@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark light">
+    <title>Flow</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230e1116'/%3E%3Cpath d='M4 5h8M4 8h6' stroke='%23aeb9c6' stroke-width='1.5' stroke-linecap='round'/%3E%3Cpath d='M4 11.5h5' stroke='%235ec8c0' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+    <script>
+      (() => {
+        try {
+          const theme = window.localStorage && window.localStorage.getItem("flow.ui.theme");
+          if (theme === "light" || theme === "dark") {
+            document.documentElement.setAttribute("data-theme", theme);
+          }
+        } catch {}
+      })();
+    </script>
+    <link rel="stylesheet" href="/ui/assets/app.css?v={{VERSION}}">
+  </head>
+  <body>
+    <flow-app></flow-app>
+    <script type="module" src="/ui/assets/app.js?v={{VERSION}}"></script>
+  </body>
+</html>

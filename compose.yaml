@@ -1,0 +1,67 @@
+services:
+  flow-server:
+    build:
+      context: .
+      target: flow-server
+      args:
+        FLOW_UID: ${FLOW_UID:-1000}
+        FLOW_GID: ${FLOW_GID:-1000}
+    image: flow-server:local
+    command:
+      - flow-server
+      - serve
+      - --config
+      - /usr/share/flow/examples/docker/flow-server.yaml
+      - --exchange-base-url
+      - ${FLOW_EXCHANGE_BASE_URL:-http://127.0.0.1:8421}
+      - --owner-token
+      - ${FLOW_OWNER_TOKEN:?Set FLOW_OWNER_TOKEN in .env}
+      - --worker-join-token
+      - ${FLOW_WORKER_JOIN_TOKEN:?Set FLOW_WORKER_JOIN_TOKEN in .env}
+    ports:
+      - "127.0.0.1:8421:8421"
+    volumes:
+      - flow-data:/var/lib/flow
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8421/v1/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  flow-worker:
+    build:
+      context: .
+      target: flow-worker
+      args:
+        FLOW_UID: ${FLOW_UID:-1000}
+        FLOW_GID: ${FLOW_GID:-1000}
+    image: flow-worker:local
+    privileged: true
+    command:
+      - flow-worker
+      - -c
+      - /usr/share/flow/examples/docker/flow-worker.yaml
+    environment:
+      FLOW_WORKER_JOIN_TOKEN: ${FLOW_WORKER_JOIN_TOKEN:?Set FLOW_WORKER_JOIN_TOKEN in .env}
+      FLOW_WORKER_COORDINATOR_URL: ${FLOW_WORKER_INTERNAL_BASE_URL:-http://flow-server:8421}
+      FLOW_WORKER_WORK_DIR: /home/flow/.local/share/flow/workers/local
+      FLOW_WORKER_DOCKERD: ${FLOW_WORKER_DOCKERD:-auto}
+      FLOW_WORKER_DOCKERD_ARGS: ${FLOW_WORKER_DOCKERD_ARGS:-}
+      FLOW_WORKER_GIT_URL_REWRITE_FROM: ${FLOW_EXCHANGE_BASE_URL:-http://127.0.0.1:8421}
+      FLOW_WORKER_GIT_URL_REWRITE_TO: ${FLOW_WORKER_INTERNAL_BASE_URL:-http://flow-server:8421}
+      FLOW_WORKER_TERMINAL_PUBLIC_BASE_URL: ${FLOW_WORKER_TERMINAL_PUBLIC_BASE_URL:-auto}
+      FLOW_WORKER_TERMINAL_BIND_ADDRESS: ${FLOW_WORKER_TERMINAL_BIND_ADDRESS:-0.0.0.0}
+      HARNESS_MODEL_PROXY_URL: ${HARNESS_MODEL_PROXY_URL:-http://host.docker.internal:8765}
+    depends_on:
+      flow-server:
+        condition: service_healthy
+    tmpfs:
+      - /run/user/${FLOW_UID:-1000}:uid=${FLOW_UID:-1000},gid=${FLOW_GID:-1000},mode=700
+    volumes:
+      - flow-worker-data:/home/flow/.local/share/flow
+      - flow-worker-docker:/home/flow/.local/share/docker
+
+volumes:
+  flow-data:
+  flow-worker-data:
+  flow-worker-docker:

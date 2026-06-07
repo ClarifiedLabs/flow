@@ -1,0 +1,11 @@
+worker_id: w-local
+coordinator_url: http://127.0.0.1:8421
+work_dir: ~/.local/share/flow/workers/local
+protocol_version: "1"
+labels:
+  local: "true"
+capacity:
+  persistent_agent: 5
+  ephemeral: 5
+git:
+  principal: worker:w-local

@@ -1,0 +1,10 @@
+/bin/
+.env
+.env.*.local
+*.db
+*.db-shm
+*.db-wal
+coverage.out
+/flow
+/flow-server
+/flow-worker

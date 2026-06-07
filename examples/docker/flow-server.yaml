@@ -1,0 +1,4 @@
+data_dir: /var/lib/flow
+listen_addr: :8421
+exchange_base_url: http://127.0.0.1:8421
+protocol_version: "1"

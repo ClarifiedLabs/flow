@@ -1,0 +1,9 @@
+services:
+  flow-worker:
+    environment:
+      CODEX_HOME: /run/flow-worker/codex
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?Set CLAUDE_CODE_OAUTH_TOKEN in .env from claude setup-token}
+    volumes:
+      - type: bind
+        source: ${FLOW_CODEX_AUTH_JSON:?Set FLOW_CODEX_AUTH_JSON in .env to the absolute path of your host .codex/auth.json}
+        target: /run/flow-worker/codex/auth.json
