@@ -80,6 +80,8 @@ func TestManagedArgValidationGolden(t *testing.T) {
 		{Harness: []string{"--hooks=/tmp/h.json"}},
 		{Harness: []string{"-p", "prompt"}},
 		{Harness: []string{"--prompt", "prompt"}},
+		{Harness: []string{"-i", "prompt"}},
+		{Harness: []string{"--initial-prompt", "prompt"}},
 		// codex reserved flag + config keys
 		{Codex: []string{"--dangerously-bypass-hook-trust"}},
 		{Codex: []string{"--dangerously-bypass-hook-trust=1"}},

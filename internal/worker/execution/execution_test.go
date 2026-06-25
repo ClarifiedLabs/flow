@@ -709,7 +709,7 @@ func TestWorkerEnvIncludesSessionToken(t *testing.T) {
 		},
 		Lease: Lease{ID: "l-harness", WorkerID: "w-local"},
 		Entrypoint: Entrypoint{
-			Argv:  []string{`harness -p "$(flow fetch-prompt --harness harness)"`},
+			Argv:  []string{`harness -i "$(flow fetch-prompt --harness harness)"`},
 			Shell: true,
 		},
 	})
@@ -857,7 +857,7 @@ func TestPrepareHookConfigWritesHarnessAuthorSettings(t *testing.T) {
 		Session:      &coordinator.Session{ID: "s-harness"},
 		SessionToken: "session-token",
 		Entrypoint: Entrypoint{
-			Argv:  []string{`harness -p "$prompt"`},
+			Argv:  []string{`harness -i "$prompt"`},
 			Shell: true,
 		},
 	})
@@ -1051,7 +1051,7 @@ func TestHarnessForEntrypoint(t *testing.T) {
 		},
 		{
 			name:       "harness shell",
-			entrypoint: Entrypoint{Argv: []string{`harness --hooks "$FLOW_HARNESS_HOOKS" -p "$prompt"`}, Shell: true},
+			entrypoint: Entrypoint{Argv: []string{`harness --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`}, Shell: true},
 			want:       "harness",
 		},
 		{

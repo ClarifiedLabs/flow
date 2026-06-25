@@ -14,7 +14,7 @@ import (
 // LAST non-empty line on screen. Requiring the submit instruction to be the last
 // line preserves the anti-injection invariant — pane content that merely quotes
 // the dialog (e.g. an issue body) pushes the submit line off the end and so is
-// not mistaken for a live prompt. A harness with no markers (clean -p, no
+// not mistaken for a live prompt. A harness with no markers (clean -i, no
 // scraped prompt) always returns false.
 func (d Definition) TrustPromptVisible(pane string) bool {
 	if len(d.TrustPromptMarkers) == 0 || d.TrustPromptSubmitMarker == "" {

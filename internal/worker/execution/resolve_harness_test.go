@@ -53,7 +53,7 @@ func TestResolveHarnessPrefersStoredKind(t *testing.T) {
 		{
 			name: "empty falls back to argv heuristic",
 			input: tmuxInput{
-				Entrypoint: Entrypoint{Argv: []string{`harness --hooks "$FLOW_HARNESS_HOOKS" -p "$prompt"`}},
+				Entrypoint: Entrypoint{Argv: []string{`harness --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`}},
 			},
 			want: flowharness.Harness,
 		},

@@ -113,15 +113,15 @@ func TestMaterializeImagesInjectsFlagsOnlyForHarness(t *testing.T) {
 code=$?
 if [ "$code" -eq 0 ]; then
   if [ -n "${FLOW_HARNESS_HOOKS:-}" ]; then
-    harness --hooks "$FLOW_HARNESS_HOOKS" --provider openrouter -p "$prompt"
+    harness --hooks "$FLOW_HARNESS_HOOKS" --provider openrouter -i "$prompt"
   else
-    harness --provider openrouter -p "$prompt"
+    harness --provider openrouter -i "$prompt"
   fi
   code=$?
 fi
 exit "$code"`
 
-	t.Run("harness gets --image flags before -p in both branches", func(t *testing.T) {
+	t.Run("harness gets --image flags before -i in both branches", func(t *testing.T) {
 		t.Parallel()
 		downloader := newFakeImageDownloader()
 		downloader.bodies["att-0001"] = "png-bytes"
@@ -136,10 +136,10 @@ exit "$code"`
 			t.Fatalf("materialize: %v", err)
 		}
 		got := payload.Entrypoint.Argv[0]
-		// Both prompt-bearing invocations get the flags before -p.
-		wantFlags := "--image '.flow/attachments/att-0001-shot.png' --image '.flow/attachments/att-0002-anim.gif' -p \"$prompt\""
+		// Both prompt-bearing invocations get the flags before -i.
+		wantFlags := "--image '.flow/attachments/att-0001-shot.png' --image '.flow/attachments/att-0002-anim.gif' -i \"$prompt\""
 		if occurrences := strings.Count(got, wantFlags); occurrences != 2 {
-			t.Fatalf("expected --image flags before -p in both branches; got %d occurrences in:\n%s", occurrences, got)
+			t.Fatalf("expected --image flags before -i in both branches; got %d occurrences in:\n%s", occurrences, got)
 		}
 	})
 
@@ -178,7 +178,7 @@ func TestMaterializeImagesSkipOnErrorKeepsOtherImagesAndOriginalArgv(t *testing.
 	downloader := newFakeImageDownloader()
 	downloader.bodies["att-0001"] = "png-bytes"
 	downloader.errs["att-0002"] = errors.New("network down")
-	payload := harnessAuthorPayload(`harness -p "$prompt"`)
+	payload := harnessAuthorPayload(`harness -i "$prompt"`)
 	payload.ImageAttachments = []coordinator.IssueImageAttachment{
 		{ID: "att-0001", Filename: "shot.png"},
 		{ID: "att-0002", Filename: "missing.jpg"},
@@ -189,7 +189,7 @@ func TestMaterializeImagesSkipOnErrorKeepsOtherImagesAndOriginalArgv(t *testing.
 	}
 	// Only the successful image is injected.
 	got := payload.Entrypoint.Argv[0]
-	want := "--image '.flow/attachments/att-0001-shot.png' -p \"$prompt\""
+	want := "--image '.flow/attachments/att-0001-shot.png' -i \"$prompt\""
 	if !strings.Contains(got, want) {
 		t.Fatalf("expected only att-0001 injected; got:\n%s", got)
 	}
@@ -213,7 +213,7 @@ func TestMaterializeImagesNoopWhenNoAttachments(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	downloader := newFakeImageDownloader()
-	payload := harnessAuthorPayload(`harness -p "$prompt"`)
+	payload := harnessAuthorPayload(`harness -i "$prompt"`)
 	worktree := t.TempDir()
 	if err := materializeImages(ctx, downloader, "i-0001", payload, worktree); err != nil {
 		t.Fatalf("materialize: %v", err)
@@ -221,7 +221,7 @@ func TestMaterializeImagesNoopWhenNoAttachments(t *testing.T) {
 	if len(downloader.calls) != 0 {
 		t.Fatalf("expected no downloads, got %+v", downloader.calls)
 	}
-	if got := payload.Entrypoint.Argv[0]; got != `harness -p "$prompt"` {
+	if got := payload.Entrypoint.Argv[0]; got != `harness -i "$prompt"` {
 		t.Fatalf("argv changed with no attachments: %s", got)
 	}
 	if _, err := os.Stat(filepath.Join(worktree, imageAttachmentsRelDir)); err == nil {

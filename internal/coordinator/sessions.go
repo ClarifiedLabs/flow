@@ -479,12 +479,12 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 	}
 	payload := copyPayload(input.Payload)
 	if _, ok := payload["entrypoint"]; !ok {
-		entrypoint, err := s.defaultAuthorEntrypointPayload(issue)
+		entrypoint, injectInitialPrompt, err := s.defaultAuthorEntrypointPayload(issue)
 		if err != nil {
 			return EnsureAuthorJobResult{}, err
 		}
 		payload["entrypoint"] = entrypoint
-		payload["inject_initial_prompt"] = true
+		payload["inject_initial_prompt"] = injectInitialPrompt
 		payload["prompt_harness"] = issue.AgentHarness
 	}
 	payload["change_id"] = change.ID
@@ -1021,12 +1021,12 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 		}
 	}
 	if _, ok := payload["entrypoint"]; !ok {
-		entrypoint, err := s.defaultAuthorEntrypointPayload(issue)
+		entrypoint, injectInitialPrompt, err := s.defaultAuthorEntrypointPayload(issue)
 		if err != nil {
 			return false, err
 		}
 		payload["entrypoint"] = entrypoint
-		payload["inject_initial_prompt"] = true
+		payload["inject_initial_prompt"] = injectInitialPrompt
 		payload["prompt_harness"] = issue.AgentHarness
 	}
 	payload["change_id"] = change.ID
@@ -1293,11 +1293,13 @@ func consoleHarnessRequirements(harness string) []string {
 	return []string{flowharness.AgentHarnessLabel(harness)}
 }
 
-func (s *SessionService) defaultAuthorEntrypointPayload(issue Issue) (map[string]any, error) {
+func (s *SessionService) defaultAuthorEntrypointPayload(issue Issue) (map[string]any, bool, error) {
 	if s.defaultAuthorEntrypointOverride {
-		return copyPayload(s.defaultAuthorEntrypoint), nil
+		return copyPayload(s.defaultAuthorEntrypoint), true, nil
 	}
-	return flowharness.DefaultConsoleEntrypointWithArgs(issue.AgentHarness, s.harnessArgs.Add(issue.HarnessArgs))
+	args := s.harnessArgs.Add(issue.HarnessArgs)
+	entrypoint, err := flowharness.DefaultAuthorEntrypointWithArgs(issue.AgentHarness, args)
+	return entrypoint, false, err
 }
 
 func (s *SessionService) StartAuthorSession(ctx context.Context, input StartAuthorSessionInput) (StartAuthorSessionResult, error) {

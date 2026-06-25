@@ -40,7 +40,7 @@ type imageAttachmentDownloader interface {
 // materializeImageAttachments downloads the coordinator-stamped image
 // attachments into the worktree for ANY author job (regardless of harness) and,
 // only when the resolved harness is the harness CLI, re-stamps the entrypoint
-// argv with --image <relpath> flags rendered before -p "$prompt". It is
+// argv with --image <relpath> flags rendered before -i "$prompt". It is
 // best-effort: a download failure is logged and skipped so a missing image
 // never fails the job, and flag injection only references images that were
 // actually written.
@@ -151,9 +151,9 @@ func sanitizeImageAttachmentFilename(id, filename string) string {
 }
 
 // injectImageFlags re-stamps the harness entrypoint argv with
-// --image <relpath> flags, rendered before -p "$prompt". The harness author
+// --image <relpath> flags, rendered before -i "$prompt". The harness author
 // command is a shell script whose prompt-bearing invocations all end with
-// ` -p "$prompt"` (the hooks and no-hooks branches), so a single ReplaceAll
+// ` -i "$prompt"` (the hooks and no-hooks branches), so a single ReplaceAll
 // covers every invocation. Non-harness entrypoints are never passed in.
 func injectImageFlags(payload JobPayload, materialized []materializedImage) {
 	if payload.Entrypoint == nil || len(payload.Entrypoint.Argv) == 0 {
@@ -163,7 +163,7 @@ func injectImageFlags(payload JobPayload, materialized []materializedImage) {
 	if flagString == "" {
 		return
 	}
-	const promptAnchor = ` -p "$prompt"`
+	const promptAnchor = ` -i "$prompt"`
 	payload.Entrypoint.Argv[0] = strings.ReplaceAll(payload.Entrypoint.Argv[0], promptAnchor, " "+flagString+promptAnchor)
 }
 

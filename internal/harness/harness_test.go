@@ -64,7 +64,7 @@ func TestDefaultAuthorEntrypointUsesSelectedHarness(t *testing.T) {
 		t.Fatalf("harness default entrypoint: %v", err)
 	}
 	harnessArgv := harness["argv"].([]string)
-	if len(harnessArgv) != 1 || !contains(harnessArgv[0], `harness --hooks "$FLOW_HARNESS_HOOKS" -p "$prompt"`) || !contains(harnessArgv[0], "--harness harness") {
+	if len(harnessArgv) != 1 || !contains(harnessArgv[0], `harness --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`) || !contains(harnessArgv[0], "--harness harness") {
 		t.Fatalf("harness argv = %#v", harness["argv"])
 	}
 }
@@ -147,7 +147,7 @@ func TestDefaultEntrypointsAppendHarnessArgs(t *testing.T) {
 		t.Fatalf("harness author entrypoint with shell-style args: %v", err)
 	}
 	harnessCommand := harnessAuthor["argv"].([]string)[0]
-	if !strings.Contains(harnessCommand, `'--provider' 'anthropic' '--model' 'claude-sonnet-4-6' -p "$prompt"`) {
+	if !strings.Contains(harnessCommand, `'--provider' 'anthropic' '--model' 'claude-sonnet-4-6' -i "$prompt"`) {
 		t.Fatalf("harness author command did not split shell-style args:\n%s", harnessCommand)
 	}
 }
@@ -163,6 +163,7 @@ func TestNormalizeArgsRejectsManagedFlags(t *testing.T) {
 		{Claude: []string{"--permission-mode=bypassPermissions"}},
 		{Harness: []string{"--hooks=/tmp/hooks.json"}},
 		{Harness: []string{"-p", "prompt"}},
+		{Harness: []string{"-i", "prompt"}},
 	}
 	for _, test := range tests {
 		if _, err := NormalizeArgs(test); err == nil {
@@ -434,7 +435,7 @@ func TestDetectEntrypointHarnessUsesRegistry(t *testing.T) {
 		{argv: nil, want: Codex},
 		{argv: []string{"/usr/local/bin/codex", "prompt"}, want: Codex},
 		{argv: []string{`claude "$(flow fetch-prompt)"`}, want: Claude},
-		{argv: []string{`harness --hooks "$FLOW_HARNESS_HOOKS" -p "$prompt"`}, want: Harness},
+		{argv: []string{`harness --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`}, want: Harness},
 		{argv: []string{"custom-agent"}, want: Agents},
 	}
 	for _, test := range tests {

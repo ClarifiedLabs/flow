@@ -67,11 +67,13 @@ func TestEnsureAuthorJobCreatesChangeAndIsIdempotent(t *testing.T) {
 	if !strings.Contains(command, "--dangerously-bypass-hook-trust") || !strings.Contains(command, "flow hook codex ingest") {
 		t.Fatalf("default command does not configure Codex native hooks: %#v", entrypoint["argv"])
 	}
-	if strings.Contains(command, "flow fetch-prompt") || strings.Contains(command, `"$prompt"`) {
-		t.Fatalf("default interactive command should not fetch prompt directly: %#v", entrypoint["argv"])
+	for _, want := range []string{"flow fetch-prompt --harness codex", `"$prompt"`} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("default codex command missing %q:\n%s", want, command)
+		}
 	}
-	if got := result.Job.Payload["inject_initial_prompt"]; got != true {
-		t.Fatalf("inject_initial_prompt = %#v, want true", got)
+	if got := result.Job.Payload["inject_initial_prompt"]; got != false {
+		t.Fatalf("inject_initial_prompt = %#v, want false", got)
 	}
 	if got := payloadString(result.Job.Payload, "prompt_harness"); got != flowharness.Codex {
 		t.Fatalf("prompt_harness = %q, want codex", got)
@@ -151,14 +153,54 @@ func TestEnsureAuthorJobUsesIssueAgentHarness(t *testing.T) {
 	if !ok || !strings.Contains(command, `claude --dangerously-skip-permissions --permission-mode bypassPermissions`) || !strings.Contains(command, "flow hook claude start") {
 		t.Fatalf("claude command = %#v", entrypoint["argv"])
 	}
-	if strings.Contains(command, `"$prompt"`) || strings.Contains(command, "flow fetch-prompt") {
-		t.Fatalf("claude author command should be interactive: %#v", entrypoint["argv"])
+	for _, want := range []string{"flow fetch-prompt --harness claude", `"$prompt"`} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("claude author command missing %q:\n%s", want, command)
+		}
 	}
-	if got := result.Job.Payload["inject_initial_prompt"]; got != true {
-		t.Fatalf("inject_initial_prompt = %#v, want true", got)
+	if got := result.Job.Payload["inject_initial_prompt"]; got != false {
+		t.Fatalf("inject_initial_prompt = %#v, want false", got)
 	}
 	if got := payloadString(result.Job.Payload, "prompt_harness"); got != flowharness.Claude {
 		t.Fatalf("prompt_harness = %q, want claude", got)
+	}
+}
+
+func TestEnsureAuthorJobUsesHarnessInitialPromptFlag(t *testing.T) {
+	ctx := context.Background()
+	fixture := newSessionServiceFixture(t)
+	sessions, issues := fixture.sessions, fixture.issues
+
+	issue, err := issues.CreateIssue(ctx, CreateIssueInput{
+		Title:        "Harness issue",
+		AgentHarness: flowharness.Harness,
+		HarnessArgs:  flowharness.Args{Harness: []string{"--model", "fast"}},
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if _, err := issues.ScheduleIssue(ctx, issue.ID, ScheduleUpNext); err != nil {
+		t.Fatalf("schedule issue: %v", err)
+	}
+
+	result, err := sessions.EnsureAuthorJob(ctx, EnsureAuthorJobInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatalf("ensure author job: %v", err)
+	}
+	command := entrypointCommandForTest(t, result.Job.Payload)
+	for _, want := range []string{
+		"flow fetch-prompt --harness harness",
+		`harness --hooks "$FLOW_HARNESS_HOOKS" '--model' 'fast' -i "$prompt"`,
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("harness author command missing %q:\n%s", want, command)
+		}
+	}
+	if got := result.Job.Payload["inject_initial_prompt"]; got != false {
+		t.Fatalf("inject_initial_prompt = %#v, want false for harness -i", got)
+	}
+	if got := payloadString(result.Job.Payload, "prompt_harness"); got != flowharness.Harness {
+		t.Fatalf("prompt_harness = %q, want harness", got)
 	}
 }
 
@@ -194,8 +236,13 @@ func TestEnsureAuthorAndConsoleJobsAppendHarnessArgs(t *testing.T) {
 			t.Fatalf("author command missing %q:\n%s", want, authorCommand)
 		}
 	}
-	if strings.Contains(authorCommand, `"$prompt"`) || strings.Contains(authorCommand, "flow fetch-prompt") {
-		t.Fatalf("author command should be interactive:\n%s", authorCommand)
+	for _, want := range []string{"flow fetch-prompt --harness codex", `"$prompt"`} {
+		if !strings.Contains(authorCommand, want) {
+			t.Fatalf("author command missing %q:\n%s", want, authorCommand)
+		}
+	}
+	if got := author.Job.Payload["inject_initial_prompt"]; got != false {
+		t.Fatalf("author inject_initial_prompt = %#v, want false", got)
 	}
 
 	console, err := sessions.EnsureConsoleJob(ctx, EnsureConsoleJobInput{Harness: flowharness.Claude})

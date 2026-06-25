@@ -116,13 +116,13 @@ type Definition struct {
 	// exposes no Flow-selectable models. AvailableModels wraps it to stamp each
 	// model with this harness's name.
 	Models func() ([]Model, error)
-	// Trust-prompt scraping. The interactive worker drives codex/claude through a
-	// TTY (tmux), where their directory/workspace-trust dialog appears and must be
-	// dismissed before the initial prompt is pasted. These data fields make the
-	// matcher tolerant of TUI copy drift (a copy tweak is a one-line data edit,
-	// not a code change) and table-testable, while preserving the anti-injection
-	// invariant via TrustPromptSubmitMarker. Empty TrustPromptMarkers means the
-	// harness shows no scraped trust prompt: the harness CLI uses a clean -p, and
+	// Trust-prompt scraping. Interactive sessions drive codex/claude through a
+	// TTY (tmux), where their directory/workspace-trust dialog may appear before
+	// the session is ready for input. These data fields make the matcher tolerant
+	// of TUI copy drift (a copy tweak is a one-line data edit, not a code change)
+	// and table-testable, while preserving the anti-injection invariant via
+	// TrustPromptSubmitMarker. Empty TrustPromptMarkers means the
+	// harness shows no scraped trust prompt: the harness CLI uses a clean -i, and
 	// codex's directory prompt is normally suppressed by
 	// projects.<cwd>.trust_level=trusted — but that suppression silently fails
 	// when the worktree path contains a symlink (so $PWD != codex's canonical
@@ -267,7 +267,7 @@ var definitions = map[string]Definition{
 		UsabilityCheck:    []string{"--check-model-proxy"},
 		CheckCommand:      DefaultHarnessPrintCommandWithArgs,
 		HookState:         func(event, _ string) string { return mapHarnessNativeHook(event) },
-		ManagedFlags:      []string{"--hooks", "-p", "--prompt"},
+		ManagedFlags:      []string{"--hooks", "-p", "--prompt", "-i", "--initial-prompt"},
 		HookEvents: []HookEvent{
 			{Name: "SessionStart"},
 			{Name: "UserPromptSubmit"},
@@ -628,9 +628,9 @@ func DefaultHarnessHookedCommandWithArgs(args []string) string {
 code=$?
 if [ "$code" -eq 0 ]; then
   if [ -n "${FLOW_HARNESS_HOOKS:-}" ]; then
-    harness --hooks "$FLOW_HARNESS_HOOKS"` + renderOptionalShellArgs(args) + ` -p "$prompt"
+    harness --hooks "$FLOW_HARNESS_HOOKS"` + renderOptionalShellArgs(args) + ` -i "$prompt"
   else
-    harness` + renderOptionalShellArgs(args) + ` -p "$prompt"
+    harness` + renderOptionalShellArgs(args) + ` -i "$prompt"
   fi
   code=$?
 fi

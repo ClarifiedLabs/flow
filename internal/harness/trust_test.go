@@ -145,7 +145,7 @@ func TestTrustPromptVisibleCrossHarnessExclusive(t *testing.T) {
 }
 
 // TestTrustPromptVisibleFalseForNonScrapedHarness asserts a harness with no
-// scraped trust prompt (the harness CLI uses a clean -p) never reports a prompt.
+// scraped trust prompt (the harness CLI uses a clean -i) never reports a prompt.
 func TestTrustPromptVisibleFalseForNonScrapedHarness(t *testing.T) {
 	def := mustLookup(t, Harness)
 	if len(def.TrustPromptMarkers) != 0 {
