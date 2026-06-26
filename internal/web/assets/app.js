@@ -567,6 +567,7 @@ export class FlowApp extends HTMLElement {
         event.preventDefault();
         const issueID = form.dataset.issueStateForm;
         const state = form.elements.state.value;
+        if (state === "closed" && !window.confirm("Close this issue?")) return;
         try {
           await apiPost(`${issueAPIBase(form.dataset.project)}/${encodeURIComponent(issueID)}/state`, { state });
           await refresh();

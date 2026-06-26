@@ -1428,6 +1428,58 @@ test("issue state form posts manual state and refreshes", async () => {
   assert.equal(status.textContent, "");
 });
 
+test("issue state form requires confirmation before closing", async () => {
+  for (const confirmed of [false, true]) {
+    let submitHandler;
+    let confirmCalls = 0;
+    const form = {
+      dataset: { issueStateForm: "i-0001", project: "p-demo" },
+      elements: {
+        state: { value: "closed" },
+      },
+      addEventListener(event, handler) {
+        if (event === "submit") submitHandler = handler;
+      },
+    };
+    const fetchCalls = [];
+    const context = await scriptContext({
+      confirm(message) {
+        confirmCalls += 1;
+        assert.equal(message, "Close this issue?");
+        return confirmed;
+      },
+    }, {
+      fetch(path, options) {
+        fetchCalls.push({ path, options });
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ issue: { id: "i-0001", schedule_state: "closed" } }),
+        });
+      },
+    });
+    const app = new context.FlowApp();
+    app.querySelectorAll = (selector) => (selector === "[data-issue-state-form]" ? [form] : []);
+    app.querySelector = () => ({ textContent: "" });
+    let refreshed = false;
+    app.bindIssueActions(async () => {
+      refreshed = true;
+    });
+
+    await submitHandler({ preventDefault() {} });
+
+    assert.equal(confirmCalls, 1);
+    assert.equal(refreshed, confirmed);
+    if (!confirmed) {
+      assert.equal(fetchCalls.length, 0);
+      continue;
+    }
+    assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues/i-0001/state");
+    assert.equal(fetchCalls[0].options.method, "POST");
+    assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
+    assert.deepEqual(JSON.parse(fetchCalls[0].options.body), { state: "closed" });
+  }
+});
+
 test("issue state form surfaces failures without refreshing", async () => {
   let submitHandler;
   const form = {
