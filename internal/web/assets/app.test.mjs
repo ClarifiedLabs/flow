@@ -572,7 +572,7 @@ test("issue form renders harness model controls from saved args", async () => {
         provider_label: "anthropic",
         model_label: "claude-opus-4-8",
         context_window: 1000000,
-        reasoning: { supported: true, options: [{ type: "effort", values: ["low", "high"] }] },
+        reasoning: true,
       }],
     }],
   };
@@ -581,7 +581,7 @@ test("issue form renders harness model controls from saved args", async () => {
     title: "Harness issue",
     agent_harness: "harness",
     harness_args: {
-      harness: ["--provider", "anthropic", "--model", "claude-opus-4-8", "--reasoning-effort", "high", "--label", "fast"],
+      harness: ["--provider", "anthropic", "--model", "claude-opus-4-8", "--reasoning", "high", "--label", "fast"],
     },
   });
 
@@ -616,7 +616,7 @@ test("issue form renders one model picker with provider labels when needed", asy
         model_id: "gemini-2.5-flash",
         qualified_id: "google:gemini-2.5-flash",
         model_name: "Gemini 2.5 Flash",
-        reasoning: { supported: true, options: [{ type: "budget_tokens", min: 0, max: 24576 }] },
+        reasoning: false,
       }],
     }],
   };
@@ -650,10 +650,10 @@ test("issue form renders saved args as shell-style strings", async () => {
   assert.match(html, /<textarea name="agent_args" rows="2"[^>]*>--label &#39;fast mode&#39; &#39;it&#39;\\&#39;&#39;s ok&#39; path\/ok<\/textarea>/);
 });
 
-// Legacy Harness budget/toggle reasoning flags cannot be represented by the
-// single Reasoning Level selector. They must remain visible in additional args so
-// unrelated edits do not silently drop saved launch configuration.
-test("issue form keeps legacy harness reasoning toggle args visible", async () => {
+// Legacy Harness budget/toggle reasoning flags are no longer valid with
+// harness v0.0.19. The form treats them as managed stale selection args so a
+// later save does not keep emitting them.
+test("issue form strips legacy harness reasoning toggle args from additional args", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   app.harnesses = {
@@ -681,7 +681,7 @@ test("issue form keeps legacy harness reasoning toggle args visible", async () =
 
   assert.match(html, /<option value="unavailable" selected>unavailable<\/option>/);
   assert.doesNotMatch(html, /<option value="low" selected>low<\/option>/);
-  assert.match(html, /<textarea name="agent_args" rows="2"[^>]*>--reasoning-enabled true --label fast<\/textarea>/);
+  assert.match(html, /<textarea name="agent_args" rows="2"[^>]*>--label fast<\/textarea>/);
 });
 
 test("issue form binding preserves legacy unavailable reasoning selection", async () => {
@@ -713,10 +713,10 @@ test("issue form binding preserves legacy unavailable reasoning selection", asyn
       harnessModelSelections: JSON.stringify({
         harness: {
           qualified_id: "anthropic:claude-opus-4-8",
-          reasoning_mode: "on",
+          reasoning_mode: "legacy",
           reasoning_effort: "",
           reasoning_budget_tokens: null,
-          additional_args: ["--reasoning-enabled", "true"],
+          additional_args: [],
         },
       }),
     },
@@ -731,7 +731,7 @@ test("issue form binding preserves legacy unavailable reasoning selection", asyn
   const form = {
     elements: {
       agent_harness: agentSelect,
-      agent_args: { value: "--reasoning-enabled true", dataset: {} },
+      agent_args: { value: "", dataset: {} },
       harness_model: modelSelect,
       harness_reasoning_effort: reasoningSelect,
     },
@@ -810,7 +810,8 @@ test("issue form model change resets unavailable reasoning for supported model",
   modelChangeHandler();
 
   assert.doesNotMatch(reasoningContainer.innerHTML, /<option value="unavailable"/);
-  assert.match(reasoningContainer.innerHTML, /<option value="low" selected>low<\/option>/);
+  assert.match(reasoningContainer.innerHTML, /<option value="" selected>Default<\/option>/);
+  assert.match(reasoningContainer.innerHTML, /<option value="low" >low<\/option>/);
   assert.match(reasoningContainer.innerHTML, /<option value="high" >high<\/option>/);
 });
 
@@ -840,7 +841,7 @@ test("issue save generates harness model args from reasoning level", async () =>
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body).harness_args.harness, [
     "--model",
     "anthropic:claude-opus-4-8",
-    "--reasoning-effort",
+    "--reasoning",
     "high",
     `--label "fast mode"`,
   ]);
@@ -876,10 +877,10 @@ test("issue save omits reasoning args when reasoning level is unavailable", asyn
   assert.equal(harness.status.textContent, "");
 });
 
-test("issue save preserves legacy harness reasoning args when unavailable", async () => {
+test("issue save preserves additional args when reasoning is unavailable", async () => {
   const harness = await issueSaveHarness({
     agentHarness: "harness",
-    agentArgs: "--reasoning-budget-tokens 2048 --label legacy",
+    agentArgs: "--label legacy",
     harnesses: {
       agents: [{
         name: "harness",
@@ -888,7 +889,7 @@ test("issue save preserves legacy harness reasoning args when unavailable", asyn
           provider_id: "anthropic",
           model_id: "claude-budget",
           qualified_id: "anthropic:claude-budget",
-          reasoning: { supported: true, options: [{ type: "budget_tokens", min: 0, max: 24576 }] },
+          reasoning: false,
         }],
       }],
     },
@@ -900,7 +901,7 @@ test("issue save preserves legacy harness reasoning args when unavailable", asyn
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body).harness_args.harness, [
     "--model",
     "anthropic:claude-budget",
-    "--reasoning-budget-tokens 2048 --label legacy",
+    "--label legacy",
   ]);
   assert.equal(harness.status.textContent, "");
 });
@@ -1109,7 +1110,7 @@ test("new issue route renders saved agent defaults from localStorage", async () 
       harness_args: {
         codex: ["--codex-fast"],
         claude: ["--claude-sonnet"],
-        harness: ["--provider", "anthropic", "--model", "claude-opus-4-8", "--reasoning-effort", "high", "--label", "fast"],
+        harness: ["--provider", "anthropic", "--model", "claude-opus-4-8", "--reasoning", "high", "--label", "fast"],
       },
     },
   });
@@ -1248,7 +1249,7 @@ test("new issue save defaults button writes agent defaults without posting", asy
     harness_args: {
       codex: ["--codex-fast"],
       claude: ["--claude-sonnet"],
-      harness: ["--model", "anthropic:claude-opus-4-8", "--reasoning-effort", "high", `--label "fast mode"`],
+      harness: ["--model", "anthropic:claude-opus-4-8", "--reasoning", "high", `--label "fast mode"`],
     },
   });
 });

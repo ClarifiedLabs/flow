@@ -54,7 +54,7 @@ func TestDecodeModelCatalogAcceptsHarnessTargetModels(t *testing.T) {
 				"context_window": 256000,
 				"input_modalities": ["text", "image"],
 				"server_tools": ["web_search"],
-				"reasoning": {"supported": true, "options": [{"type": "effort", "values": ["none", "high"]}]}
+				"reasoning": true
 			}
 		]
 	}`)
@@ -81,6 +81,13 @@ func TestDecodeModelCatalogAcceptsHarnessTargetModels(t *testing.T) {
 	}
 	if len(got.ServerTools) != 1 || got.ServerTools[0] != "web_search" {
 		t.Fatalf("server tools = %#v", got.ServerTools)
+	}
+	if !got.Reasoning.Supported || len(got.Reasoning.Options) != 1 || got.Reasoning.Options[0].Type != "profile" {
+		t.Fatalf("reasoning = %#v, want portable profile option", got.Reasoning)
+	}
+	values := got.Reasoning.Options[0].Values
+	if strings.Join(values, ",") != "none,minimal,low,medium,high,xhigh,max" {
+		t.Fatalf("reasoning profiles = %#v", values)
 	}
 }
 

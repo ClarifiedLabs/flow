@@ -1800,7 +1800,7 @@ func TestRegistrationHarnessModelsUsesHarnessCatalogWhenAvailable(t *testing.T) 
 	toolDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(toolDir, "harness"), []byte(`#!/bin/sh
 if [ "$*" = "--models --format json" ]; then
-  printf '%s\n' '{"version":1,"model_count":1,"models":[{"target_id":"anthropic:claude-opus-4-8","display_name":"Claude Opus 4.8","provider_label":"Anthropic","model_label":"claude-opus-4-8","reasoning":{"supported":true,"options":[{"type":"effort","values":["low","high"]}]}}]}'
+  printf '%s\n' '{"version":1,"model_count":1,"models":[{"target_id":"anthropic:claude-opus-4-8","display_name":"Claude Opus 4.8","provider_label":"Anthropic","model_label":"claude-opus-4-8","reasoning":true}]}'
   exit 0
 fi
 exit 1
@@ -1816,7 +1816,10 @@ exit 1
 	if models[0].TargetID != "anthropic:claude-opus-4-8" || models[0].ProviderID != "anthropic" || models[0].ModelID != "claude-opus-4-8" {
 		t.Fatalf("registration harness model normalized = %#v", models[0])
 	}
-	if values := models[0].Reasoning.Options[0].Values; len(values) != 2 || values[0] != "low" || values[1] != "high" {
+	if models[0].Reasoning.Options[0].Type != "profile" {
+		t.Fatalf("reasoning option = %#v, want profile", models[0].Reasoning.Options[0])
+	}
+	if values := models[0].Reasoning.Options[0].Values; len(values) != 7 || values[0] != "none" || values[6] != "max" {
 		t.Fatalf("reasoning values = %#v", values)
 	}
 }

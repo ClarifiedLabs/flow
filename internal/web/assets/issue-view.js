@@ -457,7 +457,7 @@ export function harnessSelectionArgsFromFormView(app, form, harness) {
   const selectedLevel = String(form.elements.harness_reasoning_effort?.value || "").trim();
   const effort = selectedLevel && selectedLevel !== HARNESS_REASONING_UNAVAILABLE && values.includes(selectedLevel)
     ? selectedLevel
-    : (selectedLevel === HARNESS_REASONING_UNAVAILABLE ? "" : values[0] || "");
+    : "";
   return serializeHarnessModelSelection(selectedHarness, model, effort
     ? { mode: "effort", effort }
     : { mode: "default" });

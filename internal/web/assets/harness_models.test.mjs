@@ -26,13 +26,14 @@ assert.strictEqual(typeof serializeHarnessModelSelection, "function", "serialize
 assert.strictEqual(typeof stripHarnessSelectionArgs, "function", "stripHarnessSelectionArgs loaded");
 
 const effort = (values) => ({ supported: true, options: [{ type: "effort", values }] });
+const profile = (values) => ({ supported: true, options: [{ type: "profile", values }] });
 const catalog = {
   harness: [{
     target_id: "anthropic:claude-opus-4-8", provider_id: "anthropic", provider_name: "Anthropic", model_id: "claude-opus-4-8",
-    qualified_id: "anthropic:claude-opus-4-8", model_name: "Opus", reasoning: effort(["low", "high"]),
+    qualified_id: "anthropic:claude-opus-4-8", model_name: "Opus", reasoning: profile(["none", "minimal", "low", "high", "max"]),
   }, {
-    target_id: "anthropic:claude-budget", provider_id: "anthropic", provider_name: "Anthropic", model_id: "claude-budget",
-    qualified_id: "anthropic:claude-budget", reasoning: { supported: true, options: [{ type: "budget_tokens", min: 0 }] },
+    target_id: "openrouter:openai/gpt-5.5", provider_id: "openrouter", provider_name: "OpenRouter", model_id: "openai/gpt-5.5",
+    qualified_id: "openrouter:openai/gpt-5.5", reasoning: true,
   }],
   claude: [{
     provider_id: "anthropic", model_id: "claude-opus-4-8", qualified_id: "anthropic:claude-opus-4-8",
@@ -51,19 +52,21 @@ function check(name, fn) {
 }
 
 // --- serialize spellings ---------------------------------------------------
-check("normalizes harness v0.0.18 target models", () => {
+check("normalizes harness v0.0.19 target models with boolean reasoning", () => {
   const models = normalizeHarnessModelList([{
     target_id: "openrouter:openai/gpt-5.5",
     display_name: "OpenAI GPT-5.5",
     provider_label: "OpenRouter",
     model_label: "openai/gpt-5.5",
-    reasoning: { supported: true, options: [{ type: "effort", values: ["none", "high"] }] },
+    reasoning: true,
   }]);
   assert.strictEqual(models[0].provider_id, "openrouter");
   assert.strictEqual(models[0].provider_name, "OpenRouter");
   assert.strictEqual(models[0].model_id, "openai/gpt-5.5");
   assert.strictEqual(models[0].qualified_id, "openrouter:openai/gpt-5.5");
   assert.strictEqual(models[0].model_name, "OpenAI GPT-5.5");
+  assert.strictEqual(models[0].reasoning.options[0].type, "profile");
+  jsonEq(models[0].reasoning.options[0].values, ["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
 });
 check("claude serializes --model + --effort", () => {
   const args = serializeHarnessModelSelection("claude", catalog.claude[0], { mode: "effort", effort: "high" });
@@ -73,23 +76,13 @@ check("codex serializes --model + -c model_reasoning_effort", () => {
   const args = serializeHarnessModelSelection("codex", catalog.codex[0], { mode: "effort", effort: "xhigh" });
   jsonEq(args, ["--model", "gpt-5.5", "-c", "model_reasoning_effort=xhigh"]);
 });
-check("harness serializes target --model + --reasoning-effort", () => {
+check("harness serializes target --model + --reasoning profile", () => {
   const args = serializeHarnessModelSelection("harness", catalog.harness[0], { mode: "effort", effort: "high" });
-  jsonEq(args, ["--model", "anthropic:claude-opus-4-8", "--reasoning-effort", "high"]);
+  jsonEq(args, ["--model", "anthropic:claude-opus-4-8", "--reasoning", "high"]);
 });
 check("default mode emits only the model", () => {
   jsonEq(serializeHarnessModelSelection("claude", catalog.claude[0], { mode: "default" }), ["--model", "claude-opus-4-8"]);
   jsonEq(serializeHarnessModelSelection("codex", catalog.codex[0], { mode: "default" }), ["--model", "gpt-5.5"]);
-});
-check("harness budget + toggle spellings", () => {
-  jsonEq(
-    serializeHarnessModelSelection("harness", catalog.harness[1], { mode: "budget", budget: "2048" }),
-    ["--model", "anthropic:claude-budget", "--reasoning-budget-tokens", "2048"],
-  );
-  jsonEq(
-    serializeHarnessModelSelection("harness", catalog.harness[0], { mode: "on" }),
-    ["--model", "anthropic:claude-opus-4-8", "--reasoning-enabled", "true"],
-  );
 });
 
 // --- serialize -> parse round-trips ---------------------------------------
@@ -105,7 +98,7 @@ check("claude round-trips effort", () => roundTrip("claude", catalog.claude[0], 
   { qualified_id: "anthropic:claude-opus-4-8", reasoning_mode: "effort", reasoning_effort: "max" }));
 check("codex round-trips effort", () => roundTrip("codex", catalog.codex[0], { mode: "effort", effort: "high" },
   { qualified_id: "openai:gpt-5.5", reasoning_mode: "effort", reasoning_effort: "high" }));
-check("harness round-trips effort", () => roundTrip("harness", catalog.harness[0], { mode: "effort", effort: "low" },
+check("harness round-trips reasoning profile", () => roundTrip("harness", catalog.harness[0], { mode: "effort", effort: "low" },
   { qualified_id: "anthropic:claude-opus-4-8", reasoning_mode: "effort", reasoning_effort: "low" }));
 
 // --- additional-arg preservation ------------------------------------------
@@ -131,29 +124,28 @@ check("claude leaves unknown flags in additional args", () => {
   jsonEq(sel.additional_args, ["--verbose"]);
 });
 check("harness parses old provider plus bare model args", () => {
-  const sel = parseHarnessSelectionArgs(["--provider", "anthropic", "--model", "claude-opus-4-8", "--reasoning-effort", "high"], catalog.harness, "harness");
+  const sel = parseHarnessSelectionArgs(["--provider", "anthropic", "--model", "claude-opus-4-8", "--reasoning", "high"], catalog.harness, "harness");
   assert.strictEqual(sel.qualified_id, "anthropic:claude-opus-4-8");
   assert.strictEqual(sel.reasoning_effort, "high");
   jsonEq(sel.additional_args, []);
 });
-check("harness keeps legacy budget reasoning flags as additional args", () => {
+check("harness strips legacy budget reasoning flags from managed selection", () => {
   const sel = parseHarnessSelectionArgs(
-    ["--model", "anthropic:claude-budget", "--reasoning-budget-tokens", "2048", "--label", "fast"],
+    ["--model", "openrouter:openai/gpt-5.5", "--reasoning-budget-tokens", "2048", "--label", "fast"],
     catalog.harness, "harness",
   );
-  assert.strictEqual(sel.qualified_id, "anthropic:claude-budget");
-  assert.strictEqual(sel.reasoning_mode, "budget");
-  assert.strictEqual(sel.reasoning_budget_tokens, 2048);
-  jsonEq(sel.additional_args, ["--reasoning-budget-tokens", "2048", "--label", "fast"]);
+  assert.strictEqual(sel.qualified_id, "openrouter:openai/gpt-5.5");
+  assert.strictEqual(sel.reasoning_mode, "legacy");
+  jsonEq(sel.additional_args, ["--label", "fast"]);
 });
-check("harness keeps legacy toggle reasoning flags as additional args", () => {
+check("harness strips legacy toggle reasoning flags from managed selection", () => {
   const sel = parseHarnessSelectionArgs(
     ["--model", "anthropic:claude-opus-4-8", "--reasoning-enabled", "true"],
     catalog.harness, "harness",
   );
   assert.strictEqual(sel.qualified_id, "anthropic:claude-opus-4-8");
-  assert.strictEqual(sel.reasoning_mode, "on");
-  jsonEq(sel.additional_args, ["--reasoning-enabled", "true"]);
+  assert.strictEqual(sel.reasoning_mode, "legacy");
+  jsonEq(sel.additional_args, []);
 });
 
 // --- strip ----------------------------------------------------------------
@@ -167,11 +159,11 @@ check("strip removes only per-harness selection flags", () => {
     ["extra"],
   );
   jsonEq(
-    stripHarnessSelectionArgs(["--model", "anthropic:claude-opus-4-8", "--reasoning-effort", "low", "tail"], "harness"),
+    stripHarnessSelectionArgs(["--model", "anthropic:claude-opus-4-8", "--reasoning", "low", "tail"], "harness"),
     ["tail"],
   );
   jsonEq(
-    stripHarnessSelectionArgs(["--provider", "anthropic", "--model", "claude-opus-4-8", "--reasoning-effort", "low", "tail"], "harness"),
+    stripHarnessSelectionArgs(["--provider", "anthropic", "--model", "claude-opus-4-8", "--reasoning", "low", "tail"], "harness"),
     ["tail"],
   );
 });

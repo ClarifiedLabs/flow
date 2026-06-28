@@ -53,6 +53,31 @@ type ReasoningInfo struct {
 	Options   []ReasoningOption `json:"options,omitempty"`
 }
 
+var portableReasoningProfiles = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+func portableReasoningProfileOption() ReasoningOption {
+	return ReasoningOption{Type: "profile", Values: append([]string(nil), portableReasoningProfiles...)}
+}
+
+func (info *ReasoningInfo) UnmarshalJSON(data []byte) error {
+	switch strings.TrimSpace(string(data)) {
+	case "true":
+		*info = ReasoningInfo{Supported: true, Options: []ReasoningOption{portableReasoningProfileOption()}}
+		return nil
+	case "false", "null":
+		*info = ReasoningInfo{}
+		return nil
+	}
+
+	type reasoningInfo ReasoningInfo
+	var decoded reasoningInfo
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*info = ReasoningInfo(decoded)
+	return nil
+}
+
 type ReasoningOption struct {
 	Type   string   `json:"type"`
 	Values []string `json:"values,omitempty"`

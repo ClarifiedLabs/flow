@@ -63,6 +63,12 @@ export function normalizeHarnessModelList(raw) {
 }
 
 export function normalizeHarnessReasoning(raw) {
+  if (raw === true) {
+    return { supported: true, options: [{ type: "profile", values: [...HARNESS_REASONING_PROFILES] }] };
+  }
+  if (raw === false || raw == null) {
+    return { supported: false, options: [] };
+  }
   const supported = Boolean(value(raw, "supported", "Supported"));
   const options = Array.isArray(value(raw, "options", "Options"))
     ? value(raw, "options", "Options")
@@ -175,22 +181,23 @@ export function uniqueHarnessProviders(models) {
 }
 
 export const HARNESS_REASONING_UNAVAILABLE = "unavailable";
+export const HARNESS_REASONING_PROFILES = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 export function renderHarnessReasoningControls(model, selection = {}) {
   const values = harnessReasoningLevelValues(model);
   const mode = String(selection.reasoning_mode || "default").trim() || "default";
   const selected = String(selection.reasoning_effort || "").trim();
   const unrepresentableLegacyMode = mode !== "default" && mode !== "effort";
-  const selectedValue = values.includes(selected)
-    ? selected
-    : (unrepresentableLegacyMode ? HARNESS_REASONING_UNAVAILABLE : (values[0] || HARNESS_REASONING_UNAVAILABLE));
+  const selectedValue = unrepresentableLegacyMode
+    ? HARNESS_REASONING_UNAVAILABLE
+    : (mode === "default" ? "" : (values.includes(selected) ? selected : HARNESS_REASONING_UNAVAILABLE));
   const unavailableOption = `<option value="${HARNESS_REASONING_UNAVAILABLE}" selected>${HARNESS_REASONING_UNAVAILABLE}</option>`;
   return `
     <label>
       <span>Reasoning Level</span>
       <select name="harness_reasoning_effort">
         ${values.length
-          ? `${selectedValue === HARNESS_REASONING_UNAVAILABLE ? unavailableOption : ""}${values.map((value) => `<option value="${escapeAttr(value)}" ${value === selectedValue ? "selected" : ""}>${escapeHTML(value)}</option>`).join("")}`
+          ? `${selectedValue === HARNESS_REASONING_UNAVAILABLE ? unavailableOption : ""}<option value="" ${selectedValue === "" ? "selected" : ""}>Default</option>${values.map((value) => `<option value="${escapeAttr(value)}" ${value === selectedValue ? "selected" : ""}>${escapeHTML(value)}</option>`).join("")}`
           : unavailableOption}
       </select>
     </label>
@@ -224,13 +231,13 @@ export function syncHarnessReasoningVisibility(_root) {
 }
 
 // HARNESS_SELECTION_FLAGS maps each harness to the flag names it uses to carry
-// a Flow-managed model/reasoning selection. The harness CLI now treats
+// a Flow-managed model/reasoning selection. The harness CLI treats
 // provider:model as a target id, but we still parse old stored --provider args.
-//   - harness: --model provider:model + --reasoning-effort/-budget-tokens/-enabled
+//   - harness: --model provider:model + --reasoning <profile>
 //   - claude:  --model + --effort
 //   - codex:   --model (or -m) + -c model_reasoning_effort=<level>
 export const HARNESS_SELECTION_FLAGS = {
-  harness: new Set(["provider", "model", "reasoning-effort", "reasoning-enabled", "reasoning-budget-tokens"]),
+  harness: new Set(["provider", "model", "reasoning", "reasoning-effort", "reasoning-enabled", "reasoning-budget-tokens"]),
   claude: new Set(["model", "m", "effort"]),
   codex: new Set(["model", "m", "c", "config"]),
 };
@@ -262,31 +269,23 @@ export function applyHarnessSelectionFlag(selection, harness, name, value) {
     return true;
   }
   if (harness === "harness") {
-    if (name === "reasoning-effort") {
+    if (name === "reasoning" || name === "reasoning-effort") {
       selection.reasoning_mode = "effort";
       selection.reasoning_effort = value;
       selection.reasoning_budget_tokens = null;
       return true;
     }
     if (name === "reasoning-enabled") {
-      const normalized = value.toLowerCase();
-      if (normalized === "true" || normalized === "false") {
-        selection.reasoning_mode = normalized === "true" ? "on" : "off";
-        selection.reasoning_effort = "";
-        selection.reasoning_budget_tokens = null;
-        return true;
-      }
-      return false;
+      selection.reasoning_mode = "legacy";
+      selection.reasoning_effort = "";
+      selection.reasoning_budget_tokens = null;
+      return true;
     }
     if (name === "reasoning-budget-tokens") {
-      const tokens = integerOrNull(value);
-      if (tokens != null) {
-        selection.reasoning_mode = "budget";
-        selection.reasoning_budget_tokens = tokens;
-        selection.reasoning_effort = "";
-        return true;
-      }
-      return false;
+      selection.reasoning_mode = "legacy";
+      selection.reasoning_budget_tokens = null;
+      selection.reasoning_effort = "";
+      return true;
     }
     return false;
   }
@@ -324,15 +323,8 @@ export function serializeHarnessModelSelection(harness, model, reasoning) {
     } else if (harness === "codex") {
       args.push("-c", `${CODEX_REASONING_EFFORT_KEY}=${effort}`);
     } else {
-      args.push("--reasoning-effort", effort);
+      args.push("--reasoning", effort);
     }
-  } else if (harness === "harness" && mode === "budget") {
-    const budget = parseReasoningBudget(reasoning.budget, model);
-    args.push("--reasoning-budget-tokens", String(budget));
-  } else if (harness === "harness" && mode === "on") {
-    args.push("--reasoning-enabled", "true");
-  } else if (harness === "harness" && mode === "off") {
-    args.push("--reasoning-enabled", "false");
   } else if (mode !== "default") {
     throw new Error("Unsupported reasoning option");
   }
@@ -357,12 +349,6 @@ export function parseHarnessSelectionArgs(args, models = [], harness = "harness"
     if (!applied) {
       selection.additional_args.push(input[i]);
       if (parsed && parsed.consumedNext) selection.additional_args.push(input[i + 1]);
-    } else if (isLegacyHarnessReasoningFlag(harness, parsed.name)) {
-      // The single Reasoning Level selector can only represent discrete effort
-      // values. Keep legacy Harness budget/toggle flags visible as additional args
-      // so saving unrelated edits does not silently drop them.
-      selection.additional_args.push(input[i]);
-      if (parsed.consumedNext) selection.additional_args.push(input[i + 1]);
     }
     if (parsed && parsed.consumedNext) i += 1;
   }
@@ -445,7 +431,7 @@ export function reasoningOption(model, type) {
 
 export function harnessReasoningLevelValues(model) {
   if (!model?.reasoning?.supported) return [];
-  return reasoningOption(model, "effort")?.values || [];
+  return reasoningOption(model, "profile")?.values || reasoningOption(model, "effort")?.values || [];
 }
 
 export function supportsReasoningToggle(model) {
