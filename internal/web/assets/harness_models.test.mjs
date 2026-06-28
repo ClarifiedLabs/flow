@@ -136,6 +136,25 @@ check("harness parses old provider plus bare model args", () => {
   assert.strictEqual(sel.reasoning_effort, "high");
   jsonEq(sel.additional_args, []);
 });
+check("harness keeps legacy budget reasoning flags as additional args", () => {
+  const sel = parseHarnessSelectionArgs(
+    ["--model", "anthropic:claude-budget", "--reasoning-budget-tokens", "2048", "--label", "fast"],
+    catalog.harness, "harness",
+  );
+  assert.strictEqual(sel.qualified_id, "anthropic:claude-budget");
+  assert.strictEqual(sel.reasoning_mode, "budget");
+  assert.strictEqual(sel.reasoning_budget_tokens, 2048);
+  jsonEq(sel.additional_args, ["--reasoning-budget-tokens", "2048", "--label", "fast"]);
+});
+check("harness keeps legacy toggle reasoning flags as additional args", () => {
+  const sel = parseHarnessSelectionArgs(
+    ["--model", "anthropic:claude-opus-4-8", "--reasoning-enabled", "true"],
+    catalog.harness, "harness",
+  );
+  assert.strictEqual(sel.qualified_id, "anthropic:claude-opus-4-8");
+  assert.strictEqual(sel.reasoning_mode, "on");
+  jsonEq(sel.additional_args, ["--reasoning-enabled", "true"]);
+});
 
 // --- strip ----------------------------------------------------------------
 check("strip removes only per-harness selection flags", () => {

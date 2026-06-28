@@ -7,7 +7,7 @@ import { renderPhaseBadge, renderReviewBadge } from "./board.js";
 import { DEFAULT_AGENT_HARNESSES } from "./config.js";
 import { renderCheck } from "./diff.js";
 import { formatDate } from "./format.js";
-import { findHarnessModel, harnessDefaultArgs, harnessModels, normalizeHarnessArgs, normalizeHarnessModelList, parseHarnessSelectionArgs, parseJSONAttribute, renderHarnessArgsField, renderHarnessModelControls, renderHarnessModelFields, renderHarnessModelOptions, renderHarnessOptions, renderHarnessReasoningInto, renderShellArgString, resolveHarnessSelection, serializeHarnessModelSelection } from "./harness-models.js";
+import { HARNESS_REASONING_UNAVAILABLE, findHarnessModel, harnessDefaultArgs, harnessModels, harnessReasoningLevelValues, normalizeHarnessArgs, normalizeHarnessModelList, parseHarnessSelectionArgs, parseJSONAttribute, renderHarnessArgsField, renderHarnessModelControls, renderHarnessModelFields, renderHarnessModelOptions, renderHarnessOptions, renderHarnessReasoningInto, renderShellArgString, resolveHarnessSelection, serializeHarnessModelSelection } from "./harness-models.js";
 import { escapeAttr, escapeHTML } from "./html.js";
 import { currentIssueState, projectButtonAttr, renderAttachmentUploadForm, renderIssueAttachment, renderIssueStateForm } from "./issue.js";
 import { renderMarkdown } from "./markdown.js";
@@ -453,9 +453,12 @@ export function harnessSelectionArgsFromFormView(app, form, harness) {
   const models = harnessModels((app.harnesses && app.harnesses.agents) || DEFAULT_AGENT_HARNESSES, selectedHarness);
   const model = findHarnessModel(models, modelValue);
   if (!model) return [];
-  return serializeHarnessModelSelection(selectedHarness, model, {
-    mode: String(form.elements.harness_reasoning_mode?.value || "default").trim(),
-    effort: form.elements.harness_reasoning_effort?.value,
-    budget: form.elements.harness_reasoning_budget_tokens?.value,
-  });
+  const values = harnessReasoningLevelValues(model);
+  const selectedLevel = String(form.elements.harness_reasoning_effort?.value || "").trim();
+  const effort = selectedLevel && selectedLevel !== HARNESS_REASONING_UNAVAILABLE && values.includes(selectedLevel)
+    ? selectedLevel
+    : (selectedLevel === HARNESS_REASONING_UNAVAILABLE ? "" : values[0] || "");
+  return serializeHarnessModelSelection(selectedHarness, model, effort
+    ? { mode: "effort", effort }
+    : { mode: "default" });
 }

@@ -1719,7 +1719,7 @@ tr.row-idle {
 
 .issue-form .harness-model-fields {
   display: grid;
-  grid-template-columns: minmax(150px, 180px) minmax(240px, 1fr) minmax(150px, 180px) minmax(150px, 180px);
+  grid-template-columns: minmax(240px, 1fr) minmax(180px, 240px);
   gap: 12px;
   margin: 0;
   padding: 10px;

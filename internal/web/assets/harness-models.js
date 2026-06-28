@@ -174,40 +174,25 @@ export function uniqueHarnessProviders(models) {
   return providers;
 }
 
+export const HARNESS_REASONING_UNAVAILABLE = "unavailable";
+
 export function renderHarnessReasoningControls(model, selection = {}) {
-  const modes = [{ value: "default", label: "Provider default" }];
-  const effort = reasoningOption(model, "effort");
-  const budget = reasoningOption(model, "budget_tokens");
-  if (model && model.reasoning && model.reasoning.supported) {
-    if (supportsReasoningToggle(model)) {
-      modes.push({ value: "on", label: "On" }, { value: "off", label: "Off" });
-    }
-    if (effort && effort.values.length) {
-      modes.push({ value: "effort", label: "Effort" });
-    }
-    if (budget) {
-      modes.push({ value: "budget", label: "Token budget" });
-    }
-  }
-  const selectedMode = modes.some((mode) => mode.value === selection.reasoning_mode) ? selection.reasoning_mode : "default";
-  const effortValue = selection.reasoning_effort || (effort && effort.values[0]) || "";
-  const budgetValue = selection.reasoning_budget_tokens == null ? "" : String(selection.reasoning_budget_tokens);
+  const values = harnessReasoningLevelValues(model);
+  const mode = String(selection.reasoning_mode || "default").trim() || "default";
+  const selected = String(selection.reasoning_effort || "").trim();
+  const unrepresentableLegacyMode = mode !== "default" && mode !== "effort";
+  const selectedValue = values.includes(selected)
+    ? selected
+    : (unrepresentableLegacyMode ? HARNESS_REASONING_UNAVAILABLE : (values[0] || HARNESS_REASONING_UNAVAILABLE));
+  const unavailableOption = `<option value="${HARNESS_REASONING_UNAVAILABLE}" selected>${HARNESS_REASONING_UNAVAILABLE}</option>`;
   return `
     <label>
-      <span>Reasoning</span>
-      <select name="harness_reasoning_mode">
-        ${modes.map((mode) => `<option value="${escapeAttr(mode.value)}" ${mode.value === selectedMode ? "selected" : ""}>${escapeHTML(mode.label)}</option>`).join("")}
-      </select>
-    </label>
-    <label data-harness-reasoning-effort-field${selectedMode === "effort" ? "" : " hidden"}>
-      <span>Effort</span>
+      <span>Reasoning Level</span>
       <select name="harness_reasoning_effort">
-        ${(effort?.values || []).map((value) => `<option value="${escapeAttr(value)}" ${value === effortValue ? "selected" : ""}>${escapeHTML(value)}</option>`).join("")}
+        ${values.length
+          ? `${selectedValue === HARNESS_REASONING_UNAVAILABLE ? unavailableOption : ""}${values.map((value) => `<option value="${escapeAttr(value)}" ${value === selectedValue ? "selected" : ""}>${escapeHTML(value)}</option>`).join("")}`
+          : unavailableOption}
       </select>
-    </label>
-    <label data-harness-reasoning-budget-field${selectedMode === "budget" ? "" : " hidden"}>
-      <span>Budget tokens</span>
-      <input name="harness_reasoning_budget_tokens" type="number" min="${escapeAttr(String(budget?.min ?? 0))}" ${budget?.max == null ? "" : `max="${escapeAttr(String(budget.max))}"`} step="1" value="${escapeAttr(budgetValue)}">
     </label>
   `;
 }
@@ -218,30 +203,24 @@ export function renderHarnessReasoningInto(fieldset, model, preserve) {
   if (!container) return;
   const current = preserve ? readHarnessReasoningSelection(fieldset) : {};
   container.innerHTML = renderHarnessReasoningControls(model, current);
-  const mode = fieldset.querySelector('[name="harness_reasoning_mode"]');
-  if (mode && typeof mode.addEventListener === "function") {
-    mode.addEventListener("change", () => syncHarnessReasoningVisibility(fieldset));
-  }
-  syncHarnessReasoningVisibility(fieldset);
 }
 
 export function readHarnessReasoningSelection(root) {
   if (!root || typeof root.querySelector !== "function") return {};
-  const mode = root.querySelector('[name="harness_reasoning_mode"]')?.value || "default";
+  const effort = String(root.querySelector('[name="harness_reasoning_effort"]')?.value || "").trim();
   return {
-    reasoning_mode: mode,
-    reasoning_effort: root.querySelector('[name="harness_reasoning_effort"]')?.value || "",
-    reasoning_budget_tokens: integerOrNull(root.querySelector('[name="harness_reasoning_budget_tokens"]')?.value),
+    reasoning_mode: effort === HARNESS_REASONING_UNAVAILABLE
+      ? HARNESS_REASONING_UNAVAILABLE
+      : (effort ? "effort" : "default"),
+    reasoning_effort: effort === HARNESS_REASONING_UNAVAILABLE ? "" : effort,
+    reasoning_budget_tokens: null,
   };
 }
 
-export function syncHarnessReasoningVisibility(root) {
-  if (!root || typeof root.querySelector !== "function") return;
-  const mode = root.querySelector('[name="harness_reasoning_mode"]')?.value || "default";
-  const effort = root.querySelector("[data-harness-reasoning-effort-field]");
-  const budget = root.querySelector("[data-harness-reasoning-budget-field]");
-  if (effort) effort.hidden = mode !== "effort";
-  if (budget) budget.hidden = mode !== "budget";
+export function syncHarnessReasoningVisibility(_root) {
+  // Legacy no-op retained for callers/tests that import the old helper. The UI now
+  // exposes one Reasoning Level selector instead of separate mode/effort/budget
+  // controls, so there is no conditional visibility to sync.
 }
 
 // HARNESS_SELECTION_FLAGS maps each harness to the flag names it uses to carry
@@ -374,9 +353,16 @@ export function parseHarnessSelectionArgs(args, models = [], harness = "harness"
   const input = normalizeArgList(args);
   for (let i = 0; i < input.length; i += 1) {
     const parsed = readFlagValue(input, i, flags);
-    if (!parsed || !parsed.value || !applyHarnessSelectionFlag(selection, harness, parsed.name, parsed.value)) {
+    const applied = parsed && parsed.value && applyHarnessSelectionFlag(selection, harness, parsed.name, parsed.value);
+    if (!applied) {
       selection.additional_args.push(input[i]);
       if (parsed && parsed.consumedNext) selection.additional_args.push(input[i + 1]);
+    } else if (isLegacyHarnessReasoningFlag(harness, parsed.name)) {
+      // The single Reasoning Level selector can only represent discrete effort
+      // values. Keep legacy Harness budget/toggle flags visible as additional args
+      // so saving unrelated edits does not silently drop them.
+      selection.additional_args.push(input[i]);
+      if (parsed.consumedNext) selection.additional_args.push(input[i + 1]);
     }
     if (parsed && parsed.consumedNext) i += 1;
   }
@@ -387,6 +373,10 @@ export function parseHarnessSelectionArgs(args, models = [], harness = "harness"
     selection.qualified_id = model.qualified_id;
   }
   return selection;
+}
+
+export function isLegacyHarnessReasoningFlag(harness, name) {
+  return harness === "harness" && (name === "reasoning-enabled" || name === "reasoning-budget-tokens");
 }
 
 export function stripHarnessSelectionArgs(args, harness = "harness") {
@@ -451,6 +441,11 @@ export function findHarnessModelByParts(models, provider, modelID) {
 export function reasoningOption(model, type) {
   const options = model?.reasoning?.options || [];
   return options.find((option) => option.type === type) || null;
+}
+
+export function harnessReasoningLevelValues(model) {
+  if (!model?.reasoning?.supported) return [];
+  return reasoningOption(model, "effort")?.values || [];
 }
 
 export function supportsReasoningToggle(model) {

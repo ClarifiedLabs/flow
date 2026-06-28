@@ -588,8 +588,11 @@ test("issue form renders harness model controls from saved args", async () => {
   assert.match(html, /data-harness-model-fields/);
   assert.doesNotMatch(html, /name="harness_provider"/);
   assert.match(html, /<option value="anthropic:claude-opus-4-8" selected>claude-opus-4-8 \(1M ctx\)<\/option>/);
-  assert.match(html, /<option value="effort" selected>Effort<\/option>/);
+  assert.match(html, /<span>Reasoning Level<\/span>/);
+  assert.doesNotMatch(html, /name="harness_reasoning_mode"/);
+  assert.match(html, /<option value="low"[^>]*>low<\/option>/);
   assert.match(html, /<option value="high" selected>high<\/option>/);
+  assert.doesNotMatch(html, /<option value="unavailable"/);
   assert.match(html, /<textarea name="agent_args" rows="2"[^>]*>--label fast<\/textarea>/);
 });
 
@@ -628,6 +631,8 @@ test("issue form renders one model picker with provider labels when needed", asy
   assert.doesNotMatch(html, /name="harness_provider"/);
   assert.match(modelOptions, /<option value="anthropic:claude-opus-4-8"[^>]*>Anthropic \/ Claude Opus 4\.8<\/option>/);
   assert.match(modelOptions, /<option value="google:gemini-2.5-flash" selected>Google \/ Gemini 2\.5 Flash<\/option>/);
+  assert.match(html, /<span>Reasoning Level<\/span>/);
+  assert.match(html, /<option value="unavailable" selected>unavailable<\/option>/);
 });
 
 test("issue form renders saved args as shell-style strings", async () => {
@@ -645,7 +650,171 @@ test("issue form renders saved args as shell-style strings", async () => {
   assert.match(html, /<textarea name="agent_args" rows="2"[^>]*>--label &#39;fast mode&#39; &#39;it&#39;\\&#39;&#39;s ok&#39; path\/ok<\/textarea>/);
 });
 
-test("issue save generates harness model args from controls", async () => {
+// Legacy Harness budget/toggle reasoning flags cannot be represented by the
+// single Reasoning Level selector. They must remain visible in additional args so
+// unrelated edits do not silently drop saved launch configuration.
+test("issue form keeps legacy harness reasoning toggle args visible", async () => {
+  const context = await scriptContext();
+  const app = new context.FlowApp();
+  app.harnesses = {
+    agents: [{
+      name: "harness",
+      display_name: "Harness",
+      models: [{
+        provider_id: "anthropic",
+        provider_name: "Anthropic",
+        model_id: "claude-opus-4-8",
+        qualified_id: "anthropic:claude-opus-4-8",
+        model_name: "Claude Opus 4.8",
+        reasoning: { supported: true, options: [{ type: "effort", values: ["low", "high"] }] },
+      }],
+    }],
+  };
+
+  const html = app.renderIssueForm({
+    title: "Harness issue",
+    agent_harness: "harness",
+    harness_args: {
+      harness: ["--model", "anthropic:claude-opus-4-8", "--reasoning-enabled", "true", "--label", "fast"],
+    },
+  });
+
+  assert.match(html, /<option value="unavailable" selected>unavailable<\/option>/);
+  assert.doesNotMatch(html, /<option value="low" selected>low<\/option>/);
+  assert.match(html, /<textarea name="agent_args" rows="2"[^>]*>--reasoning-enabled true --label fast<\/textarea>/);
+});
+
+test("issue form binding preserves legacy unavailable reasoning selection", async () => {
+  const context = await scriptContext();
+  const app = new context.FlowApp();
+  const model = {
+    provider_id: "anthropic",
+    provider_name: "Anthropic",
+    model_id: "claude-opus-4-8",
+    qualified_id: "anthropic:claude-opus-4-8",
+    model_name: "Claude Opus 4.8",
+    reasoning: { supported: true, options: [{ type: "effort", values: ["low", "high"] }] },
+  };
+  const agentSelect = {
+    value: "harness",
+    addEventListener() {},
+  };
+  const modelSelect = {
+    value: "anthropic:claude-opus-4-8",
+    innerHTML: "",
+    addEventListener() {},
+  };
+  const reasoningSelect = { value: "unavailable" };
+  const reasoningContainer = { innerHTML: "" };
+  const controls = { innerHTML: "" };
+  const fieldset = {
+    dataset: {
+      harnessModelCatalog: JSON.stringify({ harness: [model] }),
+      harnessModelSelections: JSON.stringify({
+        harness: {
+          qualified_id: "anthropic:claude-opus-4-8",
+          reasoning_mode: "on",
+          reasoning_effort: "",
+          reasoning_budget_tokens: null,
+          additional_args: ["--reasoning-enabled", "true"],
+        },
+      }),
+    },
+    hidden: false,
+    querySelector(selector) {
+      if (selector === "[data-harness-model-controls]") return controls;
+      if (selector === "[data-harness-reasoning-controls]") return reasoningContainer;
+      if (selector === '[name="harness_reasoning_effort"]') return reasoningSelect;
+      return null;
+    },
+  };
+  const form = {
+    elements: {
+      agent_harness: agentSelect,
+      agent_args: { value: "--reasoning-enabled true", dataset: {} },
+      harness_model: modelSelect,
+      harness_reasoning_effort: reasoningSelect,
+    },
+    querySelector(selector) {
+      if (selector === "[data-harness-model-fields]") return fieldset;
+      return null;
+    },
+    addEventListener() {},
+  };
+  app.querySelectorAll = (selector) => (selector === "[data-issue-form]" ? [form] : []);
+
+  app.bindIssueActions(async () => {});
+
+  assert.match(reasoningContainer.innerHTML, /<option value="unavailable" selected>unavailable<\/option>/);
+  assert.doesNotMatch(reasoningContainer.innerHTML, /<option value="low" selected>low<\/option>/);
+});
+
+test("issue form model change resets unavailable reasoning for supported model", async () => {
+  const context = await scriptContext();
+  const app = new context.FlowApp();
+  const model = {
+    provider_id: "anthropic",
+    provider_name: "Anthropic",
+    model_id: "claude-opus-4-8",
+    qualified_id: "anthropic:claude-opus-4-8",
+    model_name: "Claude Opus 4.8",
+    reasoning: { supported: true, options: [{ type: "effort", values: ["low", "high"] }] },
+  };
+  const agentSelect = {
+    value: "harness",
+    addEventListener() {},
+  };
+  let modelChangeHandler = null;
+  const modelSelect = {
+    value: "",
+    innerHTML: "",
+    addEventListener(event, handler) {
+      if (event === "change") modelChangeHandler = handler;
+    },
+  };
+  const reasoningSelect = { value: "unavailable" };
+  const reasoningContainer = { innerHTML: "" };
+  const controls = { innerHTML: "" };
+  const fieldset = {
+    dataset: {
+      harnessModelCatalog: JSON.stringify({ harness: [model] }),
+      harnessModelSelections: JSON.stringify({ harness: null }),
+    },
+    hidden: false,
+    querySelector(selector) {
+      if (selector === "[data-harness-model-controls]") return controls;
+      if (selector === "[data-harness-reasoning-controls]") return reasoningContainer;
+      if (selector === '[name="harness_reasoning_effort"]') return reasoningSelect;
+      return null;
+    },
+  };
+  const form = {
+    elements: {
+      agent_harness: agentSelect,
+      agent_args: { value: "", dataset: {} },
+      harness_model: modelSelect,
+      harness_reasoning_effort: reasoningSelect,
+    },
+    querySelector(selector) {
+      if (selector === "[data-harness-model-fields]") return fieldset;
+      return null;
+    },
+    addEventListener() {},
+  };
+  app.querySelectorAll = (selector) => (selector === "[data-issue-form]" ? [form] : []);
+
+  app.bindIssueActions(async () => {});
+  assert.equal(typeof modelChangeHandler, "function");
+
+  modelSelect.value = "anthropic:claude-opus-4-8";
+  modelChangeHandler();
+
+  assert.doesNotMatch(reasoningContainer.innerHTML, /<option value="unavailable"/);
+  assert.match(reasoningContainer.innerHTML, /<option value="low" selected>low<\/option>/);
+  assert.match(reasoningContainer.innerHTML, /<option value="high" >high<\/option>/);
+});
+
+test("issue save generates harness model args from reasoning level", async () => {
   const harness = await issueSaveHarness({
     agentHarness: "harness",
     agentArgs: `--label "fast mode"`,
@@ -654,35 +823,34 @@ test("issue save generates harness model args from controls", async () => {
         name: "harness",
         display_name: "Harness",
         models: [{
-          provider_id: "google",
-          provider_name: "google",
-          model_id: "gemini-2.5-flash",
-          qualified_id: "google:gemini-2.5-flash",
-          model_name: "gemini-2.5-flash",
-          reasoning: { supported: true, options: [{ type: "budget_tokens", min: 0, max: 24576 }] },
+          provider_id: "anthropic",
+          provider_name: "Anthropic",
+          model_id: "claude-opus-4-8",
+          qualified_id: "anthropic:claude-opus-4-8",
+          model_name: "Claude Opus 4.8",
+          reasoning: { supported: true, options: [{ type: "effort", values: ["low", "high"] }] },
         }],
       }],
     },
-    harnessProvider: "google",
-    harnessModel: "google:gemini-2.5-flash",
-    harnessReasoningMode: "budget",
-    harnessReasoningBudget: "2048",
+    harnessModel: "anthropic:claude-opus-4-8",
+    harnessReasoningEffort: "high",
   });
   await harness.submit();
 
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body).harness_args.harness, [
     "--model",
-    "google:gemini-2.5-flash",
-    "--reasoning-budget-tokens",
-    "2048",
+    "anthropic:claude-opus-4-8",
+    "--reasoning-effort",
+    "high",
     `--label "fast mode"`,
   ]);
   assert.equal(harness.status.textContent, "");
 });
 
-test("issue save validates harness reasoning budget range", async () => {
+test("issue save omits reasoning args when reasoning level is unavailable", async () => {
   const harness = await issueSaveHarness({
     agentHarness: "harness",
+    agentArgs: "--label no-reasoning",
     harnesses: {
       agents: [{
         name: "harness",
@@ -691,19 +859,50 @@ test("issue save validates harness reasoning budget range", async () => {
           provider_id: "google",
           model_id: "gemini-2.5-flash",
           qualified_id: "google:gemini-2.5-flash",
+          reasoning: { supported: false, options: [] },
+        }],
+      }],
+    },
+    harnessModel: "google:gemini-2.5-flash",
+    harnessReasoningEffort: "unavailable",
+  });
+  await harness.submit();
+
+  assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body).harness_args.harness, [
+    "--model",
+    "google:gemini-2.5-flash",
+    "--label no-reasoning",
+  ]);
+  assert.equal(harness.status.textContent, "");
+});
+
+test("issue save preserves legacy harness reasoning args when unavailable", async () => {
+  const harness = await issueSaveHarness({
+    agentHarness: "harness",
+    agentArgs: "--reasoning-budget-tokens 2048 --label legacy",
+    harnesses: {
+      agents: [{
+        name: "harness",
+        display_name: "Harness",
+        models: [{
+          provider_id: "anthropic",
+          model_id: "claude-budget",
+          qualified_id: "anthropic:claude-budget",
           reasoning: { supported: true, options: [{ type: "budget_tokens", min: 0, max: 24576 }] },
         }],
       }],
     },
-    harnessProvider: "google",
-    harnessModel: "google:gemini-2.5-flash",
-    harnessReasoningMode: "budget",
-    harnessReasoningBudget: "30000",
+    harnessModel: "anthropic:claude-budget",
+    harnessReasoningEffort: "unavailable",
   });
   await harness.submit();
 
-  assert.equal(harness.fetchCalls.length, 0);
-  assert.equal(harness.status.textContent, "Reasoning budget must be at most 24576");
+  assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body).harness_args.harness, [
+    "--model",
+    "anthropic:claude-budget",
+    "--reasoning-budget-tokens 2048 --label legacy",
+  ]);
+  assert.equal(harness.status.textContent, "");
 });
 
 test("issue save does not submit invalid form or priority", async () => {
@@ -895,8 +1094,10 @@ test("new issue route renders model controls when only Harness agent is enabled"
   assert.doesNotMatch(harness.content.innerHTML, /data-harness-model-fields[^>]* hidden/);
   assert.doesNotMatch(harness.content.innerHTML, /name="harness_provider"/);
   assert.match(harness.content.innerHTML, /<option value="anthropic:claude-opus-4-8"[^>]*>Claude Opus 4\.8<\/option>/);
-  assert.match(harness.content.innerHTML, /<select name="harness_reasoning_mode">/);
-  assert.match(harness.content.innerHTML, /<option value="default" selected>Provider default<\/option>/);
+  assert.match(harness.content.innerHTML, /<span>Reasoning Level<\/span>/);
+  assert.match(harness.content.innerHTML, /<select name="harness_reasoning_effort">/);
+  assert.match(harness.content.innerHTML, /<option value="unavailable" selected>unavailable<\/option>/);
+  assert.doesNotMatch(harness.content.innerHTML, /name="harness_reasoning_mode"/);
   assert.equal(harness.status.textContent, "");
 });
 
@@ -918,7 +1119,8 @@ test("new issue route renders saved agent defaults from localStorage", async () 
   assert.match(harness.content.innerHTML, /<option value="harness" selected>Harness<\/option>/);
   assert.doesNotMatch(harness.content.innerHTML, /name="harness_provider"/);
   assert.match(harness.content.innerHTML, /<option value="anthropic:claude-opus-4-8" selected>Claude Opus 4\.8<\/option>/);
-  assert.match(harness.content.innerHTML, /<option value="effort" selected>Effort<\/option>/);
+  assert.match(harness.content.innerHTML, /<span>Reasoning Level<\/span>/);
+  assert.doesNotMatch(harness.content.innerHTML, /name="harness_reasoning_mode"/);
   assert.match(harness.content.innerHTML, /<option value="high" selected>high<\/option>/);
   assert.match(harness.content.innerHTML, /<textarea name="agent_args" rows="2"[^>]*>--label fast<\/textarea>/);
   assert.match(harness.content.innerHTML, /<input name="priority" type="number" min="0" step="1" value="0">/);
@@ -1021,19 +1223,17 @@ test("new issue save defaults button writes agent defaults without posting", asy
         name: "harness",
         display_name: "Harness",
         models: [{
-          provider_id: "google",
-          provider_name: "Google",
-          model_id: "gemini-2.5-flash",
-          qualified_id: "google:gemini-2.5-flash",
-          model_name: "Gemini 2.5 Flash",
-          reasoning: { supported: true, options: [{ type: "budget_tokens", min: 0, max: 24576 }] },
+          provider_id: "anthropic",
+          provider_name: "Anthropic",
+          model_id: "claude-opus-4-8",
+          qualified_id: "anthropic:claude-opus-4-8",
+          model_name: "Claude Opus 4.8",
+          reasoning: { supported: true, options: [{ type: "effort", values: ["low", "high"] }] },
         }],
       }],
     },
-    harnessProvider: "google",
-    harnessModel: "google:gemini-2.5-flash",
-    harnessReasoningMode: "budget",
-    harnessReasoningBudget: "2048",
+    harnessModel: "anthropic:claude-opus-4-8",
+    harnessReasoningEffort: "high",
   });
 
   await harness.saveDefaults();
@@ -1048,24 +1248,16 @@ test("new issue save defaults button writes agent defaults without posting", asy
     harness_args: {
       codex: ["--codex-fast"],
       claude: ["--claude-sonnet"],
-      harness: ["--model", "google:gemini-2.5-flash", "--reasoning-budget-tokens", "2048", `--label "fast mode"`],
+      harness: ["--model", "anthropic:claude-opus-4-8", "--reasoning-effort", "high", `--label "fast mode"`],
     },
   });
 });
 
-test("new issue save defaults button preserves stored defaults on invalid reasoning", async () => {
-  const originalDefaults = {
-    version: 1,
-    agent_harness: "claude",
-    harness_args: {
-      codex: [],
-      claude: ["--existing"],
-      harness: [],
-    },
-  };
+test("new issue save defaults button stores model-only args when reasoning is unavailable", async () => {
   const harness = await issueSaveHarness({
     mode: "create",
     agentHarness: "harness",
+    agentArgs: "--label no-reasoning",
     harnesses: {
       agents: [{
         name: "harness",
@@ -1074,22 +1266,27 @@ test("new issue save defaults button preserves stored defaults on invalid reason
           provider_id: "google",
           model_id: "gemini-2.5-flash",
           qualified_id: "google:gemini-2.5-flash",
-          reasoning: { supported: true, options: [{ type: "budget_tokens", min: 0, max: 24576 }] },
+          reasoning: { supported: false, options: [] },
         }],
       }],
     },
-    harnessProvider: "google",
     harnessModel: "google:gemini-2.5-flash",
-    harnessReasoningMode: "budget",
-    harnessReasoningBudget: "30000",
+    harnessReasoningEffort: "unavailable",
   });
-  harness.storage.set(ISSUE_AGENT_DEFAULTS_STORAGE_KEY, JSON.stringify(originalDefaults));
 
   await harness.saveDefaults();
 
   assert.equal(harness.fetchCalls.length, 0);
-  assert.equal(harness.status.textContent, "Reasoning budget must be at most 24576");
-  assert.deepEqual(JSON.parse(harness.storage.get(ISSUE_AGENT_DEFAULTS_STORAGE_KEY)), originalDefaults);
+  assert.equal(harness.status.textContent, "Agent defaults saved");
+  assert.deepEqual(JSON.parse(harness.storage.get(ISSUE_AGENT_DEFAULTS_STORAGE_KEY)), {
+    version: 1,
+    agent_harness: "harness",
+    harness_args: {
+      codex: [],
+      claude: [],
+      harness: ["--model", "google:gemini-2.5-flash", "--label no-reasoning"],
+    },
+  });
 });
 
 test("new issue form uploads selected initial attachments after create", async () => {
@@ -4143,11 +4340,8 @@ async function issueSaveHarness(options = {}) {
     form.dataset.project = projectID;
   }
   if (options.harnessModel) {
-    form.elements.harness_provider = { value: options.harnessProvider || "" };
     form.elements.harness_model = { value: options.harnessModel };
-    form.elements.harness_reasoning_mode = { value: options.harnessReasoningMode || "default" };
     form.elements.harness_reasoning_effort = { value: options.harnessReasoningEffort || "" };
-    form.elements.harness_reasoning_budget_tokens = { value: options.harnessReasoningBudget || "" };
   }
   const status = { textContent: "" };
   const fetchCalls = [];
