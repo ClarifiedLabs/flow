@@ -41,6 +41,49 @@ func TestDecodeModelCatalogNormalizesAndSortsModels(t *testing.T) {
 	}
 }
 
+func TestDecodeModelCatalogAcceptsHarnessTargetModels(t *testing.T) {
+	raw := []byte(`{
+		"version": 1,
+		"model_count": 1,
+		"models": [
+			{
+				"target_id": "openrouter:openai/gpt-5.5",
+				"display_name": "OpenAI GPT-5.5",
+				"provider_label": "OpenRouter",
+				"model_label": "openai/gpt-5.5",
+				"context_window": 256000,
+				"input_modalities": ["text", "image"],
+				"server_tools": ["web_search"],
+				"reasoning": {"supported": true, "options": [{"type": "effort", "values": ["none", "high"]}]}
+			}
+		]
+	}`)
+
+	catalog, err := DecodeModelCatalog(raw)
+	if err != nil {
+		t.Fatalf("decode catalog: %v", err)
+	}
+	if catalog.ProviderCount != 1 || catalog.ModelCount != 1 {
+		t.Fatalf("counts = providers:%d models:%d, want 1/1", catalog.ProviderCount, catalog.ModelCount)
+	}
+	got := catalog.Models[0]
+	if got.TargetID != "openrouter:openai/gpt-5.5" || got.QualifiedID != "openrouter:openai/gpt-5.5" {
+		t.Fatalf("target/qualified id = %q/%q, want openrouter:openai/gpt-5.5", got.TargetID, got.QualifiedID)
+	}
+	if got.ProviderID != "openrouter" || got.ModelID != "openai/gpt-5.5" {
+		t.Fatalf("provider/model = %q/%q, want openrouter/openai/gpt-5.5", got.ProviderID, got.ModelID)
+	}
+	if got.ProviderName != "OpenRouter" || got.ModelName != "OpenAI GPT-5.5" {
+		t.Fatalf("display names = %q/%q, want OpenRouter/OpenAI GPT-5.5", got.ProviderName, got.ModelName)
+	}
+	if len(got.InputModalities) != 2 || got.InputModalities[1] != "image" {
+		t.Fatalf("input modalities = %#v", got.InputModalities)
+	}
+	if len(got.ServerTools) != 1 || got.ServerTools[0] != "web_search" {
+		t.Fatalf("server tools = %#v", got.ServerTools)
+	}
+}
+
 func TestDecodeModelCatalogRejectsUnsupportedVersion(t *testing.T) {
 	if _, err := DecodeModelCatalog([]byte(`{"version":2}`)); err == nil {
 		t.Fatal("DecodeModelCatalog accepted unsupported version")

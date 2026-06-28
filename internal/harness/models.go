@@ -21,12 +21,18 @@ type ModelCatalog struct {
 }
 
 type Model struct {
+	TargetID                 string        `json:"target_id,omitempty"`
+	DisplayName              string        `json:"display_name,omitempty"`
+	ProviderLabel            string        `json:"provider_label,omitempty"`
+	ModelLabel               string        `json:"model_label,omitempty"`
 	ProviderID               string        `json:"provider_id"`
 	ProviderName             string        `json:"provider_name,omitempty"`
 	ModelID                  string        `json:"model_id"`
 	QualifiedID              string        `json:"qualified_id"`
 	ModelName                string        `json:"model_name,omitempty"`
 	ContextWindow            int           `json:"context_window,omitempty"`
+	InputModalities          []string      `json:"input_modalities,omitempty"`
+	ServerTools              []string      `json:"server_tools,omitempty"`
 	PricePerMillionTokensUSD *ModelPrice   `json:"price_per_million_tokens_usd,omitempty"`
 	Reasoning                ReasoningInfo `json:"reasoning"`
 	// Harness is the agent harness this model belongs to (lowercased). It is
@@ -132,12 +138,32 @@ func CloneModels(models []Model) []Model {
 }
 
 func normalizeModel(model Model) (Model, error) {
+	model.TargetID = strings.TrimSpace(model.TargetID)
+	model.DisplayName = strings.TrimSpace(model.DisplayName)
+	model.ProviderLabel = strings.TrimSpace(model.ProviderLabel)
+	model.ModelLabel = strings.TrimSpace(model.ModelLabel)
 	model.ProviderID = strings.TrimSpace(model.ProviderID)
 	model.ProviderName = strings.TrimSpace(model.ProviderName)
 	model.ModelID = strings.TrimSpace(model.ModelID)
 	model.QualifiedID = strings.TrimSpace(model.QualifiedID)
 	model.ModelName = strings.TrimSpace(model.ModelName)
 	model.Harness = strings.ToLower(strings.TrimSpace(model.Harness))
+	if model.TargetID == "" && strings.TrimSpace(model.QualifiedID) != "" {
+		model.TargetID = model.QualifiedID
+	}
+	targetProvider, targetModel := splitModelTarget(model.TargetID)
+	if model.ProviderID == "" {
+		model.ProviderID = firstNonEmpty(targetProvider, model.ProviderLabel)
+	}
+	if model.ModelID == "" {
+		model.ModelID = firstNonEmpty(model.ModelLabel, targetModel)
+	}
+	if model.ProviderName == "" {
+		model.ProviderName = firstNonEmpty(model.ProviderLabel, model.ProviderID)
+	}
+	if model.ModelName == "" {
+		model.ModelName = firstNonEmpty(model.DisplayName, model.ModelLabel, model.ModelID)
+	}
 	if model.ProviderID == "" {
 		return Model{}, errors.New("provider_id is required")
 	}
@@ -145,7 +171,7 @@ func normalizeModel(model Model) (Model, error) {
 		return Model{}, errors.New("model_id is required")
 	}
 	if model.QualifiedID == "" {
-		model.QualifiedID = model.ProviderID + ":" + model.ModelID
+		model.QualifiedID = firstNonEmpty(model.TargetID, model.ProviderID+":"+model.ModelID)
 	}
 	if model.ContextWindow < 0 {
 		return Model{}, errors.New("context_window cannot be negative")
@@ -179,12 +205,31 @@ func normalizeReasoningInfo(info ReasoningInfo) ReasoningInfo {
 }
 
 func cloneModel(model Model) Model {
+	model.InputModalities = append([]string(nil), model.InputModalities...)
+	model.ServerTools = append([]string(nil), model.ServerTools...)
 	if model.PricePerMillionTokensUSD != nil {
 		price := *model.PricePerMillionTokensUSD
 		model.PricePerMillionTokensUSD = &price
 	}
 	model.Reasoning = cloneReasoningInfo(model.Reasoning)
 	return model
+}
+
+func splitModelTarget(target string) (string, string) {
+	before, after, ok := strings.Cut(strings.TrimSpace(target), ":")
+	if !ok {
+		return "", ""
+	}
+	return strings.TrimSpace(before), strings.TrimSpace(after)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func cloneReasoningInfo(info ReasoningInfo) ReasoningInfo {

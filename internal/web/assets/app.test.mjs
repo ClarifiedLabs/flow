@@ -567,11 +567,10 @@ test("issue form renders harness model controls from saved args", async () => {
       name: "harness",
       display_name: "Harness",
       models: [{
-        provider_id: "anthropic",
-        provider_name: "anthropic",
-        model_id: "claude-opus-4-8",
-        qualified_id: "anthropic:claude-opus-4-8",
-        model_name: "claude-opus-4-8",
+        target_id: "anthropic:claude-opus-4-8",
+        display_name: "claude-opus-4-8",
+        provider_label: "anthropic",
+        model_label: "claude-opus-4-8",
         context_window: 1000000,
         reasoning: { supported: true, options: [{ type: "effort", values: ["low", "high"] }] },
       }],
@@ -587,14 +586,14 @@ test("issue form renders harness model controls from saved args", async () => {
   });
 
   assert.match(html, /data-harness-model-fields/);
-  assert.match(html, /<option value="anthropic" selected>anthropic<\/option>/);
-  assert.match(html, /<option value="anthropic:claude-opus-4-8" data-provider="anthropic" selected>claude-opus-4-8 \(1M ctx\)<\/option>/);
+  assert.doesNotMatch(html, /name="harness_provider"/);
+  assert.match(html, /<option value="anthropic:claude-opus-4-8" selected>claude-opus-4-8 \(1M ctx\)<\/option>/);
   assert.match(html, /<option value="effort" selected>Effort<\/option>/);
   assert.match(html, /<option value="high" selected>high<\/option>/);
   assert.match(html, /<textarea name="agent_args" rows="2"[^>]*>--label fast<\/textarea>/);
 });
 
-test("issue form renders only selected provider models", async () => {
+test("issue form renders one model picker with provider labels when needed", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   app.harnesses = {
@@ -622,14 +621,13 @@ test("issue form renders only selected provider models", async () => {
   const html = app.renderIssueForm({
     title: "Harness issue",
     agent_harness: "harness",
-    harness_args: { harness: ["--provider", "google"] },
+    harness_args: { harness: ["--model", "google:gemini-2.5-flash"] },
   });
 
   const modelOptions = html.match(/<select name="harness_model">([\s\S]*?)<\/select>/)?.[1] || "";
-  assert.match(html, /<option value="google" selected>Google<\/option>/);
-  assert.match(modelOptions, /<option value="google:gemini-2.5-flash" data-provider="google"[^>]*>Gemini 2\.5 Flash<\/option>/);
-  assert.doesNotMatch(modelOptions, /anthropic:claude-opus-4-8/);
-  assert.doesNotMatch(modelOptions, /Google \/ Gemini/);
+  assert.doesNotMatch(html, /name="harness_provider"/);
+  assert.match(modelOptions, /<option value="anthropic:claude-opus-4-8"[^>]*>Anthropic \/ Claude Opus 4\.8<\/option>/);
+  assert.match(modelOptions, /<option value="google:gemini-2.5-flash" selected>Google \/ Gemini 2\.5 Flash<\/option>/);
 });
 
 test("issue form renders saved args as shell-style strings", async () => {
@@ -673,10 +671,8 @@ test("issue save generates harness model args from controls", async () => {
   await harness.submit();
 
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body).harness_args.harness, [
-    "--provider",
-    "google",
     "--model",
-    "gemini-2.5-flash",
+    "google:gemini-2.5-flash",
     "--reasoning-budget-tokens",
     "2048",
     `--label "fast mode"`,
@@ -897,8 +893,8 @@ test("new issue route renders model controls when only Harness agent is enabled"
   assert.match(harness.content.innerHTML, /<option value="harness" selected>Harness<\/option>/);
   assert.match(harness.content.innerHTML, /data-harness-model-fields/);
   assert.doesNotMatch(harness.content.innerHTML, /data-harness-model-fields[^>]* hidden/);
-  assert.match(harness.content.innerHTML, /<option value="anthropic" selected>Anthropic<\/option>/);
-  assert.match(harness.content.innerHTML, /<option value="anthropic:claude-opus-4-8" data-provider="anthropic"[^>]*>Claude Opus 4\.8<\/option>/);
+  assert.doesNotMatch(harness.content.innerHTML, /name="harness_provider"/);
+  assert.match(harness.content.innerHTML, /<option value="anthropic:claude-opus-4-8"[^>]*>Claude Opus 4\.8<\/option>/);
   assert.match(harness.content.innerHTML, /<select name="harness_reasoning_mode">/);
   assert.match(harness.content.innerHTML, /<option value="default" selected>Provider default<\/option>/);
   assert.equal(harness.status.textContent, "");
@@ -920,8 +916,8 @@ test("new issue route renders saved agent defaults from localStorage", async () 
   await harness.app.load();
 
   assert.match(harness.content.innerHTML, /<option value="harness" selected>Harness<\/option>/);
-  assert.match(harness.content.innerHTML, /<option value="anthropic" selected>Anthropic<\/option>/);
-  assert.match(harness.content.innerHTML, /<option value="anthropic:claude-opus-4-8" data-provider="anthropic" selected>Claude Opus 4\.8<\/option>/);
+  assert.doesNotMatch(harness.content.innerHTML, /name="harness_provider"/);
+  assert.match(harness.content.innerHTML, /<option value="anthropic:claude-opus-4-8" selected>Claude Opus 4\.8<\/option>/);
   assert.match(harness.content.innerHTML, /<option value="effort" selected>Effort<\/option>/);
   assert.match(harness.content.innerHTML, /<option value="high" selected>high<\/option>/);
   assert.match(harness.content.innerHTML, /<textarea name="agent_args" rows="2"[^>]*>--label fast<\/textarea>/);
@@ -1052,7 +1048,7 @@ test("new issue save defaults button writes agent defaults without posting", asy
     harness_args: {
       codex: ["--codex-fast"],
       claude: ["--claude-sonnet"],
-      harness: ["--provider", "google", "--model", "gemini-2.5-flash", "--reasoning-budget-tokens", "2048", `--label "fast mode"`],
+      harness: ["--model", "google:gemini-2.5-flash", "--reasoning-budget-tokens", "2048", `--label "fast mode"`],
     },
   });
 });

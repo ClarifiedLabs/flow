@@ -14,11 +14,13 @@ globalThis.history = {};
 globalThis.HTMLElement = class {};
 
 const {
+  normalizeHarnessModelList,
   parseHarnessSelectionArgs,
   stripHarnessSelectionArgs,
   serializeHarnessModelSelection,
 } = await import("./app.js");
 
+assert.strictEqual(typeof normalizeHarnessModelList, "function", "normalizeHarnessModelList loaded");
 assert.strictEqual(typeof parseHarnessSelectionArgs, "function", "parseHarnessSelectionArgs loaded");
 assert.strictEqual(typeof serializeHarnessModelSelection, "function", "serializeHarnessModelSelection loaded");
 assert.strictEqual(typeof stripHarnessSelectionArgs, "function", "stripHarnessSelectionArgs loaded");
@@ -26,10 +28,10 @@ assert.strictEqual(typeof stripHarnessSelectionArgs, "function", "stripHarnessSe
 const effort = (values) => ({ supported: true, options: [{ type: "effort", values }] });
 const catalog = {
   harness: [{
-    provider_id: "anthropic", provider_name: "Anthropic", model_id: "claude-opus-4-8",
+    target_id: "anthropic:claude-opus-4-8", provider_id: "anthropic", provider_name: "Anthropic", model_id: "claude-opus-4-8",
     qualified_id: "anthropic:claude-opus-4-8", model_name: "Opus", reasoning: effort(["low", "high"]),
   }, {
-    provider_id: "anthropic", provider_name: "Anthropic", model_id: "claude-budget",
+    target_id: "anthropic:claude-budget", provider_id: "anthropic", provider_name: "Anthropic", model_id: "claude-budget",
     qualified_id: "anthropic:claude-budget", reasoning: { supported: true, options: [{ type: "budget_tokens", min: 0 }] },
   }],
   claude: [{
@@ -49,6 +51,20 @@ function check(name, fn) {
 }
 
 // --- serialize spellings ---------------------------------------------------
+check("normalizes harness v0.0.18 target models", () => {
+  const models = normalizeHarnessModelList([{
+    target_id: "openrouter:openai/gpt-5.5",
+    display_name: "OpenAI GPT-5.5",
+    provider_label: "OpenRouter",
+    model_label: "openai/gpt-5.5",
+    reasoning: { supported: true, options: [{ type: "effort", values: ["none", "high"] }] },
+  }]);
+  assert.strictEqual(models[0].provider_id, "openrouter");
+  assert.strictEqual(models[0].provider_name, "OpenRouter");
+  assert.strictEqual(models[0].model_id, "openai/gpt-5.5");
+  assert.strictEqual(models[0].qualified_id, "openrouter:openai/gpt-5.5");
+  assert.strictEqual(models[0].model_name, "OpenAI GPT-5.5");
+});
 check("claude serializes --model + --effort", () => {
   const args = serializeHarnessModelSelection("claude", catalog.claude[0], { mode: "effort", effort: "high" });
   jsonEq(args, ["--model", "claude-opus-4-8", "--effort", "high"]);
@@ -57,9 +73,9 @@ check("codex serializes --model + -c model_reasoning_effort", () => {
   const args = serializeHarnessModelSelection("codex", catalog.codex[0], { mode: "effort", effort: "xhigh" });
   jsonEq(args, ["--model", "gpt-5.5", "-c", "model_reasoning_effort=xhigh"]);
 });
-check("harness serializes --provider/--model + --reasoning-effort", () => {
+check("harness serializes target --model + --reasoning-effort", () => {
   const args = serializeHarnessModelSelection("harness", catalog.harness[0], { mode: "effort", effort: "high" });
-  jsonEq(args, ["--provider", "anthropic", "--model", "claude-opus-4-8", "--reasoning-effort", "high"]);
+  jsonEq(args, ["--model", "anthropic:claude-opus-4-8", "--reasoning-effort", "high"]);
 });
 check("default mode emits only the model", () => {
   jsonEq(serializeHarnessModelSelection("claude", catalog.claude[0], { mode: "default" }), ["--model", "claude-opus-4-8"]);
@@ -68,11 +84,11 @@ check("default mode emits only the model", () => {
 check("harness budget + toggle spellings", () => {
   jsonEq(
     serializeHarnessModelSelection("harness", catalog.harness[1], { mode: "budget", budget: "2048" }),
-    ["--provider", "anthropic", "--model", "claude-budget", "--reasoning-budget-tokens", "2048"],
+    ["--model", "anthropic:claude-budget", "--reasoning-budget-tokens", "2048"],
   );
   jsonEq(
     serializeHarnessModelSelection("harness", catalog.harness[0], { mode: "on" }),
-    ["--provider", "anthropic", "--model", "claude-opus-4-8", "--reasoning-enabled", "true"],
+    ["--model", "anthropic:claude-opus-4-8", "--reasoning-enabled", "true"],
   );
 });
 
@@ -114,6 +130,12 @@ check("claude leaves unknown flags in additional args", () => {
   const sel = parseHarnessSelectionArgs(["--model", "claude-opus-4-8", "--verbose"], catalog.claude, "claude");
   jsonEq(sel.additional_args, ["--verbose"]);
 });
+check("harness parses old provider plus bare model args", () => {
+  const sel = parseHarnessSelectionArgs(["--provider", "anthropic", "--model", "claude-opus-4-8", "--reasoning-effort", "high"], catalog.harness, "harness");
+  assert.strictEqual(sel.qualified_id, "anthropic:claude-opus-4-8");
+  assert.strictEqual(sel.reasoning_effort, "high");
+  jsonEq(sel.additional_args, []);
+});
 
 // --- strip ----------------------------------------------------------------
 check("strip removes only per-harness selection flags", () => {
@@ -124,6 +146,10 @@ check("strip removes only per-harness selection flags", () => {
   jsonEq(
     stripHarnessSelectionArgs(["--model", "claude-opus-4-8", "--effort", "high", "extra"], "claude"),
     ["extra"],
+  );
+  jsonEq(
+    stripHarnessSelectionArgs(["--model", "anthropic:claude-opus-4-8", "--reasoning-effort", "low", "tail"], "harness"),
+    ["tail"],
   );
   jsonEq(
     stripHarnessSelectionArgs(["--provider", "anthropic", "--model", "claude-opus-4-8", "--reasoning-effort", "low", "tail"], "harness"),

@@ -1,5 +1,5 @@
-// Per-harness model/provider/reasoning selection: catalog normalization, the
-// selection form UI, and agent-arg (de)serialization for launches.
+// Per-harness model/reasoning selection: catalog normalization, the selection
+// form UI, and agent-arg (de)serialization for launches.
 
 import { formatTokenCount } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
@@ -29,19 +29,29 @@ export function normalizeHarnessModelList(raw) {
   const seen = new Set();
   const models = [];
   for (const item of raw) {
-    const providerID = String(value(item, "provider_id", "ProviderID") || "").trim();
-    const modelID = String(value(item, "model_id", "ModelID") || "").trim();
+    const targetID = String(value(item, "target_id", "TargetID") || "").trim();
+    const targetParts = splitQualifiedModel(targetID);
+    const providerLabel = String(value(item, "provider_label", "ProviderLabel") || "").trim();
+    const modelLabel = String(value(item, "model_label", "ModelLabel") || "").trim();
+    const providerID = String(value(item, "provider_id", "ProviderID") || (targetParts && targetParts.provider) || providerLabel).trim();
+    const modelID = String(value(item, "model_id", "ModelID") || modelLabel || (targetParts && targetParts.model) || "").trim();
     if (!providerID || !modelID) continue;
-    const qualifiedID = String(value(item, "qualified_id", "QualifiedID") || `${providerID}:${modelID}`).trim() || `${providerID}:${modelID}`;
+    const qualifiedID = String(value(item, "qualified_id", "QualifiedID") || targetID || `${providerID}:${modelID}`).trim() || `${providerID}:${modelID}`;
     if (seen.has(qualifiedID)) continue;
     seen.add(qualifiedID);
     models.push({
+      target_id: targetID || qualifiedID,
+      display_name: String(value(item, "display_name", "DisplayName") || "").trim(),
+      provider_label: providerLabel,
+      model_label: modelLabel,
       provider_id: providerID,
-      provider_name: String(value(item, "provider_name", "ProviderName") || providerID).trim() || providerID,
+      provider_name: String(value(item, "provider_name", "ProviderName") || providerLabel || providerID).trim() || providerID,
       model_id: modelID,
       qualified_id: qualifiedID,
-      model_name: String(value(item, "model_name", "ModelName") || modelID).trim() || modelID,
+      model_name: String(value(item, "model_name", "ModelName") || value(item, "display_name", "DisplayName") || modelLabel || modelID).trim() || modelID,
       context_window: Number(value(item, "context_window", "ContextWindow") || 0),
+      input_modalities: Array.isArray(value(item, "input_modalities", "InputModalities")) ? value(item, "input_modalities", "InputModalities").map((entry) => String(entry || "").trim()).filter(Boolean) : [],
+      server_tools: Array.isArray(value(item, "server_tools", "ServerTools")) ? value(item, "server_tools", "ServerTools").map((entry) => String(entry || "").trim()).filter(Boolean) : [],
       price_per_million_tokens_usd: value(item, "price_per_million_tokens_usd", "PricePerMillionTokensUSD") || null,
       reasoning: normalizeHarnessReasoning(value(item, "reasoning", "Reasoning")),
     });
@@ -117,27 +127,18 @@ export function renderHarnessModelFields(options, selectionByHarness, agentHarne
   `;
 }
 
-// renderHarnessModelControls renders the provider/model/reasoning controls for a
-// single harness's model list. Re-rendered per harness by bindHarnessModelControls.
+// renderHarnessModelControls renders the model/reasoning controls for a single
+// harness's model list. Re-rendered per harness by bindHarnessModelControls.
 export function renderHarnessModelControls(models, selection) {
   if (!models.length) return "";
   const selected = selection || parseHarnessSelectionArgs([], models);
   const selectedModel = selected.qualified_id ? findHarnessModel(models, selected.qualified_id) : null;
-  const providers = uniqueHarnessProviders(models);
-  const requestedProvider = selected.provider || (selectedModel && selectedModel.provider_id) || models[0].provider_id;
-  const selectedProvider = providers.some((provider) => provider.id === requestedProvider) ? requestedProvider : models[0].provider_id;
-  const selectedModelID = selectedModel && selectedModel.provider_id === selectedProvider ? selectedModel.qualified_id : "";
+  const selectedModelID = selectedModel ? selectedModel.qualified_id : "";
   return `
-    <label>
-      <span>Provider</span>
-      <select name="harness_provider">
-        ${providers.map((provider) => `<option value="${escapeAttr(provider.id)}" ${provider.id === selectedProvider ? "selected" : ""}>${escapeHTML(provider.name)}</option>`).join("")}
-      </select>
-    </label>
     <label>
       <span>Model</span>
       <select name="harness_model">
-        ${renderHarnessModelOptions(models, selectedProvider, selectedModelID)}
+        ${renderHarnessModelOptions(models, selectedModelID)}
       </select>
     </label>
     <div class="harness-reasoning" data-harness-reasoning-controls>
@@ -146,17 +147,20 @@ export function renderHarnessModelControls(models, selection) {
   `;
 }
 
-export function renderHarnessModelOptions(models, provider, selectedQualifiedID) {
+export function renderHarnessModelOptions(models, selectedQualifiedID) {
   const selectedID = String(selectedQualifiedID || "").trim();
-  const visibleModels = models.filter((model) => !provider || model.provider_id === provider);
+  const visibleModels = normalizeHarnessModelList(models);
   const selectedVisible = visibleModels.some((model) => model.qualified_id === selectedID);
+  const includeProvider = uniqueHarnessProviders(visibleModels).length > 1;
   return `
         <option value="" ${selectedVisible ? "" : "selected"}>Default model</option>
-        ${visibleModels.map((model) => `<option value="${escapeAttr(model.qualified_id)}" data-provider="${escapeAttr(model.provider_id)}" ${model.qualified_id === selectedID ? "selected" : ""}>${escapeHTML(harnessModelLabel(model))}</option>`).join("")}`;
+        ${visibleModels.map((model) => `<option value="${escapeAttr(model.qualified_id)}" ${model.qualified_id === selectedID ? "selected" : ""}>${escapeHTML(harnessModelLabel(model, includeProvider))}</option>`).join("")}`;
 }
 
-export function harnessModelLabel(model) {
-  return `${model.model_name || model.model_id}${model.context_window ? ` (${formatTokenCount(model.context_window)} ctx)` : ""}`;
+export function harnessModelLabel(model, includeProvider = false) {
+  const provider = model.provider_name || model.provider_id;
+  const label = `${model.model_name || model.model_id}${model.context_window ? ` (${formatTokenCount(model.context_window)} ctx)` : ""}`;
+  return includeProvider && provider ? `${provider} / ${label}` : label;
 }
 
 export function uniqueHarnessProviders(models) {
@@ -240,10 +244,10 @@ export function syncHarnessReasoningVisibility(root) {
   if (budget) budget.hidden = mode !== "budget";
 }
 
-// HARNESS_SELECTION_FLAGS maps each harness to the flag names it uses to carry a
-// Flow-managed model/reasoning selection, so parse/strip/serialize agree on the
-// per-harness spelling:
-//   - harness: --provider/--model + --reasoning-effort/-budget-tokens/-enabled
+// HARNESS_SELECTION_FLAGS maps each harness to the flag names it uses to carry
+// a Flow-managed model/reasoning selection. The harness CLI now treats
+// provider:model as a target id, but we still parse old stored --provider args.
+//   - harness: --model provider:model + --reasoning-effort/-budget-tokens/-enabled
 //   - claude:  --model + --effort
 //   - codex:   --model (or -m) + -c model_reasoning_effort=<level>
 export const HARNESS_SELECTION_FLAGS = {
@@ -330,7 +334,7 @@ export function applyHarnessSelectionFlag(selection, harness, name, value) {
 // + reasoning choice. It is the inverse of parseHarnessSelectionArgs.
 export function serializeHarnessModelSelection(harness, model, reasoning) {
   const args = harness === "harness"
-    ? ["--provider", model.provider_id, "--model", model.model_id]
+    ? ["--model", model.target_id || model.qualified_id || model.model_id]
     : ["--model", model.model_id];
   const mode = reasoning.mode || "default";
   if (mode === "effort") {

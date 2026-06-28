@@ -147,7 +147,7 @@ export function renderIssueReadOnlyDetailView(app, issue, options = {}) {
   const selection = parseHarnessSelectionArgs(issueHarnessArgs[agentHarness], harnessModels(agentOptions, agentHarness), agentHarness);
   const selectionArgs = renderShellArgString(selection.additional_args);
   const modelLabel = selection.model || "";
-  const reasoningLabel = selection.reasoningEffort || "";
+  const reasoningLabel = selection.reasoning_effort || "";
   const defaultArgs = renderShellArgString(harnessDefaultArgs(agentOptions, agentHarness));
   const requiresHumanReview = value(issue, "requires_human_review", "RequiresHumanReview") ? "required" : "optional";
   const autoMerge = value(issue, "auto_merge", "AutoMerge") ? "on" : "off";
@@ -405,38 +405,26 @@ export function bindHarnessModelControlsView(app, form) {
   const agentSelect = form.elements.agent_harness;
   const modelsFor = (harness) => normalizeHarnessModelList(catalog[harness] || []);
 
-  // bindInner (re)wires the provider/model/reasoning listeners after a render
-  // and applies provider-based model option rendering for the active harness.
+  // bindInner (re)wires the model/reasoning listeners after a render.
   const bindInner = () => {
     const harness = agentSelect?.value || "";
     const models = modelsFor(harness);
-    const providerSelect = form.elements.harness_provider;
     const modelSelect = form.elements.harness_model;
     const syncReasoning = (preserve = true) => {
       const model = findHarnessModel(models, modelSelect?.value || "");
       renderHarnessReasoningInto(fieldset, model, preserve);
     };
-    const syncModelOptions = (preserveReasoning = false) => {
-      const provider = providerSelect?.value || "";
+    const syncModelOptions = (preserveReasoning = true) => {
       if (modelSelect) {
         const currentModel = findHarnessModel(models, modelSelect.value);
-        const selectedID = currentModel && (!provider || currentModel.provider_id === provider) ? currentModel.qualified_id : "";
-        modelSelect.innerHTML = renderHarnessModelOptions(models, provider, selectedID);
+        const selectedID = currentModel ? currentModel.qualified_id : "";
+        modelSelect.innerHTML = renderHarnessModelOptions(models, selectedID);
         modelSelect.value = selectedID;
       }
       syncReasoning(preserveReasoning);
     };
-    if (providerSelect && typeof providerSelect.addEventListener === "function") {
-      providerSelect.addEventListener("change", () => syncModelOptions(false));
-    }
     if (modelSelect && typeof modelSelect.addEventListener === "function") {
-      modelSelect.addEventListener("change", () => {
-        const model = findHarnessModel(models, modelSelect.value);
-        if (model && providerSelect) {
-          providerSelect.value = model.provider_id;
-        }
-        syncModelOptions(false);
-      });
+      modelSelect.addEventListener("change", () => syncModelOptions(false));
     }
     syncModelOptions(true);
   };
