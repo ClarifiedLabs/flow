@@ -1039,6 +1039,7 @@ func workerEnv(input tmuxInput) map[string]string {
 		}
 	}
 	ensureDefaultUTF8Locale(env)
+	scrubWorkerDeploymentEnv(env)
 	reserved := map[string]string{
 		"FLOW_COORDINATOR_URL":  input.Config.CoordinatorURL,
 		"FLOW_PROTOCOL_VERSION": input.Config.ProtocolVersion,
@@ -1111,6 +1112,33 @@ func workerEnv(input tmuxInput) map[string]string {
 	}
 
 	return env
+}
+
+func scrubWorkerDeploymentEnv(env map[string]string) {
+	for _, key := range []string{
+		"FLOW_WORKER_CAPACITY_EPHEMERAL",
+		"FLOW_WORKER_CAPACITY_PERSISTENT_AGENT",
+		"FLOW_WORKER_COORDINATOR_URL",
+		"FLOW_WORKER_DOCKERD",
+		"FLOW_WORKER_DOCKERD_ARGS",
+		"FLOW_WORKER_DOCKERD_LOG",
+		"FLOW_WORKER_GIT_EXCHANGE_URL",
+		"FLOW_WORKER_GIT_PRINCIPAL",
+		"FLOW_WORKER_GIT_URL_REWRITE_FROM",
+		"FLOW_WORKER_GIT_URL_REWRITE_TO",
+		"FLOW_WORKER_ID",
+		"FLOW_WORKER_INTERNAL_BASE_URL",
+		"FLOW_WORKER_JOIN_TOKEN",
+		"FLOW_WORKER_PROTOCOL_VERSION",
+		"FLOW_WORKER_TERMINAL_BIND_ADDRESS",
+		"FLOW_WORKER_TERMINAL_PUBLIC_BASE_URL",
+		"FLOW_WORKER_TERMINAL_TTYD_PATH",
+		"FLOW_WORKER_TMUX_SOCKET_PATH",
+		"FLOW_WORKER_TOKEN",
+		"FLOW_WORKER_WORK_DIR",
+	} {
+		env[key] = ""
+	}
 }
 
 func workerGitAuthEnv(input tmuxInput) map[string]string {

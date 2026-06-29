@@ -488,6 +488,52 @@ exit 0
 	}
 }
 
+func TestRunJobScrubsInheritedWorkerDeploymentEnvironment(t *testing.T) {
+	requireTool(t, "git")
+	requireTool(t, "tmux")
+	t.Setenv("FLOW_WORKER_COORDINATOR_URL", "http://flow-server:8421")
+	t.Setenv("FLOW_WORKER_WORK_DIR", "/home/flow/.local/share/flow/workers/local")
+	t.Setenv("FLOW_WORKER_JOIN_TOKEN", "join-token")
+	t.Setenv("FLOW_WORKER_TOKEN", "live-worker-token")
+	t.Setenv("FLOW_WORKER_CAPACITY_EPHEMERAL", "5")
+
+	cfg := workerConfigWithTmux(t, t.TempDir(), createExchangeRemote(t))
+	outPath := filepath.Join(t.TempDir(), "worker-env.txt")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	entrypoint := writeScript(t, `#!/bin/sh
+{
+  printf 'coord=%s\n' "${FLOW_WORKER_COORDINATOR_URL:-}"
+  printf 'work=%s\n' "${FLOW_WORKER_WORK_DIR:-}"
+  printf 'join=%s\n' "${FLOW_WORKER_JOIN_TOKEN:-}"
+  printf 'token=%s\n' "${FLOW_WORKER_TOKEN:-}"
+  printf 'capacity=%s\n' "${FLOW_WORKER_CAPACITY_EPHEMERAL:-}"
+  printf 'flow_coord=%s\n' "${FLOW_COORDINATOR_URL:-}"
+} > `+shellQuote(outPath)+`
+exit 0
+`)
+	result := RunJob(ctx, ciRunInput(cfg, "j-worker-env-scrub", "l-worker-env-scrub", []string{entrypoint}, false))
+	if result.Err != nil {
+		t.Fatalf("run job: %v", result.Err)
+	}
+	contents, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read worker env output: %v", err)
+	}
+	got := strings.TrimSpace(string(contents))
+	want := strings.Join([]string{
+		"coord=",
+		"work=",
+		"join=",
+		"token=",
+		"capacity=",
+		"flow_coord=" + cfg.CoordinatorURL,
+	}, "\n")
+	if got != want {
+		t.Fatalf("worker deployment env:\n got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
 // TestRunJobSurvivesSocketlessTmuxKillsFromEntrypoint is the regression for
 // author agents running stale checkouts of this repository's own test suite
 // inside their pane: socketless tmux kill commands must not be able to reach
@@ -1110,6 +1156,53 @@ func TestWorkerEnvIncludesWorkerTokenForReviewerAndVerifierJobs(t *testing.T) {
 	})
 	if env["FLOW_WORKER_TOKEN"] != "" {
 		t.Fatalf("ci FLOW_WORKER_TOKEN = %q, want empty", env["FLOW_WORKER_TOKEN"])
+	}
+}
+
+func TestWorkerEnvScrubsDeploymentConfigOverrides(t *testing.T) {
+	cfg := workerConfig("/tmp/work", "file:///tmp/exchange.git")
+	cfg.Token = "worker-token"
+	env := workerEnv(tmuxInput{
+		Config: cfg,
+		Job: Job{
+			ID:             "j-ci",
+			Role:           RoleCI,
+			CapacityBucket: BucketEphemeral,
+		},
+		Lease:      Lease{ID: "l-ci", WorkerID: "w-local"},
+		Payload:    JobPayload{},
+		Entrypoint: Entrypoint{},
+	})
+	for _, key := range []string{
+		"FLOW_WORKER_COORDINATOR_URL",
+		"FLOW_WORKER_WORK_DIR",
+		"FLOW_WORKER_JOIN_TOKEN",
+		"FLOW_WORKER_CAPACITY_EPHEMERAL",
+		"FLOW_WORKER_TOKEN",
+	} {
+		if env[key] != "" {
+			t.Fatalf("%s = %q, want scrubbed empty value", key, env[key])
+		}
+	}
+	if env["FLOW_COORDINATOR_URL"] != cfg.CoordinatorURL {
+		t.Fatalf("FLOW_COORDINATOR_URL = %q, want %q", env["FLOW_COORDINATOR_URL"], cfg.CoordinatorURL)
+	}
+	if env["FLOW_WORKER_ROLE"] != string(RoleCI) {
+		t.Fatalf("FLOW_WORKER_ROLE = %q, want %q", env["FLOW_WORKER_ROLE"], RoleCI)
+	}
+
+	env = workerEnv(tmuxInput{
+		Config: cfg,
+		Job: Job{
+			ID:   "j-reviewer",
+			Role: RoleReviewer,
+		},
+		Lease:      Lease{ID: "l-reviewer", WorkerID: "w-local"},
+		Payload:    JobPayload{},
+		Entrypoint: Entrypoint{},
+	})
+	if env["FLOW_WORKER_TOKEN"] != "worker-token" {
+		t.Fatalf("reviewer FLOW_WORKER_TOKEN = %q, want worker token", env["FLOW_WORKER_TOKEN"])
 	}
 }
 
