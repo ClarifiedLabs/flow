@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1793,6 +1794,57 @@ func TestRegistrationLabelsAdvertiseAvailableHarnessesAndDropGenericAgent(t *tes
 	}
 	if labels["agent.harness.claude"] == "true" {
 		t.Fatalf("labels = %#v, did not expect claude", labels)
+	}
+}
+
+func TestRegistrationLabelsReportHarnessAvailability(t *testing.T) {
+	toolDir := t.TempDir()
+	for _, name := range []string{"codex", "harness"} {
+		if err := os.WriteFile(filepath.Join(toolDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatalf("write fake %s: %v", name, err)
+		}
+	}
+	t.Setenv("PATH", toolDir)
+
+	labels, availability := registrationLabelsWithAvailability(map[string]string{"local": "true"})
+	if labels["agent.harness.codex"] != "true" || labels["agent.harness.harness"] != "true" {
+		t.Fatalf("labels = %#v, want codex and harness labels", labels)
+	}
+	statusByName := map[string]flowharness.Availability{}
+	for _, status := range availability {
+		statusByName[status.Name] = status
+	}
+	if !statusByName[flowharness.Codex].Available || !statusByName[flowharness.Harness].Available {
+		t.Fatalf("availability = %#v, want codex and harness available", statusByName)
+	}
+	if statusByName[flowharness.Claude].Available || !strings.Contains(statusByName[flowharness.Claude].Reason, "executable not found") {
+		t.Fatalf("claude availability = %#v, want missing executable", statusByName[flowharness.Claude])
+	}
+}
+
+func TestLogAgentHarnessAvailabilityIncludesDetectedAndMissing(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	logAgentHarnessAvailability([]flowharness.Availability{
+		{Name: flowharness.Harness, Executable: "harness", Path: "/usr/bin/harness", Available: true, Reason: "usability check passed"},
+		{Name: flowharness.Claude, Executable: "claude", Available: false, Reason: "executable not found", Error: "not found"},
+	})
+
+	output := logs.String()
+	for _, want := range []string{
+		"msg=\"flow-worker agent harness detected\"",
+		"harness=harness",
+		"msg=\"flow-worker agent harness not detected\"",
+		"harness=claude",
+		"available=harness",
+		"unavailable=claude",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("log output missing %q:\n%s", want, output)
+		}
 	}
 }
 

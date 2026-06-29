@@ -506,7 +506,8 @@ func reportPersistentSessionProcessExit(ctx context.Context, client *flowclient.
 }
 
 func registerWorkerWithRetry(client *flowclient.Client, cfg config.WorkerConfig, heartbeatTTL time.Duration, stderr io.Writer) (flowworker.Worker, error) {
-	labels := registrationLabels(cfg.Labels)
+	labels, harnessAvailability := registrationLabelsWithAvailability(cfg.Labels)
+	logAgentHarnessAvailability(harnessAvailability)
 	harnessModels := registrationHarnessModels(labels)
 	for {
 		slog.Debug("flow-worker register worker", "worker_id", cfg.WorkerID, "heartbeat_ttl", heartbeatTTL)
@@ -558,6 +559,11 @@ func joinWorker(cfg config.WorkerConfig) (string, error) {
 }
 
 func registrationLabels(configured map[string]string) map[string]string {
+	labels, _ := registrationLabelsWithAvailability(configured)
+	return labels
+}
+
+func registrationLabelsWithAvailability(configured map[string]string) (map[string]string, []flowharness.Availability) {
 	labels := make(map[string]string, len(configured)+4)
 	for key, value := range configured {
 		if strings.TrimSpace(strings.ToLower(key)) == "agent" {
@@ -565,13 +571,49 @@ func registrationLabels(configured map[string]string) map[string]string {
 		}
 		labels[key] = value
 	}
-	for key, value := range flowharness.AvailableAgentLabels() {
-		labels[key] = value
+	availability := make([]flowharness.Availability, 0, len(flowharness.AgentNames()))
+	for _, name := range flowharness.AgentNames() {
+		definition, ok := flowharness.Lookup(name)
+		if !ok {
+			continue
+		}
+		status := definition.Availability()
+		availability = append(availability, status)
+		if status.Available {
+			labels[flowharness.AgentHarnessLabel(definition.Name)] = "true"
+		}
 	}
 	if _, configured := labels["docker"]; !configured && dockerAvailable() {
 		labels["docker"] = "true"
 	}
-	return labels
+	return labels, availability
+}
+
+func logAgentHarnessAvailability(availability []flowharness.Availability) {
+	available := make([]string, 0, len(availability))
+	unavailable := make([]string, 0, len(availability))
+	for _, status := range availability {
+		attrs := []any{
+			"harness", status.Name,
+			"executable", status.Executable,
+			"path", status.Path,
+			"reason", status.Reason,
+		}
+		if status.Error != "" {
+			attrs = append(attrs, "error", status.Error)
+		}
+		if status.Available {
+			available = append(available, status.Name)
+			slog.Info("flow-worker agent harness detected", attrs...)
+			continue
+		}
+		unavailable = append(unavailable, status.Name)
+		slog.Info("flow-worker agent harness not detected", attrs...)
+	}
+	slog.Info("flow-worker agent harness detection summary",
+		"available", strings.Join(available, ","),
+		"unavailable", strings.Join(unavailable, ","),
+	)
 }
 
 func dockerAvailable() bool {

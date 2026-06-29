@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -144,6 +145,16 @@ type Definition struct {
 	TrustPromptForeground   []string
 }
 
+type Availability struct {
+	Name        string
+	DisplayName string
+	Executable  string
+	Path        string
+	Available   bool
+	Reason      string
+	Error       string
+}
+
 // AvailableModels returns the harness's model catalog with every entry stamped
 // with this harness's name and normalized (lowercased harness/sorted/deduped,
 // qualified IDs filled). It returns nil when the harness exposes no models.
@@ -160,6 +171,48 @@ func (d Definition) AvailableModels() ([]Model, error) {
 		stamped[i].Harness = d.Name
 	}
 	return NormalizeModels(stamped)
+}
+
+func (d Definition) Availability() Availability {
+	status := Availability{
+		Name:        d.Name,
+		DisplayName: d.DisplayName,
+		Executable:  d.Executable,
+	}
+	if !d.RequireExecutable {
+		status.Available = true
+		status.Reason = "not required"
+		return status
+	}
+
+	executable, err := exec.LookPath(d.Executable)
+	if err != nil {
+		status.Reason = "executable not found"
+		status.Error = err.Error()
+		return status
+	}
+	status.Path = executable
+	if len(d.UsabilityCheck) == 0 {
+		status.Available = true
+		status.Reason = "executable found"
+		return status
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), availabilityCheckTimeout)
+	defer cancel()
+	err = exec.CommandContext(ctx, executable, d.UsabilityCheck...).Run()
+	if err != nil {
+		status.Reason = "usability check failed"
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			status.Error = "timed out"
+		} else {
+			status.Error = err.Error()
+		}
+		return status
+	}
+	status.Available = true
+	status.Reason = "usability check passed"
+	return status
 }
 
 // flagManaged reports whether arg overrides one of the harness's reserved flags,
@@ -309,19 +362,7 @@ func Lookup(name string) (Definition, bool) {
 }
 
 func (d Definition) Available() bool {
-	if !d.RequireExecutable {
-		return true
-	}
-	executable, err := exec.LookPath(d.Executable)
-	if err != nil {
-		return false
-	}
-	if len(d.UsabilityCheck) == 0 {
-		return true
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), availabilityCheckTimeout)
-	defer cancel()
-	return exec.CommandContext(ctx, executable, d.UsabilityCheck...).Run() == nil
+	return d.Availability().Available
 }
 
 func AgentNames() []string {

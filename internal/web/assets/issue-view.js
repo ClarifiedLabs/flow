@@ -46,7 +46,10 @@ export function renderIssueFormView(app, issue, options = {}) {
   const submitLabel = options.submitLabel || "Save";
   const issueHarnessArgs = normalizeHarnessArgs(value(issue, "harness_args", "HarnessArgs"));
   const agentOptions = (app.harnesses && app.harnesses.agents) || DEFAULT_AGENT_HARNESSES;
-  const agentHarness = resolveHarnessSelection(agentOptions, value(issue, "agent_harness", "AgentHarness") || "codex", mode !== "create");
+  const selectedAgentHarness = value(issue, "agent_harness", "AgentHarness") || "codex";
+  const agentHarness = agentOptions.length || mode !== "create" ? resolveHarnessSelection(agentOptions, selectedAgentHarness, mode !== "create") : "";
+  const harnessLoadError = app.harnessesError ? (app.harnessesError.message || String(app.harnessesError)) : "";
+  const agentOptionsUnavailable = !agentOptions.length && mode === "create";
   const selectionByHarness = {
     codex: parseHarnessSelectionArgs(issueHarnessArgs.codex, harnessModels(agentOptions, "codex"), "codex"),
     claude: parseHarnessSelectionArgs(issueHarnessArgs.claude, harnessModels(agentOptions, "claude"), "claude"),
@@ -90,9 +93,10 @@ export function renderIssueFormView(app, issue, options = {}) {
       </label>
       <label class="issue-field-agent">
         <span>Agent</span>
-        <select name="agent_harness">
-          ${renderHarnessOptions(agentOptions, agentHarness, mode !== "create")}
+        <select name="agent_harness" required${agentOptionsUnavailable ? " disabled" : ""}>
+          ${agentOptionsUnavailable ? `<option value="" selected>No agent harnesses available</option>` : renderHarnessOptions(agentOptions, agentHarness, mode !== "create")}
         </select>
+        ${agentOptionsUnavailable ? `<p class="meta-quiet">${escapeHTML(harnessLoadError ? `Unable to load agent harnesses: ${harnessLoadError}` : "No live agent harnesses are available")}</p>` : ""}
       </label>
       ${renderHarnessModelFields(agentOptions, selectionByHarness, agentHarness)}
       ${renderHarnessArgsField("agent", "Additional Agent Args", agentArgs, harnessDefaultArgs(agentOptions, agentHarness), { values: agentArgsByHarness, defaults: agentDefaultsByHarness })}
@@ -371,7 +375,8 @@ export function bindAgentArgControlsView(app, form) {
 }
 
 export function issueAgentPayloadFromFormView(app, form) {
-  const agentHarness = String(form.elements.agent_harness?.value || "codex").trim() || "codex";
+  const agentHarness = String(form.elements.agent_harness?.value || "").trim();
+  if (!agentHarness) throw new Error("Agent harness is required");
   const rawAgentArgs = String(form.elements.agent_args?.value || "");
   const harnessArgs = { codex: [], claude: [], harness: [] };
   const selectionArgs = harnessSelectionArgsFromFormView(app, form, agentHarness);
@@ -381,7 +386,8 @@ export function issueAgentPayloadFromFormView(app, form) {
 }
 
 export function issueAgentDefaultsFromFormView(app, form) {
-  const agentHarness = String(form.elements.agent_harness?.value || "codex").trim() || "codex";
+  const agentHarness = String(form.elements.agent_harness?.value || "").trim();
+  if (!agentHarness) throw new Error("Agent harness is required");
   const argsField = form.elements.agent_args;
   const savedArgs = parseJSONAttribute(argsField?.dataset?.agentArgsValues, {});
   savedArgs[agentHarness] = String(argsField?.value || "");

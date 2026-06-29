@@ -280,11 +280,13 @@ export class FlowApp extends HTMLElement {
         agents: normalizeHarnessOptions(agents, []),
         consoles: normalizeHarnessOptions(consoles, []),
       };
+      this.harnessesError = null;
     } catch (error) {
       this.harnesses = {
         agents: DEFAULT_AGENT_HARNESSES,
         consoles: DEFAULT_CONSOLE_HARNESSES,
       };
+      this.harnessesError = error;
     }
     return this.harnesses;
   }

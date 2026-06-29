@@ -1054,7 +1054,7 @@ test("new issue route renders project-scoped blank form without fetching an issu
   assert.match(content.innerHTML, /<option value="p-alpha"/);
   assert.match(content.innerHTML, /<option value="p-beta"/);
   assert.match(content.innerHTML, /<input name="title" value="" required>/);
-  assert.match(content.innerHTML, /<select name="agent_harness">/);
+  assert.match(content.innerHTML, /<select name="agent_harness" required>/);
   assert.match(content.innerHTML, /<option value="codex" selected>Codex<\/option>/);
   assert.match(content.innerHTML, /<option value="harness">Harness<\/option>/);
   assert.match(content.innerHTML, /<textarea name="agent_args" rows="2"[^>]*><\/textarea>/);
@@ -1099,6 +1099,17 @@ test("new issue route renders model controls when only Harness agent is enabled"
   assert.match(harness.content.innerHTML, /<select name="harness_reasoning_effort">/);
   assert.match(harness.content.innerHTML, /<option value="unavailable" selected>unavailable<\/option>/);
   assert.doesNotMatch(harness.content.innerHTML, /name="harness_reasoning_mode"/);
+  assert.equal(harness.status.textContent, "");
+});
+
+test("new issue route surfaces harness option load failures", async () => {
+  const harness = await newIssueRouteHarness({ harnessesError: "missing bearer token" });
+
+  await harness.app.load();
+
+  assert.match(harness.content.innerHTML, /<select name="agent_harness" required disabled>/);
+  assert.match(harness.content.innerHTML, /<option value="" selected>No agent harnesses available<\/option>/);
+  assert.match(harness.content.innerHTML, /Unable to load agent harnesses: missing bearer token/);
   assert.equal(harness.status.textContent, "");
 });
 
@@ -4274,6 +4285,13 @@ async function newIssueRouteHarness(options = {}) {
         });
       }
       if (path === "/ui/api/v1/harnesses") {
+        if (options.harnessesError) {
+          return Promise.resolve({
+            ok: false,
+            status: 401,
+            json: () => Promise.resolve({ error: { message: options.harnessesError } }),
+          });
+        }
         return Promise.resolve({
           ok: true,
           json: () => Promise.resolve(harnesses),
