@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -55,6 +56,17 @@ const (
 	envClaudeHookSettings           = "FLOW_CLAUDE_HOOK_SETTINGS"
 	envHarnessHooks                 = "FLOW_HARNESS_HOOKS"
 	defaultUTF8Locale               = "C.UTF-8"
+	hermeticHomeDirName             = "home"
+	hermeticConfigDirName           = "config"
+	hermeticDataDirName             = "data"
+	hermeticCacheDirName            = "cache"
+	hermeticRuntimeDirName          = "runtime"
+	hermeticTempDirName             = "tmp"
+	hermeticCodexDirName            = "codex"
+	hermeticGoBuildCacheDirName     = "go-build-cache"
+	hermeticGoModCacheDirName       = "go-mod-cache"
+	hermeticDockerConfigDirName     = "docker"
+	hermeticNPMCacheDirName         = "npm-cache"
 	// clientHookFlowBinary is the command the installed client hooks shell out
 	// to. The worker exports `flow` on PATH, so the hook resolves it at runtime
 	// rather than baking an absolute path into the worktree.
@@ -738,7 +750,12 @@ func runEntrypointInTmux(ctx context.Context, input tmuxInput) (int, error) {
 		return -1, err
 	}
 	jobDirectory := jobDir(input.Config.WorkDir, input.Job.ID)
-	wrapper, err := writeWrapper(jobDirectory, input.Entrypoint, input.WorkerExitFile, agentTmuxTmpDir, workerPathEnv(input.Entrypoint))
+	if err := ensureHermeticJobEnvironment(input.Config.WorkDir, input.Job.ID); err != nil {
+		return -1, err
+	}
+	entrypointEnv := workerEnv(input)
+	entrypointEnv["TMUX_TMPDIR"] = agentTmuxTmpDir
+	wrapper, err := writeWrapper(jobDirectory, input.Entrypoint, input.WorkerExitFile, entrypointEnv)
 	if err != nil {
 		return -1, err
 	}
@@ -753,8 +770,7 @@ func runEntrypointInTmux(ctx context.Context, input tmuxInput) (int, error) {
 	}
 
 	resetTmuxForJob(input.Config, input.SessionName)
-	command := append([]string{"new-session", "-d", "-s", input.SessionName, "-c", cwd}, tmuxEnv(input)...)
-	command = append(command, "--", shellQuote(bootstrap))
+	command := []string{"new-session", "-d", "-s", input.SessionName, "-c", cwd, "--", envCommand(entrypointEnv, []string{bootstrap})}
 
 	slog.Debug("worker tmux session start", "job_id", input.Job.ID, "session", input.SessionName, "cwd", cwd, "harness", resolveHarness(input))
 	if output, err := tmuxCommandContext(ctx, input.Config, command...).CombinedOutput(); err != nil {
@@ -863,39 +879,24 @@ func privateStartGateFilePath(directory string) (string, error) {
 	return path, nil
 }
 
-func writeWrapper(directory string, entrypoint Entrypoint, workerExitFile string, agentTmuxTmpDir string, pathEnv string) (string, error) {
+func writeWrapper(directory string, entrypoint Entrypoint, workerExitFile string, entrypointEnv map[string]string) (string, error) {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return "", fmt.Errorf("create worker directory: %w", err)
 	}
-	if strings.TrimSpace(agentTmuxTmpDir) == "" {
-		return "", errors.New("agent tmux tmpdir is required")
-	}
 	path := filepath.Join(directory, "run-entrypoint.sh")
-	var command strings.Builder
+	var argv []string
 	if entrypoint.Shell {
-		command.WriteString("/bin/sh -c ")
-		command.WriteString(shellQuote(entrypoint.Argv[0]))
+		argv = []string{"/bin/sh", "-c", entrypoint.Argv[0]}
 	} else {
-		for i, arg := range entrypoint.Argv {
-			if i > 0 {
-				command.WriteByte(' ')
-			}
-			command.WriteString(shellQuote(arg))
-		}
+		argv = append([]string(nil), entrypoint.Argv...)
 	}
-	// The pane inherits TMUX pointing at the job's private tmux server. Anything
-	// the entrypoint runs — including stale checkouts of this repository's own
-	// test suite — could reach that server through it and kill the session that
-	// hosts the job. Strip the inherited identity and point socketless tmux
-	// clients at an empty per-job TMUX_TMPDIR so they cannot reach the job's
-	// server or the operator's default server.
+	command := envCommand(entrypointEnv, argv)
+	// The pane inherits tmux's server environment, but the configured entrypoint
+	// runs through env -i with Flow's computed job environment. That keeps host
+	// home/config/cache variables out of the job while preserving the wrapper's
+	// exit-code reporting after the command returns.
 	script := `#!/bin/sh
-unset TMUX TMUX_PANE
-TMUX_TMPDIR=` + shellQuote(agentTmuxTmpDir) + `
-export TMUX_TMPDIR
-PATH=` + shellQuote(pathEnv) + `
-export PATH
-` + command.String() + `
+` + command + `
 code=$?
 worker_exit_file=` + shellQuote(workerExitFile) + `
 tmp="${worker_exit_file}.$$"
@@ -997,48 +998,22 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
-func tmuxEnv(input tmuxInput) []string {
-	values := workerEnv(input)
-	args := make([]string, 0, len(values)*2)
-	for key, value := range values {
-		args = append(args, "-e", key+"="+value)
+func envCommand(env map[string]string, argv []string) string {
+	var command strings.Builder
+	command.WriteString("/usr/bin/env -i")
+	for _, assignment := range envAssignments(env) {
+		command.WriteByte(' ')
+		command.WriteString(shellQuote(assignment))
 	}
-
-	return args
+	for _, arg := range argv {
+		command.WriteByte(' ')
+		command.WriteString(shellQuote(arg))
+	}
+	return command.String()
 }
 
 func workerEnv(input tmuxInput) map[string]string {
-	env := map[string]string{}
-	for key, value := range input.Entrypoint.Env {
-		if validEnvKey(key) {
-			env[key] = value
-		}
-	}
-	if _, ok := env["PATH"]; !ok {
-		if path := os.Getenv("PATH"); strings.TrimSpace(path) != "" {
-			env["PATH"] = path
-		}
-	}
-	for _, key := range []string{
-		"BASH_ENV",
-		"CARGO_HOME",
-		"CODEX_HOME",
-		"DOCKER_HOST",
-		"JAVA_HOME",
-		"LANG",
-		"LC_ALL",
-		"LC_CTYPE",
-		"NVM_DIR",
-		"RUSTUP_HOME",
-		"XDG_RUNTIME_DIR",
-	} {
-		if _, ok := env[key]; !ok {
-			if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-				env[key] = value
-			}
-		}
-	}
-	ensureDefaultUTF8Locale(env)
+	env := entrypointEnvWithHermeticDefaults(input)
 	scrubWorkerDeploymentEnv(env)
 	reserved := map[string]string{
 		"FLOW_COORDINATOR_URL":  input.Config.CoordinatorURL,
@@ -1112,6 +1087,71 @@ func workerEnv(input tmuxInput) map[string]string {
 	}
 
 	return env
+}
+
+func entrypointEnvWithHermeticDefaults(input tmuxInput) map[string]string {
+	env := hermeticJobEnv(input.Config.WorkDir, input.Job.ID)
+	for key, value := range input.Entrypoint.Env {
+		if validEnvKey(key) {
+			env[key] = value
+		}
+	}
+	if _, ok := env["PATH"]; !ok {
+		if path := os.Getenv("PATH"); strings.TrimSpace(path) != "" {
+			env["PATH"] = path
+		}
+	}
+	ensureDefaultUTF8Locale(env)
+	return env
+}
+
+func hermeticJobEnv(workDir string, jobID string) map[string]string {
+	root := jobDir(workDir, jobID)
+	tempDir := filepath.Join(root, hermeticTempDirName)
+	return map[string]string{
+		"HOME":             filepath.Join(root, hermeticHomeDirName),
+		"XDG_CONFIG_HOME":  filepath.Join(root, hermeticConfigDirName),
+		"XDG_DATA_HOME":    filepath.Join(root, hermeticDataDirName),
+		"XDG_CACHE_HOME":   filepath.Join(root, hermeticCacheDirName),
+		"XDG_RUNTIME_DIR":  filepath.Join(root, hermeticRuntimeDirName),
+		"TMPDIR":           tempDir,
+		"TMP":              tempDir,
+		"TEMP":             tempDir,
+		"CODEX_HOME":       filepath.Join(root, hermeticCodexDirName),
+		"GOCACHE":          filepath.Join(root, hermeticGoBuildCacheDirName),
+		"GOMODCACHE":       filepath.Join(root, hermeticGoModCacheDirName),
+		"DOCKER_CONFIG":    filepath.Join(root, hermeticDockerConfigDirName),
+		"NPM_CONFIG_CACHE": filepath.Join(root, hermeticNPMCacheDirName),
+	}
+}
+
+func ensureHermeticJobEnvironment(workDir string, jobID string) error {
+	seen := map[string]bool{}
+	for _, path := range hermeticJobEnv(workDir, jobID) {
+		if strings.TrimSpace(path) == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return fmt.Errorf("create hermetic job environment directory %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func envAssignments(env map[string]string) []string {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		if validEnvKey(key) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	assignments := make([]string, 0, len(keys))
+	for _, key := range keys {
+		assignments = append(assignments, key+"="+env[key])
+	}
+	return assignments
 }
 
 func scrubWorkerDeploymentEnv(env map[string]string) {
@@ -1248,7 +1288,7 @@ func prepareCodexHookConfig(input tmuxInput) (string, string, error) {
 	if err != nil {
 		return "", "", fmt.Errorf("render codex hook profile: %w", err)
 	}
-	home := codexHome()
+	home := entrypointEnvWithHermeticDefaults(input)["CODEX_HOME"]
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return "", "", fmt.Errorf("create codex home: %w", err)
 	}
@@ -1257,18 +1297,6 @@ func prepareCodexHookConfig(input tmuxInput) (string, string, error) {
 		return "", "", fmt.Errorf("write codex hook profile: %w", err)
 	}
 	return flowharness.CodexHookProfileName, definition.HookEnvVar, nil
-}
-
-// codexHome resolves codex's config home the way codex does: $CODEX_HOME, or
-// ~/.codex when unset.
-func codexHome() string {
-	if home := strings.TrimSpace(os.Getenv("CODEX_HOME")); home != "" {
-		return home
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".codex")
-	}
-	return ".codex"
 }
 
 // writeFileAtomic writes data to path via a temp file in the same directory and a
@@ -1804,11 +1832,7 @@ func renderInitialPrompt(ctx context.Context, input tmuxInput) (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(promptCtx, resolveFlowBinary(input.Entrypoint), "fetch-prompt", "--harness", harness)
 	cmd.Dir = cwd
-	env := os.Environ()
-	for key, value := range workerEnv(input) {
-		env = append(env, key+"="+value)
-	}
-	cmd.Env = tmuxClientEnv(env)
+	cmd.Env = tmuxClientEnv(envAssignments(workerEnv(input)))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		details := strings.TrimSpace(string(output))

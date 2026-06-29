@@ -764,6 +764,95 @@ func TestWorkerEnvIncludesSessionToken(t *testing.T) {
 	}
 }
 
+func TestWorkerEnvUsesHermeticJobStateDefaults(t *testing.T) {
+	workDir := filepath.Join(t.TempDir(), "work")
+	t.Setenv("HOME", "/host/home")
+	t.Setenv("XDG_CONFIG_HOME", "/host/config")
+	t.Setenv("XDG_DATA_HOME", "/host/data")
+	t.Setenv("XDG_CACHE_HOME", "/host/cache")
+	t.Setenv("XDG_RUNTIME_DIR", "/host/runtime")
+	t.Setenv("CODEX_HOME", "/host/codex")
+	t.Setenv("GOCACHE", "/host/go-build-cache")
+	t.Setenv("GOMODCACHE", "/host/go-mod-cache")
+	t.Setenv("DOCKER_CONFIG", "/host/docker")
+	t.Setenv("NPM_CONFIG_CACHE", "/host/npm-cache")
+	t.Setenv("BASH_ENV", "/host/bash-env")
+	t.Setenv("CARGO_HOME", "/host/cargo")
+	t.Setenv("DOCKER_HOST", "unix:///host/docker.sock")
+	t.Setenv("JAVA_HOME", "/host/java")
+	t.Setenv("NVM_DIR", "/host/nvm")
+	t.Setenv("RUSTUP_HOME", "/host/rustup")
+	t.Setenv("PATH", "/worker/bin:/usr/bin")
+
+	env := workerEnv(tmuxInput{
+		Config:     workerConfig(workDir, "file:///tmp/exchange.git"),
+		Job:        Job{ID: "j-hermetic", Role: RoleCI},
+		Lease:      Lease{ID: "l-hermetic", WorkerID: "w-local"},
+		Entrypoint: Entrypoint{},
+	})
+	root := filepath.Join(workDir, "jobs", "j-hermetic")
+	want := map[string]string{
+		"HOME":             filepath.Join(root, hermeticHomeDirName),
+		"XDG_CONFIG_HOME":  filepath.Join(root, hermeticConfigDirName),
+		"XDG_DATA_HOME":    filepath.Join(root, hermeticDataDirName),
+		"XDG_CACHE_HOME":   filepath.Join(root, hermeticCacheDirName),
+		"XDG_RUNTIME_DIR":  filepath.Join(root, hermeticRuntimeDirName),
+		"TMPDIR":           filepath.Join(root, hermeticTempDirName),
+		"TMP":              filepath.Join(root, hermeticTempDirName),
+		"TEMP":             filepath.Join(root, hermeticTempDirName),
+		"CODEX_HOME":       filepath.Join(root, hermeticCodexDirName),
+		"GOCACHE":          filepath.Join(root, hermeticGoBuildCacheDirName),
+		"GOMODCACHE":       filepath.Join(root, hermeticGoModCacheDirName),
+		"DOCKER_CONFIG":    filepath.Join(root, hermeticDockerConfigDirName),
+		"NPM_CONFIG_CACHE": filepath.Join(root, hermeticNPMCacheDirName),
+		"PATH":             "/worker/bin:/usr/bin",
+	}
+	for key, wantValue := range want {
+		if env[key] != wantValue {
+			t.Fatalf("%s = %q, want %q", key, env[key], wantValue)
+		}
+	}
+	for _, key := range []string{"BASH_ENV", "CARGO_HOME", "DOCKER_HOST", "JAVA_HOME", "NVM_DIR", "RUSTUP_HOME"} {
+		if _, ok := env[key]; ok {
+			t.Fatalf("%s leaked into job env as %q", key, env[key])
+		}
+	}
+	if err := ensureHermeticJobEnvironment(workDir, "j-hermetic"); err != nil {
+		t.Fatalf("ensure hermetic job environment: %v", err)
+	}
+	for key, path := range hermeticJobEnv(workDir, "j-hermetic") {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s dir %s: %v", key, path, err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("%s path %s is not a directory", key, path)
+		}
+	}
+
+	overrideHome := filepath.Join(t.TempDir(), "home")
+	overrideCodex := filepath.Join(t.TempDir(), "codex")
+	env = workerEnv(tmuxInput{
+		Config: workerConfig(workDir, "file:///tmp/exchange.git"),
+		Job:    Job{ID: "j-explicit-env", Role: RoleCI},
+		Lease:  Lease{ID: "l-explicit-env", WorkerID: "w-local"},
+		Entrypoint: Entrypoint{Env: map[string]string{
+			"HOME":       overrideHome,
+			"CODEX_HOME": overrideCodex,
+			"PATH":       "/entrypoint/bin",
+		}},
+	})
+	if env["HOME"] != overrideHome {
+		t.Fatalf("explicit HOME = %q, want %q", env["HOME"], overrideHome)
+	}
+	if env["CODEX_HOME"] != overrideCodex {
+		t.Fatalf("explicit CODEX_HOME = %q, want %q", env["CODEX_HOME"], overrideCodex)
+	}
+	if env["PATH"] != "/entrypoint/bin" {
+		t.Fatalf("explicit PATH = %q, want /entrypoint/bin", env["PATH"])
+	}
+}
+
 func TestWorkerEnvDefaultsUTF8LocaleForAgentTerminal(t *testing.T) {
 	t.Setenv("LANG", "")
 	t.Setenv("LC_ALL", "")
@@ -977,10 +1066,14 @@ func TestPrepareHookConfigWritesCodexProfile(t *testing.T) {
 	if envVar != "FLOW_CODEX_HOOK_PROFILE" {
 		t.Fatalf("env var = %q, want FLOW_CODEX_HOOK_PROFILE", envVar)
 	}
-	profilePath := filepath.Join(codexHomeDir, flowharness.CodexHookProfileName+".config.toml")
+	profileName := flowharness.CodexHookProfileName + ".config.toml"
+	profilePath := filepath.Join(hermeticJobEnv(workDir, "j-codex")["CODEX_HOME"], profileName)
 	data, err := os.ReadFile(profilePath)
 	if err != nil {
 		t.Fatalf("read codex profile: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(codexHomeDir, profileName)); !os.IsNotExist(err) {
+		t.Fatalf("host CODEX_HOME profile stat err = %v, want not exist", err)
 	}
 	def, ok := flowharness.Lookup(flowharness.Codex)
 	if !ok {

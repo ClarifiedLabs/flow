@@ -1,32 +1,7 @@
 name: ci
 kind: ci
-phase: critique
-required: true
 entrypoint:
   argv:
-    - |
-      set -eu
-      tmp="$(mktemp -d)"
-      cleanup() {
-        status=$?
-        chmod -R u+w "$tmp" 2>/dev/null || true
-        rm -rf "$tmp" 2>/dev/null || true
-        exit "$status"
-      }
-      trap cleanup EXIT
-      mkdir -p "$tmp/home" "$tmp/config" "$tmp/data" "$tmp/codex" "$tmp/gocache" "$tmp/gomodcache"
-      env -i \
-        PATH="$PATH" \
-        HOME="$tmp/home" \
-        XDG_CONFIG_HOME="$tmp/config" \
-        XDG_DATA_HOME="$tmp/data" \
-        CODEX_HOME="$tmp/codex" \
-        GOCACHE="$tmp/gocache" \
-        GOMODCACHE="$tmp/gomodcache" \
-        TMUX_TMPDIR="${TMUX_TMPDIR:-}" \
-        LANG="${LANG:-C.UTF-8}" \
-        LC_ALL="${LC_ALL:-C.UTF-8}" \
-        make ci
-  shell: true
+    - make
+    - ci
   cwd: "."
-requires: []
