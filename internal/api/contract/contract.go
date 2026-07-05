@@ -191,10 +191,6 @@ type SessionMessageDeliveredRequest struct {
 	LeaseID string `json:"lease_id"`
 }
 
-type PlanRejectRequest struct {
-	Comments string `json:"comments"`
-}
-
 type AttentionReplyRequest struct {
 	Message     string `json:"message"`
 	StatusLogID *int64 `json:"status_log_id,omitempty"`

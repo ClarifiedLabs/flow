@@ -444,8 +444,6 @@ func runIssue(args []string, stdout, stderr io.Writer) int {
 		return runIssueLink(args[1:], stdout, stderr)
 	case "unlink":
 		return runIssueUnlink(args[1:], stdout, stderr)
-	case "plan":
-		return runIssuePlan(args[1:], stdout, stderr)
 	case "reply":
 		return runIssueReply(args[1:], stdout, stderr)
 	default:
@@ -630,72 +628,6 @@ func runIssueShow(args []string, stdout, stderr io.Writer) int {
 	}
 
 	printIssueDetail(stdout, issue)
-	return 0
-}
-
-func runIssuePlan(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: flow issue plan approve|reject [flags] ISSUE_ID")
-		return 2
-	}
-	switch args[0] {
-	case "approve":
-		return runIssuePlanApprove(args[1:], stdout, stderr)
-	case "reject":
-		return runIssuePlanReject(args[1:], stdout, stderr)
-	default:
-		fmt.Fprintf(stderr, "unknown issue plan command: %s\n", args[0])
-		return 2
-	}
-}
-
-func runIssuePlanApprove(args []string, stdout, stderr io.Writer) int {
-	parsed, issueRef, code := parseScopedIssueAPICommand(args, stderr, "issue plan approve", 1, "usage: flow issue plan approve [flags] ISSUE_ID")
-	if code != 0 {
-		return code
-	}
-	issue, err := parsed.client.ApprovePlan(issueRef)
-	if err != nil {
-		fmt.Fprintf(stderr, "approve plan: %v\n", err)
-		return 1
-	}
-	printIssueLine(stdout, issue)
-	return 0
-}
-
-func runIssuePlanReject(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("issue plan reject", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	apiFlags := addAPIFlags(flags)
-	var comments string
-	flags.StringVar(&comments, "comments", "", "rejection comments")
-	if err := flags.Parse(args); err != nil {
-		return 2
-	}
-	if flags.NArg() < 1 {
-		fmt.Fprintln(stderr, "usage: flow issue plan reject [flags] ISSUE_ID [COMMENTS]")
-		return 2
-	}
-	if strings.TrimSpace(comments) == "" && flags.NArg() > 1 {
-		comments = strings.TrimSpace(strings.Join(flags.Args()[1:], " "))
-	}
-	if strings.TrimSpace(comments) == "" {
-		fmt.Fprintln(stderr, "rejection comments are required")
-		return 2
-	}
-	applySessionEnvironment(apiFlags, nil)
-	client, err := newAPIClient(apiFlags)
-	if err != nil {
-		fmt.Fprintf(stderr, "create client: %v\n", err)
-		return 1
-	}
-	client, issueRef := scopeClientForRef(client, flags.Arg(0))
-	issue, err := client.RejectPlan(issueRef, flowclient.RejectPlanInput{Comments: comments})
-	if err != nil {
-		fmt.Fprintf(stderr, "reject plan: %v\n", err)
-		return 1
-	}
-	printIssueLine(stdout, issue)
 	return 0
 }
 
@@ -2564,7 +2496,7 @@ func printUsage(out io.Writer) {
   flow issue attach ISSUE_ID --file PATH [--stage initial|author|reviewer|verifier]
   flow issue list
   flow issue show [--project PROJECT] ISSUE_ID|PROJECT/ISSUE_ID
-  flow issue plan approve|reject ISSUE_ID
+  flow phase approve|request-changes ISSUE_ID
   flow issue reply ISSUE_ID MESSAGE
   flow issue state ISSUE_ID triage|backlog|up_next|closed|rejected
   flow board
@@ -2605,8 +2537,6 @@ func printIssueUsage(out io.Writer) {
   flow issue list
   flow issue show [flags] ISSUE_ID
   flow issue edit [flags] ISSUE_ID
-  flow issue plan approve [flags] ISSUE_ID
-  flow issue plan reject [flags] ISSUE_ID [COMMENTS]
   flow issue reply [flags] ISSUE_ID [MESSAGE]
   flow issue schedule [flags] ISSUE_ID backlog|up_next
   flow issue state [flags] ISSUE_ID triage|backlog|up_next|closed|rejected

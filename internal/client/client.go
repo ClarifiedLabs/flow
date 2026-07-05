@@ -1062,25 +1062,6 @@ func (c *Client) MarkSessionMessageDelivered(ctx context.Context, input MarkSess
 	return response.Message, nil
 }
 
-func (c *Client) ApprovePlan(issueID string) (coordinator.Issue, error) {
-	var response issueResponse
-	if err := c.do(http.MethodPost, "/v1/issues/"+url.PathEscape(issueID)+"/plan/approve", map[string]string{}, nil, &response); err != nil {
-		return coordinator.Issue{}, err
-	}
-
-	return response.Issue, nil
-}
-
-func (c *Client) RejectPlan(issueID string, input RejectPlanInput) (coordinator.Issue, error) {
-	var response issueResponse
-	request := planRejectRequest{Comments: input.Comments}
-	if err := c.do(http.MethodPost, "/v1/issues/"+url.PathEscape(issueID)+"/plan/reject", request, nil, &response); err != nil {
-		return coordinator.Issue{}, err
-	}
-
-	return response.Issue, nil
-}
-
 func (c *Client) ReplyToIssue(issueID string, input ReplyToIssueInput) (coordinator.SessionMessage, bool, error) {
 	var response sessionMessageResponse
 	request := attentionReplyRequest{Message: input.Message, StatusLogID: input.StatusLogID}
@@ -1572,10 +1553,6 @@ type MarkSessionMessageDeliveredInput struct {
 	LeaseID   string
 }
 
-type RejectPlanInput struct {
-	Comments string
-}
-
 type ReplyToIssueInput struct {
 	Message     string
 	StatusLogID *int64
@@ -1622,7 +1599,6 @@ type readySessionRequest = contract.ReadySessionRequest
 type sessionStatusRequest = contract.SessionStatusRequest
 type sessionProcessExitRequest = contract.SessionProcessExitRequest
 type sessionMessageDeliveredRequest = contract.SessionMessageDeliveredRequest
-type planRejectRequest = contract.PlanRejectRequest
 type attentionReplyRequest = contract.AttentionReplyRequest
 type sessionTerminalRequest = contract.SessionTerminalRequest
 type jobTerminalRequest = contract.JobTerminalRequest
