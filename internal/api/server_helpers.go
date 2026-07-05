@@ -526,6 +526,7 @@ type uiIssueCard struct {
 	BlockingReason        string                         `json:"blocking_reason,omitempty"`
 	PrimaryAction         string                         `json:"primary_action,omitempty"`
 	CrashRetryAvailable   bool                           `json:"crash_retry_available,omitempty"`
+	Flow                  *issueFlowStatus               `json:"flow,omitempty"`
 }
 
 type uiIssueDetail struct {

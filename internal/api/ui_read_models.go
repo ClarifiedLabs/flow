@@ -26,6 +26,7 @@ func (s *projectServer) buildUIIssueCards(ctx context.Context, issues []coordina
 	cards := make(map[string]uiIssueCard, len(issues))
 	for _, issue := range issues {
 		card := uiIssueCard{IssueID: issue.ID}
+		card.Flow = s.issueFlowStatus(ctx, issue.ID)
 		tags, err := s.issues.TagsForIssue(ctx, issue.ID)
 		if err != nil {
 			return nil, fmt.Errorf("load tags for %s: %w", issue.ID, err)
