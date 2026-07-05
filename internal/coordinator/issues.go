@@ -73,6 +73,7 @@ type Issue struct {
 	PlanApprovedAt      *time.Time       `json:"plan_approved_at,omitempty"`
 	AgentHarness        string           `json:"agent_harness"`
 	HarnessArgs         flowharness.Args `json:"harness_args"`
+	FlowID              string           `json:"flow_id,omitempty"`
 	CreatedBy           Actor
 	CreatedBySessionID  *string
 	SourceIssueID       *string
@@ -112,6 +113,7 @@ type CreateIssueInput struct {
 	PlanMode            bool
 	AgentHarness        string
 	HarnessArgs         flowharness.Args
+	FlowID              string
 	CreatedBy           Actor
 	CreatedBySessionID  *string
 	SourceIssueID       *string
@@ -149,6 +151,7 @@ type EditIssueInput struct {
 	PlanMode            *bool
 	AgentHarness        *string
 	HarnessArgs         *flowharness.ArgsPatch
+	FlowID              *string
 }
 
 type IssueFilter struct {
@@ -286,13 +289,14 @@ INSERT INTO issues (
 	plan_mode,
 	agent_harness,
 	harness_args_json,
+	flow_id,
 	created_by,
 	created_by_session_id,
 	source_issue_id,
 	source_change_id,
 	created_at,
 	updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id,
 		issueInput.Title,
 		issueInput.Body,
@@ -305,6 +309,7 @@ INSERT INTO issues (
 		boolInt(issueInput.PlanMode),
 		issueInput.AgentHarness,
 		harnessArgsJSON,
+		sqlitex.NullableNonEmptyString(issueInput.FlowID),
 		string(issueInput.CreatedBy),
 		nullableStringValue(issueInput.CreatedBySessionID),
 		nullableStringValue(issueInput.SourceIssueID),
@@ -374,6 +379,7 @@ SELECT
 	plan_approved_at,
 	agent_harness,
 	harness_args_json,
+	flow_id,
 	created_by,
 	created_by_session_id,
 	source_issue_id,
@@ -412,6 +418,7 @@ const issueSelectColumns = `
 	i.plan_approved_at,
 	i.agent_harness,
 	i.harness_args_json,
+	i.flow_id,
 	i.created_by,
 	i.created_by_session_id,
 	i.source_issue_id,
@@ -632,6 +639,9 @@ func (s *IssueService) EditIssue(ctx context.Context, id string, input EditIssue
 		}
 		current.HarnessArgs = current.HarnessArgs.ApplyPatch(patch)
 	}
+	if input.FlowID != nil {
+		current.FlowID = strings.TrimSpace(*input.FlowID)
+	}
 	harnessArgsJSON, err := marshalHarnessArgs(current.HarnessArgs)
 	if err != nil {
 		return Issue{}, err
@@ -654,6 +664,7 @@ SET
 	plan_approved_at = ?,
 	agent_harness = ?,
 	harness_args_json = ?,
+	flow_id = ?,
 	updated_at = ?
 WHERE id = ?`,
 		current.Title,
@@ -670,6 +681,7 @@ WHERE id = ?`,
 		nullableTimeValue(current.PlanApprovedAt),
 		current.AgentHarness,
 		harnessArgsJSON,
+		sqlitex.NullableNonEmptyString(current.FlowID),
 		formatTime(s.now().UTC()),
 		id,
 	); err != nil {
@@ -1399,6 +1411,7 @@ SELECT
 	blocker.plan_approved_at,
 	blocker.agent_harness,
 	blocker.harness_args_json,
+	blocker.flow_id,
 	blocker.created_by,
 	blocker.created_by_session_id,
 	blocker.source_issue_id,
@@ -1732,6 +1745,7 @@ func scanIssue(scanner issueScanner) (Issue, error) {
 	var planApprovedAt sql.NullString
 	var agentHarness string
 	var harnessArgsJSON string
+	var flowID sql.NullString
 	var createdBy string
 	var createdBySessionID sql.NullString
 	var sourceIssueID sql.NullString
@@ -1758,6 +1772,7 @@ func scanIssue(scanner issueScanner) (Issue, error) {
 		&planApprovedAt,
 		&agentHarness,
 		&harnessArgsJSON,
+		&flowID,
 		&createdBy,
 		&createdBySessionID,
 		&sourceIssueID,
@@ -1789,6 +1804,9 @@ func scanIssue(scanner issueScanner) (Issue, error) {
 	}
 	if planSessionID.Valid {
 		issue.PlanSessionID = planSessionID.String
+	}
+	if flowID.Valid {
+		issue.FlowID = flowID.String
 	}
 	if planSubmittedAt.Valid {
 		parsedPlanSubmittedAt, err := parseTime(planSubmittedAt.String)

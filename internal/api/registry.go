@@ -25,6 +25,8 @@ type ProjectBundle struct {
 	Project          coordinator.Project
 	Store            *flowdb.Store
 	Issues           *coordinator.IssueService
+	AgentDefs        *coordinator.AgentDefService
+	Flows            *coordinator.FlowService
 	Checks           *coordinator.CheckService
 	Threads          *coordinator.ThreadService
 	Sessions         *coordinator.SessionService
@@ -162,6 +164,11 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 
 	db := store.DB()
 	issues := coordinator.NewIssueService(db)
+	agentDefs := coordinator.NewAgentDefService(db)
+	flows := coordinator.NewFlowService(db)
+	if err := flows.SeedDefaults(ctx); err != nil {
+		return nil, fmt.Errorf("seed default flows for project %s: %w", project.ID, err)
+	}
 	checks := coordinator.NewCheckService(db)
 	threads := coordinator.NewThreadService(db)
 	queue := worker.NewService(db)
@@ -192,6 +199,8 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 		Project:          project,
 		Store:            store,
 		Issues:           issues,
+		AgentDefs:        agentDefs,
+		Flows:            flows,
 		Checks:           checks,
 		Threads:          threads,
 		Sessions:         sessions,

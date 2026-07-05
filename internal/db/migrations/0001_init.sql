@@ -15,6 +15,48 @@ CREATE TABLE id_allocators (
 INSERT INTO id_allocators (name, next_number)
 VALUES ('issue', 1), ('issue_attachment', 1);
 
+CREATE TABLE agent_defs (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL UNIQUE CHECK (length(trim(name)) > 0),
+	harness TEXT NOT NULL CHECK (harness IN ('codex', 'claude', 'harness')),
+	model TEXT NOT NULL DEFAULT '',
+	reasoning_effort TEXT NOT NULL DEFAULT '',
+	prompt TEXT NOT NULL DEFAULT '',
+	builtin INTEGER NOT NULL DEFAULT 0 CHECK (builtin IN (0, 1)),
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+
+CREATE TABLE flows (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL UNIQUE CHECK (length(trim(name)) > 0),
+	description TEXT NOT NULL DEFAULT '',
+	fix_agent_def_id TEXT REFERENCES agent_defs(id) ON DELETE RESTRICT,
+	builtin INTEGER NOT NULL DEFAULT 0 CHECK (builtin IN (0, 1)),
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+
+CREATE TABLE flow_phases (
+	id TEXT PRIMARY KEY,
+	flow_id TEXT NOT NULL REFERENCES flows(id) ON DELETE CASCADE,
+	position INTEGER NOT NULL CHECK (position >= 0),
+	name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+	agent_def_id TEXT NOT NULL REFERENCES agent_defs(id) ON DELETE RESTRICT,
+	gate TEXT NOT NULL CHECK (gate IN ('auto', 'human')),
+	UNIQUE (flow_id, position)
+);
+
+CREATE TABLE flow_review_agents (
+	id TEXT PRIMARY KEY,
+	flow_id TEXT NOT NULL REFERENCES flows(id) ON DELETE CASCADE,
+	role TEXT NOT NULL CHECK (role IN ('reviewer', 'verifier')),
+	agent_def_id TEXT NOT NULL REFERENCES agent_defs(id) ON DELETE RESTRICT,
+	position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+	required INTEGER NOT NULL DEFAULT 1 CHECK (required IN (0, 1)),
+	UNIQUE (flow_id, role, position)
+);
+
 CREATE TABLE issues (
 	id TEXT PRIMARY KEY,
 	title TEXT NOT NULL CHECK (length(trim(title)) > 0),
@@ -40,7 +82,34 @@ CREATE TABLE issues (
 	plan_session_id TEXT,
 	plan_submitted_at TEXT,
 	plan_approved_at TEXT,
+	flow_id TEXT REFERENCES flows(id) ON DELETE SET NULL,
 	CHECK ((triage_state != 'rejected') OR (schedule_state = 'closed' AND closed_at IS NOT NULL))
+);
+
+-- The issue's frozen position within its flow. flow_snapshot_json is the flow
+-- resolved at schedule time (ordered phases with agent-def snapshots, review
+-- set, fix agent); editing or deleting a flow never touches in-flight issues.
+CREATE TABLE issue_flow_cursor (
+	issue_id TEXT PRIMARY KEY REFERENCES issues(id) ON DELETE CASCADE,
+	flow_snapshot_json TEXT NOT NULL,
+	phase_index INTEGER NOT NULL DEFAULT 0 CHECK (phase_index >= 0),
+	phase_state TEXT NOT NULL CHECK (phase_state IN ('pending', 'running', 'awaiting_approval', 'completed')),
+	gate_feedback TEXT NOT NULL DEFAULT '',
+	updated_at TEXT NOT NULL
+);
+
+-- Per-work-phase handoff artifacts (generalizes the former plan body): written
+-- by the phase's agent at flow ready, shown at human gates, and injected into
+-- the next phase's prompt.
+CREATE TABLE issue_phase_handoffs (
+	issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	phase_index INTEGER NOT NULL CHECK (phase_index >= 0),
+	phase_name TEXT NOT NULL,
+	content TEXT NOT NULL DEFAULT '',
+	head_sha TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY (issue_id, phase_index)
 );
 
 CREATE TABLE issue_relations (
@@ -396,6 +465,7 @@ SELECT
 	END AS review_state
 FROM issues i;
 
+CREATE INDEX idx_issues_flow_id ON issues(flow_id);
 CREATE INDEX idx_issues_schedule_state ON issues(schedule_state);
 CREATE INDEX idx_issues_triage_state ON issues(triage_state);
 CREATE INDEX idx_issues_source_issue_id ON issues(source_issue_id);
