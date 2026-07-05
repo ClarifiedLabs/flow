@@ -279,28 +279,20 @@ func TestServerIssueLifecycleAndBoard(t *testing.T) {
 	server := fixture.Server
 
 	createResponse := issueResponse{}
-	doJSONRequest(t, server, http.MethodPost, "/v1/issues", createIssueRequest{Title: "API issue", PlanMode: true}, http.StatusCreated, &createResponse)
+	doJSONRequest(t, server, http.MethodPost, "/v1/issues", createIssueRequest{Title: "API issue"}, http.StatusCreated, &createResponse)
 	if createResponse.Issue.ID != "i-0001" {
 		t.Fatalf("created issue ID = %q", createResponse.Issue.ID)
-	}
-	if !createResponse.Issue.PlanMode {
-		t.Fatalf("created issue PlanMode = false, want true")
 	}
 
 	title := "Renamed API issue"
 	priority := 7
-	planMode := false
 	editResponse := issueResponse{}
 	doJSONRequest(t, server, http.MethodPatch, "/v1/issues/"+createResponse.Issue.ID, editIssueRequest{
 		Title:    &title,
 		Priority: &priority,
-		PlanMode: &planMode,
 	}, http.StatusOK, &editResponse)
 	if editResponse.Issue.Title != title || editResponse.Issue.Priority != priority {
 		t.Fatalf("edited issue mismatch: %+v", editResponse.Issue)
-	}
-	if editResponse.Issue.PlanMode {
-		t.Fatalf("edited issue PlanMode = true, want false")
 	}
 
 	scheduleResponse := issueResponse{}
@@ -2261,7 +2253,7 @@ func TestSessionSignalActivityTouchesAgentActivityOnly(t *testing.T) {
 func TestSessionSignalNativeHookWorkingBypassesHumanWaitWatchdogLatch(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Native hook resume issue", PlanMode: true})
+	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Native hook resume issue"})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
@@ -2297,7 +2289,7 @@ func TestSessionSignalNativeHookWorkingBypassesHumanWaitWatchdogLatch(t *testing
 func TestSessionSignalNativeHookLoopIsSuppressed(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Native hook loop issue", PlanMode: true})
+	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Native hook loop issue"})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
@@ -2357,7 +2349,7 @@ func TestSessionSignalNativeHookLoopIsSuppressed(t *testing.T) {
 func TestSessionSignalWatchdogWorkingSuppressedByHumanWaitLatch(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Watchdog signal latch issue", PlanMode: true})
+	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Watchdog signal latch issue"})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
@@ -2398,7 +2390,7 @@ func TestSessionSignalRejectsInvalidSignal(t *testing.T) {
 func TestPlanStatusMovesSessionToNeedsAttentionThenWorkingResumes(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Plan approval issue", PlanMode: true})
+	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Plan approval issue"})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
@@ -2420,13 +2412,6 @@ func TestPlanStatusMovesSessionToNeedsAttentionThenWorkingResumes(t *testing.T) 
 	if session.RuntimeState != coordinator.SessionWaiting {
 		t.Fatalf("session state after plan status = %q, want waiting", session.RuntimeState)
 	}
-	afterPlanStatus, err := fixture.Issues.GetIssue(ctx, issue.ID)
-	if err != nil {
-		t.Fatalf("get issue after plan status: %v", err)
-	}
-	if afterPlanStatus.PlanApprovedAt != nil {
-		t.Fatalf("PlanApprovedAt after plan status = %v, want nil", afterPlanStatus.PlanApprovedAt)
-	}
 	if got := countTransitions(t, fixture, issue.ID, string(lifecycle.EventSessionStateChanged)); got != 1 {
 		t.Fatalf("session_state_changed transitions = %d, want 1", got)
 	}
@@ -2445,13 +2430,6 @@ func TestPlanStatusMovesSessionToNeedsAttentionThenWorkingResumes(t *testing.T) 
 	}, http.StatusOK, &event)
 	if event.Session.RuntimeState != coordinator.SessionWaiting {
 		t.Fatalf("session state after stale watchdog working = %q, want waiting", event.Session.RuntimeState)
-	}
-	afterStaleWatchdog, err := fixture.Issues.GetIssue(ctx, issue.ID)
-	if err != nil {
-		t.Fatalf("get issue after stale watchdog working: %v", err)
-	}
-	if afterStaleWatchdog.PlanApprovedAt != nil {
-		t.Fatalf("PlanApprovedAt after stale watchdog working = %v, want nil", afterStaleWatchdog.PlanApprovedAt)
 	}
 	board, err = fixture.Issues.BoardResult(ctx)
 	if err != nil {
@@ -2473,13 +2451,6 @@ func TestPlanStatusMovesSessionToNeedsAttentionThenWorkingResumes(t *testing.T) 
 	if event.Session.RuntimeState != coordinator.SessionWorking {
 		t.Fatalf("session state after resume = %q, want working", event.Session.RuntimeState)
 	}
-	afterResume, err := fixture.Issues.GetIssue(ctx, issue.ID)
-	if err != nil {
-		t.Fatalf("get issue after resume: %v", err)
-	}
-	if afterResume.PlanApprovedAt != nil {
-		t.Fatalf("PlanApprovedAt after resume = %v, want nil until planning ready", afterResume.PlanApprovedAt)
-	}
 	board, err = fixture.Issues.BoardResult(ctx)
 	if err != nil {
 		t.Fatalf("board after resume: %v", err)
@@ -2496,7 +2467,7 @@ func TestPlanStatusMovesSessionToNeedsAttentionThenWorkingResumes(t *testing.T) 
 func TestAttentionReplyRejectsForeignStatusLogID(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Attention reply issue", PlanMode: true})
+	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Attention reply issue"})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
@@ -2543,7 +2514,7 @@ func TestAttentionReplyRejectsForeignStatusLogID(t *testing.T) {
 func TestAttentionReplyRejectsNonExistentStatusLogID(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Attention reply issue", PlanMode: true})
+	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Attention reply issue"})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
@@ -2576,7 +2547,7 @@ func TestAttentionReplyRejectsNonExistentStatusLogID(t *testing.T) {
 func TestAttentionReplyLinksOwnIssueStatusLogID(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Attention reply issue", PlanMode: true})
+	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Attention reply issue"})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}

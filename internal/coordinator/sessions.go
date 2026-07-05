@@ -37,7 +37,6 @@ const (
 
 var ErrAuthorJobSuppressed = errors.New("author job suppressed")
 
-
 type SessionRuntimeState string
 
 const (
@@ -316,13 +315,13 @@ type workPhaseContext struct {
 	agent        AgentDefSnapshot
 }
 
-// harnessFor returns the harness the job should launch: the phase agent's
-// when a cursor drives the job, else the issue-level selection.
-func (c workPhaseContext) harnessFor(issue Issue) string {
+// harness returns the harness the job should launch: the phase agent's when a
+// cursor drives the job, else the default agent harness.
+func (c workPhaseContext) harness() string {
 	if c.hasCursor && strings.TrimSpace(c.agent.Harness) != "" {
 		return c.agent.Harness
 	}
-	return issue.AgentHarness
+	return flowharness.DefaultAgentName()
 }
 
 // resolveWorkPhase freezes/loads the issue's flow cursor and picks the agent
@@ -505,7 +504,7 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 	if err != nil {
 		return EnsureAuthorJobResult{}, err
 	}
-	jobHarness := phaseCtx.harnessFor(issue)
+	jobHarness := phaseCtx.harness()
 
 	if existing, ok, err := s.workers.LiveAuthorJobForIssue(ctx, issue.ID); err != nil {
 		return EnsureAuthorJobResult{}, err
@@ -556,7 +555,7 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 	}
 	payload := copyPayload(input.Payload)
 	if _, ok := payload["entrypoint"]; !ok {
-		entrypoint, injectInitialPrompt, err := s.authorEntrypointPayload(issue, phaseCtx)
+		entrypoint, injectInitialPrompt, err := s.authorEntrypointPayload(phaseCtx)
 		if err != nil {
 			return EnsureAuthorJobResult{}, err
 		}
@@ -1064,7 +1063,7 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 	}
 	crashedHarness := payloadString(job.Payload, "agent_harness")
 	if crashedHarness == "" {
-		crashedHarness = issue.AgentHarness
+		crashedHarness = flowharness.DefaultAgentName()
 	}
 	crashedPhaseIndex := payloadPhaseIndex(job.Payload)
 	if existing, ok, err := s.workers.LiveAuthorJobForIssue(ctx, issue.ID); err != nil {
@@ -1126,14 +1125,14 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 		if err != nil {
 			return false, err
 		}
-		entrypoint, injectInitialPrompt, err := s.authorEntrypointPayload(issue, phaseCtx)
+		entrypoint, injectInitialPrompt, err := s.authorEntrypointPayload(phaseCtx)
 		if err != nil {
 			return false, err
 		}
 		payload["entrypoint"] = entrypoint
 		payload["inject_initial_prompt"] = injectInitialPrompt
-		payload["prompt_harness"] = phaseCtx.harnessFor(issue)
-		payload["agent_harness"] = phaseCtx.harnessFor(issue)
+		payload["prompt_harness"] = phaseCtx.harness()
+		payload["agent_harness"] = phaseCtx.harness()
 		stampWorkPhasePayload(payload, phaseCtx)
 	}
 	payload["change_id"] = change.ID
@@ -1400,13 +1399,13 @@ func consoleHarnessRequirements(harness string) []string {
 
 // authorEntrypointPayload builds the agent launch entrypoint for an author
 // job: the phase agent's harness with its model/effort selection appended to
-// the coordinator/issue harness args, or the issue-level fallback when no
-// cursor drives the job.
-func (s *SessionService) authorEntrypointPayload(issue Issue, phaseCtx workPhaseContext) (map[string]any, bool, error) {
+// the coordinator harness args, or the default agent when no cursor drives the
+// job.
+func (s *SessionService) authorEntrypointPayload(phaseCtx workPhaseContext) (map[string]any, bool, error) {
 	if s.defaultAuthorEntrypointOverride {
 		return copyPayload(s.defaultAuthorEntrypoint), true, nil
 	}
-	args := s.harnessArgs.Add(issue.HarnessArgs)
+	args := s.harnessArgs
 	if phaseCtx.hasCursor {
 		tokens, err := phaseCtx.agent.ModelSelectionArgs()
 		if err != nil {
@@ -1414,7 +1413,7 @@ func (s *SessionService) authorEntrypointPayload(issue Issue, phaseCtx workPhase
 		}
 		args = args.Add(flowharness.ArgsFor(phaseCtx.agent.Harness, tokens))
 	}
-	entrypoint, err := flowharness.DefaultAuthorEntrypointWithArgs(phaseCtx.harnessFor(issue), args)
+	entrypoint, err := flowharness.DefaultAuthorEntrypointWithArgs(phaseCtx.harness(), args)
 	return entrypoint, false, err
 }
 
@@ -2122,12 +2121,6 @@ WHERE id = ?
 // ReadyAuthorSession finishes an author session and publishes its change.
 func (s *SessionService) ReadyAuthorSession(ctx context.Context, sessionID string) (Session, error) {
 	return s.readySession(ctx, sessionID, true)
-}
-
-// ReadyPlanningSession finishes a planning author session without publishing a
-// change (planning produces a plan, not a mergeable revision).
-func (s *SessionService) ReadyPlanningSession(ctx context.Context, sessionID string) (Session, error) {
-	return s.readySession(ctx, sessionID, false)
 }
 
 // FinishWorkPhaseSession finishes an intermediate work phase's session without

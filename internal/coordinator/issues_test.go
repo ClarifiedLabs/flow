@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
-	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 )
 
 func TestCreateIssueAllocatesIDAndPersistsAcrossRestart(t *testing.T) {
@@ -39,12 +38,6 @@ func TestCreateIssueAllocatesIDAndPersistsAcrossRestart(t *testing.T) {
 	}
 	if issue.CreatedBy != ActorHuman {
 		t.Fatalf("CreatedBy = %q, want human", issue.CreatedBy)
-	}
-	if issue.AgentHarness != flowharness.Codex {
-		t.Fatalf("AgentHarness = %q, want codex", issue.AgentHarness)
-	}
-	if issue.PlanMode {
-		t.Fatal("PlanMode = true, want default false")
 	}
 	if _, err := service.ScheduleIssue(ctx, issue.ID, ScheduleUpNext); err != nil {
 		t.Fatalf("schedule issue: %v", err)
@@ -203,109 +196,12 @@ func TestInvalidIssueMetadataIsRejected(t *testing.T) {
 		{Title: "closed create", ScheduleState: ScheduleClosed},
 		{Title: "agent without session", CreatedBy: ActorAgent},
 		{Title: "triage up next", TriageState: TriagePending, ScheduleState: ScheduleUpNext},
-		{Title: "unknown harness", AgentHarness: "opencode"},
 	}
 
 	for _, input := range cases {
 		if _, err := service.CreateIssue(ctx, input); err == nil {
 			t.Fatalf("CreateIssue(%+v) succeeded, want error", input)
 		}
-	}
-}
-
-func TestCreateIssueAcceptsHarnessAgent(t *testing.T) {
-	ctx := context.Background()
-	_, service := newIssueService(t, filepath.Join(t.TempDir(), "flow.db"))
-
-	issue, err := service.CreateIssue(ctx, CreateIssueInput{
-		Title:        "Harness agent",
-		AgentHarness: flowharness.Harness,
-	})
-	if err != nil {
-		t.Fatalf("CreateIssue with harness agent: %v", err)
-	}
-	if issue.AgentHarness != flowharness.Harness {
-		t.Fatalf("AgentHarness = %q, want %q", issue.AgentHarness, flowharness.Harness)
-	}
-}
-
-func TestIssueHarnessArgsPersistAndPatch(t *testing.T) {
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "flow.db")
-	store, service := newIssueService(t, dbPath)
-
-	issue, err := service.CreateIssue(ctx, CreateIssueInput{
-		Title: "Args issue",
-		HarnessArgs: flowharness.Args{
-			Codex:  []string{"--model", "gpt-5"},
-			Claude: []string{"--model", "sonnet"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	if got := issue.HarnessArgs.Codex; len(got) != 2 || got[1] != "gpt-5" {
-		t.Fatalf("created codex args = %#v", got)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
-	}
-
-	reopened, err := flowdb.Open(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("reopen database: %v", err)
-	}
-	defer reopened.Close()
-	reopenedService := NewIssueService(reopened.DB())
-	reopenedIssue, err := reopenedService.GetIssue(ctx, issue.ID)
-	if err != nil {
-		t.Fatalf("get reopened issue: %v", err)
-	}
-	if got := reopenedIssue.HarnessArgs.Claude; len(got) != 2 || got[0] != "--model" || got[1] != "sonnet" {
-		t.Fatalf("reopened claude args = %#v", got)
-	}
-
-	harnessArgs := []string{"--profile", "review"}
-	clearCodex := []string{}
-	edited, err := reopenedService.EditIssue(ctx, issue.ID, EditIssueInput{
-		HarnessArgs: &flowharness.ArgsPatch{
-			Codex:   &clearCodex,
-			Harness: &harnessArgs,
-		},
-	})
-	if err != nil {
-		t.Fatalf("edit issue harness args: %v", err)
-	}
-	if len(edited.HarnessArgs.Codex) != 0 {
-		t.Fatalf("codex args = %#v, want cleared", edited.HarnessArgs.Codex)
-	}
-	if got := edited.HarnessArgs.Claude; len(got) != 2 || got[1] != "sonnet" {
-		t.Fatalf("claude args changed unexpectedly: %#v", got)
-	}
-	if got := edited.HarnessArgs.Harness; len(got) != 2 || got[1] != "review" {
-		t.Fatalf("harness args = %#v", got)
-	}
-}
-
-func TestIssueHarnessArgsRejectManagedFlags(t *testing.T) {
-	ctx := context.Background()
-	_, service := newIssueService(t, filepath.Join(t.TempDir(), "flow.db"))
-
-	if _, err := service.CreateIssue(ctx, CreateIssueInput{
-		Title:       "Bad args",
-		HarnessArgs: flowharness.Args{Codex: []string{"-c", "hooks.Stop=[]"}},
-	}); err == nil {
-		t.Fatal("CreateIssue accepted managed codex hook config")
-	}
-	issue, err := service.CreateIssue(ctx, CreateIssueInput{Title: "Patch target"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	claudeArgs := []string{"--settings", "/tmp/settings.json"}
-	if _, err := service.EditIssue(ctx, issue.ID, EditIssueInput{
-		HarnessArgs: &flowharness.ArgsPatch{Claude: &claudeArgs},
-	}); err == nil {
-		t.Fatal("EditIssue accepted managed claude settings flag")
 	}
 }
 
@@ -321,24 +217,16 @@ func TestEditScheduleCloseAndTriageTransitions(t *testing.T) {
 	renamed := "Renamed"
 	priority := 5
 	autoMerge := true
-	planMode := true
-	agentHarness := flowharness.Claude
 	edited, err := service.EditIssue(ctx, issue.ID, EditIssueInput{
-		Title:        &renamed,
-		Priority:     &priority,
-		AutoMerge:    &autoMerge,
-		PlanMode:     &planMode,
-		AgentHarness: &agentHarness,
+		Title:     &renamed,
+		Priority:  &priority,
+		AutoMerge: &autoMerge,
 	})
 	if err != nil {
 		t.Fatalf("edit issue: %v", err)
 	}
-	if edited.Title != renamed || edited.Priority != priority || !edited.AutoMerge || !edited.PlanMode || edited.AgentHarness != flowharness.Claude {
+	if edited.Title != renamed || edited.Priority != priority || !edited.AutoMerge {
 		t.Fatalf("edited issue mismatch: %+v", edited)
-	}
-	invalidHarness := "opencode"
-	if _, err := service.EditIssue(ctx, issue.ID, EditIssueInput{AgentHarness: &invalidHarness}); err == nil {
-		t.Fatal("edited issue with invalid agent harness, want error")
 	}
 
 	scheduled, err := service.ScheduleIssue(ctx, issue.ID, ScheduleUpNext)

@@ -56,11 +56,10 @@ type modelEffects struct {
 	issueID  string
 	changeID string
 
-	triage         coordinator.TriageState
-	schedule       coordinator.ScheduleState
-	closed         bool
-	merged         bool
-	planApprovedAt *time.Time
+	triage   coordinator.TriageState
+	schedule coordinator.ScheduleState
+	closed   bool
+	merged   bool
 
 	// ready is true once the change has been readied (a ready event with a head).
 	ready   bool
@@ -97,11 +96,10 @@ func newModel(issueID, changeID string) *modelEffects {
 
 func (m *modelEffects) issue() coordinator.Issue {
 	return coordinator.Issue{
-		ID:             m.issueID,
-		TriageState:    m.triage,
-		ScheduleState:  m.schedule,
-		AutoMerge:      false, // auto-merge needs a real git repo; out of scope here
-		PlanApprovedAt: m.planApprovedAt,
+		ID:            m.issueID,
+		TriageState:   m.triage,
+		ScheduleState: m.schedule,
+		AutoMerge:     false, // auto-merge needs a real git repo; out of scope here
 	}
 }
 

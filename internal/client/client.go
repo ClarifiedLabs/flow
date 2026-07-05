@@ -1388,28 +1388,22 @@ func durationSeconds(duration time.Duration) int {
 }
 
 type CreateIssueInput struct {
-	Title               string           `json:"title"`
-	Body                string           `json:"body"`
-	AcceptanceCriteria  string           `json:"acceptance_criteria"`
-	Priority            int              `json:"priority"`
-	RequiresHumanReview *bool            `json:"requires_human_review,omitempty"`
-	AutoMerge           *bool            `json:"auto_merge,omitempty"`
-	PlanMode            bool             `json:"plan_mode,omitempty"`
-	AgentHarness        string           `json:"agent_harness,omitempty"`
-	HarnessArgs         flowharness.Args `json:"harness_args,omitempty"`
-	FlowID              string           `json:"flow_id,omitempty"`
+	Title               string `json:"title"`
+	Body                string `json:"body"`
+	AcceptanceCriteria  string `json:"acceptance_criteria"`
+	Priority            int    `json:"priority"`
+	RequiresHumanReview *bool  `json:"requires_human_review,omitempty"`
+	AutoMerge           *bool  `json:"auto_merge,omitempty"`
+	FlowID              string `json:"flow_id,omitempty"`
 }
 
 type EditIssueInput struct {
-	Title               *string                `json:"title,omitempty"`
-	Body                *string                `json:"body,omitempty"`
-	AcceptanceCriteria  *string                `json:"acceptance_criteria,omitempty"`
-	Priority            *int                   `json:"priority,omitempty"`
-	RequiresHumanReview *bool                  `json:"requires_human_review,omitempty"`
-	AutoMerge           *bool                  `json:"auto_merge,omitempty"`
-	PlanMode            *bool                  `json:"plan_mode,omitempty"`
-	AgentHarness        *string                `json:"agent_harness,omitempty"`
-	HarnessArgs         *flowharness.ArgsPatch `json:"harness_args,omitempty"`
+	Title               *string `json:"title,omitempty"`
+	Body                *string `json:"body,omitempty"`
+	AcceptanceCriteria  *string `json:"acceptance_criteria,omitempty"`
+	Priority            *int    `json:"priority,omitempty"`
+	RequiresHumanReview *bool   `json:"requires_human_review,omitempty"`
+	AutoMerge           *bool   `json:"auto_merge,omitempty"`
 }
 
 type UploadIssueAttachmentInput struct {

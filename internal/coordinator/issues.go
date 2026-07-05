@@ -3,13 +3,11 @@ package coordinator
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	"github.com/ClarifiedLabs/flow/internal/sqlitex"
 )
 
@@ -65,15 +63,7 @@ type Issue struct {
 	TriageState         TriageState
 	RequiresHumanReview bool
 	AutoMerge           bool
-	PlanMode            bool             `json:"plan_mode"`
-	PlanBody            string           `json:"plan_body,omitempty"`
-	PlanStatusLogID     *int64           `json:"plan_status_log_id,omitempty"`
-	PlanSessionID       string           `json:"plan_session_id,omitempty"`
-	PlanSubmittedAt     *time.Time       `json:"plan_submitted_at,omitempty"`
-	PlanApprovedAt      *time.Time       `json:"plan_approved_at,omitempty"`
-	AgentHarness        string           `json:"agent_harness"`
-	HarnessArgs         flowharness.Args `json:"harness_args"`
-	FlowID              string           `json:"flow_id,omitempty"`
+	FlowID              string `json:"flow_id,omitempty"`
 	CreatedBy           Actor
 	CreatedBySessionID  *string
 	SourceIssueID       *string
@@ -110,9 +100,6 @@ type CreateIssueInput struct {
 	TriageState         TriageState
 	RequiresHumanReview *bool
 	AutoMerge           *bool
-	PlanMode            bool
-	AgentHarness        string
-	HarnessArgs         flowharness.Args
 	FlowID              string
 	CreatedBy           Actor
 	CreatedBySessionID  *string
@@ -124,14 +111,6 @@ type CreateIssueWithDetailsInput struct {
 	Issue     CreateIssueInput
 	Tags      []CreateTagInput
 	Relations []CreateIssueRelationInput
-}
-
-type RecordIssuePlanInput struct {
-	IssueID     string
-	Body        string
-	StatusLogID int64
-	SessionID   string
-	SubmittedAt time.Time
 }
 
 type CreateIssueRelationInput struct {
@@ -148,9 +127,6 @@ type EditIssueInput struct {
 	Priority            *int
 	RequiresHumanReview *bool
 	AutoMerge           *bool
-	PlanMode            *bool
-	AgentHarness        *string
-	HarnessArgs         *flowharness.ArgsPatch
 	FlowID              *string
 }
 
@@ -195,11 +171,11 @@ type WaitReason string
 const (
 	WaitReasonPhaseApproval WaitReason = "phase_approval"
 	WaitReasonQuestion      WaitReason = "question"
-	WaitReasonManualMerge  WaitReason = "manual_merge"
-	WaitReasonHumanReview  WaitReason = "human_review"
-	WaitReasonBlocked      WaitReason = "blocked"
-	WaitReasonReviewCycles WaitReason = "review_cycle_limit"
-	WaitReasonCrashLoop    WaitReason = "crash_loop"
+	WaitReasonManualMerge   WaitReason = "manual_merge"
+	WaitReasonHumanReview   WaitReason = "human_review"
+	WaitReasonBlocked       WaitReason = "blocked"
+	WaitReasonReviewCycles  WaitReason = "review_cycle_limit"
+	WaitReasonCrashLoop     WaitReason = "crash_loop"
 )
 
 // BoardResult bundles the four board lanes with the per-issue overlays the UI
@@ -256,11 +232,6 @@ func (s *IssueService) CreateIssueWithDetails(ctx context.Context, input CreateI
 			return Issue{}, err
 		}
 	}
-	harnessArgsJSON, err := marshalHarnessArgs(issueInput.HarnessArgs)
-	if err != nil {
-		return Issue{}, err
-	}
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Issue{}, fmt.Errorf("begin create issue transaction: %w", err)
@@ -285,9 +256,6 @@ INSERT INTO issues (
 	triage_state,
 	requires_human_review,
 	auto_merge,
-	plan_mode,
-	agent_harness,
-	harness_args_json,
 	flow_id,
 	created_by,
 	created_by_session_id,
@@ -295,7 +263,7 @@ INSERT INTO issues (
 	source_change_id,
 	created_at,
 	updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id,
 		issueInput.Title,
 		issueInput.Body,
@@ -305,9 +273,6 @@ INSERT INTO issues (
 		string(issueInput.TriageState),
 		boolInt(*issueInput.RequiresHumanReview),
 		boolInt(*issueInput.AutoMerge),
-		boolInt(issueInput.PlanMode),
-		issueInput.AgentHarness,
-		harnessArgsJSON,
 		sqlitex.NullableNonEmptyString(issueInput.FlowID),
 		string(issueInput.CreatedBy),
 		nullableStringValue(issueInput.CreatedBySessionID),
@@ -370,14 +335,6 @@ SELECT
 	triage_state,
 	requires_human_review,
 	auto_merge,
-	plan_mode,
-	plan_body,
-	plan_status_log_id,
-	plan_session_id,
-	plan_submitted_at,
-	plan_approved_at,
-	agent_harness,
-	harness_args_json,
 	flow_id,
 	created_by,
 	created_by_session_id,
@@ -409,14 +366,6 @@ const issueSelectColumns = `
 	i.triage_state,
 	i.requires_human_review,
 	i.auto_merge,
-	i.plan_mode,
-	i.plan_body,
-	i.plan_status_log_id,
-	i.plan_session_id,
-	i.plan_submitted_at,
-	i.plan_approved_at,
-	i.agent_harness,
-	i.harness_args_json,
 	i.flow_id,
 	i.created_by,
 	i.created_by_session_id,
@@ -614,36 +563,8 @@ func (s *IssueService) EditIssue(ctx context.Context, id string, input EditIssue
 	if input.AutoMerge != nil {
 		current.AutoMerge = *input.AutoMerge
 	}
-	if input.PlanMode != nil {
-		if *input.PlanMode != current.PlanMode {
-			current.PlanBody = ""
-			current.PlanStatusLogID = nil
-			current.PlanSessionID = ""
-			current.PlanSubmittedAt = nil
-			current.PlanApprovedAt = nil
-		}
-		current.PlanMode = *input.PlanMode
-	}
-	if input.AgentHarness != nil {
-		agentHarness, err := normalizeAgentHarness(*input.AgentHarness)
-		if err != nil {
-			return Issue{}, err
-		}
-		current.AgentHarness = agentHarness
-	}
-	if input.HarnessArgs != nil {
-		patch, err := flowharness.NormalizeArgsPatch(*input.HarnessArgs)
-		if err != nil {
-			return Issue{}, err
-		}
-		current.HarnessArgs = current.HarnessArgs.ApplyPatch(patch)
-	}
 	if input.FlowID != nil {
 		current.FlowID = strings.TrimSpace(*input.FlowID)
-	}
-	harnessArgsJSON, err := marshalHarnessArgs(current.HarnessArgs)
-	if err != nil {
-		return Issue{}, err
 	}
 
 	if _, err := s.db.ExecContext(ctx, `
@@ -655,14 +576,6 @@ SET
 	priority = ?,
 	requires_human_review = ?,
 	auto_merge = ?,
-	plan_mode = ?,
-	plan_body = ?,
-	plan_status_log_id = ?,
-	plan_session_id = ?,
-	plan_submitted_at = ?,
-	plan_approved_at = ?,
-	agent_harness = ?,
-	harness_args_json = ?,
 	flow_id = ?,
 	updated_at = ?
 WHERE id = ?`,
@@ -672,14 +585,6 @@ WHERE id = ?`,
 		current.Priority,
 		boolInt(current.RequiresHumanReview),
 		boolInt(current.AutoMerge),
-		boolInt(current.PlanMode),
-		current.PlanBody,
-		nullableInt64Value(current.PlanStatusLogID),
-		sqlitex.NullableNonEmptyString(current.PlanSessionID),
-		nullableTimeValue(current.PlanSubmittedAt),
-		nullableTimeValue(current.PlanApprovedAt),
-		current.AgentHarness,
-		harnessArgsJSON,
 		sqlitex.NullableNonEmptyString(current.FlowID),
 		formatTime(s.now().UTC()),
 		id,
@@ -688,97 +593,6 @@ WHERE id = ?`,
 	}
 
 	return s.GetIssue(ctx, id)
-}
-
-func (s *IssueService) MarkPlanApproved(ctx context.Context, id string) (Issue, error) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return Issue{}, errors.New("issue id is required")
-	}
-
-	nowText := formatTime(s.now().UTC())
-	if _, err := s.db.ExecContext(ctx, `
-UPDATE issues
-SET
-	plan_approved_at = COALESCE(plan_approved_at, ?),
-	updated_at = CASE WHEN plan_approved_at IS NULL THEN ? ELSE updated_at END
-WHERE id = ?`,
-		nowText,
-		nowText,
-		id,
-	); err != nil {
-		return Issue{}, fmt.Errorf("mark plan approved: %w", err)
-	}
-
-	return s.GetIssue(ctx, id)
-}
-
-func (s *IssueService) ClearPendingPlan(ctx context.Context, id string) (Issue, error) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return Issue{}, errors.New("issue id is required")
-	}
-
-	nowText := formatTime(s.now().UTC())
-	if _, err := s.db.ExecContext(ctx, `
-UPDATE issues
-SET
-	plan_body = '',
-	plan_status_log_id = NULL,
-	plan_session_id = NULL,
-	plan_submitted_at = NULL,
-	plan_approved_at = NULL,
-	updated_at = ?
-WHERE id = ?`,
-		nowText,
-		id,
-	); err != nil {
-		return Issue{}, fmt.Errorf("clear pending plan: %w", err)
-	}
-
-	return s.GetIssue(ctx, id)
-}
-
-func (s *IssueService) RecordPlan(ctx context.Context, input RecordIssuePlanInput) (Issue, error) {
-	input.IssueID = strings.TrimSpace(input.IssueID)
-	input.Body = strings.TrimSpace(input.Body)
-	input.SessionID = strings.TrimSpace(input.SessionID)
-	if input.IssueID == "" {
-		return Issue{}, errors.New("issue id is required")
-	}
-	if input.Body == "" {
-		return Issue{}, errors.New("plan body is required")
-	}
-	if input.StatusLogID <= 0 {
-		return Issue{}, errors.New("plan status log id is required")
-	}
-	submittedAt := input.SubmittedAt.UTC()
-	if submittedAt.IsZero() {
-		submittedAt = s.now().UTC()
-	}
-	nowText := formatTime(s.now().UTC())
-	statusID := input.StatusLogID
-	if _, err := s.db.ExecContext(ctx, `
-UPDATE issues
-SET
-	plan_body = ?,
-	plan_status_log_id = ?,
-	plan_session_id = ?,
-	plan_submitted_at = ?,
-	plan_approved_at = NULL,
-	updated_at = ?
-WHERE id = ?`,
-		input.Body,
-		statusID,
-		sqlitex.NullableNonEmptyString(input.SessionID),
-		formatTime(submittedAt),
-		nowText,
-		input.IssueID,
-	); err != nil {
-		return Issue{}, fmt.Errorf("record issue plan: %w", err)
-	}
-
-	return s.GetIssue(ctx, input.IssueID)
 }
 
 func (s *IssueService) ScheduleIssue(ctx context.Context, id string, state ScheduleState) (Issue, error) {
@@ -1404,14 +1218,6 @@ SELECT
 	blocker.triage_state,
 	blocker.requires_human_review,
 	blocker.auto_merge,
-	blocker.plan_mode,
-	blocker.plan_body,
-	blocker.plan_status_log_id,
-	blocker.plan_session_id,
-	blocker.plan_submitted_at,
-	blocker.plan_approved_at,
-	blocker.agent_harness,
-	blocker.harness_args_json,
 	blocker.flow_id,
 	blocker.created_by,
 	blocker.created_by_session_id,
@@ -1521,29 +1327,8 @@ func normalizeCreateIssueInput(input CreateIssueInput) (CreateIssueInput, error)
 		defaultAutoMerge := false
 		input.AutoMerge = &defaultAutoMerge
 	}
-	agentHarness, err := normalizeAgentHarness(input.AgentHarness)
-	if err != nil {
-		return CreateIssueInput{}, err
-	}
-	input.AgentHarness = agentHarness
-	harnessArgs, err := flowharness.NormalizeArgs(input.HarnessArgs)
-	if err != nil {
-		return CreateIssueInput{}, err
-	}
-	input.HarnessArgs = harnessArgs
 
 	return input, nil
-}
-
-func normalizeAgentHarness(value string) (string, error) {
-	agentHarness := flowharness.NormalizeName(value)
-	if agentHarness == "" {
-		agentHarness = flowharness.DefaultAgentName()
-	}
-	if err := flowharness.ValidateAgentName(agentHarness); err != nil {
-		return "", err
-	}
-	return agentHarness, nil
 }
 
 func normalizeCreateTagInput(input CreateTagInput) (CreateTagInput, error) {
@@ -1682,33 +1467,6 @@ SELECT EXISTS(SELECT 1 FROM reachable WHERE issue_id = ?)`,
 	return exists == 1, nil
 }
 
-func marshalHarnessArgs(args flowharness.Args) (string, error) {
-	normalized, err := flowharness.NormalizeArgs(args)
-	if err != nil {
-		return "", err
-	}
-	encoded, err := json.Marshal(normalized)
-	if err != nil {
-		return "", fmt.Errorf("encode harness args: %w", err)
-	}
-	return string(encoded), nil
-}
-
-func unmarshalHarnessArgs(raw string) (flowharness.Args, error) {
-	if strings.TrimSpace(raw) == "" {
-		raw = "{}"
-	}
-	var args flowharness.Args
-	if err := json.Unmarshal([]byte(raw), &args); err != nil {
-		return flowharness.Args{}, fmt.Errorf("decode harness args: %w", err)
-	}
-	normalized, err := flowharness.NormalizeArgs(args)
-	if err != nil {
-		return flowharness.Args{}, err
-	}
-	return normalized, nil
-}
-
 type issueScanner interface {
 	Scan(dest ...any) error
 }
@@ -1739,13 +1497,6 @@ func scanIssue(scanner issueScanner) (Issue, error) {
 	var triageState string
 	var requiresHumanReview int
 	var autoMerge int
-	var planMode int
-	var planStatusLogID sql.NullInt64
-	var planSessionID sql.NullString
-	var planSubmittedAt sql.NullString
-	var planApprovedAt sql.NullString
-	var agentHarness string
-	var harnessArgsJSON string
 	var flowID sql.NullString
 	var createdBy string
 	var createdBySessionID sql.NullString
@@ -1765,14 +1516,6 @@ func scanIssue(scanner issueScanner) (Issue, error) {
 		&triageState,
 		&requiresHumanReview,
 		&autoMerge,
-		&planMode,
-		&issue.PlanBody,
-		&planStatusLogID,
-		&planSessionID,
-		&planSubmittedAt,
-		&planApprovedAt,
-		&agentHarness,
-		&harnessArgsJSON,
 		&flowID,
 		&createdBy,
 		&createdBySessionID,
@@ -1798,37 +1541,9 @@ func scanIssue(scanner issueScanner) (Issue, error) {
 	issue.TriageState = TriageState(triageState)
 	issue.RequiresHumanReview = requiresHumanReview == 1
 	issue.AutoMerge = autoMerge == 1
-	issue.PlanMode = planMode == 1
-	if planStatusLogID.Valid {
-		value := planStatusLogID.Int64
-		issue.PlanStatusLogID = &value
-	}
-	if planSessionID.Valid {
-		issue.PlanSessionID = planSessionID.String
-	}
 	if flowID.Valid {
 		issue.FlowID = flowID.String
 	}
-	if planSubmittedAt.Valid {
-		parsedPlanSubmittedAt, err := parseTime(planSubmittedAt.String)
-		if err != nil {
-			return Issue{}, err
-		}
-		issue.PlanSubmittedAt = &parsedPlanSubmittedAt
-	}
-	if planApprovedAt.Valid {
-		parsedPlanApprovedAt, err := parseTime(planApprovedAt.String)
-		if err != nil {
-			return Issue{}, err
-		}
-		issue.PlanApprovedAt = &parsedPlanApprovedAt
-	}
-	issue.AgentHarness = agentHarness
-	harnessArgs, err := unmarshalHarnessArgs(harnessArgsJSON)
-	if err != nil {
-		return Issue{}, err
-	}
-	issue.HarnessArgs = harnessArgs
 	issue.CreatedBy = Actor(createdBy)
 	issue.CreatedBySessionID = nullableStringPointer(createdBySessionID)
 	issue.SourceIssueID = nullableStringPointer(sourceIssueID)

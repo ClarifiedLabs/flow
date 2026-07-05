@@ -74,14 +74,6 @@ CREATE TABLE issues (
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
 	closed_at TEXT,
-	agent_harness TEXT NOT NULL DEFAULT 'codex' CHECK (agent_harness IN ('codex', 'claude', 'harness')),
-	harness_args_json TEXT NOT NULL DEFAULT '{}',
-	plan_mode INTEGER NOT NULL DEFAULT 0 CHECK (plan_mode IN (0, 1)),
-	plan_body TEXT NOT NULL DEFAULT '',
-	plan_status_log_id INTEGER,
-	plan_session_id TEXT,
-	plan_submitted_at TEXT,
-	plan_approved_at TEXT,
 	flow_id TEXT REFERENCES flows(id) ON DELETE SET NULL,
 	CHECK ((triage_state != 'rejected') OR (schedule_state = 'closed' AND closed_at IS NOT NULL))
 );

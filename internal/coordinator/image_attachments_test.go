@@ -124,8 +124,7 @@ func TestEnsureAuthorJobStampsImageAttachmentsForEveryHarness(t *testing.T) {
 		store := NewIssueAttachmentStore(filepath.Join(t.TempDir(), "attachments"))
 
 		issue, err := issues.CreateIssue(ctx, CreateIssueInput{
-			Title:        "Image issue for " + harness,
-			AgentHarness: harness,
+			Title: "Image issue for " + harness,
 		})
 		if err != nil {
 			t.Fatalf("create issue: %v", err)

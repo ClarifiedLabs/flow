@@ -722,9 +722,6 @@ func TestIssueCommandsUseAPI(t *testing.T) {
 		"--title", "CLI issue",
 		"--requires-human-review=false",
 		"--auto-merge=true",
-		"--agent-harness", "claude",
-		"--claude-arg=--model",
-		"--claude-arg=sonnet",
 	}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("issue create exitCode = %d, stderr = %q", exitCode, stderr.String())
@@ -740,11 +737,8 @@ func TestIssueCommandsUseAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get created issue: %v", err)
 	}
-	if created.RequiresHumanReview || !created.AutoMerge || created.AgentHarness != "claude" {
-		t.Fatalf("created flags = human:%t auto:%t harness:%s, want false/true/claude", created.RequiresHumanReview, created.AutoMerge, created.AgentHarness)
-	}
-	if got := created.HarnessArgs.Claude; len(got) != 2 || got[0] != "--model" || got[1] != "sonnet" {
-		t.Fatalf("created claude harness args = %#v", got)
+	if created.RequiresHumanReview || !created.AutoMerge {
+		t.Fatalf("created flags = human:%t auto:%t, want false/true", created.RequiresHumanReview, created.AutoMerge)
 	}
 
 	stdout.Reset()
@@ -755,10 +749,6 @@ func TestIssueCommandsUseAPI(t *testing.T) {
 		"--token", "owner-token",
 		"--requires-human-review=true",
 		"--auto-merge=false",
-		"--agent-harness", "codex",
-		"--codex-arg=--model",
-		"--codex-arg=gpt-5",
-		"--clear-claude-args",
 		"i-0001",
 	}, &stdout, &stderr)
 	if exitCode != 0 {
@@ -768,34 +758,8 @@ func TestIssueCommandsUseAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get edited issue: %v", err)
 	}
-	if !edited.RequiresHumanReview || edited.AutoMerge || edited.AgentHarness != "codex" {
-		t.Fatalf("edited flags = human:%t auto:%t harness:%s, want true/false/codex", edited.RequiresHumanReview, edited.AutoMerge, edited.AgentHarness)
-	}
-	if got := edited.HarnessArgs.Codex; len(got) != 2 || got[0] != "--model" || got[1] != "gpt-5" {
-		t.Fatalf("edited codex harness args = %#v", got)
-	}
-	if len(edited.HarnessArgs.Claude) != 0 {
-		t.Fatalf("edited claude harness args = %#v, want cleared", edited.HarnessArgs.Claude)
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	exitCode = run([]string{
-		"issue", "edit",
-		"--server", serverURL,
-		"--token", "owner-token",
-		"--agent-harness", "harness",
-		"i-0001",
-	}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("issue edit harness exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	edited, err = client.GetIssue("i-0001")
-	if err != nil {
-		t.Fatalf("get harness edited issue: %v", err)
-	}
-	if edited.AgentHarness != "harness" {
-		t.Fatalf("edited harness = %q, want harness", edited.AgentHarness)
+	if !edited.RequiresHumanReview || edited.AutoMerge {
+		t.Fatalf("edited flags = human:%t auto:%t, want true/false", edited.RequiresHumanReview, edited.AutoMerge)
 	}
 
 	stdout.Reset()

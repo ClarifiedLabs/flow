@@ -58,9 +58,6 @@ func createIssueInputForPrincipal(request createIssueRequest, principal coordina
 			TriageState:         triageState,
 			RequiresHumanReview: request.RequiresHumanReview,
 			AutoMerge:           request.AutoMerge,
-			PlanMode:            request.PlanMode,
-			AgentHarness:        request.AgentHarness,
-			HarnessArgs:         request.HarnessArgs,
 			FlowID:              request.FlowID,
 			CreatedBy:           actor,
 			CreatedBySessionID:  createdBySessionID,
@@ -313,9 +310,6 @@ type createIssueRequest struct {
 	TriageState         string            `json:"triage_state"`
 	RequiresHumanReview *bool             `json:"requires_human_review"`
 	AutoMerge           *bool             `json:"auto_merge"`
-	PlanMode            bool              `json:"plan_mode"`
-	AgentHarness        string            `json:"agent_harness"`
-	HarnessArgs         flowharness.Args  `json:"harness_args"`
 	FlowID              string            `json:"flow_id"`
 	CreatedBySessionID  *string           `json:"created_by_session_id"`
 	SourceIssueID       *string           `json:"source_issue_id"`
@@ -334,16 +328,13 @@ type tagRequest struct {
 type relationRequest = contract.IssueRelationRequest
 
 type editIssueRequest struct {
-	Title               *string                `json:"title"`
-	Body                *string                `json:"body"`
-	AcceptanceCriteria  *string                `json:"acceptance_criteria"`
-	Priority            *int                   `json:"priority"`
-	RequiresHumanReview *bool                  `json:"requires_human_review"`
-	AutoMerge           *bool                  `json:"auto_merge"`
-	PlanMode            *bool                  `json:"plan_mode"`
-	AgentHarness        *string                `json:"agent_harness"`
-	HarnessArgs         *flowharness.ArgsPatch `json:"harness_args"`
-	FlowID              *string                `json:"flow_id"`
+	Title               *string `json:"title"`
+	Body                *string `json:"body"`
+	AcceptanceCriteria  *string `json:"acceptance_criteria"`
+	Priority            *int    `json:"priority"`
+	RequiresHumanReview *bool   `json:"requires_human_review"`
+	AutoMerge           *bool   `json:"auto_merge"`
+	FlowID              *string `json:"flow_id"`
 }
 
 type scheduleIssueRequest = contract.ScheduleIssueRequest

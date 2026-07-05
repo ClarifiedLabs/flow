@@ -466,41 +466,17 @@ func runIssueCreate(args []string, stdout, stderr io.Writer) int {
 	var priority int
 	var requiresHumanReview optionalBoolFlag
 	var autoMerge optionalBoolFlag
-	var planMode bool
-	var agentHarness string
 	var attachmentFiles stringSliceFlag
-	var codexArgs stringSliceFlag
-	var claudeArgs stringSliceFlag
-	var harnessArgs stringSliceFlag
 	flags.StringVar(&title, "title", "", "issue title")
 	flags.StringVar(&body, "body", "", "issue body")
 	flags.StringVar(&acceptanceCriteria, "acceptance-criteria", "", "acceptance criteria")
 	flags.IntVar(&priority, "priority", 0, "issue priority")
 	flags.Var(&requiresHumanReview, "requires-human-review", "require human review before merge")
 	flags.Var(&autoMerge, "auto-merge", "auto merge when review becomes approved")
-	flags.BoolVar(&planMode, "plan-mode", false, "ask the agent to plan and wait for approval before making changes")
-	flags.StringVar(&agentHarness, "agent-harness", "", "agent harness: codex, claude, or harness")
 	var flowRef string
 	flags.StringVar(&flowRef, "flow", "", "flow (id or name) driving this issue's work phases and review set")
 	flags.Var(&attachmentFiles, "file", "file to attach to the initial issue prompt (repeatable)")
-	flags.Var(&codexArgs, "codex-arg", "additional argv token for generated Codex harness commands (repeatable)")
-	flags.Var(&claudeArgs, "claude-arg", "additional argv token for generated Claude harness commands (repeatable)")
-	flags.Var(&harnessArgs, "harness-arg", "additional argv token for generated Harness commands (repeatable)")
 	if err := flags.Parse(args); err != nil {
-		return 2
-	}
-	agentHarness = harness.NormalizeName(agentHarness)
-	if err := harness.ValidateAgentName(agentHarness); err != nil {
-		fmt.Fprintf(stderr, "invalid agent harness: %v\n", err)
-		return 2
-	}
-	additionalArgs, err := harness.NormalizeArgs(harness.Args{
-		Codex:   codexArgs.Values,
-		Claude:  claudeArgs.Values,
-		Harness: harnessArgs.Values,
-	})
-	if err != nil {
-		fmt.Fprintf(stderr, "invalid harness args: %v\n", err)
 		return 2
 	}
 
@@ -515,9 +491,6 @@ func runIssueCreate(args []string, stdout, stderr io.Writer) int {
 		Body:               body,
 		AcceptanceCriteria: acceptanceCriteria,
 		Priority:           priority,
-		PlanMode:           planMode,
-		AgentHarness:       agentHarness,
-		HarnessArgs:        additionalArgs,
 	}
 	if strings.TrimSpace(flowRef) != "" {
 		flowID, err := resolveFlowRef(client, flowRef)
@@ -786,28 +759,12 @@ func runIssueEdit(args []string, stdout, stderr io.Writer) int {
 	var priority string
 	var requiresHumanReview optionalBoolFlag
 	var autoMerge optionalBoolFlag
-	var planMode optionalBoolFlag
-	var agentHarness optionalStringFlag
-	var codexArgs stringSliceFlag
-	var claudeArgs stringSliceFlag
-	var harnessArgs stringSliceFlag
-	var clearCodexArgs bool
-	var clearClaudeArgs bool
-	var clearHarnessArgs bool
 	flags.StringVar(&title, "title", "", "new issue title")
 	flags.StringVar(&body, "body", "", "new issue body")
 	flags.StringVar(&acceptanceCriteria, "acceptance-criteria", "", "new acceptance criteria")
 	flags.StringVar(&priority, "priority", "", "new issue priority")
 	flags.Var(&requiresHumanReview, "requires-human-review", "require human review before merge")
 	flags.Var(&autoMerge, "auto-merge", "auto merge when review becomes approved")
-	flags.Var(&planMode, "plan-mode", "ask the agent to plan and wait for approval before making changes")
-	flags.Var(&agentHarness, "agent-harness", "agent harness: codex, claude, or harness")
-	flags.Var(&codexArgs, "codex-arg", "set issue-level argv token for generated Codex harness commands (repeatable)")
-	flags.Var(&claudeArgs, "claude-arg", "set issue-level argv token for generated Claude harness commands (repeatable)")
-	flags.Var(&harnessArgs, "harness-arg", "set issue-level argv token for generated Harness commands (repeatable)")
-	flags.BoolVar(&clearCodexArgs, "clear-codex-args", false, "clear issue-level Codex harness args")
-	flags.BoolVar(&clearClaudeArgs, "clear-claude-args", false, "clear issue-level Claude harness args")
-	flags.BoolVar(&clearHarnessArgs, "clear-harness-args", false, "clear issue-level Harness args")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -839,25 +796,6 @@ func runIssueEdit(args []string, stdout, stderr io.Writer) int {
 	}
 	if autoMerge.Provided {
 		input.AutoMerge = &autoMerge.Value
-	}
-	if planMode.Provided {
-		input.PlanMode = &planMode.Value
-	}
-	if agentHarness.Provided {
-		value := harness.NormalizeName(agentHarness.Value)
-		if err := harness.ValidateAgentName(value); err != nil {
-			fmt.Fprintf(stderr, "invalid agent harness: %v\n", err)
-			return 2
-		}
-		input.AgentHarness = &value
-	}
-	harnessArgsPatch, err := harnessArgsPatchFromFlags(codexArgs, clearCodexArgs, claudeArgs, clearClaudeArgs, harnessArgs, clearHarnessArgs)
-	if err != nil {
-		fmt.Fprintf(stderr, "invalid harness args: %v\n", err)
-		return 2
-	}
-	if harnessArgsPatch != nil {
-		input.HarnessArgs = harnessArgsPatch
 	}
 
 	applySessionEnvironment(apiFlags, nil)
@@ -2622,7 +2560,7 @@ func printUsage(out io.Writer) {
   flow [--log-level LEVEL] COMMAND
   flow init [--repo PATH] [--name NAME] [--base BRANCH]
   flow doctor [--db PATH] [--config PATH]
-  flow issue create --title TITLE [--agent-harness codex|claude|harness] [--file PATH]
+  flow issue create --title TITLE [--flow FLOW] [--file PATH]
   flow issue attach ISSUE_ID --file PATH [--stage initial|author|reviewer|verifier]
   flow issue list
   flow issue show [--project PROJECT] ISSUE_ID|PROJECT/ISSUE_ID
@@ -2662,11 +2600,11 @@ API override flags on owner commands:
 
 func printIssueUsage(out io.Writer) {
 	fmt.Fprint(out, `Usage:
-  flow issue create --title TITLE [--agent-harness codex|claude|harness] [--file PATH]
+  flow issue create --title TITLE [--flow FLOW] [--file PATH]
   flow issue attach [flags] ISSUE_ID
   flow issue list
   flow issue show [flags] ISSUE_ID
-  flow issue edit [--agent-harness codex|claude|harness] [flags] ISSUE_ID
+  flow issue edit [flags] ISSUE_ID
   flow issue plan approve [flags] ISSUE_ID
   flow issue plan reject [flags] ISSUE_ID [COMMENTS]
   flow issue reply [flags] ISSUE_ID [MESSAGE]
@@ -2763,24 +2701,6 @@ func (f *optionalBoolFlag) IsBoolFlag() bool {
 	return true
 }
 
-type optionalStringFlag struct {
-	Value    string
-	Provided bool
-}
-
-func (f *optionalStringFlag) Set(value string) error {
-	f.Value = strings.TrimSpace(value)
-	f.Provided = true
-	return nil
-}
-
-func (f *optionalStringFlag) String() string {
-	if f == nil || !f.Provided {
-		return ""
-	}
-	return f.Value
-}
-
 type stringSliceFlag struct {
 	Values []string
 }
@@ -2799,55 +2719,6 @@ func (f *stringSliceFlag) String() string {
 		return ""
 	}
 	return strings.Join(f.Values, ",")
-}
-
-func harnessArgsPatchFromFlags(codexArgs stringSliceFlag, clearCodexArgs bool, claudeArgs stringSliceFlag, clearClaudeArgs bool, harnessArgFlag stringSliceFlag, clearHarnessArgs bool) (*harness.ArgsPatch, error) {
-	var patch harness.ArgsPatch
-	var provided bool
-	if clearCodexArgs && len(codexArgs.Values) > 0 {
-		return nil, errors.New("--codex-arg cannot be combined with --clear-codex-args")
-	}
-	if clearClaudeArgs && len(claudeArgs.Values) > 0 {
-		return nil, errors.New("--claude-arg cannot be combined with --clear-claude-args")
-	}
-	if clearHarnessArgs && len(harnessArgFlag.Values) > 0 {
-		return nil, errors.New("--harness-arg cannot be combined with --clear-harness-args")
-	}
-	if clearCodexArgs {
-		values := []string{}
-		patch.Codex = &values
-		provided = true
-	} else if len(codexArgs.Values) > 0 {
-		values := append([]string(nil), codexArgs.Values...)
-		patch.Codex = &values
-		provided = true
-	}
-	if clearClaudeArgs {
-		values := []string{}
-		patch.Claude = &values
-		provided = true
-	} else if len(claudeArgs.Values) > 0 {
-		values := append([]string(nil), claudeArgs.Values...)
-		patch.Claude = &values
-		provided = true
-	}
-	if clearHarnessArgs {
-		values := []string{}
-		patch.Harness = &values
-		provided = true
-	} else if len(harnessArgFlag.Values) > 0 {
-		values := append([]string(nil), harnessArgFlag.Values...)
-		patch.Harness = &values
-		provided = true
-	}
-	if !provided {
-		return nil, nil
-	}
-	normalized, err := harness.NormalizeArgsPatch(patch)
-	if err != nil {
-		return nil, err
-	}
-	return &normalized, nil
 }
 
 func addAPIFlags(flags *flag.FlagSet) *apiFlagValues {
@@ -3176,39 +3047,11 @@ func printIssueAttachmentLine(out io.Writer, attachment coordinator.IssueAttachm
 
 func printIssueDetail(out io.Writer, issue coordinator.Issue) {
 	printIssueLine(out, issue)
-	if issue.AgentHarness != "" {
-		fmt.Fprintf(out, "\nagent_harness: %s\n", issue.AgentHarness)
-	}
-	if !issue.HarnessArgs.Empty() {
-		fmt.Fprintln(out, "harness_args:")
-		printHarnessArgList(out, "codex", issue.HarnessArgs.Codex)
-		printHarnessArgList(out, "claude", issue.HarnessArgs.Claude)
-		printHarnessArgList(out, "harness", issue.HarnessArgs.Harness)
-	}
-	if issue.PlanMode {
-		fmt.Fprintln(out, "plan_mode: true")
-	}
-	if issue.PlanBody != "" {
-		fmt.Fprintf(out, "plan:\n%s\n", issue.PlanBody)
-		if issue.PlanApprovedAt != nil {
-			fmt.Fprintf(out, "plan_approved_at: %s\n", issue.PlanApprovedAt.Format(time.RFC3339Nano))
-		}
-	}
 	if issue.Body != "" {
 		fmt.Fprintf(out, "\n%s\n", issue.Body)
 	}
 	if issue.AcceptanceCriteria != "" {
 		fmt.Fprintf(out, "\nacceptance_criteria:\n%s\n", issue.AcceptanceCriteria)
-	}
-}
-
-func printHarnessArgList(out io.Writer, name string, args []string) {
-	if len(args) == 0 {
-		return
-	}
-	fmt.Fprintf(out, "  %s:\n", name)
-	for _, arg := range args {
-		fmt.Fprintf(out, "    - %q\n", arg)
 	}
 }
 

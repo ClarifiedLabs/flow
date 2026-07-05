@@ -782,9 +782,6 @@ func (s *projectServer) handleEditIssue(w http.ResponseWriter, r *http.Request, 
 		Priority:            request.Priority,
 		RequiresHumanReview: request.RequiresHumanReview,
 		AutoMerge:           request.AutoMerge,
-		PlanMode:            request.PlanMode,
-		AgentHarness:        request.AgentHarness,
-		HarnessArgs:         request.HarnessArgs,
 		FlowID:              request.FlowID,
 	})
 	if err != nil {

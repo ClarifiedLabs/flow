@@ -680,10 +680,6 @@ test("new issue route renders project-scoped blank form without fetching an issu
   assert.match(content.innerHTML, /<span>Flow<\/span>/);
   assert.match(content.innerHTML, /<select name="flow_id" data-flow-select>/);
   assert.match(content.innerHTML, /<option value="" selected>Project default<\/option>/);
-  assert.doesNotMatch(content.innerHTML, /name="agent_harness"/);
-  assert.doesNotMatch(content.innerHTML, /name="agent_args"/);
-  assert.doesNotMatch(content.innerHTML, /name="plan_mode"/);
-  assert.doesNotMatch(content.innerHTML, /data-save-agent-defaults/);
   assert.match(content.innerHTML, /<input name="queue_issue" type="checkbox" checked>/);
   assert.match(content.innerHTML, /<button class="button" type="submit">Create<\/button>/);
   assert.equal(status.textContent, "");
@@ -4245,7 +4241,7 @@ test("human attention panel renders the reply form while the session waits", asy
 
 test("human attention panel renders a waiting question and no longer renders plans", async () => {
   const context = await scriptContext();
-  const issue = { id: "i-0001", title: "Plan plus question", plan_body: "Step 1\nStep 2", plan_submitted_at: "2026-06-07T11:00:00Z" };
+  const issue = { id: "i-0001", title: "Plan plus question" };
   const statusLog = [{ id: 9, kind: "question", message: "which db?", created_at: "2026-06-07T12:00:00Z" }];
   const html = context.renderHumanAttentionPanel(issue, statusLog, "p-alpha", { id: "s-0001", state: "waiting" });
   // Plan-mode review is gone; phase gates are handled by renderPhaseGatePanel.

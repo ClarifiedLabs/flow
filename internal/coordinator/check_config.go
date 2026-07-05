@@ -147,9 +147,10 @@ func NewCheckConfigServiceWithOptions(database *sql.DB, checks *CheckService, wo
 
 // reviewChecksForIssue merges the agent review set into the repo-configured
 // suite: the issue's frozen flow snapshot when a cursor exists (the composable
-// review set), else the legacy defaults synthesized from the issue harness.
+// review set), else the default agent reviewer/verifier synthesized from the
+// default harness.
 func (s *CheckConfigService) reviewChecksForIssue(ctx context.Context, suite CheckSuite, issue Issue) (CheckSuite, error) {
-	args := s.harnessArgs.Add(issue.HarnessArgs)
+	args := s.harnessArgs
 	if s.flowCursors != nil {
 		cursor, ok, err := s.flowCursors.GetCursor(ctx, issue.ID)
 		if err != nil {
@@ -159,7 +160,7 @@ func (s *CheckConfigService) reviewChecksForIssue(ctx context.Context, suite Che
 			return withFlowSnapshotReviewChecks(suite, cursor.Snapshot, args)
 		}
 	}
-	return withDefaultAgentChecks(suite, issue.AgentHarness, args)
+	return withDefaultAgentChecks(suite, flowharness.DefaultAgentName(), args)
 }
 
 // withFlowSnapshotReviewChecks appends the flow's frozen review set — one

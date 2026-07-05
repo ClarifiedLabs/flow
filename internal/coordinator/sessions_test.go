@@ -115,35 +115,66 @@ func TestEnsureAuthorJobCreatesChangeAndIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestEnsureAuthorJobUsesIssueAgentHarness(t *testing.T) {
+// ensureFlowHarnessAuthorJob drives the composable-flow author path: it builds a
+// single-phase flow whose agent def runs the given harness (the replacement for
+// the former per-issue harness) and returns the ensured author job. Optional
+// coordinator-level harness args are appended to the generated command.
+func ensureFlowHarnessAuthorJob(t *testing.T, harness string, coordinatorArgs flowharness.Args) flowworker.Job {
+	t.Helper()
 	ctx := context.Background()
-	fixture := newSessionServiceFixture(t)
-	sessions, issues := fixture.sessions, fixture.issues
+	store, err := flowdb.Open(ctx, t.TempDir()+"/flow.db")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
 
-	issue, err := issues.CreateIssue(ctx, CreateIssueInput{
-		Title:        "Claude issue",
-		AgentHarness: flowharness.Claude,
+	issues := NewIssueService(store.DB())
+	workers := flowworker.NewService(store.DB())
+	flows := NewFlowService(store.DB())
+	defs := NewAgentDefService(store.DB())
+	cursors := NewFlowCursorService(store.DB(), flows)
+	sessions := NewSessionServiceWithOptions(store.DB(), issues, workers, SessionServiceOptions{
+		FlowCursors: cursors,
+		HarnessArgs: coordinatorArgs,
 	})
+
+	agentDef, err := defs.Create(ctx, AgentDefInput{Name: "author-" + harness, Harness: harness, Prompt: "Implement."})
+	if err != nil {
+		t.Fatalf("create agent def: %v", err)
+	}
+	flow, err := flows.Create(ctx, FlowInput{
+		Name:   "author-" + harness,
+		Phases: []FlowPhaseInput{{Name: "implement", AgentDefID: agentDef.ID, Gate: FlowGateAuto}},
+	})
+	if err != nil {
+		t.Fatalf("create flow: %v", err)
+	}
+	issue, err := issues.CreateIssue(ctx, CreateIssueInput{Title: harness + " issue", FlowID: flow.ID})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
 	if _, err := issues.ScheduleIssue(ctx, issue.ID, ScheduleUpNext); err != nil {
 		t.Fatalf("schedule issue: %v", err)
 	}
-
 	result, err := sessions.EnsureAuthorJob(ctx, EnsureAuthorJobInput{IssueID: issue.ID})
 	if err != nil {
 		t.Fatalf("ensure author job: %v", err)
 	}
-	if got := payloadString(result.Job.Payload, "agent_harness"); got != flowharness.Claude {
+	return result.Job
+}
+
+func TestEnsureAuthorJobUsesFlowAgentHarness(t *testing.T) {
+	job := ensureFlowHarnessAuthorJob(t, flowharness.Claude, flowharness.Args{})
+
+	if got := payloadString(job.Payload, "agent_harness"); got != flowharness.Claude {
 		t.Fatalf("job agent_harness = %q, want claude", got)
 	}
-	if got := result.Job.Selector[flowharness.AgentHarnessLabel(flowharness.Claude)]; got != "true" {
-		t.Fatalf("job selector = %#v, want claude harness requirement", result.Job.Selector)
+	if got := job.Selector[flowharness.AgentHarnessLabel(flowharness.Claude)]; got != "true" {
+		t.Fatalf("job selector = %#v, want claude harness requirement", job.Selector)
 	}
-	entrypoint, ok := result.Job.Payload["entrypoint"].(map[string]any)
+	entrypoint, ok := job.Payload["entrypoint"].(map[string]any)
 	if !ok {
-		t.Fatalf("entrypoint payload = %#v", result.Job.Payload["entrypoint"])
+		t.Fatalf("entrypoint payload = %#v", job.Payload["entrypoint"])
 	}
 	argv, ok := entrypoint["argv"].([]any)
 	if !ok || len(argv) != 1 {
@@ -158,48 +189,30 @@ func TestEnsureAuthorJobUsesIssueAgentHarness(t *testing.T) {
 			t.Fatalf("claude author command missing %q:\n%s", want, command)
 		}
 	}
-	if got := result.Job.Payload["inject_initial_prompt"]; got != false {
+	if got := job.Payload["inject_initial_prompt"]; got != false {
 		t.Fatalf("inject_initial_prompt = %#v, want false", got)
 	}
-	if got := payloadString(result.Job.Payload, "prompt_harness"); got != flowharness.Claude {
+	if got := payloadString(job.Payload, "prompt_harness"); got != flowharness.Claude {
 		t.Fatalf("prompt_harness = %q, want claude", got)
 	}
 }
 
 func TestEnsureAuthorJobUsesHarnessInitialPromptFlag(t *testing.T) {
-	ctx := context.Background()
-	fixture := newSessionServiceFixture(t)
-	sessions, issues := fixture.sessions, fixture.issues
+	job := ensureFlowHarnessAuthorJob(t, flowharness.Harness, flowharness.Args{})
 
-	issue, err := issues.CreateIssue(ctx, CreateIssueInput{
-		Title:        "Harness issue",
-		AgentHarness: flowharness.Harness,
-		HarnessArgs:  flowharness.Args{Harness: []string{"--model", "fast"}},
-	})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	if _, err := issues.ScheduleIssue(ctx, issue.ID, ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-
-	result, err := sessions.EnsureAuthorJob(ctx, EnsureAuthorJobInput{IssueID: issue.ID})
-	if err != nil {
-		t.Fatalf("ensure author job: %v", err)
-	}
-	command := entrypointCommandForTest(t, result.Job.Payload)
+	command := entrypointCommandForTest(t, job.Payload)
 	for _, want := range []string{
 		"flow fetch-prompt --harness harness",
-		`harness --hooks "$FLOW_HARNESS_HOOKS" '--model' 'fast' -i "$prompt"`,
+		`harness --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`,
 	} {
 		if !strings.Contains(command, want) {
 			t.Fatalf("harness author command missing %q:\n%s", want, command)
 		}
 	}
-	if got := result.Job.Payload["inject_initial_prompt"]; got != false {
+	if got := job.Payload["inject_initial_prompt"]; got != false {
 		t.Fatalf("inject_initial_prompt = %#v, want false for harness -i", got)
 	}
-	if got := payloadString(result.Job.Payload, "prompt_harness"); got != flowharness.Harness {
+	if got := payloadString(job.Payload, "prompt_harness"); got != flowharness.Harness {
 		t.Fatalf("prompt_harness = %q, want harness", got)
 	}
 }
@@ -217,8 +230,7 @@ func TestEnsureAuthorAndConsoleJobsAppendHarnessArgs(t *testing.T) {
 	})
 
 	issue, err := fixture.issues.CreateIssue(ctx, CreateIssueInput{
-		Title:       "Args issue",
-		HarnessArgs: flowharness.Args{Codex: []string{"--sandbox", "workspace-write"}},
+		Title: "Args issue",
 	})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
@@ -231,10 +243,8 @@ func TestEnsureAuthorAndConsoleJobsAppendHarnessArgs(t *testing.T) {
 		t.Fatalf("ensure author job: %v", err)
 	}
 	authorCommand := entrypointCommandForTest(t, author.Job.Payload)
-	for _, want := range []string{"'--model' 'gpt-5'", "'--sandbox' 'workspace-write'"} {
-		if !strings.Contains(authorCommand, want) {
-			t.Fatalf("author command missing %q:\n%s", want, authorCommand)
-		}
+	if !strings.Contains(authorCommand, "'--model' 'gpt-5'") {
+		t.Fatalf("author command missing coordinator codex args:\n%s", authorCommand)
 	}
 	for _, want := range []string{"flow fetch-prompt --harness codex", `"$prompt"`} {
 		if !strings.Contains(authorCommand, want) {

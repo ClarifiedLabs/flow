@@ -876,18 +876,6 @@ func (s *projectServer) handleSessionStatus(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "status_failed", err.Error())
 		return
 	}
-	if entry.Kind == coordinator.StatusKindPlan && s.issues != nil {
-		if _, err := s.issues.RecordPlan(r.Context(), coordinator.RecordIssuePlanInput{
-			IssueID:     entry.IssueID,
-			Body:        entry.Message,
-			StatusLogID: entry.ID,
-			SessionID:   entry.SessionID,
-			SubmittedAt: entry.CreatedAt,
-		}); err != nil {
-			writeError(w, http.StatusBadRequest, "status_failed", err.Error())
-			return
-		}
-	}
 	if statusKindAwaitsHuman(entry.Kind) {
 		if err := s.awaitHumanForSessionStatus(r, sessionID, principal, entry.Kind); err != nil {
 			writeEngineError(w, err, "status_session_event_failed")
