@@ -70,9 +70,13 @@ downstream mirror pushes, are intentionally outside the first build.
 
 - Coordinate personal agentic development across multiple hot or ephemeral
   environments.
-- Surface only the human's turn states: mid-session feedback and final merge
-  acceptance.
-- Keep code, handoff documents, check configuration, and trailers in git.
+- Surface only the human's turn states: mid-session feedback, work-phase gate
+  approvals, and final merge acceptance.
+- Make the work pipeline composable: users define agent definitions
+  (harness, model, reasoning effort, prompt) and arrange them into flows —
+  ordered work phases with per-phase human gates plus a review agent set —
+  selected per issue.
+- Keep code, CI check configuration, and trailers in git.
 - Keep operational state fast, queryable, and durable enough in local SQLite.
 - Make CI, reviewer agents, verifier agents, and author agents variants of one
   job model.
@@ -84,7 +88,8 @@ downstream mirror pushes, are intentionally outside the first build.
 - Multi-person permissions, organizations, teams, or shared issue ownership.
 - GitHub-as-peer synchronization or syncing comments/issues with external
   systems.
-- General DAG workflow orchestration.
+- General DAG workflow orchestration. Flows are linear phase pipelines feeding
+  one fixed review/merge tail, not arbitrary graphs.
 - Kubernetes-first design. Kubernetes can be a later worker provider.
 - Public SaaS hosting.
 - Release workflows such as npm publishing. Those remain repo-specific.
@@ -367,7 +372,12 @@ Flow stores repo-versioned Flow metadata inside the repository:
     *.yaml
 ```
 
-`.flow/checks/*.yaml` configures automated checks and reviewer/verifier agents.
+`.flow/checks/*.yaml` configures repo-owned automated checks: CI-type commands
+whose definition belongs with the code (build, test, lint). Agent reviewers and
+verifiers are deliberately NOT repo configuration: whether a harness+model is
+available is a coordinator/worker concern, so the agent review set lives on the
+project's flows (see Flows and Agent Definitions) where it is editable from the
+web UI. Repo checks always merge into a round alongside the flow's review set.
 
 Handoffs are not repo files. The author submits the handoff to the coordinator
 at `flow ready` (and optionally mid-session via `flow handoff write`); it is
@@ -396,6 +406,8 @@ Issue fields:
 - `triage_state`: `triage`, `accepted`, or `rejected`
 - `requires_human_review`
 - `auto_merge`
+- `flow_id`: nullable reference to the flow driving this issue's work phases;
+  empty means the project default flow, resolved when work starts
 - `created_by`: `human`, `agent`, or `system`
 - `created_by_session_id`: nullable session provenance for agent-created issues
 - `source_issue_id`: nullable issue that led to discovery
@@ -491,6 +503,75 @@ creation goes through the API. Workers that are offline from the coordinator
 cannot create coordinator-backed issues; they should note the discovery locally
 and create the issue when the coordinator is reachable.
 
+## Flows and Agent Definitions
+
+The work pipeline — what used to be the hardcoded planning → authoring
+progression — is user-composable, per project, stored in the project database,
+and editable from the web UI (`/ui/flows`), the CLI, and the API.
+
+Agent definition: a reusable agent configuration.
+
+- `name`: unique per project, e.g. `opus-reviewer`.
+- `harness`: `codex`, `claude`, or `harness`.
+- `model` and `reasoning_effort`: optional; serialized into the launch command
+  per harness (`--model X --effort Y`, `-c model_reasoning_effort=Y`,
+  `--reasoning Y`). Empty means the harness default.
+- `prompt`: the role-instruction markdown. It replaces the embedded
+  `skills/flow-*.md` content in the session's prompt; issue context (title,
+  body, acceptance criteria, prior handoffs, review state) is still appended by
+  `flow fetch-prompt`.
+
+Flow: an ordered work pipeline plus its review configuration.
+
+- `phases`: an ordered list of work phases. Each phase names itself (e.g.
+  `spec`), references an agent definition, and declares an exit `gate`:
+  - `auto`: the next phase's job is enqueued immediately when the phase
+    completes.
+  - `human`: the flow pauses; a human reviews the phase's handoff in the UI and
+    either approves (advance) or requests changes (the same phase re-runs with
+    the feedback injected into its prompt).
+- `review_agents`: which agent reviewers (critique) and verifiers (acceptance)
+  run once the final phase publishes the change. Repo `.flow/checks/*.yaml`
+  CI checks always merge in; an empty review set deliberately runs repo checks
+  alone.
+- `fix_agent_def_id`: optional agent for review fix rounds; the default is the
+  final work phase's agent.
+
+Each project seeds built-in configuration on first open so a fresh project
+works with zero setup: agent defs `planner`, `author`, `reviewer`, and
+`verifier` (prompts copied from the embedded skills, default harness), plus two
+flows — `direct` (`implement` only; the project default) and `planned`
+(human-gated `plan`, then `implement`). These reproduce the old fixed behavior
+and are ordinary rows the user can edit or replace.
+
+Snapshot semantics: when an issue's work starts (its first author job is
+ensured), the coordinator freezes the resolved flow — phases with full
+agent-def copies, review set, and fix agent — into a per-issue flow cursor
+(`issue_flow_cursor.flow_snapshot_json`). Editing or deleting a flow never
+changes an in-flight issue; unscheduled issues resolve the live flow when they
+start, and a deleted flow falls back to the project default. Referenced agent
+definitions cannot be deleted while a flow uses them; the default flow cannot
+be deleted.
+
+Phase execution model:
+
+- Every phase runs as a fresh author-role job/session (phases may use different
+  harnesses, so sessions never continue across phases). The job payload carries
+  the phase coordinates (`phase_name`, `phase_index`, `final_phase`,
+  `gate_feedback`) and an entrypoint built from the phase agent's harness and
+  model selection.
+- `flow ready` is the single completion signal for every phase. Each phase
+  submits a handoff; the engine copies it into a per-phase store
+  (`issue_phase_handoffs`) and injects completed phases' handoffs into later
+  phases' prompts. Only the final phase's `flow ready` publishes the change
+  into review; intermediate handoffs are the phase's artifact (a spec, a plan)
+  and only need to be non-empty, while the final phase's handoff must follow
+  the Flow Handoff template.
+- Prompt material is resolved server-side: sessions call
+  `GET /issues/{id}/prompt-context` (with `?check=<name>` for review checks) to
+  receive the frozen agent prompt, gate feedback, and prior-phase handoffs, so
+  prompts always reflect the snapshot the issue is actually running.
+
 ## Identity and Naming
 
 IDs use stable prefixes:
@@ -515,15 +596,29 @@ Issue titles can change without changing branch names.
 
 ## Domain Model
 
-Flow's core nouns are Issue, Session, and Change.
+Flow's core nouns are Issue, Session, Change, Agent Definition, Flow, and the
+per-issue Flow Cursor.
 
 Issue:
 
 - Stable task identity and editorial content.
 - Stored and queried in SQLite.
 - Owns scheduling knobs: `schedule_state`, `priority`,
-  `requires_human_review`, and `auto_merge`.
+  `requires_human_review`, and `auto_merge`, plus the `flow_id` selection.
 - Can have tags and relationships to other issues.
+
+Agent Definition and Flow:
+
+- Project-owned configuration rows (see Flows and Agent Definitions): reusable
+  agent configs, and ordered phase pipelines with gates and review sets.
+
+Flow Cursor:
+
+- The issue's frozen position within its flow: the resolved snapshot plus
+  `phase_index` and `phase_state`
+  (`pending`, `running`, `awaiting_approval`, `completed`) and any gate
+  feedback. Owned by the lifecycle engine; mutations are compare-and-swap on
+  the phase index so at-least-once event delivery stays idempotent.
 
 Session:
 
@@ -551,7 +646,14 @@ are `queued`, `claimed`, and `running`.
 
 The database holds the local operational state:
 
-- `issues`: issue fields, scheduling, triage, provenance, and timestamps.
+- `issues`: issue fields, scheduling, triage, flow selection, provenance, and
+  timestamps.
+- `agent_defs`: reusable agent configurations (harness, model, effort, prompt).
+- `flows`, `flow_phases`, `flow_review_agents`: the project's flow catalog —
+  ordered phases with gates plus the review agent set and fix agent.
+- `issue_flow_cursor`: the issue's frozen flow snapshot and phase position.
+- `issue_phase_handoffs`: per-phase completion artifacts (specs, plans, the
+  final handoff), shown at gates and injected into later phases' prompts.
 - `issue_relations`: parent/child, blocker, and related issue links.
 - `tags`: tag definitions.
 - `issue_tags`: many-to-many issue tags.
@@ -595,17 +697,17 @@ fine-grained sub-state. Precedence, top wins:
 2. `ready_to_merge`: review state is `approved`, `auto_merge=false`, and not
    merged.
 3. `changes_requested`: any required check verdict is `blocked`.
-4. `planning`: plan mode is enabled and the issue does not have an approved
-   plan yet.
-5. `in_progress`: active session is `starting`, `working`, or `waiting`.
-6. `triage`: issue `triage_state=triage`.
-7. `in_review`: an unmerged ready change with review state `in_review`.
-8. `up_next`: issue `schedule_state=up_next`.
-9. `backlog`: everything else.
+4. `in_progress`: active session is `starting`, `working`, or `waiting`, or
+   the flow cursor pins the issue mid-pipeline (paused at a human gate, or
+   between phase jobs past the first phase).
+5. `triage`: issue `triage_state=triage`.
+6. `in_review`: an unmerged ready change with review state `in_review`.
+7. `up_next`: issue `schedule_state=up_next`.
+8. `backlog`: everything else.
 
 A human wait is a `wait_reason` overlay on the sub-state, not a sub-state of
-its own. Current wait reasons include `plan_approval`, `question`,
-`manual_merge`, and `blocked`.
+its own. Current wait reasons include `phase_approval` (a work phase's handoff
+awaits gate approval), `question`, `manual_merge`, and `blocked`.
 
 Second, the sub-state coarsens into one of four lanes, grouped by who acts
 next:
@@ -614,12 +716,14 @@ next:
 | --- | --- | --- |
 | `backlog` | `backlog`, `triage` | undecided or unscheduled |
 | `up_next` | `up_next` | waiting for an agent to pick it up |
-| `in_progress` | `planning`, `in_progress`, `in_review`, `changes_requested` | automation is working |
+| `in_progress` | `in_progress`, `in_review`, `changes_requested` | automation is working |
 | `needs_attention` | wait reasons, `ready_to_merge`, blocked overlay | waiting on a human |
 
-The sub-state is surfaced as a pill on issue cards; `blocked` is a derived
-overlay (unresolved `blocks` relations) rendered as a warning pill and routed
-to `needs_attention`, never a lane of its own.
+The sub-state is surfaced as a pill on issue cards, alongside a flow-phase
+pill (`plan 1/2`, with awaiting-approval styling at a gate) when the issue has
+a flow cursor; `blocked` is a derived overlay (unresolved `blocks` relations)
+rendered as a warning pill and routed to `needs_attention`, never a lane of
+its own.
 
 Review state is also derived:
 
@@ -639,27 +743,39 @@ transition, providing a durable, auditable coordinate and the timeline view.
 
 ## Issue Lifecycle
 
-1. Human creates an issue with `flow issue create`.
+1. Human creates an issue with `flow issue create [--flow <flow>]`.
 2. Issue starts in `backlog`.
 3. Human schedules it with `flow issue schedule i-0001 up_next`.
-4. Coordinator enqueues an author job if the issue is accepted, no active or
-   queued author job/session exists, and no unresolved blocker exists.
+4. Coordinator freezes the issue's flow into its cursor (the selected flow, or
+   the project default) and enqueues the first phase's author job if the issue
+   is accepted, no active or queued author job/session exists, and no
+   unresolved blocker exists.
 5. Worker claims the job, creates/checks out `issue/i-0001`, starts tmux, and
-   runs the entrypoint.
-6. The author session alternates between `working` and `waiting`.
-7. Author calls `flow ready` when the branch is ready for review.
-8. Coordinator releases the hot slot and starts critique checks.
-9. Review loop runs until review state is `approved`.
-10. If a required check blocks the change, Flow enqueues a new author job on the
-    same issue branch when no active or queued author job exists.
-11. Each fix round creates a new author session row and reuses the same change
+   runs the entrypoint built from the phase agent's harness and model
+   selection.
+6. The session alternates between `working` and `waiting`.
+7. The agent calls `flow ready` when its phase is done, piping the phase's
+   handoff on stdin.
+8. For an intermediate phase, the engine stores the handoff and either
+   enqueues the next phase's job (`gate=auto`) or pauses awaiting approval
+   (`gate=human`). At a gate the human approves (advance) or requests changes
+   (the same phase re-runs with the feedback in its prompt). Steps 5-8 repeat
+   per phase.
+9. The final phase's `flow ready` publishes the change: the coordinator
+   releases the hot slot and starts critique checks — the flow's review agents
+   plus repo `.flow/checks` CI checks.
+10. Review loop runs until review state is `approved`.
+11. If a required check blocks the change, Flow enqueues a fix author job on
+    the same issue branch (using the flow's fix agent) when no active or
+    queued author job exists.
+12. Each fix round creates a new author session row and reuses the same change
     and branch.
-12. The author fixes the branch, pushes, and calls `flow ready` again.
-13. Flow reruns required critique checks for the new HEAD.
-14. If `auto_merge=true`, coordinator merges automatically.
-15. If `auto_merge=false`, the board shows the issue in `needs_attention` with
+13. The author fixes the branch, pushes, and calls `flow ready` again.
+14. Flow reruns required critique checks for the new HEAD.
+15. If `auto_merge=true`, coordinator merges automatically.
+16. If `auto_merge=false`, the board shows the issue in `needs_attention` with
     a `ready_to_merge` pill until the human clicks merge.
-16. Merge sets `merged_at`, sets the issue `schedule_state=closed`, and removes
+17. Merge sets `merged_at`, sets the issue `schedule_state=closed`, and removes
     the issue from the board.
 
 Agent-discovered issues enter the backlog lane with a `triage` sub-state pill
@@ -676,25 +792,43 @@ shrink to "authenticate, build a typed event, call `engine.Step`".
 Each issue carries an authoritative `phase` in `workflow_state`:
 
 ```text
-triage  backlog  up_next  planning  authoring
+triage  backlog  up_next  working
 critique  acceptance  approved
 merged_closed  rejected_closed  abandoned
 ```
 
 `phase` is a projection of the existing state mechanisms (schedule/triage
-columns, the review-state view, change ready/merged latches, and active author
-sessions). It is recomputed by the same precedence the board sub-states use,
-so each phase maps deterministically into one of the four board lanes.
-`blocked` remains a derived overlay and is never stored.
+columns, the review-state view, change ready/merged latches, active author
+sessions, and the flow cursor). It is recomputed by the same precedence the
+board sub-states use, so each phase maps deterministically into one of the four
+board lanes. `blocked` remains a derived overlay and is never stored.
+
+`working` is a container phase: the entire user-composed work pipeline runs
+inside it, and the issue's position within the pipeline lives on the flow
+cursor (snapshot + `phase_index` + `phase_state`), not in `workflow_state`.
+This keeps the FSM's transition table static and reviewable while phases,
+gates, and agents remain user configuration. The cursor alone can pin an issue
+in `working` — paused at a human gate, or between phase jobs — even with no
+active session. Custom phase names surface through the cursor on the board and
+issue views; the transition log records the gate and advance events.
 
 The canonical workflow specification is a single Go table,
 `internal/lifecycle/transitions.go`, expressed as
 `[]Transition{From, On, Guard, Action, To}` rows. Reviewing one file shows every
 legal edge. Events are typed, one per external input — `ScheduleIssue`,
-`TriageIssue`, `SessionReady`, `CheckReported`, `MergeRequested`, the thread
-events — plus bounded internal follow-on events (for example a blocked required
-check emits a guarded `EnsureFixAuthorJob` edge, and an approved auto-merge issue
-emits an `AutoMerge` edge).
+`TriageIssue`, `SessionReady` (the phase-completion signal behind `flow
+ready`), `WorkPhaseApproved`, `WorkPhaseRework`, `CheckReported`,
+`MergeRequested`, the thread events — plus bounded internal follow-on events
+(for example scheduling emits `EnsureWorkPhaseJob` to freeze the cursor and
+enqueue the current phase's job, a blocked required check emits a guarded
+`EnsureFixAuthorJob` edge, and an approved auto-merge issue emits an
+`AutoMerge` edge).
+
+Cursor mutations are engine effects with compare-and-swap semantics (advance
+from index N, pause at N, resume at N with feedback, complete at N), so the
+engine's at-least-once delivery and version-conflict retries cannot
+double-advance a pipeline. The work-phase dwell deadline re-arms per phase and
+declines to escalate while a gate deliberately waits on a human.
 
 `engine.Step` is the single entry point. For one event it:
 
@@ -779,22 +913,25 @@ consistency error so the state can be inspected rather than hidden.
 
 ## Entrypoint Configuration
 
-Flow has two entrypoint sources during the MVP:
+Flow has three entrypoint sources:
 
-1. Coordinator configuration.
-   The coordinator config records default local command templates for jobs that
-   do not yet come from repo-versioned check config. The initial default author
-   harness is Codex. Claude Code is the next supported harness. Manual fake CI
-   jobs can supply an explicit entrypoint when enqueued.
+1. Flow/agent-definition configuration (the normal case).
+   Author-phase and fix-round jobs build their entrypoint from the issue's
+   frozen flow snapshot: the phase agent's harness launch template plus its
+   serialized model/reasoning selection, appended to coordinator-level harness
+   args. The flow's review agents build reviewer/verifier check commands the
+   same way.
 
 2. Repo-versioned check configuration.
-   `.flow/checks/*.yaml` defines CI, reviewer, and verifier jobs once check
-   configuration is implemented. Until then, manually enqueued fake checks and
-   the local default author harness are enough to exercise the worker.
+   `.flow/checks/*.yaml` defines repo-owned CI-type jobs with explicit
+   entrypoints. These merge into every review round regardless of flow.
 
-When both sources exist, repo check configuration controls check jobs. Local
-project configuration continues to control the default author harness unless a
-repo configuration explicitly overrides it.
+3. Coordinator configuration.
+   `author_entrypoint` in the coordinator config, when set, overrides the
+   generated author entrypoint wholesale (test/dev escape hatch), and
+   coordinator `harness_args` contribute additive argv tokens to generated
+   commands. Manual fake CI jobs can supply an explicit entrypoint when
+   enqueued.
 
 Entrypoints are stored as structured data, not as an implicit shell string:
 
@@ -909,6 +1046,10 @@ Important environment variables:
 - `FLOW_WORKER_ROLE`
 - `FLOW_WORKER_HARNESS`
 - `FLOW_ROLE`
+- `FLOW_PHASE_NAME`, `FLOW_PHASE_INDEX`, `FLOW_PHASE_FINAL`: the author job's
+  work-phase coordinates. `FLOW_PHASE_FINAL=false` relaxes `flow ready`'s
+  handoff-template validation (intermediate phase artifacts only need to be
+  non-empty).
 
 Entrypoint contract:
 
@@ -945,12 +1086,16 @@ flow comment <sha>:<file>:<line> "<body>"
 flow thread reply <thread-id> "<body>"
 flow thread claim <thread-id> fixed|not_warranted|superseded [--body "<rationale>"]
 flow verdict satisfied|blocked
-flow ready           # reads the handoff on stdin, pushes the branch, requests review
+flow ready           # completes the current work phase: reads the handoff on
+                     # stdin and pushes the branch; only the final phase
+                     # publishes the change into review
 ```
 
 `flow fetch-prompt` reads the Flow worker environment for author, reviewer, and
-verifier jobs, embeds the matching compiled role instructions, and emits the
-initial harness prompt. `flow init` does not seed role skills into project
+verifier jobs, resolves the phase/check agent prompt from the coordinator's
+prompt context (falling back to the embedded role skills when no flow cursor
+exists), appends issue context, prior-phase handoffs, and gate feedback, and
+emits the initial harness prompt. `flow init` does not seed role skills into project
 repositories, and `flow-worker` does not validate committed skill files in the
 worker checkout before starting the entrypoint. `FLOW_WORKER_HARNESS` is set by
 `flow-worker` from the
@@ -960,7 +1105,7 @@ override.
 Human commands:
 
 ```text
-flow issue create
+flow issue create [--flow <flow-id-or-name>]
 flow issue edit <issue-id>
 flow issue schedule <issue-id> backlog|up_next
 flow issue close <issue-id>
@@ -968,6 +1113,10 @@ flow issue triage accept|reject <issue-id>
 flow issue tag add|remove <issue-id> <tag>
 flow issue link <source-id> parent-of|blocks|related-to <target-id>
 flow issue unlink <source-id> parent-of|blocks|related-to <target-id>
+flow phase approve <issue-id>
+flow phase request-changes <issue-id> --feedback "<text>"
+flow flows list|create|edit|rm|set-default    # create/edit take -f flow.yaml
+flow agent-defs list|create|edit|rm           # create/edit take -f agent.yaml
 flow board
 flow attach <session-id>
 flow attach --job <job-id>
@@ -1126,7 +1275,10 @@ commit they also:
 
 At `flow ready` the session submits the handoff to the coordinator (piped on
 stdin); it may also push an interim handoff snapshot mid-session with
-`flow handoff write`. The handoff document must include:
+`flow handoff write`. An intermediate work phase's handoff is the phase's
+artifact — a spec, a plan — reviewed at approval gates and injected into later
+phases' prompts; it only has to be non-empty. The final, change-publishing
+phase's handoff must include:
 
 - Current goal.
 - Completed work.
@@ -1167,12 +1319,13 @@ There are two phases:
    The verifier audits acceptance criteria and claimed thread resolutions after
    critique settles.
 
-If the repo does not configure a reviewer check, Flow synthesizes a required
-default reviewer that uses the bundled reviewer instructions. If the repo does
-not configure a verifier check, Flow synthesizes a required default verifier
-that uses the bundled verifier instructions after critique passes. Repo
-configuration takes precedence per role, so defining any `kind=reviewer` or
-`kind=verifier` check suppresses that default.
+Agent reviewer and verifier checks come from the issue's frozen flow snapshot:
+one check per review agent, named after its agent definition, launched with
+that agent's harness and model/effort selection, and prompted with its agent
+prompt. Repo `.flow/checks/*.yaml` CI checks always merge into the round. A
+flow with an empty review set deliberately runs repo checks alone. Issues
+without a flow cursor (a project with no flows configured) fall back to
+synthesized default reviewer/verifier checks using the bundled instructions.
 
 Reviewer checks clear only by rerunning and producing `satisfied`. Authors do
 not mark reviewer verdicts as fixed.
@@ -1187,11 +1340,12 @@ a duplicate thread. If the same concern appears in a new location or the
 original anchor no longer projects cleanly, the reviewer may open a new thread
 and reference the older one.
 
-When required checks block a change, Flow sends the issue back to authoring
+When required checks block a change, Flow sends the issue back to a fix round
 automatically if it can be worked: the issue is accepted, unmerged, unblocked by
-other issues, and has no active or queued author job. The fix job creates a new
-author session on the same change branch. When that session calls `flow ready`,
-Flow treats the branch's new HEAD as the next review round and reruns required
+other issues, and has no active or queued author job. The fix job runs the
+flow's fix agent (default: the final work phase's agent) in a new author
+session on the same change branch. When that session calls `flow ready`, Flow
+treats the branch's new HEAD as the next review round and reruns required
 critique checks before verifier acceptance.
 
 ## Threads and Resolution
@@ -1243,8 +1397,12 @@ with an explanation.
 
 ## Human Gates
 
-Flow has two independent human gates:
+Flow has three independent human gates:
 
+- Work-phase gates: a flow phase with `gate=human` pauses after the phase
+  completes; the human reviews the phase's handoff and approves or requests
+  changes. This generalizes the old plan-approval gate — the seeded `planned`
+  flow is exactly a human-gated `plan` phase before `implement`.
 - `requires_human_review`: creates a required human reviewer check in the
   critique phase.
 - `auto_merge=false`: requires a final human merge action after review state is
@@ -1361,9 +1519,15 @@ Required views:
   attach action, and manual merge actions.
 - Merge inbox: `ready_to_merge` changes with check summary, diff stats, branch
   head, and the merge action when human action is required.
-- Issue detail: title, body, acceptance criteria, tags, relationships,
+- Issue detail: title, body, acceptance criteria, tags, relationships, the
+  issue's flow (phase chain with agents and gates, current position),
   schedule/triage/close controls, status feed, active and historical sessions,
-  linked change state, and a Lifecycle timeline of phase transitions.
+  linked change state, and a Lifecycle timeline of phase transitions. When a
+  phase awaits gate approval, a prominent panel renders the pending handoff as
+  markdown with Approve and Request-changes actions.
+- Flows settings: manage the project's agent definitions (name, harness,
+  model/reasoning pickers from the harness catalog, prompt) and flows (phase
+  rows with agent and gate, review agent rows, fix agent, default flow).
 - Change detail: commit summary, base/head SHAs, parsed diff, check results,
   review threads, comments, claim actions, and merge eligibility.
 - Terminal attach: authenticated embedded ttyd frame or authenticated link in a
@@ -1379,6 +1543,7 @@ prefix:
 /ui/triage
 /ui/feedback
 /ui/merge
+/ui/flows
 /ui/projects/<project-id>/issues/<issue-id>
 /ui/changes/<change-id>
 /ui/workers
