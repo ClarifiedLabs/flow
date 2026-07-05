@@ -37,12 +37,6 @@ const (
 
 var ErrAuthorJobSuppressed = errors.New("author job suppressed")
 
-type AuthorSessionPurpose string
-
-const (
-	AuthorSessionPurposePlanning  AuthorSessionPurpose = "planning"
-	AuthorSessionPurposeAuthoring AuthorSessionPurpose = "authoring"
-)
 
 type SessionRuntimeState string
 
@@ -109,7 +103,6 @@ type EnsureAuthorJobInput struct {
 	Branch   string
 	Base     string
 	Priority int
-	Purpose  AuthorSessionPurpose
 	Payload  map[string]any
 }
 
@@ -236,6 +229,11 @@ type SessionServiceOptions struct {
 	// skipped and crash recovery falls back to the bounded author relaunch.
 	HandoffSnapshots handoffSnapshotGetter
 	ReviewRounds     reviewRoundScheduler
+
+	// FlowCursors resolves the issue's flow cursor so author jobs launch the
+	// current work phase's agent (harness, model/effort, prompt). Optional:
+	// when nil, jobs fall back to the issue-level harness selection.
+	FlowCursors *FlowCursorService
 }
 
 // handoffSnapshotGetter reads the coordinator-owned handoff snapshot for a
@@ -262,6 +260,7 @@ type SessionService struct {
 	reviewCycles                    *ReviewCycleService
 	handoffSnapshots                handoffSnapshotGetter
 	reviewRounds                    reviewRoundScheduler
+	flowCursors                     *FlowCursorService
 	now                             func() time.Time
 }
 
@@ -299,8 +298,74 @@ func NewSessionServiceWithOptions(database *sql.DB, issues *IssueService, worker
 		reviewCycles:                    NewReviewCycleService(database, opts.ReviewAuthorCycleLimit),
 		handoffSnapshots:                opts.HandoffSnapshots,
 		reviewRounds:                    opts.ReviewRounds,
+		flowCursors:                     opts.FlowCursors,
 		now:                             sqlitex.UTCNow,
 	}
+}
+
+// workPhaseContext is the resolved "which agent runs this author job" answer:
+// the cursor's current phase for pipeline work, the flow's fix agent once the
+// pipeline completed (review fix rounds), or the issue-level fallback when no
+// cursor exists.
+type workPhaseContext struct {
+	hasCursor    bool
+	phaseName    string
+	phaseIndex   int
+	finalPhase   bool
+	gateFeedback string
+	agent        AgentDefSnapshot
+}
+
+// harnessFor returns the harness the job should launch: the phase agent's
+// when a cursor drives the job, else the issue-level selection.
+func (c workPhaseContext) harnessFor(issue Issue) string {
+	if c.hasCursor && strings.TrimSpace(c.agent.Harness) != "" {
+		return c.agent.Harness
+	}
+	return issue.AgentHarness
+}
+
+// resolveWorkPhase freezes/loads the issue's flow cursor and picks the agent
+// for the next author job. A completed cursor means the pipeline already
+// readied its change, so the job is a review fix round and uses the flow's
+// fix agent.
+func (s *SessionService) resolveWorkPhase(ctx context.Context, issueID string) (workPhaseContext, error) {
+	fallback := workPhaseContext{finalPhase: true}
+	if s.flowCursors == nil {
+		return fallback, nil
+	}
+	cursor, ok, err := s.flowCursors.EnsureCursor(ctx, issueID)
+	if err != nil {
+		return workPhaseContext{}, err
+	}
+	if !ok {
+		return fallback, nil
+	}
+	if cursor.PhaseState == FlowPhaseCompleted {
+		agent, err := cursor.Snapshot.FixAgentOrLastPhase()
+		if err != nil {
+			return workPhaseContext{}, err
+		}
+		return workPhaseContext{
+			hasCursor:  true,
+			phaseName:  "fix",
+			phaseIndex: cursor.PhaseIndex,
+			finalPhase: true,
+			agent:      agent,
+		}, nil
+	}
+	phase, ok := cursor.CurrentPhase()
+	if !ok {
+		return fallback, nil
+	}
+	return workPhaseContext{
+		hasCursor:    true,
+		phaseName:    phase.Name,
+		phaseIndex:   cursor.PhaseIndex,
+		finalPhase:   cursor.OnFinalPhase(),
+		gateFeedback: cursor.GateFeedback,
+		agent:        phase.Agent,
+	}, nil
 }
 
 func (s *SessionService) EnsureAuthorJob(ctx context.Context, input EnsureAuthorJobInput) (EnsureAuthorJobResult, error) {
@@ -436,13 +501,17 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 	if err := validateBranchLike("base", base); err != nil {
 		return EnsureAuthorJobResult{}, err
 	}
-	purpose := normalizeAuthorSessionPurpose(input.Purpose, issue)
+	phaseCtx, err := s.resolveWorkPhase(ctx, issue.ID)
+	if err != nil {
+		return EnsureAuthorJobResult{}, err
+	}
+	jobHarness := phaseCtx.harnessFor(issue)
 
 	if existing, ok, err := s.workers.LiveAuthorJobForIssue(ctx, issue.ID); err != nil {
 		return EnsureAuthorJobResult{}, err
 	} else if ok {
 		existingChangeID := stringPointerValue(existing.ChangeID)
-		if existingChangeID == "" || !authorJobMatches(existing, existingChangeID, branch, base, issue.AgentHarness, purpose) {
+		if existingChangeID == "" || !authorJobMatches(existing, existingChangeID, branch, base, jobHarness, phaseCtx.phaseIndex) {
 			return EnsureAuthorJobResult{}, errors.New("live author job has incompatible change or branch")
 		}
 		change, err := s.GetChange(ctx, existingChangeID)
@@ -487,19 +556,19 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 	}
 	payload := copyPayload(input.Payload)
 	if _, ok := payload["entrypoint"]; !ok {
-		entrypoint, injectInitialPrompt, err := s.defaultAuthorEntrypointPayload(issue)
+		entrypoint, injectInitialPrompt, err := s.authorEntrypointPayload(issue, phaseCtx)
 		if err != nil {
 			return EnsureAuthorJobResult{}, err
 		}
 		payload["entrypoint"] = entrypoint
 		payload["inject_initial_prompt"] = injectInitialPrompt
-		payload["prompt_harness"] = issue.AgentHarness
+		payload["prompt_harness"] = jobHarness
 	}
 	payload["change_id"] = change.ID
 	payload["branch"] = branch
 	payload["base"] = base
-	payload["agent_harness"] = issue.AgentHarness
-	payload["session_purpose"] = string(purpose)
+	payload["agent_harness"] = jobHarness
+	stampWorkPhasePayload(payload, phaseCtx)
 	if err := stampImageAttachments(ctx, s.issues, payload, issue.ID); err != nil {
 		return EnsureAuthorJobResult{}, err
 	}
@@ -511,17 +580,34 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 		Role:           flowworker.RoleAuthor,
 		CapacityBucket: flowworker.BucketPersistentAgent,
 		Priority:       priority,
-		Requires:       authorHarnessRequirements(issue.AgentHarness),
+		Requires:       authorHarnessRequirements(jobHarness),
 		Payload:        payload,
 	})
 	if err != nil {
-		if existing, ok, lookupErr := s.workers.LiveAuthorJobForIssue(ctx, issue.ID); lookupErr == nil && ok && authorJobMatches(existing, change.ID, branch, base, issue.AgentHarness, purpose) {
+		if existing, ok, lookupErr := s.workers.LiveAuthorJobForIssue(ctx, issue.ID); lookupErr == nil && ok && authorJobMatches(existing, change.ID, branch, base, jobHarness, phaseCtx.phaseIndex) {
 			return EnsureAuthorJobResult{Job: existing, Change: change, Existing: true}, nil
 		}
 		return EnsureAuthorJobResult{}, err
 	}
 
 	return EnsureAuthorJobResult{Job: job, Change: change}, nil
+}
+
+// stampWorkPhasePayload records the job's work-phase coordinates: which phase
+// it runs, whether that phase publishes the change, and any gate feedback to
+// inject into the prompt. Jobs without a cursor are the implicit single final
+// phase.
+func stampWorkPhasePayload(payload map[string]any, phaseCtx workPhaseContext) {
+	payload["phase_index"] = phaseCtx.phaseIndex
+	payload["final_phase"] = phaseCtx.finalPhase
+	if phaseCtx.hasCursor {
+		payload["phase_name"] = phaseCtx.phaseName
+	}
+	if strings.TrimSpace(phaseCtx.gateFeedback) != "" {
+		payload["gate_feedback"] = strings.TrimSpace(phaseCtx.gateFeedback)
+	} else {
+		delete(payload, "gate_feedback")
+	}
 }
 
 func (s *SessionService) shouldConsumeReviewCycle(ctx context.Context, issueID string) (bool, error) {
@@ -976,11 +1062,15 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 	if change.MergedAt != nil {
 		return false, nil
 	}
-	purpose := payloadAuthorSessionPurpose(job.Payload)
+	crashedHarness := payloadString(job.Payload, "agent_harness")
+	if crashedHarness == "" {
+		crashedHarness = issue.AgentHarness
+	}
+	crashedPhaseIndex := payloadPhaseIndex(job.Payload)
 	if existing, ok, err := s.workers.LiveAuthorJobForIssue(ctx, issue.ID); err != nil {
 		return false, err
 	} else if ok {
-		if authorJobMatches(existing, change.ID, session.Branch, session.Base, issue.AgentHarness, purpose) {
+		if authorJobMatches(existing, change.ID, session.Branch, session.Base, crashedHarness, crashedPhaseIndex) {
 			return false, nil
 		}
 		return false, errors.New("live author job has incompatible change or branch")
@@ -993,12 +1083,12 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 	if completionReviewDispatched(job) {
 		return false, nil
 	}
-	if dispatched, err := s.maybeDispatchCompletionReview(ctx, issue, change, job, purpose); err != nil {
+	if dispatched, err := s.maybeDispatchCompletionReview(ctx, issue, change, job); err != nil {
 		return false, err
 	} else if dispatched {
 		return true, nil
 	}
-	exhausted, attempts, err := s.authorCrashRestartLimitReached(ctx, issue.ID, change.ID, purpose)
+	exhausted, attempts, err := s.authorCrashRestartLimitReached(ctx, issue.ID, change.ID, crashedPhaseIndex)
 	if err != nil {
 		return false, err
 	}
@@ -1028,24 +1118,29 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 			payload["review_cycle_instructions"] = strings.TrimSpace(budget.LastInstructions)
 		}
 	}
+	// The crashed job's payload carries its phase coordinates and entrypoint;
+	// the relaunch re-runs the SAME phase with the same agent (the cursor did
+	// not move — the phase never completed).
 	if _, ok := payload["entrypoint"]; !ok {
-		entrypoint, injectInitialPrompt, err := s.defaultAuthorEntrypointPayload(issue)
+		phaseCtx, err := s.resolveWorkPhase(ctx, issue.ID)
+		if err != nil {
+			return false, err
+		}
+		entrypoint, injectInitialPrompt, err := s.authorEntrypointPayload(issue, phaseCtx)
 		if err != nil {
 			return false, err
 		}
 		payload["entrypoint"] = entrypoint
 		payload["inject_initial_prompt"] = injectInitialPrompt
-		payload["prompt_harness"] = issue.AgentHarness
+		payload["prompt_harness"] = phaseCtx.harnessFor(issue)
+		payload["agent_harness"] = phaseCtx.harnessFor(issue)
+		stampWorkPhasePayload(payload, phaseCtx)
 	}
 	payload["change_id"] = change.ID
 	payload["branch"] = session.Branch
 	payload["base"] = session.Base
-	payload["agent_harness"] = issue.AgentHarness
 	if err := stampImageAttachments(ctx, s.issues, payload, issue.ID); err != nil {
 		return false, err
-	}
-	if payloadString(payload, "session_purpose") == "" {
-		payload["session_purpose"] = string(normalizeAuthorSessionPurpose("", issue))
 	}
 
 	_, err = s.workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
@@ -1054,7 +1149,7 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 		Role:           flowworker.RoleAuthor,
 		CapacityBucket: flowworker.BucketPersistentAgent,
 		Priority:       job.Priority,
-		Requires:       authorHarnessRequirements(issue.AgentHarness),
+		Requires:       authorHarnessRequirements(crashedHarness),
 		Payload:        payload,
 	})
 	if err != nil {
@@ -1096,13 +1191,13 @@ func changeIsAheadOfBase(change Change) bool {
 // later fix-round author that crashes falls through to the normal bounded
 // relaunch. Returns false (with no side effects) whenever the recovery
 // preconditions are not met, so the caller keeps today's behavior.
-func (s *SessionService) maybeDispatchCompletionReview(ctx context.Context, issue Issue, change Change, job flowworker.Job, purpose AuthorSessionPurpose) (bool, error) {
+func (s *SessionService) maybeDispatchCompletionReview(ctx context.Context, issue Issue, change Change, job flowworker.Job) (bool, error) {
 	if s.reviewRounds == nil || s.handoffSnapshots == nil {
 		return false, nil
 	}
-	// Planning sessions do not produce a reviewable change; only authoring
-	// sessions can be completion-assessed.
-	if purpose != AuthorSessionPurposeAuthoring {
+	// Only the final work phase produces a reviewable change; intermediate
+	// phases (spec, plan, ...) cannot be completion-assessed.
+	if !payloadBool(job.Payload, "final_phase") {
 		return false, nil
 	}
 	// Fire only for a change the author never finalized. Once marked ready below,
@@ -1190,7 +1285,7 @@ WHERE id = ?`,
 	return nil
 }
 
-func (s *SessionService) authorCrashRestartLimitReached(ctx context.Context, issueID string, changeID string, purpose AuthorSessionPurpose) (bool, int, error) {
+func (s *SessionService) authorCrashRestartLimitReached(ctx context.Context, issueID string, changeID string, phaseIndex int) (bool, int, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT payload_json
 FROM jobs
@@ -1227,7 +1322,9 @@ WHERE issue_id = ?
 		if payloadBool(payload, completionReviewDispatchedKey) {
 			continue
 		}
-		if payloadAuthorSessionPurpose(payload) == purpose {
+		// Restart budgets are per work phase: a crash in phase 2 must not
+		// inherit phase 1's spent attempts.
+		if payloadPhaseIndex(payload) == phaseIndex {
 			attempts++
 		}
 	}
@@ -1301,12 +1398,23 @@ func consoleHarnessRequirements(harness string) []string {
 	return []string{flowharness.AgentHarnessLabel(harness)}
 }
 
-func (s *SessionService) defaultAuthorEntrypointPayload(issue Issue) (map[string]any, bool, error) {
+// authorEntrypointPayload builds the agent launch entrypoint for an author
+// job: the phase agent's harness with its model/effort selection appended to
+// the coordinator/issue harness args, or the issue-level fallback when no
+// cursor drives the job.
+func (s *SessionService) authorEntrypointPayload(issue Issue, phaseCtx workPhaseContext) (map[string]any, bool, error) {
 	if s.defaultAuthorEntrypointOverride {
 		return copyPayload(s.defaultAuthorEntrypoint), true, nil
 	}
 	args := s.harnessArgs.Add(issue.HarnessArgs)
-	entrypoint, err := flowharness.DefaultAuthorEntrypointWithArgs(issue.AgentHarness, args)
+	if phaseCtx.hasCursor {
+		tokens, err := phaseCtx.agent.ModelSelectionArgs()
+		if err != nil {
+			return nil, false, err
+		}
+		args = args.Add(flowharness.ArgsFor(phaseCtx.agent.Harness, tokens))
+	}
+	entrypoint, err := flowharness.DefaultAuthorEntrypointWithArgs(phaseCtx.harnessFor(issue), args)
 	return entrypoint, false, err
 }
 
@@ -3214,28 +3322,7 @@ func scanSession(scanner issueScanner) (Session, error) {
 	return session, nil
 }
 
-func normalizeAuthorSessionPurpose(purpose AuthorSessionPurpose, issue Issue) AuthorSessionPurpose {
-	switch purpose {
-	case AuthorSessionPurposePlanning, AuthorSessionPurposeAuthoring:
-		return purpose
-	default:
-		if issue.PlanMode && issue.PlanApprovedAt == nil {
-			return AuthorSessionPurposePlanning
-		}
-		return AuthorSessionPurposeAuthoring
-	}
-}
-
-func payloadAuthorSessionPurpose(payload map[string]any) AuthorSessionPurpose {
-	switch AuthorSessionPurpose(payloadString(payload, "session_purpose")) {
-	case AuthorSessionPurposePlanning:
-		return AuthorSessionPurposePlanning
-	default:
-		return AuthorSessionPurposeAuthoring
-	}
-}
-
-func authorJobMatches(job flowworker.Job, changeID string, branch string, base string, agentHarness string, purpose AuthorSessionPurpose) bool {
+func authorJobMatches(job flowworker.Job, changeID string, branch string, base string, agentHarness string, phaseIndex int) bool {
 	jobHarness := payloadString(job.Payload, "agent_harness")
 	if jobHarness == "" {
 		jobHarness = flowharness.DefaultAgentName()
@@ -3248,7 +3335,26 @@ func authorJobMatches(job flowworker.Job, changeID string, branch string, base s
 		payloadString(job.Payload, "branch") == branch &&
 		payloadString(job.Payload, "base") == base &&
 		jobHarness == agentHarness &&
-		payloadAuthorSessionPurpose(job.Payload) == purpose
+		payloadPhaseIndex(job.Payload) == phaseIndex
+}
+
+// payloadPhaseIndex reads the job's work-phase index (0 when absent: the
+// implicit single phase). JSON round-trips numbers as float64.
+func payloadPhaseIndex(payload map[string]any) int {
+	value, ok := payload["phase_index"]
+	if !ok || value == nil {
+		return 0
+	}
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	default:
+		return 0
+	}
 }
 
 func stringPointerValue(value *string) string {

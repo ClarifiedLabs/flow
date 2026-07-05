@@ -1673,24 +1673,37 @@ func enrichPromptIssueContext(input *flowprompt.Input, apiFlags *apiFlagValues) 
 	input.IssueTitle = issue.Title
 	input.IssueBody = issue.Body
 	input.IssueAcceptanceCriteria = issue.AcceptanceCriteria
-	input.PlanMode = issue.PlanMode && issue.PlanApprovedAt == nil
-	if issue.PlanApprovedAt != nil {
-		input.ApprovedPlan = issue.PlanBody
-	}
 	input.HumanAttentionContext = humanAttentionPromptContext(statusLog)
+	// Resolve the flow-phase prompt context: the current phase's role
+	// instructions (from the frozen agent-def snapshot), human gate feedback,
+	// and the completed prior phases' handoffs. Best-effort: a fetch failure
+	// falls back to the embedded role skill without stripping the prompt.
+	var priorPhaseHandoffs string
+	if promptContext, err := client.GetPromptContext(issueID); err != nil {
+		slog.Debug("skip flow phase prompt context", "issue_id", issueID, "error", err)
+	} else {
+		if promptInputRole(*input) == flowprompt.RoleAuthor {
+			input.RoleInstructionsOverride = promptContext.RoleInstructions
+			input.PhaseName = promptContext.PhaseName
+			input.GateFeedback = promptContext.GateFeedback
+		}
+		priorPhaseHandoffs = renderPriorPhaseHandoffs(promptContext.PriorHandoffs)
+	}
 	// Inject the previous session's handoff (the coordinator is the sole store
 	// now that .handoff.md is no longer committed) so the next author fix round
 	// and verifier have the prior context they used to read from the worktree.
 	// Best-effort: prior handoff is supplementary context, so a fetch failure
 	// must never strip the rest of the prompt — it only skips this section.
+	var changeHandoff string
 	if changeID := strings.TrimSpace(input.ChangeID); changeID != "" {
 		leaseID := strings.TrimSpace(os.Getenv("FLOW_LEASE_ID"))
 		if _, content, found, err := client.GetHandoff(changeID, leaseID); err != nil {
 			slog.Debug("skip prior handoff injection", "change_id", changeID, "error", err)
 		} else if found {
-			input.PriorHandoff = content
+			changeHandoff = content
 		}
 	}
+	input.PriorHandoff = combinePriorHandoffs(priorPhaseHandoffs, changeHandoff)
 	if promptInputRole(*input) == flowprompt.RoleAuthor {
 		if err := enrichPromptAuthorReviewContext(input, client); err != nil {
 			return err
@@ -1700,6 +1713,40 @@ func enrichPromptIssueContext(input *flowprompt.Input, apiFlags *apiFlagValues) 
 		enrichPromptCompletionAssessment(input, client)
 	}
 	return nil
+}
+
+// renderPriorPhaseHandoffs formats the completed work phases' handoffs as
+// labeled sections for prompt injection.
+func renderPriorPhaseHandoffs(handoffs []flowclient.PromptPhaseHandoff) string {
+	var sections []string
+	for _, handoff := range handoffs {
+		content := strings.TrimSpace(handoff.Content)
+		if content == "" {
+			continue
+		}
+		label := strings.TrimSpace(handoff.PhaseName)
+		if label == "" {
+			label = "previous phase"
+		}
+		sections = append(sections, fmt.Sprintf("### Handoff from %s phase\n\n%s", label, content))
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+// combinePriorHandoffs merges the per-phase handoffs with the change-scoped
+// handoff snapshot (the most recent session's handoff, which fix rounds
+// overwrite). The change handoff is skipped when a phase section already
+// carries the identical content.
+func combinePriorHandoffs(phaseHandoffs string, changeHandoff string) string {
+	changeHandoff = strings.TrimSpace(changeHandoff)
+	phaseHandoffs = strings.TrimSpace(phaseHandoffs)
+	if phaseHandoffs == "" {
+		return changeHandoff
+	}
+	if changeHandoff == "" || strings.Contains(phaseHandoffs, changeHandoff) {
+		return phaseHandoffs
+	}
+	return phaseHandoffs + "\n\n### Handoff from the previous session\n\n" + changeHandoff
 }
 
 // enrichPromptCompletionAssessment marks a reviewer prompt as a Mode-B recovery
@@ -2310,25 +2357,36 @@ func runReady(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	planningSession := strings.TrimSpace(os.Getenv("FLOW_SESSION_PURPOSE")) == "planning"
+	// flow ready completes the CURRENT work phase. The final phase publishes a
+	// reviewable change and its handoff must follow the Flow Handoff template;
+	// an intermediate phase's handoff is the phase's artifact (a spec, a plan)
+	// shown at approval gates and injected into the next phase's prompt, so it
+	// only has to be non-empty. FLOW_PHASE_FINAL is stamped by the worker; an
+	// absent value means the implicit single (final) phase.
+	finalPhase := strings.TrimSpace(os.Getenv("FLOW_PHASE_FINAL")) != "false"
 
 	// Read and validate the handoff up front, before touching the remote, so a
 	// malformed handoff fails fast and the agent can fix it and re-run.
-	handoffBody := ""
-	if !planningSession {
-		body, err := readReadyHandoff(handoffFile)
-		if err != nil {
-			fmt.Fprintf(stderr, "read handoff: %v\n", err)
+	handoffBody, err := readReadyHandoff(handoffFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "read handoff: %v\n", err)
+		return 1
+	}
+	validationErr := func() error {
+		if finalPhase {
+			return handoff.Validate(handoffBody)
+		}
+		if strings.TrimSpace(handoffBody) == "" {
+			return errors.New("phase handoff is empty; pipe the phase's output (spec, plan, ...) on stdin")
+		}
+		return nil
+	}()
+	if validationErr != nil {
+		if !allowMissingHandoff {
+			fmt.Fprintf(stderr, "handoff validation: %v\n", validationErr)
 			return 1
 		}
-		if err := handoff.Validate(body); err != nil {
-			if !allowMissingHandoff {
-				fmt.Fprintf(stderr, "handoff validation: %v\n", err)
-				return 1
-			}
-			fmt.Fprintf(stderr, "warning: handoff validation skipped: %v\n", err)
-		}
-		handoffBody = body
+		fmt.Fprintf(stderr, "warning: handoff validation skipped: %v\n", validationErr)
 	}
 
 	client, err := newAPIClient(apiFlags)
@@ -2336,40 +2394,40 @@ func runReady(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
-	headSHA := ""
-	if !planningSession {
-		headSHA, err = currentGitSHA()
+	headSHA, err := currentGitSHA()
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve git HEAD: %v\n", err)
+		return 1
+	}
+	// Publish the branch so the readied HEAD always exists on the exchange
+	// remote for review and merge. Idempotent: an already-published branch
+	// pushes nothing. The branch name comes from FLOW_BRANCH, falling back to
+	// the checked-out branch so the push is never silently skipped.
+	branch := strings.TrimSpace(os.Getenv("FLOW_BRANCH"))
+	if branch == "" {
+		branch, err = currentGitBranch()
 		if err != nil {
-			fmt.Fprintf(stderr, "resolve git HEAD: %v\n", err)
+			fmt.Fprintf(stderr, "resolve branch to push: %v\n", err)
 			return 1
 		}
-		// Publish the branch so the readied HEAD always exists on the exchange
-		// remote for review and merge. Idempotent: an already-published branch
-		// pushes nothing. The branch name comes from FLOW_BRANCH, falling back to
-		// the checked-out branch so the push is never silently skipped.
-		branch := strings.TrimSpace(os.Getenv("FLOW_BRANCH"))
-		if branch == "" {
-			branch, err = currentGitBranch()
-			if err != nil {
-				fmt.Fprintf(stderr, "resolve branch to push: %v\n", err)
-				return 1
-			}
-		}
-		if err := flowgit.PushBranch(context.Background(), "", branch); err != nil {
-			fmt.Fprintf(stderr, "push branch: %v\n", err)
+	}
+	if err := flowgit.PushBranch(context.Background(), "", branch); err != nil {
+		fmt.Fprintf(stderr, "push branch: %v\n", err)
+		return 1
+	}
+	// Submit the handoff to the coordinator, now the sole store. A re-run
+	// overwrites the same snapshot, so this is idempotent too. The engine
+	// copies it into the per-phase handoff store when the phase completes.
+	if changeID := strings.TrimSpace(os.Getenv("FLOW_CHANGE_ID")); changeID != "" && strings.TrimSpace(handoffBody) != "" {
+		if _, err := client.PutHandoff(changeID, flowclient.PutHandoffInput{
+			Content: handoffBody,
+			HeadSHA: headSHA,
+		}); err != nil {
+			fmt.Fprintf(stderr, "submit handoff: %v\n", err)
 			return 1
 		}
-		// Submit the handoff to the coordinator, now the sole store. A re-run
-		// overwrites the same snapshot, so this is idempotent too.
-		if changeID := strings.TrimSpace(os.Getenv("FLOW_CHANGE_ID")); changeID != "" && strings.TrimSpace(handoffBody) != "" {
-			if _, err := client.PutHandoff(changeID, flowclient.PutHandoffInput{
-				Content: handoffBody,
-				HeadSHA: headSHA,
-			}); err != nil {
-				fmt.Fprintf(stderr, "submit handoff: %v\n", err)
-				return 1
-			}
-		}
+	}
+	if finalPhase {
 		if err := claimResolvedTrailers(client); err != nil {
 			fmt.Fprintf(stderr, "claim resolved threads: %v\n", err)
 			return 1

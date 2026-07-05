@@ -23,16 +23,22 @@ type Input struct {
 	Branch                     string
 	Base                       string
 	CheckName                  string
-	SessionPurpose             string
 	ReviewState                string
 	FixRound                   bool
-	PlanMode                   bool
 	ProjectID                  string
 	ProjectName                string
-	ApprovedPlan               string
 	ReviewCycleInstructions    string
 	HumanAttentionInstructions string
 	HumanAttentionContext      string
+	// RoleInstructionsOverride replaces the embedded role skill with the
+	// issue's flow-phase agent prompt (resolved from the cursor snapshot by
+	// the coordinator). Empty falls back to the embedded skills/*.md content.
+	RoleInstructionsOverride string
+	// PhaseName labels the current work phase (e.g. "spec") in the prompt.
+	PhaseName string
+	// GateFeedback is the human's request-changes feedback for a phase sent
+	// back to rework from an approval gate.
+	GateFeedback string
 	// PriorHandoff is the previous session's handoff body, fetched from the
 	// coordinator by the session builder. It replaces the committed .handoff.md
 	// the next author (fix round) and verifier used to read from the worktree.
@@ -82,18 +88,28 @@ func Build(input Input) (string, error) {
 	}
 
 	skillName := "flow-" + role
-	skillInstructions, err := flowskills.Instructions(skillName)
-	if err != nil {
-		return "", err
+	skillInstructions := strings.TrimSpace(input.RoleInstructionsOverride)
+	label := skillName
+	if skillInstructions == "" {
+		embedded, err := flowskills.Instructions(skillName)
+		if err != nil {
+			return "", err
+		}
+		skillInstructions = embedded
+	} else if strings.TrimSpace(input.PhaseName) != "" {
+		label = strings.TrimSpace(input.PhaseName) + " phase"
 	}
 	lines := []string{
-		fmt.Sprintf("Flow role instructions (%s):", skillName),
+		fmt.Sprintf("Flow role instructions (%s):", label),
 		"",
 		skillInstructions,
 		"",
 		fmt.Sprintf("You are the %s agent for Flow.", role),
 	}
 	lines = append(lines, fmt.Sprintf("Issue: %s", valueOrUnknown(input.IssueID)))
+	if strings.TrimSpace(input.PhaseName) != "" {
+		lines = append(lines, fmt.Sprintf("Work Phase: %s", strings.TrimSpace(input.PhaseName)))
+	}
 	if strings.TrimSpace(input.IssueTitle) != "" {
 		lines = append(lines, fmt.Sprintf("Issue Title: %s", strings.TrimSpace(input.IssueTitle)))
 	}
@@ -126,12 +142,8 @@ func Build(input Input) (string, error) {
 		lines = append(lines, "", "Completion Assessment:")
 		lines = append(lines, completionAssessmentInstructions()...)
 	}
-	if role == RoleAuthor && input.PlanMode {
-		lines = append(lines, "", "Plan Mode:")
-		lines = append(lines, planModeInstructions()...)
-	}
-	if role == RoleAuthor && strings.TrimSpace(input.ApprovedPlan) != "" {
-		lines = append(lines, "", "Approved Plan:", strings.TrimSpace(input.ApprovedPlan))
+	if role == RoleAuthor && strings.TrimSpace(input.GateFeedback) != "" {
+		lines = append(lines, "", "Gate Feedback (a human reviewed this phase's handoff and requested changes; address this feedback, then finish the phase again with flow ready):", strings.TrimSpace(input.GateFeedback))
 	}
 	if role == RoleAuthor && strings.TrimSpace(input.ReviewCycleInstructions) != "" {
 		lines = append(lines, "", "Human Recovery Instructions:", strings.TrimSpace(input.ReviewCycleInstructions))
@@ -144,7 +156,7 @@ func Build(input Input) (string, error) {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, roleInstructions(role, input)...)
+	lines = append(lines, roleInstructions(role)...)
 	return strings.Join(lines, "\n"), nil
 }
 
@@ -160,16 +172,6 @@ func completionAssessmentInstructions() []string {
 		"Determine whether the task is actually complete and ready for review, or whether work remains.",
 		"If the work is complete, pass this check (record a satisfied verdict) so the change proceeds to verification.",
 		"If work remains, block this check and record exactly what is left as blocking concerns, so the author resumes from this point instead of restarting.",
-	}
-}
-
-func planModeInstructions() []string {
-	return []string{
-		"Do not make code changes in this planning session.",
-		"Create a plan and ask the user for approval.",
-		"After presenting the plan, record it with `flow status --kind plan \"<plan>\"`; Flow will move the issue to Needs Attention while this terminal session stays open.",
-		"If you need to ask a question before implementing, ask it and record it with `flow status --kind question \"<question>\"` so Flow moves the issue to Needs Attention.",
-		"After the user approves the plan, Flow will finish this planning session and start a separate implementation session.",
 	}
 }
 
@@ -305,7 +307,7 @@ func InputFromEnvironment(getenv func(string) string) Input {
 		Branch:                     getenv("FLOW_BRANCH"),
 		Base:                       getenv("FLOW_BASE"),
 		CheckName:                  getenv("FLOW_CHECK_NAME"),
-		SessionPurpose:             getenv("FLOW_SESSION_PURPOSE"),
+		PhaseName:                  getenv("FLOW_PHASE_NAME"),
 		ProjectID:                  getenv("FLOW_PROJECT_ID"),
 		ProjectName:                getenv("FLOW_PROJECT_NAME"),
 		ReviewCycleInstructions:    getenv("FLOW_REVIEW_CYCLE_INSTRUCTIONS"),
@@ -334,15 +336,9 @@ func valueOrUnknown(value string) string {
 	return trimmed
 }
 
-func roleInstructions(role string, input Input) []string {
+func roleInstructions(role string) []string {
 	switch role {
 	case RoleAuthor:
-		if strings.TrimSpace(input.SessionPurpose) == "planning" || input.PlanMode {
-			return []string{
-				"Complete planning only. Do not commit, push, write a handoff, or implement the change in this session.",
-				"Record the plan with flow status --kind plan, then wait for human approval or rejection.",
-			}
-		}
 		return []string{
 			"Implement the requested change in this worktree on branch ${FLOW_BRANCH:-the checked-out branch}.",
 			"Finalize with two actions: (1) git commit your work with a conventional-commit message; (2) run flow ready, piping the handoff on stdin (e.g. a heredoc). flow ready pushes the branch, submits the handoff, and marks the change ready — do not push or write a handoff file separately.",

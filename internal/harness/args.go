@@ -107,6 +107,21 @@ func (args Args) Empty() bool {
 	return len(args.Codex) == 0 && len(args.Claude) == 0 && len(args.Harness) == 0
 }
 
+// ArgsFor returns an Args carrying tokens under the named harness's slot,
+// e.g. the serialized model/effort selection for an agent definition.
+func ArgsFor(name string, tokens []string) Args {
+	switch NormalizeName(name) {
+	case Codex:
+		return Args{Codex: copyArgs(tokens)}
+	case Claude:
+		return Args{Claude: copyArgs(tokens)}
+	case Harness:
+		return Args{Harness: copyArgs(tokens)}
+	default:
+		return Args{}
+	}
+}
+
 func normalizeArgList(name string, args []string) ([]string, error) {
 	normalized := make([]string, 0, len(args))
 	for i, arg := range args {

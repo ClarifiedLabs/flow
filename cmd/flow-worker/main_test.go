@@ -2130,9 +2130,32 @@ func runNativeHookAuthorSessionCase(t *testing.T, tc nativeHookAuthorCase) {
 	testPath := toolDir + string(os.PathListSeparator) + os.Getenv("PATH")
 	t.Setenv("PATH", testPath)
 
+	// Drive the harness selection through an agent def + flow (the composable
+	// replacement for the per-issue harness): the issue's flow snapshot is what
+	// stamps agent_harness onto the job.
+	bundle, ok := fixture.Registry.Bundle(fixture.Project.ID)
+	if !ok {
+		t.Fatalf("project bundle not open")
+	}
+	agentDef, err := bundle.AgentDefs.Create(ctx, coordinator.AgentDefInput{
+		Name:    "native-" + tc.Harness,
+		Harness: tc.Harness,
+	})
+	if err != nil {
+		t.Fatalf("create agent def: %v", err)
+	}
+	flow, err := bundle.Flows.Create(ctx, coordinator.FlowInput{
+		Name: "native-" + tc.Harness,
+		Phases: []coordinator.FlowPhaseInput{
+			{Name: "implement", AgentDefID: agentDef.ID, Gate: coordinator.FlowGateAuto},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create flow: %v", err)
+	}
 	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{
-		Title:        "Native hook " + tc.Mode,
-		AgentHarness: tc.Harness,
+		Title:  "Native hook " + tc.Mode,
+		FlowID: flow.ID,
 	})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)

@@ -115,6 +115,10 @@ type JobPayload struct {
 	CheckName                  string      `json:"check_name"`
 	SessionID                  string      `json:"session_id"`
 	SessionPurpose             string      `json:"session_purpose"`
+	PhaseName                  string      `json:"phase_name,omitempty"`
+	PhaseIndex                 int         `json:"phase_index,omitempty"`
+	FinalPhase                 *bool       `json:"final_phase,omitempty"`
+	GateFeedback               string      `json:"gate_feedback,omitempty"`
 	InjectInitialPrompt        bool        `json:"inject_initial_prompt,omitempty"`
 	PromptHarness              string      `json:"prompt_harness,omitempty"`
 	ReviewCycleInstructions    string      `json:"review_cycle_instructions,omitempty"`
@@ -1049,6 +1053,13 @@ func workerEnv(input tmuxInput) map[string]string {
 	}
 	if input.Payload.SessionPurpose != "" {
 		reserved["FLOW_SESSION_PURPOSE"] = input.Payload.SessionPurpose
+	}
+	if strings.TrimSpace(input.Payload.PhaseName) != "" {
+		reserved["FLOW_PHASE_NAME"] = strings.TrimSpace(input.Payload.PhaseName)
+	}
+	if input.Payload.FinalPhase != nil {
+		reserved["FLOW_PHASE_INDEX"] = strconv.Itoa(input.Payload.PhaseIndex)
+		reserved["FLOW_PHASE_FINAL"] = strconv.FormatBool(*input.Payload.FinalPhase)
 	}
 	if strings.TrimSpace(input.Payload.ReviewCycleInstructions) != "" {
 		reserved["FLOW_REVIEW_CYCLE_INSTRUCTIONS"] = strings.TrimSpace(input.Payload.ReviewCycleInstructions)

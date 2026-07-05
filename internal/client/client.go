@@ -123,6 +123,31 @@ func (c *Client) GetIssue(id string) (coordinator.Issue, error) {
 	return response.Issue, nil
 }
 
+// PromptContext is the coordinator-resolved per-phase prompt material: the
+// current work phase's role instructions, human gate feedback, and completed
+// prior-phase handoffs.
+type PromptContext struct {
+	RoleInstructions string               `json:"role_instructions,omitempty"`
+	PhaseName        string               `json:"phase_name,omitempty"`
+	PhaseIndex       int                  `json:"phase_index"`
+	FinalPhase       bool                 `json:"final_phase"`
+	GateFeedback     string               `json:"gate_feedback,omitempty"`
+	PriorHandoffs    []PromptPhaseHandoff `json:"prior_handoffs,omitempty"`
+}
+
+type PromptPhaseHandoff struct {
+	PhaseName string `json:"phase_name"`
+	Content   string `json:"content"`
+}
+
+func (c *Client) GetPromptContext(issueID string) (PromptContext, error) {
+	var response PromptContext
+	if err := c.do(http.MethodGet, c.issuesPath("/"+url.PathEscape(issueID))+"/prompt-context", nil, nil, &response); err != nil {
+		return PromptContext{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) GetIssueWithStatus(id string) (coordinator.Issue, []coordinator.StatusLogEntry, error) {
 	var response issueResponse
 	if err := c.do(http.MethodGet, c.issuesPath("/"+url.PathEscape(id)), nil, nil, &response); err != nil {

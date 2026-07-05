@@ -201,7 +201,6 @@ func TestFetchPromptIncludesIssueDetailsFromAPI(t *testing.T) {
 		Title:              "Prompt details issue",
 		Body:               "Build the prompt with complete issue context.",
 		AcceptanceCriteria: "The agent can start work without calling issue show.",
-		PlanMode:           true,
 	})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
@@ -225,10 +224,6 @@ func TestFetchPromptIncludesIssueDetailsFromAPI(t *testing.T) {
 		"Issue Title: Prompt details issue",
 		"Issue Body:\nBuild the prompt with complete issue context.",
 		"Acceptance Criteria:\nThe agent can start work without calling issue show.",
-		"Plan Mode:",
-		"flow status --kind plan",
-		"Do not make code changes",
-		"Flow will finish this planning session",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("fetch-prompt output missing %q:\n%s", want, output)
@@ -236,24 +231,43 @@ func TestFetchPromptIncludesIssueDetailsFromAPI(t *testing.T) {
 	}
 }
 
-func TestFetchPromptOmitsPlanInstructionsAfterPlanApproval(t *testing.T) {
+// TestFetchPromptUsesFlowPhaseAgentPrompt is the regression for per-phase
+// prompts: an issue on the seeded "planned" flow, once scheduled, freezes a
+// cursor whose first phase runs the planner agent def — fetch-prompt must
+// render that agent's prompt (not the embedded author skill) and label the
+// work phase.
+func TestFetchPromptUsesFlowPhaseAgentPrompt(t *testing.T) {
 	clearFetchPromptEnvironment(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	fixture := newFlowTestFixture(t)
-	issue, err := fixture.Issues.CreateIssue(context.Background(), coordinator.CreateIssueInput{
-		Title:    "Approved plan issue",
-		Body:     "Implement the already-approved plan.",
-		PlanMode: true,
+	ctx := context.Background()
+
+	bundle, ok := fixture.Registry.Bundle(fixture.Project.ID)
+	if !ok {
+		t.Fatalf("project bundle not open")
+	}
+	planned, err := bundle.Flows.GetByName(ctx, "planned")
+	if err != nil {
+		t.Fatalf("get planned flow: %v", err)
+	}
+	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{
+		Title:  "Phase prompt issue",
+		Body:   "Run the plan phase first.",
+		FlowID: planned.ID,
 	})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
-	if _, err := fixture.Issues.MarkPlanApproved(context.Background(), issue.ID); err != nil {
-		t.Fatalf("mark plan approved: %v", err)
-	}
 
 	httpServer := httptest.NewServer(fixture.Server)
 	t.Cleanup(httpServer.Close)
+	client, err := flowclient.New(config.ClientConfig{ServerURL: httpServer.URL, Token: "owner-token"})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if _, err := client.ScheduleIssue(issue.ID, coordinator.ScheduleUpNext); err != nil {
+		t.Fatalf("schedule issue: %v", err)
+	}
 
 	t.Setenv("FLOW_WORKER_ROLE", "author")
 	t.Setenv("FLOW_ISSUE_ID", issue.ID)
@@ -269,23 +283,17 @@ func TestFetchPromptOmitsPlanInstructionsAfterPlanApproval(t *testing.T) {
 
 	output := stdout.String()
 	for _, want := range []string{
-		"Issue: " + issue.ID,
-		"Issue Title: Approved plan issue",
-		"Issue Body:\nImplement the already-approved plan.",
-		"Implement the requested change",
+		"Flow role instructions (plan phase):",
+		"# Flow Planner",
+		"Work Phase: plan",
+		"Do not make code changes in this planning session.",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("fetch-prompt output missing %q:\n%s", want, output)
 		}
 	}
-	for _, unwanted := range []string{
-		"Plan Mode:",
-		"flow status --kind plan",
-		"Before making any changes, create a plan",
-	} {
-		if strings.Contains(output, unwanted) {
-			t.Fatalf("fetch-prompt output included %q after plan approval:\n%s", unwanted, output)
-		}
+	if strings.Contains(output, "# Flow Author") {
+		t.Fatalf("phase prompt did not replace the embedded author skill:\n%s", output)
 	}
 }
 

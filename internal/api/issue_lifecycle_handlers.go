@@ -163,6 +163,18 @@ func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	if len(parts) == 2 && parts[1] == "prompt-context" {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker) {
+			writeError(w, http.StatusForbidden, "forbidden", "prompt context requires owner, session, or worker token")
+			return
+		}
+		s.handlePromptContext(w, r, issueID)
+		return
+	}
+
 	if len(parts) == 2 && parts[1] == "transitions" {
 		if !requireMethod(w, r, http.MethodGet) {
 			return
@@ -253,6 +265,77 @@ func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
+// promptContextResponse carries the per-phase prompt material fetch-prompt
+// assembles into an agent session's prompt: the current work phase's
+// role instructions (from the frozen agent-def snapshot), gate feedback from a
+// human's request-changes, and the handoffs of the phases already completed.
+type promptContextResponse struct {
+	RoleInstructions string               `json:"role_instructions,omitempty"`
+	PhaseName        string               `json:"phase_name,omitempty"`
+	PhaseIndex       int                  `json:"phase_index"`
+	FinalPhase       bool                 `json:"final_phase"`
+	GateFeedback     string               `json:"gate_feedback,omitempty"`
+	PriorHandoffs    []promptPhaseHandoff `json:"prior_handoffs,omitempty"`
+}
+
+type promptPhaseHandoff struct {
+	PhaseName string `json:"phase_name"`
+	Content   string `json:"content"`
+}
+
+func (s *projectServer) handlePromptContext(w http.ResponseWriter, r *http.Request, issueID string) {
+	response := promptContextResponse{FinalPhase: true}
+	if s.cursors == nil {
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+	cursor, ok, err := s.cursors.GetCursor(r.Context(), issueID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "prompt_context_failed", err.Error())
+		return
+	}
+	if !ok {
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+
+	completed := cursor.PhaseState == coordinator.FlowPhaseCompleted
+	response.PhaseIndex = cursor.PhaseIndex
+	response.FinalPhase = cursor.OnFinalPhase() || completed
+	response.GateFeedback = cursor.GateFeedback
+	if completed {
+		// The pipeline already readied its change: this is a review fix round,
+		// driven by the flow's fix agent.
+		if agent, err := cursor.Snapshot.FixAgentOrLastPhase(); err == nil {
+			response.PhaseName = "fix"
+			response.RoleInstructions = agent.Prompt
+		}
+	} else if phase, ok := cursor.CurrentPhase(); ok {
+		response.PhaseName = phase.Name
+		response.RoleInstructions = phase.Agent.Prompt
+	}
+
+	handoffs, err := s.cursors.PhaseHandoffs(r.Context(), issueID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "prompt_context_failed", err.Error())
+		return
+	}
+	for _, handoff := range handoffs {
+		if !completed && handoff.PhaseIndex >= cursor.PhaseIndex {
+			continue
+		}
+		if strings.TrimSpace(handoff.Content) == "" {
+			continue
+		}
+		response.PriorHandoffs = append(response.PriorHandoffs, promptPhaseHandoff{
+			PhaseName: handoff.PhaseName,
+			Content:   handoff.Content,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, response)
+}
+
 func (s *projectServer) handleGetIssue(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
 	issue, err := s.issues.GetIssue(r.Context(), issueID)
 	if err != nil {
@@ -321,7 +404,7 @@ func (s *projectServer) handleApprovePlan(w http.ResponseWriter, r *http.Request
 			return
 		}
 	} else if s.sessions != nil {
-		if _, err := s.sessions.EnsureAuthorJob(r.Context(), coordinator.EnsureAuthorJobInput{IssueID: issue.ID, Purpose: coordinator.AuthorSessionPurposeAuthoring}); err != nil && !errors.Is(err, coordinator.ErrAuthorJobSuppressed) {
+		if _, err := s.sessions.EnsureAuthorJob(r.Context(), coordinator.EnsureAuthorJobInput{IssueID: issue.ID}); err != nil && !errors.Is(err, coordinator.ErrAuthorJobSuppressed) {
 			writeError(w, http.StatusBadRequest, "approve_plan_queue_failed", err.Error())
 			return
 		}

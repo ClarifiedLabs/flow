@@ -330,7 +330,8 @@ func TestCompletionReviewCrashExcludedFromRelaunchBudget(t *testing.T) {
 			"change_id":       change.ID,
 			"branch":          change.Branch,
 			"base":            change.Base,
-			"session_purpose": string(AuthorSessionPurposeAuthoring),
+			"phase_index":     0,
+			"final_phase":     true,
 		}
 		if dispatched {
 			payload[completionReviewDispatchedKey] = true
@@ -355,7 +356,7 @@ UPDATE jobs SET state = ? WHERE id = ?`, string(flowworker.JobCrashed), job.ID);
 	// is excluded, so only the single real attempt counts — not yet exhausted.
 	enqueueCrashedAuthorJob(true)
 	enqueueCrashedAuthorJob(false)
-	exhausted, attempts, err := fixture.sessions.authorCrashRestartLimitReached(ctx, issue.ID, change.ID, AuthorSessionPurposeAuthoring)
+	exhausted, attempts, err := fixture.sessions.authorCrashRestartLimitReached(ctx, issue.ID, change.ID, 0)
 	if err != nil {
 		t.Fatalf("crash limit: %v", err)
 	}
@@ -366,7 +367,7 @@ UPDATE jobs SET state = ? WHERE id = ?`, string(flowworker.JobCrashed), job.ID);
 	// A second real author crash reaches the limit; the flagged crash still does
 	// not count, so the bound is exactly maxAutomaticCrashAttempts real attempts.
 	enqueueCrashedAuthorJob(false)
-	exhausted, attempts, err = fixture.sessions.authorCrashRestartLimitReached(ctx, issue.ID, change.ID, AuthorSessionPurposeAuthoring)
+	exhausted, attempts, err = fixture.sessions.authorCrashRestartLimitReached(ctx, issue.ID, change.ID, 0)
 	if err != nil {
 		t.Fatalf("crash limit second: %v", err)
 	}

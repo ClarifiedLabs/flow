@@ -166,29 +166,32 @@ func TestBuildAuthorPromptIncludesReviewCycleInstructions(t *testing.T) {
 	}
 }
 
-func TestBuildAuthorPromptIncludesPlanModeInstructions(t *testing.T) {
+func TestBuildAuthorPromptUsesPhaseOverrideAndGateFeedback(t *testing.T) {
 	rendered, err := Build(Input{
-		Role:       RoleAuthor,
-		IssueID:    "i-0011",
-		IssueTitle: "Plan mode",
-		PlanMode:   true,
+		Role:                     RoleAuthor,
+		IssueID:                  "i-0011",
+		IssueTitle:               "Composable phases",
+		PhaseName:                "spec",
+		RoleInstructionsOverride: "# Spec Writer\n\nWrite the spec, then flow ready with the spec as the handoff.",
+		GateFeedback:             "Cover the migration path in more detail.",
 	})
 	if err != nil {
 		t.Fatalf("build prompt: %v", err)
 	}
 
 	for _, want := range []string{
-		"Plan Mode:",
-		"Do not make code changes in this planning session.",
-		"Create a plan and ask the user for approval.",
-		"flow status --kind plan",
-		"flow status --kind question",
-		"Needs Attention",
-		"separate implementation session",
+		"Flow role instructions (spec phase):",
+		"# Spec Writer",
+		"Work Phase: spec",
+		"Gate Feedback",
+		"Cover the migration path in more detail.",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, rendered)
 		}
+	}
+	if strings.Contains(rendered, "# Flow Author") {
+		t.Fatalf("override did not replace the embedded author skill:\n%s", rendered)
 	}
 }
 

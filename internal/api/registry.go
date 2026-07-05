@@ -27,6 +27,7 @@ type ProjectBundle struct {
 	Issues           *coordinator.IssueService
 	AgentDefs        *coordinator.AgentDefService
 	Flows            *coordinator.FlowService
+	Cursors          *coordinator.FlowCursorService
 	Checks           *coordinator.CheckService
 	Threads          *coordinator.ThreadService
 	Sessions         *coordinator.SessionService
@@ -169,6 +170,7 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 	if err := flows.SeedDefaults(ctx); err != nil {
 		return nil, fmt.Errorf("seed default flows for project %s: %w", project.ID, err)
 	}
+	cursors := coordinator.NewFlowCursorService(db, flows)
 	checks := coordinator.NewCheckService(db)
 	threads := coordinator.NewThreadService(db)
 	queue := worker.NewService(db)
@@ -188,11 +190,11 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 		ReviewAuthorCycleLimit:          r.reviewAuthorCycleLimit,
 		HandoffSnapshots:                reconciler,
 		ReviewRounds:                    checkConfigs,
+		FlowCursors:                     cursors,
 	})
 	merges := coordinator.NewMergeService(db, issues, sessions, project)
 	status := coordinator.NewStatusService(db)
 
-	cursors := coordinator.NewFlowCursorService(db, flows)
 	engine := lifecycle.NewEngine(db, lifecycle.NewEffects(issues, checks, checkConfigs, sessions, merges, threads, status, cursors, reconciler))
 	engine.SetDeadlines(r.deadlines)
 
@@ -202,6 +204,7 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 		Issues:           issues,
 		AgentDefs:        agentDefs,
 		Flows:            flows,
+		Cursors:          cursors,
 		Checks:           checks,
 		Threads:          threads,
 		Sessions:         sessions,

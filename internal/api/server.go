@@ -94,6 +94,7 @@ type projectServer struct {
 	attachments  *coordinator.IssueAttachmentStore
 	status       *coordinator.StatusService
 	reconciler   *coordinator.ReconcileService
+	cursors      *coordinator.FlowCursorService
 	checkConfigs *coordinator.CheckConfigService
 	merges       *coordinator.MergeService
 	transitions  *coordinator.TransitionService
@@ -114,6 +115,7 @@ func (s *Server) forBundle(bundle *ProjectBundle) *projectServer {
 		attachments:  bundle.Attachments,
 		status:       bundle.Status,
 		reconciler:   bundle.Reconciler,
+		cursors:      bundle.Cursors,
 		checkConfigs: bundle.CheckConfigs,
 		merges:       bundle.Merges,
 		transitions:  bundle.Transitions,
