@@ -94,6 +94,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runAsk(args[1:], stdout, stderr)
 	case "ready":
 		return runReady(args[1:], stdout, stderr)
+	case "flows":
+		return runFlows(args[1:], stdout, stderr)
+	case "agent-defs":
+		return runAgentDefs(args[1:], stdout, stderr)
+	case "phase":
+		return runPhase(args[1:], stdout, stderr)
 	case "merge":
 		return runMerge(args[1:], stdout, stderr)
 	case "ui":
@@ -474,6 +480,8 @@ func runIssueCreate(args []string, stdout, stderr io.Writer) int {
 	flags.Var(&autoMerge, "auto-merge", "auto merge when review becomes approved")
 	flags.BoolVar(&planMode, "plan-mode", false, "ask the agent to plan and wait for approval before making changes")
 	flags.StringVar(&agentHarness, "agent-harness", "", "agent harness: codex, claude, or harness")
+	var flowRef string
+	flags.StringVar(&flowRef, "flow", "", "flow (id or name) driving this issue's work phases and review set")
 	flags.Var(&attachmentFiles, "file", "file to attach to the initial issue prompt (repeatable)")
 	flags.Var(&codexArgs, "codex-arg", "additional argv token for generated Codex harness commands (repeatable)")
 	flags.Var(&claudeArgs, "claude-arg", "additional argv token for generated Claude harness commands (repeatable)")
@@ -510,6 +518,14 @@ func runIssueCreate(args []string, stdout, stderr io.Writer) int {
 		PlanMode:           planMode,
 		AgentHarness:       agentHarness,
 		HarnessArgs:        additionalArgs,
+	}
+	if strings.TrimSpace(flowRef) != "" {
+		flowID, err := resolveFlowRef(client, flowRef)
+		if err != nil {
+			fmt.Fprintf(stderr, "resolve flow: %v\n", err)
+			return 1
+		}
+		input.FlowID = flowID
 	}
 	if requiresHumanReview.Provided {
 		input.RequiresHumanReview = &requiresHumanReview.Value

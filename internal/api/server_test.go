@@ -6275,3 +6275,179 @@ func TestSessionProcessExitRejectsConsoleSession(t *testing.T) {
 		t.Fatalf("console session = %+v, want unchanged (not crashed)", session)
 	}
 }
+
+// TestFlowConfigCRUDEndpoints exercises the agent-def and flow configuration
+// API: server-side, web-editable agent/flow config (replacing repo-level
+// reviewer definitions).
+func TestFlowConfigCRUDEndpoints(t *testing.T) {
+	fixture := newTestFixture(t)
+
+	var created struct {
+		AgentDef coordinator.AgentDef `json:"agent_def"`
+	}
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/agent-defs", coordinator.AgentDefInput{
+		Name:            "opus-reviewer",
+		Harness:         "claude",
+		Model:           "claude-opus-4-8",
+		ReasoningEffort: "xhigh",
+		Prompt:          "Review with maximum care.",
+	}, http.StatusCreated, &created)
+	if created.AgentDef.ID == "" || created.AgentDef.Harness != "claude" {
+		t.Fatalf("created agent def = %+v", created.AgentDef)
+	}
+
+	// Seeded defs plus the new one are listed.
+	var defs struct {
+		AgentDefs []coordinator.AgentDef `json:"agent_defs"`
+	}
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/agent-defs", nil, http.StatusOK, &defs)
+	if len(defs.AgentDefs) != 5 {
+		t.Fatalf("agent defs = %d, want 4 seeded + 1 created", len(defs.AgentDefs))
+	}
+
+	// Duplicate names conflict.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/agent-defs", coordinator.AgentDefInput{
+		Name: "opus-reviewer", Harness: "codex",
+	}, http.StatusConflict, nil)
+
+	var flowCreated struct {
+		Flow coordinator.Flow `json:"flow"`
+	}
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/flows", coordinator.FlowInput{
+		Name: "hardened",
+		Phases: []coordinator.FlowPhaseInput{
+			{Name: "implement", AgentDefID: created.AgentDef.ID, Gate: coordinator.FlowGateHuman},
+		},
+		ReviewAgents: []coordinator.FlowReviewAgentInput{
+			{Role: coordinator.FlowReviewRoleReviewer, AgentDefID: created.AgentDef.ID},
+		},
+	}, http.StatusCreated, &flowCreated)
+	if flowCreated.Flow.ID == "" || len(flowCreated.Flow.Phases) != 1 {
+		t.Fatalf("created flow = %+v", flowCreated.Flow)
+	}
+
+	// The referenced agent def cannot be deleted while a flow uses it.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodDelete, "/v1/agent-defs/"+created.AgentDef.ID, nil, http.StatusConflict, nil)
+
+	var setDefault struct {
+		Flow coordinator.Flow `json:"flow"`
+	}
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/flows/"+flowCreated.Flow.ID+"/default", nil, http.StatusOK, &setDefault)
+
+	var flows struct {
+		Flows         []coordinator.Flow `json:"flows"`
+		DefaultFlowID string             `json:"default_flow_id"`
+	}
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/flows", nil, http.StatusOK, &flows)
+	if flows.DefaultFlowID != flowCreated.Flow.ID {
+		t.Fatalf("default flow = %q, want %q", flows.DefaultFlowID, flowCreated.Flow.ID)
+	}
+	if len(flows.Flows) != 3 {
+		t.Fatalf("flows = %d, want 2 seeded + 1 created", len(flows.Flows))
+	}
+
+	// The default flow cannot be deleted.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodDelete, "/v1/flows/"+flowCreated.Flow.ID, nil, http.StatusConflict, nil)
+
+	// Worker tokens cannot edit configuration.
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/flows", coordinator.FlowInput{Name: "nope"}, http.StatusForbidden, nil)
+}
+
+// TestWorkPhaseGateEndpoints drives a human-gated plan phase end-to-end over
+// the API: flow ready pauses at the gate with the handoff visible on the
+// issue, request-changes re-runs the phase with feedback, and approve
+// advances the cursor to the implement phase.
+func TestWorkPhaseGateEndpoints(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	planned, err := fixture.Bundle.Flows.GetByName(ctx, "planned")
+	if err != nil {
+		t.Fatalf("get planned flow: %v", err)
+	}
+	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{
+		Title:  "Gated plan issue",
+		FlowID: planned.ID,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	running := startRunningAuthorSession(t, fixture, issue.ID)
+
+	// The plan phase's handoff is the plan body, submitted like any handoff.
+	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPut,
+		"/v1/changes/"+running.Session.ChangeID+"/handoff",
+		putHandoffRequest{Content: "# Implementation Plan\n\nDo the thing carefully."},
+		http.StatusOK, nil)
+	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost,
+		"/v1/sessions/"+running.Session.ID+"/ready", readySessionRequest{}, http.StatusOK, nil)
+
+	var detail issueResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/issues/"+issue.ID, nil, http.StatusOK, &detail)
+	if detail.Flow == nil || detail.Flow.PhaseState != string(coordinator.FlowPhaseAwaitingApproval) {
+		t.Fatalf("issue flow after ready = %+v, want awaiting_approval", detail.Flow)
+	}
+	if detail.Flow.PhaseName != "plan" || detail.Flow.PendingHandoff == "" {
+		t.Fatalf("issue flow = %+v, want plan phase with pending handoff", detail.Flow)
+	}
+
+	// Request changes: the plan phase re-runs with the feedback stored.
+	var reworked issueResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost,
+		"/v1/issues/"+issue.ID+"/phase/request-changes",
+		map[string]string{"feedback": "Cover the rollback path."}, http.StatusOK, &reworked)
+	if reworked.Flow == nil || reworked.Flow.PhaseState != string(coordinator.FlowPhasePending) || reworked.Flow.GateFeedback != "Cover the rollback path." {
+		t.Fatalf("issue flow after request-changes = %+v, want pending plan with feedback", reworked.Flow)
+	}
+
+	// A fresh plan session pauses at the gate again; approval advances to the
+	// implement phase.
+	rerun := startRunningAuthorSessionExistingWorker(t, fixture, issue.ID)
+	doJSONRequestAs(t, fixture.Server, rerun.SessionToken, http.MethodPut,
+		"/v1/changes/"+rerun.Session.ChangeID+"/handoff",
+		putHandoffRequest{Content: "# Implementation Plan v2\n\nWith rollback."},
+		http.StatusOK, nil)
+	doJSONRequestAs(t, fixture.Server, rerun.SessionToken, http.MethodPost,
+		"/v1/sessions/"+rerun.Session.ID+"/ready", readySessionRequest{}, http.StatusOK, nil)
+
+	var approved issueResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost,
+		"/v1/issues/"+issue.ID+"/phase/approve", map[string]string{}, http.StatusOK, &approved)
+	if approved.Flow == nil || approved.Flow.PhaseIndex != 1 || approved.Flow.PhaseName != "implement" || approved.Flow.PhaseState != string(coordinator.FlowPhasePending) {
+		t.Fatalf("issue flow after approve = %+v, want pending implement phase", approved.Flow)
+	}
+
+	// The gate decisions are recorded in the transition log.
+	if got := countTransitions(t, fixture, issue.ID, string(lifecycle.EventWorkPhaseRework)); got != 1 {
+		t.Fatalf("work_phase_rework transitions = %d, want 1", got)
+	}
+	if got := countTransitions(t, fixture, issue.ID, string(lifecycle.EventWorkPhaseApproved)); got != 1 {
+		t.Fatalf("work_phase_approved transitions = %d, want 1", got)
+	}
+}
+
+// startRunningAuthorSessionExistingWorker claims the next queued author job
+// with the already-registered test worker and marks it running, returning the
+// session. Used when a flow re-enqueues a phase after the first session ended.
+func startRunningAuthorSessionExistingWorker(t *testing.T, fixture testFixture, issueID string) jobResponse {
+	t.Helper()
+	var claim claimJobResponse
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/claim", claimJobRequest{
+		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
+		LeaseDurationSeconds: 60,
+	}, http.StatusOK, &claim)
+	if !claim.Claimed || claim.Job == nil || claim.Lease == nil {
+		t.Fatalf("claim response = %+v", claim)
+	}
+	if claim.Job.IssueID == nil || *claim.Job.IssueID != issueID {
+		t.Fatalf("claimed job issue = %+v, want %s", claim.Job.IssueID, issueID)
+	}
+	var running jobResponse
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/running", markJobRunningRequest{
+		LeaseID: claim.Lease.ID,
+	}, http.StatusOK, &running)
+	if running.Session == nil || running.SessionToken == "" {
+		t.Fatalf("running response missing session metadata: %+v", running)
+	}
+	return running
+}

@@ -117,7 +117,7 @@ func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	if len(parts) == 3 && parts[1] == "plan" {
+	if len(parts) == 3 && parts[1] == "phase" {
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
@@ -126,9 +126,9 @@ func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, 
 		}
 		switch parts[2] {
 		case "approve":
-			s.handleApprovePlan(w, r, principal, issueID)
-		case "reject":
-			s.handleRejectPlan(w, r, principal, issueID)
+			s.handleApproveWorkPhase(w, r, principal, issueID)
+		case "request-changes":
+			s.handleReworkWorkPhase(w, r, principal, issueID)
 		default:
 			writeError(w, http.StatusNotFound, "not_found", "resource not found")
 		}
@@ -389,121 +389,118 @@ func (s *projectServer) handleGetIssue(w http.ResponseWriter, r *http.Request, p
 		}
 		response.Detail = detail
 	}
+	response.Flow = s.issueFlowStatus(r.Context(), issueID)
 
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (s *projectServer) handleApprovePlan(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
-	issue, err := s.issues.GetIssue(r.Context(), issueID)
+// handleApproveWorkPhase applies a human's approval of a gate-paused work
+// phase through the engine: the cursor advances to the next phase (or the
+// final phase's change is published into review).
+func (s *projectServer) handleApproveWorkPhase(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
+	if !s.requireEngine(w) {
+		return
+	}
+	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
+		Kind:    lifecycle.EventWorkPhaseApproved,
+		IssueID: issueID,
+	}))
 	if err != nil {
-		writeError(w, http.StatusNotFound, "issue_not_found", err.Error())
+		writeEngineError(w, err, "approve_phase_failed")
 		return
-	}
-	if !issue.PlanMode {
-		writeError(w, http.StatusBadRequest, "approve_plan_failed", "issue is not in plan mode")
-		return
-	}
-	if strings.TrimSpace(issue.PlanBody) == "" || issue.PlanApprovedAt != nil {
-		writeError(w, http.StatusBadRequest, "approve_plan_failed", "issue does not have a pending plan")
-		return
-	}
-	if s.sessions != nil && strings.TrimSpace(issue.PlanSessionID) != "" {
-		session, err := s.sessions.GetSession(r.Context(), issue.PlanSessionID)
-		if err == nil && (session.RuntimeState == coordinator.SessionStarting || session.RuntimeState == coordinator.SessionWorking || session.RuntimeState == coordinator.SessionWaiting) {
-			if _, err := s.sessions.ReadyPlanningSession(r.Context(), issue.PlanSessionID); err != nil {
-				writeError(w, http.StatusBadRequest, "approve_plan_failed", err.Error())
-				return
-			}
-		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusBadRequest, "approve_plan_failed", err.Error())
-			return
-		}
-	}
-	approved, err := s.issues.MarkPlanApproved(r.Context(), issue.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "approve_plan_failed", err.Error())
-		return
-	}
-	if s.engine != nil {
-		if _, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-			Kind:    lifecycle.EventEnsureWorkPhaseJob,
-			IssueID: issue.ID,
-		})); err != nil {
-			writeError(w, http.StatusBadRequest, "approve_plan_queue_failed", err.Error())
-			return
-		}
-	} else if s.sessions != nil {
-		if _, err := s.sessions.EnsureAuthorJob(r.Context(), coordinator.EnsureAuthorJobInput{IssueID: issue.ID}); err != nil && !errors.Is(err, coordinator.ErrAuthorJobSuppressed) {
-			writeError(w, http.StatusBadRequest, "approve_plan_queue_failed", err.Error())
-			return
-		}
 	}
 
-	writeJSON(w, http.StatusOK, issueResponse{Issue: approved, ProjectID: s.project.ID, ProjectName: s.project.Name})
+	issue, err := s.issueForResult(r.Context(), result, issueID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "approve_phase_failed", err.Error())
+		return
+	}
+	response := issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name}
+	response.Flow = s.issueFlowStatus(r.Context(), issueID)
+	writeJSON(w, http.StatusOK, response)
 }
 
-func (s *projectServer) handleRejectPlan(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
-	if s.status == nil {
-		writeError(w, http.StatusServiceUnavailable, "status_unavailable", "status service is not configured")
-		return
-	}
-	if s.sessions == nil {
-		writeError(w, http.StatusServiceUnavailable, "sessions_unavailable", "session service is not configured")
-		return
-	}
-	var request planRejectRequest
+// handleReworkWorkPhase applies a human's request-changes on a gate-paused
+// work phase: the same phase re-runs with the feedback injected into its
+// prompt.
+func (s *projectServer) handleReworkWorkPhase(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
+	var request phaseRequestChangesRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	comments := strings.TrimSpace(request.Comments)
-	if comments == "" {
-		writeError(w, http.StatusBadRequest, "reject_plan_failed", "comments are required")
+	feedback := strings.TrimSpace(request.Feedback)
+	if feedback == "" {
+		writeError(w, http.StatusBadRequest, "request_changes_failed", "feedback is required")
 		return
 	}
-	issue, err := s.issues.GetIssue(r.Context(), issueID)
+	if !s.requireEngine(w) {
+		return
+	}
+	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
+		Kind:    lifecycle.EventWorkPhaseRework,
+		IssueID: issueID,
+		Payload: lifecycle.EventPayload{GateFeedback: feedback},
+	}))
 	if err != nil {
-		writeError(w, http.StatusNotFound, "issue_not_found", err.Error())
+		writeEngineError(w, err, "request_changes_failed")
 		return
-	}
-	if !issue.PlanMode || strings.TrimSpace(issue.PlanBody) == "" || issue.PlanApprovedAt != nil {
-		writeError(w, http.StatusBadRequest, "reject_plan_failed", "issue does not have a pending plan")
-		return
-	}
-	status, err := s.status.Write(r.Context(), coordinator.WriteStatusInput{
-		IssueID: issue.ID,
-		Actor:   principal.Actor(),
-		Kind:    coordinator.StatusKindQuestion,
-		Message: "Plan rejected:\n\n" + comments + "\n\nRejected plan:\n\n" + strings.TrimSpace(issue.PlanBody),
-	})
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "reject_plan_failed", err.Error())
-		return
-	}
-	replyBody := "The plan was rejected. Revise the plan using these comments, then record a new plan with `flow status --kind plan`.\n\n" + comments
-	_, queued, err := s.sessions.ReplyToIssue(r.Context(), coordinator.ReplyToIssueInput{
-		IssueID:     issue.ID,
-		StatusLogID: &status.ID,
-		Actor:       principal.Actor(),
-		Body:        replyBody,
-	})
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "reject_plan_reply_failed", err.Error())
-		return
-	}
-	cleared, err := s.issues.ClearPendingPlan(r.Context(), issue.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "reject_plan_failed", err.Error())
-		return
-	}
-	if !queued {
-		if err := s.ensureAuthorJobWithHumanInstructions(r, principal, issue.ID, replyBody); err != nil {
-			writeError(w, http.StatusBadRequest, "reject_plan_queue_failed", err.Error())
-			return
-		}
 	}
 
-	writeJSON(w, http.StatusOK, issueResponse{Issue: cleared, ProjectID: s.project.ID, ProjectName: s.project.Name})
+	issue, err := s.issueForResult(r.Context(), result, issueID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "request_changes_failed", err.Error())
+		return
+	}
+	response := issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name}
+	response.Flow = s.issueFlowStatus(r.Context(), issueID)
+	writeJSON(w, http.StatusOK, response)
+}
+
+type phaseRequestChangesRequest struct {
+	Feedback string `json:"feedback"`
+}
+
+// issueFlowStatus assembles the issue's flow position for API/UI consumers:
+// which flow, the ordered phases, the cursor position and gate state, and —
+// when paused at a gate — the pending handoff awaiting review. Nil when the
+// issue has no cursor.
+func (s *projectServer) issueFlowStatus(ctx context.Context, issueID string) *issueFlowStatus {
+	if s.cursors == nil {
+		return nil
+	}
+	cursor, ok, err := s.cursors.GetCursor(ctx, issueID)
+	if err != nil || !ok {
+		return nil
+	}
+	status := &issueFlowStatus{
+		FlowID:       cursor.Snapshot.FlowID,
+		FlowName:     cursor.Snapshot.FlowName,
+		PhaseIndex:   cursor.PhaseIndex,
+		PhaseCount:   len(cursor.Snapshot.Phases),
+		PhaseState:   string(cursor.PhaseState),
+		GateFeedback: cursor.GateFeedback,
+	}
+	if phase, ok := cursor.CurrentPhase(); ok {
+		status.PhaseName = phase.Name
+		status.Gate = string(phase.Gate)
+	}
+	for _, phase := range cursor.Snapshot.Phases {
+		status.Phases = append(status.Phases, issueFlowPhase{
+			Name:            phase.Name,
+			Gate:            string(phase.Gate),
+			AgentName:       phase.Agent.Name,
+			AgentHarness:    phase.Agent.Harness,
+			Model:           phase.Agent.Model,
+			ReasoningEffort: phase.Agent.ReasoningEffort,
+		})
+	}
+	if cursor.PhaseState == coordinator.FlowPhaseAwaitingApproval {
+		if handoff, ok, err := s.cursors.PhaseHandoff(ctx, issueID, cursor.PhaseIndex); err == nil && ok {
+			status.PendingHandoff = handoff.Content
+		}
+	}
+	return status
 }
 
 func (s *projectServer) handleAttentionReply(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
@@ -788,6 +785,7 @@ func (s *projectServer) handleEditIssue(w http.ResponseWriter, r *http.Request, 
 		PlanMode:            request.PlanMode,
 		AgentHarness:        request.AgentHarness,
 		HarnessArgs:         request.HarnessArgs,
+		FlowID:              request.FlowID,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "edit_issue_failed", err.Error())

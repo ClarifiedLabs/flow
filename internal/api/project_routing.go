@@ -266,6 +266,10 @@ func (s *Server) handleProjectScopedPath(w http.ResponseWriter, r *http.Request,
 		}
 	case strings.HasPrefix(sub, "issues/"):
 		ps.handleIssuePath(w, requestWithPath(r, "/v1/"+sub), principal)
+	case sub == "agent-defs" || strings.HasPrefix(sub, "agent-defs/"):
+		ps.handleAgentDefsPath(w, requestWithPath(r, "/v1/"+sub), principal)
+	case sub == "flows" || strings.HasPrefix(sub, "flows/"):
+		ps.handleFlowsPath(w, requestWithPath(r, "/v1/"+sub), principal)
 	case sub == "board":
 		if !requireMethod(w, r, http.MethodGet) {
 			return

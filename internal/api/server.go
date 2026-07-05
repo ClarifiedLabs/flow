@@ -95,6 +95,8 @@ type projectServer struct {
 	status       *coordinator.StatusService
 	reconciler   *coordinator.ReconcileService
 	cursors      *coordinator.FlowCursorService
+	agentDefs    *coordinator.AgentDefService
+	flows        *coordinator.FlowService
 	checkConfigs *coordinator.CheckConfigService
 	merges       *coordinator.MergeService
 	transitions  *coordinator.TransitionService
@@ -116,6 +118,8 @@ func (s *Server) forBundle(bundle *ProjectBundle) *projectServer {
 		status:       bundle.Status,
 		reconciler:   bundle.Reconciler,
 		cursors:      bundle.Cursors,
+		agentDefs:    bundle.AgentDefs,
+		flows:        bundle.Flows,
 		checkConfigs: bundle.CheckConfigs,
 		merges:       bundle.Merges,
 		transitions:  bundle.Transitions,
@@ -292,6 +296,26 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 			return
 		}
 		ps.handleThreadPath(w, r, principal)
+		return
+	}
+
+	if r.URL.Path == "/v1/agent-defs" || strings.HasPrefix(r.URL.Path, "/v1/agent-defs/") {
+		ps, err := s.implicitProjectServer(principal)
+		if err != nil {
+			writeProjectResolveError(w, err)
+			return
+		}
+		ps.handleAgentDefsPath(w, r, principal)
+		return
+	}
+
+	if r.URL.Path == "/v1/flows" || strings.HasPrefix(r.URL.Path, "/v1/flows/") {
+		ps, err := s.implicitProjectServer(principal)
+		if err != nil {
+			writeProjectResolveError(w, err)
+			return
+		}
+		ps.handleFlowsPath(w, r, principal)
 		return
 	}
 

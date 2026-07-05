@@ -61,6 +61,7 @@ func createIssueInputForPrincipal(request createIssueRequest, principal coordina
 			PlanMode:            request.PlanMode,
 			AgentHarness:        request.AgentHarness,
 			HarnessArgs:         request.HarnessArgs,
+			FlowID:              request.FlowID,
 			CreatedBy:           actor,
 			CreatedBySessionID:  createdBySessionID,
 			SourceIssueID:       sourceIssueID,
@@ -315,6 +316,7 @@ type createIssueRequest struct {
 	PlanMode            bool              `json:"plan_mode"`
 	AgentHarness        string            `json:"agent_harness"`
 	HarnessArgs         flowharness.Args  `json:"harness_args"`
+	FlowID              string            `json:"flow_id"`
 	CreatedBySessionID  *string           `json:"created_by_session_id"`
 	SourceIssueID       *string           `json:"source_issue_id"`
 	SourceChangeID      *string           `json:"source_change_id"`
@@ -341,6 +343,7 @@ type editIssueRequest struct {
 	PlanMode            *bool                  `json:"plan_mode"`
 	AgentHarness        *string                `json:"agent_harness"`
 	HarnessArgs         *flowharness.ArgsPatch `json:"harness_args"`
+	FlowID              *string                `json:"flow_id"`
 }
 
 type scheduleIssueRequest = contract.ScheduleIssueRequest
@@ -365,7 +368,6 @@ type readySessionRequest = contract.ReadySessionRequest
 type sessionStatusRequest = contract.SessionStatusRequest
 type sessionProcessExitRequest = contract.SessionProcessExitRequest
 type sessionMessageDeliveredRequest = contract.SessionMessageDeliveredRequest
-type planRejectRequest = contract.PlanRejectRequest
 type attentionReplyRequest = contract.AttentionReplyRequest
 type sessionTerminalRequest = contract.SessionTerminalRequest
 type jobTerminalRequest = contract.JobTerminalRequest
@@ -418,6 +420,32 @@ type issueResponse struct {
 	ProjectName string                       `json:"project_name,omitempty"`
 	StatusLog   []coordinator.StatusLogEntry `json:"status_log,omitempty"`
 	Detail      *uiIssueDetail               `json:"issue_detail,omitempty"`
+	Flow        *issueFlowStatus             `json:"flow,omitempty"`
+}
+
+// issueFlowStatus is the issue's position within its frozen flow snapshot:
+// the ordered phases, the cursor index/state, and — when paused at a human
+// gate — the pending handoff awaiting review.
+type issueFlowStatus struct {
+	FlowID         string           `json:"flow_id,omitempty"`
+	FlowName       string           `json:"flow_name,omitempty"`
+	PhaseName      string           `json:"phase_name,omitempty"`
+	PhaseIndex     int              `json:"phase_index"`
+	PhaseCount     int              `json:"phase_count"`
+	PhaseState     string           `json:"phase_state,omitempty"`
+	Gate           string           `json:"gate,omitempty"`
+	GateFeedback   string           `json:"gate_feedback,omitempty"`
+	PendingHandoff string           `json:"pending_handoff,omitempty"`
+	Phases         []issueFlowPhase `json:"phases,omitempty"`
+}
+
+type issueFlowPhase struct {
+	Name            string `json:"name"`
+	Gate            string `json:"gate"`
+	AgentName       string `json:"agent_name,omitempty"`
+	AgentHarness    string `json:"agent_harness,omitempty"`
+	Model           string `json:"model,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 type issuesResponse = contract.IssuesResponse

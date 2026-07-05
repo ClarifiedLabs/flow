@@ -77,6 +77,16 @@ func (c *Client) issuesPath(suffix string) string {
 	return "/v1/issues" + suffix
 }
 
+// projectPath scopes an arbitrary project-owned route ("/flows",
+// "/agent-defs/...") to the client's project when one is set.
+func (c *Client) projectPath(suffix string) string {
+	if c.projectID != "" {
+		return "/v1/projects/" + url.PathEscape(c.projectID) + suffix
+	}
+
+	return "/v1" + suffix
+}
+
 func (c *Client) consolePath() string {
 	if c.projectID != "" {
 		return "/v1/projects/" + url.PathEscape(c.projectID) + "/console"
@@ -120,6 +130,108 @@ func (c *Client) GetIssue(id string) (coordinator.Issue, error) {
 		return coordinator.Issue{}, err
 	}
 
+	return response.Issue, nil
+}
+
+// ListAgentDefs returns the project's agent definition catalog.
+func (c *Client) ListAgentDefs() ([]coordinator.AgentDef, error) {
+	var response struct {
+		AgentDefs []coordinator.AgentDef `json:"agent_defs"`
+	}
+	if err := c.do(http.MethodGet, c.projectPath("/agent-defs"), nil, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.AgentDefs, nil
+}
+
+func (c *Client) CreateAgentDef(input coordinator.AgentDefInput) (coordinator.AgentDef, error) {
+	var response struct {
+		AgentDef coordinator.AgentDef `json:"agent_def"`
+	}
+	if err := c.do(http.MethodPost, c.projectPath("/agent-defs"), input, nil, &response); err != nil {
+		return coordinator.AgentDef{}, err
+	}
+	return response.AgentDef, nil
+}
+
+func (c *Client) UpdateAgentDef(id string, input coordinator.AgentDefInput) (coordinator.AgentDef, error) {
+	var response struct {
+		AgentDef coordinator.AgentDef `json:"agent_def"`
+	}
+	if err := c.do(http.MethodPatch, c.projectPath("/agent-defs/"+url.PathEscape(id)), input, nil, &response); err != nil {
+		return coordinator.AgentDef{}, err
+	}
+	return response.AgentDef, nil
+}
+
+func (c *Client) DeleteAgentDef(id string) error {
+	return c.do(http.MethodDelete, c.projectPath("/agent-defs/"+url.PathEscape(id)), nil, nil, nil)
+}
+
+// FlowsList is the flows collection response: the catalog plus the project
+// default flow id.
+type FlowsList struct {
+	Flows         []coordinator.Flow `json:"flows"`
+	DefaultFlowID string             `json:"default_flow_id,omitempty"`
+}
+
+func (c *Client) ListFlows() (FlowsList, error) {
+	var response FlowsList
+	if err := c.do(http.MethodGet, c.projectPath("/flows"), nil, nil, &response); err != nil {
+		return FlowsList{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) CreateFlow(input coordinator.FlowInput) (coordinator.Flow, error) {
+	var response struct {
+		Flow coordinator.Flow `json:"flow"`
+	}
+	if err := c.do(http.MethodPost, c.projectPath("/flows"), input, nil, &response); err != nil {
+		return coordinator.Flow{}, err
+	}
+	return response.Flow, nil
+}
+
+func (c *Client) UpdateFlow(id string, input coordinator.FlowInput) (coordinator.Flow, error) {
+	var response struct {
+		Flow coordinator.Flow `json:"flow"`
+	}
+	if err := c.do(http.MethodPatch, c.projectPath("/flows/"+url.PathEscape(id)), input, nil, &response); err != nil {
+		return coordinator.Flow{}, err
+	}
+	return response.Flow, nil
+}
+
+func (c *Client) DeleteFlow(id string) error {
+	return c.do(http.MethodDelete, c.projectPath("/flows/"+url.PathEscape(id)), nil, nil, nil)
+}
+
+func (c *Client) SetDefaultFlow(id string) (coordinator.Flow, error) {
+	var response struct {
+		Flow coordinator.Flow `json:"flow"`
+	}
+	if err := c.do(http.MethodPost, c.projectPath("/flows/"+url.PathEscape(id)+"/default"), nil, nil, &response); err != nil {
+		return coordinator.Flow{}, err
+	}
+	return response.Flow, nil
+}
+
+// ApproveWorkPhase approves an issue's gate-paused work phase.
+func (c *Client) ApproveWorkPhase(issueID string) (coordinator.Issue, error) {
+	var response issueResponse
+	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(issueID))+"/phase/approve", map[string]string{}, nil, &response); err != nil {
+		return coordinator.Issue{}, err
+	}
+	return response.Issue, nil
+}
+
+// RequestWorkPhaseChanges sends a gate-paused work phase back to rework.
+func (c *Client) RequestWorkPhaseChanges(issueID string, feedback string) (coordinator.Issue, error) {
+	var response issueResponse
+	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(issueID))+"/phase/request-changes", map[string]string{"feedback": feedback}, nil, &response); err != nil {
+		return coordinator.Issue{}, err
+	}
 	return response.Issue, nil
 }
 
@@ -1285,6 +1397,7 @@ type CreateIssueInput struct {
 	PlanMode            bool             `json:"plan_mode,omitempty"`
 	AgentHarness        string           `json:"agent_harness,omitempty"`
 	HarnessArgs         flowharness.Args `json:"harness_args,omitempty"`
+	FlowID              string           `json:"flow_id,omitempty"`
 }
 
 type EditIssueInput struct {
