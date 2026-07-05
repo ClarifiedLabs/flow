@@ -183,7 +183,6 @@ type LaneState string
 const (
 	LaneStateReadyToMerge     LaneState = "ready_to_merge"
 	LaneStateChangesRequested LaneState = "changes_requested"
-	LaneStatePlanning         LaneState = "planning"
 	LaneStateInProgress       LaneState = "in_progress"
 	LaneStateInReview         LaneState = "in_review"
 	LaneStateTriage           LaneState = "triage"
@@ -194,8 +193,8 @@ const (
 type WaitReason string
 
 const (
-	WaitReasonPlanApproval WaitReason = "plan_approval"
-	WaitReasonQuestion     WaitReason = "question"
+	WaitReasonPhaseApproval WaitReason = "phase_approval"
+	WaitReasonQuestion      WaitReason = "question"
 	WaitReasonManualMerge  WaitReason = "manual_merge"
 	WaitReasonHumanReview  WaitReason = "human_review"
 	WaitReasonBlocked      WaitReason = "blocked"
@@ -1250,9 +1249,7 @@ func laneStateForPhase(phase Phase) (LaneState, bool) {
 		return LaneStateTriage, true
 	case PhaseUpNext:
 		return LaneStateUpNext, true
-	case PhasePlanning:
-		return LaneStatePlanning, true
-	case PhaseAuthoring:
+	case PhaseWorking:
 		return LaneStateInProgress, true
 	case PhaseCritique, PhaseAcceptance:
 		return LaneStateInReview, true
@@ -1266,12 +1263,16 @@ func laneStateForPhase(phase Phase) (LaneState, bool) {
 }
 
 func (s *IssueService) waitReason(ctx context.Context, issue Issue, state LaneState) (WaitReason, error) {
+	// A flow paused at a human gate has no active session; the cursor is the
+	// signal that a phase handoff awaits approval.
+	if _, cursorState, ok, err := cursorStateForIssue(ctx, s.db, issue.ID); err != nil {
+		return "", err
+	} else if ok && cursorState == FlowPhaseAwaitingApproval {
+		return WaitReasonPhaseApproval, nil
+	}
 	if sessionState, ok, err := activeSessionStateForIssue(ctx, s.db, issue.ID); err != nil {
 		return "", err
 	} else if ok && sessionState == SessionWaiting {
-		if issue.PlanMode && issue.PlanApprovedAt == nil && strings.TrimSpace(issue.PlanBody) != "" {
-			return WaitReasonPlanApproval, nil
-		}
 		return WaitReasonQuestion, nil
 	}
 	if state == LaneStateReadyToMerge && !issue.AutoMerge {
@@ -1356,7 +1357,7 @@ func laneForState(state LaneState) string {
 		return "backlog"
 	case LaneStateUpNext:
 		return "up_next"
-	case LaneStatePlanning, LaneStateInProgress, LaneStateInReview, LaneStateChangesRequested:
+	case LaneStateInProgress, LaneStateInReview, LaneStateChangesRequested:
 		return "in_progress"
 	case LaneStateReadyToMerge:
 		return "needs_attention"

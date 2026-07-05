@@ -73,9 +73,7 @@ type DeadlineConfig struct {
 // deadlineFor returns the configured dwell window for a phase, or 0 (disabled).
 func (d DeadlineConfig) deadlineFor(phase coordinator.Phase) time.Duration {
 	switch phase {
-	case coordinator.PhasePlanning:
-		return d.AuthoringStall
-	case coordinator.PhaseAuthoring:
+	case coordinator.PhaseWorking:
 		return d.AuthoringStall
 	default:
 		return 0
@@ -521,10 +519,15 @@ func (e *Engine) derivePhase(ctx context.Context, issueID string) (coordinator.P
 	if _, ok, err := e.eff.ActiveAuthorSessionState(ctx, issueID); err != nil {
 		return "", err
 	} else if ok {
-		if issue.PlanMode && issue.PlanApprovedAt == nil {
-			return coordinator.PhasePlanning, nil
-		}
-		return coordinator.PhaseAuthoring, nil
+		return coordinator.PhaseWorking, nil
+	}
+	// No active session, but the flow cursor can still pin the issue in
+	// working: paused at a human gate, or mid-pipeline between phase jobs.
+	// This must match coordinator.derivePhaseFromIssue.
+	if cursor, ok, err := e.eff.FlowCursor(ctx, issueID); err != nil {
+		return "", err
+	} else if ok && cursor.IndicatesWorking() {
+		return coordinator.PhaseWorking, nil
 	}
 	if issue.TriageState == coordinator.TriagePending {
 		return coordinator.PhaseTriage, nil
@@ -546,9 +549,6 @@ func (e *Engine) derivePhase(ctx context.Context, issueID string) (coordinator.P
 		return coordinator.PhaseCritique, nil
 	}
 	if issue.ScheduleState == coordinator.ScheduleUpNext {
-		if issue.PlanMode && issue.PlanApprovedAt == nil {
-			return coordinator.PhasePlanning, nil
-		}
 		return coordinator.PhaseUpNext, nil
 	}
 	return coordinator.PhaseBacklog, nil

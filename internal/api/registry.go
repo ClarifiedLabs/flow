@@ -192,7 +192,8 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 	merges := coordinator.NewMergeService(db, issues, sessions, project)
 	status := coordinator.NewStatusService(db)
 
-	engine := lifecycle.NewEngine(db, lifecycle.NewEffects(issues, checks, checkConfigs, sessions, merges, threads, status))
+	cursors := coordinator.NewFlowCursorService(db, flows)
+	engine := lifecycle.NewEngine(db, lifecycle.NewEffects(issues, checks, checkConfigs, sessions, merges, threads, status, cursors, reconciler))
 	engine.SetDeadlines(r.deadlines)
 
 	bundle := &ProjectBundle{

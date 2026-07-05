@@ -17,7 +17,7 @@ func TestDrainDueTimersFiresAndLatches(t *testing.T) {
 	fake.issue.TriageState = coordinator.TriageAccepted
 	fake.issue.ScheduleState = coordinator.ScheduleUpNext
 
-	if _, err := eng.ScheduleTimer(ctx, issueID, EventEnsureAuthorJob, eng.now().Add(-time.Minute), EventPayload{}); err != nil {
+	if _, err := eng.ScheduleTimer(ctx, issueID, EventEnsureWorkPhaseJob, eng.now().Add(-time.Minute), EventPayload{}); err != nil {
 		t.Fatalf("schedule timer: %v", err)
 	}
 
@@ -49,14 +49,14 @@ func TestDrainDueTimersRedeliversAfterCrashBeforeConfirm(t *testing.T) {
 	fake.issue.TriageState = coordinator.TriageAccepted
 	fake.issue.ScheduleState = coordinator.ScheduleUpNext
 
-	timerID, err := eng.ScheduleTimer(ctx, issueID, EventEnsureAuthorJob, eng.now().Add(-time.Minute), EventPayload{})
+	timerID, err := eng.ScheduleTimer(ctx, issueID, EventEnsureWorkPhaseJob, eng.now().Add(-time.Minute), EventPayload{})
 	if err != nil {
 		t.Fatalf("schedule timer: %v", err)
 	}
 
 	// Simulate a crash after the timer's Step committed but before the confirm
 	// update: the transition (keyed "timer:<id>") exists, dispatched_at is NULL.
-	if _, err := eng.Step(ctx, Event{Kind: EventEnsureAuthorJob, IssueID: issueID, IdempotencyKey: "timer:" + timerID}); err != nil {
+	if _, err := eng.Step(ctx, Event{Kind: EventEnsureWorkPhaseJob, IssueID: issueID, IdempotencyKey: "timer:" + timerID}); err != nil {
 		t.Fatalf("pre-commit step: %v", err)
 	}
 	if got := countCalls(fake.calls, "EnsureAuthorJob"); got != 1 {
@@ -96,7 +96,7 @@ INSERT INTO timers (id, issue_id, fire_at, kind, payload_json, fired_at)
 VALUES ('tm-poison', ?, '2020-01-01T00:00:00Z', 'ensure_author_job', '{', NULL)`, issueID); err != nil {
 		t.Fatalf("seed poison timer: %v", err)
 	}
-	goodID, err := eng.ScheduleTimer(ctx, issueID, EventEnsureAuthorJob, eng.now().Add(-time.Minute), EventPayload{})
+	goodID, err := eng.ScheduleTimer(ctx, issueID, EventEnsureWorkPhaseJob, eng.now().Add(-time.Minute), EventPayload{})
 	if err != nil {
 		t.Fatalf("schedule timer: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestDrainDueTimersSkipsFutureTimers(t *testing.T) {
 	ctx := context.Background()
 	fake.issue.TriageState = coordinator.TriageAccepted
 
-	if _, err := eng.ScheduleTimer(ctx, issueID, EventEnsureAuthorJob, eng.now().Add(time.Hour), EventPayload{}); err != nil {
+	if _, err := eng.ScheduleTimer(ctx, issueID, EventEnsureWorkPhaseJob, eng.now().Add(time.Hour), EventPayload{}); err != nil {
 		t.Fatalf("schedule timer: %v", err)
 	}
 	fired, err := eng.DrainDueTimers(ctx)
@@ -412,7 +412,7 @@ func TestRefreshSessionPhasesRederivesStalePhase(t *testing.T) {
 	eng, fake, store, issueID := newEngineTest(t)
 	ctx := context.Background()
 	// Seed a stale authoring phase (as if a now-crashed session left it behind).
-	if _, err := store.DB().Exec(`INSERT INTO workflow_state (issue_id, phase, version, updated_at) VALUES (?, 'authoring', 3, ?)`,
+	if _, err := store.DB().Exec(`INSERT INTO workflow_state (issue_id, phase, version, updated_at) VALUES (?, 'working', 3, ?)`,
 		issueID, "2026-01-01T00:00:00Z"); err != nil {
 		t.Fatalf("seed workflow_state: %v", err)
 	}
@@ -441,7 +441,7 @@ func TestTickDrainsTimersAndRecovers(t *testing.T) {
 	fake.issue.TriageState = coordinator.TriageAccepted
 	fake.issue.ScheduleState = coordinator.ScheduleUpNext
 
-	if _, err := eng.ScheduleTimer(ctx, issueID, EventEnsureAuthorJob, eng.now().Add(-time.Minute), EventPayload{}); err != nil {
+	if _, err := eng.ScheduleTimer(ctx, issueID, EventEnsureWorkPhaseJob, eng.now().Add(-time.Minute), EventPayload{}); err != nil {
 		t.Fatalf("schedule timer: %v", err)
 	}
 	if err := eng.Tick(ctx); err != nil {
@@ -489,7 +489,7 @@ func enterAuthoring(t *testing.T, eng *Engine, fake *fakeEffects, issueID string
 	if err != nil {
 		t.Fatalf("enter authoring: %v", err)
 	}
-	if res.ToPhase != coordinator.PhaseAuthoring {
+	if res.ToPhase != coordinator.PhaseWorking {
 		t.Fatalf("ToPhase = %q, want authoring", res.ToPhase)
 	}
 }
@@ -596,10 +596,10 @@ func TestWaitingSessionKeepsAuthoringPhase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("flip to waiting: %v", err)
 	}
-	if res.ToPhase != coordinator.PhaseAuthoring {
+	if res.ToPhase != coordinator.PhaseWorking {
 		t.Fatalf("ToPhase = %q, want authoring", res.ToPhase)
 	}
-	if currentPhase(t, store, issueID) != coordinator.PhaseAuthoring {
+	if currentPhase(t, store, issueID) != coordinator.PhaseWorking {
 		t.Fatalf("phase = %q, want authoring", currentPhase(t, store, issueID))
 	}
 	if n := pendingTimerKindCount(t, store, EventPhaseDeadline); n != 1 {
@@ -792,11 +792,11 @@ func TestPhaseDeadlineArmFailureDoesNotFailCommittedStep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Step must succeed despite a failed deadline arm, got: %v", err)
 	}
-	if res.ToPhase != coordinator.PhaseAuthoring {
+	if res.ToPhase != coordinator.PhaseWorking {
 		t.Fatalf("ToPhase = %q, want authoring", res.ToPhase)
 	}
 	// The transition committed even though arming failed.
-	if got := currentPhase(t, store, issueID); got != coordinator.PhaseAuthoring {
+	if got := currentPhase(t, store, issueID); got != coordinator.PhaseWorking {
 		t.Fatalf("committed phase = %q, want authoring", got)
 	}
 	if n := transitionCount(t, store, issueID); n != 1 {
@@ -845,7 +845,7 @@ func pendingCheckTimeoutPayload(t *testing.T, store *flowdb.Store) string {
 
 // TestRecoveryArmsCheckTimeoutForCompletionReview is the regression for the
 // Mode-B gap: a completion-assessment review is scheduled by the coordinator's
-// crash reconcile OUTSIDE the engine, so actReadyAuthorSession never armed its
+// crash reconcile OUTSIDE the engine, so actWorkPhaseComplete never armed its
 // reviewer check timeout. The engine's recovery must arm the SAME
 // EventCheckTimeout a normal round arms, using the pending checks the recovery
 // scan surfaces, so the change cannot park forever when the reviewer never

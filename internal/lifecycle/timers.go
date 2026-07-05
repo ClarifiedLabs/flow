@@ -61,15 +61,17 @@ func (e *Engine) RunRecovery(ctx context.Context) (int, error) {
 	return recovered + checksRecovered + mergesRecovered, errs
 }
 
-// refreshSessionPhases re-derives the phase for issues currently recorded in a
-// session-derived phase (planning / authoring). After a crash these phases
-// go stale — the session is gone but the column still claims work is in flight —
-// so a refresh keeps the explicit phase (and therefore the board/timeline)
-// accurate without waiting for the next inbound event.
+// refreshSessionPhases re-derives the phase for issues currently recorded in
+// the session-derived working phase. After a crash this phase can go stale —
+// the session is gone but the column still claims work is in flight — so a
+// refresh keeps the explicit phase (and therefore the board/timeline)
+// accurate without waiting for the next inbound event. (A cursor paused at a
+// human gate or mid-pipeline legitimately re-derives to working and is left
+// alone.)
 func (e *Engine) refreshSessionPhases(ctx context.Context) error {
 	rows, err := e.db.QueryContext(ctx,
-		`SELECT issue_id FROM workflow_state WHERE phase IN (?, ?)`,
-		string(coordinator.PhasePlanning), string(coordinator.PhaseAuthoring))
+		`SELECT issue_id FROM workflow_state WHERE phase = ?`,
+		string(coordinator.PhaseWorking))
 	if err != nil {
 		return fmt.Errorf("select session-phase issues: %w", err)
 	}

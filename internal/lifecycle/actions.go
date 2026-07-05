@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -38,26 +39,44 @@ func isCritiqueCheckKind(kind coordinator.CheckKind) bool {
 	}
 }
 
-// actReadyAuthorSession mirrors the ready handler cascade (server.go) exactly,
-// preserving the load-bearing ordering: capture the pre-ready change, run the
-// preflight suite validation, ready the session, advance the head + reset
-// automated checks, then schedule a review round on the pre-ready snapshot.
-func actReadyAuthorSession(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
+// actWorkPhaseComplete handles flow ready: the session's current work phase is
+// done. An intermediate phase (or a human-gated final phase) stores its handoff
+// and either auto-advances the cursor — enqueueing the next phase's job — or
+// pauses awaiting approval. The final phase runs the ready tail: publish the
+// change, advance the head, reset automated checks, and schedule the first
+// review round. Issues without a cursor (no flows configured) behave as an
+// implicit single auto phase.
+func actWorkPhaseComplete(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
 	sessionID := ev.SessionID
 	headSHA := strings.TrimSpace(ev.Payload.HeadSHA)
 	sessionBeforeReady, err := e.eff.GetSession(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
-	issue, err := e.eff.GetIssue(ctx, sessionBeforeReady.IssueID)
+
+	cursor, hasCursor, err := e.eff.FlowCursor(ctx, snap.issueID)
 	if err != nil {
 		return nil, err
 	}
-	if issue.PlanMode && issue.PlanApprovedAt == nil {
-		if strings.TrimSpace(issue.PlanBody) == "" {
-			return nil, errors.New("planning session requires a recorded plan before ready")
+	if hasCursor && cursor.PhaseState != coordinator.FlowPhaseCompleted {
+		phase, ok := cursor.CurrentPhase()
+		if !ok {
+			return nil, fmt.Errorf("flow cursor for %s is out of range (phase %d of %d)",
+				snap.issueID, cursor.PhaseIndex, len(cursor.Snapshot.Phases))
 		}
-		return nil, errors.New("human plan approval required before ready")
+		// A gated final phase pauses like any other gated phase; approval runs
+		// the ready tail (actApproveWorkPhase).
+		if !cursor.OnFinalPhase() || phase.Gate == coordinator.FlowGateHuman {
+			return e.completeGatedOrIntermediatePhase(ctx, ev, snap, res, cursor, phase, sessionBeforeReady)
+		}
+		// Final auto phase: record the handoff for the phase timeline, then run
+		// the ready tail below.
+		if err := e.storeCursorPhaseHandoff(ctx, snap.issueID, cursor, sessionBeforeReady.ChangeID); err != nil {
+			return nil, err
+		}
+		if _, err := e.eff.CompleteFlowCursor(ctx, snap.issueID, cursor.PhaseIndex); err != nil {
+			return nil, err
+		}
 	}
 
 	var preReadyChange coordinator.Change
@@ -128,8 +147,206 @@ func actReadyAuthorSession(ctx context.Context, e *Engine, ev Event, snap *snaps
 	return nil, nil
 }
 
+// completeGatedOrIntermediatePhase finishes a work phase that does NOT publish
+// the change: any non-final phase, or a human-gated final phase. Effect order
+// is load-bearing for crash redelivery: the handoff upsert and the CAS cursor
+// move commit before the session finishes, so a replay that finds the session
+// already finished can safely no-op (the cursor has provably moved), while a
+// replay that finds the session live simply re-runs the idempotent steps.
+func (e *Engine) completeGatedOrIntermediatePhase(ctx context.Context, ev Event, snap *snapshot, res *StepResult, cursor coordinator.FlowCursor, phase coordinator.FlowPhaseSnapshot, sessionBeforeReady coordinator.Session) ([]Event, error) {
+	if sessionBeforeReady.RuntimeState == coordinator.SessionFinished {
+		// A duplicate ready for a phase whose completion already processed:
+		// the cursor moved on, and re-completing would double-advance it.
+		res.Session = &sessionBeforeReady
+		return nil, nil
+	}
+
+	if err := e.storeCursorPhaseHandoff(ctx, snap.issueID, cursor, sessionBeforeReady.ChangeID); err != nil {
+		return nil, err
+	}
+
+	advanced := false
+	if phase.Gate == coordinator.FlowGateHuman {
+		if _, err := e.eff.PauseFlowCursor(ctx, snap.issueID, cursor.PhaseIndex); err != nil {
+			return nil, err
+		}
+	} else {
+		moved, err := e.eff.AdvanceFlowCursor(ctx, snap.issueID, cursor.PhaseIndex)
+		if err != nil {
+			return nil, err
+		}
+		advanced = moved
+	}
+
+	session, err := e.eff.FinishWorkPhaseSession(ctx, ev.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	res.Session = &session
+
+	if advanced {
+		// The FSM phase stays `working` across sub-phases, so the phase-change
+		// deadline hook in attemptTransition never rearms; arm the next
+		// phase's dwell window here (deduped, non-fatal like the hook).
+		if err := e.schedulePhaseDeadline(ctx, snap.issueID, coordinator.PhaseWorking); err != nil {
+			slog.Warn("lifecycle: arm work-phase deadline failed (non-fatal)",
+				"issue", snap.issueID, "error", err)
+		}
+		return []Event{{Kind: EventEnsureWorkPhaseJob, IssueID: snap.issueID}}, nil
+	}
+	return nil, nil
+}
+
+// storeCursorPhaseHandoff copies the change-scoped handoff snapshot the agent
+// submitted at flow ready into the per-phase handoff store under the cursor's
+// current index. Missing snapshots are tolerated: not every phase writes one.
+func (e *Engine) storeCursorPhaseHandoff(ctx context.Context, issueID string, cursor coordinator.FlowCursor, changeID string) error {
+	phase, ok := cursor.CurrentPhase()
+	if !ok {
+		return nil
+	}
+	snapshot, ok, err := e.eff.ChangeHandoff(ctx, changeID)
+	if err != nil || !ok {
+		return err
+	}
+	return e.eff.StorePhaseHandoff(ctx, coordinator.StorePhaseHandoffInput{
+		IssueID:    issueID,
+		PhaseIndex: cursor.PhaseIndex,
+		PhaseName:  phase.Name,
+		Content:    snapshot.Content,
+		HeadSHA:    snapshot.HeadSHA,
+	})
+}
+
+// actApproveWorkPhase applies a human's gate approval. For an intermediate
+// phase the cursor advances and the next phase's job is ensured. For the final
+// phase — whose session already finished at the pause — it runs the ready
+// tail directly: publish the change, advance the head to the stored handoff's
+// SHA, reset automated checks, and schedule the first review round.
+func actApproveWorkPhase(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
+	cursor, ok, err := e.eff.FlowCursor(ctx, snap.issueID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errors.New("issue has no flow cursor to approve")
+	}
+
+	if !cursor.OnFinalPhase() {
+		advanced, err := e.eff.AdvanceFlowCursor(ctx, snap.issueID, cursor.PhaseIndex)
+		if err != nil {
+			return nil, err
+		}
+		if advanced {
+			if err := e.schedulePhaseDeadline(ctx, snap.issueID, coordinator.PhaseWorking); err != nil {
+				slog.Warn("lifecycle: arm work-phase deadline failed (non-fatal)",
+					"issue", snap.issueID, "error", err)
+			}
+		}
+		return []Event{{Kind: EventEnsureWorkPhaseJob, IssueID: snap.issueID}}, nil
+	}
+
+	change, hasChange, err := e.eff.LatestChangeForIssue(ctx, snap.issueID)
+	if err != nil {
+		return nil, err
+	}
+	if !hasChange {
+		return nil, errors.New("final work phase has no change to publish")
+	}
+	handoff, _, err := e.eff.PhaseHandoff(ctx, snap.issueID, cursor.PhaseIndex)
+	if err != nil {
+		return nil, err
+	}
+	headSHA := strings.TrimSpace(handoff.HeadSHA)
+
+	preReadyChange := change
+	change, err = e.eff.ReadyChange(ctx, change.ID)
+	if err != nil {
+		return nil, err
+	}
+	if headSHA != "" {
+		if strings.TrimSpace(change.HeadSHA) != headSHA {
+			updated, err := e.eff.UpdateChangeHead(ctx, change.ID, headSHA)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := e.eff.ResetAutomatedChecksForNewRevision(ctx, snap.issueID); err != nil {
+				return nil, err
+			}
+			change = updated
+		}
+		if shouldScheduleReadyReview(preReadyChange, headSHA) {
+			issue, err := e.eff.GetIssue(ctx, snap.issueID)
+			if err != nil {
+				return nil, err
+			}
+			previousHeadSHA := strings.TrimSpace(preReadyChange.HeadSHA)
+			if previousHeadSHA == headSHA {
+				previousHeadSHA = ""
+			}
+			round, err := e.eff.ScheduleReviewRound(ctx, coordinator.ScheduleReviewRoundInput{
+				Issue:           issue,
+				Change:          change,
+				PreviousHeadSHA: previousHeadSHA,
+			})
+			if err != nil {
+				return nil, err
+			}
+			if err := e.scheduleCheckTimeouts(ctx, snap.issueID, change.HeadSHA, round.EnqueuedCheckNames); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	if _, err := e.eff.CompleteFlowCursor(ctx, snap.issueID, cursor.PhaseIndex); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// actReworkWorkPhase applies a human's request-changes: the gate-paused phase
+// returns to pending with the feedback stored on the cursor (injected into the
+// re-run's prompt), and its job is re-ensured.
+func actReworkWorkPhase(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
+	cursor, ok, err := e.eff.FlowCursor(ctx, snap.issueID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errors.New("issue has no flow cursor to rework")
+	}
+	resumed, err := e.eff.ResumeFlowCursor(ctx, snap.issueID, cursor.PhaseIndex, ev.Payload.GateFeedback)
+	if err != nil {
+		return nil, err
+	}
+	if resumed {
+		if err := e.schedulePhaseDeadline(ctx, snap.issueID, coordinator.PhaseWorking); err != nil {
+			slog.Warn("lifecycle: arm work-phase deadline failed (non-fatal)",
+				"issue", snap.issueID, "error", err)
+		}
+	}
+	return []Event{{Kind: EventEnsureWorkPhaseJob, IssueID: snap.issueID}}, nil
+}
+
+// actEnsureWorkPhaseJob enqueues the author job for the issue's current work
+// phase, freezing the flow cursor from the issue's flow on first use. A cursor
+// paused at a gate or already through the pipeline enqueues nothing.
+func actEnsureWorkPhaseJob(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
+	cursor, hasCursor, err := e.eff.EnsureFlowCursor(ctx, snap.issueID)
+	if err != nil {
+		return nil, err
+	}
+	if hasCursor {
+		switch cursor.PhaseState {
+		case coordinator.FlowPhaseAwaitingApproval, coordinator.FlowPhaseCompleted:
+			return nil, nil
+		}
+	}
+	return actEnsureAuthorJob(ctx, e, ev, snap, res)
+}
+
 // actSessionStateChanged records a working/waiting flip through the engine so
-// the session state and derived planning/authoring phase stay synchronized.
+// the session state and derived phase stay synchronized.
 func actSessionStateChanged(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
 	session, err := e.eff.UpdateSessionState(ctx, ev.SessionID, ev.Payload.SessionState)
 	if err != nil {
@@ -356,7 +573,7 @@ func actScheduleIssue(ctx context.Context, e *Engine, ev Event, snap *snapshot, 
 
 	var followups []Event
 	if ev.Payload.Schedule == coordinator.ScheduleUpNext {
-		followups = append(followups, Event{Kind: EventEnsureAuthorJob, IssueID: snap.issueID})
+		followups = append(followups, Event{Kind: EventEnsureWorkPhaseJob, IssueID: snap.issueID})
 	}
 	return followups, nil
 }
@@ -370,7 +587,7 @@ func actSetIssueState(ctx context.Context, e *Engine, ev Event, snap *snapshot, 
 
 	var followups []Event
 	if issue.ScheduleState == coordinator.ScheduleUpNext && issue.TriageState == coordinator.TriageAccepted {
-		followups = append(followups, Event{Kind: EventEnsureAuthorJob, IssueID: snap.issueID})
+		followups = append(followups, Event{Kind: EventEnsureWorkPhaseJob, IssueID: snap.issueID})
 	}
 	return followups, nil
 }
@@ -387,7 +604,7 @@ func actResetIssue(ctx context.Context, e *Engine, ev Event, snap *snapshot, res
 
 	var followups []Event
 	if issue.ScheduleState == coordinator.ScheduleUpNext {
-		followups = append(followups, Event{Kind: EventEnsureAuthorJob, IssueID: snap.issueID})
+		followups = append(followups, Event{Kind: EventEnsureWorkPhaseJob, IssueID: snap.issueID})
 	}
 	return followups, nil
 }
@@ -505,15 +722,13 @@ func actCommentThread(ctx context.Context, e *Engine, ev Event, snap *snapshot, 
 }
 
 // actPhaseDeadline fires when a phase's dwell window elapses (the guard has
-// already confirmed the issue is still in that phase). For planning/authoring
+// already confirmed the issue is still in that phase). For the working phase
 // it decides reschedule-vs-escalate from agent activity. The decision is
 // recorded in the transition log either way.
 func actPhaseDeadline(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
 	switch ev.Payload.DeadlinePhase {
-	case coordinator.PhasePlanning:
-		return e.handleAuthoringDeadline(ctx, ev, snap)
-	case coordinator.PhaseAuthoring:
-		return e.handleAuthoringDeadline(ctx, ev, snap)
+	case coordinator.PhaseWorking:
+		return e.handleWorkPhaseDeadline(ctx, ev, snap)
 	default:
 		// A deadline for a phase we no longer escalate on (or a disabled one):
 		// nothing to do; the timer confirms.
@@ -521,13 +736,21 @@ func actPhaseDeadline(ctx context.Context, e *Engine, ev Event, snap *snapshot, 
 	}
 }
 
-// handleAuthoringDeadline reschedules the deadline when the agent was active
-// within the window, or escalates a stalled authoring session otherwise. "No
+// handleWorkPhaseDeadline reschedules the deadline when the agent was active
+// within the window, or escalates a stalled work-phase session otherwise. "No
 // active session / no activity timestamp" is treated as stale: the guard
-// already proved the issue is still in authoring, and the window already
+// already proved the issue is still in working, and the window already
 // elapsed since it was entered, so a session that produced no signal in that
-// time is wedged.
-func (e *Engine) handleAuthoringDeadline(ctx context.Context, ev Event, snap *snapshot) ([]Event, error) {
+// time is wedged. A flow paused at a human gate is deliberately waiting, not
+// stalled — the timer confirms without escalating, and the gate approval
+// rearms the window for the next phase.
+func (e *Engine) handleWorkPhaseDeadline(ctx context.Context, ev Event, snap *snapshot) ([]Event, error) {
+	if cursor, ok, err := e.eff.FlowCursor(ctx, snap.issueID); err != nil {
+		return nil, err
+	} else if ok && cursor.PhaseState == coordinator.FlowPhaseAwaitingApproval {
+		return nil, nil
+	}
+
 	window := e.deadlines.AuthoringStall
 	lastActivity, ok, err := e.eff.LastAgentActivity(ctx, snap.issueID)
 	if err != nil {
@@ -538,9 +761,9 @@ func (e *Engine) handleAuthoringDeadline(ctx context.Context, ev Event, snap *sn
 			// Fresh activity: rearm for the moment the window next lapses from
 			// the last signal, rather than escalating a session that is working.
 			if _, err := e.ScheduleTimer(ctx, snap.issueID, EventPhaseDeadline, lastActivity.Add(window), EventPayload{
-				DeadlinePhase: coordinator.PhaseAuthoring,
+				DeadlinePhase: coordinator.PhaseWorking,
 			}); err != nil {
-				return nil, fmt.Errorf("reschedule authoring deadline: %w", err)
+				return nil, fmt.Errorf("reschedule work-phase deadline: %w", err)
 			}
 			return nil, nil
 		}
@@ -551,7 +774,7 @@ func (e *Engine) handleAuthoringDeadline(ctx context.Context, ev Event, snap *sn
 	notRequired := false
 	phase := strings.TrimSpace(string(ev.Payload.DeadlinePhase))
 	if phase == "" {
-		phase = string(coordinator.PhaseAuthoring)
+		phase = string(coordinator.PhaseWorking)
 	}
 	details := fmt.Sprintf("%s stalled: no agent activity for %s", phase, window)
 	if _, err := e.eff.ReportCheck(ctx, coordinator.ReportCheckInput{

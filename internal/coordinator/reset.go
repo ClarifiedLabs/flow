@@ -72,6 +72,14 @@ func (s *SessionService) ResetIssue(ctx context.Context, issueID string) (Issue,
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM checks WHERE issue_id = ?`, issueID); err != nil {
 		return Issue{}, fmt.Errorf("delete issue checks: %w", err)
 	}
+	// Discard the flow cursor and phase handoffs too: the next author job
+	// re-freezes a fresh snapshot from the live flow and starts at phase 0.
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM issue_flow_cursor WHERE issue_id = ?`, issueID); err != nil {
+		return Issue{}, fmt.Errorf("delete issue flow cursor: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM issue_phase_handoffs WHERE issue_id = ?`, issueID); err != nil {
+		return Issue{}, fmt.Errorf("delete issue phase handoffs: %w", err)
+	}
 
 	var revokeErr error
 	for _, tokenHash := range tokenHashes {

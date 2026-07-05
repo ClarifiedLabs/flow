@@ -249,15 +249,56 @@ func (m *modelEffects) ReadyAuthorSession(ctx context.Context, sessionID string)
 	return coordinator.Session{ID: sessionID, IssueID: m.issueID, ChangeID: m.changeID}, nil
 }
 
-func (m *modelEffects) ReadyPlanningSession(ctx context.Context, sessionID string) (coordinator.Session, error) {
+func (m *modelEffects) FinishWorkPhaseSession(ctx context.Context, sessionID string) (coordinator.Session, error) {
 	m.hasSession = false
-	return coordinator.Session{ID: sessionID, IssueID: m.issueID, ChangeID: m.changeID}, nil
+	return coordinator.Session{ID: sessionID, IssueID: m.issueID, ChangeID: m.changeID, RuntimeState: coordinator.SessionFinished}, nil
 }
 
-func (m *modelEffects) MarkPlanApproved(ctx context.Context, issueID string) (coordinator.Issue, error) {
-	now := time.Now().UTC()
-	m.planApprovedAt = &now
-	return m.issue(), nil
+func (m *modelEffects) ReadyChange(ctx context.Context, changeID string) (coordinator.Change, error) {
+	m.ready = true
+	return m.change(), nil
+}
+
+func (m *modelEffects) LatestChangeForIssue(ctx context.Context, issueID string) (coordinator.Change, bool, error) {
+	return m.change(), true, nil
+}
+
+// The interleave model runs without a flow cursor (the implicit single-phase
+// flow), so the cursor effects are inert.
+func (m *modelEffects) FlowCursor(ctx context.Context, issueID string) (coordinator.FlowCursor, bool, error) {
+	return coordinator.FlowCursor{}, false, nil
+}
+
+func (m *modelEffects) EnsureFlowCursor(ctx context.Context, issueID string) (coordinator.FlowCursor, bool, error) {
+	return coordinator.FlowCursor{}, false, nil
+}
+
+func (m *modelEffects) AdvanceFlowCursor(ctx context.Context, issueID string, fromIndex int) (bool, error) {
+	return false, nil
+}
+
+func (m *modelEffects) PauseFlowCursor(ctx context.Context, issueID string, atIndex int) (bool, error) {
+	return false, nil
+}
+
+func (m *modelEffects) ResumeFlowCursor(ctx context.Context, issueID string, atIndex int, feedback string) (bool, error) {
+	return false, nil
+}
+
+func (m *modelEffects) CompleteFlowCursor(ctx context.Context, issueID string, atIndex int) (bool, error) {
+	return false, nil
+}
+
+func (m *modelEffects) StorePhaseHandoff(ctx context.Context, input coordinator.StorePhaseHandoffInput) error {
+	return nil
+}
+
+func (m *modelEffects) PhaseHandoff(ctx context.Context, issueID string, phaseIndex int) (coordinator.PhaseHandoff, bool, error) {
+	return coordinator.PhaseHandoff{}, false, nil
+}
+
+func (m *modelEffects) ChangeHandoff(ctx context.Context, changeID string) (coordinator.HandoffSnapshot, bool, error) {
+	return coordinator.HandoffSnapshot{}, false, nil
 }
 
 func (m *modelEffects) UpdateSessionState(ctx context.Context, sessionID string, state coordinator.SessionRuntimeState) (coordinator.Session, error) {

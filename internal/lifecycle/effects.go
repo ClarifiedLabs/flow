@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 
@@ -33,13 +34,34 @@ type Effects interface {
 	GetSession(ctx context.Context, sessionID string) (coordinator.Session, error)
 	GetChange(ctx context.Context, changeID string) (coordinator.Change, error)
 	ReadyAuthorSession(ctx context.Context, sessionID string) (coordinator.Session, error)
-	ReadyPlanningSession(ctx context.Context, sessionID string) (coordinator.Session, error)
-	MarkPlanApproved(ctx context.Context, issueID string) (coordinator.Issue, error)
+	// FinishWorkPhaseSession finishes an intermediate work phase's session
+	// without publishing the change.
+	FinishWorkPhaseSession(ctx context.Context, sessionID string) (coordinator.Session, error)
+	// ReadyChange publishes a change directly (final-phase gate approval,
+	// where the phase's session already finished at the pause).
+	ReadyChange(ctx context.Context, changeID string) (coordinator.Change, error)
+	LatestChangeForIssue(ctx context.Context, issueID string) (coordinator.Change, bool, error)
 	UpdateSessionState(ctx context.Context, sessionID string, state coordinator.SessionRuntimeState) (coordinator.Session, error)
 	UpdateChangeHead(ctx context.Context, changeID, headSHA string) (coordinator.Change, error)
 	ResetAutomatedChecksForNewRevision(ctx context.Context, issueID string) (int, error)
 	LoadSuiteForChange(ctx context.Context, change coordinator.Change) (coordinator.CheckSuite, error)
 	ScheduleReviewRound(ctx context.Context, input coordinator.ScheduleReviewRoundInput) (coordinator.ScheduleReviewRoundResult, error)
+
+	// Flow cursor: the issue's frozen position within its flow. Mutations are
+	// CAS on the phase index so at-least-once redelivery stays idempotent.
+	FlowCursor(ctx context.Context, issueID string) (coordinator.FlowCursor, bool, error)
+	// EnsureFlowCursor freezes a cursor from the issue's flow on first use; ok
+	// is false when no flow could be resolved (implicit single-phase behavior).
+	EnsureFlowCursor(ctx context.Context, issueID string) (coordinator.FlowCursor, bool, error)
+	AdvanceFlowCursor(ctx context.Context, issueID string, fromIndex int) (bool, error)
+	PauseFlowCursor(ctx context.Context, issueID string, atIndex int) (bool, error)
+	ResumeFlowCursor(ctx context.Context, issueID string, atIndex int, feedback string) (bool, error)
+	CompleteFlowCursor(ctx context.Context, issueID string, atIndex int) (bool, error)
+	StorePhaseHandoff(ctx context.Context, input coordinator.StorePhaseHandoffInput) error
+	PhaseHandoff(ctx context.Context, issueID string, phaseIndex int) (coordinator.PhaseHandoff, bool, error)
+	// ChangeHandoff reads the change-scoped handoff snapshot the agent
+	// submitted at flow ready (the source copied into the per-phase store).
+	ChangeHandoff(ctx context.Context, changeID string) (coordinator.HandoffSnapshot, bool, error)
 
 	// Checks.
 	ReportCheck(ctx context.Context, input coordinator.ReportCheckInput) (coordinator.Check, error)
@@ -101,6 +123,8 @@ type liveEffects struct {
 	merges       *coordinator.MergeService
 	threads      *coordinator.ThreadService
 	status       *coordinator.StatusService
+	cursors      *coordinator.FlowCursorService
+	reconciler   *coordinator.ReconcileService
 }
 
 // NewEffects builds the production Effects from the existing coordinator services.
@@ -112,6 +136,8 @@ func NewEffects(
 	merges *coordinator.MergeService,
 	threads *coordinator.ThreadService,
 	status *coordinator.StatusService,
+	cursors *coordinator.FlowCursorService,
+	reconciler *coordinator.ReconcileService,
 ) Effects {
 	return &liveEffects{
 		issues:       issues,
@@ -121,6 +147,8 @@ func NewEffects(
 		merges:       merges,
 		threads:      threads,
 		status:       status,
+		cursors:      cursors,
+		reconciler:   reconciler,
 	}
 }
 
@@ -164,12 +192,86 @@ func (e *liveEffects) ReadyAuthorSession(ctx context.Context, sessionID string) 
 	return e.sessions.ReadyAuthorSession(ctx, sessionID)
 }
 
-func (e *liveEffects) ReadyPlanningSession(ctx context.Context, sessionID string) (coordinator.Session, error) {
-	return e.sessions.ReadyPlanningSession(ctx, sessionID)
+func (e *liveEffects) FinishWorkPhaseSession(ctx context.Context, sessionID string) (coordinator.Session, error) {
+	return e.sessions.FinishWorkPhaseSession(ctx, sessionID)
 }
 
-func (e *liveEffects) MarkPlanApproved(ctx context.Context, issueID string) (coordinator.Issue, error) {
-	return e.issues.MarkPlanApproved(ctx, issueID)
+func (e *liveEffects) ReadyChange(ctx context.Context, changeID string) (coordinator.Change, error) {
+	return e.sessions.ReadyChange(ctx, changeID)
+}
+
+func (e *liveEffects) LatestChangeForIssue(ctx context.Context, issueID string) (coordinator.Change, bool, error) {
+	return e.sessions.LatestChangeForIssue(ctx, issueID)
+}
+
+func (e *liveEffects) FlowCursor(ctx context.Context, issueID string) (coordinator.FlowCursor, bool, error) {
+	if e.cursors == nil {
+		return coordinator.FlowCursor{}, false, nil
+	}
+	return e.cursors.GetCursor(ctx, issueID)
+}
+
+func (e *liveEffects) EnsureFlowCursor(ctx context.Context, issueID string) (coordinator.FlowCursor, bool, error) {
+	if e.cursors == nil {
+		return coordinator.FlowCursor{}, false, nil
+	}
+	return e.cursors.EnsureCursor(ctx, issueID)
+}
+
+func (e *liveEffects) AdvanceFlowCursor(ctx context.Context, issueID string, fromIndex int) (bool, error) {
+	if e.cursors == nil {
+		return false, nil
+	}
+	return e.cursors.AdvanceCursor(ctx, issueID, fromIndex)
+}
+
+func (e *liveEffects) PauseFlowCursor(ctx context.Context, issueID string, atIndex int) (bool, error) {
+	if e.cursors == nil {
+		return false, nil
+	}
+	return e.cursors.PauseCursor(ctx, issueID, atIndex)
+}
+
+func (e *liveEffects) ResumeFlowCursor(ctx context.Context, issueID string, atIndex int, feedback string) (bool, error) {
+	if e.cursors == nil {
+		return false, nil
+	}
+	return e.cursors.ResumeCursor(ctx, issueID, atIndex, feedback)
+}
+
+func (e *liveEffects) CompleteFlowCursor(ctx context.Context, issueID string, atIndex int) (bool, error) {
+	if e.cursors == nil {
+		return false, nil
+	}
+	return e.cursors.CompleteCursor(ctx, issueID, atIndex)
+}
+
+func (e *liveEffects) StorePhaseHandoff(ctx context.Context, input coordinator.StorePhaseHandoffInput) error {
+	if e.cursors == nil {
+		return nil
+	}
+	return e.cursors.StorePhaseHandoff(ctx, input)
+}
+
+func (e *liveEffects) PhaseHandoff(ctx context.Context, issueID string, phaseIndex int) (coordinator.PhaseHandoff, bool, error) {
+	if e.cursors == nil {
+		return coordinator.PhaseHandoff{}, false, nil
+	}
+	return e.cursors.PhaseHandoff(ctx, issueID, phaseIndex)
+}
+
+func (e *liveEffects) ChangeHandoff(ctx context.Context, changeID string) (coordinator.HandoffSnapshot, bool, error) {
+	if e.reconciler == nil {
+		return coordinator.HandoffSnapshot{}, false, nil
+	}
+	snapshot, err := e.reconciler.GetHandoffSnapshot(ctx, changeID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return coordinator.HandoffSnapshot{}, false, nil
+		}
+		return coordinator.HandoffSnapshot{}, false, err
+	}
+	return snapshot, snapshot.Present, nil
 }
 
 func (e *liveEffects) UpdateSessionState(ctx context.Context, sessionID string, state coordinator.SessionRuntimeState) (coordinator.Session, error) {

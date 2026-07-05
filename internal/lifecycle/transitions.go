@@ -28,13 +28,20 @@ type Transition struct {
 // guard passes wins.
 func transitionTable() []Transition {
 	return []Transition{
-		// --- Author / ready ---------------------------------------------------
-		// Readying an author session marks the change ready, advances the head,
-		// resets automated checks, and schedules the first/next review round. The
-		// resulting phase is derived (typically critique once the change is ready).
-		{On: EventSessionReady, Action: actReadyAuthorSession, Desc: "ready"},
+		// --- Work phases / ready ------------------------------------------------
+		// flow ready completes the session's work phase: an intermediate (or
+		// human-gated) phase stores its handoff and advances/pauses the flow
+		// cursor; the final phase marks the change ready, advances the head,
+		// resets automated checks, and schedules the first review round. The
+		// resulting phase is derived (working mid-flow, critique once ready).
+		{On: EventSessionReady, Action: actWorkPhaseComplete, Desc: "work-phase-complete"},
+		// Human gate decisions on a paused work phase: approve advances the
+		// cursor (or publishes the final phase's change); rework re-runs the
+		// same phase with feedback.
+		{From: coordinator.PhaseWorking, On: EventWorkPhaseApproved, Guard: guardGateAwaiting, Action: actApproveWorkPhase, Desc: "gate-approve"},
+		{From: coordinator.PhaseWorking, On: EventWorkPhaseRework, Guard: guardGateAwaiting, Action: actReworkWorkPhase, Desc: "gate-rework"},
 		// A working/waiting flip is routed through the engine so the recorded
-		// session state and derived planning/authoring phase stay in sync.
+		// session state and derived working phase stay in sync.
 		{On: EventSessionStateChanged, Action: actSessionStateChanged, Desc: "session-state"},
 
 		// --- Check report / critique -> fix / acceptance / approved -> merge ---
@@ -62,8 +69,9 @@ func transitionTable() []Transition {
 		// Retrying a crash-held author job clears the crash hold and preserves
 		// the current change/branch.
 		{On: EventRetryCrashedAuthorJob, Action: actRetryCrashedAuthorJob, Desc: "retry-crashed-author"},
-		// Internal follow-on from scheduling up next.
-		{On: EventEnsureAuthorJob, Action: actEnsureAuthorJob, Desc: "ensure-author"},
+		// Internal follow-on from scheduling up next / gate decisions: freeze
+		// the flow cursor if needed and enqueue the current phase's job.
+		{On: EventEnsureWorkPhaseJob, Action: actEnsureWorkPhaseJob, Desc: "ensure-work-phase"},
 
 		// --- Triage -----------------------------------------------------------
 		// Accepting derives back to a live phase; rejecting derives to rejected_closed.

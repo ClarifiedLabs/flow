@@ -2205,8 +2205,8 @@ WHERE issue_id = ?
 	AND event_kind = ?`, issue.ID, string(lifecycle.EventSessionStateChanged)).Scan(&toPhase); err != nil {
 		t.Fatalf("read session_state_changed transition: %v", err)
 	}
-	if toPhase != string(coordinator.PhaseAuthoring) {
-		t.Fatalf("session_state_changed to_phase = %q, want authoring", toPhase)
+	if toPhase != string(coordinator.PhaseWorking) {
+		t.Fatalf("session_state_changed to_phase = %q, want working", toPhase)
 	}
 
 	// Re-posting the same state is the watchdog's per-poll re-report: the no-op
@@ -2286,7 +2286,7 @@ func TestSessionSignalNativeHookWorkingBypassesHumanWaitWatchdogLatch(t *testing
 	if err != nil {
 		t.Fatalf("board after native hook working: %v", err)
 	}
-	if len(board.Board.InProgress) != 1 || board.Board.InProgress[0].ID != issue.ID || board.LaneStates[issue.ID] != coordinator.LaneStatePlanning {
+	if len(board.Board.InProgress) != 1 || board.Board.InProgress[0].ID != issue.ID || board.LaneStates[issue.ID] != coordinator.LaneStateInProgress {
 		t.Fatalf("board after native hook working = %+v lane=%q, want planning", board.Board, board.LaneStates[issue.ID])
 	}
 	if got := countTransitions(t, fixture, issue.ID, string(lifecycle.EventSessionStateChanged)); got != 2 {
@@ -2349,7 +2349,7 @@ func TestSessionSignalNativeHookLoopIsSuppressed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("board after native hook loop: %v", err)
 	}
-	if len(board.Board.NeedsAttention) != 1 || board.Board.NeedsAttention[0].ID != issue.ID || board.WaitReasons[issue.ID] != coordinator.WaitReasonPlanApproval {
+	if len(board.Board.NeedsAttention) != 1 || board.Board.NeedsAttention[0].ID != issue.ID || board.WaitReasons[issue.ID] != coordinator.WaitReasonQuestion {
 		t.Fatalf("board after native hook loop = %+v reasons=%+v, want needs attention for plan approval", board.Board, board.WaitReasons)
 	}
 }
@@ -2434,7 +2434,7 @@ func TestPlanStatusMovesSessionToNeedsAttentionThenWorkingResumes(t *testing.T) 
 	if err != nil {
 		t.Fatalf("board: %v", err)
 	}
-	if len(board.Board.NeedsAttention) != 1 || board.Board.NeedsAttention[0].ID != issue.ID || board.LaneStates[issue.ID] != coordinator.LaneStatePlanning || board.WaitReasons[issue.ID] != coordinator.WaitReasonPlanApproval {
+	if len(board.Board.NeedsAttention) != 1 || board.Board.NeedsAttention[0].ID != issue.ID || board.LaneStates[issue.ID] != coordinator.LaneStateInProgress || board.WaitReasons[issue.ID] != coordinator.WaitReasonQuestion {
 		t.Fatalf("board after plan status = %+v lane=%q reason=%q, want needs attention planning/plan approval", board.Board, board.LaneStates[issue.ID], board.WaitReasons[issue.ID])
 	}
 
@@ -2457,7 +2457,7 @@ func TestPlanStatusMovesSessionToNeedsAttentionThenWorkingResumes(t *testing.T) 
 	if err != nil {
 		t.Fatalf("board after stale watchdog working: %v", err)
 	}
-	if len(board.Board.NeedsAttention) != 1 || board.Board.NeedsAttention[0].ID != issue.ID || board.LaneStates[issue.ID] != coordinator.LaneStatePlanning || board.WaitReasons[issue.ID] != coordinator.WaitReasonPlanApproval {
+	if len(board.Board.NeedsAttention) != 1 || board.Board.NeedsAttention[0].ID != issue.ID || board.LaneStates[issue.ID] != coordinator.LaneStateInProgress || board.WaitReasons[issue.ID] != coordinator.WaitReasonQuestion {
 		t.Fatalf("board after stale watchdog working = %+v lane=%q reason=%q, want needs attention planning/plan approval", board.Board, board.LaneStates[issue.ID], board.WaitReasons[issue.ID])
 	}
 	if got := countTransitions(t, fixture, issue.ID, string(lifecycle.EventSessionStateChanged)); got != 1 {
@@ -2484,126 +2484,8 @@ func TestPlanStatusMovesSessionToNeedsAttentionThenWorkingResumes(t *testing.T) 
 	if err != nil {
 		t.Fatalf("board after resume: %v", err)
 	}
-	if len(board.Board.InProgress) != 1 || board.Board.InProgress[0].ID != issue.ID || board.LaneStates[issue.ID] != coordinator.LaneStatePlanning || board.WaitReasons[issue.ID] != "" {
+	if len(board.Board.InProgress) != 1 || board.Board.InProgress[0].ID != issue.ID || board.LaneStates[issue.ID] != coordinator.LaneStateInProgress || board.WaitReasons[issue.ID] != "" {
 		t.Fatalf("board after resume = %+v lane=%q reason=%q, want in-progress planning without wait", board.Board, board.LaneStates[issue.ID], board.WaitReasons[issue.ID])
-	}
-}
-
-func TestPlanningReadyApprovesPlanAndEnqueuesAuthoringSession(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Planning ready issue", PlanMode: true})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	running := startRunningAuthorSession(t, fixture, issue.ID)
-	if got := payloadString(running.Job.Payload, "session_purpose"); got != string(coordinator.AuthorSessionPurposePlanning) {
-		t.Fatalf("planning job purpose = %q, want planning", got)
-	}
-
-	planBody := "Plan: inspect, implement, test"
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/status", sessionStatusRequest{
-		Kind:    coordinator.StatusKindPlan,
-		Message: planBody,
-	}, http.StatusOK, nil)
-
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/ready", readySessionRequest{}, http.StatusBadRequest, nil)
-	afterReadyFailure, err := fixture.Issues.GetIssue(ctx, issue.ID)
-	if err != nil {
-		t.Fatalf("get issue after failed planning ready: %v", err)
-	}
-	if afterReadyFailure.PlanApprovedAt != nil {
-		t.Fatalf("PlanApprovedAt after failed planning ready = %v, want nil", afterReadyFailure.PlanApprovedAt)
-	}
-
-	var approvedResponse issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+issue.ID+"/plan/approve", map[string]string{}, http.StatusOK, &approvedResponse)
-	finished, err := fixture.Sessions.GetSession(ctx, running.Session.ID)
-	if err != nil {
-		t.Fatalf("get planning session after approval: %v", err)
-	}
-	if finished.RuntimeState != coordinator.SessionFinished || finished.FinishedAt == nil {
-		t.Fatalf("planning session after approval = %+v, want finished", finished)
-	}
-	approved, err := fixture.Issues.GetIssue(ctx, issue.ID)
-	if err != nil {
-		t.Fatalf("get issue after plan approval: %v", err)
-	}
-	if approved.PlanBody != planBody || approved.PlanApprovedAt == nil {
-		t.Fatalf("approved plan body/at = %q/%v, want stored approved plan", approved.PlanBody, approved.PlanApprovedAt)
-	}
-	change, err := fixture.Sessions.GetChange(ctx, running.Session.ChangeID)
-	if err != nil {
-		t.Fatalf("get planning change: %v", err)
-	}
-	if change.ReadyAt != nil {
-		t.Fatalf("planning ready marked change ready_at = %v, want nil", change.ReadyAt)
-	}
-
-	jobs := liveAuthorJobsForIssue(t, fixture, issue.ID)
-	if len(jobs) != 1 {
-		t.Fatalf("live author jobs after planning ready = %+v, want one implementation job", jobs)
-	}
-	if jobs[0].ID == running.Job.ID {
-		t.Fatalf("implementation job reused planning job %s", jobs[0].ID)
-	}
-	if got := payloadString(jobs[0].Payload, "session_purpose"); got != string(coordinator.AuthorSessionPurposeAuthoring) {
-		t.Fatalf("implementation job purpose = %q, want authoring", got)
-	}
-	board, err := fixture.Issues.BoardResult(ctx)
-	if err != nil {
-		t.Fatalf("board after planning ready: %v", err)
-	}
-	if board.LaneStates[issue.ID] != coordinator.LaneStateUpNext || board.WaitReasons[issue.ID] != "" {
-		t.Fatalf("board after planning ready lane=%q reason=%q, want up_next without wait", board.LaneStates[issue.ID], board.WaitReasons[issue.ID])
-	}
-}
-
-func TestPlanRejectQueuesCommentsToLivePlanningSession(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Planning reject issue", PlanMode: true})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	running := startRunningAuthorSession(t, fixture, issue.ID)
-	planBody := "Plan: inspect, implement, test"
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/status", sessionStatusRequest{
-		Kind:    coordinator.StatusKindPlan,
-		Message: planBody,
-	}, http.StatusOK, nil)
-
-	var rejected issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+issue.ID+"/plan/reject", planRejectRequest{
-		Comments: "Please split the risky UI and worker changes.",
-	}, http.StatusOK, &rejected)
-	if rejected.Issue.PlanBody != "" || rejected.Issue.PlanSubmittedAt != nil || rejected.Issue.PlanApprovedAt != nil || rejected.Issue.PlanStatusLogID != nil {
-		t.Fatalf("rejected plan fields = body:%q submitted:%v approved:%v status:%v, want cleared pending plan", rejected.Issue.PlanBody, rejected.Issue.PlanSubmittedAt, rejected.Issue.PlanApprovedAt, rejected.Issue.PlanStatusLogID)
-	}
-	session, err := fixture.Sessions.GetSession(ctx, running.Session.ID)
-	if err != nil {
-		t.Fatalf("get planning session after reject: %v", err)
-	}
-	if session.RuntimeState != coordinator.SessionWaiting {
-		t.Fatalf("planning session after reject = %q, want waiting for queued comments", session.RuntimeState)
-	}
-	messages, err := fixture.Sessions.ListPendingSessionMessages(ctx, coordinator.ListPendingSessionMessagesInput{
-		SessionID: running.Session.ID,
-		LeaseID:   running.Session.LeaseID,
-		Limit:     10,
-	})
-	if err != nil {
-		t.Fatalf("list pending messages: %v", err)
-	}
-	if len(messages) != 1 || !strings.Contains(messages[0].Body, "Please split the risky UI and worker changes.") || !strings.Contains(messages[0].Body, "record a new plan") {
-		t.Fatalf("pending messages = %+v, want rejected plan comments and revision instructions", messages)
-	}
-	entries, err := fixture.Status.ListForIssue(ctx, issue.ID, 5)
-	if err != nil {
-		t.Fatalf("list status: %v", err)
-	}
-	if len(entries) == 0 || entries[0].Kind != coordinator.StatusKindQuestion || !strings.Contains(entries[0].Message, "Plan rejected") {
-		t.Fatalf("status entries = %+v, want plan rejection question", entries)
 	}
 }
 
@@ -5129,6 +5011,8 @@ WHERE id = ?`, exchangePath, exchangePath, project.ID); err != nil {
 		bundle.Merges,
 		bundle.Threads,
 		bundle.Status,
+		coordinator.NewFlowCursorService(db, bundle.Flows),
+		bundle.Reconciler,
 	))
 }
 

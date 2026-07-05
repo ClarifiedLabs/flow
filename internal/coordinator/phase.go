@@ -16,11 +16,13 @@ import (
 type Phase string
 
 const (
-	PhaseBacklog        Phase = "backlog"
-	PhaseTriage         Phase = "triage"
-	PhaseUpNext         Phase = "up_next"
-	PhasePlanning       Phase = "planning"
-	PhaseAuthoring      Phase = "authoring"
+	PhaseBacklog Phase = "backlog"
+	PhaseTriage  Phase = "triage"
+	PhaseUpNext  Phase = "up_next"
+	// PhaseWorking is the container phase for the issue's whole work pipeline:
+	// the position within the pipeline (which flow phase, running vs paused at
+	// a human gate) lives on the issue's flow cursor, not in workflow_state.
+	PhaseWorking        Phase = "working"
 	PhaseCritique       Phase = "critique"
 	PhaseAcceptance     Phase = "acceptance"
 	PhaseApproved       Phase = "approved"
@@ -68,10 +70,15 @@ func derivePhaseFromIssue(ctx context.Context, db *sql.DB, issue Issue) (Phase, 
 	if _, ok, err := activeSessionStateForIssue(ctx, db, issue.ID); err != nil {
 		return "", err
 	} else if ok {
-		if issue.PlanMode && issue.PlanApprovedAt == nil {
-			return PhasePlanning, nil
-		}
-		return PhaseAuthoring, nil
+		return PhaseWorking, nil
+	}
+	// No active session, but the flow cursor can still pin the issue in
+	// working: paused at a human gate, or mid-pipeline between phase jobs.
+	// This must match the lifecycle engine's derivePhase.
+	if index, state, ok, err := cursorStateForIssue(ctx, db, issue.ID); err != nil {
+		return "", err
+	} else if ok && cursorIndicatesWorking(index, state) {
+		return PhaseWorking, nil
 	}
 	if issue.TriageState == TriagePending {
 		return PhaseTriage, nil
@@ -96,9 +103,6 @@ func derivePhaseFromIssue(ctx context.Context, db *sql.DB, issue Issue) (Phase, 
 
 	switch issue.ScheduleState {
 	case ScheduleUpNext:
-		if issue.PlanMode && issue.PlanApprovedAt == nil {
-			return PhasePlanning, nil
-		}
 		return PhaseUpNext, nil
 	default:
 		return PhaseBacklog, nil

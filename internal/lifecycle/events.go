@@ -27,6 +27,11 @@ const (
 	EventResetIssue            EventKind = "reset_issue"
 	EventRetryCrashedAuthorJob EventKind = "retry_crashed_author_job"
 
+	// Work-phase gate events: a human approves a gate-paused phase's handoff,
+	// or sends the phase back to rework with feedback.
+	EventWorkPhaseApproved EventKind = "work_phase_approved"
+	EventWorkPhaseRework   EventKind = "work_phase_rework"
+
 	// Deadline timers (durable, scheduled by the engine itself).
 	EventPhaseDeadline EventKind = "phase_deadline"
 	EventCheckTimeout  EventKind = "check_timeout"
@@ -35,7 +40,9 @@ const (
 	EventEnsureFixAuthorJob EventKind = "ensure_fix_author_job"
 	EventEnqueueAcceptance  EventKind = "enqueue_acceptance"
 	EventAutoMerge          EventKind = "auto_merge"
-	EventEnsureAuthorJob    EventKind = "ensure_author_job"
+	// EventEnsureWorkPhaseJob enqueues the author job for the issue's current
+	// work phase (freezing the flow cursor on first use).
+	EventEnsureWorkPhaseJob EventKind = "ensure_work_phase_job"
 
 	// EventReconcile records a ticker-driven phase refresh in the transition log
 	// (e.g. after crash recovery moved an issue out of an authoring phase). It is
@@ -114,6 +121,10 @@ type EventPayload struct {
 	// AutoMerge retry bookkeeping: how many merge attempts this event
 	// represents (0 for the original check-triggered attempt).
 	AutoMergeAttempt int `json:"auto_merge_attempt,omitempty"`
+
+	// WorkPhaseRework: the human's request-changes feedback, injected into the
+	// re-run phase's prompt.
+	GateFeedback string `json:"gate_feedback,omitempty"`
 }
 
 // StepResult is what Engine.Step returns; handlers surface the populated fields

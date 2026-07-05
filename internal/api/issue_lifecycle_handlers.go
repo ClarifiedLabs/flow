@@ -45,7 +45,7 @@ func (s *projectServer) ensureAuthorJobForCreatedIssue(r *http.Request, issue co
 	}
 	if s.engine != nil {
 		_, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-			Kind:    lifecycle.EventEnsureAuthorJob,
+			Kind:    lifecycle.EventEnsureWorkPhaseJob,
 			IssueID: issue.ID,
 		}))
 		return err
@@ -314,7 +314,7 @@ func (s *projectServer) handleApprovePlan(w http.ResponseWriter, r *http.Request
 	}
 	if s.engine != nil {
 		if _, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-			Kind:    lifecycle.EventEnsureAuthorJob,
+			Kind:    lifecycle.EventEnsureWorkPhaseJob,
 			IssueID: issue.ID,
 		})); err != nil {
 			writeError(w, http.StatusBadRequest, "approve_plan_queue_failed", err.Error())
@@ -507,7 +507,7 @@ func (s *projectServer) handleApproveReviewCycles(w http.ResponseWriter, r *http
 	var failures []lifecycle.FollowUpFailure
 	if s.engine != nil {
 		result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-			Kind:    lifecycle.EventEnsureAuthorJob,
+			Kind:    lifecycle.EventEnsureWorkPhaseJob,
 			IssueID: issueID,
 		}))
 		if err != nil && !errors.Is(err, lifecycle.ErrInvalidTransition) {
@@ -892,7 +892,7 @@ func (s *projectServer) handleResumeIssue(w http.ResponseWriter, r *http.Request
 	if !s.requireEngine(w) {
 		return
 	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{Kind: lifecycle.EventEnsureAuthorJob, IssueID: issueID}))
+	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{Kind: lifecycle.EventEnsureWorkPhaseJob, IssueID: issueID}))
 	if err != nil {
 		writeEngineError(w, err, "resume_issue_failed")
 		return

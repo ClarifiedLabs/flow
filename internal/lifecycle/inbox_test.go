@@ -232,7 +232,7 @@ func TestTimerDispatchDoesNotJournalInbox(t *testing.T) {
 	fake.issue.TriageState = coordinator.TriageAccepted
 	fake.issue.ScheduleState = coordinator.ScheduleUpNext
 
-	if _, err := eng.ScheduleTimer(ctx, issueID, EventEnsureAuthorJob, eng.now().Add(-time.Minute), EventPayload{}); err != nil {
+	if _, err := eng.ScheduleTimer(ctx, issueID, EventEnsureWorkPhaseJob, eng.now().Add(-time.Minute), EventPayload{}); err != nil {
 		t.Fatalf("schedule timer: %v", err)
 	}
 	if _, err := eng.DrainDueTimers(ctx); err != nil {

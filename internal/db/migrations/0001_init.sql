@@ -359,7 +359,7 @@ CREATE TABLE review_cycle_budgets (
 
 CREATE TABLE workflow_state (
 	issue_id TEXT PRIMARY KEY REFERENCES issues(id) ON DELETE CASCADE,
-	phase TEXT NOT NULL CHECK (phase IN ('backlog', 'triage', 'up_next', 'planning', 'authoring', 'critique', 'acceptance', 'approved', 'merged_closed', 'rejected_closed', 'abandoned')),
+	phase TEXT NOT NULL CHECK (phase IN ('backlog', 'triage', 'up_next', 'working', 'critique', 'acceptance', 'approved', 'merged_closed', 'rejected_closed', 'abandoned')),
 	version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
 	updated_at TEXT NOT NULL
 );

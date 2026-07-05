@@ -31,6 +31,20 @@ func guardCanFix(ctx context.Context, e *Engine, ev Event, snap *snapshot) (bool
 	return true, "blocked->fix", nil
 }
 
+// guardGateAwaiting passes iff the issue's flow cursor is paused at a human
+// gate. A gate decision arriving after the cursor already moved on (double
+// click, stale UI) is a benign no-op.
+func guardGateAwaiting(ctx context.Context, e *Engine, ev Event, snap *snapshot) (bool, string, error) {
+	cursor, ok, err := e.eff.FlowCursor(ctx, snap.issueID)
+	if err != nil {
+		return false, "", err
+	}
+	if !ok || cursor.PhaseState != coordinator.FlowPhaseAwaitingApproval {
+		return false, "no phase awaiting approval", nil
+	}
+	return true, "gate", nil
+}
+
 // guardPhaseDeadlineRelevant passes iff the issue is still in the phase the
 // timer was armed for. The decision of reschedule-vs-escalate (for fresh vs
 // stale agent activity) lives in the action so it is logged either way; the

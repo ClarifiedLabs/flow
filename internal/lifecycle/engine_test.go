@@ -47,6 +47,15 @@ type fakeEffects struct {
 	hasActiveSession  bool
 	statusWrites      []coordinator.WriteStatusInput
 
+	// Flow cursor model. cursorTemplate, if set, is what EnsureFlowCursor
+	// freezes on first use (mirroring the real snapshot-at-schedule).
+	cursor           coordinator.FlowCursor
+	hasCursor        bool
+	cursorTemplate   *coordinator.FlowCursor
+	phaseHandoffs    map[int]coordinator.PhaseHandoff
+	changeHandoff    coordinator.HandoffSnapshot
+	hasChangeHandoff bool
+
 	// getIssueHook, if set, runs at the start of every GetIssue call. Tests use
 	// it to inject concurrent workflow_state churn between snapshot load and
 	// apply (GetIssue is the first Effects read of every step/derive).
@@ -176,19 +185,129 @@ func (f *fakeEffects) ReadyAuthorSession(ctx context.Context, sessionID string) 
 	return f.session, f.fail("ReadyAuthorSession")
 }
 
-func (f *fakeEffects) ReadyPlanningSession(ctx context.Context, sessionID string) (coordinator.Session, error) {
-	f.record("ReadyPlanningSession")
-	return f.session, f.fail("ReadyPlanningSession")
+func (f *fakeEffects) FinishWorkPhaseSession(ctx context.Context, sessionID string) (coordinator.Session, error) {
+	f.record("FinishWorkPhaseSession")
+	if err := f.fail("FinishWorkPhaseSession"); err != nil {
+		return coordinator.Session{}, err
+	}
+	f.session.RuntimeState = coordinator.SessionFinished
+	f.hasActive = false
+	return f.session, nil
 }
 
-func (f *fakeEffects) MarkPlanApproved(ctx context.Context, issueID string) (coordinator.Issue, error) {
-	f.record("MarkPlanApproved")
-	if err := f.fail("MarkPlanApproved"); err != nil {
-		return coordinator.Issue{}, err
+func (f *fakeEffects) ReadyChange(ctx context.Context, changeID string) (coordinator.Change, error) {
+	f.record("ReadyChange")
+	if err := f.fail("ReadyChange"); err != nil {
+		return coordinator.Change{}, err
 	}
-	now := time.Now().UTC()
-	f.issue.PlanApprovedAt = &now
-	return f.issue, nil
+	if f.change.ReadyAt == nil {
+		now := time.Now().UTC()
+		f.change.ReadyAt = &now
+	}
+	return f.change, nil
+}
+
+func (f *fakeEffects) LatestChangeForIssue(ctx context.Context, issueID string) (coordinator.Change, bool, error) {
+	f.record("LatestChangeForIssue")
+	return f.change, f.change.ID != "", f.fail("LatestChangeForIssue")
+}
+
+func (f *fakeEffects) FlowCursor(ctx context.Context, issueID string) (coordinator.FlowCursor, bool, error) {
+	f.record("FlowCursor")
+	return f.cursor, f.hasCursor, f.fail("FlowCursor")
+}
+
+func (f *fakeEffects) EnsureFlowCursor(ctx context.Context, issueID string) (coordinator.FlowCursor, bool, error) {
+	f.record("EnsureFlowCursor")
+	if err := f.fail("EnsureFlowCursor"); err != nil {
+		return coordinator.FlowCursor{}, false, err
+	}
+	if !f.hasCursor && f.cursorTemplate != nil {
+		f.cursor = *f.cursorTemplate
+		f.hasCursor = true
+	}
+	return f.cursor, f.hasCursor, nil
+}
+
+func (f *fakeEffects) AdvanceFlowCursor(ctx context.Context, issueID string, fromIndex int) (bool, error) {
+	f.record("AdvanceFlowCursor")
+	if err := f.fail("AdvanceFlowCursor"); err != nil {
+		return false, err
+	}
+	if !f.hasCursor || f.cursor.PhaseIndex != fromIndex {
+		return false, nil
+	}
+	f.cursor.PhaseIndex++
+	f.cursor.PhaseState = coordinator.FlowPhasePending
+	f.cursor.GateFeedback = ""
+	return true, nil
+}
+
+func (f *fakeEffects) PauseFlowCursor(ctx context.Context, issueID string, atIndex int) (bool, error) {
+	f.record("PauseFlowCursor")
+	if err := f.fail("PauseFlowCursor"); err != nil {
+		return false, err
+	}
+	if !f.hasCursor || f.cursor.PhaseIndex != atIndex {
+		return false, nil
+	}
+	f.cursor.PhaseState = coordinator.FlowPhaseAwaitingApproval
+	f.cursor.GateFeedback = ""
+	return true, nil
+}
+
+func (f *fakeEffects) ResumeFlowCursor(ctx context.Context, issueID string, atIndex int, feedback string) (bool, error) {
+	f.record("ResumeFlowCursor")
+	if err := f.fail("ResumeFlowCursor"); err != nil {
+		return false, err
+	}
+	if !f.hasCursor || f.cursor.PhaseIndex != atIndex || f.cursor.PhaseState != coordinator.FlowPhaseAwaitingApproval {
+		return false, nil
+	}
+	f.cursor.PhaseState = coordinator.FlowPhasePending
+	f.cursor.GateFeedback = feedback
+	return true, nil
+}
+
+func (f *fakeEffects) CompleteFlowCursor(ctx context.Context, issueID string, atIndex int) (bool, error) {
+	f.record("CompleteFlowCursor")
+	if err := f.fail("CompleteFlowCursor"); err != nil {
+		return false, err
+	}
+	if !f.hasCursor || f.cursor.PhaseIndex != atIndex {
+		return false, nil
+	}
+	f.cursor.PhaseState = coordinator.FlowPhaseCompleted
+	return true, nil
+}
+
+func (f *fakeEffects) StorePhaseHandoff(ctx context.Context, input coordinator.StorePhaseHandoffInput) error {
+	f.record("StorePhaseHandoff")
+	if err := f.fail("StorePhaseHandoff"); err != nil {
+		return err
+	}
+	if f.phaseHandoffs == nil {
+		f.phaseHandoffs = map[int]coordinator.PhaseHandoff{}
+	}
+	f.phaseHandoffs[input.PhaseIndex] = coordinator.PhaseHandoff{
+		IssueID:    input.IssueID,
+		PhaseIndex: input.PhaseIndex,
+		PhaseName:  input.PhaseName,
+		Content:    input.Content,
+		HeadSHA:    input.HeadSHA,
+	}
+	return nil
+}
+
+func (f *fakeEffects) PhaseHandoff(ctx context.Context, issueID string, phaseIndex int) (coordinator.PhaseHandoff, bool, error) {
+	f.record("PhaseHandoff")
+	handoff, ok := f.phaseHandoffs[phaseIndex]
+	return handoff, ok, f.fail("PhaseHandoff")
+}
+
+func (f *fakeEffects) ChangeHandoff(ctx context.Context, changeID string) (coordinator.HandoffSnapshot, bool, error) {
+	f.record("ChangeHandoff")
+	return f.changeHandoff, f.hasChangeHandoff, f.fail("ChangeHandoff")
 }
 
 func (f *fakeEffects) UpdateSessionState(ctx context.Context, sessionID string, state coordinator.SessionRuntimeState) (coordinator.Session, error) {
@@ -901,7 +1020,7 @@ func TestStepThreadClaim(t *testing.T) {
 
 // TestSessionStateChangedTransitionsPhase is the regression for routing a
 // working<->waiting flip through the engine: the action records the new session
-// state via Effects while the derived workflow phase stays authoring. The
+// state via Effects while the derived workflow phase stays working. The
 // human wait is modeled as a board/status overlay, not a durable phase.
 func TestSessionStateChangedTransitionsPhase(t *testing.T) {
 	eng, fake, store, issueID := newEngineTest(t)
@@ -915,8 +1034,8 @@ func TestSessionStateChangedTransitionsPhase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("step: %v", err)
 	}
-	if res.ToPhase != coordinator.PhaseAuthoring {
-		t.Fatalf("ToPhase = %q, want authoring", res.ToPhase)
+	if res.ToPhase != coordinator.PhaseWorking {
+		t.Fatalf("ToPhase = %q, want working", res.ToPhase)
 	}
 	if res.Session == nil || res.Session.RuntimeState != coordinator.SessionWaiting {
 		t.Fatalf("result session = %+v, want waiting", res.Session)
@@ -934,32 +1053,11 @@ FROM transitions
 WHERE issue_id = ?`, issueID).Scan(&kind, &toPhase); err != nil {
 		t.Fatalf("read transition: %v", err)
 	}
-	if kind != string(EventSessionStateChanged) || toPhase != string(coordinator.PhaseAuthoring) {
-		t.Fatalf("transition kind/to_phase = %q/%q, want session_state_changed/authoring", kind, toPhase)
+	if kind != string(EventSessionStateChanged) || toPhase != string(coordinator.PhaseWorking) {
+		t.Fatalf("transition kind/to_phase = %q/%q, want session_state_changed/working", kind, toPhase)
 	}
-	if currentPhase(t, store, issueID) != coordinator.PhaseAuthoring {
-		t.Fatalf("phase = %q, want authoring", currentPhase(t, store, issueID))
-	}
-}
-
-func TestPlanModeSessionStateChangedTransitionsToPlanning(t *testing.T) {
-	eng, fake, store, issueID := newEngineTest(t)
-	ctx := context.Background()
-	fake.issue.TriageState = coordinator.TriageAccepted
-	fake.issue.PlanMode = true
-	fake.session = coordinator.Session{ID: "s1", IssueID: issueID, ChangeID: "c1", RuntimeState: coordinator.SessionWorking}
-	fake.activeState = coordinator.SessionWorking
-	fake.hasActive = true
-
-	res, err := eng.Step(ctx, Event{Kind: EventSessionStateChanged, SessionID: "s1", Payload: EventPayload{SessionState: coordinator.SessionWaiting}})
-	if err != nil {
-		t.Fatalf("step: %v", err)
-	}
-	if res.ToPhase != coordinator.PhasePlanning {
-		t.Fatalf("ToPhase = %q, want planning", res.ToPhase)
-	}
-	if currentPhase(t, store, issueID) != coordinator.PhasePlanning {
-		t.Fatalf("phase = %q, want planning", currentPhase(t, store, issueID))
+	if currentPhase(t, store, issueID) != coordinator.PhaseWorking {
+		t.Fatalf("phase = %q, want working", currentPhase(t, store, issueID))
 	}
 }
 

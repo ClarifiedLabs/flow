@@ -346,15 +346,23 @@ func (s *SessionService) RetryCrashedAuthorJob(ctx context.Context, issueID stri
 
 	var ensured *EnsureAuthorJobResult
 	switch phase {
-	case PhaseUpNext, PhasePlanning:
-		result, err := s.EnsureAuthorJob(ctx, EnsureAuthorJobInput{IssueID: issue.ID})
+	case PhaseUpNext, PhaseWorking:
+		// working with an active session means the issue already resumed; the
+		// ensure would only be suppressed, so skip it and just clear the hold.
+		active, err := s.hasActiveAuthorSession(ctx, issue.ID)
 		if err != nil {
 			return RetryCrashedAuthorJobResult{}, err
 		}
-		ensured = &result
-	case PhaseAuthoring, PhaseCritique, PhaseAcceptance, PhaseApproved:
-		// The issue has already resumed or advanced beyond the crashed author
-		// attempt. Clearing the stale crash hold is enough.
+		if !active {
+			result, err := s.EnsureAuthorJob(ctx, EnsureAuthorJobInput{IssueID: issue.ID})
+			if err != nil {
+				return RetryCrashedAuthorJobResult{}, err
+			}
+			ensured = &result
+		}
+	case PhaseCritique, PhaseAcceptance, PhaseApproved:
+		// The issue has already advanced beyond the crashed author attempt.
+		// Clearing the stale crash hold is enough.
 	default:
 		return RetryCrashedAuthorJobResult{}, fmt.Errorf("cannot retry crashed author job from phase %q", phase)
 	}
@@ -2012,6 +2020,44 @@ func (s *SessionService) ReadyAuthorSession(ctx context.Context, sessionID strin
 // change (planning produces a plan, not a mergeable revision).
 func (s *SessionService) ReadyPlanningSession(ctx context.Context, sessionID string) (Session, error) {
 	return s.readySession(ctx, sessionID, false)
+}
+
+// FinishWorkPhaseSession finishes an intermediate work phase's session without
+// publishing the change: the phase produced a handoff, not a reviewable
+// revision, so the change's ready latch stays closed until the final phase.
+func (s *SessionService) FinishWorkPhaseSession(ctx context.Context, sessionID string) (Session, error) {
+	return s.readySession(ctx, sessionID, false)
+}
+
+// ReadyChange publishes a change directly (sets its ready latch). Used when a
+// human approves a final work phase that paused at a gate: the phase's session
+// already finished at the pause, so there is no session to ready.
+func (s *SessionService) ReadyChange(ctx context.Context, changeID string) (Change, error) {
+	changeID = strings.TrimSpace(changeID)
+	if changeID == "" {
+		return Change{}, errors.New("change id is required")
+	}
+	nowText := formatTime(s.now().UTC())
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE changes
+SET ready_at = COALESCE(ready_at, ?),
+	updated_at = ?
+WHERE id = ?`, nowText, nowText, changeID); err != nil {
+		return Change{}, fmt.Errorf("ready change: %w", err)
+	}
+	return s.GetChange(ctx, changeID)
+}
+
+// LatestChangeForIssue returns the issue's most recent change, ready or not.
+func (s *SessionService) LatestChangeForIssue(ctx context.Context, issueID string) (Change, bool, error) {
+	changes, err := s.ListChangesForIssue(ctx, issueID, 1)
+	if err != nil {
+		return Change{}, false, err
+	}
+	if len(changes) == 0 {
+		return Change{}, false, nil
+	}
+	return changes[0], true, nil
 }
 
 func (s *SessionService) MarkPersistentSessionExited(ctx context.Context, input MarkPersistentSessionExitedInput) (Session, error) {

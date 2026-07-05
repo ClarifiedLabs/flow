@@ -154,5 +154,7 @@ func repointFlowTestFixtureExchange(t *testing.T, fixture flowTestFixture, excha
 		bundle.Merges,
 		bundle.Threads,
 		bundle.Status,
+		coordinator.NewFlowCursorService(db, bundle.Flows),
+		bundle.Reconciler,
 	))
 }
