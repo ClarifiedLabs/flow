@@ -3,7 +3,7 @@
 
 import { apiGet, issueHref } from "./api.js";
 import { renderStatusKindBadge } from "./attention.js";
-import { flattenDonePage, laneIssues, phaseKey, renderPhaseBadge, renderReviewBadge, renderUniqueCardLabel, waitReasonLabel } from "./board.js";
+import { flattenDonePage, flowPhaseLabel, laneIssues, phaseKey, renderFlowPhaseBadge, renderPhaseBadge, renderReviewBadge, renderUniqueCardLabel, waitReasonLabel } from "./board.js";
 import { LANES } from "./config.js";
 import { formatDate } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
@@ -175,7 +175,6 @@ export function renderIssueCardView(app, issue, card, laneState, blocked, stagge
   const scheduleState = value(issue, "schedule_state", "ScheduleState");
   const triageState = value(issue, "triage_state", "TriageState");
   const priority = Number(value(issue, "priority", "Priority") || 0);
-  const agentHarness = value(issue, "agent_harness", "AgentHarness") || "codex";
   const updatedAt = formatDate(value(issue, "updated_at", "UpdatedAt"));
   const source = value(issue, "created_by", "CreatedBy");
   const activeSession = value(card, "active_session", "ActiveSession");
@@ -210,8 +209,14 @@ export function renderIssueCardView(app, issue, card, laneState, blocked, stagge
   const phaseSlug = phaseKey(phaseState) || "backlog";
   const cardLabelKeys = new Set();
   const waitReasonBadgeLabel = waitReason ? waitReasonLabel(waitReason) : "";
+  const flow = value(card, "flow", "Flow");
+  const flowPhaseState = value(flow, "phase_state", "PhaseState");
+  const flowBadge = flow && flowPhaseState !== "completed" && flowPhaseLabel(flow)
+    ? renderUniqueCardLabel(cardLabelKeys, `flow ${flowPhaseLabel(flow)}`, () => renderFlowPhaseBadge(flow))
+    : "";
   const metaBadges = [
     renderUniqueCardLabel(cardLabelKeys, phaseState || "—", () => renderPhaseBadge(phaseState)),
+    flowBadge,
     reviewState ? renderUniqueCardLabel(cardLabelKeys, reviewState, () => renderReviewBadge(reviewState)) : "",
     checkTotal ? renderUniqueCardLabel(cardLabelKeys, `checks ${checkSatisfied}/${checkTotal}`, () => `<span class="badge ${checkSatisfied === checkTotal ? "ok" : "idle"}">checks ${checkSatisfied}/${checkTotal}</span>`) : "",
     blockerCount ? renderUniqueCardLabel(cardLabelKeys, `blockers ${blockerCount}`, () => `<span class="badge blocked">blockers ${blockerCount}</span>`) : "",
@@ -243,7 +248,6 @@ export function renderIssueCardView(app, issue, card, laneState, blocked, stagge
   const quiet = [
     project && project.badge && project.name ? `<span class="card-project-badge">${escapeHTML(project.name)}</span>` : "",
     `p${priority}`,
-    escapeHTML(agentHarness),
     source ? escapeHTML(source) : "",
     visibleTags.map(renderTag).filter(Boolean).join(" · "),
     renderRelationSummary(relations),

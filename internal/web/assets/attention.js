@@ -12,27 +12,6 @@ export function renderHumanAttentionPanel(issue, statusLog, projectID, activeSes
   const issueID = value(issue, "id", "ID");
   let html = "";
 
-  const body = value(issue, "plan_body", "PlanBody");
-  const approvedAt = value(issue, "plan_approved_at", "PlanApprovedAt");
-  if (body && !approvedAt) {
-    const submittedAt = value(issue, "plan_submitted_at", "PlanSubmittedAt");
-    html += `
-      <section class="human-attention-panel">
-        <div class="human-attention-head">
-          <div>
-            <h3>Plan Review</h3>
-            ${submittedAt ? `<p class="meta-quiet">${escapeHTML(formatDate(submittedAt))}</p>` : ""}
-          </div>
-          <div class="actions">
-            <button class="button" data-plan-approve="${escapeAttr(issueID)}"${projectButtonAttr(projectID)}>Approve</button>
-            <button class="button secondary" data-plan-reject="${escapeAttr(issueID)}"${projectButtonAttr(projectID)}>Reject</button>
-          </div>
-        </div>
-        ${renderMarkdown(body, { className: "human-attention-body md" })}
-      </section>
-    `;
-  }
-
   const question = latestStatusOfKind(statusLog, "question");
   if (question && value(activeSession, "state", "State") === "waiting") {
     const statusID = value(question, "id", "ID");
@@ -58,6 +37,48 @@ export function renderHumanAttentionPanel(issue, statusLog, projectID, activeSes
 
 export function latestStatusOfKind(statusLog, kind) {
   return (statusLog || []).find((entry) => value(entry, "kind", "Kind") === kind) || null;
+}
+
+// renderPhaseGatePanel surfaces a flow's human-gate state on the issue page.
+// While the current phase is paused awaiting approval it renders a prominent
+// panel (the pending handoff as markdown, an Approve button and a
+// Request-changes form). Once the human has sent the phase back it renders a
+// quiet "sent back with feedback" note until the phase runs again. Returns ""
+// otherwise. `flow` is the issue-detail response's top-level flow status.
+export function renderPhaseGatePanel(flow, issueID, projectID) {
+  if (!flow) return "";
+  const phaseState = value(flow, "phase_state", "PhaseState");
+  const phaseName = value(flow, "phase_name", "PhaseName");
+  if (phaseState === "awaiting_approval") {
+    const handoff = value(flow, "pending_handoff", "PendingHandoff");
+    return `
+      <section class="human-attention-panel" data-phase-gate>
+        <div class="human-attention-head">
+          <div>
+            <h3>Phase ${escapeHTML(phaseName || "")} awaiting approval</h3>
+          </div>
+          <div class="actions">
+            <button class="button" data-phase-approve="${escapeAttr(issueID)}"${projectButtonAttr(projectID)}>Approve</button>
+          </div>
+        </div>
+        ${handoff ? renderMarkdown(handoff, { className: "human-attention-body md" }) : ""}
+        <form class="human-attention-reply" data-phase-request-changes="${escapeAttr(issueID)}"${projectButtonAttr(projectID)}>
+          <textarea name="feedback" rows="3" placeholder="Request changes"></textarea>
+          <button class="button secondary" type="submit">Request Changes</button>
+        </form>
+      </section>
+    `;
+  }
+  const gateFeedback = value(flow, "gate_feedback", "GateFeedback");
+  if (phaseState === "pending" && gateFeedback) {
+    return `
+      <section class="human-attention-note" data-phase-gate-feedback>
+        <p class="meta-quiet">Phase ${escapeHTML(phaseName || "")} sent back with feedback</p>
+        ${renderMarkdown(gateFeedback, { className: "md" })}
+      </section>
+    `;
+  }
+  return "";
 }
 
 export const STATUS_KIND_BADGE = {

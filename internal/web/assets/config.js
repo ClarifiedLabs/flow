@@ -17,6 +17,7 @@ export const NAV = [
   ["/ui/feedback", "Needs Attention"],
   ["/ui/merge", "Merge"],
   ["/ui/done", "Done"],
+  ["/ui/flows", "Flows"],
   ["/ui/workers", "Workers"],
   ["/ui/jobs", "Jobs"],
 ];
@@ -38,8 +39,6 @@ export const MAX_POLL_BACKOFF_MS = 120000;
 export const THEME_STORAGE_KEY = "flow.ui.theme";
 
 export const PROJECT_STORAGE_KEY = "flow.ui.projects";
-
-export const ISSUE_AGENT_DEFAULTS_STORAGE_KEY = "flow.ui.issueAgentDefaults.v1";
 
 export const DONE_DENSITY_STORAGE_KEY = "flow.ui.doneDensity";
 

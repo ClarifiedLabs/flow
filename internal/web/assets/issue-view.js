@@ -1,24 +1,22 @@
 // Issue views: detail page, read-only summary, the create/edit form and its
-// per-agent harness/model controls, and the edit-form toggle.
+// flow selector, and the edit-form toggle.
 
 import { apiGet, issueAPIBase } from "./api.js";
-import { renderHumanAttentionPanel, renderLifecycleChart } from "./attention.js";
+import { renderHumanAttentionPanel, renderLifecycleChart, renderPhaseGatePanel } from "./attention.js";
 import { renderPhaseBadge, renderReviewBadge } from "./board.js";
-import { DEFAULT_AGENT_HARNESSES } from "./config.js";
 import { renderCheck } from "./diff.js";
 import { formatDate } from "./format.js";
-import { HARNESS_REASONING_UNAVAILABLE, findHarnessModel, harnessDefaultArgs, harnessModels, harnessReasoningLevelValues, normalizeHarnessArgs, normalizeHarnessModelList, parseHarnessSelectionArgs, parseJSONAttribute, renderHarnessArgsField, renderHarnessModelControls, renderHarnessModelFields, renderHarnessModelOptions, renderHarnessOptions, renderHarnessReasoningInto, renderShellArgString, resolveHarnessSelection, serializeHarnessModelSelection } from "./harness-models.js";
 import { escapeAttr, escapeHTML } from "./html.js";
 import { currentIssueState, projectButtonAttr, renderAttachmentUploadForm, renderIssueAttachment, renderIssueStateForm } from "./issue.js";
 import { renderMarkdown } from "./markdown.js";
 import { value } from "./normalize.js";
-import { normalizeIssueAgentDefaults, readIssueAgentDefaults } from "./storage.js";
 import { renderTerminalButton } from "./terminal.js";
 import { renderIssueChange, renderRelation, renderTag, renderTimeline } from "./timeline.js";
 
 export async function renderNewIssueView(app, context) {
   if (context && !app.isActiveLoad(context)) return false;
-  await app.ensureHarnesses();
+  const defaultProject = defaultCreateProject(app, "");
+  if (defaultProject) await app.ensureFlows(defaultProject);
   if (context && !app.isActiveLoad(context)) return false;
   app.setTitle("New Issue");
   app.querySelector(".content").innerHTML = `
@@ -29,7 +27,6 @@ export async function renderNewIssueView(app, context) {
         </div>
       </div>
       ${renderIssueFormView(app, {
-        ...readIssueAgentDefaults(),
         priority: 0,
         requires_human_review: true,
         auto_merge: false,
@@ -40,36 +37,48 @@ export async function renderNewIssueView(app, context) {
   return true;
 }
 
+// defaultCreateProject picks the project whose flows the create form should
+// offer first: an explicit id, then the single active project, then the sole
+// registered project.
+export function defaultCreateProject(app, projectID) {
+  const explicit = String(projectID || "").trim();
+  if (explicit) return explicit;
+  const projects = app.projects || [];
+  const selected = app.selectedProjectIDs();
+  if (selected.length === 1) return selected[0];
+  if (projects.length === 1) return value(projects[0], "id", "ID");
+  return "";
+}
+
+// flowSelectOptionsView renders the <option>s for the flow selector from the
+// per-project flow cache (app.ensureFlows). The project default is marked
+// "(default)"; it is preselected for create mode and as the edit-mode
+// fallback. Falls back to a single "Project default" option when no flows are
+// loaded for the project yet.
+export function flowSelectOptionsView(app, projectID, selectedFlowID) {
+  const cache = (app.flowsByProject && app.flowsByProject.get(String(projectID || "").trim())) || { flows: [], defaultFlowID: "" };
+  const flows = cache.flows || [];
+  const defaultFlowID = cache.defaultFlowID || "";
+  if (!flows.length) {
+    return `<option value="" selected>Project default</option>`;
+  }
+  const selected = String(selectedFlowID || "").trim() || defaultFlowID;
+  return flows.map((flow) => {
+    const id = value(flow, "id", "ID");
+    const name = value(flow, "name", "Name") || id;
+    const isDefault = id === defaultFlowID || Boolean(value(flow, "default", "Default"));
+    const label = isDefault ? `${name} (default)` : name;
+    return `<option value="${escapeAttr(id)}" ${id === selected ? "selected" : ""}>${escapeHTML(label)}</option>`;
+  }).join("");
+}
+
 export function renderIssueFormView(app, issue, options = {}) {
   const mode = options.mode || "edit";
   const issueID = options.issueID || "";
   const submitLabel = options.submitLabel || "Save";
-  const issueHarnessArgs = normalizeHarnessArgs(value(issue, "harness_args", "HarnessArgs"));
-  const agentOptions = (app.harnesses && app.harnesses.agents) || DEFAULT_AGENT_HARNESSES;
-  const selectedAgentHarness = value(issue, "agent_harness", "AgentHarness") || "codex";
-  const agentHarness = agentOptions.length || mode !== "create" ? resolveHarnessSelection(agentOptions, selectedAgentHarness, mode !== "create") : "";
-  const harnessLoadError = app.harnessesError ? (app.harnessesError.message || String(app.harnessesError)) : "";
-  const agentOptionsUnavailable = !agentOptions.length && mode === "create";
-  const selectionByHarness = {
-    codex: parseHarnessSelectionArgs(issueHarnessArgs.codex, harnessModels(agentOptions, "codex"), "codex"),
-    claude: parseHarnessSelectionArgs(issueHarnessArgs.claude, harnessModels(agentOptions, "claude"), "claude"),
-    harness: parseHarnessSelectionArgs(issueHarnessArgs.harness, harnessModels(agentOptions, "harness"), "harness"),
-  };
-  const agentArgsByHarness = {
-    codex: renderShellArgString(selectionByHarness.codex.additional_args),
-    claude: renderShellArgString(selectionByHarness.claude.additional_args),
-    harness: renderShellArgString(selectionByHarness.harness.additional_args),
-  };
-  const agentDefaultsByHarness = {
-    codex: renderShellArgString(harnessDefaultArgs(agentOptions, "codex")),
-    claude: renderShellArgString(harnessDefaultArgs(agentOptions, "claude")),
-    harness: renderShellArgString(harnessDefaultArgs(agentOptions, "harness")),
-  };
-  const agentArgs = (selectionByHarness[agentHarness] || {}).additional_args || issueHarnessArgs[agentHarness];
   const projectID = options.projectID || "";
   const projects = app.projects || [];
-  const selectedProjects = app.selectedProjectIDs();
-  const defaultProject = projectID || (selectedProjects.length === 1 ? selectedProjects[0] : (projects.length === 1 ? value(projects[0], "id", "ID") : ""));
+  const defaultProject = defaultCreateProject(app, projectID);
   const projectOptions = projects.map((project) => {
     const id = value(project, "id", "ID");
     const name = value(project, "name", "Name") || id;
@@ -84,6 +93,8 @@ export function renderIssueFormView(app, issue, options = {}) {
         </select>
       </label>`
     : "";
+  const selectedFlowID = value(issue, "flow_id", "FlowID");
+  const flowOptions = flowSelectOptionsView(app, defaultProject, selectedFlowID);
   return `
     <form class="issue-form" data-issue-form="${escapeAttr(issueID)}" data-issue-form-mode="${escapeAttr(mode)}"${projectID ? ` data-project="${escapeAttr(projectID)}"` : (mode === "create" && projects.length === 1 ? ` data-project="${escapeAttr(value(projects[0], "id", "ID"))}"` : "")}>
       ${projectField}
@@ -91,15 +102,12 @@ export function renderIssueFormView(app, issue, options = {}) {
         <span>Priority</span>
         <input name="priority" type="number" min="0" step="1" value="${Number(value(issue, "priority", "Priority") || 0)}">
       </label>
-      <label class="issue-field-agent">
-        <span>Agent</span>
-        <select name="agent_harness" required${agentOptionsUnavailable ? " disabled" : ""}>
-          ${agentOptionsUnavailable ? `<option value="" selected>No agent harnesses available</option>` : renderHarnessOptions(agentOptions, agentHarness, mode !== "create")}
+      <label class="issue-field-flow">
+        <span>Flow</span>
+        <select name="flow_id" data-flow-select>
+          ${flowOptions}
         </select>
-        ${agentOptionsUnavailable ? `<p class="meta-quiet">${escapeHTML(harnessLoadError ? `Unable to load agent harnesses: ${harnessLoadError}` : "No live agent harnesses are available")}</p>` : ""}
       </label>
-      ${renderHarnessModelFields(agentOptions, selectionByHarness, agentHarness)}
-      ${renderHarnessArgsField("agent", "Additional Agent Args", agentArgs, harnessDefaultArgs(agentOptions, agentHarness), { values: agentArgsByHarness, defaults: agentDefaultsByHarness })}
       <label class="issue-field-title wide">
         <span>Title</span>
         <input name="title" value="${escapeAttr(value(issue, "title", "Title"))}" required>
@@ -127,45 +135,57 @@ export function renderIssueFormView(app, issue, options = {}) {
       </label>
       ${mode === "create" ? `
       <label class="check wide">
-        <input name="plan_mode" type="checkbox" ${value(issue, "plan_mode", "PlanMode") ? "checked" : ""}>
-        <span>Plan mode</span>
-      </label>
-      <label class="check wide">
         <input name="queue_issue" type="checkbox" checked>
         <span>Queue after creation</span>
       </label>` : ""}
       <div class="form-actions">
         <button class="button" type="submit">${escapeHTML(submitLabel)}</button>
-        ${mode === "create" ? `<button class="button secondary" type="button" data-save-agent-defaults>Save as defaults</button>` : ""}
       </div>
     </form>
   `;
 }
 
+// renderFlowSummaryLineView describes the issue's flow as a one-line summary:
+// the flow name plus its phase chain (e.g. "spec(gate) -> implement", each
+// phase optionally annotated with its agent). It prefers the live flow status
+// (data.flow, which carries the frozen phases + agent names); when the issue is
+// not yet scheduled it falls back to the selected/default flow name from the
+// per-project flow cache.
+export function renderFlowSummaryLineView(app, issue, flow, projectID) {
+  const phases = value(flow, "phases", "Phases") || [];
+  if (flow && phases.length) {
+    const flowName = value(flow, "flow_name", "FlowName");
+    const chain = phases.map((phase) => {
+      const name = value(phase, "name", "Name");
+      const gate = value(phase, "gate", "Gate") === "human" ? "(gate)" : "";
+      const agentName = value(phase, "agent_name", "AgentName");
+      return `${escapeHTML(name)}${gate}${agentName ? ` · ${escapeHTML(agentName)}` : ""}`;
+    }).join(" -> ");
+    return `Flow <strong>${escapeHTML(flowName || "")}</strong> · ${chain}`;
+  }
+  const flowID = String(value(issue, "flow_id", "FlowID") || "").trim();
+  const cache = (app.flowsByProject && app.flowsByProject.get(String(projectID || "").trim())) || { flows: [], defaultFlowID: "" };
+  const targetID = flowID || cache.defaultFlowID;
+  const match = (cache.flows || []).find((candidate) => value(candidate, "id", "ID") === targetID);
+  if (match) {
+    const name = value(match, "name", "Name") || value(match, "id", "ID");
+    const isDefault = value(match, "id", "ID") === cache.defaultFlowID;
+    return `Flow <strong>${escapeHTML(name)}</strong>${!flowID && isDefault ? " (default)" : ""}`;
+  }
+  return `<span class="muted">No flow</span>`;
+}
+
 export function renderIssueReadOnlyDetailView(app, issue, options = {}) {
   const issueID = options.issueID || "";
   const projectID = options.projectID || "";
-  const agentHarness = value(issue, "agent_harness", "AgentHarness") || "codex";
-  const issueHarnessArgs = normalizeHarnessArgs(value(issue, "harness_args", "HarnessArgs"));
-  const agentOptions = (app.harnesses && app.harnesses.agents) || DEFAULT_AGENT_HARNESSES;
-  const selection = parseHarnessSelectionArgs(issueHarnessArgs[agentHarness], harnessModels(agentOptions, agentHarness), agentHarness);
-  const selectionArgs = renderShellArgString(selection.additional_args);
-  const modelLabel = selection.model || "";
-  const reasoningLabel = selection.reasoning_effort || "";
-  const defaultArgs = renderShellArgString(harnessDefaultArgs(agentOptions, agentHarness));
+  const flow = options.flow || null;
   const requiresHumanReview = value(issue, "requires_human_review", "RequiresHumanReview") ? "required" : "optional";
   const autoMerge = value(issue, "auto_merge", "AutoMerge") ? "on" : "off";
   const priority = Number(value(issue, "priority", "Priority") || 0);
   const body = value(issue, "body", "Body") || "";
   const acceptanceCriteria = value(issue, "acceptance_criteria", "AcceptanceCriteria") || "";
   const title = value(issue, "title", "Title") || "";
-  const agentConfigParts = [
-    `<strong>${escapeHTML(agentHarness)}</strong>`,
-    modelLabel ? `model ${escapeHTML(modelLabel)}` : "",
-    reasoningLabel ? `reasoning ${escapeHTML(reasoningLabel)}` : "",
-    selectionArgs ? `args ${escapeHTML(selectionArgs)}` : "",
-  ].filter(Boolean).join(" · ");
-  const defaultsLine = defaultArgs ? `<p class="meta-quiet">Coordinator defaults: ${escapeHTML(defaultArgs)}</p>` : "";
+  const flowLine = renderFlowSummaryLineView(app, issue, flow, projectID);
   return `
     <div class="issue-read-only-detail" data-issue-read-only>
       <div class="issue-read-only-head">
@@ -174,8 +194,7 @@ export function renderIssueReadOnlyDetailView(app, issue, options = {}) {
       </div>
       <div class="issue-read-only-body" data-issue-read-only-body>
         <p class="meta-quiet">p${priority} · human review ${escapeHTML(requiresHumanReview)} · auto merge ${escapeHTML(autoMerge)}</p>
-        <p class="issue-read-only-agent">${agentConfigParts || "<span class=\"muted\">No agent configuration</span>"}</p>
-        ${defaultsLine}
+        <p class="issue-read-only-flow">${flowLine}</p>
         <p class="issue-read-only-field"><span class="meta-quiet">Title</span><br>${escapeHTML(title)}</p>
         <div class="issue-read-only-field"><span class="meta-quiet">Body</span>${body ? renderMarkdown(body) : "<br><span class=\"muted\">—</span>"}</div>
         <div class="issue-read-only-field"><span class="meta-quiet">Acceptance Criteria</span>${acceptanceCriteria ? renderMarkdown(acceptanceCriteria) : "<br><span class=\"muted\">—</span>"}</div>
@@ -190,9 +209,10 @@ export function renderIssueReadOnlyDetailView(app, issue, options = {}) {
 export async function renderIssueView(app, id, context, projectID = "") {
   const data = await apiGet(`${issueAPIBase(projectID)}/${encodeURIComponent(id)}`);
   if (context && !app.isActiveLoad(context)) return false;
-  await app.ensureHarnesses();
-  if (context && !app.isActiveLoad(context)) return false;
   const resolvedProject = data.project_id || data.ProjectID || projectID;
+  await app.ensureFlows(resolvedProject);
+  if (context && !app.isActiveLoad(context)) return false;
+  const flow = data.flow || data.Flow || null;
   const projectName = data.project_name || data.ProjectName || "";
   app.setTitle(projectName ? `Issue · ${projectName}` : "Issue");
   const issue = data.issue || data.Issue;
@@ -260,6 +280,7 @@ export async function renderIssueView(app, id, context, projectID = "") {
   const attachmentsHTML = attachments.length ? `<h3>Attachments</h3><div class="attachment-list">${attachments.map((attachment) => renderIssueAttachment(attachment, issueID, resolvedProject)).join("")}</div>` : "";
   const attachmentUploadHTML = renderAttachmentUploadForm(issueID, resolvedProject);
   const attentionHTML = renderHumanAttentionPanel(issue, statusLog, resolvedProject, activeSession);
+  const gatePanelHTML = renderPhaseGatePanel(flow, issueID, resolvedProject);
   // The standalone Sessions and Status feeds are gone: they are folded into
   // the unified Timeline below, which removes the column-height imbalance
   // (the tall sessions list used to dominate the editor column) and the
@@ -272,7 +293,7 @@ export async function renderIssueView(app, id, context, projectID = "") {
   // Read-only detail (title/body/acceptance criteria/agent config) with an
   // Edit toggle that reveals the full form. Directly fixes the issue where a
   // tall sessions list covered up the agent config, title, body and criteria.
-  const readOnlyDetailHTML = renderIssueReadOnlyDetailView(app, issue, { issueID, projectID: resolvedProject });
+  const readOnlyDetailHTML = renderIssueReadOnlyDetailView(app, issue, { issueID, projectID: resolvedProject, flow });
   const editorHTML = [
     tagsHTML,
     relationsHTML,
@@ -299,7 +320,7 @@ export async function renderIssueView(app, id, context, projectID = "") {
             ${reviewState ? renderReviewBadge(reviewState) : ""}
             ${checkTotal ? `<span class="badge ${checkSatisfied === checkTotal ? "ok" : "idle"}">checks ${checkSatisfied}/${checkTotal}</span>` : ""}
           </div>
-          <p class="meta-quiet">p${Number(value(issue, "priority", "Priority") || 0)} · ${escapeHTML(value(issue, "agent_harness", "AgentHarness") || "codex")} · human review ${value(issue, "requires_human_review", "RequiresHumanReview") ? "required" : "optional"} · auto merge ${value(issue, "auto_merge", "AutoMerge") ? "on" : "off"}</p>
+          <p class="meta-quiet">p${Number(value(issue, "priority", "Priority") || 0)}${flowHeaderMeta(flow) ? ` · ${escapeHTML(flowHeaderMeta(flow))}` : ""} · human review ${value(issue, "requires_human_review", "RequiresHumanReview") ? "required" : "optional"} · auto merge ${value(issue, "auto_merge", "AutoMerge") ? "on" : "off"}</p>
         </div>
         <div class="actions">
           ${renderIssueStateForm(issueID, currentIssueState(scheduleState, triageState), resolvedProject)}
@@ -321,6 +342,7 @@ export async function renderIssueView(app, id, context, projectID = "") {
         <div><span>Source Change</span><strong>${escapeHTML(value(issue, "source_change_id", "SourceChangeID") || "")}</strong></div>
         <div><span>Updated</span><strong>${escapeHTML(formatDate(value(issue, "updated_at", "UpdatedAt")))}</strong></div>
       </div>
+      ${gatePanelHTML}
       ${attentionHTML}
       <div class="issue-detail-grid">${detailColumns}</div>
     </section>
@@ -342,129 +364,33 @@ export function toggleIssueEditFormView(app, button) {
   button.dataset.issueEditToggleState = editing ? "editing" : "";
   if (editing) {
     const form = formWrap.querySelector("[data-issue-form]");
-    if (form) {
-      bindHarnessModelControlsView(app, form);
-      bindAgentArgControlsView(app, form);
-    }
+    if (form) bindIssueFlowControlsView(app, form);
   }
 }
 
-export function bindAgentArgControlsView(app, form) {
-  const agentSelect = form?.elements?.agent_harness;
-  const argsField = form?.elements?.agent_args;
-  if (!agentSelect || !argsField || typeof agentSelect.addEventListener !== "function") return;
-  const savedArgs = parseJSONAttribute(argsField.dataset?.agentArgsValues, {});
-  const defaults = parseJSONAttribute(argsField.dataset?.agentArgsDefaultValues, {});
-  const defaultsElement = typeof form.querySelector === "function" ? form.querySelector("[data-agent-args-defaults]") : null;
-  let currentHarness = agentSelect.value;
-  const persistSavedArgs = () => {
-    if (argsField.dataset) argsField.dataset.agentArgsValues = JSON.stringify(savedArgs);
-  };
-  const sync = () => {
-    savedArgs[currentHarness] = String(argsField.value || "");
-    currentHarness = agentSelect.value;
-    argsField.value = String(savedArgs[currentHarness] || "");
-    persistSavedArgs();
-    if (defaultsElement) {
-      const defaultArgs = String(defaults[currentHarness] || "");
-      defaultsElement.textContent = defaultArgs ? `Coordinator defaults: ${defaultArgs}` : "";
-      defaultsElement.hidden = !defaultArgs;
-    }
-  };
-  agentSelect.addEventListener("change", sync);
+// bindIssueFlowControlsView refreshes the flow selector when the create form's
+// project select changes: it fetches (and caches) that project's flows, then
+// re-renders the flow <option>s for the newly chosen project.
+export function bindIssueFlowControlsView(app, form) {
+  const projectSelect = form?.elements?.project;
+  const flowSelect = form?.elements?.flow_id;
+  if (!projectSelect || !flowSelect || typeof projectSelect.addEventListener !== "function") return;
+  projectSelect.addEventListener("change", async () => {
+    const projectID = String(projectSelect.value || "").trim();
+    if (projectID) await app.ensureFlows(projectID);
+    flowSelect.innerHTML = flowSelectOptionsView(app, projectID, "");
+  });
 }
 
-export function issueAgentPayloadFromFormView(app, form) {
-  const agentHarness = String(form.elements.agent_harness?.value || "").trim();
-  if (!agentHarness) throw new Error("Agent harness is required");
-  const rawAgentArgs = String(form.elements.agent_args?.value || "");
-  const harnessArgs = { codex: [], claude: [], harness: [] };
-  const selectionArgs = harnessSelectionArgsFromFormView(app, form, agentHarness);
-  const additionalArgs = rawAgentArgs.trim() ? [rawAgentArgs] : [];
-  harnessArgs[agentHarness] = [...selectionArgs, ...additionalArgs];
-  return { agent_harness: agentHarness, harness_args: harnessArgs };
-}
-
-export function issueAgentDefaultsFromFormView(app, form) {
-  const agentHarness = String(form.elements.agent_harness?.value || "").trim();
-  if (!agentHarness) throw new Error("Agent harness is required");
-  const argsField = form.elements.agent_args;
-  const savedArgs = parseJSONAttribute(argsField?.dataset?.agentArgsValues, {});
-  savedArgs[agentHarness] = String(argsField?.value || "");
-  const selectionArgs = harnessSelectionArgsFromFormView(app, form, agentHarness);
-  const harnessArgs = { codex: [], claude: [], harness: [] };
-  for (const name of ["codex", "claude", "harness"]) {
-    const additional = String(savedArgs[name] || "").trim() ? [String(savedArgs[name] || "")] : [];
-    const selection = name === agentHarness ? selectionArgs : [];
-    harnessArgs[name] = [...selection, ...additional];
-  }
-  return normalizeIssueAgentDefaults({ agent_harness: agentHarness, harness_args: harnessArgs });
-}
-
-export function bindHarnessModelControlsView(app, form) {
-  if (!form || typeof form.querySelector !== "function") return;
-  const fieldset = form.querySelector("[data-harness-model-fields]");
-  if (!fieldset) return;
-  const catalog = parseJSONAttribute(fieldset.dataset?.harnessModelCatalog, {});
-  const savedSelections = parseJSONAttribute(fieldset.dataset?.harnessModelSelections, {});
-  const controls = fieldset.querySelector("[data-harness-model-controls]");
-  const agentSelect = form.elements.agent_harness;
-  const modelsFor = (harness) => normalizeHarnessModelList(catalog[harness] || []);
-
-  // bindInner (re)wires the model/reasoning listeners after a render.
-  const bindInner = () => {
-    const harness = agentSelect?.value || "";
-    const models = modelsFor(harness);
-    const modelSelect = form.elements.harness_model;
-    const syncReasoning = (preserve = true) => {
-      const model = findHarnessModel(models, modelSelect?.value || "");
-      renderHarnessReasoningInto(fieldset, model, preserve);
-    };
-    const syncModelOptions = (preserveReasoning = true) => {
-      if (modelSelect) {
-        const currentModel = findHarnessModel(models, modelSelect.value);
-        const selectedID = currentModel ? currentModel.qualified_id : "";
-        modelSelect.innerHTML = renderHarnessModelOptions(models, selectedID);
-        modelSelect.value = selectedID;
-      }
-      syncReasoning(preserveReasoning);
-    };
-    if (modelSelect && typeof modelSelect.addEventListener === "function") {
-      modelSelect.addEventListener("change", () => syncModelOptions(false));
-    }
-    syncModelOptions(true);
-  };
-
-  const renderForHarness = (harness) => {
-    if (!controls) return;
-    const models = modelsFor(harness);
-    fieldset.hidden = models.length === 0;
-    controls.innerHTML = renderHarnessModelControls(models, savedSelections[harness] || null);
-    bindInner();
-  };
-
-  if (agentSelect && typeof agentSelect.addEventListener === "function") {
-    agentSelect.addEventListener("change", () => renderForHarness(agentSelect.value));
-  }
-  // The active harness's controls were rendered server-side; just wire them up.
-  bindInner();
-}
-
-export function harnessSelectionArgsFromFormView(app, form, harness) {
-  if (!form) return [];
-  const selectedHarness = harness || String(form.elements.agent_harness?.value || "").trim();
-  if (!selectedHarness) return [];
-  const modelValue = String(form.elements.harness_model?.value || "").trim();
-  if (!modelValue) return [];
-  const models = harnessModels((app.harnesses && app.harnesses.agents) || DEFAULT_AGENT_HARNESSES, selectedHarness);
-  const model = findHarnessModel(models, modelValue);
-  if (!model) return [];
-  const values = harnessReasoningLevelValues(model);
-  const selectedLevel = String(form.elements.harness_reasoning_effort?.value || "").trim();
-  const effort = selectedLevel && selectedLevel !== HARNESS_REASONING_UNAVAILABLE && values.includes(selectedLevel)
-    ? selectedLevel
-    : "";
-  return serializeHarnessModelSelection(selectedHarness, model, effort
-    ? { mode: "effort", effort }
-    : { mode: "default" });
+// flowHeaderMeta condenses the live flow status into the issue header's meta
+// line: "<flow name> · <phase> <n>/<count>" (1-based). Empty when there is no
+// flow cursor yet.
+export function flowHeaderMeta(flow) {
+  if (!flow) return "";
+  const flowName = value(flow, "flow_name", "FlowName");
+  const phaseName = value(flow, "phase_name", "PhaseName");
+  const phaseCount = Number(value(flow, "phase_count", "PhaseCount") || 0);
+  const phaseIndex = Number(value(flow, "phase_index", "PhaseIndex") || 0);
+  const phasePart = phaseName && phaseCount ? `${phaseName} ${phaseIndex + 1}/${phaseCount}` : phaseName;
+  return [flowName, phasePart].filter(Boolean).join(" · ");
 }

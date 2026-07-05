@@ -5,8 +5,8 @@
 import { value } from "./normalize.js";
 import { escapeHTML, escapeAttr } from "./html.js";
 import { NAV, SIDEBAR_STATUS_POLL_MS, MAX_POLL_BACKOFF_MS, DEFAULT_AGENT_HARNESSES, DEFAULT_CONSOLE_HARNESSES } from "./config.js";
-import { apiGet, apiPost, apiPatch, apiDelete, issueConsoleAPIPath, issueAPIBase, issueHref } from "./api.js";
-import { readSelectedProjects, writeSelectedProjects, writeIssueAgentDefaults, routeFilter, terminalSessionIDForPath, pollConfigForPath, readThemePreference, writeThemePreference, applyThemePreference, readDiffMode, writeDiffMode } from "./storage.js";
+import { apiGet, apiPost, apiPatch, apiDelete, issueConsoleAPIPath, issueAPIBase, issueHref, flowsAPIBase } from "./api.js";
+import { readSelectedProjects, writeSelectedProjects, routeFilter, terminalSessionIDForPath, pollConfigForPath, readThemePreference, writeThemePreference, applyThemePreference, readDiffMode, writeDiffMode } from "./storage.js";
 import { renderNavLink, THEME_ICONS, THEME_OPTIONS } from "./nav.js";
 import { normalizeHarnessOptions } from "./harness-models.js";
 import { openTerminalWindow, closeTerminalDialog, hideInlineTerminal, closeTerminalModalLayers } from "./terminal.js";
@@ -19,7 +19,8 @@ import { renderTerminalView, openInlineTerminalView, showTranscriptView } from "
 import { renderConsoleView, stopConsolePollView, startConsoleView, releaseConsoleView } from "./console-view.js";
 import { renderDoneView } from "./done-view.js";
 import { renderBoardView, createIssueView, renderIssueCardView } from "./board-view.js";
-import { renderNewIssueView, renderIssueFormView, renderIssueReadOnlyDetailView, renderIssueView, toggleIssueEditFormView, bindAgentArgControlsView, issueAgentPayloadFromFormView, issueAgentDefaultsFromFormView, bindHarnessModelControlsView } from "./issue-view.js";
+import { renderNewIssueView, renderIssueFormView, renderIssueReadOnlyDetailView, renderIssueView, toggleIssueEditFormView, bindIssueFlowControlsView } from "./issue-view.js";
+import { renderFlowsView } from "./flows-view.js";
 
 export * from "./normalize.js";
 export * from "./html.js";
@@ -39,6 +40,7 @@ export * from "./timeline.js";
 export * from "./attention.js";
 export * from "./issue.js";
 export * from "./poller.js";
+export * from "./flows-view.js";
 
 // Client-side route table consumed by load(). Each entry's match(path) returns a
 // truthy params object/flag when it handles the path, or a falsy value to fall
@@ -58,6 +60,7 @@ const ROUTES = [
   { match: (p) => p.startsWith("/ui/changes/") && { id: p.split("/").pop() }, render: (app, ctx, p) => app.renderChange(p.id, ctx) },
   { match: (p) => p === "/ui/console", render: (app, ctx) => app.renderConsole(ctx) },
   { match: (p) => { const id = terminalSessionIDForPath(p); return id && { id }; }, render: (app, ctx, p) => renderTerminalView(app, p.id, ctx) },
+  { match: (p) => p === "/ui/flows", render: (app, ctx) => renderFlowsView(app, ctx) },
   { match: (p) => p === "/ui/workers", render: (app, ctx) => renderWorkersView(app, ctx) },
   { match: (p) => p === "/ui/jobs", render: (app, ctx) => renderJobsView(app, ctx) },
   { match: (p) => p === "/ui/done", render: (app, ctx) => renderDoneView(app, ctx) },
@@ -291,6 +294,29 @@ export class FlowApp extends HTMLElement {
     return this.harnesses;
   }
 
+  // ensureFlows loads (and per-project caches) a project's flows so the issue
+  // form's Flow selector and the read-only flow summary can render
+  // synchronously. Flows are project-owned, so the cache is keyed by project
+  // id; pass { refresh: true } after a mutation to invalidate one project.
+  async ensureFlows(projectID, options = {}) {
+    const id = String(projectID || "").trim();
+    if (!id) return { flows: [], defaultFlowID: "" };
+    if (!this.flowsByProject) this.flowsByProject = new Map();
+    if (this.flowsByProject.has(id) && !options.refresh) return this.flowsByProject.get(id);
+    let result;
+    try {
+      const data = await apiGet(flowsAPIBase(id));
+      result = {
+        flows: data.flows || data.Flows || [],
+        defaultFlowID: data.default_flow_id || data.DefaultFlowID || "",
+      };
+    } catch (error) {
+      result = { flows: [], defaultFlowID: "" };
+    }
+    this.flowsByProject.set(id, result);
+    return result;
+  }
+
   selectedProjectIDs() {
     const projects = this.projects || [];
     const stored = readSelectedProjects();
@@ -487,6 +513,10 @@ export class FlowApp extends HTMLElement {
     return renderConsoleView(this, context);
   }
 
+  renderFlows(context) {
+    return renderFlowsView(this, context);
+  }
+
   startConsole(projectID, harness, issueID) {
     return startConsoleView(this, projectID, harness, issueID);
   }
@@ -618,28 +648,29 @@ export class FlowApp extends HTMLElement {
         }
       });
     });
-    this.querySelectorAll("[data-plan-approve]").forEach((button) => {
+    this.querySelectorAll("[data-phase-approve]").forEach((button) => {
       button.addEventListener("click", async () => {
         try {
-          await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.planApprove)}/plan/approve`, {});
+          await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.phaseApprove)}/phase/approve`, {});
           await refresh();
-          this.setStatus("plan approved");
+          this.setStatus("phase approved");
         } catch (error) {
           this.setStatus(error.message || String(error));
         }
       });
     });
-    this.querySelectorAll("[data-plan-reject]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        const comments = (window.prompt("Plan rejection comments") || "").trim();
-        if (!comments) {
-          this.setStatus("Rejection comments are required");
+    this.querySelectorAll("[data-phase-request-changes]").forEach((form) => {
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const feedback = (form.elements.feedback?.value || "").trim();
+        if (!feedback) {
+          this.setStatus("Change request feedback is required");
           return;
         }
         try {
-          await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.planReject)}/plan/reject`, { comments });
+          await apiPost(`${issueAPIBase(form.dataset.project)}/${encodeURIComponent(form.dataset.phaseRequestChanges)}/phase/request-changes`, { feedback });
           await refresh();
-          this.setStatus("plan rejected");
+          this.setStatus("changes requested");
         } catch (error) {
           this.setStatus(error.message || String(error));
         }
@@ -741,16 +772,7 @@ export class FlowApp extends HTMLElement {
   // installFormActions wires the issue create/edit form and attachment upload form.
   installFormActions(refresh) {
     this.querySelectorAll("[data-issue-form]").forEach((form) => {
-      bindHarnessModelControlsView(this, form);
-      bindAgentArgControlsView(this, form);
-      form.querySelector?.("[data-save-agent-defaults]")?.addEventListener("click", () => {
-        try {
-          const saved = writeIssueAgentDefaults(issueAgentDefaultsFromFormView(this, form));
-          this.setStatus(saved ? "Agent defaults saved" : "Unable to save agent defaults");
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-        }
-      });
+      bindIssueFlowControlsView(this, form);
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         if (form.reportValidity && !form.reportValidity()) return;
@@ -760,15 +782,6 @@ export class FlowApp extends HTMLElement {
           this.setStatus("Priority must be a non-negative integer");
           return;
         }
-        let agentSettings;
-        let agentDefaults;
-        try {
-          agentSettings = issueAgentPayloadFromFormView(this, form);
-          if (mode === "create") agentDefaults = issueAgentDefaultsFromFormView(this, form);
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-          return;
-        }
         const payload = {
           title: form.elements.title.value.trim(),
           body: form.elements.body.value,
@@ -776,12 +789,8 @@ export class FlowApp extends HTMLElement {
           priority,
           requires_human_review: form.elements.requires_human_review.checked,
           auto_merge: form.elements.auto_merge.checked,
-          agent_harness: agentSettings.agent_harness,
-          harness_args: agentSettings.harness_args,
+          flow_id: form.elements.flow_id ? form.elements.flow_id.value : "",
         };
-        if (form.elements.plan_mode) {
-          payload.plan_mode = form.elements.plan_mode.checked;
-        }
         if (!payload.title) {
           this.setStatus("Issue title is required");
           return;
@@ -801,7 +810,6 @@ export class FlowApp extends HTMLElement {
               throw new Error("Created issue ID unavailable");
             }
             const createdProject = data.project_id || data.ProjectID || formProject;
-            writeIssueAgentDefaults(agentDefaults);
             history.pushState({}, "", issueHref(createdProject, issueID));
             const files = Array.from(form.elements.attachments?.files || []);
             for (const file of files) {

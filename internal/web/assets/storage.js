@@ -1,10 +1,8 @@
 // Typed localStorage read/write helpers for UI preferences (projects, theme,
-// done-view and board-done config, agent defaults) plus pure path -> route /
-// poll-config parsing.
+// done-view and board-done config) plus pure path -> route / poll-config
+// parsing.
 
-import { BOARD_DONE_COUNTS, BOARD_DONE_STORAGE_KEY, BOARD_DONE_WINDOWS, BOARD_POLL_MS, CHANGE_POLL_MS, DIAGNOSTICS_POLL_MS, DIFF_MODES, DIFF_MODE_STORAGE_KEY, DONE_DENSITIES, DONE_DENSITY_STORAGE_KEY, DONE_OUTCOMES, DONE_OUTCOME_STORAGE_KEY, ISSUE_AGENT_DEFAULTS_STORAGE_KEY, MAX_POLL_BACKOFF_MS, PROJECT_STORAGE_KEY, THEME_PREFERENCES, THEME_STORAGE_KEY } from "./config.js";
-import { normalizeHarnessArgs } from "./harness-models.js";
-import { value } from "./normalize.js";
+import { BOARD_DONE_COUNTS, BOARD_DONE_STORAGE_KEY, BOARD_DONE_WINDOWS, BOARD_POLL_MS, CHANGE_POLL_MS, DIAGNOSTICS_POLL_MS, DIFF_MODES, DIFF_MODE_STORAGE_KEY, DONE_DENSITIES, DONE_DENSITY_STORAGE_KEY, DONE_OUTCOMES, DONE_OUTCOME_STORAGE_KEY, MAX_POLL_BACKOFF_MS, PROJECT_STORAGE_KEY, THEME_PREFERENCES, THEME_STORAGE_KEY } from "./config.js";
 
 export function readSelectedProjects() {
   try {
@@ -103,39 +101,6 @@ export function writeDoneOutcome(outcome) {
   } catch {
     // Persistence is best-effort.
   }
-}
-
-export function readIssueAgentDefaults() {
-  try {
-    const raw = window.localStorage?.getItem(ISSUE_AGENT_DEFAULTS_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return normalizeIssueAgentDefaults(parsed);
-  } catch (_error) {
-    return {};
-  }
-}
-
-export function writeIssueAgentDefaults(defaults) {
-  const normalized = normalizeIssueAgentDefaults(defaults);
-  try {
-    if (!window.localStorage || typeof window.localStorage.setItem !== "function") return false;
-    window.localStorage.setItem(ISSUE_AGENT_DEFAULTS_STORAGE_KEY, JSON.stringify({
-      version: 1,
-      ...normalized,
-    }));
-    return true;
-  } catch (_error) {
-    return false;
-  }
-}
-
-export function normalizeIssueAgentDefaults(raw) {
-  const harnessArgs = normalizeHarnessArgs(value(raw, "harness_args", "HarnessArgs"));
-  return {
-    agent_harness: String(value(raw, "agent_harness", "AgentHarness") || "codex").trim() || "codex",
-    harness_args: harnessArgs,
-  };
 }
 
 export function routeFilter(path) {

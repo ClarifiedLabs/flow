@@ -100,6 +100,20 @@ export function issueAPIBase(projectID) {
   return id ? `/v1/projects/${encodeURIComponent(id)}/issues` : "/v1/issues";
 }
 
+// flowsAPIBase / agentDefsAPIBase scope the flow-configuration endpoints to a
+// project, mirroring issueAPIBase: an explicit project id yields the
+// project-scoped path, an empty id falls back to the unscoped route that only
+// works for single-project/implicit principals.
+export function flowsAPIBase(projectID) {
+  const id = String(projectID || "").trim();
+  return id ? `/v1/projects/${encodeURIComponent(id)}/flows` : "/v1/flows";
+}
+
+export function agentDefsAPIBase(projectID) {
+  const id = String(projectID || "").trim();
+  return id ? `/v1/projects/${encodeURIComponent(id)}/agent-defs` : "/v1/agent-defs";
+}
+
 export function issueHref(projectID, issueID) {
   const id = String(projectID || "").trim();
   const issue = String(issueID || "").trim();

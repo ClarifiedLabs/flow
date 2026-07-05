@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-const ISSUE_AGENT_DEFAULTS_STORAGE_KEY = "flow.ui.issueAgentDefaults.v1";
 const DIFF_MODE_STORAGE_KEY = "flow.ui.diffMode";
 
 test("terminal click from a card opens a modal-sized frame", async () => {
@@ -519,9 +518,7 @@ test("job attach action fetches and displays the tmux attach command", async () 
 });
 
 test("issue save submits patch payload and refreshes", async () => {
-  const harness = await issueSaveHarness({
-    agentArgs: `--model "sonnet latest"`,
-  });
+  const harness = await issueSaveHarness({ flowID: "fl-review" });
   await harness.submit();
 
   assert.equal(harness.fetchCalls[0].path, "/ui/api/v1/issues/i-0001");
@@ -534,378 +531,15 @@ test("issue save submits patch payload and refreshes", async () => {
     priority: 4,
     requires_human_review: false,
     auto_merge: true,
-    agent_harness: "claude",
-    harness_args: {
-      codex: [],
-      claude: [`--model "sonnet latest"`],
-      harness: [],
-    },
+    flow_id: "fl-review",
   });
   assert.equal(harness.refreshed(), true);
   assert.equal(harness.status.textContent, "");
-});
-
-test("issue save sends malformed quoted agent args to the server", async () => {
-  const harness = await issueSaveHarness({ agentHarness: "harness", agentArgs: `--model "unterminated` });
-  await harness.submit();
-
-  assert.equal(harness.fetchCalls.length, 1);
-  assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body).harness_args, {
-    codex: [],
-    claude: [],
-    harness: [`--model "unterminated`],
-  });
-  assert.equal(harness.refreshed(), true);
-  assert.equal(harness.status.textContent, "");
-});
-
-test("issue form renders harness model controls from saved args", async () => {
-  const context = await scriptContext();
-  const app = new context.FlowApp();
-  app.harnesses = {
-    agents: [{
-      name: "harness",
-      display_name: "Harness",
-      models: [{
-        target_id: "anthropic:claude-opus-4-8",
-        display_name: "claude-opus-4-8",
-        provider_label: "anthropic",
-        model_label: "claude-opus-4-8",
-        context_window: 1000000,
-        reasoning: true,
-      }],
-    }],
-  };
-
-  const html = app.renderIssueForm({
-    title: "Harness issue",
-    agent_harness: "harness",
-    harness_args: {
-      harness: ["--provider", "anthropic", "--model", "claude-opus-4-8", "--reasoning", "high", "--label", "fast"],
-    },
-  });
-
-  assert.match(html, /data-harness-model-fields/);
-  assert.doesNotMatch(html, /name="harness_provider"/);
-  assert.match(html, /<option value="anthropic:claude-opus-4-8" selected>claude-opus-4-8 \(1M ctx\)<\/option>/);
-  assert.match(html, /<span>Reasoning Level<\/span>/);
-  assert.doesNotMatch(html, /name="harness_reasoning_mode"/);
-  assert.match(html, /<option value="low"[^>]*>low<\/option>/);
-  assert.match(html, /<option value="high" selected>high<\/option>/);
-  assert.doesNotMatch(html, /<option value="unavailable"/);
-  assert.match(html, /<textarea name="agent_args" rows="2"[^>]*>--label fast<\/textarea>/);
-});
-
-test("issue form renders one model picker with provider labels when needed", async () => {
-  const context = await scriptContext();
-  const app = new context.FlowApp();
-  app.harnesses = {
-    agents: [{
-      name: "harness",
-      display_name: "Harness",
-      models: [{
-        provider_id: "anthropic",
-        provider_name: "Anthropic",
-        model_id: "claude-opus-4-8",
-        qualified_id: "anthropic:claude-opus-4-8",
-        model_name: "Claude Opus 4.8",
-        reasoning: { supported: true, options: [{ type: "effort", values: ["low", "high"] }] },
-      }, {
-        provider_id: "google",
-        provider_name: "Google",
-        model_id: "gemini-2.5-flash",
-        qualified_id: "google:gemini-2.5-flash",
-        model_name: "Gemini 2.5 Flash",
-        reasoning: false,
-      }],
-    }],
-  };
-
-  const html = app.renderIssueForm({
-    title: "Harness issue",
-    agent_harness: "harness",
-    harness_args: { harness: ["--model", "google:gemini-2.5-flash"] },
-  });
-
-  const modelOptions = html.match(/<select name="harness_model">([\s\S]*?)<\/select>/)?.[1] || "";
-  assert.doesNotMatch(html, /name="harness_provider"/);
-  assert.match(modelOptions, /<option value="anthropic:claude-opus-4-8"[^>]*>Anthropic \/ Claude Opus 4\.8<\/option>/);
-  assert.match(modelOptions, /<option value="google:gemini-2.5-flash" selected>Google \/ Gemini 2\.5 Flash<\/option>/);
-  assert.match(html, /<span>Reasoning Level<\/span>/);
-  assert.match(html, /<option value="unavailable" selected>unavailable<\/option>/);
-});
-
-test("issue form renders saved args as shell-style strings", async () => {
-  const context = await scriptContext();
-  const app = new context.FlowApp();
-
-  const html = app.renderIssueForm({
-    title: "Quoted args",
-    agent_harness: "claude",
-    harness_args: {
-      claude: ["--label", "fast mode", "it's ok", "path/ok"],
-    },
-  });
-
-  assert.match(html, /<textarea name="agent_args" rows="2"[^>]*>--label &#39;fast mode&#39; &#39;it&#39;\\&#39;&#39;s ok&#39; path\/ok<\/textarea>/);
 });
 
 // Legacy Harness budget/toggle reasoning flags are no longer valid with
 // harness v0.0.19. The form treats them as managed stale selection args so a
 // later save does not keep emitting them.
-test("issue form strips legacy harness reasoning toggle args from additional args", async () => {
-  const context = await scriptContext();
-  const app = new context.FlowApp();
-  app.harnesses = {
-    agents: [{
-      name: "harness",
-      display_name: "Harness",
-      models: [{
-        provider_id: "anthropic",
-        provider_name: "Anthropic",
-        model_id: "claude-opus-4-8",
-        qualified_id: "anthropic:claude-opus-4-8",
-        model_name: "Claude Opus 4.8",
-        reasoning: { supported: true, options: [{ type: "effort", values: ["low", "high"] }] },
-      }],
-    }],
-  };
-
-  const html = app.renderIssueForm({
-    title: "Harness issue",
-    agent_harness: "harness",
-    harness_args: {
-      harness: ["--model", "anthropic:claude-opus-4-8", "--reasoning-enabled", "true", "--label", "fast"],
-    },
-  });
-
-  assert.match(html, /<option value="unavailable" selected>unavailable<\/option>/);
-  assert.doesNotMatch(html, /<option value="low" selected>low<\/option>/);
-  assert.match(html, /<textarea name="agent_args" rows="2"[^>]*>--label fast<\/textarea>/);
-});
-
-test("issue form binding preserves legacy unavailable reasoning selection", async () => {
-  const context = await scriptContext();
-  const app = new context.FlowApp();
-  const model = {
-    provider_id: "anthropic",
-    provider_name: "Anthropic",
-    model_id: "claude-opus-4-8",
-    qualified_id: "anthropic:claude-opus-4-8",
-    model_name: "Claude Opus 4.8",
-    reasoning: { supported: true, options: [{ type: "effort", values: ["low", "high"] }] },
-  };
-  const agentSelect = {
-    value: "harness",
-    addEventListener() {},
-  };
-  const modelSelect = {
-    value: "anthropic:claude-opus-4-8",
-    innerHTML: "",
-    addEventListener() {},
-  };
-  const reasoningSelect = { value: "unavailable" };
-  const reasoningContainer = { innerHTML: "" };
-  const controls = { innerHTML: "" };
-  const fieldset = {
-    dataset: {
-      harnessModelCatalog: JSON.stringify({ harness: [model] }),
-      harnessModelSelections: JSON.stringify({
-        harness: {
-          qualified_id: "anthropic:claude-opus-4-8",
-          reasoning_mode: "legacy",
-          reasoning_effort: "",
-          reasoning_budget_tokens: null,
-          additional_args: [],
-        },
-      }),
-    },
-    hidden: false,
-    querySelector(selector) {
-      if (selector === "[data-harness-model-controls]") return controls;
-      if (selector === "[data-harness-reasoning-controls]") return reasoningContainer;
-      if (selector === '[name="harness_reasoning_effort"]') return reasoningSelect;
-      return null;
-    },
-  };
-  const form = {
-    elements: {
-      agent_harness: agentSelect,
-      agent_args: { value: "", dataset: {} },
-      harness_model: modelSelect,
-      harness_reasoning_effort: reasoningSelect,
-    },
-    querySelector(selector) {
-      if (selector === "[data-harness-model-fields]") return fieldset;
-      return null;
-    },
-    addEventListener() {},
-  };
-  app.querySelectorAll = (selector) => (selector === "[data-issue-form]" ? [form] : []);
-
-  app.bindIssueActions(async () => {});
-
-  assert.match(reasoningContainer.innerHTML, /<option value="unavailable" selected>unavailable<\/option>/);
-  assert.doesNotMatch(reasoningContainer.innerHTML, /<option value="low" selected>low<\/option>/);
-});
-
-test("issue form model change resets unavailable reasoning for supported model", async () => {
-  const context = await scriptContext();
-  const app = new context.FlowApp();
-  const model = {
-    provider_id: "anthropic",
-    provider_name: "Anthropic",
-    model_id: "claude-opus-4-8",
-    qualified_id: "anthropic:claude-opus-4-8",
-    model_name: "Claude Opus 4.8",
-    reasoning: { supported: true, options: [{ type: "effort", values: ["low", "high"] }] },
-  };
-  const agentSelect = {
-    value: "harness",
-    addEventListener() {},
-  };
-  let modelChangeHandler = null;
-  const modelSelect = {
-    value: "",
-    innerHTML: "",
-    addEventListener(event, handler) {
-      if (event === "change") modelChangeHandler = handler;
-    },
-  };
-  const reasoningSelect = { value: "unavailable" };
-  const reasoningContainer = { innerHTML: "" };
-  const controls = { innerHTML: "" };
-  const fieldset = {
-    dataset: {
-      harnessModelCatalog: JSON.stringify({ harness: [model] }),
-      harnessModelSelections: JSON.stringify({ harness: null }),
-    },
-    hidden: false,
-    querySelector(selector) {
-      if (selector === "[data-harness-model-controls]") return controls;
-      if (selector === "[data-harness-reasoning-controls]") return reasoningContainer;
-      if (selector === '[name="harness_reasoning_effort"]') return reasoningSelect;
-      return null;
-    },
-  };
-  const form = {
-    elements: {
-      agent_harness: agentSelect,
-      agent_args: { value: "", dataset: {} },
-      harness_model: modelSelect,
-      harness_reasoning_effort: reasoningSelect,
-    },
-    querySelector(selector) {
-      if (selector === "[data-harness-model-fields]") return fieldset;
-      return null;
-    },
-    addEventListener() {},
-  };
-  app.querySelectorAll = (selector) => (selector === "[data-issue-form]" ? [form] : []);
-
-  app.bindIssueActions(async () => {});
-  assert.equal(typeof modelChangeHandler, "function");
-
-  modelSelect.value = "anthropic:claude-opus-4-8";
-  modelChangeHandler();
-
-  assert.doesNotMatch(reasoningContainer.innerHTML, /<option value="unavailable"/);
-  assert.match(reasoningContainer.innerHTML, /<option value="" selected>Default<\/option>/);
-  assert.match(reasoningContainer.innerHTML, /<option value="low" >low<\/option>/);
-  assert.match(reasoningContainer.innerHTML, /<option value="high" >high<\/option>/);
-});
-
-test("issue save generates harness model args from reasoning level", async () => {
-  const harness = await issueSaveHarness({
-    agentHarness: "harness",
-    agentArgs: `--label "fast mode"`,
-    harnesses: {
-      agents: [{
-        name: "harness",
-        display_name: "Harness",
-        models: [{
-          provider_id: "anthropic",
-          provider_name: "Anthropic",
-          model_id: "claude-opus-4-8",
-          qualified_id: "anthropic:claude-opus-4-8",
-          model_name: "Claude Opus 4.8",
-          reasoning: { supported: true, options: [{ type: "effort", values: ["low", "high"] }] },
-        }],
-      }],
-    },
-    harnessModel: "anthropic:claude-opus-4-8",
-    harnessReasoningEffort: "high",
-  });
-  await harness.submit();
-
-  assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body).harness_args.harness, [
-    "--model",
-    "anthropic:claude-opus-4-8",
-    "--reasoning",
-    "high",
-    `--label "fast mode"`,
-  ]);
-  assert.equal(harness.status.textContent, "");
-});
-
-test("issue save omits reasoning args when reasoning level is unavailable", async () => {
-  const harness = await issueSaveHarness({
-    agentHarness: "harness",
-    agentArgs: "--label no-reasoning",
-    harnesses: {
-      agents: [{
-        name: "harness",
-        display_name: "Harness",
-        models: [{
-          provider_id: "google",
-          model_id: "gemini-2.5-flash",
-          qualified_id: "google:gemini-2.5-flash",
-          reasoning: { supported: false, options: [] },
-        }],
-      }],
-    },
-    harnessModel: "google:gemini-2.5-flash",
-    harnessReasoningEffort: "unavailable",
-  });
-  await harness.submit();
-
-  assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body).harness_args.harness, [
-    "--model",
-    "google:gemini-2.5-flash",
-    "--label no-reasoning",
-  ]);
-  assert.equal(harness.status.textContent, "");
-});
-
-test("issue save preserves additional args when reasoning is unavailable", async () => {
-  const harness = await issueSaveHarness({
-    agentHarness: "harness",
-    agentArgs: "--label legacy",
-    harnesses: {
-      agents: [{
-        name: "harness",
-        display_name: "Harness",
-        models: [{
-          provider_id: "anthropic",
-          model_id: "claude-budget",
-          qualified_id: "anthropic:claude-budget",
-          reasoning: false,
-        }],
-      }],
-    },
-    harnessModel: "anthropic:claude-budget",
-    harnessReasoningEffort: "unavailable",
-  });
-  await harness.submit();
-
-  assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body).harness_args.harness, [
-    "--model",
-    "anthropic:claude-budget",
-    "--label legacy",
-  ]);
-  assert.equal(harness.status.textContent, "");
-});
-
 test("issue save does not submit invalid form or priority", async () => {
   const invalidForm = await issueSaveHarness({ valid: false });
   await invalidForm.submit();
@@ -1017,18 +651,6 @@ test("new issue route renders project-scoped blank form without fetching an issu
           }),
         });
       }
-      if (path === "/ui/api/v1/harnesses") {
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve({
-            agents: [
-              { name: "codex", display_name: "Codex", default_args: ["--model", "gpt-5"] },
-              { name: "harness", display_name: "Harness" },
-            ],
-            consoles: [],
-          }),
-        });
-      }
       throw new Error("new issue route should not fetch before submission");
     },
   });
@@ -1045,125 +667,26 @@ test("new issue route renders project-scoped blank form without fetching an issu
 
   await app.load();
 
-  assert.equal(fetchCalls.length, 2);
+  // With several projects there is no default project, so the form does not
+  // preload any project's flows: only the project registry is fetched.
+  assert.equal(fetchCalls.length, 1);
   assert.equal(fetchCalls[0].path, "/ui/api/v1/projects");
-  assert.equal(fetchCalls[1].path, "/ui/api/v1/harnesses");
   assert.equal(title.textContent, "New Issue");
   assert.match(content.innerHTML, /data-issue-form-mode="create"/);
   assert.match(content.innerHTML, /<span>Project<\/span>/);
   assert.match(content.innerHTML, /<option value="p-alpha"/);
   assert.match(content.innerHTML, /<option value="p-beta"/);
   assert.match(content.innerHTML, /<input name="title" value="" required>/);
-  assert.match(content.innerHTML, /<select name="agent_harness" required>/);
-  assert.match(content.innerHTML, /<option value="codex" selected>Codex<\/option>/);
-  assert.match(content.innerHTML, /<option value="harness">Harness<\/option>/);
-  assert.match(content.innerHTML, /<textarea name="agent_args" rows="2"[^>]*><\/textarea>/);
-  assert.doesNotMatch(content.innerHTML, /name="codex_args"/);
-  assert.doesNotMatch(content.innerHTML, /name="claude_args"/);
-  assert.doesNotMatch(content.innerHTML, /name="harness_args"/);
-  assert.match(content.innerHTML, /Coordinator defaults: --model gpt-5/);
-  assert.match(content.innerHTML, /<input name="plan_mode" type="checkbox" >/);
+  assert.match(content.innerHTML, /<span>Flow<\/span>/);
+  assert.match(content.innerHTML, /<select name="flow_id" data-flow-select>/);
+  assert.match(content.innerHTML, /<option value="" selected>Project default<\/option>/);
+  assert.doesNotMatch(content.innerHTML, /name="agent_harness"/);
+  assert.doesNotMatch(content.innerHTML, /name="agent_args"/);
+  assert.doesNotMatch(content.innerHTML, /name="plan_mode"/);
+  assert.doesNotMatch(content.innerHTML, /data-save-agent-defaults/);
   assert.match(content.innerHTML, /<input name="queue_issue" type="checkbox" checked>/);
   assert.match(content.innerHTML, /<button class="button" type="submit">Create<\/button>/);
-  assert.match(content.innerHTML, /<button class="button secondary" type="button" data-save-agent-defaults>Save as defaults<\/button>/);
   assert.equal(status.textContent, "");
-});
-
-test("new issue route renders model controls when only Harness agent is enabled", async () => {
-  const harness = await newIssueRouteHarness({
-    harnesses: {
-      agents: [{
-        name: "harness",
-        display_name: "Harness",
-        models: [{
-          provider_id: "anthropic",
-          provider_name: "Anthropic",
-          model_id: "claude-opus-4-8",
-          qualified_id: "anthropic:claude-opus-4-8",
-          model_name: "Claude Opus 4.8",
-          reasoning: { supported: true, options: [{ type: "effort", values: ["low", "high"] }] },
-        }],
-      }],
-      consoles: [],
-    },
-  });
-
-  await harness.app.load();
-
-  assert.match(harness.content.innerHTML, /<option value="harness" selected>Harness<\/option>/);
-  assert.match(harness.content.innerHTML, /data-harness-model-fields/);
-  assert.doesNotMatch(harness.content.innerHTML, /data-harness-model-fields[^>]* hidden/);
-  assert.doesNotMatch(harness.content.innerHTML, /name="harness_provider"/);
-  assert.match(harness.content.innerHTML, /<option value="anthropic:claude-opus-4-8"[^>]*>Claude Opus 4\.8<\/option>/);
-  assert.match(harness.content.innerHTML, /<span>Reasoning Level<\/span>/);
-  assert.match(harness.content.innerHTML, /<select name="harness_reasoning_effort">/);
-  assert.match(harness.content.innerHTML, /<option value="unavailable" selected>unavailable<\/option>/);
-  assert.doesNotMatch(harness.content.innerHTML, /name="harness_reasoning_mode"/);
-  assert.equal(harness.status.textContent, "");
-});
-
-test("new issue route surfaces harness option load failures", async () => {
-  const harness = await newIssueRouteHarness({ harnessesError: "missing bearer token" });
-
-  await harness.app.load();
-
-  assert.match(harness.content.innerHTML, /<select name="agent_harness" required disabled>/);
-  assert.match(harness.content.innerHTML, /<option value="" selected>No agent harnesses available<\/option>/);
-  assert.match(harness.content.innerHTML, /Unable to load agent harnesses: missing bearer token/);
-  assert.equal(harness.status.textContent, "");
-});
-
-test("new issue route renders saved agent defaults from localStorage", async () => {
-  const harness = await newIssueRouteHarness({
-    storedDefaults: {
-      version: 1,
-      agent_harness: "harness",
-      harness_args: {
-        codex: ["--codex-fast"],
-        claude: ["--claude-sonnet"],
-        harness: ["--provider", "anthropic", "--model", "claude-opus-4-8", "--reasoning", "high", "--label", "fast"],
-      },
-    },
-  });
-
-  await harness.app.load();
-
-  assert.match(harness.content.innerHTML, /<option value="harness" selected>Harness<\/option>/);
-  assert.doesNotMatch(harness.content.innerHTML, /name="harness_provider"/);
-  assert.match(harness.content.innerHTML, /<option value="anthropic:claude-opus-4-8" selected>Claude Opus 4\.8<\/option>/);
-  assert.match(harness.content.innerHTML, /<span>Reasoning Level<\/span>/);
-  assert.doesNotMatch(harness.content.innerHTML, /name="harness_reasoning_mode"/);
-  assert.match(harness.content.innerHTML, /<option value="high" selected>high<\/option>/);
-  assert.match(harness.content.innerHTML, /<textarea name="agent_args" rows="2"[^>]*>--label fast<\/textarea>/);
-  assert.match(harness.content.innerHTML, /<input name="priority" type="number" min="0" step="1" value="0">/);
-  assert.match(harness.content.innerHTML, /<input name="requires_human_review" type="checkbox" checked>/);
-  assert.match(harness.content.innerHTML, /<input name="auto_merge" type="checkbox" >/);
-  assert.equal(harness.status.textContent, "");
-});
-
-test("new issue route ignores corrupt or unavailable saved agent defaults", async () => {
-  const cases = [
-    { storedDefaultsRaw: "not-json" },
-    {
-      localStorage: {
-        getItem() {
-          throw new Error("storage unavailable");
-        },
-        setItem() {},
-        removeItem() {},
-      },
-    },
-  ];
-  for (const options of cases) {
-    const harness = await newIssueRouteHarness(options);
-
-    await harness.app.load();
-
-    assert.match(harness.content.innerHTML, /<option value="codex" selected>Codex<\/option>/);
-    assert.match(harness.content.innerHTML, /<textarea name="agent_args" rows="2"[^>]*><\/textarea>/);
-    assert.match(harness.content.innerHTML, /Coordinator defaults: --model gpt-5/);
-    assert.equal(harness.status.textContent, "");
-  }
 });
 
 test("new issue form shows the project field even with one project", async () => {
@@ -1177,12 +700,12 @@ test("new issue form shows the project field even with one project", async () =>
   assert.match(html, /<select name="project" required>/);
   assert.match(html, /<option value="p-alpha" selected>alpha<\/option>/);
   assert.ok(html.indexOf('class="issue-field-project"') < html.indexOf('class="issue-field-priority"'));
-  assert.ok(html.indexOf('class="issue-field-priority"') < html.indexOf('class="issue-field-agent"'));
-  assert.ok(html.indexOf('class="issue-field-agent"') < html.indexOf('class="issue-field-title wide"'));
+  assert.ok(html.indexOf('class="issue-field-priority"') < html.indexOf('class="issue-field-flow"'));
+  assert.ok(html.indexOf('class="issue-field-flow"') < html.indexOf('class="issue-field-title wide"'));
 });
 
 test("new issue form submits queued create payload then navigates to created issue", async () => {
-  const harness = await issueSaveHarness({ mode: "create", title: "  Browser issue  ", planMode: true });
+  const harness = await issueSaveHarness({ mode: "create", title: "  Browser issue  ", flowID: "fl-plan" });
 
   await harness.submit();
 
@@ -1196,109 +719,13 @@ test("new issue form submits queued create payload then navigates to created iss
     priority: 4,
     requires_human_review: false,
     auto_merge: true,
-    plan_mode: true,
-    agent_harness: "claude",
-    harness_args: {
-      codex: [],
-      claude: [],
-      harness: [],
-    },
+    flow_id: "fl-plan",
     schedule_state: "up_next",
   });
   assert.equal(harness.pushedPath(), "/ui/projects/p-demo/issues/i-0001");
   assert.equal(harness.loads(), 1);
   assert.equal(harness.refreshed(), false);
   assert.equal(harness.status.textContent, "");
-  assert.deepEqual(JSON.parse(harness.storage.get(ISSUE_AGENT_DEFAULTS_STORAGE_KEY)), {
-    version: 1,
-    agent_harness: "claude",
-    harness_args: {
-      codex: [],
-      claude: [],
-      harness: [],
-    },
-  });
-});
-
-test("new issue save defaults button writes agent defaults without posting", async () => {
-  const harness = await issueSaveHarness({
-    mode: "create",
-    agentHarness: "harness",
-    agentArgs: `--label "fast mode"`,
-    agentArgsValues: {
-      codex: "--codex-fast",
-      claude: "--claude-sonnet",
-      harness: "--old-harness-arg",
-    },
-    harnesses: {
-      agents: [{
-        name: "harness",
-        display_name: "Harness",
-        models: [{
-          provider_id: "anthropic",
-          provider_name: "Anthropic",
-          model_id: "claude-opus-4-8",
-          qualified_id: "anthropic:claude-opus-4-8",
-          model_name: "Claude Opus 4.8",
-          reasoning: { supported: true, options: [{ type: "effort", values: ["low", "high"] }] },
-        }],
-      }],
-    },
-    harnessModel: "anthropic:claude-opus-4-8",
-    harnessReasoningEffort: "high",
-  });
-
-  await harness.saveDefaults();
-
-  assert.equal(harness.fetchCalls.length, 0);
-  assert.equal(harness.pushedPath(), "");
-  assert.equal(harness.loads(), 0);
-  assert.equal(harness.status.textContent, "Agent defaults saved");
-  assert.deepEqual(JSON.parse(harness.storage.get(ISSUE_AGENT_DEFAULTS_STORAGE_KEY)), {
-    version: 1,
-    agent_harness: "harness",
-    harness_args: {
-      codex: ["--codex-fast"],
-      claude: ["--claude-sonnet"],
-      harness: ["--model", "anthropic:claude-opus-4-8", "--reasoning", "high", `--label "fast mode"`],
-    },
-  });
-});
-
-test("new issue save defaults button stores model-only args when reasoning is unavailable", async () => {
-  const harness = await issueSaveHarness({
-    mode: "create",
-    agentHarness: "harness",
-    agentArgs: "--label no-reasoning",
-    harnesses: {
-      agents: [{
-        name: "harness",
-        display_name: "Harness",
-        models: [{
-          provider_id: "google",
-          model_id: "gemini-2.5-flash",
-          qualified_id: "google:gemini-2.5-flash",
-          reasoning: { supported: false, options: [] },
-        }],
-      }],
-    },
-    harnessModel: "google:gemini-2.5-flash",
-    harnessReasoningEffort: "unavailable",
-  });
-
-  await harness.saveDefaults();
-
-  assert.equal(harness.fetchCalls.length, 0);
-  assert.equal(harness.status.textContent, "Agent defaults saved");
-  assert.deepEqual(JSON.parse(harness.storage.get(ISSUE_AGENT_DEFAULTS_STORAGE_KEY)), {
-    version: 1,
-    agent_harness: "harness",
-    harness_args: {
-      codex: [],
-      claude: [],
-      harness: ["--model", "google:gemini-2.5-flash", "--label no-reasoning"],
-    },
-  });
 });
 
 test("new issue form uploads selected initial attachments after create", async () => {
@@ -1330,13 +757,7 @@ test("new issue form can save without queueing", async () => {
     priority: 4,
     requires_human_review: false,
     auto_merge: true,
-    plan_mode: false,
-    agent_harness: "claude",
-    harness_args: {
-      codex: [],
-      claude: [],
-      harness: [],
-    },
+    flow_id: "",
     schedule_state: "backlog",
   });
   assert.equal(harness.pushedPath(), "/ui/projects/p-demo/issues/i-0001");
@@ -2345,10 +1766,10 @@ test("thread reply action requires comment text", async () => {
   assert.equal(refreshed, false);
 });
 
-test("plan approve action posts to issue plan endpoint and refreshes", async () => {
+test("phase approve action posts to issue phase endpoint and refreshes", async () => {
   let clickHandler;
   const button = {
-    dataset: { planApprove: "i-0001", project: "p-demo" },
+    dataset: { phaseApprove: "i-0001", project: "p-demo" },
     addEventListener(event, handler) {
       if (event === "click") clickHandler = handler;
     },
@@ -2360,12 +1781,12 @@ test("plan approve action posts to issue plan endpoint and refreshes", async () 
       fetchCalls.push({ path, options });
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ issue: { id: "i-0001" } }),
+        json: () => Promise.resolve({ issue: { id: "i-0001" }, flow: {} }),
       });
     },
   });
   const app = new context.FlowApp();
-  app.querySelectorAll = (selector) => (selector === "[data-plan-approve]" ? [button] : []);
+  app.querySelectorAll = (selector) => (selector === "[data-phase-approve]" ? [button] : []);
   app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
   let refreshed = false;
   app.bindIssueActions(async () => {
@@ -2374,52 +1795,51 @@ test("plan approve action posts to issue plan endpoint and refreshes", async () 
 
   await clickHandler();
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues/i-0001/plan/approve");
+  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues/i-0001/phase/approve");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
   assert.equal(refreshed, true);
-  assert.equal(status.textContent, "plan approved");
+  assert.equal(status.textContent, "phase approved");
 });
 
-test("plan reject action posts comments to issue plan endpoint and refreshes", async () => {
-  let clickHandler;
-  const button = {
-    dataset: { planReject: "i-0001", project: "p-demo" },
+test("phase request-changes form posts feedback to issue phase endpoint and refreshes", async () => {
+  let submitHandler;
+  const form = {
+    dataset: { phaseRequestChanges: "i-0001", project: "p-demo" },
+    elements: {
+      feedback: { value: "Please narrow the first step." },
+    },
     addEventListener(event, handler) {
-      if (event === "click") clickHandler = handler;
+      if (event === "submit") submitHandler = handler;
     },
   };
   const fetchCalls = [];
   const status = { textContent: "" };
-  const context = await scriptContext({
-    prompt() {
-      return "Please narrow the first step.";
-    },
-  }, {
+  const context = await scriptContext({}, {
     fetch(path, options) {
       fetchCalls.push({ path, options });
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ issue: { id: "i-0001" } }),
+        json: () => Promise.resolve({ issue: { id: "i-0001" }, flow: {} }),
       });
     },
   });
   const app = new context.FlowApp();
-  app.querySelectorAll = (selector) => (selector === "[data-plan-reject]" ? [button] : []);
+  app.querySelectorAll = (selector) => (selector === "[data-phase-request-changes]" ? [form] : []);
   app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
   let refreshed = false;
   app.bindIssueActions(async () => {
     refreshed = true;
   });
 
-  await clickHandler();
+  await submitHandler({ preventDefault() {} });
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues/i-0001/plan/reject");
+  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues/i-0001/phase/request-changes");
   assert.equal(fetchCalls[0].options.method, "POST");
-  assert.deepEqual(JSON.parse(fetchCalls[0].options.body), { comments: "Please narrow the first step." });
+  assert.deepEqual(JSON.parse(fetchCalls[0].options.body), { feedback: "Please narrow the first step." });
   assert.equal(refreshed, true);
-  assert.equal(status.textContent, "plan rejected");
+  assert.equal(status.textContent, "changes requested");
 });
 
 test("attention reply form posts message and status log id", async () => {
@@ -2771,36 +2191,45 @@ test("issue detail renders owner metadata, relations, sessions, changes, and che
   assert.match(content.innerHTML, /ensure_author_job|up_next/);
 });
 
-test("issue detail renders pending plan as a full-width human attention panel", async () => {
+test("issue detail renders a gate-paused phase as a full-width approval panel", async () => {
   const harness = await browserSmokeHarness("/ui/projects/p-alpha/issues/i-0001", {
     "/ui/api/v1/projects/p-alpha/issues/i-0001": {
       project_id: "p-alpha",
       issue: {
         id: "i-0001",
-        title: "Plan issue",
+        title: "Gated issue",
         schedule_state: "up_next",
         triage_state: "accepted",
         priority: 1,
         created_by: "agent",
-        agent_harness: "harness",
-        plan_body: "1. Inspect state\n2. Patch the UI",
-        plan_submitted_at: "2026-06-18T12:36:46Z",
         updated_at: "2026-06-18T12:37:00Z",
       },
       issue_detail: {},
+      flow: {
+        flow_id: "fl-plan",
+        flow_name: "planned",
+        phase_name: "plan",
+        phase_index: 0,
+        phase_count: 2,
+        phase_state: "awaiting_approval",
+        gate: "human",
+        pending_handoff: "1. Inspect state\n2. Patch the UI",
+      },
     },
   });
 
   await harness.app.load();
 
   const html = harness.content.innerHTML;
-  assert.match(html, /class="human-attention-panel"/);
-  assert.match(html, /Plan Review/);
-  assert.match(html, /data-plan-approve="i-0001"/);
-  assert.match(html, /data-plan-reject="i-0001"/);
+  assert.match(html, /class="human-attention-panel" data-phase-gate/);
+  assert.match(html, /Phase plan awaiting approval/);
+  assert.match(html, /data-phase-approve="i-0001"/);
+  assert.match(html, /data-phase-request-changes="i-0001"/);
   assert.match(html, /<ol>\s*<li>Inspect state<\/li>\s*<li>Patch the UI<\/li>\s*<\/ol>/);
-  assert.ok(html.indexOf("summary-grid") < html.indexOf("human-attention-panel"));
-  assert.ok(html.indexOf("human-attention-panel") < html.indexOf("issue-detail-grid"));
+  // The header meta line surfaces the flow + current phase (1-based).
+  assert.match(html, /planned · plan 1\/2/);
+  assert.ok(html.indexOf("summary-grid") < html.indexOf("data-phase-gate"));
+  assert.ok(html.indexOf("data-phase-gate") < html.indexOf("issue-detail-grid"));
 });
 
 test("issue detail renders resume for a paused task", async () => {
@@ -3699,7 +3128,7 @@ test("non-polling routes report static instead of live", async () => {
   assert.equal(harness.statusbar.dataset.state, "idle");
   assert.equal(harness.sbLabel.textContent, "static");
   assert.equal(harness.sbMeta.textContent, "");
-  assert.deepEqual(harness.fetchCalls, ["/ui/api/v1/projects", "/ui/api/v1/harnesses"]);
+  assert.deepEqual(harness.fetchCalls, ["/ui/api/v1/projects"]);
 });
 
 test("unscoped issue detail route requires a project-scoped URL", async () => {
@@ -3904,7 +3333,7 @@ test("browser smoke loads issue and change deep links", async () => {
   assert.equal(issueHarness.title.textContent, "Issue");
   assert.match(issueHarness.content.innerHTML, /Issue detail/);
   assert.match(issueHarness.content.innerHTML, /web-ui/);
-  assert.deepEqual(issueHarness.fetchCalls, ["/ui/api/v1/projects", "/ui/api/v1/projects/p-alpha/issues/i-0001", "/ui/api/v1/harnesses"]);
+  assert.deepEqual(issueHarness.fetchCalls, ["/ui/api/v1/projects", "/ui/api/v1/projects/p-alpha/issues/i-0001", "/ui/api/v1/projects/p-alpha/flows"]);
 
   const changeHarness = await browserSmokeHarness("/ui/changes/ch-0001", {
     "/ui/api/v1/changes/ch-0001": {
@@ -4227,103 +3656,10 @@ test("pre-disconnect load stays stale after reconnect-style load", async () => {
   assert.equal(timers[0].delay, 30000);
 });
 
-async function newIssueRouteHarness(options = {}) {
-  const title = { textContent: "" };
-  const status = { textContent: "" };
-  const content = { innerHTML: "" };
-  const fetchCalls = [];
-  const storage = new Map();
-  if (options.storedDefaultsRaw !== undefined) {
-    storage.set(ISSUE_AGENT_DEFAULTS_STORAGE_KEY, options.storedDefaultsRaw);
-  } else if (options.storedDefaults) {
-    storage.set(ISSUE_AGENT_DEFAULTS_STORAGE_KEY, JSON.stringify(options.storedDefaults));
-  }
-  const localStorage = options.localStorage || {
-    getItem(key) {
-      return storage.has(key) ? storage.get(key) : null;
-    },
-    setItem(key, value) {
-      storage.set(key, String(value));
-    },
-    removeItem(key) {
-      storage.delete(key);
-    },
-  };
-  const harnesses = options.harnesses || {
-    agents: [
-      { name: "codex", display_name: "Codex", default_args: ["--model", "gpt-5"] },
-      {
-        name: "harness",
-        display_name: "Harness",
-        models: [{
-          provider_id: "anthropic",
-          provider_name: "Anthropic",
-          model_id: "claude-opus-4-8",
-          qualified_id: "anthropic:claude-opus-4-8",
-          model_name: "Claude Opus 4.8",
-          reasoning: { supported: true, options: [{ type: "effort", values: ["low", "high"] }] },
-        }],
-      },
-    ],
-    consoles: [],
-  };
-  const context = await scriptContext({
-    location: { pathname: "/ui/issues/new" },
-    localStorage,
-  }, {
-    fetch(path, fetchOptions) {
-      fetchCalls.push({ path, options: fetchOptions });
-      if (path === "/ui/api/v1/projects") {
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve({
-            projects: [
-              { id: "p-alpha", name: "alpha" },
-              { id: "p-beta", name: "beta" },
-            ],
-          }),
-        });
-      }
-      if (path === "/ui/api/v1/harnesses") {
-        if (options.harnessesError) {
-          return Promise.resolve({
-            ok: false,
-            status: 401,
-            json: () => Promise.resolve({ error: { message: options.harnessesError } }),
-          });
-        }
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve(harnesses),
-        });
-      }
-      throw new Error("new issue route should not fetch before submission");
-    },
-  });
-  const app = new context.FlowApp();
-  app.pollingActive = true;
-  app.renderProjectPicker = () => {};
-  app.querySelector = (selector) => {
-    if (selector === "h1") return title;
-    if (selector === ".status") return status;
-    if (selector === ".content") return content;
-    return { textContent: "" };
-  };
-  app.querySelectorAll = () => [];
-
-  return { app, content, fetchCalls, status, storage, title };
-}
-
 async function issueSaveHarness(options = {}) {
   let submitHandler;
-  let saveDefaultsHandler;
   const mode = options.mode || "edit";
   const projectID = options.projectID ?? (mode === "create" ? "p-demo" : "");
-  const saveDefaultsButton = {
-    addEventListener(event, handler) {
-      if (event === "click") saveDefaultsHandler = handler;
-    },
-  };
   const form = {
     dataset: { issueForm: mode === "create" ? "" : "i-0001", issueFormMode: mode },
     elements: {
@@ -4333,12 +3669,7 @@ async function issueSaveHarness(options = {}) {
       priority: { value: options.priority ?? "4" },
       requires_human_review: { checked: false },
       auto_merge: { checked: true },
-      agent_harness: { value: options.agentHarness || "claude" },
-      agent_args: {
-        value: options.agentArgs || "",
-        dataset: options.agentArgsValues ? { agentArgsValues: JSON.stringify(options.agentArgsValues) } : {},
-      },
-      queue_issue: { checked: options.queueIssue !== false },
+      flow_id: { value: options.flowID ?? "" },
     },
     reportValidity() {
       return options.valid !== false;
@@ -4346,21 +3677,16 @@ async function issueSaveHarness(options = {}) {
     addEventListener(event, handler) {
       if (event === "submit") submitHandler = handler;
     },
-    querySelector(selector) {
-      if (selector === "[data-save-agent-defaults]") return mode === "create" ? saveDefaultsButton : null;
+    querySelector() {
       return null;
     },
   };
   if (mode === "create") {
     form.elements.project = { value: projectID };
-    form.elements.plan_mode = { checked: options.planMode === true };
     form.elements.attachments = { files: options.files || [] };
+    form.elements.queue_issue = { checked: options.queueIssue !== false };
   } else if (projectID) {
     form.dataset.project = projectID;
-  }
-  if (options.harnessModel) {
-    form.elements.harness_model = { value: options.harnessModel };
-    form.elements.harness_reasoning_effort = { value: options.harnessReasoningEffort || "" };
   }
   const status = { textContent: "" };
   const fetchCalls = [];
@@ -4439,7 +3765,6 @@ async function issueSaveHarness(options = {}) {
     refreshed: () => refreshed,
     pushedPath: () => pushedPath,
     loads: () => loads,
-    saveDefaults: () => saveDefaultsHandler(),
     submit: () => submitHandler({ preventDefault() {} }),
   };
 }
@@ -4918,17 +4243,51 @@ test("human attention panel renders the reply form while the session waits", asy
   assert.match(html, /data-status-log-id="7"/);
 });
 
-test("human attention panel renders both plan review and a waiting question", async () => {
+test("human attention panel renders a waiting question and no longer renders plans", async () => {
   const context = await scriptContext();
   const issue = { id: "i-0001", title: "Plan plus question", plan_body: "Step 1\nStep 2", plan_submitted_at: "2026-06-07T11:00:00Z" };
   const statusLog = [{ id: 9, kind: "question", message: "which db?", created_at: "2026-06-07T12:00:00Z" }];
   const html = context.renderHumanAttentionPanel(issue, statusLog, "p-alpha", { id: "s-0001", state: "waiting" });
-  assert.match(html, /Plan Review/);
-  assert.match(html, /data-plan-approve="i-0001"/);
-  assert.match(html, /Step 1/);
+  // Plan-mode review is gone; phase gates are handled by renderPhaseGatePanel.
+  assert.doesNotMatch(html, /Plan Review/);
+  assert.doesNotMatch(html, /data-plan-approve/);
   assert.match(html, /Needs Human Response/);
   assert.match(html, /data-attention-reply-form="i-0001"/);
   assert.match(html, /data-status-log-id="9"/);
+});
+
+test("phase gate panel renders the pending handoff as markdown with approve and request-changes", async () => {
+  const context = await scriptContext();
+  const flow = {
+    phase_name: "plan",
+    phase_state: "awaiting_approval",
+    pending_handoff: "## Handoff\n- did a thing",
+  };
+  const html = context.renderPhaseGatePanel(flow, "i-0001", "p-alpha");
+  assert.match(html, /data-phase-gate/);
+  assert.match(html, /Phase plan awaiting approval/);
+  assert.match(html, /class="human-attention-body md"/);
+  assert.match(html, /<h2>Handoff<\/h2>/);
+  assert.match(html, /<li>did a thing<\/li>/);
+  assert.match(html, /<button class="button" data-phase-approve="i-0001" data-project="p-alpha">/);
+  assert.match(html, /<form class="human-attention-reply" data-phase-request-changes="i-0001" data-project="p-alpha">/);
+  assert.match(html, /<textarea name="feedback"/);
+});
+
+test("phase gate panel renders a quiet sent-back note for pending feedback", async () => {
+  const context = await scriptContext();
+  const flow = { phase_name: "plan", phase_state: "pending", gate_feedback: "tighten the scope" };
+  const html = context.renderPhaseGatePanel(flow, "i-0001", "p-alpha");
+  assert.match(html, /data-phase-gate-feedback/);
+  assert.match(html, /Phase plan sent back with feedback/);
+  assert.match(html, /tighten the scope/);
+  assert.doesNotMatch(html, /data-phase-approve/);
+});
+
+test("phase gate panel is empty when the phase is running", async () => {
+  const context = await scriptContext();
+  assert.equal(context.renderPhaseGatePanel({ phase_name: "plan", phase_state: "running" }, "i-0001", "p-alpha"), "");
+  assert.equal(context.renderPhaseGatePanel(null, "i-0001", "p-alpha"), "");
 });
 
 test("phaseKey does not map crash_loop", async () => {
@@ -5170,10 +4529,10 @@ test("renderMarkdown does not overflow the stack on deeply nested lists", async 
 
 // --- markdown surface integration --------------------------------------------
 
-test("human attention panel renders the plan body as markdown", async () => {
+test("phase gate panel renders the pending handoff without a raw pre block", async () => {
   const context = await scriptContext();
-  const issue = { id: "i-0001", title: "Plan", plan_body: "## Plan\n- step one" };
-  const html = context.renderHumanAttentionPanel(issue, [], "p-alpha", null);
+  const flow = { phase_name: "plan", phase_state: "awaiting_approval", pending_handoff: "## Plan\n- step one" };
+  const html = context.renderPhaseGatePanel(flow, "i-0001", "p-alpha");
   assert.match(html, /class="human-attention-body md"/);
   assert.match(html, /<h2>Plan<\/h2>/);
   assert.match(html, /<li>step one<\/li>/);
@@ -5259,7 +4618,289 @@ test("block markdown surfaces do not double-wrap the .md container", async () =>
   const app = new context.FlowApp();
   const detail = app.renderIssueReadOnlyDetail({ id: "i-1", title: "T", body: "## H" }, { issueID: "i-1" });
   assert.doesNotMatch(detail, /class="md">\s*<div class="md"/);
-  const panel = context.renderHumanAttentionPanel({ id: "i-1", title: "T", plan_body: "## H" }, [], "p", null);
+  const panel = context.renderPhaseGatePanel({ phase_name: "plan", phase_state: "awaiting_approval", pending_handoff: "## H" }, "i-1", "p");
   assert.match(panel, /class="human-attention-body md"/);
   assert.doesNotMatch(panel, /class="md">\s*<div class="md"/);
+});
+
+// --- composable flows: issue form, board badge, gate + flows editor ------------
+
+test("issue form flow select preselects the project default flow", async () => {
+  const context = await scriptContext();
+  const app = new context.FlowApp();
+  app.projects = [{ id: "p-alpha", name: "alpha" }];
+  app.flowsByProject = new Map([["p-alpha", {
+    flows: [
+      { id: "fl-basic", name: "basic" },
+      { id: "fl-plan", name: "planned" },
+    ],
+    defaultFlowID: "fl-plan",
+  }]]);
+
+  const html = app.renderIssueForm({ title: "", priority: 0 }, { mode: "create", projectID: "p-alpha", submitLabel: "Create" });
+
+  assert.match(html, /<select name="flow_id" data-flow-select>/);
+  assert.match(html, /<option value="fl-basic" >basic<\/option>/);
+  assert.match(html, /<option value="fl-plan" selected>planned \(default\)<\/option>/);
+});
+
+test("issue form flow select preselects the issue's saved flow when editing", async () => {
+  const context = await scriptContext();
+  const app = new context.FlowApp();
+  app.flowsByProject = new Map([["p-alpha", {
+    flows: [
+      { id: "fl-basic", name: "basic" },
+      { id: "fl-plan", name: "planned" },
+    ],
+    defaultFlowID: "fl-plan",
+  }]]);
+
+  const html = app.renderIssueForm({ title: "T", flow_id: "fl-basic" }, { issueID: "i-1", projectID: "p-alpha" });
+
+  assert.match(html, /<option value="fl-basic" selected>basic<\/option>/);
+  assert.match(html, /<option value="fl-plan" >planned \(default\)<\/option>/);
+});
+
+test("board card renders the flow phase badge with awaiting-approval styling", async () => {
+  const context = await scriptContext();
+  const app = new context.FlowApp();
+  const issue = { id: "i-0001", title: "Working", schedule_state: "up_next", triage_state: "accepted" };
+
+  const running = app.renderIssueCard(issue, { flow: { phase_name: "plan", phase_index: 0, phase_count: 2, phase_state: "running" } }, "in_progress", false);
+  assert.match(running, /data-flow-phase/);
+  assert.match(running, /plan 1\/2/);
+  assert.doesNotMatch(running, /awaiting approval/);
+
+  const awaiting = app.renderIssueCard(issue, { flow: { phase_name: "plan", phase_index: 1, phase_count: 2, phase_state: "awaiting_approval" } }, "in_progress", false);
+  assert.match(awaiting, /data-awaiting-approval="true"/);
+  assert.match(awaiting, /plan 2\/2 · awaiting approval/);
+
+  const completed = app.renderIssueCard(issue, { flow: { phase_name: "verify", phase_index: 1, phase_count: 2, phase_state: "completed" } }, "in_progress", false);
+  assert.doesNotMatch(completed, /data-flow-phase/);
+});
+
+test("wait reason phase_approval maps to a human label", async () => {
+  const context = await scriptContext();
+  assert.equal(context.waitReasonLabel("phase_approval"), "waiting for phase approval");
+  assert.doesNotMatch(context.waitReasonLabel("phase_approval"), /plan/);
+});
+
+test("read-only detail renders the flow phase chain from the live flow status", async () => {
+  const context = await scriptContext();
+  const app = new context.FlowApp();
+  const flow = {
+    flow_name: "planned",
+    phases: [
+      { name: "spec", gate: "human", agent_name: "Spec Writer" },
+      { name: "implement", gate: "auto", agent_name: "Author" },
+    ],
+  };
+  const html = app.renderIssueReadOnlyDetail({ id: "i-1", title: "T" }, { issueID: "i-1", projectID: "p-alpha", flow });
+  assert.match(html, /Flow <strong>planned<\/strong>/);
+  assert.match(html, /spec\(gate\) · Spec Writer -> implement · Author/);
+});
+
+function fakeFieldForm(fields) {
+  return {
+    querySelector(selector) {
+      const match = selector.match(/^\[name="([^"]+)"\]$/);
+      if (match && match[1] in fields) return { value: fields[match[1]] };
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+  };
+}
+
+function fakeFlowRow(fields) {
+  return {
+    querySelector(selector) {
+      const match = selector.match(/^\[name="([^"]+)"\]$/);
+      if (!match) return null;
+      const name = match[1];
+      if (!(name in fields)) return null;
+      return name === "review_required" ? { checked: fields[name] } : { value: fields[name] };
+    },
+  };
+}
+
+function fakeFlowEditor(spec) {
+  const top = {
+    flow_name: spec.flow_name,
+    flow_description: spec.flow_description,
+    fix_agent_def_id: spec.fix_agent_def_id,
+  };
+  const phaseRows = (spec.phases || []).map(fakeFlowRow);
+  const reviewRows = (spec.reviews || []).map(fakeFlowRow);
+  return {
+    querySelector(selector) {
+      const match = selector.match(/^\[name="([^"]+)"\]$/);
+      if (match && match[1] in top) return { value: top[match[1]] };
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === "[data-phase-row]") return phaseRows;
+      if (selector === "[data-review-row]") return reviewRows;
+      return [];
+    },
+  };
+}
+
+test("agent def form payload stores plain harness target id and effort strings", async () => {
+  const context = await scriptContext();
+  const agentOptions = [{
+    name: "harness",
+    display_name: "Harness",
+    models: [{
+      provider_id: "anthropic",
+      provider_name: "Anthropic",
+      model_id: "claude-opus-4-8",
+      qualified_id: "anthropic:claude-opus-4-8",
+      target_id: "anthropic:claude-opus-4-8",
+      model_name: "Claude Opus 4.8",
+      reasoning: { supported: true, options: [{ type: "effort", values: ["low", "high"] }] },
+    }],
+  }];
+  const form = fakeFieldForm({
+    def_name: "Reviewer",
+    def_harness: "harness",
+    def_model: "anthropic:claude-opus-4-8",
+    def_reasoning_effort: "high",
+    def_prompt: "review carefully",
+  });
+
+  const payload = context.agentDefPayloadFromFormView(form, agentOptions);
+
+  assert.deepEqual(payload, {
+    name: "Reviewer",
+    harness: "harness",
+    model: "anthropic:claude-opus-4-8",
+    reasoning_effort: "high",
+    prompt: "review carefully",
+  });
+});
+
+test("agent def form payload uses the bare model id for codex/claude harnesses", async () => {
+  const context = await scriptContext();
+  const agentOptions = [{
+    name: "claude",
+    display_name: "Claude",
+    models: [{ provider_id: "anthropic", model_id: "sonnet", qualified_id: "anthropic:sonnet", reasoning: false }],
+  }];
+  const form = fakeFieldForm({
+    def_name: "Author",
+    def_harness: "claude",
+    def_model: "anthropic:sonnet",
+    def_reasoning_effort: "",
+    def_prompt: "",
+  });
+
+  const payload = context.agentDefPayloadFromFormView(form, agentOptions);
+
+  assert.equal(payload.model, "sonnet");
+  assert.equal(payload.reasoning_effort, "");
+});
+
+test("flow editor payload keeps phase and review rows in document order", async () => {
+  const context = await scriptContext();
+  const form = fakeFlowEditor({
+    flow_name: "Custom",
+    flow_description: "two phases",
+    fix_agent_def_id: "ad-fix",
+    phases: [
+      { phase_name: "spec", phase_agent_def_id: "ad-spec", phase_gate: "human" },
+      { phase_name: "implement", phase_agent_def_id: "ad-impl", phase_gate: "auto" },
+    ],
+    reviews: [
+      { review_role: "reviewer", review_agent_def_id: "ad-rev", review_required: true },
+      { review_role: "verifier", review_agent_def_id: "ad-ver", review_required: false },
+    ],
+  });
+
+  const payload = context.flowPayloadFromEditorView(form);
+
+  assert.deepEqual(payload, {
+    name: "Custom",
+    description: "two phases",
+    fix_agent_def_id: "ad-fix",
+    phases: [
+      { name: "spec", agent_def_id: "ad-spec", gate: "human" },
+      { name: "implement", agent_def_id: "ad-impl", gate: "auto" },
+    ],
+    review_agents: [
+      { role: "reviewer", agent_def_id: "ad-rev", required: true },
+      { role: "verifier", agent_def_id: "ad-ver", required: false },
+    ],
+  });
+});
+
+test("flow editor payload drops blank phase rows and review rows missing an agent", async () => {
+  const context = await scriptContext();
+  const form = fakeFlowEditor({
+    flow_name: "Sparse",
+    flow_description: "",
+    fix_agent_def_id: "",
+    phases: [
+      { phase_name: "spec", phase_agent_def_id: "ad-spec", phase_gate: "auto" },
+      { phase_name: "", phase_agent_def_id: "", phase_gate: "auto" },
+    ],
+    reviews: [
+      { review_role: "reviewer", review_agent_def_id: "", review_required: false },
+      { review_role: "verifier", review_agent_def_id: "ad-ver", review_required: true },
+    ],
+  });
+
+  const payload = context.flowPayloadFromEditorView(form);
+
+  assert.deepEqual(payload.phases, [{ name: "spec", agent_def_id: "ad-spec", gate: "auto" }]);
+  assert.deepEqual(payload.review_agents, [{ role: "verifier", agent_def_id: "ad-ver", required: true }]);
+});
+
+test("flows view renders agent definitions and flow tables for the active project", async () => {
+  const harness = await browserSmokeHarness("/ui/flows", {
+    "/ui/api/v1/projects": { projects: [{ id: "p-alpha", name: "alpha" }] },
+    "/ui/api/v1/harnesses": { agents: [{ name: "harness", display_name: "Harness" }], consoles: [] },
+    "/ui/api/v1/projects/p-alpha/agent-defs": {
+      agent_defs: [{ id: "ad-1", name: "author", harness: "harness", model: "anthropic:opus", reasoning_effort: "high", builtin: true }],
+    },
+    "/ui/api/v1/projects/p-alpha/flows": {
+      flows: [{
+        id: "fl-1",
+        name: "default flow",
+        default: true,
+        phases: [{ name: "plan", gate: "human" }, { name: "implement", gate: "auto" }],
+        review_agents: [{ role: "reviewer", agent_def_id: "ad-1" }],
+      }],
+      default_flow_id: "fl-1",
+    },
+  });
+
+  await harness.app.load();
+
+  const html = harness.content.innerHTML;
+  assert.equal(harness.title.textContent, "Flows");
+  assert.match(html, /Agent Definitions/);
+  assert.match(html, /author/);
+  assert.match(html, /builtin/);
+  assert.match(html, /data-agent-def-form/);
+  assert.match(html, /default flow/);
+  assert.match(html, /plan\(gate\) -> implement/);
+  assert.match(html, /data-flow-editor/);
+  // Keeps the project's flow cache warm for the issue form.
+  assert.deepEqual(harness.app.flowsByProject.get("p-alpha").defaultFlowID, "fl-1");
+});
+
+test("flows view offers a project chooser when several projects are active", async () => {
+  const harness = await browserSmokeHarness("/ui/flows", {
+    "/ui/api/v1/projects": { projects: [{ id: "p-alpha", name: "alpha" }, { id: "p-beta", name: "beta" }] },
+    "/ui/api/v1/harnesses": { agents: [], consoles: [] },
+  });
+  harness.app.renderProjectPicker = () => {};
+
+  await harness.app.load();
+
+  assert.match(harness.content.innerHTML, /Select Project/);
+  assert.match(harness.content.innerHTML, /\/ui\/flows\?project=p-alpha/);
+  assert.match(harness.content.innerHTML, /\/ui\/flows\?project=p-beta/);
 });

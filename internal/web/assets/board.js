@@ -78,8 +78,8 @@ export function phaseKey(state) {
 
 export function waitReasonLabel(reason) {
   switch (String(reason || "")) {
-    case "plan_approval":
-      return "waiting for plan approval";
+    case "phase_approval":
+      return "waiting for phase approval";
     case "manual_merge":
       return "waiting for merge";
     case "question":
@@ -103,6 +103,29 @@ export function renderPhaseBadge(state) {
     return `<span class="badge idle">${escapeHTML(label)}</span>`;
   }
   return `<span class="badge" data-phase="${escapeAttr(slug)}"><span class="dot"></span>${escapeHTML(label)}</span>`;
+}
+
+// flowPhaseLabel formats an issue's flow cursor as "<phase> <n>/<count>"
+// (1-based), e.g. "plan 1/2". Empty when the flow carries no phase name.
+export function flowPhaseLabel(flow) {
+  const phaseName = value(flow, "phase_name", "PhaseName");
+  if (!phaseName) return "";
+  const phaseCount = Number(value(flow, "phase_count", "PhaseCount") || 0);
+  if (!phaseCount) return String(phaseName);
+  const phaseIndex = Number(value(flow, "phase_index", "PhaseIndex") || 0);
+  return `${phaseName} ${phaseIndex + 1}/${phaseCount}`;
+}
+
+// renderFlowPhaseBadge renders the current flow phase as a card badge. It gains
+// an "awaiting approval" annotation and warn styling while paused at a human
+// gate. Returns "" when there is no phase to show.
+export function renderFlowPhaseBadge(flow) {
+  const label = flowPhaseLabel(flow);
+  if (!label) return "";
+  const awaiting = value(flow, "phase_state", "PhaseState") === "awaiting_approval";
+  const cls = awaiting ? "badge warn" : "badge action";
+  const text = awaiting ? `${label} · awaiting approval` : label;
+  return `<span class="${cls}" data-flow-phase${awaiting ? ' data-awaiting-approval="true"' : ""}>${escapeHTML(text)}</span>`;
 }
 
 export function renderReviewBadge(reviewState) {
