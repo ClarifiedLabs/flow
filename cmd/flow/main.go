@@ -1674,16 +1674,22 @@ func enrichPromptIssueContext(input *flowprompt.Input, apiFlags *apiFlagValues) 
 	input.IssueBody = issue.Body
 	input.IssueAcceptanceCriteria = issue.AcceptanceCriteria
 	input.HumanAttentionContext = humanAttentionPromptContext(statusLog)
-	// Resolve the flow-phase prompt context: the current phase's role
+	// Resolve the flow prompt context: for authors, the current phase's role
 	// instructions (from the frozen agent-def snapshot), human gate feedback,
-	// and the completed prior phases' handoffs. Best-effort: a fetch failure
-	// falls back to the embedded role skill without stripping the prompt.
+	// and the completed prior phases' handoffs; for reviewer/verifier check
+	// jobs, the review agent def running under this check name. Best-effort: a
+	// fetch failure falls back to the embedded role skill without stripping
+	// the prompt.
+	checkName := ""
+	if role := promptInputRole(*input); role == flowprompt.RoleReviewer || role == flowprompt.RoleVerifier {
+		checkName = strings.TrimSpace(input.CheckName)
+	}
 	var priorPhaseHandoffs string
-	if promptContext, err := client.GetPromptContext(issueID); err != nil {
+	if promptContext, err := client.GetPromptContext(issueID, checkName); err != nil {
 		slog.Debug("skip flow phase prompt context", "issue_id", issueID, "error", err)
 	} else {
+		input.RoleInstructionsOverride = promptContext.RoleInstructions
 		if promptInputRole(*input) == flowprompt.RoleAuthor {
-			input.RoleInstructionsOverride = promptContext.RoleInstructions
 			input.PhaseName = promptContext.PhaseName
 			input.GateFeedback = promptContext.GateFeedback
 		}

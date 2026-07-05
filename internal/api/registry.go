@@ -179,6 +179,7 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 	// assessment review (Mode-B recovery) instead of a blind full relaunch.
 	checkConfigs := coordinator.NewCheckConfigServiceWithOptions(db, checks, queue, threads, project, coordinator.CheckConfigServiceOptions{
 		HarnessArgs: r.harnessArgs,
+		FlowCursors: cursors,
 	})
 	reconciler := coordinator.NewReconcileService(db)
 	sessions := coordinator.NewSessionServiceWithOptions(db, issues, queue, coordinator.SessionServiceOptions{

@@ -303,6 +303,35 @@ func (s *projectServer) handlePromptContext(w http.ResponseWriter, r *http.Reque
 	response.PhaseIndex = cursor.PhaseIndex
 	response.FinalPhase = cursor.OnFinalPhase() || completed
 	response.GateFeedback = cursor.GateFeedback
+	if checkName := strings.TrimSpace(r.URL.Query().Get("check")); checkName != "" {
+		// A review check job's prompt: the flow review agent running under this
+		// check name (checks are named after their agent defs). Unmatched names
+		// (repo-defined checks, deduped collisions) fall back to the embedded
+		// role skill client-side.
+		response = promptContextResponse{FinalPhase: true}
+		for _, reviewAgent := range cursor.Snapshot.ReviewAgents {
+			if strings.TrimSpace(reviewAgent.Agent.Name) == checkName {
+				response.RoleInstructions = reviewAgent.Agent.Prompt
+				break
+			}
+		}
+		handoffs, err := s.cursors.PhaseHandoffs(r.Context(), issueID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "prompt_context_failed", err.Error())
+			return
+		}
+		for _, handoff := range handoffs {
+			if strings.TrimSpace(handoff.Content) == "" {
+				continue
+			}
+			response.PriorHandoffs = append(response.PriorHandoffs, promptPhaseHandoff{
+				PhaseName: handoff.PhaseName,
+				Content:   handoff.Content,
+			})
+		}
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
 	if completed {
 		// The pipeline already readied its change: this is a review fix round,
 		// driven by the flow's fix agent.

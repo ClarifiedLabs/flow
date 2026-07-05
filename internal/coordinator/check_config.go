@@ -110,10 +110,16 @@ type CheckConfigService struct {
 	threads     *ThreadService
 	project     Project
 	harnessArgs flowharness.Args
+	flowCursors *FlowCursorService
 }
 
 type CheckConfigServiceOptions struct {
 	HarnessArgs flowharness.Args
+	// FlowCursors resolves the issue's frozen flow snapshot so review rounds
+	// run the flow's agent reviewer/verifier set. Optional: when nil (or when
+	// an issue has no cursor), the legacy issue-harness defaults are
+	// synthesized instead.
+	FlowCursors *FlowCursorService
 }
 
 func NewCheckConfigServiceWithOptions(database *sql.DB, checks *CheckService, workers *flowworker.Service, threads *ThreadService, project Project, opts CheckConfigServiceOptions) *CheckConfigService {
@@ -135,7 +141,85 @@ func NewCheckConfigServiceWithOptions(database *sql.DB, checks *CheckService, wo
 		threads:     threads,
 		project:     project,
 		harnessArgs: harnessArgs,
+		flowCursors: opts.FlowCursors,
 	}
+}
+
+// reviewChecksForIssue merges the agent review set into the repo-configured
+// suite: the issue's frozen flow snapshot when a cursor exists (the composable
+// review set), else the legacy defaults synthesized from the issue harness.
+func (s *CheckConfigService) reviewChecksForIssue(ctx context.Context, suite CheckSuite, issue Issue) (CheckSuite, error) {
+	args := s.harnessArgs.Add(issue.HarnessArgs)
+	if s.flowCursors != nil {
+		cursor, ok, err := s.flowCursors.GetCursor(ctx, issue.ID)
+		if err != nil {
+			return CheckSuite{}, err
+		}
+		if ok {
+			return withFlowSnapshotReviewChecks(suite, cursor.Snapshot, args)
+		}
+	}
+	return withDefaultAgentChecks(suite, issue.AgentHarness, args)
+}
+
+// withFlowSnapshotReviewChecks appends the flow's frozen review set — one
+// agent check per reviewer (critique) / verifier (acceptance) — to the
+// repo-configured suite. Unlike the legacy synthesized defaults, a flow whose
+// review set is empty deliberately runs the repo checks alone.
+func withFlowSnapshotReviewChecks(suite CheckSuite, snapshot FlowSnapshot, args flowharness.Args) (CheckSuite, error) {
+	usedNames := map[string]bool{}
+	for _, definition := range suite.Definitions {
+		usedNames[definition.Name] = true
+	}
+	for _, reviewAgent := range snapshot.ReviewAgents {
+		kind := CheckKindReviewer
+		phase := CheckPhaseCritique
+		if reviewAgent.Role == FlowReviewRoleVerifier {
+			kind = CheckKindVerifier
+			phase = CheckPhaseAcceptance
+		}
+		name := unusedDefaultCheckName(reviewAgentCheckName(reviewAgent), usedNames)
+		harness := flowharness.NormalizeName(reviewAgent.Agent.Harness)
+		if err := flowharness.ValidateAgentName(harness); err != nil {
+			return CheckSuite{}, fmt.Errorf("review agent %q: %w", name, err)
+		}
+		modelArgs, err := reviewAgent.Agent.ModelSelectionArgs()
+		if err != nil {
+			return CheckSuite{}, fmt.Errorf("review agent %q: %w", name, err)
+		}
+		command, err := flowharness.DefaultAgentCheckCommandWithArgs(harness, append(args.For(harness), modelArgs...))
+		if err != nil {
+			return CheckSuite{}, fmt.Errorf("review agent %q: %w", name, err)
+		}
+		required := reviewAgent.Required
+		suite.Definitions = append(suite.Definitions, CheckDefinition{
+			Name:     name,
+			Kind:     kind,
+			Phase:    phase,
+			Required: &required,
+			Entrypoint: &CheckEntrypoint{
+				Argv:  []string{command},
+				Shell: true,
+			},
+			Requires: []string{flowharness.AgentHarnessLabel(harness)},
+		})
+		usedNames[name] = true
+	}
+
+	return suite, nil
+}
+
+// reviewAgentCheckName is the check name a flow review agent runs under: the
+// agent definition's name, so gate/prompt lookups and the checks UI read
+// naturally ("opus-reviewer"). Falls back to the role name.
+func reviewAgentCheckName(reviewAgent FlowReviewAgentSnapshot) string {
+	if name := strings.TrimSpace(reviewAgent.Agent.Name); name != "" {
+		return name
+	}
+	if reviewAgent.Role == FlowReviewRoleVerifier {
+		return defaultVerifierCheckName
+	}
+	return defaultReviewerCheckName
 }
 
 func (s *CheckConfigService) LoadSuiteForChange(ctx context.Context, change Change) (CheckSuite, error) {
@@ -183,7 +267,7 @@ func (s *CheckConfigService) ScheduleReviewRound(ctx context.Context, input Sche
 		return ScheduleReviewRoundResult{}, err
 	}
 	if strings.TrimSpace(input.Change.HeadSHA) != "" {
-		suite, err = withDefaultAgentChecks(suite, input.Issue.AgentHarness, s.harnessArgs.Add(input.Issue.HarnessArgs))
+		suite, err = s.reviewChecksForIssue(ctx, suite, input.Issue)
 		if err != nil {
 			return ScheduleReviewRoundResult{}, err
 		}
@@ -263,7 +347,7 @@ func (s *CheckConfigService) EnqueueAcceptanceIfReady(ctx context.Context, issue
 		return nil, err
 	}
 	if strings.TrimSpace(change.HeadSHA) != "" {
-		suite, err = withDefaultAgentChecks(suite, issue.AgentHarness, s.harnessArgs.Add(issue.HarnessArgs))
+		suite, err = s.reviewChecksForIssue(ctx, suite, issue)
 		if err != nil {
 			return nil, err
 		}
@@ -381,7 +465,7 @@ func (s *CheckConfigService) recoverPendingCheckJobsForChange(ctx context.Contex
 		return 0, nil, err
 	}
 	if strings.TrimSpace(change.HeadSHA) != "" {
-		suite, err = withDefaultAgentChecks(suite, issue.AgentHarness, s.harnessArgs.Add(issue.HarnessArgs))
+		suite, err = s.reviewChecksForIssue(ctx, suite, issue)
 		if err != nil {
 			return 0, nil, err
 		}

@@ -140,9 +140,16 @@ type PromptPhaseHandoff struct {
 	Content   string `json:"content"`
 }
 
-func (c *Client) GetPromptContext(issueID string) (PromptContext, error) {
+// GetPromptContext resolves the prompt material for the issue's current work
+// phase; a non-empty checkName resolves the named review check's agent prompt
+// instead.
+func (c *Client) GetPromptContext(issueID string, checkName string) (PromptContext, error) {
+	var query url.Values
+	if strings.TrimSpace(checkName) != "" {
+		query = url.Values{"check": []string{strings.TrimSpace(checkName)}}
+	}
 	var response PromptContext
-	if err := c.do(http.MethodGet, c.issuesPath("/"+url.PathEscape(issueID))+"/prompt-context", nil, nil, &response); err != nil {
+	if err := c.do(http.MethodGet, c.issuesPath("/"+url.PathEscape(issueID))+"/prompt-context", nil, query, &response); err != nil {
 		return PromptContext{}, err
 	}
 	return response, nil

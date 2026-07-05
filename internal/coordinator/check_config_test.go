@@ -1321,3 +1321,121 @@ func argvContains(value any, snippet string) bool {
 	}
 	return false
 }
+
+// TestScheduleReviewRoundUsesFlowReviewSet is the regression for the
+// composable review set: an issue whose flow snapshot declares agent
+// reviewers/verifiers runs THOSE checks — named after their agent defs, with
+// the agent's model/effort serialized into the check command — instead of the
+// legacy defaults synthesized from the issue harness.
+func TestScheduleReviewRoundUsesFlowReviewSet(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, err := flowdb.Open(ctx, filepath.Join(t.TempDir(), "flow.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	issues := NewIssueService(store.DB())
+	checks := NewCheckService(store.DB())
+	workers := flowworker.NewService(store.DB())
+	flows := NewFlowService(store.DB())
+	defs := NewAgentDefService(store.DB())
+	cursors := NewFlowCursorService(store.DB(), flows)
+	sessions := NewSessionServiceWithOptions(store.DB(), issues, workers, SessionServiceOptions{FlowCursors: cursors})
+	checkConfig := NewCheckConfigServiceWithOptions(store.DB(), checks, workers, nil, Project{}, CheckConfigServiceOptions{FlowCursors: cursors})
+
+	builder, err := defs.Create(ctx, AgentDefInput{Name: "builder", Harness: "codex", Prompt: "Implement."})
+	if err != nil {
+		t.Fatalf("create builder def: %v", err)
+	}
+	reviewerDef, err := defs.Create(ctx, AgentDefInput{Name: "opus-reviewer", Harness: "claude", Model: "claude-opus-4-8", ReasoningEffort: "max", Prompt: "Review hard."})
+	if err != nil {
+		t.Fatalf("create reviewer def: %v", err)
+	}
+	verifierDef, err := defs.Create(ctx, AgentDefInput{Name: "careful-verifier", Harness: "codex", Model: "gpt-5.5", ReasoningEffort: "high", Prompt: "Verify."})
+	if err != nil {
+		t.Fatalf("create verifier def: %v", err)
+	}
+	flow, err := flows.Create(ctx, FlowInput{
+		Name:   "custom-review",
+		Phases: []FlowPhaseInput{{Name: "implement", AgentDefID: builder.ID, Gate: FlowGateAuto}},
+		ReviewAgents: []FlowReviewAgentInput{
+			{Role: FlowReviewRoleReviewer, AgentDefID: reviewerDef.ID},
+			{Role: FlowReviewRoleVerifier, AgentDefID: verifierDef.ID},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create flow: %v", err)
+	}
+
+	requiresHuman := false
+	issue, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Flow review set issue", FlowID: flow.ID, RequiresHumanReview: &requiresHuman})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if _, err := issues.ScheduleIssue(ctx, issue.ID, ScheduleUpNext); err != nil {
+		t.Fatalf("schedule issue: %v", err)
+	}
+	// EnsureAuthorJob freezes the flow cursor (snapshot-at-schedule).
+	ensured, err := sessions.EnsureAuthorJob(ctx, EnsureAuthorJobInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatalf("ensure author job: %v", err)
+	}
+	change, err := sessions.UpdateChangeHead(ctx, ensured.Change.ID, "deadbeefcafefeed0000000000000000deadbeef")
+	if err != nil {
+		t.Fatalf("update change head: %v", err)
+	}
+
+	if _, err := checkConfig.ScheduleReviewRound(ctx, ScheduleReviewRoundInput{Issue: issue, Change: change}); err != nil {
+		t.Fatalf("schedule review round: %v", err)
+	}
+
+	// The legacy synthesized defaults must not exist alongside the flow set.
+	if _, err := checks.GetCheck(ctx, issue.ID, defaultReviewerCheckName); err == nil {
+		t.Fatalf("legacy default reviewer check exists alongside the flow review set")
+	}
+	reviewerCheck, err := checks.GetCheck(ctx, issue.ID, "opus-reviewer")
+	if err != nil {
+		t.Fatalf("get flow reviewer check: %v", err)
+	}
+	if reviewerCheck.Kind != CheckKindReviewer || reviewerCheck.Verdict != CheckPending || !reviewerCheck.Required {
+		t.Fatalf("flow reviewer check = %+v, want required pending reviewer", reviewerCheck)
+	}
+	verifierCheck, err := checks.GetCheck(ctx, issue.ID, "careful-verifier")
+	if err != nil {
+		t.Fatalf("get flow verifier check: %v", err)
+	}
+	if verifierCheck.Kind != CheckKindVerifier {
+		t.Fatalf("flow verifier check = %+v, want verifier kind", verifierCheck)
+	}
+
+	// The reviewer's critique job carries the agent's model/effort selection.
+	assertLiveCheckJobs(t, workers, issue.ID, map[flowworker.JobRole]int{
+		flowworker.RoleAuthor:   1,
+		flowworker.RoleReviewer: 1,
+	})
+	assertLiveCheckJobEntrypointContains(t, workers, issue.ID, flowworker.RoleReviewer, "opus-reviewer", "'--model' 'claude-opus-4-8'")
+	assertLiveCheckJobEntrypointContains(t, workers, issue.ID, flowworker.RoleReviewer, "opus-reviewer", "'--effort' 'max'")
+
+	// Once the reviewer satisfies critique, the flow verifier runs acceptance
+	// with its own model selection.
+	required := true
+	if _, err := checks.ReportCheck(ctx, ReportCheckInput{
+		IssueID:  issue.ID,
+		Name:     "opus-reviewer",
+		Kind:     CheckKindReviewer,
+		Required: &required,
+		Verdict:  CheckSatisfied,
+	}); err != nil {
+		t.Fatalf("satisfy flow reviewer: %v", err)
+	}
+	enqueued, err := checkConfig.EnqueueAcceptanceIfReady(ctx, issue.ID, change)
+	if err != nil {
+		t.Fatalf("enqueue acceptance: %v", err)
+	}
+	if len(enqueued) != 1 || enqueued[0] != "careful-verifier" {
+		t.Fatalf("acceptance enqueued = %v, want careful-verifier", enqueued)
+	}
+	assertLiveCheckJobEntrypointContains(t, workers, issue.ID, flowworker.RoleVerifier, "careful-verifier", "model_reasoning_effort=high'")
+}
