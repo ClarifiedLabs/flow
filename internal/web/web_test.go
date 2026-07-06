@@ -82,6 +82,10 @@ func TestCSSModuleBuildScopesSelectors(t *testing.T) {
 		"flow-app .issue-detail-column .issue-form {",
 		"flow-app .issue-form .wide,",
 		"flow-app .form-actions {",
+		"flow-app .flows-detail {",
+		"flow-app .agent-def-form {",
+		"flow-app .flow-row {",
+		"flow-app .flow-row[data-review-row] {",
 		"flow-app .console-actions {",
 	} {
 		if !strings.Contains(css, want) {

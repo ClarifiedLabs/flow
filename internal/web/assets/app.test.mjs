@@ -4696,6 +4696,30 @@ test("read-only detail renders the flow phase chain from the live flow status", 
   assert.match(html, /spec\(gate\) · Spec Writer -> implement · Author/);
 });
 
+test("flows editor markup opts into shared form styling and accessible row controls", async () => {
+  const context = await scriptContext();
+  const agentDefs = [{ id: "ad-1", name: "author" }];
+  const agentOptions = [{ name: "codex", display_name: "Codex", models: [] }];
+
+  const agentHTML = context.renderAgentDefFormView(null, agentOptions);
+  assert.match(agentHTML, /<form class="agent-def-form issue-form"/);
+  assert.match(agentHTML, /class="agent-def-model-fields" data-def-model-fields/);
+
+  const flowHTML = context.renderFlowEditorView({ name: "custom" }, agentDefs);
+  assert.match(flowHTML, /<form class="flow-editor issue-form"/);
+  assert.match(flowHTML, /class="flow-row-list wide" data-phase-rows/);
+  assert.match(flowHTML, /class="flow-row-actions wide"><button[^>]+data-add-phase/);
+  assert.match(flowHTML, /aria-label="Phase name"/);
+  assert.match(flowHTML, /class="flow-row-controls"/);
+  assert.match(flowHTML, /aria-label="Move phase up"/);
+  assert.match(flowHTML, /aria-label="Remove phase"/);
+
+  const reviewHTML = context.renderReviewRowView(agentDefs, { agent_def_id: "ad-1", required: true });
+  assert.match(reviewHTML, /aria-label="Review role"/);
+  assert.match(reviewHTML, /aria-label="Review agent"/);
+  assert.match(reviewHTML, /aria-label="Remove review agent"/);
+});
+
 function fakeFieldForm(fields) {
   return {
     querySelector(selector) {

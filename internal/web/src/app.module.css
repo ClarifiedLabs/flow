@@ -1755,6 +1755,100 @@ tr.row-idle {
   accent-color: var(--accent);
 }
 
+.flows-detail {
+  width: 100%;
+  max-width: none;
+}
+
+.flows-section {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.flows-section + .flows-section {
+  margin-top: 18px;
+}
+
+.flows-section .table-wrap {
+  min-width: 0;
+}
+
+.flows-section .table-actions {
+  gap: 6px;
+  margin-top: 0;
+}
+
+.flows-section td:last-child {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.agent-def-form {
+  grid-template-columns: minmax(150px, 1fr) minmax(132px, 170px) minmax(220px, 1.5fr) minmax(130px, 170px);
+  align-items: start;
+}
+
+.agent-def-form .agent-def-model-fields {
+  display: contents;
+}
+
+.flow-editor {
+  grid-template-columns: minmax(220px, 1fr) minmax(260px, 1.2fr);
+  align-items: start;
+}
+
+.flow-editor textarea[name="flow_description"] {
+  min-height: 64px;
+}
+
+.flow-rows-head {
+  color: var(--muted);
+  font-size: 0.65625rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  margin: 4px 0 -4px;
+  text-transform: uppercase;
+}
+
+.flow-row-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.flow-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(180px, 1.25fr) minmax(96px, 120px) auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.flow-row[data-review-row] {
+  grid-template-columns: minmax(128px, 160px) minmax(180px, 1fr) minmax(110px, auto) auto;
+}
+
+.flow-row .check {
+  align-self: center;
+  margin: 0;
+}
+
+.flow-row-controls {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.flow-row-controls .button {
+  flex: none;
+}
+
+.flow-row-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
 .form-actions {
   display: flex;
   justify-content: flex-end;
@@ -2218,6 +2312,8 @@ th {
   }
 
   .issue-form,
+  .agent-def-form,
+  .flow-editor,
   .attachment-upload,
   .attachment-main {
     grid-template-columns: 1fr;
@@ -2225,6 +2321,15 @@ th {
 
   .issue-form .harness-model-fields {
     grid-template-columns: 1fr;
+  }
+
+  .flow-row,
+  .flow-row[data-review-row] {
+    grid-template-columns: 1fr;
+  }
+
+  .flow-row-controls {
+    justify-content: flex-start;
   }
 
   .summary-grid,

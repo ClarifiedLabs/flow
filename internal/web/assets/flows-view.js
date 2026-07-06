@@ -115,8 +115,10 @@ export function renderAgentDefsSectionView(agentDefs, agentOptions, state) {
             <td>${escapeHTML(value(def, "model", "Model") || "default")}</td>
             <td>${escapeHTML(value(def, "reasoning_effort", "ReasoningEffort") || "—")}</td>
             <td>
-              <button class="button secondary" type="button" data-edit-def="${escapeAttr(id)}">Edit</button>
-              ${builtin ? "" : `<button class="button secondary" type="button" data-delete-def="${escapeAttr(id)}">Delete</button>`}
+              <div class="actions table-actions">
+                <button class="button secondary" type="button" data-edit-def="${escapeAttr(id)}">Edit</button>
+                ${builtin ? "" : `<button class="button secondary" type="button" data-delete-def="${escapeAttr(id)}">Delete</button>`}
+              </div>
             </td>
           </tr>`;
       }).join("")
@@ -144,7 +146,7 @@ export function renderAgentDefFormView(def, agentOptions) {
   const selectedQID = resolveAgentDefModelQID(models, harness, value(def, "model", "Model"));
   const selectedEffort = value(def, "reasoning_effort", "ReasoningEffort");
   return `
-    <form class="agent-def-form" data-agent-def-form data-def-id="${escapeAttr(defID)}">
+    <form class="agent-def-form issue-form" data-agent-def-form data-def-id="${escapeAttr(defID)}">
       <label><span>Name</span><input name="def_name" value="${escapeAttr(name)}" required></label>
       <label><span>Harness</span>
         <select name="def_harness" data-def-harness>${renderHarnessOptions(agentOptions, harness, true)}</select>
@@ -315,9 +317,11 @@ export function renderFlowsSectionView(flows, agentDefs, defaultFlowID, state) {
             <td>${renderFlowPhaseChainView(value(flow, "phases", "Phases") || [])}</td>
             <td>${reviewCount}</td>
             <td>
-              <button class="button secondary" type="button" data-edit-flow="${escapeAttr(id)}">Edit</button>
-              ${isDefault ? "" : `<button class="button secondary" type="button" data-default-flow="${escapeAttr(id)}">Set default</button>`}
-              ${isDefault ? "" : `<button class="button secondary" type="button" data-delete-flow="${escapeAttr(id)}">Delete</button>`}
+              <div class="actions table-actions">
+                <button class="button secondary" type="button" data-edit-flow="${escapeAttr(id)}">Edit</button>
+                ${isDefault ? "" : `<button class="button secondary" type="button" data-default-flow="${escapeAttr(id)}">Set default</button>`}
+                ${isDefault ? "" : `<button class="button secondary" type="button" data-delete-flow="${escapeAttr(id)}">Delete</button>`}
+              </div>
             </td>
           </tr>`;
       }).join("")
@@ -362,15 +366,17 @@ export function renderPhaseRowView(agentDefs, phase = {}) {
   const gate = value(phase, "gate", "Gate") === "human" ? "human" : "auto";
   return `
     <div class="flow-row" data-phase-row>
-      <input name="phase_name" placeholder="Phase name" value="${escapeAttr(name)}">
-      <select name="phase_agent_def_id">${agentDefOptionsHTML(agentDefs, agentDefID, { includeEmpty: true, emptyLabel: "Select agent" })}</select>
-      <select name="phase_gate">
+      <input name="phase_name" placeholder="Phase name" value="${escapeAttr(name)}" aria-label="Phase name">
+      <select name="phase_agent_def_id" aria-label="Phase agent">${agentDefOptionsHTML(agentDefs, agentDefID, { includeEmpty: true, emptyLabel: "Select agent" })}</select>
+      <select name="phase_gate" aria-label="Phase gate">
         <option value="auto" ${gate === "auto" ? "selected" : ""}>auto</option>
         <option value="human" ${gate === "human" ? "selected" : ""}>human</option>
       </select>
-      <button type="button" class="button secondary" data-phase-row-up>&uarr;</button>
-      <button type="button" class="button secondary" data-phase-row-down>&darr;</button>
-      <button type="button" class="button secondary" data-phase-row-remove>&times;</button>
+      <div class="flow-row-controls">
+        <button type="button" class="button secondary icon-button" data-phase-row-up title="Move phase up" aria-label="Move phase up">&uarr;</button>
+        <button type="button" class="button secondary icon-button" data-phase-row-down title="Move phase down" aria-label="Move phase down">&darr;</button>
+        <button type="button" class="button secondary icon-button" data-phase-row-remove title="Remove phase" aria-label="Remove phase">&times;</button>
+      </div>
     </div>
   `;
 }
@@ -381,13 +387,15 @@ export function renderReviewRowView(agentDefs, review = {}) {
   const required = Boolean(value(review, "required", "Required"));
   return `
     <div class="flow-row" data-review-row>
-      <select name="review_role">
+      <select name="review_role" aria-label="Review role">
         <option value="reviewer" ${role === "reviewer" ? "selected" : ""}>reviewer</option>
         <option value="verifier" ${role === "verifier" ? "selected" : ""}>verifier</option>
       </select>
-      <select name="review_agent_def_id">${agentDefOptionsHTML(agentDefs, agentDefID, { includeEmpty: true, emptyLabel: "Select agent" })}</select>
+      <select name="review_agent_def_id" aria-label="Review agent">${agentDefOptionsHTML(agentDefs, agentDefID, { includeEmpty: true, emptyLabel: "Select agent" })}</select>
       <label class="check"><input type="checkbox" name="review_required" ${required ? "checked" : ""}><span>required</span></label>
-      <button type="button" class="button secondary" data-review-row-remove>&times;</button>
+      <div class="flow-row-controls">
+        <button type="button" class="button secondary icon-button" data-review-row-remove title="Remove review agent" aria-label="Remove review agent">&times;</button>
+      </div>
     </div>
   `;
 }
@@ -402,15 +410,15 @@ export function renderFlowEditorView(flow, agentDefs) {
   const phaseRows = (phases.length ? phases : [{}]).map((phase) => renderPhaseRowView(agentDefs, phase)).join("");
   const reviewRows = reviewAgents.map((review) => renderReviewRowView(agentDefs, review)).join("");
   return `
-    <form class="flow-editor" data-flow-editor data-flow-id="${escapeAttr(flowID)}">
-      <label class="wide"><span>Name</span><input name="flow_name" value="${escapeAttr(name)}" required></label>
-      <label class="wide"><span>Description</span><textarea name="flow_description" rows="2">${escapeHTML(description)}</textarea></label>
-      <div class="flow-rows-head">Phases</div>
-      <div data-phase-rows>${phaseRows}</div>
-      <button type="button" class="button secondary" data-add-phase>Add phase</button>
-      <div class="flow-rows-head">Review Agents</div>
-      <div data-review-rows>${reviewRows}</div>
-      <button type="button" class="button secondary" data-add-review>Add review agent</button>
+    <form class="flow-editor issue-form" data-flow-editor data-flow-id="${escapeAttr(flowID)}">
+      <label><span>Name</span><input name="flow_name" value="${escapeAttr(name)}" required></label>
+      <label><span>Description</span><textarea name="flow_description" rows="2">${escapeHTML(description)}</textarea></label>
+      <div class="flow-rows-head wide">Phases</div>
+      <div class="flow-row-list wide" data-phase-rows>${phaseRows}</div>
+      <div class="flow-row-actions wide"><button type="button" class="button secondary" data-add-phase>Add phase</button></div>
+      <div class="flow-rows-head wide">Review Agents</div>
+      <div class="flow-row-list wide" data-review-rows>${reviewRows}</div>
+      <div class="flow-row-actions wide"><button type="button" class="button secondary" data-add-review>Add review agent</button></div>
       <label class="wide"><span>Fix Agent</span>
         <select name="fix_agent_def_id">${agentDefOptionsHTML(agentDefs, fixAgentDefID, { includeEmpty: true, emptyLabel: "(last phase's agent)" })}</select>
       </label>
