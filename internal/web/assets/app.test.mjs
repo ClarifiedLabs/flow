@@ -3840,6 +3840,7 @@ async function triageEditHarness(options = {}) {
 }
 
 async function browserSmokeHarness(path, responses) {
+  const [pathname, search = ""] = String(path).split("?", 2);
   const title = new SmokeElement();
   const status = new SmokeElement();
   const content = new SmokeElement();
@@ -3876,7 +3877,7 @@ async function browserSmokeHarness(path, responses) {
   }
 
   const context = await scriptContext({
-    location: { pathname: path },
+    location: { pathname, search: search ? `?${search}` : "" },
     setTimeout() {
       return 1;
     },
@@ -4921,6 +4922,52 @@ test("flows view offers a project chooser when several projects are active", asy
   await harness.app.load();
 
   assert.match(harness.content.innerHTML, /Select Project/);
+  assert.equal((harness.content.innerHTML.match(/class="project-choice"/g) || []).length, 2);
   assert.match(harness.content.innerHTML, /\/ui\/flows\?project=p-alpha/);
   assert.match(harness.content.innerHTML, /\/ui\/flows\?project=p-beta/);
+  assert.doesNotMatch(harness.content.innerHTML, /<span>p-alpha<\/span>/);
+  assert.doesNotMatch(harness.content.innerHTML, /<span>p-beta<\/span>/);
+});
+
+test("flows route refreshes a stale project registry before choosing a project", async () => {
+  const harness = await browserSmokeHarness("/ui/flows", {
+    "/ui/api/v1/projects": { projects: [{ id: "p-alpha", name: "alpha" }, { id: "p-beta", name: "beta" }] },
+    "/ui/api/v1/harnesses": { agents: [], consoles: [] },
+  });
+  harness.app.projects = [{ id: "p-alpha", name: "alpha" }];
+  harness.app.renderProjectPicker = () => {};
+
+  await harness.app.load();
+
+  assert.match(harness.content.innerHTML, /Select Project/);
+  assert.equal((harness.content.innerHTML.match(/class="project-choice"/g) || []).length, 2);
+  assert.deepEqual(harness.fetchCalls, [
+    "/ui/api/v1/projects",
+    "/ui/api/v1/harnesses",
+  ]);
+});
+
+test("flows view renders the active project name as a project switcher", async () => {
+  const harness = await browserSmokeHarness("/ui/flows?project=p-beta", {
+    "/ui/api/v1/projects": { projects: [{ id: "p-alpha", name: "alpha" }, { id: "p-beta", name: "beta" }] },
+    "/ui/api/v1/harnesses": { agents: [], consoles: [] },
+    "/ui/api/v1/projects/p-beta/agent-defs": { agent_defs: [] },
+    "/ui/api/v1/projects/p-beta/flows": { flows: [], default_flow_id: "" },
+  });
+  harness.app.renderProjectPicker = () => {};
+
+  await harness.app.load();
+
+  const html = harness.content.innerHTML;
+  assert.match(html, /class="project-switcher"/);
+  assert.match(html, /<summary aria-label="Switch project">beta<\/summary>/);
+  assert.match(html, /\/ui\/flows\?project=p-alpha/);
+  assert.match(html, /\/ui\/flows\?project=p-beta/);
+  assert.match(html, /aria-current="page"/);
+  assert.deepEqual(harness.fetchCalls, [
+    "/ui/api/v1/projects",
+    "/ui/api/v1/harnesses",
+    "/ui/api/v1/projects/p-beta/agent-defs",
+    "/ui/api/v1/projects/p-beta/flows",
+  ]);
 });

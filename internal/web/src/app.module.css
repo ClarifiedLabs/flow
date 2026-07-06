@@ -1760,6 +1760,93 @@ tr.row-idle {
   max-width: none;
 }
 
+.project-choice-list {
+  display: grid;
+  gap: 8px;
+  max-width: 560px;
+}
+
+.project-choice {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.project-choice:hover {
+  border-color: var(--accent);
+  background: var(--panel-2);
+}
+
+.project-switcher {
+  position: relative;
+  display: inline-block;
+  margin-bottom: 6px;
+}
+
+.project-switcher summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  list-style: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.2;
+}
+
+.project-switcher summary::-webkit-details-marker {
+  display: none;
+}
+
+.project-switcher summary::after {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+}
+
+.project-switcher-menu {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  z-index: 30;
+  min-width: 220px;
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+}
+
+.project-switcher-item {
+  display: block;
+  padding: 6px 8px;
+  border-radius: 4px;
+  color: var(--ink);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.project-switcher-item:hover,
+.project-switcher-item[aria-current="page"] {
+  background: var(--panel-2);
+}
+
 .flows-section {
   display: grid;
   gap: 10px;

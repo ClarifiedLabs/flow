@@ -393,6 +393,8 @@ func (lc *lifecycle) onboardProject(t *testing.T, name string) projectFixture {
 	})
 	assertContains(t, rerunOut, "flow project already registered")
 
+	lc.configureLifecycleFlow(t, repoPath)
+
 	return projectFixture{
 		repoPath:     repoPath,
 		projectID:    projectID,
@@ -400,6 +402,38 @@ func (lc *lifecycle) onboardProject(t *testing.T, name string) projectFixture {
 		exchangePath: exchangePath,
 		dbPath:       filepath.Join(lc.dataDir, "projects", projectID, "flow.db"),
 	}
+}
+
+func (lc *lifecycle) configureLifecycleFlow(t *testing.T, repoPath string) {
+	t.Helper()
+	authorID := parseAgentDefID(t, lc.flowCLIInRepo(t, repoPath, "agent-defs", "list"), "author")
+	flowPath := filepath.Join(t.TempDir(), "lifecycle-flow.yaml")
+	writeFile(t, flowPath, fmt.Sprintf(`name: lifecycle-checks
+description: Direct lifecycle test flow; repo checks provide review coverage.
+fix_agent_def_id: %s
+phases:
+  - name: implement
+    agent_def_id: %s
+    gate: auto
+review_agents: []
+`, authorID, authorID))
+
+	createOut := lc.flowCLIInRepo(t, repoPath, "flows", "create", "-f", flowPath)
+	flowID := firstField(t, createOut)
+	defaultOut := lc.flowCLIInRepo(t, repoPath, "flows", "set-default", flowID)
+	assertContains(t, defaultOut, flowID+"\tlifecycle-checks\tdefault")
+}
+
+func parseAgentDefID(t *testing.T, output string, name string) string {
+	t.Helper()
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[1] == name {
+			return fields[0]
+		}
+	}
+	t.Fatalf("agent definition %q missing from listing:\n%s", name, output)
+	return ""
 }
 
 func assertHTTPExchangeRemote(t *testing.T, remoteLine string, serverURL string, projectID string) {
@@ -649,7 +683,7 @@ func (lc *lifecycle) flowCLIInRepo(t *testing.T, repoPath string, args ...string
 	t.Helper()
 	argv := []string{lc.flow}
 	switch {
-	case len(args) >= 2 && (args[0] == "issue" || args[0] == "thread" || args[0] == "session"):
+	case len(args) >= 2 && (args[0] == "issue" || args[0] == "thread" || args[0] == "session" || args[0] == "agent-defs" || args[0] == "flows"):
 		argv = append(argv, args[0], args[1], "--server", lc.serverURL, "--token", ownerToken)
 		argv = append(argv, args[2:]...)
 	case len(args) >= 1:

@@ -42,7 +42,7 @@ export async function renderFlowsView(app, context) {
     <section class="detail flows-detail">
       <div class="detail-head">
         <div>
-          <p class="eyebrow">${escapeHTML(project.name || project.id)}</p>
+          ${renderFlowsProjectSwitchView(app, project)}
           <h2>Flows</h2>
         </div>
       </div>
@@ -78,7 +78,7 @@ export function resolveFlowsProjectView(app, selectedProject) {
 }
 
 export function renderFlowsProjectChooserView(app) {
-  const projects = app.projects || [];
+  const projects = flowsProjectOptionsView(app);
   if (!projects.length) {
     app.querySelector(".content").innerHTML = `<div class="empty">No projects</div>`;
     return;
@@ -91,13 +91,43 @@ export function renderFlowsProjectChooserView(app) {
           <p class="meta">Choose a project to manage its flows.</p>
         </div>
       </div>
-      <div class="list">${projects.map((project) => {
-        const id = value(project, "id", "ID");
-        const name = value(project, "name", "Name") || id;
-        return `<a class="row" href="/ui/flows?project=${encodeURIComponent(id)}" data-link><span>${escapeHTML(name)}</span><span>${escapeHTML(id)}</span></a>`;
-      }).join("")}</div>
+      <div class="project-choice-list">${projects.map((project) => `
+        <a class="project-choice" href="/ui/flows?project=${encodeURIComponent(project.id)}" data-link>
+          <span>${escapeHTML(project.name)}</span>
+        </a>
+      `).join("")}</div>
     </section>
   `;
+}
+
+export function renderFlowsProjectSwitchView(app, project) {
+  const currentName = project.name || project.id;
+  const projects = flowsProjectOptionsView(app);
+  if (projects.length <= 1) {
+    return `<p class="eyebrow">${escapeHTML(currentName)}</p>`;
+  }
+  return `
+    <details class="project-switcher">
+      <summary aria-label="Switch project">${escapeHTML(currentName)}</summary>
+      <div class="project-switcher-menu">
+        ${projects.map((option) => `
+          <a class="project-switcher-item" href="/ui/flows?project=${encodeURIComponent(option.id)}" data-link${option.id === project.id ? ` aria-current="page"` : ""}>
+            ${escapeHTML(option.name)}
+          </a>
+        `).join("")}
+      </div>
+    </details>
+  `;
+}
+
+function flowsProjectOptionsView(app) {
+  return (app.projects || []).map((project) => {
+    const id = value(project, "id", "ID");
+    return {
+      id,
+      name: value(project, "name", "Name") || id,
+    };
+  }).filter((project) => project.id);
 }
 
 // --- Agent definitions ---------------------------------------------------------

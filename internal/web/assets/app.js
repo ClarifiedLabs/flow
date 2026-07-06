@@ -390,7 +390,7 @@ export class FlowApp extends HTMLElement {
     };
     this.loadGeneration = context.generation;
     try {
-      await this.ensureProjects({ refresh: path === "/ui/issues/new" });
+      await this.ensureProjects({ refresh: path === "/ui/issues/new" || path === "/ui/flows" });
       for (const route of ROUTES) {
         const params = route.match(path);
         if (!params) continue;
