@@ -4,6 +4,11 @@ Flow is a local-first, single-person agentic development workflow system. It is
 not a GitHub clone with agents added on. It is a control plane for coordinating
 many agent environments while the human acts as architect, reviewer, and TPM.
 
+This is the long-form design history and rationale. For the current implemented
+architecture, start with [architecture.md](architecture.md); when this historical
+design narrative and current docs disagree, the current architecture/setup/usage
+docs are authoritative.
+
 This document turns the design draft into an implementation-ready design. It
 also records the details that needed to be decided before development could
 begin.
@@ -104,8 +109,9 @@ Flow has four planes:
   scheduler, derived board views, terminal reverse proxy, and merge actions.
 - Worker pool: environments that advertise capabilities, claim jobs, run
   entrypoints in tmux, heartbeat leases, and report events.
-- Git: a coordinator worktree plus a private Flow exchange remote containing
-  code, branch handoff documents, check configuration, and `Resolves:` trailers.
+- Git: a private Flow exchange remote containing base and issue branches,
+  repo-versioned check configuration, and `Resolves:` trailers. Handoffs are
+  coordinator-owned SQLite snapshots, not branch documents.
 - Human UI/CLI: board, diff/review, issue editing, scheduling, merge, and
   terminal attach.
 
@@ -146,11 +152,11 @@ The initial repository should be a Go monorepo:
 - `internal/git`: exchange remote, server hooks, branch, trailer, diff, and
   squash-merge helpers.
 - `internal/terminal`: ttyd/reverse-proxy integration.
-- `web`: dependency-light browser UI, built and served by the coordinator.
-  It uses browser-native custom elements, a small TypeScript codebase for API
-  types and component logic, and CSS Modules for scoped styling. The MVP should
-  not use React, Vue, Svelte, a runtime component framework, a client state
-  manager, or a general UI kit.
+- `internal/web`: dependency-light browser UI, embedded and served by the
+  coordinator. It uses browser-native custom elements, browser-native JavaScript
+  ES modules, and a small Go CSS scoping helper. It does not use React, Vue,
+  Svelte, a runtime component framework, a client state manager, or a general UI
+  kit.
 
 SQLite is the database. The coordinator is the single writer. The API is
 HTTP/JSON, versioned with a `Flow-Protocol-Version` header. The UI may poll in
@@ -1492,17 +1498,16 @@ the source of truth.
 - Use CSS Modules for scoped component styles. There should be no Tailwind,
   Bootstrap, design-system package, CSS-in-JS runtime, or icon framework in the
   MVP.
-- Use TypeScript narrowly for typed API payloads, component classes, and build
-  safety. Avoid code generators unless the API surface grows enough to justify
-  them.
+- Use browser-native JavaScript modules for component logic. Avoid code
+  generators unless the API surface grows enough to justify them.
 - Keep client state as a short-lived cache of coordinator read models. The UI
   never stores board lanes, review state, check verdicts, or terminal state as
   authoritative data.
 - Prefer server-composed read models over client N+1 request chains for board,
   inbox, and change-detail screens.
-- Keep the build as static assets embedded into `flow-server`. The acceptable
-  build dependency budget is TypeScript plus the smallest practical asset/CSS
-  bundling tool needed for CSS Modules and cache-busted output.
+- Keep the build as static assets embedded into `flow-server`. The current
+  implementation serves native ES modules and runs a small Go CSS scoping helper
+  instead of a frontend bundler.
 - Treat heavier browser packages as explicit exceptions. A dependency such as a
   terminal or diff library must replace a clearly risky local implementation;
   otherwise Flow should render its own focused UI.
@@ -1700,7 +1705,8 @@ Database loss or corruption:
 
 - This is a disaster-recovery case, not an expected mode. SQLite is treated as
   durable local application state for the MVP.
-- Code, branches, and handoff docs survive in git.
+- Code and branches survive in git; handoff snapshots live in SQLite and are not
+  recoverable from git.
 - `flow reconcile` can rebuild a partial operational database from git-backed
   metadata.
 - Issues, tags, issue relationships, review discussions, check history, leases,
@@ -1736,8 +1742,8 @@ Core automated test layers:
 - SQLite integration tests for schema constraints, views, queue claims, leases,
   and reconciliation.
 - Git integration tests using temporary repositories for branch creation,
-  exchange remote hooks, handoff commits, squash merge exclusion, and trailer
-  parsing.
+  exchange remote hooks, coordinator-stored handoffs, squash merge exclusion, and
+  trailer parsing.
 - Worker integration tests with fake entrypoints and tmux where available.
 - API tests for idempotency, state transition validation, and protocol errors.
 - UI smoke tests once the web surface exists.

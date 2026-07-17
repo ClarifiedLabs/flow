@@ -27,8 +27,9 @@ Because issue ids restart per project, project-scoped issue routes are the
 unambiguous deep links.
 
 Use **New Issue** to create work from the browser. The form can select a
-project, agent harness, model options, priority, human review, auto merge,
-attachments, and whether to queue the issue after creation.
+project, Flow, priority, human review, auto merge, attachments, and whether to
+queue the issue after creation. Use the **Flows** page to configure agent
+harnesses, model options, work phases, and review agents for each project.
 
 For temporary live verification, avoid rewriting your normal CLI discovery
 config by either running the server with `--no-write-client-config`, or by
@@ -61,9 +62,9 @@ flowchart TD
     triage -->|accept| backlog
     triage -->|reject| rejected
     backlog -->|"schedule up_next"| up_next
-    up_next -->|"schedule with plan mode"| planning
-    planning -->|"plan approved; implementation queued"| up_next
-    up_next -->|"implementation job starts"| authoring
+    up_next -->|"gated first phase (e.g. planned flow)"| planning
+    planning -->|"flow phase approve; next phase queued"| up_next
+    up_next -->|"work phase job starts"| authoring
     authoring -->|"flow ready"| critique
     critique -->|"required check blocked -> fix job"| authoring
     critique -->|"critique checks satisfied -> verifier runs"| acceptance
@@ -79,6 +80,14 @@ flowchart TD
     classDef inbox fill:#fff3cd,stroke:#856404,color:#000;
     classDef done fill:#e2e3e5,stroke:#41464b,color:#000;
 ```
+
+`planning` and `authoring` are display refinements of a single stored `working`
+phase: the issue's position within its flow (which work phase, running or paused
+at a human gate) lives on the flow cursor rather than in the workflow state. A
+flow whose first phase is human-gated (such as the built-in `planned` flow)
+surfaces as `planning`; the author runs `flow ready` to submit the phase
+artifact, then a human approves it with `flow phase approve` before the next
+phase is queued.
 
 The review loop runs inside `critique`: critique checks, reviewer agents, and an
 optional human reviewer run against the current HEAD. Once they are satisfied,
@@ -106,7 +115,7 @@ them from inside a registered repository, target another project explicitly with
 Issues:
 
 ```sh
-flow issue create --title TITLE
+flow issue create --title TITLE [--flow FLOW]
 flow issue list
 flow issue show ISSUE_ID
 flow issue edit --title TITLE ISSUE_ID
@@ -114,6 +123,14 @@ flow issue schedule ISSUE_ID backlog|up_next
 flow issue state ISSUE_ID triage|backlog|up_next|closed|rejected
 flow issue triage ISSUE_ID accepted|rejected
 flow issue close ISSUE_ID
+```
+
+Work-phase human gates (approve or rework a phase paused for review, such as the
+`planned` flow's plan phase):
+
+```sh
+flow phase approve ISSUE_ID
+flow phase request-changes ISSUE_ID --feedback "tighten the plan's scope"
 ```
 
 Board and diagnostics:
@@ -128,12 +145,28 @@ flow jobs
 flow reconcile
 ```
 
+Flow configuration:
+
+```sh
+flow agent-defs list
+flow agent-defs create -f agent.yaml
+flow agent-defs edit AGENT_DEF_ID -f agent.yaml
+flow flows list
+flow flows create -f flow.yaml
+flow flows edit FLOW_ID -f flow.yaml
+flow flows set-default direct
+```
+
 `flow board` aggregates the lanes of every registered project. Use `--project`
 to scope a command to one project when you are not inside its worktree.
 
 `flow review run` schedules a review round for the issue's current ready,
 unmerged change. It is useful for backfilling older ready changes that have no
 checks yet.
+
+`flow agent-defs` and `flow flows` manage the same project-owned configuration
+shown in the web UI's **Flows** page. The `-f` files can be YAML or JSON; use
+`-f -` to read from stdin.
 
 Agent/session workflow, usually run inside a Flow-managed tmux session:
 
@@ -197,18 +230,18 @@ flow merge CHANGE_ID
 
 Repo-versioned check configuration lives in `.flow/checks/*.yaml`. CI jobs use
 ephemeral capacity. Reviewer and verifier jobs use persistent agent capacity and
-therefore need a worker with the selected harness label, such as
+therefore need a worker with the selected review agent's harness label, such as
 `agent.harness.codex: "true"`, and available `persistent_agent` capacity.
 
-If a ready change has no configured reviewer check, Flow creates a required
-default `reviewer` check that uses the bundled reviewer instructions through
-`flow fetch-prompt` with the issue's selected agent harness. If no verifier
-check is configured, Flow creates a required default `verifier` check in the
-acceptance phase.
+When an issue enters review, Flow appends the selected flow's frozen review set
+to the repo-configured checks. Each flow reviewer runs in `critique`; each flow
+verifier runs in `acceptance`. A flow with an empty review set deliberately runs
+only the repo-configured checks. For older issues with no flow cursor, Flow falls
+back to synthesized default Codex reviewer/verifier checks.
 
-Defining any check with `kind: reviewer` or `kind: verifier` replaces the
-corresponding default and can choose a different harness in its entrypoint and
-`requires` labels.
+Configured checks with `kind: reviewer` or `kind: verifier` run alongside the
+flow review set. Use unique names to make check output clear and set `requires`
+labels to match workers that can run the entrypoint.
 
 Example CI check:
 
@@ -236,7 +269,7 @@ entrypoint:
 requires: ["agent.harness.codex"]
 ```
 
-Verifier Codex checks use the same prompt command and derive `$flow-verifier`
+Verifier Codex checks use the same prompt command and derive verifier behavior
 from `FLOW_WORKER_ROLE=verifier`.
 
 `flow-worker` sets `FLOW_WORKER_HARNESS` from the entrypoint command. Use
@@ -256,8 +289,11 @@ The coordinator serves a dependency-light web app under `/ui/*`:
 - `/ui/merge`
 - `/ui/projects/<project-id>/issues/<issue-id>`
 - `/ui/changes/<change-id>`
+- `/ui/console`
+- `/ui/flows`
 - `/ui/workers`
 - `/ui/jobs`
+- `/ui/done`
 - `/ui/sessions/<session-id>/terminal`
 
 The board shows every project's issues as cards. Each card links to the

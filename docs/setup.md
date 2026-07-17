@@ -5,11 +5,15 @@ tokens, worker configuration, and terminal attach.
 
 ## Prerequisites
 
+For a source-built local setup:
+
 - Go 1.26.4 or newer.
 - Git.
 - tmux for worker jobs.
-- Codex on `PATH` for the default author agent entrypoint.
 - ttyd on `PATH` for worker terminal attach.
+- At least one supported agent CLI on the worker `PATH`. Codex is the default
+  seeded harness; Claude Code and Harness can be selected through project flows
+  when workers advertise those capabilities.
 
 ## Local Binaries
 
@@ -290,17 +294,21 @@ Use a distinct `worker_id` for each concurrent worker; joining with an existing
 chmod 600 .flow-local/worker-join.token
 ```
 
-Issues default to Codex and can be set to Claude Code or Harness with
-`flow issue create --agent-harness claude|harness` or
-`flow issue edit --agent-harness claude|harness`. The web UI exposes the same
-Agent field on the issue form and only lists Codex, Claude Code, and Harness
-when at least one live worker has advertised the corresponding
-`agent.harness.*` label.
+Fresh projects seed built-in planner, author, reviewer, and verifier agent
+definitions using the default Codex harness, plus two flows: `direct` and
+`planned`. Choose an issue's work pipeline with `flow issue create --flow direct`,
+`flow issue create --flow planned`, or the web UI's **Flow** field. To use
+Claude Code, Harness, or model-specific settings, edit the project's agent
+definitions and flows in the web UI's **Flows** page or with
+`flow agent-defs ...` and `flow flows ...`.
+The UI lists only harnesses advertised by at least one live worker via the
+corresponding `agent.harness.*` label.
 
 The worker environment needs `flow`, `ttyd`, and the selected harness CLI
-(`codex`, `claude`, or `harness`) available on `PATH`. To use a different
-author command, serve with a coordinator config that overrides
-`author_entrypoint`.
+(`codex`, `claude`, or `harness`) available on `PATH`. To override the generated
+author command for all default author jobs, serve with a coordinator config that
+sets `author_entrypoint`; flow-selected agent definitions are ignored when this
+explicit override is configured.
 
 Example coordinator config fragment:
 

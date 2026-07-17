@@ -1,6 +1,6 @@
 # Development
 
-This guide covers local build, test, and asset generation commands for Flow
+This guide covers local build, test, and web asset commands for Flow
 contributors.
 
 ## Build
@@ -63,17 +63,26 @@ make web-smoke
 
 ## Web Assets
 
-Regenerate embedded web assets after editing `internal/web/src/app.module.css`:
+The web app uses browser-native custom elements, browser-native ES modules, and
+`internal/web/src/app.module.css`. `flow-server` embeds the source files and the
+Go helper in `internal/web/webassetbuild` scopes the CSS at serve/test time, so
+there is no separate asset generation step after CSS or JavaScript edits.
+
+Run the native-ESM tests after web UI changes:
 
 ```sh
-go generate ./internal/web
+make js-test
 ```
 
-The web app uses browser-native custom elements, a small JavaScript module
-graph, and CSS Modules generated into embedded assets served by
-`flow-server`.
+Run the browser smoke test for route and deep-link coverage when the change is
+routing- or DOM-sensitive:
 
-## Design And Release Docs
+```sh
+make web-smoke
+```
 
-Architecture and design details live in [flow-design.md](flow-design.md).
+## Architecture, Design, And Release Docs
+
+Current architecture details live in [architecture.md](architecture.md). The
+longer historical design narrative lives in [flow-design.md](flow-design.md).
 Release packaging and tagging details live in [release.md](release.md).
