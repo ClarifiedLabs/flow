@@ -4,6 +4,7 @@
 *.db
 *.db-shm
 *.db-wal
+.DS_Store
 coverage.out
 /flow
 /flow-server
