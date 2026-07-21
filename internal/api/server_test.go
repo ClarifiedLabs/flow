@@ -3577,3 +3577,65 @@ func TestSessionProcessExitRejectsConsoleSession(t *testing.T) {
 		t.Fatalf("console session = %+v, want unchanged (not crashed)", session)
 	}
 }
+
+func TestWorkflowAuthorProcessExitStopsAfterCrashRestartLimit(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	started := startAuthorSessionForStatusTest(t, fixture, "Bounded workflow author crashes")
+	issueID := started.Session.IssueID
+	runID := started.Session.WorkflowRunID
+
+	crash := func(session coordinator.Session) {
+		t.Helper()
+		doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/sessions/"+session.ID+"/process-exit", sessionProcessExitRequest{
+			LeaseID:  session.LeaseID,
+			ExitCode: 1,
+		}, http.StatusOK, nil)
+	}
+
+	crash(started.Session)
+	live := liveAuthorJobsForIssue(t, fixture, issueID)
+	if len(live) != 1 {
+		t.Fatalf("live author jobs after first crash = %+v, want one automatic restart", live)
+	}
+
+	claimed := claimSpecificJob(t, fixture, "w-local", live[0].ID, []flowworker.CapacityBucket{flowworker.BucketPersistentAgent})
+	if _, err := fixture.Workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
+		t.Fatalf("mark restarted author running: %v", err)
+	}
+	if claimed.Job.NodeRunID != nil {
+		if _, err := fixture.Bundle.WorkflowRuns.MarkNodeRunning(ctx, *claimed.Job.NodeRunID); err != nil {
+			t.Fatalf("keep workflow node running: %v", err)
+		}
+	}
+	restarted, err := fixture.Sessions.StartAuthorSession(ctx, coordinator.StartAuthorSessionInput{
+		JobID: claimed.Job.ID, LeaseID: claimed.Lease.ID, WorkerID: "w-local",
+	})
+	if err != nil {
+		t.Fatalf("start restarted author session: %v", err)
+	}
+
+	crash(restarted.Session)
+	if live := liveAuthorJobsForIssue(t, fixture, issueID); len(live) != 0 {
+		t.Fatalf("live author jobs after crash limit = %+v, want none", live)
+	}
+	detail, err := fixture.Bundle.WorkflowRuns.Detail(ctx, runID)
+	if err != nil {
+		t.Fatalf("load crash-held workflow: %v", err)
+	}
+	if detail.Run.State != coordinator.WorkflowRunWaiting || detail.OpenWait == nil || detail.OpenWait.Kind != coordinator.WorkflowWaitOperatorIntervention {
+		t.Fatalf("workflow after crash limit = %+v, want operator intervention wait", detail)
+	}
+	if !strings.Contains(detail.OpenWait.Message, "Author job crashed") {
+		t.Fatalf("crash wait message = %q, want crash explanation", detail.OpenWait.Message)
+	}
+
+	for i := 0; i < 3; i++ {
+		if err := fixture.Bundle.WorkflowExecutor.Advance(ctx, runID); err != nil {
+			t.Fatalf("advance crash-held workflow: %v", err)
+		}
+	}
+	if live := liveAuthorJobsForIssue(t, fixture, issueID); len(live) != 0 {
+		t.Fatalf("repeated advances re-enqueued author jobs: %+v", live)
+	}
+}

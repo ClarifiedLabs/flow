@@ -1022,6 +1022,7 @@ func envCommand(env map[string]string, argv []string) string {
 func workerEnv(input tmuxInput) map[string]string {
 	env := entrypointEnvWithHermeticDefaults(input)
 	scrubWorkerDeploymentEnv(env)
+	forwardHarnessModelProxyEnv(env, input)
 	reserved := map[string]string{
 		"FLOW_COORDINATOR_URL":  input.Config.CoordinatorURL,
 		"FLOW_PROTOCOL_VERSION": input.Config.ProtocolVersion,
@@ -1116,6 +1117,39 @@ func workerEnv(input tmuxInput) map[string]string {
 	}
 
 	return env
+}
+
+var harnessModelProxyEnvKeys = []string{
+	"HARNESS_MODEL_PROXY_URL",
+	"HARNESS_MODEL_PROXY_API_KEY",
+}
+
+// forwardHarnessModelProxyEnv carries the worker's model-proxy configuration
+// across the hermetic env -i boundary for jobs that actually run harness. CI
+// entrypoints remain isolated from agent credentials, and an entrypoint's
+// explicit env (including an intentional empty value) wins over deployment
+// defaults.
+func forwardHarnessModelProxyEnv(env map[string]string, input tmuxInput) {
+	if resolveHarness(input) != flowharness.Harness || !jobUsesAgentCredentials(input.Job.Role) {
+		return
+	}
+	for _, key := range harnessModelProxyEnvKeys {
+		if _, explicit := input.Entrypoint.Env[key]; explicit {
+			continue
+		}
+		if value, ok := os.LookupEnv(key); ok {
+			env[key] = value
+		}
+	}
+}
+
+func jobUsesAgentCredentials(role JobRole) bool {
+	switch role {
+	case RoleAuthor, RoleReviewer, RoleVerifier, RoleConsole:
+		return true
+	default:
+		return false
+	}
 }
 
 func entrypointEnvWithHermeticDefaults(input tmuxInput) map[string]string {

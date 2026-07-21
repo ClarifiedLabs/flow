@@ -31,8 +31,8 @@ const maxAutomaticCrashAttempts = 2
 // LIKE pattern. They are kept byte-identical (the LIKE wildcard replaces the
 // %d count) so recordCrashRestartLimit and crashLoopStatusExists never drift.
 const (
-	crashRestartLimitMessageFormat = "Crashed author job reached %d automatic restarts; human intervention required."
-	crashRestartLimitMessageLike   = "Crashed author job reached % automatic restarts; human intervention required."
+	crashRestartLimitMessageFormat = "Author job crashed %d times; human intervention required."
+	crashRestartLimitMessageLike   = "Author job crashed % times; human intervention required."
 )
 
 var ErrAuthorJobSuppressed = errors.New("author job suppressed")

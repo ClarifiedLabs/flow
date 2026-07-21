@@ -459,6 +459,69 @@ WHERE id = (SELECT issue_id FROM workflow_runs WHERE id = ?)`,
 	return updated, nil
 }
 
+// waitForAgentCrashLimit parks the active agent node after its bounded restart
+// budget is exhausted. It is idempotent so concurrent executor advances cannot
+// create duplicate waits or re-open an already parked workflow.
+func (s *WorkflowRunService) waitForAgentCrashLimit(ctx context.Context, nodeRunID string, attempts int) error {
+	nodeRunID = strings.TrimSpace(nodeRunID)
+	if nodeRunID == "" {
+		return errors.New("agent crash hold requires a node run id")
+	}
+	message := fmt.Sprintf(crashRestartLimitMessageFormat, attempts)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	nodeRun, err := scanWorkflowNodeRun(tx.QueryRowContext(ctx, workflowNodeRunSelect+` WHERE id = ?`, nodeRunID))
+	if err != nil {
+		return err
+	}
+	run, err := scanWorkflowRun(tx.QueryRowContext(ctx, workflowRunSelect+` WHERE id = ?`, nodeRun.WorkflowRunID))
+	if err != nil {
+		return err
+	}
+	if run.State == WorkflowRunWaiting {
+		wait, ok, err := openWaitTx(ctx, tx, run.ID)
+		if err != nil {
+			return err
+		}
+		if ok && wait.Kind == WorkflowWaitOperatorIntervention && wait.NodeRunID == nodeRun.ID {
+			return nil
+		}
+		return fmt.Errorf("%w: workflow is already waiting for another reason", ErrWorkflowConflict)
+	}
+	if run.State != WorkflowRunScheduled && run.State != WorkflowRunRunning {
+		return fmt.Errorf("%w: workflow run is %s", ErrWorkflowConflict, run.State)
+	}
+	if run.CurrentNodeRunID != nodeRun.ID {
+		return fmt.Errorf("%w: agent node is no longer current", ErrWorkflowConflict)
+	}
+	if nodeRun.State != WorkflowNodeQueued && nodeRun.State != WorkflowNodeRunning {
+		return fmt.Errorf("%w: agent node run is %s", ErrWorkflowConflict, nodeRun.State)
+	}
+
+	now := s.now().UTC()
+	if err := enterWaitTx(ctx, tx, &run, &nodeRun, WorkflowWaitOperatorIntervention, message, ActorSystem, now); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(map[string]any{"attempts": attempts})
+	if err != nil {
+		return err
+	}
+	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
+		IssueID: run.IssueID, WorkflowRunID: run.ID,
+		FromIssueState: string(LifecycleInProgress), ToIssueState: string(LifecycleInProgress),
+		FromNodeKey: nodeRun.NodeKey, ToNodeKey: nodeRun.NodeKey,
+		Outcome: "crashed", EventKind: "agent_crash_limit_reached", PayloadJSON: string(payload),
+		Actor: string(ActorSystem), CreatedAt: now,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *WorkflowRunService) GetNodeRun(ctx context.Context, nodeRunID string) (WorkflowNodeRun, bool, error) {
 	nodeRun, err := scanWorkflowNodeRun(s.db.QueryRowContext(ctx, workflowNodeRunSelect+` WHERE id = ?`, nodeRunID))
 	if errors.Is(err, sql.ErrNoRows) {

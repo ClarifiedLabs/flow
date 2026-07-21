@@ -853,6 +853,47 @@ func TestWorkerEnvUsesHermeticJobStateDefaults(t *testing.T) {
 	}
 }
 
+func TestWorkerEnvForwardsHarnessModelProxyConfiguration(t *testing.T) {
+	t.Setenv("HARNESS_MODEL_PROXY_URL", "https://model-proxy.example.test")
+	t.Setenv("HARNESS_MODEL_PROXY_API_KEY", "model-proxy-key")
+
+	input := tmuxInput{
+		Config: workerConfig("/tmp/work", "file:///tmp/exchange.git"),
+		Job:    Job{ID: "j-harness-proxy", Role: RoleAuthor},
+		Lease:  Lease{ID: "l-harness-proxy", WorkerID: "w-local"},
+		Entrypoint: Entrypoint{
+			Argv:    []string{"harness"},
+			Harness: flowharness.Harness,
+		},
+	}
+	env := workerEnv(input)
+	if env["HARNESS_MODEL_PROXY_URL"] != "https://model-proxy.example.test" {
+		t.Fatalf("HARNESS_MODEL_PROXY_URL = %q, want worker deployment value", env["HARNESS_MODEL_PROXY_URL"])
+	}
+	if env["HARNESS_MODEL_PROXY_API_KEY"] != "model-proxy-key" {
+		t.Fatalf("HARNESS_MODEL_PROXY_API_KEY = %q, want worker deployment value", env["HARNESS_MODEL_PROXY_API_KEY"])
+	}
+
+	input.Entrypoint.Env = map[string]string{
+		"HARNESS_MODEL_PROXY_URL":     "https://job-proxy.example.test",
+		"HARNESS_MODEL_PROXY_API_KEY": "job-proxy-key",
+	}
+	env = workerEnv(input)
+	if env["HARNESS_MODEL_PROXY_URL"] != "https://job-proxy.example.test" || env["HARNESS_MODEL_PROXY_API_KEY"] != "job-proxy-key" {
+		t.Fatalf("explicit harness proxy env was overwritten: url=%q key=%q", env["HARNESS_MODEL_PROXY_URL"], env["HARNESS_MODEL_PROXY_API_KEY"])
+	}
+
+	input.Job = Job{ID: "j-ci-proxy", Role: RoleCI}
+	input.Entrypoint.Env = nil
+	env = workerEnv(input)
+	if _, ok := env["HARNESS_MODEL_PROXY_URL"]; ok {
+		t.Fatalf("HARNESS_MODEL_PROXY_URL leaked into CI job as %q", env["HARNESS_MODEL_PROXY_URL"])
+	}
+	if _, ok := env["HARNESS_MODEL_PROXY_API_KEY"]; ok {
+		t.Fatalf("HARNESS_MODEL_PROXY_API_KEY leaked into CI job as %q", env["HARNESS_MODEL_PROXY_API_KEY"])
+	}
+}
+
 func TestWorkerEnvDefaultsUTF8LocaleForAgentTerminal(t *testing.T) {
 	t.Setenv("LANG", "")
 	t.Setenv("LC_ALL", "")

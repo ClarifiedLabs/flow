@@ -142,6 +142,15 @@ SELECT COUNT(*) FROM jobs WHERE node_run_id = ? AND state IN ('queued', 'claimed
 	if live > 0 {
 		return false, nil
 	}
+	var crashedAttempts int
+	if err := e.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM jobs WHERE node_run_id = ? AND role = ? AND state = ?`,
+		nodeRun.ID, string(flowworker.RoleAuthor), string(flowworker.JobCrashed)).Scan(&crashedAttempts); err != nil {
+		return false, err
+	}
+	if crashedAttempts >= maxAutomaticCrashAttempts {
+		return false, e.runs.waitForAgentCrashLimit(ctx, nodeRun.ID, crashedAttempts)
+	}
 
 	issueID := run.IssueID
 	var changeID *string
