@@ -22,7 +22,7 @@ test("terminal click from a card opens a modal-sized frame", async () => {
       fetchCalls.push({ path, options });
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ access: { login_path: "/v1/sessions/s-0001/terminal-login?token=abc" } }),
+        json: () => Promise.resolve({ access: { login_path: "/v2/sessions/s-0001/terminal-login?token=abc" } }),
       });
     },
   });
@@ -44,12 +44,12 @@ test("terminal click from a card opens a modal-sized frame", async () => {
   assert.match(content.children[0].innerHTML, /class="terminal-modal"/);
   assert.match(content.children[0].innerHTML, /Session terminal/);
   assert.match(content.children[0].innerHTML, /class="terminal-frame"/);
-  assert.match(content.children[0].innerHTML, /src="\/v1\/sessions\/s-0001\/terminal-login\?token=abc"/);
-  assert.match(content.children[0].innerHTML, /data-terminal-popout="\/v1\/sessions\/s-0001\/terminal-login\?token=abc"/);
+  assert.match(content.children[0].innerHTML, /src="\/v2\/sessions\/s-0001\/terminal-login\?token=abc"/);
+  assert.match(content.children[0].innerHTML, /data-terminal-popout="\/v2\/sessions\/s-0001\/terminal-login\?token=abc"/);
   assert.match(content.children[0].innerHTML, /Pop out/);
-  assert.match(content.children[0].innerHTML, /Shift\+drag to select/);
+  assert.match(content.children[0].innerHTML, /Drag to select \(auto-copies\) · Shift\+drag for manual selection/);
   assert.equal(status.textContent, "");
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/sessions/s-0001/terminal-token");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/sessions/s-0001/terminal-token");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
 });
 
@@ -82,13 +82,13 @@ test("board polling keeps an open card terminal modal mounted", async () => {
     document: inlineDocument(),
     fetch(path, options) {
       fetchCalls.push({ path, options });
-      if (path === "/ui/api/v1/sessions/s-0001/terminal-token") {
+      if (path === "/ui/api/v2/sessions/s-0001/terminal-token") {
         return Promise.resolve({
           ok: true,
-          json: () => Promise.resolve({ access: { login_path: "/v1/sessions/s-0001/terminal-login?token=abc" } }),
+          json: () => Promise.resolve({ access: { login_path: "/v2/sessions/s-0001/terminal-login?token=abc" } }),
         });
       }
-      if (path === "/ui/api/v1/board") {
+      if (path === "/ui/api/v2/board") {
         return Promise.resolve({
           ok: true,
           json: () => Promise.resolve({
@@ -124,17 +124,17 @@ test("board polling keeps an open card terminal modal mounted", async () => {
   const modal = main.children.find((child) => child.dataset?.terminalModalLayer === "true");
   assert.ok(modal);
   assert.match(modal.innerHTML, /class="terminal-frame"/);
-  assert.match(modal.innerHTML, /Shift\+drag to select/);
+  assert.match(modal.innerHTML, /Drag to select \(auto-copies\) · Shift\+drag for manual selection/);
 
   await app.load({ fromPoll: true });
 
   assert.equal(main.children.includes(modal), true);
-  assert.match(modal.innerHTML, /src="\/v1\/sessions\/s-0001\/terminal-login\?token=abc"/);
+  assert.match(modal.innerHTML, /src="\/v2\/sessions\/s-0001\/terminal-login\?token=abc"/);
   assert.match(content.innerHTML, /class="board"/);
   assert.deepEqual(fetchCalls.map((call) => call.path), [
-    "/ui/api/v1/sessions/s-0001/terminal-token",
-    "/ui/api/v1/board",
-    "/ui/api/v1/done?limit=20",
+    "/ui/api/v2/sessions/s-0001/terminal-token",
+    "/ui/api/v2/board",
+    "/ui/api/v2/done?limit=20",
   ]);
 });
 
@@ -157,7 +157,7 @@ test("terminal click closes an open card terminal modal without refreshing the t
       fetchCalls.push({ path, options });
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ access: { login_path: "/v1/sessions/s-0001/terminal-login?token=abc" } }),
+        json: () => Promise.resolve({ access: { login_path: "/v2/sessions/s-0001/terminal-login?token=abc" } }),
       });
     },
   });
@@ -200,7 +200,7 @@ test("job terminal click from a card opens a modal-sized frame", async () => {
       fetchCalls.push({ path, options });
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ access: { login_path: "/v1/jobs/j-0001/terminal-login?token=abc" } }),
+        json: () => Promise.resolve({ access: { login_path: "/v2/jobs/j-0001/terminal-login?token=abc" } }),
       });
     },
   });
@@ -218,12 +218,12 @@ test("job terminal click from a card opens a modal-sized frame", async () => {
   assert.equal(content.children.length, 1);
   assert.match(content.children[0].innerHTML, /Job terminal/);
   assert.match(content.children[0].innerHTML, /class="terminal-frame"/);
-  assert.match(content.children[0].innerHTML, /src="\/v1\/jobs\/j-0001\/terminal-login\?token=abc"/);
-  assert.match(content.children[0].innerHTML, /data-terminal-popout="\/v1\/jobs\/j-0001\/terminal-login\?token=abc"/);
+  assert.match(content.children[0].innerHTML, /src="\/v2\/jobs\/j-0001\/terminal-login\?token=abc"/);
+  assert.match(content.children[0].innerHTML, /data-terminal-popout="\/v2\/jobs\/j-0001\/terminal-login\?token=abc"/);
   assert.match(content.children[0].innerHTML, /Pop out/);
-  assert.match(content.children[0].innerHTML, /Shift\+drag to select/);
+  assert.match(content.children[0].innerHTML, /Drag to select \(auto-copies\) · Shift\+drag for manual selection/);
   assert.equal(status.textContent, "");
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/jobs/j-0001/terminal-token");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/jobs/j-0001/terminal-token");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
 });
 
@@ -253,10 +253,10 @@ test("inline terminal renders a Hide button next to the pop-out button", async (
     "session",
     "s-0001",
     `<iframe class="terminal-frame"></iframe>`,
-    "/v1/sessions/s-0001/terminal-login?token=abc",
+    "/v2/sessions/s-0001/terminal-login?token=abc",
   );
 
-  assert.match(html, /data-terminal-popout="\/v1\/sessions\/s-0001\/terminal-login\?token=abc"/);
+  assert.match(html, /data-terminal-popout="\/v2\/sessions\/s-0001\/terminal-login\?token=abc"/);
   assert.match(html, /data-terminal-hide/);
   assert.match(html, />Hide</);
   const hideIndex = html.indexOf("data-terminal-hide");
@@ -271,10 +271,10 @@ test("terminal modal renders a Hide button next to the pop-out button", async ()
     "session",
     "s-0001",
     `<iframe class="terminal-frame"></iframe>`,
-    "/v1/sessions/s-0001/terminal-login?token=abc",
+    "/v2/sessions/s-0001/terminal-login?token=abc",
   );
 
-  assert.match(html, /data-terminal-popout="\/v1\/sessions\/s-0001\/terminal-login\?token=abc"/);
+  assert.match(html, /data-terminal-popout="\/v2\/sessions\/s-0001\/terminal-login\?token=abc"/);
   assert.match(html, /data-terminal-close/);
   assert.match(html, />Hide</);
   assert.doesNotMatch(html, />Close</);
@@ -306,7 +306,7 @@ test("terminal route embeds owner-authenticated login path", async () => {
   }, {
     fetch(path, options) {
       fetchCalls.push({ path, options });
-      if (path === "/ui/api/v1/projects") {
+      if (path === "/ui/api/v2/projects") {
         return Promise.resolve({
           ok: true,
           json: () => Promise.resolve({ projects: [] }),
@@ -314,7 +314,7 @@ test("terminal route embeds owner-authenticated login path", async () => {
       }
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ access: { login_path: "/v1/sessions/s-0001/terminal-login?token=abc123" } }),
+        json: () => Promise.resolve({ access: { login_path: "/v2/sessions/s-0001/terminal-login?token=abc123" } }),
       });
     },
   });
@@ -332,14 +332,14 @@ test("terminal route embeds owner-authenticated login path", async () => {
 
   assert.equal(title.textContent, "Terminal");
   assert.equal(status.textContent, "");
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects");
-  assert.equal(fetchCalls[1].path, "/ui/api/v1/sessions/s-0001/terminal-token");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects");
+  assert.equal(fetchCalls[1].path, "/ui/api/v2/sessions/s-0001/terminal-token");
   assert.equal(fetchCalls[1].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.match(content.innerHTML, /class="detail terminal-detail"/);
   assert.match(content.innerHTML, /class="terminal-frame"/);
-  assert.match(content.innerHTML, /src="\/v1\/sessions\/s-0001\/terminal-login\?token=abc123"/);
-  assert.match(content.innerHTML, /data-terminal-popout="\/v1\/sessions\/s-0001\/terminal-login\?token=abc123"/);
-  assert.match(content.innerHTML, /Shift\+drag to select/);
+  assert.match(content.innerHTML, /src="\/v2\/sessions\/s-0001\/terminal-login\?token=abc123"/);
+  assert.match(content.innerHTML, /data-terminal-popout="\/v2\/sessions\/s-0001\/terminal-login\?token=abc123"/);
+  assert.match(content.innerHTML, /Drag to select \(auto-copies\) · Shift\+drag for manual selection/);
 });
 
 test("console page offers shell harness and posts selected harness", async () => {
@@ -353,7 +353,7 @@ test("console page offers shell harness and posts selected harness", async () =>
     URLSearchParams,
     fetch(path, options) {
       fetchCalls.push({ path, options });
-      if (path === "/ui/api/v1/harnesses") {
+      if (path === "/ui/api/v2/harnesses") {
         return Promise.resolve({
           ok: true,
           json: () => Promise.resolve({
@@ -366,7 +366,7 @@ test("console page offers shell harness and posts selected harness", async () =>
           }),
         });
       }
-      if (path === "/ui/api/v1/projects/p-alpha/console" && options.method === "POST") {
+      if (path === "/ui/api/v2/projects/p-alpha/console" && options.method === "POST") {
         return Promise.resolve({
           ok: true,
           json: () => Promise.resolve({ active: true }),
@@ -403,7 +403,7 @@ test("console page offers shell harness and posts selected harness", async () =>
   assert.match(content.innerHTML, /<option value="shell">Shell<\/option>/);
 
   await app.startConsole("p-alpha", "shell");
-  const post = fetchCalls.find((call) => call.path === "/ui/api/v1/projects/p-alpha/console" && call.options.method === "POST");
+  const post = fetchCalls.find((call) => call.path === "/ui/api/v2/projects/p-alpha/console" && call.options.method === "POST");
   assert.equal(post.options.headers["X-Flow-CSRF"], "csrf-token");
   assert.equal(JSON.parse(post.options.body).harness, "shell");
   assert.equal(loads, 1);
@@ -422,10 +422,10 @@ test("terminal pop out opens a popup-style window", async () => {
     },
   });
 
-  context.openTerminalWindow("/v1/sessions/s-0001/terminal-login?token=abc123");
+  context.openTerminalWindow("/v2/sessions/s-0001/terminal-login?token=abc123");
 
   assert.deepEqual(opened, [{
-    url: "/v1/sessions/s-0001/terminal-login?token=abc123",
+    url: "/v2/sessions/s-0001/terminal-login?token=abc123",
     target: "_blank",
     features: "popup=yes,noopener,noreferrer,width=1400,height=880,left=100,top=60,resizable=yes,scrollbars=yes",
   }]);
@@ -511,7 +511,7 @@ test("job attach action fetches and displays the tmux attach command", async () 
 
   await clickHandler();
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/jobs/j-0001/attach");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/jobs/j-0001/attach");
   assert.equal(fetchCalls[0].options.method, "GET");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.equal(status.textContent, "tmux attach-session -t flow-j-0001");
@@ -521,7 +521,7 @@ test("task save submits patch payload and refreshes", async () => {
   const harness = await taskSaveHarness({ flowID: "fl-review" });
   await harness.submit();
 
-  assert.equal(harness.fetchCalls[0].path, "/ui/api/v1/tasks/i-0001");
+  assert.equal(harness.fetchCalls[0].path, "/ui/api/v2/tasks/i-0001");
   assert.equal(harness.fetchCalls[0].options.method, "PATCH");
   assert.equal(harness.fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body), {
@@ -529,8 +529,6 @@ test("task save submits patch payload and refreshes", async () => {
     body: "New body",
     acceptance_criteria: "New criteria",
     priority: 4,
-    requires_human_review: false,
-    auto_merge: true,
     flow_id: "fl-review",
   });
   assert.equal(harness.refreshed(), true);
@@ -610,7 +608,7 @@ test("task attachment form uploads stage file and refreshes", async () => {
 
   await submitHandler({ preventDefault() {} });
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/attachments");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-demo/tasks/i-0001/attachments");
   assert.deepEqual(fetchCalls[0].options.body.fields, [
     { name: "stage", value: "reviewer", filename: undefined },
     { name: "file", value: file, filename: "review.png" },
@@ -640,7 +638,7 @@ test("new task route renders project-scoped blank form without fetching an task"
   }, {
     fetch(path, options) {
       fetchCalls.push({ path, options });
-      if (path === "/ui/api/v1/projects") {
+      if (path === "/ui/api/v2/projects") {
         return Promise.resolve({
           ok: true,
           json: () => Promise.resolve({
@@ -670,7 +668,7 @@ test("new task route renders project-scoped blank form without fetching an task"
   // With several projects there is no default project, so the form does not
   // preload any project's flows: only the project registry is fetched.
   assert.equal(fetchCalls.length, 1);
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects");
   assert.equal(title.textContent, "New Task");
   assert.match(content.innerHTML, /data-task-form-mode="create"/);
   assert.match(content.innerHTML, /<span>Project<\/span>/);
@@ -705,7 +703,7 @@ test("new task form submits queued create payload then navigates to created task
 
   await harness.submit();
 
-  assert.equal(harness.fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks");
+  assert.equal(harness.fetchCalls[0].path, "/ui/api/v2/projects/p-demo/tasks");
   assert.equal(harness.fetchCalls[0].options.method, "POST");
   assert.equal(harness.fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body), {
@@ -713,11 +711,11 @@ test("new task form submits queued create payload then navigates to created task
     body: "New body",
     acceptance_criteria: "New criteria",
     priority: 4,
-    requires_human_review: false,
-    auto_merge: true,
     flow_id: "fl-plan",
-    schedule_state: "up_next",
   });
+  // Queueing schedules the created task with a second call.
+  assert.equal(harness.fetchCalls[1].path, "/ui/api/v2/projects/p-demo/tasks/i-0001/schedule");
+  assert.equal(harness.fetchCalls[1].options.method, "POST");
   assert.equal(harness.pushedPath(), "/ui/projects/p-demo/tasks/i-0001");
   assert.equal(harness.loads(), 1);
   assert.equal(harness.refreshed(), false);
@@ -730,8 +728,8 @@ test("new task form uploads selected initial attachments after create", async ()
 
   await harness.submit();
 
-  assert.equal(harness.fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks");
-  assert.equal(harness.fetchCalls[1].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/attachments");
+  assert.equal(harness.fetchCalls[0].path, "/ui/api/v2/projects/p-demo/tasks");
+  assert.equal(harness.fetchCalls[1].path, "/ui/api/v2/projects/p-demo/tasks/i-0001/attachments");
   const body = harness.fetchCalls[1].options.body;
   assert.deepEqual(body.fields, [
     { name: "stage", value: "initial", filename: undefined },
@@ -745,17 +743,16 @@ test("new task form can save without queueing", async () => {
 
   await harness.submit();
 
-  assert.equal(harness.fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks");
+  assert.equal(harness.fetchCalls[0].path, "/ui/api/v2/projects/p-demo/tasks");
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body), {
     title: "Updated task",
     body: "New body",
     acceptance_criteria: "New criteria",
     priority: 4,
-    requires_human_review: false,
-    auto_merge: true,
     flow_id: "",
-    schedule_state: "backlog",
   });
+  // Saving without queueing creates the task only; no schedule call follows.
+  assert.equal(harness.fetchCalls.length, 1);
   assert.equal(harness.pushedPath(), "/ui/projects/p-demo/tasks/i-0001");
   assert.equal(harness.loads(), 1);
   assert.equal(harness.refreshed(), false);
@@ -788,354 +785,6 @@ test("new task form surfaces create failures and missing created task id", async
   assert.equal(missingID.status.textContent, "Created task ID unavailable");
 });
 
-test("triage card exposes accept reject and edit actions", async () => {
-  const context = await scriptContext();
-  const app = new context.FlowApp();
-  const html = app.renderTaskCard({
-    id: "i-0001",
-    title: "Agent finding",
-    schedule_state: "backlog",
-    triage_state: "triage",
-    priority: 1,
-  }, {}, "triage", false);
-
-  assert.match(html, /data-triage="accepted"/);
-  assert.match(html, /data-triage="rejected"/);
-  assert.match(html, /data-task-edit="i-0001"/);
-  assert.match(html, /data-task-title="Agent finding"/);
-});
-
-test("triage action posts triage state and refreshes", async () => {
-  for (const state of ["accepted", "rejected"]) {
-    let clickHandler;
-    const button = {
-      dataset: { task: "i-0001", triage: state },
-      addEventListener(event, handler) {
-        if (event === "click") clickHandler = handler;
-      },
-    };
-    const fetchCalls = [];
-    const context = await scriptContext({}, {
-      fetch(path, options) {
-        fetchCalls.push({ path, options });
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve({ task: { id: "i-0001" } }),
-        });
-      },
-    });
-    const app = new context.FlowApp();
-    app.querySelectorAll = (selector) => (selector === "[data-triage]" ? [button] : []);
-    app.querySelector = () => ({ textContent: "" });
-    let refreshed = false;
-    app.bindTaskActions(async () => {
-      refreshed = true;
-    });
-
-    await clickHandler();
-
-    assert.equal(fetchCalls[0].path, "/ui/api/v1/tasks/i-0001/triage");
-    assert.equal(fetchCalls[0].options.method, "POST");
-    assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
-    assert.deepEqual(JSON.parse(fetchCalls[0].options.body), { state });
-    assert.equal(refreshed, true);
-  }
-});
-
-test("close action requires confirmation before posting", async () => {
-  for (const confirmed of [false, true]) {
-    let clickHandler;
-    let confirmCalls = 0;
-    const button = {
-      dataset: { close: "i-0001", project: "p-demo" },
-      addEventListener(event, handler) {
-        if (event === "click") clickHandler = handler;
-      },
-    };
-    const fetchCalls = [];
-    const context = await scriptContext({
-      confirm(message) {
-        confirmCalls += 1;
-        assert.equal(message, "Close this task?");
-        return confirmed;
-      },
-    }, {
-      fetch(path, options) {
-        fetchCalls.push({ path, options });
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve({ task: { id: "i-0001" } }),
-        });
-      },
-    });
-    const app = new context.FlowApp();
-    app.querySelectorAll = (selector) => (selector === "[data-close]" ? [button] : []);
-    app.querySelector = () => ({ textContent: "" });
-    let refreshed = false;
-    app.bindTaskActions(async () => {
-      refreshed = true;
-    });
-
-    await clickHandler();
-
-    assert.equal(confirmCalls, 1);
-    assert.equal(refreshed, confirmed);
-    if (!confirmed) {
-      assert.equal(fetchCalls.length, 0);
-      continue;
-    }
-    assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/close");
-    assert.equal(fetchCalls[0].options.method, "POST");
-    assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
-    assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
-  }
-});
-
-test("pause action requires confirmation before posting", async () => {
-  for (const confirmed of [false, true]) {
-    let clickHandler;
-    let confirmCalls = 0;
-    const button = {
-      dataset: { pause: "i-0001", project: "p-demo" },
-      addEventListener(event, handler) {
-        if (event === "click") clickHandler = handler;
-      },
-    };
-    const fetchCalls = [];
-    const context = await scriptContext({
-      confirm(message) {
-        confirmCalls += 1;
-        assert.equal(message, "Pause this task?");
-        return confirmed;
-      },
-    }, {
-      fetch(path, options) {
-        fetchCalls.push({ path, options });
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve({ task: { id: "i-0001" } }),
-        });
-      },
-    });
-    const app = new context.FlowApp();
-    app.querySelectorAll = (selector) => (selector === "[data-pause]" ? [button] : []);
-    app.querySelector = () => ({ textContent: "" });
-    let refreshed = false;
-    app.bindTaskActions(async () => {
-      refreshed = true;
-    });
-
-    await clickHandler();
-
-    assert.equal(confirmCalls, 1);
-    assert.equal(refreshed, confirmed);
-    if (!confirmed) {
-      assert.equal(fetchCalls.length, 0);
-      continue;
-    }
-    assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/pause");
-    assert.equal(fetchCalls[0].options.method, "POST");
-    assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
-    assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
-  }
-});
-
-test("resume action posts and refreshes", async () => {
-  let clickHandler;
-  const button = {
-    dataset: { resume: "i-0001", project: "p-demo" },
-    addEventListener(event, handler) {
-      if (event === "click") clickHandler = handler;
-    },
-  };
-  const fetchCalls = [];
-  const context = await scriptContext({}, {
-    fetch(path, options) {
-      fetchCalls.push({ path, options });
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({ task: { id: "i-0001" } }),
-      });
-    },
-  });
-  const app = new context.FlowApp();
-  app.querySelectorAll = (selector) => (selector === "[data-resume]" ? [button] : []);
-  app.querySelector = () => ({ textContent: "" });
-  let refreshed = false;
-  app.bindTaskActions(async () => {
-    refreshed = true;
-  });
-
-  await clickHandler();
-
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/resume");
-  assert.equal(fetchCalls[0].options.method, "POST");
-  assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
-  assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
-  assert.equal(refreshed, true);
-});
-
-test("crash retry action posts and refreshes", async () => {
-  let clickHandler;
-  const button = {
-    dataset: { retryCrash: "i-0001", project: "p-demo" },
-    addEventListener(event, handler) {
-      if (event === "click") clickHandler = handler;
-    },
-  };
-  const fetchCalls = [];
-  const context = await scriptContext({}, {
-    fetch(path, options) {
-      fetchCalls.push({ path, options });
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({ task: { id: "i-0001" } }),
-      });
-    },
-  });
-  const app = new context.FlowApp();
-  app.querySelectorAll = (selector) => (selector === "[data-retry-crash]" ? [button] : []);
-  app.querySelector = () => ({ textContent: "" });
-  let refreshed = false;
-  app.bindTaskActions(async () => {
-    refreshed = true;
-  });
-
-  await clickHandler();
-
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/retry");
-  assert.equal(fetchCalls[0].options.method, "POST");
-  assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
-  assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
-  assert.equal(refreshed, true);
-});
-
-test("task state form posts manual state and refreshes", async () => {
-  let submitHandler;
-  const form = {
-    dataset: { taskStateForm: "i-0001", project: "p-demo" },
-    elements: {
-      state: { value: "backlog" },
-    },
-    addEventListener(event, handler) {
-      if (event === "submit") submitHandler = handler;
-    },
-  };
-  const fetchCalls = [];
-  const status = { textContent: "" };
-  const context = await scriptContext({}, {
-    fetch(path, options) {
-      fetchCalls.push({ path, options });
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({ task: { id: "i-0001", schedule_state: "backlog" } }),
-      });
-    },
-  });
-  const app = new context.FlowApp();
-  app.querySelectorAll = (selector) => (selector === "[data-task-state-form]" ? [form] : []);
-  app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
-  let refreshed = false;
-  app.bindTaskActions(async () => {
-    refreshed = true;
-  });
-
-  await submitHandler({ preventDefault() {} });
-
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/state");
-  assert.equal(fetchCalls[0].options.method, "POST");
-  assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
-  assert.deepEqual(JSON.parse(fetchCalls[0].options.body), { state: "backlog" });
-  assert.equal(refreshed, true);
-  assert.equal(status.textContent, "");
-});
-
-test("task state form requires confirmation before closing", async () => {
-  for (const confirmed of [false, true]) {
-    let submitHandler;
-    let confirmCalls = 0;
-    const form = {
-      dataset: { taskStateForm: "i-0001", project: "p-demo" },
-      elements: {
-        state: { value: "closed" },
-      },
-      addEventListener(event, handler) {
-        if (event === "submit") submitHandler = handler;
-      },
-    };
-    const fetchCalls = [];
-    const context = await scriptContext({
-      confirm(message) {
-        confirmCalls += 1;
-        assert.equal(message, "Close this task?");
-        return confirmed;
-      },
-    }, {
-      fetch(path, options) {
-        fetchCalls.push({ path, options });
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve({ task: { id: "i-0001", schedule_state: "closed" } }),
-        });
-      },
-    });
-    const app = new context.FlowApp();
-    app.querySelectorAll = (selector) => (selector === "[data-task-state-form]" ? [form] : []);
-    app.querySelector = () => ({ textContent: "" });
-    let refreshed = false;
-    app.bindTaskActions(async () => {
-      refreshed = true;
-    });
-
-    await submitHandler({ preventDefault() {} });
-
-    assert.equal(confirmCalls, 1);
-    assert.equal(refreshed, confirmed);
-    if (!confirmed) {
-      assert.equal(fetchCalls.length, 0);
-      continue;
-    }
-    assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/state");
-    assert.equal(fetchCalls[0].options.method, "POST");
-    assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
-    assert.deepEqual(JSON.parse(fetchCalls[0].options.body), { state: "closed" });
-  }
-});
-
-test("task state form surfaces failures without refreshing", async () => {
-  let submitHandler;
-  const form = {
-    dataset: { taskStateForm: "i-0001" },
-    elements: {
-      state: { value: "up_next" },
-    },
-    addEventListener(event, handler) {
-      if (event === "submit") submitHandler = handler;
-    },
-  };
-  const status = { textContent: "" };
-  const context = await scriptContext({}, {
-    fetch() {
-      return Promise.resolve({
-        ok: false,
-        json: () => Promise.resolve({ error: { message: "merged tasks cannot be moved" } }),
-      });
-    },
-  });
-  const app = new context.FlowApp();
-  app.querySelectorAll = (selector) => (selector === "[data-task-state-form]" ? [form] : []);
-  app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
-  let refreshed = false;
-  app.bindTaskActions(async () => {
-    refreshed = true;
-  });
-
-  await submitHandler({ preventDefault() {} });
-
-  assert.equal(refreshed, false);
-  assert.equal(status.textContent, "merged tasks cannot be moved");
-});
-
 test("review run action posts to task review endpoint and refreshes", async () => {
   let clickHandler;
   const button = {
@@ -1165,7 +814,7 @@ test("review run action posts to task review endpoint and refreshes", async () =
 
   await clickHandler();
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/review/run");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-demo/tasks/i-0001/review/run");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
@@ -1178,7 +827,7 @@ test("triage edit action patches task title and refreshes", async () => {
 
   await harness.click();
 
-  assert.equal(harness.fetchCalls[0].path, "/ui/api/v1/tasks/i-0001");
+  assert.equal(harness.fetchCalls[0].path, "/ui/api/v2/tasks/i-0001");
   assert.equal(harness.fetchCalls[0].options.method, "PATCH");
   assert.equal(harness.fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body), { title: "New triage title" });
@@ -1214,7 +863,7 @@ test("triage edit action surfaces patch failures", async () => {
   assert.equal(harness.status.textContent, "task title is required");
 });
 
-test("change detail fetches read model and renders checks and merge action", async () => {
+test("change detail fetches read model and renders checks and threads", async () => {
   const fetchCalls = [];
   const title = { textContent: "" };
   const status = { textContent: "" };
@@ -1237,7 +886,7 @@ test("change detail fetches read model and renders checks and merge action", asy
     },
     fetch(path, options) {
       fetchCalls.push({ path, options });
-      if (path === "/ui/api/v1/changes/ch-0001/diff") {
+      if (path === "/ui/api/v2/changes/ch-0001/diff") {
         return Promise.resolve({
           ok: true,
           json: () => Promise.resolve({
@@ -1312,13 +961,15 @@ test("change detail fetches read model and renders checks and merge action", asy
   flowApp.querySelectorAll = () => [];
   await flowApp.renderChange("ch-0001");
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/changes/ch-0001");
-  assert.equal(fetchCalls[1].path, "/ui/api/v1/changes/ch-0001/diff");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/changes/ch-0001");
+  assert.equal(fetchCalls[1].path, "/ui/api/v2/changes/ch-0001/diff");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.equal(title.textContent, "Change");
   assert.match(content.innerHTML, /ch-0001/);
   assert.match(content.innerHTML, /Ship web UI/);
-  assert.match(content.innerHTML, /data-merge-change="ch-0001"/);
+  // Merging is driven by the workflow engine; the change page no longer
+  // renders a manual merge button.
+  assert.doesNotMatch(content.innerHTML, /data-merge-change=/);
   assert.match(diffContainer.innerHTML, /files 1/);
   assert.match(diffContainer.innerHTML, /app.go/);
   assert.match(diffContainer.innerHTML, /<pre class="diff-unified" style="--diff-unified-width: 27ch;">/);
@@ -1348,7 +999,7 @@ test("change detail fetches read model and renders checks and merge action", asy
   assert.match(diffContainer.innerHTML, /aria-pressed="false"[^>]*>Split/);
   assert.match(diffContainer.innerHTML, /data-diff-mode="unified">/);
   assert.match(diffContainer.innerHTML, /diff-unified-line diff-add">\+const New = 1/);
-  assert.equal(fetchCalls.filter((call) => call.path === "/ui/api/v1/changes/ch-0001/diff").length, 1);
+  assert.equal(fetchCalls.filter((call) => call.path === "/ui/api/v2/changes/ch-0001/diff").length, 1);
 });
 
 test("change detail diff uses the same width for all files and hunks", async () => {
@@ -1473,7 +1124,7 @@ test("change detail diff toggle re-renders cached diff in the new mode without r
     window: { location: { pathname: "/ui/changes/ch-0001" }, addEventListener() {}, open() {}, localStorage },
     fetch(path) {
       fetchCalls.push(path);
-      if (path === "/ui/api/v1/changes/ch-0001/diff") {
+      if (path === "/ui/api/v2/changes/ch-0001/diff") {
         return Promise.resolve({
           ok: true,
           json: () => Promise.resolve({
@@ -1530,7 +1181,7 @@ test("change detail diff toggle re-renders cached diff in the new mode without r
   assert.match(diffContainer.innerHTML, /data-diff-mode="unified"/);
   assert.match(diffContainer.innerHTML, /<pre class="diff-unified"/);
   assert.equal(storage.get(DIFF_MODE_STORAGE_KEY), undefined);
-  assert.equal(fetchCalls.filter((p) => p === "/ui/api/v1/changes/ch-0001/diff").length, 1);
+  assert.equal(fetchCalls.filter((p) => p === "/ui/api/v2/changes/ch-0001/diff").length, 1);
   assert.equal(typeof splitButton.listener, "function");
 
   splitButton.listener();
@@ -1539,7 +1190,7 @@ test("change detail diff toggle re-renders cached diff in the new mode without r
   assert.match(diffContainer.innerHTML, /data-diff-mode="split"/);
   assert.match(diffContainer.innerHTML, /<table class="diff-split"/);
   assert.doesNotMatch(diffContainer.innerHTML, /<pre class="thread-context"/);
-  assert.equal(fetchCalls.filter((p) => p === "/ui/api/v1/changes/ch-0001/diff").length, 1);
+  assert.equal(fetchCalls.filter((p) => p === "/ui/api/v2/changes/ch-0001/diff").length, 1);
 });
 
 test("readDiffMode round-trips split and falls back to unified for invalid values", async () => {
@@ -1600,7 +1251,7 @@ test("thread claim action posts claim payload and refreshes", async () => {
 
   await clickHandler();
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/threads/th-0001/claims");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/threads/th-0001/claims");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {
@@ -1722,7 +1373,7 @@ test("thread reply action posts comment payload and refreshes", async () => {
 
   await clickHandler();
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/threads/th-0001/comments");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/threads/th-0001/comments");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {
@@ -1791,7 +1442,7 @@ test("phase approve action posts to task phase endpoint and refreshes", async ()
 
   await clickHandler();
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/phase/approve");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-demo/tasks/i-0001/phase/approve");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
@@ -1831,7 +1482,7 @@ test("phase request-changes form posts feedback to task phase endpoint and refre
 
   await submitHandler({ preventDefault() {} });
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/phase/request-changes");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-demo/tasks/i-0001/phase/request-changes");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), { feedback: "Please narrow the first step." });
   assert.equal(refreshed, true);
@@ -1870,7 +1521,7 @@ test("attention reply form posts message and status log id", async () => {
 
   await submitHandler({ preventDefault() {} });
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/attention/reply");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-demo/tasks/i-0001/attention/reply");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {
@@ -1947,7 +1598,7 @@ test("human review approval action reports satisfied check and refreshes", async
 
   await clickHandler();
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/tasks/i-0001/checks/human-review");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/tasks/i-0001/checks/human-review");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {
@@ -2009,7 +1660,7 @@ test("change diff cache refetches only when head changes", async () => {
   const context = await scriptContext({}, {
     fetch(path) {
       fetchCount += 1;
-      assert.equal(path, "/ui/api/v1/changes/ch-0001/diff");
+      assert.equal(path, "/ui/api/v2/changes/ch-0001/diff");
       const headSHA = fetchCount === 1 ? "head-1" : "head-2";
       return Promise.resolve({
         ok: true,
@@ -2041,7 +1692,7 @@ test("change diff cache refetches only when head changes", async () => {
 test("change diff ignores payload for a different head", async () => {
   const context = await scriptContext({}, {
     fetch(path) {
-      assert.equal(path, "/ui/api/v1/changes/ch-0001/diff");
+      assert.equal(path, "/ui/api/v2/changes/ch-0001/diff");
       return Promise.resolve({
         ok: true,
         json: () => Promise.resolve({
@@ -2144,13 +1795,13 @@ test("task detail renders owner metadata, relations, sessions, changes, and chec
   flowApp.querySelectorAll = () => [];
   await flowApp.renderTask("i-0001", undefined, "p-alpha");
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-alpha/tasks/i-0001");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks/i-0001");
   assert.match(content.innerHTML, /class="detail task-detail"/);
   assert.match(content.innerHTML, /class="task-detail-grid"/);
   assert.match(content.innerHTML, /class="task-detail-column task-detail-editor"/);
   assert.match(content.innerHTML, /class="task-detail-column task-detail-activity"/);
   assert.match(content.innerHTML, /class="task-detail-column task-detail-system"/);
-  assert.match(content.innerHTML, /class="task-detail-lifecycle"><h3>Lifecycle<\/h3><div class="lifecycle-chart"><svg/);
+  assert.match(content.innerHTML, /class="task-detail-lifecycle"><h3>Activity<\/h3><div class="lifecycle-timeline">/);
   // Unified timeline: sessions, transitions and status all render inside it.
   assert.match(content.innerHTML, /<div class="feed timeline-feed" data-timeline>/);
   assert.match(content.innerHTML, /data-timeline-glyph="session"/);
@@ -2167,11 +1818,11 @@ test("task detail renders owner metadata, relations, sessions, changes, and chec
   assert.match(content.innerHTML, /data-terminal="s-0001"/);
   assert.equal(content.innerHTML.match(/data-terminal="s-0001"/g)?.length, 2);
   assert.match(content.innerHTML, /data-session-transcript="s-0001"/);
-  assert.match(content.innerHTML, /data-task-state-form="i-0001"/);
-  assert.match(content.innerHTML, /<option value="up_next" selected>Up Next<\/option>/);
-  assert.match(content.innerHTML, /data-pause="i-0001"/);
-  assert.doesNotMatch(content.innerHTML, /data-close="i-0001"/);
-  assert.match(content.innerHTML, /data-review-run="i-0001"/);
+  // Lifecycle is driven by the workflow engine: the detail exposes a Schedule
+  // control rather than the legacy manual state/pause controls.
+  assert.match(content.innerHTML, /data-workflow-schedule="i-0001"/);
+  assert.doesNotMatch(content.innerHTML, /data-task-state-form=/);
+  assert.doesNotMatch(content.innerHTML, /data-pause=/);
   assert.match(content.innerHTML, /ch-0001/);
   assert.match(content.innerHTML, /Ready Change/);
   assert.match(content.innerHTML, /ch-ready/);
@@ -2179,37 +1830,57 @@ test("task detail renders owner metadata, relations, sessions, changes, and chec
   assert.match(content.innerHTML, /unit/);
   assert.match(content.innerHTML, /review\.png/);
   assert.match(content.innerHTML, /class="attachment-preview"/);
-  assert.match(content.innerHTML, /\/ui\/api\/v1\/projects\/p-alpha\/tasks\/i-0001\/attachments\/att-0001\?download=1/);
+  assert.match(content.innerHTML, /\/ui\/api\/v2\/projects\/p-alpha\/tasks\/i-0001\/attachments\/att-0001\?download=1/);
   assert.match(content.innerHTML, /<span class="badge warn">changes requested<\/span>/);
   assert.match(content.innerHTML, /Source Task/);
-  assert.match(content.innerHTML, /Lifecycle/);
-  assert.match(content.innerHTML, /<div class="lifecycle-chart"><svg/);
+  assert.match(content.innerHTML, /Activity/);
   assert.match(content.innerHTML, /ensure_author_job|up_next/);
 });
 
-test("task detail renders a gate-paused phase as a full-width approval panel", async () => {
+test("task detail renders a human gate wait as a full-width approval panel", async () => {
   const harness = await browserSmokeHarness("/ui/projects/p-alpha/tasks/i-0001", {
-    "/ui/api/v1/projects/p-alpha/tasks/i-0001": {
+    "/ui/api/v2/projects/p-alpha/tasks/i-0001": {
       project_id: "p-alpha",
       task: {
         id: "i-0001",
         title: "Gated task",
-        schedule_state: "up_next",
-        triage_state: "accepted",
+        state: "in_progress",
         priority: 1,
         created_by: "agent",
         updated_at: "2026-06-18T12:37:00Z",
       },
       task_detail: {},
-      flow: {
-        flow_id: "fl-plan",
-        flow_name: "planned",
-        phase_name: "plan",
-        phase_index: 0,
-        phase_count: 2,
-        phase_state: "awaiting_approval",
-        gate: "human",
-        pending_handoff: "1. Inspect state\n2. Patch the UI",
+    },
+    "/ui/api/v2/projects/p-alpha/tasks/i-0001/workflow": {
+      detail: {
+        run: {
+          id: "wr-1",
+          task_id: "i-0001",
+          current_node_key: "approve-plan",
+          snapshot: {
+            flow_id: "fl-plan",
+            flow_name: "planned",
+            nodes: [{
+              key: "approve-plan",
+              name: "Approve plan",
+              kind: "human_gate",
+              config: {
+                human_gate: {
+                  instructions: "Review the proposed implementation tasks.",
+                  outcomes: ["approved", "changes_requested", "rejected"],
+                },
+              },
+            }],
+          },
+        },
+        node_runs: [],
+        open_wait: {
+          id: "wait-1",
+          workflow_run_id: "wr-1",
+          node_run_id: "nr-1",
+          kind: "human_gate",
+          message: "Waiting for a human decision.",
+        },
       },
     },
   });
@@ -2217,66 +1888,17 @@ test("task detail renders a gate-paused phase as a full-width approval panel", a
   await harness.app.load();
 
   const html = harness.content.innerHTML;
-  assert.match(html, /class="human-attention-panel" data-phase-gate/);
-  assert.match(html, /Phase plan awaiting approval/);
-  assert.match(html, /data-phase-approve="i-0001"/);
-  assert.match(html, /data-phase-request-changes="i-0001"/);
-  assert.match(html, /<ol>\s*<li>Inspect state<\/li>\s*<li>Patch the UI<\/li>\s*<\/ol>/);
-  // The header meta line surfaces the flow + current phase (1-based).
-  assert.match(html, /planned · plan 1\/2/);
-  assert.ok(html.indexOf("summary-grid") < html.indexOf("data-phase-gate"));
-  assert.ok(html.indexOf("data-phase-gate") < html.indexOf("task-detail-grid"));
-});
-
-test("task detail renders resume for a paused task", async () => {
-  const harness = await browserSmokeHarness("/ui/projects/p-alpha/tasks/i-0001", {
-    "/ui/api/v1/projects/p-alpha/tasks/i-0001": {
-      project_id: "p-alpha",
-      task: {
-        id: "i-0001",
-        title: "Paused task",
-        schedule_state: "up_next",
-        triage_state: "accepted",
-        priority: 1,
-        created_by: "human",
-        updated_at: "2026-06-07T12:00:00Z",
-      },
-      task_detail: {
-        paused: true,
-        sessions: [{ id: "s-0001", state: "abandoned", worker_id: "w-local", branch: "task/i-0001", updated_at: "2026-06-07T12:01:00Z" }],
-      },
-    },
-  });
-
-  await harness.app.load();
-
-  assert.match(harness.content.innerHTML, /data-resume="i-0001"/);
-  assert.doesNotMatch(harness.content.innerHTML, /data-pause="i-0001"/);
-  assert.doesNotMatch(harness.content.innerHTML, /data-close="i-0001"/);
-});
-
-test("task detail renders retry for a crash-held task", async () => {
-  const harness = await browserSmokeHarness("/ui/projects/p-alpha/tasks/i-0001", {
-    "/ui/api/v1/projects/p-alpha/tasks/i-0001": {
-      project_id: "p-alpha",
-      task: {
-        id: "i-0001",
-        title: "Crash held task",
-        schedule_state: "up_next",
-        triage_state: "accepted",
-        priority: 1,
-        created_by: "human",
-        updated_at: "2026-06-07T12:00:00Z",
-      },
-      task_detail: {
-        wait_reason: "crash_loop",
-      },
-    },
-  });
-
-  await harness.app.load();
-
-  assert.match(harness.content.innerHTML, /data-retry-crash="i-0001"/);
+  assert.match(html, /class="human-attention-panel"/);
+  assert.match(html, /Approve plan/);
+  assert.match(html, /Review the proposed implementation tasks\./);
+  // Each gate outcome becomes a workflow respond button carrying its node run.
+  assert.match(html, /data-workflow-respond="nr-1"[^>]*data-outcome="approved"/);
+  assert.match(html, /data-workflow-respond="nr-1"[^>]*data-outcome="changes_requested"/);
+  assert.match(html, /data-workflow-respond="nr-1"[^>]*data-outcome="rejected"/);
+  assert.match(html, /data-workflow-feedback/);
+  // The panel sits between the summary grid and the detail grid.
+  assert.ok(html.indexOf("summary-grid") < html.indexOf("human-attention-panel"));
+  assert.ok(html.indexOf("human-attention-panel") < html.indexOf("task-detail-grid"));
 });
 
 test("attachment previews are limited to safe raster image types", async () => {
@@ -2594,14 +2216,13 @@ test("board cards render session terminal icon actions in every running board st
   }
 });
 
-test("ready to merge cards render diff stats and head sha", async () => {
+test("ready to merge cards link to their change and review state", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   const html = app.renderTaskCard({
     id: "i-0001",
     title: "Merge me",
-    schedule_state: "accepted",
-    triage_state: "accepted",
+    state: "in_progress",
     priority: 1,
     updated_at: "2026-06-07T12:00:00Z",
   }, {
@@ -2610,41 +2231,17 @@ test("ready to merge cards render diff stats and head sha", async () => {
       branch: "task/i-0001",
       head_sha: "abcdef1234567890",
     },
-    diff_stats: {
-      head_sha: "abcdef1234567890",
-      total_files: 2,
-      additions: 12,
-      deletions: 3,
-    },
-    review_state: "approved",
-  }, "ready_to_merge", false);
+    review_state: "changes_requested",
+  }, "approved", false);
 
-  assert.match(html, /head abcdef123456/);
-  assert.match(html, /files 2/);
-  assert.match(html, /<span class="diff-add">\+12<\/span>/);
-  assert.match(html, /<span class="diff-del">-3<\/span>/);
-  assert.match(html, /data-merge="i-0001"/);
-});
-
-test("ready to merge cards hide merge action unless approved", async () => {
-  const context = await scriptContext();
-  const app = new context.FlowApp();
-  const task = {
-    id: "i-0001",
-    title: "Not approved",
-    schedule_state: "accepted",
-    triage_state: "accepted",
-    priority: 1,
-  };
-  const change = {
-    id: "ch-0001",
-    branch: "task/i-0001",
-    head_sha: "abcdef1234567890",
-  };
-
-  assert.doesNotMatch(app.renderTaskCard(task, { change }, "ready_to_merge", false), /data-merge="i-0001"/);
-  assert.doesNotMatch(app.renderTaskCard(task, { change, review_state: "changes_requested" }, "ready_to_merge", false), /data-merge="i-0001"/);
-  assert.match(app.renderTaskCard(task, { change, review_state: "approved" }, "ready_to_merge", false), /data-merge="i-0001"/);
+  assert.match(html, /<a href="\/ui\/changes\/ch-0001" data-link>ch-0001<\/a>/);
+  assert.match(html, /task\/i-0001/);
+  assert.match(html, /<span class="badge warn">changes requested<\/span>/);
+  // Merging happens on the change page; the card only exposes workflow controls.
+  assert.doesNotMatch(html, /data-merge=/);
+  assert.doesNotMatch(html, /head abcdef123456/);
+  assert.match(html, /data-workflow-reset="i-0001"/);
+  assert.match(html, /data-workflow-done="i-0001"/);
 });
 
 test("cards carry phase identity as data-phase and a phase badge", async () => {
@@ -2653,20 +2250,20 @@ test("cards carry phase identity as data-phase and a phase badge", async () => {
   const task = {
     id: "i-0001",
     title: "Phase identity",
-    schedule_state: "up_next",
-    triage_state: "accepted",
+    state: "in_progress",
     priority: 1,
   };
 
-  const inReview = app.renderTaskCard(task, {}, "in_review", false);
+  const inReview = app.renderTaskCard(task, {}, "critique", false);
   assert.match(inReview, /<article class="card" data-phase="critique"/);
-  assert.match(inReview, /<span class="badge" data-phase="critique"><span class="dot"><\/span>in review<\/span>/);
+  assert.match(inReview, /<span class="badge" data-phase="critique"><span class="dot"><\/span>critique<\/span>/);
 
-  const queued = app.renderTaskCard(task, {}, "", false);
-  assert.match(queued, /<article class="card" data-phase="up_next"/);
+  const working = app.renderTaskCard(task, {}, "authoring", false);
+  assert.match(working, /<article class="card" data-phase="authoring"/);
 
-  const triage = app.renderTaskCard({ ...task, triage_state: "triage" }, {}, "triage", false);
-  assert.match(triage, /<article class="card" data-phase="triage"/);
+  const unscheduled = app.renderTaskCard({ ...task, state: "unscheduled" }, {}, "unscheduled", false);
+  assert.match(unscheduled, /<article class="card" data-phase="backlog"/);
+  assert.match(unscheduled, /<span class="badge" data-phase="backlog"><span class="dot"><\/span>unscheduled<\/span>/);
 });
 
 test("blocked cards render the blocked overlay phase and badge", async () => {
@@ -2857,27 +2454,6 @@ test("feedback cards surface a non-note status kind badge", async () => {
   assert.match(noteHTML, /running tests/);
 });
 
-test("crash-loop cards render retry action", async () => {
-  const context = await scriptContext();
-  const app = new context.FlowApp();
-  const task = { id: "i-0001", title: "Crash task", schedule_state: "up_next", triage_state: "accepted" };
-  const html = app.renderTaskCard(task, {}, "up_next", false, 0, { id: "p-demo" }, "crash_loop");
-
-  assert.match(html, /data-retry-crash="i-0001"/);
-  assert.match(html, /\/ui\/projects\/p-demo\/tasks\/i-0001/);
-});
-
-test("crash retry card action renders when another wait reason masks crash loop", async () => {
-  const context = await scriptContext();
-  const app = new context.FlowApp();
-  const task = { id: "i-0001", title: "Review task", schedule_state: "up_next", triage_state: "accepted" };
-  const card = { crash_retry_available: true };
-  const html = app.renderTaskCard(task, card, "in_review", false, 0, { id: "p-demo" }, "human_review");
-
-  assert.match(html, /data-retry-crash="i-0001"/);
-  assert.match(html, /waiting for human review/);
-});
-
 test("statusbar reflects poll state and interval", async () => {
   const timers = [];
   const context = await scriptContext({
@@ -2964,7 +2540,7 @@ test("worker and job state badges map states to status classes", async () => {
 test("jobs view shows project column, filters by project, and sorts by updated", async () => {
   const context = await scriptContext({}, {
     fetch(path) {
-      assert.equal(path, "/ui/api/v1/jobs");
+      assert.equal(path, "/ui/api/v2/jobs");
       return Promise.resolve({
         ok: true,
         json: () => Promise.resolve({
@@ -3075,20 +2651,19 @@ test("check verdict badges map verdicts to status classes with pending fallback"
 
 test("board lanes carry data-lane attributes for the lane accent system", async () => {
   const harness = await browserSmokeHarness("/ui/board", {
-    "/ui/api/v1/board": {
+    "/ui/api/v2/board": {
       boards: [{
         project_id: "p-alpha",
         project_name: "alpha",
         board: {
-          backlog: [{
+          Unscheduled: [{
             id: "i-0001",
-            title: "Backlog task",
-            schedule_state: "backlog",
-            triage_state: "accepted",
+            title: "Unscheduled task",
+            state: "unscheduled",
             priority: 1,
           }],
         },
-        lane_states: { "i-0001": "backlog" },
+        lane_states: { "i-0001": "unscheduled" },
         task_cards: {},
       }],
     },
@@ -3096,14 +2671,14 @@ test("board lanes carry data-lane attributes for the lane accent system", async 
 
   await harness.app.load();
 
-  for (const lane of ["backlog", "up_next", "in_progress", "needs_attention"]) {
+  for (const lane of ["unscheduled", "scheduled", "in_progress", "done"]) {
     assert.match(harness.content.innerHTML, new RegExp(`<section class="lane" data-lane="${lane}">`));
   }
 });
 
 test("load marks content as nav or poll refresh and reports live poll state", async () => {
   const harness = await browserSmokeHarness("/ui/board", {
-    "/ui/api/v1/board": { boards: [{ project_id: "p-alpha", project_name: "alpha", board: {}, lane_states: {}, task_cards: {} }] },
+    "/ui/api/v2/board": { boards: [{ project_id: "p-alpha", project_name: "alpha", board: {}, lane_states: {}, task_cards: {} }] },
   });
 
   await harness.app.load();
@@ -3124,7 +2699,7 @@ test("non-polling routes report static instead of live", async () => {
   assert.equal(harness.statusbar.dataset.state, "idle");
   assert.equal(harness.sbLabel.textContent, "static");
   assert.equal(harness.sbMeta.textContent, "");
-  assert.deepEqual(harness.fetchCalls, ["/ui/api/v1/projects"]);
+  assert.deepEqual(harness.fetchCalls, ["/ui/api/v2/projects"]);
 });
 
 test("unscoped task detail route requires a project-scoped URL", async () => {
@@ -3135,7 +2710,7 @@ test("unscoped task detail route requires a project-scoped URL", async () => {
   assert.equal(harness.title.textContent, "Task");
   assert.match(harness.content.innerHTML, /Project-scoped task URL required/);
   assert.match(harness.content.innerHTML, /\/ui\/projects\/&lt;project-id&gt;\/tasks\/&lt;task-id&gt;/);
-  assert.deepEqual(harness.fetchCalls, ["/ui/api/v1/projects"]);
+  assert.deepEqual(harness.fetchCalls, ["/ui/api/v2/projects"]);
 });
 
 test("load failures surface error then retry state in the statusbar", async () => {
@@ -3182,83 +2757,43 @@ test("feedback cards render handoff summaries", async () => {
   assert.doesNotMatch(inProgressHTML, /handoff: Waiting for product decision before final polish\./);
 });
 
-test("browser smoke loads board and inbox direct routes", async () => {
-  for (const route of [
-    {
-      path: "/ui/board",
-      title: "Board",
-      present: [/Backlog task/, /Discovered task/, /Waiting task/, /Merge task/],
-      absent: [],
-      activeHref: "/ui/board",
-    },
-    {
-      path: "/ui/",
-      title: "Board",
-      present: [/Backlog task/, /Discovered task/, /Waiting task/, /Merge task/],
-      absent: [],
-      activeHref: "/ui/board",
-    },
-    {
-      path: "/ui/triage",
-      title: "Triage",
-      present: [/Discovered task/],
-      absent: [/Backlog task/, /Waiting task/, /Merge task/],
-      activeHref: "/ui/triage",
-    },
-    {
-      path: "/ui/feedback",
-      title: "Needs Attention",
-      present: [/Waiting task/, /Merge task/],
-      absent: [/Backlog task/, /Discovered task/],
-      activeHref: "/ui/feedback",
-    },
-    {
-      path: "/ui/merge",
-      title: "Merge",
-      present: [/Merge task/],
-      absent: [/Backlog task/, /Discovered task/, /Waiting task/],
-      activeHref: "/ui/merge",
-    },
-  ]) {
-    const harness = await browserSmokeHarness(route.path, {
-      "/ui/api/v1/board": {
+test("browser smoke loads board and done preview", async () => {
+  for (const path of ["/ui/board", "/ui/"]) {
+    const harness = await browserSmokeHarness(path, {
+      "/ui/api/v2/board": {
         boards: [{
           project_id: "p-alpha",
           project_name: "alpha",
           board: {
-            backlog: [{
+            Unscheduled: [{
               id: "i-0001",
-              title: "Backlog task",
-              schedule_state: "backlog",
-              triage_state: "accepted",
+              title: "Unscheduled task",
+              state: "unscheduled",
               priority: 1,
             }, {
               id: "i-0002",
               title: "Discovered task",
-              schedule_state: "backlog",
-              triage_state: "triage",
+              state: "unscheduled",
               priority: 2,
               created_by: "agent",
             }],
-            needs_attention: [{
+            InProgress: [{
               id: "i-0003",
               title: "Waiting task",
-              schedule_state: "up_next",
-              triage_state: "accepted",
+              state: "in_progress",
               priority: 1,
             }, {
               id: "i-0004",
               title: "Merge task",
-              schedule_state: "accepted",
-              triage_state: "accepted",
+              state: "in_progress",
               priority: 1,
             }],
           },
           lane_states: {
-            "i-0001": "backlog",
-            "i-0002": "triage",
+            "i-0001": "unscheduled",
+            "i-0002": "unscheduled",
             "i-0003": "in_progress",
-            "i-0004": "ready_to_merge",
+            "i-0004": "in_progress",
           },
           wait_reasons: {
             "i-0003": "question",
@@ -3272,34 +2807,30 @@ test("browser smoke loads board and inbox direct routes", async () => {
             },
             "i-0004": {
               change: { id: "ch-0004", branch: "task/i-0004", head_sha: "abcdef1234567890" },
-              diff_stats: { total_files: 1, additions: 2, deletions: 0 },
               review_state: "approved",
             },
           },
         }],
       },
+      "/ui/api/v2/done?limit=20": { done: [] },
     });
 
     await harness.app.load();
 
-    assert.equal(harness.title.textContent, route.title);
-    for (const pattern of route.present) assert.match(harness.content.innerHTML, pattern);
-    for (const pattern of route.absent) assert.doesNotMatch(harness.content.innerHTML, pattern);
-    assert.equal(harness.activeNavHref(), route.activeHref);
-    // The unfiltered board (showDone) also fetches the Done lane preview; the
-    // filtered inbox routes (triage/feedback/merge) do not.
-    const expectedCalls = ["/ui/api/v1/projects", "/ui/api/v1/board"];
-    if (route.path === "/ui/board" || route.path === "/ui/") {
-      expectedCalls.push("/ui/api/v1/done?limit=20");
+    assert.equal(harness.title.textContent, "Board");
+    for (const pattern of [/Unscheduled task/, /Discovered task/, /Waiting task/, /Merge task/]) {
+      assert.match(harness.content.innerHTML, pattern);
     }
-    assert.deepEqual(harness.fetchCalls, expectedCalls);
+    assert.equal(harness.activeNavHref(), "/ui/board");
+    // The board also fetches the Done lane preview.
+    assert.deepEqual(harness.fetchCalls, ["/ui/api/v2/projects", "/ui/api/v2/board", "/ui/api/v2/done?limit=20"]);
     assert.equal(harness.status.textContent, "");
   }
 });
 
 test("browser smoke loads task and change deep links", async () => {
   const taskHarness = await browserSmokeHarness("/ui/projects/p-alpha/tasks/i-0001", {
-    "/ui/api/v1/projects/p-alpha/tasks/i-0001": {
+    "/ui/api/v2/projects/p-alpha/tasks/i-0001": {
       project_id: "p-alpha",
       task: {
         id: "i-0001",
@@ -3322,6 +2853,7 @@ test("browser smoke loads task and change deep links", async () => {
       },
       status_log: [{ message: "Ready for review", created_at: "2026-06-07T12:01:00Z" }],
     },
+    "/ui/api/v2/projects/p-alpha/tasks/i-0001/workflow": { detail: null },
   });
 
   await taskHarness.app.load();
@@ -3329,10 +2861,10 @@ test("browser smoke loads task and change deep links", async () => {
   assert.equal(taskHarness.title.textContent, "Task");
   assert.match(taskHarness.content.innerHTML, /Task detail/);
   assert.match(taskHarness.content.innerHTML, /web-ui/);
-  assert.deepEqual(taskHarness.fetchCalls, ["/ui/api/v1/projects", "/ui/api/v1/projects/p-alpha/tasks/i-0001", "/ui/api/v1/projects/p-alpha/flows"]);
+  assert.deepEqual(taskHarness.fetchCalls, ["/ui/api/v2/projects", "/ui/api/v2/projects/p-alpha/tasks/i-0001", "/ui/api/v2/projects/p-alpha/tasks/i-0001/workflow", "/ui/api/v2/projects/p-alpha/flows"]);
 
   const changeHarness = await browserSmokeHarness("/ui/changes/ch-0001", {
-    "/ui/api/v1/changes/ch-0001": {
+    "/ui/api/v2/changes/ch-0001": {
       change: {
         id: "ch-0001",
         branch: "task/i-0001",
@@ -3354,7 +2886,7 @@ test("browser smoke loads task and change deep links", async () => {
         comments: [{ body: "Review note" }],
       }],
     },
-    "/ui/api/v1/changes/ch-0001/diff": {
+    "/ui/api/v2/changes/ch-0001/diff": {
       change_id: "ch-0001",
       head_sha: "abcdef1234567890",
       available: true,
@@ -3373,9 +2905,9 @@ test("browser smoke loads task and change deep links", async () => {
   assert.match(changeHarness.diffContainer("ch-0001").innerHTML, /files 1/);
   assert.match(changeHarness.diffContainer("ch-0001").innerHTML, /app.go/);
   assert.deepEqual(changeHarness.fetchCalls, [
-    "/ui/api/v1/projects",
-    "/ui/api/v1/changes/ch-0001",
-    "/ui/api/v1/changes/ch-0001/diff",
+    "/ui/api/v2/projects",
+    "/ui/api/v2/changes/ch-0001",
+    "/ui/api/v2/changes/ch-0001/diff",
   ]);
 });
 
@@ -3388,11 +2920,6 @@ test("polling policy matches board, diagnostics, and change routes", async () =>
     backoff: false,
   });
   assert.deepEqual(normalize(context.pollConfigForPath("/ui/board")), {
-    interval: 10000,
-    maxInterval: 10000,
-    backoff: false,
-  });
-  assert.deepEqual(normalize(context.pollConfigForPath("/ui/triage")), {
     interval: 10000,
     maxInterval: 10000,
     backoff: false,
@@ -3437,8 +2964,8 @@ test("diagnostics polling backs off and clears prior timer", async () => {
   assert.equal(timers[1].delay, 120000);
 
   app.pollFailures = 5;
-  app.schedulePolling("/ui/merge");
-  assert.equal(timers[2].delay, 10000);
+  app.schedulePolling("/ui/workers");
+  assert.equal(timers[2].delay, 120000);
   assert.deepEqual(cleared, [1, 2]);
 });
 
@@ -3486,9 +3013,7 @@ test("sidebar status refresh renders live nav badges and polls", async () => {
       return Promise.resolve({
         ok: true,
         json: () => Promise.resolve({
-          triage: 3,
-          feedback: 4,
-          merge: 5,
+          done: 8,
           workers: { in_use: 2, capacity: 5 },
           jobs: { active: 6, queued: 7 },
         }),
@@ -3501,10 +3026,8 @@ test("sidebar status refresh renders live nav badges and polls", async () => {
 
   await app.refreshSidebarStatus();
 
-  assert.deepEqual(fetchCalls, ["/ui/api/v1/sidebar"]);
-  assert.match(nav.innerHTML, /title="3 triage items">3<\/span>/);
-  assert.match(nav.innerHTML, /title="4 needs attention items">4<\/span>/);
-  assert.match(nav.innerHTML, /title="5 merge items">5<\/span>/);
+  assert.deepEqual(fetchCalls, ["/ui/api/v2/sidebar"]);
+  assert.match(nav.innerHTML, /title="8 done items">8<\/span>/);
   assert.match(nav.innerHTML, /title="2 in use of 5 worker slots">2\/5<\/span>/);
   assert.match(nav.innerHTML, /data-job-status="active">6<\/span>/);
   assert.match(nav.innerHTML, /data-job-status="queued">7<\/span>/);
@@ -3525,7 +3048,7 @@ test("stale poll load does not repaint task route or rearm board polling", async
     clearTimeout() {},
   }, {
     fetch(path) {
-      assert.equal(path, "/ui/api/v1/board");
+      assert.equal(path, "/ui/api/v2/board");
       return boardResponse.promise;
     },
   });
@@ -3565,7 +3088,7 @@ test("disconnect during pending load prevents polling rearm", async () => {
     clearTimeout() {},
   }, {
     fetch(path) {
-      assert.equal(path, "/ui/api/v1/jobs");
+      assert.equal(path, "/ui/api/v2/jobs");
       return jobsResponse.promise;
     },
   });
@@ -3616,7 +3139,7 @@ test("pre-disconnect load stays stale after reconnect-style load", async () => {
     clearTimeout() {},
   }, {
     fetch(path) {
-      assert.equal(path, "/ui/api/v1/jobs");
+      assert.equal(path, "/ui/api/v2/jobs");
       const response = responses.shift();
       if (!response) throw new Error("unexpected fetch");
       return response;
@@ -3886,13 +3409,13 @@ async function browserSmokeHarness(path, responses) {
     HTMLElement: SmokeHTMLElement,
     fetch(requestPath) {
       fetchCalls.push(requestPath);
-      if (requestPath === "/ui/api/v1/projects" && !(requestPath in responses)) {
+      if (requestPath === "/ui/api/v2/projects" && !(requestPath in responses)) {
         return Promise.resolve({
           ok: true,
           json: () => Promise.resolve({ projects: [] }),
         });
       }
-      if (requestPath === "/ui/api/v1/harnesses" && !(requestPath in responses)) {
+      if (requestPath === "/ui/api/v2/harnesses" && !(requestPath in responses)) {
         return Promise.resolve({
           ok: true,
           json: () => Promise.resolve({ agents: [], consoles: [] }),
@@ -4699,26 +4222,35 @@ test("read-only detail renders the flow phase chain from the live flow status", 
 
 test("flows editor markup opts into shared form styling and accessible row controls", async () => {
   const context = await scriptContext();
-  const agentDefs = [{ id: "ad-1", name: "author" }];
   const agentOptions = [{ name: "codex", display_name: "Codex", models: [] }];
 
   const agentHTML = context.renderAgentDefFormView(null, agentOptions);
   assert.match(agentHTML, /<form class="agent-def-form task-form"/);
   assert.match(agentHTML, /class="agent-def-model-fields" data-def-model-fields/);
 
-  const flowHTML = context.renderFlowEditorView({ name: "custom" }, agentDefs);
+  const flowHTML = context.renderFlowEditorView({ name: "custom" }, []);
   assert.match(flowHTML, /<form class="flow-editor task-form"/);
-  assert.match(flowHTML, /class="flow-row-list wide" data-phase-rows/);
-  assert.match(flowHTML, /class="flow-row-actions wide"><button[^>]+data-add-phase/);
-  assert.match(flowHTML, /aria-label="Phase name"/);
-  assert.match(flowHTML, /class="flow-row-controls"/);
-  assert.match(flowHTML, /aria-label="Move phase up"/);
-  assert.match(flowHTML, /aria-label="Remove phase"/);
+  assert.match(flowHTML, /class="flow-row-list wide" data-node-cards/);
+  assert.match(flowHTML, /class="flow-row-actions wide"><button[^>]+data-add-node/);
+  assert.match(flowHTML, /class="flow-row-list wide" data-edge-rows/);
+  assert.match(flowHTML, /class="flow-row-actions wide"><button[^>]+data-add-edge/);
+  assert.match(flowHTML, /class="flow-graph-preview" data-graph-preview/);
 
-  const reviewHTML = context.renderReviewRowView(agentDefs, { agent_def_id: "ad-1", required: true });
-  assert.match(reviewHTML, /aria-label="Review role"/);
-  assert.match(reviewHTML, /aria-label="Review agent"/);
-  assert.match(reviewHTML, /aria-label="Remove review agent"/);
+  const nodeHTML = context.renderNodeCardView({ key: "plan", name: "Plan", kind: "agent" });
+  assert.match(nodeHTML, /class="flow-row flow-node-card" data-node-card/);
+  assert.match(nodeHTML, /aria-label="Node key"/);
+  assert.match(nodeHTML, /aria-label="Node name"/);
+  assert.match(nodeHTML, /aria-label="Trusted node kind"/);
+  assert.match(nodeHTML, /aria-label="Strict node configuration JSON"/);
+  assert.match(nodeHTML, /class="flow-row-controls"/);
+  assert.match(nodeHTML, /title="Move node up"/);
+  assert.match(nodeHTML, /title="Remove node"/);
+
+  const edgeHTML = context.renderEdgeRowView({ from: "plan", outcome: "done", to: "verify" }, ["plan", "verify"]);
+  assert.match(edgeHTML, /data-edge-row/);
+  assert.match(edgeHTML, /aria-label="From node"/);
+  assert.match(edgeHTML, /aria-label="Target node"/);
+  assert.match(edgeHTML, /title="Remove transition"/);
 });
 
 function fakeFieldForm(fields) {
@@ -4750,10 +4282,11 @@ function fakeFlowEditor(spec) {
   const top = {
     flow_name: spec.flow_name,
     flow_description: spec.flow_description,
-    fix_agent_def_id: spec.fix_agent_def_id,
+    start_node: spec.start_node ?? "",
+    transition_budget: spec.transition_budget ?? "50",
   };
-  const phaseRows = (spec.phases || []).map(fakeFlowRow);
-  const reviewRows = (spec.reviews || []).map(fakeFlowRow);
+  const nodeCards = (spec.nodes || []).map(fakeFlowRow);
+  const edgeRows = (spec.edges || []).map(fakeFlowRow);
   return {
     querySelector(selector) {
       const match = selector.match(/^\[name="([^"]+)"\]$/);
@@ -4761,8 +4294,8 @@ function fakeFlowEditor(spec) {
       return null;
     },
     querySelectorAll(selector) {
-      if (selector === "[data-phase-row]") return phaseRows;
-      if (selector === "[data-review-row]") return reviewRows;
+      if (selector === "[data-node-card]") return nodeCards;
+      if (selector === "[data-edge-row]") return edgeRows;
       return [];
     },
   };
@@ -4823,19 +4356,20 @@ test("agent def form payload uses the bare model id for codex/claude harnesses",
   assert.equal(payload.reasoning_effort, "");
 });
 
-test("flow editor payload keeps phase and review rows in document order", async () => {
+test("flow editor payload keeps node and edge rows in document order", async () => {
   const context = await scriptContext();
   const form = fakeFlowEditor({
     flow_name: "Custom",
-    flow_description: "two phases",
-    fix_agent_def_id: "ad-fix",
-    phases: [
-      { phase_name: "spec", phase_agent_def_id: "ad-spec", phase_gate: "human" },
-      { phase_name: "implement", phase_agent_def_id: "ad-impl", phase_gate: "auto" },
+    flow_description: "two nodes",
+    start_node: "plan",
+    transition_budget: "50",
+    nodes: [
+      { node_key: "plan", node_name: "Plan", node_kind: "agent", node_config: '{"agent_def_id":"ad-plan"}' },
+      { node_key: "verify", node_name: "Verify", node_kind: "automated_checks", node_config: "{}" },
     ],
-    reviews: [
-      { review_role: "reviewer", review_agent_def_id: "ad-rev", review_required: true },
-      { review_role: "verifier", review_agent_def_id: "ad-ver", review_required: false },
+    edges: [
+      { edge_from: "plan", edge_outcome: "done", edge_to: "verify" },
+      { edge_from: "verify", edge_outcome: "pass", edge_to: "plan" },
     ],
   });
 
@@ -4843,55 +4377,60 @@ test("flow editor payload keeps phase and review rows in document order", async 
 
   assert.deepEqual(payload, {
     name: "Custom",
-    description: "two phases",
-    fix_agent_def_id: "ad-fix",
-    phases: [
-      { name: "spec", agent_def_id: "ad-spec", gate: "human" },
-      { name: "implement", agent_def_id: "ad-impl", gate: "auto" },
+    description: "two nodes",
+    start_node: "plan",
+    transition_budget: 50,
+    nodes: [
+      { key: "plan", name: "Plan", kind: "agent", config: { agent_def_id: "ad-plan" } },
+      { key: "verify", name: "Verify", kind: "automated_checks", config: {} },
     ],
-    review_agents: [
-      { role: "reviewer", agent_def_id: "ad-rev", required: true },
-      { role: "verifier", agent_def_id: "ad-ver", required: false },
+    edges: [
+      { from: "plan", outcome: "done", to: "verify" },
+      { from: "verify", outcome: "pass", to: "plan" },
     ],
   });
 });
 
-test("flow editor payload drops blank phase rows and review rows missing an agent", async () => {
+test("flow editor payload reads each node and edge row as authored", async () => {
   const context = await scriptContext();
   const form = fakeFlowEditor({
     flow_name: "Sparse",
     flow_description: "",
-    fix_agent_def_id: "",
-    phases: [
-      { phase_name: "spec", phase_agent_def_id: "ad-spec", phase_gate: "auto" },
-      { phase_name: "", phase_agent_def_id: "", phase_gate: "auto" },
+    start_node: "",
+    transition_budget: "50",
+    nodes: [
+      { node_key: "plan", node_name: "Plan", node_kind: "agent", node_config: "{}" },
+      { node_key: "", node_name: "", node_kind: "agent", node_config: "{}" },
     ],
-    reviews: [
-      { review_role: "reviewer", review_agent_def_id: "", review_required: false },
-      { review_role: "verifier", review_agent_def_id: "ad-ver", review_required: true },
+    edges: [
+      { edge_from: "plan", edge_outcome: "done", edge_to: "" },
     ],
   });
 
   const payload = context.flowPayloadFromEditorView(form);
 
-  assert.deepEqual(payload.phases, [{ name: "spec", agent_def_id: "ad-spec", gate: "auto" }]);
-  assert.deepEqual(payload.review_agents, [{ role: "verifier", agent_def_id: "ad-ver", required: true }]);
+  // Rows are submitted as authored; the editor does not drop blank rows.
+  assert.deepEqual(payload.nodes, [
+    { key: "plan", name: "Plan", kind: "agent", config: {} },
+    { key: "", name: "", kind: "agent", config: {} },
+  ]);
+  assert.deepEqual(payload.edges, [{ from: "plan", outcome: "done", to: "" }]);
 });
 
 test("flows view renders agent definitions and flow tables for the active project", async () => {
   const harness = await browserSmokeHarness("/ui/flows", {
-    "/ui/api/v1/projects": { projects: [{ id: "p-alpha", name: "alpha" }] },
-    "/ui/api/v1/harnesses": { agents: [{ name: "harness", display_name: "Harness" }], consoles: [] },
-    "/ui/api/v1/projects/p-alpha/agent-defs": {
+    "/ui/api/v2/projects": { projects: [{ id: "p-alpha", name: "alpha" }] },
+    "/ui/api/v2/harnesses": { agents: [{ name: "harness", display_name: "Harness" }], consoles: [] },
+    "/ui/api/v2/projects/p-alpha/agent-defs": {
       agent_defs: [{ id: "ad-1", name: "author", harness: "harness", model: "anthropic:opus", reasoning_effort: "high", builtin: true }],
     },
-    "/ui/api/v1/projects/p-alpha/flows": {
+    "/ui/api/v2/projects/p-alpha/flows": {
       flows: [{
         id: "fl-1",
         name: "default flow",
         default: true,
-        phases: [{ name: "plan", gate: "human" }, { name: "implement", gate: "auto" }],
-        review_agents: [{ role: "reviewer", agent_def_id: "ad-1" }],
+        start_node: "plan",
+        edges: [{ from: "plan", outcome: "done", to: "implement" }],
       }],
       default_flow_id: "fl-1",
     },
@@ -4906,7 +4445,7 @@ test("flows view renders agent definitions and flow tables for the active projec
   assert.match(html, /builtin/);
   assert.match(html, /data-agent-def-form/);
   assert.match(html, /default flow/);
-  assert.match(html, /plan\(gate\) -> implement/);
+  assert.match(html, /start: plan · plan\.done → implement/);
   assert.match(html, /data-flow-editor/);
   // Keeps the project's flow cache warm for the task form.
   assert.deepEqual(harness.app.flowsByProject.get("p-alpha").defaultFlowID, "fl-1");
@@ -4914,8 +4453,8 @@ test("flows view renders agent definitions and flow tables for the active projec
 
 test("flows view offers a project chooser when several projects are active", async () => {
   const harness = await browserSmokeHarness("/ui/flows", {
-    "/ui/api/v1/projects": { projects: [{ id: "p-alpha", name: "alpha" }, { id: "p-beta", name: "beta" }] },
-    "/ui/api/v1/harnesses": { agents: [], consoles: [] },
+    "/ui/api/v2/projects": { projects: [{ id: "p-alpha", name: "alpha" }, { id: "p-beta", name: "beta" }] },
+    "/ui/api/v2/harnesses": { agents: [], consoles: [] },
   });
   harness.app.renderProjectPicker = () => {};
 
@@ -4931,8 +4470,8 @@ test("flows view offers a project chooser when several projects are active", asy
 
 test("flows route refreshes a stale project registry before choosing a project", async () => {
   const harness = await browserSmokeHarness("/ui/flows", {
-    "/ui/api/v1/projects": { projects: [{ id: "p-alpha", name: "alpha" }, { id: "p-beta", name: "beta" }] },
-    "/ui/api/v1/harnesses": { agents: [], consoles: [] },
+    "/ui/api/v2/projects": { projects: [{ id: "p-alpha", name: "alpha" }, { id: "p-beta", name: "beta" }] },
+    "/ui/api/v2/harnesses": { agents: [], consoles: [] },
   });
   harness.app.projects = [{ id: "p-alpha", name: "alpha" }];
   harness.app.renderProjectPicker = () => {};
@@ -4942,17 +4481,17 @@ test("flows route refreshes a stale project registry before choosing a project",
   assert.match(harness.content.innerHTML, /Select Project/);
   assert.equal((harness.content.innerHTML.match(/class="project-choice"/g) || []).length, 2);
   assert.deepEqual(harness.fetchCalls, [
-    "/ui/api/v1/projects",
-    "/ui/api/v1/harnesses",
+    "/ui/api/v2/projects",
+    "/ui/api/v2/harnesses",
   ]);
 });
 
 test("flows view renders the active project name as a project switcher", async () => {
   const harness = await browserSmokeHarness("/ui/flows?project=p-beta", {
-    "/ui/api/v1/projects": { projects: [{ id: "p-alpha", name: "alpha" }, { id: "p-beta", name: "beta" }] },
-    "/ui/api/v1/harnesses": { agents: [], consoles: [] },
-    "/ui/api/v1/projects/p-beta/agent-defs": { agent_defs: [] },
-    "/ui/api/v1/projects/p-beta/flows": { flows: [], default_flow_id: "" },
+    "/ui/api/v2/projects": { projects: [{ id: "p-alpha", name: "alpha" }, { id: "p-beta", name: "beta" }] },
+    "/ui/api/v2/harnesses": { agents: [], consoles: [] },
+    "/ui/api/v2/projects/p-beta/agent-defs": { agent_defs: [] },
+    "/ui/api/v2/projects/p-beta/flows": { flows: [], default_flow_id: "" },
   });
   harness.app.renderProjectPicker = () => {};
 
@@ -4965,9 +4504,9 @@ test("flows view renders the active project name as a project switcher", async (
   assert.match(html, /\/ui\/flows\?project=p-beta/);
   assert.match(html, /aria-current="page"/);
   assert.deepEqual(harness.fetchCalls, [
-    "/ui/api/v1/projects",
-    "/ui/api/v1/harnesses",
-    "/ui/api/v1/projects/p-beta/agent-defs",
-    "/ui/api/v1/projects/p-beta/flows",
+    "/ui/api/v2/projects",
+    "/ui/api/v2/harnesses",
+    "/ui/api/v2/projects/p-beta/agent-defs",
+    "/ui/api/v2/projects/p-beta/flows",
   ]);
 });
