@@ -26,10 +26,10 @@ when more than one project is registered and filters the board by project.
 Because issue ids restart per project, project-scoped issue routes are the
 unambiguous deep links.
 
-Use **New Issue** to create work from the browser. The form can select a
-project, Flow, priority, human review, auto merge, attachments, and whether to
-queue the issue after creation. Use the **Flows** page to configure agent
-harnesses, model options, work phases, and review agents for each project.
+Use **New Issue** to create unscheduled work from the browser. The form can
+select a project, workflow, priority, attachments, and whether to schedule the
+issue after creation. Use the **Flows** page to configure trusted workflow
+nodes, transitions, agents, start nodes, and transition budgets.
 
 For temporary live verification, avoid rewriting your normal CLI discovery
 config by either running the server with `--no-write-client-config`, or by
@@ -39,68 +39,33 @@ web UI smoke test.
 
 ## Issue Lifecycle
 
-An issue advances through explicit phases. Human-created issues enter at
-`backlog` and are accepted by default. Agent-discovered issues enter the
-`triage` inbox until a human accepts or rejects them. Closed outcomes are
-`merged_closed`, `rejected_closed`, or `abandoned`. A `blocked` overlay is shown
-on top of the underlying phase whenever the issue has an unresolved blocker.
+Issues have four user-facing lifecycle states:
 
 ```mermaid
-flowchart TD
-    triage([triage]):::inbox
-    backlog([backlog])
-    up_next([up_next])
-    planning([planning])
-    authoring([authoring])
-    critique([critique])
-    acceptance([acceptance])
-    approved([approved])
-    merged([merged_closed]):::done
-    rejected([rejected_closed]):::done
-    abandoned([abandoned]):::done
-
-    triage -->|accept| backlog
-    triage -->|reject| rejected
-    backlog -->|"schedule up_next"| up_next
-    up_next -->|"gated first phase (e.g. planned flow)"| planning
-    planning -->|"flow phase approve; next phase queued"| up_next
-    up_next -->|"work phase job starts"| authoring
-    authoring -->|"flow ready"| critique
-    critique -->|"required check blocked -> fix job"| authoring
-    critique -->|"critique checks satisfied -> verifier runs"| acceptance
-    acceptance -->|"verifier satisfied"| approved
-    acceptance -->|"verifier blocked -> fix job"| authoring
-    approved -->|"new commits -> flow ready"| critique
-    approved -->|"auto_merge or flow merge"| merged
-    backlog -.->|"flow issue close"| abandoned
-    up_next -.->|"flow issue close"| abandoned
-    planning -.->|"flow issue close"| abandoned
-    authoring -.->|"flow issue close"| abandoned
-
-    classDef inbox fill:#fff3cd,stroke:#856404,color:#000;
-    classDef done fill:#e2e3e5,stroke:#41464b,color:#000;
+flowchart LR
+    unscheduled([Unscheduled / null]) -->|schedule| scheduled([Scheduled])
+    scheduled -->|worker starts| progress([In Progress])
+    progress --> done([Done])
+    progress --- working([Working])
+    progress --- blocked([Blocked])
+    scheduled -->|reset| unscheduled
+    progress -->|reset| unscheduled
+    done -->|reopen| unscheduled
 ```
 
-`planning` and `authoring` are display refinements of a single stored `working`
-phase: the issue's position within its flow (which work phase, running or paused
-at a human gate) lives on the flow cursor rather than in the workflow state. A
-flow whose first phase is human-gated (such as the built-in `planned` flow)
-surfaces as `planning`; the author runs `flow ready` to submit the phase
-artifact, then a human approves it with `flow phase approve` before the next
-phase is queued.
+New issues have no persisted lifecycle state and appear as **Unscheduled**.
+**Scheduled** means queued for the selected workflow; unresolved blocker issues
+hold execution at the dependency gate. **In Progress / Working** means the
+workflow can act. **In Progress / Blocked** means a human gate or safety budget
+requires owner action. **Done** carries a fixed resolution: `completed`,
+`merged`, `rejected`, `abandoned`, `cancelled`, or `failed`.
 
-The review loop runs inside `critique`: critique checks, reviewer agents, and an
-optional human reviewer run against the current HEAD. Once they are satisfied,
-the verifier audits acceptance criteria before the issue becomes `approved`. A
-blocked required check sends the issue back to authoring with a fix job.
+The work inside In Progress is a frozen directed graph. It may branch and loop,
+but has one active node at a time. Human gates expose their configured outcomes
+on issue detail. Reset cancels the active run and preserves its history; reopen
+starts a new Unscheduled run, including after a merge.
 
-Inspect an issue's history with `flow transitions <issue-id>` or the Lifecycle
-section of its detail page in the web UI.
-
-Human waits are not lifecycle phases. A planning or authoring session can be
-`waiting`, a merge can wait for a button press, and blockers can overlay any
-phase. Those cases route to the Needs Attention lane with a wait reason while
-preserving the underlying phase.
+Inspect the active run and its node history with `flow issue workflow ISSUE_ID`.
 
 ## Common CLI Commands
 
@@ -119,18 +84,12 @@ flow issue create --title TITLE [--flow FLOW]
 flow issue list
 flow issue show ISSUE_ID
 flow issue edit --title TITLE ISSUE_ID
-flow issue schedule ISSUE_ID backlog|up_next
-flow issue state ISSUE_ID triage|backlog|up_next|closed|rejected
-flow issue triage ISSUE_ID accepted|rejected
-flow issue close ISSUE_ID
-```
-
-Work-phase human gates (approve or rework a phase paused for review, such as the
-`planned` flow's plan phase):
-
-```sh
-flow phase approve ISSUE_ID
-flow phase request-changes ISSUE_ID --feedback "tighten the plan's scope"
+flow issue schedule ISSUE_ID
+flow issue workflow ISSUE_ID
+flow issue respond ISSUE_ID --node-run NODE_RUN_ID --outcome OUTCOME --feedback "..."
+flow issue reset ISSUE_ID
+flow issue done ISSUE_ID --resolution completed
+flow issue reopen ISSUE_ID
 ```
 
 Board and diagnostics:
@@ -139,7 +98,6 @@ Board and diagnostics:
 flow board
 flow checks ISSUE_ID
 flow transitions ISSUE_ID
-flow review run ISSUE_ID
 flow workers
 flow jobs
 flow reconcile
@@ -154,15 +112,11 @@ flow agent-defs edit AGENT_DEF_ID -f agent.yaml
 flow flows list
 flow flows create -f flow.yaml
 flow flows edit FLOW_ID -f flow.yaml
-flow flows set-default direct
+flow flows set-default FLOW_ID
 ```
 
 `flow board` aggregates the lanes of every registered project. Use `--project`
 to scope a command to one project when you are not inside its worktree.
-
-`flow review run` schedules a review round for the issue's current ready,
-unmerged change. It is useful for backfilling older ready changes that have no
-checks yet.
 
 `flow agent-defs` and `flow flows` manage the same project-owned configuration
 shown in the web UI's **Flows** page. The `-f` files can be YAML or JSON; use
@@ -174,12 +128,8 @@ Agent/session workflow, usually run inside a Flow-managed tmux session:
 flow fetch-prompt
 flow status "Working on implementation"
 flow status --kind blocker "Stuck: API contract is ambiguous"
-flow handoff write
 git commit -m "feat: implement the change"
-flow ready <<'HANDOFF'
-# Flow Handoff
-...
-HANDOFF
+flow complete --summary-file SUMMARY.md
 flow session event working|waiting
 ```
 
@@ -188,18 +138,11 @@ flow session event working|waiting
 routine notes apart from things that need a human. Valid kinds are `note`,
 `progress`, `plan`, `blocker`, and `question`.
 
-The author finalize is two natural actions: commit your work with a conventional
-commit message, then run `flow ready` with the handoff piped on stdin.
-`flow ready` validates the handoff, pushes the branch to the exchange remote,
-submits the handoff to the coordinator, claims resolved review threads, uploads
-the transcript, and marks the change ready for review. Re-running `flow ready`
-is safe. Non-interactive callers can pass `--handoff-file PATH` instead of
-piping stdin.
-
-`flow handoff write` is an optional mid-session progress snapshot. It renders
-and validates a handoff, echoes it to stdout, and, inside a Flow session, posts
-it to the coordinator. The coordinator is the sole handoff store, and the next
-session's prompt includes the prior handoff.
+`flow complete` validates the active node contract and submits its typed
+artifact. For a change node it resolves and pushes the run-specific branch and
+pins the artifact to HEAD. Issue-planning nodes also pass
+`--output-file ISSUE_SET.json`; handoff nodes need only the Markdown summary.
+The command is idempotent for the active node run.
 
 Attach to a live author session or worker job:
 
@@ -219,36 +162,27 @@ flow thread certify THREAD_ID
 flow thread reopen THREAD_ID
 ```
 
-Merge:
-
-```sh
-flow merge ISSUE_ID
-flow merge CHANGE_ID
-```
-
 ## Check Configuration
 
-Repo-versioned check configuration lives in `.flow/checks/*.yaml`. CI jobs use
-ephemeral capacity. Reviewer and verifier jobs use persistent agent capacity and
-therefore need a worker with the selected review agent's harness label, such as
-`agent.harness.codex: "true"`, and available `persistent_agent` capacity.
+Repo-versioned CI configuration lives in `.flow/checks/*.yaml`. CI jobs use
+ephemeral capacity. Review and verification agents are selected by their graph
+nodes and use persistent agent capacity, so workers need the selected agent's
+harness label, such as `agent.harness.codex: "true"`.
 
-When an issue enters review, Flow appends the selected flow's frozen review set
-to the repo-configured checks. Each flow reviewer runs in `critique`; each flow
-verifier runs in `acceptance`. A flow with an empty review set deliberately runs
-only the repo-configured checks. For older issues with no flow cursor, Flow falls
-back to synthesized default Codex reviewer/verifier checks.
+An `automated_checks` node runs the repository CI definitions. A
+`change_review` or `verify_change` node runs the agent definitions frozen into
+that graph node. Each node visit receives distinct check identities, so a loop
+back through review or verification executes them again.
 
-Configured checks with `kind: reviewer` or `kind: verifier` run alongside the
-flow review set. Use unique names to make check output clear and set `requires`
-labels to match workers that can run the entrypoint.
+Set `requires` labels on CI definitions to match workers that can run the
+entrypoint. Review and verifier instructions belong in agent definitions, not
+repository check configuration.
 
 Example CI check:
 
 ```yaml
 name: unit
 kind: ci
-phase: critique
 required: true
 entrypoint:
   argv: ["go", "test", "./..."]
@@ -256,23 +190,7 @@ entrypoint:
 requires: []
 ```
 
-Example reviewer check:
-
-```yaml
-name: reviewer
-kind: reviewer
-phase: critique
-entrypoint:
-  argv: ['codex exec -c "projects.$PWD.trust_level=trusted" "$(flow fetch-prompt)"']
-  cwd: "."
-  shell: true
-requires: ["agent.harness.codex"]
-```
-
-Verifier Codex checks use the same prompt command and derive verifier behavior
-from `FLOW_WORKER_ROLE=verifier`.
-
-`flow-worker` sets `FLOW_WORKER_HARNESS` from the entrypoint command. Use
+`flow-worker` sets `FLOW_WORKER_HARNESS` from an agent job's entrypoint. Use
 `flow fetch-prompt --harness claude|harness|agents` only when overriding that
 automatic selection.
 
@@ -284,9 +202,6 @@ Bare requirements such as `requires: ["agent.harness.codex"]` mean
 The coordinator serves a dependency-light web app under `/ui/*`:
 
 - `/ui/board`
-- `/ui/triage`
-- `/ui/feedback`
-- `/ui/merge`
 - `/ui/projects/<project-id>/issues/<issue-id>`
 - `/ui/changes/<change-id>`
 - `/ui/console`
@@ -314,9 +229,9 @@ inline.
 
 The underlying API routes are:
 
-- `PUT /v1/sessions/<session-id>/transcript`: author sessions upload with the
+- `PUT /v2/sessions/<session-id>/transcript`: author sessions upload with the
   session token or owner token; `GET` returns `text/plain` with owner scope.
-- `PUT /v1/jobs/<job-id>/transcript?lease_id=<lease-id>`: check jobs upload
+- `PUT /v2/jobs/<job-id>/transcript?lease_id=<lease-id>`: check jobs upload
   with the worker token and a live lease; `GET` returns `text/plain` with owner
   scope.
 

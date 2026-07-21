@@ -47,8 +47,21 @@ func (s *Server) serveGitHTTPRequest(w http.ResponseWriter, r *http.Request) boo
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return true
 	}
+	allowedRef := ""
+	if principal.Scope == coordinator.TokenScopeSession && gitHTTPWriteRequest(r, pathInfo) {
+		session, err := bundle.Sessions.GetSession(r.Context(), principal.Subject)
+		if err != nil {
+			http.Error(w, "session is not valid for git writes", http.StatusForbidden)
+			return true
+		}
+		if session.WorkspaceMode == coordinator.WorkspaceBase {
+			http.Error(w, "base-workspace sessions cannot push", http.StatusForbidden)
+			return true
+		}
+		allowedRef = "refs/heads/" + strings.TrimSpace(session.Branch)
+	}
 
-	if err := serveGitHTTPBackend(r.Context(), w, r, exchangePath, pathInfo, gitPrincipalActor(principal)); err != nil {
+	if err := serveGitHTTPBackend(r.Context(), w, r, exchangePath, pathInfo, gitPrincipalActor(principal), allowedRef); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return true
 	}
@@ -138,7 +151,11 @@ func gitHTTPWriteRequest(r *http.Request, pathInfo string) bool {
 	return strings.HasSuffix(pathInfo, "/git-receive-pack")
 }
 
-func serveGitHTTPBackend(ctx context.Context, w http.ResponseWriter, r *http.Request, exchangePath string, pathInfo string, principal string) error {
+func serveGitHTTPBackend(ctx context.Context, w http.ResponseWriter, r *http.Request, exchangePath string, pathInfo string, principal string, allowedRefs ...string) error {
+	allowedRef := ""
+	if len(allowedRefs) > 0 {
+		allowedRef = allowedRefs[0]
+	}
 	cmd := exec.CommandContext(ctx, "git", "http-backend")
 	cmd.Env = append(cmd.Environ(),
 		"GIT_PROJECT_ROOT="+filepath.Dir(exchangePath),
@@ -149,6 +166,7 @@ func serveGitHTTPBackend(ctx context.Context, w http.ResponseWriter, r *http.Req
 		"REMOTE_USER="+principal,
 		"REMOTE_ADDR="+remoteAddr(r),
 		"FLOW_GIT_PRINCIPAL="+principal,
+		"FLOW_GIT_ALLOWED_REF="+strings.TrimSpace(allowedRef),
 	)
 	if contentType := strings.TrimSpace(r.Header.Get("Content-Type")); contentType != "" {
 		cmd.Env = append(cmd.Env, "CONTENT_TYPE="+contentType)

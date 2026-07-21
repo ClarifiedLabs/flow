@@ -2,12 +2,12 @@
 // flow selector, and the edit-form toggle.
 
 import { apiGet, issueAPIBase } from "./api.js";
-import { renderHumanAttentionPanel, renderLifecycleChart, renderPhaseGatePanel } from "./attention.js";
+import { renderHumanAttentionPanel } from "./attention.js";
 import { renderPhaseBadge, renderReviewBadge } from "./board.js";
 import { renderCheck } from "./diff.js";
 import { formatDate } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
-import { currentIssueState, projectButtonAttr, renderAttachmentUploadForm, renderIssueAttachment, renderIssueStateForm } from "./issue.js";
+import { projectButtonAttr, renderAttachmentUploadForm, renderIssueAttachment } from "./issue.js";
 import { renderMarkdown } from "./markdown.js";
 import { value } from "./normalize.js";
 import { renderTerminalButton } from "./terminal.js";
@@ -26,11 +26,7 @@ export async function renderNewIssueView(app, context) {
           <h2>New Issue</h2>
         </div>
       </div>
-      ${renderIssueFormView(app, {
-        priority: 0,
-        requires_human_review: true,
-        auto_merge: false,
-      }, { mode: "create", submitLabel: "Create" })}
+      ${renderIssueFormView(app, { priority: 0 }, { mode: "create", submitLabel: "Create" })}
     </section>
   `;
   app.bindIssueActions(() => renderNewIssueView(app, context));
@@ -125,14 +121,6 @@ export function renderIssueFormView(app, issue, options = {}) {
         <span>Attachments</span>
         <input name="attachments" type="file" multiple>
       </label>` : ""}
-      <label class="check">
-        <input name="requires_human_review" type="checkbox" ${value(issue, "requires_human_review", "RequiresHumanReview") ? "checked" : ""}>
-        <span>Human review</span>
-      </label>
-      <label class="check">
-        <input name="auto_merge" type="checkbox" ${value(issue, "auto_merge", "AutoMerge") ? "checked" : ""}>
-        <span>Auto merge</span>
-      </label>
       ${mode === "create" ? `
       <label class="check wide">
         <input name="queue_issue" type="checkbox" checked>
@@ -179,8 +167,6 @@ export function renderIssueReadOnlyDetailView(app, issue, options = {}) {
   const issueID = options.issueID || "";
   const projectID = options.projectID || "";
   const flow = options.flow || null;
-  const requiresHumanReview = value(issue, "requires_human_review", "RequiresHumanReview") ? "required" : "optional";
-  const autoMerge = value(issue, "auto_merge", "AutoMerge") ? "on" : "off";
   const priority = Number(value(issue, "priority", "Priority") || 0);
   const body = value(issue, "body", "Body") || "";
   const acceptanceCriteria = value(issue, "acceptance_criteria", "AcceptanceCriteria") || "";
@@ -193,7 +179,7 @@ export function renderIssueReadOnlyDetailView(app, issue, options = {}) {
         <button class="button secondary" type="button" data-issue-edit-toggle${projectButtonAttr(projectID)}>Edit</button>
       </div>
       <div class="issue-read-only-body" data-issue-read-only-body>
-        <p class="meta-quiet">p${priority} · human review ${escapeHTML(requiresHumanReview)} · auto merge ${escapeHTML(autoMerge)}</p>
+        <p class="meta-quiet">p${priority}</p>
         <p class="issue-read-only-flow">${flowLine}</p>
         <p class="issue-read-only-field"><span class="meta-quiet">Title</span><br>${escapeHTML(title)}</p>
         <div class="issue-read-only-field"><span class="meta-quiet">Body</span>${body ? renderMarkdown(body) : "<br><span class=\"muted\">—</span>"}</div>
@@ -210,6 +196,7 @@ export async function renderIssueView(app, id, context, projectID = "") {
   const data = await apiGet(`${issueAPIBase(projectID)}/${encodeURIComponent(id)}`);
   if (context && !app.isActiveLoad(context)) return false;
   const resolvedProject = data.project_id || data.ProjectID || projectID;
+  const workflowData = await apiGet(`${issueAPIBase(resolvedProject)}/${encodeURIComponent(id)}/workflow`).catch(() => null);
   await app.ensureFlows(resolvedProject);
   if (context && !app.isActiveLoad(context)) return false;
   const flow = data.flow || data.Flow || null;
@@ -217,8 +204,7 @@ export async function renderIssueView(app, id, context, projectID = "") {
   app.setTitle(projectName ? `Issue · ${projectName}` : "Issue");
   const issue = data.issue || data.Issue;
   const issueID = value(issue, "id", "ID");
-  const scheduleState = value(issue, "schedule_state", "ScheduleState");
-  const triageState = value(issue, "triage_state", "TriageState");
+  const lifecycleState = value(issue, "state", "State") || "unscheduled";
   const statusLog = data.status_log || data.StatusLog || [];
   const detail = data.issue_detail || data.IssueDetail || {};
   const tags = value(detail, "tags", "Tags") || [];
@@ -233,17 +219,11 @@ export async function renderIssueView(app, id, context, projectID = "") {
   // change_id on session-related rows; fall back to the raw transitions for
   // the unified timeline when the backend payload is absent.
   const timelineTransitions = value(detail, "timeline_transitions", "TimelineTransitions") || transitions;
-  const lifecycleGraph = value(detail, "lifecycle_graph", "LifecycleGraph");
   const activeSession = value(detail, "active_session", "ActiveSession");
   const terminalAvailable = Boolean(value(detail, "terminal_available", "TerminalAvailable") || value(activeSession, "terminal_available", "TerminalAvailable"));
   const terminalJobID = value(detail, "terminal_job_id", "TerminalJobID");
   const reviewState = value(detail, "review_state", "ReviewState");
   const requiredChecks = value(detail, "required_checks", "RequiredChecks") || {};
-  const reviewCycleBudget = value(detail, "review_cycle_budget", "ReviewCycleBudget") || {};
-  const waitReason = value(detail, "wait_reason", "WaitReason") || "";
-  const crashRetryAvailable = Boolean(value(detail, "crash_retry_available", "CrashRetryAvailable"));
-  const reviewCycleExhausted = Boolean(value(reviewCycleBudget, "exhausted", "Exhausted"));
-  const reviewCycleGrant = Number(value(reviewCycleBudget, "default_grant_cycles", "DefaultGrantCycles") || 5);
   const issueConsole = value(detail, "issue_console", "IssueConsole") || {};
   const issueConsoleJob = value(issueConsole, "job", "Job") || null;
   const issueConsoleSession = value(issueConsole, "session", "Session") || null;
@@ -252,26 +232,11 @@ export async function renderIssueView(app, id, context, projectID = "") {
   const checkSatisfied = Number(value(requiredChecks, "satisfied", "Satisfied") || 0);
   const activeSessionID = value(activeSession, "id", "ID");
   const activeSessionTerminalAvailable = Boolean(value(activeSession, "terminal_available", "TerminalAvailable"));
-  const paused = Boolean(value(detail, "paused", "Paused"));
-  const pauseResumeHTML = scheduleState === "closed"
-    ? ""
-    : activeSessionID
-      ? `<button class="button secondary" data-pause="${escapeAttr(issueID)}"${projectButtonAttr(resolvedProject)}>Pause</button>`
-      : paused
-        ? `<button class="button" data-resume="${escapeAttr(issueID)}"${projectButtonAttr(resolvedProject)}>Resume</button>`
-        : "";
+  const pauseResumeHTML = "";
   const issueConsoleHref = `/ui/console?project=${encodeURIComponent(resolvedProject || "")}&issue=${encodeURIComponent(issueID)}`;
-  const issueConsoleHTML = scheduleState === "closed" || !(reviewCycleExhausted || paused || issueConsoleActive)
+  const issueConsoleHTML = lifecycleState === "done" || !issueConsoleActive
     ? ""
-    : issueConsoleActive
-      ? `<a class="button secondary" href="${escapeAttr(issueConsoleHref)}" data-link>Open Console</a><button class="button secondary" data-release-issue-console="${escapeAttr(issueID)}"${projectButtonAttr(resolvedProject)}>Release Console</button>`
-      : `<button class="button secondary" data-start-issue-console="${escapeAttr(issueID)}"${projectButtonAttr(resolvedProject)}>Start Console</button>`;
-  const reviewCycleApproveHTML = reviewCycleExhausted
-    ? `<button class="button" data-review-cycles-approve="${escapeAttr(issueID)}"${projectButtonAttr(resolvedProject)}>Approve ${escapeHTML(String(reviewCycleGrant))} Cycles</button>`
-    : "";
-  const crashRetryHTML = waitReason === "crash_loop" || crashRetryAvailable
-    ? `<button class="button" data-retry-crash="${escapeAttr(issueID)}"${projectButtonAttr(resolvedProject)}>Retry</button>`
-    : "";
+    : `<a class="button secondary" href="${escapeAttr(issueConsoleHref)}" data-link>Open Console</a><button class="button secondary" data-release-issue-console="${escapeAttr(issueID)}"${projectButtonAttr(resolvedProject)}>Release Console</button>`;
   const tagsHTML = tags.length ? `<h3>Tags</h3><p class="meta-quiet">${tags.map(renderTag).filter(Boolean).join(" · ")}</p>` : "";
   const relationsHTML = relations.length ? `<h3>Relationships</h3><div class="feed">${relations.map((relation) => renderRelation(relation, issueID, resolvedProject)).join("")}</div>` : "";
   const readyChangeHTML = readyChange ? `<h3>Ready Change</h3><div class="feed">${renderIssueChange(readyChange)}</div>` : "";
@@ -280,15 +245,35 @@ export async function renderIssueView(app, id, context, projectID = "") {
   const attachmentsHTML = attachments.length ? `<h3>Attachments</h3><div class="attachment-list">${attachments.map((attachment) => renderIssueAttachment(attachment, issueID, resolvedProject)).join("")}</div>` : "";
   const attachmentUploadHTML = renderAttachmentUploadForm(issueID, resolvedProject);
   const attentionHTML = renderHumanAttentionPanel(issue, statusLog, resolvedProject, activeSession);
-  const gatePanelHTML = renderPhaseGatePanel(flow, issueID, resolvedProject);
+  const workflowDetail = value(workflowData || {}, "detail", "Detail") || null;
+  const workflowRun = value(workflowDetail || {}, "run", "Run") || null;
+  const workflowWait = value(workflowDetail || {}, "open_wait", "OpenWait") || null;
+  const workflowNodeRuns = value(workflowDetail || {}, "node_runs", "NodeRuns") || [];
+  const snapshot = value(workflowRun || {}, "snapshot", "Snapshot") || {};
+  const currentNodeKey = value(workflowRun || {}, "current_node_key", "CurrentNodeKey") || "";
+  const currentNode = (value(snapshot, "nodes", "Nodes") || []).find((node) => value(node, "key", "Key") === currentNodeKey) || null;
+  const gateConfig = value(value(currentNode || {}, "config", "Config") || {}, "human_gate", "HumanGate") || null;
+  const gateOutcomes = value(gateConfig || {}, "outcomes", "Outcomes") || [];
+  const workflowActions = lifecycleState === "unscheduled"
+    ? `<button class="button" data-workflow-schedule="${escapeAttr(issueID)}"${projectButtonAttr(resolvedProject)}>Schedule</button>`
+    : lifecycleState === "done"
+      ? `<button class="button" data-workflow-reopen="${escapeAttr(issueID)}"${projectButtonAttr(resolvedProject)}>Reopen</button>`
+      : `<button class="button secondary" data-workflow-reset="${escapeAttr(issueID)}"${projectButtonAttr(resolvedProject)}>Reset</button><button class="button secondary" data-workflow-done="${escapeAttr(issueID)}"${projectButtonAttr(resolvedProject)}>Done</button>`;
+  const gatePanelHTML = workflowWait && value(workflowWait, "kind", "Kind") === "human_gate"
+    ? `<section class="human-attention-panel"><div><h3>${escapeHTML(value(currentNode, "name", "Name") || "Human action required")}</h3><p>${escapeHTML(value(gateConfig, "instructions", "Instructions") || value(workflowWait, "message", "Message") || "Choose the next workflow outcome.")}</p><textarea data-workflow-feedback rows="3" placeholder="Optional feedback for the next node"></textarea></div><div class="actions">${gateOutcomes.map((outcome) => `<button class="button${outcome === "changes_requested" ? " secondary" : ""}" data-workflow-respond="${escapeAttr(value(workflowWait, "node_run_id", "NodeRunID"))}" data-issue="${escapeAttr(issueID)}" data-outcome="${escapeAttr(outcome)}"${projectButtonAttr(resolvedProject)}>${escapeHTML(String(outcome).replaceAll("_", " "))}</button>`).join("")}</div></section>`
+    : workflowWait && value(workflowWait, "kind", "Kind") === "operator_intervention"
+      ? `<section class="human-attention-panel"><div><h3>Workflow paused</h3><p>${escapeHTML(value(workflowWait, "message", "Message") || "Operator action is required.")}</p></div><button class="button" data-workflow-budget="${escapeAttr(issueID)}"${projectButtonAttr(resolvedProject)}>Extend budget</button></section>`
+      : "";
+  const workflowHTML = workflowRun
+    ? `<h3>Workflow</h3><p class="meta-quiet">${escapeHTML(value(snapshot, "flow_name", "FlowName") || value(workflowRun, "flow_id", "FlowID") || "Workflow")} · ${escapeHTML(currentNodeKey || "complete")} · transitions ${Number(value(workflowRun, "transitions_used", "TransitionsUsed") || 0)}/${Number(value(workflowRun, "transition_budget", "TransitionBudget") || 0)}</p><div class="feed">${workflowNodeRuns.map((nodeRun) => `<article class="feed-item"><strong>${escapeHTML(value(nodeRun, "node_key", "NodeKey"))}</strong><span>${escapeHTML(value(nodeRun, "state", "State"))}</span>${value(nodeRun, "outcome", "Outcome") ? `<p>${escapeHTML(value(nodeRun, "outcome", "Outcome"))}</p>` : ""}</article>`).join("")}</div>`
+    : "";
   // The standalone Sessions and Status feeds are gone: they are folded into
   // the unified Timeline below, which removes the column-height imbalance
   // (the tall sessions list used to dominate the editor column) and the
   // duplicated session lifecycle shown in the old transitions feed.
-  const lifecycleGraphHTML = lifecycleGraph ? `<div class="lifecycle-chart">${renderLifecycleChart(lifecycleGraph)}</div>` : "";
   const timelineHTML = renderTimeline({ sessions, transitions: timelineTransitions, statusLog });
-  const lifecycleHTML = (lifecycleGraphHTML || timelineTransitions.length || sessions.length || statusLog.length)
-    ? `<h3>Lifecycle</h3>${lifecycleGraphHTML}<div class="lifecycle-timeline">${timelineHTML}</div>`
+  const lifecycleHTML = (timelineTransitions.length || sessions.length || statusLog.length)
+    ? `<h3>Activity</h3><div class="lifecycle-timeline">${timelineHTML}</div>`
     : "";
   // Read-only detail (title/body/acceptance criteria/agent config) with an
   // Edit toggle that reveals the full form. Directly fixes the issue where a
@@ -302,7 +287,7 @@ export async function renderIssueView(app, id, context, projectID = "") {
     attachmentUploadHTML,
   ].filter(Boolean).join("");
   const activityHTML = [readyChangeHTML, changesHTML].filter(Boolean).join("");
-  const systemHTML = checksHTML;
+  const systemHTML = [workflowHTML, checksHTML].filter(Boolean).join("");
   const lifecycleSectionHTML = lifecycleHTML ? `<div class="issue-detail-lifecycle">${lifecycleHTML}</div>` : "";
   const detailColumns = [
     `<div class="issue-detail-column issue-detail-editor">${editorHTML}</div>`,
@@ -316,24 +301,18 @@ export async function renderIssueView(app, id, context, projectID = "") {
         <div>
           <h2>${escapeHTML(issueID)} · ${escapeHTML(value(issue, "title", "Title"))}</h2>
           <div class="meta">
-            ${renderPhaseBadge(triageState === "triage" ? "triage" : scheduleState)}
+            ${renderPhaseBadge(lifecycleState)}
             ${reviewState ? renderReviewBadge(reviewState) : ""}
             ${checkTotal ? `<span class="badge ${checkSatisfied === checkTotal ? "ok" : "idle"}">checks ${checkSatisfied}/${checkTotal}</span>` : ""}
           </div>
-          <p class="meta-quiet">p${Number(value(issue, "priority", "Priority") || 0)}${flowHeaderMeta(flow) ? ` · ${escapeHTML(flowHeaderMeta(flow))}` : ""} · human review ${value(issue, "requires_human_review", "RequiresHumanReview") ? "required" : "optional"} · auto merge ${value(issue, "auto_merge", "AutoMerge") ? "on" : "off"}</p>
+          <p class="meta-quiet">p${Number(value(issue, "priority", "Priority") || 0)}${flowHeaderMeta(flow) ? ` · ${escapeHTML(flowHeaderMeta(flow))}` : ""}</p>
         </div>
         <div class="actions">
-          ${renderIssueStateForm(issueID, currentIssueState(scheduleState, triageState), resolvedProject)}
-          ${readyChange ? `<button class="button secondary" data-review-run="${escapeAttr(issueID)}"${projectButtonAttr(resolvedProject)}>Run review</button>` : ""}
-          ${triageState === "triage" ? `<button class="button" data-triage="accepted" data-issue="${escapeAttr(issueID)}"${projectButtonAttr(resolvedProject)}>Accept</button><button class="button secondary" data-triage="rejected" data-issue="${escapeAttr(issueID)}"${projectButtonAttr(resolvedProject)}>Reject</button>` : ""}
-          ${scheduleState !== "up_next" && scheduleState !== "closed" ? `<button class="button secondary" data-schedule="up_next" data-issue="${escapeAttr(issueID)}"${projectButtonAttr(resolvedProject)}>Queue</button>` : ""}
-          ${scheduleState !== "backlog" && scheduleState !== "closed" ? `<button class="button secondary" data-schedule="backlog" data-issue="${escapeAttr(issueID)}"${projectButtonAttr(resolvedProject)}>Backlog</button>` : ""}
+          ${workflowActions}
           ${activeSessionID && (activeSessionTerminalAvailable || (terminalAvailable && !terminalJobID)) ? renderTerminalButton("session", activeSessionID) : ""}
           ${terminalJobID && terminalAvailable && !(activeSessionID && (activeSessionTerminalAvailable || (terminalAvailable && !terminalJobID))) ? renderTerminalButton("job", terminalJobID) : ""}
-          ${crashRetryHTML}
           ${pauseResumeHTML}
           ${issueConsoleHTML}
-          ${reviewCycleApproveHTML}
         </div>
       </div>
       <div class="summary-grid">

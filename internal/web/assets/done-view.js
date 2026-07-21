@@ -11,7 +11,7 @@ import { readDoneDensity, readDoneOutcome, writeDoneDensity, writeDoneOutcome } 
 export async function renderDoneView(app, context) {
   if (!app.doneOutcome) app.doneOutcome = readDoneOutcome();
   if (!app.doneDensity) app.doneDensity = readDoneDensity();
-  const data = await apiGet("/v1/done" + doneQueryView(app, app.doneOutcome));
+  const data = await apiGet("/v2/done" + doneQueryView(app, app.doneOutcome));
   if (context && !app.isActiveLoad(context)) return false;
   app.setTitle("Done");
   app.doneProjectBadge = (app.projects || []).length > 1;
@@ -56,7 +56,7 @@ export function appendDoneDataView(app, data) {
 }
 
 export function renderDoneControlsView(app) {
-  const outcomes = [["all", "All"], ["merged", "Merged"], ["rejected", "Rejected"], ["abandoned", "Abandoned"]];
+  const outcomes = [["all", "All"], ["completed", "Completed"], ["merged", "Merged"], ["rejected", "Rejected"], ["abandoned", "Abandoned"], ["cancelled", "Cancelled"], ["failed", "Failed"]];
   const filters = outcomes.map(([key, label]) =>
     `<button class="chip${app.doneOutcome === key ? " active" : ""}" data-done-outcome="${escapeAttr(key)}"${app.doneOutcome === key ? ' aria-pressed="true"' : ""}>${escapeHTML(label)}</button>`
   ).join("");
@@ -100,7 +100,7 @@ export function renderDoneRowView(app, entry) {
   const phaseSlug = phaseKey(laneState) || "dead";
   const change = value(card, "change", "Change");
   const changeID = value(change, "id", "ID");
-  const closedAt = formatDate(value(issue, "closed_at", "ClosedAt"));
+  const closedAt = formatDate(value(issue, "done_at", "DoneAt"));
   const meta = [
     project && project.badge && project.name ? `<span class="card-project-badge">${escapeHTML(project.name)}</span>` : "",
     changeID ? `<a href="/ui/changes/${escapeAttr(changeID)}" data-link>${escapeHTML(changeID)}</a>` : "",
@@ -153,7 +153,7 @@ export async function loadMoreDoneView(app) {
   if (!cursors.length) return;
   try {
     const pages = await Promise.all(cursors.map(([projectID, cursor]) =>
-      apiGet("/v1/done" + doneQueryView(app, app.doneOutcome, {
+      apiGet("/v2/done" + doneQueryView(app, app.doneOutcome, {
         project: projectID,
         before: cursor.before,
         before_id: cursor.beforeID,

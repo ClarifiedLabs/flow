@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -24,7 +23,6 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
-	"github.com/ClarifiedLabs/flow/internal/handoff"
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	"github.com/ClarifiedLabs/flow/internal/lifecycle"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
@@ -34,14 +32,14 @@ func TestServerRequiresOwnerToken(t *testing.T) {
 	server := newTestServer(t)
 
 	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/v1/issues", nil)
+	request := httptest.NewRequest(http.MethodGet, "/v2/issues", nil)
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("missing token status = %d, want 401", response.Code)
 	}
 
 	response = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodGet, "/v1/issues", nil)
+	request = httptest.NewRequest(http.MethodGet, "/v2/issues", nil)
 	request.Header.Set("Authorization", "Bearer wrong")
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
@@ -53,7 +51,7 @@ func TestServerReportsProtocolMismatch(t *testing.T) {
 	server := newTestServer(t)
 
 	response := httptest.NewRecorder()
-	request := authorizedRequest(http.MethodGet, "/v1/issues", nil)
+	request := authorizedRequest(http.MethodGet, "/v2/issues", nil)
 	request.Header.Set(protocolHeader, "999")
 	server.ServeHTTP(response, request)
 
@@ -85,7 +83,7 @@ func TestHarnessOptionsUseLiveWorkerHarnessLabels(t *testing.T) {
 	}
 
 	var response contract.HarnessesResponse
-	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v1/harnesses", nil, http.StatusOK, &response)
+	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v2/harnesses", nil, http.StatusOK, &response)
 
 	agents := harnessOptionNames(response.Agents)
 	if !agents[flowharness.Codex] || !agents[flowharness.Harness] {
@@ -165,7 +163,7 @@ func TestHarnessOptionsIncludeModelsAvailableOnEveryLiveHarnessWorker(t *testing
 	}
 
 	var response contract.HarnessesResponse
-	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v1/harnesses", nil, http.StatusOK, &response)
+	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v2/harnesses", nil, http.StatusOK, &response)
 
 	var harnessOption *contract.HarnessOption
 	for i := range response.Agents {
@@ -210,7 +208,7 @@ func TestHarnessOptionsExcludeExpiredWorkers(t *testing.T) {
 	}
 
 	var response contract.HarnessesResponse
-	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v1/harnesses", nil, http.StatusOK, &response)
+	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v2/harnesses", nil, http.StatusOK, &response)
 
 	agents := harnessOptionNames(response.Agents)
 	if agents[flowharness.Codex] || !agents[flowharness.Claude] || agents[flowharness.Harness] {
@@ -262,7 +260,7 @@ func TestHarnessOptionsIncludeDefaultArgs(t *testing.T) {
 	}
 
 	var response contract.HarnessesResponse
-	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v1/harnesses", nil, http.StatusOK, &response)
+	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v2/harnesses", nil, http.StatusOK, &response)
 	var codexDefaults []string
 	for _, option := range response.Agents {
 		if option.Name == flowharness.Codex {
@@ -274,65 +272,6 @@ func TestHarnessOptionsIncludeDefaultArgs(t *testing.T) {
 	}
 }
 
-func TestServerIssueLifecycleAndBoard(t *testing.T) {
-	fixture := newTestFixture(t)
-	server := fixture.Server
-
-	createResponse := issueResponse{}
-	doJSONRequest(t, server, http.MethodPost, "/v1/issues", createIssueRequest{Title: "API issue"}, http.StatusCreated, &createResponse)
-	if createResponse.Issue.ID != "i-0001" {
-		t.Fatalf("created issue ID = %q", createResponse.Issue.ID)
-	}
-
-	title := "Renamed API issue"
-	priority := 7
-	editResponse := issueResponse{}
-	doJSONRequest(t, server, http.MethodPatch, "/v1/issues/"+createResponse.Issue.ID, editIssueRequest{
-		Title:    &title,
-		Priority: &priority,
-	}, http.StatusOK, &editResponse)
-	if editResponse.Issue.Title != title || editResponse.Issue.Priority != priority {
-		t.Fatalf("edited issue mismatch: %+v", editResponse.Issue)
-	}
-
-	scheduleResponse := issueResponse{}
-	doJSONRequest(t, server, http.MethodPost, "/v1/issues/"+createResponse.Issue.ID+"/schedule", scheduleIssueRequest{
-		State: string(coordinator.ScheduleUpNext),
-	}, http.StatusOK, &scheduleResponse)
-	if scheduleResponse.Issue.ScheduleState != coordinator.ScheduleUpNext {
-		t.Fatalf("ScheduleState = %q, want up_next", scheduleResponse.Issue.ScheduleState)
-	}
-
-	var listResponse issuesResponse
-	doJSONRequest(t, server, http.MethodGet, "/v1/issues?schedule_state=up_next", nil, http.StatusOK, &listResponse)
-	if len(listResponse.Issues) != 1 || listResponse.Issues[0].ID != createResponse.Issue.ID {
-		t.Fatalf("list response = %+v", listResponse.Issues)
-	}
-
-	var board boardResponse
-	doJSONRequest(t, server, http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
-	if len(board.Board.UpNext) != 1 || board.Board.UpNext[0].ID != createResponse.Issue.ID {
-		t.Fatalf("board up_next = %+v", board.Board.UpNext)
-	}
-
-	closeResponse := issueResponse{}
-	doJSONRequest(t, server, http.MethodPost, "/v1/issues/"+createResponse.Issue.ID+"/close", map[string]string{}, http.StatusOK, &closeResponse)
-	if closeResponse.Issue.ScheduleState != coordinator.ScheduleClosed {
-		t.Fatalf("closed ScheduleState = %q, want closed", closeResponse.Issue.ScheduleState)
-	}
-
-	stateResponse := issueResponse{}
-	doJSONRequest(t, server, http.MethodPost, "/v1/issues/"+createResponse.Issue.ID+"/state", issueStateRequest{
-		State: string(coordinator.IssueStateBacklog),
-	}, http.StatusOK, &stateResponse)
-	if stateResponse.Issue.ScheduleState != coordinator.ScheduleBacklog || stateResponse.Issue.TriageState != coordinator.TriageAccepted {
-		t.Fatalf("state issue = %+v, want backlog/accepted", stateResponse.Issue)
-	}
-	if stateResponse.Issue.ClosedAt != nil {
-		t.Fatalf("state issue ClosedAt = %v, want nil", stateResponse.Issue.ClosedAt)
-	}
-}
-
 func TestIssueAttachmentUploadDetailAndDownload(t *testing.T) {
 	fixture := newTestFixture(t)
 	issue, err := fixture.Issues.CreateIssue(context.Background(), coordinator.CreateIssueInput{Title: "Attachment issue"})
@@ -340,14 +279,14 @@ func TestIssueAttachmentUploadDetailAndDownload(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	uploadPath := "/v1/projects/" + fixture.Project.ID + "/issues/" + issue.ID + "/attachments"
+	uploadPath := "/v2/projects/" + fixture.Project.ID + "/issues/" + issue.ID + "/attachments"
 	uploaded := uploadIssueAttachmentForTest(t, fixture, uploadPath, string(coordinator.IssueAttachmentStageReviewer), "review.png", "image/png", []byte("png-data"))
 	if uploaded.Stage != coordinator.IssueAttachmentStageReviewer || uploaded.Filename != "review.png" || uploaded.ContentType != "image/png" {
 		t.Fatalf("uploaded attachment = %+v", uploaded)
 	}
 
 	var detail issueResponse
-	doJSONRequest(t, fixture.Server, http.MethodGet, "/v1/projects/"+fixture.Project.ID+"/issues/"+issue.ID, nil, http.StatusOK, &detail)
+	doJSONRequest(t, fixture.Server, http.MethodGet, "/v2/projects/"+fixture.Project.ID+"/issues/"+issue.ID, nil, http.StatusOK, &detail)
 	if detail.Detail == nil || len(detail.Detail.Attachments) != 1 || detail.Detail.Attachments[0].ID != uploaded.ID {
 		t.Fatalf("detail attachments = %+v", detail.Detail)
 	}
@@ -383,7 +322,7 @@ func TestIssueAttachmentUnsafeContentTypesAreDownloadOnly(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	uploadPath := "/v1/projects/" + fixture.Project.ID + "/issues/" + issue.ID + "/attachments"
+	uploadPath := "/v2/projects/" + fixture.Project.ID + "/issues/" + issue.ID + "/attachments"
 	for _, tc := range []struct {
 		name        string
 		filename    string
@@ -461,38 +400,16 @@ func uploadIssueAttachmentForTest(t *testing.T, fixture testFixture, uploadPath 
 	return uploaded.Attachment
 }
 
-func TestCreateUpNextIssueStartsAuthorJob(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-
-	var created issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues", createIssueRequest{
-		Title:         "Queued on create",
-		ScheduleState: string(coordinator.ScheduleUpNext),
-	}, http.StatusCreated, &created)
-	if created.Issue.ScheduleState != coordinator.ScheduleUpNext {
-		t.Fatalf("created issue = %+v, want up_next", created.Issue)
-	}
-
-	jobs, err := fixture.Workers.ListJobs(ctx)
-	if err != nil {
-		t.Fatalf("list jobs: %v", err)
-	}
-	if len(jobs) != 1 || jobs[0].Role != flowworker.RoleAuthor || jobs[0].IssueID == nil || *jobs[0].IssueID != created.Issue.ID || jobs[0].ChangeID == nil {
-		t.Fatalf("jobs after queued create = %+v", jobs)
-	}
-}
-
 func TestIdempotentCreateDoesNotDuplicateIssue(t *testing.T) {
 	fixture := newTestFixture(t)
 
 	first := issueResponse{}
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues", createIssueRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues", createIssueRequest{
 		Title: "Idempotent issue",
 	}, http.StatusCreated, &first, idempotencyHeader, "create-1")
 
 	second := issueResponse{}
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues", createIssueRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues", createIssueRequest{
 		Title: "Idempotent issue",
 	}, http.StatusCreated, &second, idempotencyHeader, "create-1")
 
@@ -507,7 +424,7 @@ func TestIdempotentCreateDoesNotDuplicateIssue(t *testing.T) {
 		t.Fatalf("issue count = %d, want 1", len(issues))
 	}
 
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues", createIssueRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues", createIssueRequest{
 		Title: "Different issue",
 	}, http.StatusConflict, nil, idempotencyHeader, "create-1")
 }
@@ -526,7 +443,7 @@ func TestConcurrentIdempotentCreateDoesNotDuplicateIssue(t *testing.T) {
 			defer wg.Done()
 			<-start
 			response := httptest.NewRecorder()
-			request := authorizedRequest(http.MethodPost, "/v1/issues", createIssueRequest{Title: "Concurrent idempotent issue"})
+			request := authorizedRequest(http.MethodPost, "/v2/issues", createIssueRequest{Title: "Concurrent idempotent issue"})
 			request.Header.Set(idempotencyHeader, "concurrent-create")
 			fixture.Server.ServeHTTP(response, request)
 			if response.Code != http.StatusCreated {
@@ -577,7 +494,7 @@ WHERE token_hash = ?`, time.Now().UTC().Format(time.RFC3339Nano), coordinator.Ha
 	}
 
 	response := httptest.NewRecorder()
-	request := authorizedRequest(http.MethodGet, "/v1/issues", nil)
+	request := authorizedRequest(http.MethodGet, "/v2/issues", nil)
 	fixture.Server.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("revoked owner token status = %d, want 401", response.Code)
@@ -607,11 +524,11 @@ WHERE token_hash = ?`, time.Now().UTC().Format(time.RFC3339Nano), coordinator.Ha
 func TestWebUIBootstrapLoginAndCookieAuth(t *testing.T) {
 	fixture := newTestFixture(t)
 
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/ui/bootstrap", map[string]string{}, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, "hook-token", http.MethodPost, "/v1/ui/bootstrap", map[string]string{}, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/ui/bootstrap", map[string]string{}, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "hook-token", http.MethodPost, "/v2/ui/bootstrap", map[string]string{}, http.StatusForbidden, nil)
 
 	var bootstrap webBootstrapResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/ui/bootstrap", map[string]string{}, http.StatusOK, &bootstrap)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/ui/bootstrap", map[string]string{}, http.StatusOK, &bootstrap)
 	if !strings.HasPrefix(bootstrap.LoginPath, "/ui/login?token=") || bootstrap.ExpiresAt.IsZero() {
 		t.Fatalf("bootstrap = %+v", bootstrap)
 	}
@@ -655,7 +572,7 @@ func TestWebUIBootstrapLoginAndCookieAuth(t *testing.T) {
 	}
 
 	directBoard := httptest.NewRecorder()
-	directBoardRequest := httptest.NewRequest(http.MethodGet, "/v1/board", nil)
+	directBoardRequest := httptest.NewRequest(http.MethodGet, "/v2/board", nil)
 	directBoardRequest.Header.Set(webCSRFHeader, csrfCookie.Value)
 	directBoardRequest.AddCookie(sessionCookie)
 	fixture.Server.ServeHTTP(directBoard, directBoardRequest)
@@ -664,7 +581,7 @@ func TestWebUIBootstrapLoginAndCookieAuth(t *testing.T) {
 	}
 
 	missingReadCSRF := httptest.NewRecorder()
-	missingReadCSRFRequest := httptest.NewRequest(http.MethodGet, "/ui/api/v1/board", nil)
+	missingReadCSRFRequest := httptest.NewRequest(http.MethodGet, "/ui/api/v2/board", nil)
 	missingReadCSRFRequest.AddCookie(sessionCookie)
 	fixture.Server.ServeHTTP(missingReadCSRF, missingReadCSRFRequest)
 	if missingReadCSRF.Code != http.StatusUnauthorized {
@@ -672,7 +589,7 @@ func TestWebUIBootstrapLoginAndCookieAuth(t *testing.T) {
 	}
 
 	boardResponse := httptest.NewRecorder()
-	boardRequest := httptest.NewRequest(http.MethodGet, "/ui/api/v1/board", nil)
+	boardRequest := httptest.NewRequest(http.MethodGet, "/ui/api/v2/board", nil)
 	boardRequest.Header.Set(webCSRFHeader, csrfCookie.Value)
 	boardRequest.AddCookie(sessionCookie)
 	fixture.Server.ServeHTTP(boardResponse, boardRequest)
@@ -681,7 +598,7 @@ func TestWebUIBootstrapLoginAndCookieAuth(t *testing.T) {
 	}
 
 	missingCSRF := httptest.NewRecorder()
-	missingCSRFRequest := httptest.NewRequest(http.MethodPost, "/ui/api/v1/issues", strings.NewReader(`{"title":"Missing csrf"}`))
+	missingCSRFRequest := httptest.NewRequest(http.MethodPost, "/ui/api/v2/issues", strings.NewReader(`{"title":"Missing csrf"}`))
 	missingCSRFRequest.Header.Set("Content-Type", "application/json")
 	missingCSRFRequest.AddCookie(sessionCookie)
 	fixture.Server.ServeHTTP(missingCSRF, missingCSRFRequest)
@@ -691,7 +608,7 @@ func TestWebUIBootstrapLoginAndCookieAuth(t *testing.T) {
 
 	var created issueResponse
 	withCSRF := httptest.NewRecorder()
-	withCSRFRequest := httptest.NewRequest(http.MethodPost, "/ui/api/v1/issues", strings.NewReader(`{"title":"Browser issue"}`))
+	withCSRFRequest := httptest.NewRequest(http.MethodPost, "/ui/api/v2/issues", strings.NewReader(`{"title":"Browser issue"}`))
 	withCSRFRequest.Header.Set("Content-Type", "application/json")
 	withCSRFRequest.Header.Set(webCSRFHeader, csrfCookie.Value)
 	withCSRFRequest.AddCookie(sessionCookie)
@@ -711,7 +628,7 @@ func loginWebUI(t *testing.T, fixture testFixture) (*http.Cookie, *http.Cookie) 
 	t.Helper()
 
 	var bootstrap webBootstrapResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/ui/bootstrap", map[string]string{}, http.StatusOK, &bootstrap)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/ui/bootstrap", map[string]string{}, http.StatusOK, &bootstrap)
 	login := httptest.NewRecorder()
 	fixture.Server.ServeHTTP(login, httptest.NewRequest(http.MethodGet, bootstrap.LoginPath, nil))
 	if login.Code != http.StatusSeeOther {
@@ -801,7 +718,7 @@ func TestWebUITerminalAttachCreatesOwnerBrowserURL(t *testing.T) {
 	}
 
 	var bootstrap webBootstrapResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/ui/bootstrap", map[string]string{}, http.StatusOK, &bootstrap)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/ui/bootstrap", map[string]string{}, http.StatusOK, &bootstrap)
 	login := httptest.NewRecorder()
 	fixture.Server.ServeHTTP(login, httptest.NewRequest(http.MethodGet, bootstrap.LoginPath, nil))
 	if login.Code != http.StatusSeeOther {
@@ -822,7 +739,7 @@ func TestWebUITerminalAttachCreatesOwnerBrowserURL(t *testing.T) {
 	}
 
 	missingCSRF := httptest.NewRecorder()
-	missingCSRFRequest := httptest.NewRequest(http.MethodPost, "/ui/api/v1/sessions/"+started.Session.ID+"/terminal-token", strings.NewReader(`{}`))
+	missingCSRFRequest := httptest.NewRequest(http.MethodPost, "/ui/api/v2/sessions/"+started.Session.ID+"/terminal-token", strings.NewReader(`{}`))
 	missingCSRFRequest.Header.Set("Content-Type", "application/json")
 	missingCSRFRequest.AddCookie(sessionCookie)
 	fixture.Server.ServeHTTP(missingCSRF, missingCSRFRequest)
@@ -831,7 +748,7 @@ func TestWebUITerminalAttachCreatesOwnerBrowserURL(t *testing.T) {
 	}
 
 	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/ui/api/v1/sessions/"+started.Session.ID+"/terminal-token", strings.NewReader(`{}`))
+	request := httptest.NewRequest(http.MethodPost, "/ui/api/v2/sessions/"+started.Session.ID+"/terminal-token", strings.NewReader(`{}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(webCSRFHeader, csrfCookie.Value)
 	request.AddCookie(sessionCookie)
@@ -843,7 +760,7 @@ func TestWebUITerminalAttachCreatesOwnerBrowserURL(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&access); err != nil {
 		t.Fatalf("decode terminal access: %v", err)
 	}
-	if !strings.HasPrefix(access.Access.LoginPath, "/v1/sessions/"+started.Session.ID+"/terminal-login?token=") {
+	if !strings.HasPrefix(access.Access.LoginPath, "/v2/sessions/"+started.Session.ID+"/terminal-login?token=") {
 		t.Fatalf("terminal access = %+v", access.Access)
 	}
 }
@@ -927,7 +844,7 @@ INSERT INTO handoff_snapshots (
 	if card.ReviewState != coordinator.ReviewChangesRequested {
 		t.Fatalf("review state = %q, want changes_requested", card.ReviewState)
 	}
-	if card.BlockingReason != "required check blocked" || card.PrimaryAction != "respond" {
+	if card.BlockingReason != "" || card.PrimaryAction != "respond" {
 		t.Fatalf("card actions = blocking:%q primary:%q", card.BlockingReason, card.PrimaryAction)
 	}
 	if card.TerminalAvailable {
@@ -988,8 +905,8 @@ func TestBoardHidesUIIssueCardsFromSessionTokens(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&board); err != nil {
 		t.Fatalf("decode session board: %v", err)
 	}
-	if board.LaneStates[unrelated.Session.IssueID] != coordinator.LaneStateInProgress {
-		t.Fatalf("session board lane states = %+v, want in_progress for %s", board.LaneStates, unrelated.Session.IssueID)
+	if board.LaneStates[unrelated.Session.IssueID] != coordinator.LaneStateWorking {
+		t.Fatalf("session board lane states = %+v, want working for %s", board.LaneStates, unrelated.Session.IssueID)
 	}
 }
 
@@ -1005,23 +922,20 @@ func TestBoardUIIssueCardsShowRelationBlockers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create blocked issue: %v", err)
 	}
-	if _, err := fixture.Issues.ScheduleIssue(ctx, blocked.ID, coordinator.ScheduleUpNext); err != nil {
-		t.Fatalf("schedule blocked issue: %v", err)
-	}
 	if err := fixture.Issues.LinkIssues(ctx, blocker.ID, blocked.ID, coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
 		t.Fatalf("link blocker: %v", err)
+	}
+	if _, err := fixture.Bundle.WorkflowRuns.Schedule(ctx, blocked.ID); err != nil {
+		t.Fatalf("schedule blocked workflow: %v", err)
 	}
 
 	var board boardResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
-	if len(board.Board.UpNext) != 0 {
-		t.Fatalf("up_next lane = %+v, want empty for blocked issue", board.Board.UpNext)
+	if len(board.Board.Scheduled) != 1 || board.Board.Scheduled[0].ID != blocked.ID {
+		t.Fatalf("scheduled lane = %+v, want %s", board.Board.Scheduled, blocked.ID)
 	}
-	if len(board.Board.NeedsAttention) != 1 || board.Board.NeedsAttention[0].ID != blocked.ID {
-		t.Fatalf("needs_attention lane = %+v, want %s", board.Board.NeedsAttention, blocked.ID)
-	}
-	if len(board.BlockedIDs) != 1 || board.BlockedIDs[0] != blocked.ID {
-		t.Fatalf("blocked ids = %+v, want [%s]", board.BlockedIDs, blocked.ID)
+	if len(board.BlockedIDs) != 0 {
+		t.Fatalf("blocked ids = %+v, want no in-progress workflow wait", board.BlockedIDs)
 	}
 	card, ok := board.IssueCards[blocked.ID]
 	if !ok {
@@ -1100,14 +1014,15 @@ func TestIssueDetailReadModelIsOwnerOnly(t *testing.T) {
 		t.Fatalf("register terminal target: %v", err)
 	}
 	required := true
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+started.Session.IssueID+"/checks/unit", reportCheckRequest{
-		Kind:     string(coordinator.CheckKindCI),
-		Required: &required,
-		Verdict:  string(coordinator.CheckPending),
-	}, http.StatusOK, nil)
+	if _, err := fixture.Checks.ReportCheck(ctx, coordinator.ReportCheckInput{
+		IssueID: started.Session.IssueID, Name: "unit", Kind: coordinator.CheckKindCI,
+		Required: &required, Verdict: coordinator.CheckPending,
+	}); err != nil {
+		t.Fatalf("report detail check: %v", err)
+	}
 
 	var owner issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/issues/"+started.Session.IssueID, nil, http.StatusOK, &owner)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/issues/"+started.Session.IssueID, nil, http.StatusOK, &owner)
 	if owner.Detail == nil {
 		t.Fatal("owner issue response missing detail")
 	}
@@ -1134,7 +1049,7 @@ func TestIssueDetailReadModelIsOwnerOnly(t *testing.T) {
 	}
 
 	var session issueResponse
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodGet, "/v1/issues/"+started.Session.IssueID, nil, http.StatusOK, &session)
+	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodGet, "/v2/issues/"+started.Session.IssueID, nil, http.StatusOK, &session)
 	if session.Detail != nil {
 		t.Fatalf("session issue response leaked detail: %+v", session.Detail)
 	}
@@ -1154,87 +1069,13 @@ func TestWorkerTokenCanReadIssue(t *testing.T) {
 	}
 
 	var worker issueResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v1/issues/"+issue.ID, nil, http.StatusOK, &worker)
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/issues/"+issue.ID, nil, http.StatusOK, &worker)
 	if worker.Issue.ID != issue.ID || worker.Issue.Body != issue.Body || worker.Issue.AcceptanceCriteria != issue.AcceptanceCriteria {
 		t.Fatalf("worker issue response = %+v", worker.Issue)
 	}
 	if worker.Detail != nil {
 		t.Fatalf("worker issue response leaked owner detail: %+v", worker.Detail)
 	}
-}
-
-func TestSessionTokenCanReadAndCreateConstrainedDiscoveredIssue(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-
-	source, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Current work"})
-	if err != nil {
-		t.Fatalf("create source issue: %v", err)
-	}
-	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
-		Token:         "session-token",
-		Scope:         coordinator.TokenScopeSession,
-		Subject:       "s-1",
-		ProjectID:     &fixture.Project.ID,
-		SourceIssueID: &source.ID,
-	}); err != nil {
-		t.Fatalf("store session token: %v", err)
-	}
-
-	var list issuesResponse
-	doJSONRequestAs(t, fixture.Server, "session-token", http.MethodGet, "/v1/issues", nil, http.StatusOK, &list)
-	if len(list.Issues) != 1 || list.Issues[0].ID != source.ID {
-		t.Fatalf("session list = %+v", list.Issues)
-	}
-
-	doJSONRequestAs(t, fixture.Server, "session-token", http.MethodPost, "/v1/issues", createIssueRequest{
-		Title:         "Bad session schedule",
-		ScheduleState: string(coordinator.ScheduleUpNext),
-	}, http.StatusForbidden, nil)
-
-	createResponse := issueResponse{}
-	doJSONRequestAs(t, fixture.Server, "session-token", http.MethodPost, "/v1/issues", createIssueRequest{
-		Title: "Discovered blocker",
-		Tags: []tagRequest{{
-			Slug: "needs-investigation",
-			Name: "Needs Investigation",
-		}},
-		Relations: []relationRequest{{
-			TargetIssueID: source.ID,
-			Kind:          string(coordinator.RelationBlocks),
-		}},
-	}, http.StatusCreated, &createResponse, idempotencyHeader, "discover-1")
-
-	discovered := createResponse.Issue
-	if discovered.CreatedBy != coordinator.ActorAgent {
-		t.Fatalf("CreatedBy = %q, want agent", discovered.CreatedBy)
-	}
-	if discovered.CreatedBySessionID == nil || *discovered.CreatedBySessionID != "s-1" {
-		t.Fatalf("CreatedBySessionID = %v, want s-1", discovered.CreatedBySessionID)
-	}
-	if discovered.SourceIssueID == nil || *discovered.SourceIssueID != source.ID {
-		t.Fatalf("SourceIssueID = %v, want %s", discovered.SourceIssueID, source.ID)
-	}
-	if discovered.ScheduleState != coordinator.ScheduleBacklog || discovered.TriageState != coordinator.TriagePending {
-		t.Fatalf("discovered state = %s/%s, want backlog/triage", discovered.ScheduleState, discovered.TriageState)
-	}
-
-	tags, err := fixture.Issues.TagsForIssue(ctx, discovered.ID)
-	if err != nil {
-		t.Fatalf("tags for discovered issue: %v", err)
-	}
-	if len(tags) != 1 || tags[0].Slug != "needs-investigation" || tags[0].CreatedBy != coordinator.ActorAgent {
-		t.Fatalf("tags = %+v", tags)
-	}
-	relations, err := fixture.Issues.RelationsForIssue(ctx, source.ID)
-	if err != nil {
-		t.Fatalf("relations for source issue: %v", err)
-	}
-	if len(relations) != 1 || relations[0].SourceIssueID != discovered.ID || relations[0].TargetIssueID != source.ID || relations[0].Kind != coordinator.RelationBlocks {
-		t.Fatalf("relations = %+v", relations)
-	}
-
-	doJSONRequestAs(t, fixture.Server, "session-token", http.MethodPost, "/v1/issues/"+source.ID+"/close", map[string]string{}, http.StatusForbidden, nil)
 }
 
 func TestHookTokenCanPostGitEvents(t *testing.T) {
@@ -1287,7 +1128,7 @@ func TestDrainGitEventSpoolRecoversMissedPostReceive(t *testing.T) {
 	}
 
 	var response drainGitEventsResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/git/events/drain", drainGitEventsRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/git/events/drain", drainGitEventsRequest{
 		ExchangeRepoPath: exchangePath,
 	}, http.StatusOK, &response)
 	if response.Drained != 1 {
@@ -1302,7 +1143,7 @@ func TestDrainGitEventSpoolRecoversMissedPostReceive(t *testing.T) {
 		t.Fatalf("events = %+v", events)
 	}
 
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/git/events/drain", drainGitEventsRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/git/events/drain", drainGitEventsRequest{
 		ExchangeRepoPath: exchangePath,
 	}, http.StatusOK, &response)
 	if response.Drained != 0 {
@@ -1336,7 +1177,7 @@ func TestGitEventsDeduplicateDirectPostAndSpoolDrain(t *testing.T) {
 	}
 
 	var drainResponse drainGitEventsResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/git/events/drain", drainGitEventsRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/git/events/drain", drainGitEventsRequest{
 		ExchangeRepoPath: exchangePath,
 	}, http.StatusOK, &drainResponse)
 	if drainResponse.Drained != 0 {
@@ -1359,14 +1200,14 @@ func TestWorkerHTTPLifecycleAndJobDiagnostics(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/jobs", enqueueJobRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/jobs", enqueueJobRequest{
 		IssueID:        &issue.ID,
 		Role:           string(flowworker.RoleAuthor),
 		CapacityBucket: string(flowworker.BucketPersistentAgent),
 	}, http.StatusForbidden, nil)
 
 	var enqueue jobResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/jobs", enqueueJobRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/jobs", enqueueJobRequest{
 		IssueID:        &issue.ID,
 		Role:           string(flowworker.RoleCI),
 		CapacityBucket: string(flowworker.BucketPersistentAgent),
@@ -1378,29 +1219,29 @@ func TestWorkerHTTPLifecycleAndJobDiagnostics(t *testing.T) {
 	}
 
 	var list jobsResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/jobs", nil, http.StatusOK, &list)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/jobs", nil, http.StatusOK, &list)
 	if len(list.Jobs) != 1 || list.Jobs[0].ID != enqueue.Job.ID {
 		t.Fatalf("jobs list = %+v", list.Jobs)
 	}
 
 	var reapJobs jobsResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v1/workers/reap-jobs", nil, http.StatusOK, &reapJobs)
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/workers/reap-jobs", nil, http.StatusOK, &reapJobs)
 	if len(reapJobs.Jobs) != 1 || reapJobs.Jobs[0].ID != enqueue.Job.ID || reapJobs.Jobs[0].State != flowworker.JobQueued {
 		t.Fatalf("worker reap jobs = %+v", reapJobs.Jobs)
 	}
 	if reapJobs.Jobs[0].Payload != nil {
 		t.Fatalf("worker reap job payload = %+v, want omitted", reapJobs.Jobs[0].Payload)
 	}
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/workers/reap-jobs", nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/workers/reap-jobs", nil, http.StatusForbidden, nil)
 
 	var show jobResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/jobs/"+enqueue.Job.ID, nil, http.StatusOK, &show)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/jobs/"+enqueue.Job.ID, nil, http.StatusOK, &show)
 	if show.Job.ID != enqueue.Job.ID {
 		t.Fatalf("show job = %+v, want %s", show.Job, enqueue.Job.ID)
 	}
 
 	var registered workerResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/register", registerWorkerRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
 		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
 		CapacityPersistentAgent: 1,
 		HeartbeatTTLSeconds:     60,
@@ -1410,7 +1251,7 @@ func TestWorkerHTTPLifecycleAndJobDiagnostics(t *testing.T) {
 	}
 
 	var heartbeat workerResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/heartbeat", heartbeatWorkerRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/heartbeat", heartbeatWorkerRequest{
 		WorkerID:            "w-local",
 		HeartbeatTTLSeconds: 120,
 	}, http.StatusOK, &heartbeat)
@@ -1419,17 +1260,17 @@ func TestWorkerHTTPLifecycleAndJobDiagnostics(t *testing.T) {
 	}
 
 	var workers workersResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/workers", nil, http.StatusOK, &workers)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/workers", nil, http.StatusOK, &workers)
 	if len(workers.Workers) != 1 || workers.Workers[0].ID != "w-local" {
 		t.Fatalf("workers list = %+v", workers.Workers)
 	}
 	if workers.Queue.Queued != 1 || workers.Queue.PersistentAgent != 1 || workers.Queue.CI != 1 {
 		t.Fatalf("worker queue summary = %+v", workers.Queue)
 	}
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v1/workers", nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/workers", nil, http.StatusForbidden, nil)
 
 	var claim claimJobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/claim", claimJobRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
 		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDurationSeconds: 60,
 	}, http.StatusOK, &claim)
@@ -1444,7 +1285,7 @@ func TestWorkerHTTPLifecycleAndJobDiagnostics(t *testing.T) {
 	}
 
 	var running jobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/running", markJobRunningRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/running", markJobRunningRequest{
 		LeaseID: claim.Lease.ID,
 	}, http.StatusOK, &running)
 	if running.Job.ID != enqueue.Job.ID || running.Job.State != flowworker.JobRunning {
@@ -1452,20 +1293,20 @@ func TestWorkerHTTPLifecycleAndJobDiagnostics(t *testing.T) {
 	}
 
 	var runningJobs jobsResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/jobs", nil, http.StatusOK, &runningJobs)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/jobs", nil, http.StatusOK, &runningJobs)
 	runningDiagnostics, ok := runningJobs.Diagnostics[enqueue.Job.ID]
 	if !ok || runningDiagnostics.Lease == nil || runningDiagnostics.Lease.ID != claim.Lease.ID || !runningDiagnostics.LiveLease || runningDiagnostics.LeaseStatus != "live" || runningDiagnostics.TmuxSession == "" {
 		t.Fatalf("running job diagnostics = %+v ok=%t", runningDiagnostics, ok)
 	}
 	var liveWorkers workersResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/workers", nil, http.StatusOK, &liveWorkers)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/workers", nil, http.StatusOK, &liveWorkers)
 	liveWorkerDiagnostics := liveWorkers.Diagnostics["w-local"]
 	if liveWorkers.Queue.Queued != 0 || liveWorkerDiagnostics.LiveJobs != 1 || liveWorkerDiagnostics.LivePersistentAgent != 1 {
 		t.Fatalf("live worker diagnostics = queue:%+v worker:%+v", liveWorkers.Queue, liveWorkerDiagnostics)
 	}
 
 	var renew leaseResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/renew", renewLeaseRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/renew", renewLeaseRequest{
 		LeaseID:              claim.Lease.ID,
 		LeaseDurationSeconds: 120,
 	}, http.StatusOK, &renew)
@@ -1474,7 +1315,7 @@ func TestWorkerHTTPLifecycleAndJobDiagnostics(t *testing.T) {
 	}
 
 	var release jobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/release", releaseLeaseRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/release", releaseLeaseRequest{
 		LeaseID:    claim.Lease.ID,
 		FinalState: string(flowworker.JobFinished),
 	}, http.StatusOK, &release)
@@ -1482,7 +1323,7 @@ func TestWorkerHTTPLifecycleAndJobDiagnostics(t *testing.T) {
 		t.Fatalf("released job state = %q, want finished", release.Job.State)
 	}
 
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/jobs/"+enqueue.Job.ID, nil, http.StatusOK, &show)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/jobs/"+enqueue.Job.ID, nil, http.StatusOK, &show)
 	if show.Job.State != flowworker.JobFinished {
 		t.Fatalf("show released job state = %q, want finished", show.Job.State)
 	}
@@ -1503,7 +1344,7 @@ func TestWorkerJoinTokenCreatesAndRotatesWorkerCredential(t *testing.T) {
 		t.Fatalf("new server: %v", err)
 	}
 
-	doJSONRequestAs(t, server, "join-token", http.MethodPost, "/v1/workers/join", joinWorkerRequest{
+	doJSONRequestAs(t, server, "join-token", http.MethodPost, "/v2/workers/join", joinWorkerRequest{
 		WorkerID: "w-local",
 	}, http.StatusOK, nil)
 	if _, err := fixture.Credentials.Authenticate(context.Background(), "worker-token"); err != coordinator.ErrInvalidCredential {
@@ -1511,7 +1352,7 @@ func TestWorkerJoinTokenCreatesAndRotatesWorkerCredential(t *testing.T) {
 	}
 
 	var joined joinWorkerResponse
-	doJSONRequestAs(t, server, "join-token", http.MethodPost, "/v1/workers/join", joinWorkerRequest{
+	doJSONRequestAs(t, server, "join-token", http.MethodPost, "/v2/workers/join", joinWorkerRequest{
 		WorkerID: "w-remote",
 	}, http.StatusOK, &joined)
 	if joined.WorkerID != "w-remote" || strings.TrimSpace(joined.Token) == "" {
@@ -1529,7 +1370,7 @@ func TestWorkerJoinTokenCreatesAndRotatesWorkerCredential(t *testing.T) {
 func TestWorkerJoinDisabledWithoutJoinToken(t *testing.T) {
 	fixture := newTestFixture(t)
 
-	doJSONRequestAs(t, fixture.Server, "join-token", http.MethodPost, "/v1/workers/join", joinWorkerRequest{
+	doJSONRequestAs(t, fixture.Server, "join-token", http.MethodPost, "/v2/workers/join", joinWorkerRequest{
 		WorkerID: "w-local",
 	}, http.StatusNotFound, nil)
 }
@@ -1546,7 +1387,7 @@ func TestWorkerJoinRejectsInvalidJoinToken(t *testing.T) {
 		t.Fatalf("new server: %v", err)
 	}
 
-	doJSONRequestAs(t, server, "wrong-token", http.MethodPost, "/v1/workers/join", joinWorkerRequest{
+	doJSONRequestAs(t, server, "wrong-token", http.MethodPost, "/v2/workers/join", joinWorkerRequest{
 		WorkerID: "w-local",
 	}, http.StatusUnauthorized, nil)
 }
@@ -1555,7 +1396,7 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 	fixture := newTestFixture(t)
 
 	var startedConsole consoleResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/console", consoleRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/console", consoleRequest{
 		Harness: "codex",
 	}, http.StatusCreated, &startedConsole)
 	if !startedConsole.Active || startedConsole.Job == nil || startedConsole.Job.Role != flowworker.RoleConsole {
@@ -1565,13 +1406,13 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 		t.Fatalf("console job issue/change = %v/%v, want nil", startedConsole.Job.IssueID, startedConsole.Job.ChangeID)
 	}
 
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/register", registerWorkerRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
 		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
 		CapacityPersistentAgent: 1,
 		HeartbeatTTLSeconds:     60,
 	}, http.StatusOK, nil)
 	var claim claimJobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/claim", claimJobRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
 		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDurationSeconds: 60,
 	}, http.StatusOK, &claim)
@@ -1579,7 +1420,7 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 		t.Fatalf("claim console = %+v, want job %s", claim, startedConsole.Job.ID)
 	}
 	var running jobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/running", markJobRunningRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/running", markJobRunningRequest{
 		LeaseID: claim.Lease.ID,
 	}, http.StatusOK, &running)
 	if running.Session == nil || running.Session.Role != flowworker.RoleConsole || running.Session.IssueID != "" || running.Session.ChangeID != "" || running.SessionToken == "" {
@@ -1589,52 +1430,48 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 	sessionID := running.Session.ID
 
 	var current consoleResponse
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodGet, "/v1/console", nil, http.StatusOK, &current)
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodGet, "/v2/console", nil, http.StatusOK, &current)
 	if !current.Active || current.Session == nil || current.Session.ID != sessionID {
 		t.Fatalf("current console = %+v", current)
 	}
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v1/sessions/"+sessionID+"/terminal", sessionTerminalRequest{
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/sessions/"+sessionID+"/terminal", sessionTerminalRequest{
 		TargetURL: "http://127.0.0.1:65535",
 	}, http.StatusOK, nil)
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v1/sessions/"+sessionID+"/event", sessionEventRequest{
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/sessions/"+sessionID+"/event", sessionEventRequest{
 		State: string(coordinator.SessionWaiting),
 	}, http.StatusOK, nil)
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v1/sessions/"+sessionID+"/status", sessionStatusRequest{
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/sessions/"+sessionID+"/status", sessionStatusRequest{
 		Message: "unsupported",
 	}, http.StatusBadRequest, nil)
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v1/sessions/"+sessionID+"/ready", readySessionRequest{}, http.StatusBadRequest, nil)
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/sessions/"+sessionID+"/ready", readySessionRequest{}, http.StatusBadRequest, nil)
 
 	var created issueResponse
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v1/issues", createIssueRequest{
-		Title:         "Console-created issue",
-		ScheduleState: string(coordinator.ScheduleBacklog),
-		TriageState:   string(coordinator.TriageAccepted),
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/issues", createIssueRequest{
+		Title: "Console-created issue",
 	}, http.StatusCreated, &created)
 	if created.Issue.CreatedBy != coordinator.ActorAgent || created.Issue.CreatedBySessionID == nil || *created.Issue.CreatedBySessionID != sessionID {
 		t.Fatalf("console-created issue audit = %+v", created.Issue)
 	}
 	title := "Console-edited issue"
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPatch, "/v1/issues/"+created.Issue.ID, editIssueRequest{
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPatch, "/v2/issues/"+created.Issue.ID, editIssueRequest{
 		Title: &title,
 	}, http.StatusOK, nil)
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v1/issues/"+created.Issue.ID+"/schedule", scheduleIssueRequest{
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/issues/"+created.Issue.ID+"/schedule", scheduleIssueRequest{
 		State: string(coordinator.ScheduleUpNext),
 	}, http.StatusOK, nil)
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v1/issues/"+created.Issue.ID+"/checks/unit", reportCheckRequest{
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/issues/"+created.Issue.ID+"/checks/unit", reportCheckRequest{
 		Kind:    string(coordinator.CheckKindCI),
 		Verdict: string(coordinator.CheckSatisfied),
 	}, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v1/issues/"+created.Issue.ID+"/merge", map[string]string{}, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodGet, "/v1/jobs", nil, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodGet, "/v1/workers", nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/issues/"+created.Issue.ID+"/merge", map[string]string{}, http.StatusNotFound, nil)
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodGet, "/v2/jobs", nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodGet, "/v2/workers", nil, http.StatusForbidden, nil)
 
 	var blocker issueResponse
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v1/issues", createIssueRequest{
-		Title:         "Console blocker",
-		ScheduleState: string(coordinator.ScheduleBacklog),
-		TriageState:   string(coordinator.TriageAccepted),
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/issues", createIssueRequest{
+		Title: "Console blocker",
 	}, http.StatusCreated, &blocker)
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v1/issues/"+blocker.Issue.ID+"/relations", relationRequest{
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/issues/"+blocker.Issue.ID+"/relations", relationRequest{
 		TargetIssueID: created.Issue.ID,
 		Kind:          string(coordinator.RelationBlocks),
 	}, http.StatusNoContent, nil)
@@ -1645,17 +1482,17 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 	if len(relations) != 1 || relations[0].CreatedBy != coordinator.ActorAgent {
 		t.Fatalf("relations = %+v, want one agent-created relation", relations)
 	}
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodDelete, "/v1/issues/"+blocker.Issue.ID+"/relations", relationRequest{
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodDelete, "/v2/issues/"+blocker.Issue.ID+"/relations", relationRequest{
 		TargetIssueID: created.Issue.ID,
 		Kind:          string(coordinator.RelationBlocks),
 	}, http.StatusNoContent, nil)
 
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/release", releaseLeaseRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/release", releaseLeaseRequest{
 		LeaseID:    claim.Lease.ID,
 		FinalState: string(flowworker.JobFinished),
 	}, http.StatusBadRequest, nil)
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodDelete, "/v1/console", nil, http.StatusOK, nil)
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodGet, "/v1/console", nil, http.StatusUnauthorized, nil)
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodDelete, "/v2/console", nil, http.StatusOK, nil)
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodGet, "/v2/console", nil, http.StatusUnauthorized, nil)
 }
 
 func TestIssueConsoleAPILifecycleAndScope(t *testing.T) {
@@ -1671,7 +1508,7 @@ func TestIssueConsoleAPILifecycleAndScope(t *testing.T) {
 	}
 
 	var startedConsole consoleResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+issue.ID+"/console", consoleRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues/"+issue.ID+"/console", consoleRequest{
 		Harness: flowharness.Shell,
 	}, http.StatusCreated, &startedConsole)
 	if !startedConsole.Active || startedConsole.Job == nil || startedConsole.Job.Role != flowworker.RoleConsole {
@@ -1691,22 +1528,22 @@ func TestIssueConsoleAPILifecycleAndScope(t *testing.T) {
 	}
 
 	var projectConsole consoleResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/console", nil, http.StatusOK, &projectConsole)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/console", nil, http.StatusOK, &projectConsole)
 	if projectConsole.Active {
 		t.Fatalf("project console should ignore issue console state: %+v", projectConsole)
 	}
 	var currentIssueConsole consoleResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/issues/"+issue.ID+"/console", nil, http.StatusOK, &currentIssueConsole)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/issues/"+issue.ID+"/console", nil, http.StatusOK, &currentIssueConsole)
 	if !currentIssueConsole.Active || currentIssueConsole.Job == nil || currentIssueConsole.Job.ID != startedConsole.Job.ID {
 		t.Fatalf("current issue console = %+v, want job %s", currentIssueConsole, startedConsole.Job.ID)
 	}
 
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/register", registerWorkerRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
 		CapacityPersistentAgent: 1,
 		HeartbeatTTLSeconds:     60,
 	}, http.StatusOK, nil)
 	var claim claimJobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/claim", claimJobRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
 		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDurationSeconds: 60,
 	}, http.StatusOK, &claim)
@@ -1714,7 +1551,7 @@ func TestIssueConsoleAPILifecycleAndScope(t *testing.T) {
 		t.Fatalf("claim issue console = %+v, want job %s", claim, startedConsole.Job.ID)
 	}
 	var running jobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/running", markJobRunningRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/running", markJobRunningRequest{
 		LeaseID: claim.Lease.ID,
 	}, http.StatusOK, &running)
 	if running.Session == nil || running.Session.Role != flowworker.RoleConsole || running.Session.IssueID != issue.ID || running.Session.ChangeID != *startedConsole.Job.ChangeID || running.SessionToken == "" {
@@ -1727,18 +1564,18 @@ func TestIssueConsoleAPILifecycleAndScope(t *testing.T) {
 	if principal.Scope != coordinator.TokenScopeConsole || principal.SourceIssueID == nil || *principal.SourceIssueID != issue.ID {
 		t.Fatalf("issue console principal = %+v", principal)
 	}
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodGet, "/v1/issues/"+issue.ID, nil, http.StatusOK, nil)
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodGet, "/v1/issues/"+other.ID, nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodGet, "/v2/issues/"+issue.ID, nil, http.StatusOK, nil)
+	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodGet, "/v2/issues/"+other.ID, nil, http.StatusForbidden, nil)
 
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodDelete, "/v1/issues/"+issue.ID+"/console", nil, http.StatusOK, nil)
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodGet, "/v1/issues/"+issue.ID, nil, http.StatusUnauthorized, nil)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodDelete, "/v2/issues/"+issue.ID+"/console", nil, http.StatusOK, nil)
+	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodGet, "/v2/issues/"+issue.ID, nil, http.StatusUnauthorized, nil)
 }
 
 func TestConsoleAPIStartsShellHarness(t *testing.T) {
 	fixture := newTestFixture(t)
 
 	var startedConsole consoleResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/console", consoleRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/console", consoleRequest{
 		Harness: flowharness.Shell,
 	}, http.StatusCreated, &startedConsole)
 	if startedConsole.Job == nil {
@@ -1756,13 +1593,13 @@ func TestConsoleAPIStartsShellHarness(t *testing.T) {
 		t.Fatalf("console entrypoint argv = %#v", entrypoint["argv"])
 	}
 
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/register", registerWorkerRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
 		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
 		CapacityPersistentAgent: 1,
 		HeartbeatTTLSeconds:     60,
 	}, http.StatusOK, nil)
 	var claim claimJobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/claim", claimJobRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
 		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDurationSeconds: 60,
 	}, http.StatusOK, &claim)
@@ -1770,7 +1607,7 @@ func TestConsoleAPIStartsShellHarness(t *testing.T) {
 		t.Fatalf("claim shell console = %+v, want job %s", claim, startedConsole.Job.ID)
 	}
 	var running jobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/running", markJobRunningRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/running", markJobRunningRequest{
 		LeaseID: claim.Lease.ID,
 	}, http.StatusOK, &running)
 	if running.Session == nil || running.Session.Harness != flowharness.Shell {
@@ -1791,9 +1628,9 @@ func TestConsoleTokenIsProjectConfined(t *testing.T) {
 		t.Fatalf("store console token: %v", err)
 	}
 
-	doJSONRequestAs(t, server, "console-token", http.MethodGet, "/v1/projects/"+projectA.ID, nil, http.StatusOK, nil)
-	doJSONRequestAs(t, server, "console-token", http.MethodGet, "/v1/projects/"+projectB.ID, nil, http.StatusForbidden, nil)
-	doJSONRequestAs(t, server, "console-token", http.MethodGet, "/v1/projects/"+projectB.ID+"/board", nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, server, "console-token", http.MethodGet, "/v2/projects/"+projectA.ID, nil, http.StatusOK, nil)
+	doJSONRequestAs(t, server, "console-token", http.MethodGet, "/v2/projects/"+projectB.ID, nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, server, "console-token", http.MethodGet, "/v2/projects/"+projectB.ID+"/board", nil, http.StatusForbidden, nil)
 }
 
 func TestDiagnosticsDistinguishExpiredUnreleasedLeases(t *testing.T) {
@@ -1804,7 +1641,7 @@ func TestDiagnosticsDistinguishExpiredUnreleasedLeases(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 	var enqueue jobResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/jobs", enqueueJobRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/jobs", enqueueJobRequest{
 		IssueID:        &issue.ID,
 		Role:           string(flowworker.RoleCI),
 		CapacityBucket: string(flowworker.BucketPersistentAgent),
@@ -1817,7 +1654,7 @@ func TestDiagnosticsDistinguishExpiredUnreleasedLeases(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 	var claim claimJobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/claim", claimJobRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
 		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDurationSeconds: 60,
 	}, http.StatusOK, &claim)
@@ -1832,14 +1669,14 @@ WHERE id = ?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), clai
 	}
 
 	var jobs jobsResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/jobs", nil, http.StatusOK, &jobs)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/jobs", nil, http.StatusOK, &jobs)
 	diagnostic := jobs.Diagnostics[enqueue.Job.ID]
 	if diagnostic.Lease == nil || diagnostic.Lease.ReleasedAt != nil || diagnostic.LiveLease || diagnostic.LeaseStatus != "expired" {
 		t.Fatalf("expired job diagnostics = %+v", diagnostic)
 	}
 
 	var workers workersResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/workers", nil, http.StatusOK, &workers)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/workers", nil, http.StatusOK, &workers)
 	workerDiagnostic := workers.Diagnostics["w-local"]
 	if workerDiagnostic.LiveJobs != 0 || workerDiagnostic.ExpiredUnreleasedJobs != 1 || workerDiagnostic.ExpiredUnreleasedPersistentAgent != 1 {
 		t.Fatalf("expired worker diagnostics = %+v", workerDiagnostic)
@@ -1847,7 +1684,7 @@ WHERE id = ?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), clai
 }
 
 // TestJobsListAggregateOrdersByUpdatedAndStampsProject verifies the aggregate
-// /v1/jobs response carries each job's project name in its diagnostics and is
+// /v2/jobs response carries each job's project name in its diagnostics and is
 // ordered globally by updated_at descending across projects (rather than
 // concatenating per-project lists in registry order).
 func TestJobsListAggregateOrdersByUpdatedAndStampsProject(t *testing.T) {
@@ -1857,12 +1694,12 @@ func TestJobsListAggregateOrdersByUpdatedAndStampsProject(t *testing.T) {
 
 	// Enqueue one CI job in each project.
 	var jobA jobResponse
-	doJSONRequestAs(t, server, "owner-token", http.MethodPost, "/v1/jobs?project="+projectA.ID, enqueueJobRequest{
+	doJSONRequestAs(t, server, "owner-token", http.MethodPost, "/v2/jobs?project="+projectA.ID, enqueueJobRequest{
 		Role:           string(flowworker.RoleCI),
 		CapacityBucket: string(flowworker.BucketEphemeral),
 	}, http.StatusCreated, &jobA)
 	var jobB jobResponse
-	doJSONRequestAs(t, server, "owner-token", http.MethodPost, "/v1/jobs?project="+projectB.ID, enqueueJobRequest{
+	doJSONRequestAs(t, server, "owner-token", http.MethodPost, "/v2/jobs?project="+projectB.ID, enqueueJobRequest{
 		Role:           string(flowworker.RoleCI),
 		CapacityBucket: string(flowworker.BucketEphemeral),
 	}, http.StatusCreated, &jobB)
@@ -1879,7 +1716,7 @@ func TestJobsListAggregateOrdersByUpdatedAndStampsProject(t *testing.T) {
 	}
 
 	var list jobsResponse
-	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v1/jobs", nil, http.StatusOK, &list)
+	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v2/jobs", nil, http.StatusOK, &list)
 	if len(list.Jobs) != 2 {
 		t.Fatalf("jobs list = %+v, want 2 jobs", list.Jobs)
 	}
@@ -1899,226 +1736,12 @@ func TestJobsListAggregateOrdersByUpdatedAndStampsProject(t *testing.T) {
 	}
 }
 
-func TestSidebarStatusSummarizesLiveBoardWorkersAndJobs(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	if _, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{
-		Title:       "Pending triage",
-		TriageState: coordinator.TriagePending,
-	}); err != nil {
-		t.Fatalf("create triage issue: %v", err)
-	}
-
-	feedback := startAuthorSessionForStatusTestWithWorker(t, fixture, "Waiting for feedback", "w-feedback")
-	if _, err := fixture.Sessions.UpdateSessionState(ctx, feedback.Session.ID, coordinator.SessionWaiting); err != nil {
-		t.Fatalf("mark feedback session waiting: %v", err)
-	}
-
-	merge := startAuthorSessionForStatusTestWithWorker(t, fixture, "Ready for merge", "w-merge")
-	if _, err := fixture.Sessions.ReadyAuthorSession(ctx, merge.Session.ID); err != nil {
-		t.Fatalf("ready merge session: %v", err)
-	}
-	required := true
-	if _, err := fixture.Checks.ReportCheck(ctx, coordinator.ReportCheckInput{
-		IssueID:  merge.Session.IssueID,
-		Name:     "reviewer",
-		Kind:     coordinator.CheckKindReviewer,
-		Required: &required,
-		Verdict:  coordinator.CheckSatisfied,
-		Reporter: "test",
-	}); err != nil {
-		t.Fatalf("satisfy reviewer check: %v", err)
-	}
-	if _, err := fixture.Checks.ReportCheck(ctx, coordinator.ReportCheckInput{
-		IssueID:  merge.Session.IssueID,
-		Name:     "verifier",
-		Kind:     coordinator.CheckKindVerifier,
-		Required: &required,
-		Verdict:  coordinator.CheckSatisfied,
-		Reporter: "test",
-	}); err != nil {
-		t.Fatalf("satisfy verifier check: %v", err)
-	}
-
-	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                "w-extra",
-		CapacityEphemeral: 3,
-	}); err != nil {
-		t.Fatalf("register extra worker: %v", err)
-	}
-	activeJob, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		Role:           flowworker.RoleCI,
-		CapacityBucket: flowworker.BucketEphemeral,
-	})
-	if err != nil {
-		t.Fatalf("enqueue active job: %v", err)
-	}
-	claimed := claimSpecificJob(t, fixture, "w-extra", activeJob.ID, []flowworker.CapacityBucket{flowworker.BucketEphemeral})
-	if _, err := fixture.Workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
-		t.Fatalf("mark active job running: %v", err)
-	}
-	if _, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		Role:           flowworker.RoleCI,
-		CapacityBucket: flowworker.BucketEphemeral,
-	}); err != nil {
-		t.Fatalf("enqueue queued job: %v", err)
-	}
-
-	var sidebar sidebarResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/sidebar", nil, http.StatusOK, &sidebar)
-	if sidebar.Triage != 1 || sidebar.Feedback != 2 || sidebar.Merge != 1 {
-		t.Fatalf("sidebar issue counts = triage:%d attention:%d merge:%d, want 1/2/1", sidebar.Triage, sidebar.Feedback, sidebar.Merge)
-	}
-	if sidebar.Workers.InUse != 2 || sidebar.Workers.Capacity != 5 {
-		t.Fatalf("sidebar worker summary = %+v, want 2/5", sidebar.Workers)
-	}
-	if sidebar.Jobs.Active != 2 || sidebar.Jobs.Queued != 1 {
-		t.Fatalf("sidebar job summary = %+v, want active 2 queued 1", sidebar.Jobs)
-	}
-}
-
-func TestScheduleStartsAuthorJobAndSessionReadyReleasesSlot(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Author API issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-
-	var scheduled issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+issue.ID+"/schedule", scheduleIssueRequest{
-		State: string(coordinator.ScheduleUpNext),
-	}, http.StatusOK, &scheduled)
-	if scheduled.Issue.ScheduleState != coordinator.ScheduleUpNext {
-		t.Fatalf("scheduled issue = %+v", scheduled.Issue)
-	}
-	jobs, err := fixture.Workers.ListJobs(ctx)
-	if err != nil {
-		t.Fatalf("list jobs: %v", err)
-	}
-	if len(jobs) != 1 || jobs[0].Role != flowworker.RoleAuthor || jobs[0].ChangeID == nil {
-		t.Fatalf("jobs after schedule = %+v", jobs)
-	}
-
-	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-local",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
-		CapacityPersistentAgent: 1,
-	}); err != nil {
-		t.Fatalf("register worker: %v", err)
-	}
-	var claim claimJobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/claim", claimJobRequest{
-		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
-		LeaseDurationSeconds: 60,
-	}, http.StatusOK, &claim)
-	if !claim.Claimed || claim.Job == nil || claim.Lease == nil || claim.Job.ID != jobs[0].ID {
-		t.Fatalf("claim response = %+v, want author job %s", claim, jobs[0].ID)
-	}
-
-	var running jobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/running", markJobRunningRequest{
-		LeaseID: claim.Lease.ID,
-	}, http.StatusOK, &running)
-	if running.Session == nil || running.Change == nil || running.SessionToken == "" {
-		t.Fatalf("running response missing session metadata: %+v", running)
-	}
-	if running.Session.IssueID != issue.ID || running.Session.ChangeID != *jobs[0].ChangeID {
-		t.Fatalf("running session = %+v", running.Session)
-	}
-	if _, err := fixture.Credentials.Authenticate(ctx, running.SessionToken); err != nil {
-		t.Fatalf("authenticate session token: %v", err)
-	}
-	if _, err := fixture.Sessions.RegisterTerminalTarget(ctx, running.Session.ID, "http://127.0.0.1:7777"); err != nil {
-		t.Fatalf("register terminal target: %v", err)
-	}
-
-	var event sessionResponse
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/event", sessionEventRequest{
-		State: string(coordinator.SessionWaiting),
-	}, http.StatusOK, &event)
-	if event.Session.RuntimeState != coordinator.SessionWaiting {
-		t.Fatalf("event session = %+v", event.Session)
-	}
-	var authorJobs jobsResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/jobs", nil, http.StatusOK, &authorJobs)
-	authorDiagnostics, ok := authorJobs.Diagnostics[jobs[0].ID]
-	if !ok || authorDiagnostics.Session == nil || authorDiagnostics.Session.State != coordinator.SessionWaiting || authorDiagnostics.Change == nil || authorDiagnostics.Change.ID != *jobs[0].ChangeID {
-		t.Fatalf("author job diagnostics = %+v ok=%t", authorDiagnostics, ok)
-	}
-	if !authorDiagnostics.Session.TerminalAvailable {
-		t.Fatalf("author job session terminal availability = %+v", authorDiagnostics.Session)
-	}
-	var board boardResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
-	if len(board.Board.NeedsAttention) != 1 || board.Board.NeedsAttention[0].ID != issue.ID {
-		t.Fatalf("needs_attention board = %+v", board.Board.NeedsAttention)
-	}
-	if board.LaneStates[issue.ID] != coordinator.LaneStateInProgress || board.WaitReasons[issue.ID] != coordinator.WaitReasonQuestion {
-		t.Fatalf("lane state/wait reason = %q/%q, want in_progress/question", board.LaneStates[issue.ID], board.WaitReasons[issue.ID])
-	}
-
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/release", releaseLeaseRequest{
-		LeaseID:    claim.Lease.ID,
-		FinalState: string(flowworker.JobFailed),
-	}, http.StatusBadRequest, nil)
-	stillRunning, err := fixture.Workers.GetJob(ctx, jobs[0].ID)
-	if err != nil {
-		t.Fatalf("get still-running job: %v", err)
-	}
-	if stillRunning.State != flowworker.JobRunning {
-		t.Fatalf("author job state after release attempt = %q, want running", stillRunning.State)
-	}
-	stillLeased, err := fixture.Workers.GetLease(ctx, claim.Lease.ID)
-	if err != nil {
-		t.Fatalf("get still-live lease: %v", err)
-	}
-	if stillLeased.ReleasedAt != nil {
-		t.Fatalf("author lease released by worker release attempt: %+v", stillLeased)
-	}
-
-	var ready sessionResponse
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/ready", map[string]string{}, http.StatusOK, &ready)
-	if ready.Session.RuntimeState != coordinator.SessionFinished {
-		t.Fatalf("ready session = %+v", ready.Session)
-	}
-	if _, err := fixture.Credentials.Authenticate(ctx, running.SessionToken); !errors.Is(err, coordinator.ErrInvalidCredential) {
-		t.Fatalf("revoked session token err = %v, want ErrInvalidCredential", err)
-	}
-	releasedJob, err := fixture.Workers.GetJob(ctx, jobs[0].ID)
-	if err != nil {
-		t.Fatalf("get released job: %v", err)
-	}
-	if releasedJob.State != flowworker.JobFinished {
-		t.Fatalf("released job state = %q, want finished", releasedJob.State)
-	}
-	releasedLease, err := fixture.Workers.GetLease(ctx, claim.Lease.ID)
-	if err != nil {
-		t.Fatalf("get released lease: %v", err)
-	}
-	if releasedLease.ReleasedAt == nil {
-		t.Fatal("released lease ReleasedAt is nil")
-	}
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
-	if len(board.Board.InProgress) != 1 || board.Board.InProgress[0].ID != issue.ID {
-		t.Fatalf("in_progress board = %+v", board.Board.InProgress)
-	}
-	if board.LaneStates[issue.ID] != coordinator.LaneStateInReview {
-		t.Fatalf("lane state = %q, want in_review", board.LaneStates[issue.ID])
-	}
-}
-
-// startRunningAuthorSession schedules an issue up_next, claims its author job,
-// marks it running, and returns the running session metadata. It is the shared
-// preamble for the session-event regression tests below.
 func startRunningAuthorSession(t *testing.T, fixture testFixture, issueID string) jobResponse {
 	t.Helper()
 	ctx := context.Background()
 
-	var scheduled issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+issueID+"/schedule", scheduleIssueRequest{
-		State: string(coordinator.ScheduleUpNext),
-	}, http.StatusOK, &scheduled)
+	var scheduled workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues/"+issueID+"/schedule", nil, http.StatusOK, &scheduled)
 	jobs, err := fixture.Workers.ListJobs(ctx)
 	if err != nil {
 		t.Fatalf("list jobs: %v", err)
@@ -2134,7 +1757,7 @@ func startRunningAuthorSession(t *testing.T, fixture testFixture, issueID string
 		t.Fatalf("register worker: %v", err)
 	}
 	var claim claimJobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/claim", claimJobRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
 		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDurationSeconds: 60,
 	}, http.StatusOK, &claim)
@@ -2142,235 +1765,13 @@ func startRunningAuthorSession(t *testing.T, fixture testFixture, issueID string
 		t.Fatalf("claim response = %+v", claim)
 	}
 	var running jobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/running", markJobRunningRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/running", markJobRunningRequest{
 		LeaseID: claim.Lease.ID,
 	}, http.StatusOK, &running)
 	if running.Session == nil || running.SessionToken == "" {
 		t.Fatalf("running response missing session metadata: %+v", running)
 	}
 	return running
-}
-
-func countTransitions(t *testing.T, fixture testFixture, issueID, eventKind string) int {
-	t.Helper()
-	var n int
-	if err := fixture.DB.QueryRow(`
-SELECT COUNT(*)
-FROM transitions
-WHERE issue_id = ?
-	AND event_kind = ?`, issueID, eventKind).Scan(&n); err != nil {
-		t.Fatalf("count %s transitions: %v", eventKind, err)
-	}
-	return n
-}
-
-// TestSessionEventRoutesThroughEngine is the regression for routing the
-// working->waiting flip through the lifecycle engine: it must log a
-// session_state_changed transition while keeping the issue in authoring; the
-// human wait is a board/status overlay, not a workflow phase. A repeated
-// same-state report must be a no-op (no second transition row).
-func TestSessionEventRoutesThroughEngine(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Session event issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	running := startRunningAuthorSession(t, fixture, issue.ID)
-
-	var event sessionResponse
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/event", sessionEventRequest{
-		State: string(coordinator.SessionWaiting),
-	}, http.StatusOK, &event)
-	if event.Session.RuntimeState != coordinator.SessionWaiting {
-		t.Fatalf("event session = %+v, want waiting", event.Session)
-	}
-
-	if got := countTransitions(t, fixture, issue.ID, string(lifecycle.EventSessionStateChanged)); got != 1 {
-		t.Fatalf("session_state_changed transitions = %d, want 1", got)
-	}
-	var toPhase string
-	if err := fixture.DB.QueryRow(`
-SELECT to_phase
-FROM transitions
-WHERE issue_id = ?
-	AND event_kind = ?`, issue.ID, string(lifecycle.EventSessionStateChanged)).Scan(&toPhase); err != nil {
-		t.Fatalf("read session_state_changed transition: %v", err)
-	}
-	if toPhase != string(coordinator.PhaseWorking) {
-		t.Fatalf("session_state_changed to_phase = %q, want working", toPhase)
-	}
-
-	// Re-posting the same state is the watchdog's per-poll re-report: the no-op
-	// fast path returns the session unchanged without a new transition row.
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/event", sessionEventRequest{
-		State: string(coordinator.SessionWaiting),
-	}, http.StatusOK, &event)
-	if event.Session.RuntimeState != coordinator.SessionWaiting {
-		t.Fatalf("re-post session = %+v, want waiting", event.Session)
-	}
-	if got := countTransitions(t, fixture, issue.ID, string(lifecycle.EventSessionStateChanged)); got != 1 {
-		t.Fatalf("session_state_changed transitions after re-post = %d, want 1 (no-op fast path)", got)
-	}
-}
-
-func TestSessionSignalActivityTouchesAgentActivityOnly(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Session signal activity issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	running := startRunningAuthorSession(t, fixture, issue.ID)
-	backdated := time.Now().UTC().Add(-time.Hour)
-	if _, err := fixture.DB.ExecContext(ctx, `UPDATE sessions SET last_agent_activity_at = ? WHERE id = ?`, backdated.Format(time.RFC3339Nano), running.Session.ID); err != nil {
-		t.Fatalf("backdate agent activity: %v", err)
-	}
-
-	var response sessionResponse
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/signal", sessionSignalRequest{
-		Signal: string(coordinator.SessionSignalActivity),
-		Source: coordinator.SessionEventSourceNativeHook,
-	}, http.StatusOK, &response)
-	if response.Session.RuntimeState != running.Session.RuntimeState {
-		t.Fatalf("activity signal state = %q, want unchanged %q", response.Session.RuntimeState, running.Session.RuntimeState)
-	}
-	if got := countTransitions(t, fixture, issue.ID, string(lifecycle.EventSessionStateChanged)); got != 0 {
-		t.Fatalf("session_state_changed transitions after activity = %d, want 0", got)
-	}
-	updated, err := fixture.Sessions.GetSession(ctx, running.Session.ID)
-	if err != nil {
-		t.Fatalf("get updated session: %v", err)
-	}
-	if updated.LastAgentActivityAt == nil {
-		t.Fatalf("LastAgentActivityAt after activity signal = nil, want a timestamp")
-	}
-	if !updated.LastAgentActivityAt.After(backdated) {
-		t.Fatalf("activity signal did not advance LastAgentActivityAt past %v: got %v", backdated, updated.LastAgentActivityAt)
-	}
-}
-
-func TestSessionSignalNativeHookWorkingBypassesHumanWaitWatchdogLatch(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Native hook resume issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	running := startRunningAuthorSession(t, fixture, issue.ID)
-
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/status", sessionStatusRequest{
-		Kind:    coordinator.StatusKindPlan,
-		Message: "Plan: inspect, implement, test",
-	}, http.StatusOK, nil)
-
-	var response sessionResponse
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/signal", sessionSignalRequest{
-		Signal:        string(coordinator.SessionSignalWorking),
-		Source:        coordinator.SessionEventSourceNativeHook,
-		Harness:       "codex",
-		HookEventName: "UserPromptSubmit",
-	}, http.StatusOK, &response)
-	if response.Session.RuntimeState != coordinator.SessionWorking {
-		t.Fatalf("native hook working state = %q, want working", response.Session.RuntimeState)
-	}
-	board, err := fixture.Issues.BoardResult(ctx)
-	if err != nil {
-		t.Fatalf("board after native hook working: %v", err)
-	}
-	if len(board.Board.InProgress) != 1 || board.Board.InProgress[0].ID != issue.ID || board.LaneStates[issue.ID] != coordinator.LaneStateInProgress {
-		t.Fatalf("board after native hook working = %+v lane=%q, want planning", board.Board, board.LaneStates[issue.ID])
-	}
-	if got := countTransitions(t, fixture, issue.ID, string(lifecycle.EventSessionStateChanged)); got != 2 {
-		t.Fatalf("session_state_changed transitions after native hook working = %d, want 2", got)
-	}
-}
-
-func TestSessionSignalNativeHookLoopIsSuppressed(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Native hook loop issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	running := startRunningAuthorSession(t, fixture, issue.ID)
-
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/status", sessionStatusRequest{
-		Kind:    coordinator.StatusKindPlan,
-		Message: "Plan: inspect, implement, test",
-	}, http.StatusOK, nil)
-
-	var response sessionResponse
-	for i := 0; i < nativeHookStateLoopTransitionThreshold+4; i++ {
-		doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/signal", sessionSignalRequest{
-			Signal:        string(coordinator.SessionSignalWorking),
-			Source:        coordinator.SessionEventSourceNativeHook,
-			Harness:       "harness",
-			HookEventName: "UserPromptSubmit",
-		}, http.StatusOK, &response)
-		doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/signal", sessionSignalRequest{
-			Signal:        string(coordinator.SessionSignalWaiting),
-			Source:        coordinator.SessionEventSourceNativeHook,
-			Harness:       "harness",
-			HookEventName: "Stop",
-		}, http.StatusOK, &response)
-	}
-	if response.Session.RuntimeState != coordinator.SessionWaiting {
-		t.Fatalf("session state after native hook loop = %q, want waiting", response.Session.RuntimeState)
-	}
-	transitionCount := countTransitions(t, fixture, issue.ID, string(lifecycle.EventSessionStateChanged))
-	if transitionCount >= 1+2*(nativeHookStateLoopTransitionThreshold+4) {
-		t.Fatalf("session_state_changed transitions = %d, want suppressed loop below posted signal count", transitionCount)
-	}
-
-	entries, err := fixture.Status.ListForIssue(ctx, issue.ID, 20)
-	if err != nil {
-		t.Fatalf("list status: %v", err)
-	}
-	loopStatusCount := 0
-	for _, entry := range entries {
-		if entry.SessionID == running.Session.ID && entry.Kind == coordinator.StatusKindBlocker && entry.Message == nativeHookStateLoopStatusMessage {
-			loopStatusCount++
-		}
-	}
-	if loopStatusCount != 1 {
-		t.Fatalf("native hook loop status count = %d, want 1; entries = %+v", loopStatusCount, entries)
-	}
-
-	board, err := fixture.Issues.BoardResult(ctx)
-	if err != nil {
-		t.Fatalf("board after native hook loop: %v", err)
-	}
-	if len(board.Board.NeedsAttention) != 1 || board.Board.NeedsAttention[0].ID != issue.ID || board.WaitReasons[issue.ID] != coordinator.WaitReasonQuestion {
-		t.Fatalf("board after native hook loop = %+v reasons=%+v, want needs attention for plan approval", board.Board, board.WaitReasons)
-	}
-}
-
-func TestSessionSignalWatchdogWorkingSuppressedByHumanWaitLatch(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Watchdog signal latch issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	running := startRunningAuthorSession(t, fixture, issue.ID)
-
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/status", sessionStatusRequest{
-		Kind:    coordinator.StatusKindPlan,
-		Message: "Plan: inspect, implement, test",
-	}, http.StatusOK, nil)
-
-	var response sessionResponse
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/signal", sessionSignalRequest{
-		Signal: string(coordinator.SessionSignalWorking),
-		Source: coordinator.SessionEventSourceWatchdog,
-	}, http.StatusOK, &response)
-	if response.Session.RuntimeState != coordinator.SessionWaiting {
-		t.Fatalf("watchdog working state = %q, want waiting", response.Session.RuntimeState)
-	}
-	if got := countTransitions(t, fixture, issue.ID, string(lifecycle.EventSessionStateChanged)); got != 1 {
-		t.Fatalf("session_state_changed transitions after suppressed watchdog working = %d, want 1", got)
-	}
 }
 
 func TestSessionSignalRejectsInvalidSignal(t *testing.T) {
@@ -2382,88 +1783,11 @@ func TestSessionSignalRejectsInvalidSignal(t *testing.T) {
 	}
 	running := startRunningAuthorSession(t, fixture, issue.ID)
 
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/signal", sessionSignalRequest{
+	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v2/sessions/"+running.Session.ID+"/signal", sessionSignalRequest{
 		Signal: "finished",
 	}, http.StatusBadRequest, nil)
 }
 
-func TestPlanStatusMovesSessionToNeedsAttentionThenWorkingResumes(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Plan approval issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	running := startRunningAuthorSession(t, fixture, issue.ID)
-
-	var status statusResponse
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/status", sessionStatusRequest{
-		Kind:    coordinator.StatusKindPlan,
-		Message: "Plan: inspect, implement, test",
-	}, http.StatusOK, &status)
-	if status.Status.Kind != coordinator.StatusKindPlan {
-		t.Fatalf("status kind = %q, want plan", status.Status.Kind)
-	}
-
-	session, err := fixture.Sessions.GetSession(ctx, running.Session.ID)
-	if err != nil {
-		t.Fatalf("get session: %v", err)
-	}
-	if session.RuntimeState != coordinator.SessionWaiting {
-		t.Fatalf("session state after plan status = %q, want waiting", session.RuntimeState)
-	}
-	if got := countTransitions(t, fixture, issue.ID, string(lifecycle.EventSessionStateChanged)); got != 1 {
-		t.Fatalf("session_state_changed transitions = %d, want 1", got)
-	}
-	board, err := fixture.Issues.BoardResult(ctx)
-	if err != nil {
-		t.Fatalf("board: %v", err)
-	}
-	if len(board.Board.NeedsAttention) != 1 || board.Board.NeedsAttention[0].ID != issue.ID || board.LaneStates[issue.ID] != coordinator.LaneStateInProgress || board.WaitReasons[issue.ID] != coordinator.WaitReasonQuestion {
-		t.Fatalf("board after plan status = %+v lane=%q reason=%q, want needs attention planning/plan approval", board.Board, board.LaneStates[issue.ID], board.WaitReasons[issue.ID])
-	}
-
-	var event sessionResponse
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/event", sessionEventRequest{
-		State:  string(coordinator.SessionWorking),
-		Source: coordinator.SessionEventSourceWatchdog,
-	}, http.StatusOK, &event)
-	if event.Session.RuntimeState != coordinator.SessionWaiting {
-		t.Fatalf("session state after stale watchdog working = %q, want waiting", event.Session.RuntimeState)
-	}
-	board, err = fixture.Issues.BoardResult(ctx)
-	if err != nil {
-		t.Fatalf("board after stale watchdog working: %v", err)
-	}
-	if len(board.Board.NeedsAttention) != 1 || board.Board.NeedsAttention[0].ID != issue.ID || board.LaneStates[issue.ID] != coordinator.LaneStateInProgress || board.WaitReasons[issue.ID] != coordinator.WaitReasonQuestion {
-		t.Fatalf("board after stale watchdog working = %+v lane=%q reason=%q, want needs attention planning/plan approval", board.Board, board.LaneStates[issue.ID], board.WaitReasons[issue.ID])
-	}
-	if got := countTransitions(t, fixture, issue.ID, string(lifecycle.EventSessionStateChanged)); got != 1 {
-		t.Fatalf("session_state_changed transitions after stale watchdog working = %d, want 1", got)
-	}
-
-	// After the stale report is consumed, the next watchdog working signal
-	// represents fresh terminal activity after the human response.
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/event", sessionEventRequest{
-		State:  string(coordinator.SessionWorking),
-		Source: coordinator.SessionEventSourceWatchdog,
-	}, http.StatusOK, &event)
-	if event.Session.RuntimeState != coordinator.SessionWorking {
-		t.Fatalf("session state after resume = %q, want working", event.Session.RuntimeState)
-	}
-	board, err = fixture.Issues.BoardResult(ctx)
-	if err != nil {
-		t.Fatalf("board after resume: %v", err)
-	}
-	if len(board.Board.InProgress) != 1 || board.Board.InProgress[0].ID != issue.ID || board.LaneStates[issue.ID] != coordinator.LaneStateInProgress || board.WaitReasons[issue.ID] != "" {
-		t.Fatalf("board after resume = %+v lane=%q reason=%q, want in-progress planning without wait", board.Board, board.LaneStates[issue.ID], board.WaitReasons[issue.ID])
-	}
-}
-
-// TestAttentionReplyRejectsForeignStatusLogID is the regression for the
-// unvalidated client status_log_id finding: a status entry that belongs to a
-// different issue must be rejected with 400 before any write, so no orphaned
-// "Human response" status row is created on the target issue.
 func TestAttentionReplyRejectsForeignStatusLogID(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
@@ -2488,7 +1812,7 @@ func TestAttentionReplyRejectsForeignStatusLogID(t *testing.T) {
 	}
 
 	var resp errorResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+issue.ID+"/attention/reply", attentionReplyRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues/"+issue.ID+"/attention/reply", attentionReplyRequest{
 		Message:     "My answer",
 		StatusLogID: &foreign.ID,
 	}, http.StatusBadRequest, &resp)
@@ -2522,7 +1846,7 @@ func TestAttentionReplyRejectsNonExistentStatusLogID(t *testing.T) {
 
 	missing := int64(987654321)
 	var resp errorResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+issue.ID+"/attention/reply", attentionReplyRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues/"+issue.ID+"/attention/reply", attentionReplyRequest{
 		Message:     "My answer",
 		StatusLogID: &missing,
 	}, http.StatusBadRequest, &resp)
@@ -2564,7 +1888,7 @@ func TestAttentionReplyLinksOwnIssueStatusLogID(t *testing.T) {
 	}
 
 	var resp sessionMessageResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+issue.ID+"/attention/reply", attentionReplyRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues/"+issue.ID+"/attention/reply", attentionReplyRequest{
 		Message:     "Use sqlite",
 		StatusLogID: &question.ID,
 	}, http.StatusOK, &resp)
@@ -2576,429 +1900,12 @@ func TestAttentionReplyLinksOwnIssueStatusLogID(t *testing.T) {
 	}
 }
 
-// TestCloseIssueRoutesThroughEngine is the regression for routing issue close
-// through the lifecycle engine: it must log a close_issue transition and the
-// issue must land in the abandoned phase.
-func TestCloseIssueRoutesThroughEngine(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Close issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-
-	var closed issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+issue.ID+"/close", map[string]string{}, http.StatusOK, &closed)
-	if closed.Issue.ScheduleState != coordinator.ScheduleClosed {
-		t.Fatalf("closed ScheduleState = %q, want closed", closed.Issue.ScheduleState)
-	}
-
-	if got := countTransitions(t, fixture, issue.ID, string(lifecycle.EventCloseIssue)); got != 1 {
-		t.Fatalf("close_issue transitions = %d, want 1", got)
-	}
-	var toPhase string
-	var actor string
-	var payloadJSON string
-	if err := fixture.DB.QueryRow(`
-SELECT to_phase, actor, payload_json
-FROM transitions
-WHERE issue_id = ?
-	AND event_kind = ?`, issue.ID, string(lifecycle.EventCloseIssue)).Scan(&toPhase, &actor, &payloadJSON); err != nil {
-		t.Fatalf("read close_issue transition: %v", err)
-	}
-	if toPhase != string(coordinator.PhaseAbandoned) {
-		t.Fatalf("close_issue to_phase = %q, want abandoned", toPhase)
-	}
-	if actor != "owner:owner" {
-		t.Fatalf("close_issue actor = %q, want owner:owner", actor)
-	}
-	var payload struct {
-		Audit lifecycle.EventAudit `json:"audit"`
-	}
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-		t.Fatalf("decode close_issue payload: %v", err)
-	}
-	assertLifecycleAudit(t, payload.Audit, lifecycle.EventAudit{
-		Method:      http.MethodPost,
-		Path:        "/v1/issues/" + issue.ID + "/close",
-		Principal:   "owner:owner",
-		ProjectID:   fixture.Project.ID,
-		ProjectName: fixture.Project.Name,
-		IssueID:     issue.ID,
-	})
-	var eventJSON string
-	if err := fixture.DB.QueryRow(`
-SELECT event_json
-FROM event_inbox
-WHERE issue_id = ?
-ORDER BY created_at DESC
-LIMIT 1`, issue.ID).Scan(&eventJSON); err != nil {
-		t.Fatalf("read close_issue inbox event: %v", err)
-	}
-	var stored struct {
-		Kind  lifecycle.EventKind   `json:"kind"`
-		Actor coordinator.Principal `json:"actor"`
-		Audit lifecycle.EventAudit  `json:"audit"`
-	}
-	if err := json.Unmarshal([]byte(eventJSON), &stored); err != nil {
-		t.Fatalf("decode close_issue inbox event: %v", err)
-	}
-	if stored.Kind != lifecycle.EventCloseIssue {
-		t.Fatalf("inbox event kind = %q, want %q", stored.Kind, lifecycle.EventCloseIssue)
-	}
-	if stored.Actor.Scope != coordinator.TokenScopeOwner || stored.Actor.Subject != "owner" {
-		t.Fatalf("inbox actor = %+v, want owner principal", stored.Actor)
-	}
-	assertLifecycleAudit(t, stored.Audit, payload.Audit)
-
-	var phase string
-	if err := fixture.DB.QueryRow(`SELECT phase FROM workflow_state WHERE issue_id = ?`, issue.ID).Scan(&phase); err != nil {
-		t.Fatalf("read workflow_state: %v", err)
-	}
-	if phase != string(coordinator.PhaseAbandoned) {
-		t.Fatalf("workflow_state phase = %q, want abandoned", phase)
-	}
-}
-
-func TestWebLifecycleAuditRecordsWebSession(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Browser close issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-
-	sessionCookie, csrfCookie := loginWebUI(t, fixture)
-	var webSessionID string
-	if err := fixture.GlobalDB.QueryRow(`SELECT id FROM web_sessions ORDER BY created_at DESC LIMIT 1`).Scan(&webSessionID); err != nil {
-		t.Fatalf("read web session id: %v", err)
-	}
-
-	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, webAPIPrefix+"/v1/issues/"+issue.ID+"/close", strings.NewReader(`{}`))
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "FlowTest/1.0")
-	request.Header.Set(webCSRFHeader, csrfCookie.Value)
-	request.AddCookie(sessionCookie)
-	request.AddCookie(csrfCookie)
-	fixture.Server.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("web close status = %d, want 200; body: %s", response.Code, response.Body.String())
-	}
-
-	var actor string
-	var payloadJSON string
-	if err := fixture.DB.QueryRow(`
-SELECT actor, payload_json
-FROM transitions
-WHERE issue_id = ?
-	AND event_kind = ?`, issue.ID, string(lifecycle.EventCloseIssue)).Scan(&actor, &payloadJSON); err != nil {
-		t.Fatalf("read web close transition: %v", err)
-	}
-	if actor != "owner:web" {
-		t.Fatalf("web close actor = %q, want owner:web", actor)
-	}
-	var payload struct {
-		Audit lifecycle.EventAudit `json:"audit"`
-	}
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-		t.Fatalf("decode web close payload: %v", err)
-	}
-	assertLifecycleAudit(t, payload.Audit, lifecycle.EventAudit{
-		Method:       http.MethodPost,
-		Path:         "/v1/issues/" + issue.ID + "/close",
-		Principal:    "owner:web",
-		ProjectID:    fixture.Project.ID,
-		ProjectName:  fixture.Project.Name,
-		IssueID:      issue.ID,
-		UserAgent:    "FlowTest/1.0",
-		WebSessionID: webSessionID,
-	})
-}
-
-func TestIssuePauseAndResumeEndpointsSuspendAndRequeueTask(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Pause issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	running := startRunningAuthorSession(t, fixture, issue.ID)
-	if running.Session == nil || running.Job.ID == "" {
-		t.Fatalf("running response = %+v", running)
-	}
-
-	var paused issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+issue.ID+"/pause", nil, http.StatusOK, &paused)
-	if paused.Issue.ID != issue.ID || paused.Issue.ScheduleState != coordinator.ScheduleUpNext {
-		t.Fatalf("paused issue = %+v", paused.Issue)
-	}
-	session, err := fixture.Sessions.GetSession(ctx, running.Session.ID)
-	if err != nil {
-		t.Fatalf("get paused session: %v", err)
-	}
-	if session.RuntimeState != coordinator.SessionAbandoned || session.FinishedAt == nil {
-		t.Fatalf("paused session = %+v, want abandoned with finished_at", session)
-	}
-	job, err := fixture.Workers.GetJob(ctx, running.Job.ID)
-	if err != nil {
-		t.Fatalf("get paused job: %v", err)
-	}
-	if job.State != flowworker.JobCanceled {
-		t.Fatalf("paused job state = %q, want canceled", job.State)
-	}
-	if _, err := fixture.Credentials.Authenticate(ctx, running.SessionToken); !errors.Is(err, coordinator.ErrInvalidCredential) {
-		t.Fatalf("authenticate paused token err = %v, want ErrInvalidCredential", err)
-	}
-	var pausedDetail issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/issues/"+issue.ID, nil, http.StatusOK, &pausedDetail)
-	if pausedDetail.Detail == nil || !pausedDetail.Detail.Paused {
-		t.Fatalf("paused detail = %+v, want paused", pausedDetail.Detail)
-	}
-
-	var resumed issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+issue.ID+"/resume", nil, http.StatusOK, &resumed)
-	if resumed.Issue.ID != issue.ID {
-		t.Fatalf("resumed issue = %+v", resumed.Issue)
-	}
-	resumeJob, ok, err := fixture.Workers.LiveAuthorJobForIssue(ctx, issue.ID)
-	if err != nil {
-		t.Fatalf("live author job after resume: %v", err)
-	}
-	if !ok || resumeJob.ID == running.Job.ID || resumeJob.ChangeID == nil || *resumeJob.ChangeID != running.Session.ChangeID {
-		t.Fatalf("resume job = %+v ok=%t, want new job for change %s", resumeJob, ok, running.Session.ChangeID)
-	}
-	var resumedDetail issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/issues/"+issue.ID, nil, http.StatusOK, &resumedDetail)
-	if resumedDetail.Detail == nil || resumedDetail.Detail.Paused {
-		t.Fatalf("resumed detail = %+v, want not paused", resumedDetail.Detail)
-	}
-}
-
-func assertLifecycleAudit(t *testing.T, got lifecycle.EventAudit, want lifecycle.EventAudit) {
-	t.Helper()
-	if got != want {
-		t.Fatalf("lifecycle audit = %+v, want %+v", got, want)
-	}
-}
-
-func TestSessionReadyRejectsExpiredAuthorLease(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Expired ready issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	if _, err := fixture.Issues.ScheduleIssue(ctx, issue.ID, coordinator.ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-	ensured, err := fixture.Sessions.EnsureAuthorJob(ctx, coordinator.EnsureAuthorJobInput{IssueID: issue.ID})
-	if err != nil {
-		t.Fatalf("ensure author job: %v", err)
-	}
-	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-local",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
-		CapacityPersistentAgent: 1,
-	}); err != nil {
-		t.Fatalf("register worker: %v", err)
-	}
-	claimed, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
-		WorkerID:      "w-local",
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
-		LeaseDuration: time.Minute,
-	})
-	if err != nil {
-		t.Fatalf("claim author job: %v", err)
-	}
-	if !ok || claimed.Job.ID != ensured.Job.ID {
-		t.Fatalf("claim = %+v ok=%t, want %s", claimed.Job, ok, ensured.Job.ID)
-	}
-	if _, err := fixture.Workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
-		t.Fatalf("mark running: %v", err)
-	}
-	started, err := fixture.Sessions.StartAuthorSession(ctx, coordinator.StartAuthorSessionInput{
-		JobID:    claimed.Job.ID,
-		LeaseID:  claimed.Lease.ID,
-		WorkerID: "w-local",
-	})
-	if err != nil {
-		t.Fatalf("start author session: %v", err)
-	}
-	if _, err := fixture.DB.ExecContext(ctx, `
-UPDATE leases
-SET expires_at = ?
-WHERE id = ?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), claimed.Lease.ID); err != nil {
-		t.Fatalf("expire author lease: %v", err)
-	}
-
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/sessions/"+started.Session.ID+"/ready", map[string]string{}, http.StatusBadRequest, nil)
-	crashed, err := fixture.Sessions.GetSession(ctx, started.Session.ID)
-	if err != nil {
-		t.Fatalf("get crashed session: %v", err)
-	}
-	if crashed.RuntimeState != coordinator.SessionCrashed {
-		t.Fatalf("session state = %q, want crashed", crashed.RuntimeState)
-	}
-	if _, err := fixture.Credentials.Authenticate(ctx, started.Token); !errors.Is(err, coordinator.ErrInvalidCredential) {
-		t.Fatalf("authenticate crashed token err = %v, want ErrInvalidCredential", err)
-	}
-	resumeJob, ok, err := fixture.Workers.LiveAuthorJobForIssue(ctx, issue.ID)
-	if err != nil {
-		t.Fatalf("live author job: %v", err)
-	}
-	if !ok || resumeJob.ChangeID == nil || *resumeJob.ChangeID != started.Change.ID {
-		t.Fatalf("resume job = %+v ok=%t, want change %s", resumeJob, ok, started.Change.ID)
-	}
-}
-
-func TestBoardReconcilesExpiredAuthorSession(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Board crash resume issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	if _, err := fixture.Issues.ScheduleIssue(ctx, issue.ID, coordinator.ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-	ensured, err := fixture.Sessions.EnsureAuthorJob(ctx, coordinator.EnsureAuthorJobInput{IssueID: issue.ID})
-	if err != nil {
-		t.Fatalf("ensure author job: %v", err)
-	}
-	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-local",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
-		CapacityPersistentAgent: 1,
-	}); err != nil {
-		t.Fatalf("register worker: %v", err)
-	}
-	claimed, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
-		WorkerID:      "w-local",
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
-		LeaseDuration: time.Minute,
-	})
-	if err != nil {
-		t.Fatalf("claim author job: %v", err)
-	}
-	if !ok || claimed.Job.ID != ensured.Job.ID {
-		t.Fatalf("claim = %+v ok=%t, want %s", claimed.Job, ok, ensured.Job.ID)
-	}
-	if _, err := fixture.Workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
-		t.Fatalf("mark running: %v", err)
-	}
-	started, err := fixture.Sessions.StartAuthorSession(ctx, coordinator.StartAuthorSessionInput{
-		JobID:    claimed.Job.ID,
-		LeaseID:  claimed.Lease.ID,
-		WorkerID: "w-local",
-	})
-	if err != nil {
-		t.Fatalf("start author session: %v", err)
-	}
-	if _, err := fixture.Sessions.UpdateSessionState(ctx, started.Session.ID, coordinator.SessionWaiting); err != nil {
-		t.Fatalf("mark waiting: %v", err)
-	}
-	if _, err := fixture.DB.ExecContext(ctx, `
-UPDATE leases
-SET expires_at = ?
-WHERE id = ?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), claimed.Lease.ID); err != nil {
-		t.Fatalf("expire author lease: %v", err)
-	}
-
-	var board boardResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
-	if len(board.Board.UpNext) != 1 || board.Board.UpNext[0].ID != issue.ID {
-		t.Fatalf("up_next board = %+v", board.Board.UpNext)
-	}
-	if len(board.Board.InProgress) != 0 || len(board.Board.NeedsAttention) != 0 {
-		t.Fatalf("active board lanes after reconcile = in_progress:%+v needs_attention:%+v", board.Board.InProgress, board.Board.NeedsAttention)
-	}
-	crashed, err := fixture.Sessions.GetSession(ctx, started.Session.ID)
-	if err != nil {
-		t.Fatalf("get crashed session: %v", err)
-	}
-	if crashed.RuntimeState != coordinator.SessionCrashed {
-		t.Fatalf("session state = %q, want crashed", crashed.RuntimeState)
-	}
-	resumeJob, ok, err := fixture.Workers.LiveAuthorJobForIssue(ctx, issue.ID)
-	if err != nil {
-		t.Fatalf("live author job: %v", err)
-	}
-	if !ok || resumeJob.ChangeID == nil || *resumeJob.ChangeID != started.Change.ID {
-		t.Fatalf("resume job = %+v ok=%t, want change %s", resumeJob, ok, started.Change.ID)
-	}
-}
-
-func TestRetryCrashedAuthorJobClearsCrashHold(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Retry crash hold"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	if _, err := fixture.Issues.ScheduleIssue(ctx, issue.ID, coordinator.ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-	first, err := fixture.Sessions.EnsureAuthorJob(ctx, coordinator.EnsureAuthorJobInput{IssueID: issue.ID})
-	if err != nil {
-		t.Fatalf("ensure author job: %v", err)
-	}
-	if _, err := fixture.DB.ExecContext(ctx, `
-UPDATE jobs
-SET state = ?
-WHERE id = ?`, string(flowworker.JobCanceled), first.Job.ID); err != nil {
-		t.Fatalf("cancel first job: %v", err)
-	}
-	if _, err := fixture.DB.ExecContext(ctx, `
-INSERT INTO status_log (issue_id, actor, message, kind, created_at)
-VALUES (?, ?, ?, ?, ?)`,
-		issue.ID,
-		"system",
-		"Crashed author job reached 2 automatic restarts; human intervention required.",
-		coordinator.StatusKindBlocker,
-		time.Now().UTC().Format(time.RFC3339Nano),
-	); err != nil {
-		t.Fatalf("insert crash blocker: %v", err)
-	}
-
-	var held boardResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &held)
-	if got := held.WaitReasons[issue.ID]; got != coordinator.WaitReasonCrashLoop {
-		t.Fatalf("wait reason before retry = %q, want %q", got, coordinator.WaitReasonCrashLoop)
-	}
-
-	var response issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+issue.ID+"/retry", map[string]string{}, http.StatusOK, &response)
-	if response.Issue.ID != issue.ID {
-		t.Fatalf("retry response issue = %+v", response.Issue)
-	}
-	if got := countTransitions(t, fixture, issue.ID, string(lifecycle.EventRetryCrashedAuthorJob)); got != 1 {
-		t.Fatalf("retry transitions = %d, want 1", got)
-	}
-	live, ok, err := fixture.Workers.LiveAuthorJobForIssue(ctx, issue.ID)
-	if err != nil {
-		t.Fatalf("live author job after retry: %v", err)
-	}
-	if !ok || live.ID == first.Job.ID || live.ChangeID == nil || *live.ChangeID != first.Change.ID {
-		t.Fatalf("live job after retry = %+v ok=%t, want new job for change %s", live, ok, first.Change.ID)
-	}
-	var board boardResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
-	if got := board.WaitReasons[issue.ID]; got != "" {
-		t.Fatalf("wait reason after retry = %q, want empty", got)
-	}
-	card := board.IssueCards[issue.ID]
-	if card.LatestStatus == nil || card.LatestStatus.Kind != coordinator.StatusKindProgress {
-		t.Fatalf("latest status after retry = %+v, want progress note", card.LatestStatus)
-	}
-}
-
 func TestSessionStatusIsVisibleInIssueDetail(t *testing.T) {
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Status issue")
 
 	var written statusResponse
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/sessions/"+started.Session.ID+"/status", sessionStatusRequest{
+	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v2/sessions/"+started.Session.ID+"/status", sessionStatusRequest{
 		Message: "Running focused tests",
 	}, http.StatusOK, &written)
 	if written.Status.IssueID != started.Session.IssueID || written.Status.ChangeID != started.Session.ChangeID {
@@ -3006,7 +1913,7 @@ func TestSessionStatusIsVisibleInIssueDetail(t *testing.T) {
 	}
 
 	var issue issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/issues/"+started.Session.IssueID, nil, http.StatusOK, &issue)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/issues/"+started.Session.IssueID, nil, http.StatusOK, &issue)
 	if len(issue.StatusLog) != 1 || issue.StatusLog[0].Message != "Running focused tests" {
 		t.Fatalf("issue status log = %+v", issue.StatusLog)
 	}
@@ -3020,7 +1927,7 @@ func TestSessionStatusAcceptsKind(t *testing.T) {
 	started := startAuthorSessionForStatusTest(t, fixture, "Status kind issue")
 
 	var written statusResponse
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/sessions/"+started.Session.ID+"/status", sessionStatusRequest{
+	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v2/sessions/"+started.Session.ID+"/status", sessionStatusRequest{
 		Message: "Which datastore should I use?",
 		Kind:    coordinator.StatusKindQuestion,
 	}, http.StatusOK, &written)
@@ -3029,7 +1936,7 @@ func TestSessionStatusAcceptsKind(t *testing.T) {
 	}
 
 	var issue issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/issues/"+started.Session.IssueID, nil, http.StatusOK, &issue)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/issues/"+started.Session.IssueID, nil, http.StatusOK, &issue)
 	if len(issue.StatusLog) != 1 || issue.StatusLog[0].Kind != coordinator.StatusKindQuestion {
 		t.Fatalf("issue status log = %+v", issue.StatusLog)
 	}
@@ -3039,7 +1946,7 @@ func TestSessionStatusRejectsBadKind(t *testing.T) {
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Bad kind issue")
 
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/sessions/"+started.Session.ID+"/status", sessionStatusRequest{
+	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v2/sessions/"+started.Session.ID+"/status", sessionStatusRequest{
 		Message: "boom",
 		Kind:    "urgent",
 	}, http.StatusBadRequest, nil)
@@ -3062,7 +1969,7 @@ func TestSessionStatusTouchesAgentActivity(t *testing.T) {
 	}
 
 	var written statusResponse
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/sessions/"+started.Session.ID+"/status", sessionStatusRequest{
+	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v2/sessions/"+started.Session.ID+"/status", sessionStatusRequest{
 		Message: "Running focused tests",
 	}, http.StatusOK, &written)
 
@@ -3075,57 +1982,6 @@ func TestSessionStatusTouchesAgentActivity(t *testing.T) {
 	}
 }
 
-// TestSessionEventTouchesAgentActivity asserts the no-op same-state fast path in
-// handleSessionEvent still records agent activity: even a repeated state report
-// proves the agent is alive, so last_agent_activity_at must advance.
-func TestSessionEventTouchesAgentActivity(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Liveness event issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	running := startRunningAuthorSession(t, fixture, issue.ID)
-
-	// First flip working->waiting (engine path) stamps activity.
-	var event sessionResponse
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/event", sessionEventRequest{
-		State: string(coordinator.SessionWaiting),
-	}, http.StatusOK, &event)
-	firstTouch, err := fixture.Sessions.GetSession(ctx, running.Session.ID)
-	if err != nil {
-		t.Fatalf("get session after first event: %v", err)
-	}
-	if firstTouch.LastAgentActivityAt == nil {
-		t.Fatalf("LastAgentActivityAt after engine-path event = nil, want a timestamp")
-	}
-
-	// Backdate the stamp so the no-op fast path's advance is observable.
-	backdated := time.Now().UTC().Add(-time.Hour)
-	if _, err := fixture.DB.ExecContext(ctx, `UPDATE sessions SET last_agent_activity_at = ? WHERE id = ?`, backdated.Format(time.RFC3339Nano), running.Session.ID); err != nil {
-		t.Fatalf("backdate agent activity: %v", err)
-	}
-
-	// Re-post the same state: the no-op fast path returns the session unchanged
-	// but must still stamp last_agent_activity_at.
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v1/sessions/"+running.Session.ID+"/event", sessionEventRequest{
-		State: string(coordinator.SessionWaiting),
-	}, http.StatusOK, &event)
-	if got := countTransitions(t, fixture, issue.ID, string(lifecycle.EventSessionStateChanged)); got != 1 {
-		t.Fatalf("session_state_changed transitions after no-op re-post = %d, want 1", got)
-	}
-	noopTouch, err := fixture.Sessions.GetSession(ctx, running.Session.ID)
-	if err != nil {
-		t.Fatalf("get session after no-op event: %v", err)
-	}
-	if noopTouch.LastAgentActivityAt == nil {
-		t.Fatalf("LastAgentActivityAt after no-op event = nil, want a timestamp")
-	}
-	if !noopTouch.LastAgentActivityAt.After(backdated) {
-		t.Fatalf("no-op event did not advance LastAgentActivityAt past %v: got %v", backdated, noopTouch.LastAgentActivityAt)
-	}
-}
-
 func TestSessionAttachRequiresOwnerToken(t *testing.T) {
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Attach issue")
@@ -3133,19 +1989,19 @@ func TestSessionAttachRequiresOwnerToken(t *testing.T) {
 		t.Fatalf("register terminal target: %v", err)
 	}
 
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodGet, "/v1/sessions/"+started.Session.ID+"/attach", nil, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v1/sessions/"+started.Session.ID+"/attach", nil, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, "hook-token", http.MethodGet, "/v1/sessions/"+started.Session.ID+"/attach", nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodGet, "/v2/sessions/"+started.Session.ID+"/attach", nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/sessions/"+started.Session.ID+"/attach", nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "hook-token", http.MethodGet, "/v2/sessions/"+started.Session.ID+"/attach", nil, http.StatusForbidden, nil)
 
 	var response attachResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/sessions/"+started.Session.ID+"/attach", nil, http.StatusOK, &response)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/sessions/"+started.Session.ID+"/attach", nil, http.StatusOK, &response)
 	if response.Attach.SessionID != started.Session.ID || response.Attach.TmuxSession == "" {
 		t.Fatalf("attach response = %+v", response.Attach)
 	}
 	if len(response.Attach.Command) != 6 || response.Attach.Command[0] != "tmux" || response.Attach.Command[1] != "-S" || response.Attach.Command[2] != "/tmp/flow-session.sock" || response.Attach.Command[5] != response.Attach.TmuxSession {
 		t.Fatalf("attach command = %#v", response.Attach.Command)
 	}
-	if response.Attach.ProxyPath != "/v1/sessions/"+started.Session.ID+"/terminal" {
+	if response.Attach.ProxyPath != "/v2/sessions/"+started.Session.ID+"/terminal" {
 		t.Fatalf("proxy path = %q", response.Attach.ProxyPath)
 	}
 }
@@ -3158,10 +2014,10 @@ func TestJobAttachAllowsLiveReviewerJobs(t *testing.T) {
 		t.Fatalf("register job terminal target: %v", err)
 	}
 
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v1/jobs/"+reviewer.Job.ID+"/attach", nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/jobs/"+reviewer.Job.ID+"/attach", nil, http.StatusForbidden, nil)
 
 	var response attachResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/jobs/"+reviewer.Job.ID+"/attach", nil, http.StatusOK, &response)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/jobs/"+reviewer.Job.ID+"/attach", nil, http.StatusOK, &response)
 	if response.Attach.SessionID != "" || response.Attach.JobID != reviewer.Job.ID || response.Attach.TmuxSession != "flow-"+reviewer.Job.ID {
 		t.Fatalf("job attach response = %+v", response.Attach)
 	}
@@ -3172,7 +2028,7 @@ func TestJobAttachAllowsLiveReviewerJobs(t *testing.T) {
 	if _, err := fixture.Workers.ReleaseLease(context.Background(), reviewer.Lease.ID, flowworker.JobFinished); err != nil {
 		t.Fatalf("release reviewer lease: %v", err)
 	}
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/jobs/"+reviewer.Job.ID+"/attach", nil, http.StatusBadRequest, nil)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/jobs/"+reviewer.Job.ID+"/attach", nil, http.StatusBadRequest, nil)
 }
 
 func TestJobTerminalProxyAllowsLiveReviewerJobs(t *testing.T) {
@@ -3191,17 +2047,17 @@ func TestJobTerminalProxyAllowsLiveReviewerJobs(t *testing.T) {
 	}))
 	t.Cleanup(target.Close)
 
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/jobs/"+reviewer.Job.ID+"/terminal", jobTerminalRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/jobs/"+reviewer.Job.ID+"/terminal", jobTerminalRequest{
 		LeaseID:   reviewer.Lease.ID,
 		TargetURL: target.URL,
 	}, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/jobs/"+reviewer.Job.ID+"/terminal", jobTerminalRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/jobs/"+reviewer.Job.ID+"/terminal", jobTerminalRequest{
 		LeaseID:   reviewer.Lease.ID,
 		TargetURL: target.URL,
 	}, http.StatusForbidden, nil)
 
 	var registered jobTerminalResponse
-	doJSONRequestAs(t, fixture.Server, "reviewer-terminal-token", http.MethodPost, "/v1/jobs/"+reviewer.Job.ID+"/terminal", jobTerminalRequest{
+	doJSONRequestAs(t, fixture.Server, "reviewer-terminal-token", http.MethodPost, "/v2/jobs/"+reviewer.Job.ID+"/terminal", jobTerminalRequest{
 		LeaseID:   reviewer.Lease.ID,
 		TargetURL: target.URL,
 	}, http.StatusOK, &registered)
@@ -3210,7 +2066,7 @@ func TestJobTerminalProxyAllowsLiveReviewerJobs(t *testing.T) {
 	}
 
 	var jobs jobsResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/jobs", nil, http.StatusOK, &jobs)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/jobs", nil, http.StatusOK, &jobs)
 	if !jobs.Diagnostics[reviewer.Job.ID].TerminalAvailable {
 		t.Fatalf("job terminal availability = %+v", jobs.Diagnostics[reviewer.Job.ID])
 	}
@@ -3222,10 +2078,10 @@ func TestJobTerminalProxyAllowsLiveReviewerJobs(t *testing.T) {
 		t.Fatalf("issue card terminal metadata = %+v", card)
 	}
 
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/jobs/"+reviewer.Job.ID+"/terminal-token", map[string]string{}, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/jobs/"+reviewer.Job.ID+"/terminal-token", map[string]string{}, http.StatusForbidden, nil)
 	var access jobTerminalAccessResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/jobs/"+reviewer.Job.ID+"/terminal-token", map[string]string{}, http.StatusOK, &access)
-	if access.Access.LoginPath == "" || !strings.Contains(access.Access.LoginPath, "/v1/jobs/"+reviewer.Job.ID+"/terminal-login?token=") {
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/jobs/"+reviewer.Job.ID+"/terminal-token", map[string]string{}, http.StatusOK, &access)
+	if access.Access.LoginPath == "" || !strings.Contains(access.Access.LoginPath, "/v2/jobs/"+reviewer.Job.ID+"/terminal-login?token=") {
 		t.Fatalf("job terminal access = %+v", access.Access)
 	}
 
@@ -3235,15 +2091,15 @@ func TestJobTerminalProxyAllowsLiveReviewerJobs(t *testing.T) {
 	if login.Code != http.StatusSeeOther {
 		t.Fatalf("job terminal login status = %d body = %q", login.Code, login.Body.String())
 	}
-	if login.Header().Get("Location") != "/v1/jobs/"+reviewer.Job.ID+"/terminal" {
+	if login.Header().Get("Location") != "/v2/jobs/"+reviewer.Job.ID+"/terminal" {
 		t.Fatalf("job terminal login location = %q", login.Header().Get("Location"))
 	}
 	cookies := login.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != terminalAccessCookie || !cookies[0].HttpOnly || cookies[0].Path != "/v1/jobs/"+reviewer.Job.ID+"/terminal" {
+	if len(cookies) != 1 || cookies[0].Name != terminalAccessCookie || !cookies[0].HttpOnly || cookies[0].Path != "/v2/jobs/"+reviewer.Job.ID+"/terminal" {
 		t.Fatalf("job terminal login cookies = %+v", cookies)
 	}
 
-	cookieProxyRequest := httptest.NewRequest(http.MethodGet, "/v1/jobs/"+reviewer.Job.ID+"/terminal/pty?q=1", nil)
+	cookieProxyRequest := httptest.NewRequest(http.MethodGet, "/v2/jobs/"+reviewer.Job.ID+"/terminal/pty?q=1", nil)
 	cookieProxyRequest.AddCookie(cookies[0])
 	cookieProxyResponse := httptest.NewRecorder()
 	fixture.Server.ServeHTTP(cookieProxyResponse, cookieProxyRequest)
@@ -3260,7 +2116,7 @@ func TestJobTerminalProxyAllowsLiveReviewerJobs(t *testing.T) {
 	if _, err := fixture.Workers.ReleaseLease(context.Background(), reviewer.Lease.ID, flowworker.JobFinished); err != nil {
 		t.Fatalf("release reviewer lease: %v", err)
 	}
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/jobs/"+reviewer.Job.ID+"/terminal-token", map[string]string{}, http.StatusBadRequest, nil)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/jobs/"+reviewer.Job.ID+"/terminal-token", map[string]string{}, http.StatusBadRequest, nil)
 }
 
 func TestSessionTerminalProxyRequiresOwnerAndProxiesRegisteredTarget(t *testing.T) {
@@ -3278,28 +2134,28 @@ func TestSessionTerminalProxyRequiresOwnerAndProxiesRegisteredTarget(t *testing.
 	}))
 	t.Cleanup(target.Close)
 
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/sessions/"+started.Session.ID+"/terminal", sessionTerminalRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/sessions/"+started.Session.ID+"/terminal", sessionTerminalRequest{
 		TargetURL: target.URL,
 	}, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/sessions/"+started.Session.ID+"/terminal", sessionTerminalRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/sessions/"+started.Session.ID+"/terminal", sessionTerminalRequest{
 		TargetURL: target.URL,
 	}, http.StatusForbidden, nil)
 
 	var registered sessionTerminalResponse
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/sessions/"+started.Session.ID+"/terminal", sessionTerminalRequest{
+	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v2/sessions/"+started.Session.ID+"/terminal", sessionTerminalRequest{
 		TargetURL: target.URL,
 	}, http.StatusOK, &registered)
 	if registered.Terminal.TargetURL != target.URL {
 		t.Fatalf("registered terminal = %+v", registered.Terminal)
 	}
 
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodGet, "/v1/sessions/"+started.Session.ID+"/terminal/pty?q=1", nil, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v1/sessions/"+started.Session.ID+"/terminal/pty?q=1", nil, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, "hook-token", http.MethodGet, "/v1/sessions/"+started.Session.ID+"/terminal/pty?q=1", nil, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/sessions/"+started.Session.ID+"/terminal-token", map[string]string{}, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodGet, "/v2/sessions/"+started.Session.ID+"/terminal/pty?q=1", nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/sessions/"+started.Session.ID+"/terminal/pty?q=1", nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "hook-token", http.MethodGet, "/v2/sessions/"+started.Session.ID+"/terminal/pty?q=1", nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/sessions/"+started.Session.ID+"/terminal-token", map[string]string{}, http.StatusForbidden, nil)
 
 	var access sessionTerminalAccessResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/sessions/"+started.Session.ID+"/terminal-token", map[string]string{}, http.StatusOK, &access)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/sessions/"+started.Session.ID+"/terminal-token", map[string]string{}, http.StatusOK, &access)
 	if access.Access.LoginPath == "" || !strings.Contains(access.Access.LoginPath, "/terminal-login?token=") {
 		t.Fatalf("terminal access = %+v", access.Access)
 	}
@@ -3309,7 +2165,7 @@ func TestSessionTerminalProxyRequiresOwnerAndProxiesRegisteredTarget(t *testing.
 	if login.Code != http.StatusSeeOther {
 		t.Fatalf("login status = %d body = %q", login.Code, login.Body.String())
 	}
-	if login.Header().Get("Location") != "/v1/sessions/"+started.Session.ID+"/terminal" {
+	if login.Header().Get("Location") != "/v2/sessions/"+started.Session.ID+"/terminal" {
 		t.Fatalf("login location = %q", login.Header().Get("Location"))
 	}
 	cookies := login.Result().Cookies()
@@ -3317,7 +2173,7 @@ func TestSessionTerminalProxyRequiresOwnerAndProxiesRegisteredTarget(t *testing.
 		t.Fatalf("login cookies = %+v", cookies)
 	}
 
-	cookieProxyRequest := httptest.NewRequest(http.MethodGet, "/v1/sessions/"+started.Session.ID+"/terminal/pty?q=1", nil)
+	cookieProxyRequest := httptest.NewRequest(http.MethodGet, "/v2/sessions/"+started.Session.ID+"/terminal/pty?q=1", nil)
 	cookieProxyRequest.AddCookie(cookies[0])
 	cookieProxyResponse := httptest.NewRecorder()
 	fixture.Server.ServeHTTP(cookieProxyResponse, cookieProxyRequest)
@@ -3334,7 +2190,7 @@ func TestSessionTerminalProxyRequiresOwnerAndProxiesRegisteredTarget(t *testing.
 		t.Fatalf("cookie proxy CSP = %q, want allow-same-origin so ttyd token fetch remains same-origin", cookieProxyResponse.Header().Get("Content-Security-Policy"))
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "/v1/sessions/"+started.Session.ID+"/terminal/pty?q=1", nil)
+	request := httptest.NewRequest(http.MethodGet, "/v2/sessions/"+started.Session.ID+"/terminal/pty?q=1", nil)
 	request.Header.Set("Authorization", "Bearer owner-token")
 	request.Header.Set(protocolHeader, fixture.Server.protocolVersion)
 	response := httptest.NewRecorder()
@@ -3358,7 +2214,7 @@ func TestSessionAttachRejectsInactiveOrNonLiveSessions(t *testing.T) {
 			t.Fatalf("ready session: %v", err)
 		}
 
-		doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/sessions/"+started.Session.ID+"/attach", nil, http.StatusBadRequest, nil)
+		doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/sessions/"+started.Session.ID+"/attach", nil, http.StatusBadRequest, nil)
 	})
 
 	t.Run("crashed", func(t *testing.T) {
@@ -3368,7 +2224,7 @@ func TestSessionAttachRejectsInactiveOrNonLiveSessions(t *testing.T) {
 			t.Fatalf("crash session: %v", err)
 		}
 
-		doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/sessions/"+started.Session.ID+"/attach", nil, http.StatusBadRequest, nil)
+		doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/sessions/"+started.Session.ID+"/attach", nil, http.StatusBadRequest, nil)
 	})
 
 	t.Run("released lease", func(t *testing.T) {
@@ -3381,7 +2237,7 @@ WHERE id = ?`, time.Now().UTC().Format(time.RFC3339Nano), started.Session.LeaseI
 			t.Fatalf("release lease: %v", err)
 		}
 
-		doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/sessions/"+started.Session.ID+"/attach", nil, http.StatusBadRequest, nil)
+		doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/sessions/"+started.Session.ID+"/attach", nil, http.StatusBadRequest, nil)
 	})
 }
 
@@ -3390,7 +2246,7 @@ func TestReviewThreadAPILifecycle(t *testing.T) {
 	started := startAuthorSessionForStatusTest(t, fixture, "Thread API issue")
 
 	var created threadResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/changes/"+started.Change.ID+"/comments", createThreadRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+started.Change.ID+"/comments", createThreadRequest{
 		AnchorCommitSHA: "abc123",
 		FilePath:        "internal/app.go",
 		Line:            12,
@@ -3402,25 +2258,25 @@ func TestReviewThreadAPILifecycle(t *testing.T) {
 	}
 
 	var listed threadsResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/changes/"+started.Change.ID+"/threads", nil, http.StatusOK, &listed)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/changes/"+started.Change.ID+"/threads", nil, http.StatusOK, &listed)
 	if len(listed.Threads) != 1 || listed.Threads[0].ID != created.Thread.ID {
 		t.Fatalf("listed threads = %+v", listed.Threads)
 	}
 
 	var replied threadResponse
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/threads/"+created.Thread.ID+"/comments", threadCommentRequest{
+	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v2/threads/"+created.Thread.ID+"/comments", threadCommentRequest{
 		Body: "I will fix it.",
 	}, http.StatusOK, &replied)
 	if len(replied.Thread.Comments) != 2 {
 		t.Fatalf("replied thread = %+v", replied.Thread)
 	}
 
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/threads/"+created.Thread.ID+"/claims", threadClaimRequest{
+	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v2/threads/"+created.Thread.ID+"/claims", threadClaimRequest{
 		Kind: string(coordinator.ClaimNotWarranted),
 	}, http.StatusBadRequest, nil)
 
 	var claimed threadResponse
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/threads/"+created.Thread.ID+"/claims", threadClaimRequest{
+	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v2/threads/"+created.Thread.ID+"/claims", threadClaimRequest{
 		Kind:           string(coordinator.ClaimFixed),
 		ClaimCommitSHA: "def456",
 	}, http.StatusOK, &claimed)
@@ -3431,7 +2287,7 @@ func TestReviewThreadAPILifecycle(t *testing.T) {
 	verifier := startLiveWorkerJobForIssue(t, fixture, "verifier-token", "w-verifier", started.Session.IssueID, started.Change.ID, flowworker.RoleVerifier)
 
 	var certified threadResponse
-	doJSONRequestAs(t, fixture.Server, "verifier-token", http.MethodPost, "/v1/threads/"+created.Thread.ID+"/certify", threadCommentRequest{
+	doJSONRequestAs(t, fixture.Server, "verifier-token", http.MethodPost, "/v2/threads/"+created.Thread.ID+"/certify", threadCommentRequest{
 		Body:    "Verified.",
 		LeaseID: verifier.Lease.ID,
 	}, http.StatusOK, &certified)
@@ -3440,7 +2296,7 @@ func TestReviewThreadAPILifecycle(t *testing.T) {
 	}
 
 	var reopened threadResponse
-	doJSONRequestAs(t, fixture.Server, "verifier-token", http.MethodPost, "/v1/threads/"+created.Thread.ID+"/reopen", threadCommentRequest{
+	doJSONRequestAs(t, fixture.Server, "verifier-token", http.MethodPost, "/v2/threads/"+created.Thread.ID+"/reopen", threadCommentRequest{
 		Body:    "Still broken.",
 		LeaseID: verifier.Lease.ID,
 	}, http.StatusOK, &reopened)
@@ -3455,318 +2311,35 @@ func TestReviewThreadAPIRestrictsSessionAndWorkerAccess(t *testing.T) {
 	other := startAuthorSessionForStatusTestWithWorker(t, fixture, "Other thread auth issue", "w-other-author")
 
 	var created threadResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/changes/"+started.Change.ID+"/comments", createThreadRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+started.Change.ID+"/comments", createThreadRequest{
 		AnchorCommitSHA: "abc123",
 		FilePath:        "internal/app.go",
 		Line:            12,
 		Body:            "Please handle nil.",
 	}, http.StatusCreated, &created)
 
-	doJSONRequestAs(t, fixture.Server, other.Token, http.MethodPost, "/v1/threads/"+created.Thread.ID+"/comments", threadCommentRequest{
+	doJSONRequestAs(t, fixture.Server, other.Token, http.MethodPost, "/v2/threads/"+created.Thread.ID+"/comments", threadCommentRequest{
 		Body: "Cross-issue reply.",
 	}, http.StatusForbidden, nil)
 
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/threads/"+created.Thread.ID+"/certify", threadCommentRequest{
+	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v2/threads/"+created.Thread.ID+"/certify", threadCommentRequest{
 		Body: "Author cannot verify.",
 	}, http.StatusForbidden, nil)
 
 	reviewer := startLiveWorkerJobForIssue(t, fixture, "reviewer-token", "w-reviewer", started.Session.IssueID, started.Change.ID, flowworker.RoleReviewer)
-	doJSONRequestAs(t, fixture.Server, "reviewer-token", http.MethodPost, "/v1/threads/"+created.Thread.ID+"/comments", threadCommentRequest{
+	doJSONRequestAs(t, fixture.Server, "reviewer-token", http.MethodPost, "/v2/threads/"+created.Thread.ID+"/comments", threadCommentRequest{
 		Body:    "Reviewer reply.",
 		LeaseID: reviewer.Lease.ID,
 	}, http.StatusOK, nil)
 
-	doJSONRequestAs(t, fixture.Server, "reviewer-token", http.MethodPost, "/v1/threads/"+created.Thread.ID+"/certify", threadCommentRequest{
+	doJSONRequestAs(t, fixture.Server, "reviewer-token", http.MethodPost, "/v2/threads/"+created.Thread.ID+"/certify", threadCommentRequest{
 		Body:    "Wrong role.",
 		LeaseID: reviewer.Lease.ID,
 	}, http.StatusForbidden, nil)
 
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/threads/"+created.Thread.ID+"/comments", threadCommentRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/threads/"+created.Thread.ID+"/comments", threadCommentRequest{
 		Body: "No live lease.",
 	}, http.StatusForbidden, nil)
-}
-
-func TestReviewerAndVerifierJobsIncludeReviewContext(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	started := startAuthorSessionForStatusTest(t, fixture, "Review context issue")
-	thread, err := fixture.Threads.CreateThread(ctx, coordinator.CreateThreadInput{
-		ChangeID:        started.Change.ID,
-		AnchorCommitSHA: "abc123",
-		FilePath:        "internal/api/server.go",
-		Line:            42,
-		Body:            "Please verify this.",
-		Actor:           "owner",
-	})
-	if err != nil {
-		t.Fatalf("create thread: %v", err)
-	}
-
-	for _, role := range []flowworker.JobRole{flowworker.RoleReviewer, flowworker.RoleVerifier} {
-		var response jobResponse
-		doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/jobs", enqueueJobRequest{
-			IssueID:        &started.Session.IssueID,
-			Role:           string(role),
-			CapacityBucket: string(flowworker.BucketPersistentAgent),
-			Payload:        map[string]any{"existing": "value"},
-		}, http.StatusCreated, &response)
-		if response.Job.Payload["existing"] != "value" {
-			t.Fatalf("%s payload = %+v, want existing key preserved", role, response.Job.Payload)
-		}
-		reviewContext, ok := response.Job.Payload["review_context"].(map[string]any)
-		if !ok {
-			t.Fatalf("%s payload review_context = %#v", role, response.Job.Payload["review_context"])
-		}
-		if reviewContext["issue_id"] != started.Session.IssueID {
-			t.Fatalf("%s review_context issue_id = %#v, want %s", role, reviewContext["issue_id"], started.Session.IssueID)
-		}
-		threads, ok := reviewContext["threads"].([]any)
-		if !ok || len(threads) != 1 {
-			t.Fatalf("%s review_context threads = %#v", role, reviewContext["threads"])
-		}
-		threadPayload, ok := threads[0].(map[string]any)
-		if !ok || threadPayload["id"] != thread.ID {
-			t.Fatalf("%s review_context thread = %#v, want %s", role, threads[0], thread.ID)
-		}
-	}
-}
-
-func TestBlockedCheckEnqueuesSingleFixAuthorJobAndReadyResetsCheck(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	// This test drives the blocked-check fix loop with synthetic head SHAs, so
-	// it models a project with no exchange-configured checks: clear the
-	// exchange path so ready skips the check-config listing.
-	repointFixtureExchange(t, fixture, "")
-	started := startAuthorSessionForStatusTest(t, fixture, "Fix loop issue")
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/sessions/"+started.Session.ID+"/ready", readySessionRequest{
-		HeadSHA: "head-1",
-	}, http.StatusOK, nil)
-
-	required := true
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+started.Session.IssueID+"/checks/ci", reportCheckRequest{
-		Kind:     string(coordinator.CheckKindCI),
-		Required: &required,
-		Verdict:  string(coordinator.CheckSatisfied),
-		Details:  "Passed.",
-	}, http.StatusOK, nil)
-	var blocked checkResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+started.Session.IssueID+"/checks/reviewer", reportCheckRequest{
-		Kind:     string(coordinator.CheckKindReviewer),
-		Required: &required,
-		Verdict:  string(coordinator.CheckBlocked),
-		Details:  "Needs a fix.",
-	}, http.StatusOK, &blocked)
-	if blocked.ReviewState != coordinator.ReviewChangesRequested {
-		t.Fatalf("review state = %q, want changes_requested", blocked.ReviewState)
-	}
-
-	fixJob, ok, err := fixture.Workers.LiveAuthorJobForIssue(ctx, started.Session.IssueID)
-	if err != nil {
-		t.Fatalf("live author job: %v", err)
-	}
-	if !ok || fixJob.ChangeID == nil || *fixJob.ChangeID != started.Change.ID {
-		t.Fatalf("fix job = %+v ok=%t, want change %s", fixJob, ok, started.Change.ID)
-	}
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+started.Session.IssueID+"/checks/reviewer", reportCheckRequest{
-		Kind:     string(coordinator.CheckKindReviewer),
-		Required: &required,
-		Verdict:  string(coordinator.CheckBlocked),
-		Details:  "Still needs a fix.",
-	}, http.StatusOK, nil)
-	liveJobs := liveAuthorJobsForIssue(t, fixture, started.Session.IssueID)
-	if len(liveJobs) != 1 || liveJobs[0].ID != fixJob.ID {
-		t.Fatalf("live fix jobs = %+v, want only %s", liveJobs, fixJob.ID)
-	}
-
-	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-fix",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
-		CapacityPersistentAgent: 1,
-	}); err != nil {
-		t.Fatalf("register fix worker: %v", err)
-	}
-	claimed := claimSpecificJob(t, fixture, "w-fix", fixJob.ID, []flowworker.CapacityBucket{flowworker.BucketPersistentAgent})
-	if _, err := fixture.Workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
-		t.Fatalf("mark fix running: %v", err)
-	}
-	fixSession, err := fixture.Sessions.StartAuthorSession(ctx, coordinator.StartAuthorSessionInput{
-		JobID:    claimed.Job.ID,
-		LeaseID:  claimed.Lease.ID,
-		WorkerID: "w-fix",
-	})
-	if err != nil {
-		t.Fatalf("start fix session: %v", err)
-	}
-	doJSONRequestAs(t, fixture.Server, fixSession.Token, http.MethodPost, "/v1/sessions/"+fixSession.Session.ID+"/ready", readySessionRequest{
-		HeadSHA: "head-2",
-	}, http.StatusOK, nil)
-	resetReviewer, err := fixture.Checks.GetCheck(ctx, started.Session.IssueID, "reviewer")
-	if err != nil {
-		t.Fatalf("get reset reviewer: %v", err)
-	}
-	if resetReviewer.Verdict != coordinator.CheckPending || resetReviewer.SourceJobID != nil {
-		t.Fatalf("reset reviewer = %+v", resetReviewer)
-	}
-	resetCI, err := fixture.Checks.GetCheck(ctx, started.Session.IssueID, "ci")
-	if err != nil {
-		t.Fatalf("get reset ci: %v", err)
-	}
-	if resetCI.Verdict != coordinator.CheckPending || resetCI.SourceJobID != nil {
-		t.Fatalf("reset ci = %+v", resetCI)
-	}
-
-	var regression checkResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+started.Session.IssueID+"/checks/ci", reportCheckRequest{
-		Kind:     string(coordinator.CheckKindCI),
-		Required: &required,
-		Verdict:  string(coordinator.CheckBlocked),
-		Details:  "Regression after fix.",
-	}, http.StatusOK, &regression)
-	if regression.ReviewState != coordinator.ReviewChangesRequested {
-		t.Fatalf("regression review state = %q, want changes_requested", regression.ReviewState)
-	}
-}
-
-func TestReadySchedulesRepoConfiguredCritiqueChecks(t *testing.T) {
-	fixture := newTestFixture(t)
-	exchangePath, headSHA := createCheckConfigExchange(t)
-	repointFixtureExchange(t, fixture, exchangePath)
-	started := startAuthorSessionForStatusTest(t, fixture, "Configured ready issue")
-	if _, err := fixture.Sessions.UpdateChangeHead(context.Background(), started.Change.ID, headSHA); err != nil {
-		t.Fatalf("record change head before ready: %v", err)
-	}
-
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/sessions/"+started.Session.ID+"/ready", readySessionRequest{
-		HeadSHA: headSHA,
-	}, http.StatusOK, nil)
-
-	assertAPICheck(t, fixture, started.Session.IssueID, "unit", coordinator.CheckKindCI, coordinator.CheckPending)
-	assertAPICheck(t, fixture, started.Session.IssueID, "reviewer", coordinator.CheckKindReviewer, coordinator.CheckPending)
-	assertAPICheck(t, fixture, started.Session.IssueID, "verifier", coordinator.CheckKindVerifier, coordinator.CheckPending)
-	assertAPILiveJobs(t, fixture, started.Session.IssueID, map[flowworker.JobRole]int{
-		flowworker.RoleCI:       1,
-		flowworker.RoleReviewer: 1,
-		flowworker.RoleVerifier: 0,
-	})
-}
-
-func TestBoardRoutesPendingHumanReviewToNeedsAttention(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Human review board"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	if _, err := fixture.Issues.ScheduleIssue(ctx, issue.ID, coordinator.ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-	if _, err := fixture.DB.ExecContext(ctx, `
-INSERT INTO changes (id, issue_id, branch, base, head_sha, created_at, updated_at, ready_at)
-VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`,
-		"ch-human-review",
-		issue.ID,
-		"issue/"+issue.ID,
-		strings.Repeat("1", 40),
-		"2026-01-01T00:00:00Z",
-		"2026-01-01T00:00:00Z",
-		"2026-01-01T00:00:00Z",
-	); err != nil {
-		t.Fatalf("insert ready change: %v", err)
-	}
-	required := true
-	for _, input := range []coordinator.ReportCheckInput{
-		{IssueID: issue.ID, Name: "reviewer", Kind: coordinator.CheckKindReviewer, Required: &required, Verdict: coordinator.CheckSatisfied, Reporter: "reviewer"},
-		{IssueID: issue.ID, Name: "human-review", Kind: coordinator.CheckKindHuman, Required: &required, Verdict: coordinator.CheckPending, Reporter: "coordinator"},
-		{IssueID: issue.ID, Name: "verifier", Kind: coordinator.CheckKindVerifier, Required: &required, Verdict: coordinator.CheckPending, Reporter: "coordinator"},
-	} {
-		if _, err := fixture.Checks.ReportCheck(ctx, input); err != nil {
-			t.Fatalf("report %s check: %v", input.Name, err)
-		}
-	}
-
-	var board boardResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
-	if len(board.Board.InProgress) != 0 {
-		t.Fatalf("in_progress board = %+v, want empty while human review is pending", board.Board.InProgress)
-	}
-	if len(board.Board.NeedsAttention) != 1 || board.Board.NeedsAttention[0].ID != issue.ID {
-		t.Fatalf("needs_attention board = %+v, want %s", board.Board.NeedsAttention, issue.ID)
-	}
-	if board.LaneStates[issue.ID] != coordinator.LaneStateInReview || board.WaitReasons[issue.ID] != coordinator.WaitReasonHumanReview {
-		t.Fatalf("lane state/wait reason = %q/%q, want in_review/human_review", board.LaneStates[issue.ID], board.WaitReasons[issue.ID])
-	}
-	card := board.IssueCards[issue.ID]
-	if !card.RequiredChecks.PendingHumanReview || card.BlockingReason != "human review pending" || card.PrimaryAction != "review" {
-		t.Fatalf("card = %+v, want pending human review action", card)
-	}
-}
-
-func TestRunReviewSchedulesDefaultChecksForLegacyReadyChange(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	started := startAuthorSessionForStatusTest(t, fixture, "Legacy zero-check issue")
-	requiresHuman := false
-	if _, err := fixture.Issues.EditIssue(ctx, started.Session.IssueID, coordinator.EditIssueInput{RequiresHumanReview: &requiresHuman}); err != nil {
-		t.Fatalf("disable human review: %v", err)
-	}
-	exchangePath, headSHA := createMergeExchange(t, started.Change.Branch)
-	repointFixtureExchange(t, fixture, exchangePath)
-	if _, err := fixture.Sessions.UpdateChangeHead(ctx, started.Change.ID, headSHA); err != nil {
-		t.Fatalf("record change head before ready: %v", err)
-	}
-	if _, err := fixture.Sessions.ReadyAuthorSession(ctx, started.Session.ID); err != nil {
-		t.Fatalf("mark session ready: %v", err)
-	}
-
-	existing, err := fixture.Checks.ListChecks(ctx, started.Session.IssueID)
-	if err != nil {
-		t.Fatalf("list existing checks: %v", err)
-	}
-	if len(existing) != 0 {
-		t.Fatalf("existing checks = %+v, want none before manual review run", existing)
-	}
-
-	var response reviewRunResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+started.Session.IssueID+"/review/run", nil, http.StatusOK, &response)
-	if response.Change.ID != started.Change.ID {
-		t.Fatalf("response change = %+v, want %s", response.Change, started.Change.ID)
-	}
-	if response.Scheduled.ChecksCreated != 2 || response.Scheduled.JobsEnqueued != 1 {
-		t.Fatalf("scheduled = %+v, want two checks and one reviewer job", response.Scheduled)
-	}
-	if response.ReviewState != coordinator.ReviewInReview {
-		t.Fatalf("review state = %q, want in_review", response.ReviewState)
-	}
-
-	assertAPICheck(t, fixture, started.Session.IssueID, "reviewer", coordinator.CheckKindReviewer, coordinator.CheckPending)
-	assertAPICheck(t, fixture, started.Session.IssueID, "verifier", coordinator.CheckKindVerifier, coordinator.CheckPending)
-	assertAPILiveJobs(t, fixture, started.Session.IssueID, map[flowworker.JobRole]int{
-		flowworker.RoleReviewer: 1,
-		flowworker.RoleVerifier: 0,
-	})
-}
-
-func TestReadyPreflightsInvalidCheckConfigBeforeFinishingSession(t *testing.T) {
-	fixture := newTestFixture(t)
-	exchangePath, headSHA := createInvalidCheckConfigExchange(t)
-	repointFixtureExchange(t, fixture, exchangePath)
-	started := startAuthorSessionForStatusTest(t, fixture, "Invalid check config ready issue")
-
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/sessions/"+started.Session.ID+"/ready", readySessionRequest{
-		HeadSHA: headSHA,
-	}, http.StatusBadRequest, nil)
-
-	session, err := fixture.Sessions.GetSession(context.Background(), started.Session.ID)
-	if err != nil {
-		t.Fatalf("get session: %v", err)
-	}
-	if session.RuntimeState == coordinator.SessionFinished {
-		t.Fatalf("session finished despite check config preflight failure: %+v", session)
-	}
-	if _, err := fixture.Credentials.Authenticate(context.Background(), started.Token); err != nil {
-		t.Fatalf("session token revoked after preflight failure: %v", err)
-	}
 }
 
 func TestWorkerCheckReportRejectsSourceJobFromStaleHead(t *testing.T) {
@@ -3812,7 +2385,7 @@ func TestWorkerCheckReportRejectsSourceJobFromStaleHead(t *testing.T) {
 	}
 	sourceJobID := job.ID
 	leaseID := claimed.Lease.ID
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/issues/"+started.Session.IssueID+"/checks/unit", reportCheckRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/issues/"+started.Session.IssueID+"/checks/unit", reportCheckRequest{
 		Kind:        string(coordinator.CheckKindCI),
 		SourceJobID: &sourceJobID,
 		LeaseID:     &leaseID,
@@ -3858,7 +2431,7 @@ func TestWorkerCheckReportRejectsSourceJobMissingCheckMetadata(t *testing.T) {
 	}
 	sourceJobID := job.ID
 	leaseID := claimed.Lease.ID
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/issues/"+started.Session.IssueID+"/checks/unit", reportCheckRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/issues/"+started.Session.IssueID+"/checks/unit", reportCheckRequest{
 		Kind:        string(coordinator.CheckKindCI),
 		SourceJobID: &sourceJobID,
 		LeaseID:     &leaseID,
@@ -3877,7 +2450,7 @@ func TestWorkerReviewerJobCanReportReviewerCheck(t *testing.T) {
 	sourceJobID := reviewer.Job.ID
 	leaseID := reviewer.Lease.ID
 	var response checkResponse
-	doJSONRequestAs(t, fixture.Server, "reviewer-token", http.MethodPost, "/v1/issues/"+started.Session.IssueID+"/checks/reviewer", reportCheckRequest{
+	doJSONRequestAs(t, fixture.Server, "reviewer-token", http.MethodPost, "/v2/issues/"+started.Session.IssueID+"/checks/reviewer", reportCheckRequest{
 		Kind:        string(coordinator.CheckKindReviewer),
 		SourceJobID: &sourceJobID,
 		LeaseID:     &leaseID,
@@ -3885,830 +2458,6 @@ func TestWorkerReviewerJobCanReportReviewerCheck(t *testing.T) {
 	}, http.StatusOK, &response)
 	if response.Check.Kind != coordinator.CheckKindReviewer || response.Check.Verdict != coordinator.CheckSatisfied {
 		t.Fatalf("reviewer report response = %+v", response)
-	}
-}
-
-func TestReadyWithUnchangedHeadDoesNotResetBlockedChecks(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	// Synthetic head SHAs: model a project with no exchange-configured checks.
-	repointFixtureExchange(t, fixture, "")
-	started := startAuthorSessionForStatusTest(t, fixture, "Same head fix loop issue")
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/sessions/"+started.Session.ID+"/ready", readySessionRequest{
-		HeadSHA: "head-1",
-	}, http.StatusOK, nil)
-
-	required := true
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+started.Session.IssueID+"/checks/reviewer", reportCheckRequest{
-		Kind:     string(coordinator.CheckKindReviewer),
-		Required: &required,
-		Verdict:  string(coordinator.CheckBlocked),
-		Details:  "Needs a fix.",
-	}, http.StatusOK, nil)
-	fixJob, ok, err := fixture.Workers.LiveAuthorJobForIssue(ctx, started.Session.IssueID)
-	if err != nil {
-		t.Fatalf("live author job: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected fix author job")
-	}
-	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-same-head",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
-		CapacityPersistentAgent: 1,
-	}); err != nil {
-		t.Fatalf("register fix worker: %v", err)
-	}
-	claimed := claimSpecificJob(t, fixture, "w-same-head", fixJob.ID, []flowworker.CapacityBucket{flowworker.BucketPersistentAgent})
-	if _, err := fixture.Workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
-		t.Fatalf("mark fix running: %v", err)
-	}
-	fixSession, err := fixture.Sessions.StartAuthorSession(ctx, coordinator.StartAuthorSessionInput{
-		JobID:    claimed.Job.ID,
-		LeaseID:  claimed.Lease.ID,
-		WorkerID: "w-same-head",
-	})
-	if err != nil {
-		t.Fatalf("start fix session: %v", err)
-	}
-	doJSONRequestAs(t, fixture.Server, fixSession.Token, http.MethodPost, "/v1/sessions/"+fixSession.Session.ID+"/ready", readySessionRequest{
-		HeadSHA: "head-1",
-	}, http.StatusOK, nil)
-	check, err := fixture.Checks.GetCheck(ctx, started.Session.IssueID, "reviewer")
-	if err != nil {
-		t.Fatalf("get reviewer: %v", err)
-	}
-	if check.Verdict != coordinator.CheckBlocked {
-		t.Fatalf("reviewer verdict = %q, want blocked for unchanged head", check.Verdict)
-	}
-}
-
-func validHandoffContent(goal string) string {
-	return handoff.RenderTemplate(handoff.TemplateInput{
-		CurrentGoal:           goal,
-		CompletedWork:         "Wrote the handler.",
-		RemainingWork:         "Run the tests.",
-		TestsRun:              "go test ./... passed.",
-		FailedApproaches:      "None.",
-		ImportantFiles:        "internal/api/server.go",
-		NextRecommendedAction: "Review the change.",
-	})
-}
-
-func TestPutHandoffSnapshotRecordsHandoffForOwningSession(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	started := startAuthorSessionForStatusTest(t, fixture, "Eager handoff issue")
-
-	// A valid handoff from the owning session is recorded as present and valid.
-	content := validHandoffContent("Ship eager handoff sync.")
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPut,
-		"/v1/changes/"+started.Change.ID+"/handoff",
-		putHandoffRequest{Content: content, HeadSHA: "eager-head-1"},
-		http.StatusOK, nil)
-
-	snapshot, err := fixture.Reconciler.GetHandoffSnapshot(ctx, started.Change.ID)
-	if err != nil {
-		t.Fatalf("get handoff snapshot: %v", err)
-	}
-	if !snapshot.Present || !snapshot.Valid {
-		t.Fatalf("snapshot present/valid = %t/%t, want true/true: %+v", snapshot.Present, snapshot.Valid, snapshot)
-	}
-	if snapshot.Summary != "Ship eager handoff sync." {
-		t.Fatalf("snapshot summary = %q, want %q", snapshot.Summary, "Ship eager handoff sync.")
-	}
-	if snapshot.HeadSHA != "eager-head-1" {
-		t.Fatalf("snapshot head_sha = %q, want %q", snapshot.HeadSHA, "eager-head-1")
-	}
-
-	// An invalid handoff (missing required sections) is recorded, not rejected:
-	// the snapshot mirrors reconcile semantics and reports valid=false.
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPut,
-		"/v1/changes/"+started.Change.ID+"/handoff",
-		putHandoffRequest{Content: "# Flow Handoff\n\nincomplete", HeadSHA: "eager-head-2"},
-		http.StatusOK, nil)
-	invalid, err := fixture.Reconciler.GetHandoffSnapshot(ctx, started.Change.ID)
-	if err != nil {
-		t.Fatalf("get invalid handoff snapshot: %v", err)
-	}
-	if !invalid.Present || invalid.Valid {
-		t.Fatalf("invalid snapshot present/valid = %t/%t, want true/false: %+v", invalid.Present, invalid.Valid, invalid)
-	}
-	if invalid.HeadSHA != "eager-head-2" {
-		t.Fatalf("invalid snapshot head_sha = %q, want %q", invalid.HeadSHA, "eager-head-2")
-	}
-}
-
-func TestPutHandoffSnapshotRejectsSessionForDifferentChange(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	owning := startAuthorSessionForStatusTest(t, fixture, "Handoff owner issue")
-	other := startAuthorSessionForStatusTestWithWorker(t, fixture, "Handoff other issue", "w-other")
-
-	// The owning session's token must not be able to write the other change's
-	// handoff: the PUT is scoped to the change the session owns.
-	doJSONRequestAs(t, fixture.Server, owning.Token, http.MethodPut,
-		"/v1/changes/"+other.Change.ID+"/handoff",
-		putHandoffRequest{Content: validHandoffContent("Cross-change write."), HeadSHA: "x"},
-		http.StatusForbidden, nil)
-
-	// The rejected request must have no side effect: the auth check runs before
-	// the upsert, so the other change's handoff snapshot is never written.
-	if _, err := fixture.Reconciler.GetHandoffSnapshot(ctx, other.Change.ID); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("rejected cross-change PUT wrote a snapshot: err = %v", err)
-	}
-}
-
-func TestGetHandoffSnapshotReturnsBodyForOwningSessionAndOwner(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	started := startAuthorSessionForStatusTest(t, fixture, "Get handoff issue")
-
-	// No snapshot yet: GET is a 404 the session builder treats as "no prior
-	// handoff" rather than an error.
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodGet,
-		"/v1/changes/"+started.Change.ID+"/handoff", nil, http.StatusNotFound, nil)
-
-	content := validHandoffContent("Resume the migration.")
-	if err := fixture.Reconciler.UpsertHandoffSnapshot(ctx, started.Change.ID, "head-9", content); err != nil {
-		t.Fatalf("seed handoff snapshot: %v", err)
-	}
-
-	// The owning session reads the full body for prompt injection.
-	var got handoffResponse
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodGet,
-		"/v1/changes/"+started.Change.ID+"/handoff", nil, http.StatusOK, &got)
-	if got.Content != content || !got.Present || !got.Valid || got.HeadSHA != "head-9" {
-		t.Fatalf("session get handoff = %+v, want full content at head-9", got)
-	}
-
-	// Owners read any change's handoff.
-	var ownerGot handoffResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet,
-		"/v1/changes/"+started.Change.ID+"/handoff", nil, http.StatusOK, &ownerGot)
-	if ownerGot.Content != content {
-		t.Fatalf("owner get handoff content = %q, want %q", ownerGot.Content, content)
-	}
-
-	// A verifier worker reads the handoff for prompt injection by proving its
-	// live lease on the change.
-	claimed := startLiveCheckJobForIssue(t, fixture, "worker-token-vfy", "w-vfy",
-		started.Session.IssueID, started.Change.ID, "head-9", "verifier-check",
-		flowworker.RoleVerifier, flowworker.BucketEphemeral)
-	var workerGot handoffResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token-vfy", http.MethodGet,
-		"/v1/changes/"+started.Change.ID+"/handoff?lease_id="+claimed.Lease.ID, nil, http.StatusOK, &workerGot)
-	if workerGot.Content != content {
-		t.Fatalf("worker get handoff content = %q, want %q", workerGot.Content, content)
-	}
-	// Without the lease the worker is forbidden.
-	doJSONRequestAs(t, fixture.Server, "worker-token-vfy", http.MethodGet,
-		"/v1/changes/"+started.Change.ID+"/handoff", nil, http.StatusForbidden, nil)
-}
-
-func TestAutoMergeApprovedIssueMergesExchangeBase(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	started := startAuthorSessionForStatusTest(t, fixture, "Auto merge issue")
-	autoMerge := true
-	requiresHuman := false
-	if _, err := fixture.Issues.EditIssue(ctx, started.Session.IssueID, coordinator.EditIssueInput{
-		AutoMerge:           &autoMerge,
-		RequiresHumanReview: &requiresHuman,
-	}); err != nil {
-		t.Fatalf("enable auto merge: %v", err)
-	}
-	exchangePath, headSHA := createMergeExchange(t, started.Change.Branch)
-	repointFixtureExchange(t, fixture, exchangePath)
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/sessions/"+started.Session.ID+"/ready", readySessionRequest{
-		HeadSHA: headSHA,
-	}, http.StatusOK, nil)
-
-	var response checkResponse
-	_ = satisfyAPICheck(t, fixture, started.Session.IssueID, "reviewer", coordinator.CheckKindReviewer)
-	response = satisfyAPICheck(t, fixture, started.Session.IssueID, "verifier", coordinator.CheckKindVerifier)
-	if response.ReviewState != coordinator.ReviewMerged {
-		t.Fatalf("review state after auto merge = %q, want merged", response.ReviewState)
-	}
-	change, err := fixture.Sessions.GetChange(ctx, started.Change.ID)
-	if err != nil {
-		t.Fatalf("get merged change: %v", err)
-	}
-	if change.MergedAt == nil {
-		t.Fatalf("change merged_at is nil: %+v", change)
-	}
-	issue, err := fixture.Issues.GetIssue(ctx, started.Session.IssueID)
-	if err != nil {
-		t.Fatalf("get merged issue: %v", err)
-	}
-	if issue.ScheduleState != coordinator.ScheduleClosed {
-		t.Fatalf("issue schedule state = %q, want closed", issue.ScheduleState)
-	}
-	app, present, err := flowgit.ReadTextFileAtRef(ctx, exchangePath, "refs/heads/main", "app.go")
-	if err != nil {
-		t.Fatalf("read merged app: %v", err)
-	}
-	if !present || app != "package app\n\nconst Value = 1\n" {
-		t.Fatalf("merged app present=%t content=%q", present, app)
-	}
-	if _, present, err := flowgit.ReadTextFileAtRef(ctx, exchangePath, "refs/heads/main", ".flow/session/state.json"); err != nil {
-		t.Fatalf("read session state: %v", err)
-	} else if present {
-		t.Fatal(".flow/session file was included in auto-merged base")
-	}
-}
-
-func TestAutoMergeConflictEnqueuesAuthorFixAndRerunsChecks(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	started := startAuthorSessionForStatusTest(t, fixture, "Auto merge conflict issue")
-	autoMerge := true
-	requiresHuman := false
-	if _, err := fixture.Issues.EditIssue(ctx, started.Session.IssueID, coordinator.EditIssueInput{
-		AutoMerge:           &autoMerge,
-		RequiresHumanReview: &requiresHuman,
-	}); err != nil {
-		t.Fatalf("enable auto merge: %v", err)
-	}
-	repoPath, exchangePath, headSHA := createConflictingMergeExchange(t, started.Change.Branch)
-	repointFixtureExchange(t, fixture, exchangePath)
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/sessions/"+started.Session.ID+"/ready", readySessionRequest{
-		HeadSHA: headSHA,
-	}, http.StatusOK, nil)
-
-	_ = satisfyAPICheck(t, fixture, started.Session.IssueID, "reviewer", coordinator.CheckKindReviewer)
-	response := satisfyAPICheck(t, fixture, started.Session.IssueID, "verifier", coordinator.CheckKindVerifier)
-	if response.ReviewState != coordinator.ReviewChangesRequested {
-		t.Fatalf("review state after auto-merge conflict = %q, want changes_requested", response.ReviewState)
-	}
-	autoMergeCheck, err := fixture.Checks.GetCheck(ctx, started.Session.IssueID, coordinator.AutoMergeCheckName)
-	if err != nil {
-		t.Fatalf("get auto-merge check: %v", err)
-	}
-	if autoMergeCheck.Verdict != coordinator.CheckBlocked || !autoMergeCheck.Required || !strings.Contains(autoMergeCheck.Details, "CONFLICT") {
-		t.Fatalf("auto-merge check = %+v", autoMergeCheck)
-	}
-	fixJobs := liveAuthorJobsForIssue(t, fixture, started.Session.IssueID)
-	if len(fixJobs) != 1 {
-		t.Fatalf("live author jobs = %+v, want one fix job", fixJobs)
-	}
-	if payloadString(fixJobs[0].Payload, "branch") != started.Change.Branch {
-		t.Fatalf("fix job payload branch = %+v, want %s", fixJobs[0].Payload, started.Change.Branch)
-	}
-
-	claimed := claimSpecificJob(t, fixture, "w-local", fixJobs[0].ID, []flowworker.CapacityBucket{flowworker.BucketPersistentAgent})
-	if _, err := fixture.Workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
-		t.Fatalf("mark fix running: %v", err)
-	}
-	fixSession, err := fixture.Sessions.StartAuthorSession(ctx, coordinator.StartAuthorSessionInput{
-		JobID:    claimed.Job.ID,
-		LeaseID:  claimed.Lease.ID,
-		WorkerID: "w-local",
-	})
-	if err != nil {
-		t.Fatalf("start fix session: %v", err)
-	}
-
-	runAPIGit(t, repoPath, "checkout", started.Change.Branch)
-	runAPIGit(t, repoPath, "merge", "-s", "ours", "main", "-m", "merge main")
-	resolvedHead := apiGitOutput(t, repoPath, "rev-parse", "HEAD")
-	runAPIGit(t, repoPath, "push", exchangePath, started.Change.Branch+":"+started.Change.Branch)
-	doJSONRequestAs(t, fixture.Server, fixSession.Token, http.MethodPost, "/v1/sessions/"+fixSession.Session.ID+"/ready", readySessionRequest{
-		HeadSHA: resolvedHead,
-	}, http.StatusOK, nil)
-
-	autoMergeCheck, err = fixture.Checks.GetCheck(ctx, started.Session.IssueID, coordinator.AutoMergeCheckName)
-	if err != nil {
-		t.Fatalf("get reset auto-merge check: %v", err)
-	}
-	if autoMergeCheck.Required || autoMergeCheck.Verdict != coordinator.CheckSkipped {
-		t.Fatalf("auto-merge check after author fix = %+v, want optional skipped", autoMergeCheck)
-	}
-	assertAPICheck(t, fixture, started.Session.IssueID, "reviewer", coordinator.CheckKindReviewer, coordinator.CheckPending)
-	assertAPICheck(t, fixture, started.Session.IssueID, "verifier", coordinator.CheckKindVerifier, coordinator.CheckPending)
-
-	_ = satisfyAPICheck(t, fixture, started.Session.IssueID, "reviewer", coordinator.CheckKindReviewer)
-	response = satisfyAPICheck(t, fixture, started.Session.IssueID, "verifier", coordinator.CheckKindVerifier)
-	if response.ReviewState != coordinator.ReviewMerged {
-		t.Fatalf("review state after resolved auto-merge = %q, want merged", response.ReviewState)
-	}
-	change, err := fixture.Sessions.GetChange(ctx, started.Change.ID)
-	if err != nil {
-		t.Fatalf("get merged change: %v", err)
-	}
-	if change.MergedAt == nil {
-		t.Fatalf("change merged_at is nil after resolved auto-merge: %+v", change)
-	}
-	merged, present, err := flowgit.ReadTextFileAtRef(ctx, exchangePath, "refs/heads/main", "conflict.txt")
-	if err != nil {
-		t.Fatalf("read merged conflict file: %v", err)
-	}
-	if !present || merged != "issue branch\n" {
-		t.Fatalf("merged conflict file present=%t content=%q", present, merged)
-	}
-}
-
-func TestAutoMergeFollowUpFailureAfterVerifierCheckDoesNotFailCheckReport(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	started := startAuthorSessionForStatusTest(t, fixture, "Auto merge follow-up failure issue")
-	autoMerge := true
-	requiresHuman := false
-	if _, err := fixture.Issues.EditIssue(ctx, started.Session.IssueID, coordinator.EditIssueInput{
-		AutoMerge:           &autoMerge,
-		RequiresHumanReview: &requiresHuman,
-	}); err != nil {
-		t.Fatalf("enable auto merge: %v", err)
-	}
-	exchangePath, headSHA := createMergeExchange(t, started.Change.Branch)
-	repointFixtureExchange(t, fixture, exchangePath)
-	// Reject pushes so the squash merge succeeds but the follow-up push fails
-	// with a non-conflict error; conflicts take the author-fix recovery path.
-	hookPath := filepath.Join(exchangePath, "hooks", "pre-receive")
-	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\necho rejected by test hook >&2\nexit 1\n"), 0o755); err != nil {
-		t.Fatalf("write pre-receive hook: %v", err)
-	}
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/sessions/"+started.Session.ID+"/ready", readySessionRequest{
-		HeadSHA: headSHA,
-	}, http.StatusOK, nil)
-
-	_ = satisfyAPICheck(t, fixture, started.Session.IssueID, "reviewer", coordinator.CheckKindReviewer)
-
-	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
-		Token:   "verifier-merge-token",
-		Scope:   coordinator.TokenScopeWorker,
-		Subject: "w-verifier-merge",
-	}); err != nil {
-		t.Fatalf("store verifier token: %v", err)
-	}
-	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-verifier-merge",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true", "worker_id": "w-verifier-merge"},
-		CapacityPersistentAgent: 1,
-	}); err != nil {
-		t.Fatalf("register verifier worker: %v", err)
-	}
-	job, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &started.Session.IssueID,
-		ChangeID:       &started.Change.ID,
-		Role:           flowworker.RoleVerifier,
-		CapacityBucket: flowworker.BucketPersistentAgent,
-		Priority:       9,
-		RunsOn:         map[string]string{"worker_id": "w-verifier-merge"},
-		Payload: map[string]any{
-			"change_id":  started.Change.ID,
-			"check_name": "verifier",
-			"head_sha":   headSHA,
-		},
-	})
-	if err != nil {
-		t.Fatalf("enqueue verifier job: %v", err)
-	}
-	claimed := claimSpecificJob(t, fixture, "w-verifier-merge", job.ID, []flowworker.CapacityBucket{flowworker.BucketPersistentAgent})
-	if _, err := fixture.Workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
-		t.Fatalf("mark verifier running: %v", err)
-	}
-
-	required := true
-	sourceJobID := claimed.Job.ID
-	leaseID := claimed.Lease.ID
-	var response checkResponse
-	doJSONRequestAs(t, fixture.Server, "verifier-merge-token", http.MethodPost, "/v1/issues/"+started.Session.IssueID+"/checks/verifier", reportCheckRequest{
-		Kind:        string(coordinator.CheckKindVerifier),
-		Required:    &required,
-		Verdict:     string(coordinator.CheckSatisfied),
-		SourceJobID: &sourceJobID,
-		LeaseID:     &leaseID,
-	}, http.StatusOK, &response)
-	if response.Check.Verdict != coordinator.CheckSatisfied || response.ReviewState != coordinator.ReviewApproved {
-		t.Fatalf("check response = %+v, want satisfied approved", response)
-	}
-	if len(response.FollowUpFailures) != 1 ||
-		response.FollowUpFailures[0].EventKind != "auto_merge" ||
-		!strings.Contains(response.FollowUpFailures[0].Details, "push merged base branch") {
-		t.Fatalf("follow-up failures = %+v, want auto_merge push failure details", response.FollowUpFailures)
-	}
-
-	check, err := fixture.Checks.GetCheck(ctx, started.Session.IssueID, "verifier")
-	if err != nil {
-		t.Fatalf("get verifier check: %v", err)
-	}
-	if check.Verdict != coordinator.CheckSatisfied || check.SourceJobID == nil || *check.SourceJobID != job.ID {
-		t.Fatalf("verifier check = %+v, want satisfied with source job", check)
-	}
-
-	var verifierTransitions int
-	if err := fixture.DB.QueryRow(`
-SELECT COUNT(*)
-FROM transitions
-WHERE issue_id = ?
-	AND event_kind = 'check_reported'
-	AND payload_json LIKE '%"name":"verifier"%'`, started.Session.IssueID).Scan(&verifierTransitions); err != nil {
-		t.Fatalf("count verifier transitions: %v", err)
-	}
-	if verifierTransitions != 1 {
-		t.Fatalf("verifier check transitions = %d, want 1", verifierTransitions)
-	}
-	var mergeGuard string
-	var mergePhase string
-	if err := fixture.DB.QueryRow(`
-SELECT guard_result, to_phase
-FROM transitions
-WHERE issue_id = ?
-	AND event_kind = 'auto_merge'
-ORDER BY seq DESC
-LIMIT 1`, started.Session.IssueID).Scan(&mergeGuard, &mergePhase); err != nil {
-		t.Fatalf("load auto_merge transition: %v", err)
-	}
-	if !strings.Contains(mergeGuard, "failed:") || !strings.Contains(mergeGuard, "push merged base branch") || mergePhase != string(coordinator.PhaseApproved) {
-		t.Fatalf("auto_merge transition guard=%q to_phase=%q, want failed approved", mergeGuard, mergePhase)
-	}
-
-	var board boardResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
-	if len(board.Board.NeedsAttention) != 1 || board.Board.NeedsAttention[0].ID != started.Session.IssueID {
-		t.Fatalf("needs_attention board after failed auto-merge = %+v", board.Board)
-	}
-	if board.LaneStates[started.Session.IssueID] != coordinator.LaneStateReadyToMerge {
-		t.Fatalf("lane state = %q, want ready_to_merge", board.LaneStates[started.Session.IssueID])
-	}
-}
-
-func TestManualMergeIssueAPIRequiresOwnerAndMerges(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	started, exchangePath := readyApprovedMergeChange(t, fixture, "Manual issue merge")
-
-	var board boardResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
-	if len(board.Board.NeedsAttention) != 1 || board.Board.NeedsAttention[0].ID != started.Session.IssueID {
-		t.Fatalf("needs_attention board = %+v", board.Board.NeedsAttention)
-	}
-	if board.LaneStates[started.Session.IssueID] != coordinator.LaneStateReadyToMerge {
-		t.Fatalf("lane state = %q, want ready_to_merge", board.LaneStates[started.Session.IssueID])
-	}
-	change, err := fixture.Sessions.GetChange(ctx, started.Change.ID)
-	if err != nil {
-		t.Fatalf("get ready change: %v", err)
-	}
-	card, ok := board.IssueCards[started.Session.IssueID]
-	if !ok {
-		t.Fatalf("ready_to_merge card missing for %s: %+v", started.Session.IssueID, board.IssueCards)
-	}
-	if card.DiffStats == nil || card.DiffStats.HeadSHA != change.HeadSHA || card.DiffStats.TotalFiles != 1 || card.DiffStats.Additions != 3 || card.DiffStats.Deletions != 0 || card.DiffUnavailableReason != "" {
-		t.Fatalf("ready_to_merge diff card = %+v", card)
-	}
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/issues/"+started.Session.IssueID+"/merge", map[string]string{}, http.StatusForbidden, nil)
-
-	var response mergeResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+started.Session.IssueID+"/merge", map[string]string{}, http.StatusOK, &response)
-	if response.Merge.Issue.ScheduleState != coordinator.ScheduleClosed || response.Merge.Change.MergedAt == nil || response.Merge.MergeSHA == "" {
-		t.Fatalf("merge response = %+v", response.Merge)
-	}
-	if _, present, err := flowgit.ReadTextFileAtRef(ctx, exchangePath, "refs/heads/main", ".flow/session/state.json"); err != nil {
-		t.Fatalf("read session state: %v", err)
-	} else if present {
-		t.Fatal(".flow/session file was included in manually merged base")
-	}
-}
-
-func TestManualMergeChangeAPI(t *testing.T) {
-	fixture := newTestFixture(t)
-	started, _ := readyApprovedMergeChange(t, fixture, "Manual change merge")
-
-	var response mergeResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/changes/"+started.Change.ID+"/merge", map[string]string{}, http.StatusOK, &response)
-	if response.Merge.Change.ID != started.Change.ID || response.Merge.Issue.ScheduleState != coordinator.ScheduleClosed {
-		t.Fatalf("merge response = %+v", response.Merge)
-	}
-}
-
-func TestChangeDetailReadModelIncludesReviewState(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	started, _ := readyApprovedMergeChange(t, fixture, "Change detail")
-	change, err := fixture.Sessions.GetChange(ctx, started.Change.ID)
-	if err != nil {
-		t.Fatalf("get ready change: %v", err)
-	}
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/changes/"+change.ID+"/comments", createThreadRequest{
-		AnchorCommitSHA: change.HeadSHA,
-		FilePath:        "app.go",
-		Line:            1,
-		Context:         "const Value = 1",
-		Body:            "Check this value.",
-	}, http.StatusCreated, nil)
-
-	var response changeResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/changes/"+change.ID, nil, http.StatusOK, &response)
-	if response.Change.ID != change.ID || response.Issue.ID != started.Session.IssueID {
-		t.Fatalf("change response identity = %+v", response)
-	}
-	if response.ReviewState != coordinator.ReviewApproved || !response.CanMerge || response.MergeBlockedReason != "" {
-		t.Fatalf("merge state = review:%q canMerge:%t reason:%q", response.ReviewState, response.CanMerge, response.MergeBlockedReason)
-	}
-	if len(response.Checks) != 2 || response.RequiredChecks.Total != 2 || response.RequiredChecks.Satisfied != 2 {
-		t.Fatalf("check summary = checks:%+v required:%+v", response.Checks, response.RequiredChecks)
-	}
-	if len(response.Threads) != 1 || response.Threads[0].FilePath != "app.go" || len(response.Threads[0].Comments) != 1 {
-		t.Fatalf("threads = %+v", response.Threads)
-	}
-
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v1/changes/"+change.ID, nil, http.StatusForbidden, nil)
-}
-
-func TestWebReadModelsSurviveCoordinatorRestart(t *testing.T) {
-	dataDir := t.TempDir()
-	registry, bundles, _, global := newTestRegistryInDir(t, dataDir, "api")
-	fixture := fixtureFromRegistry(t, registry, bundles[0], dataDir, global, true)
-	ctx := context.Background()
-	started, _ := readyApprovedMergeChange(t, fixture, "Restarted web issue")
-	feedback := startAuthorSessionForStatusTestWithWorker(t, fixture, "Restarted feedback issue", "w-restart-feedback")
-	if _, err := fixture.Sessions.UpdateSessionState(ctx, feedback.Session.ID, coordinator.SessionWaiting); err != nil {
-		t.Fatalf("mark feedback waiting: %v", err)
-	}
-	if _, err := fixture.Status.WriteSessionStatus(ctx, feedback.Session.ID, "Waiting after restart", "author", coordinator.StatusKindNote); err != nil {
-		t.Fatalf("write feedback status: %v", err)
-	}
-	triage, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{
-		Title:              "Restarted triage issue",
-		CreatedBy:          coordinator.ActorAgent,
-		CreatedBySessionID: &started.Session.ID,
-		TriageState:        coordinator.TriagePending,
-	})
-	if err != nil {
-		t.Fatalf("create triage issue: %v", err)
-	}
-	change, err := fixture.Sessions.GetChange(ctx, started.Change.ID)
-	if err != nil {
-		t.Fatalf("get ready change: %v", err)
-	}
-	tag, err := fixture.Issues.CreateTag(ctx, coordinator.CreateTagInput{Slug: "restart", Name: "Restart"})
-	if err != nil {
-		t.Fatalf("create tag: %v", err)
-	}
-	if err := fixture.Issues.TagIssue(ctx, started.Session.IssueID, tag.ID, coordinator.ActorHuman); err != nil {
-		t.Fatalf("tag issue: %v", err)
-	}
-	if _, err := fixture.Threads.CreateThread(ctx, coordinator.CreateThreadInput{
-		ChangeID:        change.ID,
-		AnchorCommitSHA: change.HeadSHA,
-		FilePath:        "app.go",
-		Line:            1,
-		Context:         "const Value = 1",
-		Body:            "Review note",
-		Actor:           "reviewer",
-	}); err != nil {
-		t.Fatalf("create review thread: %v", err)
-	}
-	if err := fixture.Registry.Close(); err != nil {
-		t.Fatalf("close original registry bundles: %v", err)
-	}
-
-	restarted := reopenTestFixture(t, dataDir)
-	var board boardResponse
-	doJSONRequestAs(t, restarted.Server, "owner-token", http.MethodGet, restarted.boardPath(), nil, http.StatusOK, &board)
-	if len(board.Board.NeedsAttention) != 2 {
-		t.Fatalf("needs_attention after restart = %+v", board.Board.NeedsAttention)
-	}
-	if board.LaneStates[started.Session.IssueID] != coordinator.LaneStateReadyToMerge {
-		t.Fatalf("ready_to_merge lane state after restart = %q", board.LaneStates[started.Session.IssueID])
-	}
-	if board.LaneStates[feedback.Session.IssueID] != coordinator.LaneStateInProgress {
-		t.Fatalf("feedback lane state after restart = %q, want in_progress", board.LaneStates[feedback.Session.IssueID])
-	}
-	if board.WaitReasons[feedback.Session.IssueID] != coordinator.WaitReasonQuestion {
-		t.Fatalf("feedback wait reason after restart = %q, want question", board.WaitReasons[feedback.Session.IssueID])
-	}
-	if board.LaneStates[triage.ID] != coordinator.LaneStateTriage {
-		t.Fatalf("triage lane state after restart = %q", board.LaneStates[triage.ID])
-	}
-	var triaged *coordinator.Issue
-	for i := range board.Board.Backlog {
-		if board.Board.Backlog[i].ID == triage.ID {
-			triaged = &board.Board.Backlog[i]
-		}
-	}
-	if triaged == nil {
-		t.Fatalf("triage issue missing from backlog after restart = %+v", board.Board.Backlog)
-	}
-	if triaged.CreatedBySessionID == nil || *triaged.CreatedBySessionID != started.Session.ID {
-		t.Fatalf("triage provenance after restart = %+v", triaged.CreatedBySessionID)
-	}
-	card, ok := board.IssueCards[started.Session.IssueID]
-	if !ok {
-		t.Fatalf("issue cards after restart = %+v", board.IssueCards)
-	}
-	if card.ReviewState != coordinator.ReviewApproved || card.RequiredChecks.Satisfied != 2 || len(card.Tags) != 1 || card.Tags[0].Slug != "restart" {
-		t.Fatalf("card after restart = %+v", card)
-	}
-	feedbackCard, ok := board.IssueCards[feedback.Session.IssueID]
-	if !ok {
-		t.Fatalf("feedback card missing after restart = %+v", board.IssueCards)
-	}
-	if feedbackCard.ActiveSession == nil || feedbackCard.ActiveSession.ID != feedback.Session.ID || feedbackCard.ActiveSession.State != coordinator.SessionWaiting {
-		t.Fatalf("feedback card active session after restart = %+v", feedbackCard.ActiveSession)
-	}
-	if feedbackCard.LatestStatus == nil || feedbackCard.LatestStatus.Message != "Waiting after restart" {
-		t.Fatalf("feedback card status after restart = %+v", feedbackCard.LatestStatus)
-	}
-	triageCard, ok := board.IssueCards[triage.ID]
-	if !ok {
-		t.Fatalf("triage card missing after restart = %+v", board.IssueCards)
-	}
-	if triageCard.PrimaryAction != "triage" {
-		t.Fatalf("triage card after restart = %+v", triageCard)
-	}
-
-	var issue issueResponse
-	doJSONRequestAs(t, restarted.Server, "owner-token", http.MethodGet, "/v1/issues/"+started.Session.IssueID, nil, http.StatusOK, &issue)
-	if issue.Detail == nil || issue.Detail.ReadyChange == nil || issue.Detail.ReadyChange.ID != change.ID {
-		t.Fatalf("issue detail ready change after restart = %+v", issue.Detail)
-	}
-	if len(issue.Detail.Tags) != 1 || issue.Detail.Tags[0].Slug != "restart" || issue.Detail.RequiredChecks.Satisfied != 2 {
-		t.Fatalf("issue detail after restart = %+v", issue.Detail)
-	}
-
-	var changeDetail changeResponse
-	doJSONRequestAs(t, restarted.Server, "owner-token", http.MethodGet, "/v1/changes/"+change.ID, nil, http.StatusOK, &changeDetail)
-	if changeDetail.Change.ID != change.ID || changeDetail.Issue.ID != started.Session.IssueID {
-		t.Fatalf("change detail identity after restart = %+v", changeDetail)
-	}
-	if changeDetail.ReviewState != coordinator.ReviewApproved || !changeDetail.CanMerge || changeDetail.RequiredChecks.Satisfied != 2 {
-		t.Fatalf("change detail review state after restart = %+v", changeDetail)
-	}
-	if len(changeDetail.Threads) != 1 || changeDetail.Threads[0].FilePath != "app.go" || len(changeDetail.Threads[0].Comments) != 1 {
-		t.Fatalf("change threads after restart = %+v", changeDetail.Threads)
-	}
-}
-
-func TestChangeDiffReadModelUsesExchangeRemote(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	started, _ := readyApprovedMergeChange(t, fixture, "Change diff")
-	change, err := fixture.Sessions.GetChange(ctx, started.Change.ID)
-	if err != nil {
-		t.Fatalf("get ready change: %v", err)
-	}
-
-	var response changeDiffResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/changes/"+change.ID+"/diff", nil, http.StatusOK, &response)
-	if !response.Available || response.ChangeID != change.ID || response.HeadSHA != change.HeadSHA {
-		t.Fatalf("diff response = %+v", response)
-	}
-	if response.TotalFiles != 1 || response.Additions != 3 || response.Deletions != 0 {
-		t.Fatalf("diff stats = files:%d additions:%d deletions:%d", response.TotalFiles, response.Additions, response.Deletions)
-	}
-	var sawApp bool
-	for _, file := range response.Files {
-		if file.Path == "app.go" && file.Additions == 3 && file.Deletions == 0 && !file.Binary {
-			sawApp = true
-			if len(file.Hunks) != 1 || len(file.Hunks[0].Lines) != 3 {
-				t.Fatalf("app.go hunks = %+v, want one three-line hunk", file.Hunks)
-			}
-			if file.Hunks[0].Lines[0].Kind != "add" || file.Hunks[0].Lines[0].Text != "package app" {
-				t.Fatalf("app.go first hunk line = %+v", file.Hunks[0].Lines[0])
-			}
-		}
-	}
-	if !sawApp {
-		t.Fatalf("diff files = %+v, missing app.go stats", response.Files)
-	}
-	for _, file := range response.Files {
-		if strings.HasPrefix(file.Path, ".flow/session") {
-			t.Fatalf("diff files included merge-excluded path: %+v", response.Files)
-		}
-	}
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v1/changes/"+change.ID+"/diff", nil, http.StatusForbidden, nil)
-}
-
-// TestChangeDiffRemainsNonEmptyAfterMerge reproduces the empty-after-merge bug:
-// a squash merge advances the base ref to a commit whose tree equals the branch
-// content, so diffing refs/heads/<base>..head becomes empty. The diff must
-// instead use the pre-merge base tip (previous_base_sha) recorded in the
-// completed merge intent, keeping the change set visible after merge.
-func TestChangeDiffRemainsNonEmptyAfterMerge(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	started, _ := readyApprovedMergeChange(t, fixture, "Diff after merge")
-	change, err := fixture.Sessions.GetChange(ctx, started.Change.ID)
-	if err != nil {
-		t.Fatalf("get ready change: %v", err)
-	}
-
-	var mergeResp mergeResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+started.Session.IssueID+"/merge", map[string]string{}, http.StatusOK, &mergeResp)
-	if mergeResp.Merge.Change.MergedAt == nil || mergeResp.Merge.Issue.ScheduleState != coordinator.ScheduleClosed {
-		t.Fatalf("merge response = %+v", mergeResp.Merge)
-	}
-
-	var response changeDiffResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/changes/"+change.ID+"/diff", nil, http.StatusOK, &response)
-	if !response.Available {
-		t.Fatalf("diff unavailable after merge: %+v", response)
-	}
-	if response.TotalFiles != 1 || response.Additions != 3 || response.Deletions != 0 {
-		t.Fatalf("diff stats after merge = files:%d additions:%d deletions:%d, want the pre-merge change set", response.TotalFiles, response.Additions, response.Deletions)
-	}
-	var sawApp bool
-	for _, file := range response.Files {
-		if file.Path == "app.go" && file.Additions == 3 && file.Deletions == 0 {
-			sawApp = true
-		}
-	}
-	if !sawApp {
-		t.Fatalf("diff files after merge = %+v, missing app.go", response.Files)
-	}
-}
-
-func TestChangeDetailMergeEligibilityRequiresHeadAndProject(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	// Clear the project's exchange so merge eligibility reports the missing
-	// exchange path (the no-local-exchange branch of the resolver).
-	repointFixtureExchange(t, fixture, "")
-	started := startAuthorSessionForStatusTest(t, fixture, "Change detail blocked merge")
-	requiresHuman := false
-	if _, err := fixture.Issues.EditIssue(ctx, started.Session.IssueID, coordinator.EditIssueInput{RequiresHumanReview: &requiresHuman}); err != nil {
-		t.Fatalf("disable human review: %v", err)
-	}
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/sessions/"+started.Session.ID+"/ready", readySessionRequest{}, http.StatusOK, nil)
-	required := true
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+started.Session.IssueID+"/checks/unit", reportCheckRequest{
-		Kind:     string(coordinator.CheckKindCI),
-		Required: &required,
-		Verdict:  string(coordinator.CheckSatisfied),
-	}, http.StatusOK, nil)
-
-	var missingHead changeResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/changes/"+started.Change.ID, nil, http.StatusOK, &missingHead)
-	if missingHead.ReviewState != coordinator.ReviewApproved || missingHead.CanMerge || missingHead.MergeBlockedReason != "change head sha is required" {
-		t.Fatalf("missing head eligibility = review:%q can:%t reason:%q", missingHead.ReviewState, missingHead.CanMerge, missingHead.MergeBlockedReason)
-	}
-	var missingHeadDiff changeDiffResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/changes/"+started.Change.ID+"/diff", nil, http.StatusOK, &missingHeadDiff)
-	if missingHeadDiff.Available || missingHeadDiff.UnavailableReason != "change head sha is not recorded" {
-		t.Fatalf("missing head diff = %+v", missingHeadDiff)
-	}
-
-	if _, err := fixture.Sessions.UpdateChangeHead(ctx, started.Change.ID, strings.Repeat("a", 40)); err != nil {
-		t.Fatalf("set change head: %v", err)
-	}
-	var missingProject changeResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/changes/"+started.Change.ID, nil, http.StatusOK, &missingProject)
-	if missingProject.CanMerge || missingProject.MergeBlockedReason != "project exchange path is not local" {
-		t.Fatalf("missing project eligibility = can:%t reason:%q", missingProject.CanMerge, missingProject.MergeBlockedReason)
-	}
-}
-
-func readyApprovedMergeChange(t *testing.T, fixture testFixture, title string) (coordinator.StartAuthorSessionResult, string) {
-	t.Helper()
-
-	ctx := context.Background()
-	started := startAuthorSessionForStatusTest(t, fixture, title)
-	requiresHuman := false
-	if _, err := fixture.Issues.EditIssue(ctx, started.Session.IssueID, coordinator.EditIssueInput{RequiresHumanReview: &requiresHuman}); err != nil {
-		t.Fatalf("disable human review: %v", err)
-	}
-	exchangePath, headSHA := createMergeExchange(t, started.Change.Branch)
-	repointFixtureExchange(t, fixture, exchangePath)
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v1/sessions/"+started.Session.ID+"/ready", readySessionRequest{
-		HeadSHA: headSHA,
-	}, http.StatusOK, nil)
-	_ = satisfyAPICheck(t, fixture, started.Session.IssueID, "reviewer", coordinator.CheckKindReviewer)
-	_ = satisfyAPICheck(t, fixture, started.Session.IssueID, "verifier", coordinator.CheckKindVerifier)
-
-	return started, exchangePath
-}
-
-func TestScheduleBlockedIssueDoesNotEnqueueAuthorJob(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	blocker, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Blocker"})
-	if err != nil {
-		t.Fatalf("create blocker: %v", err)
-	}
-	blocked, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Blocked"})
-	if err != nil {
-		t.Fatalf("create blocked: %v", err)
-	}
-	if err := fixture.Issues.LinkIssues(ctx, blocker.ID, blocked.ID, coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
-		t.Fatalf("link blocker: %v", err)
-	}
-
-	var scheduled issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+blocked.ID+"/schedule", scheduleIssueRequest{
-		State: string(coordinator.ScheduleUpNext),
-	}, http.StatusOK, &scheduled)
-	if scheduled.Issue.ScheduleState != coordinator.ScheduleUpNext {
-		t.Fatalf("scheduled issue = %+v", scheduled.Issue)
-	}
-	jobs, err := fixture.Workers.ListJobs(ctx)
-	if err != nil {
-		t.Fatalf("list jobs: %v", err)
-	}
-	if len(jobs) != 0 {
-		t.Fatalf("jobs = %+v, want none for blocked issue", jobs)
 	}
 }
 
@@ -4724,12 +2473,26 @@ func startAuthorSessionForStatusTestWithWorker(t *testing.T, fixture testFixture
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
-	if _, err := fixture.Issues.ScheduleIssue(ctx, issue.ID, coordinator.ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-	ensured, err := fixture.Sessions.EnsureAuthorJob(ctx, coordinator.EnsureAuthorJobInput{IssueID: issue.ID})
+	run, err := fixture.Bundle.WorkflowRuns.Schedule(ctx, issue.ID)
 	if err != nil {
-		t.Fatalf("ensure author job: %v", err)
+		t.Fatalf("schedule workflow: %v", err)
+	}
+	if err := fixture.Bundle.WorkflowExecutor.Advance(ctx, run.ID); err != nil {
+		t.Fatalf("advance workflow: %v", err)
+	}
+	jobs, err := fixture.Workers.ListJobs(ctx)
+	if err != nil {
+		t.Fatalf("list author jobs: %v", err)
+	}
+	var authorJob flowworker.Job
+	for _, job := range jobs {
+		if job.IssueID != nil && *job.IssueID == issue.ID && job.Role == flowworker.RoleAuthor {
+			authorJob = job
+			break
+		}
+	}
+	if authorJob.ID == "" {
+		t.Fatal("workflow did not enqueue an author job")
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                      workerID,
@@ -4738,9 +2501,14 @@ func startAuthorSessionForStatusTestWithWorker(t *testing.T, fixture testFixture
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
-	claimed := claimSpecificJob(t, fixture, workerID, ensured.Job.ID, []flowworker.CapacityBucket{flowworker.BucketPersistentAgent})
+	claimed := claimSpecificJob(t, fixture, workerID, authorJob.ID, []flowworker.CapacityBucket{flowworker.BucketPersistentAgent})
 	if _, err := fixture.Workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
 		t.Fatalf("mark running: %v", err)
+	}
+	if claimed.Job.NodeRunID != nil {
+		if _, err := fixture.Bundle.WorkflowRuns.MarkNodeRunning(ctx, *claimed.Job.NodeRunID); err != nil {
+			t.Fatalf("mark workflow node running: %v", err)
+		}
 	}
 	started, err := fixture.Sessions.StartAuthorSession(ctx, coordinator.StartAuthorSessionInput{
 		JobID:    claimed.Job.ID,
@@ -4891,67 +2659,6 @@ kind: ci
 	return exchangePath, headSHA
 }
 
-func createMergeExchange(t *testing.T, branch string) (string, string) {
-	t.Helper()
-
-	root := t.TempDir()
-	repoPath := filepath.Join(root, "repo")
-	exchangePath := filepath.Join(root, "exchange.git")
-	runAPIGit(t, "", "-c", "init.defaultBranch=main", "init", repoPath)
-	runAPIGit(t, repoPath, "config", "user.name", "Flow Test")
-	runAPIGit(t, repoPath, "config", "user.email", "flow-test@example.com")
-	writeAPIFile(t, repoPath, "README.md", "initial\n")
-	runAPIGit(t, repoPath, "add", "README.md")
-	runAPIGit(t, repoPath, "commit", "-m", "initial")
-	runAPIGit(t, "", "init", "--bare", exchangePath)
-	runAPIGit(t, repoPath, "push", exchangePath, "main:main")
-	runAPIGit(t, repoPath, "checkout", "-b", branch, "main")
-	writeAPIFile(t, repoPath, "app.go", "package app\n\nconst Value = 1\n")
-	writeAPIFile(t, repoPath, ".flow/session/state.json", "{}\n")
-	runAPIGit(t, repoPath, "add", "app.go", ".flow/session/state.json")
-	runAPIGit(t, repoPath, "commit", "-m", "add app")
-	headSHA := apiGitOutput(t, repoPath, "rev-parse", "HEAD")
-	runAPIGit(t, repoPath, "push", exchangePath, branch+":"+branch)
-
-	return exchangePath, headSHA
-}
-
-func createConflictingMergeExchange(t *testing.T, branch string) (string, string, string) {
-	t.Helper()
-
-	root := t.TempDir()
-	repoPath := filepath.Join(root, "repo")
-	exchangePath := filepath.Join(root, "exchange.git")
-	runAPIGit(t, "", "-c", "init.defaultBranch=main", "init", repoPath)
-	runAPIGit(t, repoPath, "config", "user.name", "Flow Test")
-	runAPIGit(t, repoPath, "config", "user.email", "flow-test@example.com")
-	writeAPIFile(t, repoPath, "conflict.txt", "initial\n")
-	runAPIGit(t, repoPath, "add", "conflict.txt")
-	runAPIGit(t, repoPath, "commit", "-m", "initial")
-	runAPIGit(t, "", "init", "--bare", exchangePath)
-	runAPIGit(t, repoPath, "push", exchangePath, "main:main")
-
-	runAPIGit(t, repoPath, "checkout", "-b", branch, "main")
-	writeAPIFile(t, repoPath, "conflict.txt", "issue branch\n")
-	runAPIGit(t, repoPath, "add", "conflict.txt")
-	runAPIGit(t, repoPath, "commit", "-m", "change issue branch")
-	headSHA := apiGitOutput(t, repoPath, "rev-parse", "HEAD")
-	runAPIGit(t, repoPath, "push", exchangePath, branch+":"+branch)
-
-	runAPIGit(t, repoPath, "checkout", "main")
-	writeAPIFile(t, repoPath, "conflict.txt", "advanced base\n")
-	runAPIGit(t, repoPath, "add", "conflict.txt")
-	runAPIGit(t, repoPath, "commit", "-m", "advance base")
-	runAPIGit(t, repoPath, "push", exchangePath, "main:main")
-
-	return repoPath, exchangePath, headSHA
-}
-
-// repointFixtureExchange rebinds the fixture's single project to a
-// test-created exchange. Exchange-dependent services (merges, check configs,
-// and the lifecycle engine that wraps them) now read the exchange path off
-// the project value they were constructed with, so they are rebuilt in place
-// on the bundle the server resolves per request.
 func repointFixtureExchange(t *testing.T, fixture testFixture, exchangePath string) {
 	t.Helper()
 
@@ -5075,7 +2782,7 @@ func satisfyAPICheck(t *testing.T, fixture testFixture, issueID string, name str
 	t.Helper()
 	required := true
 	var response checkResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+issueID+"/checks/"+name, reportCheckRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues/"+issueID+"/checks/"+name, reportCheckRequest{
 		Kind:     string(kind),
 		Required: &required,
 		Verdict:  string(coordinator.CheckSatisfied),
@@ -5158,11 +2865,11 @@ func TestWorkerEndpointsRequireWorkerScopeAndLeaseOwnership(t *testing.T) {
 		t.Fatalf("store other worker token: %v", err)
 	}
 
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/workers/register", registerWorkerRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
 		ID:                      "w-local",
 		CapacityPersistentAgent: 1,
 	}, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/register", registerWorkerRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
 		ID:                      "w-other",
 		CapacityPersistentAgent: 1,
 	}, http.StatusForbidden, nil)
@@ -5195,11 +2902,11 @@ func TestWorkerEndpointsRequireWorkerScopeAndLeaseOwnership(t *testing.T) {
 		t.Fatal("claim ok=false")
 	}
 
-	doJSONRequestAs(t, fixture.Server, "other-worker-token", http.MethodPost, "/v1/workers/renew", renewLeaseRequest{
+	doJSONRequestAs(t, fixture.Server, "other-worker-token", http.MethodPost, "/v2/workers/renew", renewLeaseRequest{
 		LeaseID:              claimed.Lease.ID,
 		LeaseDurationSeconds: 60,
 	}, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, "other-worker-token", http.MethodPost, "/v1/workers/release", releaseLeaseRequest{
+	doJSONRequestAs(t, fixture.Server, "other-worker-token", http.MethodPost, "/v2/workers/release", releaseLeaseRequest{
 		LeaseID:    claimed.Lease.ID,
 		FinalState: string(flowworker.JobFinished),
 	}, http.StatusForbidden, nil)
@@ -5220,9 +2927,9 @@ func TestJobEnqueueIdempotencyReplaysCreatedJob(t *testing.T) {
 	}
 
 	var first jobResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/jobs", request, http.StatusCreated, &first, idempotencyHeader, "job-key")
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/jobs", request, http.StatusCreated, &first, idempotencyHeader, "job-key")
 	var second jobResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/jobs", request, http.StatusCreated, &second, idempotencyHeader, "job-key")
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/jobs", request, http.StatusCreated, &second, idempotencyHeader, "job-key")
 	if first.Job.ID == "" || second.Job.ID != first.Job.ID {
 		t.Fatalf("idempotent enqueue returned jobs %q then %q", first.Job.ID, second.Job.ID)
 	}
@@ -5233,172 +2940,6 @@ func TestJobEnqueueIdempotencyReplaysCreatedJob(t *testing.T) {
 	}
 	if len(jobs) != 1 {
 		t.Fatalf("job count = %d, want 1: %+v", len(jobs), jobs)
-	}
-}
-
-func TestAuthorJobEnqueueUsesSessionOrchestration(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Author enqueue issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/jobs", enqueueJobRequest{
-		IssueID:        &issue.ID,
-		Role:           string(flowworker.RoleAuthor),
-		CapacityBucket: string(flowworker.BucketPersistentAgent),
-	}, http.StatusBadRequest, nil)
-
-	if _, err := fixture.Issues.ScheduleIssue(ctx, issue.ID, coordinator.ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-	var response jobResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/jobs", enqueueJobRequest{
-		IssueID:        &issue.ID,
-		Role:           string(flowworker.RoleAuthor),
-		CapacityBucket: string(flowworker.BucketPersistentAgent),
-		Priority:       9,
-	}, http.StatusCreated, &response)
-	if response.Job.Role != flowworker.RoleAuthor || response.Change == nil || response.Job.ChangeID == nil || *response.Job.ChangeID != response.Change.ID {
-		t.Fatalf("author enqueue response = %+v", response)
-	}
-	if payloadString(response.Job.Payload, "branch") != "issue/"+issue.ID {
-		t.Fatalf("author job payload = %+v", response.Job.Payload)
-	}
-}
-
-func TestCheckReportingDerivesReviewStateAndBoardLane(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Check API issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	if _, err := fixture.Issues.ScheduleIssue(ctx, issue.ID, coordinator.ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-	ensured, err := fixture.Sessions.EnsureAuthorJob(ctx, coordinator.EnsureAuthorJobInput{IssueID: issue.ID})
-	if err != nil {
-		t.Fatalf("ensure author job: %v", err)
-	}
-	if _, err := fixture.Sessions.UpdateChangeHead(ctx, ensured.Change.ID, "head-1"); err != nil {
-		t.Fatalf("record change head: %v", err)
-	}
-	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                "w-local",
-		CapacityEphemeral: 1,
-	}); err != nil {
-		t.Fatalf("register worker: %v", err)
-	}
-	job, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &issue.ID,
-		ChangeID:       &ensured.Change.ID,
-		Role:           flowworker.RoleCI,
-		CapacityBucket: flowworker.BucketEphemeral,
-		Payload: map[string]any{
-			"check_name": "fake-ci",
-			"change_id":  ensured.Change.ID,
-			"head_sha":   "head-1",
-		},
-	})
-	if err != nil {
-		t.Fatalf("enqueue check job: %v", err)
-	}
-	claimed, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
-		WorkerID:      "w-local",
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketEphemeral},
-		LeaseDuration: time.Minute,
-	})
-	if err != nil {
-		t.Fatalf("claim check job: %v", err)
-	}
-	if !ok || claimed.Job.ID != job.ID {
-		t.Fatalf("claimed check job = %+v, ok=%t; want %s", claimed.Job, ok, job.ID)
-	}
-
-	exitFailure := 1
-	var blocked checkResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/issues/"+issue.ID+"/checks/fake-ci", reportCheckRequest{
-		ExitCode: &exitFailure,
-		Details:  "exit status 1",
-	}, http.StatusForbidden, nil)
-
-	sourceJobID := claimed.Job.ID
-	leaseID := claimed.Lease.ID
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/issues/"+issue.ID+"/checks/fake-ci", reportCheckRequest{
-		ExitCode:    &exitFailure,
-		Details:     "exit status 1",
-		SourceJobID: &sourceJobID,
-		LeaseID:     &leaseID,
-	}, http.StatusOK, &blocked)
-	if blocked.Check.Verdict != coordinator.CheckBlocked || blocked.ReviewState != coordinator.ReviewChangesRequested {
-		t.Fatalf("blocked check response = %+v", blocked)
-	}
-	if blocked.Check.Reporter != "w-local" {
-		t.Fatalf("Reporter = %q, want worker subject", blocked.Check.Reporter)
-	}
-
-	var checks checksResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/issues/"+issue.ID+"/checks", nil, http.StatusOK, &checks)
-	if len(checks.Checks) != 1 || checks.Checks[0].Name != "fake-ci" || checks.ReviewState != coordinator.ReviewChangesRequested {
-		t.Fatalf("checks response = %+v", checks)
-	}
-
-	var board boardResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
-	if len(board.Board.InProgress) != 1 || board.Board.InProgress[0].ID != issue.ID {
-		t.Fatalf("in_progress board = %+v", board.Board.InProgress)
-	}
-	if board.LaneStates[issue.ID] != coordinator.LaneStateChangesRequested {
-		t.Fatalf("lane state = %q, want changes_requested", board.LaneStates[issue.ID])
-	}
-	if len(board.Board.UpNext) != 0 {
-		t.Fatalf("up_next board = %+v, want empty while check is blocked", board.Board.UpNext)
-	}
-
-	exitZero := 0
-	var satisfied checkResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/changes/"+issue.ID+"/checks/fake-ci", reportCheckRequest{
-		ExitCode: &exitZero,
-	}, http.StatusOK, &satisfied)
-	if satisfied.Check.Verdict != coordinator.CheckSatisfied || satisfied.ReviewState != coordinator.ReviewApproved {
-		t.Fatalf("satisfied check response = %+v", satisfied)
-	}
-
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
-	if len(board.Board.InProgress) != 0 {
-		t.Fatalf("in_progress board after satisfy = %+v, want empty", board.Board.InProgress)
-	}
-	if len(board.Board.UpNext) != 1 || board.Board.UpNext[0].ID != issue.ID {
-		t.Fatalf("up_next board after satisfy = %+v", board.Board.UpNext)
-	}
-}
-
-func TestBlockedCheckOnNonReviewableIssueDoesNotFailOrEnqueueAuthorJob(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Backlog check issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-
-	required := true
-	var response checkResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/issues/"+issue.ID+"/checks/reviewer", reportCheckRequest{
-		Kind:     string(coordinator.CheckKindReviewer),
-		Required: &required,
-		Verdict:  string(coordinator.CheckBlocked),
-		Details:  "Blocked before scheduling.",
-	}, http.StatusOK, &response)
-	if response.Check.Verdict != coordinator.CheckBlocked || response.ReviewState != coordinator.ReviewChangesRequested {
-		t.Fatalf("check response = %+v", response)
-	}
-	jobs, err := fixture.Workers.ListJobs(ctx)
-	if err != nil {
-		t.Fatalf("list jobs: %v", err)
-	}
-	if len(jobs) != 0 {
-		t.Fatalf("jobs = %+v, want none for non-reviewable issue", jobs)
 	}
 }
 
@@ -5447,7 +2988,7 @@ WHERE id = ?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), clai
 	exitFailure := 1
 	sourceJobID := claimed.Job.ID
 	leaseID := claimed.Lease.ID
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/issues/"+issue.ID+"/checks/fake-ci", reportCheckRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/issues/"+issue.ID+"/checks/fake-ci", reportCheckRequest{
 		ExitCode:    &exitFailure,
 		Details:     "exit status 1",
 		SourceJobID: &sourceJobID,
@@ -5499,63 +3040,11 @@ func TestWorkerCheckReportingRejectsNonCISourceJob(t *testing.T) {
 	exitZero := 0
 	sourceJobID := claimed.Job.ID
 	leaseID := claimed.Lease.ID
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/issues/"+issue.ID+"/checks/fake-ci", reportCheckRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/issues/"+issue.ID+"/checks/fake-ci", reportCheckRequest{
 		ExitCode:    &exitZero,
 		Details:     "exit status 0",
 		SourceJobID: &sourceJobID,
 		LeaseID:     &leaseID,
-	}, http.StatusForbidden, nil)
-}
-
-func TestSessionCheckReportingIsBoundToSourceIssue(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	source, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Session-owned issue"})
-	if err != nil {
-		t.Fatalf("create source issue: %v", err)
-	}
-	other, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Other issue"})
-	if err != nil {
-		t.Fatalf("create other issue: %v", err)
-	}
-	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
-		Token:         "session-token",
-		Scope:         coordinator.TokenScopeSession,
-		Subject:       "s-1",
-		ProjectID:     &fixture.Project.ID,
-		SourceIssueID: &source.ID,
-	}); err != nil {
-		t.Fatalf("store session token: %v", err)
-	}
-
-	exitZero := 0
-	required := true
-	optional := false
-	var response checkResponse
-	doJSONRequestAs(t, fixture.Server, "session-token", http.MethodPost, "/v1/issues/"+source.ID+"/checks/session-verdict", reportCheckRequest{
-		Kind:     string(coordinator.CheckKindCI),
-		Required: &optional,
-		Verdict:  string(coordinator.CheckSatisfied),
-		ExitCode: &exitZero,
-	}, http.StatusOK, &response)
-	if response.Check.Reporter != "s-1" {
-		t.Fatalf("Reporter = %q, want session subject", response.Check.Reporter)
-	}
-
-	doJSONRequestAs(t, fixture.Server, "session-token", http.MethodPost, "/v1/issues/"+source.ID+"/checks/required-session-verdict", reportCheckRequest{
-		Kind:     string(coordinator.CheckKindCI),
-		Required: &required,
-		Verdict:  string(coordinator.CheckSatisfied),
-	}, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, "session-token", http.MethodPost, "/v1/issues/"+source.ID+"/checks/human-review", reportCheckRequest{
-		Kind:     string(coordinator.CheckKindHuman),
-		Required: &optional,
-		Verdict:  string(coordinator.CheckSatisfied),
-	}, http.StatusForbidden, nil)
-
-	doJSONRequestAs(t, fixture.Server, "session-token", http.MethodPost, "/v1/issues/"+other.ID+"/checks/session-verdict", reportCheckRequest{
-		Required: &optional,
-		Verdict:  string(coordinator.CheckSatisfied),
 	}, http.StatusForbidden, nil)
 }
 
@@ -5580,7 +3069,7 @@ func TestWorkerClaimCanWaitForJob(t *testing.T) {
 	}()
 
 	var claim claimJobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/claim", claimJobRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
 		Buckets:              []flowworker.CapacityBucket{flowworker.BucketEphemeral},
 		LeaseDurationSeconds: 60,
 		WaitSeconds:          1,
@@ -5645,7 +3134,7 @@ INSERT INTO leases (
 	}
 
 	var claim claimJobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/claim", claimJobRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
 		Buckets:              []flowworker.CapacityBucket{flowworker.BucketEphemeral},
 		LeaseDurationSeconds: 60,
 	}, http.StatusOK, &claim)
@@ -5659,82 +3148,6 @@ INSERT INTO leases (
 	}
 	if swept.State != flowworker.JobCrashed {
 		t.Fatalf("expired job state = %q, want crashed", swept.State)
-	}
-}
-
-func TestWorkerClaimReconcilesCrashedAuthorSession(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "API crash resume issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	if _, err := fixture.Issues.ScheduleIssue(ctx, issue.ID, coordinator.ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-	ensured, err := fixture.Sessions.EnsureAuthorJob(ctx, coordinator.EnsureAuthorJobInput{IssueID: issue.ID})
-	if err != nil {
-		t.Fatalf("ensure author job: %v", err)
-	}
-	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-local",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
-		CapacityPersistentAgent: 1,
-	}); err != nil {
-		t.Fatalf("register worker: %v", err)
-	}
-	claimed, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
-		WorkerID:      "w-local",
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
-		LeaseDuration: time.Minute,
-	})
-	if err != nil {
-		t.Fatalf("claim author job: %v", err)
-	}
-	if !ok || claimed.Job.ID != ensured.Job.ID {
-		t.Fatalf("claim = %+v ok=%t, want %s", claimed.Job, ok, ensured.Job.ID)
-	}
-	if _, err := fixture.Workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
-		t.Fatalf("mark running: %v", err)
-	}
-	started, err := fixture.Sessions.StartAuthorSession(ctx, coordinator.StartAuthorSessionInput{
-		JobID:    claimed.Job.ID,
-		LeaseID:  claimed.Lease.ID,
-		WorkerID: "w-local",
-	})
-	if err != nil {
-		t.Fatalf("start session: %v", err)
-	}
-	if _, err := fixture.DB.ExecContext(ctx, `
-UPDATE leases
-SET expires_at = ?
-WHERE id = ?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), claimed.Lease.ID); err != nil {
-		t.Fatalf("expire author lease: %v", err)
-	}
-
-	var claim claimJobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/claim", claimJobRequest{
-		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
-		LeaseDurationSeconds: 60,
-	}, http.StatusOK, &claim)
-	if !claim.Claimed || claim.Job == nil || claim.Lease == nil {
-		t.Fatalf("claim response = %+v", claim)
-	}
-	if claim.Job.ID == claimed.Job.ID {
-		t.Fatalf("claimed crashed job again: %+v", claim.Job)
-	}
-	if claim.Job.ChangeID == nil || *claim.Job.ChangeID != started.Change.ID {
-		t.Fatalf("resume claim ChangeID = %v, want %s", claim.Job.ChangeID, started.Change.ID)
-	}
-	if branch, _ := claim.Job.Payload["branch"].(string); branch != started.Change.Branch {
-		t.Fatalf("resume claim payload = %+v, want branch %s", claim.Job.Payload, started.Change.Branch)
-	}
-	crashed, err := fixture.Sessions.GetSession(ctx, started.Session.ID)
-	if err != nil {
-		t.Fatalf("get crashed session: %v", err)
-	}
-	if crashed.RuntimeState != coordinator.SessionCrashed {
-		t.Fatalf("session state = %q, want crashed", crashed.RuntimeState)
 	}
 }
 
@@ -5852,15 +3265,15 @@ func newTestFixture(t *testing.T) testFixture {
 	return fixtureFromRegistry(t, registry, bundles[0], dataDir, global, true)
 }
 
-// boardPath returns the single-project board route, which keeps the legacy
-// boardResponse shape (the unscoped /v1/board now returns an aggregate).
+// boardPath returns the project-scoped board response; the unscoped route
+// returns an aggregate across projects.
 func (f testFixture) boardPath() string {
-	return "/v1/projects/" + f.Project.ID + "/board"
+	return "/v2/projects/" + f.Project.ID + "/board"
 }
 
 // gitEventsPath returns the project-scoped hook git-events route.
 func (f testFixture) gitEventsPath() string {
-	return "/v1/projects/" + f.Project.ID + "/git/events"
+	return "/v2/projects/" + f.Project.ID + "/git/events"
 }
 
 // reopenTestFixture rebuilds a fixture from an existing data directory without
@@ -5945,7 +3358,7 @@ func authorizedRequest(method string, path string, body any) *http.Request {
 	}
 	request := httptest.NewRequest(method, path, &requestBody)
 	request.Header.Set("Authorization", "Bearer owner-token")
-	request.Header.Set(protocolHeader, "1")
+	request.Header.Set(protocolHeader, "2")
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
@@ -6011,7 +3424,7 @@ func TestListProjectsEndpoint(t *testing.T) {
 	server, bundles := newMultiProjectServer(t, "alpha", "beta")
 
 	var response projectsResponse
-	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v1/projects", nil, http.StatusOK, &response)
+	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v2/projects", nil, http.StatusOK, &response)
 	if len(response.Projects) != 2 {
 		t.Fatalf("projects = %+v, want 2", response.Projects)
 	}
@@ -6043,13 +3456,10 @@ func TestAggregateBoardMergesProjects(t *testing.T) {
 		if issue.ID != "i-0001" {
 			t.Fatalf("first issue id in %s = %q, want i-0001", bundle.Project.Name, issue.ID)
 		}
-		if _, err := bundle.Issues.ScheduleIssue(ctx, issue.ID, coordinator.ScheduleUpNext); err != nil {
-			t.Fatalf("schedule issue in %s: %v", bundle.Project.Name, err)
-		}
 	}
 
 	var response aggregateBoardResponse
-	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v1/board", nil, http.StatusOK, &response)
+	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v2/board", nil, http.StatusOK, &response)
 	if len(response.Boards) != 2 {
 		t.Fatalf("boards = %+v, want 2", response.Boards)
 	}
@@ -6060,8 +3470,8 @@ func TestAggregateBoardMergesProjects(t *testing.T) {
 			t.Fatalf("duplicate project id %s in aggregate board", board.ProjectID)
 		}
 		seenProjects[board.ProjectID] = true
-		if len(board.Board.UpNext) != 1 || board.Board.UpNext[0].ID != "i-0001" {
-			t.Fatalf("board for %s up_next = %+v, want [i-0001]", board.ProjectName, board.Board.UpNext)
+		if len(board.Board.Unscheduled) != 1 || board.Board.Unscheduled[0].ID != "i-0001" {
+			t.Fatalf("board for %s unscheduled = %+v, want [i-0001]", board.ProjectName, board.Board.Unscheduled)
 		}
 	}
 	for _, bundle := range bundles {
@@ -6084,11 +3494,11 @@ func TestProjectScopedIssueRouteIsolation(t *testing.T) {
 	}
 
 	doJSONRequestAs(t, server, "owner-token", http.MethodGet,
-		"/v1/projects/"+projectB.Project.ID+"/issues/i-0001", nil, http.StatusNotFound, nil)
+		"/v2/projects/"+projectB.Project.ID+"/issues/i-0001", nil, http.StatusNotFound, nil)
 
 	var found issueResponse
 	doJSONRequestAs(t, server, "owner-token", http.MethodGet,
-		"/v1/projects/"+projectA.Project.ID+"/issues/i-0001", nil, http.StatusOK, &found)
+		"/v2/projects/"+projectA.Project.ID+"/issues/i-0001", nil, http.StatusOK, &found)
 	if found.Issue.ID != "i-0001" || found.Issue.Title != "Only in alpha" {
 		t.Fatalf("alpha issue = %+v", found.Issue)
 	}
@@ -6102,7 +3512,7 @@ func TestUnscopedIssueRouteRejectedWithMultipleProjects(t *testing.T) {
 	}
 
 	response := httptest.NewRecorder()
-	request := authorizedRequest(http.MethodGet, "/v1/issues/i-0001", nil)
+	request := authorizedRequest(http.MethodGet, "/v2/issues/i-0001", nil)
 	server.ServeHTTP(response, request)
 	if response.Code < 400 || response.Code >= 500 {
 		t.Fatalf("unscoped issue status = %d, want 4xx; body: %s", response.Code, response.Body.String())
@@ -6111,87 +3521,8 @@ func TestUnscopedIssueRouteRejectedWithMultipleProjects(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatalf("decode error response: %v", err)
 	}
-	if !strings.Contains(body.Error.Message, "/v1/projects/") {
+	if !strings.Contains(body.Error.Message, "/v2/projects/") {
 		t.Fatalf("error message = %q, want guidance to use the project-scoped route", body.Error.Message)
-	}
-}
-
-func TestSessionProcessExitCrashesAuthorSessionAndReconciles(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Process exit issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	if _, err := fixture.Issues.ScheduleIssue(ctx, issue.ID, coordinator.ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-	ensured, err := fixture.Sessions.EnsureAuthorJob(ctx, coordinator.EnsureAuthorJobInput{IssueID: issue.ID})
-	if err != nil {
-		t.Fatalf("ensure author job: %v", err)
-	}
-	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-local",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
-		CapacityPersistentAgent: 1,
-	}); err != nil {
-		t.Fatalf("register worker: %v", err)
-	}
-	claimed, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
-		WorkerID:      "w-local",
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
-		LeaseDuration: time.Minute,
-	})
-	if err != nil {
-		t.Fatalf("claim author job: %v", err)
-	}
-	if !ok || claimed.Job.ID != ensured.Job.ID {
-		t.Fatalf("claim = %+v ok=%t, want %s", claimed.Job, ok, ensured.Job.ID)
-	}
-	if _, err := fixture.Workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
-		t.Fatalf("mark running: %v", err)
-	}
-	started, err := fixture.Sessions.StartAuthorSession(ctx, coordinator.StartAuthorSessionInput{
-		JobID:    claimed.Job.ID,
-		LeaseID:  claimed.Lease.ID,
-		WorkerID: "w-local",
-	})
-	if err != nil {
-		t.Fatalf("start author session: %v", err)
-	}
-
-	// A worker reports an un-finalized process exit (exit code 0 is still a crash
-	// because the interactive agent never finalized the session itself).
-	var exited sessionResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/sessions/"+started.Session.ID+"/process-exit", sessionProcessExitRequest{
-		LeaseID:  claimed.Lease.ID,
-		ExitCode: 0,
-	}, http.StatusOK, &exited)
-	if exited.Session.RuntimeState != coordinator.SessionCrashed {
-		t.Fatalf("process-exit session state = %q, want crashed", exited.Session.RuntimeState)
-	}
-
-	crashed, err := fixture.Sessions.GetSession(ctx, started.Session.ID)
-	if err != nil {
-		t.Fatalf("get crashed session: %v", err)
-	}
-	if crashed.RuntimeState != coordinator.SessionCrashed || crashed.FinishedAt == nil {
-		t.Fatalf("crashed session = %+v, want crashed with finished_at", crashed)
-	}
-	if _, err := fixture.Credentials.Authenticate(ctx, started.Token); !errors.Is(err, coordinator.ErrInvalidCredential) {
-		t.Fatalf("authenticate crashed token err = %v, want ErrInvalidCredential", err)
-	}
-	// handleSessionProcessExit reconciles the crashed author session, so a fresh
-	// author job is live for the issue.
-	resumeJob, ok, err := fixture.Workers.LiveAuthorJobForIssue(ctx, issue.ID)
-	if err != nil {
-		t.Fatalf("live author job after process-exit: %v", err)
-	}
-	if !ok || resumeJob.ChangeID == nil || *resumeJob.ChangeID != started.Change.ID {
-		t.Fatalf("resume job = %+v ok=%t, want change %s", resumeJob, ok, started.Change.ID)
-	}
-	if resumeJob.ID == claimed.Job.ID {
-		t.Fatal("resume job reused crashed job id")
 	}
 }
 
@@ -6199,20 +3530,20 @@ func TestSessionProcessExitRejectsConsoleSession(t *testing.T) {
 	fixture := newTestFixture(t)
 
 	var startedConsole consoleResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/console", consoleRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/console", consoleRequest{
 		Harness: "codex",
 	}, http.StatusCreated, &startedConsole)
 	if startedConsole.Job == nil {
 		t.Fatalf("started console response = %+v", startedConsole)
 	}
 
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/register", registerWorkerRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
 		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
 		CapacityPersistentAgent: 1,
 		HeartbeatTTLSeconds:     60,
 	}, http.StatusOK, nil)
 	var claim claimJobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/claim", claimJobRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
 		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDurationSeconds: 60,
 	}, http.StatusOK, &claim)
@@ -6220,17 +3551,17 @@ func TestSessionProcessExitRejectsConsoleSession(t *testing.T) {
 		t.Fatalf("claim console = %+v, want job %s", claim, startedConsole.Job.ID)
 	}
 	var running jobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/running", markJobRunningRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/running", markJobRunningRequest{
 		LeaseID: claim.Lease.ID,
 	}, http.StatusOK, &running)
 	if running.Session == nil || running.Session.Role != flowworker.RoleConsole {
 		t.Fatalf("running console = %+v", running)
 	}
 
-	// A console session must be released through /v1/console, never the generic
+	// A console session must be released through /v2/console, never the generic
 	// persistent-session process-exit path.
 	var body errorResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/sessions/"+running.Session.ID+"/process-exit", sessionProcessExitRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/sessions/"+running.Session.ID+"/process-exit", sessionProcessExitRequest{
 		LeaseID:  claim.Lease.ID,
 		ExitCode: 0,
 	}, http.StatusBadRequest, &body)
@@ -6245,180 +3576,4 @@ func TestSessionProcessExitRejectsConsoleSession(t *testing.T) {
 	if session.RuntimeState == coordinator.SessionCrashed {
 		t.Fatalf("console session = %+v, want unchanged (not crashed)", session)
 	}
-}
-
-// TestFlowConfigCRUDEndpoints exercises the agent-def and flow configuration
-// API: server-side, web-editable agent/flow config (replacing repo-level
-// reviewer definitions).
-func TestFlowConfigCRUDEndpoints(t *testing.T) {
-	fixture := newTestFixture(t)
-
-	var created struct {
-		AgentDef coordinator.AgentDef `json:"agent_def"`
-	}
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/agent-defs", coordinator.AgentDefInput{
-		Name:            "opus-reviewer",
-		Harness:         "claude",
-		Model:           "claude-opus-4-8",
-		ReasoningEffort: "xhigh",
-		Prompt:          "Review with maximum care.",
-	}, http.StatusCreated, &created)
-	if created.AgentDef.ID == "" || created.AgentDef.Harness != "claude" {
-		t.Fatalf("created agent def = %+v", created.AgentDef)
-	}
-
-	// Seeded defs plus the new one are listed.
-	var defs struct {
-		AgentDefs []coordinator.AgentDef `json:"agent_defs"`
-	}
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/agent-defs", nil, http.StatusOK, &defs)
-	if len(defs.AgentDefs) != 5 {
-		t.Fatalf("agent defs = %d, want 4 seeded + 1 created", len(defs.AgentDefs))
-	}
-
-	// Duplicate names conflict.
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/agent-defs", coordinator.AgentDefInput{
-		Name: "opus-reviewer", Harness: "codex",
-	}, http.StatusConflict, nil)
-
-	var flowCreated struct {
-		Flow coordinator.Flow `json:"flow"`
-	}
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/flows", coordinator.FlowInput{
-		Name: "hardened",
-		Phases: []coordinator.FlowPhaseInput{
-			{Name: "implement", AgentDefID: created.AgentDef.ID, Gate: coordinator.FlowGateHuman},
-		},
-		ReviewAgents: []coordinator.FlowReviewAgentInput{
-			{Role: coordinator.FlowReviewRoleReviewer, AgentDefID: created.AgentDef.ID},
-		},
-	}, http.StatusCreated, &flowCreated)
-	if flowCreated.Flow.ID == "" || len(flowCreated.Flow.Phases) != 1 {
-		t.Fatalf("created flow = %+v", flowCreated.Flow)
-	}
-
-	// The referenced agent def cannot be deleted while a flow uses it.
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodDelete, "/v1/agent-defs/"+created.AgentDef.ID, nil, http.StatusConflict, nil)
-
-	var setDefault struct {
-		Flow coordinator.Flow `json:"flow"`
-	}
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v1/flows/"+flowCreated.Flow.ID+"/default", nil, http.StatusOK, &setDefault)
-
-	var flows struct {
-		Flows         []coordinator.Flow `json:"flows"`
-		DefaultFlowID string             `json:"default_flow_id"`
-	}
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/flows", nil, http.StatusOK, &flows)
-	if flows.DefaultFlowID != flowCreated.Flow.ID {
-		t.Fatalf("default flow = %q, want %q", flows.DefaultFlowID, flowCreated.Flow.ID)
-	}
-	if len(flows.Flows) != 3 {
-		t.Fatalf("flows = %d, want 2 seeded + 1 created", len(flows.Flows))
-	}
-
-	// The default flow cannot be deleted.
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodDelete, "/v1/flows/"+flowCreated.Flow.ID, nil, http.StatusConflict, nil)
-
-	// Worker tokens cannot edit configuration.
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/flows", coordinator.FlowInput{Name: "nope"}, http.StatusForbidden, nil)
-}
-
-// TestWorkPhaseGateEndpoints drives a human-gated plan phase end-to-end over
-// the API: flow ready pauses at the gate with the handoff visible on the
-// issue, request-changes re-runs the phase with feedback, and approve
-// advances the cursor to the implement phase.
-func TestWorkPhaseGateEndpoints(t *testing.T) {
-	fixture := newTestFixture(t)
-	ctx := context.Background()
-
-	planned, err := fixture.Bundle.Flows.GetByName(ctx, "planned")
-	if err != nil {
-		t.Fatalf("get planned flow: %v", err)
-	}
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{
-		Title:  "Gated plan issue",
-		FlowID: planned.ID,
-	})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	running := startRunningAuthorSession(t, fixture, issue.ID)
-
-	// The plan phase's handoff is the plan body, submitted like any handoff.
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPut,
-		"/v1/changes/"+running.Session.ChangeID+"/handoff",
-		putHandoffRequest{Content: "# Implementation Plan\n\nDo the thing carefully."},
-		http.StatusOK, nil)
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost,
-		"/v1/sessions/"+running.Session.ID+"/ready", readySessionRequest{}, http.StatusOK, nil)
-
-	var detail issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v1/issues/"+issue.ID, nil, http.StatusOK, &detail)
-	if detail.Flow == nil || detail.Flow.PhaseState != string(coordinator.FlowPhaseAwaitingApproval) {
-		t.Fatalf("issue flow after ready = %+v, want awaiting_approval", detail.Flow)
-	}
-	if detail.Flow.PhaseName != "plan" || detail.Flow.PendingHandoff == "" {
-		t.Fatalf("issue flow = %+v, want plan phase with pending handoff", detail.Flow)
-	}
-
-	// Request changes: the plan phase re-runs with the feedback stored.
-	var reworked issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost,
-		"/v1/issues/"+issue.ID+"/phase/request-changes",
-		map[string]string{"feedback": "Cover the rollback path."}, http.StatusOK, &reworked)
-	if reworked.Flow == nil || reworked.Flow.PhaseState != string(coordinator.FlowPhasePending) || reworked.Flow.GateFeedback != "Cover the rollback path." {
-		t.Fatalf("issue flow after request-changes = %+v, want pending plan with feedback", reworked.Flow)
-	}
-
-	// A fresh plan session pauses at the gate again; approval advances to the
-	// implement phase.
-	rerun := startRunningAuthorSessionExistingWorker(t, fixture, issue.ID)
-	doJSONRequestAs(t, fixture.Server, rerun.SessionToken, http.MethodPut,
-		"/v1/changes/"+rerun.Session.ChangeID+"/handoff",
-		putHandoffRequest{Content: "# Implementation Plan v2\n\nWith rollback."},
-		http.StatusOK, nil)
-	doJSONRequestAs(t, fixture.Server, rerun.SessionToken, http.MethodPost,
-		"/v1/sessions/"+rerun.Session.ID+"/ready", readySessionRequest{}, http.StatusOK, nil)
-
-	var approved issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost,
-		"/v1/issues/"+issue.ID+"/phase/approve", map[string]string{}, http.StatusOK, &approved)
-	if approved.Flow == nil || approved.Flow.PhaseIndex != 1 || approved.Flow.PhaseName != "implement" || approved.Flow.PhaseState != string(coordinator.FlowPhasePending) {
-		t.Fatalf("issue flow after approve = %+v, want pending implement phase", approved.Flow)
-	}
-
-	// The gate decisions are recorded in the transition log.
-	if got := countTransitions(t, fixture, issue.ID, string(lifecycle.EventWorkPhaseRework)); got != 1 {
-		t.Fatalf("work_phase_rework transitions = %d, want 1", got)
-	}
-	if got := countTransitions(t, fixture, issue.ID, string(lifecycle.EventWorkPhaseApproved)); got != 1 {
-		t.Fatalf("work_phase_approved transitions = %d, want 1", got)
-	}
-}
-
-// startRunningAuthorSessionExistingWorker claims the next queued author job
-// with the already-registered test worker and marks it running, returning the
-// session. Used when a flow re-enqueues a phase after the first session ended.
-func startRunningAuthorSessionExistingWorker(t *testing.T, fixture testFixture, issueID string) jobResponse {
-	t.Helper()
-	var claim claimJobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/claim", claimJobRequest{
-		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
-		LeaseDurationSeconds: 60,
-	}, http.StatusOK, &claim)
-	if !claim.Claimed || claim.Job == nil || claim.Lease == nil {
-		t.Fatalf("claim response = %+v", claim)
-	}
-	if claim.Job.IssueID == nil || *claim.Job.IssueID != issueID {
-		t.Fatalf("claimed job issue = %+v, want %s", claim.Job.IssueID, issueID)
-	}
-	var running jobResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v1/workers/running", markJobRunningRequest{
-		LeaseID: claim.Lease.ID,
-	}, http.StatusOK, &running)
-	if running.Session == nil || running.SessionToken == "" {
-		t.Fatalf("running response missing session metadata: %+v", running)
-	}
-	return running
 }

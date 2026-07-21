@@ -16,7 +16,7 @@ import (
 )
 
 func (s *projectServer) handleChangePath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/changes/"), "/")
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v2/changes/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 		return
@@ -34,15 +34,6 @@ func (s *projectServer) handleChangePath(w http.ResponseWriter, r *http.Request,
 	}
 
 	switch parts[1] {
-	case "merge":
-		if len(parts) != 2 || r.Method != http.MethodPost {
-			writeError(w, http.StatusNotFound, "not_found", "resource not found")
-			return
-		}
-		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
-			return
-		}
-		s.handleMergeChange(w, r, principal, parts[0])
 	case "diff":
 		if len(parts) != 2 || r.Method != http.MethodGet {
 			writeError(w, http.StatusNotFound, "not_found", "resource not found")
@@ -75,27 +66,6 @@ func (s *projectServer) handleChangePath(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		s.handleListThreads(w, r, principal, parts[0])
-	case "handoff":
-		if len(parts) != 2 {
-			writeError(w, http.StatusNotFound, "not_found", "resource not found")
-			return
-		}
-		switch r.Method {
-		case http.MethodPut:
-			if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession) {
-				writeError(w, http.StatusForbidden, "forbidden", "handoff write requires owner or session token")
-				return
-			}
-			s.handlePutHandoff(w, r, principal, parts[0])
-		case http.MethodGet:
-			if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker) {
-				writeError(w, http.StatusForbidden, "forbidden", "handoff read requires owner, session, or worker token")
-				return
-			}
-			s.handleGetHandoff(w, r, principal, parts[0])
-		default:
-			writeError(w, http.StatusNotFound, "not_found", "resource not found")
-		}
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 	}
@@ -262,7 +232,7 @@ func (s *projectServer) handleThreadPath(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusInternalServerError, "threads_unavailable", "thread service is not configured")
 		return
 	}
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/threads/"), "/")
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v2/threads/"), "/")
 	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 		return
@@ -463,10 +433,10 @@ func (s *projectServer) handleGetHandoff(w http.ResponseWriter, r *http.Request,
 	})
 }
 
-// stepThreadEvent runs the shared thread-mutation flow: load the thread (for its
-// access check), authorize the caller, step the engine with the caller's event,
-// and respond with the resulting thread. notFoundMsg is surfaced when the engine
-// reports the thread vanished or was not in a mutable state.
+// stepThreadEvent runs the shared thread-mutation flow against the review
+// thread service. Thread mutations are workflow inputs, not lifecycle-engine
+// transitions; active workflow check nodes observe the resulting thread/check
+// state when the executor advances.
 func (s *projectServer) stepThreadEvent(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, threadID string, leaseID string, allowSession bool, roles []worker.JobRole, event lifecycle.Event, failCode string, notFoundMsg string) {
 	thread, err := s.threads.GetThread(r.Context(), threadID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -481,19 +451,33 @@ func (s *projectServer) stepThreadEvent(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 		return
 	}
-	if !s.requireEngine(w) {
-		return
+	actor := principal.Actor()
+	var updated coordinator.ReviewThread
+	switch event.Kind {
+	case lifecycle.EventThreadComment:
+		updated, err = s.threads.AddComment(r.Context(), coordinator.AddThreadCommentInput{
+			ThreadID: threadID, Body: event.Payload.Body, Actor: actor,
+		})
+	case lifecycle.EventThreadClaimed:
+		updated, err = s.threads.ClaimThread(r.Context(), coordinator.ClaimThreadInput{
+			ThreadID: threadID, Kind: event.Payload.ThreadKind, Body: event.Payload.Body,
+			ClaimCommitSHA: event.Payload.ClaimCommitSHA, Actor: actor,
+		})
+	case lifecycle.EventThreadCertify:
+		updated, err = s.threads.CertifyThread(r.Context(), coordinator.VerifyThreadInput{
+			ThreadID: threadID, Body: event.Payload.Body, Actor: actor,
+		})
+	case lifecycle.EventThreadReopen:
+		updated, err = s.threads.ReopenThread(r.Context(), coordinator.VerifyThreadInput{
+			ThreadID: threadID, Body: event.Payload.Body, Actor: actor,
+		})
+	default:
+		err = errors.New("unsupported review thread mutation")
 	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, event))
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "thread_not_found", notFoundMsg)
 		return
 	}
-	if err != nil {
-		writeEngineError(w, err, failCode)
-		return
-	}
-	updated, err := s.threadForResult(r.Context(), result, threadID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, failCode, err.Error())
 		return
@@ -515,15 +499,6 @@ func (s *projectServer) handleReplyThread(w http.ResponseWriter, r *http.Request
 			Payload:  lifecycle.EventPayload{Body: request.Body},
 		},
 		"reply_thread_failed", "thread not found")
-}
-
-// threadForResult returns the thread carried by a StepResult, falling back to a
-// fresh load when the transition did not surface one.
-func (s *projectServer) threadForResult(ctx context.Context, result lifecycle.StepResult, threadID string) (coordinator.ReviewThread, error) {
-	if result.Thread != nil {
-		return *result.Thread, nil
-	}
-	return s.threads.GetThread(ctx, threadID)
 }
 
 func (s *projectServer) handleClaimThread(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, threadID string) {
@@ -710,36 +685,31 @@ func (s *projectServer) handleReportCheck(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if !s.requireEngine(w) {
-		return
-	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-		Kind:    lifecycle.EventCheckReported,
-		IssueID: issueID,
-		Payload: lifecycle.EventPayload{
-			Name:        name,
-			CheckKind:   coordinator.CheckKind(strings.TrimSpace(request.Kind)),
-			Required:    request.Required,
-			Verdict:     coordinator.CheckVerdict(strings.TrimSpace(request.Verdict)),
-			ExitCode:    request.ExitCode,
-			Details:     request.Details,
-			SourceJobID: request.SourceJobID,
-			Reporter:    checkReporter(request, principal),
-		},
-	}))
+	check, err := s.checks.ReportCheck(r.Context(), coordinator.ReportCheckInput{
+		IssueID: issueID, Name: name,
+		Kind: coordinator.CheckKind(strings.TrimSpace(request.Kind)), Required: request.Required,
+		Verdict: coordinator.CheckVerdict(strings.TrimSpace(request.Verdict)), ExitCode: request.ExitCode,
+		Details: request.Details, SourceJobID: request.SourceJobID, Reporter: checkReporter(request, principal),
+	})
 	if err != nil {
-		writeEngineError(w, err, "report_check_failed")
+		writeError(w, http.StatusBadRequest, "report_check_failed", err.Error())
 		return
 	}
-	if result.Check == nil {
-		writeError(w, http.StatusInternalServerError, "report_check_failed", "check produced no result")
+	if s.workflowExecutor != nil {
+		if err := s.workflowExecutor.Tick(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "advance_workflow_failed", err.Error())
+			return
+		}
+	}
+	reviewState, err := s.checks.ReviewState(r.Context(), issueID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "review_state_failed", err.Error())
 		return
 	}
 
 	writeJSON(w, http.StatusOK, checkResponse{
-		Check:            *result.Check,
-		ReviewState:      result.ReviewState,
-		FollowUpFailures: result.FollowUpFailures,
+		Check:       check,
+		ReviewState: reviewState,
 	})
 }
 

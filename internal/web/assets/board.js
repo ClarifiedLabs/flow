@@ -5,11 +5,11 @@ import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
 
 export function doneClosedAtMs(issue) {
-  const ms = Date.parse(value(issue, "closed_at", "ClosedAt"));
+  const ms = Date.parse(value(issue, "done_at", "DoneAt"));
   return Number.isNaN(ms) ? 0 : ms;
 }
 
-// flattenDonePage turns an aggregate /v1/done page into render-ready entries
+// flattenDonePage turns an aggregate /v2/done page into render-ready entries
 // (newest closed first) plus each project's keyset cursor.
 export function flattenDonePage(data, projectBadge) {
   const entries = [];
@@ -41,6 +41,17 @@ export function laneIssues(board, key, field) {
 // phase color slugs (the [data-phase] attribute values in app.module.css).
 export function phaseKey(state) {
   switch (String(state || "")) {
+    case "unscheduled":
+      return "backlog";
+    case "scheduled":
+      return "up_next";
+    case "working":
+      return "authoring";
+    case "done":
+    case "completed":
+    case "cancelled":
+    case "failed":
+      return "dead";
     case "triage":
       return "triage";
     case "backlog":

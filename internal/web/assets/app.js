@@ -214,7 +214,7 @@ export class FlowApp extends HTMLElement {
     this.sidebarStatusGeneration = context.generation;
 
     try {
-      const data = await apiGet("/v1/sidebar" + this.projectQuery());
+      const data = await apiGet("/v2/sidebar" + this.projectQuery());
       if (!this.isActiveSidebarStatus(context)) return false;
       this.renderSidebarStatus(data);
       this.sidebarStatusFailures = 0;
@@ -263,7 +263,7 @@ export class FlowApp extends HTMLElement {
   async ensureProjects(options = {}) {
     if (this.projects && !options.refresh) return this.projects;
     try {
-      const data = await apiGet("/v1/projects");
+      const data = await apiGet("/v2/projects");
       this.projects = data.projects || data.Projects || [];
     } catch (error) {
       this.projects = [];
@@ -275,7 +275,7 @@ export class FlowApp extends HTMLElement {
   async ensureHarnesses(options = {}) {
     if (this.harnesses && !options.refresh) return this.harnesses;
     try {
-      const data = await apiGet("/v1/harnesses");
+      const data = await apiGet("/v2/harnesses");
       const agents = data.agents || data.Agents;
       const consoles = data.consoles || data.Consoles;
       if (!Array.isArray(agents) || !Array.isArray(consoles)) throw new Error("invalid harness options");
@@ -478,7 +478,7 @@ export class FlowApp extends HTMLElement {
   // doneQuery combines the active project selection with the outcome filter and
   // any extra params (cursor, single-project scope for load-more).
 
-  // appendDoneData flattens an aggregate /v1/done page onto the accumulator and
+  // appendDoneData flattens an aggregate /v2/done page onto the accumulator and
   // records each project's keyset cursor (or clears it when exhausted).
 
   // loadMoreDone fetches the next (older) page for every project that still has
@@ -531,17 +531,52 @@ export class FlowApp extends HTMLElement {
     this.installToggleActions();
   }
 
-  // installLifecycleActions wires issue lifecycle transitions (merge/triage/schedule/close/pause/resume/state).
+  // installLifecycleActions wires the public workflow lifecycle controls.
   installLifecycleActions(refresh) {
-    this.querySelectorAll("[data-merge]").forEach((button) => {
+    this.querySelectorAll("[data-workflow-schedule]").forEach((button) => {
       button.addEventListener("click", async () => {
-        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.merge)}/merge`, {});
+        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowSchedule)}/schedule`, {});
         await refresh();
       });
     });
-    this.querySelectorAll("[data-triage]").forEach((button) => {
+    this.querySelectorAll("[data-workflow-reset]").forEach((button) => {
       button.addEventListener("click", async () => {
-        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.issue)}/triage`, { state: button.dataset.triage });
+        if (!window.confirm("Cancel this workflow run and return the issue to Unscheduled?")) return;
+        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowReset)}/reset`, {});
+        await refresh();
+      });
+    });
+    this.querySelectorAll("[data-workflow-done]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const resolution = (window.prompt("Done resolution: completed, rejected, abandoned, cancelled, or failed", "completed") || "").trim();
+        if (!resolution) return;
+        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowDone)}/done`, { resolution });
+        await refresh();
+      });
+    });
+    this.querySelectorAll("[data-workflow-reopen]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowReopen)}/reopen`, {});
+        await refresh();
+      });
+    });
+    this.querySelectorAll("[data-workflow-respond]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const outcome = button.dataset.outcome || "";
+        const feedback = String(button.closest(".human-attention-panel")?.querySelector("[data-workflow-feedback]")?.value || "").trim();
+        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.issue)}/workflow/respond`, {
+          node_run_id: button.dataset.workflowRespond,
+          outcome,
+          feedback,
+        });
+        await refresh();
+      });
+    });
+    this.querySelectorAll("[data-workflow-budget]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const additional = Number(window.prompt("Additional workflow transitions", "50"));
+        if (!Number.isInteger(additional) || additional < 1) return;
+        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowBudget)}/workflow/budget`, { additional });
         await refresh();
       });
     });
@@ -562,52 +597,6 @@ export class FlowApp extends HTMLElement {
         }
       });
     });
-    this.querySelectorAll("[data-schedule]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.issue)}/schedule`, { state: button.dataset.schedule });
-        await refresh();
-      });
-    });
-    this.querySelectorAll("[data-close]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        if (!window.confirm("Close this issue?")) return;
-        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.close)}/close`, {});
-        await refresh();
-      });
-    });
-    this.querySelectorAll("[data-pause]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        if (!window.confirm("Pause this task?")) return;
-        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.pause)}/pause`, {});
-        await refresh();
-      });
-    });
-    this.querySelectorAll("[data-resume]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.resume)}/resume`, {});
-        await refresh();
-      });
-    });
-    this.querySelectorAll("[data-retry-crash]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.retryCrash)}/retry`, {});
-        await refresh();
-      });
-    });
-    this.querySelectorAll("[data-issue-state-form]").forEach((form) => {
-      form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const issueID = form.dataset.issueStateForm;
-        const state = form.elements.state.value;
-        if (state === "closed" && !window.confirm("Close this issue?")) return;
-        try {
-          await apiPost(`${issueAPIBase(form.dataset.project)}/${encodeURIComponent(issueID)}/state`, { state });
-          await refresh();
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-        }
-      });
-    });
   }
 
   // installReviewActions wires review, plan and human-review approval actions.
@@ -615,7 +604,7 @@ export class FlowApp extends HTMLElement {
     this.querySelectorAll("[data-merge-change]").forEach((button) => {
       button.addEventListener("click", async () => {
         try {
-          await apiPost(`/v1/changes/${encodeURIComponent(button.dataset.mergeChange)}/merge`, {});
+          await apiPost(`/v2/changes/${encodeURIComponent(button.dataset.mergeChange)}/merge`, {});
           await refresh();
         } catch (error) {
           this.setStatus(error.message || String(error));
@@ -741,7 +730,7 @@ export class FlowApp extends HTMLElement {
           return;
         }
         try {
-          await apiPost(`/v1/threads/${encodeURIComponent(button.dataset.threadClaim)}/claims`, {
+          await apiPost(`/v2/threads/${encodeURIComponent(button.dataset.threadClaim)}/claims`, {
             kind,
             body,
             claim_commit_sha: button.dataset.claimCommit || "",
@@ -760,7 +749,7 @@ export class FlowApp extends HTMLElement {
           return;
         }
         try {
-          await apiPost(`/v1/threads/${encodeURIComponent(button.dataset.threadReply)}/comments`, { body });
+          await apiPost(`/v2/threads/${encodeURIComponent(button.dataset.threadReply)}/comments`, { body });
           await refresh();
         } catch (error) {
           this.setStatus(error.message || String(error));
@@ -787,8 +776,6 @@ export class FlowApp extends HTMLElement {
           body: form.elements.body.value,
           acceptance_criteria: form.elements.acceptance_criteria.value,
           priority,
-          requires_human_review: form.elements.requires_human_review.checked,
-          auto_merge: form.elements.auto_merge.checked,
           flow_id: form.elements.flow_id ? form.elements.flow_id.value : "",
         };
         if (!payload.title) {
@@ -797,7 +784,7 @@ export class FlowApp extends HTMLElement {
         }
         try {
           if (mode === "create") {
-            payload.schedule_state = form.elements.queue_issue && form.elements.queue_issue.checked ? "up_next" : "backlog";
+            const scheduleAfterCreate = Boolean(form.elements.queue_issue && form.elements.queue_issue.checked);
             const formProject = form.elements.project ? form.elements.project.value : (form.dataset.project || "");
             if (!formProject) {
               this.setStatus("Project is required");
@@ -814,6 +801,9 @@ export class FlowApp extends HTMLElement {
             const files = Array.from(form.elements.attachments?.files || []);
             for (const file of files) {
               await uploadIssueAttachment(createdProject, issueID, file, "initial");
+            }
+            if (scheduleAfterCreate) {
+              await apiPost(`${issueAPIBase(createdProject)}/${encodeURIComponent(issueID)}/schedule`, {});
             }
             await this.load();
           } else {
@@ -858,7 +848,7 @@ export class FlowApp extends HTMLElement {
     this.querySelectorAll("[data-job-attach]").forEach((button) => {
       button.addEventListener("click", async () => {
         try {
-          const data = await apiGet(`/v1/jobs/${encodeURIComponent(button.dataset.jobAttach)}/attach`);
+          const data = await apiGet(`/v2/jobs/${encodeURIComponent(button.dataset.jobAttach)}/attach`);
           const attach = data.attach || data.Attach || {};
           const command = value(attach, "command", "Command") || [];
           const tmuxSession = value(attach, "tmux_session", "TmuxSession");

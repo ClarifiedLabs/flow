@@ -17,6 +17,7 @@ var (
 	ErrFlowNotFound  = errors.New("flow not found")
 	ErrFlowNameTaken = errors.New("a flow with this name already exists")
 	ErrFlowIsDefault = errors.New("flow is the project default; set another default before deleting it")
+	ErrFlowInUse     = errors.New("flow is selected by an issue or another workflow")
 )
 
 const defaultFlowMetadataKey = "default_flow_id"
@@ -39,20 +40,23 @@ const (
 	FlowReviewRoleVerifier FlowReviewRole = "verifier"
 )
 
-// Flow is an ordered work pipeline (phases) plus the agent review set that
-// runs once the final phase readies a change. Flows are project-owned rows
-// edited live; issues freeze a FlowSnapshot at schedule time.
+// Flow is a project-owned trusted workflow graph. Issues freeze a resolved
+// FlowSnapshot when they are scheduled.
 type Flow struct {
-	ID            string            `json:"id"`
-	Name          string            `json:"name"`
-	Description   string            `json:"description,omitempty"`
-	FixAgentDefID string            `json:"fix_agent_def_id,omitempty"`
-	Builtin       bool              `json:"builtin"`
-	Default       bool              `json:"default"`
-	Phases        []FlowPhase       `json:"phases"`
-	ReviewAgents  []FlowReviewAgent `json:"review_agents"`
-	CreatedAt     time.Time         `json:"created_at"`
-	UpdatedAt     time.Time         `json:"updated_at"`
+	ID               string            `json:"id"`
+	Name             string            `json:"name"`
+	Description      string            `json:"description,omitempty"`
+	StartNode        string            `json:"start_node,omitempty"`
+	TransitionBudget int               `json:"transition_budget,omitempty"`
+	Nodes            []FlowNode        `json:"nodes,omitempty"`
+	Edges            []FlowEdge        `json:"edges,omitempty"`
+	FixAgentDefID    string            `json:"-"`
+	Builtin          bool              `json:"builtin"`
+	Default          bool              `json:"default"`
+	Phases           []FlowPhase       `json:"-"`
+	ReviewAgents     []FlowReviewAgent `json:"-"`
+	CreatedAt        time.Time         `json:"created_at"`
+	UpdatedAt        time.Time         `json:"updated_at"`
 }
 
 type FlowPhase struct {
@@ -84,11 +88,15 @@ type FlowReviewAgentInput struct {
 }
 
 type FlowInput struct {
-	Name          string                 `json:"name"`
-	Description   string                 `json:"description"`
-	FixAgentDefID string                 `json:"fix_agent_def_id"`
-	Phases        []FlowPhaseInput       `json:"phases"`
-	ReviewAgents  []FlowReviewAgentInput `json:"review_agents"`
+	Name             string                 `json:"name"`
+	Description      string                 `json:"description"`
+	StartNode        string                 `json:"start_node,omitempty"`
+	TransitionBudget int                    `json:"transition_budget,omitempty"`
+	Nodes            []FlowNodeInput        `json:"nodes,omitempty"`
+	Edges            []FlowEdgeInput        `json:"edges,omitempty"`
+	FixAgentDefID    string                 `json:"-"`
+	Phases           []FlowPhaseInput       `json:"-"`
+	ReviewAgents     []FlowReviewAgentInput `json:"-"`
 }
 
 // AgentDefSnapshot is the frozen copy of an agent definition carried in a
@@ -121,15 +129,18 @@ type FlowReviewAgentSnapshot struct {
 	Agent    AgentDefSnapshot `json:"agent"`
 }
 
-// FlowSnapshot is the fully resolved flow an issue runs: ordered work phases
-// with frozen agent defs, the review set, and the fix-cycle agent. It is
-// stored as JSON on issue_flow_cursor at schedule time.
+// FlowSnapshot is the fully resolved graph a workflow run executes. Agent
+// definitions are frozen into node configs when the issue is scheduled.
 type FlowSnapshot struct {
-	FlowID       string                    `json:"flow_id"`
-	FlowName     string                    `json:"flow_name"`
-	Phases       []FlowPhaseSnapshot       `json:"phases"`
-	ReviewAgents []FlowReviewAgentSnapshot `json:"review_agents,omitempty"`
-	FixAgent     *AgentDefSnapshot         `json:"fix_agent,omitempty"`
+	FlowID           string                    `json:"flow_id"`
+	FlowName         string                    `json:"flow_name"`
+	StartNode        string                    `json:"start_node,omitempty"`
+	TransitionBudget int                       `json:"transition_budget,omitempty"`
+	Nodes            []FlowNodeSnapshot        `json:"nodes,omitempty"`
+	Edges            []FlowEdge                `json:"edges,omitempty"`
+	Phases           []FlowPhaseSnapshot       `json:"-"`
+	ReviewAgents     []FlowReviewAgentSnapshot `json:"-"`
+	FixAgent         *AgentDefSnapshot         `json:"-"`
 }
 
 // FixAgentOrLastPhase returns the flow's designated fix-cycle agent, falling
@@ -169,45 +180,13 @@ func normalizeFlowInput(input FlowInput) (FlowInput, error) {
 	}
 	input.Description = strings.TrimSpace(input.Description)
 	input.FixAgentDefID = strings.TrimSpace(input.FixAgentDefID)
-	if len(input.Phases) == 0 {
-		return FlowInput{}, errors.New("flow requires at least one phase")
+	if len(input.Phases) > 0 || len(input.ReviewAgents) > 0 || input.FixAgentDefID != "" {
+		return FlowInput{}, errors.New("ordered phases and legacy review configuration are not supported")
 	}
-	seenPhaseNames := map[string]struct{}{}
-	for i, phase := range input.Phases {
-		phase.Name = strings.TrimSpace(phase.Name)
-		phase.AgentDefID = strings.TrimSpace(phase.AgentDefID)
-		if phase.Name == "" {
-			return FlowInput{}, fmt.Errorf("phase %d name is required", i+1)
-		}
-		if _, dup := seenPhaseNames[phase.Name]; dup {
-			return FlowInput{}, fmt.Errorf("duplicate phase name %q", phase.Name)
-		}
-		seenPhaseNames[phase.Name] = struct{}{}
-		if phase.AgentDefID == "" {
-			return FlowInput{}, fmt.Errorf("phase %q requires an agent definition", phase.Name)
-		}
-		switch phase.Gate {
-		case FlowGateAuto, FlowGateHuman:
-		case "":
-			phase.Gate = FlowGateAuto
-		default:
-			return FlowInput{}, fmt.Errorf("phase %q has invalid gate %q", phase.Name, phase.Gate)
-		}
-		input.Phases[i] = phase
+	if len(input.Nodes) == 0 && strings.TrimSpace(input.StartNode) == "" {
+		return FlowInput{}, errors.New("flow requires a graph definition")
 	}
-	for i, agent := range input.ReviewAgents {
-		agent.AgentDefID = strings.TrimSpace(agent.AgentDefID)
-		if agent.AgentDefID == "" {
-			return FlowInput{}, fmt.Errorf("review agent %d requires an agent definition", i+1)
-		}
-		switch agent.Role {
-		case FlowReviewRoleReviewer, FlowReviewRoleVerifier:
-		default:
-			return FlowInput{}, fmt.Errorf("review agent %d has invalid role %q", i+1, agent.Role)
-		}
-		input.ReviewAgents[i] = agent
-	}
-	return input, nil
+	return normalizeGraphInput(input)
 }
 
 func (s *FlowService) Create(ctx context.Context, input FlowInput) (Flow, error) {
@@ -231,11 +210,14 @@ func (s *FlowService) create(ctx context.Context, input FlowInput, builtin bool)
 	defer tx.Rollback()
 
 	now := sqlitex.FormatTime(s.now().UTC())
+	budget := input.TransitionBudget
+	if budget == 0 {
+		budget = DefaultFlowTransitionBudget
+	}
 	_, err = tx.ExecContext(ctx, `
-INSERT INTO flows (id, name, description, fix_agent_def_id, builtin, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, input.Name, input.Description, sqlitex.NullableNonEmptyString(input.FixAgentDefID),
-		boolToInt(builtin), now, now)
+INSERT INTO flows (id, name, description, start_node_key, transition_budget, builtin, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, input.Name, input.Description, input.StartNode, budget, boolToInt(builtin), now, now)
 	if err != nil {
 		if isUniqueViolation(err, "flows.name") {
 			return Flow{}, ErrFlowNameTaken
@@ -264,10 +246,13 @@ func (s *FlowService) Update(ctx context.Context, id string, input FlowInput) (F
 	}
 	defer tx.Rollback()
 
+	budget := input.TransitionBudget
+	if budget == 0 {
+		budget = DefaultFlowTransitionBudget
+	}
 	result, err := tx.ExecContext(ctx, `
-UPDATE flows SET name = ?, description = ?, fix_agent_def_id = ?, updated_at = ?
-WHERE id = ?`,
-		input.Name, input.Description, sqlitex.NullableNonEmptyString(input.FixAgentDefID),
+UPDATE flows SET name = ?, description = ?, start_node_key = ?, transition_budget = ?, updated_at = ?
+WHERE id = ?`, input.Name, input.Description, input.StartNode, budget,
 		sqlitex.FormatTime(s.now().UTC()), id)
 	if err != nil {
 		if isUniqueViolation(err, "flows.name") {
@@ -283,13 +268,11 @@ WHERE id = ?`,
 		return Flow{}, ErrFlowNotFound
 	}
 
-	// Phases and review agents are replace-all: the input is the complete
-	// desired flow, not a patch.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM flow_phases WHERE flow_id = ?`, id); err != nil {
-		return Flow{}, fmt.Errorf("clear flow phases: %w", err)
+	if _, err := tx.ExecContext(ctx, `DELETE FROM flow_edges WHERE flow_id = ?`, id); err != nil {
+		return Flow{}, fmt.Errorf("clear flow edges: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM flow_review_agents WHERE flow_id = ?`, id); err != nil {
-		return Flow{}, fmt.Errorf("clear flow review agents: %w", err)
+	if _, err := tx.ExecContext(ctx, `DELETE FROM flow_nodes WHERE flow_id = ?`, id); err != nil {
+		return Flow{}, fmt.Errorf("clear flow nodes: %w", err)
 	}
 	if err := insertFlowChildren(ctx, tx, id, input); err != nil {
 		return Flow{}, err
@@ -302,41 +285,67 @@ WHERE id = ?`,
 }
 
 func insertFlowChildren(ctx context.Context, tx *sqlitex.Tx, flowID string, input FlowInput) error {
-	for position, phase := range input.Phases {
-		phaseID, err := randomPrefixedID("fp")
+	if err := validateGraphReferencesInTx(ctx, tx, input); err != nil {
+		return err
+	}
+	for position, node := range input.Nodes {
+		nodeID, err := randomPrefixedID("fn")
+		if err != nil {
+			return err
+		}
+		configJSON, err := encodeNodeConfig(node.Config)
 		if err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO flow_phases (id, flow_id, position, name, agent_def_id, gate)
-VALUES (?, ?, ?, ?, ?, ?)`,
-			phaseID, flowID, position, phase.Name, phase.AgentDefID, string(phase.Gate)); err != nil {
-			if isForeignKeyViolation(err) {
-				return fmt.Errorf("phase %q references an unknown agent definition", phase.Name)
-			}
-			return fmt.Errorf("insert flow phase %q: %w", phase.Name, err)
+INSERT INTO flow_nodes (id, flow_id, node_key, name, kind, position, config_json)
+VALUES (?, ?, ?, ?, ?, ?, ?)`, nodeID, flowID, node.Key, node.Name, string(node.Kind), position, configJSON); err != nil {
+			return fmt.Errorf("insert flow node %q: %w", node.Key, err)
 		}
 	}
-	positions := map[FlowReviewRole]int{}
-	for _, agent := range input.ReviewAgents {
-		agentID, err := randomPrefixedID("fra")
-		if err != nil {
+	for _, edge := range input.Edges {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO flow_edges (flow_id, from_node_key, outcome, to_node_key)
+VALUES (?, ?, ?, ?)`, flowID, edge.From, edge.Outcome, edge.To); err != nil {
+			return fmt.Errorf("insert flow edge %s.%s: %w", edge.From, edge.Outcome, err)
+		}
+	}
+	return nil
+}
+
+func validateGraphReferencesInTx(ctx context.Context, tx *sqlitex.Tx, input FlowInput) error {
+	checkAgent := func(nodeKey, id string) error {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_defs WHERE id = ?`, id).Scan(&count); err != nil {
 			return err
 		}
-		required := true
-		if agent.Required != nil {
-			required = *agent.Required
+		if count == 0 {
+			return fmt.Errorf("node %q references unknown agent definition %q", nodeKey, id)
 		}
-		position := positions[agent.Role]
-		positions[agent.Role] = position + 1
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO flow_review_agents (id, flow_id, role, agent_def_id, position, required)
-VALUES (?, ?, ?, ?, ?, ?)`,
-			agentID, flowID, string(agent.Role), agent.AgentDefID, position, boolToInt(required)); err != nil {
-			if isForeignKeyViolation(err) {
-				return fmt.Errorf("review agent %d references an unknown agent definition", position+1)
+		return nil
+	}
+	for _, node := range input.Nodes {
+		switch node.Kind {
+		case NodeAgent:
+			if err := checkAgent(node.Key, node.Config.Agent.AgentDefID); err != nil {
+				return err
 			}
-			return fmt.Errorf("insert flow review agent: %w", err)
+		case NodeChangeReview:
+			for _, agent := range node.Config.ChangeReview.Agents {
+				if err := checkAgent(node.Key, agent.AgentDefID); err != nil {
+					return err
+				}
+			}
+		case NodeVerifyChange:
+			for _, agent := range node.Config.VerifyChange.Agents {
+				if err := checkAgent(node.Key, agent.AgentDefID); err != nil {
+					return err
+				}
+			}
+		case NodeMaterializeIssueSet:
+			if err := requireImplementationFlowTx(ctx, tx, node.Config.MaterializeIssueSet.DefaultChildFlowID); err != nil {
+				return fmt.Errorf("node %q default child flow: %w", node.Key, err)
+			}
 		}
 	}
 	return nil
@@ -349,6 +358,18 @@ func (s *FlowService) Delete(ctx context.Context, id string) error {
 	}
 	if defaultID == id {
 		return ErrFlowIsDefault
+	}
+	var references int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT
+	(SELECT COUNT(*) FROM issues WHERE flow_id = ?) +
+	(SELECT COUNT(*) FROM flow_nodes
+	 WHERE kind = 'materialize_issue_set'
+	   AND json_extract(config_json, '$.materialize_issue_set.default_child_flow_id') = ?)`, id, id).Scan(&references); err != nil {
+		return fmt.Errorf("inspect flow references: %w", err)
+	}
+	if references > 0 {
+		return ErrFlowInUse
 	}
 
 	result, err := s.db.ExecContext(ctx, `DELETE FROM flows WHERE id = ?`, id)
@@ -393,7 +414,7 @@ func (s *FlowService) List(ctx context.Context) ([]Flow, error) {
 
 func (s *FlowService) list(ctx context.Context, where string, args ...any) ([]Flow, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT f.id, f.name, f.description, f.fix_agent_def_id, f.builtin, f.created_at, f.updated_at
+SELECT f.id, f.name, f.description, f.start_node_key, f.transition_budget, f.builtin, f.created_at, f.updated_at
 FROM flows f WHERE `+where+` ORDER BY f.name`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list flows: %w", err)
@@ -404,14 +425,10 @@ FROM flows f WHERE `+where+` ORDER BY f.name`, args...)
 	index := map[string]int{}
 	for rows.Next() {
 		var flow Flow
-		var fixAgent sql.NullString
 		var builtin int
 		var createdAt, updatedAt string
-		if err := rows.Scan(&flow.ID, &flow.Name, &flow.Description, &fixAgent, &builtin, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&flow.ID, &flow.Name, &flow.Description, &flow.StartNode, &flow.TransitionBudget, &builtin, &createdAt, &updatedAt); err != nil {
 			return nil, err
-		}
-		if fixAgent.Valid {
-			flow.FixAgentDefID = fixAgent.String
 		}
 		flow.Builtin = builtin != 0
 		if flow.CreatedAt, err = sqlitex.ParseTime(createdAt); err != nil {
@@ -422,6 +439,8 @@ FROM flows f WHERE `+where+` ORDER BY f.name`, args...)
 		}
 		flow.Phases = []FlowPhase{}
 		flow.ReviewAgents = []FlowReviewAgent{}
+		flow.Nodes = []FlowNode{}
+		flow.Edges = []FlowEdge{}
 		index[flow.ID] = len(flows)
 		flows = append(flows, flow)
 	}
@@ -432,51 +451,52 @@ FROM flows f WHERE `+where+` ORDER BY f.name`, args...)
 		return flows, nil
 	}
 
-	phaseRows, err := s.db.QueryContext(ctx, `
-SELECT p.id, p.flow_id, p.position, p.name, p.agent_def_id, p.gate
-FROM flow_phases p JOIN flows f ON f.id = p.flow_id
-WHERE `+where+` ORDER BY p.flow_id, p.position`, args...)
+	nodeRows, err := s.db.QueryContext(ctx, `
+SELECT n.id, n.flow_id, n.node_key, n.name, n.kind, n.position, n.config_json
+FROM flow_nodes n JOIN flows f ON f.id = n.flow_id
+WHERE `+where+` ORDER BY n.flow_id, n.position`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list flow phases: %w", err)
+		return nil, fmt.Errorf("list flow nodes: %w", err)
 	}
-	defer phaseRows.Close()
-	for phaseRows.Next() {
-		var phase FlowPhase
-		var flowID, gate string
-		if err := phaseRows.Scan(&phase.ID, &flowID, &phase.Position, &phase.Name, &phase.AgentDefID, &gate); err != nil {
+	defer nodeRows.Close()
+	for nodeRows.Next() {
+		var node FlowNode
+		var flowID, kind, configJSON string
+		if err := nodeRows.Scan(&node.ID, &flowID, &node.Key, &node.Name, &kind, &node.Position, &configJSON); err != nil {
 			return nil, err
 		}
-		phase.Gate = FlowGate(gate)
+		node.Kind = NodeKind(kind)
+		node.Config, err = decodeNodeConfig(configJSON)
+		if err != nil {
+			return nil, fmt.Errorf("flow %s node %s: %w", flowID, node.Key, err)
+		}
 		if i, ok := index[flowID]; ok {
-			flows[i].Phases = append(flows[i].Phases, phase)
+			flows[i].Nodes = append(flows[i].Nodes, node)
 		}
 	}
-	if err := phaseRows.Err(); err != nil {
+	if err := nodeRows.Err(); err != nil {
 		return nil, err
 	}
 
-	reviewRows, err := s.db.QueryContext(ctx, `
-SELECT r.id, r.flow_id, r.role, r.agent_def_id, r.position, r.required
-FROM flow_review_agents r JOIN flows f ON f.id = r.flow_id
-WHERE `+where+` ORDER BY r.flow_id, r.role, r.position`, args...)
+	edgeRows, err := s.db.QueryContext(ctx, `
+SELECT e.flow_id, e.from_node_key, e.outcome, e.to_node_key
+FROM flow_edges e JOIN flows f ON f.id = e.flow_id
+WHERE `+where+` ORDER BY e.flow_id, e.from_node_key, e.outcome`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list flow review agents: %w", err)
+		return nil, fmt.Errorf("list flow edges: %w", err)
 	}
-	defer reviewRows.Close()
-	for reviewRows.Next() {
-		var agent FlowReviewAgent
-		var flowID, role string
-		var required int
-		if err := reviewRows.Scan(&agent.ID, &flowID, &role, &agent.AgentDefID, &agent.Position, &required); err != nil {
+	defer edgeRows.Close()
+	for edgeRows.Next() {
+		var flowID string
+		var edge FlowEdge
+		if err := edgeRows.Scan(&flowID, &edge.From, &edge.Outcome, &edge.To); err != nil {
 			return nil, err
 		}
-		agent.Role = FlowReviewRole(role)
-		agent.Required = required != 0
 		if i, ok := index[flowID]; ok {
-			flows[i].ReviewAgents = append(flows[i].ReviewAgents, agent)
+			flows[i].Edges = append(flows[i].Edges, edge)
 		}
 	}
-	if err := reviewRows.Err(); err != nil {
+	if err := edgeRows.Err(); err != nil {
 		return nil, err
 	}
 
@@ -538,8 +558,8 @@ func (s *FlowService) ResolveSnapshot(ctx context.Context, flowID string) (FlowS
 	if err != nil {
 		return FlowSnapshot{}, err
 	}
-	if len(flow.Phases) == 0 {
-		return FlowSnapshot{}, fmt.Errorf("flow %q has no phases", flow.Name)
+	if len(flow.Nodes) == 0 {
+		return FlowSnapshot{}, fmt.Errorf("flow %q has no executable definition", flow.Name)
 	}
 
 	defs := NewAgentDefService(s.db)
@@ -558,45 +578,71 @@ func (s *FlowService) ResolveSnapshot(ctx context.Context, flowID string) (FlowS
 		}, nil
 	}
 
-	snapshot := FlowSnapshot{FlowID: flow.ID, FlowName: flow.Name}
-	for _, phase := range flow.Phases {
-		agent, err := snapshotAgent(phase.AgentDefID)
-		if err != nil {
-			return FlowSnapshot{}, err
-		}
-		snapshot.Phases = append(snapshot.Phases, FlowPhaseSnapshot{
-			Name:  phase.Name,
-			Gate:  phase.Gate,
-			Agent: agent,
-		})
+	snapshot := FlowSnapshot{
+		FlowID: flow.ID, FlowName: flow.Name, StartNode: flow.StartNode,
+		TransitionBudget: flow.TransitionBudget, Edges: append([]FlowEdge(nil), flow.Edges...),
 	}
-	for _, reviewAgent := range flow.ReviewAgents {
-		agent, err := snapshotAgent(reviewAgent.AgentDefID)
-		if err != nil {
-			return FlowSnapshot{}, err
+	for _, node := range flow.Nodes {
+		snapshotNode := FlowNodeSnapshot{Key: node.Key, Name: node.Name, Kind: node.Kind}
+		switch node.Kind {
+		case NodeAgent:
+			agent, err := snapshotAgent(node.Config.Agent.AgentDefID)
+			if err != nil {
+				return FlowSnapshot{}, err
+			}
+			snapshotNode.Config.Agent = &AgentNodeSnapshotConfig{
+				Agent: agent, Workspace: node.Config.Agent.Workspace, Artifact: node.Config.Agent.Artifact,
+			}
+		case NodeAutomatedChecks:
+			snapshotNode.Config.AutomatedChecks = &AutomatedChecksNodeConfig{}
+		case NodeChangeReview:
+			config := &ChangeReviewNodeSnapshotConfig{}
+			for _, inputAgent := range node.Config.ChangeReview.Agents {
+				agent, err := snapshotAgent(inputAgent.AgentDefID)
+				if err != nil {
+					return FlowSnapshot{}, err
+				}
+				required := true
+				if inputAgent.Required != nil {
+					required = *inputAgent.Required
+				}
+				config.Agents = append(config.Agents, SnapshotReviewAgent{Required: required, Agent: agent})
+			}
+			snapshotNode.Config.ChangeReview = config
+		case NodeHumanGate:
+			copyConfig := *node.Config.HumanGate
+			copyConfig.Outcomes = append([]string(nil), node.Config.HumanGate.Outcomes...)
+			snapshotNode.Config.HumanGate = &copyConfig
+		case NodeVerifyChange:
+			config := &VerifyChangeNodeSnapshotConfig{}
+			for _, inputAgent := range node.Config.VerifyChange.Agents {
+				agent, err := snapshotAgent(inputAgent.AgentDefID)
+				if err != nil {
+					return FlowSnapshot{}, err
+				}
+				required := true
+				if inputAgent.Required != nil {
+					required = *inputAgent.Required
+				}
+				config.Agents = append(config.Agents, SnapshotReviewAgent{Required: required, Agent: agent})
+			}
+			snapshotNode.Config.VerifyChange = config
+		case NodeMaterializeIssueSet:
+			copyConfig := *node.Config.MaterializeIssueSet
+			snapshotNode.Config.MaterializeIssueSet = &copyConfig
+		case NodeMergeChange:
+			snapshotNode.Config.MergeChange = &MergeChangeNodeConfig{}
+		case NodeTerminal:
+			copyConfig := *node.Config.Terminal
+			snapshotNode.Config.Terminal = &copyConfig
 		}
-		snapshot.ReviewAgents = append(snapshot.ReviewAgents, FlowReviewAgentSnapshot{
-			Role:     reviewAgent.Role,
-			Required: reviewAgent.Required,
-			Agent:    agent,
-		})
+		snapshot.Nodes = append(snapshot.Nodes, snapshotNode)
 	}
-	if flow.FixAgentDefID != "" {
-		agent, err := snapshotAgent(flow.FixAgentDefID)
-		if err != nil {
-			return FlowSnapshot{}, err
-		}
-		snapshot.FixAgent = &agent
-	}
-
 	return snapshot, nil
 }
 
-// SeedDefaults populates a fresh project with the built-in agent defs and
-// flows so it works with zero configuration: planner/author/reviewer/verifier
-// defs (prompts from the embedded skills), a "direct" flow (implement only)
-// and a "planned" flow (human-gated plan, then implement). Idempotent: any
-// existing agent def or flow row disables seeding entirely.
+// SeedDefaults populates a fresh format-2 project with the built-in coding and
+// planning graphs plus the agent definitions they snapshot.
 func (s *FlowService) SeedDefaults(ctx context.Context) error {
 	var count int
 	if err := s.db.QueryRowContext(ctx,
@@ -614,7 +660,7 @@ func (s *FlowService) SeedDefaults(ctx context.Context) error {
 		name  string
 		skill string
 	}{
-		{"planner", flowskills.PlannerSkill},
+		{"issue-planner", flowskills.IssuePlannerSkill},
 		{"author", flowskills.AuthorSkill},
 		{"reviewer", flowskills.ReviewerSkill},
 		{"verifier", flowskills.VerifierSkill},
@@ -630,34 +676,61 @@ func (s *FlowService) SeedDefaults(ctx context.Context) error {
 		defIDs[seed.name] = def.ID
 	}
 
-	reviewSet := []FlowReviewAgentInput{
-		{Role: FlowReviewRoleReviewer, AgentDefID: defIDs["reviewer"]},
-		{Role: FlowReviewRoleVerifier, AgentDefID: defIDs["verifier"]},
-	}
-	direct, err := s.create(ctx, FlowInput{
-		Name:          "direct",
-		Description:   "Implement immediately; agent review before merge.",
-		FixAgentDefID: defIDs["author"],
-		Phases: []FlowPhaseInput{
-			{Name: "implement", AgentDefID: defIDs["author"], Gate: FlowGateAuto},
+	coding, err := s.create(ctx, FlowInput{
+		Name:             "coding",
+		Description:      "Implement, check, review, verify, and merge a change.",
+		StartNode:        "implement",
+		TransitionBudget: DefaultFlowTransitionBudget,
+		Nodes: []FlowNodeInput{
+			{Key: "implement", Name: "Implement", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: defIDs["author"], Workspace: WorkspaceChange, Artifact: ArtifactChange}}},
+			{Key: "checks", Name: "Automated checks", Kind: NodeAutomatedChecks, Config: FlowNodeConfig{AutomatedChecks: &AutomatedChecksNodeConfig{}}},
+			{Key: "review", Name: "Agent review", Kind: NodeChangeReview, Config: FlowNodeConfig{ChangeReview: &ChangeReviewNodeConfig{Agents: []ReviewAgentConfig{{AgentDefID: defIDs["reviewer"]}}}}},
+			{Key: "human-review", Name: "Human change review", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Instructions: "Review the change and choose whether it can proceed.", Outcomes: []string{"approved", "changes_requested", "rejected"}}}},
+			{Key: "verify", Name: "Verify requirements", Kind: NodeVerifyChange, Config: FlowNodeConfig{VerifyChange: &VerifyChangeNodeConfig{Agents: []ReviewAgentConfig{{AgentDefID: defIDs["verifier"]}}}}},
+			{Key: "merge", Name: "Merge change", Kind: NodeMergeChange, Config: FlowNodeConfig{MergeChange: &MergeChangeNodeConfig{}}},
+			{Key: "done", Name: "Merged", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionMerged}}},
+			{Key: "rejected", Name: "Rejected", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionRejected}}},
 		},
-		ReviewAgents: reviewSet,
+		Edges: []FlowEdgeInput{
+			{From: "implement", Outcome: "completed", To: "checks"},
+			{From: "checks", Outcome: "passed", To: "review"},
+			{From: "checks", Outcome: "failed", To: "implement"},
+			{From: "review", Outcome: "approved", To: "human-review"},
+			{From: "review", Outcome: "changes_requested", To: "implement"},
+			{From: "human-review", Outcome: "approved", To: "verify"},
+			{From: "human-review", Outcome: "changes_requested", To: "implement"},
+			{From: "human-review", Outcome: "rejected", To: "rejected"},
+			{From: "verify", Outcome: "passed", To: "merge"},
+			{From: "verify", Outcome: "changes_requested", To: "implement"},
+			{From: "merge", Outcome: "merged", To: "done"},
+			{From: "merge", Outcome: "conflict", To: "implement"},
+		},
 	}, true)
 	if err != nil {
-		return fmt.Errorf("seed direct flow: %w", err)
+		return fmt.Errorf("seed coding flow: %w", err)
 	}
 	if _, err := s.create(ctx, FlowInput{
-		Name:          "planned",
-		Description:   "Plan first with human approval, then implement.",
-		FixAgentDefID: defIDs["author"],
-		Phases: []FlowPhaseInput{
-			{Name: "plan", AgentDefID: defIDs["planner"], Gate: FlowGateHuman},
-			{Name: "implement", AgentDefID: defIDs["author"], Gate: FlowGateAuto},
+		Name:             "planning",
+		Description:      "Create a human-approved implementation issue graph.",
+		StartNode:        "write-plan",
+		TransitionBudget: DefaultFlowTransitionBudget,
+		Nodes: []FlowNodeInput{
+			{Key: "write-plan", Name: "Write issue plan", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: defIDs["issue-planner"], Workspace: WorkspaceBase, Artifact: ArtifactIssueSet}}},
+			{Key: "review-plan", Name: "Review plan", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Instructions: "Review the proposed implementation issues.", Outcomes: []string{"approved", "changes_requested", "rejected"}}}},
+			{Key: "create-issues", Name: "Create implementation issues", Kind: NodeMaterializeIssueSet, Config: FlowNodeConfig{MaterializeIssueSet: &MaterializeIssueSetNodeConfig{DefaultChildFlowID: coding.ID, AllowChildFlowOverride: true, MaxItems: 25}}},
+			{Key: "done", Name: "Completed", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+			{Key: "rejected", Name: "Rejected", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionRejected}}},
 		},
-		ReviewAgents: reviewSet,
+		Edges: []FlowEdgeInput{
+			{From: "write-plan", Outcome: "completed", To: "review-plan"},
+			{From: "review-plan", Outcome: "approved", To: "create-issues"},
+			{From: "review-plan", Outcome: "changes_requested", To: "write-plan"},
+			{From: "review-plan", Outcome: "rejected", To: "rejected"},
+			{From: "create-issues", Outcome: "completed", To: "done"},
+		},
 	}, true); err != nil {
-		return fmt.Errorf("seed planned flow: %w", err)
+		return fmt.Errorf("seed planning flow: %w", err)
 	}
 
-	return s.SetDefaultFlow(ctx, direct.ID)
+	return s.SetDefaultFlow(ctx, coding.ID)
 }

@@ -45,7 +45,10 @@ func TestOpenInitializesSQLite(t *testing.T) {
 		t.Fatalf("schema version = %q, want 0001_init", schemaVersion)
 	}
 
-	assertTables(t, store, []string{"issues", "issue_attachments", "jobs", "leases", "sessions", "session_messages", "changes", "git_events", "idempotency_records", "session_human_wait_latches"}, []string{"projects", "workers", "tokens", "web_sessions", "web_bootstrap_tokens"})
+	assertTables(t, store,
+		[]string{"issues", "workflow_runs", "workflow_node_runs", "workflow_artifacts", "workflow_waits", "workflow_transitions", "jobs", "leases", "sessions", "changes"},
+		[]string{"projects", "workers", "tokens", "web_sessions", "web_bootstrap_tokens", "workflow_state", "transitions", "issue_flow_cursor", "issue_phase_handoffs"},
+	)
 }
 
 func TestOpenGlobalInitializesGlobalSchema(t *testing.T) {

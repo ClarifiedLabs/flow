@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -31,11 +32,6 @@ func (s *projectServer) handleCreateIssue(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid_issue", err.Error())
 		return
 	}
-	if err := s.ensureAuthorJobForCreatedIssue(r, issue, principal); err != nil {
-		writeError(w, http.StatusBadRequest, "create_issue_queue_failed", err.Error())
-		return
-	}
-
 	writeJSON(w, http.StatusCreated, issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name})
 }
 
@@ -77,14 +73,14 @@ func (s *projectServer) handleListIssues(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/issues/"), "/")
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v2/issues/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
 		writeError(w, http.StatusNotFound, "not_found", "issue not found")
 		return
 	}
 
 	issueID := parts[0]
-	if err := checkConsoleIssueScope(principal, issueID); err != nil {
+	if err := checkBoundIssueScope(principal, issueID); err != nil {
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 		return
 	}
@@ -117,21 +113,12 @@ func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	if len(parts) == 3 && parts[1] == "phase" {
-		if !requireMethod(w, r, http.MethodPost) {
+	if len(parts) >= 2 && parts[1] == "workflow" {
+		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
+			writeError(w, http.StatusForbidden, "forbidden", "workflow access requires an owner, session, or console token")
 			return
 		}
-		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
-			return
-		}
-		switch parts[2] {
-		case "approve":
-			s.handleApproveWorkPhase(w, r, principal, issueID)
-		case "request-changes":
-			s.handleReworkWorkPhase(w, r, principal, issueID)
-		default:
-			writeError(w, http.StatusNotFound, "not_found", "resource not found")
-		}
+		s.handleWorkflowPath(w, r, principal, issueID, parts[2:])
 		return
 	}
 
@@ -187,28 +174,6 @@ func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	if len(parts) == 3 && parts[1] == "review" && parts[2] == "run" {
-		if !requireMethod(w, r, http.MethodPost) {
-			return
-		}
-		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
-			return
-		}
-		s.handleRunReview(w, r, issueID)
-		return
-	}
-
-	if len(parts) == 3 && parts[1] == "review-cycles" && parts[2] == "approve" {
-		if !requireMethod(w, r, http.MethodPost) {
-			return
-		}
-		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
-			return
-		}
-		s.handleApproveReviewCycles(w, r, principal, issueID)
-		return
-	}
-
 	if len(parts) != 2 || r.Method != http.MethodPost {
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 		return
@@ -219,47 +184,22 @@ func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, 
 		if !requireScope(w, principal, "owner or console token is required", coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
 			return
 		}
-		s.handleScheduleIssue(w, r, principal, issueID)
-	case "state":
-		if !requireScope(w, principal, "owner or console token is required", coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
-			return
-		}
-		s.handleSetIssueState(w, r, principal, issueID)
-	case "close":
-		if !requireScope(w, principal, "owner or console token is required", coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
-			return
-		}
-		s.handleCloseIssue(w, r, principal, issueID)
-	case "pause":
-		if !requireScope(w, principal, "owner or console token is required", coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
-			return
-		}
-		s.handlePauseIssue(w, r, issueID)
-	case "resume":
-		if !requireScope(w, principal, "owner or console token is required", coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
-			return
-		}
-		s.handleResumeIssue(w, r, principal, issueID)
-	case "retry":
-		if !requireScope(w, principal, "owner or console token is required", coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
-			return
-		}
-		s.handleRetryCrashedAuthorJob(w, r, principal, issueID)
-	case "triage":
-		if !requireScope(w, principal, "owner or console token is required", coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
-			return
-		}
-		s.handleTriageIssue(w, r, principal, issueID)
-	case "merge":
-		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
-			return
-		}
-		s.handleMergeIssue(w, r, principal, issueID)
+		s.handleScheduleWorkflow(w, r, principal, issueID)
 	case "reset":
 		if !requireScope(w, principal, "owner or console token is required", coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
 			return
 		}
-		s.handleResetIssue(w, r, principal, issueID)
+		s.handleResetWorkflow(w, r, principal, issueID)
+	case "done":
+		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+			return
+		}
+		s.handleForceDoneWorkflow(w, r, principal, issueID)
+	case "reopen":
+		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+			return
+		}
+		s.handleReopenWorkflow(w, r, principal, issueID)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 	}
@@ -270,12 +210,14 @@ func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, 
 // role instructions (from the frozen agent-def snapshot), gate feedback from a
 // human's request-changes, and the handoffs of the phases already completed.
 type promptContextResponse struct {
-	RoleInstructions string               `json:"role_instructions,omitempty"`
-	PhaseName        string               `json:"phase_name,omitempty"`
-	PhaseIndex       int                  `json:"phase_index"`
-	FinalPhase       bool                 `json:"final_phase"`
-	GateFeedback     string               `json:"gate_feedback,omitempty"`
-	PriorHandoffs    []promptPhaseHandoff `json:"prior_handoffs,omitempty"`
+	RoleInstructions string                    `json:"role_instructions,omitempty"`
+	PhaseName        string                    `json:"phase_name,omitempty"`
+	WorkspaceMode    coordinator.WorkspaceMode `json:"workspace_mode,omitempty"`
+	ArtifactKind     coordinator.ArtifactKind  `json:"artifact_kind,omitempty"`
+	PhaseIndex       int                       `json:"phase_index"`
+	FinalPhase       bool                      `json:"final_phase"`
+	GateFeedback     string                    `json:"gate_feedback,omitempty"`
+	PriorHandoffs    []promptPhaseHandoff      `json:"prior_handoffs,omitempty"`
 }
 
 type promptPhaseHandoff struct {
@@ -285,6 +227,81 @@ type promptPhaseHandoff struct {
 
 func (s *projectServer) handlePromptContext(w http.ResponseWriter, r *http.Request, issueID string) {
 	response := promptContextResponse{FinalPhase: true}
+	if s.workflowRuns != nil {
+		run, active, err := s.workflowRuns.ActiveForIssue(r.Context(), issueID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "prompt_context_failed", err.Error())
+			return
+		}
+		if active {
+			detail, err := s.workflowRuns.Detail(r.Context(), run.ID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "prompt_context_failed", err.Error())
+				return
+			}
+			node, ok := run.Snapshot.Node(run.CurrentNodeKey)
+			if ok {
+				response.PhaseName = node.Name
+				checkName := strings.TrimSpace(r.URL.Query().Get("check"))
+				baseCheckName := strings.SplitN(checkName, ".node.", 2)[0]
+				switch {
+				case checkName == "" && node.Config.Agent != nil:
+					response.RoleInstructions = node.Config.Agent.Agent.Prompt
+					response.WorkspaceMode = node.Config.Agent.Workspace
+					response.ArtifactKind = node.Config.Agent.Artifact
+				case checkName != "" && node.Config.ChangeReview != nil:
+					for _, agent := range node.Config.ChangeReview.Agents {
+						if strings.TrimSpace(agent.Agent.Name) == baseCheckName {
+							response.RoleInstructions = agent.Agent.Prompt
+							break
+						}
+					}
+				case checkName != "" && node.Config.VerifyChange != nil:
+					for _, agent := range node.Config.VerifyChange.Agents {
+						if strings.TrimSpace(agent.Agent.Name) == baseCheckName {
+							response.RoleInstructions = agent.Agent.Prompt
+							break
+						}
+					}
+				}
+			}
+			for index := len(detail.Transitions) - 1; index >= 0; index-- {
+				transition := detail.Transitions[index]
+				if transition.ToNodeKey != run.CurrentNodeKey || len(transition.Payload) == 0 {
+					continue
+				}
+				var payload struct {
+					Feedback string `json:"feedback"`
+				}
+				if json.Unmarshal(transition.Payload, &payload) == nil && strings.TrimSpace(payload.Feedback) != "" {
+					response.GateFeedback = strings.TrimSpace(payload.Feedback)
+				}
+				break
+			}
+			if s.workflowArtifacts != nil {
+				artifacts, err := s.workflowArtifacts.ListForRun(r.Context(), run.ID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "prompt_context_failed", err.Error())
+					return
+				}
+				nodeNames := map[string]string{}
+				for _, nodeRun := range detail.NodeRuns {
+					if snapshotNode, ok := run.Snapshot.Node(nodeRun.NodeKey); ok {
+						nodeNames[nodeRun.ID] = snapshotNode.Name
+					}
+				}
+				for _, artifact := range artifacts {
+					if strings.TrimSpace(artifact.SummaryMarkdown) != "" {
+						response.PriorHandoffs = append(response.PriorHandoffs, promptPhaseHandoff{
+							PhaseName: nodeNames[artifact.NodeRunID], Content: artifact.SummaryMarkdown,
+						})
+					}
+				}
+			}
+			writeJSON(w, http.StatusOK, response)
+			return
+		}
+	}
 	if s.cursors == nil {
 		writeJSON(w, http.StatusOK, response)
 		return
@@ -389,8 +406,6 @@ func (s *projectServer) handleGetIssue(w http.ResponseWriter, r *http.Request, p
 		}
 		response.Detail = detail
 	}
-	response.Flow = s.issueFlowStatus(r.Context(), issueID)
-
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -562,7 +577,15 @@ func (s *projectServer) handleAttentionReply(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "attention_reply_failed", err.Error())
 		return
 	}
-	if !queued {
+	resumed := false
+	if s.workflowRuns != nil {
+		resumed, err = s.workflowRuns.ResumeAgentRequest(r.Context(), issueID, body, coordinator.ActorHuman)
+		if err != nil {
+			writeWorkflowError(w, err, "attention_reply_resume_failed")
+			return
+		}
+	}
+	if !queued && !resumed {
 		if err := s.ensureAuthorJobWithHumanInstructions(r, principal, issueID, body); err != nil {
 			writeError(w, http.StatusBadRequest, "attention_reply_queue_failed", err.Error())
 			return
@@ -652,11 +675,6 @@ func (s *projectServer) buildUIIssueDetail(ctx context.Context, issue coordinato
 		return nil, fmt.Errorf("load issue wait reason: %w", err)
 	}
 	detail.WaitReason = board.WaitReasons[issue.ID]
-	crashRetry, err := s.issues.CrashRetryAvailable(ctx, issue.ID)
-	if err != nil {
-		return nil, fmt.Errorf("load crash retry availability: %w", err)
-	}
-	detail.CrashRetryAvailable = crashRetry
 	terminalJobs, err := s.uiTerminalJobsByIssue(ctx, []coordinator.Issue{issue})
 	if err != nil {
 		return nil, err
@@ -717,11 +735,6 @@ func (s *projectServer) buildUIIssueDetail(ctx context.Context, issue coordinato
 		if ok {
 			detail.ReadyChange = uiChangeSummaryFromChange(readyChange)
 		}
-		budget, err := s.sessions.ReviewCycleBudget(ctx, issue.ID)
-		if err != nil {
-			return nil, fmt.Errorf("load review cycle budget: %w", err)
-		}
-		detail.ReviewCycleBudget = &budget
 		consoleState, err := s.sessions.CurrentIssueConsole(ctx, issue.ID)
 		if err != nil {
 			return nil, fmt.Errorf("load issue console: %w", err)
@@ -753,11 +766,6 @@ func (s *projectServer) buildUIIssueDetail(ctx context.Context, issue coordinato
 			return nil, fmt.Errorf("load timeline transitions: %w", err)
 		}
 		detail.TimelineTransitions = timeline
-		graph, err := s.transitions.GraphSummaryForIssue(ctx, issue.ID)
-		if err != nil {
-			return nil, fmt.Errorf("load lifecycle graph: %w", err)
-		}
-		detail.LifecycleGraph = &graph
 	}
 	attachments, err := s.issues.ListIssueAttachments(ctx, issue.ID)
 	if err != nil {
@@ -776,13 +784,11 @@ func (s *projectServer) handleEditIssue(w http.ResponseWriter, r *http.Request, 
 	}
 
 	issue, err := s.issues.EditIssue(r.Context(), issueID, coordinator.EditIssueInput{
-		Title:               request.Title,
-		Body:                request.Body,
-		AcceptanceCriteria:  request.AcceptanceCriteria,
-		Priority:            request.Priority,
-		RequiresHumanReview: request.RequiresHumanReview,
-		AutoMerge:           request.AutoMerge,
-		FlowID:              request.FlowID,
+		Title:              request.Title,
+		Body:               request.Body,
+		AcceptanceCriteria: request.AcceptanceCriteria,
+		Priority:           request.Priority,
+		FlowID:             request.FlowID,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "edit_issue_failed", err.Error())
@@ -831,11 +837,11 @@ func (s *projectServer) handleIssueRelations(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *projectServer) handleListTransitions(w http.ResponseWriter, r *http.Request, issueID string) {
-	if s.transitions == nil {
+	if s.workflowRuns == nil {
 		writeError(w, http.StatusInternalServerError, "transitions_unavailable", "transition service is not configured")
 		return
 	}
-	entries, err := s.transitions.ListForIssue(r.Context(), issueID, 100)
+	entries, err := s.workflowRuns.ListTransitionsForIssue(r.Context(), issueID, 100)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "list_transitions_failed", err.Error())
 		return
@@ -1167,11 +1173,9 @@ func (s *projectServer) doneResponseForProject(ctx context.Context, principal co
 		response.NextBeforeID = next.ID
 	}
 	for _, issue := range issues {
-		phase, err := s.issues.PhaseForIssue(ctx, issue)
-		if err != nil {
-			return doneResponse{}, fmt.Errorf("derive phase for %s: %w", issue.ID, err)
+		if issue.DoneResolution != nil {
+			response.Outcomes[issue.ID] = coordinator.Phase(*issue.DoneResolution)
 		}
-		response.Outcomes[issue.ID] = phase
 	}
 
 	if !scopeAllowed(principal, coordinator.TokenScopeOwner) {
@@ -1223,10 +1227,9 @@ func boardIssues(board coordinator.Board) []coordinator.Issue {
 	seen := map[string]bool{}
 	var issues []coordinator.Issue
 	for _, lane := range [][]coordinator.Issue{
-		board.Backlog,
-		board.UpNext,
+		board.Unscheduled,
+		board.Scheduled,
 		board.InProgress,
-		board.NeedsAttention,
 	} {
 		for _, issue := range lane {
 			if seen[issue.ID] {

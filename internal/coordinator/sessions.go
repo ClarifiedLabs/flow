@@ -77,6 +77,9 @@ type Session struct {
 	ID             string
 	IssueID        string
 	ChangeID       string
+	WorkflowRunID  string
+	NodeRunID      string
+	WorkspaceMode  WorkspaceMode
 	JobID          string
 	LeaseID        string
 	WorkerID       string
@@ -792,6 +795,7 @@ FROM sessions s
 JOIN jobs j ON j.id = s.job_id
 JOIN leases l ON l.id = s.lease_id
 WHERE s.role = ?
+	AND s.workflow_run_id IS NULL
 	AND (
 		(
 			s.runtime_state IN (?, ?, ?)
@@ -1450,17 +1454,37 @@ func (s *SessionService) StartAuthorSession(ctx context.Context, input StartAuth
 	}
 
 	changeID := stringPointerValue(job.ChangeID)
+	workspaceMode := WorkspaceMode(payloadString(job.Payload, "workspace_mode"))
+	if workspaceMode == "" {
+		workspaceMode = WorkspaceChange
+	}
 	branch := payloadString(job.Payload, "branch")
 	base := payloadString(job.Payload, "base")
-	if changeID == "" || branch == "" || base == "" {
-		return StartAuthorSessionResult{}, errors.New("author job payload requires change_id, branch, and base")
+	if base == "" {
+		return StartAuthorSessionResult{}, errors.New("author job payload requires base")
 	}
-	change, err := s.GetChange(ctx, changeID)
-	if err != nil {
-		return StartAuthorSessionResult{}, err
+	if branch == "" && workspaceMode == WorkspaceBase {
+		branch = base
 	}
-	if change.IssueID != *job.IssueID || change.Branch != branch || change.Base != base {
-		return StartAuthorSessionResult{}, errors.New("author job payload does not match change")
+	var change Change
+	switch workspaceMode {
+	case WorkspaceChange:
+		if changeID == "" || branch == "" {
+			return StartAuthorSessionResult{}, errors.New("change-workspace author job requires change_id and branch")
+		}
+		change, err = s.GetChange(ctx, changeID)
+		if err != nil {
+			return StartAuthorSessionResult{}, err
+		}
+		if change.IssueID != *job.IssueID || change.Branch != branch || change.Base != base {
+			return StartAuthorSessionResult{}, errors.New("author job payload does not match change")
+		}
+	case WorkspaceBase:
+		if changeID != "" || branch != base {
+			return StartAuthorSessionResult{}, errors.New("base-workspace author job cannot carry a change or non-base branch")
+		}
+	default:
+		return StartAuthorSessionResult{}, fmt.Errorf("author job has invalid workspace_mode %q", workspaceMode)
 	}
 
 	sessionID, err := randomPrefixedID("s")
@@ -1511,10 +1535,13 @@ INSERT INTO sessions (
 	id,
 	issue_id,
 	change_id,
+	workflow_run_id,
+	node_run_id,
 	job_id,
 	lease_id,
 	worker_id,
 	role,
+	workspace_mode,
 	runtime_state,
 	branch,
 	base,
@@ -1524,14 +1551,17 @@ INSERT INTO sessions (
 	token_hash,
 	created_at,
 	updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sessionID,
 		*job.IssueID,
-		change.ID,
+		nullableStringValue(job.ChangeID),
+		nullableStringValue(job.WorkflowRunID),
+		nullableStringValue(job.NodeRunID),
 		job.ID,
 		lease.ID,
 		workerID,
 		string(flowworker.RoleAuthor),
+		string(workspaceMode),
 		string(SessionStarting),
 		branch,
 		base,
@@ -1662,10 +1692,13 @@ INSERT INTO sessions (
 	id,
 	issue_id,
 	change_id,
+	workflow_run_id,
+	node_run_id,
 	job_id,
 	lease_id,
 	worker_id,
 	role,
+	workspace_mode,
 	runtime_state,
 	branch,
 	base,
@@ -1675,14 +1708,17 @@ INSERT INTO sessions (
 	token_hash,
 	created_at,
 	updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sessionID,
 		nullableStringValue(job.IssueID),
 		nullableStringValue(job.ChangeID),
+		nullableStringValue(job.WorkflowRunID),
+		nullableStringValue(job.NodeRunID),
 		job.ID,
 		lease.ID,
 		workerID,
 		string(flowworker.RoleConsole),
+		string(WorkspaceChange),
 		string(SessionStarting),
 		branch,
 		base,
@@ -2111,8 +2147,13 @@ WHERE id = ?
 	}
 	// The session token lives in the coordinator's global database; revoke it
 	// after the project transaction commits.
-	if err := s.revokeSessionTokenHash(ctx, session.TokenHash); err != nil {
-		slog.Warn("revoke ready session token", "session_id", sessionID, "error", err)
+	// Workflow completion is retryable with the session-scoped idempotency
+	// identity. Keep that token valid until its normal expiry; every mutating
+	// operation still verifies node ownership and active/succeeded state.
+	if session.WorkflowRunID == "" {
+		if err := s.revokeSessionTokenHash(ctx, session.TokenHash); err != nil {
+			slog.Warn("revoke ready session token", "session_id", sessionID, "error", err)
+		}
 	}
 
 	return s.GetSession(ctx, sessionID)
@@ -2464,6 +2505,42 @@ func (s *SessionService) revokeSessionTokenHash(ctx context.Context, tokenHash s
 	return nil
 }
 
+// RevokeWorkflowRunSessionTokens invalidates every session credential minted
+// for a cancelled run. Project state is already durable when this is called;
+// callers may log a credential-store failure without rolling the run back.
+func (s *SessionService) RevokeWorkflowRunSessionTokens(ctx context.Context, workflowRunID string) error {
+	workflowRunID = strings.TrimSpace(workflowRunID)
+	if workflowRunID == "" || s.credentials == nil {
+		return nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT token_hash FROM sessions WHERE workflow_run_id = ?`, workflowRunID)
+	if err != nil {
+		return fmt.Errorf("list workflow session tokens: %w", err)
+	}
+	var hashes []string
+	for rows.Next() {
+		var hash string
+		if err := rows.Scan(&hash); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan workflow session token: %w", err)
+		}
+		hashes = append(hashes, hash)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate workflow session tokens: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, hash := range hashes {
+		if err := s.revokeSessionTokenHash(ctx, hash); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *SessionService) GetChange(ctx context.Context, changeID string) (Change, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT id, issue_id, branch, base, head_sha, created_at, updated_at, ready_at, merged_at
@@ -2629,10 +2706,13 @@ SELECT
 	s.id,
 	s.issue_id,
 	s.change_id,
+	s.workflow_run_id,
+	s.node_run_id,
 	s.job_id,
 	s.lease_id,
 	s.worker_id,
 	s.role,
+	s.workspace_mode,
 	s.runtime_state,
 	s.branch,
 	s.base,
@@ -3232,10 +3312,13 @@ SELECT
 	id,
 	issue_id,
 	change_id,
+	workflow_run_id,
+	node_run_id,
 	job_id,
 	lease_id,
 	worker_id,
 	role,
+	workspace_mode,
 	runtime_state,
 	branch,
 	base,
@@ -3252,6 +3335,9 @@ func scanSession(scanner issueScanner) (Session, error) {
 	var session Session
 	var issueID sql.NullString
 	var changeID sql.NullString
+	var workflowRunID sql.NullString
+	var nodeRunID sql.NullString
+	var workspaceMode string
 	var role string
 	var runtimeState string
 	var lastAgentActivityAt sql.NullString
@@ -3262,10 +3348,13 @@ func scanSession(scanner issueScanner) (Session, error) {
 		&session.ID,
 		&issueID,
 		&changeID,
+		&workflowRunID,
+		&nodeRunID,
 		&session.JobID,
 		&session.LeaseID,
 		&session.WorkerID,
 		&role,
+		&workspaceMode,
 		&runtimeState,
 		&session.Branch,
 		&session.Base,
@@ -3285,6 +3374,9 @@ func scanSession(scanner issueScanner) (Session, error) {
 	if changeID.Valid {
 		session.ChangeID = strings.TrimSpace(changeID.String)
 	}
+	session.WorkflowRunID = strings.TrimSpace(workflowRunID.String)
+	session.NodeRunID = strings.TrimSpace(nodeRunID.String)
+	session.WorkspaceMode = WorkspaceMode(workspaceMode)
 	parsedCreatedAt, err := parseTime(createdAt)
 	if err != nil {
 		return Session{}, err

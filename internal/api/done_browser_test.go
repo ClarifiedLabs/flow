@@ -43,7 +43,7 @@ func TestWebUIDoneViewSurfacesClosedWork(t *testing.T) {
 	assertPageContains(t, browserCtx, abandoned.ID)
 	assertPageContains(t, browserCtx, "c-0001")
 
-	// The nav badge reflects the total closed count (polled from /v1/sidebar).
+	// The nav badge reflects the total closed count (polled from /v2/sidebar).
 	if err := chromedp.Run(browserCtx, waitForDoneBadge("3")); err != nil {
 		t.Fatalf("done nav badge did not reach 3: %v\nbody:\n%s", err, browserBody(t, browserCtx))
 	}

@@ -156,10 +156,10 @@ func TestHookPrepushCapturesAndSteers(t *testing.T) {
 		}
 	})
 
-	if !server.sawPath(http.MethodPost, "/v1/sessions/s-1/signal") {
+	if !server.sawPath(http.MethodPost, "/v2/sessions/s-1/signal") {
 		t.Fatalf("expected a capture POST to the session signal endpoint; got %+v", server.recorded())
 	}
-	if !server.sawPath(http.MethodGet, "/v1/changes/ch-1/threads") {
+	if !server.sawPath(http.MethodGet, "/v2/changes/ch-1/threads") {
 		t.Fatalf("expected a threads fetch; got %+v", server.recorded())
 	}
 	// Only open + reopened threads are unresolved (claimed/certified are not).

@@ -10,7 +10,7 @@
 2. Review for defects that matter:
    - Prioritize correctness, regressions, missing tests, broken acceptance criteria, security-sensitive mistakes, and unclear handoff claims.
    - Ignore style-only comments unless they create real maintainability risk.
-   - Do not modify files, commit, push, certify threads, or call `flow ready`.
+   - Do not modify files, commit, push, certify threads, or call `flow complete`.
 
 3. Decide actionable blocking concerns:
    - Anchor each concern to a `<sha>:<file>:<line>`, using the current commit from

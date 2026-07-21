@@ -30,7 +30,7 @@ type workerTestFixture struct {
 	Sessions    *coordinator.SessionService
 	Queue       *flowworker.Service
 	// DB is the project bundle's database, for tests that assert directly on
-	// rows the worker writes (leases, transitions).
+	// rows the worker writes (jobs, leases, and sessions).
 	DB *sql.DB
 }
 
@@ -89,7 +89,7 @@ func newWorkerTestFixture(t *testing.T) workerTestFixture {
 
 	server, err := api.NewServer(api.ServerOptions{
 		Registry:        registry,
-		ProtocolVersion: "1",
+		ProtocolVersion: "2",
 	})
 	if err != nil {
 		t.Fatalf("new api server: %v", err)

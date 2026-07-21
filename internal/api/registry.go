@@ -22,27 +22,30 @@ import (
 // it. Every project-scoped request resolves to a bundle; the bundle's
 // services never see another project's data.
 type ProjectBundle struct {
-	Project          coordinator.Project
-	Store            *flowdb.Store
-	Issues           *coordinator.IssueService
-	AgentDefs        *coordinator.AgentDefService
-	Flows            *coordinator.FlowService
-	Cursors          *coordinator.FlowCursorService
-	Checks           *coordinator.CheckService
-	Threads          *coordinator.ThreadService
-	Sessions         *coordinator.SessionService
-	Transcripts      *coordinator.TranscriptStore
-	Attachments      *coordinator.IssueAttachmentStore
-	Status           *coordinator.StatusService
-	Reconciler       *coordinator.ReconcileService
-	CheckConfigs     *coordinator.CheckConfigService
-	Merges           *coordinator.MergeService
-	Transitions      *coordinator.TransitionService
-	GitEvents        *coordinator.GitEventService
-	Idempotency      *coordinator.IdempotencyService
-	GitEventConsumer *coordinator.GitEventConsumer
-	Queue            *worker.Service
-	Engine           *lifecycle.Engine
+	Project           coordinator.Project
+	Store             *flowdb.Store
+	Issues            *coordinator.IssueService
+	AgentDefs         *coordinator.AgentDefService
+	Flows             *coordinator.FlowService
+	WorkflowRuns      *coordinator.WorkflowRunService
+	WorkflowArtifacts *coordinator.WorkflowArtifactService
+	WorkflowExecutor  *coordinator.WorkflowExecutor
+	Cursors           *coordinator.FlowCursorService
+	Checks            *coordinator.CheckService
+	Threads           *coordinator.ThreadService
+	Sessions          *coordinator.SessionService
+	Transcripts       *coordinator.TranscriptStore
+	Attachments       *coordinator.IssueAttachmentStore
+	Status            *coordinator.StatusService
+	Reconciler        *coordinator.ReconcileService
+	CheckConfigs      *coordinator.CheckConfigService
+	Merges            *coordinator.MergeService
+	Transitions       *coordinator.TransitionService
+	GitEvents         *coordinator.GitEventService
+	Idempotency       *coordinator.IdempotencyService
+	GitEventConsumer  *coordinator.GitEventConsumer
+	Queue             *worker.Service
+	Engine            *lifecycle.Engine
 }
 
 type RegistryOptions struct {
@@ -170,7 +173,6 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 	if err := flows.SeedDefaults(ctx); err != nil {
 		return nil, fmt.Errorf("seed default flows for project %s: %w", project.ID, err)
 	}
-	cursors := coordinator.NewFlowCursorService(db, flows)
 	checks := coordinator.NewCheckService(db)
 	threads := coordinator.NewThreadService(db)
 	queue := worker.NewService(db)
@@ -179,7 +181,6 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 	// assessment review (Mode-B recovery) instead of a blind full relaunch.
 	checkConfigs := coordinator.NewCheckConfigServiceWithOptions(db, checks, queue, threads, project, coordinator.CheckConfigServiceOptions{
 		HarnessArgs: r.harnessArgs,
-		FlowCursors: cursors,
 	})
 	reconciler := coordinator.NewReconcileService(db)
 	sessions := coordinator.NewSessionServiceWithOptions(db, issues, queue, coordinator.SessionServiceOptions{
@@ -191,36 +192,43 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 		ReviewAuthorCycleLimit:          r.reviewAuthorCycleLimit,
 		HandoffSnapshots:                reconciler,
 		ReviewRounds:                    checkConfigs,
-		FlowCursors:                     cursors,
 	})
 	merges := coordinator.NewMergeService(db, issues, sessions, project)
+	workflowRuns := coordinator.NewWorkflowRunService(db, flows, issues)
+	workflowArtifacts := coordinator.NewWorkflowArtifactService(db)
+	workflowExecutor := coordinator.NewWorkflowExecutor(coordinator.WorkflowExecutorOptions{
+		Database: db, Runs: workflowRuns, Artifacts: workflowArtifacts, Issues: issues,
+		Checks: checks, CheckConfigs: checkConfigs, Sessions: sessions, Merges: merges,
+		Queue: queue, Project: project, HarnessArgs: r.harnessArgs,
+	})
 	status := coordinator.NewStatusService(db)
 
-	engine := lifecycle.NewEngine(db, lifecycle.NewEffects(issues, checks, checkConfigs, sessions, merges, threads, status, cursors, reconciler))
+	engine := lifecycle.NewEngine(db, lifecycle.NewEffects(issues, checks, checkConfigs, sessions, merges, threads, status, nil, reconciler))
 	engine.SetDeadlines(r.deadlines)
 
 	bundle := &ProjectBundle{
-		Project:          project,
-		Store:            store,
-		Issues:           issues,
-		AgentDefs:        agentDefs,
-		Flows:            flows,
-		Cursors:          cursors,
-		Checks:           checks,
-		Threads:          threads,
-		Sessions:         sessions,
-		Transcripts:      coordinator.NewTranscriptStore(filepath.Join(flowgit.ProjectDir(r.dataDir, project.ID), "transcripts")),
-		Attachments:      coordinator.NewIssueAttachmentStore(filepath.Join(flowgit.ProjectDir(r.dataDir, project.ID), "attachments")),
-		Status:           status,
-		Reconciler:       reconciler,
-		CheckConfigs:     checkConfigs,
-		Merges:           merges,
-		Transitions:      coordinator.NewTransitionService(db),
-		GitEvents:        coordinator.NewGitEventService(db),
-		Idempotency:      coordinator.NewIdempotencyService(db),
-		GitEventConsumer: coordinator.NewGitEventConsumer(db, project),
-		Queue:            queue,
-		Engine:           engine,
+		Project:           project,
+		Store:             store,
+		Issues:            issues,
+		AgentDefs:         agentDefs,
+		Flows:             flows,
+		WorkflowRuns:      workflowRuns,
+		WorkflowArtifacts: workflowArtifacts,
+		WorkflowExecutor:  workflowExecutor,
+		Checks:            checks,
+		Threads:           threads,
+		Sessions:          sessions,
+		Transcripts:       coordinator.NewTranscriptStore(filepath.Join(flowgit.ProjectDir(r.dataDir, project.ID), "transcripts")),
+		Attachments:       coordinator.NewIssueAttachmentStore(filepath.Join(flowgit.ProjectDir(r.dataDir, project.ID), "attachments")),
+		Status:            status,
+		Reconciler:        reconciler,
+		CheckConfigs:      checkConfigs,
+		Merges:            merges,
+		GitEvents:         coordinator.NewGitEventService(db),
+		Idempotency:       coordinator.NewIdempotencyService(db),
+		GitEventConsumer:  coordinator.NewGitEventConsumer(db, project),
+		Queue:             queue,
+		Engine:            engine,
 	}
 	r.bundles[project.ID] = bundle
 

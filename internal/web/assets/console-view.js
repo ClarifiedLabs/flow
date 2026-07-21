@@ -33,7 +33,7 @@ export async function renderConsoleView(app, context) {
   let terminal = "";
   if (session && terminalAvailable) {
     const sessionID = value(session, "id", "ID");
-    const accessData = await apiPost(`/v1/sessions/${encodeURIComponent(sessionID)}/terminal-token`, {});
+    const accessData = await apiPost(`/v2/sessions/${encodeURIComponent(sessionID)}/terminal-token`, {});
     if (context && !app.isActiveLoad(context)) return false;
     const access = accessData.access || accessData.Access || {};
     const loginPath = value(access, "login_path", "LoginPath");

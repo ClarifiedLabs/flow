@@ -15,16 +15,16 @@
 3. Verify locally with the narrowest useful tests first, then broader tests when risk justifies it.
    - Report meaningful progress with `flow status "<message>"` during longer work.
    - For addressed review threads, use `flow thread claim <thread-id> fixed|not_warranted|superseded`.
-   - If a blocking concern cannot be fixed, explain it in the handoff and do not call `flow ready`.
+   - If a blocking concern cannot be fixed, report it with `flow status --kind question` and do not complete the node.
 
-4. Finalize with two actions:
+4. Finalize with three actions:
    - `git commit` your work with a conventional-commit message.
-   - `flow ready`, piping the handoff on stdin. `flow ready` pushes the branch to the Flow exchange remote, submits the handoff to the coordinator, and marks the change ready for review. Do not push or write a handoff file separately.
-   - Provide the handoff via a heredoc, for example:
+   - Write a concise Markdown summary of the change and verification results.
+   - Run `flow complete --summary-file SUMMARY.md`. It pushes the run-specific branch, creates the typed change artifact, and advances the active workflow node.
+   - A useful summary looks like:
 
      ```
-     flow ready <<'HANDOFF'
-     # Flow Handoff
+     # Change Summary
 
      ## Current Goal
      <goal>
@@ -46,5 +46,4 @@
 
      ## Next Recommended Action
      <the next concrete step>
-     HANDOFF
      ```

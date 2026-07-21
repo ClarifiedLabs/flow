@@ -85,7 +85,7 @@ func newFlowTestFixture(t *testing.T) flowTestFixture {
 	server, err := api.NewServer(api.ServerOptions{
 		Registry:        registry,
 		OwnerToken:      "owner-token",
-		ProtocolVersion: "1",
+		ProtocolVersion: "2",
 	})
 	if err != nil {
 		t.Fatalf("new api server: %v", err)

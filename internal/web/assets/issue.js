@@ -1,8 +1,6 @@
-// Issue form/attachment free helpers (issue-state form, attachment upload form
-// and list, the upload action).
+// Issue attachment helpers: forms, lists, and the upload action.
 
 import { apiPostForm, attachmentHref, isImageContentType, issueAPIBase } from "./api.js";
-import { ISSUE_STATE_OPTIONS } from "./config.js";
 import { formatBytes } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
@@ -10,28 +8,6 @@ import { value } from "./normalize.js";
 export function projectButtonAttr(projectID) {
   const id = String(projectID || "").trim();
   return id ? ` data-project="${escapeAttr(id)}"` : "";
-}
-
-export function currentIssueState(scheduleState, triageState) {
-  if (triageState === "rejected") return "rejected";
-  if (scheduleState === "closed") return "closed";
-  if (triageState === "triage") return "triage";
-  if (scheduleState === "up_next") return "up_next";
-  return "backlog";
-}
-
-export function renderIssueStateForm(issueID, currentState, projectID) {
-  return `
-    <form class="issue-state-form" data-issue-state-form="${escapeAttr(issueID)}"${projectButtonAttr(projectID)}>
-      <label>
-        <span>State</span>
-        <select name="state">
-          ${ISSUE_STATE_OPTIONS.map(([state, label]) => `<option value="${escapeAttr(state)}" ${state === currentState ? "selected" : ""}>${escapeHTML(label)}</option>`).join("")}
-        </select>
-      </label>
-      <button class="button secondary" type="submit">Apply</button>
-    </form>
-  `;
 }
 
 export function renderAttachmentUploadForm(issueID, projectID) {

@@ -19,7 +19,7 @@ import (
 // TestReconcileRestoresChangeProjectionWithoutReadingHandoffRef proves the
 // change projection is rebuilt from the branch tip while a committed handoff
 // file on that branch is ignored: the coordinator's handoff snapshot is written
-// solely by PutHandoff (flow ready / flow handoff write), never re-read from git.
+// solely by the coordinator's artifact path, never re-read from git.
 func TestReconcileRestoresChangeProjectionWithoutReadingHandoffRef(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

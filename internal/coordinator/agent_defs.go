@@ -136,6 +136,27 @@ WHERE id = ?`,
 }
 
 func (s *AgentDefService) Delete(ctx context.Context, id string) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT config_json FROM flow_nodes`)
+	if err != nil {
+		return fmt.Errorf("inspect workflow agent references: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return fmt.Errorf("scan workflow agent reference: %w", err)
+		}
+		config, err := decodeNodeConfig(raw)
+		if err != nil {
+			return err
+		}
+		if flowNodeConfigUsesAgent(config, id) {
+			return ErrAgentDefInUse
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate workflow agent references: %w", err)
+	}
 	result, err := s.db.ExecContext(ctx, `DELETE FROM agent_defs WHERE id = ?`, id)
 	if err != nil {
 		if isForeignKeyViolation(err) {
@@ -151,6 +172,27 @@ func (s *AgentDefService) Delete(ctx context.Context, id string) error {
 		return ErrAgentDefNotFound
 	}
 	return nil
+}
+
+func flowNodeConfigUsesAgent(config FlowNodeConfig, agentDefID string) bool {
+	if config.Agent != nil && config.Agent.AgentDefID == agentDefID {
+		return true
+	}
+	if config.ChangeReview != nil {
+		for _, agent := range config.ChangeReview.Agents {
+			if agent.AgentDefID == agentDefID {
+				return true
+			}
+		}
+	}
+	if config.VerifyChange != nil {
+		for _, agent := range config.VerifyChange.Agents {
+			if agent.AgentDefID == agentDefID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *AgentDefService) Get(ctx context.Context, id string) (AgentDef, error) {

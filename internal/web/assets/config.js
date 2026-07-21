@@ -4,18 +4,14 @@
 // layout, etc.) live with their owning module, not here.
 
 export const LANES = [
-  ["backlog", "Backlog", "Backlog"],
-  ["up_next", "Up Next", "UpNext"],
+  ["unscheduled", "Unscheduled", "Unscheduled"],
+  ["scheduled", "Scheduled", "Scheduled"],
   ["in_progress", "In Progress", "InProgress"],
-  ["needs_attention", "Needs Attention", "NeedsAttention"],
 ];
 
 export const NAV = [
   ["/ui/board", "Board"],
   ["/ui/console", "Console"],
-  ["/ui/triage", "Triage"],
-  ["/ui/feedback", "Needs Attention"],
-  ["/ui/merge", "Merge"],
   ["/ui/done", "Done"],
   ["/ui/flows", "Flows"],
   ["/ui/workers", "Workers"],
@@ -52,7 +48,7 @@ export const DONE_DENSITIES = new Set(["extended", "compact"]);
 
 export const DIFF_MODES = new Set(["unified", "split"]);
 
-export const DONE_OUTCOMES = new Set(["all", "merged", "rejected", "abandoned"]);
+export const DONE_OUTCOMES = new Set(["all", "completed", "merged", "rejected", "abandoned", "cancelled", "failed"]);
 
 export const THEME_PREFERENCES = new Set(["system", "light", "dark"]);
 
@@ -60,14 +56,6 @@ export const DEFAULT_AGENT_HARNESSES = [];
 
 export const DEFAULT_CONSOLE_HARNESSES = [
   { name: "shell", display_name: "Shell" },
-];
-
-export const ISSUE_STATE_OPTIONS = [
-  ["triage", "Triage"],
-  ["backlog", "Backlog"],
-  ["up_next", "Up Next"],
-  ["closed", "Closed"],
-  ["rejected", "Rejected"],
 ];
 
 export const BOARD_DONE_COUNTS = [10, 20, 50];

@@ -358,13 +358,13 @@ func TestServeAPIWiresWorkerDiagnostics(t *testing.T) {
 		Registry:        registry,
 		OwnerToken:      "owner-token",
 		HookToken:       "hook-token",
-		ProtocolVersion: "1",
+		ProtocolVersion: "2",
 	})
 	if err != nil {
 		t.Fatalf("new serve api: %v", err)
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "/v1/workers", nil)
+	request := httptest.NewRequest(http.MethodGet, "/v2/workers", nil)
 	request.Header.Set("Authorization", "Bearer owner-token")
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
@@ -375,7 +375,7 @@ func TestServeAPIWiresWorkerDiagnostics(t *testing.T) {
 		t.Fatalf("body = %s", response.Body.String())
 	}
 
-	request = httptest.NewRequest(http.MethodGet, "/v1/issues/"+issue.ID+"/checks", nil)
+	request = httptest.NewRequest(http.MethodGet, "/v2/issues/"+issue.ID+"/checks", nil)
 	request.Header.Set("Authorization", "Bearer owner-token")
 	response = httptest.NewRecorder()
 	server.ServeHTTP(response, request)

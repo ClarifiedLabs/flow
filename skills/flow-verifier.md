@@ -10,7 +10,7 @@
 2. Verify acceptance and claims:
    - Check the issue acceptance criteria against the current code and tests.
    - For claimed threads, inspect the original concern, author rationale, and claimed commit.
-   - Do not implement fixes, commit, push, create new review concerns, or call `flow ready`.
+   - Do not implement fixes, commit, push, create new review concerns, or call `flow complete`.
 
 3. Decide each claimed thread:
    - Decide `certify` when the claim is correct, `reopen` (with a body explaining why)

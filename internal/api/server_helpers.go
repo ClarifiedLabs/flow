@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -21,16 +22,10 @@ func createIssueInputForPrincipal(request createIssueRequest, principal coordina
 	actor := coordinator.ActorHuman
 	createdBySessionID := request.CreatedBySessionID
 	sourceIssueID := request.SourceIssueID
-	scheduleState := coordinator.ScheduleState(request.ScheduleState)
-	triageState := coordinator.TriageState(request.TriageState)
+	scheduleState := coordinator.ScheduleBacklog
+	triageState := coordinator.TriageAccepted
 
 	if principal.Scope == coordinator.TokenScopeSession {
-		if request.ScheduleState != "" && scheduleState != coordinator.ScheduleBacklog {
-			return coordinator.CreateIssueWithDetailsInput{}, errors.New("session tokens can only create backlog issues")
-		}
-		if request.TriageState != "" && triageState != coordinator.TriagePending {
-			return coordinator.CreateIssueWithDetailsInput{}, errors.New("session tokens can only create triage issues")
-		}
 		if principal.SourceIssueID == nil && sourceIssueID != nil {
 			return coordinator.CreateIssueWithDetailsInput{}, errors.New("session token is not bound to a source issue")
 		}
@@ -42,7 +37,7 @@ func createIssueInputForPrincipal(request createIssueRequest, principal coordina
 		createdBySessionID = &principal.Subject
 		sourceIssueID = principal.SourceIssueID
 		scheduleState = coordinator.ScheduleBacklog
-		triageState = coordinator.TriagePending
+		triageState = coordinator.TriageAccepted
 	} else if principal.Scope == coordinator.TokenScopeConsole {
 		actor = coordinator.ActorAgent
 		createdBySessionID = &principal.Subject
@@ -50,19 +45,17 @@ func createIssueInputForPrincipal(request createIssueRequest, principal coordina
 
 	input := coordinator.CreateIssueWithDetailsInput{
 		Issue: coordinator.CreateIssueInput{
-			Title:               request.Title,
-			Body:                request.Body,
-			AcceptanceCriteria:  request.AcceptanceCriteria,
-			Priority:            request.Priority,
-			ScheduleState:       scheduleState,
-			TriageState:         triageState,
-			RequiresHumanReview: request.RequiresHumanReview,
-			AutoMerge:           request.AutoMerge,
-			FlowID:              request.FlowID,
-			CreatedBy:           actor,
-			CreatedBySessionID:  createdBySessionID,
-			SourceIssueID:       sourceIssueID,
-			SourceChangeID:      request.SourceChangeID,
+			Title:              request.Title,
+			Body:               request.Body,
+			AcceptanceCriteria: request.AcceptanceCriteria,
+			Priority:           request.Priority,
+			ScheduleState:      scheduleState,
+			TriageState:        triageState,
+			FlowID:             request.FlowID,
+			CreatedBy:          actor,
+			CreatedBySessionID: createdBySessionID,
+			SourceIssueID:      sourceIssueID,
+			SourceChangeID:     request.SourceChangeID,
 		},
 		Tags:      tagInputs(request.Tags, actor),
 		Relations: relationInputs(request.Relations, actor),
@@ -183,12 +176,12 @@ func checkSessionTokenScope(principal coordinator.Principal, sessionID string) e
 	return nil
 }
 
-func checkConsoleIssueScope(principal coordinator.Principal, issueID string) error {
-	if principal.Scope != coordinator.TokenScopeConsole || principal.SourceIssueID == nil {
+func checkBoundIssueScope(principal coordinator.Principal, issueID string) error {
+	if (principal.Scope != coordinator.TokenScopeSession && principal.Scope != coordinator.TokenScopeConsole) || principal.SourceIssueID == nil {
 		return nil
 	}
 	if strings.TrimSpace(*principal.SourceIssueID) != strings.TrimSpace(issueID) {
-		return errors.New("issue console token cannot operate on a different issue")
+		return errors.New("session credential cannot operate on a different issue")
 	}
 	return nil
 }
@@ -302,20 +295,18 @@ func sessionHarnessForJob(job worker.Job) string {
 }
 
 type createIssueRequest struct {
-	Title               string            `json:"title"`
-	Body                string            `json:"body"`
-	AcceptanceCriteria  string            `json:"acceptance_criteria"`
-	Priority            int               `json:"priority"`
-	ScheduleState       string            `json:"schedule_state"`
-	TriageState         string            `json:"triage_state"`
-	RequiresHumanReview *bool             `json:"requires_human_review"`
-	AutoMerge           *bool             `json:"auto_merge"`
-	FlowID              string            `json:"flow_id"`
-	CreatedBySessionID  *string           `json:"created_by_session_id"`
-	SourceIssueID       *string           `json:"source_issue_id"`
-	SourceChangeID      *string           `json:"source_change_id"`
-	Tags                []tagRequest      `json:"tags"`
-	Relations           []relationRequest `json:"relations"`
+	Title              string            `json:"title"`
+	Body               string            `json:"body"`
+	AcceptanceCriteria string            `json:"acceptance_criteria"`
+	Priority           int               `json:"priority"`
+	FlowID             string            `json:"flow_id"`
+	ScheduleState      string            `json:"-"`
+	TriageState        string            `json:"-"`
+	CreatedBySessionID *string           `json:"created_by_session_id"`
+	SourceIssueID      *string           `json:"source_issue_id"`
+	SourceChangeID     *string           `json:"source_change_id"`
+	Tags               []tagRequest      `json:"tags"`
+	Relations          []relationRequest `json:"relations"`
 }
 
 type tagRequest struct {
@@ -328,13 +319,11 @@ type tagRequest struct {
 type relationRequest = contract.IssueRelationRequest
 
 type editIssueRequest struct {
-	Title               *string `json:"title"`
-	Body                *string `json:"body"`
-	AcceptanceCriteria  *string `json:"acceptance_criteria"`
-	Priority            *int    `json:"priority"`
-	RequiresHumanReview *bool   `json:"requires_human_review"`
-	AutoMerge           *bool   `json:"auto_merge"`
-	FlowID              *string `json:"flow_id"`
+	Title              *string `json:"title"`
+	Body               *string `json:"body"`
+	AcceptanceCriteria *string `json:"acceptance_criteria"`
+	Priority           *int    `json:"priority"`
+	FlowID             *string `json:"flow_id"`
 }
 
 type scheduleIssueRequest = contract.ScheduleIssueRequest
@@ -729,28 +718,15 @@ type errorResponse = contract.ErrorResponse
 
 func issueFilterFromQuery(r *http.Request) (coordinator.IssueFilter, error) {
 	var filter coordinator.IssueFilter
-	for _, state := range r.URL.Query()["schedule_state"] {
+	for _, state := range r.URL.Query()["state"] {
 		if state == "" {
 			continue
 		}
-		scheduleState := coordinator.ScheduleState(state)
-		switch scheduleState {
-		case coordinator.ScheduleBacklog, coordinator.ScheduleUpNext, coordinator.ScheduleClosed:
-			filter.ScheduleStates = append(filter.ScheduleStates, scheduleState)
+		switch state {
+		case "unscheduled", string(coordinator.LifecycleScheduled), string(coordinator.LifecycleInProgress), string(coordinator.LifecycleDone):
+			filter.LifecycleStates = append(filter.LifecycleStates, state)
 		default:
-			return coordinator.IssueFilter{}, fmt.Errorf("invalid schedule_state %q", state)
-		}
-	}
-	for _, state := range r.URL.Query()["triage_state"] {
-		if state == "" {
-			continue
-		}
-		triageState := coordinator.TriageState(state)
-		switch triageState {
-		case coordinator.TriagePending, coordinator.TriageAccepted, coordinator.TriageRejected:
-			filter.TriageStates = append(filter.TriageStates, triageState)
-		default:
-			return coordinator.IssueFilter{}, fmt.Errorf("invalid triage_state %q", state)
+			return coordinator.IssueFilter{}, fmt.Errorf("invalid state %q", state)
 		}
 	}
 	filter.TagSlugs = r.URL.Query()["tag"]
@@ -766,7 +742,12 @@ func decodeJSON(r *http.Request, target any) error {
 	if err := decoder.Decode(target); err != nil {
 		return err
 	}
-
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("request body must contain exactly one JSON value")
+		}
+		return err
+	}
 	return nil
 }
 

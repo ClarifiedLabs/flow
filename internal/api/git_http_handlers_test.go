@@ -53,7 +53,7 @@ func TestGitHTTPExchangeAuthAndHooks(t *testing.T) {
 	}
 	installGitHTTPTestHooks(t, project)
 
-	server, err := NewServer(ServerOptions{Registry: registry, ProtocolVersion: "1"})
+	server, err := NewServer(ServerOptions{Registry: registry, ProtocolVersion: "2"})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}

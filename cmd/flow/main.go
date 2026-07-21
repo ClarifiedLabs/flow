@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -68,8 +69,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runChecks(args[1:], stdout, stderr)
 	case "transitions":
 		return runTransitions(args[1:], stdout, stderr)
-	case "review":
-		return runReview(args[1:], stdout, stderr)
 	case "workers":
 		return runWorkers(args[1:], stdout, stderr)
 	case "jobs":
@@ -86,22 +85,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runComment(args[1:], stdout, stderr)
 	case "thread":
 		return runThread(args[1:], stdout, stderr)
-	case "handoff":
-		return runHandoff(args[1:], stdout, stderr)
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
 	case "ask":
 		return runAsk(args[1:], stdout, stderr)
-	case "ready":
-		return runReady(args[1:], stdout, stderr)
+	case "complete":
+		return runComplete(args[1:], stdout, stderr)
 	case "flows":
 		return runFlows(args[1:], stdout, stderr)
 	case "agent-defs":
 		return runAgentDefs(args[1:], stdout, stderr)
-	case "phase":
-		return runPhase(args[1:], stdout, stderr)
-	case "merge":
-		return runMerge(args[1:], stdout, stderr)
 	case "ui":
 		return runUI(args[1:], stdout, stderr)
 	case "reconcile":
@@ -432,14 +425,18 @@ func runIssue(args []string, stdout, stderr io.Writer) int {
 		return runIssueEdit(args[1:], stdout, stderr)
 	case "schedule":
 		return runIssueSchedule(args[1:], stdout, stderr)
-	case "state":
-		return runIssueState(args[1:], stdout, stderr)
 	case "reset":
 		return runIssueReset(args[1:], stdout, stderr)
-	case "close":
-		return runIssueClose(args[1:], stdout, stderr)
-	case "triage":
-		return runIssueTriage(args[1:], stdout, stderr)
+	case "done":
+		return runIssueDone(args[1:], stdout, stderr)
+	case "reopen":
+		return runIssueReopen(args[1:], stdout, stderr)
+	case "workflow":
+		return runIssueWorkflow(args[1:], stdout, stderr)
+	case "respond":
+		return runIssueRespond(args[1:], stdout, stderr)
+	case "budget":
+		return runIssueBudget(args[1:], stdout, stderr)
 	case "link":
 		return runIssueLink(args[1:], stdout, stderr)
 	case "unlink":
@@ -462,17 +459,13 @@ func runIssueCreate(args []string, stdout, stderr io.Writer) int {
 	var body string
 	var acceptanceCriteria string
 	var priority int
-	var requiresHumanReview optionalBoolFlag
-	var autoMerge optionalBoolFlag
 	var attachmentFiles stringSliceFlag
 	flags.StringVar(&title, "title", "", "issue title")
 	flags.StringVar(&body, "body", "", "issue body")
 	flags.StringVar(&acceptanceCriteria, "acceptance-criteria", "", "acceptance criteria")
 	flags.IntVar(&priority, "priority", 0, "issue priority")
-	flags.Var(&requiresHumanReview, "requires-human-review", "require human review before merge")
-	flags.Var(&autoMerge, "auto-merge", "auto merge when review becomes approved")
 	var flowRef string
-	flags.StringVar(&flowRef, "flow", "", "flow (id or name) driving this issue's work phases and review set")
+	flags.StringVar(&flowRef, "flow", "", "workflow (id or name) used when the issue is scheduled")
 	flags.Var(&attachmentFiles, "file", "file to attach to the initial issue prompt (repeatable)")
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -497,12 +490,6 @@ func runIssueCreate(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		input.FlowID = flowID
-	}
-	if requiresHumanReview.Provided {
-		input.RequiresHumanReview = &requiresHumanReview.Value
-	}
-	if autoMerge.Provided {
-		input.AutoMerge = &autoMerge.Value
 	}
 	issue, err := client.CreateIssue(input)
 	if err != nil {
@@ -570,11 +557,9 @@ func runIssueList(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
 
-	var scheduleState string
-	var triageState string
+	var lifecycleStates string
 	var tag string
-	flags.StringVar(&scheduleState, "schedule-state", "", "comma-separated schedule states")
-	flags.StringVar(&triageState, "triage-state", "", "comma-separated triage states")
+	flags.StringVar(&lifecycleStates, "state", "", "comma-separated unscheduled,scheduled,in_progress,done states")
 	flags.StringVar(&tag, "tag", "", "comma-separated tag slugs")
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -587,9 +572,8 @@ func runIssueList(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	issues, err := client.ListIssues(flowclient.IssueFilter{
-		ScheduleStates: parseScheduleStates(scheduleState),
-		TriageStates:   parseTriageStates(triageState),
-		TagSlugs:       parseCSV(tag),
+		LifecycleStates: parseCSV(lifecycleStates),
+		TagSlugs:        parseCSV(tag),
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "list issues: %v\n", err)
@@ -689,20 +673,24 @@ func runIssueEdit(args []string, stdout, stderr io.Writer) int {
 	var body string
 	var acceptanceCriteria string
 	var priority string
-	var requiresHumanReview optionalBoolFlag
-	var autoMerge optionalBoolFlag
+	var flowRef string
 	flags.StringVar(&title, "title", "", "new issue title")
 	flags.StringVar(&body, "body", "", "new issue body")
 	flags.StringVar(&acceptanceCriteria, "acceptance-criteria", "", "new acceptance criteria")
 	flags.StringVar(&priority, "priority", "", "new issue priority")
-	flags.Var(&requiresHumanReview, "requires-human-review", "require human review before merge")
-	flags.Var(&autoMerge, "auto-merge", "auto merge when review becomes approved")
+	flags.StringVar(&flowRef, "flow", "", "workflow (id or name) used by the next run")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	if flags.NArg() != 1 {
 		fmt.Fprintln(stderr, "issue id is required")
 		return 2
+	}
+	applySessionEnvironment(apiFlags, nil)
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return 1
 	}
 
 	input := flowclient.EditIssueInput{}
@@ -723,19 +711,15 @@ func runIssueEdit(args []string, stdout, stderr io.Writer) int {
 		}
 		input.Priority = &parsedPriority
 	}
-	if requiresHumanReview.Provided {
-		input.RequiresHumanReview = &requiresHumanReview.Value
-	}
-	if autoMerge.Provided {
-		input.AutoMerge = &autoMerge.Value
+	if strings.TrimSpace(flowRef) != "" {
+		flowID, err := resolveFlowRef(client, flowRef)
+		if err != nil {
+			fmt.Fprintf(stderr, "resolve flow: %v\n", err)
+			return 1
+		}
+		input.FlowID = &flowID
 	}
 
-	applySessionEnvironment(apiFlags, nil)
-	client, err := newAPIClient(apiFlags)
-	if err != nil {
-		fmt.Fprintf(stderr, "create client: %v\n", err)
-		return 1
-	}
 	client, issueRef := scopeClientForRef(client, flags.Arg(0))
 	issue, err := client.EditIssue(issueRef, input)
 	if err != nil {
@@ -748,17 +732,16 @@ func runIssueEdit(args []string, stdout, stderr io.Writer) int {
 }
 
 func runIssueSchedule(args []string, stdout, stderr io.Writer) int {
-	parsed, issueRef, code := parseScopedIssueAPICommand(args, stderr, "issue schedule", 2, "usage: flow issue schedule [flags] ISSUE_ID backlog|up_next")
+	parsed, issueRef, code := parseScopedIssueAPICommand(args, stderr, "issue schedule", 1, "usage: flow issue schedule [flags] ISSUE_ID")
 	if code != 0 {
 		return code
 	}
-	issue, err := parsed.client.ScheduleIssue(issueRef, coordinator.ScheduleState(parsed.flags.Arg(1)))
+	run, err := parsed.client.ScheduleWorkflow(issueRef)
 	if err != nil {
 		fmt.Fprintf(stderr, "schedule issue: %v\n", err)
 		return 1
 	}
-
-	printIssueLine(stdout, issue)
+	fmt.Fprintf(stdout, "%s\t%s\t%s\n", run.IssueID, run.State, run.CurrentNodeKey)
 	return 0
 }
 
@@ -789,6 +772,129 @@ func runIssueReset(args []string, stdout, stderr io.Writer) int {
 	}
 
 	printIssueLine(stdout, issue)
+	return 0
+}
+
+func runIssueDone(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("issue done", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	var resolution string
+	var note string
+	flags.StringVar(&resolution, "resolution", string(coordinator.ResolutionCompleted), "completed|rejected|abandoned|cancelled|failed")
+	flags.StringVar(&note, "note", "", "completion note")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(stderr, "issue id is required")
+		return 2
+	}
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return 1
+	}
+	client, issueRef := scopeClientForRef(client, flags.Arg(0))
+	issue, err := client.ForceDone(issueRef, coordinator.DoneResolution(resolution), note)
+	if err != nil {
+		fmt.Fprintf(stderr, "complete issue: %v\n", err)
+		return 1
+	}
+	printIssueLine(stdout, issue)
+	return 0
+}
+
+func runIssueReopen(args []string, stdout, stderr io.Writer) int {
+	parsed, issueRef, code := parseScopedIssueAPICommand(args, stderr, "issue reopen", 1, "usage: flow issue reopen [flags] ISSUE_ID")
+	if code != 0 {
+		return code
+	}
+	issue, err := parsed.client.ReopenIssue(issueRef)
+	if err != nil {
+		fmt.Fprintf(stderr, "reopen issue: %v\n", err)
+		return 1
+	}
+	printIssueLine(stdout, issue)
+	return 0
+}
+
+func runIssueWorkflow(args []string, stdout, stderr io.Writer) int {
+	parsed, issueRef, code := parseScopedIssueAPICommand(args, stderr, "issue workflow", 1, "usage: flow issue workflow [flags] ISSUE_ID")
+	if code != 0 {
+		return code
+	}
+	detail, err := parsed.client.GetWorkflow(issueRef)
+	if err != nil {
+		fmt.Fprintf(stderr, "get workflow: %v\n", err)
+		return 1
+	}
+	encoded, err := json.MarshalIndent(detail, "", "  ")
+	if err != nil {
+		fmt.Fprintf(stderr, "encode workflow: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, string(encoded))
+	return 0
+}
+
+func runIssueRespond(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("issue respond", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	var nodeRunID string
+	var outcome string
+	var feedback string
+	flags.StringVar(&nodeRunID, "node-run", "", "waiting node run id")
+	flags.StringVar(&outcome, "outcome", "", "human-gate outcome")
+	flags.StringVar(&feedback, "feedback", "", "feedback for the next node")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 || strings.TrimSpace(nodeRunID) == "" || strings.TrimSpace(outcome) == "" {
+		fmt.Fprintln(stderr, "usage: flow issue respond [flags] ISSUE_ID --node-run NODE_RUN_ID --outcome OUTCOME [--feedback TEXT]")
+		return 2
+	}
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return 1
+	}
+	client, issueRef := scopeClientForRef(client, flags.Arg(0))
+	result, err := client.RespondWorkflow(issueRef, nodeRunID, outcome, feedback)
+	if err != nil {
+		fmt.Fprintf(stderr, "respond to workflow: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s\t%s\t%s\n", result.Run.IssueID, result.Run.State, result.Run.CurrentNodeKey)
+	return 0
+}
+
+func runIssueBudget(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("issue budget", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	var additional int
+	flags.IntVar(&additional, "additional", 50, "additional graph transitions")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 || additional < 1 {
+		fmt.Fprintln(stderr, "usage: flow issue budget [flags] ISSUE_ID --additional N")
+		return 2
+	}
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return 1
+	}
+	client, issueRef := scopeClientForRef(client, flags.Arg(0))
+	run, err := client.ExtendWorkflowBudget(issueRef, additional)
+	if err != nil {
+		fmt.Fprintf(stderr, "extend workflow budget: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s\t%d/%d\n", run.IssueID, run.TransitionsUsed, run.TransitionBudget)
 	return 0
 }
 
@@ -933,21 +1039,26 @@ func runTransitions(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func printTransitionLine(out io.Writer, entry coordinator.TransitionLogEntry) {
-	from := entry.FromPhase
+func printTransitionLine(out io.Writer, entry coordinator.WorkflowTransition) {
+	from := entry.FromIssueState
 	if from == "" {
 		from = "-"
+	}
+	to := entry.ToIssueState
+	if entry.FromNodeKey != "" || entry.ToNodeKey != "" {
+		from = entry.FromNodeKey
+		to = entry.ToNodeKey
 	}
 	actor := entry.Actor
 	if actor == "" {
 		actor = "-"
 	}
-	fmt.Fprintf(out, "%d\t%s\t%s -> %s\t%s\tactor=%s\t%s\n",
-		entry.Seq,
+	fmt.Fprintf(out, "%d\t%s\t%s -> %s\toutcome=%s\tactor=%s\t%s\n",
+		entry.Sequence,
 		entry.EventKind,
 		from,
-		entry.ToPhase,
-		entry.GuardResult,
+		to,
+		entry.Outcome,
 		actor,
 		entry.CreatedAt.Format(time.RFC3339),
 	)
@@ -1578,24 +1689,16 @@ func enrichPromptIssueContext(input *flowprompt.Input, apiFlags *apiFlagValues) 
 		if promptInputRole(*input) == flowprompt.RoleAuthor {
 			input.PhaseName = promptContext.PhaseName
 			input.GateFeedback = promptContext.GateFeedback
+			if promptContext.WorkspaceMode != "" {
+				input.WorkspaceMode = string(promptContext.WorkspaceMode)
+			}
+			if promptContext.ArtifactKind != "" {
+				input.ArtifactKind = string(promptContext.ArtifactKind)
+			}
 		}
 		priorPhaseHandoffs = renderPriorPhaseHandoffs(promptContext.PriorHandoffs)
 	}
-	// Inject the previous session's handoff (the coordinator is the sole store
-	// now that .handoff.md is no longer committed) so the next author fix round
-	// and verifier have the prior context they used to read from the worktree.
-	// Best-effort: prior handoff is supplementary context, so a fetch failure
-	// must never strip the rest of the prompt — it only skips this section.
-	var changeHandoff string
-	if changeID := strings.TrimSpace(input.ChangeID); changeID != "" {
-		leaseID := strings.TrimSpace(os.Getenv("FLOW_LEASE_ID"))
-		if _, content, found, err := client.GetHandoff(changeID, leaseID); err != nil {
-			slog.Debug("skip prior handoff injection", "change_id", changeID, "error", err)
-		} else if found {
-			changeHandoff = content
-		}
-	}
-	input.PriorHandoff = combinePriorHandoffs(priorPhaseHandoffs, changeHandoff)
+	input.PriorHandoff = priorPhaseHandoffs
 	if promptInputRole(*input) == flowprompt.RoleAuthor {
 		if err := enrichPromptAuthorReviewContext(input, client); err != nil {
 			return err
@@ -2391,6 +2494,123 @@ func uploadReadyTranscriptBestEffort(client *flowclient.Client, sessionID string
 	}
 }
 
+func runComplete(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("complete", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	var issueID string
+	var nodeRunID string
+	var kind string
+	var summaryFile string
+	var outputFile string
+	var clientKey string
+	flags.StringVar(&issueID, "issue", "", "issue id (default FLOW_ISSUE_ID)")
+	flags.StringVar(&nodeRunID, "node-run", "", "node run id (default FLOW_NODE_RUN_ID)")
+	flags.StringVar(&kind, "kind", "", "handoff|change|issue_set (default FLOW_ARTIFACT_KIND)")
+	flags.StringVar(&summaryFile, "summary-file", "", "Markdown summary file")
+	flags.StringVar(&outputFile, "output-file", "", "JSON artifact payload file")
+	flags.StringVar(&clientKey, "client-key", "", "idempotency key (default node run id)")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "complete does not accept positional arguments")
+		return 2
+	}
+	if strings.TrimSpace(issueID) == "" {
+		issueID = os.Getenv("FLOW_ISSUE_ID")
+	}
+	if strings.TrimSpace(nodeRunID) == "" {
+		nodeRunID = os.Getenv("FLOW_NODE_RUN_ID")
+	}
+	if strings.TrimSpace(kind) == "" {
+		kind = os.Getenv("FLOW_ARTIFACT_KIND")
+	}
+	if strings.TrimSpace(issueID) == "" || strings.TrimSpace(nodeRunID) == "" || strings.TrimSpace(kind) == "" {
+		fmt.Fprintln(stderr, "issue, node run, and artifact kind are required")
+		return 2
+	}
+	if strings.TrimSpace(summaryFile) == "" {
+		fmt.Fprintln(stderr, "--summary-file is required")
+		return 2
+	}
+	summary, err := os.ReadFile(summaryFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "read summary: %v\n", err)
+		return 1
+	}
+	var payload json.RawMessage
+	if strings.TrimSpace(outputFile) != "" {
+		payload, err = os.ReadFile(outputFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "read output: %v\n", err)
+			return 1
+		}
+	}
+	if coordinator.ArtifactKind(kind) == coordinator.ArtifactChange {
+		changeID := strings.TrimSpace(os.Getenv("FLOW_CHANGE_ID"))
+		if changeID == "" {
+			fmt.Fprintln(stderr, "change completion requires FLOW_CHANGE_ID")
+			return 2
+		}
+		changePayload := map[string]any{}
+		if len(payload) > 0 {
+			if err := json.Unmarshal(payload, &changePayload); err != nil {
+				fmt.Fprintf(stderr, "decode change output: %v\n", err)
+				return 2
+			}
+			if supplied, _ := changePayload["change_id"].(string); strings.TrimSpace(supplied) != "" && strings.TrimSpace(supplied) != changeID {
+				fmt.Fprintln(stderr, "change output change_id does not match FLOW_CHANGE_ID")
+				return 2
+			}
+		}
+		headSHA, err := currentGitSHA()
+		if err != nil {
+			fmt.Fprintf(stderr, "resolve git HEAD: %v\n", err)
+			return 1
+		}
+		branch := strings.TrimSpace(os.Getenv("FLOW_BRANCH"))
+		if branch == "" {
+			branch, err = currentGitBranch()
+			if err != nil {
+				fmt.Fprintf(stderr, "resolve branch to push: %v\n", err)
+				return 1
+			}
+		}
+		if err := flowgit.PushBranch(context.Background(), "", branch); err != nil {
+			fmt.Fprintf(stderr, "push branch: %v\n", err)
+			return 1
+		}
+		changePayload["change_id"] = changeID
+		changePayload["head_sha"] = headSHA
+		payload, _ = json.Marshal(changePayload)
+	}
+	if clientKey == "" {
+		clientKey = nodeRunID
+	}
+	applySessionEnvironment(apiFlags, nil)
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return 1
+	}
+	artifact, replayed, err := client.CreateWorkflowArtifact(issueID, coordinator.CreateWorkflowArtifactInput{
+		NodeRunID: nodeRunID, Kind: coordinator.ArtifactKind(kind), SummaryMarkdown: string(summary),
+		Payload: payload, ClientKey: clientKey,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "create workflow artifact: %v\n", err)
+		return 1
+	}
+	result, err := client.CompleteWorkflowAgentNode(issueID, nodeRunID, artifact.ID)
+	if err != nil {
+		fmt.Fprintf(stderr, "complete workflow node: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s\t%s\t%s\treplayed=%t\n", artifact.ID, result.Run.ID, result.Run.State, replayed || result.Replayed)
+	return 0
+}
+
 func runMerge(args []string, stdout, stderr io.Writer) int {
 	parsed, code := parseAPICommand(args, stderr, "merge", 1, "usage: flow merge [flags] ISSUE_ID|CHANGE_ID")
 	if code != 0 {
@@ -2494,15 +2714,17 @@ func printUsage(out io.Writer) {
   flow doctor [--db PATH] [--config PATH]
   flow issue create --title TITLE [--flow FLOW] [--file PATH]
   flow issue attach ISSUE_ID --file PATH [--stage initial|author|reviewer|verifier]
-  flow issue list
+  flow issue list [--state unscheduled,scheduled,in_progress,done]
   flow issue show [--project PROJECT] ISSUE_ID|PROJECT/ISSUE_ID
-  flow phase approve|request-changes ISSUE_ID
   flow issue reply ISSUE_ID MESSAGE
-  flow issue state ISSUE_ID triage|backlog|up_next|closed|rejected
+  flow issue schedule ISSUE_ID
+  flow issue reset|reopen|workflow ISSUE_ID
+  flow issue respond ISSUE_ID --node-run NODE_RUN_ID --outcome OUTCOME [--feedback TEXT]
+  flow issue budget ISSUE_ID --additional N
+  flow issue done ISSUE_ID [--resolution RESOLUTION]
   flow board
   flow checks ISSUE_ID
   flow transitions ISSUE_ID
-  flow review run ISSUE_ID
   flow workers
   flow jobs
   flow ui
@@ -2512,11 +2734,9 @@ func printUsage(out io.Writer) {
   flow fetch-prompt [--role author|reviewer|verifier] [--harness codex|claude|harness|agents]
   flow comment SHA:FILE:LINE BODY
   flow thread reply|claim|certify|reopen
-  flow handoff write [flags]
   flow status MESSAGE
   flow ask QUESTION
-  flow ready [--handoff-file PATH] [--allow-missing-handoff]   (handoff piped on stdin)
-  flow merge ISSUE_ID|CHANGE_ID
+  flow complete --summary-file PATH [--output-file PATH]
   flow reconcile
   flow --version
 
@@ -2538,11 +2758,13 @@ func printIssueUsage(out io.Writer) {
   flow issue show [flags] ISSUE_ID
   flow issue edit [flags] ISSUE_ID
   flow issue reply [flags] ISSUE_ID [MESSAGE]
-  flow issue schedule [flags] ISSUE_ID backlog|up_next
-  flow issue state [flags] ISSUE_ID triage|backlog|up_next|closed|rejected
+  flow issue schedule [flags] ISSUE_ID
   flow issue reset [flags] ISSUE_ID
-  flow issue close [flags] ISSUE_ID
-  flow issue triage [flags] ISSUE_ID accepted|rejected
+  flow issue done [flags] ISSUE_ID [--resolution completed|rejected|abandoned|cancelled|failed]
+  flow issue reopen [flags] ISSUE_ID
+  flow issue workflow [flags] ISSUE_ID
+  flow issue respond [flags] ISSUE_ID --node-run NODE_RUN_ID --outcome OUTCOME
+  flow issue budget [flags] ISSUE_ID --additional N
   flow issue link [flags] SOURCE_ID blocks|parent_of|related_to TARGET_ID
   flow issue unlink [flags] SOURCE_ID blocks|parent_of|related_to TARGET_ID
 `)
@@ -2603,32 +2825,6 @@ type apiFlagValues struct {
 type parsedAPICommand struct {
 	flags  *flag.FlagSet
 	client *flowclient.Client
-}
-
-type optionalBoolFlag struct {
-	Value    bool
-	Provided bool
-}
-
-func (f *optionalBoolFlag) Set(value string) error {
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		return err
-	}
-	f.Value = parsed
-	f.Provided = true
-	return nil
-}
-
-func (f *optionalBoolFlag) String() string {
-	if f == nil || !f.Provided {
-		return ""
-	}
-	return strconv.FormatBool(f.Value)
-}
-
-func (f *optionalBoolFlag) IsBoolFlag() bool {
-	return true
 }
 
 type stringSliceFlag struct {
@@ -2968,7 +3164,18 @@ func nowUTC() time.Time {
 }
 
 func printIssueLine(out io.Writer, issue coordinator.Issue) {
-	fmt.Fprintf(out, "%s\t%s\t%s\t%s\n", issue.ID, issue.ScheduleState, issue.TriageState, issue.Title)
+	resolution := ""
+	if issue.DoneResolution != nil {
+		resolution = string(*issue.DoneResolution)
+	}
+	fmt.Fprintf(out, "%s\t%s\t%s\t%s\n", issue.ID, issueLifecycleLabel(issue), resolution, issue.Title)
+}
+
+func issueLifecycleLabel(issue coordinator.Issue) string {
+	if issue.State == nil {
+		return "unscheduled"
+	}
+	return string(*issue.State)
 }
 
 func printIssueAttachmentLine(out io.Writer, attachment coordinator.IssueAttachment) {
@@ -2990,17 +3197,16 @@ func printBoard(out io.Writer, result coordinator.BoardResult) {
 	for _, id := range result.BlockedIDs {
 		blocked[id] = true
 	}
-	printBoardLane(out, "backlog", result.Board.Backlog, result.LaneStates, result.WaitReasons, blocked)
-	printBoardLane(out, "up_next", result.Board.UpNext, result.LaneStates, result.WaitReasons, blocked)
+	printBoardLane(out, "unscheduled", result.Board.Unscheduled, result.LaneStates, result.WaitReasons, blocked)
+	printBoardLane(out, "scheduled", result.Board.Scheduled, result.LaneStates, result.WaitReasons, blocked)
 	printBoardLane(out, "in_progress", result.Board.InProgress, result.LaneStates, result.WaitReasons, blocked)
-	printBoardLane(out, "needs_attention", result.Board.NeedsAttention, result.LaneStates, result.WaitReasons, blocked)
 }
 
 func printBoardLane(out io.Writer, name string, issues []coordinator.Issue, states map[string]coordinator.LaneState, waitReasons map[string]coordinator.WaitReason, blocked map[string]bool) {
 	fmt.Fprintf(out, "%s:\n", name)
 	for _, issue := range issues {
 		annotations := ""
-		if state, ok := states[issue.ID]; ok && string(state) != string(issue.ScheduleState) && string(state) != string(issue.TriageState) {
+		if state, ok := states[issue.ID]; ok && string(state) != issueLifecycleLabel(issue) {
 			annotations += "\t[" + strings.ReplaceAll(string(state), "_", " ") + "]"
 		}
 		if reason := waitReasons[issue.ID]; reason != "" {
@@ -3009,7 +3215,7 @@ func printBoardLane(out io.Writer, name string, issues []coordinator.Issue, stat
 		if blocked[issue.ID] {
 			annotations += "\t[blocked]"
 		}
-		fmt.Fprintf(out, "  %s\t%s\t%s\t%s%s\n", issue.ID, issue.ScheduleState, issue.TriageState, issue.Title, annotations)
+		fmt.Fprintf(out, "  %s\t%s\t%s%s\n", issue.ID, issueLifecycleLabel(issue), issue.Title, annotations)
 	}
 }
 

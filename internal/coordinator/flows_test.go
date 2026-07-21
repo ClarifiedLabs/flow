@@ -51,32 +51,29 @@ func TestSeedDefaults(t *testing.T) {
 		t.Fatalf("seeded flows = %d, want 2", len(allFlows))
 	}
 
-	direct, err := flows.GetByName(ctx, "direct")
+	coding, err := flows.GetByName(ctx, "coding")
 	if err != nil {
-		t.Fatalf("GetByName direct: %v", err)
+		t.Fatalf("GetByName coding: %v", err)
 	}
-	if !direct.Default {
-		t.Error("direct flow is not the default")
+	if !coding.Default {
+		t.Error("coding flow is not the default")
 	}
-	if len(direct.Phases) != 1 || direct.Phases[0].Name != "implement" || direct.Phases[0].Gate != FlowGateAuto {
-		t.Errorf("direct phases = %+v, want single auto implement phase", direct.Phases)
+	if coding.StartNode != "implement" || len(coding.Nodes) != 8 {
+		t.Errorf("coding graph = start %q, nodes %+v", coding.StartNode, coding.Nodes)
 	}
-	if len(direct.ReviewAgents) != 2 {
-		t.Errorf("direct review agents = %+v, want reviewer+verifier", direct.ReviewAgents)
+	if coding.Nodes[0].Kind != NodeAgent || coding.Nodes[len(coding.Nodes)-1].Kind != NodeTerminal {
+		t.Errorf("coding nodes = %+v", coding.Nodes)
 	}
 
-	planned, err := flows.GetByName(ctx, "planned")
+	planning, err := flows.GetByName(ctx, "planning")
 	if err != nil {
-		t.Fatalf("GetByName planned: %v", err)
+		t.Fatalf("GetByName planning: %v", err)
 	}
-	if len(planned.Phases) != 2 {
-		t.Fatalf("planned phases = %+v, want plan+implement", planned.Phases)
+	if planning.StartNode != "write-plan" || len(planning.Nodes) != 5 {
+		t.Fatalf("planning graph = start %q, nodes %+v", planning.StartNode, planning.Nodes)
 	}
-	if planned.Phases[0].Name != "plan" || planned.Phases[0].Gate != FlowGateHuman {
-		t.Errorf("planned first phase = %+v, want human-gated plan", planned.Phases[0])
-	}
-	if planned.Phases[1].Name != "implement" || planned.Phases[1].Gate != FlowGateAuto {
-		t.Errorf("planned second phase = %+v, want auto implement", planned.Phases[1])
+	if planning.Nodes[1].Kind != NodeHumanGate || planning.Nodes[2].Kind != NodeMaterializeIssueSet {
+		t.Errorf("planning nodes = %+v", planning.Nodes)
 	}
 
 	// Idempotent: a second seed pass changes nothing.
@@ -153,115 +150,5 @@ func TestAgentDefCRUD(t *testing.T) {
 	}
 	if _, err := defs.Get(ctx, created.ID); !errors.Is(err, ErrAgentDefNotFound) {
 		t.Fatalf("Get after delete = %v, want ErrAgentDefNotFound", err)
-	}
-}
-
-func TestFlowCRUDAndSnapshot(t *testing.T) {
-	ctx := context.Background()
-	flows, defs := newFlowTestServices(t)
-
-	planner, err := defs.Create(ctx, AgentDefInput{Name: "spec-writer", Harness: "codex", Model: "gpt-5.5", ReasoningEffort: "high", Prompt: "Write a spec."})
-	if err != nil {
-		t.Fatalf("create planner def: %v", err)
-	}
-	builder, err := defs.Create(ctx, AgentDefInput{Name: "builder", Harness: "claude", Prompt: "Implement."})
-	if err != nil {
-		t.Fatalf("create builder def: %v", err)
-	}
-	reviewer, err := defs.Create(ctx, AgentDefInput{Name: "strict-reviewer", Harness: "claude", Model: "claude-opus-4-8", ReasoningEffort: "max", Prompt: "Review."})
-	if err != nil {
-		t.Fatalf("create reviewer def: %v", err)
-	}
-
-	if _, err := flows.Create(ctx, FlowInput{Name: "empty"}); err == nil {
-		t.Fatal("expected error creating flow with no phases")
-	}
-
-	flow, err := flows.Create(ctx, FlowInput{
-		Name: "feature",
-		Phases: []FlowPhaseInput{
-			{Name: "spec", AgentDefID: planner.ID, Gate: FlowGateHuman},
-			{Name: "implement", AgentDefID: builder.ID},
-		},
-		ReviewAgents: []FlowReviewAgentInput{
-			{Role: FlowReviewRoleReviewer, AgentDefID: reviewer.ID},
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create flow: %v", err)
-	}
-	if flow.Phases[1].Gate != FlowGateAuto {
-		t.Errorf("unset gate = %q, want default auto", flow.Phases[1].Gate)
-	}
-
-	// Referenced agent defs cannot be deleted.
-	if err := defs.Delete(ctx, planner.ID); !errors.Is(err, ErrAgentDefInUse) {
-		t.Fatalf("delete referenced def = %v, want ErrAgentDefInUse", err)
-	}
-
-	if err := flows.SetDefaultFlow(ctx, flow.ID); err != nil {
-		t.Fatalf("SetDefaultFlow: %v", err)
-	}
-	if err := flows.Delete(ctx, flow.ID); !errors.Is(err, ErrFlowIsDefault) {
-		t.Fatalf("delete default flow = %v, want ErrFlowIsDefault", err)
-	}
-
-	// Empty flow id resolves the project default.
-	snapshot, err := flows.ResolveSnapshot(ctx, "")
-	if err != nil {
-		t.Fatalf("ResolveSnapshot: %v", err)
-	}
-	if snapshot.FlowName != "feature" || len(snapshot.Phases) != 2 {
-		t.Fatalf("snapshot = %+v, want feature flow with 2 phases", snapshot)
-	}
-	if snapshot.Phases[0].Agent.Model != "gpt-5.5" || snapshot.Phases[0].Agent.Prompt != "Write a spec." {
-		t.Errorf("snapshot phase agent = %+v, want frozen spec-writer", snapshot.Phases[0].Agent)
-	}
-	if len(snapshot.ReviewAgents) != 1 || !snapshot.ReviewAgents[0].Required {
-		t.Errorf("snapshot review agents = %+v, want one required reviewer", snapshot.ReviewAgents)
-	}
-
-	// No fix agent declared: falls back to the last work phase's agent.
-	fix, err := snapshot.FixAgentOrLastPhase()
-	if err != nil {
-		t.Fatalf("FixAgentOrLastPhase: %v", err)
-	}
-	if fix.Name != "builder" {
-		t.Errorf("fix agent = %s, want builder", fix.Name)
-	}
-
-	// The snapshot is frozen: editing the live def afterwards must not leak in.
-	if _, err := defs.Update(ctx, planner.ID, AgentDefInput{Name: "spec-writer", Harness: "codex", Model: "gpt-5.4", Prompt: "Changed."}); err != nil {
-		t.Fatalf("update def: %v", err)
-	}
-	if snapshot.Phases[0].Agent.Model != "gpt-5.5" {
-		t.Error("snapshot leaked a live agent def edit")
-	}
-
-	// Update replaces phases and review agents wholesale.
-	updated, err := flows.Update(ctx, flow.ID, FlowInput{
-		Name:          "feature",
-		FixAgentDefID: reviewer.ID,
-		Phases: []FlowPhaseInput{
-			{Name: "implement", AgentDefID: builder.ID, Gate: FlowGateAuto},
-		},
-	})
-	if err != nil {
-		t.Fatalf("Update flow: %v", err)
-	}
-	if len(updated.Phases) != 1 || len(updated.ReviewAgents) != 0 {
-		t.Fatalf("updated flow = %+v, want single phase and no review agents", updated)
-	}
-
-	resnap, err := flows.ResolveSnapshot(ctx, flow.ID)
-	if err != nil {
-		t.Fatalf("ResolveSnapshot after update: %v", err)
-	}
-	fix, err = resnap.FixAgentOrLastPhase()
-	if err != nil {
-		t.Fatalf("FixAgentOrLastPhase after update: %v", err)
-	}
-	if fix.Name != "strict-reviewer" {
-		t.Errorf("declared fix agent = %s, want strict-reviewer", fix.Name)
 	}
 }

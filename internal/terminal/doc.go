@@ -50,11 +50,11 @@ func TmuxAttachCommand(sessionName string, tmuxSocketPath string) []string {
 }
 
 func TerminalProxyPath(sessionID string) string {
-	return "/v1/sessions/" + url.PathEscape(strings.TrimSpace(sessionID)) + "/terminal"
+	return "/v2/sessions/" + url.PathEscape(strings.TrimSpace(sessionID)) + "/terminal"
 }
 
 func JobTerminalProxyPath(jobID string) string {
-	return "/v1/jobs/" + url.PathEscape(strings.TrimSpace(jobID)) + "/terminal"
+	return "/v2/jobs/" + url.PathEscape(strings.TrimSpace(jobID)) + "/terminal"
 }
 
 func TTYDServeCommand(sessionName string, bindAddress string, port int) []string {

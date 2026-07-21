@@ -63,6 +63,8 @@ type Job struct {
 	ID             string                 `json:"id"`
 	IssueID        *string                `json:"issue_id"`
 	ChangeID       *string                `json:"change_id"`
+	WorkflowRunID  *string                `json:"workflow_run_id,omitempty"`
+	NodeRunID      *string                `json:"node_run_id,omitempty"`
 	Role           JobRole                `json:"role"`
 	State          JobState               `json:"state"`
 	CapacityBucket CapacityBucket         `json:"capacity_bucket"`
@@ -104,6 +106,8 @@ type RegisterWorkerInput struct {
 type EnqueueJobInput struct {
 	IssueID        *string
 	ChangeID       *string
+	WorkflowRunID  *string
+	NodeRunID      *string
 	Role           JobRole
 	CapacityBucket CapacityBucket
 	Priority       int
@@ -176,6 +180,8 @@ INSERT INTO jobs (
 	id,
 	issue_id,
 	change_id,
+	workflow_run_id,
+	node_run_id,
 	role,
 	state,
 	capacity_bucket,
@@ -185,10 +191,12 @@ INSERT INTO jobs (
 	payload_json,
 	created_at,
 	updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id,
 		nullableString(input.IssueID),
 		nullableString(input.ChangeID),
+		nullableString(input.WorkflowRunID),
+		nullableString(input.NodeRunID),
 		string(input.Role),
 		string(JobQueued),
 		string(input.CapacityBucket),
@@ -727,6 +735,8 @@ SELECT
 	id,
 	issue_id,
 	change_id,
+	workflow_run_id,
+	node_run_id,
 	role,
 	state,
 	capacity_bucket,
@@ -984,6 +994,8 @@ func scanJob(row scanner) (Job, error) {
 	var job Job
 	var issueID sql.NullString
 	var changeID sql.NullString
+	var workflowRunID sql.NullString
+	var nodeRunID sql.NullString
 	var role string
 	var state string
 	var bucket string
@@ -997,6 +1009,8 @@ func scanJob(row scanner) (Job, error) {
 		&job.ID,
 		&issueID,
 		&changeID,
+		&workflowRunID,
+		&nodeRunID,
 		&role,
 		&state,
 		&bucket,
@@ -1034,6 +1048,8 @@ func scanJob(row scanner) (Job, error) {
 
 	job.IssueID = nullableStringPointer(issueID)
 	job.ChangeID = nullableStringPointer(changeID)
+	job.WorkflowRunID = nullableStringPointer(workflowRunID)
+	job.NodeRunID = nullableStringPointer(nodeRunID)
 	job.Role = JobRole(role)
 	job.State = JobState(state)
 	job.CapacityBucket = CapacityBucket(bucket)

@@ -70,6 +70,16 @@ func (c *GitEventConsumer) ConsumeNew(ctx context.Context) (bool, error) {
 	}
 	resetIssues := map[string]bool{}
 	for _, updated := range result.UpdatedChanges {
+		var workflowRunID sql.NullString
+		if err := c.db.QueryRowContext(ctx, `SELECT workflow_run_id FROM changes WHERE id = ?`, updated.ChangeID).Scan(&workflowRunID); err != nil {
+			errs = errors.Join(errs, fmt.Errorf("load workflow ownership for change %s: %w", updated.ChangeID, err))
+			continue
+		}
+		// Graph workflows own check scheduling per node visit. The legacy
+		// revision reset would resurrect retired checks from earlier visits.
+		if workflowRunID.Valid {
+			continue
+		}
 		if resetIssues[updated.IssueID] {
 			continue
 		}

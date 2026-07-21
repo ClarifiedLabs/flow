@@ -308,5 +308,9 @@ func issueIDForBranch(branch string) string {
 		return ""
 	}
 
-	return strings.TrimPrefix(branch, "issue/")
+	issueID := strings.TrimPrefix(branch, "issue/")
+	if marker := strings.Index(issueID, "/run-"); marker >= 0 {
+		issueID = issueID[:marker]
+	}
+	return issueID
 }

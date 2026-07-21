@@ -37,6 +37,21 @@ const (
 	TriageRejected TriageState = "rejected"
 )
 
+type LifecycleState string
+
+const (
+	LifecycleScheduled  LifecycleState = "scheduled"
+	LifecycleInProgress LifecycleState = "in_progress"
+	LifecycleDone       LifecycleState = "done"
+)
+
+type InProgressSubstate string
+
+const (
+	InProgressWorking InProgressSubstate = "working"
+	InProgressBlocked InProgressSubstate = "blocked"
+)
+
 type Actor string
 
 const (
@@ -59,18 +74,21 @@ type Issue struct {
 	Body                string
 	AcceptanceCriteria  string
 	Priority            int
-	ScheduleState       ScheduleState
-	TriageState         TriageState
-	RequiresHumanReview bool
-	AutoMerge           bool
-	FlowID              string `json:"flow_id,omitempty"`
+	ScheduleState       ScheduleState   `json:"-"`
+	TriageState         TriageState     `json:"-"`
+	RequiresHumanReview bool            `json:"-"`
+	AutoMerge           bool            `json:"-"`
+	FlowID              string          `json:"flow_id,omitempty"`
+	State               *LifecycleState `json:"state"`
+	DoneResolution      *DoneResolution `json:"done_resolution,omitempty"`
+	DoneAt              *time.Time      `json:"done_at,omitempty"`
 	CreatedBy           Actor
 	CreatedBySessionID  *string
 	SourceIssueID       *string
 	SourceChangeID      *string
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
-	ClosedAt            *time.Time
+	ClosedAt            *time.Time `json:"-"`
 }
 
 type Tag struct {
@@ -131,9 +149,8 @@ type EditIssueInput struct {
 }
 
 type IssueFilter struct {
-	ScheduleStates []ScheduleState
-	TriageStates   []TriageState
-	TagSlugs       []string
+	LifecycleStates []string
+	TagSlugs        []string
 }
 
 type CreateTagInput struct {
@@ -145,10 +162,12 @@ type CreateTagInput struct {
 }
 
 type Board struct {
-	Backlog        []Issue
-	UpNext         []Issue
+	Unscheduled    []Issue
+	Scheduled      []Issue
 	InProgress     []Issue
-	NeedsAttention []Issue
+	Backlog        []Issue `json:"-"`
+	UpNext         []Issue `json:"-"`
+	NeedsAttention []Issue `json:"-"`
 }
 
 // LaneState is the fine-grained derived sub-state of an open issue. It is the
@@ -164,6 +183,10 @@ const (
 	LaneStateTriage           LaneState = "triage"
 	LaneStateUpNext           LaneState = "up_next"
 	LaneStateBacklog          LaneState = "backlog"
+	LaneStateUnscheduled      LaneState = "unscheduled"
+	LaneStateScheduled        LaneState = "scheduled"
+	LaneStateWorking          LaneState = "working"
+	LaneStateBlocked          LaneState = "blocked"
 )
 
 type WaitReason string
@@ -252,10 +275,6 @@ INSERT INTO issues (
 	body,
 	acceptance_criteria,
 	priority,
-	schedule_state,
-	triage_state,
-	requires_human_review,
-	auto_merge,
 	flow_id,
 	created_by,
 	created_by_session_id,
@@ -263,16 +282,12 @@ INSERT INTO issues (
 	source_change_id,
 	created_at,
 	updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id,
 		issueInput.Title,
 		issueInput.Body,
 		issueInput.AcceptanceCriteria,
 		issueInput.Priority,
-		string(issueInput.ScheduleState),
-		string(issueInput.TriageState),
-		boolInt(*issueInput.RequiresHumanReview),
-		boolInt(*issueInput.AutoMerge),
 		sqlitex.NullableNonEmptyString(issueInput.FlowID),
 		string(issueInput.CreatedBy),
 		nullableStringValue(issueInput.CreatedBySessionID),
@@ -331,10 +346,6 @@ SELECT
 	body,
 	acceptance_criteria,
 	priority,
-	schedule_state,
-	triage_state,
-	requires_human_review,
-	auto_merge,
 	flow_id,
 	created_by,
 	created_by_session_id,
@@ -342,7 +353,9 @@ SELECT
 	source_change_id,
 	created_at,
 	updated_at,
-	closed_at
+	lifecycle_state,
+	done_resolution,
+	done_at
 FROM issues
 WHERE id = ?`, id)
 
@@ -362,10 +375,6 @@ const issueSelectColumns = `
 	i.body,
 	i.acceptance_criteria,
 	i.priority,
-	i.schedule_state,
-	i.triage_state,
-	i.requires_human_review,
-	i.auto_merge,
 	i.flow_id,
 	i.created_by,
 	i.created_by_session_id,
@@ -373,7 +382,9 @@ const issueSelectColumns = `
 	i.source_change_id,
 	i.created_at,
 	i.updated_at,
-	i.closed_at`
+	i.lifecycle_state,
+	i.done_resolution,
+	i.done_at`
 
 func (s *IssueService) ListIssues(ctx context.Context, filter IssueFilter) ([]Issue, error) {
 	query := "SELECT" + issueSelectColumns + "\nFROM issues i"
@@ -389,17 +400,21 @@ JOIN tags t ON t.id = it.tag_id`
 			args = append(args, slug)
 		}
 	}
-	if len(filter.ScheduleStates) > 0 {
-		predicates = append(predicates, inPredicate("i.schedule_state", len(filter.ScheduleStates)))
-		for _, state := range filter.ScheduleStates {
-			args = append(args, string(state))
+	if len(filter.LifecycleStates) > 0 {
+		var statePredicates []string
+		for _, state := range filter.LifecycleStates {
+			switch strings.TrimSpace(state) {
+			case "unscheduled":
+				statePredicates = append(statePredicates, "i.lifecycle_state IS NULL")
+			case string(LifecycleScheduled), string(LifecycleInProgress), string(LifecycleDone):
+				statePredicates = append(statePredicates, "i.lifecycle_state = ?")
+				args = append(args, strings.TrimSpace(state))
+			}
 		}
-	}
-	if len(filter.TriageStates) > 0 {
-		predicates = append(predicates, inPredicate("i.triage_state", len(filter.TriageStates)))
-		for _, state := range filter.TriageStates {
-			args = append(args, string(state))
+		if len(statePredicates) == 0 {
+			return []Issue{}, nil
 		}
+		predicates = append(predicates, "("+strings.Join(statePredicates, " OR ")+")")
 	}
 	if len(predicates) > 0 {
 		query += "\nWHERE " + strings.Join(predicates, " AND ")
@@ -422,9 +437,12 @@ type ClosedOutcome string
 
 const (
 	ClosedOutcomeAll       ClosedOutcome = ""
+	ClosedOutcomeCompleted ClosedOutcome = "completed"
 	ClosedOutcomeMerged    ClosedOutcome = "merged"
 	ClosedOutcomeRejected  ClosedOutcome = "rejected"
 	ClosedOutcomeAbandoned ClosedOutcome = "abandoned"
+	ClosedOutcomeCancelled ClosedOutcome = "cancelled"
+	ClosedOutcomeFailed    ClosedOutcome = "failed"
 )
 
 // ClosedIssueQuery bounds a page of closed issues. It is deliberately separate
@@ -434,7 +452,7 @@ type ClosedIssueQuery struct {
 	// Limit caps the page size; <= 0 falls back to defaultClosedIssueLimit.
 	Limit int
 	// Before/BeforeID is the keyset cursor: only rows strictly older than this
-	// (closed_at, id) pair are returned. Both come from a prior ClosedCursor.
+	// (done_at, id) pair are returned. Both come from a prior ClosedCursor.
 	Before   *time.Time
 	BeforeID string
 	// Within, when set, restricts results to issues closed at or after it.
@@ -453,7 +471,7 @@ type ClosedCursor struct {
 const defaultClosedIssueLimit = 50
 
 // ListClosedIssues returns one keyset-paginated page of closed issues ordered
-// newest-closed first (closed_at desc, id desc tiebreak). It never loads the
+// newest-closed first (done_at desc, id desc tiebreak). It never loads the
 // full set: closed issues grow unbounded, so callers must page or window. The
 // returned cursor is non-nil only when more rows remain.
 func (s *IssueService) ListClosedIssues(ctx context.Context, q ClosedIssueQuery) ([]Issue, *ClosedCursor, error) {
@@ -462,37 +480,31 @@ func (s *IssueService) ListClosedIssues(ctx context.Context, q ClosedIssueQuery)
 		limit = defaultClosedIssueLimit
 	}
 
-	predicates := []string{"i.schedule_state = ?", "i.closed_at IS NOT NULL"}
-	args := []any{string(ScheduleClosed)}
+	predicates := []string{"i.lifecycle_state = ?", "i.done_at IS NOT NULL"}
+	args := []any{string(LifecycleDone)}
 
 	if q.Before != nil {
 		before := formatTime(*q.Before)
-		predicates = append(predicates, "(i.closed_at < ? OR (i.closed_at = ? AND i.id < ?))")
+		predicates = append(predicates, "(i.done_at < ? OR (i.done_at = ? AND i.id < ?))")
 		args = append(args, before, before, q.BeforeID)
 	}
 	if q.Within != nil {
-		predicates = append(predicates, "i.closed_at >= ?")
+		predicates = append(predicates, "i.done_at >= ?")
 		args = append(args, formatTime(*q.Within))
 	}
 
 	switch q.Outcome {
 	case ClosedOutcomeAll:
 		// No disposition predicate.
-	case ClosedOutcomeRejected:
-		predicates = append(predicates, "i.triage_state = ?")
-		args = append(args, string(TriageRejected))
-	case ClosedOutcomeMerged:
-		predicates = append(predicates, "i.triage_state != ? AND EXISTS (SELECT 1 FROM changes c WHERE c.issue_id = i.id AND c.merged_at IS NOT NULL)")
-		args = append(args, string(TriageRejected))
-	case ClosedOutcomeAbandoned:
-		predicates = append(predicates, "i.triage_state != ? AND NOT EXISTS (SELECT 1 FROM changes c WHERE c.issue_id = i.id AND c.merged_at IS NOT NULL)")
-		args = append(args, string(TriageRejected))
+	case ClosedOutcomeCompleted, ClosedOutcomeMerged, ClosedOutcomeRejected, ClosedOutcomeAbandoned, ClosedOutcomeCancelled, ClosedOutcomeFailed:
+		predicates = append(predicates, "i.done_resolution = ?")
+		args = append(args, string(q.Outcome))
 	default:
 		return nil, nil, fmt.Errorf("invalid closed outcome %q", q.Outcome)
 	}
 
 	query := "SELECT" + issueSelectColumns + "\nFROM issues i\nWHERE " + strings.Join(predicates, " AND ") +
-		"\nORDER BY i.closed_at DESC, i.id DESC\nLIMIT ?"
+		"\nORDER BY i.done_at DESC, i.id DESC\nLIMIT ?"
 	args = append(args, limit+1)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -510,8 +522,8 @@ func (s *IssueService) ListClosedIssues(ctx context.Context, q ClosedIssueQuery)
 	if len(issues) > limit {
 		issues = issues[:limit]
 		last := issues[limit-1]
-		if last.ClosedAt != nil {
-			next = &ClosedCursor{ClosedAt: *last.ClosedAt, ID: last.ID}
+		if last.DoneAt != nil {
+			next = &ClosedCursor{ClosedAt: *last.DoneAt, ID: last.ID}
 		}
 	}
 
@@ -525,7 +537,7 @@ func (s *IssueService) CountClosedIssues(ctx context.Context) (int, error) {
 	if err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM issues
-WHERE schedule_state = ?`, string(ScheduleClosed)).Scan(&count); err != nil {
+WHERE lifecycle_state = ?`, string(LifecycleDone)).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count closed issues: %w", err)
 	}
 
@@ -557,12 +569,6 @@ func (s *IssueService) EditIssue(ctx context.Context, id string, input EditIssue
 		}
 		current.Priority = *input.Priority
 	}
-	if input.RequiresHumanReview != nil {
-		current.RequiresHumanReview = *input.RequiresHumanReview
-	}
-	if input.AutoMerge != nil {
-		current.AutoMerge = *input.AutoMerge
-	}
 	if input.FlowID != nil {
 		current.FlowID = strings.TrimSpace(*input.FlowID)
 	}
@@ -574,8 +580,6 @@ SET
 	body = ?,
 	acceptance_criteria = ?,
 	priority = ?,
-	requires_human_review = ?,
-	auto_merge = ?,
 	flow_id = ?,
 	updated_at = ?
 WHERE id = ?`,
@@ -583,8 +587,6 @@ WHERE id = ?`,
 		current.Body,
 		current.AcceptanceCriteria,
 		current.Priority,
-		boolInt(current.RequiresHumanReview),
-		boolInt(current.AutoMerge),
 		sqlitex.NullableNonEmptyString(current.FlowID),
 		formatTime(s.now().UTC()),
 		id,
@@ -596,139 +598,23 @@ WHERE id = ?`,
 }
 
 func (s *IssueService) ScheduleIssue(ctx context.Context, id string, state ScheduleState) (Issue, error) {
-	if state != ScheduleBacklog && state != ScheduleUpNext {
-		return Issue{}, errors.New("schedule state must be backlog or up_next")
-	}
-
-	current, err := s.GetIssue(ctx, id)
-	if err != nil {
-		return Issue{}, err
-	}
-	if current.TriageState != TriageAccepted {
-		return Issue{}, errors.New("only accepted issues can be scheduled")
-	}
-	if current.ScheduleState == ScheduleClosed {
-		return Issue{}, errors.New("closed issues cannot be scheduled")
-	}
-
-	if _, err := s.db.ExecContext(ctx, `
-UPDATE issues
-SET schedule_state = ?, updated_at = ?
-WHERE id = ?`, string(state), formatTime(s.now().UTC()), id); err != nil {
-		return Issue{}, fmt.Errorf("schedule issue: %w", err)
-	}
-
-	return s.GetIssue(ctx, id)
+	return Issue{}, errors.New("legacy schedule states were removed; schedule the issue through its workflow")
 }
 
 func (s *IssueService) CloseIssue(ctx context.Context, id string) (Issue, error) {
-	nowText := formatTime(s.now().UTC())
-	if _, err := s.db.ExecContext(ctx, `
-UPDATE issues
-SET schedule_state = ?, updated_at = ?, closed_at = COALESCE(closed_at, ?)
-WHERE id = ?`, string(ScheduleClosed), nowText, nowText, id); err != nil {
-		return Issue{}, fmt.Errorf("close issue: %w", err)
-	}
-
-	return s.GetIssue(ctx, id)
-}
-
-// issueStateUpdate describes how SetIssueState rewrites an issue's
-// schedule/triage/closed_at columns for a target state. An empty triage means
-// "keep the issue's current triage"; clearClosed wipes closed_at to NULL while
-// the closed states preserve any existing close timestamp.
-type issueStateUpdate struct {
-	schedule    ScheduleState
-	triage      TriageState
-	clearClosed bool
-}
-
-var issueStateUpdates = map[IssueState]issueStateUpdate{
-	IssueStateTriage:   {schedule: ScheduleBacklog, triage: TriagePending, clearClosed: true},
-	IssueStateBacklog:  {schedule: ScheduleBacklog, triage: TriageAccepted, clearClosed: true},
-	IssueStateUpNext:   {schedule: ScheduleUpNext, triage: TriageAccepted, clearClosed: true},
-	IssueStateClosed:   {schedule: ScheduleClosed},
-	IssueStateRejected: {schedule: ScheduleClosed, triage: TriageRejected},
+	return Issue{}, errors.New("legacy close was removed; complete the issue through its workflow")
 }
 
 func (s *IssueService) SetIssueState(ctx context.Context, id string, state IssueState) (Issue, error) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return Issue{}, errors.New("issue id is required")
-	}
-	state = IssueState(strings.TrimSpace(string(state)))
-	if err := validateIssueState(state); err != nil {
-		return Issue{}, err
-	}
-
-	current, err := s.GetIssue(ctx, id)
-	if err != nil {
-		return Issue{}, err
-	}
-	if state != IssueStateClosed {
-		merged, err := s.HasMergedChange(ctx, id)
-		if err != nil {
-			return Issue{}, err
-		}
-		if merged {
-			return Issue{}, errors.New("merged issues cannot be moved to a manual state other than closed")
-		}
-	}
-
-	update := issueStateUpdates[state]
-	triage := update.triage
-	if triage == "" {
-		triage = current.TriageState
-	}
-	nowText := formatTime(s.now().UTC())
-	// closed_at is NULL for open states; closed states preserve any existing
-	// close timestamp (COALESCE(closed_at, now), computed here from current).
-	var closedAt any
-	if !update.clearClosed {
-		closedAt = nowText
-		if current.ClosedAt != nil {
-			closedAt = formatTime(*current.ClosedAt)
-		}
-	}
-	if _, err := s.db.ExecContext(ctx, `
-UPDATE issues
-SET schedule_state = ?, triage_state = ?, updated_at = ?, closed_at = ?
-WHERE id = ?`, string(update.schedule), string(triage), nowText, closedAt, id); err != nil {
-		return Issue{}, fmt.Errorf("set issue state: %w", err)
-	}
-
-	return s.GetIssue(ctx, id)
+	return Issue{}, errors.New("legacy issue states were removed; use workflow lifecycle operations")
 }
 
 func (s *IssueService) AcceptTriage(ctx context.Context, id string) (Issue, error) {
-	current, err := s.GetIssue(ctx, id)
-	if err != nil {
-		return Issue{}, err
-	}
-	if current.ScheduleState == ScheduleClosed {
-		return Issue{}, errors.New("closed issues cannot be accepted from triage")
-	}
-
-	if _, err := s.db.ExecContext(ctx, `
-UPDATE issues
-SET triage_state = ?, updated_at = ?
-WHERE id = ?`, string(TriageAccepted), formatTime(s.now().UTC()), id); err != nil {
-		return Issue{}, fmt.Errorf("accept triage issue: %w", err)
-	}
-
-	return s.GetIssue(ctx, id)
+	return Issue{}, errors.New("triage was removed from the issue lifecycle")
 }
 
 func (s *IssueService) RejectTriage(ctx context.Context, id string) (Issue, error) {
-	nowText := formatTime(s.now().UTC())
-	if _, err := s.db.ExecContext(ctx, `
-UPDATE issues
-SET triage_state = ?, schedule_state = ?, updated_at = ?, closed_at = COALESCE(closed_at, ?)
-WHERE id = ?`, string(TriageRejected), string(ScheduleClosed), nowText, nowText, id); err != nil {
-		return Issue{}, fmt.Errorf("reject triage issue: %w", err)
-	}
-
-	return s.GetIssue(ctx, id)
+	return Issue{}, errors.New("triage was removed from the issue lifecycle")
 }
 
 func (s *IssueService) CreateTag(ctx context.Context, input CreateTagInput) (Tag, error) {
@@ -989,47 +875,33 @@ func (s *IssueService) BoardResult(ctx context.Context) (BoardResult, error) {
 
 	result := BoardResult{LaneStates: map[string]LaneState{}, WaitReasons: map[string]WaitReason{}}
 	for _, issue := range issues {
-		phase, err := derivePhaseFromIssue(ctx, s.db, issue)
-		if err != nil {
-			return BoardResult{}, err
-		}
-		state, ok, err := s.laneStateForPhase(ctx, issue.ID, phase)
-		if err != nil {
-			return BoardResult{}, err
-		}
-		if !ok {
+		if issue.State == nil {
+			result.Board.Unscheduled = append(result.Board.Unscheduled, issue)
+			result.LaneStates[issue.ID] = LaneStateUnscheduled
 			continue
 		}
-		result.LaneStates[issue.ID] = state
-		if reason, err := s.waitReason(ctx, issue, state); err != nil {
-			return BoardResult{}, err
-		} else if reason != "" {
-			result.WaitReasons[issue.ID] = reason
-		}
-
-		blocked, err := s.issueIsBlocked(ctx, issue.ID)
-		if err != nil {
-			return BoardResult{}, err
-		}
-		if blocked {
-			result.BlockedIDs = append(result.BlockedIDs, issue.ID)
-			result.WaitReasons[issue.ID] = WaitReasonBlocked
-		}
-
-		lane := laneForState(state)
-		if blocked || result.WaitReasons[issue.ID] != "" {
-			lane = "needs_attention"
-		}
-
-		switch lane {
-		case "backlog":
-			result.Board.Backlog = append(result.Board.Backlog, issue)
-		case "up_next":
-			result.Board.UpNext = append(result.Board.UpNext, issue)
-		case "in_progress":
+		switch *issue.State {
+		case LifecycleScheduled:
+			result.Board.Scheduled = append(result.Board.Scheduled, issue)
+			result.LaneStates[issue.ID] = LaneStateScheduled
+		case LifecycleInProgress:
 			result.Board.InProgress = append(result.Board.InProgress, issue)
-		case "needs_attention":
-			result.Board.NeedsAttention = append(result.Board.NeedsAttention, issue)
+			var openWaits int
+			if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM workflow_waits w
+JOIN workflow_runs r ON r.id = w.workflow_run_id
+WHERE r.issue_id = ? AND w.state = 'open'`, issue.ID).Scan(&openWaits); err != nil {
+				return BoardResult{}, err
+			}
+			if openWaits > 0 {
+				result.LaneStates[issue.ID] = LaneStateBlocked
+				result.BlockedIDs = append(result.BlockedIDs, issue.ID)
+				result.WaitReasons[issue.ID] = WaitReasonBlocked
+			} else {
+				result.LaneStates[issue.ID] = LaneStateWorking
+			}
+		case LifecycleDone:
+			// Done is served by the paginated Done reader.
 		}
 	}
 
@@ -1189,12 +1061,12 @@ func (s *IssueService) issueIsBlocked(ctx context.Context, issueID string) (bool
 SELECT COUNT(*)
 FROM issue_relations r
 JOIN issues blocker ON blocker.id = r.source_issue_id
-WHERE r.kind = ?
-	AND r.target_issue_id = ?
-	AND blocker.schedule_state != ?`,
+	WHERE r.kind = ?
+		AND r.target_issue_id = ?
+		AND (blocker.lifecycle_state IS NULL OR blocker.lifecycle_state != ?)`,
 		string(RelationBlocks),
 		issueID,
-		string(ScheduleClosed),
+		string(LifecycleDone),
 	).Scan(&count); err != nil {
 		return false, fmt.Errorf("check issue blockers: %w", err)
 	}
@@ -1212,29 +1084,27 @@ SELECT
 	blocker.id,
 	blocker.title,
 	blocker.body,
-	blocker.acceptance_criteria,
-	blocker.priority,
-	blocker.schedule_state,
-	blocker.triage_state,
-	blocker.requires_human_review,
-	blocker.auto_merge,
-	blocker.flow_id,
+		blocker.acceptance_criteria,
+		blocker.priority,
+		blocker.flow_id,
 	blocker.created_by,
 	blocker.created_by_session_id,
 	blocker.source_issue_id,
 	blocker.source_change_id,
 	blocker.created_at,
-	blocker.updated_at,
-	blocker.closed_at
+		blocker.updated_at,
+		blocker.lifecycle_state,
+	blocker.done_resolution,
+	blocker.done_at
 FROM issue_relations r
 JOIN issues blocker ON blocker.id = r.source_issue_id
-WHERE r.kind = ?
-	AND r.target_issue_id = ?
-	AND blocker.schedule_state != ?
+	WHERE r.kind = ?
+		AND r.target_issue_id = ?
+		AND (blocker.lifecycle_state IS NULL OR blocker.lifecycle_state != ?)
 ORDER BY blocker.priority DESC, blocker.updated_at DESC, blocker.id`,
 		string(RelationBlocks),
 		issueID,
-		string(ScheduleClosed),
+		string(LifecycleDone),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list issue blockers: %w", err)
@@ -1493,10 +1363,6 @@ func scanRows[T any](rows *sql.Rows, scan func(issueScanner) (T, error)) ([]T, e
 
 func scanIssue(scanner issueScanner) (Issue, error) {
 	var issue Issue
-	var scheduleState string
-	var triageState string
-	var requiresHumanReview int
-	var autoMerge int
 	var flowID sql.NullString
 	var createdBy string
 	var createdBySessionID sql.NullString
@@ -1504,7 +1370,9 @@ func scanIssue(scanner issueScanner) (Issue, error) {
 	var sourceChangeID sql.NullString
 	var createdAt string
 	var updatedAt string
-	var closedAt sql.NullString
+	var lifecycleState sql.NullString
+	var doneResolution sql.NullString
+	var doneAt sql.NullString
 
 	if err := scanner.Scan(
 		&issue.ID,
@@ -1512,10 +1380,6 @@ func scanIssue(scanner issueScanner) (Issue, error) {
 		&issue.Body,
 		&issue.AcceptanceCriteria,
 		&issue.Priority,
-		&scheduleState,
-		&triageState,
-		&requiresHumanReview,
-		&autoMerge,
 		&flowID,
 		&createdBy,
 		&createdBySessionID,
@@ -1523,7 +1387,9 @@ func scanIssue(scanner issueScanner) (Issue, error) {
 		&sourceChangeID,
 		&createdAt,
 		&updatedAt,
-		&closedAt,
+		&lifecycleState,
+		&doneResolution,
+		&doneAt,
 	); err != nil {
 		return Issue{}, fmt.Errorf("scan issue: %w", err)
 	}
@@ -1537,10 +1403,12 @@ func scanIssue(scanner issueScanner) (Issue, error) {
 		return Issue{}, err
 	}
 
-	issue.ScheduleState = ScheduleState(scheduleState)
-	issue.TriageState = TriageState(triageState)
-	issue.RequiresHumanReview = requiresHumanReview == 1
-	issue.AutoMerge = autoMerge == 1
+	// These fields exist only so dormant pre-v2 coordinator helpers still
+	// compile. They are derived from the authoritative lifecycle and are never
+	// persisted or exposed by the version-2 model.
+	issue.ScheduleState = ScheduleBacklog
+	issue.TriageState = TriageAccepted
+	issue.RequiresHumanReview = true
 	if flowID.Valid {
 		issue.FlowID = flowID.String
 	}
@@ -1550,12 +1418,27 @@ func scanIssue(scanner issueScanner) (Issue, error) {
 	issue.SourceChangeID = nullableStringPointer(sourceChangeID)
 	issue.CreatedAt = parsedCreatedAt
 	issue.UpdatedAt = parsedUpdatedAt
-	if closedAt.Valid {
-		parsedClosedAt, err := parseTime(closedAt.String)
+	if lifecycleState.Valid {
+		state := LifecycleState(lifecycleState.String)
+		issue.State = &state
+		switch state {
+		case LifecycleScheduled, LifecycleInProgress:
+			issue.ScheduleState = ScheduleUpNext
+		case LifecycleDone:
+			issue.ScheduleState = ScheduleClosed
+		}
+	}
+	if doneResolution.Valid {
+		resolution := DoneResolution(doneResolution.String)
+		issue.DoneResolution = &resolution
+	}
+	if doneAt.Valid {
+		parsedDoneAt, err := parseTime(doneAt.String)
 		if err != nil {
 			return Issue{}, err
 		}
-		issue.ClosedAt = &parsedClosedAt
+		issue.DoneAt = &parsedDoneAt
+		issue.ClosedAt = &parsedDoneAt
 	}
 
 	return issue, nil

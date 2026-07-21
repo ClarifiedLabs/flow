@@ -26,7 +26,6 @@ func (s *projectServer) buildUIIssueCards(ctx context.Context, issues []coordina
 	cards := make(map[string]uiIssueCard, len(issues))
 	for _, issue := range issues {
 		card := uiIssueCard{IssueID: issue.ID}
-		card.Flow = s.issueFlowStatus(ctx, issue.ID)
 		tags, err := s.issues.TagsForIssue(ctx, issue.ID)
 		if err != nil {
 			return nil, fmt.Errorf("load tags for %s: %w", issue.ID, err)
@@ -103,23 +102,11 @@ func (s *projectServer) buildUIIssueCards(ctx context.Context, issues []coordina
 				card.LatestStatus = &statusLog[0]
 			}
 		}
-		if s.sessions != nil {
-			budget, err := s.sessions.ReviewCycleBudget(ctx, issue.ID)
-			if err != nil {
-				return nil, fmt.Errorf("load review cycle budget for %s: %w", issue.ID, err)
-			}
-			card.ReviewCycleBudget = &budget
-		}
 		blockers, err := s.issues.UnresolvedBlockers(ctx, issue.ID)
 		if err != nil {
 			return nil, fmt.Errorf("load blockers for %s: %w", issue.ID, err)
 		}
 		card.Blockers = uiBlockerSummaryFromIssues(blockers)
-		crashRetry, err := s.issues.CrashRetryAvailable(ctx, issue.ID)
-		if err != nil {
-			return nil, fmt.Errorf("load crash retry availability for %s: %w", issue.ID, err)
-		}
-		card.CrashRetryAvailable = crashRetry
 		card.BlockingReason = uiBlockingReason(issue, card)
 		card.PrimaryAction = uiPrimaryAction(issue, card)
 		if jobID, ok := terminalJobs[issue.ID]; ok {
@@ -289,57 +276,23 @@ func uiRelationSummaryFromRelations(issueID string, relations []coordinator.Issu
 	return summary
 }
 
-func uiBlockingReason(issue coordinator.Issue, card uiIssueCard) string {
-	switch {
-	case issue.TriageState == coordinator.TriagePending:
-		return "awaiting triage"
-	case card.Blockers.Count > 0:
+func uiBlockingReason(_ coordinator.Issue, card uiIssueCard) string {
+	if card.Blockers.Count > 0 {
 		return "blocked by issue"
-	case card.ReviewCycleBudget != nil && card.ReviewCycleBudget.Exhausted:
-		return "review cycle limit"
-	case card.RequiredChecks.Blocked > 0:
-		return "required check blocked"
-	case card.RequiredChecks.PendingHumanReview:
-		return "human review pending"
-	case card.RequiredChecks.Pending > 0:
-		return "required check pending"
-	default:
-		return ""
 	}
+	return ""
 }
 
-func uiPrimaryAction(issue coordinator.Issue, card uiIssueCard) string {
-	if issue.TriageState == coordinator.TriagePending {
-		return "triage"
-	}
+func uiPrimaryAction(_ coordinator.Issue, card uiIssueCard) string {
 	if card.ActiveSession != nil {
 		if card.ActiveSession.State == coordinator.SessionWaiting {
 			return "respond"
 		}
 		return "monitor"
 	}
-	if card.Change != nil && card.ReviewState == coordinator.ReviewApproved && !issue.AutoMerge {
-		return "merge"
-	}
-	if card.ReviewCycleBudget != nil && card.ReviewCycleBudget.Exhausted {
-		return "recover"
-	}
-	if card.RequiredChecks.PendingHumanReview {
-		return "review"
-	}
-	if card.RequiredChecks.Blocked > 0 {
-		return "review"
-	}
 	if card.Blockers.Count > 0 {
 		return "unblock"
 	}
-	if issue.ScheduleState == coordinator.ScheduleBacklog {
-		return "queue"
-	}
-	if issue.ScheduleState == coordinator.ScheduleUpNext {
-		return "start"
-	}
-
 	return ""
 }
 

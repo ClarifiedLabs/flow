@@ -85,54 +85,60 @@ func (s *Server) Registry() *Registry {
 // embedded Server.
 type projectServer struct {
 	*Server
-	project      coordinator.Project
-	issues       *coordinator.IssueService
-	checks       *coordinator.CheckService
-	threads      *coordinator.ThreadService
-	sessions     *coordinator.SessionService
-	transcripts  *coordinator.TranscriptStore
-	attachments  *coordinator.IssueAttachmentStore
-	status       *coordinator.StatusService
-	reconciler   *coordinator.ReconcileService
-	cursors      *coordinator.FlowCursorService
-	agentDefs    *coordinator.AgentDefService
-	flows        *coordinator.FlowService
-	checkConfigs *coordinator.CheckConfigService
-	merges       *coordinator.MergeService
-	transitions  *coordinator.TransitionService
-	gitEvents    *coordinator.GitEventService
-	workers      *worker.Service
-	engine       *lifecycle.Engine
+	project           coordinator.Project
+	issues            *coordinator.IssueService
+	checks            *coordinator.CheckService
+	threads           *coordinator.ThreadService
+	sessions          *coordinator.SessionService
+	transcripts       *coordinator.TranscriptStore
+	attachments       *coordinator.IssueAttachmentStore
+	status            *coordinator.StatusService
+	reconciler        *coordinator.ReconcileService
+	cursors           *coordinator.FlowCursorService
+	agentDefs         *coordinator.AgentDefService
+	flows             *coordinator.FlowService
+	workflowRuns      *coordinator.WorkflowRunService
+	workflowArtifacts *coordinator.WorkflowArtifactService
+	workflowExecutor  *coordinator.WorkflowExecutor
+	checkConfigs      *coordinator.CheckConfigService
+	merges            *coordinator.MergeService
+	transitions       *coordinator.TransitionService
+	gitEvents         *coordinator.GitEventService
+	workers           *worker.Service
+	engine            *lifecycle.Engine
 }
 
 func (s *Server) forBundle(bundle *ProjectBundle) *projectServer {
 	return &projectServer{
-		Server:       s,
-		project:      bundle.Project,
-		issues:       bundle.Issues,
-		checks:       bundle.Checks,
-		threads:      bundle.Threads,
-		sessions:     bundle.Sessions,
-		transcripts:  bundle.Transcripts,
-		attachments:  bundle.Attachments,
-		status:       bundle.Status,
-		reconciler:   bundle.Reconciler,
-		cursors:      bundle.Cursors,
-		agentDefs:    bundle.AgentDefs,
-		flows:        bundle.Flows,
-		checkConfigs: bundle.CheckConfigs,
-		merges:       bundle.Merges,
-		transitions:  bundle.Transitions,
-		gitEvents:    bundle.GitEvents,
-		workers:      bundle.Queue,
-		engine:       bundle.Engine,
+		Server:            s,
+		project:           bundle.Project,
+		issues:            bundle.Issues,
+		checks:            bundle.Checks,
+		threads:           bundle.Threads,
+		sessions:          bundle.Sessions,
+		transcripts:       bundle.Transcripts,
+		attachments:       bundle.Attachments,
+		status:            bundle.Status,
+		reconciler:        bundle.Reconciler,
+		cursors:           bundle.Cursors,
+		agentDefs:         bundle.AgentDefs,
+		flows:             bundle.Flows,
+		workflowRuns:      bundle.WorkflowRuns,
+		workflowArtifacts: bundle.WorkflowArtifacts,
+		workflowExecutor:  bundle.WorkflowExecutor,
+		checkConfigs:      bundle.CheckConfigs,
+		merges:            bundle.Merges,
+		transitions:       bundle.Transitions,
+		gitEvents:         bundle.GitEvents,
+		workers:           bundle.Queue,
+		engine:            bundle.Engine,
 	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("flow api server request", "method", r.Method, "path", r.URL.Path)
 	w.Header().Set(protocolHeader, s.protocolVersion)
-	if r.URL.Path == "/v1/health" {
+	if r.URL.Path == "/v2/health" {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
@@ -157,7 +163,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Path == "/v1/workers/join" {
+	if r.URL.Path == "/v2/workers/join" {
 		s.handleJoinWorker(w, r)
 		return
 	}
@@ -177,7 +183,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
-	if r.URL.Path == "/v1/ui/bootstrap" {
+	if r.URL.Path == "/v2/ui/bootstrap" {
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
@@ -188,22 +194,22 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
-	if r.URL.Path == "/v1/projects" {
+	if r.URL.Path == "/v2/projects" {
 		s.handleProjectsCollection(w, r, principal)
 		return
 	}
 
-	if r.URL.Path == "/v1/harnesses" {
+	if r.URL.Path == "/v2/harnesses" {
 		s.handleHarnesses(w, r, principal)
 		return
 	}
 
-	if strings.HasPrefix(r.URL.Path, "/v1/projects/") {
+	if strings.HasPrefix(r.URL.Path, "/v2/projects/") {
 		s.handleProjectScopedPath(w, r, principal)
 		return
 	}
 
-	if r.URL.Path == "/v1/console" {
+	if r.URL.Path == "/v2/console" {
 		ps, err := s.implicitProjectServer(principal)
 		if err != nil {
 			writeProjectResolveError(w, err)
@@ -213,7 +219,7 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
-	if r.URL.Path == "/v1/git/events/drain" {
+	if r.URL.Path == "/v2/git/events/drain" {
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
@@ -224,17 +230,17 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
-	if r.URL.Path == "/v1/sidebar" {
+	if r.URL.Path == "/v2/sidebar" {
 		s.handleSidebar(w, r, principal)
 		return
 	}
 
-	if r.URL.Path == "/v1/workers" {
+	if r.URL.Path == "/v2/workers" {
 		s.handleWorkersDiagnostics(w, r, principal)
 		return
 	}
 
-	if r.URL.Path == "/v1/reconcile" {
+	if r.URL.Path == "/v2/reconcile" {
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
@@ -245,18 +251,18 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
-	if strings.HasPrefix(r.URL.Path, "/v1/workers/") {
+	if strings.HasPrefix(r.URL.Path, "/v2/workers/") {
 		s.handleWorkerPath(w, r, principal)
 		return
 	}
 
-	if r.URL.Path == "/v1/jobs" || strings.HasPrefix(r.URL.Path, "/v1/jobs/") {
+	if r.URL.Path == "/v2/jobs" || strings.HasPrefix(r.URL.Path, "/v2/jobs/") {
 		s.handleJobsPath(w, r, principal)
 		return
 	}
 
-	if strings.HasPrefix(r.URL.Path, "/v1/sessions/") {
-		sessionID := pathResourceID(r.URL.Path, "/v1/sessions/")
+	if strings.HasPrefix(r.URL.Path, "/v2/sessions/") {
+		sessionID := pathResourceID(r.URL.Path, "/v2/sessions/")
 		ps, ok := s.bundleForSession(r.Context(), principal, sessionID)
 		if !ok {
 			writeError(w, http.StatusNotFound, "session_not_found", "session not found")
@@ -266,9 +272,9 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
-	if strings.HasPrefix(r.URL.Path, "/v1/changes/") {
-		resourceID := pathResourceID(r.URL.Path, "/v1/changes/")
-		// The /v1/changes/{id}/checks subroute addresses checks by issue id;
+	if strings.HasPrefix(r.URL.Path, "/v2/changes/") {
+		resourceID := pathResourceID(r.URL.Path, "/v2/changes/")
+		// The /v2/changes/{id}/checks subroute addresses checks by issue id;
 		// every other changes subroute addresses by change id.
 		if changesSubpathIsChecks(r.URL.Path) {
 			ps, ok := s.bundleForChangeIssue(r.Context(), principal, resourceID)
@@ -288,8 +294,8 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
-	if strings.HasPrefix(r.URL.Path, "/v1/threads/") {
-		threadID := pathResourceID(r.URL.Path, "/v1/threads/")
+	if strings.HasPrefix(r.URL.Path, "/v2/threads/") {
+		threadID := pathResourceID(r.URL.Path, "/v2/threads/")
 		ps, ok := s.bundleForThread(r.Context(), principal, threadID)
 		if !ok {
 			writeError(w, http.StatusNotFound, "thread_not_found", "thread not found")
@@ -299,7 +305,7 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
-	if r.URL.Path == "/v1/agent-defs" || strings.HasPrefix(r.URL.Path, "/v1/agent-defs/") {
+	if r.URL.Path == "/v2/agent-defs" || strings.HasPrefix(r.URL.Path, "/v2/agent-defs/") {
 		ps, err := s.implicitProjectServer(principal)
 		if err != nil {
 			writeProjectResolveError(w, err)
@@ -309,7 +315,7 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
-	if r.URL.Path == "/v1/flows" || strings.HasPrefix(r.URL.Path, "/v1/flows/") {
+	if r.URL.Path == "/v2/flows" || strings.HasPrefix(r.URL.Path, "/v2/flows/") {
 		ps, err := s.implicitProjectServer(principal)
 		if err != nil {
 			writeProjectResolveError(w, err)
@@ -319,7 +325,7 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
-	if r.URL.Path == "/v1/issues" {
+	if r.URL.Path == "/v2/issues" {
 		switch r.Method {
 		case http.MethodGet:
 			if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
@@ -344,11 +350,11 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
-	if strings.HasPrefix(r.URL.Path, "/v1/issues/") {
+	if strings.HasPrefix(r.URL.Path, "/v2/issues/") {
 		// Issue ids are only unique within a project; unscoped issue routes
 		// work for principals with an implicit project (session tokens, or a
 		// coordinator with exactly one project). Everything else must use
-		// /v1/projects/{project}/issues/...
+		// /v2/projects/{project}/issues/...
 		ps, err := s.implicitProjectServer(principal)
 		if err != nil {
 			writeProjectResolveError(w, err)
@@ -358,7 +364,7 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
-	if r.URL.Path == "/v1/board" {
+	if r.URL.Path == "/v2/board" {
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
@@ -370,7 +376,7 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
-	if r.URL.Path == "/v1/done" {
+	if r.URL.Path == "/v2/done" {
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}

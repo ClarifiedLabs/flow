@@ -17,8 +17,8 @@ import { doneQueryView, renderDoneRowView } from "./done-view.js";
 export async function renderBoardView(app, filter, context) {
   const showDone = !filter;
   const [data, doneData] = await Promise.all([
-    apiGet("/v1/board" + app.projectQuery()),
-    showDone ? apiGet("/v1/done" + boardDoneQueryView(app)).catch(() => null) : Promise.resolve(null),
+    apiGet("/v2/board" + app.projectQuery()),
+    showDone ? apiGet("/v2/done" + boardDoneQueryView(app)).catch(() => null) : Promise.resolve(null),
   ]);
   if (context && !app.isActiveLoad(context)) return false;
   app.setTitle(filter ? filter.label : "Board");
@@ -88,7 +88,7 @@ export function renderBoardDoneLaneView(app, doneData) {
 }
 
 export function renderBoardDoneControlsView(app, config) {
-  const outcomes = [["all", "All"], ["merged", "Merged"], ["rejected", "Rejected"], ["abandoned", "Abandoned"]];
+  const outcomes = [["all", "All"], ["completed", "Completed"], ["merged", "Merged"], ["rejected", "Rejected"], ["abandoned", "Abandoned"], ["cancelled", "Cancelled"], ["failed", "Failed"]];
   const outcomeChips = outcomes.map(([key, label]) =>
     `<button class="chip${config.outcome === key ? " active" : ""}" data-board-done-outcome="${escapeAttr(key)}"${config.outcome === key ? ' aria-pressed="true"' : ""}>${escapeHTML(label)}</button>`
   ).join("");
@@ -146,7 +146,7 @@ export async function refreshBoardDoneLaneView(app, filter) {
   if (!lane) return;
   let doneData = null;
   try {
-    doneData = await apiGet("/v1/done" + boardDoneQueryView(app));
+    doneData = await apiGet("/v2/done" + boardDoneQueryView(app));
   } catch (error) {
     app.setStatus(error.message || String(error));
     return;
@@ -172,8 +172,7 @@ export function renderIssueCardView(app, issue, card, laneState, blocked, stagge
   const projectAttr = projectID ? ` data-project="${escapeAttr(projectID)}"` : "";
   const issueID = value(issue, "id", "ID");
   const title = value(issue, "title", "Title");
-  const scheduleState = value(issue, "schedule_state", "ScheduleState");
-  const triageState = value(issue, "triage_state", "TriageState");
+  const lifecycleState = value(issue, "state", "State") || "unscheduled";
   const priority = Number(value(issue, "priority", "Priority") || 0);
   const updatedAt = formatDate(value(issue, "updated_at", "UpdatedAt"));
   const source = value(issue, "created_by", "CreatedBy");
@@ -188,7 +187,6 @@ export function renderIssueCardView(app, issue, card, laneState, blocked, stagge
   const reviewState = value(card, "review_state", "ReviewState");
   const primaryAction = value(card, "primary_action", "PrimaryAction");
   const blockingReason = value(card, "blocking_reason", "BlockingReason");
-  const crashRetryAvailable = Boolean(value(card, "crash_retry_available", "CrashRetryAvailable"));
   const terminalJobID = value(card, "terminal_job_id", "TerminalJobID");
   const blockers = value(card, "blockers", "Blockers") || {};
   const blockerIssues = value(blockers, "issues", "Issues") || [];
@@ -205,8 +203,8 @@ export function renderIssueCardView(app, issue, card, laneState, blocked, stagge
   const checkSatisfied = Number(value(checks, "satisfied", "Satisfied") || 0);
   const statusMessage = value(latestStatus, "message", "Message");
   const statusKind = value(latestStatus, "kind", "Kind");
-  const phaseState = laneState || (triageState === "triage" ? "triage" : scheduleState);
-  const phaseSlug = phaseKey(phaseState) || "backlog";
+  const phaseState = laneState || lifecycleState;
+  const phaseSlug = phaseKey(phaseState) || "unscheduled";
   const cardLabelKeys = new Set();
   const waitReasonBadgeLabel = waitReason ? waitReasonLabel(waitReason) : "";
   const flow = value(card, "flow", "Flow");
@@ -231,14 +229,14 @@ export function renderIssueCardView(app, issue, card, laneState, blocked, stagge
   const visibleTags = uniqueCardTags(tags, cardLabelKeys);
   const handoffSummary = waitReason ? renderHandoffSummary(handoff) : "";
   const blockerText = blockerIssues.map((blocker) => `${value(blocker, "id", "ID")} ${value(blocker, "title", "Title")}`.trim()).join(", ");
-  const mergeButton = laneState === "ready_to_merge" && reviewState === "approved"
-    ? `<button class="button" data-merge="${escapeAttr(issueID)}"${projectAttr}>Merge</button>`
+  const scheduleButton = lifecycleState === "unscheduled"
+    ? `<button class="button" data-workflow-schedule="${escapeAttr(issueID)}"${projectAttr}>Schedule</button>`
     : "";
-  const retryButton = waitReason === "crash_loop" || crashRetryAvailable
-    ? `<button class="button" data-retry-crash="${escapeAttr(issueID)}"${projectAttr}>Retry</button>`
+  const resetButton = lifecycleState === "scheduled" || lifecycleState === "in_progress"
+    ? `<button class="button secondary" data-workflow-reset="${escapeAttr(issueID)}"${projectAttr}>Reset</button>`
     : "";
-  const triageButtons = laneState === "triage"
-    ? `<button class="button" data-triage="accepted" data-issue="${escapeAttr(issueID)}"${projectAttr}>Accept</button><button class="button secondary" data-triage="rejected" data-issue="${escapeAttr(issueID)}"${projectAttr}>Reject</button><button class="button secondary" data-issue-edit="${escapeAttr(issueID)}" data-issue-title="${escapeAttr(title)}"${projectAttr}>Edit</button>`
+  const doneButton = lifecycleState !== "done"
+    ? `<button class="button secondary" data-workflow-done="${escapeAttr(issueID)}"${projectAttr}>Done</button>`
     : "";
   const terminalButton = sessionID && (sessionTerminalAvailable || (terminalAvailable && !terminalJobID))
     ? renderTerminalButton("session", sessionID, { iconOnly: true })
@@ -252,7 +250,6 @@ export function renderIssueCardView(app, issue, card, laneState, blocked, stagge
     visibleTags.map(renderTag).filter(Boolean).join(" · "),
     renderRelationSummary(relations),
     changeID ? `<a href="/ui/changes/${escapeAttr(changeID)}" data-link>${escapeHTML(changeID)}</a>` : "",
-    laneState === "ready_to_merge" ? renderDiffStatText(diffStats, diffUnavailableReason, changeHeadSHA) : "",
     branch ? escapeHTML(branch) : "",
     activeState ? escapeHTML(activeState) : "",
     updatedAt ? escapeHTML(updatedAt) : "",
@@ -267,7 +264,7 @@ export function renderIssueCardView(app, issue, card, laneState, blocked, stagge
       ${blockerText ? `<p class="card-status">${escapeHTML(blockerText)}</p>` : ""}
       ${statusMessage ? `<p class="card-status">${statusKindBadge}${renderMarkdown(statusMessage, { inline: true })}</p>` : ""}
       ${handoffSummary}
-      ${mergeButton || retryButton || triageButtons || terminalButton ? `<div class="actions">${mergeButton}${retryButton}${triageButtons}${terminalButton}</div>` : ""}
+      ${scheduleButton || resetButton || doneButton || terminalButton ? `<div class="actions">${scheduleButton}${resetButton}${doneButton}${terminalButton}</div>` : ""}
     </article>
   `;
 }

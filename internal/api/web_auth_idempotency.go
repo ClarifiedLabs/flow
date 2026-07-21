@@ -21,7 +21,7 @@ func (s *Server) serveWebAPIRequest(w http.ResponseWriter, r *http.Request) bool
 	}
 
 	apiPath := strings.TrimPrefix(r.URL.Path, webAPIPrefix)
-	if !strings.HasPrefix(apiPath, "/v1/") {
+	if !strings.HasPrefix(apiPath, "/v2/") {
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 		return true
 	}
@@ -300,7 +300,7 @@ func (s *Server) shouldUseIdempotency(r *http.Request, principal coordinator.Pri
 		return false
 	}
 
-	return strings.HasPrefix(r.URL.Path, "/v1/issues") || strings.HasPrefix(r.URL.Path, "/v1/projects/") || strings.HasPrefix(r.URL.Path, "/v1/changes") || strings.HasPrefix(r.URL.Path, "/v1/sessions") || r.URL.Path == "/v1/jobs" || r.URL.Path == "/v1/reconcile"
+	return strings.HasPrefix(r.URL.Path, "/v2/issues") || strings.HasPrefix(r.URL.Path, "/v2/projects/") || strings.HasPrefix(r.URL.Path, "/v2/changes") || strings.HasPrefix(r.URL.Path, "/v2/sessions") || r.URL.Path == "/v2/jobs" || r.URL.Path == "/v2/reconcile"
 }
 
 // idempotencyFor picks the record store for a principal: session tokens use

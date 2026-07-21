@@ -15,7 +15,7 @@ func TestAttachInfoForSessionUsesStableTmuxName(t *testing.T) {
 	if !reflect.DeepEqual(info.Command, wantCommand) {
 		t.Fatalf("Command = %#v, want %#v", info.Command, wantCommand)
 	}
-	if info.ProxyPath != "/v1/sessions/s-1/terminal" {
+	if info.ProxyPath != "/v2/sessions/s-1/terminal" {
 		t.Fatalf("ProxyPath = %q, want session terminal path", info.ProxyPath)
 	}
 }
@@ -32,7 +32,7 @@ func TestAttachInfoForJobUsesStableTmuxName(t *testing.T) {
 	if !reflect.DeepEqual(info.Command, wantCommand) {
 		t.Fatalf("Command = %#v, want %#v", info.Command, wantCommand)
 	}
-	if info.ProxyPath != "/v1/jobs/j:reviewer%2F1/terminal" {
+	if info.ProxyPath != "/v2/jobs/j:reviewer%2F1/terminal" {
 		t.Fatalf("ProxyPath = %q, want job terminal path", info.ProxyPath)
 	}
 }

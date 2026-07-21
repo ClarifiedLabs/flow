@@ -31,7 +31,7 @@ func TestBuildAuthorPromptInvokesRoleSkill(t *testing.T) {
 		"Change: ch-1",
 		"Branch: issue/i-0001",
 		"git commit",
-		"flow ready",
+		"flow complete",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, rendered)
@@ -40,8 +40,8 @@ func TestBuildAuthorPromptInvokesRoleSkill(t *testing.T) {
 	if strings.Contains(rendered, "Use $flow-author") {
 		t.Fatalf("prompt still points at an external skill:\n%s", rendered)
 	}
-	// The committed-handoff ritual is gone: flow ready owns the handoff, so the
-	// author must not be told to write one separately.
+	// The committed-handoff ritual is gone: flow complete owns the typed output,
+	// so the author must not be told to write a handoff separately.
 	if strings.Contains(rendered, "flow handoff write") {
 		t.Fatalf("author prompt still tells the agent to write a handoff file:\n%s", rendered)
 	}
@@ -163,35 +163,6 @@ func TestBuildAuthorPromptIncludesReviewCycleInstructions(t *testing.T) {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, rendered)
 		}
-	}
-}
-
-func TestBuildAuthorPromptUsesPhaseOverrideAndGateFeedback(t *testing.T) {
-	rendered, err := Build(Input{
-		Role:                     RoleAuthor,
-		IssueID:                  "i-0011",
-		IssueTitle:               "Composable phases",
-		PhaseName:                "spec",
-		RoleInstructionsOverride: "# Spec Writer\n\nWrite the spec, then flow ready with the spec as the handoff.",
-		GateFeedback:             "Cover the migration path in more detail.",
-	})
-	if err != nil {
-		t.Fatalf("build prompt: %v", err)
-	}
-
-	for _, want := range []string{
-		"Flow role instructions (spec phase):",
-		"# Spec Writer",
-		"Work Phase: spec",
-		"Gate Feedback",
-		"Cover the migration path in more detail.",
-	} {
-		if !strings.Contains(rendered, want) {
-			t.Fatalf("prompt missing %q:\n%s", want, rendered)
-		}
-	}
-	if strings.Contains(rendered, "# Flow Author") {
-		t.Fatalf("override did not replace the embedded author skill:\n%s", rendered)
 	}
 }
 

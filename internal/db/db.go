@@ -30,16 +30,16 @@ type Store struct {
 
 // Open opens a per-project database and applies the per-project migration set.
 func Open(ctx context.Context, path string) (*Store, error) {
-	return openWith(ctx, path, migrationFS, "migrations/*.sql")
+	return openWith(ctx, path, migrationFS, "migrations/*.sql", "2")
 }
 
 // OpenGlobal opens the coordinator-wide database (projects registry, workers,
 // tokens, web sessions) and applies the global migration set.
 func OpenGlobal(ctx context.Context, path string) (*Store, error) {
-	return openWith(ctx, path, globalMigrationFS, "migrations_global/*.sql")
+	return openWith(ctx, path, globalMigrationFS, "migrations_global/*.sql", "")
 }
 
-func openWith(ctx context.Context, path string, migrations embed.FS, glob string) (*Store, error) {
+func openWith(ctx context.Context, path string, migrations embed.FS, glob string, expectedStorageFormat string) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("database path is required")
 	}
@@ -61,12 +61,68 @@ func openWith(ctx context.Context, path string, migrations embed.FS, glob string
 		_ = conn.Close()
 		return nil, err
 	}
+	if expectedStorageFormat != "" {
+		if err := store.validateExistingStorageFormat(ctx, expectedStorageFormat); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+	}
 	if err := store.Migrate(ctx); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
+	if expectedStorageFormat != "" {
+		if err := store.requireStorageFormat(ctx, expectedStorageFormat); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+	}
 
 	return store, nil
+}
+
+// validateExistingStorageFormat rejects a pre-format-2 project database before
+// migrations can reinterpret its schema. A completely empty database is valid
+// and receives the current marker from the initial migration.
+func (s *Store) validateExistingStorageFormat(ctx context.Context, expected string) error {
+	var appMetadataTables int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'app_metadata'`).Scan(&appMetadataTables); err != nil {
+		return fmt.Errorf("inspect project database format: %w", err)
+	}
+	if appMetadataTables == 0 {
+		var userTables int
+		if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM sqlite_master
+WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`).Scan(&userTables); err != nil {
+			return fmt.Errorf("inspect project database tables: %w", err)
+		}
+		if userTables == 0 {
+			return nil
+		}
+		return incompatibleStorageFormatError(expected, "missing")
+	}
+	return s.requireStorageFormat(ctx, expected)
+}
+
+func (s *Store) requireStorageFormat(ctx context.Context, expected string) error {
+	var actual string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT value FROM app_metadata WHERE key = 'storage_format'`).Scan(&actual)
+	if errors.Is(err, sql.ErrNoRows) {
+		return incompatibleStorageFormatError(expected, "missing")
+	}
+	if err != nil {
+		return fmt.Errorf("read project database format: %w", err)
+	}
+	if actual != expected {
+		return incompatibleStorageFormatError(expected, actual)
+	}
+	return nil
+}
+
+func incompatibleStorageFormatError(expected, actual string) error {
+	return fmt.Errorf("incompatible project database storage format %q (need %q); back up and recreate the project database", actual, expected)
 }
 
 func (s *Store) DB() *sql.DB {

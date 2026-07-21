@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
-	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
 func TestThreadLifecycleClaimCertifyAndReopen(t *testing.T) {
@@ -255,19 +254,15 @@ func newThreadServiceFixture(t *testing.T) (*flowdb.Store, *ThreadService, Chang
 	})
 
 	issues := NewIssueService(store.DB())
-	workers := flowworker.NewService(store.DB())
-	sessions := NewSessionService(store.DB(), issues, workers)
 	issue, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Review target"})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
-	if _, err := issues.ScheduleIssue(ctx, issue.ID, ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-	ensured, err := sessions.EnsureAuthorJob(ctx, EnsureAuthorJobInput{IssueID: issue.ID})
+	insertChangeForTest(t, store.DB(), issue.ID, "ch-review-target", "issue/review-target", false)
+	change, err := NewSessionService(store.DB(), issues, nil).GetChange(ctx, "ch-review-target")
 	if err != nil {
-		t.Fatalf("ensure author job: %v", err)
+		t.Fatalf("get review change: %v", err)
 	}
 
-	return store, NewThreadService(store.DB()), ensured.Change
+	return store, NewThreadService(store.DB()), change
 }

@@ -64,7 +64,7 @@ func (s *Server) handleJoinWorker(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWorkerPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
-	if r.URL.Path == "/v1/workers/reap-jobs" {
+	if r.URL.Path == "/v2/workers/reap-jobs" {
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
@@ -85,19 +85,19 @@ func (s *Server) handleWorkerPath(w http.ResponseWriter, r *http.Request, princi
 	}
 
 	switch r.URL.Path {
-	case "/v1/workers/register":
+	case "/v2/workers/register":
 		s.handleRegisterWorker(w, r, principal)
-	case "/v1/workers/heartbeat":
+	case "/v2/workers/heartbeat":
 		s.handleHeartbeatWorker(w, r, principal)
-	case "/v1/workers/claim":
+	case "/v2/workers/claim":
 		s.handleClaimWorkerJob(w, r, principal)
-	case "/v1/workers/running":
+	case "/v2/workers/running":
 		s.handleMarkJobRunning(w, r, principal)
-	case "/v1/workers/renew":
+	case "/v2/workers/renew":
 		s.handleRenewLease(w, r, principal)
-	case "/v1/workers/status":
+	case "/v2/workers/status":
 		s.handleWorkerJobStatus(w, r, principal)
-	case "/v1/workers/release":
+	case "/v2/workers/release":
 		s.handleReleaseLease(w, r, principal)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
@@ -400,6 +400,12 @@ func (s *Server) handleMarkJobRunning(w http.ResponseWriter, r *http.Request, pr
 		writeError(w, http.StatusBadRequest, "mark_running_failed", err.Error())
 		return
 	}
+	if job.NodeRunID != nil && ps.workflowRuns != nil {
+		if _, err := ps.workflowRuns.MarkNodeRunning(r.Context(), *job.NodeRunID); err != nil {
+			writeError(w, http.StatusConflict, "start_workflow_node_failed", err.Error())
+			return
+		}
+	}
 
 	response := jobResponse{Job: job, ProjectID: ps.project.ID}
 	if job.Role == worker.RoleAuthor {
@@ -455,7 +461,7 @@ func (s *Server) handleReleaseLease(w http.ResponseWriter, r *http.Request, prin
 		return
 	}
 	if job.Role == worker.RoleAuthor {
-		writeError(w, http.StatusBadRequest, "release_lease_failed", "author session leases are released by flow ready")
+		writeError(w, http.StatusBadRequest, "release_lease_failed", "author session leases are released by flow complete")
 		return
 	}
 	if job.Role == worker.RoleConsole {
@@ -473,7 +479,7 @@ func (s *Server) handleReleaseLease(w http.ResponseWriter, r *http.Request, prin
 }
 
 func (s *Server) handleJobsPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
-	if r.URL.Path == "/v1/jobs" {
+	if r.URL.Path == "/v2/jobs" {
 		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
 			return
 		}
@@ -488,7 +494,7 @@ func (s *Server) handleJobsPath(w http.ResponseWriter, r *http.Request, principa
 		return
 	}
 
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/jobs/"), "/")
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v2/jobs/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 		return

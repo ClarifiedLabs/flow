@@ -39,6 +39,10 @@ type Input struct {
 	// GateFeedback is the human's request-changes feedback for a phase sent
 	// back to rework from an approval gate.
 	GateFeedback string
+	// WorkspaceMode and ArtifactKind are the active workflow node contract.
+	// They determine the completion instructions appended to author prompts.
+	WorkspaceMode string
+	ArtifactKind  string
 	// PriorHandoff is the previous session's handoff body, fetched from the
 	// coordinator by the session builder. It replaces the committed .handoff.md
 	// the next author (fix round) and verifier used to read from the worktree.
@@ -143,7 +147,7 @@ func Build(input Input) (string, error) {
 		lines = append(lines, completionAssessmentInstructions()...)
 	}
 	if role == RoleAuthor && strings.TrimSpace(input.GateFeedback) != "" {
-		lines = append(lines, "", "Gate Feedback (a human reviewed this phase's handoff and requested changes; address this feedback, then finish the phase again with flow ready):", strings.TrimSpace(input.GateFeedback))
+		lines = append(lines, "", "Gate Feedback (a human requested changes; address this feedback, then complete the active workflow node again):", strings.TrimSpace(input.GateFeedback))
 	}
 	if role == RoleAuthor && strings.TrimSpace(input.ReviewCycleInstructions) != "" {
 		lines = append(lines, "", "Human Recovery Instructions:", strings.TrimSpace(input.ReviewCycleInstructions))
@@ -156,7 +160,7 @@ func Build(input Input) (string, error) {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, roleInstructions(role)...)
+	lines = append(lines, roleInstructions(role, input)...)
 	return strings.Join(lines, "\n"), nil
 }
 
@@ -185,7 +189,7 @@ func appendReviewContext(lines []string, input Input) []string {
 		lines = append(lines, fmt.Sprintf("Review State: %s", strings.TrimSpace(input.ReviewState)))
 	}
 	if input.FixRound {
-		lines = append(lines, "This is a fix/rework round. Address the blockers below before calling flow ready; do not restart the original implementation.")
+		lines = append(lines, "This is a fix/rework round. Address the blockers below before calling flow complete; do not restart the original implementation.")
 	}
 	if len(input.BlockedChecks) > 0 {
 		lines = append(lines, "", "Blocked Required Checks:")
@@ -312,6 +316,9 @@ func InputFromEnvironment(getenv func(string) string) Input {
 		ProjectName:                getenv("FLOW_PROJECT_NAME"),
 		ReviewCycleInstructions:    getenv("FLOW_REVIEW_CYCLE_INSTRUCTIONS"),
 		HumanAttentionInstructions: getenv("FLOW_HUMAN_ATTENTION_INSTRUCTIONS"),
+		RoleInstructionsOverride:   getenv("FLOW_ROLE_INSTRUCTIONS"),
+		WorkspaceMode:              getenv("FLOW_WORKSPACE_MODE"),
+		ArtifactKind:               getenv("FLOW_ARTIFACT_KIND"),
 	}
 }
 
@@ -336,23 +343,35 @@ func valueOrUnknown(value string) string {
 	return trimmed
 }
 
-func roleInstructions(role string) []string {
+func roleInstructions(role string, input Input) []string {
 	switch role {
 	case RoleAuthor:
+		switch strings.TrimSpace(input.ArtifactKind) {
+		case "issue_set":
+			return []string{
+				"Produce the requested issue plan as a schema-version-1 issue-set JSON document. This base workspace is read-only with respect to the exchange; do not create commits or push branches.",
+				"Write a concise Markdown summary and finalize with flow complete --summary-file SUMMARY.md --output-file ISSUE_SET.json.",
+			}
+		case "handoff":
+			return []string{
+				"Complete the requested work and write a concise Markdown handoff. Do not create a Git change unless the node instructions explicitly require one.",
+				"Finalize with flow complete --summary-file SUMMARY.md.",
+			}
+		}
 		return []string{
 			"Implement the requested change in this worktree on branch ${FLOW_BRANCH:-the checked-out branch}.",
-			"Finalize with two actions: (1) git commit your work with a conventional-commit message; (2) run flow ready, piping the handoff on stdin (e.g. a heredoc). flow ready pushes the branch, submits the handoff, and marks the change ready — do not push or write a handoff file separately.",
+			"Finalize with two actions: (1) git commit your work with a conventional-commit message; (2) write a concise Markdown summary and run flow complete --summary-file SUMMARY.md. flow complete pushes the run branch and submits the change artifact.",
 		}
 	case RoleReviewer:
 		return []string{
 			"Review the issue and current branch against ${FLOW_BASE:-the base branch}.",
-			"Record actionable blocking concerns as comments[] entries in $FLOW_VERDICT_FILE (each {sha,file,line,body}); the worker files each as a review thread. Use flow comment to file one directly instead if you prefer. Do not edit files, commit, push, certify threads, or call flow ready.",
+			"Record actionable blocking concerns as comments[] entries in $FLOW_VERDICT_FILE (each {sha,file,line,body}); the worker files each as a review thread. Use flow comment to file one directly instead if you prefer. Do not edit files, commit, push, certify threads, or call flow complete.",
 			"Write the structured verdict to $FLOW_VERDICT_FILE as the source of truth. Exit 0 only when the reviewer check is satisfied; exit nonzero after filing blocking concerns or when review is unreliable, as the belt-and-braces fallback.",
 		}
 	case RoleVerifier:
 		return []string{
 			"Verify acceptance criteria and claimed review-thread resolutions against the current branch.",
-			"Record certify/reopen decisions as threads[] entries in $FLOW_VERDICT_FILE (each {id,decision,body}; reopen requires a body); the worker applies each. Use flow thread certify and flow thread reopen --body to apply one directly instead if you prefer. Do not edit files, commit, push, or call flow ready.",
+			"Record certify/reopen decisions as threads[] entries in $FLOW_VERDICT_FILE (each {id,decision,body}; reopen requires a body); the worker applies each. Use flow thread certify and flow thread reopen --body to apply one directly instead if you prefer. Do not edit files, commit, push, or call flow complete.",
 			"Write the structured verdict to $FLOW_VERDICT_FILE as the source of truth. Exit 0 only when verification is satisfied; exit nonzero when acceptance fails, claims are reopened, or verification is unreliable, as the belt-and-braces fallback.",
 		}
 	default:

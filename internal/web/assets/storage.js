@@ -104,9 +104,6 @@ export function writeDoneOutcome(outcome) {
 }
 
 export function routeFilter(path) {
-  if (path === "/ui/triage") return { lane: "backlog", state: "triage", label: "Triage" };
-  if (path === "/ui/feedback") return { lane: "needs_attention", label: "Needs Attention" };
-  if (path === "/ui/merge") return { lane: "needs_attention", state: "ready_to_merge", label: "Merge" };
   return null;
 }
 
@@ -121,7 +118,7 @@ export function terminalSessionIDForPath(path) {
 }
 
 export function pollConfigForPath(path) {
-  if (path === "/ui" || path === "/ui/" || path === "/ui/board" || path === "/ui/triage" || path === "/ui/feedback" || path === "/ui/merge") {
+  if (path === "/ui" || path === "/ui/" || path === "/ui/board") {
     return { interval: BOARD_POLL_MS, maxInterval: BOARD_POLL_MS, backoff: false };
   }
   if (path.startsWith("/ui/changes/")) {

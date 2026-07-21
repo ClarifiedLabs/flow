@@ -2,12 +2,9 @@ package coordinator
 
 import (
 	"context"
-	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 )
 
 func TestIsImageContentType(t *testing.T) {
@@ -113,52 +110,5 @@ func TestStampImageAttachmentsStampsEmptyListForIssueWithoutImages(t *testing.T)
 	}
 	if len(descriptors) != 0 {
 		t.Fatalf("image attachments = %+v, want empty", descriptors)
-	}
-}
-
-func TestEnsureAuthorJobStampsImageAttachmentsForEveryHarness(t *testing.T) {
-	ctx := context.Background()
-	for _, harness := range []string{flowharness.Codex, flowharness.Claude, flowharness.Harness} {
-		fixture := newSessionServiceFixture(t)
-		issues := fixture.issues
-		store := NewIssueAttachmentStore(filepath.Join(t.TempDir(), "attachments"))
-
-		issue, err := issues.CreateIssue(ctx, CreateIssueInput{
-			Title: "Image issue for " + harness,
-		})
-		if err != nil {
-			t.Fatalf("create issue: %v", err)
-		}
-		if _, err := issues.ScheduleIssue(ctx, issue.ID, ScheduleUpNext); err != nil {
-			t.Fatalf("schedule issue: %v", err)
-		}
-		attachment, err := issues.CreateIssueAttachment(ctx, CreateIssueAttachmentInput{
-			IssueID: issue.ID, Stage: IssueAttachmentStageInitial,
-			Filename: "shot.png", ContentType: "image/png",
-			CreatedBy: ActorHuman, Reader: strings.NewReader("png-bytes"),
-		}, store)
-		if err != nil {
-			t.Fatalf("create attachment: %v", err)
-		}
-		result, err := fixture.sessions.EnsureAuthorJob(ctx, EnsureAuthorJobInput{IssueID: issue.ID})
-		if err != nil {
-			t.Fatalf("ensure author job: %v", err)
-		}
-		// The worker stores the payload as generic JSON, so decode it back through
-		// JSON the way the worker's DecodePayload does to recover the typed slice.
-		encoded, err := json.Marshal(result.Job.Payload)
-		if err != nil {
-			t.Fatalf("harness %s: marshal payload: %v", harness, err)
-		}
-		var decoded struct {
-			ImageAttachments []IssueImageAttachment `json:"image_attachments"`
-		}
-		if err := json.Unmarshal(encoded, &decoded); err != nil {
-			t.Fatalf("harness %s: unmarshal payload: %v", harness, err)
-		}
-		descriptors := decoded.ImageAttachments
-		if len(descriptors) != 1 || descriptors[0].ID != attachment.ID || descriptors[0].Filename != "shot.png" {
-			t.Fatalf("harness %s: image attachments = %+v, want single %s shot.png", harness, descriptors, attachment.ID)
-		}
 	}
 }

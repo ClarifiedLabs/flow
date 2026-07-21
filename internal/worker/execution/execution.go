@@ -115,6 +115,9 @@ type JobPayload struct {
 	CheckName                  string      `json:"check_name"`
 	SessionID                  string      `json:"session_id"`
 	SessionPurpose             string      `json:"session_purpose"`
+	WorkspaceMode              string      `json:"workspace_mode,omitempty"`
+	ArtifactKind               string      `json:"artifact_kind,omitempty"`
+	RoleInstructions           string      `json:"role_instructions,omitempty"`
 	PhaseName                  string      `json:"phase_name,omitempty"`
 	PhaseIndex                 int         `json:"phase_index,omitempty"`
 	FinalPhase                 *bool       `json:"final_phase,omitempty"`
@@ -1036,6 +1039,21 @@ func workerEnv(input tmuxInput) map[string]string {
 	if input.Job.IssueID != nil {
 		reserved["FLOW_ISSUE_ID"] = *input.Job.IssueID
 	}
+	if input.Job.WorkflowRunID != nil {
+		reserved["FLOW_WORKFLOW_RUN_ID"] = *input.Job.WorkflowRunID
+	}
+	if input.Job.NodeRunID != nil {
+		reserved["FLOW_NODE_RUN_ID"] = *input.Job.NodeRunID
+	}
+	if input.Payload.WorkspaceMode != "" {
+		reserved["FLOW_WORKSPACE_MODE"] = input.Payload.WorkspaceMode
+	}
+	if input.Payload.ArtifactKind != "" {
+		reserved["FLOW_ARTIFACT_KIND"] = input.Payload.ArtifactKind
+	}
+	if input.Payload.RoleInstructions != "" {
+		reserved["FLOW_ROLE_INSTRUCTIONS"] = input.Payload.RoleInstructions
+	}
 	if input.Payload.Branch != "" {
 		reserved["FLOW_BRANCH"] = input.Payload.Branch
 	}
@@ -1193,6 +1211,9 @@ func scrubWorkerDeploymentEnv(env map[string]string) {
 }
 
 func workerGitAuthEnv(input tmuxInput) map[string]string {
+	if strings.TrimSpace(input.Payload.WorkspaceMode) == "base" {
+		return nil
+	}
 	if !strings.HasPrefix(strings.TrimSpace(input.Payload.ExchangeURL), "http://") &&
 		!strings.HasPrefix(strings.TrimSpace(input.Payload.ExchangeURL), "https://") {
 		return nil

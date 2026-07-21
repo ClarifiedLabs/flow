@@ -9,7 +9,7 @@ import { closeInlineTerminal, inlineTerminalMount, renderTerminalPopOutButton, r
 export async function renderTerminalView(app, sessionID, context) {
   app.setTitle("Terminal");
   app.querySelector(".content").innerHTML = `<section class="detail"><div class="empty">Connecting terminal</div></section>`;
-  const data = await apiPost(`/v1/sessions/${encodeURIComponent(sessionID)}/terminal-token`, {});
+  const data = await apiPost(`/v2/sessions/${encodeURIComponent(sessionID)}/terminal-token`, {});
   if (context && !app.isActiveLoad(context)) return false;
   const access = data.access || data.Access || {};
   const loginPath = value(access, "login_path", "LoginPath");
@@ -57,8 +57,8 @@ export async function openInlineTerminalView(app, button, kind, id) {
   target.mount.innerHTML = renderTerminalSurface(target.presentation, kind, terminalID, `<div class="empty">Connecting terminal</div>`);
   try {
     const path = kind === "job"
-      ? `/v1/jobs/${encodeURIComponent(terminalID)}/terminal-token`
-      : `/v1/sessions/${encodeURIComponent(terminalID)}/terminal-token`;
+      ? `/v2/jobs/${encodeURIComponent(terminalID)}/terminal-token`
+      : `/v2/sessions/${encodeURIComponent(terminalID)}/terminal-token`;
     const data = await apiPost(path, {});
     const access = data.access || data.Access || {};
     const loginPath = value(access, "login_path", "LoginPath");
@@ -82,8 +82,8 @@ export async function showTranscriptView(app, button, kind, id) {
   const transcriptID = String(id || "").trim();
   if (!transcriptID) return;
   const path = kind === "job"
-    ? `/v1/jobs/${encodeURIComponent(transcriptID)}/transcript`
-    : `/v1/sessions/${encodeURIComponent(transcriptID)}/transcript`;
+    ? `/v2/jobs/${encodeURIComponent(transcriptID)}/transcript`
+    : `/v2/sessions/${encodeURIComponent(transcriptID)}/transcript`;
   const mount = inlineTerminalMount(button, app);
   mount.dataset.inlineTerminalMode = "transcript";
   mount.dataset.inlineTerminalKind = kind;

@@ -59,76 +59,6 @@ func TestReportCheckMapsCIExitCodeToVerdict(t *testing.T) {
 	}
 }
 
-func TestRequiredChecksDeriveReviewStateAndBoardLane(t *testing.T) {
-	ctx := context.Background()
-	_, issues, checks := newCheckService(t)
-	issue, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Review target"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	if _, err := issues.ScheduleIssue(ctx, issue.ID, ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-
-	state, err := checks.ReviewState(ctx, issue.ID)
-	if err != nil {
-		t.Fatalf("initial review state: %v", err)
-	}
-	if state != ReviewInReview {
-		t.Fatalf("initial review state = %q, want in_review", state)
-	}
-
-	exitFailure := 1
-	if _, err := checks.ReportCheck(ctx, ReportCheckInput{
-		IssueID:  issue.ID,
-		Name:     "fake-ci",
-		ExitCode: &exitFailure,
-	}); err != nil {
-		t.Fatalf("report blocked check: %v", err)
-	}
-	state, err = checks.ReviewState(ctx, issue.ID)
-	if err != nil {
-		t.Fatalf("blocked review state: %v", err)
-	}
-	if state != ReviewChangesRequested {
-		t.Fatalf("blocked review state = %q, want changes_requested", state)
-	}
-	board, err := issues.BoardResult(ctx)
-	if err != nil {
-		t.Fatalf("derive board: %v", err)
-	}
-	assertIssueIDs(t, board.Board.InProgress, []string{issue.ID})
-	assertIssueIDs(t, board.Board.UpNext, []string{})
-	if got := board.LaneStates[issue.ID]; got != LaneStateChangesRequested {
-		t.Fatalf("lane state = %q, want changes_requested", got)
-	}
-
-	exitZero := 0
-	if _, err := checks.ReportCheck(ctx, ReportCheckInput{
-		IssueID:  issue.ID,
-		Name:     "fake-ci",
-		ExitCode: &exitZero,
-	}); err != nil {
-		t.Fatalf("report satisfied check: %v", err)
-	}
-	state, err = checks.ReviewState(ctx, issue.ID)
-	if err != nil {
-		t.Fatalf("approved review state: %v", err)
-	}
-	if state != ReviewApproved {
-		t.Fatalf("approved review state = %q, want approved", state)
-	}
-	board, err = issues.BoardResult(ctx)
-	if err != nil {
-		t.Fatalf("derive board after satisfied: %v", err)
-	}
-	assertIssueIDs(t, board.Board.InProgress, []string{})
-	assertIssueIDs(t, board.Board.UpNext, []string{issue.ID})
-	if got := board.LaneStates[issue.ID]; got != LaneStateUpNext {
-		t.Fatalf("lane state = %q, want up_next", got)
-	}
-}
-
 func TestResetAutomatedChecksForNewRevisionLeavesHumanChecksBlocked(t *testing.T) {
 	ctx := context.Background()
 	_, issues, checks := newCheckService(t)
@@ -195,9 +125,8 @@ func TestResetAutomatedChecksForNewRevisionLeavesHumanChecksBlocked(t *testing.T
 	}
 }
 
-// seedReadyChange creates an issue with an author session/change and marks the
-// change ready so review threads can hang off it, returning the issue and
-// change for the review-thread cross-check tests.
+// seedReadyChange creates a ready change directly so review-thread checks do
+// not depend on a particular workflow graph or agent-node setup.
 func seedReadyChange(t *testing.T, store *flowdb.Store, issues *IssueService) (Issue, Change) {
 	t.Helper()
 	ctx := context.Background()
@@ -205,15 +134,7 @@ func seedReadyChange(t *testing.T, store *flowdb.Store, issues *IssueService) (I
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
-	if _, err := issues.ScheduleIssue(ctx, issue.ID, ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-	workers := flowworker.NewService(store.DB())
-	sessions := NewSessionService(store.DB(), issues, workers)
-	ensured, err := sessions.EnsureAuthorJob(ctx, EnsureAuthorJobInput{IssueID: issue.ID})
-	if err != nil {
-		t.Fatalf("ensure author job: %v", err)
-	}
+	insertChangeForTest(t, store.DB(), issue.ID, "ch-cross-check", "issue/cross-check", false)
 	if _, err := store.DB().ExecContext(ctx, `
 UPDATE changes
 SET ready_at = COALESCE(ready_at, ?),
@@ -223,12 +144,15 @@ WHERE id = ?`,
 		"2026-01-01T00:00:00Z",
 		"deadbeef",
 		"2026-01-01T00:00:00Z",
-		ensured.Change.ID,
+		"ch-cross-check",
 	); err != nil {
 		t.Fatalf("mark change ready: %v", err)
 	}
-
-	return issue, ensured.Change
+	change, err := NewSessionService(store.DB(), issues, nil).GetChange(ctx, "ch-cross-check")
+	if err != nil {
+		t.Fatalf("get ready change: %v", err)
+	}
+	return issue, change
 }
 
 func openReviewThread(t *testing.T, store *flowdb.Store, change Change) {

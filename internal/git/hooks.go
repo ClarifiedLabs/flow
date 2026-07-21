@@ -22,7 +22,7 @@ const (
 	ownerActor       = "owner"
 )
 
-var issueRefPattern = regexp.MustCompile(`^refs/heads/issue/i-[0-9]{4,}$`)
+var issueRefPattern = regexp.MustCompile(`^refs/heads/issue/i-[0-9]{4,}(?:/run-[0-9]+)?$`)
 
 type HookInstallOptions struct {
 	BaseBranch  string
@@ -36,6 +36,7 @@ type HookOptions struct {
 	Stdout           io.Writer
 	Stderr           io.Writer
 	Principal        *string
+	AllowedRef       string
 }
 
 type RefUpdate struct {
@@ -97,6 +98,11 @@ func HandlePreReceive(ctx context.Context, opts HookOptions) error {
 
 	principal := hookPrincipal(opts)
 	for _, update := range updates {
+		if allowed := strings.TrimSpace(opts.AllowedRef); allowed != "" && update.Ref != allowed {
+			err := fmt.Errorf("credential may only update %s", allowed)
+			fmt.Fprintf(opts.Stderr, "flow pre-receive rejected %s: %v\n", update.Ref, err)
+			return err
+		}
 		if err := validateRefUpdate(ctx, opts.ExchangeRepoPath, opts.BaseBranch, principal, update); err != nil {
 			fmt.Fprintf(opts.Stderr, "flow pre-receive rejected %s: %v\n", update.Ref, err)
 			return err

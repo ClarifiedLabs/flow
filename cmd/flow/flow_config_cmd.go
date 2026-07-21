@@ -154,8 +154,7 @@ func runAgentDefsRemove(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// runFlows manages the project's flow catalog: ordered work phases (each with
-// an agent definition and exit gate) plus the review agent set.
+// runFlows manages the project's trusted workflow graph catalog.
 func runFlows(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "usage: flow flows {list|create -f FILE|edit ID -f FILE|rm ID|set-default ID_OR_NAME}")

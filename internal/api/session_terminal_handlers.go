@@ -142,18 +142,18 @@ func parseTerminalPath(path, prefix string) (string, string, []string, bool) {
 }
 
 func parseSessionTerminalPath(path string) (string, string, []string, bool) {
-	return parseTerminalPath(path, "/v1/sessions/")
+	return parseTerminalPath(path, "/v2/sessions/")
 }
 
 func parseJobTerminalPath(path string) (string, string, []string, bool) {
-	return parseTerminalPath(path, "/v1/jobs/")
+	return parseTerminalPath(path, "/v2/jobs/")
 }
 func (s *projectServer) handleSessionPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
 	if s.sessions == nil {
 		writeError(w, http.StatusInternalServerError, "sessions_unavailable", "session service is not configured")
 		return
 	}
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/sessions/"), "/")
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v2/sessions/"), "/")
 	if len(parts) < 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 		return
@@ -287,8 +287,12 @@ func (s *projectServer) handleSessionPath(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusBadRequest, "ready_session_failed", err.Error())
 			return
 		}
+		if currentSession.WorkflowRunID != "" {
+			writeError(w, http.StatusConflict, "workflow_conflict", "workflow sessions finish with flow complete")
+			return
+		}
 		if currentSession.Role == flowworker.RoleConsole {
-			writeError(w, http.StatusBadRequest, "ready_session_failed", "Console sessions are released with /v1/console")
+			writeError(w, http.StatusBadRequest, "ready_session_failed", "Console sessions are released with /v2/console")
 			return
 		}
 		var request readySessionRequest
@@ -716,18 +720,6 @@ func (s *projectServer) applySessionStateSignal(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusOK, sessionResponse{Session: session})
 		return
 	}
-	if source == coordinator.SessionEventSourceWatchdog && session.RuntimeState == coordinator.SessionWaiting && state == coordinator.SessionWorking {
-		consumed, err := s.sessions.ConsumeHumanWaitWatchdogProtection(r.Context(), sessionID)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, failureCode, err.Error())
-			return
-		}
-		if consumed {
-			s.touchAgentActivity(r.Context(), sessionID)
-			writeJSON(w, http.StatusOK, sessionResponse{Session: session})
-			return
-		}
-	}
 	if s.suppressNativeHookStateLoop(r.Context(), principal, session, state, source) {
 		s.touchAgentActivity(r.Context(), sessionID)
 		writeJSON(w, http.StatusOK, sessionResponse{Session: session})
@@ -736,6 +728,16 @@ func (s *projectServer) applySessionStateSignal(w http.ResponseWriter, r *http.R
 
 	if session.Role == flowworker.RoleConsole {
 		updated, err := s.sessions.UpdateConsoleSessionState(r.Context(), sessionID, state)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, failureCode, err.Error())
+			return
+		}
+		s.touchAgentActivity(r.Context(), sessionID)
+		writeJSON(w, http.StatusOK, sessionResponse{Session: updated})
+		return
+	}
+	if session.WorkflowRunID != "" {
+		updated, err := s.sessions.UpdateSessionState(r.Context(), sessionID, state)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, failureCode, err.Error())
 			return
@@ -761,12 +763,6 @@ func (s *projectServer) applySessionStateSignal(w http.ResponseWriter, r *http.R
 	if result.Session == nil {
 		writeError(w, http.StatusInternalServerError, failureCode, "session signal produced no result")
 		return
-	}
-	if state == coordinator.SessionWorking {
-		if _, err := s.sessions.ConsumeHumanWaitWatchdogProtection(r.Context(), sessionID); err != nil {
-			writeError(w, http.StatusBadRequest, failureCode, err.Error())
-			return
-		}
 	}
 	s.touchAgentActivity(r.Context(), sessionID)
 	writeJSON(w, http.StatusOK, sessionResponse{Session: *result.Session})
@@ -877,7 +873,12 @@ func (s *projectServer) handleSessionStatus(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if statusKindAwaitsHuman(entry.Kind) {
-		if err := s.awaitHumanForSessionStatus(r, sessionID, principal, entry.Kind); err != nil {
+		if session.WorkflowRunID != "" && session.NodeRunID != "" && s.workflowRuns != nil {
+			err = s.workflowRuns.RequestAgentInput(r.Context(), session.NodeRunID, entry.Message, coordinator.ActorAgent)
+		} else {
+			err = s.awaitHumanForSessionStatus(r, sessionID, principal, entry.Kind)
+		}
+		if err != nil {
 			writeEngineError(w, err, "status_session_event_failed")
 			return
 		}
@@ -902,7 +903,12 @@ func (s *projectServer) handleSessionProcessExit(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusBadRequest, "process_exit_failed", err.Error())
 		return
 	}
-	if session.Role == flowworker.RoleAuthor {
+	if session.WorkflowRunID != "" && s.workflowExecutor != nil {
+		if err := s.workflowExecutor.Advance(r.Context(), session.WorkflowRunID); err != nil {
+			writeError(w, http.StatusBadRequest, "process_exit_workflow_failed", err.Error())
+			return
+		}
+	} else if session.Role == flowworker.RoleAuthor {
 		if _, err := s.sessions.ReconcileCrashedAuthorSessions(r.Context()); err != nil {
 			writeError(w, http.StatusBadRequest, "process_exit_reconcile_failed", err.Error())
 			return
@@ -956,7 +962,7 @@ func (s *projectServer) handleSessionMessageDelivered(w http.ResponseWriter, r *
 
 func statusKindAwaitsHuman(kind string) bool {
 	switch strings.TrimSpace(kind) {
-	case coordinator.StatusKindPlan, coordinator.StatusKindQuestion:
+	case coordinator.StatusKindPlan, coordinator.StatusKindQuestion, coordinator.StatusKindBlocker:
 		return true
 	default:
 		return false

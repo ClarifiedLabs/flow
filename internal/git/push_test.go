@@ -37,7 +37,7 @@ func TestPushBranchPublishesHeadAndIsIdempotent(t *testing.T) {
 	}
 
 	// A re-run after the branch is already published must be a no-op success:
-	// `flow ready` re-runs the push, so it cannot fail when nothing changed.
+	// `flow complete` re-runs the push, so it cannot fail when nothing changed.
 	if err := PushBranch(ctx, repoPath, "issue/i-0001"); err != nil {
 		t.Fatalf("idempotent push branch: %v", err)
 	}

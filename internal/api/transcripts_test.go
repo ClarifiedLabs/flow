@@ -19,7 +19,7 @@ func putTranscriptAs(t *testing.T, server *Server, token string, path string, bo
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPut, path, strings.NewReader(body))
 	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set(protocolHeader, "1")
+	request.Header.Set(protocolHeader, "2")
 	request.Header.Set("Content-Type", "text/plain")
 	server.ServeHTTP(response, request)
 	return response
@@ -30,7 +30,7 @@ func getAs(t *testing.T, server *Server, token string, path string) *httptest.Re
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, path, nil)
 	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set(protocolHeader, "1")
+	request.Header.Set(protocolHeader, "2")
 	server.ServeHTTP(response, request)
 	return response
 }
@@ -41,7 +41,7 @@ func TestSessionTranscriptUploadAndDownload(t *testing.T) {
 	sessionID := started.Session.ID
 
 	content := "author session pane output\nsecond line\n"
-	upload := putTranscriptAs(t, fixture.Server, started.Token, "/v1/sessions/"+sessionID+"/transcript", content)
+	upload := putTranscriptAs(t, fixture.Server, started.Token, "/v2/sessions/"+sessionID+"/transcript", content)
 	if upload.Code != http.StatusNoContent {
 		t.Fatalf("upload status = %d, want 204; body: %s", upload.Code, upload.Body.String())
 	}
@@ -56,7 +56,7 @@ func TestSessionTranscriptUploadAndDownload(t *testing.T) {
 	}
 
 	// Owner can download as text/plain.
-	download := getAs(t, fixture.Server, "owner-token", "/v1/sessions/"+sessionID+"/transcript")
+	download := getAs(t, fixture.Server, "owner-token", "/v2/sessions/"+sessionID+"/transcript")
 	if download.Code != http.StatusOK {
 		t.Fatalf("download status = %d, want 200; body: %s", download.Code, download.Body.String())
 	}
@@ -74,7 +74,7 @@ func TestSessionTranscriptUploadRejectsOtherSession(t *testing.T) {
 	other := startAuthorSessionForStatusTestWithWorker(t, fixture, "Other session", "w-other")
 
 	// other's session token may not upload to owner's session.
-	response := putTranscriptAs(t, fixture.Server, other.Token, "/v1/sessions/"+owner.Session.ID+"/transcript", "nope")
+	response := putTranscriptAs(t, fixture.Server, other.Token, "/v2/sessions/"+owner.Session.ID+"/transcript", "nope")
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("cross-session upload status = %d, want 403; body: %s", response.Code, response.Body.String())
 	}
@@ -86,12 +86,12 @@ func TestSessionTranscriptDownloadRequiresOwner(t *testing.T) {
 	sessionID := started.Session.ID
 
 	// Seed a transcript so a 200 is otherwise possible.
-	if up := putTranscriptAs(t, fixture.Server, started.Token, "/v1/sessions/"+sessionID+"/transcript", "data"); up.Code != http.StatusNoContent {
+	if up := putTranscriptAs(t, fixture.Server, started.Token, "/v2/sessions/"+sessionID+"/transcript", "data"); up.Code != http.StatusNoContent {
 		t.Fatalf("seed upload status = %d; body: %s", up.Code, up.Body.String())
 	}
 
 	// The owning session token may not GET its transcript.
-	response := getAs(t, fixture.Server, started.Token, "/v1/sessions/"+sessionID+"/transcript")
+	response := getAs(t, fixture.Server, started.Token, "/v2/sessions/"+sessionID+"/transcript")
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("session-token download status = %d, want 403; body: %s", response.Code, response.Body.String())
 	}
@@ -101,7 +101,7 @@ func TestSessionTranscriptDownloadMissing(t *testing.T) {
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "No transcript yet")
 
-	response := getAs(t, fixture.Server, "owner-token", "/v1/sessions/"+started.Session.ID+"/transcript")
+	response := getAs(t, fixture.Server, "owner-token", "/v2/sessions/"+started.Session.ID+"/transcript")
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("missing transcript status = %d, want 404; body: %s", response.Code, response.Body.String())
 	}
@@ -116,7 +116,7 @@ func TestJobTranscriptUploadRequiresLiveLease(t *testing.T) {
 	jobID := claimed.Job.ID
 
 	content := "reviewer job pane output\n"
-	path := "/v1/jobs/" + jobID + "/transcript?lease_id=" + claimed.Lease.ID
+	path := "/v2/jobs/" + jobID + "/transcript?lease_id=" + claimed.Lease.ID
 	upload := putTranscriptAs(t, fixture.Server, "worker-token-rev", path, content)
 	if upload.Code != http.StatusNoContent {
 		t.Fatalf("job upload status = %d, want 204; body: %s", upload.Code, upload.Body.String())
@@ -131,7 +131,7 @@ func TestJobTranscriptUploadRequiresLiveLease(t *testing.T) {
 	}
 
 	// Owner download round-trips.
-	download := getAs(t, fixture.Server, "owner-token", "/v1/jobs/"+jobID+"/transcript")
+	download := getAs(t, fixture.Server, "owner-token", "/v2/jobs/"+jobID+"/transcript")
 	if download.Code != http.StatusOK {
 		t.Fatalf("job download status = %d, want 200; body: %s", download.Code, download.Body.String())
 	}
@@ -147,7 +147,7 @@ func TestJobTranscriptUploadRejectsMissingLease(t *testing.T) {
 	jobID := claimed.Job.ID
 
 	// No lease_id query param -> rejected.
-	response := putTranscriptAs(t, fixture.Server, "worker-token-rev2", "/v1/jobs/"+jobID+"/transcript", "x")
+	response := putTranscriptAs(t, fixture.Server, "worker-token-rev2", "/v2/jobs/"+jobID+"/transcript", "x")
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("missing-lease upload status = %d, want 400; body: %s", response.Code, response.Body.String())
 	}
@@ -164,7 +164,7 @@ func TestJobTranscriptUploadRejectsReleasedLease(t *testing.T) {
 		t.Fatalf("release lease: %v", err)
 	}
 
-	path := "/v1/jobs/" + jobID + "/transcript?lease_id=" + claimed.Lease.ID
+	path := "/v2/jobs/" + jobID + "/transcript?lease_id=" + claimed.Lease.ID
 	response := putTranscriptAs(t, fixture.Server, "worker-token-rev3", path, "x")
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("released-lease upload status = %d, want 403; body: %s", response.Code, response.Body.String())
@@ -177,12 +177,12 @@ func TestJobTranscriptDownloadServesTextPlain(t *testing.T) {
 	claimed := startLiveCheckJobForIssue(t, fixture, "worker-token-ct", "w-ct", issue.ID, change.ID, "", "reviewer-check", flowworker.RoleReviewer, flowworker.BucketEphemeral)
 	jobID := claimed.Job.ID
 
-	path := "/v1/jobs/" + jobID + "/transcript?lease_id=" + claimed.Lease.ID
+	path := "/v2/jobs/" + jobID + "/transcript?lease_id=" + claimed.Lease.ID
 	if up := putTranscriptAs(t, fixture.Server, "worker-token-ct", path, "reviewer pane output\n"); up.Code != http.StatusNoContent {
 		t.Fatalf("seed job upload status = %d; body: %s", up.Code, up.Body.String())
 	}
 
-	download := getAs(t, fixture.Server, "owner-token", "/v1/jobs/"+jobID+"/transcript")
+	download := getAs(t, fixture.Server, "owner-token", "/v2/jobs/"+jobID+"/transcript")
 	if download.Code != http.StatusOK {
 		t.Fatalf("job download status = %d, want 200; body: %s", download.Code, download.Body.String())
 	}
@@ -197,13 +197,13 @@ func TestJobTranscriptDownloadRequiresOwner(t *testing.T) {
 	claimed := startLiveCheckJobForIssue(t, fixture, "worker-token-own", "w-own", issue.ID, change.ID, "", "reviewer-check", flowworker.RoleReviewer, flowworker.BucketEphemeral)
 	jobID := claimed.Job.ID
 
-	path := "/v1/jobs/" + jobID + "/transcript?lease_id=" + claimed.Lease.ID
+	path := "/v2/jobs/" + jobID + "/transcript?lease_id=" + claimed.Lease.ID
 	if up := putTranscriptAs(t, fixture.Server, "worker-token-own", path, "data"); up.Code != http.StatusNoContent {
 		t.Fatalf("seed job upload status = %d; body: %s", up.Code, up.Body.String())
 	}
 
 	// A worker token (even holding the lease) may not download the transcript.
-	response := getAs(t, fixture.Server, "worker-token-own", "/v1/jobs/"+jobID+"/transcript")
+	response := getAs(t, fixture.Server, "worker-token-own", "/v2/jobs/"+jobID+"/transcript")
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("worker-token download status = %d, want 403; body: %s", response.Code, response.Body.String())
 	}
@@ -221,12 +221,12 @@ func TestSessionTranscriptUploadTruncatesToLast10MB(t *testing.T) {
 	pad := strings.Repeat("P", (10<<20)-len(tail)+1)
 	full := head + pad + tail
 
-	up := putTranscriptAs(t, fixture.Server, started.Token, "/v1/sessions/"+sessionID+"/transcript", full)
+	up := putTranscriptAs(t, fixture.Server, started.Token, "/v2/sessions/"+sessionID+"/transcript", full)
 	if up.Code != http.StatusNoContent {
 		t.Fatalf("big upload status = %d; body: %s", up.Code, up.Body.String())
 	}
 
-	download := getAs(t, fixture.Server, "owner-token", "/v1/sessions/"+sessionID+"/transcript")
+	download := getAs(t, fixture.Server, "owner-token", "/v2/sessions/"+sessionID+"/transcript")
 	if download.Code != http.StatusOK {
 		t.Fatalf("download status = %d", download.Code)
 	}
@@ -245,8 +245,8 @@ func TestSessionTranscriptUploadTruncatesToLast10MB(t *testing.T) {
 	}
 }
 
-// seedIssueWithChange creates an issue and a ready change for it so a check job
-// can be enqueued and addressed by change id.
+// seedIssueWithChange creates a ready change directly so transcript endpoint
+// tests stay independent of any particular workflow graph.
 func seedIssueWithChange(t *testing.T, fixture testFixture, title string) (coordinator.Issue, coordinator.Change) {
 	t.Helper()
 	ctx := context.Background()
@@ -254,12 +254,16 @@ func seedIssueWithChange(t *testing.T, fixture testFixture, title string) (coord
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
-	if _, err := fixture.Issues.ScheduleIssue(ctx, issue.ID, coordinator.ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
+	const changeID = "ch-transcript"
+	const stamp = "2026-01-01T00:00:00Z"
+	if _, err := fixture.DB.ExecContext(ctx, `
+INSERT INTO changes (id, issue_id, branch, base, head_sha, created_at, updated_at, ready_at)
+VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, issue.ID, "issue/transcript", "deadbeef", stamp, stamp, stamp); err != nil {
+		t.Fatalf("insert transcript change: %v", err)
 	}
-	ensured, err := fixture.Sessions.EnsureAuthorJob(ctx, coordinator.EnsureAuthorJobInput{IssueID: issue.ID})
+	change, err := fixture.Sessions.GetChange(ctx, changeID)
 	if err != nil {
-		t.Fatalf("ensure author job: %v", err)
+		t.Fatalf("load transcript change: %v", err)
 	}
-	return issue, ensured.Change
+	return issue, change
 }

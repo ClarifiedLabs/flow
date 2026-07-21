@@ -348,7 +348,7 @@ func tickProjects(ctx context.Context, bundles []*api.ProjectBundle, stderr io.W
 }
 
 func tickProject(ctx context.Context, bundle *api.ProjectBundle, stderr io.Writer) {
-	if err := bundle.Engine.Tick(ctx); err != nil && ctx.Err() == nil {
+	if err := bundle.WorkflowExecutor.Tick(ctx); err != nil && ctx.Err() == nil {
 		slog.Debug("lifecycle ticker failed", "project", bundle.Project.ID, "error", err)
 		fmt.Fprintf(stderr, "lifecycle ticker (%s): %v\n", bundle.Project.ID, err)
 	}
@@ -414,6 +414,7 @@ func runGitHook(args []string, stdout, stderr io.Writer) int {
 		Stdin:            os.Stdin,
 		Stdout:           stdout,
 		Stderr:           stderr,
+		AllowedRef:       os.Getenv("FLOW_GIT_ALLOWED_REF"),
 	}
 
 	var err error

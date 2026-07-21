@@ -17,7 +17,7 @@ import (
 //
 // Honest scope: these hooks only fire when the agent runs git. They
 // capture/steer/validate; they are NOT a substitute for the "done" judgment.
-// A push is not task completion -- `flow ready` remains the authoritative
+// A push is not task completion -- `flow complete` remains the authoritative
 // finalize. The hooks complement it.
 
 // clientHookSubcommands maps each git hook filename Flow installs to the
@@ -119,7 +119,7 @@ func clientHookScript(command HookCommand, harnessKind string, subcommand string
 	b.WriteString("# Flow-managed client hook. Fires on the agent's natural git actions to\n")
 	b.WriteString("# capture push context and steer review-thread hygiene. Best-effort and\n")
 	b.WriteString("# NON-BLOCKING: it never rejects a commit or push, so it always exits 0.\n")
-	b.WriteString("# A push is not task completion -- `flow ready` remains the finalize.\n")
+	b.WriteString("# A push is not task completion -- `flow complete` remains the finalizer.\n")
 	for _, key := range sortedEnvKeys(command.Env) {
 		b.WriteString("export ")
 		b.WriteString(key)

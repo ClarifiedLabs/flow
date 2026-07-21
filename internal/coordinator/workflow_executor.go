@@ -1,0 +1,378 @@
+package coordinator
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+
+	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
+	"github.com/ClarifiedLabs/flow/internal/sqlitex"
+	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
+)
+
+// WorkflowExecutor is the trusted node-handler registry and dispatcher. Flow
+// definitions select only these coordinator-owned handlers; definitions never
+// contain executable code, expressions, commands, or webhooks.
+type WorkflowExecutor struct {
+	db           *sql.DB
+	runs         *WorkflowRunService
+	artifacts    *WorkflowArtifactService
+	issues       *IssueService
+	checks       *CheckService
+	checkConfigs *CheckConfigService
+	sessions     *SessionService
+	merges       *MergeService
+	queue        *flowworker.Service
+	project      Project
+	harnessArgs  flowharness.Args
+	handlers     map[NodeKind]workflowNodeHandler
+}
+
+type workflowNodeHandler func(context.Context, WorkflowRun, WorkflowNodeRun, FlowNodeSnapshot) (bool, error)
+
+type WorkflowExecutorOptions struct {
+	Database     *sql.DB
+	Runs         *WorkflowRunService
+	Artifacts    *WorkflowArtifactService
+	Issues       *IssueService
+	Checks       *CheckService
+	CheckConfigs *CheckConfigService
+	Sessions     *SessionService
+	Merges       *MergeService
+	Queue        *flowworker.Service
+	Project      Project
+	HarnessArgs  flowharness.Args
+}
+
+func NewWorkflowExecutor(opts WorkflowExecutorOptions) *WorkflowExecutor {
+	executor := &WorkflowExecutor{
+		db: opts.Database, runs: opts.Runs, artifacts: opts.Artifacts, issues: opts.Issues,
+		checks: opts.Checks, checkConfigs: opts.CheckConfigs, sessions: opts.Sessions,
+		merges: opts.Merges, queue: opts.Queue, project: opts.Project, harnessArgs: opts.HarnessArgs,
+	}
+	executor.handlers = map[NodeKind]workflowNodeHandler{
+		NodeAgent:               executor.handleAgent,
+		NodeAutomatedChecks:     executor.handleAutomatedChecks,
+		NodeChangeReview:        executor.handleChangeReview,
+		NodeVerifyChange:        executor.handleVerifyChange,
+		NodeMaterializeIssueSet: executor.handleMaterializeIssueSet,
+		NodeMergeChange:         executor.handleMergeChange,
+	}
+	return executor
+}
+
+// Tick advances every active workflow until it reaches asynchronous work, a
+// human wait, a dependency wait, or Done. Repeated calls are idempotent.
+func (e *WorkflowExecutor) Tick(ctx context.Context) error {
+	rows, err := e.db.QueryContext(ctx, `
+SELECT id FROM workflow_runs WHERE state IN ('scheduled', 'running') ORDER BY created_at, id`)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := e.Advance(ctx, id); err != nil {
+			return fmt.Errorf("advance workflow %s: %w", id, err)
+		}
+	}
+	return nil
+}
+
+func (e *WorkflowExecutor) Advance(ctx context.Context, runID string) error {
+	for step := 0; step < MaxFlowTransitionBudget+MaxFlowNodes; step++ {
+		run, err := e.runs.Get(ctx, runID)
+		if err != nil {
+			return err
+		}
+		if run.State == WorkflowRunWaiting || run.State == WorkflowRunCompleted || run.State == WorkflowRunCancelled {
+			return nil
+		}
+		nodeRun, _, err := e.runs.EnsureCurrentNode(ctx, run.ID)
+		if err != nil {
+			return err
+		}
+		if nodeRun.ID == "" {
+			return nil
+		}
+		node, ok := run.Snapshot.Node(nodeRun.NodeKey)
+		if !ok {
+			return fmt.Errorf("snapshot node %q not found", nodeRun.NodeKey)
+		}
+		if node.Kind == NodeHumanGate || node.Kind == NodeTerminal {
+			return nil
+		}
+		handler := e.handlers[node.Kind]
+		if handler == nil {
+			return fmt.Errorf("no trusted handler registered for node kind %q", node.Kind)
+		}
+		completed, err := handler(ctx, run, nodeRun, node)
+		if err != nil {
+			return err
+		}
+		if !completed {
+			return nil
+		}
+	}
+	return errors.New("workflow executor local cascade limit exceeded")
+}
+
+func (e *WorkflowExecutor) handleAgent(ctx context.Context, run WorkflowRun, nodeRun WorkflowNodeRun, node FlowNodeSnapshot) (bool, error) {
+	if node.Config.Agent == nil {
+		return false, errors.New("agent node is missing configuration")
+	}
+	var live int
+	if err := e.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM jobs WHERE node_run_id = ? AND state IN ('queued', 'claimed', 'running')`, nodeRun.ID).Scan(&live); err != nil {
+		return false, err
+	}
+	if live > 0 {
+		return false, nil
+	}
+
+	issueID := run.IssueID
+	var changeID *string
+	branch := ""
+	base := strings.TrimSpace(e.project.BaseBranch)
+	if base == "" {
+		base = "main"
+	}
+	if node.Config.Agent.Workspace == WorkspaceChange {
+		change, err := e.changeForAgentNode(ctx, run, nodeRun, base)
+		if err != nil {
+			return false, err
+		}
+		changeID = &change.ID
+		branch = change.Branch
+	}
+	modelArgs, err := node.Config.Agent.Agent.ModelSelectionArgs()
+	if err != nil {
+		return false, err
+	}
+	harness := flowharness.NormalizeName(node.Config.Agent.Agent.Harness)
+	entrypoint, err := flowharness.DefaultAuthorEntrypointWithArgs(harness,
+		e.harnessArgs.Add(flowharness.ArgsFor(harness, modelArgs)))
+	if err != nil {
+		return false, err
+	}
+	payload := map[string]any{
+		"entrypoint": entrypoint, "workflow_run_id": run.ID, "node_run_id": nodeRun.ID,
+		"workspace_mode": node.Config.Agent.Workspace, "artifact_kind": node.Config.Agent.Artifact,
+		"agent": node.Config.Agent.Agent, "role_instructions": node.Config.Agent.Agent.Prompt,
+		"branch": branch, "base": base, "project_id": e.project.ID, "project_name": e.project.Name,
+		"exchange_url": e.project.ExchangeURL,
+	}
+	_, err = e.queue.EnqueueJob(ctx, flowworker.EnqueueJobInput{
+		IssueID: &issueID, ChangeID: changeID, WorkflowRunID: &run.ID, NodeRunID: &nodeRun.ID,
+		Role: flowworker.RoleAuthor, CapacityBucket: flowworker.BucketPersistentAgent,
+		Priority: 0, Requires: []string{flowharness.AgentHarnessLabel(harness)}, Payload: payload,
+	})
+	return false, err
+}
+
+func (e *WorkflowExecutor) changeForAgentNode(ctx context.Context, run WorkflowRun, nodeRun WorkflowNodeRun, base string) (Change, error) {
+	if nodeRun.InputArtifactID != "" {
+		artifact, err := e.artifacts.Get(ctx, nodeRun.InputArtifactID)
+		if err == nil && artifact.Kind == ArtifactChange {
+			changeID, err := changeIDFromArtifact(artifact)
+			if err != nil {
+				return Change{}, err
+			}
+			return e.sessions.GetChange(ctx, changeID)
+		}
+		if err != nil && !errors.Is(err, ErrWorkflowArtifactNotFound) {
+			return Change{}, err
+		}
+	}
+	branch := fmt.Sprintf("issue/%s/run-%d", run.IssueID, run.RunSequence)
+	var existingID string
+	err := e.db.QueryRowContext(ctx, `
+SELECT id FROM changes WHERE workflow_run_id = ? ORDER BY created_at DESC LIMIT 1`, run.ID).Scan(&existingID)
+	if err == nil {
+		return e.sessions.GetChange(ctx, existingID)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Change{}, err
+	}
+	id, err := randomPrefixedID("ch")
+	if err != nil {
+		return Change{}, err
+	}
+	now := sqlitex.FormatTime(sqlitex.UTCNow())
+	if _, err := e.db.ExecContext(ctx, `
+INSERT INTO changes (id, issue_id, workflow_run_id, branch, base, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)`, id, run.IssueID, run.ID, branch, base, now, now); err != nil {
+		return Change{}, err
+	}
+	return e.sessions.GetChange(ctx, id)
+}
+
+func (e *WorkflowExecutor) handleAutomatedChecks(ctx context.Context, run WorkflowRun, nodeRun WorkflowNodeRun, _ FlowNodeSnapshot) (bool, error) {
+	return e.handleChecks(ctx, run, nodeRun, WorkflowChecksAutomated, nil, "passed", "failed")
+}
+
+func (e *WorkflowExecutor) handleChangeReview(ctx context.Context, run WorkflowRun, nodeRun WorkflowNodeRun, node FlowNodeSnapshot) (bool, error) {
+	if node.Config.ChangeReview == nil {
+		return false, errors.New("change review node is missing configuration")
+	}
+	return e.handleChecks(ctx, run, nodeRun, WorkflowChecksReview, node.Config.ChangeReview.Agents, "approved", "changes_requested")
+}
+
+func (e *WorkflowExecutor) handleVerifyChange(ctx context.Context, run WorkflowRun, nodeRun WorkflowNodeRun, node FlowNodeSnapshot) (bool, error) {
+	if node.Config.VerifyChange == nil {
+		return false, errors.New("verify node is missing configuration")
+	}
+	return e.handleChecks(ctx, run, nodeRun, WorkflowChecksVerify, node.Config.VerifyChange.Agents, "passed", "changes_requested")
+}
+
+func (e *WorkflowExecutor) handleChecks(ctx context.Context, run WorkflowRun, nodeRun WorkflowNodeRun, mode WorkflowCheckMode, agents []SnapshotReviewAgent, successOutcome, failureOutcome string) (bool, error) {
+	if nodeRun.State == WorkflowNodeQueued {
+		if _, err := e.runs.MarkNodeRunning(ctx, nodeRun.ID); err != nil {
+			return false, err
+		}
+	}
+	artifact, err := e.artifacts.Get(ctx, nodeRun.InputArtifactID)
+	if err != nil {
+		return false, fmt.Errorf("load change artifact: %w", err)
+	}
+	changeID, err := changeIDFromArtifact(artifact)
+	if err != nil {
+		return false, err
+	}
+	change, err := e.sessions.GetChange(ctx, changeID)
+	if err != nil {
+		return false, err
+	}
+	issue, err := e.issues.GetIssue(ctx, run.IssueID)
+	if err != nil {
+		return false, err
+	}
+	names, err := e.checkConfigs.ScheduleWorkflowNodeChecks(ctx, issue, change, mode, agents, run.ID, nodeRun.ID)
+	if err != nil {
+		return false, err
+	}
+	if len(names) == 0 {
+		_, err := e.runs.CompleteNode(ctx, CompleteWorkflowNodeInput{NodeRunID: nodeRun.ID, Outcome: successOutcome, Actor: ActorSystem})
+		return err == nil, err
+	}
+	checks, err := e.checks.ListChecks(ctx, run.IssueID)
+	if err != nil {
+		return false, err
+	}
+	byName := map[string]Check{}
+	for _, check := range checks {
+		byName[check.Name] = check
+	}
+	allFinished := true
+	failed := false
+	for _, name := range names {
+		check, ok := byName[name]
+		if !ok || check.Verdict == CheckPending {
+			allFinished = false
+			continue
+		}
+		if check.Required && check.Verdict == CheckBlocked {
+			failed = true
+		}
+	}
+	if !allFinished {
+		return false, nil
+	}
+	outcome := successOutcome
+	if failed {
+		outcome = failureOutcome
+	}
+	_, err = e.runs.CompleteNode(ctx, CompleteWorkflowNodeInput{NodeRunID: nodeRun.ID, Outcome: outcome, Actor: ActorSystem})
+	return err == nil, err
+}
+
+func (e *WorkflowExecutor) handleMaterializeIssueSet(ctx context.Context, run WorkflowRun, nodeRun WorkflowNodeRun, node FlowNodeSnapshot) (bool, error) {
+	if node.Config.MaterializeIssueSet == nil {
+		return false, errors.New("materialize node is missing configuration")
+	}
+	if nodeRun.State == WorkflowNodeQueued {
+		if _, err := e.runs.MarkNodeRunning(ctx, nodeRun.ID); err != nil {
+			return false, err
+		}
+	}
+	result, replayed, err := e.artifacts.MaterializeIssueSet(ctx, nodeRun.InputArtifactID, *node.Config.MaterializeIssueSet)
+	if err != nil {
+		return false, err
+	}
+	_, err = e.runs.CompleteNode(ctx, CompleteWorkflowNodeInput{
+		NodeRunID: nodeRun.ID, Outcome: "completed", Actor: ActorSystem,
+		Payload: map[string]any{"issue_ids": result.IssueIDs, "replayed": replayed},
+	})
+	return err == nil, err
+}
+
+func (e *WorkflowExecutor) handleMergeChange(ctx context.Context, run WorkflowRun, nodeRun WorkflowNodeRun, _ FlowNodeSnapshot) (bool, error) {
+	if nodeRun.State == WorkflowNodeQueued {
+		if _, err := e.runs.MarkNodeRunning(ctx, nodeRun.ID); err != nil {
+			return false, err
+		}
+	}
+	artifact, err := e.artifacts.Get(ctx, nodeRun.InputArtifactID)
+	if err != nil {
+		return false, err
+	}
+	changeID, err := changeIDFromArtifact(artifact)
+	if err != nil {
+		return false, err
+	}
+	outcome := "merged"
+	change, err := e.sessions.GetChange(ctx, changeID)
+	if err != nil {
+		return false, err
+	}
+	if change.MergedAt == nil {
+		_, err = e.merges.MergeChange(ctx, changeID)
+	}
+	if err != nil {
+		// A merge may have committed before the process lost its response. The
+		// durable change latch is authoritative when this node is retried.
+		if refreshed, loadErr := e.sessions.GetChange(ctx, changeID); loadErr == nil && refreshed.MergedAt != nil {
+			err = nil
+		}
+	}
+	if err != nil {
+		message := strings.ToLower(err.Error())
+		if strings.Contains(message, "conflict") || strings.Contains(message, "base advanced") || strings.Contains(message, "not current") {
+			outcome = "conflict"
+		} else {
+			return false, err
+		}
+	}
+	_, err = e.runs.CompleteNode(ctx, CompleteWorkflowNodeInput{NodeRunID: nodeRun.ID, Outcome: outcome, Actor: ActorSystem})
+	return err == nil, err
+}
+
+func changeIDFromArtifact(artifact WorkflowArtifact) (string, error) {
+	if artifact.Kind != ArtifactChange {
+		return "", errors.New("node requires a change artifact")
+	}
+	var payload struct {
+		ChangeID string `json:"change_id"`
+	}
+	if err := json.Unmarshal(artifact.Payload, &payload); err != nil {
+		return "", err
+	}
+	payload.ChangeID = strings.TrimSpace(payload.ChangeID)
+	if payload.ChangeID == "" {
+		return "", errors.New("change artifact has no change_id")
+	}
+	return payload.ChangeID, nil
+}

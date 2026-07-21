@@ -47,16 +47,17 @@ type CheckEntrypoint struct {
 }
 
 type CheckDefinition struct {
-	Name        string                 `json:"name" yaml:"name"`
-	Kind        CheckKind              `json:"kind" yaml:"kind"`
-	Phase       CheckPhase             `json:"phase" yaml:"phase"`
-	Required    *bool                  `json:"required" yaml:"required"`
-	Entrypoint  *CheckEntrypoint       `json:"entrypoint" yaml:"entrypoint"`
-	RunsOn      map[string]string      `json:"runs_on" yaml:"runs_on"`
-	Requires    []string               `json:"requires" yaml:"requires"`
-	Size        string                 `json:"size" yaml:"size"`
-	Tolerations []scheduler.Toleration `json:"tolerations" yaml:"tolerations"`
-	sourcePath  string
+	Name             string                 `json:"name" yaml:"name"`
+	Kind             CheckKind              `json:"kind" yaml:"kind"`
+	Phase            CheckPhase             `json:"phase" yaml:"phase"`
+	Required         *bool                  `json:"required" yaml:"required"`
+	Entrypoint       *CheckEntrypoint       `json:"entrypoint" yaml:"entrypoint"`
+	RunsOn           map[string]string      `json:"runs_on" yaml:"runs_on"`
+	Requires         []string               `json:"requires" yaml:"requires"`
+	Size             string                 `json:"size" yaml:"size"`
+	Tolerations      []scheduler.Toleration `json:"tolerations" yaml:"tolerations"`
+	sourcePath       string
+	roleInstructions string
 }
 
 type CheckSuite struct {
@@ -202,7 +203,8 @@ func withFlowSnapshotReviewChecks(suite CheckSuite, snapshot FlowSnapshot, args 
 				Argv:  []string{command},
 				Shell: true,
 			},
-			Requires: []string{flowharness.AgentHarnessLabel(harness)},
+			Requires:         []string{flowharness.AgentHarnessLabel(harness)},
+			roleInstructions: reviewAgent.Agent.Prompt,
 		})
 		usedNames[name] = true
 	}
@@ -419,8 +421,7 @@ func (s *CheckConfigService) checkRecoveryCandidates(ctx context.Context) ([]che
 SELECT ch.id, ch.issue_id, ch.branch, ch.base, ch.head_sha, ch.created_at, ch.updated_at, ch.ready_at, ch.merged_at
 FROM changes ch
 JOIN issues i ON i.id = ch.issue_id
-WHERE i.triage_state = ?
-	AND i.schedule_state != ?
+WHERE i.lifecycle_state = ?
 	AND ch.ready_at IS NOT NULL
 	AND ch.merged_at IS NULL
 	AND ch.id = (
@@ -433,8 +434,7 @@ WHERE i.triage_state = ?
 		LIMIT 1
 	)
 ORDER BY ch.updated_at, ch.id`,
-		string(TriageAccepted),
-		string(ScheduleClosed),
+		string(LifecycleInProgress),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("select check recovery candidates: %w", err)
@@ -823,6 +823,10 @@ func (s *CheckConfigService) ensureCheckExists(ctx context.Context, issueID stri
 }
 
 func (s *CheckConfigService) enqueueCheckJob(ctx context.Context, issueID string, change Change, definition CheckDefinition) (bool, error) {
+	return s.enqueueCheckJobForWorkflow(ctx, issueID, change, definition, "", "")
+}
+
+func (s *CheckConfigService) enqueueCheckJobForWorkflow(ctx context.Context, issueID string, change Change, definition CheckDefinition, workflowRunID, nodeRunID string) (bool, error) {
 	role, bucket, err := jobRoleForCheck(definition.Kind)
 	if err != nil {
 		return false, err
@@ -844,6 +848,9 @@ func (s *CheckConfigService) enqueueCheckJob(ctx context.Context, issueID string
 		"branch":     change.Branch,
 		"base":       change.Base,
 	}
+	if strings.TrimSpace(definition.roleInstructions) != "" {
+		payload["role_instructions"] = definition.roleInstructions
+	}
 	stampProjectPayload(payload, s.project)
 	if (role == flowworker.RoleReviewer || role == flowworker.RoleVerifier) && s.threads != nil {
 		reviewContext, err := s.threads.ReviewContextForIssue(ctx, issueID)
@@ -855,6 +862,8 @@ func (s *CheckConfigService) enqueueCheckJob(ctx context.Context, issueID string
 	job, err := s.workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
 		IssueID:        &issueID,
 		ChangeID:       &change.ID,
+		WorkflowRunID:  stringPointerOrNil(workflowRunID),
+		NodeRunID:      stringPointerOrNil(nodeRunID),
 		Role:           role,
 		CapacityBucket: bucket,
 		RunsOn:         definition.RunsOn,
@@ -872,6 +881,105 @@ func (s *CheckConfigService) enqueueCheckJob(ctx context.Context, issueID string
 	}
 
 	return job.ID != "", nil
+}
+
+type WorkflowCheckMode string
+
+const (
+	WorkflowChecksAutomated WorkflowCheckMode = "automated"
+	WorkflowChecksReview    WorkflowCheckMode = "review"
+	WorkflowChecksVerify    WorkflowCheckMode = "verify"
+)
+
+// ScheduleWorkflowNodeChecks translates one trusted graph node into ordinary
+// check jobs while preserving run/node ownership on every queued job.
+func (s *CheckConfigService) ScheduleWorkflowNodeChecks(ctx context.Context, issue Issue, change Change, mode WorkflowCheckMode, agents []SnapshotReviewAgent, workflowRunID, nodeRunID string) ([]string, error) {
+	var definitions []CheckDefinition
+	switch mode {
+	case WorkflowChecksAutomated:
+		suite, err := s.LoadSuiteForChange(ctx, change)
+		if err != nil {
+			return nil, err
+		}
+		for _, definition := range suite.Definitions {
+			if definition.Kind == CheckKindCI {
+				definitions = append(definitions, definition)
+			}
+		}
+	case WorkflowChecksReview, WorkflowChecksVerify:
+		role := FlowReviewRoleReviewer
+		if mode == WorkflowChecksVerify {
+			role = FlowReviewRoleVerifier
+		}
+		snapshot := FlowSnapshot{}
+		for _, agent := range agents {
+			snapshot.ReviewAgents = append(snapshot.ReviewAgents, FlowReviewAgentSnapshot{
+				Role: role, Required: agent.Required, Agent: agent.Agent,
+			})
+		}
+		suite, err := withFlowSnapshotReviewChecks(CheckSuite{}, snapshot, s.harnessArgs)
+		if err != nil {
+			return nil, err
+		}
+		definitions = suite.Definitions
+	default:
+		return nil, fmt.Errorf("unknown workflow check mode %q", mode)
+	}
+
+	// A graph may revisit the same check node. Retire unsuccessful checks from
+	// earlier visits so they remain visible as history without blocking a later
+	// successful path or the merge handler.
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE checks
+SET required = 0,
+	verdict = ?,
+	details = ?,
+	updated_at = ?
+WHERE issue_id = ?
+	AND verdict IN (?, ?)
+	AND name LIKE '%.node.%'
+	AND name NOT LIKE ?`, string(CheckSkipped), "retired by a later workflow node visit", formatTime(s.checks.now().UTC()),
+		issue.ID, string(CheckPending), string(CheckBlocked), "%.node."+nodeRunID); err != nil {
+		return nil, fmt.Errorf("retire prior workflow checks: %w", err)
+	}
+
+	var names []string
+	for index, definition := range definitions {
+		definition.Name = workflowNodeCheckName(definition.Name, nodeRunID, index)
+		check, err := s.checks.GetCheck(ctx, issue.ID, definition.Name)
+		if errors.Is(err, sql.ErrNoRows) {
+			if err := s.ensurePendingCheck(ctx, issue.ID, definition); err != nil {
+				return nil, err
+			}
+			check, err = s.checks.GetCheck(ctx, issue.ID, definition.Name)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if check.Verdict == CheckPending {
+			if _, err := s.enqueueCheckJobForWorkflow(ctx, issue.ID, change, definition, workflowRunID, nodeRunID); err != nil {
+				return nil, err
+			}
+		}
+		names = append(names, definition.Name)
+	}
+	return names, nil
+}
+
+func workflowNodeCheckName(name, nodeRunID string, index int) string {
+	nodeRunID = strings.TrimSpace(nodeRunID)
+	if nodeRunID == "" {
+		nodeRunID = fmt.Sprintf("visit-%d", index+1)
+	}
+	return fmt.Sprintf("%s.node.%s", strings.TrimSpace(name), nodeRunID)
+}
+
+func stringPointerOrNil(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func (s *CheckConfigService) exchangePathForChange(_ context.Context, _ Change) (string, bool, error) {

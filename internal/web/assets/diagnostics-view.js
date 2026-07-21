@@ -7,7 +7,7 @@ import { value } from "./normalize.js";
 import { renderJobRow, renderQueueSummary, renderWorkerRow } from "./queue.js";
 
 export async function renderWorkersView(app, context) {
-  const data = await apiGet("/v1/workers");
+  const data = await apiGet("/v2/workers");
   if (context && !app.isActiveLoad(context)) return false;
   app.setTitle("Workers");
   const workers = data.workers || data.Workers || [];
@@ -59,7 +59,7 @@ function filterAndSortJobs(jobs, diagnostics, filter, sort) {
 }
 
 export async function renderJobsView(app, context) {
-  const data = await apiGet("/v1/jobs");
+  const data = await apiGet("/v2/jobs");
   if (context && !app.isActiveLoad(context)) return false;
   app.setTitle("Jobs");
   const jobs = data.jobs || data.Jobs || [];

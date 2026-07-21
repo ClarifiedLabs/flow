@@ -290,7 +290,7 @@ type ChecksResponse struct {
 }
 
 type TransitionsResponse struct {
-	Transitions []coordinator.TransitionLogEntry `json:"transitions"`
+	Transitions []coordinator.WorkflowTransition `json:"transitions"`
 }
 
 type ReviewRunResponse struct {

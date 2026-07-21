@@ -71,28 +71,28 @@ func (c *Client) WithProject(projectID string) *Client {
 // issuesPath scopes an issue route to the client's project when one is set.
 func (c *Client) issuesPath(suffix string) string {
 	if c.projectID != "" {
-		return "/v1/projects/" + url.PathEscape(c.projectID) + "/issues" + suffix
+		return "/v2/projects/" + url.PathEscape(c.projectID) + "/issues" + suffix
 	}
 
-	return "/v1/issues" + suffix
+	return "/v2/issues" + suffix
 }
 
 // projectPath scopes an arbitrary project-owned route ("/flows",
 // "/agent-defs/...") to the client's project when one is set.
 func (c *Client) projectPath(suffix string) string {
 	if c.projectID != "" {
-		return "/v1/projects/" + url.PathEscape(c.projectID) + suffix
+		return "/v2/projects/" + url.PathEscape(c.projectID) + suffix
 	}
 
-	return "/v1" + suffix
+	return "/v2" + suffix
 }
 
 func (c *Client) consolePath() string {
 	if c.projectID != "" {
-		return "/v1/projects/" + url.PathEscape(c.projectID) + "/console"
+		return "/v2/projects/" + url.PathEscape(c.projectID) + "/console"
 	}
 
-	return "/v1/console"
+	return "/v2/console"
 }
 
 func (c *Client) CreateIssue(input CreateIssueInput) (coordinator.Issue, error) {
@@ -106,11 +106,8 @@ func (c *Client) CreateIssue(input CreateIssueInput) (coordinator.Issue, error) 
 
 func (c *Client) ListIssues(filter IssueFilter) ([]coordinator.Issue, error) {
 	query := url.Values{}
-	for _, state := range filter.ScheduleStates {
-		query.Add("schedule_state", string(state))
-	}
-	for _, state := range filter.TriageStates {
-		query.Add("triage_state", string(state))
+	for _, state := range filter.LifecycleStates {
+		query.Add("state", state)
 	}
 	for _, tag := range filter.TagSlugs {
 		query.Add("tag", tag)
@@ -239,12 +236,14 @@ func (c *Client) RequestWorkPhaseChanges(issueID string, feedback string) (coord
 // current work phase's role instructions, human gate feedback, and completed
 // prior-phase handoffs.
 type PromptContext struct {
-	RoleInstructions string               `json:"role_instructions,omitempty"`
-	PhaseName        string               `json:"phase_name,omitempty"`
-	PhaseIndex       int                  `json:"phase_index"`
-	FinalPhase       bool                 `json:"final_phase"`
-	GateFeedback     string               `json:"gate_feedback,omitempty"`
-	PriorHandoffs    []PromptPhaseHandoff `json:"prior_handoffs,omitempty"`
+	RoleInstructions string                    `json:"role_instructions,omitempty"`
+	PhaseName        string                    `json:"phase_name,omitempty"`
+	WorkspaceMode    coordinator.WorkspaceMode `json:"workspace_mode,omitempty"`
+	ArtifactKind     coordinator.ArtifactKind  `json:"artifact_kind,omitempty"`
+	PhaseIndex       int                       `json:"phase_index"`
+	FinalPhase       bool                      `json:"final_phase"`
+	GateFeedback     string                    `json:"gate_feedback,omitempty"`
+	PriorHandoffs    []PromptPhaseHandoff      `json:"prior_handoffs,omitempty"`
 }
 
 type PromptPhaseHandoff struct {
@@ -286,12 +285,74 @@ func (c *Client) EditIssue(id string, input EditIssueInput) (coordinator.Issue, 
 }
 
 func (c *Client) ScheduleIssue(id string, state coordinator.ScheduleState) (coordinator.Issue, error) {
-	var response issueResponse
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(id))+"/schedule", scheduleIssueRequest{State: string(state)}, nil, &response); err != nil {
+	if _, err := c.ScheduleWorkflow(id); err != nil {
 		return coordinator.Issue{}, err
 	}
+	issue, _, err := c.GetIssueWithStatus(id)
+	return issue, err
+}
 
-	return response.Issue, nil
+type WorkflowDetail struct {
+	Detail    coordinator.WorkflowRunDetail  `json:"detail"`
+	Artifacts []coordinator.WorkflowArtifact `json:"artifacts"`
+}
+
+func (c *Client) ScheduleWorkflow(id string) (coordinator.WorkflowRun, error) {
+	var response struct {
+		Run coordinator.WorkflowRun `json:"run"`
+	}
+	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(id))+"/schedule", map[string]string{}, nil, &response); err != nil {
+		return coordinator.WorkflowRun{}, err
+	}
+	return response.Run, nil
+}
+
+func (c *Client) GetWorkflow(id string) (WorkflowDetail, error) {
+	var response WorkflowDetail
+	if err := c.do(http.MethodGet, c.issuesPath("/"+url.PathEscape(id))+"/workflow", nil, nil, &response); err != nil {
+		return WorkflowDetail{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) CreateWorkflowArtifact(issueID string, input coordinator.CreateWorkflowArtifactInput) (coordinator.WorkflowArtifact, bool, error) {
+	var response struct {
+		Artifact coordinator.WorkflowArtifact `json:"artifact"`
+		Replayed bool                         `json:"replayed"`
+	}
+	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(issueID))+"/workflow/artifacts", input, nil, &response); err != nil {
+		return coordinator.WorkflowArtifact{}, false, err
+	}
+	return response.Artifact, response.Replayed, nil
+}
+
+func (c *Client) CompleteWorkflowAgentNode(issueID, nodeRunID, artifactID string) (coordinator.CompleteWorkflowNodeResult, error) {
+	var response coordinator.CompleteWorkflowNodeResult
+	request := map[string]string{"node_run_id": nodeRunID, "artifact_id": artifactID}
+	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(issueID))+"/workflow/complete", request, nil, &response); err != nil {
+		return coordinator.CompleteWorkflowNodeResult{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) RespondWorkflow(issueID, nodeRunID, outcome, feedback string) (coordinator.CompleteWorkflowNodeResult, error) {
+	var response coordinator.CompleteWorkflowNodeResult
+	request := map[string]string{"node_run_id": nodeRunID, "outcome": outcome, "feedback": feedback}
+	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(issueID))+"/workflow/respond", request, nil, &response); err != nil {
+		return coordinator.CompleteWorkflowNodeResult{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) ExtendWorkflowBudget(issueID string, additional int) (coordinator.WorkflowRun, error) {
+	var response struct {
+		Run coordinator.WorkflowRun `json:"run"`
+	}
+	request := map[string]int{"additional": additional}
+	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(issueID))+"/workflow/budget", request, nil, &response); err != nil {
+		return coordinator.WorkflowRun{}, err
+	}
+	return response.Run, nil
 }
 
 func (c *Client) SetIssueState(id string, state coordinator.IssueState) (coordinator.Issue, error) {
@@ -304,11 +365,37 @@ func (c *Client) SetIssueState(id string, state coordinator.IssueState) (coordin
 }
 
 func (c *Client) ResetIssue(id string) (coordinator.Issue, error) {
-	var response issueResponse
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(id))+"/reset", map[string]string{}, nil, &response); err != nil {
+	if _, err := c.ResetWorkflow(id); err != nil {
 		return coordinator.Issue{}, err
 	}
+	issue, _, err := c.GetIssueWithStatus(id)
+	return issue, err
+}
 
+func (c *Client) ResetWorkflow(id string) (coordinator.WorkflowRun, error) {
+	var response struct {
+		Run coordinator.WorkflowRun `json:"run"`
+	}
+	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(id))+"/reset", map[string]string{}, nil, &response); err != nil {
+		return coordinator.WorkflowRun{}, err
+	}
+	return response.Run, nil
+}
+
+func (c *Client) ForceDone(id string, resolution coordinator.DoneResolution, note string) (coordinator.Issue, error) {
+	var response issueResponse
+	request := map[string]string{"resolution": string(resolution), "note": note}
+	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(id))+"/done", request, nil, &response); err != nil {
+		return coordinator.Issue{}, err
+	}
+	return response.Issue, nil
+}
+
+func (c *Client) ReopenIssue(id string) (coordinator.Issue, error) {
+	var response issueResponse
+	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(id))+"/reopen", map[string]string{}, nil, &response); err != nil {
+		return coordinator.Issue{}, err
+	}
 	return response.Issue, nil
 }
 
@@ -442,7 +529,7 @@ func (c *Client) DownloadIssueAttachment(ctx context.Context, issueID, attachmen
 
 func (c *Client) MergeChange(id string) (coordinator.MergeResult, error) {
 	var response mergeResponse
-	if err := c.do(http.MethodPost, "/v1/changes/"+url.PathEscape(id)+"/merge", map[string]string{}, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/changes/"+url.PathEscape(id)+"/merge", map[string]string{}, nil, &response); err != nil {
 		return coordinator.MergeResult{}, err
 	}
 
@@ -451,7 +538,7 @@ func (c *Client) MergeChange(id string) (coordinator.MergeResult, error) {
 
 func (c *Client) CreateWebBootstrap() (WebBootstrapResult, error) {
 	var response webBootstrapResponse
-	if err := c.do(http.MethodPost, "/v1/ui/bootstrap", map[string]string{}, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/ui/bootstrap", map[string]string{}, nil, &response); err != nil {
 		return WebBootstrapResult{}, err
 	}
 
@@ -466,7 +553,7 @@ func (c *Client) CreateWebBootstrap() (WebBootstrapResult, error) {
 func (c *Client) Board() (coordinator.BoardResult, error) {
 	if c.projectID != "" {
 		var response boardResponse
-		if err := c.do(http.MethodGet, "/v1/projects/"+url.PathEscape(c.projectID)+"/board", nil, nil, &response); err != nil {
+		if err := c.do(http.MethodGet, "/v2/projects/"+url.PathEscape(c.projectID)+"/board", nil, nil, &response); err != nil {
 			return coordinator.BoardResult{}, err
 		}
 		return coordinator.BoardResult{
@@ -511,7 +598,7 @@ type ProjectBoard struct {
 // BoardAll returns every project's board.
 func (c *Client) BoardAll() ([]ProjectBoard, error) {
 	var response aggregateBoardResponse
-	if err := c.do(http.MethodGet, "/v1/board", nil, nil, &response); err != nil {
+	if err := c.do(http.MethodGet, "/v2/board", nil, nil, &response); err != nil {
 		return nil, err
 	}
 
@@ -548,7 +635,7 @@ type CreateProjectInput struct {
 // same repo path returns the existing project with created=false.
 func (c *Client) CreateProject(input CreateProjectInput) (Project, bool, error) {
 	var response projectResponse
-	if err := c.do(http.MethodPost, "/v1/projects", input, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/projects", input, nil, &response); err != nil {
 		return Project{}, false, err
 	}
 
@@ -557,7 +644,7 @@ func (c *Client) CreateProject(input CreateProjectInput) (Project, bool, error) 
 
 func (c *Client) ListProjects() ([]Project, error) {
 	var response projectsResponse
-	if err := c.do(http.MethodGet, "/v1/projects", nil, nil, &response); err != nil {
+	if err := c.do(http.MethodGet, "/v2/projects", nil, nil, &response); err != nil {
 		return nil, err
 	}
 
@@ -566,7 +653,7 @@ func (c *Client) ListProjects() ([]Project, error) {
 
 func (c *Client) ListHarnesses() (HarnessesResponse, error) {
 	var response harnessesResponse
-	if err := c.do(http.MethodGet, "/v1/harnesses", nil, nil, &response); err != nil {
+	if err := c.do(http.MethodGet, "/v2/harnesses", nil, nil, &response); err != nil {
 		return HarnessesResponse{}, err
 	}
 
@@ -580,7 +667,7 @@ func (c *Client) LookupProjectByRepoPath(repoPath string) (*Project, error) {
 	query.Set("repo_path", repoPath)
 
 	var response projectsResponse
-	if err := c.do(http.MethodGet, "/v1/projects", nil, query, &response); err != nil {
+	if err := c.do(http.MethodGet, "/v2/projects", nil, query, &response); err != nil {
 		return nil, err
 	}
 	if len(response.Projects) == 0 {
@@ -602,7 +689,7 @@ func (c *Client) ListChecks(issueID string) (CheckListResult, error) {
 	}, nil
 }
 
-func (c *Client) ListTransitions(issueID string) ([]coordinator.TransitionLogEntry, error) {
+func (c *Client) ListTransitions(issueID string) ([]coordinator.WorkflowTransition, error) {
 	var response transitionsResponse
 	if err := c.do(http.MethodGet, c.issuesPath("/"+url.PathEscape(issueID))+"/transitions", nil, nil, &response); err != nil {
 		return nil, err
@@ -671,7 +758,7 @@ func (c *Client) CreateThread(changeID string, input CreateThreadInput) (coordin
 		Body:            input.Body,
 		LeaseID:         input.LeaseID,
 	}
-	if err := c.do(http.MethodPost, "/v1/changes/"+url.PathEscape(changeID)+"/comments", request, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/changes/"+url.PathEscape(changeID)+"/comments", request, nil, &response); err != nil {
 		return coordinator.ReviewThread{}, err
 	}
 
@@ -680,7 +767,7 @@ func (c *Client) CreateThread(changeID string, input CreateThreadInput) (coordin
 
 func (c *Client) ListThreads(changeID string, leaseID string) ([]coordinator.ReviewThread, error) {
 	var response threadsResponse
-	path := "/v1/changes/" + url.PathEscape(changeID) + "/threads"
+	path := "/v2/changes/" + url.PathEscape(changeID) + "/threads"
 	if strings.TrimSpace(leaseID) != "" {
 		path += "?lease_id=" + url.QueryEscape(strings.TrimSpace(leaseID))
 	}
@@ -693,7 +780,7 @@ func (c *Client) ListThreads(changeID string, leaseID string) ([]coordinator.Rev
 
 func (c *Client) ReplyThread(threadID string, body string, leaseID string) (coordinator.ReviewThread, error) {
 	var response threadResponse
-	if err := c.do(http.MethodPost, "/v1/threads/"+url.PathEscape(threadID)+"/comments", threadCommentRequest{Body: body, LeaseID: leaseID}, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/threads/"+url.PathEscape(threadID)+"/comments", threadCommentRequest{Body: body, LeaseID: leaseID}, nil, &response); err != nil {
 		return coordinator.ReviewThread{}, err
 	}
 
@@ -708,7 +795,7 @@ func (c *Client) ClaimThread(threadID string, input ClaimThreadInput) (coordinat
 		ClaimCommitSHA: input.ClaimCommitSHA,
 		LeaseID:        input.LeaseID,
 	}
-	if err := c.do(http.MethodPost, "/v1/threads/"+url.PathEscape(threadID)+"/claims", request, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/threads/"+url.PathEscape(threadID)+"/claims", request, nil, &response); err != nil {
 		return coordinator.ReviewThread{}, err
 	}
 
@@ -725,7 +812,7 @@ func (c *Client) ReopenThread(threadID string, body string, leaseID string) (coo
 
 func (c *Client) verifyThread(threadID string, action string, body string, leaseID string) (coordinator.ReviewThread, error) {
 	var response threadResponse
-	if err := c.do(http.MethodPost, "/v1/threads/"+url.PathEscape(threadID)+"/"+action, threadCommentRequest{Body: body, LeaseID: leaseID}, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/threads/"+url.PathEscape(threadID)+"/"+action, threadCommentRequest{Body: body, LeaseID: leaseID}, nil, &response); err != nil {
 		return coordinator.ReviewThread{}, err
 	}
 
@@ -743,7 +830,7 @@ func (c *Client) RegisterWorker(input RegisterWorkerInput) (flowworker.Worker, e
 		CapacityEphemeral:       input.CapacityEphemeral,
 		HeartbeatTTLSeconds:     durationSeconds(input.HeartbeatTTL),
 	}
-	if err := c.do(http.MethodPost, "/v1/workers/register", request, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/workers/register", request, nil, &response); err != nil {
 		return flowworker.Worker{}, err
 	}
 
@@ -753,7 +840,7 @@ func (c *Client) RegisterWorker(input RegisterWorkerInput) (flowworker.Worker, e
 func (c *Client) JoinWorker(input JoinWorkerInput) (JoinWorkerResult, error) {
 	var response joinWorkerResponse
 	request := joinWorkerRequest{WorkerID: input.WorkerID}
-	if err := c.do(http.MethodPost, "/v1/workers/join", request, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/workers/join", request, nil, &response); err != nil {
 		return JoinWorkerResult{}, err
 	}
 
@@ -769,7 +856,7 @@ func (c *Client) HeartbeatWorker(input HeartbeatWorkerInput) (flowworker.Worker,
 		WorkerID:            input.WorkerID,
 		HeartbeatTTLSeconds: durationSeconds(input.HeartbeatTTL),
 	}
-	if err := c.do(http.MethodPost, "/v1/workers/heartbeat", request, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/workers/heartbeat", request, nil, &response); err != nil {
 		return flowworker.Worker{}, err
 	}
 
@@ -778,7 +865,7 @@ func (c *Client) HeartbeatWorker(input HeartbeatWorkerInput) (flowworker.Worker,
 
 func (c *Client) ListWorkerReapJobs() ([]flowworker.Job, error) {
 	var response jobsResponse
-	if err := c.do(http.MethodGet, "/v1/workers/reap-jobs", nil, nil, &response); err != nil {
+	if err := c.do(http.MethodGet, "/v2/workers/reap-jobs", nil, nil, &response); err != nil {
 		return nil, err
 	}
 
@@ -793,7 +880,7 @@ func (c *Client) ClaimJob(input ClaimJobInput) (ClaimJobResult, error) {
 		LeaseDurationSeconds: durationSeconds(input.LeaseDuration),
 		WaitSeconds:          durationSeconds(input.Wait),
 	}
-	if err := c.do(http.MethodPost, "/v1/workers/claim", request, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/workers/claim", request, nil, &response); err != nil {
 		return ClaimJobResult{}, err
 	}
 
@@ -811,7 +898,7 @@ func (c *Client) RenewLease(input RenewLeaseInput) (flowworker.Lease, error) {
 		LeaseID:              input.LeaseID,
 		LeaseDurationSeconds: durationSeconds(input.LeaseDuration),
 	}
-	if err := c.do(http.MethodPost, "/v1/workers/renew", request, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/workers/renew", request, nil, &response); err != nil {
 		return flowworker.Lease{}, err
 	}
 
@@ -821,7 +908,7 @@ func (c *Client) RenewLease(input RenewLeaseInput) (flowworker.Lease, error) {
 func (c *Client) WorkerJobStatus(ctx context.Context, input WorkerJobStatusInput) (WorkerJobStatusResult, error) {
 	var response workerJobStatusResponse
 	request := workerJobStatusRequest{LeaseID: input.LeaseID}
-	if err := c.doContext(ctx, http.MethodPost, "/v1/workers/status", request, nil, &response); err != nil {
+	if err := c.doContext(ctx, http.MethodPost, "/v2/workers/status", request, nil, &response); err != nil {
 		return WorkerJobStatusResult{}, err
 	}
 
@@ -835,7 +922,7 @@ func (c *Client) WorkerJobStatus(ctx context.Context, input WorkerJobStatusInput
 func (c *Client) MarkJobRunning(leaseID string) (MarkJobRunningResult, error) {
 	var response jobResponse
 	request := markJobRunningRequest{LeaseID: leaseID}
-	if err := c.do(http.MethodPost, "/v1/workers/running", request, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/workers/running", request, nil, &response); err != nil {
 		return MarkJobRunningResult{}, err
 	}
 
@@ -853,7 +940,7 @@ func (c *Client) ReleaseLease(input ReleaseLeaseInput) (flowworker.Job, error) {
 		LeaseID:    input.LeaseID,
 		FinalState: string(input.FinalState),
 	}
-	if err := c.do(http.MethodPost, "/v1/workers/release", request, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/workers/release", request, nil, &response); err != nil {
 		return flowworker.Job{}, err
 	}
 
@@ -872,7 +959,7 @@ func (c *Client) RegisterJobTerminal(ctx context.Context, jobID string, leaseID 
 		TargetURL:      targetURL,
 		TmuxSocketPath: tmuxSocketPath,
 	}
-	if err := c.doContext(ctx, http.MethodPost, "/v1/jobs/"+url.PathEscape(jobID)+"/terminal", request, nil, &response); err != nil {
+	if err := c.doContext(ctx, http.MethodPost, "/v2/jobs/"+url.PathEscape(jobID)+"/terminal", request, nil, &response); err != nil {
 		return coordinator.JobTerminal{}, err
 	}
 
@@ -881,7 +968,7 @@ func (c *Client) RegisterJobTerminal(ctx context.Context, jobID string, leaseID 
 
 func (c *Client) ListWorkers() ([]flowworker.Worker, error) {
 	var response workersResponse
-	if err := c.do(http.MethodGet, "/v1/workers", nil, nil, &response); err != nil {
+	if err := c.do(http.MethodGet, "/v2/workers", nil, nil, &response); err != nil {
 		return nil, err
 	}
 
@@ -890,7 +977,7 @@ func (c *Client) ListWorkers() ([]flowworker.Worker, error) {
 
 func (c *Client) ListJobs() ([]flowworker.Job, error) {
 	var response jobsResponse
-	if err := c.do(http.MethodGet, "/v1/jobs", nil, nil, &response); err != nil {
+	if err := c.do(http.MethodGet, "/v2/jobs", nil, nil, &response); err != nil {
 		return nil, err
 	}
 
@@ -911,7 +998,7 @@ func (c *Client) EnqueueJob(input EnqueueJobInput) (flowworker.Job, error) {
 		Tolerations:    input.Tolerations,
 		Payload:        input.Payload,
 	}
-	if err := c.do(http.MethodPost, "/v1/jobs", request, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/jobs", request, nil, &response); err != nil {
 		return flowworker.Job{}, err
 	}
 
@@ -920,7 +1007,7 @@ func (c *Client) EnqueueJob(input EnqueueJobInput) (flowworker.Job, error) {
 
 func (c *Client) JobAttach(jobID string) (terminal.AttachInfo, error) {
 	var response attachResponse
-	if err := c.do(http.MethodGet, "/v1/jobs/"+url.PathEscape(jobID)+"/attach", nil, nil, &response); err != nil {
+	if err := c.do(http.MethodGet, "/v2/jobs/"+url.PathEscape(jobID)+"/attach", nil, nil, &response); err != nil {
 		return terminal.AttachInfo{}, err
 	}
 
@@ -938,7 +1025,7 @@ func (c *Client) UpdateSessionStateContext(ctx context.Context, sessionID string
 func (c *Client) UpdateSessionStateWithSourceContext(ctx context.Context, sessionID string, state coordinator.SessionRuntimeState, source string) (coordinator.Session, error) {
 	var response sessionResponse
 	request := sessionEventRequest{State: string(state), Source: strings.TrimSpace(source)}
-	if err := c.doContext(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(sessionID)+"/event", request, nil, &response); err != nil {
+	if err := c.doContext(ctx, http.MethodPost, "/v2/sessions/"+url.PathEscape(sessionID)+"/event", request, nil, &response); err != nil {
 		return coordinator.Session{}, err
 	}
 
@@ -954,7 +1041,7 @@ func (c *Client) ReportSessionSignal(ctx context.Context, sessionID string, inpu
 		HookEventName: strings.TrimSpace(input.HookEventName),
 		Details:       strings.TrimSpace(input.Details),
 	}
-	if err := c.doContext(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(sessionID)+"/signal", request, nil, &response); err != nil {
+	if err := c.doContext(ctx, http.MethodPost, "/v2/sessions/"+url.PathEscape(sessionID)+"/signal", request, nil, &response); err != nil {
 		return coordinator.Session{}, err
 	}
 
@@ -967,7 +1054,7 @@ func (c *Client) ReadySession(sessionID string) (coordinator.Session, error) {
 
 func (c *Client) ReadySessionWithInput(sessionID string, input ReadySessionInput) (coordinator.Session, error) {
 	var response sessionResponse
-	if err := c.do(http.MethodPost, "/v1/sessions/"+url.PathEscape(sessionID)+"/ready", readySessionRequest{HeadSHA: input.HeadSHA}, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/sessions/"+url.PathEscape(sessionID)+"/ready", readySessionRequest{HeadSHA: input.HeadSHA}, nil, &response); err != nil {
 		return coordinator.Session{}, err
 	}
 
@@ -976,7 +1063,7 @@ func (c *Client) ReadySessionWithInput(sessionID string, input ReadySessionInput
 
 func (c *Client) SessionAttach(sessionID string) (terminal.AttachInfo, error) {
 	var response attachResponse
-	if err := c.do(http.MethodGet, "/v1/sessions/"+url.PathEscape(sessionID)+"/attach", nil, nil, &response); err != nil {
+	if err := c.do(http.MethodGet, "/v2/sessions/"+url.PathEscape(sessionID)+"/attach", nil, nil, &response); err != nil {
 		return terminal.AttachInfo{}, err
 	}
 
@@ -986,7 +1073,7 @@ func (c *Client) SessionAttach(sessionID string) (terminal.AttachInfo, error) {
 func (c *Client) RegisterSessionTerminal(ctx context.Context, sessionID string, targetURL string, tmuxSocketPath string) (coordinator.SessionTerminal, error) {
 	var response sessionTerminalResponse
 	request := sessionTerminalRequest{TargetURL: targetURL, TmuxSocketPath: tmuxSocketPath}
-	if err := c.doContext(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(sessionID)+"/terminal", request, nil, &response); err != nil {
+	if err := c.doContext(ctx, http.MethodPost, "/v2/sessions/"+url.PathEscape(sessionID)+"/terminal", request, nil, &response); err != nil {
 		return coordinator.SessionTerminal{}, err
 	}
 
@@ -995,7 +1082,7 @@ func (c *Client) RegisterSessionTerminal(ctx context.Context, sessionID string, 
 
 func (c *Client) CreateSessionTerminalAccess(sessionID string) (coordinator.SessionTerminalAccess, error) {
 	var response sessionTerminalAccessResponse
-	if err := c.do(http.MethodPost, "/v1/sessions/"+url.PathEscape(sessionID)+"/terminal-token", map[string]string{}, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/sessions/"+url.PathEscape(sessionID)+"/terminal-token", map[string]string{}, nil, &response); err != nil {
 		return coordinator.SessionTerminalAccess{}, err
 	}
 
@@ -1016,7 +1103,7 @@ func (c *Client) URLForPath(path string) string {
 func (c *Client) WriteSessionStatus(sessionID string, message string, kind string) (coordinator.StatusLogEntry, error) {
 	var response statusResponse
 	request := sessionStatusRequest{Message: message, Kind: kind}
-	if err := c.do(http.MethodPost, "/v1/sessions/"+url.PathEscape(sessionID)+"/status", request, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/sessions/"+url.PathEscape(sessionID)+"/status", request, nil, &response); err != nil {
 		return coordinator.StatusLogEntry{}, err
 	}
 
@@ -1026,7 +1113,7 @@ func (c *Client) WriteSessionStatus(sessionID string, message string, kind strin
 func (c *Client) ReportSessionProcessExit(ctx context.Context, input ReportSessionProcessExitInput) (coordinator.Session, error) {
 	var response sessionResponse
 	request := sessionProcessExitRequest{LeaseID: input.LeaseID, ExitCode: input.ExitCode}
-	if err := c.doContext(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(input.SessionID)+"/process-exit", request, nil, &response); err != nil {
+	if err := c.doContext(ctx, http.MethodPost, "/v2/sessions/"+url.PathEscape(input.SessionID)+"/process-exit", request, nil, &response); err != nil {
 		return coordinator.Session{}, err
 	}
 
@@ -1040,7 +1127,7 @@ func (c *Client) ListPendingSessionMessages(ctx context.Context, input ListPendi
 	if input.Limit > 0 {
 		query.Set("limit", strconv.Itoa(input.Limit))
 	}
-	path := "/v1/sessions/" + url.PathEscape(input.SessionID) + "/messages"
+	path := "/v2/sessions/" + url.PathEscape(input.SessionID) + "/messages"
 	if encoded := query.Encode(); encoded != "" {
 		path += "?" + encoded
 	}
@@ -1054,7 +1141,7 @@ func (c *Client) ListPendingSessionMessages(ctx context.Context, input ListPendi
 func (c *Client) MarkSessionMessageDelivered(ctx context.Context, input MarkSessionMessageDeliveredInput) (coordinator.SessionMessage, error) {
 	var response sessionMessageResponse
 	request := sessionMessageDeliveredRequest{LeaseID: input.LeaseID}
-	path := "/v1/sessions/" + url.PathEscape(input.SessionID) + "/messages/" + url.PathEscape(input.MessageID) + "/delivered"
+	path := "/v2/sessions/" + url.PathEscape(input.SessionID) + "/messages/" + url.PathEscape(input.MessageID) + "/delivered"
 	if err := c.doContext(ctx, http.MethodPost, path, request, nil, &response); err != nil {
 		return coordinator.SessionMessage{}, err
 	}
@@ -1065,7 +1152,7 @@ func (c *Client) MarkSessionMessageDelivered(ctx context.Context, input MarkSess
 func (c *Client) ReplyToIssue(issueID string, input ReplyToIssueInput) (coordinator.SessionMessage, bool, error) {
 	var response sessionMessageResponse
 	request := attentionReplyRequest{Message: input.Message, StatusLogID: input.StatusLogID}
-	if err := c.do(http.MethodPost, "/v1/issues/"+url.PathEscape(issueID)+"/attention/reply", request, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/issues/"+url.PathEscape(issueID)+"/attention/reply", request, nil, &response); err != nil {
 		return coordinator.SessionMessage{}, false, err
 	}
 
@@ -1074,7 +1161,7 @@ func (c *Client) ReplyToIssue(issueID string, input ReplyToIssueInput) (coordina
 
 func (c *Client) Reconcile() (coordinator.ReconcileResult, error) {
 	var response reconcileResponse
-	if err := c.do(http.MethodPost, "/v1/reconcile", map[string]string{}, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/reconcile", map[string]string{}, nil, &response); err != nil {
 		return coordinator.ReconcileResult{}, err
 	}
 
@@ -1087,7 +1174,7 @@ func (c *Client) Reconcile() (coordinator.ReconcileResult, error) {
 func (c *Client) PutHandoff(changeID string, input PutHandoffInput) (PutHandoffResult, error) {
 	var response handoffResponse
 	request := putHandoffRequest{Content: input.Content, HeadSHA: input.HeadSHA}
-	if err := c.do(http.MethodPut, "/v1/changes/"+url.PathEscape(changeID)+"/handoff", request, nil, &response); err != nil {
+	if err := c.do(http.MethodPut, "/v2/changes/"+url.PathEscape(changeID)+"/handoff", request, nil, &response); err != nil {
 		return PutHandoffResult{}, err
 	}
 
@@ -1113,7 +1200,7 @@ func (c *Client) GetHandoff(changeID string, leaseID string) (PutHandoffResult, 
 		query = url.Values{"lease_id": {leaseID}}
 	}
 	var response handoffResponse
-	err := c.do(http.MethodGet, "/v1/changes/"+url.PathEscape(changeID)+"/handoff", nil, query, &response)
+	err := c.do(http.MethodGet, "/v2/changes/"+url.PathEscape(changeID)+"/handoff", nil, query, &response)
 	if err != nil {
 		var statusErr *HTTPStatusError
 		if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound {
@@ -1134,7 +1221,7 @@ func (c *Client) GetHandoff(changeID string, leaseID string) (PutHandoffResult, 
 // UploadSessionTranscript PUTs raw transcript bytes for an author session. The
 // caller (the worker) supplies the trailing bytes of the tmux transcript log.
 func (c *Client) UploadSessionTranscript(ctx context.Context, sessionID string, r io.Reader) error {
-	return c.doRaw(ctx, http.MethodPut, "/v1/sessions/"+url.PathEscape(sessionID)+"/transcript", nil, r)
+	return c.doRaw(ctx, http.MethodPut, "/v2/sessions/"+url.PathEscape(sessionID)+"/transcript", nil, r)
 }
 
 // UploadJobTranscript PUTs raw transcript bytes for a check job, proving a live
@@ -1143,17 +1230,17 @@ func (c *Client) UploadSessionTranscript(ctx context.Context, sessionID string, 
 func (c *Client) UploadJobTranscript(ctx context.Context, jobID string, leaseID string, r io.Reader) error {
 	query := url.Values{}
 	query.Set("lease_id", leaseID)
-	return c.doRaw(ctx, http.MethodPut, "/v1/jobs/"+url.PathEscape(jobID)+"/transcript", query, r)
+	return c.doRaw(ctx, http.MethodPut, "/v2/jobs/"+url.PathEscape(jobID)+"/transcript", query, r)
 }
 
 // SessionTranscript GETs an author session's stored transcript (owner scope).
 func (c *Client) SessionTranscript(sessionID string) (string, error) {
-	return c.getText("/v1/sessions/" + url.PathEscape(sessionID) + "/transcript")
+	return c.getText("/v2/sessions/" + url.PathEscape(sessionID) + "/transcript")
 }
 
 // JobTranscript GETs a job's stored transcript (owner scope).
 func (c *Client) JobTranscript(jobID string) (string, error) {
-	return c.getText("/v1/jobs/" + url.PathEscape(jobID) + "/transcript")
+	return c.getText("/v2/jobs/" + url.PathEscape(jobID) + "/transcript")
 }
 
 func (c *Client) do(method string, path string, body any, query url.Values, target any) error {
@@ -1369,22 +1456,19 @@ func durationSeconds(duration time.Duration) int {
 }
 
 type CreateIssueInput struct {
-	Title               string `json:"title"`
-	Body                string `json:"body"`
-	AcceptanceCriteria  string `json:"acceptance_criteria"`
-	Priority            int    `json:"priority"`
-	RequiresHumanReview *bool  `json:"requires_human_review,omitempty"`
-	AutoMerge           *bool  `json:"auto_merge,omitempty"`
-	FlowID              string `json:"flow_id,omitempty"`
+	Title              string `json:"title"`
+	Body               string `json:"body"`
+	AcceptanceCriteria string `json:"acceptance_criteria"`
+	Priority           int    `json:"priority"`
+	FlowID             string `json:"flow_id,omitempty"`
 }
 
 type EditIssueInput struct {
-	Title               *string `json:"title,omitempty"`
-	Body                *string `json:"body,omitempty"`
-	AcceptanceCriteria  *string `json:"acceptance_criteria,omitempty"`
-	Priority            *int    `json:"priority,omitempty"`
-	RequiresHumanReview *bool   `json:"requires_human_review,omitempty"`
-	AutoMerge           *bool   `json:"auto_merge,omitempty"`
+	Title              *string `json:"title,omitempty"`
+	Body               *string `json:"body,omitempty"`
+	AcceptanceCriteria *string `json:"acceptance_criteria,omitempty"`
+	Priority           *int    `json:"priority,omitempty"`
+	FlowID             *string `json:"flow_id,omitempty"`
 }
 
 type UploadIssueAttachmentInput struct {
@@ -1396,9 +1480,8 @@ type UploadIssueAttachmentInput struct {
 }
 
 type IssueFilter struct {
-	ScheduleStates []coordinator.ScheduleState
-	TriageStates   []coordinator.TriageState
-	TagSlugs       []string
+	LifecycleStates []string
+	TagSlugs        []string
 }
 
 type RegisterWorkerInput struct {

@@ -7,15 +7,16 @@ import (
 )
 
 const (
-	PlannerSkill  = "flow-planner"
-	AuthorSkill   = "flow-author"
-	ReviewerSkill = "flow-reviewer"
-	VerifierSkill = "flow-verifier"
+	PlannerSkill      = "flow-planner"
+	IssuePlannerSkill = "flow-issue-planner"
+	AuthorSkill       = "flow-author"
+	ReviewerSkill     = "flow-reviewer"
+	VerifierSkill     = "flow-verifier"
 )
 
-var Names = []string{PlannerSkill, AuthorSkill, ReviewerSkill, VerifierSkill}
+var Names = []string{PlannerSkill, IssuePlannerSkill, AuthorSkill, ReviewerSkill, VerifierSkill}
 
-//go:embed flow-planner.md flow-author.md flow-reviewer.md flow-verifier.md
+//go:embed flow-planner.md flow-issue-planner.md flow-author.md flow-reviewer.md flow-verifier.md
 var bundled embed.FS
 
 func Instructions(name string) (string, error) {

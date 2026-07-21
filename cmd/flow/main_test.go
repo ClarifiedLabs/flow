@@ -13,13 +13,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	flowclient "github.com/ClarifiedLabs/flow/internal/client"
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	"github.com/ClarifiedLabs/flow/internal/db"
-	"github.com/ClarifiedLabs/flow/internal/handoff"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
@@ -231,72 +229,6 @@ func TestFetchPromptIncludesIssueDetailsFromAPI(t *testing.T) {
 	}
 }
 
-// TestFetchPromptUsesFlowPhaseAgentPrompt is the regression for per-phase
-// prompts: an issue on the seeded "planned" flow, once scheduled, freezes a
-// cursor whose first phase runs the planner agent def — fetch-prompt must
-// render that agent's prompt (not the embedded author skill) and label the
-// work phase.
-func TestFetchPromptUsesFlowPhaseAgentPrompt(t *testing.T) {
-	clearFetchPromptEnvironment(t)
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	fixture := newFlowTestFixture(t)
-	ctx := context.Background()
-
-	bundle, ok := fixture.Registry.Bundle(fixture.Project.ID)
-	if !ok {
-		t.Fatalf("project bundle not open")
-	}
-	planned, err := bundle.Flows.GetByName(ctx, "planned")
-	if err != nil {
-		t.Fatalf("get planned flow: %v", err)
-	}
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{
-		Title:  "Phase prompt issue",
-		Body:   "Run the plan phase first.",
-		FlowID: planned.ID,
-	})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-
-	httpServer := httptest.NewServer(fixture.Server)
-	t.Cleanup(httpServer.Close)
-	client, err := flowclient.New(config.ClientConfig{ServerURL: httpServer.URL, Token: "owner-token"})
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-	if _, err := client.ScheduleIssue(issue.ID, coordinator.ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-
-	t.Setenv("FLOW_WORKER_ROLE", "author")
-	t.Setenv("FLOW_ISSUE_ID", issue.ID)
-	t.Setenv("FLOW_COORDINATOR_URL", httpServer.URL)
-	t.Setenv("FLOW_SESSION_TOKEN", "owner-token")
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	exitCode := run([]string{"fetch-prompt", "--harness", "codex"}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("fetch-prompt exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-
-	output := stdout.String()
-	for _, want := range []string{
-		"Flow role instructions (plan phase):",
-		"# Flow Planner",
-		"Work Phase: plan",
-		"Do not make code changes in this planning session.",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("fetch-prompt output missing %q:\n%s", want, output)
-		}
-	}
-	if strings.Contains(output, "# Flow Author") {
-		t.Fatalf("phase prompt did not replace the embedded author skill:\n%s", output)
-	}
-}
-
 func TestFetchPromptContinuesWhenIssueContextFetchFails(t *testing.T) {
 	clearFetchPromptEnvironment(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -329,241 +261,6 @@ func TestFetchPromptContinuesWhenIssueContextFetchFails(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "continuing without issue context") {
 		t.Fatalf("fetch-prompt stderr missing enrichment warning: %q", stderr.String())
-	}
-}
-
-func TestFetchPromptIncludesAuthorFixRoundContextFromAPI(t *testing.T) {
-	clearFetchPromptEnvironment(t)
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	ctx := context.Background()
-	fixture := newFlowTestFixture(t)
-	issues := fixture.Issues
-	checks := fixture.Checks
-	sessions := fixture.Sessions
-	threads := fixture.Threads
-	issue, err := issues.CreateIssue(ctx, coordinator.CreateIssueInput{
-		Title: "Terminal link recovery",
-		Body:  "Original request that should not hide the fix context.",
-	})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	if _, err := issues.ScheduleIssue(ctx, issue.ID, coordinator.ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-	ensured, err := sessions.EnsureAuthorJob(ctx, coordinator.EnsureAuthorJobInput{IssueID: issue.ID})
-	if err != nil {
-		t.Fatalf("ensure author job: %v", err)
-	}
-
-	required := true
-	exitCode := 1
-	sourceJobID := ensured.Job.ID
-	blocked, err := checks.ReportCheck(ctx, coordinator.ReportCheckInput{
-		IssueID:     issue.ID,
-		Name:        "merge-conflict",
-		Kind:        coordinator.CheckKindCI,
-		Required:    &required,
-		Verdict:     coordinator.CheckBlocked,
-		ExitCode:    &exitCode,
-		Details:     "branch conflicts with base main\nconflicting file: internal/worker/worker.go",
-		SourceJobID: &sourceJobID,
-		Reporter:    "flow-merge",
-	})
-	if err != nil {
-		t.Fatalf("report blocked check: %v", err)
-	}
-	thread, err := threads.CreateThread(ctx, coordinator.CreateThreadInput{
-		ChangeID:        ensured.Change.ID,
-		AnchorCommitSHA: "head-1",
-		FilePath:        "internal/worker/worker.go",
-		Line:            128,
-		Context:         "merge conflict markers remain",
-		Body:            "Resolve the conflict before ready.",
-		Actor:           "reviewer",
-	})
-	if err != nil {
-		t.Fatalf("create thread: %v", err)
-	}
-	if _, err := threads.ClaimThread(ctx, coordinator.ClaimThreadInput{
-		ThreadID: thread.ID,
-		Kind:     coordinator.ClaimFixed,
-		Actor:    "author",
-	}); err != nil {
-		t.Fatalf("claim thread: %v", err)
-	}
-	reopened, err := threads.ReopenThread(ctx, coordinator.VerifyThreadInput{
-		ThreadID: thread.ID,
-		Body:     "Still conflicts after rebase.",
-		Actor:    "verifier",
-	})
-	if err != nil {
-		t.Fatalf("reopen thread: %v", err)
-	}
-
-	httpServer := httptest.NewServer(fixture.Server)
-	t.Cleanup(httpServer.Close)
-
-	t.Setenv("FLOW_WORKER_ROLE", "author")
-	t.Setenv("FLOW_ISSUE_ID", issue.ID)
-	t.Setenv("FLOW_CHANGE_ID", ensured.Change.ID)
-	t.Setenv("FLOW_BRANCH", ensured.Change.Branch)
-	t.Setenv("FLOW_BASE", ensured.Change.Base)
-	t.Setenv("FLOW_COORDINATOR_URL", httpServer.URL)
-	t.Setenv("FLOW_SESSION_TOKEN", "owner-token")
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	exitCodeResult := run([]string{"fetch-prompt", "--harness", "codex"}, &stdout, &stderr)
-	if exitCodeResult != 0 {
-		t.Fatalf("fetch-prompt exitCode = %d, stderr = %q", exitCodeResult, stderr.String())
-	}
-
-	output := stdout.String()
-	for _, want := range []string{
-		"Round: fix/rework",
-		"Review State: changes_requested",
-		"Blocked Required Checks:",
-		"- merge-conflict (Check ID: " + strconv.FormatInt(blocked.ID, 10),
-		"Reporter: flow-merge",
-		"Source Job: " + sourceJobID,
-		"Details: branch conflicts with base main",
-		"conflicting file: internal/worker/worker.go",
-		"Open/Reopened Review Threads:",
-		"- " + reopened.ID + " at internal/worker/worker.go:128 (State: reopened; Created By: reviewer)",
-		"Latest Comment by verifier: Still conflicts after rebase.",
-		"Issue Body:\nOriginal request that should not hide the fix context.",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("fetch-prompt output missing %q:\n%s", want, output)
-		}
-	}
-}
-
-func TestFetchPromptInjectsPriorHandoffFromCoordinator(t *testing.T) {
-	clearFetchPromptEnvironment(t)
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	ctx := context.Background()
-	fixture := newFlowTestFixture(t)
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{
-		Title: "Resume work issue",
-		Body:  "Continue from the prior session.",
-	})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	if _, err := fixture.Issues.ScheduleIssue(ctx, issue.ID, coordinator.ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-	ensured, err := fixture.Sessions.EnsureAuthorJob(ctx, coordinator.EnsureAuthorJobInput{IssueID: issue.ID})
-	if err != nil {
-		t.Fatalf("ensure author job: %v", err)
-	}
-
-	// Seed the prior handoff in the coordinator (the sole store now that the
-	// committed .handoff.md is gone).
-	priorHandoff := handoff.RenderTemplate(handoff.TemplateInput{
-		IssueID:               issue.ID,
-		ChangeID:              ensured.Change.ID,
-		CurrentGoal:           "Resume the migration work.",
-		CompletedWork:         "Phase 1 done.",
-		RemainingWork:         "Phase 2.",
-		TestsRun:              "go test ./...",
-		FailedApproaches:      "None.",
-		ImportantFiles:        "cmd/flow/main.go",
-		NextRecommendedAction: "Start phase 2.",
-	})
-	if err := fixture.Reconciler.UpsertHandoffSnapshot(ctx, ensured.Change.ID, "deadbeef", priorHandoff); err != nil {
-		t.Fatalf("seed handoff snapshot: %v", err)
-	}
-
-	httpServer := httptest.NewServer(fixture.Server)
-	t.Cleanup(httpServer.Close)
-	t.Setenv("FLOW_WORKER_ROLE", "author")
-	t.Setenv("FLOW_ISSUE_ID", issue.ID)
-	t.Setenv("FLOW_CHANGE_ID", ensured.Change.ID)
-	t.Setenv("FLOW_BRANCH", ensured.Change.Branch)
-	t.Setenv("FLOW_BASE", ensured.Change.Base)
-	t.Setenv("FLOW_COORDINATOR_URL", httpServer.URL)
-	t.Setenv("FLOW_SESSION_TOKEN", "owner-token")
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	exitCode := run([]string{"fetch-prompt", "--harness", "codex"}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("fetch-prompt exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	output := stdout.String()
-	if !strings.Contains(output, "Prior Handoff (from the previous session") {
-		t.Fatalf("fetch-prompt missing prior handoff section:\n%s", output)
-	}
-	if !strings.Contains(output, "Resume the migration work.") {
-		t.Fatalf("fetch-prompt missing prior handoff body:\n%s", output)
-	}
-}
-
-func TestFetchPromptReviewerRendersCompletionAssessmentFromMarker(t *testing.T) {
-	clearFetchPromptEnvironment(t)
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	ctx := context.Background()
-	fixture := newFlowTestFixture(t)
-
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{
-		Title: "Crashed-but-finished work",
-		Body:  "Assess whether the crashed author actually finished.",
-	})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	if _, err := fixture.Issues.ScheduleIssue(ctx, issue.ID, coordinator.ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-	ensured, err := fixture.Sessions.EnsureAuthorJob(ctx, coordinator.EnsureAuthorJobInput{IssueID: issue.ID})
-	if err != nil {
-		t.Fatalf("ensure author job: %v", err)
-	}
-
-	// The coordinator stamps the completion-assessment marker onto the reviewer
-	// check when routing a crashed author to a targeted review.
-	required := true
-	if _, err := fixture.Checks.ReportCheck(ctx, coordinator.ReportCheckInput{
-		IssueID:  issue.ID,
-		Name:     "reviewer",
-		Kind:     coordinator.CheckKindReviewer,
-		Required: &required,
-		Verdict:  coordinator.CheckPending,
-		Details:  coordinator.CompletionAssessmentCheckMarker,
-		Reporter: "coordinator",
-	}); err != nil {
-		t.Fatalf("seed completion-assessment reviewer check: %v", err)
-	}
-
-	httpServer := httptest.NewServer(fixture.Server)
-	t.Cleanup(httpServer.Close)
-	t.Setenv("FLOW_WORKER_ROLE", "reviewer")
-	t.Setenv("FLOW_ISSUE_ID", issue.ID)
-	t.Setenv("FLOW_CHANGE_ID", ensured.Change.ID)
-	t.Setenv("FLOW_CHECK_NAME", "reviewer")
-	t.Setenv("FLOW_BRANCH", ensured.Change.Branch)
-	t.Setenv("FLOW_BASE", ensured.Change.Base)
-	t.Setenv("FLOW_COORDINATOR_URL", httpServer.URL)
-	t.Setenv("FLOW_SESSION_TOKEN", "owner-token")
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	exitCode := run([]string{"fetch-prompt", "--harness", "codex"}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("fetch-prompt exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	output := stdout.String()
-	for _, want := range []string{
-		"Completion Assessment:",
-		"ended without finalizing",
-		"whether the task is actually complete",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("reviewer prompt missing completion-assessment guidance %q:\n%s", want, output)
-		}
 	}
 }
 
@@ -720,13 +417,11 @@ func TestIssueCommandsUseAPI(t *testing.T) {
 		"--server", serverURL,
 		"--token", "owner-token",
 		"--title", "CLI issue",
-		"--requires-human-review=false",
-		"--auto-merge=true",
 	}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("issue create exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "i-0001\tbacklog\taccepted\tCLI issue") {
+	if !strings.Contains(stdout.String(), "i-0001\tunscheduled\t\tCLI issue") {
 		t.Fatalf("create output = %q", stdout.String())
 	}
 	client, err := flowclient.New(config.ClientConfig{ServerURL: serverURL, Token: "owner-token"})
@@ -737,8 +432,8 @@ func TestIssueCommandsUseAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get created issue: %v", err)
 	}
-	if created.RequiresHumanReview || !created.AutoMerge {
-		t.Fatalf("created flags = human:%t auto:%t, want false/true", created.RequiresHumanReview, created.AutoMerge)
+	if created.State != nil {
+		t.Fatalf("created state = %v, want unscheduled", created.State)
 	}
 
 	stdout.Reset()
@@ -747,8 +442,7 @@ func TestIssueCommandsUseAPI(t *testing.T) {
 		"issue", "edit",
 		"--server", serverURL,
 		"--token", "owner-token",
-		"--requires-human-review=true",
-		"--auto-merge=false",
+		"--priority=4",
 		"i-0001",
 	}, &stdout, &stderr)
 	if exitCode != 0 {
@@ -758,17 +452,17 @@ func TestIssueCommandsUseAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get edited issue: %v", err)
 	}
-	if !edited.RequiresHumanReview || edited.AutoMerge {
-		t.Fatalf("edited flags = human:%t auto:%t, want true/false", edited.RequiresHumanReview, edited.AutoMerge)
+	if edited.Priority != 4 {
+		t.Fatalf("edited priority = %d, want 4", edited.Priority)
 	}
 
 	stdout.Reset()
 	stderr.Reset()
-	exitCode = run([]string{"issue", "schedule", "--server", serverURL, "--token", "owner-token", "i-0001", "up_next"}, &stdout, &stderr)
+	exitCode = run([]string{"issue", "schedule", "--server", serverURL, "--token", "owner-token", "i-0001"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("issue schedule exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "i-0001\tup_next\taccepted\tCLI issue") {
+	if !strings.Contains(stdout.String(), "i-0001\tscheduled\timplement") {
 		t.Fatalf("schedule output = %q", stdout.String())
 	}
 
@@ -778,7 +472,7 @@ func TestIssueCommandsUseAPI(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("issue show exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "i-0001\tup_next\taccepted\tCLI issue") {
+	if !strings.Contains(stdout.String(), "i-0001\tscheduled\t\tCLI issue") {
 		t.Fatalf("show output = %q", stdout.String())
 	}
 
@@ -788,7 +482,7 @@ func TestIssueCommandsUseAPI(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("board exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "up_next:\n  i-0001\tup_next\taccepted\tCLI issue") {
+	if !strings.Contains(stdout.String(), "scheduled:\n  i-0001\tscheduled\tCLI issue") {
 		t.Fatalf("board output = %q", stdout.String())
 	}
 }
@@ -820,7 +514,7 @@ func TestIssueCreateUsesDiscoveredClientConfigOwnerToken(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("issue create exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "i-0001\tbacklog\taccepted\tDiscovered CLI issue") {
+	if !strings.Contains(stdout.String(), "i-0001\tunscheduled\t\tDiscovered CLI issue") {
 		t.Fatalf("create output = %q", stdout.String())
 	}
 }
@@ -891,11 +585,11 @@ func TestIssueCreateUploadsInitialAttachment(t *testing.T) {
 			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
 		}
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/issues":
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/issues":
 			sawCreate = true
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"issue":{"ID":"i-0001","Title":"With file","ScheduleState":"backlog","TriageState":"accepted"}}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/issues/i-0001/attachments":
+			_, _ = w.Write([]byte(`{"issue":{"ID":"i-0001","Title":"With file"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/issues/i-0001/attachments":
 			sawAttachment = true
 			if err := r.ParseMultipartForm(1 << 20); err != nil {
 				t.Fatalf("parse multipart: %v", err)
@@ -951,8 +645,8 @@ func TestIssueAttachUsesInferredRoleAndLease(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/issues/i-0001/attachments" {
-			t.Fatalf("request = %s %s, want POST /v1/issues/i-0001/attachments", r.Method, r.URL.Path)
+		if r.Method != http.MethodPost || r.URL.Path != "/v2/issues/i-0001/attachments" {
+			t.Fatalf("request = %s %s, want POST /v2/issues/i-0001/attachments", r.Method, r.URL.Path)
 		}
 		if got := r.URL.Query().Get("lease_id"); got != "l-0001" {
 			t.Fatalf("lease_id = %q, want l-0001", got)
@@ -1001,39 +695,40 @@ func TestIssueCreateDiscoveryIgnoresAmbientFlowSessionEnvironment(t *testing.T) 
 }
 
 func TestPrintBoardAnnotatesSubStateAndBlocked(t *testing.T) {
+	scheduled := coordinator.LifecycleScheduled
+	inProgress := coordinator.LifecycleInProgress
 	result := coordinator.BoardResult{
 		Board: coordinator.Board{
-			Backlog: []coordinator.Issue{
-				{ID: "i-0001", ScheduleState: coordinator.ScheduleBacklog, TriageState: coordinator.TriagePending, Title: "Untriaged"},
+			Unscheduled: []coordinator.Issue{
+				{ID: "i-0001", Title: "Unplanned"},
+			},
+			Scheduled: []coordinator.Issue{
+				{ID: "i-0002", State: &scheduled, Title: "Queued"},
 			},
 			InProgress: []coordinator.Issue{
-				{ID: "i-0003", ScheduleState: coordinator.ScheduleUpNext, TriageState: coordinator.TriageAccepted, Title: "Reviewing"},
-			},
-			NeedsAttention: []coordinator.Issue{
-				{ID: "i-0002", ScheduleState: coordinator.ScheduleUpNext, TriageState: coordinator.TriageAccepted, Title: "Blocked next"},
-				{ID: "i-0004", ScheduleState: coordinator.ScheduleUpNext, TriageState: coordinator.TriageAccepted, Title: "Mergeable"},
+				{ID: "i-0003", State: &inProgress, Title: "Working"},
+				{ID: "i-0004", State: &inProgress, Title: "Needs input"},
 			},
 		},
 		LaneStates: map[string]coordinator.LaneState{
-			"i-0001": coordinator.LaneStateTriage,
-			"i-0002": coordinator.LaneStateUpNext,
-			"i-0003": coordinator.LaneStateInReview,
-			"i-0004": coordinator.LaneStateReadyToMerge,
+			"i-0001": coordinator.LaneStateUnscheduled,
+			"i-0002": coordinator.LaneStateScheduled,
+			"i-0003": coordinator.LaneStateWorking,
+			"i-0004": coordinator.LaneStateBlocked,
 		},
-		BlockedIDs: []string{"i-0002"},
+		WaitReasons: map[string]coordinator.WaitReason{"i-0004": coordinator.WaitReasonQuestion},
 	}
 
 	var out bytes.Buffer
 	printBoard(&out, result)
 
-	want := "backlog:\n" +
-		"  i-0001\tbacklog\ttriage\tUntriaged\n" +
-		"up_next:\n" +
+	want := "unscheduled:\n" +
+		"  i-0001\tunscheduled\tUnplanned\n" +
+		"scheduled:\n" +
+		"  i-0002\tscheduled\tQueued\n" +
 		"in_progress:\n" +
-		"  i-0003\tup_next\taccepted\tReviewing\t[in review]\n" +
-		"needs_attention:\n" +
-		"  i-0002\tup_next\taccepted\tBlocked next\t[blocked]\n" +
-		"  i-0004\tup_next\taccepted\tMergeable\t[ready to merge]\n"
+		"  i-0003\tin_progress\tWorking\t[working]\n" +
+		"  i-0004\tin_progress\tNeeds input\t[blocked]\t[question]\n"
 	if out.String() != want {
 		t.Fatalf("board output = %q, want %q", out.String(), want)
 	}
@@ -1088,14 +783,14 @@ func TestIssueShowUsesSessionEnvironment(t *testing.T) {
 	// of looking up a project for the cwd.
 	t.Chdir(t.TempDir())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/issues/i-0001" {
-			t.Fatalf("request = %s %s, want GET /v1/issues/i-0001", r.Method, r.URL.Path)
+		if r.Method != http.MethodGet || r.URL.Path != "/v2/issues/i-0001" {
+			t.Fatalf("request = %s %s, want GET /v2/issues/i-0001", r.Method, r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != "Bearer session-token" {
 			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"issue":{"ID":"i-0001","Title":"Session issue","ScheduleState":"up_next","TriageState":"accepted"}}`))
+		_, _ = w.Write([]byte(`{"issue":{"ID":"i-0001","Title":"Session issue","state":"in_progress"}}`))
 	}))
 	t.Cleanup(server.Close)
 	t.Setenv("FLOW_COORDINATOR_URL", server.URL)
@@ -1107,45 +802,8 @@ func TestIssueShowUsesSessionEnvironment(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "i-0001\tup_next\taccepted\tSession issue") {
+	if !strings.Contains(stdout.String(), "i-0001\tin_progress\t\tSession issue") {
 		t.Fatalf("stdout = %q", stdout.String())
-	}
-}
-
-func TestMergeCommandUsesAPI(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Chdir(t.TempDir())
-	for _, tc := range []struct {
-		name     string
-		target   string
-		wantPath string
-	}{
-		{name: "issue", target: "i-0001", wantPath: "/v1/issues/i-0001/merge"},
-		{name: "change", target: "ch-0001", wantPath: "/v1/changes/ch-0001/merge"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost || r.URL.Path != tc.wantPath {
-					t.Fatalf("request = %s %s, want POST %s", r.Method, r.URL.Path, tc.wantPath)
-				}
-				if r.Header.Get("Authorization") != "Bearer owner-token" {
-					t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
-				}
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"merge":{"issue":{"id":"i-0001","title":"Merge target","schedule_state":"closed"},"change":{"id":"ch-0001","issue_id":"i-0001","branch":"issue/i-0001","base":"main","head_sha":"head-sha"},"head_sha":"head-sha","merge_sha":"merge-sha"}}`))
-			}))
-			t.Cleanup(server.Close)
-
-			var stdout bytes.Buffer
-			var stderr bytes.Buffer
-			exitCode := run([]string{"merge", "--server", server.URL, "--token", "owner-token", tc.target}, &stdout, &stderr)
-			if exitCode != 0 {
-				t.Fatalf("merge exitCode = %d, stderr = %q", exitCode, stderr.String())
-			}
-			if !strings.Contains(stdout.String(), "i-0001\tch-0001\tmerge-sha\thead-sha") {
-				t.Fatalf("merge output = %q", stdout.String())
-			}
-		})
 	}
 }
 
@@ -1153,8 +811,8 @@ func TestUICommandPrintsBrowserLoginURL(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Chdir(t.TempDir())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/ui/bootstrap" {
-			t.Fatalf("request = %s %s, want POST /v1/ui/bootstrap", r.Method, r.URL.Path)
+		if r.Method != http.MethodPost || r.URL.Path != "/v2/ui/bootstrap" {
+			t.Fatalf("request = %s %s, want POST /v2/ui/bootstrap", r.Method, r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != "Bearer owner-token" {
 			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
@@ -1247,178 +905,6 @@ func TestWorkerAndJobDiagnosticsUseAPI(t *testing.T) {
 	}
 }
 
-func TestReviewRunUsesAPI(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Chdir(t.TempDir())
-	var sawRequest bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sawRequest = true
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/issues/i-0002/review/run" {
-			t.Fatalf("request = %s %s, want POST /v1/issues/i-0002/review/run", r.Method, r.URL.Path)
-		}
-		if r.Header.Get("Authorization") != "Bearer owner-token" {
-			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"change":{"ID":"ch-1","IssueID":"i-0002","Branch":"issue/i-0002","Base":"main","HeadSHA":"abc"},
-			"scheduled":{"checks_created":2,"jobs_enqueued":1},
-			"review_state":"in_review",
-			"checks":[{"id":1,"issue_id":"i-0002","name":"reviewer","kind":"reviewer","required":true,"verdict":"pending","reporter":"coordinator"}]
-		}`))
-	}))
-	t.Cleanup(server.Close)
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	exitCode := run([]string{"review", "run", "--server", server.URL, "--token", "owner-token", "i-0002"}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("review run exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	if !sawRequest {
-		t.Fatal("server did not receive review run request")
-	}
-	output := stdout.String()
-	for _, want := range []string{
-		"change: ch-1",
-		"checks_created: 2",
-		"jobs_enqueued: 1",
-		"review_state: in_review",
-		"reviewer\treviewer\tpending",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("review run output missing %q:\n%s", want, output)
-		}
-	}
-}
-
-func TestIssueStateUsesAPI(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Chdir(t.TempDir())
-	var requestBody string
-	var sawRequest bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sawRequest = true
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/issues/i-0002/state" {
-			t.Fatalf("request = %s %s, want POST /v1/issues/i-0002/state", r.Method, r.URL.Path)
-		}
-		if r.Header.Get("Authorization") != "Bearer owner-token" {
-			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
-		}
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("read request body: %v", err)
-		}
-		requestBody = string(body)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"issue":{"ID":"i-0002","Title":"CLI state","ScheduleState":"backlog","TriageState":"accepted"}}`))
-	}))
-	t.Cleanup(server.Close)
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	exitCode := run([]string{"issue", "state", "--server", server.URL, "--token", "owner-token", "i-0002", "backlog"}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("issue state exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	if !sawRequest {
-		t.Fatal("server did not receive issue state request")
-	}
-	if requestBody != `{"state":"backlog"}`+"\n" {
-		t.Fatalf("request body = %q", requestBody)
-	}
-	if !strings.Contains(stdout.String(), "i-0002\tbacklog\taccepted\tCLI state") {
-		t.Fatalf("issue state output = %q", stdout.String())
-	}
-}
-
-func TestHandoffWriteRendersTemplateToStdout(t *testing.T) {
-	workDir := t.TempDir()
-	t.Chdir(workDir)
-	// No session environment: handoff write is a pure offline render that emits
-	// the handoff to stdout and writes no repo file.
-	t.Setenv("FLOW_ISSUE_ID", "i-0001")
-	t.Setenv("FLOW_CHANGE_ID", "")
-	t.Setenv("FLOW_SESSION_ID", "")
-	t.Setenv("FLOW_BRANCH", "issue/i-0001")
-	t.Setenv("FLOW_BASE", "main")
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	exitCode := run([]string{
-		"handoff",
-		"write",
-		"--goal", "Finish Phase 7.",
-		"--completed", "Added handoff command.",
-		"--remaining", "Run tests.",
-		"--tests", "Not yet.",
-		"--failed-approaches", "None.",
-		"--files", "cmd/flow/main.go",
-		"--next", "Run go test.",
-	}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("handoff write exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	if err := handoff.Validate(stdout.String()); err != nil {
-		t.Fatalf("validate rendered handoff: %v\n%s", err, stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "Finish Phase 7.") {
-		t.Fatalf("handoff stdout missing goal:\n%s", stdout.String())
-	}
-	if _, err := os.Stat(filepath.Join(workDir, ".handoff.md")); !os.IsNotExist(err) {
-		t.Fatalf("handoff write created a repo file, want none (stat err = %v)", err)
-	}
-}
-
-func TestHandoffWriteEagerlySyncsToCoordinator(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	ctx := context.Background()
-	fixture := newFlowTestFixtureWithProtocol(t, "1")
-	started := startCLIAuthorSession(t, fixture, "Eager handoff write issue")
-
-	httpServer := httptest.NewServer(fixture.Server)
-	t.Cleanup(httpServer.Close)
-	t.Setenv("FLOW_COORDINATOR_URL", httpServer.URL)
-	t.Setenv("FLOW_PROTOCOL_VERSION", "1")
-	t.Setenv("FLOW_SESSION_ID", started.Session.ID)
-	t.Setenv("FLOW_SESSION_TOKEN", started.Token)
-	t.Setenv("FLOW_ISSUE_ID", started.Session.IssueID)
-	t.Setenv("FLOW_CHANGE_ID", started.Change.ID)
-	t.Setenv("FLOW_BRANCH", started.Change.Branch)
-	t.Setenv("FLOW_BASE", started.Change.Base)
-
-	workDir := t.TempDir()
-	t.Chdir(workDir)
-	initFlowTestGitRepo(t, workDir)
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	exitCode := run([]string{
-		"handoff", "write",
-		"--goal", "Sync eagerly on write.",
-		"--completed", "Wrote the command.",
-		"--remaining", "Run the tests.",
-		"--tests", "go test passed.",
-		"--failed-approaches", "None.",
-		"--files", "cmd/flow/main.go",
-		"--next", "Mark ready.",
-	}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("handoff write exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	if strings.Contains(stderr.String(), "warning:") {
-		t.Fatalf("unexpected sync warning on stderr: %q", stderr.String())
-	}
-
-	got, err := fixture.Reconciler.GetHandoffSnapshot(ctx, started.Change.ID)
-	if err != nil {
-		t.Fatalf("get handoff snapshot: %v", err)
-	}
-	if !got.Present || !got.Valid || got.Summary != "Sync eagerly on write." {
-		t.Fatalf("eager handoff snapshot = %+v", got)
-	}
-}
-
 func TestHookIngestDefaultModeSwallowsCoordinatorFailure(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1470,557 +956,6 @@ func TestHookIngestStrictModeRequiresSessionEnvironment(t *testing.T) {
 
 // startCLIAuthorSession drives the registry through schedule → claim → running →
 // start so CLI tests get a live author session with a session token and change.
-func startCLIAuthorSession(t *testing.T, fixture flowTestFixture, title string) coordinator.StartAuthorSessionResult {
-	t.Helper()
-	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: title})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	if _, err := fixture.Issues.ScheduleIssue(ctx, issue.ID, coordinator.ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-	ensured, err := fixture.Sessions.EnsureAuthorJob(ctx, coordinator.EnsureAuthorJobInput{IssueID: issue.ID})
-	if err != nil {
-		t.Fatalf("ensure author job: %v", err)
-	}
-	if _, err := fixture.Directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-local",
-		Labels:                  map[string]string{"agent.harness.codex": "true"},
-		CapacityPersistentAgent: 1,
-	}); err != nil {
-		t.Fatalf("register worker: %v", err)
-	}
-	claimed, ok, err := fixture.claimNext(ctx, flowworker.ClaimInput{
-		WorkerID:      "w-local",
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
-		LeaseDuration: time.Minute,
-	})
-	if err != nil || !ok || claimed.Job.ID != ensured.Job.ID {
-		t.Fatalf("claim job: ok=%t err=%v job=%+v", ok, err, claimed.Job)
-	}
-	if _, err := fixture.Queue.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
-		t.Fatalf("mark running: %v", err)
-	}
-	started, err := fixture.Sessions.StartAuthorSession(ctx, coordinator.StartAuthorSessionInput{
-		JobID:    claimed.Job.ID,
-		LeaseID:  claimed.Lease.ID,
-		WorkerID: "w-local",
-	})
-	if err != nil {
-		t.Fatalf("start session: %v", err)
-	}
-	return started
-}
-
-func TestReadyCommandUploadsTranscriptBeforeRevokingSessionToken(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	ctx := context.Background()
-	fixture := newFlowTestFixtureWithProtocol(t, "1")
-	repointFlowTestFixtureExchange(t, fixture, "")
-	started := startCLIAuthorSession(t, fixture, "Ready transcript issue")
-
-	httpServer := httptest.NewServer(fixture.Server)
-	t.Cleanup(httpServer.Close)
-	t.Setenv("FLOW_COORDINATOR_URL", httpServer.URL)
-	t.Setenv("FLOW_PROTOCOL_VERSION", "1")
-	t.Setenv("FLOW_SESSION_ID", started.Session.ID)
-	t.Setenv("FLOW_SESSION_TOKEN", started.Token)
-	t.Setenv("FLOW_ISSUE_ID", started.Session.IssueID)
-	t.Setenv("FLOW_CHANGE_ID", started.Change.ID)
-	t.Setenv("FLOW_BRANCH", started.Change.Branch)
-	t.Setenv("FLOW_BASE", started.Change.Base)
-
-	workDir := t.TempDir()
-	t.Chdir(workDir)
-	initReadyWorktree(t, workDir, started.Change.Branch)
-	handoffContents := handoff.RenderTemplate(handoff.TemplateInput{
-		IssueID:               started.Session.IssueID,
-		ChangeID:              started.Change.ID,
-		SessionID:             started.Session.ID,
-		Branch:                started.Change.Branch,
-		Base:                  started.Change.Base,
-		CurrentGoal:           "Persist ready-time transcripts.",
-		CompletedWork:         "Uploaded transcript before ready.",
-		RemainingWork:         "Review the change.",
-		TestsRun:              "go test pending.",
-		FailedApproaches:      "None.",
-		ImportantFiles:        "cmd/flow/main.go",
-		NextRecommendedAction: "Review.",
-	})
-
-	transcriptPath := filepath.Join(t.TempDir(), "transcript.log")
-	transcript := "author pane line before ready\n"
-	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o600); err != nil {
-		t.Fatalf("write transcript: %v", err)
-	}
-	t.Setenv("FLOW_TRANSCRIPT_FILE", transcriptPath)
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	var exitCode int
-	withStdin(t, handoffContents, func() {
-		exitCode = run([]string{"ready"}, &stdout, &stderr)
-	})
-	if exitCode != 0 {
-		t.Fatalf("ready exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	if strings.Contains(stderr.String(), "transcript sync") {
-		t.Fatalf("unexpected transcript sync warning: %q", stderr.String())
-	}
-	if !strings.Contains(stdout.String(), started.Session.ID+"\tfinished\t"+started.Change.ID) {
-		t.Fatalf("ready output = %q", stdout.String())
-	}
-
-	ownerClient, err := flowclient.New(config.ClientConfig{
-		ServerURL:       httpServer.URL,
-		Token:           "owner-token",
-		ProtocolVersion: "1",
-	})
-	if err != nil {
-		t.Fatalf("create owner client: %v", err)
-	}
-	gotTranscript, err := ownerClient.SessionTranscript(started.Session.ID)
-	if err != nil {
-		t.Fatalf("download transcript after ready: %v", err)
-	}
-	if gotTranscript != transcript {
-		t.Fatalf("transcript = %q, want %q", gotTranscript, transcript)
-	}
-	session, err := fixture.Sessions.GetSession(ctx, started.Session.ID)
-	if err != nil {
-		t.Fatalf("get session: %v", err)
-	}
-	if session.TranscriptPath == "" {
-		t.Fatalf("session transcript path was not recorded")
-	}
-	if _, err := fixture.Credentials.Authenticate(ctx, started.Token); err == nil {
-		t.Fatalf("session token still authenticates after ready")
-	}
-}
-
-func TestReadyCommandUsesSessionEnvironment(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	ctx := context.Background()
-	fixture := newFlowTestFixtureWithProtocol(t, "2")
-	repointFlowTestFixtureExchange(t, fixture, "")
-	issues := fixture.Issues
-	sessions := fixture.Sessions
-	issue, err := issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Ready CLI issue"})
-	if err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	if _, err := issues.ScheduleIssue(ctx, issue.ID, coordinator.ScheduleUpNext); err != nil {
-		t.Fatalf("schedule issue: %v", err)
-	}
-	ensured, err := sessions.EnsureAuthorJob(ctx, coordinator.EnsureAuthorJobInput{IssueID: issue.ID})
-	if err != nil {
-		t.Fatalf("ensure author job: %v", err)
-	}
-	if _, err := fixture.Directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-local",
-		Labels:                  map[string]string{"agent.harness.codex": "true"},
-		CapacityPersistentAgent: 1,
-	}); err != nil {
-		t.Fatalf("register worker: %v", err)
-	}
-	claimed, ok, err := fixture.claimNext(ctx, flowworker.ClaimInput{
-		WorkerID:      "w-local",
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
-		LeaseDuration: time.Minute,
-	})
-	if err != nil {
-		t.Fatalf("claim job: %v", err)
-	}
-	if !ok || claimed.Job.ID != ensured.Job.ID {
-		t.Fatalf("claim = %+v ok=%t, want %s", claimed.Job, ok, ensured.Job.ID)
-	}
-	if _, err := fixture.Queue.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
-		t.Fatalf("mark running: %v", err)
-	}
-	started, err := sessions.StartAuthorSession(ctx, coordinator.StartAuthorSessionInput{
-		JobID:    claimed.Job.ID,
-		LeaseID:  claimed.Lease.ID,
-		WorkerID: "w-local",
-	})
-	if err != nil {
-		t.Fatalf("start session: %v", err)
-	}
-
-	httpServer := httptest.NewServer(fixture.Server)
-	t.Cleanup(httpServer.Close)
-	t.Setenv("FLOW_COORDINATOR_URL", httpServer.URL)
-	t.Setenv("FLOW_PROTOCOL_VERSION", "2")
-	t.Setenv("FLOW_SESSION_ID", started.Session.ID)
-	t.Setenv("FLOW_SESSION_TOKEN", started.Token)
-	t.Setenv("FLOW_ISSUE_ID", issue.ID)
-	t.Setenv("FLOW_CHANGE_ID", started.Change.ID)
-	t.Setenv("FLOW_BRANCH", started.Change.Branch)
-	t.Setenv("FLOW_BASE", started.Change.Base)
-
-	workDir := t.TempDir()
-	t.Chdir(workDir)
-	initReadyWorktree(t, workDir, started.Change.Branch)
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	var exitCode int
-	withStdin(t, "", func() {
-		exitCode = run([]string{"ready"}, &stdout, &stderr)
-	})
-	if exitCode != 1 {
-		t.Fatalf("ready without handoff exitCode = %d, want 1; stderr = %q", exitCode, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "handoff validation") {
-		t.Fatalf("missing handoff stderr = %q", stderr.String())
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	exitCode = run([]string{"session", "event", "waiting"}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("session event exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), started.Session.ID+"\twaiting\t"+started.Change.ID) {
-		t.Fatalf("session event output = %q", stdout.String())
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	exitCode = run([]string{"hook", "codex", "resume"}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("hook event exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), started.Session.ID+"\tworking\t"+started.Change.ID+"\tcodex:resume") {
-		t.Fatalf("hook event output = %q", stdout.String())
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	exitCode = run([]string{"attach", "--server", httpServer.URL, "--token", "owner-token", "--print-command", started.Session.ID}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("attach exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "tmux attach-session -t flow-"+claimed.Job.ID) {
-		t.Fatalf("attach output = %q", stdout.String())
-	}
-	if _, err := fixture.Directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-review-cli",
-		Labels:                  map[string]string{"agent.harness.codex": "true", "worker_id": "w-review-cli"},
-		CapacityPersistentAgent: 1,
-	}); err != nil {
-		t.Fatalf("register review worker: %v", err)
-	}
-	reviewerJob, err := fixture.Queue.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &issue.ID,
-		ChangeID:       &started.Change.ID,
-		Role:           flowworker.RoleReviewer,
-		CapacityBucket: flowworker.BucketPersistentAgent,
-		RunsOn:         map[string]string{"worker_id": "w-review-cli"},
-	})
-	if err != nil {
-		t.Fatalf("enqueue reviewer job: %v", err)
-	}
-	reviewerClaim, ok, err := fixture.claimNext(ctx, flowworker.ClaimInput{
-		WorkerID:      "w-review-cli",
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
-		LeaseDuration: time.Minute,
-	})
-	if err != nil {
-		t.Fatalf("claim reviewer job: %v", err)
-	}
-	if !ok || reviewerClaim.Job.ID != reviewerJob.ID {
-		t.Fatalf("reviewer claim = %+v ok=%t, want %s", reviewerClaim.Job, ok, reviewerJob.ID)
-	}
-	if _, err := fixture.Queue.MarkJobRunning(ctx, reviewerClaim.Lease.ID); err != nil {
-		t.Fatalf("mark reviewer running: %v", err)
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	exitCode = run([]string{"attach", "--server", httpServer.URL, "--token", "owner-token", "--job", "--print-command", reviewerJob.ID}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("attach job exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "tmux attach-session -t flow-"+reviewerJob.ID) {
-		t.Fatalf("attach job output = %q", stdout.String())
-	}
-	if _, err := sessions.RegisterTerminalTarget(ctx, started.Session.ID, "http://127.0.0.1:7777"); err != nil {
-		t.Fatalf("register terminal target: %v", err)
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	exitCode = run([]string{"attach", "--server", httpServer.URL, "--token", "owner-token", "--web", "--print-command", started.Session.ID}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("web attach exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	webURL := strings.TrimSpace(stdout.String())
-	if !strings.HasPrefix(webURL, httpServer.URL+"/v1/sessions/"+started.Session.ID+"/terminal-login?token=") {
-		t.Fatalf("web attach output = %q", stdout.String())
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	exitCode = run([]string{"status", "Running focused tests"}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("status exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "Running focused tests") {
-		t.Fatalf("status output = %q", stdout.String())
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	exitCode = run([]string{"comment", "abc123:internal/app.go:12", "Please handle nil."}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("comment exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	threadID := strings.Fields(stdout.String())[0]
-	if !strings.HasPrefix(threadID, "th-") || !strings.Contains(stdout.String(), "open") {
-		t.Fatalf("comment output = %q", stdout.String())
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	exitCode = run([]string{"thread", "reply", threadID, "I will address it."}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("thread reply exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "comments=2") {
-		t.Fatalf("thread reply output = %q", stdout.String())
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	exitCode = run([]string{"thread", "claim", "--body", "Intentional behavior.", threadID, "not_warranted"}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("thread claim exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "claimed") || !strings.Contains(stdout.String(), "claim=not_warranted") {
-		t.Fatalf("thread claim output = %q", stdout.String())
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	exitCode = run([]string{
-		"handoff",
-		"write",
-		"--goal", "Ready CLI issue.",
-		"--completed", "Implemented work.",
-		"--remaining", "Review.",
-		"--tests", "go test pending.",
-		"--failed-approaches", "None.",
-		"--files", "cmd/flow/main.go",
-		"--next", "Call flow ready.",
-	}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("handoff write exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	handoffBody := stdout.String()
-
-	stdout.Reset()
-	stderr.Reset()
-	withStdin(t, handoffBody, func() {
-		exitCode = run([]string{"ready"}, &stdout, &stderr)
-	})
-	if exitCode != 0 {
-		t.Fatalf("ready exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), started.Session.ID+"\tfinished\t"+started.Change.ID) {
-		t.Fatalf("ready output = %q", stdout.String())
-	}
-	released, err := fixture.Queue.GetJob(ctx, claimed.Job.ID)
-	if err != nil {
-		t.Fatalf("get released job: %v", err)
-	}
-	if released.State != flowworker.JobFinished {
-		t.Fatalf("released job state = %q, want finished", released.State)
-	}
-}
-
-// setupReadySession starts a live CLI author session behind an httptest server
-// and exports the session environment, so flow ready tests can finalize. The
-// coordinator's exchange is cleared; finalize pushes go to the worktree's own
-// origin (initReadyWorktree) and the handoff lands in the coordinator DB.
-func setupReadySession(t *testing.T, title string) (flowTestFixture, coordinator.StartAuthorSessionResult) {
-	t.Helper()
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	fixture := newFlowTestFixtureWithProtocol(t, "1")
-	repointFlowTestFixtureExchange(t, fixture, "")
-	started := startCLIAuthorSession(t, fixture, title)
-
-	httpServer := httptest.NewServer(fixture.Server)
-	t.Cleanup(httpServer.Close)
-	t.Setenv("FLOW_COORDINATOR_URL", httpServer.URL)
-	t.Setenv("FLOW_PROTOCOL_VERSION", "1")
-	t.Setenv("FLOW_SESSION_ID", started.Session.ID)
-	t.Setenv("FLOW_SESSION_TOKEN", started.Token)
-	t.Setenv("FLOW_ISSUE_ID", started.Session.IssueID)
-	t.Setenv("FLOW_CHANGE_ID", started.Change.ID)
-	t.Setenv("FLOW_BRANCH", started.Change.Branch)
-	t.Setenv("FLOW_BASE", started.Change.Base)
-	return fixture, started
-}
-
-func readyTestHandoff(started coordinator.StartAuthorSessionResult, goal string) string {
-	return handoff.RenderTemplate(handoff.TemplateInput{
-		IssueID:               started.Session.IssueID,
-		ChangeID:              started.Change.ID,
-		SessionID:             started.Session.ID,
-		Branch:                started.Change.Branch,
-		Base:                  started.Change.Base,
-		CurrentGoal:           goal,
-		CompletedWork:         "Implemented the change.",
-		RemainingWork:         "Review the change.",
-		TestsRun:              "go test ./...",
-		FailedApproaches:      "None.",
-		ImportantFiles:        "cmd/flow/main.go",
-		NextRecommendedAction: "Review.",
-	})
-}
-
-func TestReadyPublishesHeadAndSubmitsHandoff(t *testing.T) {
-	ctx := context.Background()
-	fixture, started := setupReadySession(t, "Ready publishes head")
-
-	workDir := t.TempDir()
-	t.Chdir(workDir)
-	exchangeDir := initReadyWorktree(t, workDir, started.Change.Branch)
-	if err := os.WriteFile(filepath.Join(workDir, "feature.txt"), []byte("work\n"), 0o644); err != nil {
-		t.Fatalf("write feature: %v", err)
-	}
-	runFlowTestGit(t, workDir, "add", "feature.txt")
-	runFlowTestGit(t, workDir, "commit", "-m", "feat: add feature")
-	headSHA := flowTestGitOutput(t, workDir, "rev-parse", "HEAD")
-
-	var stdout, stderr bytes.Buffer
-	var exitCode int
-	withStdin(t, readyTestHandoff(started, "Publish the readied HEAD."), func() {
-		exitCode = run([]string{"ready"}, &stdout, &stderr)
-	})
-	if exitCode != 0 {
-		t.Fatalf("ready exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), started.Session.ID+"\tfinished\t"+started.Change.ID) {
-		t.Fatalf("ready output = %q", stdout.String())
-	}
-
-	// Regression: a readied HEAD always exists on the exchange remote.
-	exchangeHead := flowTestGitOutput(t, exchangeDir, "rev-parse", "refs/heads/"+started.Change.Branch)
-	if exchangeHead != headSHA {
-		t.Fatalf("exchange branch head = %s, want readied HEAD %s", exchangeHead, headSHA)
-	}
-	// The handoff reached the coordinator (the sole store).
-	snapshot, err := fixture.Reconciler.GetHandoffSnapshot(ctx, started.Change.ID)
-	if err != nil {
-		t.Fatalf("get handoff snapshot: %v", err)
-	}
-	if !snapshot.Present || !snapshot.Valid || snapshot.HeadSHA != headSHA {
-		t.Fatalf("handoff snapshot = %+v, want present/valid at %s", snapshot, headSHA)
-	}
-}
-
-func TestReadyIsIdempotentWhenBranchAlreadyPushed(t *testing.T) {
-	_, started := setupReadySession(t, "Ready idempotent push")
-
-	workDir := t.TempDir()
-	t.Chdir(workDir)
-	exchangeDir := initReadyWorktree(t, workDir, started.Change.Branch)
-	runFlowTestGit(t, workDir, "commit", "--allow-empty", "-m", "chore: work")
-	headSHA := flowTestGitOutput(t, workDir, "rev-parse", "HEAD")
-	// Pre-publish the branch so flow ready's push is an up-to-date no-op.
-	runFlowTestGit(t, workDir, "push", "origin", "HEAD:refs/heads/"+started.Change.Branch)
-
-	var stdout, stderr bytes.Buffer
-	var exitCode int
-	withStdin(t, readyTestHandoff(started, "Re-run is safe."), func() {
-		exitCode = run([]string{"ready"}, &stdout, &stderr)
-	})
-	if exitCode != 0 {
-		t.Fatalf("ready (already published) exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	exchangeHead := flowTestGitOutput(t, exchangeDir, "rev-parse", "refs/heads/"+started.Change.Branch)
-	if exchangeHead != headSHA {
-		t.Fatalf("exchange head = %s, want unchanged %s", exchangeHead, headSHA)
-	}
-}
-
-func TestReadyReadsHandoffFromFile(t *testing.T) {
-	_, started := setupReadySession(t, "Ready from file")
-
-	workDir := t.TempDir()
-	t.Chdir(workDir)
-	initReadyWorktree(t, workDir, started.Change.Branch)
-	runFlowTestGit(t, workDir, "commit", "--allow-empty", "-m", "chore: work")
-
-	handoffPath := filepath.Join(t.TempDir(), "handoff.md")
-	if err := os.WriteFile(handoffPath, []byte(readyTestHandoff(started, "Read handoff from a file.")), 0o644); err != nil {
-		t.Fatalf("write handoff file: %v", err)
-	}
-
-	// No stdin pipe: --handoff-file supplies the body for non-interactive callers.
-	var stdout, stderr bytes.Buffer
-	exitCode := run([]string{"ready", "--handoff-file", handoffPath}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("ready --handoff-file exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), started.Session.ID+"\tfinished\t"+started.Change.ID) {
-		t.Fatalf("ready output = %q", stdout.String())
-	}
-}
-
-func TestReadyDerivesBranchFromCheckoutWhenEnvMissing(t *testing.T) {
-	_, started := setupReadySession(t, "Ready derives branch")
-	// FLOW_BRANCH unset: the push must still target the checked-out branch so
-	// the readied HEAD always lands on the exchange.
-	t.Setenv("FLOW_BRANCH", "")
-
-	workDir := t.TempDir()
-	t.Chdir(workDir)
-	exchangeDir := initReadyWorktree(t, workDir, started.Change.Branch)
-	runFlowTestGit(t, workDir, "commit", "--allow-empty", "-m", "chore: work")
-	headSHA := flowTestGitOutput(t, workDir, "rev-parse", "HEAD")
-
-	var stdout, stderr bytes.Buffer
-	var exitCode int
-	withStdin(t, readyTestHandoff(started, "Derive the branch."), func() {
-		exitCode = run([]string{"ready"}, &stdout, &stderr)
-	})
-	if exitCode != 0 {
-		t.Fatalf("ready (branch from checkout) exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	exchangeHead := flowTestGitOutput(t, exchangeDir, "rev-parse", "refs/heads/"+started.Change.Branch)
-	if exchangeHead != headSHA {
-		t.Fatalf("exchange head = %s, want readied HEAD %s", exchangeHead, headSHA)
-	}
-}
-
-func TestReadyRejectsInvalidHandoffFromStdin(t *testing.T) {
-	_, started := setupReadySession(t, "Ready invalid handoff")
-
-	workDir := t.TempDir()
-	t.Chdir(workDir)
-	exchangeDir := initReadyWorktree(t, workDir, started.Change.Branch)
-	runFlowTestGit(t, workDir, "commit", "--allow-empty", "-m", "chore: work")
-
-	var stdout, stderr bytes.Buffer
-	var exitCode int
-	withStdin(t, "not a real handoff\n", func() {
-		exitCode = run([]string{"ready"}, &stdout, &stderr)
-	})
-	if exitCode != 1 {
-		t.Fatalf("ready invalid handoff exitCode = %d, want 1; stderr = %q", exitCode, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "handoff validation") {
-		t.Fatalf("invalid handoff stderr = %q", stderr.String())
-	}
-	// Validation fails before any remote mutation: nothing was pushed.
-	if err := exec.Command("git", "--git-dir", exchangeDir, "rev-parse", "--verify", "refs/heads/"+started.Change.Branch).Run(); err == nil {
-		t.Fatal("invalid handoff still pushed the branch to the exchange")
-	}
-}
-
 func newFlowAPIServer(t *testing.T) string {
 	t.Helper()
 
@@ -2060,34 +995,6 @@ func flowTestGitOutput(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
 	}
 	return strings.TrimSpace(string(output))
-}
-
-func initFlowTestGitRepo(t *testing.T, dir string) {
-	t.Helper()
-	runFlowTestGit(t, "", "-c", "init.defaultBranch=main", "init", dir)
-	runFlowTestGit(t, dir, "config", "user.name", "Flow Test")
-	runFlowTestGit(t, dir, "config", "user.email", "flow@example.invalid")
-	readme := filepath.Join(dir, "README.md")
-	if err := os.WriteFile(readme, []byte("test repo\n"), 0o644); err != nil {
-		t.Fatalf("write README: %v", err)
-	}
-	runFlowTestGit(t, dir, "add", "README.md")
-	runFlowTestGit(t, dir, "commit", "-m", "test: initial")
-}
-
-// initReadyWorktree prepares dir as the author's worktree on branch with an
-// origin remote pointing at a fresh bare exchange, so `flow ready` can push the
-// branch. It returns the exchange path for asserting the readied HEAD landed
-// there.
-func initReadyWorktree(t *testing.T, dir string, branch string) string {
-	t.Helper()
-	exchangeDir := filepath.Join(t.TempDir(), "exchange.git")
-	runFlowTestGit(t, "", "init", "--bare", exchangeDir)
-	initFlowTestGitRepo(t, dir)
-	runFlowTestGit(t, dir, "remote", "add", "origin", exchangeDir)
-	runFlowTestGit(t, dir, "push", "origin", "main:main")
-	runFlowTestGit(t, dir, "checkout", "-b", branch)
-	return exchangeDir
 }
 
 func assertMigrationsInclude(t *testing.T, got []string, want ...string) {
@@ -2154,8 +1061,8 @@ func TestInitRegistersProjectWithDiscoveredClientConfig(t *testing.T) {
 	runFlowTestGit(t, "", "init", "--bare", exchangePath)
 	exchangeURL := (&url.URL{Scheme: "file", Path: exchangePath}).String()
 	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/projects" {
-			t.Fatalf("request = %s %s, want POST /v1/projects", r.Method, r.URL.Path)
+		if r.Method != http.MethodPost || r.URL.Path != "/v2/projects" {
+			t.Fatalf("request = %s %s, want POST /v2/projects", r.Method, r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != "Bearer owner-token" {
 			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))

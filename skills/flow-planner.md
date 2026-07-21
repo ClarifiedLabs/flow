@@ -12,13 +12,12 @@
    - Cover: the problem and intended outcome, the files to modify, the approach, edge cases, and how the change will be verified.
    - If a question genuinely blocks planning, ask it and record it with `flow status --kind question "<question>"` so Flow moves the issue to Needs Attention.
 
-3. Finalize with `flow ready`, piping the plan as the handoff on stdin.
-   - The handoff is the plan: it is what the human reviews at the approval gate and what the next phase's agent receives as its instructions.
-   - Do not commit code and do not push; planning produces only the handoff.
-   - Provide the handoff via a heredoc, for example:
+3. Write the plan to a Markdown file and finalize with `flow complete --summary-file PLAN.md`.
+   - The summary is what the human reviews at the approval gate and what later nodes receive as context.
+   - Do not commit code and do not push; planning produces only a handoff artifact.
+   - For example, `PLAN.md` may contain:
 
      ```
-     flow ready <<'HANDOFF'
      # Implementation Plan
 
      ## Context
@@ -35,5 +34,4 @@
 
      ## Verification
      <how to test the change end-to-end>
-     HANDOFF
      ```

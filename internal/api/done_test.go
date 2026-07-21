@@ -9,10 +9,10 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 )
 
-func setIssueClosedAtForTest(t *testing.T, db *sql.DB, issueID, closedAt string) {
+func setIssueDoneAtForTest(t *testing.T, db *sql.DB, issueID, doneAt string) {
 	t.Helper()
-	if _, err := db.ExecContext(context.Background(), `UPDATE issues SET closed_at = ? WHERE id = ?`, closedAt, issueID); err != nil {
-		t.Fatalf("set closed_at for %s: %v", issueID, err)
+	if _, err := db.ExecContext(context.Background(), `UPDATE issues SET done_at = ? WHERE id = ?`, doneAt, issueID); err != nil {
+		t.Fatalf("set done_at for %s: %v", issueID, err)
 	}
 }
 
@@ -28,8 +28,8 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?, ?)`,
 	}
 }
 
-// seedClosedIssues creates one merged_closed, one rejected_closed, and one
-// abandoned issue with deterministic closed_at ordering (merged newest).
+// seedClosedIssues creates three terminal issues with deterministic done_at
+// ordering (merged newest).
 func seedClosedIssues(t *testing.T, fixture testFixture) (merged, rejected, abandoned coordinator.Issue) {
 	t.Helper()
 	ctx := context.Background()
@@ -39,29 +39,32 @@ func seedClosedIssues(t *testing.T, fixture testFixture) (merged, rejected, aban
 		t.Fatalf("create merged issue: %v", err)
 	}
 	insertMergedChangeForTest(t, fixture.DB, merged.ID, "c-0001")
-	if _, err := fixture.Issues.CloseIssue(ctx, merged.ID); err != nil {
-		t.Fatalf("close merged issue: %v", err)
+	if _, err := fixture.Bundle.WorkflowRuns.ForceDone(ctx, merged.ID, coordinator.ResolutionCompleted, "merged", coordinator.ActorHuman); err != nil {
+		t.Fatalf("finish merged issue: %v", err)
+	}
+	if _, err := fixture.DB.ExecContext(ctx, `UPDATE issues SET done_resolution = ? WHERE id = ?`, string(coordinator.ResolutionMerged), merged.ID); err != nil {
+		t.Fatalf("stamp merged resolution: %v", err)
 	}
 
 	rejected, err = fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "rejected work"})
 	if err != nil {
 		t.Fatalf("create rejected issue: %v", err)
 	}
-	if _, err := fixture.Issues.RejectTriage(ctx, rejected.ID); err != nil {
-		t.Fatalf("reject issue: %v", err)
+	if _, err := fixture.Bundle.WorkflowRuns.ForceDone(ctx, rejected.ID, coordinator.ResolutionRejected, "rejected", coordinator.ActorHuman); err != nil {
+		t.Fatalf("finish rejected issue: %v", err)
 	}
 
 	abandoned, err = fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "abandoned work"})
 	if err != nil {
 		t.Fatalf("create abandoned issue: %v", err)
 	}
-	if _, err := fixture.Issues.CloseIssue(ctx, abandoned.ID); err != nil {
-		t.Fatalf("close abandoned issue: %v", err)
+	if _, err := fixture.Bundle.WorkflowRuns.ForceDone(ctx, abandoned.ID, coordinator.ResolutionAbandoned, "abandoned", coordinator.ActorHuman); err != nil {
+		t.Fatalf("finish abandoned issue: %v", err)
 	}
 
-	setIssueClosedAtForTest(t, fixture.DB, merged.ID, "2026-03-03T03:00:00.000000000Z")
-	setIssueClosedAtForTest(t, fixture.DB, rejected.ID, "2026-02-02T02:00:00.000000000Z")
-	setIssueClosedAtForTest(t, fixture.DB, abandoned.ID, "2026-01-01T01:00:00.000000000Z")
+	setIssueDoneAtForTest(t, fixture.DB, merged.ID, "2026-03-03T03:00:00.000000000Z")
+	setIssueDoneAtForTest(t, fixture.DB, rejected.ID, "2026-02-02T02:00:00.000000000Z")
+	setIssueDoneAtForTest(t, fixture.DB, abandoned.ID, "2026-01-01T01:00:00.000000000Z")
 	return merged, rejected, abandoned
 }
 
@@ -70,7 +73,7 @@ func TestDoneAggregateSurfacesClosedIssuesWithOutcomesAndMergedChange(t *testing
 	merged, rejected, abandoned := seedClosedIssues(t, fixture)
 
 	var done aggregateDoneResponse
-	doJSONRequest(t, fixture.Server, http.MethodGet, "/v1/done", nil, http.StatusOK, &done)
+	doJSONRequest(t, fixture.Server, http.MethodGet, "/v2/done", nil, http.StatusOK, &done)
 
 	if len(done.Done) != 1 {
 		t.Fatalf("aggregate projects = %d, want 1", len(done.Done))
@@ -86,14 +89,14 @@ func TestDoneAggregateSurfacesClosedIssuesWithOutcomesAndMergedChange(t *testing
 		t.Fatalf("done issue order = %v, want %v (newest closed first)", gotIDs, want)
 	}
 
-	if project.Outcomes[merged.ID] != coordinator.PhaseMergedClosed {
-		t.Fatalf("merged outcome = %q, want %q", project.Outcomes[merged.ID], coordinator.PhaseMergedClosed)
+	if project.Outcomes[merged.ID] != coordinator.Phase(coordinator.ResolutionMerged) {
+		t.Fatalf("merged outcome = %q, want %q", project.Outcomes[merged.ID], coordinator.ResolutionMerged)
 	}
-	if project.Outcomes[rejected.ID] != coordinator.PhaseRejectedClosed {
-		t.Fatalf("rejected outcome = %q, want %q", project.Outcomes[rejected.ID], coordinator.PhaseRejectedClosed)
+	if project.Outcomes[rejected.ID] != coordinator.Phase(coordinator.ResolutionRejected) {
+		t.Fatalf("rejected outcome = %q, want %q", project.Outcomes[rejected.ID], coordinator.ResolutionRejected)
 	}
-	if project.Outcomes[abandoned.ID] != coordinator.PhaseAbandoned {
-		t.Fatalf("abandoned outcome = %q, want %q", project.Outcomes[abandoned.ID], coordinator.PhaseAbandoned)
+	if project.Outcomes[abandoned.ID] != coordinator.Phase(coordinator.ResolutionAbandoned) {
+		t.Fatalf("abandoned outcome = %q, want %q", project.Outcomes[abandoned.ID], coordinator.ResolutionAbandoned)
 	}
 
 	mergedCard, ok := project.IssueCards[merged.ID]
@@ -113,7 +116,7 @@ func TestDoneAggregateKeysetPagination(t *testing.T) {
 	merged, rejected, abandoned := seedClosedIssues(t, fixture)
 
 	var page1 aggregateDoneResponse
-	doJSONRequest(t, fixture.Server, http.MethodGet, "/v1/done?limit=2", nil, http.StatusOK, &page1)
+	doJSONRequest(t, fixture.Server, http.MethodGet, "/v2/done?limit=2", nil, http.StatusOK, &page1)
 	first := page1.Done[0]
 	if got := issueIDsFromAPI(first.Issues); !equalStringSlices(got, []string{merged.ID, rejected.ID}) {
 		t.Fatalf("page 1 ids = %v, want [%s %s]", got, merged.ID, rejected.ID)
@@ -124,7 +127,7 @@ func TestDoneAggregateKeysetPagination(t *testing.T) {
 
 	var page2 aggregateDoneResponse
 	doJSONRequest(t, fixture.Server, http.MethodGet,
-		"/v1/done?limit=2&before="+first.NextBefore+"&before_id="+first.NextBeforeID,
+		"/v2/done?limit=2&before="+first.NextBefore+"&before_id="+first.NextBeforeID,
 		nil, http.StatusOK, &page2)
 	second := page2.Done[0]
 	if got := issueIDsFromAPI(second.Issues); !equalStringSlices(got, []string{abandoned.ID}) {
@@ -140,7 +143,7 @@ func TestDoneAggregateFiltersByOutcome(t *testing.T) {
 	merged, _, _ := seedClosedIssues(t, fixture)
 
 	var done aggregateDoneResponse
-	doJSONRequest(t, fixture.Server, http.MethodGet, "/v1/done?outcome=merged", nil, http.StatusOK, &done)
+	doJSONRequest(t, fixture.Server, http.MethodGet, "/v2/done?outcome=merged", nil, http.StatusOK, &done)
 	if got := issueIDsFromAPI(done.Done[0].Issues); !equalStringSlices(got, []string{merged.ID}) {
 		t.Fatalf("outcome=merged ids = %v, want [%s]", got, merged.ID)
 	}
@@ -151,7 +154,7 @@ func TestSidebarReportsClosedCount(t *testing.T) {
 	seedClosedIssues(t, fixture)
 
 	var sidebar sidebarResponse
-	doJSONRequest(t, fixture.Server, http.MethodGet, "/v1/sidebar", nil, http.StatusOK, &sidebar)
+	doJSONRequest(t, fixture.Server, http.MethodGet, "/v2/sidebar", nil, http.StatusOK, &sidebar)
 	if sidebar.Done != 3 {
 		t.Fatalf("sidebar done count = %d, want 3", sidebar.Done)
 	}

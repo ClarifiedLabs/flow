@@ -39,7 +39,7 @@ func (s *projectServer) handleAgentDefsPath(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	rest := strings.TrimPrefix(r.URL.Path, "/v1/agent-defs")
+	rest := strings.TrimPrefix(r.URL.Path, "/v2/agent-defs")
 	rest = strings.Trim(rest, "/")
 	if rest == "" {
 		switch r.Method {
@@ -109,7 +109,7 @@ func (s *projectServer) handleFlowsPath(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	rest := strings.TrimPrefix(r.URL.Path, "/v1/flows")
+	rest := strings.TrimPrefix(r.URL.Path, "/v2/flows")
 	rest = strings.Trim(rest, "/")
 	if rest == "" {
 		switch r.Method {
@@ -211,7 +211,7 @@ func writeFlowError(w http.ResponseWriter, err error, code string) {
 	switch {
 	case errors.Is(err, coordinator.ErrFlowNotFound):
 		writeError(w, http.StatusNotFound, "flow_not_found", err.Error())
-	case errors.Is(err, coordinator.ErrFlowNameTaken), errors.Is(err, coordinator.ErrFlowIsDefault):
+	case errors.Is(err, coordinator.ErrFlowNameTaken), errors.Is(err, coordinator.ErrFlowIsDefault), errors.Is(err, coordinator.ErrFlowInUse):
 		writeError(w, http.StatusConflict, code, err.Error())
 	case errors.Is(err, coordinator.ErrAgentDefNotFound):
 		writeError(w, http.StatusBadRequest, code, err.Error())

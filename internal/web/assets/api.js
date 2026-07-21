@@ -63,7 +63,7 @@ export async function apiDelete(path) {
 
 export function consoleAPIPath(projectID) {
   const id = String(projectID || "").trim();
-  return id ? `/v1/projects/${encodeURIComponent(id)}/console` : "/v1/console";
+  return id ? `/v2/projects/${encodeURIComponent(id)}/console` : "/v2/console";
 }
 
 export function issueConsoleAPIPath(projectID, issueID) {
@@ -97,7 +97,7 @@ export async function apiFetch(path, options) {
 // ambiguous once several projects exist.
 export function issueAPIBase(projectID) {
   const id = String(projectID || "").trim();
-  return id ? `/v1/projects/${encodeURIComponent(id)}/issues` : "/v1/issues";
+  return id ? `/v2/projects/${encodeURIComponent(id)}/issues` : "/v2/issues";
 }
 
 // flowsAPIBase / agentDefsAPIBase scope the flow-configuration endpoints to a
@@ -106,12 +106,12 @@ export function issueAPIBase(projectID) {
 // works for single-project/implicit principals.
 export function flowsAPIBase(projectID) {
   const id = String(projectID || "").trim();
-  return id ? `/v1/projects/${encodeURIComponent(id)}/flows` : "/v1/flows";
+  return id ? `/v2/projects/${encodeURIComponent(id)}/flows` : "/v2/flows";
 }
 
 export function agentDefsAPIBase(projectID) {
   const id = String(projectID || "").trim();
-  return id ? `/v1/projects/${encodeURIComponent(id)}/agent-defs` : "/v1/agent-defs";
+  return id ? `/v2/projects/${encodeURIComponent(id)}/agent-defs` : "/v2/agent-defs";
 }
 
 export function issueHref(projectID, issueID) {

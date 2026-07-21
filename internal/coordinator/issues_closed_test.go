@@ -8,7 +8,7 @@ import (
 )
 
 // closedFixture builds a service with a controllable clock and returns it so
-// tests can stamp deterministic closed_at values.
+// tests can stamp deterministic done_at values.
 func newClosedIssueFixture(t *testing.T) (*IssueService, *time.Time) {
 	t.Helper()
 	_, service := newIssueService(t, filepath.Join(t.TempDir(), "flow.db"))
@@ -18,16 +18,21 @@ func newClosedIssueFixture(t *testing.T) (*IssueService, *time.Time) {
 	return service, clock
 }
 
-// closeAbandoned closes an accepted issue with no merged change (-> abandoned).
-func closeAbandoned(t *testing.T, service *IssueService, clock *time.Time, title string, at time.Time) Issue {
+func finishIssue(t *testing.T, service *IssueService, clock *time.Time, title string, at time.Time, resolution DoneResolution) Issue {
 	t.Helper()
 	issue := createIssues(t, service, title)[0]
 	*clock = at
-	closed, err := service.CloseIssue(context.Background(), issue.ID)
-	if err != nil {
-		t.Fatalf("close issue %s: %v", issue.ID, err)
+	stamp := formatTime(at)
+	if _, err := service.db.ExecContext(context.Background(), `
+UPDATE issues SET lifecycle_state = ?, done_resolution = ?, done_at = ?, updated_at = ? WHERE id = ?`,
+		string(LifecycleDone), string(resolution), stamp, stamp, issue.ID); err != nil {
+		t.Fatalf("finish issue %s: %v", issue.ID, err)
 	}
-	return closed
+	finished, err := service.GetIssue(context.Background(), issue.ID)
+	if err != nil {
+		t.Fatalf("load finished issue %s: %v", issue.ID, err)
+	}
+	return finished
 }
 
 func TestListClosedIssuesReturnsClosedNewestFirstAndExcludesOpen(t *testing.T) {
@@ -35,9 +40,9 @@ func TestListClosedIssuesReturnsClosedNewestFirstAndExcludesOpen(t *testing.T) {
 	service, clock := newClosedIssueFixture(t)
 	base := *clock
 
-	first := closeAbandoned(t, service, clock, "first", base)
-	second := closeAbandoned(t, service, clock, "second", base.Add(time.Hour))
-	third := closeAbandoned(t, service, clock, "third", base.Add(2*time.Hour))
+	first := finishIssue(t, service, clock, "first", base, ResolutionAbandoned)
+	second := finishIssue(t, service, clock, "second", base.Add(time.Hour), ResolutionAbandoned)
+	third := finishIssue(t, service, clock, "third", base.Add(2*time.Hour), ResolutionAbandoned)
 	// An open issue must never appear.
 	createIssues(t, service, "still open")
 
@@ -60,9 +65,9 @@ func TestListClosedIssuesKeysetPagination(t *testing.T) {
 	service, clock := newClosedIssueFixture(t)
 	base := *clock
 
-	first := closeAbandoned(t, service, clock, "first", base)
-	second := closeAbandoned(t, service, clock, "second", base.Add(time.Hour))
-	third := closeAbandoned(t, service, clock, "third", base.Add(2*time.Hour))
+	first := finishIssue(t, service, clock, "first", base, ResolutionAbandoned)
+	second := finishIssue(t, service, clock, "second", base.Add(time.Hour), ResolutionAbandoned)
+	third := finishIssue(t, service, clock, "third", base.Add(2*time.Hour), ResolutionAbandoned)
 
 	page1, next, err := service.ListClosedIssues(ctx, ClosedIssueQuery{Limit: 2})
 	if err != nil {
@@ -96,8 +101,8 @@ func TestListClosedIssuesTieBreaksByIDWithoutSkipOrDuplicate(t *testing.T) {
 	at := clock.Add(time.Hour)
 
 	// Two issues closed at the exact same instant: id desc breaks the tie.
-	first := closeAbandoned(t, service, clock, "first", at)   // i-0001
-	second := closeAbandoned(t, service, clock, "second", at) // i-0002
+	first := finishIssue(t, service, clock, "first", at, ResolutionAbandoned)   // i-0001
+	second := finishIssue(t, service, clock, "second", at, ResolutionAbandoned) // i-0002
 
 	page1, next, err := service.ListClosedIssues(ctx, ClosedIssueQuery{Limit: 1})
 	if err != nil {
@@ -127,23 +132,17 @@ func TestListClosedIssuesFiltersByOutcome(t *testing.T) {
 	service, clock := newClosedIssueFixture(t)
 	base := *clock
 
-	// merged_closed: accepted issue with a merged change, then closed.
 	merged := createIssues(t, service, "merged")[0]
 	insertChangeForTest(t, service.db, merged.ID, "c-0001", "feat/merged", true)
 	*clock = base.Add(3 * time.Hour)
-	if _, err := service.CloseIssue(ctx, merged.ID); err != nil {
-		t.Fatalf("close merged issue: %v", err)
+	mergedAt := formatTime(*clock)
+	if _, err := service.db.ExecContext(ctx, `UPDATE issues SET lifecycle_state = ?, done_resolution = ?, done_at = ?, updated_at = ? WHERE id = ?`,
+		string(LifecycleDone), string(ResolutionMerged), mergedAt, mergedAt, merged.ID); err != nil {
+		t.Fatalf("finish merged issue: %v", err)
 	}
 
-	// rejected_closed.
-	rejected := createIssues(t, service, "rejected")[0]
-	*clock = base.Add(2 * time.Hour)
-	if _, err := service.RejectTriage(ctx, rejected.ID); err != nil {
-		t.Fatalf("reject issue: %v", err)
-	}
-
-	// abandoned: closed with no merged change.
-	abandoned := closeAbandoned(t, service, clock, "abandoned", base.Add(time.Hour))
+	rejected := finishIssue(t, service, clock, "rejected", base.Add(2*time.Hour), ResolutionRejected)
+	abandoned := finishIssue(t, service, clock, "abandoned", base.Add(time.Hour), ResolutionAbandoned)
 
 	cases := []struct {
 		outcome ClosedOutcome
@@ -170,8 +169,8 @@ func TestListClosedIssuesWithinWindow(t *testing.T) {
 	service, clock := newClosedIssueFixture(t)
 	base := *clock
 
-	old := closeAbandoned(t, service, clock, "old", base)
-	recent := closeAbandoned(t, service, clock, "recent", base.Add(48*time.Hour))
+	old := finishIssue(t, service, clock, "old", base, ResolutionAbandoned)
+	recent := finishIssue(t, service, clock, "recent", base.Add(48*time.Hour), ResolutionAbandoned)
 
 	cutoff := base.Add(24 * time.Hour)
 	issues, _, err := service.ListClosedIssues(ctx, ClosedIssueQuery{Within: &cutoff})
@@ -188,8 +187,8 @@ func TestCountClosedIssuesCountsOnlyClosed(t *testing.T) {
 	service, clock := newClosedIssueFixture(t)
 	base := *clock
 
-	closeAbandoned(t, service, clock, "closed one", base)
-	closeAbandoned(t, service, clock, "closed two", base.Add(time.Hour))
+	finishIssue(t, service, clock, "closed one", base, ResolutionAbandoned)
+	finishIssue(t, service, clock, "closed two", base.Add(time.Hour), ResolutionAbandoned)
 	createIssues(t, service, "open one", "open two", "open three")
 
 	count, err := service.CountClosedIssues(ctx)

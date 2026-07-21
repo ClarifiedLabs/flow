@@ -7,6 +7,9 @@ CREATE TABLE app_metadata (
 INSERT INTO app_metadata (key, value, updated_at)
 VALUES ('schema_version', '0001_init', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
+INSERT INTO app_metadata (key, value, updated_at)
+VALUES ('storage_format', '2', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+
 CREATE TABLE id_allocators (
 	name TEXT PRIMARY KEY,
 	next_number INTEGER NOT NULL CHECK (next_number > 0)
@@ -31,30 +34,38 @@ CREATE TABLE flows (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL UNIQUE CHECK (length(trim(name)) > 0),
 	description TEXT NOT NULL DEFAULT '',
-	fix_agent_def_id TEXT REFERENCES agent_defs(id) ON DELETE RESTRICT,
+	start_node_key TEXT NOT NULL DEFAULT '',
+	transition_budget INTEGER NOT NULL DEFAULT 50 CHECK (transition_budget BETWEEN 1 AND 500),
 	builtin INTEGER NOT NULL DEFAULT 0 CHECK (builtin IN (0, 1)),
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL
 );
 
-CREATE TABLE flow_phases (
+-- Editable workflow graph. Topology is relational while each trusted node
+-- handler owns a strict, versioned JSON configuration contract.
+CREATE TABLE flow_nodes (
 	id TEXT PRIMARY KEY,
 	flow_id TEXT NOT NULL REFERENCES flows(id) ON DELETE CASCADE,
-	position INTEGER NOT NULL CHECK (position >= 0),
+	node_key TEXT NOT NULL CHECK (length(trim(node_key)) > 0),
 	name TEXT NOT NULL CHECK (length(trim(name)) > 0),
-	agent_def_id TEXT NOT NULL REFERENCES agent_defs(id) ON DELETE RESTRICT,
-	gate TEXT NOT NULL CHECK (gate IN ('auto', 'human')),
+	kind TEXT NOT NULL CHECK (kind IN (
+		'agent', 'automated_checks', 'change_review', 'human_gate',
+		'verify_change', 'materialize_issue_set', 'merge_change', 'terminal'
+	)),
+	position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+	config_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(config_json)),
+	UNIQUE (flow_id, node_key),
 	UNIQUE (flow_id, position)
 );
 
-CREATE TABLE flow_review_agents (
-	id TEXT PRIMARY KEY,
+CREATE TABLE flow_edges (
 	flow_id TEXT NOT NULL REFERENCES flows(id) ON DELETE CASCADE,
-	role TEXT NOT NULL CHECK (role IN ('reviewer', 'verifier')),
-	agent_def_id TEXT NOT NULL REFERENCES agent_defs(id) ON DELETE RESTRICT,
-	position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
-	required INTEGER NOT NULL DEFAULT 1 CHECK (required IN (0, 1)),
-	UNIQUE (flow_id, role, position)
+	from_node_key TEXT NOT NULL,
+	outcome TEXT NOT NULL CHECK (length(trim(outcome)) > 0),
+	to_node_key TEXT NOT NULL,
+	PRIMARY KEY (flow_id, from_node_key, outcome),
+	FOREIGN KEY (flow_id, from_node_key) REFERENCES flow_nodes(flow_id, node_key) ON DELETE CASCADE,
+	FOREIGN KEY (flow_id, to_node_key) REFERENCES flow_nodes(flow_id, node_key) ON DELETE CASCADE
 );
 
 CREATE TABLE issues (
@@ -63,46 +74,124 @@ CREATE TABLE issues (
 	body TEXT NOT NULL DEFAULT '',
 	acceptance_criteria TEXT NOT NULL DEFAULT '',
 	priority INTEGER NOT NULL DEFAULT 0 CHECK (priority >= 0),
-	schedule_state TEXT NOT NULL CHECK (schedule_state IN ('backlog', 'up_next', 'closed')),
-	triage_state TEXT NOT NULL CHECK (triage_state IN ('triage', 'accepted', 'rejected')),
-	requires_human_review INTEGER NOT NULL DEFAULT 1 CHECK (requires_human_review IN (0, 1)),
-	auto_merge INTEGER NOT NULL DEFAULT 0 CHECK (auto_merge IN (0, 1)),
 	created_by TEXT NOT NULL CHECK (created_by IN ('human', 'agent', 'system')),
 	created_by_session_id TEXT,
 	source_issue_id TEXT REFERENCES issues(id) ON DELETE SET NULL,
 	source_change_id TEXT,
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
-	closed_at TEXT,
-	flow_id TEXT REFERENCES flows(id) ON DELETE SET NULL,
-	CHECK ((triage_state != 'rejected') OR (schedule_state = 'closed' AND closed_at IS NOT NULL))
+	flow_id TEXT REFERENCES flows(id) ON DELETE RESTRICT,
+	lifecycle_state TEXT CHECK (lifecycle_state IN ('scheduled', 'in_progress', 'done')),
+	done_resolution TEXT CHECK (done_resolution IN ('completed', 'merged', 'rejected', 'abandoned', 'cancelled', 'failed')),
+	done_at TEXT,
+	CHECK ((lifecycle_state = 'done') = (done_resolution IS NOT NULL AND done_at IS NOT NULL)),
+	CHECK (lifecycle_state = 'done' OR (done_resolution IS NULL AND done_at IS NULL))
 );
 
--- The issue's frozen position within its flow. flow_snapshot_json is the flow
--- resolved at schedule time (ordered phases with agent-def snapshots, review
--- set, fix agent); editing or deleting a flow never touches in-flight issues.
-CREATE TABLE issue_flow_cursor (
-	issue_id TEXT PRIMARY KEY REFERENCES issues(id) ON DELETE CASCADE,
-	flow_snapshot_json TEXT NOT NULL,
-	phase_index INTEGER NOT NULL DEFAULT 0 CHECK (phase_index >= 0),
-	phase_state TEXT NOT NULL CHECK (phase_state IN ('pending', 'running', 'awaiting_approval', 'completed')),
-	gate_feedback TEXT NOT NULL DEFAULT '',
-	updated_at TEXT NOT NULL
-);
-
--- Per-work-phase handoff artifacts (generalizes the former plan body): written
--- by the phase's agent at flow ready, shown at human gates, and injected into
--- the next phase's prompt.
-CREATE TABLE issue_phase_handoffs (
+CREATE TABLE workflow_runs (
+	id TEXT PRIMARY KEY,
 	issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
-	phase_index INTEGER NOT NULL CHECK (phase_index >= 0),
-	phase_name TEXT NOT NULL,
-	content TEXT NOT NULL DEFAULT '',
-	head_sha TEXT NOT NULL DEFAULT '',
+	run_sequence INTEGER NOT NULL CHECK (run_sequence > 0),
+	flow_id TEXT,
+	flow_snapshot_json TEXT NOT NULL CHECK (json_valid(flow_snapshot_json)),
+	state TEXT NOT NULL CHECK (state IN ('scheduled', 'running', 'waiting', 'completed', 'cancelled')),
+	current_node_key TEXT NOT NULL DEFAULT '',
+	current_node_run_id TEXT,
+	current_artifact_id TEXT,
+	transition_budget INTEGER NOT NULL CHECK (transition_budget BETWEEN 1 AND 500),
+	transitions_used INTEGER NOT NULL DEFAULT 0 CHECK (transitions_used >= 0),
+	version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
 	created_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL,
-	PRIMARY KEY (issue_id, phase_index)
+	started_at TEXT,
+	completed_at TEXT,
+	cancelled_at TEXT,
+	completion_source TEXT NOT NULL DEFAULT '',
+	UNIQUE (issue_id, run_sequence)
 );
+
+CREATE UNIQUE INDEX idx_workflow_runs_one_active
+	ON workflow_runs(issue_id)
+	WHERE state IN ('scheduled', 'running', 'waiting');
+
+CREATE TABLE workflow_node_runs (
+	id TEXT PRIMARY KEY,
+	workflow_run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+	node_key TEXT NOT NULL,
+	visit INTEGER NOT NULL CHECK (visit > 0),
+	attempt INTEGER NOT NULL CHECK (attempt > 0),
+	state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'waiting', 'succeeded', 'failed', 'cancelled')),
+	input_artifact_id TEXT,
+	output_artifact_id TEXT,
+	outcome TEXT NOT NULL DEFAULT '',
+	error TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	started_at TEXT,
+	completed_at TEXT,
+	UNIQUE (workflow_run_id, node_key, visit, attempt)
+);
+
+CREATE UNIQUE INDEX idx_workflow_node_runs_one_active
+	ON workflow_node_runs(workflow_run_id)
+	WHERE state IN ('queued', 'running', 'waiting');
+
+CREATE TABLE workflow_artifacts (
+	id TEXT PRIMARY KEY,
+	workflow_run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE RESTRICT,
+	node_run_id TEXT NOT NULL REFERENCES workflow_node_runs(id) ON DELETE RESTRICT,
+	session_id TEXT,
+	creator_key TEXT NOT NULL,
+	kind TEXT NOT NULL CHECK (kind IN ('handoff', 'change', 'issue_set')),
+	summary_markdown TEXT NOT NULL,
+	payload_json TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
+	payload_sha256 TEXT NOT NULL,
+	base_revision TEXT,
+	client_key TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	UNIQUE (creator_key, client_key)
+);
+
+CREATE TABLE workflow_materializations (
+	artifact_id TEXT PRIMARY KEY REFERENCES workflow_artifacts(id) ON DELETE RESTRICT,
+	workflow_run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE RESTRICT,
+	result_json TEXT NOT NULL CHECK (json_valid(result_json)),
+	created_at TEXT NOT NULL
+);
+
+CREATE TABLE workflow_waits (
+	id TEXT PRIMARY KEY,
+	workflow_run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+	node_run_id TEXT REFERENCES workflow_node_runs(id) ON DELETE SET NULL,
+	kind TEXT NOT NULL CHECK (kind IN ('human_gate', 'agent_request', 'operator_intervention')),
+	message TEXT NOT NULL DEFAULT '',
+	state TEXT NOT NULL CHECK (state IN ('open', 'resolved')),
+	created_by TEXT NOT NULL CHECK (created_by IN ('human', 'agent', 'system')),
+	created_at TEXT NOT NULL,
+	resolved_by TEXT,
+	resolved_at TEXT
+);
+
+CREATE UNIQUE INDEX idx_workflow_waits_one_open
+	ON workflow_waits(workflow_run_id) WHERE state = 'open';
+
+CREATE TABLE workflow_transitions (
+	seq INTEGER PRIMARY KEY AUTOINCREMENT,
+	issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	workflow_run_id TEXT REFERENCES workflow_runs(id) ON DELETE CASCADE,
+	from_issue_state TEXT NOT NULL DEFAULT '',
+	to_issue_state TEXT NOT NULL DEFAULT '',
+	from_node_key TEXT NOT NULL DEFAULT '',
+	to_node_key TEXT NOT NULL DEFAULT '',
+	outcome TEXT NOT NULL DEFAULT '',
+	event_kind TEXT NOT NULL CHECK (length(trim(event_kind)) > 0),
+	payload_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json)),
+	actor TEXT NOT NULL DEFAULT '',
+	idempotency_key TEXT,
+	created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX idx_workflow_transitions_idempotency
+	ON workflow_transitions(workflow_run_id, idempotency_key)
+	WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE issue_relations (
 	source_issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
@@ -160,6 +249,8 @@ CREATE TABLE jobs (
 	id TEXT PRIMARY KEY,
 	issue_id TEXT REFERENCES issues(id) ON DELETE CASCADE,
 	change_id TEXT REFERENCES changes(id) ON DELETE SET NULL,
+	workflow_run_id TEXT REFERENCES workflow_runs(id) ON DELETE CASCADE,
+	node_run_id TEXT REFERENCES workflow_node_runs(id) ON DELETE CASCADE,
 	role TEXT NOT NULL CHECK (role IN ('author', 'reviewer', 'verifier', 'ci', 'console')),
 	state TEXT NOT NULL CHECK (state IN ('queued', 'claimed', 'running', 'finished', 'failed', 'crashed', 'canceled')),
 	capacity_bucket TEXT NOT NULL CHECK (capacity_bucket IN ('persistent_agent', 'ephemeral')),
@@ -204,6 +295,7 @@ CREATE TABLE checks (
 CREATE TABLE changes (
 	id TEXT PRIMARY KEY,
 	issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	workflow_run_id TEXT REFERENCES workflow_runs(id) ON DELETE CASCADE,
 	branch TEXT NOT NULL,
 	base TEXT NOT NULL DEFAULT 'main',
 	head_sha TEXT NOT NULL DEFAULT '',
@@ -220,10 +312,13 @@ CREATE TABLE sessions (
 	id TEXT PRIMARY KEY,
 	issue_id TEXT REFERENCES issues(id) ON DELETE CASCADE,
 	change_id TEXT REFERENCES changes(id) ON DELETE CASCADE,
+	workflow_run_id TEXT REFERENCES workflow_runs(id) ON DELETE CASCADE,
+	node_run_id TEXT REFERENCES workflow_node_runs(id) ON DELETE CASCADE,
 	job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
 	lease_id TEXT NOT NULL REFERENCES leases(id) ON DELETE CASCADE,
 	worker_id TEXT NOT NULL,
 	role TEXT NOT NULL CHECK (role IN ('author', 'reviewer', 'verifier', 'console')),
+	workspace_mode TEXT NOT NULL DEFAULT 'change' CHECK (workspace_mode IN ('base', 'change')),
 	runtime_state TEXT NOT NULL CHECK (runtime_state IN ('starting', 'working', 'waiting', 'finished', 'crashed', 'abandoned')),
 	branch TEXT NOT NULL,
 	base TEXT NOT NULL DEFAULT 'main',
@@ -337,50 +432,6 @@ CREATE TABLE review_comments (
 	CHECK (length(trim(body)) > 0)
 );
 
-CREATE TABLE review_cycle_budgets (
-	issue_id TEXT PRIMARY KEY REFERENCES issues(id) ON DELETE CASCADE,
-	granted_cycles INTEGER NOT NULL CHECK (granted_cycles >= 0),
-	used_cycles INTEGER NOT NULL DEFAULT 0 CHECK (used_cycles >= 0),
-	exhausted_at TEXT,
-	last_approved_at TEXT,
-	last_approved_by TEXT NOT NULL DEFAULT '',
-	last_instructions TEXT NOT NULL DEFAULT '',
-	updated_at TEXT NOT NULL,
-	CHECK (used_cycles <= granted_cycles)
-);
-
-CREATE TABLE workflow_state (
-	issue_id TEXT PRIMARY KEY REFERENCES issues(id) ON DELETE CASCADE,
-	phase TEXT NOT NULL CHECK (phase IN ('backlog', 'triage', 'up_next', 'working', 'critique', 'acceptance', 'approved', 'merged_closed', 'rejected_closed', 'abandoned')),
-	version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
-	updated_at TEXT NOT NULL
-);
-
-CREATE TABLE transitions (
-	seq INTEGER PRIMARY KEY AUTOINCREMENT,
-	issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
-	from_phase TEXT NOT NULL DEFAULT '',
-	event_kind TEXT NOT NULL CHECK (length(trim(event_kind)) > 0),
-	payload_json TEXT NOT NULL DEFAULT '{}',
-	guard_result TEXT NOT NULL DEFAULT '',
-	to_phase TEXT NOT NULL CHECK (length(trim(to_phase)) > 0),
-	actor TEXT NOT NULL DEFAULT '',
-	idempotency_key TEXT,
-	created_at TEXT NOT NULL
-);
-
-CREATE TABLE timers (
-	id TEXT PRIMARY KEY,
-	issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
-	fire_at TEXT NOT NULL,
-	kind TEXT NOT NULL CHECK (length(trim(kind)) > 0),
-	payload_json TEXT NOT NULL DEFAULT '{}',
-	fired_at TEXT,
-	attempts INTEGER NOT NULL DEFAULT 0,
-	last_error TEXT NOT NULL DEFAULT '',
-	dispatched_at TEXT
-);
-
 CREATE TABLE job_terminals (
 	job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
 	lease_id TEXT NOT NULL REFERENCES leases(id) ON DELETE CASCADE,
@@ -416,23 +467,6 @@ CREATE TABLE consumer_watermarks (
 	updated_at TEXT NOT NULL
 );
 
-CREATE TABLE event_inbox (
-	id TEXT PRIMARY KEY,
-	issue_id TEXT NOT NULL,
-	event_json TEXT NOT NULL,
-	idempotency_key TEXT NOT NULL,
-	created_at TEXT NOT NULL,
-	attempts INTEGER NOT NULL DEFAULT 0,
-	last_error TEXT NOT NULL DEFAULT '',
-	confirmed_at TEXT
-);
-
-CREATE TABLE session_human_wait_latches (
-	session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-	kind TEXT NOT NULL CHECK (kind IN ('plan', 'question')),
-	created_at TEXT NOT NULL
-);
-
 CREATE TABLE issue_attachments (
 	id TEXT PRIMARY KEY,
 	issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
@@ -458,11 +492,9 @@ SELECT
 FROM issues i;
 
 CREATE INDEX idx_issues_flow_id ON issues(flow_id);
-CREATE INDEX idx_issues_schedule_state ON issues(schedule_state);
-CREATE INDEX idx_issues_triage_state ON issues(triage_state);
+CREATE INDEX idx_issues_lifecycle_state ON issues(lifecycle_state, updated_at);
+CREATE INDEX idx_issues_done_at ON issues(done_at DESC, id DESC) WHERE lifecycle_state = 'done';
 CREATE INDEX idx_issues_source_issue_id ON issues(source_issue_id);
--- Done view queries closed issues and distinguishes merged from abandoned changes.
-CREATE INDEX idx_issues_closed_at ON issues(closed_at DESC) WHERE schedule_state = 'closed';
 CREATE INDEX idx_issue_relations_target ON issue_relations(target_issue_id, kind);
 CREATE UNIQUE INDEX idx_issue_relations_one_parent ON issue_relations(target_issue_id) WHERE kind = 'parent_of';
 CREATE INDEX idx_issue_tags_tag_id ON issue_tags(tag_id);
@@ -482,6 +514,11 @@ CREATE INDEX idx_changes_issue_unmerged ON changes(issue_id, merged_at);
 CREATE INDEX idx_changes_issue_ready ON changes(issue_id, ready_at, merged_at);
 CREATE INDEX idx_changes_issue_merged ON changes(issue_id) WHERE merged_at IS NOT NULL;
 CREATE INDEX idx_jobs_change_id ON jobs(change_id);
+CREATE INDEX idx_jobs_workflow_node ON jobs(workflow_run_id, node_run_id);
+CREATE INDEX idx_changes_workflow_run ON changes(workflow_run_id);
+CREATE INDEX idx_sessions_workflow_node ON sessions(workflow_run_id, node_run_id);
+CREATE INDEX idx_workflow_artifacts_run ON workflow_artifacts(workflow_run_id, created_at);
+CREATE INDEX idx_workflow_transitions_issue_seq ON workflow_transitions(issue_id, seq DESC);
 CREATE UNIQUE INDEX idx_sessions_one_active_author_per_issue ON sessions(issue_id) WHERE role = 'author' AND runtime_state IN ('starting', 'working', 'waiting');
 CREATE UNIQUE INDEX idx_sessions_one_active_project_console ON sessions(role)
 	WHERE role = 'console' AND issue_id IS NULL AND runtime_state IN ('starting', 'working', 'waiting');
@@ -501,14 +538,9 @@ CREATE UNIQUE INDEX idx_review_threads_idem
 	ON review_threads(change_id, anchor_commit_sha, file_path, line, body_hash)
 	WHERE body_hash != '';
 CREATE INDEX idx_review_comments_thread_created ON review_comments(thread_id, created_at, id);
-CREATE INDEX idx_transitions_issue_seq ON transitions(issue_id, seq);
-CREATE UNIQUE INDEX idx_transitions_idempotency ON transitions(issue_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
-CREATE INDEX idx_timers_issue ON timers(issue_id);
-CREATE INDEX idx_timers_due ON timers(fire_at) WHERE dispatched_at IS NULL;
 CREATE INDEX idx_job_terminals_lease ON job_terminals(lease_id);
 CREATE INDEX idx_job_terminal_access_tokens_job ON job_terminal_access_tokens(job_id, expires_at);
 CREATE UNIQUE INDEX idx_merge_intents_change_open ON merge_intents(change_id) WHERE completed_at IS NULL;
 CREATE INDEX idx_idempotency_pending ON idempotency_records(status_code, created_at);
-CREATE INDEX idx_event_inbox_pending ON event_inbox(created_at) WHERE confirmed_at IS NULL;
 CREATE INDEX idx_issue_attachments_issue_id ON issue_attachments(issue_id, created_at);
 CREATE INDEX idx_issue_attachments_stage ON issue_attachments(stage);

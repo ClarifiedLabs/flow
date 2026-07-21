@@ -10,8 +10,8 @@ Flow ships three Go commands from one module:
 
 | Command | Role |
 | --- | --- |
-| `flow` | Human and in-session CLI. It registers projects, drives issue/review/merge commands, fetches prompts, submits handoffs, and attaches to terminals. |
-| `flow-server` | Coordinator daemon. It serves the HTTP API, browser UI, Git HTTP exchange endpoints, web/terminal proxy routes, project registry, lifecycle engine, scheduler entrypoints, and exchange git hooks. |
+| `flow` | Human and in-session CLI. It registers projects, drives issue/workflow commands, fetches prompts, submits typed artifacts, and attaches to terminals. |
+| `flow-server` | Coordinator daemon. It serves the HTTP API, browser UI, Git HTTP exchange endpoints, web/terminal proxy routes, project registry, workflow executor, scheduler entrypoints, and exchange git hooks. |
 | `flow-worker` | Worker supervisor. It joins the coordinator, advertises capacity and harness labels, claims jobs across projects, clones exchange branches, runs jobs in tmux, heartbeats leases, uploads transcripts, and reports results. |
 
 A single `flow-server` can serve many projects. A single `flow-worker` can run
@@ -70,49 +70,42 @@ and workers.
 
 `internal/api.Server` handles all coordinator HTTP traffic:
 
-- `/v1/health` for health checks.
+- `/v2/health` for health checks.
 - Git HTTP exchange routes before normal API auth.
 - `/ui/*` and `/ui/api/*` for the embedded browser UI.
-- `/v1/workers/join` for join-token based worker registration.
+- `/v2/workers/join` for join-token based worker registration.
 - Owner, worker, session, console, and hook-token authenticated API routes.
-- Project-scoped routes under `/v1/projects/<project-id>/...`.
+- Project-scoped routes under `/v2/projects/<project-id>/...`.
 
 Per-project handlers are built around a `ProjectBundle` from
 `internal/api/registry.go`. A bundle owns the services for exactly one project:
-issues, sessions, checks, review threads, flows, transcripts, attachments,
-merges, git events, worker queue, and lifecycle engine.
+issues, workflow runs and artifacts, sessions, checks, review threads, flows,
+transcripts, attachments, merges, git events, worker queue, and workflow executor.
 
-Some routes, such as `/v1/issues/<id>`, can be resolved implicitly only when the
+Some routes, such as `/v2/issues/<id>`, can be resolved implicitly only when the
 principal or server context identifies a single project. Project-qualified routes
 are the unambiguous form because issue IDs restart per project.
 
 The API is HTTP/JSON and carries a `Flow-Protocol-Version` header. Mutating
 endpoints use idempotency records where repeated client requests must be safe.
 
-## Lifecycle engine
+## Lifecycle and workflow executor
 
-The lifecycle engine in `internal/lifecycle` is the only entry point for
-lifecycle-changing events. It:
+The issue lifecycle stores only `scheduled`, `in_progress`, and `done`; null is
+Unscheduled. Working and Blocked are derived In Progress substates. Done stores
+one fixed resolution.
 
-1. Resolves the issue.
-2. Journals externally submitted events into a durable inbox.
-3. Loads the current workflow snapshot.
-4. Looks up the transition for `(phase, event)`.
-5. Evaluates guards and runs actions through `Effects`.
-6. Writes the new phase and transition log.
-7. Confirms the inbox row after the cascade commits.
+Scheduling freezes the selected flow graph and resolved agent definitions into
+a `workflow_run`. The executor maintains exactly one active `workflow_node_run`,
+dispatches its trusted handler, records typed artifacts and durable waits, and
+appends every state or graph movement to `workflow_transitions`. Branches and
+cycles are allowed. A per-run transition budget opens an operator wait before a
+cycle can run forever.
 
-The transition log backs `flow transitions` and the web UI lifecycle timeline.
-Durable timers bound otherwise invisible waits, such as a check that never
-reports or an authoring phase with no activity.
-
-The stored phase enum (`internal/coordinator/phase.go`) is triage, backlog,
-up_next, working, critique, acceptance, approved, merged_closed, rejected_closed,
-and abandoned. `working` is a container: the position within the issue's flow
-(which phase, running or paused at a human gate) lives on the flow cursor, and
-the board and transition timeline refine `working` into the `planning` and
-`authoring` display phases. `blocked` is a derived overlay, not a stored phase.
-See [usage.md](usage.md#issue-lifecycle) for the lifecycle diagram.
+Human gates and budget exhaustion derive Blocked. Reset cancels run-owned jobs,
+leases, sessions, and the active node and returns the issue to Unscheduled.
+Terminal nodes derive Done; a merged terminal additionally proves the run owns
+a merged change.
 
 ## Worker scheduling and execution
 
@@ -153,7 +146,7 @@ so normal job environments do not inherit the reusable join secret.
 Each project has a private bare exchange remote. Flow-managed refs include:
 
 - the protected base branch;
-- `refs/heads/issue/i-....` issue branches;
+- `refs/heads/issue/i-..../run-N` run-specific issue branches;
 - coordinator-owned tags and future internal `refs/flow/*` refs.
 
 Server-side `pre-receive` hooks enforce guardrails:
@@ -170,9 +163,10 @@ The coordinator drains those events into SQLite and uses them to update change
 heads, stale checks, and review-thread trailer claims. `flow reconcile` remains a
 manual recovery path when git and SQLite drift.
 
-Handoffs are not git artifacts. `flow ready` and `flow handoff write` submit them
-to the coordinator, which stores snapshots in SQLite and injects them into later
-prompts.
+Agent outputs are immutable typed workflow artifacts. `flow complete` submits a
+Markdown summary plus a `handoff`, `change`, or `issue_set` payload. Change
+artifacts are pinned to the submitted HEAD; later prompts receive prior artifact
+summaries from the frozen run.
 
 ## Flows, agent definitions, and checks
 
@@ -180,14 +174,13 @@ Each project stores flow configuration in SQLite:
 
 - **Agent definitions** combine a harness, optional model/reasoning selection,
   and prompt instructions.
-- **Flows** define ordered work phases, optional human gates, review agents, and
-  the fix agent.
+- **Flows** define directed trusted-node graphs, strict per-kind configuration,
+  outcome transitions, a start node, and a transition budget.
 
-Fresh projects seed built-in planner, author, reviewer, and verifier agent
-definitions plus two flows:
-
-- `direct`: implement immediately, then agent review before merge.
-- `planned`: run a human-gated planning phase, then implementation and review.
+Fresh projects seed issue-planner, author, reviewer, and verifier definitions
+plus two flows: the default coding graph (implementation, checks, review, human
+gate, verification, and merge loops) and the planning graph (issue-set authoring,
+human review, transactional materialization, and completion).
 
 Repo-versioned automated check configuration lives in `.flow/checks/*.yaml`.
 Checks belong with the code; agent definitions and flows are coordinator-owned so

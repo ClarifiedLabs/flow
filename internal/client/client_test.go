@@ -35,7 +35,7 @@ func TestListIssueAttachments(t *testing.T) {
 		{ID: "att-0002", IssueID: "i-0001", Filename: "notes.txt", ContentType: "text/plain"},
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/issues/i-0001/attachments", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v2/issues/i-0001/attachments", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("method = %s, want GET", r.Method)
 		}
@@ -65,7 +65,7 @@ func TestListIssueAttachments(t *testing.T) {
 func TestJoinWorker(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/workers/join", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v2/workers/join", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %s, want POST", r.Method)
 		}
@@ -98,7 +98,7 @@ func TestJoinWorker(t *testing.T) {
 func TestListIssueAttachmentsScopedToProject(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/projects/proj-1/issues/i-0001/attachments", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v2/projects/proj-1/issues/i-0001/attachments", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(t, w, http.StatusOK, map[string]any{"attachments": []coordinator.IssueAttachment{
 			{ID: "att-0001", IssueID: "i-0001", Filename: "shot.png"},
 		}})
@@ -117,7 +117,7 @@ func TestListIssueAttachmentsScopedToProject(t *testing.T) {
 func TestListIssueAttachmentsSurfacesErrorStatus(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/issues/i-missing/attachments", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v2/issues/i-missing/attachments", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(t, w, http.StatusNotFound, map[string]any{
 			"error": map[string]string{"code": "issue_not_found", "message": "issue not found"},
 		})
@@ -138,7 +138,7 @@ func TestDownloadIssueAttachment(t *testing.T) {
 	t.Parallel()
 	want := []byte("png-bytes")
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/issues/i-0001/attachments/att-0001", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v2/issues/i-0001/attachments/att-0001", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("method = %s, want GET", r.Method)
 		}
@@ -163,7 +163,7 @@ func TestDownloadIssueAttachment(t *testing.T) {
 func TestDownloadIssueAttachmentSurfacesErrorStatus(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/issues/i-0001/attachments/att-missing", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v2/issues/i-0001/attachments/att-missing", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(t, w, http.StatusNotFound, map[string]any{
 			"error": map[string]string{"code": "attachment_not_found", "message": "attachment not found"},
 		})

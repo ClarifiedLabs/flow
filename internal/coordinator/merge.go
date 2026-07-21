@@ -532,16 +532,12 @@ WHERE id = ?
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE issues
-SET schedule_state = ?,
-	closed_at = COALESCE(closed_at, ?),
-	updated_at = ?
+SET updated_at = ?
 WHERE id = ?`,
-		string(ScheduleClosed),
-		nowText,
 		nowText,
 		issueID,
 	); err != nil {
-		return Change{}, Issue{}, fmt.Errorf("close merged issue: %w", err)
+		return Change{}, Issue{}, fmt.Errorf("update merged issue: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return Change{}, Issue{}, fmt.Errorf("commit merge transaction: %w", err)

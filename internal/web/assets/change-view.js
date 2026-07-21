@@ -10,7 +10,7 @@ import { value } from "./normalize.js";
 import { readDiffMode } from "./storage.js";
 
 export async function renderChangeView(app, id, context) {
-  const data = await apiGet(`/v1/changes/${encodeURIComponent(id)}`);
+  const data = await apiGet(`/v2/changes/${encodeURIComponent(id)}`);
   if (context && !app.isActiveLoad(context)) return false;
   app.setTitle("Change");
   const change = data.change || data.Change || {};
@@ -46,7 +46,6 @@ export async function renderChangeView(app, id, context) {
           ].filter(Boolean).join(" · ")}</p>
         </div>
         <div class="actions">
-          ${canMerge ? `<button class="button" data-merge-change="${escapeAttr(changeID)}">Merge</button>` : ""}
           ${humanReviewAction}
         </div>
       </div>
@@ -77,7 +76,7 @@ export async function renderChangeDiffView(app, changeID, headSHA, context) {
   app.changeDiffCache = app.changeDiffCache || new Map();
   let diff = app.changeDiffCache.get(cacheKey);
   if (!diff) {
-    diff = await apiGet(`/v1/changes/${encodeURIComponent(changeID)}/diff`);
+    diff = await apiGet(`/v2/changes/${encodeURIComponent(changeID)}/diff`);
     if (context && !app.isActiveLoad(context)) return false;
     if (value(diff, "head_sha", "HeadSHA") && value(diff, "head_sha", "HeadSHA") !== headSHA) {
       container.innerHTML = `<div class="empty">Diff changed; waiting for refresh</div>`;

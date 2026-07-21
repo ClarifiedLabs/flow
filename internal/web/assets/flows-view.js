@@ -1,7 +1,6 @@
 // Flows settings view: manage a project's agent definitions and flows. Agent
-// definitions pick a harness + model/effort + prompt; flows chain ordered work
-// phases (each an agent def with an auto/human gate) plus a review-agent set
-// and an optional fix agent. Both are project-owned rows edited live here,
+// definitions pick a harness + model/effort + prompt; flows are editable
+// graphs of trusted node kinds with explicit outcome transitions. Both are project-owned rows edited live here,
 // resolving the active project the same way console-view does.
 
 import { agentDefsAPIBase, apiDelete, apiGet, apiPatch, apiPost, flowsAPIBase } from "./api.js";
@@ -340,12 +339,12 @@ export function renderFlowsSectionView(flows, agentDefs, defaultFlowID, state) {
         const id = value(flow, "id", "ID");
         const isDefault = id === defaultFlowID || Boolean(value(flow, "default", "Default"));
         const builtin = Boolean(value(flow, "builtin", "Builtin"));
-        const reviewCount = (value(flow, "review_agents", "ReviewAgents") || []).length;
+        const nodes = value(flow, "nodes", "Nodes") || [];
         return `
           <tr>
             <td>${escapeHTML(value(flow, "name", "Name"))}${isDefault ? ` <span class="badge ok">default</span>` : ""}${builtin ? ` <span class="badge idle">builtin</span>` : ""}</td>
-            <td>${renderFlowPhaseChainView(value(flow, "phases", "Phases") || [])}</td>
-            <td>${reviewCount}</td>
+            <td>${renderFlowGraphSummaryView(flow)}</td>
+            <td>${nodes.length}</td>
             <td>
               <div class="actions table-actions">
                 <button class="button secondary" type="button" data-edit-flow="${escapeAttr(id)}">Edit</button>
@@ -361,7 +360,7 @@ export function renderFlowsSectionView(flows, agentDefs, defaultFlowID, state) {
       <h3>Flows</h3>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Name</th><th>Phases</th><th>Reviews</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Graph</th><th>Nodes</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
@@ -378,6 +377,14 @@ export function renderFlowPhaseChainView(phases) {
   }).join(" -> ");
 }
 
+export function renderFlowGraphSummaryView(flow) {
+  const start = value(flow, "start_node", "StartNode");
+  const edges = value(flow, "edges", "Edges") || [];
+  if (!start) return "—";
+  const transitions = edges.slice(0, 3).map((edge) => `${value(edge, "from", "From")}.${value(edge, "outcome", "Outcome")} → ${value(edge, "to", "To")}`);
+  return escapeHTML([`start: ${start}`, ...transitions, edges.length > 3 ? `+${edges.length - 3} more` : ""].filter(Boolean).join(" · "));
+}
+
 export function agentDefOptionsHTML(agentDefs, selectedID, options = {}) {
   const selected = String(selectedID || "").trim();
   const empty = options.includeEmpty
@@ -390,68 +397,67 @@ export function agentDefOptionsHTML(agentDefs, selectedID, options = {}) {
   }).join("");
 }
 
-export function renderPhaseRowView(agentDefs, phase = {}) {
-  const name = value(phase, "name", "Name");
-  const agentDefID = value(phase, "agent_def_id", "AgentDefID");
-  const gate = value(phase, "gate", "Gate") === "human" ? "human" : "auto";
+const NODE_KINDS = ["agent", "automated_checks", "change_review", "human_gate", "verify_change", "materialize_issue_set", "merge_change", "terminal"];
+
+function nodeConfigValue(node) {
+  const config = value(node, "config", "Config") || {};
+  return JSON.stringify(config, null, 2);
+}
+
+export function renderNodeCardView(node = {}) {
+  const key = value(node, "key", "Key");
+  const name = value(node, "name", "Name");
+  const kind = value(node, "kind", "Kind") || "agent";
   return `
-    <div class="flow-row" data-phase-row>
-      <input name="phase_name" placeholder="Phase name" value="${escapeAttr(name)}" aria-label="Phase name">
-      <select name="phase_agent_def_id" aria-label="Phase agent">${agentDefOptionsHTML(agentDefs, agentDefID, { includeEmpty: true, emptyLabel: "Select agent" })}</select>
-      <select name="phase_gate" aria-label="Phase gate">
-        <option value="auto" ${gate === "auto" ? "selected" : ""}>auto</option>
-        <option value="human" ${gate === "human" ? "selected" : ""}>human</option>
-      </select>
+    <article class="flow-row flow-node-card" data-node-card>
+      <input name="node_key" placeholder="stable-node-key" value="${escapeAttr(key)}" aria-label="Node key" required>
+      <input name="node_name" placeholder="Display name" value="${escapeAttr(name)}" aria-label="Node name" required>
+      <select name="node_kind" aria-label="Trusted node kind">${NODE_KINDS.map((candidate) => `<option value="${candidate}" ${candidate === kind ? "selected" : ""}>${candidate}</option>`).join("")}</select>
+      <textarea name="node_config" rows="6" spellcheck="false" aria-label="Strict node configuration JSON">${escapeHTML(nodeConfigValue(node))}</textarea>
       <div class="flow-row-controls">
-        <button type="button" class="button secondary icon-button" data-phase-row-up title="Move phase up" aria-label="Move phase up">&uarr;</button>
-        <button type="button" class="button secondary icon-button" data-phase-row-down title="Move phase down" aria-label="Move phase down">&darr;</button>
-        <button type="button" class="button secondary icon-button" data-phase-row-remove title="Remove phase" aria-label="Remove phase">&times;</button>
+        <button type="button" class="button secondary icon-button" data-node-up title="Move node up">&uarr;</button>
+        <button type="button" class="button secondary icon-button" data-node-down title="Move node down">&darr;</button>
+        <button type="button" class="button secondary icon-button" data-node-remove title="Remove node">&times;</button>
       </div>
-    </div>
+    </article>
   `;
 }
 
-export function renderReviewRowView(agentDefs, review = {}) {
-  const role = value(review, "role", "Role") === "verifier" ? "verifier" : "reviewer";
-  const agentDefID = value(review, "agent_def_id", "AgentDefID");
-  const required = Boolean(value(review, "required", "Required"));
-  return `
-    <div class="flow-row" data-review-row>
-      <select name="review_role" aria-label="Review role">
-        <option value="reviewer" ${role === "reviewer" ? "selected" : ""}>reviewer</option>
-        <option value="verifier" ${role === "verifier" ? "selected" : ""}>verifier</option>
-      </select>
-      <select name="review_agent_def_id" aria-label="Review agent">${agentDefOptionsHTML(agentDefs, agentDefID, { includeEmpty: true, emptyLabel: "Select agent" })}</select>
-      <label class="check"><input type="checkbox" name="review_required" ${required ? "checked" : ""}><span>required</span></label>
-      <div class="flow-row-controls">
-        <button type="button" class="button secondary icon-button" data-review-row-remove title="Remove review agent" aria-label="Remove review agent">&times;</button>
-      </div>
-    </div>
-  `;
+export function renderEdgeRowView(edge = {}, nodeKeys = []) {
+  const from = value(edge, "from", "From");
+  const outcome = value(edge, "outcome", "Outcome");
+  const to = value(edge, "to", "To");
+  const options = (selected) => `<option value="">Select node</option>${nodeKeys.map((key) => `<option value="${escapeAttr(key)}" ${key === selected ? "selected" : ""}>${escapeHTML(key)}</option>`).join("")}`;
+  return `<div class="flow-row" data-edge-row>
+    <select name="edge_from" aria-label="From node">${options(from)}</select>
+    <input name="edge_outcome" placeholder="outcome" value="${escapeAttr(outcome)}" required>
+    <select name="edge_to" aria-label="Target node">${options(to)}</select>
+    <button type="button" class="button secondary icon-button" data-edge-remove title="Remove transition">&times;</button>
+  </div>`;
 }
 
 export function renderFlowEditorView(flow, agentDefs) {
   const flowID = value(flow, "id", "ID");
   const name = value(flow, "name", "Name");
   const description = value(flow, "description", "Description");
-  const fixAgentDefID = value(flow, "fix_agent_def_id", "FixAgentDefID");
-  const phases = value(flow, "phases", "Phases") || [];
-  const reviewAgents = value(flow, "review_agents", "ReviewAgents") || [];
-  const phaseRows = (phases.length ? phases : [{}]).map((phase) => renderPhaseRowView(agentDefs, phase)).join("");
-  const reviewRows = reviewAgents.map((review) => renderReviewRowView(agentDefs, review)).join("");
+  const startNode = value(flow, "start_node", "StartNode");
+  const transitionBudget = Number(value(flow, "transition_budget", "TransitionBudget") || 50);
+  const nodes = value(flow, "nodes", "Nodes") || [];
+  const edges = value(flow, "edges", "Edges") || [];
+  const nodeKeys = nodes.map((node) => value(node, "key", "Key")).filter(Boolean);
   return `
     <form class="flow-editor issue-form" data-flow-editor data-flow-id="${escapeAttr(flowID)}">
       <label><span>Name</span><input name="flow_name" value="${escapeAttr(name)}" required></label>
       <label><span>Description</span><textarea name="flow_description" rows="2">${escapeHTML(description)}</textarea></label>
-      <div class="flow-rows-head wide">Phases</div>
-      <div class="flow-row-list wide" data-phase-rows>${phaseRows}</div>
-      <div class="flow-row-actions wide"><button type="button" class="button secondary" data-add-phase>Add phase</button></div>
-      <div class="flow-rows-head wide">Review Agents</div>
-      <div class="flow-row-list wide" data-review-rows>${reviewRows}</div>
-      <div class="flow-row-actions wide"><button type="button" class="button secondary" data-add-review>Add review agent</button></div>
-      <label class="wide"><span>Fix Agent</span>
-        <select name="fix_agent_def_id">${agentDefOptionsHTML(agentDefs, fixAgentDefID, { includeEmpty: true, emptyLabel: "(last phase's agent)" })}</select>
-      </label>
+      <label><span>Start node</span><select name="start_node">${nodeKeys.map((key) => `<option value="${escapeAttr(key)}" ${key === startNode ? "selected" : ""}>${escapeHTML(key)}</option>`).join("")}</select></label>
+      <label><span>Transition budget</span><input name="transition_budget" type="number" min="1" max="500" value="${transitionBudget}"></label>
+      <div class="flow-rows-head wide">Trusted node cards</div>
+      <div class="flow-row-list wide" data-node-cards>${nodes.map(renderNodeCardView).join("")}</div>
+      <div class="flow-row-actions wide"><button type="button" class="button secondary" data-add-node>Add node</button></div>
+      <div class="flow-rows-head wide">Outcome transitions</div>
+      <div class="flow-row-list wide" data-edge-rows>${edges.map((edge) => renderEdgeRowView(edge, nodeKeys)).join("")}</div>
+      <div class="flow-row-actions wide"><button type="button" class="button secondary" data-add-edge>Add transition</button></div>
+      <div class="wide"><span>Read-only graph preview</span><pre class="flow-graph-preview" data-graph-preview>${escapeHTML(renderFlowGraphSummaryView(flow))}</pre></div>
       <div class="form-actions">
         <button class="button" type="submit">${flowID ? "Save flow" : "Create flow"}</button>
         ${flowID ? `<button class="button secondary" type="button" data-flow-cancel>Cancel</button>` : ""}
@@ -460,38 +466,29 @@ export function renderFlowEditorView(flow, agentDefs) {
   `;
 }
 
-// flowPayloadFromEditorView reads the flow editor into the API body, preserving
-// phase/review row order (querySelectorAll is document order). Blank rows (no
-// name and no agent) are dropped.
 export function flowPayloadFromEditorView(form) {
   const readValue = (root, selector) => {
     const element = root.querySelector(selector);
     return element ? String(element.value ?? "") : "";
   };
-  const readChecked = (root, selector) => {
-    const element = root.querySelector(selector);
-    return element ? Boolean(element.checked) : false;
-  };
-  const phases = Array.from(form.querySelectorAll("[data-phase-row]"))
-    .map((row) => ({
-      name: readValue(row, '[name="phase_name"]').trim(),
-      agent_def_id: readValue(row, '[name="phase_agent_def_id"]'),
-      gate: readValue(row, '[name="phase_gate"]') === "human" ? "human" : "auto",
-    }))
-    .filter((phase) => phase.name || phase.agent_def_id);
-  const review_agents = Array.from(form.querySelectorAll("[data-review-row]"))
-    .map((row) => ({
-      role: readValue(row, '[name="review_role"]') === "verifier" ? "verifier" : "reviewer",
-      agent_def_id: readValue(row, '[name="review_agent_def_id"]'),
-      required: readChecked(row, '[name="review_required"]'),
-    }))
-    .filter((review) => review.agent_def_id);
+  const nodes = Array.from(form.querySelectorAll("[data-node-card]")).map((card) => ({
+    key: readValue(card, '[name="node_key"]').trim(),
+    name: readValue(card, '[name="node_name"]').trim(),
+    kind: readValue(card, '[name="node_kind"]'),
+    config: JSON.parse(readValue(card, '[name="node_config"]') || "{}"),
+  }));
+  const edges = Array.from(form.querySelectorAll("[data-edge-row]")).map((row) => ({
+    from: readValue(row, '[name="edge_from"]'),
+    outcome: readValue(row, '[name="edge_outcome"]').trim(),
+    to: readValue(row, '[name="edge_to"]'),
+  }));
   return {
     name: readValue(form, '[name="flow_name"]').trim(),
     description: readValue(form, '[name="flow_description"]').trim(),
-    fix_agent_def_id: readValue(form, '[name="fix_agent_def_id"]'),
-    phases,
-    review_agents,
+    start_node: readValue(form, '[name="start_node"]'),
+    transition_budget: Number(readValue(form, '[name="transition_budget"]') || 50),
+    nodes,
+    edges,
   };
 }
 
@@ -533,30 +530,30 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
   const form = section.querySelector("[data-flow-editor]");
   if (!form) return;
 
-  const phaseRowHTML = renderPhaseRowView(agentDefs, {});
-  const reviewRowHTML = renderReviewRowView(agentDefs, {});
   if (typeof form.addEventListener === "function") {
     form.addEventListener("click", (event) => {
       const target = event.target;
       if (!target || typeof target.closest !== "function") return;
-      if (target.closest("[data-add-phase]")) {
+      if (target.closest("[data-add-node]")) {
         event.preventDefault();
-        form.querySelector("[data-phase-rows]")?.insertAdjacentHTML("beforeend", phaseRowHTML);
-      } else if (target.closest("[data-add-review]")) {
+        form.querySelector("[data-node-cards]")?.insertAdjacentHTML("beforeend", renderNodeCardView({}));
+        refreshGraphSelectorsView(form);
+      } else if (target.closest("[data-add-edge]")) {
         event.preventDefault();
-        form.querySelector("[data-review-rows]")?.insertAdjacentHTML("beforeend", reviewRowHTML);
-      } else if (target.closest("[data-phase-row-remove]")) {
+        form.querySelector("[data-edge-rows]")?.insertAdjacentHTML("beforeend", renderEdgeRowView({}, graphNodeKeysView(form)));
+      } else if (target.closest("[data-node-remove]")) {
         event.preventDefault();
-        target.closest("[data-phase-row]")?.remove();
-      } else if (target.closest("[data-review-row-remove]")) {
+        target.closest("[data-node-card]")?.remove();
+        refreshGraphSelectorsView(form);
+      } else if (target.closest("[data-edge-remove]")) {
         event.preventDefault();
-        target.closest("[data-review-row]")?.remove();
-      } else if (target.closest("[data-phase-row-up]")) {
+        target.closest("[data-edge-row]")?.remove();
+      } else if (target.closest("[data-node-up]")) {
         event.preventDefault();
-        moveRowView(target.closest("[data-phase-row]"), -1);
-      } else if (target.closest("[data-phase-row-down]")) {
+        moveRowView(target.closest("[data-node-card]"), -1);
+      } else if (target.closest("[data-node-down]")) {
         event.preventDefault();
-        moveRowView(target.closest("[data-phase-row]"), 1);
+        moveRowView(target.closest("[data-node-card]"), 1);
       } else if (target.closest("[data-flow-cancel]")) {
         event.preventDefault();
         state.editingFlowID = "";
@@ -564,11 +561,18 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
       }
     });
   }
+  form.addEventListener("input", () => refreshGraphSelectorsView(form));
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (form.reportValidity && !form.reportValidity()) return;
-    const payload = flowPayloadFromEditorView(form);
+    let payload;
+    try {
+      payload = flowPayloadFromEditorView(form);
+    } catch (error) {
+      app.setStatus(`Invalid node configuration JSON: ${error.message || error}`);
+      return;
+    }
     if (!payload.name) {
       app.setStatus("Flow name is required");
       return;
@@ -587,6 +591,23 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
       app.setStatus(error.message || String(error));
     }
   });
+}
+
+function graphNodeKeysView(form) {
+  return Array.from(form.querySelectorAll('[name="node_key"]')).map((input) => String(input.value || "").trim()).filter(Boolean);
+}
+
+function refreshGraphSelectorsView(form) {
+  const keys = graphNodeKeysView(form);
+  for (const select of form.querySelectorAll('[name="start_node"], [name="edge_from"], [name="edge_to"]')) {
+    const selected = select.value;
+    select.innerHTML = `${select.name === "start_node" ? "" : '<option value="">Select node</option>'}${keys.map((key) => `<option value="${escapeAttr(key)}" ${key === selected ? "selected" : ""}>${escapeHTML(key)}</option>`).join("")}`;
+  }
+  const preview = form.querySelector("[data-graph-preview]");
+  if (preview) {
+    const edges = Array.from(form.querySelectorAll("[data-edge-row]")).map((row) => `${row.querySelector('[name="edge_from"]')?.value || "?"}.${row.querySelector('[name="edge_outcome"]')?.value || "?"} → ${row.querySelector('[name="edge_to"]')?.value || "?"}`);
+    preview.textContent = [`start: ${form.querySelector('[name="start_node"]')?.value || "?"}`, ...edges].join("\n");
+  }
 }
 
 // moveRowView reorders a flow editor row within its container by swapping it

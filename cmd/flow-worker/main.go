@@ -386,7 +386,7 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 	}
 
 	if persistentSession {
-		// A console session always releases its lease through /v1/console
+		// A console session always releases its lease through /v2/console
 		// regardless of how the worker step ended. Routing a failed console run
 		// through the generic process-exit path below would both leak the lease
 		// (that path rejects the console role) and mask the real error with the

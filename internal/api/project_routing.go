@@ -122,7 +122,7 @@ func (s *Server) bundleForChange(ctx context.Context, principal coordinator.Prin
 }
 
 // bundleForChangeIssue resolves the owning bundle for the
-// /v1/changes/{issueID}/checks subroute, whose leading path segment is an
+// /v2/changes/{issueID}/checks subroute, whose leading path segment is an
 // issue id (checks are keyed by issue) rather than a change id.
 func (s *Server) bundleForChangeIssue(ctx context.Context, principal coordinator.Principal, issueID string) (*projectServer, bool) {
 	for _, bundle := range s.scopedBundles(principal) {
@@ -164,10 +164,10 @@ func (s *Server) bundleForLease(ctx context.Context, principal coordinator.Princ
 	return nil, false
 }
 
-// changesSubpathIsChecks reports whether a /v1/changes/{id}/... path targets
+// changesSubpathIsChecks reports whether a /v2/changes/{id}/... path targets
 // the checks subroute, whose leading segment is an issue id.
 func changesSubpathIsChecks(path string) bool {
-	rest := strings.TrimPrefix(path, "/v1/changes/")
+	rest := strings.TrimPrefix(path, "/v2/changes/")
 	_, sub, _ := strings.Cut(rest, "/")
 	sub, _, _ = strings.Cut(sub, "/")
 	return sub == "checks"
@@ -201,7 +201,7 @@ func (s *Server) implicitProjectServer(principal coordinator.Principal) (*projec
 		return nil, errProjectNotFound
 	}
 
-	return nil, errors.New("multiple projects are registered; use /v1/projects/{project}/issues")
+	return nil, errors.New("multiple projects are registered; use /v2/projects/{project}/issues")
 }
 
 func (s *Server) handleProjectsCollection(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
@@ -222,7 +222,7 @@ func (s *Server) handleProjectsCollection(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleProjectScopedPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
-	rest := strings.TrimPrefix(r.URL.Path, "/v1/projects/")
+	rest := strings.TrimPrefix(r.URL.Path, "/v2/projects/")
 	projectRef, sub, _ := strings.Cut(rest, "/")
 	if strings.TrimSpace(projectRef) == "" {
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
@@ -254,22 +254,22 @@ func (s *Server) handleProjectScopedPath(w http.ResponseWriter, r *http.Request,
 				writeError(w, http.StatusForbidden, "forbidden", "issue read requires owner, session, or console token")
 				return
 			}
-			ps.handleListIssues(w, requestWithPath(r, "/v1/issues"))
+			ps.handleListIssues(w, requestWithPath(r, "/v2/issues"))
 		case http.MethodPost:
 			if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
 				writeError(w, http.StatusForbidden, "forbidden", "issue creation requires owner, session, or console token")
 				return
 			}
-			ps.handleCreateIssue(w, requestWithPath(r, "/v1/issues"), principal)
+			ps.handleCreateIssue(w, requestWithPath(r, "/v2/issues"), principal)
 		default:
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method is not allowed")
 		}
 	case strings.HasPrefix(sub, "issues/"):
-		ps.handleIssuePath(w, requestWithPath(r, "/v1/"+sub), principal)
+		ps.handleIssuePath(w, requestWithPath(r, "/v2/"+sub), principal)
 	case sub == "agent-defs" || strings.HasPrefix(sub, "agent-defs/"):
-		ps.handleAgentDefsPath(w, requestWithPath(r, "/v1/"+sub), principal)
+		ps.handleAgentDefsPath(w, requestWithPath(r, "/v2/"+sub), principal)
 	case sub == "flows" || strings.HasPrefix(sub, "flows/"):
-		ps.handleFlowsPath(w, requestWithPath(r, "/v1/"+sub), principal)
+		ps.handleFlowsPath(w, requestWithPath(r, "/v2/"+sub), principal)
 	case sub == "board":
 		if !requireMethod(w, r, http.MethodGet) {
 			return
@@ -509,7 +509,7 @@ func (s *Server) handleBoardAggregate(w http.ResponseWriter, r *http.Request, pr
 	writeJSON(w, http.StatusOK, response)
 }
 
-// maxClosedIssueLimit caps a single /v1/done page so the unbounded history can
+// maxClosedIssueLimit caps a single /v2/done page so the unbounded history can
 // never be fetched in one request.
 const maxClosedIssueLimit = 200
 
@@ -543,7 +543,7 @@ func (s *Server) handleDoneAggregate(w http.ResponseWriter, r *http.Request, pri
 	writeJSON(w, http.StatusOK, response)
 }
 
-// closedIssueQueryFromRequest parses the /v1/done query string into a bounded
+// closedIssueQueryFromRequest parses the /v2/done query string into a bounded
 // ClosedIssueQuery (limit, keyset cursor, time window, outcome filter).
 func closedIssueQueryFromRequest(r *http.Request) (coordinator.ClosedIssueQuery, error) {
 	values := r.URL.Query()
@@ -579,7 +579,9 @@ func closedIssueQueryFromRequest(r *http.Request) (coordinator.ClosedIssueQuery,
 	}
 
 	switch outcome := coordinator.ClosedOutcome(strings.TrimSpace(values.Get("outcome"))); outcome {
-	case coordinator.ClosedOutcomeAll, coordinator.ClosedOutcomeMerged, coordinator.ClosedOutcomeRejected, coordinator.ClosedOutcomeAbandoned:
+	case coordinator.ClosedOutcomeAll, coordinator.ClosedOutcomeCompleted, coordinator.ClosedOutcomeMerged,
+		coordinator.ClosedOutcomeRejected, coordinator.ClosedOutcomeAbandoned,
+		coordinator.ClosedOutcomeCancelled, coordinator.ClosedOutcomeFailed:
 		query.Outcome = outcome
 	default:
 		return query, fmt.Errorf("invalid outcome %q", outcome)

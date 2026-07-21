@@ -15,7 +15,7 @@ import (
 //
 // The push targets refs/heads/<branch> from HEAD, so re-running it after the
 // branch is already published is a no-op success ("Everything up-to-date"). That
-// idempotency is what lets `flow ready` own the push and be safe to re-run.
+// idempotency is what lets `flow complete` own the push and be safe to re-run.
 func PushBranch(ctx context.Context, worktree string, branch string) error {
 	branch = strings.TrimSpace(branch)
 	if branch == "" {
