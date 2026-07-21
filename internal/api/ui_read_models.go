@@ -48,13 +48,15 @@ func (s *projectServer) buildUIIssueCards(ctx context.Context, issues []coordina
 				}
 				card.ActiveSession = summary
 				card.TerminalAvailable = summary.TerminalAvailable
-				change, err := s.sessions.GetChange(ctx, active.ChangeID)
-				if err != nil {
-					return nil, fmt.Errorf("load active change for %s: %w", issue.ID, err)
-				}
-				card.Change = uiChangeSummaryFromChange(change)
-				if err := s.applyHandoffSummary(ctx, &card, change); err != nil {
-					return nil, fmt.Errorf("load handoff summary for %s: %w", issue.ID, err)
+				if active.ChangeID != "" {
+					change, err := s.sessions.GetChange(ctx, active.ChangeID)
+					if err != nil {
+						return nil, fmt.Errorf("load active change for %s: %w", issue.ID, err)
+					}
+					card.Change = uiChangeSummaryFromChange(change)
+					if err := s.applyHandoffSummary(ctx, &card, change); err != nil {
+						return nil, fmt.Errorf("load handoff summary for %s: %w", issue.ID, err)
+					}
 				}
 			}
 			readyChange, ok, err := s.sessions.ReadyUnmergedChangeForIssue(ctx, issue.ID)

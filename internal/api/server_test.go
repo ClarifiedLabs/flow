@@ -872,6 +872,63 @@ INSERT INTO handoff_snapshots (
 	}
 }
 
+func TestBoardSupportsActiveBaseWorkspaceSessionWithoutChange(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Plan issue set"})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	const workerID = "w-base-workspace"
+	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
+		ID:                      workerID,
+		CapacityPersistentAgent: 1,
+	}); err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	job, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
+		IssueID:        &issue.ID,
+		Role:           flowworker.RoleAuthor,
+		CapacityBucket: flowworker.BucketPersistentAgent,
+		Payload: map[string]any{
+			"workspace_mode": coordinator.WorkspaceBase,
+			"branch":         "main",
+			"base":           "main",
+		},
+	})
+	if err != nil {
+		t.Fatalf("enqueue base-workspace job: %v", err)
+	}
+	claimed := claimSpecificJob(t, fixture, workerID, job.ID, []flowworker.CapacityBucket{flowworker.BucketPersistentAgent})
+	if _, err := fixture.Workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
+		t.Fatalf("mark job running: %v", err)
+	}
+	started, err := fixture.Sessions.StartAuthorSession(ctx, coordinator.StartAuthorSessionInput{
+		JobID:    job.ID,
+		LeaseID:  claimed.Lease.ID,
+		WorkerID: workerID,
+	})
+	if err != nil {
+		t.Fatalf("start base-workspace session: %v", err)
+	}
+	if started.Session.ChangeID != "" {
+		t.Fatalf("base-workspace session change id = %q, want empty", started.Session.ChangeID)
+	}
+
+	var board boardResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
+	card, ok := board.IssueCards[issue.ID]
+	if !ok {
+		t.Fatalf("issue cards = %+v, missing %s", board.IssueCards, issue.ID)
+	}
+	if card.ActiveSession == nil || card.ActiveSession.ID != started.Session.ID {
+		t.Fatalf("active session summary = %+v, want %s", card.ActiveSession, started.Session.ID)
+	}
+	if card.Change != nil {
+		t.Fatalf("change summary = %+v, want nil", card.Change)
+	}
+}
+
 func TestBoardHidesUIIssueCardsFromSessionTokens(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
