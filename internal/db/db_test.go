@@ -44,6 +44,7 @@ func TestOpenInitializesSQLite(t *testing.T) {
 	if schemaVersion != "0001_init" {
 		t.Fatalf("schema version = %q, want 0001_init", schemaVersion)
 	}
+	assertStorageFormat(t, store, "3")
 
 	assertTables(t, store,
 		[]string{"tasks", "workflow_runs", "workflow_node_runs", "workflow_artifacts", "workflow_waits", "workflow_transitions", "jobs", "leases", "sessions", "changes"},
@@ -80,8 +81,49 @@ func TestOpenGlobalInitializesGlobalSchema(t *testing.T) {
 		t.Fatalf("read migrations: %v", err)
 	}
 	assertAppliedMigrations(t, migrations, "0001_global_init")
+	assertStorageFormat(t, store, "3")
 
-	assertTables(t, store, []string{"projects", "workers", "tokens", "web_sessions", "web_bootstrap_tokens", "idempotency_records"}, []string{"tasks", "jobs", "leases", "sessions", "changes"})
+	assertTables(t, store, []string{"app_metadata", "projects", "workers", "tokens", "web_sessions", "web_bootstrap_tokens", "idempotency_records"}, []string{"tasks", "jobs", "leases", "sessions", "changes"})
+}
+
+func TestOpenRejectsOldIdentifierStorageFormat(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		open func(context.Context, string) (*Store, error)
+	}{
+		{name: "project", open: Open},
+		{name: "global", open: OpenGlobal},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), test.name+".db")
+			store, err := test.open(ctx, path)
+			if err != nil {
+				t.Fatalf("initialize database: %v", err)
+			}
+			if _, err := store.DB().ExecContext(ctx, "UPDATE app_metadata SET value = '2' WHERE key = 'storage_format'"); err != nil {
+				t.Fatalf("downgrade storage marker: %v", err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatalf("close database: %v", err)
+			}
+
+			if _, err := test.open(ctx, path); err == nil || !strings.Contains(err.Error(), "recreate the Flow data directory") {
+				t.Fatalf("reopen err = %v, want incompatible-format guidance", err)
+			}
+		})
+	}
+}
+
+func assertStorageFormat(t *testing.T, store *Store, want string) {
+	t.Helper()
+	var got string
+	if err := store.DB().QueryRow("SELECT value FROM app_metadata WHERE key = 'storage_format'").Scan(&got); err != nil {
+		t.Fatalf("read storage format: %v", err)
+	}
+	if got != want {
+		t.Fatalf("storage format = %q, want %q", got, want)
+	}
 }
 
 func TestOpenGlobalMigrationIsIdempotent(t *testing.T) {

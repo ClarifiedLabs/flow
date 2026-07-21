@@ -49,7 +49,7 @@ func TestIdempotencyReserveCompleteAndConflict(t *testing.T) {
 	}
 
 	record.StatusCode = 201
-	record.ResponseBody = []byte(`{"task":{"id":"i-0001"}}`)
+	record.ResponseBody = []byte(`{"task":{"id":"t-test-0001"}}`)
 	if err := service.Complete(ctx, record); err != nil {
 		t.Fatalf("complete idempotency record: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestIdempotencyReserveReplaysCompletedRecordDespiteAge(t *testing.T) {
 	}
 
 	record.StatusCode = 201
-	record.ResponseBody = []byte(`{"task":{"id":"i-0001"}}`)
+	record.ResponseBody = []byte(`{"task":{"id":"t-test-0001"}}`)
 	if err := service.Complete(ctx, record); err != nil {
 		t.Fatalf("complete idempotency record: %v", err)
 	}

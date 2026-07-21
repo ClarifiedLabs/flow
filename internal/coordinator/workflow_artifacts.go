@@ -44,12 +44,13 @@ type CreateWorkflowArtifactInput struct {
 }
 
 type WorkflowArtifactService struct {
-	db  *sql.DB
-	now func() time.Time
+	db    *sql.DB
+	tasks *TaskService
+	now   func() time.Time
 }
 
-func NewWorkflowArtifactService(db *sql.DB) *WorkflowArtifactService {
-	return &WorkflowArtifactService{db: db, now: sqlitex.UTCNow}
+func NewWorkflowArtifactService(db *sql.DB, tasks *TaskService) *WorkflowArtifactService {
+	return &WorkflowArtifactService{db: db, tasks: tasks, now: sqlitex.UTCNow}
 }
 
 func (s *WorkflowArtifactService) Create(ctx context.Context, input CreateWorkflowArtifactInput) (WorkflowArtifact, bool, error) {
@@ -389,7 +390,7 @@ func (s *WorkflowArtifactService) MaterializeTaskSet(ctx context.Context, artifa
 		if err := requireImplementationFlowTx(ctx, tx, flowID); err != nil {
 			return MaterializeTaskSetResult{}, false, fmt.Errorf("task %q flow: %w", item.Key, err)
 		}
-		id, err := allocateTaskID(ctx, tx)
+		id, err := s.tasks.allocateTaskID(ctx, tx)
 		if err != nil {
 			return MaterializeTaskSetResult{}, false, err
 		}

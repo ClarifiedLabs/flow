@@ -185,7 +185,7 @@ cd /path/to/existing/repo
 git status
 flow init --repo .
 flow task create
-flow task schedule i-0001 up_next
+flow task schedule t-my-project-0001 up_next
 ```
 
 `flow init` does not seed role-skill files into the repository. Flow role
@@ -274,7 +274,7 @@ git:
   base_branch: main
   exchange:
     name: flow
-    url: file:///Users/me/.local/share/flow/projects/p-123/exchange.git
+    url: file:///Users/me/.local/share/flow/projects/p-my-project/exchange.git
     hooks: required
 ```
 
@@ -357,7 +357,7 @@ cleanup by hand. They do not require an active session. The tradeoff is that a
 running agent may need to fetch/rebase before its next push; non-fast-forward
 rejection prevents either side from silently overwriting the other.
 
-For local exchange remotes, a raw `git push flow task/i-0001` is accepted when
+For local exchange remotes, a raw `git push flow task/t-my-project-0001` is accepted when
 it is a fast-forward update. A future `flow git push` helper can make the
 principal explicit for nicer diagnostics, but it is not required for the MVP.
 
@@ -399,11 +399,13 @@ truth and workers do not create task files.
 
 Tasks are coordinator-owned database records. IDs are allocated in one SQLite
 transaction, so concurrent workers can create tasks without git conflicts or
-ID collisions.
+ID collisions. The task ID embeds its normalized project key, making it
+globally meaningful even though the numeric sequence remains project-local.
 
 Task fields:
 
-- `id`: stable coordinator-allocated ID, e.g. `i-0001`.
+- `id`: stable coordinator-allocated ID, e.g. `t-my-project-0001`; the owning
+  project is `p-my-project`.
 - `title`
 - `body`
 - `acceptance_criteria`
@@ -498,7 +500,7 @@ worker can still continue its scoped work, it should use `related_to` instead.
 ### Why Tasks Are Not Git Files
 
 Task creation is a concurrent database operation, not a git authoring
-operation. If tasks lived as `.flow/tasks/i-0007.md`, two workers could
+operation. If tasks lived as `.flow/tasks/t-my-project-0007.md`, two workers could
 allocate the same next ID locally and race to push conflicting files. The
 exchange remote could reject one push, but the losing worker would then need to
 renumber the task, rewrite references, and retry. UUID filenames would avoid
@@ -582,7 +584,7 @@ Phase execution model:
 
 IDs use stable prefixes:
 
-- Task: `i-0001`
+- Task: `t-my-project-0001`
 - Session: `s-<random>`
 - Change: `ch-<random>`
 - Job: `j-<random>`
@@ -595,7 +597,7 @@ IDs use stable prefixes:
 Feature branch names are the universal join key:
 
 ```text
-task/i-0001
+task/t-my-project-0001
 ```
 
 Task titles can change without changing branch names.
@@ -751,12 +753,12 @@ transition, providing a durable, auditable coordinate and the timeline view.
 
 1. Human creates an task with `flow task create [--flow <flow>]`.
 2. Task starts in `backlog`.
-3. Human schedules it with `flow task schedule i-0001 up_next`.
+3. Human schedules it with `flow task schedule t-my-project-0001 up_next`.
 4. Coordinator freezes the task's flow into its cursor (the selected flow, or
    the project default) and enqueues the first phase's author job if the task
    is accepted, no active or queued author job/session exists, and no
    unresolved blocker exists.
-5. Worker claims the job, creates/checks out `task/i-0001`, starts tmux, and
+5. Worker claims the job, creates/checks out `task/t-my-project-0001`, starts tmux, and
    runs the entrypoint built from the phase agent's harness and model
    selection.
 6. The session alternates between `working` and `waiting`.
@@ -1457,7 +1459,7 @@ feedback is manually re-entered as Flow tasks or threads.
 recovery and maintenance tool, not the normal durability model:
 
 1. Fetch from the Flow exchange remote.
-2. Scan `refs/heads/task/i-*` branches.
+2. Scan `refs/heads/task/t-<project-key>-*` branches.
 3. Verify each task branch maps to a known SQLite task.
 4. Create missing change rows for known branches when enough metadata exists.
 5. Parse `Resolves:` trailers and mark matching known threads as

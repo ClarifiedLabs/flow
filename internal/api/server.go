@@ -351,13 +351,14 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 	}
 
 	if strings.HasPrefix(r.URL.Path, "/v2/tasks/") {
-		// Task ids are only unique within a project; unscoped task routes
-		// work for principals with an implicit project (session tokens, or a
-		// coordinator with exactly one project). Everything else must use
-		// /v2/projects/{project}/tasks/...
-		ps, err := s.implicitProjectServer(principal)
+		taskID := pathResourceID(r.URL.Path, "/v2/tasks/")
+		ps, err := s.projectServerForTask(r.Context(), principal, taskID)
 		if err != nil {
-			writeProjectResolveError(w, err)
+			if errors.Is(err, errProjectForbidden) {
+				writeProjectResolveError(w, err)
+			} else {
+				writeError(w, http.StatusNotFound, "task_not_found", "task not found")
+			}
 			return
 		}
 		ps.handleTaskPath(w, r, principal)

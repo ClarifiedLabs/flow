@@ -90,13 +90,13 @@ func TestGitHTTPExchangeAuthAndHooks(t *testing.T) {
 	}
 	runGitHTTPTestGitWithEnv(t, repoPath, bearer, "ls-remote", exchangeURL, "refs/heads/main")
 
-	runGitHTTPTestGit(t, repoPath, "checkout", "-b", "task/i-0001")
+	runGitHTTPTestGit(t, repoPath, "checkout", "-b", "task/t-demo-0001")
 	if err := os.WriteFile(filepath.Join(repoPath, "task.txt"), []byte("task\n"), 0o644); err != nil {
 		t.Fatalf("write task file: %v", err)
 	}
 	runGitHTTPTestGit(t, repoPath, "add", "task.txt")
 	runGitHTTPTestGit(t, repoPath, "commit", "-m", "task work")
-	runGitHTTPTestGit(t, repoPath, "push", workerURL, "refs/heads/task/i-0001:refs/heads/task/i-0001")
+	runGitHTTPTestGit(t, repoPath, "push", workerURL, "refs/heads/task/t-demo-0001:refs/heads/task/t-demo-0001")
 
 	runGitHTTPTestGit(t, repoPath, "checkout", "main")
 	if err := os.WriteFile(filepath.Join(repoPath, "README.md"), []byte("forbidden\n"), 0o644); err != nil {

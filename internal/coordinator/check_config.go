@@ -136,7 +136,7 @@ func NewCheckConfigServiceWithOptions(database *sql.DB, checks *CheckService, wo
 	}
 	return &CheckConfigService{
 		db:          database,
-		tasks:       NewTaskService(database),
+		tasks:       NewTaskService(database, project.ID),
 		checks:      checks,
 		workers:     workers,
 		threads:     threads,

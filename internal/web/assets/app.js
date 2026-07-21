@@ -51,12 +51,18 @@ const ROUTES = [
   { match: (p) => p === "/ui/tasks/new", render: (app, ctx) => renderNewTaskView(app, ctx) },
   {
     match: (p) => {
+      const m = p.match(/^\/ui\/tasks\/([^/]+)$/);
+      return m && { task: decodeURIComponent(m[1]) };
+    },
+    render: (app, ctx, p) => app.renderTask(p.task, ctx),
+  },
+  {
+    match: (p) => {
       const m = p.match(/^\/ui\/projects\/([^/]+)\/tasks\/([^/]+)$/);
       return m && { project: decodeURIComponent(m[1]), task: decodeURIComponent(m[2]) };
     },
     render: (app, ctx, p) => app.renderTask(p.task, ctx, p.project),
   },
-  { match: (p) => p.startsWith("/ui/tasks/") && { unscopedTask: true }, render: (app) => renderUnscopedTaskRoute(app) },
   { match: (p) => p.startsWith("/ui/changes/") && { id: p.split("/").pop() }, render: (app, ctx, p) => app.renderChange(p.id, ctx) },
   { match: (p) => p === "/ui/console", render: (app, ctx) => app.renderConsole(ctx) },
   { match: (p) => { const id = terminalSessionIDForPath(p); return id && { id }; }, render: (app, ctx, p) => renderTerminalView(app, p.id, ctx) },
@@ -66,17 +72,6 @@ const ROUTES = [
   { match: (p) => p === "/ui/done", render: (app, ctx) => renderDoneView(app, ctx) },
   { match: () => true, render: (app, ctx) => renderBoardView(app, routeFilter(ctx.path), ctx) },
 ];
-
-function renderUnscopedTaskRoute(app) {
-  app.setTitle("Task");
-  app.querySelector(".content").innerHTML = `
-    <section class="detail">
-      <h2>Project-scoped task URL required</h2>
-      <p class="meta-quiet">Task IDs are scoped to projects. Use /ui/projects/&lt;project-id&gt;/tasks/&lt;task-id&gt;.</p>
-    </section>
-  `;
-  return true;
-}
 
 export class FlowApp extends HTMLElement {
   constructor() {

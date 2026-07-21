@@ -82,9 +82,9 @@ Per-project handlers are built around a `ProjectBundle` from
 tasks, workflow runs and artifacts, sessions, checks, review threads, flows,
 transcripts, attachments, merges, git events, worker queue, and workflow executor.
 
-Some routes, such as `/v2/tasks/<id>`, can be resolved implicitly only when the
-principal or server context identifies a single project. Project-qualified routes
-are the unambiguous form because task IDs restart per project.
+Task routes such as `/v2/tasks/t-flow-app-0001` resolve the owning project from
+the task ID itself. Project-qualified routes remain the collection, creation,
+and explicit authorization boundary for project-owned resources.
 
 The API is HTTP/JSON and carries a `Flow-Protocol-Version` header. Mutating
 endpoints use idempotency records where repeated client requests must be safe.
@@ -146,7 +146,7 @@ so normal job environments do not inherit the reusable join secret.
 Each project has a private bare exchange remote. Flow-managed refs include:
 
 - the protected base branch;
-- `refs/heads/task/i-..../run-N` run-specific task branches;
+- `refs/heads/task/t-<project-key>-<number>/run-N` run-specific task branches;
 - coordinator-owned tags and future internal `refs/flow/*` refs.
 
 Server-side `pre-receive` hooks enforce guardrails:

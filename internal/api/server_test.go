@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -512,7 +513,7 @@ WHERE token_hash = ?`, time.Now().UTC().Format(time.RFC3339Nano), coordinator.Ha
 	request = authorizedRequest(http.MethodPost, fixture.gitEventsPath(), gitEventsRequest{
 		OldSHA: "old",
 		NewSHA: "new",
-		Ref:    "refs/heads/task/i-0001",
+		Ref:    "refs/heads/task/t-api-0001",
 		Actor:  "hook",
 	})
 	request.Header.Set("Authorization", "Bearer hook-token")
@@ -654,7 +655,7 @@ func loginWebUI(t *testing.T, fixture testFixture) (*http.Cookie, *http.Cookie) 
 func TestWebUIRoutesAndAssets(t *testing.T) {
 	fixture := newTestFixture(t)
 
-	for _, path := range []string{"/ui/", "/ui/board", "/ui/merge", "/ui/projects/" + fixture.Project.ID + "/tasks/i-0001", "/ui/changes/ch-0001", "/ui/sessions/s-0001/terminal", "/ui/workers", "/ui/jobs"} {
+	for _, path := range []string{"/ui/", "/ui/board", "/ui/merge", "/ui/projects/" + fixture.Project.ID + "/tasks/t-api-0001", "/ui/changes/ch-0001", "/ui/sessions/s-0001/terminal", "/ui/workers", "/ui/jobs"} {
 		response := httptest.NewRecorder()
 		fixture.Server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		if response.Code != http.StatusOK {
@@ -1152,7 +1153,7 @@ func TestHookTokenCanPostGitEvents(t *testing.T) {
 	event := gitEventsRequest{
 		OldSHA: "old",
 		NewSHA: "new",
-		Ref:    "refs/heads/task/i-0001",
+		Ref:    "refs/heads/task/t-api-0001",
 		Actor:  "owner",
 	}
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, fixture.gitEventsPath(), event, http.StatusForbidden, nil)
@@ -1168,7 +1169,7 @@ func TestHookTokenCanPostGitEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list git events: %v", err)
 	}
-	if len(events) != 1 || events[0].Ref != "refs/heads/task/i-0001" || events[0].Source != coordinator.GitEventSourceAPI {
+	if len(events) != 1 || events[0].Ref != "refs/heads/task/t-api-0001" || events[0].Source != coordinator.GitEventSourceAPI {
 		t.Fatalf("events = %+v", events)
 	}
 }
@@ -1180,7 +1181,7 @@ func TestDrainGitEventSpoolRecoversMissedPostReceive(t *testing.T) {
 
 	if err := flowgit.HandlePostReceive(context.Background(), flowgit.HookOptions{
 		ExchangeRepoPath: exchangePath,
-		Stdin:            bytes.NewBufferString("old new refs/heads/task/i-0001\n"),
+		Stdin:            bytes.NewBufferString("old new refs/heads/task/t-api-0001\n"),
 	}); err != nil {
 		t.Fatalf("post receive spool: %v", err)
 	}
@@ -1217,7 +1218,7 @@ func TestGitEventsDeduplicateDirectPostAndSpoolDrain(t *testing.T) {
 	event := gitEventsRequest{
 		OldSHA: "old",
 		NewSHA: "new",
-		Ref:    "refs/heads/task/i-0001",
+		Ref:    "refs/heads/task/t-api-0001",
 		Actor:  "owner",
 	}
 	var postResponse gitEventsResponse
@@ -1229,7 +1230,7 @@ func TestGitEventsDeduplicateDirectPostAndSpoolDrain(t *testing.T) {
 	t.Setenv("FLOW_GIT_PRINCIPAL", "owner")
 	if err := flowgit.HandlePostReceive(context.Background(), flowgit.HookOptions{
 		ExchangeRepoPath: exchangePath,
-		Stdin:            bytes.NewBufferString("old new refs/heads/task/i-0001\n"),
+		Stdin:            bytes.NewBufferString("old new refs/heads/task/t-api-0001\n"),
 	}); err != nil {
 		t.Fatalf("post receive spool: %v", err)
 	}
@@ -1689,6 +1690,17 @@ func TestConsoleTokenIsProjectConfined(t *testing.T) {
 	doJSONRequestAs(t, server, "console-token", http.MethodGet, "/v2/projects/"+projectA.ID, nil, http.StatusOK, nil)
 	doJSONRequestAs(t, server, "console-token", http.MethodGet, "/v2/projects/"+projectB.ID, nil, http.StatusForbidden, nil)
 	doJSONRequestAs(t, server, "console-token", http.MethodGet, "/v2/projects/"+projectB.ID+"/board", nil, http.StatusForbidden, nil)
+
+	taskA, err := bundles[0].Tasks.CreateTask(context.Background(), coordinator.CreateTaskInput{Title: "Alpha task"})
+	if err != nil {
+		t.Fatalf("create alpha task: %v", err)
+	}
+	taskB, err := bundles[1].Tasks.CreateTask(context.Background(), coordinator.CreateTaskInput{Title: "Beta task"})
+	if err != nil {
+		t.Fatalf("create beta task: %v", err)
+	}
+	doJSONRequestAs(t, server, "console-token", http.MethodGet, "/v2/tasks/"+taskA.ID, nil, http.StatusOK, nil)
+	doJSONRequestAs(t, server, "console-token", http.MethodGet, "/v2/tasks/"+taskB.ID, nil, http.StatusForbidden, nil)
 }
 
 func TestDiagnosticsDistinguishExpiredUnreleasedLeases(t *testing.T) {
@@ -2746,7 +2758,7 @@ func createCheckConfigExchange(t *testing.T) (string, string) {
 	runAPIGit(t, repoPath, "add", "README.md")
 	runAPIGit(t, repoPath, "commit", "-m", "initial")
 	runAPIGit(t, "", "init", "--bare", exchangePath)
-	runAPIGit(t, repoPath, "checkout", "-b", "task/i-0001", "main")
+	runAPIGit(t, repoPath, "checkout", "-b", "task/t-api-0001", "main")
 	writeAPIFile(t, repoPath, ".flow/checks/unit.yaml", `
 name: unit
 kind: ci
@@ -2772,7 +2784,7 @@ requires: ["agent.harness.codex"]
 	runAPIGit(t, repoPath, "add", ".flow/checks")
 	runAPIGit(t, repoPath, "commit", "-m", "add checks")
 	headSHA := apiGitOutput(t, repoPath, "rev-parse", "HEAD")
-	runAPIGit(t, repoPath, "push", exchangePath, "task/i-0001:task/i-0001")
+	runAPIGit(t, repoPath, "push", exchangePath, "task/t-api-0001:task/t-api-0001")
 
 	return exchangePath, headSHA
 }
@@ -2790,7 +2802,7 @@ func createInvalidCheckConfigExchange(t *testing.T) (string, string) {
 	runAPIGit(t, repoPath, "add", "README.md")
 	runAPIGit(t, repoPath, "commit", "-m", "initial")
 	runAPIGit(t, "", "init", "--bare", exchangePath)
-	runAPIGit(t, repoPath, "checkout", "-b", "task/i-0001", "main")
+	runAPIGit(t, repoPath, "checkout", "-b", "task/t-api-0001", "main")
 	writeAPIFile(t, repoPath, ".flow/checks/bad.yaml", `
 name: bad
 kind: ci
@@ -2798,7 +2810,7 @@ kind: ci
 	runAPIGit(t, repoPath, "add", ".flow/checks")
 	runAPIGit(t, repoPath, "commit", "-m", "add bad check")
 	headSHA := apiGitOutput(t, repoPath, "rev-parse", "HEAD")
-	runAPIGit(t, repoPath, "push", exchangePath, "task/i-0001:task/i-0001")
+	runAPIGit(t, repoPath, "push", exchangePath, "task/t-api-0001:task/t-api-0001")
 
 	return exchangePath, headSHA
 }
@@ -3588,6 +3600,31 @@ func TestListProjectsEndpoint(t *testing.T) {
 	}
 }
 
+func TestCreateProjectUsesNormalizedIDAndRejectsKeyCollision(t *testing.T) {
+	registry, _, _, _ := newTestRegistryInDir(t, t.TempDir())
+	ctx := context.Background()
+
+	project, err := registry.CreateProject(ctx, coordinator.Project{
+		Name: "Flow App", RepoPath: "/tmp/flow-app-a", BaseBranch: "main",
+	})
+	if err != nil {
+		t.Fatalf("create first project: %v", err)
+	}
+	if project.ID != "p-flow-app" || project.Name != "Flow App" {
+		t.Fatalf("project = %+v, want id p-flow-app and preserved display name", project)
+	}
+
+	_, err = registry.CreateProject(ctx, coordinator.Project{
+		Name: "flow_app", RepoPath: "/tmp/flow-app-b", BaseBranch: "main",
+	})
+	if !errors.Is(err, coordinator.ErrProjectIDExists) {
+		t.Fatalf("normalized key collision err = %v, want ErrProjectIDExists", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "choose a distinct --name") {
+		t.Fatalf("collision err = %v, want actionable --name guidance", err)
+	}
+}
+
 func TestAggregateBoardMergesProjects(t *testing.T) {
 	server, bundles := newMultiProjectServer(t, "alpha", "beta")
 	ctx := context.Background()
@@ -3597,8 +3634,9 @@ func TestAggregateBoardMergesProjects(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create task in %s: %v", bundle.Project.Name, err)
 		}
-		if task.ID != "i-0001" {
-			t.Fatalf("first task id in %s = %q, want i-0001", bundle.Project.Name, task.ID)
+		wantID := "t-" + bundle.Project.Name + "-0001"
+		if task.ID != wantID {
+			t.Fatalf("first task id in %s = %q, want %s", bundle.Project.Name, task.ID, wantID)
 		}
 	}
 
@@ -3614,8 +3652,9 @@ func TestAggregateBoardMergesProjects(t *testing.T) {
 			t.Fatalf("duplicate project id %s in aggregate board", board.ProjectID)
 		}
 		seenProjects[board.ProjectID] = true
-		if len(board.Board.Unscheduled) != 1 || board.Board.Unscheduled[0].ID != "i-0001" {
-			t.Fatalf("board for %s unscheduled = %+v, want [i-0001]", board.ProjectName, board.Board.Unscheduled)
+		wantID := "t-" + board.ProjectName + "-0001"
+		if len(board.Board.Unscheduled) != 1 || board.Board.Unscheduled[0].ID != wantID {
+			t.Fatalf("board for %s unscheduled = %+v, want [%s]", board.ProjectName, board.Board.Unscheduled, wantID)
 		}
 	}
 	for _, bundle := range bundles {
@@ -3633,40 +3672,33 @@ func TestProjectScopedTaskRouteIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create task in alpha: %v", err)
 	}
-	if task.ID != "i-0001" {
-		t.Fatalf("task id = %q, want i-0001", task.ID)
+	if task.ID != "t-alpha-0001" {
+		t.Fatalf("task id = %q, want t-alpha-0001", task.ID)
 	}
 
 	doJSONRequestAs(t, server, "owner-token", http.MethodGet,
-		"/v2/projects/"+projectB.Project.ID+"/tasks/i-0001", nil, http.StatusNotFound, nil)
+		"/v2/projects/"+projectB.Project.ID+"/tasks/t-alpha-0001", nil, http.StatusNotFound, nil)
 
 	var found taskResponse
 	doJSONRequestAs(t, server, "owner-token", http.MethodGet,
-		"/v2/projects/"+projectA.Project.ID+"/tasks/i-0001", nil, http.StatusOK, &found)
-	if found.Task.ID != "i-0001" || found.Task.Title != "Only in alpha" {
+		"/v2/projects/"+projectA.Project.ID+"/tasks/t-alpha-0001", nil, http.StatusOK, &found)
+	if found.Task.ID != "t-alpha-0001" || found.Task.Title != "Only in alpha" {
 		t.Fatalf("alpha task = %+v", found.Task)
 	}
 }
 
-func TestUnscopedTaskRouteRejectedWithMultipleProjects(t *testing.T) {
+func TestUnscopedTaskRouteResolvesEmbeddedProjectWithMultipleProjects(t *testing.T) {
 	server, bundles := newMultiProjectServer(t, "alpha", "beta")
 
-	if _, err := bundles[0].Tasks.CreateTask(context.Background(), coordinator.CreateTaskInput{Title: "Ambiguous"}); err != nil {
+	created, err := bundles[0].Tasks.CreateTask(context.Background(), coordinator.CreateTaskInput{Title: "Globally addressable"})
+	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
 
-	response := httptest.NewRecorder()
-	request := authorizedRequest(http.MethodGet, "/v2/tasks/i-0001", nil)
-	server.ServeHTTP(response, request)
-	if response.Code < 400 || response.Code >= 500 {
-		t.Fatalf("unscoped task status = %d, want 4xx; body: %s", response.Code, response.Body.String())
-	}
-	var body errorResponse
-	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
-		t.Fatalf("decode error response: %v", err)
-	}
-	if !strings.Contains(body.Error.Message, "/v2/projects/") {
-		t.Fatalf("error message = %q, want guidance to use the project-scoped route", body.Error.Message)
+	var found taskResponse
+	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v2/tasks/"+created.ID, nil, http.StatusOK, &found)
+	if found.Task.ID != "t-alpha-0001" || found.Task.Title != "Globally addressable" {
+		t.Fatalf("unscoped task = %+v", found.Task)
 	}
 }
 

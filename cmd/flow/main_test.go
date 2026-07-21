@@ -161,7 +161,7 @@ func TestDoctorInitializesDatabase(t *testing.T) {
 func TestFetchPromptUsesWorkerRoleEnvironment(t *testing.T) {
 	clearFetchPromptEnvironment(t)
 	t.Setenv("FLOW_WORKER_ROLE", "reviewer")
-	t.Setenv("FLOW_TASK_ID", "i-0001")
+	t.Setenv("FLOW_TASK_ID", "t-demo-0001")
 	t.Setenv("FLOW_CHANGE_ID", "ch-1")
 	t.Setenv("FLOW_CHECK_NAME", "reviewer")
 
@@ -176,7 +176,7 @@ func TestFetchPromptUsesWorkerRoleEnvironment(t *testing.T) {
 	for _, want := range []string{
 		"Flow role instructions (flow-reviewer):",
 		"# Flow Reviewer",
-		"Task: i-0001",
+		"Task: t-demo-0001",
 		"Change: ch-1",
 		"Check: reviewer",
 		"Use flow comment",
@@ -235,7 +235,7 @@ func TestFetchPromptContinuesWhenTaskContextFetchFails(t *testing.T) {
 	serverURL := newFlowAPIServer(t)
 
 	t.Setenv("FLOW_WORKER_ROLE", "reviewer")
-	t.Setenv("FLOW_TASK_ID", "i-0001")
+	t.Setenv("FLOW_TASK_ID", "t-demo-0001")
 	t.Setenv("FLOW_CHANGE_ID", "ch-1")
 	t.Setenv("FLOW_CHECK_NAME", "reviewer")
 	t.Setenv("FLOW_COORDINATOR_URL", serverURL)
@@ -252,7 +252,7 @@ func TestFetchPromptContinuesWhenTaskContextFetchFails(t *testing.T) {
 	for _, want := range []string{
 		"Flow role instructions (flow-reviewer):",
 		"# Flow Reviewer",
-		"Task: i-0001",
+		"Task: t-demo-0001",
 		"Check: reviewer",
 	} {
 		if !strings.Contains(output, want) {
@@ -313,7 +313,7 @@ func TestInitDoesNotSeedRepositorySkills(t *testing.T) {
 func TestFetchPromptUsesEmbeddedAuthorInstructions(t *testing.T) {
 	clearFetchPromptEnvironment(t)
 	t.Setenv("FLOW_WORKER_ROLE", "author")
-	t.Setenv("FLOW_TASK_ID", "i-0002")
+	t.Setenv("FLOW_TASK_ID", "t-demo-0002")
 	t.Setenv("FLOW_WORKER_HARNESS", "")
 
 	var stdout bytes.Buffer
@@ -326,7 +326,7 @@ func TestFetchPromptUsesEmbeddedAuthorInstructions(t *testing.T) {
 	for _, want := range []string{
 		"Flow role instructions (flow-author):",
 		"# Flow Author",
-		"Task: i-0002",
+		"Task: t-demo-0002",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("fetch-prompt output missing %q:\n%s", want, stdout.String())
@@ -421,14 +421,14 @@ func TestTaskCommandsUseAPI(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("task create exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "i-0001\tunscheduled\t\tCLI task") {
+	if !strings.Contains(stdout.String(), "t-demo-0001\tunscheduled\t\tCLI task") {
 		t.Fatalf("create output = %q", stdout.String())
 	}
 	client, err := flowclient.New(config.ClientConfig{ServerURL: serverURL, Token: "owner-token"})
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	created, err := client.GetTask("i-0001")
+	created, err := client.GetTask("t-demo-0001")
 	if err != nil {
 		t.Fatalf("get created task: %v", err)
 	}
@@ -443,12 +443,12 @@ func TestTaskCommandsUseAPI(t *testing.T) {
 		"--server", serverURL,
 		"--token", "owner-token",
 		"--priority=4",
-		"i-0001",
+		"t-demo-0001",
 	}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("task edit flags exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	edited, err := client.GetTask("i-0001")
+	edited, err := client.GetTask("t-demo-0001")
 	if err != nil {
 		t.Fatalf("get edited task: %v", err)
 	}
@@ -458,21 +458,21 @@ func TestTaskCommandsUseAPI(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	exitCode = run([]string{"task", "schedule", "--server", serverURL, "--token", "owner-token", "i-0001"}, &stdout, &stderr)
+	exitCode = run([]string{"task", "schedule", "--server", serverURL, "--token", "owner-token", "t-demo-0001"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("task schedule exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "i-0001\tscheduled\timplement") {
+	if !strings.Contains(stdout.String(), "t-demo-0001\tscheduled\timplement") {
 		t.Fatalf("schedule output = %q", stdout.String())
 	}
 
 	stdout.Reset()
 	stderr.Reset()
-	exitCode = run([]string{"task", "show", "--server", serverURL, "--token", "owner-token", "i-0001"}, &stdout, &stderr)
+	exitCode = run([]string{"task", "show", "--server", serverURL, "--token", "owner-token", "t-demo-0001"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("task show exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "i-0001\tscheduled\t\tCLI task") {
+	if !strings.Contains(stdout.String(), "t-demo-0001\tscheduled\t\tCLI task") {
 		t.Fatalf("show output = %q", stdout.String())
 	}
 
@@ -482,7 +482,7 @@ func TestTaskCommandsUseAPI(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("board exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "scheduled:\n  i-0001\tscheduled\tCLI task") {
+	if !strings.Contains(stdout.String(), "scheduled:\n  t-demo-0001\tscheduled\tCLI task") {
 		t.Fatalf("board output = %q", stdout.String())
 	}
 }
@@ -514,7 +514,7 @@ func TestTaskCreateUsesDiscoveredClientConfigOwnerToken(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("task create exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "i-0001\tunscheduled\t\tDiscovered CLI task") {
+	if !strings.Contains(stdout.String(), "t-demo-0001\tunscheduled\t\tDiscovered CLI task") {
 		t.Fatalf("create output = %q", stdout.String())
 	}
 }
@@ -588,8 +588,8 @@ func TestTaskCreateUploadsInitialAttachment(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/v2/tasks":
 			sawCreate = true
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"task":{"ID":"i-0001","Title":"With file"}}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/v2/tasks/i-0001/attachments":
+			_, _ = w.Write([]byte(`{"task":{"ID":"t-demo-0001","Title":"With file"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/tasks/t-demo-0001/attachments":
 			sawAttachment = true
 			if err := r.ParseMultipartForm(1 << 20); err != nil {
 				t.Fatalf("parse multipart: %v", err)
@@ -613,7 +613,7 @@ func TestTaskCreateUploadsInitialAttachment(t *testing.T) {
 				t.Fatalf("uploaded content = %q", string(content))
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"attachment":{"id":"att-0001","task_id":"i-0001","stage":"initial","filename":"initial.txt","content_type":"text/plain; charset=utf-8","size_bytes":18}}`))
+			_, _ = w.Write([]byte(`{"attachment":{"id":"att-0001","task_id":"t-demo-0001","stage":"initial","filename":"initial.txt","content_type":"text/plain; charset=utf-8","size_bytes":18}}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}
@@ -645,8 +645,8 @@ func TestTaskAttachUsesInferredRoleAndLease(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v2/tasks/i-0001/attachments" {
-			t.Fatalf("request = %s %s, want POST /v2/tasks/i-0001/attachments", r.Method, r.URL.Path)
+		if r.Method != http.MethodPost || r.URL.Path != "/v2/projects/p-demo/tasks/t-demo-0001/attachments" {
+			t.Fatalf("request = %s %s, want POST /v2/projects/p-demo/tasks/t-demo-0001/attachments", r.Method, r.URL.Path)
 		}
 		if got := r.URL.Query().Get("lease_id"); got != "l-0001" {
 			t.Fatalf("lease_id = %q, want l-0001", got)
@@ -665,13 +665,13 @@ func TestTaskAttachUsesInferredRoleAndLease(t *testing.T) {
 			t.Fatalf("file header = %+v", header)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"attachment":{"id":"att-0002","task_id":"i-0001","stage":"reviewer","filename":"review.png","content_type":"image/png","size_bytes":3}}`))
+		_, _ = w.Write([]byte(`{"attachment":{"id":"att-0002","task_id":"t-demo-0001","stage":"reviewer","filename":"review.png","content_type":"image/png","size_bytes":3}}`))
 	}))
 	t.Cleanup(server.Close)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"task", "attach", "--server", server.URL, "--token", "owner-token", "--file", filePath, "i-0001"}, &stdout, &stderr)
+	exitCode := run([]string{"task", "attach", "--server", server.URL, "--token", "owner-token", "--file", filePath, "t-demo-0001"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("task attach exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
@@ -700,35 +700,35 @@ func TestPrintBoardAnnotatesSubStateAndBlocked(t *testing.T) {
 	result := coordinator.BoardResult{
 		Board: coordinator.Board{
 			Unscheduled: []coordinator.Task{
-				{ID: "i-0001", Title: "Unplanned"},
+				{ID: "t-demo-0001", Title: "Unplanned"},
 			},
 			Scheduled: []coordinator.Task{
-				{ID: "i-0002", State: &scheduled, Title: "Queued"},
+				{ID: "t-demo-0002", State: &scheduled, Title: "Queued"},
 			},
 			InProgress: []coordinator.Task{
-				{ID: "i-0003", State: &inProgress, Title: "Working"},
-				{ID: "i-0004", State: &inProgress, Title: "Needs input"},
+				{ID: "t-demo-0003", State: &inProgress, Title: "Working"},
+				{ID: "t-demo-0004", State: &inProgress, Title: "Needs input"},
 			},
 		},
 		LaneStates: map[string]coordinator.LaneState{
-			"i-0001": coordinator.LaneStateUnscheduled,
-			"i-0002": coordinator.LaneStateScheduled,
-			"i-0003": coordinator.LaneStateWorking,
-			"i-0004": coordinator.LaneStateBlocked,
+			"t-demo-0001": coordinator.LaneStateUnscheduled,
+			"t-demo-0002": coordinator.LaneStateScheduled,
+			"t-demo-0003": coordinator.LaneStateWorking,
+			"t-demo-0004": coordinator.LaneStateBlocked,
 		},
-		WaitReasons: map[string]coordinator.WaitReason{"i-0004": coordinator.WaitReasonQuestion},
+		WaitReasons: map[string]coordinator.WaitReason{"t-demo-0004": coordinator.WaitReasonQuestion},
 	}
 
 	var out bytes.Buffer
 	printBoard(&out, result)
 
 	want := "unscheduled:\n" +
-		"  i-0001\tunscheduled\tUnplanned\n" +
+		"  t-demo-0001\tunscheduled\tUnplanned\n" +
 		"scheduled:\n" +
-		"  i-0002\tscheduled\tQueued\n" +
+		"  t-demo-0002\tscheduled\tQueued\n" +
 		"in_progress:\n" +
-		"  i-0003\tin_progress\tWorking\t[working]\n" +
-		"  i-0004\tin_progress\tNeeds input\t[blocked]\t[question]\n"
+		"  t-demo-0003\tin_progress\tWorking\t[working]\n" +
+		"  t-demo-0004\tin_progress\tNeeds input\t[blocked]\t[question]\n"
 	if out.String() != want {
 		t.Fatalf("board output = %q, want %q", out.String(), want)
 	}
@@ -783,14 +783,14 @@ func TestTaskShowUsesSessionEnvironment(t *testing.T) {
 	// of looking up a project for the cwd.
 	t.Chdir(t.TempDir())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v2/tasks/i-0001" {
-			t.Fatalf("request = %s %s, want GET /v2/tasks/i-0001", r.Method, r.URL.Path)
+		if r.Method != http.MethodGet || r.URL.Path != "/v2/projects/p-demo/tasks/t-demo-0001" {
+			t.Fatalf("request = %s %s, want GET /v2/projects/p-demo/tasks/t-demo-0001", r.Method, r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != "Bearer session-token" {
 			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"task":{"ID":"i-0001","Title":"Session task","state":"in_progress"}}`))
+		_, _ = w.Write([]byte(`{"task":{"ID":"t-demo-0001","Title":"Session task","state":"in_progress"}}`))
 	}))
 	t.Cleanup(server.Close)
 	t.Setenv("FLOW_COORDINATOR_URL", server.URL)
@@ -798,11 +798,11 @@ func TestTaskShowUsesSessionEnvironment(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"task", "show", "i-0001"}, &stdout, &stderr)
+	exitCode := run([]string{"task", "show", "t-demo-0001"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "i-0001\tin_progress\t\tSession task") {
+	if !strings.Contains(stdout.String(), "t-demo-0001\tin_progress\t\tSession task") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 }
@@ -1017,11 +1017,11 @@ func TestSplitQualifiedRef(t *testing.T) {
 		wantProject string
 		wantID      string
 	}{
-		{"i-0001", "", "i-0001"},
-		{"myproj/i-0001", "myproj", "i-0001"},
+		{"t-demo-0001", "", "t-demo-0001"},
+		{"myproj/t-demo-0001", "myproj", "t-demo-0001"},
 		{"myproj/ch-abc123", "myproj", "ch-abc123"},
-		{"p-1234/i-0042", "p-1234", "i-0042"},
-		{"task/i-0001", "task", "i-0001"},
+		{"p-demo/t-demo-0042", "p-demo", "t-demo-0042"},
+		{"task/t-demo-0001", "task", "t-demo-0001"},
 		{"refs/heads/main", "", "refs/heads/main"},
 		{"ch-abc123", "", "ch-abc123"},
 	}

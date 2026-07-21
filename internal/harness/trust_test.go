@@ -109,7 +109,7 @@ func TestTrustPromptVisibleRejectsEmbeddedPromptText(t *testing.T) {
 		{"codex", mustLookup(t, Codex), codexTrustPane()},
 		{"claude", mustLookup(t, Claude), claudeTrustPane()},
 	} {
-		pane := "Flow role instructions (flow-author):\n\n# Flow Author\n\nTask: i-0005\n\n" +
+		pane := "Flow role instructions (flow-author):\n\n# Flow Author\n\nTask: t-test-0005\n\n" +
 			tc.pane + "\n\nacceptance_criteria:\n" + tc.name + " no longer gets stuck at the trust prompt\n"
 		if tc.def.TrustPromptVisible(pane) {
 			t.Fatalf("%s definition matched trust-prompt text embedded in task content", tc.name)

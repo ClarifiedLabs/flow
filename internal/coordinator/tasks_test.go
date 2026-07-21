@@ -27,8 +27,8 @@ func TestCreateTaskAllocatesIDAndPersistsAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
-	if task.ID != "i-0001" {
-		t.Fatalf("task.ID = %q, want i-0001", task.ID)
+	if task.ID != "t-test-0001" {
+		t.Fatalf("task.ID = %q, want t-test-0001", task.ID)
 	}
 	if task.State != nil {
 		t.Fatalf("State = %v, want unscheduled", task.State)
@@ -46,7 +46,7 @@ func TestCreateTaskAllocatesIDAndPersistsAcrossRestart(t *testing.T) {
 	}
 	defer reopened.Close()
 
-	reopenedTask, err := NewTaskService(reopened.DB()).GetTask(ctx, task.ID)
+	reopenedTask, err := NewTaskService(reopened.DB(), "p-test").GetTask(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("get reopened task: %v", err)
 	}
@@ -101,7 +101,10 @@ func TestConcurrentTaskCreationAllocatesUniqueIDs(t *testing.T) {
 	}
 
 	for i := 1; i <= taskCount; i++ {
-		id := formatTaskID(int64(i))
+		id, err := formatTaskID("p-test", int64(i))
+		if err != nil {
+			t.Fatalf("format allocated task id: %v", err)
+		}
 		if !seen[id] {
 			t.Fatalf("missing allocated task id %s", id)
 		}
@@ -318,7 +321,7 @@ func newTaskService(t *testing.T, dbPath string) (*flowdb.Store, *TaskService) {
 		_ = store.Close()
 	})
 
-	return store, NewTaskService(store.DB())
+	return store, NewTaskService(store.DB(), "p-test")
 }
 
 func insertChangeForTest(t *testing.T, database *sql.DB, taskID string, changeID string, branch string, merged bool) {

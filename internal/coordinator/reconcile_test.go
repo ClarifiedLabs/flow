@@ -26,7 +26,7 @@ func TestReconcileRestoresChangeProjectionWithoutReadingHandoffRef(t *testing.T)
 	fixture := newProjectFixture(t)
 	repoPath := fixture.repoPath
 	store := fixture.store
-	tasks := NewTaskService(store.DB())
+	tasks := NewTaskService(store.DB(), "p-test")
 	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Reconciled task"})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
@@ -120,7 +120,7 @@ func TestReconcileIsolatesPoisonedProjectAndScansOthers(t *testing.T) {
 		ExchangePath: poisonPath,
 	}
 
-	tasks := NewTaskService(store.DB())
+	tasks := NewTaskService(store.DB(), "p-test")
 	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Reconciled task"})
 	if err != nil {
 		t.Fatalf("create task: %v", err)

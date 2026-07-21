@@ -75,7 +75,7 @@ func TestMaterializeImagesDownloadsEveryImageForAnyHarness(t *testing.T) {
 			},
 		}
 		worktree := t.TempDir()
-		if err := materializeImages(ctx, downloader, "i-0001", payload, worktree); err != nil {
+		if err := materializeImages(ctx, downloader, "t-test-0001", payload, worktree); err != nil {
 			t.Fatalf("harness %s: materialize: %v", harness, err)
 		}
 		// Every harness materializes the files.
@@ -132,7 +132,7 @@ exit "$code"`
 			{ID: "att-0002", Filename: "anim.gif"},
 		}
 		worktree := t.TempDir()
-		if err := materializeImages(ctx, downloader, "i-0001", payload, worktree); err != nil {
+		if err := materializeImages(ctx, downloader, "t-test-0001", payload, worktree); err != nil {
 			t.Fatalf("materialize: %v", err)
 		}
 		got := payload.Entrypoint.Argv[0]
@@ -155,7 +155,7 @@ exit "$code"`
 			{ID: "att-0001", Filename: "shot.png"},
 		}
 		worktree := t.TempDir()
-		if err := materializeImages(ctx, downloader, "i-0001", payload, worktree); err != nil {
+		if err := materializeImages(ctx, downloader, "t-test-0001", payload, worktree); err != nil {
 			t.Fatalf("materialize: %v", err)
 		}
 		got := payload.Entrypoint.Argv[0]
@@ -184,7 +184,7 @@ func TestMaterializeImagesSkipOnErrorKeepsOtherImagesAndOriginalArgv(t *testing.
 		{ID: "att-0002", Filename: "missing.jpg"},
 	}
 	worktree := t.TempDir()
-	if err := materializeImages(ctx, downloader, "i-0001", payload, worktree); err != nil {
+	if err := materializeImages(ctx, downloader, "t-test-0001", payload, worktree); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
 	// Only the successful image is injected.
@@ -215,7 +215,7 @@ func TestMaterializeImagesNoopWhenNoAttachments(t *testing.T) {
 	downloader := newFakeImageDownloader()
 	payload := harnessAuthorPayload(`harness -i "$prompt"`)
 	worktree := t.TempDir()
-	if err := materializeImages(ctx, downloader, "i-0001", payload, worktree); err != nil {
+	if err := materializeImages(ctx, downloader, "t-test-0001", payload, worktree); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
 	if len(downloader.calls) != 0 {
@@ -271,12 +271,12 @@ func TestDownloadImageAttachmentUsesTaskIDAndWritesBytes(t *testing.T) {
 	if err := os.MkdirAll(destDir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	relPath, err := downloadImageAttachment(ctx, downloader, "i-0009", coordinator.TaskImageAttachment{ID: "att-0001", Filename: "shot.png"}, destDir, worktree)
+	relPath, err := downloadImageAttachment(ctx, downloader, "t-test-0009", coordinator.TaskImageAttachment{ID: "att-0001", Filename: "shot.png"}, destDir, worktree)
 	if err != nil {
 		t.Fatalf("download: %v", err)
 	}
-	if len(downloader.calls) != 1 || downloader.calls[0].TaskID != "i-0009" || downloader.calls[0].AttachmentID != "att-0001" {
-		t.Fatalf("downloader calls = %+v, want one call for i-0009/att-0001", downloader.calls)
+	if len(downloader.calls) != 1 || downloader.calls[0].TaskID != "t-test-0009" || downloader.calls[0].AttachmentID != "att-0001" {
+		t.Fatalf("downloader calls = %+v, want one call for t-test-0009/att-0001", downloader.calls)
 	}
 	absPath := filepath.Join(worktree, relPath)
 	got, err := os.ReadFile(absPath)

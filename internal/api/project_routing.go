@@ -60,6 +60,7 @@ func (s *Server) resolveProjectBundle(ctx context.Context, principal coordinator
 var (
 	errProjectNotFound  = errors.New("project not found")
 	errProjectForbidden = errors.New("project is not accessible with this token")
+	errTaskNotFound     = errors.New("task not found")
 )
 
 func writeProjectResolveError(w http.ResponseWriter, err error) {
@@ -125,13 +126,40 @@ func (s *Server) bundleForChange(ctx context.Context, principal coordinator.Prin
 // /v2/changes/{taskID}/checks subroute, whose leading path segment is an
 // task id (checks are keyed by task) rather than a change id.
 func (s *Server) bundleForChangeTask(ctx context.Context, principal coordinator.Principal, taskID string) (*projectServer, bool) {
-	for _, bundle := range s.scopedBundles(principal) {
-		if _, err := bundle.Tasks.GetTask(ctx, taskID); err == nil {
-			return s.forBundle(bundle), true
-		}
+	projectID, ok := coordinator.ProjectIDFromTaskID(taskID)
+	if !ok {
+		return nil, false
+	}
+	bundle, ok := s.registry.Bundle(projectID)
+	if !ok || (principal.IsProjectBound() && *principal.ProjectID != projectID) {
+		return nil, false
+	}
+	if _, err := bundle.Tasks.GetTask(ctx, taskID); err != nil {
+		return nil, false
 	}
 
-	return nil, false
+	return s.forBundle(bundle), true
+}
+
+// projectServerForTask resolves a globally descriptive task ID to its owning
+// project while preserving project-bound token confinement.
+func (s *Server) projectServerForTask(ctx context.Context, principal coordinator.Principal, taskID string) (*projectServer, error) {
+	projectID, ok := coordinator.ProjectIDFromTaskID(taskID)
+	if !ok {
+		return nil, errTaskNotFound
+	}
+	bundle, err := s.resolveProjectBundle(ctx, principal, projectID)
+	if err != nil {
+		if errors.Is(err, errProjectForbidden) {
+			return nil, err
+		}
+		return nil, errTaskNotFound
+	}
+	if _, err := bundle.Tasks.GetTask(ctx, taskID); err != nil {
+		return nil, errTaskNotFound
+	}
+
+	return s.forBundle(bundle), nil
 }
 
 func (s *Server) bundleForThread(ctx context.Context, principal coordinator.Principal, threadID string) (*projectServer, bool) {
@@ -370,8 +398,8 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, projectResponse{Project: uiProjectFromRegistry(project), Created: true})
 }
 
-// uiTaskWithProject decorates an task with its owning project for
-// aggregate responses; task ids alone are ambiguous across projects.
+// uiTaskWithProject decorates a task with project display metadata for
+// aggregate responses.
 type uiTaskWithProject struct {
 	coordinator.Task
 	ProjectID   string `json:"project_id"`

@@ -332,7 +332,7 @@ func newSessionServiceFixture(t *testing.T) sessionFixture {
 		t.Fatalf("insert project: %v", err)
 	}
 
-	tasks := NewTaskService(store.DB())
+	tasks := NewTaskService(store.DB(), testProjectID)
 	workers := flowworker.NewService(store.DB())
 	credentials := NewCredentialService(global.DB())
 	directory := flowworker.NewDirectory(global.DB())

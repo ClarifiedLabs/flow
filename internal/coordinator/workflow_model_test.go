@@ -16,7 +16,7 @@ func newWorkflowModelServices(t *testing.T) (*FlowService, *TaskService, *Workfl
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	flows := NewFlowService(store.DB())
-	tasks := NewTaskService(store.DB())
+	tasks := NewTaskService(store.DB(), "p-test")
 	return flows, tasks, NewWorkflowRunService(store.DB(), flows, tasks)
 }
 

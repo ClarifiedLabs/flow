@@ -521,7 +521,7 @@ test("task save submits patch payload and refreshes", async () => {
   const harness = await taskSaveHarness({ flowID: "fl-review" });
   await harness.submit();
 
-  assert.equal(harness.fetchCalls[0].path, "/ui/api/v2/tasks/i-0001");
+  assert.equal(harness.fetchCalls[0].path, "/ui/api/v2/tasks/t-alpha-0001");
   assert.equal(harness.fetchCalls[0].options.method, "PATCH");
   assert.equal(harness.fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body), {
@@ -564,7 +564,7 @@ test("task attachment form uploads stage file and refreshes", async () => {
   let submitHandler;
   const file = { name: "review.png" };
   const form = {
-    dataset: { task: "i-0001", project: "p-demo" },
+    dataset: { task: "t-alpha-0001", project: "p-alpha" },
     elements: {
       stage: { value: "reviewer" },
       file: { files: [file] },
@@ -608,7 +608,7 @@ test("task attachment form uploads stage file and refreshes", async () => {
 
   await submitHandler({ preventDefault() {} });
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-demo/tasks/i-0001/attachments");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/attachments");
   assert.deepEqual(fetchCalls[0].options.body.fields, [
     { name: "stage", value: "reviewer", filename: undefined },
     { name: "file", value: file, filename: "review.png" },
@@ -703,7 +703,7 @@ test("new task form submits queued create payload then navigates to created task
 
   await harness.submit();
 
-  assert.equal(harness.fetchCalls[0].path, "/ui/api/v2/projects/p-demo/tasks");
+  assert.equal(harness.fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks");
   assert.equal(harness.fetchCalls[0].options.method, "POST");
   assert.equal(harness.fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body), {
@@ -714,9 +714,9 @@ test("new task form submits queued create payload then navigates to created task
     flow_id: "fl-plan",
   });
   // Queueing schedules the created task with a second call.
-  assert.equal(harness.fetchCalls[1].path, "/ui/api/v2/projects/p-demo/tasks/i-0001/schedule");
+  assert.equal(harness.fetchCalls[1].path, "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/schedule");
   assert.equal(harness.fetchCalls[1].options.method, "POST");
-  assert.equal(harness.pushedPath(), "/ui/projects/p-demo/tasks/i-0001");
+  assert.equal(harness.pushedPath(), "/ui/tasks/t-alpha-0001");
   assert.equal(harness.loads(), 1);
   assert.equal(harness.refreshed(), false);
   assert.equal(harness.status.textContent, "");
@@ -728,8 +728,8 @@ test("new task form uploads selected initial attachments after create", async ()
 
   await harness.submit();
 
-  assert.equal(harness.fetchCalls[0].path, "/ui/api/v2/projects/p-demo/tasks");
-  assert.equal(harness.fetchCalls[1].path, "/ui/api/v2/projects/p-demo/tasks/i-0001/attachments");
+  assert.equal(harness.fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks");
+  assert.equal(harness.fetchCalls[1].path, "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/attachments");
   const body = harness.fetchCalls[1].options.body;
   assert.deepEqual(body.fields, [
     { name: "stage", value: "initial", filename: undefined },
@@ -743,7 +743,7 @@ test("new task form can save without queueing", async () => {
 
   await harness.submit();
 
-  assert.equal(harness.fetchCalls[0].path, "/ui/api/v2/projects/p-demo/tasks");
+  assert.equal(harness.fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks");
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body), {
     title: "Updated task",
     body: "New body",
@@ -753,7 +753,7 @@ test("new task form can save without queueing", async () => {
   });
   // Saving without queueing creates the task only; no schedule call follows.
   assert.equal(harness.fetchCalls.length, 1);
-  assert.equal(harness.pushedPath(), "/ui/projects/p-demo/tasks/i-0001");
+  assert.equal(harness.pushedPath(), "/ui/tasks/t-alpha-0001");
   assert.equal(harness.loads(), 1);
   assert.equal(harness.refreshed(), false);
   assert.equal(harness.status.textContent, "");
@@ -788,7 +788,7 @@ test("new task form surfaces create failures and missing created task id", async
 test("review run action posts to task review endpoint and refreshes", async () => {
   let clickHandler;
   const button = {
-    dataset: { reviewRun: "i-0001", project: "p-demo" },
+    dataset: { reviewRun: "t-alpha-0001", project: "p-alpha" },
     addEventListener(event, handler) {
       if (event === "click") clickHandler = handler;
     },
@@ -814,7 +814,7 @@ test("review run action posts to task review endpoint and refreshes", async () =
 
   await clickHandler();
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-demo/tasks/i-0001/review/run");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/review/run");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
@@ -827,7 +827,7 @@ test("triage edit action patches task title and refreshes", async () => {
 
   await harness.click();
 
-  assert.equal(harness.fetchCalls[0].path, "/ui/api/v2/tasks/i-0001");
+  assert.equal(harness.fetchCalls[0].path, "/ui/api/v2/tasks/t-alpha-0001");
   assert.equal(harness.fetchCalls[0].options.method, "PATCH");
   assert.equal(harness.fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body), { title: "New triage title" });
@@ -918,14 +918,14 @@ test("change detail fetches read model and renders checks and threads", async ()
         json: () => Promise.resolve({
           change: {
             id: "ch-0001",
-            task_id: "i-0001",
-            branch: "task/i-0001",
+            task_id: "t-alpha-0001",
+            branch: "task/t-alpha-0001",
             base: "main",
             head_sha: "1234567890abcdef",
             updated_at: "2026-06-07T12:00:00Z",
             ready_at: "2026-06-07T12:01:00Z",
           },
-          task: { id: "i-0001", title: "Ship web UI" },
+          task: { id: "t-alpha-0001", title: "Ship web UI" },
           review_state: "approved",
           required_checks: { total: 1, satisfied: 1 },
           checks: [{ name: "unit", kind: "ci", required: true, verdict: "satisfied", details: "ok" }],
@@ -1153,8 +1153,8 @@ test("change detail diff toggle re-renders cached diff in the new mode without r
       return Promise.resolve({
         ok: true,
         json: () => Promise.resolve({
-          change: { id: "ch-0001", task_id: "i-0001", branch: "task/i-0001", base: "main", head_sha: "1234567890abcdef", updated_at: "2026-06-07T12:00:00Z" },
-          task: { id: "i-0001", title: "Ship web UI" },
+          change: { id: "ch-0001", task_id: "t-alpha-0001", branch: "task/t-alpha-0001", base: "main", head_sha: "1234567890abcdef", updated_at: "2026-06-07T12:00:00Z" },
+          task: { id: "t-alpha-0001", title: "Ship web UI" },
           review_state: "approved",
           required_checks: { total: 0, satisfied: 0 },
           checks: [],
@@ -1416,7 +1416,7 @@ test("thread reply action requires comment text", async () => {
 test("phase approve action posts to task phase endpoint and refreshes", async () => {
   let clickHandler;
   const button = {
-    dataset: { phaseApprove: "i-0001", project: "p-demo" },
+    dataset: { phaseApprove: "t-alpha-0001", project: "p-alpha" },
     addEventListener(event, handler) {
       if (event === "click") clickHandler = handler;
     },
@@ -1428,7 +1428,7 @@ test("phase approve action posts to task phase endpoint and refreshes", async ()
       fetchCalls.push({ path, options });
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ task: { id: "i-0001" }, flow: {} }),
+        json: () => Promise.resolve({ task: { id: "t-alpha-0001" }, flow: {} }),
       });
     },
   });
@@ -1442,7 +1442,7 @@ test("phase approve action posts to task phase endpoint and refreshes", async ()
 
   await clickHandler();
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-demo/tasks/i-0001/phase/approve");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/phase/approve");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
@@ -1453,7 +1453,7 @@ test("phase approve action posts to task phase endpoint and refreshes", async ()
 test("phase request-changes form posts feedback to task phase endpoint and refreshes", async () => {
   let submitHandler;
   const form = {
-    dataset: { phaseRequestChanges: "i-0001", project: "p-demo" },
+    dataset: { phaseRequestChanges: "t-alpha-0001", project: "p-alpha" },
     elements: {
       feedback: { value: "Please narrow the first step." },
     },
@@ -1468,7 +1468,7 @@ test("phase request-changes form posts feedback to task phase endpoint and refre
       fetchCalls.push({ path, options });
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ task: { id: "i-0001" }, flow: {} }),
+        json: () => Promise.resolve({ task: { id: "t-alpha-0001" }, flow: {} }),
       });
     },
   });
@@ -1482,7 +1482,7 @@ test("phase request-changes form posts feedback to task phase endpoint and refre
 
   await submitHandler({ preventDefault() {} });
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-demo/tasks/i-0001/phase/request-changes");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/phase/request-changes");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), { feedback: "Please narrow the first step." });
   assert.equal(refreshed, true);
@@ -1492,7 +1492,7 @@ test("phase request-changes form posts feedback to task phase endpoint and refre
 test("attention reply form posts message and status log id", async () => {
   let submitHandler;
   const form = {
-    dataset: { attentionReplyForm: "i-0001", statusLogId: "42", project: "p-demo" },
+    dataset: { attentionReplyForm: "t-alpha-0001", statusLogId: "42", project: "p-alpha" },
     elements: {
       message: { value: "Use the smaller scope." },
     },
@@ -1521,7 +1521,7 @@ test("attention reply form posts message and status log id", async () => {
 
   await submitHandler({ preventDefault() {} });
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-demo/tasks/i-0001/attention/reply");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/attention/reply");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {
@@ -1535,28 +1535,28 @@ test("attention reply form posts message and status log id", async () => {
 test("human review check renders approval action only while unsatisfied", async () => {
   const context = await scriptContext();
   const pendingHTML = context.renderCheck({
-    task_id: "i-0001",
+    task_id: "t-alpha-0001",
     name: "human-review",
     kind: "human",
     required: true,
     verdict: "pending",
   });
   const satisfiedHTML = context.renderCheck({
-    task_id: "i-0001",
+    task_id: "t-alpha-0001",
     name: "human-review",
     kind: "human",
     required: true,
     verdict: "satisfied",
   });
   const ciHTML = context.renderCheck({
-    task_id: "i-0001",
+    task_id: "t-alpha-0001",
     name: "unit",
     kind: "ci",
     required: true,
     verdict: "pending",
   });
 
-  assert.match(pendingHTML, /data-human-review-approve="i-0001"/);
+  assert.match(pendingHTML, /data-human-review-approve="t-alpha-0001"/);
   assert.match(pendingHTML, /data-check-name="human-review"/);
   assert.match(pendingHTML, />Approve<\/button>/);
   assert.doesNotMatch(satisfiedHTML, /data-human-review-approve/);
@@ -1567,7 +1567,7 @@ test("human review approval action reports satisfied check and refreshes", async
   let clickHandler;
   const button = {
     dataset: {
-      humanReviewApprove: "i-0001",
+      humanReviewApprove: "t-alpha-0001",
       checkName: "human-review",
     },
     addEventListener(event, handler) {
@@ -1598,7 +1598,7 @@ test("human review approval action reports satisfied check and refreshes", async
 
   await clickHandler();
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v2/tasks/i-0001/checks/human-review");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/tasks/t-alpha-0001/checks/human-review");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {
@@ -1729,7 +1729,7 @@ test("task detail renders owner metadata, relations, sessions, changes, and chec
     },
     history: { pushState() {} },
     window: {
-      location: { pathname: "/ui/projects/p-alpha/tasks/i-0001" },
+      location: { pathname: "/ui/projects/p-alpha/tasks/t-alpha-0001" },
       addEventListener() {},
       open() {
         throw new Error("window.open should not be used for task detail render");
@@ -1743,7 +1743,7 @@ test("task detail renders owner metadata, relations, sessions, changes, and chec
           project_id: "p-alpha",
           project_name: "alpha",
           task: {
-            id: "i-0001",
+            id: "t-alpha-0001",
             title: "Task detail",
             body: "Body",
             acceptance_criteria: "Done",
@@ -1751,22 +1751,22 @@ test("task detail renders owner metadata, relations, sessions, changes, and chec
             schedule_state: "up_next",
             triage_state: "accepted",
             created_by: "agent",
-            source_task_id: "i-0000",
+            source_task_id: "t-alpha-0000",
             source_change_id: "ch-0000",
             updated_at: "2026-06-07T12:00:00Z",
           },
           task_detail: {
             tags: [{ slug: "web-ui" }],
-            relations: [{ source_task_id: "i-0002", target_task_id: "i-0001", kind: "blocks" }],
-            active_session: { id: "s-0001", state: "waiting", worker_id: "w-local", branch: "task/i-0001" },
+            relations: [{ source_task_id: "t-alpha-0002", target_task_id: "t-alpha-0001", kind: "blocks" }],
+            active_session: { id: "s-0001", state: "waiting", worker_id: "w-local", branch: "task/t-alpha-0001" },
             terminal_available: true,
-            sessions: [{ id: "s-0001", state: "waiting", worker_id: "w-local", branch: "task/i-0001", terminal_available: true, transcript_available: true, updated_at: "2026-06-07T12:01:00Z" }],
-            changes: [{ id: "ch-0001", branch: "task/i-0001", head_sha: "abcdef1234567890", updated_at: "2026-06-07T12:02:00Z" }],
-            ready_change: { id: "ch-ready", branch: "task/i-0001", head_sha: "1234567890abcdef", ready_at: "2026-06-07T12:03:00Z" },
+            sessions: [{ id: "s-0001", state: "waiting", worker_id: "w-local", branch: "task/t-alpha-0001", terminal_available: true, transcript_available: true, updated_at: "2026-06-07T12:01:00Z" }],
+            changes: [{ id: "ch-0001", branch: "task/t-alpha-0001", head_sha: "abcdef1234567890", updated_at: "2026-06-07T12:02:00Z" }],
+            ready_change: { id: "ch-ready", branch: "task/t-alpha-0001", head_sha: "1234567890abcdef", ready_at: "2026-06-07T12:03:00Z" },
             review_state: "changes_requested",
             required_checks: { total: 1, blocked: 1 },
             checks: [{ name: "unit", kind: "ci", required: true, verdict: "blocked", details: "failed" }],
-            attachments: [{ id: "att-0001", task_id: "i-0001", stage: "reviewer", filename: "review.png", content_type: "image/png", size_bytes: 2048 }],
+            attachments: [{ id: "att-0001", task_id: "t-alpha-0001", stage: "reviewer", filename: "review.png", content_type: "image/png", size_bytes: 2048 }],
             transitions: [
               { seq: 2, from_phase: "up_next", event_kind: "ensure_author_job", to_phase: "authoring", actor: "owner:cli", created_at: "2026-06-07T12:04:00Z" },
             ],
@@ -1793,9 +1793,9 @@ test("task detail renders owner metadata, relations, sessions, changes, and chec
     return { textContent: "" };
   };
   flowApp.querySelectorAll = () => [];
-  await flowApp.renderTask("i-0001", undefined, "p-alpha");
+  await flowApp.renderTask("t-alpha-0001", undefined, "p-alpha");
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks/i-0001");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001");
   assert.match(content.innerHTML, /class="detail task-detail"/);
   assert.match(content.innerHTML, /class="task-detail-grid"/);
   assert.match(content.innerHTML, /class="task-detail-column task-detail-editor"/);
@@ -1814,13 +1814,13 @@ test("task detail renders owner metadata, relations, sessions, changes, and chec
   assert.match(content.innerHTML, /data-task-edit-toggle/);
   assert.match(content.innerHTML, /data-task-edit-form/);
   assert.match(content.innerHTML, /web-ui/);
-  assert.match(content.innerHTML, /href="\/ui\/projects\/p-alpha\/tasks\/i-0002"/);
+  assert.match(content.innerHTML, /href="\/ui\/tasks\/t-alpha-0002"/);
   assert.match(content.innerHTML, /data-terminal="s-0001"/);
   assert.equal(content.innerHTML.match(/data-terminal="s-0001"/g)?.length, 2);
   assert.match(content.innerHTML, /data-session-transcript="s-0001"/);
   // Lifecycle is driven by the workflow engine: the detail exposes a Schedule
   // control rather than the legacy manual state/pause controls.
-  assert.match(content.innerHTML, /data-workflow-schedule="i-0001"/);
+  assert.match(content.innerHTML, /data-workflow-schedule="t-alpha-0001"/);
   assert.doesNotMatch(content.innerHTML, /data-task-state-form=/);
   assert.doesNotMatch(content.innerHTML, /data-pause=/);
   assert.match(content.innerHTML, /ch-0001/);
@@ -1830,7 +1830,7 @@ test("task detail renders owner metadata, relations, sessions, changes, and chec
   assert.match(content.innerHTML, /unit/);
   assert.match(content.innerHTML, /review\.png/);
   assert.match(content.innerHTML, /class="attachment-preview"/);
-  assert.match(content.innerHTML, /\/ui\/api\/v2\/projects\/p-alpha\/tasks\/i-0001\/attachments\/att-0001\?download=1/);
+  assert.match(content.innerHTML, /\/ui\/api\/v2\/projects\/p-alpha\/tasks\/t-alpha-0001\/attachments\/att-0001\?download=1/);
   assert.match(content.innerHTML, /<span class="badge warn">changes requested<\/span>/);
   assert.match(content.innerHTML, /Source Task/);
   assert.match(content.innerHTML, /Activity/);
@@ -1838,11 +1838,11 @@ test("task detail renders owner metadata, relations, sessions, changes, and chec
 });
 
 test("task detail renders a human gate wait as a full-width approval panel", async () => {
-  const harness = await browserSmokeHarness("/ui/projects/p-alpha/tasks/i-0001", {
-    "/ui/api/v2/projects/p-alpha/tasks/i-0001": {
+  const harness = await browserSmokeHarness("/ui/projects/p-alpha/tasks/t-alpha-0001", {
+    "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001": {
       project_id: "p-alpha",
       task: {
-        id: "i-0001",
+        id: "t-alpha-0001",
         title: "Gated task",
         state: "in_progress",
         priority: 1,
@@ -1851,11 +1851,11 @@ test("task detail renders a human gate wait as a full-width approval panel", asy
       },
       task_detail: {},
     },
-    "/ui/api/v2/projects/p-alpha/tasks/i-0001/workflow": {
+    "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/workflow": {
       detail: {
         run: {
           id: "wr-1",
-          task_id: "i-0001",
+          task_id: "t-alpha-0001",
           current_node_key: "approve-plan",
           snapshot: {
             flow_id: "fl-plan",
@@ -1910,11 +1910,11 @@ test("attachment previews are limited to safe raster image types", async () => {
   assert.equal(context.isImageContentType("image/svg+xml"), false);
 });
 
-test("taskHref requires project context for task detail links", async () => {
+test("taskHref builds a globally resolvable task detail link", async () => {
   const context = await scriptContext();
 
-  assert.equal(context.taskHref("p-alpha", "i-0001"), "/ui/projects/p-alpha/tasks/i-0001");
-  assert.equal(context.taskHref("", "i-0001"), "#");
+  assert.equal(context.taskHref("p-alpha", "t-alpha-0001"), "/ui/tasks/t-alpha-0001");
+  assert.equal(context.taskHref("", "t-alpha-0001"), "/ui/tasks/t-alpha-0001");
 });
 
 test("renderLifecycleChart draws the canonical graph with counts and highlights", async () => {
@@ -2010,7 +2010,7 @@ test("diagnostics rows render queue, lease, tmux, session, and taints", async ()
     state: "running",
     role: "ci",
     capacity_bucket: "ephemeral",
-    task_id: "i-0001",
+    task_id: "t-alpha-0001",
     change_id: "ch-0001",
     updated_at: "2026-06-07T12:00:00Z",
   }, {
@@ -2032,7 +2032,7 @@ test("diagnostics rows render queue, lease, tmux, session, and taints", async ()
   assert.match(jobHTML, /data-terminal="s-0001"/);
   assert.match(jobHTML, /data-job-attach="j-0001"/);
   assert.match(jobHTML, /data-session-transcript="s-0001"/);
-  assert.match(jobHTML, /\/ui\/projects\/p-alpha\/tasks\/i-0001/);
+  assert.match(jobHTML, /\/ui\/tasks\/t-alpha-0001/);
   assert.match(jobHTML, /\/ui\/changes\/ch-0001/);
 
   const jobTranscriptHTML = context.renderJobRow({
@@ -2040,7 +2040,7 @@ test("diagnostics rows render queue, lease, tmux, session, and taints", async ()
     state: "finished",
     role: "reviewer",
     capacity_bucket: "ephemeral",
-    task_id: "i-0001",
+    task_id: "t-alpha-0001",
     updated_at: "2026-06-07T12:00:00Z",
   }, {
     lease: { id: "l-0004", worker_id: "w-local" },
@@ -2053,7 +2053,7 @@ test("diagnostics rows render queue, lease, tmux, session, and taints", async ()
     state: "running",
     role: "reviewer",
     capacity_bucket: "persistent_agent",
-    task_id: "i-0001",
+    task_id: "t-alpha-0001",
     updated_at: "2026-06-07T12:00:00Z",
   }, {
     lease: { id: "l-0003", worker_id: "w-local" },
@@ -2084,7 +2084,7 @@ test("board cards render tags and relationship indicators", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   const html = app.renderTaskCard({
-    id: "i-0001",
+    id: "t-alpha-0001",
     title: "Tagged task",
     schedule_state: "backlog",
     triage_state: "triage",
@@ -2113,7 +2113,7 @@ test("board cards suppress duplicate visible status labels", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   const task = {
-    id: "i-0001",
+    id: "t-alpha-0001",
     title: "Needs changes",
     schedule_state: "up_next",
     triage_state: "accepted",
@@ -2139,7 +2139,7 @@ test("board cards suppress duplicate visible labels from all badge sources", asy
   const context = await scriptContext();
   const app = new context.FlowApp();
   const html = app.renderTaskCard({
-    id: "i-0001",
+    id: "t-alpha-0001",
     title: "Badge sources",
     schedule_state: "up_next",
     triage_state: "accepted",
@@ -2176,7 +2176,7 @@ test("board cards render job terminal actions without active sessions", async ()
   const context = await scriptContext();
   const app = new context.FlowApp();
   const html = app.renderTaskCard({
-    id: "i-0001",
+    id: "t-alpha-0001",
     title: "Review running",
     schedule_state: "up_next",
     triage_state: "accepted",
@@ -2200,7 +2200,7 @@ test("board cards render session terminal icon actions in every running board st
 
   for (const state of states) {
     const html = app.renderTaskCard({
-      id: `i-${state}`,
+      id: `t-alpha-${state}`,
       title: `${state} task`,
       schedule_state: "up_next",
       triage_state: "accepted",
@@ -2220,7 +2220,7 @@ test("ready to merge cards link to their change and review state", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   const html = app.renderTaskCard({
-    id: "i-0001",
+    id: "t-alpha-0001",
     title: "Merge me",
     state: "in_progress",
     priority: 1,
@@ -2228,27 +2228,27 @@ test("ready to merge cards link to their change and review state", async () => {
   }, {
     change: {
       id: "ch-0001",
-      branch: "task/i-0001",
+      branch: "task/t-alpha-0001",
       head_sha: "abcdef1234567890",
     },
     review_state: "changes_requested",
   }, "approved", false);
 
   assert.match(html, /<a href="\/ui\/changes\/ch-0001" data-link>ch-0001<\/a>/);
-  assert.match(html, /task\/i-0001/);
+  assert.match(html, /task\/t-alpha-0001/);
   assert.match(html, /<span class="badge warn">changes requested<\/span>/);
   // Merging happens on the change page; the card only exposes workflow controls.
   assert.doesNotMatch(html, /data-merge=/);
   assert.doesNotMatch(html, /head abcdef123456/);
-  assert.match(html, /data-workflow-reset="i-0001"/);
-  assert.match(html, /data-workflow-done="i-0001"/);
+  assert.match(html, /data-workflow-reset="t-alpha-0001"/);
+  assert.match(html, /data-workflow-done="t-alpha-0001"/);
 });
 
 test("cards carry phase identity as data-phase and a phase badge", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   const task = {
-    id: "i-0001",
+    id: "t-alpha-0001",
     title: "Phase identity",
     state: "in_progress",
     priority: 1,
@@ -2270,7 +2270,7 @@ test("blocked cards render the blocked overlay phase and badge", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   const task = {
-    id: "i-0001",
+    id: "t-alpha-0001",
     title: "Blocked work",
     schedule_state: "up_next",
     triage_state: "accepted",
@@ -2308,7 +2308,7 @@ test("lifecycle transitions render phase badges around an arrow", async () => {
 test("unified timeline merges sessions, transitions, and status by time with a show-more cap", async () => {
   const context = await scriptContext();
   const sessions = [
-    { id: "s-1", state: "working", worker_id: "w-local", branch: "task/i-0001", terminal_available: true, transcript_available: true, updated_at: "2026-06-07T12:05:00Z" },
+    { id: "s-1", state: "working", worker_id: "w-local", branch: "task/t-alpha-0001", terminal_available: true, transcript_available: true, updated_at: "2026-06-07T12:05:00Z" },
   ];
   const transitions = [
     { seq: 1, event_kind: "session_ready", session_id: "s-1", head_sha: "abcdef1234567890", change_id: "ch-1", created_at: "2026-06-07T12:03:00Z" },
@@ -2439,7 +2439,7 @@ test("status entries render a kind badge", async () => {
 test("feedback cards surface a non-note status kind badge", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const task = { id: "i-0001", title: "Blocked task", schedule_state: "up_next", triage_state: "accepted" };
+  const task = { id: "t-alpha-0001", title: "Blocked task", schedule_state: "up_next", triage_state: "accepted" };
   const blockerCard = {
     active_session: { id: "s-0001", state: "waiting" },
     latest_status: { message: "stuck on auth", kind: "blocker" },
@@ -2488,7 +2488,7 @@ test("statusbar reflects poll state and interval", async () => {
   app.schedulePolling("/ui/jobs");
   assert.equal(meta.textContent, "poll 30s");
 
-  app.schedulePolling("/ui/projects/p-alpha/tasks/i-0001");
+  app.schedulePolling("/ui/projects/p-alpha/tasks/t-alpha-0001");
   assert.equal(meta.textContent, "");
 });
 
@@ -2657,13 +2657,13 @@ test("board lanes carry data-lane attributes for the lane accent system", async 
         project_name: "alpha",
         board: {
           Unscheduled: [{
-            id: "i-0001",
+            id: "t-alpha-0001",
             title: "Unscheduled task",
             state: "unscheduled",
             priority: 1,
           }],
         },
-        lane_states: { "i-0001": "unscheduled" },
+        lane_states: { "t-alpha-0001": "unscheduled" },
         task_cards: {},
       }],
     },
@@ -2702,15 +2702,28 @@ test("non-polling routes report static instead of live", async () => {
   assert.deepEqual(harness.fetchCalls, ["/ui/api/v2/projects"]);
 });
 
-test("unscoped task detail route requires a project-scoped URL", async () => {
-  const harness = await browserSmokeHarness("/ui/tasks/i-0001", {});
+test("canonical task detail route resolves the embedded project", async () => {
+  const harness = await browserSmokeHarness("/ui/tasks/t-alpha-0001", {
+    "/ui/api/v2/tasks/t-alpha-0001": {
+      project_id: "p-alpha",
+      project_name: "alpha",
+      task: { id: "t-alpha-0001", title: "Direct task", priority: 0, updated_at: "2026-07-21T12:00:00Z" },
+      task_detail: {},
+    },
+    "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/workflow": { detail: null },
+    "/ui/api/v2/projects/p-alpha/flows": { flows: [], default_flow_id: "" },
+  });
 
   await harness.app.load();
 
-  assert.equal(harness.title.textContent, "Task");
-  assert.match(harness.content.innerHTML, /Project-scoped task URL required/);
-  assert.match(harness.content.innerHTML, /\/ui\/projects\/&lt;project-id&gt;\/tasks\/&lt;task-id&gt;/);
-  assert.deepEqual(harness.fetchCalls, ["/ui/api/v2/projects"]);
+  assert.equal(harness.title.textContent, "Task · alpha");
+  assert.match(harness.content.innerHTML, /t-alpha-0001 · Direct task/);
+  assert.deepEqual(harness.fetchCalls, [
+    "/ui/api/v2/projects",
+    "/ui/api/v2/tasks/t-alpha-0001",
+    "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/workflow",
+    "/ui/api/v2/projects/p-alpha/flows",
+  ]);
 });
 
 test("load failures surface error then retry state in the statusbar", async () => {
@@ -2732,14 +2745,14 @@ test("feedback cards render handoff summaries", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   const task = {
-    id: "i-0001",
+    id: "t-alpha-0001",
     title: "Needs feedback",
     schedule_state: "up_next",
     triage_state: "accepted",
     priority: 1,
   };
   const card = {
-    active_session: { id: "s-0001", state: "waiting", branch: "task/i-0001" },
+    active_session: { id: "s-0001", state: "waiting", branch: "task/t-alpha-0001" },
     terminal_available: true,
     latest_status: { message: "Waiting on product decision" },
     handoff: {
@@ -2766,47 +2779,47 @@ test("browser smoke loads board and done preview", async () => {
           project_name: "alpha",
           board: {
             Unscheduled: [{
-              id: "i-0001",
+              id: "t-alpha-0001",
               title: "Unscheduled task",
               state: "unscheduled",
               priority: 1,
             }, {
-              id: "i-0002",
+              id: "t-alpha-0002",
               title: "Discovered task",
               state: "unscheduled",
               priority: 2,
               created_by: "agent",
             }],
             InProgress: [{
-              id: "i-0003",
+              id: "t-alpha-0003",
               title: "Waiting task",
               state: "in_progress",
               priority: 1,
             }, {
-              id: "i-0004",
+              id: "t-alpha-0004",
               title: "Merge task",
               state: "in_progress",
               priority: 1,
             }],
           },
           lane_states: {
-            "i-0001": "unscheduled",
-            "i-0002": "unscheduled",
-            "i-0003": "in_progress",
-            "i-0004": "in_progress",
+            "t-alpha-0001": "unscheduled",
+            "t-alpha-0002": "unscheduled",
+            "t-alpha-0003": "in_progress",
+            "t-alpha-0004": "in_progress",
           },
           wait_reasons: {
-            "i-0003": "question",
+            "t-alpha-0003": "question",
           },
           task_cards: {
-            "i-0001": { tags: [{ slug: "planned" }] },
-            "i-0002": { tags: [{ slug: "agent" }] },
-            "i-0003": {
+            "t-alpha-0001": { tags: [{ slug: "planned" }] },
+            "t-alpha-0002": { tags: [{ slug: "agent" }] },
+            "t-alpha-0003": {
               active_session: { id: "s-0003", state: "waiting" },
               latest_status: { message: "Need a decision", kind: "question" },
             },
-            "i-0004": {
-              change: { id: "ch-0004", branch: "task/i-0004", head_sha: "abcdef1234567890" },
+            "t-alpha-0004": {
+              change: { id: "ch-0004", branch: "task/t-alpha-0004", head_sha: "abcdef1234567890" },
               review_state: "approved",
             },
           },
@@ -2829,11 +2842,11 @@ test("browser smoke loads board and done preview", async () => {
 });
 
 test("browser smoke loads task and change deep links", async () => {
-  const taskHarness = await browserSmokeHarness("/ui/projects/p-alpha/tasks/i-0001", {
-    "/ui/api/v2/projects/p-alpha/tasks/i-0001": {
+  const taskHarness = await browserSmokeHarness("/ui/projects/p-alpha/tasks/t-alpha-0001", {
+    "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001": {
       project_id: "p-alpha",
       task: {
-        id: "i-0001",
+        id: "t-alpha-0001",
         title: "Task detail",
         body: "Task body",
         acceptance_criteria: "Done",
@@ -2853,7 +2866,7 @@ test("browser smoke loads task and change deep links", async () => {
       },
       status_log: [{ message: "Ready for review", created_at: "2026-06-07T12:01:00Z" }],
     },
-    "/ui/api/v2/projects/p-alpha/tasks/i-0001/workflow": { detail: null },
+    "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/workflow": { detail: null },
   });
 
   await taskHarness.app.load();
@@ -2861,18 +2874,18 @@ test("browser smoke loads task and change deep links", async () => {
   assert.equal(taskHarness.title.textContent, "Task");
   assert.match(taskHarness.content.innerHTML, /Task detail/);
   assert.match(taskHarness.content.innerHTML, /web-ui/);
-  assert.deepEqual(taskHarness.fetchCalls, ["/ui/api/v2/projects", "/ui/api/v2/projects/p-alpha/tasks/i-0001", "/ui/api/v2/projects/p-alpha/tasks/i-0001/workflow", "/ui/api/v2/projects/p-alpha/flows"]);
+  assert.deepEqual(taskHarness.fetchCalls, ["/ui/api/v2/projects", "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001", "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/workflow", "/ui/api/v2/projects/p-alpha/flows"]);
 
   const changeHarness = await browserSmokeHarness("/ui/changes/ch-0001", {
     "/ui/api/v2/changes/ch-0001": {
       change: {
         id: "ch-0001",
-        branch: "task/i-0001",
+        branch: "task/t-alpha-0001",
         base: "main",
         head_sha: "abcdef1234567890",
         updated_at: "2026-06-07T12:00:00Z",
       },
-      task: { id: "i-0001", title: "Change detail" },
+      task: { id: "t-alpha-0001", title: "Change detail" },
       checks: [{ name: "unit", kind: "ci", required: true, verdict: "satisfied" }],
       required_checks: { total: 1, satisfied: 1 },
       review_state: "approved",
@@ -2934,7 +2947,7 @@ test("polling policy matches board, diagnostics, and change routes", async () =>
     maxInterval: 120000,
     backoff: true,
   });
-  assert.equal(context.pollConfigForPath("/ui/projects/p-alpha/tasks/i-0001"), null);
+  assert.equal(context.pollConfigForPath("/ui/projects/p-alpha/tasks/t-alpha-0001"), null);
 });
 
 test("diagnostics polling backs off and clears prior timer", async () => {
@@ -3064,10 +3077,10 @@ test("stale poll load does not repaint task route or rearm board polling", async
   };
 
   const loadPromise = app.load({ fromPoll: true });
-  context.window.location.pathname = "/ui/projects/p-alpha/tasks/i-0001";
+  context.window.location.pathname = "/ui/projects/p-alpha/tasks/t-alpha-0001";
   boardResponse.resolve({
     ok: true,
-    json: () => Promise.resolve({ board: { backlog: [{ id: "i-0002", title: "Board task" }] } }),
+    json: () => Promise.resolve({ board: { backlog: [{ id: "t-alpha-0002", title: "Board task" }] } }),
   });
   await loadPromise;
 
@@ -3178,9 +3191,9 @@ test("pre-disconnect load stays stale after reconnect-style load", async () => {
 async function taskSaveHarness(options = {}) {
   let submitHandler;
   const mode = options.mode || "edit";
-  const projectID = options.projectID ?? (mode === "create" ? "p-demo" : "");
+  const projectID = options.projectID ?? (mode === "create" ? "p-alpha" : "");
   const form = {
-    dataset: { taskForm: mode === "create" ? "" : "i-0001", taskFormMode: mode },
+    dataset: { taskForm: mode === "create" ? "" : "t-alpha-0001", taskFormMode: mode },
     elements: {
       title: { value: options.title ?? "Updated task" },
       body: { value: "New body" },
@@ -3244,7 +3257,7 @@ async function taskSaveHarness(options = {}) {
         ok: options.fetchOK !== false,
         json: () => Promise.resolve(options.fetchOK === false
           ? { error: { message: options.errorMessage || "request failed" } }
-          : { task: options.responseTask || { id: "i-0001" } }),
+          : { task: options.responseTask || { id: "t-alpha-0001" } }),
       });
     },
     FormData: class {
@@ -3322,7 +3335,7 @@ async function createTaskHarness() {
 async function triageEditHarness(options = {}) {
   let clickHandler;
   const button = {
-    dataset: { taskEdit: "i-0001", taskTitle: "Old title" },
+    dataset: { taskEdit: "t-alpha-0001", taskTitle: "Old title" },
     addEventListener(event, handler) {
       if (event === "click") clickHandler = handler;
     },
@@ -3342,7 +3355,7 @@ async function triageEditHarness(options = {}) {
         ok: options.fetchOK !== false,
         json: () => Promise.resolve(options.fetchOK === false
           ? { error: { message: options.errorMessage || "request failed" } }
-          : { task: { id: "i-0001" } }),
+          : { task: { id: "t-alpha-0001" } }),
       });
     },
   });
@@ -3745,7 +3758,7 @@ async function scriptContext(windowOverrides = {}, contextOverrides = {}) {
 
 test("human attention panel hides the reply form once the agent resumes", async () => {
   const context = await scriptContext();
-  const task = { id: "i-0001", title: "Working" };
+  const task = { id: "t-alpha-0001", title: "Working" };
   const statusLog = [{ id: 7, kind: "question", message: "which db?", created_at: "2026-06-07T12:00:00Z" }];
   const html = context.renderHumanAttentionPanel(task, statusLog, "p-alpha", { id: "s-0001", state: "working" });
   assert.doesNotMatch(html, /data-attention-reply-form/);
@@ -3754,25 +3767,25 @@ test("human attention panel hides the reply form once the agent resumes", async 
 
 test("human attention panel renders the reply form while the session waits", async () => {
   const context = await scriptContext();
-  const task = { id: "i-0001", title: "Waiting" };
+  const task = { id: "t-alpha-0001", title: "Waiting" };
   const statusLog = [{ id: 7, kind: "question", message: "which db?", created_at: "2026-06-07T12:00:00Z" }];
   const html = context.renderHumanAttentionPanel(task, statusLog, "p-alpha", { id: "s-0001", state: "waiting" });
   assert.match(html, /Needs Human Response/);
   assert.match(html, /which db\?/);
-  assert.match(html, /data-attention-reply-form="i-0001"/);
+  assert.match(html, /data-attention-reply-form="t-alpha-0001"/);
   assert.match(html, /data-status-log-id="7"/);
 });
 
 test("human attention panel renders a waiting question and no longer renders plans", async () => {
   const context = await scriptContext();
-  const task = { id: "i-0001", title: "Plan plus question" };
+  const task = { id: "t-alpha-0001", title: "Plan plus question" };
   const statusLog = [{ id: 9, kind: "question", message: "which db?", created_at: "2026-06-07T12:00:00Z" }];
   const html = context.renderHumanAttentionPanel(task, statusLog, "p-alpha", { id: "s-0001", state: "waiting" });
   // Plan-mode review is gone; phase gates are handled by renderPhaseGatePanel.
   assert.doesNotMatch(html, /Plan Review/);
   assert.doesNotMatch(html, /data-plan-approve/);
   assert.match(html, /Needs Human Response/);
-  assert.match(html, /data-attention-reply-form="i-0001"/);
+  assert.match(html, /data-attention-reply-form="t-alpha-0001"/);
   assert.match(html, /data-status-log-id="9"/);
 });
 
@@ -3783,21 +3796,21 @@ test("phase gate panel renders the pending handoff as markdown with approve and 
     phase_state: "awaiting_approval",
     pending_handoff: "## Handoff\n- did a thing",
   };
-  const html = context.renderPhaseGatePanel(flow, "i-0001", "p-alpha");
+  const html = context.renderPhaseGatePanel(flow, "t-alpha-0001", "p-alpha");
   assert.match(html, /data-phase-gate/);
   assert.match(html, /Phase plan awaiting approval/);
   assert.match(html, /class="human-attention-body md"/);
   assert.match(html, /<h2>Handoff<\/h2>/);
   assert.match(html, /<li>did a thing<\/li>/);
-  assert.match(html, /<button class="button" data-phase-approve="i-0001" data-project="p-alpha">/);
-  assert.match(html, /<form class="human-attention-reply" data-phase-request-changes="i-0001" data-project="p-alpha">/);
+  assert.match(html, /<button class="button" data-phase-approve="t-alpha-0001" data-project="p-alpha">/);
+  assert.match(html, /<form class="human-attention-reply" data-phase-request-changes="t-alpha-0001" data-project="p-alpha">/);
   assert.match(html, /<textarea name="feedback"/);
 });
 
 test("phase gate panel renders a quiet sent-back note for pending feedback", async () => {
   const context = await scriptContext();
   const flow = { phase_name: "plan", phase_state: "pending", gate_feedback: "tighten the scope" };
-  const html = context.renderPhaseGatePanel(flow, "i-0001", "p-alpha");
+  const html = context.renderPhaseGatePanel(flow, "t-alpha-0001", "p-alpha");
   assert.match(html, /data-phase-gate-feedback/);
   assert.match(html, /Phase plan sent back with feedback/);
   assert.match(html, /tighten the scope/);
@@ -3806,8 +3819,8 @@ test("phase gate panel renders a quiet sent-back note for pending feedback", asy
 
 test("phase gate panel is empty when the phase is running", async () => {
   const context = await scriptContext();
-  assert.equal(context.renderPhaseGatePanel({ phase_name: "plan", phase_state: "running" }, "i-0001", "p-alpha"), "");
-  assert.equal(context.renderPhaseGatePanel(null, "i-0001", "p-alpha"), "");
+  assert.equal(context.renderPhaseGatePanel({ phase_name: "plan", phase_state: "running" }, "t-alpha-0001", "p-alpha"), "");
+  assert.equal(context.renderPhaseGatePanel(null, "t-alpha-0001", "p-alpha"), "");
 });
 
 test("phaseKey does not map crash_loop", async () => {
@@ -4052,7 +4065,7 @@ test("renderMarkdown does not overflow the stack on deeply nested lists", async 
 test("phase gate panel renders the pending handoff without a raw pre block", async () => {
   const context = await scriptContext();
   const flow = { phase_name: "plan", phase_state: "awaiting_approval", pending_handoff: "## Plan\n- step one" };
-  const html = context.renderPhaseGatePanel(flow, "i-0001", "p-alpha");
+  const html = context.renderPhaseGatePanel(flow, "t-alpha-0001", "p-alpha");
   assert.match(html, /class="human-attention-body md"/);
   assert.match(html, /<h2>Plan<\/h2>/);
   assert.match(html, /<li>step one<\/li>/);
@@ -4061,7 +4074,7 @@ test("phase gate panel renders the pending handoff without a raw pre block", asy
 
 test("human attention panel renders the question message as markdown", async () => {
   const context = await scriptContext();
-  const task = { id: "i-0001", title: "Q" };
+  const task = { id: "t-alpha-0001", title: "Q" };
   const statusLog = [{ id: 7, kind: "question", message: "Pick **one**:\n- a\n- b", created_at: "2026-06-07T12:00:00Z" }];
   const html = context.renderHumanAttentionPanel(task, statusLog, "p-alpha", { id: "s-0001", state: "waiting" });
   assert.match(html, /<strong>one<\/strong>/);
@@ -4072,8 +4085,8 @@ test("task read-only detail renders the body as markdown but keeps the edit text
   const context = await scriptContext();
   const app = new context.FlowApp();
   const html = app.renderTaskReadOnlyDetail(
-    { id: "i-0001", title: "T", body: "## Body\n- item", acceptance_criteria: "- done" },
-    { taskID: "i-0001" },
+    { id: "t-alpha-0001", title: "T", body: "## Body\n- item", acceptance_criteria: "- done" },
+    { taskID: "t-alpha-0001" },
   );
   assert.match(html, /<h2>Body<\/h2>/);
   assert.match(html, /<li>item<\/li>/);
@@ -4084,7 +4097,7 @@ test("task read-only detail renders the body as markdown but keeps the edit text
 test("task read-only detail shows a dash placeholder for an empty body", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const html = app.renderTaskReadOnlyDetail({ id: "i-0001", title: "T" }, { taskID: "i-0001" });
+  const html = app.renderTaskReadOnlyDetail({ id: "t-alpha-0001", title: "T" }, { taskID: "t-alpha-0001" });
   assert.match(html, /Body<\/span>[\s\S]*?—/);
 });
 
@@ -4092,7 +4105,7 @@ test("task card renders the latest status message as inline markdown", async () 
   const context = await scriptContext();
   const app = new context.FlowApp();
   const html = app.renderTaskCard(
-    { id: "i-0001", title: "T" },
+    { id: "t-alpha-0001", title: "T" },
     { latest_status: { message: "**done** `sha`", kind: "progress" } },
     "working",
     false,
@@ -4136,9 +4149,9 @@ test("block markdown surfaces do not double-wrap the .md container", async () =>
   const comment = context.renderThreadComment({ actor: "r", body: "## H", created_at: "2026-06-07T12:00:00Z" });
   assert.doesNotMatch(comment, /class="md">\s*<div class="md"/);
   const app = new context.FlowApp();
-  const detail = app.renderTaskReadOnlyDetail({ id: "i-1", title: "T", body: "## H" }, { taskID: "i-1" });
+  const detail = app.renderTaskReadOnlyDetail({ id: "t-alpha-0001", title: "T", body: "## H" }, { taskID: "t-alpha-0001" });
   assert.doesNotMatch(detail, /class="md">\s*<div class="md"/);
-  const panel = context.renderPhaseGatePanel({ phase_name: "plan", phase_state: "awaiting_approval", pending_handoff: "## H" }, "i-1", "p");
+  const panel = context.renderPhaseGatePanel({ phase_name: "plan", phase_state: "awaiting_approval", pending_handoff: "## H" }, "t-alpha-0001", "p");
   assert.match(panel, /class="human-attention-body md"/);
   assert.doesNotMatch(panel, /class="md">\s*<div class="md"/);
 });
@@ -4175,7 +4188,7 @@ test("task form flow select preselects the task's saved flow when editing", asyn
     defaultFlowID: "fl-plan",
   }]]);
 
-  const html = app.renderTaskForm({ title: "T", flow_id: "fl-basic" }, { taskID: "i-1", projectID: "p-alpha" });
+  const html = app.renderTaskForm({ title: "T", flow_id: "fl-basic" }, { taskID: "t-alpha-0001", projectID: "p-alpha" });
 
   assert.match(html, /<option value="fl-basic" selected>basic<\/option>/);
   assert.match(html, /<option value="fl-plan" >planned \(default\)<\/option>/);
@@ -4184,7 +4197,7 @@ test("task form flow select preselects the task's saved flow when editing", asyn
 test("board card renders the flow phase badge with awaiting-approval styling", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const task = { id: "i-0001", title: "Working", schedule_state: "up_next", triage_state: "accepted" };
+  const task = { id: "t-alpha-0001", title: "Working", schedule_state: "up_next", triage_state: "accepted" };
 
   const running = app.renderTaskCard(task, { flow: { phase_name: "plan", phase_index: 0, phase_count: 2, phase_state: "running" } }, "in_progress", false);
   assert.match(running, /data-flow-phase/);
@@ -4215,7 +4228,7 @@ test("read-only detail renders the flow phase chain from the live flow status", 
       { name: "implement", gate: "auto", agent_name: "Author" },
     ],
   };
-  const html = app.renderTaskReadOnlyDetail({ id: "i-1", title: "T" }, { taskID: "i-1", projectID: "p-alpha", flow });
+  const html = app.renderTaskReadOnlyDetail({ id: "t-alpha-0001", title: "T" }, { taskID: "t-alpha-0001", projectID: "p-alpha", flow });
   assert.match(html, /Flow <strong>planned<\/strong>/);
   assert.match(html, /spec\(gate\) · Spec Writer -> implement · Author/);
 });

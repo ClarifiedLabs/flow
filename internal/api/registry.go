@@ -92,8 +92,9 @@ type Registry struct {
 	deadlines                  lifecycle.DeadlineConfig
 	reviewAuthorCycleLimit     int
 
-	mu      sync.RWMutex
-	bundles map[string]*ProjectBundle
+	mu       sync.RWMutex
+	bundles  map[string]*ProjectBundle
+	createMu sync.Mutex
 
 	// claimMu serializes job claims: worker capacity is enforced against
 	// lease counts aggregated across project databases, and no transaction
@@ -167,7 +168,7 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 	}
 
 	db := store.DB()
-	tasks := coordinator.NewTaskService(db)
+	tasks := coordinator.NewTaskService(db, project.ID)
 	agentDefs := coordinator.NewAgentDefService(db)
 	flows := coordinator.NewFlowService(db)
 	if err := flows.SeedDefaults(ctx); err != nil {
@@ -195,7 +196,7 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 	})
 	merges := coordinator.NewMergeService(db, tasks, sessions, project)
 	workflowRuns := coordinator.NewWorkflowRunService(db, flows, tasks)
-	workflowArtifacts := coordinator.NewWorkflowArtifactService(db)
+	workflowArtifacts := coordinator.NewWorkflowArtifactService(db, tasks)
 	workflowExecutor := coordinator.NewWorkflowExecutor(coordinator.WorkflowExecutorOptions{
 		Database: db, Runs: workflowRuns, Artifacts: workflowArtifacts, Tasks: tasks,
 		Checks: checks, CheckConfigs: checkConfigs, Sessions: sessions, Merges: merges,
@@ -240,6 +241,9 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 // hooks, insert the registry row, and open the bundle. The caller (the CLI)
 // owns all worktree-side work.
 func (r *Registry) CreateProject(ctx context.Context, input coordinator.Project) (coordinator.Project, error) {
+	r.createMu.Lock()
+	defer r.createMu.Unlock()
+
 	name := strings.TrimSpace(input.Name)
 	if name == "" && strings.TrimSpace(input.RepoPath) != "" {
 		name = filepath.Base(strings.TrimSpace(input.RepoPath))
@@ -247,10 +251,22 @@ func (r *Registry) CreateProject(ctx context.Context, input coordinator.Project)
 	if name == "" {
 		return coordinator.Project{}, errors.New("project name or repo path is required")
 	}
+	if repoPath := strings.TrimSpace(input.RepoPath); repoPath != "" {
+		if _, lookupErr := r.projects.GetByRepoPath(ctx, repoPath); lookupErr == nil {
+			return coordinator.Project{}, coordinator.ErrProjectRepoPathExists
+		} else if !errors.Is(lookupErr, coordinator.ErrProjectNotFound) {
+			return coordinator.Project{}, lookupErr
+		}
+	}
 
-	id, err := coordinator.NewProjectID()
+	id, err := coordinator.ProjectIDFromName(name)
 	if err != nil {
 		return coordinator.Project{}, err
+	}
+	if existing, lookupErr := r.projects.Get(ctx, id); lookupErr == nil {
+		return coordinator.Project{}, fmt.Errorf("%w: project name %q normalizes to %q, already used by %q; choose a distinct --name", coordinator.ErrProjectIDExists, name, id, existing.Name)
+	} else if !errors.Is(lookupErr, coordinator.ErrProjectNotFound) {
+		return coordinator.Project{}, lookupErr
 	}
 
 	created, err := flowgit.CreateServerProject(ctx, flowgit.ServerProjectOptions{

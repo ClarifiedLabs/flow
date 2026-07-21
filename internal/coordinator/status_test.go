@@ -17,7 +17,7 @@ func newStatusTestService(t *testing.T) (*StatusService, string) {
 	}
 	t.Cleanup(func() { store.Close() })
 
-	task, err := NewTaskService(store.DB()).CreateTask(ctx, CreateTaskInput{Title: "status"})
+	task, err := NewTaskService(store.DB(), "p-test").CreateTask(ctx, CreateTaskInput{Title: "status"})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}

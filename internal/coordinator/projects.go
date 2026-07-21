@@ -14,7 +14,11 @@ import (
 var (
 	ErrProjectNotFound       = errors.New("project not found")
 	ErrProjectRepoPathExists = errors.New("a project is already registered for this repo path")
+	ErrProjectNameExists     = errors.New("a project already uses this name")
+	ErrProjectIDExists       = errors.New("a project already uses this normalized key")
 )
+
+const maxProjectKeyLength = 48
 
 // Project is a row in the coordinator-wide projects registry. Each project
 // owns a data directory with its own SQLite database and exchange remote.
@@ -30,11 +34,96 @@ type Project struct {
 	UpdatedAt    time.Time
 }
 
-// NewProjectID allocates a random project identifier. Project IDs are not
-// derived from the repo path: the repo may live on another machine than the
-// coordinator, so the path is advisory metadata rather than identity.
-func NewProjectID() (string, error) {
-	return randomPrefixedID("p")
+// ProjectIDFromName derives the stable, human-readable project identifier
+// used by projects, tasks, URLs, and Git refs. Display names remain unchanged;
+// only ASCII letters and digits are retained in the normalized key.
+func ProjectIDFromName(name string) (string, error) {
+	key, err := projectKeyFromName(name)
+	if err != nil {
+		return "", err
+	}
+
+	return "p-" + key, nil
+}
+
+func projectKeyFromName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", errors.New("project name is required")
+	}
+
+	var builder strings.Builder
+	pendingSeparator := false
+	for _, r := range name {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			if pendingSeparator && builder.Len() > 0 {
+				builder.WriteByte('-')
+			}
+			builder.WriteByte(byte(r + ('a' - 'A')))
+			pendingSeparator = false
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			if pendingSeparator && builder.Len() > 0 {
+				builder.WriteByte('-')
+			}
+			builder.WriteRune(r)
+			pendingSeparator = false
+		default:
+			pendingSeparator = builder.Len() > 0
+		}
+	}
+
+	key := builder.String()
+	if key == "" {
+		return "", errors.New("project name must contain an ASCII letter or digit")
+	}
+	if len(key) > maxProjectKeyLength {
+		return "", fmt.Errorf("normalized project key %q is %d characters; maximum is %d", key, len(key), maxProjectKeyLength)
+	}
+
+	return key, nil
+}
+
+func projectKeyFromID(projectID string) (string, error) {
+	projectID = strings.TrimSpace(projectID)
+	if !strings.HasPrefix(projectID, "p-") {
+		return "", fmt.Errorf("invalid project id %q", projectID)
+	}
+	key := strings.TrimPrefix(projectID, "p-")
+	normalized, err := projectKeyFromName(key)
+	if err != nil || normalized != key {
+		return "", fmt.Errorf("invalid project id %q", projectID)
+	}
+
+	return key, nil
+}
+
+// ProjectIDFromTaskID returns the project encoded in a canonical task ID.
+func ProjectIDFromTaskID(taskID string) (string, bool) {
+	taskID = strings.TrimSpace(taskID)
+	if !strings.HasPrefix(taskID, "t-") {
+		return "", false
+	}
+	rest := strings.TrimPrefix(taskID, "t-")
+	separator := strings.LastIndexByte(rest, '-')
+	if separator <= 0 {
+		return "", false
+	}
+	key, sequence := rest[:separator], rest[separator+1:]
+	if len(sequence) < 4 {
+		return "", false
+	}
+	for _, r := range sequence {
+		if r < '0' || r > '9' {
+			return "", false
+		}
+	}
+	projectID := "p-" + key
+	if _, err := projectKeyFromID(projectID); err != nil {
+		return "", false
+	}
+
+	return projectID, true
 }
 
 // ProjectService manages the projects registry in the coordinator's global
@@ -51,8 +140,8 @@ func NewProjectService(database *sql.DB) *ProjectService {
 	}
 }
 
-// Insert stores a new project. The requested name is deduplicated with a
-// numeric suffix when already taken; the stored project is returned.
+// Insert stores a new project. Names and their normalized identifiers must be
+// unique; callers surface collisions so users can choose an intentional name.
 func (s *ProjectService) Insert(ctx context.Context, project Project) (Project, error) {
 	project, err := normalizeProject(project)
 	if err != nil {
@@ -73,9 +162,7 @@ func (s *ProjectService) Insert(ctx context.Context, project Project) (Project, 
 	project.CreatedAt = now
 	project.UpdatedAt = now
 
-	baseName := project.Name
-	for attempt := 2; ; attempt++ {
-		_, err := s.db.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, `
 INSERT INTO projects (
 	id,
 	name,
@@ -87,28 +174,29 @@ INSERT INTO projects (
 	created_at,
 	updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			project.ID,
-			project.Name,
-			sqlitex.NullableNonEmptyString(project.RepoPath),
-			project.BaseBranch,
-			project.ExchangeName,
-			project.ExchangeURL,
-			sqlitex.NullableNonEmptyString(project.ExchangePath),
-			formatTime(project.CreatedAt),
-			formatTime(project.UpdatedAt),
-		)
-		if err == nil {
-			return project, nil
-		}
-		if strings.Contains(err.Error(), "projects.name") {
-			project.Name = fmt.Sprintf("%s-%d", baseName, attempt)
-			continue
-		}
-		if strings.Contains(err.Error(), "projects.repo_path") {
-			return Project{}, ErrProjectRepoPathExists
-		}
-		return Project{}, fmt.Errorf("insert project: %w", err)
+		project.ID,
+		project.Name,
+		sqlitex.NullableNonEmptyString(project.RepoPath),
+		project.BaseBranch,
+		project.ExchangeName,
+		project.ExchangeURL,
+		sqlitex.NullableNonEmptyString(project.ExchangePath),
+		formatTime(project.CreatedAt),
+		formatTime(project.UpdatedAt),
+	)
+	if err == nil {
+		return project, nil
 	}
+	if strings.Contains(err.Error(), "projects.id") {
+		return Project{}, ErrProjectIDExists
+	}
+	if strings.Contains(err.Error(), "projects.name") {
+		return Project{}, ErrProjectNameExists
+	}
+	if strings.Contains(err.Error(), "projects.repo_path") {
+		return Project{}, ErrProjectRepoPathExists
+	}
+	return Project{}, fmt.Errorf("insert project: %w", err)
 }
 
 func (s *ProjectService) List(ctx context.Context) ([]Project, error) {
@@ -279,6 +367,13 @@ func normalizeProject(project Project) (Project, error) {
 	}
 	if project.Name == "" {
 		return Project{}, errors.New("project name is required")
+	}
+	expectedID, err := ProjectIDFromName(project.Name)
+	if err != nil {
+		return Project{}, err
+	}
+	if project.ID != expectedID {
+		return Project{}, fmt.Errorf("project id %q does not match normalized name id %q", project.ID, expectedID)
 	}
 	if project.BaseBranch == "" {
 		return Project{}, errors.New("project base branch is required")

@@ -100,17 +100,21 @@ Most users can stay in the web UI:
   merges, worker capacity, and job diagnostics.
 - **Flows** configures project-specific agent definitions and work/review flows.
 
+Flow derives readable IDs from the project name: `--name "My Project"` creates
+project `p-my-project`, and its tasks are `t-my-project-0001`,
+`t-my-project-0002`, and so on. Full task IDs work from any directory.
+
 Useful CLI shortcuts:
 
 ```sh
 flow task create --title "Implement feature" --flow direct
-flow task schedule i-0001 up_next
+flow task schedule t-my-project-0001 up_next
 flow board
-flow checks i-0001
-flow transitions i-0001
+flow checks t-my-project-0001
+flow transitions t-my-project-0001
 flow workers
 flow jobs
-flow merge i-0001
+flow merge t-my-project-0001
 ```
 
 ## How Flow works

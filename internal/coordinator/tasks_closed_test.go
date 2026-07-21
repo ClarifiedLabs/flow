@@ -101,8 +101,8 @@ func TestListClosedTasksTieBreaksByIDWithoutSkipOrDuplicate(t *testing.T) {
 	at := clock.Add(time.Hour)
 
 	// Two tasks closed at the exact same instant: id desc breaks the tie.
-	first := finishTask(t, service, clock, "first", at, ResolutionAbandoned)   // i-0001
-	second := finishTask(t, service, clock, "second", at, ResolutionAbandoned) // i-0002
+	first := finishTask(t, service, clock, "first", at, ResolutionAbandoned)   // t-test-0001
+	second := finishTask(t, service, clock, "second", at, ResolutionAbandoned) // t-test-0002
 
 	page1, next, err := service.ListClosedTasks(ctx, ClosedTaskQuery{Limit: 1})
 	if err != nil {

@@ -2715,7 +2715,7 @@ func printUsage(out io.Writer) {
   flow task create --title TITLE [--flow FLOW] [--file PATH]
   flow task attach TASK_ID --file PATH [--stage initial|author|reviewer|verifier]
   flow task list [--state unscheduled,scheduled,in_progress,done]
-  flow task show [--project PROJECT] TASK_ID|PROJECT/TASK_ID
+  flow task show [--project PROJECT] TASK_ID
   flow task reply TASK_ID MESSAGE
   flow task schedule TASK_ID
   flow task reset|reopen|workflow TASK_ID
@@ -2899,6 +2899,12 @@ func parseTaskRelationCommand(args []string, stderr io.Writer, name string) (par
 
 	sourceProject, sourceID := splitQualifiedRef(parsed.flags.Arg(0))
 	targetProject, targetID := splitQualifiedRef(parsed.flags.Arg(2))
+	if embedded, ok := coordinator.ProjectIDFromTaskID(sourceID); ok {
+		sourceProject = embedded
+	}
+	if embedded, ok := coordinator.ProjectIDFromTaskID(targetID); ok {
+		targetProject = embedded
+	}
 	if sourceProject != "" && targetProject != "" && sourceProject != targetProject {
 		fmt.Fprintln(stderr, "source and target tasks must be in the same project")
 		return parsedAPICommand{}, "", "", "", 2
@@ -3006,14 +3012,15 @@ func resolveProjectRef(values *apiFlagValues, client *flowclient.Client) string 
 	return project.ID
 }
 
-// splitQualifiedRef peels an optional "project/" qualifier off an task or
-// change ref: "myproj/i-0001" addresses i-0001 in project myproj.
+// splitQualifiedRef peels an optional "project/" qualifier off a task or
+// change ref. Canonical task IDs already carry their project; qualifiers are
+// still useful for change references and explicit project-scoped calls.
 func splitQualifiedRef(ref string) (string, string) {
 	projectRef, id, found := strings.Cut(ref, "/")
 	if !found {
 		return "", ref
 	}
-	if strings.HasPrefix(id, "i-") || strings.HasPrefix(id, "ch-") {
+	if strings.HasPrefix(id, "t-") || strings.HasPrefix(id, "ch-") {
 		return projectRef, id
 	}
 
@@ -3024,11 +3031,14 @@ func splitQualifiedRef(ref string) (string, string) {
 // project qualifier.
 func scopeClientForRef(client *flowclient.Client, ref string) (*flowclient.Client, string) {
 	projectRef, id := splitQualifiedRef(ref)
-	if projectRef == "" {
-		return client, ref
+	if projectRef != "" {
+		return client.WithProject(projectRef), id
+	}
+	if embeddedProject, ok := coordinator.ProjectIDFromTaskID(id); ok {
+		return client.WithProject(embeddedProject), id
 	}
 
-	return client.WithProject(projectRef), id
+	return client, ref
 }
 
 func uploadTaskAttachmentFile(client *flowclient.Client, taskID string, filePath string, stage coordinator.TaskAttachmentStage) (coordinator.TaskAttachment, error) {

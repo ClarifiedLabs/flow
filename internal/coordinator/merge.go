@@ -45,7 +45,7 @@ type mergeRecoveryBackoff struct {
 
 func NewMergeService(database *sql.DB, tasks *TaskService, sessions *SessionService, project Project) *MergeService {
 	if tasks == nil {
-		tasks = NewTaskService(database)
+		tasks = NewTaskService(database, project.ID)
 	}
 	if sessions == nil {
 		sessions = NewSessionService(database, tasks, nil)

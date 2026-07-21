@@ -71,7 +71,7 @@ Task-set materialization is transactional and idempotent. It creates Unscheduled
 
 ## Execution and ownership
 
-Every run owns its jobs, node visits, artifacts, waits, sessions, and changes. Coding runs use a branch such as `task/i-1234/run-2`, preventing reopened or reset runs from sharing revision identity.
+Every run owns its jobs, node visits, artifacts, waits, sessions, and changes. Coding runs use a branch such as `task/t-my-project-1234/run-2`, preventing reopened or reset runs from sharing revision identity.
 
 Agent jobs stay Scheduled while queued and move the task to In Progress only when a worker starts the node. Base-workspace jobs cannot push. Change-workspace session credentials are restricted to the run branch. `flow complete` creates the typed artifact and completes the active agent node; change completion resolves and pushes the current branch and pins its head SHA.
 

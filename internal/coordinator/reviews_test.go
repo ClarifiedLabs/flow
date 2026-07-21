@@ -253,7 +253,7 @@ func newThreadServiceFixture(t *testing.T) (*flowdb.Store, *ThreadService, Chang
 		_ = store.Close()
 	})
 
-	tasks := NewTaskService(store.DB())
+	tasks := NewTaskService(store.DB(), "p-test")
 	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Review target"})
 	if err != nil {
 		t.Fatalf("create task: %v", err)

@@ -30,13 +30,13 @@ type Store struct {
 
 // Open opens a per-project database and applies the per-project migration set.
 func Open(ctx context.Context, path string) (*Store, error) {
-	return openWith(ctx, path, migrationFS, "migrations/*.sql", "2")
+	return openWith(ctx, path, migrationFS, "migrations/*.sql", "3")
 }
 
 // OpenGlobal opens the coordinator-wide database (projects registry, workers,
 // tokens, web sessions) and applies the global migration set.
 func OpenGlobal(ctx context.Context, path string) (*Store, error) {
-	return openWith(ctx, path, globalMigrationFS, "migrations_global/*.sql", "")
+	return openWith(ctx, path, globalMigrationFS, "migrations_global/*.sql", "3")
 }
 
 func openWith(ctx context.Context, path string, migrations embed.FS, glob string, expectedStorageFormat string) (*Store, error) {
@@ -81,21 +81,21 @@ func openWith(ctx context.Context, path string, migrations embed.FS, glob string
 	return store, nil
 }
 
-// validateExistingStorageFormat rejects a pre-format-2 project database before
+// validateExistingStorageFormat rejects an incompatible database before
 // migrations can reinterpret its schema. A completely empty database is valid
 // and receives the current marker from the initial migration.
 func (s *Store) validateExistingStorageFormat(ctx context.Context, expected string) error {
 	var appMetadataTables int
 	if err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'app_metadata'`).Scan(&appMetadataTables); err != nil {
-		return fmt.Errorf("inspect project database format: %w", err)
+		return fmt.Errorf("inspect database format: %w", err)
 	}
 	if appMetadataTables == 0 {
 		var userTables int
 		if err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM sqlite_master
 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`).Scan(&userTables); err != nil {
-			return fmt.Errorf("inspect project database tables: %w", err)
+			return fmt.Errorf("inspect database tables: %w", err)
 		}
 		if userTables == 0 {
 			return nil
@@ -122,7 +122,7 @@ func (s *Store) requireStorageFormat(ctx context.Context, expected string) error
 }
 
 func incompatibleStorageFormatError(expected, actual string) error {
-	return fmt.Errorf("incompatible project database storage format %q (need %q); back up and recreate the project database", actual, expected)
+	return fmt.Errorf("incompatible database storage format %q (need %q); back up and recreate the Flow data directory", actual, expected)
 }
 
 func (s *Store) DB() *sql.DB {

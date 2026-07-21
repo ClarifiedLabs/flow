@@ -22,8 +22,8 @@ export async function renderBoardView(app, filter, context) {
   ]);
   if (context && !app.isActiveLoad(context)) return false;
   app.setTitle(filter ? filter.label : "Board");
-  // The aggregate response carries one board per project; task ids are
-  // only unique within a project, so every card stays tied to its board.
+  // The aggregate response carries one board per project; keep each card tied
+  // to its board for project badges, scoped actions, and overlay maps.
   const boards = data.boards || data.Boards || [];
   const showProjectBadge = (app.projects || []).length > 1;
   const lanes = filter ? LANES.filter(([key]) => key === filter.lane) : LANES;

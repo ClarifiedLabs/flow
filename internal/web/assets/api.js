@@ -93,8 +93,9 @@ export async function apiFetch(path, options) {
   return response.json();
 }
 
-// taskAPIBase scopes task API calls to a project; task ids alone are
-// ambiguous once several projects exist.
+// taskAPIBase scopes project-owned collection/action calls when a project is
+// known. Canonical task IDs can also use the globally resolvable /v2/tasks
+// route directly.
 export function taskAPIBase(projectID) {
   const id = String(projectID || "").trim();
   return id ? `/v2/projects/${encodeURIComponent(id)}/tasks` : "/v2/tasks";
@@ -115,9 +116,8 @@ export function agentDefsAPIBase(projectID) {
 }
 
 export function taskHref(projectID, taskID) {
-  const id = String(projectID || "").trim();
   const task = String(taskID || "").trim();
-  return id && task ? `/ui/projects/${encodeURIComponent(id)}/tasks/${encodeURIComponent(task)}` : "#";
+  return task ? `/ui/tasks/${encodeURIComponent(task)}` : "#";
 }
 
 export function attachmentHref(projectID, taskID, attachmentID) {

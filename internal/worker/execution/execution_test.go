@@ -240,7 +240,7 @@ func TestRunJobPushesNewTaskBranch(t *testing.T) {
 		CapacityBucket: BucketPersistentAgent,
 		Payload: map[string]any{
 			"base":   "main",
-			"branch": "task/i-0001",
+			"branch": "task/t-test-0001",
 			"entrypoint": map[string]any{
 				"argv":  []string{"/bin/true"},
 				"shell": false,
@@ -257,7 +257,7 @@ func TestRunJobPushesNewTaskBranch(t *testing.T) {
 		t.Fatalf("run author job: %v", result.Err)
 	}
 	remotePath := strings.TrimPrefix(exchangeURL, "file://")
-	gitRun(t, remotePath, "show-ref", "--verify", "refs/heads/task/i-0001")
+	gitRun(t, remotePath, "show-ref", "--verify", "refs/heads/task/t-test-0001")
 }
 
 func TestRunJobShellEntrypointRequiresExplicitShell(t *testing.T) {
@@ -719,7 +719,7 @@ func TestWorkerEnvIncludesSessionToken(t *testing.T) {
 		SessionToken: "session-token",
 		Payload: JobPayload{
 			SessionID: "payload-session",
-			Branch:    "task/i-0001",
+			Branch:    "task/t-test-0001",
 			Base:      "main",
 		},
 		Entrypoint: Entrypoint{},
@@ -1516,7 +1516,7 @@ func TestAnyTrustPromptVisibleRejectsEmbeddedPromptText(t *testing.T) {
 	// not be mistaken for a live prompt: the submit instruction is no longer the
 	// last line on screen.
 	for _, pane := range []string{codexTrustPromptPane(), claudeTrustPromptPane()} {
-		embedded := "Flow role instructions (flow-author):\n\n# Flow Author\n\nTask: i-0005\n\n" +
+		embedded := "Flow role instructions (flow-author):\n\n# Flow Author\n\nTask: t-test-0005\n\n" +
 			pane + "\n\nacceptance_criteria:\nthe agent no longer gets stuck at the trust prompt\n"
 		if anyTrustPromptVisible(embedded) {
 			t.Fatal("anyTrustPromptVisible accepted prompt text embedded in task content")

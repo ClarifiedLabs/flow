@@ -59,7 +59,7 @@ func TestCheckConfigRetiresRemovedAutomatedChecks(t *testing.T) {
 	t.Cleanup(func() {
 		_ = store.Close()
 	})
-	tasks := NewTaskService(store.DB())
+	tasks := NewTaskService(store.DB(), "p-test")
 	checks := NewCheckService(store.DB())
 	checkConfig := NewCheckConfigServiceWithOptions(store.DB(), checks, flowworker.NewService(store.DB()), nil, Project{}, CheckConfigServiceOptions{})
 	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Removed check task"})
@@ -104,7 +104,7 @@ func TestLiveCheckJobExistsIsScopedToHead(t *testing.T) {
 	t.Cleanup(func() {
 		_ = store.Close()
 	})
-	tasks := NewTaskService(store.DB())
+	tasks := NewTaskService(store.DB(), "p-test")
 	workers := flowworker.NewService(store.DB())
 	checkConfig := NewCheckConfigServiceWithOptions(store.DB(), nil, workers, nil, Project{}, CheckConfigServiceOptions{})
 	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Head scoped job task"})
@@ -208,7 +208,7 @@ type checkConfigServices struct {
 // wireCheckConfigServices constructs the standard service graph used across the
 // check-config tests, sharing the same DB handle and project.
 func wireCheckConfigServices(store *flowdb.Store, project Project) checkConfigServices {
-	tasks := NewTaskService(store.DB())
+	tasks := NewTaskService(store.DB(), "p-test")
 	workers := flowworker.NewService(store.DB())
 	sessions := NewSessionService(store.DB(), tasks, workers)
 	checks := NewCheckService(store.DB())

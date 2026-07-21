@@ -124,7 +124,7 @@ func TestPreReceiveTaskBranchPolicy(t *testing.T) {
 	if err := HandlePreReceive(ctx, HookOptions{
 		ExchangeRepoPath: result.ExchangePath,
 		BaseBranch:       "main",
-		Stdin:            strings.NewReader(refLine(zeroSHA, firstTaskSHA, "refs/heads/task/i-0002")),
+		Stdin:            strings.NewReader(refLine(zeroSHA, firstTaskSHA, "refs/heads/task/t-test-0002")),
 		Principal:        hookTestPrincipal("owner"),
 	}); err != nil {
 		t.Fatalf("owner task branch create rejected: %v", err)
@@ -133,7 +133,7 @@ func TestPreReceiveTaskBranchPolicy(t *testing.T) {
 	if err := HandlePreReceive(ctx, HookOptions{
 		ExchangeRepoPath: result.ExchangePath,
 		BaseBranch:       "main",
-		Stdin:            strings.NewReader(refLine(firstTaskSHA, secondTaskSHA, "refs/heads/task/i-0001")),
+		Stdin:            strings.NewReader(refLine(firstTaskSHA, secondTaskSHA, "refs/heads/task/t-test-0001")),
 		Principal:        hookTestPrincipal(""),
 	}); err != nil {
 		t.Fatalf("local fast-forward task update rejected: %v", err)
@@ -141,7 +141,7 @@ func TestPreReceiveTaskBranchPolicy(t *testing.T) {
 	if err := HandlePreReceive(ctx, HookOptions{
 		ExchangeRepoPath: result.ExchangePath,
 		BaseBranch:       "main",
-		Stdin:            strings.NewReader(refLine(secondTaskSHA, firstTaskSHA, "refs/heads/task/i-0001")),
+		Stdin:            strings.NewReader(refLine(secondTaskSHA, firstTaskSHA, "refs/heads/task/t-test-0001")),
 		Principal:        hookTestPrincipal(""),
 	}); err == nil {
 		t.Fatal("local non-fast-forward task update was accepted")
@@ -165,7 +165,7 @@ func TestPreReceiveTaskBranchPolicy(t *testing.T) {
 	if err := HandlePreReceive(ctx, HookOptions{
 		ExchangeRepoPath: result.ExchangePath,
 		BaseBranch:       "main",
-		Stdin:            strings.NewReader(refLine(secondTaskSHA, zeroSHA, "refs/heads/task/i-0001")),
+		Stdin:            strings.NewReader(refLine(secondTaskSHA, zeroSHA, "refs/heads/task/t-test-0001")),
 		Principal:        hookTestPrincipal(""),
 	}); err == nil {
 		t.Fatal("local task branch deletion was accepted")
@@ -182,7 +182,7 @@ func TestPostReceiveSpoolsEvents(t *testing.T) {
 		BaseBranch:       "main",
 		Principal:        hookTestPrincipal("owner"),
 		Stdin: bytes.NewBufferString(
-			refLine(firstTaskSHA, secondTaskSHA, "refs/heads/task/i-0001") +
+			refLine(firstTaskSHA, secondTaskSHA, "refs/heads/task/t-test-0001") +
 				refLine(zeroSHA, firstTaskSHA, "refs/tags/test-tag"),
 		),
 	}); err != nil {
@@ -196,7 +196,7 @@ func TestPostReceiveSpoolsEvents(t *testing.T) {
 	if len(events) != 2 {
 		t.Fatalf("events = %+v, want 2", events)
 	}
-	if events[0].OldSHA != firstTaskSHA || events[0].NewSHA != secondTaskSHA || events[0].Ref != "refs/heads/task/i-0001" {
+	if events[0].OldSHA != firstTaskSHA || events[0].NewSHA != secondTaskSHA || events[0].Ref != "refs/heads/task/t-test-0001" {
 		t.Fatalf("first event mismatch: %+v", events[0])
 	}
 	if events[0].Actor != "owner" {
@@ -230,12 +230,12 @@ func initializedTaskBranch(t *testing.T) (string, ServerProject, string, string)
 
 	ctx := context.Background()
 	repoPath, project := initializedRepoWithTaskBranch(t)
-	if err := gitRun(ctx, repoPath, nil, "checkout", "-b", "task/i-0001"); err != nil {
+	if err := gitRun(ctx, repoPath, nil, "checkout", "-b", "task/t-test-0001"); err != nil {
 		t.Fatalf("checkout task branch: %v", err)
 	}
 	firstTaskSHA := writeAndCommit(t, repoPath, "task.txt", "first\n", "first task commit")
 	secondTaskSHA := writeAndCommit(t, repoPath, "task.txt", "second\n", "second task commit")
-	if err := gitRun(ctx, repoPath, []string{"FLOW_GIT_PRINCIPAL=owner"}, "push", project.ExchangeURL, "refs/heads/task/i-0001:refs/heads/task/i-0001"); err != nil {
+	if err := gitRun(ctx, repoPath, []string{"FLOW_GIT_PRINCIPAL=owner"}, "push", project.ExchangeURL, "refs/heads/task/t-test-0001:refs/heads/task/t-test-0001"); err != nil {
 		t.Fatalf("push task branch to exchange: %v", err)
 	}
 

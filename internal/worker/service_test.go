@@ -800,7 +800,7 @@ WHERE name = 'task'
 RETURNING next_number - 1`).Scan(&nextNumber); err != nil {
 		t.Fatalf("allocate task id: %v", err)
 	}
-	id := fmt.Sprintf("i-%04d", nextNumber)
+	id := fmt.Sprintf("t-test-%04d", nextNumber)
 	now := formatTime(time.Now().UTC())
 	if _, err := store.DB().ExecContext(ctx, `
 INSERT INTO tasks (
@@ -826,7 +826,7 @@ INSERT INTO tasks (
 func insertChange(t *testing.T, store *flowdb.Store, taskID string) string {
 	t.Helper()
 
-	id := "ch-" + strings.TrimPrefix(taskID, "i-")
+	id := "ch-" + strings.TrimPrefix(taskID, "t-test-")
 	now := formatTime(time.Now().UTC())
 	if _, err := store.DB().ExecContext(context.Background(), `
 INSERT INTO changes (

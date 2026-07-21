@@ -272,7 +272,7 @@ func NewSessionService(database *sql.DB, tasks *TaskService, workers *flowworker
 
 func NewSessionServiceWithOptions(database *sql.DB, tasks *TaskService, workers *flowworker.Service, opts SessionServiceOptions) *SessionService {
 	if tasks == nil {
-		tasks = NewTaskService(database)
+		tasks = NewTaskService(database, opts.Project.ID)
 	}
 	if workers == nil {
 		workers = flowworker.NewService(database)

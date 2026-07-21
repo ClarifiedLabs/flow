@@ -213,14 +213,16 @@ type BoardResult struct {
 }
 
 type TaskService struct {
-	db  *sql.DB
-	now func() time.Time
+	db        *sql.DB
+	projectID string
+	now       func() time.Time
 }
 
-func NewTaskService(database *sql.DB) *TaskService {
+func NewTaskService(database *sql.DB, projectID string) *TaskService {
 	return &TaskService{
-		db:  database,
-		now: sqlitex.UTCNow,
+		db:        database,
+		projectID: strings.TrimSpace(projectID),
+		now:       sqlitex.UTCNow,
 	}
 }
 
@@ -261,7 +263,7 @@ func (s *TaskService) CreateTaskWithDetails(ctx context.Context, input CreateTas
 	}
 	defer tx.Rollback()
 
-	id, err := allocateTaskID(ctx, tx)
+	id, err := s.allocateTaskID(ctx, tx)
 	if err != nil {
 		return Task{}, err
 	}
@@ -1126,7 +1128,7 @@ ORDER BY blocker.priority DESC, blocker.updated_at DESC, blocker.id`,
 	return blockers, nil
 }
 
-func allocateTaskID(ctx context.Context, tx *sql.Tx) (string, error) {
+func (s *TaskService) allocateTaskID(ctx context.Context, tx *sql.Tx) (string, error) {
 	var nextNumber int64
 	if err := tx.QueryRowContext(ctx, `
 UPDATE id_allocators
@@ -1136,11 +1138,16 @@ RETURNING next_number - 1`).Scan(&nextNumber); err != nil {
 		return "", fmt.Errorf("allocate task id: %w", err)
 	}
 
-	return formatTaskID(nextNumber), nil
+	return formatTaskID(s.projectID, nextNumber)
 }
 
-func formatTaskID(number int64) string {
-	return fmt.Sprintf("i-%04d", number)
+func formatTaskID(projectID string, number int64) (string, error) {
+	key, err := projectKeyFromID(projectID)
+	if err != nil {
+		return "", fmt.Errorf("format task id: %w", err)
+	}
+
+	return fmt.Sprintf("t-%s-%04d", key, number), nil
 }
 
 func normalizeCreateTaskInput(input CreateTaskInput) (CreateTaskInput, error) {

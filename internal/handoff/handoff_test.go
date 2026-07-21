@@ -8,10 +8,10 @@ import (
 
 func TestRenderTemplateIncludesRequiredSections(t *testing.T) {
 	rendered := RenderTemplate(TemplateInput{
-		TaskID:                "i-0001",
+		TaskID:                "t-test-0001",
 		ChangeID:              "ch-1",
 		SessionID:             "s-1",
-		Branch:                "task/i-0001",
+		Branch:                "task/t-test-0001",
 		Base:                  "main",
 		UpdatedAt:             time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC),
 		CurrentGoal:           "Finish handoff durability.",

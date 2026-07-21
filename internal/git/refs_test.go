@@ -24,14 +24,14 @@ func TestChangedFileStatsExcludesRestoredPathsButKeepsSourceDeletion(t *testing.
 	runRefsGit(t, "", "init", "--bare", exchangePath)
 	runRefsGit(t, repoPath, "push", exchangePath, "main:main")
 
-	runRefsGit(t, repoPath, "checkout", "-b", "task/i-0001")
+	runRefsGit(t, repoPath, "checkout", "-b", "task/t-test-0001")
 	if err := os.MkdirAll(filepath.Join(repoPath, ".flow/session"), 0o755); err != nil {
 		t.Fatalf("mkdir session: %v", err)
 	}
 	runRefsGit(t, repoPath, "mv", "app.go", ".flow/session/app.go")
 	runRefsGit(t, repoPath, "commit", "-m", "move app into session")
 	head := refsGitOutput(t, repoPath, "rev-parse", "HEAD")
-	runRefsGit(t, repoPath, "push", exchangePath, "task/i-0001:task/i-0001")
+	runRefsGit(t, repoPath, "push", exchangePath, "task/t-test-0001:task/t-test-0001")
 
 	stats, err := ChangedFileStats(ctx, exchangePath, "refs/heads/main", head)
 	if err != nil {
@@ -72,12 +72,12 @@ func TestChangedFileDiffParsesHeaderLikeContentLines(t *testing.T) {
 	runRefsGit(t, "", "init", "--bare", exchangePath)
 	runRefsGit(t, repoPath, "push", exchangePath, "main:main")
 
-	runRefsGit(t, repoPath, "checkout", "-b", "task/i-0001")
+	runRefsGit(t, repoPath, "checkout", "-b", "task/t-test-0001")
 	writeRefsFile(t, repoPath, "notes.txt", "alpha\n++ new comment\nkeep\n")
 	runRefsGit(t, repoPath, "add", "notes.txt")
 	runRefsGit(t, repoPath, "commit", "-m", "update notes")
 	head := refsGitOutput(t, repoPath, "rev-parse", "HEAD")
-	runRefsGit(t, repoPath, "push", exchangePath, "task/i-0001:task/i-0001")
+	runRefsGit(t, repoPath, "push", exchangePath, "task/t-test-0001:task/t-test-0001")
 
 	diff, err := ChangedFileDiff(ctx, exchangePath, "refs/heads/main", head)
 	if err != nil {
@@ -117,12 +117,12 @@ func TestChangedFileDiffPreservesTrailingSpaces(t *testing.T) {
 	runRefsGit(t, "", "init", "--bare", exchangePath)
 	runRefsGit(t, repoPath, "push", exchangePath, "main:main")
 
-	runRefsGit(t, repoPath, "checkout", "-b", "task/i-0001")
+	runRefsGit(t, repoPath, "checkout", "-b", "task/t-test-0001")
 	writeRefsFile(t, repoPath, "trailing.txt", "value   \n")
 	runRefsGit(t, repoPath, "add", "trailing.txt")
 	runRefsGit(t, repoPath, "commit", "-m", "add trailing spaces")
 	head := refsGitOutput(t, repoPath, "rev-parse", "HEAD")
-	runRefsGit(t, repoPath, "push", exchangePath, "task/i-0001:task/i-0001")
+	runRefsGit(t, repoPath, "push", exchangePath, "task/t-test-0001:task/t-test-0001")
 
 	diff, err := ChangedFileDiff(ctx, exchangePath, "refs/heads/main", head)
 	if err != nil {
@@ -153,12 +153,12 @@ func TestChangedFileDiffMatchesQuotedPatchPaths(t *testing.T) {
 	runRefsGit(t, "", "init", "--bare", exchangePath)
 	runRefsGit(t, repoPath, "push", exchangePath, "main:main")
 
-	runRefsGit(t, repoPath, "checkout", "-b", "task/i-0001")
+	runRefsGit(t, repoPath, "checkout", "-b", "task/t-test-0001")
 	writeRefsFile(t, repoPath, relativePath, "new\n")
 	runRefsGit(t, repoPath, "add", ".")
 	runRefsGit(t, repoPath, "commit", "-m", "update quoted path")
 	head := refsGitOutput(t, repoPath, "rev-parse", "HEAD")
-	runRefsGit(t, repoPath, "push", exchangePath, "task/i-0001:task/i-0001")
+	runRefsGit(t, repoPath, "push", exchangePath, "task/t-test-0001:task/t-test-0001")
 
 	diff, err := ChangedFileDiff(ctx, exchangePath, "refs/heads/main", head)
 	if err != nil {

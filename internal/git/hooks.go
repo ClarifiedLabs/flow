@@ -22,7 +22,7 @@ const (
 	ownerActor       = "owner"
 )
 
-var taskRefPattern = regexp.MustCompile(`^refs/heads/task/i-[0-9]{4,}(?:/run-[0-9]+)?$`)
+var taskRefPattern = regexp.MustCompile(`^refs/heads/task/t-(?:[a-z0-9]|[a-z0-9][a-z0-9-]{0,46}[a-z0-9])-[0-9]{4,}(?:/run-[0-9]+)?$`)
 
 type HookInstallOptions struct {
 	BaseBranch  string

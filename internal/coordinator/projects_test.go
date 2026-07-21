@@ -22,21 +22,44 @@ func newProjectService(t *testing.T) *ProjectService {
 	return NewProjectService(store.DB())
 }
 
-func TestNewProjectIDUsesPrefix(t *testing.T) {
-	id, err := NewProjectID()
-	if err != nil {
-		t.Fatalf("new project id: %v", err)
+func TestProjectIDFromNameNormalizesHumanName(t *testing.T) {
+	tests := map[string]string{
+		"Flow App":        "p-flow-app",
+		"  API___Server ": "p-api-server",
+		"Release 2026":    "p-release-2026",
+		"CAFÉ":            "p-caf",
 	}
-	if !strings.HasPrefix(id, "p-") || len(id) <= len("p-") {
-		t.Fatalf("project id = %q, want p-<random>", id)
+	for name, want := range tests {
+		got, err := ProjectIDFromName(name)
+		if err != nil {
+			t.Fatalf("ProjectIDFromName(%q): %v", name, err)
+		}
+		if got != want {
+			t.Errorf("ProjectIDFromName(%q) = %q, want %q", name, got, want)
+		}
 	}
 
-	other, err := NewProjectID()
-	if err != nil {
-		t.Fatalf("new project id: %v", err)
+	for _, name := range []string{"", "---", strings.Repeat("a", maxProjectKeyLength+1)} {
+		if _, err := ProjectIDFromName(name); err == nil {
+			t.Errorf("ProjectIDFromName(%q) succeeded, want error", name)
+		}
 	}
-	if id == other {
-		t.Fatalf("project ids should be random, got %q twice", id)
+}
+
+func TestProjectIDFromTaskID(t *testing.T) {
+	for taskID, wantProject := range map[string]string{
+		"t-flow-app-0001":      "p-flow-app",
+		"t-release-2026-10423": "p-release-2026",
+	} {
+		got, ok := ProjectIDFromTaskID(taskID)
+		if !ok || got != wantProject {
+			t.Errorf("ProjectIDFromTaskID(%q) = (%q, %t), want (%q, true)", taskID, got, ok, wantProject)
+		}
+	}
+	for _, taskID := range []string{"i-0001", "t-flow-001", "t-Flow-0001", "t-flow-nope"} {
+		if projectID, ok := ProjectIDFromTaskID(taskID); ok {
+			t.Errorf("ProjectIDFromTaskID(%q) = (%q, true), want invalid", taskID, projectID)
+		}
 	}
 }
 
@@ -45,7 +68,7 @@ func TestProjectServiceInsertAndLookups(t *testing.T) {
 	service := newProjectService(t)
 
 	inserted, err := service.Insert(ctx, Project{
-		ID:           "p-1111",
+		ID:           "p-demo",
 		Name:         "demo",
 		RepoPath:     "/tmp/demo",
 		BaseBranch:   "main",
@@ -63,7 +86,7 @@ func TestProjectServiceInsertAndLookups(t *testing.T) {
 		t.Fatal("inserted project should carry timestamps")
 	}
 
-	got, err := service.Get(ctx, "p-1111")
+	got, err := service.Get(ctx, "p-demo")
 	if err != nil {
 		t.Fatalf("get project: %v", err)
 	}
@@ -75,24 +98,24 @@ func TestProjectServiceInsertAndLookups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get project by name: %v", err)
 	}
-	if byName.ID != "p-1111" {
-		t.Fatalf("get by name id = %q, want p-1111", byName.ID)
+	if byName.ID != "p-demo" {
+		t.Fatalf("get by name id = %q, want p-demo", byName.ID)
 	}
 
 	byRepo, err := service.GetByRepoPath(ctx, "/tmp/demo")
 	if err != nil {
 		t.Fatalf("get project by repo path: %v", err)
 	}
-	if byRepo.ID != "p-1111" {
-		t.Fatalf("get by repo path id = %q, want p-1111", byRepo.ID)
+	if byRepo.ID != "p-demo" {
+		t.Fatalf("get by repo path id = %q, want p-demo", byRepo.ID)
 	}
 
 	byExchange, err := service.GetByExchangePath(ctx, "/tmp/exchange.git")
 	if err != nil {
 		t.Fatalf("get project by exchange path: %v", err)
 	}
-	if byExchange.ID != "p-1111" {
-		t.Fatalf("get by exchange path id = %q, want p-1111", byExchange.ID)
+	if byExchange.ID != "p-demo" {
+		t.Fatalf("get by exchange path id = %q, want p-demo", byExchange.ID)
 	}
 
 	if _, err := service.Get(ctx, "p-missing"); !errors.Is(err, ErrProjectNotFound) {
@@ -103,12 +126,12 @@ func TestProjectServiceInsertAndLookups(t *testing.T) {
 	}
 }
 
-func TestProjectServiceInsertDedupesName(t *testing.T) {
+func TestProjectServiceInsertRejectsDuplicateName(t *testing.T) {
 	ctx := context.Background()
 	service := newProjectService(t)
 
 	first, err := service.Insert(ctx, Project{
-		ID: "p-aaaa", Name: "demo", RepoPath: "/tmp/demo-a",
+		ID: "p-demo", Name: "demo", RepoPath: "/tmp/demo-a",
 		BaseBranch: "main", ExchangeName: "flow", ExchangeURL: "file:///tmp/a.git",
 	})
 	if err != nil {
@@ -118,26 +141,12 @@ func TestProjectServiceInsertDedupesName(t *testing.T) {
 		t.Fatalf("first name = %q, want demo", first.Name)
 	}
 
-	second, err := service.Insert(ctx, Project{
-		ID: "p-bbbb", Name: "demo", RepoPath: "/tmp/demo-b",
+	_, err = service.Insert(ctx, Project{
+		ID: "p-demo", Name: "demo", RepoPath: "/tmp/demo-b",
 		BaseBranch: "main", ExchangeName: "flow", ExchangeURL: "file:///tmp/b.git",
 	})
-	if err != nil {
-		t.Fatalf("insert second project: %v", err)
-	}
-	if second.Name != "demo-2" {
-		t.Fatalf("second name = %q, want demo-2", second.Name)
-	}
-
-	third, err := service.Insert(ctx, Project{
-		ID: "p-cccc", Name: "demo", RepoPath: "/tmp/demo-c",
-		BaseBranch: "main", ExchangeName: "flow", ExchangeURL: "file:///tmp/c.git",
-	})
-	if err != nil {
-		t.Fatalf("insert third project: %v", err)
-	}
-	if third.Name != "demo-3" {
-		t.Fatalf("third name = %q, want demo-3", third.Name)
+	if !errors.Is(err, ErrProjectNameExists) {
+		t.Fatalf("duplicate name err = %v, want ErrProjectNameExists", err)
 	}
 }
 
@@ -146,14 +155,14 @@ func TestProjectServiceInsertRejectsDuplicateRepoPath(t *testing.T) {
 	service := newProjectService(t)
 
 	if _, err := service.Insert(ctx, Project{
-		ID: "p-aaaa", Name: "demo", RepoPath: "/tmp/demo",
+		ID: "p-demo", Name: "demo", RepoPath: "/tmp/demo",
 		BaseBranch: "main", ExchangeName: "flow", ExchangeURL: "file:///tmp/a.git",
 	}); err != nil {
 		t.Fatalf("insert first project: %v", err)
 	}
 
 	if _, err := service.Insert(ctx, Project{
-		ID: "p-bbbb", Name: "other", RepoPath: "/tmp/demo",
+		ID: "p-other", Name: "other", RepoPath: "/tmp/demo",
 		BaseBranch: "main", ExchangeName: "flow", ExchangeURL: "file:///tmp/b.git",
 	}); !errors.Is(err, ErrProjectRepoPathExists) {
 		t.Fatalf("duplicate repo path err = %v, want ErrProjectRepoPathExists", err)
@@ -165,8 +174,8 @@ func TestProjectServiceListOrdersByName(t *testing.T) {
 	service := newProjectService(t)
 
 	for _, p := range []Project{
-		{ID: "p-2222", Name: "zeta", RepoPath: "/tmp/z", BaseBranch: "main", ExchangeName: "flow", ExchangeURL: "file:///tmp/z.git"},
-		{ID: "p-1111", Name: "alpha", RepoPath: "/tmp/a", BaseBranch: "main", ExchangeName: "flow", ExchangeURL: "file:///tmp/a.git"},
+		{ID: "p-zeta", Name: "zeta", RepoPath: "/tmp/z", BaseBranch: "main", ExchangeName: "flow", ExchangeURL: "file:///tmp/z.git"},
+		{ID: "p-alpha", Name: "alpha", RepoPath: "/tmp/a", BaseBranch: "main", ExchangeName: "flow", ExchangeURL: "file:///tmp/a.git"},
 	} {
 		if _, err := service.Insert(ctx, p); err != nil {
 			t.Fatalf("insert project %s: %v", p.Name, err)

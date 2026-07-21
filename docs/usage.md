@@ -23,8 +23,8 @@ owner token is not placed in JavaScript.
 
 The board shows every project's tasks as cards. A topbar project picker appears
 when more than one project is registered and filters the board by project.
-Because task ids restart per project, project-scoped task routes are the
-unambiguous deep links.
+Task IDs embed their normalized project key, so links such as
+`/ui/tasks/t-flow-app-0001` remain unambiguous across every registered project.
 
 Use **New Task** to create unscheduled work from the browser. The form can
 select a project, workflow, priority, attachments, and whether to schedule the
@@ -74,8 +74,15 @@ commands need no `--server` or `--token` flags. Pass `--server` or `--token`
 only to override the discovered config.
 
 CLI commands auto-detect their project from the current repo's worktree. Run
-them from inside a registered repository, target another project explicitly with
-`--project NAME|ID`, or use a qualified ref like `other/i-0001`.
+them from inside a registered repository or target project-owned collection
+operations explicitly with `--project NAME|ID`. A full task ID is globally
+resolvable, so `flow task show t-flow-app-0001` works from any directory.
+
+Project IDs are derived from the project display name. Flow lowercases ASCII
+letters, replaces punctuation and whitespace runs with hyphens, and keeps the
+display name unchanged. For example, `flow init --name "Flow App"` creates
+project `p-flow-app`, whose first task is `t-flow-app-0001`. Two names that
+normalize to the same key are rejected so identifiers remain predictable.
 
 Tasks:
 

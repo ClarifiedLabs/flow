@@ -369,5 +369,5 @@ func newCheckService(t *testing.T) (*flowdb.Store, *TaskService, *CheckService) 
 		_ = store.Close()
 	})
 
-	return store, NewTaskService(store.DB()), NewCheckService(store.DB())
+	return store, NewTaskService(store.DB(), "p-test"), NewCheckService(store.DB())
 }
