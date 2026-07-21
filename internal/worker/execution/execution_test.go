@@ -764,6 +764,24 @@ func TestWorkerEnvIncludesSessionToken(t *testing.T) {
 	}
 }
 
+func TestWorkerEnvIncludesTopLevelJobChangeID(t *testing.T) {
+	changeID := "ch-workflow"
+	env := workerEnv(tmuxInput{
+		Config: workerConfig("/tmp/work", "file:///tmp/exchange.git"),
+		Job: Job{
+			ID:       "j-workflow",
+			ChangeID: &changeID,
+			Role:     RoleAuthor,
+		},
+		Lease:      Lease{ID: "l-workflow", WorkerID: "w-local"},
+		Payload:    JobPayload{},
+		Entrypoint: Entrypoint{},
+	})
+	if env["FLOW_CHANGE_ID"] != changeID {
+		t.Fatalf("FLOW_CHANGE_ID = %q, want top-level job change id %q", env["FLOW_CHANGE_ID"], changeID)
+	}
+}
+
 func TestWorkerEnvUsesHermeticJobStateDefaults(t *testing.T) {
 	workDir := filepath.Join(t.TempDir(), "work")
 	t.Setenv("HOME", "/host/home")

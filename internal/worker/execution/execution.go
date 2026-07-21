@@ -1064,8 +1064,8 @@ func workerEnv(input tmuxInput) map[string]string {
 	if input.Payload.CheckName != "" {
 		reserved["FLOW_CHECK_NAME"] = input.Payload.CheckName
 	}
-	if input.Payload.ChangeID != "" {
-		reserved["FLOW_CHANGE_ID"] = input.Payload.ChangeID
+	if input.Job.ChangeID != nil {
+		reserved["FLOW_CHANGE_ID"] = *input.Job.ChangeID
 	}
 	if input.Payload.SessionID != "" {
 		reserved["FLOW_SESSION_ID"] = input.Payload.SessionID
