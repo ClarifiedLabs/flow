@@ -962,12 +962,14 @@ func releaseEntrypointStartGate(path string) error {
 // browser, so set-clipboard is enabled and terminal-features is extended with a
 // `*:clipboard` entry so tmux advertises the clipboard capability and emits an
 // OSC 52 clipboard sequence to the outer terminal even when its terminfo does
-// not. OSC 52 is only honored by terminals/clients that implement it; the ttyd
-// build shipped here has no OSC 52 handler, so it does not forward or auto-copy
-// those sequences (a plain drag does not copy in this deployment). The reliable
-// copy path that works on every transport is Shift+drag (bypasses tmux
-// selection for a native browser selection) followed by Ctrl/Cmd+C; the web UI
-// surfaces that as a hint.
+// not. The ttyd build shipped here has no OSC 52 handler of its own, so the
+// coordinator terminal proxy injects a small bridge script into ttyd's page
+// that forwards those OSC 52 sequences to the browser clipboard
+// (internal/web/assets/terminal-clipboard.js); as a result a plain drag-select
+// in the web UI copies locally while tmux keeps owning the mouse. Shift+drag
+// (bypasses tmux selection for a native browser selection) followed by
+// Ctrl/Cmd+C remains the transport-independent fallback — for non-web attach
+// such as the CLI `tmux attach` — and the web UI surfaces that as a hint.
 func configureTmuxForJob(ctx context.Context, cfg config.WorkerConfig, sessionName string) error {
 	session := strings.TrimSpace(sessionName)
 	options := [][]string{

@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -17,6 +19,7 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	"github.com/ClarifiedLabs/flow/internal/lifecycle"
 	"github.com/ClarifiedLabs/flow/internal/terminal"
+	flowweb "github.com/ClarifiedLabs/flow/internal/web"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
@@ -25,6 +28,15 @@ const (
 	nativeHookStateLoopTransitionThreshold = 6
 	nativeHookStateLoopTransitionLimit     = 20
 	nativeHookStateLoopStatusMessage       = "Flow detected repeated native-hook session state changes and left the session waiting for human attention."
+)
+
+const (
+	// terminalClipboardAssetName is the OSC 52 → browser clipboard bridge script
+	// served from the terminal path and injected into ttyd's terminal page.
+	terminalClipboardAssetName = "terminal-clipboard.js"
+	// terminalClipboardScriptTagFormat is the <script> tag injected into ttyd's
+	// terminal HTML page; %s is the terminal proxy base path (session or job).
+	terminalClipboardScriptTagFormat = `<script src="%s/terminal-clipboard.js"></script>`
 )
 
 func (s *Server) serveTerminalBrowserRequest(w http.ResponseWriter, r *http.Request) bool {
@@ -377,6 +389,10 @@ func (s *projectServer) handleSessionTerminalAccess(w http.ResponseWriter, r *ht
 }
 
 func (s *projectServer) handleSessionTerminalProxy(w http.ResponseWriter, r *http.Request, sessionID string, suffix []string) {
+	if len(suffix) == 1 && suffix[0] == terminalClipboardAssetName {
+		s.serveTerminalClipboardAsset(w)
+		return
+	}
 	registered, err := s.sessions.TerminalTarget(r.Context(), sessionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "terminal_not_found", "terminal target not found")
@@ -386,7 +402,7 @@ func (s *projectServer) handleSessionTerminalProxy(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusBadRequest, "terminal_proxy_failed", err.Error())
 		return
 	}
-	s.proxyTerminalTarget(w, r, registered.TargetURL, suffix)
+	s.proxyTerminalTarget(w, r, registered.TargetURL, suffix, fmt.Sprintf(terminalClipboardScriptTagFormat, terminal.TerminalProxyPath(sessionID)))
 }
 
 func (s *projectServer) handleJobTerminalRegister(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, jobID string) {
@@ -427,6 +443,10 @@ func (s *projectServer) handleJobTerminalAccess(w http.ResponseWriter, r *http.R
 }
 
 func (s *projectServer) handleJobTerminalProxy(w http.ResponseWriter, r *http.Request, jobID string, suffix []string) {
+	if len(suffix) == 1 && suffix[0] == terminalClipboardAssetName {
+		s.serveTerminalClipboardAsset(w)
+		return
+	}
 	registered, err := s.sessions.JobTerminalTarget(r.Context(), jobID)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "terminal_not_found", "terminal target not found")
@@ -436,7 +456,24 @@ func (s *projectServer) handleJobTerminalProxy(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "terminal_proxy_failed", err.Error())
 		return
 	}
-	s.proxyTerminalTarget(w, r, registered.TargetURL, suffix)
+	s.proxyTerminalTarget(w, r, registered.TargetURL, suffix, fmt.Sprintf(terminalClipboardScriptTagFormat, terminal.JobTerminalProxyPath(jobID)))
+}
+
+// serveTerminalClipboardAsset serves the OSC 52 → browser clipboard bridge
+// script from the terminal path so the injected <script src> is same-origin
+// with ttyd's page. It sits behind the terminal access cookie / owner-token
+// auth already enforced on the terminal path.
+func (s *projectServer) serveTerminalClipboardAsset(w http.ResponseWriter) {
+	contents, contentType, ok := flowweb.Asset(terminalClipboardAssetName)
+	if !ok {
+		writeError(w, http.StatusNotFound, "terminal_asset_not_found", "terminal clipboard asset not found")
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Security-Policy", terminalSandboxCSP)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(contents)
 }
 
 // transcriptUploadLimit bounds the request body the coordinator will read for
@@ -583,7 +620,7 @@ func (s *projectServer) serveTranscript(w http.ResponseWriter, id string) {
 	_, _ = io.Copy(w, reader)
 }
 
-func (s *Server) proxyTerminalTarget(w http.ResponseWriter, r *http.Request, targetURL string, suffix []string) {
+func (s *Server) proxyTerminalTarget(w http.ResponseWriter, r *http.Request, targetURL string, suffix []string, clipboardScriptTag string) {
 	target, err := url.Parse(targetURL)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "terminal_proxy_failed", err.Error())
@@ -607,9 +644,29 @@ func (s *Server) proxyTerminalTarget(w http.ResponseWriter, r *http.Request, tar
 			request.Host = target.Host
 			request.Header.Del("Authorization")
 			request.Header.Del(protocolHeader)
+			// The terminal HTML page is rewritten below (a clipboard-bridge
+			// <script> is injected), so strip the conditional and encoding
+			// request headers that would otherwise let the browser or upstream
+			// serve a cached, un-injected copy or a body we cannot rewrite.
+			request.Header.Del("Accept-Encoding")
+			request.Header.Del("If-None-Match")
+			request.Header.Del("If-Modified-Since")
 		},
 		ModifyResponse: func(response *http.Response) error {
 			response.Header.Set("Content-Security-Policy", terminalSandboxCSP)
+			// Only rewrite the terminal HTML page itself: status 200, an HTML
+			// content type, and no upstream encoding we would have to decode
+			// first (Accept-Encoding is stripped in the Director, so this is a
+			// belt-and-braces guard). Non-HTML responses — /pty (WebSocket 101),
+			// /auth_token, and ttyd static assets — pass through untouched.
+			if clipboardScriptTag != "" &&
+				response.StatusCode == http.StatusOK &&
+				strings.Contains(response.Header.Get("Content-Type"), "text/html") &&
+				response.Header.Get("Content-Encoding") == "" {
+				if err := injectTerminalClipboardScript(response, clipboardScriptTag); err != nil {
+					return err
+				}
+			}
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -617,6 +674,48 @@ func (s *Server) proxyTerminalTarget(w http.ResponseWriter, r *http.Request, tar
 		},
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+// injectTerminalClipboardScript appends the OSC 52 → browser clipboard bridge
+// <script> to ttyd's terminal HTML page. ttyd serves exactly one HTML page (the
+// terminal UI), so the text/html content-type guard in ModifyResponse is enough
+// to leave /pty (WebSocket 101), /auth_token, and static assets untouched. The
+// body length and validators change, so Content-Length is recomputed, ETag and
+// Last-Modified are dropped, and the page is marked no-store so browsers never
+// serve a cached, un-injected copy.
+func injectTerminalClipboardScript(response *http.Response, scriptTag string) error {
+	body, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if err != nil {
+		return err
+	}
+	// Insert immediately before </body> (case-insensitive); append at the end if
+	// the tag is absent.
+	injected := insertBeforeClosingBody(body, scriptTag)
+	response.Body = io.NopCloser(bytes.NewReader(injected))
+	response.ContentLength = int64(len(injected))
+	response.Header.Set("Content-Length", strconv.Itoa(len(injected)))
+	response.Header.Del("ETag")
+	response.Header.Del("Last-Modified")
+	response.Header.Set("Cache-Control", "no-store")
+	return nil
+}
+
+// insertBeforeClosingBody returns body with scriptTag inserted immediately
+// before the first case-insensitive </body> occurrence, or appended if none is
+// present.
+func insertBeforeClosingBody(body []byte, scriptTag string) []byte {
+	lower := bytes.ToLower(body)
+	marker := []byte("</body>")
+	index := bytes.Index(lower, marker)
+	if index < 0 {
+		return append(append([]byte{}, body...), scriptTag...)
+	}
+	out := make([]byte, 0, len(body)+len(scriptTag))
+	out = append(out, body[:index]...)
+	out = append(out, scriptTag...)
+	out = append(out, body[index:]...)
+	return out
 }
 
 func terminalProxyPath(base string, suffix []string) string {

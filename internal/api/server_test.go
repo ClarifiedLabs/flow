@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -2260,6 +2261,92 @@ func TestSessionTerminalProxyRequiresOwnerAndProxiesRegisteredTarget(t *testing.
 	}
 	if response.Header().Get("Content-Security-Policy") != terminalSandboxCSP {
 		t.Fatalf("proxy CSP = %q, want %q", response.Header().Get("Content-Security-Policy"), terminalSandboxCSP)
+	}
+}
+
+func TestSessionTerminalProxyInjectsClipboardBridge(t *testing.T) {
+	fixture := newTestFixture(t)
+	started := startAuthorSessionForStatusTest(t, fixture, "Terminal clipboard issue")
+	const terminalHTML = "<html><body>term</body></html>"
+	const ptyBody = "pty-stream"
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(terminalHTML))
+		case "/pty":
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = w.Write([]byte(ptyBody))
+		default:
+			t.Fatalf("unexpected proxied request path = %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(target.Close)
+
+	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v2/sessions/"+started.Session.ID+"/terminal", sessionTerminalRequest{
+		TargetURL: target.URL,
+	}, http.StatusOK, nil)
+
+	var access sessionTerminalAccessResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/sessions/"+started.Session.ID+"/terminal-token", map[string]string{}, http.StatusOK, &access)
+	login := httptest.NewRecorder()
+	fixture.Server.ServeHTTP(login, httptest.NewRequest(http.MethodGet, access.Access.LoginPath, nil))
+	if login.Code != http.StatusSeeOther {
+		t.Fatalf("login status = %d body = %q", login.Code, login.Body.String())
+	}
+	cookies := login.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("login cookies = %+v", cookies)
+	}
+
+	proxyGet := func(path string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.AddCookie(cookies[0])
+		response := httptest.NewRecorder()
+		fixture.Server.ServeHTTP(response, request)
+		return response
+	}
+
+	// The terminal HTML page gets the clipboard-bridge <script> injected before
+	// </body>, with a matching Content-Length.
+	htmlResponse := proxyGet("/v2/sessions/" + started.Session.ID + "/terminal")
+	if htmlResponse.Code != http.StatusOK {
+		t.Fatalf("terminal page status = %d body = %q", htmlResponse.Code, htmlResponse.Body.String())
+	}
+	wantScript := `<script src="/v2/sessions/` + started.Session.ID + `/terminal/terminal-clipboard.js"></script>`
+	htmlBody := htmlResponse.Body.String()
+	if !strings.Contains(htmlBody, wantScript+"</body>") {
+		t.Fatalf("terminal page body = %q, want injected %q before </body>", htmlBody, wantScript)
+	}
+	if htmlResponse.Header().Get("Content-Security-Policy") != terminalSandboxCSP {
+		t.Fatalf("terminal page CSP = %q, want %q", htmlResponse.Header().Get("Content-Security-Policy"), terminalSandboxCSP)
+	}
+	if got := htmlResponse.Header().Get("Content-Length"); got != strconv.Itoa(len(htmlBody)) {
+		t.Fatalf("terminal page Content-Length = %q, want %d", got, len(htmlBody))
+	}
+
+	// Non-HTML proxied responses pass through untouched.
+	ptyResponse := proxyGet("/v2/sessions/" + started.Session.ID + "/terminal/pty")
+	if ptyResponse.Code != http.StatusOK {
+		t.Fatalf("pty status = %d body = %q", ptyResponse.Code, ptyResponse.Body.String())
+	}
+	if ptyResponse.Body.String() != ptyBody {
+		t.Fatalf("pty body = %q, want %q (non-HTML untouched)", ptyResponse.Body.String(), ptyBody)
+	}
+	if strings.Contains(ptyResponse.Body.String(), "terminal-clipboard.js") {
+		t.Fatalf("pty body unexpectedly injected: %q", ptyResponse.Body.String())
+	}
+
+	// The bridge script itself is served from the terminal path.
+	assetResponse := proxyGet("/v2/sessions/" + started.Session.ID + "/terminal/terminal-clipboard.js")
+	if assetResponse.Code != http.StatusOK {
+		t.Fatalf("clipboard asset status = %d body = %q", assetResponse.Code, assetResponse.Body.String())
+	}
+	if contentType := assetResponse.Header().Get("Content-Type"); !strings.Contains(contentType, "javascript") {
+		t.Fatalf("clipboard asset Content-Type = %q, want javascript", contentType)
+	}
+	if !strings.Contains(assetResponse.Body.String(), "registerOscHandler") {
+		t.Fatalf("clipboard asset body missing registerOscHandler: %q", assetResponse.Body.String())
 	}
 }
 

@@ -173,14 +173,14 @@ export function renderTerminalPopOutButton(loginPath) {
     : "";
 }
 
-// terminalSelectionHint documents the reliable copy path. tmux owns mouse
-// selection (mouse is on so wheel scrolling works), so a plain drag selection
-// vanishes on mouse-up in the browser and is not copied. tmux does emit OSC 52
-// (see set-clipboard), but the ttyd terminal shipped here has no OSC 52 handler,
-// so that path does not auto-copy in this deployment. Shift+drag bypasses tmux
+// terminalSelectionHint documents the copy paths. tmux owns mouse selection
+// (mouse is on so wheel scrolling works), but it also emits OSC 52 on selection
+// (see set-clipboard) and the coordinator terminal proxy injects a bridge script
+// into ttyd's page that forwards OSC 52 to the browser clipboard, so a plain
+// drag-select in the web UI auto-copies locally. Shift+drag bypasses tmux
 // selection for a native browser selection that Ctrl/Cmd+C copies on every
-// transport; that is what this hint teaches.
-export const terminalSelectionHint = '<span class="terminal-hint">Shift+drag to select</span>';
+// transport; it remains the fallback (e.g. non-web attach) and the manual path.
+export const terminalSelectionHint = '<span class="terminal-hint">Drag to select (auto-copies) · Shift+drag for manual selection</span>';
 
 export function openTerminalWindow(loginPath) {
   const url = String(loginPath || "").trim();

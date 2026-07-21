@@ -374,8 +374,13 @@ The browser terminal runs the agent inside a tmux session exposed over ttyd.
 Each job's tmux session is configured with mouse on, a 100k-line history limit,
 and `set-clipboard on`.
 
-- Copy text by holding Shift while dragging to make a native browser selection,
-  then press Ctrl/Cmd+C.
+- Drag to select: a plain drag-select copies the selection to your local
+  clipboard automatically (tmux emits OSC 52 and the coordinator terminal proxy
+  bridges it to the browser clipboard). This requires a secure context — HTTPS
+  or localhost.
+- Hold Shift while dragging to make a native browser selection, then press
+  Ctrl/Cmd+C. This is the fallback when clipboard access is unavailable and the
+  copy path for non-web attach (e.g. the CLI `tmux attach`).
 - Scroll with the mouse wheel.
 - Press Ctrl-b [ to enter tmux copy mode and move through the full pane
   history; press q to leave copy mode.
