@@ -44,31 +44,31 @@ func TestStampImageAttachmentsFiltersToImagesAndStampsDescriptors(t *testing.T) 
 	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
-	_, issues := newIssueService(t, filepath.Join(dir, "flow.db"))
-	store := NewIssueAttachmentStore(filepath.Join(dir, "attachments"))
+	_, tasks := newTaskService(t, filepath.Join(dir, "flow.db"))
+	store := NewTaskAttachmentStore(filepath.Join(dir, "attachments"))
 
-	issue, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Image issue"})
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Image task"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 	// An image attachment (png) and a non-image attachment (text) and an svg
 	// (image/* but excluded).
-	if _, err := issues.CreateIssueAttachment(ctx, CreateIssueAttachmentInput{
-		IssueID: issue.ID, Stage: IssueAttachmentStageInitial,
+	if _, err := tasks.CreateTaskAttachment(ctx, CreateTaskAttachmentInput{
+		TaskID: task.ID, Stage: TaskAttachmentStageInitial,
 		Filename: "shot.png", ContentType: "image/png",
 		CreatedBy: ActorHuman, Reader: strings.NewReader("png-bytes"),
 	}, store); err != nil {
 		t.Fatalf("create png attachment: %v", err)
 	}
-	if _, err := issues.CreateIssueAttachment(ctx, CreateIssueAttachmentInput{
-		IssueID: issue.ID, Stage: IssueAttachmentStageInitial,
+	if _, err := tasks.CreateTaskAttachment(ctx, CreateTaskAttachmentInput{
+		TaskID: task.ID, Stage: TaskAttachmentStageInitial,
 		Filename: "notes.txt", ContentType: "text/plain",
 		CreatedBy: ActorHuman, Reader: strings.NewReader("notes"),
 	}, store); err != nil {
 		t.Fatalf("create txt attachment: %v", err)
 	}
-	if _, err := issues.CreateIssueAttachment(ctx, CreateIssueAttachmentInput{
-		IssueID: issue.ID, Stage: IssueAttachmentStageInitial,
+	if _, err := tasks.CreateTaskAttachment(ctx, CreateTaskAttachmentInput{
+		TaskID: task.ID, Stage: TaskAttachmentStageInitial,
 		Filename: "diagram.svg", ContentType: "image/svg+xml",
 		CreatedBy: ActorHuman, Reader: strings.NewReader("<svg/>"),
 	}, store); err != nil {
@@ -76,12 +76,12 @@ func TestStampImageAttachmentsFiltersToImagesAndStampsDescriptors(t *testing.T) 
 	}
 
 	payload := map[string]any{}
-	if err := stampImageAttachments(ctx, issues, payload, issue.ID); err != nil {
+	if err := stampImageAttachments(ctx, tasks, payload, task.ID); err != nil {
 		t.Fatalf("stamp image attachments: %v", err)
 	}
-	descriptors, ok := payload["image_attachments"].([]IssueImageAttachment)
+	descriptors, ok := payload["image_attachments"].([]TaskImageAttachment)
 	if !ok {
-		t.Fatalf("image_attachments = %#v, want []IssueImageAttachment", payload["image_attachments"])
+		t.Fatalf("image_attachments = %#v, want []TaskImageAttachment", payload["image_attachments"])
 	}
 	if len(descriptors) != 1 {
 		t.Fatalf("image attachments = %+v, want 1 (png only)", descriptors)
@@ -91,20 +91,20 @@ func TestStampImageAttachmentsFiltersToImagesAndStampsDescriptors(t *testing.T) 
 	}
 }
 
-func TestStampImageAttachmentsStampsEmptyListForIssueWithoutImages(t *testing.T) {
+func TestStampImageAttachmentsStampsEmptyListForTaskWithoutImages(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
-	_, issues := newIssueService(t, filepath.Join(dir, "flow.db"))
-	issue, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "No images"})
+	_, tasks := newTaskService(t, filepath.Join(dir, "flow.db"))
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "No images"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 	payload := map[string]any{}
-	if err := stampImageAttachments(ctx, issues, payload, issue.ID); err != nil {
+	if err := stampImageAttachments(ctx, tasks, payload, task.ID); err != nil {
 		t.Fatalf("stamp image attachments: %v", err)
 	}
-	descriptors, ok := payload["image_attachments"].([]IssueImageAttachment)
+	descriptors, ok := payload["image_attachments"].([]TaskImageAttachment)
 	if !ok {
 		t.Fatalf("image_attachments = %#v, want typed empty slice", payload["image_attachments"])
 	}

@@ -1,7 +1,7 @@
 // Unified lifecycle timeline + session/change/relation rendering.
 
 import { renderStatusKindBadge } from "./attention.js";
-import { issueHref } from "./api.js";
+import { taskHref } from "./api.js";
 import { cardLabelKey, renderPhaseBadge } from "./board.js";
 import { formatDate, formatRelative, shortSHA } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
@@ -62,20 +62,20 @@ export function renderHandoffSummary(handoff) {
   return `<p class="card-status">${escapeHTML(label)}${summary ? `: ${renderMarkdown(summary, { inline: true })}` : ""}</p>`;
 }
 
-export function renderRelation(relation, issueID, projectID = "") {
-  const source = value(relation, "source_issue_id", "SourceIssueID");
-  const target = value(relation, "target_issue_id", "TargetIssueID");
-  const related = source === issueID ? target : source;
-  const direction = source === issueID ? "outbound" : "inbound";
+export function renderRelation(relation, taskID, projectID = "") {
+  const source = value(relation, "source_task_id", "SourceTaskID");
+  const target = value(relation, "target_task_id", "TargetTaskID");
+  const related = source === taskID ? target : source;
+  const direction = source === taskID ? "outbound" : "inbound";
   return `
     <article class="feed-item">
       <strong>${escapeHTML(value(relation, "kind", "Kind"))}</strong><span>${escapeHTML(direction)}</span>
-      <p><a href="${escapeAttr(issueHref(projectID, related))}" data-link>${escapeHTML(related)}</a></p>
+      <p><a href="${escapeAttr(taskHref(projectID, related))}" data-link>${escapeHTML(related)}</a></p>
     </article>
   `;
 }
 
-export function renderIssueChange(change) {
+export function renderTaskChange(change) {
   const changeID = value(change, "id", "ID");
   const readyAt = value(change, "ready_at", "ReadyAt");
   const mergedAt = value(change, "merged_at", "MergedAt");
@@ -88,9 +88,9 @@ export function renderIssueChange(change) {
   `;
 }
 
-export function renderIssueSession(session) {
+export function renderTaskSession(session) {
   // Compact session row for the unified timeline. The raw session id is no
-  // longer the headline (it is largely meaningless and the issue id is already
+  // longer the headline (it is largely meaningless and the task id is already
   // on the page): the row leads with the state, then worker/branch, with the
   // transcript/terminal controls only when the backend reports them ready.
   const sessionID = value(session, "id", "ID");
@@ -214,7 +214,7 @@ export function groupSessionStateRuns(entries) {
 // when the backend enriched them with a session_id, terminal/transcript
 // controls for that exact session.
 export function renderTimelineRow(entry) {
-  if (entry.type === "session") return renderIssueSession(entry.record);
+  if (entry.type === "session") return renderTaskSession(entry.record);
   if (entry.type === "status") return renderTimelineStatusRow(entry.record);
   if (entry.type === "session-run") return renderSessionStateRun(entry);
   return renderTimelineTransitionRow(entry.record);

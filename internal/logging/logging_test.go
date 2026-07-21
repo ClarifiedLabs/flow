@@ -8,14 +8,14 @@ import (
 )
 
 func TestStripLogLevelFlag(t *testing.T) {
-	args, level, ok, err := StripLogLevelFlag([]string{"issue", "list", "--log-level", "debug", "--server", "http://example.test"})
+	args, level, ok, err := StripLogLevelFlag([]string{"task", "list", "--log-level", "debug", "--server", "http://example.test"})
 	if err != nil {
 		t.Fatalf("StripLogLevelFlag returned error: %v", err)
 	}
 	if !ok || level != "debug" {
 		t.Fatalf("level = %q ok = %v, want debug true", level, ok)
 	}
-	if got := strings.Join(args, " "); got != "issue list --server http://example.test" {
+	if got := strings.Join(args, " "); got != "task list --server http://example.test" {
 		t.Fatalf("args = %q", got)
 	}
 

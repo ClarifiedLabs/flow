@@ -32,7 +32,7 @@ func validStatusKind(kind string) bool {
 
 type StatusLogEntry struct {
 	ID        int64     `json:"id"`
-	IssueID   string    `json:"issue_id"`
+	TaskID    string    `json:"task_id"`
 	ChangeID  string    `json:"change_id,omitempty"`
 	SessionID string    `json:"session_id,omitempty"`
 	Actor     string    `json:"actor"`
@@ -42,7 +42,7 @@ type StatusLogEntry struct {
 }
 
 type WriteStatusInput struct {
-	IssueID   string
+	TaskID    string
 	ChangeID  string
 	SessionID string
 	Actor     string
@@ -63,13 +63,13 @@ func NewStatusService(database *sql.DB) *StatusService {
 }
 
 func (s *StatusService) Write(ctx context.Context, input WriteStatusInput) (StatusLogEntry, error) {
-	input.IssueID = strings.TrimSpace(input.IssueID)
+	input.TaskID = strings.TrimSpace(input.TaskID)
 	input.ChangeID = strings.TrimSpace(input.ChangeID)
 	input.SessionID = strings.TrimSpace(input.SessionID)
 	input.Actor = strings.TrimSpace(input.Actor)
 	input.Message = strings.TrimSpace(input.Message)
-	if input.IssueID == "" {
-		return StatusLogEntry{}, errors.New("issue id is required")
+	if input.TaskID == "" {
+		return StatusLogEntry{}, errors.New("task id is required")
 	}
 	if input.Message == "" {
 		return StatusLogEntry{}, errors.New("status message is required")
@@ -88,7 +88,7 @@ func (s *StatusService) Write(ctx context.Context, input WriteStatusInput) (Stat
 	nowText := formatTime(s.now().UTC())
 	result, err := s.db.ExecContext(ctx, `
 INSERT INTO status_log (
-	issue_id,
+	task_id,
 	change_id,
 	session_id,
 	actor,
@@ -96,7 +96,7 @@ INSERT INTO status_log (
 	kind,
 	created_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		input.IssueID,
+		input.TaskID,
 		sqlitex.NullableNonEmptyString(input.ChangeID),
 		sqlitex.NullableNonEmptyString(input.SessionID),
 		input.Actor,
@@ -121,12 +121,12 @@ func (s *StatusService) WriteSessionStatus(ctx context.Context, sessionID string
 		return StatusLogEntry{}, errors.New("session id is required")
 	}
 
-	var issueID string
+	var taskID string
 	var changeID string
 	if err := s.db.QueryRowContext(ctx, `
-SELECT issue_id, change_id
+SELECT task_id, change_id
 FROM sessions
-WHERE id = ?`, sessionID).Scan(&issueID, &changeID); err != nil {
+WHERE id = ?`, sessionID).Scan(&taskID, &changeID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return StatusLogEntry{}, errors.New("session not found")
 		}
@@ -134,7 +134,7 @@ WHERE id = ?`, sessionID).Scan(&issueID, &changeID); err != nil {
 	}
 
 	return s.Write(ctx, WriteStatusInput{
-		IssueID:   issueID,
+		TaskID:    taskID,
 		ChangeID:  changeID,
 		SessionID: sessionID,
 		Actor:     actor,
@@ -145,30 +145,30 @@ WHERE id = ?`, sessionID).Scan(&issueID, &changeID); err != nil {
 
 func (s *StatusService) Get(ctx context.Context, id int64) (StatusLogEntry, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, issue_id, COALESCE(change_id, ''), COALESCE(session_id, ''), actor, message, kind, created_at
+SELECT id, task_id, COALESCE(change_id, ''), COALESCE(session_id, ''), actor, message, kind, created_at
 FROM status_log
 WHERE id = ?`, id)
 
 	return scanStatusLogEntry(row)
 }
 
-func (s *StatusService) ListForIssue(ctx context.Context, issueID string, limit int) ([]StatusLogEntry, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return nil, errors.New("issue id is required")
+func (s *StatusService) ListForTask(ctx context.Context, taskID string, limit int) ([]StatusLogEntry, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, errors.New("task id is required")
 	}
 	if limit <= 0 {
 		limit = 20
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, issue_id, COALESCE(change_id, ''), COALESCE(session_id, ''), actor, message, kind, created_at
+SELECT id, task_id, COALESCE(change_id, ''), COALESCE(session_id, ''), actor, message, kind, created_at
 FROM status_log
-WHERE issue_id = ?
+WHERE task_id = ?
 ORDER BY created_at DESC, id DESC
-LIMIT ?`, issueID, limit)
+LIMIT ?`, taskID, limit)
 	if err != nil {
-		return nil, fmt.Errorf("list issue status: %w", err)
+		return nil, fmt.Errorf("list task status: %w", err)
 	}
 	return scanRows(rows, scanStatusLogEntry)
 }
@@ -234,7 +234,7 @@ SELECT EXISTS (
 }
 
 // ListRecentByKind returns the most recent status entries whose kind is in the
-// provided set, across all issues. Invalid kinds are ignored; an empty kind set
+// provided set, across all tasks. Invalid kinds are ignored; an empty kind set
 // yields no rows. It is the read primitive for surfacing blocker/question
 // entries (e.g. a feedback view) and is consumed by downstream feedback work.
 func (s *StatusService) ListRecentByKind(ctx context.Context, kinds []string, limit int) ([]StatusLogEntry, error) {
@@ -258,7 +258,7 @@ func (s *StatusService) ListRecentByKind(ctx context.Context, kinds []string, li
 	args = append(args, limit)
 
 	query := fmt.Sprintf(`
-SELECT id, issue_id, COALESCE(change_id, ''), COALESCE(session_id, ''), actor, message, kind, created_at
+SELECT id, task_id, COALESCE(change_id, ''), COALESCE(session_id, ''), actor, message, kind, created_at
 FROM status_log
 WHERE kind IN (%s)
 ORDER BY created_at DESC, id DESC
@@ -271,12 +271,12 @@ LIMIT ?`, strings.Join(placeholders, ", "))
 	return scanRows(rows, scanStatusLogEntry)
 }
 
-func scanStatusLogEntry(scanner issueScanner) (StatusLogEntry, error) {
+func scanStatusLogEntry(scanner taskScanner) (StatusLogEntry, error) {
 	var entry StatusLogEntry
 	var createdAt string
 	if err := scanner.Scan(
 		&entry.ID,
-		&entry.IssueID,
+		&entry.TaskID,
 		&entry.ChangeID,
 		&entry.SessionID,
 		&entry.Actor,

@@ -18,7 +18,7 @@ var RequiredSections = []string{
 }
 
 type TemplateInput struct {
-	IssueID               string
+	TaskID                string
 	ChangeID              string
 	SessionID             string
 	Branch                string
@@ -41,7 +41,7 @@ func RenderTemplate(input TemplateInput) string {
 
 	var builder strings.Builder
 	builder.WriteString("# Flow Handoff\n\n")
-	writeMetadata(&builder, "Issue", input.IssueID)
+	writeMetadata(&builder, "Task", input.TaskID)
 	writeMetadata(&builder, "Change", input.ChangeID)
 	writeMetadata(&builder, "Session", input.SessionID)
 	writeMetadata(&builder, "Branch", input.Branch)

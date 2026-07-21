@@ -28,10 +28,10 @@ const (
 	FlowPhaseCompleted FlowPhaseState = "completed"
 )
 
-// FlowCursor is an issue's frozen position within its flow: the snapshot
+// FlowCursor is an task's frozen position within its flow: the snapshot
 // resolved at schedule time plus the current phase index and state.
 type FlowCursor struct {
-	IssueID      string         `json:"issue_id"`
+	TaskID       string         `json:"task_id"`
 	Snapshot     FlowSnapshot   `json:"snapshot"`
 	PhaseIndex   int            `json:"phase_index"`
 	PhaseState   FlowPhaseState `json:"phase_state"`
@@ -51,7 +51,7 @@ func (c FlowCursor) OnFinalPhase() bool {
 }
 
 // IndicatesWorking reports whether the cursor alone (no active session) keeps
-// the issue in the working phase: paused at a human gate, or mid-pipeline past
+// the task in the working phase: paused at a human gate, or mid-pipeline past
 // the first phase.
 func (c FlowCursor) IndicatesWorking() bool {
 	return cursorIndicatesWorking(c.PhaseIndex, c.PhaseState)
@@ -59,7 +59,7 @@ func (c FlowCursor) IndicatesWorking() bool {
 
 // PhaseHandoff is one work phase's completion artifact.
 type PhaseHandoff struct {
-	IssueID    string    `json:"issue_id"`
+	TaskID     string    `json:"task_id"`
 	PhaseIndex int       `json:"phase_index"`
 	PhaseName  string    `json:"phase_name"`
 	Content    string    `json:"content"`
@@ -69,14 +69,14 @@ type PhaseHandoff struct {
 }
 
 type StorePhaseHandoffInput struct {
-	IssueID    string
+	TaskID     string
 	PhaseIndex int
 	PhaseName  string
 	Content    string
 	HeadSHA    string
 }
 
-// FlowCursorService owns issue_flow_cursor and issue_phase_handoffs. Cursor
+// FlowCursorService owns task_flow_cursor and task_phase_handoffs. Cursor
 // mutations are compare-and-swap on the phase index so the lifecycle engine's
 // at-least-once event delivery stays idempotent: a replayed advance/pause
 // simply matches zero rows.
@@ -90,16 +90,16 @@ func NewFlowCursorService(database *sql.DB, flows *FlowService) *FlowCursorServi
 	return &FlowCursorService{db: database, flows: flows, now: sqlitex.UTCNow}
 }
 
-// GetCursor loads the issue's cursor; ok is false when the issue has none.
-func (s *FlowCursorService) GetCursor(ctx context.Context, issueID string) (FlowCursor, bool, error) {
+// GetCursor loads the task's cursor; ok is false when the task has none.
+func (s *FlowCursorService) GetCursor(ctx context.Context, taskID string) (FlowCursor, bool, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT issue_id, flow_snapshot_json, phase_index, phase_state, gate_feedback, updated_at
-FROM issue_flow_cursor WHERE issue_id = ?`, issueID)
+SELECT task_id, flow_snapshot_json, phase_index, phase_state, gate_feedback, updated_at
+FROM task_flow_cursor WHERE task_id = ?`, taskID)
 
 	var cursor FlowCursor
 	var snapshotJSON, updatedAt string
 	var state string
-	err := row.Scan(&cursor.IssueID, &snapshotJSON, &cursor.PhaseIndex, &state, &cursor.GateFeedback, &updatedAt)
+	err := row.Scan(&cursor.TaskID, &snapshotJSON, &cursor.PhaseIndex, &state, &cursor.GateFeedback, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return FlowCursor{}, false, nil
 	}
@@ -108,7 +108,7 @@ FROM issue_flow_cursor WHERE issue_id = ?`, issueID)
 	}
 	cursor.PhaseState = FlowPhaseState(state)
 	if err := json.Unmarshal([]byte(snapshotJSON), &cursor.Snapshot); err != nil {
-		return FlowCursor{}, false, fmt.Errorf("decode flow snapshot for %s: %w", issueID, err)
+		return FlowCursor{}, false, fmt.Errorf("decode flow snapshot for %s: %w", taskID, err)
 	}
 	if cursor.UpdatedAt, err = sqlitex.ParseTime(updatedAt); err != nil {
 		return FlowCursor{}, false, fmt.Errorf("parse flow cursor updated_at: %w", err)
@@ -116,13 +116,13 @@ FROM issue_flow_cursor WHERE issue_id = ?`, issueID)
 	return cursor, true, nil
 }
 
-// EnsureCursor returns the issue's cursor, freezing one from the issue's flow
-// (or the project default) on first use — i.e. when the issue is first
+// EnsureCursor returns the task's cursor, freezing one from the task's flow
+// (or the project default) on first use — i.e. when the task is first
 // scheduled into work. A missing or deleted flow falls back to the project
 // default; ok is false when no flow could be resolved at all (a project with
 // no flows configured), which callers treat as the implicit single-phase flow.
-func (s *FlowCursorService) EnsureCursor(ctx context.Context, issueID string) (FlowCursor, bool, error) {
-	cursor, ok, err := s.GetCursor(ctx, issueID)
+func (s *FlowCursorService) EnsureCursor(ctx context.Context, taskID string) (FlowCursor, bool, error) {
+	cursor, ok, err := s.GetCursor(ctx, taskID)
 	if err != nil {
 		return FlowCursor{}, false, err
 	}
@@ -132,16 +132,16 @@ func (s *FlowCursorService) EnsureCursor(ctx context.Context, issueID string) (F
 
 	var flowID sql.NullString
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT flow_id FROM issues WHERE id = ?`, issueID).Scan(&flowID); err != nil {
+		`SELECT flow_id FROM tasks WHERE id = ?`, taskID).Scan(&flowID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return FlowCursor{}, false, fmt.Errorf("issue %s not found", issueID)
+			return FlowCursor{}, false, fmt.Errorf("task %s not found", taskID)
 		}
-		return FlowCursor{}, false, fmt.Errorf("load issue flow id: %w", err)
+		return FlowCursor{}, false, fmt.Errorf("load task flow id: %w", err)
 	}
 
 	snapshot, err := s.flows.ResolveSnapshot(ctx, flowID.String)
 	if err != nil && flowID.Valid && strings.TrimSpace(flowID.String) != "" {
-		// The selected flow may have been deleted since the issue chose it;
+		// The selected flow may have been deleted since the task chose it;
 		// fall back to the project default.
 		snapshot, err = s.flows.ResolveSnapshot(ctx, "")
 	}
@@ -156,43 +156,43 @@ func (s *FlowCursorService) EnsureCursor(ctx context.Context, issueID string) (F
 		return FlowCursor{}, false, fmt.Errorf("encode flow snapshot: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, `
-INSERT INTO issue_flow_cursor (issue_id, flow_snapshot_json, phase_index, phase_state, gate_feedback, updated_at)
+INSERT INTO task_flow_cursor (task_id, flow_snapshot_json, phase_index, phase_state, gate_feedback, updated_at)
 VALUES (?, ?, 0, ?, '', ?)
-ON CONFLICT(issue_id) DO NOTHING`,
-		issueID, string(snapshotJSON), string(FlowPhasePending), sqlitex.FormatTime(s.now().UTC())); err != nil {
+ON CONFLICT(task_id) DO NOTHING`,
+		taskID, string(snapshotJSON), string(FlowPhasePending), sqlitex.FormatTime(s.now().UTC())); err != nil {
 		return FlowCursor{}, false, fmt.Errorf("insert flow cursor: %w", err)
 	}
 
-	return s.GetCursor(ctx, issueID)
+	return s.GetCursor(ctx, taskID)
 }
 
 // AdvanceCursor moves the cursor from fromIndex to the next phase (state
 // pending, feedback cleared). Returns false when the cursor is no longer at
 // fromIndex — an idempotent replay no-op.
-func (s *FlowCursorService) AdvanceCursor(ctx context.Context, issueID string, fromIndex int) (bool, error) {
-	return s.casCursor(ctx, issueID, fromIndex, `
-UPDATE issue_flow_cursor
+func (s *FlowCursorService) AdvanceCursor(ctx context.Context, taskID string, fromIndex int) (bool, error) {
+	return s.casCursor(ctx, taskID, fromIndex, `
+UPDATE task_flow_cursor
 SET phase_index = phase_index + 1, phase_state = ?, gate_feedback = '', updated_at = ?
-WHERE issue_id = ? AND phase_index = ?`, string(FlowPhasePending))
+WHERE task_id = ? AND phase_index = ?`, string(FlowPhasePending))
 }
 
 // PauseCursor parks the cursor at atIndex awaiting human approval.
-func (s *FlowCursorService) PauseCursor(ctx context.Context, issueID string, atIndex int) (bool, error) {
-	return s.casCursor(ctx, issueID, atIndex, `
-UPDATE issue_flow_cursor
+func (s *FlowCursorService) PauseCursor(ctx context.Context, taskID string, atIndex int) (bool, error) {
+	return s.casCursor(ctx, taskID, atIndex, `
+UPDATE task_flow_cursor
 SET phase_state = ?, gate_feedback = '', updated_at = ?
-WHERE issue_id = ? AND phase_index = ?`, string(FlowPhaseAwaitingApproval))
+WHERE task_id = ? AND phase_index = ?`, string(FlowPhaseAwaitingApproval))
 }
 
 // ResumeCursor sends a gate-paused phase back to work with feedback. Returns
 // false unless the cursor is at atIndex awaiting approval.
-func (s *FlowCursorService) ResumeCursor(ctx context.Context, issueID string, atIndex int, feedback string) (bool, error) {
+func (s *FlowCursorService) ResumeCursor(ctx context.Context, taskID string, atIndex int, feedback string) (bool, error) {
 	result, err := s.db.ExecContext(ctx, `
-UPDATE issue_flow_cursor
+UPDATE task_flow_cursor
 SET phase_state = ?, gate_feedback = ?, updated_at = ?
-WHERE issue_id = ? AND phase_index = ? AND phase_state = ?`,
+WHERE task_id = ? AND phase_index = ? AND phase_state = ?`,
 		string(FlowPhasePending), strings.TrimSpace(feedback), sqlitex.FormatTime(s.now().UTC()),
-		issueID, atIndex, string(FlowPhaseAwaitingApproval))
+		taskID, atIndex, string(FlowPhaseAwaitingApproval))
 	if err != nil {
 		return false, fmt.Errorf("resume flow cursor: %w", err)
 	}
@@ -205,15 +205,15 @@ WHERE issue_id = ? AND phase_index = ? AND phase_state = ?`,
 
 // CompleteCursor marks the work pipeline finished at atIndex (the final phase
 // readied its change into review).
-func (s *FlowCursorService) CompleteCursor(ctx context.Context, issueID string, atIndex int) (bool, error) {
-	return s.casCursor(ctx, issueID, atIndex, `
-UPDATE issue_flow_cursor
+func (s *FlowCursorService) CompleteCursor(ctx context.Context, taskID string, atIndex int) (bool, error) {
+	return s.casCursor(ctx, taskID, atIndex, `
+UPDATE task_flow_cursor
 SET phase_state = ?, gate_feedback = '', updated_at = ?
-WHERE issue_id = ? AND phase_index = ?`, string(FlowPhaseCompleted))
+WHERE task_id = ? AND phase_index = ?`, string(FlowPhaseCompleted))
 }
 
-func (s *FlowCursorService) casCursor(ctx context.Context, issueID string, index int, query, state string) (bool, error) {
-	result, err := s.db.ExecContext(ctx, query, state, sqlitex.FormatTime(s.now().UTC()), issueID, index)
+func (s *FlowCursorService) casCursor(ctx context.Context, taskID string, index int, query, state string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, query, state, sqlitex.FormatTime(s.now().UTC()), taskID, index)
 	if err != nil {
 		return false, fmt.Errorf("update flow cursor: %w", err)
 	}
@@ -224,13 +224,13 @@ func (s *FlowCursorService) casCursor(ctx context.Context, issueID string, index
 	return affected > 0, nil
 }
 
-// ClearFlowState removes the issue's cursor and phase handoffs (issue reset:
+// ClearFlowState removes the task's cursor and phase handoffs (task reset:
 // the next ensure re-freezes a fresh snapshot from the live flow).
-func (s *FlowCursorService) ClearFlowState(ctx context.Context, issueID string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM issue_flow_cursor WHERE issue_id = ?`, issueID); err != nil {
+func (s *FlowCursorService) ClearFlowState(ctx context.Context, taskID string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM task_flow_cursor WHERE task_id = ?`, taskID); err != nil {
 		return fmt.Errorf("clear flow cursor: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM issue_phase_handoffs WHERE issue_id = ?`, issueID); err != nil {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM task_phase_handoffs WHERE task_id = ?`, taskID); err != nil {
 		return fmt.Errorf("clear phase handoffs: %w", err)
 	}
 	return nil
@@ -240,14 +240,14 @@ func (s *FlowCursorService) ClearFlowState(ctx context.Context, issueID string) 
 func (s *FlowCursorService) StorePhaseHandoff(ctx context.Context, input StorePhaseHandoffInput) error {
 	now := sqlitex.FormatTime(s.now().UTC())
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO issue_phase_handoffs (issue_id, phase_index, phase_name, content, head_sha, created_at, updated_at)
+INSERT INTO task_phase_handoffs (task_id, phase_index, phase_name, content, head_sha, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(issue_id, phase_index) DO UPDATE SET
+ON CONFLICT(task_id, phase_index) DO UPDATE SET
 	phase_name = excluded.phase_name,
 	content = excluded.content,
 	head_sha = excluded.head_sha,
 	updated_at = excluded.updated_at`,
-		input.IssueID, input.PhaseIndex, strings.TrimSpace(input.PhaseName),
+		input.TaskID, input.PhaseIndex, strings.TrimSpace(input.PhaseName),
 		input.Content, strings.TrimSpace(input.HeadSHA), now, now)
 	if err != nil {
 		return fmt.Errorf("store phase handoff: %w", err)
@@ -256,10 +256,10 @@ ON CONFLICT(issue_id, phase_index) DO UPDATE SET
 }
 
 // PhaseHandoff returns the handoff stored for one phase index.
-func (s *FlowCursorService) PhaseHandoff(ctx context.Context, issueID string, phaseIndex int) (PhaseHandoff, bool, error) {
+func (s *FlowCursorService) PhaseHandoff(ctx context.Context, taskID string, phaseIndex int) (PhaseHandoff, bool, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT issue_id, phase_index, phase_name, content, head_sha, created_at, updated_at
-FROM issue_phase_handoffs WHERE issue_id = ? AND phase_index = ?`, issueID, phaseIndex)
+SELECT task_id, phase_index, phase_name, content, head_sha, created_at, updated_at
+FROM task_phase_handoffs WHERE task_id = ? AND phase_index = ?`, taskID, phaseIndex)
 	handoff, err := scanPhaseHandoff(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PhaseHandoff{}, false, nil
@@ -270,11 +270,11 @@ FROM issue_phase_handoffs WHERE issue_id = ? AND phase_index = ?`, issueID, phas
 	return handoff, true, nil
 }
 
-// PhaseHandoffs returns every stored handoff for the issue in phase order.
-func (s *FlowCursorService) PhaseHandoffs(ctx context.Context, issueID string) ([]PhaseHandoff, error) {
+// PhaseHandoffs returns every stored handoff for the task in phase order.
+func (s *FlowCursorService) PhaseHandoffs(ctx context.Context, taskID string) ([]PhaseHandoff, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT issue_id, phase_index, phase_name, content, head_sha, created_at, updated_at
-FROM issue_phase_handoffs WHERE issue_id = ? ORDER BY phase_index`, issueID)
+SELECT task_id, phase_index, phase_name, content, head_sha, created_at, updated_at
+FROM task_phase_handoffs WHERE task_id = ? ORDER BY phase_index`, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("list phase handoffs: %w", err)
 	}
@@ -294,7 +294,7 @@ FROM issue_phase_handoffs WHERE issue_id = ? ORDER BY phase_index`, issueID)
 func scanPhaseHandoff(row rowScanner) (PhaseHandoff, error) {
 	var handoff PhaseHandoff
 	var createdAt, updatedAt string
-	if err := row.Scan(&handoff.IssueID, &handoff.PhaseIndex, &handoff.PhaseName,
+	if err := row.Scan(&handoff.TaskID, &handoff.PhaseIndex, &handoff.PhaseName,
 		&handoff.Content, &handoff.HeadSHA, &createdAt, &updatedAt); err != nil {
 		return PhaseHandoff{}, err
 	}
@@ -308,14 +308,14 @@ func scanPhaseHandoff(row rowScanner) (PhaseHandoff, error) {
 	return handoff, nil
 }
 
-// cursorStateForIssue is the lightweight cursor read shared by the phase
+// cursorStateForTask is the lightweight cursor read shared by the phase
 // derivations and wait-reason overlay: index and state without decoding the
 // snapshot JSON.
-func cursorStateForIssue(ctx context.Context, db *sql.DB, issueID string) (int, FlowPhaseState, bool, error) {
+func cursorStateForTask(ctx context.Context, db *sql.DB, taskID string) (int, FlowPhaseState, bool, error) {
 	var index int
 	var state string
 	err := db.QueryRowContext(ctx,
-		`SELECT phase_index, phase_state FROM issue_flow_cursor WHERE issue_id = ?`, issueID).Scan(&index, &state)
+		`SELECT phase_index, phase_state FROM task_flow_cursor WHERE task_id = ?`, taskID).Scan(&index, &state)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, "", false, nil
 	}
@@ -326,7 +326,7 @@ func cursorStateForIssue(ctx context.Context, db *sql.DB, issueID string) (int, 
 }
 
 // cursorIndicatesWorking reports whether the cursor alone (no active session)
-// keeps the issue in the working phase: paused at a human gate, or mid-pipeline
+// keeps the task in the working phase: paused at a human gate, or mid-pipeline
 // past the first phase.
 func cursorIndicatesWorking(index int, state FlowPhaseState) bool {
 	if state == FlowPhaseAwaitingApproval {

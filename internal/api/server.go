@@ -86,12 +86,12 @@ func (s *Server) Registry() *Registry {
 type projectServer struct {
 	*Server
 	project           coordinator.Project
-	issues            *coordinator.IssueService
+	tasks             *coordinator.TaskService
 	checks            *coordinator.CheckService
 	threads           *coordinator.ThreadService
 	sessions          *coordinator.SessionService
 	transcripts       *coordinator.TranscriptStore
-	attachments       *coordinator.IssueAttachmentStore
+	attachments       *coordinator.TaskAttachmentStore
 	status            *coordinator.StatusService
 	reconciler        *coordinator.ReconcileService
 	cursors           *coordinator.FlowCursorService
@@ -112,7 +112,7 @@ func (s *Server) forBundle(bundle *ProjectBundle) *projectServer {
 	return &projectServer{
 		Server:            s,
 		project:           bundle.Project,
-		issues:            bundle.Issues,
+		tasks:             bundle.Tasks,
 		checks:            bundle.Checks,
 		threads:           bundle.Threads,
 		sessions:          bundle.Sessions,
@@ -274,12 +274,12 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 
 	if strings.HasPrefix(r.URL.Path, "/v2/changes/") {
 		resourceID := pathResourceID(r.URL.Path, "/v2/changes/")
-		// The /v2/changes/{id}/checks subroute addresses checks by issue id;
+		// The /v2/changes/{id}/checks subroute addresses checks by task id;
 		// every other changes subroute addresses by change id.
 		if changesSubpathIsChecks(r.URL.Path) {
-			ps, ok := s.bundleForChangeIssue(r.Context(), principal, resourceID)
+			ps, ok := s.bundleForChangeTask(r.Context(), principal, resourceID)
 			if !ok {
-				writeError(w, http.StatusNotFound, "issue_not_found", "issue not found")
+				writeError(w, http.StatusNotFound, "task_not_found", "task not found")
 				return
 			}
 			ps.handleChangePath(w, r, principal)
@@ -325,17 +325,17 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
-	if r.URL.Path == "/v2/issues" {
+	if r.URL.Path == "/v2/tasks" {
 		switch r.Method {
 		case http.MethodGet:
 			if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
-				writeError(w, http.StatusForbidden, "forbidden", "issue read requires owner, session, or console token")
+				writeError(w, http.StatusForbidden, "forbidden", "task read requires owner, session, or console token")
 				return
 			}
-			s.handleListIssuesAggregate(w, r, principal)
+			s.handleListTasksAggregate(w, r, principal)
 		case http.MethodPost:
 			if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
-				writeError(w, http.StatusForbidden, "forbidden", "issue creation requires owner, session, or console token")
+				writeError(w, http.StatusForbidden, "forbidden", "task creation requires owner, session, or console token")
 				return
 			}
 			ps, err := s.implicitProjectServer(principal)
@@ -343,24 +343,24 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 				writeProjectResolveError(w, err)
 				return
 			}
-			ps.handleCreateIssue(w, r, principal)
+			ps.handleCreateTask(w, r, principal)
 		default:
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method is not allowed")
 		}
 		return
 	}
 
-	if strings.HasPrefix(r.URL.Path, "/v2/issues/") {
-		// Issue ids are only unique within a project; unscoped issue routes
+	if strings.HasPrefix(r.URL.Path, "/v2/tasks/") {
+		// Task ids are only unique within a project; unscoped task routes
 		// work for principals with an implicit project (session tokens, or a
 		// coordinator with exactly one project). Everything else must use
-		// /v2/projects/{project}/issues/...
+		// /v2/projects/{project}/tasks/...
 		ps, err := s.implicitProjectServer(principal)
 		if err != nil {
 			writeProjectResolveError(w, err)
 			return
 		}
-		ps.handleIssuePath(w, r, principal)
+		ps.handleTaskPath(w, r, principal)
 		return
 	}
 

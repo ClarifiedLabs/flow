@@ -61,7 +61,7 @@ func (e *Engine) RunRecovery(ctx context.Context) (int, error) {
 	return recovered + checksRecovered + mergesRecovered, errs
 }
 
-// refreshSessionPhases re-derives the phase for issues currently recorded in
+// refreshSessionPhases re-derives the phase for tasks currently recorded in
 // the session-derived working phase. After a crash this phase can go stale —
 // the session is gone but the column still claims work is in flight — so a
 // refresh keeps the explicit phase (and therefore the board/timeline)
@@ -70,42 +70,42 @@ func (e *Engine) RunRecovery(ctx context.Context) (int, error) {
 // alone.)
 func (e *Engine) refreshSessionPhases(ctx context.Context) error {
 	rows, err := e.db.QueryContext(ctx,
-		`SELECT issue_id FROM workflow_state WHERE phase = ?`,
+		`SELECT task_id FROM workflow_state WHERE phase = ?`,
 		string(coordinator.PhaseWorking))
 	if err != nil {
-		return fmt.Errorf("select session-phase issues: %w", err)
+		return fmt.Errorf("select session-phase tasks: %w", err)
 	}
-	var issueIDs []string
+	var taskIDs []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			rows.Close()
-			return fmt.Errorf("scan session-phase issue: %w", err)
+			return fmt.Errorf("scan session-phase task: %w", err)
 		}
-		issueIDs = append(issueIDs, id)
+		taskIDs = append(taskIDs, id)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate session-phase issues: %w", err)
+		return fmt.Errorf("iterate session-phase tasks: %w", err)
 	}
 
 	var errs error
-	for _, issueID := range issueIDs {
-		if err := e.reconcilePhase(ctx, issueID); err != nil {
-			errs = errors.Join(errs, fmt.Errorf("reconcile phase for %s: %w", issueID, err))
+	for _, taskID := range taskIDs {
+		if err := e.reconcilePhase(ctx, taskID); err != nil {
+			errs = errors.Join(errs, fmt.Errorf("reconcile phase for %s: %w", taskID, err))
 		}
 	}
 	return errs
 }
 
-// reconcilePhase re-derives an issue's phase and, if it changed, records the move
+// reconcilePhase re-derives an task's phase and, if it changed, records the move
 // as a reconcile transition (no external effects run).
-func (e *Engine) reconcilePhase(ctx context.Context, issueID string) error {
-	snap, err := e.loadSnapshot(ctx, issueID)
+func (e *Engine) reconcilePhase(ctx context.Context, taskID string) error {
+	snap, err := e.loadSnapshot(ctx, taskID)
 	if err != nil {
 		return err
 	}
-	toPhase, err := e.derivePhase(ctx, issueID)
+	toPhase, err := e.derivePhase(ctx, taskID)
 	if err != nil {
 		return err
 	}
@@ -113,12 +113,12 @@ func (e *Engine) reconcilePhase(ctx context.Context, issueID string) error {
 		return nil
 	}
 	// Assert the snapshot version: a conflict means a real Step transitioned this
-	// issue between our load and apply. Reconcile is a best-effort background
+	// task between our load and apply. Reconcile is a best-effort background
 	// refresh, and that concurrent Step already recorded an authoritative move, so
 	// a conflict is a benign skip — the next tick re-derives from committed state
 	// if the phase is still stale. We deliberately do not retry here (unlike
-	// step()) to avoid contending with live traffic on a hot issue.
-	_, err = e.applyTransition(ctx, issueID, snap, Event{Kind: EventReconcile}, "reconcile", toPhase, snap.version)
+	// step()) to avoid contending with live traffic on a hot task.
+	_, err = e.applyTransition(ctx, taskID, snap, Event{Kind: EventReconcile}, "reconcile", toPhase, snap.version)
 	if errors.Is(err, ErrVersionConflict) {
 		return nil
 	}
@@ -127,7 +127,7 @@ func (e *Engine) reconcilePhase(ctx context.Context, issueID string) error {
 
 // ScheduleTimer records a durable timer that fires the given event at fireAt. The
 // background ticker drains it via DrainDueTimers. Returns the timer id.
-func (e *Engine) ScheduleTimer(ctx context.Context, issueID string, kind EventKind, fireAt time.Time, payload EventPayload) (string, error) {
+func (e *Engine) ScheduleTimer(ctx context.Context, taskID string, kind EventKind, fireAt time.Time, payload EventPayload) (string, error) {
 	id, err := newTimerID()
 	if err != nil {
 		return "", err
@@ -137,8 +137,8 @@ func (e *Engine) ScheduleTimer(ctx context.Context, issueID string, kind EventKi
 		return "", fmt.Errorf("marshal timer payload: %w", err)
 	}
 	if _, err := e.db.ExecContext(ctx, `
-INSERT INTO timers (id, issue_id, fire_at, kind, payload_json, fired_at)
-VALUES (?, ?, ?, ?, ?, NULL)`, id, issueID, formatTime(fireAt.UTC()), string(kind), string(payloadJSON)); err != nil {
+INSERT INTO timers (id, task_id, fire_at, kind, payload_json, fired_at)
+VALUES (?, ?, ?, ?, ?, NULL)`, id, taskID, formatTime(fireAt.UTC()), string(kind), string(payloadJSON)); err != nil {
 		return "", fmt.Errorf("schedule timer: %w", err)
 	}
 	return id, nil
@@ -157,7 +157,7 @@ VALUES (?, ?, ?, ?, ?, NULL)`, id, issueID, formatTime(fireAt.UTC()), string(kin
 func (e *Engine) DrainDueTimers(ctx context.Context) (int, error) {
 	now := formatTime(e.now())
 	rows, err := e.db.QueryContext(ctx, `
-SELECT id, issue_id, kind, payload_json
+SELECT id, task_id, kind, payload_json
 FROM timers
 WHERE dispatched_at IS NULL AND fire_at <= ?
 ORDER BY fire_at`, now)
@@ -165,12 +165,12 @@ ORDER BY fire_at`, now)
 		return 0, fmt.Errorf("select due timers: %w", err)
 	}
 	type dueTimer struct {
-		id, issueID, kind, payload string
+		id, taskID, kind, payload string
 	}
 	var due []dueTimer
 	for rows.Next() {
 		var t dueTimer
-		if err := rows.Scan(&t.id, &t.issueID, &t.kind, &t.payload); err != nil {
+		if err := rows.Scan(&t.id, &t.taskID, &t.kind, &t.payload); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("scan due timer: %w", err)
 		}
@@ -201,7 +201,7 @@ ORDER BY fire_at`, now)
 			continue
 		}
 
-		if err := e.dispatchTimer(ctx, t.id, t.issueID, EventKind(t.kind), t.payload); err != nil {
+		if err := e.dispatchTimer(ctx, t.id, t.taskID, EventKind(t.kind), t.payload); err != nil {
 			errs = errors.Join(errs, fmt.Errorf("dispatch timer %s (%s): %w", t.id, t.kind, err))
 			// A poison timer (unretryable failure) is parked — confirmed with
 			// its error preserved — because redelivery can never succeed and
@@ -230,10 +230,10 @@ ORDER BY fire_at`, now)
 }
 
 // dispatchTimer applies one claimed timer's event through Step. A stale timer —
-// its issue has since moved to a phase where the event has no candidate edge —
+// its task has since moved to a phase where the event has no candidate edge —
 // is treated as successfully dispatched so it confirms instead of retrying
 // forever (the guard-declined case is already a benign no-op inside Step).
-func (e *Engine) dispatchTimer(ctx context.Context, timerID, issueID string, kind EventKind, payloadJSON string) error {
+func (e *Engine) dispatchTimer(ctx context.Context, timerID, taskID string, kind EventKind, payloadJSON string) error {
 	var payload EventPayload
 	if payloadJSON != "" {
 		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
@@ -242,7 +242,7 @@ func (e *Engine) dispatchTimer(ctx context.Context, timerID, issueID string, kin
 	}
 	ev := Event{
 		Kind:           kind,
-		IssueID:        issueID,
+		TaskID:         taskID,
 		Payload:        payload,
 		IdempotencyKey: "timer:" + timerID,
 	}
@@ -260,7 +260,7 @@ func (e *Engine) dispatchTimer(ctx context.Context, timerID, issueID string, kin
 	// the action's follow-up scheduling.
 	var followUpErr *nonFatalFollowUpError
 	if errors.As(err, &followUpErr) && followUpErr.kind == kind {
-		if recordErr := e.recordFollowUpFailure(ctx, issueID, ev, followUpErr.err); recordErr != nil {
+		if recordErr := e.recordFollowUpFailure(ctx, taskID, ev, followUpErr.err); recordErr != nil {
 			return fmt.Errorf("record %s timer failure after %w: %v", kind, followUpErr.err, recordErr)
 		}
 		return nil
@@ -299,19 +299,19 @@ func truncateError(err error) string {
 // repeated active-agent phase churn cannot spawn a
 // storm of timers. The dispatching timer (still unconfirmed while its action
 // reschedules) is excluded so a reschedule is not mistaken for a duplicate.
-func (e *Engine) schedulePhaseDeadline(ctx context.Context, issueID string, phase coordinator.Phase) error {
+func (e *Engine) schedulePhaseDeadline(ctx context.Context, taskID string, phase coordinator.Phase) error {
 	window := e.deadlines.deadlineFor(phase)
 	if window <= 0 {
 		return nil
 	}
-	pending, err := e.hasPendingTimer(ctx, issueID, EventPhaseDeadline, "")
+	pending, err := e.hasPendingTimer(ctx, taskID, EventPhaseDeadline, "")
 	if err != nil {
 		return err
 	}
 	if pending {
 		return nil
 	}
-	_, err = e.ScheduleTimer(ctx, issueID, EventPhaseDeadline, e.now().Add(window), EventPayload{
+	_, err = e.ScheduleTimer(ctx, taskID, EventPhaseDeadline, e.now().Add(window), EventPayload{
 		DeadlinePhase: phase,
 	})
 	return err
@@ -323,7 +323,7 @@ func (e *Engine) schedulePhaseDeadline(ctx context.Context, issueID string, phas
 // assessment review dispatched directly by the coordinator's crash reconcile,
 // which cannot reach the engine's scheduleCheckTimeouts — left its reviewer check
 // un-timeout-armed, so a reviewer that never reports could park the change
-// indefinitely. Arming is deduped per (issue, name, head): a normal round
+// indefinitely. Arming is deduped per (task, name, head): a normal round
 // already armed its timeout at ready-time, so the same surfaced check is a
 // no-op, and the SAME EventCheckTimeout the normal path arms is used. It is a
 // no-op when the deadline is disabled. Errors are joined so one bad check cannot
@@ -334,8 +334,8 @@ func (e *Engine) armRecoveredCheckTimeouts(ctx context.Context, pending []coordi
 	}
 	var errs error
 	for _, p := range pending {
-		issueID := strings.TrimSpace(p.IssueID)
-		if issueID == "" {
+		taskID := strings.TrimSpace(p.TaskID)
+		if taskID == "" {
 			continue
 		}
 		headSHA := strings.TrimSpace(p.HeadSHA)
@@ -345,7 +345,7 @@ func (e *Engine) armRecoveredCheckTimeouts(ctx context.Context, pending []coordi
 			if name == "" {
 				continue
 			}
-			armed, err := e.hasPendingCheckTimeout(ctx, issueID, name, headSHA)
+			armed, err := e.hasPendingCheckTimeout(ctx, taskID, name, headSHA)
 			if err != nil {
 				errs = errors.Join(errs, err)
 				continue
@@ -354,7 +354,7 @@ func (e *Engine) armRecoveredCheckTimeouts(ctx context.Context, pending []coordi
 				missing = append(missing, name)
 			}
 		}
-		if err := e.scheduleCheckTimeouts(ctx, issueID, headSHA, missing); err != nil {
+		if err := e.scheduleCheckTimeouts(ctx, taskID, headSHA, missing); err != nil {
 			errs = errors.Join(errs, err)
 		}
 	}
@@ -362,14 +362,14 @@ func (e *Engine) armRecoveredCheckTimeouts(ctx context.Context, pending []coordi
 }
 
 // hasPendingCheckTimeout reports whether an undispatched EventCheckTimeout is
-// already armed for this (issue, check name, head). Check timeouts carry the
-// name and head in their payload (a single issue can have one per check), so the
+// already armed for this (task, check name, head). Check timeouts carry the
+// name and head in their payload (a single task can have one per check), so the
 // match parses the payload rather than keying on kind alone.
-func (e *Engine) hasPendingCheckTimeout(ctx context.Context, issueID, name, headSHA string) (bool, error) {
+func (e *Engine) hasPendingCheckTimeout(ctx context.Context, taskID, name, headSHA string) (bool, error) {
 	rows, err := e.db.QueryContext(ctx, `
 SELECT payload_json FROM timers
-WHERE issue_id = ? AND kind = ? AND dispatched_at IS NULL`,
-		issueID, string(EventCheckTimeout))
+WHERE task_id = ? AND kind = ? AND dispatched_at IS NULL`,
+		taskID, string(EventCheckTimeout))
 	if err != nil {
 		return false, fmt.Errorf("query pending check timeouts: %w", err)
 	}
@@ -399,15 +399,15 @@ WHERE issue_id = ? AND kind = ? AND dispatched_at IS NULL`,
 }
 
 // hasPendingTimer reports whether an undispatched timer of the given kind is
-// already scheduled for the issue, ignoring excludeID (the timer currently
+// already scheduled for the task, ignoring excludeID (the timer currently
 // being dispatched is unconfirmed while its action runs, and must not count
 // as its own successor).
-func (e *Engine) hasPendingTimer(ctx context.Context, issueID string, kind EventKind, excludeID string) (bool, error) {
+func (e *Engine) hasPendingTimer(ctx context.Context, taskID string, kind EventKind, excludeID string) (bool, error) {
 	var count int
 	if err := e.db.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM timers
-WHERE issue_id = ? AND kind = ? AND dispatched_at IS NULL AND id != ?`,
-		issueID, string(kind), excludeID).Scan(&count); err != nil {
+WHERE task_id = ? AND kind = ? AND dispatched_at IS NULL AND id != ?`,
+		taskID, string(kind), excludeID).Scan(&count); err != nil {
 		return false, fmt.Errorf("check pending timers: %w", err)
 	}
 	return count > 0, nil

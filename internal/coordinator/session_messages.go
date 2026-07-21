@@ -49,8 +49,8 @@ type MarkSessionMessageDeliveredInput struct {
 	LeaseID   string
 }
 
-type ReplyToIssueInput struct {
-	IssueID     string
+type ReplyToTaskInput struct {
+	TaskID      string
 	StatusLogID *int64
 	Actor       string
 	Body        string
@@ -95,16 +95,16 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`,
 	return s.GetSessionMessage(ctx, id)
 }
 
-func (s *SessionService) ReplyToIssue(ctx context.Context, input ReplyToIssueInput) (SessionMessage, bool, error) {
-	issueID := strings.TrimSpace(input.IssueID)
-	if issueID == "" {
-		return SessionMessage{}, false, errors.New("issue id is required")
+func (s *SessionService) ReplyToTask(ctx context.Context, input ReplyToTaskInput) (SessionMessage, bool, error) {
+	taskID := strings.TrimSpace(input.TaskID)
+	if taskID == "" {
+		return SessionMessage{}, false, errors.New("task id is required")
 	}
 	body := strings.TrimSpace(input.Body)
 	if body == "" {
 		return SessionMessage{}, false, errors.New("reply message is required")
 	}
-	session, ok, err := s.ActiveAuthorSessionForIssue(ctx, issueID)
+	session, ok, err := s.ActiveAuthorSessionForTask(ctx, taskID)
 	if err != nil {
 		return SessionMessage{}, false, err
 	}
@@ -245,7 +245,7 @@ func (s *SessionService) validateLiveSessionLease(ctx context.Context, sessionID
 	return s.validateLiveJobLease(ctx, session.JobID, leaseID)
 }
 
-func scanSessionMessage(row issueScanner) (SessionMessage, error) {
+func scanSessionMessage(row taskScanner) (SessionMessage, error) {
 	var message SessionMessage
 	var statusLogID sql.NullInt64
 	var deliveredAt sql.NullString

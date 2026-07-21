@@ -36,14 +36,14 @@ cat >"$spec" <<SPEC
 Name: flow
 Version: ${version}
 Release: 1%{?dist}
-Summary: Local coordinator for issue-driven agent work
+Summary: Local coordinator for task-driven agent work
 License: MIT
 URL: https://github.com/ClarifiedLabs/flow
 BuildArch: ${rpm_arch}
 AutoReqProv: no
 
 %description
-Flow is a local coordinator for issue-driven agent work. It keeps durable state
+Flow is a local coordinator for task-driven agent work. It keeps durable state
 in SQLite, uses a private git exchange remote for worker branches, and exposes a CLI and browser UI.
 
 %prep

@@ -5,13 +5,13 @@ import (
 	"database/sql"
 )
 
-// Phase is the explicit, authoritative lifecycle coordinate for an issue. It is
+// Phase is the explicit, authoritative lifecycle coordinate for an task. It is
 // stored in workflow_state by the lifecycle engine and is a projection of the
-// existing state mechanisms (schedule/triage columns, the issue_review_state
+// existing state mechanisms (schedule/triage columns, the task_review_state
 // view, change ready/merged latches, and active author sessions).
 //
 // blocked is deliberately NOT a phase: it remains a derived overlay computed
-// live from issue_relations, so a blocked issue still carries its underlying
+// live from task_relations, so a blocked task still carries its underlying
 // phase (backlog/up_next/critique/...) and the block is layered on at read time.
 type Phase string
 
@@ -19,9 +19,9 @@ const (
 	PhaseBacklog Phase = "backlog"
 	PhaseTriage  Phase = "triage"
 	PhaseUpNext  Phase = "up_next"
-	// PhaseWorking is the container phase for the issue's whole work pipeline:
+	// PhaseWorking is the container phase for the task's whole work pipeline:
 	// the position within the pipeline (which flow phase, running vs paused at
-	// a human gate) lives on the issue's flow cursor, not in workflow_state.
+	// a human gate) lives on the task's flow cursor, not in workflow_state.
 	PhaseWorking        Phase = "working"
 	PhaseCritique       Phase = "critique"
 	PhaseAcceptance     Phase = "acceptance"
@@ -31,19 +31,19 @@ const (
 	PhaseAbandoned      Phase = "abandoned"
 )
 
-// PhaseForIssue derives the lifecycle phase for an already-loaded issue,
+// PhaseForTask derives the lifecycle phase for an already-loaded task,
 // reusing the same disposition logic as the board projection. For a closed
-// issue this resolves to merged_closed / rejected_closed / abandoned.
-func (s *IssueService) PhaseForIssue(ctx context.Context, issue Issue) (Phase, error) {
-	return derivePhaseFromIssue(ctx, s.db, issue)
+// task this resolves to merged_closed / rejected_closed / abandoned.
+func (s *TaskService) PhaseForTask(ctx context.Context, task Task) (Phase, error) {
+	return derivePhaseFromTask(ctx, s.db, task)
 }
 
-func derivePhaseFromIssue(ctx context.Context, db *sql.DB, issue Issue) (Phase, error) {
-	if issue.ScheduleState == ScheduleClosed {
-		if issue.TriageState == TriageRejected {
+func derivePhaseFromTask(ctx context.Context, db *sql.DB, task Task) (Phase, error) {
+	if task.ScheduleState == ScheduleClosed {
+		if task.TriageState == TriageRejected {
 			return PhaseRejectedClosed, nil
 		}
-		merged, err := issueHasMergedChange(ctx, db, issue.ID)
+		merged, err := taskHasMergedChange(ctx, db, task.ID)
 		if err != nil {
 			return "", err
 		}
@@ -53,11 +53,11 @@ func derivePhaseFromIssue(ctx context.Context, db *sql.DB, issue Issue) (Phase, 
 		return PhaseAbandoned, nil
 	}
 
-	reviewState, err := reviewStateForIssue(ctx, db, issue.ID)
+	reviewState, err := reviewStateForTask(ctx, db, task.ID)
 	if err != nil {
 		return "", err
 	}
-	hasChange, err := issueHasUnmergedChange(ctx, db, issue.ID)
+	hasChange, err := taskHasUnmergedChange(ctx, db, task.ID)
 	if err != nil {
 		return "", err
 	}
@@ -67,23 +67,23 @@ func derivePhaseFromIssue(ctx context.Context, db *sql.DB, issue Issue) (Phase, 
 	if reviewState == ReviewChangesRequested {
 		return PhaseCritique, nil
 	}
-	if _, ok, err := activeSessionStateForIssue(ctx, db, issue.ID); err != nil {
+	if _, ok, err := activeSessionStateForTask(ctx, db, task.ID); err != nil {
 		return "", err
 	} else if ok {
 		return PhaseWorking, nil
 	}
-	// No active session, but the flow cursor can still pin the issue in
+	// No active session, but the flow cursor can still pin the task in
 	// working: paused at a human gate, or mid-pipeline between phase jobs.
 	// This must match the lifecycle engine's derivePhase.
-	if index, state, ok, err := cursorStateForIssue(ctx, db, issue.ID); err != nil {
+	if index, state, ok, err := cursorStateForTask(ctx, db, task.ID); err != nil {
 		return "", err
 	} else if ok && cursorIndicatesWorking(index, state) {
 		return PhaseWorking, nil
 	}
-	if issue.TriageState == TriagePending {
+	if task.TriageState == TriagePending {
 		return PhaseTriage, nil
 	}
-	if issue.TriageState != TriageAccepted {
+	if task.TriageState != TriageAccepted {
 		return PhaseTriage, nil
 	}
 	if hasChange && reviewState == ReviewInReview {
@@ -91,7 +91,7 @@ func derivePhaseFromIssue(ctx context.Context, db *sql.DB, issue Issue) (Phase, 
 		// check is satisfied but a verifier check is still pending; otherwise the
 		// change is still in critique. This must match the lifecycle engine's
 		// derivePhase, which reads the same predicate via Effects.AcceptancePending.
-		pending, err := acceptancePendingForIssue(ctx, db, issue.ID)
+		pending, err := acceptancePendingForTask(ctx, db, task.ID)
 		if err != nil {
 			return "", err
 		}
@@ -101,7 +101,7 @@ func derivePhaseFromIssue(ctx context.Context, db *sql.DB, issue Issue) (Phase, 
 		return PhaseCritique, nil
 	}
 
-	switch issue.ScheduleState {
+	switch task.ScheduleState {
 	case ScheduleUpNext:
 		return PhaseUpNext, nil
 	default:
@@ -109,20 +109,20 @@ func derivePhaseFromIssue(ctx context.Context, db *sql.DB, issue Issue) (Phase, 
 	}
 }
 
-// HasMergedChange reports whether the issue has any merged change. It is the
+// HasMergedChange reports whether the task has any merged change. It is the
 // exported reader the lifecycle engine uses to distinguish an abandoned closed
-// issue (no merge) from a merged_closed one.
-func (s *IssueService) HasMergedChange(ctx context.Context, issueID string) (bool, error) {
-	return issueHasMergedChange(ctx, s.db, issueID)
+// task (no merge) from a merged_closed one.
+func (s *TaskService) HasMergedChange(ctx context.Context, taskID string) (bool, error) {
+	return taskHasMergedChange(ctx, s.db, taskID)
 }
 
-func issueHasMergedChange(ctx context.Context, db *sql.DB, issueID string) (bool, error) {
+func taskHasMergedChange(ctx context.Context, db *sql.DB, taskID string) (bool, error) {
 	var count int
 	if err := db.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM changes
-WHERE issue_id = ?
-	AND merged_at IS NOT NULL`, issueID).Scan(&count); err != nil {
+WHERE task_id = ?
+	AND merged_at IS NOT NULL`, taskID).Scan(&count); err != nil {
 		return false, err
 	}
 

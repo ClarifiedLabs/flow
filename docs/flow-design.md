@@ -51,9 +51,9 @@ missing or internally ambiguous. These decisions resolve the blockers:
    `flow ready`. Harness idle/stop hooks only mean "the agent yielded the turn,"
    never "the work is done."
 
-7. Issues live in SQLite, not as repo artifacts.
-   Issue state is coordinator-owned application data. Workers and humans create
-   and read issues through the API, which allocates issue IDs transactionally.
+7. Tasks live in SQLite, not as repo artifacts.
+   Task state is coordinator-owned application data. Workers and humans create
+   and read tasks through the API, which allocates task IDs transactionally.
    This avoids git merge conflicts and ID collisions when multiple workers
    discover new work concurrently.
 
@@ -80,7 +80,7 @@ downstream mirror pushes, are intentionally outside the first build.
 - Make the work pipeline composable: users define agent definitions
   (harness, model, reasoning effort, prompt) and arrange them into flows —
   ordered work phases with per-phase human gates plus a review agent set —
-  selected per issue.
+  selected per task.
 - Keep code, CI check configuration, and trailers in git.
 - Keep operational state fast, queryable, and durable enough in local SQLite.
 - Make CI, reviewer agents, verifier agents, and author agents variants of one
@@ -90,8 +90,8 @@ downstream mirror pushes, are intentionally outside the first build.
 
 ## Non-Goals
 
-- Multi-person permissions, organizations, teams, or shared issue ownership.
-- GitHub-as-peer synchronization or syncing comments/issues with external
+- Multi-person permissions, organizations, teams, or shared task ownership.
+- GitHub-as-peer synchronization or syncing comments/tasks with external
   systems.
 - General DAG workflow orchestration. Flows are linear phase pipelines feeding
   one fixed review/merge tail, not arbitrary graphs.
@@ -109,10 +109,10 @@ Flow has four planes:
   scheduler, derived board views, terminal reverse proxy, and merge actions.
 - Worker pool: environments that advertise capabilities, claim jobs, run
   entrypoints in tmux, heartbeat leases, and report events.
-- Git: a private Flow exchange remote containing base and issue branches,
+- Git: a private Flow exchange remote containing base and task branches,
   repo-versioned check configuration, and `Resolves:` trailers. Handoffs are
   coordinator-owned SQLite snapshots, not branch documents.
-- Human UI/CLI: board, diff/review, issue editing, scheduling, merge, and
+- Human UI/CLI: board, diff/review, task editing, scheduling, merge, and
   terminal attach.
 
 ```mermaid
@@ -138,11 +138,11 @@ The initial repository should be a Go monorepo:
 - `internal/api`: HTTP handlers, auth, request/response types. Lifecycle
   handlers authenticate, build a typed event, and call the engine.
 - `internal/client`: client command plumbing and API client.
-- `internal/coordinator`: single-step domain services (issues, sessions, checks,
+- `internal/coordinator`: single-step domain services (tasks, sessions, checks,
   merges, reviews), the explicit `phase` projection, and the transition-log
   read model.
 - `internal/lifecycle`: the in-process workflow engine. It owns the canonical
-  issue transition table, the `Step` entry point, guards and actions, the
+  task transition table, the `Step` entry point, guards and actions, the
   durable transition log, and the timer/recovery loop.
 - `internal/db`: SQLite schema, views, transactions, and embedded migrations.
 - `internal/scheduler`: selector/taint matching and queue selection.
@@ -184,8 +184,8 @@ FLOW_WORKER_JOIN_TOKEN="$(tr -d '\r\n' < .flow-local/worker-join.token)" flow-wo
 cd /path/to/existing/repo
 git status
 flow init --repo .
-flow issue create
-flow issue schedule i-0001 up_next
+flow task create
+flow task schedule i-0001 up_next
 ```
 
 `flow init` does not seed role-skill files into the repository. Flow role
@@ -217,7 +217,7 @@ Project registration does not create a per-project worker config.
 Default behavior is deliberately conservative:
 
 - Existing `origin` is not renamed, removed, or used as the active Flow remote.
-- Existing feature branches are not imported as Flow issue branches.
+- Existing feature branches are not imported as Flow task branches.
 - Dirty working tree changes are not included in the exchange remote seed.
 - No downstream push happens during initialization.
 - No committed file is written unless the user asks Flow to create starter
@@ -257,12 +257,12 @@ There are two Flow-managed git roles:
 
 1. Coordinator worktree.
    The repository Flow is managing. The coordinator performs squash merges and
-   pushes authoritative base-branch updates here. Issue state is not edited in
+   pushes authoritative base-branch updates here. Task state is not edited in
    the worktree.
 
 2. Flow exchange remote.
    A private bare git repository, remote name `flow` by default. Workers clone,
-   fetch, and push issue branches through this remote. It is the git rendezvous
+   fetch, and push task branches through this remote. It is the git rendezvous
    point for active work and must support server-side hooks. For all-local use,
    this can be a `file://` remote in Flow's data directory. For remote workers,
    it can be served over SSH on a tailnet.
@@ -294,11 +294,11 @@ self-hosted bare repo with hooks can be the exchange remote.
 Flow uses these refs in the exchange remote:
 
 - `refs/heads/<base>`: protected base branch, normally `main`.
-- `refs/heads/issue/<issue-id>`: active issue branch.
+- `refs/heads/task/<task-id>`: active task branch.
 - `refs/tags/*`: release tags when explicitly pushed by the coordinator.
 - future `refs/flow/*`: internal scratch or archival refs.
 
-Issue branch names remain the universal join key. The exchange remote makes that
+Task branch names remain the universal join key. The exchange remote makes that
 join key available across machines.
 
 ### Server-Side Hooks
@@ -310,13 +310,13 @@ sources; they are not the workflow engine.
 
 - reject direct base-branch updates unless the push principal is the owner or
   coordinator
-- allow owner-principal pushes to issue branches for manual edits
-- allow local same-user issue-branch pushes with no asserted principal when they
+- allow owner-principal pushes to task branches for manual edits
+- allow local same-user task-branch pushes with no asserted principal when they
   are fast-forward updates
 - reject unknown active-work refs outside Flow's namespace
-- reject non-fast-forward issue-branch updates by non-coordinator principals
+- reject non-fast-forward task-branch updates by non-coordinator principals
 - reject `.flow/session/**` on the base branch
-- do not require an active Flow session or lease for issue-branch pushes
+- do not require an active Flow session or lease for task-branch pushes
 
 Push principal handling depends on transport:
 
@@ -325,7 +325,7 @@ Push principal handling depends on transport:
   worker operations invoke git with an asserted `FLOW_GIT_PRINCIPAL` environment
   value. Missing principals are treated as local manual pushes: protected base
   updates are rejected, owner or coordinator base updates are allowed,
-  fast-forward issue-branch updates are allowed, and unknown Flow-managed
+  fast-forward task-branch updates are allowed, and unknown Flow-managed
   namespaces are rejected.
 - Remote SSH exchange remotes derive the principal from SSH configuration,
   normally per-key forced commands or equivalent server-side environment
@@ -334,7 +334,7 @@ Push principal handling depends on transport:
 
 `post-receive` records ref-update events:
 
-- new HEAD for issue branches
+- new HEAD for task branches
 - base-branch updates
 - pushed tags
 - actor/principal when available
@@ -351,19 +351,19 @@ Post-receive events drive useful workflow updates:
 - parse new `Resolves:` trailers
 - enqueue check reruns when a ready/in-review change receives new commits
 
-Manual owner pushes to issue branches are first-class workflow input. They are
+Manual owner pushes to task branches are first-class workflow input. They are
 useful for taking over from an agent, making a quick local fix, or adding review
 cleanup by hand. They do not require an active session. The tradeoff is that a
 running agent may need to fetch/rebase before its next push; non-fast-forward
 rejection prevents either side from silently overwriting the other.
 
-For local exchange remotes, a raw `git push flow issue/i-0001` is accepted when
+For local exchange remotes, a raw `git push flow task/i-0001` is accepted when
 it is a fast-forward update. A future `flow git push` helper can make the
 principal explicit for nicer diagnostics, but it is not required for the MVP.
 
 Manual owner pushes to the protected base branch are allowed. They bypass
 Flow's merge action, which is responsible for setting `merged_at`, closing the
-issue file, and excluding handoff files, so they are best suited for owner
+task file, and excluding handoff files, so they are best suited for owner
 repairs or syncing a base ref that is not tied to a Flow change.
 
 Periodic reconcile remains the safety net if event delivery is missed.
@@ -390,18 +390,18 @@ at `flow ready` (and optionally mid-session via `flow handoff write`); it is
 stored as a per-change snapshot in SQLite and injected into the next session's
 prompt, so nothing handoff-related is committed to the branch.
 
-Issues are intentionally not repo artifacts. They live in SQLite and are exposed
-through the coordinator API. The coordinator may later export issue snapshots for
+Tasks are intentionally not repo artifacts. They live in SQLite and are exposed
+through the coordinator API. The coordinator may later export task snapshots for
 backup or public documentation, but generated exports are not the source of
-truth and workers do not create issue files.
+truth and workers do not create task files.
 
-## Issue Model
+## Task Model
 
-Issues are coordinator-owned database records. IDs are allocated in one SQLite
-transaction, so concurrent workers can create issues without git conflicts or
+Tasks are coordinator-owned database records. IDs are allocated in one SQLite
+transaction, so concurrent workers can create tasks without git conflicts or
 ID collisions.
 
-Issue fields:
+Task fields:
 
 - `id`: stable coordinator-allocated ID, e.g. `i-0001`.
 - `title`
@@ -412,31 +412,31 @@ Issue fields:
 - `triage_state`: `triage`, `accepted`, or `rejected`
 - `requires_human_review`
 - `auto_merge`
-- `flow_id`: nullable reference to the flow driving this issue's work phases;
+- `flow_id`: nullable reference to the flow driving this task's work phases;
   empty means the project default flow, resolved when work starts
 - `created_by`: `human`, `agent`, or `system`
-- `created_by_session_id`: nullable session provenance for agent-created issues
-- `source_issue_id`: nullable issue that led to discovery
+- `created_by_session_id`: nullable session provenance for agent-created tasks
+- `source_task_id`: nullable task that led to discovery
 - `source_change_id`: nullable change that led to discovery
 - timestamps
 
-Human-created issues default to `triage_state=accepted`. Agent-created issues
+Human-created tasks default to `triage_state=accepted`. Agent-created tasks
 default to `triage_state=triage`, `schedule_state=backlog`, and should usually
-carry a system tag such as `agent-discovered`. Agents may create issues and add
+carry a system tag such as `agent-discovered`. Agents may create tasks and add
 context, tags, and relationships, but may not schedule, close, reject, or merge
-issues.
+tasks.
 
 The `triage` state is a human inbox for discovered work. Accepting a triage
-issue changes `triage_state` to `accepted`; rejecting it changes
+task changes `triage_state` to `accepted`; rejecting it changes
 `triage_state` to `rejected` and `schedule_state` to `closed`.
-Only accepted issues can be scheduled or enqueue author jobs.
+Only accepted tasks can be scheduled or enqueue author jobs.
 
-### Issue Relationships
+### Task Relationships
 
-Issue relationships are rows, not columns:
+Task relationships are rows, not columns:
 
 ```text
-issue_relations(source_issue_id, target_issue_id, kind, created_by, created_at)
+task_relations(source_task_id, target_task_id, kind, created_by, created_at)
 ```
 
 Supported relation kinds for the MVP:
@@ -457,57 +457,57 @@ Parent/child relationships are organizational. They do not automatically close a
 parent when all children close, and they do not block scheduling unless an
 explicit `blocks` relation also exists.
 
-Blocking relationships affect scheduling. An issue with any unresolved blocker
+Blocking relationships affect scheduling. An task with any unresolved blocker
 does not enqueue a new author session and derives to the `blocked` board lane
 when it is otherwise idle.
 
-### Issue Tags
+### Task Tags
 
 Tags are first-class records:
 
 ```text
 tags(id, slug, name, color, description, created_by, created_at)
-issue_tags(issue_id, tag_id, created_by, created_at)
+task_tags(task_id, tag_id, created_by, created_at)
 ```
 
 Tag slugs are lowercase, unique, and stable. Display names can change. Agents
-may apply existing tags and may create tags when creating a discovered issue, but
+may apply existing tags and may create tags when creating a discovered task, but
 agent-created tags are marked with provenance so the UI can surface them for
 cleanup.
 
-### Agent-Discovered Issues
+### Agent-Discovered Tasks
 
-A session-scoped token can create and read issues through the coordinator API.
+A session-scoped token can create and read tasks through the coordinator API.
 This is how a worker records work it discovers that is out of scope for its
-current issue.
+current task.
 
-Agent-created issues are constrained:
+Agent-created tasks are constrained:
 
 - created with `created_by=agent` and `created_by_session_id`
 - default to `triage_state=triage`
 - default to `schedule_state=backlog`
 - cannot be scheduled or closed by the session token
 - can include tags and relationships at creation time
-- can relate back to the current issue through `source_issue_id`
+- can relate back to the current task through `source_task_id`
 
-If the discovered issue blocks the current issue, the worker can create it with
-a `blocks` relationship pointing at the current issue. The current issue then
+If the discovered task blocks the current task, the worker can create it with
+a `blocks` relationship pointing at the current task. The current task then
 derives to `blocked` after its active session ends or is abandoned. If the
 worker can still continue its scoped work, it should use `related_to` instead.
 
-### Why Issues Are Not Git Files
+### Why Tasks Are Not Git Files
 
-Issue creation is a concurrent database operation, not a git authoring
-operation. If issues lived as `.flow/issues/i-0007.md`, two workers could
+Task creation is a concurrent database operation, not a git authoring
+operation. If tasks lived as `.flow/tasks/i-0007.md`, two workers could
 allocate the same next ID locally and race to push conflicting files. The
 exchange remote could reject one push, but the losing worker would then need to
-renumber the issue, rewrite references, and retry. UUID filenames would avoid
-the collision but would make issue IDs worse for humans and branch names.
+renumber the task, rewrite references, and retry. UUID filenames would avoid
+the collision but would make task IDs worse for humans and branch names.
 
-The coordinator already serializes writes and owns ID allocation, so issue
+The coordinator already serializes writes and owns ID allocation, so task
 creation goes through the API. Workers that are offline from the coordinator
-cannot create coordinator-backed issues; they should note the discovery locally
-and create the issue when the coordinator is reachable.
+cannot create coordinator-backed tasks; they should note the discovery locally
+and create the task when the coordinator is reachable.
 
 ## Flows and Agent Definitions
 
@@ -523,7 +523,7 @@ Agent definition: a reusable agent configuration.
   per harness (`--model X --effort Y`, `-c model_reasoning_effort=Y`,
   `--reasoning Y`). Empty means the harness default.
 - `prompt`: the role-instruction markdown. It replaces the embedded
-  `skills/flow-*.md` content in the session's prompt; issue context (title,
+  `skills/flow-*.md` content in the session's prompt; task context (title,
   body, acceptance criteria, prior handoffs, review state) is still appended by
   `flow fetch-prompt`.
 
@@ -550,11 +550,11 @@ flows — `direct` (`implement` only; the project default) and `planned`
 (human-gated `plan`, then `implement`). These reproduce the old fixed behavior
 and are ordinary rows the user can edit or replace.
 
-Snapshot semantics: when an issue's work starts (its first author job is
+Snapshot semantics: when an task's work starts (its first author job is
 ensured), the coordinator freezes the resolved flow — phases with full
-agent-def copies, review set, and fix agent — into a per-issue flow cursor
-(`issue_flow_cursor.flow_snapshot_json`). Editing or deleting a flow never
-changes an in-flight issue; unscheduled issues resolve the live flow when they
+agent-def copies, review set, and fix agent — into a per-task flow cursor
+(`task_flow_cursor.flow_snapshot_json`). Editing or deleting a flow never
+changes an in-flight task; unscheduled tasks resolve the live flow when they
 start, and a deleted flow falls back to the project default. Referenced agent
 definitions cannot be deleted while a flow uses them; the default flow cannot
 be deleted.
@@ -568,21 +568,21 @@ Phase execution model:
   model selection.
 - `flow ready` is the single completion signal for every phase. Each phase
   submits a handoff; the engine copies it into a per-phase store
-  (`issue_phase_handoffs`) and injects completed phases' handoffs into later
+  (`task_phase_handoffs`) and injects completed phases' handoffs into later
   phases' prompts. Only the final phase's `flow ready` publishes the change
   into review; intermediate handoffs are the phase's artifact (a spec, a plan)
   and only need to be non-empty, while the final phase's handoff must follow
   the Flow Handoff template.
 - Prompt material is resolved server-side: sessions call
-  `GET /issues/{id}/prompt-context` (with `?check=<name>` for review checks) to
+  `GET /tasks/{id}/prompt-context` (with `?check=<name>` for review checks) to
   receive the frozen agent prompt, gate feedback, and prior-phase handoffs, so
-  prompts always reflect the snapshot the issue is actually running.
+  prompts always reflect the snapshot the task is actually running.
 
 ## Identity and Naming
 
 IDs use stable prefixes:
 
-- Issue: `i-0001`
+- Task: `i-0001`
 - Session: `s-<random>`
 - Change: `ch-<random>`
 - Job: `j-<random>`
@@ -595,23 +595,23 @@ IDs use stable prefixes:
 Feature branch names are the universal join key:
 
 ```text
-issue/i-0001
+task/i-0001
 ```
 
-Issue titles can change without changing branch names.
+Task titles can change without changing branch names.
 
 ## Domain Model
 
-Flow's core nouns are Issue, Session, Change, Agent Definition, Flow, and the
-per-issue Flow Cursor.
+Flow's core nouns are Task, Session, Change, Agent Definition, Flow, and the
+per-task Flow Cursor.
 
-Issue:
+Task:
 
 - Stable task identity and editorial content.
 - Stored and queried in SQLite.
 - Owns scheduling knobs: `schedule_state`, `priority`,
   `requires_human_review`, and `auto_merge`, plus the `flow_id` selection.
-- Can have tags and relationships to other issues.
+- Can have tags and relationships to other tasks.
 
 Agent Definition and Flow:
 
@@ -620,7 +620,7 @@ Agent Definition and Flow:
 
 Flow Cursor:
 
-- The issue's frozen position within its flow: the resolved snapshot plus
+- The task's frozen position within its flow: the resolved snapshot plus
   `phase_index` and `phase_state`
   (`pending`, `running`, `awaiting_approval`, `completed`) and any gate
   feedback. Owned by the lifecycle engine; mutations are compare-and-swap on
@@ -628,7 +628,7 @@ Flow Cursor:
 
 Session:
 
-- One engagement by a worker environment against an issue.
+- One engagement by a worker environment against an task.
 - Has role `author`, `reviewer`, or `verifier`.
 - Has runtime state `starting`, `working`, `waiting`, `finished`, `crashed`, or
   `abandoned`.
@@ -640,11 +640,11 @@ Change:
 - Code artifact represented by branch plus base.
 - Usually created when an author session starts.
 - Becomes reviewable when the author calls `flow ready`.
-- Reuses the same issue branch across review/fix rounds.
+- Reuses the same task branch across review/fix rounds.
 - Stores only durable lifecycle fact `merged_at`; review status is derived.
 
-SQLite enforces one active author session per issue with a partial unique index
-and one live author job per issue with a separate partial unique index. Active
+SQLite enforces one active author session per task with a partial unique index
+and one live author job per task with a separate partial unique index. Active
 session runtime states are `starting`, `working`, and `waiting`. Live job states
 are `queued`, `claimed`, and `running`.
 
@@ -652,17 +652,17 @@ are `queued`, `claimed`, and `running`.
 
 The database holds the local operational state:
 
-- `issues`: issue fields, scheduling, triage, flow selection, provenance, and
+- `tasks`: task fields, scheduling, triage, flow selection, provenance, and
   timestamps.
 - `agent_defs`: reusable agent configurations (harness, model, effort, prompt).
 - `flows`, `flow_phases`, `flow_review_agents`: the project's flow catalog —
   ordered phases with gates plus the review agent set and fix agent.
-- `issue_flow_cursor`: the issue's frozen flow snapshot and phase position.
-- `issue_phase_handoffs`: per-phase completion artifacts (specs, plans, the
+- `task_flow_cursor`: the task's frozen flow snapshot and phase position.
+- `task_phase_handoffs`: per-phase completion artifacts (specs, plans, the
   final handoff), shown at gates and injected into later phases' prompts.
-- `issue_relations`: parent/child, blocker, and related issue links.
+- `task_relations`: parent/child, blocker, and related task links.
 - `tags`: tag definitions.
-- `issue_tags`: many-to-many issue tags.
+- `task_tags`: many-to-many task tags.
 - `sessions`: worker engagements and runtime state.
 - `changes`: branch/base/merge facts.
 - `jobs`: unified queue for agent, verifier, reviewer, CI, and push jobs.
@@ -673,7 +673,7 @@ The database holds the local operational state:
 - `comments`: thread discussion.
 - `status_log`: lossy TPM/status feed.
 - `tokens`: hashed coordinator, worker, and session credentials.
-- `workflow_state`: the explicit, authoritative lifecycle `phase` per issue,
+- `workflow_state`: the explicit, authoritative lifecycle `phase` per task,
   with an optimistic `version`.
 - `transitions`: the append-only lifecycle transition log (audit and replay).
 - `timers`: durable timers the background ticker drains for crash recovery and
@@ -686,8 +686,8 @@ Required pragmatics:
 - Coordinator is the only SQLite writer.
 - `BEGIN IMMEDIATE` around job claim and state transitions.
 - Partial unique index for unreleased lease per job.
-- Partial unique index for active author session per issue.
-- Partial unique index for live author job per issue:
+- Partial unique index for active author session per task.
+- Partial unique index for live author job per task:
   `kind='agent' AND role='author' AND state IN ('queued','claimed','running')`.
 - Unique normalized tag slugs.
 - Unique relation rows and cycle checks in coordinator transitions.
@@ -695,20 +695,20 @@ Required pragmatics:
 
 ## Derived State
 
-The board is a view derived in two steps. First, each open issue gets a
+The board is a view derived in two steps. First, each open task gets a
 fine-grained sub-state. Precedence, top wins:
 
-1. `done`: issue `schedule_state=closed` or `change.merged_at IS NOT NULL`
+1. `done`: task `schedule_state=closed` or `change.merged_at IS NOT NULL`
    (skipped; not shown on the board).
 2. `ready_to_merge`: review state is `approved`, `auto_merge=false`, and not
    merged.
 3. `changes_requested`: any required check verdict is `blocked`.
 4. `in_progress`: active session is `starting`, `working`, or `waiting`, or
-   the flow cursor pins the issue mid-pipeline (paused at a human gate, or
+   the flow cursor pins the task mid-pipeline (paused at a human gate, or
    between phase jobs past the first phase).
-5. `triage`: issue `triage_state=triage`.
+5. `triage`: task `triage_state=triage`.
 6. `in_review`: an unmerged ready change with review state `in_review`.
-7. `up_next`: issue `schedule_state=up_next`.
+7. `up_next`: task `schedule_state=up_next`.
 8. `backlog`: everything else.
 
 A human wait is a `wait_reason` overlay on the sub-state, not a sub-state of
@@ -725,8 +725,8 @@ next:
 | `in_progress` | `in_progress`, `in_review`, `changes_requested` | automation is working |
 | `needs_attention` | wait reasons, `ready_to_merge`, blocked overlay | waiting on a human |
 
-The sub-state is surfaced as a pill on issue cards, alongside a flow-phase
-pill (`plan 1/2`, with awaiting-approval styling at a gate) when the issue has
+The sub-state is surfaced as a pill on task cards, alongside a flow-phase
+pill (`plan 1/2`, with awaiting-approval styling at a gate) when the task has
 a flow cursor; `blocked` is a derived overlay (unresolved `blocks` relations)
 rendered as a warning pill and routed to `needs_attention`, never a lane of
 its own.
@@ -740,23 +740,23 @@ Review state is also derived:
 
 No actor writes a board lane or review state.
 
-The lifecycle engine additionally maintains an explicit `phase` per issue in
-`workflow_state` (see Issue Lifecycle). The board lane and review-state views
+The lifecycle engine additionally maintains an explicit `phase` per task in
+`workflow_state` (see Task Lifecycle). The board lane and review-state views
 remain derived and authoritative for those projections; the explicit `phase` is
 an overlay that the engine recomputes from the same underlying state on every
 transition, providing a durable, auditable coordinate and the timeline view.
 `blocked` stays a derived overlay and is never stored as a phase.
 
-## Issue Lifecycle
+## Task Lifecycle
 
-1. Human creates an issue with `flow issue create [--flow <flow>]`.
-2. Issue starts in `backlog`.
-3. Human schedules it with `flow issue schedule i-0001 up_next`.
-4. Coordinator freezes the issue's flow into its cursor (the selected flow, or
-   the project default) and enqueues the first phase's author job if the issue
+1. Human creates an task with `flow task create [--flow <flow>]`.
+2. Task starts in `backlog`.
+3. Human schedules it with `flow task schedule i-0001 up_next`.
+4. Coordinator freezes the task's flow into its cursor (the selected flow, or
+   the project default) and enqueues the first phase's author job if the task
    is accepted, no active or queued author job/session exists, and no
    unresolved blocker exists.
-5. Worker claims the job, creates/checks out `issue/i-0001`, starts tmux, and
+5. Worker claims the job, creates/checks out `task/i-0001`, starts tmux, and
    runs the entrypoint built from the phase agent's harness and model
    selection.
 6. The session alternates between `working` and `waiting`.
@@ -772,19 +772,19 @@ transition, providing a durable, auditable coordinate and the timeline view.
    plus repo `.flow/checks` CI checks.
 10. Review loop runs until review state is `approved`.
 11. If a required check blocks the change, Flow enqueues a fix author job on
-    the same issue branch (using the flow's fix agent) when no active or
+    the same task branch (using the flow's fix agent) when no active or
     queued author job exists.
 12. Each fix round creates a new author session row and reuses the same change
     and branch.
 13. The author fixes the branch, pushes, and calls `flow ready` again.
 14. Flow reruns required critique checks for the new HEAD.
 15. If `auto_merge=true`, coordinator merges automatically.
-16. If `auto_merge=false`, the board shows the issue in `needs_attention` with
+16. If `auto_merge=false`, the board shows the task in `needs_attention` with
     a `ready_to_merge` pill until the human clicks merge.
-17. Merge sets `merged_at`, sets the issue `schedule_state=closed`, and removes
-    the issue from the board.
+17. Merge sets `merged_at`, sets the task `schedule_state=closed`, and removes
+    the task from the board.
 
-Agent-discovered issues enter the backlog lane with a `triage` sub-state pill
+Agent-discovered tasks enter the backlog lane with a `triage` sub-state pill
 instead of the normal backlog. The human can accept, edit, tag, relate,
 schedule, or reject them.
 
@@ -792,10 +792,10 @@ schedule, or reject them.
 
 The lifecycle above is implemented as an explicit, durable in-process workflow
 engine (`internal/lifecycle`) rather than as cascades hand-wired into HTTP
-handlers. The engine owns the issue finite-state machine; lifecycle API handlers
+handlers. The engine owns the task finite-state machine; lifecycle API handlers
 shrink to "authenticate, build a typed event, call `engine.Step`".
 
-Each issue carries an authoritative `phase` in `workflow_state`:
+Each task carries an authoritative `phase` in `workflow_state`:
 
 ```text
 triage  backlog  up_next  working
@@ -810,24 +810,24 @@ board sub-states use, so each phase maps deterministically into one of the four
 board lanes. `blocked` remains a derived overlay and is never stored.
 
 `working` is a container phase: the entire user-composed work pipeline runs
-inside it, and the issue's position within the pipeline lives on the flow
+inside it, and the task's position within the pipeline lives on the flow
 cursor (snapshot + `phase_index` + `phase_state`), not in `workflow_state`.
 This keeps the FSM's transition table static and reviewable while phases,
-gates, and agents remain user configuration. The cursor alone can pin an issue
+gates, and agents remain user configuration. The cursor alone can pin an task
 in `working` — paused at a human gate, or between phase jobs — even with no
 active session. Custom phase names surface through the cursor on the board and
-issue views; the transition log records the gate and advance events.
+task views; the transition log records the gate and advance events.
 
 The canonical workflow specification is a single Go table,
 `internal/lifecycle/transitions.go`, expressed as
 `[]Transition{From, On, Guard, Action, To}` rows. Reviewing one file shows every
-legal edge. Events are typed, one per external input — `ScheduleIssue`,
-`TriageIssue`, `SessionReady` (the phase-completion signal behind `flow
+legal edge. Events are typed, one per external input — `ScheduleTask`,
+`TriageTask`, `SessionReady` (the phase-completion signal behind `flow
 ready`), `WorkPhaseApproved`, `WorkPhaseRework`, `CheckReported`,
 `MergeRequested`, the thread events — plus bounded internal follow-on events
 (for example scheduling emits `EnsureWorkPhaseJob` to freeze the cursor and
 enqueue the current phase's job, a blocked required check emits a guarded
-`EnsureFixAuthorJob` edge, and an approved auto-merge issue emits an
+`EnsureFixAuthorJob` edge, and an approved auto-merge task emits an
 `AutoMerge` edge).
 
 Cursor mutations are engine effects with compare-and-swap semantics (advance
@@ -838,7 +838,7 @@ declines to escalate while a gate deliberately waits on a human.
 
 `engine.Step` is the single entry point. For one event it:
 
-1. resolves the target issue and loads a snapshot,
+1. resolves the target task and loads a snapshot,
 2. looks up the transition for `(phase, event)` and evaluates its guard,
 3. runs the action, whose side effects go through an injected `Effects` seam so
    the engine is a deterministic reducer and testable with a fake,
@@ -859,9 +859,9 @@ old lazy sweep only ran when a request happened to pass through a handler. The
 in-line sweeps remain as defense-in-depth. The engine stays single-process and
 single-writer, consistent with the rest of Flow.
 
-The per-issue transition history is surfaced three ways: `GET
-/issues/{id}/transitions`, a `flow transitions <issue-id>` CLI command, and a
-Lifecycle section on the issue detail view.
+The per-task transition history is surfaced three ways: `GET
+/tasks/{id}/transitions`, a `flow transitions <task-id>` CLI command, and a
+Lifecycle section on the task detail view.
 
 ## Job Queue and Leases
 
@@ -870,7 +870,7 @@ CI and agents share one queue. A job has:
 - `kind`: `agent`, `ci`, or `push`.
 - `lifetime`: `persistent` or `ephemeral`.
 - `role`: `author`, `reviewer`, `verifier`, or null for CI/push.
-- `issue_id`, `change_id`, and optional `check_id`.
+- `task_id`, `change_id`, and optional `check_id`.
 - `priority`.
 - selectors and tolerations.
 - entrypoint spec.
@@ -902,18 +902,18 @@ traffic; request-time sweeps remain as a safety net.
 Author job enqueue is guarded. Flow enqueues an author or fix-author job only
 when all of these are true:
 
-- the issue is accepted and not closed
-- the issue has no unresolved blockers
+- the task is accepted and not closed
+- the task has no unresolved blockers
 - the change is not merged
-- no active author session exists for the issue
-- no queued, claimed, or running author job exists for the issue
+- no active author session exists for the task
+- no queued, claimed, or running author job exists for the task
 
-Initial author jobs create the change and issue branch when needed. Fix-author
-jobs reuse the existing change and `issue/<issue-id>` branch.
+Initial author jobs create the change and task branch when needed. Fix-author
+jobs reuse the existing change and `task/<task-id>` branch.
 
-Author-job enqueue is idempotent for the same issue/change/branch. If a live
+Author-job enqueue is idempotent for the same task/change/branch. If a live
 author job already exists with matching inputs, the coordinator returns that job
-instead of creating a duplicate. If a live author job exists for the same issue
+instead of creating a duplicate. If a live author job exists for the same task
 but points at a different change or branch, enqueue fails with an internal
 consistency error so the state can be inspected rather than hidden.
 
@@ -922,7 +922,7 @@ consistency error so the state can be inspected rather than hidden.
 Flow has three entrypoint sources:
 
 1. Flow/agent-definition configuration (the normal case).
-   Author-phase and fix-round jobs build their entrypoint from the issue's
+   Author-phase and fix-round jobs build their entrypoint from the task's
    frozen flow snapshot: the phase agent's harness launch template plus its
    serialized model/reasoning selection, appended to coordinator-level harness
    args. The flow's review agents build reviewer/verifier check commands the
@@ -1042,7 +1042,7 @@ Important environment variables:
 - `FLOW_COORDINATOR_URL`
 - `FLOW_PROTOCOL_VERSION`
 - `FLOW_SESSION_TOKEN`
-- `FLOW_ISSUE_ID`
+- `FLOW_TASK_ID`
 - `FLOW_SESSION_ID`
 - `FLOW_CHANGE_ID`
 - `FLOW_BRANCH`
@@ -1085,9 +1085,9 @@ In-session commands:
 flow fetch-prompt [--harness codex|claude|harness|agents]
 flow status "<message>"
 flow handoff write   # optional progress snapshot (reads stdin), submitted to the coordinator
-flow issue list [--tag <tag>] [--blocked-by <issue-id>]
-flow issue show <issue-id>
-flow issue create --title "<title>" --body "<body>" [--tag <tag>] [--blocks <issue-id>] [--related <issue-id>]
+flow task list [--tag <tag>] [--blocked-by <task-id>]
+flow task show <task-id>
+flow task create --title "<title>" --body "<body>" [--tag <tag>] [--blocks <task-id>] [--related <task-id>]
 flow comment <sha>:<file>:<line> "<body>"
 flow thread reply <thread-id> "<body>"
 flow thread claim <thread-id> fixed|not_warranted|superseded [--body "<rationale>"]
@@ -1100,7 +1100,7 @@ flow ready           # completes the current work phase: reads the handoff on
 `flow fetch-prompt` reads the Flow worker environment for author, reviewer, and
 verifier jobs, resolves the phase/check agent prompt from the coordinator's
 prompt context (falling back to the embedded role skills when no flow cursor
-exists), appends issue context, prior-phase handoffs, and gate feedback, and
+exists), appends task context, prior-phase handoffs, and gate feedback, and
 emits the initial harness prompt. `flow init` does not seed role skills into project
 repositories, and `flow-worker` does not validate committed skill files in the
 worker checkout before starting the entrypoint. `FLOW_WORKER_HARNESS` is set by
@@ -1111,22 +1111,22 @@ override.
 Human commands:
 
 ```text
-flow issue create [--flow <flow-id-or-name>]
-flow issue edit <issue-id>
-flow issue schedule <issue-id> backlog|up_next
-flow issue close <issue-id>
-flow issue triage accept|reject <issue-id>
-flow issue tag add|remove <issue-id> <tag>
-flow issue link <source-id> parent-of|blocks|related-to <target-id>
-flow issue unlink <source-id> parent-of|blocks|related-to <target-id>
-flow phase approve <issue-id>
-flow phase request-changes <issue-id> --feedback "<text>"
+flow task create [--flow <flow-id-or-name>]
+flow task edit <task-id>
+flow task schedule <task-id> backlog|up_next
+flow task close <task-id>
+flow task triage accept|reject <task-id>
+flow task tag add|remove <task-id> <tag>
+flow task link <source-id> parent-of|blocks|related-to <target-id>
+flow task unlink <source-id> parent-of|blocks|related-to <target-id>
+flow phase approve <task-id>
+flow phase request-changes <task-id> --feedback "<text>"
 flow flows list|create|edit|rm|set-default    # create/edit take -f flow.yaml
 flow agent-defs list|create|edit|rm           # create/edit take -f agent.yaml
 flow board
 flow attach <session-id>
 flow attach --job <job-id>
-flow merge <issue-id|change-id>
+flow merge <task-id|change-id>
 flow reconcile
 ```
 
@@ -1199,20 +1199,20 @@ Standard error shape:
 Core endpoints:
 
 ```text
-POST /issues
-GET  /issues
-GET  /issues/{id}
-PATCH /issues/{id}
-POST /issues/{id}/schedule
-POST /issues/{id}/close
-POST /issues/{id}/triage
-GET  /issues/{id}/transitions
-POST /issues/{id}/tags
-DELETE /issues/{id}/tags/{tag}
+POST /tasks
+GET  /tasks
+GET  /tasks/{id}
+PATCH /tasks/{id}
+POST /tasks/{id}/schedule
+POST /tasks/{id}/close
+POST /tasks/{id}/triage
+GET  /tasks/{id}/transitions
+POST /tasks/{id}/tags
+DELETE /tasks/{id}/tags/{tag}
 GET  /tags
 POST /tags
-POST /issue-relations
-DELETE /issue-relations/{id}
+POST /task-relations
+DELETE /task-relations/{id}
 
 GET  /board
 GET  /changes/{id}/diff
@@ -1325,11 +1325,11 @@ There are two phases:
    The verifier audits acceptance criteria and claimed thread resolutions after
    critique settles.
 
-Agent reviewer and verifier checks come from the issue's frozen flow snapshot:
+Agent reviewer and verifier checks come from the task's frozen flow snapshot:
 one check per review agent, named after its agent definition, launched with
 that agent's harness and model/effort selection, and prompted with its agent
 prompt. Repo `.flow/checks/*.yaml` CI checks always merge into the round. A
-flow with an empty review set deliberately runs repo checks alone. Issues
+flow with an empty review set deliberately runs repo checks alone. Tasks
 without a flow cursor (a project with no flows configured) fall back to
 synthesized default reviewer/verifier checks using the bundled instructions.
 
@@ -1346,9 +1346,9 @@ a duplicate thread. If the same concern appears in a new location or the
 original anchor no longer projects cleanly, the reviewer may open a new thread
 and reference the older one.
 
-When required checks block a change, Flow sends the issue back to a fix round
-automatically if it can be worked: the issue is accepted, unmerged, unblocked by
-other issues, and has no active or queued author job. The fix job runs the
+When required checks block a change, Flow sends the task back to a fix round
+automatically if it can be worked: the task is accepted, unmerged, unblocked by
+other tasks, and has no active or queued author job. The fix job runs the
 flow's fix agent (default: the final work phase's agent) in a new author
 session on the same change branch. When that session calls `flow ready`, Flow
 treats the branch's new HEAD as the next review round and reruns required
@@ -1439,17 +1439,17 @@ Automatic merge happens when `auto_merge=true` and review state becomes
 
 Merge behavior:
 
-1. Fetch base and issue branch from the Flow exchange remote.
+1. Fetch base and task branch from the Flow exchange remote.
 2. Build a squash commit from branch diff against base.
 3. Exclude `.flow/session/**`.
 4. Preserve code changes.
 5. Set `merged_at`.
-6. Set the issue `schedule_state=closed` in SQLite.
+6. Set the task `schedule_state=closed` in SQLite.
 7. Push the base-branch update to the Flow exchange remote as the coordinator.
 
 Downstream publication is outside Flow's MVP scope. Users can push from their
 own worktree or from the exchange remote to provider remotes manually. External
-feedback is manually re-entered as Flow issues or threads.
+feedback is manually re-entered as Flow tasks or threads.
 
 ## Reconciliation
 
@@ -1457,8 +1457,8 @@ feedback is manually re-entered as Flow issues or threads.
 recovery and maintenance tool, not the normal durability model:
 
 1. Fetch from the Flow exchange remote.
-2. Scan `refs/heads/issue/i-*` branches.
-3. Verify each issue branch maps to a known SQLite issue.
+2. Scan `refs/heads/task/i-*` branches.
+3. Verify each task branch maps to a known SQLite task.
 4. Create missing change rows for known branches when enough metadata exists.
 5. Parse `Resolves:` trailers and mark matching known threads as
    `claimed(kind=fixed)`.
@@ -1468,11 +1468,11 @@ Handoffs are coordinator-stored (submitted via `flow ready`/`flow handoff
 write`), so reconcile no longer reads them from branch refs.
 
 SQLite is durable enough for the local MVP and is the source of truth for
-operational state, issues, review discussion, and check history. If the database
+operational state, tasks, review discussion, and check history. If the database
 is lost or corrupted, reconciliation can recover only the parts that were also
 represented in git. It cannot recover:
 
-- issues, tags, or issue relationships
+- tasks, tags, or task relationships
 - status feed entries
 - check verdict history
 - review thread/comment bodies or claim state
@@ -1514,18 +1514,18 @@ the source of truth.
 
 Required views:
 
-- Board: derived lanes, issue cards, active status, check summary, attach/merge
+- Board: derived lanes, task cards, active status, check summary, attach/merge
   actions, and quick links to detail views. Lanes are read from the coordinator;
   drag-and-drop is not required for the MVP.
-- Triage inbox: agent-discovered `triage` issues with provenance, tags,
+- Triage inbox: agent-discovered `triage` tasks with provenance, tags,
   relationships, and explicit accept/reject/edit actions.
-- Needs Attention inbox: issues with wait reasons or required human actions,
+- Needs Attention inbox: tasks with wait reasons or required human actions,
   including the active session, latest status line, handoff summary, terminal
   attach action, and manual merge actions.
 - Merge inbox: `ready_to_merge` changes with check summary, diff stats, branch
   head, and the merge action when human action is required.
-- Issue detail: title, body, acceptance criteria, tags, relationships, the
-  issue's flow (phase chain with agents and gates, current position),
+- Task detail: title, body, acceptance criteria, tags, relationships, the
+  task's flow (phase chain with agents and gates, current position),
   schedule/triage/close controls, status feed, active and historical sessions,
   linked change state, and a Lifecycle timeline of phase transitions. When a
   phase awaits gate approval, a prominent panel renders the pending handoff as
@@ -1549,7 +1549,7 @@ prefix:
 /ui/feedback
 /ui/merge
 /ui/flows
-/ui/projects/<project-id>/issues/<issue-id>
+/ui/projects/<project-id>/tasks/<task-id>
 /ui/changes/<change-id>
 /ui/workers
 /ui/jobs
@@ -1564,7 +1564,7 @@ working.
 
 Board and inbox cards should show enough information for fast scanning:
 
-- issue ID, title, tags, and relationship indicators
+- task ID, title, tags, and relationship indicators
 - board lane and scheduling status
 - active session state and latest status line
 - branch/change identity when present
@@ -1615,15 +1615,15 @@ Flow is single-user but still treats agent environments as untrusted.
 Credential scopes:
 
 - Owner token: human UI/CLI. Can create/edit/schedule/close/merge/reconcile
-  issues and changes.
+  tasks and changes.
 - Worker token: supervisor only. Can register, claim, heartbeat, and release.
 - Session token: exported to agent shell. Can act on its session/change, read
-  issues, and create triage/backlog issues with provenance.
+  tasks, and create triage/backlog tasks with provenance.
 - Hook token: exchange remote hooks only. Can post git ref-update events.
 - Git coordinator principal: can update protected refs in the exchange remote.
-- Git owner principal: can manually update issue branches and the protected
+- Git owner principal: can manually update task branches and the protected
   base branch, but not coordinator-only internal refs.
-- Git worker principal: can update allowed issue branches in the exchange
+- Git worker principal: can update allowed task branches in the exchange
   remote.
 
 Rules:
@@ -1634,7 +1634,7 @@ Rules:
 - Tokens are stored hashed in SQLite.
 - Session tokens expire when the session reaches a terminal state.
 - All mutating session operations validate session ownership.
-- Session-token issue creation is idempotent and cannot schedule or close work.
+- Session-token task creation is idempotent and cannot schedule or close work.
 - The coordinator defaults to loopback binding.
 - Remote workers require TLS or a trusted private network.
 - Terminal URLs require owner auth and session authorization.
@@ -1652,7 +1652,7 @@ worker environment.
 
 The coordinator writes structured logs for:
 
-- issue mutations
+- task mutations
 - job enqueue/claim/release
 - lease renewal and expiry
 - session state changes
@@ -1662,9 +1662,9 @@ The coordinator writes structured logs for:
 - exchange-remote hook events
 
 `status_log` is a lossy product feed for the human, not an audit log. The
-append-only `transitions` log is the durable lifecycle audit trail: every issue
+append-only `transitions` log is the durable lifecycle audit trail: every task
 phase change records the triggering event, guard result, from/to phase, actor,
-and time, and backs the per-issue lifecycle timeline.
+and time, and backs the per-task lifecycle timeline.
 
 Metrics to expose later:
 
@@ -1709,7 +1709,7 @@ Database loss or corruption:
   recoverable from git.
 - `flow reconcile` can rebuild a partial operational database from git-backed
   metadata.
-- Issues, tags, issue relationships, review discussions, check history, leases,
+- Tasks, tags, task relationships, review discussions, check history, leases,
   tokens, and status feed are lost.
 - HA, replication, and automatic failover are out of scope for the initial
   design.
@@ -1748,10 +1748,10 @@ Core automated test layers:
 - API tests for idempotency, state transition validation, and protocol errors.
 - UI smoke tests once the web surface exists.
 
-The MVP is not complete until it can run an end-to-end fake issue through:
+The MVP is not complete until it can run an end-to-end fake task through:
 
 ```text
-create issue -> schedule -> worker claim -> agent creates discovered issue
+create task -> schedule -> worker claim -> agent creates discovered task
 -> fake author ready -> CI check -> approved -> manual merge
--> handoff excluded -> issue done
+-> handoff excluded -> task done
 ```

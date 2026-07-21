@@ -209,7 +209,7 @@ func canonicalArtifactPayload(kind ArtifactKind, raw json.RawMessage) ([]byte, e
 		if len(raw) == 0 {
 			return nil, nil
 		}
-	case ArtifactChange, ArtifactIssueSet:
+	case ArtifactChange, ArtifactTaskSet:
 		if len(raw) == 0 {
 			return nil, fmt.Errorf("%s artifact payload is required", kind)
 		}
@@ -241,8 +241,8 @@ func canonicalArtifactPayload(kind ArtifactKind, raw json.RawMessage) ([]byte, e
 			return nil, errors.New("change artifact payload requires change_id and head_sha")
 		}
 	}
-	if kind == ArtifactIssueSet {
-		if _, err := DecodeIssueSetManifest(canonical); err != nil {
+	if kind == ArtifactTaskSet {
+		if _, err := DecodeTaskSetManifest(canonical); err != nil {
 			return nil, err
 		}
 	}
@@ -273,7 +273,7 @@ SELECT id, workflow_run_id, node_run_id, session_id, kind, summary_markdown,
 	payload_json, payload_sha256, base_revision, client_key, created_at
 FROM workflow_artifacts`
 
-func scanWorkflowArtifactMaybe(scanner issueScanner) (WorkflowArtifact, bool, error) {
+func scanWorkflowArtifactMaybe(scanner taskScanner) (WorkflowArtifact, bool, error) {
 	var artifact WorkflowArtifact
 	var sessionID, payload, baseRevision sql.NullString
 	var kind, createdAt string
@@ -299,13 +299,13 @@ func scanWorkflowArtifactMaybe(scanner issueScanner) (WorkflowArtifact, bool, er
 	return artifact, true, nil
 }
 
-type IssueSetManifest struct {
-	SchemaVersion int                  `json:"schema_version"`
-	Issues        []IssueSetItem       `json:"issues"`
-	Dependencies  []IssueSetDependency `json:"dependencies,omitempty"`
+type TaskSetManifest struct {
+	SchemaVersion int                 `json:"schema_version"`
+	Tasks         []TaskSetItem       `json:"tasks"`
+	Dependencies  []TaskSetDependency `json:"dependencies,omitempty"`
 }
 
-type IssueSetItem struct {
+type TaskSetItem struct {
 	Key                string   `json:"key"`
 	Title              string   `json:"title"`
 	Body               string   `json:"body,omitempty"`
@@ -315,83 +315,83 @@ type IssueSetItem struct {
 	FlowID             string   `json:"flow_id,omitempty"`
 }
 
-type IssueSetDependency struct {
+type TaskSetDependency struct {
 	Blocker string `json:"blocker"`
 	Blocked string `json:"blocked"`
 }
 
-type MaterializeIssueSetResult struct {
-	IssueIDs map[string]string `json:"issue_ids"`
+type MaterializeTaskSetResult struct {
+	TaskIDs map[string]string `json:"task_ids"`
 }
 
-func (s *WorkflowArtifactService) MaterializeIssueSet(ctx context.Context, artifactID string, config MaterializeIssueSetNodeConfig) (MaterializeIssueSetResult, bool, error) {
+func (s *WorkflowArtifactService) MaterializeTaskSet(ctx context.Context, artifactID string, config MaterializeTaskSetNodeConfig) (MaterializeTaskSetResult, bool, error) {
 	artifactID = strings.TrimSpace(artifactID)
 	if artifactID == "" {
-		return MaterializeIssueSetResult{}, false, errors.New("artifact id is required")
+		return MaterializeTaskSetResult{}, false, errors.New("artifact id is required")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return MaterializeIssueSetResult{}, false, err
+		return MaterializeTaskSetResult{}, false, err
 	}
 	defer tx.Rollback()
 	var existingJSON string
 	if err := tx.QueryRowContext(ctx, `SELECT result_json FROM workflow_materializations WHERE artifact_id = ?`, artifactID).Scan(&existingJSON); err == nil {
-		var existing MaterializeIssueSetResult
+		var existing MaterializeTaskSetResult
 		if err := json.Unmarshal([]byte(existingJSON), &existing); err != nil {
-			return MaterializeIssueSetResult{}, false, err
+			return MaterializeTaskSetResult{}, false, err
 		}
 		return existing, true, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
-		return MaterializeIssueSetResult{}, false, err
+		return MaterializeTaskSetResult{}, false, err
 	}
 	artifact, found, err := scanWorkflowArtifactMaybe(tx.QueryRowContext(ctx, workflowArtifactSelect+` WHERE id = ?`, artifactID))
 	if err != nil {
-		return MaterializeIssueSetResult{}, false, err
+		return MaterializeTaskSetResult{}, false, err
 	}
 	if !found {
-		return MaterializeIssueSetResult{}, false, ErrWorkflowArtifactNotFound
+		return MaterializeTaskSetResult{}, false, ErrWorkflowArtifactNotFound
 	}
-	if artifact.Kind != ArtifactIssueSet {
-		return MaterializeIssueSetResult{}, false, errors.New("materialization requires an issue_set artifact")
+	if artifact.Kind != ArtifactTaskSet {
+		return MaterializeTaskSetResult{}, false, errors.New("materialization requires an task_set artifact")
 	}
-	manifest, err := DecodeIssueSetManifest(artifact.Payload)
+	manifest, err := DecodeTaskSetManifest(artifact.Payload)
 	if err != nil {
-		return MaterializeIssueSetResult{}, false, err
+		return MaterializeTaskSetResult{}, false, err
 	}
 	if config.MaxItems == 0 {
 		config.MaxItems = 25
 	}
-	if len(manifest.Issues) > config.MaxItems {
-		return MaterializeIssueSetResult{}, false, fmt.Errorf("issue-set contains %d issues; maximum is %d", len(manifest.Issues), config.MaxItems)
+	if len(manifest.Tasks) > config.MaxItems {
+		return MaterializeTaskSetResult{}, false, fmt.Errorf("task-set contains %d tasks; maximum is %d", len(manifest.Tasks), config.MaxItems)
 	}
-	var sourceIssueID string
-	if err := tx.QueryRowContext(ctx, `SELECT issue_id FROM workflow_runs WHERE id = ?`, artifact.WorkflowRunID).Scan(&sourceIssueID); err != nil {
-		return MaterializeIssueSetResult{}, false, err
+	var sourceTaskID string
+	if err := tx.QueryRowContext(ctx, `SELECT task_id FROM workflow_runs WHERE id = ?`, artifact.WorkflowRunID).Scan(&sourceTaskID); err != nil {
+		return MaterializeTaskSetResult{}, false, err
 	}
 	defaultFlowID := strings.TrimSpace(config.DefaultChildFlowID)
 	if defaultFlowID == "" {
-		return MaterializeIssueSetResult{}, false, errors.New("materialization requires a default child flow")
+		return MaterializeTaskSetResult{}, false, errors.New("materialization requires a default child flow")
 	}
 	if err := requireImplementationFlowTx(ctx, tx, defaultFlowID); err != nil {
-		return MaterializeIssueSetResult{}, false, fmt.Errorf("default child flow: %w", err)
+		return MaterializeTaskSetResult{}, false, fmt.Errorf("default child flow: %w", err)
 	}
 
 	now := s.now().UTC()
 	nowText := sqlitex.FormatTime(now)
-	result := MaterializeIssueSetResult{IssueIDs: make(map[string]string, len(manifest.Issues))}
-	for _, item := range manifest.Issues {
+	result := MaterializeTaskSetResult{TaskIDs: make(map[string]string, len(manifest.Tasks))}
+	for _, item := range manifest.Tasks {
 		flowID := strings.TrimSpace(item.FlowID)
 		if flowID == "" {
 			flowID = defaultFlowID
 		} else if !config.AllowChildFlowOverride {
-			return MaterializeIssueSetResult{}, false, fmt.Errorf("issue %q may not override its child flow", item.Key)
+			return MaterializeTaskSetResult{}, false, fmt.Errorf("task %q may not override its child flow", item.Key)
 		}
 		if err := requireImplementationFlowTx(ctx, tx, flowID); err != nil {
-			return MaterializeIssueSetResult{}, false, fmt.Errorf("issue %q flow: %w", item.Key, err)
+			return MaterializeTaskSetResult{}, false, fmt.Errorf("task %q flow: %w", item.Key, err)
 		}
-		id, err := allocateIssueID(ctx, tx)
+		id, err := allocateTaskID(ctx, tx)
 		if err != nil {
-			return MaterializeIssueSetResult{}, false, err
+			return MaterializeTaskSetResult{}, false, err
 		}
 		createdBy := ActorSystem
 		var sessionID any
@@ -400,45 +400,45 @@ func (s *WorkflowArtifactService) MaterializeIssueSet(ctx context.Context, artif
 			sessionID = artifact.SessionID
 		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO issues (
+INSERT INTO tasks (
 	id, title, body, acceptance_criteria, priority, flow_id, created_by, created_by_session_id,
-	source_issue_id, created_at, updated_at
+	source_task_id, created_at, updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.Title, item.Body,
-			item.AcceptanceCriteria, item.Priority, flowID, string(createdBy), sessionID, sourceIssueID, nowText, nowText); err != nil {
-			return MaterializeIssueSetResult{}, false, fmt.Errorf("create generated issue %q: %w", item.Key, err)
+			item.AcceptanceCriteria, item.Priority, flowID, string(createdBy), sessionID, sourceTaskID, nowText, nowText); err != nil {
+			return MaterializeTaskSetResult{}, false, fmt.Errorf("create generated task %q: %w", item.Key, err)
 		}
-		if err := linkIssuesInTx(ctx, tx, sourceIssueID, id, RelationParentOf, ActorSystem, nowText); err != nil {
-			return MaterializeIssueSetResult{}, false, err
+		if err := linkTasksInTx(ctx, tx, sourceTaskID, id, RelationParentOf, ActorSystem, nowText); err != nil {
+			return MaterializeTaskSetResult{}, false, err
 		}
 		for _, slug := range item.TagSlugs {
 			tagID, err := upsertTagInTx(ctx, tx, CreateTagInput{Slug: slug, Name: slug, CreatedBy: ActorSystem}, nowText)
 			if err != nil {
-				return MaterializeIssueSetResult{}, false, err
+				return MaterializeTaskSetResult{}, false, err
 			}
 			if _, err := tx.ExecContext(ctx, `
-INSERT INTO issue_tags (issue_id, tag_id, created_by, created_at) VALUES (?, ?, ?, ?)`,
+INSERT INTO task_tags (task_id, tag_id, created_by, created_at) VALUES (?, ?, ?, ?)`,
 				id, tagID, string(ActorSystem), nowText); err != nil {
-				return MaterializeIssueSetResult{}, false, err
+				return MaterializeTaskSetResult{}, false, err
 			}
 		}
-		result.IssueIDs[item.Key] = id
+		result.TaskIDs[item.Key] = id
 	}
 	for _, dependency := range manifest.Dependencies {
-		if err := linkIssuesInTx(ctx, tx, result.IssueIDs[dependency.Blocker], result.IssueIDs[dependency.Blocked], RelationBlocks, ActorSystem, nowText); err != nil {
-			return MaterializeIssueSetResult{}, false, err
+		if err := linkTasksInTx(ctx, tx, result.TaskIDs[dependency.Blocker], result.TaskIDs[dependency.Blocked], RelationBlocks, ActorSystem, nowText); err != nil {
+			return MaterializeTaskSetResult{}, false, err
 		}
 	}
 	resultJSON, err := json.Marshal(result)
 	if err != nil {
-		return MaterializeIssueSetResult{}, false, err
+		return MaterializeTaskSetResult{}, false, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO workflow_materializations (artifact_id, workflow_run_id, result_json, created_at)
 VALUES (?, ?, ?, ?)`, artifact.ID, artifact.WorkflowRunID, string(resultJSON), nowText); err != nil {
-		return MaterializeIssueSetResult{}, false, err
+		return MaterializeTaskSetResult{}, false, err
 	}
 	if err := tx.Commit(); err != nil {
-		return MaterializeIssueSetResult{}, false, err
+		return MaterializeTaskSetResult{}, false, err
 	}
 	return result, false, nil
 }
@@ -450,7 +450,7 @@ SELECT COUNT(*)
 FROM flows f
 WHERE f.id = ?
 	AND EXISTS (SELECT 1 FROM flow_nodes n WHERE n.flow_id = f.id AND n.kind = 'merge_change')
-	AND NOT EXISTS (SELECT 1 FROM flow_nodes n WHERE n.flow_id = f.id AND n.kind = 'materialize_issue_set')`, flowID).Scan(&count); err != nil {
+	AND NOT EXISTS (SELECT 1 FROM flow_nodes n WHERE n.flow_id = f.id AND n.kind = 'materialize_task_set')`, flowID).Scan(&count); err != nil {
 		return err
 	}
 	if count == 0 {
@@ -459,56 +459,56 @@ WHERE f.id = ?
 	return nil
 }
 
-func DecodeIssueSetManifest(raw []byte) (IssueSetManifest, error) {
-	var manifest IssueSetManifest
+func DecodeTaskSetManifest(raw []byte) (TaskSetManifest, error) {
+	var manifest TaskSetManifest
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&manifest); err != nil {
-		return IssueSetManifest{}, fmt.Errorf("decode issue-set manifest: %w", err)
+		return TaskSetManifest{}, fmt.Errorf("decode task-set manifest: %w", err)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		if err == nil {
-			return IssueSetManifest{}, errors.New("issue-set manifest must contain exactly one JSON value")
+			return TaskSetManifest{}, errors.New("task-set manifest must contain exactly one JSON value")
 		}
-		return IssueSetManifest{}, fmt.Errorf("decode issue-set manifest: %w", err)
+		return TaskSetManifest{}, fmt.Errorf("decode task-set manifest: %w", err)
 	}
 	if manifest.SchemaVersion != 1 {
-		return IssueSetManifest{}, errors.New("issue-set schema_version must be 1")
+		return TaskSetManifest{}, errors.New("task-set schema_version must be 1")
 	}
-	if len(manifest.Issues) == 0 {
-		return IssueSetManifest{}, errors.New("issue-set requires at least one issue")
+	if len(manifest.Tasks) == 0 {
+		return TaskSetManifest{}, errors.New("task-set requires at least one task")
 	}
 	if len(manifest.Dependencies) > 200 {
-		return IssueSetManifest{}, errors.New("issue-set may contain at most 200 dependencies")
+		return TaskSetManifest{}, errors.New("task-set may contain at most 200 dependencies")
 	}
 	seen := map[string]bool{}
-	for i := range manifest.Issues {
-		item := &manifest.Issues[i]
+	for i := range manifest.Tasks {
+		item := &manifest.Tasks[i]
 		item.Key = strings.TrimSpace(item.Key)
 		item.Title = strings.TrimSpace(item.Title)
 		item.AcceptanceCriteria = strings.TrimSpace(item.AcceptanceCriteria)
 		item.FlowID = strings.TrimSpace(item.FlowID)
 		if !flowNodeKeyPattern.MatchString(item.Key) {
-			return IssueSetManifest{}, fmt.Errorf("issue %d key %q is invalid", i+1, item.Key)
+			return TaskSetManifest{}, fmt.Errorf("task %d key %q is invalid", i+1, item.Key)
 		}
 		if seen[item.Key] {
-			return IssueSetManifest{}, fmt.Errorf("duplicate issue key %q", item.Key)
+			return TaskSetManifest{}, fmt.Errorf("duplicate task key %q", item.Key)
 		}
 		seen[item.Key] = true
 		if item.Title == "" || item.AcceptanceCriteria == "" {
-			return IssueSetManifest{}, fmt.Errorf("issue %q requires title and acceptance_criteria", item.Key)
+			return TaskSetManifest{}, fmt.Errorf("task %q requires title and acceptance_criteria", item.Key)
 		}
 		if item.Priority < 0 {
-			return IssueSetManifest{}, fmt.Errorf("issue %q priority must be non-negative", item.Key)
+			return TaskSetManifest{}, fmt.Errorf("task %q priority must be non-negative", item.Key)
 		}
 		seenTags := map[string]bool{}
 		for j := range item.TagSlugs {
 			item.TagSlugs[j] = strings.TrimSpace(item.TagSlugs[j])
 			if item.TagSlugs[j] == "" {
-				return IssueSetManifest{}, fmt.Errorf("issue %q contains an empty tag slug", item.Key)
+				return TaskSetManifest{}, fmt.Errorf("task %q contains an empty tag slug", item.Key)
 			}
 			if seenTags[item.TagSlugs[j]] {
-				return IssueSetManifest{}, fmt.Errorf("issue %q repeats tag slug %q", item.Key, item.TagSlugs[j])
+				return TaskSetManifest{}, fmt.Errorf("task %q repeats tag slug %q", item.Key, item.TagSlugs[j])
 			}
 			seenTags[item.TagSlugs[j]] = true
 		}
@@ -520,14 +520,14 @@ func DecodeIssueSetManifest(raw []byte) (IssueSetManifest, error) {
 		dependency.Blocker = strings.TrimSpace(dependency.Blocker)
 		dependency.Blocked = strings.TrimSpace(dependency.Blocked)
 		if !seen[dependency.Blocker] || !seen[dependency.Blocked] {
-			return IssueSetManifest{}, fmt.Errorf("dependency %q -> %q references an unknown issue", dependency.Blocker, dependency.Blocked)
+			return TaskSetManifest{}, fmt.Errorf("dependency %q -> %q references an unknown task", dependency.Blocker, dependency.Blocked)
 		}
 		if dependency.Blocker == dependency.Blocked {
-			return IssueSetManifest{}, fmt.Errorf("issue %q cannot block itself", dependency.Blocker)
+			return TaskSetManifest{}, fmt.Errorf("task %q cannot block itself", dependency.Blocker)
 		}
 		edgeKey := dependency.Blocker + "\x00" + dependency.Blocked
 		if seenDependencies[edgeKey] {
-			return IssueSetManifest{}, fmt.Errorf("duplicate dependency %q -> %q", dependency.Blocker, dependency.Blocked)
+			return TaskSetManifest{}, fmt.Errorf("duplicate dependency %q -> %q", dependency.Blocker, dependency.Blocked)
 		}
 		seenDependencies[edgeKey] = true
 		dependencyEdges[dependency.Blocker] = append(dependencyEdges[dependency.Blocker], dependency.Blocked)
@@ -554,7 +554,7 @@ func DecodeIssueSetManifest(raw []byte) (IssueSetManifest, error) {
 	}
 	for key := range seen {
 		if visit(key) {
-			return IssueSetManifest{}, errors.New("issue-set dependencies must be acyclic")
+			return TaskSetManifest{}, errors.New("task-set dependencies must be acyclic")
 		}
 	}
 	return manifest, nil

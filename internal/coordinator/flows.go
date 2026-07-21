@@ -17,7 +17,7 @@ var (
 	ErrFlowNotFound  = errors.New("flow not found")
 	ErrFlowNameTaken = errors.New("a flow with this name already exists")
 	ErrFlowIsDefault = errors.New("flow is the project default; set another default before deleting it")
-	ErrFlowInUse     = errors.New("flow is selected by an issue or another workflow")
+	ErrFlowInUse     = errors.New("flow is selected by an task or another workflow")
 )
 
 const defaultFlowMetadataKey = "default_flow_id"
@@ -40,7 +40,7 @@ const (
 	FlowReviewRoleVerifier FlowReviewRole = "verifier"
 )
 
-// Flow is a project-owned trusted workflow graph. Issues freeze a resolved
+// Flow is a project-owned trusted workflow graph. Tasks freeze a resolved
 // FlowSnapshot when they are scheduled.
 type Flow struct {
 	ID               string            `json:"id"`
@@ -130,7 +130,7 @@ type FlowReviewAgentSnapshot struct {
 }
 
 // FlowSnapshot is the fully resolved graph a workflow run executes. Agent
-// definitions are frozen into node configs when the issue is scheduled.
+// definitions are frozen into node configs when the task is scheduled.
 type FlowSnapshot struct {
 	FlowID           string                    `json:"flow_id"`
 	FlowName         string                    `json:"flow_name"`
@@ -342,8 +342,8 @@ func validateGraphReferencesInTx(ctx context.Context, tx *sqlitex.Tx, input Flow
 					return err
 				}
 			}
-		case NodeMaterializeIssueSet:
-			if err := requireImplementationFlowTx(ctx, tx, node.Config.MaterializeIssueSet.DefaultChildFlowID); err != nil {
+		case NodeMaterializeTaskSet:
+			if err := requireImplementationFlowTx(ctx, tx, node.Config.MaterializeTaskSet.DefaultChildFlowID); err != nil {
 				return fmt.Errorf("node %q default child flow: %w", node.Key, err)
 			}
 		}
@@ -362,10 +362,10 @@ func (s *FlowService) Delete(ctx context.Context, id string) error {
 	var references int
 	if err := s.db.QueryRowContext(ctx, `
 SELECT
-	(SELECT COUNT(*) FROM issues WHERE flow_id = ?) +
+	(SELECT COUNT(*) FROM tasks WHERE flow_id = ?) +
 	(SELECT COUNT(*) FROM flow_nodes
-	 WHERE kind = 'materialize_issue_set'
-	   AND json_extract(config_json, '$.materialize_issue_set.default_child_flow_id') = ?)`, id, id).Scan(&references); err != nil {
+	 WHERE kind = 'materialize_task_set'
+	   AND json_extract(config_json, '$.materialize_task_set.default_child_flow_id') = ?)`, id, id).Scan(&references); err != nil {
 		return fmt.Errorf("inspect flow references: %w", err)
 	}
 	if references > 0 {
@@ -627,9 +627,9 @@ func (s *FlowService) ResolveSnapshot(ctx context.Context, flowID string) (FlowS
 				config.Agents = append(config.Agents, SnapshotReviewAgent{Required: required, Agent: agent})
 			}
 			snapshotNode.Config.VerifyChange = config
-		case NodeMaterializeIssueSet:
-			copyConfig := *node.Config.MaterializeIssueSet
-			snapshotNode.Config.MaterializeIssueSet = &copyConfig
+		case NodeMaterializeTaskSet:
+			copyConfig := *node.Config.MaterializeTaskSet
+			snapshotNode.Config.MaterializeTaskSet = &copyConfig
 		case NodeMergeChange:
 			snapshotNode.Config.MergeChange = &MergeChangeNodeConfig{}
 		case NodeTerminal:
@@ -660,7 +660,7 @@ func (s *FlowService) SeedDefaults(ctx context.Context) error {
 		name  string
 		skill string
 	}{
-		{"issue-planner", flowskills.IssuePlannerSkill},
+		{"task-planner", flowskills.TaskPlannerSkill},
 		{"author", flowskills.AuthorSkill},
 		{"reviewer", flowskills.ReviewerSkill},
 		{"verifier", flowskills.VerifierSkill},
@@ -711,22 +711,22 @@ func (s *FlowService) SeedDefaults(ctx context.Context) error {
 	}
 	if _, err := s.create(ctx, FlowInput{
 		Name:             "planning",
-		Description:      "Create a human-approved implementation issue graph.",
+		Description:      "Create a human-approved implementation task graph.",
 		StartNode:        "write-plan",
 		TransitionBudget: DefaultFlowTransitionBudget,
 		Nodes: []FlowNodeInput{
-			{Key: "write-plan", Name: "Write issue plan", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: defIDs["issue-planner"], Workspace: WorkspaceBase, Artifact: ArtifactIssueSet}}},
-			{Key: "review-plan", Name: "Review plan", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Instructions: "Review the proposed implementation issues.", Outcomes: []string{"approved", "changes_requested", "rejected"}}}},
-			{Key: "create-issues", Name: "Create implementation issues", Kind: NodeMaterializeIssueSet, Config: FlowNodeConfig{MaterializeIssueSet: &MaterializeIssueSetNodeConfig{DefaultChildFlowID: coding.ID, AllowChildFlowOverride: true, MaxItems: 25}}},
+			{Key: "write-plan", Name: "Write task plan", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: defIDs["task-planner"], Workspace: WorkspaceBase, Artifact: ArtifactTaskSet}}},
+			{Key: "review-plan", Name: "Review plan", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Instructions: "Review the proposed implementation tasks.", Outcomes: []string{"approved", "changes_requested", "rejected"}}}},
+			{Key: "create-tasks", Name: "Create implementation tasks", Kind: NodeMaterializeTaskSet, Config: FlowNodeConfig{MaterializeTaskSet: &MaterializeTaskSetNodeConfig{DefaultChildFlowID: coding.ID, AllowChildFlowOverride: true, MaxItems: 25}}},
 			{Key: "done", Name: "Completed", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
 			{Key: "rejected", Name: "Rejected", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionRejected}}},
 		},
 		Edges: []FlowEdgeInput{
 			{From: "write-plan", Outcome: "completed", To: "review-plan"},
-			{From: "review-plan", Outcome: "approved", To: "create-issues"},
+			{From: "review-plan", Outcome: "approved", To: "create-tasks"},
 			{From: "review-plan", Outcome: "changes_requested", To: "write-plan"},
 			{From: "review-plan", Outcome: "rejected", To: "rejected"},
-			{From: "create-issues", Outcome: "completed", To: "done"},
+			{From: "create-tasks", Outcome: "completed", To: "done"},
 		},
 	}, true); err != nil {
 		return fmt.Errorf("seed planning flow: %w", err)

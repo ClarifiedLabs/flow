@@ -150,7 +150,7 @@ func TestReviewContextIncludesAllThreadStates(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 
-	context, err := threads.ReviewContextForIssue(ctx, change.IssueID)
+	context, err := threads.ReviewContextForTask(ctx, change.TaskID)
 	if err != nil {
 		t.Fatalf("review context: %v", err)
 	}
@@ -253,13 +253,13 @@ func newThreadServiceFixture(t *testing.T) (*flowdb.Store, *ThreadService, Chang
 		_ = store.Close()
 	})
 
-	issues := NewIssueService(store.DB())
-	issue, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Review target"})
+	tasks := NewTaskService(store.DB())
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Review target"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
-	insertChangeForTest(t, store.DB(), issue.ID, "ch-review-target", "issue/review-target", false)
-	change, err := NewSessionService(store.DB(), issues, nil).GetChange(ctx, "ch-review-target")
+	insertChangeForTest(t, store.DB(), task.ID, "ch-review-target", "task/review-target", false)
+	change, err := NewSessionService(store.DB(), tasks, nil).GetChange(ctx, "ch-review-target")
 	if err != nil {
 		t.Fatalf("get review change: %v", err)
 	}

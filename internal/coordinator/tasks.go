@@ -19,14 +19,14 @@ const (
 	ScheduleClosed  ScheduleState = "closed"
 )
 
-type IssueState string
+type TaskState string
 
 const (
-	IssueStateTriage   IssueState = "triage"
-	IssueStateBacklog  IssueState = "backlog"
-	IssueStateUpNext   IssueState = "up_next"
-	IssueStateClosed   IssueState = "closed"
-	IssueStateRejected IssueState = "rejected"
+	TaskStateTriage   TaskState = "triage"
+	TaskStateBacklog  TaskState = "backlog"
+	TaskStateUpNext   TaskState = "up_next"
+	TaskStateClosed   TaskState = "closed"
+	TaskStateRejected TaskState = "rejected"
 )
 
 type TriageState string
@@ -68,7 +68,7 @@ const (
 	RelationRelatedTo RelationKind = "related_to"
 )
 
-type Issue struct {
+type Task struct {
 	ID                  string
 	Title               string
 	Body                string
@@ -84,7 +84,7 @@ type Issue struct {
 	DoneAt              *time.Time      `json:"done_at,omitempty"`
 	CreatedBy           Actor
 	CreatedBySessionID  *string
-	SourceIssueID       *string
+	SourceTaskID        *string
 	SourceChangeID      *string
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
@@ -101,15 +101,15 @@ type Tag struct {
 	CreatedAt   time.Time
 }
 
-type IssueRelation struct {
-	SourceIssueID string
-	TargetIssueID string
-	Kind          RelationKind
-	CreatedBy     Actor
-	CreatedAt     time.Time
+type TaskRelation struct {
+	SourceTaskID string
+	TargetTaskID string
+	Kind         RelationKind
+	CreatedBy    Actor
+	CreatedAt    time.Time
 }
 
-type CreateIssueInput struct {
+type CreateTaskInput struct {
 	Title               string
 	Body                string
 	AcceptanceCriteria  string
@@ -121,24 +121,24 @@ type CreateIssueInput struct {
 	FlowID              string
 	CreatedBy           Actor
 	CreatedBySessionID  *string
-	SourceIssueID       *string
+	SourceTaskID        *string
 	SourceChangeID      *string
 }
 
-type CreateIssueWithDetailsInput struct {
-	Issue     CreateIssueInput
+type CreateTaskWithDetailsInput struct {
+	Task      CreateTaskInput
 	Tags      []CreateTagInput
-	Relations []CreateIssueRelationInput
+	Relations []CreateTaskRelationInput
 }
 
-type CreateIssueRelationInput struct {
-	SourceIssueID string
-	TargetIssueID string
-	Kind          RelationKind
-	CreatedBy     Actor
+type CreateTaskRelationInput struct {
+	SourceTaskID string
+	TargetTaskID string
+	Kind         RelationKind
+	CreatedBy    Actor
 }
 
-type EditIssueInput struct {
+type EditTaskInput struct {
 	Title               *string
 	Body                *string
 	AcceptanceCriteria  *string
@@ -148,7 +148,7 @@ type EditIssueInput struct {
 	FlowID              *string
 }
 
-type IssueFilter struct {
+type TaskFilter struct {
 	LifecycleStates []string
 	TagSlugs        []string
 }
@@ -162,17 +162,17 @@ type CreateTagInput struct {
 }
 
 type Board struct {
-	Unscheduled    []Issue
-	Scheduled      []Issue
-	InProgress     []Issue
-	Backlog        []Issue `json:"-"`
-	UpNext         []Issue `json:"-"`
-	NeedsAttention []Issue `json:"-"`
+	Unscheduled    []Task
+	Scheduled      []Task
+	InProgress     []Task
+	Backlog        []Task `json:"-"`
+	UpNext         []Task `json:"-"`
+	NeedsAttention []Task `json:"-"`
 }
 
-// LaneState is the fine-grained derived sub-state of an open issue. It is the
+// LaneState is the fine-grained derived sub-state of an open task. It is the
 // outcome of the board precedence cascade before coarsening into one of the
-// four board lanes, and is surfaced as a pill on issue cards.
+// four board lanes, and is surfaced as a pill on task cards.
 type LaneState string
 
 const (
@@ -201,9 +201,9 @@ const (
 	WaitReasonCrashLoop     WaitReason = "crash_loop"
 )
 
-// BoardResult bundles the four board lanes with the per-issue overlays the UI
+// BoardResult bundles the four board lanes with the per-task overlays the UI
 // and CLI need: the fine-grained sub-state and the derived blocked overlay.
-// Blocked issues are routed to needs_attention while retaining their natural
+// Blocked tasks are routed to needs_attention while retaining their natural
 // lane state for card badges and CLI annotations.
 type BoardResult struct {
 	Board       Board
@@ -212,64 +212,64 @@ type BoardResult struct {
 	BlockedIDs  []string
 }
 
-type IssueService struct {
+type TaskService struct {
 	db  *sql.DB
 	now func() time.Time
 }
 
-func NewIssueService(database *sql.DB) *IssueService {
-	return &IssueService{
+func NewTaskService(database *sql.DB) *TaskService {
+	return &TaskService{
 		db:  database,
 		now: sqlitex.UTCNow,
 	}
 }
 
-func (s *IssueService) CreateIssue(ctx context.Context, input CreateIssueInput) (Issue, error) {
-	return s.CreateIssueWithDetails(ctx, CreateIssueWithDetailsInput{Issue: input})
+func (s *TaskService) CreateTask(ctx context.Context, input CreateTaskInput) (Task, error) {
+	return s.CreateTaskWithDetails(ctx, CreateTaskWithDetailsInput{Task: input})
 }
 
-func (s *IssueService) CreateIssueWithDetails(ctx context.Context, input CreateIssueWithDetailsInput) (Issue, error) {
-	issueInput, err := normalizeCreateIssueInput(input.Issue)
+func (s *TaskService) CreateTaskWithDetails(ctx context.Context, input CreateTaskWithDetailsInput) (Task, error) {
+	taskInput, err := normalizeCreateTaskInput(input.Task)
 	if err != nil {
-		return Issue{}, err
+		return Task{}, err
 	}
 	for i := range input.Tags {
 		if input.Tags[i].CreatedBy == "" {
-			input.Tags[i].CreatedBy = issueInput.CreatedBy
+			input.Tags[i].CreatedBy = taskInput.CreatedBy
 		}
 		if _, err := normalizeCreateTagInput(input.Tags[i]); err != nil {
-			return Issue{}, err
+			return Task{}, err
 		}
 	}
 	for i := range input.Relations {
 		if input.Relations[i].CreatedBy == "" {
-			input.Relations[i].CreatedBy = issueInput.CreatedBy
+			input.Relations[i].CreatedBy = taskInput.CreatedBy
 		}
 		if input.Relations[i].Kind == "" {
-			return Issue{}, errors.New("issue relation kind is required")
+			return Task{}, errors.New("task relation kind is required")
 		}
 		if err := validateRelationKind(input.Relations[i].Kind); err != nil {
-			return Issue{}, err
+			return Task{}, err
 		}
 		if err := validateActor(input.Relations[i].CreatedBy); err != nil {
-			return Issue{}, err
+			return Task{}, err
 		}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return Issue{}, fmt.Errorf("begin create issue transaction: %w", err)
+		return Task{}, fmt.Errorf("begin create task transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	id, err := allocateIssueID(ctx, tx)
+	id, err := allocateTaskID(ctx, tx)
 	if err != nil {
-		return Issue{}, err
+		return Task{}, err
 	}
 
 	now := s.now().UTC()
 	nowText := formatTime(now)
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO issues (
+INSERT INTO tasks (
 	id,
 	title,
 	body,
@@ -278,67 +278,67 @@ INSERT INTO issues (
 	flow_id,
 	created_by,
 	created_by_session_id,
-	source_issue_id,
+	source_task_id,
 	source_change_id,
 	created_at,
 	updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id,
-		issueInput.Title,
-		issueInput.Body,
-		issueInput.AcceptanceCriteria,
-		issueInput.Priority,
-		sqlitex.NullableNonEmptyString(issueInput.FlowID),
-		string(issueInput.CreatedBy),
-		nullableStringValue(issueInput.CreatedBySessionID),
-		nullableStringValue(issueInput.SourceIssueID),
-		nullableStringValue(issueInput.SourceChangeID),
+		taskInput.Title,
+		taskInput.Body,
+		taskInput.AcceptanceCriteria,
+		taskInput.Priority,
+		sqlitex.NullableNonEmptyString(taskInput.FlowID),
+		string(taskInput.CreatedBy),
+		nullableStringValue(taskInput.CreatedBySessionID),
+		nullableStringValue(taskInput.SourceTaskID),
+		nullableStringValue(taskInput.SourceChangeID),
 		nowText,
 		nowText,
 	); err != nil {
-		return Issue{}, fmt.Errorf("insert issue: %w", err)
+		return Task{}, fmt.Errorf("insert task: %w", err)
 	}
 
 	for _, tagInput := range input.Tags {
-		tagInput.CreatedBy = defaultActor(tagInput.CreatedBy, issueInput.CreatedBy)
+		tagInput.CreatedBy = defaultActor(tagInput.CreatedBy, taskInput.CreatedBy)
 		tagID, err := upsertTagInTx(ctx, tx, tagInput, nowText)
 		if err != nil {
-			return Issue{}, err
+			return Task{}, err
 		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT OR IGNORE INTO issue_tags (issue_id, tag_id, created_by, created_at)
+INSERT OR IGNORE INTO task_tags (task_id, tag_id, created_by, created_at)
 VALUES (?, ?, ?, ?)`,
 			id,
 			tagID,
-			string(issueInput.CreatedBy),
+			string(taskInput.CreatedBy),
 			nowText,
 		); err != nil {
-			return Issue{}, fmt.Errorf("tag issue: %w", err)
+			return Task{}, fmt.Errorf("tag task: %w", err)
 		}
 	}
 
 	for _, relationInput := range input.Relations {
-		sourceIssueID := strings.TrimSpace(relationInput.SourceIssueID)
-		if sourceIssueID == "" {
-			sourceIssueID = id
+		sourceTaskID := strings.TrimSpace(relationInput.SourceTaskID)
+		if sourceTaskID == "" {
+			sourceTaskID = id
 		}
-		targetIssueID := strings.TrimSpace(relationInput.TargetIssueID)
-		if targetIssueID == "" {
-			targetIssueID = id
+		targetTaskID := strings.TrimSpace(relationInput.TargetTaskID)
+		if targetTaskID == "" {
+			targetTaskID = id
 		}
-		if err := linkIssuesInTx(ctx, tx, sourceIssueID, targetIssueID, relationInput.Kind, defaultActor(relationInput.CreatedBy, issueInput.CreatedBy), nowText); err != nil {
-			return Issue{}, err
+		if err := linkTasksInTx(ctx, tx, sourceTaskID, targetTaskID, relationInput.Kind, defaultActor(relationInput.CreatedBy, taskInput.CreatedBy), nowText); err != nil {
+			return Task{}, err
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return Issue{}, fmt.Errorf("commit create issue: %w", err)
+		return Task{}, fmt.Errorf("commit create task: %w", err)
 	}
 
-	return s.GetIssue(ctx, id)
+	return s.GetTask(ctx, id)
 }
 
-func (s *IssueService) GetIssue(ctx context.Context, id string) (Issue, error) {
+func (s *TaskService) GetTask(ctx context.Context, id string) (Task, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT
 	id,
@@ -349,27 +349,27 @@ SELECT
 	flow_id,
 	created_by,
 	created_by_session_id,
-	source_issue_id,
+	source_task_id,
 	source_change_id,
 	created_at,
 	updated_at,
 	lifecycle_state,
 	done_resolution,
 	done_at
-FROM issues
+FROM tasks
 WHERE id = ?`, id)
 
-	issue, err := scanIssue(row)
+	task, err := scanTask(row)
 	if err != nil {
-		return Issue{}, err
+		return Task{}, err
 	}
 
-	return issue, nil
+	return task, nil
 }
 
-// issueSelectColumns is the canonical issue column list, shared by every reader
-// that scans rows with scanIssues. Keep the order in sync with scanIssues.
-const issueSelectColumns = `
+// taskSelectColumns is the canonical task column list, shared by every reader
+// that scans rows with scanTasks. Keep the order in sync with scanTasks.
+const taskSelectColumns = `
 	i.id,
 	i.title,
 	i.body,
@@ -378,7 +378,7 @@ const issueSelectColumns = `
 	i.flow_id,
 	i.created_by,
 	i.created_by_session_id,
-	i.source_issue_id,
+	i.source_task_id,
 	i.source_change_id,
 	i.created_at,
 	i.updated_at,
@@ -386,14 +386,14 @@ const issueSelectColumns = `
 	i.done_resolution,
 	i.done_at`
 
-func (s *IssueService) ListIssues(ctx context.Context, filter IssueFilter) ([]Issue, error) {
-	query := "SELECT" + issueSelectColumns + "\nFROM issues i"
+func (s *TaskService) ListTasks(ctx context.Context, filter TaskFilter) ([]Task, error) {
+	query := "SELECT" + taskSelectColumns + "\nFROM tasks i"
 
 	var args []any
 	var predicates []string
 	if len(filter.TagSlugs) > 0 {
 		query += `
-JOIN issue_tags it ON it.issue_id = i.id
+JOIN task_tags it ON it.task_id = i.id
 JOIN tags t ON t.id = it.tag_id`
 		predicates = append(predicates, inPredicate("t.slug", len(filter.TagSlugs)))
 		for _, slug := range filter.TagSlugs {
@@ -412,7 +412,7 @@ JOIN tags t ON t.id = it.tag_id`
 			}
 		}
 		if len(statePredicates) == 0 {
-			return []Issue{}, nil
+			return []Task{}, nil
 		}
 		predicates = append(predicates, "("+strings.Join(statePredicates, " OR ")+")")
 	}
@@ -423,15 +423,15 @@ JOIN tags t ON t.id = it.tag_id`
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list issues: %w", err)
+		return nil, fmt.Errorf("list tasks: %w", err)
 	}
 	defer rows.Close()
 
-	return scanIssues(rows)
+	return scanTasks(rows)
 }
 
-// ClosedOutcome filters closed issues by their terminal disposition. The empty
-// value means "any outcome". The predicates mirror derivePhaseFromIssue: a
+// ClosedOutcome filters closed tasks by their terminal disposition. The empty
+// value means "any outcome". The predicates mirror derivePhaseFromTask: a
 // rejected triage wins over a merged change, which wins over abandonment.
 type ClosedOutcome string
 
@@ -445,39 +445,39 @@ const (
 	ClosedOutcomeFailed    ClosedOutcome = "failed"
 )
 
-// ClosedIssueQuery bounds a page of closed issues. It is deliberately separate
-// from IssueFilter/ListIssues (the board + triage hot path) so the unbounded
+// ClosedTaskQuery bounds a page of closed tasks. It is deliberately separate
+// from TaskFilter/ListTasks (the board + triage hot path) so the unbounded
 // history reader can never widen those queries.
-type ClosedIssueQuery struct {
-	// Limit caps the page size; <= 0 falls back to defaultClosedIssueLimit.
+type ClosedTaskQuery struct {
+	// Limit caps the page size; <= 0 falls back to defaultClosedTaskLimit.
 	Limit int
 	// Before/BeforeID is the keyset cursor: only rows strictly older than this
 	// (done_at, id) pair are returned. Both come from a prior ClosedCursor.
 	Before   *time.Time
 	BeforeID string
-	// Within, when set, restricts results to issues closed at or after it.
+	// Within, when set, restricts results to tasks closed at or after it.
 	Within *time.Time
 	// Outcome filters by terminal disposition; empty means any.
 	Outcome ClosedOutcome
 }
 
 // ClosedCursor is the keyset position of the last returned row, used to fetch
-// the next (older) page via ClosedIssueQuery.Before/BeforeID.
+// the next (older) page via ClosedTaskQuery.Before/BeforeID.
 type ClosedCursor struct {
 	ClosedAt time.Time
 	ID       string
 }
 
-const defaultClosedIssueLimit = 50
+const defaultClosedTaskLimit = 50
 
-// ListClosedIssues returns one keyset-paginated page of closed issues ordered
+// ListClosedTasks returns one keyset-paginated page of closed tasks ordered
 // newest-closed first (done_at desc, id desc tiebreak). It never loads the
-// full set: closed issues grow unbounded, so callers must page or window. The
+// full set: closed tasks grow unbounded, so callers must page or window. The
 // returned cursor is non-nil only when more rows remain.
-func (s *IssueService) ListClosedIssues(ctx context.Context, q ClosedIssueQuery) ([]Issue, *ClosedCursor, error) {
+func (s *TaskService) ListClosedTasks(ctx context.Context, q ClosedTaskQuery) ([]Task, *ClosedCursor, error) {
 	limit := q.Limit
 	if limit <= 0 {
-		limit = defaultClosedIssueLimit
+		limit = defaultClosedTaskLimit
 	}
 
 	predicates := []string{"i.lifecycle_state = ?", "i.done_at IS NOT NULL"}
@@ -503,57 +503,57 @@ func (s *IssueService) ListClosedIssues(ctx context.Context, q ClosedIssueQuery)
 		return nil, nil, fmt.Errorf("invalid closed outcome %q", q.Outcome)
 	}
 
-	query := "SELECT" + issueSelectColumns + "\nFROM issues i\nWHERE " + strings.Join(predicates, " AND ") +
+	query := "SELECT" + taskSelectColumns + "\nFROM tasks i\nWHERE " + strings.Join(predicates, " AND ") +
 		"\nORDER BY i.done_at DESC, i.id DESC\nLIMIT ?"
 	args = append(args, limit+1)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, nil, fmt.Errorf("list closed issues: %w", err)
+		return nil, nil, fmt.Errorf("list closed tasks: %w", err)
 	}
 	defer rows.Close()
 
-	issues, err := scanIssues(rows)
+	tasks, err := scanTasks(rows)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	var next *ClosedCursor
-	if len(issues) > limit {
-		issues = issues[:limit]
-		last := issues[limit-1]
+	if len(tasks) > limit {
+		tasks = tasks[:limit]
+		last := tasks[limit-1]
 		if last.DoneAt != nil {
 			next = &ClosedCursor{ClosedAt: *last.DoneAt, ID: last.ID}
 		}
 	}
 
-	return issues, next, nil
+	return tasks, next, nil
 }
 
-// CountClosedIssues returns the total number of closed issues, for the nav
+// CountClosedTasks returns the total number of closed tasks, for the nav
 // badge. It is a cheap indexed COUNT and intentionally ignores disposition.
-func (s *IssueService) CountClosedIssues(ctx context.Context) (int, error) {
+func (s *TaskService) CountClosedTasks(ctx context.Context) (int, error) {
 	var count int
 	if err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(*)
-FROM issues
+FROM tasks
 WHERE lifecycle_state = ?`, string(LifecycleDone)).Scan(&count); err != nil {
-		return 0, fmt.Errorf("count closed issues: %w", err)
+		return 0, fmt.Errorf("count closed tasks: %w", err)
 	}
 
 	return count, nil
 }
 
-func (s *IssueService) EditIssue(ctx context.Context, id string, input EditIssueInput) (Issue, error) {
-	current, err := s.GetIssue(ctx, id)
+func (s *TaskService) EditTask(ctx context.Context, id string, input EditTaskInput) (Task, error) {
+	current, err := s.GetTask(ctx, id)
 	if err != nil {
-		return Issue{}, err
+		return Task{}, err
 	}
 
 	if input.Title != nil {
 		title := strings.TrimSpace(*input.Title)
 		if title == "" {
-			return Issue{}, errors.New("issue title is required")
+			return Task{}, errors.New("task title is required")
 		}
 		current.Title = title
 	}
@@ -565,7 +565,7 @@ func (s *IssueService) EditIssue(ctx context.Context, id string, input EditIssue
 	}
 	if input.Priority != nil {
 		if *input.Priority < 0 {
-			return Issue{}, errors.New("issue priority must be non-negative")
+			return Task{}, errors.New("task priority must be non-negative")
 		}
 		current.Priority = *input.Priority
 	}
@@ -574,7 +574,7 @@ func (s *IssueService) EditIssue(ctx context.Context, id string, input EditIssue
 	}
 
 	if _, err := s.db.ExecContext(ctx, `
-UPDATE issues
+UPDATE tasks
 SET
 	title = ?,
 	body = ?,
@@ -591,33 +591,33 @@ WHERE id = ?`,
 		formatTime(s.now().UTC()),
 		id,
 	); err != nil {
-		return Issue{}, fmt.Errorf("edit issue: %w", err)
+		return Task{}, fmt.Errorf("edit task: %w", err)
 	}
 
-	return s.GetIssue(ctx, id)
+	return s.GetTask(ctx, id)
 }
 
-func (s *IssueService) ScheduleIssue(ctx context.Context, id string, state ScheduleState) (Issue, error) {
-	return Issue{}, errors.New("legacy schedule states were removed; schedule the issue through its workflow")
+func (s *TaskService) ScheduleTask(ctx context.Context, id string, state ScheduleState) (Task, error) {
+	return Task{}, errors.New("legacy schedule states were removed; schedule the task through its workflow")
 }
 
-func (s *IssueService) CloseIssue(ctx context.Context, id string) (Issue, error) {
-	return Issue{}, errors.New("legacy close was removed; complete the issue through its workflow")
+func (s *TaskService) CloseTask(ctx context.Context, id string) (Task, error) {
+	return Task{}, errors.New("legacy close was removed; complete the task through its workflow")
 }
 
-func (s *IssueService) SetIssueState(ctx context.Context, id string, state IssueState) (Issue, error) {
-	return Issue{}, errors.New("legacy issue states were removed; use workflow lifecycle operations")
+func (s *TaskService) SetTaskState(ctx context.Context, id string, state TaskState) (Task, error) {
+	return Task{}, errors.New("legacy task states were removed; use workflow lifecycle operations")
 }
 
-func (s *IssueService) AcceptTriage(ctx context.Context, id string) (Issue, error) {
-	return Issue{}, errors.New("triage was removed from the issue lifecycle")
+func (s *TaskService) AcceptTriage(ctx context.Context, id string) (Task, error) {
+	return Task{}, errors.New("triage was removed from the task lifecycle")
 }
 
-func (s *IssueService) RejectTriage(ctx context.Context, id string) (Issue, error) {
-	return Issue{}, errors.New("triage was removed from the issue lifecycle")
+func (s *TaskService) RejectTriage(ctx context.Context, id string) (Task, error) {
+	return Task{}, errors.New("triage was removed from the task lifecycle")
 }
 
-func (s *IssueService) CreateTag(ctx context.Context, input CreateTagInput) (Tag, error) {
+func (s *TaskService) CreateTag(ctx context.Context, input CreateTagInput) (Tag, error) {
 	input, err := normalizeCreateTagInput(input)
 	if err != nil {
 		return Tag{}, err
@@ -646,7 +646,7 @@ VALUES (?, ?, ?, ?, ?, ?)`,
 	return s.GetTag(ctx, id)
 }
 
-func (s *IssueService) GetTag(ctx context.Context, id int64) (Tag, error) {
+func (s *TaskService) GetTag(ctx context.Context, id int64) (Tag, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT id, slug, name, color, description, created_by, created_at
 FROM tags
@@ -660,15 +660,15 @@ WHERE id = ?`, id)
 	return tag, nil
 }
 
-func (s *IssueService) TagsForIssue(ctx context.Context, issueID string) ([]Tag, error) {
+func (s *TaskService) TagsForTask(ctx context.Context, taskID string) ([]Tag, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT t.id, t.slug, t.name, t.color, t.description, t.created_by, t.created_at
 FROM tags t
-JOIN issue_tags it ON it.tag_id = t.id
-WHERE it.issue_id = ?
-ORDER BY t.slug`, issueID)
+JOIN task_tags it ON it.tag_id = t.id
+WHERE it.task_id = ?
+ORDER BY t.slug`, taskID)
 	if err != nil {
-		return nil, fmt.Errorf("list issue tags: %w", err)
+		return nil, fmt.Errorf("list task tags: %w", err)
 	}
 	defer rows.Close()
 
@@ -681,26 +681,26 @@ ORDER BY t.slug`, issueID)
 		tags = append(tags, tag)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate issue tags: %w", err)
+		return nil, fmt.Errorf("iterate task tags: %w", err)
 	}
 
 	return tags, nil
 }
 
-func (s *IssueService) TagIssue(ctx context.Context, issueID string, tagID int64, actor Actor) error {
+func (s *TaskService) TagTask(ctx context.Context, taskID string, tagID int64, actor Actor) error {
 	if err := validateActor(actor); err != nil {
 		return err
 	}
 
 	if _, err := s.db.ExecContext(ctx, `
-INSERT INTO issue_tags (issue_id, tag_id, created_by, created_at)
+INSERT INTO task_tags (task_id, tag_id, created_by, created_at)
 VALUES (?, ?, ?, ?)`,
-		issueID,
+		taskID,
 		tagID,
 		string(actor),
 		formatTime(s.now().UTC()),
 	); err != nil {
-		return fmt.Errorf("tag issue: %w", err)
+		return fmt.Errorf("tag task: %w", err)
 	}
 
 	return nil
@@ -737,42 +737,42 @@ WHERE slug = ?`, input.Slug).Scan(&tagID); err != nil {
 	return tagID, nil
 }
 
-func (s *IssueService) UntagIssue(ctx context.Context, issueID string, tagID int64) error {
+func (s *TaskService) UntagTask(ctx context.Context, taskID string, tagID int64) error {
 	if _, err := s.db.ExecContext(ctx, `
-DELETE FROM issue_tags
-WHERE issue_id = ? AND tag_id = ?`, issueID, tagID); err != nil {
-		return fmt.Errorf("untag issue: %w", err)
+DELETE FROM task_tags
+WHERE task_id = ? AND tag_id = ?`, taskID, tagID); err != nil {
+		return fmt.Errorf("untag task: %w", err)
 	}
 
 	return nil
 }
 
-func (s *IssueService) LinkIssues(ctx context.Context, sourceIssueID, targetIssueID string, kind RelationKind, actor Actor) error {
+func (s *TaskService) LinkTasks(ctx context.Context, sourceTaskID, targetTaskID string, kind RelationKind, actor Actor) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin link issue transaction: %w", err)
+		return fmt.Errorf("begin link task transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	if err := linkIssuesInTx(ctx, tx, sourceIssueID, targetIssueID, kind, actor, formatTime(s.now().UTC())); err != nil {
+	if err := linkTasksInTx(ctx, tx, sourceTaskID, targetTaskID, kind, actor, formatTime(s.now().UTC())); err != nil {
 		return err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit link issues: %w", err)
+		return fmt.Errorf("commit link tasks: %w", err)
 	}
 
 	return nil
 }
 
-func linkIssuesInTx(ctx context.Context, tx *sql.Tx, sourceIssueID, targetIssueID string, kind RelationKind, actor Actor, nowText string) error {
-	sourceIssueID = strings.TrimSpace(sourceIssueID)
-	targetIssueID = strings.TrimSpace(targetIssueID)
-	if sourceIssueID == "" || targetIssueID == "" {
-		return errors.New("issue relation source_issue_id and target_issue_id are required")
+func linkTasksInTx(ctx context.Context, tx *sql.Tx, sourceTaskID, targetTaskID string, kind RelationKind, actor Actor, nowText string) error {
+	sourceTaskID = strings.TrimSpace(sourceTaskID)
+	targetTaskID = strings.TrimSpace(targetTaskID)
+	if sourceTaskID == "" || targetTaskID == "" {
+		return errors.New("task relation source_task_id and target_task_id are required")
 	}
-	if sourceIssueID == targetIssueID {
-		return errors.New("issue relation cannot target itself")
+	if sourceTaskID == targetTaskID {
+		return errors.New("task relation cannot target itself")
 	}
 	if err := validateRelationKind(kind); err != nil {
 		return err
@@ -782,16 +782,16 @@ func linkIssuesInTx(ctx context.Context, tx *sql.Tx, sourceIssueID, targetIssueI
 	}
 
 	if kind == RelationParentOf {
-		hasParent, err := issueHasParent(ctx, tx, targetIssueID)
+		hasParent, err := taskHasParent(ctx, tx, targetTaskID)
 		if err != nil {
 			return err
 		}
 		if hasParent {
-			return errors.New("issue already has a parent")
+			return errors.New("task already has a parent")
 		}
 	}
 	if kind == RelationParentOf || kind == RelationBlocks {
-		cycle, err := relationPathExists(ctx, tx, kind, targetIssueID, sourceIssueID)
+		cycle, err := relationPathExists(ctx, tx, kind, targetTaskID, sourceTaskID)
 		if err != nil {
 			return err
 		}
@@ -801,65 +801,65 @@ func linkIssuesInTx(ctx context.Context, tx *sql.Tx, sourceIssueID, targetIssueI
 	}
 
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO issue_relations (source_issue_id, target_issue_id, kind, created_by, created_at)
+INSERT INTO task_relations (source_task_id, target_task_id, kind, created_by, created_at)
 VALUES (?, ?, ?, ?, ?)`,
-		sourceIssueID,
-		targetIssueID,
+		sourceTaskID,
+		targetTaskID,
 		string(kind),
 		string(actor),
 		nowText,
 	); err != nil {
-		return fmt.Errorf("link issues: %w", err)
+		return fmt.Errorf("link tasks: %w", err)
 	}
 
 	return nil
 }
 
-func (s *IssueService) UnlinkIssues(ctx context.Context, sourceIssueID, targetIssueID string, kind RelationKind) error {
+func (s *TaskService) UnlinkTasks(ctx context.Context, sourceTaskID, targetTaskID string, kind RelationKind) error {
 	if err := validateRelationKind(kind); err != nil {
 		return err
 	}
 
 	if _, err := s.db.ExecContext(ctx, `
-DELETE FROM issue_relations
-WHERE source_issue_id = ? AND target_issue_id = ? AND kind = ?`,
-		sourceIssueID,
-		targetIssueID,
+DELETE FROM task_relations
+WHERE source_task_id = ? AND target_task_id = ? AND kind = ?`,
+		sourceTaskID,
+		targetTaskID,
 		string(kind),
 	); err != nil {
-		return fmt.Errorf("unlink issues: %w", err)
+		return fmt.Errorf("unlink tasks: %w", err)
 	}
 
 	return nil
 }
 
-func (s *IssueService) RelationsForIssue(ctx context.Context, issueID string) ([]IssueRelation, error) {
+func (s *TaskService) RelationsForTask(ctx context.Context, taskID string) ([]TaskRelation, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT source_issue_id, target_issue_id, kind, created_by, created_at
-FROM issue_relations
-WHERE source_issue_id = ? OR target_issue_id = ?
-ORDER BY created_at, source_issue_id, target_issue_id, kind`, issueID, issueID)
+SELECT source_task_id, target_task_id, kind, created_by, created_at
+FROM task_relations
+WHERE source_task_id = ? OR target_task_id = ?
+ORDER BY created_at, source_task_id, target_task_id, kind`, taskID, taskID)
 	if err != nil {
-		return nil, fmt.Errorf("list issue relations: %w", err)
+		return nil, fmt.Errorf("list task relations: %w", err)
 	}
 	defer rows.Close()
 
-	var relations []IssueRelation
+	var relations []TaskRelation
 	for rows.Next() {
-		relation, err := scanIssueRelation(rows)
+		relation, err := scanTaskRelation(rows)
 		if err != nil {
 			return nil, err
 		}
 		relations = append(relations, relation)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate issue relations: %w", err)
+		return nil, fmt.Errorf("iterate task relations: %w", err)
 	}
 
 	return relations, nil
 }
 
-func (s *IssueService) Board(ctx context.Context) (Board, error) {
+func (s *TaskService) Board(ctx context.Context) (Board, error) {
 	result, err := s.BoardResult(ctx)
 	if err != nil {
 		return Board{}, err
@@ -867,38 +867,38 @@ func (s *IssueService) Board(ctx context.Context) (Board, error) {
 	return result.Board, nil
 }
 
-func (s *IssueService) BoardResult(ctx context.Context) (BoardResult, error) {
-	issues, err := s.ListIssues(ctx, IssueFilter{})
+func (s *TaskService) BoardResult(ctx context.Context) (BoardResult, error) {
+	tasks, err := s.ListTasks(ctx, TaskFilter{})
 	if err != nil {
 		return BoardResult{}, err
 	}
 
 	result := BoardResult{LaneStates: map[string]LaneState{}, WaitReasons: map[string]WaitReason{}}
-	for _, issue := range issues {
-		if issue.State == nil {
-			result.Board.Unscheduled = append(result.Board.Unscheduled, issue)
-			result.LaneStates[issue.ID] = LaneStateUnscheduled
+	for _, task := range tasks {
+		if task.State == nil {
+			result.Board.Unscheduled = append(result.Board.Unscheduled, task)
+			result.LaneStates[task.ID] = LaneStateUnscheduled
 			continue
 		}
-		switch *issue.State {
+		switch *task.State {
 		case LifecycleScheduled:
-			result.Board.Scheduled = append(result.Board.Scheduled, issue)
-			result.LaneStates[issue.ID] = LaneStateScheduled
+			result.Board.Scheduled = append(result.Board.Scheduled, task)
+			result.LaneStates[task.ID] = LaneStateScheduled
 		case LifecycleInProgress:
-			result.Board.InProgress = append(result.Board.InProgress, issue)
+			result.Board.InProgress = append(result.Board.InProgress, task)
 			var openWaits int
 			if err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM workflow_waits w
 JOIN workflow_runs r ON r.id = w.workflow_run_id
-WHERE r.issue_id = ? AND w.state = 'open'`, issue.ID).Scan(&openWaits); err != nil {
+WHERE r.task_id = ? AND w.state = 'open'`, task.ID).Scan(&openWaits); err != nil {
 				return BoardResult{}, err
 			}
 			if openWaits > 0 {
-				result.LaneStates[issue.ID] = LaneStateBlocked
-				result.BlockedIDs = append(result.BlockedIDs, issue.ID)
-				result.WaitReasons[issue.ID] = WaitReasonBlocked
+				result.LaneStates[task.ID] = LaneStateBlocked
+				result.BlockedIDs = append(result.BlockedIDs, task.ID)
+				result.WaitReasons[task.ID] = WaitReasonBlocked
 			} else {
-				result.LaneStates[issue.ID] = LaneStateWorking
+				result.LaneStates[task.ID] = LaneStateWorking
 			}
 		case LifecycleDone:
 			// Done is served by the paginated Done reader.
@@ -912,12 +912,12 @@ WHERE r.issue_id = ? AND w.state = 'open'`, issue.ID).Scan(&openWaits); err != n
 // fine-grained state. Closed phases are omitted from the board. Critique keeps
 // the existing user-facing distinction between a change under review and one
 // that explicitly has requested changes.
-func (s *IssueService) laneStateForPhase(ctx context.Context, issueID string, phase Phase) (LaneState, bool, error) {
+func (s *TaskService) laneStateForPhase(ctx context.Context, taskID string, phase Phase) (LaneState, bool, error) {
 	state, ok := laneStateForPhase(phase)
 	if !ok || phase != PhaseCritique {
 		return state, ok, nil
 	}
-	reviewState, err := s.reviewState(ctx, issueID)
+	reviewState, err := s.reviewState(ctx, taskID)
 	if err != nil {
 		return "", false, err
 	}
@@ -948,24 +948,24 @@ func laneStateForPhase(phase Phase) (LaneState, bool) {
 	}
 }
 
-func (s *IssueService) waitReason(ctx context.Context, issue Issue, state LaneState) (WaitReason, error) {
+func (s *TaskService) waitReason(ctx context.Context, task Task, state LaneState) (WaitReason, error) {
 	// A flow paused at a human gate has no active session; the cursor is the
 	// signal that a phase handoff awaits approval.
-	if _, cursorState, ok, err := cursorStateForIssue(ctx, s.db, issue.ID); err != nil {
+	if _, cursorState, ok, err := cursorStateForTask(ctx, s.db, task.ID); err != nil {
 		return "", err
 	} else if ok && cursorState == FlowPhaseAwaitingApproval {
 		return WaitReasonPhaseApproval, nil
 	}
-	if sessionState, ok, err := activeSessionStateForIssue(ctx, s.db, issue.ID); err != nil {
+	if sessionState, ok, err := activeSessionStateForTask(ctx, s.db, task.ID); err != nil {
 		return "", err
 	} else if ok && sessionState == SessionWaiting {
 		return WaitReasonQuestion, nil
 	}
-	if state == LaneStateReadyToMerge && !issue.AutoMerge {
+	if state == LaneStateReadyToMerge && !task.AutoMerge {
 		return WaitReasonManualMerge, nil
 	}
 	if state == LaneStateInReview {
-		pending, err := pendingHumanReview(ctx, s.db, issue.ID)
+		pending, err := pendingHumanReview(ctx, s.db, task.ID)
 		if err != nil {
 			return "", err
 		}
@@ -973,14 +973,14 @@ func (s *IssueService) waitReason(ctx context.Context, issue Issue, state LaneSt
 			return WaitReasonHumanReview, nil
 		}
 	}
-	crashLoop, err := crashLoopStatusExists(ctx, s.db, issue.ID)
+	crashLoop, err := crashLoopStatusExists(ctx, s.db, task.ID)
 	if err != nil {
 		return "", err
 	}
 	if crashLoop {
 		return WaitReasonCrashLoop, nil
 	}
-	exhausted, err := reviewCycleBudgetExhausted(ctx, s.db, issue.ID)
+	exhausted, err := reviewCycleBudgetExhausted(ctx, s.db, task.ID)
 	if err != nil {
 		return "", err
 	}
@@ -990,16 +990,16 @@ func (s *IssueService) waitReason(ctx context.Context, issue Issue, state LaneSt
 	return "", nil
 }
 
-func pendingHumanReview(ctx context.Context, db *sql.DB, issueID string) (bool, error) {
+func pendingHumanReview(ctx context.Context, db *sql.DB, taskID string) (bool, error) {
 	var count int
 	if err := db.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM checks
-WHERE issue_id = ?
+WHERE task_id = ?
 	AND kind = ?
 	AND required = 1
 	AND verdict = ?`,
-		issueID,
+		taskID,
 		string(CheckKindHuman),
 		string(CheckPending),
 	).Scan(&count); err != nil {
@@ -1009,16 +1009,16 @@ WHERE issue_id = ?
 	return count > 0, nil
 }
 
-func crashLoopStatusExists(ctx context.Context, db *sql.DB, issueID string) (bool, error) {
+func crashLoopStatusExists(ctx context.Context, db *sql.DB, taskID string) (bool, error) {
 	var count int
 	if err := db.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM status_log
-WHERE issue_id = ?
+WHERE task_id = ?
 	AND kind = ?
 	AND message LIKE ?
 	AND resolved_at IS NULL`,
-		issueID,
+		taskID,
 		StatusKindBlocker,
 		crashRestartLimitMessageLike,
 	).Scan(&count); err != nil {
@@ -1028,8 +1028,8 @@ WHERE issue_id = ?
 	return count > 0, nil
 }
 
-func (s *IssueService) CrashRetryAvailable(ctx context.Context, issueID string) (bool, error) {
-	return crashLoopStatusExists(ctx, s.db, issueID)
+func (s *TaskService) CrashRetryAvailable(ctx context.Context, taskID string) (bool, error) {
+	return crashLoopStatusExists(ctx, s.db, taskID)
 }
 
 // laneForState coarsens a fine-grained sub-state into one of the four board
@@ -1051,33 +1051,33 @@ func laneForState(state LaneState) string {
 	return "backlog"
 }
 
-func (s *IssueService) reviewState(ctx context.Context, issueID string) (ReviewState, error) {
-	return reviewStateForIssue(ctx, s.db, issueID)
+func (s *TaskService) reviewState(ctx context.Context, taskID string) (ReviewState, error) {
+	return reviewStateForTask(ctx, s.db, taskID)
 }
 
-func (s *IssueService) issueIsBlocked(ctx context.Context, issueID string) (bool, error) {
+func (s *TaskService) taskIsBlocked(ctx context.Context, taskID string) (bool, error) {
 	var count int
 	if err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(*)
-FROM issue_relations r
-JOIN issues blocker ON blocker.id = r.source_issue_id
+FROM task_relations r
+JOIN tasks blocker ON blocker.id = r.source_task_id
 	WHERE r.kind = ?
-		AND r.target_issue_id = ?
+		AND r.target_task_id = ?
 		AND (blocker.lifecycle_state IS NULL OR blocker.lifecycle_state != ?)`,
 		string(RelationBlocks),
-		issueID,
+		taskID,
 		string(LifecycleDone),
 	).Scan(&count); err != nil {
-		return false, fmt.Errorf("check issue blockers: %w", err)
+		return false, fmt.Errorf("check task blockers: %w", err)
 	}
 
 	return count > 0, nil
 }
 
-func (s *IssueService) UnresolvedBlockers(ctx context.Context, issueID string) ([]Issue, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return nil, errors.New("issue id is required")
+func (s *TaskService) UnresolvedBlockers(ctx context.Context, taskID string) ([]Task, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, errors.New("task id is required")
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT
@@ -1089,87 +1089,87 @@ SELECT
 		blocker.flow_id,
 	blocker.created_by,
 	blocker.created_by_session_id,
-	blocker.source_issue_id,
+	blocker.source_task_id,
 	blocker.source_change_id,
 	blocker.created_at,
 		blocker.updated_at,
 		blocker.lifecycle_state,
 	blocker.done_resolution,
 	blocker.done_at
-FROM issue_relations r
-JOIN issues blocker ON blocker.id = r.source_issue_id
+FROM task_relations r
+JOIN tasks blocker ON blocker.id = r.source_task_id
 	WHERE r.kind = ?
-		AND r.target_issue_id = ?
+		AND r.target_task_id = ?
 		AND (blocker.lifecycle_state IS NULL OR blocker.lifecycle_state != ?)
 ORDER BY blocker.priority DESC, blocker.updated_at DESC, blocker.id`,
 		string(RelationBlocks),
-		issueID,
+		taskID,
 		string(LifecycleDone),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("list issue blockers: %w", err)
+		return nil, fmt.Errorf("list task blockers: %w", err)
 	}
 	defer rows.Close()
 
-	var blockers []Issue
+	var blockers []Task
 	for rows.Next() {
-		blocker, err := scanIssue(rows)
+		blocker, err := scanTask(rows)
 		if err != nil {
 			return nil, err
 		}
 		blockers = append(blockers, blocker)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate issue blockers: %w", err)
+		return nil, fmt.Errorf("iterate task blockers: %w", err)
 	}
 
 	return blockers, nil
 }
 
-func allocateIssueID(ctx context.Context, tx *sql.Tx) (string, error) {
+func allocateTaskID(ctx context.Context, tx *sql.Tx) (string, error) {
 	var nextNumber int64
 	if err := tx.QueryRowContext(ctx, `
 UPDATE id_allocators
 SET next_number = next_number + 1
-WHERE name = 'issue'
+WHERE name = 'task'
 RETURNING next_number - 1`).Scan(&nextNumber); err != nil {
-		return "", fmt.Errorf("allocate issue id: %w", err)
+		return "", fmt.Errorf("allocate task id: %w", err)
 	}
 
-	return formatIssueID(nextNumber), nil
+	return formatTaskID(nextNumber), nil
 }
 
-func formatIssueID(number int64) string {
+func formatTaskID(number int64) string {
 	return fmt.Sprintf("i-%04d", number)
 }
 
-func normalizeCreateIssueInput(input CreateIssueInput) (CreateIssueInput, error) {
+func normalizeCreateTaskInput(input CreateTaskInput) (CreateTaskInput, error) {
 	input.Title = strings.TrimSpace(input.Title)
 	if input.Title == "" {
-		return CreateIssueInput{}, errors.New("issue title is required")
+		return CreateTaskInput{}, errors.New("task title is required")
 	}
 	if input.Priority < 0 {
-		return CreateIssueInput{}, errors.New("issue priority must be non-negative")
+		return CreateTaskInput{}, errors.New("task priority must be non-negative")
 	}
 
 	if input.CreatedBy == "" {
 		input.CreatedBy = ActorHuman
 	}
 	if err := validateActor(input.CreatedBy); err != nil {
-		return CreateIssueInput{}, err
+		return CreateTaskInput{}, err
 	}
 	if input.CreatedBy == ActorAgent && (input.CreatedBySessionID == nil || strings.TrimSpace(*input.CreatedBySessionID) == "") {
-		return CreateIssueInput{}, errors.New("agent-created issues require created_by_session_id")
+		return CreateTaskInput{}, errors.New("agent-created tasks require created_by_session_id")
 	}
 
 	if input.ScheduleState == "" {
 		input.ScheduleState = ScheduleBacklog
 	}
 	if err := validateScheduleState(input.ScheduleState); err != nil {
-		return CreateIssueInput{}, err
+		return CreateTaskInput{}, err
 	}
 	if input.ScheduleState == ScheduleClosed {
-		return CreateIssueInput{}, errors.New("issues cannot be created closed")
+		return CreateTaskInput{}, errors.New("tasks cannot be created closed")
 	}
 
 	if input.TriageState == "" {
@@ -1180,13 +1180,13 @@ func normalizeCreateIssueInput(input CreateIssueInput) (CreateIssueInput, error)
 		}
 	}
 	if err := validateTriageState(input.TriageState); err != nil {
-		return CreateIssueInput{}, err
+		return CreateTaskInput{}, err
 	}
 	if input.TriageState == TriageRejected {
-		return CreateIssueInput{}, errors.New("issues cannot be created rejected")
+		return CreateTaskInput{}, errors.New("tasks cannot be created rejected")
 	}
 	if input.ScheduleState != ScheduleBacklog && input.TriageState != TriageAccepted {
-		return CreateIssueInput{}, errors.New("only accepted issues can be scheduled")
+		return CreateTaskInput{}, errors.New("only accepted tasks can be scheduled")
 	}
 
 	if input.RequiresHumanReview == nil {
@@ -1234,12 +1234,12 @@ func validateScheduleState(state ScheduleState) error {
 	}
 }
 
-func validateIssueState(state IssueState) error {
+func validateTaskState(state TaskState) error {
 	switch state {
-	case IssueStateTriage, IssueStateBacklog, IssueStateUpNext, IssueStateClosed, IssueStateRejected:
+	case TaskStateTriage, TaskStateBacklog, TaskStateUpNext, TaskStateClosed, TaskStateRejected:
 		return nil
 	default:
-		return fmt.Errorf("invalid issue state: %s", state)
+		return fmt.Errorf("invalid task state: %s", state)
 	}
 }
 
@@ -1298,38 +1298,38 @@ func validateTagSlug(slug string) error {
 	return nil
 }
 
-func issueHasParent(ctx context.Context, tx *sql.Tx, issueID string) (bool, error) {
+func taskHasParent(ctx context.Context, tx *sql.Tx, taskID string) (bool, error) {
 	var count int
 	if err := tx.QueryRowContext(ctx, `
 SELECT COUNT(*)
-FROM issue_relations
-WHERE target_issue_id = ? AND kind = ?`, issueID, string(RelationParentOf)).Scan(&count); err != nil {
-		return false, fmt.Errorf("check issue parent: %w", err)
+FROM task_relations
+WHERE target_task_id = ? AND kind = ?`, taskID, string(RelationParentOf)).Scan(&count); err != nil {
+		return false, fmt.Errorf("check task parent: %w", err)
 	}
 
 	return count > 0, nil
 }
 
-func relationPathExists(ctx context.Context, tx *sql.Tx, kind RelationKind, startIssueID, targetIssueID string) (bool, error) {
+func relationPathExists(ctx context.Context, tx *sql.Tx, kind RelationKind, startTaskID, targetTaskID string) (bool, error) {
 	var exists int
 	if err := tx.QueryRowContext(ctx, `
-WITH RECURSIVE reachable(issue_id) AS (
-	SELECT target_issue_id
-	FROM issue_relations
-	WHERE source_issue_id = ? AND kind = ?
+WITH RECURSIVE reachable(task_id) AS (
+	SELECT target_task_id
+	FROM task_relations
+	WHERE source_task_id = ? AND kind = ?
 
 	UNION
 
-	SELECT r.target_issue_id
-	FROM issue_relations r
-	JOIN reachable ON reachable.issue_id = r.source_issue_id
+	SELECT r.target_task_id
+	FROM task_relations r
+	JOIN reachable ON reachable.task_id = r.source_task_id
 	WHERE r.kind = ?
 )
-SELECT EXISTS(SELECT 1 FROM reachable WHERE issue_id = ?)`,
-		startIssueID,
+SELECT EXISTS(SELECT 1 FROM reachable WHERE task_id = ?)`,
+		startTaskID,
 		string(kind),
 		string(kind),
-		targetIssueID,
+		targetTaskID,
 	).Scan(&exists); err != nil {
 		return false, fmt.Errorf("check relation cycle: %w", err)
 	}
@@ -1337,14 +1337,14 @@ SELECT EXISTS(SELECT 1 FROM reachable WHERE issue_id = ?)`,
 	return exists == 1, nil
 }
 
-type issueScanner interface {
+type taskScanner interface {
 	Scan(dest ...any) error
 }
 
 // scanRows scans every row through scan, appending the results and closing rows
 // when done. It collapses the repeated for-rows.Next/append/rows.Err boilerplate
 // shared by the coordinator readers.
-func scanRows[T any](rows *sql.Rows, scan func(issueScanner) (T, error)) ([]T, error) {
+func scanRows[T any](rows *sql.Rows, scan func(taskScanner) (T, error)) ([]T, error) {
 	defer rows.Close()
 	var out []T
 	for rows.Next() {
@@ -1361,12 +1361,12 @@ func scanRows[T any](rows *sql.Rows, scan func(issueScanner) (T, error)) ([]T, e
 	return out, nil
 }
 
-func scanIssue(scanner issueScanner) (Issue, error) {
-	var issue Issue
+func scanTask(scanner taskScanner) (Task, error) {
+	var task Task
 	var flowID sql.NullString
 	var createdBy string
 	var createdBySessionID sql.NullString
-	var sourceIssueID sql.NullString
+	var sourceTaskID sql.NullString
 	var sourceChangeID sql.NullString
 	var createdAt string
 	var updatedAt string
@@ -1375,15 +1375,15 @@ func scanIssue(scanner issueScanner) (Issue, error) {
 	var doneAt sql.NullString
 
 	if err := scanner.Scan(
-		&issue.ID,
-		&issue.Title,
-		&issue.Body,
-		&issue.AcceptanceCriteria,
-		&issue.Priority,
+		&task.ID,
+		&task.Title,
+		&task.Body,
+		&task.AcceptanceCriteria,
+		&task.Priority,
 		&flowID,
 		&createdBy,
 		&createdBySessionID,
-		&sourceIssueID,
+		&sourceTaskID,
 		&sourceChangeID,
 		&createdAt,
 		&updatedAt,
@@ -1391,76 +1391,76 @@ func scanIssue(scanner issueScanner) (Issue, error) {
 		&doneResolution,
 		&doneAt,
 	); err != nil {
-		return Issue{}, fmt.Errorf("scan issue: %w", err)
+		return Task{}, fmt.Errorf("scan task: %w", err)
 	}
 
 	parsedCreatedAt, err := parseTime(createdAt)
 	if err != nil {
-		return Issue{}, err
+		return Task{}, err
 	}
 	parsedUpdatedAt, err := parseTime(updatedAt)
 	if err != nil {
-		return Issue{}, err
+		return Task{}, err
 	}
 
 	// These fields exist only so dormant pre-v2 coordinator helpers still
 	// compile. They are derived from the authoritative lifecycle and are never
 	// persisted or exposed by the version-2 model.
-	issue.ScheduleState = ScheduleBacklog
-	issue.TriageState = TriageAccepted
-	issue.RequiresHumanReview = true
+	task.ScheduleState = ScheduleBacklog
+	task.TriageState = TriageAccepted
+	task.RequiresHumanReview = true
 	if flowID.Valid {
-		issue.FlowID = flowID.String
+		task.FlowID = flowID.String
 	}
-	issue.CreatedBy = Actor(createdBy)
-	issue.CreatedBySessionID = nullableStringPointer(createdBySessionID)
-	issue.SourceIssueID = nullableStringPointer(sourceIssueID)
-	issue.SourceChangeID = nullableStringPointer(sourceChangeID)
-	issue.CreatedAt = parsedCreatedAt
-	issue.UpdatedAt = parsedUpdatedAt
+	task.CreatedBy = Actor(createdBy)
+	task.CreatedBySessionID = nullableStringPointer(createdBySessionID)
+	task.SourceTaskID = nullableStringPointer(sourceTaskID)
+	task.SourceChangeID = nullableStringPointer(sourceChangeID)
+	task.CreatedAt = parsedCreatedAt
+	task.UpdatedAt = parsedUpdatedAt
 	if lifecycleState.Valid {
 		state := LifecycleState(lifecycleState.String)
-		issue.State = &state
+		task.State = &state
 		switch state {
 		case LifecycleScheduled, LifecycleInProgress:
-			issue.ScheduleState = ScheduleUpNext
+			task.ScheduleState = ScheduleUpNext
 		case LifecycleDone:
-			issue.ScheduleState = ScheduleClosed
+			task.ScheduleState = ScheduleClosed
 		}
 	}
 	if doneResolution.Valid {
 		resolution := DoneResolution(doneResolution.String)
-		issue.DoneResolution = &resolution
+		task.DoneResolution = &resolution
 	}
 	if doneAt.Valid {
 		parsedDoneAt, err := parseTime(doneAt.String)
 		if err != nil {
-			return Issue{}, err
+			return Task{}, err
 		}
-		issue.DoneAt = &parsedDoneAt
-		issue.ClosedAt = &parsedDoneAt
+		task.DoneAt = &parsedDoneAt
+		task.ClosedAt = &parsedDoneAt
 	}
 
-	return issue, nil
+	return task, nil
 }
 
-func scanIssues(rows *sql.Rows) ([]Issue, error) {
-	var issues []Issue
+func scanTasks(rows *sql.Rows) ([]Task, error) {
+	var tasks []Task
 	for rows.Next() {
-		issue, err := scanIssue(rows)
+		task, err := scanTask(rows)
 		if err != nil {
 			return nil, err
 		}
-		issues = append(issues, issue)
+		tasks = append(tasks, task)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate issues: %w", err)
+		return nil, fmt.Errorf("iterate tasks: %w", err)
 	}
 
-	return issues, nil
+	return tasks, nil
 }
 
-func scanTag(scanner issueScanner) (Tag, error) {
+func scanTag(scanner taskScanner) (Tag, error) {
 	var tag Tag
 	var createdBy string
 	var createdAt string
@@ -1487,25 +1487,25 @@ func scanTag(scanner issueScanner) (Tag, error) {
 	return tag, nil
 }
 
-func scanIssueRelation(scanner issueScanner) (IssueRelation, error) {
-	var relation IssueRelation
+func scanTaskRelation(scanner taskScanner) (TaskRelation, error) {
+	var relation TaskRelation
 	var kind string
 	var createdBy string
 	var createdAt string
 
 	if err := scanner.Scan(
-		&relation.SourceIssueID,
-		&relation.TargetIssueID,
+		&relation.SourceTaskID,
+		&relation.TargetTaskID,
 		&kind,
 		&createdBy,
 		&createdAt,
 	); err != nil {
-		return IssueRelation{}, fmt.Errorf("scan issue relation: %w", err)
+		return TaskRelation{}, fmt.Errorf("scan task relation: %w", err)
 	}
 
 	parsedCreatedAt, err := parseTime(createdAt)
 	if err != nil {
-		return IssueRelation{}, err
+		return TaskRelation{}, err
 	}
 
 	relation.Kind = RelationKind(kind)

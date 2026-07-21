@@ -58,7 +58,7 @@ func New(cfg config.ClientConfig) (*Client, error) {
 	}, nil
 }
 
-// WithProject returns a client whose issue and board calls target the given
+// WithProject returns a client whose task and board calls target the given
 // project's scoped routes. Without a project the unscoped routes apply: the
 // coordinator resolves session tokens to their bound project and treats a
 // single-project deployment as implicit.
@@ -68,13 +68,13 @@ func (c *Client) WithProject(projectID string) *Client {
 	return &clone
 }
 
-// issuesPath scopes an issue route to the client's project when one is set.
-func (c *Client) issuesPath(suffix string) string {
+// tasksPath scopes an task route to the client's project when one is set.
+func (c *Client) tasksPath(suffix string) string {
 	if c.projectID != "" {
-		return "/v2/projects/" + url.PathEscape(c.projectID) + "/issues" + suffix
+		return "/v2/projects/" + url.PathEscape(c.projectID) + "/tasks" + suffix
 	}
 
-	return "/v2/issues" + suffix
+	return "/v2/tasks" + suffix
 }
 
 // projectPath scopes an arbitrary project-owned route ("/flows",
@@ -95,16 +95,16 @@ func (c *Client) consolePath() string {
 	return "/v2/console"
 }
 
-func (c *Client) CreateIssue(input CreateIssueInput) (coordinator.Issue, error) {
-	var response issueResponse
-	if err := c.do(http.MethodPost, c.issuesPath(""), input, nil, &response); err != nil {
-		return coordinator.Issue{}, err
+func (c *Client) CreateTask(input CreateTaskInput) (coordinator.Task, error) {
+	var response taskResponse
+	if err := c.do(http.MethodPost, c.tasksPath(""), input, nil, &response); err != nil {
+		return coordinator.Task{}, err
 	}
 
-	return response.Issue, nil
+	return response.Task, nil
 }
 
-func (c *Client) ListIssues(filter IssueFilter) ([]coordinator.Issue, error) {
+func (c *Client) ListTasks(filter TaskFilter) ([]coordinator.Task, error) {
 	query := url.Values{}
 	for _, state := range filter.LifecycleStates {
 		query.Add("state", state)
@@ -113,21 +113,21 @@ func (c *Client) ListIssues(filter IssueFilter) ([]coordinator.Issue, error) {
 		query.Add("tag", tag)
 	}
 
-	var response issuesResponse
-	if err := c.do(http.MethodGet, c.issuesPath(""), nil, query, &response); err != nil {
+	var response tasksResponse
+	if err := c.do(http.MethodGet, c.tasksPath(""), nil, query, &response); err != nil {
 		return nil, err
 	}
 
-	return response.Issues, nil
+	return response.Tasks, nil
 }
 
-func (c *Client) GetIssue(id string) (coordinator.Issue, error) {
-	var response issueResponse
-	if err := c.do(http.MethodGet, c.issuesPath("/"+url.PathEscape(id)), nil, nil, &response); err != nil {
-		return coordinator.Issue{}, err
+func (c *Client) GetTask(id string) (coordinator.Task, error) {
+	var response taskResponse
+	if err := c.do(http.MethodGet, c.tasksPath("/"+url.PathEscape(id)), nil, nil, &response); err != nil {
+		return coordinator.Task{}, err
 	}
 
-	return response.Issue, nil
+	return response.Task, nil
 }
 
 // ListAgentDefs returns the project's agent definition catalog.
@@ -214,22 +214,22 @@ func (c *Client) SetDefaultFlow(id string) (coordinator.Flow, error) {
 	return response.Flow, nil
 }
 
-// ApproveWorkPhase approves an issue's gate-paused work phase.
-func (c *Client) ApproveWorkPhase(issueID string) (coordinator.Issue, error) {
-	var response issueResponse
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(issueID))+"/phase/approve", map[string]string{}, nil, &response); err != nil {
-		return coordinator.Issue{}, err
+// ApproveWorkPhase approves an task's gate-paused work phase.
+func (c *Client) ApproveWorkPhase(taskID string) (coordinator.Task, error) {
+	var response taskResponse
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/phase/approve", map[string]string{}, nil, &response); err != nil {
+		return coordinator.Task{}, err
 	}
-	return response.Issue, nil
+	return response.Task, nil
 }
 
 // RequestWorkPhaseChanges sends a gate-paused work phase back to rework.
-func (c *Client) RequestWorkPhaseChanges(issueID string, feedback string) (coordinator.Issue, error) {
-	var response issueResponse
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(issueID))+"/phase/request-changes", map[string]string{"feedback": feedback}, nil, &response); err != nil {
-		return coordinator.Issue{}, err
+func (c *Client) RequestWorkPhaseChanges(taskID string, feedback string) (coordinator.Task, error) {
+	var response taskResponse
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/phase/request-changes", map[string]string{"feedback": feedback}, nil, &response); err != nil {
+		return coordinator.Task{}, err
 	}
-	return response.Issue, nil
+	return response.Task, nil
 }
 
 // PromptContext is the coordinator-resolved per-phase prompt material: the
@@ -251,45 +251,45 @@ type PromptPhaseHandoff struct {
 	Content   string `json:"content"`
 }
 
-// GetPromptContext resolves the prompt material for the issue's current work
+// GetPromptContext resolves the prompt material for the task's current work
 // phase; a non-empty checkName resolves the named review check's agent prompt
 // instead.
-func (c *Client) GetPromptContext(issueID string, checkName string) (PromptContext, error) {
+func (c *Client) GetPromptContext(taskID string, checkName string) (PromptContext, error) {
 	var query url.Values
 	if strings.TrimSpace(checkName) != "" {
 		query = url.Values{"check": []string{strings.TrimSpace(checkName)}}
 	}
 	var response PromptContext
-	if err := c.do(http.MethodGet, c.issuesPath("/"+url.PathEscape(issueID))+"/prompt-context", nil, query, &response); err != nil {
+	if err := c.do(http.MethodGet, c.tasksPath("/"+url.PathEscape(taskID))+"/prompt-context", nil, query, &response); err != nil {
 		return PromptContext{}, err
 	}
 	return response, nil
 }
 
-func (c *Client) GetIssueWithStatus(id string) (coordinator.Issue, []coordinator.StatusLogEntry, error) {
-	var response issueResponse
-	if err := c.do(http.MethodGet, c.issuesPath("/"+url.PathEscape(id)), nil, nil, &response); err != nil {
-		return coordinator.Issue{}, nil, err
+func (c *Client) GetTaskWithStatus(id string) (coordinator.Task, []coordinator.StatusLogEntry, error) {
+	var response taskResponse
+	if err := c.do(http.MethodGet, c.tasksPath("/"+url.PathEscape(id)), nil, nil, &response); err != nil {
+		return coordinator.Task{}, nil, err
 	}
 
-	return response.Issue, response.StatusLog, nil
+	return response.Task, response.StatusLog, nil
 }
 
-func (c *Client) EditIssue(id string, input EditIssueInput) (coordinator.Issue, error) {
-	var response issueResponse
-	if err := c.do(http.MethodPatch, c.issuesPath("/"+url.PathEscape(id)), input, nil, &response); err != nil {
-		return coordinator.Issue{}, err
+func (c *Client) EditTask(id string, input EditTaskInput) (coordinator.Task, error) {
+	var response taskResponse
+	if err := c.do(http.MethodPatch, c.tasksPath("/"+url.PathEscape(id)), input, nil, &response); err != nil {
+		return coordinator.Task{}, err
 	}
 
-	return response.Issue, nil
+	return response.Task, nil
 }
 
-func (c *Client) ScheduleIssue(id string, state coordinator.ScheduleState) (coordinator.Issue, error) {
+func (c *Client) ScheduleTask(id string, state coordinator.ScheduleState) (coordinator.Task, error) {
 	if _, err := c.ScheduleWorkflow(id); err != nil {
-		return coordinator.Issue{}, err
+		return coordinator.Task{}, err
 	}
-	issue, _, err := c.GetIssueWithStatus(id)
-	return issue, err
+	task, _, err := c.GetTaskWithStatus(id)
+	return task, err
 }
 
 type WorkflowDetail struct {
@@ -301,7 +301,7 @@ func (c *Client) ScheduleWorkflow(id string) (coordinator.WorkflowRun, error) {
 	var response struct {
 		Run coordinator.WorkflowRun `json:"run"`
 	}
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(id))+"/schedule", map[string]string{}, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(id))+"/schedule", map[string]string{}, nil, &response); err != nil {
 		return coordinator.WorkflowRun{}, err
 	}
 	return response.Run, nil
@@ -309,150 +309,150 @@ func (c *Client) ScheduleWorkflow(id string) (coordinator.WorkflowRun, error) {
 
 func (c *Client) GetWorkflow(id string) (WorkflowDetail, error) {
 	var response WorkflowDetail
-	if err := c.do(http.MethodGet, c.issuesPath("/"+url.PathEscape(id))+"/workflow", nil, nil, &response); err != nil {
+	if err := c.do(http.MethodGet, c.tasksPath("/"+url.PathEscape(id))+"/workflow", nil, nil, &response); err != nil {
 		return WorkflowDetail{}, err
 	}
 	return response, nil
 }
 
-func (c *Client) CreateWorkflowArtifact(issueID string, input coordinator.CreateWorkflowArtifactInput) (coordinator.WorkflowArtifact, bool, error) {
+func (c *Client) CreateWorkflowArtifact(taskID string, input coordinator.CreateWorkflowArtifactInput) (coordinator.WorkflowArtifact, bool, error) {
 	var response struct {
 		Artifact coordinator.WorkflowArtifact `json:"artifact"`
 		Replayed bool                         `json:"replayed"`
 	}
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(issueID))+"/workflow/artifacts", input, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/workflow/artifacts", input, nil, &response); err != nil {
 		return coordinator.WorkflowArtifact{}, false, err
 	}
 	return response.Artifact, response.Replayed, nil
 }
 
-func (c *Client) CompleteWorkflowAgentNode(issueID, nodeRunID, artifactID string) (coordinator.CompleteWorkflowNodeResult, error) {
+func (c *Client) CompleteWorkflowAgentNode(taskID, nodeRunID, artifactID string) (coordinator.CompleteWorkflowNodeResult, error) {
 	var response coordinator.CompleteWorkflowNodeResult
 	request := map[string]string{"node_run_id": nodeRunID, "artifact_id": artifactID}
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(issueID))+"/workflow/complete", request, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/workflow/complete", request, nil, &response); err != nil {
 		return coordinator.CompleteWorkflowNodeResult{}, err
 	}
 	return response, nil
 }
 
-func (c *Client) RespondWorkflow(issueID, nodeRunID, outcome, feedback string) (coordinator.CompleteWorkflowNodeResult, error) {
+func (c *Client) RespondWorkflow(taskID, nodeRunID, outcome, feedback string) (coordinator.CompleteWorkflowNodeResult, error) {
 	var response coordinator.CompleteWorkflowNodeResult
 	request := map[string]string{"node_run_id": nodeRunID, "outcome": outcome, "feedback": feedback}
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(issueID))+"/workflow/respond", request, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/workflow/respond", request, nil, &response); err != nil {
 		return coordinator.CompleteWorkflowNodeResult{}, err
 	}
 	return response, nil
 }
 
-func (c *Client) ExtendWorkflowBudget(issueID string, additional int) (coordinator.WorkflowRun, error) {
+func (c *Client) ExtendWorkflowBudget(taskID string, additional int) (coordinator.WorkflowRun, error) {
 	var response struct {
 		Run coordinator.WorkflowRun `json:"run"`
 	}
 	request := map[string]int{"additional": additional}
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(issueID))+"/workflow/budget", request, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/workflow/budget", request, nil, &response); err != nil {
 		return coordinator.WorkflowRun{}, err
 	}
 	return response.Run, nil
 }
 
-func (c *Client) SetIssueState(id string, state coordinator.IssueState) (coordinator.Issue, error) {
-	var response issueResponse
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(id))+"/state", issueStateRequest{State: string(state)}, nil, &response); err != nil {
-		return coordinator.Issue{}, err
+func (c *Client) SetTaskState(id string, state coordinator.TaskState) (coordinator.Task, error) {
+	var response taskResponse
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(id))+"/state", taskStateRequest{State: string(state)}, nil, &response); err != nil {
+		return coordinator.Task{}, err
 	}
 
-	return response.Issue, nil
+	return response.Task, nil
 }
 
-func (c *Client) ResetIssue(id string) (coordinator.Issue, error) {
+func (c *Client) ResetTask(id string) (coordinator.Task, error) {
 	if _, err := c.ResetWorkflow(id); err != nil {
-		return coordinator.Issue{}, err
+		return coordinator.Task{}, err
 	}
-	issue, _, err := c.GetIssueWithStatus(id)
-	return issue, err
+	task, _, err := c.GetTaskWithStatus(id)
+	return task, err
 }
 
 func (c *Client) ResetWorkflow(id string) (coordinator.WorkflowRun, error) {
 	var response struct {
 		Run coordinator.WorkflowRun `json:"run"`
 	}
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(id))+"/reset", map[string]string{}, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(id))+"/reset", map[string]string{}, nil, &response); err != nil {
 		return coordinator.WorkflowRun{}, err
 	}
 	return response.Run, nil
 }
 
-func (c *Client) ForceDone(id string, resolution coordinator.DoneResolution, note string) (coordinator.Issue, error) {
-	var response issueResponse
+func (c *Client) ForceDone(id string, resolution coordinator.DoneResolution, note string) (coordinator.Task, error) {
+	var response taskResponse
 	request := map[string]string{"resolution": string(resolution), "note": note}
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(id))+"/done", request, nil, &response); err != nil {
-		return coordinator.Issue{}, err
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(id))+"/done", request, nil, &response); err != nil {
+		return coordinator.Task{}, err
 	}
-	return response.Issue, nil
+	return response.Task, nil
 }
 
-func (c *Client) ReopenIssue(id string) (coordinator.Issue, error) {
-	var response issueResponse
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(id))+"/reopen", map[string]string{}, nil, &response); err != nil {
-		return coordinator.Issue{}, err
+func (c *Client) ReopenTask(id string) (coordinator.Task, error) {
+	var response taskResponse
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(id))+"/reopen", map[string]string{}, nil, &response); err != nil {
+		return coordinator.Task{}, err
 	}
-	return response.Issue, nil
+	return response.Task, nil
 }
 
-func (c *Client) CloseIssue(id string) (coordinator.Issue, error) {
-	var response issueResponse
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(id))+"/close", map[string]string{}, nil, &response); err != nil {
-		return coordinator.Issue{}, err
+func (c *Client) CloseTask(id string) (coordinator.Task, error) {
+	var response taskResponse
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(id))+"/close", map[string]string{}, nil, &response); err != nil {
+		return coordinator.Task{}, err
 	}
 
-	return response.Issue, nil
+	return response.Task, nil
 }
 
-func (c *Client) TriageIssue(id string, state coordinator.TriageState) (coordinator.Issue, error) {
-	var response issueResponse
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(id))+"/triage", triageIssueRequest{State: string(state)}, nil, &response); err != nil {
-		return coordinator.Issue{}, err
+func (c *Client) TriageTask(id string, state coordinator.TriageState) (coordinator.Task, error) {
+	var response taskResponse
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(id))+"/triage", triageTaskRequest{State: string(state)}, nil, &response); err != nil {
+		return coordinator.Task{}, err
 	}
 
-	return response.Issue, nil
+	return response.Task, nil
 }
 
-func (c *Client) LinkIssues(sourceIssueID string, kind coordinator.RelationKind, targetIssueID string) error {
-	request := issueRelationRequest{
-		TargetIssueID: targetIssueID,
-		Kind:          string(kind),
+func (c *Client) LinkTasks(sourceTaskID string, kind coordinator.RelationKind, targetTaskID string) error {
+	request := taskRelationRequest{
+		TargetTaskID: targetTaskID,
+		Kind:         string(kind),
 	}
-	return c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(sourceIssueID))+"/relations", request, nil, nil)
+	return c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(sourceTaskID))+"/relations", request, nil, nil)
 }
 
-func (c *Client) UnlinkIssues(sourceIssueID string, kind coordinator.RelationKind, targetIssueID string) error {
-	request := issueRelationRequest{
-		TargetIssueID: targetIssueID,
-		Kind:          string(kind),
+func (c *Client) UnlinkTasks(sourceTaskID string, kind coordinator.RelationKind, targetTaskID string) error {
+	request := taskRelationRequest{
+		TargetTaskID: targetTaskID,
+		Kind:         string(kind),
 	}
-	return c.do(http.MethodDelete, c.issuesPath("/"+url.PathEscape(sourceIssueID))+"/relations", request, nil, nil)
+	return c.do(http.MethodDelete, c.tasksPath("/"+url.PathEscape(sourceTaskID))+"/relations", request, nil, nil)
 }
 
-func (c *Client) MergeIssue(id string) (coordinator.MergeResult, error) {
+func (c *Client) MergeTask(id string) (coordinator.MergeResult, error) {
 	var response mergeResponse
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(id))+"/merge", map[string]string{}, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(id))+"/merge", map[string]string{}, nil, &response); err != nil {
 		return coordinator.MergeResult{}, err
 	}
 
 	return response.Merge, nil
 }
 
-func (c *Client) UploadIssueAttachment(issueID string, input UploadIssueAttachmentInput) (coordinator.IssueAttachment, error) {
+func (c *Client) UploadTaskAttachment(taskID string, input UploadTaskAttachmentInput) (coordinator.TaskAttachment, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	if input.Stage != "" {
 		if err := writer.WriteField("stage", string(input.Stage)); err != nil {
-			return coordinator.IssueAttachment{}, err
+			return coordinator.TaskAttachment{}, err
 		}
 	}
 	filename := strings.TrimSpace(input.Filename)
 	if filename == "" {
-		return coordinator.IssueAttachment{}, errors.New("attachment filename is required")
+		return coordinator.TaskAttachment{}, errors.New("attachment filename is required")
 	}
 	contentType := strings.TrimSpace(input.ContentType)
 	if contentType == "" {
@@ -466,45 +466,45 @@ func (c *Client) UploadIssueAttachment(issueID string, input UploadIssueAttachme
 	header.Set("Content-Type", contentType)
 	part, err := writer.CreatePart(header)
 	if err != nil {
-		return coordinator.IssueAttachment{}, err
+		return coordinator.TaskAttachment{}, err
 	}
 	if input.Reader == nil {
-		return coordinator.IssueAttachment{}, errors.New("attachment reader is required")
+		return coordinator.TaskAttachment{}, errors.New("attachment reader is required")
 	}
 	if _, err := io.Copy(part, input.Reader); err != nil {
-		return coordinator.IssueAttachment{}, err
+		return coordinator.TaskAttachment{}, err
 	}
 	if err := writer.Close(); err != nil {
-		return coordinator.IssueAttachment{}, err
+		return coordinator.TaskAttachment{}, err
 	}
 
 	query := url.Values{}
 	if strings.TrimSpace(input.LeaseID) != "" {
 		query.Set("lease_id", strings.TrimSpace(input.LeaseID))
 	}
-	var response issueAttachmentResponse
-	if err := c.doMultipart(http.MethodPost, c.issuesPath("/"+url.PathEscape(issueID))+"/attachments", query, writer.FormDataContentType(), &body, &response); err != nil {
-		return coordinator.IssueAttachment{}, err
+	var response taskAttachmentResponse
+	if err := c.doMultipart(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/attachments", query, writer.FormDataContentType(), &body, &response); err != nil {
+		return coordinator.TaskAttachment{}, err
 	}
 
 	return response.Attachment, nil
 }
 
-// ListIssueAttachments lists the attachments recorded for an issue. It is the
-// client counterpart to the issue attachments read API and authenticates with
+// ListTaskAttachments lists the attachments recorded for an task. It is the
+// client counterpart to the task attachments read API and authenticates with
 // the client's token (the worker uses its worker token).
-func (c *Client) ListIssueAttachments(ctx context.Context, issueID string) ([]coordinator.IssueAttachment, error) {
-	var response issueAttachmentsResponse
-	if err := c.doContext(ctx, http.MethodGet, c.issuesPath("/"+url.PathEscape(issueID))+"/attachments", nil, nil, &response); err != nil {
+func (c *Client) ListTaskAttachments(ctx context.Context, taskID string) ([]coordinator.TaskAttachment, error) {
+	var response taskAttachmentsResponse
+	if err := c.doContext(ctx, http.MethodGet, c.tasksPath("/"+url.PathEscape(taskID))+"/attachments", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return response.Attachments, nil
 }
 
-// DownloadIssueAttachment downloads an issue attachment's bytes into dst. It
+// DownloadTaskAttachment downloads an task attachment's bytes into dst. It
 // authenticates with the client's token (the worker uses its worker token).
-func (c *Client) DownloadIssueAttachment(ctx context.Context, issueID, attachmentID string, dst io.Writer) error {
-	endpoint := c.baseURL + c.issuesPath("/"+url.PathEscape(issueID)+"/attachments/"+url.PathEscape(attachmentID))
+func (c *Client) DownloadTaskAttachment(ctx context.Context, taskID, attachmentID string, dst io.Writer) error {
+	endpoint := c.baseURL + c.tasksPath("/"+url.PathEscape(taskID)+"/attachments/"+url.PathEscape(attachmentID))
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return err
@@ -677,9 +677,9 @@ func (c *Client) LookupProjectByRepoPath(repoPath string) (*Project, error) {
 	return &response.Projects[0], nil
 }
 
-func (c *Client) ListChecks(issueID string) (CheckListResult, error) {
+func (c *Client) ListChecks(taskID string) (CheckListResult, error) {
 	var response checksResponse
-	if err := c.do(http.MethodGet, c.issuesPath("/"+url.PathEscape(issueID))+"/checks", nil, nil, &response); err != nil {
+	if err := c.do(http.MethodGet, c.tasksPath("/"+url.PathEscape(taskID))+"/checks", nil, nil, &response); err != nil {
 		return CheckListResult{}, err
 	}
 
@@ -689,18 +689,18 @@ func (c *Client) ListChecks(issueID string) (CheckListResult, error) {
 	}, nil
 }
 
-func (c *Client) ListTransitions(issueID string) ([]coordinator.WorkflowTransition, error) {
+func (c *Client) ListTransitions(taskID string) ([]coordinator.WorkflowTransition, error) {
 	var response transitionsResponse
-	if err := c.do(http.MethodGet, c.issuesPath("/"+url.PathEscape(issueID))+"/transitions", nil, nil, &response); err != nil {
+	if err := c.do(http.MethodGet, c.tasksPath("/"+url.PathEscape(taskID))+"/transitions", nil, nil, &response); err != nil {
 		return nil, err
 	}
 
 	return response.Transitions, nil
 }
 
-func (c *Client) RunReview(issueID string) (ReviewRunResult, error) {
+func (c *Client) RunReview(taskID string) (ReviewRunResult, error) {
 	var response reviewRunResponse
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(issueID))+"/review/run", map[string]string{}, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/review/run", map[string]string{}, nil, &response); err != nil {
 		return ReviewRunResult{}, err
 	}
 
@@ -712,9 +712,9 @@ func (c *Client) RunReview(issueID string) (ReviewRunResult, error) {
 	}, nil
 }
 
-func (c *Client) GetCheck(issueID string, name string) (CheckResult, error) {
+func (c *Client) GetCheck(taskID string, name string) (CheckResult, error) {
 	var response checkResponse
-	if err := c.do(http.MethodGet, c.issuesPath("/"+url.PathEscape(issueID))+"/checks/"+url.PathEscape(name), nil, nil, &response); err != nil {
+	if err := c.do(http.MethodGet, c.tasksPath("/"+url.PathEscape(taskID))+"/checks/"+url.PathEscape(name), nil, nil, &response); err != nil {
 		return CheckResult{}, err
 	}
 
@@ -725,7 +725,7 @@ func (c *Client) GetCheck(issueID string, name string) (CheckResult, error) {
 	}, nil
 }
 
-func (c *Client) ReportCheck(issueID string, name string, input ReportCheckInput) (CheckResult, error) {
+func (c *Client) ReportCheck(taskID string, name string, input ReportCheckInput) (CheckResult, error) {
 	var response checkResponse
 	request := reportCheckRequest{
 		Kind:        string(input.Kind),
@@ -737,7 +737,7 @@ func (c *Client) ReportCheck(issueID string, name string, input ReportCheckInput
 		LeaseID:     input.LeaseID,
 		Reporter:    input.Reporter,
 	}
-	if err := c.do(http.MethodPost, c.issuesPath("/"+url.PathEscape(issueID))+"/checks/"+url.PathEscape(name), request, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/checks/"+url.PathEscape(name), request, nil, &response); err != nil {
 		return CheckResult{}, err
 	}
 
@@ -987,7 +987,7 @@ func (c *Client) ListJobs() ([]flowworker.Job, error) {
 func (c *Client) EnqueueJob(input EnqueueJobInput) (flowworker.Job, error) {
 	var response jobResponse
 	request := enqueueJobRequest{
-		IssueID:        input.IssueID,
+		TaskID:         input.TaskID,
 		ChangeID:       input.ChangeID,
 		Role:           string(input.Role),
 		CapacityBucket: string(input.CapacityBucket),
@@ -1149,10 +1149,10 @@ func (c *Client) MarkSessionMessageDelivered(ctx context.Context, input MarkSess
 	return response.Message, nil
 }
 
-func (c *Client) ReplyToIssue(issueID string, input ReplyToIssueInput) (coordinator.SessionMessage, bool, error) {
+func (c *Client) ReplyToTask(taskID string, input ReplyToTaskInput) (coordinator.SessionMessage, bool, error) {
 	var response sessionMessageResponse
 	request := attentionReplyRequest{Message: input.Message, StatusLogID: input.StatusLogID}
-	if err := c.do(http.MethodPost, "/v2/issues/"+url.PathEscape(issueID)+"/attention/reply", request, nil, &response); err != nil {
+	if err := c.do(http.MethodPost, "/v2/tasks/"+url.PathEscape(taskID)+"/attention/reply", request, nil, &response); err != nil {
 		return coordinator.SessionMessage{}, false, err
 	}
 
@@ -1455,7 +1455,7 @@ func durationSeconds(duration time.Duration) int {
 	return int(duration / time.Second)
 }
 
-type CreateIssueInput struct {
+type CreateTaskInput struct {
 	Title              string `json:"title"`
 	Body               string `json:"body"`
 	AcceptanceCriteria string `json:"acceptance_criteria"`
@@ -1463,7 +1463,7 @@ type CreateIssueInput struct {
 	FlowID             string `json:"flow_id,omitempty"`
 }
 
-type EditIssueInput struct {
+type EditTaskInput struct {
 	Title              *string `json:"title,omitempty"`
 	Body               *string `json:"body,omitempty"`
 	AcceptanceCriteria *string `json:"acceptance_criteria,omitempty"`
@@ -1471,15 +1471,15 @@ type EditIssueInput struct {
 	FlowID             *string `json:"flow_id,omitempty"`
 }
 
-type UploadIssueAttachmentInput struct {
-	Stage       coordinator.IssueAttachmentStage
+type UploadTaskAttachmentInput struct {
+	Stage       coordinator.TaskAttachmentStage
 	Filename    string
 	ContentType string
 	Reader      io.Reader
 	LeaseID     string
 }
 
-type IssueFilter struct {
+type TaskFilter struct {
 	LifecycleStates []string
 	TagSlugs        []string
 }
@@ -1550,7 +1550,7 @@ type ReleaseLeaseInput struct {
 }
 
 type EnqueueJobInput struct {
-	IssueID        *string
+	TaskID         *string
 	ChangeID       *string
 	Role           flowworker.JobRole
 	CapacityBucket flowworker.CapacityBucket
@@ -1636,7 +1636,7 @@ type MarkSessionMessageDeliveredInput struct {
 	LeaseID   string
 }
 
-type ReplyToIssueInput struct {
+type ReplyToTaskInput struct {
 	Message     string
 	StatusLogID *int64
 }
@@ -1662,10 +1662,10 @@ type PutHandoffResult struct {
 	Summary  string
 }
 
-type scheduleIssueRequest = contract.ScheduleIssueRequest
-type issueStateRequest = contract.IssueStateRequest
-type triageIssueRequest = contract.TriageIssueRequest
-type issueRelationRequest = contract.IssueRelationRequest
+type scheduleTaskRequest = contract.ScheduleTaskRequest
+type taskStateRequest = contract.TaskStateRequest
+type triageTaskRequest = contract.TriageTaskRequest
+type taskRelationRequest = contract.TaskRelationRequest
 type registerWorkerRequest = contract.RegisterWorkerRequest
 type joinWorkerRequest = contract.JoinWorkerRequest
 type heartbeatWorkerRequest = contract.HeartbeatWorkerRequest
@@ -1689,10 +1689,10 @@ type createThreadRequest = contract.CreateThreadRequest
 type putHandoffRequest = contract.PutHandoffRequest
 type threadCommentRequest = contract.ThreadCommentRequest
 type threadClaimRequest = contract.ThreadClaimRequest
-type issueResponse = contract.IssueResponse
-type issuesResponse = contract.IssuesResponse
-type issueAttachmentResponse = contract.IssueAttachmentResponse
-type issueAttachmentsResponse = contract.IssueAttachmentsResponse
+type taskResponse = contract.TaskResponse
+type tasksResponse = contract.TasksResponse
+type taskAttachmentResponse = contract.TaskAttachmentResponse
+type taskAttachmentsResponse = contract.TaskAttachmentsResponse
 type boardResponse = contract.BoardResponse
 type aggregateBoardResponse = contract.AggregateBoardResponse
 type consoleResponse = contract.ConsoleResponse

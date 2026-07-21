@@ -20,7 +20,7 @@ var (
 
 // AgentDef is a reusable, project-owned agent configuration: which harness to
 // launch, the model/reasoning-effort selection, and the role-instruction
-// prompt. Flow phases and review sets reference agent defs by id; issues in
+// prompt. Flow phases and review sets reference agent defs by id; tasks in
 // flight carry frozen AgentDefSnapshot copies instead.
 type AgentDef struct {
 	ID              string    `json:"id"`

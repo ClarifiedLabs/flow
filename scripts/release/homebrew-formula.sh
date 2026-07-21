@@ -57,13 +57,13 @@ end
 FORMULA
 }
 
-write_binary_formula flow Flow "CLI for local issue-driven agent work" flow ./cmd/flow
-write_binary_formula flow-server FlowServer "Coordinator server for issue-driven agent work" flow-server ./cmd/flow-server
-write_binary_formula flow-worker FlowWorker "Worker supervisor for issue-driven agent work" flow-worker ./cmd/flow-worker
+write_binary_formula flow Flow "CLI for local task-driven agent work" flow ./cmd/flow
+write_binary_formula flow-server FlowServer "Coordinator server for task-driven agent work" flow-server ./cmd/flow-server
+write_binary_formula flow-worker FlowWorker "Worker supervisor for task-driven agent work" flow-worker ./cmd/flow-worker
 
 cat >"${formula_dir}/flow-full.rb" <<FORMULA
 class FlowFull < Formula
-  desc "All Flow commands for issue-driven agent work"
+  desc "All Flow commands for task-driven agent work"
   homepage "https://github.com/ClarifiedLabs/flow"
   url "${source_url}"
   sha256 "${SOURCE_SHA256}"

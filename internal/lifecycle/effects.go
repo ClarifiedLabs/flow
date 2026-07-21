@@ -21,14 +21,14 @@ var ErrMergeUnavailable = errors.New("lifecycle: merge service unavailable")
 // owns its own transaction; the engine never holds a transaction across an
 // effect.
 type Effects interface {
-	// Issue setters / reads.
-	GetIssue(ctx context.Context, id string) (coordinator.Issue, error)
-	HasMergedChange(ctx context.Context, issueID string) (bool, error)
-	ScheduleIssue(ctx context.Context, id string, state coordinator.ScheduleState) (coordinator.Issue, error)
-	SetIssueState(ctx context.Context, id string, state coordinator.IssueState) (coordinator.Issue, error)
-	AcceptTriage(ctx context.Context, id string) (coordinator.Issue, error)
-	RejectTriage(ctx context.Context, id string) (coordinator.Issue, error)
-	CloseIssue(ctx context.Context, issueID string) (coordinator.Issue, error)
+	// Task setters / reads.
+	GetTask(ctx context.Context, id string) (coordinator.Task, error)
+	HasMergedChange(ctx context.Context, taskID string) (bool, error)
+	ScheduleTask(ctx context.Context, id string, state coordinator.ScheduleState) (coordinator.Task, error)
+	SetTaskState(ctx context.Context, id string, state coordinator.TaskState) (coordinator.Task, error)
+	AcceptTriage(ctx context.Context, id string) (coordinator.Task, error)
+	RejectTriage(ctx context.Context, id string) (coordinator.Task, error)
+	CloseTask(ctx context.Context, taskID string) (coordinator.Task, error)
 
 	// Author / ready cascade.
 	GetSession(ctx context.Context, sessionID string) (coordinator.Session, error)
@@ -40,52 +40,52 @@ type Effects interface {
 	// ReadyChange publishes a change directly (final-phase gate approval,
 	// where the phase's session already finished at the pause).
 	ReadyChange(ctx context.Context, changeID string) (coordinator.Change, error)
-	LatestChangeForIssue(ctx context.Context, issueID string) (coordinator.Change, bool, error)
+	LatestChangeForTask(ctx context.Context, taskID string) (coordinator.Change, bool, error)
 	UpdateSessionState(ctx context.Context, sessionID string, state coordinator.SessionRuntimeState) (coordinator.Session, error)
 	UpdateChangeHead(ctx context.Context, changeID, headSHA string) (coordinator.Change, error)
-	ResetAutomatedChecksForNewRevision(ctx context.Context, issueID string) (int, error)
+	ResetAutomatedChecksForNewRevision(ctx context.Context, taskID string) (int, error)
 	LoadSuiteForChange(ctx context.Context, change coordinator.Change) (coordinator.CheckSuite, error)
 	ScheduleReviewRound(ctx context.Context, input coordinator.ScheduleReviewRoundInput) (coordinator.ScheduleReviewRoundResult, error)
 
-	// Flow cursor: the issue's frozen position within its flow. Mutations are
+	// Flow cursor: the task's frozen position within its flow. Mutations are
 	// CAS on the phase index so at-least-once redelivery stays idempotent.
-	FlowCursor(ctx context.Context, issueID string) (coordinator.FlowCursor, bool, error)
-	// EnsureFlowCursor freezes a cursor from the issue's flow on first use; ok
+	FlowCursor(ctx context.Context, taskID string) (coordinator.FlowCursor, bool, error)
+	// EnsureFlowCursor freezes a cursor from the task's flow on first use; ok
 	// is false when no flow could be resolved (implicit single-phase behavior).
-	EnsureFlowCursor(ctx context.Context, issueID string) (coordinator.FlowCursor, bool, error)
-	AdvanceFlowCursor(ctx context.Context, issueID string, fromIndex int) (bool, error)
-	PauseFlowCursor(ctx context.Context, issueID string, atIndex int) (bool, error)
-	ResumeFlowCursor(ctx context.Context, issueID string, atIndex int, feedback string) (bool, error)
-	CompleteFlowCursor(ctx context.Context, issueID string, atIndex int) (bool, error)
+	EnsureFlowCursor(ctx context.Context, taskID string) (coordinator.FlowCursor, bool, error)
+	AdvanceFlowCursor(ctx context.Context, taskID string, fromIndex int) (bool, error)
+	PauseFlowCursor(ctx context.Context, taskID string, atIndex int) (bool, error)
+	ResumeFlowCursor(ctx context.Context, taskID string, atIndex int, feedback string) (bool, error)
+	CompleteFlowCursor(ctx context.Context, taskID string, atIndex int) (bool, error)
 	StorePhaseHandoff(ctx context.Context, input coordinator.StorePhaseHandoffInput) error
-	PhaseHandoff(ctx context.Context, issueID string, phaseIndex int) (coordinator.PhaseHandoff, bool, error)
+	PhaseHandoff(ctx context.Context, taskID string, phaseIndex int) (coordinator.PhaseHandoff, bool, error)
 	// ChangeHandoff reads the change-scoped handoff snapshot the agent
 	// submitted at flow ready (the source copied into the per-phase store).
 	ChangeHandoff(ctx context.Context, changeID string) (coordinator.HandoffSnapshot, bool, error)
 
 	// Checks.
 	ReportCheck(ctx context.Context, input coordinator.ReportCheckInput) (coordinator.Check, error)
-	GetCheck(ctx context.Context, issueID, name string) (coordinator.Check, error)
-	ReviewState(ctx context.Context, issueID string) (coordinator.ReviewState, error)
-	HasReadyUnmergedChange(ctx context.Context, issueID string) (bool, error)
-	ReadyUnmergedChangeForIssue(ctx context.Context, issueID string) (coordinator.Change, bool, error)
-	ActiveAuthorSessionState(ctx context.Context, issueID string) (coordinator.SessionRuntimeState, bool, error)
+	GetCheck(ctx context.Context, taskID, name string) (coordinator.Check, error)
+	ReviewState(ctx context.Context, taskID string) (coordinator.ReviewState, error)
+	HasReadyUnmergedChange(ctx context.Context, taskID string) (bool, error)
+	ReadyUnmergedChangeForTask(ctx context.Context, taskID string) (coordinator.Change, bool, error)
+	ActiveAuthorSessionState(ctx context.Context, taskID string) (coordinator.SessionRuntimeState, bool, error)
 	// EnqueueAcceptanceIfReady enqueues acceptance-phase check jobs once the
 	// critique gate is met and returns the names of the checks it enqueued.
-	EnqueueAcceptanceIfReady(ctx context.Context, issueID string, change coordinator.Change) ([]string, error)
-	AcceptancePending(ctx context.Context, issueID string) (bool, error)
+	EnqueueAcceptanceIfReady(ctx context.Context, taskID string, change coordinator.Change) ([]string, error)
+	AcceptancePending(ctx context.Context, taskID string) (bool, error)
 
 	// Author jobs. The raw coordinator error (including ErrAuthorJobSuppressed)
 	// is returned; the caller decides whether suppression is benign.
 	EnsureAuthorJob(ctx context.Context, input coordinator.EnsureAuthorJobInput) (coordinator.EnsureAuthorJobResult, error)
-	// ResetIssue discards the issue's authoring artifacts (jobs, sessions,
+	// ResetTask discards the task's authoring artifacts (jobs, sessions,
 	// changes, checks, exchange branches) so the next author job starts over
 	// from the base branch.
-	ResetIssue(ctx context.Context, issueID string) (coordinator.Issue, error)
-	RetryCrashedAuthorJob(ctx context.Context, issueID string, actor string) (coordinator.RetryCrashedAuthorJobResult, error)
+	ResetTask(ctx context.Context, taskID string) (coordinator.Task, error)
+	RetryCrashedAuthorJob(ctx context.Context, taskID string, actor string) (coordinator.RetryCrashedAuthorJobResult, error)
 
 	// Merge.
-	MergeIssue(ctx context.Context, issueID string) (coordinator.MergeResult, error)
+	MergeTask(ctx context.Context, taskID string) (coordinator.MergeResult, error)
 	MergeChange(ctx context.Context, changeID string) (coordinator.MergeResult, error)
 
 	// Review threads.
@@ -97,8 +97,8 @@ type Effects interface {
 
 	// Deadlines.
 	// LastAgentActivity returns the active author session's last agent-activity
-	// timestamp for the issue; ok is false when no active author session exists.
-	LastAgentActivity(ctx context.Context, issueID string) (*time.Time, bool, error)
+	// timestamp for the task; ok is false when no active author session exists.
+	LastAgentActivity(ctx context.Context, taskID string) (*time.Time, bool, error)
 	// WriteStatus records a status-log entry (used by the deadline actions to
 	// surface a blocker/question to a human).
 	WriteStatus(ctx context.Context, input coordinator.WriteStatusInput) error
@@ -116,7 +116,7 @@ type Effects interface {
 // liveEffects is the production Effects implementation: thin pass-throughs to the
 // coordinator services already wired into the API server.
 type liveEffects struct {
-	issues       *coordinator.IssueService
+	tasks        *coordinator.TaskService
 	checks       *coordinator.CheckService
 	checkConfigs *coordinator.CheckConfigService
 	sessions     *coordinator.SessionService
@@ -129,7 +129,7 @@ type liveEffects struct {
 
 // NewEffects builds the production Effects from the existing coordinator services.
 func NewEffects(
-	issues *coordinator.IssueService,
+	tasks *coordinator.TaskService,
 	checks *coordinator.CheckService,
 	checkConfigs *coordinator.CheckConfigService,
 	sessions *coordinator.SessionService,
@@ -140,7 +140,7 @@ func NewEffects(
 	reconciler *coordinator.ReconcileService,
 ) Effects {
 	return &liveEffects{
-		issues:       issues,
+		tasks:        tasks,
 		checks:       checks,
 		checkConfigs: checkConfigs,
 		sessions:     sessions,
@@ -152,32 +152,32 @@ func NewEffects(
 	}
 }
 
-func (e *liveEffects) GetIssue(ctx context.Context, id string) (coordinator.Issue, error) {
-	return e.issues.GetIssue(ctx, id)
+func (e *liveEffects) GetTask(ctx context.Context, id string) (coordinator.Task, error) {
+	return e.tasks.GetTask(ctx, id)
 }
 
-func (e *liveEffects) HasMergedChange(ctx context.Context, issueID string) (bool, error) {
-	return e.issues.HasMergedChange(ctx, issueID)
+func (e *liveEffects) HasMergedChange(ctx context.Context, taskID string) (bool, error) {
+	return e.tasks.HasMergedChange(ctx, taskID)
 }
 
-func (e *liveEffects) ScheduleIssue(ctx context.Context, id string, state coordinator.ScheduleState) (coordinator.Issue, error) {
-	return e.issues.ScheduleIssue(ctx, id, state)
+func (e *liveEffects) ScheduleTask(ctx context.Context, id string, state coordinator.ScheduleState) (coordinator.Task, error) {
+	return e.tasks.ScheduleTask(ctx, id, state)
 }
 
-func (e *liveEffects) SetIssueState(ctx context.Context, id string, state coordinator.IssueState) (coordinator.Issue, error) {
-	return e.issues.SetIssueState(ctx, id, state)
+func (e *liveEffects) SetTaskState(ctx context.Context, id string, state coordinator.TaskState) (coordinator.Task, error) {
+	return e.tasks.SetTaskState(ctx, id, state)
 }
 
-func (e *liveEffects) AcceptTriage(ctx context.Context, id string) (coordinator.Issue, error) {
-	return e.issues.AcceptTriage(ctx, id)
+func (e *liveEffects) AcceptTriage(ctx context.Context, id string) (coordinator.Task, error) {
+	return e.tasks.AcceptTriage(ctx, id)
 }
 
-func (e *liveEffects) RejectTriage(ctx context.Context, id string) (coordinator.Issue, error) {
-	return e.issues.RejectTriage(ctx, id)
+func (e *liveEffects) RejectTriage(ctx context.Context, id string) (coordinator.Task, error) {
+	return e.tasks.RejectTriage(ctx, id)
 }
 
-func (e *liveEffects) CloseIssue(ctx context.Context, issueID string) (coordinator.Issue, error) {
-	return e.issues.CloseIssue(ctx, issueID)
+func (e *liveEffects) CloseTask(ctx context.Context, taskID string) (coordinator.Task, error) {
+	return e.tasks.CloseTask(ctx, taskID)
 }
 
 func (e *liveEffects) GetSession(ctx context.Context, sessionID string) (coordinator.Session, error) {
@@ -200,50 +200,50 @@ func (e *liveEffects) ReadyChange(ctx context.Context, changeID string) (coordin
 	return e.sessions.ReadyChange(ctx, changeID)
 }
 
-func (e *liveEffects) LatestChangeForIssue(ctx context.Context, issueID string) (coordinator.Change, bool, error) {
-	return e.sessions.LatestChangeForIssue(ctx, issueID)
+func (e *liveEffects) LatestChangeForTask(ctx context.Context, taskID string) (coordinator.Change, bool, error) {
+	return e.sessions.LatestChangeForTask(ctx, taskID)
 }
 
-func (e *liveEffects) FlowCursor(ctx context.Context, issueID string) (coordinator.FlowCursor, bool, error) {
+func (e *liveEffects) FlowCursor(ctx context.Context, taskID string) (coordinator.FlowCursor, bool, error) {
 	if e.cursors == nil {
 		return coordinator.FlowCursor{}, false, nil
 	}
-	return e.cursors.GetCursor(ctx, issueID)
+	return e.cursors.GetCursor(ctx, taskID)
 }
 
-func (e *liveEffects) EnsureFlowCursor(ctx context.Context, issueID string) (coordinator.FlowCursor, bool, error) {
+func (e *liveEffects) EnsureFlowCursor(ctx context.Context, taskID string) (coordinator.FlowCursor, bool, error) {
 	if e.cursors == nil {
 		return coordinator.FlowCursor{}, false, nil
 	}
-	return e.cursors.EnsureCursor(ctx, issueID)
+	return e.cursors.EnsureCursor(ctx, taskID)
 }
 
-func (e *liveEffects) AdvanceFlowCursor(ctx context.Context, issueID string, fromIndex int) (bool, error) {
+func (e *liveEffects) AdvanceFlowCursor(ctx context.Context, taskID string, fromIndex int) (bool, error) {
 	if e.cursors == nil {
 		return false, nil
 	}
-	return e.cursors.AdvanceCursor(ctx, issueID, fromIndex)
+	return e.cursors.AdvanceCursor(ctx, taskID, fromIndex)
 }
 
-func (e *liveEffects) PauseFlowCursor(ctx context.Context, issueID string, atIndex int) (bool, error) {
+func (e *liveEffects) PauseFlowCursor(ctx context.Context, taskID string, atIndex int) (bool, error) {
 	if e.cursors == nil {
 		return false, nil
 	}
-	return e.cursors.PauseCursor(ctx, issueID, atIndex)
+	return e.cursors.PauseCursor(ctx, taskID, atIndex)
 }
 
-func (e *liveEffects) ResumeFlowCursor(ctx context.Context, issueID string, atIndex int, feedback string) (bool, error) {
+func (e *liveEffects) ResumeFlowCursor(ctx context.Context, taskID string, atIndex int, feedback string) (bool, error) {
 	if e.cursors == nil {
 		return false, nil
 	}
-	return e.cursors.ResumeCursor(ctx, issueID, atIndex, feedback)
+	return e.cursors.ResumeCursor(ctx, taskID, atIndex, feedback)
 }
 
-func (e *liveEffects) CompleteFlowCursor(ctx context.Context, issueID string, atIndex int) (bool, error) {
+func (e *liveEffects) CompleteFlowCursor(ctx context.Context, taskID string, atIndex int) (bool, error) {
 	if e.cursors == nil {
 		return false, nil
 	}
-	return e.cursors.CompleteCursor(ctx, issueID, atIndex)
+	return e.cursors.CompleteCursor(ctx, taskID, atIndex)
 }
 
 func (e *liveEffects) StorePhaseHandoff(ctx context.Context, input coordinator.StorePhaseHandoffInput) error {
@@ -253,11 +253,11 @@ func (e *liveEffects) StorePhaseHandoff(ctx context.Context, input coordinator.S
 	return e.cursors.StorePhaseHandoff(ctx, input)
 }
 
-func (e *liveEffects) PhaseHandoff(ctx context.Context, issueID string, phaseIndex int) (coordinator.PhaseHandoff, bool, error) {
+func (e *liveEffects) PhaseHandoff(ctx context.Context, taskID string, phaseIndex int) (coordinator.PhaseHandoff, bool, error) {
 	if e.cursors == nil {
 		return coordinator.PhaseHandoff{}, false, nil
 	}
-	return e.cursors.PhaseHandoff(ctx, issueID, phaseIndex)
+	return e.cursors.PhaseHandoff(ctx, taskID, phaseIndex)
 }
 
 func (e *liveEffects) ChangeHandoff(ctx context.Context, changeID string) (coordinator.HandoffSnapshot, bool, error) {
@@ -282,8 +282,8 @@ func (e *liveEffects) UpdateChangeHead(ctx context.Context, changeID, headSHA st
 	return e.sessions.UpdateChangeHead(ctx, changeID, headSHA)
 }
 
-func (e *liveEffects) ResetAutomatedChecksForNewRevision(ctx context.Context, issueID string) (int, error) {
-	return e.checks.ResetAutomatedChecksForNewRevision(ctx, issueID)
+func (e *liveEffects) ResetAutomatedChecksForNewRevision(ctx context.Context, taskID string) (int, error) {
+	return e.checks.ResetAutomatedChecksForNewRevision(ctx, taskID)
 }
 
 func (e *liveEffects) LoadSuiteForChange(ctx context.Context, change coordinator.Change) (coordinator.CheckSuite, error) {
@@ -304,57 +304,57 @@ func (e *liveEffects) ReportCheck(ctx context.Context, input coordinator.ReportC
 	return e.checks.ReportCheck(ctx, input)
 }
 
-func (e *liveEffects) GetCheck(ctx context.Context, issueID, name string) (coordinator.Check, error) {
-	return e.checks.GetCheck(ctx, issueID, name)
+func (e *liveEffects) GetCheck(ctx context.Context, taskID, name string) (coordinator.Check, error) {
+	return e.checks.GetCheck(ctx, taskID, name)
 }
 
-func (e *liveEffects) ReviewState(ctx context.Context, issueID string) (coordinator.ReviewState, error) {
-	return e.checks.ReviewState(ctx, issueID)
+func (e *liveEffects) ReviewState(ctx context.Context, taskID string) (coordinator.ReviewState, error) {
+	return e.checks.ReviewState(ctx, taskID)
 }
 
-func (e *liveEffects) HasReadyUnmergedChange(ctx context.Context, issueID string) (bool, error) {
-	return e.sessions.HasReadyUnmergedChange(ctx, issueID)
+func (e *liveEffects) HasReadyUnmergedChange(ctx context.Context, taskID string) (bool, error) {
+	return e.sessions.HasReadyUnmergedChange(ctx, taskID)
 }
 
-func (e *liveEffects) ReadyUnmergedChangeForIssue(ctx context.Context, issueID string) (coordinator.Change, bool, error) {
-	return e.sessions.ReadyUnmergedChangeForIssue(ctx, issueID)
+func (e *liveEffects) ReadyUnmergedChangeForTask(ctx context.Context, taskID string) (coordinator.Change, bool, error) {
+	return e.sessions.ReadyUnmergedChangeForTask(ctx, taskID)
 }
 
-func (e *liveEffects) ActiveAuthorSessionState(ctx context.Context, issueID string) (coordinator.SessionRuntimeState, bool, error) {
-	return e.sessions.ActiveAuthorSessionState(ctx, issueID)
+func (e *liveEffects) ActiveAuthorSessionState(ctx context.Context, taskID string) (coordinator.SessionRuntimeState, bool, error) {
+	return e.sessions.ActiveAuthorSessionState(ctx, taskID)
 }
 
-func (e *liveEffects) EnqueueAcceptanceIfReady(ctx context.Context, issueID string, change coordinator.Change) ([]string, error) {
+func (e *liveEffects) EnqueueAcceptanceIfReady(ctx context.Context, taskID string, change coordinator.Change) ([]string, error) {
 	if e.checkConfigs == nil {
 		return nil, nil
 	}
-	return e.checkConfigs.EnqueueAcceptanceIfReady(ctx, issueID, change)
+	return e.checkConfigs.EnqueueAcceptanceIfReady(ctx, taskID, change)
 }
 
-func (e *liveEffects) AcceptancePending(ctx context.Context, issueID string) (bool, error) {
+func (e *liveEffects) AcceptancePending(ctx context.Context, taskID string) (bool, error) {
 	if e.checkConfigs == nil {
 		return false, nil
 	}
-	return e.checkConfigs.AcceptancePending(ctx, issueID)
+	return e.checkConfigs.AcceptancePending(ctx, taskID)
 }
 
 func (e *liveEffects) EnsureAuthorJob(ctx context.Context, input coordinator.EnsureAuthorJobInput) (coordinator.EnsureAuthorJobResult, error) {
 	return e.sessions.EnsureAuthorJob(ctx, input)
 }
 
-func (e *liveEffects) ResetIssue(ctx context.Context, issueID string) (coordinator.Issue, error) {
-	return e.sessions.ResetIssue(ctx, issueID)
+func (e *liveEffects) ResetTask(ctx context.Context, taskID string) (coordinator.Task, error) {
+	return e.sessions.ResetTask(ctx, taskID)
 }
 
-func (e *liveEffects) RetryCrashedAuthorJob(ctx context.Context, issueID string, actor string) (coordinator.RetryCrashedAuthorJobResult, error) {
-	return e.sessions.RetryCrashedAuthorJob(ctx, issueID, actor)
+func (e *liveEffects) RetryCrashedAuthorJob(ctx context.Context, taskID string, actor string) (coordinator.RetryCrashedAuthorJobResult, error) {
+	return e.sessions.RetryCrashedAuthorJob(ctx, taskID, actor)
 }
 
-func (e *liveEffects) MergeIssue(ctx context.Context, issueID string) (coordinator.MergeResult, error) {
+func (e *liveEffects) MergeTask(ctx context.Context, taskID string) (coordinator.MergeResult, error) {
 	if e.merges == nil {
 		return coordinator.MergeResult{}, ErrMergeUnavailable
 	}
-	return e.merges.MergeIssue(ctx, issueID)
+	return e.merges.MergeTask(ctx, taskID)
 }
 
 func (e *liveEffects) MergeChange(ctx context.Context, changeID string) (coordinator.MergeResult, error) {
@@ -384,8 +384,8 @@ func (e *liveEffects) AddComment(ctx context.Context, input coordinator.AddThrea
 	return e.threads.AddComment(ctx, input)
 }
 
-func (e *liveEffects) LastAgentActivity(ctx context.Context, issueID string) (*time.Time, bool, error) {
-	session, ok, err := e.sessions.ActiveAuthorSessionForIssue(ctx, issueID)
+func (e *liveEffects) LastAgentActivity(ctx context.Context, taskID string) (*time.Time, bool, error) {
+	session, ok, err := e.sessions.ActiveAuthorSessionForTask(ctx, taskID)
 	if err != nil || !ok {
 		return nil, false, err
 	}

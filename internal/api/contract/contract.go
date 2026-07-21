@@ -55,22 +55,22 @@ type HarnessesResponse struct {
 	Consoles []HarnessOption `json:"consoles"`
 }
 
-type ScheduleIssueRequest struct {
+type ScheduleTaskRequest struct {
 	State string `json:"state"`
 }
 
-type IssueStateRequest struct {
+type TaskStateRequest struct {
 	State string `json:"state"`
 }
 
-type TriageIssueRequest struct {
+type TriageTaskRequest struct {
 	State string `json:"state"`
 }
 
-type IssueRelationRequest struct {
-	SourceIssueID string `json:"source_issue_id,omitempty"`
-	TargetIssueID string `json:"target_issue_id"`
-	Kind          string `json:"kind"`
+type TaskRelationRequest struct {
+	SourceTaskID string `json:"source_task_id,omitempty"`
+	TargetTaskID string `json:"target_task_id"`
+	Kind         string `json:"kind"`
 }
 
 type RegisterWorkerRequest struct {
@@ -123,7 +123,7 @@ type ReleaseLeaseRequest struct {
 }
 
 type EnqueueJobRequest struct {
-	IssueID        *string                `json:"issue_id"`
+	TaskID         *string                `json:"task_id"`
 	ChangeID       *string                `json:"change_id"`
 	Role           string                 `json:"role"`
 	CapacityBucket string                 `json:"capacity_bucket"`
@@ -233,21 +233,21 @@ type ThreadClaimRequest struct {
 	LeaseID        string `json:"lease_id"`
 }
 
-type IssuesResponse struct {
-	Issues []coordinator.Issue `json:"issues"`
+type TasksResponse struct {
+	Tasks []coordinator.Task `json:"tasks"`
 }
 
-type IssueResponse struct {
-	Issue     coordinator.Issue            `json:"issue"`
+type TaskResponse struct {
+	Task      coordinator.Task             `json:"task"`
 	StatusLog []coordinator.StatusLogEntry `json:"status_log,omitempty"`
 }
 
-type IssueAttachmentResponse struct {
-	Attachment coordinator.IssueAttachment `json:"attachment"`
+type TaskAttachmentResponse struct {
+	Attachment coordinator.TaskAttachment `json:"attachment"`
 }
 
-type IssueAttachmentsResponse struct {
-	Attachments []coordinator.IssueAttachment `json:"attachments"`
+type TaskAttachmentsResponse struct {
+	Attachments []coordinator.TaskAttachment `json:"attachments"`
 }
 
 type BoardResponse struct {

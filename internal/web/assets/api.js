@@ -66,9 +66,9 @@ export function consoleAPIPath(projectID) {
   return id ? `/v2/projects/${encodeURIComponent(id)}/console` : "/v2/console";
 }
 
-export function issueConsoleAPIPath(projectID, issueID) {
-  const base = issueAPIBase(projectID);
-  return `${base}/${encodeURIComponent(issueID)}/console`;
+export function taskConsoleAPIPath(projectID, taskID) {
+  const base = taskAPIBase(projectID);
+  return `${base}/${encodeURIComponent(taskID)}/console`;
 }
 
 export function consoleState(job, session) {
@@ -93,15 +93,15 @@ export async function apiFetch(path, options) {
   return response.json();
 }
 
-// issueAPIBase scopes issue API calls to a project; issue ids alone are
+// taskAPIBase scopes task API calls to a project; task ids alone are
 // ambiguous once several projects exist.
-export function issueAPIBase(projectID) {
+export function taskAPIBase(projectID) {
   const id = String(projectID || "").trim();
-  return id ? `/v2/projects/${encodeURIComponent(id)}/issues` : "/v2/issues";
+  return id ? `/v2/projects/${encodeURIComponent(id)}/tasks` : "/v2/tasks";
 }
 
 // flowsAPIBase / agentDefsAPIBase scope the flow-configuration endpoints to a
-// project, mirroring issueAPIBase: an explicit project id yields the
+// project, mirroring taskAPIBase: an explicit project id yields the
 // project-scoped path, an empty id falls back to the unscoped route that only
 // works for single-project/implicit principals.
 export function flowsAPIBase(projectID) {
@@ -114,14 +114,14 @@ export function agentDefsAPIBase(projectID) {
   return id ? `/v2/projects/${encodeURIComponent(id)}/agent-defs` : "/v2/agent-defs";
 }
 
-export function issueHref(projectID, issueID) {
+export function taskHref(projectID, taskID) {
   const id = String(projectID || "").trim();
-  const issue = String(issueID || "").trim();
-  return id && issue ? `/ui/projects/${encodeURIComponent(id)}/issues/${encodeURIComponent(issue)}` : "#";
+  const task = String(taskID || "").trim();
+  return id && task ? `/ui/projects/${encodeURIComponent(id)}/tasks/${encodeURIComponent(task)}` : "#";
 }
 
-export function attachmentHref(projectID, issueID, attachmentID) {
-  return `${API_PREFIX}${issueAPIBase(projectID)}/${encodeURIComponent(issueID)}/attachments/${encodeURIComponent(attachmentID)}`;
+export function attachmentHref(projectID, taskID, attachmentID) {
+  return `${API_PREFIX}${taskAPIBase(projectID)}/${encodeURIComponent(taskID)}/attachments/${encodeURIComponent(attachmentID)}`;
 }
 
 export function isImageContentType(contentType) {

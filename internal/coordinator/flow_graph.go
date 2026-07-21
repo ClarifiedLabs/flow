@@ -29,22 +29,22 @@ const (
 type ArtifactKind string
 
 const (
-	ArtifactHandoff  ArtifactKind = "handoff"
-	ArtifactChange   ArtifactKind = "change"
-	ArtifactIssueSet ArtifactKind = "issue_set"
+	ArtifactHandoff ArtifactKind = "handoff"
+	ArtifactChange  ArtifactKind = "change"
+	ArtifactTaskSet ArtifactKind = "task_set"
 )
 
 type NodeKind string
 
 const (
-	NodeAgent               NodeKind = "agent"
-	NodeAutomatedChecks     NodeKind = "automated_checks"
-	NodeChangeReview        NodeKind = "change_review"
-	NodeHumanGate           NodeKind = "human_gate"
-	NodeVerifyChange        NodeKind = "verify_change"
-	NodeMaterializeIssueSet NodeKind = "materialize_issue_set"
-	NodeMergeChange         NodeKind = "merge_change"
-	NodeTerminal            NodeKind = "terminal"
+	NodeAgent              NodeKind = "agent"
+	NodeAutomatedChecks    NodeKind = "automated_checks"
+	NodeChangeReview       NodeKind = "change_review"
+	NodeHumanGate          NodeKind = "human_gate"
+	NodeVerifyChange       NodeKind = "verify_change"
+	NodeMaterializeTaskSet NodeKind = "materialize_task_set"
+	NodeMergeChange        NodeKind = "merge_change"
+	NodeTerminal           NodeKind = "terminal"
 )
 
 type DoneResolution string
@@ -84,7 +84,7 @@ type VerifyChangeNodeConfig struct {
 	Agents []ReviewAgentConfig `json:"agents"`
 }
 
-type MaterializeIssueSetNodeConfig struct {
+type MaterializeTaskSetNodeConfig struct {
 	DefaultChildFlowID     string `json:"default_child_flow_id"`
 	AllowChildFlowOverride bool   `json:"allow_child_flow_override"`
 	MaxItems               int    `json:"max_items"`
@@ -99,14 +99,14 @@ type TerminalNodeConfig struct {
 // FlowNodeConfig is a strict discriminated union. Exactly one branch matching
 // the containing node's kind must be present.
 type FlowNodeConfig struct {
-	Agent               *AgentNodeConfig               `json:"agent,omitempty"`
-	AutomatedChecks     *AutomatedChecksNodeConfig     `json:"automated_checks,omitempty"`
-	ChangeReview        *ChangeReviewNodeConfig        `json:"change_review,omitempty"`
-	HumanGate           *HumanGateNodeConfig           `json:"human_gate,omitempty"`
-	VerifyChange        *VerifyChangeNodeConfig        `json:"verify_change,omitempty"`
-	MaterializeIssueSet *MaterializeIssueSetNodeConfig `json:"materialize_issue_set,omitempty"`
-	MergeChange         *MergeChangeNodeConfig         `json:"merge_change,omitempty"`
-	Terminal            *TerminalNodeConfig            `json:"terminal,omitempty"`
+	Agent              *AgentNodeConfig              `json:"agent,omitempty"`
+	AutomatedChecks    *AutomatedChecksNodeConfig    `json:"automated_checks,omitempty"`
+	ChangeReview       *ChangeReviewNodeConfig       `json:"change_review,omitempty"`
+	HumanGate          *HumanGateNodeConfig          `json:"human_gate,omitempty"`
+	VerifyChange       *VerifyChangeNodeConfig       `json:"verify_change,omitempty"`
+	MaterializeTaskSet *MaterializeTaskSetNodeConfig `json:"materialize_task_set,omitempty"`
+	MergeChange        *MergeChangeNodeConfig        `json:"merge_change,omitempty"`
+	Terminal           *TerminalNodeConfig           `json:"terminal,omitempty"`
 }
 
 type FlowNode struct {
@@ -139,14 +139,14 @@ type SnapshotReviewAgent struct {
 }
 
 type FlowNodeSnapshotConfig struct {
-	Agent               *AgentNodeSnapshotConfig        `json:"agent,omitempty"`
-	AutomatedChecks     *AutomatedChecksNodeConfig      `json:"automated_checks,omitempty"`
-	ChangeReview        *ChangeReviewNodeSnapshotConfig `json:"change_review,omitempty"`
-	HumanGate           *HumanGateNodeConfig            `json:"human_gate,omitempty"`
-	VerifyChange        *VerifyChangeNodeSnapshotConfig `json:"verify_change,omitempty"`
-	MaterializeIssueSet *MaterializeIssueSetNodeConfig  `json:"materialize_issue_set,omitempty"`
-	MergeChange         *MergeChangeNodeConfig          `json:"merge_change,omitempty"`
-	Terminal            *TerminalNodeConfig             `json:"terminal,omitempty"`
+	Agent              *AgentNodeSnapshotConfig        `json:"agent,omitempty"`
+	AutomatedChecks    *AutomatedChecksNodeConfig      `json:"automated_checks,omitempty"`
+	ChangeReview       *ChangeReviewNodeSnapshotConfig `json:"change_review,omitempty"`
+	HumanGate          *HumanGateNodeConfig            `json:"human_gate,omitempty"`
+	VerifyChange       *VerifyChangeNodeSnapshotConfig `json:"verify_change,omitempty"`
+	MaterializeTaskSet *MaterializeTaskSetNodeConfig   `json:"materialize_task_set,omitempty"`
+	MergeChange        *MergeChangeNodeConfig          `json:"merge_change,omitempty"`
+	Terminal           *TerminalNodeConfig             `json:"terminal,omitempty"`
 }
 
 type AgentNodeSnapshotConfig struct {
@@ -284,7 +284,7 @@ func normalizeNodeConfig(key string, kind NodeKind, config FlowNodeConfig) ([]st
 	branchCount := 0
 	for _, present := range []bool{
 		config.Agent != nil, config.AutomatedChecks != nil, config.ChangeReview != nil,
-		config.HumanGate != nil, config.VerifyChange != nil, config.MaterializeIssueSet != nil,
+		config.HumanGate != nil, config.VerifyChange != nil, config.MaterializeTaskSet != nil,
 		config.MergeChange != nil, config.Terminal != nil,
 	} {
 		if present {
@@ -309,7 +309,7 @@ func normalizeNodeConfig(key string, kind NodeKind, config FlowNodeConfig) ([]st
 			return nil, FlowNodeConfig{}, fmt.Errorf("agent node %q has invalid workspace %q", key, config.Agent.Workspace)
 		}
 		switch config.Agent.Artifact {
-		case ArtifactHandoff, ArtifactChange, ArtifactIssueSet:
+		case ArtifactHandoff, ArtifactChange, ArtifactTaskSet:
 		default:
 			return nil, FlowNodeConfig{}, fmt.Errorf("agent node %q has invalid artifact %q", key, config.Agent.Artifact)
 		}
@@ -361,17 +361,17 @@ func normalizeNodeConfig(key string, kind NodeKind, config FlowNodeConfig) ([]st
 			config.VerifyChange.Agents = agents
 			return []string{"passed", "changes_requested"}, config, nil
 		}
-	case NodeMaterializeIssueSet:
-		if config.MaterializeIssueSet != nil {
-			config.MaterializeIssueSet.DefaultChildFlowID = strings.TrimSpace(config.MaterializeIssueSet.DefaultChildFlowID)
-			if config.MaterializeIssueSet.DefaultChildFlowID == "" {
-				return nil, FlowNodeConfig{}, fmt.Errorf("issue materialization node %q requires a default child flow", key)
+	case NodeMaterializeTaskSet:
+		if config.MaterializeTaskSet != nil {
+			config.MaterializeTaskSet.DefaultChildFlowID = strings.TrimSpace(config.MaterializeTaskSet.DefaultChildFlowID)
+			if config.MaterializeTaskSet.DefaultChildFlowID == "" {
+				return nil, FlowNodeConfig{}, fmt.Errorf("task materialization node %q requires a default child flow", key)
 			}
-			if config.MaterializeIssueSet.MaxItems == 0 {
-				config.MaterializeIssueSet.MaxItems = 25
+			if config.MaterializeTaskSet.MaxItems == 0 {
+				config.MaterializeTaskSet.MaxItems = 25
 			}
-			if config.MaterializeIssueSet.MaxItems < 1 || config.MaterializeIssueSet.MaxItems > 50 {
-				return nil, FlowNodeConfig{}, fmt.Errorf("issue materialization node %q max_items must be between 1 and 50", key)
+			if config.MaterializeTaskSet.MaxItems < 1 || config.MaterializeTaskSet.MaxItems > 50 {
+				return nil, FlowNodeConfig{}, fmt.Errorf("task materialization node %q max_items must be between 1 and 50", key)
 			}
 			return []string{"completed"}, config, nil
 		}
@@ -513,8 +513,8 @@ func validateNodeInputArtifacts(node FlowNodeInput, incoming map[ArtifactKind]bo
 	switch node.Kind {
 	case NodeAutomatedChecks, NodeChangeReview, NodeVerifyChange, NodeMergeChange:
 		return require(ArtifactChange)
-	case NodeMaterializeIssueSet:
-		return require(ArtifactIssueSet)
+	case NodeMaterializeTaskSet:
+		return require(ArtifactTaskSet)
 	}
 	return nil
 }

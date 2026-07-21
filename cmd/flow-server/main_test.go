@@ -245,7 +245,7 @@ func TestServeRejectsConflictingOwnerTokenFlags(t *testing.T) {
 
 // newServeTestRegistry builds a registry backed by a global database and a
 // single project (with its real bare exchange), mirroring how `flow-server
-// serve` wires the coordinator. The single project lets unscoped issue routes
+// serve` wires the coordinator. The single project lets unscoped task routes
 // resolve implicitly, exactly as a fresh single-project deployment behaves.
 func newServeTestRegistry(t *testing.T) (*api.Registry, coordinator.Project) {
 	t.Helper()
@@ -305,7 +305,7 @@ func TestTickProjectsTicksEveryProject(t *testing.T) {
 	// successful concurrent pass runs reconcile and persists the watermark.
 	for _, bundle := range bundles {
 		if _, err := bundle.GitEvents.Record(ctx, coordinator.GitEvent{
-			Ref:    "refs/heads/issue/seed",
+			Ref:    "refs/heads/task/seed",
 			OldSHA: "0000000000000000000000000000000000000000",
 			NewSHA: "1111111111111111111111111111111111111111",
 		}, coordinator.GitEventSourceAPI); err != nil {
@@ -348,11 +348,11 @@ func TestServeAPIWiresWorkerDiagnostics(t *testing.T) {
 	if !ok {
 		t.Fatalf("project bundle not open")
 	}
-	issue, err := bundle.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{
-		Title: "Serve wiring issue",
+	task, err := bundle.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{
+		Title: "Serve wiring task",
 	})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 	server, err := api.NewServer(api.ServerOptions{
 		Registry:        registry,
@@ -375,7 +375,7 @@ func TestServeAPIWiresWorkerDiagnostics(t *testing.T) {
 		t.Fatalf("body = %s", response.Body.String())
 	}
 
-	request = httptest.NewRequest(http.MethodGet, "/v2/issues/"+issue.ID+"/checks", nil)
+	request = httptest.NewRequest(http.MethodGet, "/v2/tasks/"+task.ID+"/checks", nil)
 	request.Header.Set("Authorization", "Bearer owner-token")
 	response = httptest.NewRecorder()
 	server.ServeHTTP(response, request)

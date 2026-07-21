@@ -3,12 +3,12 @@
 ## Workflow
 
 1. Inspect the assignment before editing:
-   - Use the issue title, body, and acceptance criteria from the initial prompt; run `flow issue show "$FLOW_ISSUE_ID"` only if that context is missing.
+   - Use the task title, body, and acceptance criteria from the initial prompt; run `flow task show "$FLOW_TASK_ID"` only if that context is missing.
    - Check `FLOW_BRANCH`, `FLOW_BASE`, and `FLOW_CHANGE_ID`. If a prior session left a handoff, it is included in your prompt as "Prior Handoff" (there is no handoff file in the worktree to read).
    - If this is a fix round, inspect review threads with `flow thread list "$FLOW_CHANGE_ID"`.
 
 2. Implement the requested change on the checked-out branch.
-   - Keep edits scoped to the issue and repository instructions.
+   - Keep edits scoped to the task and repository instructions.
    - Add regression tests when fixing bugs.
    - Do not certify or reopen review threads; authors may only claim them.
 

@@ -94,37 +94,37 @@ func (s *projectServer) handleReleaseConsole(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, s.consoleResponse(state))
 }
 
-func (s *projectServer) handleIssueConsole(w http.ResponseWriter, r *http.Request, issueID string) {
+func (s *projectServer) handleTaskConsole(w http.ResponseWriter, r *http.Request, taskID string) {
 	if s.sessions == nil {
 		writeError(w, http.StatusInternalServerError, "sessions_unavailable", "session service is not configured")
 		return
 	}
-	if _, err := s.issues.GetIssue(r.Context(), issueID); errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "issue_not_found", "issue not found")
+	if _, err := s.tasks.GetTask(r.Context(), taskID); errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "task_not_found", "task not found")
 		return
 	} else if err != nil {
-		writeError(w, http.StatusBadRequest, "get_issue_failed", err.Error())
+		writeError(w, http.StatusBadRequest, "get_task_failed", err.Error())
 		return
 	}
 
 	switch r.Method {
 	case http.MethodGet:
-		s.handleGetIssueConsole(w, r, issueID)
+		s.handleGetTaskConsole(w, r, taskID)
 	case http.MethodPost:
-		s.handleStartIssueConsole(w, r, issueID)
+		s.handleStartTaskConsole(w, r, taskID)
 	case http.MethodDelete:
-		s.handleReleaseIssueConsole(w, r, issueID)
+		s.handleReleaseTaskConsole(w, r, taskID)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method is not allowed")
 	}
 }
 
-func (s *projectServer) handleGetIssueConsole(w http.ResponseWriter, r *http.Request, issueID string) {
+func (s *projectServer) handleGetTaskConsole(w http.ResponseWriter, r *http.Request, taskID string) {
 	if err := s.projectSweepExpiredLeases(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "console_reconcile_failed", err.Error())
 		return
 	}
-	state, err := s.sessions.CurrentIssueConsole(r.Context(), issueID)
+	state, err := s.sessions.CurrentTaskConsole(r.Context(), taskID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "console_failed", err.Error())
 		return
@@ -132,7 +132,7 @@ func (s *projectServer) handleGetIssueConsole(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, s.consoleResponse(state))
 }
 
-func (s *projectServer) handleStartIssueConsole(w http.ResponseWriter, r *http.Request, issueID string) {
+func (s *projectServer) handleStartTaskConsole(w http.ResponseWriter, r *http.Request, taskID string) {
 	var request consoleRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
@@ -146,15 +146,15 @@ func (s *projectServer) handleStartIssueConsole(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadRequest, "start_console_failed", err.Error())
 		return
 	}
-	result, err := s.sessions.EnsureIssueConsoleJob(r.Context(), coordinator.EnsureIssueConsoleJobInput{
-		IssueID: issueID,
+	result, err := s.sessions.EnsureTaskConsoleJob(r.Context(), coordinator.EnsureTaskConsoleJobInput{
+		TaskID:  taskID,
 		Harness: harness,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "start_console_failed", err.Error())
 		return
 	}
-	state, err := s.sessions.CurrentIssueConsole(r.Context(), issueID)
+	state, err := s.sessions.CurrentTaskConsole(r.Context(), taskID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "start_console_failed", err.Error())
 		return
@@ -169,8 +169,8 @@ func (s *projectServer) handleStartIssueConsole(w http.ResponseWriter, r *http.R
 	writeJSON(w, status, s.consoleResponse(state))
 }
 
-func (s *projectServer) handleReleaseIssueConsole(w http.ResponseWriter, r *http.Request, issueID string) {
-	state, err := s.sessions.ReleaseIssueConsole(r.Context(), issueID)
+func (s *projectServer) handleReleaseTaskConsole(w http.ResponseWriter, r *http.Request, taskID string) {
+	state, err := s.sessions.ReleaseTaskConsole(r.Context(), taskID)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "console_not_found", "console not found")
 		return

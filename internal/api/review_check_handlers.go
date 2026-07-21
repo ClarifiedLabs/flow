@@ -44,8 +44,8 @@ func (s *projectServer) handleChangePath(w http.ResponseWriter, r *http.Request,
 		}
 		s.handleGetChangeDiff(w, r, parts[0])
 	case "checks":
-		issueID := parts[0]
-		s.handleChecksPath(w, r, principal, issueID, parts[2:])
+		taskID := parts[0]
+		s.handleChecksPath(w, r, principal, taskID, parts[2:])
 	case "comments":
 		if len(parts) != 2 || r.Method != http.MethodPost {
 			writeError(w, http.StatusNotFound, "not_found", "resource not found")
@@ -86,13 +86,13 @@ func (s *projectServer) handleGetChange(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusBadRequest, "get_change_failed", err.Error())
 		return
 	}
-	issue, err := s.issues.GetIssue(r.Context(), change.IssueID)
+	task, err := s.tasks.GetTask(r.Context(), change.TaskID)
 	if errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "issue_not_found", "issue not found")
+		writeError(w, http.StatusNotFound, "task_not_found", "task not found")
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "get_change_issue_failed", err.Error())
+		writeError(w, http.StatusBadRequest, "get_change_task_failed", err.Error())
 		return
 	}
 
@@ -100,12 +100,12 @@ func (s *projectServer) handleGetChange(w http.ResponseWriter, r *http.Request, 
 	var reviewState coordinator.ReviewState
 	var requiredChecks uiRequiredCheckSummary
 	if s.checks != nil {
-		checks, err = s.checks.ListChecks(r.Context(), change.IssueID)
+		checks, err = s.checks.ListChecks(r.Context(), change.TaskID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "list_checks_failed", err.Error())
 			return
 		}
-		reviewState, err = s.checks.ReviewState(r.Context(), change.IssueID)
+		reviewState, err = s.checks.ReviewState(r.Context(), change.TaskID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "review_state_failed", err.Error())
 			return
@@ -122,7 +122,7 @@ func (s *projectServer) handleGetChange(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	canMerge, mergeBlockedReason, err := s.changeMergeEligibility(r.Context(), issue, change)
+	canMerge, mergeBlockedReason, err := s.changeMergeEligibility(r.Context(), task, change)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "merge_eligibility_failed", err.Error())
 		return
@@ -132,7 +132,7 @@ func (s *projectServer) handleGetChange(w http.ResponseWriter, r *http.Request, 
 		Change:             change,
 		ProjectID:          s.project.ID,
 		ProjectName:        s.project.Name,
-		Issue:              issue,
+		Task:               task,
 		Checks:             checks,
 		ReviewState:        reviewState,
 		RequiredChecks:     requiredChecks,
@@ -219,12 +219,12 @@ func (s *projectServer) changeDiffStats(ctx context.Context, change coordinator.
 	return stats, "", nil
 }
 
-func (s *projectServer) changeMergeEligibility(ctx context.Context, issue coordinator.Issue, change coordinator.Change) (bool, string, error) {
+func (s *projectServer) changeMergeEligibility(ctx context.Context, task coordinator.Task, change coordinator.Change) (bool, string, error) {
 	if s.merges == nil {
 		return false, "merge service is not configured", nil
 	}
 
-	return s.merges.ChangeMergeEligibility(ctx, issue, change)
+	return s.merges.ChangeMergeEligibility(ctx, task, change)
 }
 
 func (s *projectServer) handleThreadPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
@@ -269,7 +269,7 @@ func (s *projectServer) handleCreateThread(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	issueID, err := s.threads.ChangeIssueID(r.Context(), changeID)
+	taskID, err := s.threads.ChangeTaskID(r.Context(), changeID)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "change_not_found", "change not found")
 		return
@@ -278,7 +278,7 @@ func (s *projectServer) handleCreateThread(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "load_change_failed", err.Error())
 		return
 	}
-	if err := s.checkThreadChangeAccess(r, principal, issueID, changeID, request.LeaseID, true, worker.RoleReviewer, worker.RoleVerifier); err != nil {
+	if err := s.checkThreadChangeAccess(r, principal, taskID, changeID, request.LeaseID, true, worker.RoleReviewer, worker.RoleVerifier); err != nil {
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 		return
 	}
@@ -308,7 +308,7 @@ func (s *projectServer) handleListThreads(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "threads_unavailable", "thread service is not configured")
 		return
 	}
-	issueID, err := s.threads.ChangeIssueID(r.Context(), changeID)
+	taskID, err := s.threads.ChangeTaskID(r.Context(), changeID)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "change_not_found", "change not found")
 		return
@@ -317,7 +317,7 @@ func (s *projectServer) handleListThreads(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "load_change_failed", err.Error())
 		return
 	}
-	if err := s.checkThreadChangeAccess(r, principal, issueID, changeID, r.URL.Query().Get("lease_id"), true, worker.RoleReviewer, worker.RoleVerifier); err != nil {
+	if err := s.checkThreadChangeAccess(r, principal, taskID, changeID, r.URL.Query().Get("lease_id"), true, worker.RoleReviewer, worker.RoleVerifier); err != nil {
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 		return
 	}
@@ -361,7 +361,7 @@ func (s *projectServer) handlePutHandoff(w http.ResponseWriter, r *http.Request,
 	}
 	// A session token must own this change; owners may write any change's
 	// handoff. Workers cannot write handoffs (no allowed worker roles passed).
-	if err := s.checkThreadChangeAccess(r, principal, change.IssueID, change.ID, "", true); err != nil {
+	if err := s.checkThreadChangeAccess(r, principal, change.TaskID, change.ID, "", true); err != nil {
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 		return
 	}
@@ -409,7 +409,7 @@ func (s *projectServer) handleGetHandoff(w http.ResponseWriter, r *http.Request,
 	}
 	// Owners read any change; the change's session and the reviewer/verifier
 	// workers acting on it read its handoff for prompt context.
-	if err := s.checkThreadChangeAccess(r, principal, change.IssueID, change.ID, r.URL.Query().Get("lease_id"), true, worker.RoleReviewer, worker.RoleVerifier); err != nil {
+	if err := s.checkThreadChangeAccess(r, principal, change.TaskID, change.ID, r.URL.Query().Get("lease_id"), true, worker.RoleReviewer, worker.RoleVerifier); err != nil {
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 		return
 	}
@@ -447,7 +447,7 @@ func (s *projectServer) stepThreadEvent(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusBadRequest, "load_thread_failed", err.Error())
 		return
 	}
-	if err := s.checkThreadChangeAccess(r, principal, thread.IssueID, thread.ChangeID, leaseID, allowSession, roles...); err != nil {
+	if err := s.checkThreadChangeAccess(r, principal, thread.TaskID, thread.ChangeID, leaseID, allowSession, roles...); err != nil {
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 		return
 	}
@@ -552,7 +552,7 @@ func (s *projectServer) handleReopenThread(w http.ResponseWriter, r *http.Reques
 		"reopen_thread_failed", "thread not found or not reopenable")
 }
 
-func (s *projectServer) handleChecksPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string, parts []string) {
+func (s *projectServer) handleChecksPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string, parts []string) {
 	if s.checks == nil {
 		writeError(w, http.StatusInternalServerError, "checks_unavailable", "check service is not configured")
 		return
@@ -564,33 +564,33 @@ func (s *projectServer) handleChecksPath(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusForbidden, "forbidden", "check read requires owner, session, or worker token")
 			return
 		}
-		s.handleListChecks(w, r, issueID)
+		s.handleListChecks(w, r, taskID)
 	case len(parts) == 1 && r.Method == http.MethodGet:
 		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker) {
 			writeError(w, http.StatusForbidden, "forbidden", "check read requires owner, session, or worker token")
 			return
 		}
-		s.handleGetCheck(w, r, issueID, parts[0])
+		s.handleGetCheck(w, r, taskID, parts[0])
 	case len(parts) == 1 && r.Method == http.MethodPost:
 		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker) {
 			writeError(w, http.StatusForbidden, "forbidden", "check reporting requires owner, session, or worker token")
 			return
 		}
-		s.handleReportCheck(w, r, principal, issueID, parts[0])
+		s.handleReportCheck(w, r, principal, taskID, parts[0])
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 	}
 }
 
-func (s *projectServer) handleListChecks(w http.ResponseWriter, r *http.Request, issueID string) {
-	checks, err := s.checks.ListChecks(r.Context(), issueID)
+func (s *projectServer) handleListChecks(w http.ResponseWriter, r *http.Request, taskID string) {
+	checks, err := s.checks.ListChecks(r.Context(), taskID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "list_checks_failed", err.Error())
 		return
 	}
-	reviewState, err := s.checks.ReviewState(r.Context(), issueID)
+	reviewState, err := s.checks.ReviewState(r.Context(), taskID)
 	if errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "issue_not_found", "issue not found")
+		writeError(w, http.StatusNotFound, "task_not_found", "task not found")
 		return
 	}
 	if err != nil {
@@ -601,43 +601,43 @@ func (s *projectServer) handleListChecks(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, checksResponse{Checks: checks, ReviewState: reviewState})
 }
 
-func (s *projectServer) handleRunReview(w http.ResponseWriter, r *http.Request, issueID string) {
+func (s *projectServer) handleRunReview(w http.ResponseWriter, r *http.Request, taskID string) {
 	if s.checkConfigs == nil || s.sessions == nil || s.checks == nil {
 		writeError(w, http.StatusInternalServerError, "review_unavailable", "review services are not configured")
 		return
 	}
-	issue, err := s.issues.GetIssue(r.Context(), issueID)
+	task, err := s.tasks.GetTask(r.Context(), taskID)
 	if errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "issue_not_found", "issue not found")
+		writeError(w, http.StatusNotFound, "task_not_found", "task not found")
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "get_issue_failed", err.Error())
+		writeError(w, http.StatusBadRequest, "get_task_failed", err.Error())
 		return
 	}
-	change, ok, err := s.sessions.ReadyUnmergedChangeForIssue(r.Context(), issueID)
+	change, ok, err := s.sessions.ReadyUnmergedChangeForTask(r.Context(), taskID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "load_ready_change_failed", err.Error())
 		return
 	}
 	if !ok {
-		writeError(w, http.StatusBadRequest, "review_run_failed", "issue has no ready unmerged change")
+		writeError(w, http.StatusBadRequest, "review_run_failed", "task has no ready unmerged change")
 		return
 	}
 	scheduled, err := s.checkConfigs.ScheduleReviewRound(r.Context(), coordinator.ScheduleReviewRoundInput{
-		Issue:  issue,
+		Task:   task,
 		Change: change,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "schedule_review_failed", err.Error())
 		return
 	}
-	checks, err := s.checks.ListChecks(r.Context(), issueID)
+	checks, err := s.checks.ListChecks(r.Context(), taskID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "list_checks_failed", err.Error())
 		return
 	}
-	reviewState, err := s.checks.ReviewState(r.Context(), issueID)
+	reviewState, err := s.checks.ReviewState(r.Context(), taskID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "review_state_failed", err.Error())
 		return
@@ -651,8 +651,8 @@ func (s *projectServer) handleRunReview(w http.ResponseWriter, r *http.Request, 
 	})
 }
 
-func (s *projectServer) handleGetCheck(w http.ResponseWriter, r *http.Request, issueID string, name string) {
-	check, err := s.checks.GetCheck(r.Context(), issueID, name)
+func (s *projectServer) handleGetCheck(w http.ResponseWriter, r *http.Request, taskID string, name string) {
+	check, err := s.checks.GetCheck(r.Context(), taskID, name)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "check_not_found", "check not found")
 		return
@@ -661,9 +661,9 @@ func (s *projectServer) handleGetCheck(w http.ResponseWriter, r *http.Request, i
 		writeError(w, http.StatusBadRequest, "get_check_failed", err.Error())
 		return
 	}
-	reviewState, err := s.checks.ReviewState(r.Context(), issueID)
+	reviewState, err := s.checks.ReviewState(r.Context(), taskID)
 	if errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "issue_not_found", "issue not found")
+		writeError(w, http.StatusNotFound, "task_not_found", "task not found")
 		return
 	}
 	if err != nil {
@@ -674,19 +674,19 @@ func (s *projectServer) handleGetCheck(w http.ResponseWriter, r *http.Request, i
 	writeJSON(w, http.StatusOK, checkResponse{Check: check, ReviewState: reviewState})
 }
 
-func (s *projectServer) handleReportCheck(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string, name string) {
+func (s *projectServer) handleReportCheck(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string, name string) {
 	var request reportCheckRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	if err := s.checkReportScope(r, issueID, name, request, principal); err != nil {
+	if err := s.checkReportScope(r, taskID, name, request, principal); err != nil {
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 		return
 	}
 
 	check, err := s.checks.ReportCheck(r.Context(), coordinator.ReportCheckInput{
-		IssueID: issueID, Name: name,
+		TaskID: taskID, Name: name,
 		Kind: coordinator.CheckKind(strings.TrimSpace(request.Kind)), Required: request.Required,
 		Verdict: coordinator.CheckVerdict(strings.TrimSpace(request.Verdict)), ExitCode: request.ExitCode,
 		Details: request.Details, SourceJobID: request.SourceJobID, Reporter: checkReporter(request, principal),
@@ -701,7 +701,7 @@ func (s *projectServer) handleReportCheck(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
-	reviewState, err := s.checks.ReviewState(r.Context(), issueID)
+	reviewState, err := s.checks.ReviewState(r.Context(), taskID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "review_state_failed", err.Error())
 		return
@@ -743,7 +743,7 @@ func (s *projectServer) lifecycleAudit(r *http.Request, principal coordinator.Pr
 		Principal:    principal.Actor(),
 		ProjectID:    s.project.ID,
 		ProjectName:  s.project.Name,
-		IssueID:      strings.TrimSpace(ev.IssueID),
+		TaskID:       strings.TrimSpace(ev.TaskID),
 		ChangeID:     strings.TrimSpace(ev.ChangeID),
 		ThreadID:     strings.TrimSpace(ev.ThreadID),
 		SessionID:    strings.TrimSpace(ev.SessionID),
@@ -752,8 +752,8 @@ func (s *projectServer) lifecycleAudit(r *http.Request, principal coordinator.Pr
 	}
 }
 
-func (s *projectServer) checkThreadChangeAccess(r *http.Request, principal coordinator.Principal, issueID string, changeID string, leaseID string, allowSession bool, workerRoles ...worker.JobRole) error {
-	issueID = strings.TrimSpace(issueID)
+func (s *projectServer) checkThreadChangeAccess(r *http.Request, principal coordinator.Principal, taskID string, changeID string, leaseID string, allowSession bool, workerRoles ...worker.JobRole) error {
+	taskID = strings.TrimSpace(taskID)
 	changeID = strings.TrimSpace(changeID)
 	leaseID = strings.TrimSpace(leaseID)
 	switch principal.Scope {
@@ -773,7 +773,7 @@ func (s *projectServer) checkThreadChangeAccess(r *http.Request, principal coord
 		if err != nil {
 			return fmt.Errorf("load session: %w", err)
 		}
-		if session.IssueID != issueID || session.ChangeID != changeID {
+		if session.TaskID != taskID || session.ChangeID != changeID {
 			return errors.New("session token cannot access threads for a different change")
 		}
 		return nil
@@ -781,13 +781,13 @@ func (s *projectServer) checkThreadChangeAccess(r *http.Request, principal coord
 		if len(workerRoles) == 0 {
 			return errors.New("worker token cannot perform this thread operation")
 		}
-		return s.checkWorkerThreadLease(r.Context(), principal, leaseID, issueID, changeID, workerRoles)
+		return s.checkWorkerThreadLease(r.Context(), principal, leaseID, taskID, changeID, workerRoles)
 	default:
 		return errors.New("thread operation requires owner, session, or worker token")
 	}
 }
 
-func (s *projectServer) checkWorkerThreadLease(ctx context.Context, principal coordinator.Principal, leaseID string, issueID string, changeID string, allowedRoles []worker.JobRole) error {
+func (s *projectServer) checkWorkerThreadLease(ctx context.Context, principal coordinator.Principal, leaseID string, taskID string, changeID string, allowedRoles []worker.JobRole) error {
 	if s.workers == nil {
 		return errors.New("worker service is not configured")
 	}
@@ -820,8 +820,8 @@ func (s *projectServer) checkWorkerThreadLease(ctx context.Context, principal co
 	if !workerRoleAllowed(job.Role, allowedRoles) {
 		return errors.New("worker job role cannot perform this thread operation")
 	}
-	if job.IssueID == nil || strings.TrimSpace(*job.IssueID) != issueID {
-		return errors.New("worker job does not belong to the thread issue")
+	if job.TaskID == nil || strings.TrimSpace(*job.TaskID) != taskID {
+		return errors.New("worker job does not belong to the thread task")
 	}
 	if job.ChangeID != nil && strings.TrimSpace(*job.ChangeID) != changeID {
 		return errors.New("worker job does not belong to the thread change")
@@ -840,15 +840,15 @@ func workerRoleAllowed(role worker.JobRole, allowed []worker.JobRole) bool {
 	return false
 }
 
-func (s *projectServer) checkReportScope(r *http.Request, issueID string, checkName string, request reportCheckRequest, principal coordinator.Principal) error {
+func (s *projectServer) checkReportScope(r *http.Request, taskID string, checkName string, request reportCheckRequest, principal coordinator.Principal) error {
 	switch principal.Scope {
 	case coordinator.TokenScopeOwner:
 		return nil
 	case coordinator.TokenScopeSession:
-		if principal.SourceIssueID == nil || strings.TrimSpace(*principal.SourceIssueID) != strings.TrimSpace(issueID) {
-			return errors.New("session token cannot report checks for a different issue")
+		if principal.SourceTaskID == nil || strings.TrimSpace(*principal.SourceTaskID) != strings.TrimSpace(taskID) {
+			return errors.New("session token cannot report checks for a different task")
 		}
-		if err := s.checkSessionCheckReportScope(r.Context(), issueID, checkName, request); err != nil {
+		if err := s.checkSessionCheckReportScope(r.Context(), taskID, checkName, request); err != nil {
 			return err
 		}
 		return nil
@@ -895,8 +895,8 @@ func (s *projectServer) checkReportScope(r *http.Request, issueID string, checkN
 		if requestKind != expectedKind {
 			return errors.New("worker check kind does not match source job role")
 		}
-		if job.IssueID == nil || strings.TrimSpace(*job.IssueID) != strings.TrimSpace(issueID) {
-			return errors.New("source job does not belong to the check issue")
+		if job.TaskID == nil || strings.TrimSpace(*job.TaskID) != strings.TrimSpace(taskID) {
+			return errors.New("source job does not belong to the check task")
 		}
 		jobCheckName := payloadString(job.Payload, "check_name")
 		if jobCheckName == "" {
@@ -914,7 +914,7 @@ func (s *projectServer) checkReportScope(r *http.Request, issueID string, checkN
 	}
 }
 
-func (s *projectServer) checkSessionCheckReportScope(ctx context.Context, issueID string, checkName string, request reportCheckRequest) error {
+func (s *projectServer) checkSessionCheckReportScope(ctx context.Context, taskID string, checkName string, request reportCheckRequest) error {
 	requestKind := coordinator.CheckKind(strings.TrimSpace(request.Kind))
 	if requestKind == "" {
 		requestKind = coordinator.CheckKindCI
@@ -928,7 +928,7 @@ func (s *projectServer) checkSessionCheckReportScope(ctx context.Context, issueI
 	if s.checks == nil {
 		return errors.New("check service is not configured")
 	}
-	existing, err := s.checks.GetCheck(ctx, issueID, checkName)
+	existing, err := s.checks.GetCheck(ctx, taskID, checkName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}

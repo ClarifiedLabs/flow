@@ -16,7 +16,7 @@ import (
 
 // Sentinel errors surfaced by Step. Handlers map these to HTTP status codes.
 var (
-	// ErrInvalidTransition means the event is not legal in the issue's current
+	// ErrInvalidTransition means the event is not legal in the task's current
 	// phase (no matching row in the transition table).
 	ErrInvalidTransition = errors.New("lifecycle: no transition for event in current phase")
 	// ErrVersionConflict means the workflow_state row changed concurrently
@@ -42,7 +42,7 @@ func (e *nonFatalFollowUpError) Unwrap() error {
 	return e.err
 }
 
-// Engine owns the issue lifecycle FSM. It is the single entry point through
+// Engine owns the task lifecycle FSM. It is the single entry point through
 // which lifecycle-changing events are applied: it loads a snapshot, looks up the
 // transition for (phase, event), evaluates the guard, runs the action (whose
 // side effects go through Effects), records the new phase, and appends an
@@ -97,10 +97,10 @@ func (e *Engine) SetDeadlines(d DeadlineConfig) {
 	e.deadlines = d
 }
 
-// snapshot is the pre-action view of an issue the guards and actions read.
+// snapshot is the pre-action view of an task the guards and actions read.
 type snapshot struct {
-	issueID   string
-	issue     coordinator.Issue
+	taskID    string
+	task      coordinator.Task
 	change    coordinator.Change
 	hasChange bool
 	phase     coordinator.Phase
@@ -123,23 +123,23 @@ type snapshot struct {
 // must not double-journal). Only this externally-facing entry point inserts inbox
 // rows.
 func (e *Engine) Step(ctx context.Context, ev Event) (StepResult, error) {
-	// Resolve the issue before journaling: the inbox row's issue_id is NOT NULL,
+	// Resolve the task before journaling: the inbox row's task_id is NOT NULL,
 	// and a pre-resolution failure means nothing has committed, so it is safe to
 	// fail without a journal entry (the client retries).
-	issueID, err := e.resolveIssueID(ctx, ev)
+	taskID, err := e.resolveTaskID(ctx, ev)
 	if err != nil {
 		return StepResult{}, err
 	}
-	if issueID == "" {
-		return StepResult{}, fmt.Errorf("lifecycle: event %q has no issue", ev.Kind)
+	if taskID == "" {
+		return StepResult{}, fmt.Errorf("lifecycle: event %q has no task", ev.Kind)
 	}
-	ev.IssueID = issueID
+	ev.TaskID = taskID
 
 	// Journal the event. An inbox INSERT failure fails the Step (we cannot
 	// guarantee what we cannot durably record — fail fast; the client retries).
 	// insertInbox assigns and writes back an idempotency key when the event has
 	// none, so the transitions replay guard can dedupe a later redelivery.
-	inboxID, err := e.insertInbox(ctx, issueID, &ev)
+	inboxID, err := e.insertInbox(ctx, taskID, &ev)
 	if err != nil {
 		return StepResult{}, err
 	}
@@ -177,32 +177,32 @@ func (e *Engine) step(ctx context.Context, ev Event, res *StepResult, depth int)
 		return ErrCascadeLimit
 	}
 
-	issueID, err := e.resolveIssueID(ctx, ev)
+	taskID, err := e.resolveTaskID(ctx, ev)
 	if err != nil {
 		return err
 	}
-	if issueID == "" {
-		return fmt.Errorf("lifecycle: event %q has no issue", ev.Kind)
+	if taskID == "" {
+		return fmt.Errorf("lifecycle: event %q has no task", ev.Kind)
 	}
 
 	// Optimistic-concurrency retry loop around snapshot→select→action→apply. The
 	// snapshot the guard and action read is asserted against the live
 	// workflow_state version inside applyTransition's write lock; if a concurrent
-	// Step moved the issue in between, the apply is stale and returns
+	// Step moved the task in between, the apply is stale and returns
 	// ErrVersionConflict, so we reload a fresh snapshot and run the whole
 	// sequence again. The action therefore re-runs on a retry: this is safe
 	// because actions' Effects are idempotent by convention (unique indexes on
 	// the domain rows they write) and the reloaded snapshot re-evaluates guards
 	// against committed state, so a retry either lands cleanly or re-declines.
 	// This is the same at-least-once contract the timer drain already relies on.
-	// The bound (maxApplyAttempts) keeps a pathologically contended issue from
+	// The bound (maxApplyAttempts) keeps a pathologically contended task from
 	// spinning forever; a conflict that survives every attempt is surfaced to the
 	// caller (the API maps it to 409, a timer redelivers on the next tick).
 	const maxApplyAttempts = 3
 	var followups []Event
 	var terminal bool
 	for attempt := 1; ; attempt++ {
-		followups, terminal, err = e.attemptTransition(ctx, ev, issueID, res)
+		followups, terminal, err = e.attemptTransition(ctx, ev, taskID, res)
 		if err == nil {
 			break
 		}
@@ -215,8 +215,8 @@ func (e *Engine) step(ctx context.Context, ev Event, res *StepResult, depth int)
 	}
 
 	for _, f := range followups {
-		if f.IssueID == "" {
-			f.IssueID = issueID
+		if f.TaskID == "" {
+			f.TaskID = taskID
 		}
 		if f.Actor.Scope == "" {
 			f.Actor = ev.Actor
@@ -227,7 +227,7 @@ func (e *Engine) step(ctx context.Context, ev Event, res *StepResult, depth int)
 		if err := e.step(ctx, f, res, depth+1); err != nil {
 			var followUpErr *nonFatalFollowUpError
 			if errors.As(err, &followUpErr) && followUpErr.kind == f.Kind {
-				if recordErr := e.recordFollowUpFailure(ctx, issueID, f, followUpErr.err); recordErr != nil {
+				if recordErr := e.recordFollowUpFailure(ctx, taskID, f, followUpErr.err); recordErr != nil {
 					return fmt.Errorf("record %s follow-up failure after %w: %v", f.Kind, followUpErr.err, recordErr)
 				}
 				res.FollowUpFailures = append(res.FollowUpFailures, FollowUpFailure{
@@ -249,22 +249,22 @@ func (e *Engine) step(ctx context.Context, ev Event, res *StepResult, depth int)
 // either the event was an idempotent replay (its transition already exists) or
 // no guard accepted it (a benign no-op). A returned ErrVersionConflict means the
 // snapshot was superseded under the write lock; step() reloads and retries.
-func (e *Engine) attemptTransition(ctx context.Context, ev Event, issueID string, res *StepResult) (followups []Event, terminal bool, err error) {
-	snap, err := e.loadSnapshot(ctx, issueID)
+func (e *Engine) attemptTransition(ctx context.Context, ev Event, taskID string, res *StepResult) (followups []Event, terminal bool, err error) {
+	snap, err := e.loadSnapshot(ctx, taskID)
 	if err != nil {
 		return nil, false, err
 	}
 
-	// Replay guard: a repeated idempotency key for this issue is a no-op, and
+	// Replay guard: a repeated idempotency key for this task is a no-op, and
 	// must skip the action so effects are not re-run.
 	if ev.IdempotencyKey != "" {
-		seen, err := e.transitionExists(ctx, issueID, ev.IdempotencyKey)
+		seen, err := e.transitionExists(ctx, taskID, ev.IdempotencyKey)
 		if err != nil {
 			return nil, false, err
 		}
 		if seen {
-			if res.IssueID == "" {
-				res.IssueID = issueID
+			if res.TaskID == "" {
+				res.TaskID = taskID
 				res.FromPhase = snap.phase
 				res.ToPhase = snap.phase
 			}
@@ -282,8 +282,8 @@ func (e *Engine) attemptTransition(ctx context.Context, ev Event, issueID string
 			return nil, false, fmt.Errorf("%w: phase=%s event=%s", ErrInvalidTransition, snap.phase, ev.Kind)
 		}
 		// Candidates exist but every guard declined: a benign no-op.
-		if res.IssueID == "" {
-			res.IssueID = issueID
+		if res.TaskID == "" {
+			res.TaskID = taskID
 			res.FromPhase = snap.phase
 			res.ToPhase = snap.phase
 		}
@@ -299,13 +299,13 @@ func (e *Engine) attemptTransition(ctx context.Context, ev Event, issueID string
 
 	toPhase := transition.To
 	if toPhase == "" {
-		toPhase, err = e.derivePhase(ctx, issueID)
+		toPhase, err = e.derivePhase(ctx, taskID)
 		if err != nil {
 			return nil, false, err
 		}
 	}
 
-	applied, err := e.applyTransition(ctx, issueID, snap, ev, guardResult, toPhase, snap.version)
+	applied, err := e.applyTransition(ctx, taskID, snap, ev, guardResult, toPhase, snap.version)
 	if err != nil {
 		// On a version conflict the phase/transition accounting below has not run
 		// yet (we return before touching res here); any domain-result fields the
@@ -314,8 +314,8 @@ func (e *Engine) attemptTransition(ctx context.Context, ev Event, issueID string
 		return nil, false, err
 	}
 
-	if res.IssueID == "" {
-		res.IssueID = issueID
+	if res.TaskID == "" {
+		res.TaskID = taskID
 	}
 	if !res.Transitioned {
 		res.FromPhase = snap.phase
@@ -339,21 +339,21 @@ func (e *Engine) attemptTransition(ctx context.Context, ev Event, issueID string
 	// contract above it is non-fatal: log and continue, leaving the rearm to the
 	// next phase-changing transition or reconcile refresh.
 	if applied && toPhase != snap.phase {
-		if err := e.schedulePhaseDeadline(ctx, issueID, toPhase); err != nil {
+		if err := e.schedulePhaseDeadline(ctx, taskID, toPhase); err != nil {
 			slog.Warn("lifecycle: arm phase deadline failed (non-fatal)",
-				"issue", issueID, "phase", toPhase, "error", err)
+				"task", taskID, "phase", toPhase, "error", err)
 		}
 	}
 
 	return followups, false, nil
 }
 
-func (e *Engine) recordFollowUpFailure(ctx context.Context, issueID string, ev Event, cause error) error {
-	toPhase, err := e.derivePhase(ctx, issueID)
+func (e *Engine) recordFollowUpFailure(ctx context.Context, taskID string, ev Event, cause error) error {
+	toPhase, err := e.derivePhase(ctx, taskID)
 	if err != nil {
 		return err
 	}
-	fromPhase, version, err := e.readWorkflowState(ctx, issueID)
+	fromPhase, version, err := e.readWorkflowState(ctx, taskID)
 	if err != nil {
 		return err
 	}
@@ -368,15 +368,15 @@ func (e *Engine) recordFollowUpFailure(ctx context.Context, issueID string, ev E
 	// phase, not a guarded transition, so there is no snapshot version to assert.
 	// Skipping the check lets the failure row be recorded even if a concurrent
 	// Step bumped the version after the action failed.
-	_, err = e.applyTransition(ctx, issueID, &snapshot{phase: fromPhase}, ev, "failed: "+details, toPhase, -1)
+	_, err = e.applyTransition(ctx, taskID, &snapshot{phase: fromPhase}, ev, "failed: "+details, toPhase, -1)
 	return err
 }
 
-// resolveIssueID determines the issue an event targets, following the
-// session/change/thread key when the event is not keyed directly by issue.
-func (e *Engine) resolveIssueID(ctx context.Context, ev Event) (string, error) {
-	if ev.IssueID != "" {
-		return ev.IssueID, nil
+// resolveTaskID determines the task an event targets, following the
+// session/change/thread key when the event is not keyed directly by task.
+func (e *Engine) resolveTaskID(ctx context.Context, ev Event) (string, error) {
+	if ev.TaskID != "" {
+		return ev.TaskID, nil
 	}
 	switch {
 	case ev.SessionID != "":
@@ -384,57 +384,57 @@ func (e *Engine) resolveIssueID(ctx context.Context, ev Event) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return session.IssueID, nil
+		return session.TaskID, nil
 	case ev.ChangeID != "":
 		change, err := e.eff.GetChange(ctx, ev.ChangeID)
 		if err != nil {
 			return "", err
 		}
-		return change.IssueID, nil
+		return change.TaskID, nil
 	case ev.ThreadID != "":
 		thread, err := e.eff.GetThread(ctx, ev.ThreadID)
 		if err != nil {
 			return "", err
 		}
-		return thread.IssueID, nil
+		return thread.TaskID, nil
 	}
 	return "", nil
 }
 
-// loadSnapshot reads the issue's phase/version (lazily initialising the
+// loadSnapshot reads the task's phase/version (lazily initialising the
 // workflow_state row from the derived phase if absent) and the relevant domain
 // state for guards.
-func (e *Engine) loadSnapshot(ctx context.Context, issueID string) (*snapshot, error) {
-	phase, version, err := e.readWorkflowState(ctx, issueID)
+func (e *Engine) loadSnapshot(ctx context.Context, taskID string) (*snapshot, error) {
+	phase, version, err := e.readWorkflowState(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
 	if version < 0 {
-		derived, err := e.derivePhase(ctx, issueID)
+		derived, err := e.derivePhase(ctx, taskID)
 		if err != nil {
 			return nil, err
 		}
-		if err := e.ensureWorkflowState(ctx, issueID, derived); err != nil {
+		if err := e.ensureWorkflowState(ctx, taskID, derived); err != nil {
 			return nil, err
 		}
-		phase, version, err = e.readWorkflowState(ctx, issueID)
+		phase, version, err = e.readWorkflowState(ctx, taskID)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	issue, err := e.eff.GetIssue(ctx, issueID)
+	task, err := e.eff.GetTask(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
-	change, hasChange, err := e.eff.ReadyUnmergedChangeForIssue(ctx, issueID)
+	change, hasChange, err := e.eff.ReadyUnmergedChangeForTask(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
 
 	return &snapshot{
-		issueID:   issueID,
-		issue:     issue,
+		taskID:    taskID,
+		task:      task,
 		change:    change,
 		hasChange: hasChange,
 		phase:     phase,
@@ -442,21 +442,21 @@ func (e *Engine) loadSnapshot(ctx context.Context, issueID string) (*snapshot, e
 	}, nil
 }
 
-func (e *Engine) transitionExists(ctx context.Context, issueID, idempotencyKey string) (bool, error) {
+func (e *Engine) transitionExists(ctx context.Context, taskID, idempotencyKey string) (bool, error) {
 	var count int
 	if err := e.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM transitions WHERE issue_id = ? AND idempotency_key = ?`,
-		issueID, idempotencyKey).Scan(&count); err != nil {
+		`SELECT COUNT(*) FROM transitions WHERE task_id = ? AND idempotency_key = ?`,
+		taskID, idempotencyKey).Scan(&count); err != nil {
 		return false, fmt.Errorf("check transition idempotency: %w", err)
 	}
 	return count > 0, nil
 }
 
-func (e *Engine) readWorkflowState(ctx context.Context, issueID string) (coordinator.Phase, int64, error) {
+func (e *Engine) readWorkflowState(ctx context.Context, taskID string) (coordinator.Phase, int64, error) {
 	var phase string
 	var version int64
 	err := e.db.QueryRowContext(ctx,
-		`SELECT phase, version FROM workflow_state WHERE issue_id = ?`, issueID).Scan(&phase, &version)
+		`SELECT phase, version FROM workflow_state WHERE task_id = ?`, taskID).Scan(&phase, &version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", -1, nil
 	}
@@ -466,33 +466,33 @@ func (e *Engine) readWorkflowState(ctx context.Context, issueID string) (coordin
 	return coordinator.Phase(phase), version, nil
 }
 
-func (e *Engine) ensureWorkflowState(ctx context.Context, issueID string, phase coordinator.Phase) error {
+func (e *Engine) ensureWorkflowState(ctx context.Context, taskID string, phase coordinator.Phase) error {
 	_, err := e.db.ExecContext(ctx, `
-INSERT INTO workflow_state (issue_id, phase, version, updated_at)
+INSERT INTO workflow_state (task_id, phase, version, updated_at)
 VALUES (?, ?, 0, ?)
-ON CONFLICT(issue_id) DO NOTHING`, issueID, string(phase), formatTime(e.now()))
+ON CONFLICT(task_id) DO NOTHING`, taskID, string(phase), formatTime(e.now()))
 	if err != nil {
 		return fmt.Errorf("init workflow_state: %w", err)
 	}
 	return nil
 }
 
-// derivePhase computes an issue's phase via Effects reads, mirroring
-// coordinator.DerivePhase exactly (including the closed-issue disambiguation:
+// derivePhase computes an task's phase via Effects reads, mirroring
+// coordinator.DerivePhase exactly (including the closed-task disambiguation:
 // rejected -> rejected_closed, has a merged change -> merged_closed, otherwise
-// -> abandoned). It runs both for live issues (after most transitions) and for a
-// closed issue that an event lazily initialises or the reconcile ticker
+// -> abandoned). It runs both for live tasks (after most transitions) and for a
+// closed task that an event lazily initialises or the reconcile ticker
 // refreshes, so the closed branch must be faithful.
-func (e *Engine) derivePhase(ctx context.Context, issueID string) (coordinator.Phase, error) {
-	issue, err := e.eff.GetIssue(ctx, issueID)
+func (e *Engine) derivePhase(ctx context.Context, taskID string) (coordinator.Phase, error) {
+	task, err := e.eff.GetTask(ctx, taskID)
 	if err != nil {
 		return "", err
 	}
-	if issue.ScheduleState == coordinator.ScheduleClosed {
-		if issue.TriageState == coordinator.TriageRejected {
+	if task.ScheduleState == coordinator.ScheduleClosed {
+		if task.TriageState == coordinator.TriageRejected {
 			return coordinator.PhaseRejectedClosed, nil
 		}
-		merged, err := e.eff.HasMergedChange(ctx, issueID)
+		merged, err := e.eff.HasMergedChange(ctx, taskID)
 		if err != nil {
 			return "", err
 		}
@@ -502,11 +502,11 @@ func (e *Engine) derivePhase(ctx context.Context, issueID string) (coordinator.P
 		return coordinator.PhaseAbandoned, nil
 	}
 
-	reviewState, err := e.eff.ReviewState(ctx, issueID)
+	reviewState, err := e.eff.ReviewState(ctx, taskID)
 	if err != nil {
 		return "", err
 	}
-	hasChange, err := e.eff.HasReadyUnmergedChange(ctx, issueID)
+	hasChange, err := e.eff.HasReadyUnmergedChange(ctx, taskID)
 	if err != nil {
 		return "", err
 	}
@@ -516,30 +516,30 @@ func (e *Engine) derivePhase(ctx context.Context, issueID string) (coordinator.P
 	if reviewState == coordinator.ReviewChangesRequested {
 		return coordinator.PhaseCritique, nil
 	}
-	if _, ok, err := e.eff.ActiveAuthorSessionState(ctx, issueID); err != nil {
+	if _, ok, err := e.eff.ActiveAuthorSessionState(ctx, taskID); err != nil {
 		return "", err
 	} else if ok {
 		return coordinator.PhaseWorking, nil
 	}
-	// No active session, but the flow cursor can still pin the issue in
+	// No active session, but the flow cursor can still pin the task in
 	// working: paused at a human gate, or mid-pipeline between phase jobs.
-	// This must match coordinator.derivePhaseFromIssue.
-	if cursor, ok, err := e.eff.FlowCursor(ctx, issueID); err != nil {
+	// This must match coordinator.derivePhaseFromTask.
+	if cursor, ok, err := e.eff.FlowCursor(ctx, taskID); err != nil {
 		return "", err
 	} else if ok && cursor.IndicatesWorking() {
 		return coordinator.PhaseWorking, nil
 	}
-	if issue.TriageState == coordinator.TriagePending {
+	if task.TriageState == coordinator.TriagePending {
 		return coordinator.PhaseTriage, nil
 	}
-	if issue.TriageState != coordinator.TriageAccepted {
+	if task.TriageState != coordinator.TriageAccepted {
 		return coordinator.PhaseTriage, nil
 	}
 	if hasChange && reviewState == coordinator.ReviewInReview {
 		// Acceptance is the slice of in-review where every required critique
 		// check is satisfied but a verifier check is still pending; otherwise the
 		// change is still in critique.
-		pending, err := e.eff.AcceptancePending(ctx, issueID)
+		pending, err := e.eff.AcceptancePending(ctx, taskID)
 		if err != nil {
 			return "", err
 		}
@@ -548,7 +548,7 @@ func (e *Engine) derivePhase(ctx context.Context, issueID string) (coordinator.P
 		}
 		return coordinator.PhaseCritique, nil
 	}
-	if issue.ScheduleState == coordinator.ScheduleUpNext {
+	if task.ScheduleState == coordinator.ScheduleUpNext {
 		return coordinator.PhaseUpNext, nil
 	}
 	return coordinator.PhaseBacklog, nil
@@ -557,13 +557,13 @@ func (e *Engine) derivePhase(ctx context.Context, issueID string) (coordinator.P
 // applyTransition advances the workflow_state phase and appends the
 // transition-log row. The current phase/version is read inside the BEGIN
 // IMMEDIATE write lock so the read-modify-write is atomic: concurrent Steps on
-// the same issue serialize on the write lock, each bumping the version
+// the same task serialize on the write lock, each bumping the version
 // monotonically.
 //
 // expectedVersion enforces optimistic concurrency. When it is >= 0 the caller is
 // asserting that the guard/action ran against that exact workflow_state version;
 // if the live version under the lock differs, a concurrent writer has moved the
-// issue since the snapshot was taken and this apply is stale, so it is rejected
+// task since the snapshot was taken and this apply is stale, so it is rejected
 // with ErrVersionConflict (no row is written) and the caller is expected to
 // reload and retry. Pass -1 to skip the comparison for callers that have no real
 // snapshot to assert (recordFollowUpFailure, which deliberately fabricates a
@@ -572,19 +572,19 @@ func (e *Engine) derivePhase(ctx context.Context, issueID string) (coordinator.P
 // Returns whether a row was written (false on a duplicate idempotency key,
 // treated as a successful replay no-op, or on a version conflict alongside the
 // error).
-func (e *Engine) applyTransition(ctx context.Context, issueID string, snap *snapshot, ev Event, guardResult string, toPhase coordinator.Phase, expectedVersion int64) (bool, error) {
+func (e *Engine) applyTransition(ctx context.Context, taskID string, snap *snapshot, ev Event, guardResult string, toPhase coordinator.Phase, expectedVersion int64) (bool, error) {
 	tx, err := beginImmediate(ctx, e.db)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
 
-	// Replay guard: a repeated idempotency key for this issue is a no-op.
+	// Replay guard: a repeated idempotency key for this task is a no-op.
 	if ev.IdempotencyKey != "" {
 		var count int
 		if err := tx.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM transitions WHERE issue_id = ? AND idempotency_key = ?`,
-			issueID, ev.IdempotencyKey).Scan(&count); err != nil {
+			`SELECT COUNT(*) FROM transitions WHERE task_id = ? AND idempotency_key = ?`,
+			taskID, ev.IdempotencyKey).Scan(&count); err != nil {
 			return false, fmt.Errorf("check transition idempotency: %w", err)
 		}
 		if count > 0 {
@@ -598,7 +598,7 @@ func (e *Engine) applyTransition(ctx context.Context, issueID string, snap *snap
 	var liveVersion int64
 	haveRow := true
 	if err := tx.QueryRowContext(ctx,
-		`SELECT phase, version FROM workflow_state WHERE issue_id = ?`, issueID).Scan(&fromPhase, &liveVersion); err != nil {
+		`SELECT phase, version FROM workflow_state WHERE task_id = ?`, taskID).Scan(&fromPhase, &liveVersion); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			haveRow = false
 		} else {
@@ -608,7 +608,7 @@ func (e *Engine) applyTransition(ctx context.Context, issueID string, snap *snap
 
 	// Optimistic concurrency check: if the caller asserted a specific version and
 	// the live version under the lock no longer matches, a concurrent Step moved
-	// the issue since the snapshot was taken. The guard/action this apply belongs
+	// the task since the snapshot was taken. The guard/action this apply belongs
 	// to ran against stale state, so reject it; step() reloads and retries.
 	if expectedVersion >= 0 && haveRow && liveVersion != expectedVersion {
 		return false, ErrVersionConflict
@@ -619,12 +619,12 @@ func (e *Engine) applyTransition(ctx context.Context, issueID string, snap *snap
 		if _, err := tx.ExecContext(ctx, `
 UPDATE workflow_state
 SET phase = ?, version = ?, updated_at = ?
-WHERE issue_id = ?`, string(toPhase), liveVersion+1, now, issueID); err != nil {
+WHERE task_id = ?`, string(toPhase), liveVersion+1, now, taskID); err != nil {
 			return false, fmt.Errorf("update workflow_state: %w", err)
 		}
 	} else if _, err := tx.ExecContext(ctx, `
-INSERT INTO workflow_state (issue_id, phase, version, updated_at)
-VALUES (?, ?, 0, ?)`, issueID, string(toPhase), now); err != nil {
+INSERT INTO workflow_state (task_id, phase, version, updated_at)
+VALUES (?, ?, 0, ?)`, taskID, string(toPhase), now); err != nil {
 		return false, fmt.Errorf("insert workflow_state: %w", err)
 	}
 
@@ -638,9 +638,9 @@ VALUES (?, ?, 0, ?)`, issueID, string(toPhase), now); err != nil {
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO transitions
-	(issue_id, from_phase, event_kind, payload_json, guard_result, to_phase, actor, idempotency_key, created_at)
+	(task_id, from_phase, event_kind, payload_json, guard_result, to_phase, actor, idempotency_key, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		issueID, fromPhase, string(ev.Kind), string(payload), guardResult,
+		taskID, fromPhase, string(ev.Kind), string(payload), guardResult,
 		string(toPhase), ev.Actor.Actor(), idempotencyKey, now); err != nil {
 		return false, fmt.Errorf("append transition: %w", err)
 	}

@@ -19,7 +19,7 @@ import (
 func TestWorkerRegisterHeartbeatAndClaimLifecycle(t *testing.T) {
 	ctx := context.Background()
 	store, directory, service := newWorkerService(t)
-	issue := createIssue(t, store)
+	task := createTask(t, store)
 
 	registered, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
 		ID:                      "w-local",
@@ -44,7 +44,7 @@ func TestWorkerRegisterHeartbeatAndClaimLifecycle(t *testing.T) {
 	}
 
 	job, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
 		Priority:       10,
@@ -168,7 +168,7 @@ func TestRegisterWorkerPersistsHarnessModels(t *testing.T) {
 func TestConcurrentClaimIsAtomic(t *testing.T) {
 	ctx := context.Background()
 	store, directory, service := newWorkerService(t)
-	issue := createIssue(t, store)
+	task := createTask(t, store)
 
 	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
 		ID:                      "w-local",
@@ -177,7 +177,7 @@ func TestConcurrentClaimIsAtomic(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 	job, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
 	})
@@ -230,10 +230,10 @@ func TestConcurrentClaimIsAtomic(t *testing.T) {
 func TestLiveAuthorJobUniqueness(t *testing.T) {
 	ctx := context.Background()
 	store, directory, service := newWorkerService(t)
-	issue := createIssue(t, store)
+	task := createTask(t, store)
 
 	first, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
 	})
@@ -241,7 +241,7 @@ func TestLiveAuthorJobUniqueness(t *testing.T) {
 		t.Fatalf("enqueue first author job: %v", err)
 	}
 	if _, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
 	}); err == nil {
@@ -266,7 +266,7 @@ func TestLiveAuthorJobUniqueness(t *testing.T) {
 		t.Fatalf("claim = %+v ok=%v, want %s", claimed, ok, first.ID)
 	}
 	if _, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
 	}); err == nil {
@@ -276,7 +276,7 @@ func TestLiveAuthorJobUniqueness(t *testing.T) {
 		t.Fatalf("release first author job: %v", err)
 	}
 	if _, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
 	}); err != nil {
@@ -287,7 +287,7 @@ func TestLiveAuthorJobUniqueness(t *testing.T) {
 func TestCapacityBucketsAreIndependent(t *testing.T) {
 	ctx := context.Background()
 	store, directory, service := newWorkerService(t)
-	issue := createIssue(t, store)
+	task := createTask(t, store)
 
 	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
 		ID:                      "w-local",
@@ -297,7 +297,7 @@ func TestCapacityBucketsAreIndependent(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 	persistent, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
 	})
@@ -341,8 +341,8 @@ func TestCapacityBucketsAreIndependent(t *testing.T) {
 func TestWorkerCapacityPreventsOverclaimingSameBucket(t *testing.T) {
 	ctx := context.Background()
 	store, directory, service := newWorkerService(t)
-	firstIssue := createIssue(t, store)
-	secondIssue := createIssue(t, store)
+	firstTask := createTask(t, store)
+	secondTask := createTask(t, store)
 
 	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
 		ID:                      "w-local",
@@ -351,7 +351,7 @@ func TestWorkerCapacityPreventsOverclaimingSameBucket(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 	firstJob, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		IssueID:        &firstIssue.ID,
+		TaskID:         &firstTask.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
 		Priority:       10,
@@ -360,7 +360,7 @@ func TestWorkerCapacityPreventsOverclaimingSameBucket(t *testing.T) {
 		t.Fatalf("enqueue first job: %v", err)
 	}
 	secondJob, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		IssueID:        &secondIssue.ID,
+		TaskID:         &secondTask.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
 		Priority:       1,
@@ -519,7 +519,7 @@ func TestClaimSkipsTaintedWorkerWithoutExactToleration(t *testing.T) {
 func TestExpiredLeaseIsSwept(t *testing.T) {
 	ctx := context.Background()
 	store, directory, service := newWorkerService(t)
-	issue := createIssue(t, store)
+	task := createTask(t, store)
 
 	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
@@ -531,7 +531,7 @@ func TestExpiredLeaseIsSwept(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 	job, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
 	})
@@ -580,7 +580,7 @@ func TestExpiredLeaseIsSwept(t *testing.T) {
 func TestExpiredLeaseCannotBeRenewed(t *testing.T) {
 	ctx := context.Background()
 	store, directory, service := newWorkerService(t)
-	issue := createIssue(t, store)
+	task := createTask(t, store)
 
 	now := time.Date(2026, 6, 7, 13, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
@@ -591,7 +591,7 @@ func TestExpiredLeaseCannotBeRenewed(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 	if _, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
 	}); err != nil {
@@ -618,7 +618,7 @@ func TestExpiredLeaseCannotBeRenewed(t *testing.T) {
 func TestExpiredLeaseCannotBeMarkedRunning(t *testing.T) {
 	ctx := context.Background()
 	store, directory, service := newWorkerService(t)
-	issue := createIssue(t, store)
+	task := createTask(t, store)
 
 	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
@@ -629,7 +629,7 @@ func TestExpiredLeaseCannotBeMarkedRunning(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 	if _, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
 	}); err != nil {
@@ -656,7 +656,7 @@ func TestExpiredLeaseCannotBeMarkedRunning(t *testing.T) {
 func TestLiveLeaseUniquenessIsEnforcedAtDatabaseLayer(t *testing.T) {
 	ctx := context.Background()
 	store, directory, service := newWorkerService(t)
-	issue := createIssue(t, store)
+	task := createTask(t, store)
 
 	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
 		ID:                      "w-local",
@@ -665,7 +665,7 @@ func TestLiveLeaseUniquenessIsEnforcedAtDatabaseLayer(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 	if _, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
 	}); err != nil {
@@ -716,7 +716,7 @@ func TestInvalidWorkerInputsAreRejected(t *testing.T) {
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
 	}); err == nil {
-		t.Fatal("author job without issue was accepted")
+		t.Fatal("author job without task was accepted")
 	}
 	if _, _, err := claimNext(ctx, directory, service, ClaimInput{
 		WorkerID:      "missing-worker",
@@ -726,15 +726,15 @@ func TestInvalidWorkerInputsAreRejected(t *testing.T) {
 	}
 }
 
-func TestEnqueueJobRejectsChangeIssueMismatch(t *testing.T) {
+func TestEnqueueJobRejectsChangeTaskMismatch(t *testing.T) {
 	ctx := context.Background()
 	store, _, service := newWorkerService(t)
-	firstIssue := createIssue(t, store)
-	secondIssue := createIssue(t, store)
-	changeID := insertChange(t, store, firstIssue.ID)
+	firstTask := createTask(t, store)
+	secondTask := createTask(t, store)
+	changeID := insertChange(t, store, firstTask.ID)
 
 	if _, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		IssueID:        &secondIssue.ID,
+		TaskID:         &secondTask.ID,
 		ChangeID:       &changeID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
@@ -742,7 +742,7 @@ func TestEnqueueJobRejectsChangeIssueMismatch(t *testing.T) {
 		t.Fatalf("enqueue mismatched change err = %v, want mismatch error", err)
 	}
 	matched, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		IssueID:        &firstIssue.ID,
+		TaskID:         &firstTask.ID,
 		ChangeID:       &changeID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
@@ -784,11 +784,11 @@ func claimNext(ctx context.Context, directory *Directory, service *Service, inpu
 	return ClaimedJob{Job: claim.Job, Lease: claim.Lease}, ok, err
 }
 
-type testIssue struct {
+type testTask struct {
 	ID string
 }
 
-func createIssue(t *testing.T, store *flowdb.Store) testIssue {
+func createTask(t *testing.T, store *flowdb.Store) testTask {
 	t.Helper()
 
 	ctx := context.Background()
@@ -796,14 +796,14 @@ func createIssue(t *testing.T, store *flowdb.Store) testIssue {
 	if err := store.DB().QueryRowContext(ctx, `
 UPDATE id_allocators
 SET next_number = next_number + 1
-WHERE name = 'issue'
+WHERE name = 'task'
 RETURNING next_number - 1`).Scan(&nextNumber); err != nil {
-		t.Fatalf("allocate issue id: %v", err)
+		t.Fatalf("allocate task id: %v", err)
 	}
 	id := fmt.Sprintf("i-%04d", nextNumber)
 	now := formatTime(time.Now().UTC())
 	if _, err := store.DB().ExecContext(ctx, `
-INSERT INTO issues (
+INSERT INTO tasks (
 	id,
 	title,
 	body,
@@ -812,26 +812,26 @@ INSERT INTO issues (
 	created_by,
 	created_at,
 	updated_at
-) VALUES (?, 'Worker issue', '', '', 0, 'human', ?, ?)`,
+) VALUES (?, 'Worker task', '', '', 0, 'human', ?, ?)`,
 		id,
 		now,
 		now,
 	); err != nil {
-		t.Fatalf("insert issue: %v", err)
+		t.Fatalf("insert task: %v", err)
 	}
 
-	return testIssue{ID: id}
+	return testTask{ID: id}
 }
 
-func insertChange(t *testing.T, store *flowdb.Store, issueID string) string {
+func insertChange(t *testing.T, store *flowdb.Store, taskID string) string {
 	t.Helper()
 
-	id := "ch-" + strings.TrimPrefix(issueID, "i-")
+	id := "ch-" + strings.TrimPrefix(taskID, "i-")
 	now := formatTime(time.Now().UTC())
 	if _, err := store.DB().ExecContext(context.Background(), `
 INSERT INTO changes (
 	id,
-	issue_id,
+	task_id,
 	branch,
 	base,
 	head_sha,
@@ -839,8 +839,8 @@ INSERT INTO changes (
 	updated_at
 ) VALUES (?, ?, ?, 'main', '', ?, ?)`,
 		id,
-		issueID,
-		"issue/"+issueID,
+		taskID,
+		"task/"+taskID,
 		now,
 		now,
 	); err != nil {

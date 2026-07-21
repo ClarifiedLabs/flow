@@ -13,9 +13,9 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 )
 
-const issueAttachmentUploadLimit = coordinator.IssueAttachmentMaxBytes + (1 << 20)
+const taskAttachmentUploadLimit = coordinator.TaskAttachmentMaxBytes + (1 << 20)
 
-func (s *projectServer) handleIssueAttachmentsPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string, parts []string) {
+func (s *projectServer) handleTaskAttachmentsPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string, parts []string) {
 	if len(parts) == 0 {
 		switch r.Method {
 		case http.MethodGet:
@@ -23,17 +23,17 @@ func (s *projectServer) handleIssueAttachmentsPath(w http.ResponseWriter, r *htt
 				writeError(w, http.StatusForbidden, "forbidden", "attachment read requires owner, session, or worker token")
 				return
 			}
-			s.handleListIssueAttachments(w, r, issueID)
+			s.handleListTaskAttachments(w, r, taskID)
 		case http.MethodPost:
 			if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker) {
 				writeError(w, http.StatusForbidden, "forbidden", "attachment upload requires owner, session, or worker token")
 				return
 			}
-			if err := s.checkIssueAttachmentWriteScope(r, principal, issueID); err != nil {
+			if err := s.checkTaskAttachmentWriteScope(r, principal, taskID); err != nil {
 				writeAttachmentScopeError(w, err)
 				return
 			}
-			s.handleUploadIssueAttachment(w, r, principal, issueID)
+			s.handleUploadTaskAttachment(w, r, principal, taskID)
 		default:
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method is not allowed")
 		}
@@ -45,37 +45,37 @@ func (s *projectServer) handleIssueAttachmentsPath(w http.ResponseWriter, r *htt
 			writeError(w, http.StatusForbidden, "forbidden", "attachment read requires owner, session, or worker token")
 			return
 		}
-		s.handleDownloadIssueAttachment(w, r, issueID, parts[0])
+		s.handleDownloadTaskAttachment(w, r, taskID, parts[0])
 		return
 	}
 
 	writeError(w, http.StatusNotFound, "not_found", "resource not found")
 }
 
-func (s *projectServer) handleListIssueAttachments(w http.ResponseWriter, r *http.Request, issueID string) {
-	if _, err := s.issues.GetIssue(r.Context(), issueID); err != nil {
+func (s *projectServer) handleListTaskAttachments(w http.ResponseWriter, r *http.Request, taskID string) {
+	if _, err := s.tasks.GetTask(r.Context(), taskID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "issue_not_found", "issue not found")
+			writeError(w, http.StatusNotFound, "task_not_found", "task not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "issue_lookup_failed", err.Error())
+		writeError(w, http.StatusInternalServerError, "task_lookup_failed", err.Error())
 		return
 	}
-	attachments, err := s.issues.ListIssueAttachments(r.Context(), issueID)
+	attachments, err := s.tasks.ListTaskAttachments(r.Context(), taskID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "attachments_list_failed", err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, issueAttachmentsResponse{Attachments: attachments})
+	writeJSON(w, http.StatusOK, taskAttachmentsResponse{Attachments: attachments})
 }
 
-func (s *projectServer) handleUploadIssueAttachment(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
+func (s *projectServer) handleUploadTaskAttachment(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
 	if s.attachments == nil {
 		writeError(w, http.StatusInternalServerError, "attachments_unavailable", "attachment store is not configured")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, issueAttachmentUploadLimit)
+	r.Body = http.MaxBytesReader(w, r.Body, taskAttachmentUploadLimit)
 	if err := r.ParseMultipartForm(1 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_attachment_upload", err.Error())
 		return
@@ -90,9 +90,9 @@ func (s *projectServer) handleUploadIssueAttachment(w http.ResponseWriter, r *ht
 	}
 	defer file.Close()
 
-	attachment, err := s.issues.CreateIssueAttachment(r.Context(), coordinator.CreateIssueAttachmentInput{
-		IssueID:     issueID,
-		Stage:       coordinator.IssueAttachmentStage(r.FormValue("stage")),
+	attachment, err := s.tasks.CreateTaskAttachment(r.Context(), coordinator.CreateTaskAttachmentInput{
+		TaskID:      taskID,
+		Stage:       coordinator.TaskAttachmentStage(r.FormValue("stage")),
 		Filename:    header.Filename,
 		ContentType: header.Header.Get("Content-Type"),
 		CreatedBy:   attachmentActorForPrincipal(principal),
@@ -100,22 +100,22 @@ func (s *projectServer) handleUploadIssueAttachment(w http.ResponseWriter, r *ht
 	}, s.attachments)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "issue_not_found", "issue not found")
+			writeError(w, http.StatusNotFound, "task_not_found", "task not found")
 			return
 		}
 		writeError(w, http.StatusBadRequest, "attachment_upload_failed", err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, issueAttachmentResponse{Attachment: attachment})
+	writeJSON(w, http.StatusCreated, taskAttachmentResponse{Attachment: attachment})
 }
 
-func (s *projectServer) handleDownloadIssueAttachment(w http.ResponseWriter, r *http.Request, issueID string, attachmentID string) {
+func (s *projectServer) handleDownloadTaskAttachment(w http.ResponseWriter, r *http.Request, taskID string, attachmentID string) {
 	if s.attachments == nil {
 		writeError(w, http.StatusInternalServerError, "attachments_unavailable", "attachment store is not configured")
 		return
 	}
-	attachment, err := s.issues.GetIssueAttachment(r.Context(), issueID, attachmentID)
+	attachment, err := s.tasks.GetTaskAttachment(r.Context(), taskID, attachmentID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "attachment_not_found", "attachment not found")
@@ -135,7 +135,7 @@ func (s *projectServer) handleDownloadIssueAttachment(w http.ResponseWriter, r *
 	}
 	defer reader.Close()
 
-	contentType, inlineSafe := issueAttachmentResponseContentType(attachment.ContentType)
+	contentType, inlineSafe := taskAttachmentResponseContentType(attachment.ContentType)
 	disposition := "attachment"
 	if inlineSafe && r.URL.Query().Get("download") != "1" {
 		disposition = "inline"
@@ -148,7 +148,7 @@ func (s *projectServer) handleDownloadIssueAttachment(w http.ResponseWriter, r *
 	_, _ = io.Copy(w, reader)
 }
 
-func issueAttachmentResponseContentType(contentType string) (string, bool) {
+func taskAttachmentResponseContentType(contentType string) (string, bool) {
 	mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(contentType))
 	if err != nil {
 		return "application/octet-stream", false
@@ -160,24 +160,24 @@ func issueAttachmentResponseContentType(contentType string) (string, bool) {
 	return "application/octet-stream", false
 }
 
-func (s *projectServer) checkIssueAttachmentWriteScope(r *http.Request, principal coordinator.Principal, issueID string) error {
-	issueID = strings.TrimSpace(issueID)
+func (s *projectServer) checkTaskAttachmentWriteScope(r *http.Request, principal coordinator.Principal, taskID string) error {
+	taskID = strings.TrimSpace(taskID)
 	switch principal.Scope {
 	case coordinator.TokenScopeOwner:
 		return nil
 	case coordinator.TokenScopeSession:
-		if principal.SourceIssueID == nil || strings.TrimSpace(*principal.SourceIssueID) != issueID {
-			return errors.New("session token cannot attach files to a different issue")
+		if principal.SourceTaskID == nil || strings.TrimSpace(*principal.SourceTaskID) != taskID {
+			return errors.New("session token cannot attach files to a different task")
 		}
 		return nil
 	case coordinator.TokenScopeWorker:
-		return s.checkWorkerIssueLease(r, principal, issueID)
+		return s.checkWorkerTaskLease(r, principal, taskID)
 	default:
 		return errors.New("attachment upload requires owner, session, or worker token")
 	}
 }
 
-func (s *projectServer) checkWorkerIssueLease(r *http.Request, principal coordinator.Principal, issueID string) error {
+func (s *projectServer) checkWorkerTaskLease(r *http.Request, principal coordinator.Principal, taskID string) error {
 	leaseID := strings.TrimSpace(r.URL.Query().Get("lease_id"))
 	if leaseID == "" {
 		return errAttachmentLeaseRequired
@@ -202,7 +202,7 @@ func (s *projectServer) checkWorkerIssueLease(r *http.Request, principal coordin
 	if err != nil {
 		return err
 	}
-	if job.IssueID == nil || strings.TrimSpace(*job.IssueID) != strings.TrimSpace(issueID) {
+	if job.TaskID == nil || strings.TrimSpace(*job.TaskID) != strings.TrimSpace(taskID) {
 		return errAttachmentLeaseForbidden
 	}
 
@@ -211,7 +211,7 @@ func (s *projectServer) checkWorkerIssueLease(r *http.Request, principal coordin
 
 var (
 	errAttachmentLeaseRequired  = errors.New("lease_id is required for worker attachment uploads")
-	errAttachmentLeaseForbidden = errors.New("lease does not belong to this issue")
+	errAttachmentLeaseForbidden = errors.New("lease does not belong to this task")
 )
 
 func writeAttachmentScopeError(w http.ResponseWriter, err error) {

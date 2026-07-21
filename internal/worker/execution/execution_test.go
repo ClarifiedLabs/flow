@@ -225,7 +225,7 @@ func TestRunJobRunsWhenRepositorySkillsAreMissing(t *testing.T) {
 	}
 }
 
-func TestRunJobPushesNewIssueBranch(t *testing.T) {
+func TestRunJobPushesNewTaskBranch(t *testing.T) {
 	t.Parallel()
 	requireTool(t, "git")
 	requireTool(t, "tmux")
@@ -240,7 +240,7 @@ func TestRunJobPushesNewIssueBranch(t *testing.T) {
 		CapacityBucket: BucketPersistentAgent,
 		Payload: map[string]any{
 			"base":   "main",
-			"branch": "issue/i-0001",
+			"branch": "task/i-0001",
 			"entrypoint": map[string]any{
 				"argv":  []string{"/bin/true"},
 				"shell": false,
@@ -257,7 +257,7 @@ func TestRunJobPushesNewIssueBranch(t *testing.T) {
 		t.Fatalf("run author job: %v", result.Err)
 	}
 	remotePath := strings.TrimPrefix(exchangeURL, "file://")
-	gitRun(t, remotePath, "show-ref", "--verify", "refs/heads/issue/i-0001")
+	gitRun(t, remotePath, "show-ref", "--verify", "refs/heads/task/i-0001")
 }
 
 func TestRunJobShellEntrypointRequiresExplicitShell(t *testing.T) {
@@ -719,7 +719,7 @@ func TestWorkerEnvIncludesSessionToken(t *testing.T) {
 		SessionToken: "session-token",
 		Payload: JobPayload{
 			SessionID: "payload-session",
-			Branch:    "issue/i-0001",
+			Branch:    "task/i-0001",
 			Base:      "main",
 		},
 		Entrypoint: Entrypoint{},
@@ -1512,14 +1512,14 @@ func TestAnyTrustPromptVisibleRecognizesActivePrompts(t *testing.T) {
 }
 
 func TestAnyTrustPromptVisibleRejectsEmbeddedPromptText(t *testing.T) {
-	// The trust-prompt copy quoted inside larger pane content (an issue body) must
+	// The trust-prompt copy quoted inside larger pane content (an task body) must
 	// not be mistaken for a live prompt: the submit instruction is no longer the
 	// last line on screen.
 	for _, pane := range []string{codexTrustPromptPane(), claudeTrustPromptPane()} {
-		embedded := "Flow role instructions (flow-author):\n\n# Flow Author\n\nIssue: i-0005\n\n" +
+		embedded := "Flow role instructions (flow-author):\n\n# Flow Author\n\nTask: i-0005\n\n" +
 			pane + "\n\nacceptance_criteria:\nthe agent no longer gets stuck at the trust prompt\n"
 		if anyTrustPromptVisible(embedded) {
-			t.Fatal("anyTrustPromptVisible accepted prompt text embedded in issue content")
+			t.Fatal("anyTrustPromptVisible accepted prompt text embedded in task content")
 		}
 	}
 }

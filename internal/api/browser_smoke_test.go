@@ -40,7 +40,7 @@ func TestWebUIConsoleAutoReleaseRefreshesOpenPage(t *testing.T) {
 	browserCtx, cancel := newBrowserTestContext(t, browserPath)
 	defer cancel()
 
-	navigateAndWaitForText(t, browserCtx, httpServer.URL+webLoginPath(bootstrap.Token), "No issues")
+	navigateAndWaitForText(t, browserCtx, httpServer.URL+webLoginPath(bootstrap.Token), "No tasks")
 	navigateAndWaitForText(t, browserCtx, httpServer.URL+"/ui/console", "Start Console")
 	if err := chromedp.Run(browserCtx,
 		chromedp.Click(`button[data-start-console]`, chromedp.ByQuery),

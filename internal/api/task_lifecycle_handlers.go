@@ -15,39 +15,39 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/sqlitex"
 )
 
-func (s *projectServer) handleCreateIssue(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
-	var request createIssueRequest
+func (s *projectServer) handleCreateTask(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
+	var request createTaskRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
 
-	input, err := createIssueInputForPrincipal(request, principal)
+	input, err := createTaskInputForPrincipal(request, principal)
 	if err != nil {
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 		return
 	}
-	issue, err := s.issues.CreateIssueWithDetails(r.Context(), input)
+	task, err := s.tasks.CreateTaskWithDetails(r.Context(), input)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_issue", err.Error())
+		writeError(w, http.StatusBadRequest, "invalid_task", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name})
+	writeJSON(w, http.StatusCreated, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
 }
 
-func (s *projectServer) ensureAuthorJobForCreatedIssue(r *http.Request, issue coordinator.Issue, principal coordinator.Principal) error {
-	if issue.ScheduleState != coordinator.ScheduleUpNext {
+func (s *projectServer) ensureAuthorJobForCreatedTask(r *http.Request, task coordinator.Task, principal coordinator.Principal) error {
+	if task.ScheduleState != coordinator.ScheduleUpNext {
 		return nil
 	}
 	if s.engine != nil {
 		_, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-			Kind:    lifecycle.EventEnsureWorkPhaseJob,
-			IssueID: issue.ID,
+			Kind:   lifecycle.EventEnsureWorkPhaseJob,
+			TaskID: task.ID,
 		}))
 		return err
 	}
 	if s.sessions != nil {
-		_, err := s.sessions.EnsureAuthorJob(r.Context(), coordinator.EnsureAuthorJobInput{IssueID: issue.ID})
+		_, err := s.sessions.EnsureAuthorJob(r.Context(), coordinator.EnsureAuthorJobInput{TaskID: task.ID})
 		if errors.Is(err, coordinator.ErrAuthorJobSuppressed) {
 			return nil
 		}
@@ -56,31 +56,31 @@ func (s *projectServer) ensureAuthorJobForCreatedIssue(r *http.Request, issue co
 	return errors.New("lifecycle engine is not configured")
 }
 
-func (s *projectServer) handleListIssues(w http.ResponseWriter, r *http.Request) {
-	filter, err := issueFilterFromQuery(r)
+func (s *projectServer) handleListTasks(w http.ResponseWriter, r *http.Request) {
+	filter, err := taskFilterFromQuery(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_filter", err.Error())
 		return
 	}
 
-	issues, err := s.issues.ListIssues(r.Context(), filter)
+	tasks, err := s.tasks.ListTasks(r.Context(), filter)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "list_issues_failed", err.Error())
+		writeError(w, http.StatusInternalServerError, "list_tasks_failed", err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, issuesResponse{Issues: issues})
+	writeJSON(w, http.StatusOK, tasksResponse{Tasks: tasks})
 }
 
-func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v2/issues/"), "/")
+func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v2/tasks/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
-		writeError(w, http.StatusNotFound, "not_found", "issue not found")
+		writeError(w, http.StatusNotFound, "not_found", "task not found")
 		return
 	}
 
-	issueID := parts[0]
-	if err := checkBoundIssueScope(principal, issueID); err != nil {
+	taskID := parts[0]
+	if err := checkBoundTaskScope(principal, taskID); err != nil {
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 		return
 	}
@@ -88,15 +88,15 @@ func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, 
 		switch r.Method {
 		case http.MethodGet:
 			if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker, coordinator.TokenScopeConsole) {
-				writeError(w, http.StatusForbidden, "forbidden", "issue read requires owner, session, worker, or console token")
+				writeError(w, http.StatusForbidden, "forbidden", "task read requires owner, session, worker, or console token")
 				return
 			}
-			s.handleGetIssue(w, r, principal, issueID)
+			s.handleGetTask(w, r, principal, taskID)
 		case http.MethodPatch:
 			if !requireScope(w, principal, "owner or console token is required", coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
 				return
 			}
-			s.handleEditIssue(w, r, issueID)
+			s.handleEditTask(w, r, taskID)
 		default:
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method is not allowed")
 		}
@@ -104,12 +104,12 @@ func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, 
 	}
 
 	if len(parts) >= 2 && parts[1] == "checks" {
-		s.handleChecksPath(w, r, principal, issueID, parts[2:])
+		s.handleChecksPath(w, r, principal, taskID, parts[2:])
 		return
 	}
 
 	if len(parts) >= 2 && parts[1] == "attachments" {
-		s.handleIssueAttachmentsPath(w, r, principal, issueID, parts[2:])
+		s.handleTaskAttachmentsPath(w, r, principal, taskID, parts[2:])
 		return
 	}
 
@@ -118,7 +118,7 @@ func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, 
 			writeError(w, http.StatusForbidden, "forbidden", "workflow access requires an owner, session, or console token")
 			return
 		}
-		s.handleWorkflowPath(w, r, principal, issueID, parts[2:])
+		s.handleWorkflowPath(w, r, principal, taskID, parts[2:])
 		return
 	}
 
@@ -129,7 +129,7 @@ func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, 
 		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
 			return
 		}
-		s.handleAttentionReply(w, r, principal, issueID)
+		s.handleAttentionReply(w, r, principal, taskID)
 		return
 	}
 
@@ -137,7 +137,7 @@ func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, 
 		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
 			return
 		}
-		s.handleIssueConsole(w, r, issueID)
+		s.handleTaskConsole(w, r, taskID)
 		return
 	}
 
@@ -146,7 +146,7 @@ func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, 
 			writeError(w, http.StatusForbidden, "forbidden", "relation updates require owner or console token")
 			return
 		}
-		s.handleIssueRelations(w, r, principal, issueID)
+		s.handleTaskRelations(w, r, principal, taskID)
 		return
 	}
 
@@ -158,7 +158,7 @@ func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, 
 			writeError(w, http.StatusForbidden, "forbidden", "prompt context requires owner, session, or worker token")
 			return
 		}
-		s.handlePromptContext(w, r, issueID)
+		s.handlePromptContext(w, r, taskID)
 		return
 	}
 
@@ -170,7 +170,7 @@ func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, 
 			writeError(w, http.StatusForbidden, "forbidden", "transition history requires owner or session token")
 			return
 		}
-		s.handleListTransitions(w, r, issueID)
+		s.handleListTransitions(w, r, taskID)
 		return
 	}
 
@@ -184,22 +184,22 @@ func (s *projectServer) handleIssuePath(w http.ResponseWriter, r *http.Request, 
 		if !requireScope(w, principal, "owner or console token is required", coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
 			return
 		}
-		s.handleScheduleWorkflow(w, r, principal, issueID)
+		s.handleScheduleWorkflow(w, r, principal, taskID)
 	case "reset":
 		if !requireScope(w, principal, "owner or console token is required", coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
 			return
 		}
-		s.handleResetWorkflow(w, r, principal, issueID)
+		s.handleResetWorkflow(w, r, principal, taskID)
 	case "done":
 		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
 			return
 		}
-		s.handleForceDoneWorkflow(w, r, principal, issueID)
+		s.handleForceDoneWorkflow(w, r, principal, taskID)
 	case "reopen":
 		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
 			return
 		}
-		s.handleReopenWorkflow(w, r, principal, issueID)
+		s.handleReopenWorkflow(w, r, principal, taskID)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 	}
@@ -225,10 +225,10 @@ type promptPhaseHandoff struct {
 	Content   string `json:"content"`
 }
 
-func (s *projectServer) handlePromptContext(w http.ResponseWriter, r *http.Request, issueID string) {
+func (s *projectServer) handlePromptContext(w http.ResponseWriter, r *http.Request, taskID string) {
 	response := promptContextResponse{FinalPhase: true}
 	if s.workflowRuns != nil {
-		run, active, err := s.workflowRuns.ActiveForIssue(r.Context(), issueID)
+		run, active, err := s.workflowRuns.ActiveForTask(r.Context(), taskID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "prompt_context_failed", err.Error())
 			return
@@ -306,7 +306,7 @@ func (s *projectServer) handlePromptContext(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusOK, response)
 		return
 	}
-	cursor, ok, err := s.cursors.GetCursor(r.Context(), issueID)
+	cursor, ok, err := s.cursors.GetCursor(r.Context(), taskID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "prompt_context_failed", err.Error())
 		return
@@ -332,7 +332,7 @@ func (s *projectServer) handlePromptContext(w http.ResponseWriter, r *http.Reque
 				break
 			}
 		}
-		handoffs, err := s.cursors.PhaseHandoffs(r.Context(), issueID)
+		handoffs, err := s.cursors.PhaseHandoffs(r.Context(), taskID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "prompt_context_failed", err.Error())
 			return
@@ -361,7 +361,7 @@ func (s *projectServer) handlePromptContext(w http.ResponseWriter, r *http.Reque
 		response.RoleInstructions = phase.Agent.Prompt
 	}
 
-	handoffs, err := s.cursors.PhaseHandoffs(r.Context(), issueID)
+	handoffs, err := s.cursors.PhaseHandoffs(r.Context(), taskID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "prompt_context_failed", err.Error())
 		return
@@ -382,16 +382,16 @@ func (s *projectServer) handlePromptContext(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (s *projectServer) handleGetIssue(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
-	issue, err := s.issues.GetIssue(r.Context(), issueID)
+func (s *projectServer) handleGetTask(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
+	task, err := s.tasks.GetTask(r.Context(), taskID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "issue_not_found", err.Error())
+		writeError(w, http.StatusNotFound, "task_not_found", err.Error())
 		return
 	}
 
-	response := issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name}
+	response := taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name}
 	if s.status != nil {
-		statusLog, err := s.status.ListForIssue(r.Context(), issueID, 20)
+		statusLog, err := s.status.ListForTask(r.Context(), taskID, 20)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "status_log_failed", err.Error())
 			return
@@ -399,9 +399,9 @@ func (s *projectServer) handleGetIssue(w http.ResponseWriter, r *http.Request, p
 		response.StatusLog = statusLog
 	}
 	if scopeAllowed(principal, coordinator.TokenScopeOwner) {
-		detail, err := s.buildUIIssueDetail(r.Context(), issue)
+		detail, err := s.buildUITaskDetail(r.Context(), task)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "issue_detail_failed", err.Error())
+			writeError(w, http.StatusInternalServerError, "task_detail_failed", err.Error())
 			return
 		}
 		response.Detail = detail
@@ -412,33 +412,33 @@ func (s *projectServer) handleGetIssue(w http.ResponseWriter, r *http.Request, p
 // handleApproveWorkPhase applies a human's approval of a gate-paused work
 // phase through the engine: the cursor advances to the next phase (or the
 // final phase's change is published into review).
-func (s *projectServer) handleApproveWorkPhase(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
+func (s *projectServer) handleApproveWorkPhase(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
 	if !s.requireEngine(w) {
 		return
 	}
 	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-		Kind:    lifecycle.EventWorkPhaseApproved,
-		IssueID: issueID,
+		Kind:   lifecycle.EventWorkPhaseApproved,
+		TaskID: taskID,
 	}))
 	if err != nil {
 		writeEngineError(w, err, "approve_phase_failed")
 		return
 	}
 
-	issue, err := s.issueForResult(r.Context(), result, issueID)
+	task, err := s.taskForResult(r.Context(), result, taskID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "approve_phase_failed", err.Error())
 		return
 	}
-	response := issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name}
-	response.Flow = s.issueFlowStatus(r.Context(), issueID)
+	response := taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name}
+	response.Flow = s.taskFlowStatus(r.Context(), taskID)
 	writeJSON(w, http.StatusOK, response)
 }
 
 // handleReworkWorkPhase applies a human's request-changes on a gate-paused
 // work phase: the same phase re-runs with the feedback injected into its
 // prompt.
-func (s *projectServer) handleReworkWorkPhase(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
+func (s *projectServer) handleReworkWorkPhase(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
 	var request phaseRequestChangesRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
@@ -454,7 +454,7 @@ func (s *projectServer) handleReworkWorkPhase(w http.ResponseWriter, r *http.Req
 	}
 	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
 		Kind:    lifecycle.EventWorkPhaseRework,
-		IssueID: issueID,
+		TaskID:  taskID,
 		Payload: lifecycle.EventPayload{GateFeedback: feedback},
 	}))
 	if err != nil {
@@ -462,13 +462,13 @@ func (s *projectServer) handleReworkWorkPhase(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	issue, err := s.issueForResult(r.Context(), result, issueID)
+	task, err := s.taskForResult(r.Context(), result, taskID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "request_changes_failed", err.Error())
 		return
 	}
-	response := issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name}
-	response.Flow = s.issueFlowStatus(r.Context(), issueID)
+	response := taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name}
+	response.Flow = s.taskFlowStatus(r.Context(), taskID)
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -476,19 +476,19 @@ type phaseRequestChangesRequest struct {
 	Feedback string `json:"feedback"`
 }
 
-// issueFlowStatus assembles the issue's flow position for API/UI consumers:
+// taskFlowStatus assembles the task's flow position for API/UI consumers:
 // which flow, the ordered phases, the cursor position and gate state, and —
 // when paused at a gate — the pending handoff awaiting review. Nil when the
-// issue has no cursor.
-func (s *projectServer) issueFlowStatus(ctx context.Context, issueID string) *issueFlowStatus {
+// task has no cursor.
+func (s *projectServer) taskFlowStatus(ctx context.Context, taskID string) *taskFlowStatus {
 	if s.cursors == nil {
 		return nil
 	}
-	cursor, ok, err := s.cursors.GetCursor(ctx, issueID)
+	cursor, ok, err := s.cursors.GetCursor(ctx, taskID)
 	if err != nil || !ok {
 		return nil
 	}
-	status := &issueFlowStatus{
+	status := &taskFlowStatus{
 		FlowID:       cursor.Snapshot.FlowID,
 		FlowName:     cursor.Snapshot.FlowName,
 		PhaseIndex:   cursor.PhaseIndex,
@@ -501,7 +501,7 @@ func (s *projectServer) issueFlowStatus(ctx context.Context, issueID string) *is
 		status.Gate = string(phase.Gate)
 	}
 	for _, phase := range cursor.Snapshot.Phases {
-		status.Phases = append(status.Phases, issueFlowPhase{
+		status.Phases = append(status.Phases, taskFlowPhase{
 			Name:            phase.Name,
 			Gate:            string(phase.Gate),
 			AgentName:       phase.Agent.Name,
@@ -511,14 +511,14 @@ func (s *projectServer) issueFlowStatus(ctx context.Context, issueID string) *is
 		})
 	}
 	if cursor.PhaseState == coordinator.FlowPhaseAwaitingApproval {
-		if handoff, ok, err := s.cursors.PhaseHandoff(ctx, issueID, cursor.PhaseIndex); err == nil && ok {
+		if handoff, ok, err := s.cursors.PhaseHandoff(ctx, taskID, cursor.PhaseIndex); err == nil && ok {
 			status.PendingHandoff = handoff.Content
 		}
 	}
 	return status
 }
 
-func (s *projectServer) handleAttentionReply(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
+func (s *projectServer) handleAttentionReply(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
 	if s.status == nil {
 		writeError(w, http.StatusServiceUnavailable, "status_unavailable", "status service is not configured")
 		return
@@ -537,24 +537,24 @@ func (s *projectServer) handleAttentionReply(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "attention_reply_failed", "message is required")
 		return
 	}
-	if _, err := s.issues.GetIssue(r.Context(), issueID); err != nil {
-		writeError(w, http.StatusNotFound, "issue_not_found", err.Error())
+	if _, err := s.tasks.GetTask(r.Context(), taskID); err != nil {
+		writeError(w, http.StatusNotFound, "task_not_found", err.Error())
 		return
 	}
 	// Validate any client-supplied status_log_id up front, before writing
-	// anything: it must reference an existing status entry on this issue.
+	// anything: it must reference an existing status entry on this task.
 	// Rejecting here eliminates the orphaned-status-row window that a later FK
 	// failure would otherwise leave behind, and prevents cross-linking the reply
-	// to another issue's status entry.
+	// to another task's status entry.
 	if request.StatusLogID != nil {
 		entry, err := s.status.Get(r.Context(), *request.StatusLogID)
-		if err != nil || entry.IssueID != issueID {
-			writeError(w, http.StatusBadRequest, "invalid_status_log_id", "status_log_id does not belong to this issue")
+		if err != nil || entry.TaskID != taskID {
+			writeError(w, http.StatusBadRequest, "invalid_status_log_id", "status_log_id does not belong to this task")
 			return
 		}
 	}
 	status, err := s.status.Write(r.Context(), coordinator.WriteStatusInput{
-		IssueID: issueID,
+		TaskID:  taskID,
 		Actor:   principal.Actor(),
 		Kind:    coordinator.StatusKindProgress,
 		Message: "Human response:\n\n" + body,
@@ -567,8 +567,8 @@ func (s *projectServer) handleAttentionReply(w http.ResponseWriter, r *http.Requ
 	if request.StatusLogID != nil {
 		statusID = *request.StatusLogID
 	}
-	message, queued, err := s.sessions.ReplyToIssue(r.Context(), coordinator.ReplyToIssueInput{
-		IssueID:     issueID,
+	message, queued, err := s.sessions.ReplyToTask(r.Context(), coordinator.ReplyToTaskInput{
+		TaskID:      taskID,
 		StatusLogID: &statusID,
 		Actor:       principal.Actor(),
 		Body:        body,
@@ -579,14 +579,14 @@ func (s *projectServer) handleAttentionReply(w http.ResponseWriter, r *http.Requ
 	}
 	resumed := false
 	if s.workflowRuns != nil {
-		resumed, err = s.workflowRuns.ResumeAgentRequest(r.Context(), issueID, body, coordinator.ActorHuman)
+		resumed, err = s.workflowRuns.ResumeAgentRequest(r.Context(), taskID, body, coordinator.ActorHuman)
 		if err != nil {
 			writeWorkflowError(w, err, "attention_reply_resume_failed")
 			return
 		}
 	}
 	if !queued && !resumed {
-		if err := s.ensureAuthorJobWithHumanInstructions(r, principal, issueID, body); err != nil {
+		if err := s.ensureAuthorJobWithHumanInstructions(r, principal, taskID, body); err != nil {
 			writeError(w, http.StatusBadRequest, "attention_reply_queue_failed", err.Error())
 			return
 		}
@@ -595,10 +595,10 @@ func (s *projectServer) handleAttentionReply(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, sessionMessageResponse{Message: message, Queued: queued})
 }
 
-func (s *projectServer) ensureAuthorJobWithHumanInstructions(r *http.Request, principal coordinator.Principal, issueID string, instructions string) error {
+func (s *projectServer) ensureAuthorJobWithHumanInstructions(r *http.Request, principal coordinator.Principal, taskID string, instructions string) error {
 	payload := map[string]any{"human_attention_instructions": strings.TrimSpace(instructions)}
 	if s.sessions != nil {
-		_, err := s.sessions.EnsureAuthorJob(r.Context(), coordinator.EnsureAuthorJobInput{IssueID: issueID, Payload: payload})
+		_, err := s.sessions.EnsureAuthorJob(r.Context(), coordinator.EnsureAuthorJobInput{TaskID: taskID, Payload: payload})
 		if errors.Is(err, coordinator.ErrAuthorJobSuppressed) {
 			return nil
 		}
@@ -607,7 +607,7 @@ func (s *projectServer) ensureAuthorJobWithHumanInstructions(r *http.Request, pr
 	return errors.New("lifecycle engine is not configured")
 }
 
-func (s *projectServer) handleApproveReviewCycles(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
+func (s *projectServer) handleApproveReviewCycles(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
 	if s.sessions == nil {
 		writeError(w, http.StatusInternalServerError, "sessions_unavailable", "session service is not configured")
 		return
@@ -617,16 +617,16 @@ func (s *projectServer) handleApproveReviewCycles(w http.ResponseWriter, r *http
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	if _, err := s.issues.GetIssue(r.Context(), issueID); errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "issue_not_found", "issue not found")
+	if _, err := s.tasks.GetTask(r.Context(), taskID); errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "task_not_found", "task not found")
 		return
 	} else if err != nil {
-		writeError(w, http.StatusBadRequest, "get_issue_failed", err.Error())
+		writeError(w, http.StatusBadRequest, "get_task_failed", err.Error())
 		return
 	}
 
 	_, err := s.sessions.ApproveReviewCycles(r.Context(), coordinator.ApproveReviewCyclesInput{
-		IssueID:      issueID,
+		TaskID:       taskID,
 		Cycles:       request.Cycles,
 		Instructions: request.Instructions,
 		Actor:        principal.Actor(),
@@ -639,8 +639,8 @@ func (s *projectServer) handleApproveReviewCycles(w http.ResponseWriter, r *http
 	var failures []lifecycle.FollowUpFailure
 	if s.engine != nil {
 		result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-			Kind:    lifecycle.EventEnsureWorkPhaseJob,
-			IssueID: issueID,
+			Kind:   lifecycle.EventEnsureWorkPhaseJob,
+			TaskID: taskID,
 		}))
 		if err != nil && !errors.Is(err, lifecycle.ErrInvalidTransition) {
 			writeEngineError(w, err, "approve_review_cycles_failed")
@@ -649,7 +649,7 @@ func (s *projectServer) handleApproveReviewCycles(w http.ResponseWriter, r *http
 		failures = result.FollowUpFailures
 	}
 
-	budget, err := s.sessions.ReviewCycleBudget(r.Context(), issueID)
+	budget, err := s.sessions.ReviewCycleBudget(r.Context(), taskID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "load_review_cycles_failed", err.Error())
 		return
@@ -657,34 +657,34 @@ func (s *projectServer) handleApproveReviewCycles(w http.ResponseWriter, r *http
 	writeJSON(w, http.StatusOK, reviewCycleBudgetResponse{Budget: budget, FollowUpFailures: failures})
 }
 
-func (s *projectServer) buildUIIssueDetail(ctx context.Context, issue coordinator.Issue) (*uiIssueDetail, error) {
-	tags, err := s.issues.TagsForIssue(ctx, issue.ID)
+func (s *projectServer) buildUITaskDetail(ctx context.Context, task coordinator.Task) (*uiTaskDetail, error) {
+	tags, err := s.tasks.TagsForTask(ctx, task.ID)
 	if err != nil {
-		return nil, fmt.Errorf("load issue tags: %w", err)
+		return nil, fmt.Errorf("load task tags: %w", err)
 	}
-	relations, err := s.issues.RelationsForIssue(ctx, issue.ID)
+	relations, err := s.tasks.RelationsForTask(ctx, task.ID)
 	if err != nil {
-		return nil, fmt.Errorf("load issue relations: %w", err)
+		return nil, fmt.Errorf("load task relations: %w", err)
 	}
-	detail := &uiIssueDetail{
+	detail := &uiTaskDetail{
 		Tags:      tags,
 		Relations: relations,
 	}
-	board, err := s.issues.BoardResult(ctx)
+	board, err := s.tasks.BoardResult(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("load issue wait reason: %w", err)
+		return nil, fmt.Errorf("load task wait reason: %w", err)
 	}
-	detail.WaitReason = board.WaitReasons[issue.ID]
-	terminalJobs, err := s.uiTerminalJobsByIssue(ctx, []coordinator.Issue{issue})
+	detail.WaitReason = board.WaitReasons[task.ID]
+	terminalJobs, err := s.uiTerminalJobsByTask(ctx, []coordinator.Task{task})
 	if err != nil {
 		return nil, err
 	}
-	if jobID, ok := terminalJobs[issue.ID]; ok {
+	if jobID, ok := terminalJobs[task.ID]; ok {
 		detail.TerminalJobID = jobID
 		detail.TerminalAvailable = true
 	}
 	if s.sessions != nil {
-		active, ok, err := s.sessions.ActiveAuthorSessionForIssue(ctx, issue.ID)
+		active, ok, err := s.sessions.ActiveAuthorSessionForTask(ctx, task.ID)
 		if err != nil {
 			return nil, fmt.Errorf("load active session: %w", err)
 		}
@@ -698,9 +698,9 @@ func (s *projectServer) buildUIIssueDetail(ctx context.Context, issue coordinato
 				detail.TerminalAvailable = true
 			}
 		}
-		sessions, err := s.sessions.ListSessionsForIssue(ctx, issue.ID, 10)
+		sessions, err := s.sessions.ListSessionsForTask(ctx, task.ID, 10)
 		if err != nil {
-			return nil, fmt.Errorf("load issue sessions: %w", err)
+			return nil, fmt.Errorf("load task sessions: %w", err)
 		}
 		for _, session := range sessions {
 			summary, err := s.uiSessionSummaryWithTerminal(ctx, session)
@@ -712,7 +712,7 @@ func (s *projectServer) buildUIIssueDetail(ctx context.Context, issue coordinato
 		if detail.ActiveSession == nil && len(detail.Sessions) > 0 && detail.Sessions[0].State == coordinator.SessionAbandoned {
 			paused := true
 			if s.workers != nil {
-				if _, live, err := s.workers.LiveAuthorJobForIssue(ctx, issue.ID); err != nil {
+				if _, live, err := s.workers.LiveAuthorJobForTask(ctx, task.ID); err != nil {
 					return nil, fmt.Errorf("load live author job: %w", err)
 				} else if live {
 					paused = false
@@ -720,70 +720,70 @@ func (s *projectServer) buildUIIssueDetail(ctx context.Context, issue coordinato
 			}
 			detail.Paused = paused
 		}
-		changes, err := s.sessions.ListChangesForIssue(ctx, issue.ID, 10)
+		changes, err := s.sessions.ListChangesForTask(ctx, task.ID, 10)
 		if err != nil {
-			return nil, fmt.Errorf("load issue changes: %w", err)
+			return nil, fmt.Errorf("load task changes: %w", err)
 		}
 		for _, change := range changes {
 			summary := uiChangeSummaryFromChange(change)
 			detail.Changes = append(detail.Changes, *summary)
 		}
-		readyChange, ok, err := s.sessions.ReadyUnmergedChangeForIssue(ctx, issue.ID)
+		readyChange, ok, err := s.sessions.ReadyUnmergedChangeForTask(ctx, task.ID)
 		if err != nil {
 			return nil, fmt.Errorf("load ready change: %w", err)
 		}
 		if ok {
 			detail.ReadyChange = uiChangeSummaryFromChange(readyChange)
 		}
-		consoleState, err := s.sessions.CurrentIssueConsole(ctx, issue.ID)
+		consoleState, err := s.sessions.CurrentTaskConsole(ctx, task.ID)
 		if err != nil {
-			return nil, fmt.Errorf("load issue console: %w", err)
+			return nil, fmt.Errorf("load task console: %w", err)
 		}
 		consoleResponse := s.consoleResponse(consoleState)
-		detail.IssueConsole = &consoleResponse
+		detail.TaskConsole = &consoleResponse
 	}
 	if s.checks != nil {
-		checks, err := s.checks.ListChecks(ctx, issue.ID)
+		checks, err := s.checks.ListChecks(ctx, task.ID)
 		if err != nil {
 			return nil, fmt.Errorf("load checks: %w", err)
 		}
 		detail.Checks = checks
 		detail.RequiredChecks = uiRequiredCheckSummaryFromChecks(checks)
-		reviewState, err := s.checks.ReviewState(ctx, issue.ID)
+		reviewState, err := s.checks.ReviewState(ctx, task.ID)
 		if err != nil {
 			return nil, fmt.Errorf("load review state: %w", err)
 		}
 		detail.ReviewState = reviewState
 	}
 	if s.transitions != nil {
-		transitions, err := s.transitions.ListForIssue(ctx, issue.ID, 50)
+		transitions, err := s.transitions.ListForTask(ctx, task.ID, 50)
 		if err != nil {
 			return nil, fmt.Errorf("load transitions: %w", err)
 		}
 		detail.Transitions = transitions
-		timeline, err := s.transitions.ListForIssueWithPayload(ctx, issue.ID, 50)
+		timeline, err := s.transitions.ListForTaskWithPayload(ctx, task.ID, 50)
 		if err != nil {
 			return nil, fmt.Errorf("load timeline transitions: %w", err)
 		}
 		detail.TimelineTransitions = timeline
 	}
-	attachments, err := s.issues.ListIssueAttachments(ctx, issue.ID)
+	attachments, err := s.tasks.ListTaskAttachments(ctx, task.ID)
 	if err != nil {
-		return nil, fmt.Errorf("load issue attachments: %w", err)
+		return nil, fmt.Errorf("load task attachments: %w", err)
 	}
 	detail.Attachments = attachments
 
 	return detail, nil
 }
 
-func (s *projectServer) handleEditIssue(w http.ResponseWriter, r *http.Request, issueID string) {
-	var request editIssueRequest
+func (s *projectServer) handleEditTask(w http.ResponseWriter, r *http.Request, taskID string) {
+	var request editTaskRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
 
-	issue, err := s.issues.EditIssue(r.Context(), issueID, coordinator.EditIssueInput{
+	task, err := s.tasks.EditTask(r.Context(), taskID, coordinator.EditTaskInput{
 		Title:              request.Title,
 		Body:               request.Body,
 		AcceptanceCriteria: request.AcceptanceCriteria,
@@ -791,14 +791,14 @@ func (s *projectServer) handleEditIssue(w http.ResponseWriter, r *http.Request, 
 		FlowID:             request.FlowID,
 	})
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "edit_issue_failed", err.Error())
+		writeError(w, http.StatusBadRequest, "edit_task_failed", err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name})
+	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
 }
 
-func (s *projectServer) handleIssueRelations(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
+func (s *projectServer) handleTaskRelations(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
 	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method is not allowed")
 		return
@@ -809,11 +809,11 @@ func (s *projectServer) handleIssueRelations(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	sourceIssueID := strings.TrimSpace(request.SourceIssueID)
-	if sourceIssueID == "" {
-		sourceIssueID = issueID
+	sourceTaskID := strings.TrimSpace(request.SourceTaskID)
+	if sourceTaskID == "" {
+		sourceTaskID = taskID
 	}
-	targetIssueID := strings.TrimSpace(request.TargetIssueID)
+	targetTaskID := strings.TrimSpace(request.TargetTaskID)
 	kind := coordinator.RelationKind(request.Kind)
 
 	switch r.Method {
@@ -822,26 +822,26 @@ func (s *projectServer) handleIssueRelations(w http.ResponseWriter, r *http.Requ
 		if principal.Scope == coordinator.TokenScopeConsole {
 			actor = coordinator.ActorAgent
 		}
-		if err := s.issues.LinkIssues(r.Context(), sourceIssueID, targetIssueID, kind, actor); err != nil {
-			writeError(w, http.StatusBadRequest, "link_issues_failed", err.Error())
+		if err := s.tasks.LinkTasks(r.Context(), sourceTaskID, targetTaskID, kind, actor); err != nil {
+			writeError(w, http.StatusBadRequest, "link_tasks_failed", err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	case http.MethodDelete:
-		if err := s.issues.UnlinkIssues(r.Context(), sourceIssueID, targetIssueID, kind); err != nil {
-			writeError(w, http.StatusBadRequest, "unlink_issues_failed", err.Error())
+		if err := s.tasks.UnlinkTasks(r.Context(), sourceTaskID, targetTaskID, kind); err != nil {
+			writeError(w, http.StatusBadRequest, "unlink_tasks_failed", err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
-func (s *projectServer) handleListTransitions(w http.ResponseWriter, r *http.Request, issueID string) {
+func (s *projectServer) handleListTransitions(w http.ResponseWriter, r *http.Request, taskID string) {
 	if s.workflowRuns == nil {
 		writeError(w, http.StatusInternalServerError, "transitions_unavailable", "transition service is not configured")
 		return
 	}
-	entries, err := s.workflowRuns.ListTransitionsForIssue(r.Context(), issueID, 100)
+	entries, err := s.workflowRuns.ListTransitionsForTask(r.Context(), taskID, 100)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "list_transitions_failed", err.Error())
 		return
@@ -875,8 +875,8 @@ func writeEngineError(w http.ResponseWriter, err error, defaultCode string) {
 	}
 }
 
-func (s *projectServer) handleScheduleIssue(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
-	var request scheduleIssueRequest
+func (s *projectServer) handleScheduleTask(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
+	var request scheduleTaskRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
@@ -886,25 +886,25 @@ func (s *projectServer) handleScheduleIssue(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-		Kind:    lifecycle.EventScheduleIssue,
-		IssueID: issueID,
+		Kind:    lifecycle.EventScheduleTask,
+		TaskID:  taskID,
 		Payload: lifecycle.EventPayload{Schedule: coordinator.ScheduleState(request.State)},
 	}))
 	if err != nil {
-		writeEngineError(w, err, "schedule_issue_failed")
+		writeEngineError(w, err, "schedule_task_failed")
 		return
 	}
 
-	issue, err := s.issueForResult(r.Context(), result, issueID)
+	task, err := s.taskForResult(r.Context(), result, taskID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "schedule_issue_failed", err.Error())
+		writeError(w, http.StatusBadRequest, "schedule_task_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name})
+	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
 }
 
-func (s *projectServer) handleSetIssueState(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
-	var request issueStateRequest
+func (s *projectServer) handleSetTaskState(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
+	var request taskStateRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
@@ -914,130 +914,130 @@ func (s *projectServer) handleSetIssueState(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-		Kind:    lifecycle.EventSetIssueState,
-		IssueID: issueID,
-		Payload: lifecycle.EventPayload{IssueState: coordinator.IssueState(request.State)},
+		Kind:    lifecycle.EventSetTaskState,
+		TaskID:  taskID,
+		Payload: lifecycle.EventPayload{TaskState: coordinator.TaskState(request.State)},
 	}))
 	if err != nil {
-		writeEngineError(w, err, "set_issue_state_failed")
+		writeEngineError(w, err, "set_task_state_failed")
 		return
 	}
 
-	issue, err := s.issueForResult(r.Context(), result, issueID)
+	task, err := s.taskForResult(r.Context(), result, taskID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "set_issue_state_failed", err.Error())
+		writeError(w, http.StatusBadRequest, "set_task_state_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name})
+	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
 }
 
-func (s *projectServer) handleResetIssue(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
+func (s *projectServer) handleResetTask(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
 	if !s.requireEngine(w) {
 		return
 	}
 	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-		Kind:    lifecycle.EventResetIssue,
-		IssueID: issueID,
+		Kind:   lifecycle.EventResetTask,
+		TaskID: taskID,
 	}))
 	if err != nil {
-		writeEngineError(w, err, "reset_issue_failed")
+		writeEngineError(w, err, "reset_task_failed")
 		return
 	}
 
-	issue, err := s.issueForResult(r.Context(), result, issueID)
+	task, err := s.taskForResult(r.Context(), result, taskID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "reset_issue_failed", err.Error())
+		writeError(w, http.StatusBadRequest, "reset_task_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name})
+	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
 }
 
-// issueForResult returns the issue carried by a StepResult, falling back to a
+// taskForResult returns the task carried by a StepResult, falling back to a
 // fresh load when the transition did not surface one (e.g. an idempotent replay).
-func (s *projectServer) issueForResult(ctx context.Context, result lifecycle.StepResult, issueID string) (coordinator.Issue, error) {
-	if result.Issue != nil {
-		return *result.Issue, nil
+func (s *projectServer) taskForResult(ctx context.Context, result lifecycle.StepResult, taskID string) (coordinator.Task, error) {
+	if result.Task != nil {
+		return *result.Task, nil
 	}
-	return s.issues.GetIssue(ctx, issueID)
+	return s.tasks.GetTask(ctx, taskID)
 }
 
-func (s *projectServer) handleCloseIssue(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
+func (s *projectServer) handleCloseTask(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
 	if !s.requireEngine(w) {
 		return
 	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{Kind: lifecycle.EventCloseIssue, IssueID: issueID}))
+	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{Kind: lifecycle.EventCloseTask, TaskID: taskID}))
 	if err != nil {
-		writeEngineError(w, err, "close_issue_failed")
+		writeEngineError(w, err, "close_task_failed")
 		return
 	}
-	issue, err := s.issueForResult(r.Context(), result, issueID)
+	task, err := s.taskForResult(r.Context(), result, taskID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "close_issue_failed", err.Error())
+		writeError(w, http.StatusBadRequest, "close_task_failed", err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name})
+	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
 }
 
-func (s *projectServer) handlePauseIssue(w http.ResponseWriter, r *http.Request, issueID string) {
+func (s *projectServer) handlePauseTask(w http.ResponseWriter, r *http.Request, taskID string) {
 	if s.sessions == nil {
 		writeError(w, http.StatusServiceUnavailable, "sessions_unavailable", "session service is not configured")
 		return
 	}
-	if _, err := s.sessions.PauseAuthorSession(r.Context(), issueID); err != nil {
+	if _, err := s.sessions.PauseAuthorSession(r.Context(), taskID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusConflict, "pause_issue_failed", "issue has no active author session")
+			writeError(w, http.StatusConflict, "pause_task_failed", "task has no active author session")
 			return
 		}
-		writeError(w, http.StatusBadRequest, "pause_issue_failed", err.Error())
+		writeError(w, http.StatusBadRequest, "pause_task_failed", err.Error())
 		return
 	}
-	issue, err := s.issues.GetIssue(r.Context(), issueID)
+	task, err := s.tasks.GetTask(r.Context(), taskID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "pause_issue_failed", err.Error())
+		writeError(w, http.StatusBadRequest, "pause_task_failed", err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name})
+	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
 }
 
-func (s *projectServer) handleResumeIssue(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
+func (s *projectServer) handleResumeTask(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
 	if !s.requireEngine(w) {
 		return
 	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{Kind: lifecycle.EventEnsureWorkPhaseJob, IssueID: issueID}))
+	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{Kind: lifecycle.EventEnsureWorkPhaseJob, TaskID: taskID}))
 	if err != nil {
-		writeEngineError(w, err, "resume_issue_failed")
+		writeEngineError(w, err, "resume_task_failed")
 		return
 	}
-	issue, err := s.issueForResult(r.Context(), result, issueID)
+	task, err := s.taskForResult(r.Context(), result, taskID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "resume_issue_failed", err.Error())
+		writeError(w, http.StatusBadRequest, "resume_task_failed", err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name})
+	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
 }
 
-func (s *projectServer) handleRetryCrashedAuthorJob(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
+func (s *projectServer) handleRetryCrashedAuthorJob(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
 	if !s.requireEngine(w) {
 		return
 	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{Kind: lifecycle.EventRetryCrashedAuthorJob, IssueID: issueID}))
+	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{Kind: lifecycle.EventRetryCrashedAuthorJob, TaskID: taskID}))
 	if err != nil {
 		writeEngineError(w, err, "retry_crashed_author_job_failed")
 		return
 	}
-	issue, err := s.issueForResult(r.Context(), result, issueID)
+	task, err := s.taskForResult(r.Context(), result, taskID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "retry_crashed_author_job_failed", err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name})
+	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
 }
 
-func (s *projectServer) handleMergeIssue(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
+func (s *projectServer) handleMergeTask(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
 	if !s.requireEngine(w) {
 		return
 	}
@@ -1045,7 +1045,7 @@ func (s *projectServer) handleMergeIssue(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusInternalServerError, "merges_unavailable", "merge service is not configured")
 		return
 	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{Kind: lifecycle.EventMergeRequested, IssueID: issueID}))
+	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{Kind: lifecycle.EventMergeRequested, TaskID: taskID}))
 	if err != nil {
 		writeEngineError(w, err, "merge_failed")
 		return
@@ -1079,8 +1079,8 @@ func (s *projectServer) handleMergeChange(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, mergeResponse{Merge: *result.Merge})
 }
 
-func (s *projectServer) handleTriageIssue(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
-	var request triageIssueRequest
+func (s *projectServer) handleTriageTask(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
+	var request triageTaskRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
@@ -1096,21 +1096,21 @@ func (s *projectServer) handleTriageIssue(w http.ResponseWriter, r *http.Request
 		return
 	}
 	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-		Kind:    lifecycle.EventTriageIssue,
-		IssueID: issueID,
+		Kind:    lifecycle.EventTriageTask,
+		TaskID:  taskID,
 		Payload: lifecycle.EventPayload{Triage: state},
 	}))
 	if err != nil {
-		writeEngineError(w, err, "triage_issue_failed")
+		writeEngineError(w, err, "triage_task_failed")
 		return
 	}
 
-	issue, err := s.issueForResult(r.Context(), result, issueID)
+	task, err := s.taskForResult(r.Context(), result, taskID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "triage_issue_failed", err.Error())
+		writeError(w, http.StatusBadRequest, "triage_task_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name})
+	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
 }
 
 func (s *projectServer) handleBoard(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
@@ -1128,7 +1128,7 @@ func (s *projectServer) boardResponseForProject(ctx context.Context, principal c
 		return boardResponse{}, err
 	}
 
-	result, err := s.issues.BoardResult(ctx)
+	result, err := s.tasks.BoardResult(ctx)
 	if err != nil {
 		return boardResponse{}, err
 	}
@@ -1146,35 +1146,35 @@ func (s *projectServer) boardResponseForProject(ctx context.Context, principal c
 		return response, nil
 	}
 
-	cards, err := s.buildUIIssueCards(ctx, boardIssues(result.Board))
+	cards, err := s.buildUITaskCards(ctx, boardTasks(result.Board))
 	if err != nil {
 		return boardResponse{}, err
 	}
 
-	response.IssueCards = cards
+	response.TaskCards = cards
 	return response, nil
 }
 
-// doneResponseForProject builds the terminal-issue read model for one project.
-// Issues + outcomes are returned for any read scope; the lean cards (which read
+// doneResponseForProject builds the terminal-task read model for one project.
+// Tasks + outcomes are returned for any read scope; the lean cards (which read
 // change details) are gated on owner scope exactly as the board cards are.
-func (s *projectServer) doneResponseForProject(ctx context.Context, principal coordinator.Principal, query coordinator.ClosedIssueQuery) (doneResponse, error) {
-	issues, next, err := s.issues.ListClosedIssues(ctx, query)
+func (s *projectServer) doneResponseForProject(ctx context.Context, principal coordinator.Principal, query coordinator.ClosedTaskQuery) (doneResponse, error) {
+	tasks, next, err := s.tasks.ListClosedTasks(ctx, query)
 	if err != nil {
 		return doneResponse{}, err
 	}
 
 	response := doneResponse{
-		Issues:   issues,
-		Outcomes: make(map[string]coordinator.Phase, len(issues)),
+		Tasks:    tasks,
+		Outcomes: make(map[string]coordinator.Phase, len(tasks)),
 	}
 	if next != nil {
 		response.NextBefore = sqlitex.FormatTime(next.ClosedAt)
 		response.NextBeforeID = next.ID
 	}
-	for _, issue := range issues {
-		if issue.DoneResolution != nil {
-			response.Outcomes[issue.ID] = coordinator.Phase(*issue.DoneResolution)
+	for _, task := range tasks {
+		if task.DoneResolution != nil {
+			response.Outcomes[task.ID] = coordinator.Phase(*task.DoneResolution)
 		}
 	}
 
@@ -1182,33 +1182,33 @@ func (s *projectServer) doneResponseForProject(ctx context.Context, principal co
 		return response, nil
 	}
 
-	cards, err := s.buildUIDoneCards(ctx, issues)
+	cards, err := s.buildUIDoneCards(ctx, tasks)
 	if err != nil {
 		return doneResponse{}, err
 	}
-	response.IssueCards = cards
+	response.TaskCards = cards
 	return response, nil
 }
 
 // buildUIDoneCards loads the merged change (if any) and tags for each closed
-// issue. Work is bounded by the caller's page size.
-func (s *projectServer) buildUIDoneCards(ctx context.Context, issues []coordinator.Issue) (map[string]uiDoneCard, error) {
-	if len(issues) == 0 {
+// task. Work is bounded by the caller's page size.
+func (s *projectServer) buildUIDoneCards(ctx context.Context, tasks []coordinator.Task) (map[string]uiDoneCard, error) {
+	if len(tasks) == 0 {
 		return nil, nil
 	}
 
-	cards := make(map[string]uiDoneCard, len(issues))
-	for _, issue := range issues {
-		card := uiDoneCard{IssueID: issue.ID}
-		tags, err := s.issues.TagsForIssue(ctx, issue.ID)
+	cards := make(map[string]uiDoneCard, len(tasks))
+	for _, task := range tasks {
+		card := uiDoneCard{TaskID: task.ID}
+		tags, err := s.tasks.TagsForTask(ctx, task.ID)
 		if err != nil {
-			return nil, fmt.Errorf("load tags for %s: %w", issue.ID, err)
+			return nil, fmt.Errorf("load tags for %s: %w", task.ID, err)
 		}
 		card.Tags = tags
 		if s.sessions != nil {
-			changes, err := s.sessions.ListChangesForIssue(ctx, issue.ID, 10)
+			changes, err := s.sessions.ListChangesForTask(ctx, task.ID, 10)
 			if err != nil {
-				return nil, fmt.Errorf("load changes for %s: %w", issue.ID, err)
+				return nil, fmt.Errorf("load changes for %s: %w", task.ID, err)
 			}
 			for _, change := range changes {
 				if change.MergedAt != nil {
@@ -1217,28 +1217,28 @@ func (s *projectServer) buildUIDoneCards(ctx context.Context, issues []coordinat
 				}
 			}
 		}
-		cards[issue.ID] = card
+		cards[task.ID] = card
 	}
 
 	return cards, nil
 }
 
-func boardIssues(board coordinator.Board) []coordinator.Issue {
+func boardTasks(board coordinator.Board) []coordinator.Task {
 	seen := map[string]bool{}
-	var issues []coordinator.Issue
-	for _, lane := range [][]coordinator.Issue{
+	var tasks []coordinator.Task
+	for _, lane := range [][]coordinator.Task{
 		board.Unscheduled,
 		board.Scheduled,
 		board.InProgress,
 	} {
-		for _, issue := range lane {
-			if seen[issue.ID] {
+		for _, task := range lane {
+			if seen[task.ID] {
 				continue
 			}
-			seen[issue.ID] = true
-			issues = append(issues, issue)
+			seen[task.ID] = true
+			tasks = append(tasks, task)
 		}
 	}
 
-	return issues
+	return tasks
 }

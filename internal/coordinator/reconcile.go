@@ -23,12 +23,12 @@ type ReconcileResult struct {
 	UnknownBranches []string `json:"unknown_branches"`
 	// UpdatedChanges lists the changes whose stored head was created or moved
 	// to match the actual branch tip during this pass, so callers (the git
-	// event consumer) can reset stale per-issue state.
+	// event consumer) can reset stale per-task state.
 	UpdatedChanges []ReconciledChange `json:"updated_changes,omitempty"`
 }
 
 type ReconciledChange struct {
-	IssueID  string `json:"issue_id"`
+	TaskID   string `json:"task_id"`
 	ChangeID string `json:"change_id"`
 }
 
@@ -65,22 +65,22 @@ func (s *ReconcileService) Reconcile(ctx context.Context, project Project) (Reco
 		result.SkippedProjects = append(result.SkippedProjects, project.ID)
 		return result, nil
 	}
-	refs, err := flowgit.ListIssueBranchRefs(ctx, project.ExchangePath)
+	refs, err := flowgit.ListTaskBranchRefs(ctx, project.ExchangePath)
 	if err != nil {
 		result.ProjectsSkipped++
 		result.SkippedProjects = append(result.SkippedProjects, project.ID)
-		return result, fmt.Errorf("list issue branch refs for project %s: %w", project.ID, err)
+		return result, fmt.Errorf("list task branch refs for project %s: %w", project.ID, err)
 	}
 	result.ProjectsScanned++
 	for _, ref := range refs {
 		result.BranchesScanned++
-		issueID := issueIDForBranch(ref.Branch)
-		if issueID == "" || !s.issueExists(ctx, issueID) {
+		taskID := taskIDForBranch(ref.Branch)
+		if taskID == "" || !s.taskExists(ctx, taskID) {
 			result.UnknownBranches = append(result.UnknownBranches, ref.Branch)
 			continue
 		}
 
-		change, created, updated, err := s.ensureChangeProjection(ctx, issueID, ref.Branch, project.BaseBranch, ref.SHA)
+		change, created, updated, err := s.ensureChangeProjection(ctx, taskID, ref.Branch, project.BaseBranch, ref.SHA)
 		if err != nil {
 			joinedErr = errors.Join(joinedErr, fmt.Errorf("ensure change projection for %s: %w", ref.Branch, err))
 			continue
@@ -91,7 +91,7 @@ func (s *ReconcileService) Reconcile(ctx context.Context, project Project) (Reco
 			result.ChangesUpdated++
 		}
 		if created || updated {
-			result.UpdatedChanges = append(result.UpdatedChanges, ReconciledChange{IssueID: issueID, ChangeID: change.ID})
+			result.UpdatedChanges = append(result.UpdatedChanges, ReconciledChange{TaskID: taskID, ChangeID: change.ID})
 		}
 	}
 
@@ -120,20 +120,20 @@ WHERE change_id = ?`, strings.TrimSpace(changeID))
 	return scanHandoffSnapshot(row)
 }
 
-func (s *ReconcileService) issueExists(ctx context.Context, issueID string) bool {
+func (s *ReconcileService) taskExists(ctx context.Context, taskID string) bool {
 	var count int
 	if err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(*)
-FROM issues
-WHERE id = ?`, issueID).Scan(&count); err != nil {
+FROM tasks
+WHERE id = ?`, taskID).Scan(&count); err != nil {
 		return false
 	}
 
 	return count == 1
 }
 
-func (s *ReconcileService) ensureChangeProjection(ctx context.Context, issueID string, branch string, base string, headSHA string) (Change, bool, bool, error) {
-	existing, err := s.changeForIssueBranch(ctx, issueID, branch)
+func (s *ReconcileService) ensureChangeProjection(ctx context.Context, taskID string, branch string, base string, headSHA string) (Change, bool, bool, error) {
+	existing, err := s.changeForTaskBranch(ctx, taskID, branch)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return Change{}, false, false, err
 	}
@@ -147,7 +147,7 @@ func (s *ReconcileService) ensureChangeProjection(ctx context.Context, issueID s
 		if _, err := s.db.ExecContext(ctx, `
 INSERT INTO changes (
 	id,
-	issue_id,
+	task_id,
 	branch,
 	base,
 	head_sha,
@@ -155,7 +155,7 @@ INSERT INTO changes (
 	updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			id,
-			issueID,
+			taskID,
 			branch,
 			base,
 			headSHA,
@@ -186,18 +186,18 @@ WHERE id = ?`,
 	return change, false, true, err
 }
 
-func (s *ReconcileService) changeForIssueBranch(ctx context.Context, issueID string, branch string) (Change, error) {
+func (s *ReconcileService) changeForTaskBranch(ctx context.Context, taskID string, branch string) (Change, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, issue_id, branch, base, head_sha, created_at, updated_at, ready_at, merged_at
+SELECT id, task_id, branch, base, head_sha, created_at, updated_at, ready_at, merged_at
 FROM changes
-WHERE issue_id = ? AND branch = ?`, issueID, branch)
+WHERE task_id = ? AND branch = ?`, taskID, branch)
 
 	return scanChange(row)
 }
 
 func (s *ReconcileService) getChange(ctx context.Context, changeID string) (Change, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, issue_id, branch, base, head_sha, created_at, updated_at, ready_at, merged_at
+SELECT id, task_id, branch, base, head_sha, created_at, updated_at, ready_at, merged_at
 FROM changes
 WHERE id = ?`, changeID)
 
@@ -275,7 +275,7 @@ INSERT INTO handoff_history (
 	return nil
 }
 
-func scanHandoffSnapshot(scanner issueScanner) (HandoffSnapshot, error) {
+func scanHandoffSnapshot(scanner taskScanner) (HandoffSnapshot, error) {
 	var snapshot HandoffSnapshot
 	var present int
 	var valid int
@@ -302,15 +302,15 @@ func scanHandoffSnapshot(scanner issueScanner) (HandoffSnapshot, error) {
 	return snapshot, nil
 }
 
-func issueIDForBranch(branch string) string {
+func taskIDForBranch(branch string) string {
 	branch = strings.TrimSpace(branch)
-	if !strings.HasPrefix(branch, "issue/") {
+	if !strings.HasPrefix(branch, "task/") {
 		return ""
 	}
 
-	issueID := strings.TrimPrefix(branch, "issue/")
-	if marker := strings.Index(issueID, "/run-"); marker >= 0 {
-		issueID = issueID[:marker]
+	taskID := strings.TrimPrefix(branch, "task/")
+	if marker := strings.Index(taskID, "/run-"); marker >= 0 {
+		taskID = taskID[:marker]
 	}
-	return issueID
+	return taskID
 }

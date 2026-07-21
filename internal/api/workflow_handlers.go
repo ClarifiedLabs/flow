@@ -44,8 +44,8 @@ type workflowArtifactResponse struct {
 	Replayed bool                         `json:"replayed"`
 }
 
-func (s *projectServer) handleScheduleWorkflow(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
-	run, err := s.workflowRuns.ScheduleAs(r.Context(), issueID, workflowActor(principal))
+func (s *projectServer) handleScheduleWorkflow(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
+	run, err := s.workflowRuns.ScheduleAs(r.Context(), taskID, workflowActor(principal))
 	if err != nil {
 		writeWorkflowError(w, err, "schedule_workflow_failed")
 		return
@@ -64,8 +64,8 @@ func (s *projectServer) handleScheduleWorkflow(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, workflowRunResponse{Run: run})
 }
 
-func (s *projectServer) handleResetWorkflow(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
-	run, err := s.workflowRuns.Reset(r.Context(), issueID, workflowActor(principal))
+func (s *projectServer) handleResetWorkflow(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
+	run, err := s.workflowRuns.Reset(r.Context(), taskID, workflowActor(principal))
 	if err != nil {
 		writeWorkflowError(w, err, "reset_workflow_failed")
 		return
@@ -76,18 +76,18 @@ func (s *projectServer) handleResetWorkflow(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, workflowRunResponse{Run: run})
 }
 
-func (s *projectServer) handleForceDoneWorkflow(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
+func (s *projectServer) handleForceDoneWorkflow(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
 	var request workflowDoneRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	activeRun, hadActiveRun, lookupErr := s.workflowRuns.ActiveForIssue(r.Context(), issueID)
+	activeRun, hadActiveRun, lookupErr := s.workflowRuns.ActiveForTask(r.Context(), taskID)
 	if lookupErr != nil {
 		writeWorkflowError(w, lookupErr, "complete_workflow_failed")
 		return
 	}
-	issue, err := s.workflowRuns.ForceDone(r.Context(), issueID, request.Resolution, request.Note, workflowActor(principal))
+	task, err := s.workflowRuns.ForceDone(r.Context(), taskID, request.Resolution, request.Note, workflowActor(principal))
 	if err != nil {
 		writeWorkflowError(w, err, "complete_workflow_failed")
 		return
@@ -97,19 +97,19 @@ func (s *projectServer) handleForceDoneWorkflow(w http.ResponseWriter, r *http.R
 			slog.Warn("revoke completed workflow session tokens", "workflow_run_id", activeRun.ID, "error", err)
 		}
 	}
-	writeJSON(w, http.StatusOK, issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name})
+	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
 }
 
-func (s *projectServer) handleReopenWorkflow(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string) {
-	issue, err := s.workflowRuns.Reopen(r.Context(), issueID, workflowActor(principal))
+func (s *projectServer) handleReopenWorkflow(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
+	task, err := s.workflowRuns.Reopen(r.Context(), taskID, workflowActor(principal))
 	if err != nil {
 		writeWorkflowError(w, err, "reopen_workflow_failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, issueResponse{Issue: issue, ProjectID: s.project.ID, ProjectName: s.project.Name})
+	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
 }
 
-func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, issueID string, parts []string) {
+func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string, parts []string) {
 	if s.workflowRuns == nil || s.workflowArtifacts == nil {
 		writeError(w, http.StatusServiceUnavailable, "workflows_unavailable", "workflow services are not configured")
 		return
@@ -118,7 +118,7 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
-		runs, err := s.workflowRuns.ListForIssue(r.Context(), issueID)
+		runs, err := s.workflowRuns.ListForTask(r.Context(), taskID)
 		if err != nil {
 			writeWorkflowError(w, err, "list_workflows_failed")
 			return
@@ -164,7 +164,7 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		run, err := s.workflowRuns.Get(r.Context(), nodeRun.WorkflowRunID)
-		if err != nil || run.IssueID != issueID {
+		if err != nil || run.TaskID != taskID {
 			if err == nil {
 				err = coordinator.ErrWorkflowRunNotFound
 			}
@@ -210,7 +210,7 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		run, err := s.workflowRuns.Get(r.Context(), nodeRun.WorkflowRunID)
-		if err != nil || run.IssueID != issueID {
+		if err != nil || run.TaskID != taskID {
 			if err == nil {
 				err = coordinator.ErrWorkflowRunNotFound
 			}
@@ -284,7 +284,7 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 			return
 		}
-		result, err := s.workflowRuns.Respond(r.Context(), issueID, request.NodeRunID, request.Outcome, request.Feedback, coordinator.ActorHuman)
+		result, err := s.workflowRuns.Respond(r.Context(), taskID, request.NodeRunID, request.Outcome, request.Feedback, coordinator.ActorHuman)
 		if err != nil {
 			writeWorkflowError(w, err, "respond_workflow_failed")
 			return
@@ -309,7 +309,7 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 			return
 		}
-		run, err := s.workflowRuns.ExtendBudget(r.Context(), issueID, request.Additional, coordinator.ActorHuman)
+		run, err := s.workflowRuns.ExtendBudget(r.Context(), taskID, request.Additional, coordinator.ActorHuman)
 		if err != nil {
 			writeWorkflowError(w, err, "extend_workflow_budget_failed")
 			return
@@ -330,7 +330,7 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 		if !requireMethod(w, r, http.MethodPost) || !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
 			return
 		}
-		run, ok, err := s.workflowRuns.ActiveForIssue(r.Context(), issueID)
+		run, ok, err := s.workflowRuns.ActiveForTask(r.Context(), taskID)
 		if err != nil || !ok {
 			if err == nil {
 				err = coordinator.ErrNoActiveWorkflowRun

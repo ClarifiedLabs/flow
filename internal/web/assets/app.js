@@ -5,12 +5,12 @@
 import { value } from "./normalize.js";
 import { escapeHTML, escapeAttr } from "./html.js";
 import { NAV, SIDEBAR_STATUS_POLL_MS, MAX_POLL_BACKOFF_MS, DEFAULT_AGENT_HARNESSES, DEFAULT_CONSOLE_HARNESSES } from "./config.js";
-import { apiGet, apiPost, apiPatch, apiDelete, issueConsoleAPIPath, issueAPIBase, issueHref, flowsAPIBase } from "./api.js";
+import { apiGet, apiPost, apiPatch, apiDelete, taskConsoleAPIPath, taskAPIBase, taskHref, flowsAPIBase } from "./api.js";
 import { readSelectedProjects, writeSelectedProjects, routeFilter, terminalSessionIDForPath, pollConfigForPath, readThemePreference, writeThemePreference, applyThemePreference, readDiffMode, writeDiffMode } from "./storage.js";
 import { renderNavLink, THEME_ICONS, THEME_OPTIONS } from "./nav.js";
 import { normalizeHarnessOptions } from "./harness-models.js";
 import { openTerminalWindow, closeTerminalDialog, hideInlineTerminal, closeTerminalModalLayers } from "./terminal.js";
-import { uploadIssueAttachment } from "./issue.js";
+import { uploadTaskAttachment } from "./task.js";
 import { pollDelay, Poller } from "./poller.js";
 import { renderWorkersView, renderJobsView } from "./diagnostics-view.js";
 import { renderChangeView, renderChangeDiffView } from "./change-view.js";
@@ -18,8 +18,8 @@ import { renderDiffSummary } from "./diff.js";
 import { renderTerminalView, openInlineTerminalView, showTranscriptView } from "./terminal-view.js";
 import { renderConsoleView, stopConsolePollView, startConsoleView, releaseConsoleView } from "./console-view.js";
 import { renderDoneView } from "./done-view.js";
-import { renderBoardView, createIssueView, renderIssueCardView } from "./board-view.js";
-import { renderNewIssueView, renderIssueFormView, renderIssueReadOnlyDetailView, renderIssueView, toggleIssueEditFormView, bindIssueFlowControlsView } from "./issue-view.js";
+import { renderBoardView, createTaskView, renderTaskCardView } from "./board-view.js";
+import { renderNewTaskView, renderTaskFormView, renderTaskReadOnlyDetailView, renderTaskView, toggleTaskEditFormView, bindTaskFlowControlsView } from "./task-view.js";
 import { renderFlowsView } from "./flows-view.js";
 
 export * from "./normalize.js";
@@ -38,7 +38,7 @@ export * from "./diagnostics-view.js";
 export * from "./diff.js";
 export * from "./timeline.js";
 export * from "./attention.js";
-export * from "./issue.js";
+export * from "./task.js";
 export * from "./poller.js";
 export * from "./flows-view.js";
 
@@ -48,15 +48,15 @@ export * from "./flows-view.js";
 // the catch-all last. render() receives the app instance, the load context and
 // the matched params.
 const ROUTES = [
-  { match: (p) => p === "/ui/issues/new", render: (app, ctx) => renderNewIssueView(app, ctx) },
+  { match: (p) => p === "/ui/tasks/new", render: (app, ctx) => renderNewTaskView(app, ctx) },
   {
     match: (p) => {
-      const m = p.match(/^\/ui\/projects\/([^/]+)\/issues\/([^/]+)$/);
-      return m && { project: decodeURIComponent(m[1]), issue: decodeURIComponent(m[2]) };
+      const m = p.match(/^\/ui\/projects\/([^/]+)\/tasks\/([^/]+)$/);
+      return m && { project: decodeURIComponent(m[1]), task: decodeURIComponent(m[2]) };
     },
-    render: (app, ctx, p) => app.renderIssue(p.issue, ctx, p.project),
+    render: (app, ctx, p) => app.renderTask(p.task, ctx, p.project),
   },
-  { match: (p) => p.startsWith("/ui/issues/") && { unscopedIssue: true }, render: (app) => renderUnscopedIssueRoute(app) },
+  { match: (p) => p.startsWith("/ui/tasks/") && { unscopedTask: true }, render: (app) => renderUnscopedTaskRoute(app) },
   { match: (p) => p.startsWith("/ui/changes/") && { id: p.split("/").pop() }, render: (app, ctx, p) => app.renderChange(p.id, ctx) },
   { match: (p) => p === "/ui/console", render: (app, ctx) => app.renderConsole(ctx) },
   { match: (p) => { const id = terminalSessionIDForPath(p); return id && { id }; }, render: (app, ctx, p) => renderTerminalView(app, p.id, ctx) },
@@ -67,12 +67,12 @@ const ROUTES = [
   { match: () => true, render: (app, ctx) => renderBoardView(app, routeFilter(ctx.path), ctx) },
 ];
 
-function renderUnscopedIssueRoute(app) {
-  app.setTitle("Issue");
+function renderUnscopedTaskRoute(app) {
+  app.setTitle("Task");
   app.querySelector(".content").innerHTML = `
     <section class="detail">
-      <h2>Project-scoped issue URL required</h2>
-      <p class="meta-quiet">Issue IDs are scoped to projects. Use /ui/projects/&lt;project-id&gt;/issues/&lt;issue-id&gt;.</p>
+      <h2>Project-scoped task URL required</h2>
+      <p class="meta-quiet">Task IDs are scoped to projects. Use /ui/projects/&lt;project-id&gt;/tasks/&lt;task-id&gt;.</p>
     </section>
   `;
   return true;
@@ -133,7 +133,7 @@ export class FlowApp extends HTMLElement {
                 <summary class="button secondary"></summary>
                 <div class="project-picker-menu"></div>
               </details>
-              <button class="button" data-action="new-issue">New Issue</button>
+              <button class="button" data-action="new-task">New Task</button>
               <button class="button secondary" data-action="refresh">Refresh</button>
             </div>
           </div>
@@ -154,7 +154,7 @@ export class FlowApp extends HTMLElement {
       this.refreshSidebarStatus();
       this.load();
     });
-    this.querySelector('[data-action="new-issue"]').addEventListener("click", () => this.createIssue());
+    this.querySelector('[data-action="new-task"]').addEventListener("click", () => this.createTask());
     this.renderNav();
   }
 
@@ -173,14 +173,14 @@ export class FlowApp extends HTMLElement {
       if (start && this.contains(start) && !event.defaultPrevented) {
         event.preventDefault();
         const harness = this.querySelector("[data-console-harness]")?.value || "claude";
-        await this.startConsole(start.dataset.project || "", harness, start.dataset.issue || "");
+        await this.startConsole(start.dataset.project || "", harness, start.dataset.task || "");
         return;
       }
 
       const release = event.target?.closest?.("[data-release-console]");
       if (release && this.contains(release) && !event.defaultPrevented) {
         event.preventDefault();
-        await releaseConsoleView(this, release.dataset.project || "", release.dataset.issue || "");
+        await releaseConsoleView(this, release.dataset.project || "", release.dataset.task || "");
       }
     });
   }
@@ -259,7 +259,7 @@ export class FlowApp extends HTMLElement {
   }
 
   // ensureProjects loads the project registry; callers can force a refresh
-  // before rendering project-sensitive flows such as issue creation.
+  // before rendering project-sensitive flows such as task creation.
   async ensureProjects(options = {}) {
     if (this.projects && !options.refresh) return this.projects;
     try {
@@ -294,7 +294,7 @@ export class FlowApp extends HTMLElement {
     return this.harnesses;
   }
 
-  // ensureFlows loads (and per-project caches) a project's flows so the issue
+  // ensureFlows loads (and per-project caches) a project's flows so the task
   // form's Flow selector and the read-only flow summary can render
   // synchronously. Flows are project-owned, so the cache is keyed by project
   // id; pass { refresh: true } after a mutation to invalidate one project.
@@ -390,7 +390,7 @@ export class FlowApp extends HTMLElement {
     };
     this.loadGeneration = context.generation;
     try {
-      await this.ensureProjects({ refresh: path === "/ui/issues/new" || path === "/ui/flows" });
+      await this.ensureProjects({ refresh: path === "/ui/tasks/new" || path === "/ui/flows" });
       for (const route of ROUTES) {
         const params = route.match(path);
         if (!params) continue;
@@ -467,12 +467,12 @@ export class FlowApp extends HTMLElement {
   // refreshBoardDoneLane re-fetches and replaces only the board's Done column,
   // leaving the four active lanes (and the board poll) untouched.
 
-  createIssue() {
-    return createIssueView(this);
+  createTask() {
+    return createTaskView(this);
   }
 
-  renderIssueCard(issue, card, laneState, blocked, stagger, project, waitReason) {
-    return renderIssueCardView(this, issue, card, laneState, blocked, stagger, project, waitReason);
+  renderTaskCard(task, card, laneState, blocked, stagger, project, waitReason) {
+    return renderTaskCardView(this, task, card, laneState, blocked, stagger, project, waitReason);
   }
 
   // doneQuery combines the active project selection with the outcome filter and
@@ -484,21 +484,21 @@ export class FlowApp extends HTMLElement {
   // loadMoreDone fetches the next (older) page for every project that still has
   // a cursor, scoping each request to that project so keyset paging stays exact.
 
-  renderIssueForm(issue, options) {
-    return renderIssueFormView(this, issue, options);
+  renderTaskForm(task, options) {
+    return renderTaskFormView(this, task, options);
   }
 
-  // renderIssueReadOnlyDetail renders the title, body, acceptance criteria and
+  // renderTaskReadOnlyDetail renders the title, body, acceptance criteria and
   // agent configuration as a read-only summary with an Edit button that reveals
   // the full edit form. Replacing the always-visible form with this collapsed
   // view keeps the editor column short, so the (now timeline-merged) sessions
-  // list can no longer overwhelm/cover the agent config and the issue text.
-  renderIssueReadOnlyDetail(issue, options) {
-    return renderIssueReadOnlyDetailView(this, issue, options);
+  // list can no longer overwhelm/cover the agent config and the task text.
+  renderTaskReadOnlyDetail(task, options) {
+    return renderTaskReadOnlyDetailView(this, task, options);
   }
 
-  renderIssue(id, context, projectID) {
-    return renderIssueView(this, id, context, projectID);
+  renderTask(id, context, projectID) {
+    return renderTaskView(this, id, context, projectID);
   }
 
   renderChange(id, context) {
@@ -517,11 +517,11 @@ export class FlowApp extends HTMLElement {
     return renderFlowsView(this, context);
   }
 
-  startConsole(projectID, harness, issueID) {
-    return startConsoleView(this, projectID, harness, issueID);
+  startConsole(projectID, harness, taskID) {
+    return startConsoleView(this, projectID, harness, taskID);
   }
 
-  bindIssueActions(refresh) {
+  bindTaskActions(refresh) {
     this.installLifecycleActions(refresh);
     this.installReviewActions(refresh);
     this.installConsoleActions(refresh);
@@ -535,14 +535,14 @@ export class FlowApp extends HTMLElement {
   installLifecycleActions(refresh) {
     this.querySelectorAll("[data-workflow-schedule]").forEach((button) => {
       button.addEventListener("click", async () => {
-        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowSchedule)}/schedule`, {});
+        await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowSchedule)}/schedule`, {});
         await refresh();
       });
     });
     this.querySelectorAll("[data-workflow-reset]").forEach((button) => {
       button.addEventListener("click", async () => {
-        if (!window.confirm("Cancel this workflow run and return the issue to Unscheduled?")) return;
-        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowReset)}/reset`, {});
+        if (!window.confirm("Cancel this workflow run and return the task to Unscheduled?")) return;
+        await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowReset)}/reset`, {});
         await refresh();
       });
     });
@@ -550,13 +550,13 @@ export class FlowApp extends HTMLElement {
       button.addEventListener("click", async () => {
         const resolution = (window.prompt("Done resolution: completed, rejected, abandoned, cancelled, or failed", "completed") || "").trim();
         if (!resolution) return;
-        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowDone)}/done`, { resolution });
+        await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowDone)}/done`, { resolution });
         await refresh();
       });
     });
     this.querySelectorAll("[data-workflow-reopen]").forEach((button) => {
       button.addEventListener("click", async () => {
-        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowReopen)}/reopen`, {});
+        await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowReopen)}/reopen`, {});
         await refresh();
       });
     });
@@ -564,7 +564,7 @@ export class FlowApp extends HTMLElement {
       button.addEventListener("click", async () => {
         const outcome = button.dataset.outcome || "";
         const feedback = String(button.closest(".human-attention-panel")?.querySelector("[data-workflow-feedback]")?.value || "").trim();
-        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.issue)}/workflow/respond`, {
+        await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.task)}/workflow/respond`, {
           node_run_id: button.dataset.workflowRespond,
           outcome,
           feedback,
@@ -576,21 +576,21 @@ export class FlowApp extends HTMLElement {
       button.addEventListener("click", async () => {
         const additional = Number(window.prompt("Additional workflow transitions", "50"));
         if (!Number.isInteger(additional) || additional < 1) return;
-        await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowBudget)}/workflow/budget`, { additional });
+        await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowBudget)}/workflow/budget`, { additional });
         await refresh();
       });
     });
-    this.querySelectorAll("[data-issue-edit]").forEach((button) => {
+    this.querySelectorAll("[data-task-edit]").forEach((button) => {
       button.addEventListener("click", async () => {
-        const nextTitle = window.prompt("Title", button.dataset.issueTitle || "");
+        const nextTitle = window.prompt("Title", button.dataset.taskTitle || "");
         if (nextTitle === null) return;
         const title = nextTitle.trim();
         if (!title) {
-          this.setStatus("Issue title is required");
+          this.setStatus("Task title is required");
           return;
         }
         try {
-          await apiPatch(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.issueEdit)}`, { title });
+          await apiPatch(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.taskEdit)}`, { title });
           await refresh();
         } catch (error) {
           this.setStatus(error.message || String(error));
@@ -614,7 +614,7 @@ export class FlowApp extends HTMLElement {
     this.querySelectorAll("[data-review-run]").forEach((button) => {
       button.addEventListener("click", async () => {
         try {
-          await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.reviewRun)}/review/run`, {});
+          await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.reviewRun)}/review/run`, {});
           await refresh();
         } catch (error) {
           this.setStatus(error.message || String(error));
@@ -629,7 +629,7 @@ export class FlowApp extends HTMLElement {
           return;
         }
         try {
-          await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.reviewCyclesApprove)}/review-cycles/approve`, { instructions });
+          await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.reviewCyclesApprove)}/review-cycles/approve`, { instructions });
           await refresh();
           this.setStatus("review cycles approved");
         } catch (error) {
@@ -640,7 +640,7 @@ export class FlowApp extends HTMLElement {
     this.querySelectorAll("[data-phase-approve]").forEach((button) => {
       button.addEventListener("click", async () => {
         try {
-          await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.phaseApprove)}/phase/approve`, {});
+          await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.phaseApprove)}/phase/approve`, {});
           await refresh();
           this.setStatus("phase approved");
         } catch (error) {
@@ -657,7 +657,7 @@ export class FlowApp extends HTMLElement {
           return;
         }
         try {
-          await apiPost(`${issueAPIBase(form.dataset.project)}/${encodeURIComponent(form.dataset.phaseRequestChanges)}/phase/request-changes`, { feedback });
+          await apiPost(`${taskAPIBase(form.dataset.project)}/${encodeURIComponent(form.dataset.phaseRequestChanges)}/phase/request-changes`, { feedback });
           await refresh();
           this.setStatus("changes requested");
         } catch (error) {
@@ -673,25 +673,25 @@ export class FlowApp extends HTMLElement {
     });
   }
 
-  // installConsoleActions wires issue console start/release.
+  // installConsoleActions wires task console start/release.
   installConsoleActions(refresh) {
-    this.querySelectorAll("[data-start-issue-console]").forEach((button) => {
+    this.querySelectorAll("[data-start-task-console]").forEach((button) => {
       button.addEventListener("click", async () => {
         try {
-          await apiPost(issueConsoleAPIPath(button.dataset.project, button.dataset.startIssueConsole), { harness: "claude" });
+          await apiPost(taskConsoleAPIPath(button.dataset.project, button.dataset.startTaskConsole), { harness: "claude" });
           await refresh();
-          this.setStatus("issue console starting");
+          this.setStatus("task console starting");
         } catch (error) {
           this.setStatus(error.message || String(error));
         }
       });
     });
-    this.querySelectorAll("[data-release-issue-console]").forEach((button) => {
+    this.querySelectorAll("[data-release-task-console]").forEach((button) => {
       button.addEventListener("click", async () => {
         try {
-          await apiDelete(issueConsoleAPIPath(button.dataset.project, button.dataset.releaseIssueConsole));
+          await apiDelete(taskConsoleAPIPath(button.dataset.project, button.dataset.releaseTaskConsole));
           await refresh();
-          this.setStatus("issue console released");
+          this.setStatus("task console released");
         } catch (error) {
           this.setStatus(error.message || String(error));
         }
@@ -713,7 +713,7 @@ export class FlowApp extends HTMLElement {
         const payload = { message };
         if (statusLogID > 0) payload.status_log_id = statusLogID;
         try {
-          await apiPost(`${issueAPIBase(form.dataset.project)}/${encodeURIComponent(form.dataset.attentionReplyForm)}/attention/reply`, payload);
+          await apiPost(`${taskAPIBase(form.dataset.project)}/${encodeURIComponent(form.dataset.attentionReplyForm)}/attention/reply`, payload);
           await refresh();
           this.setStatus("reply sent");
         } catch (error) {
@@ -758,14 +758,14 @@ export class FlowApp extends HTMLElement {
     });
   }
 
-  // installFormActions wires the issue create/edit form and attachment upload form.
+  // installFormActions wires the task create/edit form and attachment upload form.
   installFormActions(refresh) {
-    this.querySelectorAll("[data-issue-form]").forEach((form) => {
-      bindIssueFlowControlsView(this, form);
+    this.querySelectorAll("[data-task-form]").forEach((form) => {
+      bindTaskFlowControlsView(this, form);
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         if (form.reportValidity && !form.reportValidity()) return;
-        const mode = form.dataset.issueFormMode || "edit";
+        const mode = form.dataset.taskFormMode || "edit";
         const priority = Number(form.elements.priority.value || 0);
         if (!Number.isInteger(priority) || priority < 0) {
           this.setStatus("Priority must be a non-negative integer");
@@ -779,36 +779,36 @@ export class FlowApp extends HTMLElement {
           flow_id: form.elements.flow_id ? form.elements.flow_id.value : "",
         };
         if (!payload.title) {
-          this.setStatus("Issue title is required");
+          this.setStatus("Task title is required");
           return;
         }
         try {
           if (mode === "create") {
-            const scheduleAfterCreate = Boolean(form.elements.queue_issue && form.elements.queue_issue.checked);
+            const scheduleAfterCreate = Boolean(form.elements.queue_task && form.elements.queue_task.checked);
             const formProject = form.elements.project ? form.elements.project.value : (form.dataset.project || "");
             if (!formProject) {
               this.setStatus("Project is required");
               return;
             }
-            const data = await apiPost(issueAPIBase(formProject), payload);
-            const issue = data.issue || data.Issue || {};
-            const issueID = value(issue, "id", "ID");
-            if (!issueID) {
-              throw new Error("Created issue ID unavailable");
+            const data = await apiPost(taskAPIBase(formProject), payload);
+            const task = data.task || data.Task || {};
+            const taskID = value(task, "id", "ID");
+            if (!taskID) {
+              throw new Error("Created task ID unavailable");
             }
             const createdProject = data.project_id || data.ProjectID || formProject;
-            history.pushState({}, "", issueHref(createdProject, issueID));
+            history.pushState({}, "", taskHref(createdProject, taskID));
             const files = Array.from(form.elements.attachments?.files || []);
             for (const file of files) {
-              await uploadIssueAttachment(createdProject, issueID, file, "initial");
+              await uploadTaskAttachment(createdProject, taskID, file, "initial");
             }
             if (scheduleAfterCreate) {
-              await apiPost(`${issueAPIBase(createdProject)}/${encodeURIComponent(issueID)}/schedule`, {});
+              await apiPost(`${taskAPIBase(createdProject)}/${encodeURIComponent(taskID)}/schedule`, {});
             }
             await this.load();
           } else {
-            const issueID = form.dataset.issueForm;
-            await apiPatch(`${issueAPIBase(form.dataset.project)}/${encodeURIComponent(issueID)}`, payload);
+            const taskID = form.dataset.taskForm;
+            await apiPatch(`${taskAPIBase(form.dataset.project)}/${encodeURIComponent(taskID)}`, payload);
             await refresh();
           }
         } catch (error) {
@@ -820,10 +820,10 @@ export class FlowApp extends HTMLElement {
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         if (form.reportValidity && !form.reportValidity()) return;
-        const issueID = form.dataset.issue;
+        const taskID = form.dataset.task;
         const file = form.elements.file?.files?.[0];
         try {
-          await uploadIssueAttachment(form.dataset.project, issueID, file, form.elements.stage.value);
+          await uploadTaskAttachment(form.dataset.project, taskID, file, form.elements.stage.value);
           form.reset();
           await refresh();
         } catch (error) {
@@ -873,8 +873,8 @@ export class FlowApp extends HTMLElement {
 
   // installToggleActions wires in-place UI toggles (edit form, timeline expand/collapse).
   installToggleActions() {
-    this.querySelectorAll("[data-issue-edit-toggle]").forEach((button) => {
-      button.addEventListener("click", () => toggleIssueEditFormView(this, button));
+    this.querySelectorAll("[data-task-edit-toggle]").forEach((button) => {
+      button.addEventListener("click", () => toggleTaskEditFormView(this, button));
     });
     this.querySelectorAll("[data-timeline-show-more]").forEach((button) => {
       button.addEventListener("click", () => this.expandTimeline(button));
@@ -905,7 +905,7 @@ export class FlowApp extends HTMLElement {
     });
   }
 
-  // toggleIssueEditForm swaps the read-only detail summary for the full edit
+  // toggleTaskEditForm swaps the read-only detail summary for the full edit
   // form (and back), re-binding the form's harness controls so they work after
   // being revealed from a hidden container.
 
@@ -933,7 +933,7 @@ export class FlowApp extends HTMLElement {
 
   async approveHumanReview(button, refresh) {
     try {
-      await apiPost(`${issueAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.humanReviewApprove)}/checks/${encodeURIComponent(button.dataset.checkName || "human-review")}`, {
+      await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.humanReviewApprove)}/checks/${encodeURIComponent(button.dataset.checkName || "human-review")}`, {
         kind: "human",
         required: true,
         verdict: "satisfied",

@@ -12,7 +12,7 @@ import (
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
-// putTranscriptAs issues a raw-body PUT with the given bearer token and returns
+// putTranscriptAs tasks a raw-body PUT with the given bearer token and returns
 // the recorder.
 func putTranscriptAs(t *testing.T, server *Server, token string, path string, body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -111,8 +111,8 @@ func TestJobTranscriptUploadRequiresLiveLease(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
-	issue, change := seedIssueWithChange(t, fixture, "Job transcript issue")
-	claimed := startLiveCheckJobForIssue(t, fixture, "worker-token-rev", "w-rev", issue.ID, change.ID, "", "reviewer-check", flowworker.RoleReviewer, flowworker.BucketEphemeral)
+	task, change := seedTaskWithChange(t, fixture, "Job transcript task")
+	claimed := startLiveCheckJobForTask(t, fixture, "worker-token-rev", "w-rev", task.ID, change.ID, "", "reviewer-check", flowworker.RoleReviewer, flowworker.BucketEphemeral)
 	jobID := claimed.Job.ID
 
 	content := "reviewer job pane output\n"
@@ -142,8 +142,8 @@ func TestJobTranscriptUploadRequiresLiveLease(t *testing.T) {
 
 func TestJobTranscriptUploadRejectsMissingLease(t *testing.T) {
 	fixture := newTestFixture(t)
-	issue, change := seedIssueWithChange(t, fixture, "Job transcript no-lease")
-	claimed := startLiveCheckJobForIssue(t, fixture, "worker-token-rev2", "w-rev2", issue.ID, change.ID, "", "reviewer-check", flowworker.RoleReviewer, flowworker.BucketEphemeral)
+	task, change := seedTaskWithChange(t, fixture, "Job transcript no-lease")
+	claimed := startLiveCheckJobForTask(t, fixture, "worker-token-rev2", "w-rev2", task.ID, change.ID, "", "reviewer-check", flowworker.RoleReviewer, flowworker.BucketEphemeral)
 	jobID := claimed.Job.ID
 
 	// No lease_id query param -> rejected.
@@ -156,8 +156,8 @@ func TestJobTranscriptUploadRejectsMissingLease(t *testing.T) {
 func TestJobTranscriptUploadRejectsReleasedLease(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, change := seedIssueWithChange(t, fixture, "Job transcript released-lease")
-	claimed := startLiveCheckJobForIssue(t, fixture, "worker-token-rev3", "w-rev3", issue.ID, change.ID, "", "reviewer-check", flowworker.RoleReviewer, flowworker.BucketEphemeral)
+	task, change := seedTaskWithChange(t, fixture, "Job transcript released-lease")
+	claimed := startLiveCheckJobForTask(t, fixture, "worker-token-rev3", "w-rev3", task.ID, change.ID, "", "reviewer-check", flowworker.RoleReviewer, flowworker.BucketEphemeral)
 	jobID := claimed.Job.ID
 
 	if _, err := fixture.Workers.ReleaseLease(ctx, claimed.Lease.ID, flowworker.JobFinished); err != nil {
@@ -173,8 +173,8 @@ func TestJobTranscriptUploadRejectsReleasedLease(t *testing.T) {
 
 func TestJobTranscriptDownloadServesTextPlain(t *testing.T) {
 	fixture := newTestFixture(t)
-	issue, change := seedIssueWithChange(t, fixture, "Job transcript content type")
-	claimed := startLiveCheckJobForIssue(t, fixture, "worker-token-ct", "w-ct", issue.ID, change.ID, "", "reviewer-check", flowworker.RoleReviewer, flowworker.BucketEphemeral)
+	task, change := seedTaskWithChange(t, fixture, "Job transcript content type")
+	claimed := startLiveCheckJobForTask(t, fixture, "worker-token-ct", "w-ct", task.ID, change.ID, "", "reviewer-check", flowworker.RoleReviewer, flowworker.BucketEphemeral)
 	jobID := claimed.Job.ID
 
 	path := "/v2/jobs/" + jobID + "/transcript?lease_id=" + claimed.Lease.ID
@@ -193,8 +193,8 @@ func TestJobTranscriptDownloadServesTextPlain(t *testing.T) {
 
 func TestJobTranscriptDownloadRequiresOwner(t *testing.T) {
 	fixture := newTestFixture(t)
-	issue, change := seedIssueWithChange(t, fixture, "Job transcript owner-only download")
-	claimed := startLiveCheckJobForIssue(t, fixture, "worker-token-own", "w-own", issue.ID, change.ID, "", "reviewer-check", flowworker.RoleReviewer, flowworker.BucketEphemeral)
+	task, change := seedTaskWithChange(t, fixture, "Job transcript owner-only download")
+	claimed := startLiveCheckJobForTask(t, fixture, "worker-token-own", "w-own", task.ID, change.ID, "", "reviewer-check", flowworker.RoleReviewer, flowworker.BucketEphemeral)
 	jobID := claimed.Job.ID
 
 	path := "/v2/jobs/" + jobID + "/transcript?lease_id=" + claimed.Lease.ID
@@ -245,25 +245,25 @@ func TestSessionTranscriptUploadTruncatesToLast10MB(t *testing.T) {
 	}
 }
 
-// seedIssueWithChange creates a ready change directly so transcript endpoint
+// seedTaskWithChange creates a ready change directly so transcript endpoint
 // tests stay independent of any particular workflow graph.
-func seedIssueWithChange(t *testing.T, fixture testFixture, title string) (coordinator.Issue, coordinator.Change) {
+func seedTaskWithChange(t *testing.T, fixture testFixture, title string) (coordinator.Task, coordinator.Change) {
 	t.Helper()
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: title})
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: title})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 	const changeID = "ch-transcript"
 	const stamp = "2026-01-01T00:00:00Z"
 	if _, err := fixture.DB.ExecContext(ctx, `
-INSERT INTO changes (id, issue_id, branch, base, head_sha, created_at, updated_at, ready_at)
-VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, issue.ID, "issue/transcript", "deadbeef", stamp, stamp, stamp); err != nil {
+INSERT INTO changes (id, task_id, branch, base, head_sha, created_at, updated_at, ready_at)
+VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, task.ID, "task/transcript", "deadbeef", stamp, stamp, stamp); err != nil {
 		t.Fatalf("insert transcript change: %v", err)
 	}
 	change, err := fixture.Sessions.GetChange(ctx, changeID)
 	if err != nil {
 		t.Fatalf("load transcript change: %v", err)
 	}
-	return issue, change
+	return task, change
 }

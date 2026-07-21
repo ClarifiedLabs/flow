@@ -72,7 +72,7 @@ func TestSeedDefaults(t *testing.T) {
 	if planning.StartNode != "write-plan" || len(planning.Nodes) != 5 {
 		t.Fatalf("planning graph = start %q, nodes %+v", planning.StartNode, planning.Nodes)
 	}
-	if planning.Nodes[1].Kind != NodeHumanGate || planning.Nodes[2].Kind != NodeMaterializeIssueSet {
+	if planning.Nodes[1].Kind != NodeHumanGate || planning.Nodes[2].Kind != NodeMaterializeTaskSet {
 		t.Errorf("planning nodes = %+v", planning.Nodes)
 	}
 

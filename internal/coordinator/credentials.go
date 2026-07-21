@@ -27,21 +27,21 @@ const (
 var ErrInvalidCredential = errors.New("invalid bearer token")
 
 type CredentialInput struct {
-	Token         string
-	Scope         TokenScope
-	Subject       string
-	ProjectID     *string
-	SourceIssueID *string
-	ExpiresAt     *time.Time
+	Token        string
+	Scope        TokenScope
+	Subject      string
+	ProjectID    *string
+	SourceTaskID *string
+	ExpiresAt    *time.Time
 }
 
 type Principal struct {
-	Scope         TokenScope
-	Subject       string
-	TokenHash     string
-	ProjectID     *string
-	SourceIssueID *string
-	WebSessionID  string
+	Scope        TokenScope
+	Subject      string
+	TokenHash    string
+	ProjectID    *string
+	SourceTaskID *string
+	WebSessionID string
 }
 
 func (p Principal) IdempotencyPrincipalKey() string {
@@ -49,7 +49,7 @@ func (p Principal) IdempotencyPrincipalKey() string {
 }
 
 // IsProjectBound reports whether the token is confined to one project
-// database. Session tokens are issue/session credentials; console tokens are
+// database. Session tokens are task/session credentials; console tokens are
 // project-manager credentials for a single persistent console session.
 func (p Principal) IsProjectBound() bool {
 	if p.ProjectID == nil || strings.TrimSpace(*p.ProjectID) == "" {
@@ -143,7 +143,7 @@ INSERT INTO tokens (
 	scope,
 	subject,
 	project_id,
-	source_issue_id,
+	source_task_id,
 	expires_at,
 	revoked_at,
 	created_at
@@ -152,14 +152,14 @@ ON CONFLICT(token_hash) DO UPDATE SET
 	scope = excluded.scope,
 	subject = excluded.subject,
 	project_id = excluded.project_id,
-	source_issue_id = excluded.source_issue_id,
+	source_task_id = excluded.source_task_id,
 	expires_at = excluded.expires_at,
 	revoked_at = NULL`,
 		HashToken(input.Token),
 		string(input.Scope),
 		input.Subject,
 		nullableStringValue(input.ProjectID),
-		nullableStringValue(input.SourceIssueID),
+		nullableStringValue(input.SourceTaskID),
 		nullableTimeValue(input.ExpiresAt),
 		now,
 	); err != nil {
@@ -185,7 +185,7 @@ INSERT INTO tokens (
 	scope,
 	subject,
 	project_id,
-	source_issue_id,
+	source_task_id,
 	expires_at,
 	revoked_at,
 	created_at
@@ -194,13 +194,13 @@ ON CONFLICT(token_hash) DO UPDATE SET
 	scope = excluded.scope,
 	subject = excluded.subject,
 	project_id = excluded.project_id,
-	source_issue_id = excluded.source_issue_id,
+	source_task_id = excluded.source_task_id,
 	expires_at = excluded.expires_at`,
 		HashToken(input.Token),
 		string(input.Scope),
 		input.Subject,
 		nullableStringValue(input.ProjectID),
-		nullableStringValue(input.SourceIssueID),
+		nullableStringValue(input.SourceTaskID),
 		nullableTimeValue(input.ExpiresAt),
 		formatTime(s.now().UTC()),
 	)
@@ -220,18 +220,18 @@ func (s *CredentialService) Authenticate(ctx context.Context, token string) (Pri
 	var principal Principal
 	var scope string
 	var projectID sql.NullString
-	var sourceIssueID sql.NullString
+	var sourceTaskID sql.NullString
 	var expiresAt sql.NullString
 	var revokedAt sql.NullString
 	if err := s.db.QueryRowContext(ctx, `
-SELECT scope, subject, token_hash, project_id, source_issue_id, expires_at, revoked_at
+SELECT scope, subject, token_hash, project_id, source_task_id, expires_at, revoked_at
 FROM tokens
 WHERE token_hash = ?`, HashToken(token)).Scan(
 		&scope,
 		&principal.Subject,
 		&principal.TokenHash,
 		&projectID,
-		&sourceIssueID,
+		&sourceTaskID,
 		&expiresAt,
 		&revokedAt,
 	); err != nil {
@@ -256,7 +256,7 @@ WHERE token_hash = ?`, HashToken(token)).Scan(
 
 	principal.Scope = TokenScope(scope)
 	principal.ProjectID = nullableStringPointer(projectID)
-	principal.SourceIssueID = nullableStringPointer(sourceIssueID)
+	principal.SourceTaskID = nullableStringPointer(sourceTaskID)
 	return principal, nil
 }
 
@@ -323,12 +323,12 @@ func normalizeCredentialInput(input CredentialInput) (CredentialInput, error) {
 			input.ProjectID = &projectID
 		}
 	}
-	if input.SourceIssueID != nil {
-		sourceIssueID := strings.TrimSpace(*input.SourceIssueID)
-		if sourceIssueID == "" {
-			input.SourceIssueID = nil
+	if input.SourceTaskID != nil {
+		sourceTaskID := strings.TrimSpace(*input.SourceTaskID)
+		if sourceTaskID == "" {
+			input.SourceTaskID = nil
 		} else {
-			input.SourceIssueID = &sourceIssueID
+			input.SourceTaskID = &sourceTaskID
 		}
 	}
 

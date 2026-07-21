@@ -657,16 +657,16 @@ func (s *projectServer) handleEnqueueJob(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	issueID := trimmedStringPointer(request.IssueID)
+	taskID := trimmedStringPointer(request.TaskID)
 	changeID := trimmedStringPointer(request.ChangeID)
 	role := worker.JobRole(strings.TrimSpace(request.Role))
 	if role == worker.RoleAuthor && s.sessions != nil {
-		if issueID == nil {
-			writeError(w, http.StatusBadRequest, "enqueue_job_failed", "author jobs require issue id")
+		if taskID == nil {
+			writeError(w, http.StatusBadRequest, "enqueue_job_failed", "author jobs require task id")
 			return
 		}
 		result, err := s.sessions.EnsureAuthorJob(r.Context(), coordinator.EnsureAuthorJobInput{
-			IssueID:  *issueID,
+			TaskID:   *taskID,
 			Branch:   payloadString(request.Payload, "branch"),
 			Base:     payloadString(request.Payload, "base"),
 			Priority: request.Priority,
@@ -679,13 +679,13 @@ func (s *projectServer) handleEnqueueJob(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusCreated, jobResponse{Job: result.Job, Change: &result.Change})
 		return
 	}
-	payload, err := s.jobPayloadWithReviewContext(r.Context(), role, issueID, request.Payload)
+	payload, err := s.jobPayloadWithReviewContext(r.Context(), role, taskID, request.Payload)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "enqueue_job_failed", err.Error())
 		return
 	}
 	job, err := s.workers.EnqueueJob(r.Context(), worker.EnqueueJobInput{
-		IssueID:        issueID,
+		TaskID:         taskID,
 		ChangeID:       changeID,
 		Role:           role,
 		CapacityBucket: worker.CapacityBucket(strings.TrimSpace(request.CapacityBucket)),
@@ -704,12 +704,12 @@ func (s *projectServer) handleEnqueueJob(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusCreated, jobResponse{Job: job})
 }
 
-func (s *projectServer) jobPayloadWithReviewContext(ctx context.Context, role worker.JobRole, issueID *string, payload map[string]any) (map[string]any, error) {
-	if s.threads == nil || issueID == nil || (role != worker.RoleReviewer && role != worker.RoleVerifier) {
+func (s *projectServer) jobPayloadWithReviewContext(ctx context.Context, role worker.JobRole, taskID *string, payload map[string]any) (map[string]any, error) {
+	if s.threads == nil || taskID == nil || (role != worker.RoleReviewer && role != worker.RoleVerifier) {
 		return payload, nil
 	}
 
-	context, err := s.threads.ReviewContextForIssue(ctx, *issueID)
+	context, err := s.threads.ReviewContextForTask(ctx, *taskID)
 	if err != nil {
 		return nil, fmt.Errorf("load review context: %w", err)
 	}

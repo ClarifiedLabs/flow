@@ -14,7 +14,7 @@ import (
 
 var (
 	ErrWorkflowRunNotFound = errors.New("workflow run not found")
-	ErrNoActiveWorkflowRun = errors.New("issue has no active workflow run")
+	ErrNoActiveWorkflowRun = errors.New("task has no active workflow run")
 	ErrWorkflowConflict    = errors.New("workflow state conflict")
 )
 
@@ -49,7 +49,7 @@ const (
 
 type WorkflowRun struct {
 	ID                string           `json:"id"`
-	IssueID           string           `json:"issue_id"`
+	TaskID            string           `json:"task_id"`
 	RunSequence       int              `json:"run_sequence"`
 	FlowID            string           `json:"flow_id,omitempty"`
 	Snapshot          FlowSnapshot     `json:"snapshot"`
@@ -94,18 +94,18 @@ type WorkflowWait struct {
 }
 
 type WorkflowTransition struct {
-	Sequence       int64           `json:"sequence"`
-	IssueID        string          `json:"issue_id"`
-	WorkflowRunID  string          `json:"workflow_run_id,omitempty"`
-	FromIssueState string          `json:"from_issue_state,omitempty"`
-	ToIssueState   string          `json:"to_issue_state,omitempty"`
-	FromNodeKey    string          `json:"from_node_key,omitempty"`
-	ToNodeKey      string          `json:"to_node_key,omitempty"`
-	Outcome        string          `json:"outcome,omitempty"`
-	EventKind      string          `json:"event_kind"`
-	Payload        json.RawMessage `json:"payload"`
-	Actor          string          `json:"actor,omitempty"`
-	CreatedAt      time.Time       `json:"created_at"`
+	Sequence      int64           `json:"sequence"`
+	TaskID        string          `json:"task_id"`
+	WorkflowRunID string          `json:"workflow_run_id,omitempty"`
+	FromTaskState string          `json:"from_task_state,omitempty"`
+	ToTaskState   string          `json:"to_task_state,omitempty"`
+	FromNodeKey   string          `json:"from_node_key,omitempty"`
+	ToNodeKey     string          `json:"to_node_key,omitempty"`
+	Outcome       string          `json:"outcome,omitempty"`
+	EventKind     string          `json:"event_kind"`
+	Payload       json.RawMessage `json:"payload"`
+	Actor         string          `json:"actor,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
 }
 
 type WorkflowRunDetail struct {
@@ -117,39 +117,39 @@ type WorkflowRunDetail struct {
 }
 
 type WorkflowRunService struct {
-	db     *sql.DB
-	flows  *FlowService
-	issues *IssueService
-	now    func() time.Time
+	db    *sql.DB
+	flows *FlowService
+	tasks *TaskService
+	now   func() time.Time
 }
 
-func NewWorkflowRunService(db *sql.DB, flows *FlowService, issues *IssueService) *WorkflowRunService {
-	return &WorkflowRunService{db: db, flows: flows, issues: issues, now: sqlitex.UTCNow}
+func NewWorkflowRunService(db *sql.DB, flows *FlowService, tasks *TaskService) *WorkflowRunService {
+	return &WorkflowRunService{db: db, flows: flows, tasks: tasks, now: sqlitex.UTCNow}
 }
 
-// Schedule freezes the selected flow and creates a new run. The issue remains
-// Scheduled until its first node actually starts; unresolved issue blockers
+// Schedule freezes the selected flow and creates a new run. The task remains
+// Scheduled until its first node actually starts; unresolved task blockers
 // suppress node creation but not scheduling.
-func (s *WorkflowRunService) Schedule(ctx context.Context, issueID string) (WorkflowRun, error) {
-	return s.ScheduleAs(ctx, issueID, ActorHuman)
+func (s *WorkflowRunService) Schedule(ctx context.Context, taskID string) (WorkflowRun, error) {
+	return s.ScheduleAs(ctx, taskID, ActorHuman)
 }
 
-func (s *WorkflowRunService) ScheduleAs(ctx context.Context, issueID string, actor Actor) (WorkflowRun, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return WorkflowRun{}, errors.New("issue id is required")
+func (s *WorkflowRunService) ScheduleAs(ctx context.Context, taskID string, actor Actor) (WorkflowRun, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return WorkflowRun{}, errors.New("task id is required")
 	}
 	if actor == "" {
 		actor = ActorSystem
 	}
-	issue, err := s.issues.GetIssue(ctx, issueID)
+	task, err := s.tasks.GetTask(ctx, taskID)
 	if err != nil {
 		return WorkflowRun{}, err
 	}
-	if issue.State != nil {
-		return WorkflowRun{}, fmt.Errorf("%w: issue is already %s", ErrWorkflowConflict, *issue.State)
+	if task.State != nil {
+		return WorkflowRun{}, fmt.Errorf("%w: task is already %s", ErrWorkflowConflict, *task.State)
 	}
-	snapshot, err := s.flows.ResolveSnapshot(ctx, issue.FlowID)
+	snapshot, err := s.flows.ResolveSnapshot(ctx, task.FlowID)
 	if err != nil {
 		return WorkflowRun{}, err
 	}
@@ -167,15 +167,15 @@ func (s *WorkflowRunService) ScheduleAs(ctx context.Context, issueID string, act
 	}
 	defer tx.Rollback()
 	var existingState sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT lifecycle_state FROM issues WHERE id = ?`, issueID).Scan(&existingState); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT lifecycle_state FROM tasks WHERE id = ?`, taskID).Scan(&existingState); err != nil {
 		return WorkflowRun{}, err
 	}
 	if existingState.Valid {
-		return WorkflowRun{}, fmt.Errorf("%w: issue is already %s", ErrWorkflowConflict, existingState.String)
+		return WorkflowRun{}, fmt.Errorf("%w: task is already %s", ErrWorkflowConflict, existingState.String)
 	}
 	var sequence int
 	if err := tx.QueryRowContext(ctx, `
-SELECT COALESCE(MAX(run_sequence), 0) + 1 FROM workflow_runs WHERE issue_id = ?`, issueID).Scan(&sequence); err != nil {
+SELECT COALESCE(MAX(run_sequence), 0) + 1 FROM workflow_runs WHERE task_id = ?`, taskID).Scan(&sequence); err != nil {
 		return WorkflowRun{}, err
 	}
 	id, err := randomPrefixedID("wr")
@@ -185,21 +185,21 @@ SELECT COALESCE(MAX(run_sequence), 0) + 1 FROM workflow_runs WHERE issue_id = ?`
 	now := s.now().UTC()
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO workflow_runs (
-	id, issue_id, run_sequence, flow_id, flow_snapshot_json, state,
+	id, task_id, run_sequence, flow_id, flow_snapshot_json, state,
 	current_node_key, transition_budget, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, issueID, sequence,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, taskID, sequence,
 		sqlitex.NullableNonEmptyString(snapshot.FlowID), string(snapshotJSON), string(WorkflowRunScheduled),
 		snapshot.StartNode, snapshot.TransitionBudget, sqlitex.FormatTime(now)); err != nil {
 		return WorkflowRun{}, fmt.Errorf("insert workflow run: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
-UPDATE issues SET lifecycle_state = ?, done_resolution = NULL, done_at = NULL, updated_at = ?
-WHERE id = ?`, string(LifecycleScheduled), sqlitex.FormatTime(now), issueID); err != nil {
-		return WorkflowRun{}, fmt.Errorf("mark issue scheduled: %w", err)
+UPDATE tasks SET lifecycle_state = ?, done_resolution = NULL, done_at = NULL, updated_at = ?
+WHERE id = ?`, string(LifecycleScheduled), sqlitex.FormatTime(now), taskID); err != nil {
+		return WorkflowRun{}, fmt.Errorf("mark task scheduled: %w", err)
 	}
 	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
-		IssueID: issueID, WorkflowRunID: id, ToIssueState: string(LifecycleScheduled),
-		ToNodeKey: snapshot.StartNode, EventKind: "issue_scheduled", Actor: string(actor), CreatedAt: now,
+		TaskID: taskID, WorkflowRunID: id, ToTaskState: string(LifecycleScheduled),
+		ToNodeKey: snapshot.StartNode, EventKind: "task_scheduled", Actor: string(actor), CreatedAt: now,
 	}); err != nil {
 		return WorkflowRun{}, err
 	}
@@ -213,31 +213,31 @@ func (s *WorkflowRunService) Get(ctx context.Context, runID string) (WorkflowRun
 	return scanWorkflowRun(s.db.QueryRowContext(ctx, workflowRunSelect+` WHERE id = ?`, runID))
 }
 
-func (s *WorkflowRunService) ActiveForIssue(ctx context.Context, issueID string) (WorkflowRun, bool, error) {
+func (s *WorkflowRunService) ActiveForTask(ctx context.Context, taskID string) (WorkflowRun, bool, error) {
 	run, err := scanWorkflowRun(s.db.QueryRowContext(ctx, workflowRunSelect+`
-WHERE issue_id = ? AND state IN ('scheduled', 'running', 'waiting')`, issueID))
+WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, taskID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return WorkflowRun{}, false, nil
 	}
 	return run, err == nil, err
 }
 
-func (s *WorkflowRunService) ListForIssue(ctx context.Context, issueID string) ([]WorkflowRun, error) {
-	rows, err := s.db.QueryContext(ctx, workflowRunSelect+` WHERE issue_id = ? ORDER BY run_sequence DESC`, issueID)
+func (s *WorkflowRunService) ListForTask(ctx context.Context, taskID string) ([]WorkflowRun, error) {
+	rows, err := s.db.QueryContext(ctx, workflowRunSelect+` WHERE task_id = ? ORDER BY run_sequence DESC`, taskID)
 	if err != nil {
 		return nil, err
 	}
 	return scanRows(rows, scanWorkflowRun)
 }
 
-func (s *WorkflowRunService) ListTransitionsForIssue(ctx context.Context, issueID string, limit int) ([]WorkflowTransition, error) {
+func (s *WorkflowRunService) ListTransitionsForTask(ctx context.Context, taskID string, limit int) ([]WorkflowTransition, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT seq, issue_id, workflow_run_id, from_issue_state, to_issue_state,
+SELECT seq, task_id, workflow_run_id, from_task_state, to_task_state,
 	from_node_key, to_node_key, outcome, event_kind, payload_json, actor, created_at
-FROM workflow_transitions WHERE issue_id = ? ORDER BY seq DESC LIMIT ?`, strings.TrimSpace(issueID), limit)
+FROM workflow_transitions WHERE task_id = ? ORDER BY seq DESC LIMIT ?`, strings.TrimSpace(taskID), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +247,7 @@ FROM workflow_transitions WHERE issue_id = ? ORDER BY seq DESC LIMIT ?`, strings
 		var entry WorkflowTransition
 		var runID sql.NullString
 		var payload, createdAt string
-		if err := rows.Scan(&entry.Sequence, &entry.IssueID, &runID, &entry.FromIssueState, &entry.ToIssueState,
+		if err := rows.Scan(&entry.Sequence, &entry.TaskID, &runID, &entry.FromTaskState, &entry.ToTaskState,
 			&entry.FromNodeKey, &entry.ToNodeKey, &entry.Outcome, &entry.EventKind, &payload, &entry.Actor, &createdAt); err != nil {
 			return nil, err
 		}
@@ -286,7 +286,7 @@ WHERE workflow_run_id = ? AND state = 'open'`, run.ID)); err != nil {
 		detail.Substate = InProgressWorking
 	}
 	transitionRows, err := s.db.QueryContext(ctx, `
-SELECT seq, issue_id, workflow_run_id, from_issue_state, to_issue_state,
+SELECT seq, task_id, workflow_run_id, from_task_state, to_task_state,
 	from_node_key, to_node_key, outcome, event_kind, payload_json, actor, created_at
 FROM workflow_transitions WHERE workflow_run_id = ? ORDER BY seq`, run.ID)
 	if err != nil {
@@ -297,8 +297,8 @@ FROM workflow_transitions WHERE workflow_run_id = ? ORDER BY seq`, run.ID)
 		var transition WorkflowTransition
 		var workflowRunID sql.NullString
 		var payload, createdAt string
-		if err := transitionRows.Scan(&transition.Sequence, &transition.IssueID, &workflowRunID,
-			&transition.FromIssueState, &transition.ToIssueState, &transition.FromNodeKey,
+		if err := transitionRows.Scan(&transition.Sequence, &transition.TaskID, &workflowRunID,
+			&transition.FromTaskState, &transition.ToTaskState, &transition.FromNodeKey,
 			&transition.ToNodeKey, &transition.Outcome, &transition.EventKind, &payload,
 			&transition.Actor, &createdAt); err != nil {
 			return WorkflowRunDetail{}, err
@@ -334,7 +334,7 @@ func (s *WorkflowRunService) EnsureCurrentNode(ctx context.Context, runID string
 		return nodeRun, false, err
 	}
 	if run.State == WorkflowRunScheduled {
-		blocked, err := unresolvedBlockerCountTx(ctx, tx, run.IssueID)
+		blocked, err := unresolvedBlockerCountTx(ctx, tx, run.TaskID)
 		if err != nil {
 			return WorkflowNodeRun{}, false, err
 		}
@@ -349,13 +349,13 @@ func (s *WorkflowRunService) EnsureCurrentNode(ctx context.Context, runID string
 	if node.Kind == NodeTerminal {
 		now := s.now().UTC()
 		if run.State == WorkflowRunScheduled {
-			if _, err := tx.ExecContext(ctx, `UPDATE issues SET lifecycle_state = ?, updated_at = ? WHERE id = ?`,
-				string(LifecycleInProgress), sqlitex.FormatTime(now), run.IssueID); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE tasks SET lifecycle_state = ?, updated_at = ? WHERE id = ?`,
+				string(LifecycleInProgress), sqlitex.FormatTime(now), run.TaskID); err != nil {
 				return WorkflowNodeRun{}, false, err
 			}
 			if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
-				IssueID: run.IssueID, WorkflowRunID: run.ID, FromIssueState: string(LifecycleScheduled),
-				ToIssueState: string(LifecycleInProgress), ToNodeKey: node.Key,
+				TaskID: run.TaskID, WorkflowRunID: run.ID, FromTaskState: string(LifecycleScheduled),
+				ToTaskState: string(LifecycleInProgress), ToNodeKey: node.Key,
 				EventKind: "workflow_started", Actor: string(ActorSystem), CreatedAt: now,
 			}); err != nil {
 				return WorkflowNodeRun{}, false, err
@@ -432,15 +432,15 @@ WHERE id = ?`, string(WorkflowRunRunning), sqlitex.FormatTime(now), nodeRun.Work
 		return WorkflowNodeRun{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
-UPDATE issues SET lifecycle_state = ?, updated_at = ?
-WHERE id = (SELECT issue_id FROM workflow_runs WHERE id = ?)`,
+UPDATE tasks SET lifecycle_state = ?, updated_at = ?
+WHERE id = (SELECT task_id FROM workflow_runs WHERE id = ?)`,
 		string(LifecycleInProgress), sqlitex.FormatTime(now), nodeRun.WorkflowRunID); err != nil {
 		return WorkflowNodeRun{}, err
 	}
 	if run.State == WorkflowRunScheduled {
 		if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
-			IssueID: run.IssueID, WorkflowRunID: run.ID, FromIssueState: string(LifecycleScheduled),
-			ToIssueState: string(LifecycleInProgress), ToNodeKey: nodeRun.NodeKey,
+			TaskID: run.TaskID, WorkflowRunID: run.ID, FromTaskState: string(LifecycleScheduled),
+			ToTaskState: string(LifecycleInProgress), ToNodeKey: nodeRun.NodeKey,
 			EventKind: "workflow_started", Actor: string(ActorSystem), CreatedAt: now,
 		}); err != nil {
 			return WorkflowNodeRun{}, err
@@ -511,8 +511,8 @@ func (s *WorkflowRunService) waitForAgentCrashLimit(ctx context.Context, nodeRun
 		return err
 	}
 	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
-		IssueID: run.IssueID, WorkflowRunID: run.ID,
-		FromIssueState: string(LifecycleInProgress), ToIssueState: string(LifecycleInProgress),
+		TaskID: run.TaskID, WorkflowRunID: run.ID,
+		FromTaskState: string(LifecycleInProgress), ToTaskState: string(LifecycleInProgress),
 		FromNodeKey: nodeRun.NodeKey, ToNodeKey: nodeRun.NodeKey,
 		Outcome: "crashed", EventKind: "agent_crash_limit_reached", PayloadJSON: string(payload),
 		Actor: string(ActorSystem), CreatedAt: now,
@@ -630,8 +630,8 @@ WHERE id = ?`, string(WorkflowNodeSucceeded), sqlitex.NullableNonEmptyString(art
 		return CompleteWorkflowNodeResult{}, err
 	}
 	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
-		IssueID: run.IssueID, WorkflowRunID: run.ID, FromIssueState: string(LifecycleInProgress),
-		ToIssueState: string(LifecycleInProgress), FromNodeKey: nodeRun.NodeKey, ToNodeKey: target,
+		TaskID: run.TaskID, WorkflowRunID: run.ID, FromTaskState: string(LifecycleInProgress),
+		ToTaskState: string(LifecycleInProgress), FromNodeKey: nodeRun.NodeKey, ToNodeKey: target,
 		Outcome: input.Outcome, EventKind: "node_completed", PayloadJSON: string(payloadJSON),
 		Actor: string(input.Actor), IdempotencyKey: input.IdempotencyKey, CreatedAt: now,
 	}); err != nil {
@@ -712,7 +712,7 @@ WHERE id = ?`, string(WorkflowRunRunning), target, sqlitex.NullableNonEmptyStrin
 	return CompleteWorkflowNodeResult{Run: updated, Next: &nextLoaded}, err
 }
 
-func (s *WorkflowRunService) Respond(ctx context.Context, issueID, nodeRunID, outcome, feedback string, actor Actor) (CompleteWorkflowNodeResult, error) {
+func (s *WorkflowRunService) Respond(ctx context.Context, taskID, nodeRunID, outcome, feedback string, actor Actor) (CompleteWorkflowNodeResult, error) {
 	nodeRun, ok, err := s.GetNodeRun(ctx, strings.TrimSpace(nodeRunID))
 	if err != nil {
 		return CompleteWorkflowNodeResult{}, err
@@ -724,11 +724,11 @@ func (s *WorkflowRunService) Respond(ctx context.Context, issueID, nodeRunID, ou
 	if err != nil {
 		return CompleteWorkflowNodeResult{}, err
 	}
-	if run.IssueID != strings.TrimSpace(issueID) {
+	if run.TaskID != strings.TrimSpace(taskID) {
 		return CompleteWorkflowNodeResult{}, ErrWorkflowRunNotFound
 	}
 	if nodeRun.State != WorkflowNodeSucceeded && (run.State != WorkflowRunWaiting || run.CurrentNodeRunID != nodeRun.ID) {
-		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: issue is not waiting on that node", ErrWorkflowConflict)
+		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: task is not waiting on that node", ErrWorkflowConflict)
 	}
 	node, ok := run.Snapshot.Node(nodeRun.NodeKey)
 	if !ok || node.Kind != NodeHumanGate {
@@ -741,7 +741,7 @@ func (s *WorkflowRunService) Respond(ctx context.Context, issueID, nodeRunID, ou
 	})
 }
 
-func (s *WorkflowRunService) ExtendBudget(ctx context.Context, issueID string, additional int, actor Actor) (WorkflowRun, error) {
+func (s *WorkflowRunService) ExtendBudget(ctx context.Context, taskID string, additional int, actor Actor) (WorkflowRun, error) {
 	if additional < 1 || additional > MaxFlowTransitionBudget {
 		return WorkflowRun{}, fmt.Errorf("additional transitions must be between 1 and %d", MaxFlowTransitionBudget)
 	}
@@ -751,7 +751,7 @@ func (s *WorkflowRunService) ExtendBudget(ctx context.Context, issueID string, a
 	}
 	defer tx.Rollback()
 	run, err := scanWorkflowRun(tx.QueryRowContext(ctx, workflowRunSelect+`
-WHERE issue_id = ? AND state = 'waiting'`, issueID))
+WHERE task_id = ? AND state = 'waiting'`, taskID))
 	if err != nil {
 		return WorkflowRun{}, err
 	}
@@ -780,14 +780,14 @@ UPDATE workflow_runs SET transition_budget = transition_budget + ?, state = ?, v
 	return s.Get(ctx, run.ID)
 }
 
-func (s *WorkflowRunService) Reset(ctx context.Context, issueID string, actor Actor) (WorkflowRun, error) {
+func (s *WorkflowRunService) Reset(ctx context.Context, taskID string, actor Actor) (WorkflowRun, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return WorkflowRun{}, err
 	}
 	defer tx.Rollback()
 	run, err := scanWorkflowRun(tx.QueryRowContext(ctx, workflowRunSelect+`
-WHERE issue_id = ? AND state IN ('scheduled', 'running', 'waiting')`, issueID))
+WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, taskID))
 	if err != nil {
 		return WorkflowRun{}, err
 	}
@@ -824,8 +824,8 @@ UPDATE workflow_runs SET state = ?, cancelled_at = ?, current_node_run_id = NULL
 		return WorkflowRun{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
-UPDATE issues SET lifecycle_state = NULL, done_resolution = NULL, done_at = NULL,
-	updated_at = ? WHERE id = ?`, sqlitex.FormatTime(now), issueID); err != nil {
+UPDATE tasks SET lifecycle_state = NULL, done_resolution = NULL, done_at = NULL,
+	updated_at = ? WHERE id = ?`, sqlitex.FormatTime(now), taskID); err != nil {
 		return WorkflowRun{}, err
 	}
 	fromState := LifecycleInProgress
@@ -833,7 +833,7 @@ UPDATE issues SET lifecycle_state = NULL, done_resolution = NULL, done_at = NULL
 		fromState = LifecycleScheduled
 	}
 	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
-		IssueID: issueID, WorkflowRunID: run.ID, FromIssueState: string(fromState),
+		TaskID: taskID, WorkflowRunID: run.ID, FromTaskState: string(fromState),
 		EventKind: "workflow_reset", Actor: string(actor), CreatedAt: now,
 	}); err != nil {
 		return WorkflowRun{}, err
@@ -844,121 +844,121 @@ UPDATE issues SET lifecycle_state = NULL, done_resolution = NULL, done_at = NULL
 	return s.Get(ctx, run.ID)
 }
 
-func (s *WorkflowRunService) ForceDone(ctx context.Context, issueID string, resolution DoneResolution, note string, actor Actor) (Issue, error) {
+func (s *WorkflowRunService) ForceDone(ctx context.Context, taskID string, resolution DoneResolution, note string, actor Actor) (Task, error) {
 	if err := validateDoneResolution(resolution); err != nil {
-		return Issue{}, err
+		return Task{}, err
 	}
 	if resolution == ResolutionMerged {
-		return Issue{}, errors.New("merged resolution may only be produced by a merge node")
+		return Task{}, errors.New("merged resolution may only be produced by a merge node")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return Issue{}, err
+		return Task{}, err
 	}
 	defer tx.Rollback()
 	var currentState sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT lifecycle_state FROM issues WHERE id = ?`, issueID).Scan(&currentState); err != nil {
-		return Issue{}, err
+	if err := tx.QueryRowContext(ctx, `SELECT lifecycle_state FROM tasks WHERE id = ?`, taskID).Scan(&currentState); err != nil {
+		return Task{}, err
 	}
 	if currentState.Valid && currentState.String == string(LifecycleDone) {
-		return Issue{}, fmt.Errorf("%w: issue is already done", ErrWorkflowConflict)
+		return Task{}, fmt.Errorf("%w: task is already done", ErrWorkflowConflict)
 	}
 	now := s.now().UTC()
 	var runID sql.NullString
 	_ = tx.QueryRowContext(ctx, `
-SELECT id FROM workflow_runs WHERE issue_id = ? AND state IN ('scheduled', 'running', 'waiting')`, issueID).Scan(&runID)
+SELECT id FROM workflow_runs WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, taskID).Scan(&runID)
 	if runID.Valid {
 		if _, err := tx.ExecContext(ctx, `
 UPDATE jobs SET state = 'canceled', updated_at = ?
 WHERE workflow_run_id = ? AND state IN ('queued', 'claimed', 'running')`, sqlitex.FormatTime(now), runID.String); err != nil {
-			return Issue{}, err
+			return Task{}, err
 		}
 		if _, err := tx.ExecContext(ctx, `
 UPDATE leases SET released_at = COALESCE(released_at, ?)
 WHERE job_id IN (SELECT id FROM jobs WHERE workflow_run_id = ?) AND released_at IS NULL`, sqlitex.FormatTime(now), runID.String); err != nil {
-			return Issue{}, err
+			return Task{}, err
 		}
 		if _, err := tx.ExecContext(ctx, `
 UPDATE sessions SET runtime_state = 'abandoned', updated_at = ?, finished_at = COALESCE(finished_at, ?)
 WHERE workflow_run_id = ? AND runtime_state IN ('starting', 'working', 'waiting')`,
 			sqlitex.FormatTime(now), sqlitex.FormatTime(now), runID.String); err != nil {
-			return Issue{}, err
+			return Task{}, err
 		}
 		if _, err := tx.ExecContext(ctx, `
 UPDATE workflow_node_runs SET state = ?, completed_at = COALESCE(completed_at, ?)
 WHERE workflow_run_id = ? AND state IN ('queued', 'running', 'waiting')`,
 			string(WorkflowNodeCancelled), sqlitex.FormatTime(now), runID.String); err != nil {
-			return Issue{}, err
+			return Task{}, err
 		}
 		if _, err := tx.ExecContext(ctx, `
 UPDATE workflow_runs SET state = ?, completed_at = ?, completion_source = 'owner_override',
 	current_node_run_id = NULL, version = version + 1 WHERE id = ?`,
 			string(WorkflowRunCompleted), sqlitex.FormatTime(now), runID.String); err != nil {
-			return Issue{}, err
+			return Task{}, err
 		}
 		if err := resolveOpenWaitTx(ctx, tx, runID.String, actor, now); err != nil {
-			return Issue{}, err
+			return Task{}, err
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `
-UPDATE issues SET lifecycle_state = ?, done_resolution = ?, done_at = ?, updated_at = ? WHERE id = ?`,
-		string(LifecycleDone), string(resolution), sqlitex.FormatTime(now), sqlitex.FormatTime(now), issueID); err != nil {
-		return Issue{}, err
+UPDATE tasks SET lifecycle_state = ?, done_resolution = ?, done_at = ?, updated_at = ? WHERE id = ?`,
+		string(LifecycleDone), string(resolution), sqlitex.FormatTime(now), sqlitex.FormatTime(now), taskID); err != nil {
+		return Task{}, err
 	}
 	payload, _ := json.Marshal(map[string]any{"note": strings.TrimSpace(note), "resolution": resolution})
 	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
-		IssueID: issueID, WorkflowRunID: runID.String, FromIssueState: currentState.String,
-		ToIssueState: string(LifecycleDone), EventKind: "owner_done", PayloadJSON: string(payload),
+		TaskID: taskID, WorkflowRunID: runID.String, FromTaskState: currentState.String,
+		ToTaskState: string(LifecycleDone), EventKind: "owner_done", PayloadJSON: string(payload),
 		Actor: string(actor), CreatedAt: now,
 	}); err != nil {
-		return Issue{}, err
+		return Task{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return Issue{}, err
+		return Task{}, err
 	}
-	return s.issues.GetIssue(ctx, issueID)
+	return s.tasks.GetTask(ctx, taskID)
 }
 
-func (s *WorkflowRunService) Reopen(ctx context.Context, issueID string, actor Actor) (Issue, error) {
+func (s *WorkflowRunService) Reopen(ctx context.Context, taskID string, actor Actor) (Task, error) {
 	now := s.now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return Issue{}, err
+		return Task{}, err
 	}
 	defer tx.Rollback()
 	var previousResolution string
-	if err := tx.QueryRowContext(ctx, `SELECT done_resolution FROM issues WHERE id = ? AND lifecycle_state = ?`,
-		issueID, string(LifecycleDone)).Scan(&previousResolution); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT done_resolution FROM tasks WHERE id = ? AND lifecycle_state = ?`,
+		taskID, string(LifecycleDone)).Scan(&previousResolution); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return Issue{}, fmt.Errorf("%w: only Done issues can be reopened", ErrWorkflowConflict)
+			return Task{}, fmt.Errorf("%w: only Done tasks can be reopened", ErrWorkflowConflict)
 		}
-		return Issue{}, err
+		return Task{}, err
 	}
 	result, err := tx.ExecContext(ctx, `
-UPDATE issues SET lifecycle_state = NULL, done_resolution = NULL, done_at = NULL, updated_at = ?
-WHERE id = ? AND lifecycle_state = ?`, sqlitex.FormatTime(now), issueID, string(LifecycleDone))
+UPDATE tasks SET lifecycle_state = NULL, done_resolution = NULL, done_at = NULL, updated_at = ?
+WHERE id = ? AND lifecycle_state = ?`, sqlitex.FormatTime(now), taskID, string(LifecycleDone))
 	if err != nil {
-		return Issue{}, err
+		return Task{}, err
 	}
 	affected, _ := result.RowsAffected()
 	if affected == 0 {
-		return Issue{}, fmt.Errorf("%w: only Done issues can be reopened", ErrWorkflowConflict)
+		return Task{}, fmt.Errorf("%w: only Done tasks can be reopened", ErrWorkflowConflict)
 	}
 	payload, _ := json.Marshal(map[string]any{"previous_resolution": previousResolution})
 	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
-		IssueID: issueID, FromIssueState: string(LifecycleDone), EventKind: "issue_reopened",
+		TaskID: taskID, FromTaskState: string(LifecycleDone), EventKind: "task_reopened",
 		PayloadJSON: string(payload), Actor: string(actor), CreatedAt: now,
 	}); err != nil {
-		return Issue{}, err
+		return Task{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return Issue{}, err
+		return Task{}, err
 	}
-	return s.issues.GetIssue(ctx, issueID)
+	return s.tasks.GetTask(ctx, taskID)
 }
 
-func (s *WorkflowRunService) OpenWait(ctx context.Context, issueID string) (WorkflowWait, bool, error) {
-	run, ok, err := s.ActiveForIssue(ctx, issueID)
+func (s *WorkflowRunService) OpenWait(ctx context.Context, taskID string) (WorkflowWait, bool, error) {
+	run, ok, err := s.ActiveForTask(ctx, taskID)
 	if err != nil || !ok {
 		return WorkflowWait{}, false, err
 	}
@@ -966,8 +966,8 @@ func (s *WorkflowRunService) OpenWait(ctx context.Context, issueID string) (Work
 WHERE workflow_run_id = ? AND state = 'open'`, run.ID))
 }
 
-func (s *WorkflowRunService) Substate(ctx context.Context, issueID string) (InProgressSubstate, *WorkflowWait, error) {
-	wait, ok, err := s.OpenWait(ctx, issueID)
+func (s *WorkflowRunService) Substate(ctx context.Context, taskID string) (InProgressSubstate, *WorkflowWait, error) {
+	wait, ok, err := s.OpenWait(ctx, taskID)
 	if err != nil {
 		return "", nil, err
 	}
@@ -978,7 +978,7 @@ func (s *WorkflowRunService) Substate(ctx context.Context, issueID string) (InPr
 }
 
 // RequestAgentInput pauses the active agent node without completing it. The
-// live session may continue polling for a human reply, while the issue derives
+// live session may continue polling for a human reply, while the task derives
 // In Progress / Blocked from the durable wait.
 func (s *WorkflowRunService) RequestAgentInput(ctx context.Context, nodeRunID, message string, actor Actor) error {
 	nodeRunID = strings.TrimSpace(nodeRunID)
@@ -1027,8 +1027,8 @@ func (s *WorkflowRunService) RequestAgentInput(ctx context.Context, nodeRunID, m
 	}
 	payload, _ := json.Marshal(map[string]string{"message": message})
 	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
-		IssueID: run.IssueID, WorkflowRunID: run.ID, FromIssueState: string(LifecycleInProgress),
-		ToIssueState: string(LifecycleInProgress), FromNodeKey: nodeRun.NodeKey, ToNodeKey: nodeRun.NodeKey,
+		TaskID: run.TaskID, WorkflowRunID: run.ID, FromTaskState: string(LifecycleInProgress),
+		ToTaskState: string(LifecycleInProgress), FromNodeKey: nodeRun.NodeKey, ToNodeKey: nodeRun.NodeKey,
 		EventKind: "agent_input_requested", PayloadJSON: string(payload), Actor: string(actor), CreatedAt: now,
 	}); err != nil {
 		return err
@@ -1038,14 +1038,14 @@ func (s *WorkflowRunService) RequestAgentInput(ctx context.Context, nodeRunID, m
 
 // ResumeAgentRequest resolves an open agent-input wait after the reply has
 // been queued to the live session. It leaves the same node visit active.
-func (s *WorkflowRunService) ResumeAgentRequest(ctx context.Context, issueID, feedback string, actor Actor) (bool, error) {
+func (s *WorkflowRunService) ResumeAgentRequest(ctx context.Context, taskID, feedback string, actor Actor) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
 	run, err := scanWorkflowRun(tx.QueryRowContext(ctx, workflowRunSelect+`
-WHERE issue_id = ? AND state = 'waiting'`, strings.TrimSpace(issueID)))
+WHERE task_id = ? AND state = 'waiting'`, strings.TrimSpace(taskID)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -1075,8 +1075,8 @@ WHERE issue_id = ? AND state = 'waiting'`, strings.TrimSpace(issueID)))
 	}
 	payload, _ := json.Marshal(map[string]string{"feedback": strings.TrimSpace(feedback)})
 	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
-		IssueID: run.IssueID, WorkflowRunID: run.ID, FromIssueState: string(LifecycleInProgress),
-		ToIssueState: string(LifecycleInProgress), FromNodeKey: nodeRun.NodeKey, ToNodeKey: nodeRun.NodeKey,
+		TaskID: run.TaskID, WorkflowRunID: run.ID, FromTaskState: string(LifecycleInProgress),
+		ToTaskState: string(LifecycleInProgress), FromNodeKey: nodeRun.NodeKey, ToNodeKey: nodeRun.NodeKey,
 		EventKind: "agent_input_received", PayloadJSON: string(payload), Actor: string(actor), CreatedAt: now,
 	}); err != nil {
 		return false, err
@@ -1112,13 +1112,13 @@ UPDATE workflow_runs SET state = ?, current_node_key = ?, current_node_run_id = 
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-UPDATE issues SET lifecycle_state = ?, done_resolution = ?, done_at = ?, updated_at = ? WHERE id = ?`,
-		string(LifecycleDone), string(resolution), sqlitex.FormatTime(now), sqlitex.FormatTime(now), run.IssueID); err != nil {
+UPDATE tasks SET lifecycle_state = ?, done_resolution = ?, done_at = ?, updated_at = ? WHERE id = ?`,
+		string(LifecycleDone), string(resolution), sqlitex.FormatTime(now), sqlitex.FormatTime(now), run.TaskID); err != nil {
 		return err
 	}
 	return insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
-		IssueID: run.IssueID, WorkflowRunID: run.ID, FromIssueState: string(LifecycleInProgress),
-		ToIssueState: string(LifecycleDone), FromNodeKey: run.CurrentNodeKey, ToNodeKey: node.Key,
+		TaskID: run.TaskID, WorkflowRunID: run.ID, FromTaskState: string(LifecycleInProgress),
+		ToTaskState: string(LifecycleDone), FromNodeKey: run.CurrentNodeKey, ToNodeKey: node.Key,
 		EventKind: "workflow_completed", PayloadJSON: fmt.Sprintf(`{"resolution":%q}`, resolution),
 		Actor: string(ActorSystem), CreatedAt: now,
 	})
@@ -1156,14 +1156,14 @@ UPDATE workflow_runs SET state = ?, started_at = COALESCE(started_at, ?), versio
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-UPDATE issues SET lifecycle_state = ?, updated_at = ? WHERE id = ?`,
-		string(LifecycleInProgress), sqlitex.FormatTime(now), run.IssueID); err != nil {
+UPDATE tasks SET lifecycle_state = ?, updated_at = ? WHERE id = ?`,
+		string(LifecycleInProgress), sqlitex.FormatTime(now), run.TaskID); err != nil {
 		return err
 	}
 	if run.State == WorkflowRunScheduled {
 		if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
-			IssueID: run.IssueID, WorkflowRunID: run.ID, FromIssueState: string(LifecycleScheduled),
-			ToIssueState: string(LifecycleInProgress), ToNodeKey: nodeRun.NodeKey,
+			TaskID: run.TaskID, WorkflowRunID: run.ID, FromTaskState: string(LifecycleScheduled),
+			ToTaskState: string(LifecycleInProgress), ToNodeKey: nodeRun.NodeKey,
 			EventKind: "workflow_started", Actor: string(ActorSystem), CreatedAt: now,
 		}); err != nil {
 			return err
@@ -1202,22 +1202,22 @@ func openWaitTx(ctx context.Context, tx *sql.Tx, runID string) (WorkflowWait, bo
 	return scanWorkflowWaitMaybe(tx.QueryRowContext(ctx, workflowWaitSelect+` WHERE workflow_run_id = ? AND state = 'open'`, runID))
 }
 
-func unresolvedBlockerCountTx(ctx context.Context, tx *sql.Tx, issueID string) (int, error) {
+func unresolvedBlockerCountTx(ctx context.Context, tx *sql.Tx, taskID string) (int, error) {
 	var count int
 	err := tx.QueryRowContext(ctx, `
 SELECT COUNT(*)
-FROM issue_relations r
-JOIN issues blocker ON blocker.id = r.source_issue_id
-WHERE r.kind = ? AND r.target_issue_id = ?
-	AND COALESCE(blocker.lifecycle_state, '') != ?`, string(RelationBlocks), issueID, string(LifecycleDone)).Scan(&count)
+FROM task_relations r
+JOIN tasks blocker ON blocker.id = r.source_task_id
+WHERE r.kind = ? AND r.target_task_id = ?
+	AND COALESCE(blocker.lifecycle_state, '') != ?`, string(RelationBlocks), taskID, string(LifecycleDone)).Scan(&count)
 	return count, err
 }
 
 type workflowTransitionInput struct {
-	IssueID, WorkflowRunID, FromIssueState, ToIssueState string
-	FromNodeKey, ToNodeKey, Outcome, EventKind           string
-	PayloadJSON, Actor, IdempotencyKey                   string
-	CreatedAt                                            time.Time
+	TaskID, WorkflowRunID, FromTaskState, ToTaskState string
+	FromNodeKey, ToNodeKey, Outcome, EventKind        string
+	PayloadJSON, Actor, IdempotencyKey                string
+	CreatedAt                                         time.Time
 }
 
 func insertWorkflowTransitionTx(ctx context.Context, tx *sql.Tx, input workflowTransitionInput) error {
@@ -1227,28 +1227,28 @@ func insertWorkflowTransitionTx(ctx context.Context, tx *sql.Tx, input workflowT
 	}
 	_, err := tx.ExecContext(ctx, `
 INSERT INTO workflow_transitions (
-	issue_id, workflow_run_id, from_issue_state, to_issue_state, from_node_key,
+	task_id, workflow_run_id, from_task_state, to_task_state, from_node_key,
 	to_node_key, outcome, event_kind, payload_json, actor, idempotency_key, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.IssueID,
-		sqlitex.NullableNonEmptyString(input.WorkflowRunID), input.FromIssueState, input.ToIssueState,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.TaskID,
+		sqlitex.NullableNonEmptyString(input.WorkflowRunID), input.FromTaskState, input.ToTaskState,
 		input.FromNodeKey, input.ToNodeKey, input.Outcome, input.EventKind, payload,
 		input.Actor, sqlitex.NullableNonEmptyString(input.IdempotencyKey), sqlitex.FormatTime(input.CreatedAt.UTC()))
 	return err
 }
 
 const workflowRunSelect = `
-SELECT id, issue_id, run_sequence, flow_id, flow_snapshot_json, state,
+SELECT id, task_id, run_sequence, flow_id, flow_snapshot_json, state,
 	current_node_key, current_node_run_id, current_artifact_id,
 	transition_budget, transitions_used, version, created_at, started_at,
 	completed_at, cancelled_at, completion_source
 FROM workflow_runs`
 
-func scanWorkflowRun(scanner issueScanner) (WorkflowRun, error) {
+func scanWorkflowRun(scanner taskScanner) (WorkflowRun, error) {
 	var run WorkflowRun
 	var flowID, nodeRunID, artifactID sql.NullString
 	var snapshotJSON, state, createdAt string
 	var startedAt, completedAt, cancelledAt sql.NullString
-	if err := scanner.Scan(&run.ID, &run.IssueID, &run.RunSequence, &flowID, &snapshotJSON, &state,
+	if err := scanner.Scan(&run.ID, &run.TaskID, &run.RunSequence, &flowID, &snapshotJSON, &state,
 		&run.CurrentNodeKey, &nodeRunID, &artifactID, &run.TransitionBudget, &run.TransitionsUsed,
 		&run.Version, &createdAt, &startedAt, &completedAt, &cancelledAt, &run.CompletionSource); err != nil {
 		return WorkflowRun{}, err
@@ -1281,7 +1281,7 @@ SELECT id, workflow_run_id, node_key, visit, attempt, state, input_artifact_id,
 	output_artifact_id, outcome, error, created_at, started_at, completed_at
 FROM workflow_node_runs`
 
-func scanWorkflowNodeRun(scanner issueScanner) (WorkflowNodeRun, error) {
+func scanWorkflowNodeRun(scanner taskScanner) (WorkflowNodeRun, error) {
 	var run WorkflowNodeRun
 	var state, createdAt string
 	var inputArtifact, outputArtifact, startedAt, completedAt sql.NullString
@@ -1310,7 +1310,7 @@ const workflowWaitSelect = `
 SELECT id, workflow_run_id, node_run_id, kind, message, created_by, created_at
 FROM workflow_waits`
 
-func scanWorkflowWaitMaybe(scanner issueScanner) (WorkflowWait, bool, error) {
+func scanWorkflowWaitMaybe(scanner taskScanner) (WorkflowWait, bool, error) {
 	var wait WorkflowWait
 	var nodeRunID sql.NullString
 	var kind, actor, createdAt string

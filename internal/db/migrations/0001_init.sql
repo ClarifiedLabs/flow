@@ -16,7 +16,7 @@ CREATE TABLE id_allocators (
 );
 
 INSERT INTO id_allocators (name, next_number)
-VALUES ('issue', 1), ('issue_attachment', 1);
+VALUES ('task', 1), ('task_attachment', 1);
 
 CREATE TABLE agent_defs (
 	id TEXT PRIMARY KEY,
@@ -50,7 +50,7 @@ CREATE TABLE flow_nodes (
 	name TEXT NOT NULL CHECK (length(trim(name)) > 0),
 	kind TEXT NOT NULL CHECK (kind IN (
 		'agent', 'automated_checks', 'change_review', 'human_gate',
-		'verify_change', 'materialize_issue_set', 'merge_change', 'terminal'
+		'verify_change', 'materialize_task_set', 'merge_change', 'terminal'
 	)),
 	position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
 	config_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(config_json)),
@@ -68,7 +68,7 @@ CREATE TABLE flow_edges (
 	FOREIGN KEY (flow_id, to_node_key) REFERENCES flow_nodes(flow_id, node_key) ON DELETE CASCADE
 );
 
-CREATE TABLE issues (
+CREATE TABLE tasks (
 	id TEXT PRIMARY KEY,
 	title TEXT NOT NULL CHECK (length(trim(title)) > 0),
 	body TEXT NOT NULL DEFAULT '',
@@ -76,7 +76,7 @@ CREATE TABLE issues (
 	priority INTEGER NOT NULL DEFAULT 0 CHECK (priority >= 0),
 	created_by TEXT NOT NULL CHECK (created_by IN ('human', 'agent', 'system')),
 	created_by_session_id TEXT,
-	source_issue_id TEXT REFERENCES issues(id) ON DELETE SET NULL,
+	source_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
 	source_change_id TEXT,
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
@@ -90,7 +90,7 @@ CREATE TABLE issues (
 
 CREATE TABLE workflow_runs (
 	id TEXT PRIMARY KEY,
-	issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 	run_sequence INTEGER NOT NULL CHECK (run_sequence > 0),
 	flow_id TEXT,
 	flow_snapshot_json TEXT NOT NULL CHECK (json_valid(flow_snapshot_json)),
@@ -106,11 +106,11 @@ CREATE TABLE workflow_runs (
 	completed_at TEXT,
 	cancelled_at TEXT,
 	completion_source TEXT NOT NULL DEFAULT '',
-	UNIQUE (issue_id, run_sequence)
+	UNIQUE (task_id, run_sequence)
 );
 
 CREATE UNIQUE INDEX idx_workflow_runs_one_active
-	ON workflow_runs(issue_id)
+	ON workflow_runs(task_id)
 	WHERE state IN ('scheduled', 'running', 'waiting');
 
 CREATE TABLE workflow_node_runs (
@@ -140,7 +140,7 @@ CREATE TABLE workflow_artifacts (
 	node_run_id TEXT NOT NULL REFERENCES workflow_node_runs(id) ON DELETE RESTRICT,
 	session_id TEXT,
 	creator_key TEXT NOT NULL,
-	kind TEXT NOT NULL CHECK (kind IN ('handoff', 'change', 'issue_set')),
+	kind TEXT NOT NULL CHECK (kind IN ('handoff', 'change', 'task_set')),
 	summary_markdown TEXT NOT NULL,
 	payload_json TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
 	payload_sha256 TEXT NOT NULL,
@@ -175,10 +175,10 @@ CREATE UNIQUE INDEX idx_workflow_waits_one_open
 
 CREATE TABLE workflow_transitions (
 	seq INTEGER PRIMARY KEY AUTOINCREMENT,
-	issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 	workflow_run_id TEXT REFERENCES workflow_runs(id) ON DELETE CASCADE,
-	from_issue_state TEXT NOT NULL DEFAULT '',
-	to_issue_state TEXT NOT NULL DEFAULT '',
+	from_task_state TEXT NOT NULL DEFAULT '',
+	to_task_state TEXT NOT NULL DEFAULT '',
 	from_node_key TEXT NOT NULL DEFAULT '',
 	to_node_key TEXT NOT NULL DEFAULT '',
 	outcome TEXT NOT NULL DEFAULT '',
@@ -193,14 +193,14 @@ CREATE UNIQUE INDEX idx_workflow_transitions_idempotency
 	ON workflow_transitions(workflow_run_id, idempotency_key)
 	WHERE idempotency_key IS NOT NULL;
 
-CREATE TABLE issue_relations (
-	source_issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
-	target_issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+CREATE TABLE task_relations (
+	source_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	target_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 	kind TEXT NOT NULL CHECK (kind IN ('parent_of', 'blocks', 'related_to')),
 	created_by TEXT NOT NULL CHECK (created_by IN ('human', 'agent', 'system')),
 	created_at TEXT NOT NULL,
-	PRIMARY KEY (source_issue_id, target_issue_id, kind),
-	CHECK (source_issue_id != target_issue_id)
+	PRIMARY KEY (source_task_id, target_task_id, kind),
+	CHECK (source_task_id != target_task_id)
 );
 
 CREATE TABLE tags (
@@ -213,12 +213,12 @@ CREATE TABLE tags (
 	created_at TEXT NOT NULL
 );
 
-CREATE TABLE issue_tags (
-	issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+CREATE TABLE task_tags (
+	task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 	tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
 	created_by TEXT NOT NULL CHECK (created_by IN ('human', 'agent', 'system')),
 	created_at TEXT NOT NULL,
-	PRIMARY KEY (issue_id, tag_id)
+	PRIMARY KEY (task_id, tag_id)
 );
 
 CREATE TABLE idempotency_records (
@@ -247,7 +247,7 @@ CREATE TABLE git_events (
 
 CREATE TABLE jobs (
 	id TEXT PRIMARY KEY,
-	issue_id TEXT REFERENCES issues(id) ON DELETE CASCADE,
+	task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
 	change_id TEXT REFERENCES changes(id) ON DELETE SET NULL,
 	workflow_run_id TEXT REFERENCES workflow_runs(id) ON DELETE CASCADE,
 	node_run_id TEXT REFERENCES workflow_node_runs(id) ON DELETE CASCADE,
@@ -261,7 +261,7 @@ CREATE TABLE jobs (
 	transcript_path TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
-	CHECK (role != 'author' OR issue_id IS NOT NULL)
+	CHECK (role != 'author' OR task_id IS NOT NULL)
 );
 
 CREATE TABLE leases (
@@ -277,7 +277,7 @@ CREATE TABLE leases (
 
 CREATE TABLE checks (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 	name TEXT NOT NULL,
 	kind TEXT NOT NULL CHECK (kind IN ('ci', 'reviewer', 'verifier', 'human')),
 	required INTEGER NOT NULL DEFAULT 1 CHECK (required IN (0, 1)),
@@ -288,13 +288,13 @@ CREATE TABLE checks (
 	reporter TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
-	UNIQUE (issue_id, name),
+	UNIQUE (task_id, name),
 	CHECK (length(trim(name)) > 0)
 );
 
 CREATE TABLE changes (
 	id TEXT PRIMARY KEY,
-	issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 	workflow_run_id TEXT REFERENCES workflow_runs(id) ON DELETE CASCADE,
 	branch TEXT NOT NULL,
 	base TEXT NOT NULL DEFAULT 'main',
@@ -303,14 +303,14 @@ CREATE TABLE changes (
 	updated_at TEXT NOT NULL,
 	ready_at TEXT,
 	merged_at TEXT,
-	UNIQUE (issue_id, branch),
+	UNIQUE (task_id, branch),
 	CHECK (length(trim(branch)) > 0),
 	CHECK (length(trim(base)) > 0)
 );
 
 CREATE TABLE sessions (
 	id TEXT PRIMARY KEY,
-	issue_id TEXT REFERENCES issues(id) ON DELETE CASCADE,
+	task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
 	change_id TEXT REFERENCES changes(id) ON DELETE CASCADE,
 	workflow_run_id TEXT REFERENCES workflow_runs(id) ON DELETE CASCADE,
 	node_run_id TEXT REFERENCES workflow_node_runs(id) ON DELETE CASCADE,
@@ -335,7 +335,7 @@ CREATE TABLE sessions (
 
 CREATE TABLE status_log (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 	change_id TEXT REFERENCES changes(id) ON DELETE SET NULL,
 	session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
 	actor TEXT NOT NULL,
@@ -398,7 +398,7 @@ CREATE TABLE terminal_access_tokens (
 
 CREATE TABLE review_threads (
 	id TEXT PRIMARY KEY,
-	issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 	change_id TEXT NOT NULL REFERENCES changes(id) ON DELETE CASCADE,
 	state TEXT NOT NULL CHECK (state IN ('open', 'claimed', 'certified', 'reopened')),
 	anchor_commit_sha TEXT NOT NULL,
@@ -451,7 +451,7 @@ CREATE TABLE job_terminal_access_tokens (
 
 CREATE TABLE merge_intents (
 	id TEXT PRIMARY KEY,
-	issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 	change_id TEXT NOT NULL REFERENCES changes(id) ON DELETE CASCADE,
 	base_branch TEXT NOT NULL,
 	exchange_path TEXT NOT NULL,
@@ -467,9 +467,9 @@ CREATE TABLE consumer_watermarks (
 	updated_at TEXT NOT NULL
 );
 
-CREATE TABLE issue_attachments (
+CREATE TABLE task_attachments (
 	id TEXT PRIMARY KEY,
-	issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 	stage TEXT NOT NULL CHECK (stage IN ('initial', 'author', 'reviewer', 'verifier')),
 	filename TEXT NOT NULL CHECK (length(trim(filename)) > 0),
 	content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
@@ -479,60 +479,60 @@ CREATE TABLE issue_attachments (
 	created_at TEXT NOT NULL
 );
 
-CREATE VIEW issue_review_state AS
+CREATE VIEW task_review_state AS
 SELECT
-	i.id AS issue_id,
+	i.id AS task_id,
 	CASE
-		WHEN EXISTS (SELECT 1 FROM changes ch WHERE ch.issue_id = i.id AND ch.merged_at IS NOT NULL) THEN 'merged'
-		WHEN EXISTS (SELECT 1 FROM checks c WHERE c.issue_id = i.id AND c.required = 1 AND c.verdict = 'blocked') THEN 'changes_requested'
-		WHEN EXISTS (SELECT 1 FROM checks c WHERE c.issue_id = i.id AND c.required = 1)
-			AND NOT EXISTS (SELECT 1 FROM checks c WHERE c.issue_id = i.id AND c.required = 1 AND c.verdict != 'satisfied') THEN 'approved'
+		WHEN EXISTS (SELECT 1 FROM changes ch WHERE ch.task_id = i.id AND ch.merged_at IS NOT NULL) THEN 'merged'
+		WHEN EXISTS (SELECT 1 FROM checks c WHERE c.task_id = i.id AND c.required = 1 AND c.verdict = 'blocked') THEN 'changes_requested'
+		WHEN EXISTS (SELECT 1 FROM checks c WHERE c.task_id = i.id AND c.required = 1)
+			AND NOT EXISTS (SELECT 1 FROM checks c WHERE c.task_id = i.id AND c.required = 1 AND c.verdict != 'satisfied') THEN 'approved'
 		ELSE 'in_review'
 	END AS review_state
-FROM issues i;
+FROM tasks i;
 
-CREATE INDEX idx_issues_flow_id ON issues(flow_id);
-CREATE INDEX idx_issues_lifecycle_state ON issues(lifecycle_state, updated_at);
-CREATE INDEX idx_issues_done_at ON issues(done_at DESC, id DESC) WHERE lifecycle_state = 'done';
-CREATE INDEX idx_issues_source_issue_id ON issues(source_issue_id);
-CREATE INDEX idx_issue_relations_target ON issue_relations(target_issue_id, kind);
-CREATE UNIQUE INDEX idx_issue_relations_one_parent ON issue_relations(target_issue_id) WHERE kind = 'parent_of';
-CREATE INDEX idx_issue_tags_tag_id ON issue_tags(tag_id);
+CREATE INDEX idx_tasks_flow_id ON tasks(flow_id);
+CREATE INDEX idx_tasks_lifecycle_state ON tasks(lifecycle_state, updated_at);
+CREATE INDEX idx_tasks_done_at ON tasks(done_at DESC, id DESC) WHERE lifecycle_state = 'done';
+CREATE INDEX idx_tasks_source_task_id ON tasks(source_task_id);
+CREATE INDEX idx_task_relations_target ON task_relations(target_task_id, kind);
+CREATE UNIQUE INDEX idx_task_relations_one_parent ON task_relations(target_task_id) WHERE kind = 'parent_of';
+CREATE INDEX idx_task_tags_tag_id ON task_tags(tag_id);
 CREATE INDEX idx_git_events_ref ON git_events(ref, observed_at);
 CREATE INDEX idx_jobs_queue ON jobs(state, capacity_bucket, priority DESC, created_at);
-CREATE UNIQUE INDEX idx_jobs_one_live_author_per_issue ON jobs(issue_id) WHERE role = 'author' AND state IN ('queued', 'claimed', 'running') AND issue_id IS NOT NULL;
--- Console work is unique per project when issue_id is NULL and per issue otherwise.
+CREATE UNIQUE INDEX idx_jobs_one_live_author_per_task ON jobs(task_id) WHERE role = 'author' AND state IN ('queued', 'claimed', 'running') AND task_id IS NOT NULL;
+-- Console work is unique per project when task_id is NULL and per task otherwise.
 CREATE UNIQUE INDEX idx_jobs_one_live_project_console ON jobs(role)
-	WHERE role = 'console' AND issue_id IS NULL AND state IN ('queued', 'claimed', 'running');
-CREATE UNIQUE INDEX idx_jobs_one_live_issue_console ON jobs(issue_id)
-	WHERE role = 'console' AND issue_id IS NOT NULL AND state IN ('queued', 'claimed', 'running');
+	WHERE role = 'console' AND task_id IS NULL AND state IN ('queued', 'claimed', 'running');
+CREATE UNIQUE INDEX idx_jobs_one_live_task_console ON jobs(task_id)
+	WHERE role = 'console' AND task_id IS NOT NULL AND state IN ('queued', 'claimed', 'running');
 CREATE INDEX idx_leases_worker_live ON leases(worker_id, capacity_bucket) WHERE released_at IS NULL;
 CREATE INDEX idx_leases_expired ON leases(expires_at) WHERE released_at IS NULL;
 CREATE UNIQUE INDEX idx_leases_one_live_per_job ON leases(job_id) WHERE released_at IS NULL;
-CREATE INDEX idx_checks_issue_verdict ON checks(issue_id, required, verdict);
-CREATE INDEX idx_changes_issue_unmerged ON changes(issue_id, merged_at);
-CREATE INDEX idx_changes_issue_ready ON changes(issue_id, ready_at, merged_at);
-CREATE INDEX idx_changes_issue_merged ON changes(issue_id) WHERE merged_at IS NOT NULL;
+CREATE INDEX idx_checks_task_verdict ON checks(task_id, required, verdict);
+CREATE INDEX idx_changes_task_unmerged ON changes(task_id, merged_at);
+CREATE INDEX idx_changes_task_ready ON changes(task_id, ready_at, merged_at);
+CREATE INDEX idx_changes_task_merged ON changes(task_id) WHERE merged_at IS NOT NULL;
 CREATE INDEX idx_jobs_change_id ON jobs(change_id);
 CREATE INDEX idx_jobs_workflow_node ON jobs(workflow_run_id, node_run_id);
 CREATE INDEX idx_changes_workflow_run ON changes(workflow_run_id);
 CREATE INDEX idx_sessions_workflow_node ON sessions(workflow_run_id, node_run_id);
 CREATE INDEX idx_workflow_artifacts_run ON workflow_artifacts(workflow_run_id, created_at);
-CREATE INDEX idx_workflow_transitions_issue_seq ON workflow_transitions(issue_id, seq DESC);
-CREATE UNIQUE INDEX idx_sessions_one_active_author_per_issue ON sessions(issue_id) WHERE role = 'author' AND runtime_state IN ('starting', 'working', 'waiting');
+CREATE INDEX idx_workflow_transitions_task_seq ON workflow_transitions(task_id, seq DESC);
+CREATE UNIQUE INDEX idx_sessions_one_active_author_per_task ON sessions(task_id) WHERE role = 'author' AND runtime_state IN ('starting', 'working', 'waiting');
 CREATE UNIQUE INDEX idx_sessions_one_active_project_console ON sessions(role)
-	WHERE role = 'console' AND issue_id IS NULL AND runtime_state IN ('starting', 'working', 'waiting');
-CREATE UNIQUE INDEX idx_sessions_one_active_issue_console ON sessions(issue_id)
-	WHERE role = 'console' AND issue_id IS NOT NULL AND runtime_state IN ('starting', 'working', 'waiting');
+	WHERE role = 'console' AND task_id IS NULL AND runtime_state IN ('starting', 'working', 'waiting');
+CREATE UNIQUE INDEX idx_sessions_one_active_task_console ON sessions(task_id)
+	WHERE role = 'console' AND task_id IS NOT NULL AND runtime_state IN ('starting', 'working', 'waiting');
 CREATE INDEX idx_sessions_change ON sessions(change_id, created_at);
 CREATE INDEX idx_session_messages_pending ON session_messages(session_id, state, created_at);
-CREATE INDEX idx_status_log_issue_created ON status_log(issue_id, created_at DESC, id DESC);
-CREATE INDEX idx_status_log_issue_kind_resolved
-	ON status_log(issue_id, kind, resolved_at, created_at DESC, id DESC);
+CREATE INDEX idx_status_log_task_created ON status_log(task_id, created_at DESC, id DESC);
+CREATE INDEX idx_status_log_task_kind_resolved
+	ON status_log(task_id, kind, resolved_at, created_at DESC, id DESC);
 CREATE INDEX idx_handoff_history_change_recorded ON handoff_history(change_id, recorded_at DESC, id DESC);
 CREATE INDEX idx_terminal_access_tokens_session ON terminal_access_tokens(session_id, expires_at);
 CREATE INDEX idx_review_threads_change_state ON review_threads(change_id, state, created_at);
-CREATE INDEX idx_review_threads_issue_state ON review_threads(issue_id, state, created_at);
+CREATE INDEX idx_review_threads_task_state ON review_threads(task_id, state, created_at);
 -- Idempotency guard for worker-applied reviewer concerns.
 CREATE UNIQUE INDEX idx_review_threads_idem
 	ON review_threads(change_id, anchor_commit_sha, file_path, line, body_hash)
@@ -542,5 +542,5 @@ CREATE INDEX idx_job_terminals_lease ON job_terminals(lease_id);
 CREATE INDEX idx_job_terminal_access_tokens_job ON job_terminal_access_tokens(job_id, expires_at);
 CREATE UNIQUE INDEX idx_merge_intents_change_open ON merge_intents(change_id) WHERE completed_at IS NULL;
 CREATE INDEX idx_idempotency_pending ON idempotency_records(status_code, created_at);
-CREATE INDEX idx_issue_attachments_issue_id ON issue_attachments(issue_id, created_at);
-CREATE INDEX idx_issue_attachments_stage ON issue_attachments(stage);
+CREATE INDEX idx_task_attachments_task_id ON task_attachments(task_id, created_at);
+CREATE INDEX idx_task_attachments_stage ON task_attachments(stage);

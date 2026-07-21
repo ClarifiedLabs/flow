@@ -17,7 +17,7 @@ import (
 var errRecordMergedConflict = errors.New("change is already merged, missing, or head changed")
 
 type MergeResult struct {
-	Issue           Issue  `json:"issue"`
+	Task            Task   `json:"task"`
 	Change          Change `json:"change"`
 	PreviousBaseSHA string `json:"previous_base_sha"`
 	HeadSHA         string `json:"head_sha"`
@@ -26,7 +26,7 @@ type MergeResult struct {
 
 type MergeService struct {
 	db       *sql.DB
-	issues   *IssueService
+	tasks    *TaskService
 	sessions *SessionService
 	project  Project
 	now      func() time.Time
@@ -43,16 +43,16 @@ type mergeRecoveryBackoff struct {
 	nextAttempt time.Time
 }
 
-func NewMergeService(database *sql.DB, issues *IssueService, sessions *SessionService, project Project) *MergeService {
-	if issues == nil {
-		issues = NewIssueService(database)
+func NewMergeService(database *sql.DB, tasks *TaskService, sessions *SessionService, project Project) *MergeService {
+	if tasks == nil {
+		tasks = NewTaskService(database)
 	}
 	if sessions == nil {
-		sessions = NewSessionService(database, issues, nil)
+		sessions = NewSessionService(database, tasks, nil)
 	}
 	return &MergeService{
 		db:              database,
-		issues:          issues,
+		tasks:           tasks,
 		sessions:        sessions,
 		project:         project,
 		now:             sqlitex.UTCNow,
@@ -60,24 +60,24 @@ func NewMergeService(database *sql.DB, issues *IssueService, sessions *SessionSe
 	}
 }
 
-func (s *MergeService) MergeIssue(ctx context.Context, issueID string) (MergeResult, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return MergeResult{}, errors.New("issue id is required")
+func (s *MergeService) MergeTask(ctx context.Context, taskID string) (MergeResult, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return MergeResult{}, errors.New("task id is required")
 	}
-	issue, err := s.issues.GetIssue(ctx, issueID)
+	task, err := s.tasks.GetTask(ctx, taskID)
 	if err != nil {
 		return MergeResult{}, err
 	}
-	change, ok, err := s.sessions.ReadyUnmergedChangeForIssue(ctx, issue.ID)
+	change, ok, err := s.sessions.ReadyUnmergedChangeForTask(ctx, task.ID)
 	if err != nil {
 		return MergeResult{}, err
 	}
 	if !ok {
-		return MergeResult{}, errors.New("issue has no ready unmerged change")
+		return MergeResult{}, errors.New("task has no ready unmerged change")
 	}
 
-	return s.mergeApprovedChange(ctx, issue, change)
+	return s.mergeApprovedChange(ctx, task, change)
 }
 
 func (s *MergeService) MergeChange(ctx context.Context, changeID string) (MergeResult, error) {
@@ -95,11 +95,11 @@ func (s *MergeService) MergeChange(ctx context.Context, changeID string) (MergeR
 	if change.MergedAt != nil {
 		return MergeResult{}, errors.New("change is already merged")
 	}
-	issue, err := s.issues.GetIssue(ctx, change.IssueID)
+	task, err := s.tasks.GetTask(ctx, change.TaskID)
 	if err != nil {
 		return MergeResult{}, err
 	}
-	currentChange, ok, err := s.sessions.ReadyUnmergedChangeForIssue(ctx, issue.ID)
+	currentChange, ok, err := s.sessions.ReadyUnmergedChangeForTask(ctx, task.ID)
 	if err != nil {
 		return MergeResult{}, err
 	}
@@ -107,12 +107,12 @@ func (s *MergeService) MergeChange(ctx context.Context, changeID string) (MergeR
 		return MergeResult{}, errors.New("change is not the current ready unmerged change")
 	}
 
-	return s.mergeApprovedChange(ctx, issue, change)
+	return s.mergeApprovedChange(ctx, task, change)
 }
 
-func (s *MergeService) ChangeMergeEligibility(ctx context.Context, issue Issue, change Change) (bool, string, error) {
-	if issue.ScheduleState == ScheduleClosed {
-		return false, "issue is closed", nil
+func (s *MergeService) ChangeMergeEligibility(ctx context.Context, task Task, change Change) (bool, string, error) {
+	if task.ScheduleState == ScheduleClosed {
+		return false, "task is closed", nil
 	}
 	if change.ReadyAt == nil {
 		return false, "change is not ready", nil
@@ -120,14 +120,14 @@ func (s *MergeService) ChangeMergeEligibility(ctx context.Context, issue Issue, 
 	if change.MergedAt != nil {
 		return false, "change is already merged", nil
 	}
-	currentChange, ok, err := s.sessions.ReadyUnmergedChangeForIssue(ctx, issue.ID)
+	currentChange, ok, err := s.sessions.ReadyUnmergedChangeForTask(ctx, task.ID)
 	if err != nil {
 		return false, "", err
 	}
 	if !ok || currentChange.ID != change.ID {
 		return false, "change is not the current ready unmerged change", nil
 	}
-	reviewState, err := s.issues.reviewState(ctx, issue.ID)
+	reviewState, err := s.tasks.reviewState(ctx, task.ID)
 	if err != nil {
 		return false, "", err
 	}
@@ -174,11 +174,11 @@ LIMIT 1`, change.ID)
 	return strings.TrimSpace(baseSHA), true, nil
 }
 
-func (s *MergeService) mergeApprovedChange(ctx context.Context, issue Issue, change Change) (MergeResult, error) {
-	if issue.ScheduleState == ScheduleClosed {
-		return MergeResult{}, errors.New("closed issues cannot be merged")
+func (s *MergeService) mergeApprovedChange(ctx context.Context, task Task, change Change) (MergeResult, error) {
+	if task.ScheduleState == ScheduleClosed {
+		return MergeResult{}, errors.New("closed tasks cannot be merged")
 	}
-	reviewState, err := s.issues.reviewState(ctx, issue.ID)
+	reviewState, err := s.tasks.reviewState(ctx, task.ID)
 	if err != nil {
 		return MergeResult{}, err
 	}
@@ -192,7 +192,7 @@ func (s *MergeService) mergeApprovedChange(ctx context.Context, issue Issue, cha
 	if err != nil {
 		return MergeResult{}, err
 	}
-	intent, err := s.ensureMergeIntent(ctx, issue.ID, change, exchangePath)
+	intent, err := s.ensureMergeIntent(ctx, task.ID, change, exchangePath)
 	if err != nil {
 		return MergeResult{}, err
 	}
@@ -201,7 +201,7 @@ func (s *MergeService) mergeApprovedChange(ctx context.Context, issue Issue, cha
 		BaseBranch:       change.Base,
 		Branch:           change.Branch,
 		ExpectedHeadSHA:  strings.TrimSpace(change.HeadSHA),
-		Message:          mergeCommitMessage(issue, change),
+		Message:          mergeCommitMessage(task, change),
 	})
 	if errors.Is(err, flowgit.ErrNoMergeChanges) {
 		// An empty squash against a base that advanced past the intent's
@@ -227,7 +227,7 @@ func (s *MergeService) mergeApprovedChange(ctx context.Context, issue Issue, cha
 		// with this branch's content, and deletes it otherwise.
 		return MergeResult{}, err
 	}
-	mergedChange, mergedIssue, err := s.recordMerged(ctx, issue.ID, change.ID, strings.TrimSpace(change.HeadSHA))
+	mergedChange, mergedTask, err := s.recordMerged(ctx, task.ID, change.ID, strings.TrimSpace(change.HeadSHA))
 	if err != nil {
 		return MergeResult{}, err
 	}
@@ -236,7 +236,7 @@ func (s *MergeService) mergeApprovedChange(ctx context.Context, issue Issue, cha
 	}
 
 	return MergeResult{
-		Issue:           mergedIssue,
+		Task:            mergedTask,
 		Change:          mergedChange,
 		PreviousBaseSHA: gitResult.PreviousBaseSHA,
 		HeadSHA:         gitResult.HeadSHA,
@@ -258,7 +258,7 @@ func (s *MergeService) healStrandedMerge(ctx context.Context, intent mergeIntent
 		return false, MergeResult{}, nil
 	}
 	headSHA := strings.TrimSpace(change.HeadSHA)
-	mergedChange, mergedIssue, err := s.recordMerged(ctx, intent.IssueID, intent.ChangeID, headSHA)
+	mergedChange, mergedTask, err := s.recordMerged(ctx, intent.TaskID, intent.ChangeID, headSHA)
 	if err != nil {
 		return false, MergeResult{}, fmt.Errorf("complete stranded merge: %w", err)
 	}
@@ -267,7 +267,7 @@ func (s *MergeService) healStrandedMerge(ctx context.Context, intent mergeIntent
 	}
 
 	return true, MergeResult{
-		Issue:           mergedIssue,
+		Task:            mergedTask,
 		Change:          mergedChange,
 		PreviousBaseSHA: intent.PreviousBaseSHA,
 		HeadSHA:         headSHA,
@@ -357,7 +357,7 @@ func (s *MergeService) recoverMergeIntent(ctx context.Context, intent mergeInten
 	if !noop {
 		return false, s.deleteMergeIntent(ctx, intent.ID)
 	}
-	if _, _, err := s.recordMerged(ctx, intent.IssueID, intent.ChangeID, intent.HeadSHA); err != nil {
+	if _, _, err := s.recordMerged(ctx, intent.TaskID, intent.ChangeID, intent.HeadSHA); err != nil {
 		if errors.Is(err, errRecordMergedConflict) {
 			return false, s.deleteMergeIntent(ctx, intent.ID)
 		}
@@ -372,7 +372,7 @@ func (s *MergeService) recoverMergeIntent(ctx context.Context, intent mergeInten
 // mergeIntent mirrors a merge_intents row (see migration 0017).
 type mergeIntent struct {
 	ID              string
-	IssueID         string
+	TaskID          string
 	ChangeID        string
 	BaseBranch      string
 	ExchangePath    string
@@ -384,7 +384,7 @@ type mergeIntent struct {
 // intent a crashed earlier attempt left behind (whose previous_base_sha must be
 // preserved — it is the pre-push base tip that recovery and healing compare
 // against).
-func (s *MergeService) ensureMergeIntent(ctx context.Context, issueID string, change Change, exchangePath string) (mergeIntent, error) {
+func (s *MergeService) ensureMergeIntent(ctx context.Context, taskID string, change Change, exchangePath string) (mergeIntent, error) {
 	if existing, ok, err := s.openMergeIntentForChange(ctx, change.ID); err != nil {
 		return mergeIntent{}, err
 	} else if ok {
@@ -403,7 +403,7 @@ func (s *MergeService) ensureMergeIntent(ctx context.Context, issueID string, ch
 	}
 	intent := mergeIntent{
 		ID:              id,
-		IssueID:         issueID,
+		TaskID:          taskID,
 		ChangeID:        change.ID,
 		BaseBranch:      change.Base,
 		ExchangePath:    exchangePath,
@@ -412,9 +412,9 @@ func (s *MergeService) ensureMergeIntent(ctx context.Context, issueID string, ch
 	}
 	if _, err := s.db.ExecContext(ctx, `
 INSERT INTO merge_intents
-	(id, issue_id, change_id, base_branch, exchange_path, head_sha, previous_base_sha, created_at)
+	(id, task_id, change_id, base_branch, exchange_path, head_sha, previous_base_sha, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		intent.ID, intent.IssueID, intent.ChangeID, intent.BaseBranch,
+		intent.ID, intent.TaskID, intent.ChangeID, intent.BaseBranch,
 		intent.ExchangePath, intent.HeadSHA, intent.PreviousBaseSHA, formatTime(s.now().UTC())); err != nil {
 		// The partial unique index admits one open intent per change; losing
 		// that race means another attempt just wrote it — adopt theirs.
@@ -428,11 +428,11 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 
 func (s *MergeService) openMergeIntentForChange(ctx context.Context, changeID string) (mergeIntent, bool, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, issue_id, change_id, base_branch, exchange_path, head_sha, previous_base_sha
+SELECT id, task_id, change_id, base_branch, exchange_path, head_sha, previous_base_sha
 FROM merge_intents
 WHERE change_id = ? AND completed_at IS NULL`, changeID)
 	var intent mergeIntent
-	err := row.Scan(&intent.ID, &intent.IssueID, &intent.ChangeID, &intent.BaseBranch,
+	err := row.Scan(&intent.ID, &intent.TaskID, &intent.ChangeID, &intent.BaseBranch,
 		&intent.ExchangePath, &intent.HeadSHA, &intent.PreviousBaseSHA)
 	if errors.Is(err, sql.ErrNoRows) {
 		return mergeIntent{}, false, nil
@@ -445,7 +445,7 @@ WHERE change_id = ? AND completed_at IS NULL`, changeID)
 
 func (s *MergeService) openMergeIntents(ctx context.Context) ([]mergeIntent, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, issue_id, change_id, base_branch, exchange_path, head_sha, previous_base_sha
+SELECT id, task_id, change_id, base_branch, exchange_path, head_sha, previous_base_sha
 FROM merge_intents
 WHERE completed_at IS NULL
 ORDER BY created_at`)
@@ -456,7 +456,7 @@ ORDER BY created_at`)
 	var intents []mergeIntent
 	for rows.Next() {
 		var intent mergeIntent
-		if err := rows.Scan(&intent.ID, &intent.IssueID, &intent.ChangeID, &intent.BaseBranch,
+		if err := rows.Scan(&intent.ID, &intent.TaskID, &intent.ChangeID, &intent.BaseBranch,
 			&intent.ExchangePath, &intent.HeadSHA, &intent.PreviousBaseSHA); err != nil {
 			return nil, fmt.Errorf("scan merge intent: %w", err)
 		}
@@ -494,15 +494,15 @@ func (s *MergeService) exchangePathForChange(_ context.Context, _ Change) (strin
 	return exchangePath, nil
 }
 
-func (s *MergeService) recordMerged(ctx context.Context, issueID string, changeID string, headSHA string) (Change, Issue, error) {
+func (s *MergeService) recordMerged(ctx context.Context, taskID string, changeID string, headSHA string) (Change, Task, error) {
 	headSHA = strings.TrimSpace(headSHA)
 	if headSHA == "" {
-		return Change{}, Issue{}, errors.New("head sha is required")
+		return Change{}, Task{}, errors.New("head sha is required")
 	}
 	nowText := formatTime(s.now().UTC())
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return Change{}, Issue{}, fmt.Errorf("begin merge transaction: %w", err)
+		return Change{}, Task{}, fmt.Errorf("begin merge transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -511,55 +511,55 @@ UPDATE changes
 SET merged_at = COALESCE(merged_at, ?),
 	updated_at = ?
 WHERE id = ?
-	AND issue_id = ?
+	AND task_id = ?
 	AND head_sha = ?
 	AND merged_at IS NULL`,
 		nowText,
 		nowText,
 		changeID,
-		issueID,
+		taskID,
 		headSHA,
 	)
 	if err != nil {
-		return Change{}, Issue{}, fmt.Errorf("mark change merged: %w", err)
+		return Change{}, Task{}, fmt.Errorf("mark change merged: %w", err)
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
-		return Change{}, Issue{}, fmt.Errorf("read merged rows affected: %w", err)
+		return Change{}, Task{}, fmt.Errorf("read merged rows affected: %w", err)
 	}
 	if rows == 0 {
-		return Change{}, Issue{}, errRecordMergedConflict
+		return Change{}, Task{}, errRecordMergedConflict
 	}
 	if _, err := tx.ExecContext(ctx, `
-UPDATE issues
+UPDATE tasks
 SET updated_at = ?
 WHERE id = ?`,
 		nowText,
-		issueID,
+		taskID,
 	); err != nil {
-		return Change{}, Issue{}, fmt.Errorf("update merged issue: %w", err)
+		return Change{}, Task{}, fmt.Errorf("update merged task: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return Change{}, Issue{}, fmt.Errorf("commit merge transaction: %w", err)
+		return Change{}, Task{}, fmt.Errorf("commit merge transaction: %w", err)
 	}
 
 	change, err := s.sessions.GetChange(ctx, changeID)
 	if err != nil {
-		return Change{}, Issue{}, err
+		return Change{}, Task{}, err
 	}
-	issue, err := s.issues.GetIssue(ctx, issueID)
+	task, err := s.tasks.GetTask(ctx, taskID)
 	if err != nil {
-		return Change{}, Issue{}, err
+		return Change{}, Task{}, err
 	}
 
-	return change, issue, nil
+	return change, task, nil
 }
 
-func mergeCommitMessage(issue Issue, change Change) string {
-	title := strings.TrimSpace(issue.Title)
+func mergeCommitMessage(task Task, change Change) string {
+	title := strings.TrimSpace(task.Title)
 	if title == "" {
-		title = issue.ID
+		title = task.ID
 	}
 
-	return fmt.Sprintf("Merge %s: %s\n\nSquash merge change %s from %s.", issue.ID, title, change.ID, change.Branch)
+	return fmt.Sprintf("Merge %s: %s\n\nSquash merge change %s from %s.", task.ID, title, change.ID, change.Branch)
 }

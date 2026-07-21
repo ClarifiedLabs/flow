@@ -4,12 +4,12 @@
 import { phaseKey, renderPhaseBadge } from "./board.js";
 import { formatDate } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
-import { projectButtonAttr } from "./issue.js";
+import { projectButtonAttr } from "./task.js";
 import { renderMarkdown } from "./markdown.js";
 import { value } from "./normalize.js";
 
-export function renderHumanAttentionPanel(issue, statusLog, projectID, activeSession) {
-  const issueID = value(issue, "id", "ID");
+export function renderHumanAttentionPanel(task, statusLog, projectID, activeSession) {
+  const taskID = value(task, "id", "ID");
   let html = "";
 
   const question = latestStatusOfKind(statusLog, "question");
@@ -24,7 +24,7 @@ export function renderHumanAttentionPanel(issue, statusLog, projectID, activeSes
           </div>
         </div>
         ${renderMarkdown(value(question, "message", "Message"), { className: "human-attention-body md" })}
-        <form class="human-attention-reply" data-attention-reply-form="${escapeAttr(issueID)}" data-status-log-id="${escapeAttr(statusID)}"${projectButtonAttr(projectID)}>
+        <form class="human-attention-reply" data-attention-reply-form="${escapeAttr(taskID)}" data-status-log-id="${escapeAttr(statusID)}"${projectButtonAttr(projectID)}>
           <textarea name="message" rows="3" placeholder="Reply"></textarea>
           <button class="button" type="submit">Send Reply</button>
         </form>
@@ -39,13 +39,13 @@ export function latestStatusOfKind(statusLog, kind) {
   return (statusLog || []).find((entry) => value(entry, "kind", "Kind") === kind) || null;
 }
 
-// renderPhaseGatePanel surfaces a flow's human-gate state on the issue page.
+// renderPhaseGatePanel surfaces a flow's human-gate state on the task page.
 // While the current phase is paused awaiting approval it renders a prominent
 // panel (the pending handoff as markdown, an Approve button and a
 // Request-changes form). Once the human has sent the phase back it renders a
 // quiet "sent back with feedback" note until the phase runs again. Returns ""
-// otherwise. `flow` is the issue-detail response's top-level flow status.
-export function renderPhaseGatePanel(flow, issueID, projectID) {
+// otherwise. `flow` is the task-detail response's top-level flow status.
+export function renderPhaseGatePanel(flow, taskID, projectID) {
   if (!flow) return "";
   const phaseState = value(flow, "phase_state", "PhaseState");
   const phaseName = value(flow, "phase_name", "PhaseName");
@@ -58,11 +58,11 @@ export function renderPhaseGatePanel(flow, issueID, projectID) {
             <h3>Phase ${escapeHTML(phaseName || "")} awaiting approval</h3>
           </div>
           <div class="actions">
-            <button class="button" data-phase-approve="${escapeAttr(issueID)}"${projectButtonAttr(projectID)}>Approve</button>
+            <button class="button" data-phase-approve="${escapeAttr(taskID)}"${projectButtonAttr(projectID)}>Approve</button>
           </div>
         </div>
         ${handoff ? renderMarkdown(handoff, { className: "human-attention-body md" }) : ""}
-        <form class="human-attention-reply" data-phase-request-changes="${escapeAttr(issueID)}"${projectButtonAttr(projectID)}>
+        <form class="human-attention-reply" data-phase-request-changes="${escapeAttr(taskID)}"${projectButtonAttr(projectID)}>
           <textarea name="feedback" rows="3" placeholder="Request changes"></textarea>
           <button class="button secondary" type="submit">Request Changes</button>
         </form>
@@ -114,13 +114,13 @@ export function renderTransition(entry) {
   return `<article class="feed-item"><strong>${escapeHTML(eventKind)}</strong><span>${escapeHTML(createdAt)}</span><p class="phase-flow">${renderPhaseBadge(fromPhase)}<span class="arrow">→</span>${renderPhaseBadge(toPhase)}${meta ? `<span class="muted">(${meta})</span>` : ""}</p></article>`;
 }
 
-// Canonical lifecycle topology for the issue flow chart, on a fixed grid.
+// Canonical lifecycle topology for the task flow chart, on a fixed grid.
 // Node keys are the Phase strings from internal/coordinator/phase.go.
-// Pending (agent-created) issues start in triage and move to backlog when
-// accepted; owner-created issues start accepted in backlog, so their first
+// Pending (agent-created) tasks start in triage and move to backlog when
+// accepted; owner-created tasks start accepted in backlog, so their first
 // logged transition enters backlog directly. acceptance is a real derived
 // phase (critique satisfied, verifier pending); the merge step is synchronous,
-// so no issue rests in a merging phase and approved leads straight to
+// so no task rests in a merging phase and approved leads straight to
 // merged_closed.
 export const LIFECYCLE_NODES = [
   { key: "triage", col: 0, row: 1 },
@@ -137,7 +137,7 @@ export const LIFECYCLE_NODES = [
 ];
 
 // Happy path, the planning detour, the reviewer/verifier sent-back edges, and
-// the closed-issue exits. Plan approval returns to up_next so a separate
+// the closed-task exits. Plan approval returns to up_next so a separate
 // implementation session can start. The engine emits critique→acceptance when
 // the verifier gate opens, acceptance→approved when it closes, and
 // approved→merged_closed on the synchronous merge; critique→approved stays for
@@ -270,5 +270,5 @@ export function renderLifecycleChart(graph) {
     ? `<p class="lifecycle-legend">Sent back — reviewer ×${reviewerSends} · verifier ×${verifierSends}</p>`
     : "";
   const defs = `<defs><marker id="lc-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="lifecycle-arrow" d="M0 0L8 4L0 8z"/></marker><marker id="lc-arrow-dim" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="lifecycle-arrow dim" d="M0 0L8 4L0 8z"/></marker></defs>`;
-  return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Issue lifecycle">${defs}${parts.join("")}</svg>${legend}`;
+  return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Task lifecycle">${defs}${parts.join("")}</svg>${legend}`;
 }

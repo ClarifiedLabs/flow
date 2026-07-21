@@ -1,7 +1,7 @@
 // Interactive agent Console view: project resolution, the session list, and the
 // console's own URL-guarded refresh polling (separate from the main poll loop).
 
-import { apiDelete, apiGet, apiPost, consoleAPIPath, consoleState, issueConsoleAPIPath } from "./api.js";
+import { apiDelete, apiGet, apiPost, consoleAPIPath, consoleState, taskConsoleAPIPath } from "./api.js";
 import { CONSOLE_REFRESH_MS, DEFAULT_CONSOLE_HARNESSES } from "./config.js";
 import { renderHarnessOptions } from "./harness-models.js";
 import { escapeAttr, escapeHTML } from "./html.js";
@@ -14,7 +14,7 @@ export async function renderConsoleView(app, context) {
   if (context && !app.isActiveLoad(context)) return false;
   const params = new URLSearchParams(window.location.search);
   const selectedProject = params.get("project") || "";
-  const selectedIssue = params.get("issue") || "";
+  const selectedTask = params.get("task") || "";
   const project = resolveConsoleProjectView(app, selectedProject);
   if (!project) {
     if (context && !app.isActiveLoad(context)) return false;
@@ -22,7 +22,7 @@ export async function renderConsoleView(app, context) {
     return true;
   }
 
-  const data = await apiGet(selectedIssue ? issueConsoleAPIPath(project.id, selectedIssue) : consoleAPIPath(project.id));
+  const data = await apiGet(selectedTask ? taskConsoleAPIPath(project.id, selectedTask) : consoleAPIPath(project.id));
   if (context && !app.isActiveLoad(context)) return false;
   const job = data.job || data.Job || null;
   const session = data.session || data.Session || null;
@@ -40,8 +40,8 @@ export async function renderConsoleView(app, context) {
     if (loginPath) {
       terminal = `
         <div class="terminal-bezel">
-          <div class="terminal-titlebar"><span class="dot"></span><span>${escapeHTML(selectedIssue ? `console ${selectedIssue}` : `console ${project.name || projectID}`)}</span>${terminalSelectionHint}</div>
-          <iframe class="terminal-frame" title="${escapeAttr(selectedIssue ? "Issue console terminal" : "Console terminal")}" src="${escapeAttr(loginPath)}" referrerpolicy="no-referrer"></iframe>
+          <div class="terminal-titlebar"><span class="dot"></span><span>${escapeHTML(selectedTask ? `console ${selectedTask}` : `console ${project.name || projectID}`)}</span>${terminalSelectionHint}</div>
+          <iframe class="terminal-frame" title="${escapeAttr(selectedTask ? "Task console terminal" : "Console terminal")}" src="${escapeAttr(loginPath)}" referrerpolicy="no-referrer"></iframe>
         </div>
       `;
     }
@@ -54,23 +54,23 @@ export async function renderConsoleView(app, context) {
       <div class="detail-head">
         <div>
           <p class="eyebrow">${escapeHTML(project.name || projectID)}</p>
-          <h2>${escapeHTML(selectedIssue ? `Console · ${selectedIssue}` : "Console")}</h2>
+          <h2>${escapeHTML(selectedTask ? `Console · ${selectedTask}` : "Console")}</h2>
           <p class="meta">${escapeHTML(active ? consoleState(job, session) : "not running")}</p>
         </div>
         <div class="actions console-actions">
-          ${active ? `<button class="button secondary" data-release-console data-project="${escapeAttr(projectID)}" data-issue="${escapeAttr(selectedIssue)}">Release Console</button>` : `
+          ${active ? `<button class="button secondary" data-release-console data-project="${escapeAttr(projectID)}" data-task="${escapeAttr(selectedTask)}">Release Console</button>` : `
             <label>Harness
               <select data-console-harness>
                 ${renderHarnessOptions((app.harnesses && app.harnesses.consoles) || DEFAULT_CONSOLE_HARNESSES, "claude")}
               </select>
             </label>
-            <button class="button" data-start-console data-project="${escapeAttr(projectID)}" data-issue="${escapeAttr(selectedIssue)}">Start Console</button>`}
+            <button class="button" data-start-console data-project="${escapeAttr(projectID)}" data-task="${escapeAttr(selectedTask)}">Start Console</button>`}
         </div>
       </div>
       ${terminal}
     </section>
   `;
-  if (active) scheduleConsolePollView(app, projectID, selectedIssue, { terminalAvailable });
+  if (active) scheduleConsolePollView(app, projectID, selectedTask, { terminalAvailable });
   return true;
 }
 
@@ -126,14 +126,14 @@ export function renderConsoleProjectChooserView(app) {
   `;
 }
 
-export function scheduleConsolePollView(app, projectID, issueID = "", state = {}) {
+export function scheduleConsolePollView(app, projectID, taskID = "", state = {}) {
   stopConsolePollView(app);
   const hadTerminal = Boolean(state.terminalAvailable);
   app.consolePoll.arm(CONSOLE_REFRESH_MS, async () => {
-    if (!isCurrentConsoleTargetView(app, projectID, issueID)) return;
+    if (!isCurrentConsoleTargetView(app, projectID, taskID)) return;
     try {
-      const data = await apiGet(issueID ? issueConsoleAPIPath(projectID, issueID) : consoleAPIPath(projectID));
-      if (!isCurrentConsoleTargetView(app, projectID, issueID)) return;
+      const data = await apiGet(taskID ? taskConsoleAPIPath(projectID, taskID) : consoleAPIPath(projectID));
+      if (!isCurrentConsoleTargetView(app, projectID, taskID)) return;
       const job = data.job || data.Job || null;
       const session = data.session || data.Session || null;
       const active = Boolean(data.active || data.Active || job || session);
@@ -142,11 +142,11 @@ export function scheduleConsolePollView(app, projectID, issueID = "", state = {}
         await app.load({ fromPoll: true });
         return;
       }
-      scheduleConsolePollView(app, projectID, issueID, { terminalAvailable });
+      scheduleConsolePollView(app, projectID, taskID, { terminalAvailable });
     } catch (error) {
-      if (!isCurrentConsoleTargetView(app, projectID, issueID)) return;
+      if (!isCurrentConsoleTargetView(app, projectID, taskID)) return;
       app.setStatus(`console refresh failed: ${error.message || String(error)}`);
-      scheduleConsolePollView(app, projectID, issueID, { terminalAvailable: hadTerminal });
+      scheduleConsolePollView(app, projectID, taskID, { terminalAvailable: hadTerminal });
     }
   });
 }
@@ -161,20 +161,20 @@ export function isCurrentConsoleProjectView(app, projectID) {
   return !selectedProject || selectedProject === projectID;
 }
 
-export function isCurrentConsoleTargetView(app, projectID, issueID = "") {
+export function isCurrentConsoleTargetView(app, projectID, taskID = "") {
   if (!isCurrentConsoleProjectView(app, projectID)) return false;
-  const selectedIssue = new URLSearchParams(window.location.search).get("issue") || "";
-  return !selectedIssue || selectedIssue === issueID;
+  const selectedTask = new URLSearchParams(window.location.search).get("task") || "";
+  return !selectedTask || selectedTask === taskID;
 }
 
-export async function startConsoleView(app, projectID, harness, issueID = "") {
-  await apiPost(issueID ? issueConsoleAPIPath(projectID, issueID) : consoleAPIPath(projectID), { harness });
+export async function startConsoleView(app, projectID, harness, taskID = "") {
+  await apiPost(taskID ? taskConsoleAPIPath(projectID, taskID) : consoleAPIPath(projectID), { harness });
   await app.load();
   app.setStatus("console starting");
 }
 
-export async function releaseConsoleView(app, projectID, issueID = "") {
-  await apiDelete(issueID ? issueConsoleAPIPath(projectID, issueID) : consoleAPIPath(projectID));
+export async function releaseConsoleView(app, projectID, taskID = "") {
+  await apiDelete(taskID ? taskConsoleAPIPath(projectID, taskID) : consoleAPIPath(projectID));
   await app.load();
   app.setStatus("console released");
 }

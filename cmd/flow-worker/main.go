@@ -653,8 +653,8 @@ func retryTransientOperation(action string, stdout io.Writer, fn func() error) e
 
 func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease flowworker.Lease, result workerexec.RunResult, stdout io.Writer) error {
 	checkName := strings.TrimSpace(result.Payload.CheckName)
-	if checkName == "" || job.IssueID == nil {
-		slog.Debug("flow-worker skipping check report", "job_id", job.ID, "reason", "missing check name or issue")
+	if checkName == "" || job.TaskID == nil {
+		slog.Debug("flow-worker skipping check report", "job_id", job.ID, "reason", "missing check name or task")
 		return nil
 	}
 	kind, ok := checkKindForJob(job)
@@ -693,7 +693,7 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 		}
 	}
 
-	// The check report hits the issue route, which the coordinator can only
+	// The check report hits the task route, which the coordinator can only
 	// resolve implicitly when a single project is registered. Scope the client
 	// to the job's project (carried on the payload) so reports — and the review
 	// threads/decisions applied below — land in the right project once multiple
@@ -711,7 +711,7 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 		applyVerdictActions(client, kind, lease, result, verdictReport, stdout)
 	}
 
-	check, err := client.ReportCheck(*job.IssueID, checkName, flowclient.ReportCheckInput{
+	check, err := client.ReportCheck(*job.TaskID, checkName, flowclient.ReportCheckInput{
 		Kind:        kind,
 		Verdict:     verdict,
 		ExitCode:    &exitCode,

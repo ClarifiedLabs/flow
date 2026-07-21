@@ -61,7 +61,7 @@ type Worker struct {
 
 type Job struct {
 	ID             string                 `json:"id"`
-	IssueID        *string                `json:"issue_id"`
+	TaskID         *string                `json:"task_id"`
 	ChangeID       *string                `json:"change_id"`
 	WorkflowRunID  *string                `json:"workflow_run_id,omitempty"`
 	NodeRunID      *string                `json:"node_run_id,omitempty"`
@@ -104,7 +104,7 @@ type RegisterWorkerInput struct {
 }
 
 type EnqueueJobInput struct {
-	IssueID        *string
+	TaskID         *string
 	ChangeID       *string
 	WorkflowRunID  *string
 	NodeRunID      *string
@@ -140,10 +140,10 @@ func (s *Service) EnqueueJob(ctx context.Context, input EnqueueJobInput) (Job, e
 	if err := validateJobRole(input.Role); err != nil {
 		return Job{}, err
 	}
-	if input.Role == RoleAuthor && (input.IssueID == nil || strings.TrimSpace(*input.IssueID) == "") {
-		return Job{}, errors.New("author jobs require issue id")
+	if input.Role == RoleAuthor && (input.TaskID == nil || strings.TrimSpace(*input.TaskID) == "") {
+		return Job{}, errors.New("author jobs require task id")
 	}
-	if err := s.validateJobChange(ctx, input.IssueID, input.ChangeID); err != nil {
+	if err := s.validateJobChange(ctx, input.TaskID, input.ChangeID); err != nil {
 		return Job{}, err
 	}
 	if err := validateCapacityBucket(input.CapacityBucket); err != nil {
@@ -178,7 +178,7 @@ func (s *Service) EnqueueJob(ctx context.Context, input EnqueueJobInput) (Job, e
 	if _, err := s.db.ExecContext(ctx, `
 INSERT INTO jobs (
 	id,
-	issue_id,
+	task_id,
 	change_id,
 	workflow_run_id,
 	node_run_id,
@@ -193,7 +193,7 @@ INSERT INTO jobs (
 	updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id,
-		nullableString(input.IssueID),
+		nullableString(input.TaskID),
 		nullableString(input.ChangeID),
 		nullableString(input.WorkflowRunID),
 		nullableString(input.NodeRunID),
@@ -273,19 +273,19 @@ ORDER BY created_at DESC, id DESC`)
 	return jobs, nil
 }
 
-func (s *Service) LiveAuthorJobForIssue(ctx context.Context, issueID string) (Job, bool, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return Job{}, false, errors.New("issue id is required")
+func (s *Service) LiveAuthorJobForTask(ctx context.Context, taskID string) (Job, bool, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return Job{}, false, errors.New("task id is required")
 	}
 
 	row := s.db.QueryRowContext(ctx, jobSelectSQL+`
-WHERE issue_id = ?
+WHERE task_id = ?
 	AND role = ?
 	AND state IN (?, ?, ?)
 ORDER BY created_at
 LIMIT 1`,
-		issueID,
+		taskID,
 		string(RoleAuthor),
 		string(JobQueued),
 		string(JobClaimed),
@@ -302,28 +302,28 @@ LIMIT 1`,
 	return job, true, nil
 }
 
-func (s *Service) validateJobChange(ctx context.Context, issueID *string, changeID *string) error {
+func (s *Service) validateJobChange(ctx context.Context, taskID *string, changeID *string) error {
 	change := strings.TrimSpace(stringPointerValue(changeID))
 	if change == "" {
 		return nil
 	}
-	issue := strings.TrimSpace(stringPointerValue(issueID))
-	if issue == "" {
-		return errors.New("change jobs require issue id")
+	task := strings.TrimSpace(stringPointerValue(taskID))
+	if task == "" {
+		return errors.New("change jobs require task id")
 	}
 
-	var changeIssueID string
+	var changeTaskID string
 	if err := s.db.QueryRowContext(ctx, `
-SELECT issue_id
+SELECT task_id
 FROM changes
-WHERE id = ?`, change).Scan(&changeIssueID); err != nil {
+WHERE id = ?`, change).Scan(&changeTaskID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return errors.New("change not found")
 		}
 		return fmt.Errorf("load job change: %w", err)
 	}
-	if strings.TrimSpace(changeIssueID) != issue {
-		return errors.New("job change does not belong to issue")
+	if strings.TrimSpace(changeTaskID) != task {
+		return errors.New("job change does not belong to task")
 	}
 
 	return nil
@@ -531,15 +531,15 @@ WHERE id = ?`, string(finalState), formatTime(now), lease.JobID); err != nil {
 	return job, nil
 }
 
-// CancelLiveJobsForIssue cancels every queued, claimed, or running job of the
-// given role for the issue, releasing any live leases so the lease sweeper does
+// CancelLiveJobsForTask cancels every queued, claimed, or running job of the
+// given role for the task, releasing any live leases so the lease sweeper does
 // not later mark the canceled jobs crashed. It returns the canceled job IDs.
 // Workers running a canceled job observe the terminal state through their
 // session reconciler and stop the job's session themselves.
-func (s *Service) CancelLiveJobsForIssue(ctx context.Context, issueID string, role JobRole) ([]string, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return nil, errors.New("issue id is required")
+func (s *Service) CancelLiveJobsForTask(ctx context.Context, taskID string, role JobRole) ([]string, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, errors.New("task id is required")
 	}
 
 	tx, err := beginImmediate(ctx, s.db)
@@ -551,18 +551,18 @@ func (s *Service) CancelLiveJobsForIssue(ctx context.Context, issueID string, ro
 	rows, err := tx.QueryContext(ctx, `
 SELECT id
 FROM jobs
-WHERE issue_id = ?
+WHERE task_id = ?
 	AND role = ?
 	AND state IN (?, ?, ?)
 ORDER BY created_at, id`,
-		issueID,
+		taskID,
 		string(role),
 		string(JobQueued),
 		string(JobClaimed),
 		string(JobRunning),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("select live jobs for issue: %w", err)
+		return nil, fmt.Errorf("select live jobs for task: %w", err)
 	}
 	var jobIDs []string
 	for rows.Next() {
@@ -733,7 +733,7 @@ var beginImmediate = sqlitex.BeginImmediate
 const jobSelectSQL = `
 SELECT
 	id,
-	issue_id,
+	task_id,
 	change_id,
 	workflow_run_id,
 	node_run_id,
@@ -992,7 +992,7 @@ func scanWorker(row scanner) (Worker, error) {
 
 func scanJob(row scanner) (Job, error) {
 	var job Job
-	var issueID sql.NullString
+	var taskID sql.NullString
 	var changeID sql.NullString
 	var workflowRunID sql.NullString
 	var nodeRunID sql.NullString
@@ -1007,7 +1007,7 @@ func scanJob(row scanner) (Job, error) {
 	var updatedAt string
 	if err := row.Scan(
 		&job.ID,
-		&issueID,
+		&taskID,
 		&changeID,
 		&workflowRunID,
 		&nodeRunID,
@@ -1046,7 +1046,7 @@ func scanJob(row scanner) (Job, error) {
 		return Job{}, err
 	}
 
-	job.IssueID = nullableStringPointer(issueID)
+	job.TaskID = nullableStringPointer(taskID)
 	job.ChangeID = nullableStringPointer(changeID)
 	job.WorkflowRunID = nullableStringPointer(workflowRunID)
 	job.NodeRunID = nullableStringPointer(nodeRunID)

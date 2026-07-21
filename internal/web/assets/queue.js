@@ -3,7 +3,7 @@
 
 import { renderStateBadge } from "./board.js";
 import { formatDate, formatLabels } from "./format.js";
-import { issueHref } from "./api.js";
+import { taskHref } from "./api.js";
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
 import { renderTerminalButton, renderTranscriptButton } from "./terminal.js";
@@ -63,7 +63,7 @@ export function jobStateClass(state) {
 
 export function renderJobRow(job, diagnostics = {}) {
   const jobID = value(job, "id", "ID");
-  const issueID = value(job, "issue_id", "IssueID");
+  const taskID = value(job, "task_id", "TaskID");
   const projectID = value(diagnostics, "project_id", "ProjectID");
   const projectName = value(diagnostics, "project_name", "ProjectName");
   const change = value(diagnostics, "change", "Change");
@@ -98,7 +98,7 @@ export function renderJobRow(job, diagnostics = {}) {
     terminalButton || attachButton || transcriptButton ? `<div class="actions table-actions">${terminalButton}${attachButton}${transcriptButton}</div>` : "",
   ].filter(Boolean).join("");
   const target = [
-    issueID ? `<a href="${escapeAttr(issueHref(projectID, issueID))}" data-link>${escapeHTML(issueID)}</a>` : "",
+    taskID ? `<a href="${escapeAttr(taskHref(projectID, taskID))}" data-link>${escapeHTML(taskID)}</a>` : "",
     changeID ? `<a href="/ui/changes/${escapeAttr(changeID)}" data-link>${escapeHTML(changeID)}</a>` : "",
   ].filter(Boolean).join("<br>");
   const stateClass = jobStateClass(value(job, "state", "State"));

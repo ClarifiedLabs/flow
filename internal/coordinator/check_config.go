@@ -66,7 +66,7 @@ type CheckSuite struct {
 }
 
 type ScheduleReviewRoundInput struct {
-	Issue           Issue
+	Task            Task
 	Change          Change
 	PreviousHeadSHA string
 	// CompletionAssessment requests a Mode-B recovery review: the reviewer
@@ -82,7 +82,7 @@ type ScheduleReviewRoundResult struct {
 	JobsEnqueued  int `json:"jobs_enqueued"`
 	// EnqueuedCheckNames lists the checks for which a job was actually
 	// enqueued this round. The lifecycle engine arms a check-timeout timer per
-	// name so a job that never reports cannot park the issue indefinitely.
+	// name so a job that never reports cannot park the task indefinitely.
 	EnqueuedCheckNames []string `json:"enqueued_check_names,omitempty"`
 }
 
@@ -98,14 +98,14 @@ type checkRecoveryCandidate struct {
 // the engine's timeout arming — still times out like a normal review round
 // instead of parking the change indefinitely when its reviewer never reports.
 type PendingCheckTimeout struct {
-	IssueID    string
+	TaskID     string
 	HeadSHA    string
 	CheckNames []string
 }
 
 type CheckConfigService struct {
 	db          *sql.DB
-	issues      *IssueService
+	tasks       *TaskService
 	checks      *CheckService
 	workers     *flowworker.Service
 	threads     *ThreadService
@@ -116,9 +116,9 @@ type CheckConfigService struct {
 
 type CheckConfigServiceOptions struct {
 	HarnessArgs flowharness.Args
-	// FlowCursors resolves the issue's frozen flow snapshot so review rounds
+	// FlowCursors resolves the task's frozen flow snapshot so review rounds
 	// run the flow's agent reviewer/verifier set. Optional: when nil (or when
-	// an issue has no cursor), the legacy issue-harness defaults are
+	// an task has no cursor), the legacy task-harness defaults are
 	// synthesized instead.
 	FlowCursors *FlowCursorService
 }
@@ -136,7 +136,7 @@ func NewCheckConfigServiceWithOptions(database *sql.DB, checks *CheckService, wo
 	}
 	return &CheckConfigService{
 		db:          database,
-		issues:      NewIssueService(database),
+		tasks:       NewTaskService(database),
 		checks:      checks,
 		workers:     workers,
 		threads:     threads,
@@ -146,14 +146,14 @@ func NewCheckConfigServiceWithOptions(database *sql.DB, checks *CheckService, wo
 	}
 }
 
-// reviewChecksForIssue merges the agent review set into the repo-configured
-// suite: the issue's frozen flow snapshot when a cursor exists (the composable
+// reviewChecksForTask merges the agent review set into the repo-configured
+// suite: the task's frozen flow snapshot when a cursor exists (the composable
 // review set), else the default agent reviewer/verifier synthesized from the
 // default harness.
-func (s *CheckConfigService) reviewChecksForIssue(ctx context.Context, suite CheckSuite, issue Issue) (CheckSuite, error) {
+func (s *CheckConfigService) reviewChecksForTask(ctx context.Context, suite CheckSuite, task Task) (CheckSuite, error) {
 	args := s.harnessArgs
 	if s.flowCursors != nil {
-		cursor, ok, err := s.flowCursors.GetCursor(ctx, issue.ID)
+		cursor, ok, err := s.flowCursors.GetCursor(ctx, task.ID)
 		if err != nil {
 			return CheckSuite{}, err
 		}
@@ -270,7 +270,7 @@ func (s *CheckConfigService) ScheduleReviewRound(ctx context.Context, input Sche
 		return ScheduleReviewRoundResult{}, err
 	}
 	if strings.TrimSpace(input.Change.HeadSHA) != "" {
-		suite, err = s.reviewChecksForIssue(ctx, suite, input.Issue)
+		suite, err = s.reviewChecksForTask(ctx, suite, input.Task)
 		if err != nil {
 			return ScheduleReviewRoundResult{}, err
 		}
@@ -284,12 +284,12 @@ func (s *CheckConfigService) ScheduleReviewRound(ctx context.Context, input Sche
 		if input.CompletionAssessment && definition.Kind == CheckKindReviewer {
 			details = CompletionAssessmentCheckMarker
 		}
-		if err := s.ensurePendingCheckWithDetails(ctx, input.Issue.ID, definition, details); err != nil {
+		if err := s.ensurePendingCheckWithDetails(ctx, input.Task.ID, definition, details); err != nil {
 			return ScheduleReviewRoundResult{}, err
 		}
 		result.ChecksCreated++
 		if definition.Phase == CheckPhaseCritique && definition.Kind != CheckKindHuman {
-			enqueued, err := s.enqueueCheckJob(ctx, input.Issue.ID, input.Change, definition)
+			enqueued, err := s.enqueueCheckJob(ctx, input.Task.ID, input.Change, definition)
 			if err != nil {
 				return ScheduleReviewRoundResult{}, err
 			}
@@ -299,8 +299,8 @@ func (s *CheckConfigService) ScheduleReviewRound(ctx context.Context, input Sche
 			}
 		}
 	}
-	if input.Issue.RequiresHumanReview {
-		created, err := s.ensureHumanReviewCheck(ctx, input.Issue.ID, input.Change, input.PreviousHeadSHA)
+	if input.Task.RequiresHumanReview {
+		created, err := s.ensureHumanReviewCheck(ctx, input.Task.ID, input.Change, input.PreviousHeadSHA)
 		if err != nil {
 			return ScheduleReviewRoundResult{}, err
 		}
@@ -308,7 +308,7 @@ func (s *CheckConfigService) ScheduleReviewRound(ctx context.Context, input Sche
 			result.ChecksCreated++
 		}
 	}
-	acceptanceNames, err := s.EnqueueAcceptanceIfReady(ctx, input.Issue.ID, input.Change)
+	acceptanceNames, err := s.EnqueueAcceptanceIfReady(ctx, input.Task.ID, input.Change)
 	if err != nil {
 		return ScheduleReviewRoundResult{}, err
 	}
@@ -318,14 +318,14 @@ func (s *CheckConfigService) ScheduleReviewRound(ctx context.Context, input Sche
 	return result, nil
 }
 
-// AcceptancePending reports whether the issue sits in the acceptance gate: every
+// AcceptancePending reports whether the task sits in the acceptance gate: every
 // required critique-kind check is satisfied AND at least one verifier-kind check
 // has not yet been satisfied. It delegates to the package-level predicate that
 // the coordinator's DerivePhase also uses, so the acceptance-job enqueue
 // (EnqueueAcceptanceIfReady), the lifecycle engine's phase derivation, and the
 // coordinator phase mirror never disagree about what "acceptance" means.
-func (s *CheckConfigService) AcceptancePending(ctx context.Context, issueID string) (bool, error) {
-	return acceptancePendingForIssue(ctx, s.db, issueID)
+func (s *CheckConfigService) AcceptancePending(ctx context.Context, taskID string) (bool, error) {
+	return acceptancePendingForTask(ctx, s.db, taskID)
 }
 
 // EnqueueAcceptanceIfReady enqueues acceptance-phase check jobs once the
@@ -333,8 +333,8 @@ func (s *CheckConfigService) AcceptancePending(ctx context.Context, issueID stri
 // job was actually enqueued (empty when the gate is not yet met or every
 // acceptance check already has a live job) so the lifecycle engine can arm a
 // timeout per scheduled check.
-func (s *CheckConfigService) EnqueueAcceptanceIfReady(ctx context.Context, issueID string, change Change) ([]string, error) {
-	ready, err := s.checks.CritiqueSatisfied(ctx, issueID)
+func (s *CheckConfigService) EnqueueAcceptanceIfReady(ctx context.Context, taskID string, change Change) ([]string, error) {
+	ready, err := s.checks.CritiqueSatisfied(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -345,12 +345,12 @@ func (s *CheckConfigService) EnqueueAcceptanceIfReady(ctx context.Context, issue
 	if err != nil {
 		return nil, err
 	}
-	issue, err := s.issues.GetIssue(ctx, issueID)
+	task, err := s.tasks.GetTask(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(change.HeadSHA) != "" {
-		suite, err = s.reviewChecksForIssue(ctx, suite, issue)
+		suite, err = s.reviewChecksForTask(ctx, suite, task)
 		if err != nil {
 			return nil, err
 		}
@@ -360,14 +360,14 @@ func (s *CheckConfigService) EnqueueAcceptanceIfReady(ctx context.Context, issue
 		if definition.Phase != CheckPhaseAcceptance || definition.Kind == CheckKindHuman {
 			continue
 		}
-		check, err := s.ensureCheckExists(ctx, issueID, definition)
+		check, err := s.ensureCheckExists(ctx, taskID, definition)
 		if err != nil {
 			return nil, err
 		}
 		if check.Verdict != CheckPending {
 			continue
 		}
-		ok, err := s.enqueueCheckJob(ctx, issueID, change, definition)
+		ok, err := s.enqueueCheckJob(ctx, taskID, change, definition)
 		if err != nil {
 			return nil, err
 		}
@@ -401,7 +401,7 @@ func (s *CheckConfigService) RecoverPendingCheckJobs(ctx context.Context) (int, 
 		// must not be lost to an unrelated per-change fault.
 		if len(names) > 0 {
 			pending = append(pending, PendingCheckTimeout{
-				IssueID:    candidate.change.IssueID,
+				TaskID:     candidate.change.TaskID,
 				HeadSHA:    candidate.change.HeadSHA,
 				CheckNames: names,
 			})
@@ -418,16 +418,16 @@ func (s *CheckConfigService) RecoverPendingCheckJobs(ctx context.Context) (int, 
 
 func (s *CheckConfigService) checkRecoveryCandidates(ctx context.Context) ([]checkRecoveryCandidate, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT ch.id, ch.issue_id, ch.branch, ch.base, ch.head_sha, ch.created_at, ch.updated_at, ch.ready_at, ch.merged_at
+SELECT ch.id, ch.task_id, ch.branch, ch.base, ch.head_sha, ch.created_at, ch.updated_at, ch.ready_at, ch.merged_at
 FROM changes ch
-JOIN issues i ON i.id = ch.issue_id
+JOIN tasks i ON i.id = ch.task_id
 WHERE i.lifecycle_state = ?
 	AND ch.ready_at IS NOT NULL
 	AND ch.merged_at IS NULL
 	AND ch.id = (
 		SELECT current.id
 		FROM changes current
-		WHERE current.issue_id = i.id
+		WHERE current.task_id = i.id
 			AND current.ready_at IS NOT NULL
 			AND current.merged_at IS NULL
 		ORDER BY current.updated_at DESC, current.created_at DESC, current.id DESC
@@ -461,17 +461,17 @@ func (s *CheckConfigService) recoverPendingCheckJobsForChange(ctx context.Contex
 	if err != nil {
 		return 0, nil, err
 	}
-	issue, err := s.issues.GetIssue(ctx, change.IssueID)
+	task, err := s.tasks.GetTask(ctx, change.TaskID)
 	if err != nil {
 		return 0, nil, err
 	}
 	if strings.TrimSpace(change.HeadSHA) != "" {
-		suite, err = s.reviewChecksForIssue(ctx, suite, issue)
+		suite, err = s.reviewChecksForTask(ctx, suite, task)
 		if err != nil {
 			return 0, nil, err
 		}
 	}
-	checks, err := s.ensureCurrentAutomatedChecks(ctx, change.IssueID, suite)
+	checks, err := s.ensureCurrentAutomatedChecks(ctx, change.TaskID, suite)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -490,7 +490,7 @@ func (s *CheckConfigService) recoverPendingCheckJobsForChange(ctx context.Contex
 		}
 		if definition.Phase == CheckPhaseAcceptance {
 			if !checkedCritique {
-				critiqueSatisfied, err = s.checks.CritiqueSatisfied(ctx, change.IssueID)
+				critiqueSatisfied, err = s.checks.CritiqueSatisfied(ctx, change.TaskID)
 				if err != nil {
 					return enqueued, pendingNames, err
 				}
@@ -505,7 +505,7 @@ func (s *CheckConfigService) recoverPendingCheckJobsForChange(ctx context.Contex
 		// satisfied), so it needs a check timeout — record it whether or not a
 		// job is enqueued below.
 		pendingNames = append(pendingNames, definition.Name)
-		ok, err := s.enqueueCheckJob(ctx, change.IssueID, change, definition)
+		ok, err := s.enqueueCheckJob(ctx, change.TaskID, change, definition)
 		if err != nil {
 			return enqueued, pendingNames, err
 		}
@@ -517,8 +517,8 @@ func (s *CheckConfigService) recoverPendingCheckJobsForChange(ctx context.Contex
 	return enqueued, pendingNames, nil
 }
 
-func (s *CheckConfigService) ensureCurrentAutomatedChecks(ctx context.Context, issueID string, suite CheckSuite) (map[string]Check, error) {
-	checks, err := s.checks.ListChecks(ctx, issueID)
+func (s *CheckConfigService) ensureCurrentAutomatedChecks(ctx context.Context, taskID string, suite CheckSuite) (map[string]Check, error) {
+	checks, err := s.checks.ListChecks(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -539,15 +539,15 @@ func (s *CheckConfigService) ensureCurrentAutomatedChecks(ctx context.Context, i
 			continue
 		}
 		if ok {
-			if err := s.ensurePendingCheck(ctx, issueID, definition); err != nil {
+			if err := s.ensurePendingCheck(ctx, taskID, definition); err != nil {
 				return nil, err
 			}
-			check, err = s.checks.GetCheck(ctx, issueID, definition.Name)
+			check, err = s.checks.GetCheck(ctx, taskID, definition.Name)
 			if err != nil {
 				return nil, err
 			}
 		} else {
-			check, err = s.ensureCheckExists(ctx, issueID, definition)
+			check, err = s.ensureCheckExists(ctx, taskID, definition)
 			if err != nil {
 				return nil, err
 			}
@@ -632,18 +632,18 @@ func unusedDefaultCheckName(preferred string, used map[string]bool) string {
 	}
 }
 
-func (s *CheckConfigService) ensurePendingCheck(ctx context.Context, issueID string, definition CheckDefinition) error {
-	return s.ensurePendingCheckWithDetails(ctx, issueID, definition, "")
+func (s *CheckConfigService) ensurePendingCheck(ctx context.Context, taskID string, definition CheckDefinition) error {
+	return s.ensurePendingCheckWithDetails(ctx, taskID, definition, "")
 }
 
 // ensurePendingCheckWithDetails resets a check to pending, optionally seeding its
 // Details. Details is empty for an ordinary review round; the completion-
 // assessment round seeds CompletionAssessmentCheckMarker on the reviewer check so
 // the recovering reviewer can detect the recovery mode from its own check.
-func (s *CheckConfigService) ensurePendingCheckWithDetails(ctx context.Context, issueID string, definition CheckDefinition, details string) error {
+func (s *CheckConfigService) ensurePendingCheckWithDetails(ctx context.Context, taskID string, definition CheckDefinition, details string) error {
 	required := requiredForCheckDefinition(definition)
 	_, err := s.checks.ReportCheck(ctx, ReportCheckInput{
-		IssueID:  issueID,
+		TaskID:   taskID,
 		Name:     definition.Name,
 		Kind:     definition.Kind,
 		Required: &required,
@@ -663,7 +663,7 @@ func requiredForCheckDefinition(definition CheckDefinition) bool {
 
 func (s *CheckConfigService) retireRemovedConfiguredChecks(ctx context.Context, input ScheduleReviewRoundInput, currentSuite CheckSuite) error {
 	if currentSuite.Configured {
-		return s.retireAbsentAutomatedChecks(ctx, input.Issue.ID, currentSuite)
+		return s.retireAbsentAutomatedChecks(ctx, input.Task.ID, currentSuite)
 	}
 	previousHeadSHA := strings.TrimSpace(input.PreviousHeadSHA)
 	if previousHeadSHA == "" {
@@ -679,17 +679,17 @@ func (s *CheckConfigService) retireRemovedConfiguredChecks(ctx context.Context, 
 		return nil
 	}
 
-	return s.retireAbsentAutomatedChecks(ctx, input.Issue.ID, currentSuite)
+	return s.retireAbsentAutomatedChecks(ctx, input.Task.ID, currentSuite)
 }
 
-func (s *CheckConfigService) retireAbsentAutomatedChecks(ctx context.Context, issueID string, suite CheckSuite) error {
+func (s *CheckConfigService) retireAbsentAutomatedChecks(ctx context.Context, taskID string, suite CheckSuite) error {
 	current := map[string]bool{}
 	for _, definition := range suite.Definitions {
 		if definition.Kind != CheckKindHuman {
 			current[definition.Name] = true
 		}
 	}
-	checks, err := s.checks.ListChecks(ctx, issueID)
+	checks, err := s.checks.ListChecks(ctx, taskID)
 	if err != nil {
 		return err
 	}
@@ -699,7 +699,7 @@ func (s *CheckConfigService) retireAbsentAutomatedChecks(ctx context.Context, is
 			continue
 		}
 		if _, err := s.checks.ReportCheck(ctx, ReportCheckInput{
-			IssueID:  issueID,
+			TaskID:   taskID,
 			Name:     check.Name,
 			Kind:     check.Kind,
 			Required: &required,
@@ -714,12 +714,12 @@ func (s *CheckConfigService) retireAbsentAutomatedChecks(ctx context.Context, is
 	return nil
 }
 
-func (s *CheckConfigService) ensureHumanReviewCheck(ctx context.Context, issueID string, change Change, previousHeadSHA string) (bool, error) {
+func (s *CheckConfigService) ensureHumanReviewCheck(ctx context.Context, taskID string, change Change, previousHeadSHA string) (bool, error) {
 	required := true
-	existing, err := s.checks.GetCheck(ctx, issueID, "human-review")
+	existing, err := s.checks.GetCheck(ctx, taskID, "human-review")
 	if errors.Is(err, sql.ErrNoRows) {
 		if _, err := s.checks.ReportCheck(ctx, ReportCheckInput{
-			IssueID:  issueID,
+			TaskID:   taskID,
 			Name:     "human-review",
 			Kind:     CheckKindHuman,
 			Required: &required,
@@ -736,7 +736,7 @@ func (s *CheckConfigService) ensureHumanReviewCheck(ctx context.Context, issueID
 	if existing.Verdict != CheckSatisfied {
 		return false, nil
 	}
-	stale, err := s.humanReviewStale(ctx, issueID, change, previousHeadSHA)
+	stale, err := s.humanReviewStale(ctx, taskID, change, previousHeadSHA)
 	if err != nil {
 		return false, err
 	}
@@ -744,7 +744,7 @@ func (s *CheckConfigService) ensureHumanReviewCheck(ctx context.Context, issueID
 		return false, nil
 	}
 	if _, err := s.checks.ReportCheck(ctx, ReportCheckInput{
-		IssueID:  issueID,
+		TaskID:   taskID,
 		Name:     "human-review",
 		Kind:     CheckKindHuman,
 		Required: &required,
@@ -758,7 +758,7 @@ func (s *CheckConfigService) ensureHumanReviewCheck(ctx context.Context, issueID
 	return false, nil
 }
 
-func (s *CheckConfigService) humanReviewStale(ctx context.Context, issueID string, change Change, previousHeadSHA string) (bool, error) {
+func (s *CheckConfigService) humanReviewStale(ctx context.Context, taskID string, change Change, previousHeadSHA string) (bool, error) {
 	previousHeadSHA = strings.TrimSpace(previousHeadSHA)
 	if previousHeadSHA == "" || strings.TrimSpace(change.HeadSHA) == "" || previousHeadSHA == strings.TrimSpace(change.HeadSHA) {
 		return false, nil
@@ -782,13 +782,13 @@ func (s *CheckConfigService) humanReviewStale(ctx context.Context, issueID strin
 SELECT DISTINCT rt.file_path
 FROM review_threads rt
 LEFT JOIN review_comments rc ON rc.thread_id = rt.id
-WHERE rt.issue_id = ?
+WHERE rt.task_id = ?
 	AND (
 		rt.created_by LIKE 'owner%'
 		OR rt.created_by LIKE 'human%'
 		OR rc.actor LIKE 'owner%'
 		OR rc.actor LIKE 'human%'
-	)`, issueID)
+	)`, taskID)
 	if err != nil {
 		return false, fmt.Errorf("load human review thread paths: %w", err)
 	}
@@ -809,30 +809,30 @@ WHERE rt.issue_id = ?
 	return false, nil
 }
 
-func (s *CheckConfigService) ensureCheckExists(ctx context.Context, issueID string, definition CheckDefinition) (Check, error) {
-	if check, err := s.checks.GetCheck(ctx, issueID, definition.Name); err == nil {
+func (s *CheckConfigService) ensureCheckExists(ctx context.Context, taskID string, definition CheckDefinition) (Check, error) {
+	if check, err := s.checks.GetCheck(ctx, taskID, definition.Name); err == nil {
 		return check, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return Check{}, err
 	}
 
-	if err := s.ensurePendingCheck(ctx, issueID, definition); err != nil {
+	if err := s.ensurePendingCheck(ctx, taskID, definition); err != nil {
 		return Check{}, err
 	}
-	return s.checks.GetCheck(ctx, issueID, definition.Name)
+	return s.checks.GetCheck(ctx, taskID, definition.Name)
 }
 
-func (s *CheckConfigService) enqueueCheckJob(ctx context.Context, issueID string, change Change, definition CheckDefinition) (bool, error) {
-	return s.enqueueCheckJobForWorkflow(ctx, issueID, change, definition, "", "")
+func (s *CheckConfigService) enqueueCheckJob(ctx context.Context, taskID string, change Change, definition CheckDefinition) (bool, error) {
+	return s.enqueueCheckJobForWorkflow(ctx, taskID, change, definition, "", "")
 }
 
-func (s *CheckConfigService) enqueueCheckJobForWorkflow(ctx context.Context, issueID string, change Change, definition CheckDefinition, workflowRunID, nodeRunID string) (bool, error) {
+func (s *CheckConfigService) enqueueCheckJobForWorkflow(ctx context.Context, taskID string, change Change, definition CheckDefinition, workflowRunID, nodeRunID string) (bool, error) {
 	role, bucket, err := jobRoleForCheck(definition.Kind)
 	if err != nil {
 		return false, err
 	}
 	headSHA := strings.TrimSpace(change.HeadSHA)
-	exists, err := s.liveCheckJobExists(ctx, issueID, change.ID, role, definition.Name, headSHA)
+	exists, err := s.liveCheckJobExists(ctx, taskID, change.ID, role, definition.Name, headSHA)
 	if err != nil {
 		return false, err
 	}
@@ -853,14 +853,14 @@ func (s *CheckConfigService) enqueueCheckJobForWorkflow(ctx context.Context, iss
 	}
 	stampProjectPayload(payload, s.project)
 	if (role == flowworker.RoleReviewer || role == flowworker.RoleVerifier) && s.threads != nil {
-		reviewContext, err := s.threads.ReviewContextForIssue(ctx, issueID)
+		reviewContext, err := s.threads.ReviewContextForTask(ctx, taskID)
 		if err != nil {
 			return false, err
 		}
 		payload["review_context"] = reviewContext
 	}
 	job, err := s.workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &issueID,
+		TaskID:         &taskID,
 		ChangeID:       &change.ID,
 		WorkflowRunID:  stringPointerOrNil(workflowRunID),
 		NodeRunID:      stringPointerOrNil(nodeRunID),
@@ -873,7 +873,7 @@ func (s *CheckConfigService) enqueueCheckJobForWorkflow(ctx context.Context, iss
 		Payload:        payload,
 	})
 	if err != nil {
-		exists, lookupErr := s.liveCheckJobExists(ctx, issueID, change.ID, role, definition.Name, headSHA)
+		exists, lookupErr := s.liveCheckJobExists(ctx, taskID, change.ID, role, definition.Name, headSHA)
 		if lookupErr == nil && exists {
 			return false, nil
 		}
@@ -893,7 +893,7 @@ const (
 
 // ScheduleWorkflowNodeChecks translates one trusted graph node into ordinary
 // check jobs while preserving run/node ownership on every queued job.
-func (s *CheckConfigService) ScheduleWorkflowNodeChecks(ctx context.Context, issue Issue, change Change, mode WorkflowCheckMode, agents []SnapshotReviewAgent, workflowRunID, nodeRunID string) ([]string, error) {
+func (s *CheckConfigService) ScheduleWorkflowNodeChecks(ctx context.Context, task Task, change Change, mode WorkflowCheckMode, agents []SnapshotReviewAgent, workflowRunID, nodeRunID string) ([]string, error) {
 	var definitions []CheckDefinition
 	switch mode {
 	case WorkflowChecksAutomated:
@@ -935,29 +935,29 @@ SET required = 0,
 	verdict = ?,
 	details = ?,
 	updated_at = ?
-WHERE issue_id = ?
+WHERE task_id = ?
 	AND verdict IN (?, ?)
 	AND name LIKE '%.node.%'
 	AND name NOT LIKE ?`, string(CheckSkipped), "retired by a later workflow node visit", formatTime(s.checks.now().UTC()),
-		issue.ID, string(CheckPending), string(CheckBlocked), "%.node."+nodeRunID); err != nil {
+		task.ID, string(CheckPending), string(CheckBlocked), "%.node."+nodeRunID); err != nil {
 		return nil, fmt.Errorf("retire prior workflow checks: %w", err)
 	}
 
 	var names []string
 	for index, definition := range definitions {
 		definition.Name = workflowNodeCheckName(definition.Name, nodeRunID, index)
-		check, err := s.checks.GetCheck(ctx, issue.ID, definition.Name)
+		check, err := s.checks.GetCheck(ctx, task.ID, definition.Name)
 		if errors.Is(err, sql.ErrNoRows) {
-			if err := s.ensurePendingCheck(ctx, issue.ID, definition); err != nil {
+			if err := s.ensurePendingCheck(ctx, task.ID, definition); err != nil {
 				return nil, err
 			}
-			check, err = s.checks.GetCheck(ctx, issue.ID, definition.Name)
+			check, err = s.checks.GetCheck(ctx, task.ID, definition.Name)
 		}
 		if err != nil {
 			return nil, err
 		}
 		if check.Verdict == CheckPending {
-			if _, err := s.enqueueCheckJobForWorkflow(ctx, issue.ID, change, definition, workflowRunID, nodeRunID); err != nil {
+			if _, err := s.enqueueCheckJobForWorkflow(ctx, task.ID, change, definition, workflowRunID, nodeRunID); err != nil {
 				return nil, err
 			}
 		}
@@ -1120,15 +1120,15 @@ func jobRoleForCheck(kind CheckKind) (flowworker.JobRole, flowworker.CapacityBuc
 	}
 }
 
-func (s *CheckConfigService) liveCheckJobExists(ctx context.Context, issueID string, changeID string, role flowworker.JobRole, checkName string, headSHA string) (bool, error) {
+func (s *CheckConfigService) liveCheckJobExists(ctx context.Context, taskID string, changeID string, role flowworker.JobRole, checkName string, headSHA string) (bool, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT payload_json
 FROM jobs
-WHERE issue_id = ?
+WHERE task_id = ?
 	AND change_id = ?
 	AND role = ?
 	AND state IN (?, ?, ?)`,
-		strings.TrimSpace(issueID),
+		strings.TrimSpace(taskID),
 		strings.TrimSpace(changeID),
 		string(role),
 		string(flowworker.JobQueued),

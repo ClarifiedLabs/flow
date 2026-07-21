@@ -1,9 +1,9 @@
-// Board (kanban) view: lanes, issue cards, the inline Done-lane preview and its
-// controls, plus the new-issue create action.
+// Board (kanban) view: lanes, task cards, the inline Done-lane preview and its
+// controls, plus the new-task create action.
 
-import { apiGet, issueHref } from "./api.js";
+import { apiGet, taskHref } from "./api.js";
 import { renderStatusKindBadge } from "./attention.js";
-import { flattenDonePage, flowPhaseLabel, laneIssues, phaseKey, renderFlowPhaseBadge, renderPhaseBadge, renderReviewBadge, renderUniqueCardLabel, waitReasonLabel } from "./board.js";
+import { flattenDonePage, flowPhaseLabel, laneTasks, phaseKey, renderFlowPhaseBadge, renderPhaseBadge, renderReviewBadge, renderUniqueCardLabel, waitReasonLabel } from "./board.js";
 import { LANES } from "./config.js";
 import { formatDate } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
@@ -22,7 +22,7 @@ export async function renderBoardView(app, filter, context) {
   ]);
   if (context && !app.isActiveLoad(context)) return false;
   app.setTitle(filter ? filter.label : "Board");
-  // The aggregate response carries one board per project; issue ids are
+  // The aggregate response carries one board per project; task ids are
   // only unique within a project, so every card stays tied to its board.
   const boards = data.boards || data.Boards || [];
   const showProjectBadge = (app.projects || []).length > 1;
@@ -31,7 +31,7 @@ export async function renderBoardView(app, filter, context) {
     const entries = [];
     for (const projectBoard of boards) {
       const board = projectBoard.board || projectBoard.Board || {};
-      const cards = projectBoard.issue_cards || projectBoard.IssueCards || {};
+      const cards = projectBoard.task_cards || projectBoard.TaskCards || {};
       const laneStates = projectBoard.lane_states || projectBoard.LaneStates || {};
       const waitReasons = projectBoard.wait_reasons || projectBoard.WaitReasons || {};
       const blockedIDs = new Set(projectBoard.blocked_ids || projectBoard.BlockedIDs || []);
@@ -40,16 +40,16 @@ export async function renderBoardView(app, filter, context) {
         name: projectBoard.project_name || projectBoard.ProjectName || "",
         badge: showProjectBadge,
       };
-      let issues = laneIssues(board, key, field);
-      if (filter && filter.state) issues = issues.filter((issue) => laneStates[value(issue, "id", "ID")] === filter.state);
-      for (const issue of issues) {
-        const issueID = value(issue, "id", "ID");
+      let tasks = laneTasks(board, key, field);
+      if (filter && filter.state) tasks = tasks.filter((task) => laneStates[value(task, "id", "ID")] === filter.state);
+      for (const task of tasks) {
+        const taskID = value(task, "id", "ID");
         entries.push({
-          issue,
-          card: cards[issueID] || {},
-          laneState: laneStates[issueID] || "",
-          waitReason: waitReasons[issueID] || "",
-          blocked: blockedIDs.has(issueID),
+          task,
+          card: cards[taskID] || {},
+          laneState: laneStates[taskID] || "",
+          waitReason: waitReasons[taskID] || "",
+          blocked: blockedIDs.has(taskID),
           project,
         });
       }
@@ -62,7 +62,7 @@ export async function renderBoardView(app, filter, context) {
       ${showDone ? renderBoardDoneLaneView(app, doneData) : ""}
     </div>
   `;
-  app.bindIssueActions(() => renderBoardView(app, filter));
+  app.bindTaskActions(() => renderBoardView(app, filter));
   if (showDone) bindBoardDoneControlsView(app, filter);
   return true;
 }
@@ -77,7 +77,7 @@ export function renderBoardDoneLaneView(app, doneData) {
   const { entries } = doneData ? flattenDonePage(doneData, (app.projects || []).length > 1) : { entries: [] };
   const rows = entries.length
     ? entries.map((entry) => renderDoneRowView(app, entry)).join("")
-    : `<div class="empty">No closed issues</div>`;
+    : `<div class="empty">No closed tasks</div>`;
   return `
     <section class="lane" data-lane="done">
       <h2>Done · ${entries.length}</h2>
@@ -155,27 +155,27 @@ export async function refreshBoardDoneLaneView(app, filter) {
   bindBoardDoneControlsView(app, filter);
 }
 
-export async function createIssueView(app) {
-  history.pushState({}, "", "/ui/issues/new");
+export async function createTaskView(app) {
+  history.pushState({}, "", "/ui/tasks/new");
   await app.load();
 }
 
 export function renderLaneView(app, label, entries, laneKey = "") {
   const renderedCards = entries.length
-    ? entries.map((entry, index) => renderIssueCardView(app, entry.issue, entry.card, entry.laneState, entry.blocked, Math.min(index, 8), entry.project, entry.waitReason)).join("")
-    : `<div class="empty">No issues</div>`;
+    ? entries.map((entry, index) => renderTaskCardView(app, entry.task, entry.card, entry.laneState, entry.blocked, Math.min(index, 8), entry.project, entry.waitReason)).join("")
+    : `<div class="empty">No tasks</div>`;
   return `<section class="lane" data-lane="${escapeAttr(laneKey)}"><h2>${escapeHTML(label)} · ${entries.length}</h2><div class="cards">${renderedCards}</div></section>`;
 }
 
-export function renderIssueCardView(app, issue, card, laneState, blocked, stagger = 0, project = null, waitReason = "") {
+export function renderTaskCardView(app, task, card, laneState, blocked, stagger = 0, project = null, waitReason = "") {
   const projectID = project && project.id ? project.id : "";
   const projectAttr = projectID ? ` data-project="${escapeAttr(projectID)}"` : "";
-  const issueID = value(issue, "id", "ID");
-  const title = value(issue, "title", "Title");
-  const lifecycleState = value(issue, "state", "State") || "unscheduled";
-  const priority = Number(value(issue, "priority", "Priority") || 0);
-  const updatedAt = formatDate(value(issue, "updated_at", "UpdatedAt"));
-  const source = value(issue, "created_by", "CreatedBy");
+  const taskID = value(task, "id", "ID");
+  const title = value(task, "title", "Title");
+  const lifecycleState = value(task, "state", "State") || "unscheduled";
+  const priority = Number(value(task, "priority", "Priority") || 0);
+  const updatedAt = formatDate(value(task, "updated_at", "UpdatedAt"));
+  const source = value(task, "created_by", "CreatedBy");
   const activeSession = value(card, "active_session", "ActiveSession");
   const terminalAvailable = Boolean(value(card, "terminal_available", "TerminalAvailable") || value(activeSession, "terminal_available", "TerminalAvailable"));
   const change = value(card, "change", "Change");
@@ -189,7 +189,7 @@ export function renderIssueCardView(app, issue, card, laneState, blocked, stagge
   const blockingReason = value(card, "blocking_reason", "BlockingReason");
   const terminalJobID = value(card, "terminal_job_id", "TerminalJobID");
   const blockers = value(card, "blockers", "Blockers") || {};
-  const blockerIssues = value(blockers, "issues", "Issues") || [];
+  const blockerTasks = value(blockers, "tasks", "Tasks") || [];
   const blockerCount = Number(value(blockers, "count", "Count") || 0);
   const tags = value(card, "tags", "Tags") || [];
   const relations = value(card, "relations", "Relations") || {};
@@ -228,15 +228,15 @@ export function renderIssueCardView(app, issue, card, laneState, blocked, stagge
     : "";
   const visibleTags = uniqueCardTags(tags, cardLabelKeys);
   const handoffSummary = waitReason ? renderHandoffSummary(handoff) : "";
-  const blockerText = blockerIssues.map((blocker) => `${value(blocker, "id", "ID")} ${value(blocker, "title", "Title")}`.trim()).join(", ");
+  const blockerText = blockerTasks.map((blocker) => `${value(blocker, "id", "ID")} ${value(blocker, "title", "Title")}`.trim()).join(", ");
   const scheduleButton = lifecycleState === "unscheduled"
-    ? `<button class="button" data-workflow-schedule="${escapeAttr(issueID)}"${projectAttr}>Schedule</button>`
+    ? `<button class="button" data-workflow-schedule="${escapeAttr(taskID)}"${projectAttr}>Schedule</button>`
     : "";
   const resetButton = lifecycleState === "scheduled" || lifecycleState === "in_progress"
-    ? `<button class="button secondary" data-workflow-reset="${escapeAttr(issueID)}"${projectAttr}>Reset</button>`
+    ? `<button class="button secondary" data-workflow-reset="${escapeAttr(taskID)}"${projectAttr}>Reset</button>`
     : "";
   const doneButton = lifecycleState !== "done"
-    ? `<button class="button secondary" data-workflow-done="${escapeAttr(issueID)}"${projectAttr}>Done</button>`
+    ? `<button class="button secondary" data-workflow-done="${escapeAttr(taskID)}"${projectAttr}>Done</button>`
     : "";
   const terminalButton = sessionID && (sessionTerminalAvailable || (terminalAvailable && !terminalJobID))
     ? renderTerminalButton("session", sessionID, { iconOnly: true })
@@ -256,7 +256,7 @@ export function renderIssueCardView(app, issue, card, laneState, blocked, stagge
   ].filter(Boolean).join(" · ");
   return `
     <article class="card" data-phase="${escapeAttr(blocked || blockerCount ? "blocked" : phaseSlug)}" style="--i:${Number(stagger) || 0}">
-      <a class="card-title" href="${escapeAttr(issueHref(projectID, issueID))}" data-link>${escapeHTML(issueID)} · ${escapeHTML(title)}</a>
+      <a class="card-title" href="${escapeAttr(taskHref(projectID, taskID))}" data-link>${escapeHTML(taskID)} · ${escapeHTML(title)}</a>
       <div class="meta">
         ${metaBadges}
       </div>

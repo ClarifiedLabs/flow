@@ -14,7 +14,7 @@ import (
 // the merge head guard then rejected the change. The consumer runs from the
 // background ticker: when new events appear it reconciles the exchange (which
 // syncs every change head to the real branch tip rather than trusting the
-// event payload) and resets automated checks for issues whose head moved. It
+// event payload) and resets automated checks for tasks whose head moved. It
 // deliberately does NOT schedule a review round — that still requires an
 // explicit session-ready signal.
 // gitEventWatermarkName is the consumer_watermarks key under which the
@@ -68,7 +68,7 @@ func (c *GitEventConsumer) ConsumeNew(ctx context.Context) (bool, error) {
 	if err != nil {
 		errs = errors.Join(errs, err)
 	}
-	resetIssues := map[string]bool{}
+	resetTasks := map[string]bool{}
 	for _, updated := range result.UpdatedChanges {
 		var workflowRunID sql.NullString
 		if err := c.db.QueryRowContext(ctx, `SELECT workflow_run_id FROM changes WHERE id = ?`, updated.ChangeID).Scan(&workflowRunID); err != nil {
@@ -80,12 +80,12 @@ func (c *GitEventConsumer) ConsumeNew(ctx context.Context) (bool, error) {
 		if workflowRunID.Valid {
 			continue
 		}
-		if resetIssues[updated.IssueID] {
+		if resetTasks[updated.TaskID] {
 			continue
 		}
-		resetIssues[updated.IssueID] = true
-		if _, err := c.checks.ResetAutomatedChecksForNewRevision(ctx, updated.IssueID); err != nil {
-			errs = errors.Join(errs, fmt.Errorf("reset automated checks for %s: %w", updated.IssueID, err))
+		resetTasks[updated.TaskID] = true
+		if _, err := c.checks.ResetAutomatedChecksForNewRevision(ctx, updated.TaskID); err != nil {
+			errs = errors.Join(errs, fmt.Errorf("reset automated checks for %s: %w", updated.TaskID, err))
 		}
 	}
 	if errs == nil {

@@ -132,7 +132,7 @@ type JobPayload struct {
 	// for every author job, regardless of harness. Only the harness CLI receives
 	// --image flags (see injectImageFlags); other harnesses get the materialized
 	// files but no flag.
-	ImageAttachments []coordinator.IssueImageAttachment `json:"image_attachments,omitempty"`
+	ImageAttachments []coordinator.TaskImageAttachment `json:"image_attachments,omitempty"`
 	// AgentHarness / ConsoleHarness are the harness kinds the coordinator stamps
 	// on author / console jobs respectively, so the worker reads the stored
 	// harness instead of re-deriving it from argv. See resolveHarness.
@@ -409,7 +409,7 @@ func prepareWorktree(ctx context.Context, cfg config.WorkerConfig, job Job, payl
 // The patterns are scoped narrowly: only the materialized-image directory
 // (.flow/attachments) is excluded, NOT the whole .flow/ tree. .flow/ is a
 // shared Flow namespace that also holds paths authors are expected to commit
-// — .flow/checks/*.yaml check definitions (read from the issue branch HEAD by
+// — .flow/checks/*.yaml check definitions (read from the task branch HEAD by
 // checkConfigPrefix in internal/coordinator/check_config.go) and .flow/session
 // (a real committed path whose presence on the base branch is guarded in
 // internal/git/hooks.go). Excluding all of .flow/ would silently drop those
@@ -1039,8 +1039,8 @@ func workerEnv(input tmuxInput) map[string]string {
 	if strings.TrimSpace(input.TranscriptFile) != "" {
 		reserved["FLOW_TRANSCRIPT_FILE"] = strings.TrimSpace(input.TranscriptFile)
 	}
-	if input.Job.IssueID != nil {
-		reserved["FLOW_ISSUE_ID"] = *input.Job.IssueID
+	if input.Job.TaskID != nil {
+		reserved["FLOW_TASK_ID"] = *input.Job.TaskID
 	}
 	if input.Job.WorkflowRunID != nil {
 		reserved["FLOW_WORKFLOW_RUN_ID"] = *input.Job.WorkflowRunID

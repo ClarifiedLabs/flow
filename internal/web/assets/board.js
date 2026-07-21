@@ -4,8 +4,8 @@
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
 
-export function doneClosedAtMs(issue) {
-  const ms = Date.parse(value(issue, "done_at", "DoneAt"));
+export function doneClosedAtMs(task) {
+  const ms = Date.parse(value(task, "done_at", "DoneAt"));
   return Number.isNaN(ms) ? 0 : ms;
 }
 
@@ -18,22 +18,22 @@ export function flattenDonePage(data, projectBadge) {
   for (const entry of projects) {
     const projectID = value(entry, "project_id", "ProjectID") || "";
     const projectName = value(entry, "project_name", "ProjectName") || "";
-    const issues = value(entry, "issues", "Issues") || [];
+    const tasks = value(entry, "tasks", "Tasks") || [];
     const outcomes = value(entry, "outcomes", "Outcomes") || {};
-    const cards = value(entry, "issue_cards", "IssueCards") || {};
+    const cards = value(entry, "task_cards", "TaskCards") || {};
     const project = { id: projectID, name: projectName, badge: projectBadge };
-    for (const issue of issues) {
-      const issueID = value(issue, "id", "ID");
-      entries.push({ issue, card: cards[issueID] || {}, laneState: outcomes[issueID] || "", project });
+    for (const task of tasks) {
+      const taskID = value(task, "id", "ID");
+      entries.push({ task, card: cards[taskID] || {}, laneState: outcomes[taskID] || "", project });
     }
     const nextBefore = value(entry, "next_before", "NextBefore");
     if (nextBefore) cursors[projectID] = { before: nextBefore, beforeID: value(entry, "next_before_id", "NextBeforeID") || "" };
   }
-  entries.sort((a, b) => doneClosedAtMs(b.issue) - doneClosedAtMs(a.issue));
+  entries.sort((a, b) => doneClosedAtMs(b.task) - doneClosedAtMs(a.task));
   return { entries, cursors };
 }
 
-export function laneIssues(board, key, field) {
+export function laneTasks(board, key, field) {
   return board[field] || board[key] || [];
 }
 
@@ -116,7 +116,7 @@ export function renderPhaseBadge(state) {
   return `<span class="badge" data-phase="${escapeAttr(slug)}"><span class="dot"></span>${escapeHTML(label)}</span>`;
 }
 
-// flowPhaseLabel formats an issue's flow cursor as "<phase> <n>/<count>"
+// flowPhaseLabel formats an task's flow cursor as "<phase> <n>/<count>"
 // (1-based), e.g. "plan 1/2". Empty when the flow carries no phase name.
 export function flowPhaseLabel(flow) {
   const phaseName = value(flow, "phase_name", "PhaseName");

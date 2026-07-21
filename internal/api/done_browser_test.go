@@ -10,7 +10,7 @@ import (
 )
 
 // TestWebUIDoneViewSurfacesClosedWork drives the real UI: the Done page lists
-// closed issues with their merged change, the outcome filter narrows the list,
+// closed tasks with their merged change, the outcome filter narrows the list,
 // the density toggle switches to compact rows, the nav badge shows the closed
 // count, and the board grows a Done column.
 func TestWebUIDoneViewSurfacesClosedWork(t *testing.T) {
@@ -21,7 +21,7 @@ func TestWebUIDoneViewSurfacesClosedWork(t *testing.T) {
 
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	merged, rejected, abandoned := seedClosedIssues(t, fixture)
+	merged, rejected, abandoned := seedClosedTasks(t, fixture)
 
 	httpServer := httptest.NewServer(fixture.Server)
 	t.Cleanup(httpServer.Close)
@@ -36,7 +36,7 @@ func TestWebUIDoneViewSurfacesClosedWork(t *testing.T) {
 
 	navigateAndWaitForText(t, browserCtx, httpServer.URL+webLoginPath(bootstrap.Token), "Board")
 
-	// Done page lists every terminal issue with its merged change link.
+	// Done page lists every terminal task with its merged change link.
 	navigateAndWaitForText(t, browserCtx, httpServer.URL+"/ui/done", merged.ID)
 	assertActiveNav(t, browserCtx, "/ui/done")
 	assertPageContains(t, browserCtx, rejected.ID)
@@ -48,7 +48,7 @@ func TestWebUIDoneViewSurfacesClosedWork(t *testing.T) {
 		t.Fatalf("done nav badge did not reach 3: %v\nbody:\n%s", err, browserBody(t, browserCtx))
 	}
 
-	// Filtering by Merged narrows to the merged issue and drops the others.
+	// Filtering by Merged narrows to the merged task and drops the others.
 	if err := chromedp.Run(browserCtx,
 		chromedp.Click(`button[data-done-outcome="merged"]`, chromedp.ByQuery),
 		waitForTextGone(rejected.ID),
@@ -68,7 +68,7 @@ func TestWebUIDoneViewSurfacesClosedWork(t *testing.T) {
 		t.Fatalf("toggle Done density to compact: %v\nbody:\n%s", err, browserBody(t, browserCtx))
 	}
 
-	// The board grows a Done column listing the same terminal issues.
+	// The board grows a Done column listing the same terminal tasks.
 	navigateAndWaitForText(t, browserCtx, httpServer.URL+"/ui/board", merged.ID)
 	var hasDoneLane bool
 	if err := chromedp.Run(browserCtx,

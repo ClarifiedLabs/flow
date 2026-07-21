@@ -34,7 +34,7 @@ var imageAttachmentDownloadTimeout = 60 * time.Second
 // fetch image attachment bytes. *flowclient.Client satisfies it; tests inject a
 // fake.
 type imageAttachmentDownloader interface {
-	DownloadIssueAttachment(ctx context.Context, issueID, attachmentID string, dst io.Writer) error
+	DownloadTaskAttachment(ctx context.Context, taskID, attachmentID string, dst io.Writer) error
 }
 
 // materializeImageAttachments downloads the coordinator-stamped image
@@ -48,15 +48,15 @@ func materializeImageAttachments(ctx context.Context, input RunInput, payload Jo
 	if len(payload.ImageAttachments) == 0 {
 		return nil
 	}
-	issueID := ""
-	if input.Job.IssueID != nil {
-		issueID = strings.TrimSpace(*input.Job.IssueID)
+	taskID := ""
+	if input.Job.TaskID != nil {
+		taskID = strings.TrimSpace(*input.Job.TaskID)
 	}
 	token := strings.TrimSpace(input.Config.Token)
-	if issueID == "" || token == "" || strings.TrimSpace(input.Config.CoordinatorURL) == "" {
-		// Without an issue id, worker token, or coordinator URL there is no way
+	if taskID == "" || token == "" || strings.TrimSpace(input.Config.CoordinatorURL) == "" {
+		// Without an task id, worker token, or coordinator URL there is no way
 		// to fetch the bytes. Leave the entrypoint untouched.
-		slog.Debug("worker image attachments skipped; missing issue id, worker token, or coordinator url", "job_id", input.Job.ID)
+		slog.Debug("worker image attachments skipped; missing task id, worker token, or coordinator url", "job_id", input.Job.ID)
 		return nil
 	}
 	client, err := flowclient.New(config.ClientConfig{
@@ -67,18 +67,18 @@ func materializeImageAttachments(ctx context.Context, input RunInput, payload Jo
 	if err != nil {
 		return err
 	}
-	return materializeImages(ctx, client.WithProject(payload.ProjectID), issueID, payload, worktree)
+	return materializeImages(ctx, client.WithProject(payload.ProjectID), taskID, payload, worktree)
 }
 
 // materializeImages is the testable core of materializeImageAttachments: it
 // downloads each image via downloader and, for the harness CLI, injects the
 // --image flags. Splitting the client construction out lets tests drive the
 // download + injection logic with a fake downloader.
-func materializeImages(ctx context.Context, downloader imageAttachmentDownloader, issueID string, payload JobPayload, worktree string) error {
+func materializeImages(ctx context.Context, downloader imageAttachmentDownloader, taskID string, payload JobPayload, worktree string) error {
 	destDir := filepath.Join(worktree, imageAttachmentsRelDir)
 	var materialized []materializedImage
 	for _, descriptor := range payload.ImageAttachments {
-		relPath, err := downloadImageAttachment(ctx, downloader, issueID, descriptor, destDir, worktree)
+		relPath, err := downloadImageAttachment(ctx, downloader, taskID, descriptor, destDir, worktree)
 		if err != nil {
 			// Skip-on-error: a single failed download must not poison the whole
 			// job or block the remaining images. The entrypoint keeps its
@@ -102,7 +102,7 @@ type materializedImage struct {
 	relPath string
 }
 
-func downloadImageAttachment(ctx context.Context, downloader imageAttachmentDownloader, issueID string, descriptor coordinator.IssueImageAttachment, destDir, worktree string) (string, error) {
+func downloadImageAttachment(ctx context.Context, downloader imageAttachmentDownloader, taskID string, descriptor coordinator.TaskImageAttachment, destDir, worktree string) (string, error) {
 	if err := os.MkdirAll(destDir, 0o700); err != nil {
 		return "", fmt.Errorf("create image attachments directory: %w", err)
 	}
@@ -117,7 +117,7 @@ func downloadImageAttachment(ctx context.Context, downloader imageAttachmentDown
 	defer os.Remove(tmpPath)
 	downloadCtx, cancel := context.WithTimeout(ctx, imageAttachmentDownloadTimeout)
 	defer cancel()
-	if err := downloader.DownloadIssueAttachment(downloadCtx, issueID, descriptor.ID, tmp); err != nil {
+	if err := downloader.DownloadTaskAttachment(downloadCtx, taskID, descriptor.ID, tmp); err != nil {
 		_ = tmp.Close()
 		return "", fmt.Errorf("download attachment %s: %w", descriptor.ID, err)
 	}

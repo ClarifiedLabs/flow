@@ -10,7 +10,7 @@ Flow ships three Go commands from one module:
 
 | Command | Role |
 | --- | --- |
-| `flow` | Human and in-session CLI. It registers projects, drives issue/workflow commands, fetches prompts, submits typed artifacts, and attaches to terminals. |
+| `flow` | Human and in-session CLI. It registers projects, drives task/workflow commands, fetches prompts, submits typed artifacts, and attaches to terminals. |
 | `flow-server` | Coordinator daemon. It serves the HTTP API, browser UI, Git HTTP exchange endpoints, web/terminal proxy routes, project registry, workflow executor, scheduler entrypoints, and exchange git hooks. |
 | `flow-worker` | Worker supervisor. It joins the coordinator, advertises capacity and harness labels, claims jobs across projects, clones exchange branches, runs jobs in tmux, heartbeats leases, uploads transcripts, and reports results. |
 
@@ -30,7 +30,7 @@ The coordinator data directory defaults to
   hook.token                        # fallback hook token, mode 0600
   projects/
     <project-id>/
-      flow.db                       # issue/session/check/review state
+      flow.db                       # task/session/check/review state
       exchange.git/                 # private bare git exchange remote
         flow-spool/post-receive.jsonl
       transcripts/
@@ -79,19 +79,19 @@ and workers.
 
 Per-project handlers are built around a `ProjectBundle` from
 `internal/api/registry.go`. A bundle owns the services for exactly one project:
-issues, workflow runs and artifacts, sessions, checks, review threads, flows,
+tasks, workflow runs and artifacts, sessions, checks, review threads, flows,
 transcripts, attachments, merges, git events, worker queue, and workflow executor.
 
-Some routes, such as `/v2/issues/<id>`, can be resolved implicitly only when the
+Some routes, such as `/v2/tasks/<id>`, can be resolved implicitly only when the
 principal or server context identifies a single project. Project-qualified routes
-are the unambiguous form because issue IDs restart per project.
+are the unambiguous form because task IDs restart per project.
 
 The API is HTTP/JSON and carries a `Flow-Protocol-Version` header. Mutating
 endpoints use idempotency records where repeated client requests must be safe.
 
 ## Lifecycle and workflow executor
 
-The issue lifecycle stores only `scheduled`, `in_progress`, and `done`; null is
+The task lifecycle stores only `scheduled`, `in_progress`, and `done`; null is
 Unscheduled. Working and Blocked are derived In Progress substates. Done stores
 one fixed resolution.
 
@@ -103,7 +103,7 @@ cycles are allowed. A per-run transition budget opens an operator wait before a
 cycle can run forever.
 
 Human gates and budget exhaustion derive Blocked. Reset cancels run-owned jobs,
-leases, sessions, and the active node and returns the issue to Unscheduled.
+leases, sessions, and the active node and returns the task to Unscheduled.
 Terminal nodes derive Done; a merged terminal additionally proves the run owns
 a merged change.
 
@@ -130,7 +130,7 @@ Capacity buckets have different purposes:
 For each claimed job, the worker:
 
 1. Clones or fetches the project's exchange remote into its work directory.
-2. Checks out the job's issue branch.
+2. Checks out the job's task branch.
 3. Builds the job environment, including Flow session/job variables.
 4. Configures harness hooks and client-side git hooks where needed.
 5. Starts a tmux session and a ttyd terminal proxy.
@@ -146,14 +146,14 @@ so normal job environments do not inherit the reusable join secret.
 Each project has a private bare exchange remote. Flow-managed refs include:
 
 - the protected base branch;
-- `refs/heads/issue/i-..../run-N` run-specific issue branches;
+- `refs/heads/task/i-..../run-N` run-specific task branches;
 - coordinator-owned tags and future internal `refs/flow/*` refs.
 
 Server-side `pre-receive` hooks enforce guardrails:
 
 - protected base updates require owner or coordinator principal;
-- non-fast-forward issue branch updates require coordinator principal;
-- issue branch pushes are allowed from owner, worker, session, coordinator, or
+- non-fast-forward task branch updates require coordinator principal;
+- task branch pushes are allowed from owner, worker, session, coordinator, or
   local same-user principals when they are fast-forward;
 - unknown Flow-managed namespaces are rejected;
 - `.flow/session/**` is not allowed on the protected base branch.
@@ -164,7 +164,7 @@ heads, stale checks, and review-thread trailer claims. `flow reconcile` remains 
 manual recovery path when git and SQLite drift.
 
 Agent outputs are immutable typed workflow artifacts. `flow complete` submits a
-Markdown summary plus a `handoff`, `change`, or `issue_set` payload. Change
+Markdown summary plus a `handoff`, `change`, or `task_set` payload. Change
 artifacts are pinned to the submitted HEAD; later prompts receive prior artifact
 summaries from the frozen run.
 
@@ -177,9 +177,9 @@ Each project stores flow configuration in SQLite:
 - **Flows** define directed trusted-node graphs, strict per-kind configuration,
   outcome transitions, a start node, and a transition budget.
 
-Fresh projects seed issue-planner, author, reviewer, and verifier definitions
+Fresh projects seed task-planner, author, reviewer, and verifier definitions
 plus two flows: the default coding graph (implementation, checks, review, human
-gate, verification, and merge loops) and the planning graph (issue-set authoring,
+gate, verification, and merge loops) and the planning graph (task-set authoring,
 human review, transactional materialization, and completion).
 
 Repo-versioned automated check configuration lives in `.flow/checks/*.yaml`.
@@ -216,7 +216,7 @@ server. The implementation lives under `internal/web`:
   serving and tests.
 
 The UI treats coordinator read models as the source of truth. It keeps a small
-client-side cache for convenience, but issue lanes, review state, checks,
+client-side cache for convenience, but task lanes, review state, checks,
 terminal state, and flow state are authoritative on the server.
 
 ## Source map

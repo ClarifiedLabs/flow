@@ -33,14 +33,14 @@ func TestServerRequiresOwnerToken(t *testing.T) {
 	server := newTestServer(t)
 
 	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/v2/issues", nil)
+	request := httptest.NewRequest(http.MethodGet, "/v2/tasks", nil)
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("missing token status = %d, want 401", response.Code)
 	}
 
 	response = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodGet, "/v2/issues", nil)
+	request = httptest.NewRequest(http.MethodGet, "/v2/tasks", nil)
 	request.Header.Set("Authorization", "Bearer wrong")
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
@@ -52,7 +52,7 @@ func TestServerReportsProtocolMismatch(t *testing.T) {
 	server := newTestServer(t)
 
 	response := httptest.NewRecorder()
-	request := authorizedRequest(http.MethodGet, "/v2/issues", nil)
+	request := authorizedRequest(http.MethodGet, "/v2/tasks", nil)
 	request.Header.Set(protocolHeader, "999")
 	server.ServeHTTP(response, request)
 
@@ -273,21 +273,21 @@ func TestHarnessOptionsIncludeDefaultArgs(t *testing.T) {
 	}
 }
 
-func TestIssueAttachmentUploadDetailAndDownload(t *testing.T) {
+func TestTaskAttachmentUploadDetailAndDownload(t *testing.T) {
 	fixture := newTestFixture(t)
-	issue, err := fixture.Issues.CreateIssue(context.Background(), coordinator.CreateIssueInput{Title: "Attachment issue"})
+	task, err := fixture.Tasks.CreateTask(context.Background(), coordinator.CreateTaskInput{Title: "Attachment task"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 
-	uploadPath := "/v2/projects/" + fixture.Project.ID + "/issues/" + issue.ID + "/attachments"
-	uploaded := uploadIssueAttachmentForTest(t, fixture, uploadPath, string(coordinator.IssueAttachmentStageReviewer), "review.png", "image/png", []byte("png-data"))
-	if uploaded.Stage != coordinator.IssueAttachmentStageReviewer || uploaded.Filename != "review.png" || uploaded.ContentType != "image/png" {
+	uploadPath := "/v2/projects/" + fixture.Project.ID + "/tasks/" + task.ID + "/attachments"
+	uploaded := uploadTaskAttachmentForTest(t, fixture, uploadPath, string(coordinator.TaskAttachmentStageReviewer), "review.png", "image/png", []byte("png-data"))
+	if uploaded.Stage != coordinator.TaskAttachmentStageReviewer || uploaded.Filename != "review.png" || uploaded.ContentType != "image/png" {
 		t.Fatalf("uploaded attachment = %+v", uploaded)
 	}
 
-	var detail issueResponse
-	doJSONRequest(t, fixture.Server, http.MethodGet, "/v2/projects/"+fixture.Project.ID+"/issues/"+issue.ID, nil, http.StatusOK, &detail)
+	var detail taskResponse
+	doJSONRequest(t, fixture.Server, http.MethodGet, "/v2/projects/"+fixture.Project.ID+"/tasks/"+task.ID, nil, http.StatusOK, &detail)
 	if detail.Detail == nil || len(detail.Detail.Attachments) != 1 || detail.Detail.Attachments[0].ID != uploaded.ID {
 		t.Fatalf("detail attachments = %+v", detail.Detail)
 	}
@@ -316,14 +316,14 @@ func TestIssueAttachmentUploadDetailAndDownload(t *testing.T) {
 	}
 }
 
-func TestIssueAttachmentUnsafeContentTypesAreDownloadOnly(t *testing.T) {
+func TestTaskAttachmentUnsafeContentTypesAreDownloadOnly(t *testing.T) {
 	fixture := newTestFixture(t)
-	issue, err := fixture.Issues.CreateIssue(context.Background(), coordinator.CreateIssueInput{Title: "Unsafe attachment issue"})
+	task, err := fixture.Tasks.CreateTask(context.Background(), coordinator.CreateTaskInput{Title: "Unsafe attachment task"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 
-	uploadPath := "/v2/projects/" + fixture.Project.ID + "/issues/" + issue.ID + "/attachments"
+	uploadPath := "/v2/projects/" + fixture.Project.ID + "/tasks/" + task.ID + "/attachments"
 	for _, tc := range []struct {
 		name        string
 		filename    string
@@ -334,7 +334,7 @@ func TestIssueAttachmentUnsafeContentTypesAreDownloadOnly(t *testing.T) {
 		{name: "svg", filename: "proof.svg", contentType: "image/svg+xml", body: `<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			uploaded := uploadIssueAttachmentForTest(t, fixture, uploadPath, string(coordinator.IssueAttachmentStageReviewer), tc.filename, tc.contentType, []byte(tc.body))
+			uploaded := uploadTaskAttachmentForTest(t, fixture, uploadPath, string(coordinator.TaskAttachmentStageReviewer), tc.filename, tc.contentType, []byte(tc.body))
 			if uploaded.ContentType != tc.contentType {
 				t.Fatalf("stored content type = %q, want %q", uploaded.ContentType, tc.contentType)
 			}
@@ -360,7 +360,7 @@ func TestIssueAttachmentUnsafeContentTypesAreDownloadOnly(t *testing.T) {
 	}
 }
 
-func uploadIssueAttachmentForTest(t *testing.T, fixture testFixture, uploadPath string, stage string, filename string, contentType string, data []byte) coordinator.IssueAttachment {
+func uploadTaskAttachmentForTest(t *testing.T, fixture testFixture, uploadPath string, stage string, filename string, contentType string, data []byte) coordinator.TaskAttachment {
 	t.Helper()
 
 	var body bytes.Buffer
@@ -394,48 +394,48 @@ func uploadIssueAttachmentForTest(t *testing.T, fixture testFixture, uploadPath 
 	if upload.Code != http.StatusCreated {
 		t.Fatalf("upload status = %d, want 201; body: %s", upload.Code, upload.Body.String())
 	}
-	var uploaded issueAttachmentResponse
+	var uploaded taskAttachmentResponse
 	if err := json.NewDecoder(upload.Body).Decode(&uploaded); err != nil {
 		t.Fatalf("decode upload: %v", err)
 	}
 	return uploaded.Attachment
 }
 
-func TestIdempotentCreateDoesNotDuplicateIssue(t *testing.T) {
+func TestIdempotentCreateDoesNotDuplicateTask(t *testing.T) {
 	fixture := newTestFixture(t)
 
-	first := issueResponse{}
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues", createIssueRequest{
-		Title: "Idempotent issue",
+	first := taskResponse{}
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks", createTaskRequest{
+		Title: "Idempotent task",
 	}, http.StatusCreated, &first, idempotencyHeader, "create-1")
 
-	second := issueResponse{}
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues", createIssueRequest{
-		Title: "Idempotent issue",
+	second := taskResponse{}
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks", createTaskRequest{
+		Title: "Idempotent task",
 	}, http.StatusCreated, &second, idempotencyHeader, "create-1")
 
-	if first.Issue.ID != second.Issue.ID {
-		t.Fatalf("second idempotent create returned %s, want %s", second.Issue.ID, first.Issue.ID)
+	if first.Task.ID != second.Task.ID {
+		t.Fatalf("second idempotent create returned %s, want %s", second.Task.ID, first.Task.ID)
 	}
-	issues, err := fixture.Issues.ListIssues(context.Background(), coordinator.IssueFilter{})
+	tasks, err := fixture.Tasks.ListTasks(context.Background(), coordinator.TaskFilter{})
 	if err != nil {
-		t.Fatalf("list issues: %v", err)
+		t.Fatalf("list tasks: %v", err)
 	}
-	if len(issues) != 1 {
-		t.Fatalf("issue count = %d, want 1", len(issues))
+	if len(tasks) != 1 {
+		t.Fatalf("task count = %d, want 1", len(tasks))
 	}
 
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues", createIssueRequest{
-		Title: "Different issue",
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks", createTaskRequest{
+		Title: "Different task",
 	}, http.StatusConflict, nil, idempotencyHeader, "create-1")
 }
 
-func TestConcurrentIdempotentCreateDoesNotDuplicateIssue(t *testing.T) {
+func TestConcurrentIdempotentCreateDoesNotDuplicateTask(t *testing.T) {
 	fixture := newTestFixture(t)
 
 	const requests = 24
 	start := make(chan struct{})
-	results := make(chan issueResponse, requests)
+	results := make(chan taskResponse, requests)
 	errors := make(chan string, requests)
 	var wg sync.WaitGroup
 	for i := 0; i < requests; i++ {
@@ -444,14 +444,14 @@ func TestConcurrentIdempotentCreateDoesNotDuplicateIssue(t *testing.T) {
 			defer wg.Done()
 			<-start
 			response := httptest.NewRecorder()
-			request := authorizedRequest(http.MethodPost, "/v2/issues", createIssueRequest{Title: "Concurrent idempotent issue"})
+			request := authorizedRequest(http.MethodPost, "/v2/tasks", createTaskRequest{Title: "Concurrent idempotent task"})
 			request.Header.Set(idempotencyHeader, "concurrent-create")
 			fixture.Server.ServeHTTP(response, request)
 			if response.Code != http.StatusCreated {
 				errors <- response.Body.String()
 				return
 			}
-			var body issueResponse
+			var body taskResponse
 			if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 				errors <- err.Error()
 				return
@@ -468,20 +468,20 @@ func TestConcurrentIdempotentCreateDoesNotDuplicateIssue(t *testing.T) {
 		t.Fatalf("idempotent request failed: %s", err)
 	}
 
-	issueIDs := map[string]bool{}
+	taskIDs := map[string]bool{}
 	for result := range results {
-		issueIDs[result.Issue.ID] = true
+		taskIDs[result.Task.ID] = true
 	}
-	if len(issueIDs) != 1 {
-		t.Fatalf("idempotent issue IDs = %+v, want exactly one", issueIDs)
+	if len(taskIDs) != 1 {
+		t.Fatalf("idempotent task IDs = %+v, want exactly one", taskIDs)
 	}
 
-	issues, err := fixture.Issues.ListIssues(context.Background(), coordinator.IssueFilter{})
+	tasks, err := fixture.Tasks.ListTasks(context.Background(), coordinator.TaskFilter{})
 	if err != nil {
-		t.Fatalf("list issues: %v", err)
+		t.Fatalf("list tasks: %v", err)
 	}
-	if len(issues) != 1 {
-		t.Fatalf("issue count = %d, want 1", len(issues))
+	if len(tasks) != 1 {
+		t.Fatalf("task count = %d, want 1", len(tasks))
 	}
 }
 
@@ -495,7 +495,7 @@ WHERE token_hash = ?`, time.Now().UTC().Format(time.RFC3339Nano), coordinator.Ha
 	}
 
 	response := httptest.NewRecorder()
-	request := authorizedRequest(http.MethodGet, "/v2/issues", nil)
+	request := authorizedRequest(http.MethodGet, "/v2/tasks", nil)
 	fixture.Server.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("revoked owner token status = %d, want 401", response.Code)
@@ -512,7 +512,7 @@ WHERE token_hash = ?`, time.Now().UTC().Format(time.RFC3339Nano), coordinator.Ha
 	request = authorizedRequest(http.MethodPost, fixture.gitEventsPath(), gitEventsRequest{
 		OldSHA: "old",
 		NewSHA: "new",
-		Ref:    "refs/heads/issue/i-0001",
+		Ref:    "refs/heads/task/i-0001",
 		Actor:  "hook",
 	})
 	request.Header.Set("Authorization", "Bearer hook-token")
@@ -599,7 +599,7 @@ func TestWebUIBootstrapLoginAndCookieAuth(t *testing.T) {
 	}
 
 	missingCSRF := httptest.NewRecorder()
-	missingCSRFRequest := httptest.NewRequest(http.MethodPost, "/ui/api/v2/issues", strings.NewReader(`{"title":"Missing csrf"}`))
+	missingCSRFRequest := httptest.NewRequest(http.MethodPost, "/ui/api/v2/tasks", strings.NewReader(`{"title":"Missing csrf"}`))
 	missingCSRFRequest.Header.Set("Content-Type", "application/json")
 	missingCSRFRequest.AddCookie(sessionCookie)
 	fixture.Server.ServeHTTP(missingCSRF, missingCSRFRequest)
@@ -607,9 +607,9 @@ func TestWebUIBootstrapLoginAndCookieAuth(t *testing.T) {
 		t.Fatalf("missing csrf status = %d, want 401; body: %s", missingCSRF.Code, missingCSRF.Body.String())
 	}
 
-	var created issueResponse
+	var created taskResponse
 	withCSRF := httptest.NewRecorder()
-	withCSRFRequest := httptest.NewRequest(http.MethodPost, "/ui/api/v2/issues", strings.NewReader(`{"title":"Browser issue"}`))
+	withCSRFRequest := httptest.NewRequest(http.MethodPost, "/ui/api/v2/tasks", strings.NewReader(`{"title":"Browser task"}`))
 	withCSRFRequest.Header.Set("Content-Type", "application/json")
 	withCSRFRequest.Header.Set(webCSRFHeader, csrfCookie.Value)
 	withCSRFRequest.AddCookie(sessionCookie)
@@ -618,10 +618,10 @@ func TestWebUIBootstrapLoginAndCookieAuth(t *testing.T) {
 		t.Fatalf("with csrf status = %d, want 201; body: %s", withCSRF.Code, withCSRF.Body.String())
 	}
 	if err := json.NewDecoder(withCSRF.Body).Decode(&created); err != nil {
-		t.Fatalf("decode created issue: %v", err)
+		t.Fatalf("decode created task: %v", err)
 	}
-	if created.Issue.Title != "Browser issue" {
-		t.Fatalf("created issue = %+v", created.Issue)
+	if created.Task.Title != "Browser task" {
+		t.Fatalf("created task = %+v", created.Task)
 	}
 }
 
@@ -654,7 +654,7 @@ func loginWebUI(t *testing.T, fixture testFixture) (*http.Cookie, *http.Cookie) 
 func TestWebUIRoutesAndAssets(t *testing.T) {
 	fixture := newTestFixture(t)
 
-	for _, path := range []string{"/ui/", "/ui/board", "/ui/merge", "/ui/projects/" + fixture.Project.ID + "/issues/i-0001", "/ui/changes/ch-0001", "/ui/sessions/s-0001/terminal", "/ui/workers", "/ui/jobs"} {
+	for _, path := range []string{"/ui/", "/ui/board", "/ui/merge", "/ui/projects/" + fixture.Project.ID + "/tasks/i-0001", "/ui/changes/ch-0001", "/ui/sessions/s-0001/terminal", "/ui/workers", "/ui/jobs"} {
 		response := httptest.NewRecorder()
 		fixture.Server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		if response.Code != http.StatusOK {
@@ -713,7 +713,7 @@ func TestWebUIRoutesAndAssets(t *testing.T) {
 
 func TestWebUITerminalAttachCreatesOwnerBrowserURL(t *testing.T) {
 	fixture := newTestFixture(t)
-	started := startAuthorSessionForStatusTest(t, fixture, "Web terminal issue")
+	started := startAuthorSessionForStatusTest(t, fixture, "Web terminal task")
 	if _, err := fixture.Sessions.RegisterTerminalTarget(context.Background(), started.Session.ID, "http://127.0.0.1:7777"); err != nil {
 		t.Fatalf("register terminal target: %v", err)
 	}
@@ -766,9 +766,9 @@ func TestWebUITerminalAttachCreatesOwnerBrowserURL(t *testing.T) {
 	}
 }
 
-func TestBoardIncludesUIIssueCardReadModels(t *testing.T) {
+func TestBoardIncludesUITaskCardReadModels(t *testing.T) {
 	fixture := newTestFixture(t)
-	started := startAuthorSessionForStatusTest(t, fixture, "Card read model issue")
+	started := startAuthorSessionForStatusTest(t, fixture, "Card read model task")
 	if _, err := fixture.Sessions.UpdateSessionState(context.Background(), started.Session.ID, coordinator.SessionWaiting); err != nil {
 		t.Fatalf("mark waiting: %v", err)
 	}
@@ -797,7 +797,7 @@ INSERT INTO handoff_snapshots (
 	}
 	required := true
 	if _, err := fixture.Checks.ReportCheck(context.Background(), coordinator.ReportCheckInput{
-		IssueID:  started.Session.IssueID,
+		TaskID:   started.Session.TaskID,
 		Name:     "unit",
 		Required: &required,
 		Verdict:  coordinator.CheckBlocked,
@@ -823,9 +823,9 @@ INSERT INTO handoff_snapshots (
 		t.Fatalf("decode board: %v", err)
 	}
 
-	card, ok := board.IssueCards[started.Session.IssueID]
+	card, ok := board.TaskCards[started.Session.TaskID]
 	if !ok {
-		t.Fatalf("issue cards = %+v, missing %s", board.IssueCards, started.Session.IssueID)
+		t.Fatalf("task cards = %+v, missing %s", board.TaskCards, started.Session.TaskID)
 	}
 	if card.ActiveSession == nil || card.ActiveSession.ID != started.Session.ID || card.ActiveSession.State != coordinator.SessionWaiting {
 		t.Fatalf("active session summary = %+v", card.ActiveSession)
@@ -864,7 +864,7 @@ INSERT INTO handoff_snapshots (
 	if err := json.NewDecoder(response.Body).Decode(&board); err != nil {
 		t.Fatalf("decode board with terminal: %v", err)
 	}
-	card = board.IssueCards[started.Session.IssueID]
+	card = board.TaskCards[started.Session.TaskID]
 	if !card.TerminalAvailable {
 		t.Fatalf("terminal availability = false, card = %+v", card)
 	}
@@ -876,9 +876,9 @@ INSERT INTO handoff_snapshots (
 func TestBoardSupportsActiveBaseWorkspaceSessionWithoutChange(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Plan issue set"})
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Plan task set"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 	const workerID = "w-base-workspace"
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
@@ -888,7 +888,7 @@ func TestBoardSupportsActiveBaseWorkspaceSessionWithoutChange(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 	job, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           flowworker.RoleAuthor,
 		CapacityBucket: flowworker.BucketPersistentAgent,
 		Payload: map[string]any{
@@ -918,9 +918,9 @@ func TestBoardSupportsActiveBaseWorkspaceSessionWithoutChange(t *testing.T) {
 
 	var board boardResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
-	card, ok := board.IssueCards[issue.ID]
+	card, ok := board.TaskCards[task.ID]
 	if !ok {
-		t.Fatalf("issue cards = %+v, missing %s", board.IssueCards, issue.ID)
+		t.Fatalf("task cards = %+v, missing %s", board.TaskCards, task.ID)
 	}
 	if card.ActiveSession == nil || card.ActiveSession.ID != started.Session.ID {
 		t.Fatalf("active session summary = %+v, want %s", card.ActiveSession, started.Session.ID)
@@ -930,21 +930,21 @@ func TestBoardSupportsActiveBaseWorkspaceSessionWithoutChange(t *testing.T) {
 	}
 }
 
-func TestBoardHidesUIIssueCardsFromSessionTokens(t *testing.T) {
+func TestBoardHidesUITaskCardsFromSessionTokens(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
-	source, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Session source"})
+	source, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Session source"})
 	if err != nil {
-		t.Fatalf("create source issue: %v", err)
+		t.Fatalf("create source task: %v", err)
 	}
-	unrelated := startAuthorSessionForStatusTest(t, fixture, "Unrelated live issue")
+	unrelated := startAuthorSessionForStatusTest(t, fixture, "Unrelated live task")
 	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
-		Token:         "session-token",
-		Scope:         coordinator.TokenScopeSession,
-		Subject:       "s-session",
-		ProjectID:     &fixture.Project.ID,
-		SourceIssueID: &source.ID,
+		Token:        "session-token",
+		Scope:        coordinator.TokenScopeSession,
+		Subject:      "s-session",
+		ProjectID:    &fixture.Project.ID,
+		SourceTaskID: &source.ID,
 	}); err != nil {
 		t.Fatalf("store session token: %v", err)
 	}
@@ -956,31 +956,31 @@ func TestBoardHidesUIIssueCardsFromSessionTokens(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("board status = %d, want 200; body: %s", response.Code, response.Body.String())
 	}
-	if strings.Contains(response.Body.String(), "issue_cards") || strings.Contains(response.Body.String(), unrelated.Session.ID) || strings.Contains(response.Body.String(), unrelated.Session.WorkerID) {
+	if strings.Contains(response.Body.String(), "task_cards") || strings.Contains(response.Body.String(), unrelated.Session.ID) || strings.Contains(response.Body.String(), unrelated.Session.WorkerID) {
 		t.Fatalf("session board leaked card metadata: %s", response.Body.String())
 	}
 	var board boardResponse
 	if err := json.NewDecoder(response.Body).Decode(&board); err != nil {
 		t.Fatalf("decode session board: %v", err)
 	}
-	if board.LaneStates[unrelated.Session.IssueID] != coordinator.LaneStateWorking {
-		t.Fatalf("session board lane states = %+v, want working for %s", board.LaneStates, unrelated.Session.IssueID)
+	if board.LaneStates[unrelated.Session.TaskID] != coordinator.LaneStateWorking {
+		t.Fatalf("session board lane states = %+v, want working for %s", board.LaneStates, unrelated.Session.TaskID)
 	}
 }
 
-func TestBoardUIIssueCardsShowRelationBlockers(t *testing.T) {
+func TestBoardUITaskCardsShowRelationBlockers(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
-	blocker, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Finish dependency"})
+	blocker, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Finish dependency"})
 	if err != nil {
 		t.Fatalf("create blocker: %v", err)
 	}
-	blocked, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Blocked work"})
+	blocked, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Blocked work"})
 	if err != nil {
-		t.Fatalf("create blocked issue: %v", err)
+		t.Fatalf("create blocked task: %v", err)
 	}
-	if err := fixture.Issues.LinkIssues(ctx, blocker.ID, blocked.ID, coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
+	if err := fixture.Tasks.LinkTasks(ctx, blocker.ID, blocked.ID, coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
 		t.Fatalf("link blocker: %v", err)
 	}
 	if _, err := fixture.Bundle.WorkflowRuns.Schedule(ctx, blocked.ID); err != nil {
@@ -995,52 +995,52 @@ func TestBoardUIIssueCardsShowRelationBlockers(t *testing.T) {
 	if len(board.BlockedIDs) != 0 {
 		t.Fatalf("blocked ids = %+v, want no in-progress workflow wait", board.BlockedIDs)
 	}
-	card, ok := board.IssueCards[blocked.ID]
+	card, ok := board.TaskCards[blocked.ID]
 	if !ok {
-		t.Fatalf("issue cards = %+v, missing %s", board.IssueCards, blocked.ID)
+		t.Fatalf("task cards = %+v, missing %s", board.TaskCards, blocked.ID)
 	}
-	if card.Blockers.Count != 1 || len(card.Blockers.Issues) != 1 || card.Blockers.Issues[0].ID != blocker.ID {
+	if card.Blockers.Count != 1 || len(card.Blockers.Tasks) != 1 || card.Blockers.Tasks[0].ID != blocker.ID {
 		t.Fatalf("blocker summary = %+v", card.Blockers)
 	}
-	if card.BlockingReason != "blocked by issue" || card.PrimaryAction != "unblock" {
+	if card.BlockingReason != "blocked by task" || card.PrimaryAction != "unblock" {
 		t.Fatalf("card actions = blocking:%q primary:%q", card.BlockingReason, card.PrimaryAction)
 	}
 }
 
-func TestBoardUIIssueCardsIncludeTagsAndRelationSummary(t *testing.T) {
+func TestBoardUITaskCardsIncludeTagsAndRelationSummary(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	parent, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Parent"})
+	parent, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Parent"})
 	if err != nil {
 		t.Fatalf("create parent: %v", err)
 	}
-	child, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Child"})
+	child, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Child"})
 	if err != nil {
 		t.Fatalf("create child: %v", err)
 	}
-	related, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Related"})
+	related, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Related"})
 	if err != nil {
 		t.Fatalf("create related: %v", err)
 	}
-	tag, err := fixture.Issues.CreateTag(ctx, coordinator.CreateTagInput{Slug: "triage-tag", Name: "Triage Tag"})
+	tag, err := fixture.Tasks.CreateTag(ctx, coordinator.CreateTagInput{Slug: "triage-tag", Name: "Triage Tag"})
 	if err != nil {
 		t.Fatalf("create tag: %v", err)
 	}
-	if err := fixture.Issues.TagIssue(ctx, child.ID, tag.ID, coordinator.ActorHuman); err != nil {
+	if err := fixture.Tasks.TagTask(ctx, child.ID, tag.ID, coordinator.ActorHuman); err != nil {
 		t.Fatalf("tag child: %v", err)
 	}
-	if err := fixture.Issues.LinkIssues(ctx, parent.ID, child.ID, coordinator.RelationParentOf, coordinator.ActorHuman); err != nil {
+	if err := fixture.Tasks.LinkTasks(ctx, parent.ID, child.ID, coordinator.RelationParentOf, coordinator.ActorHuman); err != nil {
 		t.Fatalf("link parent: %v", err)
 	}
-	if err := fixture.Issues.LinkIssues(ctx, child.ID, related.ID, coordinator.RelationRelatedTo, coordinator.ActorHuman); err != nil {
+	if err := fixture.Tasks.LinkTasks(ctx, child.ID, related.ID, coordinator.RelationRelatedTo, coordinator.ActorHuman); err != nil {
 		t.Fatalf("link related: %v", err)
 	}
 
 	var board boardResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
-	card, ok := board.IssueCards[child.ID]
+	card, ok := board.TaskCards[child.ID]
 	if !ok {
-		t.Fatalf("issue cards = %+v, missing %s", board.IssueCards, child.ID)
+		t.Fatalf("task cards = %+v, missing %s", board.TaskCards, child.ID)
 	}
 	if len(card.Tags) != 1 || card.Tags[0].Slug != "triage-tag" {
 		t.Fatalf("card tags = %+v", card.Tags)
@@ -1050,22 +1050,22 @@ func TestBoardUIIssueCardsIncludeTagsAndRelationSummary(t *testing.T) {
 	}
 }
 
-func TestIssueDetailReadModelIsOwnerOnly(t *testing.T) {
+func TestTaskDetailReadModelIsOwnerOnly(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	started := startAuthorSessionForStatusTest(t, fixture, "Issue detail metadata")
-	tag, err := fixture.Issues.CreateTag(ctx, coordinator.CreateTagInput{Slug: "web-ui", Name: "Web UI"})
+	started := startAuthorSessionForStatusTest(t, fixture, "Task detail metadata")
+	tag, err := fixture.Tasks.CreateTag(ctx, coordinator.CreateTagInput{Slug: "web-ui", Name: "Web UI"})
 	if err != nil {
 		t.Fatalf("create tag: %v", err)
 	}
-	if err := fixture.Issues.TagIssue(ctx, started.Session.IssueID, tag.ID, coordinator.ActorHuman); err != nil {
-		t.Fatalf("tag issue: %v", err)
+	if err := fixture.Tasks.TagTask(ctx, started.Session.TaskID, tag.ID, coordinator.ActorHuman); err != nil {
+		t.Fatalf("tag task: %v", err)
 	}
-	blocker, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Blocker"})
+	blocker, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Blocker"})
 	if err != nil {
 		t.Fatalf("create blocker: %v", err)
 	}
-	if err := fixture.Issues.LinkIssues(ctx, blocker.ID, started.Session.IssueID, coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
+	if err := fixture.Tasks.LinkTasks(ctx, blocker.ID, started.Session.TaskID, coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
 		t.Fatalf("link blocker: %v", err)
 	}
 	if _, err := fixture.Sessions.RegisterTerminalTarget(ctx, started.Session.ID, "http://127.0.0.1:7777"); err != nil {
@@ -1073,21 +1073,21 @@ func TestIssueDetailReadModelIsOwnerOnly(t *testing.T) {
 	}
 	required := true
 	if _, err := fixture.Checks.ReportCheck(ctx, coordinator.ReportCheckInput{
-		IssueID: started.Session.IssueID, Name: "unit", Kind: coordinator.CheckKindCI,
+		TaskID: started.Session.TaskID, Name: "unit", Kind: coordinator.CheckKindCI,
 		Required: &required, Verdict: coordinator.CheckPending,
 	}); err != nil {
 		t.Fatalf("report detail check: %v", err)
 	}
 
-	var owner issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/issues/"+started.Session.IssueID, nil, http.StatusOK, &owner)
+	var owner taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks/"+started.Session.TaskID, nil, http.StatusOK, &owner)
 	if owner.Detail == nil {
-		t.Fatal("owner issue response missing detail")
+		t.Fatal("owner task response missing detail")
 	}
 	if len(owner.Detail.Tags) != 1 || owner.Detail.Tags[0].Slug != "web-ui" {
 		t.Fatalf("detail tags = %+v", owner.Detail.Tags)
 	}
-	if len(owner.Detail.Relations) != 1 || owner.Detail.Relations[0].SourceIssueID != blocker.ID {
+	if len(owner.Detail.Relations) != 1 || owner.Detail.Relations[0].SourceTaskID != blocker.ID {
 		t.Fatalf("detail relations = %+v", owner.Detail.Relations)
 	}
 	if owner.Detail.ActiveSession == nil || owner.Detail.ActiveSession.ID != started.Session.ID {
@@ -1106,33 +1106,33 @@ func TestIssueDetailReadModelIsOwnerOnly(t *testing.T) {
 		t.Fatalf("checks = %+v summary=%+v", owner.Detail.Checks, owner.Detail.RequiredChecks)
 	}
 
-	var session issueResponse
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodGet, "/v2/issues/"+started.Session.IssueID, nil, http.StatusOK, &session)
+	var session taskResponse
+	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodGet, "/v2/tasks/"+started.Session.TaskID, nil, http.StatusOK, &session)
 	if session.Detail != nil {
-		t.Fatalf("session issue response leaked detail: %+v", session.Detail)
+		t.Fatalf("session task response leaked detail: %+v", session.Detail)
 	}
 }
 
-func TestWorkerTokenCanReadIssue(t *testing.T) {
+func TestWorkerTokenCanReadTask(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{
 		Title:              "Reviewer prompt context",
-		Body:               "Check jobs fetch issue context with the worker token.",
-		AcceptanceCriteria: "Worker-scope issue reads succeed.",
+		Body:               "Check jobs fetch task context with the worker token.",
+		AcceptanceCriteria: "Worker-scope task reads succeed.",
 	})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 
-	var worker issueResponse
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/issues/"+issue.ID, nil, http.StatusOK, &worker)
-	if worker.Issue.ID != issue.ID || worker.Issue.Body != issue.Body || worker.Issue.AcceptanceCriteria != issue.AcceptanceCriteria {
-		t.Fatalf("worker issue response = %+v", worker.Issue)
+	var worker taskResponse
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/tasks/"+task.ID, nil, http.StatusOK, &worker)
+	if worker.Task.ID != task.ID || worker.Task.Body != task.Body || worker.Task.AcceptanceCriteria != task.AcceptanceCriteria {
+		t.Fatalf("worker task response = %+v", worker.Task)
 	}
 	if worker.Detail != nil {
-		t.Fatalf("worker issue response leaked owner detail: %+v", worker.Detail)
+		t.Fatalf("worker task response leaked owner detail: %+v", worker.Detail)
 	}
 }
 
@@ -1140,11 +1140,11 @@ func TestHookTokenCanPostGitEvents(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
-		Token:         "session-token",
-		Scope:         coordinator.TokenScopeSession,
-		Subject:       "s-1",
-		ProjectID:     &fixture.Project.ID,
-		SourceIssueID: nil,
+		Token:        "session-token",
+		Scope:        coordinator.TokenScopeSession,
+		Subject:      "s-1",
+		ProjectID:    &fixture.Project.ID,
+		SourceTaskID: nil,
 	}); err != nil {
 		t.Fatalf("store session token: %v", err)
 	}
@@ -1152,7 +1152,7 @@ func TestHookTokenCanPostGitEvents(t *testing.T) {
 	event := gitEventsRequest{
 		OldSHA: "old",
 		NewSHA: "new",
-		Ref:    "refs/heads/issue/i-0001",
+		Ref:    "refs/heads/task/i-0001",
 		Actor:  "owner",
 	}
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, fixture.gitEventsPath(), event, http.StatusForbidden, nil)
@@ -1168,7 +1168,7 @@ func TestHookTokenCanPostGitEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list git events: %v", err)
 	}
-	if len(events) != 1 || events[0].Ref != "refs/heads/issue/i-0001" || events[0].Source != coordinator.GitEventSourceAPI {
+	if len(events) != 1 || events[0].Ref != "refs/heads/task/i-0001" || events[0].Source != coordinator.GitEventSourceAPI {
 		t.Fatalf("events = %+v", events)
 	}
 }
@@ -1180,7 +1180,7 @@ func TestDrainGitEventSpoolRecoversMissedPostReceive(t *testing.T) {
 
 	if err := flowgit.HandlePostReceive(context.Background(), flowgit.HookOptions{
 		ExchangeRepoPath: exchangePath,
-		Stdin:            bytes.NewBufferString("old new refs/heads/issue/i-0001\n"),
+		Stdin:            bytes.NewBufferString("old new refs/heads/task/i-0001\n"),
 	}); err != nil {
 		t.Fatalf("post receive spool: %v", err)
 	}
@@ -1217,7 +1217,7 @@ func TestGitEventsDeduplicateDirectPostAndSpoolDrain(t *testing.T) {
 	event := gitEventsRequest{
 		OldSHA: "old",
 		NewSHA: "new",
-		Ref:    "refs/heads/issue/i-0001",
+		Ref:    "refs/heads/task/i-0001",
 		Actor:  "owner",
 	}
 	var postResponse gitEventsResponse
@@ -1229,7 +1229,7 @@ func TestGitEventsDeduplicateDirectPostAndSpoolDrain(t *testing.T) {
 	t.Setenv("FLOW_GIT_PRINCIPAL", "owner")
 	if err := flowgit.HandlePostReceive(context.Background(), flowgit.HookOptions{
 		ExchangeRepoPath: exchangePath,
-		Stdin:            bytes.NewBufferString("old new refs/heads/issue/i-0001\n"),
+		Stdin:            bytes.NewBufferString("old new refs/heads/task/i-0001\n"),
 	}); err != nil {
 		t.Fatalf("post receive spool: %v", err)
 	}
@@ -1253,26 +1253,26 @@ func TestGitEventsDeduplicateDirectPostAndSpoolDrain(t *testing.T) {
 func TestWorkerHTTPLifecycleAndJobDiagnostics(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Worker API issue"})
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Worker API task"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/jobs", enqueueJobRequest{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           string(flowworker.RoleAuthor),
 		CapacityBucket: string(flowworker.BucketPersistentAgent),
 	}, http.StatusForbidden, nil)
 
 	var enqueue jobResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/jobs", enqueueJobRequest{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           string(flowworker.RoleCI),
 		CapacityBucket: string(flowworker.BucketPersistentAgent),
 		Priority:       5,
 		Payload:        map[string]any{"entrypoint": "make test"},
 	}, http.StatusCreated, &enqueue)
-	if enqueue.Job.State != flowworker.JobQueued || enqueue.Job.IssueID == nil || *enqueue.Job.IssueID != issue.ID {
+	if enqueue.Job.State != flowworker.JobQueued || enqueue.Job.TaskID == nil || *enqueue.Job.TaskID != task.ID {
 		t.Fatalf("enqueued job = %+v", enqueue.Job)
 	}
 
@@ -1460,8 +1460,8 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 	if !startedConsole.Active || startedConsole.Job == nil || startedConsole.Job.Role != flowworker.RoleConsole {
 		t.Fatalf("started console response = %+v", startedConsole)
 	}
-	if startedConsole.Job.IssueID != nil || startedConsole.Job.ChangeID != nil {
-		t.Fatalf("console job issue/change = %v/%v, want nil", startedConsole.Job.IssueID, startedConsole.Job.ChangeID)
+	if startedConsole.Job.TaskID != nil || startedConsole.Job.ChangeID != nil {
+		t.Fatalf("console job task/change = %v/%v, want nil", startedConsole.Job.TaskID, startedConsole.Job.ChangeID)
 	}
 
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
@@ -1481,7 +1481,7 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/running", markJobRunningRequest{
 		LeaseID: claim.Lease.ID,
 	}, http.StatusOK, &running)
-	if running.Session == nil || running.Session.Role != flowworker.RoleConsole || running.Session.IssueID != "" || running.Session.ChangeID != "" || running.SessionToken == "" {
+	if running.Session == nil || running.Session.Role != flowworker.RoleConsole || running.Session.TaskID != "" || running.Session.ChangeID != "" || running.SessionToken == "" {
 		t.Fatalf("running console = %+v", running)
 	}
 	consoleToken := running.SessionToken
@@ -1503,46 +1503,46 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 	}, http.StatusBadRequest, nil)
 	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/sessions/"+sessionID+"/ready", readySessionRequest{}, http.StatusBadRequest, nil)
 
-	var created issueResponse
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/issues", createIssueRequest{
-		Title: "Console-created issue",
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/tasks", createTaskRequest{
+		Title: "Console-created task",
 	}, http.StatusCreated, &created)
-	if created.Issue.CreatedBy != coordinator.ActorAgent || created.Issue.CreatedBySessionID == nil || *created.Issue.CreatedBySessionID != sessionID {
-		t.Fatalf("console-created issue audit = %+v", created.Issue)
+	if created.Task.CreatedBy != coordinator.ActorAgent || created.Task.CreatedBySessionID == nil || *created.Task.CreatedBySessionID != sessionID {
+		t.Fatalf("console-created task audit = %+v", created.Task)
 	}
-	title := "Console-edited issue"
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPatch, "/v2/issues/"+created.Issue.ID, editIssueRequest{
+	title := "Console-edited task"
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPatch, "/v2/tasks/"+created.Task.ID, editTaskRequest{
 		Title: &title,
 	}, http.StatusOK, nil)
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/issues/"+created.Issue.ID+"/schedule", scheduleIssueRequest{
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule", scheduleTaskRequest{
 		State: string(coordinator.ScheduleUpNext),
 	}, http.StatusOK, nil)
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/issues/"+created.Issue.ID+"/checks/unit", reportCheckRequest{
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/tasks/"+created.Task.ID+"/checks/unit", reportCheckRequest{
 		Kind:    string(coordinator.CheckKindCI),
 		Verdict: string(coordinator.CheckSatisfied),
 	}, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/issues/"+created.Issue.ID+"/merge", map[string]string{}, http.StatusNotFound, nil)
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/tasks/"+created.Task.ID+"/merge", map[string]string{}, http.StatusNotFound, nil)
 	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodGet, "/v2/jobs", nil, http.StatusForbidden, nil)
 	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodGet, "/v2/workers", nil, http.StatusForbidden, nil)
 
-	var blocker issueResponse
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/issues", createIssueRequest{
+	var blocker taskResponse
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/tasks", createTaskRequest{
 		Title: "Console blocker",
 	}, http.StatusCreated, &blocker)
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/issues/"+blocker.Issue.ID+"/relations", relationRequest{
-		TargetIssueID: created.Issue.ID,
-		Kind:          string(coordinator.RelationBlocks),
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/tasks/"+blocker.Task.ID+"/relations", relationRequest{
+		TargetTaskID: created.Task.ID,
+		Kind:         string(coordinator.RelationBlocks),
 	}, http.StatusNoContent, nil)
-	relations, err := fixture.Issues.RelationsForIssue(context.Background(), created.Issue.ID)
+	relations, err := fixture.Tasks.RelationsForTask(context.Background(), created.Task.ID)
 	if err != nil {
-		t.Fatalf("relations for console issue: %v", err)
+		t.Fatalf("relations for console task: %v", err)
 	}
 	if len(relations) != 1 || relations[0].CreatedBy != coordinator.ActorAgent {
 		t.Fatalf("relations = %+v, want one agent-created relation", relations)
 	}
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodDelete, "/v2/issues/"+blocker.Issue.ID+"/relations", relationRequest{
-		TargetIssueID: created.Issue.ID,
-		Kind:          string(coordinator.RelationBlocks),
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodDelete, "/v2/tasks/"+blocker.Task.ID+"/relations", relationRequest{
+		TargetTaskID: created.Task.ID,
+		Kind:         string(coordinator.RelationBlocks),
 	}, http.StatusNoContent, nil)
 
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/release", releaseLeaseRequest{
@@ -1553,47 +1553,47 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodGet, "/v2/console", nil, http.StatusUnauthorized, nil)
 }
 
-func TestIssueConsoleAPILifecycleAndScope(t *testing.T) {
+func TestTaskConsoleAPILifecycleAndScope(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Issue recovery console"})
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Task recovery console"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
-	other, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Other issue"})
+	other, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Other task"})
 	if err != nil {
-		t.Fatalf("create other issue: %v", err)
+		t.Fatalf("create other task: %v", err)
 	}
 
 	var startedConsole consoleResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues/"+issue.ID+"/console", consoleRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+task.ID+"/console", consoleRequest{
 		Harness: flowharness.Shell,
 	}, http.StatusCreated, &startedConsole)
 	if !startedConsole.Active || startedConsole.Job == nil || startedConsole.Job.Role != flowworker.RoleConsole {
-		t.Fatalf("started issue console response = %+v", startedConsole)
+		t.Fatalf("started task console response = %+v", startedConsole)
 	}
-	if startedConsole.Job.IssueID == nil || *startedConsole.Job.IssueID != issue.ID || startedConsole.Job.ChangeID == nil {
-		t.Fatalf("issue console job issue/change = %v/%v, want %s/change", startedConsole.Job.IssueID, startedConsole.Job.ChangeID, issue.ID)
+	if startedConsole.Job.TaskID == nil || *startedConsole.Job.TaskID != task.ID || startedConsole.Job.ChangeID == nil {
+		t.Fatalf("task console job task/change = %v/%v, want %s/change", startedConsole.Job.TaskID, startedConsole.Job.ChangeID, task.ID)
 	}
-	if got := payloadString(startedConsole.Job.Payload, "console_scope"); got != "issue_recovery" {
-		t.Fatalf("console_scope = %q, want issue_recovery", got)
+	if got := payloadString(startedConsole.Job.Payload, "console_scope"); got != "task_recovery" {
+		t.Fatalf("console_scope = %q, want task_recovery", got)
 	}
-	if got := payloadString(startedConsole.Job.Payload, "session_purpose"); got != "issue_console" {
-		t.Fatalf("session_purpose = %q, want issue_console", got)
+	if got := payloadString(startedConsole.Job.Payload, "session_purpose"); got != "task_console" {
+		t.Fatalf("session_purpose = %q, want task_console", got)
 	}
-	if got := payloadString(startedConsole.Job.Payload, "branch"); got != "issue/"+issue.ID {
-		t.Fatalf("issue console branch = %q, want issue/%s", got, issue.ID)
+	if got := payloadString(startedConsole.Job.Payload, "branch"); got != "task/"+task.ID {
+		t.Fatalf("task console branch = %q, want task/%s", got, task.ID)
 	}
 
 	var projectConsole consoleResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/console", nil, http.StatusOK, &projectConsole)
 	if projectConsole.Active {
-		t.Fatalf("project console should ignore issue console state: %+v", projectConsole)
+		t.Fatalf("project console should ignore task console state: %+v", projectConsole)
 	}
-	var currentIssueConsole consoleResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/issues/"+issue.ID+"/console", nil, http.StatusOK, &currentIssueConsole)
-	if !currentIssueConsole.Active || currentIssueConsole.Job == nil || currentIssueConsole.Job.ID != startedConsole.Job.ID {
-		t.Fatalf("current issue console = %+v, want job %s", currentIssueConsole, startedConsole.Job.ID)
+	var currentTaskConsole consoleResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks/"+task.ID+"/console", nil, http.StatusOK, &currentTaskConsole)
+	if !currentTaskConsole.Active || currentTaskConsole.Job == nil || currentTaskConsole.Job.ID != startedConsole.Job.ID {
+		t.Fatalf("current task console = %+v, want job %s", currentTaskConsole, startedConsole.Job.ID)
 	}
 
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
@@ -1606,27 +1606,27 @@ func TestIssueConsoleAPILifecycleAndScope(t *testing.T) {
 		LeaseDurationSeconds: 60,
 	}, http.StatusOK, &claim)
 	if !claim.Claimed || claim.Job == nil || claim.Job.ID != startedConsole.Job.ID {
-		t.Fatalf("claim issue console = %+v, want job %s", claim, startedConsole.Job.ID)
+		t.Fatalf("claim task console = %+v, want job %s", claim, startedConsole.Job.ID)
 	}
 	var running jobResponse
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/running", markJobRunningRequest{
 		LeaseID: claim.Lease.ID,
 	}, http.StatusOK, &running)
-	if running.Session == nil || running.Session.Role != flowworker.RoleConsole || running.Session.IssueID != issue.ID || running.Session.ChangeID != *startedConsole.Job.ChangeID || running.SessionToken == "" {
-		t.Fatalf("running issue console = %+v", running)
+	if running.Session == nil || running.Session.Role != flowworker.RoleConsole || running.Session.TaskID != task.ID || running.Session.ChangeID != *startedConsole.Job.ChangeID || running.SessionToken == "" {
+		t.Fatalf("running task console = %+v", running)
 	}
 	principal, err := fixture.Credentials.Authenticate(ctx, running.SessionToken)
 	if err != nil {
-		t.Fatalf("authenticate issue console token: %v", err)
+		t.Fatalf("authenticate task console token: %v", err)
 	}
-	if principal.Scope != coordinator.TokenScopeConsole || principal.SourceIssueID == nil || *principal.SourceIssueID != issue.ID {
-		t.Fatalf("issue console principal = %+v", principal)
+	if principal.Scope != coordinator.TokenScopeConsole || principal.SourceTaskID == nil || *principal.SourceTaskID != task.ID {
+		t.Fatalf("task console principal = %+v", principal)
 	}
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodGet, "/v2/issues/"+issue.ID, nil, http.StatusOK, nil)
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodGet, "/v2/issues/"+other.ID, nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodGet, "/v2/tasks/"+task.ID, nil, http.StatusOK, nil)
+	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodGet, "/v2/tasks/"+other.ID, nil, http.StatusForbidden, nil)
 
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodDelete, "/v2/issues/"+issue.ID+"/console", nil, http.StatusOK, nil)
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodGet, "/v2/issues/"+issue.ID, nil, http.StatusUnauthorized, nil)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodDelete, "/v2/tasks/"+task.ID+"/console", nil, http.StatusOK, nil)
+	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodGet, "/v2/tasks/"+task.ID, nil, http.StatusUnauthorized, nil)
 }
 
 func TestConsoleAPIStartsShellHarness(t *testing.T) {
@@ -1694,13 +1694,13 @@ func TestConsoleTokenIsProjectConfined(t *testing.T) {
 func TestDiagnosticsDistinguishExpiredUnreleasedLeases(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Expired lease diagnostics"})
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Expired lease diagnostics"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 	var enqueue jobResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/jobs", enqueueJobRequest{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           string(flowworker.RoleCI),
 		CapacityBucket: string(flowworker.BucketPersistentAgent),
 	}, http.StatusCreated, &enqueue)
@@ -1794,12 +1794,12 @@ func TestJobsListAggregateOrdersByUpdatedAndStampsProject(t *testing.T) {
 	}
 }
 
-func startRunningAuthorSession(t *testing.T, fixture testFixture, issueID string) jobResponse {
+func startRunningAuthorSession(t *testing.T, fixture testFixture, taskID string) jobResponse {
 	t.Helper()
 	ctx := context.Background()
 
 	var scheduled workflowRunResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues/"+issueID+"/schedule", nil, http.StatusOK, &scheduled)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+taskID+"/schedule", nil, http.StatusOK, &scheduled)
 	jobs, err := fixture.Workers.ListJobs(ctx)
 	if err != nil {
 		t.Fatalf("list jobs: %v", err)
@@ -1835,11 +1835,11 @@ func startRunningAuthorSession(t *testing.T, fixture testFixture, issueID string
 func TestSessionSignalRejectsInvalidSignal(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Invalid signal issue"})
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Invalid signal task"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
-	running := startRunningAuthorSession(t, fixture, issue.ID)
+	running := startRunningAuthorSession(t, fixture, task.ID)
 
 	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v2/sessions/"+running.Session.ID+"/signal", sessionSignalRequest{
 		Signal: "finished",
@@ -1849,18 +1849,18 @@ func TestSessionSignalRejectsInvalidSignal(t *testing.T) {
 func TestAttentionReplyRejectsForeignStatusLogID(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Attention reply issue"})
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Attention reply task"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
-	startRunningAuthorSession(t, fixture, issue.ID)
+	startRunningAuthorSession(t, fixture, task.ID)
 
-	other, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Other issue"})
+	other, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Other task"})
 	if err != nil {
-		t.Fatalf("create other issue: %v", err)
+		t.Fatalf("create other task: %v", err)
 	}
 	foreign, err := fixture.Status.Write(ctx, coordinator.WriteStatusInput{
-		IssueID: other.ID,
+		TaskID:  other.ID,
 		Actor:   "agent",
 		Kind:    coordinator.StatusKindQuestion,
 		Message: "Foreign question",
@@ -1870,7 +1870,7 @@ func TestAttentionReplyRejectsForeignStatusLogID(t *testing.T) {
 	}
 
 	var resp errorResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues/"+issue.ID+"/attention/reply", attentionReplyRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+task.ID+"/attention/reply", attentionReplyRequest{
 		Message:     "My answer",
 		StatusLogID: &foreign.ID,
 	}, http.StatusBadRequest, &resp)
@@ -1878,13 +1878,13 @@ func TestAttentionReplyRejectsForeignStatusLogID(t *testing.T) {
 		t.Fatalf("error code = %q, want invalid_status_log_id", resp.Error.Code)
 	}
 
-	entries, err := fixture.Status.ListForIssue(ctx, issue.ID, 20)
+	entries, err := fixture.Status.ListForTask(ctx, task.ID, 20)
 	if err != nil {
 		t.Fatalf("list status: %v", err)
 	}
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Message, "Human response:") {
-			t.Fatalf("found orphaned human response status entry on target issue: %+v", entry)
+			t.Fatalf("found orphaned human response status entry on target task: %+v", entry)
 		}
 	}
 }
@@ -1896,15 +1896,15 @@ func TestAttentionReplyRejectsForeignStatusLogID(t *testing.T) {
 func TestAttentionReplyRejectsNonExistentStatusLogID(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Attention reply issue"})
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Attention reply task"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
-	startRunningAuthorSession(t, fixture, issue.ID)
+	startRunningAuthorSession(t, fixture, task.ID)
 
 	missing := int64(987654321)
 	var resp errorResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues/"+issue.ID+"/attention/reply", attentionReplyRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+task.ID+"/attention/reply", attentionReplyRequest{
 		Message:     "My answer",
 		StatusLogID: &missing,
 	}, http.StatusBadRequest, &resp)
@@ -1912,7 +1912,7 @@ func TestAttentionReplyRejectsNonExistentStatusLogID(t *testing.T) {
 		t.Fatalf("error code = %q, want invalid_status_log_id", resp.Error.Code)
 	}
 
-	entries, err := fixture.Status.ListForIssue(ctx, issue.ID, 20)
+	entries, err := fixture.Status.ListForTask(ctx, task.ID, 20)
 	if err != nil {
 		t.Fatalf("list status: %v", err)
 	}
@@ -1923,20 +1923,20 @@ func TestAttentionReplyRejectsNonExistentStatusLogID(t *testing.T) {
 	}
 }
 
-// TestAttentionReplyLinksOwnIssueStatusLogID is the regression confirming that a
-// valid status_log_id belonging to the issue is accepted and threaded onto the
+// TestAttentionReplyLinksOwnTaskStatusLogID is the regression confirming that a
+// valid status_log_id belonging to the task is accepted and threaded onto the
 // queued session message.
-func TestAttentionReplyLinksOwnIssueStatusLogID(t *testing.T) {
+func TestAttentionReplyLinksOwnTaskStatusLogID(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Attention reply issue"})
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Attention reply task"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
-	startRunningAuthorSession(t, fixture, issue.ID)
+	startRunningAuthorSession(t, fixture, task.ID)
 
 	question, err := fixture.Status.Write(ctx, coordinator.WriteStatusInput{
-		IssueID: issue.ID,
+		TaskID:  task.ID,
 		Actor:   "agent",
 		Kind:    coordinator.StatusKindQuestion,
 		Message: "What database should I use?",
@@ -1946,7 +1946,7 @@ func TestAttentionReplyLinksOwnIssueStatusLogID(t *testing.T) {
 	}
 
 	var resp sessionMessageResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues/"+issue.ID+"/attention/reply", attentionReplyRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+task.ID+"/attention/reply", attentionReplyRequest{
 		Message:     "Use sqlite",
 		StatusLogID: &question.ID,
 	}, http.StatusOK, &resp)
@@ -1958,31 +1958,31 @@ func TestAttentionReplyLinksOwnIssueStatusLogID(t *testing.T) {
 	}
 }
 
-func TestSessionStatusIsVisibleInIssueDetail(t *testing.T) {
+func TestSessionStatusIsVisibleInTaskDetail(t *testing.T) {
 	fixture := newTestFixture(t)
-	started := startAuthorSessionForStatusTest(t, fixture, "Status issue")
+	started := startAuthorSessionForStatusTest(t, fixture, "Status task")
 
 	var written statusResponse
 	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v2/sessions/"+started.Session.ID+"/status", sessionStatusRequest{
 		Message: "Running focused tests",
 	}, http.StatusOK, &written)
-	if written.Status.IssueID != started.Session.IssueID || written.Status.ChangeID != started.Session.ChangeID {
-		t.Fatalf("written status = %+v, want issue %s change %s", written.Status, started.Session.IssueID, started.Session.ChangeID)
+	if written.Status.TaskID != started.Session.TaskID || written.Status.ChangeID != started.Session.ChangeID {
+		t.Fatalf("written status = %+v, want task %s change %s", written.Status, started.Session.TaskID, started.Session.ChangeID)
 	}
 
-	var issue issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/issues/"+started.Session.IssueID, nil, http.StatusOK, &issue)
-	if len(issue.StatusLog) != 1 || issue.StatusLog[0].Message != "Running focused tests" {
-		t.Fatalf("issue status log = %+v", issue.StatusLog)
+	var task taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks/"+started.Session.TaskID, nil, http.StatusOK, &task)
+	if len(task.StatusLog) != 1 || task.StatusLog[0].Message != "Running focused tests" {
+		t.Fatalf("task status log = %+v", task.StatusLog)
 	}
-	if issue.StatusLog[0].Kind != coordinator.StatusKindNote {
-		t.Fatalf("default status kind = %q, want %q", issue.StatusLog[0].Kind, coordinator.StatusKindNote)
+	if task.StatusLog[0].Kind != coordinator.StatusKindNote {
+		t.Fatalf("default status kind = %q, want %q", task.StatusLog[0].Kind, coordinator.StatusKindNote)
 	}
 }
 
 func TestSessionStatusAcceptsKind(t *testing.T) {
 	fixture := newTestFixture(t)
-	started := startAuthorSessionForStatusTest(t, fixture, "Status kind issue")
+	started := startAuthorSessionForStatusTest(t, fixture, "Status kind task")
 
 	var written statusResponse
 	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v2/sessions/"+started.Session.ID+"/status", sessionStatusRequest{
@@ -1993,16 +1993,16 @@ func TestSessionStatusAcceptsKind(t *testing.T) {
 		t.Fatalf("written status kind = %q, want %q", written.Status.Kind, coordinator.StatusKindQuestion)
 	}
 
-	var issue issueResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/issues/"+started.Session.IssueID, nil, http.StatusOK, &issue)
-	if len(issue.StatusLog) != 1 || issue.StatusLog[0].Kind != coordinator.StatusKindQuestion {
-		t.Fatalf("issue status log = %+v", issue.StatusLog)
+	var task taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks/"+started.Session.TaskID, nil, http.StatusOK, &task)
+	if len(task.StatusLog) != 1 || task.StatusLog[0].Kind != coordinator.StatusKindQuestion {
+		t.Fatalf("task status log = %+v", task.StatusLog)
 	}
 }
 
 func TestSessionStatusRejectsBadKind(t *testing.T) {
 	fixture := newTestFixture(t)
-	started := startAuthorSessionForStatusTest(t, fixture, "Bad kind issue")
+	started := startAuthorSessionForStatusTest(t, fixture, "Bad kind task")
 
 	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v2/sessions/"+started.Session.ID+"/status", sessionStatusRequest{
 		Message: "boom",
@@ -2016,7 +2016,7 @@ func TestSessionStatusRejectsBadKind(t *testing.T) {
 func TestSessionStatusTouchesAgentActivity(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	started := startAuthorSessionForStatusTest(t, fixture, "Liveness status issue")
+	started := startAuthorSessionForStatusTest(t, fixture, "Liveness status task")
 
 	before, err := fixture.Sessions.GetSession(ctx, started.Session.ID)
 	if err != nil {
@@ -2042,7 +2042,7 @@ func TestSessionStatusTouchesAgentActivity(t *testing.T) {
 
 func TestSessionAttachRequiresOwnerToken(t *testing.T) {
 	fixture := newTestFixture(t)
-	started := startAuthorSessionForStatusTest(t, fixture, "Attach issue")
+	started := startAuthorSessionForStatusTest(t, fixture, "Attach task")
 	if _, err := fixture.Sessions.RegisterTerminalTarget(context.Background(), started.Session.ID, "http://127.0.0.1:7777", "/tmp/flow-session.sock"); err != nil {
 		t.Fatalf("register terminal target: %v", err)
 	}
@@ -2066,8 +2066,8 @@ func TestSessionAttachRequiresOwnerToken(t *testing.T) {
 
 func TestJobAttachAllowsLiveReviewerJobs(t *testing.T) {
 	fixture := newTestFixture(t)
-	started := startAuthorSessionForStatusTest(t, fixture, "Reviewer attach issue")
-	reviewer := startLiveCheckJobForIssue(t, fixture, "reviewer-token", "w-review-attach", started.Session.IssueID, started.Change.ID, "head-1", "reviewer", flowworker.RoleReviewer, flowworker.BucketPersistentAgent)
+	started := startAuthorSessionForStatusTest(t, fixture, "Reviewer attach task")
+	reviewer := startLiveCheckJobForTask(t, fixture, "reviewer-token", "w-review-attach", started.Session.TaskID, started.Change.ID, "head-1", "reviewer", flowworker.RoleReviewer, flowworker.BucketPersistentAgent)
 	if _, err := fixture.Sessions.RegisterJobTerminalTarget(context.Background(), reviewer.Job.ID, reviewer.Lease.ID, "http://127.0.0.1:7778", "/tmp/flow-job.sock"); err != nil {
 		t.Fatalf("register job terminal target: %v", err)
 	}
@@ -2091,8 +2091,8 @@ func TestJobAttachAllowsLiveReviewerJobs(t *testing.T) {
 
 func TestJobTerminalProxyAllowsLiveReviewerJobs(t *testing.T) {
 	fixture := newTestFixture(t)
-	started := startAuthorSessionForStatusTest(t, fixture, "Reviewer terminal issue")
-	reviewer := startLiveCheckJobForIssue(t, fixture, "reviewer-terminal-token", "w-review-terminal", started.Session.IssueID, started.Change.ID, "head-1", "reviewer", flowworker.RoleReviewer, flowworker.BucketPersistentAgent)
+	started := startAuthorSessionForStatusTest(t, fixture, "Reviewer terminal task")
+	reviewer := startLiveCheckJobForTask(t, fixture, "reviewer-terminal-token", "w-review-terminal", started.Session.TaskID, started.Change.ID, "head-1", "reviewer", flowworker.RoleReviewer, flowworker.BucketPersistentAgent)
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/pty" || r.URL.RawQuery != "q=1" {
 			t.Fatalf("proxied request URL = %s?%s", r.URL.Path, r.URL.RawQuery)
@@ -2131,9 +2131,9 @@ func TestJobTerminalProxyAllowsLiveReviewerJobs(t *testing.T) {
 
 	var board boardResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
-	card := board.IssueCards[started.Session.IssueID]
+	card := board.TaskCards[started.Session.TaskID]
 	if !card.TerminalAvailable || card.TerminalJobID != reviewer.Job.ID {
-		t.Fatalf("issue card terminal metadata = %+v", card)
+		t.Fatalf("task card terminal metadata = %+v", card)
 	}
 
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/jobs/"+reviewer.Job.ID+"/terminal-token", map[string]string{}, http.StatusForbidden, nil)
@@ -2179,7 +2179,7 @@ func TestJobTerminalProxyAllowsLiveReviewerJobs(t *testing.T) {
 
 func TestSessionTerminalProxyRequiresOwnerAndProxiesRegisteredTarget(t *testing.T) {
 	fixture := newTestFixture(t)
-	started := startAuthorSessionForStatusTest(t, fixture, "Terminal proxy issue")
+	started := startAuthorSessionForStatusTest(t, fixture, "Terminal proxy task")
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/pty" || r.URL.RawQuery != "q=1" {
 			t.Fatalf("proxied request URL = %s?%s", r.URL.Path, r.URL.RawQuery)
@@ -2266,7 +2266,7 @@ func TestSessionTerminalProxyRequiresOwnerAndProxiesRegisteredTarget(t *testing.
 
 func TestSessionTerminalProxyInjectsClipboardBridge(t *testing.T) {
 	fixture := newTestFixture(t)
-	started := startAuthorSessionForStatusTest(t, fixture, "Terminal clipboard issue")
+	started := startAuthorSessionForStatusTest(t, fixture, "Terminal clipboard task")
 	const terminalHTML = "<html><body>term</body></html>"
 	const ptyBody = "pty-stream"
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2353,7 +2353,7 @@ func TestSessionTerminalProxyInjectsClipboardBridge(t *testing.T) {
 func TestSessionAttachRejectsInactiveOrNonLiveSessions(t *testing.T) {
 	t.Run("finished", func(t *testing.T) {
 		fixture := newTestFixture(t)
-		started := startAuthorSessionForStatusTest(t, fixture, "Finished attach issue")
+		started := startAuthorSessionForStatusTest(t, fixture, "Finished attach task")
 		if _, err := fixture.Sessions.ReadyAuthorSession(context.Background(), started.Session.ID); err != nil {
 			t.Fatalf("ready session: %v", err)
 		}
@@ -2363,7 +2363,7 @@ func TestSessionAttachRejectsInactiveOrNonLiveSessions(t *testing.T) {
 
 	t.Run("crashed", func(t *testing.T) {
 		fixture := newTestFixture(t)
-		started := startAuthorSessionForStatusTest(t, fixture, "Crashed attach issue")
+		started := startAuthorSessionForStatusTest(t, fixture, "Crashed attach task")
 		if _, err := fixture.Sessions.UpdateSessionState(context.Background(), started.Session.ID, coordinator.SessionCrashed); err != nil {
 			t.Fatalf("crash session: %v", err)
 		}
@@ -2373,7 +2373,7 @@ func TestSessionAttachRejectsInactiveOrNonLiveSessions(t *testing.T) {
 
 	t.Run("released lease", func(t *testing.T) {
 		fixture := newTestFixture(t)
-		started := startAuthorSessionForStatusTest(t, fixture, "Released lease attach issue")
+		started := startAuthorSessionForStatusTest(t, fixture, "Released lease attach task")
 		if _, err := fixture.DB.ExecContext(context.Background(), `
 UPDATE leases
 SET released_at = ?
@@ -2387,7 +2387,7 @@ WHERE id = ?`, time.Now().UTC().Format(time.RFC3339Nano), started.Session.LeaseI
 
 func TestReviewThreadAPILifecycle(t *testing.T) {
 	fixture := newTestFixture(t)
-	started := startAuthorSessionForStatusTest(t, fixture, "Thread API issue")
+	started := startAuthorSessionForStatusTest(t, fixture, "Thread API task")
 
 	var created threadResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+started.Change.ID+"/comments", createThreadRequest{
@@ -2428,7 +2428,7 @@ func TestReviewThreadAPILifecycle(t *testing.T) {
 		t.Fatalf("claimed thread = %+v", claimed.Thread)
 	}
 
-	verifier := startLiveWorkerJobForIssue(t, fixture, "verifier-token", "w-verifier", started.Session.IssueID, started.Change.ID, flowworker.RoleVerifier)
+	verifier := startLiveWorkerJobForTask(t, fixture, "verifier-token", "w-verifier", started.Session.TaskID, started.Change.ID, flowworker.RoleVerifier)
 
 	var certified threadResponse
 	doJSONRequestAs(t, fixture.Server, "verifier-token", http.MethodPost, "/v2/threads/"+created.Thread.ID+"/certify", threadCommentRequest{
@@ -2451,8 +2451,8 @@ func TestReviewThreadAPILifecycle(t *testing.T) {
 
 func TestReviewThreadAPIRestrictsSessionAndWorkerAccess(t *testing.T) {
 	fixture := newTestFixture(t)
-	started := startAuthorSessionForStatusTest(t, fixture, "Thread auth issue")
-	other := startAuthorSessionForStatusTestWithWorker(t, fixture, "Other thread auth issue", "w-other-author")
+	started := startAuthorSessionForStatusTest(t, fixture, "Thread auth task")
+	other := startAuthorSessionForStatusTestWithWorker(t, fixture, "Other thread auth task", "w-other-author")
 
 	var created threadResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+started.Change.ID+"/comments", createThreadRequest{
@@ -2463,14 +2463,14 @@ func TestReviewThreadAPIRestrictsSessionAndWorkerAccess(t *testing.T) {
 	}, http.StatusCreated, &created)
 
 	doJSONRequestAs(t, fixture.Server, other.Token, http.MethodPost, "/v2/threads/"+created.Thread.ID+"/comments", threadCommentRequest{
-		Body: "Cross-issue reply.",
+		Body: "Cross-task reply.",
 	}, http.StatusForbidden, nil)
 
 	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v2/threads/"+created.Thread.ID+"/certify", threadCommentRequest{
 		Body: "Author cannot verify.",
 	}, http.StatusForbidden, nil)
 
-	reviewer := startLiveWorkerJobForIssue(t, fixture, "reviewer-token", "w-reviewer", started.Session.IssueID, started.Change.ID, flowworker.RoleReviewer)
+	reviewer := startLiveWorkerJobForTask(t, fixture, "reviewer-token", "w-reviewer", started.Session.TaskID, started.Change.ID, flowworker.RoleReviewer)
 	doJSONRequestAs(t, fixture.Server, "reviewer-token", http.MethodPost, "/v2/threads/"+created.Thread.ID+"/comments", threadCommentRequest{
 		Body:    "Reviewer reply.",
 		LeaseID: reviewer.Lease.ID,
@@ -2489,7 +2489,7 @@ func TestReviewThreadAPIRestrictsSessionAndWorkerAccess(t *testing.T) {
 func TestWorkerCheckReportRejectsSourceJobFromStaleHead(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	started := startAuthorSessionForStatusTest(t, fixture, "Stale check job issue")
+	started := startAuthorSessionForStatusTest(t, fixture, "Stale check job task")
 	if _, err := fixture.Sessions.UpdateChangeHead(ctx, started.Change.ID, "head-2"); err != nil {
 		t.Fatalf("update change head: %v", err)
 	}
@@ -2500,7 +2500,7 @@ func TestWorkerCheckReportRejectsSourceJobFromStaleHead(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 	job, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &started.Session.IssueID,
+		TaskID:         &started.Session.TaskID,
 		ChangeID:       &started.Change.ID,
 		Role:           flowworker.RoleCI,
 		CapacityBucket: flowworker.BucketEphemeral,
@@ -2529,7 +2529,7 @@ func TestWorkerCheckReportRejectsSourceJobFromStaleHead(t *testing.T) {
 	}
 	sourceJobID := job.ID
 	leaseID := claimed.Lease.ID
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/issues/"+started.Session.IssueID+"/checks/unit", reportCheckRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/tasks/"+started.Session.TaskID+"/checks/unit", reportCheckRequest{
 		Kind:        string(coordinator.CheckKindCI),
 		SourceJobID: &sourceJobID,
 		LeaseID:     &leaseID,
@@ -2540,7 +2540,7 @@ func TestWorkerCheckReportRejectsSourceJobFromStaleHead(t *testing.T) {
 func TestWorkerCheckReportRejectsSourceJobMissingCheckMetadata(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	started := startAuthorSessionForStatusTest(t, fixture, "Missing check metadata issue")
+	started := startAuthorSessionForStatusTest(t, fixture, "Missing check metadata task")
 	if _, err := fixture.Sessions.UpdateChangeHead(ctx, started.Change.ID, "head-1"); err != nil {
 		t.Fatalf("update change head: %v", err)
 	}
@@ -2551,7 +2551,7 @@ func TestWorkerCheckReportRejectsSourceJobMissingCheckMetadata(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 	job, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &started.Session.IssueID,
+		TaskID:         &started.Session.TaskID,
 		ChangeID:       &started.Change.ID,
 		Role:           flowworker.RoleCI,
 		CapacityBucket: flowworker.BucketEphemeral,
@@ -2575,7 +2575,7 @@ func TestWorkerCheckReportRejectsSourceJobMissingCheckMetadata(t *testing.T) {
 	}
 	sourceJobID := job.ID
 	leaseID := claimed.Lease.ID
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/issues/"+started.Session.IssueID+"/checks/unit", reportCheckRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/tasks/"+started.Session.TaskID+"/checks/unit", reportCheckRequest{
 		Kind:        string(coordinator.CheckKindCI),
 		SourceJobID: &sourceJobID,
 		LeaseID:     &leaseID,
@@ -2586,15 +2586,15 @@ func TestWorkerCheckReportRejectsSourceJobMissingCheckMetadata(t *testing.T) {
 func TestWorkerReviewerJobCanReportReviewerCheck(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	started := startAuthorSessionForStatusTest(t, fixture, "Reviewer report issue")
+	started := startAuthorSessionForStatusTest(t, fixture, "Reviewer report task")
 	if _, err := fixture.Sessions.UpdateChangeHead(ctx, started.Change.ID, "head-1"); err != nil {
 		t.Fatalf("update change head: %v", err)
 	}
-	reviewer := startLiveCheckJobForIssue(t, fixture, "reviewer-token", "w-review-report", started.Session.IssueID, started.Change.ID, "head-1", "reviewer", flowworker.RoleReviewer, flowworker.BucketPersistentAgent)
+	reviewer := startLiveCheckJobForTask(t, fixture, "reviewer-token", "w-review-report", started.Session.TaskID, started.Change.ID, "head-1", "reviewer", flowworker.RoleReviewer, flowworker.BucketPersistentAgent)
 	sourceJobID := reviewer.Job.ID
 	leaseID := reviewer.Lease.ID
 	var response checkResponse
-	doJSONRequestAs(t, fixture.Server, "reviewer-token", http.MethodPost, "/v2/issues/"+started.Session.IssueID+"/checks/reviewer", reportCheckRequest{
+	doJSONRequestAs(t, fixture.Server, "reviewer-token", http.MethodPost, "/v2/tasks/"+started.Session.TaskID+"/checks/reviewer", reportCheckRequest{
 		Kind:        string(coordinator.CheckKindReviewer),
 		SourceJobID: &sourceJobID,
 		LeaseID:     &leaseID,
@@ -2613,11 +2613,11 @@ func startAuthorSessionForStatusTestWithWorker(t *testing.T, fixture testFixture
 	t.Helper()
 
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: title})
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: title})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
-	run, err := fixture.Bundle.WorkflowRuns.Schedule(ctx, issue.ID)
+	run, err := fixture.Bundle.WorkflowRuns.Schedule(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("schedule workflow: %v", err)
 	}
@@ -2630,7 +2630,7 @@ func startAuthorSessionForStatusTestWithWorker(t *testing.T, fixture testFixture
 	}
 	var authorJob flowworker.Job
 	for _, job := range jobs {
-		if job.IssueID != nil && *job.IssueID == issue.ID && job.Role == flowworker.RoleAuthor {
+		if job.TaskID != nil && *job.TaskID == task.ID && job.Role == flowworker.RoleAuthor {
 			authorJob = job
 			break
 		}
@@ -2666,7 +2666,7 @@ func startAuthorSessionForStatusTestWithWorker(t *testing.T, fixture testFixture
 	return started
 }
 
-func liveAuthorJobsForIssue(t *testing.T, fixture testFixture, issueID string) []flowworker.Job {
+func liveAuthorJobsForTask(t *testing.T, fixture testFixture, taskID string) []flowworker.Job {
 	t.Helper()
 
 	jobs, err := fixture.Workers.ListJobs(context.Background())
@@ -2675,7 +2675,7 @@ func liveAuthorJobsForIssue(t *testing.T, fixture testFixture, issueID string) [
 	}
 	var live []flowworker.Job
 	for _, job := range jobs {
-		if job.IssueID == nil || *job.IssueID != issueID || job.Role != flowworker.RoleAuthor {
+		if job.TaskID == nil || *job.TaskID != taskID || job.Role != flowworker.RoleAuthor {
 			continue
 		}
 		switch job.State {
@@ -2686,7 +2686,7 @@ func liveAuthorJobsForIssue(t *testing.T, fixture testFixture, issueID string) [
 	return live
 }
 
-func startLiveWorkerJobForIssue(t *testing.T, fixture testFixture, token string, workerID string, issueID string, changeID string, role flowworker.JobRole) flowworker.ClaimedJob {
+func startLiveWorkerJobForTask(t *testing.T, fixture testFixture, token string, workerID string, taskID string, changeID string, role flowworker.JobRole) flowworker.ClaimedJob {
 	t.Helper()
 
 	ctx := context.Background()
@@ -2705,7 +2705,7 @@ func startLiveWorkerJobForIssue(t *testing.T, fixture testFixture, token string,
 		t.Fatalf("register worker %s: %v", workerID, err)
 	}
 	job, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &issueID,
+		TaskID:         &taskID,
 		ChangeID:       &changeID,
 		Role:           role,
 		CapacityBucket: flowworker.BucketPersistentAgent,
@@ -2746,7 +2746,7 @@ func createCheckConfigExchange(t *testing.T) (string, string) {
 	runAPIGit(t, repoPath, "add", "README.md")
 	runAPIGit(t, repoPath, "commit", "-m", "initial")
 	runAPIGit(t, "", "init", "--bare", exchangePath)
-	runAPIGit(t, repoPath, "checkout", "-b", "issue/i-0001", "main")
+	runAPIGit(t, repoPath, "checkout", "-b", "task/i-0001", "main")
 	writeAPIFile(t, repoPath, ".flow/checks/unit.yaml", `
 name: unit
 kind: ci
@@ -2772,7 +2772,7 @@ requires: ["agent.harness.codex"]
 	runAPIGit(t, repoPath, "add", ".flow/checks")
 	runAPIGit(t, repoPath, "commit", "-m", "add checks")
 	headSHA := apiGitOutput(t, repoPath, "rev-parse", "HEAD")
-	runAPIGit(t, repoPath, "push", exchangePath, "issue/i-0001:issue/i-0001")
+	runAPIGit(t, repoPath, "push", exchangePath, "task/i-0001:task/i-0001")
 
 	return exchangePath, headSHA
 }
@@ -2790,7 +2790,7 @@ func createInvalidCheckConfigExchange(t *testing.T) (string, string) {
 	runAPIGit(t, repoPath, "add", "README.md")
 	runAPIGit(t, repoPath, "commit", "-m", "initial")
 	runAPIGit(t, "", "init", "--bare", exchangePath)
-	runAPIGit(t, repoPath, "checkout", "-b", "issue/i-0001", "main")
+	runAPIGit(t, repoPath, "checkout", "-b", "task/i-0001", "main")
 	writeAPIFile(t, repoPath, ".flow/checks/bad.yaml", `
 name: bad
 kind: ci
@@ -2798,7 +2798,7 @@ kind: ci
 	runAPIGit(t, repoPath, "add", ".flow/checks")
 	runAPIGit(t, repoPath, "commit", "-m", "add bad check")
 	headSHA := apiGitOutput(t, repoPath, "rev-parse", "HEAD")
-	runAPIGit(t, repoPath, "push", exchangePath, "issue/i-0001:issue/i-0001")
+	runAPIGit(t, repoPath, "push", exchangePath, "task/i-0001:task/i-0001")
 
 	return exchangePath, headSHA
 }
@@ -2822,11 +2822,11 @@ WHERE id = ?`, exchangePath, exchangePath, project.ID); err != nil {
 	}
 
 	db := bundle.Store.DB()
-	bundle.Merges = coordinator.NewMergeService(db, bundle.Issues, bundle.Sessions, project)
+	bundle.Merges = coordinator.NewMergeService(db, bundle.Tasks, bundle.Sessions, project)
 	bundle.CheckConfigs = coordinator.NewCheckConfigServiceWithOptions(db, bundle.Checks, bundle.Queue, bundle.Threads, project, coordinator.CheckConfigServiceOptions{})
 	bundle.GitEventConsumer = coordinator.NewGitEventConsumer(db, project)
 	bundle.Engine = lifecycle.NewEngine(db, lifecycle.NewEffects(
-		bundle.Issues,
+		bundle.Tasks,
 		bundle.Checks,
 		bundle.CheckConfigs,
 		bundle.Sessions,
@@ -2838,7 +2838,7 @@ WHERE id = ?`, exchangePath, exchangePath, project.ID); err != nil {
 	))
 }
 
-func startLiveCheckJobForIssue(t *testing.T, fixture testFixture, token string, workerID string, issueID string, changeID string, headSHA string, checkName string, role flowworker.JobRole, bucket flowworker.CapacityBucket) flowworker.ClaimedJob {
+func startLiveCheckJobForTask(t *testing.T, fixture testFixture, token string, workerID string, taskID string, changeID string, headSHA string, checkName string, role flowworker.JobRole, bucket flowworker.CapacityBucket) flowworker.ClaimedJob {
 	t.Helper()
 
 	ctx := context.Background()
@@ -2858,7 +2858,7 @@ func startLiveCheckJobForIssue(t *testing.T, fixture testFixture, token string, 
 		t.Fatalf("register worker %s: %v", workerID, err)
 	}
 	job, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &issueID,
+		TaskID:         &taskID,
 		ChangeID:       &changeID,
 		Role:           role,
 		CapacityBucket: bucket,
@@ -2922,11 +2922,11 @@ func intPointer(value int) *int {
 	return &value
 }
 
-func satisfyAPICheck(t *testing.T, fixture testFixture, issueID string, name string, kind coordinator.CheckKind) checkResponse {
+func satisfyAPICheck(t *testing.T, fixture testFixture, taskID string, name string, kind coordinator.CheckKind) checkResponse {
 	t.Helper()
 	required := true
 	var response checkResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/issues/"+issueID+"/checks/"+name, reportCheckRequest{
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+taskID+"/checks/"+name, reportCheckRequest{
 		Kind:     string(kind),
 		Required: &required,
 		Verdict:  string(coordinator.CheckSatisfied),
@@ -2934,9 +2934,9 @@ func satisfyAPICheck(t *testing.T, fixture testFixture, issueID string, name str
 	return response
 }
 
-func assertAPICheck(t *testing.T, fixture testFixture, issueID string, name string, kind coordinator.CheckKind, verdict coordinator.CheckVerdict) {
+func assertAPICheck(t *testing.T, fixture testFixture, taskID string, name string, kind coordinator.CheckKind, verdict coordinator.CheckVerdict) {
 	t.Helper()
-	check, err := fixture.Checks.GetCheck(context.Background(), issueID, name)
+	check, err := fixture.Checks.GetCheck(context.Background(), taskID, name)
 	if err != nil {
 		t.Fatalf("get check %s: %v", name, err)
 	}
@@ -2945,7 +2945,7 @@ func assertAPICheck(t *testing.T, fixture testFixture, issueID string, name stri
 	}
 }
 
-func assertAPILiveJobs(t *testing.T, fixture testFixture, issueID string, want map[flowworker.JobRole]int) {
+func assertAPILiveJobs(t *testing.T, fixture testFixture, taskID string, want map[flowworker.JobRole]int) {
 	t.Helper()
 	jobs, err := fixture.Workers.ListJobs(context.Background())
 	if err != nil {
@@ -2953,7 +2953,7 @@ func assertAPILiveJobs(t *testing.T, fixture testFixture, issueID string, want m
 	}
 	counts := map[flowworker.JobRole]int{}
 	for _, job := range jobs {
-		if job.IssueID == nil || *job.IssueID != issueID {
+		if job.TaskID == nil || *job.TaskID != taskID {
 			continue
 		}
 		switch job.State {
@@ -3018,9 +3018,9 @@ func TestWorkerEndpointsRequireWorkerScopeAndLeaseOwnership(t *testing.T) {
 		CapacityPersistentAgent: 1,
 	}, http.StatusForbidden, nil)
 
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Lease ownership issue"})
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Lease ownership task"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                      "w-local",
@@ -3029,7 +3029,7 @@ func TestWorkerEndpointsRequireWorkerScopeAndLeaseOwnership(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 	if _, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           flowworker.RoleAuthor,
 		CapacityBucket: flowworker.BucketPersistentAgent,
 	}); err != nil {
@@ -3059,12 +3059,12 @@ func TestWorkerEndpointsRequireWorkerScopeAndLeaseOwnership(t *testing.T) {
 func TestJobEnqueueIdempotencyReplaysCreatedJob(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Idempotent job issue"})
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Idempotent job task"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 	request := enqueueJobRequest{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           string(flowworker.RoleCI),
 		CapacityBucket: string(flowworker.BucketEphemeral),
 		Priority:       3,
@@ -3090,9 +3090,9 @@ func TestJobEnqueueIdempotencyReplaysCreatedJob(t *testing.T) {
 func TestWorkerCheckReportingRejectsExpiredLease(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Expired check lease issue"})
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Expired check lease task"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                "w-local",
@@ -3101,7 +3101,7 @@ func TestWorkerCheckReportingRejectsExpiredLease(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 	job, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           flowworker.RoleCI,
 		CapacityBucket: flowworker.BucketEphemeral,
 	})
@@ -3132,7 +3132,7 @@ WHERE id = ?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), clai
 	exitFailure := 1
 	sourceJobID := claimed.Job.ID
 	leaseID := claimed.Lease.ID
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/issues/"+issue.ID+"/checks/fake-ci", reportCheckRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/tasks/"+task.ID+"/checks/fake-ci", reportCheckRequest{
 		ExitCode:    &exitFailure,
 		Details:     "exit status 1",
 		SourceJobID: &sourceJobID,
@@ -3151,9 +3151,9 @@ WHERE id = ?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), clai
 func TestWorkerCheckReportingRejectsNonCISourceJob(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	issue, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Non-CI check lease issue"})
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Non-CI check lease task"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                      "w-local",
@@ -3162,7 +3162,7 @@ func TestWorkerCheckReportingRejectsNonCISourceJob(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 	job, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           flowworker.RoleAuthor,
 		CapacityBucket: flowworker.BucketPersistentAgent,
 	})
@@ -3184,7 +3184,7 @@ func TestWorkerCheckReportingRejectsNonCISourceJob(t *testing.T) {
 	exitZero := 0
 	sourceJobID := claimed.Job.ID
 	leaseID := claimed.Lease.ID
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/issues/"+issue.ID+"/checks/fake-ci", reportCheckRequest{
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/tasks/"+task.ID+"/checks/fake-ci", reportCheckRequest{
 		ExitCode:    &exitZero,
 		Details:     "exit status 0",
 		SourceJobID: &sourceJobID,
@@ -3389,7 +3389,7 @@ type testFixture struct {
 	Server      *Server
 	DB          *sql.DB
 	GlobalDB    *sql.DB
-	Issues      *coordinator.IssueService
+	Tasks       *coordinator.TaskService
 	Checks      *coordinator.CheckService
 	Credentials *coordinator.CredentialService
 	GitEvents   *coordinator.GitEventService
@@ -3480,7 +3480,7 @@ func fixtureFromRegistry(t *testing.T, registry *Registry, bundle *ProjectBundle
 		Server:      server,
 		DB:          bundle.Store.DB(),
 		GlobalDB:    global.DB(),
-		Issues:      bundle.Issues,
+		Tasks:       bundle.Tasks,
 		Checks:      bundle.Checks,
 		Credentials: credentials,
 		GitEvents:   bundle.GitEvents,
@@ -3593,12 +3593,12 @@ func TestAggregateBoardMergesProjects(t *testing.T) {
 	ctx := context.Background()
 
 	for _, bundle := range bundles {
-		issue, err := bundle.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Work in " + bundle.Project.Name})
+		task, err := bundle.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Work in " + bundle.Project.Name})
 		if err != nil {
-			t.Fatalf("create issue in %s: %v", bundle.Project.Name, err)
+			t.Fatalf("create task in %s: %v", bundle.Project.Name, err)
 		}
-		if issue.ID != "i-0001" {
-			t.Fatalf("first issue id in %s = %q, want i-0001", bundle.Project.Name, issue.ID)
+		if task.ID != "i-0001" {
+			t.Fatalf("first task id in %s = %q, want i-0001", bundle.Project.Name, task.ID)
 		}
 	}
 
@@ -3625,41 +3625,41 @@ func TestAggregateBoardMergesProjects(t *testing.T) {
 	}
 }
 
-func TestProjectScopedIssueRouteIsolation(t *testing.T) {
+func TestProjectScopedTaskRouteIsolation(t *testing.T) {
 	server, bundles := newMultiProjectServer(t, "alpha", "beta")
 	projectA, projectB := bundles[0], bundles[1]
 
-	issue, err := projectA.Issues.CreateIssue(context.Background(), coordinator.CreateIssueInput{Title: "Only in alpha"})
+	task, err := projectA.Tasks.CreateTask(context.Background(), coordinator.CreateTaskInput{Title: "Only in alpha"})
 	if err != nil {
-		t.Fatalf("create issue in alpha: %v", err)
+		t.Fatalf("create task in alpha: %v", err)
 	}
-	if issue.ID != "i-0001" {
-		t.Fatalf("issue id = %q, want i-0001", issue.ID)
+	if task.ID != "i-0001" {
+		t.Fatalf("task id = %q, want i-0001", task.ID)
 	}
 
 	doJSONRequestAs(t, server, "owner-token", http.MethodGet,
-		"/v2/projects/"+projectB.Project.ID+"/issues/i-0001", nil, http.StatusNotFound, nil)
+		"/v2/projects/"+projectB.Project.ID+"/tasks/i-0001", nil, http.StatusNotFound, nil)
 
-	var found issueResponse
+	var found taskResponse
 	doJSONRequestAs(t, server, "owner-token", http.MethodGet,
-		"/v2/projects/"+projectA.Project.ID+"/issues/i-0001", nil, http.StatusOK, &found)
-	if found.Issue.ID != "i-0001" || found.Issue.Title != "Only in alpha" {
-		t.Fatalf("alpha issue = %+v", found.Issue)
+		"/v2/projects/"+projectA.Project.ID+"/tasks/i-0001", nil, http.StatusOK, &found)
+	if found.Task.ID != "i-0001" || found.Task.Title != "Only in alpha" {
+		t.Fatalf("alpha task = %+v", found.Task)
 	}
 }
 
-func TestUnscopedIssueRouteRejectedWithMultipleProjects(t *testing.T) {
+func TestUnscopedTaskRouteRejectedWithMultipleProjects(t *testing.T) {
 	server, bundles := newMultiProjectServer(t, "alpha", "beta")
 
-	if _, err := bundles[0].Issues.CreateIssue(context.Background(), coordinator.CreateIssueInput{Title: "Ambiguous"}); err != nil {
-		t.Fatalf("create issue: %v", err)
+	if _, err := bundles[0].Tasks.CreateTask(context.Background(), coordinator.CreateTaskInput{Title: "Ambiguous"}); err != nil {
+		t.Fatalf("create task: %v", err)
 	}
 
 	response := httptest.NewRecorder()
-	request := authorizedRequest(http.MethodGet, "/v2/issues/i-0001", nil)
+	request := authorizedRequest(http.MethodGet, "/v2/tasks/i-0001", nil)
 	server.ServeHTTP(response, request)
 	if response.Code < 400 || response.Code >= 500 {
-		t.Fatalf("unscoped issue status = %d, want 4xx; body: %s", response.Code, response.Body.String())
+		t.Fatalf("unscoped task status = %d, want 4xx; body: %s", response.Code, response.Body.String())
 	}
 	var body errorResponse
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
@@ -3726,7 +3726,7 @@ func TestWorkflowAuthorProcessExitStopsAfterCrashRestartLimit(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	started := startAuthorSessionForStatusTest(t, fixture, "Bounded workflow author crashes")
-	issueID := started.Session.IssueID
+	taskID := started.Session.TaskID
 	runID := started.Session.WorkflowRunID
 
 	crash := func(session coordinator.Session) {
@@ -3738,7 +3738,7 @@ func TestWorkflowAuthorProcessExitStopsAfterCrashRestartLimit(t *testing.T) {
 	}
 
 	crash(started.Session)
-	live := liveAuthorJobsForIssue(t, fixture, issueID)
+	live := liveAuthorJobsForTask(t, fixture, taskID)
 	if len(live) != 1 {
 		t.Fatalf("live author jobs after first crash = %+v, want one automatic restart", live)
 	}
@@ -3760,7 +3760,7 @@ func TestWorkflowAuthorProcessExitStopsAfterCrashRestartLimit(t *testing.T) {
 	}
 
 	crash(restarted.Session)
-	if live := liveAuthorJobsForIssue(t, fixture, issueID); len(live) != 0 {
+	if live := liveAuthorJobsForTask(t, fixture, taskID); len(live) != 0 {
 		t.Fatalf("live author jobs after crash limit = %+v, want none", live)
 	}
 	detail, err := fixture.Bundle.WorkflowRuns.Detail(ctx, runID)
@@ -3779,7 +3779,7 @@ func TestWorkflowAuthorProcessExitStopsAfterCrashRestartLimit(t *testing.T) {
 			t.Fatalf("advance crash-held workflow: %v", err)
 		}
 	}
-	if live := liveAuthorJobsForIssue(t, fixture, issueID); len(live) != 0 {
+	if live := liveAuthorJobsForTask(t, fixture, taskID); len(live) != 0 {
 		t.Fatalf("repeated advances re-enqueued author jobs: %+v", live)
 	}
 }

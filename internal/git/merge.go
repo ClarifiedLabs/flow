@@ -12,7 +12,7 @@ import (
 var (
 	ErrNoMergeChanges = errors.New("squash merge has no included changes")
 	ErrMergeConflict  = errors.New("squash merge conflict")
-	ErrHeadMismatch   = errors.New("issue branch head does not match expected head")
+	ErrHeadMismatch   = errors.New("task branch head does not match expected head")
 )
 
 type MergeConflictError struct {
@@ -50,7 +50,7 @@ func SquashMergeToBase(ctx context.Context, input SquashMergeInput) (SquashMerge
 	return squashMergeToBase(ctx, input, true)
 }
 
-// SquashMergeIsNoop reports whether squashing the issue branch onto the current
+// SquashMergeIsNoop reports whether squashing the task branch onto the current
 // base stages no changes — i.e. the branch's content is already contained in
 // the base. Nothing is committed or pushed. Merge-recovery uses this as the
 // content-equivalence proof that a crashed merge's push landed before marking
@@ -78,7 +78,7 @@ func squashMergeToBase(ctx context.Context, input SquashMergeInput, push bool) (
 		return SquashMergeResult{}, errors.New("base branch is required")
 	}
 	if input.Branch == "" {
-		return SquashMergeResult{}, errors.New("issue branch is required")
+		return SquashMergeResult{}, errors.New("task branch is required")
 	}
 	if input.Message == "" && push {
 		return SquashMergeResult{}, errors.New("merge message is required")
@@ -110,16 +110,16 @@ func squashMergeToBase(ctx context.Context, input SquashMergeInput, push bool) (
 	}
 	headSHA, err := gitOutput(ctx, worktree, nil, "rev-parse", "origin/"+input.Branch)
 	if err != nil {
-		return SquashMergeResult{}, fmt.Errorf("read issue branch sha: %w", err)
+		return SquashMergeResult{}, fmt.Errorf("read task branch sha: %w", err)
 	}
 	if expected := strings.TrimSpace(input.ExpectedHeadSHA); expected != "" && headSHA != expected {
 		return SquashMergeResult{}, fmt.Errorf("%w: %s, expected %s", ErrHeadMismatch, headSHA, expected)
 	}
 	if err := gitRun(ctx, worktree, nil, "merge", "--squash", "--no-commit", "origin/"+input.Branch); err != nil {
 		if output, ok := mergeConflictOutput(err); ok {
-			return SquashMergeResult{}, fmt.Errorf("squash merge issue branch: %w", &MergeConflictError{Output: output})
+			return SquashMergeResult{}, fmt.Errorf("squash merge task branch: %w", &MergeConflictError{Output: output})
 		}
-		return SquashMergeResult{}, fmt.Errorf("squash merge issue branch: %w", err)
+		return SquashMergeResult{}, fmt.Errorf("squash merge task branch: %w", err)
 	}
 	if err := restoreExcludedMergePaths(ctx, worktree); err != nil {
 		return SquashMergeResult{}, err

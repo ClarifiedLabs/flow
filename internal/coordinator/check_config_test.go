@@ -59,16 +59,16 @@ func TestCheckConfigRetiresRemovedAutomatedChecks(t *testing.T) {
 	t.Cleanup(func() {
 		_ = store.Close()
 	})
-	issues := NewIssueService(store.DB())
+	tasks := NewTaskService(store.DB())
 	checks := NewCheckService(store.DB())
 	checkConfig := NewCheckConfigServiceWithOptions(store.DB(), checks, flowworker.NewService(store.DB()), nil, Project{}, CheckConfigServiceOptions{})
-	issue, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Removed check issue"})
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Removed check task"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 	required := true
 	if _, err := checks.ReportCheck(ctx, ReportCheckInput{
-		IssueID:  issue.ID,
+		TaskID:   task.ID,
 		Name:     "removed",
 		Kind:     CheckKindCI,
 		Required: &required,
@@ -76,7 +76,7 @@ func TestCheckConfigRetiresRemovedAutomatedChecks(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed removed check: %v", err)
 	}
-	if err := checkConfig.retireAbsentAutomatedChecks(ctx, issue.ID, CheckSuite{
+	if err := checkConfig.retireAbsentAutomatedChecks(ctx, task.ID, CheckSuite{
 		Configured: true,
 		Definitions: []CheckDefinition{{
 			Name: "unit",
@@ -85,7 +85,7 @@ func TestCheckConfigRetiresRemovedAutomatedChecks(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("retire absent: %v", err)
 	}
-	removed, err := checks.GetCheck(ctx, issue.ID, "removed")
+	removed, err := checks.GetCheck(ctx, task.ID, "removed")
 	if err != nil {
 		t.Fatalf("get removed: %v", err)
 	}
@@ -104,12 +104,12 @@ func TestLiveCheckJobExistsIsScopedToHead(t *testing.T) {
 	t.Cleanup(func() {
 		_ = store.Close()
 	})
-	issues := NewIssueService(store.DB())
+	tasks := NewTaskService(store.DB())
 	workers := flowworker.NewService(store.DB())
 	checkConfig := NewCheckConfigServiceWithOptions(store.DB(), nil, workers, nil, Project{}, CheckConfigServiceOptions{})
-	issue, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Head scoped job issue"})
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Head scoped job task"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 	changeID := "ch-head-scoped-1"
 	otherChangeID := "ch-head-scoped-2"
@@ -117,18 +117,18 @@ func TestLiveCheckJobExistsIsScopedToHead(t *testing.T) {
 		id     string
 		branch string
 	}{
-		{id: changeID, branch: "issue/head-scoped-1"},
-		{id: otherChangeID, branch: "issue/head-scoped-2"},
+		{id: changeID, branch: "task/head-scoped-1"},
+		{id: otherChangeID, branch: "task/head-scoped-2"},
 	} {
 		if _, err := store.DB().ExecContext(ctx, `
-INSERT INTO changes (id, issue_id, branch, base, head_sha, created_at, updated_at)
+INSERT INTO changes (id, task_id, branch, base, head_sha, created_at, updated_at)
 VALUES (?, ?, ?, 'main', 'head-1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-			change.id, issue.ID, change.branch); err != nil {
+			change.id, task.ID, change.branch); err != nil {
 			t.Fatalf("insert change %s: %v", change.id, err)
 		}
 	}
 	if _, err := workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		ChangeID:       &changeID,
 		Role:           flowworker.RoleCI,
 		CapacityBucket: flowworker.BucketEphemeral,
@@ -139,21 +139,21 @@ VALUES (?, ?, ?, 'main', 'head-1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z
 	}); err != nil {
 		t.Fatalf("enqueue job: %v", err)
 	}
-	exists, err := checkConfig.liveCheckJobExists(ctx, issue.ID, changeID, flowworker.RoleCI, "unit", "head-1")
+	exists, err := checkConfig.liveCheckJobExists(ctx, task.ID, changeID, flowworker.RoleCI, "unit", "head-1")
 	if err != nil {
 		t.Fatalf("lookup matching head: %v", err)
 	}
 	if !exists {
 		t.Fatal("live job not found for matching head")
 	}
-	exists, err = checkConfig.liveCheckJobExists(ctx, issue.ID, changeID, flowworker.RoleCI, "unit", "head-2")
+	exists, err = checkConfig.liveCheckJobExists(ctx, task.ID, changeID, flowworker.RoleCI, "unit", "head-2")
 	if err != nil {
 		t.Fatalf("lookup different head: %v", err)
 	}
 	if exists {
 		t.Fatal("live job matched different head")
 	}
-	exists, err = checkConfig.liveCheckJobExists(ctx, issue.ID, otherChangeID, flowworker.RoleCI, "unit", "head-1")
+	exists, err = checkConfig.liveCheckJobExists(ctx, task.ID, otherChangeID, flowworker.RoleCI, "unit", "head-1")
 	if err != nil {
 		t.Fatalf("lookup different change: %v", err)
 	}
@@ -197,7 +197,7 @@ func writeCheckConfig(t *testing.T, repoPath string, relativePath string, conten
 // checkConfigServices bundles the services wired together for the
 // check-config tests so call sites can pull out only what they need.
 type checkConfigServices struct {
-	issues      *IssueService
+	tasks       *TaskService
 	workers     *flowworker.Service
 	sessions    *SessionService
 	checks      *CheckService
@@ -208,14 +208,14 @@ type checkConfigServices struct {
 // wireCheckConfigServices constructs the standard service graph used across the
 // check-config tests, sharing the same DB handle and project.
 func wireCheckConfigServices(store *flowdb.Store, project Project) checkConfigServices {
-	issues := NewIssueService(store.DB())
+	tasks := NewTaskService(store.DB())
 	workers := flowworker.NewService(store.DB())
-	sessions := NewSessionService(store.DB(), issues, workers)
+	sessions := NewSessionService(store.DB(), tasks, workers)
 	checks := NewCheckService(store.DB())
 	threads := NewThreadService(store.DB())
 	checkConfig := NewCheckConfigServiceWithOptions(store.DB(), checks, workers, threads, project, CheckConfigServiceOptions{})
 	return checkConfigServices{
-		issues:      issues,
+		tasks:       tasks,
 		workers:     workers,
 		sessions:    sessions,
 		checks:      checks,
@@ -230,15 +230,15 @@ type checkConfigFile struct {
 	content string
 }
 
-// seedReadyChangeWithConfig creates the issue branch, writes the given check
+// seedReadyChangeWithConfig creates the task branch, writes the given check
 // config files, commits and pushes them to the exchange, and advances the
 // change head to the pushed commit. It returns the updated change and the
 // pushed head SHA. commitMessage is the message used for the seed commit.
-func seedReadyChangeWithConfig(t *testing.T, ctx context.Context, repoPath string, project Project, sessions *SessionService, issue Issue, ensured EnsureAuthorJobResult, commitMessage string, configs []checkConfigFile) (Change, string) {
+func seedReadyChangeWithConfig(t *testing.T, ctx context.Context, repoPath string, project Project, sessions *SessionService, task Task, ensured EnsureAuthorJobResult, commitMessage string, configs []checkConfigFile) (Change, string) {
 	t.Helper()
-	branch := "issue/" + issue.ID
+	branch := "task/" + task.ID
 	if err := runReconcileGit(repoPath, nil, "checkout", "-b", branch, "main"); err != nil {
-		t.Fatalf("checkout issue branch: %v", err)
+		t.Fatalf("checkout task branch: %v", err)
 	}
 	for _, config := range configs {
 		writeCheckConfig(t, repoPath, config.path, config.content)
@@ -254,7 +254,7 @@ func seedReadyChangeWithConfig(t *testing.T, ctx context.Context, repoPath strin
 		t.Fatalf("rev-parse head: %v", err)
 	}
 	if err := runReconcileGit(repoPath, []string{"FLOW_GIT_PRINCIPAL=worker:w-local"}, "push", project.ExchangeURL, branch+":"+branch); err != nil {
-		t.Fatalf("push issue branch: %v", err)
+		t.Fatalf("push task branch: %v", err)
 	}
 	change, err := sessions.UpdateChangeHead(ctx, ensured.Change.ID, head)
 	if err != nil {
@@ -263,9 +263,9 @@ func seedReadyChangeWithConfig(t *testing.T, ctx context.Context, repoPath strin
 	return change, head
 }
 
-func assertCheckPending(t *testing.T, checks *CheckService, issueID string, name string, kind CheckKind) {
+func assertCheckPending(t *testing.T, checks *CheckService, taskID string, name string, kind CheckKind) {
 	t.Helper()
-	check, err := checks.GetCheck(context.Background(), issueID, name)
+	check, err := checks.GetCheck(context.Background(), taskID, name)
 	if err != nil {
 		t.Fatalf("get check %s: %v", name, err)
 	}
@@ -274,7 +274,7 @@ func assertCheckPending(t *testing.T, checks *CheckService, issueID string, name
 	}
 }
 
-func assertLiveCheckJobs(t *testing.T, workers *flowworker.Service, issueID string, want map[flowworker.JobRole]int) {
+func assertLiveCheckJobs(t *testing.T, workers *flowworker.Service, taskID string, want map[flowworker.JobRole]int) {
 	t.Helper()
 	jobs, err := workers.ListJobs(context.Background())
 	if err != nil {
@@ -282,7 +282,7 @@ func assertLiveCheckJobs(t *testing.T, workers *flowworker.Service, issueID stri
 	}
 	counts := map[flowworker.JobRole]int{}
 	for _, job := range jobs {
-		if job.IssueID == nil || *job.IssueID != issueID {
+		if job.TaskID == nil || *job.TaskID != taskID {
 			continue
 		}
 		switch job.State {
@@ -297,14 +297,14 @@ func assertLiveCheckJobs(t *testing.T, workers *flowworker.Service, issueID stri
 	}
 }
 
-func assertLiveCheckJobEntrypointContains(t *testing.T, workers *flowworker.Service, issueID string, role flowworker.JobRole, checkName string, snippet string) {
+func assertLiveCheckJobEntrypointContains(t *testing.T, workers *flowworker.Service, taskID string, role flowworker.JobRole, checkName string, snippet string) {
 	t.Helper()
 	jobs, err := workers.ListJobs(context.Background())
 	if err != nil {
 		t.Fatalf("list jobs: %v", err)
 	}
 	for _, job := range jobs {
-		if job.IssueID == nil || *job.IssueID != issueID || job.Role != role {
+		if job.TaskID == nil || *job.TaskID != taskID || job.Role != role {
 			continue
 		}
 		switch job.State {

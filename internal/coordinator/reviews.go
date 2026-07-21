@@ -32,7 +32,7 @@ const (
 
 type ReviewThread struct {
 	ID              string            `json:"id"`
-	IssueID         string            `json:"issue_id"`
+	TaskID          string            `json:"task_id"`
 	ChangeID        string            `json:"change_id"`
 	State           ReviewThreadState `json:"state"`
 	AnchorCommitSHA string            `json:"anchor_commit_sha"`
@@ -92,7 +92,7 @@ type VerifyThreadInput struct {
 }
 
 type ReviewContext struct {
-	IssueID string         `json:"issue_id"`
+	TaskID  string         `json:"task_id"`
 	Threads []ReviewThread `json:"threads"`
 }
 
@@ -148,11 +148,11 @@ func (s *ThreadService) CreateThread(ctx context.Context, input CreateThreadInpu
 	}
 	defer tx.Rollback()
 
-	var issueID string
+	var taskID string
 	if err := tx.QueryRowContext(ctx, `
-SELECT issue_id
+SELECT task_id
 FROM changes
-WHERE id = ?`, input.ChangeID).Scan(&issueID); err != nil {
+WHERE id = ?`, input.ChangeID).Scan(&taskID); err != nil {
 		return ReviewThread{}, err
 	}
 
@@ -186,7 +186,7 @@ LIMIT 1`,
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO review_threads (
 	id,
-	issue_id,
+	task_id,
 	change_id,
 	state,
 	anchor_commit_sha,
@@ -199,7 +199,7 @@ INSERT INTO review_threads (
 	updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		threadID,
-		issueID,
+		taskID,
 		input.ChangeID,
 		string(ThreadOpen),
 		input.AnchorCommitSHA,
@@ -231,21 +231,21 @@ func hashThreadBody(body string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (s *ThreadService) ChangeIssueID(ctx context.Context, changeID string) (string, error) {
+func (s *ThreadService) ChangeTaskID(ctx context.Context, changeID string) (string, error) {
 	changeID = strings.TrimSpace(changeID)
 	if changeID == "" {
 		return "", errors.New("change id is required")
 	}
 
-	var issueID string
+	var taskID string
 	if err := s.db.QueryRowContext(ctx, `
-SELECT issue_id
+SELECT task_id
 FROM changes
-WHERE id = ?`, changeID).Scan(&issueID); err != nil {
+WHERE id = ?`, changeID).Scan(&taskID); err != nil {
 		return "", err
 	}
 
-	return issueID, nil
+	return taskID, nil
 }
 
 func (s *ThreadService) AddComment(ctx context.Context, input AddThreadCommentInput) (ReviewThread, error) {
@@ -450,16 +450,16 @@ ORDER BY created_at, id`, changeID)
 	return s.scanThreadsWithComments(ctx, rows)
 }
 
-func (s *ThreadService) ReviewContextForIssue(ctx context.Context, issueID string) (ReviewContext, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return ReviewContext{}, errors.New("issue id is required")
+func (s *ThreadService) ReviewContextForTask(ctx context.Context, taskID string) (ReviewContext, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return ReviewContext{}, errors.New("task id is required")
 	}
 	rows, err := s.db.QueryContext(ctx, reviewThreadSelectSQL+`
-WHERE issue_id = ?
+WHERE task_id = ?
 	AND state IN (?, ?, ?, ?)
 ORDER BY created_at, id`,
-		issueID,
+		taskID,
 		string(ThreadOpen),
 		string(ThreadClaimed),
 		string(ThreadReopened),
@@ -473,7 +473,7 @@ ORDER BY created_at, id`,
 		return ReviewContext{}, err
 	}
 
-	return ReviewContext{IssueID: issueID, Threads: threads}, nil
+	return ReviewContext{TaskID: taskID, Threads: threads}, nil
 }
 
 func (s *ThreadService) ListComments(ctx context.Context, threadID string) ([]ReviewComment, error) {
@@ -556,7 +556,7 @@ type queryExecutor interface {
 const reviewThreadSelectSQL = `
 SELECT
 	id,
-	issue_id,
+	task_id,
 	change_id,
 	state,
 	anchor_commit_sha,
@@ -576,7 +576,7 @@ SELECT
 	updated_at
 FROM review_threads`
 
-func scanReviewThread(scanner issueScanner) (ReviewThread, error) {
+func scanReviewThread(scanner taskScanner) (ReviewThread, error) {
 	var thread ReviewThread
 	var state string
 	var claimKind sql.NullString
@@ -591,7 +591,7 @@ func scanReviewThread(scanner issueScanner) (ReviewThread, error) {
 	var updatedAt string
 	if err := scanner.Scan(
 		&thread.ID,
-		&thread.IssueID,
+		&thread.TaskID,
 		&thread.ChangeID,
 		&state,
 		&thread.AnchorCommitSHA,
@@ -664,7 +664,7 @@ func scanReviewThread(scanner issueScanner) (ReviewThread, error) {
 	return thread, nil
 }
 
-func scanReviewComment(scanner issueScanner) (ReviewComment, error) {
+func scanReviewComment(scanner taskScanner) (ReviewComment, error) {
 	var comment ReviewComment
 	var createdAt string
 	if err := scanner.Scan(&comment.ID, &comment.ThreadID, &comment.Actor, &comment.Body, &createdAt); err != nil {

@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// PushBranch publishes the worktree's current HEAD to the issue branch on the
+// PushBranch publishes the worktree's current HEAD to the task branch on the
 // exchange remote (origin). It runs as the worker principal unless the caller's
 // environment already names one, mirroring how the merge worktree stamps
 // FLOW_GIT_PRINCIPAL on its base-branch push (see merge.go).

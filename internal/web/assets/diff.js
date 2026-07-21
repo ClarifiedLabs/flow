@@ -2,7 +2,7 @@
 
 import { formatDate, shortSHA } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
-import { projectButtonAttr } from "./issue.js";
+import { projectButtonAttr } from "./task.js";
 import { renderMarkdown } from "./markdown.js";
 import { value } from "./normalize.js";
 import { DIFF_MODES } from "./config.js";
@@ -52,15 +52,15 @@ export function renderThreadComment(comment) {
   `;
 }
 
-export function renderCheck(check, issueID = "", projectID = "") {
+export function renderCheck(check, taskID = "", projectID = "") {
   const name = value(check, "name", "Name");
   const verdict = value(check, "verdict", "Verdict");
   const kind = value(check, "kind", "Kind");
   const required = value(check, "required", "Required");
   const details = value(check, "details", "Details");
-  const checkIssueID = issueID || value(check, "issue_id", "IssueID");
-  const approveAction = canApproveHumanReview(check, checkIssueID)
-    ? renderHumanReviewApproveButton(check, checkIssueID, projectID, "button check-action")
+  const checkTaskID = taskID || value(check, "task_id", "TaskID");
+  const approveAction = canApproveHumanReview(check, checkTaskID)
+    ? renderHumanReviewApproveButton(check, checkTaskID, projectID, "button check-action")
     : "";
   return `
     <article class="check-row">
@@ -77,9 +77,9 @@ export function renderCheck(check, issueID = "", projectID = "") {
   `;
 }
 
-export function renderHumanReviewApproveButton(check, issueID, projectID = "", classes = "button secondary") {
+export function renderHumanReviewApproveButton(check, taskID, projectID = "", classes = "button secondary") {
   const name = value(check, "name", "Name");
-  return `<button class="${escapeAttr(classes)}" data-human-review-approve="${escapeAttr(issueID)}" data-check-name="${escapeAttr(name)}"${projectButtonAttr(projectID)}>Approve</button>`;
+  return `<button class="${escapeAttr(classes)}" data-human-review-approve="${escapeAttr(taskID)}" data-check-name="${escapeAttr(name)}"${projectButtonAttr(projectID)}>Approve</button>`;
 }
 
 export function renderVerdictBadge(verdict) {
@@ -92,12 +92,12 @@ export function renderVerdictBadge(verdict) {
   return `<span class="badge ${cls}">${escapeHTML(raw.replaceAll("_", " ") || "pending")}</span>`;
 }
 
-export function canApproveHumanReview(check, issueID) {
+export function canApproveHumanReview(check, taskID) {
   const name = value(check, "name", "Name");
   const kind = value(check, "kind", "Kind");
   const required = Boolean(value(check, "required", "Required"));
   const verdict = value(check, "verdict", "Verdict");
-  return Boolean(issueID)
+  return Boolean(taskID)
     && name === "human-review"
     && kind === "human"
     && required

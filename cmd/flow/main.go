@@ -61,8 +61,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runInit(args[1:], stdout, stderr)
 	case "doctor":
 		return runDoctor(args[1:], stdout, stderr)
-	case "issue":
-		return runIssue(args[1:], stdout, stderr)
+	case "task":
+		return runTask(args[1:], stdout, stderr)
 	case "board":
 		return runBoard(args[1:], stdout, stderr)
 	case "checks":
@@ -260,7 +260,7 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "  # optional: configure a git credential helper, then store the Flow Git credential")
 		fmt.Fprintf(stdout, "  %s\n", credentialCommand)
 	}
-	fmt.Fprintln(stdout, "  flow issue create --title \"...\"   # project auto-detected from this repo")
+	fmt.Fprintln(stdout, "  flow task create --title \"...\"   # project auto-detected from this repo")
 	fmt.Fprintln(stdout, "  flow board")
 	return 0
 }
@@ -406,52 +406,52 @@ func currentBranch(repoRoot string) (string, error) {
 	return branch, nil
 }
 
-func runIssue(args []string, stdout, stderr io.Writer) int {
+func runTask(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		printIssueUsage(stderr)
+		printTaskUsage(stderr)
 		return 2
 	}
 
 	switch args[0] {
 	case "create":
-		return runIssueCreate(args[1:], stdout, stderr)
+		return runTaskCreate(args[1:], stdout, stderr)
 	case "attach":
-		return runIssueAttach(args[1:], stdout, stderr)
+		return runTaskAttach(args[1:], stdout, stderr)
 	case "list":
-		return runIssueList(args[1:], stdout, stderr)
+		return runTaskList(args[1:], stdout, stderr)
 	case "show":
-		return runIssueShow(args[1:], stdout, stderr)
+		return runTaskShow(args[1:], stdout, stderr)
 	case "edit":
-		return runIssueEdit(args[1:], stdout, stderr)
+		return runTaskEdit(args[1:], stdout, stderr)
 	case "schedule":
-		return runIssueSchedule(args[1:], stdout, stderr)
+		return runTaskSchedule(args[1:], stdout, stderr)
 	case "reset":
-		return runIssueReset(args[1:], stdout, stderr)
+		return runTaskReset(args[1:], stdout, stderr)
 	case "done":
-		return runIssueDone(args[1:], stdout, stderr)
+		return runTaskDone(args[1:], stdout, stderr)
 	case "reopen":
-		return runIssueReopen(args[1:], stdout, stderr)
+		return runTaskReopen(args[1:], stdout, stderr)
 	case "workflow":
-		return runIssueWorkflow(args[1:], stdout, stderr)
+		return runTaskWorkflow(args[1:], stdout, stderr)
 	case "respond":
-		return runIssueRespond(args[1:], stdout, stderr)
+		return runTaskRespond(args[1:], stdout, stderr)
 	case "budget":
-		return runIssueBudget(args[1:], stdout, stderr)
+		return runTaskBudget(args[1:], stdout, stderr)
 	case "link":
-		return runIssueLink(args[1:], stdout, stderr)
+		return runTaskLink(args[1:], stdout, stderr)
 	case "unlink":
-		return runIssueUnlink(args[1:], stdout, stderr)
+		return runTaskUnlink(args[1:], stdout, stderr)
 	case "reply":
-		return runIssueReply(args[1:], stdout, stderr)
+		return runTaskReply(args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "unknown issue command: %s\n\n", args[0])
-		printIssueUsage(stderr)
+		fmt.Fprintf(stderr, "unknown task command: %s\n\n", args[0])
+		printTaskUsage(stderr)
 		return 2
 	}
 }
 
-func runIssueCreate(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("issue create", flag.ContinueOnError)
+func runTaskCreate(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("task create", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
 
@@ -460,13 +460,13 @@ func runIssueCreate(args []string, stdout, stderr io.Writer) int {
 	var acceptanceCriteria string
 	var priority int
 	var attachmentFiles stringSliceFlag
-	flags.StringVar(&title, "title", "", "issue title")
-	flags.StringVar(&body, "body", "", "issue body")
+	flags.StringVar(&title, "title", "", "task title")
+	flags.StringVar(&body, "body", "", "task body")
 	flags.StringVar(&acceptanceCriteria, "acceptance-criteria", "", "acceptance criteria")
-	flags.IntVar(&priority, "priority", 0, "issue priority")
+	flags.IntVar(&priority, "priority", 0, "task priority")
 	var flowRef string
-	flags.StringVar(&flowRef, "flow", "", "workflow (id or name) used when the issue is scheduled")
-	flags.Var(&attachmentFiles, "file", "file to attach to the initial issue prompt (repeatable)")
+	flags.StringVar(&flowRef, "flow", "", "workflow (id or name) used when the task is scheduled")
+	flags.Var(&attachmentFiles, "file", "file to attach to the initial task prompt (repeatable)")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -477,7 +477,7 @@ func runIssueCreate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
-	input := flowclient.CreateIssueInput{
+	input := flowclient.CreateTaskInput{
 		Title:              title,
 		Body:               body,
 		AcceptanceCriteria: acceptanceCriteria,
@@ -491,26 +491,26 @@ func runIssueCreate(args []string, stdout, stderr io.Writer) int {
 		}
 		input.FlowID = flowID
 	}
-	issue, err := client.CreateIssue(input)
+	task, err := client.CreateTask(input)
 	if err != nil {
-		fmt.Fprintf(stderr, "create issue: %v\n", err)
+		fmt.Fprintf(stderr, "create task: %v\n", err)
 		return 1
 	}
-	printIssueLine(stdout, issue)
+	printTaskLine(stdout, task)
 	for _, filePath := range attachmentFiles.Values {
-		attachment, err := uploadIssueAttachmentFile(client, issue.ID, filePath, coordinator.IssueAttachmentStageInitial)
+		attachment, err := uploadTaskAttachmentFile(client, task.ID, filePath, coordinator.TaskAttachmentStageInitial)
 		if err != nil {
-			fmt.Fprintf(stderr, "attach file to %s: %v\n", issue.ID, err)
+			fmt.Fprintf(stderr, "attach file to %s: %v\n", task.ID, err)
 			return 1
 		}
-		printIssueAttachmentLine(stdout, attachment)
+		printTaskAttachmentLine(stdout, attachment)
 	}
 
 	return 0
 }
 
-func runIssueAttach(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("issue attach", flag.ContinueOnError)
+func runTaskAttach(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("task attach", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
 
@@ -522,14 +522,14 @@ func runIssueAttach(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "issue id is required")
+		fmt.Fprintln(stderr, "task id is required")
 		return 2
 	}
 	if strings.TrimSpace(filePath) == "" {
 		fmt.Fprintln(stderr, "--file is required")
 		return 2
 	}
-	attachmentStage, err := issueAttachmentStageFromCLI(stage)
+	attachmentStage, err := taskAttachmentStageFromCLI(stage)
 	if err != nil {
 		fmt.Fprintf(stderr, "invalid attachment stage: %v\n", err)
 		return 2
@@ -541,19 +541,19 @@ func runIssueAttach(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
-	client, issueRef := scopeClientForRef(client, flags.Arg(0))
-	attachment, err := uploadIssueAttachmentFile(client, issueRef, filePath, attachmentStage)
+	client, taskRef := scopeClientForRef(client, flags.Arg(0))
+	attachment, err := uploadTaskAttachmentFile(client, taskRef, filePath, attachmentStage)
 	if err != nil {
 		fmt.Fprintf(stderr, "attach file: %v\n", err)
 		return 1
 	}
 
-	printIssueAttachmentLine(stdout, attachment)
+	printTaskAttachmentLine(stdout, attachment)
 	return 0
 }
 
-func runIssueList(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("issue list", flag.ContinueOnError)
+func runTaskList(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("task list", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
 
@@ -571,30 +571,30 @@ func runIssueList(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
-	issues, err := client.ListIssues(flowclient.IssueFilter{
+	tasks, err := client.ListTasks(flowclient.TaskFilter{
 		LifecycleStates: parseCSV(lifecycleStates),
 		TagSlugs:        parseCSV(tag),
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "list issues: %v\n", err)
+		fmt.Fprintf(stderr, "list tasks: %v\n", err)
 		return 1
 	}
 
-	for _, issue := range issues {
-		printIssueLine(stdout, issue)
+	for _, task := range tasks {
+		printTaskLine(stdout, task)
 	}
 	return 0
 }
 
-func runIssueShow(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("issue show", flag.ContinueOnError)
+func runTaskShow(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("task show", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "issue id is required")
+		fmt.Fprintln(stderr, "task id is required")
 		return 2
 	}
 
@@ -604,19 +604,19 @@ func runIssueShow(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
-	client, issueRef := scopeClientForRef(client, flags.Arg(0))
-	issue, err := client.GetIssue(issueRef)
+	client, taskRef := scopeClientForRef(client, flags.Arg(0))
+	task, err := client.GetTask(taskRef)
 	if err != nil {
-		fmt.Fprintf(stderr, "show issue: %v\n", err)
+		fmt.Fprintf(stderr, "show task: %v\n", err)
 		return 1
 	}
 
-	printIssueDetail(stdout, issue)
+	printTaskDetail(stdout, task)
 	return 0
 }
 
-func runIssueReply(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("issue reply", flag.ContinueOnError)
+func runTaskReply(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("task reply", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
 	var message string
@@ -627,7 +627,7 @@ func runIssueReply(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if flags.NArg() < 1 {
-		fmt.Fprintln(stderr, "usage: flow issue reply [flags] ISSUE_ID [MESSAGE]")
+		fmt.Fprintln(stderr, "usage: flow task reply [flags] TASK_ID [MESSAGE]")
 		return 2
 	}
 	if strings.TrimSpace(message) == "" && flags.NArg() > 1 {
@@ -643,17 +643,17 @@ func runIssueReply(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
-	client, issueRef := scopeClientForRef(client, flags.Arg(0))
+	client, taskRef := scopeClientForRef(client, flags.Arg(0))
 	var statusLogIDPtr *int64
 	if statusLogID > 0 {
 		statusLogIDPtr = &statusLogID
 	}
-	messageResult, queued, err := client.ReplyToIssue(issueRef, flowclient.ReplyToIssueInput{
+	messageResult, queued, err := client.ReplyToTask(taskRef, flowclient.ReplyToTaskInput{
 		Message:     message,
 		StatusLogID: statusLogIDPtr,
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "reply issue: %v\n", err)
+		fmt.Fprintf(stderr, "reply task: %v\n", err)
 		return 1
 	}
 	if queued {
@@ -664,8 +664,8 @@ func runIssueReply(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runIssueEdit(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("issue edit", flag.ContinueOnError)
+func runTaskEdit(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("task edit", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
 
@@ -674,16 +674,16 @@ func runIssueEdit(args []string, stdout, stderr io.Writer) int {
 	var acceptanceCriteria string
 	var priority string
 	var flowRef string
-	flags.StringVar(&title, "title", "", "new issue title")
-	flags.StringVar(&body, "body", "", "new issue body")
+	flags.StringVar(&title, "title", "", "new task title")
+	flags.StringVar(&body, "body", "", "new task body")
 	flags.StringVar(&acceptanceCriteria, "acceptance-criteria", "", "new acceptance criteria")
-	flags.StringVar(&priority, "priority", "", "new issue priority")
+	flags.StringVar(&priority, "priority", "", "new task priority")
 	flags.StringVar(&flowRef, "flow", "", "workflow (id or name) used by the next run")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "issue id is required")
+		fmt.Fprintln(stderr, "task id is required")
 		return 2
 	}
 	applySessionEnvironment(apiFlags, nil)
@@ -693,7 +693,7 @@ func runIssueEdit(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	input := flowclient.EditIssueInput{}
+	input := flowclient.EditTaskInput{}
 	if title != "" {
 		input.Title = &title
 	}
@@ -720,63 +720,63 @@ func runIssueEdit(args []string, stdout, stderr io.Writer) int {
 		input.FlowID = &flowID
 	}
 
-	client, issueRef := scopeClientForRef(client, flags.Arg(0))
-	issue, err := client.EditIssue(issueRef, input)
+	client, taskRef := scopeClientForRef(client, flags.Arg(0))
+	task, err := client.EditTask(taskRef, input)
 	if err != nil {
-		fmt.Fprintf(stderr, "edit issue: %v\n", err)
+		fmt.Fprintf(stderr, "edit task: %v\n", err)
 		return 1
 	}
 
-	printIssueLine(stdout, issue)
+	printTaskLine(stdout, task)
 	return 0
 }
 
-func runIssueSchedule(args []string, stdout, stderr io.Writer) int {
-	parsed, issueRef, code := parseScopedIssueAPICommand(args, stderr, "issue schedule", 1, "usage: flow issue schedule [flags] ISSUE_ID")
+func runTaskSchedule(args []string, stdout, stderr io.Writer) int {
+	parsed, taskRef, code := parseScopedTaskAPICommand(args, stderr, "task schedule", 1, "usage: flow task schedule [flags] TASK_ID")
 	if code != 0 {
 		return code
 	}
-	run, err := parsed.client.ScheduleWorkflow(issueRef)
+	run, err := parsed.client.ScheduleWorkflow(taskRef)
 	if err != nil {
-		fmt.Fprintf(stderr, "schedule issue: %v\n", err)
+		fmt.Fprintf(stderr, "schedule task: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "%s\t%s\t%s\n", run.IssueID, run.State, run.CurrentNodeKey)
+	fmt.Fprintf(stdout, "%s\t%s\t%s\n", run.TaskID, run.State, run.CurrentNodeKey)
 	return 0
 }
 
-func runIssueState(args []string, stdout, stderr io.Writer) int {
-	parsed, issueRef, code := parseScopedIssueAPICommand(args, stderr, "issue state", 2, "usage: flow issue state [flags] ISSUE_ID triage|backlog|up_next|closed|rejected")
+func runTaskState(args []string, stdout, stderr io.Writer) int {
+	parsed, taskRef, code := parseScopedTaskAPICommand(args, stderr, "task state", 2, "usage: flow task state [flags] TASK_ID triage|backlog|up_next|closed|rejected")
 	if code != 0 {
 		return code
 	}
-	issue, err := parsed.client.SetIssueState(issueRef, coordinator.IssueState(parsed.flags.Arg(1)))
+	task, err := parsed.client.SetTaskState(taskRef, coordinator.TaskState(parsed.flags.Arg(1)))
 	if err != nil {
-		fmt.Fprintf(stderr, "set issue state: %v\n", err)
+		fmt.Fprintf(stderr, "set task state: %v\n", err)
 		return 1
 	}
 
-	printIssueLine(stdout, issue)
+	printTaskLine(stdout, task)
 	return 0
 }
 
-func runIssueReset(args []string, stdout, stderr io.Writer) int {
-	parsed, issueRef, code := parseScopedIssueAPICommand(args, stderr, "issue reset", 1, "usage: flow issue reset [flags] ISSUE_ID")
+func runTaskReset(args []string, stdout, stderr io.Writer) int {
+	parsed, taskRef, code := parseScopedTaskAPICommand(args, stderr, "task reset", 1, "usage: flow task reset [flags] TASK_ID")
 	if code != 0 {
 		return code
 	}
-	issue, err := parsed.client.ResetIssue(issueRef)
+	task, err := parsed.client.ResetTask(taskRef)
 	if err != nil {
-		fmt.Fprintf(stderr, "reset issue: %v\n", err)
+		fmt.Fprintf(stderr, "reset task: %v\n", err)
 		return 1
 	}
 
-	printIssueLine(stdout, issue)
+	printTaskLine(stdout, task)
 	return 0
 }
 
-func runIssueDone(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("issue done", flag.ContinueOnError)
+func runTaskDone(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("task done", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
 	var resolution string
@@ -787,7 +787,7 @@ func runIssueDone(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "issue id is required")
+		fmt.Fprintln(stderr, "task id is required")
 		return 2
 	}
 	client, err := newAPIClient(apiFlags)
@@ -795,36 +795,36 @@ func runIssueDone(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
-	client, issueRef := scopeClientForRef(client, flags.Arg(0))
-	issue, err := client.ForceDone(issueRef, coordinator.DoneResolution(resolution), note)
+	client, taskRef := scopeClientForRef(client, flags.Arg(0))
+	task, err := client.ForceDone(taskRef, coordinator.DoneResolution(resolution), note)
 	if err != nil {
-		fmt.Fprintf(stderr, "complete issue: %v\n", err)
+		fmt.Fprintf(stderr, "complete task: %v\n", err)
 		return 1
 	}
-	printIssueLine(stdout, issue)
+	printTaskLine(stdout, task)
 	return 0
 }
 
-func runIssueReopen(args []string, stdout, stderr io.Writer) int {
-	parsed, issueRef, code := parseScopedIssueAPICommand(args, stderr, "issue reopen", 1, "usage: flow issue reopen [flags] ISSUE_ID")
+func runTaskReopen(args []string, stdout, stderr io.Writer) int {
+	parsed, taskRef, code := parseScopedTaskAPICommand(args, stderr, "task reopen", 1, "usage: flow task reopen [flags] TASK_ID")
 	if code != 0 {
 		return code
 	}
-	issue, err := parsed.client.ReopenIssue(issueRef)
+	task, err := parsed.client.ReopenTask(taskRef)
 	if err != nil {
-		fmt.Fprintf(stderr, "reopen issue: %v\n", err)
+		fmt.Fprintf(stderr, "reopen task: %v\n", err)
 		return 1
 	}
-	printIssueLine(stdout, issue)
+	printTaskLine(stdout, task)
 	return 0
 }
 
-func runIssueWorkflow(args []string, stdout, stderr io.Writer) int {
-	parsed, issueRef, code := parseScopedIssueAPICommand(args, stderr, "issue workflow", 1, "usage: flow issue workflow [flags] ISSUE_ID")
+func runTaskWorkflow(args []string, stdout, stderr io.Writer) int {
+	parsed, taskRef, code := parseScopedTaskAPICommand(args, stderr, "task workflow", 1, "usage: flow task workflow [flags] TASK_ID")
 	if code != 0 {
 		return code
 	}
-	detail, err := parsed.client.GetWorkflow(issueRef)
+	detail, err := parsed.client.GetWorkflow(taskRef)
 	if err != nil {
 		fmt.Fprintf(stderr, "get workflow: %v\n", err)
 		return 1
@@ -838,8 +838,8 @@ func runIssueWorkflow(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runIssueRespond(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("issue respond", flag.ContinueOnError)
+func runTaskRespond(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("task respond", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
 	var nodeRunID string
@@ -852,7 +852,7 @@ func runIssueRespond(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if flags.NArg() != 1 || strings.TrimSpace(nodeRunID) == "" || strings.TrimSpace(outcome) == "" {
-		fmt.Fprintln(stderr, "usage: flow issue respond [flags] ISSUE_ID --node-run NODE_RUN_ID --outcome OUTCOME [--feedback TEXT]")
+		fmt.Fprintln(stderr, "usage: flow task respond [flags] TASK_ID --node-run NODE_RUN_ID --outcome OUTCOME [--feedback TEXT]")
 		return 2
 	}
 	client, err := newAPIClient(apiFlags)
@@ -860,18 +860,18 @@ func runIssueRespond(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
-	client, issueRef := scopeClientForRef(client, flags.Arg(0))
-	result, err := client.RespondWorkflow(issueRef, nodeRunID, outcome, feedback)
+	client, taskRef := scopeClientForRef(client, flags.Arg(0))
+	result, err := client.RespondWorkflow(taskRef, nodeRunID, outcome, feedback)
 	if err != nil {
 		fmt.Fprintf(stderr, "respond to workflow: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "%s\t%s\t%s\n", result.Run.IssueID, result.Run.State, result.Run.CurrentNodeKey)
+	fmt.Fprintf(stdout, "%s\t%s\t%s\n", result.Run.TaskID, result.Run.State, result.Run.CurrentNodeKey)
 	return 0
 }
 
-func runIssueBudget(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("issue budget", flag.ContinueOnError)
+func runTaskBudget(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("task budget", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
 	var additional int
@@ -880,7 +880,7 @@ func runIssueBudget(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if flags.NArg() != 1 || additional < 1 {
-		fmt.Fprintln(stderr, "usage: flow issue budget [flags] ISSUE_ID --additional N")
+		fmt.Fprintln(stderr, "usage: flow task budget [flags] TASK_ID --additional N")
 		return 2
 	}
 	client, err := newAPIClient(apiFlags)
@@ -888,66 +888,66 @@ func runIssueBudget(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
-	client, issueRef := scopeClientForRef(client, flags.Arg(0))
-	run, err := client.ExtendWorkflowBudget(issueRef, additional)
+	client, taskRef := scopeClientForRef(client, flags.Arg(0))
+	run, err := client.ExtendWorkflowBudget(taskRef, additional)
 	if err != nil {
 		fmt.Fprintf(stderr, "extend workflow budget: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "%s\t%d/%d\n", run.IssueID, run.TransitionsUsed, run.TransitionBudget)
+	fmt.Fprintf(stdout, "%s\t%d/%d\n", run.TaskID, run.TransitionsUsed, run.TransitionBudget)
 	return 0
 }
 
-func runIssueClose(args []string, stdout, stderr io.Writer) int {
-	parsed, issueRef, code := parseScopedIssueAPICommand(args, stderr, "issue close", 1, "issue id is required")
+func runTaskClose(args []string, stdout, stderr io.Writer) int {
+	parsed, taskRef, code := parseScopedTaskAPICommand(args, stderr, "task close", 1, "task id is required")
 	if code != 0 {
 		return code
 	}
-	issue, err := parsed.client.CloseIssue(issueRef)
+	task, err := parsed.client.CloseTask(taskRef)
 	if err != nil {
-		fmt.Fprintf(stderr, "close issue: %v\n", err)
+		fmt.Fprintf(stderr, "close task: %v\n", err)
 		return 1
 	}
 
-	printIssueLine(stdout, issue)
+	printTaskLine(stdout, task)
 	return 0
 }
 
-func runIssueTriage(args []string, stdout, stderr io.Writer) int {
-	parsed, issueRef, code := parseScopedIssueAPICommand(args, stderr, "issue triage", 2, "usage: flow issue triage [flags] ISSUE_ID accepted|rejected")
+func runTaskTriage(args []string, stdout, stderr io.Writer) int {
+	parsed, taskRef, code := parseScopedTaskAPICommand(args, stderr, "task triage", 2, "usage: flow task triage [flags] TASK_ID accepted|rejected")
 	if code != 0 {
 		return code
 	}
-	issue, err := parsed.client.TriageIssue(issueRef, coordinator.TriageState(parsed.flags.Arg(1)))
+	task, err := parsed.client.TriageTask(taskRef, coordinator.TriageState(parsed.flags.Arg(1)))
 	if err != nil {
-		fmt.Fprintf(stderr, "triage issue: %v\n", err)
+		fmt.Fprintf(stderr, "triage task: %v\n", err)
 		return 1
 	}
 
-	printIssueLine(stdout, issue)
+	printTaskLine(stdout, task)
 	return 0
 }
 
-func runIssueLink(args []string, stdout, stderr io.Writer) int {
-	parsed, sourceRef, targetRef, kind, code := parseIssueRelationCommand(args, stderr, "issue link")
+func runTaskLink(args []string, stdout, stderr io.Writer) int {
+	parsed, sourceRef, targetRef, kind, code := parseTaskRelationCommand(args, stderr, "task link")
 	if code != 0 {
 		return code
 	}
-	if err := parsed.client.LinkIssues(sourceRef, kind, targetRef); err != nil {
-		fmt.Fprintf(stderr, "link issues: %v\n", err)
+	if err := parsed.client.LinkTasks(sourceRef, kind, targetRef); err != nil {
+		fmt.Fprintf(stderr, "link tasks: %v\n", err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "%s\t%s\t%s\n", sourceRef, kind, targetRef)
 	return 0
 }
 
-func runIssueUnlink(args []string, stdout, stderr io.Writer) int {
-	parsed, sourceRef, targetRef, kind, code := parseIssueRelationCommand(args, stderr, "issue unlink")
+func runTaskUnlink(args []string, stdout, stderr io.Writer) int {
+	parsed, sourceRef, targetRef, kind, code := parseTaskRelationCommand(args, stderr, "task unlink")
 	if code != 0 {
 		return code
 	}
-	if err := parsed.client.UnlinkIssues(sourceRef, kind, targetRef); err != nil {
-		fmt.Fprintf(stderr, "unlink issues: %v\n", err)
+	if err := parsed.client.UnlinkTasks(sourceRef, kind, targetRef); err != nil {
+		fmt.Fprintf(stderr, "unlink tasks: %v\n", err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "%s\t%s\t%s\n", sourceRef, kind, targetRef)
@@ -1005,11 +1005,11 @@ func runUI(args []string, stdout, stderr io.Writer) int {
 }
 
 func runChecks(args []string, stdout, stderr io.Writer) int {
-	parsed, issueRef, code := parseScopedIssueAPICommand(args, stderr, "checks", 1, "usage: flow checks [flags] ISSUE_ID")
+	parsed, taskRef, code := parseScopedTaskAPICommand(args, stderr, "checks", 1, "usage: flow checks [flags] TASK_ID")
 	if code != 0 {
 		return code
 	}
-	result, err := parsed.client.ListChecks(issueRef)
+	result, err := parsed.client.ListChecks(taskRef)
 	if err != nil {
 		fmt.Fprintf(stderr, "list checks: %v\n", err)
 		return 1
@@ -1023,11 +1023,11 @@ func runChecks(args []string, stdout, stderr io.Writer) int {
 }
 
 func runTransitions(args []string, stdout, stderr io.Writer) int {
-	parsed, issueRef, code := parseScopedIssueAPICommand(args, stderr, "transitions", 1, "usage: flow transitions [flags] ISSUE_ID")
+	parsed, taskRef, code := parseScopedTaskAPICommand(args, stderr, "transitions", 1, "usage: flow transitions [flags] TASK_ID")
 	if code != 0 {
 		return code
 	}
-	transitions, err := parsed.client.ListTransitions(issueRef)
+	transitions, err := parsed.client.ListTransitions(taskRef)
 	if err != nil {
 		fmt.Fprintf(stderr, "list transitions: %v\n", err)
 		return 1
@@ -1040,11 +1040,11 @@ func runTransitions(args []string, stdout, stderr io.Writer) int {
 }
 
 func printTransitionLine(out io.Writer, entry coordinator.WorkflowTransition) {
-	from := entry.FromIssueState
+	from := entry.FromTaskState
 	if from == "" {
 		from = "-"
 	}
-	to := entry.ToIssueState
+	to := entry.ToTaskState
 	if entry.FromNodeKey != "" || entry.ToNodeKey != "" {
 		from = entry.FromNodeKey
 		to = entry.ToNodeKey
@@ -1081,11 +1081,11 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 }
 
 func runReviewRun(args []string, stdout, stderr io.Writer) int {
-	parsed, issueRef, code := parseScopedIssueAPICommand(args, stderr, "review run", 1, "usage: flow review run [flags] ISSUE_ID")
+	parsed, taskRef, code := parseScopedTaskAPICommand(args, stderr, "review run", 1, "usage: flow review run [flags] TASK_ID")
 	if code != 0 {
 		return code
 	}
-	result, err := parsed.client.RunReview(issueRef)
+	result, err := parsed.client.RunReview(taskRef)
 	if err != nil {
 		fmt.Fprintf(stderr, "run review: %v\n", err)
 		return 1
@@ -1639,8 +1639,8 @@ func runFetchPrompt(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	applySessionEnvironment(apiFlags, nil)
-	if err := enrichPromptIssueContext(&input, apiFlags); err != nil {
-		fmt.Fprintf(stderr, "fetch prompt: warning: %v; continuing without issue context\n", err)
+	if err := enrichPromptTaskContext(&input, apiFlags); err != nil {
+		fmt.Fprintf(stderr, "fetch prompt: warning: %v; continuing without task context\n", err)
 	}
 	rendered, err := flowprompt.Build(input)
 	if err != nil {
@@ -1652,24 +1652,24 @@ func runFetchPrompt(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func enrichPromptIssueContext(input *flowprompt.Input, apiFlags *apiFlagValues) error {
-	issueID := strings.TrimSpace(input.IssueID)
-	if issueID == "" || !promptIssueFetchConfigured(apiFlags) {
+func enrichPromptTaskContext(input *flowprompt.Input, apiFlags *apiFlagValues) error {
+	taskID := strings.TrimSpace(input.TaskID)
+	if taskID == "" || !promptTaskFetchConfigured(apiFlags) {
 		return nil
 	}
 
 	client, err := newAPIClient(apiFlags)
 	if err != nil {
-		return fmt.Errorf("create client for issue context: %w", err)
+		return fmt.Errorf("create client for task context: %w", err)
 	}
-	issue, statusLog, err := client.GetIssueWithStatus(issueID)
+	task, statusLog, err := client.GetTaskWithStatus(taskID)
 	if err != nil {
-		return fmt.Errorf("fetch issue context: %w", err)
+		return fmt.Errorf("fetch task context: %w", err)
 	}
 
-	input.IssueTitle = issue.Title
-	input.IssueBody = issue.Body
-	input.IssueAcceptanceCriteria = issue.AcceptanceCriteria
+	input.TaskTitle = task.Title
+	input.TaskBody = task.Body
+	input.TaskAcceptanceCriteria = task.AcceptanceCriteria
 	input.HumanAttentionContext = humanAttentionPromptContext(statusLog)
 	// Resolve the flow prompt context: for authors, the current phase's role
 	// instructions (from the frozen agent-def snapshot), human gate feedback,
@@ -1682,8 +1682,8 @@ func enrichPromptIssueContext(input *flowprompt.Input, apiFlags *apiFlagValues) 
 		checkName = strings.TrimSpace(input.CheckName)
 	}
 	var priorPhaseHandoffs string
-	if promptContext, err := client.GetPromptContext(issueID, checkName); err != nil {
-		slog.Debug("skip flow phase prompt context", "issue_id", issueID, "error", err)
+	if promptContext, err := client.GetPromptContext(taskID, checkName); err != nil {
+		slog.Debug("skip flow phase prompt context", "task_id", taskID, "error", err)
 	} else {
 		input.RoleInstructionsOverride = promptContext.RoleInstructions
 		if promptInputRole(*input) == flowprompt.RoleAuthor {
@@ -1750,14 +1750,14 @@ func combinePriorHandoffs(phaseHandoffs string, changeHandoff string) string {
 // targeted review rather than a blind relaunch). It is best-effort: the marker
 // is supplementary guidance, so a lookup failure must never strip the prompt.
 func enrichPromptCompletionAssessment(input *flowprompt.Input, client *flowclient.Client) {
-	issueID := strings.TrimSpace(input.IssueID)
+	taskID := strings.TrimSpace(input.TaskID)
 	checkName := strings.TrimSpace(input.CheckName)
-	if issueID == "" || checkName == "" {
+	if taskID == "" || checkName == "" {
 		return
 	}
-	result, err := client.GetCheck(issueID, checkName)
+	result, err := client.GetCheck(taskID, checkName)
 	if err != nil {
-		slog.Debug("skip completion-assessment detection", "issue_id", issueID, "check", checkName, "error", err)
+		slog.Debug("skip completion-assessment detection", "task_id", taskID, "check", checkName, "error", err)
 		return
 	}
 	if strings.TrimSpace(result.Check.Details) == coordinator.CompletionAssessmentCheckMarker {
@@ -1793,12 +1793,12 @@ func humanAttentionPromptContext(statusLog []coordinator.StatusLogEntry) string 
 }
 
 func enrichPromptAuthorReviewContext(input *flowprompt.Input, client *flowclient.Client) error {
-	issueID := strings.TrimSpace(input.IssueID)
-	if issueID == "" {
+	taskID := strings.TrimSpace(input.TaskID)
+	if taskID == "" {
 		return nil
 	}
 
-	checks, err := client.ListChecks(issueID)
+	checks, err := client.ListChecks(taskID)
 	if err != nil {
 		return fmt.Errorf("fetch review check context: %w", err)
 	}
@@ -1872,7 +1872,7 @@ func promptReviewThread(thread coordinator.ReviewThread) flowprompt.ReviewThread
 	return rendered
 }
 
-func promptIssueFetchConfigured(apiFlags *apiFlagValues) bool {
+func promptTaskFetchConfigured(apiFlags *apiFlagValues) bool {
 	return strings.TrimSpace(apiFlags.serverURL) != "" || strings.TrimSpace(apiFlags.configPath) != ""
 }
 
@@ -2268,7 +2268,7 @@ func handoffWriteBody(path string, input handoff.TemplateInput) (string, error) 
 		}
 		return string(data), nil
 	}
-	input.IssueID = os.Getenv("FLOW_ISSUE_ID")
+	input.TaskID = os.Getenv("FLOW_TASK_ID")
 	input.ChangeID = os.Getenv("FLOW_CHANGE_ID")
 	input.SessionID = os.Getenv("FLOW_SESSION_ID")
 	input.Branch = os.Getenv("FLOW_BRANCH")
@@ -2312,7 +2312,7 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "%d\t%s\t%s\n", status.ID, status.IssueID, status.Message)
+	fmt.Fprintf(stdout, "%d\t%s\t%s\n", status.ID, status.TaskID, status.Message)
 	return 0
 }
 
@@ -2498,15 +2498,15 @@ func runComplete(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("complete", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
-	var issueID string
+	var taskID string
 	var nodeRunID string
 	var kind string
 	var summaryFile string
 	var outputFile string
 	var clientKey string
-	flags.StringVar(&issueID, "issue", "", "issue id (default FLOW_ISSUE_ID)")
+	flags.StringVar(&taskID, "task", "", "task id (default FLOW_TASK_ID)")
 	flags.StringVar(&nodeRunID, "node-run", "", "node run id (default FLOW_NODE_RUN_ID)")
-	flags.StringVar(&kind, "kind", "", "handoff|change|issue_set (default FLOW_ARTIFACT_KIND)")
+	flags.StringVar(&kind, "kind", "", "handoff|change|task_set (default FLOW_ARTIFACT_KIND)")
 	flags.StringVar(&summaryFile, "summary-file", "", "Markdown summary file")
 	flags.StringVar(&outputFile, "output-file", "", "JSON artifact payload file")
 	flags.StringVar(&clientKey, "client-key", "", "idempotency key (default node run id)")
@@ -2517,8 +2517,8 @@ func runComplete(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "complete does not accept positional arguments")
 		return 2
 	}
-	if strings.TrimSpace(issueID) == "" {
-		issueID = os.Getenv("FLOW_ISSUE_ID")
+	if strings.TrimSpace(taskID) == "" {
+		taskID = os.Getenv("FLOW_TASK_ID")
 	}
 	if strings.TrimSpace(nodeRunID) == "" {
 		nodeRunID = os.Getenv("FLOW_NODE_RUN_ID")
@@ -2526,8 +2526,8 @@ func runComplete(args []string, stdout, stderr io.Writer) int {
 	if strings.TrimSpace(kind) == "" {
 		kind = os.Getenv("FLOW_ARTIFACT_KIND")
 	}
-	if strings.TrimSpace(issueID) == "" || strings.TrimSpace(nodeRunID) == "" || strings.TrimSpace(kind) == "" {
-		fmt.Fprintln(stderr, "issue, node run, and artifact kind are required")
+	if strings.TrimSpace(taskID) == "" || strings.TrimSpace(nodeRunID) == "" || strings.TrimSpace(kind) == "" {
+		fmt.Fprintln(stderr, "task, node run, and artifact kind are required")
 		return 2
 	}
 	if strings.TrimSpace(summaryFile) == "" {
@@ -2594,7 +2594,7 @@ func runComplete(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
-	artifact, replayed, err := client.CreateWorkflowArtifact(issueID, coordinator.CreateWorkflowArtifactInput{
+	artifact, replayed, err := client.CreateWorkflowArtifact(taskID, coordinator.CreateWorkflowArtifactInput{
 		NodeRunID: nodeRunID, Kind: coordinator.ArtifactKind(kind), SummaryMarkdown: string(summary),
 		Payload: payload, ClientKey: clientKey,
 	})
@@ -2602,7 +2602,7 @@ func runComplete(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create workflow artifact: %v\n", err)
 		return 1
 	}
-	result, err := client.CompleteWorkflowAgentNode(issueID, nodeRunID, artifact.ID)
+	result, err := client.CompleteWorkflowAgentNode(taskID, nodeRunID, artifact.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "complete workflow node: %v\n", err)
 		return 1
@@ -2612,7 +2612,7 @@ func runComplete(args []string, stdout, stderr io.Writer) int {
 }
 
 func runMerge(args []string, stdout, stderr io.Writer) int {
-	parsed, code := parseAPICommand(args, stderr, "merge", 1, "usage: flow merge [flags] ISSUE_ID|CHANGE_ID")
+	parsed, code := parseAPICommand(args, stderr, "merge", 1, "usage: flow merge [flags] TASK_ID|CHANGE_ID")
 	if code != 0 {
 		return code
 	}
@@ -2622,14 +2622,14 @@ func runMerge(args []string, stdout, stderr io.Writer) int {
 	if strings.HasPrefix(target, "ch-") {
 		result, err = client.MergeChange(target)
 	} else {
-		result, err = client.MergeIssue(target)
+		result, err = client.MergeTask(target)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "merge: %v\n", err)
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", result.Issue.ID, result.Change.ID, result.MergeSHA, result.HeadSHA)
+	fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", result.Task.ID, result.Change.ID, result.MergeSHA, result.HeadSHA)
 	return 0
 }
 
@@ -2712,19 +2712,19 @@ func printUsage(out io.Writer) {
   flow [--log-level LEVEL] COMMAND
   flow init [--repo PATH] [--name NAME] [--base BRANCH]
   flow doctor [--db PATH] [--config PATH]
-  flow issue create --title TITLE [--flow FLOW] [--file PATH]
-  flow issue attach ISSUE_ID --file PATH [--stage initial|author|reviewer|verifier]
-  flow issue list [--state unscheduled,scheduled,in_progress,done]
-  flow issue show [--project PROJECT] ISSUE_ID|PROJECT/ISSUE_ID
-  flow issue reply ISSUE_ID MESSAGE
-  flow issue schedule ISSUE_ID
-  flow issue reset|reopen|workflow ISSUE_ID
-  flow issue respond ISSUE_ID --node-run NODE_RUN_ID --outcome OUTCOME [--feedback TEXT]
-  flow issue budget ISSUE_ID --additional N
-  flow issue done ISSUE_ID [--resolution RESOLUTION]
+  flow task create --title TITLE [--flow FLOW] [--file PATH]
+  flow task attach TASK_ID --file PATH [--stage initial|author|reviewer|verifier]
+  flow task list [--state unscheduled,scheduled,in_progress,done]
+  flow task show [--project PROJECT] TASK_ID|PROJECT/TASK_ID
+  flow task reply TASK_ID MESSAGE
+  flow task schedule TASK_ID
+  flow task reset|reopen|workflow TASK_ID
+  flow task respond TASK_ID --node-run NODE_RUN_ID --outcome OUTCOME [--feedback TEXT]
+  flow task budget TASK_ID --additional N
+  flow task done TASK_ID [--resolution RESOLUTION]
   flow board
-  flow checks ISSUE_ID
-  flow transitions ISSUE_ID
+  flow checks TASK_ID
+  flow transitions TASK_ID
   flow workers
   flow jobs
   flow ui
@@ -2750,23 +2750,23 @@ API override flags on owner commands:
 `)
 }
 
-func printIssueUsage(out io.Writer) {
+func printTaskUsage(out io.Writer) {
 	fmt.Fprint(out, `Usage:
-  flow issue create --title TITLE [--flow FLOW] [--file PATH]
-  flow issue attach [flags] ISSUE_ID
-  flow issue list
-  flow issue show [flags] ISSUE_ID
-  flow issue edit [flags] ISSUE_ID
-  flow issue reply [flags] ISSUE_ID [MESSAGE]
-  flow issue schedule [flags] ISSUE_ID
-  flow issue reset [flags] ISSUE_ID
-  flow issue done [flags] ISSUE_ID [--resolution completed|rejected|abandoned|cancelled|failed]
-  flow issue reopen [flags] ISSUE_ID
-  flow issue workflow [flags] ISSUE_ID
-  flow issue respond [flags] ISSUE_ID --node-run NODE_RUN_ID --outcome OUTCOME
-  flow issue budget [flags] ISSUE_ID --additional N
-  flow issue link [flags] SOURCE_ID blocks|parent_of|related_to TARGET_ID
-  flow issue unlink [flags] SOURCE_ID blocks|parent_of|related_to TARGET_ID
+  flow task create --title TITLE [--flow FLOW] [--file PATH]
+  flow task attach [flags] TASK_ID
+  flow task list
+  flow task show [flags] TASK_ID
+  flow task edit [flags] TASK_ID
+  flow task reply [flags] TASK_ID [MESSAGE]
+  flow task schedule [flags] TASK_ID
+  flow task reset [flags] TASK_ID
+  flow task done [flags] TASK_ID [--resolution completed|rejected|abandoned|cancelled|failed]
+  flow task reopen [flags] TASK_ID
+  flow task workflow [flags] TASK_ID
+  flow task respond [flags] TASK_ID --node-run NODE_RUN_ID --outcome OUTCOME
+  flow task budget [flags] TASK_ID --additional N
+  flow task link [flags] SOURCE_ID blocks|parent_of|related_to TARGET_ID
+  flow task unlink [flags] SOURCE_ID blocks|parent_of|related_to TARGET_ID
 `)
 }
 
@@ -2779,7 +2779,7 @@ func printHandoffUsage(out io.Writer) {
 
 func printReviewUsage(out io.Writer) {
 	fmt.Fprint(out, `Usage:
-  flow review run [flags] ISSUE_ID
+  flow review run [flags] TASK_ID
 `)
 }
 
@@ -2881,17 +2881,17 @@ func parseAPICommand(args []string, stderr io.Writer, name string, positionalCou
 	return parsedAPICommand{flags: flags, client: client}, 0
 }
 
-func parseScopedIssueAPICommand(args []string, stderr io.Writer, name string, positionalCount int, positionalError string) (parsedAPICommand, string, int) {
+func parseScopedTaskAPICommand(args []string, stderr io.Writer, name string, positionalCount int, positionalError string) (parsedAPICommand, string, int) {
 	parsed, code := parseAPICommand(args, stderr, name, positionalCount, positionalError)
 	if code != 0 {
 		return parsedAPICommand{}, "", code
 	}
-	client, issueRef := scopeClientForRef(parsed.client, parsed.flags.Arg(0))
+	client, taskRef := scopeClientForRef(parsed.client, parsed.flags.Arg(0))
 	parsed.client = client
-	return parsed, issueRef, 0
+	return parsed, taskRef, 0
 }
 
-func parseIssueRelationCommand(args []string, stderr io.Writer, name string) (parsedAPICommand, string, string, coordinator.RelationKind, int) {
+func parseTaskRelationCommand(args []string, stderr io.Writer, name string) (parsedAPICommand, string, string, coordinator.RelationKind, int) {
 	parsed, code := parseAPICommand(args, stderr, name, 3, "usage: flow "+name+" [flags] SOURCE_ID blocks|parent_of|related_to TARGET_ID")
 	if code != 0 {
 		return parsedAPICommand{}, "", "", "", code
@@ -2900,7 +2900,7 @@ func parseIssueRelationCommand(args []string, stderr io.Writer, name string) (pa
 	sourceProject, sourceID := splitQualifiedRef(parsed.flags.Arg(0))
 	targetProject, targetID := splitQualifiedRef(parsed.flags.Arg(2))
 	if sourceProject != "" && targetProject != "" && sourceProject != targetProject {
-		fmt.Fprintln(stderr, "source and target issues must be in the same project")
+		fmt.Fprintln(stderr, "source and target tasks must be in the same project")
 		return parsedAPICommand{}, "", "", "", 2
 	}
 	if sourceProject != "" {
@@ -3006,7 +3006,7 @@ func resolveProjectRef(values *apiFlagValues, client *flowclient.Client) string 
 	return project.ID
 }
 
-// splitQualifiedRef peels an optional "project/" qualifier off an issue or
+// splitQualifiedRef peels an optional "project/" qualifier off an task or
 // change ref: "myproj/i-0001" addresses i-0001 in project myproj.
 func splitQualifiedRef(ref string) (string, string) {
 	projectRef, id, found := strings.Cut(ref, "/")
@@ -3031,32 +3031,32 @@ func scopeClientForRef(client *flowclient.Client, ref string) (*flowclient.Clien
 	return client.WithProject(projectRef), id
 }
 
-func uploadIssueAttachmentFile(client *flowclient.Client, issueID string, filePath string, stage coordinator.IssueAttachmentStage) (coordinator.IssueAttachment, error) {
+func uploadTaskAttachmentFile(client *flowclient.Client, taskID string, filePath string, stage coordinator.TaskAttachmentStage) (coordinator.TaskAttachment, error) {
 	filePath = strings.TrimSpace(filePath)
 	if filePath == "" {
-		return coordinator.IssueAttachment{}, errors.New("attachment file path is required")
+		return coordinator.TaskAttachment{}, errors.New("attachment file path is required")
 	}
 	file, err := os.Open(filePath)
 	if err != nil {
-		return coordinator.IssueAttachment{}, err
+		return coordinator.TaskAttachment{}, err
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return coordinator.IssueAttachment{}, err
+		return coordinator.TaskAttachment{}, err
 	}
 	if info.IsDir() {
-		return coordinator.IssueAttachment{}, fmt.Errorf("%s is a directory", filePath)
+		return coordinator.TaskAttachment{}, fmt.Errorf("%s is a directory", filePath)
 	}
 	contentType, err := detectAttachmentContentType(file, filePath)
 	if err != nil {
-		return coordinator.IssueAttachment{}, err
+		return coordinator.TaskAttachment{}, err
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return coordinator.IssueAttachment{}, err
+		return coordinator.TaskAttachment{}, err
 	}
 
-	return client.UploadIssueAttachment(issueID, flowclient.UploadIssueAttachmentInput{
+	return client.UploadTaskAttachment(taskID, flowclient.UploadTaskAttachmentInput{
 		Stage:       stage,
 		Filename:    filepath.Base(filePath),
 		ContentType: contentType,
@@ -3081,7 +3081,7 @@ func detectAttachmentContentType(file *os.File, filePath string) (string, error)
 	return http.DetectContentType(prefix[:n]), nil
 }
 
-func issueAttachmentStageFromCLI(stage string) (coordinator.IssueAttachmentStage, error) {
+func taskAttachmentStageFromCLI(stage string) (coordinator.TaskAttachmentStage, error) {
 	stage = strings.TrimSpace(stage)
 	if stage == "" {
 		stage = strings.TrimSpace(os.Getenv("FLOW_ROLE"))
@@ -3089,17 +3089,17 @@ func issueAttachmentStageFromCLI(stage string) (coordinator.IssueAttachmentStage
 	if stage == "" {
 		stage = strings.TrimSpace(os.Getenv("FLOW_WORKER_ROLE"))
 	}
-	switch coordinator.IssueAttachmentStage(stage) {
-	case coordinator.IssueAttachmentStageInitial:
-		return coordinator.IssueAttachmentStageInitial, nil
-	case coordinator.IssueAttachmentStageAuthor:
-		return coordinator.IssueAttachmentStageAuthor, nil
-	case coordinator.IssueAttachmentStageReviewer:
-		return coordinator.IssueAttachmentStageReviewer, nil
-	case coordinator.IssueAttachmentStageVerifier:
-		return coordinator.IssueAttachmentStageVerifier, nil
+	switch coordinator.TaskAttachmentStage(stage) {
+	case coordinator.TaskAttachmentStageInitial:
+		return coordinator.TaskAttachmentStageInitial, nil
+	case coordinator.TaskAttachmentStageAuthor:
+		return coordinator.TaskAttachmentStageAuthor, nil
+	case coordinator.TaskAttachmentStageReviewer:
+		return coordinator.TaskAttachmentStageReviewer, nil
+	case coordinator.TaskAttachmentStageVerifier:
+		return coordinator.TaskAttachmentStageVerifier, nil
 	case "":
-		return coordinator.IssueAttachmentStageInitial, nil
+		return coordinator.TaskAttachmentStageInitial, nil
 	default:
 		return "", fmt.Errorf("must be one of initial, author, reviewer, or verifier")
 	}
@@ -3163,32 +3163,32 @@ func nowUTC() time.Time {
 	return time.Now().UTC()
 }
 
-func printIssueLine(out io.Writer, issue coordinator.Issue) {
+func printTaskLine(out io.Writer, task coordinator.Task) {
 	resolution := ""
-	if issue.DoneResolution != nil {
-		resolution = string(*issue.DoneResolution)
+	if task.DoneResolution != nil {
+		resolution = string(*task.DoneResolution)
 	}
-	fmt.Fprintf(out, "%s\t%s\t%s\t%s\n", issue.ID, issueLifecycleLabel(issue), resolution, issue.Title)
+	fmt.Fprintf(out, "%s\t%s\t%s\t%s\n", task.ID, taskLifecycleLabel(task), resolution, task.Title)
 }
 
-func issueLifecycleLabel(issue coordinator.Issue) string {
-	if issue.State == nil {
+func taskLifecycleLabel(task coordinator.Task) string {
+	if task.State == nil {
 		return "unscheduled"
 	}
-	return string(*issue.State)
+	return string(*task.State)
 }
 
-func printIssueAttachmentLine(out io.Writer, attachment coordinator.IssueAttachment) {
+func printTaskAttachmentLine(out io.Writer, attachment coordinator.TaskAttachment) {
 	fmt.Fprintf(out, "%s\t%s\t%s\t%d\n", attachment.ID, attachment.Stage, attachment.Filename, attachment.SizeBytes)
 }
 
-func printIssueDetail(out io.Writer, issue coordinator.Issue) {
-	printIssueLine(out, issue)
-	if issue.Body != "" {
-		fmt.Fprintf(out, "\n%s\n", issue.Body)
+func printTaskDetail(out io.Writer, task coordinator.Task) {
+	printTaskLine(out, task)
+	if task.Body != "" {
+		fmt.Fprintf(out, "\n%s\n", task.Body)
 	}
-	if issue.AcceptanceCriteria != "" {
-		fmt.Fprintf(out, "\nacceptance_criteria:\n%s\n", issue.AcceptanceCriteria)
+	if task.AcceptanceCriteria != "" {
+		fmt.Fprintf(out, "\nacceptance_criteria:\n%s\n", task.AcceptanceCriteria)
 	}
 }
 
@@ -3202,20 +3202,20 @@ func printBoard(out io.Writer, result coordinator.BoardResult) {
 	printBoardLane(out, "in_progress", result.Board.InProgress, result.LaneStates, result.WaitReasons, blocked)
 }
 
-func printBoardLane(out io.Writer, name string, issues []coordinator.Issue, states map[string]coordinator.LaneState, waitReasons map[string]coordinator.WaitReason, blocked map[string]bool) {
+func printBoardLane(out io.Writer, name string, tasks []coordinator.Task, states map[string]coordinator.LaneState, waitReasons map[string]coordinator.WaitReason, blocked map[string]bool) {
 	fmt.Fprintf(out, "%s:\n", name)
-	for _, issue := range issues {
+	for _, task := range tasks {
 		annotations := ""
-		if state, ok := states[issue.ID]; ok && string(state) != issueLifecycleLabel(issue) {
+		if state, ok := states[task.ID]; ok && string(state) != taskLifecycleLabel(task) {
 			annotations += "\t[" + strings.ReplaceAll(string(state), "_", " ") + "]"
 		}
-		if reason := waitReasons[issue.ID]; reason != "" {
+		if reason := waitReasons[task.ID]; reason != "" {
 			annotations += "\t[" + strings.ReplaceAll(string(reason), "_", " ") + "]"
 		}
-		if blocked[issue.ID] {
+		if blocked[task.ID] {
 			annotations += "\t[blocked]"
 		}
-		fmt.Fprintf(out, "  %s\t%s\t%s%s\n", issue.ID, issueLifecycleLabel(issue), issue.Title, annotations)
+		fmt.Fprintf(out, "  %s\t%s\t%s%s\n", task.ID, taskLifecycleLabel(task), task.Title, annotations)
 	}
 }
 
@@ -3260,16 +3260,16 @@ func printWorkerLine(out io.Writer, worker flowworker.Worker) {
 }
 
 func printJobLine(out io.Writer, job flowworker.Job) {
-	issueID := ""
-	if job.IssueID != nil {
-		issueID = *job.IssueID
+	taskID := ""
+	if job.TaskID != nil {
+		taskID = *job.TaskID
 	}
-	fmt.Fprintf(out, "%s\t%s\t%s\t%s\tissue=%s\tpriority=%d\n",
+	fmt.Fprintf(out, "%s\t%s\t%s\t%s\ttask=%s\tpriority=%d\n",
 		job.ID,
 		job.State,
 		job.Role,
 		job.CapacityBucket,
-		issueID,
+		taskID,
 		job.Priority,
 	)
 }

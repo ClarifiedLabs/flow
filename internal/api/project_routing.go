@@ -121,12 +121,12 @@ func (s *Server) bundleForChange(ctx context.Context, principal coordinator.Prin
 	return nil, false
 }
 
-// bundleForChangeIssue resolves the owning bundle for the
-// /v2/changes/{issueID}/checks subroute, whose leading path segment is an
-// issue id (checks are keyed by issue) rather than a change id.
-func (s *Server) bundleForChangeIssue(ctx context.Context, principal coordinator.Principal, issueID string) (*projectServer, bool) {
+// bundleForChangeTask resolves the owning bundle for the
+// /v2/changes/{taskID}/checks subroute, whose leading path segment is an
+// task id (checks are keyed by task) rather than a change id.
+func (s *Server) bundleForChangeTask(ctx context.Context, principal coordinator.Principal, taskID string) (*projectServer, bool) {
 	for _, bundle := range s.scopedBundles(principal) {
-		if _, err := bundle.Issues.GetIssue(ctx, issueID); err == nil {
+		if _, err := bundle.Tasks.GetTask(ctx, taskID); err == nil {
 			return s.forBundle(bundle), true
 		}
 	}
@@ -165,7 +165,7 @@ func (s *Server) bundleForLease(ctx context.Context, principal coordinator.Princ
 }
 
 // changesSubpathIsChecks reports whether a /v2/changes/{id}/... path targets
-// the checks subroute, whose leading segment is an issue id.
+// the checks subroute, whose leading segment is an task id.
 func changesSubpathIsChecks(path string) bool {
 	rest := strings.TrimPrefix(path, "/v2/changes/")
 	_, sub, _ := strings.Cut(rest, "/")
@@ -201,7 +201,7 @@ func (s *Server) implicitProjectServer(principal coordinator.Principal) (*projec
 		return nil, errProjectNotFound
 	}
 
-	return nil, errors.New("multiple projects are registered; use /v2/projects/{project}/issues")
+	return nil, errors.New("multiple projects are registered; use /v2/projects/{project}/tasks")
 }
 
 func (s *Server) handleProjectsCollection(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
@@ -247,25 +247,25 @@ func (s *Server) handleProjectScopedPath(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusOK, projectResponse{Project: uiProjectFromRegistry(bundle.Project)})
 	case sub == "console":
 		ps.handleConsole(w, r, principal)
-	case sub == "issues":
+	case sub == "tasks":
 		switch r.Method {
 		case http.MethodGet:
 			if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
-				writeError(w, http.StatusForbidden, "forbidden", "issue read requires owner, session, or console token")
+				writeError(w, http.StatusForbidden, "forbidden", "task read requires owner, session, or console token")
 				return
 			}
-			ps.handleListIssues(w, requestWithPath(r, "/v2/issues"))
+			ps.handleListTasks(w, requestWithPath(r, "/v2/tasks"))
 		case http.MethodPost:
 			if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
-				writeError(w, http.StatusForbidden, "forbidden", "issue creation requires owner, session, or console token")
+				writeError(w, http.StatusForbidden, "forbidden", "task creation requires owner, session, or console token")
 				return
 			}
-			ps.handleCreateIssue(w, requestWithPath(r, "/v2/issues"), principal)
+			ps.handleCreateTask(w, requestWithPath(r, "/v2/tasks"), principal)
 		default:
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method is not allowed")
 		}
-	case strings.HasPrefix(sub, "issues/"):
-		ps.handleIssuePath(w, requestWithPath(r, "/v2/"+sub), principal)
+	case strings.HasPrefix(sub, "tasks/"):
+		ps.handleTaskPath(w, requestWithPath(r, "/v2/"+sub), principal)
 	case sub == "agent-defs" || strings.HasPrefix(sub, "agent-defs/"):
 		ps.handleAgentDefsPath(w, requestWithPath(r, "/v2/"+sub), principal)
 	case sub == "flows" || strings.HasPrefix(sub, "flows/"):
@@ -370,16 +370,16 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, projectResponse{Project: uiProjectFromRegistry(project), Created: true})
 }
 
-// uiIssueWithProject decorates an issue with its owning project for
-// aggregate responses; issue ids alone are ambiguous across projects.
-type uiIssueWithProject struct {
-	coordinator.Issue
+// uiTaskWithProject decorates an task with its owning project for
+// aggregate responses; task ids alone are ambiguous across projects.
+type uiTaskWithProject struct {
+	coordinator.Task
 	ProjectID   string `json:"project_id"`
 	ProjectName string `json:"project_name"`
 }
 
-type aggregateIssuesResponse struct {
-	Issues []uiIssueWithProject `json:"issues"`
+type aggregateTasksResponse struct {
+	Tasks []uiTaskWithProject `json:"tasks"`
 }
 
 type projectBoardResponse struct {
@@ -454,28 +454,28 @@ func (s *Server) projectFilterBundles(w http.ResponseWriter, r *http.Request, pr
 	return selected, true
 }
 
-func (s *Server) handleListIssuesAggregate(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
+func (s *Server) handleListTasksAggregate(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
 	bundles, ok := s.projectFilterBundles(w, r, principal)
 	if !ok {
 		return
 	}
 
-	filter, err := issueFilterFromQuery(r)
+	filter, err := taskFilterFromQuery(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_filter", err.Error())
 		return
 	}
 
-	response := aggregateIssuesResponse{Issues: []uiIssueWithProject{}}
+	response := aggregateTasksResponse{Tasks: []uiTaskWithProject{}}
 	for _, bundle := range bundles {
-		issues, err := bundle.Issues.ListIssues(r.Context(), filter)
+		tasks, err := bundle.Tasks.ListTasks(r.Context(), filter)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "list_issues_failed", err.Error())
+			writeError(w, http.StatusInternalServerError, "list_tasks_failed", err.Error())
 			return
 		}
-		for _, issue := range issues {
-			response.Issues = append(response.Issues, uiIssueWithProject{
-				Issue:       issue,
+		for _, task := range tasks {
+			response.Tasks = append(response.Tasks, uiTaskWithProject{
+				Task:        task,
 				ProjectID:   bundle.Project.ID,
 				ProjectName: bundle.Project.Name,
 			})
@@ -509,9 +509,9 @@ func (s *Server) handleBoardAggregate(w http.ResponseWriter, r *http.Request, pr
 	writeJSON(w, http.StatusOK, response)
 }
 
-// maxClosedIssueLimit caps a single /v2/done page so the unbounded history can
+// maxClosedTaskLimit caps a single /v2/done page so the unbounded history can
 // never be fetched in one request.
-const maxClosedIssueLimit = 200
+const maxClosedTaskLimit = 200
 
 func (s *Server) handleDoneAggregate(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
 	bundles, ok := s.projectFilterBundles(w, r, principal)
@@ -519,7 +519,7 @@ func (s *Server) handleDoneAggregate(w http.ResponseWriter, r *http.Request, pri
 		return
 	}
 
-	query, err := closedIssueQueryFromRequest(r)
+	query, err := closedTaskQueryFromRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
 		return
@@ -543,19 +543,19 @@ func (s *Server) handleDoneAggregate(w http.ResponseWriter, r *http.Request, pri
 	writeJSON(w, http.StatusOK, response)
 }
 
-// closedIssueQueryFromRequest parses the /v2/done query string into a bounded
-// ClosedIssueQuery (limit, keyset cursor, time window, outcome filter).
-func closedIssueQueryFromRequest(r *http.Request) (coordinator.ClosedIssueQuery, error) {
+// closedTaskQueryFromRequest parses the /v2/done query string into a bounded
+// ClosedTaskQuery (limit, keyset cursor, time window, outcome filter).
+func closedTaskQueryFromRequest(r *http.Request) (coordinator.ClosedTaskQuery, error) {
 	values := r.URL.Query()
-	query := coordinator.ClosedIssueQuery{}
+	query := coordinator.ClosedTaskQuery{}
 
 	if raw := strings.TrimSpace(values.Get("limit")); raw != "" {
 		limit, err := strconv.Atoi(raw)
 		if err != nil || limit <= 0 {
 			return query, fmt.Errorf("invalid limit %q", raw)
 		}
-		if limit > maxClosedIssueLimit {
-			limit = maxClosedIssueLimit
+		if limit > maxClosedTaskLimit {
+			limit = maxClosedTaskLimit
 		}
 		query.Limit = limit
 	}
@@ -616,21 +616,21 @@ func (s *Server) handleSidebar(w http.ResponseWriter, r *http.Request, principal
 		return
 	}
 
-	issueBundles, ok := s.projectFilterBundles(w, r, principal)
+	taskBundles, ok := s.projectFilterBundles(w, r, principal)
 	if !ok {
 		return
 	}
 
 	response := sidebarResponse{}
-	for _, bundle := range issueBundles {
-		result, err := bundle.Issues.BoardResult(r.Context())
+	for _, bundle := range taskBundles {
+		result, err := bundle.Tasks.BoardResult(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "sidebar_failed", err.Error())
 			return
 		}
 		addSidebarBoardCounts(&response, result)
 
-		closed, err := bundle.Issues.CountClosedIssues(r.Context())
+		closed, err := bundle.Tasks.CountClosedTasks(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "sidebar_failed", err.Error())
 			return

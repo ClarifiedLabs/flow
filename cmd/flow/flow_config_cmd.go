@@ -327,10 +327,10 @@ func runFlowsSetDefault(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// runPhase applies human gate decisions on an issue's paused work phase.
+// runPhase applies human gate decisions on an task's paused work phase.
 func runPhase(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: flow phase {approve ISSUE_ID|request-changes ISSUE_ID --feedback TEXT}")
+		fmt.Fprintln(stderr, "usage: flow phase {approve TASK_ID|request-changes TASK_ID --feedback TEXT}")
 		return 2
 	}
 	switch args[0] {
@@ -352,7 +352,7 @@ func runPhaseApprove(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "issue id is required")
+		fmt.Fprintln(stderr, "task id is required")
 		return 2
 	}
 	client, err := newAPIClient(apiFlags)
@@ -360,12 +360,12 @@ func runPhaseApprove(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
-	issue, err := client.ApproveWorkPhase(flags.Arg(0))
+	task, err := client.ApproveWorkPhase(flags.Arg(0))
 	if err != nil {
 		fmt.Fprintf(stderr, "approve phase: %v\n", err)
 		return 1
 	}
-	printIssueLine(stdout, issue)
+	printTaskLine(stdout, task)
 	return 0
 }
 
@@ -379,7 +379,7 @@ func runPhaseRequestChanges(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "issue id is required")
+		fmt.Fprintln(stderr, "task id is required")
 		return 2
 	}
 	if strings.TrimSpace(feedback) == "" {
@@ -391,12 +391,12 @@ func runPhaseRequestChanges(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
-	issue, err := client.RequestWorkPhaseChanges(flags.Arg(0), feedback)
+	task, err := client.RequestWorkPhaseChanges(flags.Arg(0), feedback)
 	if err != nil {
 		fmt.Fprintf(stderr, "request changes: %v\n", err)
 		return 1
 	}
-	printIssueLine(stdout, issue)
+	printTaskLine(stdout, task)
 	return 0
 }
 

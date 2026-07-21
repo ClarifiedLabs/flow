@@ -24,7 +24,7 @@ import (
 var flowRuntimeEnvKeys = []string{
 	"FLOW_WORKER_ROLE",
 	"FLOW_ROLE",
-	"FLOW_ISSUE_ID",
+	"FLOW_TASK_ID",
 	"FLOW_CHANGE_ID",
 	"FLOW_BRANCH",
 	"FLOW_BASE",
@@ -161,7 +161,7 @@ func TestDoctorInitializesDatabase(t *testing.T) {
 func TestFetchPromptUsesWorkerRoleEnvironment(t *testing.T) {
 	clearFetchPromptEnvironment(t)
 	t.Setenv("FLOW_WORKER_ROLE", "reviewer")
-	t.Setenv("FLOW_ISSUE_ID", "i-0001")
+	t.Setenv("FLOW_TASK_ID", "i-0001")
 	t.Setenv("FLOW_CHANGE_ID", "ch-1")
 	t.Setenv("FLOW_CHECK_NAME", "reviewer")
 
@@ -176,7 +176,7 @@ func TestFetchPromptUsesWorkerRoleEnvironment(t *testing.T) {
 	for _, want := range []string{
 		"Flow role instructions (flow-reviewer):",
 		"# Flow Reviewer",
-		"Issue: i-0001",
+		"Task: i-0001",
 		"Change: ch-1",
 		"Check: reviewer",
 		"Use flow comment",
@@ -187,7 +187,7 @@ func TestFetchPromptUsesWorkerRoleEnvironment(t *testing.T) {
 	}
 }
 
-func TestFetchPromptIncludesIssueDetailsFromAPI(t *testing.T) {
+func TestFetchPromptIncludesTaskDetailsFromAPI(t *testing.T) {
 	clearFetchPromptEnvironment(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	serverURL := newFlowAPIServer(t)
@@ -195,17 +195,17 @@ func TestFetchPromptIncludesIssueDetailsFromAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	issue, err := client.CreateIssue(flowclient.CreateIssueInput{
-		Title:              "Prompt details issue",
-		Body:               "Build the prompt with complete issue context.",
-		AcceptanceCriteria: "The agent can start work without calling issue show.",
+	task, err := client.CreateTask(flowclient.CreateTaskInput{
+		Title:              "Prompt details task",
+		Body:               "Build the prompt with complete task context.",
+		AcceptanceCriteria: "The agent can start work without calling task show.",
 	})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 
 	t.Setenv("FLOW_WORKER_ROLE", "author")
-	t.Setenv("FLOW_ISSUE_ID", issue.ID)
+	t.Setenv("FLOW_TASK_ID", task.ID)
 	t.Setenv("FLOW_COORDINATOR_URL", serverURL)
 	t.Setenv("FLOW_SESSION_TOKEN", "owner-token")
 
@@ -218,10 +218,10 @@ func TestFetchPromptIncludesIssueDetailsFromAPI(t *testing.T) {
 
 	output := stdout.String()
 	for _, want := range []string{
-		"Issue: " + issue.ID,
-		"Issue Title: Prompt details issue",
-		"Issue Body:\nBuild the prompt with complete issue context.",
-		"Acceptance Criteria:\nThe agent can start work without calling issue show.",
+		"Task: " + task.ID,
+		"Task Title: Prompt details task",
+		"Task Body:\nBuild the prompt with complete task context.",
+		"Acceptance Criteria:\nThe agent can start work without calling task show.",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("fetch-prompt output missing %q:\n%s", want, output)
@@ -229,13 +229,13 @@ func TestFetchPromptIncludesIssueDetailsFromAPI(t *testing.T) {
 	}
 }
 
-func TestFetchPromptContinuesWhenIssueContextFetchFails(t *testing.T) {
+func TestFetchPromptContinuesWhenTaskContextFetchFails(t *testing.T) {
 	clearFetchPromptEnvironment(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	serverURL := newFlowAPIServer(t)
 
 	t.Setenv("FLOW_WORKER_ROLE", "reviewer")
-	t.Setenv("FLOW_ISSUE_ID", "i-0001")
+	t.Setenv("FLOW_TASK_ID", "i-0001")
 	t.Setenv("FLOW_CHANGE_ID", "ch-1")
 	t.Setenv("FLOW_CHECK_NAME", "reviewer")
 	t.Setenv("FLOW_COORDINATOR_URL", serverURL)
@@ -252,14 +252,14 @@ func TestFetchPromptContinuesWhenIssueContextFetchFails(t *testing.T) {
 	for _, want := range []string{
 		"Flow role instructions (flow-reviewer):",
 		"# Flow Reviewer",
-		"Issue: i-0001",
+		"Task: i-0001",
 		"Check: reviewer",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("fetch-prompt output missing %q:\n%s", want, output)
 		}
 	}
-	if !strings.Contains(stderr.String(), "continuing without issue context") {
+	if !strings.Contains(stderr.String(), "continuing without task context") {
 		t.Fatalf("fetch-prompt stderr missing enrichment warning: %q", stderr.String())
 	}
 }
@@ -313,7 +313,7 @@ func TestInitDoesNotSeedRepositorySkills(t *testing.T) {
 func TestFetchPromptUsesEmbeddedAuthorInstructions(t *testing.T) {
 	clearFetchPromptEnvironment(t)
 	t.Setenv("FLOW_WORKER_ROLE", "author")
-	t.Setenv("FLOW_ISSUE_ID", "i-0002")
+	t.Setenv("FLOW_TASK_ID", "i-0002")
 	t.Setenv("FLOW_WORKER_HARNESS", "")
 
 	var stdout bytes.Buffer
@@ -326,7 +326,7 @@ func TestFetchPromptUsesEmbeddedAuthorInstructions(t *testing.T) {
 	for _, want := range []string{
 		"Flow role instructions (flow-author):",
 		"# Flow Author",
-		"Issue: i-0002",
+		"Task: i-0002",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("fetch-prompt output missing %q:\n%s", want, stdout.String())
@@ -406,31 +406,31 @@ func TestFetchPromptRejectsUnsupportedRole(t *testing.T) {
 	}
 }
 
-func TestIssueCommandsUseAPI(t *testing.T) {
+func TestTaskCommandsUseAPI(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	serverURL := newFlowAPIServer(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exitCode := run([]string{
-		"issue", "create",
+		"task", "create",
 		"--server", serverURL,
 		"--token", "owner-token",
-		"--title", "CLI issue",
+		"--title", "CLI task",
 	}, &stdout, &stderr)
 	if exitCode != 0 {
-		t.Fatalf("issue create exitCode = %d, stderr = %q", exitCode, stderr.String())
+		t.Fatalf("task create exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "i-0001\tunscheduled\t\tCLI issue") {
+	if !strings.Contains(stdout.String(), "i-0001\tunscheduled\t\tCLI task") {
 		t.Fatalf("create output = %q", stdout.String())
 	}
 	client, err := flowclient.New(config.ClientConfig{ServerURL: serverURL, Token: "owner-token"})
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	created, err := client.GetIssue("i-0001")
+	created, err := client.GetTask("i-0001")
 	if err != nil {
-		t.Fatalf("get created issue: %v", err)
+		t.Fatalf("get created task: %v", err)
 	}
 	if created.State != nil {
 		t.Fatalf("created state = %v, want unscheduled", created.State)
@@ -439,18 +439,18 @@ func TestIssueCommandsUseAPI(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	exitCode = run([]string{
-		"issue", "edit",
+		"task", "edit",
 		"--server", serverURL,
 		"--token", "owner-token",
 		"--priority=4",
 		"i-0001",
 	}, &stdout, &stderr)
 	if exitCode != 0 {
-		t.Fatalf("issue edit flags exitCode = %d, stderr = %q", exitCode, stderr.String())
+		t.Fatalf("task edit flags exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	edited, err := client.GetIssue("i-0001")
+	edited, err := client.GetTask("i-0001")
 	if err != nil {
-		t.Fatalf("get edited issue: %v", err)
+		t.Fatalf("get edited task: %v", err)
 	}
 	if edited.Priority != 4 {
 		t.Fatalf("edited priority = %d, want 4", edited.Priority)
@@ -458,9 +458,9 @@ func TestIssueCommandsUseAPI(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	exitCode = run([]string{"issue", "schedule", "--server", serverURL, "--token", "owner-token", "i-0001"}, &stdout, &stderr)
+	exitCode = run([]string{"task", "schedule", "--server", serverURL, "--token", "owner-token", "i-0001"}, &stdout, &stderr)
 	if exitCode != 0 {
-		t.Fatalf("issue schedule exitCode = %d, stderr = %q", exitCode, stderr.String())
+		t.Fatalf("task schedule exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "i-0001\tscheduled\timplement") {
 		t.Fatalf("schedule output = %q", stdout.String())
@@ -468,11 +468,11 @@ func TestIssueCommandsUseAPI(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	exitCode = run([]string{"issue", "show", "--server", serverURL, "--token", "owner-token", "i-0001"}, &stdout, &stderr)
+	exitCode = run([]string{"task", "show", "--server", serverURL, "--token", "owner-token", "i-0001"}, &stdout, &stderr)
 	if exitCode != 0 {
-		t.Fatalf("issue show exitCode = %d, stderr = %q", exitCode, stderr.String())
+		t.Fatalf("task show exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "i-0001\tscheduled\t\tCLI issue") {
+	if !strings.Contains(stdout.String(), "i-0001\tscheduled\t\tCLI task") {
 		t.Fatalf("show output = %q", stdout.String())
 	}
 
@@ -482,12 +482,12 @@ func TestIssueCommandsUseAPI(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("board exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "scheduled:\n  i-0001\tscheduled\tCLI issue") {
+	if !strings.Contains(stdout.String(), "scheduled:\n  i-0001\tscheduled\tCLI task") {
 		t.Fatalf("board output = %q", stdout.String())
 	}
 }
 
-func TestIssueCreateUsesDiscoveredClientConfigOwnerToken(t *testing.T) {
+func TestTaskCreateUsesDiscoveredClientConfigOwnerToken(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Chdir(t.TempDir())
 	fixture := newFlowTestFixture(t)
@@ -510,58 +510,58 @@ func TestIssueCreateUsesDiscoveredClientConfigOwnerToken(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"issue", "create", "--title", "Discovered CLI issue"}, &stdout, &stderr)
+	exitCode := run([]string{"task", "create", "--title", "Discovered CLI task"}, &stdout, &stderr)
 	if exitCode != 0 {
-		t.Fatalf("issue create exitCode = %d, stderr = %q", exitCode, stderr.String())
+		t.Fatalf("task create exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "i-0001\tunscheduled\t\tDiscovered CLI issue") {
+	if !strings.Contains(stdout.String(), "i-0001\tunscheduled\t\tDiscovered CLI task") {
 		t.Fatalf("create output = %q", stdout.String())
 	}
 }
 
-func TestIssueRelationCommandsUseAPI(t *testing.T) {
+func TestTaskRelationCommandsUseAPI(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	ctx := context.Background()
 	fixture := newFlowTestFixture(t)
 	httpServer := httptest.NewServer(fixture.Server)
 	t.Cleanup(httpServer.Close)
 
-	source, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Source issue"})
+	source, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Source task"})
 	if err != nil {
-		t.Fatalf("create source issue: %v", err)
+		t.Fatalf("create source task: %v", err)
 	}
-	target, err := fixture.Issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Target issue"})
+	target, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Target task"})
 	if err != nil {
-		t.Fatalf("create target issue: %v", err)
+		t.Fatalf("create target task: %v", err)
 	}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"issue", "link", "--server", httpServer.URL, "--token", "owner-token", source.ID, "blocks", target.ID}, &stdout, &stderr)
+	exitCode := run([]string{"task", "link", "--server", httpServer.URL, "--token", "owner-token", source.ID, "blocks", target.ID}, &stdout, &stderr)
 	if exitCode != 0 {
-		t.Fatalf("issue link exitCode = %d, stderr = %q", exitCode, stderr.String())
+		t.Fatalf("task link exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	if strings.TrimSpace(stdout.String()) != source.ID+"\tblocks\t"+target.ID {
 		t.Fatalf("link stdout = %q", stdout.String())
 	}
-	relations, err := fixture.Issues.RelationsForIssue(ctx, target.ID)
+	relations, err := fixture.Tasks.RelationsForTask(ctx, target.ID)
 	if err != nil {
 		t.Fatalf("relations after link: %v", err)
 	}
-	if len(relations) != 1 || relations[0].SourceIssueID != source.ID || relations[0].Kind != coordinator.RelationBlocks {
+	if len(relations) != 1 || relations[0].SourceTaskID != source.ID || relations[0].Kind != coordinator.RelationBlocks {
 		t.Fatalf("relations after link = %+v", relations)
 	}
 
 	stdout.Reset()
 	stderr.Reset()
-	exitCode = run([]string{"issue", "unlink", "--server", httpServer.URL, "--token", "owner-token", source.ID, "blocks", target.ID}, &stdout, &stderr)
+	exitCode = run([]string{"task", "unlink", "--server", httpServer.URL, "--token", "owner-token", source.ID, "blocks", target.ID}, &stdout, &stderr)
 	if exitCode != 0 {
-		t.Fatalf("issue unlink exitCode = %d, stderr = %q", exitCode, stderr.String())
+		t.Fatalf("task unlink exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	if strings.TrimSpace(stdout.String()) != source.ID+"\tblocks\t"+target.ID {
 		t.Fatalf("unlink stdout = %q", stdout.String())
 	}
-	relations, err = fixture.Issues.RelationsForIssue(ctx, target.ID)
+	relations, err = fixture.Tasks.RelationsForTask(ctx, target.ID)
 	if err != nil {
 		t.Fatalf("relations after unlink: %v", err)
 	}
@@ -570,7 +570,7 @@ func TestIssueRelationCommandsUseAPI(t *testing.T) {
 	}
 }
 
-func TestIssueCreateUploadsInitialAttachment(t *testing.T) {
+func TestTaskCreateUploadsInitialAttachment(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Chdir(t.TempDir())
 	filePath := filepath.Join(t.TempDir(), "initial.txt")
@@ -585,11 +585,11 @@ func TestIssueCreateUploadsInitialAttachment(t *testing.T) {
 			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
 		}
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v2/issues":
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/tasks":
 			sawCreate = true
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"issue":{"ID":"i-0001","Title":"With file"}}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/v2/issues/i-0001/attachments":
+			_, _ = w.Write([]byte(`{"task":{"ID":"i-0001","Title":"With file"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/tasks/i-0001/attachments":
 			sawAttachment = true
 			if err := r.ParseMultipartForm(1 << 20); err != nil {
 				t.Fatalf("parse multipart: %v", err)
@@ -613,7 +613,7 @@ func TestIssueCreateUploadsInitialAttachment(t *testing.T) {
 				t.Fatalf("uploaded content = %q", string(content))
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"attachment":{"id":"att-0001","issue_id":"i-0001","stage":"initial","filename":"initial.txt","content_type":"text/plain; charset=utf-8","size_bytes":18}}`))
+			_, _ = w.Write([]byte(`{"attachment":{"id":"att-0001","task_id":"i-0001","stage":"initial","filename":"initial.txt","content_type":"text/plain; charset=utf-8","size_bytes":18}}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}
@@ -622,9 +622,9 @@ func TestIssueCreateUploadsInitialAttachment(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"issue", "create", "--server", server.URL, "--token", "owner-token", "--title", "With file", "--file", filePath}, &stdout, &stderr)
+	exitCode := run([]string{"task", "create", "--server", server.URL, "--token", "owner-token", "--title", "With file", "--file", filePath}, &stdout, &stderr)
 	if exitCode != 0 {
-		t.Fatalf("issue create exitCode = %d, stderr = %q", exitCode, stderr.String())
+		t.Fatalf("task create exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	if !sawCreate || !sawAttachment {
 		t.Fatalf("sawCreate=%t sawAttachment=%t", sawCreate, sawAttachment)
@@ -634,7 +634,7 @@ func TestIssueCreateUploadsInitialAttachment(t *testing.T) {
 	}
 }
 
-func TestIssueAttachUsesInferredRoleAndLease(t *testing.T) {
+func TestTaskAttachUsesInferredRoleAndLease(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Chdir(t.TempDir())
 	t.Setenv("FLOW_ROLE", "reviewer")
@@ -645,8 +645,8 @@ func TestIssueAttachUsesInferredRoleAndLease(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v2/issues/i-0001/attachments" {
-			t.Fatalf("request = %s %s, want POST /v2/issues/i-0001/attachments", r.Method, r.URL.Path)
+		if r.Method != http.MethodPost || r.URL.Path != "/v2/tasks/i-0001/attachments" {
+			t.Fatalf("request = %s %s, want POST /v2/tasks/i-0001/attachments", r.Method, r.URL.Path)
 		}
 		if got := r.URL.Query().Get("lease_id"); got != "l-0001" {
 			t.Fatalf("lease_id = %q, want l-0001", got)
@@ -665,28 +665,28 @@ func TestIssueAttachUsesInferredRoleAndLease(t *testing.T) {
 			t.Fatalf("file header = %+v", header)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"attachment":{"id":"att-0002","issue_id":"i-0001","stage":"reviewer","filename":"review.png","content_type":"image/png","size_bytes":3}}`))
+		_, _ = w.Write([]byte(`{"attachment":{"id":"att-0002","task_id":"i-0001","stage":"reviewer","filename":"review.png","content_type":"image/png","size_bytes":3}}`))
 	}))
 	t.Cleanup(server.Close)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"issue", "attach", "--server", server.URL, "--token", "owner-token", "--file", filePath, "i-0001"}, &stdout, &stderr)
+	exitCode := run([]string{"task", "attach", "--server", server.URL, "--token", "owner-token", "--file", filePath, "i-0001"}, &stdout, &stderr)
 	if exitCode != 0 {
-		t.Fatalf("issue attach exitCode = %d, stderr = %q", exitCode, stderr.String())
+		t.Fatalf("task attach exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "att-0002\treviewer\treview.png\t3") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 }
 
-func TestIssueCreateDiscoveryIgnoresAmbientFlowSessionEnvironment(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-test.run=^TestIssueCreateUsesDiscoveredClientConfigOwnerToken$", "-test.count=1")
+func TestTaskCreateDiscoveryIgnoresAmbientFlowSessionEnvironment(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestTaskCreateUsesDiscoveredClientConfigOwnerToken$", "-test.count=1")
 	cmd.Env = append(os.Environ(),
 		"FLOW_COORDINATOR_URL=http://127.0.0.1:1",
 		"FLOW_SESSION_TOKEN=leaked-session-token",
 		"FLOW_SESSION_ID=s-live",
-		"FLOW_ISSUE_ID=i-live",
+		"FLOW_TASK_ID=i-live",
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -699,13 +699,13 @@ func TestPrintBoardAnnotatesSubStateAndBlocked(t *testing.T) {
 	inProgress := coordinator.LifecycleInProgress
 	result := coordinator.BoardResult{
 		Board: coordinator.Board{
-			Unscheduled: []coordinator.Issue{
+			Unscheduled: []coordinator.Task{
 				{ID: "i-0001", Title: "Unplanned"},
 			},
-			Scheduled: []coordinator.Issue{
+			Scheduled: []coordinator.Task{
 				{ID: "i-0002", State: &scheduled, Title: "Queued"},
 			},
-			InProgress: []coordinator.Issue{
+			InProgress: []coordinator.Task{
 				{ID: "i-0003", State: &inProgress, Title: "Working"},
 				{ID: "i-0004", State: &inProgress, Title: "Needs input"},
 			},
@@ -734,15 +734,15 @@ func TestPrintBoardAnnotatesSubStateAndBlocked(t *testing.T) {
 	}
 }
 
-func TestIssueCommandRejectsUnauthorizedToken(t *testing.T) {
+func TestTaskCommandRejectsUnauthorizedToken(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	serverURL := newFlowAPIServer(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"issue", "list", "--server", serverURL, "--token", "wrong"}, &stdout, &stderr)
+	exitCode := run([]string{"task", "list", "--server", serverURL, "--token", "wrong"}, &stdout, &stderr)
 	if exitCode != 1 {
-		t.Fatalf("issue list exitCode = %d, want 1", exitCode)
+		t.Fatalf("task list exitCode = %d, want 1", exitCode)
 	}
 	if !strings.Contains(stderr.String(), "unauthorized") {
 		t.Fatalf("stderr = %q, want unauthorized error", stderr.String())
@@ -777,20 +777,20 @@ func TestSessionEnvironmentPrefersSessionTokenThenWorkerToken(t *testing.T) {
 	}
 }
 
-func TestIssueShowUsesSessionEnvironment(t *testing.T) {
+func TestTaskShowUsesSessionEnvironment(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	// Run outside any git repo so the CLI leaves issue routes unscoped instead
+	// Run outside any git repo so the CLI leaves task routes unscoped instead
 	// of looking up a project for the cwd.
 	t.Chdir(t.TempDir())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v2/issues/i-0001" {
-			t.Fatalf("request = %s %s, want GET /v2/issues/i-0001", r.Method, r.URL.Path)
+		if r.Method != http.MethodGet || r.URL.Path != "/v2/tasks/i-0001" {
+			t.Fatalf("request = %s %s, want GET /v2/tasks/i-0001", r.Method, r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != "Bearer session-token" {
 			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"issue":{"ID":"i-0001","Title":"Session issue","state":"in_progress"}}`))
+		_, _ = w.Write([]byte(`{"task":{"ID":"i-0001","Title":"Session task","state":"in_progress"}}`))
 	}))
 	t.Cleanup(server.Close)
 	t.Setenv("FLOW_COORDINATOR_URL", server.URL)
@@ -798,11 +798,11 @@ func TestIssueShowUsesSessionEnvironment(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"issue", "show", "i-0001"}, &stdout, &stderr)
+	exitCode := run([]string{"task", "show", "i-0001"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "i-0001\tin_progress\t\tSession issue") {
+	if !strings.Contains(stdout.String(), "i-0001\tin_progress\t\tSession task") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 }
@@ -837,11 +837,11 @@ func TestWorkerAndJobDiagnosticsUseAPI(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	ctx := context.Background()
 	fixture := newFlowTestFixture(t)
-	issues := fixture.Issues
+	tasks := fixture.Tasks
 	checks := fixture.Checks
-	issue, err := issues.CreateIssue(ctx, coordinator.CreateIssueInput{Title: "Diagnostics issue"})
+	task, err := tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Diagnostics task"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 	if _, err := fixture.Directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                      "w-local",
@@ -852,7 +852,7 @@ func TestWorkerAndJobDiagnosticsUseAPI(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 	job, err := fixture.Queue.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		Role:           flowworker.RoleAuthor,
 		CapacityBucket: flowworker.BucketPersistentAgent,
 		Priority:       7,
@@ -862,7 +862,7 @@ func TestWorkerAndJobDiagnosticsUseAPI(t *testing.T) {
 	}
 	exitFailure := 1
 	if _, err := checks.ReportCheck(ctx, coordinator.ReportCheckInput{
-		IssueID:  issue.ID,
+		TaskID:   task.ID,
 		Name:     "fake-ci",
 		ExitCode: &exitFailure,
 		Reporter: "worker:w-local",
@@ -889,13 +889,13 @@ func TestWorkerAndJobDiagnosticsUseAPI(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("jobs exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), job.ID+"\tqueued\tauthor\tpersistent_agent\tissue="+issue.ID+"\tpriority=7") {
+	if !strings.Contains(stdout.String(), job.ID+"\tqueued\tauthor\tpersistent_agent\ttask="+task.ID+"\tpriority=7") {
 		t.Fatalf("jobs output = %q", stdout.String())
 	}
 
 	stdout.Reset()
 	stderr.Reset()
-	exitCode = run([]string{"checks", "--server", httpServer.URL, "--token", "owner-token", issue.ID}, &stdout, &stderr)
+	exitCode = run([]string{"checks", "--server", httpServer.URL, "--token", "owner-token", task.ID}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("checks exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
@@ -1021,7 +1021,7 @@ func TestSplitQualifiedRef(t *testing.T) {
 		{"myproj/i-0001", "myproj", "i-0001"},
 		{"myproj/ch-abc123", "myproj", "ch-abc123"},
 		{"p-1234/i-0042", "p-1234", "i-0042"},
-		{"issue/i-0001", "issue", "i-0001"},
+		{"task/i-0001", "task", "i-0001"},
 		{"refs/heads/main", "", "refs/heads/main"},
 		{"ch-abc123", "", "ch-abc123"},
 	}

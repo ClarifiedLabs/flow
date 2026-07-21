@@ -34,7 +34,7 @@ test("terminal click from a card opens a modal-sized frame", async () => {
     if (selector === ".content") return content;
     return new InlineDOMElement();
   };
-  flowApp.bindIssueActions(async () => {});
+  flowApp.bindTaskActions(async () => {});
   await terminalButton.listeners.get("click")();
 
   assert.equal(terminalHost.children.length, 0);
@@ -97,7 +97,7 @@ test("board polling keeps an open card terminal modal mounted", async () => {
               project_name: "alpha",
               board: {},
               lane_states: {},
-              issue_cards: {},
+              task_cards: {},
             }],
           }),
         });
@@ -169,7 +169,7 @@ test("terminal click closes an open card terminal modal without refreshing the t
     if (selector === ".content") return content;
     return new InlineDOMElement();
   };
-  flowApp.bindIssueActions(async () => {});
+  flowApp.bindTaskActions(async () => {});
   await terminalButton.listeners.get("click")();
   assert.equal(content.children.length, 1);
 
@@ -211,7 +211,7 @@ test("job terminal click from a card opens a modal-sized frame", async () => {
     if (selector === ".content") return content;
     return new InlineDOMElement();
   };
-  flowApp.bindIssueActions(async () => {});
+  flowApp.bindTaskActions(async () => {});
   await terminalButton.listeners.get("click")();
 
   assert.equal(terminalHost.children.length, 0);
@@ -452,13 +452,13 @@ test("theme switcher defaults to system without a stored override", async () => 
   assert.match(harness.app.innerHTML, /data-theme-option/);
 });
 
-test("shell keeps the terminal-style brand and New Issue action", async () => {
+test("shell keeps the terminal-style brand and New Task action", async () => {
   const harness = await themeShellHarness();
 
   harness.app.renderShell();
 
   assert.match(harness.app.innerHTML, /<p class="brand">flow<span class="brand-cursor">_<\/span><\/p>/);
-  assert.match(harness.app.innerHTML, /<button class="button" data-action="new-issue">New Issue<\/button>/);
+  assert.match(harness.app.innerHTML, /<button class="button" data-action="new-task">New Task<\/button>/);
 });
 
 test("theme switcher applies stored overrides and persists user choices", async () => {
@@ -507,7 +507,7 @@ test("job attach action fetches and displays the tmux attach command", async () 
   const app = new context.FlowApp();
   app.querySelectorAll = (selector) => (selector === "[data-job-attach]" ? [attachButton] : []);
   app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
-  app.bindIssueActions(async () => {});
+  app.bindTaskActions(async () => {});
 
   await clickHandler();
 
@@ -517,15 +517,15 @@ test("job attach action fetches and displays the tmux attach command", async () 
   assert.equal(status.textContent, "tmux attach-session -t flow-j-0001");
 });
 
-test("issue save submits patch payload and refreshes", async () => {
-  const harness = await issueSaveHarness({ flowID: "fl-review" });
+test("task save submits patch payload and refreshes", async () => {
+  const harness = await taskSaveHarness({ flowID: "fl-review" });
   await harness.submit();
 
-  assert.equal(harness.fetchCalls[0].path, "/ui/api/v1/issues/i-0001");
+  assert.equal(harness.fetchCalls[0].path, "/ui/api/v1/tasks/i-0001");
   assert.equal(harness.fetchCalls[0].options.method, "PATCH");
   assert.equal(harness.fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body), {
-    title: "Updated issue",
+    title: "Updated task",
     body: "New body",
     acceptance_criteria: "New criteria",
     priority: 4,
@@ -540,33 +540,33 @@ test("issue save submits patch payload and refreshes", async () => {
 // Legacy Harness budget/toggle reasoning flags are no longer valid with
 // harness v0.0.19. The form treats them as managed stale selection args so a
 // later save does not keep emitting them.
-test("issue save does not submit invalid form or priority", async () => {
-  const invalidForm = await issueSaveHarness({ valid: false });
+test("task save does not submit invalid form or priority", async () => {
+  const invalidForm = await taskSaveHarness({ valid: false });
   await invalidForm.submit();
   assert.equal(invalidForm.fetchCalls.length, 0);
   assert.equal(invalidForm.refreshed(), false);
 
-  const invalidPriority = await issueSaveHarness({ priority: "4.5" });
+  const invalidPriority = await taskSaveHarness({ priority: "4.5" });
   await invalidPriority.submit();
   assert.equal(invalidPriority.fetchCalls.length, 0);
   assert.equal(invalidPriority.refreshed(), false);
   assert.equal(invalidPriority.status.textContent, "Priority must be a non-negative integer");
 });
 
-test("issue save surfaces patch failures", async () => {
-  const harness = await issueSaveHarness({ fetchOK: false, errorMessage: "issue title is required" });
+test("task save surfaces patch failures", async () => {
+  const harness = await taskSaveHarness({ fetchOK: false, errorMessage: "task title is required" });
   await harness.submit();
 
   assert.equal(harness.fetchCalls.length, 1);
   assert.equal(harness.refreshed(), false);
-  assert.equal(harness.status.textContent, "issue title is required");
+  assert.equal(harness.status.textContent, "task title is required");
 });
 
-test("issue attachment form uploads stage file and refreshes", async () => {
+test("task attachment form uploads stage file and refreshes", async () => {
   let submitHandler;
   const file = { name: "review.png" };
   const form = {
-    dataset: { issue: "i-0001", project: "p-demo" },
+    dataset: { task: "i-0001", project: "p-demo" },
     elements: {
       stage: { value: "reviewer" },
       file: { files: [file] },
@@ -604,13 +604,13 @@ test("issue attachment form uploads stage file and refreshes", async () => {
   app.querySelectorAll = (selector) => (selector === "[data-attachment-form]" ? [form] : []);
   app.querySelector = () => ({ textContent: "" });
   let refreshed = false;
-  app.bindIssueActions(async () => {
+  app.bindTaskActions(async () => {
     refreshed = true;
   });
 
   await submitHandler({ preventDefault() {} });
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues/i-0001/attachments");
+  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/attachments");
   assert.deepEqual(fetchCalls[0].options.body.fields, [
     { name: "stage", value: "reviewer", filename: undefined },
     { name: "file", value: file, filename: "review.png" },
@@ -619,24 +619,24 @@ test("issue attachment form uploads stage file and refreshes", async () => {
   assert.equal(refreshed, true);
 });
 
-test("new issue action navigates to blank issue form without posting", async () => {
-  const harness = await createIssueHarness();
+test("new task action navigates to blank task form without posting", async () => {
+  const harness = await createTaskHarness();
 
   await harness.create();
 
   assert.equal(harness.fetchCalls.length, 0);
-  assert.equal(harness.pushedPath(), "/ui/issues/new");
+  assert.equal(harness.pushedPath(), "/ui/tasks/new");
   assert.equal(harness.loads(), 1);
   assert.equal(harness.status.textContent, "");
 });
 
-test("new issue route renders project-scoped blank form without fetching an issue", async () => {
+test("new task route renders project-scoped blank form without fetching an task", async () => {
   const fetchCalls = [];
   const title = { textContent: "" };
   const status = { textContent: "" };
   const content = { innerHTML: "" };
   const context = await scriptContext({
-    location: { pathname: "/ui/issues/new" },
+    location: { pathname: "/ui/tasks/new" },
   }, {
     fetch(path, options) {
       fetchCalls.push({ path, options });
@@ -651,7 +651,7 @@ test("new issue route renders project-scoped blank form without fetching an issu
           }),
         });
       }
-      throw new Error("new issue route should not fetch before submission");
+      throw new Error("new task route should not fetch before submission");
     },
   });
   const app = new context.FlowApp();
@@ -671,8 +671,8 @@ test("new issue route renders project-scoped blank form without fetching an issu
   // preload any project's flows: only the project registry is fetched.
   assert.equal(fetchCalls.length, 1);
   assert.equal(fetchCalls[0].path, "/ui/api/v1/projects");
-  assert.equal(title.textContent, "New Issue");
-  assert.match(content.innerHTML, /data-issue-form-mode="create"/);
+  assert.equal(title.textContent, "New Task");
+  assert.match(content.innerHTML, /data-task-form-mode="create"/);
   assert.match(content.innerHTML, /<span>Project<\/span>/);
   assert.match(content.innerHTML, /<option value="p-alpha"/);
   assert.match(content.innerHTML, /<option value="p-beta"/);
@@ -680,36 +680,36 @@ test("new issue route renders project-scoped blank form without fetching an issu
   assert.match(content.innerHTML, /<span>Flow<\/span>/);
   assert.match(content.innerHTML, /<select name="flow_id" data-flow-select>/);
   assert.match(content.innerHTML, /<option value="" selected>Project default<\/option>/);
-  assert.match(content.innerHTML, /<input name="queue_issue" type="checkbox" checked>/);
+  assert.match(content.innerHTML, /<input name="queue_task" type="checkbox" checked>/);
   assert.match(content.innerHTML, /<button class="button" type="submit">Create<\/button>/);
   assert.equal(status.textContent, "");
 });
 
-test("new issue form shows the project field even with one project", async () => {
+test("new task form shows the project field even with one project", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   app.projects = [{ id: "p-alpha", name: "alpha" }];
 
-  const html = app.renderIssueForm({ title: "", priority: 0 }, { mode: "create", submitLabel: "Create" });
+  const html = app.renderTaskForm({ title: "", priority: 0 }, { mode: "create", submitLabel: "Create" });
 
   assert.match(html, /<span>Project<\/span>/);
   assert.match(html, /<select name="project" required>/);
   assert.match(html, /<option value="p-alpha" selected>alpha<\/option>/);
-  assert.ok(html.indexOf('class="issue-field-project"') < html.indexOf('class="issue-field-priority"'));
-  assert.ok(html.indexOf('class="issue-field-priority"') < html.indexOf('class="issue-field-flow"'));
-  assert.ok(html.indexOf('class="issue-field-flow"') < html.indexOf('class="issue-field-title wide"'));
+  assert.ok(html.indexOf('class="task-field-project"') < html.indexOf('class="task-field-priority"'));
+  assert.ok(html.indexOf('class="task-field-priority"') < html.indexOf('class="task-field-flow"'));
+  assert.ok(html.indexOf('class="task-field-flow"') < html.indexOf('class="task-field-title wide"'));
 });
 
-test("new issue form submits queued create payload then navigates to created issue", async () => {
-  const harness = await issueSaveHarness({ mode: "create", title: "  Browser issue  ", flowID: "fl-plan" });
+test("new task form submits queued create payload then navigates to created task", async () => {
+  const harness = await taskSaveHarness({ mode: "create", title: "  Browser task  ", flowID: "fl-plan" });
 
   await harness.submit();
 
-  assert.equal(harness.fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues");
+  assert.equal(harness.fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks");
   assert.equal(harness.fetchCalls[0].options.method, "POST");
   assert.equal(harness.fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body), {
-    title: "Browser issue",
+    title: "Browser task",
     body: "New body",
     acceptance_criteria: "New criteria",
     priority: 4,
@@ -718,20 +718,20 @@ test("new issue form submits queued create payload then navigates to created iss
     flow_id: "fl-plan",
     schedule_state: "up_next",
   });
-  assert.equal(harness.pushedPath(), "/ui/projects/p-demo/issues/i-0001");
+  assert.equal(harness.pushedPath(), "/ui/projects/p-demo/tasks/i-0001");
   assert.equal(harness.loads(), 1);
   assert.equal(harness.refreshed(), false);
   assert.equal(harness.status.textContent, "");
 });
 
-test("new issue form uploads selected initial attachments after create", async () => {
+test("new task form uploads selected initial attachments after create", async () => {
   const file = { name: "screenshot.png" };
-  const harness = await issueSaveHarness({ mode: "create", files: [file] });
+  const harness = await taskSaveHarness({ mode: "create", files: [file] });
 
   await harness.submit();
 
-  assert.equal(harness.fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues");
-  assert.equal(harness.fetchCalls[1].path, "/ui/api/v1/projects/p-demo/issues/i-0001/attachments");
+  assert.equal(harness.fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks");
+  assert.equal(harness.fetchCalls[1].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/attachments");
   const body = harness.fetchCalls[1].options.body;
   assert.deepEqual(body.fields, [
     { name: "stage", value: "initial", filename: undefined },
@@ -740,14 +740,14 @@ test("new issue form uploads selected initial attachments after create", async (
   assert.equal(harness.loads(), 1);
 });
 
-test("new issue form can save without queueing", async () => {
-  const harness = await issueSaveHarness({ mode: "create", queueIssue: false });
+test("new task form can save without queueing", async () => {
+  const harness = await taskSaveHarness({ mode: "create", queueTask: false });
 
   await harness.submit();
 
-  assert.equal(harness.fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues");
+  assert.equal(harness.fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks");
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body), {
-    title: "Updated issue",
+    title: "Updated task",
     body: "New body",
     acceptance_criteria: "New criteria",
     priority: 4,
@@ -756,14 +756,14 @@ test("new issue form can save without queueing", async () => {
     flow_id: "",
     schedule_state: "backlog",
   });
-  assert.equal(harness.pushedPath(), "/ui/projects/p-demo/issues/i-0001");
+  assert.equal(harness.pushedPath(), "/ui/projects/p-demo/tasks/i-0001");
   assert.equal(harness.loads(), 1);
   assert.equal(harness.refreshed(), false);
   assert.equal(harness.status.textContent, "");
 });
 
-test("new issue form surfaces create failures and missing created issue id", async () => {
-  const missingProject = await issueSaveHarness({ mode: "create", projectID: "" });
+test("new task form surfaces create failures and missing created task id", async () => {
+  const missingProject = await taskSaveHarness({ mode: "create", projectID: "" });
   await missingProject.submit();
 
   assert.equal(missingProject.fetchCalls.length, 0);
@@ -771,27 +771,27 @@ test("new issue form surfaces create failures and missing created issue id", asy
   assert.equal(missingProject.loads(), 0);
   assert.equal(missingProject.status.textContent, "Project is required");
 
-  const failedCreate = await issueSaveHarness({ mode: "create", fetchOK: false, errorMessage: "issue title is required" });
+  const failedCreate = await taskSaveHarness({ mode: "create", fetchOK: false, errorMessage: "task title is required" });
   await failedCreate.submit();
 
   assert.equal(failedCreate.fetchCalls.length, 1);
   assert.equal(failedCreate.pushedPath(), "");
   assert.equal(failedCreate.loads(), 0);
-  assert.equal(failedCreate.status.textContent, "issue title is required");
+  assert.equal(failedCreate.status.textContent, "task title is required");
 
-  const missingID = await issueSaveHarness({ mode: "create", responseIssue: {} });
+  const missingID = await taskSaveHarness({ mode: "create", responseTask: {} });
   await missingID.submit();
 
   assert.equal(missingID.fetchCalls.length, 1);
   assert.equal(missingID.pushedPath(), "");
   assert.equal(missingID.loads(), 0);
-  assert.equal(missingID.status.textContent, "Created issue ID unavailable");
+  assert.equal(missingID.status.textContent, "Created task ID unavailable");
 });
 
 test("triage card exposes accept reject and edit actions", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const html = app.renderIssueCard({
+  const html = app.renderTaskCard({
     id: "i-0001",
     title: "Agent finding",
     schedule_state: "backlog",
@@ -801,15 +801,15 @@ test("triage card exposes accept reject and edit actions", async () => {
 
   assert.match(html, /data-triage="accepted"/);
   assert.match(html, /data-triage="rejected"/);
-  assert.match(html, /data-issue-edit="i-0001"/);
-  assert.match(html, /data-issue-title="Agent finding"/);
+  assert.match(html, /data-task-edit="i-0001"/);
+  assert.match(html, /data-task-title="Agent finding"/);
 });
 
 test("triage action posts triage state and refreshes", async () => {
   for (const state of ["accepted", "rejected"]) {
     let clickHandler;
     const button = {
-      dataset: { issue: "i-0001", triage: state },
+      dataset: { task: "i-0001", triage: state },
       addEventListener(event, handler) {
         if (event === "click") clickHandler = handler;
       },
@@ -820,7 +820,7 @@ test("triage action posts triage state and refreshes", async () => {
         fetchCalls.push({ path, options });
         return Promise.resolve({
           ok: true,
-          json: () => Promise.resolve({ issue: { id: "i-0001" } }),
+          json: () => Promise.resolve({ task: { id: "i-0001" } }),
         });
       },
     });
@@ -828,13 +828,13 @@ test("triage action posts triage state and refreshes", async () => {
     app.querySelectorAll = (selector) => (selector === "[data-triage]" ? [button] : []);
     app.querySelector = () => ({ textContent: "" });
     let refreshed = false;
-    app.bindIssueActions(async () => {
+    app.bindTaskActions(async () => {
       refreshed = true;
     });
 
     await clickHandler();
 
-    assert.equal(fetchCalls[0].path, "/ui/api/v1/issues/i-0001/triage");
+    assert.equal(fetchCalls[0].path, "/ui/api/v1/tasks/i-0001/triage");
     assert.equal(fetchCalls[0].options.method, "POST");
     assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
     assert.deepEqual(JSON.parse(fetchCalls[0].options.body), { state });
@@ -856,7 +856,7 @@ test("close action requires confirmation before posting", async () => {
     const context = await scriptContext({
       confirm(message) {
         confirmCalls += 1;
-        assert.equal(message, "Close this issue?");
+        assert.equal(message, "Close this task?");
         return confirmed;
       },
     }, {
@@ -864,7 +864,7 @@ test("close action requires confirmation before posting", async () => {
         fetchCalls.push({ path, options });
         return Promise.resolve({
           ok: true,
-          json: () => Promise.resolve({ issue: { id: "i-0001" } }),
+          json: () => Promise.resolve({ task: { id: "i-0001" } }),
         });
       },
     });
@@ -872,7 +872,7 @@ test("close action requires confirmation before posting", async () => {
     app.querySelectorAll = (selector) => (selector === "[data-close]" ? [button] : []);
     app.querySelector = () => ({ textContent: "" });
     let refreshed = false;
-    app.bindIssueActions(async () => {
+    app.bindTaskActions(async () => {
       refreshed = true;
     });
 
@@ -884,7 +884,7 @@ test("close action requires confirmation before posting", async () => {
       assert.equal(fetchCalls.length, 0);
       continue;
     }
-    assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues/i-0001/close");
+    assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/close");
     assert.equal(fetchCalls[0].options.method, "POST");
     assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
     assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
@@ -913,7 +913,7 @@ test("pause action requires confirmation before posting", async () => {
         fetchCalls.push({ path, options });
         return Promise.resolve({
           ok: true,
-          json: () => Promise.resolve({ issue: { id: "i-0001" } }),
+          json: () => Promise.resolve({ task: { id: "i-0001" } }),
         });
       },
     });
@@ -921,7 +921,7 @@ test("pause action requires confirmation before posting", async () => {
     app.querySelectorAll = (selector) => (selector === "[data-pause]" ? [button] : []);
     app.querySelector = () => ({ textContent: "" });
     let refreshed = false;
-    app.bindIssueActions(async () => {
+    app.bindTaskActions(async () => {
       refreshed = true;
     });
 
@@ -933,7 +933,7 @@ test("pause action requires confirmation before posting", async () => {
       assert.equal(fetchCalls.length, 0);
       continue;
     }
-    assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues/i-0001/pause");
+    assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/pause");
     assert.equal(fetchCalls[0].options.method, "POST");
     assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
     assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
@@ -954,7 +954,7 @@ test("resume action posts and refreshes", async () => {
       fetchCalls.push({ path, options });
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ issue: { id: "i-0001" } }),
+        json: () => Promise.resolve({ task: { id: "i-0001" } }),
       });
     },
   });
@@ -962,13 +962,13 @@ test("resume action posts and refreshes", async () => {
   app.querySelectorAll = (selector) => (selector === "[data-resume]" ? [button] : []);
   app.querySelector = () => ({ textContent: "" });
   let refreshed = false;
-  app.bindIssueActions(async () => {
+  app.bindTaskActions(async () => {
     refreshed = true;
   });
 
   await clickHandler();
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues/i-0001/resume");
+  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/resume");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
@@ -989,7 +989,7 @@ test("crash retry action posts and refreshes", async () => {
       fetchCalls.push({ path, options });
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ issue: { id: "i-0001" } }),
+        json: () => Promise.resolve({ task: { id: "i-0001" } }),
       });
     },
   });
@@ -997,23 +997,23 @@ test("crash retry action posts and refreshes", async () => {
   app.querySelectorAll = (selector) => (selector === "[data-retry-crash]" ? [button] : []);
   app.querySelector = () => ({ textContent: "" });
   let refreshed = false;
-  app.bindIssueActions(async () => {
+  app.bindTaskActions(async () => {
     refreshed = true;
   });
 
   await clickHandler();
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues/i-0001/retry");
+  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/retry");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
   assert.equal(refreshed, true);
 });
 
-test("issue state form posts manual state and refreshes", async () => {
+test("task state form posts manual state and refreshes", async () => {
   let submitHandler;
   const form = {
-    dataset: { issueStateForm: "i-0001", project: "p-demo" },
+    dataset: { taskStateForm: "i-0001", project: "p-demo" },
     elements: {
       state: { value: "backlog" },
     },
@@ -1028,21 +1028,21 @@ test("issue state form posts manual state and refreshes", async () => {
       fetchCalls.push({ path, options });
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ issue: { id: "i-0001", schedule_state: "backlog" } }),
+        json: () => Promise.resolve({ task: { id: "i-0001", schedule_state: "backlog" } }),
       });
     },
   });
   const app = new context.FlowApp();
-  app.querySelectorAll = (selector) => (selector === "[data-issue-state-form]" ? [form] : []);
+  app.querySelectorAll = (selector) => (selector === "[data-task-state-form]" ? [form] : []);
   app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
   let refreshed = false;
-  app.bindIssueActions(async () => {
+  app.bindTaskActions(async () => {
     refreshed = true;
   });
 
   await submitHandler({ preventDefault() {} });
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues/i-0001/state");
+  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/state");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), { state: "backlog" });
@@ -1050,12 +1050,12 @@ test("issue state form posts manual state and refreshes", async () => {
   assert.equal(status.textContent, "");
 });
 
-test("issue state form requires confirmation before closing", async () => {
+test("task state form requires confirmation before closing", async () => {
   for (const confirmed of [false, true]) {
     let submitHandler;
     let confirmCalls = 0;
     const form = {
-      dataset: { issueStateForm: "i-0001", project: "p-demo" },
+      dataset: { taskStateForm: "i-0001", project: "p-demo" },
       elements: {
         state: { value: "closed" },
       },
@@ -1067,7 +1067,7 @@ test("issue state form requires confirmation before closing", async () => {
     const context = await scriptContext({
       confirm(message) {
         confirmCalls += 1;
-        assert.equal(message, "Close this issue?");
+        assert.equal(message, "Close this task?");
         return confirmed;
       },
     }, {
@@ -1075,15 +1075,15 @@ test("issue state form requires confirmation before closing", async () => {
         fetchCalls.push({ path, options });
         return Promise.resolve({
           ok: true,
-          json: () => Promise.resolve({ issue: { id: "i-0001", schedule_state: "closed" } }),
+          json: () => Promise.resolve({ task: { id: "i-0001", schedule_state: "closed" } }),
         });
       },
     });
     const app = new context.FlowApp();
-    app.querySelectorAll = (selector) => (selector === "[data-issue-state-form]" ? [form] : []);
+    app.querySelectorAll = (selector) => (selector === "[data-task-state-form]" ? [form] : []);
     app.querySelector = () => ({ textContent: "" });
     let refreshed = false;
-    app.bindIssueActions(async () => {
+    app.bindTaskActions(async () => {
       refreshed = true;
     });
 
@@ -1095,17 +1095,17 @@ test("issue state form requires confirmation before closing", async () => {
       assert.equal(fetchCalls.length, 0);
       continue;
     }
-    assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues/i-0001/state");
+    assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/state");
     assert.equal(fetchCalls[0].options.method, "POST");
     assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
     assert.deepEqual(JSON.parse(fetchCalls[0].options.body), { state: "closed" });
   }
 });
 
-test("issue state form surfaces failures without refreshing", async () => {
+test("task state form surfaces failures without refreshing", async () => {
   let submitHandler;
   const form = {
-    dataset: { issueStateForm: "i-0001" },
+    dataset: { taskStateForm: "i-0001" },
     elements: {
       state: { value: "up_next" },
     },
@@ -1118,25 +1118,25 @@ test("issue state form surfaces failures without refreshing", async () => {
     fetch() {
       return Promise.resolve({
         ok: false,
-        json: () => Promise.resolve({ error: { message: "merged issues cannot be moved" } }),
+        json: () => Promise.resolve({ error: { message: "merged tasks cannot be moved" } }),
       });
     },
   });
   const app = new context.FlowApp();
-  app.querySelectorAll = (selector) => (selector === "[data-issue-state-form]" ? [form] : []);
+  app.querySelectorAll = (selector) => (selector === "[data-task-state-form]" ? [form] : []);
   app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
   let refreshed = false;
-  app.bindIssueActions(async () => {
+  app.bindTaskActions(async () => {
     refreshed = true;
   });
 
   await submitHandler({ preventDefault() {} });
 
   assert.equal(refreshed, false);
-  assert.equal(status.textContent, "merged issues cannot be moved");
+  assert.equal(status.textContent, "merged tasks cannot be moved");
 });
 
-test("review run action posts to issue review endpoint and refreshes", async () => {
+test("review run action posts to task review endpoint and refreshes", async () => {
   let clickHandler;
   const button = {
     dataset: { reviewRun: "i-0001", project: "p-demo" },
@@ -1159,13 +1159,13 @@ test("review run action posts to issue review endpoint and refreshes", async () 
   app.querySelectorAll = (selector) => (selector === "[data-review-run]" ? [button] : []);
   app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
   let refreshed = false;
-  app.bindIssueActions(async () => {
+  app.bindTaskActions(async () => {
     refreshed = true;
   });
 
   await clickHandler();
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues/i-0001/review/run");
+  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/review/run");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
@@ -1173,12 +1173,12 @@ test("review run action posts to issue review endpoint and refreshes", async () 
   assert.equal(status.textContent, "");
 });
 
-test("triage edit action patches issue title and refreshes", async () => {
+test("triage edit action patches task title and refreshes", async () => {
   const harness = await triageEditHarness({ promptValue: "  New triage title  " });
 
   await harness.click();
 
-  assert.equal(harness.fetchCalls[0].path, "/ui/api/v1/issues/i-0001");
+  assert.equal(harness.fetchCalls[0].path, "/ui/api/v1/tasks/i-0001");
   assert.equal(harness.fetchCalls[0].options.method, "PATCH");
   assert.equal(harness.fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body), { title: "New triage title" });
@@ -1197,21 +1197,21 @@ test("triage edit action ignores cancel and blank titles", async () => {
   await blank.click();
   assert.equal(blank.fetchCalls.length, 0);
   assert.equal(blank.refreshed(), false);
-  assert.equal(blank.status.textContent, "Issue title is required");
+  assert.equal(blank.status.textContent, "Task title is required");
 });
 
 test("triage edit action surfaces patch failures", async () => {
   const harness = await triageEditHarness({
     promptValue: "Updated",
     fetchOK: false,
-    errorMessage: "issue title is required",
+    errorMessage: "task title is required",
   });
 
   await harness.click();
 
   assert.equal(harness.fetchCalls.length, 1);
   assert.equal(harness.refreshed(), false);
-  assert.equal(harness.status.textContent, "issue title is required");
+  assert.equal(harness.status.textContent, "task title is required");
 });
 
 test("change detail fetches read model and renders checks and merge action", async () => {
@@ -1269,14 +1269,14 @@ test("change detail fetches read model and renders checks and merge action", asy
         json: () => Promise.resolve({
           change: {
             id: "ch-0001",
-            issue_id: "i-0001",
-            branch: "issue/i-0001",
+            task_id: "i-0001",
+            branch: "task/i-0001",
             base: "main",
             head_sha: "1234567890abcdef",
             updated_at: "2026-06-07T12:00:00Z",
             ready_at: "2026-06-07T12:01:00Z",
           },
-          issue: { id: "i-0001", title: "Ship web UI" },
+          task: { id: "i-0001", title: "Ship web UI" },
           review_state: "approved",
           required_checks: { total: 1, satisfied: 1 },
           checks: [{ name: "unit", kind: "ci", required: true, verdict: "satisfied", details: "ok" }],
@@ -1502,8 +1502,8 @@ test("change detail diff toggle re-renders cached diff in the new mode without r
       return Promise.resolve({
         ok: true,
         json: () => Promise.resolve({
-          change: { id: "ch-0001", issue_id: "i-0001", branch: "issue/i-0001", base: "main", head_sha: "1234567890abcdef", updated_at: "2026-06-07T12:00:00Z" },
-          issue: { id: "i-0001", title: "Ship web UI" },
+          change: { id: "ch-0001", task_id: "i-0001", branch: "task/i-0001", base: "main", head_sha: "1234567890abcdef", updated_at: "2026-06-07T12:00:00Z" },
+          task: { id: "i-0001", title: "Ship web UI" },
           review_state: "approved",
           required_checks: { total: 0, satisfied: 0 },
           checks: [],
@@ -1594,7 +1594,7 @@ test("thread claim action posts claim payload and refreshes", async () => {
   app.querySelectorAll = (selector) => (selector === "[data-thread-claim]" ? [button] : []);
   app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
   let refreshed = false;
-  app.bindIssueActions(async () => {
+  app.bindTaskActions(async () => {
     refreshed = true;
   });
 
@@ -1642,7 +1642,7 @@ test("thread fixed claim posts current head without prompting", async () => {
   app.querySelectorAll = (selector) => (selector === "[data-thread-claim]" ? [button] : []);
   app.querySelector = () => ({ textContent: "" });
   let refreshed = false;
-  app.bindIssueActions(async () => {
+  app.bindTaskActions(async () => {
     refreshed = true;
   });
 
@@ -1677,7 +1677,7 @@ test("thread claim action requires rationale for non-fixed claims", async () => 
   app.querySelectorAll = (selector) => (selector === "[data-thread-claim]" ? [button] : []);
   app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
   let refreshed = false;
-  app.bindIssueActions(async () => {
+  app.bindTaskActions(async () => {
     refreshed = true;
   });
 
@@ -1716,7 +1716,7 @@ test("thread reply action posts comment payload and refreshes", async () => {
   app.querySelectorAll = (selector) => (selector === "[data-thread-reply]" ? [button] : []);
   app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
   let refreshed = false;
-  app.bindIssueActions(async () => {
+  app.bindTaskActions(async () => {
     refreshed = true;
   });
 
@@ -1752,7 +1752,7 @@ test("thread reply action requires comment text", async () => {
   app.querySelectorAll = (selector) => (selector === "[data-thread-reply]" ? [button] : []);
   app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
   let refreshed = false;
-  app.bindIssueActions(async () => {
+  app.bindTaskActions(async () => {
     refreshed = true;
   });
 
@@ -1762,7 +1762,7 @@ test("thread reply action requires comment text", async () => {
   assert.equal(refreshed, false);
 });
 
-test("phase approve action posts to issue phase endpoint and refreshes", async () => {
+test("phase approve action posts to task phase endpoint and refreshes", async () => {
   let clickHandler;
   const button = {
     dataset: { phaseApprove: "i-0001", project: "p-demo" },
@@ -1777,7 +1777,7 @@ test("phase approve action posts to issue phase endpoint and refreshes", async (
       fetchCalls.push({ path, options });
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ issue: { id: "i-0001" }, flow: {} }),
+        json: () => Promise.resolve({ task: { id: "i-0001" }, flow: {} }),
       });
     },
   });
@@ -1785,13 +1785,13 @@ test("phase approve action posts to issue phase endpoint and refreshes", async (
   app.querySelectorAll = (selector) => (selector === "[data-phase-approve]" ? [button] : []);
   app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
   let refreshed = false;
-  app.bindIssueActions(async () => {
+  app.bindTaskActions(async () => {
     refreshed = true;
   });
 
   await clickHandler();
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues/i-0001/phase/approve");
+  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/phase/approve");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
@@ -1799,7 +1799,7 @@ test("phase approve action posts to issue phase endpoint and refreshes", async (
   assert.equal(status.textContent, "phase approved");
 });
 
-test("phase request-changes form posts feedback to issue phase endpoint and refreshes", async () => {
+test("phase request-changes form posts feedback to task phase endpoint and refreshes", async () => {
   let submitHandler;
   const form = {
     dataset: { phaseRequestChanges: "i-0001", project: "p-demo" },
@@ -1817,7 +1817,7 @@ test("phase request-changes form posts feedback to issue phase endpoint and refr
       fetchCalls.push({ path, options });
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ issue: { id: "i-0001" }, flow: {} }),
+        json: () => Promise.resolve({ task: { id: "i-0001" }, flow: {} }),
       });
     },
   });
@@ -1825,13 +1825,13 @@ test("phase request-changes form posts feedback to issue phase endpoint and refr
   app.querySelectorAll = (selector) => (selector === "[data-phase-request-changes]" ? [form] : []);
   app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
   let refreshed = false;
-  app.bindIssueActions(async () => {
+  app.bindTaskActions(async () => {
     refreshed = true;
   });
 
   await submitHandler({ preventDefault() {} });
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues/i-0001/phase/request-changes");
+  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/phase/request-changes");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), { feedback: "Please narrow the first step." });
   assert.equal(refreshed, true);
@@ -1864,13 +1864,13 @@ test("attention reply form posts message and status log id", async () => {
   app.querySelectorAll = (selector) => (selector === "[data-attention-reply-form]" ? [form] : []);
   app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
   let refreshed = false;
-  app.bindIssueActions(async () => {
+  app.bindTaskActions(async () => {
     refreshed = true;
   });
 
   await submitHandler({ preventDefault() {} });
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/issues/i-0001/attention/reply");
+  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-demo/tasks/i-0001/attention/reply");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {
@@ -1884,21 +1884,21 @@ test("attention reply form posts message and status log id", async () => {
 test("human review check renders approval action only while unsatisfied", async () => {
   const context = await scriptContext();
   const pendingHTML = context.renderCheck({
-    issue_id: "i-0001",
+    task_id: "i-0001",
     name: "human-review",
     kind: "human",
     required: true,
     verdict: "pending",
   });
   const satisfiedHTML = context.renderCheck({
-    issue_id: "i-0001",
+    task_id: "i-0001",
     name: "human-review",
     kind: "human",
     required: true,
     verdict: "satisfied",
   });
   const ciHTML = context.renderCheck({
-    issue_id: "i-0001",
+    task_id: "i-0001",
     name: "unit",
     kind: "ci",
     required: true,
@@ -1941,13 +1941,13 @@ test("human review approval action reports satisfied check and refreshes", async
   app.querySelectorAll = (selector) => (selector === "[data-human-review-approve]" ? [button] : []);
   app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
   let refreshed = false;
-  app.bindIssueActions(async () => {
+  app.bindTaskActions(async () => {
     refreshed = true;
   });
 
   await clickHandler();
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/issues/i-0001/checks/human-review");
+  assert.equal(fetchCalls[0].path, "/ui/api/v1/tasks/i-0001/checks/human-review");
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {
@@ -2064,7 +2064,7 @@ test("change diff ignores payload for a different head", async () => {
   assert.equal(app.changeDiffCache?.has("ch-0001:old-head"), false);
 });
 
-test("issue detail renders owner metadata, relations, sessions, changes, and checks", async () => {
+test("task detail renders owner metadata, relations, sessions, changes, and checks", async () => {
   const fetchCalls = [];
   const title = { textContent: "" };
   const status = { textContent: "" };
@@ -2078,10 +2078,10 @@ test("issue detail renders owner metadata, relations, sessions, changes, and che
     },
     history: { pushState() {} },
     window: {
-      location: { pathname: "/ui/projects/p-alpha/issues/i-0001" },
+      location: { pathname: "/ui/projects/p-alpha/tasks/i-0001" },
       addEventListener() {},
       open() {
-        throw new Error("window.open should not be used for issue detail render");
+        throw new Error("window.open should not be used for task detail render");
       },
     },
     fetch(path, options) {
@@ -2091,31 +2091,31 @@ test("issue detail renders owner metadata, relations, sessions, changes, and che
         json: () => Promise.resolve({
           project_id: "p-alpha",
           project_name: "alpha",
-          issue: {
+          task: {
             id: "i-0001",
-            title: "Issue detail",
+            title: "Task detail",
             body: "Body",
             acceptance_criteria: "Done",
             priority: 2,
             schedule_state: "up_next",
             triage_state: "accepted",
             created_by: "agent",
-            source_issue_id: "i-0000",
+            source_task_id: "i-0000",
             source_change_id: "ch-0000",
             updated_at: "2026-06-07T12:00:00Z",
           },
-          issue_detail: {
+          task_detail: {
             tags: [{ slug: "web-ui" }],
-            relations: [{ source_issue_id: "i-0002", target_issue_id: "i-0001", kind: "blocks" }],
-            active_session: { id: "s-0001", state: "waiting", worker_id: "w-local", branch: "issue/i-0001" },
+            relations: [{ source_task_id: "i-0002", target_task_id: "i-0001", kind: "blocks" }],
+            active_session: { id: "s-0001", state: "waiting", worker_id: "w-local", branch: "task/i-0001" },
             terminal_available: true,
-            sessions: [{ id: "s-0001", state: "waiting", worker_id: "w-local", branch: "issue/i-0001", terminal_available: true, transcript_available: true, updated_at: "2026-06-07T12:01:00Z" }],
-            changes: [{ id: "ch-0001", branch: "issue/i-0001", head_sha: "abcdef1234567890", updated_at: "2026-06-07T12:02:00Z" }],
-            ready_change: { id: "ch-ready", branch: "issue/i-0001", head_sha: "1234567890abcdef", ready_at: "2026-06-07T12:03:00Z" },
+            sessions: [{ id: "s-0001", state: "waiting", worker_id: "w-local", branch: "task/i-0001", terminal_available: true, transcript_available: true, updated_at: "2026-06-07T12:01:00Z" }],
+            changes: [{ id: "ch-0001", branch: "task/i-0001", head_sha: "abcdef1234567890", updated_at: "2026-06-07T12:02:00Z" }],
+            ready_change: { id: "ch-ready", branch: "task/i-0001", head_sha: "1234567890abcdef", ready_at: "2026-06-07T12:03:00Z" },
             review_state: "changes_requested",
             required_checks: { total: 1, blocked: 1 },
             checks: [{ name: "unit", kind: "ci", required: true, verdict: "blocked", details: "failed" }],
-            attachments: [{ id: "att-0001", issue_id: "i-0001", stage: "reviewer", filename: "review.png", content_type: "image/png", size_bytes: 2048 }],
+            attachments: [{ id: "att-0001", task_id: "i-0001", stage: "reviewer", filename: "review.png", content_type: "image/png", size_bytes: 2048 }],
             transitions: [
               { seq: 2, from_phase: "up_next", event_kind: "ensure_author_job", to_phase: "authoring", actor: "owner:cli", created_at: "2026-06-07T12:04:00Z" },
             ],
@@ -2142,15 +2142,15 @@ test("issue detail renders owner metadata, relations, sessions, changes, and che
     return { textContent: "" };
   };
   flowApp.querySelectorAll = () => [];
-  await flowApp.renderIssue("i-0001", undefined, "p-alpha");
+  await flowApp.renderTask("i-0001", undefined, "p-alpha");
 
-  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-alpha/issues/i-0001");
-  assert.match(content.innerHTML, /class="detail issue-detail"/);
-  assert.match(content.innerHTML, /class="issue-detail-grid"/);
-  assert.match(content.innerHTML, /class="issue-detail-column issue-detail-editor"/);
-  assert.match(content.innerHTML, /class="issue-detail-column issue-detail-activity"/);
-  assert.match(content.innerHTML, /class="issue-detail-column issue-detail-system"/);
-  assert.match(content.innerHTML, /class="issue-detail-lifecycle"><h3>Lifecycle<\/h3><div class="lifecycle-chart"><svg/);
+  assert.equal(fetchCalls[0].path, "/ui/api/v1/projects/p-alpha/tasks/i-0001");
+  assert.match(content.innerHTML, /class="detail task-detail"/);
+  assert.match(content.innerHTML, /class="task-detail-grid"/);
+  assert.match(content.innerHTML, /class="task-detail-column task-detail-editor"/);
+  assert.match(content.innerHTML, /class="task-detail-column task-detail-activity"/);
+  assert.match(content.innerHTML, /class="task-detail-column task-detail-system"/);
+  assert.match(content.innerHTML, /class="task-detail-lifecycle"><h3>Lifecycle<\/h3><div class="lifecycle-chart"><svg/);
   // Unified timeline: sessions, transitions and status all render inside it.
   assert.match(content.innerHTML, /<div class="feed timeline-feed" data-timeline>/);
   assert.match(content.innerHTML, /data-timeline-glyph="session"/);
@@ -2159,15 +2159,15 @@ test("issue detail renders owner metadata, relations, sessions, changes, and che
   assert.doesNotMatch(content.innerHTML, /<h3>Sessions<\/h3>/);
   assert.doesNotMatch(content.innerHTML, /<h3>Status<\/h3>/);
   // Read-only detail summary with an Edit toggle that reveals the form.
-  assert.match(content.innerHTML, /data-issue-read-only/);
-  assert.match(content.innerHTML, /data-issue-edit-toggle/);
-  assert.match(content.innerHTML, /data-issue-edit-form/);
+  assert.match(content.innerHTML, /data-task-read-only/);
+  assert.match(content.innerHTML, /data-task-edit-toggle/);
+  assert.match(content.innerHTML, /data-task-edit-form/);
   assert.match(content.innerHTML, /web-ui/);
-  assert.match(content.innerHTML, /href="\/ui\/projects\/p-alpha\/issues\/i-0002"/);
+  assert.match(content.innerHTML, /href="\/ui\/projects\/p-alpha\/tasks\/i-0002"/);
   assert.match(content.innerHTML, /data-terminal="s-0001"/);
   assert.equal(content.innerHTML.match(/data-terminal="s-0001"/g)?.length, 2);
   assert.match(content.innerHTML, /data-session-transcript="s-0001"/);
-  assert.match(content.innerHTML, /data-issue-state-form="i-0001"/);
+  assert.match(content.innerHTML, /data-task-state-form="i-0001"/);
   assert.match(content.innerHTML, /<option value="up_next" selected>Up Next<\/option>/);
   assert.match(content.innerHTML, /data-pause="i-0001"/);
   assert.doesNotMatch(content.innerHTML, /data-close="i-0001"/);
@@ -2179,28 +2179,28 @@ test("issue detail renders owner metadata, relations, sessions, changes, and che
   assert.match(content.innerHTML, /unit/);
   assert.match(content.innerHTML, /review\.png/);
   assert.match(content.innerHTML, /class="attachment-preview"/);
-  assert.match(content.innerHTML, /\/ui\/api\/v1\/projects\/p-alpha\/issues\/i-0001\/attachments\/att-0001\?download=1/);
+  assert.match(content.innerHTML, /\/ui\/api\/v1\/projects\/p-alpha\/tasks\/i-0001\/attachments\/att-0001\?download=1/);
   assert.match(content.innerHTML, /<span class="badge warn">changes requested<\/span>/);
-  assert.match(content.innerHTML, /Source Issue/);
+  assert.match(content.innerHTML, /Source Task/);
   assert.match(content.innerHTML, /Lifecycle/);
   assert.match(content.innerHTML, /<div class="lifecycle-chart"><svg/);
   assert.match(content.innerHTML, /ensure_author_job|up_next/);
 });
 
-test("issue detail renders a gate-paused phase as a full-width approval panel", async () => {
-  const harness = await browserSmokeHarness("/ui/projects/p-alpha/issues/i-0001", {
-    "/ui/api/v1/projects/p-alpha/issues/i-0001": {
+test("task detail renders a gate-paused phase as a full-width approval panel", async () => {
+  const harness = await browserSmokeHarness("/ui/projects/p-alpha/tasks/i-0001", {
+    "/ui/api/v1/projects/p-alpha/tasks/i-0001": {
       project_id: "p-alpha",
-      issue: {
+      task: {
         id: "i-0001",
-        title: "Gated issue",
+        title: "Gated task",
         schedule_state: "up_next",
         triage_state: "accepted",
         priority: 1,
         created_by: "agent",
         updated_at: "2026-06-18T12:37:00Z",
       },
-      issue_detail: {},
+      task_detail: {},
       flow: {
         flow_id: "fl-plan",
         flow_name: "planned",
@@ -2225,25 +2225,25 @@ test("issue detail renders a gate-paused phase as a full-width approval panel", 
   // The header meta line surfaces the flow + current phase (1-based).
   assert.match(html, /planned · plan 1\/2/);
   assert.ok(html.indexOf("summary-grid") < html.indexOf("data-phase-gate"));
-  assert.ok(html.indexOf("data-phase-gate") < html.indexOf("issue-detail-grid"));
+  assert.ok(html.indexOf("data-phase-gate") < html.indexOf("task-detail-grid"));
 });
 
-test("issue detail renders resume for a paused task", async () => {
-  const harness = await browserSmokeHarness("/ui/projects/p-alpha/issues/i-0001", {
-    "/ui/api/v1/projects/p-alpha/issues/i-0001": {
+test("task detail renders resume for a paused task", async () => {
+  const harness = await browserSmokeHarness("/ui/projects/p-alpha/tasks/i-0001", {
+    "/ui/api/v1/projects/p-alpha/tasks/i-0001": {
       project_id: "p-alpha",
-      issue: {
+      task: {
         id: "i-0001",
-        title: "Paused issue",
+        title: "Paused task",
         schedule_state: "up_next",
         triage_state: "accepted",
         priority: 1,
         created_by: "human",
         updated_at: "2026-06-07T12:00:00Z",
       },
-      issue_detail: {
+      task_detail: {
         paused: true,
-        sessions: [{ id: "s-0001", state: "abandoned", worker_id: "w-local", branch: "issue/i-0001", updated_at: "2026-06-07T12:01:00Z" }],
+        sessions: [{ id: "s-0001", state: "abandoned", worker_id: "w-local", branch: "task/i-0001", updated_at: "2026-06-07T12:01:00Z" }],
       },
     },
   });
@@ -2255,20 +2255,20 @@ test("issue detail renders resume for a paused task", async () => {
   assert.doesNotMatch(harness.content.innerHTML, /data-close="i-0001"/);
 });
 
-test("issue detail renders retry for a crash-held task", async () => {
-  const harness = await browserSmokeHarness("/ui/projects/p-alpha/issues/i-0001", {
-    "/ui/api/v1/projects/p-alpha/issues/i-0001": {
+test("task detail renders retry for a crash-held task", async () => {
+  const harness = await browserSmokeHarness("/ui/projects/p-alpha/tasks/i-0001", {
+    "/ui/api/v1/projects/p-alpha/tasks/i-0001": {
       project_id: "p-alpha",
-      issue: {
+      task: {
         id: "i-0001",
-        title: "Crash held issue",
+        title: "Crash held task",
         schedule_state: "up_next",
         triage_state: "accepted",
         priority: 1,
         created_by: "human",
         updated_at: "2026-06-07T12:00:00Z",
       },
-      issue_detail: {
+      task_detail: {
         wait_reason: "crash_loop",
       },
     },
@@ -2288,11 +2288,11 @@ test("attachment previews are limited to safe raster image types", async () => {
   assert.equal(context.isImageContentType("image/svg+xml"), false);
 });
 
-test("issueHref requires project context for issue detail links", async () => {
+test("taskHref requires project context for task detail links", async () => {
   const context = await scriptContext();
 
-  assert.equal(context.issueHref("p-alpha", "i-0001"), "/ui/projects/p-alpha/issues/i-0001");
-  assert.equal(context.issueHref("", "i-0001"), "#");
+  assert.equal(context.taskHref("p-alpha", "i-0001"), "/ui/projects/p-alpha/tasks/i-0001");
+  assert.equal(context.taskHref("", "i-0001"), "#");
 });
 
 test("renderLifecycleChart draws the canonical graph with counts and highlights", async () => {
@@ -2388,7 +2388,7 @@ test("diagnostics rows render queue, lease, tmux, session, and taints", async ()
     state: "running",
     role: "ci",
     capacity_bucket: "ephemeral",
-    issue_id: "i-0001",
+    task_id: "i-0001",
     change_id: "ch-0001",
     updated_at: "2026-06-07T12:00:00Z",
   }, {
@@ -2410,7 +2410,7 @@ test("diagnostics rows render queue, lease, tmux, session, and taints", async ()
   assert.match(jobHTML, /data-terminal="s-0001"/);
   assert.match(jobHTML, /data-job-attach="j-0001"/);
   assert.match(jobHTML, /data-session-transcript="s-0001"/);
-  assert.match(jobHTML, /\/ui\/projects\/p-alpha\/issues\/i-0001/);
+  assert.match(jobHTML, /\/ui\/projects\/p-alpha\/tasks\/i-0001/);
   assert.match(jobHTML, /\/ui\/changes\/ch-0001/);
 
   const jobTranscriptHTML = context.renderJobRow({
@@ -2418,7 +2418,7 @@ test("diagnostics rows render queue, lease, tmux, session, and taints", async ()
     state: "finished",
     role: "reviewer",
     capacity_bucket: "ephemeral",
-    issue_id: "i-0001",
+    task_id: "i-0001",
     updated_at: "2026-06-07T12:00:00Z",
   }, {
     lease: { id: "l-0004", worker_id: "w-local" },
@@ -2431,7 +2431,7 @@ test("diagnostics rows render queue, lease, tmux, session, and taints", async ()
     state: "running",
     role: "reviewer",
     capacity_bucket: "persistent_agent",
-    issue_id: "i-0001",
+    task_id: "i-0001",
     updated_at: "2026-06-07T12:00:00Z",
   }, {
     lease: { id: "l-0003", worker_id: "w-local" },
@@ -2461,9 +2461,9 @@ test("diagnostics rows render queue, lease, tmux, session, and taints", async ()
 test("board cards render tags and relationship indicators", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const html = app.renderIssueCard({
+  const html = app.renderTaskCard({
     id: "i-0001",
-    title: "Tagged issue",
+    title: "Tagged task",
     schedule_state: "backlog",
     triage_state: "triage",
     priority: 1,
@@ -2490,14 +2490,14 @@ test("board cards render tags and relationship indicators", async () => {
 test("board cards suppress duplicate visible status labels", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const issue = {
+  const task = {
     id: "i-0001",
     title: "Needs changes",
     schedule_state: "up_next",
     triage_state: "accepted",
     priority: 1,
   };
-  const render = (tags) => app.renderIssueCard(issue, {
+  const render = (tags) => app.renderTaskCard(task, {
     review_state: "changes_requested",
     tags,
   }, "changes_requested", false);
@@ -2516,7 +2516,7 @@ test("board cards suppress duplicate visible status labels", async () => {
 test("board cards suppress duplicate visible labels from all badge sources", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const html = app.renderIssueCard({
+  const html = app.renderTaskCard({
     id: "i-0001",
     title: "Badge sources",
     schedule_state: "up_next",
@@ -2524,7 +2524,7 @@ test("board cards suppress duplicate visible labels from all badge sources", asy
     priority: 1,
   }, {
     required_checks: { total: 2, satisfied: 1 },
-    blockers: { count: 2, issues: [] },
+    blockers: { count: 2, tasks: [] },
     latest_status: { message: "cannot continue", kind: "blocker" },
     blocking_reason: "waiting for response",
     primary_action: "Resume",
@@ -2553,7 +2553,7 @@ test("board cards suppress duplicate visible labels from all badge sources", asy
 test("board cards render job terminal actions without active sessions", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const html = app.renderIssueCard({
+  const html = app.renderTaskCard({
     id: "i-0001",
     title: "Review running",
     schedule_state: "up_next",
@@ -2577,9 +2577,9 @@ test("board cards render session terminal icon actions in every running board st
   const states = ["planning", "in_progress", "in_review", "changes_requested", "ready_to_merge"];
 
   for (const state of states) {
-    const html = app.renderIssueCard({
+    const html = app.renderTaskCard({
       id: `i-${state}`,
-      title: `${state} issue`,
+      title: `${state} task`,
       schedule_state: "up_next",
       triage_state: "accepted",
       priority: 1,
@@ -2597,7 +2597,7 @@ test("board cards render session terminal icon actions in every running board st
 test("ready to merge cards render diff stats and head sha", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const html = app.renderIssueCard({
+  const html = app.renderTaskCard({
     id: "i-0001",
     title: "Merge me",
     schedule_state: "accepted",
@@ -2607,7 +2607,7 @@ test("ready to merge cards render diff stats and head sha", async () => {
   }, {
     change: {
       id: "ch-0001",
-      branch: "issue/i-0001",
+      branch: "task/i-0001",
       head_sha: "abcdef1234567890",
     },
     diff_stats: {
@@ -2629,7 +2629,7 @@ test("ready to merge cards render diff stats and head sha", async () => {
 test("ready to merge cards hide merge action unless approved", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const issue = {
+  const task = {
     id: "i-0001",
     title: "Not approved",
     schedule_state: "accepted",
@@ -2638,19 +2638,19 @@ test("ready to merge cards hide merge action unless approved", async () => {
   };
   const change = {
     id: "ch-0001",
-    branch: "issue/i-0001",
+    branch: "task/i-0001",
     head_sha: "abcdef1234567890",
   };
 
-  assert.doesNotMatch(app.renderIssueCard(issue, { change }, "ready_to_merge", false), /data-merge="i-0001"/);
-  assert.doesNotMatch(app.renderIssueCard(issue, { change, review_state: "changes_requested" }, "ready_to_merge", false), /data-merge="i-0001"/);
-  assert.match(app.renderIssueCard(issue, { change, review_state: "approved" }, "ready_to_merge", false), /data-merge="i-0001"/);
+  assert.doesNotMatch(app.renderTaskCard(task, { change }, "ready_to_merge", false), /data-merge="i-0001"/);
+  assert.doesNotMatch(app.renderTaskCard(task, { change, review_state: "changes_requested" }, "ready_to_merge", false), /data-merge="i-0001"/);
+  assert.match(app.renderTaskCard(task, { change, review_state: "approved" }, "ready_to_merge", false), /data-merge="i-0001"/);
 });
 
 test("cards carry phase identity as data-phase and a phase badge", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const issue = {
+  const task = {
     id: "i-0001",
     title: "Phase identity",
     schedule_state: "up_next",
@@ -2658,21 +2658,21 @@ test("cards carry phase identity as data-phase and a phase badge", async () => {
     priority: 1,
   };
 
-  const inReview = app.renderIssueCard(issue, {}, "in_review", false);
+  const inReview = app.renderTaskCard(task, {}, "in_review", false);
   assert.match(inReview, /<article class="card" data-phase="critique"/);
   assert.match(inReview, /<span class="badge" data-phase="critique"><span class="dot"><\/span>in review<\/span>/);
 
-  const queued = app.renderIssueCard(issue, {}, "", false);
+  const queued = app.renderTaskCard(task, {}, "", false);
   assert.match(queued, /<article class="card" data-phase="up_next"/);
 
-  const triage = app.renderIssueCard({ ...issue, triage_state: "triage" }, {}, "triage", false);
+  const triage = app.renderTaskCard({ ...task, triage_state: "triage" }, {}, "triage", false);
   assert.match(triage, /<article class="card" data-phase="triage"/);
 });
 
 test("blocked cards render the blocked overlay phase and badge", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const issue = {
+  const task = {
     id: "i-0001",
     title: "Blocked work",
     schedule_state: "up_next",
@@ -2680,12 +2680,12 @@ test("blocked cards render the blocked overlay phase and badge", async () => {
     priority: 1,
   };
 
-  const blocked = app.renderIssueCard(issue, {}, "in_progress", true);
+  const blocked = app.renderTaskCard(task, {}, "in_progress", true);
   assert.match(blocked, /<article class="card" data-phase="blocked"/);
   assert.match(blocked, /<span class="badge blocked">blocked<\/span>/);
   assert.match(blocked, /<span class="badge" data-phase="authoring">/);
 
-  const withBlockers = app.renderIssueCard(issue, { blockers: { count: 2, issues: [] } }, "in_progress", false);
+  const withBlockers = app.renderTaskCard(task, { blockers: { count: 2, tasks: [] } }, "in_progress", false);
   assert.match(withBlockers, /<article class="card" data-phase="blocked"/);
   assert.match(withBlockers, /<span class="badge blocked">blockers 2<\/span>/);
 });
@@ -2711,7 +2711,7 @@ test("lifecycle transitions render phase badges around an arrow", async () => {
 test("unified timeline merges sessions, transitions, and status by time with a show-more cap", async () => {
   const context = await scriptContext();
   const sessions = [
-    { id: "s-1", state: "working", worker_id: "w-local", branch: "issue/i-0001", terminal_available: true, transcript_available: true, updated_at: "2026-06-07T12:05:00Z" },
+    { id: "s-1", state: "working", worker_id: "w-local", branch: "task/i-0001", terminal_available: true, transcript_available: true, updated_at: "2026-06-07T12:05:00Z" },
   ];
   const transitions = [
     { seq: 1, event_kind: "session_ready", session_id: "s-1", head_sha: "abcdef1234567890", change_id: "ch-1", created_at: "2026-06-07T12:03:00Z" },
@@ -2737,7 +2737,7 @@ test("unified timeline merges sessions, transitions, and status by time with a s
   assert.ok(transcriptButtons.length >= 2, `expected at least 2 transcript buttons, got ${transcriptButtons.length}`);
   // Times are relative with the absolute value available on hover.
   assert.match(html, /<time title="[^"]+">/);
-  // No raw session id as a headline and no issue id echoed.
+  // No raw session id as a headline and no task id echoed.
   assert.doesNotMatch(html, /<strong>s-1<\/strong>/);
 
   // Entries interleave by time, newest first: s-1 (12:05), then
@@ -2842,17 +2842,17 @@ test("status entries render a kind badge", async () => {
 test("feedback cards surface a non-note status kind badge", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const issue = { id: "i-0001", title: "Blocked issue", schedule_state: "up_next", triage_state: "accepted" };
+  const task = { id: "i-0001", title: "Blocked task", schedule_state: "up_next", triage_state: "accepted" };
   const blockerCard = {
     active_session: { id: "s-0001", state: "waiting" },
     latest_status: { message: "stuck on auth", kind: "blocker" },
   };
-  const blockerHTML = app.renderIssueCard(issue, blockerCard, "in_progress", false, 0, null, "question");
+  const blockerHTML = app.renderTaskCard(task, blockerCard, "in_progress", false, 0, null, "question");
   assert.match(blockerHTML, /<span class="badge danger">blocker<\/span>/);
   assert.match(blockerHTML, /waiting for response/);
 
   const noteCard = { latest_status: { message: "running tests", kind: "note" } };
-  const noteHTML = app.renderIssueCard(issue, noteCard, "in_progress", false, 0, null, "question");
+  const noteHTML = app.renderTaskCard(task, noteCard, "in_progress", false, 0, null, "question");
   assert.doesNotMatch(noteHTML, /class="badge danger"/);
   assert.match(noteHTML, /running tests/);
 });
@@ -2860,19 +2860,19 @@ test("feedback cards surface a non-note status kind badge", async () => {
 test("crash-loop cards render retry action", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const issue = { id: "i-0001", title: "Crash issue", schedule_state: "up_next", triage_state: "accepted" };
-  const html = app.renderIssueCard(issue, {}, "up_next", false, 0, { id: "p-demo" }, "crash_loop");
+  const task = { id: "i-0001", title: "Crash task", schedule_state: "up_next", triage_state: "accepted" };
+  const html = app.renderTaskCard(task, {}, "up_next", false, 0, { id: "p-demo" }, "crash_loop");
 
   assert.match(html, /data-retry-crash="i-0001"/);
-  assert.match(html, /\/ui\/projects\/p-demo\/issues\/i-0001/);
+  assert.match(html, /\/ui\/projects\/p-demo\/tasks\/i-0001/);
 });
 
 test("crash retry card action renders when another wait reason masks crash loop", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const issue = { id: "i-0001", title: "Review issue", schedule_state: "up_next", triage_state: "accepted" };
+  const task = { id: "i-0001", title: "Review task", schedule_state: "up_next", triage_state: "accepted" };
   const card = { crash_retry_available: true };
-  const html = app.renderIssueCard(issue, card, "in_review", false, 0, { id: "p-demo" }, "human_review");
+  const html = app.renderTaskCard(task, card, "in_review", false, 0, { id: "p-demo" }, "human_review");
 
   assert.match(html, /data-retry-crash="i-0001"/);
   assert.match(html, /waiting for human review/);
@@ -2912,7 +2912,7 @@ test("statusbar reflects poll state and interval", async () => {
   app.schedulePolling("/ui/jobs");
   assert.equal(meta.textContent, "poll 30s");
 
-  app.schedulePolling("/ui/projects/p-alpha/issues/i-0001");
+  app.schedulePolling("/ui/projects/p-alpha/tasks/i-0001");
   assert.equal(meta.textContent, "");
 });
 
@@ -2988,7 +2988,7 @@ test("jobs view shows project column, filters by project, and sorts by updated",
   const content = { innerHTML: "" };
   const app = new context.FlowApp();
   app.setTitle = () => {};
-  app.bindIssueActions = () => {};
+  app.bindTaskActions = () => {};
   app.isActiveLoad = () => true;
   app.querySelector = () => content;
   // Stub the per-view control listeners so change handlers do not blow up;
@@ -3047,7 +3047,7 @@ test("jobs view filter selects only the chosen project", async () => {
   const content = { innerHTML: "" };
   const app = new context.FlowApp();
   app.setTitle = () => {};
-  app.bindIssueActions = () => {};
+  app.bindTaskActions = () => {};
   app.isActiveLoad = () => true;
   app.querySelector = (selector) => (selector === ".content" ? content : null);
 
@@ -3082,14 +3082,14 @@ test("board lanes carry data-lane attributes for the lane accent system", async 
         board: {
           backlog: [{
             id: "i-0001",
-            title: "Backlog issue",
+            title: "Backlog task",
             schedule_state: "backlog",
             triage_state: "accepted",
             priority: 1,
           }],
         },
         lane_states: { "i-0001": "backlog" },
-        issue_cards: {},
+        task_cards: {},
       }],
     },
   });
@@ -3103,7 +3103,7 @@ test("board lanes carry data-lane attributes for the lane accent system", async 
 
 test("load marks content as nav or poll refresh and reports live poll state", async () => {
   const harness = await browserSmokeHarness("/ui/board", {
-    "/ui/api/v1/board": { boards: [{ project_id: "p-alpha", project_name: "alpha", board: {}, lane_states: {}, issue_cards: {} }] },
+    "/ui/api/v1/board": { boards: [{ project_id: "p-alpha", project_name: "alpha", board: {}, lane_states: {}, task_cards: {} }] },
   });
 
   await harness.app.load();
@@ -3117,7 +3117,7 @@ test("load marks content as nav or poll refresh and reports live poll state", as
 });
 
 test("non-polling routes report static instead of live", async () => {
-  const harness = await browserSmokeHarness("/ui/issues/new", {});
+  const harness = await browserSmokeHarness("/ui/tasks/new", {});
 
   await harness.app.load();
 
@@ -3127,14 +3127,14 @@ test("non-polling routes report static instead of live", async () => {
   assert.deepEqual(harness.fetchCalls, ["/ui/api/v1/projects"]);
 });
 
-test("unscoped issue detail route requires a project-scoped URL", async () => {
-  const harness = await browserSmokeHarness("/ui/issues/i-0001", {});
+test("unscoped task detail route requires a project-scoped URL", async () => {
+  const harness = await browserSmokeHarness("/ui/tasks/i-0001", {});
 
   await harness.app.load();
 
-  assert.equal(harness.title.textContent, "Issue");
-  assert.match(harness.content.innerHTML, /Project-scoped issue URL required/);
-  assert.match(harness.content.innerHTML, /\/ui\/projects\/&lt;project-id&gt;\/issues\/&lt;issue-id&gt;/);
+  assert.equal(harness.title.textContent, "Task");
+  assert.match(harness.content.innerHTML, /Project-scoped task URL required/);
+  assert.match(harness.content.innerHTML, /\/ui\/projects\/&lt;project-id&gt;\/tasks\/&lt;task-id&gt;/);
   assert.deepEqual(harness.fetchCalls, ["/ui/api/v1/projects"]);
 });
 
@@ -3156,7 +3156,7 @@ test("load failures surface error then retry state in the statusbar", async () =
 test("feedback cards render handoff summaries", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const issue = {
+  const task = {
     id: "i-0001",
     title: "Needs feedback",
     schedule_state: "up_next",
@@ -3164,7 +3164,7 @@ test("feedback cards render handoff summaries", async () => {
     priority: 1,
   };
   const card = {
-    active_session: { id: "s-0001", state: "waiting", branch: "issue/i-0001" },
+    active_session: { id: "s-0001", state: "waiting", branch: "task/i-0001" },
     terminal_available: true,
     latest_status: { message: "Waiting on product decision" },
     handoff: {
@@ -3173,8 +3173,8 @@ test("feedback cards render handoff summaries", async () => {
       summary: "Waiting for product decision before final polish.",
     },
   };
-  const html = app.renderIssueCard(issue, card, "in_progress", false, 0, null, "question");
-  const inProgressHTML = app.renderIssueCard(issue, card, "in_progress", false);
+  const html = app.renderTaskCard(task, card, "in_progress", false, 0, null, "question");
+  const inProgressHTML = app.renderTaskCard(task, card, "in_progress", false);
 
   assert.match(html, /Waiting on product decision/);
   assert.match(html, /handoff: Waiting for product decision before final polish\./);
@@ -3187,36 +3187,36 @@ test("browser smoke loads board and inbox direct routes", async () => {
     {
       path: "/ui/board",
       title: "Board",
-      present: [/Backlog issue/, /Discovered issue/, /Waiting issue/, /Merge issue/],
+      present: [/Backlog task/, /Discovered task/, /Waiting task/, /Merge task/],
       absent: [],
       activeHref: "/ui/board",
     },
     {
       path: "/ui/",
       title: "Board",
-      present: [/Backlog issue/, /Discovered issue/, /Waiting issue/, /Merge issue/],
+      present: [/Backlog task/, /Discovered task/, /Waiting task/, /Merge task/],
       absent: [],
       activeHref: "/ui/board",
     },
     {
       path: "/ui/triage",
       title: "Triage",
-      present: [/Discovered issue/],
-      absent: [/Backlog issue/, /Waiting issue/, /Merge issue/],
+      present: [/Discovered task/],
+      absent: [/Backlog task/, /Waiting task/, /Merge task/],
       activeHref: "/ui/triage",
     },
     {
       path: "/ui/feedback",
       title: "Needs Attention",
-      present: [/Waiting issue/, /Merge issue/],
-      absent: [/Backlog issue/, /Discovered issue/],
+      present: [/Waiting task/, /Merge task/],
+      absent: [/Backlog task/, /Discovered task/],
       activeHref: "/ui/feedback",
     },
     {
       path: "/ui/merge",
       title: "Merge",
-      present: [/Merge issue/],
-      absent: [/Backlog issue/, /Discovered issue/, /Waiting issue/],
+      present: [/Merge task/],
+      absent: [/Backlog task/, /Discovered task/, /Waiting task/],
       activeHref: "/ui/merge",
     },
   ]) {
@@ -3228,13 +3228,13 @@ test("browser smoke loads board and inbox direct routes", async () => {
           board: {
             backlog: [{
               id: "i-0001",
-              title: "Backlog issue",
+              title: "Backlog task",
               schedule_state: "backlog",
               triage_state: "accepted",
               priority: 1,
             }, {
               id: "i-0002",
-              title: "Discovered issue",
+              title: "Discovered task",
               schedule_state: "backlog",
               triage_state: "triage",
               priority: 2,
@@ -3242,13 +3242,13 @@ test("browser smoke loads board and inbox direct routes", async () => {
             }],
             needs_attention: [{
               id: "i-0003",
-              title: "Waiting issue",
+              title: "Waiting task",
               schedule_state: "up_next",
               triage_state: "accepted",
               priority: 1,
             }, {
               id: "i-0004",
-              title: "Merge issue",
+              title: "Merge task",
               schedule_state: "accepted",
               triage_state: "accepted",
               priority: 1,
@@ -3263,7 +3263,7 @@ test("browser smoke loads board and inbox direct routes", async () => {
           wait_reasons: {
             "i-0003": "question",
           },
-          issue_cards: {
+          task_cards: {
             "i-0001": { tags: [{ slug: "planned" }] },
             "i-0002": { tags: [{ slug: "agent" }] },
             "i-0003": {
@@ -3271,7 +3271,7 @@ test("browser smoke loads board and inbox direct routes", async () => {
               latest_status: { message: "Need a decision", kind: "question" },
             },
             "i-0004": {
-              change: { id: "ch-0004", branch: "issue/i-0004", head_sha: "abcdef1234567890" },
+              change: { id: "ch-0004", branch: "task/i-0004", head_sha: "abcdef1234567890" },
               diff_stats: { total_files: 1, additions: 2, deletions: 0 },
               review_state: "approved",
             },
@@ -3297,14 +3297,14 @@ test("browser smoke loads board and inbox direct routes", async () => {
   }
 });
 
-test("browser smoke loads issue and change deep links", async () => {
-  const issueHarness = await browserSmokeHarness("/ui/projects/p-alpha/issues/i-0001", {
-    "/ui/api/v1/projects/p-alpha/issues/i-0001": {
+test("browser smoke loads task and change deep links", async () => {
+  const taskHarness = await browserSmokeHarness("/ui/projects/p-alpha/tasks/i-0001", {
+    "/ui/api/v1/projects/p-alpha/tasks/i-0001": {
       project_id: "p-alpha",
-      issue: {
+      task: {
         id: "i-0001",
-        title: "Issue detail",
-        body: "Issue body",
+        title: "Task detail",
+        body: "Task body",
         acceptance_criteria: "Done",
         schedule_state: "up_next",
         triage_state: "accepted",
@@ -3314,7 +3314,7 @@ test("browser smoke loads issue and change deep links", async () => {
         created_by: "human",
         updated_at: "2026-06-07T12:00:00Z",
       },
-      issue_detail: {
+      task_detail: {
         tags: [{ slug: "web-ui" }],
         required_checks: { total: 1, satisfied: 1 },
         review_state: "approved",
@@ -3324,23 +3324,23 @@ test("browser smoke loads issue and change deep links", async () => {
     },
   });
 
-  await issueHarness.app.load();
+  await taskHarness.app.load();
 
-  assert.equal(issueHarness.title.textContent, "Issue");
-  assert.match(issueHarness.content.innerHTML, /Issue detail/);
-  assert.match(issueHarness.content.innerHTML, /web-ui/);
-  assert.deepEqual(issueHarness.fetchCalls, ["/ui/api/v1/projects", "/ui/api/v1/projects/p-alpha/issues/i-0001", "/ui/api/v1/projects/p-alpha/flows"]);
+  assert.equal(taskHarness.title.textContent, "Task");
+  assert.match(taskHarness.content.innerHTML, /Task detail/);
+  assert.match(taskHarness.content.innerHTML, /web-ui/);
+  assert.deepEqual(taskHarness.fetchCalls, ["/ui/api/v1/projects", "/ui/api/v1/projects/p-alpha/tasks/i-0001", "/ui/api/v1/projects/p-alpha/flows"]);
 
   const changeHarness = await browserSmokeHarness("/ui/changes/ch-0001", {
     "/ui/api/v1/changes/ch-0001": {
       change: {
         id: "ch-0001",
-        branch: "issue/i-0001",
+        branch: "task/i-0001",
         base: "main",
         head_sha: "abcdef1234567890",
         updated_at: "2026-06-07T12:00:00Z",
       },
-      issue: { id: "i-0001", title: "Change detail" },
+      task: { id: "i-0001", title: "Change detail" },
       checks: [{ name: "unit", kind: "ci", required: true, verdict: "satisfied" }],
       required_checks: { total: 1, satisfied: 1 },
       review_state: "approved",
@@ -3407,7 +3407,7 @@ test("polling policy matches board, diagnostics, and change routes", async () =>
     maxInterval: 120000,
     backoff: true,
   });
-  assert.equal(context.pollConfigForPath("/ui/projects/p-alpha/issues/i-0001"), null);
+  assert.equal(context.pollConfigForPath("/ui/projects/p-alpha/tasks/i-0001"), null);
 });
 
 test("diagnostics polling backs off and clears prior timer", async () => {
@@ -3456,13 +3456,13 @@ test("sidebar status refresh renders live nav badges and polls", async () => {
   const fetchCalls = [];
   const nav = new SmokeNav();
   const refresh = new SmokeElement();
-  const newIssue = new SmokeElement();
+  const newTask = new SmokeElement();
 
   class SidebarHTMLElement extends SmokeElement {
     querySelector(selector) {
       if (selector === ".nav") return nav;
       if (selector === '[data-action="refresh"]') return refresh;
-      if (selector === '[data-action="new-issue"]') return newIssue;
+      if (selector === '[data-action="new-task"]') return newTask;
       return new SmokeElement();
     }
 
@@ -3511,11 +3511,11 @@ test("sidebar status refresh renders live nav badges and polls", async () => {
   assert.equal(timers[0].delay, 10000);
 });
 
-test("stale poll load does not repaint issue route or rearm board polling", async () => {
+test("stale poll load does not repaint task route or rearm board polling", async () => {
   const timers = [];
   const status = { textContent: "" };
   const title = { textContent: "" };
-  const content = { innerHTML: "issue edit form" };
+  const content = { innerHTML: "task edit form" };
   const boardResponse = deferred();
   const context = await scriptContext({
     setTimeout(callback, delay) {
@@ -3541,14 +3541,14 @@ test("stale poll load does not repaint issue route or rearm board polling", asyn
   };
 
   const loadPromise = app.load({ fromPoll: true });
-  context.window.location.pathname = "/ui/projects/p-alpha/issues/i-0001";
+  context.window.location.pathname = "/ui/projects/p-alpha/tasks/i-0001";
   boardResponse.resolve({
     ok: true,
-    json: () => Promise.resolve({ board: { backlog: [{ id: "i-0002", title: "Board issue" }] } }),
+    json: () => Promise.resolve({ board: { backlog: [{ id: "i-0002", title: "Board task" }] } }),
   });
   await loadPromise;
 
-  assert.equal(content.innerHTML, "issue edit form");
+  assert.equal(content.innerHTML, "task edit form");
   assert.equal(title.textContent, "");
   assert.equal(timers.length, 0);
   assert.equal(status.textContent, "");
@@ -3652,14 +3652,14 @@ test("pre-disconnect load stays stale after reconnect-style load", async () => {
   assert.equal(timers[0].delay, 30000);
 });
 
-async function issueSaveHarness(options = {}) {
+async function taskSaveHarness(options = {}) {
   let submitHandler;
   const mode = options.mode || "edit";
   const projectID = options.projectID ?? (mode === "create" ? "p-demo" : "");
   const form = {
-    dataset: { issueForm: mode === "create" ? "" : "i-0001", issueFormMode: mode },
+    dataset: { taskForm: mode === "create" ? "" : "i-0001", taskFormMode: mode },
     elements: {
-      title: { value: options.title ?? "Updated issue" },
+      title: { value: options.title ?? "Updated task" },
       body: { value: "New body" },
       acceptance_criteria: { value: "New criteria" },
       priority: { value: options.priority ?? "4" },
@@ -3680,7 +3680,7 @@ async function issueSaveHarness(options = {}) {
   if (mode === "create") {
     form.elements.project = { value: projectID };
     form.elements.attachments = { files: options.files || [] };
-    form.elements.queue_issue = { checked: options.queueIssue !== false };
+    form.elements.queue_task = { checked: options.queueTask !== false };
   } else if (projectID) {
     form.dataset.project = projectID;
   }
@@ -3712,7 +3712,7 @@ async function issueSaveHarness(options = {}) {
         },
       },
       open() {
-        throw new Error("window.open should not be used for issue save");
+        throw new Error("window.open should not be used for task save");
       },
     },
     fetch(path, fetchOptions) {
@@ -3721,7 +3721,7 @@ async function issueSaveHarness(options = {}) {
         ok: options.fetchOK !== false,
         json: () => Promise.resolve(options.fetchOK === false
           ? { error: { message: options.errorMessage || "request failed" } }
-          : { issue: options.responseIssue || { id: "i-0001" } }),
+          : { task: options.responseTask || { id: "i-0001" } }),
       });
     },
     FormData: class {
@@ -3744,10 +3744,10 @@ async function issueSaveHarness(options = {}) {
   if (options.harnesses) {
     flowApp.harnesses = options.harnesses;
   }
-  flowApp.querySelectorAll = (selector) => (selector === "[data-issue-form]" ? [form] : []);
+  flowApp.querySelectorAll = (selector) => (selector === "[data-task-form]" ? [form] : []);
   flowApp.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
   let refreshed = false;
-  flowApp.bindIssueActions(async () => {
+  flowApp.bindTaskActions(async () => {
     refreshed = true;
   });
   flowApp.load = async () => {
@@ -3765,7 +3765,7 @@ async function issueSaveHarness(options = {}) {
   };
 }
 
-async function createIssueHarness() {
+async function createTaskHarness() {
   const status = { textContent: "" };
   const fetchCalls = [];
   let pushedPath = "";
@@ -3778,7 +3778,7 @@ async function createIssueHarness() {
     },
     fetch(path, fetchOptions) {
       fetchCalls.push({ path, options: fetchOptions });
-      throw new Error("new issue action should not fetch before submission");
+      throw new Error("new task action should not fetch before submission");
     },
   });
   const app = new context.FlowApp();
@@ -3790,7 +3790,7 @@ async function createIssueHarness() {
   return {
     fetchCalls,
     status,
-    create: () => app.createIssue(),
+    create: () => app.createTask(),
     pushedPath: () => pushedPath,
     loads: () => loads,
   };
@@ -3799,7 +3799,7 @@ async function createIssueHarness() {
 async function triageEditHarness(options = {}) {
   let clickHandler;
   const button = {
-    dataset: { issueEdit: "i-0001", issueTitle: "Old title" },
+    dataset: { taskEdit: "i-0001", taskTitle: "Old title" },
     addEventListener(event, handler) {
       if (event === "click") clickHandler = handler;
     },
@@ -3819,15 +3819,15 @@ async function triageEditHarness(options = {}) {
         ok: options.fetchOK !== false,
         json: () => Promise.resolve(options.fetchOK === false
           ? { error: { message: options.errorMessage || "request failed" } }
-          : { issue: { id: "i-0001" } }),
+          : { task: { id: "i-0001" } }),
       });
     },
   });
   const app = new context.FlowApp();
-  app.querySelectorAll = (selector) => (selector === "[data-issue-edit]" ? [button] : []);
+  app.querySelectorAll = (selector) => (selector === "[data-task-edit]" ? [button] : []);
   app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
   let refreshed = false;
-  app.bindIssueActions(async () => {
+  app.bindTaskActions(async () => {
     refreshed = true;
   });
 
@@ -4085,14 +4085,14 @@ async function themeShellHarness(storedTheme = "") {
     themeButtons[option] = button;
   }
   const refresh = new SmokeElement();
-  const newIssue = new SmokeElement();
+  const newTask = new SmokeElement();
   const nav = new SmokeNav();
 
   class ThemeHTMLElement extends SmokeElement {
     querySelector(selector) {
       if (selector === ".nav") return nav;
       if (selector === '[data-action="refresh"]') return refresh;
-      if (selector === '[data-action="new-issue"]') return newIssue;
+      if (selector === '[data-action="new-task"]') return newTask;
       return new SmokeElement();
     }
 
@@ -4222,18 +4222,18 @@ async function scriptContext(windowOverrides = {}, contextOverrides = {}) {
 
 test("human attention panel hides the reply form once the agent resumes", async () => {
   const context = await scriptContext();
-  const issue = { id: "i-0001", title: "Working" };
+  const task = { id: "i-0001", title: "Working" };
   const statusLog = [{ id: 7, kind: "question", message: "which db?", created_at: "2026-06-07T12:00:00Z" }];
-  const html = context.renderHumanAttentionPanel(issue, statusLog, "p-alpha", { id: "s-0001", state: "working" });
+  const html = context.renderHumanAttentionPanel(task, statusLog, "p-alpha", { id: "s-0001", state: "working" });
   assert.doesNotMatch(html, /data-attention-reply-form/);
   assert.doesNotMatch(html, /Needs Human Response/);
 });
 
 test("human attention panel renders the reply form while the session waits", async () => {
   const context = await scriptContext();
-  const issue = { id: "i-0001", title: "Waiting" };
+  const task = { id: "i-0001", title: "Waiting" };
   const statusLog = [{ id: 7, kind: "question", message: "which db?", created_at: "2026-06-07T12:00:00Z" }];
-  const html = context.renderHumanAttentionPanel(issue, statusLog, "p-alpha", { id: "s-0001", state: "waiting" });
+  const html = context.renderHumanAttentionPanel(task, statusLog, "p-alpha", { id: "s-0001", state: "waiting" });
   assert.match(html, /Needs Human Response/);
   assert.match(html, /which db\?/);
   assert.match(html, /data-attention-reply-form="i-0001"/);
@@ -4242,9 +4242,9 @@ test("human attention panel renders the reply form while the session waits", asy
 
 test("human attention panel renders a waiting question and no longer renders plans", async () => {
   const context = await scriptContext();
-  const issue = { id: "i-0001", title: "Plan plus question" };
+  const task = { id: "i-0001", title: "Plan plus question" };
   const statusLog = [{ id: 9, kind: "question", message: "which db?", created_at: "2026-06-07T12:00:00Z" }];
-  const html = context.renderHumanAttentionPanel(issue, statusLog, "p-alpha", { id: "s-0001", state: "waiting" });
+  const html = context.renderHumanAttentionPanel(task, statusLog, "p-alpha", { id: "s-0001", state: "waiting" });
   // Plan-mode review is gone; phase gates are handled by renderPhaseGatePanel.
   assert.doesNotMatch(html, /Plan Review/);
   assert.doesNotMatch(html, /data-plan-approve/);
@@ -4538,19 +4538,19 @@ test("phase gate panel renders the pending handoff without a raw pre block", asy
 
 test("human attention panel renders the question message as markdown", async () => {
   const context = await scriptContext();
-  const issue = { id: "i-0001", title: "Q" };
+  const task = { id: "i-0001", title: "Q" };
   const statusLog = [{ id: 7, kind: "question", message: "Pick **one**:\n- a\n- b", created_at: "2026-06-07T12:00:00Z" }];
-  const html = context.renderHumanAttentionPanel(issue, statusLog, "p-alpha", { id: "s-0001", state: "waiting" });
+  const html = context.renderHumanAttentionPanel(task, statusLog, "p-alpha", { id: "s-0001", state: "waiting" });
   assert.match(html, /<strong>one<\/strong>/);
   assert.match(html, /<li>a<\/li>/);
 });
 
-test("issue read-only detail renders the body as markdown but keeps the edit textarea raw", async () => {
+test("task read-only detail renders the body as markdown but keeps the edit textarea raw", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const html = app.renderIssueReadOnlyDetail(
+  const html = app.renderTaskReadOnlyDetail(
     { id: "i-0001", title: "T", body: "## Body\n- item", acceptance_criteria: "- done" },
-    { issueID: "i-0001" },
+    { taskID: "i-0001" },
   );
   assert.match(html, /<h2>Body<\/h2>/);
   assert.match(html, /<li>item<\/li>/);
@@ -4558,17 +4558,17 @@ test("issue read-only detail renders the body as markdown but keeps the edit tex
   assert.match(html, /<textarea[^>]*name="body"[^>]*>## Body/);
 });
 
-test("issue read-only detail shows a dash placeholder for an empty body", async () => {
+test("task read-only detail shows a dash placeholder for an empty body", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const html = app.renderIssueReadOnlyDetail({ id: "i-0001", title: "T" }, { issueID: "i-0001" });
+  const html = app.renderTaskReadOnlyDetail({ id: "i-0001", title: "T" }, { taskID: "i-0001" });
   assert.match(html, /Body<\/span>[\s\S]*?—/);
 });
 
-test("issue card renders the latest status message as inline markdown", async () => {
+test("task card renders the latest status message as inline markdown", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const html = app.renderIssueCard(
+  const html = app.renderTaskCard(
     { id: "i-0001", title: "T" },
     { latest_status: { message: "**done** `sha`", kind: "progress" } },
     "working",
@@ -4613,16 +4613,16 @@ test("block markdown surfaces do not double-wrap the .md container", async () =>
   const comment = context.renderThreadComment({ actor: "r", body: "## H", created_at: "2026-06-07T12:00:00Z" });
   assert.doesNotMatch(comment, /class="md">\s*<div class="md"/);
   const app = new context.FlowApp();
-  const detail = app.renderIssueReadOnlyDetail({ id: "i-1", title: "T", body: "## H" }, { issueID: "i-1" });
+  const detail = app.renderTaskReadOnlyDetail({ id: "i-1", title: "T", body: "## H" }, { taskID: "i-1" });
   assert.doesNotMatch(detail, /class="md">\s*<div class="md"/);
   const panel = context.renderPhaseGatePanel({ phase_name: "plan", phase_state: "awaiting_approval", pending_handoff: "## H" }, "i-1", "p");
   assert.match(panel, /class="human-attention-body md"/);
   assert.doesNotMatch(panel, /class="md">\s*<div class="md"/);
 });
 
-// --- composable flows: issue form, board badge, gate + flows editor ------------
+// --- composable flows: task form, board badge, gate + flows editor ------------
 
-test("issue form flow select preselects the project default flow", async () => {
+test("task form flow select preselects the project default flow", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   app.projects = [{ id: "p-alpha", name: "alpha" }];
@@ -4634,14 +4634,14 @@ test("issue form flow select preselects the project default flow", async () => {
     defaultFlowID: "fl-plan",
   }]]);
 
-  const html = app.renderIssueForm({ title: "", priority: 0 }, { mode: "create", projectID: "p-alpha", submitLabel: "Create" });
+  const html = app.renderTaskForm({ title: "", priority: 0 }, { mode: "create", projectID: "p-alpha", submitLabel: "Create" });
 
   assert.match(html, /<select name="flow_id" data-flow-select>/);
   assert.match(html, /<option value="fl-basic" >basic<\/option>/);
   assert.match(html, /<option value="fl-plan" selected>planned \(default\)<\/option>/);
 });
 
-test("issue form flow select preselects the issue's saved flow when editing", async () => {
+test("task form flow select preselects the task's saved flow when editing", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   app.flowsByProject = new Map([["p-alpha", {
@@ -4652,7 +4652,7 @@ test("issue form flow select preselects the issue's saved flow when editing", as
     defaultFlowID: "fl-plan",
   }]]);
 
-  const html = app.renderIssueForm({ title: "T", flow_id: "fl-basic" }, { issueID: "i-1", projectID: "p-alpha" });
+  const html = app.renderTaskForm({ title: "T", flow_id: "fl-basic" }, { taskID: "i-1", projectID: "p-alpha" });
 
   assert.match(html, /<option value="fl-basic" selected>basic<\/option>/);
   assert.match(html, /<option value="fl-plan" >planned \(default\)<\/option>/);
@@ -4661,18 +4661,18 @@ test("issue form flow select preselects the issue's saved flow when editing", as
 test("board card renders the flow phase badge with awaiting-approval styling", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const issue = { id: "i-0001", title: "Working", schedule_state: "up_next", triage_state: "accepted" };
+  const task = { id: "i-0001", title: "Working", schedule_state: "up_next", triage_state: "accepted" };
 
-  const running = app.renderIssueCard(issue, { flow: { phase_name: "plan", phase_index: 0, phase_count: 2, phase_state: "running" } }, "in_progress", false);
+  const running = app.renderTaskCard(task, { flow: { phase_name: "plan", phase_index: 0, phase_count: 2, phase_state: "running" } }, "in_progress", false);
   assert.match(running, /data-flow-phase/);
   assert.match(running, /plan 1\/2/);
   assert.doesNotMatch(running, /awaiting approval/);
 
-  const awaiting = app.renderIssueCard(issue, { flow: { phase_name: "plan", phase_index: 1, phase_count: 2, phase_state: "awaiting_approval" } }, "in_progress", false);
+  const awaiting = app.renderTaskCard(task, { flow: { phase_name: "plan", phase_index: 1, phase_count: 2, phase_state: "awaiting_approval" } }, "in_progress", false);
   assert.match(awaiting, /data-awaiting-approval="true"/);
   assert.match(awaiting, /plan 2\/2 · awaiting approval/);
 
-  const completed = app.renderIssueCard(issue, { flow: { phase_name: "verify", phase_index: 1, phase_count: 2, phase_state: "completed" } }, "in_progress", false);
+  const completed = app.renderTaskCard(task, { flow: { phase_name: "verify", phase_index: 1, phase_count: 2, phase_state: "completed" } }, "in_progress", false);
   assert.doesNotMatch(completed, /data-flow-phase/);
 });
 
@@ -4692,7 +4692,7 @@ test("read-only detail renders the flow phase chain from the live flow status", 
       { name: "implement", gate: "auto", agent_name: "Author" },
     ],
   };
-  const html = app.renderIssueReadOnlyDetail({ id: "i-1", title: "T" }, { issueID: "i-1", projectID: "p-alpha", flow });
+  const html = app.renderTaskReadOnlyDetail({ id: "i-1", title: "T" }, { taskID: "i-1", projectID: "p-alpha", flow });
   assert.match(html, /Flow <strong>planned<\/strong>/);
   assert.match(html, /spec\(gate\) · Spec Writer -> implement · Author/);
 });
@@ -4703,11 +4703,11 @@ test("flows editor markup opts into shared form styling and accessible row contr
   const agentOptions = [{ name: "codex", display_name: "Codex", models: [] }];
 
   const agentHTML = context.renderAgentDefFormView(null, agentOptions);
-  assert.match(agentHTML, /<form class="agent-def-form issue-form"/);
+  assert.match(agentHTML, /<form class="agent-def-form task-form"/);
   assert.match(agentHTML, /class="agent-def-model-fields" data-def-model-fields/);
 
   const flowHTML = context.renderFlowEditorView({ name: "custom" }, agentDefs);
-  assert.match(flowHTML, /<form class="flow-editor issue-form"/);
+  assert.match(flowHTML, /<form class="flow-editor task-form"/);
   assert.match(flowHTML, /class="flow-row-list wide" data-phase-rows/);
   assert.match(flowHTML, /class="flow-row-actions wide"><button[^>]+data-add-phase/);
   assert.match(flowHTML, /aria-label="Phase name"/);
@@ -4908,7 +4908,7 @@ test("flows view renders agent definitions and flow tables for the active projec
   assert.match(html, /default flow/);
   assert.match(html, /plan\(gate\) -> implement/);
   assert.match(html, /data-flow-editor/);
-  // Keeps the project's flow cache warm for the issue form.
+  // Keeps the project's flow cache warm for the task form.
   assert.deepEqual(harness.app.flowsByProject.get("p-alpha").defaultFlowID, "fl-1");
 });
 

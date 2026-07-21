@@ -189,7 +189,7 @@ func gitEventHash(event GitEvent) string {
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
-func scanGitEvent(scanner issueScanner) (GitEvent, error) {
+func scanGitEvent(scanner taskScanner) (GitEvent, error) {
 	var event GitEvent
 	var observedAt string
 	var receivedAt string

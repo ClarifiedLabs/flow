@@ -17,19 +17,19 @@ func newStatusTestService(t *testing.T) (*StatusService, string) {
 	}
 	t.Cleanup(func() { store.Close() })
 
-	issue, err := NewIssueService(store.DB()).CreateIssue(ctx, CreateIssueInput{Title: "status"})
+	task, err := NewTaskService(store.DB()).CreateTask(ctx, CreateTaskInput{Title: "status"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 
-	return NewStatusService(store.DB()), issue.ID
+	return NewStatusService(store.DB()), task.ID
 }
 
 func TestWriteStatusWithKind(t *testing.T) {
 	ctx := context.Background()
-	service, issueID := newStatusTestService(t)
+	service, taskID := newStatusTestService(t)
 
-	entry, err := service.Write(ctx, WriteStatusInput{IssueID: issueID, Message: "stuck on X", Kind: "blocker"})
+	entry, err := service.Write(ctx, WriteStatusInput{TaskID: taskID, Message: "stuck on X", Kind: "blocker"})
 	if err != nil {
 		t.Fatalf("write status: %v", err)
 	}
@@ -40,9 +40,9 @@ func TestWriteStatusWithKind(t *testing.T) {
 
 func TestWriteStatusDefaultsKindNote(t *testing.T) {
 	ctx := context.Background()
-	service, issueID := newStatusTestService(t)
+	service, taskID := newStatusTestService(t)
 
-	entry, err := service.Write(ctx, WriteStatusInput{IssueID: issueID, Message: "progressing"})
+	entry, err := service.Write(ctx, WriteStatusInput{TaskID: taskID, Message: "progressing"})
 	if err != nil {
 		t.Fatalf("write status: %v", err)
 	}
@@ -53,19 +53,19 @@ func TestWriteStatusDefaultsKindNote(t *testing.T) {
 
 func TestWriteStatusRejectsBadKind(t *testing.T) {
 	ctx := context.Background()
-	service, issueID := newStatusTestService(t)
+	service, taskID := newStatusTestService(t)
 
-	if _, err := service.Write(ctx, WriteStatusInput{IssueID: issueID, Message: "boom", Kind: "urgent"}); err == nil {
+	if _, err := service.Write(ctx, WriteStatusInput{TaskID: taskID, Message: "boom", Kind: "urgent"}); err == nil {
 		t.Fatalf("expected error for invalid kind, got nil")
 	}
 }
 
 func TestWriteStatusAcceptsAllKinds(t *testing.T) {
 	ctx := context.Background()
-	service, issueID := newStatusTestService(t)
+	service, taskID := newStatusTestService(t)
 
 	for _, kind := range []string{"note", "progress", "plan", "blocker", "question"} {
-		entry, err := service.Write(ctx, WriteStatusInput{IssueID: issueID, Message: "msg", Kind: kind})
+		entry, err := service.Write(ctx, WriteStatusInput{TaskID: taskID, Message: "msg", Kind: kind})
 		if err != nil {
 			t.Fatalf("write status kind %q: %v", kind, err)
 		}
@@ -77,16 +77,16 @@ func TestWriteStatusAcceptsAllKinds(t *testing.T) {
 
 func TestListRecentByKind(t *testing.T) {
 	ctx := context.Background()
-	service, issueID := newStatusTestService(t)
+	service, taskID := newStatusTestService(t)
 
-	if _, err := service.Write(ctx, WriteStatusInput{IssueID: issueID, Message: "note one", Kind: "note"}); err != nil {
+	if _, err := service.Write(ctx, WriteStatusInput{TaskID: taskID, Message: "note one", Kind: "note"}); err != nil {
 		t.Fatalf("write note: %v", err)
 	}
-	blocker, err := service.Write(ctx, WriteStatusInput{IssueID: issueID, Message: "blocked here", Kind: "blocker"})
+	blocker, err := service.Write(ctx, WriteStatusInput{TaskID: taskID, Message: "blocked here", Kind: "blocker"})
 	if err != nil {
 		t.Fatalf("write blocker: %v", err)
 	}
-	question, err := service.Write(ctx, WriteStatusInput{IssueID: issueID, Message: "which way?", Kind: "question"})
+	question, err := service.Write(ctx, WriteStatusInput{TaskID: taskID, Message: "which way?", Kind: "question"})
 	if err != nil {
 		t.Fatalf("write question: %v", err)
 	}

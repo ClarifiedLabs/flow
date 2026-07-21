@@ -7,14 +7,14 @@ import (
 
 func TestBuildAuthorPromptInvokesRoleSkill(t *testing.T) {
 	rendered, err := Build(Input{
-		Role:                    RoleAuthor,
-		IssueID:                 "i-0001",
-		IssueTitle:              "Prompt includes issue details",
-		IssueBody:               "Make the initial prompt self-contained.",
-		IssueAcceptanceCriteria: "Agents do not need to immediately fetch issue details.",
-		ChangeID:                "ch-1",
-		Branch:                  "issue/i-0001",
-		Base:                    "main",
+		Role:                   RoleAuthor,
+		TaskID:                 "i-0001",
+		TaskTitle:              "Prompt includes task details",
+		TaskBody:               "Make the initial prompt self-contained.",
+		TaskAcceptanceCriteria: "Agents do not need to immediately fetch task details.",
+		ChangeID:               "ch-1",
+		Branch:                 "task/i-0001",
+		Base:                   "main",
 	})
 	if err != nil {
 		t.Fatalf("build prompt: %v", err)
@@ -24,12 +24,12 @@ func TestBuildAuthorPromptInvokesRoleSkill(t *testing.T) {
 		"Flow role instructions (flow-author):",
 		"# Flow Author",
 		"Finalize with two actions:",
-		"Issue: i-0001",
-		"Issue Title: Prompt includes issue details",
-		"Issue Body:\nMake the initial prompt self-contained.",
-		"Acceptance Criteria:\nAgents do not need to immediately fetch issue details.",
+		"Task: i-0001",
+		"Task Title: Prompt includes task details",
+		"Task Body:\nMake the initial prompt self-contained.",
+		"Acceptance Criteria:\nAgents do not need to immediately fetch task details.",
 		"Change: ch-1",
-		"Branch: issue/i-0001",
+		"Branch: task/i-0001",
 		"git commit",
 		"flow complete",
 	} {
@@ -55,9 +55,9 @@ func TestBuildInjectsPriorHandoffForAuthorAndVerifier(t *testing.T) {
 	for _, role := range []string{RoleAuthor, RoleVerifier} {
 		rendered, err := Build(Input{
 			Role:         role,
-			IssueID:      "i-0007",
+			TaskID:       "i-0007",
 			ChangeID:     "ch-7",
-			Branch:       "issue/i-0007",
+			Branch:       "task/i-0007",
 			Base:         "main",
 			PriorHandoff: priorHandoff,
 		})
@@ -76,9 +76,9 @@ func TestBuildInjectsPriorHandoffForAuthorAndVerifier(t *testing.T) {
 func TestBuildOmitsPriorHandoffWhenAbsent(t *testing.T) {
 	rendered, err := Build(Input{
 		Role:     RoleAuthor,
-		IssueID:  "i-0008",
+		TaskID:   "i-0008",
 		ChangeID: "ch-8",
-		Branch:   "issue/i-0008",
+		Branch:   "task/i-0008",
 		Base:     "main",
 	})
 	if err != nil {
@@ -93,10 +93,10 @@ func TestBuildAuthorFixRoundPromptIncludesBlockedReviewContext(t *testing.T) {
 	exitCode := 1
 	rendered, err := Build(Input{
 		Role:        RoleAuthor,
-		IssueID:     "i-0006",
-		IssueTitle:  "Terminal link issue",
+		TaskID:      "i-0006",
+		TaskTitle:   "Terminal link task",
 		ChangeID:    "ch-6",
-		Branch:      "issue/i-0006",
+		Branch:      "task/i-0006",
 		Base:        "main",
 		ReviewState: "changes_requested",
 		FixRound:    true,
@@ -148,8 +148,8 @@ func TestBuildAuthorFixRoundPromptIncludesBlockedReviewContext(t *testing.T) {
 func TestBuildAuthorPromptIncludesReviewCycleInstructions(t *testing.T) {
 	rendered, err := Build(Input{
 		Role:                    RoleAuthor,
-		IssueID:                 "i-0007",
-		IssueTitle:              "Recover repeated review loop",
+		TaskID:                  "i-0007",
+		TaskTitle:               "Recover repeated review loop",
 		ReviewCycleInstructions: "Summarize why the loop happened before changing code.",
 	})
 	if err != nil {
@@ -169,7 +169,7 @@ func TestBuildAuthorPromptIncludesReviewCycleInstructions(t *testing.T) {
 func TestBuildReviewerPromptUsesReviewerVerdictInstructions(t *testing.T) {
 	rendered, err := Build(Input{
 		Role:      RoleReviewer,
-		IssueID:   "i-0002",
+		TaskID:    "i-0002",
 		ChangeID:  "ch-2",
 		CheckName: "reviewer",
 	})
@@ -194,7 +194,7 @@ func TestBuildReviewerPromptUsesReviewerVerdictInstructions(t *testing.T) {
 func TestBuildReviewerPromptIncludesCompletionAssessmentGuidance(t *testing.T) {
 	rendered, err := Build(Input{
 		Role:                 RoleReviewer,
-		IssueID:              "i-0009",
+		TaskID:               "i-0009",
 		ChangeID:             "ch-9",
 		CheckName:            "reviewer",
 		CompletionAssessment: true,
@@ -219,7 +219,7 @@ func TestBuildReviewerPromptIncludesCompletionAssessmentGuidance(t *testing.T) {
 func TestBuildOmitsCompletionAssessmentWhenUnset(t *testing.T) {
 	rendered, err := Build(Input{
 		Role:      RoleReviewer,
-		IssueID:   "i-0010",
+		TaskID:    "i-0010",
 		ChangeID:  "ch-10",
 		CheckName: "reviewer",
 	})
@@ -237,7 +237,7 @@ func TestBuildOmitsCompletionAssessmentForNonReviewerRoles(t *testing.T) {
 	for _, role := range []string{RoleAuthor, RoleVerifier} {
 		rendered, err := Build(Input{
 			Role:                 role,
-			IssueID:              "i-0011",
+			TaskID:               "i-0011",
 			ChangeID:             "ch-11",
 			CompletionAssessment: true,
 		})
@@ -253,7 +253,7 @@ func TestBuildOmitsCompletionAssessmentForNonReviewerRoles(t *testing.T) {
 func TestBuildVerifierPromptUsesVerifierThreadInstructions(t *testing.T) {
 	rendered, err := Build(Input{
 		Role:      RoleVerifier,
-		IssueID:   "i-0003",
+		TaskID:    "i-0003",
 		ChangeID:  "ch-3",
 		CheckName: "verifier",
 	})
@@ -287,13 +287,13 @@ func TestInputFromEnvironmentPrefersWorkerRole(t *testing.T) {
 	env := map[string]string{
 		"FLOW_WORKER_ROLE": "reviewer",
 		"FLOW_ROLE":        "author",
-		"FLOW_ISSUE_ID":    "i-0004",
+		"FLOW_TASK_ID":     "i-0004",
 	}
 	input := InputFromEnvironment(func(key string) string {
 		return env[key]
 	})
 
-	if input.Role != RoleReviewer || input.IssueID != "i-0004" {
+	if input.Role != RoleReviewer || input.TaskID != "i-0004" {
 		t.Fatalf("input = %+v", input)
 	}
 }

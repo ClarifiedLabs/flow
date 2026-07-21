@@ -49,7 +49,7 @@ type ResolvedDeadlines struct {
 
 // LimitConfig configures bounded automation loops.
 type LimitConfig struct {
-	// ReviewAuthorCycles limits how many times an issue may be automatically
+	// ReviewAuthorCycles limits how many times an task may be automatically
 	// sent from review/acceptance back to authoring before a human grants more.
 	// The default is 5.
 	ReviewAuthorCycles int `json:"review_author_cycles" yaml:"review_author_cycles"`

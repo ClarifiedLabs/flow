@@ -46,8 +46,8 @@ func TestOpenInitializesSQLite(t *testing.T) {
 	}
 
 	assertTables(t, store,
-		[]string{"issues", "workflow_runs", "workflow_node_runs", "workflow_artifacts", "workflow_waits", "workflow_transitions", "jobs", "leases", "sessions", "changes"},
-		[]string{"projects", "workers", "tokens", "web_sessions", "web_bootstrap_tokens", "workflow_state", "transitions", "issue_flow_cursor", "issue_phase_handoffs"},
+		[]string{"tasks", "workflow_runs", "workflow_node_runs", "workflow_artifacts", "workflow_waits", "workflow_transitions", "jobs", "leases", "sessions", "changes"},
+		[]string{"projects", "workers", "tokens", "web_sessions", "web_bootstrap_tokens", "workflow_state", "transitions", "task_flow_cursor", "task_phase_handoffs"},
 	)
 }
 
@@ -81,7 +81,7 @@ func TestOpenGlobalInitializesGlobalSchema(t *testing.T) {
 	}
 	assertAppliedMigrations(t, migrations, "0001_global_init")
 
-	assertTables(t, store, []string{"projects", "workers", "tokens", "web_sessions", "web_bootstrap_tokens", "idempotency_records"}, []string{"issues", "jobs", "leases", "sessions", "changes"})
+	assertTables(t, store, []string{"projects", "workers", "tokens", "web_sessions", "web_bootstrap_tokens", "idempotency_records"}, []string{"tasks", "jobs", "leases", "sessions", "changes"})
 }
 
 func TestOpenGlobalMigrationIsIdempotent(t *testing.T) {

@@ -6,12 +6,12 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 )
 
-// Transition is one edge of the issue lifecycle FSM. The table below IS the
+// Transition is one edge of the task lifecycle FSM. The table below IS the
 // canonical, reviewable workflow specification the system used to express only
 // implicitly across HTTP handlers.
 //
 // From == "" matches any phase. To == "" means the post-action phase is derived
-// from the resulting issue state (engine.derivePhase) rather than fixed by the
+// from the resulting task state (engine.derivePhase) rather than fixed by the
 // edge. Guard == nil always passes. Action performs the edge's side effects
 // (through Effects) and may emit bounded follow-on events.
 type Transition struct {
@@ -51,21 +51,21 @@ func transitionTable() []Transition {
 		{On: EventCheckReported, Action: actReportCheck, Desc: "report-check"},
 		// Internal follow-on: a blocked required check enqueues a fix author job.
 		{On: EventEnsureFixAuthorJob, Guard: guardCanFix, Action: actEnsureAuthorJob, Desc: "ensure-fix"},
-		// Internal follow-on: an approved auto-merge issue is merged.
+		// Internal follow-on: an approved auto-merge task is merged.
 		{On: EventAutoMerge, Guard: guardAutoMergeReady, Action: actAutoMerge, Desc: "auto-merge"},
 
 		// --- Schedule ---------------------------------------------------------
 		// Scheduling sets backlog/up_next; moving up next enqueues an author job.
-		{On: EventScheduleIssue, Action: actScheduleIssue, Desc: "schedule"},
+		{On: EventScheduleTask, Action: actScheduleTask, Desc: "schedule"},
 		// Manual state changes are owner-operated repairs/overrides, including
-		// reopening a mistakenly closed issue.
-		{On: EventSetIssueState, Action: actSetIssueState, Desc: "set-issue-state"},
-		// Closing an issue is routed through the engine so the move to a closed
+		// reopening a mistakenly closed task.
+		{On: EventSetTaskState, Action: actSetTaskState, Desc: "set-task-state"},
+		// Closing an task is routed through the engine so the move to a closed
 		// phase (derived: abandoned/merged_closed/rejected_closed) is logged.
-		{On: EventCloseIssue, Action: actCloseIssue, Desc: "close"},
+		{On: EventCloseTask, Action: actCloseTask, Desc: "close"},
 		// Resetting discards authoring artifacts (jobs, sessions, changes,
-		// branches) and re-enqueues a fresh author job for up_next issues.
-		{On: EventResetIssue, Action: actResetIssue, Desc: "reset"},
+		// branches) and re-enqueues a fresh author job for up_next tasks.
+		{On: EventResetTask, Action: actResetTask, Desc: "reset"},
 		// Retrying a crash-held author job clears the crash hold and preserves
 		// the current change/branch.
 		{On: EventRetryCrashedAuthorJob, Action: actRetryCrashedAuthorJob, Desc: "retry-crashed-author"},
@@ -75,10 +75,10 @@ func transitionTable() []Transition {
 
 		// --- Triage -----------------------------------------------------------
 		// Accepting derives back to a live phase; rejecting derives to rejected_closed.
-		{On: EventTriageIssue, Action: actTriage, Desc: "triage"},
+		{On: EventTriageTask, Action: actTriage, Desc: "triage"},
 
 		// --- Merge ------------------------------------------------------------
-		{On: EventMergeRequested, Action: actMergeIssue, Desc: "merge"},
+		{On: EventMergeRequested, Action: actMergeTask, Desc: "merge"},
 		{On: EventMergeChange, Action: actMergeChange, Desc: "merge-change"},
 
 		// --- Deadlines (durable timers; see DeadlineConfig) -------------------
@@ -89,7 +89,7 @@ func transitionTable() []Transition {
 		// blocked EventCheckReported so the normal report-check cascade runs.
 		{On: EventCheckTimeout, Guard: guardCheckTimeoutPending, Action: actCheckTimeout, Desc: "check-timeout"},
 
-		// --- Review threads (sub-state machine; issue phase unchanged) ---------
+		// --- Review threads (sub-state machine; task phase unchanged) ---------
 		{On: EventThreadClaimed, Action: actClaimThread, Desc: "thread-claim"},
 		{On: EventThreadCertify, Action: actCertifyThread, Desc: "thread-certify"},
 		{On: EventThreadReopen, Action: actReopenThread, Desc: "thread-reopen"},

@@ -29,7 +29,7 @@ export async function renderFlowsView(app, context) {
   const agentDefs = defsData.agent_defs || defsData.AgentDefs || [];
   const flows = flowsData.flows || flowsData.Flows || [];
   const defaultFlowID = flowsData.default_flow_id || flowsData.DefaultFlowID || "";
-  // Keep this project's flow cache warm so the issue form renders its Flow
+  // Keep this project's flow cache warm so the task form renders its Flow
   // selector without an extra round trip.
   if (!app.flowsByProject) app.flowsByProject = new Map();
   app.flowsByProject.set(project.id, { flows, defaultFlowID });
@@ -175,7 +175,7 @@ export function renderAgentDefFormView(def, agentOptions) {
   const selectedQID = resolveAgentDefModelQID(models, harness, value(def, "model", "Model"));
   const selectedEffort = value(def, "reasoning_effort", "ReasoningEffort");
   return `
-    <form class="agent-def-form issue-form" data-agent-def-form data-def-id="${escapeAttr(defID)}">
+    <form class="agent-def-form task-form" data-agent-def-form data-def-id="${escapeAttr(defID)}">
       <label><span>Name</span><input name="def_name" value="${escapeAttr(name)}" required></label>
       <label><span>Harness</span>
         <select name="def_harness" data-def-harness>${renderHarnessOptions(agentOptions, harness, true)}</select>
@@ -397,7 +397,7 @@ export function agentDefOptionsHTML(agentDefs, selectedID, options = {}) {
   }).join("");
 }
 
-const NODE_KINDS = ["agent", "automated_checks", "change_review", "human_gate", "verify_change", "materialize_issue_set", "merge_change", "terminal"];
+const NODE_KINDS = ["agent", "automated_checks", "change_review", "human_gate", "verify_change", "materialize_task_set", "merge_change", "terminal"];
 
 function nodeConfigValue(node) {
   const config = value(node, "config", "Config") || {};
@@ -446,7 +446,7 @@ export function renderFlowEditorView(flow, agentDefs) {
   const edges = value(flow, "edges", "Edges") || [];
   const nodeKeys = nodes.map((node) => value(node, "key", "Key")).filter(Boolean);
   return `
-    <form class="flow-editor issue-form" data-flow-editor data-flow-id="${escapeAttr(flowID)}">
+    <form class="flow-editor task-form" data-flow-editor data-flow-id="${escapeAttr(flowID)}">
       <label><span>Name</span><input name="flow_name" value="${escapeAttr(name)}" required></label>
       <label><span>Description</span><textarea name="flow_description" rows="2">${escapeHTML(description)}</textarea></label>
       <label><span>Start node</span><select name="start_node">${nodeKeys.map((key) => `<option value="${escapeAttr(key)}" ${key === startNode ? "selected" : ""}>${escapeHTML(key)}</option>`).join("")}</select></label>

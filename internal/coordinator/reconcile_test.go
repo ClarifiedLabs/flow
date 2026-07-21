@@ -26,19 +26,19 @@ func TestReconcileRestoresChangeProjectionWithoutReadingHandoffRef(t *testing.T)
 	fixture := newProjectFixture(t)
 	repoPath := fixture.repoPath
 	store := fixture.store
-	issues := NewIssueService(store.DB())
-	issue, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Reconciled issue"})
+	tasks := NewTaskService(store.DB())
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Reconciled task"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 
-	branch := "issue/" + issue.ID
+	branch := "task/" + task.ID
 	if err := runReconcileGit(repoPath, nil, "checkout", "-b", branch, "main"); err != nil {
 		t.Fatalf("checkout branch: %v", err)
 	}
 	// Commit a stray handoff file on the branch: reconcile must NOT read it.
 	handoffContents := handoff.RenderTemplate(handoff.TemplateInput{
-		IssueID:               issue.ID,
+		TaskID:                task.ID,
 		Branch:                branch,
 		Base:                  "main",
 		UpdatedAt:             time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC),
@@ -55,7 +55,7 @@ func TestReconcileRestoresChangeProjectionWithoutReadingHandoffRef(t *testing.T)
 	if err := runReconcileGit(repoPath, nil, "add", "feature.txt", ".handoff.md"); err != nil {
 		t.Fatalf("git add: %v", err)
 	}
-	if err := runReconcileGit(repoPath, nil, "commit", "-m", "work on issue"); err != nil {
+	if err := runReconcileGit(repoPath, nil, "commit", "-m", "work on task"); err != nil {
 		t.Fatalf("git commit: %v", err)
 	}
 	headSHA, err := reconcileGitOutput(repoPath, nil, "rev-parse", "HEAD")
@@ -63,7 +63,7 @@ func TestReconcileRestoresChangeProjectionWithoutReadingHandoffRef(t *testing.T)
 		t.Fatalf("read head sha: %v", err)
 	}
 	if err := runReconcileGit(repoPath, []string{"FLOW_GIT_PRINCIPAL=worker:w-local"}, "push", fixture.project.ExchangeURL, branch+":"+branch); err != nil {
-		t.Fatalf("push issue branch: %v", err)
+		t.Fatalf("push task branch: %v", err)
 	}
 
 	reconciler := NewReconcileService(store.DB())
@@ -80,7 +80,7 @@ func TestReconcileRestoresChangeProjectionWithoutReadingHandoffRef(t *testing.T)
 	if err := store.DB().QueryRowContext(ctx, `
 SELECT id, head_sha
 FROM changes
-WHERE issue_id = ? AND branch = ?`, issue.ID, branch).Scan(&changeID, &head); err != nil {
+WHERE task_id = ? AND branch = ?`, task.ID, branch).Scan(&changeID, &head); err != nil {
 		t.Fatalf("load reconciled change: %v", err)
 	}
 	if head != headSHA {
@@ -120,13 +120,13 @@ func TestReconcileIsolatesPoisonedProjectAndScansOthers(t *testing.T) {
 		ExchangePath: poisonPath,
 	}
 
-	issues := NewIssueService(store.DB())
-	issue, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Reconciled issue"})
+	tasks := NewTaskService(store.DB())
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Reconciled task"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 
-	branch := "issue/" + issue.ID
+	branch := "task/" + task.ID
 	if err := runReconcileGit(repoPath, nil, "checkout", "-b", branch, "main"); err != nil {
 		t.Fatalf("checkout branch: %v", err)
 	}
@@ -134,11 +134,11 @@ func TestReconcileIsolatesPoisonedProjectAndScansOthers(t *testing.T) {
 	if err := runReconcileGit(repoPath, nil, "add", "feature.txt"); err != nil {
 		t.Fatalf("git add: %v", err)
 	}
-	if err := runReconcileGit(repoPath, nil, "commit", "-m", "work on issue"); err != nil {
+	if err := runReconcileGit(repoPath, nil, "commit", "-m", "work on task"); err != nil {
 		t.Fatalf("git commit: %v", err)
 	}
 	if err := runReconcileGit(repoPath, []string{"FLOW_GIT_PRINCIPAL=worker:w-local"}, "push", fixture.project.ExchangeURL, branch+":"+branch); err != nil {
-		t.Fatalf("push issue branch: %v", err)
+		t.Fatalf("push task branch: %v", err)
 	}
 
 	// The coordinator-wide pass: reconcile each project, joining errors and
@@ -176,7 +176,7 @@ func TestReconcileIsolatesPoisonedProjectAndScansOthers(t *testing.T) {
 	if err := store.DB().QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM changes
-WHERE issue_id = ? AND branch = ?`, issue.ID, branch).Scan(&changeCount); err != nil {
+WHERE task_id = ? AND branch = ?`, task.ID, branch).Scan(&changeCount); err != nil {
 		t.Fatalf("count reconciled change: %v", err)
 	}
 	if changeCount != 1 {

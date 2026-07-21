@@ -28,14 +28,14 @@ func newClientForTest(t *testing.T, handler http.Handler) *Client {
 	return client
 }
 
-func TestListIssueAttachments(t *testing.T) {
+func TestListTaskAttachments(t *testing.T) {
 	t.Parallel()
-	want := []coordinator.IssueAttachment{
-		{ID: "att-0001", IssueID: "i-0001", Filename: "shot.png", ContentType: "image/png"},
-		{ID: "att-0002", IssueID: "i-0001", Filename: "notes.txt", ContentType: "text/plain"},
+	want := []coordinator.TaskAttachment{
+		{ID: "att-0001", TaskID: "i-0001", Filename: "shot.png", ContentType: "image/png"},
+		{ID: "att-0002", TaskID: "i-0001", Filename: "notes.txt", ContentType: "text/plain"},
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v2/issues/i-0001/attachments", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v2/tasks/i-0001/attachments", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("method = %s, want GET", r.Method)
 		}
@@ -48,7 +48,7 @@ func TestListIssueAttachments(t *testing.T) {
 	})
 	client := newClientForTest(t, mux)
 
-	got, err := client.ListIssueAttachments(context.Background(), "i-0001")
+	got, err := client.ListTaskAttachments(context.Background(), "i-0001")
 	if err != nil {
 		t.Fatalf("list attachments: %v", err)
 	}
@@ -95,17 +95,17 @@ func TestJoinWorker(t *testing.T) {
 	}
 }
 
-func TestListIssueAttachmentsScopedToProject(t *testing.T) {
+func TestListTaskAttachmentsScopedToProject(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v2/projects/proj-1/issues/i-0001/attachments", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(t, w, http.StatusOK, map[string]any{"attachments": []coordinator.IssueAttachment{
-			{ID: "att-0001", IssueID: "i-0001", Filename: "shot.png"},
+	mux.HandleFunc("/v2/projects/proj-1/tasks/i-0001/attachments", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]any{"attachments": []coordinator.TaskAttachment{
+			{ID: "att-0001", TaskID: "i-0001", Filename: "shot.png"},
 		}})
 	})
 	client := newClientForTest(t, mux).WithProject("proj-1")
 
-	got, err := client.ListIssueAttachments(context.Background(), "i-0001")
+	got, err := client.ListTaskAttachments(context.Background(), "i-0001")
 	if err != nil {
 		t.Fatalf("list attachments: %v", err)
 	}
@@ -114,31 +114,31 @@ func TestListIssueAttachmentsScopedToProject(t *testing.T) {
 	}
 }
 
-func TestListIssueAttachmentsSurfacesErrorStatus(t *testing.T) {
+func TestListTaskAttachmentsSurfacesErrorStatus(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v2/issues/i-missing/attachments", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v2/tasks/i-missing/attachments", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(t, w, http.StatusNotFound, map[string]any{
-			"error": map[string]string{"code": "issue_not_found", "message": "issue not found"},
+			"error": map[string]string{"code": "task_not_found", "message": "task not found"},
 		})
 	})
 	client := newClientForTest(t, mux)
 
-	_, err := client.ListIssueAttachments(context.Background(), "i-missing")
+	_, err := client.ListTaskAttachments(context.Background(), "i-missing")
 	if err == nil {
-		t.Fatal("expected error for missing issue")
+		t.Fatal("expected error for missing task")
 	}
 	var statusErr *HTTPStatusError
-	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusNotFound || statusErr.Code != "issue_not_found" {
-		t.Fatalf("err = %v, want HTTPStatusError 404 issue_not_found", err)
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusNotFound || statusErr.Code != "task_not_found" {
+		t.Fatalf("err = %v, want HTTPStatusError 404 task_not_found", err)
 	}
 }
 
-func TestDownloadIssueAttachment(t *testing.T) {
+func TestDownloadTaskAttachment(t *testing.T) {
 	t.Parallel()
 	want := []byte("png-bytes")
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v2/issues/i-0001/attachments/att-0001", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v2/tasks/i-0001/attachments/att-0001", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("method = %s, want GET", r.Method)
 		}
@@ -152,7 +152,7 @@ func TestDownloadIssueAttachment(t *testing.T) {
 	client := newClientForTest(t, mux)
 
 	var buf bytes.Buffer
-	if err := client.DownloadIssueAttachment(context.Background(), "i-0001", "att-0001", &buf); err != nil {
+	if err := client.DownloadTaskAttachment(context.Background(), "i-0001", "att-0001", &buf); err != nil {
 		t.Fatalf("download: %v", err)
 	}
 	if !bytes.Equal(buf.Bytes(), want) {
@@ -160,10 +160,10 @@ func TestDownloadIssueAttachment(t *testing.T) {
 	}
 }
 
-func TestDownloadIssueAttachmentSurfacesErrorStatus(t *testing.T) {
+func TestDownloadTaskAttachmentSurfacesErrorStatus(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v2/issues/i-0001/attachments/att-missing", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v2/tasks/i-0001/attachments/att-missing", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(t, w, http.StatusNotFound, map[string]any{
 			"error": map[string]string{"code": "attachment_not_found", "message": "attachment not found"},
 		})
@@ -171,7 +171,7 @@ func TestDownloadIssueAttachmentSurfacesErrorStatus(t *testing.T) {
 	client := newClientForTest(t, mux)
 
 	var buf bytes.Buffer
-	err := client.DownloadIssueAttachment(context.Background(), "i-0001", "att-missing", &buf)
+	err := client.DownloadTaskAttachment(context.Background(), "i-0001", "att-missing", &buf)
 	if err == nil {
 		t.Fatal("expected error for missing attachment")
 	}

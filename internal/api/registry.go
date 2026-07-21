@@ -24,7 +24,7 @@ import (
 type ProjectBundle struct {
 	Project           coordinator.Project
 	Store             *flowdb.Store
-	Issues            *coordinator.IssueService
+	Tasks             *coordinator.TaskService
 	AgentDefs         *coordinator.AgentDefService
 	Flows             *coordinator.FlowService
 	WorkflowRuns      *coordinator.WorkflowRunService
@@ -35,7 +35,7 @@ type ProjectBundle struct {
 	Threads           *coordinator.ThreadService
 	Sessions          *coordinator.SessionService
 	Transcripts       *coordinator.TranscriptStore
-	Attachments       *coordinator.IssueAttachmentStore
+	Attachments       *coordinator.TaskAttachmentStore
 	Status            *coordinator.StatusService
 	Reconciler        *coordinator.ReconcileService
 	CheckConfigs      *coordinator.CheckConfigService
@@ -167,7 +167,7 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 	}
 
 	db := store.DB()
-	issues := coordinator.NewIssueService(db)
+	tasks := coordinator.NewTaskService(db)
 	agentDefs := coordinator.NewAgentDefService(db)
 	flows := coordinator.NewFlowService(db)
 	if err := flows.SeedDefaults(ctx); err != nil {
@@ -183,7 +183,7 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 		HarnessArgs: r.harnessArgs,
 	})
 	reconciler := coordinator.NewReconcileService(db)
-	sessions := coordinator.NewSessionServiceWithOptions(db, issues, queue, coordinator.SessionServiceOptions{
+	sessions := coordinator.NewSessionServiceWithOptions(db, tasks, queue, coordinator.SessionServiceOptions{
 		DefaultAuthorEntrypoint:         r.authorEntrypoint,
 		DefaultAuthorEntrypointOverride: r.authorEntrypointConfigured,
 		HarnessArgs:                     r.harnessArgs,
@@ -193,23 +193,23 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 		HandoffSnapshots:                reconciler,
 		ReviewRounds:                    checkConfigs,
 	})
-	merges := coordinator.NewMergeService(db, issues, sessions, project)
-	workflowRuns := coordinator.NewWorkflowRunService(db, flows, issues)
+	merges := coordinator.NewMergeService(db, tasks, sessions, project)
+	workflowRuns := coordinator.NewWorkflowRunService(db, flows, tasks)
 	workflowArtifacts := coordinator.NewWorkflowArtifactService(db)
 	workflowExecutor := coordinator.NewWorkflowExecutor(coordinator.WorkflowExecutorOptions{
-		Database: db, Runs: workflowRuns, Artifacts: workflowArtifacts, Issues: issues,
+		Database: db, Runs: workflowRuns, Artifacts: workflowArtifacts, Tasks: tasks,
 		Checks: checks, CheckConfigs: checkConfigs, Sessions: sessions, Merges: merges,
 		Queue: queue, Project: project, HarnessArgs: r.harnessArgs,
 	})
 	status := coordinator.NewStatusService(db)
 
-	engine := lifecycle.NewEngine(db, lifecycle.NewEffects(issues, checks, checkConfigs, sessions, merges, threads, status, nil, reconciler))
+	engine := lifecycle.NewEngine(db, lifecycle.NewEffects(tasks, checks, checkConfigs, sessions, merges, threads, status, nil, reconciler))
 	engine.SetDeadlines(r.deadlines)
 
 	bundle := &ProjectBundle{
 		Project:           project,
 		Store:             store,
-		Issues:            issues,
+		Tasks:             tasks,
 		AgentDefs:         agentDefs,
 		Flows:             flows,
 		WorkflowRuns:      workflowRuns,
@@ -219,7 +219,7 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 		Threads:           threads,
 		Sessions:          sessions,
 		Transcripts:       coordinator.NewTranscriptStore(filepath.Join(flowgit.ProjectDir(r.dataDir, project.ID), "transcripts")),
-		Attachments:       coordinator.NewIssueAttachmentStore(filepath.Join(flowgit.ProjectDir(r.dataDir, project.ID), "attachments")),
+		Attachments:       coordinator.NewTaskAttachmentStore(filepath.Join(flowgit.ProjectDir(r.dataDir, project.ID), "attachments")),
 		Status:            status,
 		Reconciler:        reconciler,
 		CheckConfigs:      checkConfigs,

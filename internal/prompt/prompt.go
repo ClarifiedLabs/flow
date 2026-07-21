@@ -15,10 +15,10 @@ const (
 
 type Input struct {
 	Role                       string
-	IssueID                    string
-	IssueTitle                 string
-	IssueBody                  string
-	IssueAcceptanceCriteria    string
+	TaskID                     string
+	TaskTitle                  string
+	TaskBody                   string
+	TaskAcceptanceCriteria     string
 	ChangeID                   string
 	Branch                     string
 	Base                       string
@@ -31,7 +31,7 @@ type Input struct {
 	HumanAttentionInstructions string
 	HumanAttentionContext      string
 	// RoleInstructionsOverride replaces the embedded role skill with the
-	// issue's flow-phase agent prompt (resolved from the cursor snapshot by
+	// task's flow-phase agent prompt (resolved from the cursor snapshot by
 	// the coordinator). Empty falls back to the embedded skills/*.md content.
 	RoleInstructionsOverride string
 	// PhaseName labels the current work phase (e.g. "spec") in the prompt.
@@ -110,12 +110,12 @@ func Build(input Input) (string, error) {
 		"",
 		fmt.Sprintf("You are the %s agent for Flow.", role),
 	}
-	lines = append(lines, fmt.Sprintf("Issue: %s", valueOrUnknown(input.IssueID)))
+	lines = append(lines, fmt.Sprintf("Task: %s", valueOrUnknown(input.TaskID)))
 	if strings.TrimSpace(input.PhaseName) != "" {
 		lines = append(lines, fmt.Sprintf("Work Phase: %s", strings.TrimSpace(input.PhaseName)))
 	}
-	if strings.TrimSpace(input.IssueTitle) != "" {
-		lines = append(lines, fmt.Sprintf("Issue Title: %s", strings.TrimSpace(input.IssueTitle)))
+	if strings.TrimSpace(input.TaskTitle) != "" {
+		lines = append(lines, fmt.Sprintf("Task Title: %s", strings.TrimSpace(input.TaskTitle)))
 	}
 	if strings.TrimSpace(input.ChangeID) != "" {
 		lines = append(lines, fmt.Sprintf("Change: %s", strings.TrimSpace(input.ChangeID)))
@@ -133,11 +133,11 @@ func Build(input Input) (string, error) {
 		lines = append(lines, "Round: fix/rework")
 	}
 	lines = appendReviewContext(lines, input)
-	if strings.TrimSpace(input.IssueBody) != "" {
-		lines = append(lines, "", "Issue Body:", strings.TrimSpace(input.IssueBody))
+	if strings.TrimSpace(input.TaskBody) != "" {
+		lines = append(lines, "", "Task Body:", strings.TrimSpace(input.TaskBody))
 	}
-	if strings.TrimSpace(input.IssueAcceptanceCriteria) != "" {
-		lines = append(lines, "", "Acceptance Criteria:", strings.TrimSpace(input.IssueAcceptanceCriteria))
+	if strings.TrimSpace(input.TaskAcceptanceCriteria) != "" {
+		lines = append(lines, "", "Acceptance Criteria:", strings.TrimSpace(input.TaskAcceptanceCriteria))
 	}
 	if strings.TrimSpace(input.PriorHandoff) != "" {
 		lines = append(lines, "", "Prior Handoff (from the previous session; there is no handoff file in the worktree to read):", strings.TrimSpace(input.PriorHandoff))
@@ -306,7 +306,7 @@ func RoleFromEnvironment(getenv func(string) string) string {
 func InputFromEnvironment(getenv func(string) string) Input {
 	return Input{
 		Role:                       RoleFromEnvironment(getenv),
-		IssueID:                    getenv("FLOW_ISSUE_ID"),
+		TaskID:                     getenv("FLOW_TASK_ID"),
 		ChangeID:                   getenv("FLOW_CHANGE_ID"),
 		Branch:                     getenv("FLOW_BRANCH"),
 		Base:                       getenv("FLOW_BASE"),
@@ -347,10 +347,10 @@ func roleInstructions(role string, input Input) []string {
 	switch role {
 	case RoleAuthor:
 		switch strings.TrimSpace(input.ArtifactKind) {
-		case "issue_set":
+		case "task_set":
 			return []string{
-				"Produce the requested issue plan as a schema-version-1 issue-set JSON document. This base workspace is read-only with respect to the exchange; do not create commits or push branches.",
-				"Write a concise Markdown summary and finalize with flow complete --summary-file SUMMARY.md --output-file ISSUE_SET.json.",
+				"Produce the requested task plan as a schema-version-1 task-set JSON document. This base workspace is read-only with respect to the exchange; do not create commits or push branches.",
+				"Write a concise Markdown summary and finalize with flow complete --summary-file SUMMARY.md --output-file TASK_SET.json.",
 			}
 		case "handoff":
 			return []string{
@@ -364,7 +364,7 @@ func roleInstructions(role string, input Input) []string {
 		}
 	case RoleReviewer:
 		return []string{
-			"Review the issue and current branch against ${FLOW_BASE:-the base branch}.",
+			"Review the task and current branch against ${FLOW_BASE:-the base branch}.",
 			"Record actionable blocking concerns as comments[] entries in $FLOW_VERDICT_FILE (each {sha,file,line,body}); the worker files each as a review thread. Use flow comment to file one directly instead if you prefer. Do not edit files, commit, push, certify threads, or call flow complete.",
 			"Write the structured verdict to $FLOW_VERDICT_FILE as the source of truth. Exit 0 only when the reviewer check is satisfied; exit nonzero after filing blocking concerns or when review is unreliable, as the belt-and-braces fallback.",
 		}

@@ -3,12 +3,12 @@
 ## Workflow
 
 1. Build verification context:
-   - Use the issue title, body, and acceptance criteria from the initial prompt; run `flow issue show "$FLOW_ISSUE_ID"` only if that context is missing.
+   - Use the task title, body, and acceptance criteria from the initial prompt; run `flow task show "$FLOW_TASK_ID"` only if that context is missing.
    - Inspect the current branch and `FLOW_BASE`. If a prior session left a handoff, it is included in your prompt as "Prior Handoff" (there is no handoff file in the worktree to read).
    - List review threads with `flow thread list "$FLOW_CHANGE_ID"`.
 
 2. Verify acceptance and claims:
-   - Check the issue acceptance criteria against the current code and tests.
+   - Check the task acceptance criteria against the current code and tests.
    - For claimed threads, inspect the original concern, author rationale, and claimed commit.
    - Do not implement fixes, commit, push, create new review concerns, or call `flow complete`.
 

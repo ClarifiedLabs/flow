@@ -15,7 +15,7 @@ import (
 
 // flowTestFixture bundles a single-project registry, its API server, and the
 // per-project services the CLI tests drive directly. A single project lets the
-// CLI's unscoped issue/board routes resolve implicitly, matching a fresh
+// CLI's unscoped task/board routes resolve implicitly, matching a fresh
 // single-project deployment.
 type flowTestFixture struct {
 	Registry    *api.Registry
@@ -23,7 +23,7 @@ type flowTestFixture struct {
 	Project     coordinator.Project
 	Credentials *coordinator.CredentialService
 	Directory   *flowworker.Directory
-	Issues      *coordinator.IssueService
+	Tasks       *coordinator.TaskService
 	Checks      *coordinator.CheckService
 	Threads     *coordinator.ThreadService
 	Sessions    *coordinator.SessionService
@@ -97,7 +97,7 @@ func newFlowTestFixture(t *testing.T) flowTestFixture {
 		Project:     project,
 		Credentials: credentials,
 		Directory:   registry.Directory(),
-		Issues:      bundle.Issues,
+		Tasks:       bundle.Tasks,
 		Checks:      bundle.Checks,
 		Threads:     bundle.Threads,
 		Sessions:    bundle.Sessions,
@@ -143,11 +143,11 @@ func repointFlowTestFixtureExchange(t *testing.T, fixture flowTestFixture, excha
 	bundle.Project = project
 
 	db := bundle.Store.DB()
-	bundle.Merges = coordinator.NewMergeService(db, bundle.Issues, bundle.Sessions, project)
+	bundle.Merges = coordinator.NewMergeService(db, bundle.Tasks, bundle.Sessions, project)
 	bundle.CheckConfigs = coordinator.NewCheckConfigServiceWithOptions(db, bundle.Checks, bundle.Queue, bundle.Threads, project, coordinator.CheckConfigServiceOptions{})
 	bundle.GitEventConsumer = coordinator.NewGitEventConsumer(db, project)
 	bundle.Engine = lifecycle.NewEngine(db, lifecycle.NewEffects(
-		bundle.Issues,
+		bundle.Tasks,
 		bundle.Checks,
 		bundle.CheckConfigs,
 		bundle.Sessions,

@@ -12,9 +12,9 @@ const (
 	// External events (one per coordinator input).
 	EventSessionReady   EventKind = "session_ready"
 	EventCheckReported  EventKind = "check_reported"
-	EventScheduleIssue  EventKind = "schedule_issue"
-	EventSetIssueState  EventKind = "set_issue_state"
-	EventTriageIssue    EventKind = "triage_issue"
+	EventScheduleTask   EventKind = "schedule_task"
+	EventSetTaskState   EventKind = "set_task_state"
+	EventTriageTask     EventKind = "triage_task"
 	EventMergeRequested EventKind = "merge_requested"
 	EventMergeChange    EventKind = "merge_change"
 	EventThreadClaimed  EventKind = "thread_claimed"
@@ -23,8 +23,8 @@ const (
 	EventThreadComment  EventKind = "thread_comment"
 
 	EventSessionStateChanged   EventKind = "session_state_changed"
-	EventCloseIssue            EventKind = "close_issue"
-	EventResetIssue            EventKind = "reset_issue"
+	EventCloseTask             EventKind = "close_task"
+	EventResetTask             EventKind = "reset_task"
 	EventRetryCrashedAuthorJob EventKind = "retry_crashed_author_job"
 
 	// Work-phase gate events: a human approves a gate-paused phase's handoff,
@@ -40,21 +40,21 @@ const (
 	EventEnsureFixAuthorJob EventKind = "ensure_fix_author_job"
 	EventEnqueueAcceptance  EventKind = "enqueue_acceptance"
 	EventAutoMerge          EventKind = "auto_merge"
-	// EventEnsureWorkPhaseJob enqueues the author job for the issue's current
+	// EventEnsureWorkPhaseJob enqueues the author job for the task's current
 	// work phase (freezing the flow cursor on first use).
 	EventEnsureWorkPhaseJob EventKind = "ensure_work_phase_job"
 
 	// EventReconcile records a ticker-driven phase refresh in the transition log
-	// (e.g. after crash recovery moved an issue out of an authoring phase). It is
+	// (e.g. after crash recovery moved an task out of an authoring phase). It is
 	// applied directly, not dispatched through the transition table.
 	EventReconcile EventKind = "reconcile"
 )
 
-// Event is the typed input to Engine.Step. The engine resolves IssueID for
+// Event is the typed input to Engine.Step. The engine resolves TaskID for
 // events keyed by change/thread/session before loading the snapshot.
 type Event struct {
 	Kind           EventKind
-	IssueID        string
+	TaskID         string
 	ChangeID       string
 	ThreadID       string
 	SessionID      string
@@ -73,7 +73,7 @@ type EventAudit struct {
 	Principal    string `json:"principal,omitempty"`
 	ProjectID    string `json:"project_id,omitempty"`
 	ProjectName  string `json:"project_name,omitempty"`
-	IssueID      string `json:"issue_id,omitempty"`
+	TaskID       string `json:"task_id,omitempty"`
 	ChangeID     string `json:"change_id,omitempty"`
 	ThreadID     string `json:"thread_id,omitempty"`
 	SessionID    string `json:"session_id,omitempty"`
@@ -108,10 +108,10 @@ type EventPayload struct {
 	SourceJobID *string                  `json:"source_job_id,omitempty"`
 	Reporter    string                   `json:"reporter,omitempty"`
 
-	// ScheduleIssue / SetIssueState / TriageIssue
-	Schedule   coordinator.ScheduleState `json:"schedule,omitempty"`
-	IssueState coordinator.IssueState    `json:"issue_state,omitempty"`
-	Triage     coordinator.TriageState   `json:"triage,omitempty"`
+	// ScheduleTask / SetTaskState / TriageTask
+	Schedule  coordinator.ScheduleState `json:"schedule,omitempty"`
+	TaskState coordinator.TaskState     `json:"task_state,omitempty"`
+	Triage    coordinator.TriageState   `json:"triage,omitempty"`
 
 	// Thread events
 	ThreadKind     coordinator.ReviewClaimKind `json:"thread_kind,omitempty"`
@@ -130,12 +130,12 @@ type EventPayload struct {
 // StepResult is what Engine.Step returns; handlers surface the populated fields
 // in their HTTP responses. Only the fields a given event produces are set.
 type StepResult struct {
-	IssueID      string
+	TaskID       string
 	FromPhase    coordinator.Phase
 	ToPhase      coordinator.Phase
 	Transitioned bool
 
-	Issue            *coordinator.Issue
+	Task             *coordinator.Task
 	Session          *coordinator.Session
 	Check            *coordinator.Check
 	ReviewState      coordinator.ReviewState

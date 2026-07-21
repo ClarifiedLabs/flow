@@ -26,7 +26,7 @@ export PATH="$PWD/bin:$PATH"
 
 Create private owner and worker join tokens. The owner token authorizes
 human/admin CLI calls and web UI bootstrap. The server accepts the reusable
-worker join token from workers and issues each joined worker its own worker
+worker join token from workers and tasks each joined worker its own worker
 token.
 
 ```sh
@@ -222,7 +222,7 @@ session/worker/owner token environment variables, then client config, then
 ## Owner Token
 
 `OWNER_TOKEN` is the owner-scoped bearer token for human/admin API calls. Owner
-commands include issue scheduling, board reads, worker/job diagnostics, merge,
+commands include task scheduling, board reads, worker/job diagnostics, merge,
 and web UI bootstrap.
 
 For the normal local setup above, owner commands read the token from
@@ -296,8 +296,8 @@ chmod 600 .flow-local/worker-join.token
 
 Fresh projects seed built-in planner, author, reviewer, and verifier agent
 definitions using the default Codex harness, plus two flows: `direct` and
-`planned`. Choose an issue's work pipeline with `flow issue create --flow direct`,
-`flow issue create --flow planned`, or the web UI's **Flow** field. To use
+`planned`. Choose an task's work pipeline with `flow task create --flow direct`,
+`flow task create --flow planned`, or the web UI's **Flow** field. To use
 Claude Code, Harness, or model-specific settings, edit the project's agent
 definitions and flows in the web UI's **Flows** page or with
 `flow agent-defs ...` and `flow flows ...`.
@@ -330,7 +330,7 @@ auto-merge retries and fire from the background lifecycle ticker.
 - `deadlines.check_pending` defaults to `30m`. When a check stays `pending`
   past this window with no report, the coordinator reports it `blocked` with
   details `timed out after <window>`.
-- `deadlines.authoring_stall` defaults to `2h`. When an issue sits in
+- `deadlines.authoring_stall` defaults to `2h`. When an task sits in
   `planning` or `authoring` for this long with no agent activity, the
   coordinator reports a non-required `phase-deadline` check as `blocked` and
   writes a blocker status entry.

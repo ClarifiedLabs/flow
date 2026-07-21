@@ -12,15 +12,15 @@ import (
 
 func TestReportCheckMapsCIExitCodeToVerdict(t *testing.T) {
 	ctx := context.Background()
-	_, issues, checks := newCheckService(t)
-	issue, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Check target"})
+	_, tasks, checks := newCheckService(t)
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Check target"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 
 	exitZero := 0
 	passing, err := checks.ReportCheck(ctx, ReportCheckInput{
-		IssueID:  issue.ID,
+		TaskID:   task.ID,
 		Name:     "fake-ci",
 		ExitCode: &exitZero,
 		Reporter: "worker:w-local",
@@ -34,7 +34,7 @@ func TestReportCheckMapsCIExitCodeToVerdict(t *testing.T) {
 
 	exitFailure := 2
 	blocked, err := checks.ReportCheck(ctx, ReportCheckInput{
-		IssueID:  issue.ID,
+		TaskID:   task.ID,
 		Name:     "fake-ci",
 		ExitCode: &exitFailure,
 		Details:  "exit status 2",
@@ -50,7 +50,7 @@ func TestReportCheckMapsCIExitCodeToVerdict(t *testing.T) {
 		t.Fatalf("blocked check = %+v", blocked)
 	}
 
-	listed, err := checks.ListChecks(ctx, issue.ID)
+	listed, err := checks.ListChecks(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("list checks: %v", err)
 	}
@@ -61,14 +61,14 @@ func TestReportCheckMapsCIExitCodeToVerdict(t *testing.T) {
 
 func TestResetAutomatedChecksForNewRevisionLeavesHumanChecksBlocked(t *testing.T) {
 	ctx := context.Background()
-	_, issues, checks := newCheckService(t)
-	issue, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Reset target"})
+	_, tasks, checks := newCheckService(t)
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Reset target"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 	required := true
 	if _, err := checks.ReportCheck(ctx, ReportCheckInput{
-		IssueID:  issue.ID,
+		TaskID:   task.ID,
 		Name:     "ci",
 		Kind:     CheckKindCI,
 		Required: &required,
@@ -77,7 +77,7 @@ func TestResetAutomatedChecksForNewRevisionLeavesHumanChecksBlocked(t *testing.T
 		t.Fatalf("report ci: %v", err)
 	}
 	if _, err := checks.ReportCheck(ctx, ReportCheckInput{
-		IssueID:  issue.ID,
+		TaskID:   task.ID,
 		Name:     "reviewer",
 		Kind:     CheckKindReviewer,
 		Required: &required,
@@ -86,7 +86,7 @@ func TestResetAutomatedChecksForNewRevisionLeavesHumanChecksBlocked(t *testing.T
 		t.Fatalf("report reviewer: %v", err)
 	}
 	if _, err := checks.ReportCheck(ctx, ReportCheckInput{
-		IssueID:  issue.ID,
+		TaskID:   task.ID,
 		Name:     "human",
 		Kind:     CheckKindHuman,
 		Required: &required,
@@ -95,28 +95,28 @@ func TestResetAutomatedChecksForNewRevisionLeavesHumanChecksBlocked(t *testing.T
 		t.Fatalf("report human: %v", err)
 	}
 
-	reset, err := checks.ResetAutomatedChecksForNewRevision(ctx, issue.ID)
+	reset, err := checks.ResetAutomatedChecksForNewRevision(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("reset checks: %v", err)
 	}
 	if reset != 2 {
 		t.Fatalf("reset = %d, want two automated checks", reset)
 	}
-	ci, err := checks.GetCheck(ctx, issue.ID, "ci")
+	ci, err := checks.GetCheck(ctx, task.ID, "ci")
 	if err != nil {
 		t.Fatalf("get ci: %v", err)
 	}
 	if ci.Verdict != CheckPending || ci.ExitCode != nil || ci.SourceJobID != nil {
 		t.Fatalf("ci after reset = %+v", ci)
 	}
-	reviewer, err := checks.GetCheck(ctx, issue.ID, "reviewer")
+	reviewer, err := checks.GetCheck(ctx, task.ID, "reviewer")
 	if err != nil {
 		t.Fatalf("get reviewer: %v", err)
 	}
 	if reviewer.Verdict != CheckPending || reviewer.ExitCode != nil || reviewer.SourceJobID != nil {
 		t.Fatalf("reviewer after reset = %+v", reviewer)
 	}
-	human, err := checks.GetCheck(ctx, issue.ID, "human")
+	human, err := checks.GetCheck(ctx, task.ID, "human")
 	if err != nil {
 		t.Fatalf("get human: %v", err)
 	}
@@ -127,14 +127,14 @@ func TestResetAutomatedChecksForNewRevisionLeavesHumanChecksBlocked(t *testing.T
 
 // seedReadyChange creates a ready change directly so review-thread checks do
 // not depend on a particular workflow graph or agent-node setup.
-func seedReadyChange(t *testing.T, store *flowdb.Store, issues *IssueService) (Issue, Change) {
+func seedReadyChange(t *testing.T, store *flowdb.Store, tasks *TaskService) (Task, Change) {
 	t.Helper()
 	ctx := context.Background()
-	issue, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Cross-check target"})
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Cross-check target"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
-	insertChangeForTest(t, store.DB(), issue.ID, "ch-cross-check", "issue/cross-check", false)
+	insertChangeForTest(t, store.DB(), task.ID, "ch-cross-check", "task/cross-check", false)
 	if _, err := store.DB().ExecContext(ctx, `
 UPDATE changes
 SET ready_at = COALESCE(ready_at, ?),
@@ -148,11 +148,11 @@ WHERE id = ?`,
 	); err != nil {
 		t.Fatalf("mark change ready: %v", err)
 	}
-	change, err := NewSessionService(store.DB(), issues, nil).GetChange(ctx, "ch-cross-check")
+	change, err := NewSessionService(store.DB(), tasks, nil).GetChange(ctx, "ch-cross-check")
 	if err != nil {
 		t.Fatalf("get ready change: %v", err)
 	}
-	return issue, change
+	return task, change
 }
 
 func openReviewThread(t *testing.T, store *flowdb.Store, change Change) {
@@ -172,12 +172,12 @@ func openReviewThread(t *testing.T, store *flowdb.Store, change Change) {
 
 func TestReportReviewerSatisfiedWithOpenThreadsOverriddenToBlocked(t *testing.T) {
 	ctx := context.Background()
-	store, issues, checks := newCheckService(t)
-	issue, change := seedReadyChange(t, store, issues)
+	store, tasks, checks := newCheckService(t)
+	task, change := seedReadyChange(t, store, tasks)
 	openReviewThread(t, store, change)
 
 	reviewer, err := checks.ReportCheck(ctx, ReportCheckInput{
-		IssueID:  issue.ID,
+		TaskID:   task.ID,
 		Name:     "reviewer",
 		Kind:     CheckKindReviewer,
 		Verdict:  CheckSatisfied,
@@ -200,11 +200,11 @@ func TestReportReviewerSatisfiedWithOpenThreadsOverriddenToBlocked(t *testing.T)
 
 func TestReportReviewerSatisfiedWithNoOpenThreadsStaysSatisfied(t *testing.T) {
 	ctx := context.Background()
-	store, issues, checks := newCheckService(t)
-	issue, _ := seedReadyChange(t, store, issues)
+	store, tasks, checks := newCheckService(t)
+	task, _ := seedReadyChange(t, store, tasks)
 
 	reviewer, err := checks.ReportCheck(ctx, ReportCheckInput{
-		IssueID:  issue.ID,
+		TaskID:   task.ID,
 		Name:     "reviewer",
 		Kind:     CheckKindReviewer,
 		Verdict:  CheckSatisfied,
@@ -220,13 +220,13 @@ func TestReportReviewerSatisfiedWithNoOpenThreadsStaysSatisfied(t *testing.T) {
 
 func TestReportCICheckWithOpenThreadsNotOverridden(t *testing.T) {
 	ctx := context.Background()
-	store, issues, checks := newCheckService(t)
-	issue, change := seedReadyChange(t, store, issues)
+	store, tasks, checks := newCheckService(t)
+	task, change := seedReadyChange(t, store, tasks)
 	openReviewThread(t, store, change)
 
 	exitZero := 0
 	ci, err := checks.ReportCheck(ctx, ReportCheckInput{
-		IssueID:  issue.ID,
+		TaskID:   task.ID,
 		Name:     "ci",
 		Kind:     CheckKindCI,
 		ExitCode: &exitZero,
@@ -240,20 +240,20 @@ func TestReportCICheckWithOpenThreadsNotOverridden(t *testing.T) {
 	}
 }
 
-func TestReportCheckRejectsSourceJobForDifferentIssue(t *testing.T) {
+func TestReportCheckRejectsSourceJobForDifferentTask(t *testing.T) {
 	ctx := context.Background()
-	store, issues, checks := newCheckService(t)
-	target, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Check target"})
+	store, tasks, checks := newCheckService(t)
+	target, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Check target"})
 	if err != nil {
-		t.Fatalf("create target issue: %v", err)
+		t.Fatalf("create target task: %v", err)
 	}
-	other, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Other issue"})
+	other, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Other task"})
 	if err != nil {
-		t.Fatalf("create other issue: %v", err)
+		t.Fatalf("create other task: %v", err)
 	}
 	workers := flowworker.NewService(store.DB())
 	job, err := workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &other.ID,
+		TaskID:         &other.ID,
 		Role:           flowworker.RoleCI,
 		CapacityBucket: flowworker.BucketEphemeral,
 	})
@@ -263,7 +263,7 @@ func TestReportCheckRejectsSourceJobForDifferentIssue(t *testing.T) {
 
 	sourceJobID := job.ID
 	_, err = checks.ReportCheck(ctx, ReportCheckInput{
-		IssueID:     target.ID,
+		TaskID:      target.ID,
 		Name:        "fake-ci",
 		SourceJobID: &sourceJobID,
 	})
@@ -274,18 +274,18 @@ func TestReportCheckRejectsSourceJobForDifferentIssue(t *testing.T) {
 
 func TestAcceptancePendingGate(t *testing.T) {
 	ctx := context.Background()
-	store, issues, checks := newCheckService(t)
+	store, tasks, checks := newCheckService(t)
 	checkConfig := NewCheckConfigServiceWithOptions(store.DB(), checks, nil, nil, Project{}, CheckConfigServiceOptions{})
-	issue, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Acceptance gate"})
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Acceptance gate"})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 	required := true
 
 	report := func(name string, kind CheckKind, verdict CheckVerdict) {
 		t.Helper()
 		if _, err := checks.ReportCheck(ctx, ReportCheckInput{
-			IssueID:  issue.ID,
+			TaskID:   task.ID,
 			Name:     name,
 			Kind:     kind,
 			Required: &required,
@@ -297,7 +297,7 @@ func TestAcceptancePendingGate(t *testing.T) {
 
 	assertGate := func(label string, wantAcceptance bool) {
 		t.Helper()
-		got, err := checkConfig.AcceptancePending(ctx, issue.ID)
+		got, err := checkConfig.AcceptancePending(ctx, task.ID)
 		if err != nil {
 			t.Fatalf("%s: acceptance pending: %v", label, err)
 		}
@@ -315,7 +315,7 @@ func TestAcceptancePendingGate(t *testing.T) {
 	report("unit", CheckKindCI, CheckSatisfied)
 	assertGate("critique satisfied, verifier pending", true)
 
-	pending, err := checks.VerifierPending(ctx, issue.ID)
+	pending, err := checks.VerifierPending(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("verifier pending: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestAcceptancePendingGate(t *testing.T) {
 	report("verifier", CheckKindVerifier, CheckSatisfied)
 	assertGate("verifier satisfied", false)
 
-	pending, err = checks.VerifierPending(ctx, issue.ID)
+	pending, err = checks.VerifierPending(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("verifier pending after satisfy: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestAcceptancePendingGate(t *testing.T) {
 	// the acceptance gate.
 	notRequired := false
 	if _, err := checks.ReportCheck(ctx, ReportCheckInput{
-		IssueID:  issue.ID,
+		TaskID:   task.ID,
 		Name:     "verifier-optional",
 		Kind:     CheckKindVerifier,
 		Required: &notRequired,
@@ -349,7 +349,7 @@ func TestAcceptancePendingGate(t *testing.T) {
 	}
 	assertGate("non-required verifier pending", false)
 
-	pending, err = checks.VerifierPending(ctx, issue.ID)
+	pending, err = checks.VerifierPending(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("verifier pending with optional verifier: %v", err)
 	}
@@ -358,7 +358,7 @@ func TestAcceptancePendingGate(t *testing.T) {
 	}
 }
 
-func newCheckService(t *testing.T) (*flowdb.Store, *IssueService, *CheckService) {
+func newCheckService(t *testing.T) (*flowdb.Store, *TaskService, *CheckService) {
 	t.Helper()
 
 	store, err := flowdb.Open(context.Background(), filepath.Join(t.TempDir(), "flow.db"))
@@ -369,5 +369,5 @@ func newCheckService(t *testing.T) (*flowdb.Store, *IssueService, *CheckService)
 		_ = store.Close()
 	})
 
-	return store, NewIssueService(store.DB()), NewCheckService(store.DB())
+	return store, NewTaskService(store.DB()), NewCheckService(store.DB())
 }

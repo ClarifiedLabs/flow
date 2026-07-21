@@ -14,7 +14,7 @@ import (
 // `flow transitions` CLI.
 type TransitionLogEntry struct {
 	Seq         int64     `json:"seq"`
-	IssueID     string    `json:"issue_id"`
+	TaskID      string    `json:"task_id"`
 	FromPhase   string    `json:"from_phase"`
 	EventKind   string    `json:"event_kind"`
 	GuardResult string    `json:"guard_result"`
@@ -53,18 +53,18 @@ func NewTransitionService(database *sql.DB) *TransitionService {
 	return &TransitionService{db: database}
 }
 
-// ListForIssue returns an issue's transition history, most recent first, capped
+// ListForTask returns an task's transition history, most recent first, capped
 // at limit (defaulting to 100).
-func (s *TransitionService) ListForIssue(ctx context.Context, issueID string, limit int) ([]TransitionLogEntry, error) {
+func (s *TransitionService) ListForTask(ctx context.Context, taskID string, limit int) ([]TransitionLogEntry, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT seq, issue_id, from_phase, event_kind, guard_result, to_phase, actor, created_at
+SELECT seq, task_id, from_phase, event_kind, guard_result, to_phase, actor, created_at
 FROM transitions
-WHERE issue_id = ?
+WHERE task_id = ?
 ORDER BY seq DESC
-LIMIT ?`, issueID, limit)
+LIMIT ?`, taskID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list transitions: %w", err)
 	}
@@ -74,7 +74,7 @@ LIMIT ?`, issueID, limit)
 	for rows.Next() {
 		var entry TransitionLogEntry
 		var createdAt string
-		if err := rows.Scan(&entry.Seq, &entry.IssueID, &entry.FromPhase, &entry.EventKind,
+		if err := rows.Scan(&entry.Seq, &entry.TaskID, &entry.FromPhase, &entry.EventKind,
 			&entry.GuardResult, &entry.ToPhase, &entry.Actor, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan transition: %w", err)
 		}
@@ -92,7 +92,7 @@ LIMIT ?`, issueID, limit)
 	return entries, nil
 }
 
-// ListForIssueWithPayload returns an issue's transition history (most recent
+// ListForTaskWithPayload returns an task's transition history (most recent
 // first, capped at limit) with session-related rows enriched from their
 // payload_json. session_ready rows expose the head_sha (and session_id/change_id
 // from the audit envelope); session_state_changed rows expose the session_state
@@ -100,16 +100,16 @@ LIMIT ?`, issueID, limit)
 // The UI timeline uses this to correlate transition rows to a specific session
 // and render its terminal/transcript controls even outside the top-N session
 // list.
-func (s *TransitionService) ListForIssueWithPayload(ctx context.Context, issueID string, limit int) ([]SessionTimelineEntry, error) {
+func (s *TransitionService) ListForTaskWithPayload(ctx context.Context, taskID string, limit int) ([]SessionTimelineEntry, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT seq, issue_id, from_phase, event_kind, payload_json, guard_result, to_phase, actor, created_at
+SELECT seq, task_id, from_phase, event_kind, payload_json, guard_result, to_phase, actor, created_at
 FROM transitions
-WHERE issue_id = ?
+WHERE task_id = ?
 ORDER BY seq DESC
-LIMIT ?`, issueID, limit)
+LIMIT ?`, taskID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list transitions with payload: %w", err)
 	}
@@ -120,7 +120,7 @@ LIMIT ?`, issueID, limit)
 		var rawPayload string
 		var createdAt string
 		var entry SessionTimelineEntry
-		if err := rows.Scan(&entry.Seq, &entry.IssueID, &entry.FromPhase, &entry.EventKind,
+		if err := rows.Scan(&entry.Seq, &entry.TaskID, &entry.FromPhase, &entry.EventKind,
 			&rawPayload, &entry.GuardResult, &entry.ToPhase, &entry.Actor, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan transition with payload: %w", err)
 		}
@@ -171,11 +171,11 @@ func decodeTimelinePayload(entry *SessionTimelineEntry, raw string) {
 // RecentSessionStateTransitions returns recent session_state_changed entries
 // for one session, newest first. Session ids are stored in transition audit
 // payloads, so rows without matching audit data are ignored.
-func (s *TransitionService) RecentSessionStateTransitions(ctx context.Context, issueID string, sessionID string, since time.Time, limit int) ([]SessionStateTransition, error) {
-	issueID = strings.TrimSpace(issueID)
+func (s *TransitionService) RecentSessionStateTransitions(ctx context.Context, taskID string, sessionID string, since time.Time, limit int) ([]SessionStateTransition, error) {
+	taskID = strings.TrimSpace(taskID)
 	sessionID = strings.TrimSpace(sessionID)
-	if issueID == "" {
-		return nil, fmt.Errorf("issue id is required")
+	if taskID == "" {
+		return nil, fmt.Errorf("task id is required")
 	}
 	if sessionID == "" {
 		return nil, fmt.Errorf("session id is required")
@@ -187,11 +187,11 @@ func (s *TransitionService) RecentSessionStateTransitions(ctx context.Context, i
 	rows, err := s.db.QueryContext(ctx, `
 SELECT from_phase, to_phase, payload_json, created_at
 FROM transitions
-WHERE issue_id = ?
+WHERE task_id = ?
 	AND event_kind = 'session_state_changed'
 	AND created_at >= ?
 ORDER BY seq DESC
-LIMIT ?`, issueID, formatTime(since.UTC()), limit)
+LIMIT ?`, taskID, formatTime(since.UTC()), limit)
 	if err != nil {
 		return nil, fmt.Errorf("list session state transitions: %w", err)
 	}
@@ -233,7 +233,7 @@ LIMIT ?`, issueID, formatTime(since.UTC()), limit)
 }
 
 // EdgeCount is one observed from→to phase transition and how many times it
-// occurred for an issue.
+// occurred for an task.
 type EdgeCount struct {
 	FromPhase string `json:"from_phase"`
 	ToPhase   string `json:"to_phase"`
@@ -241,10 +241,10 @@ type EdgeCount struct {
 }
 
 // LifecycleGraphSummary is the aggregation backing the web UI's lifecycle
-// flow chart: per-edge transition counts, the issue's current phase, and the
+// flow chart: per-edge transition counts, the task's current phase, and the
 // reviewer/verifier "sent back" tallies. The tallies come from check_reported
 // payloads because phase pairs alone cannot attribute a bounce to a reviewer
-// or verifier (both land the issue in critique).
+// or verifier (both land the task in critique).
 type LifecycleGraphSummary struct {
 	CurrentPhase  string      `json:"current_phase"`
 	Edges         []EdgeCount `json:"edges"`
@@ -252,19 +252,19 @@ type LifecycleGraphSummary struct {
 	VerifierSends int         `json:"verifier_sends"`
 }
 
-// GraphSummaryForIssue aggregates the full transition log for one issue. It
-// runs uncapped queries (unlike ListForIssue) so counts stay accurate for
-// long-lived issues. Initial rows (from_phase=”) and self-loops are excluded
+// GraphSummaryForTask aggregates the full transition log for one task. It
+// runs uncapped queries (unlike ListForTask) so counts stay accurate for
+// long-lived tasks. Initial rows (from_phase=”) and self-loops are excluded
 // from edges: the former is graph entry, and the engine logs a row on every
 // step even when the phase is unchanged.
-func (s *TransitionService) GraphSummaryForIssue(ctx context.Context, issueID string) (LifecycleGraphSummary, error) {
+func (s *TransitionService) GraphSummaryForTask(ctx context.Context, taskID string) (LifecycleGraphSummary, error) {
 	var summary LifecycleGraphSummary
 
 	rows, err := s.db.QueryContext(ctx, `
 SELECT from_phase, to_phase, COUNT(*)
 FROM transitions
-WHERE issue_id = ? AND from_phase <> '' AND from_phase <> to_phase
-GROUP BY from_phase, to_phase`, issueID)
+WHERE task_id = ? AND from_phase <> '' AND from_phase <> to_phase
+GROUP BY from_phase, to_phase`, taskID)
 	if err != nil {
 		return summary, fmt.Errorf("count transition edges: %w", err)
 	}
@@ -281,14 +281,14 @@ GROUP BY from_phase, to_phase`, issueID)
 	}
 
 	err = s.db.QueryRowContext(ctx, `
-SELECT to_phase FROM transitions WHERE issue_id = ? ORDER BY seq DESC LIMIT 1`, issueID).
+SELECT to_phase FROM transitions WHERE task_id = ? ORDER BY seq DESC LIMIT 1`, taskID).
 		Scan(&summary.CurrentPhase)
 	if err != nil && err != sql.ErrNoRows {
 		return summary, fmt.Errorf("read current phase: %w", err)
 	}
 
 	checkRows, err := s.db.QueryContext(ctx, `
-SELECT payload_json FROM transitions WHERE issue_id = ? AND event_kind = 'check_reported'`, issueID)
+SELECT payload_json FROM transitions WHERE task_id = ? AND event_kind = 'check_reported'`, taskID)
 	if err != nil {
 		return summary, fmt.Errorf("read check payloads: %w", err)
 	}

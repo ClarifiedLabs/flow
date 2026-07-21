@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-type IssueBranchRef struct {
+type TaskBranchRef struct {
 	Ref    string
 	Branch string
 	SHA    string
@@ -70,26 +70,26 @@ func BranchTip(ctx context.Context, exchangeRepoPath string, branch string) (str
 	return strings.TrimSpace(sha), true, nil
 }
 
-func ListIssueBranchRefs(ctx context.Context, exchangeRepoPath string) ([]IssueBranchRef, error) {
-	output, err := gitBareOutput(ctx, exchangeRepoPath, nil, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/issue")
+func ListTaskBranchRefs(ctx context.Context, exchangeRepoPath string) ([]TaskBranchRef, error) {
+	output, err := gitBareOutput(ctx, exchangeRepoPath, nil, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/task")
 	if err != nil {
-		return nil, fmt.Errorf("list issue branch refs: %w", err)
+		return nil, fmt.Errorf("list task branch refs: %w", err)
 	}
 	if strings.TrimSpace(output) == "" {
 		return nil, nil
 	}
 
-	var refs []IssueBranchRef
+	var refs []TaskBranchRef
 	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) != 2 {
-			return nil, fmt.Errorf("invalid issue ref line %q", line)
+			return nil, fmt.Errorf("invalid task ref line %q", line)
 		}
 		ref := fields[0]
-		if !issueRefPattern.MatchString(ref) {
+		if !taskRefPattern.MatchString(ref) {
 			continue
 		}
-		refs = append(refs, IssueBranchRef{
+		refs = append(refs, TaskBranchRef{
 			Ref:    ref,
 			Branch: strings.TrimPrefix(ref, "refs/heads/"),
 			SHA:    fields[1],

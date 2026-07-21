@@ -8,7 +8,7 @@ import (
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 )
 
-func newWorkflowModelServices(t *testing.T) (*FlowService, *IssueService, *WorkflowRunService) {
+func newWorkflowModelServices(t *testing.T) (*FlowService, *TaskService, *WorkflowRunService) {
 	t.Helper()
 	store, err := flowdb.Open(context.Background(), filepath.Join(t.TempDir(), "flow.db"))
 	if err != nil {
@@ -16,13 +16,13 @@ func newWorkflowModelServices(t *testing.T) (*FlowService, *IssueService, *Workf
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	flows := NewFlowService(store.DB())
-	issues := NewIssueService(store.DB())
-	return flows, issues, NewWorkflowRunService(store.DB(), flows, issues)
+	tasks := NewTaskService(store.DB())
+	return flows, tasks, NewWorkflowRunService(store.DB(), flows, tasks)
 }
 
 func TestWorkflowModelHumanGateCanUseCustomOutcomeAndComplete(t *testing.T) {
 	ctx := context.Background()
-	flows, issues, runs := newWorkflowModelServices(t)
+	flows, tasks, runs := newWorkflowModelServices(t)
 
 	flow, err := flows.Create(ctx, FlowInput{
 		Name:             "release decision",
@@ -41,15 +41,15 @@ func TestWorkflowModelHumanGateCanUseCustomOutcomeAndComplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
-	issue, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Release", FlowID: flow.ID})
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Release", FlowID: flow.ID})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
-	if issue.State != nil {
-		t.Fatalf("new issue state = %v, want Unscheduled/null", issue.State)
+	if task.State != nil {
+		t.Fatalf("new task state = %v, want Unscheduled/null", task.State)
 	}
 
-	run, err := runs.Schedule(ctx, issue.ID)
+	run, err := runs.Schedule(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("schedule workflow: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestWorkflowModelHumanGateCanUseCustomOutcomeAndComplete(t *testing.T) {
 	if !created || nodeRun.State != WorkflowNodeWaiting {
 		t.Fatalf("human gate node = %+v, created=%t", nodeRun, created)
 	}
-	state, wait, err := runs.Substate(ctx, issue.ID)
+	state, wait, err := runs.Substate(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("derive substate: %v", err)
 	}
@@ -71,33 +71,33 @@ func TestWorkflowModelHumanGateCanUseCustomOutcomeAndComplete(t *testing.T) {
 		t.Fatalf("substate = %q wait=%+v, want Blocked on active node", state, wait)
 	}
 
-	result, err := runs.Respond(ctx, issue.ID, nodeRun.ID, "ship_it", "release approved", ActorHuman)
+	result, err := runs.Respond(ctx, task.ID, nodeRun.ID, "ship_it", "release approved", ActorHuman)
 	if err != nil {
 		t.Fatalf("respond to human gate: %v", err)
 	}
 	if !result.Done || result.Run.State != WorkflowRunCompleted || result.Run.TransitionsUsed != 1 {
 		t.Fatalf("completion result = %+v", result)
 	}
-	completed, err := issues.GetIssue(ctx, issue.ID)
+	completed, err := tasks.GetTask(ctx, task.ID)
 	if err != nil {
-		t.Fatalf("load completed issue: %v", err)
+		t.Fatalf("load completed task: %v", err)
 	}
 	if completed.State == nil || *completed.State != LifecycleDone || completed.DoneResolution == nil || *completed.DoneResolution != ResolutionCompleted {
-		t.Fatalf("completed issue = %+v", completed)
+		t.Fatalf("completed task = %+v", completed)
 	}
 
-	reopened, err := runs.Reopen(ctx, issue.ID, ActorHuman)
+	reopened, err := runs.Reopen(ctx, task.ID, ActorHuman)
 	if err != nil {
-		t.Fatalf("reopen issue: %v", err)
+		t.Fatalf("reopen task: %v", err)
 	}
 	if reopened.State != nil || reopened.DoneResolution != nil || reopened.DoneAt != nil {
-		t.Fatalf("reopened issue = %+v, want Unscheduled without resolution", reopened)
+		t.Fatalf("reopened task = %+v, want Unscheduled without resolution", reopened)
 	}
 }
 
-func TestWorkflowModelSchedulingWaitsForIssueDependencies(t *testing.T) {
+func TestWorkflowModelSchedulingWaitsForTaskDependencies(t *testing.T) {
 	ctx := context.Background()
-	flows, issues, runs := newWorkflowModelServices(t)
+	flows, tasks, runs := newWorkflowModelServices(t)
 	flow, err := flows.Create(ctx, FlowInput{
 		Name:      "finish",
 		StartNode: "done",
@@ -108,20 +108,20 @@ func TestWorkflowModelSchedulingWaitsForIssueDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
-	blocker, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Blocker", FlowID: flow.ID})
+	blocker, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Blocker", FlowID: flow.ID})
 	if err != nil {
 		t.Fatalf("create blocker: %v", err)
 	}
-	blocked, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Blocked", FlowID: flow.ID})
+	blocked, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Blocked", FlowID: flow.ID})
 	if err != nil {
-		t.Fatalf("create blocked issue: %v", err)
+		t.Fatalf("create blocked task: %v", err)
 	}
-	if err := issues.LinkIssues(ctx, blocker.ID, blocked.ID, RelationBlocks, ActorHuman); err != nil {
+	if err := tasks.LinkTasks(ctx, blocker.ID, blocked.ID, RelationBlocks, ActorHuman); err != nil {
 		t.Fatalf("link blocker: %v", err)
 	}
 	run, err := runs.Schedule(ctx, blocked.ID)
 	if err != nil {
-		t.Fatalf("schedule blocked issue: %v", err)
+		t.Fatalf("schedule blocked task: %v", err)
 	}
 	if node, created, err := runs.EnsureCurrentNode(ctx, run.ID); err != nil || created || node.ID != "" {
 		t.Fatalf("dependency-gated node = %+v created=%t err=%v", node, created, err)
@@ -136,9 +136,9 @@ func TestWorkflowModelSchedulingWaitsForIssueDependencies(t *testing.T) {
 
 func TestWorkflowModelAgentInputWaitResumesSameNodeVisit(t *testing.T) {
 	ctx := context.Background()
-	flows, issues, runs := newWorkflowModelServices(t)
+	flows, tasks, runs := newWorkflowModelServices(t)
 	agent, err := NewAgentDefService(flows.db).Create(ctx, AgentDefInput{
-		Name: "implementation agent", Harness: "codex", Prompt: "Implement the issue.",
+		Name: "implementation agent", Harness: "codex", Prompt: "Implement the task.",
 	})
 	if err != nil {
 		t.Fatalf("create agent definition: %v", err)
@@ -155,11 +155,11 @@ func TestWorkflowModelAgentInputWaitResumesSameNodeVisit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
-	issue, err := issues.CreateIssue(ctx, CreateIssueInput{Title: "Needs a decision", FlowID: flow.ID})
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Needs a decision", FlowID: flow.ID})
 	if err != nil {
-		t.Fatalf("create issue: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
-	run, err := runs.Schedule(ctx, issue.ID)
+	run, err := runs.Schedule(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("schedule workflow: %v", err)
 	}
@@ -173,14 +173,14 @@ func TestWorkflowModelAgentInputWaitResumesSameNodeVisit(t *testing.T) {
 	if err := runs.RequestAgentInput(ctx, nodeRun.ID, "Which API shape should I use?", ActorAgent); err != nil {
 		t.Fatalf("request agent input: %v", err)
 	}
-	state, wait, err := runs.Substate(ctx, issue.ID)
+	state, wait, err := runs.Substate(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("derive blocked state: %v", err)
 	}
 	if state != InProgressBlocked || wait == nil || wait.Kind != WorkflowWaitAgentRequest {
 		t.Fatalf("blocked state = %q wait=%+v", state, wait)
 	}
-	resumed, err := runs.ResumeAgentRequest(ctx, issue.ID, "Use the v2 shape.", ActorHuman)
+	resumed, err := runs.ResumeAgentRequest(ctx, task.ID, "Use the v2 shape.", ActorHuman)
 	if err != nil || !resumed {
 		t.Fatalf("resume agent input: resumed=%t err=%v", resumed, err)
 	}
@@ -191,7 +191,7 @@ func TestWorkflowModelAgentInputWaitResumesSameNodeVisit(t *testing.T) {
 	if resumedNode.State != WorkflowNodeRunning || resumedNode.Visit != nodeRun.Visit {
 		t.Fatalf("resumed node = %+v, want same running visit", resumedNode)
 	}
-	state, wait, err = runs.Substate(ctx, issue.ID)
+	state, wait, err = runs.Substate(ctx, task.ID)
 	if err != nil || state != InProgressWorking || wait != nil {
 		t.Fatalf("working state = %q wait=%+v err=%v", state, wait, err)
 	}

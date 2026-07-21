@@ -967,13 +967,13 @@ tr.row-idle {
   max-width: 900px;
 }
 
-.issue-detail,
+.task-detail,
 .change-detail {
   width: 100%;
   max-width: none;
 }
 
-.issue-detail-grid {
+.task-detail-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
   gap: 16px;
@@ -1026,34 +1026,34 @@ tr.row-idle {
   resize: vertical;
 }
 
-.issue-detail-column {
+.task-detail-column {
   min-width: 0;
 }
 
-.issue-detail-lifecycle {
+.task-detail-lifecycle {
   grid-column: 1 / -1;
   min-width: 0;
 }
 
-.issue-detail-column > :first-child {
+.task-detail-column > :first-child {
   margin-top: 0;
 }
 
-.issue-detail-lifecycle > :first-child {
+.task-detail-lifecycle > :first-child {
   margin-top: 0;
 }
 
-.issue-detail-column .issue-form {
+.task-detail-column .task-form {
   grid-template-columns: 1fr;
 }
 
-.issue-detail-column > .issue-form:first-child {
+.task-detail-column > .task-form:first-child {
   margin-top: 0;
 }
 
-/* Sticky issue detail head: keeps the title/actions visible while scrolling the
+/* Sticky task detail head: keeps the title/actions visible while scrolling the
    (potentially long) timeline below. */
-.issue-detail-head {
+.task-detail-head {
   position: sticky;
   top: 0;
   z-index: 5;
@@ -1064,35 +1064,35 @@ tr.row-idle {
 
 /* Collapsible read-only detail summary. The edit form is hidden until the Edit
    button reveals it, which keeps the editor column short. */
-.issue-read-only-detail {
+.task-read-only-detail {
   display: grid;
   gap: 10px;
 }
 
-.issue-read-only-head {
+.task-read-only-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
 
-.issue-read-only-head h3 {
+.task-read-only-head h3 {
   margin: 0;
 }
 
-.issue-read-only-body {
+.task-read-only-body {
   display: grid;
   gap: 8px;
 }
 
-.issue-read-only-agent {
+.task-read-only-agent {
   margin: 0;
   font-size: 0.78125rem;
   color: var(--ink-2);
   word-break: break-word;
 }
 
-.issue-read-only-field {
+.task-read-only-field {
   margin: 0;
   font-size: 0.8125rem;
   white-space: pre-wrap;
@@ -1100,7 +1100,7 @@ tr.row-idle {
   line-height: 1.45;
 }
 
-.issue-read-only-field br + * {
+.task-read-only-field br + * {
   margin-top: 2px;
 }
 
@@ -1457,14 +1457,14 @@ tr.row-idle {
   padding: 10px;
 }
 
-.issue-state-form {
+.task-state-form {
   display: flex;
   align-items: flex-end;
   gap: 8px;
   margin: 0;
 }
 
-.issue-state-form label {
+.task-state-form label {
   display: grid;
   gap: 4px;
   color: var(--muted);
@@ -1474,7 +1474,7 @@ tr.row-idle {
   text-transform: uppercase;
 }
 
-.issue-state-form select {
+.task-state-form select {
   min-width: 118px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -1669,14 +1669,14 @@ tr.row-idle {
   padding: 3px 8px;
 }
 
-.issue-form {
+.task-form {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) minmax(96px, 120px) minmax(160px, 200px);
   gap: 12px;
   margin: 14px 0;
 }
 
-.issue-form label {
+.task-form label {
   display: grid;
   gap: 5px;
   color: var(--muted);
@@ -1686,9 +1686,9 @@ tr.row-idle {
   text-transform: uppercase;
 }
 
-.issue-form input,
-.issue-form select,
-.issue-form textarea {
+.task-form input,
+.task-form select,
+.task-form textarea {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -1702,22 +1702,22 @@ tr.row-idle {
   transition: border-color 120ms ease;
 }
 
-.issue-form textarea {
+.task-form textarea {
   font-family: var(--font-prose);
 }
 
-.issue-form input:focus,
-.issue-form select:focus,
-.issue-form textarea:focus {
+.task-form input:focus,
+.task-form select:focus,
+.task-form textarea:focus {
   border-color: var(--accent);
 }
 
-.issue-form .wide,
+.task-form .wide,
 .form-actions {
   grid-column: 1 / -1;
 }
 
-.issue-form .harness-model-fields {
+.task-form .harness-model-fields {
   display: grid;
   grid-template-columns: minmax(240px, 1fr) minmax(180px, 240px);
   gap: 12px;
@@ -1728,20 +1728,20 @@ tr.row-idle {
   background: var(--panel);
 }
 
-.issue-form .harness-model-fields[hidden] {
+.task-form .harness-model-fields[hidden] {
   display: none;
 }
 
-.issue-form .harness-model-fields [data-harness-model-controls],
-.issue-form .harness-reasoning {
+.task-form .harness-model-fields [data-harness-model-controls],
+.task-form .harness-reasoning {
   display: contents;
 }
 
-.issue-form .harness-reasoning label[hidden] {
+.task-form .harness-reasoning label[hidden] {
   display: none;
 }
 
-.issue-form .check {
+.task-form .check {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1750,7 +1750,7 @@ tr.row-idle {
   font-size: 0.78125rem;
 }
 
-.issue-form .check input {
+.task-form .check input {
   width: auto;
   accent-color: var(--accent);
 }
@@ -2398,7 +2398,7 @@ th {
     display: grid;
   }
 
-  .issue-form,
+  .task-form,
   .agent-def-form,
   .flow-editor,
   .attachment-upload,
@@ -2406,7 +2406,7 @@ th {
     grid-template-columns: 1fr;
   }
 
-  .issue-form .harness-model-fields {
+  .task-form .harness-model-fields {
     grid-template-columns: 1fr;
   }
 

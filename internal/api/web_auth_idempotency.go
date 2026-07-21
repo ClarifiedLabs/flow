@@ -250,20 +250,20 @@ func isWebAPIPath(path string) bool {
 }
 
 func webAPIRequiresCSRF(r *http.Request) bool {
-	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && isWebIssueAttachmentDownloadPath(r.URL.Path) {
+	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && isWebTaskAttachmentDownloadPath(r.URL.Path) {
 		return false
 	}
 
 	return true
 }
 
-func isWebIssueAttachmentDownloadPath(requestPath string) bool {
+func isWebTaskAttachmentDownloadPath(requestPath string) bool {
 	apiPath := strings.TrimPrefix(requestPath, webAPIPrefix)
 	parts := strings.Split(strings.Trim(apiPath, "/"), "/")
-	if len(parts) == 5 && parts[0] == "v1" && parts[1] == "issues" && parts[3] == "attachments" && strings.TrimSpace(parts[4]) != "" {
+	if len(parts) == 5 && parts[0] == "v1" && parts[1] == "tasks" && parts[3] == "attachments" && strings.TrimSpace(parts[4]) != "" {
 		return true
 	}
-	if len(parts) == 7 && parts[0] == "v1" && parts[1] == "projects" && parts[3] == "issues" && parts[5] == "attachments" && strings.TrimSpace(parts[6]) != "" {
+	if len(parts) == 7 && parts[0] == "v1" && parts[1] == "projects" && parts[3] == "tasks" && parts[5] == "attachments" && strings.TrimSpace(parts[6]) != "" {
 		return true
 	}
 
@@ -300,7 +300,7 @@ func (s *Server) shouldUseIdempotency(r *http.Request, principal coordinator.Pri
 		return false
 	}
 
-	return strings.HasPrefix(r.URL.Path, "/v2/issues") || strings.HasPrefix(r.URL.Path, "/v2/projects/") || strings.HasPrefix(r.URL.Path, "/v2/changes") || strings.HasPrefix(r.URL.Path, "/v2/sessions") || r.URL.Path == "/v2/jobs" || r.URL.Path == "/v2/reconcile"
+	return strings.HasPrefix(r.URL.Path, "/v2/tasks") || strings.HasPrefix(r.URL.Path, "/v2/projects/") || strings.HasPrefix(r.URL.Path, "/v2/changes") || strings.HasPrefix(r.URL.Path, "/v2/sessions") || r.URL.Path == "/v2/jobs" || r.URL.Path == "/v2/reconcile"
 }
 
 // idempotencyFor picks the record store for a principal: session tokens use

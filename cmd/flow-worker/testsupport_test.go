@@ -25,7 +25,7 @@ type workerTestFixture struct {
 	Project     coordinator.Project
 	Credentials *coordinator.CredentialService
 	Directory   *flowworker.Directory
-	Issues      *coordinator.IssueService
+	Tasks       *coordinator.TaskService
 	Checks      *coordinator.CheckService
 	Sessions    *coordinator.SessionService
 	Queue       *flowworker.Service
@@ -101,7 +101,7 @@ func newWorkerTestFixture(t *testing.T) workerTestFixture {
 		Project:     project,
 		Credentials: registry.Credentials(),
 		Directory:   registry.Directory(),
-		Issues:      bundle.Issues,
+		Tasks:       bundle.Tasks,
 		Checks:      bundle.Checks,
 		Sessions:    bundle.Sessions,
 		Queue:       bundle.Queue,

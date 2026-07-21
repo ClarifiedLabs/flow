@@ -51,7 +51,7 @@ const (
 
 type Check struct {
 	ID          int64        `json:"id"`
-	IssueID     string       `json:"issue_id"`
+	TaskID      string       `json:"task_id"`
 	Name        string       `json:"name"`
 	Kind        CheckKind    `json:"kind"`
 	Required    bool         `json:"required"`
@@ -65,7 +65,7 @@ type Check struct {
 }
 
 type ReportCheckInput struct {
-	IssueID     string
+	TaskID      string
 	Name        string
 	Kind        CheckKind
 	Required    *bool
@@ -93,7 +93,7 @@ func (s *CheckService) ReportCheck(ctx context.Context, input ReportCheckInput) 
 	if err != nil {
 		return Check{}, err
 	}
-	if err := s.validateSourceJob(ctx, input.IssueID, input.SourceJobID); err != nil {
+	if err := s.validateSourceJob(ctx, input.TaskID, input.SourceJobID); err != nil {
 		return Check{}, err
 	}
 	if err := s.crossCheckReviewThreads(ctx, &input); err != nil {
@@ -103,7 +103,7 @@ func (s *CheckService) ReportCheck(ctx context.Context, input ReportCheckInput) 
 	nowText := formatTime(s.now().UTC())
 	row := s.db.QueryRowContext(ctx, `
 INSERT INTO checks (
-	issue_id,
+	task_id,
 	name,
 	kind,
 	required,
@@ -115,7 +115,7 @@ INSERT INTO checks (
 	created_at,
 	updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(issue_id, name) DO UPDATE SET
+ON CONFLICT(task_id, name) DO UPDATE SET
 	kind = excluded.kind,
 	required = excluded.required,
 	verdict = excluded.verdict,
@@ -125,7 +125,7 @@ ON CONFLICT(issue_id, name) DO UPDATE SET
 	reporter = excluded.reporter,
 	updated_at = excluded.updated_at
 RETURNING`+checkColumns,
-		input.IssueID,
+		input.TaskID,
 		input.Name,
 		string(input.Kind),
 		boolInt(*input.Required),
@@ -147,7 +147,7 @@ RETURNING`+checkColumns,
 }
 
 // crossCheckReviewThreads overrides a reviewer's satisfied verdict to blocked
-// when the issue's ready change still has unresolved review threads. A reviewer
+// when the task's ready change still has unresolved review threads. A reviewer
 // agent that files actionable threads but then reports satisfied is
 // contradicting itself; the cross-check keeps the recorded verdict honest so
 // the lifecycle does not approve a change with open critique. It applies to
@@ -156,7 +156,7 @@ func (s *CheckService) crossCheckReviewThreads(ctx context.Context, input *Repor
 	if input.Kind != CheckKindReviewer || input.Verdict != CheckSatisfied {
 		return nil
 	}
-	open, err := s.countOpenReviewThreads(ctx, input.IssueID)
+	open, err := s.countOpenReviewThreads(ctx, input.TaskID)
 	if err != nil {
 		return err
 	}
@@ -174,11 +174,11 @@ func (s *CheckService) crossCheckReviewThreads(ctx context.Context, input *Repor
 	return nil
 }
 
-// countOpenReviewThreads counts unresolved review threads on the issue's latest
+// countOpenReviewThreads counts unresolved review threads on the task's latest
 // ready, unmerged change. open and reopened threads are unresolved (claimed and
 // certified threads represent author/verifier progress); a change with none is
 // clear of outstanding critique.
-func (s *CheckService) countOpenReviewThreads(ctx context.Context, issueID string) (int, error) {
+func (s *CheckService) countOpenReviewThreads(ctx context.Context, taskID string) (int, error) {
 	var count int
 	if err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(*)
@@ -187,7 +187,7 @@ WHERE state IN (?, ?)
 	AND change_id = (
 		SELECT id
 		FROM changes
-		WHERE issue_id = ?
+		WHERE task_id = ?
 			AND ready_at IS NOT NULL
 			AND merged_at IS NULL
 		ORDER BY updated_at DESC, created_at DESC
@@ -195,7 +195,7 @@ WHERE state IN (?, ?)
 	)`,
 		string(ThreadOpen),
 		string(ThreadReopened),
-		issueID,
+		taskID,
 	).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count open review threads: %w", err)
 	}
@@ -203,71 +203,71 @@ WHERE state IN (?, ?)
 	return count, nil
 }
 
-func (s *CheckService) GetCheck(ctx context.Context, issueID string, name string) (Check, error) {
-	issueID = strings.TrimSpace(issueID)
+func (s *CheckService) GetCheck(ctx context.Context, taskID string, name string) (Check, error) {
+	taskID = strings.TrimSpace(taskID)
 	name = strings.TrimSpace(name)
-	if issueID == "" {
-		return Check{}, errors.New("issue id is required")
+	if taskID == "" {
+		return Check{}, errors.New("task id is required")
 	}
 	if name == "" {
 		return Check{}, errors.New("check name is required")
 	}
 
 	row := s.db.QueryRowContext(ctx, checkSelectSQL+`
-WHERE issue_id = ? AND name = ?`, issueID, name)
+WHERE task_id = ? AND name = ?`, taskID, name)
 
 	return scanCheck(row)
 }
 
-func (s *CheckService) ListChecks(ctx context.Context, issueID string) ([]Check, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return nil, errors.New("issue id is required")
+func (s *CheckService) ListChecks(ctx context.Context, taskID string) ([]Check, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, errors.New("task id is required")
 	}
 
 	rows, err := s.db.QueryContext(ctx, checkSelectSQL+`
-WHERE issue_id = ?
-ORDER BY required DESC, name`, issueID)
+WHERE task_id = ?
+ORDER BY required DESC, name`, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("list checks: %w", err)
 	}
 	return scanRows(rows, scanCheck)
 }
 
-func (s *CheckService) ReviewState(ctx context.Context, issueID string) (ReviewState, error) {
-	return reviewStateForIssue(ctx, s.db, issueID)
+func (s *CheckService) ReviewState(ctx context.Context, taskID string) (ReviewState, error) {
+	return reviewStateForTask(ctx, s.db, taskID)
 }
 
-func (s *CheckService) CritiqueSatisfied(ctx context.Context, issueID string) (bool, error) {
-	return critiqueSatisfiedForIssue(ctx, s.db, issueID)
+func (s *CheckService) CritiqueSatisfied(ctx context.Context, taskID string) (bool, error) {
+	return critiqueSatisfiedForTask(ctx, s.db, taskID)
 }
 
-// VerifierPending reports whether the issue has at least one required
+// VerifierPending reports whether the task has at least one required
 // verifier-kind check that has not yet been satisfied. Verifier checks run in
 // the acceptance phase; skipped and non-required verifiers are deliberately
-// excluded, mirroring critiqueSatisfiedForIssue's required-only scope. It is
+// excluded, mirroring critiqueSatisfiedForTask's required-only scope. It is
 // the verifier half of the acceptance gate.
-func (s *CheckService) VerifierPending(ctx context.Context, issueID string) (bool, error) {
-	return verifierPendingForIssue(ctx, s.db, issueID)
+func (s *CheckService) VerifierPending(ctx context.Context, taskID string) (bool, error) {
+	return verifierPendingForTask(ctx, s.db, taskID)
 }
 
-// critiqueSatisfiedForIssue reports whether every required critique-kind check
+// critiqueSatisfiedForTask reports whether every required critique-kind check
 // (CI/reviewer/human) is satisfied. It is the package-level predicate shared by
 // CheckService.CritiqueSatisfied and the acceptance gate so the SQL lives once.
-func critiqueSatisfiedForIssue(ctx context.Context, database *sql.DB, issueID string) (bool, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return false, errors.New("issue id is required")
+func critiqueSatisfiedForTask(ctx context.Context, database *sql.DB, taskID string) (bool, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return false, errors.New("task id is required")
 	}
 	var count int
 	if err := database.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM checks
-WHERE issue_id = ?
+WHERE task_id = ?
 	AND required = 1
 	AND kind IN (?, ?, ?)
 	AND verdict != ?`,
-		issueID,
+		taskID,
 		string(CheckKindCI),
 		string(CheckKindReviewer),
 		string(CheckKindHuman),
@@ -279,22 +279,22 @@ WHERE issue_id = ?
 	return count == 0, nil
 }
 
-// verifierPendingForIssue is the package-level predicate behind
+// verifierPendingForTask is the package-level predicate behind
 // CheckService.VerifierPending; see that method for semantics.
-func verifierPendingForIssue(ctx context.Context, database *sql.DB, issueID string) (bool, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return false, errors.New("issue id is required")
+func verifierPendingForTask(ctx context.Context, database *sql.DB, taskID string) (bool, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return false, errors.New("task id is required")
 	}
 	var count int
 	if err := database.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM checks
-WHERE issue_id = ?
+WHERE task_id = ?
 	AND kind = ?
 	AND required = 1
 	AND verdict NOT IN (?, ?)`,
-		issueID,
+		taskID,
 		string(CheckKindVerifier),
 		string(CheckSatisfied),
 		string(CheckSkipped),
@@ -305,30 +305,30 @@ WHERE issue_id = ?
 	return count > 0, nil
 }
 
-// acceptancePendingForIssue reports whether the issue sits in the acceptance
+// acceptancePendingForTask reports whether the task sits in the acceptance
 // gate: every required critique-kind check is satisfied AND at least one
 // verifier-kind check is not yet satisfied. It is the single source of truth for
 // "acceptance", shared by CheckConfigService.AcceptancePending (which the
 // lifecycle engine reads) and the coordinator's DerivePhase, so the two
 // derivations never disagree.
-func acceptancePendingForIssue(ctx context.Context, database *sql.DB, issueID string) (bool, error) {
-	critiqueSatisfied, err := critiqueSatisfiedForIssue(ctx, database, issueID)
+func acceptancePendingForTask(ctx context.Context, database *sql.DB, taskID string) (bool, error) {
+	critiqueSatisfied, err := critiqueSatisfiedForTask(ctx, database, taskID)
 	if err != nil {
 		return false, err
 	}
 	if !critiqueSatisfied {
 		return false, nil
 	}
-	return verifierPendingForIssue(ctx, database, issueID)
+	return verifierPendingForTask(ctx, database, taskID)
 }
 
-func (s *CheckService) ResetAutomatedChecksForNewRevision(ctx context.Context, issueID string) (int, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return 0, errors.New("issue id is required")
+func (s *CheckService) ResetAutomatedChecksForNewRevision(ctx context.Context, taskID string) (int, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return 0, errors.New("task id is required")
 	}
 	nowText := formatTime(s.now().UTC())
-	retiredAutoMerge, err := s.retireAutoMergeConflictCheckForNewRevision(ctx, issueID, nowText)
+	retiredAutoMerge, err := s.retireAutoMergeConflictCheckForNewRevision(ctx, taskID, nowText)
 	if err != nil {
 		return 0, err
 	}
@@ -339,7 +339,7 @@ SET verdict = ?,
 	details = ?,
 	source_job_id = NULL,
 	updated_at = ?
-WHERE issue_id = ?
+WHERE task_id = ?
 	AND kind IN (?, ?, ?)
 	AND verdict != ?
 	AND NOT (
@@ -351,7 +351,7 @@ WHERE issue_id = ?
 		string(CheckPending),
 		"reset after new author revision",
 		nowText,
-		issueID,
+		taskID,
 		string(CheckKindCI),
 		string(CheckKindReviewer),
 		string(CheckKindVerifier),
@@ -373,7 +373,7 @@ WHERE issue_id = ?
 	return int(rows) + retiredAutoMerge, nil
 }
 
-func (s *CheckService) retireAutoMergeConflictCheckForNewRevision(ctx context.Context, issueID string, nowText string) (int, error) {
+func (s *CheckService) retireAutoMergeConflictCheckForNewRevision(ctx context.Context, taskID string, nowText string) (int, error) {
 	result, err := s.db.ExecContext(ctx, `
 UPDATE checks
 SET required = 0,
@@ -382,7 +382,7 @@ SET required = 0,
 	details = ?,
 	source_job_id = NULL,
 	updated_at = ?
-WHERE issue_id = ?
+WHERE task_id = ?
 	AND name = ?
 	AND kind = ?
 	AND reporter = ?
@@ -391,7 +391,7 @@ WHERE issue_id = ?
 		string(CheckSkipped),
 		"reset after new author revision",
 		nowText,
-		issueID,
+		taskID,
 		AutoMergeCheckName,
 		string(CheckKindCI),
 		"coordinator",
@@ -409,32 +409,32 @@ WHERE issue_id = ?
 	return int(rows), nil
 }
 
-func (s *CheckService) validateSourceJob(ctx context.Context, issueID string, sourceJobID *string) error {
+func (s *CheckService) validateSourceJob(ctx context.Context, taskID string, sourceJobID *string) error {
 	if sourceJobID == nil {
 		return nil
 	}
 
-	var sourceIssueID sql.NullString
+	var sourceTaskID sql.NullString
 	if err := s.db.QueryRowContext(ctx, `
-SELECT issue_id
+SELECT task_id
 FROM jobs
-WHERE id = ?`, *sourceJobID).Scan(&sourceIssueID); err != nil {
+WHERE id = ?`, *sourceJobID).Scan(&sourceTaskID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return errors.New("source job not found")
 		}
 		return fmt.Errorf("load source job: %w", err)
 	}
-	if !sourceIssueID.Valid || strings.TrimSpace(sourceIssueID.String) != issueID {
-		return errors.New("source job does not belong to check issue")
+	if !sourceTaskID.Valid || strings.TrimSpace(sourceTaskID.String) != taskID {
+		return errors.New("source job does not belong to check task")
 	}
 
 	return nil
 }
 
 func normalizeReportCheckInput(input ReportCheckInput) (ReportCheckInput, error) {
-	input.IssueID = strings.TrimSpace(input.IssueID)
-	if input.IssueID == "" {
-		return ReportCheckInput{}, errors.New("issue id is required")
+	input.TaskID = strings.TrimSpace(input.TaskID)
+	if input.TaskID == "" {
+		return ReportCheckInput{}, errors.New("task id is required")
 	}
 	input.Name = strings.TrimSpace(input.Name)
 	if err := validateCheckName(input.Name); err != nil {
@@ -520,17 +520,17 @@ func validateCheckVerdict(verdict CheckVerdict) error {
 	}
 }
 
-func reviewStateForIssue(ctx context.Context, database *sql.DB, issueID string) (ReviewState, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return "", errors.New("issue id is required")
+func reviewStateForTask(ctx context.Context, database *sql.DB, taskID string) (ReviewState, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return "", errors.New("task id is required")
 	}
 
 	var state string
 	if err := database.QueryRowContext(ctx, `
 SELECT review_state
-FROM issue_review_state
-WHERE issue_id = ?`, issueID).Scan(&state); err != nil {
+FROM task_review_state
+WHERE task_id = ?`, taskID).Scan(&state); err != nil {
 		return "", fmt.Errorf("load review state: %w", err)
 	}
 
@@ -542,7 +542,7 @@ WHERE issue_id = ?`, issueID).Scan(&state); err != nil {
 // a full projection; callers append WHERE/ORDER clauses.
 const checkColumns = `
 	id,
-	issue_id,
+	task_id,
 	name,
 	kind,
 	required,
@@ -556,7 +556,7 @@ const checkColumns = `
 
 const checkSelectSQL = "\nSELECT" + checkColumns + "\nFROM checks"
 
-func scanCheck(scanner issueScanner) (Check, error) {
+func scanCheck(scanner taskScanner) (Check, error) {
 	var check Check
 	var kind string
 	var required int
@@ -568,7 +568,7 @@ func scanCheck(scanner issueScanner) (Check, error) {
 
 	if err := scanner.Scan(
 		&check.ID,
-		&check.IssueID,
+		&check.TaskID,
 		&check.Name,
 		&kind,
 		&required,

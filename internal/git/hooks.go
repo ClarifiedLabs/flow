@@ -22,7 +22,7 @@ const (
 	ownerActor       = "owner"
 )
 
-var issueRefPattern = regexp.MustCompile(`^refs/heads/issue/i-[0-9]{4,}(?:/run-[0-9]+)?$`)
+var taskRefPattern = regexp.MustCompile(`^refs/heads/task/i-[0-9]{4,}(?:/run-[0-9]+)?$`)
 
 type HookInstallOptions struct {
 	BaseBranch  string
@@ -197,8 +197,8 @@ func validateRefUpdate(ctx context.Context, exchangeRepoPath string, baseBranch 
 	switch {
 	case update.Ref == baseRef:
 		return validateBaseUpdate(ctx, exchangeRepoPath, principal, update)
-	case issueRefPattern.MatchString(update.Ref):
-		return validateIssueUpdate(ctx, exchangeRepoPath, principal, update)
+	case taskRefPattern.MatchString(update.Ref):
+		return validateTaskUpdate(ctx, exchangeRepoPath, principal, update)
 	case strings.HasPrefix(update.Ref, "refs/tags/"):
 		if principal != coordinatorActor {
 			return errors.New("only the coordinator may update tags")
@@ -235,18 +235,18 @@ func validateBaseUpdate(ctx context.Context, exchangeRepoPath string, principal 
 	return nil
 }
 
-func validateIssueUpdate(ctx context.Context, exchangeRepoPath string, principal string, update RefUpdate) error {
+func validateTaskUpdate(ctx context.Context, exchangeRepoPath string, principal string, update RefUpdate) error {
 	if update.NewSHA == zeroSHA {
 		if principal == coordinatorActor {
 			return nil
 		}
-		return errors.New("only the coordinator may delete issue branches")
+		return errors.New("only the coordinator may delete task branches")
 	}
 	if principal == coordinatorActor {
 		return nil
 	}
-	if !issueBranchPrincipalAllowed(principal) {
-		return errors.New("issue branch updates require owner, worker, coordinator, or local principal")
+	if !taskBranchPrincipalAllowed(principal) {
+		return errors.New("task branch updates require owner, worker, coordinator, or local principal")
 	}
 	if update.OldSHA == zeroSHA {
 		return nil
@@ -257,13 +257,13 @@ func validateIssueUpdate(ctx context.Context, exchangeRepoPath string, principal
 		return err
 	}
 	if !fastForward {
-		return errors.New("non-fast-forward issue branch updates require coordinator principal")
+		return errors.New("non-fast-forward task branch updates require coordinator principal")
 	}
 
 	return nil
 }
 
-func issueBranchPrincipalAllowed(principal string) bool {
+func taskBranchPrincipalAllowed(principal string) bool {
 	return principal == "" ||
 		principal == ownerActor ||
 		principal == "worker" ||

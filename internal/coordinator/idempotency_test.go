@@ -22,7 +22,7 @@ func TestIdempotencyReserveCompleteAndConflict(t *testing.T) {
 		PrincipalKey:   "owner:owner:hash",
 		IdempotencyKey: "create-1",
 		Method:         "POST",
-		Path:           "/v2/issues",
+		Path:           "/v2/tasks",
 		RequestHash:    "hash-a",
 	}
 
@@ -49,7 +49,7 @@ func TestIdempotencyReserveCompleteAndConflict(t *testing.T) {
 	}
 
 	record.StatusCode = 201
-	record.ResponseBody = []byte(`{"issue":{"id":"i-0001"}}`)
+	record.ResponseBody = []byte(`{"task":{"id":"i-0001"}}`)
 	if err := service.Complete(ctx, record); err != nil {
 		t.Fatalf("complete idempotency record: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestIdempotencyCancelAllowsRetryAfterFailedMutation(t *testing.T) {
 		PrincipalKey:   "owner:owner:hash",
 		IdempotencyKey: "failed-create",
 		Method:         "POST",
-		Path:           "/v2/issues",
+		Path:           "/v2/tasks",
 		RequestHash:    "hash-a",
 	}
 	if _, ok, err := service.Reserve(ctx, record); err != nil || !ok {
@@ -122,7 +122,7 @@ func TestIdempotencyReserveReclaimsStalePendingAfterTTL(t *testing.T) {
 		PrincipalKey:   "owner:owner:hash",
 		IdempotencyKey: "stale-pending",
 		Method:         "POST",
-		Path:           "/v2/issues",
+		Path:           "/v2/tasks",
 		RequestHash:    "hash-a",
 	}
 
@@ -169,7 +169,7 @@ func TestIdempotencyReserveDoesNotReclaimPendingBeforeTTL(t *testing.T) {
 		PrincipalKey:   "owner:owner:hash",
 		IdempotencyKey: "fresh-pending",
 		Method:         "POST",
-		Path:           "/v2/issues",
+		Path:           "/v2/tasks",
 		RequestHash:    "hash-a",
 	}
 
@@ -211,7 +211,7 @@ func TestIdempotencyReserveReplaysCompletedRecordDespiteAge(t *testing.T) {
 		PrincipalKey:   "owner:owner:hash",
 		IdempotencyKey: "completed",
 		Method:         "POST",
-		Path:           "/v2/issues",
+		Path:           "/v2/tasks",
 		RequestHash:    "hash-a",
 	}
 
@@ -220,7 +220,7 @@ func TestIdempotencyReserveReplaysCompletedRecordDespiteAge(t *testing.T) {
 	}
 
 	record.StatusCode = 201
-	record.ResponseBody = []byte(`{"issue":{"id":"i-0001"}}`)
+	record.ResponseBody = []byte(`{"task":{"id":"i-0001"}}`)
 	if err := service.Complete(ctx, record); err != nil {
 		t.Fatalf("complete idempotency record: %v", err)
 	}

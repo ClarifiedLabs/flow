@@ -1,7 +1,7 @@
-// Done (closed issues) view: paginated history with outcome/density controls.
+// Done (closed tasks) view: paginated history with outcome/density controls.
 // Accumulates pages on the app instance (app.doneEntries / app.doneCursors).
 
-import { apiGet, issueHref } from "./api.js";
+import { apiGet, taskHref } from "./api.js";
 import { doneClosedAtMs, flattenDonePage, phaseKey, renderPhaseBadge } from "./board.js";
 import { formatDate } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
@@ -76,31 +76,31 @@ export function renderDoneListView(app) {
   const list = app.querySelector(".done-list");
   if (!list) return;
   list.dataset.density = app.doneDensity;
-  const entries = [...app.doneEntries].sort((a, b) => doneClosedAtMs(b.issue) - doneClosedAtMs(a.issue));
+  const entries = [...app.doneEntries].sort((a, b) => doneClosedAtMs(b.task) - doneClosedAtMs(a.task));
   list.innerHTML = entries.length
     ? entries.map((entry, index) => app.doneDensity === "compact"
         ? renderDoneRowView(app, entry)
-        : app.renderIssueCard(entry.issue, entry.card, entry.laneState, false, Math.min(index, 8), entry.project, "")
+        : app.renderTaskCard(entry.task, entry.card, entry.laneState, false, Math.min(index, 8), entry.project, "")
       ).join("")
-    : `<div class="empty">No closed issues</div>`;
+    : `<div class="empty">No closed tasks</div>`;
   const more = app.querySelector(".done-more");
   if (more) {
     more.innerHTML = Object.keys(app.doneCursors).length
       ? `<button class="button secondary" data-done-more>Load more</button>`
       : "";
   }
-  app.bindIssueActions(() => app.load());
+  app.bindTaskActions(() => app.load());
 }
 
 export function renderDoneRowView(app, entry) {
-  const { issue, card, laneState, project } = entry;
-  const issueID = value(issue, "id", "ID");
-  const title = value(issue, "title", "Title");
+  const { task, card, laneState, project } = entry;
+  const taskID = value(task, "id", "ID");
+  const title = value(task, "title", "Title");
   const projectID = project && project.id ? project.id : "";
   const phaseSlug = phaseKey(laneState) || "dead";
   const change = value(card, "change", "Change");
   const changeID = value(change, "id", "ID");
-  const closedAt = formatDate(value(issue, "done_at", "DoneAt"));
+  const closedAt = formatDate(value(task, "done_at", "DoneAt"));
   const meta = [
     project && project.badge && project.name ? `<span class="card-project-badge">${escapeHTML(project.name)}</span>` : "",
     changeID ? `<a href="/ui/changes/${escapeAttr(changeID)}" data-link>${escapeHTML(changeID)}</a>` : "",
@@ -108,7 +108,7 @@ export function renderDoneRowView(app, entry) {
   ].filter(Boolean).join(" · ");
   return `
     <div class="done-row" data-phase="${escapeAttr(phaseSlug)}">
-      <a class="done-row-title" href="${escapeAttr(issueHref(projectID, issueID))}" data-link>${escapeHTML(issueID)} · ${escapeHTML(title)}</a>
+      <a class="done-row-title" href="${escapeAttr(taskHref(projectID, taskID))}" data-link>${escapeHTML(taskID)} · ${escapeHTML(title)}</a>
       <span class="done-row-badges">${renderPhaseBadge(laneState)}</span>
       ${meta ? `<span class="done-row-meta">${meta}</span>` : ""}
     </div>

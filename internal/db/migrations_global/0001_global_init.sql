@@ -28,7 +28,7 @@ CREATE TABLE workers (
 
 -- Tokens are coordinator-wide. Session tokens are bound to the project that
 -- minted them via project_id; owner, hook, and worker tokens leave it NULL.
--- source_issue_id refers to an issue in the bound project's database, so it
+-- source_task_id refers to an task in the bound project's database, so it
 -- carries no foreign key here.
 CREATE TABLE tokens (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,7 +36,7 @@ CREATE TABLE tokens (
 	scope TEXT NOT NULL CHECK (scope IN ('owner', 'worker', 'session', 'console', 'hook')),
 	subject TEXT NOT NULL DEFAULT '',
 	project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
-	source_issue_id TEXT,
+	source_task_id TEXT,
 	expires_at TEXT,
 	revoked_at TEXT,
 	created_at TEXT NOT NULL,

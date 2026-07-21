@@ -1064,12 +1064,12 @@ func workerTestRenderShellArgs(args []string) string {
 	return strings.Join(quoted, " ")
 }
 
-func waitForWorkerSessionState(t *testing.T, fixture workerTestFixture, issueID string, want coordinator.SessionRuntimeState, timeout time.Duration) coordinator.Session {
+func waitForWorkerSessionState(t *testing.T, fixture workerTestFixture, taskID string, want coordinator.SessionRuntimeState, timeout time.Duration) coordinator.Session {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var last coordinator.Session
 	for time.Now().Before(deadline) {
-		sessions, err := fixture.Sessions.ListSessionsForIssue(context.Background(), issueID, 1)
+		sessions, err := fixture.Sessions.ListSessionsForTask(context.Background(), taskID, 1)
 		if err == nil && len(sessions) > 0 {
 			last = sessions[0]
 			if sessions[0].RuntimeState == want {
@@ -1078,7 +1078,7 @@ func waitForWorkerSessionState(t *testing.T, fixture workerTestFixture, issueID 
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("session for issue %s did not reach state %q within %s (last=%+v)", issueID, want, timeout, last)
+	t.Fatalf("session for task %s did not reach state %q within %s (last=%+v)", taskID, want, timeout, last)
 	return coordinator.Session{}
 }
 

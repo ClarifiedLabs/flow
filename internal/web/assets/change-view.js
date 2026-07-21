@@ -1,7 +1,7 @@
 // Change (branch diff) detail view. Caches the rendered diff per head SHA on
 // the app instance (app.changeDiffCache).
 
-import { apiGet, issueHref } from "./api.js";
+import { apiGet, taskHref } from "./api.js";
 import { renderReviewBadge } from "./board.js";
 import { canApproveHumanReview, renderCheck, renderDiffSummary, renderHumanReviewApproveButton, renderThread } from "./diff.js";
 import { formatDate, shortSHA } from "./format.js";
@@ -14,7 +14,7 @@ export async function renderChangeView(app, id, context) {
   if (context && !app.isActiveLoad(context)) return false;
   app.setTitle("Change");
   const change = data.change || data.Change || {};
-  const issue = data.issue || data.Issue || {};
+  const task = data.task || data.Task || {};
   const checks = data.checks || data.Checks || [];
   const threads = data.threads || data.Threads || [];
   const requiredChecks = data.required_checks || data.RequiredChecks || {};
@@ -23,24 +23,24 @@ export async function renderChangeView(app, id, context) {
   const mergeBlockedReason = value(data, "merge_blocked_reason", "MergeBlockedReason");
   const changeID = value(change, "id", "ID") || id;
   const changeProjectID = data.project_id || data.ProjectID || "";
-  const issueID = value(issue, "id", "ID");
+  const taskID = value(task, "id", "ID");
   const headSHA = value(change, "head_sha", "HeadSHA");
   const checkTotal = Number(value(requiredChecks, "total", "Total") || 0);
   const checkSatisfied = Number(value(requiredChecks, "satisfied", "Satisfied") || 0);
-  const humanReviewCheck = checks.find((check) => canApproveHumanReview(check, issueID));
-  const humanReviewAction = humanReviewCheck ? renderHumanReviewApproveButton(humanReviewCheck, issueID, changeProjectID) : "";
+  const humanReviewCheck = checks.find((check) => canApproveHumanReview(check, taskID));
+  const humanReviewAction = humanReviewCheck ? renderHumanReviewApproveButton(humanReviewCheck, taskID, changeProjectID) : "";
   app.querySelector(".content").innerHTML = `
     <section class="detail change-detail">
       <div class="detail-head">
         <div>
-          <h2>${escapeHTML(changeID)} · ${escapeHTML(value(issue, "title", "Title") || "Change")}</h2>
+          <h2>${escapeHTML(changeID)} · ${escapeHTML(value(task, "title", "Title") || "Change")}</h2>
           <div class="meta">
             ${reviewState ? renderReviewBadge(reviewState) : ""}
             ${checkTotal ? `<span class="badge ${checkSatisfied === checkTotal ? "ok" : "idle"}">required ${checkSatisfied}/${checkTotal}</span>` : ""}
             ${value(change, "merged_at", "MergedAt") ? `<span class="badge" data-phase="merged"><span class="dot"></span>merged</span>` : ""}
           </div>
           <p class="meta-quiet">${[
-            issueID ? `<a href="${escapeAttr(issueHref(changeProjectID, issueID))}" data-link>${escapeHTML(issueID)}</a>` : "",
+            taskID ? `<a href="${escapeAttr(taskHref(changeProjectID, taskID))}" data-link>${escapeHTML(taskID)}</a>` : "",
             value(change, "ready_at", "ReadyAt") ? `ready ${escapeHTML(formatDate(value(change, "ready_at", "ReadyAt")))}` : "",
             value(change, "merged_at", "MergedAt") ? `merged ${escapeHTML(formatDate(value(change, "merged_at", "MergedAt")))}` : "",
           ].filter(Boolean).join(" · ")}</p>
@@ -59,12 +59,12 @@ export async function renderChangeView(app, id, context) {
       <h3>Diff</h3>
       <div data-change-diff="${escapeAttr(changeID)}">${headSHA ? `<div class="empty">Loading diff</div>` : `<div class="empty">Diff unavailable</div>`}</div>
       <h3>Checks</h3>
-      ${checks.length ? `<div class="check-list">${checks.map((check) => renderCheck(check, issueID, changeProjectID)).join("")}</div>` : `<div class="empty">No checks</div>`}
+      ${checks.length ? `<div class="check-list">${checks.map((check) => renderCheck(check, taskID, changeProjectID)).join("")}</div>` : `<div class="empty">No checks</div>`}
       <h3>Review Threads</h3>
       ${threads.length ? `<div class="feed">${threads.map((thread) => renderThread(thread, headSHA)).join("")}</div>` : `<div class="empty">No review threads</div>`}
     </section>
   `;
-  app.bindIssueActions(() => renderChangeView(app, id));
+  app.bindTaskActions(() => renderChangeView(app, id));
   if (headSHA && await renderChangeDiffView(app, changeID, headSHA, context) === false) return false;
   return true;
 }

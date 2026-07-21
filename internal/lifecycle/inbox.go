@@ -32,7 +32,7 @@ const maxInboxAttempts = 10
 // actor principal, audit provenance, and the payload — round-trips through it.
 type storedEvent struct {
 	Kind           EventKind             `json:"kind"`
-	IssueID        string                `json:"issue_id,omitempty"`
+	TaskID         string                `json:"task_id,omitempty"`
 	ChangeID       string                `json:"change_id,omitempty"`
 	ThreadID       string                `json:"thread_id,omitempty"`
 	SessionID      string                `json:"session_id,omitempty"`
@@ -55,8 +55,8 @@ func (s storedEvent) toEvent() Event {
 // is assigned ("inbox:<id>") and written back onto *ev so the cascade's
 // transition row — and therefore the replay guard — uses the same key, making a
 // later redelivery a dedup no-op. The caller must have resolved a non-empty
-// issueID (the column is NOT NULL).
-func (e *Engine) insertInbox(ctx context.Context, issueID string, ev *Event) (string, error) {
+// taskID (the column is NOT NULL).
+func (e *Engine) insertInbox(ctx context.Context, taskID string, ev *Event) (string, error) {
 	id, err := newInboxID()
 	if err != nil {
 		return "", err
@@ -69,9 +69,9 @@ func (e *Engine) insertInbox(ctx context.Context, issueID string, ev *Event) (st
 		return "", fmt.Errorf("marshal inbox event: %w", err)
 	}
 	if _, err := e.db.ExecContext(ctx, `
-INSERT INTO event_inbox (id, issue_id, event_json, idempotency_key, created_at, attempts, last_error, confirmed_at)
+INSERT INTO event_inbox (id, task_id, event_json, idempotency_key, created_at, attempts, last_error, confirmed_at)
 VALUES (?, ?, ?, ?, ?, 0, '', NULL)`,
-		id, issueID, string(raw), ev.IdempotencyKey, formatTime(e.now())); err != nil {
+		id, taskID, string(raw), ev.IdempotencyKey, formatTime(e.now())); err != nil {
 		return "", fmt.Errorf("insert inbox row: %w", err)
 	}
 	return id, nil

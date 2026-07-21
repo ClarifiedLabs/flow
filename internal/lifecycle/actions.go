@@ -29,7 +29,7 @@ func shouldScheduleReadyReview(change coordinator.Change, headSHA string) bool {
 }
 
 // isCritiqueCheckKind is ported verbatim from server.go: which check kinds, when
-// satisfied, can advance an issue toward acceptance.
+// satisfied, can advance an task toward acceptance.
 func isCritiqueCheckKind(kind coordinator.CheckKind) bool {
 	switch kind {
 	case coordinator.CheckKindCI, coordinator.CheckKindReviewer, coordinator.CheckKindHuman:
@@ -44,7 +44,7 @@ func isCritiqueCheckKind(kind coordinator.CheckKind) bool {
 // and either auto-advances the cursor — enqueueing the next phase's job — or
 // pauses awaiting approval. The final phase runs the ready tail: publish the
 // change, advance the head, reset automated checks, and schedule the first
-// review round. Issues without a cursor (no flows configured) behave as an
+// review round. Tasks without a cursor (no flows configured) behave as an
 // implicit single auto phase.
 func actWorkPhaseComplete(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
 	sessionID := ev.SessionID
@@ -54,7 +54,7 @@ func actWorkPhaseComplete(ctx context.Context, e *Engine, ev Event, snap *snapsh
 		return nil, err
 	}
 
-	cursor, hasCursor, err := e.eff.FlowCursor(ctx, snap.issueID)
+	cursor, hasCursor, err := e.eff.FlowCursor(ctx, snap.taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +62,7 @@ func actWorkPhaseComplete(ctx context.Context, e *Engine, ev Event, snap *snapsh
 		phase, ok := cursor.CurrentPhase()
 		if !ok {
 			return nil, fmt.Errorf("flow cursor for %s is out of range (phase %d of %d)",
-				snap.issueID, cursor.PhaseIndex, len(cursor.Snapshot.Phases))
+				snap.taskID, cursor.PhaseIndex, len(cursor.Snapshot.Phases))
 		}
 		// A gated final phase pauses like any other gated phase; approval runs
 		// the ready tail (actApproveWorkPhase).
@@ -71,10 +71,10 @@ func actWorkPhaseComplete(ctx context.Context, e *Engine, ev Event, snap *snapsh
 		}
 		// Final auto phase: record the handoff for the phase timeline, then run
 		// the ready tail below.
-		if err := e.storeCursorPhaseHandoff(ctx, snap.issueID, cursor, sessionBeforeReady.ChangeID); err != nil {
+		if err := e.storeCursorPhaseHandoff(ctx, snap.taskID, cursor, sessionBeforeReady.ChangeID); err != nil {
 			return nil, err
 		}
-		if _, err := e.eff.CompleteFlowCursor(ctx, snap.issueID, cursor.PhaseIndex); err != nil {
+		if _, err := e.eff.CompleteFlowCursor(ctx, snap.taskID, cursor.PhaseIndex); err != nil {
 			return nil, err
 		}
 	}
@@ -115,13 +115,13 @@ func actWorkPhaseComplete(ctx context.Context, e *Engine, ev Event, snap *snapsh
 			if err != nil {
 				return nil, err
 			}
-			if _, err := e.eff.ResetAutomatedChecksForNewRevision(ctx, session.IssueID); err != nil {
+			if _, err := e.eff.ResetAutomatedChecksForNewRevision(ctx, session.TaskID); err != nil {
 				return nil, err
 			}
 			change = updated
 		}
 		if shouldScheduleReadyReview(preReadyChange, headSHA) {
-			issue, err := e.eff.GetIssue(ctx, session.IssueID)
+			task, err := e.eff.GetTask(ctx, session.TaskID)
 			if err != nil {
 				return nil, err
 			}
@@ -130,14 +130,14 @@ func actWorkPhaseComplete(ctx context.Context, e *Engine, ev Event, snap *snapsh
 				previousHeadSHA = ""
 			}
 			round, err := e.eff.ScheduleReviewRound(ctx, coordinator.ScheduleReviewRoundInput{
-				Issue:           issue,
+				Task:            task,
 				Change:          change,
 				PreviousHeadSHA: previousHeadSHA,
 			})
 			if err != nil {
 				return nil, err
 			}
-			if err := e.scheduleCheckTimeouts(ctx, session.IssueID, change.HeadSHA, round.EnqueuedCheckNames); err != nil {
+			if err := e.scheduleCheckTimeouts(ctx, session.TaskID, change.HeadSHA, round.EnqueuedCheckNames); err != nil {
 				return nil, err
 			}
 		}
@@ -161,17 +161,17 @@ func (e *Engine) completeGatedOrIntermediatePhase(ctx context.Context, ev Event,
 		return nil, nil
 	}
 
-	if err := e.storeCursorPhaseHandoff(ctx, snap.issueID, cursor, sessionBeforeReady.ChangeID); err != nil {
+	if err := e.storeCursorPhaseHandoff(ctx, snap.taskID, cursor, sessionBeforeReady.ChangeID); err != nil {
 		return nil, err
 	}
 
 	advanced := false
 	if phase.Gate == coordinator.FlowGateHuman {
-		if _, err := e.eff.PauseFlowCursor(ctx, snap.issueID, cursor.PhaseIndex); err != nil {
+		if _, err := e.eff.PauseFlowCursor(ctx, snap.taskID, cursor.PhaseIndex); err != nil {
 			return nil, err
 		}
 	} else {
-		moved, err := e.eff.AdvanceFlowCursor(ctx, snap.issueID, cursor.PhaseIndex)
+		moved, err := e.eff.AdvanceFlowCursor(ctx, snap.taskID, cursor.PhaseIndex)
 		if err != nil {
 			return nil, err
 		}
@@ -188,11 +188,11 @@ func (e *Engine) completeGatedOrIntermediatePhase(ctx context.Context, ev Event,
 		// The FSM phase stays `working` across sub-phases, so the phase-change
 		// deadline hook in attemptTransition never rearms; arm the next
 		// phase's dwell window here (deduped, non-fatal like the hook).
-		if err := e.schedulePhaseDeadline(ctx, snap.issueID, coordinator.PhaseWorking); err != nil {
+		if err := e.schedulePhaseDeadline(ctx, snap.taskID, coordinator.PhaseWorking); err != nil {
 			slog.Warn("lifecycle: arm work-phase deadline failed (non-fatal)",
-				"issue", snap.issueID, "error", err)
+				"task", snap.taskID, "error", err)
 		}
-		return []Event{{Kind: EventEnsureWorkPhaseJob, IssueID: snap.issueID}}, nil
+		return []Event{{Kind: EventEnsureWorkPhaseJob, TaskID: snap.taskID}}, nil
 	}
 	return nil, nil
 }
@@ -200,7 +200,7 @@ func (e *Engine) completeGatedOrIntermediatePhase(ctx context.Context, ev Event,
 // storeCursorPhaseHandoff copies the change-scoped handoff snapshot the agent
 // submitted at flow ready into the per-phase handoff store under the cursor's
 // current index. Missing snapshots are tolerated: not every phase writes one.
-func (e *Engine) storeCursorPhaseHandoff(ctx context.Context, issueID string, cursor coordinator.FlowCursor, changeID string) error {
+func (e *Engine) storeCursorPhaseHandoff(ctx context.Context, taskID string, cursor coordinator.FlowCursor, changeID string) error {
 	phase, ok := cursor.CurrentPhase()
 	if !ok {
 		return nil
@@ -210,7 +210,7 @@ func (e *Engine) storeCursorPhaseHandoff(ctx context.Context, issueID string, cu
 		return err
 	}
 	return e.eff.StorePhaseHandoff(ctx, coordinator.StorePhaseHandoffInput{
-		IssueID:    issueID,
+		TaskID:     taskID,
 		PhaseIndex: cursor.PhaseIndex,
 		PhaseName:  phase.Name,
 		Content:    snapshot.Content,
@@ -224,36 +224,36 @@ func (e *Engine) storeCursorPhaseHandoff(ctx context.Context, issueID string, cu
 // tail directly: publish the change, advance the head to the stored handoff's
 // SHA, reset automated checks, and schedule the first review round.
 func actApproveWorkPhase(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
-	cursor, ok, err := e.eff.FlowCursor(ctx, snap.issueID)
+	cursor, ok, err := e.eff.FlowCursor(ctx, snap.taskID)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
-		return nil, errors.New("issue has no flow cursor to approve")
+		return nil, errors.New("task has no flow cursor to approve")
 	}
 
 	if !cursor.OnFinalPhase() {
-		advanced, err := e.eff.AdvanceFlowCursor(ctx, snap.issueID, cursor.PhaseIndex)
+		advanced, err := e.eff.AdvanceFlowCursor(ctx, snap.taskID, cursor.PhaseIndex)
 		if err != nil {
 			return nil, err
 		}
 		if advanced {
-			if err := e.schedulePhaseDeadline(ctx, snap.issueID, coordinator.PhaseWorking); err != nil {
+			if err := e.schedulePhaseDeadline(ctx, snap.taskID, coordinator.PhaseWorking); err != nil {
 				slog.Warn("lifecycle: arm work-phase deadline failed (non-fatal)",
-					"issue", snap.issueID, "error", err)
+					"task", snap.taskID, "error", err)
 			}
 		}
-		return []Event{{Kind: EventEnsureWorkPhaseJob, IssueID: snap.issueID}}, nil
+		return []Event{{Kind: EventEnsureWorkPhaseJob, TaskID: snap.taskID}}, nil
 	}
 
-	change, hasChange, err := e.eff.LatestChangeForIssue(ctx, snap.issueID)
+	change, hasChange, err := e.eff.LatestChangeForTask(ctx, snap.taskID)
 	if err != nil {
 		return nil, err
 	}
 	if !hasChange {
 		return nil, errors.New("final work phase has no change to publish")
 	}
-	handoff, _, err := e.eff.PhaseHandoff(ctx, snap.issueID, cursor.PhaseIndex)
+	handoff, _, err := e.eff.PhaseHandoff(ctx, snap.taskID, cursor.PhaseIndex)
 	if err != nil {
 		return nil, err
 	}
@@ -270,13 +270,13 @@ func actApproveWorkPhase(ctx context.Context, e *Engine, ev Event, snap *snapsho
 			if err != nil {
 				return nil, err
 			}
-			if _, err := e.eff.ResetAutomatedChecksForNewRevision(ctx, snap.issueID); err != nil {
+			if _, err := e.eff.ResetAutomatedChecksForNewRevision(ctx, snap.taskID); err != nil {
 				return nil, err
 			}
 			change = updated
 		}
 		if shouldScheduleReadyReview(preReadyChange, headSHA) {
-			issue, err := e.eff.GetIssue(ctx, snap.issueID)
+			task, err := e.eff.GetTask(ctx, snap.taskID)
 			if err != nil {
 				return nil, err
 			}
@@ -285,20 +285,20 @@ func actApproveWorkPhase(ctx context.Context, e *Engine, ev Event, snap *snapsho
 				previousHeadSHA = ""
 			}
 			round, err := e.eff.ScheduleReviewRound(ctx, coordinator.ScheduleReviewRoundInput{
-				Issue:           issue,
+				Task:            task,
 				Change:          change,
 				PreviousHeadSHA: previousHeadSHA,
 			})
 			if err != nil {
 				return nil, err
 			}
-			if err := e.scheduleCheckTimeouts(ctx, snap.issueID, change.HeadSHA, round.EnqueuedCheckNames); err != nil {
+			if err := e.scheduleCheckTimeouts(ctx, snap.taskID, change.HeadSHA, round.EnqueuedCheckNames); err != nil {
 				return nil, err
 			}
 		}
 	}
 
-	if _, err := e.eff.CompleteFlowCursor(ctx, snap.issueID, cursor.PhaseIndex); err != nil {
+	if _, err := e.eff.CompleteFlowCursor(ctx, snap.taskID, cursor.PhaseIndex); err != nil {
 		return nil, err
 	}
 	return nil, nil
@@ -308,31 +308,31 @@ func actApproveWorkPhase(ctx context.Context, e *Engine, ev Event, snap *snapsho
 // returns to pending with the feedback stored on the cursor (injected into the
 // re-run's prompt), and its job is re-ensured.
 func actReworkWorkPhase(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
-	cursor, ok, err := e.eff.FlowCursor(ctx, snap.issueID)
+	cursor, ok, err := e.eff.FlowCursor(ctx, snap.taskID)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
-		return nil, errors.New("issue has no flow cursor to rework")
+		return nil, errors.New("task has no flow cursor to rework")
 	}
-	resumed, err := e.eff.ResumeFlowCursor(ctx, snap.issueID, cursor.PhaseIndex, ev.Payload.GateFeedback)
+	resumed, err := e.eff.ResumeFlowCursor(ctx, snap.taskID, cursor.PhaseIndex, ev.Payload.GateFeedback)
 	if err != nil {
 		return nil, err
 	}
 	if resumed {
-		if err := e.schedulePhaseDeadline(ctx, snap.issueID, coordinator.PhaseWorking); err != nil {
+		if err := e.schedulePhaseDeadline(ctx, snap.taskID, coordinator.PhaseWorking); err != nil {
 			slog.Warn("lifecycle: arm work-phase deadline failed (non-fatal)",
-				"issue", snap.issueID, "error", err)
+				"task", snap.taskID, "error", err)
 		}
 	}
-	return []Event{{Kind: EventEnsureWorkPhaseJob, IssueID: snap.issueID}}, nil
+	return []Event{{Kind: EventEnsureWorkPhaseJob, TaskID: snap.taskID}}, nil
 }
 
-// actEnsureWorkPhaseJob enqueues the author job for the issue's current work
-// phase, freezing the flow cursor from the issue's flow on first use. A cursor
+// actEnsureWorkPhaseJob enqueues the author job for the task's current work
+// phase, freezing the flow cursor from the task's flow on first use. A cursor
 // paused at a gate or already through the pipeline enqueues nothing.
 func actEnsureWorkPhaseJob(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
-	cursor, hasCursor, err := e.eff.EnsureFlowCursor(ctx, snap.issueID)
+	cursor, hasCursor, err := e.eff.EnsureFlowCursor(ctx, snap.taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -362,7 +362,7 @@ func actSessionStateChanged(ctx context.Context, e *Engine, ev Event, snap *snap
 // fix and auto-merge follow-on edges.
 func actReportCheck(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
 	check, err := e.eff.ReportCheck(ctx, coordinator.ReportCheckInput{
-		IssueID:     snap.issueID,
+		TaskID:      snap.taskID,
 		Name:        ev.Payload.Name,
 		Kind:        ev.Payload.CheckKind,
 		Required:    ev.Payload.Required,
@@ -378,22 +378,22 @@ func actReportCheck(ctx context.Context, e *Engine, ev Event, snap *snapshot, re
 	res.Check = &check
 
 	if check.Verdict == coordinator.CheckSatisfied && isCritiqueCheckKind(check.Kind) {
-		change, ok, err := e.eff.ReadyUnmergedChangeForIssue(ctx, snap.issueID)
+		change, ok, err := e.eff.ReadyUnmergedChangeForTask(ctx, snap.taskID)
 		if err != nil {
 			return nil, err
 		}
 		if ok {
-			enqueuedNames, err := e.eff.EnqueueAcceptanceIfReady(ctx, snap.issueID, change)
+			enqueuedNames, err := e.eff.EnqueueAcceptanceIfReady(ctx, snap.taskID, change)
 			if err != nil {
 				return nil, err
 			}
-			if err := e.scheduleCheckTimeouts(ctx, snap.issueID, change.HeadSHA, enqueuedNames); err != nil {
+			if err := e.scheduleCheckTimeouts(ctx, snap.taskID, change.HeadSHA, enqueuedNames); err != nil {
 				return nil, err
 			}
 		}
 	}
 
-	reviewState, err := e.eff.ReviewState(ctx, snap.issueID)
+	reviewState, err := e.eff.ReviewState(ctx, snap.taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -401,23 +401,23 @@ func actReportCheck(ctx context.Context, e *Engine, ev Event, snap *snapshot, re
 
 	var followups []Event
 	if check.Required && check.Verdict == coordinator.CheckBlocked {
-		followups = append(followups, Event{Kind: EventEnsureFixAuthorJob, IssueID: snap.issueID})
+		followups = append(followups, Event{Kind: EventEnsureFixAuthorJob, TaskID: snap.taskID})
 	}
 	if reviewState == coordinator.ReviewApproved {
-		followups = append(followups, Event{Kind: EventAutoMerge, IssueID: snap.issueID})
+		followups = append(followups, Event{Kind: EventAutoMerge, TaskID: snap.taskID})
 	}
 	return followups, nil
 }
 
 // scheduleCheckTimeouts arms one durable EventCheckTimeout per newly enqueued
 // check name at now+CheckPending, so a check job that never reports cannot park
-// the issue forever. It is a no-op when the deadline is disabled. Each timer
-// carries the head SHA it was armed for: checks are keyed (issue, name) and a
+// the task forever. It is a no-op when the deadline is disabled. Each timer
+// carries the head SHA it was armed for: checks are keyed (task, name) and a
 // new revision resets the same row back to pending, so a stale timer from an
 // older head must NOT fire against the restarted check. The guard compares the
-// payload head to the issue's current ready-change head and declines (confirms)
+// payload head to the task's current ready-change head and declines (confirms)
 // when they differ; the new head's own timer governs the restarted check.
-func (e *Engine) scheduleCheckTimeouts(ctx context.Context, issueID, headSHA string, checkNames []string) error {
+func (e *Engine) scheduleCheckTimeouts(ctx context.Context, taskID, headSHA string, checkNames []string) error {
 	if e.deadlines.CheckPending <= 0 {
 		return nil
 	}
@@ -427,7 +427,7 @@ func (e *Engine) scheduleCheckTimeouts(ctx context.Context, issueID, headSHA str
 		if strings.TrimSpace(name) == "" {
 			continue
 		}
-		if _, err := e.ScheduleTimer(ctx, issueID, EventCheckTimeout, fireAt, EventPayload{Name: name, HeadSHA: headSHA}); err != nil {
+		if _, err := e.ScheduleTimer(ctx, taskID, EventCheckTimeout, fireAt, EventPayload{Name: name, HeadSHA: headSHA}); err != nil {
 			return fmt.Errorf("schedule check timeout for %q: %w", name, err)
 		}
 	}
@@ -438,7 +438,7 @@ func (e *Engine) scheduleCheckTimeouts(ctx context.Context, issueID, headSHA str
 // the benign signal that an existing session/job already covers the work. Used
 // by both the blocked-check fix edge and the schedule up-next edge.
 func actEnsureAuthorJob(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
-	input := coordinator.EnsureAuthorJobInput{IssueID: snap.issueID}
+	input := coordinator.EnsureAuthorJobInput{TaskID: snap.taskID}
 	if snap.hasChange {
 		input.Branch = snap.change.Branch
 		input.Base = snap.change.Base
@@ -459,34 +459,34 @@ const (
 	autoMergeRetryBaseDelay = 30 * time.Second
 )
 
-// actAutoMerge merges an approved auto-merge issue and re-reads the review state
+// actAutoMerge merges an approved auto-merge task and re-reads the review state
 // so the result reflects the post-merge ("merged") projection.
 func actAutoMerge(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
-	merge, err := e.eff.MergeIssue(ctx, snap.issueID)
+	merge, err := e.eff.MergeTask(ctx, snap.taskID)
 	if err != nil {
 		var conflict *flowgit.MergeConflictError
 		if !errors.As(err, &conflict) {
-			if retryErr := scheduleAutoMergeRetry(ctx, e, ev, snap.issueID, err); retryErr != nil {
+			if retryErr := scheduleAutoMergeRetry(ctx, e, ev, snap.taskID, err); retryErr != nil {
 				return nil, retryErr
 			}
 			return nil, &nonFatalFollowUpError{kind: EventAutoMerge, err: err}
 		}
-		check, err := reportAutoMergeConflict(ctx, e, snap.issueID, err, conflict)
+		check, err := reportAutoMergeConflict(ctx, e, snap.taskID, err, conflict)
 		if err != nil {
 			return nil, err
 		}
 		if res.Check == nil {
 			res.Check = &check
 		}
-		reviewState, err := e.eff.ReviewState(ctx, snap.issueID)
+		reviewState, err := e.eff.ReviewState(ctx, snap.taskID)
 		if err != nil {
 			return nil, err
 		}
 		res.ReviewState = reviewState
-		return []Event{{Kind: EventEnsureFixAuthorJob, IssueID: snap.issueID}}, nil
+		return []Event{{Kind: EventEnsureFixAuthorJob, TaskID: snap.taskID}}, nil
 	}
 	res.Merge = &merge
-	reviewState, err := e.eff.ReviewState(ctx, snap.issueID)
+	reviewState, err := e.eff.ReviewState(ctx, snap.taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -496,16 +496,16 @@ func actAutoMerge(ctx context.Context, e *Engine, ev Event, snap *snapshot, res 
 
 // scheduleAutoMergeRetry arranges the next durable attempt after a transient
 // auto-merge failure, or — when attempts are exhausted — reports a blocked
-// auto-merge check so a human sees the issue parked in approved. The retry
+// auto-merge check so a human sees the task parked in approved. The retry
 // timer re-fires EventAutoMerge through guardAutoMergeReady, so a retry that
-// lands after the issue merged or lost approval is a benign no-op.
-func scheduleAutoMergeRetry(ctx context.Context, e *Engine, ev Event, issueID string, cause error) error {
-	// At most one pending retry chain per issue: scheduling commits before the
+// lands after the task merged or lost approval is a benign no-op.
+func scheduleAutoMergeRetry(ctx context.Context, e *Engine, ev Event, taskID string, cause error) error {
+	// At most one pending retry chain per task: scheduling commits before the
 	// dispatching event's dedup transition does, so a crash-redelivery would
 	// otherwise re-run this effect and fork a second chain, defeating the
 	// attempt bound. The dispatching timer itself (still unconfirmed while
 	// this action runs) is excluded.
-	if pending, err := e.hasPendingTimer(ctx, issueID, EventAutoMerge,
+	if pending, err := e.hasPendingTimer(ctx, taskID, EventAutoMerge,
 		strings.TrimPrefix(ev.IdempotencyKey, "timer:")); err != nil {
 		return err
 	} else if pending {
@@ -520,7 +520,7 @@ func scheduleAutoMergeRetry(ctx context.Context, e *Engine, ev Event, issueID st
 			details = "unknown error"
 		}
 		if _, err := e.eff.ReportCheck(ctx, coordinator.ReportCheckInput{
-			IssueID:  issueID,
+			TaskID:   taskID,
 			Name:     coordinator.AutoMergeCheckName,
 			Kind:     coordinator.CheckKindCI,
 			Required: &required,
@@ -534,13 +534,13 @@ func scheduleAutoMergeRetry(ctx context.Context, e *Engine, ev Event, issueID st
 		return nil
 	}
 	delay := autoMergeRetryBaseDelay << (next - 1)
-	if _, err := e.ScheduleTimer(ctx, issueID, EventAutoMerge, e.now().Add(delay), EventPayload{AutoMergeAttempt: next}); err != nil {
+	if _, err := e.ScheduleTimer(ctx, taskID, EventAutoMerge, e.now().Add(delay), EventPayload{AutoMergeAttempt: next}); err != nil {
 		return fmt.Errorf("schedule auto-merge retry: %w", err)
 	}
 	return nil
 }
 
-func reportAutoMergeConflict(ctx context.Context, e *Engine, issueID string, mergeErr error, conflict *flowgit.MergeConflictError) (coordinator.Check, error) {
+func reportAutoMergeConflict(ctx context.Context, e *Engine, taskID string, mergeErr error, conflict *flowgit.MergeConflictError) (coordinator.Check, error) {
 	required := true
 	exitCode := 1
 	details := strings.TrimSpace(conflict.Output)
@@ -551,7 +551,7 @@ func reportAutoMergeConflict(ctx context.Context, e *Engine, issueID string, mer
 		details = flowgit.ErrMergeConflict.Error()
 	}
 	return e.eff.ReportCheck(ctx, coordinator.ReportCheckInput{
-		IssueID:  issueID,
+		TaskID:   taskID,
 		Name:     coordinator.AutoMergeCheckName,
 		Kind:     coordinator.CheckKindCI,
 		Required: &required,
@@ -562,95 +562,95 @@ func reportAutoMergeConflict(ctx context.Context, e *Engine, issueID string, mer
 	})
 }
 
-// actScheduleIssue sets the schedule state and, when moving to up_next, emits an
+// actScheduleTask sets the schedule state and, when moving to up_next, emits an
 // ensure-author-job edge.
-func actScheduleIssue(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
-	issue, err := e.eff.ScheduleIssue(ctx, snap.issueID, ev.Payload.Schedule)
+func actScheduleTask(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
+	task, err := e.eff.ScheduleTask(ctx, snap.taskID, ev.Payload.Schedule)
 	if err != nil {
 		return nil, err
 	}
-	res.Issue = &issue
+	res.Task = &task
 
 	var followups []Event
 	if ev.Payload.Schedule == coordinator.ScheduleUpNext {
-		followups = append(followups, Event{Kind: EventEnsureWorkPhaseJob, IssueID: snap.issueID})
+		followups = append(followups, Event{Kind: EventEnsureWorkPhaseJob, TaskID: snap.taskID})
 	}
 	return followups, nil
 }
 
-func actSetIssueState(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
-	issue, err := e.eff.SetIssueState(ctx, snap.issueID, ev.Payload.IssueState)
+func actSetTaskState(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
+	task, err := e.eff.SetTaskState(ctx, snap.taskID, ev.Payload.TaskState)
 	if err != nil {
 		return nil, err
 	}
-	res.Issue = &issue
+	res.Task = &task
 
 	var followups []Event
-	if issue.ScheduleState == coordinator.ScheduleUpNext && issue.TriageState == coordinator.TriageAccepted {
-		followups = append(followups, Event{Kind: EventEnsureWorkPhaseJob, IssueID: snap.issueID})
+	if task.ScheduleState == coordinator.ScheduleUpNext && task.TriageState == coordinator.TriageAccepted {
+		followups = append(followups, Event{Kind: EventEnsureWorkPhaseJob, TaskID: snap.taskID})
 	}
 	return followups, nil
 }
 
-// actResetIssue discards the issue's authoring artifacts and, when the issue is
+// actResetTask discards the task's authoring artifacts and, when the task is
 // still scheduled up next, emits an ensure-author-job edge so a fresh attempt
 // starts from the base branch.
-func actResetIssue(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
-	issue, err := e.eff.ResetIssue(ctx, snap.issueID)
+func actResetTask(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
+	task, err := e.eff.ResetTask(ctx, snap.taskID)
 	if err != nil {
 		return nil, err
 	}
-	res.Issue = &issue
+	res.Task = &task
 
 	var followups []Event
-	if issue.ScheduleState == coordinator.ScheduleUpNext {
-		followups = append(followups, Event{Kind: EventEnsureWorkPhaseJob, IssueID: snap.issueID})
+	if task.ScheduleState == coordinator.ScheduleUpNext {
+		followups = append(followups, Event{Kind: EventEnsureWorkPhaseJob, TaskID: snap.taskID})
 	}
 	return followups, nil
 }
 
 func actRetryCrashedAuthorJob(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
-	result, err := e.eff.RetryCrashedAuthorJob(ctx, snap.issueID, ev.Actor.Actor())
+	result, err := e.eff.RetryCrashedAuthorJob(ctx, snap.taskID, ev.Actor.Actor())
 	if err != nil {
 		return nil, err
 	}
-	res.Issue = &result.Issue
+	res.Task = &result.Task
 	return nil, nil
 }
 
-// actCloseIssue closes the issue through the engine; the resulting closed phase
-// (abandoned/merged_closed/rejected_closed) is derived from the issue state.
-func actCloseIssue(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
-	issue, err := e.eff.CloseIssue(ctx, snap.issueID)
+// actCloseTask closes the task through the engine; the resulting closed phase
+// (abandoned/merged_closed/rejected_closed) is derived from the task state.
+func actCloseTask(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
+	task, err := e.eff.CloseTask(ctx, snap.taskID)
 	if err != nil {
 		return nil, err
 	}
-	res.Issue = &issue
+	res.Task = &task
 	return nil, nil
 }
 
-// actTriage accepts or rejects an issue. Acceptance derives back to a live phase;
+// actTriage accepts or rejects an task. Acceptance derives back to a live phase;
 // rejection derives to rejected_closed.
 func actTriage(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
-	var issue coordinator.Issue
+	var task coordinator.Task
 	var err error
 	switch ev.Payload.Triage {
 	case coordinator.TriageAccepted:
-		issue, err = e.eff.AcceptTriage(ctx, snap.issueID)
+		task, err = e.eff.AcceptTriage(ctx, snap.taskID)
 	case coordinator.TriageRejected:
-		issue, err = e.eff.RejectTriage(ctx, snap.issueID)
+		task, err = e.eff.RejectTriage(ctx, snap.taskID)
 	default:
 		return nil, fmt.Errorf("lifecycle: invalid triage state %q", ev.Payload.Triage)
 	}
 	if err != nil {
 		return nil, err
 	}
-	res.Issue = &issue
+	res.Task = &task
 	return nil, nil
 }
 
-func actMergeIssue(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
-	merge, err := e.eff.MergeIssue(ctx, snap.issueID)
+func actMergeTask(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
+	merge, err := e.eff.MergeTask(ctx, snap.taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -722,7 +722,7 @@ func actCommentThread(ctx context.Context, e *Engine, ev Event, snap *snapshot, 
 }
 
 // actPhaseDeadline fires when a phase's dwell window elapses (the guard has
-// already confirmed the issue is still in that phase). For the working phase
+// already confirmed the task is still in that phase). For the working phase
 // it decides reschedule-vs-escalate from agent activity. The decision is
 // recorded in the transition log either way.
 func actPhaseDeadline(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
@@ -739,20 +739,20 @@ func actPhaseDeadline(ctx context.Context, e *Engine, ev Event, snap *snapshot, 
 // handleWorkPhaseDeadline reschedules the deadline when the agent was active
 // within the window, or escalates a stalled work-phase session otherwise. "No
 // active session / no activity timestamp" is treated as stale: the guard
-// already proved the issue is still in working, and the window already
+// already proved the task is still in working, and the window already
 // elapsed since it was entered, so a session that produced no signal in that
 // time is wedged. A flow paused at a human gate is deliberately waiting, not
 // stalled — the timer confirms without escalating, and the gate approval
 // rearms the window for the next phase.
 func (e *Engine) handleWorkPhaseDeadline(ctx context.Context, ev Event, snap *snapshot) ([]Event, error) {
-	if cursor, ok, err := e.eff.FlowCursor(ctx, snap.issueID); err != nil {
+	if cursor, ok, err := e.eff.FlowCursor(ctx, snap.taskID); err != nil {
 		return nil, err
 	} else if ok && cursor.PhaseState == coordinator.FlowPhaseAwaitingApproval {
 		return nil, nil
 	}
 
 	window := e.deadlines.AuthoringStall
-	lastActivity, ok, err := e.eff.LastAgentActivity(ctx, snap.issueID)
+	lastActivity, ok, err := e.eff.LastAgentActivity(ctx, snap.taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -760,7 +760,7 @@ func (e *Engine) handleWorkPhaseDeadline(ctx context.Context, ev Event, snap *sn
 		if lastActivity.Add(window).After(e.now()) {
 			// Fresh activity: rearm for the moment the window next lapses from
 			// the last signal, rather than escalating a session that is working.
-			if _, err := e.ScheduleTimer(ctx, snap.issueID, EventPhaseDeadline, lastActivity.Add(window), EventPayload{
+			if _, err := e.ScheduleTimer(ctx, snap.taskID, EventPhaseDeadline, lastActivity.Add(window), EventPayload{
 				DeadlinePhase: coordinator.PhaseWorking,
 			}); err != nil {
 				return nil, fmt.Errorf("reschedule work-phase deadline: %w", err)
@@ -770,7 +770,7 @@ func (e *Engine) handleWorkPhaseDeadline(ctx context.Context, ev Event, snap *sn
 	}
 
 	// Stale: surface the stall as a non-required blocked check plus a blocker
-	// status entry so a human notices without the issue being forced backward.
+	// status entry so a human notices without the task being forced backward.
 	notRequired := false
 	phase := strings.TrimSpace(string(ev.Payload.DeadlinePhase))
 	if phase == "" {
@@ -778,7 +778,7 @@ func (e *Engine) handleWorkPhaseDeadline(ctx context.Context, ev Event, snap *sn
 	}
 	details := fmt.Sprintf("%s stalled: no agent activity for %s", phase, window)
 	if _, err := e.eff.ReportCheck(ctx, coordinator.ReportCheckInput{
-		IssueID:  snap.issueID,
+		TaskID:   snap.taskID,
 		Name:     phaseDeadlineCheckName,
 		Kind:     coordinator.CheckKindCI,
 		Required: &notRequired,
@@ -789,7 +789,7 @@ func (e *Engine) handleWorkPhaseDeadline(ctx context.Context, ev Event, snap *sn
 		return nil, err
 	}
 	if err := e.eff.WriteStatus(ctx, coordinator.WriteStatusInput{
-		IssueID: snap.issueID,
+		TaskID:  snap.taskID,
 		Actor:   "coordinator",
 		Kind:    coordinator.StatusKindBlocker,
 		Message: details,
@@ -811,14 +811,14 @@ const phaseDeadlineCheckName = "phase-deadline"
 // existing check and passing its Required back, so the timeout never silently
 // flips a required check to optional or vice versa.
 func actCheckTimeout(ctx context.Context, e *Engine, ev Event, snap *snapshot, res *StepResult) ([]Event, error) {
-	existing, err := e.eff.GetCheck(ctx, snap.issueID, ev.Payload.Name)
+	existing, err := e.eff.GetCheck(ctx, snap.taskID, ev.Payload.Name)
 	if err != nil {
 		return nil, err
 	}
 	required := existing.Required
 	return []Event{{
-		Kind:    EventCheckReported,
-		IssueID: snap.issueID,
+		Kind:   EventCheckReported,
+		TaskID: snap.taskID,
 		Payload: EventPayload{
 			Name:      ev.Payload.Name,
 			CheckKind: existing.Kind,

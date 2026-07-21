@@ -18,24 +18,24 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/worker"
 )
 
-func createIssueInputForPrincipal(request createIssueRequest, principal coordinator.Principal) (coordinator.CreateIssueWithDetailsInput, error) {
+func createTaskInputForPrincipal(request createTaskRequest, principal coordinator.Principal) (coordinator.CreateTaskWithDetailsInput, error) {
 	actor := coordinator.ActorHuman
 	createdBySessionID := request.CreatedBySessionID
-	sourceIssueID := request.SourceIssueID
+	sourceTaskID := request.SourceTaskID
 	scheduleState := coordinator.ScheduleBacklog
 	triageState := coordinator.TriageAccepted
 
 	if principal.Scope == coordinator.TokenScopeSession {
-		if principal.SourceIssueID == nil && sourceIssueID != nil {
-			return coordinator.CreateIssueWithDetailsInput{}, errors.New("session token is not bound to a source issue")
+		if principal.SourceTaskID == nil && sourceTaskID != nil {
+			return coordinator.CreateTaskWithDetailsInput{}, errors.New("session token is not bound to a source task")
 		}
-		if principal.SourceIssueID != nil && sourceIssueID != nil && strings.TrimSpace(*sourceIssueID) != *principal.SourceIssueID {
-			return coordinator.CreateIssueWithDetailsInput{}, errors.New("session token cannot create issues for a different source issue")
+		if principal.SourceTaskID != nil && sourceTaskID != nil && strings.TrimSpace(*sourceTaskID) != *principal.SourceTaskID {
+			return coordinator.CreateTaskWithDetailsInput{}, errors.New("session token cannot create tasks for a different source task")
 		}
 
 		actor = coordinator.ActorAgent
 		createdBySessionID = &principal.Subject
-		sourceIssueID = principal.SourceIssueID
+		sourceTaskID = principal.SourceTaskID
 		scheduleState = coordinator.ScheduleBacklog
 		triageState = coordinator.TriageAccepted
 	} else if principal.Scope == coordinator.TokenScopeConsole {
@@ -43,8 +43,8 @@ func createIssueInputForPrincipal(request createIssueRequest, principal coordina
 		createdBySessionID = &principal.Subject
 	}
 
-	input := coordinator.CreateIssueWithDetailsInput{
-		Issue: coordinator.CreateIssueInput{
+	input := coordinator.CreateTaskWithDetailsInput{
+		Task: coordinator.CreateTaskInput{
 			Title:              request.Title,
 			Body:               request.Body,
 			AcceptanceCriteria: request.AcceptanceCriteria,
@@ -54,40 +54,40 @@ func createIssueInputForPrincipal(request createIssueRequest, principal coordina
 			FlowID:             request.FlowID,
 			CreatedBy:          actor,
 			CreatedBySessionID: createdBySessionID,
-			SourceIssueID:      sourceIssueID,
+			SourceTaskID:       sourceTaskID,
 			SourceChangeID:     request.SourceChangeID,
 		},
 		Tags:      tagInputs(request.Tags, actor),
 		Relations: relationInputs(request.Relations, actor),
 	}
 	if principal.Scope == coordinator.TokenScopeSession {
-		if err := constrainSessionRelations(input.Relations, principal.SourceIssueID); err != nil {
-			return coordinator.CreateIssueWithDetailsInput{}, err
+		if err := constrainSessionRelations(input.Relations, principal.SourceTaskID); err != nil {
+			return coordinator.CreateTaskWithDetailsInput{}, err
 		}
 	}
 
 	return input, nil
 }
 
-func constrainSessionRelations(relations []coordinator.CreateIssueRelationInput, sourceIssueID *string) error {
-	if sourceIssueID == nil && len(relations) > 0 {
-		return errors.New("session token is not bound to a source issue")
+func constrainSessionRelations(relations []coordinator.CreateTaskRelationInput, sourceTaskID *string) error {
+	if sourceTaskID == nil && len(relations) > 0 {
+		return errors.New("session token is not bound to a source task")
 	}
 	for _, relation := range relations {
-		source := strings.TrimSpace(relation.SourceIssueID)
-		target := strings.TrimSpace(relation.TargetIssueID)
+		source := strings.TrimSpace(relation.SourceTaskID)
+		target := strings.TrimSpace(relation.TargetTaskID)
 		if source != "" && target != "" {
-			return errors.New("session-created issue relations must involve the newly created issue")
+			return errors.New("session-created task relations must involve the newly created task")
 		}
-		if sourceIssueID == nil {
+		if sourceTaskID == nil {
 			continue
 		}
-		ownedIssueID := *sourceIssueID
+		ownedTaskID := *sourceTaskID
 		switch {
-		case source == "" && target == ownedIssueID:
-		case target == "" && source == ownedIssueID:
+		case source == "" && target == ownedTaskID:
+		case target == "" && source == ownedTaskID:
 		default:
-			return errors.New("session-created issue relations must relate to the session source issue")
+			return errors.New("session-created task relations must relate to the session source task")
 		}
 	}
 
@@ -109,14 +109,14 @@ func tagInputs(tags []tagRequest, actor coordinator.Actor) []coordinator.CreateT
 	return inputs
 }
 
-func relationInputs(relations []relationRequest, actor coordinator.Actor) []coordinator.CreateIssueRelationInput {
-	inputs := make([]coordinator.CreateIssueRelationInput, 0, len(relations))
+func relationInputs(relations []relationRequest, actor coordinator.Actor) []coordinator.CreateTaskRelationInput {
+	inputs := make([]coordinator.CreateTaskRelationInput, 0, len(relations))
 	for _, relation := range relations {
-		inputs = append(inputs, coordinator.CreateIssueRelationInput{
-			SourceIssueID: relation.SourceIssueID,
-			TargetIssueID: relation.TargetIssueID,
-			Kind:          coordinator.RelationKind(relation.Kind),
-			CreatedBy:     actor,
+		inputs = append(inputs, coordinator.CreateTaskRelationInput{
+			SourceTaskID: relation.SourceTaskID,
+			TargetTaskID: relation.TargetTaskID,
+			Kind:         coordinator.RelationKind(relation.Kind),
+			CreatedBy:    actor,
 		})
 	}
 
@@ -176,12 +176,12 @@ func checkSessionTokenScope(principal coordinator.Principal, sessionID string) e
 	return nil
 }
 
-func checkBoundIssueScope(principal coordinator.Principal, issueID string) error {
-	if (principal.Scope != coordinator.TokenScopeSession && principal.Scope != coordinator.TokenScopeConsole) || principal.SourceIssueID == nil {
+func checkBoundTaskScope(principal coordinator.Principal, taskID string) error {
+	if (principal.Scope != coordinator.TokenScopeSession && principal.Scope != coordinator.TokenScopeConsole) || principal.SourceTaskID == nil {
 		return nil
 	}
-	if strings.TrimSpace(*principal.SourceIssueID) != strings.TrimSpace(issueID) {
-		return errors.New("session credential cannot operate on a different issue")
+	if strings.TrimSpace(*principal.SourceTaskID) != strings.TrimSpace(taskID) {
+		return errors.New("session credential cannot operate on a different task")
 	}
 	return nil
 }
@@ -294,7 +294,7 @@ func sessionHarnessForJob(job worker.Job) string {
 	return flowharness.DefaultAgentName()
 }
 
-type createIssueRequest struct {
+type createTaskRequest struct {
 	Title              string            `json:"title"`
 	Body               string            `json:"body"`
 	AcceptanceCriteria string            `json:"acceptance_criteria"`
@@ -303,7 +303,7 @@ type createIssueRequest struct {
 	ScheduleState      string            `json:"-"`
 	TriageState        string            `json:"-"`
 	CreatedBySessionID *string           `json:"created_by_session_id"`
-	SourceIssueID      *string           `json:"source_issue_id"`
+	SourceTaskID       *string           `json:"source_task_id"`
 	SourceChangeID     *string           `json:"source_change_id"`
 	Tags               []tagRequest      `json:"tags"`
 	Relations          []relationRequest `json:"relations"`
@@ -316,9 +316,9 @@ type tagRequest struct {
 	Description string `json:"description"`
 }
 
-type relationRequest = contract.IssueRelationRequest
+type relationRequest = contract.TaskRelationRequest
 
-type editIssueRequest struct {
+type editTaskRequest struct {
 	Title              *string `json:"title"`
 	Body               *string `json:"body"`
 	AcceptanceCriteria *string `json:"acceptance_criteria"`
@@ -326,9 +326,9 @@ type editIssueRequest struct {
 	FlowID             *string `json:"flow_id"`
 }
 
-type scheduleIssueRequest = contract.ScheduleIssueRequest
-type issueStateRequest = contract.IssueStateRequest
-type triageIssueRequest = contract.TriageIssueRequest
+type scheduleTaskRequest = contract.ScheduleTaskRequest
+type taskStateRequest = contract.TaskStateRequest
+type triageTaskRequest = contract.TriageTaskRequest
 type registerWorkerRequest = contract.RegisterWorkerRequest
 type joinWorkerRequest = contract.JoinWorkerRequest
 type joinWorkerResponse = contract.JoinWorkerResponse
@@ -394,32 +394,32 @@ type drainGitEventsRequest struct {
 	ExchangeRepoPath string `json:"exchange_repo_path"`
 }
 
-type issueResponse struct {
-	Issue       coordinator.Issue            `json:"issue"`
+type taskResponse struct {
+	Task        coordinator.Task             `json:"task"`
 	ProjectID   string                       `json:"project_id,omitempty"`
 	ProjectName string                       `json:"project_name,omitempty"`
 	StatusLog   []coordinator.StatusLogEntry `json:"status_log,omitempty"`
-	Detail      *uiIssueDetail               `json:"issue_detail,omitempty"`
-	Flow        *issueFlowStatus             `json:"flow,omitempty"`
+	Detail      *uiTaskDetail                `json:"task_detail,omitempty"`
+	Flow        *taskFlowStatus              `json:"flow,omitempty"`
 }
 
-// issueFlowStatus is the issue's position within its frozen flow snapshot:
+// taskFlowStatus is the task's position within its frozen flow snapshot:
 // the ordered phases, the cursor index/state, and — when paused at a human
 // gate — the pending handoff awaiting review.
-type issueFlowStatus struct {
-	FlowID         string           `json:"flow_id,omitempty"`
-	FlowName       string           `json:"flow_name,omitempty"`
-	PhaseName      string           `json:"phase_name,omitempty"`
-	PhaseIndex     int              `json:"phase_index"`
-	PhaseCount     int              `json:"phase_count"`
-	PhaseState     string           `json:"phase_state,omitempty"`
-	Gate           string           `json:"gate,omitempty"`
-	GateFeedback   string           `json:"gate_feedback,omitempty"`
-	PendingHandoff string           `json:"pending_handoff,omitempty"`
-	Phases         []issueFlowPhase `json:"phases,omitempty"`
+type taskFlowStatus struct {
+	FlowID         string          `json:"flow_id,omitempty"`
+	FlowName       string          `json:"flow_name,omitempty"`
+	PhaseName      string          `json:"phase_name,omitempty"`
+	PhaseIndex     int             `json:"phase_index"`
+	PhaseCount     int             `json:"phase_count"`
+	PhaseState     string          `json:"phase_state,omitempty"`
+	Gate           string          `json:"gate,omitempty"`
+	GateFeedback   string          `json:"gate_feedback,omitempty"`
+	PendingHandoff string          `json:"pending_handoff,omitempty"`
+	Phases         []taskFlowPhase `json:"phases,omitempty"`
 }
 
-type issueFlowPhase struct {
+type taskFlowPhase struct {
 	Name            string `json:"name"`
 	Gate            string `json:"gate"`
 	AgentName       string `json:"agent_name,omitempty"`
@@ -428,43 +428,43 @@ type issueFlowPhase struct {
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
-type issuesResponse = contract.IssuesResponse
-type issueAttachmentResponse = contract.IssueAttachmentResponse
-type issueAttachmentsResponse = contract.IssueAttachmentsResponse
+type tasksResponse = contract.TasksResponse
+type taskAttachmentResponse = contract.TaskAttachmentResponse
+type taskAttachmentsResponse = contract.TaskAttachmentsResponse
 
 type sessionMessagesResponse = contract.SessionMessagesResponse
 type sessionMessageResponse = contract.SessionMessageResponse
 
 type boardResponse struct {
 	contract.BoardResponse
-	IssueCards map[string]uiIssueCard `json:"issue_cards,omitempty"`
+	TaskCards map[string]uiTaskCard `json:"task_cards,omitempty"`
 }
 
-// doneResponse is the per-project read model for terminal (closed) issues. It
+// doneResponse is the per-project read model for terminal (closed) tasks. It
 // mirrors the board's owner-scoped card gating but carries the derived outcome
-// phase per issue plus a keyset cursor for paging older history.
+// phase per task plus a keyset cursor for paging older history.
 type doneResponse struct {
-	Issues       []coordinator.Issue          `json:"issues"`
+	Tasks        []coordinator.Task           `json:"tasks"`
 	Outcomes     map[string]coordinator.Phase `json:"outcomes"`
-	IssueCards   map[string]uiDoneCard        `json:"issue_cards,omitempty"`
+	TaskCards    map[string]uiDoneCard        `json:"task_cards,omitempty"`
 	NextBefore   string                       `json:"next_before,omitempty"`
 	NextBeforeID string                       `json:"next_before_id,omitempty"`
 }
 
-// uiDoneCard is a lean card for a closed issue: just the merged change (if any)
+// uiDoneCard is a lean card for a closed task: just the merged change (if any)
 // and tags. It deliberately omits the session/job/diff/check fan-out that
-// buildUIIssueCards performs for active issues.
+// buildUITaskCards performs for active tasks.
 type uiDoneCard struct {
-	IssueID string            `json:"issue_id"`
-	Change  *uiChangeSummary  `json:"change,omitempty"`
-	Tags    []coordinator.Tag `json:"tags,omitempty"`
+	TaskID string            `json:"task_id"`
+	Change *uiChangeSummary  `json:"change,omitempty"`
+	Tags   []coordinator.Tag `json:"tags,omitempty"`
 }
 
 type changeResponse struct {
 	Change             coordinator.Change         `json:"change"`
 	ProjectID          string                     `json:"project_id,omitempty"`
 	ProjectName        string                     `json:"project_name,omitempty"`
-	Issue              coordinator.Issue          `json:"issue"`
+	Task               coordinator.Task           `json:"task"`
 	Checks             []coordinator.Check        `json:"checks,omitempty"`
 	ReviewState        coordinator.ReviewState    `json:"review_state,omitempty"`
 	RequiredChecks     uiRequiredCheckSummary     `json:"required_checks"`
@@ -487,8 +487,8 @@ type changeDiffResponse struct {
 
 type mergeResponse = contract.MergeResponse
 
-type uiIssueCard struct {
-	IssueID               string                         `json:"issue_id"`
+type uiTaskCard struct {
+	TaskID                string                         `json:"task_id"`
 	Tags                  []coordinator.Tag              `json:"tags,omitempty"`
 	Relations             uiRelationSummary              `json:"relations"`
 	ActiveSession         *uiSessionSummary              `json:"active_session,omitempty"`
@@ -506,12 +506,12 @@ type uiIssueCard struct {
 	BlockingReason        string                         `json:"blocking_reason,omitempty"`
 	PrimaryAction         string                         `json:"primary_action,omitempty"`
 	CrashRetryAvailable   bool                           `json:"crash_retry_available,omitempty"`
-	Flow                  *issueFlowStatus               `json:"flow,omitempty"`
+	Flow                  *taskFlowStatus                `json:"flow,omitempty"`
 }
 
-type uiIssueDetail struct {
+type uiTaskDetail struct {
 	Tags                []coordinator.Tag                `json:"tags,omitempty"`
-	Relations           []coordinator.IssueRelation      `json:"relations,omitempty"`
+	Relations           []coordinator.TaskRelation       `json:"relations,omitempty"`
 	ActiveSession       *uiSessionSummary                `json:"active_session,omitempty"`
 	Paused              bool                             `json:"paused,omitempty"`
 	TerminalAvailable   bool                             `json:"terminal_available,omitempty"`
@@ -524,7 +524,7 @@ type uiIssueDetail struct {
 	ReviewCycleBudget   *coordinator.ReviewCycleBudget   `json:"review_cycle_budget,omitempty"`
 	WaitReason          coordinator.WaitReason           `json:"wait_reason,omitempty"`
 	CrashRetryAvailable bool                             `json:"crash_retry_available,omitempty"`
-	IssueConsole        *consoleResponse                 `json:"issue_console,omitempty"`
+	TaskConsole         *consoleResponse                 `json:"task_console,omitempty"`
 	Checks              []coordinator.Check              `json:"checks,omitempty"`
 	Transitions         []coordinator.TransitionLogEntry `json:"transitions,omitempty"`
 	// TimelineTransitions is the enriched view of Transitions used by the web
@@ -536,7 +536,7 @@ type uiIssueDetail struct {
 	// transitions exist.
 	TimelineTransitions []coordinator.SessionTimelineEntry `json:"timeline_transitions,omitempty"`
 	LifecycleGraph      *coordinator.LifecycleGraphSummary `json:"lifecycle_graph,omitempty"`
-	Attachments         []coordinator.IssueAttachment      `json:"attachments,omitempty"`
+	Attachments         []coordinator.TaskAttachment       `json:"attachments,omitempty"`
 }
 
 type uiSessionSummary struct {
@@ -588,11 +588,11 @@ type uiRequiredCheckSummary struct {
 }
 
 type uiBlockerSummary struct {
-	Count  int                     `json:"count"`
-	Issues []uiBlockerIssueSummary `json:"issues,omitempty"`
+	Count int                    `json:"count"`
+	Tasks []uiBlockerTaskSummary `json:"tasks,omitempty"`
 }
 
-type uiBlockerIssueSummary struct {
+type uiBlockerTaskSummary struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
 }
@@ -716,8 +716,8 @@ type drainGitEventsResponse struct {
 
 type errorResponse = contract.ErrorResponse
 
-func issueFilterFromQuery(r *http.Request) (coordinator.IssueFilter, error) {
-	var filter coordinator.IssueFilter
+func taskFilterFromQuery(r *http.Request) (coordinator.TaskFilter, error) {
+	var filter coordinator.TaskFilter
 	for _, state := range r.URL.Query()["state"] {
 		if state == "" {
 			continue
@@ -726,7 +726,7 @@ func issueFilterFromQuery(r *http.Request) (coordinator.IssueFilter, error) {
 		case "unscheduled", string(coordinator.LifecycleScheduled), string(coordinator.LifecycleInProgress), string(coordinator.LifecycleDone):
 			filter.LifecycleStates = append(filter.LifecycleStates, state)
 		default:
-			return coordinator.IssueFilter{}, fmt.Errorf("invalid state %q", state)
+			return coordinator.TaskFilter{}, fmt.Errorf("invalid state %q", state)
 		}
 	}
 	filter.TagSlugs = r.URL.Query()["tag"]

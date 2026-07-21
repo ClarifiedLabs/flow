@@ -23,12 +23,12 @@ type fakeImageDownloader struct {
 }
 
 type downloadCall struct {
-	IssueID      string
+	TaskID       string
 	AttachmentID string
 }
 
-func (f *fakeImageDownloader) DownloadIssueAttachment(ctx context.Context, issueID, attachmentID string, dst io.Writer) error {
-	f.calls = append(f.calls, downloadCall{IssueID: issueID, AttachmentID: attachmentID})
+func (f *fakeImageDownloader) DownloadTaskAttachment(ctx context.Context, taskID, attachmentID string, dst io.Writer) error {
+	f.calls = append(f.calls, downloadCall{TaskID: taskID, AttachmentID: attachmentID})
 	if err, ok := f.errs[attachmentID]; ok {
 		return err
 	}
@@ -69,7 +69,7 @@ func TestMaterializeImagesDownloadsEveryImageForAnyHarness(t *testing.T) {
 		downloader.bodies["att-0002"] = "gif-bytes"
 		payload := JobPayload{
 			AgentHarness: harness,
-			ImageAttachments: []coordinator.IssueImageAttachment{
+			ImageAttachments: []coordinator.TaskImageAttachment{
 				{ID: "att-0001", Filename: "shot.png"},
 				{ID: "att-0002", Filename: "anim.gif"},
 			},
@@ -127,7 +127,7 @@ exit "$code"`
 		downloader.bodies["att-0001"] = "png-bytes"
 		downloader.bodies["att-0002"] = "gif-bytes"
 		payload := harnessAuthorPayload(command)
-		payload.ImageAttachments = []coordinator.IssueImageAttachment{
+		payload.ImageAttachments = []coordinator.TaskImageAttachment{
 			{ID: "att-0001", Filename: "shot.png"},
 			{ID: "att-0002", Filename: "anim.gif"},
 		}
@@ -151,7 +151,7 @@ exit "$code"`
 		payload.AgentHarness = flowharness.Claude
 		payload.Entrypoint.Harness = flowharness.Claude
 		payload.Entrypoint.Argv = []string{`claude --dangerously-skip-permissions -p "$prompt"`}
-		payload.ImageAttachments = []coordinator.IssueImageAttachment{
+		payload.ImageAttachments = []coordinator.TaskImageAttachment{
 			{ID: "att-0001", Filename: "shot.png"},
 		}
 		worktree := t.TempDir()
@@ -179,7 +179,7 @@ func TestMaterializeImagesSkipOnErrorKeepsOtherImagesAndOriginalArgv(t *testing.
 	downloader.bodies["att-0001"] = "png-bytes"
 	downloader.errs["att-0002"] = errors.New("network down")
 	payload := harnessAuthorPayload(`harness -i "$prompt"`)
-	payload.ImageAttachments = []coordinator.IssueImageAttachment{
+	payload.ImageAttachments = []coordinator.TaskImageAttachment{
 		{ID: "att-0001", Filename: "shot.png"},
 		{ID: "att-0002", Filename: "missing.jpg"},
 	}
@@ -261,7 +261,7 @@ func TestSanitizeImageAttachmentFilename(t *testing.T) {
 	}
 }
 
-func TestDownloadImageAttachmentUsesIssueIDAndWritesBytes(t *testing.T) {
+func TestDownloadImageAttachmentUsesTaskIDAndWritesBytes(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	downloader := newFakeImageDownloader()
@@ -271,11 +271,11 @@ func TestDownloadImageAttachmentUsesIssueIDAndWritesBytes(t *testing.T) {
 	if err := os.MkdirAll(destDir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	relPath, err := downloadImageAttachment(ctx, downloader, "i-0009", coordinator.IssueImageAttachment{ID: "att-0001", Filename: "shot.png"}, destDir, worktree)
+	relPath, err := downloadImageAttachment(ctx, downloader, "i-0009", coordinator.TaskImageAttachment{ID: "att-0001", Filename: "shot.png"}, destDir, worktree)
 	if err != nil {
 		t.Fatalf("download: %v", err)
 	}
-	if len(downloader.calls) != 1 || downloader.calls[0].IssueID != "i-0009" || downloader.calls[0].AttachmentID != "att-0001" {
+	if len(downloader.calls) != 1 || downloader.calls[0].TaskID != "i-0009" || downloader.calls[0].AttachmentID != "att-0001" {
 		t.Fatalf("downloader calls = %+v, want one call for i-0009/att-0001", downloader.calls)
 	}
 	absPath := filepath.Join(worktree, relPath)

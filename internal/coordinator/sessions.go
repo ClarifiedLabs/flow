@@ -63,7 +63,7 @@ const (
 
 type Change struct {
 	ID        string
-	IssueID   string
+	TaskID    string
 	Branch    string
 	Base      string
 	HeadSHA   string
@@ -75,7 +75,7 @@ type Change struct {
 
 type Session struct {
 	ID             string
-	IssueID        string
+	TaskID         string
 	ChangeID       string
 	WorkflowRunID  string
 	NodeRunID      string
@@ -101,7 +101,7 @@ type Session struct {
 }
 
 type EnsureAuthorJobInput struct {
-	IssueID  string
+	TaskID   string
 	Branch   string
 	Base     string
 	Priority int
@@ -115,7 +115,7 @@ type EnsureAuthorJobResult struct {
 }
 
 type RetryCrashedAuthorJobResult struct {
-	Issue        Issue
+	Task         Task
 	Job          *flowworker.Job
 	Change       *Change
 	Existing     bool
@@ -143,8 +143,8 @@ type EnsureConsoleJobInput struct {
 	Priority   int
 }
 
-type EnsureIssueConsoleJobInput struct {
-	IssueID  string
+type EnsureTaskConsoleJobInput struct {
+	TaskID   string
 	Harness  string
 	Priority int
 }
@@ -232,9 +232,9 @@ type SessionServiceOptions struct {
 	HandoffSnapshots handoffSnapshotGetter
 	ReviewRounds     reviewRoundScheduler
 
-	// FlowCursors resolves the issue's flow cursor so author jobs launch the
+	// FlowCursors resolves the task's flow cursor so author jobs launch the
 	// current work phase's agent (harness, model/effort, prompt). Optional:
-	// when nil, jobs fall back to the issue-level harness selection.
+	// when nil, jobs fall back to the task-level harness selection.
 	FlowCursors *FlowCursorService
 }
 
@@ -252,7 +252,7 @@ type reviewRoundScheduler interface {
 
 type SessionService struct {
 	db                              *sql.DB
-	issues                          *IssueService
+	tasks                           *TaskService
 	workers                         *flowworker.Service
 	credentials                     *CredentialService
 	project                         Project
@@ -266,13 +266,13 @@ type SessionService struct {
 	now                             func() time.Time
 }
 
-func NewSessionService(database *sql.DB, issues *IssueService, workers *flowworker.Service) *SessionService {
-	return NewSessionServiceWithOptions(database, issues, workers, SessionServiceOptions{})
+func NewSessionService(database *sql.DB, tasks *TaskService, workers *flowworker.Service) *SessionService {
+	return NewSessionServiceWithOptions(database, tasks, workers, SessionServiceOptions{})
 }
 
-func NewSessionServiceWithOptions(database *sql.DB, issues *IssueService, workers *flowworker.Service, opts SessionServiceOptions) *SessionService {
-	if issues == nil {
-		issues = NewIssueService(database)
+func NewSessionServiceWithOptions(database *sql.DB, tasks *TaskService, workers *flowworker.Service, opts SessionServiceOptions) *SessionService {
+	if tasks == nil {
+		tasks = NewTaskService(database)
 	}
 	if workers == nil {
 		workers = flowworker.NewService(database)
@@ -290,7 +290,7 @@ func NewSessionServiceWithOptions(database *sql.DB, issues *IssueService, worker
 	}
 	return &SessionService{
 		db:                              database,
-		issues:                          issues,
+		tasks:                           tasks,
 		workers:                         workers,
 		credentials:                     opts.Credentials,
 		project:                         opts.Project,
@@ -307,7 +307,7 @@ func NewSessionServiceWithOptions(database *sql.DB, issues *IssueService, worker
 
 // workPhaseContext is the resolved "which agent runs this author job" answer:
 // the cursor's current phase for pipeline work, the flow's fix agent once the
-// pipeline completed (review fix rounds), or the issue-level fallback when no
+// pipeline completed (review fix rounds), or the task-level fallback when no
 // cursor exists.
 type workPhaseContext struct {
 	hasCursor    bool
@@ -327,16 +327,16 @@ func (c workPhaseContext) harness() string {
 	return flowharness.DefaultAgentName()
 }
 
-// resolveWorkPhase freezes/loads the issue's flow cursor and picks the agent
+// resolveWorkPhase freezes/loads the task's flow cursor and picks the agent
 // for the next author job. A completed cursor means the pipeline already
 // readied its change, so the job is a review fix round and uses the flow's
 // fix agent.
-func (s *SessionService) resolveWorkPhase(ctx context.Context, issueID string) (workPhaseContext, error) {
+func (s *SessionService) resolveWorkPhase(ctx context.Context, taskID string) (workPhaseContext, error) {
 	fallback := workPhaseContext{finalPhase: true}
 	if s.flowCursors == nil {
 		return fallback, nil
 	}
-	cursor, ok, err := s.flowCursors.EnsureCursor(ctx, issueID)
+	cursor, ok, err := s.flowCursors.EnsureCursor(ctx, taskID)
 	if err != nil {
 		return workPhaseContext{}, err
 	}
@@ -378,35 +378,35 @@ func (s *SessionService) EnsureAuthorJob(ctx context.Context, input EnsureAuthor
 	return s.ensureAuthorJob(ctx, input)
 }
 
-func (s *SessionService) RetryCrashedAuthorJob(ctx context.Context, issueID string, actor string) (RetryCrashedAuthorJobResult, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return RetryCrashedAuthorJobResult{}, errors.New("issue id is required")
+func (s *SessionService) RetryCrashedAuthorJob(ctx context.Context, taskID string, actor string) (RetryCrashedAuthorJobResult, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return RetryCrashedAuthorJobResult{}, errors.New("task id is required")
 	}
 	actor = strings.TrimSpace(actor)
 	if actor == "" {
 		actor = "system"
 	}
 
-	issue, err := s.issues.GetIssue(ctx, issueID)
+	task, err := s.tasks.GetTask(ctx, taskID)
 	if err != nil {
 		return RetryCrashedAuthorJobResult{}, err
 	}
-	if issue.ScheduleState == ScheduleClosed {
-		return RetryCrashedAuthorJobResult{}, errors.New("cannot retry a closed issue")
+	if task.ScheduleState == ScheduleClosed {
+		return RetryCrashedAuthorJobResult{}, errors.New("cannot retry a closed task")
 	}
-	if issue.TriageState != TriageAccepted {
-		return RetryCrashedAuthorJobResult{}, errors.New("crash retry requires an accepted issue")
+	if task.TriageState != TriageAccepted {
+		return RetryCrashedAuthorJobResult{}, errors.New("crash retry requires an accepted task")
 	}
-	crashLoop, err := crashLoopStatusExists(ctx, s.db, issue.ID)
+	crashLoop, err := crashLoopStatusExists(ctx, s.db, task.ID)
 	if err != nil {
 		return RetryCrashedAuthorJobResult{}, err
 	}
 	if !crashLoop {
-		return RetryCrashedAuthorJobResult{}, errors.New("issue is not held for crash retry")
+		return RetryCrashedAuthorJobResult{}, errors.New("task is not held for crash retry")
 	}
 
-	phase, err := s.issues.PhaseForIssue(ctx, issue)
+	phase, err := s.tasks.PhaseForTask(ctx, task)
 	if err != nil {
 		return RetryCrashedAuthorJobResult{}, err
 	}
@@ -414,44 +414,44 @@ func (s *SessionService) RetryCrashedAuthorJob(ctx context.Context, issueID stri
 	var ensured *EnsureAuthorJobResult
 	switch phase {
 	case PhaseUpNext, PhaseWorking:
-		// working with an active session means the issue already resumed; the
+		// working with an active session means the task already resumed; the
 		// ensure would only be suppressed, so skip it and just clear the hold.
-		active, err := s.hasActiveAuthorSession(ctx, issue.ID)
+		active, err := s.hasActiveAuthorSession(ctx, task.ID)
 		if err != nil {
 			return RetryCrashedAuthorJobResult{}, err
 		}
 		if !active {
-			result, err := s.EnsureAuthorJob(ctx, EnsureAuthorJobInput{IssueID: issue.ID})
+			result, err := s.EnsureAuthorJob(ctx, EnsureAuthorJobInput{TaskID: task.ID})
 			if err != nil {
 				return RetryCrashedAuthorJobResult{}, err
 			}
 			ensured = &result
 		}
 	case PhaseCritique, PhaseAcceptance, PhaseApproved:
-		// The issue has already advanced beyond the crashed author attempt.
+		// The task has already advanced beyond the crashed author attempt.
 		// Clearing the stale crash hold is enough.
 	default:
 		return RetryCrashedAuthorJobResult{}, fmt.Errorf("cannot retry crashed author job from phase %q", phase)
 	}
 
-	resolved, err := s.resolveCrashRestartLimit(ctx, issue.ID)
+	resolved, err := s.resolveCrashRestartLimit(ctx, task.ID)
 	if err != nil {
 		return RetryCrashedAuthorJobResult{}, err
 	}
 	if _, err := NewStatusService(s.db).Write(ctx, WriteStatusInput{
-		IssueID: issue.ID,
+		TaskID:  task.ID,
 		Actor:   actor,
 		Message: "Crash hold cleared; retrying author job.",
 		Kind:    StatusKindProgress,
 	}); err != nil {
 		return RetryCrashedAuthorJobResult{}, err
 	}
-	issue, err = s.issues.GetIssue(ctx, issue.ID)
+	task, err = s.tasks.GetTask(ctx, task.ID)
 	if err != nil {
 		return RetryCrashedAuthorJobResult{}, err
 	}
 
-	result := RetryCrashedAuthorJobResult{Issue: issue, ResolvedRows: resolved}
+	result := RetryCrashedAuthorJobResult{Task: task, ResolvedRows: resolved}
 	if ensured != nil {
 		result.Job = &ensured.Job
 		result.Change = &ensured.Change
@@ -461,37 +461,37 @@ func (s *SessionService) RetryCrashedAuthorJob(ctx context.Context, issueID stri
 }
 
 func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthorJobInput) (EnsureAuthorJobResult, error) {
-	input.IssueID = strings.TrimSpace(input.IssueID)
-	if input.IssueID == "" {
-		return EnsureAuthorJobResult{}, errors.New("issue id is required")
+	input.TaskID = strings.TrimSpace(input.TaskID)
+	if input.TaskID == "" {
+		return EnsureAuthorJobResult{}, errors.New("task id is required")
 	}
 
-	issue, err := s.issues.GetIssue(ctx, input.IssueID)
+	task, err := s.tasks.GetTask(ctx, input.TaskID)
 	if err != nil {
 		return EnsureAuthorJobResult{}, err
 	}
-	if issue.TriageState != TriageAccepted {
-		return EnsureAuthorJobResult{}, errors.New("author jobs require an accepted issue")
+	if task.TriageState != TriageAccepted {
+		return EnsureAuthorJobResult{}, errors.New("author jobs require an accepted task")
 	}
-	if issue.ScheduleState != ScheduleUpNext {
-		return EnsureAuthorJobResult{}, errors.New("author jobs require an up_next issue")
+	if task.ScheduleState != ScheduleUpNext {
+		return EnsureAuthorJobResult{}, errors.New("author jobs require an up_next task")
 	}
-	blocked, err := s.issues.issueIsBlocked(ctx, issue.ID)
+	blocked, err := s.tasks.taskIsBlocked(ctx, task.ID)
 	if err != nil {
 		return EnsureAuthorJobResult{}, err
 	}
 	if blocked {
-		return EnsureAuthorJobResult{}, fmt.Errorf("%w: issue has unresolved blockers", ErrAuthorJobSuppressed)
+		return EnsureAuthorJobResult{}, fmt.Errorf("%w: task has unresolved blockers", ErrAuthorJobSuppressed)
 	}
-	if active, err := s.hasActiveAuthorSession(ctx, issue.ID); err != nil {
+	if active, err := s.hasActiveAuthorSession(ctx, task.ID); err != nil {
 		return EnsureAuthorJobResult{}, err
 	} else if active {
-		return EnsureAuthorJobResult{}, fmt.Errorf("%w: issue already has an active author session", ErrAuthorJobSuppressed)
+		return EnsureAuthorJobResult{}, fmt.Errorf("%w: task already has an active author session", ErrAuthorJobSuppressed)
 	}
 
 	branch := strings.TrimSpace(input.Branch)
 	if branch == "" {
-		branch = issueBranch(issue.ID)
+		branch = taskBranch(task.ID)
 	}
 	base := strings.TrimSpace(input.Base)
 	if base == "" {
@@ -503,13 +503,13 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 	if err := validateBranchLike("base", base); err != nil {
 		return EnsureAuthorJobResult{}, err
 	}
-	phaseCtx, err := s.resolveWorkPhase(ctx, issue.ID)
+	phaseCtx, err := s.resolveWorkPhase(ctx, task.ID)
 	if err != nil {
 		return EnsureAuthorJobResult{}, err
 	}
 	jobHarness := phaseCtx.harness()
 
-	if existing, ok, err := s.workers.LiveAuthorJobForIssue(ctx, issue.ID); err != nil {
+	if existing, ok, err := s.workers.LiveAuthorJobForTask(ctx, task.ID); err != nil {
 		return EnsureAuthorJobResult{}, err
 	} else if ok {
 		existingChangeID := stringPointerValue(existing.ChangeID)
@@ -523,19 +523,19 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 		return EnsureAuthorJobResult{Job: existing, Change: change, Existing: true}, nil
 	}
 
-	change, err := s.ensureChange(ctx, issue.ID, branch, base)
+	change, err := s.ensureChange(ctx, task.ID, branch, base)
 	if err != nil {
 		return EnsureAuthorJobResult{}, err
 	}
 	if change.MergedAt != nil {
 		return EnsureAuthorJobResult{}, errors.New("author jobs cannot be enqueued for a merged change")
 	}
-	reviewFix, err := s.shouldConsumeReviewCycle(ctx, issue.ID)
+	reviewFix, err := s.shouldConsumeReviewCycle(ctx, task.ID)
 	if err != nil {
 		return EnsureAuthorJobResult{}, err
 	}
 	if reviewFix {
-		budget, err := s.reviewCycles.Consume(ctx, issue.ID, "system")
+		budget, err := s.reviewCycles.Consume(ctx, task.ID, "system")
 		if errors.Is(err, ErrReviewCycleLimitReached) {
 			return EnsureAuthorJobResult{}, fmt.Errorf("%w: %w (%d/%d review-author cycles used)", ErrAuthorJobSuppressed, ErrReviewCycleLimitReached, budget.UsedCycles, budget.GrantedCycles)
 		}
@@ -554,7 +554,7 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 
 	priority := input.Priority
 	if priority == 0 {
-		priority = issue.Priority
+		priority = task.Priority
 	}
 	payload := copyPayload(input.Payload)
 	if _, ok := payload["entrypoint"]; !ok {
@@ -571,13 +571,13 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 	payload["base"] = base
 	payload["agent_harness"] = jobHarness
 	stampWorkPhasePayload(payload, phaseCtx)
-	if err := stampImageAttachments(ctx, s.issues, payload, issue.ID); err != nil {
+	if err := stampImageAttachments(ctx, s.tasks, payload, task.ID); err != nil {
 		return EnsureAuthorJobResult{}, err
 	}
 	stampProjectPayload(payload, s.project)
 
 	job, err := s.workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		ChangeID:       &change.ID,
 		Role:           flowworker.RoleAuthor,
 		CapacityBucket: flowworker.BucketPersistentAgent,
@@ -586,7 +586,7 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 		Payload:        payload,
 	})
 	if err != nil {
-		if existing, ok, lookupErr := s.workers.LiveAuthorJobForIssue(ctx, issue.ID); lookupErr == nil && ok && authorJobMatches(existing, change.ID, branch, base, jobHarness, phaseCtx.phaseIndex) {
+		if existing, ok, lookupErr := s.workers.LiveAuthorJobForTask(ctx, task.ID); lookupErr == nil && ok && authorJobMatches(existing, change.ID, branch, base, jobHarness, phaseCtx.phaseIndex) {
 			return EnsureAuthorJobResult{Job: existing, Change: change, Existing: true}, nil
 		}
 		return EnsureAuthorJobResult{}, err
@@ -612,19 +612,19 @@ func stampWorkPhasePayload(payload map[string]any, phaseCtx workPhaseContext) {
 	}
 }
 
-func (s *SessionService) shouldConsumeReviewCycle(ctx context.Context, issueID string) (bool, error) {
-	reviewState, err := reviewStateForIssue(ctx, s.db, issueID)
+func (s *SessionService) shouldConsumeReviewCycle(ctx context.Context, taskID string) (bool, error) {
+	reviewState, err := reviewStateForTask(ctx, s.db, taskID)
 	if err != nil {
 		return false, err
 	}
 	if reviewState != ReviewChangesRequested {
 		return false, nil
 	}
-	return issueHasUnmergedChange(ctx, s.db, issueID)
+	return taskHasUnmergedChange(ctx, s.db, taskID)
 }
 
-func (s *SessionService) ReviewCycleBudget(ctx context.Context, issueID string) (ReviewCycleBudget, error) {
-	return s.reviewCycles.Get(ctx, issueID)
+func (s *SessionService) ReviewCycleBudget(ctx context.Context, taskID string) (ReviewCycleBudget, error) {
+	return s.reviewCycles.Get(ctx, taskID)
 }
 
 func (s *SessionService) ApproveReviewCycles(ctx context.Context, input ApproveReviewCyclesInput) (ReviewCycleBudget, error) {
@@ -698,26 +698,26 @@ func (s *SessionService) EnsureConsoleJob(ctx context.Context, input EnsureConso
 	return EnsureConsoleJobResult{Job: job}, nil
 }
 
-func (s *SessionService) EnsureIssueConsoleJob(ctx context.Context, input EnsureIssueConsoleJobInput) (EnsureConsoleJobResult, error) {
+func (s *SessionService) EnsureTaskConsoleJob(ctx context.Context, input EnsureTaskConsoleJobInput) (EnsureConsoleJobResult, error) {
 	if _, err := s.ReconcileCrashedConsoleSessions(ctx); err != nil {
 		return EnsureConsoleJobResult{}, err
 	}
-	issueID := strings.TrimSpace(input.IssueID)
-	if issueID == "" {
-		return EnsureConsoleJobResult{}, errors.New("issue id is required")
+	taskID := strings.TrimSpace(input.TaskID)
+	if taskID == "" {
+		return EnsureConsoleJobResult{}, errors.New("task id is required")
 	}
-	if existing, ok, err := s.liveIssueConsoleJob(ctx, issueID); err != nil {
+	if existing, ok, err := s.liveTaskConsoleJob(ctx, taskID); err != nil {
 		return EnsureConsoleJobResult{}, err
 	} else if ok {
 		return EnsureConsoleJobResult{Job: existing, Existing: true}, nil
 	}
-	if state, err := s.CurrentIssueConsole(ctx, issueID); err != nil {
+	if state, err := s.CurrentTaskConsole(ctx, taskID); err != nil {
 		return EnsureConsoleJobResult{}, err
 	} else if state.Session != nil {
-		return EnsureConsoleJobResult{}, errors.New("issue console session is already active")
+		return EnsureConsoleJobResult{}, errors.New("task console session is already active")
 	}
 
-	issue, err := s.issues.GetIssue(ctx, issueID)
+	task, err := s.tasks.GetTask(ctx, taskID)
 	if err != nil {
 		return EnsureConsoleJobResult{}, err
 	}
@@ -725,12 +725,12 @@ func (s *SessionService) EnsureIssueConsoleJob(ctx context.Context, input Ensure
 	if base == "" {
 		base = defaultAuthorBase
 	}
-	change, ok, err := s.ReadyUnmergedChangeForIssue(ctx, issue.ID)
+	change, ok, err := s.ReadyUnmergedChangeForTask(ctx, task.ID)
 	if err != nil {
 		return EnsureConsoleJobResult{}, err
 	}
 	if !ok {
-		change, err = s.ensureChange(ctx, issue.ID, issueBranch(issue.ID), base)
+		change, err = s.ensureChange(ctx, task.ID, taskBranch(task.ID), base)
 		if err != nil {
 			return EnsureConsoleJobResult{}, err
 		}
@@ -759,13 +759,13 @@ func (s *SessionService) EnsureIssueConsoleJob(ctx context.Context, input Ensure
 		"branch":          change.Branch,
 		"change_id":       change.ID,
 		"console_harness": harness,
-		"console_scope":   "issue_recovery",
-		"session_purpose": "issue_console",
+		"console_scope":   "task_recovery",
+		"session_purpose": "task_console",
 	}
 	stampProjectPayload(payload, s.project)
 
 	job, err := s.workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		ChangeID:       &change.ID,
 		Role:           flowworker.RoleConsole,
 		CapacityBucket: flowworker.BucketPersistentAgent,
@@ -774,7 +774,7 @@ func (s *SessionService) EnsureIssueConsoleJob(ctx context.Context, input Ensure
 		Payload:        payload,
 	})
 	if err != nil {
-		if existing, ok, lookupErr := s.liveIssueConsoleJob(ctx, issue.ID); lookupErr == nil && ok {
+		if existing, ok, lookupErr := s.liveTaskConsoleJob(ctx, task.ID); lookupErr == nil && ok {
 			return EnsureConsoleJobResult{Job: existing, Existing: true}, nil
 		}
 		return EnsureConsoleJobResult{}, err
@@ -810,7 +810,7 @@ WHERE s.role = ?
 			AND NOT EXISTS (
 				SELECT 1
 				FROM jobs live
-				WHERE live.issue_id = s.issue_id
+				WHERE live.task_id = s.task_id
 					AND live.role = ?
 					AND live.state IN (?, ?, ?)
 			)
@@ -1044,14 +1044,14 @@ WHERE id = ?
 }
 
 func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, session Session, job flowworker.Job) (bool, error) {
-	issue, err := s.issues.GetIssue(ctx, session.IssueID)
+	task, err := s.tasks.GetTask(ctx, session.TaskID)
 	if err != nil {
 		return false, err
 	}
-	if issue.TriageState != TriageAccepted || issue.ScheduleState != ScheduleUpNext {
+	if task.TriageState != TriageAccepted || task.ScheduleState != ScheduleUpNext {
 		return false, nil
 	}
-	blocked, err := s.issues.issueIsBlocked(ctx, issue.ID)
+	blocked, err := s.tasks.taskIsBlocked(ctx, task.ID)
 	if err != nil {
 		return false, err
 	}
@@ -1070,7 +1070,7 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 		crashedHarness = flowharness.DefaultAgentName()
 	}
 	crashedPhaseIndex := payloadPhaseIndex(job.Payload)
-	if existing, ok, err := s.workers.LiveAuthorJobForIssue(ctx, issue.ID); err != nil {
+	if existing, ok, err := s.workers.LiveAuthorJobForTask(ctx, task.ID); err != nil {
 		return false, err
 	} else if ok {
 		if authorJobMatches(existing, change.ID, session.Branch, session.Base, crashedHarness, crashedPhaseIndex) {
@@ -1079,36 +1079,36 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 		return false, errors.New("live author job has incompatible change or branch")
 	}
 	// Mode-B recovery. A crashed author session keeps matching the reconcile
-	// query until a live author job exists for the issue; the targeted-review
+	// query until a live author job exists for the task; the targeted-review
 	// path enqueues a reviewer job, not an author job, so the same crashed
 	// session is re-selected every tick. The dispatch flag, stamped onto the
 	// crashed job, makes that re-selection a no-op instead of a blind relaunch.
 	if completionReviewDispatched(job) {
 		return false, nil
 	}
-	if dispatched, err := s.maybeDispatchCompletionReview(ctx, issue, change, job); err != nil {
+	if dispatched, err := s.maybeDispatchCompletionReview(ctx, task, change, job); err != nil {
 		return false, err
 	} else if dispatched {
 		return true, nil
 	}
-	exhausted, attempts, err := s.authorCrashRestartLimitReached(ctx, issue.ID, change.ID, crashedPhaseIndex)
+	exhausted, attempts, err := s.authorCrashRestartLimitReached(ctx, task.ID, change.ID, crashedPhaseIndex)
 	if err != nil {
 		return false, err
 	}
 	if exhausted {
-		if err := s.recordCrashRestartLimit(ctx, issue.ID, attempts); err != nil {
+		if err := s.recordCrashRestartLimit(ctx, task.ID, attempts); err != nil {
 			return false, err
 		}
 		return false, nil
 	}
 
 	payload := copyPayload(job.Payload)
-	reviewFix, err := s.shouldConsumeReviewCycle(ctx, issue.ID)
+	reviewFix, err := s.shouldConsumeReviewCycle(ctx, task.ID)
 	if err != nil {
 		return false, err
 	}
 	if reviewFix {
-		budget, err := s.reviewCycles.Consume(ctx, issue.ID, "system")
+		budget, err := s.reviewCycles.Consume(ctx, task.ID, "system")
 		if errors.Is(err, ErrReviewCycleLimitReached) {
 			return false, nil
 		}
@@ -1125,7 +1125,7 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 	// the relaunch re-runs the SAME phase with the same agent (the cursor did
 	// not move — the phase never completed).
 	if _, ok := payload["entrypoint"]; !ok {
-		phaseCtx, err := s.resolveWorkPhase(ctx, issue.ID)
+		phaseCtx, err := s.resolveWorkPhase(ctx, task.ID)
 		if err != nil {
 			return false, err
 		}
@@ -1142,12 +1142,12 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 	payload["change_id"] = change.ID
 	payload["branch"] = session.Branch
 	payload["base"] = session.Base
-	if err := stampImageAttachments(ctx, s.issues, payload, issue.ID); err != nil {
+	if err := stampImageAttachments(ctx, s.tasks, payload, task.ID); err != nil {
 		return false, err
 	}
 
 	_, err = s.workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID:        &issue.ID,
+		TaskID:         &task.ID,
 		ChangeID:       &change.ID,
 		Role:           flowworker.RoleAuthor,
 		CapacityBucket: flowworker.BucketPersistentAgent,
@@ -1175,7 +1175,7 @@ func completionReviewDispatched(job flowworker.Job) bool {
 
 // changeIsAheadOfBase reports whether the change has commits beyond its base.
 // The coordinator never stores a base SHA, so a non-empty projected head is the
-// available proxy: an issue branch is cut from base and only acquires a head SHA
+// available proxy: an task branch is cut from base and only acquires a head SHA
 // once the git reconcile projects real commits onto it (a fresh branch with no
 // commits has an empty head). The same non-empty-head signal already gates the
 // ordinary ready-review scheduling, so this stays consistent with it.
@@ -1194,7 +1194,7 @@ func changeIsAheadOfBase(change Change) bool {
 // later fix-round author that crashes falls through to the normal bounded
 // relaunch. Returns false (with no side effects) whenever the recovery
 // preconditions are not met, so the caller keeps today's behavior.
-func (s *SessionService) maybeDispatchCompletionReview(ctx context.Context, issue Issue, change Change, job flowworker.Job) (bool, error) {
+func (s *SessionService) maybeDispatchCompletionReview(ctx context.Context, task Task, change Change, job flowworker.Job) (bool, error) {
 	if s.reviewRounds == nil || s.handoffSnapshots == nil {
 		return false, nil
 	}
@@ -1227,7 +1227,7 @@ func (s *SessionService) maybeDispatchCompletionReview(ctx context.Context, issu
 	// after a transient failure is safe. Publishing the change + stamping the
 	// dispatch flag only happens once the review is in flight.
 	if _, err := s.reviewRounds.ScheduleReviewRound(ctx, ScheduleReviewRoundInput{
-		Issue:                issue,
+		Task:                 task,
 		Change:               change,
 		CompletionAssessment: true,
 	}); err != nil {
@@ -1288,15 +1288,15 @@ WHERE id = ?`,
 	return nil
 }
 
-func (s *SessionService) authorCrashRestartLimitReached(ctx context.Context, issueID string, changeID string, phaseIndex int) (bool, int, error) {
+func (s *SessionService) authorCrashRestartLimitReached(ctx context.Context, taskID string, changeID string, phaseIndex int) (bool, int, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT payload_json
 FROM jobs
-WHERE issue_id = ?
+WHERE task_id = ?
 	AND change_id = ?
 	AND role = ?
 	AND state = ?`,
-		issueID,
+		taskID,
 		changeID,
 		string(flowworker.RoleAuthor),
 		string(flowworker.JobCrashed),
@@ -1316,7 +1316,7 @@ WHERE issue_id = ?
 		if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 			// A single corrupt payload must not abort the whole reconcile tick;
 			// skip it and keep counting the well-formed crashed attempts.
-			slog.Warn("skip malformed crashed author payload", "issue_id", issueID, "change_id", changeID, "error", err)
+			slog.Warn("skip malformed crashed author payload", "task_id", taskID, "change_id", changeID, "error", err)
 			continue
 		}
 		// A crash that was routed to a completion-assessment review (Mode-B
@@ -1338,26 +1338,26 @@ WHERE issue_id = ?
 	return attempts >= maxAutomaticCrashAttempts, attempts, nil
 }
 
-func (s *SessionService) recordCrashRestartLimit(ctx context.Context, issueID string, attempts int) error {
+func (s *SessionService) recordCrashRestartLimit(ctx context.Context, taskID string, attempts int) error {
 	nowText := formatTime(s.now().UTC())
 	message := fmt.Sprintf(crashRestartLimitMessageFormat, attempts)
 	if _, err := s.db.ExecContext(ctx, `
-INSERT INTO status_log (issue_id, actor, message, kind, created_at)
+INSERT INTO status_log (task_id, actor, message, kind, created_at)
 SELECT ?, ?, ?, ?, ?
 WHERE NOT EXISTS (
 	SELECT 1
 	FROM status_log
-	WHERE issue_id = ?
+	WHERE task_id = ?
 		AND kind = ?
 		AND message LIKE ?
 		AND resolved_at IS NULL
 )`,
-		issueID,
+		taskID,
 		"system",
 		message,
 		StatusKindBlocker,
 		nowText,
-		issueID,
+		taskID,
 		StatusKindBlocker,
 		crashRestartLimitMessageLike,
 	); err != nil {
@@ -1367,16 +1367,16 @@ WHERE NOT EXISTS (
 	return nil
 }
 
-func (s *SessionService) resolveCrashRestartLimit(ctx context.Context, issueID string) (int64, error) {
+func (s *SessionService) resolveCrashRestartLimit(ctx context.Context, taskID string) (int64, error) {
 	result, err := s.db.ExecContext(ctx, `
 UPDATE status_log
 SET resolved_at = ?
-WHERE issue_id = ?
+WHERE task_id = ?
 	AND kind = ?
 	AND message LIKE ?
 	AND resolved_at IS NULL`,
 		formatTime(s.now().UTC()),
-		issueID,
+		taskID,
 		StatusKindBlocker,
 		crashRestartLimitMessageLike,
 	)
@@ -1436,8 +1436,8 @@ func (s *SessionService) StartAuthorSession(ctx context.Context, input StartAuth
 	if err != nil {
 		return StartAuthorSessionResult{}, err
 	}
-	if job.Role != flowworker.RoleAuthor || job.IssueID == nil {
-		return StartAuthorSessionResult{}, errors.New("author session requires an author job with issue id")
+	if job.Role != flowworker.RoleAuthor || job.TaskID == nil {
+		return StartAuthorSessionResult{}, errors.New("author session requires an author job with task id")
 	}
 	if job.State != flowworker.JobRunning {
 		return StartAuthorSessionResult{}, errors.New("author session requires a running author job")
@@ -1476,7 +1476,7 @@ func (s *SessionService) StartAuthorSession(ctx context.Context, input StartAuth
 		if err != nil {
 			return StartAuthorSessionResult{}, err
 		}
-		if change.IssueID != *job.IssueID || change.Branch != branch || change.Base != base {
+		if change.TaskID != *job.TaskID || change.Branch != branch || change.Base != base {
 			return StartAuthorSessionResult{}, errors.New("author job payload does not match change")
 		}
 	case WorkspaceBase:
@@ -1507,11 +1507,11 @@ func (s *SessionService) StartAuthorSession(ctx context.Context, input StartAuth
 	}
 	projectID := s.project.ID
 	if err := s.credentials.EnsureToken(ctx, CredentialInput{
-		Token:         token,
-		Scope:         TokenScopeSession,
-		Subject:       sessionID,
-		ProjectID:     &projectID,
-		SourceIssueID: job.IssueID,
+		Token:        token,
+		Scope:        TokenScopeSession,
+		Subject:      sessionID,
+		ProjectID:    &projectID,
+		SourceTaskID: job.TaskID,
 	}); err != nil {
 		return StartAuthorSessionResult{}, fmt.Errorf("store session token: %w", err)
 	}
@@ -1533,7 +1533,7 @@ func (s *SessionService) StartAuthorSession(ctx context.Context, input StartAuth
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO sessions (
 	id,
-	issue_id,
+	task_id,
 	change_id,
 	workflow_run_id,
 	node_run_id,
@@ -1553,7 +1553,7 @@ INSERT INTO sessions (
 	updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sessionID,
-		*job.IssueID,
+		*job.TaskID,
 		nullableStringValue(job.ChangeID),
 		nullableStringValue(job.WorkflowRunID),
 		nullableStringValue(job.NodeRunID),
@@ -1631,20 +1631,20 @@ func (s *SessionService) StartConsoleSession(ctx context.Context, input StartCon
 	if branch == "" {
 		branch = base
 	}
-	if job.IssueID == nil && branch != base {
+	if job.TaskID == nil && branch != base {
 		return StartConsoleSessionResult{}, errors.New("console job branch must match base")
 	}
 	changeID := stringPointerValue(job.ChangeID)
-	if job.IssueID != nil {
+	if job.TaskID != nil {
 		if changeID == "" {
-			return StartConsoleSessionResult{}, errors.New("issue console job requires change id")
+			return StartConsoleSessionResult{}, errors.New("task console job requires change id")
 		}
 		change, err := s.GetChange(ctx, changeID)
 		if err != nil {
 			return StartConsoleSessionResult{}, err
 		}
-		if change.IssueID != *job.IssueID || change.Branch != branch || change.Base != base {
-			return StartConsoleSessionResult{}, errors.New("issue console job payload does not match change")
+		if change.TaskID != *job.TaskID || change.Branch != branch || change.Base != base {
+			return StartConsoleSessionResult{}, errors.New("task console job payload does not match change")
 		}
 	}
 
@@ -1664,11 +1664,11 @@ func (s *SessionService) StartConsoleSession(ctx context.Context, input StartCon
 	}
 	projectID := s.project.ID
 	if err := s.credentials.EnsureToken(ctx, CredentialInput{
-		Token:         token,
-		Scope:         TokenScopeConsole,
-		Subject:       sessionID,
-		ProjectID:     &projectID,
-		SourceIssueID: job.IssueID,
+		Token:        token,
+		Scope:        TokenScopeConsole,
+		Subject:      sessionID,
+		ProjectID:    &projectID,
+		SourceTaskID: job.TaskID,
 	}); err != nil {
 		return StartConsoleSessionResult{}, fmt.Errorf("store console token: %w", err)
 	}
@@ -1690,7 +1690,7 @@ func (s *SessionService) StartConsoleSession(ctx context.Context, input StartCon
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO sessions (
 	id,
-	issue_id,
+	task_id,
 	change_id,
 	workflow_run_id,
 	node_run_id,
@@ -1710,7 +1710,7 @@ INSERT INTO sessions (
 	updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sessionID,
-		nullableStringValue(job.IssueID),
+		nullableStringValue(job.TaskID),
 		nullableStringValue(job.ChangeID),
 		nullableStringValue(job.WorkflowRunID),
 		nullableStringValue(job.NodeRunID),
@@ -1792,15 +1792,15 @@ WHERE id = ?
 	return s.GetSession(ctx, sessionID)
 }
 
-// PauseAuthorSession abandons the issue's live author session and cancels its
-// running job so the worker slot is released until a human resumes the issue.
-func (s *SessionService) PauseAuthorSession(ctx context.Context, issueID string) (Session, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return Session{}, errors.New("issue id is required")
+// PauseAuthorSession abandons the task's live author session and cancels its
+// running job so the worker slot is released until a human resumes the task.
+func (s *SessionService) PauseAuthorSession(ctx context.Context, taskID string) (Session, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return Session{}, errors.New("task id is required")
 	}
 
-	session, ok, err := s.ActiveAuthorSessionForIssue(ctx, issueID)
+	session, ok, err := s.ActiveAuthorSessionForTask(ctx, taskID)
 	if err != nil {
 		return Session{}, err
 	}
@@ -1821,14 +1821,14 @@ SET runtime_state = ?,
 	updated_at = ?,
 	finished_at = COALESCE(finished_at, ?)
 WHERE id = ?
-	AND issue_id = ?
+	AND task_id = ?
 	AND role = ?
 	AND runtime_state IN (?, ?, ?)`,
 		string(SessionAbandoned),
 		nowText,
 		nowText,
 		session.ID,
-		issueID,
+		taskID,
 		string(flowworker.RoleAuthor),
 		string(SessionStarting),
 		string(SessionWorking),
@@ -2190,9 +2190,9 @@ WHERE id = ?`, nowText, nowText, changeID); err != nil {
 	return s.GetChange(ctx, changeID)
 }
 
-// LatestChangeForIssue returns the issue's most recent change, ready or not.
-func (s *SessionService) LatestChangeForIssue(ctx context.Context, issueID string) (Change, bool, error) {
-	changes, err := s.ListChangesForIssue(ctx, issueID, 1)
+// LatestChangeForTask returns the task's most recent change, ready or not.
+func (s *SessionService) LatestChangeForTask(ctx context.Context, taskID string) (Change, bool, error) {
+	changes, err := s.ListChangesForTask(ctx, taskID, 1)
 	if err != nil {
 		return Change{}, false, err
 	}
@@ -2298,19 +2298,19 @@ func (s *SessionService) CurrentConsole(ctx context.Context) (ConsoleState, erro
 	return state, nil
 }
 
-func (s *SessionService) CurrentIssueConsole(ctx context.Context, issueID string) (ConsoleState, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return ConsoleState{}, errors.New("issue id is required")
+func (s *SessionService) CurrentTaskConsole(ctx context.Context, taskID string) (ConsoleState, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return ConsoleState{}, errors.New("task id is required")
 	}
 	var state ConsoleState
-	if job, ok, err := s.liveIssueConsoleJob(ctx, issueID); err != nil {
+	if job, ok, err := s.liveTaskConsoleJob(ctx, taskID); err != nil {
 		return ConsoleState{}, err
 	} else if ok {
 		state.Job = &job
 		state.Active = true
 	}
-	if session, ok, err := s.activeIssueConsoleSession(ctx, issueID); err != nil {
+	if session, ok, err := s.activeTaskConsoleSession(ctx, taskID); err != nil {
 		return ConsoleState{}, err
 	} else if ok {
 		state.Session = &session
@@ -2361,15 +2361,15 @@ func (s *SessionService) ReleaseConsole(ctx context.Context) (ConsoleState, erro
 	return ConsoleState{}, nil
 }
 
-func (s *SessionService) ReleaseIssueConsole(ctx context.Context, issueID string) (ConsoleState, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return ConsoleState{}, errors.New("issue id is required")
+func (s *SessionService) ReleaseTaskConsole(ctx context.Context, taskID string) (ConsoleState, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return ConsoleState{}, errors.New("task id is required")
 	}
 	if _, err := s.ReconcileCrashedConsoleSessions(ctx); err != nil {
 		return ConsoleState{}, err
 	}
-	state, err := s.CurrentIssueConsole(ctx, issueID)
+	state, err := s.CurrentTaskConsole(ctx, taskID)
 	if err != nil {
 		return ConsoleState{}, err
 	}
@@ -2377,13 +2377,13 @@ func (s *SessionService) ReleaseIssueConsole(ctx context.Context, issueID string
 		if _, err := s.finishConsoleSession(ctx, state.Session.ID); err != nil {
 			return ConsoleState{}, err
 		}
-		return s.CurrentIssueConsole(ctx, issueID)
+		return s.CurrentTaskConsole(ctx, taskID)
 	}
 	if state.Job != nil {
 		if err := s.cancelConsoleJob(ctx, state.Job.ID); err != nil {
 			return ConsoleState{}, err
 		}
-		return s.CurrentIssueConsole(ctx, issueID)
+		return s.CurrentTaskConsole(ctx, taskID)
 	}
 
 	return ConsoleState{}, nil
@@ -2543,7 +2543,7 @@ func (s *SessionService) RevokeWorkflowRunSessionTokens(ctx context.Context, wor
 
 func (s *SessionService) GetChange(ctx context.Context, changeID string) (Change, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, issue_id, branch, base, head_sha, created_at, updated_at, ready_at, merged_at
+SELECT id, task_id, branch, base, head_sha, created_at, updated_at, ready_at, merged_at
 FROM changes
 WHERE id = ?`, strings.TrimSpace(changeID))
 
@@ -2584,28 +2584,28 @@ WHERE id = ?`,
 	return s.GetChange(ctx, changeID)
 }
 
-func (s *SessionService) HasReadyUnmergedChange(ctx context.Context, issueID string) (bool, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return false, errors.New("issue id is required")
+func (s *SessionService) HasReadyUnmergedChange(ctx context.Context, taskID string) (bool, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return false, errors.New("task id is required")
 	}
 
-	return issueHasUnmergedChange(ctx, s.db, issueID)
+	return taskHasUnmergedChange(ctx, s.db, taskID)
 }
 
-func (s *SessionService) ReadyUnmergedChangeForIssue(ctx context.Context, issueID string) (Change, bool, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return Change{}, false, errors.New("issue id is required")
+func (s *SessionService) ReadyUnmergedChangeForTask(ctx context.Context, taskID string) (Change, bool, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return Change{}, false, errors.New("task id is required")
 	}
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, issue_id, branch, base, head_sha, created_at, updated_at, ready_at, merged_at
+SELECT id, task_id, branch, base, head_sha, created_at, updated_at, ready_at, merged_at
 FROM changes
-WHERE issue_id = ?
+WHERE task_id = ?
 	AND ready_at IS NOT NULL
 	AND merged_at IS NULL
 ORDER BY updated_at DESC, created_at DESC
-LIMIT 1`, issueID)
+LIMIT 1`, taskID)
 	change, err := scanChange(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Change{}, false, nil
@@ -2617,22 +2617,22 @@ LIMIT 1`, issueID)
 	return change, true, nil
 }
 
-func (s *SessionService) ListChangesForIssue(ctx context.Context, issueID string, limit int) ([]Change, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return nil, errors.New("issue id is required")
+func (s *SessionService) ListChangesForTask(ctx context.Context, taskID string, limit int) ([]Change, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, errors.New("task id is required")
 	}
 	if limit <= 0 {
 		limit = 20
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, issue_id, branch, base, head_sha, created_at, updated_at, ready_at, merged_at
+SELECT id, task_id, branch, base, head_sha, created_at, updated_at, ready_at, merged_at
 FROM changes
-WHERE issue_id = ?
+WHERE task_id = ?
 ORDER BY updated_at DESC, created_at DESC
-LIMIT ?`, issueID, limit)
+LIMIT ?`, taskID, limit)
 	if err != nil {
-		return nil, fmt.Errorf("list issue changes: %w", err)
+		return nil, fmt.Errorf("list task changes: %w", err)
 	}
 	defer rows.Close()
 
@@ -2645,7 +2645,7 @@ LIMIT ?`, issueID, limit)
 		changes = append(changes, change)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate issue changes: %w", err)
+		return nil, fmt.Errorf("iterate task changes: %w", err)
 	}
 
 	return changes, nil
@@ -2678,33 +2678,33 @@ LIMIT 1`, jobID)
 	return session, true, nil
 }
 
-func (s *SessionService) ListSessionsForIssue(ctx context.Context, issueID string, limit int) ([]Session, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return nil, errors.New("issue id is required")
+func (s *SessionService) ListSessionsForTask(ctx context.Context, taskID string, limit int) ([]Session, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, errors.New("task id is required")
 	}
 	if limit <= 0 {
 		limit = 20
 	}
 	rows, err := s.db.QueryContext(ctx, sessionSelectSQL+`
-WHERE issue_id = ?
+WHERE task_id = ?
 ORDER BY updated_at DESC, created_at DESC, id DESC
-LIMIT ?`, issueID, limit)
+LIMIT ?`, taskID, limit)
 	if err != nil {
-		return nil, fmt.Errorf("list issue sessions: %w", err)
+		return nil, fmt.Errorf("list task sessions: %w", err)
 	}
 	return scanRows(rows, scanSession)
 }
 
-func (s *SessionService) ActiveAuthorSessionForIssue(ctx context.Context, issueID string) (Session, bool, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return Session{}, false, errors.New("issue id is required")
+func (s *SessionService) ActiveAuthorSessionForTask(ctx context.Context, taskID string) (Session, bool, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return Session{}, false, errors.New("task id is required")
 	}
 	row := s.db.QueryRowContext(ctx, `
 SELECT
 	s.id,
-	s.issue_id,
+	s.task_id,
 	s.change_id,
 	s.workflow_run_id,
 	s.node_run_id,
@@ -2726,7 +2726,7 @@ SELECT
 FROM sessions s
 JOIN jobs j ON j.id = s.job_id
 JOIN leases l ON l.id = s.lease_id
-WHERE s.issue_id = ?
+WHERE s.task_id = ?
 	AND s.role = ?
 	AND s.runtime_state IN (?, ?, ?)
 	AND j.state = ?
@@ -2734,7 +2734,7 @@ WHERE s.issue_id = ?
 	AND l.expires_at > ?
 ORDER BY s.updated_at DESC, s.created_at DESC
 LIMIT 1`,
-		issueID,
+		taskID,
 		string(flowworker.RoleAuthor),
 		string(SessionStarting),
 		string(SessionWorking),
@@ -2970,8 +2970,8 @@ WHERE token_hash = ?
 	return nil
 }
 
-func (s *SessionService) ensureChange(ctx context.Context, issueID string, branch string, base string) (Change, error) {
-	if existing, ok, err := s.changeForIssueBranch(ctx, issueID, branch); err != nil {
+func (s *SessionService) ensureChange(ctx context.Context, taskID string, branch string, base string) (Change, error) {
+	if existing, ok, err := s.changeForTaskBranch(ctx, taskID, branch); err != nil {
 		return Change{}, err
 	} else if ok {
 		if existing.Base != base {
@@ -2988,7 +2988,7 @@ func (s *SessionService) ensureChange(ctx context.Context, issueID string, branc
 	if _, err := s.db.ExecContext(ctx, `
 INSERT INTO changes (
 	id,
-	issue_id,
+	task_id,
 	branch,
 	base,
 	head_sha,
@@ -2996,13 +2996,13 @@ INSERT INTO changes (
 	updated_at
 ) VALUES (?, ?, ?, ?, '', ?, ?)`,
 		id,
-		issueID,
+		taskID,
 		branch,
 		base,
 		formatTime(now),
 		formatTime(now),
 	); err != nil {
-		if existing, ok, lookupErr := s.changeForIssueBranch(ctx, issueID, branch); lookupErr == nil && ok && existing.Base == base {
+		if existing, ok, lookupErr := s.changeForTaskBranch(ctx, taskID, branch); lookupErr == nil && ok && existing.Base == base {
 			return existing, nil
 		}
 		return Change{}, fmt.Errorf("insert change: %w", err)
@@ -3011,11 +3011,11 @@ INSERT INTO changes (
 	return s.GetChange(ctx, id)
 }
 
-func (s *SessionService) changeForIssueBranch(ctx context.Context, issueID string, branch string) (Change, bool, error) {
+func (s *SessionService) changeForTaskBranch(ctx context.Context, taskID string, branch string) (Change, bool, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, issue_id, branch, base, head_sha, created_at, updated_at, ready_at, merged_at
+SELECT id, task_id, branch, base, head_sha, created_at, updated_at, ready_at, merged_at
 FROM changes
-WHERE issue_id = ? AND branch = ?`, issueID, branch)
+WHERE task_id = ? AND branch = ?`, taskID, branch)
 	change, err := scanChange(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Change{}, false, nil
@@ -3027,20 +3027,20 @@ WHERE issue_id = ? AND branch = ?`, issueID, branch)
 	return change, true, nil
 }
 
-func (s *SessionService) hasActiveAuthorSession(ctx context.Context, issueID string) (bool, error) {
+func (s *SessionService) hasActiveAuthorSession(ctx context.Context, taskID string) (bool, error) {
 	var count int
 	if err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM sessions s
 JOIN jobs j ON j.id = s.job_id
 JOIN leases l ON l.id = s.lease_id
-WHERE s.issue_id = ?
+WHERE s.task_id = ?
 	AND s.role = ?
 	AND s.runtime_state IN (?, ?, ?)
 	AND j.state = ?
 	AND l.released_at IS NULL
 	AND l.expires_at > ?`,
-		issueID,
+		taskID,
 		string(flowworker.RoleAuthor),
 		string(SessionStarting),
 		string(SessionWorking),
@@ -3063,7 +3063,7 @@ func (s *SessionService) liveConsoleJob(ctx context.Context) (flowworker.Job, bo
 		if job.Role != flowworker.RoleConsole {
 			continue
 		}
-		if job.IssueID != nil {
+		if job.TaskID != nil {
 			continue
 		}
 		switch job.State {
@@ -3074,17 +3074,17 @@ func (s *SessionService) liveConsoleJob(ctx context.Context) (flowworker.Job, bo
 	return flowworker.Job{}, false, nil
 }
 
-func (s *SessionService) liveIssueConsoleJob(ctx context.Context, issueID string) (flowworker.Job, bool, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return flowworker.Job{}, false, errors.New("issue id is required")
+func (s *SessionService) liveTaskConsoleJob(ctx context.Context, taskID string) (flowworker.Job, bool, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return flowworker.Job{}, false, errors.New("task id is required")
 	}
 	jobs, err := s.workers.ListJobs(ctx)
 	if err != nil {
 		return flowworker.Job{}, false, err
 	}
 	for _, job := range jobs {
-		if job.Role != flowworker.RoleConsole || job.IssueID == nil || *job.IssueID != issueID {
+		if job.Role != flowworker.RoleConsole || job.TaskID == nil || *job.TaskID != taskID {
 			continue
 		}
 		switch job.State {
@@ -3098,7 +3098,7 @@ func (s *SessionService) liveIssueConsoleJob(ctx context.Context, issueID string
 func (s *SessionService) activeConsoleSession(ctx context.Context) (Session, bool, error) {
 	row := s.db.QueryRowContext(ctx, sessionSelectSQL+`
 WHERE role = ?
-	AND issue_id IS NULL
+	AND task_id IS NULL
 	AND runtime_state IN (?, ?, ?)
 ORDER BY updated_at DESC, created_at DESC, id DESC
 LIMIT 1`,
@@ -3118,19 +3118,19 @@ LIMIT 1`,
 	return session, true, nil
 }
 
-func (s *SessionService) activeIssueConsoleSession(ctx context.Context, issueID string) (Session, bool, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return Session{}, false, errors.New("issue id is required")
+func (s *SessionService) activeTaskConsoleSession(ctx context.Context, taskID string) (Session, bool, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return Session{}, false, errors.New("task id is required")
 	}
 	row := s.db.QueryRowContext(ctx, sessionSelectSQL+`
 WHERE role = ?
-	AND issue_id = ?
+	AND task_id = ?
 	AND runtime_state IN (?, ?, ?)
 ORDER BY updated_at DESC, created_at DESC, id DESC
 LIMIT 1`,
 		string(flowworker.RoleConsole),
-		issueID,
+		taskID,
 		string(SessionStarting),
 		string(SessionWorking),
 		string(SessionWaiting),
@@ -3205,21 +3205,21 @@ WHERE id = ?
 	return nil
 }
 
-// ActiveAuthorSessionState reports the runtime state of the issue's live author
+// ActiveAuthorSessionState reports the runtime state of the task's live author
 // session, if one exists. It is the exported entry point the lifecycle engine
 // uses to derive the planning / authoring phases.
-func (s *SessionService) ActiveAuthorSessionState(ctx context.Context, issueID string) (SessionRuntimeState, bool, error) {
-	return activeSessionStateForIssue(ctx, s.db, issueID)
+func (s *SessionService) ActiveAuthorSessionState(ctx context.Context, taskID string) (SessionRuntimeState, bool, error) {
+	return activeSessionStateForTask(ctx, s.db, taskID)
 }
 
-func activeSessionStateForIssue(ctx context.Context, db *sql.DB, issueID string) (SessionRuntimeState, bool, error) {
+func activeSessionStateForTask(ctx context.Context, db *sql.DB, taskID string) (SessionRuntimeState, bool, error) {
 	var state string
 	if err := db.QueryRowContext(ctx, `
 SELECT s.runtime_state
 FROM sessions s
 JOIN jobs j ON j.id = s.job_id
 JOIN leases l ON l.id = s.lease_id
-WHERE s.issue_id = ?
+WHERE s.task_id = ?
 	AND s.role = ?
 	AND s.runtime_state IN (?, ?, ?)
 	AND j.state = ?
@@ -3227,7 +3227,7 @@ WHERE s.issue_id = ?
 	AND l.expires_at > ?
 ORDER BY s.updated_at DESC
 LIMIT 1`,
-		issueID,
+		taskID,
 		string(flowworker.RoleAuthor),
 		string(SessionStarting),
 		string(SessionWorking),
@@ -3244,21 +3244,21 @@ LIMIT 1`,
 	return SessionRuntimeState(state), true, nil
 }
 
-func issueHasUnmergedChange(ctx context.Context, db *sql.DB, issueID string) (bool, error) {
+func taskHasUnmergedChange(ctx context.Context, db *sql.DB, taskID string) (bool, error) {
 	var count int
 	if err := db.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM changes
-WHERE issue_id = ?
+WHERE task_id = ?
 	AND ready_at IS NOT NULL
-	AND merged_at IS NULL`, issueID).Scan(&count); err != nil {
+	AND merged_at IS NULL`, taskID).Scan(&count); err != nil {
 		return false, fmt.Errorf("check ready unmerged change: %w", err)
 	}
 
 	return count > 0, nil
 }
 
-func scanChange(scanner issueScanner) (Change, error) {
+func scanChange(scanner taskScanner) (Change, error) {
 	var change Change
 	var createdAt string
 	var updatedAt string
@@ -3266,7 +3266,7 @@ func scanChange(scanner issueScanner) (Change, error) {
 	var mergedAt sql.NullString
 	if err := scanner.Scan(
 		&change.ID,
-		&change.IssueID,
+		&change.TaskID,
 		&change.Branch,
 		&change.Base,
 		&change.HeadSHA,
@@ -3310,7 +3310,7 @@ func scanChange(scanner issueScanner) (Change, error) {
 const sessionSelectSQL = `
 SELECT
 	id,
-	issue_id,
+	task_id,
 	change_id,
 	workflow_run_id,
 	node_run_id,
@@ -3331,9 +3331,9 @@ SELECT
 	finished_at
 FROM sessions`
 
-func scanSession(scanner issueScanner) (Session, error) {
+func scanSession(scanner taskScanner) (Session, error) {
 	var session Session
-	var issueID sql.NullString
+	var taskID sql.NullString
 	var changeID sql.NullString
 	var workflowRunID sql.NullString
 	var nodeRunID sql.NullString
@@ -3346,7 +3346,7 @@ func scanSession(scanner issueScanner) (Session, error) {
 	var finishedAt sql.NullString
 	if err := scanner.Scan(
 		&session.ID,
-		&issueID,
+		&taskID,
 		&changeID,
 		&workflowRunID,
 		&nodeRunID,
@@ -3368,8 +3368,8 @@ func scanSession(scanner issueScanner) (Session, error) {
 	); err != nil {
 		return Session{}, fmt.Errorf("scan session: %w", err)
 	}
-	if issueID.Valid {
-		session.IssueID = strings.TrimSpace(issueID.String)
+	if taskID.Valid {
+		session.TaskID = strings.TrimSpace(taskID.String)
 	}
 	if changeID.Valid {
 		session.ChangeID = strings.TrimSpace(changeID.String)
@@ -3487,39 +3487,39 @@ func copyPayload(payload map[string]any) map[string]any {
 	return copied
 }
 
-// IssueImageAttachment is the attachment descriptor the coordinator stamps onto
+// TaskImageAttachment is the attachment descriptor the coordinator stamps onto
 // an author job payload so the worker can materialize the image bytes in the
 // worktree. It deliberately carries only the attachment ID and filename (not the
 // content type or bytes): the coordinator already filtered to image types via
 // IsImageContentType, and the worker downloads the bytes from the exchange.
 // Every agent harness receives this list; whether the bytes become a CLI flag
 // is a worker-side, harness-specific concern.
-type IssueImageAttachment struct {
+type TaskImageAttachment struct {
 	ID       string `json:"id"`
 	Filename string `json:"filename"`
 }
 
-// stampImageAttachments loads an issue's attachments, filters to image content
+// stampImageAttachments loads an task's attachments, filters to image content
 // types, and stamps the resulting {id, filename} descriptors onto the author
 // payload under image_attachments. It is agent-agnostic: the worker
 // materializes the bytes for any harness, and only the harness CLI gets
-// --image flags. A nil attachment store (no issue service) is tolerated by
+// --image flags. A nil attachment store (no task service) is tolerated by
 // stamping an empty list so the payload shape is stable.
-func stampImageAttachments(ctx context.Context, issues *IssueService, payload map[string]any, issueID string) error {
+func stampImageAttachments(ctx context.Context, tasks *TaskService, payload map[string]any, taskID string) error {
 	if payload == nil {
 		return nil
 	}
-	descriptors := []IssueImageAttachment{}
-	if issues != nil {
-		attachments, err := issues.ListIssueAttachments(ctx, issueID)
+	descriptors := []TaskImageAttachment{}
+	if tasks != nil {
+		attachments, err := tasks.ListTaskAttachments(ctx, taskID)
 		if err != nil {
-			return fmt.Errorf("load issue attachments: %w", err)
+			return fmt.Errorf("load task attachments: %w", err)
 		}
 		for _, attachment := range attachments {
 			if !IsImageContentType(attachment.ContentType) {
 				continue
 			}
-			descriptors = append(descriptors, IssueImageAttachment{
+			descriptors = append(descriptors, TaskImageAttachment{
 				ID:       attachment.ID,
 				Filename: attachment.Filename,
 			})
@@ -3537,8 +3537,8 @@ func defaultAuthorEntrypoint() map[string]any {
 	return entrypoint
 }
 
-func issueBranch(issueID string) string {
-	return "issue/" + strings.TrimSpace(issueID)
+func taskBranch(taskID string) string {
+	return "task/" + strings.TrimSpace(taskID)
 }
 
 func terminalLoginPath(sessionID string, token string) string {

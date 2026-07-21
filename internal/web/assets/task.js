@@ -1,6 +1,6 @@
-// Issue attachment helpers: forms, lists, and the upload action.
+// Task attachment helpers: forms, lists, and the upload action.
 
-import { apiPostForm, attachmentHref, isImageContentType, issueAPIBase } from "./api.js";
+import { apiPostForm, attachmentHref, isImageContentType, taskAPIBase } from "./api.js";
 import { formatBytes } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
@@ -10,9 +10,9 @@ export function projectButtonAttr(projectID) {
   return id ? ` data-project="${escapeAttr(id)}"` : "";
 }
 
-export function renderAttachmentUploadForm(issueID, projectID) {
+export function renderAttachmentUploadForm(taskID, projectID) {
   return `
-    <form class="attachment-upload" data-attachment-form data-issue="${escapeAttr(issueID)}"${projectButtonAttr(projectID)}>
+    <form class="attachment-upload" data-attachment-form data-task="${escapeAttr(taskID)}"${projectButtonAttr(projectID)}>
       <label>
         <span>Stage</span>
         <select name="stage">
@@ -33,13 +33,13 @@ export function renderAttachmentUploadForm(issueID, projectID) {
   `;
 }
 
-export function renderIssueAttachment(attachment, issueID, projectID) {
+export function renderTaskAttachment(attachment, taskID, projectID) {
   const id = value(attachment, "id", "ID");
   const filename = value(attachment, "filename", "Filename") || id;
   const contentType = value(attachment, "content_type", "ContentType") || "application/octet-stream";
   const stage = value(attachment, "stage", "Stage") || "initial";
   const sizeBytes = Number(value(attachment, "size_bytes", "SizeBytes") || 0);
-  const viewHref = attachmentHref(projectID, issueID, id);
+  const viewHref = attachmentHref(projectID, taskID, id);
   const downloadHref = `${viewHref}?download=1`;
   const meta = `${stage} · ${formatBytes(sizeBytes)} · ${contentType}`;
   const imageHTML = isImageContentType(contentType)
@@ -59,12 +59,12 @@ export function renderIssueAttachment(attachment, issueID, projectID) {
   `;
 }
 
-export async function uploadIssueAttachment(projectID, issueID, file, stage) {
+export async function uploadTaskAttachment(projectID, taskID, file, stage) {
   if (!file) {
     throw new Error("File is required");
   }
   const body = new FormData();
   body.set("stage", stage || "initial");
   body.set("file", file, file.name || "attachment");
-  return apiPostForm(`${issueAPIBase(projectID)}/${encodeURIComponent(issueID)}/attachments`, body);
+  return apiPostForm(`${taskAPIBase(projectID)}/${encodeURIComponent(taskID)}/attachments`, body);
 }

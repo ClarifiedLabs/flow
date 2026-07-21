@@ -875,7 +875,7 @@ func (s *projectServer) suppressNativeHookStateLoop(ctx context.Context, princip
 		s.transitions == nil {
 		return false
 	}
-	transitions, err := s.transitions.RecentSessionStateTransitions(ctx, session.IssueID, session.ID, time.Now().UTC().Add(-nativeHookStateLoopWindow), nativeHookStateLoopTransitionLimit)
+	transitions, err := s.transitions.RecentSessionStateTransitions(ctx, session.TaskID, session.ID, time.Now().UTC().Add(-nativeHookStateLoopWindow), nativeHookStateLoopTransitionLimit)
 	if err != nil {
 		slog.Warn("native hook state loop detection failed", "session_id", session.ID, "error", err)
 		return false
@@ -923,7 +923,7 @@ func (s *projectServer) writeNativeHookStateLoopStatus(ctx context.Context, prin
 		return nil
 	}
 	_, err = s.status.Write(ctx, coordinator.WriteStatusInput{
-		IssueID:   session.IssueID,
+		TaskID:    session.TaskID,
 		ChangeID:  session.ChangeID,
 		SessionID: session.ID,
 		Actor:     principal.Actor(),
@@ -957,7 +957,7 @@ func (s *projectServer) handleSessionStatus(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if session.Role == flowworker.RoleConsole {
-		writeError(w, http.StatusBadRequest, "status_failed", "flow status is issue-scoped and unsupported in Console")
+		writeError(w, http.StatusBadRequest, "status_failed", "flow status is task-scoped and unsupported in Console")
 		return
 	}
 

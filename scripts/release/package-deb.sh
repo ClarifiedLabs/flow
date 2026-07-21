@@ -36,8 +36,8 @@ Architecture: ${deb_arch}
 Maintainer: Clarified Labs <opensource@clarifiedlabs.com>
 Installed-Size: ${installed_size}
 Homepage: https://github.com/ClarifiedLabs/flow
-Description: Local coordinator for issue-driven agent work
- Flow is a local coordinator for issue-driven agent work. It keeps durable state
+Description: Local coordinator for task-driven agent work
+ Flow is a local coordinator for task-driven agent work. It keeps durable state
  in SQLite, uses a private git exchange remote for worker branches, and exposes a CLI and browser UI.
 CONTROL
 

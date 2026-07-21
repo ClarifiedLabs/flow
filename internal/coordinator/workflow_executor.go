@@ -20,7 +20,7 @@ type WorkflowExecutor struct {
 	db           *sql.DB
 	runs         *WorkflowRunService
 	artifacts    *WorkflowArtifactService
-	issues       *IssueService
+	tasks        *TaskService
 	checks       *CheckService
 	checkConfigs *CheckConfigService
 	sessions     *SessionService
@@ -37,7 +37,7 @@ type WorkflowExecutorOptions struct {
 	Database     *sql.DB
 	Runs         *WorkflowRunService
 	Artifacts    *WorkflowArtifactService
-	Issues       *IssueService
+	Tasks        *TaskService
 	Checks       *CheckService
 	CheckConfigs *CheckConfigService
 	Sessions     *SessionService
@@ -49,17 +49,17 @@ type WorkflowExecutorOptions struct {
 
 func NewWorkflowExecutor(opts WorkflowExecutorOptions) *WorkflowExecutor {
 	executor := &WorkflowExecutor{
-		db: opts.Database, runs: opts.Runs, artifacts: opts.Artifacts, issues: opts.Issues,
+		db: opts.Database, runs: opts.Runs, artifacts: opts.Artifacts, tasks: opts.Tasks,
 		checks: opts.Checks, checkConfigs: opts.CheckConfigs, sessions: opts.Sessions,
 		merges: opts.Merges, queue: opts.Queue, project: opts.Project, harnessArgs: opts.HarnessArgs,
 	}
 	executor.handlers = map[NodeKind]workflowNodeHandler{
-		NodeAgent:               executor.handleAgent,
-		NodeAutomatedChecks:     executor.handleAutomatedChecks,
-		NodeChangeReview:        executor.handleChangeReview,
-		NodeVerifyChange:        executor.handleVerifyChange,
-		NodeMaterializeIssueSet: executor.handleMaterializeIssueSet,
-		NodeMergeChange:         executor.handleMergeChange,
+		NodeAgent:              executor.handleAgent,
+		NodeAutomatedChecks:    executor.handleAutomatedChecks,
+		NodeChangeReview:       executor.handleChangeReview,
+		NodeVerifyChange:       executor.handleVerifyChange,
+		NodeMaterializeTaskSet: executor.handleMaterializeTaskSet,
+		NodeMergeChange:        executor.handleMergeChange,
 	}
 	return executor
 }
@@ -152,7 +152,7 @@ SELECT COUNT(*) FROM jobs WHERE node_run_id = ? AND role = ? AND state = ?`,
 		return false, e.runs.waitForAgentCrashLimit(ctx, nodeRun.ID, crashedAttempts)
 	}
 
-	issueID := run.IssueID
+	taskID := run.TaskID
 	var changeID *string
 	branch := ""
 	base := strings.TrimSpace(e.project.BaseBranch)
@@ -185,7 +185,7 @@ SELECT COUNT(*) FROM jobs WHERE node_run_id = ? AND role = ? AND state = ?`,
 		"exchange_url": e.project.ExchangeURL,
 	}
 	_, err = e.queue.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		IssueID: &issueID, ChangeID: changeID, WorkflowRunID: &run.ID, NodeRunID: &nodeRun.ID,
+		TaskID: &taskID, ChangeID: changeID, WorkflowRunID: &run.ID, NodeRunID: &nodeRun.ID,
 		Role: flowworker.RoleAuthor, CapacityBucket: flowworker.BucketPersistentAgent,
 		Priority: 0, Requires: []string{flowharness.AgentHarnessLabel(harness)}, Payload: payload,
 	})
@@ -206,7 +206,7 @@ func (e *WorkflowExecutor) changeForAgentNode(ctx context.Context, run WorkflowR
 			return Change{}, err
 		}
 	}
-	branch := fmt.Sprintf("issue/%s/run-%d", run.IssueID, run.RunSequence)
+	branch := fmt.Sprintf("task/%s/run-%d", run.TaskID, run.RunSequence)
 	var existingID string
 	err := e.db.QueryRowContext(ctx, `
 SELECT id FROM changes WHERE workflow_run_id = ? ORDER BY created_at DESC LIMIT 1`, run.ID).Scan(&existingID)
@@ -222,8 +222,8 @@ SELECT id FROM changes WHERE workflow_run_id = ? ORDER BY created_at DESC LIMIT 
 	}
 	now := sqlitex.FormatTime(sqlitex.UTCNow())
 	if _, err := e.db.ExecContext(ctx, `
-INSERT INTO changes (id, issue_id, workflow_run_id, branch, base, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)`, id, run.IssueID, run.ID, branch, base, now, now); err != nil {
+INSERT INTO changes (id, task_id, workflow_run_id, branch, base, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)`, id, run.TaskID, run.ID, branch, base, now, now); err != nil {
 		return Change{}, err
 	}
 	return e.sessions.GetChange(ctx, id)
@@ -265,11 +265,11 @@ func (e *WorkflowExecutor) handleChecks(ctx context.Context, run WorkflowRun, no
 	if err != nil {
 		return false, err
 	}
-	issue, err := e.issues.GetIssue(ctx, run.IssueID)
+	task, err := e.tasks.GetTask(ctx, run.TaskID)
 	if err != nil {
 		return false, err
 	}
-	names, err := e.checkConfigs.ScheduleWorkflowNodeChecks(ctx, issue, change, mode, agents, run.ID, nodeRun.ID)
+	names, err := e.checkConfigs.ScheduleWorkflowNodeChecks(ctx, task, change, mode, agents, run.ID, nodeRun.ID)
 	if err != nil {
 		return false, err
 	}
@@ -277,7 +277,7 @@ func (e *WorkflowExecutor) handleChecks(ctx context.Context, run WorkflowRun, no
 		_, err := e.runs.CompleteNode(ctx, CompleteWorkflowNodeInput{NodeRunID: nodeRun.ID, Outcome: successOutcome, Actor: ActorSystem})
 		return err == nil, err
 	}
-	checks, err := e.checks.ListChecks(ctx, run.IssueID)
+	checks, err := e.checks.ListChecks(ctx, run.TaskID)
 	if err != nil {
 		return false, err
 	}
@@ -308,8 +308,8 @@ func (e *WorkflowExecutor) handleChecks(ctx context.Context, run WorkflowRun, no
 	return err == nil, err
 }
 
-func (e *WorkflowExecutor) handleMaterializeIssueSet(ctx context.Context, run WorkflowRun, nodeRun WorkflowNodeRun, node FlowNodeSnapshot) (bool, error) {
-	if node.Config.MaterializeIssueSet == nil {
+func (e *WorkflowExecutor) handleMaterializeTaskSet(ctx context.Context, run WorkflowRun, nodeRun WorkflowNodeRun, node FlowNodeSnapshot) (bool, error) {
+	if node.Config.MaterializeTaskSet == nil {
 		return false, errors.New("materialize node is missing configuration")
 	}
 	if nodeRun.State == WorkflowNodeQueued {
@@ -317,13 +317,13 @@ func (e *WorkflowExecutor) handleMaterializeIssueSet(ctx context.Context, run Wo
 			return false, err
 		}
 	}
-	result, replayed, err := e.artifacts.MaterializeIssueSet(ctx, nodeRun.InputArtifactID, *node.Config.MaterializeIssueSet)
+	result, replayed, err := e.artifacts.MaterializeTaskSet(ctx, nodeRun.InputArtifactID, *node.Config.MaterializeTaskSet)
 	if err != nil {
 		return false, err
 	}
 	_, err = e.runs.CompleteNode(ctx, CompleteWorkflowNodeInput{
 		NodeRunID: nodeRun.ID, Outcome: "completed", Actor: ActorSystem,
-		Payload: map[string]any{"issue_ids": result.IssueIDs, "replayed": replayed},
+		Payload: map[string]any{"task_ids": result.TaskIDs, "replayed": replayed},
 	})
 	return err == nil, err
 }

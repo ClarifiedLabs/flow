@@ -13,60 +13,60 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/worker"
 )
 
-func (s *projectServer) buildUIIssueCards(ctx context.Context, issues []coordinator.Issue) (map[string]uiIssueCard, error) {
-	if len(issues) == 0 {
+func (s *projectServer) buildUITaskCards(ctx context.Context, tasks []coordinator.Task) (map[string]uiTaskCard, error) {
+	if len(tasks) == 0 {
 		return nil, nil
 	}
 
-	terminalJobs, err := s.uiTerminalJobsByIssue(ctx, issues)
+	terminalJobs, err := s.uiTerminalJobsByTask(ctx, tasks)
 	if err != nil {
 		return nil, err
 	}
 
-	cards := make(map[string]uiIssueCard, len(issues))
-	for _, issue := range issues {
-		card := uiIssueCard{IssueID: issue.ID}
-		tags, err := s.issues.TagsForIssue(ctx, issue.ID)
+	cards := make(map[string]uiTaskCard, len(tasks))
+	for _, task := range tasks {
+		card := uiTaskCard{TaskID: task.ID}
+		tags, err := s.tasks.TagsForTask(ctx, task.ID)
 		if err != nil {
-			return nil, fmt.Errorf("load tags for %s: %w", issue.ID, err)
+			return nil, fmt.Errorf("load tags for %s: %w", task.ID, err)
 		}
 		card.Tags = tags
-		relations, err := s.issues.RelationsForIssue(ctx, issue.ID)
+		relations, err := s.tasks.RelationsForTask(ctx, task.ID)
 		if err != nil {
-			return nil, fmt.Errorf("load relations for %s: %w", issue.ID, err)
+			return nil, fmt.Errorf("load relations for %s: %w", task.ID, err)
 		}
-		card.Relations = uiRelationSummaryFromRelations(issue.ID, relations)
+		card.Relations = uiRelationSummaryFromRelations(task.ID, relations)
 		if s.sessions != nil {
-			active, ok, err := s.sessions.ActiveAuthorSessionForIssue(ctx, issue.ID)
+			active, ok, err := s.sessions.ActiveAuthorSessionForTask(ctx, task.ID)
 			if err != nil {
-				return nil, fmt.Errorf("load active session for %s: %w", issue.ID, err)
+				return nil, fmt.Errorf("load active session for %s: %w", task.ID, err)
 			}
 			if ok {
 				summary, err := s.uiSessionSummaryWithTerminal(ctx, active)
 				if err != nil {
-					return nil, fmt.Errorf("load terminal availability for %s: %w", issue.ID, err)
+					return nil, fmt.Errorf("load terminal availability for %s: %w", task.ID, err)
 				}
 				card.ActiveSession = summary
 				card.TerminalAvailable = summary.TerminalAvailable
 				if active.ChangeID != "" {
 					change, err := s.sessions.GetChange(ctx, active.ChangeID)
 					if err != nil {
-						return nil, fmt.Errorf("load active change for %s: %w", issue.ID, err)
+						return nil, fmt.Errorf("load active change for %s: %w", task.ID, err)
 					}
 					card.Change = uiChangeSummaryFromChange(change)
 					if err := s.applyHandoffSummary(ctx, &card, change); err != nil {
-						return nil, fmt.Errorf("load handoff summary for %s: %w", issue.ID, err)
+						return nil, fmt.Errorf("load handoff summary for %s: %w", task.ID, err)
 					}
 				}
 			}
-			readyChange, ok, err := s.sessions.ReadyUnmergedChangeForIssue(ctx, issue.ID)
+			readyChange, ok, err := s.sessions.ReadyUnmergedChangeForTask(ctx, task.ID)
 			if err != nil {
-				return nil, fmt.Errorf("load ready change for %s: %w", issue.ID, err)
+				return nil, fmt.Errorf("load ready change for %s: %w", task.ID, err)
 			}
 			if ok {
 				card.Change = uiChangeSummaryFromChange(readyChange)
 				if err := s.applyHandoffSummary(ctx, &card, readyChange); err != nil {
-					return nil, fmt.Errorf("load handoff summary for %s: %w", issue.ID, err)
+					return nil, fmt.Errorf("load handoff summary for %s: %w", task.ID, err)
 				}
 				stats, unavailableReason, err := s.changeDiffStats(ctx, readyChange, false)
 				if err != nil {
@@ -84,50 +84,50 @@ func (s *projectServer) buildUIIssueCards(ctx context.Context, issues []coordina
 			}
 		}
 		if s.checks != nil {
-			checks, err := s.checks.ListChecks(ctx, issue.ID)
+			checks, err := s.checks.ListChecks(ctx, task.ID)
 			if err != nil {
-				return nil, fmt.Errorf("load checks for %s: %w", issue.ID, err)
+				return nil, fmt.Errorf("load checks for %s: %w", task.ID, err)
 			}
 			card.RequiredChecks = uiRequiredCheckSummaryFromChecks(checks)
-			reviewState, err := s.checks.ReviewState(ctx, issue.ID)
+			reviewState, err := s.checks.ReviewState(ctx, task.ID)
 			if err != nil {
-				return nil, fmt.Errorf("load review state for %s: %w", issue.ID, err)
+				return nil, fmt.Errorf("load review state for %s: %w", task.ID, err)
 			}
 			card.ReviewState = reviewState
 		}
 		if s.status != nil {
-			statusLog, err := s.status.ListForIssue(ctx, issue.ID, 1)
+			statusLog, err := s.status.ListForTask(ctx, task.ID, 1)
 			if err != nil {
-				return nil, fmt.Errorf("load latest status for %s: %w", issue.ID, err)
+				return nil, fmt.Errorf("load latest status for %s: %w", task.ID, err)
 			}
 			if len(statusLog) > 0 {
 				card.LatestStatus = &statusLog[0]
 			}
 		}
-		blockers, err := s.issues.UnresolvedBlockers(ctx, issue.ID)
+		blockers, err := s.tasks.UnresolvedBlockers(ctx, task.ID)
 		if err != nil {
-			return nil, fmt.Errorf("load blockers for %s: %w", issue.ID, err)
+			return nil, fmt.Errorf("load blockers for %s: %w", task.ID, err)
 		}
-		card.Blockers = uiBlockerSummaryFromIssues(blockers)
-		card.BlockingReason = uiBlockingReason(issue, card)
-		card.PrimaryAction = uiPrimaryAction(issue, card)
-		if jobID, ok := terminalJobs[issue.ID]; ok {
+		card.Blockers = uiBlockerSummaryFromTasks(blockers)
+		card.BlockingReason = uiBlockingReason(task, card)
+		card.PrimaryAction = uiPrimaryAction(task, card)
+		if jobID, ok := terminalJobs[task.ID]; ok {
 			card.TerminalJobID = jobID
 			card.TerminalAvailable = true
 		}
-		cards[issue.ID] = card
+		cards[task.ID] = card
 	}
 
 	return cards, nil
 }
 
-func (s *projectServer) uiTerminalJobsByIssue(ctx context.Context, issues []coordinator.Issue) (map[string]string, error) {
-	if len(issues) == 0 || s.workers == nil || s.sessions == nil {
+func (s *projectServer) uiTerminalJobsByTask(ctx context.Context, tasks []coordinator.Task) (map[string]string, error) {
+	if len(tasks) == 0 || s.workers == nil || s.sessions == nil {
 		return nil, nil
 	}
-	issueIDs := make(map[string]bool, len(issues))
-	for _, issue := range issues {
-		issueIDs[issue.ID] = true
+	taskIDs := make(map[string]bool, len(tasks))
+	for _, task := range tasks {
+		taskIDs[task.ID] = true
 	}
 	jobs, err := s.workers.ListJobs(ctx)
 	if err != nil {
@@ -135,10 +135,10 @@ func (s *projectServer) uiTerminalJobsByIssue(ctx context.Context, issues []coor
 	}
 	terminalJobs := map[string]string{}
 	for _, job := range jobs {
-		if job.IssueID == nil || !issueIDs[*job.IssueID] {
+		if job.TaskID == nil || !taskIDs[*job.TaskID] {
 			continue
 		}
-		if _, exists := terminalJobs[*job.IssueID]; exists {
+		if _, exists := terminalJobs[*job.TaskID]; exists {
 			continue
 		}
 		available, err := s.sessions.JobTerminalAvailable(ctx, job.ID)
@@ -146,14 +146,14 @@ func (s *projectServer) uiTerminalJobsByIssue(ctx context.Context, issues []coor
 			return nil, fmt.Errorf("load job terminal availability %s: %w", job.ID, err)
 		}
 		if available {
-			terminalJobs[*job.IssueID] = job.ID
+			terminalJobs[*job.TaskID] = job.ID
 		}
 	}
 
 	return terminalJobs, nil
 }
 
-func (s *projectServer) applyHandoffSummary(ctx context.Context, card *uiIssueCard, change coordinator.Change) error {
+func (s *projectServer) applyHandoffSummary(ctx context.Context, card *uiTaskCard, change coordinator.Change) error {
 	if s.reconciler == nil {
 		return nil
 	}
@@ -237,13 +237,13 @@ func uiRequiredCheckSummaryFromChecks(checks []coordinator.Check) uiRequiredChec
 	return summary
 }
 
-func uiBlockerSummaryFromIssues(blockers []coordinator.Issue) uiBlockerSummary {
+func uiBlockerSummaryFromTasks(blockers []coordinator.Task) uiBlockerSummary {
 	summary := uiBlockerSummary{Count: len(blockers)}
 	for i, blocker := range blockers {
 		if i >= 3 {
 			break
 		}
-		summary.Issues = append(summary.Issues, uiBlockerIssueSummary{
+		summary.Tasks = append(summary.Tasks, uiBlockerTaskSummary{
 			ID:    blocker.ID,
 			Title: blocker.Title,
 		})
@@ -252,22 +252,22 @@ func uiBlockerSummaryFromIssues(blockers []coordinator.Issue) uiBlockerSummary {
 	return summary
 }
 
-func uiRelationSummaryFromRelations(issueID string, relations []coordinator.IssueRelation) uiRelationSummary {
+func uiRelationSummaryFromRelations(taskID string, relations []coordinator.TaskRelation) uiRelationSummary {
 	summary := uiRelationSummary{Total: len(relations)}
 	for _, relation := range relations {
-		source := strings.TrimSpace(relation.SourceIssueID)
-		target := strings.TrimSpace(relation.TargetIssueID)
+		source := strings.TrimSpace(relation.SourceTaskID)
+		target := strings.TrimSpace(relation.TargetTaskID)
 		switch relation.Kind {
 		case coordinator.RelationParentOf:
-			if source == issueID {
+			if source == taskID {
 				summary.Children++
-			} else if target == issueID {
+			} else if target == taskID {
 				summary.Parents++
 			}
 		case coordinator.RelationBlocks:
-			if source == issueID {
+			if source == taskID {
 				summary.Blocks++
-			} else if target == issueID {
+			} else if target == taskID {
 				summary.BlockedBy++
 			}
 		case coordinator.RelationRelatedTo:
@@ -278,14 +278,14 @@ func uiRelationSummaryFromRelations(issueID string, relations []coordinator.Issu
 	return summary
 }
 
-func uiBlockingReason(_ coordinator.Issue, card uiIssueCard) string {
+func uiBlockingReason(_ coordinator.Task, card uiTaskCard) string {
 	if card.Blockers.Count > 0 {
-		return "blocked by issue"
+		return "blocked by task"
 	}
 	return ""
 }
 
-func uiPrimaryAction(_ coordinator.Issue, card uiIssueCard) string {
+func uiPrimaryAction(_ coordinator.Task, card uiTaskCard) string {
 	if card.ActiveSession != nil {
 		if card.ActiveSession.State == coordinator.SessionWaiting {
 			return "respond"

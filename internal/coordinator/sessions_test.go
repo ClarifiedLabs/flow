@@ -25,7 +25,7 @@ func TestConsoleSessionLifecycle(t *testing.T) {
 	if ensured.Existing {
 		t.Fatal("first console job was marked existing")
 	}
-	if ensured.Job.Role != flowworker.RoleConsole || ensured.Job.IssueID != nil || ensured.Job.ChangeID != nil {
+	if ensured.Job.Role != flowworker.RoleConsole || ensured.Job.TaskID != nil || ensured.Job.ChangeID != nil {
 		t.Fatalf("console job = %+v", ensured.Job)
 	}
 	if payloadString(ensured.Job.Payload, "branch") != fixture.project.BaseBranch || payloadString(ensured.Job.Payload, "base") != fixture.project.BaseBranch {
@@ -92,14 +92,14 @@ func TestConsoleSessionLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start console session: %v", err)
 	}
-	if started.Session.Role != flowworker.RoleConsole || started.Session.IssueID != "" || started.Session.ChangeID != "" {
+	if started.Session.Role != flowworker.RoleConsole || started.Session.TaskID != "" || started.Session.ChangeID != "" {
 		t.Fatalf("started console session = %+v", started.Session)
 	}
 	principal, err := credentials.Authenticate(ctx, started.Token)
 	if err != nil {
 		t.Fatalf("authenticate console token: %v", err)
 	}
-	if principal.Scope != TokenScopeConsole || principal.Subject != started.Session.ID || principal.ProjectID == nil || *principal.ProjectID != fixture.project.ID || principal.SourceIssueID != nil {
+	if principal.Scope != TokenScopeConsole || principal.Subject != started.Session.ID || principal.ProjectID == nil || *principal.ProjectID != fixture.project.ID || principal.SourceTaskID != nil {
 		t.Fatalf("console principal = %+v", principal)
 	}
 	waiting, err := sessions.UpdateConsoleSessionState(ctx, started.Session.ID, SessionWaiting)
@@ -282,14 +282,14 @@ WHERE id = ?`, formatTime(time.Now().UTC().Add(-time.Minute)), claimed.Lease.ID)
 	}
 }
 
-// sessionFixture wires a project database (issues, changes, sessions, jobs,
+// sessionFixture wires a project database (tasks, changes, sessions, jobs,
 // leases) together with the coordinator-wide global database (projects,
 // workers, tokens) so author sessions can mint project-scoped session tokens.
 type sessionFixture struct {
 	store        *flowdb.Store
 	global       *flowdb.Store
 	sessions     *SessionService
-	issues       *IssueService
+	tasks        *TaskService
 	workers      *flowworker.Service
 	directory    *flowworker.Directory
 	credentials  *CredentialService
@@ -332,7 +332,7 @@ func newSessionServiceFixture(t *testing.T) sessionFixture {
 		t.Fatalf("insert project: %v", err)
 	}
 
-	issues := NewIssueService(store.DB())
+	tasks := NewTaskService(store.DB())
 	workers := flowworker.NewService(store.DB())
 	credentials := NewCredentialService(global.DB())
 	directory := flowworker.NewDirectory(global.DB())
@@ -340,7 +340,7 @@ func newSessionServiceFixture(t *testing.T) sessionFixture {
 	threads := NewThreadService(store.DB())
 	checkConfigs := NewCheckConfigServiceWithOptions(store.DB(), checks, workers, threads, project, CheckConfigServiceOptions{})
 	reconciler := NewReconcileService(store.DB())
-	sessions := NewSessionServiceWithOptions(store.DB(), issues, workers, SessionServiceOptions{
+	sessions := NewSessionServiceWithOptions(store.DB(), tasks, workers, SessionServiceOptions{
 		Credentials:      credentials,
 		Project:          project,
 		HandoffSnapshots: reconciler,
@@ -350,7 +350,7 @@ func newSessionServiceFixture(t *testing.T) sessionFixture {
 		store:        store,
 		global:       global,
 		sessions:     sessions,
-		issues:       issues,
+		tasks:        tasks,
 		workers:      workers,
 		directory:    directory,
 		credentials:  credentials,
