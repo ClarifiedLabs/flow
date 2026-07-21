@@ -688,6 +688,37 @@ func tmuxConfigForJob(cfg config.WorkerConfig, jobID string) (config.WorkerConfi
 	return cfg, nil
 }
 
+// tmuxRuntimeRoot returns the deterministic, short runtime directory shared by
+// this user's per-job tmux servers. Keeping it directly below /tmp prevents a
+// long worker work_dir or inherited TMPDIR from overflowing sockaddr_un.sun_path.
+// Reusing a valid directory is intentional: deterministic socket paths let the
+// worker reap servers left behind after a crash.
+func tmuxRuntimeRoot() (string, error) {
+	root := filepath.Join("/tmp", fmt.Sprintf("flow-job-tmux-%d", os.Getuid()))
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", fmt.Errorf("create tmux runtime directory: %w", err)
+	}
+
+	info, err := os.Lstat(root)
+	if err != nil {
+		return "", fmt.Errorf("inspect tmux runtime directory: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("tmux runtime path %q is not a directory", root)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", fmt.Errorf("inspect tmux runtime directory owner: unsupported file info for %q", root)
+	}
+	if stat.Uid != uint32(os.Geteuid()) {
+		return "", fmt.Errorf("tmux runtime directory %q is owned by uid %d, want %d", root, stat.Uid, os.Geteuid())
+	}
+	if permissions := info.Mode().Perm(); permissions != 0o700 {
+		return "", fmt.Errorf("tmux runtime directory %q has permissions %04o, want 0700", root, permissions)
+	}
+	return root, nil
+}
+
 func tmuxSocketPathForJob(cfg config.WorkerConfig, jobID string) (string, error) {
 	if strings.TrimSpace(cfg.WorkDir) == "" {
 		return "", errors.New("worker work_dir is required for job tmux socket")
@@ -695,9 +726,9 @@ func tmuxSocketPathForJob(cfg config.WorkerConfig, jobID string) (string, error)
 	if strings.TrimSpace(jobID) == "" {
 		return "", errors.New("job id is required for job tmux socket")
 	}
-	root := filepath.Join(os.TempDir(), "flow-job-tmux")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return "", fmt.Errorf("create job tmux socket directory: %w", err)
+	root, err := tmuxRuntimeRoot()
+	if err != nil {
+		return "", err
 	}
 	key := strings.TrimSpace(cfg.WorkDir) + "\x00" + strings.TrimSpace(jobID)
 	sum := sha256.Sum256([]byte(key))
@@ -717,7 +748,10 @@ func agentTmuxTmpDirForJob(cfg config.WorkerConfig, jobID string) (string, error
 	if strings.TrimSpace(jobID) == "" {
 		return "", errors.New("job id is required for agent tmux tmpdir")
 	}
-	root := filepath.Join(os.TempDir(), "flow-job-tmux")
+	root, err := tmuxRuntimeRoot()
+	if err != nil {
+		return "", err
+	}
 	key := strings.TrimSpace(cfg.WorkDir) + "\x00" + strings.TrimSpace(jobID)
 	sum := sha256.Sum256([]byte(key))
 	dir := filepath.Join(root, "a-"+hex.EncodeToString(sum[:])[:12])

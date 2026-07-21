@@ -196,7 +196,7 @@ RUN set -eux \
     fi \
     && jdk_home="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")" \
     && ln -sfn "$jdk_home" "$JAVA_HOME" \
-    && mkdir -p "$XDG_RUNTIME_DIR" /home/flow/.local/share/flow /home/flow/.local/share/docker /run/flow-worker/codex \
+    && mkdir -p "$XDG_RUNTIME_DIR" /flow/work /home/flow/.local/share/flow /home/flow/.local/share/docker /run/flow-worker/codex \
     && chmod 0700 "$XDG_RUNTIME_DIR" \
     && if ! grep -q '^flow:' /etc/subuid; then echo 'flow:100000:65536' >> /etc/subuid; fi \
     && if ! grep -q '^flow:' /etc/subgid; then echo 'flow:100000:65536' >> /etc/subgid; fi \
@@ -266,6 +266,7 @@ RUN set -eux \
         "$NVM_DIR" \
         "$RUSTUP_HOME" \
         "$CARGO_HOME" \
+        /flow \
         /home/flow \
         /run/flow-worker \
         "$XDG_RUNTIME_DIR" \
@@ -291,7 +292,7 @@ ENV BASH_ENV=/etc/profile.d/flow-dev-tools.sh
 RUN printf '\n[ -r /etc/profile.d/flow-dev-tools.sh ] && . /etc/profile.d/flow-dev-tools.sh\n' >> /home/flow/.bashrc \
     && chown flow:flow /home/flow/.bashrc
 
-VOLUME ["/home/flow/.local/share/flow", "/home/flow/.local/share/docker"]
+VOLUME ["/flow/work", "/home/flow/.local/share/docker"]
 USER flow
 ENTRYPOINT ["tini", "-g", "--", "flow-worker-entrypoint"]
 CMD ["flow-worker", "-c", "/usr/share/flow/examples/docker/flow-worker.yaml"]

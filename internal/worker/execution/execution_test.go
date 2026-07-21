@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -780,6 +781,52 @@ func TestWorkerEnvIncludesTopLevelJobChangeID(t *testing.T) {
 	if env["FLOW_CHANGE_ID"] != changeID {
 		t.Fatalf("FLOW_CHANGE_ID = %q, want top-level job change id %q", env["FLOW_CHANGE_ID"], changeID)
 	}
+}
+
+func TestTmuxRuntimePathsIgnoreLongTMPDIR(t *testing.T) {
+	requireTool(t, "tmux")
+
+	longTempDir := filepath.Join(t.TempDir(), strings.Repeat("nested-temp-dir-", 10))
+	if err := os.MkdirAll(longTempDir, 0o700); err != nil {
+		t.Fatalf("create long temp dir: %v", err)
+	}
+	t.Setenv("TMPDIR", longTempDir)
+
+	cfg := workerConfig(filepath.Join(longTempDir, "work"), "file:///tmp/exchange.git")
+	jobCfg, err := tmuxConfigForJob(cfg, "j-long-tmpdir")
+	if err != nil {
+		t.Fatalf("job tmux config: %v", err)
+	}
+	runtimeRoot, err := tmuxRuntimeRoot()
+	if err != nil {
+		t.Fatalf("tmux runtime root: %v", err)
+	}
+	if filepath.Dir(jobCfg.Tmux.SocketPath) != runtimeRoot {
+		t.Fatalf("job socket path = %q, want it directly below %q", jobCfg.Tmux.SocketPath, runtimeRoot)
+	}
+	if strings.HasPrefix(jobCfg.Tmux.SocketPath, longTempDir) {
+		t.Fatalf("job socket path %q inherited TMPDIR %q", jobCfg.Tmux.SocketPath, longTempDir)
+	}
+
+	sessionName := sessionNameForJob("j-long-tmpdir")
+	t.Cleanup(func() { cleanupTmuxServer(jobCfg) })
+	tmuxRun(t, jobCfg, "new-session", "-d", "-s", sessionName)
+
+	agentTmpDir, err := agentTmuxTmpDirForJob(cfg, "j-long-tmpdir")
+	if err != nil {
+		t.Fatalf("agent tmux tmpdir: %v", err)
+	}
+	if filepath.Dir(agentTmpDir) != runtimeRoot {
+		t.Fatalf("agent tmux tmpdir = %q, want it directly below %q", agentTmpDir, runtimeRoot)
+	}
+	agentSocket := filepath.Join(agentTmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), "default")
+	if err := os.MkdirAll(filepath.Dir(agentSocket), 0o700); err != nil {
+		t.Fatalf("create agent tmux socket directory: %v", err)
+	}
+	agentCfg := cfg
+	agentCfg.Tmux.SocketPath = agentSocket
+	t.Cleanup(func() { cleanupAgentTmuxServer(cfg, agentTmpDir) })
+	tmuxRun(t, agentCfg, "new-session", "-d", "-s", "flow-agent-long-tmpdir")
 }
 
 func TestWorkerEnvUsesHermeticJobStateDefaults(t *testing.T) {

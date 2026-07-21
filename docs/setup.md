@@ -119,8 +119,8 @@ sed -i.bak \
 docker compose up -d --build
 ```
 
-The server stores coordinator state in `flow-data`. The worker stores its work
-directory in `flow-worker-data` and its rootless Docker state in
+The server stores coordinator state in `flow-data`. The worker stores its
+`/flow/work` directory in `flow-worker-data` and its rootless Docker state in
 `flow-worker-docker`; it does not mount the server data volume.
 
 The `flow-server` image stays minimal. The `flow-worker` image includes

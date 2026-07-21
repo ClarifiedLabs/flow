@@ -1,6 +1,6 @@
 worker_id: w-local
 coordinator_url: http://flow-server:8421
-work_dir: /home/flow/.local/share/flow/workers/local
+work_dir: /flow/work
 protocol_version: "1"
 labels:
   local: "true"
