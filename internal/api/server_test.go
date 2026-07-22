@@ -334,6 +334,7 @@ func TestGlobalAgentDefsAreInheritedAndProjectOverridesWin(t *testing.T) {
 	}
 
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodDelete, "/v2/global/agent-defs/"+created.AgentDef.ID, nil, http.StatusConflict, nil)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodDelete, "/v2/global/agent-defs/%20"+created.AgentDef.ID+"%20", nil, http.StatusConflict, nil)
 	hookResponse := httptest.NewRecorder()
 	hookRequest := authorizedRequest(http.MethodGet, "/v2/global/agent-defs", nil)
 	hookRequest.Header.Set("Authorization", "Bearer hook-token")

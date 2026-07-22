@@ -340,6 +340,7 @@ func (r *Registry) Claim(ctx context.Context, input worker.ClaimInput) (worker.P
 // reference, so deleting the global row would otherwise make the flow
 // impossible to resolve if its override were later removed.
 func (r *Registry) DeleteGlobalAgentDef(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
 	if _, err := r.globalAgentDefs.Get(ctx, id); err != nil {
 		return err
 	}
