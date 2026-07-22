@@ -284,6 +284,68 @@ func TestLiveAuthorJobUniqueness(t *testing.T) {
 	}
 }
 
+func TestConcurrentKeyedEnqueueDeduplicatesLiveJobsAndReusesTerminalKey(t *testing.T) {
+	ctx := context.Background()
+	store, _, service := newWorkerService(t)
+	task := createTask(t, store)
+	input := EnqueueJobInput{
+		TaskID:         &task.ID,
+		Role:           RoleCI,
+		CapacityBucket: BucketEphemeral,
+		Payload:        map[string]any{"check_name": "security.node.nr-1"},
+	}
+
+	const attempts = 32
+	type result struct {
+		job     Job
+		created bool
+		err     error
+	}
+	results := make(chan result, attempts)
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			job, created, err := service.EnqueueJobWithDispatchKey(ctx, "workflow-check:nr-1:security.node.nr-1", input)
+			results <- result{job: job, created: created, err: err}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	created := 0
+	jobID := ""
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("keyed enqueue: %v", result.err)
+		}
+		if result.created {
+			created++
+		}
+		if jobID == "" {
+			jobID = result.job.ID
+		}
+		if result.job.ID != jobID {
+			t.Fatalf("keyed enqueue returned job %q, want %q", result.job.ID, jobID)
+		}
+	}
+	if created != 1 {
+		t.Fatalf("created count = %d, want 1", created)
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `UPDATE jobs SET state = ? WHERE id = ?`, string(JobFailed), jobID); err != nil {
+		t.Fatalf("mark keyed job terminal: %v", err)
+	}
+	retry, retryCreated, err := service.EnqueueJobWithDispatchKey(ctx, "workflow-check:nr-1:security.node.nr-1", input)
+	if err != nil {
+		t.Fatalf("retry terminal keyed job: %v", err)
+	}
+	if !retryCreated || retry.ID == jobID {
+		t.Fatalf("retry = %+v created=%v, want fresh job", retry, retryCreated)
+	}
+}
+
 func TestCapacityBucketsAreIndependent(t *testing.T) {
 	ctx := context.Background()
 	store, directory, service := newWorkerService(t)

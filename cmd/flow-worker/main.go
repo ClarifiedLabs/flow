@@ -710,17 +710,23 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 		client = client.WithProject(projectID)
 	}
 
+	blocking := checkJobBlocksApproval(job)
+	if haveVerdict && !blocking {
+		details = advisoryVerdictDetails(details, verdictReport)
+	}
+
 	// Apply the structured reviewer concerns / verifier decisions the job carried
-	// in its verdict file BEFORE recording the check verdict. Filing review
-	// threads first lets the coordinator's cross-check override a satisfied
-	// reviewer verdict to blocked when open threads remain. The worker lease is
-	// still live here, so the writes pass the change-access check.
+	// in its verdict file BEFORE recording the check verdict. Advisory jobs retain
+	// those findings in check details instead: they must not create or reopen a
+	// thread that independently blocks approval. The worker lease is still live
+	// here, so blocking jobs' writes pass the change-access check.
 	if haveVerdict {
-		applyVerdictActions(client, kind, lease, result, verdictReport, stdout)
+		applyVerdictActions(client, kind, blocking, lease, result, verdictReport, stdout)
 	}
 
 	check, err := client.ReportCheck(*job.TaskID, checkName, flowclient.ReportCheckInput{
 		Kind:        kind,
+		Required:    &blocking,
 		Verdict:     verdict,
 		ExitCode:    &exitCode,
 		Details:     details,
@@ -743,7 +749,14 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 // are logged to job stdout and never fail the job: the check verdict still needs
 // to be recorded, and CreateThread is idempotent (a retry is a no-op) while
 // certify/reopen are state-guarded.
-func applyVerdictActions(client *flowclient.Client, kind coordinator.CheckKind, lease flowworker.Lease, result workerexec.RunResult, report workerexec.VerdictReport, stdout io.Writer) {
+func applyVerdictActions(client *flowclient.Client, kind coordinator.CheckKind, blocking bool, lease flowworker.Lease, result workerexec.RunResult, report workerexec.VerdictReport, stdout io.Writer) {
+	if !blocking {
+		findings := len(report.Comments) + len(report.Threads)
+		if findings > 0 {
+			fmt.Fprintf(stdout, "check: retained %d advisory finding(s) in check details; no review threads changed\n", findings)
+		}
+		return
+	}
 	leaseID := lease.ID
 	switch kind {
 	case coordinator.CheckKindReviewer:
@@ -797,6 +810,31 @@ func applyVerdictActions(client *flowclient.Client, kind coordinator.CheckKind, 
 			fmt.Fprintf(stdout, "check: applied verdict thread %s %s\n", decision.ID, decision.Decision)
 		}
 	}
+}
+
+func checkJobBlocksApproval(job flowworker.Job) bool {
+	blocking, ok := job.Payload["blocking"].(bool)
+	return !ok || blocking
+}
+
+func advisoryVerdictDetails(details string, report workerexec.VerdictReport) string {
+	var lines []string
+	if trimmed := strings.TrimSpace(details); trimmed != "" {
+		lines = append(lines, "Advisory (non-blocking): "+trimmed)
+	} else {
+		lines = append(lines, "Advisory (non-blocking) finding")
+	}
+	for _, comment := range report.Comments {
+		lines = append(lines, fmt.Sprintf("- %s:%d: %s", comment.File, comment.Line, strings.TrimSpace(comment.Body)))
+	}
+	for _, decision := range report.Threads {
+		finding := fmt.Sprintf("- thread %s: recommends %s", decision.ID, decision.Decision)
+		if body := strings.TrimSpace(decision.Body); body != "" {
+			finding += ": " + body
+		}
+		lines = append(lines, finding)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // transcriptTailBytes is the maximum number of bytes the worker uploads from

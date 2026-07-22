@@ -116,6 +116,7 @@ type EnqueueJobInput struct {
 	Size           string
 	Tolerations    []scheduler.Toleration
 	Payload        map[string]any
+	dispatchKey    string
 }
 
 type ClaimInput struct {
@@ -189,9 +190,10 @@ INSERT INTO jobs (
 	selector_json,
 	tolerations_json,
 	payload_json,
+	dispatch_key,
 	created_at,
 	updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id,
 		nullableString(input.TaskID),
 		nullableString(input.ChangeID),
@@ -204,6 +206,7 @@ INSERT INTO jobs (
 		selectorJSON,
 		tolerationsJSON,
 		payload,
+		input.dispatchKey,
 		formatTime(now),
 		formatTime(now),
 	); err != nil {
@@ -211,6 +214,32 @@ INSERT INTO jobs (
 	}
 
 	return s.GetJob(ctx, id)
+}
+
+// EnqueueJobWithDispatchKey durably deduplicates a trusted internal dispatch.
+// Terminal jobs release the partial unique key so failed work can be retried.
+func (s *Service) EnqueueJobWithDispatchKey(ctx context.Context, dispatchKey string, input EnqueueJobInput) (Job, bool, error) {
+	dispatchKey = strings.TrimSpace(dispatchKey)
+	if dispatchKey == "" {
+		return Job{}, false, errors.New("dispatch key is required")
+	}
+	input.dispatchKey = dispatchKey
+	job, err := s.EnqueueJob(ctx, input)
+	if err == nil {
+		return job, true, nil
+	}
+	if !strings.Contains(err.Error(), "jobs.dispatch_key") {
+		return Job{}, false, err
+	}
+	row := s.db.QueryRowContext(ctx, jobSelectSQL+`
+WHERE dispatch_key = ?
+	AND state IN (?, ?, ?)
+LIMIT 1`, dispatchKey, string(JobQueued), string(JobClaimed), string(JobRunning))
+	existing, lookupErr := scanJob(row)
+	if lookupErr != nil {
+		return Job{}, false, err
+	}
+	return existing, false, nil
 }
 
 func (s *Service) GetJob(ctx context.Context, jobID string) (Job, error) {

@@ -113,6 +113,34 @@ func TestInvalidLogLevelFails(t *testing.T) {
 	}
 }
 
+func TestFlowsListSummarizesGraphReviewAgents(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v2/flows" {
+			t.Fatalf("request = %s %s, want GET /v2/flows", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer owner-token" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"flows":[{"id":"fl-quality","name":"quality","default":true,"start_node":"implement","nodes":[{"id":"fn-1","key":"implement","name":"Implement","kind":"agent","position":0,"config":{"agent":{"agent_def_id":"ad-author","workspace":"change","artifact":"change"}}},{"id":"fn-2","key":"review","name":"Review","kind":"change_review","position":1,"config":{"change_review":{"agents":[{"agent_def_id":"ad-review-default"},{"agent_def_id":"ad-review-advisory","required":false}]}}},{"id":"fn-3","key":"verify","name":"Verify","kind":"verify_change","position":2,"config":{"verify_change":{"agents":[{"agent_def_id":"ad-verify-blocking","required":true},{"agent_def_id":"ad-verify-advisory-1","required":false},{"agent_def_id":"ad-verify-advisory-2","required":false}]}}},{"id":"fn-4","key":"done","name":"Done","kind":"terminal","position":3,"config":{"terminal":{"resolution":"completed"}}}]}]}`)
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"flows", "list", "--server", server.URL, "--token", "owner-token"}, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("flows list exitCode = %d, stderr = %q", exitCode, stderr.String())
+	}
+	want := "fl-quality\tquality*\tstart=implement\tnodes=4\treviewers=1 blocking/1 advisory\tverifiers=1 blocking/2 advisory\n"
+	if stdout.String() != want {
+		t.Fatalf("flows list output = %q, want %q", stdout.String(), want)
+	}
+}
+
 func clearFetchPromptEnvironment(t *testing.T) {
 	t.Helper()
 	for _, key := range flowRuntimeEnvKeys {

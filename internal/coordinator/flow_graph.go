@@ -68,7 +68,43 @@ type AutomatedChecksNodeConfig struct{}
 
 type ReviewAgentConfig struct {
 	AgentDefID string `json:"agent_def_id"`
-	Required   *bool  `json:"required,omitempty"`
+	Blocking   *bool  `json:"blocking,omitempty"`
+}
+
+// UnmarshalJSON accepts the deprecated required field while keeping blocking as
+// the only marshaled representation. Specifying both is rejected so legacy and
+// canonical inputs can never have ambiguous precedence.
+func (c *ReviewAgentConfig) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	_, hasBlocking := fields["blocking"]
+	_, hasRequired := fields["required"]
+	if hasBlocking && hasRequired {
+		return errors.New("review agent cannot specify both blocking and deprecated required")
+	}
+
+	var decoded struct {
+		AgentDefID string `json:"agent_def_id"`
+		Blocking   *bool  `json:"blocking"`
+		Required   *bool  `json:"required"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	c.AgentDefID = decoded.AgentDefID
+	c.Blocking = decoded.Blocking
+	if hasRequired {
+		c.Blocking = decoded.Required
+	}
+	if c.Blocking == nil {
+		blocking := true
+		c.Blocking = &blocking
+	}
+	return nil
 }
 
 type ChangeReviewNodeConfig struct {
@@ -134,8 +170,42 @@ type FlowEdge struct {
 type FlowEdgeInput = FlowEdge
 
 type SnapshotReviewAgent struct {
-	Required bool             `json:"required"`
+	Blocking bool             `json:"blocking"`
 	Agent    AgentDefSnapshot `json:"agent"`
+}
+
+// UnmarshalJSON keeps already-scheduled workflow snapshots readable after the
+// workflow-facing field was renamed from required to blocking.
+func (a *SnapshotReviewAgent) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	_, hasBlocking := fields["blocking"]
+	_, hasRequired := fields["required"]
+	if hasBlocking && hasRequired {
+		return errors.New("snapshot review agent cannot specify both blocking and deprecated required")
+	}
+
+	var decoded struct {
+		Blocking *bool            `json:"blocking"`
+		Required *bool            `json:"required"`
+		Agent    AgentDefSnapshot `json:"agent"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	a.Blocking = true
+	if hasBlocking && decoded.Blocking != nil {
+		a.Blocking = *decoded.Blocking
+	}
+	if hasRequired && decoded.Required != nil {
+		a.Blocking = *decoded.Required
+	}
+	a.Agent = decoded.Agent
+	return nil
 }
 
 type FlowNodeSnapshotConfig struct {
@@ -406,8 +476,17 @@ func normalizeReviewAgents(key string, input []ReviewAgentConfig) ([]ReviewAgent
 			return nil, fmt.Errorf("node %q repeats agent definition %q", key, input[i].AgentDefID)
 		}
 		seen[input[i].AgentDefID] = true
+		blocking := reviewAgentBlocking(input[i])
+		input[i].Blocking = &blocking
 	}
 	return input, nil
+}
+
+func reviewAgentBlocking(agent ReviewAgentConfig) bool {
+	if agent.Blocking != nil {
+		return *agent.Blocking
+	}
+	return true
 }
 
 func validateGraphReachability(start string, nodes map[string]FlowNodeInput, edges map[string]map[string]string) error {

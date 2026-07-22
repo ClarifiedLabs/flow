@@ -4294,6 +4294,219 @@ test("flows editor markup opts into shared form styling and accessible row contr
   assert.match(edgeHTML, /title="Remove transition"/);
 });
 
+test("parallel review editors render ordered structured rows without generic JSON", async () => {
+  const context = await scriptContext();
+  const agentDefs = [
+    { id: "ad-code", name: "Code review", harness: "codex", model: "gpt-code" },
+    { id: "ad-security", name: "Security review", harness: "claude", model: "opus" },
+  ];
+  const html = context.renderNodeCardView({
+    key: "review",
+    name: "Review",
+    kind: "change_review",
+    config: {
+      change_review: {
+        agents: [
+          { agent_def_id: "ad-code", blocking: false },
+          { agent_def_id: "ad-retired" },
+        ],
+      },
+    },
+  }, agentDefs);
+
+  assert.equal((html.match(/data-review-agent-row(?:\s|>)/g) || []).length, 2);
+  assert.ok(html.indexOf('value="ad-code" selected') < html.indexOf('value="ad-retired" selected'));
+  assert.match(html, /<option value="ad-code" selected>Code review — codex \/ gpt-code<\/option>/);
+  assert.match(html, /<option value="ad-retired" selected>ad-retired \(unavailable\)<\/option>/);
+  assert.equal((html.match(/name="review_agent_blocking" checked/g) || []).length, 1, "omitted blocking defaults to checked");
+  assert.match(html, /Blocks approval/);
+  assert.match(html, /data-review-agent-advisory >Advisory<\/span>/);
+  assert.match(html, /Every listed agent runs and is awaited/);
+  assert.match(html, /data-add-review-agent>Add agent/);
+  assert.match(html, /title="Move agent up"/);
+  assert.match(html, /title="Move agent down"/);
+  assert.match(html, /title="Remove agent"/);
+  assert.doesNotMatch(html, /name="node_config"|Strict node configuration JSON/);
+
+  const legacy = context.renderReviewAgentRowView({ agent_def_id: "ad-security", required: false }, agentDefs);
+  assert.doesNotMatch(legacy, /name="review_agent_blocking" checked/);
+  assert.equal(context.reviewAgentBlockingView({ required: true }), true);
+
+  const verifyHTML = context.renderNodeCardView({
+    kind: "verify_change",
+    config: { verify_change: { agents: [{ agent_def_id: "ad-security", blocking: true }] } },
+  }, agentDefs);
+  assert.match(verifyHTML, /data-review-config-key="verify_change"/);
+  assert.match(verifyHTML, /Blocks success/);
+  assert.doesNotMatch(verifyHTML, /name="node_config"|Strict node configuration JSON/);
+});
+
+test("parallel review controls add, remove, and reorder agent rows", async () => {
+  const context = await scriptContext();
+  const listeners = new Map();
+  const form = {
+    dataset: {},
+    addEventListener(event, handler) {
+      listeners.set(event, handler);
+    },
+    querySelector() {
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+  };
+  const section = {
+    querySelector(selector) {
+      return selector === "[data-flow-editor]" ? form : null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+  };
+  const app = {
+    querySelector(selector) {
+      return selector === "[data-flows-section]" ? section : null;
+    },
+    load() {},
+    setStatus() {},
+  };
+  context.bindFlowsSectionView(app, { id: "p-alpha" }, [], [{ id: "ad-code", name: "Code review" }], {});
+
+  let addedHTML = "";
+  const rowList = {
+    insertAdjacentHTML(position, html) {
+      assert.equal(position, "beforeend");
+      addedHTML = html;
+    },
+  };
+  const config = {
+    querySelector(selector) {
+      return selector === "[data-review-agent-rows]" ? rowList : null;
+    },
+  };
+  let prevented = false;
+  listeners.get("click")({
+    target: {
+      closest(selector) {
+        if (selector === "[data-add-review-agent]") return this;
+        if (selector === "[data-review-agent-config]") return config;
+        return null;
+      },
+    },
+    preventDefault() {
+      prevented = true;
+    },
+  });
+  assert.equal(prevented, true);
+  assert.match(addedHTML, /data-review-agent-row/);
+  assert.match(addedHTML, /<option value="ad-code" >Code review<\/option>/);
+  assert.match(addedHTML, /name="review_agent_blocking" checked/);
+
+  let removed = false;
+  const removableRow = { remove() { removed = true; } };
+  listeners.get("click")({
+    target: {
+      closest(selector) {
+        if (selector === "[data-review-agent-remove]") return this;
+        if (selector === "[data-review-agent-row]") return removableRow;
+        return null;
+      },
+    },
+    preventDefault() {},
+  });
+  assert.equal(removed, true);
+
+  const first = { id: "first" };
+  const second = { id: "second" };
+  const parent = {
+    children: [first, second],
+    insertBefore(node, reference) {
+      this.children.splice(this.children.indexOf(node), 1);
+      this.children.splice(this.children.indexOf(reference), 0, node);
+      relink();
+    },
+  };
+  const relink = () => {
+    parent.children.forEach((row, index) => {
+      row.parentNode = parent;
+      row.previousElementSibling = parent.children[index - 1] || null;
+      row.nextElementSibling = parent.children[index + 1] || null;
+    });
+  };
+  relink();
+  listeners.get("click")({
+    target: {
+      closest(selector) {
+        if (selector === "[data-review-agent-down]") return this;
+        if (selector === "[data-review-agent-row]") return first;
+        return null;
+      },
+    },
+    preventDefault() {},
+  });
+  assert.deepEqual(parent.children.map((row) => row.id), ["second", "first"]);
+});
+
+test("switching to either parallel review kind initializes its structured config", async () => {
+  const context = await scriptContext();
+  const listeners = new Map();
+  const editor = { innerHTML: "old config" };
+  const card = {
+    querySelector(selector) {
+      return selector === "[data-node-config-editor]" ? editor : null;
+    },
+  };
+  const form = {
+    dataset: {},
+    addEventListener(event, handler) {
+      listeners.set(event, handler);
+    },
+    querySelector() {
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+  };
+  const section = {
+    querySelector(selector) {
+      return selector === "[data-flow-editor]" ? form : null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+  };
+  const app = {
+    querySelector(selector) {
+      return selector === "[data-flows-section]" ? section : null;
+    },
+    load() {},
+    setStatus() {},
+  };
+  context.bindFlowsSectionView(app, { id: "p-alpha" }, [], [{ id: "ad-code", name: "Code review" }], {});
+  const kindSelect = {
+    name: "node_kind",
+    value: "change_review",
+    closest(selector) {
+      return selector === "[data-node-card]" ? card : null;
+    },
+  };
+
+  listeners.get("change")({ target: kindSelect });
+  assert.match(editor.innerHTML, /data-review-config-key="change_review"/);
+  assert.equal((editor.innerHTML.match(/data-review-agent-row(?:\s|>)/g) || []).length, 1);
+  assert.match(editor.innerHTML, /name="review_agent_def_id"[^>]*required/);
+  assert.doesNotMatch(editor.innerHTML, /name="node_config"/);
+
+  kindSelect.value = "verify_change";
+  listeners.get("change")({ target: kindSelect });
+  assert.match(editor.innerHTML, /data-review-config-key="verify_change"/);
+  assert.equal((editor.innerHTML.match(/data-review-agent-row(?:\s|>)/g) || []).length, 1);
+  assert.match(editor.innerHTML, /Blocks success/);
+  assert.doesNotMatch(editor.innerHTML, /name="node_config"/);
+});
+
 function fakeFieldForm(fields) {
   return {
     querySelector(selector) {
@@ -4314,7 +4527,14 @@ function fakeFlowRow(fields) {
       if (!match) return null;
       const name = match[1];
       if (!(name in fields)) return null;
-      return name === "review_required" ? { checked: fields[name] } : { value: fields[name] };
+      if (name === "review_agent_blocking" || name === "review_required") {
+        return typeof fields[name] === "object" ? fields[name] : { checked: fields[name] };
+      }
+      return { value: fields[name] };
+    },
+    querySelectorAll(selector) {
+      if (selector === "[data-review-agent-row]") return (fields.review_agents || []).map(fakeFlowRow);
+      return [];
     },
   };
 }
@@ -4456,6 +4676,83 @@ test("flow editor payload reads each node and edge row as authored", async () =>
     { key: "", name: "", kind: "agent", config: {} },
   ]);
   assert.deepEqual(payload.edges, [{ from: "plan", outcome: "done", to: "" }]);
+});
+
+test("parallel review payload preserves agent order and emits canonical blocking only", async () => {
+  const context = await scriptContext();
+  const form = fakeFlowEditor({
+    flow_name: "Parallel review",
+    flow_description: "",
+    start_node: "review",
+    nodes: [
+      {
+        node_key: "review",
+        node_name: "Review",
+        node_kind: "change_review",
+        review_agents: [
+          { review_agent_def_id: "ad-code", review_agent_blocking: true, review_required: false },
+          { review_agent_def_id: "ad-security", review_agent_blocking: false, review_required: true },
+        ],
+      },
+      {
+        node_key: "verify",
+        node_name: "Verify",
+        node_kind: "verify_change",
+        review_agents: [
+          { review_agent_def_id: "ad-verifier", review_agent_blocking: true },
+        ],
+      },
+    ],
+    edges: [],
+  });
+
+  const payload = context.flowPayloadFromEditorView(form);
+
+  assert.deepEqual(payload.nodes, [
+    {
+      key: "review",
+      name: "Review",
+      kind: "change_review",
+      config: {
+        change_review: {
+          agents: [
+            { agent_def_id: "ad-code", blocking: true },
+            { agent_def_id: "ad-security", blocking: false },
+          ],
+        },
+      },
+    },
+    {
+      key: "verify",
+      name: "Verify",
+      kind: "verify_change",
+      config: {
+        verify_change: {
+          agents: [{ agent_def_id: "ad-verifier", blocking: true }],
+        },
+      },
+    },
+  ]);
+  assert.doesNotMatch(JSON.stringify(payload), /"required"/);
+});
+
+test("parallel review blocking checkbox toggles an agent to advisory", async () => {
+  const context = await scriptContext();
+  const blocking = { checked: true };
+  const form = fakeFlowEditor({
+    flow_name: "Advisory review",
+    start_node: "review",
+    nodes: [{
+      node_key: "review",
+      node_name: "Review",
+      node_kind: "change_review",
+      review_agents: [{ review_agent_def_id: "ad-security", review_agent_blocking: blocking }],
+    }],
+  });
+
+  assert.equal(context.flowPayloadFromEditorView(form).nodes[0].config.change_review.agents[0].blocking, true);
+  blocking.checked = false;
+  assert.equal(context.flowPayloadFromEditorView(form).nodes[0].config.change_review.agents[0].blocking, false);
 });
 
 test("flows view renders agent definitions and flow tables for the active project", async () => {

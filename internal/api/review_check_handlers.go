@@ -820,6 +820,9 @@ func (s *projectServer) checkWorkerThreadLease(ctx context.Context, principal co
 	if !workerRoleAllowed(job.Role, allowedRoles) {
 		return errors.New("worker job role cannot perform this thread operation")
 	}
+	if !jobBlocksApproval(job) {
+		return errors.New("advisory check jobs cannot mutate review threads")
+	}
 	if job.TaskID == nil || strings.TrimSpace(*job.TaskID) != taskID {
 		return errors.New("worker job does not belong to the thread task")
 	}
@@ -828,6 +831,23 @@ func (s *projectServer) checkWorkerThreadLease(ctx context.Context, principal co
 	}
 
 	return nil
+}
+
+func jobBlockingValue(job worker.Job) (bool, bool) {
+	value, present := job.Payload["blocking"]
+	if !present {
+		return true, false
+	}
+	blocking, ok := value.(bool)
+	if !ok {
+		return true, true
+	}
+	return blocking, true
+}
+
+func jobBlocksApproval(job worker.Job) bool {
+	blocking, stamped := jobBlockingValue(job)
+	return !stamped || blocking
 }
 
 func workerRoleAllowed(role worker.JobRole, allowed []worker.JobRole) bool {
@@ -907,6 +927,14 @@ func (s *projectServer) checkReportScope(r *http.Request, taskID string, checkNa
 		}
 		if err := s.checkSourceJobHead(r.Context(), job); err != nil {
 			return err
+		}
+		stampedBlocking, stamped := jobBlockingValue(job)
+		if request.Required == nil {
+			if stamped {
+				return errors.New("worker check required value does not match source job blocking mode")
+			}
+		} else if *request.Required != stampedBlocking {
+			return errors.New("worker check required value does not match source job blocking mode")
 		}
 		return nil
 	default:

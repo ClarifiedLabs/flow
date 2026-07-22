@@ -292,7 +292,7 @@ func (e *WorkflowExecutor) handleChecks(ctx context.Context, run WorkflowRun, no
 			allFinished = false
 			continue
 		}
-		if check.Required && check.Verdict == CheckBlocked {
+		if check.Required && check.Verdict != CheckSatisfied {
 			failed = true
 		}
 	}

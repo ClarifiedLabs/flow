@@ -105,8 +105,11 @@ Scheduling freezes the selected flow graph and resolved agent definitions into
 a `workflow_run`. The executor maintains exactly one active `workflow_node_run`,
 dispatches its trusted handler, records typed artifacts and durable waits, and
 appends every state or graph movement to `workflow_transitions`. Branches and
-cycles are allowed. A per-run transition budget opens an operator wait before a
-cycle can run forever.
+cycles are allowed, but graph nodes do not run in parallel. A multi-agent node
+can internally fan out child jobs; those children remain owned by the same one
+active node visit, and its successor cannot begin until the node's barrier
+closes. A per-run transition budget opens an operator wait before a cycle can
+run forever.
 
 Human gates and budget exhaustion derive Blocked. Reset cancels run-owned jobs,
 leases, sessions, and the active node and returns the task to Unscheduled.
@@ -132,6 +135,11 @@ Capacity buckets have different purposes:
 
 - `persistent_agent`: author, reviewer, verifier, and console agent sessions.
 - `ephemeral`: CI/check commands.
+
+Capacity is shared across every project and role eligible for a worker; it is
+not reserved per workflow node. In particular, each child job inside a
+multi-agent review or verification fan-out consumes one `persistent_agent`
+slot and competes with authors, consoles, and other multi-agent children.
 
 For each claimed job, the worker:
 
@@ -178,10 +186,25 @@ summaries from the frozen run.
 
 Each project stores flow configuration in SQLite:
 
-- **Agent definitions** combine a harness, optional model/reasoning selection,
-  and prompt instructions.
+- **Agent definitions** combine the **model agent** selection (harness, optional
+  model, and optional reasoning effort) with the **focus agent** identity and
+  prompt instructions. They are managed with
+  `flow agent-defs list|create|edit|rm`.
 - **Flows** define directed trusted-node graphs, strict per-kind configuration,
-  outcome transitions, a start node, and a transition budget.
+  outcome transitions, a start node, and a transition budget. They are managed
+  with `flow flows list|create|edit|rm|set-default`.
+
+`change_review` and `verify_change` are multi-agent trusted node kinds. Entering
+one node fans out one persistent-agent child job per configured focus agent.
+The workflow still has only that one active graph node: child jobs are internal
+work, not graph-node concurrency. Its barrier awaits every blocking and
+advisory child before evaluating the transition. Blocking is the default when
+an entry omits the flag. A blocked blocking child selects the node's
+failure/changes-requested outcome, while a blocked advisory child remains
+visible without changing the outcome. New configuration uses
+`blocking: false` for advisory agents. `required` is retained only as a
+deprecated compatibility alias (`true` is blocking, `false` is advisory), and
+configurations should not specify both fields.
 
 Fresh projects seed task-planner, author, reviewer, and verifier definitions
 plus two flows: the default coding graph (implementation, checks, review, human

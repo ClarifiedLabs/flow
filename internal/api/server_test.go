@@ -2759,6 +2759,69 @@ func TestWorkerReviewerJobCanReportReviewerCheck(t *testing.T) {
 	}
 }
 
+func TestAdvisoryReviewerReportIsVisibleButCannotCreateBlockingThread(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	started := startAuthorSessionForStatusTest(t, fixture, "Advisory reviewer task")
+	if _, err := fixture.Sessions.UpdateChangeHead(ctx, started.Change.ID, "head-1"); err != nil {
+		t.Fatalf("update change head: %v", err)
+	}
+	advisoryJob := startLiveCheckJobForTask(t, fixture, "advisory-token", "w-advisory", started.Session.TaskID, started.Change.ID, "head-1", "performance-review", flowworker.RoleReviewer, flowworker.BucketPersistentAgent)
+	if _, err := fixture.Store.DB().ExecContext(ctx, `
+UPDATE jobs SET payload_json = json_set(payload_json, '$.blocking', json('false')) WHERE id = ?`, advisoryJob.Job.ID); err != nil {
+		t.Fatalf("mark reviewer job advisory: %v", err)
+	}
+
+	advisory := false
+	blocking := true
+	sourceJobID := advisoryJob.Job.ID
+	leaseID := advisoryJob.Lease.ID
+	reportPath := "/v2/tasks/" + started.Session.TaskID + "/checks/performance-review"
+	doJSONRequestAs(t, fixture.Server, "advisory-token", http.MethodPost, reportPath, reportCheckRequest{
+		Kind: string(coordinator.CheckKindReviewer), Required: &blocking,
+		Verdict: string(coordinator.CheckBlocked), Details: "Advisory (non-blocking): consider caching.",
+		SourceJobID: &sourceJobID, LeaseID: &leaseID,
+	}, http.StatusForbidden, nil)
+	var reported checkResponse
+	doJSONRequestAs(t, fixture.Server, "advisory-token", http.MethodPost, reportPath, reportCheckRequest{
+		Kind: string(coordinator.CheckKindReviewer), Required: &advisory,
+		Verdict: string(coordinator.CheckBlocked), Details: "Advisory (non-blocking): consider caching.",
+		SourceJobID: &sourceJobID, LeaseID: &leaseID,
+	}, http.StatusOK, &reported)
+	if reported.Check.Required || reported.Check.Verdict != coordinator.CheckBlocked || !strings.Contains(reported.Check.Details, "Advisory (non-blocking)") {
+		t.Fatalf("advisory check response = %+v", reported.Check)
+	}
+
+	doJSONRequestAs(t, fixture.Server, "advisory-token", http.MethodPost, "/v2/changes/"+started.Change.ID+"/comments", createThreadRequest{
+		AnchorCommitSHA: "head-1", FilePath: "cache.go", Line: 12,
+		Body: "Consider caching this lookup.", LeaseID: advisoryJob.Lease.ID,
+	}, http.StatusForbidden, nil)
+
+	blockingJob := startLiveCheckJobForTask(t, fixture, "blocking-token", "w-blocking-review", started.Session.TaskID, started.Change.ID, "head-1", "security-review", flowworker.RoleReviewer, flowworker.BucketPersistentAgent)
+	var created threadResponse
+	doJSONRequestAs(t, fixture.Server, "blocking-token", http.MethodPost, "/v2/changes/"+started.Change.ID+"/comments", createThreadRequest{
+		AnchorCommitSHA: "head-1", FilePath: "auth.go", Line: 7,
+		Body: "This authorization check is required.", LeaseID: blockingJob.Lease.ID,
+	}, http.StatusCreated, &created)
+	if created.Thread.ID == "" || created.Thread.State != coordinator.ThreadOpen {
+		t.Fatalf("blocking reviewer thread = %+v", created.Thread)
+	}
+	doJSONRequestAs(t, fixture.Server, "advisory-token", http.MethodPost, "/v2/threads/"+created.Thread.ID+"/comments", threadCommentRequest{
+		Body: "Advisory jobs cannot reply.", LeaseID: advisoryJob.Lease.ID,
+	}, http.StatusForbidden, nil)
+
+	advisoryVerifier := startLiveCheckJobForTask(t, fixture, "advisory-verifier-token", "w-advisory-verifier", started.Session.TaskID, started.Change.ID, "head-1", "verification", flowworker.RoleVerifier, flowworker.BucketPersistentAgent)
+	if _, err := fixture.Store.DB().ExecContext(ctx, `
+UPDATE jobs SET payload_json = json_set(payload_json, '$.blocking', json('false')) WHERE id = ?`, advisoryVerifier.Job.ID); err != nil {
+		t.Fatalf("mark verifier job advisory: %v", err)
+	}
+	for _, action := range []string{"certify", "reopen"} {
+		doJSONRequestAs(t, fixture.Server, "advisory-verifier-token", http.MethodPost, "/v2/threads/"+created.Thread.ID+"/"+action, threadCommentRequest{
+			Body: "Advisory jobs cannot " + action + ".", LeaseID: advisoryVerifier.Lease.ID,
+		}, http.StatusForbidden, nil)
+	}
+}
+
 func startAuthorSessionForStatusTest(t *testing.T, fixture testFixture, title string) coordinator.StartAuthorSessionResult {
 	return startAuthorSessionForStatusTestWithWorker(t, fixture, title, "w-local")
 }

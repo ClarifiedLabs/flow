@@ -193,7 +193,7 @@ func withFlowSnapshotReviewChecks(suite CheckSuite, snapshot FlowSnapshot, args 
 		if err != nil {
 			return CheckSuite{}, fmt.Errorf("review agent %q: %w", name, err)
 		}
-		required := reviewAgent.Required
+		required := reviewAgent.Blocking
 		suite.Definitions = append(suite.Definitions, CheckDefinition{
 			Name:     name,
 			Kind:     kind,
@@ -636,6 +636,20 @@ func (s *CheckConfigService) ensurePendingCheck(ctx context.Context, taskID stri
 	return s.ensurePendingCheckWithDetails(ctx, taskID, definition, "")
 }
 
+// ensureWorkflowPendingCheck creates a workflow-owned check without changing an
+// existing result. This avoids a stale scheduler resetting a verdict reported by
+// a fast worker after another scheduler observed the check as absent.
+func (s *CheckConfigService) ensureWorkflowPendingCheck(ctx context.Context, taskID string, definition CheckDefinition) error {
+	required := requiredForCheckDefinition(definition)
+	now := formatTime(s.checks.now().UTC())
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO checks (
+	task_id, name, kind, required, verdict, details, reporter, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, '', 'coordinator', ?, ?)
+ON CONFLICT(task_id, name) DO NOTHING`, taskID, definition.Name, string(definition.Kind), boolInt(required), string(CheckPending), now, now)
+	return err
+}
+
 // ensurePendingCheckWithDetails resets a check to pending, optionally seeding its
 // Details. Details is empty for an ordinary review round; the completion-
 // assessment round seeds CompletionAssessmentCheckMarker on the reviewer check so
@@ -832,12 +846,17 @@ func (s *CheckConfigService) enqueueCheckJobForWorkflow(ctx context.Context, tas
 		return false, err
 	}
 	headSHA := strings.TrimSpace(change.HeadSHA)
-	exists, err := s.liveCheckJobExists(ctx, taskID, change.ID, role, definition.Name, headSHA)
-	if err != nil {
-		return false, err
-	}
-	if exists {
-		return false, nil
+	dispatchKey := ""
+	if strings.TrimSpace(nodeRunID) != "" {
+		dispatchKey = workflowCheckDispatchKey(nodeRunID, definition.Name)
+	} else {
+		exists, err := s.liveCheckJobExists(ctx, taskID, change.ID, role, definition.Name, headSHA)
+		if err != nil {
+			return false, err
+		}
+		if exists {
+			return false, nil
+		}
 	}
 
 	payload := map[string]any{
@@ -847,6 +866,7 @@ func (s *CheckConfigService) enqueueCheckJobForWorkflow(ctx context.Context, tas
 		"head_sha":   headSHA,
 		"branch":     change.Branch,
 		"base":       change.Base,
+		"blocking":   requiredForCheckDefinition(definition),
 	}
 	if strings.TrimSpace(definition.roleInstructions) != "" {
 		payload["role_instructions"] = definition.roleInstructions
@@ -859,7 +879,7 @@ func (s *CheckConfigService) enqueueCheckJobForWorkflow(ctx context.Context, tas
 		}
 		payload["review_context"] = reviewContext
 	}
-	job, err := s.workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
+	input := flowworker.EnqueueJobInput{
 		TaskID:         &taskID,
 		ChangeID:       &change.ID,
 		WorkflowRunID:  stringPointerOrNil(workflowRunID),
@@ -871,7 +891,12 @@ func (s *CheckConfigService) enqueueCheckJobForWorkflow(ctx context.Context, tas
 		Size:           definition.Size,
 		Tolerations:    definition.Tolerations,
 		Payload:        payload,
-	})
+	}
+	if dispatchKey != "" {
+		_, created, err := s.workers.EnqueueJobWithDispatchKey(ctx, dispatchKey, input)
+		return created, err
+	}
+	job, err := s.workers.EnqueueJob(ctx, input)
 	if err != nil {
 		exists, lookupErr := s.liveCheckJobExists(ctx, taskID, change.ID, role, definition.Name, headSHA)
 		if lookupErr == nil && exists {
@@ -914,7 +939,7 @@ func (s *CheckConfigService) ScheduleWorkflowNodeChecks(ctx context.Context, tas
 		snapshot := FlowSnapshot{}
 		for _, agent := range agents {
 			snapshot.ReviewAgents = append(snapshot.ReviewAgents, FlowReviewAgentSnapshot{
-				Role: role, Required: agent.Required, Agent: agent.Agent,
+				Role: role, Blocking: agent.Blocking, Agent: agent.Agent,
 			})
 		}
 		suite, err := withFlowSnapshotReviewChecks(CheckSuite{}, snapshot, s.harnessArgs)
@@ -926,33 +951,49 @@ func (s *CheckConfigService) ScheduleWorkflowNodeChecks(ctx context.Context, tas
 		return nil, fmt.Errorf("unknown workflow check mode %q", mode)
 	}
 
-	// A graph may revisit the same check node. Retire unsuccessful checks from
-	// earlier visits so they remain visible as history without blocking a later
-	// successful path or the merge handler.
+	// A graph may revisit the same check node. Retire unsuccessful blocking
+	// checks from earlier visits of this node so they remain historical without
+	// blocking a later successful path. The node identity and visit ordering are
+	// derived from durable node runs: a stale scheduler therefore cannot mutate
+	// checks owned by a successor node or a newer revisit. Advisory findings are
+	// already non-vetoing and retain their original verdict and details.
 	if _, err := s.db.ExecContext(ctx, `
 UPDATE checks
 SET required = 0,
 	verdict = ?,
-	details = ?,
+	details = CASE
+		WHEN trim(details) = '' THEN ?
+		ELSE details || char(10) || char(10) || ?
+	END,
 	updated_at = ?
 WHERE task_id = ?
+	AND required = 1
 	AND verdict IN (?, ?)
-	AND name LIKE '%.node.%'
-	AND name NOT LIKE ?`, string(CheckSkipped), "retired by a later workflow node visit", formatTime(s.checks.now().UTC()),
-		task.ID, string(CheckPending), string(CheckBlocked), "%.node."+nodeRunID); err != nil {
+	AND EXISTS (
+		SELECT 1
+		FROM workflow_node_runs AS current_node
+		JOIN workflow_node_runs AS prior_node
+			ON prior_node.workflow_run_id = current_node.workflow_run_id
+			AND prior_node.node_key = current_node.node_key
+		WHERE current_node.id = ?
+			AND current_node.workflow_run_id = ?
+			AND (
+				prior_node.visit < current_node.visit
+				OR (prior_node.visit = current_node.visit AND prior_node.attempt < current_node.attempt)
+			)
+			AND checks.name LIKE '%.node.' || prior_node.id
+	)`, string(CheckSkipped), "retired by a later visit to this workflow node", "Retired by a later visit to this workflow node.", formatTime(s.checks.now().UTC()),
+		task.ID, string(CheckPending), string(CheckBlocked), nodeRunID, workflowRunID); err != nil {
 		return nil, fmt.Errorf("retire prior workflow checks: %w", err)
 	}
 
 	var names []string
 	for index, definition := range definitions {
 		definition.Name = workflowNodeCheckName(definition.Name, nodeRunID, index)
-		check, err := s.checks.GetCheck(ctx, task.ID, definition.Name)
-		if errors.Is(err, sql.ErrNoRows) {
-			if err := s.ensurePendingCheck(ctx, task.ID, definition); err != nil {
-				return nil, err
-			}
-			check, err = s.checks.GetCheck(ctx, task.ID, definition.Name)
+		if err := s.ensureWorkflowPendingCheck(ctx, task.ID, definition); err != nil {
+			return nil, err
 		}
+		check, err := s.checks.GetCheck(ctx, task.ID, definition.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -964,6 +1005,10 @@ WHERE task_id = ?
 		names = append(names, definition.Name)
 	}
 	return names, nil
+}
+
+func workflowCheckDispatchKey(nodeRunID, checkName string) string {
+	return "workflow-check:" + strings.TrimSpace(nodeRunID) + ":" + strings.TrimSpace(checkName)
 }
 
 func workflowNodeCheckName(name, nodeRunID string, index int) string {

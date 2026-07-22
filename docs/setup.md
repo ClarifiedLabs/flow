@@ -273,14 +273,18 @@ harness capabilities as labels:
 - `agent.harness.codex: "true"` when `codex login status` passes.
 - `agent.harness.claude: "true"` when `claude auth status` passes.
 - `agent.harness.harness: "true"` when `harness --check-model-proxy` passes.
-- `capacity.persistent_agent` controls concurrent author, reviewer, and
-  verifier agent jobs.
+- `capacity.persistent_agent` controls concurrent author, reviewer, verifier,
+  and console agent jobs.
 - `capacity.ephemeral` controls concurrent CI/check jobs.
 
 Capacity is the concurrency limit for this configured worker. A single
 `flow-worker` process starts one internal claim loop per configured slot, so
 `persistent_agent: 1` and `ephemeral: 2` can run up to three jobs at the same
-time across all projects. Use separate configs with distinct `worker_id` values
+time across all projects. Persistent slots are shared rather than reserved by
+role or project: every child of a multi-agent review/verification node competes
+for the same slots as authors, consoles, and children from other projects. A
+multi-agent barrier may consequently wait for capacity even though its graph
+node is already active. Use separate configs with distinct `worker_id` values
 when you want separate labels, capacity, credentials, hosts, or work
 directories.
 
@@ -296,13 +300,28 @@ chmod 600 .flow-local/worker-join.token
 
 Fresh projects seed built-in planner, author, reviewer, and verifier agent
 definitions using the default Codex harness, plus two flows: `direct` and
-`planned`. Choose an task's work pipeline with `flow task create --flow direct`,
+`planned`. Each reusable agent definition combines a **model agent** selection
+(harness, model, and reasoning effort) with a **focus agent** name and prompt.
+Manage those model/focus definitions with
+`flow agent-defs list|create|edit|rm` and the graphs that reference them with
+`flow flows list|create|edit|rm|set-default`.
+
+Choose an task's work pipeline with `flow task create --flow direct`,
 `flow task create --flow planned`, or the web UI's **Flow** field. To use
 Claude Code, Harness, or model-specific settings, edit the project's agent
-definitions and flows in the web UI's **Flows** page or with
-`flow agent-defs ...` and `flow flows ...`.
+definitions and flows in the web UI's **Flows** page or with those CLI commands.
 The UI lists only harnesses advertised by at least one live worker via the
 corresponding `agent.harness.*` label.
+
+Review and verification graph nodes may name several focus agents. Flow runs
+their child jobs as an internal fan-out, awaits every child at a barrier, and
+then follows the node outcome. Entries are blocking by default; set
+`blocking: false` when a result is advisory. Advisory children are still
+awaited, but their failures do not select the failure/changes-requested edge.
+`required` remains accepted as a deprecated compatibility spelling, with
+`true` mapping to blocking and `false` to advisory; use `blocking` in new flow
+files. The parent remains the run's sole active graph node throughout the
+fan-out—children are jobs, not independently active graph nodes.
 
 The worker environment needs `flow`, `ttyd`, and the selected harness CLI
 (`codex`, `claude`, or `harness`) available on `PATH`. To override the generated

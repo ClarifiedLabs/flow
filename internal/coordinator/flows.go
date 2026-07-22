@@ -125,7 +125,7 @@ type FlowPhaseSnapshot struct {
 
 type FlowReviewAgentSnapshot struct {
 	Role     FlowReviewRole   `json:"role"`
-	Required bool             `json:"required"`
+	Blocking bool             `json:"blocking"`
 	Agent    AgentDefSnapshot `json:"agent"`
 }
 
@@ -602,11 +602,7 @@ func (s *FlowService) ResolveSnapshot(ctx context.Context, flowID string) (FlowS
 				if err != nil {
 					return FlowSnapshot{}, err
 				}
-				required := true
-				if inputAgent.Required != nil {
-					required = *inputAgent.Required
-				}
-				config.Agents = append(config.Agents, SnapshotReviewAgent{Required: required, Agent: agent})
+				config.Agents = append(config.Agents, SnapshotReviewAgent{Blocking: reviewAgentBlocking(inputAgent), Agent: agent})
 			}
 			snapshotNode.Config.ChangeReview = config
 		case NodeHumanGate:
@@ -620,11 +616,7 @@ func (s *FlowService) ResolveSnapshot(ctx context.Context, flowID string) (FlowS
 				if err != nil {
 					return FlowSnapshot{}, err
 				}
-				required := true
-				if inputAgent.Required != nil {
-					required = *inputAgent.Required
-				}
-				config.Agents = append(config.Agents, SnapshotReviewAgent{Required: required, Agent: agent})
+				config.Agents = append(config.Agents, SnapshotReviewAgent{Blocking: reviewAgentBlocking(inputAgent), Agent: agent})
 			}
 			snapshotNode.Config.VerifyChange = config
 		case NodeMaterializeTaskSet:

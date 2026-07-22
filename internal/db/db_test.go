@@ -35,16 +35,35 @@ func TestOpenInitializesSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_init")
+	assertAppliedMigrations(t, migrations, "0001_init", "0002_job_dispatch_keys")
 
 	var schemaVersion string
 	if err := store.DB().QueryRowContext(ctx, "SELECT value FROM app_metadata WHERE key = 'schema_version'").Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version metadata: %v", err)
 	}
-	if schemaVersion != "0001_init" {
-		t.Fatalf("schema version = %q, want 0001_init", schemaVersion)
+	if schemaVersion != "0002_job_dispatch_keys" {
+		t.Fatalf("schema version = %q, want 0002_job_dispatch_keys", schemaVersion)
 	}
 	assertStorageFormat(t, store, "4")
+
+	var dispatchDefault string
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT dflt_value FROM pragma_table_info('jobs') WHERE name = 'dispatch_key'`).Scan(&dispatchDefault); err != nil {
+		t.Fatalf("inspect jobs.dispatch_key: %v", err)
+	}
+	if dispatchDefault != "''" {
+		t.Fatalf("jobs.dispatch_key default = %q, want empty string", dispatchDefault)
+	}
+	var dispatchIndexSQL string
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_jobs_live_dispatch_key'`).Scan(&dispatchIndexSQL); err != nil {
+		t.Fatalf("inspect dispatch-key index: %v", err)
+	}
+	for _, fragment := range []string{"UNIQUE INDEX", "dispatch_key", "queued", "claimed", "running"} {
+		if !strings.Contains(dispatchIndexSQL, fragment) {
+			t.Fatalf("dispatch-key index SQL %q missing %q", dispatchIndexSQL, fragment)
+		}
+	}
 	assertColumnAbsent(t, store, "tasks", "acceptance_"+"criteria")
 
 	assertTables(t, store,
@@ -258,7 +277,7 @@ func TestOpenMigrationIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_init")
+	assertAppliedMigrations(t, migrations, "0001_init", "0002_job_dispatch_keys")
 }
 
 func assertAppliedMigrations(t *testing.T, got []string, want ...string) {

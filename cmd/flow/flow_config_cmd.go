@@ -199,18 +199,44 @@ func runFlowsList(args []string, stdout, stderr io.Writer) int {
 		if flow.Default {
 			marker = "*"
 		}
-		var phases []string
-		for _, phase := range flow.Phases {
-			label := phase.Name
-			if phase.Gate == coordinator.FlowGateHuman {
-				label += "(gate)"
-			}
-			phases = append(phases, label)
-		}
-		fmt.Fprintf(stdout, "%s\t%s%s\t%s\t%d review agents\n",
-			flow.ID, flow.Name, marker, strings.Join(phases, " -> "), len(flow.ReviewAgents))
+		reviewers, verifiers := summarizeFlowReviewAgents(flow)
+		fmt.Fprintf(stdout, "%s\t%s%s\tstart=%s\tnodes=%d\treviewers=%d blocking/%d advisory\tverifiers=%d blocking/%d advisory\n",
+			flow.ID, flow.Name, marker, flow.StartNode, len(flow.Nodes),
+			reviewers.blocking, reviewers.advisory, verifiers.blocking, verifiers.advisory)
 	}
 	return 0
+}
+
+type flowReviewAgentSummary struct {
+	blocking int
+	advisory int
+}
+
+// summarizeFlowReviewAgents reads only the public workflow graph. An omitted
+// blocking value has the graph contract's blocking default; false is advisory.
+func summarizeFlowReviewAgents(flow coordinator.Flow) (reviewers, verifiers flowReviewAgentSummary) {
+	add := func(summary *flowReviewAgentSummary, agents []coordinator.ReviewAgentConfig) {
+		for _, agent := range agents {
+			if agent.Blocking == nil || *agent.Blocking {
+				summary.blocking++
+			} else {
+				summary.advisory++
+			}
+		}
+	}
+	for _, node := range flow.Nodes {
+		switch node.Kind {
+		case coordinator.NodeChangeReview:
+			if node.Config.ChangeReview != nil {
+				add(&reviewers, node.Config.ChangeReview.Agents)
+			}
+		case coordinator.NodeVerifyChange:
+			if node.Config.VerifyChange != nil {
+				add(&verifiers, node.Config.VerifyChange.Agents)
+			}
+		}
+	}
+	return reviewers, verifiers
 }
 
 func runFlowsCreate(args []string, stdout, stderr io.Writer) int {

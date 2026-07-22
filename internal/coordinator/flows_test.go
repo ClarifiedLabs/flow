@@ -2,8 +2,10 @@ package coordinator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
@@ -86,6 +88,143 @@ func TestSeedDefaults(t *testing.T) {
 	}
 	if len(allFlows) != 2 {
 		t.Fatalf("flows after reseed = %d, want 2", len(allFlows))
+	}
+}
+
+func TestParallelReviewGraphUsesCanonicalBlockingAndFreezesSnapshot(t *testing.T) {
+	ctx := context.Background()
+	flows, defs := newFlowTestServices(t)
+
+	author, err := defs.Create(ctx, AgentDefInput{Name: "author-test", Harness: "codex", Prompt: "Implement the task."})
+	if err != nil {
+		t.Fatalf("create author: %v", err)
+	}
+	codeReview, err := defs.Create(ctx, AgentDefInput{
+		Name: "code-review", Harness: "codex", Model: "gpt-5", ReasoningEffort: "high", Prompt: "Review correctness.",
+	})
+	if err != nil {
+		t.Fatalf("create code reviewer: %v", err)
+	}
+	securityReview, err := defs.Create(ctx, AgentDefInput{
+		Name: "security-review", Harness: "claude", Model: "claude-sonnet-4-6", Prompt: "Review security.",
+	})
+	if err != nil {
+		t.Fatalf("create security reviewer: %v", err)
+	}
+	advisory := false
+	created, err := flows.Create(ctx, FlowInput{
+		Name: "parallel-review", StartNode: "implement",
+		Nodes: []FlowNodeInput{
+			{Key: "implement", Name: "Implement", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: author.ID, Workspace: WorkspaceChange, Artifact: ArtifactChange}}},
+			{Key: "review", Name: "Review", Kind: NodeChangeReview, Config: FlowNodeConfig{ChangeReview: &ChangeReviewNodeConfig{Agents: []ReviewAgentConfig{
+				{AgentDefID: codeReview.ID},
+				{AgentDefID: securityReview.ID, Blocking: &advisory},
+			}}}},
+			{Key: "verify", Name: "Verify", Kind: NodeVerifyChange, Config: FlowNodeConfig{VerifyChange: &VerifyChangeNodeConfig{Agents: []ReviewAgentConfig{{AgentDefID: securityReview.ID}}}}},
+			{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+		},
+		Edges: []FlowEdgeInput{
+			{From: "implement", Outcome: "completed", To: "review"},
+			{From: "review", Outcome: "approved", To: "verify"},
+			{From: "review", Outcome: "changes_requested", To: "implement"},
+			{From: "verify", Outcome: "passed", To: "done"},
+			{From: "verify", Outcome: "changes_requested", To: "implement"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create flow: %v", err)
+	}
+
+	if got := created.Nodes[1].Config.ChangeReview.Agents; len(got) != 2 || got[0].AgentDefID != codeReview.ID || got[1].AgentDefID != securityReview.ID {
+		t.Fatalf("review agent order = %+v", got)
+	} else if got[0].Blocking == nil || !*got[0].Blocking || got[1].Blocking == nil || *got[1].Blocking {
+		t.Fatalf("review blocking values = %+v, want true then false", got)
+	}
+	verifyAgents := created.Nodes[2].Config.VerifyChange.Agents
+	if len(verifyAgents) != 1 || verifyAgents[0].Blocking == nil || !*verifyAgents[0].Blocking {
+		t.Fatalf("verify agents = %+v, want default blocking", verifyAgents)
+	}
+	encodedFlow, err := json.Marshal(created)
+	if err != nil {
+		t.Fatalf("marshal flow: %v", err)
+	}
+	if !strings.Contains(string(encodedFlow), `"blocking":true`) || !strings.Contains(string(encodedFlow), `"blocking":false`) || strings.Contains(string(encodedFlow), `"required"`) {
+		t.Fatalf("canonical flow JSON = %s", encodedFlow)
+	}
+
+	snapshot, err := flows.ResolveSnapshot(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("resolve snapshot: %v", err)
+	}
+	reviewNode, ok := snapshot.Node("review")
+	if !ok || reviewNode.Config.ChangeReview == nil || len(reviewNode.Config.ChangeReview.Agents) != 2 {
+		t.Fatalf("review snapshot node = %+v ok=%v", reviewNode, ok)
+	}
+	frozen := reviewNode.Config.ChangeReview.Agents
+	if !frozen[0].Blocking || frozen[1].Blocking || frozen[0].Agent.Model != "gpt-5" || frozen[0].Agent.ReasoningEffort != "high" || frozen[0].Agent.Prompt != "Review correctness." || frozen[1].Agent.Prompt != "Review security." {
+		t.Fatalf("frozen review agents = %+v", frozen)
+	}
+	verifyNode, ok := snapshot.Node("verify")
+	if !ok || verifyNode.Config.VerifyChange == nil || len(verifyNode.Config.VerifyChange.Agents) != 1 || !verifyNode.Config.VerifyChange.Agents[0].Blocking {
+		t.Fatalf("verify snapshot node = %+v ok=%v", verifyNode, ok)
+	}
+
+	if _, err := defs.Update(ctx, codeReview.ID, AgentDefInput{Name: "code-review", Harness: "codex", Model: "gpt-5-mini", Prompt: "Changed live prompt."}); err != nil {
+		t.Fatalf("update live reviewer: %v", err)
+	}
+	if frozen[0].Agent.Model != "gpt-5" || frozen[0].Agent.Prompt != "Review correctness." || !frozen[0].Blocking || frozen[1].Blocking {
+		t.Fatalf("snapshot changed after live edit: %+v", frozen)
+	}
+}
+
+func TestReviewAgentLegacyRequiredCompatibilityAndValidation(t *testing.T) {
+	legacy, err := decodeNodeConfig(`{"change_review":{"agents":[{"agent_def_id":"ad-code","required":true},{"agent_def_id":"ad-security","required":false}]}}`)
+	if err != nil {
+		t.Fatalf("decode legacy review config: %v", err)
+	}
+	agents := legacy.ChangeReview.Agents
+	if len(agents) != 2 || agents[0].Blocking == nil || !*agents[0].Blocking || agents[1].Blocking == nil || *agents[1].Blocking {
+		t.Fatalf("legacy review agents = %+v", agents)
+	}
+	canonical, err := encodeNodeConfig(legacy)
+	if err != nil {
+		t.Fatalf("encode canonical review config: %v", err)
+	}
+	if strings.Contains(canonical, `"required"`) || !strings.Contains(canonical, `"blocking":false`) {
+		t.Fatalf("canonical review config = %s", canonical)
+	}
+
+	verify, err := decodeNodeConfig(`{"verify_change":{"agents":[{"agent_def_id":"ad-verifier","required":false}]}}`)
+	if err != nil || verify.VerifyChange.Agents[0].Blocking == nil || *verify.VerifyChange.Agents[0].Blocking {
+		t.Fatalf("legacy verify config = %+v err=%v", verify, err)
+	}
+	if _, err := decodeNodeConfig(`{"change_review":{"agents":[{"agent_def_id":"ad-code","blocking":true,"required":true}]}}`); err == nil || !strings.Contains(err.Error(), "both blocking") {
+		t.Fatalf("both-fields error = %v", err)
+	}
+
+	if _, err := normalizeReviewAgents("review", nil); err == nil || !strings.Contains(err.Error(), "at least one agent") {
+		t.Fatalf("empty group error = %v", err)
+	}
+	if _, err := normalizeReviewAgents("review", []ReviewAgentConfig{{AgentDefID: "ad-code"}, {AgentDefID: "ad-code"}}); err == nil || !strings.Contains(err.Error(), "repeats agent definition") {
+		t.Fatalf("duplicate group error = %v", err)
+	}
+
+	var snapshotAgent SnapshotReviewAgent
+	if err := json.Unmarshal([]byte(`{"required":false,"agent":{"name":"legacy","harness":"codex"}}`), &snapshotAgent); err != nil {
+		t.Fatalf("decode legacy snapshot agent: %v", err)
+	}
+	if snapshotAgent.Blocking {
+		t.Fatalf("legacy snapshot agent = %+v, want advisory", snapshotAgent)
+	}
+	snapshotJSON, err := json.Marshal(snapshotAgent)
+	if err != nil {
+		t.Fatalf("marshal snapshot agent: %v", err)
+	}
+	if strings.Contains(string(snapshotJSON), `"required"`) || !strings.Contains(string(snapshotJSON), `"blocking":false`) {
+		t.Fatalf("canonical snapshot JSON = %s", snapshotJSON)
+	}
+	if err := json.Unmarshal([]byte(`{"blocking":false,"required":false,"agent":{"name":"bad","harness":"codex"}}`), &snapshotAgent); err == nil || !strings.Contains(err.Error(), "both blocking") {
+		t.Fatalf("snapshot both-fields error = %v", err)
 	}
 }
 

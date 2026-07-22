@@ -25,6 +25,7 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
+	workerexec "github.com/ClarifiedLabs/flow/internal/worker/execution"
 )
 
 func TestMain(m *testing.M) {
@@ -91,6 +92,37 @@ func TestIsStaleSourceJobHeadReportMatchesWrappedForbidden(t *testing.T) {
 	}
 	if isStaleSourceJobHeadReport(other) {
 		t.Fatalf("isStaleSourceJobHeadReport(%v) = true, want false", other)
+	}
+}
+
+func TestAdvisoryVerdictFindingsStayInCheckDetailsWithoutThreadActions(t *testing.T) {
+	job := flowworker.Job{Payload: map[string]any{"blocking": false}}
+	if checkJobBlocksApproval(job) {
+		t.Fatal("advisory job was treated as blocking")
+	}
+	if !checkJobBlocksApproval(flowworker.Job{Payload: map[string]any{}}) {
+		t.Fatal("legacy job without blocking marker must default to blocking")
+	}
+	report := workerexec.VerdictReport{
+		Verdict: "blocked",
+		Reason:  "Potential timing leak.",
+		Comments: []workerexec.ReviewCommentReport{{
+			SHA: "abc123", File: "auth.go", Line: 42, Body: "Use a constant-time comparison.",
+		}},
+		Threads: []workerexec.ThreadDecisionReport{{
+			ID: "th-1", Decision: "reopen", Body: "Recheck this path.",
+		}},
+	}
+	details := advisoryVerdictDetails(report.Reason, report)
+	for _, want := range []string{"Advisory (non-blocking)", "auth.go:42", "constant-time comparison", "thread th-1", "recommends reopen"} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("advisory details %q missing %q", details, want)
+		}
+	}
+	var stdout bytes.Buffer
+	applyVerdictActions(nil, coordinator.CheckKindReviewer, false, flowworker.Lease{}, workerexec.RunResult{}, report, &stdout)
+	if !strings.Contains(stdout.String(), "retained 2 advisory finding(s)") || !strings.Contains(stdout.String(), "no review threads changed") {
+		t.Fatalf("advisory action output = %q", stdout.String())
 	}
 }
 

@@ -116,9 +116,11 @@ Flow configuration:
 flow agent-defs list
 flow agent-defs create -f agent.yaml
 flow agent-defs edit AGENT_DEF_ID -f agent.yaml
+flow agent-defs rm AGENT_DEF_ID
 flow flows list
 flow flows create -f flow.yaml
 flow flows edit FLOW_ID -f flow.yaml
+flow flows rm FLOW_ID
 flow flows set-default FLOW_ID
 ```
 
@@ -127,7 +129,58 @@ to scope a command to one project when you are not inside its worktree.
 
 `flow agent-defs` and `flow flows` manage the same project-owned configuration
 shown in the web UI's **Flows** page. The `-f` files can be YAML or JSON; use
-`-f -` to read from stdin.
+`-f -` to read from stdin. `flow flows list` prints each graph's start key and
+node count, followed by its blocking/advisory reviewer and verifier counts.
+
+An agent definition combines two concerns: the **model agent** selection
+(`harness`, optional `model`, and optional `reasoning_effort`) and the **focus
+agent** instructions (`name` and `prompt`) applied to that model. The
+`flow agent-defs list|create|edit|rm` commands manage these reusable
+model/focus definitions; graph nodes reference their IDs. For example, create
+two definitions with distinct models and review focuses:
+
+```yaml
+# security-review.yaml
+name: security-review
+harness: codex
+model: gpt-5.2-codex
+reasoning_effort: high
+prompt: Review authorization boundaries, input trust, and secret handling. Report concrete exploitable paths.
+```
+
+```yaml
+# performance-review.yaml
+name: performance-review
+harness: claude
+model: claude-opus-4-1
+reasoning_effort: high
+prompt: Review algorithmic cost, database access patterns, allocation hot spots, and realistic scaling risks.
+```
+
+```sh
+flow agent-defs create -f security-review.yaml
+flow agent-defs create -f performance-review.yaml
+flow agent-defs list
+```
+
+Use the IDs returned by those commands in a review node (shown here as the
+relevant node from a flow file):
+
+```yaml
+key: review
+name: Security and performance review
+kind: change_review
+config:
+  change_review:
+    agents:
+      - agent_def_id: ad-security-review
+        blocking: true
+      - agent_def_id: ad-performance-review
+        blocking: false
+```
+
+Scheduling freezes both model selections and focus prompts, so editing a live
+definition affects only later workflow runs.
 
 Agent/session workflow, usually run inside a Flow-managed tmux session:
 
@@ -169,7 +222,7 @@ flow thread certify THREAD_ID
 flow thread reopen THREAD_ID
 ```
 
-## Check Configuration
+## Multi-Agent Nodes and Check Configuration
 
 Repo-versioned CI configuration lives in `.flow/checks/*.yaml`. CI jobs use
 ephemeral capacity. Review and verification agents are selected by their graph
@@ -177,9 +230,26 @@ nodes and use persistent agent capacity, so workers need the selected agent's
 harness label, such as `agent.harness.codex: "true"`.
 
 An `automated_checks` node runs the repository CI definitions. A
-`change_review` or `verify_change` node runs the agent definitions frozen into
-that graph node. Each node visit receives distinct check identities, so a loop
-back through review or verification executes them again.
+`change_review` or `verify_change` node is a multi-agent node: it fans out one
+child job per configured focus agent while remaining the workflow run's one
+active graph node. Successor graph nodes cannot start until that internal
+barrier closes.
+
+The barrier awaits every child, including advisory agents. Agent entries are
+blocking by default when the flag is omitted. Once all children finish, a
+blocking failure selects the node's failure/changes-requested outcome; an
+advisory failure is recorded and shown but does not change the outcome.
+Use `blocking: false` for an advisory entry. It does not skip or detach the
+job: the agent is always dispatched and the barrier still waits for its
+terminal result. The older `required` spelling is a deprecated compatibility
+alias (`required: true` means blocking and `required: false` means advisory);
+new flow files should use `blocking` and should not set both names.
+
+Each node visit receives distinct check identities, so a loop back through
+review or verification executes every configured child again. All of those
+children share workers' `persistent_agent` capacity with author and other agent
+jobs; the barrier can therefore wait while another project or node uses the
+available slots.
 
 Set `requires` labels on CI definitions to match workers that can run the
 entrypoint. Review and verifier instructions belong in agent definitions, not

@@ -387,24 +387,95 @@ export function renderFlowGraphSummaryView(flow) {
 
 export function agentDefOptionsHTML(agentDefs, selectedID, options = {}) {
   const selected = String(selectedID || "").trim();
+  const hasSelected = (agentDefs || []).some((def) => String(value(def, "id", "ID")) === selected);
   const empty = options.includeEmpty
     ? `<option value="" ${selected ? "" : "selected"}>${escapeHTML(options.emptyLabel || "")}</option>`
     : "";
-  return empty + (agentDefs || []).map((def) => {
+  const unavailable = selected && !hasSelected
+    ? `<option value="${escapeAttr(selected)}" selected>${escapeHTML(`${selected} (unavailable)`)}</option>`
+    : "";
+  return empty + unavailable + (agentDefs || []).map((def) => {
     const id = value(def, "id", "ID");
     const name = value(def, "name", "Name") || id;
-    return `<option value="${escapeAttr(id)}" ${id === selected ? "selected" : ""}>${escapeHTML(name)}</option>`;
+    const harness = String(value(def, "harness", "Harness") || "").trim();
+    const model = String(value(def, "model", "Model") || "").trim();
+    const runtime = [harness, model].filter(Boolean).join(" / ");
+    const label = runtime ? `${name} — ${runtime}` : name;
+    return `<option value="${escapeAttr(id)}" ${id === selected ? "selected" : ""}>${escapeHTML(label)}</option>`;
   }).join("");
 }
 
 const NODE_KINDS = ["agent", "automated_checks", "change_review", "human_gate", "verify_change", "materialize_task_set", "merge_change", "terminal"];
+const REVIEW_NODE_CONFIG_KEYS = {
+  change_review: "change_review",
+  verify_change: "verify_change",
+};
+
+function reviewNodeConfigKeyView(kind) {
+  return REVIEW_NODE_CONFIG_KEYS[kind] || "";
+}
+
+function reviewAgentsFromNodeView(node, kind) {
+  const config = value(node, "config", "Config") || {};
+  const configKey = reviewNodeConfigKeyView(kind);
+  const pascalKey = configKey === "change_review" ? "ChangeReview" : "VerifyChange";
+  const reviewConfig = value(config, configKey, pascalKey) || {};
+  const agents = value(reviewConfig, "agents", "Agents");
+  return Array.isArray(agents) ? agents : [];
+}
+
+// Saved legacy entries may still contain required. Treat it only as an input
+// alias; structured editor payloads always use the canonical blocking field.
+export function reviewAgentBlockingView(agent = {}) {
+  if (agent.blocking !== undefined && agent.blocking !== null) return Boolean(agent.blocking);
+  if (agent.Blocking !== undefined && agent.Blocking !== null) return Boolean(agent.Blocking);
+  if (agent.required !== undefined && agent.required !== null) return Boolean(agent.required);
+  if (agent.Required !== undefined && agent.Required !== null) return Boolean(agent.Required);
+  return true;
+}
+
+export function renderReviewAgentRowView(agent = {}, agentDefs = [], configKey = "change_review") {
+  const agentDefID = value(agent, "agent_def_id", "AgentDefID");
+  const blocking = reviewAgentBlockingView(agent);
+  const blockingLabel = configKey === "verify_change" ? "Blocks success" : "Blocks approval";
+  return `
+    <div class="flow-row flow-review-agent-row" data-review-agent-row>
+      <select name="review_agent_def_id" aria-label="Agent definition" required>
+        ${agentDefOptionsHTML(agentDefs, agentDefID, { includeEmpty: true, emptyLabel: "Select agent definition" })}
+      </select>
+      <label><input type="checkbox" name="review_agent_blocking" ${blocking ? "checked" : ""}> ${blockingLabel}</label>
+      <span class="muted" data-review-agent-advisory ${blocking ? "hidden" : ""}>Advisory</span>
+      <div class="flow-row-controls">
+        <button type="button" class="button secondary icon-button" data-review-agent-up title="Move agent up">&uarr;</button>
+        <button type="button" class="button secondary icon-button" data-review-agent-down title="Move agent down">&darr;</button>
+        <button type="button" class="button secondary icon-button" data-review-agent-remove title="Remove agent">&times;</button>
+      </div>
+    </div>
+  `;
+}
 
 function nodeConfigValue(node) {
   const config = value(node, "config", "Config") || {};
   return JSON.stringify(config, null, 2);
 }
 
-export function renderNodeCardView(node = {}) {
+export function renderNodeConfigEditorView(node = {}, agentDefs = []) {
+  const kind = value(node, "kind", "Kind") || "agent";
+  const configKey = reviewNodeConfigKeyView(kind);
+  if (!configKey) {
+    return `<textarea name="node_config" rows="6" spellcheck="false" aria-label="Strict node configuration JSON">${escapeHTML(nodeConfigValue(node))}</textarea>`;
+  }
+  const agents = reviewAgentsFromNodeView(node, kind);
+  return `
+    <div class="flow-review-agent-config" data-review-agent-config data-review-config-key="${configKey}">
+      <p class="muted">Every listed agent runs and is awaited. ${configKey === "verify_change" ? "Blocks success" : "Blocks approval"} only controls whether that agent's findings can veto the node.</p>
+      <div class="flow-row-list" data-review-agent-rows>${agents.map((agent) => renderReviewAgentRowView(agent, agentDefs, configKey)).join("")}</div>
+      <div class="flow-row-actions"><button type="button" class="button secondary" data-add-review-agent>Add agent</button></div>
+    </div>
+  `;
+}
+
+export function renderNodeCardView(node = {}, agentDefs = []) {
   const key = value(node, "key", "Key");
   const name = value(node, "name", "Name");
   const kind = value(node, "kind", "Kind") || "agent";
@@ -413,7 +484,7 @@ export function renderNodeCardView(node = {}) {
       <input name="node_key" placeholder="stable-node-key" value="${escapeAttr(key)}" aria-label="Node key" required>
       <input name="node_name" placeholder="Short display name (e.g. Implement)" value="${escapeAttr(name)}" aria-label="Node name" required>
       <select name="node_kind" aria-label="Trusted node kind">${NODE_KINDS.map((candidate) => `<option value="${candidate}" ${candidate === kind ? "selected" : ""}>${candidate}</option>`).join("")}</select>
-      <textarea name="node_config" rows="6" spellcheck="false" aria-label="Strict node configuration JSON">${escapeHTML(nodeConfigValue(node))}</textarea>
+      <div data-node-config-editor>${renderNodeConfigEditorView(node, agentDefs)}</div>
       <div class="flow-row-controls">
         <button type="button" class="button secondary icon-button" data-node-up title="Move node up">&uarr;</button>
         <button type="button" class="button secondary icon-button" data-node-down title="Move node down">&darr;</button>
@@ -452,7 +523,7 @@ export function renderFlowEditorView(flow, agentDefs) {
       <label><span>Start node</span><select name="start_node">${nodeKeys.map((key) => `<option value="${escapeAttr(key)}" ${key === startNode ? "selected" : ""}>${escapeHTML(key)}</option>`).join("")}</select></label>
       <label><span>Transition budget</span><input name="transition_budget" type="number" min="1" max="500" value="${transitionBudget}"></label>
       <div class="flow-rows-head wide">Trusted node cards</div>
-      <div class="flow-row-list wide" data-node-cards>${nodes.map(renderNodeCardView).join("")}</div>
+      <div class="flow-row-list wide" data-node-cards>${nodes.map((node) => renderNodeCardView(node, agentDefs)).join("")}</div>
       <div class="flow-row-actions wide"><button type="button" class="button secondary" data-add-node>Add node</button></div>
       <div class="flow-rows-head wide">Outcome transitions</div>
       <div class="flow-row-list wide" data-edge-rows>${edges.map((edge) => renderEdgeRowView(edge, nodeKeys)).join("")}</div>
@@ -471,12 +542,29 @@ export function flowPayloadFromEditorView(form) {
     const element = root.querySelector(selector);
     return element ? String(element.value ?? "") : "";
   };
-  const nodes = Array.from(form.querySelectorAll("[data-node-card]")).map((card) => ({
-    key: readValue(card, '[name="node_key"]').trim(),
-    name: readValue(card, '[name="node_name"]').trim(),
-    kind: readValue(card, '[name="node_kind"]'),
-    config: JSON.parse(readValue(card, '[name="node_config"]') || "{}"),
-  }));
+  const nodes = Array.from(form.querySelectorAll("[data-node-card]")).map((card) => {
+    const kind = readValue(card, '[name="node_kind"]');
+    const reviewConfigKey = reviewNodeConfigKeyView(kind);
+    let config;
+    if (reviewConfigKey) {
+      const agents = Array.from(card.querySelectorAll("[data-review-agent-row]")).map((row) => {
+        const blocking = row.querySelector('[name="review_agent_blocking"]');
+        return {
+          agent_def_id: readValue(row, '[name="review_agent_def_id"]'),
+          blocking: blocking ? Boolean(blocking.checked) : true,
+        };
+      });
+      config = { [reviewConfigKey]: { agents } };
+    } else {
+      config = JSON.parse(readValue(card, '[name="node_config"]') || "{}");
+    }
+    return {
+      key: readValue(card, '[name="node_key"]').trim(),
+      name: readValue(card, '[name="node_name"]').trim(),
+      kind,
+      config,
+    };
+  });
   const edges = Array.from(form.querySelectorAll("[data-edge-row]")).map((row) => ({
     from: readValue(row, '[name="edge_from"]'),
     outcome: readValue(row, '[name="edge_outcome"]').trim(),
@@ -536,8 +624,12 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
       if (!target || typeof target.closest !== "function") return;
       if (target.closest("[data-add-node]")) {
         event.preventDefault();
-        form.querySelector("[data-node-cards]")?.insertAdjacentHTML("beforeend", renderNodeCardView({}));
+        form.querySelector("[data-node-cards]")?.insertAdjacentHTML("beforeend", renderNodeCardView({}, agentDefs));
         refreshGraphSelectorsView(form);
+      } else if (target.closest("[data-add-review-agent]")) {
+        event.preventDefault();
+        const config = target.closest("[data-review-agent-config]");
+        config?.querySelector("[data-review-agent-rows]")?.insertAdjacentHTML("beforeend", renderReviewAgentRowView({}, agentDefs, config.dataset?.reviewConfigKey));
       } else if (target.closest("[data-add-edge]")) {
         event.preventDefault();
         form.querySelector("[data-edge-rows]")?.insertAdjacentHTML("beforeend", renderEdgeRowView({}, graphNodeKeysView(form)));
@@ -548,6 +640,15 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
       } else if (target.closest("[data-edge-remove]")) {
         event.preventDefault();
         target.closest("[data-edge-row]")?.remove();
+      } else if (target.closest("[data-review-agent-remove]")) {
+        event.preventDefault();
+        target.closest("[data-review-agent-row]")?.remove();
+      } else if (target.closest("[data-review-agent-up]")) {
+        event.preventDefault();
+        moveRowView(target.closest("[data-review-agent-row]"), -1);
+      } else if (target.closest("[data-review-agent-down]")) {
+        event.preventDefault();
+        moveRowView(target.closest("[data-review-agent-row]"), 1);
       } else if (target.closest("[data-node-up]")) {
         event.preventDefault();
         moveRowView(target.closest("[data-node-card]"), -1);
@@ -561,6 +662,22 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
       }
     });
   }
+  form.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!target) return;
+    if (target.name === "review_agent_blocking" && typeof target.closest === "function") {
+      const marker = target.closest("[data-review-agent-row]")?.querySelector("[data-review-agent-advisory]");
+      if (marker) marker.hidden = Boolean(target.checked);
+      return;
+    }
+    if (target.name !== "node_kind" || typeof target.closest !== "function") return;
+    const card = target.closest("[data-node-card]");
+    const editor = card?.querySelector("[data-node-config-editor]");
+    if (!editor) return;
+    const configKey = reviewNodeConfigKeyView(target.value);
+    const config = configKey ? { [configKey]: { agents: [{}] } } : {};
+    editor.innerHTML = renderNodeConfigEditorView({ kind: target.value, config }, agentDefs);
+  });
   form.addEventListener("input", () => refreshGraphSelectorsView(form));
 
   form.addEventListener("submit", async (event) => {
