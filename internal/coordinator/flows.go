@@ -651,15 +651,20 @@ func (s *FlowService) SeedDefaults(ctx context.Context) error {
 	for _, seed := range []struct {
 		name  string
 		skill string
+		focus string
 	}{
-		{"task-planner", flowskills.TaskPlannerSkill},
-		{"author", flowskills.AuthorSkill},
-		{"reviewer", flowskills.ReviewerSkill},
-		{"verifier", flowskills.VerifierSkill},
+		{name: "task-planner", skill: flowskills.TaskPlannerSkill},
+		{name: "author", skill: flowskills.AuthorSkill},
+		{name: "code-reviewer", skill: flowskills.ReviewerSkill},
+		{name: "security-reviewer", skill: flowskills.ReviewerSkill, focus: "Security focus: prioritize trust boundaries, authorization, input validation, secret handling, injection risks, and exploitable failure modes."},
+		{name: "verifier", skill: flowskills.VerifierSkill},
 	} {
 		prompt, err := flowskills.Instructions(seed.skill)
 		if err != nil {
 			return fmt.Errorf("seed agent def %s: %w", seed.name, err)
+		}
+		if seed.focus != "" {
+			prompt += "\n\n" + seed.focus
 		}
 		def, err := defs.create(ctx, AgentDefInput{Name: seed.name, Harness: harness, Prompt: prompt}, true)
 		if err != nil {
@@ -676,7 +681,7 @@ func (s *FlowService) SeedDefaults(ctx context.Context) error {
 		Nodes: []FlowNodeInput{
 			{Key: "implement", Name: "Implement", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: defIDs["author"], Workspace: WorkspaceChange, Artifact: ArtifactChange}}},
 			{Key: "checks", Name: "Automated checks", Kind: NodeAutomatedChecks, Config: FlowNodeConfig{AutomatedChecks: &AutomatedChecksNodeConfig{}}},
-			{Key: "review", Name: "Agent review", Kind: NodeChangeReview, Config: FlowNodeConfig{ChangeReview: &ChangeReviewNodeConfig{Agents: []ReviewAgentConfig{{AgentDefID: defIDs["reviewer"]}}}}},
+			{Key: "review", Name: "Code and security review", Kind: NodeChangeReview, Config: FlowNodeConfig{ChangeReview: &ChangeReviewNodeConfig{Agents: []ReviewAgentConfig{{AgentDefID: defIDs["code-reviewer"]}, {AgentDefID: defIDs["security-reviewer"]}}}}},
 			{Key: "human-review", Name: "Human change review", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Instructions: "Review the change and choose whether it can proceed.", Outcomes: []string{"approved", "changes_requested", "rejected"}}}},
 			{Key: "verify", Name: "Verify requirements", Kind: NodeVerifyChange, Config: FlowNodeConfig{VerifyChange: &VerifyChangeNodeConfig{Agents: []ReviewAgentConfig{{AgentDefID: defIDs["verifier"]}}}}},
 			{Key: "merge", Name: "Merge change", Kind: NodeMergeChange, Config: FlowNodeConfig{MergeChange: &MergeChangeNodeConfig{}}},

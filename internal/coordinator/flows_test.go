@@ -33,10 +33,12 @@ func TestSeedDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List agent defs: %v", err)
 	}
-	if len(allDefs) != 4 {
-		t.Fatalf("seeded agent defs = %d, want 4", len(allDefs))
+	if len(allDefs) != 5 {
+		t.Fatalf("seeded agent defs = %d, want 5", len(allDefs))
 	}
+	defsByName := make(map[string]AgentDef, len(allDefs))
 	for _, def := range allDefs {
+		defsByName[def.Name] = def
 		if !def.Builtin {
 			t.Errorf("seeded agent def %s not marked builtin", def.Name)
 		}
@@ -65,6 +67,20 @@ func TestSeedDefaults(t *testing.T) {
 	}
 	if coding.Nodes[0].Kind != NodeAgent || coding.Nodes[len(coding.Nodes)-1].Kind != NodeTerminal {
 		t.Errorf("coding nodes = %+v", coding.Nodes)
+	}
+	codeReviewer, hasCodeReviewer := defsByName["code-reviewer"]
+	securityReviewer, hasSecurityReviewer := defsByName["security-reviewer"]
+	if !hasCodeReviewer || !hasSecurityReviewer || !strings.Contains(strings.ToLower(securityReviewer.Prompt), "security focus") {
+		t.Fatalf("seeded reviewers = code:%+v security:%+v", codeReviewer, securityReviewer)
+	}
+	reviewAgents := coding.Nodes[2].Config.ChangeReview.Agents
+	if len(reviewAgents) != 2 || reviewAgents[0].AgentDefID != codeReviewer.ID || reviewAgents[1].AgentDefID != securityReviewer.ID {
+		t.Fatalf("default review agents = %+v", reviewAgents)
+	}
+	for _, agent := range reviewAgents {
+		if agent.Blocking == nil || !*agent.Blocking {
+			t.Errorf("default reviewer is not blocking: %+v", agent)
+		}
 	}
 
 	planning, err := flows.GetByName(ctx, "planning")
