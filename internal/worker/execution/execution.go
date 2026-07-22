@@ -138,28 +138,22 @@ type JobPayload struct {
 	// harness instead of re-deriving it from argv. See resolveHarness.
 	AgentHarness   string `json:"agent_harness,omitempty"`
 	ConsoleHarness string `json:"console_harness,omitempty"`
-	// ExchangeURL, ProjectID, and ProjectName identify the owning project;
-	// the coordinator stamps them on every payload so one worker serves all
-	// projects, cloning each job's exchange.
-	ExchangeURL string `json:"exchange_url,omitempty"`
+	// ProjectID and ProjectName identify the owning project. The coordinator
+	// stamps them on every payload so one worker serves all projects and derives
+	// each exchange URL from its own coordinator URL.
 	ProjectID   string `json:"project_id,omitempty"`
 	ProjectName string `json:"project_name,omitempty"`
 }
 
-// effectiveExchangeURL prefers the payload's per-project exchange and falls
-// back to the worker config's pinned URL (single-exchange setups).
-func effectiveExchangeURL(payload JobPayload, cfg config.WorkerConfig) string {
-	if url := strings.TrimSpace(payload.ExchangeURL); url != "" {
-		return url
-	}
-
-	return strings.TrimSpace(cfg.Git.ExchangeURL)
+func effectiveExchangeURL(payload JobPayload, cfg config.WorkerConfig) (string, error) {
+	return flowgit.ExchangeHTTPURL(cfg.CoordinatorURL, payload.ProjectID)
 }
 
 type RunInput struct {
 	Config       config.WorkerConfig
 	Job          Job
 	Lease        Lease
+	ProjectID    string
 	Session      *coordinator.Session
 	SessionToken string
 }
@@ -187,14 +181,20 @@ func RunJob(ctx context.Context, input RunInput) RunResult {
 	if err != nil {
 		return failedResult(input, payload, fmt.Errorf("decode job payload: %w", err))
 	}
+	if projectID := strings.TrimSpace(input.ProjectID); projectID != "" {
+		if payload.ProjectID != "" && payload.ProjectID != projectID {
+			return failedResult(input, payload, fmt.Errorf("job payload project id %q does not match claimed project %q", payload.ProjectID, projectID))
+		}
+		payload.ProjectID = projectID
+	}
 	if payload.Entrypoint == nil {
 		return failedResult(input, payload, errors.New("job payload entrypoint is required"))
 	}
 	if err := validateEntrypoint(*payload.Entrypoint); err != nil {
 		return failedResult(input, payload, err)
 	}
-	if effectiveExchangeURL(payload, input.Config) == "" {
-		return failedResult(input, payload, errors.New("job payload exchange_url (or worker config git.exchange_url) is required to run jobs"))
+	if _, err := effectiveExchangeURL(payload, input.Config); err != nil {
+		return failedResult(input, payload, fmt.Errorf("derive project exchange url: %w", err))
 	}
 
 	worktree, err := prepareWorktree(ctx, input.Config, input.Job, payload, sessionIDForRun(input, payload), input.SessionToken)
@@ -334,6 +334,10 @@ func validateEntrypoint(entrypoint Entrypoint) error {
 func prepareWorktree(ctx context.Context, cfg config.WorkerConfig, job Job, payload JobPayload, sessionID string, sessionToken string) (string, error) {
 	jobDirectory := jobDir(cfg.WorkDir, job.ID)
 	repoDir := filepath.Join(jobDirectory, "repo")
+	exchangeURL, err := effectiveExchangeURL(payload, cfg)
+	if err != nil {
+		return "", fmt.Errorf("derive project exchange url: %w", err)
+	}
 	slog.Debug("worker prepare worktree", "job_id", job.ID, "repo_dir", repoDir)
 	if err := os.MkdirAll(jobDirectory, 0o700); err != nil {
 		return "", fmt.Errorf("create job directory: %w", err)
@@ -344,13 +348,16 @@ func prepareWorktree(ctx context.Context, cfg config.WorkerConfig, job Job, payl
 			return "", fmt.Errorf("job worktree exists but is not a git repository: %s", repoDir)
 		}
 		slog.Debug("worker clone exchange remote", "job_id", job.ID, "repo_dir", repoDir)
-		if err := git(ctx, "", cfg, "clone", effectiveExchangeURL(payload, cfg), repoDir); err != nil {
+		if err := git(ctx, "", cfg, "clone", exchangeURL, repoDir); err != nil {
 			return "", fmt.Errorf("clone exchange remote: %w", err)
 		}
 	} else if err != nil {
 		return "", fmt.Errorf("stat job worktree: %w", err)
 	}
 
+	if err := git(ctx, repoDir, cfg, "remote", "set-url", "origin", exchangeURL); err != nil {
+		return "", fmt.Errorf("set exchange origin: %w", err)
+	}
 	if err := git(ctx, repoDir, cfg, "fetch", "origin", "--prune"); err != nil {
 		return "", fmt.Errorf("fetch exchange remote: %w", err)
 	}
@@ -1261,12 +1268,8 @@ func scrubWorkerDeploymentEnv(env map[string]string) {
 		"FLOW_WORKER_DOCKERD",
 		"FLOW_WORKER_DOCKERD_ARGS",
 		"FLOW_WORKER_DOCKERD_LOG",
-		"FLOW_WORKER_GIT_EXCHANGE_URL",
 		"FLOW_WORKER_GIT_PRINCIPAL",
-		"FLOW_WORKER_GIT_URL_REWRITE_FROM",
-		"FLOW_WORKER_GIT_URL_REWRITE_TO",
 		"FLOW_WORKER_ID",
-		"FLOW_WORKER_INTERNAL_BASE_URL",
 		"FLOW_WORKER_JOIN_TOKEN",
 		"FLOW_WORKER_PROTOCOL_VERSION",
 		"FLOW_WORKER_TERMINAL_BIND_ADDRESS",
@@ -1284,8 +1287,8 @@ func workerGitAuthEnv(input tmuxInput) map[string]string {
 	if strings.TrimSpace(input.Payload.WorkspaceMode) == "base" {
 		return nil
 	}
-	if !strings.HasPrefix(strings.TrimSpace(input.Payload.ExchangeURL), "http://") &&
-		!strings.HasPrefix(strings.TrimSpace(input.Payload.ExchangeURL), "https://") {
+	exchangeURL, err := effectiveExchangeURL(input.Payload, input.Config)
+	if err != nil || (!strings.HasPrefix(exchangeURL, "http://") && !strings.HasPrefix(exchangeURL, "https://")) {
 		return nil
 	}
 	token := strings.TrimSpace(input.SessionToken)

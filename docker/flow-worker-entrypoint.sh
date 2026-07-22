@@ -22,19 +22,6 @@ should_start_dockerd() {
   esac
 }
 
-configure_git_url_rewrite() {
-  local from="${FLOW_WORKER_GIT_URL_REWRITE_FROM:-}"
-  local to="${FLOW_WORKER_GIT_URL_REWRITE_TO:-}"
-
-  if [ -z "$from" ] || [ -z "$to" ]; then
-    return 0
-  fi
-
-  from="${from%/}/"
-  to="${to%/}/"
-  git config --global "url.${to}.insteadOf" "$from"
-}
-
 configure_worker_terminal() {
   local public_base_url="${FLOW_WORKER_TERMINAL_PUBLIC_BASE_URL:-}"
   local bind_address="${FLOW_WORKER_TERMINAL_BIND_ADDRESS:-0.0.0.0}"
@@ -89,7 +76,6 @@ start_dockerd_rootless() {
 }
 
 configure_worker_terminal "$@"
-configure_git_url_rewrite
 
 if should_start_dockerd; then
   start_dockerd_rootless

@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -28,10 +27,6 @@ func TestCreateServerProjectCreatesExchangeWithHooksAndIsIdempotent(t *testing.T
 	if created.DatabasePath != ProjectDatabasePath(dataDir, "p-test") {
 		t.Fatalf("DatabasePath = %q", created.DatabasePath)
 	}
-	if !strings.HasPrefix(created.ExchangeURL, "file://") {
-		t.Fatalf("ExchangeURL = %q, want file:// url", created.ExchangeURL)
-	}
-
 	isBare, err := gitBareOutput(ctx, created.ExchangePath, nil, "rev-parse", "--is-bare-repository")
 	if err != nil || isBare != "true" {
 		t.Fatalf("exchange is not a bare repository: %q %v", isBare, err)
@@ -84,7 +79,7 @@ func TestSeedExchangeFromWorktreeSeedsBaseAndPreservesOrigin(t *testing.T) {
 	result, err := SeedExchangeFromWorktree(ctx, SeedOptions{
 		RepoPath:    repoPath,
 		BaseBranch:  "main",
-		ExchangeURL: project.ExchangeURL,
+		ExchangeURL: project.ExchangePath,
 	})
 	if err != nil {
 		t.Fatalf("seed exchange: %v", err)
@@ -104,8 +99,8 @@ func TestSeedExchangeFromWorktreeSeedsBaseAndPreservesOrigin(t *testing.T) {
 		t.Fatalf("origin URL = %q (%v), want %q", currentOrigin, err, originURL)
 	}
 	flowRemote, err := gitOutput(ctx, repoPath, nil, "remote", "get-url", DefaultExchangeName)
-	if err != nil || flowRemote != project.ExchangeURL {
-		t.Fatalf("flow remote = %q (%v), want %q", flowRemote, err, project.ExchangeURL)
+	if err != nil || flowRemote != project.ExchangePath {
+		t.Fatalf("flow remote = %q (%v), want %q", flowRemote, err, project.ExchangePath)
 	}
 
 	localHead, err := gitOutput(ctx, repoPath, nil, "rev-parse", "refs/heads/main")
@@ -123,7 +118,7 @@ func TestSeedExchangeFromWorktreeSeedsBaseAndPreservesOrigin(t *testing.T) {
 	rerun, err := SeedExchangeFromWorktree(ctx, SeedOptions{
 		RepoPath:    repoPath,
 		BaseBranch:  "main",
-		ExchangeURL: project.ExchangeURL,
+		ExchangeURL: project.ExchangePath,
 	})
 	if err != nil {
 		t.Fatalf("re-seed exchange: %v", err)
@@ -146,7 +141,7 @@ func TestSeedExchangeFromWorktreeWarnsOnDirtyWorktree(t *testing.T) {
 	result, err := SeedExchangeFromWorktree(ctx, SeedOptions{
 		RepoPath:    repoPath,
 		BaseBranch:  "main",
-		ExchangeURL: project.ExchangeURL,
+		ExchangeURL: project.ExchangePath,
 	})
 	if err != nil {
 		t.Fatalf("seed with dirty worktree: %v", err)
@@ -184,7 +179,7 @@ func TestSeedExchangeFromWorktreeFailsWhenFlowRemoteDiffers(t *testing.T) {
 	if _, err := SeedExchangeFromWorktree(ctx, SeedOptions{
 		RepoPath:    repoPath,
 		BaseBranch:  "main",
-		ExchangeURL: project.ExchangeURL,
+		ExchangeURL: project.ExchangePath,
 	}); err == nil {
 		t.Fatal("conflicting flow remote was accepted")
 	}
@@ -194,7 +189,7 @@ func TestSeedExchangeFromWorktreeFailsWhenFlowRemoteDiffers(t *testing.T) {
 		RepoPath:     repoPath,
 		BaseBranch:   "main",
 		ExchangeName: "flow-local",
-		ExchangeURL:  project.ExchangeURL,
+		ExchangeURL:  project.ExchangePath,
 	}); err != nil {
 		t.Fatalf("seed with alternate exchange name: %v", err)
 	}

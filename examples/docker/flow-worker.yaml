@@ -1,7 +1,7 @@
 worker_id: w-local
 coordinator_url: http://flow-server:8421
 work_dir: /flow/work
-protocol_version: "1"
+protocol_version: "3"
 labels:
   local: "true"
 capacity:

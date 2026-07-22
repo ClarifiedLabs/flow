@@ -324,7 +324,6 @@ func newSessionServiceFixture(t *testing.T) sessionFixture {
 		RepoPath:     "/tmp/session-fixture",
 		BaseBranch:   "main",
 		ExchangeName: "flow",
-		ExchangeURL:  "file:///tmp/session-fixture.git",
 	}
 	// Session tokens carry a project binding with a foreign key into the global
 	// projects registry, so the project row must exist before tokens are minted.

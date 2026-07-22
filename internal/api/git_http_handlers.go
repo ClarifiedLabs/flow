@@ -12,12 +12,11 @@ import (
 	"strings"
 
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
+	flowgit "github.com/ClarifiedLabs/flow/internal/git"
 )
 
-const gitHTTPPrefix = "/git/projects/"
-
 func (s *Server) serveGitHTTPRequest(w http.ResponseWriter, r *http.Request) bool {
-	if !strings.HasPrefix(r.URL.Path, gitHTTPPrefix) {
+	if !strings.HasPrefix(r.URL.Path, flowgit.ExchangeHTTPPrefix) {
 		return false
 	}
 
@@ -69,7 +68,7 @@ func (s *Server) serveGitHTTPRequest(w http.ResponseWriter, r *http.Request) boo
 }
 
 func parseGitHTTPPath(requestPath string) (string, string, bool) {
-	rest := strings.TrimPrefix(requestPath, gitHTTPPrefix)
+	rest := strings.TrimPrefix(requestPath, flowgit.ExchangeHTTPPrefix)
 	projectID, suffix, ok := strings.Cut(rest, "/")
 	if !ok || strings.TrimSpace(projectID) == "" {
 		return "", "", false

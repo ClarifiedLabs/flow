@@ -253,7 +253,7 @@ func seedReadyChangeWithConfig(t *testing.T, ctx context.Context, repoPath strin
 	if err != nil {
 		t.Fatalf("rev-parse head: %v", err)
 	}
-	if err := runReconcileGit(repoPath, []string{"FLOW_GIT_PRINCIPAL=worker:w-local"}, "push", project.ExchangeURL, branch+":"+branch); err != nil {
+	if err := runReconcileGit(repoPath, []string{"FLOW_GIT_PRINCIPAL=worker:w-local"}, "push", project.ExchangePath, branch+":"+branch); err != nil {
 		t.Fatalf("push task branch: %v", err)
 	}
 	change, err := sessions.UpdateChangeHead(ctx, ensured.Change.ID, head)

@@ -66,6 +66,12 @@ The user's `origin` remote is not replaced. The Flow exchange remote is private
 application state and is the rendezvous point between the coordinator, local CLI,
 and workers.
 
+Exchange URLs are caller-derived, not project metadata. The CLI combines its
+configured `server_url` with `/git/projects/<project-id>/exchange.git`; workers
+do the same with `coordinator_url`. This lets host and container workers use
+different network addresses for the same Flow server without URL rewriting or
+a separately advertised exchange base URL.
+
 ## API and project routing
 
 `internal/api.Server` handles all coordinator HTTP traffic:

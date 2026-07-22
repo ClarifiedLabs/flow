@@ -30,13 +30,13 @@ type Store struct {
 
 // Open opens a per-project database and applies the per-project migration set.
 func Open(ctx context.Context, path string) (*Store, error) {
-	return openWith(ctx, path, migrationFS, "migrations/*.sql", "3")
+	return openWith(ctx, path, migrationFS, "migrations/*.sql", "4")
 }
 
 // OpenGlobal opens the coordinator-wide database (projects registry, workers,
 // tokens, web sessions) and applies the global migration set.
 func OpenGlobal(ctx context.Context, path string) (*Store, error) {
-	return openWith(ctx, path, globalMigrationFS, "migrations_global/*.sql", "3")
+	return openWith(ctx, path, globalMigrationFS, "migrations_global/*.sql", "4")
 }
 
 func openWith(ctx context.Context, path string, migrations embed.FS, glob string, expectedStorageFormat string) (*Store, error) {

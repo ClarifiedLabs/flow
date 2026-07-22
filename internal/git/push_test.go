@@ -9,7 +9,7 @@ func TestPushBranchPublishesHeadAndIsIdempotent(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	repoPath, project := initializedRepoWithTaskBranch(t)
-	if err := gitRun(ctx, repoPath, nil, "remote", "add", "origin", project.ExchangeURL); err != nil {
+	if err := gitRun(ctx, repoPath, nil, "remote", "add", "origin", project.ExchangePath); err != nil {
 		t.Fatalf("add origin remote: %v", err)
 	}
 	if err := gitRun(ctx, repoPath, nil, "checkout", "-b", "task/t-test-0001"); err != nil {

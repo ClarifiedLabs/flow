@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ClarifiedLabs/flow/internal/api"
+	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
@@ -78,9 +79,8 @@ func newWorkerTestFixture(t *testing.T) workerTestFixture {
 	neutralizeExchangeHooks(t, project.ExchangePath)
 	// Seed the project's exchange with a base branch so the worker can clone
 	// and check out jobs. Jobs enqueued through the
-	// session service are stamped with this project's exchange URL; plain jobs
-	// fall back to the worker config's git.exchange_url, which tests point at
-	// the same exchange.
+	// session service are stamped with this project's id; workers derive the
+	// HTTP exchange URL from their configured coordinator URL.
 	seedWorkerProjectExchange(t, project)
 	bundle, ok := registry.Bundle(project.ID)
 	if !ok {
@@ -89,7 +89,7 @@ func newWorkerTestFixture(t *testing.T) workerTestFixture {
 
 	server, err := api.NewServer(api.ServerOptions{
 		Registry:        registry,
-		ProtocolVersion: "2",
+		ProtocolVersion: config.DefaultProtocolVersion,
 	})
 	if err != nil {
 		t.Fatalf("new api server: %v", err)
@@ -149,7 +149,7 @@ func seedWorkerProjectExchange(t *testing.T, project coordinator.Project) {
 		RepoPath:     worktree,
 		BaseBranch:   project.BaseBranch,
 		ExchangeName: flowgit.DefaultExchangeName,
-		ExchangeURL:  project.ExchangeURL,
+		ExchangeURL:  project.ExchangePath,
 	}); err != nil {
 		t.Fatalf("seed project exchange: %v", err)
 	}

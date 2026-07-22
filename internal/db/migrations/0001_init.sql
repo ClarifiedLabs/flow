@@ -8,7 +8,7 @@ INSERT INTO app_metadata (key, value, updated_at)
 VALUES ('schema_version', '0001_init', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 INSERT INTO app_metadata (key, value, updated_at)
-VALUES ('storage_format', '3', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+VALUES ('storage_format', '4', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 CREATE TABLE id_allocators (
 	name TEXT PRIMARY KEY,

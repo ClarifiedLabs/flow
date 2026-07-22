@@ -53,8 +53,8 @@ func TestSessionTokenCarriesProjectBinding(t *testing.T) {
 	service, store := newCredentialServiceForTest(t)
 
 	if _, err := store.DB().ExecContext(ctx, `
-INSERT INTO projects (id, name, repo_path, base_branch, exchange_name, exchange_url, created_at, updated_at)
-VALUES ('p-1234', 'demo', '/tmp/demo', 'main', 'flow', 'file:///tmp/demo.git', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
+INSERT INTO projects (id, name, repo_path, base_branch, exchange_name, created_at, updated_at)
+VALUES ('p-1234', 'demo', '/tmp/demo', 'main', 'flow', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatalf("insert project: %v", err)
 	}
 

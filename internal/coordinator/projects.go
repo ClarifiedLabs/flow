@@ -28,7 +28,6 @@ type Project struct {
 	RepoPath     string
 	BaseBranch   string
 	ExchangeName string
-	ExchangeURL  string
 	ExchangePath string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -169,17 +168,15 @@ INSERT INTO projects (
 	repo_path,
 	base_branch,
 	exchange_name,
-	exchange_url,
 	exchange_path,
 	created_at,
 	updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		project.ID,
 		project.Name,
 		sqlitex.NullableNonEmptyString(project.RepoPath),
 		project.BaseBranch,
 		project.ExchangeName,
-		project.ExchangeURL,
 		sqlitex.NullableNonEmptyString(project.ExchangePath),
 		formatTime(project.CreatedAt),
 		formatTime(project.UpdatedAt),
@@ -207,7 +204,6 @@ SELECT
 	COALESCE(repo_path, ''),
 	base_branch,
 	exchange_name,
-	exchange_url,
 	COALESCE(exchange_path, ''),
 	created_at,
 	updated_at
@@ -241,7 +237,6 @@ SELECT
 	COALESCE(repo_path, ''),
 	base_branch,
 	exchange_name,
-	exchange_url,
 	COALESCE(exchange_path, ''),
 	created_at,
 	updated_at
@@ -257,7 +252,6 @@ SELECT
 	COALESCE(repo_path, ''),
 	base_branch,
 	exchange_name,
-	exchange_url,
 	COALESCE(exchange_path, ''),
 	created_at,
 	updated_at
@@ -278,7 +272,6 @@ SELECT
 	COALESCE(repo_path, ''),
 	base_branch,
 	exchange_name,
-	exchange_url,
 	COALESCE(exchange_path, ''),
 	created_at,
 	updated_at
@@ -299,7 +292,6 @@ SELECT
 	COALESCE(repo_path, ''),
 	base_branch,
 	exchange_name,
-	exchange_url,
 	COALESCE(exchange_path, ''),
 	created_at,
 	updated_at
@@ -331,7 +323,6 @@ func scanProject(scan func(...any) error) (Project, error) {
 		&project.RepoPath,
 		&project.BaseBranch,
 		&project.ExchangeName,
-		&project.ExchangeURL,
 		&project.ExchangePath,
 		&createdAt,
 		&updatedAt,
@@ -359,7 +350,6 @@ func normalizeProject(project Project) (Project, error) {
 	project.RepoPath = strings.TrimSpace(project.RepoPath)
 	project.BaseBranch = strings.TrimSpace(project.BaseBranch)
 	project.ExchangeName = strings.TrimSpace(project.ExchangeName)
-	project.ExchangeURL = strings.TrimSpace(project.ExchangeURL)
 	project.ExchangePath = strings.TrimSpace(project.ExchangePath)
 
 	if project.ID == "" {
@@ -378,9 +368,6 @@ func normalizeProject(project Project) (Project, error) {
 	if project.BaseBranch == "" {
 		return Project{}, errors.New("project base branch is required")
 	}
-	if project.ExchangeURL == "" {
-		return Project{}, errors.New("project exchange url is required")
-	}
 	if project.ExchangeName == "" {
 		project.ExchangeName = "flow"
 	}
@@ -388,14 +375,13 @@ func normalizeProject(project Project) (Project, error) {
 	return project, nil
 }
 
-// stampProjectPayload records the owning project and its exchange location
-// on a job payload so the worker can clone the right exchange and expose the
-// project to agent sessions.
+// stampProjectPayload records the owning project on a job payload so the
+// worker can derive its network-local exchange URL and expose the project to
+// agent sessions.
 func stampProjectPayload(payload map[string]any, project Project) {
 	if payload == nil {
 		return
 	}
 	payload["project_id"] = project.ID
 	payload["project_name"] = project.Name
-	payload["exchange_url"] = project.ExchangeURL
 }

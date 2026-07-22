@@ -12,8 +12,6 @@ services:
       - serve
       - --config
       - /usr/share/flow/examples/docker/flow-server.yaml
-      - --exchange-base-url
-      - ${FLOW_EXCHANGE_BASE_URL:-http://127.0.0.1:8421}
       - --owner-token
       - ${FLOW_OWNER_TOKEN:?Set FLOW_OWNER_TOKEN in .env}
       - --worker-join-token
@@ -43,12 +41,10 @@ services:
       - /usr/share/flow/examples/docker/flow-worker.yaml
     environment:
       FLOW_WORKER_JOIN_TOKEN: ${FLOW_WORKER_JOIN_TOKEN:?Set FLOW_WORKER_JOIN_TOKEN in .env}
-      FLOW_WORKER_COORDINATOR_URL: ${FLOW_WORKER_INTERNAL_BASE_URL:-http://flow-server:8421}
+      FLOW_WORKER_COORDINATOR_URL: ${FLOW_WORKER_COORDINATOR_URL:-http://flow-server:8421}
       FLOW_WORKER_WORK_DIR: /flow/work
       FLOW_WORKER_DOCKERD: ${FLOW_WORKER_DOCKERD:-auto}
       FLOW_WORKER_DOCKERD_ARGS: ${FLOW_WORKER_DOCKERD_ARGS:-}
-      FLOW_WORKER_GIT_URL_REWRITE_FROM: ${FLOW_EXCHANGE_BASE_URL:-http://127.0.0.1:8421}
-      FLOW_WORKER_GIT_URL_REWRITE_TO: ${FLOW_WORKER_INTERNAL_BASE_URL:-http://flow-server:8421}
       FLOW_WORKER_TERMINAL_PUBLIC_BASE_URL: ${FLOW_WORKER_TERMINAL_PUBLIC_BASE_URL:-auto}
       FLOW_WORKER_TERMINAL_BIND_ADDRESS: ${FLOW_WORKER_TERMINAL_BIND_ADDRESS:-0.0.0.0}
       HARNESS_MODEL_PROXY_URL: ${HARNESS_MODEL_PROXY_URL}

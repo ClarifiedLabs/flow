@@ -213,12 +213,17 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "register project: %v\n", err)
 		return 1
 	}
+	exchangeURL, err := flowgit.ExchangeHTTPURL(clientCfg.ServerURL, project.ID)
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve exchange remote: %v\n", err)
+		return 1
+	}
 
 	seed, err := flowgit.SeedExchangeFromWorktree(context.Background(), flowgit.SeedOptions{
 		RepoPath:     repoRoot,
 		BaseBranch:   project.BaseBranch,
 		ExchangeName: project.ExchangeName,
-		ExchangeURL:  project.ExchangeURL,
+		ExchangeURL:  exchangeURL,
 		Token:        clientCfg.Token,
 	})
 	if err != nil {
@@ -228,7 +233,7 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	if seed.Warning != "" {
 		fmt.Fprintf(stderr, "warning: %s\n", seed.Warning)
 	}
-	credentialStored, credentialCommand, err := approveGitCredential(repoRoot, project.ExchangeURL, clientCfg.Token)
+	credentialStored, credentialCommand, err := approveGitCredential(repoRoot, exchangeURL, clientCfg.Token)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: git credential storage skipped: %v\n", err)
 	} else if credentialStored {
@@ -253,7 +258,7 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "project_id: %s\n", project.ID)
 	fmt.Fprintf(stdout, "name: %s\n", project.Name)
 	fmt.Fprintf(stdout, "base_branch: %s\n", project.BaseBranch)
-	fmt.Fprintf(stdout, "exchange_remote: %s -> %s\n", project.ExchangeName, project.ExchangeURL)
+	fmt.Fprintf(stdout, "exchange_remote: %s -> %s\n", project.ExchangeName, exchangeURL)
 	fmt.Fprintf(stdout, "client_config: %s\n", configPath)
 	fmt.Fprintln(stdout, "next:")
 	if credentialCommand != "" {

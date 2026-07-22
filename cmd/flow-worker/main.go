@@ -339,6 +339,9 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 	if claim.Job == nil || claim.Lease == nil {
 		return false, fmt.Errorf("claim job: malformed response")
 	}
+	if strings.TrimSpace(claim.ProjectID) == "" {
+		return false, fmt.Errorf("claim job: project id is required")
+	}
 	slog.Debug("flow-worker job claimed",
 		"worker_id", cfg.WorkerID,
 		"job_id", claim.Job.ID,
@@ -355,11 +358,16 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 	fmt.Fprintf(stdout, "running: %s state=%s\n", running.Job.ID, running.Job.State)
 
 	persistentSession := running.Session != nil
+	if running.Job.Payload == nil {
+		running.Job.Payload = map[string]any{}
+	}
+	running.Job.Payload["project_id"] = claim.ProjectID
 	stopHeartbeat := startLeaseHeartbeat(client, cfg, *claim.Lease, timings, stdout)
 	result := workerexec.RunJob(context.Background(), workerexec.RunInput{
 		Config:       cfg,
 		Job:          running.Job,
 		Lease:        *claim.Lease,
+		ProjectID:    claim.ProjectID,
 		Session:      running.Session,
 		SessionToken: running.SessionToken,
 	})

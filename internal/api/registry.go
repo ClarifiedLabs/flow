@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -56,11 +55,6 @@ type RegistryOptions struct {
 	// tokens, web sessions).
 	Global *flowdb.Store
 
-	// ExchangeBaseURL is the public base URL used for per-project HTTP Git
-	// exchange remotes. When empty, project registration keeps same-machine
-	// file:// exchange URLs for tests and local direct use.
-	ExchangeBaseURL string
-
 	AuthorEntrypoint           map[string]any
 	AuthorEntrypointConfigured bool
 	HarnessArgs                flowharness.Args
@@ -85,7 +79,6 @@ type Registry struct {
 	directory                  *worker.Directory
 	webSessions                *coordinator.WebSessionService
 	idempotency                *coordinator.IdempotencyService
-	exchangeBaseURL            string
 	authorEntrypoint           map[string]any
 	authorEntrypointConfigured bool
 	harnessArgs                flowharness.Args
@@ -119,7 +112,6 @@ func NewRegistry(opts RegistryOptions) (*Registry, error) {
 		directory:                  worker.NewDirectory(opts.Global.DB()),
 		webSessions:                coordinator.NewWebSessionService(opts.Global.DB()),
 		idempotency:                coordinator.NewIdempotencyService(opts.Global.DB()),
-		exchangeBaseURL:            strings.TrimRight(strings.TrimSpace(opts.ExchangeBaseURL), "/"),
 		authorEntrypoint:           opts.AuthorEntrypoint,
 		authorEntrypointConfigured: opts.AuthorEntrypointConfigured,
 		harnessArgs:                harnessArgs,
@@ -278,21 +270,12 @@ func (r *Registry) CreateProject(ctx context.Context, input coordinator.Project)
 		return coordinator.Project{}, err
 	}
 
-	exchangeURL := created.ExchangeURL
-	if r.exchangeBaseURL != "" {
-		exchangeURL, err = exchangeHTTPURL(r.exchangeBaseURL, id)
-		if err != nil {
-			return coordinator.Project{}, err
-		}
-	}
-
 	project, err := r.projects.Insert(ctx, coordinator.Project{
 		ID:           id,
 		Name:         name,
 		RepoPath:     input.RepoPath,
 		BaseBranch:   input.BaseBranch,
 		ExchangeName: input.ExchangeName,
-		ExchangeURL:  exchangeURL,
 		ExchangePath: created.ExchangePath,
 	})
 	if err != nil {
@@ -304,21 +287,6 @@ func (r *Registry) CreateProject(ctx context.Context, input coordinator.Project)
 	}
 
 	return project, nil
-}
-
-func exchangeHTTPURL(baseURL string, projectID string) (string, error) {
-	if strings.TrimSpace(baseURL) == "" {
-		return "", errors.New("exchange base url is required")
-	}
-	if strings.TrimSpace(projectID) == "" {
-		return "", errors.New("project id is required")
-	}
-	joined, err := url.JoinPath(strings.TrimRight(strings.TrimSpace(baseURL), "/"), "git", "projects", projectID, "exchange.git")
-	if err != nil {
-		return "", fmt.Errorf("build exchange url: %w", err)
-	}
-
-	return joined, nil
 }
 
 // Bundle returns the open bundle for a project id.

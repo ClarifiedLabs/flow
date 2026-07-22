@@ -256,7 +256,6 @@ printf renew-ok > "$1"
 		capacityBucket: "ephemeral",
 		capacityCount:  1,
 		toolYAML:       toolYAML,
-		exchangeURL:    fixture.Project.ExchangeURL,
 	})
 
 	var stdout bytes.Buffer
@@ -338,7 +337,6 @@ sleep 3
 		capacityBucket: "ephemeral",
 		capacityCount:  2,
 		toolYAML:       toolYAML,
-		exchangeURL:    fixture.Project.ExchangeURL,
 	})
 
 	var stdout bytes.Buffer
@@ -426,7 +424,6 @@ printf console-exit > "$1"
 		capacityBucket:    "persistent_agent",
 		capacityCount:     1,
 		toolYAML:          toolYAML,
-		exchangeURL:       fixture.Project.ExchangeURL,
 		principal:         true,
 	})
 
@@ -519,7 +516,6 @@ exit 42
 		capacityBucket:    "persistent_agent",
 		capacityCount:     1,
 		toolYAML:          toolYAML,
-		exchangeURL:       fixture.Project.ExchangeURL,
 		principal:         true,
 	})
 
@@ -717,7 +713,7 @@ capacity:
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"worker_id: w-local", "protocol: 2", "labels: 1", "capacity_persistent_agent: 1"} {
+	for _, want := range []string{"worker_id: w-local", "protocol: 3", "labels: 1", "capacity_persistent_agent: 1"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("config output missing %q:\n%s", want, output)
 		}
@@ -987,8 +983,7 @@ printf next-ok > "$1"
 			SocketPath: isolatedWorkerTmuxSocket(t),
 		},
 		Git: config.WorkerGitConfig{
-			ExchangeURL: fixture.Project.ExchangeURL,
-			Principal:   "worker:w-local",
+			Principal: "worker:w-local",
 		},
 	}
 	client, err := newWorkerClient(cfg)
@@ -1204,12 +1199,11 @@ func putFakeTTYDOnPath(t *testing.T) {
 // every call site; only the fields below differ.
 type workerConfigOptions struct {
 	coordinatorURL    string // coordinator_url value (e.g. httpServer.URL)
-	protocolVersion   string // protocol_version value; defaults to "2"
+	protocolVersion   string // protocol_version value; defaults to the current protocol
 	codexHarnessLabel bool   // include labels: { agent.harness.codex: "true" }
 	capacityBucket    string // capacity bucket key (e.g. "ephemeral")
 	capacityCount     int    // capacity bucket count
 	toolYAML          string // tool/terminal/tmux config fragment
-	exchangeURL       string // git.exchange_url; empty omits the git block
 	principal         bool   // include git.principal: worker:w-local
 	omitToken         bool   // leave token empty so the worker joins at startup
 }
@@ -1221,7 +1215,7 @@ func writeWorkerConfig(t *testing.T, dir string, opts workerConfigOptions) strin
 	t.Helper()
 	protocolVersion := opts.protocolVersion
 	if protocolVersion == "" {
-		protocolVersion = "2"
+		protocolVersion = config.DefaultProtocolVersion
 	}
 	var b strings.Builder
 	b.WriteString("worker_id: w-local\n")
@@ -1237,12 +1231,9 @@ func writeWorkerConfig(t *testing.T, dir string, opts workerConfigOptions) strin
 	b.WriteString("capacity:\n")
 	b.WriteString(fmt.Sprintf("  %s: %d\n", opts.capacityBucket, opts.capacityCount))
 	b.WriteString(opts.toolYAML)
-	if opts.exchangeURL != "" {
+	if opts.principal {
 		b.WriteString("git:\n")
-		b.WriteString("  exchange_url: " + opts.exchangeURL + "\n")
-		if opts.principal {
-			b.WriteString("  principal: worker:w-local\n")
-		}
+		b.WriteString("  principal: worker:w-local\n")
 	}
 	configPath := filepath.Join(dir, "worker.yaml")
 	if err := os.WriteFile(configPath, []byte(b.String()), 0o600); err != nil {
@@ -1319,7 +1310,7 @@ capacity:
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"worker_id: w-local", "protocol: 2", "labels: 1", "capacity_persistent_agent: 1"} {
+	for _, want := range []string{"worker_id: w-local", "protocol: 3", "labels: 1", "capacity_persistent_agent: 1"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("config output missing %q:\n%s", want, output)
 		}
@@ -1364,7 +1355,6 @@ func TestWorkerConsoleRunErrorReleasesSessionAndSurfacesError(t *testing.T) {
 		capacityBucket:    "persistent_agent",
 		capacityCount:     1,
 		toolYAML:          toolYAML,
-		exchangeURL:       fixture.Project.ExchangeURL,
 		principal:         true,
 	})
 

@@ -44,7 +44,7 @@ func TestOpenInitializesSQLite(t *testing.T) {
 	if schemaVersion != "0001_init" {
 		t.Fatalf("schema version = %q, want 0001_init", schemaVersion)
 	}
-	assertStorageFormat(t, store, "3")
+	assertStorageFormat(t, store, "4")
 
 	assertTables(t, store,
 		[]string{"tasks", "workflow_runs", "workflow_node_runs", "workflow_artifacts", "workflow_waits", "workflow_transitions", "jobs", "leases", "sessions", "changes"},
@@ -81,12 +81,13 @@ func TestOpenGlobalInitializesGlobalSchema(t *testing.T) {
 		t.Fatalf("read migrations: %v", err)
 	}
 	assertAppliedMigrations(t, migrations, "0001_global_init")
-	assertStorageFormat(t, store, "3")
+	assertStorageFormat(t, store, "4")
+	assertColumnAbsent(t, store, "projects", "exchange_url")
 
 	assertTables(t, store, []string{"app_metadata", "projects", "workers", "tokens", "web_sessions", "web_bootstrap_tokens", "idempotency_records"}, []string{"tasks", "jobs", "leases", "sessions", "changes"})
 }
 
-func TestOpenRejectsOldIdentifierStorageFormat(t *testing.T) {
+func TestOpenRejectsPreviousStorageFormat(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		open func(context.Context, string) (*Store, error)
@@ -101,7 +102,7 @@ func TestOpenRejectsOldIdentifierStorageFormat(t *testing.T) {
 			if err != nil {
 				t.Fatalf("initialize database: %v", err)
 			}
-			if _, err := store.DB().ExecContext(ctx, "UPDATE app_metadata SET value = '2' WHERE key = 'storage_format'"); err != nil {
+			if _, err := store.DB().ExecContext(ctx, "UPDATE app_metadata SET value = '3' WHERE key = 'storage_format'"); err != nil {
 				t.Fatalf("downgrade storage marker: %v", err)
 			}
 			if err := store.Close(); err != nil {
@@ -112,6 +113,21 @@ func TestOpenRejectsOldIdentifierStorageFormat(t *testing.T) {
 				t.Fatalf("reopen err = %v, want incompatible-format guidance", err)
 			}
 		})
+	}
+}
+
+func assertColumnAbsent(t *testing.T, store *Store, table string, column string) {
+	t.Helper()
+	var count int
+	if err := store.DB().QueryRow(
+		"SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?",
+		table,
+		column,
+	).Scan(&count); err != nil {
+		t.Fatalf("inspect %s.%s: %v", table, column, err)
+	}
+	if count != 0 {
+		t.Fatalf("column %s.%s still exists", table, column)
 	}
 }
 
@@ -160,8 +176,8 @@ func TestGlobalTokensCarryProjectBinding(t *testing.T) {
 	defer store.Close()
 
 	if _, err := store.DB().ExecContext(ctx, `
-INSERT INTO projects (id, name, repo_path, base_branch, exchange_name, exchange_url, created_at, updated_at)
-VALUES ('p-1234', 'demo', '/tmp/demo', 'main', 'flow', 'file:///tmp/demo-exchange.git', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
+	INSERT INTO projects (id, name, repo_path, base_branch, exchange_name, created_at, updated_at)
+	VALUES ('p-1234', 'demo', '/tmp/demo', 'main', 'flow', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatalf("insert project: %v", err)
 	}
 

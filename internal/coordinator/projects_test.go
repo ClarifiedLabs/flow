@@ -73,7 +73,6 @@ func TestProjectServiceInsertAndLookups(t *testing.T) {
 		RepoPath:     "/tmp/demo",
 		BaseBranch:   "main",
 		ExchangeName: "flow",
-		ExchangeURL:  "file:///tmp/exchange.git",
 		ExchangePath: "/tmp/exchange.git",
 	})
 	if err != nil {
@@ -90,7 +89,7 @@ func TestProjectServiceInsertAndLookups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get project: %v", err)
 	}
-	if got.ExchangeURL != "file:///tmp/exchange.git" || got.BaseBranch != "main" {
+	if got.ExchangePath != "/tmp/exchange.git" || got.BaseBranch != "main" {
 		t.Fatalf("get project = %+v", got)
 	}
 
@@ -132,7 +131,7 @@ func TestProjectServiceInsertRejectsDuplicateName(t *testing.T) {
 
 	first, err := service.Insert(ctx, Project{
 		ID: "p-demo", Name: "demo", RepoPath: "/tmp/demo-a",
-		BaseBranch: "main", ExchangeName: "flow", ExchangeURL: "file:///tmp/a.git",
+		BaseBranch: "main", ExchangeName: "flow",
 	})
 	if err != nil {
 		t.Fatalf("insert first project: %v", err)
@@ -143,7 +142,7 @@ func TestProjectServiceInsertRejectsDuplicateName(t *testing.T) {
 
 	_, err = service.Insert(ctx, Project{
 		ID: "p-demo", Name: "demo", RepoPath: "/tmp/demo-b",
-		BaseBranch: "main", ExchangeName: "flow", ExchangeURL: "file:///tmp/b.git",
+		BaseBranch: "main", ExchangeName: "flow",
 	})
 	if !errors.Is(err, ErrProjectNameExists) {
 		t.Fatalf("duplicate name err = %v, want ErrProjectNameExists", err)
@@ -156,14 +155,14 @@ func TestProjectServiceInsertRejectsDuplicateRepoPath(t *testing.T) {
 
 	if _, err := service.Insert(ctx, Project{
 		ID: "p-demo", Name: "demo", RepoPath: "/tmp/demo",
-		BaseBranch: "main", ExchangeName: "flow", ExchangeURL: "file:///tmp/a.git",
+		BaseBranch: "main", ExchangeName: "flow",
 	}); err != nil {
 		t.Fatalf("insert first project: %v", err)
 	}
 
 	if _, err := service.Insert(ctx, Project{
 		ID: "p-other", Name: "other", RepoPath: "/tmp/demo",
-		BaseBranch: "main", ExchangeName: "flow", ExchangeURL: "file:///tmp/b.git",
+		BaseBranch: "main", ExchangeName: "flow",
 	}); !errors.Is(err, ErrProjectRepoPathExists) {
 		t.Fatalf("duplicate repo path err = %v, want ErrProjectRepoPathExists", err)
 	}
@@ -174,8 +173,8 @@ func TestProjectServiceListOrdersByName(t *testing.T) {
 	service := newProjectService(t)
 
 	for _, p := range []Project{
-		{ID: "p-zeta", Name: "zeta", RepoPath: "/tmp/z", BaseBranch: "main", ExchangeName: "flow", ExchangeURL: "file:///tmp/z.git"},
-		{ID: "p-alpha", Name: "alpha", RepoPath: "/tmp/a", BaseBranch: "main", ExchangeName: "flow", ExchangeURL: "file:///tmp/a.git"},
+		{ID: "p-zeta", Name: "zeta", RepoPath: "/tmp/z", BaseBranch: "main", ExchangeName: "flow"},
+		{ID: "p-alpha", Name: "alpha", RepoPath: "/tmp/a", BaseBranch: "main", ExchangeName: "flow"},
 	} {
 		if _, err := service.Insert(ctx, p); err != nil {
 			t.Fatalf("insert project %s: %v", p.Name, err)

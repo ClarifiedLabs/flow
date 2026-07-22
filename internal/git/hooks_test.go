@@ -16,7 +16,7 @@ func TestPreReceiveProtectsBaseBranch(t *testing.T) {
 		t.Fatalf("read base sha: %v", err)
 	}
 	nextSHA := writeAndCommit(t, repoPath, "next.txt", "next\n", "next commit")
-	if err := gitRun(ctx, repoPath, []string{"FLOW_GIT_PRINCIPAL=coordinator"}, "push", result.ExchangeURL, nextSHA+":refs/heads/tmp-next"); err != nil {
+	if err := gitRun(ctx, repoPath, []string{"FLOW_GIT_PRINCIPAL=coordinator"}, "push", result.ExchangePath, nextSHA+":refs/heads/tmp-next"); err != nil {
 		t.Fatalf("push next object to exchange: %v", err)
 	}
 
@@ -101,7 +101,7 @@ func TestPreReceiveRejectsForbiddenBasePaths(t *testing.T) {
 
 	for _, principal := range []string{"coordinator", "owner"} {
 		for _, sha := range []string{sessionSHA} {
-			if err := gitRun(ctx, repoPath, []string{"FLOW_GIT_PRINCIPAL=coordinator"}, "push", "--force", result.ExchangeURL, sha+":refs/heads/tmp-forbidden"); err != nil {
+			if err := gitRun(ctx, repoPath, []string{"FLOW_GIT_PRINCIPAL=coordinator"}, "push", "--force", result.ExchangePath, sha+":refs/heads/tmp-forbidden"); err != nil {
 				t.Fatalf("push forbidden object to exchange: %v", err)
 			}
 			if err := HandlePreReceive(ctx, HookOptions{
@@ -217,7 +217,7 @@ func initializedRepoWithTaskBranch(t *testing.T) (string, ServerProject) {
 	if _, err := SeedExchangeFromWorktree(ctx, SeedOptions{
 		RepoPath:    repoPath,
 		BaseBranch:  "main",
-		ExchangeURL: project.ExchangeURL,
+		ExchangeURL: project.ExchangePath,
 	}); err != nil {
 		t.Fatalf("seed exchange: %v", err)
 	}
@@ -235,7 +235,7 @@ func initializedTaskBranch(t *testing.T) (string, ServerProject, string, string)
 	}
 	firstTaskSHA := writeAndCommit(t, repoPath, "task.txt", "first\n", "first task commit")
 	secondTaskSHA := writeAndCommit(t, repoPath, "task.txt", "second\n", "second task commit")
-	if err := gitRun(ctx, repoPath, []string{"FLOW_GIT_PRINCIPAL=owner"}, "push", project.ExchangeURL, "refs/heads/task/t-test-0001:refs/heads/task/t-test-0001"); err != nil {
+	if err := gitRun(ctx, repoPath, []string{"FLOW_GIT_PRINCIPAL=owner"}, "push", project.ExchangePath, "refs/heads/task/t-test-0001:refs/heads/task/t-test-0001"); err != nil {
 		t.Fatalf("push task branch to exchange: %v", err)
 	}
 

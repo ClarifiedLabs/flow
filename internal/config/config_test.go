@@ -75,6 +75,19 @@ author_entrypoint:
 	}
 }
 
+func TestLoadCoordinatorRejectsRemovedExchangeBaseURL(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "coordinator.yaml")
+	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
+exchange_base_url: http://flow-server:8421
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if _, err := LoadCoordinator(configPath); err == nil {
+		t.Fatal("LoadCoordinator accepted removed exchange_base_url")
+	}
+}
+
 func TestLoadCoordinatorParsesHarnessArgs(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "coordinator.yaml")
 	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
@@ -258,7 +271,6 @@ terminal:
 tmux:
   socket_path: /tmp/flow-test-tmux.sock
 git:
-  exchange_url: file:///tmp/flow.git
   principal: worker:w-local
 `), 0o600); err != nil {
 		t.Fatalf("write worker config: %v", err)
@@ -292,9 +304,6 @@ git:
 	if cfg.Tmux.SocketPath != "/tmp/flow-test-tmux.sock" {
 		t.Fatalf("Tmux = %+v", cfg.Tmux)
 	}
-	if cfg.Git.ExchangeURL != "file:///tmp/flow.git" {
-		t.Fatalf("Git.ExchangeURL = %q", cfg.Git.ExchangeURL)
-	}
 	if cfg.Git.Principal != "worker:w-local" {
 		t.Fatalf("Git.Principal = %q", cfg.Git.Principal)
 	}
@@ -318,6 +327,22 @@ extra: true
 	}
 }
 
+func TestLoadWorkerYAMLRejectsRemovedExchangeURL(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "worker.yaml")
+	if err := os.WriteFile(configPath, []byte(`worker_id: w-local
+coordinator_url: http://flow-server:8421
+work_dir: /tmp/worker
+git:
+  exchange_url: http://127.0.0.1:8421/git/projects/p-flow/exchange.git
+`), 0o600); err != nil {
+		t.Fatalf("write worker config: %v", err)
+	}
+
+	if _, err := LoadWorker(configPath); err == nil {
+		t.Fatal("LoadWorker accepted removed git.exchange_url")
+	}
+}
+
 func TestApplyWorkerEnvOverrides(t *testing.T) {
 	cfg, err := LoadWorker("")
 	if err != nil {
@@ -335,7 +360,6 @@ func TestApplyWorkerEnvOverrides(t *testing.T) {
 			"FLOW_WORKER_TERMINAL_PUBLIC_BASE_URL":  "http://worker.local",
 			"FLOW_WORKER_TERMINAL_TTYD_PATH":        "/tmp/ttyd",
 			"FLOW_WORKER_TMUX_SOCKET_PATH":          "/tmp/tmux.sock",
-			"FLOW_WORKER_GIT_EXCHANGE_URL":          "https://example.test/exchange.git",
 			"FLOW_WORKER_GIT_PRINCIPAL":             "worker:w-env",
 			"FLOW_WORKER_PROTOCOL_VERSION":          "2",
 		}
@@ -361,7 +385,7 @@ func TestApplyWorkerEnvOverrides(t *testing.T) {
 	if cfg.Tmux.SocketPath != "/tmp/tmux.sock" {
 		t.Fatalf("Tmux = %+v", cfg.Tmux)
 	}
-	if cfg.Git.ExchangeURL != "https://example.test/exchange.git" || cfg.Git.Principal != "worker:w-env" {
+	if cfg.Git.Principal != "worker:w-env" {
 		t.Fatalf("Git = %+v", cfg.Git)
 	}
 	if cfg.ProtocolVersion != "2" {

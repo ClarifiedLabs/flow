@@ -23,7 +23,6 @@ type Project struct {
 	RepoPath     string `json:"repo_path,omitempty"`
 	BaseBranch   string `json:"base_branch"`
 	ExchangeName string `json:"exchange_name"`
-	ExchangeURL  string `json:"exchange_url"`
 	CreatedAt    string `json:"created_at,omitempty"`
 }
 

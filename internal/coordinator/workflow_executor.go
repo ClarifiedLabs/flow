@@ -182,7 +182,6 @@ SELECT COUNT(*) FROM jobs WHERE node_run_id = ? AND role = ? AND state = ?`,
 		"workspace_mode": node.Config.Agent.Workspace, "artifact_kind": node.Config.Agent.Artifact,
 		"agent": node.Config.Agent.Agent, "role_instructions": node.Config.Agent.Agent.Prompt,
 		"branch": branch, "base": base, "project_id": e.project.ID, "project_name": e.project.Name,
-		"exchange_url": e.project.ExchangeURL,
 	}
 	_, err = e.queue.EnqueueJob(ctx, flowworker.EnqueueJobInput{
 		TaskID: &taskID, ChangeID: changeID, WorkflowRunID: &run.ID, NodeRunID: &nodeRun.ID,

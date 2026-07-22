@@ -240,8 +240,9 @@ Registration seeds the exchange remote from committed `HEAD`. If the worktree
 has uncommitted local changes, Flow still seeds from `HEAD` and prints a warning
 that those changes were not included.
 
-If a `flow` remote already exists, init fails with a clear message unless
-`--exchange-name` or `--exchange-url` specifies how to reuse or replace it.
+If a `flow` remote already exists, init verifies that it points at this
+project's server-hosted exchange. Use `--exchange-name` to choose another local
+remote name.
 
 The command is idempotent after successful initialization. Re-running it verifies
 the project registration, database, exchange remote, configured base branch, and
@@ -262,32 +263,29 @@ There are two Flow-managed git roles:
 
 2. Flow exchange remote.
    A private bare git repository, remote name `flow` by default. Workers clone,
-   fetch, and push task branches through this remote. It is the git rendezvous
-   point for active work and must support server-side hooks. For all-local use,
-   this can be a `file://` remote in Flow's data directory. For remote workers,
-   it can be served over SSH on a tailnet.
+   fetch, and push task branches through the Flow server's authenticated Git
+   HTTP route. It is the git rendezvous point for active work and supports
+   server-side hooks in the server-owned bare repository.
 
-Default configuration shape:
+The exchange route is deterministic:
 
-```yaml
-git:
-  base_branch: main
-  exchange:
-    name: flow
-    url: file:///Users/me/.local/share/flow/projects/p-my-project/exchange.git
-    hooks: required
+```text
+<caller-configured-flow-server-url>/git/projects/<project-id>/exchange.git
 ```
 
-The exchange remote is provider-agnostic only within limits. It must allow:
+The API and job payloads do not advertise or persist an absolute exchange URL.
+Each caller already has the Flow server URL it can reach: a host CLI might use
+`http://127.0.0.1:8421`, while a Compose worker uses
+`http://flow-server:8421`. The caller combines that URL with the project id, so
+deployment-specific network addressing stays in client or worker configuration.
+
+The server-hosted exchange allows:
 
 - private WIP branches
 - worker fetch/push access
 - coordinator base-branch push access
 - server-side hooks
-- ordinary git protocol access from every worker class
-
-That means a generic hosted forge is not the Flow exchange remote in the MVP. A
-self-hosted bare repo with hooks can be the exchange remote.
+- authenticated Git HTTP access from every worker class
 
 ### Exchange Refs
 
@@ -318,19 +316,10 @@ sources; they are not the workflow engine.
 - reject `.flow/session/**` on the base branch
 - do not require an active Flow session or lease for task-branch pushes
 
-Push principal handling depends on transport:
-
-- Local `file://` exchange remotes are an operational guardrail, not a strong
-  security boundary. `flow-server` coordinator operations and `flow-worker`
-  worker operations invoke git with an asserted `FLOW_GIT_PRINCIPAL` environment
-  value. Missing principals are treated as local manual pushes: protected base
-  updates are rejected, owner or coordinator base updates are allowed,
-  fast-forward task-branch updates are allowed, and unknown Flow-managed
-  namespaces are rejected.
-- Remote SSH exchange remotes derive the principal from SSH configuration,
-  normally per-key forced commands or equivalent server-side environment
-  injection. After the principal is established, the hook policy is the same as
-  local mode.
+The Flow server authenticates Git HTTP requests with owner, worker, session, or
+console credentials, derives the Git principal from that credential, and passes
+the principal to the exchange hooks. Project-scoped credentials cannot access a
+different project's exchange.
 
 `post-receive` records ref-update events:
 
@@ -357,9 +346,8 @@ cleanup by hand. They do not require an active session. The tradeoff is that a
 running agent may need to fetch/rebase before its next push; non-fast-forward
 rejection prevents either side from silently overwriting the other.
 
-For local exchange remotes, a raw `git push flow task/t-my-project-0001` is accepted when
-it is a fast-forward update. A future `flow git push` helper can make the
-principal explicit for nicer diagnostics, but it is not required for the MVP.
+A raw `git push flow task/t-my-project-0001` is accepted when it is an
+authenticated, authorized fast-forward update.
 
 Manual owner pushes to the protected base branch are allowed. They bypass
 Flow's merge action, which is responsible for setting `merged_at`, closing the

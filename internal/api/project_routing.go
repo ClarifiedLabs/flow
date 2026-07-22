@@ -339,7 +339,6 @@ func uiProjectFromRegistry(project coordinator.Project) uiProject {
 		RepoPath:     project.RepoPath,
 		BaseBranch:   project.BaseBranch,
 		ExchangeName: project.ExchangeName,
-		ExchangeURL:  project.ExchangeURL,
 		CreatedAt:    project.CreatedAt.UTC().Format(time.RFC3339Nano),
 	}
 }

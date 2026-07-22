@@ -41,6 +41,7 @@ func TestPrepareWorktreeInstallsClientHooksForAuthorSession(t *testing.T) {
 	exchangeURL := createExchangeRemote(t)
 	cfg := workerConfig(t.TempDir(), exchangeURL)
 	payload, err := DecodePayload(map[string]any{
+		"project_id":    "p-test",
 		"base":          "main",
 		"branch":        "main",
 		"agent_harness": "claude",
@@ -82,6 +83,7 @@ func TestPrepareWorktreeExcludesFlowArtifacts(t *testing.T) {
 	exchangeURL := createExchangeRemote(t)
 	cfg := workerConfig(t.TempDir(), exchangeURL)
 	payload, err := DecodePayload(map[string]any{
+		"project_id": "p-test",
 		"base":       "main",
 		"branch":     "main",
 		"entrypoint": map[string]any{"argv": []string{"true"}, "cwd": "."},
@@ -211,6 +213,7 @@ func TestPrepareWorktreeSkipsClientHooksForCheckJob(t *testing.T) {
 	exchangeURL := createExchangeRemote(t)
 	cfg := workerConfig(t.TempDir(), exchangeURL)
 	payload, err := DecodePayload(map[string]any{
+		"project_id": "p-test",
 		"base":       "main",
 		"branch":     "main",
 		"entrypoint": map[string]any{"argv": []string{"true"}, "cwd": "."},

@@ -77,7 +77,6 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	var configPath string
 	var addr string
 	var dataDir string
-	var exchangeBaseURL string
 	var ownerToken string
 	var ownerTokenFile string
 	var hookToken string
@@ -89,7 +88,6 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&configPath, "config", "", "coordinator config JSON path")
 	flags.StringVar(&addr, "addr", "", "listen address")
 	flags.StringVar(&dataDir, "data-dir", "", "Flow data directory")
-	flags.StringVar(&exchangeBaseURL, "exchange-base-url", "", "public base URL for HTTP git exchange remotes")
 	flags.StringVar(&ownerToken, "owner-token", "", "owner bearer token")
 	flags.StringVar(&ownerTokenFile, "owner-token-file", "", "mode-0600 file containing the owner bearer token")
 	flags.StringVar(&hookToken, "hook-token", "", "hook bearer token")
@@ -116,12 +114,6 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	}
 	if addr != "" {
 		cfg.ListenAddr = addr
-		if exchangeBaseURL == "" {
-			cfg.ExchangeBaseURL = config.CoordinatorURLForListenAddr(cfg.ListenAddr)
-		}
-	}
-	if exchangeBaseURL != "" {
-		cfg.ExchangeBaseURL = strings.TrimRight(strings.TrimSpace(exchangeBaseURL), "/")
 	}
 	ownerToken = strings.TrimSpace(ownerToken)
 	ownerTokenFile = strings.TrimSpace(ownerTokenFile)
@@ -214,7 +206,6 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	registry, err := api.NewRegistry(api.RegistryOptions{
 		DataDir:                    cfg.DataDir,
 		Global:                     globalStore,
-		ExchangeBaseURL:            cfg.ExchangeBaseURL,
 		AuthorEntrypoint:           cfg.AuthorEntrypoint,
 		AuthorEntrypointConfigured: cfg.AuthorEntrypointConfigured,
 		HarnessArgs:                cfg.HarnessArgs,
@@ -266,7 +257,6 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "flow-server listening on %s\n", cfg.ListenAddr)
 	fmt.Fprintf(stdout, "database: %s\n", cfg.GlobalDatabasePath())
 	fmt.Fprintf(stdout, "projects: %d\n", len(registry.All()))
-	fmt.Fprintf(stdout, "exchange_base_url: %s\n", cfg.ExchangeBaseURL)
 	fmt.Fprintf(stdout, "owner_token_file: %s\n", ownerTokenFileDisplay)
 	fmt.Fprintf(stdout, "hook_token_file: %s\n", hookTokenFileDisplay)
 	fmt.Fprintf(stdout, "client_config_file: %s\n", clientConfigPath)
@@ -381,7 +371,6 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "data_dir: %s\n", cfg.DataDir)
 	fmt.Fprintf(stdout, "database_path: %s\n", cfg.GlobalDatabasePath())
 	fmt.Fprintf(stdout, "listen_addr: %s\n", cfg.ListenAddr)
-	fmt.Fprintf(stdout, "exchange_base_url: %s\n", cfg.ExchangeBaseURL)
 	fmt.Fprintf(stdout, "protocol: %s\n", cfg.ProtocolVersion)
 	return 0
 }
@@ -437,7 +426,7 @@ func runGitHook(args []string, stdout, stderr io.Writer) int {
 func printUsage(out io.Writer) {
 	fmt.Fprint(out, `Usage:
   flow-server [--log-level LEVEL] COMMAND
-  flow-server serve [--data-dir PATH] [--addr HOST:PORT] [--exchange-base-url URL] [--worker-join-token TOKEN | --worker-join-token-file PATH] [--owner-token TOKEN | --owner-token-file PATH] [--hook-token TOKEN | --hook-token-file PATH] [--client-config PATH | --no-write-client-config]
+  flow-server serve [--data-dir PATH] [--addr HOST:PORT] [--worker-join-token TOKEN | --worker-join-token-file PATH] [--owner-token TOKEN | --owner-token-file PATH] [--hook-token TOKEN | --hook-token-file PATH] [--client-config PATH | --no-write-client-config]
   flow-server config [--config PATH]
   flow-server git-hook pre-receive --repo PATH --base BRANCH
   flow-server git-hook post-receive --repo PATH --base BRANCH

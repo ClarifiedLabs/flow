@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/cgi"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +21,7 @@ import (
 	flowclient "github.com/ClarifiedLabs/flow/internal/client"
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
+	flowgit "github.com/ClarifiedLabs/flow/internal/git"
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	"github.com/ClarifiedLabs/flow/internal/terminal"
 )
@@ -55,9 +58,10 @@ printf '%s' "$1" > "$2"
 	}
 
 	result := RunJob(ctx, RunInput{
-		Config: cfg,
-		Job:    job,
-		Lease:  Lease{ID: "l-argv", WorkerID: "w-local"},
+		Config:    cfg,
+		ProjectID: "p-test",
+		Job:       job,
+		Lease:     Lease{ID: "l-argv", WorkerID: "w-local"},
 	})
 	if result.Err != nil {
 		t.Fatalf("run job: %v", result.Err)
@@ -113,9 +117,10 @@ func TestRunJobCapturesTmuxTranscript(t *testing.T) {
 	}
 
 	result := RunJob(ctx, RunInput{
-		Config: cfg,
-		Job:    job,
-		Lease:  Lease{ID: "l-transcript", WorkerID: "w-local"},
+		Config:    cfg,
+		ProjectID: "p-test",
+		Job:       job,
+		Lease:     Lease{ID: "l-transcript", WorkerID: "w-local"},
 	})
 	if result.Err != nil {
 		t.Fatalf("run job: %v", result.Err)
@@ -175,9 +180,10 @@ cat README.md > "$1"
 	}
 
 	result := RunJob(ctx, RunInput{
-		Config: workerConfigWithTmux(t, t.TempDir(), "file://"+filepath.ToSlash(remote)),
-		Job:    job,
-		Lease:  Lease{ID: "l-head-sha", WorkerID: "w-local"},
+		Config:    workerConfigWithTmux(t, t.TempDir(), serveExchangeRemote(t, remote)),
+		ProjectID: "p-test",
+		Job:       job,
+		Lease:     Lease{ID: "l-head-sha", WorkerID: "w-local"},
 	})
 	if result.Err != nil {
 		t.Fatalf("run job: %v", result.Err)
@@ -202,7 +208,8 @@ func TestRunJobRunsWhenRepositorySkillsAreMissing(t *testing.T) {
 	workDir := t.TempDir()
 
 	result := RunJob(ctx, RunInput{
-		Config: workerConfig(workDir, exchangeURL),
+		Config:    workerConfig(workDir, exchangeURL),
+		ProjectID: "p-test",
 		Job: Job{
 			ID:             "j-missing-skills",
 			Role:           RoleCI,
@@ -226,14 +233,27 @@ func TestRunJobRunsWhenRepositorySkillsAreMissing(t *testing.T) {
 	}
 }
 
-func TestRunJobPushesNewTaskBranch(t *testing.T) {
+func TestRunJobDerivesOriginFromCoordinatorURLForAgentPush(t *testing.T) {
 	t.Parallel()
 	requireTool(t, "git")
 	requireTool(t, "tmux")
 	ctx := context.Background()
 	exchangeURL := createExchangeRemote(t)
+	expectedRemote, err := flowgit.ExchangeHTTPURL(exchangeURL, "p-test")
+	if err != nil {
+		t.Fatalf("build expected exchange url: %v", err)
+	}
 	workDir := t.TempDir()
 	cfg := workerConfigWithTmux(t, workDir, exchangeURL)
+	ref := "refs/heads/task/t-test-0001"
+	pusher := writeScript(t, `#!/bin/sh
+set -eu
+test "$(git remote get-url origin)" = "$1"
+printf 'agent push\n' > agent-push.txt
+git add agent-push.txt
+git -c user.name='Flow Agent' -c user.email='flow@example.com' commit -m 'test: exercise agent push'
+git push origin "HEAD:$2"
+`)
 
 	job := Job{
 		ID:             "j-branch",
@@ -243,22 +263,25 @@ func TestRunJobPushesNewTaskBranch(t *testing.T) {
 			"base":   "main",
 			"branch": "task/t-test-0001",
 			"entrypoint": map[string]any{
-				"argv":  []string{"/bin/true"},
+				"argv":  []string{pusher, expectedRemote, ref},
 				"shell": false,
 			},
 		},
 	}
 
 	result := RunJob(ctx, RunInput{
-		Config: cfg,
-		Job:    job,
-		Lease:  Lease{ID: "l-branch", WorkerID: "w-local"},
+		Config:    cfg,
+		ProjectID: "p-test",
+		Job:       job,
+		Lease:     Lease{ID: "l-branch", WorkerID: "w-local"},
 	})
 	if result.Err != nil {
 		t.Fatalf("run author job: %v", result.Err)
 	}
-	remotePath := strings.TrimPrefix(exchangeURL, "file://")
-	gitRun(t, remotePath, "show-ref", "--verify", "refs/heads/task/t-test-0001")
+	remoteHead := strings.Fields(gitOutput(t, "", "ls-remote", expectedRemote, ref))
+	if len(remoteHead) != 2 || remoteHead[0] != gitOutput(t, result.Worktree, "rev-parse", "HEAD") || remoteHead[1] != ref {
+		t.Fatalf("remote ref = %q, want worktree HEAD at %s", remoteHead, ref)
+	}
 }
 
 func TestRunJobShellEntrypointRequiresExplicitShell(t *testing.T) {
@@ -459,7 +482,8 @@ printf '%s\n%s\n%s\n' "${TMUX:-unset}" "${TMUX_PANE:-unset}" "${TMUX_TMPDIR:-uns
 exit 0
 `)
 	result := RunJob(ctx, RunInput{
-		Config: cfg,
+		Config:    cfg,
+		ProjectID: "p-test",
 		Job: Job{
 			ID:             jobID,
 			Role:           RoleCI,
@@ -1406,7 +1430,7 @@ func TestWorkerEnvScrubsDeploymentConfigOverrides(t *testing.T) {
 }
 
 func TestWorkerEnvIncludesHTTPGitAuthForJobCommands(t *testing.T) {
-	cfg := workerConfig("/tmp/work", "http://127.0.0.1:8421/git/projects/p-test/exchange.git")
+	cfg := workerConfig("/tmp/work", "http://127.0.0.1:8421")
 	cfg.Token = "worker-token"
 	env := workerEnv(tmuxInput{
 		Config: cfg,
@@ -1417,7 +1441,7 @@ func TestWorkerEnvIncludesHTTPGitAuthForJobCommands(t *testing.T) {
 		Lease:        Lease{ID: "l-author", WorkerID: "w-local"},
 		SessionToken: "session-token",
 		Payload: JobPayload{
-			ExchangeURL: "http://127.0.0.1:8421/git/projects/p-test/exchange.git",
+			ProjectID: "p-test",
 		},
 		Entrypoint: Entrypoint{},
 	})
@@ -1437,7 +1461,8 @@ func TestRunJobRejectsCWDOutsideWorktreeViaSymlink(t *testing.T) {
 	workDir := t.TempDir()
 	cfg := workerConfigWithTmux(t, workDir, exchangeURL)
 	result := RunJob(context.Background(), RunInput{
-		Config: cfg,
+		Config:    cfg,
+		ProjectID: "p-test",
 		Job: Job{
 			ID:             "j-cwd",
 			Role:           RoleCI,
@@ -1461,7 +1486,8 @@ func TestRunJobRejectsCWDOutsideWorktreeViaSymlink(t *testing.T) {
 	}
 
 	result = RunJob(context.Background(), RunInput{
-		Config: cfg,
+		Config:    cfg,
+		ProjectID: "p-test",
 		Job: Job{
 			ID:             "j-cwd",
 			Role:           RoleCI,
@@ -2049,7 +2075,8 @@ func runtimeStates(states []coordinator.SessionRuntimeState) []string {
 // id, lease id, argv, and shell flag vary between call sites.
 func ciRunInput(cfg config.WorkerConfig, jobID, leaseID string, argv []string, shell bool) RunInput {
 	return RunInput{
-		Config: cfg,
+		Config:    cfg,
+		ProjectID: "p-test",
 		Job: Job{
 			ID:             jobID,
 			Role:           RoleCI,
@@ -2067,22 +2094,21 @@ func ciRunInput(cfg config.WorkerConfig, jobID, leaseID string, argv []string, s
 	}
 }
 
-func workerConfig(workDir string, exchangeURL string) config.WorkerConfig {
+func workerConfig(workDir string, coordinatorURL string) config.WorkerConfig {
 	return config.WorkerConfig{
 		WorkerID:        "w-local",
-		CoordinatorURL:  "http://127.0.0.1:8421",
+		CoordinatorURL:  coordinatorURL,
 		ProtocolVersion: config.DefaultProtocolVersion,
 		WorkDir:         workDir,
 		Git: config.WorkerGitConfig{
-			ExchangeURL: exchangeURL,
-			Principal:   "worker:w-local",
+			Principal: "worker:w-local",
 		},
 	}
 }
 
-func workerConfigWithTmux(t *testing.T, workDir string, exchangeURL string) config.WorkerConfig {
+func workerConfigWithTmux(t *testing.T, workDir string, coordinatorURL string) config.WorkerConfig {
 	t.Helper()
-	cfg := workerConfig(workDir, exchangeURL)
+	cfg := workerConfig(workDir, coordinatorURL)
 	cfg.Tmux.SocketPath = isolatedTmuxSocket(t)
 	return cfg
 }
@@ -2091,13 +2117,34 @@ func createExchangeRemote(t *testing.T) string {
 	t.Helper()
 	worktree, remote := createSeedGitRemote(t)
 	gitRun(t, worktree, "push", remote, "main:main")
-	return "file://" + filepath.ToSlash(remote)
+	return serveExchangeRemote(t, remote)
 }
 
 func createExchangeRemoteWithoutFlowSkills(t *testing.T) string {
 	t.Helper()
 	_, remote := createSeedGitRemote(t)
-	return "file://" + filepath.ToSlash(remote)
+	return serveExchangeRemote(t, remote)
+}
+
+func serveExchangeRemote(t *testing.T, remote string) string {
+	t.Helper()
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("resolve git: %v", err)
+	}
+	handler := &cgi.Handler{
+		Path: gitPath,
+		Args: []string{"http-backend"},
+		Dir:  filepath.Dir(remote),
+		Root: "/git/projects/p-test",
+		Env: []string{
+			"GIT_PROJECT_ROOT=" + filepath.Dir(remote),
+			"GIT_HTTP_EXPORT_ALL=1",
+		},
+	}
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	return server.URL
 }
 
 func isolatedTmuxSocket(t *testing.T) string {
@@ -2135,6 +2182,7 @@ func createSeedGitRemote(t *testing.T) (string, string) {
 	gitRun(t, worktree, "commit", "-m", "seed")
 	gitRun(t, worktree, "branch", "-M", "main")
 	gitRun(t, root, "init", "--bare", remote)
+	gitRun(t, root, "--git-dir", remote, "config", "http.receivepack", "true")
 	gitRun(t, worktree, "push", remote, "main:main")
 	return worktree, remote
 }

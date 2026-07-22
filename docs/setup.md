@@ -56,7 +56,6 @@ database: /path/to/flow/global.db
 projects: 0
 owner_token_file: /path/to/repo/.flow-local/owner.token
 hook_token_file: /path/to/flow/hook.token
-exchange_base_url: http://127.0.0.1:8421
 client_config_file: /path/to/config/flow/config.yaml
 ```
 
@@ -132,9 +131,10 @@ architecture-specific SHA256 is declared as a Docker build argument in
 `Dockerfile`.
 
 The worker starts a rootless Docker daemon by default and advertises
-`docker=true` only after `docker info` succeeds. It rewrites the public host
-exchange URL to the internal Compose URL for worker-side Git clones while
-leaving host-facing project remotes pointed at `http://127.0.0.1:8421`.
+`docker=true` only after `docker info` succeeds. Its `coordinator_url` is the
+internal Compose address, `http://flow-server:8421`. The worker uses that same
+base URL for API requests and project Git exchanges; host-side clients use
+their own configured server URL, normally `http://127.0.0.1:8421`.
 
 To run Docker-hosted agents with Claude and Codex subscription auth, add the
 auth values to `.env` and use the auth compose overlay:
@@ -250,9 +250,9 @@ FLOW_WORKER_JOIN_TOKEN="$(tr -d '\r\n' < .flow-local/worker-join.token)" \
   flow-worker -c .flow-local/worker.yaml
 ```
 
-Each job payload carries the exchange URL, project id, and project name of its
-owning project, so the worker clones that job's exchange into its `work_dir`,
-checks out the per-job branch, and runs the job in tmux.
+Each job claim identifies its project. The worker resolves that project's Git
+exchange as `<coordinator_url>/git/projects/<project-id>/exchange.git`, clones
+it into its `work_dir`, checks out the per-job branch, and runs the job in tmux.
 
 The example `worker.yaml` configures one local worker and deliberately omits the
 long-lived worker token:
@@ -346,10 +346,10 @@ deadlines:
 
 ## Remote Workers
 
-For a remote worker, use exchange remotes and a coordinator URL that the remote
-machine can reach. `flow-server serve` stamps HTTP exchange URLs on job payloads
-by default; set `exchange_base_url` or `--exchange-base-url` to the address
-remote machines should use.
+For a remote worker, set `coordinator_url` to the Flow server URL that the
+remote machine can reach. The worker uses that one URL for both coordinator API
+requests and the server-hosted Git exchanges. The server does not advertise a
+second exchange base URL.
 
 A remote worker does not need its own checkout of your project, but it does need
 a worker config with a unique `worker_id`, a reachable `coordinator_url`, an

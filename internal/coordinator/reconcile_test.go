@@ -62,7 +62,7 @@ func TestReconcileRestoresChangeProjectionWithoutReadingHandoffRef(t *testing.T)
 	if err != nil {
 		t.Fatalf("read head sha: %v", err)
 	}
-	if err := runReconcileGit(repoPath, []string{"FLOW_GIT_PRINCIPAL=worker:w-local"}, "push", fixture.project.ExchangeURL, branch+":"+branch); err != nil {
+	if err := runReconcileGit(repoPath, []string{"FLOW_GIT_PRINCIPAL=worker:w-local"}, "push", fixture.project.ExchangePath, branch+":"+branch); err != nil {
 		t.Fatalf("push task branch: %v", err)
 	}
 
@@ -116,7 +116,6 @@ func TestReconcileIsolatesPoisonedProjectAndScansOthers(t *testing.T) {
 		RepoPath:     poisonPath,
 		BaseBranch:   "main",
 		ExchangeName: "flow",
-		ExchangeURL:  "ssh://example.com/poison.git",
 		ExchangePath: poisonPath,
 	}
 
@@ -137,7 +136,7 @@ func TestReconcileIsolatesPoisonedProjectAndScansOthers(t *testing.T) {
 	if err := runReconcileGit(repoPath, nil, "commit", "-m", "work on task"); err != nil {
 		t.Fatalf("git commit: %v", err)
 	}
-	if err := runReconcileGit(repoPath, []string{"FLOW_GIT_PRINCIPAL=worker:w-local"}, "push", fixture.project.ExchangeURL, branch+":"+branch); err != nil {
+	if err := runReconcileGit(repoPath, []string{"FLOW_GIT_PRINCIPAL=worker:w-local"}, "push", fixture.project.ExchangePath, branch+":"+branch); err != nil {
 		t.Fatalf("push task branch: %v", err)
 	}
 
@@ -203,7 +202,6 @@ func TestReconcileSkipsNonLocalExchangeProjects(t *testing.T) {
 		RepoPath:     "/tmp/remote-flow-project",
 		BaseBranch:   "main",
 		ExchangeName: "flow",
-		ExchangeURL:  "ssh://example.com/flow.git",
 	}
 
 	result, err := NewReconcileService(store.DB()).Reconcile(ctx, nonLocal)
@@ -250,7 +248,7 @@ func newProjectFixture(t *testing.T) projectFixture {
 		RepoPath:     repoPath,
 		BaseBranch:   "main",
 		ExchangeName: flowgit.DefaultExchangeName,
-		ExchangeURL:  server.ExchangeURL,
+		ExchangeURL:  server.ExchangePath,
 	}); err != nil {
 		t.Fatalf("seed exchange: %v", err)
 	}
@@ -272,7 +270,6 @@ func newProjectFixture(t *testing.T) projectFixture {
 			RepoPath:     repoPath,
 			BaseBranch:   "main",
 			ExchangeName: flowgit.DefaultExchangeName,
-			ExchangeURL:  server.ExchangeURL,
 			ExchangePath: server.ExchangePath,
 		},
 	}

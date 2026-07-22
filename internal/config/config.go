@@ -15,12 +15,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const DefaultProtocolVersion = "2"
+const DefaultProtocolVersion = "3"
 
 type CoordinatorConfig struct {
 	DataDir                    string           `json:"data_dir" yaml:"data_dir"`
 	ListenAddr                 string           `json:"listen_addr" yaml:"listen_addr"`
-	ExchangeBaseURL            string           `json:"exchange_base_url" yaml:"exchange_base_url"`
 	ProtocolVersion            string           `json:"protocol_version" yaml:"protocol_version"`
 	AuthorEntrypoint           map[string]any   `json:"author_entrypoint" yaml:"author_entrypoint"`
 	AuthorEntrypointConfigured bool             `json:"-" yaml:"-"`
@@ -147,8 +146,7 @@ type WorkerCapacity struct {
 }
 
 type WorkerGitConfig struct {
-	ExchangeURL string `json:"exchange_url" yaml:"exchange_url"`
-	Principal   string `json:"principal" yaml:"principal"`
+	Principal string `json:"principal" yaml:"principal"`
 }
 
 type WorkerTerminalConfig struct {
@@ -220,9 +218,6 @@ func LoadCoordinator(path string) (CoordinatorConfig, error) {
 	}
 	if fileCfg.ListenAddr != "" {
 		cfg.ListenAddr = fileCfg.ListenAddr
-	}
-	if fileCfg.ExchangeBaseURL != "" {
-		cfg.ExchangeBaseURL = fileCfg.ExchangeBaseURL
 	}
 	if fileCfg.ProtocolVersion != "" {
 		cfg.ProtocolVersion = fileCfg.ProtocolVersion
@@ -529,9 +524,6 @@ func LoadWorker(path string) (WorkerConfig, error) {
 	if fileCfg.Capacity.Ephemeral != 0 {
 		cfg.Capacity.Ephemeral = fileCfg.Capacity.Ephemeral
 	}
-	if fileCfg.Git.ExchangeURL != "" {
-		cfg.Git.ExchangeURL = fileCfg.Git.ExchangeURL
-	}
 	if fileCfg.Git.Principal != "" {
 		cfg.Git.Principal = fileCfg.Git.Principal
 	}
@@ -599,9 +591,6 @@ func ApplyWorkerEnvOverrides(cfg WorkerConfig, getenv func(string) string) (Work
 	if value := strings.TrimSpace(getenv("FLOW_WORKER_TMUX_SOCKET_PATH")); value != "" {
 		cfg.Tmux.SocketPath = value
 	}
-	if value := strings.TrimSpace(getenv("FLOW_WORKER_GIT_EXCHANGE_URL")); value != "" {
-		cfg.Git.ExchangeURL = value
-	}
 	if value := strings.TrimSpace(getenv("FLOW_WORKER_GIT_PRINCIPAL")); value != "" {
 		cfg.Git.Principal = value
 	}
@@ -619,9 +608,6 @@ func normalizeCoordinator(cfg CoordinatorConfig) (CoordinatorConfig, error) {
 	if strings.TrimSpace(cfg.ProtocolVersion) == "" {
 		return CoordinatorConfig{}, errors.New("coordinator protocol_version is required")
 	}
-	if strings.TrimSpace(cfg.ExchangeBaseURL) == "" {
-		cfg.ExchangeBaseURL = CoordinatorURLForListenAddr(cfg.ListenAddr)
-	}
 	if cfg.AuthorEntrypoint == nil {
 		cfg.AuthorEntrypoint = DefaultAuthorEntrypoint()
 	}
@@ -638,7 +624,6 @@ func normalizeCoordinator(cfg CoordinatorConfig) (CoordinatorConfig, error) {
 
 	cfg.DataDir = cleanRequiredPath(cfg.DataDir)
 	cfg.ListenAddr = strings.TrimSpace(cfg.ListenAddr)
-	cfg.ExchangeBaseURL = strings.TrimRight(strings.TrimSpace(cfg.ExchangeBaseURL), "/")
 	cfg.HarnessArgs = harnessArgs
 	return cfg, nil
 }

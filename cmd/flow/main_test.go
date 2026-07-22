@@ -6,11 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -1057,18 +1055,14 @@ func TestInitDoesNotSeedSkillsInRepoWithoutCommits(t *testing.T) {
 func TestInitRegistersProjectWithDiscoveredClientConfig(t *testing.T) {
 	requireFlowTestTool(t, "git")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	exchangePath := filepath.Join(t.TempDir(), "exchange.git")
-	runFlowTestGit(t, "", "init", "--bare", exchangePath)
-	exchangeURL := (&url.URL{Scheme: "file", Path: exchangePath}).String()
+	fixture := newFlowTestFixture(t)
 	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v2/projects" {
-			t.Fatalf("request = %s %s, want POST /v2/projects", r.Method, r.URL.Path)
+		fixture.Server.ServeHTTP(w, r)
+		if r.Method == http.MethodPost && r.URL.Path == "/v2/projects" {
+			for _, bundle := range fixture.Registry.All() {
+				neutralizeFlowExchangeHooks(t, bundle.Project.ExchangePath)
+			}
 		}
-		if r.Header.Get("Authorization") != "Bearer owner-token" {
-			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"project":{"id":"p-discovered","name":"repo","repo_path":"","base_branch":"main","exchange_name":"flow","exchange_url":` + strconv.Quote(exchangeURL) + `},"created":true}`))
 	}))
 	t.Cleanup(httpServer.Close)
 	dataDir := t.TempDir()
@@ -1108,6 +1102,16 @@ func TestInitRegistersProjectWithDiscoveredClientConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(repoPath, ".flow", "skills")); !os.IsNotExist(err) {
 		t.Fatalf("init wrote repository skills; stat err = %v", err)
+	}
+}
+
+func neutralizeFlowExchangeHooks(t *testing.T, exchangePath string) {
+	t.Helper()
+	for _, name := range []string{"pre-receive", "post-receive"} {
+		path := filepath.Join(exchangePath, "hooks", name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("neutralize exchange hook %s: %v", name, err)
+		}
 	}
 }
 

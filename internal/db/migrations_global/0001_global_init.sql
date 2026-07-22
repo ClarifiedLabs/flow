@@ -8,7 +8,7 @@ INSERT INTO app_metadata (key, value, updated_at)
 VALUES ('schema_version', '0001_global_init', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 INSERT INTO app_metadata (key, value, updated_at)
-VALUES ('storage_format', '3', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+VALUES ('storage_format', '4', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 CREATE TABLE projects (
 	id TEXT PRIMARY KEY,
@@ -16,7 +16,6 @@ CREATE TABLE projects (
 	repo_path TEXT UNIQUE,
 	base_branch TEXT NOT NULL,
 	exchange_name TEXT NOT NULL,
-	exchange_url TEXT NOT NULL,
 	exchange_path TEXT,
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,

@@ -30,35 +30,35 @@ func TestWorkflowModelV2HumanGateLifecycle(t *testing.T) {
 
 	var created taskResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
-		createTaskRequest{Title: "Release v2", FlowID: flow.ID}, http.StatusCreated, &created, protocolHeader, "2")
+		createTaskRequest{Title: "Release v2", FlowID: flow.ID}, http.StatusCreated, &created)
 	if created.Task.State != nil {
 		t.Fatalf("created task state = %v, want Unscheduled/null", created.Task.State)
 	}
 
 	var scheduled workflowRunResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
-		nil, http.StatusOK, &scheduled, protocolHeader, "2")
+		nil, http.StatusOK, &scheduled)
 	if scheduled.Run.State != coordinator.WorkflowRunWaiting {
 		t.Fatalf("scheduled workflow state = %q, want waiting", scheduled.Run.State)
 	}
 
 	var detail workflowDetailResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks/"+created.Task.ID+"/workflow",
-		nil, http.StatusOK, &detail, protocolHeader, "2")
+		nil, http.StatusOK, &detail)
 	if detail.Detail.Substate != coordinator.InProgressBlocked || detail.Detail.OpenWait == nil {
 		t.Fatalf("workflow detail = %+v, want In Progress / Blocked", detail.Detail)
 	}
 
 	var completed coordinator.CompleteWorkflowNodeResult
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/respond",
-		workflowRespondRequest{NodeRunID: scheduled.Run.CurrentNodeRunID, Outcome: "ship"}, http.StatusOK, &completed, protocolHeader, "2")
+		workflowRespondRequest{NodeRunID: scheduled.Run.CurrentNodeRunID, Outcome: "ship"}, http.StatusOK, &completed)
 	if !completed.Done || completed.Run.State != coordinator.WorkflowRunCompleted {
 		t.Fatalf("completed workflow = %+v", completed)
 	}
 
 	var done taskResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks/"+created.Task.ID,
-		nil, http.StatusOK, &done, protocolHeader, "2")
+		nil, http.StatusOK, &done)
 	if done.Task.State == nil || *done.Task.State != coordinator.LifecycleDone || done.Task.DoneResolution == nil || *done.Task.DoneResolution != coordinator.ResolutionCompleted {
 		t.Fatalf("done task = %+v", done.Task)
 	}

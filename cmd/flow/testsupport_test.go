@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/ClarifiedLabs/flow/internal/api"
+	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	"github.com/ClarifiedLabs/flow/internal/lifecycle"
@@ -85,7 +86,7 @@ func newFlowTestFixture(t *testing.T) flowTestFixture {
 	server, err := api.NewServer(api.ServerOptions{
 		Registry:        registry,
 		OwnerToken:      "owner-token",
-		ProtocolVersion: "2",
+		ProtocolVersion: config.DefaultProtocolVersion,
 	})
 	if err != nil {
 		t.Fatalf("new api server: %v", err)
@@ -138,7 +139,6 @@ func repointFlowTestFixtureExchange(t *testing.T, fixture flowTestFixture, excha
 		t.Fatalf("project bundle not open")
 	}
 	project := bundle.Project
-	project.ExchangeURL = exchangePath
 	project.ExchangePath = exchangePath
 	bundle.Project = project
 

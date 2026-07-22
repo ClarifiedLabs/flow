@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -232,7 +231,6 @@ type ServerProject struct {
 	Dir          string
 	DatabasePath string
 	ExchangePath string
-	ExchangeURL  string
 }
 
 // CreateServerProject creates the project directory and its bare exchange
@@ -283,7 +281,6 @@ func CreateServerProject(ctx context.Context, opts ServerProjectOptions) (Server
 		Dir:          projectDir,
 		DatabasePath: ProjectDatabasePath(opts.DataDir, opts.ProjectID),
 		ExchangePath: exchangePath,
-		ExchangeURL:  pathToFileURL(exchangePath),
 	}, nil
 }
 
@@ -297,13 +294,4 @@ func ProjectDir(dataDir string, projectID string) string {
 // coordinator's data dir.
 func ProjectDatabasePath(dataDir string, projectID string) string {
 	return filepath.Join(ProjectDir(dataDir, projectID), "flow.db")
-}
-
-func pathToFileURL(path string) string {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		absolute = path
-	}
-
-	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}).String()
 }

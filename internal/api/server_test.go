@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/api/contract"
+	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
@@ -2820,7 +2821,6 @@ func repointFixtureExchange(t *testing.T, fixture testFixture, exchangePath stri
 
 	bundle := fixture.Bundle
 	project := bundle.Project
-	project.ExchangeURL = exchangePath
 	project.ExchangePath = exchangePath
 	bundle.Project = project
 
@@ -2828,8 +2828,8 @@ func repointFixtureExchange(t *testing.T, fixture testFixture, exchangePath stri
 	// resolve this project from its exchange path.
 	if _, err := fixture.GlobalDB.ExecContext(context.Background(), `
 UPDATE projects
-SET exchange_url = ?, exchange_path = ?
-WHERE id = ?`, exchangePath, exchangePath, project.ID); err != nil {
+SET exchange_path = ?
+WHERE id = ?`, exchangePath, project.ID); err != nil {
 		t.Fatalf("repoint project exchange row: %v", err)
 	}
 
@@ -3514,7 +3514,7 @@ func authorizedRequest(method string, path string, body any) *http.Request {
 	}
 	request := httptest.NewRequest(method, path, &requestBody)
 	request.Header.Set("Authorization", "Bearer owner-token")
-	request.Header.Set(protocolHeader, "2")
+	request.Header.Set(protocolHeader, config.DefaultProtocolVersion)
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
@@ -3579,8 +3579,18 @@ func newMultiProjectServer(t *testing.T, projectNames ...string) (*Server, []*Pr
 func TestListProjectsEndpoint(t *testing.T) {
 	server, bundles := newMultiProjectServer(t, "alpha", "beta")
 
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, authorizedRequest(http.MethodGet, "/v2/projects", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GET /v2/projects status = %d, want 200; body: %s", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "exchange_url") {
+		t.Fatalf("project response advertises an exchange URL: %s", recorder.Body.String())
+	}
 	var response projectsResponse
-	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v2/projects", nil, http.StatusOK, &response)
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode projects response: %v", err)
+	}
 	if len(response.Projects) != 2 {
 		t.Fatalf("projects = %+v, want 2", response.Projects)
 	}
