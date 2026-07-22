@@ -395,8 +395,8 @@ Task fields:
 - `id`: stable coordinator-allocated ID, e.g. `t-my-project-0001`; the owning
   project is `p-my-project`.
 - `title`
-- `body`
-- `acceptance_criteria`
+- `body`: sole Markdown field for the task's requirements and specification;
+  generated task-set items require a nonblank body
 - `priority`
 - `schedule_state`: `backlog`, `up_next`, or `closed`
 - `triage_state`: `triage`, `accepted`, or `rejected`
@@ -514,8 +514,8 @@ Agent definition: a reusable agent configuration.
   `--reasoning Y`). Empty means the harness default.
 - `prompt`: the role-instruction markdown. It replaces the embedded
   `skills/flow-*.md` content in the session's prompt; task context (title,
-  body, acceptance criteria, prior handoffs, review state) is still appended by
-  `flow fetch-prompt`.
+  Markdown body, prior handoffs, review state) is still appended by `flow
+  fetch-prompt`.
 
 Flow: an ordered work pipeline plus its review configuration.
 
@@ -1312,8 +1312,8 @@ There are two phases:
    round.
 
 2. Acceptance phase.
-   The verifier audits acceptance criteria and claimed thread resolutions after
-   critique settles.
+   The verifier audits the requirements in the task body and claimed thread
+   resolutions after critique settles.
 
 Agent reviewer and verifier checks come from the task's frozen flow snapshot:
 one check per review agent, named after its agent definition, launched with
@@ -1514,8 +1514,8 @@ Required views:
   attach action, and manual merge actions.
 - Merge inbox: `ready_to_merge` changes with check summary, diff stats, branch
   head, and the merge action when human action is required.
-- Task detail: title, body, acceptance criteria, tags, relationships, the
-  task's flow (phase chain with agents and gates, current position),
+- Task detail: title, Markdown body, tags, relationships, the task's flow
+  (phase chain with agents and gates, current position),
   schedule/triage/close controls, status feed, active and historical sessions,
   linked change state, and a Lifecycle timeline of phase transitions. When a
   phase awaits gate approval, a prominent panel renders the pending handoff as

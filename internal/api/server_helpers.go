@@ -47,7 +47,6 @@ func createTaskInputForPrincipal(request createTaskRequest, principal coordinato
 		Task: coordinator.CreateTaskInput{
 			Title:              request.Title,
 			Body:               request.Body,
-			AcceptanceCriteria: request.AcceptanceCriteria,
 			Priority:           request.Priority,
 			ScheduleState:      scheduleState,
 			TriageState:        triageState,
@@ -297,7 +296,6 @@ func sessionHarnessForJob(job worker.Job) string {
 type createTaskRequest struct {
 	Title              string            `json:"title"`
 	Body               string            `json:"body"`
-	AcceptanceCriteria string            `json:"acceptance_criteria"`
 	Priority           int               `json:"priority"`
 	FlowID             string            `json:"flow_id"`
 	ScheduleState      string            `json:"-"`
@@ -319,11 +317,10 @@ type tagRequest struct {
 type relationRequest = contract.TaskRelationRequest
 
 type editTaskRequest struct {
-	Title              *string `json:"title"`
-	Body               *string `json:"body"`
-	AcceptanceCriteria *string `json:"acceptance_criteria"`
-	Priority           *int    `json:"priority"`
-	FlowID             *string `json:"flow_id"`
+	Title    *string `json:"title"`
+	Body     *string `json:"body"`
+	Priority *int    `json:"priority"`
+	FlowID   *string `json:"flow_id"`
 }
 
 type scheduleTaskRequest = contract.ScheduleTaskRequest

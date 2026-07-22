@@ -1120,9 +1120,8 @@ func TestWorkerTokenCanReadTask(t *testing.T) {
 	ctx := context.Background()
 
 	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{
-		Title:              "Reviewer prompt context",
-		Body:               "Check jobs fetch task context with the worker token.",
-		AcceptanceCriteria: "Worker-scope task reads succeed.",
+		Title: "Reviewer prompt context",
+		Body:  "Check jobs fetch task context with the worker token. Worker-scope task reads must succeed.",
 	})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
@@ -1130,7 +1129,7 @@ func TestWorkerTokenCanReadTask(t *testing.T) {
 
 	var worker taskResponse
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/tasks/"+task.ID, nil, http.StatusOK, &worker)
-	if worker.Task.ID != task.ID || worker.Task.Body != task.Body || worker.Task.AcceptanceCriteria != task.AcceptanceCriteria {
+	if worker.Task.ID != task.ID || worker.Task.Body != task.Body {
 		t.Fatalf("worker task response = %+v", worker.Task)
 	}
 	if worker.Detail != nil {

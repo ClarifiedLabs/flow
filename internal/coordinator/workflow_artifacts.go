@@ -307,13 +307,12 @@ type TaskSetManifest struct {
 }
 
 type TaskSetItem struct {
-	Key                string   `json:"key"`
-	Title              string   `json:"title"`
-	Body               string   `json:"body,omitempty"`
-	AcceptanceCriteria string   `json:"acceptance_criteria"`
-	Priority           int      `json:"priority,omitempty"`
-	TagSlugs           []string `json:"tag_slugs,omitempty"`
-	FlowID             string   `json:"flow_id,omitempty"`
+	Key      string   `json:"key"`
+	Title    string   `json:"title"`
+	Body     string   `json:"body"`
+	Priority int      `json:"priority,omitempty"`
+	TagSlugs []string `json:"tag_slugs,omitempty"`
+	FlowID   string   `json:"flow_id,omitempty"`
 }
 
 type TaskSetDependency struct {
@@ -402,10 +401,10 @@ func (s *WorkflowArtifactService) MaterializeTaskSet(ctx context.Context, artifa
 		}
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO tasks (
-	id, title, body, acceptance_criteria, priority, flow_id, created_by, created_by_session_id,
+	id, title, body, priority, flow_id, created_by, created_by_session_id,
 	source_task_id, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.Title, item.Body,
-			item.AcceptanceCriteria, item.Priority, flowID, string(createdBy), sessionID, sourceTaskID, nowText, nowText); err != nil {
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.Title, item.Body,
+			item.Priority, flowID, string(createdBy), sessionID, sourceTaskID, nowText, nowText); err != nil {
 			return MaterializeTaskSetResult{}, false, fmt.Errorf("create generated task %q: %w", item.Key, err)
 		}
 		if err := linkTasksInTx(ctx, tx, sourceTaskID, id, RelationParentOf, ActorSystem, nowText); err != nil {
@@ -487,7 +486,6 @@ func DecodeTaskSetManifest(raw []byte) (TaskSetManifest, error) {
 		item := &manifest.Tasks[i]
 		item.Key = strings.TrimSpace(item.Key)
 		item.Title = strings.TrimSpace(item.Title)
-		item.AcceptanceCriteria = strings.TrimSpace(item.AcceptanceCriteria)
 		item.FlowID = strings.TrimSpace(item.FlowID)
 		if !flowNodeKeyPattern.MatchString(item.Key) {
 			return TaskSetManifest{}, fmt.Errorf("task %d key %q is invalid", i+1, item.Key)
@@ -496,8 +494,8 @@ func DecodeTaskSetManifest(raw []byte) (TaskSetManifest, error) {
 			return TaskSetManifest{}, fmt.Errorf("duplicate task key %q", item.Key)
 		}
 		seen[item.Key] = true
-		if item.Title == "" || item.AcceptanceCriteria == "" {
-			return TaskSetManifest{}, fmt.Errorf("task %q requires title and acceptance_criteria", item.Key)
+		if item.Title == "" || strings.TrimSpace(item.Body) == "" {
+			return TaskSetManifest{}, fmt.Errorf("task %q requires title and body", item.Key)
 		}
 		if item.Priority < 0 {
 			return TaskSetManifest{}, fmt.Errorf("task %q priority must be non-negative", item.Key)

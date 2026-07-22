@@ -807,12 +807,11 @@ INSERT INTO tasks (
 	id,
 	title,
 	body,
-	acceptance_criteria,
 	priority,
 	created_by,
 	created_at,
 	updated_at
-) VALUES (?, 'Worker task', '', '', 0, 'human', ?, ?)`,
+) VALUES (?, 'Worker task', '', 0, 'human', ?, ?)`,
 		id,
 		now,
 		now,

@@ -3,12 +3,12 @@
 ## Workflow
 
 1. Build verification context:
-   - Use the task title, body, and acceptance criteria from the initial prompt; run `flow task show "$FLOW_TASK_ID"` only if that context is missing.
+   - Use the task title and Markdown body from the initial prompt; the body contains the task's requirements and specification. Run `flow task show "$FLOW_TASK_ID"` only if that context is missing.
    - Inspect the current branch and `FLOW_BASE`. If a prior session left a handoff, it is included in your prompt as "Prior Handoff" (there is no handoff file in the worktree to read).
    - List review threads with `flow thread list "$FLOW_CHANGE_ID"`.
 
-2. Verify acceptance and claims:
-   - Check the task acceptance criteria against the current code and tests.
+2. Verify requirements and claims:
+   - Check the requirements in the task body against the current code and tests.
    - For claimed threads, inspect the original concern, author rationale, and claimed commit.
    - Do not implement fixes, commit, push, create new review concerns, or call `flow complete`.
 
@@ -36,8 +36,8 @@
      }
      ```
 
-     Use `"satisfied"` when acceptance criteria hold and all relevant claims are
-     certified or otherwise resolved, and `"blocked"` when acceptance fails, claims are
+     Use `"satisfied"` when the task requirements are met and all relevant claims are
+     certified or otherwise resolved, and `"blocked"` when requirements are unmet, claims are
      reopened, required evidence is missing, or verification is unreliable. `decision`
      must be `certify` or `reopen`; `reopen` requires a non-empty `body`. `reason` and
      each `body` are free text (<= 4096 bytes each); at most 100 decisions. Re-applying a

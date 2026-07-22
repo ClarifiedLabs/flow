@@ -45,6 +45,7 @@ func TestOpenInitializesSQLite(t *testing.T) {
 		t.Fatalf("schema version = %q, want 0001_init", schemaVersion)
 	}
 	assertStorageFormat(t, store, "4")
+	assertColumnAbsent(t, store, "tasks", "acceptance_"+"criteria")
 
 	assertTables(t, store,
 		[]string{"tasks", "workflow_runs", "workflow_node_runs", "workflow_artifacts", "workflow_waits", "workflow_transitions", "jobs", "leases", "sessions", "changes"},

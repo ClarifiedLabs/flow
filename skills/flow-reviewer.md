@@ -3,12 +3,12 @@
 ## Workflow
 
 1. Build review context:
-   - Use the task title, body, and acceptance criteria from the initial prompt; run `flow task show "$FLOW_TASK_ID"` only if that context is missing.
+   - Use the task title and Markdown body from the initial prompt; the body contains the task's requirements and specification. Run `flow task show "$FLOW_TASK_ID"` only if that context is missing.
    - Inspect the current branch against `FLOW_BASE`.
    - List existing threads with `flow thread list "$FLOW_CHANGE_ID"` to avoid duplicate concerns.
 
 2. Review for defects that matter:
-   - Prioritize correctness, regressions, missing tests, broken acceptance criteria, security-sensitive mistakes, and unclear handoff claims.
+   - Prioritize correctness, regressions, missing tests, unmet task requirements, security-sensitive mistakes, and unclear handoff claims.
    - Ignore style-only comments unless they create real maintainability risk.
    - Do not modify files, commit, push, certify threads, or call `flow complete`.
 

@@ -1585,12 +1585,12 @@ func TestAnyTrustPromptVisibleRecognizesActivePrompts(t *testing.T) {
 }
 
 func TestAnyTrustPromptVisibleRejectsEmbeddedPromptText(t *testing.T) {
-	// The trust-prompt copy quoted inside larger pane content (an task body) must
+	// The trust-prompt copy quoted inside larger pane content (a task body) must
 	// not be mistaken for a live prompt: the submit instruction is no longer the
 	// last line on screen.
 	for _, pane := range []string{codexTrustPromptPane(), claudeTrustPromptPane()} {
 		embedded := "Flow role instructions (flow-author):\n\n# Flow Author\n\nTask: t-test-0005\n\n" +
-			pane + "\n\nacceptance_criteria:\nthe agent no longer gets stuck at the trust prompt\n"
+			pane + "\n\nTask body:\nthe agent no longer gets stuck at the trust prompt\n"
 		if anyTrustPromptVisible(embedded) {
 			t.Fatal("anyTrustPromptVisible accepted prompt text embedded in task content")
 		}

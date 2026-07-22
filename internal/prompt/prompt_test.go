@@ -7,14 +7,13 @@ import (
 
 func TestBuildAuthorPromptInvokesRoleSkill(t *testing.T) {
 	rendered, err := Build(Input{
-		Role:                   RoleAuthor,
-		TaskID:                 "t-test-0001",
-		TaskTitle:              "Prompt includes task details",
-		TaskBody:               "Make the initial prompt self-contained.",
-		TaskAcceptanceCriteria: "Agents do not need to immediately fetch task details.",
-		ChangeID:               "ch-1",
-		Branch:                 "task/t-test-0001",
-		Base:                   "main",
+		Role:      RoleAuthor,
+		TaskID:    "t-test-0001",
+		TaskTitle: "Prompt includes task details",
+		TaskBody:  "Make the initial prompt self-contained.\n\nAgents must not need to immediately fetch task details.",
+		ChangeID:  "ch-1",
+		Branch:    "task/t-test-0001",
+		Base:      "main",
 	})
 	if err != nil {
 		t.Fatalf("build prompt: %v", err)
@@ -26,8 +25,7 @@ func TestBuildAuthorPromptInvokesRoleSkill(t *testing.T) {
 		"Finalize with two actions:",
 		"Task: t-test-0001",
 		"Task Title: Prompt includes task details",
-		"Task Body:\nMake the initial prompt self-contained.",
-		"Acceptance Criteria:\nAgents do not need to immediately fetch task details.",
+		"Task Body:\nMake the initial prompt self-contained.\n\nAgents must not need to immediately fetch task details.",
 		"Change: ch-1",
 		"Branch: task/t-test-0001",
 		"git commit",

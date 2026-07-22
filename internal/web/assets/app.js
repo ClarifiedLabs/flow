@@ -483,11 +483,10 @@ export class FlowApp extends HTMLElement {
     return renderTaskFormView(this, task, options);
   }
 
-  // renderTaskReadOnlyDetail renders the title, body, acceptance criteria and
-  // agent configuration as a read-only summary with an Edit button that reveals
-  // the full edit form. Replacing the always-visible form with this collapsed
-  // view keeps the editor column short, so the (now timeline-merged) sessions
-  // list can no longer overwhelm/cover the agent config and the task text.
+  // renderTaskReadOnlyDetail renders the title, body and flow as a read-only
+  // summary with an Edit button that reveals the full edit form. Replacing the
+  // always-visible form with this collapsed view keeps the editor column short,
+  // so the (now timeline-merged) sessions list cannot overwhelm the task text.
   renderTaskReadOnlyDetail(task, options) {
     return renderTaskReadOnlyDetailView(this, task, options);
   }
@@ -769,7 +768,6 @@ export class FlowApp extends HTMLElement {
         const payload = {
           title: form.elements.title.value.trim(),
           body: form.elements.body.value,
-          acceptance_criteria: form.elements.acceptance_criteria.value,
           priority,
           flow_id: form.elements.flow_id ? form.elements.flow_id.value : "",
         };
@@ -901,8 +899,8 @@ export class FlowApp extends HTMLElement {
   }
 
   // toggleTaskEditForm swaps the read-only detail summary for the full edit
-  // form (and back), re-binding the form's harness controls so they work after
-  // being revealed from a hidden container.
+  // form (and back), re-binding the form's flow controls after it is revealed
+  // from a hidden container.
 
   // expandTimeline reveals the capped timeline rows behind the "Show more"
   // control and removes the control once everything is visible.

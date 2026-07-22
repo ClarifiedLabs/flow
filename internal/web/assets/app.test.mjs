@@ -526,8 +526,7 @@ test("task save submits patch payload and refreshes", async () => {
   assert.equal(harness.fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body), {
     title: "Updated task",
-    body: "New body",
-    acceptance_criteria: "New criteria",
+    body: "New body\n\n## Requirements\n- New criteria",
     priority: 4,
     flow_id: "fl-review",
   });
@@ -675,6 +674,8 @@ test("new task route renders project-scoped blank form without fetching an task"
   assert.match(content.innerHTML, /<option value="p-alpha"/);
   assert.match(content.innerHTML, /<option value="p-beta"/);
   assert.match(content.innerHTML, /<input name="title" value="" required>/);
+  assert.match(content.innerHTML, /<textarea name="body" rows="8"><\/textarea>/);
+  assert.equal(content.innerHTML.match(/<textarea\b/g)?.length, 1);
   assert.match(content.innerHTML, /<span>Flow<\/span>/);
   assert.match(content.innerHTML, /<select name="flow_id" data-flow-select>/);
   assert.match(content.innerHTML, /<option value="" selected>Project default<\/option>/);
@@ -708,8 +709,7 @@ test("new task form submits queued create payload then navigates to created task
   assert.equal(harness.fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body), {
     title: "Browser task",
-    body: "New body",
-    acceptance_criteria: "New criteria",
+    body: "New body\n\n## Requirements\n- New criteria",
     priority: 4,
     flow_id: "fl-plan",
   });
@@ -746,8 +746,7 @@ test("new task form can save without queueing", async () => {
   assert.equal(harness.fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks");
   assert.deepEqual(JSON.parse(harness.fetchCalls[0].options.body), {
     title: "Updated task",
-    body: "New body",
-    acceptance_criteria: "New criteria",
+    body: "New body\n\n## Requirements\n- New criteria",
     priority: 4,
     flow_id: "",
   });
@@ -1745,8 +1744,7 @@ test("task detail renders owner metadata, relations, sessions, changes, and chec
           task: {
             id: "t-alpha-0001",
             title: "Task detail",
-            body: "Body",
-            acceptance_criteria: "Done",
+            body: "Body\n\n## Requirements\n- Done",
             priority: 2,
             schedule_state: "up_next",
             triage_state: "accepted",
@@ -2848,8 +2846,7 @@ test("browser smoke loads task and change deep links", async () => {
       task: {
         id: "t-alpha-0001",
         title: "Task detail",
-        body: "Task body",
-        acceptance_criteria: "Done",
+        body: "Task body\n\n## Requirements\n- Done",
         schedule_state: "up_next",
         triage_state: "accepted",
         priority: 3,
@@ -3196,8 +3193,7 @@ async function taskSaveHarness(options = {}) {
     dataset: { taskForm: mode === "create" ? "" : "t-alpha-0001", taskFormMode: mode },
     elements: {
       title: { value: options.title ?? "Updated task" },
-      body: { value: "New body" },
-      acceptance_criteria: { value: "New criteria" },
+      body: { value: "New body\n\n## Requirements\n- New criteria" },
       priority: { value: options.priority ?? "4" },
       requires_human_review: { checked: false },
       auto_merge: { checked: true },
@@ -4081,17 +4077,18 @@ test("human attention panel renders the question message as markdown", async () 
   assert.match(html, /<li>a<\/li>/);
 });
 
-test("task read-only detail renders the body as markdown but keeps the edit textarea raw", async () => {
+test("task read-only detail renders body requirements as markdown but keeps the edit textarea raw", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   const html = app.renderTaskReadOnlyDetail(
-    { id: "t-alpha-0001", title: "T", body: "## Body\n- item", acceptance_criteria: "- done" },
+    { id: "t-alpha-0001", title: "T", body: "## Body\n- item\n\n## Requirements\n- done" },
     { taskID: "t-alpha-0001" },
   );
   assert.match(html, /<h2>Body<\/h2>/);
   assert.match(html, /<li>item<\/li>/);
+  assert.match(html, /<h2>Requirements<\/h2>/);
   assert.match(html, /<li>done<\/li>/);
-  assert.match(html, /<textarea[^>]*name="body"[^>]*>## Body/);
+  assert.match(html, /<textarea[^>]*name="body"[^>]*>## Body\n- item\n\n## Requirements\n- done<\/textarea>/);
 });
 
 test("task read-only detail shows a dash placeholder for an empty body", async () => {

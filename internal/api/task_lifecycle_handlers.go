@@ -784,11 +784,10 @@ func (s *projectServer) handleEditTask(w http.ResponseWriter, r *http.Request, t
 	}
 
 	task, err := s.tasks.EditTask(r.Context(), taskID, coordinator.EditTaskInput{
-		Title:              request.Title,
-		Body:               request.Body,
-		AcceptanceCriteria: request.AcceptanceCriteria,
-		Priority:           request.Priority,
-		FlowID:             request.FlowID,
+		Title:    request.Title,
+		Body:     request.Body,
+		Priority: request.Priority,
+		FlowID:   request.FlowID,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "edit_task_failed", err.Error())

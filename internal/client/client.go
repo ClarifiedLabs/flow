@@ -1456,19 +1456,17 @@ func durationSeconds(duration time.Duration) int {
 }
 
 type CreateTaskInput struct {
-	Title              string `json:"title"`
-	Body               string `json:"body"`
-	AcceptanceCriteria string `json:"acceptance_criteria"`
-	Priority           int    `json:"priority"`
-	FlowID             string `json:"flow_id,omitempty"`
+	Title    string `json:"title"`
+	Body     string `json:"body"`
+	Priority int    `json:"priority"`
+	FlowID   string `json:"flow_id,omitempty"`
 }
 
 type EditTaskInput struct {
-	Title              *string `json:"title,omitempty"`
-	Body               *string `json:"body,omitempty"`
-	AcceptanceCriteria *string `json:"acceptance_criteria,omitempty"`
-	Priority           *int    `json:"priority,omitempty"`
-	FlowID             *string `json:"flow_id,omitempty"`
+	Title    *string `json:"title,omitempty"`
+	Body     *string `json:"body,omitempty"`
+	Priority *int    `json:"priority,omitempty"`
+	FlowID   *string `json:"flow_id,omitempty"`
 }
 
 type UploadTaskAttachmentInput struct {

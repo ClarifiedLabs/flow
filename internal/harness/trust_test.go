@@ -98,7 +98,7 @@ func TestTrustPromptVisibleToleratesCopyDrift(t *testing.T) {
 
 // TestTrustPromptVisibleRejectsEmbeddedPromptText preserves the anti-injection
 // invariant: when the trust-prompt copy is merely quoted inside larger pane
-// content (e.g. an task body), the prompt's submit instruction is no longer
+// content (e.g. a task body), the prompt's submit instruction is no longer
 // the last line on screen, so it must not be mistaken for a live prompt.
 func TestTrustPromptVisibleRejectsEmbeddedPromptText(t *testing.T) {
 	for _, tc := range []struct {
@@ -110,7 +110,7 @@ func TestTrustPromptVisibleRejectsEmbeddedPromptText(t *testing.T) {
 		{"claude", mustLookup(t, Claude), claudeTrustPane()},
 	} {
 		pane := "Flow role instructions (flow-author):\n\n# Flow Author\n\nTask: t-test-0005\n\n" +
-			tc.pane + "\n\nacceptance_criteria:\n" + tc.name + " no longer gets stuck at the trust prompt\n"
+			tc.pane + "\n\nTask body:\n" + tc.name + " no longer gets stuck at the trust prompt\n"
 		if tc.def.TrustPromptVisible(pane) {
 			t.Fatalf("%s definition matched trust-prompt text embedded in task content", tc.name)
 		}

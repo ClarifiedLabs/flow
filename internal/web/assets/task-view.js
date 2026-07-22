@@ -112,10 +112,6 @@ export function renderTaskFormView(app, task, options = {}) {
         <span>Body</span>
         <textarea name="body" rows="8">${escapeHTML(value(task, "body", "Body"))}</textarea>
       </label>
-      <label class="wide">
-        <span>Acceptance Criteria</span>
-        <textarea name="acceptance_criteria" rows="6">${escapeHTML(value(task, "acceptance_criteria", "AcceptanceCriteria"))}</textarea>
-      </label>
       ${mode === "create" ? `
       <label class="wide">
         <span>Attachments</span>
@@ -169,7 +165,6 @@ export function renderTaskReadOnlyDetailView(app, task, options = {}) {
   const flow = options.flow || null;
   const priority = Number(value(task, "priority", "Priority") || 0);
   const body = value(task, "body", "Body") || "";
-  const acceptanceCriteria = value(task, "acceptance_criteria", "AcceptanceCriteria") || "";
   const title = value(task, "title", "Title") || "";
   const flowLine = renderFlowSummaryLineView(app, task, flow, projectID);
   return `
@@ -183,7 +178,6 @@ export function renderTaskReadOnlyDetailView(app, task, options = {}) {
         <p class="task-read-only-flow">${flowLine}</p>
         <p class="task-read-only-field"><span class="meta-quiet">Title</span><br>${escapeHTML(title)}</p>
         <div class="task-read-only-field"><span class="meta-quiet">Body</span>${body ? renderMarkdown(body) : "<br><span class=\"muted\">—</span>"}</div>
-        <div class="task-read-only-field"><span class="meta-quiet">Acceptance Criteria</span>${acceptanceCriteria ? renderMarkdown(acceptanceCriteria) : "<br><span class=\"muted\">—</span>"}</div>
       </div>
       <div class="task-read-only-form" data-task-edit-form hidden>
         ${renderTaskFormView(app, task, { taskID, projectID })}
@@ -275,9 +269,8 @@ export async function renderTaskView(app, id, context, projectID = "") {
   const lifecycleHTML = (timelineTransitions.length || sessions.length || statusLog.length)
     ? `<h3>Activity</h3><div class="lifecycle-timeline">${timelineHTML}</div>`
     : "";
-  // Read-only detail (title/body/acceptance criteria/agent config) with an
-  // Edit toggle that reveals the full form. Directly fixes the task where a
-  // tall sessions list covered up the agent config, title, body and criteria.
+  // Read-only task detail (title, body and flow) with an Edit toggle that
+  // reveals the full form without letting the timeline overwhelm task text.
   const readOnlyDetailHTML = renderTaskReadOnlyDetailView(app, task, { taskID, projectID: resolvedProject, flow });
   const editorHTML = [
     tagsHTML,

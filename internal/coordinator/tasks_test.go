@@ -56,6 +56,9 @@ func TestCreateTaskAllocatesIDAndPersistsAcrossRestart(t *testing.T) {
 	if reopenedTask.Title != "Build task domain" {
 		t.Fatalf("reopened Title = %q", reopenedTask.Title)
 	}
+	if reopenedTask.Body != "Persist tasks in SQLite." {
+		t.Fatalf("reopened Body = %q", reopenedTask.Body)
+	}
 }
 
 func TestConcurrentTaskCreationAllocatesUniqueIDs(t *testing.T) {

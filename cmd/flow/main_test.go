@@ -194,9 +194,8 @@ func TestFetchPromptIncludesTaskDetailsFromAPI(t *testing.T) {
 		t.Fatalf("new client: %v", err)
 	}
 	task, err := client.CreateTask(flowclient.CreateTaskInput{
-		Title:              "Prompt details task",
-		Body:               "Build the prompt with complete task context.",
-		AcceptanceCriteria: "The agent can start work without calling task show.",
+		Title: "Prompt details task",
+		Body:  "Build the prompt with complete task context.\n\nThe agent must be able to start work without calling task show.",
 	})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
@@ -218,12 +217,14 @@ func TestFetchPromptIncludesTaskDetailsFromAPI(t *testing.T) {
 	for _, want := range []string{
 		"Task: " + task.ID,
 		"Task Title: Prompt details task",
-		"Task Body:\nBuild the prompt with complete task context.",
-		"Acceptance Criteria:\nThe agent can start work without calling task show.",
+		"Task Body:\nBuild the prompt with complete task context.\n\nThe agent must be able to start work without calling task show.",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("fetch-prompt output missing %q:\n%s", want, output)
 		}
+	}
+	if got := strings.Count(output, "The agent must be able to start work without calling task show."); got != 1 {
+		t.Fatalf("task requirement appears %d times, want once:\n%s", got, output)
 	}
 }
 

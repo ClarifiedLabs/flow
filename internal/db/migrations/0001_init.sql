@@ -72,7 +72,6 @@ CREATE TABLE tasks (
 	id TEXT PRIMARY KEY,
 	title TEXT NOT NULL CHECK (length(trim(title)) > 0),
 	body TEXT NOT NULL DEFAULT '',
-	acceptance_criteria TEXT NOT NULL DEFAULT '',
 	priority INTEGER NOT NULL DEFAULT 0 CHECK (priority >= 0),
 	created_by TEXT NOT NULL CHECK (created_by IN ('human', 'agent', 'system')),
 	created_by_session_id TEXT,

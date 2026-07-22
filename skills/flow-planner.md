@@ -3,7 +3,7 @@
 ## Workflow
 
 1. Inspect the assignment before planning:
-   - Use the task title, body, and acceptance criteria from the initial prompt; run `flow task show "$FLOW_TASK_ID"` only if that context is missing.
+   - Use the task title and Markdown body from the initial prompt; the body contains the task's requirements and specification. Run `flow task show "$FLOW_TASK_ID"` only if that context is missing.
    - Check `FLOW_BRANCH` and `FLOW_BASE`. If a prior phase left a handoff, it is included in your prompt as "Prior Handoff".
    - If this phase was sent back with feedback, the prompt includes "Gate Feedback" — revise the plan to address it rather than starting over.
 

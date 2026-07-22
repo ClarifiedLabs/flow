@@ -462,12 +462,10 @@ func runTaskCreate(args []string, stdout, stderr io.Writer) int {
 
 	var title string
 	var body string
-	var acceptanceCriteria string
 	var priority int
 	var attachmentFiles stringSliceFlag
 	flags.StringVar(&title, "title", "", "task title")
 	flags.StringVar(&body, "body", "", "task body")
-	flags.StringVar(&acceptanceCriteria, "acceptance-criteria", "", "acceptance criteria")
 	flags.IntVar(&priority, "priority", 0, "task priority")
 	var flowRef string
 	flags.StringVar(&flowRef, "flow", "", "workflow (id or name) used when the task is scheduled")
@@ -483,10 +481,9 @@ func runTaskCreate(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	input := flowclient.CreateTaskInput{
-		Title:              title,
-		Body:               body,
-		AcceptanceCriteria: acceptanceCriteria,
-		Priority:           priority,
+		Title:    title,
+		Body:     body,
+		Priority: priority,
 	}
 	if strings.TrimSpace(flowRef) != "" {
 		flowID, err := resolveFlowRef(client, flowRef)
@@ -676,12 +673,10 @@ func runTaskEdit(args []string, stdout, stderr io.Writer) int {
 
 	var title string
 	var body string
-	var acceptanceCriteria string
 	var priority string
 	var flowRef string
 	flags.StringVar(&title, "title", "", "new task title")
 	flags.StringVar(&body, "body", "", "new task body")
-	flags.StringVar(&acceptanceCriteria, "acceptance-criteria", "", "new acceptance criteria")
 	flags.StringVar(&priority, "priority", "", "new task priority")
 	flags.StringVar(&flowRef, "flow", "", "workflow (id or name) used by the next run")
 	if err := flags.Parse(args); err != nil {
@@ -704,9 +699,6 @@ func runTaskEdit(args []string, stdout, stderr io.Writer) int {
 	}
 	if body != "" {
 		input.Body = &body
-	}
-	if acceptanceCriteria != "" {
-		input.AcceptanceCriteria = &acceptanceCriteria
 	}
 	if priority != "" {
 		parsedPriority, err := strconv.Atoi(priority)
@@ -1674,7 +1666,6 @@ func enrichPromptTaskContext(input *flowprompt.Input, apiFlags *apiFlagValues) e
 
 	input.TaskTitle = task.Title
 	input.TaskBody = task.Body
-	input.TaskAcceptanceCriteria = task.AcceptanceCriteria
 	input.HumanAttentionContext = humanAttentionPromptContext(statusLog)
 	// Resolve the flow prompt context: for authors, the current phase's role
 	// instructions (from the frozen agent-def snapshot), human gate feedback,
@@ -3201,9 +3192,6 @@ func printTaskDetail(out io.Writer, task coordinator.Task) {
 	printTaskLine(out, task)
 	if task.Body != "" {
 		fmt.Fprintf(out, "\n%s\n", task.Body)
-	}
-	if task.AcceptanceCriteria != "" {
-		fmt.Fprintf(out, "\nacceptance_criteria:\n%s\n", task.AcceptanceCriteria)
 	}
 }
 

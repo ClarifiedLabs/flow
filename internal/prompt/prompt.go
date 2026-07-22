@@ -18,7 +18,6 @@ type Input struct {
 	TaskID                     string
 	TaskTitle                  string
 	TaskBody                   string
-	TaskAcceptanceCriteria     string
 	ChangeID                   string
 	Branch                     string
 	Base                       string
@@ -135,9 +134,6 @@ func Build(input Input) (string, error) {
 	lines = appendReviewContext(lines, input)
 	if strings.TrimSpace(input.TaskBody) != "" {
 		lines = append(lines, "", "Task Body:", strings.TrimSpace(input.TaskBody))
-	}
-	if strings.TrimSpace(input.TaskAcceptanceCriteria) != "" {
-		lines = append(lines, "", "Acceptance Criteria:", strings.TrimSpace(input.TaskAcceptanceCriteria))
 	}
 	if strings.TrimSpace(input.PriorHandoff) != "" {
 		lines = append(lines, "", "Prior Handoff (from the previous session; there is no handoff file in the worktree to read):", strings.TrimSpace(input.PriorHandoff))
@@ -370,9 +366,9 @@ func roleInstructions(role string, input Input) []string {
 		}
 	case RoleVerifier:
 		return []string{
-			"Verify acceptance criteria and claimed review-thread resolutions against the current branch.",
+			"Verify the task requirements and claimed review-thread resolutions against the current branch.",
 			"Record certify/reopen decisions as threads[] entries in $FLOW_VERDICT_FILE (each {id,decision,body}; reopen requires a body); the worker applies each. Use flow thread certify and flow thread reopen --body to apply one directly instead if you prefer. Do not edit files, commit, push, or call flow complete.",
-			"Write the structured verdict to $FLOW_VERDICT_FILE as the source of truth. Exit 0 only when verification is satisfied; exit nonzero when acceptance fails, claims are reopened, or verification is unreliable, as the belt-and-braces fallback.",
+			"Write the structured verdict to $FLOW_VERDICT_FILE as the source of truth. Exit 0 only when verification is satisfied; exit nonzero when requirements are not met, claims are reopened, or verification is unreliable, as the belt-and-braces fallback.",
 		}
 	default:
 		panic("unreachable role")

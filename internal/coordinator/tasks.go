@@ -72,7 +72,6 @@ type Task struct {
 	ID                  string
 	Title               string
 	Body                string
-	AcceptanceCriteria  string
 	Priority            int
 	ScheduleState       ScheduleState   `json:"-"`
 	TriageState         TriageState     `json:"-"`
@@ -112,7 +111,6 @@ type TaskRelation struct {
 type CreateTaskInput struct {
 	Title               string
 	Body                string
-	AcceptanceCriteria  string
 	Priority            int
 	ScheduleState       ScheduleState
 	TriageState         TriageState
@@ -141,7 +139,6 @@ type CreateTaskRelationInput struct {
 type EditTaskInput struct {
 	Title               *string
 	Body                *string
-	AcceptanceCriteria  *string
 	Priority            *int
 	RequiresHumanReview *bool
 	AutoMerge           *bool
@@ -275,7 +272,6 @@ INSERT INTO tasks (
 	id,
 	title,
 	body,
-	acceptance_criteria,
 	priority,
 	flow_id,
 	created_by,
@@ -284,11 +280,10 @@ INSERT INTO tasks (
 	source_change_id,
 	created_at,
 	updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id,
 		taskInput.Title,
 		taskInput.Body,
-		taskInput.AcceptanceCriteria,
 		taskInput.Priority,
 		sqlitex.NullableNonEmptyString(taskInput.FlowID),
 		string(taskInput.CreatedBy),
@@ -346,7 +341,6 @@ SELECT
 	id,
 	title,
 	body,
-	acceptance_criteria,
 	priority,
 	flow_id,
 	created_by,
@@ -375,7 +369,6 @@ const taskSelectColumns = `
 	i.id,
 	i.title,
 	i.body,
-	i.acceptance_criteria,
 	i.priority,
 	i.flow_id,
 	i.created_by,
@@ -562,9 +555,6 @@ func (s *TaskService) EditTask(ctx context.Context, id string, input EditTaskInp
 	if input.Body != nil {
 		current.Body = *input.Body
 	}
-	if input.AcceptanceCriteria != nil {
-		current.AcceptanceCriteria = *input.AcceptanceCriteria
-	}
 	if input.Priority != nil {
 		if *input.Priority < 0 {
 			return Task{}, errors.New("task priority must be non-negative")
@@ -580,14 +570,12 @@ UPDATE tasks
 SET
 	title = ?,
 	body = ?,
-	acceptance_criteria = ?,
 	priority = ?,
 	flow_id = ?,
 	updated_at = ?
 WHERE id = ?`,
 		current.Title,
 		current.Body,
-		current.AcceptanceCriteria,
 		current.Priority,
 		sqlitex.NullableNonEmptyString(current.FlowID),
 		formatTime(s.now().UTC()),
@@ -1086,7 +1074,6 @@ SELECT
 	blocker.id,
 	blocker.title,
 	blocker.body,
-		blocker.acceptance_criteria,
 		blocker.priority,
 		blocker.flow_id,
 	blocker.created_by,
@@ -1385,7 +1372,6 @@ func scanTask(scanner taskScanner) (Task, error) {
 		&task.ID,
 		&task.Title,
 		&task.Body,
-		&task.AcceptanceCriteria,
 		&task.Priority,
 		&flowID,
 		&createdBy,

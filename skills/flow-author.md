@@ -3,7 +3,7 @@
 ## Workflow
 
 1. Inspect the assignment before editing:
-   - Use the task title, body, and acceptance criteria from the initial prompt; run `flow task show "$FLOW_TASK_ID"` only if that context is missing.
+   - Use the task title and Markdown body from the initial prompt; the body contains the task's requirements and specification. Run `flow task show "$FLOW_TASK_ID"` only if that context is missing.
    - Check `FLOW_BRANCH`, `FLOW_BASE`, and `FLOW_CHANGE_ID`. If a prior session left a handoff, it is included in your prompt as "Prior Handoff" (there is no handoff file in the worktree to read).
    - If this is a fix round, inspect review threads with `flow thread list "$FLOW_CHANGE_ID"`.
 
