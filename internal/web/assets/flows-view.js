@@ -8,6 +8,7 @@ import { DEFAULT_AGENT_HARNESSES } from "./config.js";
 import { HARNESS_REASONING_UNAVAILABLE, findHarnessModel, harnessModels, harnessReasoningLevelValues, renderHarnessModelOptions, renderHarnessOptions } from "./harness-models.js";
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
+import { renderWorkflowGraph } from "./workflow-graph.js";
 
 export async function renderFlowsView(app, context) {
   app.setTitle("Flows");
@@ -343,7 +344,7 @@ export function renderFlowsSectionView(flows, agentDefs, defaultFlowID, state) {
         return `
           <tr>
             <td>${escapeHTML(value(flow, "name", "Name"))}${isDefault ? ` <span class="badge ok">default</span>` : ""}${builtin ? ` <span class="badge idle">builtin</span>` : ""}</td>
-            <td>${renderFlowGraphSummaryView(flow)}</td>
+            <td><div class="workflow-chart compact">${renderWorkflowGraph(flow, { ariaLabel: `${value(flow, "name", "Name") || id} workflow definition` })}</div><p class="flow-graph-summary">${renderFlowGraphSummaryView(flow)}</p></td>
             <td>${nodes.length}</td>
             <td>
               <div class="actions table-actions">
@@ -528,7 +529,7 @@ export function renderFlowEditorView(flow, agentDefs) {
       <div class="flow-rows-head wide">Outcome transitions</div>
       <div class="flow-row-list wide" data-edge-rows>${edges.map((edge) => renderEdgeRowView(edge, nodeKeys)).join("")}</div>
       <div class="flow-row-actions wide"><button type="button" class="button secondary" data-add-edge>Add transition</button></div>
-      <div class="wide"><span>Read-only graph preview</span><pre class="flow-graph-preview" data-graph-preview>${escapeHTML(renderFlowGraphSummaryView(flow))}</pre></div>
+      <div class="wide"><span>Read-only graph preview</span><div class="workflow-chart flow-graph-preview" data-graph-preview>${renderWorkflowGraph(flow, { ariaLabel: `${name || "New flow"} workflow definition` })}</div></div>
       <div class="form-actions">
         <button class="button" type="submit">${flowID ? "Save flow" : "Create flow"}</button>
         ${flowID ? `<button class="button secondary" type="button" data-flow-cancel>Cancel</button>` : ""}
@@ -640,6 +641,7 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
       } else if (target.closest("[data-edge-remove]")) {
         event.preventDefault();
         target.closest("[data-edge-row]")?.remove();
+        refreshGraphSelectorsView(form);
       } else if (target.closest("[data-review-agent-remove]")) {
         event.preventDefault();
         target.closest("[data-review-agent-row]")?.remove();
@@ -652,9 +654,11 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
       } else if (target.closest("[data-node-up]")) {
         event.preventDefault();
         moveRowView(target.closest("[data-node-card]"), -1);
+        refreshGraphSelectorsView(form);
       } else if (target.closest("[data-node-down]")) {
         event.preventDefault();
         moveRowView(target.closest("[data-node-card]"), 1);
+        refreshGraphSelectorsView(form);
       } else if (target.closest("[data-flow-cancel]")) {
         event.preventDefault();
         state.editingFlowID = "";
@@ -722,8 +726,20 @@ function refreshGraphSelectorsView(form) {
   }
   const preview = form.querySelector("[data-graph-preview]");
   if (preview) {
-    const edges = Array.from(form.querySelectorAll("[data-edge-row]")).map((row) => `${row.querySelector('[name="edge_from"]')?.value || "?"}.${row.querySelector('[name="edge_outcome"]')?.value || "?"} → ${row.querySelector('[name="edge_to"]')?.value || "?"}`);
-    preview.textContent = [`start: ${form.querySelector('[name="start_node"]')?.value || "?"}`, ...edges].join("\n");
+    const graph = {
+      start_node: form.querySelector('[name="start_node"]')?.value || "",
+      nodes: Array.from(form.querySelectorAll("[data-node-card]")).map((card) => ({
+        key: card.querySelector('[name="node_key"]')?.value || "",
+        name: card.querySelector('[name="node_name"]')?.value || "",
+        kind: card.querySelector('[name="node_kind"]')?.value || "",
+      })),
+      edges: Array.from(form.querySelectorAll("[data-edge-row]")).map((row) => ({
+        from: row.querySelector('[name="edge_from"]')?.value || "",
+        outcome: row.querySelector('[name="edge_outcome"]')?.value || "",
+        to: row.querySelector('[name="edge_to"]')?.value || "",
+      })),
+    };
+    preview.innerHTML = renderWorkflowGraph(graph, { ariaLabel: "Workflow definition preview" });
   }
 }
 

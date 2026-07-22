@@ -41,6 +41,7 @@ export * from "./attention.js";
 export * from "./task.js";
 export * from "./poller.js";
 export * from "./flows-view.js";
+export * from "./workflow-graph.js";
 
 // Client-side route table consumed by load(). Each entry's match(path) returns a
 // truthy params object/flag when it handles the path, or a falsy value to fall

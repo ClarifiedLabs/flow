@@ -12,6 +12,7 @@ import { renderMarkdown } from "./markdown.js";
 import { value } from "./normalize.js";
 import { renderTerminalButton } from "./terminal.js";
 import { renderTaskChange, renderRelation, renderTag, renderTimeline } from "./timeline.js";
+import { renderWorkflowGraph, workflowTransitionCounts } from "./workflow-graph.js";
 
 export async function renderNewTaskView(app, context) {
   if (context && !app.isActiveLoad(context)) return false;
@@ -243,6 +244,7 @@ export async function renderTaskView(app, id, context, projectID = "") {
   const workflowRun = value(workflowDetail || {}, "run", "Run") || null;
   const workflowWait = value(workflowDetail || {}, "open_wait", "OpenWait") || null;
   const workflowNodeRuns = value(workflowDetail || {}, "node_runs", "NodeRuns") || [];
+  const workflowTransitions = value(workflowDetail || {}, "transitions", "Transitions") || [];
   const snapshot = value(workflowRun || {}, "snapshot", "Snapshot") || {};
   const currentNodeKey = value(workflowRun || {}, "current_node_key", "CurrentNodeKey") || "";
   const currentNode = (value(snapshot, "nodes", "Nodes") || []).find((node) => value(node, "key", "Key") === currentNodeKey) || null;
@@ -259,7 +261,7 @@ export async function renderTaskView(app, id, context, projectID = "") {
       ? `<section class="human-attention-panel"><div><h3>Workflow paused</h3><p>${escapeHTML(value(workflowWait, "message", "Message") || "Operator action is required.")}</p></div><button class="button" data-workflow-budget="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>Extend budget</button></section>`
       : "";
   const workflowHTML = workflowRun
-    ? `<h3>Workflow</h3><p class="meta-quiet">${escapeHTML(value(snapshot, "flow_name", "FlowName") || value(workflowRun, "flow_id", "FlowID") || "Workflow")} · ${escapeHTML(currentNodeKey || "complete")} · transitions ${Number(value(workflowRun, "transitions_used", "TransitionsUsed") || 0)}/${Number(value(workflowRun, "transition_budget", "TransitionBudget") || 0)}</p><div class="feed">${workflowNodeRuns.map((nodeRun) => `<article class="feed-item"><strong>${escapeHTML(value(nodeRun, "node_key", "NodeKey"))}</strong><span>${escapeHTML(value(nodeRun, "state", "State"))}</span>${value(nodeRun, "outcome", "Outcome") ? `<p>${escapeHTML(value(nodeRun, "outcome", "Outcome"))}</p>` : ""}</article>`).join("")}</div>`
+    ? `<h3>Workflow</h3><p class="meta-quiet">${escapeHTML(value(snapshot, "flow_name", "FlowName") || value(workflowRun, "flow_id", "FlowID") || "Workflow")} · ${escapeHTML(currentNodeKey || "complete")} · transitions ${Number(value(workflowRun, "transitions_used", "TransitionsUsed") || 0)}/${Number(value(workflowRun, "transition_budget", "TransitionBudget") || 0)}</p><div class="workflow-chart">${renderWorkflowGraph(snapshot, { activeNode: currentNodeKey, transitionCounts: workflowTransitionCounts(workflowTransitions), ariaLabel: "Task workflow" })}</div><div class="feed">${workflowNodeRuns.map((nodeRun) => `<article class="feed-item"><strong>${escapeHTML(value(nodeRun, "node_key", "NodeKey"))}</strong><span>${escapeHTML(value(nodeRun, "state", "State"))}</span>${value(nodeRun, "outcome", "Outcome") ? `<p>${escapeHTML(value(nodeRun, "outcome", "Outcome"))}</p>` : ""}</article>`).join("")}</div>`
     : "";
   // The standalone Sessions and Status feeds are gone: they are folded into
   // the unified Timeline below, which removes the column-height imbalance
