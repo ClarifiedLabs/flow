@@ -820,6 +820,11 @@ INSERT INTO handoff_snapshots (
 	if strings.Contains(response.Body.String(), "PRIVATE HANDOFF DETAIL") || strings.Contains(response.Body.String(), `"content"`) {
 		t.Fatalf("board response leaked handoff content: %s", response.Body.String())
 	}
+	for _, obsolete := range []string{`"review_state"`, `"blocking_reason"`, `"primary_action"`, `"flow"`} {
+		if strings.Contains(response.Body.String(), obsolete) {
+			t.Fatalf("board response contains obsolete card field %s: %s", obsolete, response.Body.String())
+		}
+	}
 	var board boardResponse
 	if err := json.NewDecoder(response.Body).Decode(&board); err != nil {
 		t.Fatalf("decode board: %v", err)
@@ -844,11 +849,8 @@ INSERT INTO handoff_snapshots (
 	if card.RequiredChecks.Total != 1 || card.RequiredChecks.Blocked != 1 {
 		t.Fatalf("required check summary = %+v", card.RequiredChecks)
 	}
-	if card.ReviewState != coordinator.ReviewChangesRequested {
-		t.Fatalf("review state = %q, want changes_requested", card.ReviewState)
-	}
-	if card.BlockingReason != "" || card.PrimaryAction != "respond" {
-		t.Fatalf("card actions = blocking:%q primary:%q", card.BlockingReason, card.PrimaryAction)
+	if card.CurrentStep == nil || card.CurrentStep.Key != "implement" || card.CurrentStep.Name != "Implement" || card.CurrentStep.Kind != coordinator.NodeAgent {
+		t.Fatalf("current workflow step = %+v, want frozen Implement agent node", card.CurrentStep)
 	}
 	if card.TerminalAvailable {
 		t.Fatal("terminal should not be available before a target is registered")
@@ -872,6 +874,146 @@ INSERT INTO handoff_snapshots (
 	}
 	if card.ActiveSession == nil || !card.ActiveSession.TerminalAvailable {
 		t.Fatalf("active session terminal availability = %+v", card.ActiveSession)
+	}
+}
+
+func TestBoardCurrentStepUsesFrozenWorkflowSnapshot(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	flow, err := fixture.Bundle.Flows.GetByName(ctx, "coding")
+	if err != nil {
+		t.Fatalf("load coding flow: %v", err)
+	}
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Frozen card step", FlowID: flow.ID})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	run, err := fixture.Bundle.WorkflowRuns.Schedule(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("schedule workflow: %v", err)
+	}
+
+	nodes := make([]coordinator.FlowNodeInput, 0, len(flow.Nodes))
+	for _, node := range flow.Nodes {
+		name := node.Name
+		if node.Key == "implement" {
+			name = "Renamed live implementation"
+		}
+		nodes = append(nodes, coordinator.FlowNodeInput{Key: node.Key, Name: name, Kind: node.Kind, Config: node.Config})
+	}
+	if _, err := fixture.Bundle.Flows.Update(ctx, flow.ID, coordinator.FlowInput{
+		Name:             flow.Name,
+		Description:      flow.Description,
+		StartNode:        flow.StartNode,
+		TransitionBudget: flow.TransitionBudget,
+		Nodes:            nodes,
+		Edges:            flow.Edges,
+	}); err != nil {
+		t.Fatalf("rename live flow node: %v", err)
+	}
+
+	assertCurrentStep := func(wantState coordinator.LaneState) {
+		t.Helper()
+		var board boardResponse
+		doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
+		if board.LaneStates[task.ID] != wantState {
+			t.Fatalf("lane state = %q, want %q", board.LaneStates[task.ID], wantState)
+		}
+		step := board.TaskCards[task.ID].CurrentStep
+		if step == nil || step.Key != "implement" || step.Name != "Implement" || step.Kind != coordinator.NodeAgent {
+			t.Fatalf("current step = %+v, want frozen Implement agent node", step)
+		}
+	}
+
+	assertCurrentStep(coordinator.LaneStateScheduled)
+	if err := fixture.Bundle.WorkflowExecutor.Advance(ctx, run.ID); err != nil {
+		t.Fatalf("advance workflow: %v", err)
+	}
+	jobs, err := fixture.Workers.ListJobs(ctx)
+	if err != nil {
+		t.Fatalf("list workflow jobs: %v", err)
+	}
+	var nodeRunID string
+	for _, job := range jobs {
+		if job.TaskID != nil && *job.TaskID == task.ID && job.NodeRunID != nil {
+			nodeRunID = *job.NodeRunID
+			break
+		}
+	}
+	if nodeRunID == "" {
+		t.Fatalf("advanced workflow jobs = %+v, want current node run", jobs)
+	}
+	if _, err := fixture.Bundle.WorkflowRuns.MarkNodeRunning(ctx, nodeRunID); err != nil {
+		t.Fatalf("mark current node running: %v", err)
+	}
+	assertCurrentStep(coordinator.LaneStateWorking)
+}
+
+func TestBoardCurrentStepToleratesMissingAndMalformedRunData(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	createTask := func(title string) coordinator.Task {
+		t.Helper()
+		task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: title})
+		if err != nil {
+			t.Fatalf("create %s: %v", title, err)
+		}
+		return task
+	}
+	scheduleTask := func(title string) (coordinator.Task, coordinator.WorkflowRun) {
+		t.Helper()
+		task := createTask(title)
+		run, err := fixture.Bundle.WorkflowRuns.Schedule(ctx, task.ID)
+		if err != nil {
+			t.Fatalf("schedule %s: %v", title, err)
+		}
+		return task, run
+	}
+
+	unscheduled := createTask("No workflow yet")
+	missingRun := createTask("Scheduled without a run")
+	if _, err := fixture.DB.ExecContext(ctx, `UPDATE tasks SET lifecycle_state = 'scheduled' WHERE id = ?`, missingRun.ID); err != nil {
+		t.Fatalf("mark task scheduled without run: %v", err)
+	}
+
+	emptyKey, emptyKeyRun := scheduleTask("Empty workflow key")
+	if _, err := fixture.DB.ExecContext(ctx, `UPDATE workflow_runs SET current_node_key = '' WHERE id = ?`, emptyKeyRun.ID); err != nil {
+		t.Fatalf("clear current node key: %v", err)
+	}
+
+	unresolved, unresolvedRun := scheduleTask("Unresolved workflow key")
+	if _, err := fixture.DB.ExecContext(ctx, `UPDATE workflow_runs SET current_node_key = 'legacy-node_key' WHERE id = ?`, unresolvedRun.ID); err != nil {
+		t.Fatalf("set unresolved current node key: %v", err)
+	}
+
+	emptyName, emptyNameRun := scheduleTask("Empty snapshot node name")
+	for i := range emptyNameRun.Snapshot.Nodes {
+		if emptyNameRun.Snapshot.Nodes[i].Key == emptyNameRun.CurrentNodeKey {
+			emptyNameRun.Snapshot.Nodes[i].Name = ""
+		}
+	}
+	snapshotJSON, err := json.Marshal(emptyNameRun.Snapshot)
+	if err != nil {
+		t.Fatalf("encode malformed snapshot: %v", err)
+	}
+	if _, err := fixture.DB.ExecContext(ctx, `UPDATE workflow_runs SET flow_snapshot_json = ? WHERE id = ?`, string(snapshotJSON), emptyNameRun.ID); err != nil {
+		t.Fatalf("empty snapshot node name: %v", err)
+	}
+
+	var board boardResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
+	for _, taskID := range []string{unscheduled.ID, missingRun.ID, emptyKey.ID} {
+		if step := board.TaskCards[taskID].CurrentStep; step != nil {
+			t.Fatalf("task %s current step = %+v, want omitted", taskID, step)
+		}
+	}
+	if step := board.TaskCards[unresolved.ID].CurrentStep; step == nil || step.Key != "legacy-node_key" || step.Name != "legacy node key" || step.Kind != "" {
+		t.Fatalf("unresolved current step = %+v, want readable stable-key fallback", step)
+	}
+	if step := board.TaskCards[emptyName.ID].CurrentStep; step == nil || step.Key != "implement" || step.Name != "implement" || step.Kind != coordinator.NodeAgent {
+		t.Fatalf("empty-name current step = %+v, want key fallback with resolved kind", step)
 	}
 }
 
@@ -1004,8 +1146,8 @@ func TestBoardUITaskCardsShowRelationBlockers(t *testing.T) {
 	if card.Blockers.Count != 1 || len(card.Blockers.Tasks) != 1 || card.Blockers.Tasks[0].ID != blocker.ID {
 		t.Fatalf("blocker summary = %+v", card.Blockers)
 	}
-	if card.BlockingReason != "blocked by task" || card.PrimaryAction != "unblock" {
-		t.Fatalf("card actions = blocking:%q primary:%q", card.BlockingReason, card.PrimaryAction)
+	if card.CurrentStep == nil || card.CurrentStep.Name != "Implement" {
+		t.Fatalf("scheduled blocked task current step = %+v, want Implement", card.CurrentStep)
 	}
 }
 

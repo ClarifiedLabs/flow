@@ -488,6 +488,7 @@ type uiTaskCard struct {
 	TaskID                string                         `json:"task_id"`
 	Tags                  []coordinator.Tag              `json:"tags,omitempty"`
 	Relations             uiRelationSummary              `json:"relations"`
+	CurrentStep           *uiWorkflowStepSummary         `json:"current_step,omitempty"`
 	ActiveSession         *uiSessionSummary              `json:"active_session,omitempty"`
 	TerminalAvailable     bool                           `json:"terminal_available,omitempty"`
 	TerminalJobID         string                         `json:"terminal_job_id,omitempty"`
@@ -495,15 +496,17 @@ type uiTaskCard struct {
 	DiffStats             *uiDiffStatSummary             `json:"diff_stats,omitempty"`
 	DiffUnavailableReason string                         `json:"diff_unavailable_reason,omitempty"`
 	Handoff               *uiHandoffSummary              `json:"handoff,omitempty"`
-	ReviewState           coordinator.ReviewState        `json:"review_state,omitempty"`
 	RequiredChecks        uiRequiredCheckSummary         `json:"required_checks"`
 	ReviewCycleBudget     *coordinator.ReviewCycleBudget `json:"review_cycle_budget,omitempty"`
 	LatestStatus          *coordinator.StatusLogEntry    `json:"latest_status,omitempty"`
 	Blockers              uiBlockerSummary               `json:"blockers"`
-	BlockingReason        string                         `json:"blocking_reason,omitempty"`
-	PrimaryAction         string                         `json:"primary_action,omitempty"`
 	CrashRetryAvailable   bool                           `json:"crash_retry_available,omitempty"`
-	Flow                  *taskFlowStatus                `json:"flow,omitempty"`
+}
+
+type uiWorkflowStepSummary struct {
+	Key  string               `json:"key"`
+	Name string               `json:"name"`
+	Kind coordinator.NodeKind `json:"kind,omitempty"`
 }
 
 type uiTaskDetail struct {

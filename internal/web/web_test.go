@@ -43,6 +43,38 @@ func TestCSSFontSizesUseRootScale(t *testing.T) {
 	}
 }
 
+func TestCardCurrentStepEllipsizesAtMinimumBoardWidth(t *testing.T) {
+	source, err := os.ReadFile("src/app.module.css")
+	if err != nil {
+		t.Fatalf("read css module source: %v", err)
+	}
+	css := string(source)
+	if !strings.Contains(css, "grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));") {
+		t.Fatal("board CSS is missing the 260px minimum lane width")
+	}
+	start := strings.Index(css, ".card-current-step {")
+	if start == -1 {
+		t.Fatal("CSS is missing the card current-step style")
+	}
+	end := strings.Index(css[start:], "\n}")
+	if end == -1 {
+		t.Fatal("card current-step CSS block is not closed")
+	}
+	block := css[start : start+end]
+	for _, want := range []string{
+		"font-size: 0.75rem;",
+		"min-width: 0;",
+		"max-width: 100%;",
+		"overflow: hidden;",
+		"text-overflow: ellipsis;",
+		"white-space: nowrap;",
+	} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("card current-step CSS missing %q", want)
+		}
+	}
+}
+
 // TestSidebarStaysWithinViewport keeps the light/dark theme switcher visible
 // without scrolling when the main view pane is taller than the browser window.
 // The sidebar must be viewport-bound (sticky, 100vh) rather than stretching to

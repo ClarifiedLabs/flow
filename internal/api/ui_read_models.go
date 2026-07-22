@@ -36,6 +36,15 @@ func (s *projectServer) buildUITaskCards(ctx context.Context, tasks []coordinato
 			return nil, fmt.Errorf("load relations for %s: %w", task.ID, err)
 		}
 		card.Relations = uiRelationSummaryFromRelations(task.ID, relations)
+		if s.workflowRuns != nil && task.State != nil && (*task.State == coordinator.LifecycleScheduled || *task.State == coordinator.LifecycleInProgress) {
+			run, active, err := s.workflowRuns.ActiveForTask(ctx, task.ID)
+			if err != nil {
+				return nil, fmt.Errorf("load active workflow run for %s: %w", task.ID, err)
+			}
+			if active {
+				card.CurrentStep = uiWorkflowStepSummaryFromRun(run)
+			}
+		}
 		if s.sessions != nil {
 			active, ok, err := s.sessions.ActiveAuthorSessionForTask(ctx, task.ID)
 			if err != nil {
@@ -89,11 +98,6 @@ func (s *projectServer) buildUITaskCards(ctx context.Context, tasks []coordinato
 				return nil, fmt.Errorf("load checks for %s: %w", task.ID, err)
 			}
 			card.RequiredChecks = uiRequiredCheckSummaryFromChecks(checks)
-			reviewState, err := s.checks.ReviewState(ctx, task.ID)
-			if err != nil {
-				return nil, fmt.Errorf("load review state for %s: %w", task.ID, err)
-			}
-			card.ReviewState = reviewState
 		}
 		if s.status != nil {
 			statusLog, err := s.status.ListForTask(ctx, task.ID, 1)
@@ -109,8 +113,6 @@ func (s *projectServer) buildUITaskCards(ctx context.Context, tasks []coordinato
 			return nil, fmt.Errorf("load blockers for %s: %w", task.ID, err)
 		}
 		card.Blockers = uiBlockerSummaryFromTasks(blockers)
-		card.BlockingReason = uiBlockingReason(task, card)
-		card.PrimaryAction = uiPrimaryAction(task, card)
 		if jobID, ok := terminalJobs[task.ID]; ok {
 			card.TerminalJobID = jobID
 			card.TerminalAvailable = true
@@ -278,24 +280,31 @@ func uiRelationSummaryFromRelations(taskID string, relations []coordinator.TaskR
 	return summary
 }
 
-func uiBlockingReason(_ coordinator.Task, card uiTaskCard) string {
-	if card.Blockers.Count > 0 {
-		return "blocked by task"
+func uiWorkflowStepSummaryFromRun(run coordinator.WorkflowRun) *uiWorkflowStepSummary {
+	key := strings.TrimSpace(run.CurrentNodeKey)
+	if key == "" {
+		return nil
 	}
-	return ""
+
+	summary := &uiWorkflowStepSummary{Key: key}
+	if node, ok := run.Snapshot.Node(key); ok {
+		summary.Kind = node.Kind
+		if strings.TrimSpace(node.Name) != "" {
+			summary.Name = node.Name
+		}
+	}
+	if summary.Name == "" {
+		summary.Name = workflowNodeKeyLabel(key)
+	}
+	if summary.Name == "" {
+		return nil
+	}
+	return summary
 }
 
-func uiPrimaryAction(_ coordinator.Task, card uiTaskCard) string {
-	if card.ActiveSession != nil {
-		if card.ActiveSession.State == coordinator.SessionWaiting {
-			return "respond"
-		}
-		return "monitor"
-	}
-	if card.Blockers.Count > 0 {
-		return "unblock"
-	}
-	return ""
+func workflowNodeKeyLabel(key string) string {
+	label := strings.NewReplacer("_", " ", "-", " ").Replace(key)
+	return strings.Join(strings.Fields(label), " ")
 }
 
 func uiWorkerDiagnosticsFromLeases(workers []worker.Worker, leases []worker.Lease, now time.Time) map[string]uiWorkerDiagnostics {

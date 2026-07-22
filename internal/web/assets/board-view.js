@@ -3,7 +3,7 @@
 
 import { apiGet, taskHref } from "./api.js";
 import { renderStatusKindBadge } from "./attention.js";
-import { flattenDonePage, flowPhaseLabel, laneTasks, phaseKey, renderFlowPhaseBadge, renderPhaseBadge, renderReviewBadge, renderUniqueCardLabel, waitReasonLabel } from "./board.js";
+import { flattenDonePage, laneTasks, phaseKey, renderPhaseBadge, renderUniqueCardLabel } from "./board.js";
 import { LANES } from "./config.js";
 import { formatDate } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
@@ -182,15 +182,15 @@ export function renderTaskCardView(app, task, card, laneState, blocked, stagger 
   const diffStats = value(card, "diff_stats", "DiffStats");
   const diffUnavailableReason = value(card, "diff_unavailable_reason", "DiffUnavailableReason");
   const handoff = value(card, "handoff", "Handoff");
+  const currentStep = value(card, "current_step", "CurrentStep") || {};
+  const currentStepKey = String(value(currentStep, "key", "Key") || "").trim();
+  const frozenStepName = String(value(currentStep, "name", "Name") || "");
+  const currentStepName = frozenStepName.trim() ? frozenStepName : currentStepKey.replace(/[_-]+/g, " ").replace(/\s+/g, " ");
   const checks = value(card, "required_checks", "RequiredChecks") || {};
   const latestStatus = value(card, "latest_status", "LatestStatus");
-  const reviewState = value(card, "review_state", "ReviewState");
-  const primaryAction = value(card, "primary_action", "PrimaryAction");
-  const blockingReason = value(card, "blocking_reason", "BlockingReason");
   const terminalJobID = value(card, "terminal_job_id", "TerminalJobID");
   const blockers = value(card, "blockers", "Blockers") || {};
   const blockerTasks = value(blockers, "tasks", "Tasks") || [];
-  const blockerCount = Number(value(blockers, "count", "Count") || 0);
   const tags = value(card, "tags", "Tags") || [];
   const relations = value(card, "relations", "Relations") || {};
   const changeID = value(change, "id", "ID");
@@ -204,25 +204,13 @@ export function renderTaskCardView(app, task, card, laneState, blocked, stagger 
   const statusMessage = value(latestStatus, "message", "Message");
   const statusKind = value(latestStatus, "kind", "Kind");
   const phaseState = laneState || lifecycleState;
-  const phaseSlug = phaseKey(phaseState) || "unscheduled";
+  const cardState = blocked ? "blocked" : phaseState;
+  const phaseSlug = phaseKey(cardState) || "unscheduled";
   const cardLabelKeys = new Set();
-  const waitReasonBadgeLabel = waitReason ? waitReasonLabel(waitReason) : "";
-  const flow = value(card, "flow", "Flow");
-  const flowPhaseState = value(flow, "phase_state", "PhaseState");
-  const flowBadge = flow && flowPhaseState !== "completed" && flowPhaseLabel(flow)
-    ? renderUniqueCardLabel(cardLabelKeys, `flow ${flowPhaseLabel(flow)}`, () => renderFlowPhaseBadge(flow))
+  const stateBadge = renderUniqueCardLabel(cardLabelKeys, cardState || "—", () => renderPhaseBadge(cardState));
+  const checkProgress = checkTotal
+    ? renderUniqueCardLabel(cardLabelKeys, `checks ${checkSatisfied}/${checkTotal}`, () => `checks ${checkSatisfied}/${checkTotal}`)
     : "";
-  const metaBadges = [
-    renderUniqueCardLabel(cardLabelKeys, phaseState || "—", () => renderPhaseBadge(phaseState)),
-    flowBadge,
-    reviewState ? renderUniqueCardLabel(cardLabelKeys, reviewState, () => renderReviewBadge(reviewState)) : "",
-    checkTotal ? renderUniqueCardLabel(cardLabelKeys, `checks ${checkSatisfied}/${checkTotal}`, () => `<span class="badge ${checkSatisfied === checkTotal ? "ok" : "idle"}">checks ${checkSatisfied}/${checkTotal}</span>`) : "",
-    blockerCount ? renderUniqueCardLabel(cardLabelKeys, `blockers ${blockerCount}`, () => `<span class="badge blocked">blockers ${blockerCount}</span>`) : "",
-    blocked && !blockerCount ? renderUniqueCardLabel(cardLabelKeys, "blocked", () => `<span class="badge blocked">blocked</span>`) : "",
-    waitReason ? renderUniqueCardLabel(cardLabelKeys, waitReasonBadgeLabel, () => `<span class="badge blocked">${escapeHTML(waitReasonBadgeLabel)}</span>`) : "",
-    blockingReason ? renderUniqueCardLabel(cardLabelKeys, blockingReason, () => `<span class="badge blocked">${escapeHTML(blockingReason)}</span>`) : "",
-    primaryAction ? renderUniqueCardLabel(cardLabelKeys, primaryAction, () => `<span class="badge action">${escapeHTML(primaryAction)}</span>`) : "",
-  ].filter(Boolean).join("");
   const statusKindBadge = statusMessage && statusKind && statusKind !== "note"
     ? renderUniqueCardLabel(cardLabelKeys, statusKind, () => renderStatusKindBadge(statusKind))
     : "";
@@ -247,6 +235,7 @@ export function renderTaskCardView(app, task, card, laneState, blocked, stagger 
     project && project.badge && project.name ? `<span class="card-project-badge">${escapeHTML(project.name)}</span>` : "",
     `p${priority}`,
     source ? escapeHTML(source) : "",
+    checkProgress,
     visibleTags.map(renderTag).filter(Boolean).join(" · "),
     renderRelationSummary(relations),
     changeID ? `<a href="/ui/changes/${escapeAttr(changeID)}" data-link>${escapeHTML(changeID)}</a>` : "",
@@ -255,11 +244,12 @@ export function renderTaskCardView(app, task, card, laneState, blocked, stagger 
     updatedAt ? escapeHTML(updatedAt) : "",
   ].filter(Boolean).join(" · ");
   return `
-    <article class="card" data-phase="${escapeAttr(blocked || blockerCount ? "blocked" : phaseSlug)}" style="--i:${Number(stagger) || 0}">
+    <article class="card" data-phase="${escapeAttr(phaseSlug)}" style="--i:${Number(stagger) || 0}">
       <a class="card-title" href="${escapeAttr(taskHref(projectID, taskID))}" data-link>${escapeHTML(taskID)} · ${escapeHTML(title)}</a>
       <div class="meta">
-        ${metaBadges}
+        ${stateBadge}
       </div>
+      ${currentStepName ? `<div class="card-current-step" title="${escapeAttr(currentStepName)}">${escapeHTML(currentStepName)}</div>` : ""}
       ${quiet ? `<p class="meta-quiet">${quiet}</p>` : ""}
       ${blockerText ? `<p class="card-status">${escapeHTML(blockerText)}</p>` : ""}
       ${statusMessage ? `<p class="card-status">${statusKindBadge}${renderMarkdown(statusMessage, { inline: true })}</p>` : ""}

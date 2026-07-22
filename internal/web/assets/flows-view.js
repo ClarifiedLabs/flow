@@ -411,7 +411,7 @@ export function renderNodeCardView(node = {}) {
   return `
     <article class="flow-row flow-node-card" data-node-card>
       <input name="node_key" placeholder="stable-node-key" value="${escapeAttr(key)}" aria-label="Node key" required>
-      <input name="node_name" placeholder="Display name" value="${escapeAttr(name)}" aria-label="Node name" required>
+      <input name="node_name" placeholder="Short display name (e.g. Implement)" value="${escapeAttr(name)}" aria-label="Node name" required>
       <select name="node_kind" aria-label="Trusted node kind">${NODE_KINDS.map((candidate) => `<option value="${candidate}" ${candidate === kind ? "selected" : ""}>${candidate}</option>`).join("")}</select>
       <textarea name="node_config" rows="6" spellcheck="false" aria-label="Strict node configuration JSON">${escapeHTML(nodeConfigValue(node))}</textarea>
       <div class="flow-row-controls">

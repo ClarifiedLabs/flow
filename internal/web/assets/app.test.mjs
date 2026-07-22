@@ -2107,67 +2107,91 @@ test("board cards render tags and relationship indicators", async () => {
   assert.match(html, /related 3/);
 });
 
-test("board cards suppress duplicate visible status labels", async () => {
-  const context = await scriptContext();
-  const app = new context.FlowApp();
-  const task = {
-    id: "t-alpha-0001",
-    title: "Needs changes",
-    schedule_state: "up_next",
-    triage_state: "accepted",
-    priority: 1,
-  };
-  const render = (tags) => app.renderTaskCard(task, {
-    review_state: "changes_requested",
-    tags,
-  }, "changes_requested", false);
-
-  const dashedHTML = render([{ slug: "changes-requested" }]);
-  assert.equal(dashedHTML.match(/changes requested/g)?.length, 1);
-  assert.doesNotMatch(dashedHTML, /changes-requested/);
-  assert.doesNotMatch(dashedHTML, /<span class="badge warn">changes requested<\/span>/);
-
-  const reportedHTML = render([{ slug: "* CHANGES REQUESTED" }]);
-  assert.equal(reportedHTML.match(/changes requested/g)?.length, 1);
-  assert.doesNotMatch(reportedHTML, /\* CHANGES REQUESTED/);
-  assert.doesNotMatch(reportedHTML, /<span class="badge warn">changes requested<\/span>/);
-});
-
-test("board cards suppress duplicate visible labels from all badge sources", async () => {
+test("board cards render one lifecycle badge above the frozen workflow step", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   const html = app.renderTaskCard({
     id: "t-alpha-0001",
-    title: "Badge sources",
-    schedule_state: "up_next",
-    triage_state: "accepted",
+    title: "Implement compact cards",
+    state: "in_progress",
     priority: 1,
   }, {
+    current_step: { key: "implement", name: "Implement", kind: "agent" },
+    // These stale legacy values must not compete with the workflow step.
+    review_state: "in_review",
+    primary_action: "monitor",
+  }, "working", false);
+
+  assert.equal(html.match(/class="badge/g)?.length, 1);
+  assert.match(html, /<span class="badge" data-phase="authoring"><span class="dot"><\/span>working<\/span>/);
+  assert.match(html, /<div class="card-current-step" title="Implement">Implement<\/div>/);
+  assert.ok(html.indexOf(">working</") < html.indexOf(">Implement</"));
+  assert.doesNotMatch(html, /in review/i);
+  assert.doesNotMatch(html, /monitor/i);
+});
+
+test("board workflow steps handle review nodes, escaping, key fallback, and omission", async () => {
+  const context = await scriptContext();
+  const app = new context.FlowApp();
+  const task = { id: "t-alpha-0001", title: "Workflow step cases", state: "in_progress", priority: 1 };
+
+  const review = app.renderTaskCard(task, {
+    current_step: { key: "review", name: "Agent review", kind: "change_review" },
+  }, "working", false);
+  assert.match(review, /<span class="badge" data-phase="authoring"><span class="dot"><\/span>working<\/span>/);
+  assert.match(review, /<div class="card-current-step" title="Agent review">Agent review<\/div>/);
+  assert.doesNotMatch(review, /Current step/);
+
+  const longName = `Review <all> & "security" before merging this intentionally long localized change`;
+  const escapedLongName = `Review &lt;all&gt; &amp; &quot;security&quot; before merging this intentionally long localized change`;
+  const long = app.renderTaskCard(task, {
+    current_step: { key: "long-review", name: longName, kind: "human_gate" },
+  }, "blocked", false);
+  assert.match(long, new RegExp(`<div class="card-current-step" title="${escapedLongName}">${escapedLongName}<\\/div>`));
+  assert.doesNotMatch(long, /<span[^>]*card-current-step/);
+  assert.doesNotMatch(long, /<script|<all>/);
+
+  const fallback = app.renderTaskCard(task, {
+    current_step: { key: "human-review_step", name: "" },
+  }, "working", false);
+  assert.match(fallback, /title="human review step">human review step<\/div>/);
+
+  const missing = app.renderTaskCard(task, {}, "working", false);
+  assert.doesNotMatch(missing, /card-current-step/);
+});
+
+test("board cards keep objective counts quiet and ignore obsolete state fields", async () => {
+  const context = await scriptContext();
+  const app = new context.FlowApp();
+  const html = app.renderTaskCard({
+    id: "t-alpha-0001",
+    title: "Compact metadata",
+    state: "in_progress",
+    priority: 1,
+  }, {
+    current_step: { key: "checks", name: "Automated checks", kind: "automated_checks" },
     required_checks: { total: 2, satisfied: 1 },
     blockers: { count: 2, tasks: [] },
+    relations: { blocked_by: 2 },
     latest_status: { message: "cannot continue", kind: "blocker" },
+    review_state: "in_review",
     blocking_reason: "waiting for response",
-    primary_action: "Resume",
+    primary_action: "monitor",
     tags: [
-      { slug: "in-review" },
       { slug: "checks 1/2" },
-      { slug: "blockers 2" },
-      { slug: "waiting_for_response" },
       { slug: "blocker" },
-      { slug: "resume" },
       { slug: "visible-tag" },
     ],
-  }, "in_review", false, 0, null, "question");
+  }, "working", false);
 
-  assert.equal(html.match(/in review/g)?.length, 1);
   assert.equal(html.match(/checks 1\/2/g)?.length, 1);
-  assert.equal(html.match(/blockers 2/g)?.length, 1);
-  assert.equal(html.match(/waiting for response/g)?.length, 1);
+  assert.match(html, /class="meta-quiet"[^>]*>[^<]*p1 · checks 1\/2/);
+  assert.match(html, /blocked by 2/);
   assert.equal(html.match(/>blocker<\/span>/g)?.length, 1);
-  assert.equal(html.match(/Resume/g)?.length, 1);
   assert.match(html, /visible-tag/);
-  assert.doesNotMatch(html, /in-review/);
-  assert.doesNotMatch(html, /waiting_for_response/);
+  assert.doesNotMatch(html, /in review/i);
+  assert.doesNotMatch(html, /waiting for response/i);
+  assert.doesNotMatch(html, /monitor/i);
 });
 
 test("board cards render job terminal actions without active sessions", async () => {
@@ -2214,7 +2238,7 @@ test("board cards render session terminal icon actions in every running board st
   }
 });
 
-test("ready to merge cards link to their change and review state", async () => {
+test("ready to merge cards link to their change without a legacy review badge", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   const html = app.renderTaskCard({
@@ -2234,7 +2258,7 @@ test("ready to merge cards link to their change and review state", async () => {
 
   assert.match(html, /<a href="\/ui\/changes\/ch-0001" data-link>ch-0001<\/a>/);
   assert.match(html, /task\/t-alpha-0001/);
-  assert.match(html, /<span class="badge warn">changes requested<\/span>/);
+  assert.doesNotMatch(html, /changes requested/);
   // Merging happens on the change page; the card only exposes workflow controls.
   assert.doesNotMatch(html, /data-merge=/);
   assert.doesNotMatch(html, /head abcdef123456/);
@@ -2264,25 +2288,34 @@ test("cards carry phase identity as data-phase and a phase badge", async () => {
   assert.match(unscheduled, /<span class="badge" data-phase="backlog"><span class="dot"><\/span>unscheduled<\/span>/);
 });
 
-test("blocked cards render the blocked overlay phase and badge", async () => {
+test("blocked cards show one blocked badge and the workflow step", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   const task = {
     id: "t-alpha-0001",
     title: "Blocked work",
-    schedule_state: "up_next",
-    triage_state: "accepted",
+    state: "in_progress",
     priority: 1,
   };
 
-  const blocked = app.renderTaskCard(task, {}, "in_progress", true);
+  const blocked = app.renderTaskCard(task, {
+    current_step: { key: "human-review", name: "Human change review", kind: "human_gate" },
+  }, "working", true);
   assert.match(blocked, /<article class="card" data-phase="blocked"/);
-  assert.match(blocked, /<span class="badge blocked">blocked<\/span>/);
-  assert.match(blocked, /<span class="badge" data-phase="authoring">/);
+  assert.match(blocked, /<span class="badge" data-phase="blocked"><span class="dot"><\/span>blocked<\/span>/);
+  assert.match(blocked, /<div class="card-current-step" title="Human change review">Human change review<\/div>/);
+  assert.equal(blocked.match(/class="badge/g)?.length, 1);
+  assert.doesNotMatch(blocked, /data-phase="authoring"/);
 
-  const withBlockers = app.renderTaskCard(task, { blockers: { count: 2, tasks: [] } }, "in_progress", false);
-  assert.match(withBlockers, /<article class="card" data-phase="blocked"/);
-  assert.match(withBlockers, /<span class="badge blocked">blockers 2<\/span>/);
+  const scheduledDependency = app.renderTaskCard({ ...task, state: "scheduled" }, {
+    current_step: { key: "implement", name: "Implement", kind: "agent" },
+    blockers: { count: 2, tasks: [] },
+    relations: { blocked_by: 2 },
+  }, "scheduled", false);
+  assert.match(scheduledDependency, /<article class="card" data-phase="up_next"/);
+  assert.match(scheduledDependency, />scheduled<\/span>/);
+  assert.match(scheduledDependency, /blocked by 2/);
+  assert.doesNotMatch(scheduledDependency, />blocked<\/span>/);
 });
 
 test("lifecycle transitions render phase badges around an arrow", async () => {
@@ -2444,7 +2477,7 @@ test("feedback cards surface a non-note status kind badge", async () => {
   };
   const blockerHTML = app.renderTaskCard(task, blockerCard, "in_progress", false, 0, null, "question");
   assert.match(blockerHTML, /<span class="badge danger">blocker<\/span>/);
-  assert.match(blockerHTML, /waiting for response/);
+  assert.doesNotMatch(blockerHTML, /waiting for response/);
 
   const noteCard = { latest_status: { message: "running tests", kind: "note" } };
   const noteHTML = app.renderTaskCard(task, noteCard, "in_progress", false, 0, null, "question");
@@ -4191,22 +4224,19 @@ test("task form flow select preselects the task's saved flow when editing", asyn
   assert.match(html, /<option value="fl-plan" >planned \(default\)<\/option>/);
 });
 
-test("board card renders the flow phase badge with awaiting-approval styling", async () => {
+test("scheduled board cards show the frozen start step and ignore legacy flow cursors", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
-  const task = { id: "t-alpha-0001", title: "Working", schedule_state: "up_next", triage_state: "accepted" };
+  const task = { id: "t-alpha-0001", title: "Scheduled", state: "scheduled" };
 
-  const running = app.renderTaskCard(task, { flow: { phase_name: "plan", phase_index: 0, phase_count: 2, phase_state: "running" } }, "in_progress", false);
-  assert.match(running, /data-flow-phase/);
-  assert.match(running, /plan 1\/2/);
-  assert.doesNotMatch(running, /awaiting approval/);
+  const html = app.renderTaskCard(task, {
+    current_step: { key: "implement", name: "Implement", kind: "agent" },
+    flow: { phase_name: "legacy plan", phase_index: 0, phase_count: 2, phase_state: "running" },
+  }, "scheduled", false);
 
-  const awaiting = app.renderTaskCard(task, { flow: { phase_name: "plan", phase_index: 1, phase_count: 2, phase_state: "awaiting_approval" } }, "in_progress", false);
-  assert.match(awaiting, /data-awaiting-approval="true"/);
-  assert.match(awaiting, /plan 2\/2 · awaiting approval/);
-
-  const completed = app.renderTaskCard(task, { flow: { phase_name: "verify", phase_index: 1, phase_count: 2, phase_state: "completed" } }, "in_progress", false);
-  assert.doesNotMatch(completed, /data-flow-phase/);
+  assert.match(html, /<span class="badge" data-phase="up_next"><span class="dot"><\/span>scheduled<\/span>/);
+  assert.match(html, /<div class="card-current-step" title="Implement">Implement<\/div>/);
+  assert.doesNotMatch(html, /data-flow-phase|legacy plan|1\/2/);
 });
 
 test("wait reason phase_approval maps to a human label", async () => {
@@ -4249,6 +4279,7 @@ test("flows editor markup opts into shared form styling and accessible row contr
   const nodeHTML = context.renderNodeCardView({ key: "plan", name: "Plan", kind: "agent" });
   assert.match(nodeHTML, /class="flow-row flow-node-card" data-node-card/);
   assert.match(nodeHTML, /aria-label="Node key"/);
+  assert.match(nodeHTML, /placeholder="Short display name \(e\.g\. Implement\)"/);
   assert.match(nodeHTML, /aria-label="Node name"/);
   assert.match(nodeHTML, /aria-label="Trusted node kind"/);
   assert.match(nodeHTML, /aria-label="Strict node configuration JSON"/);
