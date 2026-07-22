@@ -20,6 +20,11 @@ func TestGitHTTPExchangeAuthAndHooks(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skipf("git is not installed")
 	}
+	// Workers authenticate their repository clone through process-wide Git
+	// config. Test Git commands must not send that credential to this server.
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "http.extraHeader")
+	t.Setenv("GIT_CONFIG_VALUE_0", "Authorization: Bearer inherited-worker-token")
 
 	ctx := context.Background()
 	dataDir := t.TempDir()
@@ -231,13 +236,26 @@ func runGitHTTPTestGitErrWithEnv(t *testing.T, dir string, env []string, args ..
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(withoutInheritedGitConfig(os.Environ()), "GIT_TERMINAL_PROMPT=0")
 	cmd.Env = append(cmd.Env, env...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return errWithOutput{err: err, output: strings.TrimSpace(string(output))}
 	}
 	return nil
+}
+
+func withoutInheritedGitConfig(env []string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, variable := range env {
+		key, _, _ := strings.Cut(variable, "=")
+		if key == "GIT_CONFIG_COUNT" || key == "GIT_CONFIG_PARAMETERS" ||
+			strings.HasPrefix(key, "GIT_CONFIG_KEY_") || strings.HasPrefix(key, "GIT_CONFIG_VALUE_") {
+			continue
+		}
+		filtered = append(filtered, variable)
+	}
+	return filtered
 }
 
 func gitHTTPTestOutput(t *testing.T, dir string, args ...string) string {

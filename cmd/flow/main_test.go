@@ -27,6 +27,7 @@ var flowRuntimeEnvKeys = []string{
 	"FLOW_BRANCH",
 	"FLOW_BASE",
 	"FLOW_CHECK_NAME",
+	"FLOW_PHASE_NAME",
 	"FLOW_WORKER_HARNESS",
 	"FLOW_SESSION_PURPOSE",
 	"FLOW_COORDINATOR_URL",
@@ -37,6 +38,10 @@ var flowRuntimeEnvKeys = []string{
 	"FLOW_PROJECT_NAME",
 	"FLOW_SESSION_ID",
 	"FLOW_REVIEW_CYCLE_INSTRUCTIONS",
+	"FLOW_HUMAN_ATTENTION_INSTRUCTIONS",
+	"FLOW_ROLE_INSTRUCTIONS",
+	"FLOW_WORKSPACE_MODE",
+	"FLOW_ARTIFACT_KIND",
 	"FLOW_CONSOLE_SCOPE",
 	"FLOW_PROTOCOL_VERSION",
 	"FLOW_DATA_DIR",
@@ -222,6 +227,7 @@ func TestDoctorInitializesDatabase(t *testing.T) {
 }
 
 func TestFetchPromptUsesWorkerRoleEnvironment(t *testing.T) {
+	t.Setenv("FLOW_ROLE_INSTRUCTIONS", "# Stale Worker Instructions")
 	clearFetchPromptEnvironment(t)
 	t.Setenv("FLOW_WORKER_ROLE", "reviewer")
 	t.Setenv("FLOW_TASK_ID", "t-demo-0001")
