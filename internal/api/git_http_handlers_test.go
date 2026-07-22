@@ -231,13 +231,43 @@ func runGitHTTPTestGitErrWithEnv(t *testing.T, dir string, env []string, args ..
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	// Flow workers authenticate their own Git operations through an inherited
+	// GIT_CONFIG_* extra header. Do not let that header override the credentials
+	// this integration test is explicitly exercising.
+	cmd.Env = append(gitHTTPTestEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0")
 	cmd.Env = append(cmd.Env, env...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return errWithOutput{err: err, output: strings.TrimSpace(string(output))}
 	}
 	return nil
+}
+
+func gitHTTPTestEnvironment(environ []string) []string {
+	filtered := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		key, _, _ := strings.Cut(entry, "=")
+		if key == "GIT_CONFIG_COUNT" || strings.HasPrefix(key, "GIT_CONFIG_KEY_") || strings.HasPrefix(key, "GIT_CONFIG_VALUE_") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+func TestGitHTTPTestEnvironmentRemovesInjectedGitConfig(t *testing.T) {
+	environ := []string{
+		"PATH=/usr/bin",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.extraHeader",
+		"GIT_CONFIG_VALUE_0=Authorization: Bearer leaked-token",
+		"HOME=/tmp/home",
+	}
+	got := gitHTTPTestEnvironment(environ)
+	want := []string{"PATH=/usr/bin", "HOME=/tmp/home"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("filtered environment = %q, want %q", got, want)
+	}
 }
 
 func gitHTTPTestOutput(t *testing.T, dir string, args ...string) string {

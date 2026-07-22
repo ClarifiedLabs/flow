@@ -3,7 +3,7 @@
 
 import { apiGet, taskAPIBase } from "./api.js";
 import { renderHumanAttentionPanel } from "./attention.js";
-import { renderPhaseBadge, renderReviewBadge } from "./board.js";
+import { renderPhaseBadge, renderStateBadge } from "./board.js";
 import { renderCheck } from "./diff.js";
 import { formatDate } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
@@ -186,6 +186,109 @@ export function renderTaskReadOnlyDetailView(app, task, options = {}) {
   `;
 }
 
+function workflowLabel(label) {
+  return String(label || "").trim().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+}
+
+function workflowStepFromSnapshot(snapshot, key) {
+  const normalizedKey = String(key || "").trim();
+  if (!normalizedKey) return null;
+  const nodes = value(snapshot || {}, "nodes", "Nodes") || [];
+  const node = Array.isArray(nodes)
+    ? nodes.find((candidate) => String(value(candidate, "key", "Key") || "").trim() === normalizedKey) || null
+    : null;
+  const frozenName = String(value(node || {}, "name", "Name") || "").trim();
+  const name = frozenName || workflowLabel(normalizedKey);
+  if (!name) return null;
+  return {
+    key: normalizedKey,
+    name,
+    kind: String(value(node || {}, "kind", "Kind") || "").trim(),
+    node,
+  };
+}
+
+function currentWorkflowNodeRun(workflowRun, nodeRuns, currentNodeKey) {
+  const currentNodeRunID = String(value(workflowRun || {}, "current_node_run_id", "CurrentNodeRunID") || "").trim();
+  if (currentNodeRunID) {
+    const match = nodeRuns.find((nodeRun) => String(value(nodeRun, "id", "ID") || "").trim() === currentNodeRunID);
+    if (match) return match;
+  }
+  for (let index = nodeRuns.length - 1; index >= 0; index -= 1) {
+    const nodeRun = nodeRuns[index];
+    const nodeKey = String(value(nodeRun, "node_key", "NodeKey") || "").trim();
+    const nodeState = String(value(nodeRun, "state", "State") || "").trim();
+    if (nodeKey === currentNodeKey && ["queued", "running", "waiting"].includes(nodeState)) return nodeRun;
+  }
+  return null;
+}
+
+function currentWorkflowStatus(workflowRun, nodeRun, workflowWait) {
+  switch (String(value(workflowWait || {}, "kind", "Kind") || "")) {
+    case "human_gate":
+      return "waiting for human decision";
+    case "agent_request":
+      return "waiting for response";
+    case "operator_intervention":
+      return "paused for operator intervention";
+    default:
+      break;
+  }
+  return workflowLabel(value(nodeRun || {}, "state", "State") || value(workflowRun || {}, "state", "State"));
+}
+
+function renderCurrentWorkflowStep(workflowRun, step, nodeRun, workflowWait) {
+  if (!step) return "";
+  const snapshot = value(workflowRun || {}, "snapshot", "Snapshot") || {};
+  const flowName = String(value(snapshot, "flow_name", "FlowName") || value(workflowRun, "flow_id", "FlowID") || "").trim();
+  const meta = [
+    flowName,
+    workflowLabel(step.kind),
+    currentWorkflowStatus(workflowRun, nodeRun, workflowWait),
+  ].filter(Boolean).join(" · ");
+  return `<div class="task-current-step" data-current-workflow-step><span class="task-current-step-label">Current step</span><strong title="${escapeAttr(step.key)}">${escapeHTML(step.name)}</strong>${meta ? `<span class="task-current-step-meta">${escapeHTML(meta)}</span>` : ""}</div>`;
+}
+
+function renderWorkflowNodeRun(nodeRun, snapshot, currentNodeRunID) {
+  const key = String(value(nodeRun, "node_key", "NodeKey") || "").trim();
+  const step = workflowStepFromSnapshot(snapshot, key);
+  const name = step ? step.name : workflowLabel(key) || "Unknown step";
+  const kind = workflowLabel(step && step.kind);
+  const id = String(value(nodeRun, "id", "ID") || "").trim();
+  const state = String(value(nodeRun, "state", "State") || "").trim();
+  const outcome = workflowLabel(value(nodeRun, "outcome", "Outcome"));
+  const error = String(value(nodeRun, "error", "Error") || "").trim();
+  const visit = Number(value(nodeRun, "visit", "Visit") || 0);
+  const attempt = Number(value(nodeRun, "attempt", "Attempt") || 0);
+  const details = [
+    kind,
+    visit > 1 ? `visit ${visit}` : "",
+    attempt > 1 ? `attempt ${attempt}` : "",
+    outcome ? `outcome: ${outcome}` : "",
+  ].filter(Boolean).join(" · ");
+  const isCurrent = Boolean(currentNodeRunID && id === currentNodeRunID);
+  return `<article class="feed-item workflow-step${isCurrent ? " is-current" : ""}"${isCurrent ? " data-current-workflow-step-run" : ""}><div class="workflow-step-head"><div><strong>${escapeHTML(name)}</strong>${key ? `<span class="workflow-step-key">${escapeHTML(key)}</span>` : ""}</div>${renderStateBadge(state)}</div>${details ? `<p>${escapeHTML(details)}</p>` : ""}${error ? `<p class="workflow-step-error">${escapeHTML(error)}</p>` : ""}</article>`;
+}
+
+function renderWorkflowDetail(workflowRun, nodeRuns, currentNodeRunID) {
+  if (!workflowRun) return "";
+  const snapshot = value(workflowRun, "snapshot", "Snapshot") || {};
+  const flowName = value(snapshot, "flow_name", "FlowName") || value(workflowRun, "flow_id", "FlowID") || "Workflow";
+  const runSequence = Number(value(workflowRun, "run_sequence", "RunSequence") || 0);
+  const runState = workflowLabel(value(workflowRun, "state", "State"));
+  const transitionsUsed = Number(value(workflowRun, "transitions_used", "TransitionsUsed") || 0);
+  const transitionBudget = Number(value(workflowRun, "transition_budget", "TransitionBudget") || 0);
+  const runMeta = [
+    runSequence ? `run ${runSequence}` : "",
+    runState,
+    `transitions ${transitionsUsed}/${transitionBudget}`,
+  ].filter(Boolean).join(" · ");
+  const history = nodeRuns.length
+    ? `<div class="feed workflow-steps" aria-label="Workflow step history">${nodeRuns.map((nodeRun) => renderWorkflowNodeRun(nodeRun, snapshot, currentNodeRunID)).join("")}</div>`
+    : `<p class="meta-quiet workflow-steps-empty">No steps have run yet.</p>`;
+  return `<div class="workflow-detail"><div class="workflow-detail-head"><div><h3>Workflow</h3><p class="meta-quiet">${escapeHTML(flowName)}</p></div><p class="meta-quiet">${escapeHTML(runMeta)}</p></div>${history}</div>`;
+}
+
 export async function renderTaskView(app, id, context, projectID = "") {
   const data = await apiGet(`${taskAPIBase(projectID)}/${encodeURIComponent(id)}`);
   if (context && !app.isActiveLoad(context)) return false;
@@ -216,14 +319,10 @@ export async function renderTaskView(app, id, context, projectID = "") {
   const activeSession = value(detail, "active_session", "ActiveSession");
   const terminalAvailable = Boolean(value(detail, "terminal_available", "TerminalAvailable") || value(activeSession, "terminal_available", "TerminalAvailable"));
   const terminalJobID = value(detail, "terminal_job_id", "TerminalJobID");
-  const reviewState = value(detail, "review_state", "ReviewState");
-  const requiredChecks = value(detail, "required_checks", "RequiredChecks") || {};
   const taskConsole = value(detail, "task_console", "TaskConsole") || {};
   const taskConsoleJob = value(taskConsole, "job", "Job") || null;
   const taskConsoleSession = value(taskConsole, "session", "Session") || null;
   const taskConsoleActive = Boolean(value(taskConsole, "active", "Active") || taskConsoleJob || taskConsoleSession);
-  const checkTotal = Number(value(requiredChecks, "total", "Total") || 0);
-  const checkSatisfied = Number(value(requiredChecks, "satisfied", "Satisfied") || 0);
   const activeSessionID = value(activeSession, "id", "ID");
   const activeSessionTerminalAvailable = Boolean(value(activeSession, "terminal_available", "TerminalAvailable"));
   const pauseResumeHTML = "";
@@ -244,8 +343,19 @@ export async function renderTaskView(app, id, context, projectID = "") {
   const workflowWait = value(workflowDetail || {}, "open_wait", "OpenWait") || null;
   const workflowNodeRuns = value(workflowDetail || {}, "node_runs", "NodeRuns") || [];
   const snapshot = value(workflowRun || {}, "snapshot", "Snapshot") || {};
-  const currentNodeKey = value(workflowRun || {}, "current_node_key", "CurrentNodeKey") || "";
-  const currentNode = (value(snapshot, "nodes", "Nodes") || []).find((node) => value(node, "key", "Key") === currentNodeKey) || null;
+  const currentNodeKey = String(value(workflowRun || {}, "current_node_key", "CurrentNodeKey") || "").trim();
+  const workflowRunState = String(value(workflowRun || {}, "state", "State") || "").trim();
+  const workflowActive = Boolean(workflowRun && (lifecycleState === "scheduled" || lifecycleState === "in_progress") && !["completed", "cancelled"].includes(workflowRunState));
+  const currentStep = workflowActive ? workflowStepFromSnapshot(snapshot, currentNodeKey) : null;
+  const currentNode = currentStep && currentStep.node;
+  const currentNodeRun = workflowActive ? currentWorkflowNodeRun(workflowRun, workflowNodeRuns, currentNodeKey) : null;
+  const currentNodeRunID = String(value(currentNodeRun || {}, "id", "ID") || "").trim();
+  const workflowSubstate = String(value(workflowDetail || {}, "substate", "Substate") || "").trim();
+  const activeSessionWaiting = value(activeSession || {}, "state", "State") === "waiting";
+  const taskDisplayState = lifecycleState === "in_progress"
+    ? ((workflowActive && (workflowWait || workflowSubstate === "blocked")) || activeSessionWaiting ? "blocked" : "working")
+    : lifecycleState;
+  const currentStepHTML = renderCurrentWorkflowStep(workflowRun, currentStep, currentNodeRun, workflowWait);
   const gateConfig = value(value(currentNode || {}, "config", "Config") || {}, "human_gate", "HumanGate") || null;
   const gateOutcomes = value(gateConfig || {}, "outcomes", "Outcomes") || [];
   const workflowActions = lifecycleState === "unscheduled"
@@ -258,9 +368,7 @@ export async function renderTaskView(app, id, context, projectID = "") {
     : workflowWait && value(workflowWait, "kind", "Kind") === "operator_intervention"
       ? `<section class="human-attention-panel"><div><h3>Workflow paused</h3><p>${escapeHTML(value(workflowWait, "message", "Message") || "Operator action is required.")}</p></div><button class="button" data-workflow-budget="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>Extend budget</button></section>`
       : "";
-  const workflowHTML = workflowRun
-    ? `<h3>Workflow</h3><p class="meta-quiet">${escapeHTML(value(snapshot, "flow_name", "FlowName") || value(workflowRun, "flow_id", "FlowID") || "Workflow")} · ${escapeHTML(currentNodeKey || "complete")} · transitions ${Number(value(workflowRun, "transitions_used", "TransitionsUsed") || 0)}/${Number(value(workflowRun, "transition_budget", "TransitionBudget") || 0)}</p><div class="feed">${workflowNodeRuns.map((nodeRun) => `<article class="feed-item"><strong>${escapeHTML(value(nodeRun, "node_key", "NodeKey"))}</strong><span>${escapeHTML(value(nodeRun, "state", "State"))}</span>${value(nodeRun, "outcome", "Outcome") ? `<p>${escapeHTML(value(nodeRun, "outcome", "Outcome"))}</p>` : ""}</article>`).join("")}</div>`
-    : "";
+  const workflowHTML = renderWorkflowDetail(workflowRun, workflowNodeRuns, workflowActive ? currentNodeRunID : "");
   // The standalone Sessions and Status feeds are gone: they are folded into
   // the unified Timeline below, which removes the column-height imbalance
   // (the tall sessions list used to dominate the editor column) and the
@@ -294,11 +402,10 @@ export async function renderTaskView(app, id, context, projectID = "") {
         <div>
           <h2>${escapeHTML(taskID)} · ${escapeHTML(value(task, "title", "Title"))}</h2>
           <div class="meta">
-            ${renderPhaseBadge(lifecycleState)}
-            ${reviewState ? renderReviewBadge(reviewState) : ""}
-            ${checkTotal ? `<span class="badge ${checkSatisfied === checkTotal ? "ok" : "idle"}">checks ${checkSatisfied}/${checkTotal}</span>` : ""}
+            ${renderPhaseBadge(taskDisplayState)}
           </div>
-          <p class="meta-quiet">p${Number(value(task, "priority", "Priority") || 0)}${flowHeaderMeta(flow) ? ` · ${escapeHTML(flowHeaderMeta(flow))}` : ""}</p>
+          ${currentStepHTML}
+          <p class="meta-quiet">p${Number(value(task, "priority", "Priority") || 0)}</p>
         </div>
         <div class="actions">
           ${workflowActions}
