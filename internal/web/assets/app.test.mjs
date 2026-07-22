@@ -1829,10 +1829,79 @@ test("task detail renders owner metadata, relations, sessions, changes, and chec
   assert.match(content.innerHTML, /review\.png/);
   assert.match(content.innerHTML, /class="attachment-preview"/);
   assert.match(content.innerHTML, /\/ui\/api\/v2\/projects\/p-alpha\/tasks\/t-alpha-0001\/attachments\/att-0001\?download=1/);
-  assert.match(content.innerHTML, /<span class="badge warn">changes requested<\/span>/);
+  const taskHeadHTML = content.innerHTML.slice(content.innerHTML.indexOf('class="detail-head task-detail-head"'), content.innerHTML.indexOf('class="summary-grid"'));
+  assert.equal(taskHeadHTML.match(/class="badge/g)?.length, 1);
+  assert.doesNotMatch(taskHeadHTML, /changes requested|checks 0\/1/);
   assert.match(content.innerHTML, /Source Task/);
   assert.match(content.innerHTML, /Activity/);
   assert.match(content.innerHTML, /ensure_author_job|up_next/);
+});
+
+test("task detail matches cards with one lifecycle badge and a clear frozen workflow step", async () => {
+  const harness = await browserSmokeHarness("/ui/projects/p-alpha/tasks/t-alpha-0001", {
+    "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001": {
+      project_id: "p-alpha",
+      task: {
+        id: "t-alpha-0001",
+        title: "Review the implementation",
+        state: "in_progress",
+        priority: 1,
+        created_by: "agent",
+        updated_at: "2026-06-18T12:37:00Z",
+      },
+      task_detail: {
+        // These legacy status summaries must not compete with the workflow step.
+        review_state: "changes_requested",
+        required_checks: { total: 2, satisfied: 1 },
+      },
+    },
+    "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/workflow": {
+      detail: {
+        run: {
+          id: "wr-1",
+          task_id: "t-alpha-0001",
+          run_sequence: 1,
+          state: "running",
+          current_node_key: "security-review",
+          current_node_run_id: "nr-review",
+          transitions_used: 3,
+          transition_budget: 50,
+          snapshot: {
+            flow_id: "fl-default",
+            flow_name: "default workflow",
+            nodes: [
+              { key: "implement", name: "Implement", kind: "agent", config: {} },
+              { key: "security-review", name: "Security review", kind: "change_review", config: {} },
+            ],
+          },
+        },
+        node_runs: [
+          { id: "nr-implement", node_key: "implement", visit: 1, attempt: 1, state: "succeeded", outcome: "draft_ready" },
+          { id: "nr-review", node_key: "security-review", visit: 1, attempt: 1, state: "running" },
+        ],
+      },
+    },
+  });
+
+  await harness.app.load();
+
+  const html = harness.content.innerHTML;
+  const taskHeadHTML = html.slice(html.indexOf('class="detail-head task-detail-head"'), html.indexOf('class="summary-grid"'));
+  assert.equal(taskHeadHTML.match(/class="badge/g)?.length, 1);
+  assert.match(taskHeadHTML, /data-phase="authoring"><span class="dot"><\/span>working<\/span>/);
+  assert.match(taskHeadHTML, /class="task-current-step" data-current-workflow-step/);
+  assert.match(taskHeadHTML, /<span class="task-current-step-label">Current step<\/span><strong title="security-review">Security review<\/strong>/);
+  assert.match(taskHeadHTML, /default workflow · change review · running/);
+  assert.doesNotMatch(taskHeadHTML, /changes requested|checks 1\/2/);
+
+  // The roomier workflow section keeps run diagnostics and readable history,
+  // while still highlighting the node that is active right now.
+  assert.match(html, /run 1 · running · transitions 3\/50/);
+  assert.match(html, /<strong>Implement<\/strong><span class="workflow-step-key">implement<\/span>/);
+  assert.match(html, /outcome: draft ready/);
+  assert.match(html, /class="feed-item workflow-step is-current" data-current-workflow-step-run/);
+  assert.match(html, /<strong>Security review<\/strong><span class="workflow-step-key">security-review<\/span>/);
+  assert.doesNotMatch(html, /default workflow · security-review · transitions/);
 });
 
 test("task detail renders a human gate wait as a full-width approval panel", async () => {
@@ -1889,6 +1958,10 @@ test("task detail renders a human gate wait as a full-width approval panel", asy
   assert.match(html, /class="human-attention-panel"/);
   assert.match(html, /Approve plan/);
   assert.match(html, /Review the proposed implementation tasks\./);
+  const taskHeadHTML = html.slice(html.indexOf('class="detail-head task-detail-head"'), html.indexOf('class="summary-grid"'));
+  assert.match(taskHeadHTML, /data-phase="blocked"><span class="dot"><\/span>blocked<\/span>/);
+  assert.match(taskHeadHTML, /Current step<\/span><strong title="approve-plan">Approve plan<\/strong>/);
+  assert.match(taskHeadHTML, /planned · human gate · waiting for human decision/);
   // Each gate outcome becomes a workflow respond button carrying its node run.
   assert.match(html, /data-workflow-respond="nr-1"[^>]*data-outcome="approved"/);
   assert.match(html, /data-workflow-respond="nr-1"[^>]*data-outcome="changes_requested"/);

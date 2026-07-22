@@ -1063,8 +1063,8 @@ tr.row-idle {
   margin-top: 0;
 }
 
-/* Sticky task detail head: keeps the title/actions visible while scrolling the
-   (potentially long) timeline below. */
+/* Sticky task detail head: keeps the title/actions and current workflow step
+   visible while scrolling the (potentially long) timeline below. */
 .task-detail-head {
   position: sticky;
   top: 0;
@@ -1072,6 +1072,94 @@ tr.row-idle {
   background: var(--bg, var(--panel));
   padding-bottom: 14px;
   margin-bottom: 0;
+}
+
+.task-detail-head > :first-child {
+  min-width: 0;
+}
+
+.task-current-step {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  min-width: 0;
+  margin-top: 5px;
+}
+
+.task-current-step-label {
+  color: var(--muted);
+  font-size: 0.65625rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.task-current-step strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.task-current-step-meta {
+  color: var(--muted);
+  font-size: 0.71875rem;
+}
+
+.workflow-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.workflow-detail-head h3,
+.workflow-detail-head p {
+  margin: 0;
+}
+
+.workflow-detail-head > p {
+  text-align: right;
+}
+
+.workflow-step {
+  min-width: 0;
+}
+
+.workflow-step.is-current {
+  border-left: 2px solid var(--accent);
+  background: var(--panel-2);
+}
+
+.workflow-step-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.workflow-step-head > div {
+  min-width: 0;
+}
+
+.workflow-step-key {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  overflow-wrap: anywhere;
+}
+
+.feed-item .workflow-step-error {
+  color: var(--st-danger);
+}
+
+.workflow-steps-empty {
+  margin-top: 0;
 }
 
 /* Collapsible read-only detail summary. The edit form is hidden until the Edit
