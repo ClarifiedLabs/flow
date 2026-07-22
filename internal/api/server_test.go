@@ -275,6 +275,83 @@ func TestHarnessOptionsIncludeDefaultArgs(t *testing.T) {
 	}
 }
 
+func TestGlobalAgentDefsAreInheritedAndProjectOverridesWin(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	input := coordinator.AgentDefInput{Name: "organization-reviewer", Harness: "codex", Model: "gpt-global", Prompt: "global prompt"}
+	var created agentDefResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/global/agent-defs", input, http.StatusCreated, &created)
+	if created.AgentDef.Inherited {
+		t.Fatalf("global definition = %+v, should not be marked inherited in the global catalog", created.AgentDef)
+	}
+
+	var projectList agentDefsResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/projects/"+fixture.Project.ID+"/agent-defs", nil, http.StatusOK, &projectList)
+	inherited := findAgentDefByName(projectList.AgentDefs, input.Name)
+	if inherited == nil || inherited.ID != created.AgentDef.ID || !inherited.Inherited {
+		t.Fatalf("project agent definitions = %+v, want inherited global definition", projectList.AgentDefs)
+	}
+
+	overrideInput := coordinator.AgentDefInput{Name: input.Name, Harness: "claude", Model: "sonnet", Prompt: "project prompt"}
+	var override agentDefResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPatch, "/v2/projects/"+fixture.Project.ID+"/agent-defs/"+created.AgentDef.ID, overrideInput, http.StatusOK, &override)
+	if override.AgentDef.ID == created.AgentDef.ID || override.AgentDef.Inherited || override.AgentDef.Prompt != "project prompt" {
+		t.Fatalf("project override = %+v, want a new local definition", override.AgentDef)
+	}
+
+	projectList = agentDefsResponse{}
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/projects/"+fixture.Project.ID+"/agent-defs", nil, http.StatusOK, &projectList)
+	effective := findAgentDefByName(projectList.AgentDefs, input.Name)
+	if effective == nil || effective.ID != override.AgentDef.ID || effective.Inherited {
+		t.Fatalf("effective project definition = %+v, want local override", effective)
+	}
+	var globalList agentDefsResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/global/agent-defs", nil, http.StatusOK, &globalList)
+	global := findAgentDefByName(globalList.AgentDefs, input.Name)
+	if global == nil || global.ID != created.AgentDef.ID || global.Prompt != "global prompt" {
+		t.Fatalf("global definition after project override = %+v", global)
+	}
+
+	flow, err := fixture.Bundle.Flows.Create(ctx, coordinator.FlowInput{
+		Name: "inherited-flow", StartNode: "review",
+		Nodes: []coordinator.FlowNodeInput{
+			{Key: "review", Name: "Review", Kind: coordinator.NodeAgent, Config: coordinator.FlowNodeConfig{Agent: &coordinator.AgentNodeConfig{AgentDefID: created.AgentDef.ID, Workspace: coordinator.WorkspaceChange, Artifact: coordinator.ArtifactChange}}},
+			{Key: "done", Name: "Done", Kind: coordinator.NodeTerminal, Config: coordinator.FlowNodeConfig{Terminal: &coordinator.TerminalNodeConfig{Resolution: coordinator.ResolutionCompleted}}},
+		},
+		Edges: []coordinator.FlowEdgeInput{{From: "review", Outcome: "completed", To: "done"}},
+	})
+	if err != nil {
+		t.Fatalf("create flow referencing global definition: %v", err)
+	}
+	snapshot, err := fixture.Bundle.Flows.ResolveSnapshot(ctx, flow.ID)
+	if err != nil {
+		t.Fatalf("resolve flow snapshot: %v", err)
+	}
+	node, ok := snapshot.Node("review")
+	if !ok || node.Config.Agent == nil || node.Config.Agent.Agent.ID != override.AgentDef.ID || node.Config.Agent.Agent.Prompt != "project prompt" {
+		t.Fatalf("resolved review agent = %+v, want project override", node.Config.Agent)
+	}
+
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodDelete, "/v2/global/agent-defs/"+created.AgentDef.ID, nil, http.StatusConflict, nil)
+	hookResponse := httptest.NewRecorder()
+	hookRequest := authorizedRequest(http.MethodGet, "/v2/global/agent-defs", nil)
+	hookRequest.Header.Set("Authorization", "Bearer hook-token")
+	fixture.Server.ServeHTTP(hookResponse, hookRequest)
+	if hookResponse.Code != http.StatusForbidden {
+		t.Fatalf("hook global agent-def status = %d, want 403", hookResponse.Code)
+	}
+}
+
+func findAgentDefByName(defs []coordinator.AgentDef, name string) *coordinator.AgentDef {
+	for i := range defs {
+		if defs[i].Name == name {
+			return &defs[i]
+		}
+	}
+	return nil
+}
+
 func TestTaskAttachmentUploadDetailAndDownload(t *testing.T) {
 	fixture := newTestFixture(t)
 	task, err := fixture.Tasks.CreateTask(context.Background(), coordinator.CreateTaskInput{Title: "Attachment task"})

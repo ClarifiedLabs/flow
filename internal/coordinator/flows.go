@@ -165,12 +165,17 @@ func (s FlowSnapshot) PhaseAt(index int) (FlowPhaseSnapshot, bool) {
 
 // FlowService manages the per-project flow catalog and the project default.
 type FlowService struct {
-	db  *sql.DB
-	now func() time.Time
+	db        *sql.DB
+	agentDefs *AgentDefService
+	now       func() time.Time
 }
 
 func NewFlowService(database *sql.DB) *FlowService {
-	return &FlowService{db: database, now: sqlitex.UTCNow}
+	return NewFlowServiceWithAgentDefs(database, NewAgentDefService(database))
+}
+
+func NewFlowServiceWithAgentDefs(database *sql.DB, agentDefs *AgentDefService) *FlowService {
+	return &FlowService{db: database, agentDefs: agentDefs, now: sqlitex.UTCNow}
 }
 
 func normalizeFlowInput(input FlowInput) (FlowInput, error) {
@@ -224,7 +229,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		}
 		return Flow{}, fmt.Errorf("insert flow: %w", err)
 	}
-	if err := insertFlowChildren(ctx, tx, id, input); err != nil {
+	if err := s.insertFlowChildren(ctx, tx, id, input); err != nil {
 		return Flow{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -274,7 +279,7 @@ WHERE id = ?`, input.Name, input.Description, input.StartNode, budget,
 	if _, err := tx.ExecContext(ctx, `DELETE FROM flow_nodes WHERE flow_id = ?`, id); err != nil {
 		return Flow{}, fmt.Errorf("clear flow nodes: %w", err)
 	}
-	if err := insertFlowChildren(ctx, tx, id, input); err != nil {
+	if err := s.insertFlowChildren(ctx, tx, id, input); err != nil {
 		return Flow{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -284,8 +289,8 @@ WHERE id = ?`, input.Name, input.Description, input.StartNode, budget,
 	return s.Get(ctx, id)
 }
 
-func insertFlowChildren(ctx context.Context, tx *sqlitex.Tx, flowID string, input FlowInput) error {
-	if err := validateGraphReferencesInTx(ctx, tx, input); err != nil {
+func (s *FlowService) insertFlowChildren(ctx context.Context, tx *sqlitex.Tx, flowID string, input FlowInput) error {
+	if err := validateGraphReferencesInTx(ctx, tx, s.agentDefs, input); err != nil {
 		return err
 	}
 	for position, node := range input.Nodes {
@@ -313,14 +318,16 @@ VALUES (?, ?, ?, ?)`, flowID, edge.From, edge.Outcome, edge.To); err != nil {
 	return nil
 }
 
-func validateGraphReferencesInTx(ctx context.Context, tx *sqlitex.Tx, input FlowInput) error {
+func validateGraphReferencesInTx(ctx context.Context, tx *sqlitex.Tx, defs *AgentDefService, input FlowInput) error {
 	checkAgent := func(nodeKey, id string) error {
-		var count int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_defs WHERE id = ?`, id).Scan(&count); err != nil {
-			return err
-		}
-		if count == 0 {
+		if defs == nil {
 			return fmt.Errorf("node %q references unknown agent definition %q", nodeKey, id)
+		}
+		if _, err := defs.resolveWith(ctx, tx, id); err != nil {
+			if errors.Is(err, ErrAgentDefNotFound) {
+				return fmt.Errorf("node %q references unknown agent definition %q", nodeKey, id)
+			}
+			return err
 		}
 		return nil
 	}
@@ -562,9 +569,8 @@ func (s *FlowService) ResolveSnapshot(ctx context.Context, flowID string) (FlowS
 		return FlowSnapshot{}, fmt.Errorf("flow %q has no executable definition", flow.Name)
 	}
 
-	defs := NewAgentDefService(s.db)
 	snapshotAgent := func(agentDefID string) (AgentDefSnapshot, error) {
-		def, err := defs.Get(ctx, agentDefID)
+		def, err := s.agentDefs.Resolve(ctx, agentDefID)
 		if err != nil {
 			return AgentDefSnapshot{}, fmt.Errorf("flow %q: %w", flow.Name, err)
 		}
@@ -645,7 +651,7 @@ func (s *FlowService) SeedDefaults(ctx context.Context) error {
 		return nil
 	}
 
-	defs := NewAgentDefService(s.db)
+	defs := s.agentDefs
 	harness := flowharness.DefaultAgentName()
 	defIDs := map[string]string{}
 	for _, seed := range []struct {
@@ -659,6 +665,16 @@ func (s *FlowService) SeedDefaults(ctx context.Context) error {
 		{name: "security-reviewer", skill: flowskills.ReviewerSkill, focus: "Security focus: prioritize trust boundaries, authorization, input validation, secret handling, injection risks, and exploitable failure modes."},
 		{name: "verifier", skill: flowskills.VerifierSkill},
 	} {
+		// A global definition created before the project provides that seeded
+		// role directly. The default flow stores its global id, so a later local
+		// same-name row becomes an ordinary project override.
+		if inherited, lookupErr := defs.GetByName(ctx, seed.name); lookupErr == nil && inherited.Inherited {
+			defIDs[seed.name] = inherited.ID
+			continue
+		} else if lookupErr != nil && !errors.Is(lookupErr, ErrAgentDefNotFound) {
+			return fmt.Errorf("look up inherited agent def %s: %w", seed.name, lookupErr)
+		}
+
 		prompt, err := flowskills.Instructions(seed.skill)
 		if err != nil {
 			return fmt.Errorf("seed agent def %s: %w", seed.name, err)

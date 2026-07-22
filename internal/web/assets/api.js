@@ -115,6 +115,10 @@ export function agentDefsAPIBase(projectID) {
   return id ? `/v2/projects/${encodeURIComponent(id)}/agent-defs` : "/v2/agent-defs";
 }
 
+export function globalAgentDefsAPIBase() {
+  return "/v2/global/agent-defs";
+}
+
 export function taskHref(projectID, taskID) {
   const task = String(taskID || "").trim();
   return task ? `/ui/tasks/${encodeURIComponent(task)}` : "#";

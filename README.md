@@ -98,7 +98,8 @@ Most users can stay in the web UI:
   attachments, and terminal links.
 - **Feedback**, **Merge**, **Workers**, and **Jobs** show human waits, ready
   merges, worker capacity, and job diagnostics.
-- **Flows** configures project-specific agent definitions and work/review flows.
+- **Flows** configures coordinator-global and project-specific agent definitions,
+  plus project work/review flows.
 
 Flow derives readable IDs from the project name: `--name "My Project"` creates
 project `p-my-project`, and its tasks are `t-my-project-0001`,
@@ -128,8 +129,8 @@ flow merge t-my-project-0001
   prompts, handoffs, terminal attach, review threads, and merge.
 
 Flow stores operational state under the Flow data directory. The global database
-tracks projects, workers, tokens, and web sessions; each project has its own
-SQLite database plus private bare `exchange.git` remote.
+tracks projects, workers, tokens, web sessions, and inherited agent definitions;
+each project has its own SQLite database plus private bare `exchange.git` remote.
 
 ## Documentation
 

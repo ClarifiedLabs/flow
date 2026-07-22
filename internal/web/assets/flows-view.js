@@ -1,9 +1,8 @@
-// Flows settings view: manage a project's agent definitions and flows. Agent
-// definitions pick a harness + model/effort + prompt; flows are editable
-// graphs of trusted node kinds with explicit outcome transitions. Both are project-owned rows edited live here,
-// resolving the active project the same way console-view does.
+// Flows settings view: manage global/project agent definitions and project
+// flows. Agent definitions pick a harness + model/effort + prompt; flows are
+// editable graphs of trusted node kinds with explicit outcome transitions.
 
-import { agentDefsAPIBase, apiDelete, apiGet, apiPatch, apiPost, flowsAPIBase } from "./api.js";
+import { agentDefsAPIBase, apiDelete, apiGet, apiPatch, apiPost, flowsAPIBase, globalAgentDefsAPIBase } from "./api.js";
 import { DEFAULT_AGENT_HARNESSES } from "./config.js";
 import { HARNESS_REASONING_UNAVAILABLE, findHarnessModel, harnessModels, harnessReasoningLevelValues, renderHarnessModelOptions, renderHarnessOptions } from "./harness-models.js";
 import { escapeAttr, escapeHTML } from "./html.js";
@@ -21,11 +20,13 @@ export async function renderFlowsView(app, context) {
     return true;
   }
 
-  const [defsData, flowsData] = await Promise.all([
+  const [globalDefsData, defsData, flowsData] = await Promise.all([
+    apiGet(globalAgentDefsAPIBase()),
     apiGet(agentDefsAPIBase(project.id)),
     apiGet(flowsAPIBase(project.id)),
   ]);
   if (context && !app.isActiveLoad(context)) return false;
+  const globalAgentDefs = globalDefsData.agent_defs || globalDefsData.AgentDefs || [];
   const agentDefs = defsData.agent_defs || defsData.AgentDefs || [];
   const flows = flowsData.flows || flowsData.Flows || [];
   const defaultFlowID = flowsData.default_flow_id || flowsData.DefaultFlowID || "";
@@ -45,17 +46,20 @@ export async function renderFlowsView(app, context) {
           <h2>Flows</h2>
         </div>
       </div>
+      ${renderGlobalAgentDefsSectionView(globalAgentDefs, agentOptions, state)}
       ${renderAgentDefsSectionView(agentDefs, agentOptions, state)}
       ${renderFlowsSectionView(flows, agentDefs, defaultFlowID, state)}
     </section>
   `;
+  bindGlobalAgentDefsSectionView(app, globalAgentDefs, agentOptions, state);
   bindAgentDefsSectionView(app, project, agentDefs, agentOptions, state);
   bindFlowsSectionView(app, project, flows, agentDefs, state);
   return true;
 }
 
 export function flowsViewState(app) {
-  if (!app.flowsView) app.flowsView = { editingDefID: "", editingFlowID: "" };
+  if (!app.flowsView) app.flowsView = { editingDefID: "", editingGlobalDefID: "", editingFlowID: "" };
+  if (app.flowsView.editingGlobalDefID === undefined) app.flowsView.editingGlobalDefID = "";
   return app.flowsView;
 }
 
@@ -132,29 +136,49 @@ function flowsProjectOptionsView(app) {
 // --- Agent definitions ---------------------------------------------------------
 
 export function renderAgentDefsSectionView(agentDefs, agentOptions, state) {
-  const editingDef = (agentDefs || []).find((def) => value(def, "id", "ID") === state.editingDefID) || null;
+  return renderAgentDefsCatalogView(agentDefs, agentOptions, state, {
+    editingKey: "editingDefID",
+    sectionAttribute: "data-agent-defs-section",
+    title: "Project Agent Definitions",
+    description: "Inherited definitions are available to this project's flows. Editing one creates a project override with the same name.",
+  });
+}
+
+export function renderGlobalAgentDefsSectionView(agentDefs, agentOptions, state) {
+  return renderAgentDefsCatalogView(agentDefs, agentOptions, state, {
+    editingKey: "editingGlobalDefID",
+    sectionAttribute: "data-global-agent-defs-section",
+    title: "Global Agent Definitions",
+    description: "Every project inherits these definitions unless it has a same-name project override.",
+  });
+}
+
+function renderAgentDefsCatalogView(agentDefs, agentOptions, state, options) {
+  const editingDef = (agentDefs || []).find((def) => value(def, "id", "ID") === state[options.editingKey]) || null;
   const rows = (agentDefs || []).length
     ? agentDefs.map((def) => {
         const id = value(def, "id", "ID");
         const builtin = Boolean(value(def, "builtin", "Builtin"));
+        const inherited = Boolean(value(def, "inherited", "Inherited"));
         return `
           <tr>
-            <td>${escapeHTML(value(def, "name", "Name"))}${builtin ? ` <span class="badge idle">builtin</span>` : ""}</td>
+            <td>${escapeHTML(value(def, "name", "Name"))}${builtin ? ` <span class="badge idle">builtin</span>` : ""}${inherited ? ` <span class="badge idle">inherited</span>` : ""}</td>
             <td>${escapeHTML(value(def, "harness", "Harness"))}</td>
             <td>${escapeHTML(value(def, "model", "Model") || "default")}</td>
             <td>${escapeHTML(value(def, "reasoning_effort", "ReasoningEffort") || "—")}</td>
             <td>
               <div class="actions table-actions">
-                <button class="button secondary" type="button" data-edit-def="${escapeAttr(id)}">Edit</button>
-                ${builtin ? "" : `<button class="button secondary" type="button" data-delete-def="${escapeAttr(id)}">Delete</button>`}
+                <button class="button secondary" type="button" data-edit-def="${escapeAttr(id)}">${inherited ? "Override" : "Edit"}</button>
+                ${builtin || inherited ? "" : `<button class="button secondary" type="button" data-delete-def="${escapeAttr(id)}">Delete</button>`}
               </div>
             </td>
           </tr>`;
       }).join("")
     : `<tr><td colspan="5">No agent definitions</td></tr>`;
   return `
-    <section class="flows-section" data-agent-defs-section>
-      <h3>Agent Definitions</h3>
+    <section class="flows-section" ${options.sectionAttribute}>
+      <h3>${escapeHTML(options.title)}</h3>
+      <p class="meta">${escapeHTML(options.description)}</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Name</th><th>Harness</th><th>Model</th><th>Effort</th><th></th></tr></thead>
@@ -169,6 +193,7 @@ export function renderAgentDefsSectionView(agentDefs, agentOptions, state) {
 export function renderAgentDefFormView(def, agentOptions) {
   const defID = value(def, "id", "ID");
   const name = value(def, "name", "Name");
+  const inherited = Boolean(value(def, "inherited", "Inherited"));
   const harness = def ? value(def, "harness", "Harness") : (agentOptions[0] ? agentOptions[0].name : "codex");
   const prompt = value(def, "prompt", "Prompt");
   const models = harnessModels(agentOptions, harness);
@@ -176,7 +201,7 @@ export function renderAgentDefFormView(def, agentOptions) {
   const selectedEffort = value(def, "reasoning_effort", "ReasoningEffort");
   return `
     <form class="agent-def-form task-form" data-agent-def-form data-def-id="${escapeAttr(defID)}">
-      <label><span>Name</span><input name="def_name" value="${escapeAttr(name)}" required></label>
+      <label><span>Name</span><input name="def_name" value="${escapeAttr(name)}" ${inherited ? "readonly" : ""} required></label>
       <label><span>Harness</span>
         <select name="def_harness" data-def-harness>${renderHarnessOptions(agentOptions, harness, true)}</select>
       </label>
@@ -252,13 +277,29 @@ export function agentDefPayloadFromFormView(form, agentOptions) {
 }
 
 export function bindAgentDefsSectionView(app, project, agentDefs, agentOptions, state) {
-  const section = app.querySelector("[data-agent-defs-section]");
+  bindAgentDefsCatalogView(app, agentOptions, state, {
+    apiBase: agentDefsAPIBase(project.id),
+    editingKey: "editingDefID",
+    selector: "[data-agent-defs-section]",
+  });
+}
+
+export function bindGlobalAgentDefsSectionView(app, agentDefs, agentOptions, state) {
+  bindAgentDefsCatalogView(app, agentOptions, state, {
+    apiBase: globalAgentDefsAPIBase(),
+    editingKey: "editingGlobalDefID",
+    selector: "[data-global-agent-defs-section]",
+  });
+}
+
+function bindAgentDefsCatalogView(app, agentOptions, state, options) {
+  const section = app.querySelector(options.selector);
   if (!section) return;
   const reload = () => app.load();
 
   section.querySelectorAll("[data-edit-def]").forEach((button) => {
     button.addEventListener("click", () => {
-      state.editingDefID = button.dataset.editDef || "";
+      state[options.editingKey] = button.dataset.editDef || "";
       reload();
     });
   });
@@ -266,8 +307,8 @@ export function bindAgentDefsSectionView(app, project, agentDefs, agentOptions, 
     button.addEventListener("click", async () => {
       if (typeof window.confirm === "function" && !window.confirm("Delete this agent definition?")) return;
       try {
-        await apiDelete(`${agentDefsAPIBase(project.id)}/${encodeURIComponent(button.dataset.deleteDef)}`);
-        state.editingDefID = "";
+        await apiDelete(`${options.apiBase}/${encodeURIComponent(button.dataset.deleteDef)}`);
+        state[options.editingKey] = "";
         await reload();
       } catch (error) {
         app.setStatus(error.message || String(error));
@@ -301,7 +342,7 @@ export function bindAgentDefsSectionView(app, project, agentDefs, agentOptions, 
   const cancel = form.querySelector("[data-def-cancel]");
   if (cancel && typeof cancel.addEventListener === "function") {
     cancel.addEventListener("click", () => {
-      state.editingDefID = "";
+      state[options.editingKey] = "";
       reload();
     });
   }
@@ -317,11 +358,11 @@ export function bindAgentDefsSectionView(app, project, agentDefs, agentOptions, 
     const defID = form.dataset.defId || "";
     try {
       if (defID) {
-        await apiPatch(`${agentDefsAPIBase(project.id)}/${encodeURIComponent(defID)}`, payload);
+        await apiPatch(`${options.apiBase}/${encodeURIComponent(defID)}`, payload);
       } else {
-        await apiPost(agentDefsAPIBase(project.id), payload);
+        await apiPost(options.apiBase, payload);
       }
-      state.editingDefID = "";
+      state[options.editingKey] = "";
       await reload();
       app.setStatus(defID ? "agent definition saved" : "agent definition created");
     } catch (error) {

@@ -304,7 +304,12 @@ definitions using the default Codex harness, plus two flows: `direct` and
 (harness, model, and reasoning effort) with a **focus agent** name and prompt.
 Manage those model/focus definitions with
 `flow agent-defs list|create|edit|rm` and the graphs that reference them with
-`flow flows list|create|edit|rm|set-default`.
+`flow flows list|create|edit|rm|set-default`. Add `--global` to an agent-def
+command to manage definitions inherited by every project. A same-name project
+definition overrides its global definition for later workflow snapshots. If a
+global `task-planner`, `author`, `code-reviewer`, `security-reviewer`, or
+`verifier` exists before a project is created, that project's seeded flows use
+the global role rather than creating the corresponding local built-in.
 
 Choose an task's work pipeline with `flow task create --flow direct`,
 `flow task create --flow planned`, or the web UI's **Flow** field. To use

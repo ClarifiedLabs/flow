@@ -14,12 +14,12 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 )
 
-// runAgentDefs manages the project's agent definition catalog: reusable
-// harness+model+effort+prompt configurations referenced by flow phases and
-// review sets.
+// runAgentDefs manages reusable harness+model+effort+prompt configurations.
+// Project catalogs inherit coordinator-global definitions and may override them
+// by name.
 func runAgentDefs(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: flow agent-defs {list|create -f FILE|edit ID -f FILE|rm ID}")
+		fmt.Fprintln(stderr, "usage: flow agent-defs {list|create -f FILE|edit -f FILE ID|rm ID} [--global]")
 		return 2
 	}
 	switch args[0] {
@@ -37,11 +37,24 @@ func runAgentDefs(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+func rejectConflictingAgentDefScope(global bool, apiFlags *apiFlagValues, stderr io.Writer) bool {
+	if !global || strings.TrimSpace(apiFlags.project) == "" {
+		return false
+	}
+	fmt.Fprintln(stderr, "--global and --project cannot be used together")
+	return true
+}
+
 func runAgentDefsList(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("agent-defs list", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
+	var global bool
+	flags.BoolVar(&global, "global", false, "manage coordinator-global agent definitions")
 	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if rejectConflictingAgentDefScope(global, apiFlags, stderr) {
 		return 2
 	}
 	client, err := newAPIClient(apiFlags)
@@ -49,7 +62,12 @@ func runAgentDefsList(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
-	defs, err := client.ListAgentDefs()
+	var defs []coordinator.AgentDef
+	if global {
+		defs, err = client.ListGlobalAgentDefs()
+	} else {
+		defs, err = client.ListAgentDefs()
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "list agent defs: %v\n", err)
 		return 1
@@ -65,7 +83,13 @@ func runAgentDefsList(args []string, stdout, stderr io.Writer) int {
 		if selection == "" {
 			selection = "-"
 		}
-		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", def.ID, def.Name, def.Harness, selection)
+		scope := ""
+		if global {
+			scope = "\tglobal"
+		} else if def.Inherited {
+			scope = "\tinherited"
+		}
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s%s\n", def.ID, def.Name, def.Harness, selection, scope)
 	}
 	return 0
 }
@@ -75,8 +99,13 @@ func runAgentDefsCreate(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
 	var file string
+	var global bool
 	flags.StringVar(&file, "f", "", "agent definition YAML/JSON file (- for stdin)")
+	flags.BoolVar(&global, "global", false, "manage coordinator-global agent definitions")
 	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if rejectConflictingAgentDefScope(global, apiFlags, stderr) {
 		return 2
 	}
 	var input coordinator.AgentDefInput
@@ -89,7 +118,12 @@ func runAgentDefsCreate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
-	def, err := client.CreateAgentDef(input)
+	var def coordinator.AgentDef
+	if global {
+		def, err = client.CreateGlobalAgentDef(input)
+	} else {
+		def, err = client.CreateAgentDef(input)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "create agent def: %v\n", err)
 		return 1
@@ -103,8 +137,13 @@ func runAgentDefsEdit(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
 	var file string
+	var global bool
 	flags.StringVar(&file, "f", "", "agent definition YAML/JSON file (- for stdin)")
+	flags.BoolVar(&global, "global", false, "manage coordinator-global agent definitions")
 	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if rejectConflictingAgentDefScope(global, apiFlags, stderr) {
 		return 2
 	}
 	if flags.NArg() != 1 {
@@ -121,7 +160,12 @@ func runAgentDefsEdit(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
-	def, err := client.UpdateAgentDef(flags.Arg(0), input)
+	var def coordinator.AgentDef
+	if global {
+		def, err = client.UpdateGlobalAgentDef(flags.Arg(0), input)
+	} else {
+		def, err = client.UpdateAgentDef(flags.Arg(0), input)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "update agent def: %v\n", err)
 		return 1
@@ -134,7 +178,12 @@ func runAgentDefsRemove(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("agent-defs rm", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
+	var global bool
+	flags.BoolVar(&global, "global", false, "manage coordinator-global agent definitions")
 	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if rejectConflictingAgentDefScope(global, apiFlags, stderr) {
 		return 2
 	}
 	if flags.NArg() != 1 {
@@ -146,7 +195,12 @@ func runAgentDefsRemove(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
-	if err := client.DeleteAgentDef(flags.Arg(0)); err != nil {
+	if global {
+		err = client.DeleteGlobalAgentDef(flags.Arg(0))
+	} else {
+		err = client.DeleteAgentDef(flags.Arg(0))
+	}
+	if err != nil {
 		fmt.Fprintf(stderr, "delete agent def: %v\n", err)
 		return 1
 	}

@@ -4268,6 +4268,17 @@ test("flows editor markup opts into shared form styling and accessible row contr
   assert.match(agentHTML, /<form class="agent-def-form task-form"/);
   assert.match(agentHTML, /class="agent-def-model-fields" data-def-model-fields/);
 
+  const inheritedHTML = context.renderAgentDefsSectionView([{ id: "ad-global", name: "shared", harness: "codex", inherited: true }], agentOptions, { editingDefID: "ad-global" });
+  assert.match(inheritedHTML, /Project Agent Definitions/);
+  assert.match(inheritedHTML, /badge idle">inherited/);
+  assert.match(inheritedHTML, /data-edit-def="ad-global">Override/);
+  assert.match(inheritedHTML, /name="def_name" value="shared" readonly required/);
+  assert.doesNotMatch(inheritedHTML, /data-delete-def="ad-global"/);
+
+  const globalHTML = context.renderGlobalAgentDefsSectionView([], agentOptions, { editingGlobalDefID: "" });
+  assert.match(globalHTML, /Global Agent Definitions/);
+  assert.match(globalHTML, /Every project inherits/);
+
   const flowHTML = context.renderFlowEditorView({ name: "custom" }, []);
   assert.match(flowHTML, /<form class="flow-editor task-form"/);
   assert.match(flowHTML, /class="flow-row-list wide" data-node-cards/);
@@ -4759,6 +4770,7 @@ test("flows view renders agent definitions and flow tables for the active projec
   const harness = await browserSmokeHarness("/ui/flows", {
     "/ui/api/v2/projects": { projects: [{ id: "p-alpha", name: "alpha" }] },
     "/ui/api/v2/harnesses": { agents: [{ name: "harness", display_name: "Harness" }], consoles: [] },
+    "/ui/api/v2/global/agent-defs": { agent_defs: [{ id: "ad-global", name: "organization-reviewer", harness: "codex" }] },
     "/ui/api/v2/projects/p-alpha/agent-defs": {
       agent_defs: [{ id: "ad-1", name: "author", harness: "harness", model: "anthropic:opus", reasoning_effort: "high", builtin: true }],
     },
@@ -4778,7 +4790,9 @@ test("flows view renders agent definitions and flow tables for the active projec
 
   const html = harness.content.innerHTML;
   assert.equal(harness.title.textContent, "Flows");
-  assert.match(html, /Agent Definitions/);
+  assert.match(html, /Global Agent Definitions/);
+  assert.match(html, /organization-reviewer/);
+  assert.match(html, /Project Agent Definitions/);
   assert.match(html, /author/);
   assert.match(html, /builtin/);
   assert.match(html, /data-agent-def-form/);
@@ -4828,6 +4842,7 @@ test("flows view renders the active project name as a project switcher", async (
   const harness = await browserSmokeHarness("/ui/flows?project=p-beta", {
     "/ui/api/v2/projects": { projects: [{ id: "p-alpha", name: "alpha" }, { id: "p-beta", name: "beta" }] },
     "/ui/api/v2/harnesses": { agents: [], consoles: [] },
+    "/ui/api/v2/global/agent-defs": { agent_defs: [] },
     "/ui/api/v2/projects/p-beta/agent-defs": { agent_defs: [] },
     "/ui/api/v2/projects/p-beta/flows": { flows: [], default_flow_id: "" },
   });
@@ -4844,6 +4859,7 @@ test("flows view renders the active project name as a project switcher", async (
   assert.deepEqual(harness.fetchCalls, [
     "/ui/api/v2/projects",
     "/ui/api/v2/harnesses",
+    "/ui/api/v2/global/agent-defs",
     "/ui/api/v2/projects/p-beta/agent-defs",
     "/ui/api/v2/projects/p-beta/flows",
   ]);

@@ -141,6 +141,43 @@ func TestFlowsListSummarizesGraphReviewAgents(t *testing.T) {
 	}
 }
 
+func TestAgentDefsListGlobalUsesGlobalCatalog(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v2/global/agent-defs" {
+			t.Fatalf("request = %s %s, want GET /v2/global/agent-defs", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"agent_defs":[{"id":"ad-global","name":"shared-reviewer","harness":"codex","model":"gpt-5","reasoning_effort":"high"}]}`)
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"agent-defs", "list", "--global", "--server", server.URL, "--token", "owner-token"}, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("agent-defs list exitCode = %d, stderr = %q", exitCode, stderr.String())
+	}
+	want := "ad-global\tshared-reviewer\tcodex\tgpt-5 effort=high\tglobal\n"
+	if stdout.String() != want {
+		t.Fatalf("agent-defs list output = %q, want %q", stdout.String(), want)
+	}
+}
+
+func TestAgentDefsGlobalAndProjectScopesConflict(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runAgentDefsList([]string{"--global", "--project", "demo"}, &stdout, &stderr)
+	if exitCode != 2 {
+		t.Fatalf("agent-defs list exitCode = %d, want 2", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "--global and --project cannot be used together") {
+		t.Fatalf("stderr = %q, want conflicting scope error", stderr.String())
+	}
+}
+
 func clearFetchPromptEnvironment(t *testing.T) {
 	t.Helper()
 	for _, key := range flowRuntimeEnvKeys {

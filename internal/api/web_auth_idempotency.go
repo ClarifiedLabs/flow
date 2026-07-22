@@ -300,7 +300,7 @@ func (s *Server) shouldUseIdempotency(r *http.Request, principal coordinator.Pri
 		return false
 	}
 
-	return strings.HasPrefix(r.URL.Path, "/v2/tasks") || strings.HasPrefix(r.URL.Path, "/v2/projects/") || strings.HasPrefix(r.URL.Path, "/v2/changes") || strings.HasPrefix(r.URL.Path, "/v2/sessions") || r.URL.Path == "/v2/jobs" || r.URL.Path == "/v2/reconcile"
+	return strings.HasPrefix(r.URL.Path, "/v2/tasks") || strings.HasPrefix(r.URL.Path, "/v2/projects/") || strings.HasPrefix(r.URL.Path, "/v2/global/") || strings.HasPrefix(r.URL.Path, "/v2/changes") || strings.HasPrefix(r.URL.Path, "/v2/sessions") || r.URL.Path == "/v2/jobs" || r.URL.Path == "/v2/reconcile"
 }
 
 // idempotencyFor picks the record store for a principal: session tokens use

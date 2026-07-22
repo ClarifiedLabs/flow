@@ -100,11 +100,11 @@ func TestOpenGlobalInitializesGlobalSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_global_init")
+	assertAppliedMigrations(t, migrations, "0001_global_init", "0002_global_agent_defs")
 	assertStorageFormat(t, store, "4")
 	assertColumnAbsent(t, store, "projects", "exchange_url")
 
-	assertTables(t, store, []string{"app_metadata", "projects", "workers", "tokens", "web_sessions", "web_bootstrap_tokens", "idempotency_records"}, []string{"tasks", "jobs", "leases", "sessions", "changes"})
+	assertTables(t, store, []string{"app_metadata", "projects", "workers", "tokens", "web_sessions", "web_bootstrap_tokens", "idempotency_records", "agent_defs"}, []string{"tasks", "jobs", "leases", "sessions", "changes"})
 }
 
 func TestOpenRejectsPreviousStorageFormat(t *testing.T) {
@@ -184,7 +184,7 @@ func TestOpenGlobalMigrationIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_global_init")
+	assertAppliedMigrations(t, migrations, "0001_global_init", "0002_global_agent_defs")
 }
 
 func TestGlobalTokensCarryProjectBinding(t *testing.T) {
