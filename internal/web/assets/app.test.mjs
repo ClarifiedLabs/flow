@@ -480,43 +480,6 @@ test("theme switcher applies stored overrides and persists user choices", async 
   assert.deepEqual(harness.pressedThemes(), ["system"]);
 });
 
-test("job attach action fetches and displays the tmux attach command", async () => {
-  let clickHandler;
-  const attachButton = {
-    dataset: { jobAttach: "j-0001" },
-    addEventListener(event, handler) {
-      if (event === "click") clickHandler = handler;
-    },
-  };
-  const status = { textContent: "" };
-  const fetchCalls = [];
-  const context = await scriptContext({}, {
-    fetch(path, options) {
-      fetchCalls.push({ path, options });
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({
-          attach: {
-            tmux_session: "flow-j-0001",
-            command: ["tmux", "attach-session", "-t", "flow-j-0001"],
-          },
-        }),
-      });
-    },
-  });
-  const app = new context.FlowApp();
-  app.querySelectorAll = (selector) => (selector === "[data-job-attach]" ? [attachButton] : []);
-  app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
-  app.bindTaskActions(async () => {});
-
-  await clickHandler();
-
-  assert.equal(fetchCalls[0].path, "/ui/api/v2/jobs/j-0001/attach");
-  assert.equal(fetchCalls[0].options.method, "GET");
-  assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
-  assert.equal(status.textContent, "tmux attach-session -t flow-j-0001");
-});
-
 test("task save submits patch payload and refreshes", async () => {
   const harness = await taskSaveHarness({ flowID: "fl-review" });
   await harness.submit();
@@ -2028,7 +1991,7 @@ test("diagnostics rows render queue, lease, tmux, session, and taints", async ()
   assert.match(jobHTML, /flow-j-0001/);
   assert.match(jobHTML, /working/);
   assert.match(jobHTML, /data-terminal="s-0001"/);
-  assert.match(jobHTML, /data-job-attach="j-0001"/);
+  assert.doesNotMatch(jobHTML, /data-job-attach|>Attach<\/button>/);
   assert.match(jobHTML, /data-session-transcript="s-0001"/);
   assert.match(jobHTML, /\/ui\/tasks\/t-alpha-0001/);
   assert.match(jobHTML, /\/ui\/changes\/ch-0001/);
@@ -2061,7 +2024,7 @@ test("diagnostics rows render queue, lease, tmux, session, and taints", async ()
     terminal_available: true,
   });
   assert.match(reviewerJobHTML, /data-job-terminal="j-0003"/);
-  assert.match(reviewerJobHTML, /data-job-attach="j-0003"/);
+  assert.doesNotMatch(reviewerJobHTML, /data-job-attach|>Attach<\/button>/);
 
   const expiredJobHTML = context.renderJobRow({
     id: "j-0002",

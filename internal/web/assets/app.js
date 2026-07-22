@@ -838,20 +838,6 @@ export class FlowApp extends HTMLElement {
         await this.openInlineTerminal(button, "job", button.dataset.jobTerminal);
       });
     });
-    this.querySelectorAll("[data-job-attach]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        try {
-          const data = await apiGet(`/v2/jobs/${encodeURIComponent(button.dataset.jobAttach)}/attach`);
-          const attach = data.attach || data.Attach || {};
-          const command = value(attach, "command", "Command") || [];
-          const tmuxSession = value(attach, "tmux_session", "TmuxSession");
-          const text = Array.isArray(command) && command.length ? command.join(" ") : (tmuxSession ? `tmux attach-session -t ${tmuxSession}` : "");
-          this.setStatus(text || "Attach command unavailable");
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-        }
-      });
-    });
     this.querySelectorAll("[data-session-transcript]").forEach((button) => {
       button.addEventListener("click", async () => {
         await showTranscriptView(this, button, "session", button.dataset.sessionTranscript);
