@@ -113,9 +113,9 @@ type Definition struct {
 	HookEnvVar         string
 	HookTimeoutSeconds int
 	// Models returns this harness's selectable model catalog (dynamic for the
-	// harness CLI, curated static lists for claude/codex). Nil means the harness
-	// exposes no Flow-selectable models. AvailableModels wraps it to stamp each
-	// model with this harness's name.
+	// harness and codex CLIs, curated for claude). Nil means the harness exposes
+	// no Flow-selectable models. AvailableModels wraps it to stamp each model
+	// with this harness's name.
 	Models func() ([]Model, error)
 	// Trust-prompt scraping. Interactive sessions drive codex/claude through a
 	// TTY (tmux), where their directory/workspace-trust dialog may appear before
@@ -266,7 +266,7 @@ var definitions = map[string]Definition{
 		HookFormat:         "toml",
 		HookEnvVar:         envCodexHookProfile,
 		HookTimeoutSeconds: codexNativeHookTimeoutSeconds,
-		Models:             CuratedCodexModels,
+		Models:             AvailableCodexModels,
 		// Codex "Do you trust the contents of this directory?" directory prompt.
 		TrustPromptMarkers:      []string{"do you trust the contents", "yes, continue", "no, quit"},
 		TrustPromptSubmitMarker: "enter to continue",

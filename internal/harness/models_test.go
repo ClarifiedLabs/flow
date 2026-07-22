@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -110,71 +111,133 @@ func TestNormalizeModelLowercasesHarness(t *testing.T) {
 	}
 }
 
-// TestCuratedCatalogsAvailableModelsStampHarness checks the curated claude/codex
-// catalogs normalize cleanly and AvailableModels stamps each entry with the
-// owning harness, with the right provider and effort reasoning options.
-func TestCuratedCatalogsAvailableModelsStampHarness(t *testing.T) {
-	cases := []struct {
-		harness  string
-		provider string
-		wantIDs  []string
-		efforts  map[string][]string
-	}{
-		{
-			harness:  Claude,
-			provider: "anthropic",
-			wantIDs:  []string{"claude-fable-5", "claude-haiku-4-5", "claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-4-6"},
-			efforts: map[string][]string{
-				"claude-opus-4-8":  {"low", "medium", "high", "xhigh", "max"},
-				"claude-haiku-4-5": {"low", "medium", "high"},
-			},
-		},
-		{
-			harness:  Codex,
-			provider: "openai",
-			wantIDs:  []string{"gpt-5.4", "gpt-5.4-mini", "gpt-5.5"},
-			efforts: map[string][]string{
-				"gpt-5.5": {"low", "medium", "high", "xhigh"},
-			},
-		},
+func TestCuratedClaudeModelsIncludePinnedVersionsAndLatestAliases(t *testing.T) {
+	def, ok := Lookup(Claude)
+	if !ok {
+		t.Fatalf("lookup %q", Claude)
 	}
-	for _, tc := range cases {
-		t.Run(tc.harness, func(t *testing.T) {
-			def, ok := Lookup(tc.harness)
-			if !ok {
-				t.Fatalf("lookup %q", tc.harness)
+	models, err := def.AvailableModels()
+	if err != nil {
+		t.Fatalf("AvailableModels: %v", err)
+	}
+
+	wantIDs := []string{
+		"claude-fable-5",
+		"claude-haiku-4-5",
+		"claude-opus-4-6",
+		"claude-opus-4-7",
+		"claude-opus-4-8",
+		"claude-sonnet-4-6",
+		"claude-sonnet-5",
+		"fable",
+		"haiku",
+		"opus",
+		"sonnet",
+	}
+	var gotIDs []string
+	byID := map[string]Model{}
+	for _, model := range models {
+		if model.Harness != Claude || model.ProviderID != "anthropic" {
+			t.Fatalf("model %q owner = %q/%q, want claude/anthropic", model.ModelID, model.Harness, model.ProviderID)
+		}
+		if model.QualifiedID != "anthropic:"+model.ModelID {
+			t.Fatalf("model %q qualified id = %q", model.ModelID, model.QualifiedID)
+		}
+		gotIDs = append(gotIDs, model.ModelID)
+		byID[model.ModelID] = model
+	}
+	if strings.Join(gotIDs, ",") != strings.Join(wantIDs, ",") {
+		t.Fatalf("model ids = %v, want %v (sorted)", gotIDs, wantIDs)
+	}
+
+	wantEfforts := map[string][]string{
+		"claude-opus-4-6":  {"low", "medium", "high", "max"},
+		"claude-opus-4-8":  {"low", "medium", "high", "xhigh", "max"},
+		"claude-haiku-4-5": nil,
+		"opus":             {"low", "medium", "high", "xhigh", "max"},
+		"haiku":            nil,
+	}
+	for id, want := range wantEfforts {
+		model := byID[id]
+		if len(want) == 0 {
+			if model.Reasoning.Supported || len(model.Reasoning.Options) != 0 {
+				t.Fatalf("%s reasoning = %#v, want unsupported", id, model.Reasoning)
 			}
-			models, err := def.AvailableModels()
-			if err != nil {
-				t.Fatalf("AvailableModels: %v", err)
-			}
-			var gotIDs []string
-			byID := map[string]Model{}
-			for _, m := range models {
-				if m.Harness != tc.harness {
-					t.Fatalf("model %q harness = %q, want %q", m.ModelID, m.Harness, tc.harness)
-				}
-				if m.ProviderID != tc.provider {
-					t.Fatalf("model %q provider = %q, want %q", m.ModelID, m.ProviderID, tc.provider)
-				}
-				if m.QualifiedID != tc.provider+":"+m.ModelID {
-					t.Fatalf("model %q qualified id = %q", m.ModelID, m.QualifiedID)
-				}
-				if !m.Reasoning.Supported || len(m.Reasoning.Options) != 1 || m.Reasoning.Options[0].Type != "effort" {
-					t.Fatalf("model %q reasoning = %#v, want one effort option", m.ModelID, m.Reasoning)
-				}
-				gotIDs = append(gotIDs, m.ModelID)
-				byID[m.ModelID] = m
-			}
-			if strings.Join(gotIDs, ",") != strings.Join(tc.wantIDs, ",") {
-				t.Fatalf("model ids = %v, want %v (sorted)", gotIDs, tc.wantIDs)
-			}
-			for id, wantEfforts := range tc.efforts {
-				got := byID[id].Reasoning.Options[0].Values
-				if strings.Join(got, ",") != strings.Join(wantEfforts, ",") {
-					t.Fatalf("%s efforts = %v, want %v", id, got, wantEfforts)
-				}
-			}
-		})
+			continue
+		}
+		if !model.Reasoning.Supported || len(model.Reasoning.Options) != 1 {
+			t.Fatalf("%s reasoning = %#v, want one effort option", id, model.Reasoning)
+		}
+		got := model.Reasoning.Options[0].Values
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("%s efforts = %v, want %v", id, got, want)
+		}
+	}
+	for _, alias := range []string{"fable", "haiku", "opus", "sonnet"} {
+		if !strings.Contains(byID[alias].ModelName, "(latest)") {
+			t.Fatalf("alias %q name = %q, want latest label", alias, byID[alias].ModelName)
+		}
+	}
+}
+
+func TestAvailableCodexModelsUsesInstalledCatalog(t *testing.T) {
+	toolDir := t.TempDir()
+	writeFakeExecutableScript(t, filepath.Join(toolDir, Codex), `#!/bin/sh
+if [ "$*" = "debug models" ]; then
+  printf '%s\n' '{"models":[{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"max"},{"effort":"ultra"}]},{"slug":"hidden-review","display_name":"Hidden Review","visibility":"hide","supported_reasoning_levels":[{"effort":"high"}]}]}'
+  exit 0
+fi
+exit 12
+`)
+	t.Setenv("PATH", toolDir)
+
+	def, ok := Lookup(Codex)
+	if !ok {
+		t.Fatalf("lookup %q", Codex)
+	}
+	models, err := def.AvailableModels()
+	if err != nil {
+		t.Fatalf("AvailableModels: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("models = %#v, want one list-visible model", models)
+	}
+	model := models[0]
+	if model.ModelID != "gpt-5.6-sol" || model.ModelName != "GPT-5.6-Sol" {
+		t.Fatalf("model = %#v", model)
+	}
+	if model.Harness != Codex || model.ProviderID != "openai" || model.QualifiedID != "openai:gpt-5.6-sol" {
+		t.Fatalf("model owner = %#v", model)
+	}
+	wantEfforts := []string{"low", "max", "ultra"}
+	if got := model.Reasoning.Options[0].Values; strings.Join(got, ",") != strings.Join(wantEfforts, ",") {
+		t.Fatalf("efforts = %v, want %v", got, wantEfforts)
+	}
+}
+
+func TestAvailableCodexModelsFallsBackToBundledCatalog(t *testing.T) {
+	toolDir := t.TempDir()
+	writeFakeExecutableScript(t, filepath.Join(toolDir, Codex), `#!/bin/sh
+if [ "$*" = "debug models" ]; then
+  printf '{'
+  exit 0
+fi
+if [ "$*" = "debug models --bundled" ]; then
+  printf '%s\n' '{"models":[{"slug":"gpt-bundled","display_name":"GPT Bundled","visibility":"list","supported_reasoning_levels":[]}]}'
+  exit 0
+fi
+exit 12
+`)
+	t.Setenv("PATH", toolDir)
+
+	models, err := AvailableCodexModels()
+	if err != nil {
+		t.Fatalf("AvailableCodexModels: %v", err)
+	}
+	if len(models) != 1 || models[0].ModelID != "gpt-bundled" {
+		t.Fatalf("models = %#v, want bundled catalog", models)
+	}
+	if models[0].Reasoning.Supported {
+		t.Fatalf("bundled model reasoning = %#v, want unsupported", models[0].Reasoning)
 	}
 }
