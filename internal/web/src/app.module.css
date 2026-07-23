@@ -1749,6 +1749,126 @@ tr.row-idle {
   margin: 4px 0 0;
 }
 
+.workflow-chart {
+  width: 100%;
+  min-width: 0;
+  margin: 8px 0 12px;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+.workflow-chart svg {
+  display: block;
+  max-width: none;
+  height: auto;
+}
+
+.workflow-node rect:not(.workflow-current-halo) {
+  fill: var(--panel);
+  stroke: var(--line-2);
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
+}
+
+.workflow-node.is-start rect:not(.workflow-current-halo) {
+  stroke: var(--accent);
+  stroke-dasharray: 4 3;
+}
+
+.workflow-node text {
+  pointer-events: none;
+}
+
+.workflow-node-name {
+  fill: var(--ink);
+  font-size: 0.6875rem;
+  font-weight: 650;
+}
+
+.workflow-node-kind,
+.workflow-node-start {
+  fill: var(--muted);
+  font-size: 0.5625rem;
+  letter-spacing: 0.04em;
+}
+
+.workflow-node-start {
+  fill: var(--accent);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.workflow-node.is-current rect:not(.workflow-current-halo) {
+  fill: color-mix(in srgb, var(--accent) 24%, var(--panel));
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-dasharray: none;
+  filter: drop-shadow(0 0 6px var(--accent));
+}
+
+.workflow-node.is-current .workflow-current-halo {
+  fill: color-mix(in srgb, var(--accent) 18%, transparent);
+  stroke: color-mix(in srgb, var(--accent) 68%, transparent);
+  stroke-width: 2;
+  filter: drop-shadow(0 0 9px var(--accent));
+}
+
+.workflow-node.is-current .workflow-node-name {
+  font-weight: 800;
+}
+
+.workflow-edge {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.25;
+  vector-effect: non-scaling-stroke;
+}
+
+.workflow-edge.is-taken {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.workflow-edge.is-untaken {
+  stroke-opacity: 0.28;
+}
+
+.workflow-edge-label {
+  fill: var(--ink-2);
+  stroke: var(--panel-2);
+  stroke-width: 4px;
+  paint-order: stroke;
+  font-size: 0.59375rem;
+  font-weight: 600;
+}
+
+.workflow-edge-group.is-taken .workflow-edge-label {
+  fill: var(--accent);
+}
+
+.workflow-edge-group.is-untaken .workflow-edge-label {
+  fill-opacity: 0.72;
+}
+
+.workflow-arrow {
+  fill: var(--muted);
+}
+
+.workflow-arrow.taken {
+  fill: var(--accent);
+}
+
+.workflow-arrow.dim {
+  opacity: 0.28;
+}
+
+.workflow-graph-empty {
+  min-width: 240px;
+}
+
 .summary-strip {
   display: flex;
   flex-wrap: wrap;
@@ -1969,6 +2089,24 @@ tr.row-idle {
 .flows-section td:last-child {
   width: 1%;
   white-space: nowrap;
+}
+
+.flows-section td .workflow-chart {
+  min-width: 420px;
+  max-width: 720px;
+  max-height: 340px;
+  margin-top: 0;
+}
+
+.flow-graph-summary {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.6875rem;
+  overflow-wrap: anywhere;
+}
+
+.flow-editor .workflow-chart {
+  min-height: 110px;
 }
 
 .agent-def-form {

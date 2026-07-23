@@ -12,6 +12,7 @@ import { renderMarkdown } from "./markdown.js";
 import { value } from "./normalize.js";
 import { renderTerminalButton } from "./terminal.js";
 import { renderTaskChange, renderRelation, renderTag, renderTimeline } from "./timeline.js";
+import { renderWorkflowGraph, workflowTransitionCounts } from "./workflow-graph.js";
 
 export async function renderNewTaskView(app, context) {
   if (context && !app.isActiveLoad(context)) return false;
@@ -270,7 +271,7 @@ function renderWorkflowNodeRun(nodeRun, snapshot, currentNodeRunID) {
   return `<article class="feed-item workflow-step${isCurrent ? " is-current" : ""}"${isCurrent ? " data-current-workflow-step-run" : ""}><div class="workflow-step-head"><div><strong>${escapeHTML(name)}</strong>${key ? `<span class="workflow-step-key">${escapeHTML(key)}</span>` : ""}</div>${renderStateBadge(state)}</div>${details ? `<p>${escapeHTML(details)}</p>` : ""}${error ? `<p class="workflow-step-error">${escapeHTML(error)}</p>` : ""}</article>`;
 }
 
-function renderWorkflowDetail(workflowRun, nodeRuns, currentNodeRunID) {
+function renderWorkflowDetail(workflowRun, nodeRuns, currentNodeRunID, transitions = [], activeNode = "") {
   if (!workflowRun) return "";
   const snapshot = value(workflowRun, "snapshot", "Snapshot") || {};
   const flowName = value(snapshot, "flow_name", "FlowName") || value(workflowRun, "flow_id", "FlowID") || "Workflow";
@@ -286,7 +287,12 @@ function renderWorkflowDetail(workflowRun, nodeRuns, currentNodeRunID) {
   const history = nodeRuns.length
     ? `<div class="feed workflow-steps" aria-label="Workflow step history">${nodeRuns.map((nodeRun) => renderWorkflowNodeRun(nodeRun, snapshot, currentNodeRunID)).join("")}</div>`
     : `<p class="meta-quiet workflow-steps-empty">No steps have run yet.</p>`;
-  return `<div class="workflow-detail"><div class="workflow-detail-head"><div><h3>Workflow</h3><p class="meta-quiet">${escapeHTML(flowName)}</p></div><p class="meta-quiet">${escapeHTML(runMeta)}</p></div>${history}</div>`;
+  const graph = `<div class="workflow-chart">${renderWorkflowGraph(snapshot, {
+    activeNode,
+    transitionCounts: workflowTransitionCounts(transitions),
+    ariaLabel: "Task workflow",
+  })}</div>`;
+  return `<div class="workflow-detail"><div class="workflow-detail-head"><div><h3>Workflow</h3><p class="meta-quiet">${escapeHTML(flowName)}</p></div><p class="meta-quiet">${escapeHTML(runMeta)}</p></div>${graph}${history}</div>`;
 }
 
 export async function renderTaskView(app, id, context, projectID = "") {
@@ -342,6 +348,7 @@ export async function renderTaskView(app, id, context, projectID = "") {
   const workflowRun = value(workflowDetail || {}, "run", "Run") || null;
   const workflowWait = value(workflowDetail || {}, "open_wait", "OpenWait") || null;
   const workflowNodeRuns = value(workflowDetail || {}, "node_runs", "NodeRuns") || [];
+  const workflowTransitions = value(workflowDetail || {}, "transitions", "Transitions") || [];
   const snapshot = value(workflowRun || {}, "snapshot", "Snapshot") || {};
   const currentNodeKey = String(value(workflowRun || {}, "current_node_key", "CurrentNodeKey") || "").trim();
   const workflowRunState = String(value(workflowRun || {}, "state", "State") || "").trim();
@@ -368,7 +375,13 @@ export async function renderTaskView(app, id, context, projectID = "") {
     : workflowWait && value(workflowWait, "kind", "Kind") === "operator_intervention"
       ? `<section class="human-attention-panel"><div><h3>Workflow paused</h3><p>${escapeHTML(value(workflowWait, "message", "Message") || "Operator action is required.")}</p></div><button class="button" data-workflow-budget="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>Extend budget</button></section>`
       : "";
-  const workflowHTML = renderWorkflowDetail(workflowRun, workflowNodeRuns, workflowActive ? currentNodeRunID : "");
+  const workflowHTML = renderWorkflowDetail(
+    workflowRun,
+    workflowNodeRuns,
+    workflowActive ? currentNodeRunID : "",
+    workflowTransitions,
+    currentNodeKey,
+  );
   // The standalone Sessions and Status feeds are gone: they are folded into
   // the unified Timeline below, which removes the column-height imbalance
   // (the tall sessions list used to dominate the editor column) and the

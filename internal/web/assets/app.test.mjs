@@ -1941,6 +1941,7 @@ test("task detail renders a human gate wait as a full-width approval panel", asy
           snapshot: {
             flow_id: "fl-plan",
             flow_name: "planned",
+            start_node: "approve-plan",
             nodes: [{
               key: "approve-plan",
               name: "Approve plan",
@@ -1951,10 +1952,17 @@ test("task detail renders a human gate wait as a full-width approval panel", asy
                   outcomes: ["approved", "changes_requested", "rejected"],
                 },
               },
+            }, {
+              key: "done",
+              name: "Done",
+              kind: "terminal",
+              config: { terminal: { resolution: "completed" } },
             }],
+            edges: [{ from: "approve-plan", outcome: "approved", to: "done" }],
           },
         },
         node_runs: [],
+        transitions: [],
         open_wait: {
           id: "wait-1",
           workflow_run_id: "wr-1",
@@ -1981,6 +1989,9 @@ test("task detail renders a human gate wait as a full-width approval panel", asy
   assert.match(html, /data-workflow-respond="nr-1"[^>]*data-outcome="changes_requested"/);
   assert.match(html, /data-workflow-respond="nr-1"[^>]*data-outcome="rejected"/);
   assert.match(html, /data-workflow-feedback/);
+  assert.match(html, /class="workflow-chart"/);
+  assert.match(html, /class="workflow-node is-current is-start" data-node="approve-plan"/);
+  assert.match(html, /approved ×0/);
   // The panel sits between the summary grid and the detail grid.
   assert.ok(html.indexOf("summary-grid") < html.indexOf("human-attention-panel"));
   assert.ok(html.indexOf("human-attention-panel") < html.indexOf("task-detail-grid"));
@@ -2055,6 +2066,60 @@ test("renderLifecycleChart tolerates a missing or empty graph", async () => {
     assert.doesNotMatch(html, /is-current/);
     assert.doesNotMatch(html, /Sent back/);
   }
+});
+
+test("generic workflow chart counts exact outcome edges and highlights the active node", async () => {
+  const context = await scriptContext();
+  const graph = {
+    start_node: "implement",
+    nodes: [
+      { key: "implement", name: "Implement <safe>", kind: "agent" },
+      { key: "review", name: "Review", kind: "change_review" },
+      { key: "done", name: "Done", kind: "terminal" },
+    ],
+    edges: [
+      { from: "implement", outcome: "completed", to: "review" },
+      { from: "review", outcome: "changes_requested", to: "implement" },
+      { from: "review", outcome: "approved", to: "done" },
+    ],
+  };
+  const transitions = [
+    { from_node_key: "implement", outcome: "completed", to_node_key: "review", event_kind: "node_completed" },
+    { from_node_key: "review", outcome: "changes_requested", to_node_key: "implement", event_kind: "node_completed" },
+    { from_node_key: "implement", outcome: "completed", to_node_key: "review", event_kind: "node_completed" },
+    { from_node_key: "review", outcome: "approved", to_node_key: "done", event_kind: "node_completed" },
+    // The lifecycle completion row traverses the same terminal edge but has no
+    // outcome and must not inflate the edge count.
+    { from_node_key: "review", to_node_key: "done", event_kind: "workflow_completed" },
+  ];
+  const counts = context.workflowTransitionCounts(transitions);
+  assert.equal(counts.get(context.workflowEdgeKey("implement", "completed", "review")), 2);
+  assert.equal(counts.get(context.workflowEdgeKey("review", "changes_requested", "implement")), 1);
+  assert.equal(counts.get(context.workflowEdgeKey("review", "approved", "done")), 1);
+
+  const html = context.renderWorkflowGraph(graph, { activeNode: "review", transitionCounts: counts, ariaLabel: "Task workflow" });
+  assert.match(html, /<svg[^>]*aria-label="Task workflow"/);
+  assert.match(html, /class="workflow-node is-current" data-node="review"/);
+  assert.match(html, /class="workflow-current-halo"/);
+  assert.match(html, /completed ×2/);
+  assert.match(html, /changes_requested ×1/);
+  assert.match(html, /approved ×1/);
+  assert.match(html, /class="workflow-edge is-taken"/);
+  assert.match(html, /Implement &lt;safe&gt;/);
+  assert.doesNotMatch(html, /Implement <safe>/);
+});
+
+test("generic workflow definition chart renders edge outcomes without run counts", async () => {
+  const context = await scriptContext();
+  const html = context.renderWorkflowGraph({
+    start_node: "plan",
+    nodes: [{ key: "plan", name: "Plan", kind: "agent" }, { key: "done", name: "Done", kind: "terminal" }],
+    edges: [{ from: "plan", outcome: "completed", to: "done" }],
+  });
+  assert.match(html, /class="workflow-node is-start" data-node="plan"/);
+  assert.match(html, /data-edge-outcome="completed"/);
+  assert.match(html, />completed<\/text>/);
+  assert.doesNotMatch(html, /×0/);
 });
 
 test("diagnostics rows render queue, lease, tmux, session, and taints", async () => {
@@ -4355,13 +4420,21 @@ test("flows editor markup opts into shared form styling and accessible row contr
   assert.match(agentHTML, /<form class="agent-def-form task-form"/);
   assert.match(agentHTML, /class="agent-def-model-fields" data-def-model-fields/);
 
-  const flowHTML = context.renderFlowEditorView({ name: "custom" }, []);
+  const flowHTML = context.renderFlowEditorView({
+    name: "custom",
+    start_node: "plan",
+    nodes: [{ key: "plan", name: "Plan", kind: "agent" }, { key: "done", name: "Done", kind: "terminal" }],
+    edges: [{ from: "plan", outcome: "completed", to: "done" }],
+  }, []);
   assert.match(flowHTML, /<form class="flow-editor task-form"/);
   assert.match(flowHTML, /class="flow-row-list wide" data-node-cards/);
   assert.match(flowHTML, /class="flow-row-actions wide"><button[^>]+data-add-node/);
   assert.match(flowHTML, /class="flow-row-list wide" data-edge-rows/);
   assert.match(flowHTML, /class="flow-row-actions wide"><button[^>]+data-add-edge/);
-  assert.match(flowHTML, /class="flow-graph-preview" data-graph-preview/);
+  assert.match(flowHTML, /class="workflow-chart flow-graph-preview" data-graph-preview/);
+  assert.match(flowHTML, /<svg[^>]*aria-label="custom workflow definition"/);
+  assert.match(flowHTML, /data-node="plan"/);
+  assert.match(flowHTML, /data-edge-outcome="completed"/);
 
   const nodeHTML = context.renderNodeCardView({ key: "plan", name: "Plan", kind: "agent" });
   assert.match(nodeHTML, /class="flow-row flow-node-card" data-node-card/);
@@ -4855,6 +4928,7 @@ test("flows view renders agent definitions and flow tables for the active projec
         name: "default flow",
         default: true,
         start_node: "plan",
+        nodes: [{ key: "plan", name: "Plan", kind: "agent" }, { key: "implement", name: "Implement", kind: "agent" }],
         edges: [{ from: "plan", outcome: "done", to: "implement" }],
       }],
       default_flow_id: "fl-1",
@@ -4871,6 +4945,9 @@ test("flows view renders agent definitions and flow tables for the active projec
   assert.match(html, /data-agent-def-form/);
   assert.match(html, /default flow/);
   assert.match(html, /start: plan · plan\.done → implement/);
+  assert.match(html, /class="workflow-chart compact"/);
+  assert.match(html, /<svg[^>]*aria-label="default flow workflow definition"/);
+  assert.match(html, /data-node="implement"/);
   assert.match(html, /data-flow-editor/);
   // Keeps the project's flow cache warm for the task form.
   assert.deepEqual(harness.app.flowsByProject.get("p-alpha").defaultFlowID, "fl-1");
