@@ -1814,7 +1814,7 @@ test("task detail renders owner metadata, relations, sessions, changes, and chec
   assert.match(content.innerHTML, /ensure_author_job|up_next/);
 });
 
-test("task detail matches cards with one lifecycle badge and a clear frozen workflow step", async () => {
+test("task detail replaces the generic working badge with the current workflow activity", async () => {
   const harness = await browserSmokeHarness("/ui/projects/p-alpha/tasks/t-alpha-0001", {
     "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001": {
       project_id: "p-alpha",
@@ -1864,10 +1864,11 @@ test("task detail matches cards with one lifecycle badge and a clear frozen work
 
   const html = harness.content.innerHTML;
   const taskHeadHTML = html.slice(html.indexOf('class="detail-head task-detail-head"'), html.indexOf('class="summary-grid"'));
-  assert.equal(taskHeadHTML.match(/class="badge/g)?.length, 1);
-  assert.match(taskHeadHTML, /data-phase="authoring"><span class="dot"><\/span>working<\/span>/);
+  assert.equal(taskHeadHTML.match(/class="badge/g)?.length || 0, 0);
+  assert.doesNotMatch(taskHeadHTML, />working</i);
   assert.match(taskHeadHTML, /class="task-current-step" data-current-workflow-step/);
-  assert.match(taskHeadHTML, /<span class="task-current-step-label">Current step<\/span><strong title="security-review">Security review<\/strong>/);
+  assert.match(taskHeadHTML, /<strong title="security-review">Reviewing security<\/strong>/);
+  assert.doesNotMatch(taskHeadHTML, /task-current-step-label/);
   assert.match(taskHeadHTML, /default workflow · change review · running/);
   assert.doesNotMatch(taskHeadHTML, /changes requested|checks 1\/2/);
 
@@ -2195,6 +2196,22 @@ test("diagnostics rows render queue, lease, tmux, session, and taints", async ()
   assert.match(expiredJobHTML, /expired/);
 });
 
+test("workflow activity labels describe common active step names", async () => {
+  const context = await scriptContext();
+
+  assert.equal(context.workflowActivityLabel("Implement", "agent"), "Implementing");
+  assert.equal(context.workflowActivityLabel("Plan", "agent"), "Planning");
+  assert.equal(context.workflowActivityLabel("Write task plan", "agent"), "Writing task plan");
+  assert.equal(context.workflowActivityLabel("Automated checks", "automated_checks"), "Running automated checks");
+  assert.equal(context.workflowActivityLabel("Code and security review", "change_review"), "Reviewing code and security");
+  assert.equal(context.workflowActivityLabel("Requirements verification", "verify_change"), "Verifying requirements");
+  assert.equal(context.workflowActivityLabel("Change merge", "merge_change"), "Merging change");
+  assert.equal(context.workflowActivityLabel("Sync dependencies", "agent"), "Syncing dependencies");
+  assert.equal(context.workflowActivityLabel("Implementation", "agent"), "Working on implementation");
+  assert.equal(context.workflowActivityLabel("Security", "agent"), "Working on security");
+  assert.equal(context.workflowActivityLabel("Security review", ""), "Working on security review");
+});
+
 test("board cards render tags and relationship indicators", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
@@ -2224,7 +2241,7 @@ test("board cards render tags and relationship indicators", async () => {
   assert.match(html, /related 3/);
 });
 
-test("board cards render one lifecycle badge above the frozen workflow step", async () => {
+test("board cards replace the generic working badge with the current workflow activity", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   const html = app.renderTaskCard({
@@ -2234,15 +2251,15 @@ test("board cards render one lifecycle badge above the frozen workflow step", as
     priority: 1,
   }, {
     current_step: { key: "implement", name: "Implement", kind: "agent" },
+    active_session: { id: "s-1", state: "working" },
     // These stale legacy values must not compete with the workflow step.
     review_state: "in_review",
     primary_action: "monitor",
   }, "working", false);
 
-  assert.equal(html.match(/class="badge/g)?.length, 1);
-  assert.match(html, /<span class="badge" data-phase="authoring"><span class="dot"><\/span>working<\/span>/);
-  assert.match(html, /<div class="card-current-step" title="Implement">Implement<\/div>/);
-  assert.ok(html.indexOf(">working</") < html.indexOf(">Implement</"));
+  assert.equal(html.match(/class="badge/g)?.length || 0, 0);
+  assert.match(html, /<div class="card-current-step" title="Implementing">Implementing<\/div>/);
+  assert.doesNotMatch(html, />working</i);
   assert.doesNotMatch(html, /in review/i);
   assert.doesNotMatch(html, /monitor/i);
 });
@@ -2255,9 +2272,9 @@ test("board workflow steps handle review nodes, escaping, key fallback, and omis
   const review = app.renderTaskCard(task, {
     current_step: { key: "review", name: "Agent review", kind: "change_review" },
   }, "working", false);
-  assert.match(review, /<span class="badge" data-phase="authoring"><span class="dot"><\/span>working<\/span>/);
-  assert.match(review, /<div class="card-current-step" title="Agent review">Agent review<\/div>/);
-  assert.doesNotMatch(review, /Current step/);
+  assert.doesNotMatch(review, /class="badge"/);
+  assert.match(review, /<div class="card-current-step" title="Reviewing agent">Reviewing agent<\/div>/);
+  assert.doesNotMatch(review, /Current step|>working</i);
 
   const longName = `Review <all> & "security" before merging this intentionally long localized change`;
   const escapedLongName = `Review &lt;all&gt; &amp; &quot;security&quot; before merging this intentionally long localized change`;
@@ -2271,10 +2288,11 @@ test("board workflow steps handle review nodes, escaping, key fallback, and omis
   const fallback = app.renderTaskCard(task, {
     current_step: { key: "human-review_step", name: "" },
   }, "working", false);
-  assert.match(fallback, /title="human review step">human review step<\/div>/);
+  assert.match(fallback, /title="Working on human review step">Working on human review step<\/div>/);
 
   const missing = app.renderTaskCard(task, {}, "working", false);
-  assert.doesNotMatch(missing, /card-current-step/);
+  assert.match(missing, /title="Work in progress">Work in progress<\/div>/);
+  assert.doesNotMatch(missing, />working</i);
 });
 
 test("board cards keep objective counts quiet and ignore obsolete state fields", async () => {
@@ -2383,7 +2401,7 @@ test("ready to merge cards link to their change without a legacy review badge", 
   assert.match(html, /data-workflow-done="t-alpha-0001"/);
 });
 
-test("cards carry phase identity as data-phase and a phase badge", async () => {
+test("cards carry phase identity while active work uses an activity message", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   const task = {
@@ -2399,6 +2417,8 @@ test("cards carry phase identity as data-phase and a phase badge", async () => {
 
   const working = app.renderTaskCard(task, {}, "authoring", false);
   assert.match(working, /<article class="card" data-phase="authoring"/);
+  assert.match(working, />Work in progress<\/div>/);
+  assert.doesNotMatch(working, /class="badge"/);
 
   const unscheduled = app.renderTaskCard({ ...task, state: "unscheduled" }, {}, "unscheduled", false);
   assert.match(unscheduled, /<article class="card" data-phase="backlog"/);
@@ -2417,12 +2437,14 @@ test("blocked cards show one blocked badge and the workflow step", async () => {
 
   const blocked = app.renderTaskCard(task, {
     current_step: { key: "human-review", name: "Human change review", kind: "human_gate" },
+    active_session: { id: "s-1", state: "working" },
   }, "working", true);
   assert.match(blocked, /<article class="card" data-phase="blocked"/);
   assert.match(blocked, /<span class="badge" data-phase="blocked"><span class="dot"><\/span>blocked<\/span>/);
   assert.match(blocked, /<div class="card-current-step" title="Human change review">Human change review<\/div>/);
   assert.equal(blocked.match(/class="badge/g)?.length, 1);
   assert.doesNotMatch(blocked, /data-phase="authoring"/);
+  assert.doesNotMatch(blocked, /\bworking\b/i);
 
   const scheduledDependency = app.renderTaskCard({ ...task, state: "scheduled" }, {
     current_step: { key: "implement", name: "Implement", kind: "agent" },

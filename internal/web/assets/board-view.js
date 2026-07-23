@@ -3,7 +3,7 @@
 
 import { apiGet, taskHref } from "./api.js";
 import { renderStatusKindBadge } from "./attention.js";
-import { flattenDonePage, laneTasks, phaseKey, renderPhaseBadge, renderUniqueCardLabel } from "./board.js";
+import { flattenDonePage, laneTasks, phaseKey, renderPhaseBadge, renderUniqueCardLabel, workflowActivityLabel } from "./board.js";
 import { LANES } from "./config.js";
 import { formatDate } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
@@ -184,6 +184,7 @@ export function renderTaskCardView(app, task, card, laneState, blocked, stagger 
   const handoff = value(card, "handoff", "Handoff");
   const currentStep = value(card, "current_step", "CurrentStep") || {};
   const currentStepKey = String(value(currentStep, "key", "Key") || "").trim();
+  const currentStepKind = String(value(currentStep, "kind", "Kind") || "").trim();
   const frozenStepName = String(value(currentStep, "name", "Name") || "");
   const currentStepName = frozenStepName.trim() ? frozenStepName : currentStepKey.replace(/[_-]+/g, " ").replace(/\s+/g, " ");
   const checks = value(card, "required_checks", "RequiredChecks") || {};
@@ -206,8 +207,17 @@ export function renderTaskCardView(app, task, card, laneState, blocked, stagger 
   const phaseState = laneState || lifecycleState;
   const cardState = blocked ? "blocked" : phaseState;
   const phaseSlug = phaseKey(cardState) || "unscheduled";
+  const workActive = !blocked && phaseSlug === "authoring";
+  const workMessage = workActive
+    ? workflowActivityLabel(currentStepName, currentStepKind) || "Work in progress"
+    : currentStepName;
   const cardLabelKeys = new Set();
-  const stateBadge = renderUniqueCardLabel(cardLabelKeys, cardState || "—", () => renderPhaseBadge(cardState));
+  const stateBadge = renderUniqueCardLabel(
+    cardLabelKeys,
+    cardState || "—",
+    () => workActive ? "" : renderPhaseBadge(cardState),
+  );
+  if (workActive) renderUniqueCardLabel(cardLabelKeys, workMessage, () => "");
   const checkProgress = checkTotal
     ? renderUniqueCardLabel(cardLabelKeys, `checks ${checkSatisfied}/${checkTotal}`, () => `checks ${checkSatisfied}/${checkTotal}`)
     : "";
@@ -240,16 +250,14 @@ export function renderTaskCardView(app, task, card, laneState, blocked, stagger 
     renderRelationSummary(relations),
     changeID ? `<a href="/ui/changes/${escapeAttr(changeID)}" data-link>${escapeHTML(changeID)}</a>` : "",
     branch ? escapeHTML(branch) : "",
-    activeState ? escapeHTML(activeState) : "",
+    activeState && !["starting", "working"].includes(String(activeState).toLowerCase()) ? escapeHTML(activeState) : "",
     updatedAt ? escapeHTML(updatedAt) : "",
   ].filter(Boolean).join(" · ");
   return `
     <article class="card" data-phase="${escapeAttr(phaseSlug)}" style="--i:${Number(stagger) || 0}">
       <a class="card-title" href="${escapeAttr(taskHref(projectID, taskID))}" data-link>${escapeHTML(taskID)} · ${escapeHTML(title)}</a>
-      <div class="meta">
-        ${stateBadge}
-      </div>
-      ${currentStepName ? `<div class="card-current-step" title="${escapeAttr(currentStepName)}">${escapeHTML(currentStepName)}</div>` : ""}
+      ${stateBadge ? `<div class="meta">${stateBadge}</div>` : ""}
+      ${workMessage ? `<div class="card-current-step" title="${escapeAttr(workMessage)}">${escapeHTML(workMessage)}</div>` : ""}
       ${quiet ? `<p class="meta-quiet">${quiet}</p>` : ""}
       ${blockerText ? `<p class="card-status">${escapeHTML(blockerText)}</p>` : ""}
       ${statusMessage ? `<p class="card-status">${statusKindBadge}${renderMarkdown(statusMessage, { inline: true })}</p>` : ""}

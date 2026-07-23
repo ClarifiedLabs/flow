@@ -104,6 +104,81 @@ export function waitReasonLabel(reason) {
   }
 }
 
+const WORKFLOW_ACTION_VERBS = new Set([
+  "analyze", "analyse", "approve", "assess", "audit", "benchmark", "build",
+  "check", "configure", "create", "deploy", "design", "document", "draft",
+  "execute", "fetch", "finalise", "finalize", "fix", "generate", "implement",
+  "inspect", "integrate", "investigate", "materialize", "merge", "migrate",
+  "monitor", "optimize", "optimise", "package", "plan", "prepare", "process",
+  "publish", "queue", "refactor", "release", "research", "resolve", "review",
+  "run", "schedule", "specify", "sync", "synchronize", "test", "triage",
+  "update", "validate", "verify", "write",
+]);
+
+const DOUBLE_FINAL_CONSONANT_VERBS = new Set([
+  "begin", "commit", "cut", "get", "plan", "put", "run", "set", "stop", "submit",
+]);
+
+function activityObject(label) {
+  if (/^[A-Z][a-z]/.test(label)) return label[0].toLowerCase() + label.slice(1);
+  return label;
+}
+
+function progressiveVerb(word) {
+  const lower = word.toLowerCase();
+  let progressive;
+  if (lower.endsWith("ing")) {
+    progressive = lower;
+  } else if (lower.endsWith("ie")) {
+    progressive = `${lower.slice(0, -2)}ying`;
+  } else if (lower === "sync") {
+    progressive = "syncing";
+  } else if (lower.endsWith("c")) {
+    progressive = `${lower}king`;
+  } else if (lower.endsWith("e") && !/(?:ee|oe|ye)$/.test(lower)) {
+    progressive = `${lower.slice(0, -1)}ing`;
+  } else if (DOUBLE_FINAL_CONSONANT_VERBS.has(lower)) {
+    progressive = `${lower}${lower.at(-1)}ing`;
+  } else {
+    progressive = `${lower}ing`;
+  }
+  return /^[A-Z]/.test(word) ? progressive[0].toUpperCase() + progressive.slice(1) : progressive;
+}
+
+// workflowActivityLabel turns an active workflow step into a concise description
+// of the work in progress. Node kinds disambiguate noun-style names used by the
+// built-in flow (for example, "Code review" and "Automated checks").
+export function workflowActivityLabel(name, kind = "") {
+  const label = String(name || "").trim().replace(/\s+/g, " ");
+  if (!label) return "";
+
+  const normalizedKind = String(kind || "").trim().toLowerCase();
+  const first = label.match(/^([A-Za-z]+)(.*)$/);
+  const firstWord = first ? first[1].toLowerCase() : "";
+  if (normalizedKind === "automated_checks" && !["check", "execute", "run", "test", "verify"].includes(firstWord)) {
+    return `Running ${activityObject(label)}`;
+  }
+  if (normalizedKind === "change_review" && firstWord !== "review") {
+    const reviewObject = label.match(/^(.+?)\s+review$/i);
+    return `Reviewing ${activityObject(reviewObject ? reviewObject[1] : label)}`;
+  }
+  if (normalizedKind === "verify_change" && firstWord !== "verify") {
+    const verificationObject = label.match(/^(.+?)\s+verification$/i);
+    return `Verifying ${activityObject(verificationObject ? verificationObject[1] : label)}`;
+  }
+  if (normalizedKind === "merge_change" && firstWord !== "merge") {
+    const mergeObject = label.match(/^(.+?)\s+merge$/i);
+    return `Merging ${activityObject(mergeObject ? mergeObject[1] : label)}`;
+  }
+  if (normalizedKind === "human_gate") {
+    return `Waiting for ${activityObject(label)}`;
+  }
+  if (!first || !WORKFLOW_ACTION_VERBS.has(firstWord)) {
+    return `Working on ${activityObject(label)}`;
+  }
+  return `${progressiveVerb(first[1])}${first[2]}`;
+}
+
 export function renderPhaseBadge(state) {
   const label = String(state || "").replaceAll("_", " ");
   if (!label || label === "—") {

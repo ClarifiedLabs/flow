@@ -3,7 +3,7 @@
 
 import { apiGet, taskAPIBase } from "./api.js";
 import { renderHumanAttentionPanel } from "./attention.js";
-import { renderPhaseBadge, renderStateBadge } from "./board.js";
+import { renderPhaseBadge, renderStateBadge, workflowActivityLabel } from "./board.js";
 import { renderCheck } from "./diff.js";
 import { formatDate } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
@@ -238,7 +238,7 @@ function currentWorkflowStatus(workflowRun, nodeRun, workflowWait) {
   return workflowLabel(value(nodeRun || {}, "state", "State") || value(workflowRun || {}, "state", "State"));
 }
 
-function renderCurrentWorkflowStep(workflowRun, step, nodeRun, workflowWait) {
+function renderCurrentWorkflowStep(workflowRun, step, nodeRun, workflowWait, workActive = false) {
   if (!step) return "";
   const snapshot = value(workflowRun || {}, "snapshot", "Snapshot") || {};
   const flowName = String(value(snapshot, "flow_name", "FlowName") || value(workflowRun, "flow_id", "FlowID") || "").trim();
@@ -247,7 +247,9 @@ function renderCurrentWorkflowStep(workflowRun, step, nodeRun, workflowWait) {
     workflowLabel(step.kind),
     currentWorkflowStatus(workflowRun, nodeRun, workflowWait),
   ].filter(Boolean).join(" · ");
-  return `<div class="task-current-step" data-current-workflow-step><span class="task-current-step-label">Current step</span><strong title="${escapeAttr(step.key)}">${escapeHTML(step.name)}</strong>${meta ? `<span class="task-current-step-meta">${escapeHTML(meta)}</span>` : ""}</div>`;
+  const name = workActive ? workflowActivityLabel(step.name, step.kind) || "Work in progress" : step.name;
+  const stepLabel = workActive ? "" : `<span class="task-current-step-label">Current step</span>`;
+  return `<div class="task-current-step" data-current-workflow-step>${stepLabel}<strong title="${escapeAttr(step.key)}">${escapeHTML(name)}</strong>${meta ? `<span class="task-current-step-meta">${escapeHTML(meta)}</span>` : ""}</div>`;
 }
 
 function renderWorkflowNodeRun(nodeRun, snapshot, currentNodeRunID) {
@@ -362,7 +364,10 @@ export async function renderTaskView(app, id, context, projectID = "") {
   const taskDisplayState = lifecycleState === "in_progress"
     ? ((workflowActive && (workflowWait || workflowSubstate === "blocked")) || activeSessionWaiting ? "blocked" : "working")
     : lifecycleState;
-  const currentStepHTML = renderCurrentWorkflowStep(workflowRun, currentStep, currentNodeRun, workflowWait);
+  const workActive = taskDisplayState === "working";
+  const currentStepHTML = renderCurrentWorkflowStep(workflowRun, currentStep, currentNodeRun, workflowWait, workActive)
+    || (workActive ? `<div class="task-current-step"><strong>Work in progress</strong></div>` : "");
+  const stateBadgeHTML = workActive ? "" : renderPhaseBadge(taskDisplayState);
   const gateConfig = value(value(currentNode || {}, "config", "Config") || {}, "human_gate", "HumanGate") || null;
   const gateOutcomes = value(gateConfig || {}, "outcomes", "Outcomes") || [];
   const workflowActions = lifecycleState === "unscheduled"
@@ -415,9 +420,7 @@ export async function renderTaskView(app, id, context, projectID = "") {
       <div class="detail-head task-detail-head">
         <div>
           <h2>${escapeHTML(taskID)} · ${escapeHTML(value(task, "title", "Title"))}</h2>
-          <div class="meta">
-            ${renderPhaseBadge(taskDisplayState)}
-          </div>
+          ${stateBadgeHTML ? `<div class="meta">${stateBadgeHTML}</div>` : ""}
           ${currentStepHTML}
           <p class="meta-quiet">p${Number(value(task, "priority", "Priority") || 0)}</p>
         </div>
