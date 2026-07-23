@@ -5,6 +5,7 @@
 COMMAND_PACKAGES := ./cmd/flow ./cmd/flow-server ./cmd/flow-worker
 BINDIR ?= $(HOME)/bin
 GO_TEST_P ?= 4
+TEST_ENV := ./scripts/test-env.sh
 
 build:
 	mkdir -p bin
@@ -20,16 +21,16 @@ install: build
 	install -m 0755 bin/flow bin/flow-server bin/flow-worker $(BINDIR)/
 
 test:
-	go test -p $(GO_TEST_P) ./...
+	$(TEST_ENV) go test -p $(GO_TEST_P) ./...
 
 # js-test runs the web UI's native-ESM Node tests (app.js is split into ES
 # modules served as-is to the browser; these tests import them directly).
 js-test:
-	node --test internal/web/assets/app.test.mjs
-	node internal/web/assets/harness_models.test.mjs
+	$(TEST_ENV) node --test internal/web/assets/app.test.mjs
+	$(TEST_ENV) node internal/web/assets/harness_models.test.mjs
 
 lifecycle-test:
-	go test ./tests/lifecycle -count=1
+	$(TEST_ENV) go test ./tests/lifecycle -count=1
 
 release:
 ifndef VERSION
@@ -38,11 +39,9 @@ endif
 	scripts/release/check-clean.sh
 	go build ./...
 	go vet ./...
-	go test ./...
+	$(MAKE) test
 	VERSION="$(VERSION)" AUTOPUSH="$(AUTOPUSH)" scripts/release/tag.sh
 
 web-smoke:
-	tmp=$$(mktemp -d); \
-	trap 'rm -rf "$$tmp"' EXIT; \
-	XDG_CONFIG_HOME="$$tmp/config" FLOW_DATA_DIR="$$tmp/data" FLOW_BROWSER_BIN="$(FLOW_BROWSER_BIN)" \
+	$(TEST_ENV) /usr/bin/env FLOW_BROWSER_BIN="$(FLOW_BROWSER_BIN)" \
 		go test ./internal/api -run TestWebUIBrowserSmokeRoutesAndDeepLinks -count=1
