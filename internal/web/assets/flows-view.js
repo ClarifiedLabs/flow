@@ -384,10 +384,10 @@ export function renderFlowsSectionView(flows, agentDefs, defaultFlowID, state) {
         const nodes = value(flow, "nodes", "Nodes") || [];
         return `
           <tr>
-            <td>${escapeHTML(value(flow, "name", "Name"))}${isDefault ? ` <span class="badge ok">default</span>` : ""}${builtin ? ` <span class="badge idle">builtin</span>` : ""}</td>
-            <td><div class="workflow-chart compact">${renderWorkflowGraph(flow, { ariaLabel: `${value(flow, "name", "Name") || id} workflow definition` })}</div><p class="flow-graph-summary">${renderFlowGraphSummaryView(flow)}</p></td>
-            <td>${nodes.length}</td>
-            <td>
+            <td class="flow-name-column">${escapeHTML(value(flow, "name", "Name"))}${isDefault ? ` <span class="badge ok">default</span>` : ""}${builtin ? ` <span class="badge idle">builtin</span>` : ""}</td>
+            <td class="flow-graph-column"><div class="workflow-chart compact">${renderWorkflowGraph(flow, { ariaLabel: `${value(flow, "name", "Name") || id} workflow definition` })}</div><p class="flow-graph-summary">${renderFlowGraphSummaryView(flow)}</p></td>
+            <td class="flow-nodes-column">${nodes.length}</td>
+            <td class="flow-actions-column">
               <div class="actions table-actions">
                 <button class="button secondary" type="button" data-edit-flow="${escapeAttr(id)}">Edit</button>
                 ${isDefault ? "" : `<button class="button secondary" type="button" data-default-flow="${escapeAttr(id)}">Set default</button>`}
@@ -401,8 +401,8 @@ export function renderFlowsSectionView(flows, agentDefs, defaultFlowID, state) {
     <section class="flows-section" data-flows-section>
       <h3>Flows</h3>
       <div class="table-wrap">
-        <table>
-          <thead><tr><th>Name</th><th>Graph</th><th>Nodes</th><th></th></tr></thead>
+        <table class="flows-table">
+          <thead><tr><th class="flow-name-column">Name</th><th class="flow-graph-column">Graph</th><th class="flow-nodes-column">Nodes</th><th class="flow-actions-column"></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>

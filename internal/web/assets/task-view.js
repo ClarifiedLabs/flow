@@ -401,12 +401,13 @@ export async function renderTaskView(app, id, context, projectID = "") {
     attachmentUploadHTML,
   ].filter(Boolean).join("");
   const activityHTML = [readyChangeHTML, changesHTML].filter(Boolean).join("");
-  const systemHTML = [workflowHTML, checksHTML].filter(Boolean).join("");
+  const workflowSectionHTML = workflowHTML ? `<div class="task-detail-workflow">${workflowHTML}</div>` : "";
   const lifecycleSectionHTML = lifecycleHTML ? `<div class="task-detail-lifecycle">${lifecycleHTML}</div>` : "";
   const detailColumns = [
+    workflowSectionHTML,
     `<div class="task-detail-column task-detail-editor">${editorHTML}</div>`,
     activityHTML ? `<div class="task-detail-column task-detail-activity">${activityHTML}</div>` : "",
-    systemHTML ? `<div class="task-detail-column task-detail-system">${systemHTML}</div>` : "",
+    checksHTML ? `<div class="task-detail-column task-detail-system">${checksHTML}</div>` : "",
     lifecycleSectionHTML,
   ].filter(Boolean).join("");
   app.querySelector(".content").innerHTML = `

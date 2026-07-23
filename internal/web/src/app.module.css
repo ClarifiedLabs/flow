@@ -1042,6 +1042,7 @@ tr.row-idle {
   min-width: 0;
 }
 
+.task-detail-workflow,
 .task-detail-lifecycle {
   grid-column: 1 / -1;
   min-width: 0;
@@ -2086,14 +2087,19 @@ tr.row-idle {
   margin-top: 0;
 }
 
-.flows-section td:last-child {
+.flows-table .flow-name-column,
+.flows-table .flow-nodes-column,
+.flows-table .flow-actions-column {
   width: 1%;
   white-space: nowrap;
 }
 
+.flows-table .flow-graph-column {
+  width: 100%;
+}
+
 .flows-section td .workflow-chart {
   min-width: 420px;
-  max-width: 720px;
   max-height: 340px;
   margin-top: 0;
 }

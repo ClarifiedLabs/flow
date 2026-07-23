@@ -1871,8 +1871,10 @@ test("task detail matches cards with one lifecycle badge and a clear frozen work
   assert.match(taskHeadHTML, /default workflow · change review · running/);
   assert.doesNotMatch(taskHeadHTML, /changes requested|checks 1\/2/);
 
-  // The roomier workflow section keeps run diagnostics and readable history,
-  // while still highlighting the node that is active right now.
+  // The workflow occupies its own full-width grid row, keeping run diagnostics
+  // and readable history while still highlighting the active node.
+  assert.match(html, /<div class="task-detail-workflow"><div class="workflow-detail">/);
+  assert.ok(html.indexOf("task-detail-workflow") < html.indexOf("task-detail-editor"));
   assert.match(html, /run 1 · running · transitions 3\/50/);
   assert.match(html, /<strong>Implement<\/strong><span class="workflow-step-key">implement<\/span>/);
   assert.match(html, /outcome: draft ready/);
@@ -4922,6 +4924,10 @@ test("flows view renders agent definitions and flow tables for the active projec
   assert.match(html, /data-agent-def-form/);
   assert.match(html, /default flow/);
   assert.match(html, /start: plan · plan\.done → implement/);
+  assert.match(html, /class="flows-table"/);
+  assert.match(html, /<th class="flow-name-column">Name<\/th><th class="flow-graph-column">Graph<\/th>/);
+  assert.match(html, /<td class="flow-name-column">default flow/);
+  assert.match(html, /<td class="flow-graph-column"><div class="workflow-chart compact">/);
   assert.match(html, /class="workflow-chart compact"/);
   assert.match(html, /<svg[^>]*aria-label="default flow workflow definition"/);
   assert.match(html, /data-node="implement"/);
