@@ -38,6 +38,11 @@ type SquashMergeInput struct {
 	Branch           string
 	ExpectedHeadSHA  string
 	Message          string
+	// CommitName and CommitEmail set the merge commit's author/committer
+	// identity. When empty, DefaultMergeCommitName/DefaultMergeCommitEmail are
+	// used.
+	CommitName  string
+	CommitEmail string
 }
 
 type SquashMergeResult struct {
@@ -94,10 +99,14 @@ func squashMergeToBase(ctx context.Context, input SquashMergeInput, push bool) (
 	if err := gitRun(ctx, "", nil, "clone", input.ExchangeRepoPath, worktree); err != nil {
 		return SquashMergeResult{}, fmt.Errorf("clone exchange for merge: %w", err)
 	}
-	if err := gitRun(ctx, worktree, nil, "config", "user.name", "Flow Coordinator"); err != nil {
+	identity := CommitIdentity{Name: input.CommitName, Email: input.CommitEmail}.WithDefaults(CommitIdentity{
+		Name:  DefaultMergeCommitName,
+		Email: DefaultMergeCommitEmail,
+	})
+	if err := gitRun(ctx, worktree, nil, "config", "user.name", identity.Name); err != nil {
 		return SquashMergeResult{}, fmt.Errorf("configure merge user name: %w", err)
 	}
-	if err := gitRun(ctx, worktree, nil, "config", "user.email", "flow@example.invalid"); err != nil {
+	if err := gitRun(ctx, worktree, nil, "config", "user.email", identity.Email); err != nil {
 		return SquashMergeResult{}, fmt.Errorf("configure merge user email: %w", err)
 	}
 	if err := gitRun(ctx, worktree, nil, "checkout", "-B", input.BaseBranch, "origin/"+input.BaseBranch); err != nil {

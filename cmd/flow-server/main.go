@@ -85,6 +85,8 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	var workerJoinTokenFile string
 	var clientConfigPathFlag string
 	var noWriteClientConfig bool
+	var gitCommitName string
+	var gitCommitEmail string
 	flags.StringVar(&configPath, "config", "", "coordinator config JSON path")
 	flags.StringVar(&addr, "addr", "", "listen address")
 	flags.StringVar(&dataDir, "data-dir", "", "Flow data directory")
@@ -96,6 +98,8 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&workerJoinTokenFile, "worker-join-token-file", "", "mode-0600 file containing the worker join bearer token")
 	flags.StringVar(&clientConfigPathFlag, "client-config", "", "client config path to write for local CLI discovery")
 	flags.BoolVar(&noWriteClientConfig, "no-write-client-config", false, "do not write a local client config")
+	flags.StringVar(&gitCommitName, "git-commit-name", "", "git user.name for coordinator-created commits")
+	flags.StringVar(&gitCommitEmail, "git-commit-email", "", "git user.email for coordinator-created commits")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -109,11 +113,26 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "load coordinator config: %v\n", err)
 		return 1
 	}
+	cfg, err = config.ApplyCoordinatorEnvOverrides(cfg, os.Getenv)
+	if err != nil {
+		fmt.Fprintf(stderr, "apply coordinator env overrides: %v\n", err)
+		return 1
+	}
 	if dataDir != "" {
 		cfg.DataDir = dataDir
 	}
 	if addr != "" {
 		cfg.ListenAddr = addr
+	}
+	if strings.TrimSpace(gitCommitName) != "" {
+		cfg.Git.CommitName = strings.TrimSpace(gitCommitName)
+	}
+	if strings.TrimSpace(gitCommitEmail) != "" {
+		cfg.Git.CommitEmail = strings.TrimSpace(gitCommitEmail)
+	}
+	if err := config.ValidateCoordinatorCommitIdentity(cfg.Git); err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 1
 	}
 	ownerToken = strings.TrimSpace(ownerToken)
 	ownerTokenFile = strings.TrimSpace(ownerTokenFile)
@@ -214,6 +233,10 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 			AuthoringStall: deadlines.AuthoringStall,
 		},
 		ReviewAuthorCycleLimit: limits.ReviewAuthorCycles,
+		CommitIdentity: flowgit.CommitIdentity{
+			Name:  cfg.Git.CommitName,
+			Email: cfg.Git.CommitEmail,
+		},
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "create project registry: %v\n", err)

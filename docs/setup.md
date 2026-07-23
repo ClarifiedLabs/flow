@@ -343,6 +343,45 @@ author_entrypoint:
   shell: false
 ```
 
+## Commit Identity
+
+Flow creates git commits in two places, and each binary's commit author can be
+configured independently via config file, environment variable, or CLI flag
+(precedence: config file < env var < CLI flag).
+
+- **flow-server** authors the squash-merge commit that lands a change on the
+  base branch. When unset it uses the built-in identity
+  `Flow Coordinator <flow@example.invalid>`.
+- **flow-worker** injects the identity as `GIT_AUTHOR_*` / `GIT_COMMITTER_*`
+  into the job environment so the harness/agent commits under it. When unset the
+  agent inherits whatever git identity is present in the worker environment.
+
+Both fields must be set together or both left empty; a half-set identity is a
+startup error.
+
+Coordinator (`flow-server serve`):
+
+```yaml
+git:
+  commit_name: Flow Bot
+  commit_email: flow-bot@example.com
+```
+
+Environment: `FLOW_GIT_COMMIT_NAME`, `FLOW_GIT_COMMIT_EMAIL`.
+CLI: `--git-commit-name`, `--git-commit-email`.
+
+Worker (`flow-worker`):
+
+```yaml
+git:
+  principal: worker:w-local
+  commit_name: Flow Bot
+  commit_email: flow-bot@example.com
+```
+
+Environment: `FLOW_WORKER_GIT_COMMIT_NAME`, `FLOW_WORKER_GIT_COMMIT_EMAIL`.
+CLI: `--git-commit-name`, `--git-commit-email`.
+
 ## Lifecycle Deadlines
 
 The coordinator arms durable timers that bound otherwise-unobservable waits: a

@@ -789,6 +789,43 @@ func TestWorkerEnvIncludesSessionToken(t *testing.T) {
 	}
 }
 
+func TestWorkerEnvInjectsCommitIdentity(t *testing.T) {
+	cfg := workerConfig("/tmp/work", "file:///tmp/exchange.git")
+	cfg.Git.CommitName = "Flow Bot"
+	cfg.Git.CommitEmail = "flow-bot@example.com"
+
+	env := workerEnv(tmuxInput{
+		Worktree: "/tmp/work/repo",
+		Config:   cfg,
+		Job:      Job{ID: "j-identity", Role: RoleAuthor},
+		Lease:    Lease{ID: "l-identity", WorkerID: "w-local"},
+	})
+	for key, want := range map[string]string{
+		"GIT_AUTHOR_NAME":     "Flow Bot",
+		"GIT_AUTHOR_EMAIL":    "flow-bot@example.com",
+		"GIT_COMMITTER_NAME":  "Flow Bot",
+		"GIT_COMMITTER_EMAIL": "flow-bot@example.com",
+	} {
+		if env[key] != want {
+			t.Fatalf("%s = %q, want %q", key, env[key], want)
+		}
+	}
+}
+
+func TestWorkerEnvOmitsCommitIdentityWhenUnconfigured(t *testing.T) {
+	env := workerEnv(tmuxInput{
+		Worktree: "/tmp/work/repo",
+		Config:   workerConfig("/tmp/work", "file:///tmp/exchange.git"),
+		Job:      Job{ID: "j-identity", Role: RoleAuthor},
+		Lease:    Lease{ID: "l-identity", WorkerID: "w-local"},
+	})
+	for _, key := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"} {
+		if _, present := env[key]; present {
+			t.Fatalf("%s = %q, want absent when identity unconfigured", key, env[key])
+		}
+	}
+}
+
 func TestWorkerEnvIncludesTopLevelJobChangeID(t *testing.T) {
 	changeID := "ch-workflow"
 	env := workerEnv(tmuxInput{

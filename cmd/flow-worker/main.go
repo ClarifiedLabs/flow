@@ -122,6 +122,8 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	var claimWait time.Duration
 	var leaseDuration time.Duration
 	var heartbeatTTL time.Duration
+	var gitCommitName string
+	var gitCommitEmail string
 	flags.StringVar(&configPath, "c", "", "worker config path")
 	flags.StringVar(&configPath, "config", "", "worker config path")
 	flags.BoolVar(&registerOnly, "register-only", false, "register and heartbeat without claiming jobs")
@@ -129,6 +131,8 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	flags.DurationVar(&claimWait, "claim-wait", 30*time.Second, "claim long-poll duration")
 	flags.DurationVar(&leaseDuration, "lease", 60*time.Second, "lease duration")
 	flags.DurationVar(&heartbeatTTL, "heartbeat-ttl", 60*time.Second, "worker heartbeat TTL")
+	flags.StringVar(&gitCommitName, "git-commit-name", "", "git user.name for agent commits in the job worktree")
+	flags.StringVar(&gitCommitEmail, "git-commit-email", "", "git user.email for agent commits in the job worktree")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -140,6 +144,16 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	cfg, _, err := loadWorkerConfig(configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "load worker config: %v\n", err)
+		return 1
+	}
+	if strings.TrimSpace(gitCommitName) != "" {
+		cfg.Git.CommitName = strings.TrimSpace(gitCommitName)
+	}
+	if strings.TrimSpace(gitCommitEmail) != "" {
+		cfg.Git.CommitEmail = strings.TrimSpace(gitCommitEmail)
+	}
+	if err := config.ValidateWorkerCommitIdentity(cfg.Git); err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
 	}
 	if strings.TrimSpace(cfg.WorkerID) == "" {

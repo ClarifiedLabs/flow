@@ -31,6 +31,10 @@ type MergeService struct {
 	project  Project
 	now      func() time.Time
 
+	// CommitIdentity sets the author/committer identity of the squash-merge
+	// commit. The zero value uses the git package's default identity.
+	CommitIdentity flowgit.CommitIdentity
+
 	// recoveryBackoff throttles per-intent recovery retries: resolving a
 	// base-advanced intent clones the exchange, so a persistently-failing
 	// intent must not re-clone on every 5s tick. In-memory only — a restart
@@ -202,6 +206,8 @@ func (s *MergeService) mergeApprovedChange(ctx context.Context, task Task, chang
 		Branch:           change.Branch,
 		ExpectedHeadSHA:  strings.TrimSpace(change.HeadSHA),
 		Message:          mergeCommitMessage(task, change),
+		CommitName:       s.CommitIdentity.Name,
+		CommitEmail:      s.CommitIdentity.Email,
 	})
 	if errors.Is(err, flowgit.ErrNoMergeChanges) {
 		// An empty squash against a base that advanced past the intent's

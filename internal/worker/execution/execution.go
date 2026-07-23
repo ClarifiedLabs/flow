@@ -1159,6 +1159,21 @@ func workerEnv(input tmuxInput) map[string]string {
 		env[key] = value
 	}
 
+	// Inject the configured git commit identity (if any) as GIT_AUTHOR_*/
+	// GIT_COMMITTER_* so the harness and the shells it spawns commit under it.
+	// These are not FLOW_WORKER_* keys, so scrubWorkerDeploymentEnv leaves them
+	// in place.
+	identity := flowgit.CommitIdentity{
+		Name:  input.Config.Git.CommitName,
+		Email: input.Config.Git.CommitEmail,
+	}
+	if identity.Configured() {
+		for _, assignment := range identity.Env() {
+			key, value, _ := strings.Cut(assignment, "=")
+			env[key] = value
+		}
+	}
+
 	return env
 }
 

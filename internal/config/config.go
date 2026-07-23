@@ -18,14 +18,23 @@ import (
 const DefaultProtocolVersion = "3"
 
 type CoordinatorConfig struct {
-	DataDir                    string           `json:"data_dir" yaml:"data_dir"`
-	ListenAddr                 string           `json:"listen_addr" yaml:"listen_addr"`
-	ProtocolVersion            string           `json:"protocol_version" yaml:"protocol_version"`
-	AuthorEntrypoint           map[string]any   `json:"author_entrypoint" yaml:"author_entrypoint"`
-	AuthorEntrypointConfigured bool             `json:"-" yaml:"-"`
-	Deadlines                  DeadlineConfig   `json:"deadlines" yaml:"deadlines"`
-	Limits                     LimitConfig      `json:"limits" yaml:"limits"`
-	HarnessArgs                flowharness.Args `json:"harness_args" yaml:"harness_args"`
+	DataDir                    string               `json:"data_dir" yaml:"data_dir"`
+	ListenAddr                 string               `json:"listen_addr" yaml:"listen_addr"`
+	ProtocolVersion            string               `json:"protocol_version" yaml:"protocol_version"`
+	AuthorEntrypoint           map[string]any       `json:"author_entrypoint" yaml:"author_entrypoint"`
+	AuthorEntrypointConfigured bool                 `json:"-" yaml:"-"`
+	Deadlines                  DeadlineConfig       `json:"deadlines" yaml:"deadlines"`
+	Limits                     LimitConfig          `json:"limits" yaml:"limits"`
+	HarnessArgs                flowharness.Args     `json:"harness_args" yaml:"harness_args"`
+	Git                        CoordinatorGitConfig `json:"git" yaml:"git"`
+}
+
+// CoordinatorGitConfig configures the git commit identity the coordinator uses
+// for the commits it creates (the squash-merge commit landing a change on the
+// base branch). When unset, the built-in default identity is used.
+type CoordinatorGitConfig struct {
+	CommitName  string `json:"commit_name" yaml:"commit_name"`
+	CommitEmail string `json:"commit_email" yaml:"commit_email"`
 }
 
 // DeadlineConfig bounds otherwise-unbounded waits in the lifecycle. Each value
@@ -146,7 +155,9 @@ type WorkerCapacity struct {
 }
 
 type WorkerGitConfig struct {
-	Principal string `json:"principal" yaml:"principal"`
+	Principal   string `json:"principal" yaml:"principal"`
+	CommitName  string `json:"commit_name" yaml:"commit_name"`
+	CommitEmail string `json:"commit_email" yaml:"commit_email"`
 }
 
 type WorkerTerminalConfig struct {
@@ -229,6 +240,12 @@ func LoadCoordinator(path string) (CoordinatorConfig, error) {
 	cfg.Deadlines = fileCfg.Deadlines
 	cfg.Limits = fileCfg.Limits
 	cfg.HarnessArgs = fileCfg.HarnessArgs
+	if strings.TrimSpace(fileCfg.Git.CommitName) != "" {
+		cfg.Git.CommitName = strings.TrimSpace(fileCfg.Git.CommitName)
+	}
+	if strings.TrimSpace(fileCfg.Git.CommitEmail) != "" {
+		cfg.Git.CommitEmail = strings.TrimSpace(fileCfg.Git.CommitEmail)
+	}
 
 	return normalizeCoordinator(cfg)
 }
@@ -527,6 +544,12 @@ func LoadWorker(path string) (WorkerConfig, error) {
 	if fileCfg.Git.Principal != "" {
 		cfg.Git.Principal = fileCfg.Git.Principal
 	}
+	if strings.TrimSpace(fileCfg.Git.CommitName) != "" {
+		cfg.Git.CommitName = strings.TrimSpace(fileCfg.Git.CommitName)
+	}
+	if strings.TrimSpace(fileCfg.Git.CommitEmail) != "" {
+		cfg.Git.CommitEmail = strings.TrimSpace(fileCfg.Git.CommitEmail)
+	}
 	if fileCfg.Terminal.BindAddress != "" {
 		cfg.Terminal.BindAddress = fileCfg.Terminal.BindAddress
 	}
@@ -594,8 +617,58 @@ func ApplyWorkerEnvOverrides(cfg WorkerConfig, getenv func(string) string) (Work
 	if value := strings.TrimSpace(getenv("FLOW_WORKER_GIT_PRINCIPAL")); value != "" {
 		cfg.Git.Principal = value
 	}
+	if value := strings.TrimSpace(getenv("FLOW_WORKER_GIT_COMMIT_NAME")); value != "" {
+		cfg.Git.CommitName = value
+	}
+	if value := strings.TrimSpace(getenv("FLOW_WORKER_GIT_COMMIT_EMAIL")); value != "" {
+		cfg.Git.CommitEmail = value
+	}
 
 	return normalizeWorker(cfg)
+}
+
+// ApplyCoordinatorEnvOverrides applies deployment-specific coordinator
+// overrides after a file config has been loaded. It mirrors
+// ApplyWorkerEnvOverrides: a typed layer rather than generic env-to-YAML
+// templating so invalid values fail at startup.
+func ApplyCoordinatorEnvOverrides(cfg CoordinatorConfig, getenv func(string) string) (CoordinatorConfig, error) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if value := strings.TrimSpace(getenv("FLOW_GIT_COMMIT_NAME")); value != "" {
+		cfg.Git.CommitName = value
+	}
+	if value := strings.TrimSpace(getenv("FLOW_GIT_COMMIT_EMAIL")); value != "" {
+		cfg.Git.CommitEmail = value
+	}
+
+	return normalizeCoordinator(cfg)
+}
+
+// validateCommitIdentity enforces that a git commit identity is either fully
+// set or fully empty: git refuses to commit with a name but no email (or vice
+// versa), so a half-set identity is a startup error.
+func validateCommitIdentity(name string, email string, scope string) error {
+	hasName := strings.TrimSpace(name) != ""
+	hasEmail := strings.TrimSpace(email) != ""
+	if hasName != hasEmail {
+		return fmt.Errorf("%s git.commit_name and git.commit_email must both be set or both be empty", scope)
+	}
+	return nil
+}
+
+// ValidateCoordinatorCommitIdentity validates the coordinator's git commit
+// identity (both fields set or both empty). Callers that mutate the identity
+// after loading (e.g. CLI flags) re-run this before serving.
+func ValidateCoordinatorCommitIdentity(git CoordinatorGitConfig) error {
+	return validateCommitIdentity(git.CommitName, git.CommitEmail, "coordinator")
+}
+
+// ValidateWorkerCommitIdentity validates the worker's git commit identity
+// (both fields set or both empty). Callers that mutate the identity after
+// loading (e.g. CLI flags) re-run this before serving.
+func ValidateWorkerCommitIdentity(git WorkerGitConfig) error {
+	return validateCommitIdentity(git.CommitName, git.CommitEmail, "worker")
 }
 
 func normalizeCoordinator(cfg CoordinatorConfig) (CoordinatorConfig, error) {
@@ -620,6 +693,9 @@ func normalizeCoordinator(cfg CoordinatorConfig) (CoordinatorConfig, error) {
 	harnessArgs, err := flowharness.NormalizeArgs(cfg.HarnessArgs)
 	if err != nil {
 		return CoordinatorConfig{}, fmt.Errorf("coordinator harness_args: %w", err)
+	}
+	if err := validateCommitIdentity(cfg.Git.CommitName, cfg.Git.CommitEmail, "coordinator"); err != nil {
+		return CoordinatorConfig{}, err
 	}
 
 	cfg.DataDir = cleanRequiredPath(cfg.DataDir)
@@ -651,6 +727,9 @@ func normalizeWorker(cfg WorkerConfig) (WorkerConfig, error) {
 	}
 	if cfg.Capacity.PersistentAgent < 0 || cfg.Capacity.Ephemeral < 0 {
 		return WorkerConfig{}, errors.New("worker capacity cannot be negative")
+	}
+	if err := validateCommitIdentity(cfg.Git.CommitName, cfg.Git.CommitEmail, "worker"); err != nil {
+		return WorkerConfig{}, err
 	}
 
 	cfg.WorkDir = cleanRequiredPath(cfg.WorkDir)

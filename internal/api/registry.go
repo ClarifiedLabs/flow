@@ -66,6 +66,11 @@ type RegistryOptions struct {
 	// ReviewAuthorCycleLimit bounds automated review/acceptance -> author fix
 	// loops before a human must grant more cycles.
 	ReviewAuthorCycleLimit int
+
+	// CommitIdentity sets the git author/committer identity the coordinator
+	// uses for the commits it creates (the squash-merge commit). The zero value
+	// uses the git package's default identity.
+	CommitIdentity flowgit.CommitIdentity
 }
 
 // Registry owns the coordinator's global services and the set of open
@@ -85,6 +90,7 @@ type Registry struct {
 	harnessArgs                flowharness.Args
 	deadlines                  lifecycle.DeadlineConfig
 	reviewAuthorCycleLimit     int
+	commitIdentity             flowgit.CommitIdentity
 
 	mu       sync.RWMutex
 	bundles  map[string]*ProjectBundle
@@ -130,6 +136,7 @@ func NewRegistry(opts RegistryOptions) (*Registry, error) {
 		harnessArgs:                harnessArgs,
 		deadlines:                  opts.Deadlines,
 		reviewAuthorCycleLimit:     opts.ReviewAuthorCycleLimit,
+		commitIdentity:             opts.CommitIdentity,
 		bundles:                    map[string]*ProjectBundle{},
 	}
 	if err := registry.globalAgentDefs.SeedDefaults(context.Background()); err != nil {
@@ -291,6 +298,7 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 		ReviewRounds:                    checkConfigs,
 	})
 	merges := coordinator.NewMergeService(db, tasks, sessions, project)
+	merges.CommitIdentity = r.commitIdentity
 	workflowRuns := coordinator.NewWorkflowRunService(db, flows, tasks)
 	workflowArtifacts := coordinator.NewWorkflowArtifactService(db, tasks)
 	workflowExecutor := coordinator.NewWorkflowExecutor(coordinator.WorkflowExecutorOptions{

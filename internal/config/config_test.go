@@ -272,6 +272,8 @@ tmux:
   socket_path: /tmp/flow-test-tmux.sock
 git:
   principal: worker:w-local
+  commit_name: Flow Bot
+  commit_email: flow-bot@example.com
 `), 0o600); err != nil {
 		t.Fatalf("write worker config: %v", err)
 	}
@@ -306,6 +308,9 @@ git:
 	}
 	if cfg.Git.Principal != "worker:w-local" {
 		t.Fatalf("Git.Principal = %q", cfg.Git.Principal)
+	}
+	if cfg.Git.CommitName != "Flow Bot" || cfg.Git.CommitEmail != "flow-bot@example.com" {
+		t.Fatalf("Git commit identity = %+v", cfg.Git)
 	}
 	if strings.Contains(cfg.WorkDir, "~") {
 		t.Fatalf("WorkDir was not expanded: %q", cfg.WorkDir)
@@ -361,6 +366,8 @@ func TestApplyWorkerEnvOverrides(t *testing.T) {
 			"FLOW_WORKER_TERMINAL_TTYD_PATH":        "/tmp/ttyd",
 			"FLOW_WORKER_TMUX_SOCKET_PATH":          "/tmp/tmux.sock",
 			"FLOW_WORKER_GIT_PRINCIPAL":             "worker:w-env",
+			"FLOW_WORKER_GIT_COMMIT_NAME":           "Flow Bot",
+			"FLOW_WORKER_GIT_COMMIT_EMAIL":          "flow-bot@example.com",
 			"FLOW_WORKER_PROTOCOL_VERSION":          "2",
 		}
 		return values[key]
@@ -388,6 +395,9 @@ func TestApplyWorkerEnvOverrides(t *testing.T) {
 	if cfg.Git.Principal != "worker:w-env" {
 		t.Fatalf("Git = %+v", cfg.Git)
 	}
+	if cfg.Git.CommitName != "Flow Bot" || cfg.Git.CommitEmail != "flow-bot@example.com" {
+		t.Fatalf("Git commit identity = %+v", cfg.Git)
+	}
 	if cfg.ProtocolVersion != "2" {
 		t.Fatalf("ProtocolVersion = %q, want 2", cfg.ProtocolVersion)
 	}
@@ -407,6 +417,78 @@ func TestApplyWorkerEnvOverridesRejectsInvalidCapacity(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("ApplyWorkerEnvOverrides accepted invalid capacity")
+	}
+}
+
+func TestLoadCoordinatorGitCommitIdentity(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "coordinator.yaml")
+	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
+listen_addr: 127.0.0.1:8421
+git:
+  commit_name: Flow Bot
+  commit_email: flow-bot@example.com
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadCoordinator(configPath)
+	if err != nil {
+		t.Fatalf("load coordinator: %v", err)
+	}
+	if cfg.Git.CommitName != "Flow Bot" || cfg.Git.CommitEmail != "flow-bot@example.com" {
+		t.Fatalf("Git commit identity = %+v", cfg.Git)
+	}
+}
+
+func TestApplyCoordinatorEnvOverrides(t *testing.T) {
+	cfg, err := LoadCoordinator("")
+	if err != nil {
+		t.Fatalf("load default coordinator: %v", err)
+	}
+
+	cfg, err = ApplyCoordinatorEnvOverrides(cfg, func(key string) string {
+		values := map[string]string{
+			"FLOW_GIT_COMMIT_NAME":  "Flow Bot",
+			"FLOW_GIT_COMMIT_EMAIL": "flow-bot@example.com",
+		}
+		return values[key]
+	})
+	if err != nil {
+		t.Fatalf("apply coordinator env overrides: %v", err)
+	}
+	if cfg.Git.CommitName != "Flow Bot" || cfg.Git.CommitEmail != "flow-bot@example.com" {
+		t.Fatalf("Git commit identity = %+v", cfg.Git)
+	}
+}
+
+func TestCoordinatorRejectsHalfSetCommitIdentity(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "coordinator.yaml")
+	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
+listen_addr: 127.0.0.1:8421
+git:
+  commit_name: Flow Bot
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if _, err := LoadCoordinator(configPath); err == nil {
+		t.Fatal("LoadCoordinator accepted a name without an email")
+	}
+}
+
+func TestWorkerRejectsHalfSetCommitIdentity(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "worker.yaml")
+	if err := os.WriteFile(configPath, []byte(`worker_id: w-local
+coordinator_url: http://127.0.0.1:8421
+work_dir: /tmp/worker
+git:
+  commit_email: flow-bot@example.com
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if _, err := LoadWorker(configPath); err == nil {
+		t.Fatal("LoadWorker accepted an email without a name")
 	}
 }
 

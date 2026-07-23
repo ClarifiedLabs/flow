@@ -9,3 +9,7 @@ capacity:
   ephemeral: 5
 git:
   principal: worker:w-local
+  # Git identity the harness/agent commits under in the job worktree. When
+  # omitted, the agent inherits the worker environment's git identity.
+  # commit_name: Flow Bot
+  # commit_email: flow-bot@example.com
