@@ -34,16 +34,16 @@ export async function renderNewTaskView(app, context) {
 }
 
 // defaultCreateProject picks the project whose flows the create form should
-// offer first: an explicit id, then the single active project, then the sole
-// registered project.
+// offer first: an explicit id, then the first active project, then the first
+// registered project. Choosing a concrete project keeps the initial project
+// and flow selects in sync when several projects are available.
 export function defaultCreateProject(app, projectID) {
   const explicit = String(projectID || "").trim();
   if (explicit) return explicit;
   const projects = app.projects || [];
   const selected = app.selectedProjectIDs();
-  if (selected.length === 1) return selected[0];
-  if (projects.length === 1) return value(projects[0], "id", "ID");
-  return "";
+  if (selected.length) return selected[0];
+  return projects.length ? value(projects[0], "id", "ID") : "";
 }
 
 // flowSelectOptionsView renders the <option>s for the flow selector from the

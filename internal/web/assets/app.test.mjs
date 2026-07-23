@@ -627,7 +627,7 @@ test("new task action navigates to blank task form without posting", async () =>
   assert.equal(harness.status.textContent, "");
 });
 
-test("new task route renders project-scoped blank form without fetching an task", async () => {
+test("new task route renders project-scoped blank form with the selected project's flows", async () => {
   const fetchCalls = [];
   const title = { textContent: "" };
   const status = { textContent: "" };
@@ -648,7 +648,19 @@ test("new task route renders project-scoped blank form without fetching an task"
           }),
         });
       }
-      throw new Error("new task route should not fetch before submission");
+      if (path === "/ui/api/v2/projects/p-alpha/flows") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            flows: [
+              { id: "fl-coding", name: "coding" },
+              { id: "fl-planning", name: "planning" },
+            ],
+            default_flow_id: "fl-coding",
+          }),
+        });
+      }
+      throw new Error(`new task route unexpectedly fetched ${path}`);
     },
   });
   const app = new context.FlowApp();
@@ -664,21 +676,23 @@ test("new task route renders project-scoped blank form without fetching an task"
 
   await app.load();
 
-  // With several projects there is no default project, so the form does not
-  // preload any project's flows: only the project registry is fetched.
-  assert.equal(fetchCalls.length, 1);
-  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects");
+  assert.deepEqual(fetchCalls.map((call) => call.path), [
+    "/ui/api/v2/projects",
+    "/ui/api/v2/projects/p-alpha/flows",
+  ]);
   assert.equal(title.textContent, "New Task");
   assert.match(content.innerHTML, /data-task-form-mode="create"/);
   assert.match(content.innerHTML, /<span>Project<\/span>/);
-  assert.match(content.innerHTML, /<option value="p-alpha"/);
-  assert.match(content.innerHTML, /<option value="p-beta"/);
+  assert.match(content.innerHTML, /<option value="p-alpha" selected>alpha<\/option>/);
+  assert.match(content.innerHTML, /<option value="p-beta" >beta<\/option>/);
   assert.match(content.innerHTML, /<input name="title" value="" required>/);
   assert.match(content.innerHTML, /<textarea name="body" rows="8"><\/textarea>/);
   assert.equal(content.innerHTML.match(/<textarea\b/g)?.length, 1);
   assert.match(content.innerHTML, /<span>Flow<\/span>/);
   assert.match(content.innerHTML, /<select name="flow_id" data-flow-select>/);
-  assert.match(content.innerHTML, /<option value="" selected>Project default<\/option>/);
+  assert.match(content.innerHTML, /<option value="fl-coding" selected>coding \(default\)<\/option>/);
+  assert.match(content.innerHTML, /<option value="fl-planning" >planning<\/option>/);
+  assert.doesNotMatch(content.innerHTML, /Project default/);
   assert.match(content.innerHTML, /<input name="queue_task" type="checkbox" checked>/);
   assert.match(content.innerHTML, /<button class="button" type="submit">Create<\/button>/);
   assert.equal(status.textContent, "");
