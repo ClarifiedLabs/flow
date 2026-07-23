@@ -184,12 +184,14 @@ summaries from the frozen run.
 
 ## Flows, agent definitions, and checks
 
-Each project stores flow configuration in SQLite:
+Flow configuration is stored in SQLite:
 
 - **Agent definitions** combine the **model agent** selection (harness, optional
   model, and optional reasoning effort) with the **focus agent** identity and
-  prompt instructions. They are managed with
-  `flow agent-defs list|create|edit|rm`.
+  prompt instructions. The global database stores definitions inherited by all
+  projects; each project database may shadow a global definition with a
+  same-name local row. They are managed with
+  `flow agent-defs list|create|edit|rm` and the `--global` flag.
 - **Flows** define directed trusted-node graphs, strict per-kind configuration,
   outcome transitions, a start node, and a transition budget. They are managed
   with `flow flows list|create|edit|rm|set-default`.
@@ -209,7 +211,11 @@ configurations should not specify both fields.
 Fresh projects seed task-planner, author, reviewer, and verifier definitions
 plus two flows: the default coding graph (implementation, checks, review, human
 gate, verification, and merge loops) and the planning graph (task-set authoring,
-human review, transactional materialization, and completion).
+human review, transactional materialization, and completion). Global definitions
+appear dynamically in every project's effective catalog. When a matching global
+role exists before project creation, the seeded flows reference it instead of
+creating a local copy. Flows may store a global definition ID; snapshot
+resolution applies a same-name project override before freezing the run.
 
 Repo-versioned automated check configuration lives in `.flow/checks/*.yaml`.
 Checks belong with the code; agent definitions and flows are coordinator-owned so

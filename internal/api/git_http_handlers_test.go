@@ -20,6 +20,11 @@ func TestGitHTTPExchangeAuthAndHooks(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skipf("git is not installed")
 	}
+	// Workers authenticate their repository clone through process-wide Git
+	// config. Test Git commands must not send that credential to this server.
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "http.extraHeader")
+	t.Setenv("GIT_CONFIG_VALUE_0", "Authorization: Bearer inherited-worker-token")
 
 	ctx := context.Background()
 	dataDir := t.TempDir()

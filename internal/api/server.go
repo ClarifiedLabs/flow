@@ -199,6 +199,11 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
+	if r.URL.Path == "/v2/global/agent-defs" || strings.HasPrefix(r.URL.Path, "/v2/global/agent-defs/") {
+		s.handleGlobalAgentDefsPath(w, r, principal)
+		return
+	}
+
 	if r.URL.Path == "/v2/harnesses" {
 		s.handleHarnesses(w, r, principal)
 		return

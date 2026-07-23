@@ -8,8 +8,9 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 )
 
-// Flow configuration endpoints: agent definitions and flows are project-owned
-// rows edited live from the web UI / CLI (harness+model availability is a
+// Flow configuration endpoints: flows are project-owned, while agent
+// definitions may be coordinator-global or project-owned overrides. They are
+// edited live from the web UI / CLI (harness+model availability is a
 // server/worker concern, so this configuration deliberately does NOT live in
 // the repository the way .flow/checks/*.yaml CI checks do).
 
@@ -34,17 +35,34 @@ func (s *projectServer) handleAgentDefsPath(w http.ResponseWriter, r *http.Reque
 	if !requireScope(w, principal, "agent definitions require an owner or console token", coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
 		return
 	}
-	if s.agentDefs == nil {
+	s.handleAgentDefs(w, r, s.agentDefs, "/v2/agent-defs", nil)
+}
+
+func (s *Server) handleGlobalAgentDefsPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
+	if !requireScope(w, principal, "global agent definitions require an owner token", coordinator.TokenScopeOwner) {
+		return
+	}
+	var service *coordinator.AgentDefService
+	var deleteDef func(string) error
+	if s.registry != nil {
+		service = s.registry.GlobalAgentDefs()
+		deleteDef = func(id string) error { return s.registry.DeleteGlobalAgentDef(r.Context(), id) }
+	}
+	s.handleAgentDefs(w, r, service, "/v2/global/agent-defs", deleteDef)
+}
+
+func (s *Server) handleAgentDefs(w http.ResponseWriter, r *http.Request, service *coordinator.AgentDefService, pathPrefix string, deleteDef func(string) error) {
+	if service == nil {
 		writeError(w, http.StatusServiceUnavailable, "agent_defs_unavailable", "agent definition service is not configured")
 		return
 	}
 
-	rest := strings.TrimPrefix(r.URL.Path, "/v2/agent-defs")
+	rest := strings.TrimPrefix(r.URL.Path, pathPrefix)
 	rest = strings.Trim(rest, "/")
 	if rest == "" {
 		switch r.Method {
 		case http.MethodGet:
-			defs, err := s.agentDefs.List(r.Context())
+			defs, err := service.List(r.Context())
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "list_agent_defs_failed", err.Error())
 				return
@@ -56,7 +74,7 @@ func (s *projectServer) handleAgentDefsPath(w http.ResponseWriter, r *http.Reque
 				writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 				return
 			}
-			def, err := s.agentDefs.Create(r.Context(), input)
+			def, err := service.Create(r.Context(), input)
 			if err != nil {
 				writeAgentDefError(w, err, "create_agent_def_failed")
 				return
@@ -71,7 +89,7 @@ func (s *projectServer) handleAgentDefsPath(w http.ResponseWriter, r *http.Reque
 	id := rest
 	switch r.Method {
 	case http.MethodGet:
-		def, err := s.agentDefs.Get(r.Context(), id)
+		def, err := service.Get(r.Context(), id)
 		if err != nil {
 			writeAgentDefError(w, err, "get_agent_def_failed")
 			return
@@ -83,14 +101,17 @@ func (s *projectServer) handleAgentDefsPath(w http.ResponseWriter, r *http.Reque
 			writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 			return
 		}
-		def, err := s.agentDefs.Update(r.Context(), id, input)
+		def, err := service.Update(r.Context(), id, input)
 		if err != nil {
 			writeAgentDefError(w, err, "update_agent_def_failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, agentDefResponse{AgentDef: def})
 	case http.MethodDelete:
-		if err := s.agentDefs.Delete(r.Context(), id); err != nil {
+		if deleteDef == nil {
+			deleteDef = func(id string) error { return service.Delete(r.Context(), id) }
+		}
+		if err := deleteDef(id); err != nil {
 			writeAgentDefError(w, err, "delete_agent_def_failed")
 			return
 		}

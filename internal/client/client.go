@@ -130,7 +130,8 @@ func (c *Client) GetTask(id string) (coordinator.Task, error) {
 	return response.Task, nil
 }
 
-// ListAgentDefs returns the project's agent definition catalog.
+// ListAgentDefs returns the project's effective agent definition catalog,
+// including inherited global definitions not overridden by name.
 func (c *Client) ListAgentDefs() ([]coordinator.AgentDef, error) {
 	var response struct {
 		AgentDefs []coordinator.AgentDef `json:"agent_defs"`
@@ -163,6 +164,40 @@ func (c *Client) UpdateAgentDef(id string, input coordinator.AgentDefInput) (coo
 
 func (c *Client) DeleteAgentDef(id string) error {
 	return c.do(http.MethodDelete, c.projectPath("/agent-defs/"+url.PathEscape(id)), nil, nil, nil)
+}
+
+func (c *Client) ListGlobalAgentDefs() ([]coordinator.AgentDef, error) {
+	var response struct {
+		AgentDefs []coordinator.AgentDef `json:"agent_defs"`
+	}
+	if err := c.do(http.MethodGet, "/v2/global/agent-defs", nil, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.AgentDefs, nil
+}
+
+func (c *Client) CreateGlobalAgentDef(input coordinator.AgentDefInput) (coordinator.AgentDef, error) {
+	var response struct {
+		AgentDef coordinator.AgentDef `json:"agent_def"`
+	}
+	if err := c.do(http.MethodPost, "/v2/global/agent-defs", input, nil, &response); err != nil {
+		return coordinator.AgentDef{}, err
+	}
+	return response.AgentDef, nil
+}
+
+func (c *Client) UpdateGlobalAgentDef(id string, input coordinator.AgentDefInput) (coordinator.AgentDef, error) {
+	var response struct {
+		AgentDef coordinator.AgentDef `json:"agent_def"`
+	}
+	if err := c.do(http.MethodPatch, "/v2/global/agent-defs/"+url.PathEscape(id), input, nil, &response); err != nil {
+		return coordinator.AgentDef{}, err
+	}
+	return response.AgentDef, nil
+}
+
+func (c *Client) DeleteGlobalAgentDef(id string) error {
+	return c.do(http.MethodDelete, "/v2/global/agent-defs/"+url.PathEscape(id), nil, nil, nil)
 }
 
 // FlowsList is the flows collection response: the catalog plus the project

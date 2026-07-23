@@ -115,8 +115,12 @@ Flow configuration:
 ```sh
 flow agent-defs list
 flow agent-defs create -f agent.yaml
-flow agent-defs edit AGENT_DEF_ID -f agent.yaml
+flow agent-defs edit -f agent.yaml AGENT_DEF_ID
 flow agent-defs rm AGENT_DEF_ID
+flow agent-defs list --global
+flow agent-defs create --global -f agent.yaml
+flow agent-defs edit --global -f agent.yaml AGENT_DEF_ID
+flow agent-defs rm --global AGENT_DEF_ID
 flow flows list
 flow flows create -f flow.yaml
 flow flows edit FLOW_ID -f flow.yaml
@@ -127,17 +131,25 @@ flow flows set-default FLOW_ID
 `flow board` aggregates the lanes of every registered project. Use `--project`
 to scope a command to one project when you are not inside its worktree.
 
-`flow agent-defs` and `flow flows` manage the same project-owned configuration
-shown in the web UI's **Flows** page. The `-f` files can be YAML or JSON; use
-`-f -` to read from stdin. `flow flows list` prints each graph's start key and
-node count, followed by its blocking/advisory reviewer and verifier counts.
+`flow agent-defs` and `flow flows` manage the same configuration shown in the
+web UI's **Flows** page. Agent definitions are project-scoped by default; pass
+`--global` to manage the coordinator-wide catalog inherited by every project.
+The `-f` files can be YAML or JSON; use `-f -` to read from stdin. `flow flows
+list` prints each graph's start key and node count, followed by its
+blocking/advisory reviewer and verifier counts.
 
 An agent definition combines two concerns: the **model agent** selection
 (`harness`, optional `model`, and optional `reasoning_effort`) and the **focus
 agent** instructions (`name` and `prompt`) applied to that model. The
 `flow agent-defs list|create|edit|rm` commands manage these reusable
-model/focus definitions; graph nodes reference their IDs. For example, create
-two definitions with distinct models and review focuses:
+model/focus definitions; graph nodes reference their IDs. A project's effective
+catalog merges its local rows with the global catalog by name. A local row wins
+when names match. Editing an inherited row through the project command creates
+that same-name local override; editing with `--global` changes the definition
+for every project that has not overridden it. Global definitions referenced by
+any project flow cannot be deleted.
+
+For example, create two definitions with distinct models and review focuses:
 
 ```yaml
 # security-review.yaml
@@ -179,8 +191,10 @@ config:
         blocking: false
 ```
 
-Scheduling freezes both model selections and focus prompts, so editing a live
-definition affects only later workflow runs.
+A flow may reference an inherited global ID. At scheduling time Flow resolves a
+same-name project override, if present, then freezes the selected model and
+focus prompt. Editing a live global or project definition therefore affects
+only later workflow runs.
 
 Agent/session workflow, usually run inside a Flow-managed tmux session:
 

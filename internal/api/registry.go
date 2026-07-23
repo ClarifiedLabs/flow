@@ -75,6 +75,7 @@ type Registry struct {
 	dataDir                    string
 	global                     *flowdb.Store
 	projects                   *coordinator.ProjectService
+	globalAgentDefs            *coordinator.AgentDefService
 	credentials                *coordinator.CredentialService
 	directory                  *worker.Directory
 	webSessions                *coordinator.WebSessionService
@@ -108,6 +109,7 @@ func NewRegistry(opts RegistryOptions) (*Registry, error) {
 		dataDir:                    opts.DataDir,
 		global:                     opts.Global,
 		projects:                   coordinator.NewProjectService(opts.Global.DB()),
+		globalAgentDefs:            coordinator.NewGlobalAgentDefService(opts.Global.DB()),
 		credentials:                coordinator.NewCredentialService(opts.Global.DB()),
 		directory:                  worker.NewDirectory(opts.Global.DB()),
 		webSessions:                coordinator.NewWebSessionService(opts.Global.DB()),
@@ -122,6 +124,7 @@ func NewRegistry(opts RegistryOptions) (*Registry, error) {
 }
 
 func (r *Registry) Projects() *coordinator.ProjectService              { return r.projects }
+func (r *Registry) GlobalAgentDefs() *coordinator.AgentDefService      { return r.globalAgentDefs }
 func (r *Registry) Credentials() *coordinator.CredentialService        { return r.credentials }
 func (r *Registry) Directory() *worker.Directory                       { return r.directory }
 func (r *Registry) WebSessions() *coordinator.WebSessionService        { return r.webSessions }
@@ -161,8 +164,8 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 
 	db := store.DB()
 	tasks := coordinator.NewTaskService(db, project.ID)
-	agentDefs := coordinator.NewAgentDefService(db)
-	flows := coordinator.NewFlowService(db)
+	agentDefs := coordinator.NewInheritedAgentDefService(db, r.globalAgentDefs)
+	flows := coordinator.NewFlowServiceWithAgentDefs(db, agentDefs)
 	if err := flows.SeedDefaults(ctx); err != nil {
 		return nil, fmt.Errorf("seed default flows for project %s: %w", project.ID, err)
 	}
@@ -330,6 +333,33 @@ func (r *Registry) Claim(ctx context.Context, input worker.ClaimInput) (worker.P
 	}
 
 	return worker.ClaimAcrossProjects(ctx, r.directory, queues, input)
+}
+
+// DeleteGlobalAgentDef removes a global definition only when no project flow
+// directly references its id. Project-local overrides do not erase that stored
+// reference, so deleting the global row would otherwise make the flow
+// impossible to resolve if its override were later removed.
+func (r *Registry) DeleteGlobalAgentDef(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if _, err := r.globalAgentDefs.Get(ctx, id); err != nil {
+		return err
+	}
+	// OpenAll is normally completed at server startup, but keeping this method
+	// self-contained prevents a registered, not-yet-open project from escaping
+	// the cross-project reference check in tests and embedded uses.
+	if err := r.OpenAll(ctx); err != nil {
+		return fmt.Errorf("open projects before inspecting agent references: %w", err)
+	}
+	for _, bundle := range r.All() {
+		inUse, err := bundle.AgentDefs.IsReferenced(ctx, id)
+		if err != nil {
+			return fmt.Errorf("inspect project %s agent references: %w", bundle.Project.ID, err)
+		}
+		if inUse {
+			return coordinator.ErrAgentDefInUse
+		}
+	}
+	return r.globalAgentDefs.Delete(ctx, id)
 }
 
 func (r *Registry) Close() error {
