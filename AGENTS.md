@@ -6,9 +6,8 @@
 
 ## Test Isolation
 
-- Use `make test` or `make ci` for full suites.
-- Run targeted tests through `scripts/test-env.sh`; for example, `scripts/test-env.sh go test ./internal/config -run TestLoadClient -count=1`.
-- Do not run raw test commands, because Flow worker environment variables and configuration files can otherwise leak into the test process.
+- Go tests are hermetic by construction: every test package's TestMain routes through `internal/testenv`, which clears the environment and substitutes temporary HOME/XDG/TMP directories before any test runs. Plain `go test ./...` and targeted runs like `go test ./internal/config -run TestLoadClient -count=1` are both safe.
+- New test packages must add a `testmain_test.go` containing `func TestMain(m *testing.M) { testenv.Main(m) }`; a root-level test enforces this.
 
 ## Pull Requests
 

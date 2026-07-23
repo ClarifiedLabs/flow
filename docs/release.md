@@ -78,7 +78,8 @@ make release VERSION=patch AUTOPUSH=1
 
 `patch`, `minor`, and `major` are computed from the latest `vX.Y.Z` git tag.
 `patch` starts at `v0.0.1` when no prior tag exists. The target requires a clean
-worktree, runs `go build ./...`, `go vet ./...`, and the hermetic `make test`, then
+worktree, runs `go build ./...`, `go vet ./...`, and `make test` (Go tests
+isolate their own environment via `internal/testenv`), then
 creates an annotated `vX.Y.Z` tag. `AUTOPUSH=1` pushes the tag to `origin`.
 
 ## Required Secrets And Variables

@@ -38,19 +38,21 @@ Run the Go test suite:
 make test
 ```
 
-All canonical test targets run with an empty inherited environment, temporary
-home and XDG directories, and external Go and Git configuration disabled. For
-a targeted test, use the same isolation wrapper directly:
+Go tests isolate themselves: every test package's TestMain routes through
+`internal/testenv`, which clears the inherited environment, substitutes
+temporary home and XDG directories, and disables external Go and Git
+configuration before any test runs. Plain `go test` is therefore safe for
+targeted runs:
 
 ```sh
-scripts/test-env.sh go test ./internal/config -run TestLoadClient -count=1
+go test ./internal/config -run TestLoadClient -count=1
 ```
 
-When a test intentionally needs an environment variable, inject it explicitly
-inside the isolated environment:
+Variables a test intentionally consumes (currently `FLOW_BROWSER_BIN`) are
+preserved through the isolation layer, so they can be passed the ordinary way:
 
 ```sh
-scripts/test-env.sh env FLOW_BROWSER_BIN=/path/to/chrome go test ./internal/api -run TestWebUIBrowserSmokeRoutesAndDeepLinks -count=1
+FLOW_BROWSER_BIN=/path/to/chrome go test ./internal/api -run TestWebUIBrowserSmokeRoutesAndDeepLinks -count=1
 ```
 
 Run the web UI's native-ESM Node tests:

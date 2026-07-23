@@ -2,6 +2,7 @@ package flow_test
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,11 +12,14 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/config"
 )
 
-const testEnvironmentHelper = "FLOW_TEST_ENV_HELPER"
+// hermeticHelper gates the child branch of TestTestEnvironmentIsHermetic. It
+// is on testenv's preserve list so it survives the child's own isolation.
+const hermeticHelper = "FLOW_TESTENV_HERMETIC_HELPER"
 
 func TestTestEnvironmentIsHermetic(t *testing.T) {
-	if os.Getenv(testEnvironmentHelper) == "1" {
+	if os.Getenv(hermeticHelper) == "1" {
 		assertHermeticTestEnvironment(t)
+		fmt.Printf("HERMETIC_HOME=%s\n", os.Getenv("HOME"))
 		return
 	}
 
@@ -37,15 +41,19 @@ func TestTestEnvironmentIsHermetic(t *testing.T) {
 		t.Fatalf("write outside Go config: %v", err)
 	}
 
-	cmd := exec.Command(
-		testEnvironmentWrapper(t),
-		"/usr/bin/env",
-		testEnvironmentHelper+"=1",
-		os.Args[0],
-		"-test.run=^TestTestEnvironmentIsHermetic$",
-		"-test.count=1",
-	)
-	cmd.Env = append(os.Environ(),
+	// Strip the isolation marker so the child re-isolates from scratch, as
+	// if the polluted environment below were its real inherited one.
+	baseline := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "FLOW_TESTENV_ISOLATED=") {
+			continue
+		}
+		baseline = append(baseline, entry)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestTestEnvironmentIsHermetic$", "-test.count=1")
+	cmd.Env = append(baseline,
+		hermeticHelper+"=1",
 		"HOME="+outsideHome,
 		"XDG_CONFIG_HOME="+outsideConfigHome,
 		"FLOW_DATA_DIR="+filepath.Join(outsideHome, "flow-data"),
@@ -59,12 +67,25 @@ func TestTestEnvironmentIsHermetic(t *testing.T) {
 		"GIT_CONFIG_GLOBAL="+outsideGitConfig,
 		"GIT_CONFIG_NOSYSTEM=0",
 		"OUTSIDE_ONLY=present",
-		"TMPDIR="+filepath.Join(outsideHome, "tmp"),
+		"TMPDIR="+filepath.Join(outsideHome, "does-not-exist"),
 		"TZ=America/Los_Angeles",
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("hermetic test helper failed: %v\n%s", err, output)
+	}
+
+	isolatedHome := ""
+	for line := range strings.SplitSeq(string(output), "\n") {
+		if value, ok := strings.CutPrefix(line, "HERMETIC_HOME="); ok {
+			isolatedHome = value
+		}
+	}
+	if isolatedHome == "" {
+		t.Fatalf("helper output missing HERMETIC_HOME:\n%s", output)
+	}
+	if _, err := os.Stat(isolatedHome); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("isolated HOME still exists after helper exit: %q: %v", isolatedHome, err)
 	}
 }
 
@@ -86,7 +107,7 @@ func assertHermeticTestEnvironment(t *testing.T) {
 	}
 
 	home := os.Getenv("HOME")
-	if !strings.HasPrefix(home, "/tmp/flow-test.") || filepath.Base(home) != "home" {
+	if !strings.HasPrefix(home, "/tmp/flow-test-") || filepath.Base(home) != "home" {
 		t.Fatalf("HOME = %q, want isolated Flow test home", home)
 	}
 	testRoot := filepath.Dir(home)
@@ -106,16 +127,17 @@ func assertHermeticTestEnvironment(t *testing.T) {
 	}
 
 	wantValues := map[string]string{
-		"GOENV":               "off",
-		"GOWORK":              "off",
-		"GIT_CONFIG_GLOBAL":   "/dev/null",
-		"GIT_CONFIG_NOSYSTEM": "1",
-		"GIT_ATTR_NOSYSTEM":   "1",
-		"GIT_TERMINAL_PROMPT": "0",
-		"LANG":                "C.UTF-8",
-		"LC_ALL":              "C.UTF-8",
-		"LC_CTYPE":            "C.UTF-8",
-		"TZ":                  "UTC",
+		"FLOW_TESTENV_ISOLATED": "1",
+		"GOENV":                 "off",
+		"GOWORK":                "off",
+		"GIT_CONFIG_GLOBAL":     "/dev/null",
+		"GIT_CONFIG_NOSYSTEM":   "1",
+		"GIT_ATTR_NOSYSTEM":     "1",
+		"GIT_TERMINAL_PROMPT":   "0",
+		"LANG":                  "C.UTF-8",
+		"LC_ALL":                "C.UTF-8",
+		"LC_CTYPE":              "C.UTF-8",
+		"TZ":                    "UTC",
 	}
 	for key, want := range wantValues {
 		if got := os.Getenv(key); got != want {
@@ -123,11 +145,16 @@ func assertHermeticTestEnvironment(t *testing.T) {
 		}
 	}
 
-	for _, key := range []string{"GOCACHE", "GOMODCACHE"} {
-		value := filepath.Clean(os.Getenv(key))
-		if !strings.Contains(value, filepath.Join("bin", ".test-cache")) {
-			t.Fatalf("%s = %q, want repository test cache", key, value)
-		}
+	umaskProbe := filepath.Join(t.TempDir(), "umask-probe")
+	if err := os.WriteFile(umaskProbe, []byte("probe"), 0o666); err != nil {
+		t.Fatalf("write umask probe: %v", err)
+	}
+	info, err := os.Stat(umaskProbe)
+	if err != nil {
+		t.Fatalf("stat umask probe: %v", err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Fatalf("umask probe mode = %v, want 0644", info.Mode().Perm())
 	}
 
 	cfg, err := config.LoadClient("")
@@ -146,75 +173,4 @@ func assertHermeticTestEnvironment(t *testing.T) {
 	if strings.TrimSpace(string(output)) != "" {
 		t.Fatalf("global Git config leaked into test environment: %s", output)
 	}
-}
-
-func TestTestEnvironmentSupportsExplicitVariables(t *testing.T) {
-	cmd := exec.Command(
-		testEnvironmentWrapper(t),
-		"/usr/bin/env",
-		"FLOW_BROWSER_BIN=/explicit/browser",
-		"/bin/sh",
-		"-c",
-		`test "$FLOW_BROWSER_BIN" = /explicit/browser && test "$(umask)" = 0022`,
-	)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("explicit test variable failed: %v\n%s", err, output)
-	}
-}
-
-func TestTestEnvironmentPreservesExitStatusAndCleansUp(t *testing.T) {
-	wrapper := testEnvironmentWrapper(t)
-	failing := exec.Command(wrapper, "/bin/sh", "-c", "exit 23")
-	err := failing.Run()
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 23 {
-		t.Fatalf("wrapper exit error = %v, want exit status 23", err)
-	}
-
-	printHome := exec.Command(wrapper, "/bin/sh", "-c", `printf '%s' "$HOME"`)
-	output, err := printHome.Output()
-	if err != nil {
-		t.Fatalf("print isolated HOME: %v", err)
-	}
-	isolatedHome := string(output)
-	if _, err := os.Stat(isolatedHome); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("isolated HOME still exists after wrapper exit: %q: %v", isolatedHome, err)
-	}
-}
-
-func TestCanonicalTestEntrypointsUseHermeticEnvironment(t *testing.T) {
-	makefile, err := os.ReadFile("Makefile")
-	if err != nil {
-		t.Fatalf("read Makefile: %v", err)
-	}
-	makeText := string(makefile)
-	for _, want := range []string{
-		"TEST_ENV := ./scripts/test-env.sh",
-		"test:\n\t$(TEST_ENV) go test -p $(GO_TEST_P) ./...",
-		"js-test:\n\t$(TEST_ENV) node --test internal/web/assets/app.test.mjs",
-		"lifecycle-test:\n\t$(TEST_ENV) go test ./tests/lifecycle -count=1",
-		"\t$(MAKE) test",
-		"web-smoke:\n\t$(TEST_ENV) /usr/bin/env FLOW_BROWSER_BIN=",
-	} {
-		if !strings.Contains(makeText, want) {
-			t.Fatalf("Makefile does not route canonical test command through hermetic environment: missing %q", want)
-		}
-	}
-
-	workflow, err := os.ReadFile(filepath.Join(".github", "workflows", "release.yml"))
-	if err != nil {
-		t.Fatalf("read release workflow: %v", err)
-	}
-	if !strings.Contains(string(workflow), "run: make test") {
-		t.Fatal("release workflow does not use the hermetic Make test target")
-	}
-}
-
-func testEnvironmentWrapper(t *testing.T) string {
-	t.Helper()
-	path, err := filepath.Abs(filepath.Join("scripts", "test-env.sh"))
-	if err != nil {
-		t.Fatalf("resolve test environment wrapper: %v", err)
-	}
-	return path
 }

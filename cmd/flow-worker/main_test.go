@@ -24,11 +24,13 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
+	"github.com/ClarifiedLabs/flow/internal/testenv"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 	workerexec "github.com/ClarifiedLabs/flow/internal/worker/execution"
 )
 
 func TestMain(m *testing.M) {
+	cleanup := testenv.Isolate()
 	denyDir, err := os.MkdirTemp("", "flow-worker-deny-agents-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create deny agent dir: %v\n", err)
@@ -40,6 +42,7 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("PATH", denyDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	_ = os.Setenv("HARNESS_MODEL_PROXY_URL", "http://127.0.0.1:1")
 	code := m.Run()
+	cleanup()
 	os.Exit(code)
 }
 

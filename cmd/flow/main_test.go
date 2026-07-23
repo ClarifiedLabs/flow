@@ -19,38 +19,6 @@ import (
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
-var flowRuntimeEnvKeys = []string{
-	"FLOW_WORKER_ROLE",
-	"FLOW_ROLE",
-	"FLOW_TASK_ID",
-	"FLOW_CHANGE_ID",
-	"FLOW_BRANCH",
-	"FLOW_BASE",
-	"FLOW_CHECK_NAME",
-	"FLOW_WORKER_HARNESS",
-	"FLOW_SESSION_PURPOSE",
-	"FLOW_COORDINATOR_URL",
-	"FLOW_SESSION_TOKEN",
-	"FLOW_WORKER_TOKEN",
-	"FLOW_OWNER_TOKEN",
-	"FLOW_PROJECT_ID",
-	"FLOW_PROJECT_NAME",
-	"FLOW_SESSION_ID",
-	"FLOW_REVIEW_CYCLE_INSTRUCTIONS",
-	"FLOW_ROLE_INSTRUCTIONS",
-	"FLOW_CONSOLE_SCOPE",
-	"FLOW_PROTOCOL_VERSION",
-	"FLOW_DATA_DIR",
-	"FLOW_TRANSCRIPT_FILE",
-}
-
-func TestMain(m *testing.M) {
-	for _, key := range flowRuntimeEnvKeys {
-		_ = os.Unsetenv(key)
-	}
-	os.Exit(m.Run())
-}
-
 func withStdin(t *testing.T, content string, fn func()) {
 	t.Helper()
 	file, err := os.CreateTemp(t.TempDir(), "stdin-*")
@@ -142,13 +110,6 @@ func TestFlowsListSummarizesGraphReviewAgents(t *testing.T) {
 	}
 }
 
-func clearFetchPromptEnvironment(t *testing.T) {
-	t.Helper()
-	for _, key := range flowRuntimeEnvKeys {
-		t.Setenv(key, "")
-	}
-}
-
 func TestDoctorInitializesDatabase(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	dbPath := filepath.Join(t.TempDir(), "global.db")
@@ -186,7 +147,6 @@ func TestDoctorInitializesDatabase(t *testing.T) {
 }
 
 func TestFetchPromptUsesWorkerRoleEnvironment(t *testing.T) {
-	clearFetchPromptEnvironment(t)
 	t.Setenv("FLOW_WORKER_ROLE", "reviewer")
 	t.Setenv("FLOW_TASK_ID", "t-demo-0001")
 	t.Setenv("FLOW_CHANGE_ID", "ch-1")
@@ -215,7 +175,6 @@ func TestFetchPromptUsesWorkerRoleEnvironment(t *testing.T) {
 }
 
 func TestFetchPromptIncludesTaskDetailsFromAPI(t *testing.T) {
-	clearFetchPromptEnvironment(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	serverURL := newFlowAPIServer(t)
 	client, err := flowclient.New(config.ClientConfig{ServerURL: serverURL, Token: "owner-token"})
@@ -258,7 +217,6 @@ func TestFetchPromptIncludesTaskDetailsFromAPI(t *testing.T) {
 }
 
 func TestFetchPromptContinuesWhenTaskContextFetchFails(t *testing.T) {
-	clearFetchPromptEnvironment(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	serverURL := newFlowAPIServer(t)
 
@@ -339,7 +297,6 @@ func TestInitDoesNotSeedRepositorySkills(t *testing.T) {
 }
 
 func TestFetchPromptUsesEmbeddedAuthorInstructions(t *testing.T) {
-	clearFetchPromptEnvironment(t)
 	t.Setenv("FLOW_WORKER_ROLE", "author")
 	t.Setenv("FLOW_TASK_ID", "t-demo-0002")
 	t.Setenv("FLOW_WORKER_HARNESS", "")
@@ -366,7 +323,6 @@ func TestFetchPromptUsesEmbeddedAuthorInstructions(t *testing.T) {
 }
 
 func TestFetchPromptUsesEmbeddedVerifierInstructions(t *testing.T) {
-	clearFetchPromptEnvironment(t)
 	t.Setenv("FLOW_WORKER_ROLE", "verifier")
 	t.Setenv("FLOW_WORKER_HARNESS", "claude")
 
@@ -388,7 +344,6 @@ func TestFetchPromptUsesEmbeddedVerifierInstructions(t *testing.T) {
 }
 
 func TestFetchPromptAcceptsHarnessConvention(t *testing.T) {
-	clearFetchPromptEnvironment(t)
 	t.Setenv("FLOW_WORKER_ROLE", "author")
 	t.Setenv("FLOW_WORKER_HARNESS", "harness")
 
@@ -404,7 +359,6 @@ func TestFetchPromptAcceptsHarnessConvention(t *testing.T) {
 }
 
 func TestFetchPromptHarnessFlagOverridesEnvironment(t *testing.T) {
-	clearFetchPromptEnvironment(t)
 	t.Setenv("FLOW_WORKER_ROLE", "reviewer")
 	t.Setenv("FLOW_WORKER_HARNESS", "invalid-harness")
 
@@ -421,7 +375,6 @@ func TestFetchPromptHarnessFlagOverridesEnvironment(t *testing.T) {
 
 func TestFetchPromptRejectsUnsupportedRole(t *testing.T) {
 	for _, role := range []string{"ci", "console"} {
-		clearFetchPromptEnvironment(t)
 		var stdout bytes.Buffer
 		var stderr bytes.Buffer
 		exitCode := run([]string{"fetch-prompt", "--role", role}, &stdout, &stderr)
@@ -708,17 +661,49 @@ func TestTaskAttachUsesInferredRoleAndLease(t *testing.T) {
 	}
 }
 
-func TestTaskCreateDiscoveryIgnoresAmbientFlowSessionEnvironment(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-test.run=^TestTaskCreateUsesDiscoveredClientConfigOwnerToken$", "-test.count=1")
-	cmd.Env = append(os.Environ(),
-		"FLOW_COORDINATOR_URL=http://127.0.0.1:1",
-		"FLOW_SESSION_TOKEN=leaked-session-token",
-		"FLOW_SESSION_ID=s-live",
-		"FLOW_TASK_ID=i-live",
-	)
-	output, err := cmd.CombinedOutput()
+func TestTaskCreatePrefersAmbientFlowEnvironmentOverClientConfig(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	fixture := newFlowTestFixture(t)
+	httpServer := httptest.NewServer(fixture.Server)
+	t.Cleanup(httpServer.Close)
+
+	// A discoverable client config points at an unreachable server with an
+	// unknown token; the worker-injected ambient environment must win.
+	configPath, err := config.DefaultClientConfigPath()
 	if err != nil {
-		t.Fatalf("child test used ambient Flow session environment: %v\n%s", err, string(output))
+		t.Fatalf("default client config path: %v", err)
+	}
+	if err := config.WriteClientConfig(configPath, config.ClientConfig{
+		ServerURL: "http://127.0.0.1:1",
+		Token:     "config-token",
+	}); err != nil {
+		t.Fatalf("write client config: %v", err)
+	}
+
+	t.Setenv("FLOW_COORDINATOR_URL", httpServer.URL)
+	t.Setenv("FLOW_OWNER_TOKEN", "owner-token")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"task", "create", "--title", "Ambient CLI task"}, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("task create exitCode = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "t-demo-0001\tunscheduled\t\tAmbient CLI task") {
+		t.Fatalf("create output = %q", stdout.String())
+	}
+}
+
+func TestApplyClientEnvironmentPrefersSessionToken(t *testing.T) {
+	t.Setenv("FLOW_SESSION_TOKEN", "session-token")
+	t.Setenv("FLOW_WORKER_TOKEN", "worker-token")
+	t.Setenv("FLOW_OWNER_TOKEN", "owner-token")
+
+	values := apiFlagValues{}
+	applyClientEnvironment(&values)
+	if values.token != "session-token" {
+		t.Fatalf("token = %q, want the session token to beat worker and owner tokens", values.token)
 	}
 }
 
