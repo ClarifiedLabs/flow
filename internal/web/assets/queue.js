@@ -83,9 +83,6 @@ export function renderJobRow(job, diagnostics = {}) {
     : jobID && jobTerminalAvailable
       ? renderTerminalButton("job", jobID)
     : "";
-  const attachButton = jobID && tmuxSession
-    ? `<button class="button secondary" data-job-attach="${escapeAttr(jobID)}">Attach</button>`
-    : "";
   const sessionTranscriptAvailable = Boolean(value(session, "transcript_available", "TranscriptAvailable"));
   const jobTranscriptAvailable = Boolean(value(diagnostics, "transcript_available", "TranscriptAvailable"));
   const transcriptButton = sessionID && sessionTranscriptAvailable
@@ -95,7 +92,7 @@ export function renderJobRow(job, diagnostics = {}) {
     : "";
   const tmuxCell = [
     tmuxSession ? escapeHTML(tmuxSession) : "",
-    terminalButton || attachButton || transcriptButton ? `<div class="actions table-actions">${terminalButton}${attachButton}${transcriptButton}</div>` : "",
+    terminalButton || transcriptButton ? `<div class="actions table-actions">${terminalButton}${transcriptButton}</div>` : "",
   ].filter(Boolean).join("");
   const target = [
     taskID ? `<a href="${escapeAttr(taskHref(projectID, taskID))}" data-link>${escapeHTML(taskID)}</a>` : "",
