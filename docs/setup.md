@@ -298,18 +298,17 @@ Use a distinct `worker_id` for each concurrent worker; joining with an existing
 chmod 600 .flow-local/worker-join.token
 ```
 
-Fresh projects seed built-in planner, author, reviewer, and verifier agent
-definitions using the default Codex harness, plus two flows: `direct` and
-`planned`. Each reusable agent definition combines a **model agent** selection
-(harness, model, and reasoning effort) with a **focus agent** name and prompt.
-Manage those model/focus definitions with
-`flow agent-defs list|create|edit|rm` and the graphs that reference them with
-`flow flows list|create|edit|rm|set-default`. Add `--global` to an agent-def
-command to manage definitions inherited by every project. A same-name project
-definition overrides its global definition for later workflow snapshots. If a
-global `task-planner`, `author`, `code-reviewer`, `security-reviewer`, or
-`verifier` exists before a project is created, that project's seeded flows use
-the global role rather than creating the corresponding local built-in.
+The coordinator seeds global built-in `task-planner`, `author`,
+`code-reviewer`, `security-reviewer`, and `verifier` agent definitions using the
+default Codex harness. Fresh projects inherit those definitions and seed only
+the `coding` and `planning` flows; they do not create project-local copies. Each
+reusable agent definition combines a **model agent** selection (harness, model,
+and reasoning effort) with a **focus agent** name and prompt. Manage those
+model/focus definitions with `flow agent-defs list|create|edit|rm` and the graphs
+that reference them with `flow flows list|create|edit|rm|set-default`. Add
+`--global` to an agent-def command to manage definitions inherited by every
+project. A same-name project definition overrides its global definition for
+later workflow snapshots.
 
 Choose an task's work pipeline with `flow task create --flow direct`,
 `flow task create --flow planned`, or the web UI's **Flow** field. To use

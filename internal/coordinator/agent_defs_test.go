@@ -115,18 +115,36 @@ func TestSeedDefaultsUsesMatchingGlobalAgentDefinition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create global author: %v", err)
 	}
+	if err := globals.SeedDefaults(ctx); err != nil {
+		t.Fatalf("seed global defaults: %v", err)
+	}
+	if err := globals.SeedDefaults(ctx); err != nil {
+		t.Fatalf("seed global defaults idempotently: %v", err)
+	}
+	globalDefs, err := globals.List(ctx)
+	if err != nil {
+		t.Fatalf("list global defaults: %v", err)
+	}
+	if len(globalDefs) != 5 {
+		t.Fatalf("global defaults = %d, want 5", len(globalDefs))
+	}
+	preservedAuthor, err := globals.GetByName(ctx, "author")
+	if err != nil || preservedAuthor.ID != globalAuthor.ID || preservedAuthor.Builtin || preservedAuthor.Prompt != "shared author" {
+		t.Fatalf("preserved global author = %+v, err=%v; want custom definition %+v", preservedAuthor, err, globalAuthor)
+	}
+
 	projectDefs := NewInheritedAgentDefService(projectStore.DB(), globals)
 	flows := NewFlowServiceWithAgentDefs(projectStore.DB(), projectDefs)
 	if err := flows.SeedDefaults(ctx); err != nil {
 		t.Fatalf("seed defaults: %v", err)
 	}
 
-	var localAuthors int
-	if err := projectStore.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_defs WHERE name = 'author'`).Scan(&localAuthors); err != nil {
-		t.Fatalf("count local authors: %v", err)
+	var localDefs int
+	if err := projectStore.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_defs`).Scan(&localDefs); err != nil {
+		t.Fatalf("count local agent definitions: %v", err)
 	}
-	if localAuthors != 0 {
-		t.Fatalf("local author count = %d, want global author to remain inherited", localAuthors)
+	if localDefs != 0 {
+		t.Fatalf("local agent definition count = %d, want all defaults to remain inherited", localDefs)
 	}
 	coding, err := flows.GetByName(ctx, "coding")
 	if err != nil {

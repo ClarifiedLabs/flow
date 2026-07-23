@@ -90,6 +90,17 @@ type Registry struct {
 	bundles  map[string]*ProjectBundle
 	createMu sync.Mutex
 
+	// catalogMu serializes global agent-definition mutations with the complete
+	// project open sequence. It stays held from restoring canonical definitions
+	// through seeding project flows, and across global deletion reference checks.
+	catalogMu sync.Mutex
+
+	// These hooks coordinate catalog boundaries in concurrency tests.
+	// Production registries leave them nil.
+	beforeProjectFlowSeed      func()
+	beforeGlobalAgentDefDelete func()
+	catalogMutationLockBlocked func()
+
 	// claimMu serializes job claims: worker capacity is enforced against
 	// lease counts aggregated across project databases, and no transaction
 	// spans them.
@@ -105,7 +116,7 @@ func NewRegistry(opts RegistryOptions) (*Registry, error) {
 		return nil, fmt.Errorf("harness args: %w", err)
 	}
 
-	return &Registry{
+	registry := &Registry{
 		dataDir:                    opts.DataDir,
 		global:                     opts.Global,
 		projects:                   coordinator.NewProjectService(opts.Global.DB()),
@@ -120,11 +131,68 @@ func NewRegistry(opts RegistryOptions) (*Registry, error) {
 		deadlines:                  opts.Deadlines,
 		reviewAuthorCycleLimit:     opts.ReviewAuthorCycleLimit,
 		bundles:                    map[string]*ProjectBundle{},
-	}, nil
+	}
+	if err := registry.globalAgentDefs.SeedDefaults(context.Background()); err != nil {
+		return nil, fmt.Errorf("seed global agent definitions: %w", err)
+	}
+	return registry, nil
+}
+
+// AgentDefCatalog exposes the coordinator-global agent definitions while
+// keeping mutations synchronized with project opening and flow seeding.
+type AgentDefCatalog interface {
+	List(context.Context) ([]coordinator.AgentDef, error)
+	Get(context.Context, string) (coordinator.AgentDef, error)
+	GetByName(context.Context, string) (coordinator.AgentDef, error)
+	Create(context.Context, coordinator.AgentDefInput) (coordinator.AgentDef, error)
+	Update(context.Context, string, coordinator.AgentDefInput) (coordinator.AgentDef, error)
+	Delete(context.Context, string) error
+}
+
+type globalAgentDefCatalog struct {
+	registry *Registry
+}
+
+func (c globalAgentDefCatalog) List(ctx context.Context) ([]coordinator.AgentDef, error) {
+	return c.registry.globalAgentDefs.List(ctx)
+}
+
+func (c globalAgentDefCatalog) Get(ctx context.Context, id string) (coordinator.AgentDef, error) {
+	return c.registry.globalAgentDefs.Get(ctx, id)
+}
+
+func (c globalAgentDefCatalog) GetByName(ctx context.Context, name string) (coordinator.AgentDef, error) {
+	return c.registry.globalAgentDefs.GetByName(ctx, name)
+}
+
+func (c globalAgentDefCatalog) Create(ctx context.Context, input coordinator.AgentDefInput) (coordinator.AgentDef, error) {
+	c.registry.lockCatalogMutation()
+	defer c.registry.catalogMu.Unlock()
+	return c.registry.globalAgentDefs.Create(ctx, input)
+}
+
+func (c globalAgentDefCatalog) Update(ctx context.Context, id string, input coordinator.AgentDefInput) (coordinator.AgentDef, error) {
+	c.registry.lockCatalogMutation()
+	defer c.registry.catalogMu.Unlock()
+	return c.registry.globalAgentDefs.Update(ctx, id, input)
+}
+
+func (c globalAgentDefCatalog) Delete(ctx context.Context, id string) error {
+	return c.registry.DeleteGlobalAgentDef(ctx, id)
+}
+
+func (r *Registry) lockCatalogMutation() {
+	if r.catalogMu.TryLock() {
+		return
+	}
+	if r.catalogMutationLockBlocked != nil {
+		r.catalogMutationLockBlocked()
+	}
+	r.catalogMu.Lock()
 }
 
 func (r *Registry) Projects() *coordinator.ProjectService              { return r.projects }
-func (r *Registry) GlobalAgentDefs() *coordinator.AgentDefService      { return r.globalAgentDefs }
+func (r *Registry) GlobalAgentDefs() AgentDefCatalog                   { return globalAgentDefCatalog{registry: r} }
 func (r *Registry) Credentials() *coordinator.CredentialService        { return r.credentials }
 func (r *Registry) Directory() *worker.Directory                       { return r.directory }
 func (r *Registry) WebSessions() *coordinator.WebSessionService        { return r.webSessions }
@@ -133,12 +201,19 @@ func (r *Registry) HarnessArgs() flowharness.Args                      { return 
 
 // OpenAll opens a bundle for every project in the global registry.
 func (r *Registry) OpenAll(ctx context.Context) error {
+	r.catalogMu.Lock()
+	defer r.catalogMu.Unlock()
+	return r.openAllLocked(ctx)
+}
+
+// openAllLocked opens every registered project while catalogMu is held.
+func (r *Registry) openAllLocked(ctx context.Context) error {
 	projects, err := r.projects.List(ctx)
 	if err != nil {
 		return err
 	}
 	for _, project := range projects {
-		if _, err := r.OpenProject(ctx, project); err != nil {
+		if _, err := r.openProjectLocked(ctx, project); err != nil {
 			return fmt.Errorf("open project %s: %w", project.ID, err)
 		}
 	}
@@ -148,8 +223,15 @@ func (r *Registry) OpenAll(ctx context.Context) error {
 
 // OpenProject opens the project's database, constructs its service bundle,
 // and registers it. Opening an already-open project returns the existing
-// bundle.
+// bundle. Global catalog mutations wait until default flow seeding completes.
 func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project) (*ProjectBundle, error) {
+	r.catalogMu.Lock()
+	defer r.catalogMu.Unlock()
+	return r.openProjectLocked(ctx, project)
+}
+
+// openProjectLocked opens one project while catalogMu is held.
+func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Project) (_ *ProjectBundle, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -157,15 +239,34 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 		return bundle, nil
 	}
 
+	// Global defaults may have been renamed or deleted through the owner API
+	// since registry startup. Restore every canonical role before opening a
+	// fresh project so its built-in flows can always inherit those definitions.
+	if err := r.globalAgentDefs.SeedDefaults(ctx); err != nil {
+		return nil, fmt.Errorf("ensure global agent definitions for project %s: %w", project.ID, err)
+	}
+
 	store, err := flowdb.Open(ctx, flowgit.ProjectDatabasePath(r.dataDir, project.ID))
 	if err != nil {
 		return nil, err
 	}
+	keepStore := false
+	defer func() {
+		if keepStore {
+			return
+		}
+		if closeErr := store.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close project %s database after open failure: %w", project.ID, closeErr))
+		}
+	}()
 
 	db := store.DB()
 	tasks := coordinator.NewTaskService(db, project.ID)
 	agentDefs := coordinator.NewInheritedAgentDefService(db, r.globalAgentDefs)
 	flows := coordinator.NewFlowServiceWithAgentDefs(db, agentDefs)
+	if r.beforeProjectFlowSeed != nil {
+		r.beforeProjectFlowSeed()
+	}
 	if err := flows.SeedDefaults(ctx); err != nil {
 		return nil, fmt.Errorf("seed default flows for project %s: %w", project.ID, err)
 	}
@@ -227,6 +328,7 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 		Engine:            engine,
 	}
 	r.bundles[project.ID] = bundle
+	keepStore = true
 
 	return bundle, nil
 }
@@ -238,6 +340,8 @@ func (r *Registry) OpenProject(ctx context.Context, project coordinator.Project)
 func (r *Registry) CreateProject(ctx context.Context, input coordinator.Project) (coordinator.Project, error) {
 	r.createMu.Lock()
 	defer r.createMu.Unlock()
+	r.catalogMu.Lock()
+	defer r.catalogMu.Unlock()
 
 	name := strings.TrimSpace(input.Name)
 	if name == "" && strings.TrimSpace(input.RepoPath) != "" {
@@ -264,6 +368,13 @@ func (r *Registry) CreateProject(ctx context.Context, input coordinator.Project)
 		return coordinator.Project{}, lookupErr
 	}
 
+	// Check and restore the catalog before creating durable Git or registry
+	// state. catalogMu remains held through openProjectLocked and flow seeding;
+	// direct OpenProject calls take the same lock before repeating this check.
+	if err := r.globalAgentDefs.SeedDefaults(ctx); err != nil {
+		return coordinator.Project{}, fmt.Errorf("ensure global agent definitions: %w", err)
+	}
+
 	created, err := flowgit.CreateServerProject(ctx, flowgit.ServerProjectOptions{
 		DataDir:    r.dataDir,
 		ProjectID:  id,
@@ -285,7 +396,7 @@ func (r *Registry) CreateProject(ctx context.Context, input coordinator.Project)
 		return coordinator.Project{}, err
 	}
 
-	if _, err := r.OpenProject(ctx, project); err != nil {
+	if _, err := r.openProjectLocked(ctx, project); err != nil {
 		return coordinator.Project{}, err
 	}
 
@@ -340,14 +451,19 @@ func (r *Registry) Claim(ctx context.Context, input worker.ClaimInput) (worker.P
 // reference, so deleting the global row would otherwise make the flow
 // impossible to resolve if its override were later removed.
 func (r *Registry) DeleteGlobalAgentDef(ctx context.Context, id string) error {
+	r.lockCatalogMutation()
+	defer r.catalogMu.Unlock()
+
 	id = strings.TrimSpace(id)
 	if _, err := r.globalAgentDefs.Get(ctx, id); err != nil {
 		return err
 	}
 	// OpenAll is normally completed at server startup, but keeping this method
 	// self-contained prevents a registered, not-yet-open project from escaping
-	// the cross-project reference check in tests and embedded uses.
-	if err := r.OpenAll(ctx); err != nil {
+	// the cross-project reference check in tests and embedded uses. Holding
+	// catalogMu prevents a new project from appearing between this check and the
+	// delete.
+	if err := r.openAllLocked(ctx); err != nil {
 		return fmt.Errorf("open projects before inspecting agent references: %w", err)
 	}
 	for _, bundle := range r.All() {
@@ -358,6 +474,9 @@ func (r *Registry) DeleteGlobalAgentDef(ctx context.Context, id string) error {
 		if inUse {
 			return coordinator.ErrAgentDefInUse
 		}
+	}
+	if r.beforeGlobalAgentDefDelete != nil {
+		r.beforeGlobalAgentDefDelete()
 	}
 	return r.globalAgentDefs.Delete(ctx, id)
 }

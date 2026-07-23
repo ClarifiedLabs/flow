@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 )
 
 func TestDecodeTaskSetManifestRequiresBody(t *testing.T) {
@@ -49,7 +51,16 @@ func TestDecodeTaskSetManifestRequiresBody(t *testing.T) {
 func TestMaterializeTaskSetStoresBodyAndTaskMetadata(t *testing.T) {
 	ctx := context.Background()
 	store, tasks := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
-	flows := NewFlowService(store.DB())
+	globalStore, err := flowdb.OpenGlobal(ctx, filepath.Join(t.TempDir(), "global.db"))
+	if err != nil {
+		t.Fatalf("open global database: %v", err)
+	}
+	t.Cleanup(func() { _ = globalStore.Close() })
+	globals := NewGlobalAgentDefService(globalStore.DB())
+	if err := globals.SeedDefaults(ctx); err != nil {
+		t.Fatalf("seed global agent definitions: %v", err)
+	}
+	flows := NewFlowServiceWithAgentDefs(store.DB(), NewInheritedAgentDefService(store.DB(), globals))
 	if err := flows.SeedDefaults(ctx); err != nil {
 		t.Fatalf("seed flows: %v", err)
 	}

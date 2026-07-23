@@ -208,14 +208,14 @@ visible without changing the outcome. New configuration uses
 deprecated compatibility alias (`true` is blocking, `false` is advisory), and
 configurations should not specify both fields.
 
-Fresh projects seed task-planner, author, reviewer, and verifier definitions
-plus two flows: the default coding graph (implementation, checks, review, human
-gate, verification, and merge loops) and the planning graph (task-set authoring,
-human review, transactional materialization, and completion). Global definitions
-appear dynamically in every project's effective catalog. When a matching global
-role exists before project creation, the seeded flows reference it instead of
-creating a local copy. Flows may store a global definition ID; snapshot
-resolution applies a same-name project override before freezing the run.
+The coordinator seeds global task-planner, author, code-reviewer,
+security-reviewer, and verifier definitions. Fresh projects inherit those rows
+and seed only two project-owned flows: the default coding graph (implementation,
+checks, review, human gate, verification, and merge loops) and the planning graph
+(task-set authoring, human review, transactional materialization, and
+completion). No default agent-definition rows are stored in project databases.
+Flows store global definition IDs; snapshot resolution applies a same-name
+project override before freezing the run.
 
 Repo-versioned automated check configuration lives in `.flow/checks/*.yaml`.
 Checks belong with the code; agent definitions and flows are coordinator-owned so

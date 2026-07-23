@@ -11,6 +11,7 @@ import (
 
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	"github.com/ClarifiedLabs/flow/internal/sqlitex"
+	flowskills "github.com/ClarifiedLabs/flow/skills"
 )
 
 var (
@@ -73,6 +74,52 @@ func NewInheritedAgentDefService(database *sql.DB, inherited *AgentDefService) *
 
 func NewGlobalAgentDefService(database *sql.DB) *AgentDefService {
 	return &AgentDefService{db: database, now: sqlitex.UTCNow}
+}
+
+type defaultAgentDefSeed struct {
+	name  string
+	skill string
+	focus string
+}
+
+func defaultAgentDefSeeds() []defaultAgentDefSeed {
+	return []defaultAgentDefSeed{
+		{name: "task-planner", skill: flowskills.TaskPlannerSkill},
+		{name: "author", skill: flowskills.AuthorSkill},
+		{name: "code-reviewer", skill: flowskills.ReviewerSkill},
+		{name: "security-reviewer", skill: flowskills.ReviewerSkill, focus: "Security focus: prioritize trust boundaries, authorization, input validation, secret handling, injection risks, and exploitable failure modes."},
+		{name: "verifier", skill: flowskills.VerifierSkill},
+	}
+}
+
+// SeedDefaults ensures the coordinator-global catalog contains the built-in
+// definitions referenced by newly seeded project flows. Existing same-name
+// global definitions are preserved so operators can customize a default role.
+func (s *AgentDefService) SeedDefaults(ctx context.Context) error {
+	if s.projectOwned {
+		return errors.New("default agent definitions can only be seeded globally")
+	}
+
+	harness := flowharness.DefaultAgentName()
+	for _, seed := range defaultAgentDefSeeds() {
+		if _, err := s.GetByName(ctx, seed.name); err == nil {
+			continue
+		} else if !errors.Is(err, ErrAgentDefNotFound) {
+			return fmt.Errorf("look up default agent def %s: %w", seed.name, err)
+		}
+
+		prompt, err := flowskills.Instructions(seed.skill)
+		if err != nil {
+			return fmt.Errorf("seed default agent def %s: %w", seed.name, err)
+		}
+		if seed.focus != "" {
+			prompt += "\n\n" + seed.focus
+		}
+		if _, err := s.create(ctx, AgentDefInput{Name: seed.name, Harness: harness, Prompt: prompt}, true); err != nil {
+			return fmt.Errorf("seed default agent def %s: %w", seed.name, err)
+		}
+	}
+	return nil
 }
 
 func normalizeAgentDefInput(input AgentDefInput) (AgentDefInput, error) {
@@ -268,6 +315,17 @@ func (s *AgentDefService) GetByName(ctx context.Context, name string) (AgentDef,
 		return def, err
 	}
 	def, err = s.inherited.GetByName(ctx, name)
+	if err == nil {
+		def.Inherited = true
+	}
+	return def, err
+}
+
+func (s *AgentDefService) getInheritedByName(ctx context.Context, name string) (AgentDef, error) {
+	if s.inherited == nil {
+		return AgentDef{}, ErrAgentDefNotFound
+	}
+	def, err := s.inherited.GetByName(ctx, strings.TrimSpace(name))
 	if err == nil {
 		def.Inherited = true
 	}

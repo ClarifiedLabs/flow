@@ -13,12 +13,25 @@ import (
 
 func newFlowTestServices(t *testing.T) (*FlowService, *AgentDefService) {
 	t.Helper()
-	store, err := flowdb.Open(context.Background(), filepath.Join(t.TempDir(), "flow.db"))
+	ctx := context.Background()
+	root := t.TempDir()
+	globalStore, err := flowdb.OpenGlobal(ctx, filepath.Join(root, "global.db"))
 	if err != nil {
-		t.Fatalf("open test database: %v", err)
+		t.Fatalf("open global test database: %v", err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
-	return NewFlowService(store.DB()), NewAgentDefService(store.DB())
+	t.Cleanup(func() { _ = globalStore.Close() })
+	globals := NewGlobalAgentDefService(globalStore.DB())
+	if err := globals.SeedDefaults(ctx); err != nil {
+		t.Fatalf("seed global agent definitions: %v", err)
+	}
+
+	projectStore, err := flowdb.Open(ctx, filepath.Join(root, "project.db"))
+	if err != nil {
+		t.Fatalf("open project test database: %v", err)
+	}
+	t.Cleanup(func() { _ = projectStore.Close() })
+	defs := NewInheritedAgentDefService(projectStore.DB(), globals)
+	return NewFlowServiceWithAgentDefs(projectStore.DB(), defs), defs
 }
 
 func TestSeedDefaults(t *testing.T) {
@@ -34,17 +47,24 @@ func TestSeedDefaults(t *testing.T) {
 		t.Fatalf("List agent defs: %v", err)
 	}
 	if len(allDefs) != 5 {
-		t.Fatalf("seeded agent defs = %d, want 5", len(allDefs))
+		t.Fatalf("inherited default agent defs = %d, want 5", len(allDefs))
 	}
 	defsByName := make(map[string]AgentDef, len(allDefs))
 	for _, def := range allDefs {
 		defsByName[def.Name] = def
-		if !def.Builtin {
-			t.Errorf("seeded agent def %s not marked builtin", def.Name)
+		if !def.Builtin || !def.Inherited {
+			t.Errorf("default agent def %s = %+v, want inherited global built-in", def.Name, def)
 		}
 		if def.Prompt == "" {
-			t.Errorf("seeded agent def %s has empty prompt", def.Name)
+			t.Errorf("default agent def %s has empty prompt", def.Name)
 		}
+	}
+	var localDefCount int
+	if err := defs.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_defs`).Scan(&localDefCount); err != nil {
+		t.Fatalf("count project agent definitions: %v", err)
+	}
+	if localDefCount != 0 {
+		t.Fatalf("project agent definitions = %d, want none", localDefCount)
 	}
 
 	allFlows, err := flows.List(ctx)

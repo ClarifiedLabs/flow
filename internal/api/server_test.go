@@ -275,6 +275,331 @@ func TestHarnessOptionsIncludeDefaultArgs(t *testing.T) {
 	}
 }
 
+func TestDefaultAgentDefsAreGlobalAndInheritedByProjects(t *testing.T) {
+	fixture := newTestFixture(t)
+
+	var globalList agentDefsResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/global/agent-defs", nil, http.StatusOK, &globalList)
+	if len(globalList.AgentDefs) != 5 {
+		t.Fatalf("global default agent definitions = %d, want 5", len(globalList.AgentDefs))
+	}
+
+	var projectList agentDefsResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/projects/"+fixture.Project.ID+"/agent-defs", nil, http.StatusOK, &projectList)
+	if len(projectList.AgentDefs) != len(globalList.AgentDefs) {
+		t.Fatalf("project agent definitions = %d, want %d inherited defaults", len(projectList.AgentDefs), len(globalList.AgentDefs))
+	}
+	for _, global := range globalList.AgentDefs {
+		inherited := findAgentDefByName(projectList.AgentDefs, global.Name)
+		if !global.Builtin || global.Inherited || global.Prompt == "" {
+			t.Errorf("global default %q = %+v, want non-inherited built-in with prompt", global.Name, global)
+		}
+		if inherited == nil || inherited.ID != global.ID || !inherited.Builtin || !inherited.Inherited {
+			t.Errorf("project default %q = %+v, want inherited global definition %+v", global.Name, inherited, global)
+		}
+	}
+
+	var localCount int
+	if err := fixture.DB.QueryRow(`SELECT COUNT(*) FROM agent_defs`).Scan(&localCount); err != nil {
+		t.Fatalf("count project-local agent definitions: %v", err)
+	}
+	if localCount != 0 {
+		t.Fatalf("project-local agent definitions = %d, want none", localCount)
+	}
+}
+
+func TestCreateProjectRestoresMutatedGlobalDefaultAgentDefs(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*testing.T, *Server, coordinator.AgentDef)
+	}{
+		{
+			name: "renamed",
+			mutate: func(t *testing.T, server *Server, def coordinator.AgentDef) {
+				t.Helper()
+				input := coordinator.AgentDefInput{
+					Name: "renamed-author", Harness: def.Harness, Model: def.Model,
+					ReasoningEffort: def.ReasoningEffort, Prompt: def.Prompt,
+				}
+				doJSONRequestAs(t, server, "owner-token", http.MethodPatch, "/v2/global/agent-defs/"+def.ID, input, http.StatusOK, nil)
+			},
+		},
+		{
+			name: "deleted",
+			mutate: func(t *testing.T, server *Server, def coordinator.AgentDef) {
+				t.Helper()
+				doJSONRequestAs(t, server, "owner-token", http.MethodDelete, "/v2/global/agent-defs/"+def.ID, nil, http.StatusOK, nil)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			registry, _, _, _ := newTestRegistryInDir(t, t.TempDir())
+			if err := registry.Credentials().EnsureToken(ctx, coordinator.CredentialInput{
+				Token: "owner-token", Scope: coordinator.TokenScopeOwner,
+			}); err != nil {
+				t.Fatalf("store owner token: %v", err)
+			}
+			server, err := NewServer(ServerOptions{Registry: registry, OwnerToken: "owner-token"})
+			if err != nil {
+				t.Fatalf("new server: %v", err)
+			}
+
+			author, err := registry.GlobalAgentDefs().GetByName(ctx, "author")
+			if err != nil {
+				t.Fatalf("get default author: %v", err)
+			}
+			tc.mutate(t, server, author)
+
+			project, err := registry.CreateProject(ctx, coordinator.Project{Name: "after-" + tc.name, BaseBranch: "main"})
+			if err != nil {
+				t.Fatalf("create project after default was %s: %v", tc.name, err)
+			}
+			restored, err := registry.GlobalAgentDefs().GetByName(ctx, "author")
+			if err != nil {
+				t.Fatalf("get restored default author: %v", err)
+			}
+			if restored.ID == author.ID {
+				t.Fatalf("restored author id = %q, want a new canonical definition after it was %s", restored.ID, tc.name)
+			}
+
+			bundle, ok := registry.Bundle(project.ID)
+			if !ok {
+				t.Fatalf("bundle for created project %q not found", project.ID)
+			}
+			coding, err := bundle.Flows.GetByName(ctx, "coding")
+			if err != nil {
+				t.Fatalf("get seeded coding flow: %v", err)
+			}
+			if got := coding.Nodes[0].Config.Agent.AgentDefID; got != restored.ID {
+				t.Fatalf("seeded coding author id = %q, want restored global id %q", got, restored.ID)
+			}
+			var localCount int
+			if err := bundle.Store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_defs`).Scan(&localCount); err != nil {
+				t.Fatalf("count project-local agent definitions: %v", err)
+			}
+			if localCount != 0 {
+				t.Fatalf("project-local agent definitions = %d, want none", localCount)
+			}
+		})
+	}
+}
+
+func TestGlobalAgentDefMutationsWaitForProjectFlowSeeding(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		method     string
+		body       func(coordinator.AgentDef) any
+		wantStatus int
+	}{
+		{
+			name:   "update",
+			method: http.MethodPatch,
+			body: func(def coordinator.AgentDef) any {
+				return coordinator.AgentDefInput{
+					Name: "renamed-author", Harness: def.Harness, Model: def.Model,
+					ReasoningEffort: def.ReasoningEffort, Prompt: def.Prompt,
+				}
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "delete",
+			method:     http.MethodDelete,
+			wantStatus: http.StatusConflict,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			registry, _, _, _ := newTestRegistryInDir(t, t.TempDir())
+			catalog := registry.GlobalAgentDefs()
+			author, err := catalog.GetByName(ctx, "author")
+			if err != nil {
+				t.Fatalf("get default author: %v", err)
+			}
+			if err := registry.Credentials().EnsureToken(ctx, coordinator.CredentialInput{
+				Token: "owner-token", Scope: coordinator.TokenScopeOwner,
+			}); err != nil {
+				t.Fatalf("store owner token: %v", err)
+			}
+			server, err := NewServer(ServerOptions{Registry: registry, OwnerToken: "owner-token"})
+			if err != nil {
+				t.Fatalf("new server: %v", err)
+			}
+
+			seedReached := make(chan struct{})
+			releaseSeed := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releaseSeed) }) }
+			t.Cleanup(release)
+			registry.beforeProjectFlowSeed = func() {
+				close(seedReached)
+				<-releaseSeed
+			}
+
+			type createResult struct {
+				project coordinator.Project
+				err     error
+			}
+			createDone := make(chan createResult, 1)
+			go func() {
+				project, createErr := registry.CreateProject(ctx, coordinator.Project{Name: "concurrent-" + tc.name, BaseBranch: "main"})
+				createDone <- createResult{project: project, err: createErr}
+			}()
+
+			select {
+			case <-seedReached:
+			case <-time.After(10 * time.Second):
+				t.Fatal("project creation did not reach the flow-seeding boundary")
+			}
+			if registry.catalogMu.TryLock() {
+				registry.catalogMu.Unlock()
+				t.Error("catalog mutex was not held at the flow-seeding boundary")
+			}
+
+			mutationLockBlocked := make(chan struct{})
+			registry.catalogMutationLockBlocked = func() { close(mutationLockBlocked) }
+			mutationDone := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				response := httptest.NewRecorder()
+				var body any
+				if tc.body != nil {
+					body = tc.body(author)
+				}
+				request := authorizedRequest(tc.method, "/v2/global/agent-defs/"+author.ID, body)
+				server.ServeHTTP(response, request)
+				mutationDone <- response
+			}()
+			select {
+			case <-mutationLockBlocked:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("global %s did not block on the catalog lock", tc.name)
+			}
+			release()
+
+			var created createResult
+			select {
+			case created = <-createDone:
+			case <-time.After(10 * time.Second):
+				t.Fatal("project creation did not finish after releasing flow seeding")
+			}
+			if created.err != nil {
+				t.Fatalf("create project during global %s: %v", tc.name, created.err)
+			}
+
+			var mutationResponse *httptest.ResponseRecorder
+			select {
+			case mutationResponse = <-mutationDone:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("global %s did not finish after project creation", tc.name)
+			}
+			if mutationResponse.Code != tc.wantStatus {
+				t.Fatalf("global %s status = %d, want %d; body: %s", tc.name, mutationResponse.Code, tc.wantStatus, mutationResponse.Body.String())
+			}
+
+			bundle, ok := registry.Bundle(created.project.ID)
+			if !ok {
+				t.Fatalf("bundle for created project %q not found", created.project.ID)
+			}
+			coding, err := bundle.Flows.GetByName(ctx, "coding")
+			if err != nil {
+				t.Fatalf("get seeded coding flow: %v", err)
+			}
+			if got := coding.Nodes[0].Config.Agent.AgentDefID; got != author.ID {
+				t.Fatalf("seeded coding author id = %q, want serialized global id %q", got, author.ID)
+			}
+			if _, err := bundle.AgentDefs.Resolve(ctx, author.ID); err != nil {
+				t.Fatalf("resolve seeded global author after %s: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestProjectFlowMutationWaitsForGlobalAgentDefDelete(t *testing.T) {
+	ctx := context.Background()
+	fixture := newTestFixture(t)
+	custom, err := fixture.Registry.GlobalAgentDefs().Create(ctx, coordinator.AgentDefInput{
+		Name: "concurrent-delete", Harness: "codex", Prompt: "custom global definition",
+	})
+	if err != nil {
+		t.Fatalf("create global agent definition: %v", err)
+	}
+
+	deleteReached := make(chan struct{})
+	releaseDelete := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseDelete) }) }
+	t.Cleanup(release)
+	fixture.Registry.beforeGlobalAgentDefDelete = func() {
+		close(deleteReached)
+		<-releaseDelete
+	}
+
+	deleteDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		request := authorizedRequest(http.MethodDelete, "/v2/global/agent-defs/"+custom.ID, nil)
+		fixture.Server.ServeHTTP(response, request)
+		deleteDone <- response
+	}()
+	select {
+	case <-deleteReached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("global delete did not reach the post-reference-check boundary")
+	}
+	if fixture.Registry.catalogMu.TryLock() {
+		fixture.Registry.catalogMu.Unlock()
+		t.Error("catalog mutex was not held after the global delete reference check")
+	}
+
+	flowInput := coordinator.FlowInput{
+		Name: "concurrent-global-delete", StartNode: "author",
+		Nodes: []coordinator.FlowNodeInput{
+			{Key: "author", Name: "Author", Kind: coordinator.NodeAgent, Config: coordinator.FlowNodeConfig{Agent: &coordinator.AgentNodeConfig{AgentDefID: custom.ID, Workspace: coordinator.WorkspaceChange, Artifact: coordinator.ArtifactChange}}},
+			{Key: "done", Name: "Done", Kind: coordinator.NodeTerminal, Config: coordinator.FlowNodeConfig{Terminal: &coordinator.TerminalNodeConfig{Resolution: coordinator.ResolutionCompleted}}},
+		},
+		Edges: []coordinator.FlowEdgeInput{{From: "author", Outcome: "completed", To: "done"}},
+	}
+	flowLockBlocked := make(chan struct{})
+	fixture.Registry.catalogMutationLockBlocked = func() { close(flowLockBlocked) }
+	flowDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		request := authorizedRequest(http.MethodPost, "/v2/projects/"+fixture.Project.ID+"/flows", flowInput)
+		fixture.Server.ServeHTTP(response, request)
+		flowDone <- response
+	}()
+	select {
+	case <-flowLockBlocked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("flow creation did not block on the catalog lock")
+	}
+	release()
+
+	var deleteResponse *httptest.ResponseRecorder
+	select {
+	case deleteResponse = <-deleteDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("global delete did not finish after release")
+	}
+	if deleteResponse.Code != http.StatusOK {
+		t.Fatalf("global delete status = %d, want 200; body: %s", deleteResponse.Code, deleteResponse.Body.String())
+	}
+
+	var flowResponse *httptest.ResponseRecorder
+	select {
+	case flowResponse = <-flowDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("flow creation did not finish after global delete")
+	}
+	if flowResponse.Code != http.StatusBadRequest {
+		t.Fatalf("flow creation status = %d, want 400 after referenced global deletion; body: %s", flowResponse.Code, flowResponse.Body.String())
+	}
+	if _, err := fixture.Bundle.Flows.GetByName(ctx, flowInput.Name); !errors.Is(err, coordinator.ErrFlowNotFound) {
+		t.Fatalf("get rejected flow error = %v, want ErrFlowNotFound", err)
+	}
+}
+
 func TestGlobalAgentDefsAreInheritedAndProjectOverridesWin(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()

@@ -10,7 +10,6 @@ import (
 
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	"github.com/ClarifiedLabs/flow/internal/sqlitex"
-	flowskills "github.com/ClarifiedLabs/flow/skills"
 )
 
 var (
@@ -639,54 +638,25 @@ func (s *FlowService) ResolveSnapshot(ctx context.Context, flowID string) (FlowS
 	return snapshot, nil
 }
 
-// SeedDefaults populates a fresh format-2 project with the built-in coding and
-// planning graphs plus the agent definitions they snapshot.
+// SeedDefaults populates a fresh project with the built-in coding and planning
+// graphs. Their agent definitions are coordinator-global rows inherited by the
+// project, so seeding never creates project-local agent definitions.
 func (s *FlowService) SeedDefaults(ctx context.Context) error {
 	var count int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT (SELECT COUNT(*) FROM agent_defs) + (SELECT COUNT(*) FROM flows)`).Scan(&count); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM flows`).Scan(&count); err != nil {
 		return fmt.Errorf("check seed state: %w", err)
 	}
 	if count > 0 {
 		return nil
 	}
 
-	defs := s.agentDefs
-	harness := flowharness.DefaultAgentName()
 	defIDs := map[string]string{}
-	for _, seed := range []struct {
-		name  string
-		skill string
-		focus string
-	}{
-		{name: "task-planner", skill: flowskills.TaskPlannerSkill},
-		{name: "author", skill: flowskills.AuthorSkill},
-		{name: "code-reviewer", skill: flowskills.ReviewerSkill},
-		{name: "security-reviewer", skill: flowskills.ReviewerSkill, focus: "Security focus: prioritize trust boundaries, authorization, input validation, secret handling, injection risks, and exploitable failure modes."},
-		{name: "verifier", skill: flowskills.VerifierSkill},
-	} {
-		// A global definition created before the project provides that seeded
-		// role directly. The default flow stores its global id, so a later local
-		// same-name row becomes an ordinary project override.
-		if inherited, lookupErr := defs.GetByName(ctx, seed.name); lookupErr == nil && inherited.Inherited {
-			defIDs[seed.name] = inherited.ID
-			continue
-		} else if lookupErr != nil && !errors.Is(lookupErr, ErrAgentDefNotFound) {
-			return fmt.Errorf("look up inherited agent def %s: %w", seed.name, lookupErr)
-		}
-
-		prompt, err := flowskills.Instructions(seed.skill)
+	for _, seed := range defaultAgentDefSeeds() {
+		inherited, err := s.agentDefs.getInheritedByName(ctx, seed.name)
 		if err != nil {
-			return fmt.Errorf("seed agent def %s: %w", seed.name, err)
+			return fmt.Errorf("look up global default agent def %s: %w", seed.name, err)
 		}
-		if seed.focus != "" {
-			prompt += "\n\n" + seed.focus
-		}
-		def, err := defs.create(ctx, AgentDefInput{Name: seed.name, Harness: harness, Prompt: prompt}, true)
-		if err != nil {
-			return fmt.Errorf("seed agent def %s: %w", seed.name, err)
-		}
-		defIDs[seed.name] = def.ID
+		defIDs[seed.name] = inherited.ID
 	}
 
 	coding, err := s.create(ctx, FlowInput{

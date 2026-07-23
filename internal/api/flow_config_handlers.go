@@ -35,23 +35,25 @@ func (s *projectServer) handleAgentDefsPath(w http.ResponseWriter, r *http.Reque
 	if !requireScope(w, principal, "agent definitions require an owner or console token", coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
 		return
 	}
-	s.handleAgentDefs(w, r, s.agentDefs, "/v2/agent-defs", nil)
+	var service AgentDefCatalog
+	if s.agentDefs != nil {
+		service = s.agentDefs
+	}
+	s.handleAgentDefs(w, r, service, "/v2/agent-defs")
 }
 
 func (s *Server) handleGlobalAgentDefsPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
 	if !requireScope(w, principal, "global agent definitions require an owner token", coordinator.TokenScopeOwner) {
 		return
 	}
-	var service *coordinator.AgentDefService
-	var deleteDef func(string) error
+	var service AgentDefCatalog
 	if s.registry != nil {
 		service = s.registry.GlobalAgentDefs()
-		deleteDef = func(id string) error { return s.registry.DeleteGlobalAgentDef(r.Context(), id) }
 	}
-	s.handleAgentDefs(w, r, service, "/v2/global/agent-defs", deleteDef)
+	s.handleAgentDefs(w, r, service, "/v2/global/agent-defs")
 }
 
-func (s *Server) handleAgentDefs(w http.ResponseWriter, r *http.Request, service *coordinator.AgentDefService, pathPrefix string, deleteDef func(string) error) {
+func (s *Server) handleAgentDefs(w http.ResponseWriter, r *http.Request, service AgentDefCatalog, pathPrefix string) {
 	if service == nil {
 		writeError(w, http.StatusServiceUnavailable, "agent_defs_unavailable", "agent definition service is not configured")
 		return
@@ -108,10 +110,7 @@ func (s *Server) handleAgentDefs(w http.ResponseWriter, r *http.Request, service
 		}
 		writeJSON(w, http.StatusOK, agentDefResponse{AgentDef: def})
 	case http.MethodDelete:
-		if deleteDef == nil {
-			deleteDef = func(id string) error { return service.Delete(r.Context(), id) }
-		}
-		if err := deleteDef(id); err != nil {
+		if err := service.Delete(r.Context(), id); err != nil {
 			writeAgentDefError(w, err, "delete_agent_def_failed")
 			return
 		}
@@ -152,7 +151,9 @@ func (s *projectServer) handleFlowsPath(w http.ResponseWriter, r *http.Request, 
 				writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 				return
 			}
+			s.registry.lockCatalogMutation()
 			flow, err := s.flows.Create(r.Context(), input)
+			s.registry.catalogMu.Unlock()
 			if err != nil {
 				writeFlowError(w, err, "create_flow_failed")
 				return
@@ -200,14 +201,19 @@ func (s *projectServer) handleFlowsPath(w http.ResponseWriter, r *http.Request, 
 			writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 			return
 		}
+		s.registry.lockCatalogMutation()
 		flow, err := s.flows.Update(r.Context(), id, input)
+		s.registry.catalogMu.Unlock()
 		if err != nil {
 			writeFlowError(w, err, "update_flow_failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, flowResponse{Flow: flow})
 	case http.MethodDelete:
-		if err := s.flows.Delete(r.Context(), id); err != nil {
+		s.registry.lockCatalogMutation()
+		err := s.flows.Delete(r.Context(), id)
+		s.registry.catalogMu.Unlock()
+		if err != nil {
 			writeFlowError(w, err, "delete_flow_failed")
 			return
 		}
