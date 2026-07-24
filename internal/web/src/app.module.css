@@ -773,6 +773,14 @@ textarea {
   white-space: nowrap;
 }
 
+.card[data-phase="authoring"] .card-current-step {
+  width: fit-content;
+  border-radius: var(--radius);
+  padding: 2px 7px;
+  color: var(--ph);
+  background: var(--ph-bg);
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
