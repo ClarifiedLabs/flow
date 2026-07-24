@@ -579,7 +579,8 @@ export class FlowApp extends HTMLElement {
       button.addEventListener("click", async () => {
         button.disabled = true;
         try {
-          await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowRetry)}/workflow/retry`, {});
+          const refreshAgentRuntime = button.dataset.workflowRetryRefresh === "true";
+          await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowRetry)}/workflow/retry`, { refresh_agent_runtime: refreshAgentRuntime });
           await refresh();
         } finally {
           button.disabled = false;

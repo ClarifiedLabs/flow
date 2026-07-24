@@ -803,7 +803,7 @@ test("review run action posts to task review endpoint and refreshes", async () =
 test("workflow retry action posts to the owner retry endpoint and refreshes", async () => {
   let clickHandler;
   const button = {
-    dataset: { workflowRetry: "t-alpha-0001", project: "p-alpha" },
+    dataset: { workflowRetry: "t-alpha-0001", workflowRetryRefresh: "true", project: "p-alpha" },
     disabled: false,
     addEventListener(event, handler) {
       if (event === "click") clickHandler = handler;
@@ -831,9 +831,38 @@ test("workflow retry action posts to the owner retry endpoint and refreshes", as
 
   assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/workflow/retry");
   assert.equal(fetchCalls[0].options.method, "POST");
-  assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
+  assert.deepEqual(JSON.parse(fetchCalls[0].options.body), { refresh_agent_runtime: true });
   assert.equal(button.disabled, false);
   assert.equal(refreshed, true);
+});
+
+test("workflow retry action omits the runtime refresh when the button does not request it", async () => {
+  let clickHandler;
+  const button = {
+    dataset: { workflowRetry: "t-alpha-0001", project: "p-alpha" },
+    disabled: false,
+    addEventListener(event, handler) {
+      if (event === "click") clickHandler = handler;
+    },
+  };
+  const fetchCalls = [];
+  const context = await scriptContext({}, {
+    fetch(path, options) {
+      fetchCalls.push({ path, options });
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ run: { id: "wr-1", state: "running" } }),
+      });
+    },
+  });
+  const app = new context.FlowApp();
+  app.querySelectorAll = (selector) => (selector === "[data-workflow-retry]" ? [button] : []);
+  app.querySelector = () => ({ textContent: "" });
+  app.bindTaskActions(async () => {});
+
+  await clickHandler();
+
+  assert.deepEqual(JSON.parse(fetchCalls[0].options.body), { refresh_agent_runtime: false });
 });
 
 test("workflow skip action confirms, posts to the owner skip endpoint, and refreshes", async () => {
@@ -2387,6 +2416,7 @@ test("task detail offers retry and diagnostics only for execution-failure waits"
   assert.match(html, /Job: j-review/);
   assert.match(html, /data-inline-terminal-anchor="true"/);
   assert.match(html, /data-workflow-retry="t-alpha-0001"/);
+  assert.match(html, /data-workflow-retry-refresh="true"/);
   assert.match(html, /data-workflow-skip="t-alpha-0001"/);
   assert.match(html, /data-workflow-skip-node="nr-review"/);
   assert.match(html, /Skip step/);
