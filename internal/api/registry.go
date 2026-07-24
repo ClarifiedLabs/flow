@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
@@ -438,6 +439,23 @@ func (r *Registry) All() []*ProjectBundle {
 	})
 
 	return bundles
+}
+
+// ExtendActiveLeaseDeadlines reserves every open project's active leases
+// through deadline. The coordinator calls this once during startup, before
+// serving requests or starting recovery, so workers that survived a server
+// restart can renew their existing leases instead of racing the expiry sweep.
+func (r *Registry) ExtendActiveLeaseDeadlines(ctx context.Context, deadline time.Time) (int, error) {
+	var total int
+	var joined error
+	for _, bundle := range r.All() {
+		extended, err := bundle.Queue.ExtendActiveLeaseDeadlines(ctx, deadline)
+		total += extended
+		if err != nil {
+			joined = errors.Join(joined, fmt.Errorf("extend active leases for project %s: %w", bundle.Project.ID, err))
+		}
+	}
+	return total, joined
 }
 
 // Claim claims the next eligible job for a worker across all projects,

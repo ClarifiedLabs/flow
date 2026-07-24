@@ -136,6 +136,13 @@ for work. The coordinator orders project queues by their oldest queued eligible
 job and claims only when the worker has remaining aggregate capacity in the
 requested capacity bucket.
 
+At coordinator startup, active lease deadlines are extended through the
+configured worker reconnect grace before recovery starts. A worker keeps its
+local tmux job running and retries transient renewal failures while the
+coordinator is unavailable. The original lease remains exclusive during the
+grace window; if its worker does not reconnect, ordinary expiry and crash
+recovery resume when the window closes.
+
 Capacity buckets have different purposes:
 
 - `persistent_agent`: author, reviewer, verifier, and console agent sessions.

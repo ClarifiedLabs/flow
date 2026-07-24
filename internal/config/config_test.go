@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	"gopkg.in/yaml.v3"
@@ -158,6 +159,40 @@ func TestResolveDeadlinesRejectsBadDuration(t *testing.T) {
 	}
 }
 
+func TestResolveCoordinatorWorkersAppliesReconnectGrace(t *testing.T) {
+	resolved, err := (CoordinatorWorkers{}).Resolve()
+	if err != nil {
+		t.Fatalf("resolve defaults: %v", err)
+	}
+	if resolved.ReconnectGrace != 2*time.Minute {
+		t.Fatalf("ReconnectGrace = %s, want 2m", resolved.ReconnectGrace)
+	}
+
+	resolved, err = (CoordinatorWorkers{ReconnectGrace: "5m"}).Resolve()
+	if err != nil {
+		t.Fatalf("resolve custom grace: %v", err)
+	}
+	if resolved.ReconnectGrace != 5*time.Minute {
+		t.Fatalf("ReconnectGrace = %s, want 5m", resolved.ReconnectGrace)
+	}
+
+	resolved, err = (CoordinatorWorkers{ReconnectGrace: "0"}).Resolve()
+	if err != nil {
+		t.Fatalf("resolve disabled grace: %v", err)
+	}
+	if resolved.ReconnectGrace != 0 {
+		t.Fatalf("ReconnectGrace = %s, want disabled", resolved.ReconnectGrace)
+	}
+}
+
+func TestResolveCoordinatorWorkersRejectsBadReconnectGrace(t *testing.T) {
+	for _, value := range []string{"soon", "-1s"} {
+		if _, err := (CoordinatorWorkers{ReconnectGrace: value}).Resolve(); err == nil {
+			t.Fatalf("Resolve accepted reconnect grace %q", value)
+		}
+	}
+}
+
 func TestLoadCoordinatorParsesDeadlines(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "coordinator.yaml")
 	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
@@ -181,6 +216,28 @@ deadlines:
 	}
 	if resolved.AuthoringStall.Hours() != 1 {
 		t.Fatalf("AuthoringStall = %s, want 1h", resolved.AuthoringStall)
+	}
+}
+
+func TestLoadCoordinatorParsesWorkerReconnectGrace(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "coordinator.yaml")
+	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
+listen_addr: 127.0.0.1:8421
+workers:
+  reconnect_grace: "90s"
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadCoordinator(configPath)
+	if err != nil {
+		t.Fatalf("load coordinator: %v", err)
+	}
+	resolved, err := cfg.Workers.Resolve()
+	if err != nil {
+		t.Fatalf("resolve worker policy: %v", err)
+	}
+	if resolved.ReconnectGrace != 90*time.Second {
+		t.Fatalf("ReconnectGrace = %s, want 90s", resolved.ReconnectGrace)
 	}
 }
 

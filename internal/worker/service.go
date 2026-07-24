@@ -508,6 +508,44 @@ WHERE id = ?
 	return s.GetLease(ctx, leaseID)
 }
 
+// ExtendActiveLeaseDeadlines protects work that was already active when the
+// coordinator started. It moves every unreleased claimed/running lease's
+// deadline forward to at least the supplied time, without shortening leases
+// that already extend beyond it. The startup path calls this before serving
+// traffic or running crash recovery so reconnecting workers retain exclusive
+// ownership during the configured grace window.
+func (s *Service) ExtendActiveLeaseDeadlines(ctx context.Context, deadline time.Time) (int, error) {
+	deadline = deadline.UTC()
+	if !deadline.After(s.now().UTC()) {
+		return 0, errors.New("active lease deadline must be in the future")
+	}
+	formattedDeadline := formatTime(deadline)
+	result, err := s.db.ExecContext(ctx, `
+UPDATE leases
+SET expires_at = ?
+WHERE released_at IS NULL
+	AND expires_at < ?
+	AND EXISTS (
+		SELECT 1
+		FROM jobs
+		WHERE jobs.id = leases.job_id
+			AND jobs.state IN (?, ?)
+	)`,
+		formattedDeadline,
+		formattedDeadline,
+		string(JobClaimed),
+		string(JobRunning),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("extend active lease deadlines: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("read extended active lease rows affected: %w", err)
+	}
+	return int(rows), nil
+}
+
 func (s *Service) ReleaseLease(ctx context.Context, leaseID string, finalState JobState) (Job, error) {
 	if !IsTerminalJobState(finalState) {
 		return Job{}, errors.New("released jobs require a terminal final state")

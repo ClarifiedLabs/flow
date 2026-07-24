@@ -25,8 +25,22 @@ type CoordinatorConfig struct {
 	AuthorEntrypointConfigured bool                 `json:"-" yaml:"-"`
 	Deadlines                  DeadlineConfig       `json:"deadlines" yaml:"deadlines"`
 	Limits                     LimitConfig          `json:"limits" yaml:"limits"`
+	Workers                    CoordinatorWorkers   `json:"workers" yaml:"workers"`
 	HarnessArgs                flowharness.Args     `json:"harness_args" yaml:"harness_args"`
 	Git                        CoordinatorGitConfig `json:"git" yaml:"git"`
+}
+
+// CoordinatorWorkers configures coordinator-side worker lifecycle policy.
+type CoordinatorWorkers struct {
+	// ReconnectGrace reserves active leases while workers reconnect after a
+	// coordinator restart (default 2m). "0" disables restart protection.
+	ReconnectGrace string `json:"reconnect_grace" yaml:"reconnect_grace"`
+}
+
+// ResolvedCoordinatorWorkers is the parsed, default-applied worker lifecycle
+// policy used by the coordinator runtime.
+type ResolvedCoordinatorWorkers struct {
+	ReconnectGrace time.Duration
 }
 
 // CoordinatorGitConfig configures the git commit identity the coordinator uses
@@ -71,6 +85,7 @@ const (
 	defaultCheckPendingDeadline   = 30 * time.Minute
 	defaultAuthoringStallDeadline = 2 * time.Hour
 	defaultReviewAuthorCycles     = 5
+	defaultWorkerReconnectGrace   = 2 * time.Minute
 )
 
 // ResolveDeadlines parses the configured duration strings, applying the
@@ -115,6 +130,23 @@ func (c LimitConfig) ResolveLimits() (ResolvedLimits, error) {
 		return ResolvedLimits{}, errors.New("coordinator limits.review_author_cycles must not be negative")
 	}
 	return ResolvedLimits{ReviewAuthorCycles: reviewAuthorCycles}, nil
+}
+
+// Resolve parses coordinator-side worker lifecycle durations, applying their
+// defaults. A zero reconnect grace explicitly disables restart protection.
+func (c CoordinatorWorkers) Resolve() (ResolvedCoordinatorWorkers, error) {
+	value := strings.TrimSpace(c.ReconnectGrace)
+	if value == "" {
+		return ResolvedCoordinatorWorkers{ReconnectGrace: defaultWorkerReconnectGrace}, nil
+	}
+	grace, err := time.ParseDuration(value)
+	if err != nil {
+		return ResolvedCoordinatorWorkers{}, fmt.Errorf("coordinator workers.reconnect_grace: %w", err)
+	}
+	if grace < 0 {
+		return ResolvedCoordinatorWorkers{}, errors.New("coordinator workers.reconnect_grace must not be negative")
+	}
+	return ResolvedCoordinatorWorkers{ReconnectGrace: grace}, nil
 }
 
 // GlobalDatabasePath is the coordinator-wide database under the data dir; it
@@ -239,6 +271,7 @@ func LoadCoordinator(path string) (CoordinatorConfig, error) {
 	}
 	cfg.Deadlines = fileCfg.Deadlines
 	cfg.Limits = fileCfg.Limits
+	cfg.Workers = fileCfg.Workers
 	cfg.HarnessArgs = fileCfg.HarnessArgs
 	if strings.TrimSpace(fileCfg.Git.CommitName) != "" {
 		cfg.Git.CommitName = strings.TrimSpace(fileCfg.Git.CommitName)
@@ -688,6 +721,9 @@ func normalizeCoordinator(cfg CoordinatorConfig) (CoordinatorConfig, error) {
 		return CoordinatorConfig{}, err
 	}
 	if _, err := cfg.Deadlines.ResolveDeadlines(); err != nil {
+		return CoordinatorConfig{}, err
+	}
+	if _, err := cfg.Workers.Resolve(); err != nil {
 		return CoordinatorConfig{}, err
 	}
 	harnessArgs, err := flowharness.NormalizeArgs(cfg.HarnessArgs)

@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -335,7 +336,7 @@ func TestWorkerLeaseHeartbeatRecoversAfterTransientCoordinatorRenewalFailure(t *
 	ctx := context.Background()
 	fixture := newWorkerTestFixture(t)
 	scriptPath := writeWorkerScript(t, `#!/bin/sh
-sleep 3
+sleep 7
 printf renew-ok > "$1"
 `)
 	outPath := filepath.Join(t.TempDir(), "renew.out")
@@ -355,12 +356,24 @@ printf renew-ok > "$1"
 	}
 	server := fixture.Server
 	var renewAttempts atomic.Int32
+	var protectOnce sync.Once
+	var protectErr error
 	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v2/workers/renew" && renewAttempts.Add(1) == 1 {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte(`{"error":{"code":"restart","message":"coordinator restarting"}}`))
-			return
+		if r.URL.Path == "/v2/workers/renew" {
+			attempt := renewAttempts.Add(1)
+			if attempt <= 4 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"error":{"code":"restart","message":"coordinator restarting"}}`))
+				return
+			}
+			protectOnce.Do(func() {
+				_, protectErr = fixture.Queue.ExtendActiveLeaseDeadlines(ctx, time.Now().UTC().Add(2*time.Minute))
+			})
+			if protectErr != nil {
+				http.Error(w, protectErr.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 		server.ServeHTTP(w, r)
 	}))
@@ -376,7 +389,7 @@ printf renew-ok > "$1"
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"-c", configPath, "--once", "--claim-wait", "0s", "--lease", "4s", "--heartbeat-ttl", "2s"}, &stdout, &stderr)
+	exitCode := run([]string{"-c", configPath, "--once", "--claim-wait", "0s", "--lease", "3s", "--heartbeat-ttl", "2s"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("exitCode = %d, stderr = %q\nstdout = %s", exitCode, stderr.String(), stdout.String())
 	}
@@ -386,8 +399,8 @@ printf renew-ok > "$1"
 			t.Fatalf("worker output missing %q:\n%s", want, output)
 		}
 	}
-	if renewAttempts.Load() < 2 {
-		t.Fatalf("renew attempts = %d, want retry after transient failure", renewAttempts.Load())
+	if renewAttempts.Load() < 5 {
+		t.Fatalf("renew attempts = %d, want retries beyond the original lease deadline", renewAttempts.Load())
 	}
 	contents, err := os.ReadFile(outPath)
 	if err != nil {
@@ -402,6 +415,54 @@ printf renew-ok > "$1"
 	}
 	if released.State != flowworker.JobFinished {
 		t.Fatalf("job state = %q, want finished", released.State)
+	}
+}
+
+func TestLeaseHeartbeatCancelsJobAfterAuthoritativeLeaseLoss(t *testing.T) {
+	t.Parallel()
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v2/workers/heartbeat":
+			_, _ = w.Write([]byte(`{"worker":{"id":"w-local"}}`))
+		case "/v2/workers/renew":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"code":"renew_lease_failed","message":"lease is not renewable"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(httpServer.Close)
+
+	client, err := flowclient.New(config.ClientConfig{
+		ServerURL:       httpServer.URL,
+		Token:           "worker-token",
+		ProtocolVersion: config.DefaultProtocolVersion,
+	})
+	if err != nil {
+		t.Fatalf("create worker client: %v", err)
+	}
+	jobCtx, cancelJob := context.WithCancelCause(context.Background())
+	heartbeat := startLeaseHeartbeat(
+		client,
+		config.WorkerConfig{WorkerID: "w-local"},
+		flowworker.Lease{ID: "l-lost", ExpiresAt: time.Now().UTC().Add(time.Minute)},
+		workerTimings{LeaseDuration: 2 * time.Second, HeartbeatTTL: 2 * time.Second},
+		io.Discard,
+		cancelJob,
+	)
+
+	select {
+	case <-jobCtx.Done():
+	case <-time.After(4 * time.Second):
+		t.Fatal("job context was not canceled after authoritative lease loss")
+	}
+	heartbeatErr := heartbeat.Stop()
+	if heartbeatErr == nil || !isLeaseNotRenewable(heartbeatErr) {
+		t.Fatalf("heartbeat error = %v, want nonrenewable lease", heartbeatErr)
+	}
+	if cause := context.Cause(jobCtx); cause == nil || !isLeaseNotRenewable(cause) {
+		t.Fatalf("job cancellation cause = %v, want nonrenewable lease", cause)
 	}
 }
 

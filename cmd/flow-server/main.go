@@ -221,6 +221,11 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "resolve limits: %v\n", err)
 		return 1
 	}
+	workerPolicy, err := cfg.Workers.Resolve()
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve worker policy: %v\n", err)
+		return 1
+	}
 
 	registry, err := api.NewRegistry(api.RegistryOptions{
 		DataDir:                    cfg.DataDir,
@@ -275,6 +280,20 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "create api server: %v\n", err)
 		return 1
+	}
+
+	if workerPolicy.ReconnectGrace > 0 {
+		reconnectDeadline := time.Now().UTC().Add(workerPolicy.ReconnectGrace)
+		protected, err := registry.ExtendActiveLeaseDeadlines(context.Background(), reconnectDeadline)
+		if err != nil {
+			fmt.Fprintf(stderr, "protect active worker leases: %v\n", err)
+			return 1
+		}
+		slog.Info("protected active worker leases for coordinator restart",
+			"leases", protected,
+			"reconnect_deadline", reconnectDeadline,
+			"reconnect_grace", workerPolicy.ReconnectGrace,
+		)
 	}
 
 	fmt.Fprintf(stdout, "flow-server listening on %s\n", cfg.ListenAddr)

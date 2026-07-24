@@ -410,6 +410,29 @@ deadlines:
   authoring_stall: "2h"
 ```
 
+## Worker Reconnection
+
+The coordinator protects claimed and running jobs across server restarts. Before
+it begins serving traffic or running crash recovery, it extends existing active
+leases through `workers.reconnect_grace`, which defaults to `2m`. The grace
+window begins when the restarted server is ready, regardless of how long it was
+offline.
+
+Workers continue their local tmux jobs while the coordinator is unreachable and
+retry lease renewal until it returns. Flow API operations, server-hosted Git
+pushes, terminal proxying, and new job claims remain unavailable during the
+outage. If a worker does not reconnect before the grace window closes, normal
+lease expiry marks the job crashed and recovery may enqueue a replacement.
+
+```yaml
+workers:
+  reconnect_grace: "2m"
+```
+
+Set the value to `"0"` to disable restart protection. This policy protects
+workers that remain alive while the coordinator restarts; it does not preserve
+running processes across a worker container or host restart.
+
 ## Remote Workers
 
 For a remote worker, set `coordinator_url` to the Flow server URL that the

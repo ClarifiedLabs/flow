@@ -677,6 +677,165 @@ func TestExpiredLeaseCannotBeRenewed(t *testing.T) {
 	}
 }
 
+func TestCoordinatorRestartProtectsExpiredActiveLease(t *testing.T) {
+	ctx := context.Background()
+	_, directory, service := newWorkerService(t)
+
+	now := time.Date(2026, 6, 7, 13, 30, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
+		ID:                "w-local",
+		CapacityEphemeral: 1,
+	}); err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	job, err := service.EnqueueJob(ctx, EnqueueJobInput{
+		Role:           RoleCI,
+		CapacityBucket: BucketEphemeral,
+	})
+	if err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
+		WorkerID:      "w-local",
+		Buckets:       []CapacityBucket{BucketEphemeral},
+		LeaseDuration: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("claim job: %v", err)
+	}
+	if !ok {
+		t.Fatal("claim ok=false")
+	}
+	if _, err := service.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	restartedAt := now.Add(2 * time.Minute)
+	reconnectDeadline := restartedAt.Add(2 * time.Minute)
+	service.now = func() time.Time { return restartedAt }
+	extended, err := service.ExtendActiveLeaseDeadlines(ctx, reconnectDeadline)
+	if err != nil {
+		t.Fatalf("extend active lease deadlines: %v", err)
+	}
+	if extended != 1 {
+		t.Fatalf("extended = %d, want 1", extended)
+	}
+	protected, err := service.GetLease(ctx, claimed.Lease.ID)
+	if err != nil {
+		t.Fatalf("get protected lease: %v", err)
+	}
+	if !protected.ExpiresAt.Equal(reconnectDeadline) {
+		t.Fatalf("protected expiry = %s, want %s", protected.ExpiresAt, reconnectDeadline)
+	}
+	if swept, err := service.SweepExpiredLeases(ctx); err != nil {
+		t.Fatalf("sweep protected lease: %v", err)
+	} else if swept != 0 {
+		t.Fatalf("swept = %d, want 0", swept)
+	}
+	if _, err := service.RenewLease(ctx, claimed.Lease.ID, time.Minute); err != nil {
+		t.Fatalf("renew protected lease: %v", err)
+	}
+	running, err := service.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get running job: %v", err)
+	}
+	if running.State != JobRunning {
+		t.Fatalf("job state = %q, want running", running.State)
+	}
+
+	service.now = func() time.Time { return reconnectDeadline.Add(time.Second) }
+	if swept, err := service.SweepExpiredLeases(ctx); err != nil {
+		t.Fatalf("sweep after reconnect protection: %v", err)
+	} else if swept != 1 {
+		t.Fatalf("swept after reconnect protection = %d, want 1", swept)
+	}
+	crashed, err := service.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get crashed job: %v", err)
+	}
+	if crashed.State != JobCrashed {
+		t.Fatalf("job state after protection = %q, want crashed", crashed.State)
+	}
+}
+
+func TestCoordinatorRestartLeaseProtectionDoesNotReviveTerminalOrShortenLiveLease(t *testing.T) {
+	ctx := context.Background()
+	store, directory, service := newWorkerService(t)
+
+	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
+		ID:                "w-local",
+		CapacityEphemeral: 3,
+	}); err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+
+	var leases []Lease
+	for priority, duration := range []time.Duration{10 * time.Minute, time.Minute, time.Minute} {
+		if _, err := service.EnqueueJob(ctx, EnqueueJobInput{
+			Role:           RoleCI,
+			CapacityBucket: BucketEphemeral,
+			Priority:       priority,
+		}); err != nil {
+			t.Fatalf("enqueue job %d: %v", priority, err)
+		}
+		claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
+			WorkerID:      "w-local",
+			Buckets:       []CapacityBucket{BucketEphemeral},
+			LeaseDuration: duration,
+		})
+		if err != nil {
+			t.Fatalf("claim job %d: %v", priority, err)
+		}
+		if !ok {
+			t.Fatalf("claim job %d ok=false", priority)
+		}
+		if _, err := service.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
+			t.Fatalf("mark job %d running: %v", priority, err)
+		}
+		leases = append(leases, claimed.Lease)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE jobs SET state = ? WHERE id = ?`, string(JobFinished), leases[1].JobID); err != nil {
+		t.Fatalf("make second job terminal: %v", err)
+	}
+	if _, err := service.ReleaseLease(ctx, leases[2].ID, JobFinished); err != nil {
+		t.Fatalf("release third job: %v", err)
+	}
+
+	service.now = func() time.Time { return now.Add(2 * time.Minute) }
+	deadline := now.Add(5 * time.Minute)
+	extended, err := service.ExtendActiveLeaseDeadlines(ctx, deadline)
+	if err != nil {
+		t.Fatalf("extend active lease deadlines: %v", err)
+	}
+	if extended != 0 {
+		t.Fatalf("extended = %d, want 0", extended)
+	}
+	longLease, err := service.GetLease(ctx, leases[0].ID)
+	if err != nil {
+		t.Fatalf("get long lease: %v", err)
+	}
+	if !longLease.ExpiresAt.Equal(now.Add(10 * time.Minute)) {
+		t.Fatalf("long lease expiry = %s, want unchanged", longLease.ExpiresAt)
+	}
+	terminalLease, err := service.GetLease(ctx, leases[1].ID)
+	if err != nil {
+		t.Fatalf("get terminal lease: %v", err)
+	}
+	if !terminalLease.ExpiresAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("terminal lease expiry = %s, want unchanged", terminalLease.ExpiresAt)
+	}
+	releasedLease, err := service.GetLease(ctx, leases[2].ID)
+	if err != nil {
+		t.Fatalf("get released lease: %v", err)
+	}
+	if releasedLease.ReleasedAt == nil || !releasedLease.ExpiresAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("released lease = %+v, want released with unchanged expiry", releasedLease)
+	}
+}
+
 func TestExpiredLeaseCannotBeMarkedRunning(t *testing.T) {
 	ctx := context.Background()
 	store, directory, service := newWorkerService(t)

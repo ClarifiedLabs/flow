@@ -376,8 +376,10 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 		running.Job.Payload = map[string]any{}
 	}
 	running.Job.Payload["project_id"] = claim.ProjectID
-	stopHeartbeat := startLeaseHeartbeat(client, cfg, *claim.Lease, timings, stdout)
-	result := workerexec.RunJob(context.Background(), workerexec.RunInput{
+	jobCtx, cancelJob := context.WithCancelCause(context.Background())
+	defer cancelJob(nil)
+	leaseHeartbeat := startLeaseHeartbeat(client, cfg, *claim.Lease, timings, stdout, cancelJob)
+	result := workerexec.RunJob(jobCtx, workerexec.RunInput{
 		Config:       cfg,
 		Job:          running.Job,
 		Lease:        *claim.Lease,
@@ -387,6 +389,19 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 	})
 	fmt.Fprintf(stdout, "ran: %s session=%s exit=%d\n", claim.Job.ID, result.Session, result.ExitCode)
 	slog.Debug("flow-worker job completed", "job_id", claim.Job.ID, "session", result.Session, "exit_code", result.ExitCode, "final_state", result.FinalState, "error", result.Err)
+	if heartbeatErr := leaseHeartbeat.Err(); heartbeatErr != nil {
+		_ = leaseHeartbeat.Stop()
+		if isLeaseNotRenewable(heartbeatErr) &&
+			persistentSession &&
+			persistentSessionFinalized(context.Background(), client, running.Job, *claim.Lease, running.Session) {
+			slog.Debug("flow-worker persistent session finalized while lease heartbeat was active", "job_id", running.Job.ID, "session_id", running.Session.ID, "lease_id", claim.Lease.ID)
+			fmt.Fprintf(stdout, "persistent session finalized: %s lease=%s\n", running.Session.ID, claim.Lease.ID)
+			return true, nil
+		}
+		slog.Debug("flow-worker discarded job result after authoritative lease loss", "job_id", claim.Job.ID, "lease_id", claim.Lease.ID, "error", heartbeatErr)
+		fmt.Fprintf(stdout, "lease lost: %s; discarded local result\n", claim.Lease.ID)
+		return true, jobFailure(fmt.Errorf("lease heartbeat: %w", heartbeatErr))
+	}
 	var reportedCheckVerdict coordinator.CheckVerdict
 	checkErr := retryTransientOperation("report check", stdout, func() error {
 		var err error
@@ -416,7 +431,7 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 			releaseErr := retryTransientOperation("release console", stdout, func() error {
 				return releaseConsoleSession(cfg, running.SessionToken)
 			})
-			heartbeatErr := stopHeartbeat()
+			heartbeatErr := leaseHeartbeat.Stop()
 			if releaseErr != nil {
 				if isInvalidBearerToken(releaseErr) && persistentSessionFinalized(context.Background(), client, running.Job, *claim.Lease, running.Session) {
 					fmt.Fprintf(stdout, "console release skipped: session already finalized\n")
@@ -445,9 +460,11 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 		alreadyFinalized := persistentSessionFinalized(context.Background(), client, running.Job, *claim.Lease, running.Session)
 		var processExitErr error
 		if !alreadyFinalized {
-			processExitErr = reportPersistentSessionProcessExit(context.Background(), client, running.Session, *claim.Lease, result.ExitCode)
+			processExitErr = retryTransientOperation("report persistent session process exit", stdout, func() error {
+				return reportPersistentSessionProcessExit(context.Background(), client, running.Session, *claim.Lease, result.ExitCode)
+			})
 		}
-		heartbeatErr := stopHeartbeat()
+		heartbeatErr := leaseHeartbeat.Stop()
 		if alreadyFinalized {
 			slog.Debug("flow-worker persistent session finalized by coordinator", "job_id", running.Job.ID, "session_id", running.Session.ID, "lease_id", claim.Lease.ID, "role", running.Job.Role)
 			fmt.Fprintf(stdout, "persistent session finalized: %s lease=%s\n", running.Session.ID, claim.Lease.ID)
@@ -479,7 +496,7 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 		})
 		return err
 	})
-	heartbeatErr := stopHeartbeat()
+	heartbeatErr := leaseHeartbeat.Stop()
 	if releaseErr != nil {
 		if heartbeatErr != nil {
 			return true, jobFailure(fmt.Errorf("lease heartbeat: %v; release lease: %w", heartbeatErr, releaseErr))
@@ -1043,34 +1060,90 @@ func checkKindForJob(job flowworker.Job) (coordinator.CheckKind, bool) {
 	}
 }
 
-func startLeaseHeartbeat(client *flowclient.Client, cfg config.WorkerConfig, lease flowworker.Lease, timings workerTimings, stdout io.Writer) func() error {
+type leaseHeartbeat struct {
+	stop     chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
+	cancel   context.CancelCauseFunc
+
+	mu  sync.Mutex
+	err error
+}
+
+func (h *leaseHeartbeat) fail(err error) {
+	if h == nil || err == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.err != nil {
+		h.mu.Unlock()
+		return
+	}
+	h.err = err
+	h.mu.Unlock()
+	if h.cancel != nil {
+		h.cancel(err)
+	}
+}
+
+func (h *leaseHeartbeat) Err() error {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.err
+}
+
+func (h *leaseHeartbeat) Stop() error {
+	if h == nil {
+		return nil
+	}
+	h.stopOnce.Do(func() {
+		close(h.stop)
+	})
+	<-h.done
+	return h.Err()
+}
+
+func startLeaseHeartbeat(
+	client *flowclient.Client,
+	cfg config.WorkerConfig,
+	lease flowworker.Lease,
+	timings workerTimings,
+	stdout io.Writer,
+	cancel context.CancelCauseFunc,
+) *leaseHeartbeat {
 	interval := heartbeatInterval(timings.HeartbeatTTL, timings.LeaseDuration)
 	slog.Debug("flow-worker start lease heartbeat", "worker_id", cfg.WorkerID, "lease_id", lease.ID, "interval", interval)
-	stop := make(chan struct{})
-	done := make(chan struct{})
+	heartbeat := &leaseHeartbeat{
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
+		cancel: cancel,
+	}
 	leaseID := lease.ID
 	leaseExpiresAt := lease.ExpiresAt
-	var fatalErr error
 	go func() {
-		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+		defer close(heartbeat.done)
+		delay := interval
+		disconnected := false
 		for {
+			timer := time.NewTimer(delay)
 			select {
-			case <-stop:
+			case <-heartbeat.stop:
+				timer.Stop()
 				return
-			case <-ticker.C:
+			case <-timer.C:
 				if _, err := client.HeartbeatWorker(flowclient.HeartbeatWorkerInput{
 					WorkerID:     cfg.WorkerID,
 					HeartbeatTTL: timings.HeartbeatTTL,
 				}); err != nil {
 					if !flowclient.IsRetryableError(err) {
 						slog.Debug("flow-worker lease heartbeat fatal worker heartbeat error", "worker_id", cfg.WorkerID, "lease_id", leaseID, "error", err)
-						fatalErr = fmt.Errorf("heartbeat worker: %w", err)
+						heartbeat.fail(fmt.Errorf("heartbeat worker: %w", err))
 						return
 					}
 					slog.Debug("flow-worker lease heartbeat transient worker heartbeat error", "worker_id", cfg.WorkerID, "lease_id", leaseID, "error", err)
-					fmt.Fprintf(stdout, "heartbeat transient error: %v; retrying\n", err)
 				}
 				renewed, err := client.RenewLease(flowclient.RenewLeaseInput{
 					LeaseID:       leaseID,
@@ -1079,30 +1152,30 @@ func startLeaseHeartbeat(client *flowclient.Client, cfg config.WorkerConfig, lea
 				if err != nil {
 					if !flowclient.IsRetryableError(err) {
 						slog.Debug("flow-worker lease renewal fatal error", "lease_id", leaseID, "error", err)
-						fatalErr = fmt.Errorf("renew lease: %w", err)
-						return
-					}
-					if !time.Now().UTC().Before(leaseExpiresAt) {
-						slog.Debug("flow-worker lease renewal exceeded deadline", "lease_id", leaseID, "expires_at", leaseExpiresAt, "error", err)
-						fatalErr = fmt.Errorf("renew lease exceeded current lease deadline %s: %w", leaseExpiresAt.Format(time.RFC3339), err)
+						heartbeat.fail(fmt.Errorf("renew lease: %w", err))
 						return
 					}
 					slog.Debug("flow-worker lease renewal transient error", "lease_id", leaseID, "expires_at", leaseExpiresAt, "error", err)
-					fmt.Fprintf(stdout, "renew transient error: %v; retrying before lease expires at %s\n", err, leaseExpiresAt.Format(time.RFC3339))
+					if !disconnected {
+						fmt.Fprintf(stdout, "renew transient error: %v; coordinator unavailable, retrying every %s\n", err, transientWorkerRetryDelay)
+					}
+					disconnected = true
+					delay = transientWorkerRetryDelay
 					continue
 				}
 				leaseExpiresAt = renewed.ExpiresAt
 				slog.Debug("flow-worker lease renewed", "lease_id", leaseID, "expires_at", leaseExpiresAt)
+				if disconnected {
+					fmt.Fprintf(stdout, "coordinator reconnected: lease=%s\n", leaseID)
+				}
 				fmt.Fprintf(stdout, "renewed: %s\n", leaseID)
+				disconnected = false
+				delay = interval
 			}
 		}
 	}()
 
-	return func() error {
-		close(stop)
-		<-done
-		return fatalErr
-	}
+	return heartbeat
 }
 
 func isLeaseNotRenewable(err error) bool {
