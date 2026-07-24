@@ -75,7 +75,11 @@ Every run owns its jobs, node visits, artifacts, waits, sessions, and changes. C
 
 Agent jobs stay Scheduled while queued and move the task to In Progress only when a worker starts the node. Base-workspace jobs cannot push. Change-workspace session credentials are restricted to the run branch. `flow complete` creates the typed artifact and completes the active agent node; change completion resolves and pushes the current branch and pins its head SHA.
 
-Review, verification, and repository checks are separate trusted handlers. Each graph-node visit gets distinct check identities so cycles run checks again. Failed checks from earlier visits remain visible but are made non-required when a later visit begins.
+Review, verification, and repository checks are separate trusted handlers. Each
+graph-node visit gets distinct check identities so cycles run checks again.
+Domain results select edges; execution errors instead open a durable operator
+wait. Failed checks from earlier visits remain visible but are made non-required
+when a later visit begins.
 
 ## Human control and terminal behavior
 
@@ -84,6 +88,7 @@ A human gate opens a durable wait and derives In Progress / Blocked. The owner c
 Owners may:
 
 - reset an active run, cancelling its jobs, leases, sessions, and active node and returning the task to Unscheduled while retaining history;
+- retry an execution-failure wait, rerunning only errored checks when the current node is a same-revision check barrier;
 - extend an exhausted transition budget;
 - force Done with any fixed resolution except `merged`; or
 - reopen any Done task, including a merged task, as a new Unscheduled run.

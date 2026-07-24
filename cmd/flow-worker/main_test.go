@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -126,6 +128,85 @@ func TestAdvisoryVerdictFindingsStayInCheckDetailsWithoutThreadActions(t *testin
 	applyVerdictActions(nil, coordinator.CheckKindReviewer, false, flowworker.Lease{}, workerexec.RunResult{}, report, &stdout)
 	if !strings.Contains(stdout.String(), "retained 2 advisory finding(s)") || !strings.Contains(stdout.String(), "no review threads changed") {
 		t.Fatalf("advisory action output = %q", stdout.String())
+	}
+}
+
+func TestReviewerHarnessFailureReportsErroredInsteadOfBlocked(t *testing.T) {
+	var reported struct {
+		Verdict string `json:"verdict"`
+		Details string `json:"details"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v2/tasks/t-review/checks/security-review" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&reported); err != nil {
+			t.Errorf("decode report: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"check":{"task_id":"t-review","name":"security-review","kind":"reviewer","required":true,"verdict":"errored"},"review_state":"in_review"}`)
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := flowclient.New(config.ClientConfig{ServerURL: server.URL, Token: "worker-token"})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	taskID := "t-review"
+	job := flowworker.Job{
+		ID:             "j-review",
+		TaskID:         &taskID,
+		Role:           flowworker.RoleReviewer,
+		CapacityBucket: flowworker.BucketPersistentAgent,
+		Payload:        map[string]any{"blocking": true},
+	}
+	result := workerexec.RunResult{
+		ExitCode: 1,
+		Err:      errors.New("agent transcript invalid after assistant turn"),
+		Payload: workerexec.JobPayload{
+			CheckName: "security-review",
+		},
+		VerdictFilePath: filepath.Join(t.TempDir(), workerexec.VerdictFileName),
+	}
+	var stdout bytes.Buffer
+	verdict, err := reportCheckIfNeeded(client, job, flowworker.Lease{ID: "l-review"}, result, &stdout)
+	if err == nil {
+		t.Fatal("report check error = nil, want worker job failure after errored report")
+	}
+	if verdict != coordinator.CheckErrored {
+		t.Fatalf("reported result = %q, want errored", verdict)
+	}
+	if reported.Verdict != string(coordinator.CheckErrored) {
+		t.Fatalf("reported verdict = %q, want errored", reported.Verdict)
+	}
+	if !strings.Contains(reported.Details, "agent transcript invalid") {
+		t.Fatalf("reported details = %q, want harness failure", reported.Details)
+	}
+	if strings.Contains(stdout.String(), "falling back to exit code") {
+		t.Fatalf("worker output used exit-code fallback: %q", stdout.String())
+	}
+}
+
+func TestStructuredCheckResultIsAuthoritativeForJobState(t *testing.T) {
+	result := workerexec.RunResult{
+		FinalState: flowworker.JobFailed,
+		ExitCode:   1,
+		Err:        errors.New("diagnostic process failure"),
+	}
+	for _, verdict := range []coordinator.CheckVerdict{coordinator.CheckSatisfied, coordinator.CheckBlocked} {
+		if got := finalStateForCheckReport(result, verdict, nil, false); got != flowworker.JobFinished {
+			t.Fatalf("final state for %s verdict = %s, want finished", verdict, got)
+		}
+	}
+	if got := finalStateForCheckReport(result, coordinator.CheckErrored, errors.New("invalid verdict"), false); got != flowworker.JobFailed {
+		t.Fatalf("final state for execution error = %s, want failed", got)
+	}
+	if got := finalStateForCheckReport(result, coordinator.CheckSatisfied, nil, true); got != flowworker.JobCanceled {
+		t.Fatalf("final state for stale result = %s, want canceled", got)
 	}
 }
 

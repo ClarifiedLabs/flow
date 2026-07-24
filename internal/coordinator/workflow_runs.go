@@ -47,6 +47,13 @@ const (
 	WorkflowWaitOperatorIntervention WorkflowWaitKind = "operator_intervention"
 )
 
+type WorkflowWaitReason string
+
+const (
+	WorkflowWaitReasonExecutionFailed           WorkflowWaitReason = "execution_failed"
+	WorkflowWaitReasonTransitionBudgetExhausted WorkflowWaitReason = "transition_budget_exhausted"
+)
+
 type WorkflowRun struct {
 	ID                string           `json:"id"`
 	TaskID            string           `json:"task_id"`
@@ -84,13 +91,24 @@ type WorkflowNodeRun struct {
 }
 
 type WorkflowWait struct {
-	ID            string           `json:"id"`
-	WorkflowRunID string           `json:"workflow_run_id"`
-	NodeRunID     string           `json:"node_run_id,omitempty"`
-	Kind          WorkflowWaitKind `json:"kind"`
-	Message       string           `json:"message"`
-	CreatedBy     Actor            `json:"created_by"`
-	CreatedAt     time.Time        `json:"created_at"`
+	ID            string             `json:"id"`
+	WorkflowRunID string             `json:"workflow_run_id"`
+	NodeRunID     string             `json:"node_run_id,omitempty"`
+	Kind          WorkflowWaitKind   `json:"kind"`
+	Reason        WorkflowWaitReason `json:"reason,omitempty"`
+	Details       json.RawMessage    `json:"details,omitempty"`
+	Message       string             `json:"message"`
+	CreatedBy     Actor              `json:"created_by"`
+	CreatedAt     time.Time          `json:"created_at"`
+}
+
+type WorkflowExecutionFailure struct {
+	Operation string   `json:"operation"`
+	NodeKind  NodeKind `json:"node_kind,omitempty"`
+	Attempt   int      `json:"attempt,omitempty"`
+	CheckID   int64    `json:"check_id,omitempty"`
+	JobID     string   `json:"job_id,omitempty"`
+	Message   string   `json:"message"`
 }
 
 type WorkflowTransition struct {
@@ -459,26 +477,34 @@ WHERE id = (SELECT task_id FROM workflow_runs WHERE id = ?)`,
 	return updated, nil
 }
 
-// waitForAgentCrashLimit parks the active agent node after its bounded restart
-// budget is exhausted. It is idempotent so concurrent executor advances cannot
-// create duplicate waits or re-open an already parked workflow.
-func (s *WorkflowRunService) waitForAgentCrashLimit(ctx context.Context, nodeRunID string, attempts int) error {
+// PauseForExecutionError durably parks an active workflow without selecting an
+// outcome edge. It is idempotent so concurrent executor advances cannot create
+// duplicate operator waits.
+func (s *WorkflowRunService) PauseForExecutionError(ctx context.Context, runID, nodeRunID string, failure WorkflowExecutionFailure) error {
+	runID = strings.TrimSpace(runID)
 	nodeRunID = strings.TrimSpace(nodeRunID)
-	if nodeRunID == "" {
-		return errors.New("agent crash hold requires a node run id")
+	failure.Operation = strings.TrimSpace(failure.Operation)
+	failure.Message = strings.TrimSpace(failure.Message)
+	if runID == "" {
+		return errors.New("execution failure requires a workflow run id")
 	}
-	message := fmt.Sprintf(crashRestartLimitMessageFormat, attempts)
+	if failure.Operation == "" {
+		failure.Operation = "execute workflow node"
+	}
+	if failure.Message == "" {
+		failure.Message = "workflow phase failed without an error message"
+	}
+	const maxFailureMessage = 8 * 1024
+	if len(failure.Message) > maxFailureMessage {
+		failure.Message = failure.Message[:maxFailureMessage]
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	nodeRun, err := scanWorkflowNodeRun(tx.QueryRowContext(ctx, workflowNodeRunSelect+` WHERE id = ?`, nodeRunID))
-	if err != nil {
-		return err
-	}
-	run, err := scanWorkflowRun(tx.QueryRowContext(ctx, workflowRunSelect+` WHERE id = ?`, nodeRun.WorkflowRunID))
+	run, err := scanWorkflowRun(tx.QueryRowContext(ctx, workflowRunSelect+` WHERE id = ?`, runID))
 	if err != nil {
 		return err
 	}
@@ -487,7 +513,10 @@ func (s *WorkflowRunService) waitForAgentCrashLimit(ctx context.Context, nodeRun
 		if err != nil {
 			return err
 		}
-		if ok && wait.Kind == WorkflowWaitOperatorIntervention && wait.NodeRunID == nodeRun.ID {
+		if ok &&
+			wait.Kind == WorkflowWaitOperatorIntervention &&
+			wait.Reason == WorkflowWaitReasonExecutionFailed &&
+			wait.NodeRunID == nodeRunID {
 			return nil
 		}
 		return fmt.Errorf("%w: workflow is already waiting for another reason", ErrWorkflowConflict)
@@ -495,31 +524,234 @@ func (s *WorkflowRunService) waitForAgentCrashLimit(ctx context.Context, nodeRun
 	if run.State != WorkflowRunScheduled && run.State != WorkflowRunRunning {
 		return fmt.Errorf("%w: workflow run is %s", ErrWorkflowConflict, run.State)
 	}
-	if run.CurrentNodeRunID != nodeRun.ID {
-		return fmt.Errorf("%w: agent node is no longer current", ErrWorkflowConflict)
+	if nodeRunID != "" && run.CurrentNodeRunID != nodeRunID {
+		return fmt.Errorf("%w: workflow node is no longer current", ErrWorkflowConflict)
 	}
-	if nodeRun.State != WorkflowNodeQueued && nodeRun.State != WorkflowNodeRunning {
-		return fmt.Errorf("%w: agent node run is %s", ErrWorkflowConflict, nodeRun.State)
+
+	var nodeRun WorkflowNodeRun
+	if nodeRunID != "" {
+		nodeRun, err = scanWorkflowNodeRun(tx.QueryRowContext(ctx, workflowNodeRunSelect+` WHERE id = ?`, nodeRunID))
+		if err != nil {
+			return err
+		}
+		if nodeRun.WorkflowRunID != run.ID {
+			return fmt.Errorf("%w: node does not belong to workflow run", ErrWorkflowConflict)
+		}
+		if nodeRun.State != WorkflowNodeQueued && nodeRun.State != WorkflowNodeRunning && nodeRun.State != WorkflowNodeWaiting {
+			return fmt.Errorf("%w: workflow node is %s", ErrWorkflowConflict, nodeRun.State)
+		}
+		if failure.NodeKind == "" {
+			if node, ok := run.Snapshot.Node(nodeRun.NodeKey); ok {
+				failure.NodeKind = node.Kind
+			}
+		}
+		if failure.Attempt == 0 {
+			failure.Attempt = nodeRun.Attempt
+		}
 	}
 
 	now := s.now().UTC()
-	if err := enterWaitTx(ctx, tx, &run, &nodeRun, WorkflowWaitOperatorIntervention, message, ActorSystem, now); err != nil {
+	if nodeRunID != "" {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE workflow_node_runs
+SET state = ?, error = ?, completed_at = NULL
+WHERE id = ?`, string(WorkflowNodeWaiting), failure.Message, nodeRunID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE workflow_runs
+SET state = ?, started_at = COALESCE(started_at, ?), version = version + 1
+WHERE id = ?`, string(WorkflowRunWaiting), sqlitex.FormatTime(now), run.ID); err != nil {
 		return err
 	}
-	payload, err := json.Marshal(map[string]any{"attempts": attempts})
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `
+UPDATE tasks SET lifecycle_state = ?, updated_at = ? WHERE id = ?`,
+		string(LifecycleInProgress), sqlitex.FormatTime(now), run.TaskID); err != nil {
 		return err
+	}
+	payload, err := json.Marshal(failure)
+	if err != nil {
+		return fmt.Errorf("encode workflow execution failure: %w", err)
+	}
+	message := fmt.Sprintf("%s: %s", failure.Operation, failure.Message)
+	if err := insertWaitWithReasonTx(
+		ctx,
+		tx,
+		run.ID,
+		nodeRunID,
+		WorkflowWaitOperatorIntervention,
+		WorkflowWaitReasonExecutionFailed,
+		failure,
+		message,
+		ActorSystem,
+		now,
+	); err != nil {
+		return err
+	}
+	fromTaskState := LifecycleInProgress
+	if run.State == WorkflowRunScheduled {
+		fromTaskState = LifecycleScheduled
 	}
 	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
 		TaskID: run.TaskID, WorkflowRunID: run.ID,
-		FromTaskState: string(LifecycleInProgress), ToTaskState: string(LifecycleInProgress),
+		FromTaskState: string(fromTaskState), ToTaskState: string(LifecycleInProgress),
 		FromNodeKey: nodeRun.NodeKey, ToNodeKey: nodeRun.NodeKey,
-		Outcome: "crashed", EventKind: "agent_crash_limit_reached", PayloadJSON: string(payload),
+		EventKind: "node_execution_failed", PayloadJSON: string(payload),
 		Actor: string(ActorSystem), CreatedAt: now,
 	}); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// RetryExecution resolves an execution-failure wait and reruns only the current
+// node attempt. For check nodes, only errored checks are reset; completed
+// results for the same pinned change revision remain authoritative.
+func (s *WorkflowRunService) RetryExecution(ctx context.Context, taskID string, actor Actor) (WorkflowRun, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return WorkflowRun{}, errors.New("task id is required")
+	}
+	if actor == "" {
+		actor = ActorHuman
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return WorkflowRun{}, err
+	}
+	defer tx.Rollback()
+
+	run, err := scanWorkflowRun(tx.QueryRowContext(ctx, workflowRunSelect+`
+WHERE task_id = ? AND state = ?`, taskID, string(WorkflowRunWaiting)))
+	if err != nil {
+		return WorkflowRun{}, err
+	}
+	wait, ok, err := openWaitTx(ctx, tx, run.ID)
+	if err != nil {
+		return WorkflowRun{}, err
+	}
+	if !ok || wait.Kind != WorkflowWaitOperatorIntervention || wait.Reason != WorkflowWaitReasonExecutionFailed {
+		return WorkflowRun{}, fmt.Errorf("%w: workflow is not waiting on an execution failure", ErrWorkflowConflict)
+	}
+
+	var nodeRun WorkflowNodeRun
+	if run.CurrentNodeRunID != "" {
+		nodeRun, err = scanWorkflowNodeRun(tx.QueryRowContext(ctx, workflowNodeRunSelect+` WHERE id = ?`, run.CurrentNodeRunID))
+		if err != nil {
+			return WorkflowRun{}, err
+		}
+		if nodeRun.State != WorkflowNodeWaiting &&
+			nodeRun.State != WorkflowNodeQueued &&
+			nodeRun.State != WorkflowNodeRunning {
+			return WorkflowRun{}, fmt.Errorf("%w: workflow node is %s", ErrWorkflowConflict, nodeRun.State)
+		}
+		node, ok := run.Snapshot.Node(nodeRun.NodeKey)
+		if !ok {
+			return WorkflowRun{}, fmt.Errorf("snapshot node %q not found", nodeRun.NodeKey)
+		}
+		if node.Kind == NodeAutomatedChecks || node.Kind == NodeChangeReview || node.Kind == NodeVerifyChange {
+			if err := verifyPinnedChangeHeadTx(ctx, tx, run.CurrentArtifactID); err != nil {
+				return WorkflowRun{}, err
+			}
+		}
+	}
+
+	now := s.now().UTC()
+	resetChecks := int64(0)
+	if nodeRun.ID != "" {
+		result, err := tx.ExecContext(ctx, `
+UPDATE checks
+SET verdict = ?, exit_code = NULL, details = '', source_job_id = NULL,
+	reporter = 'coordinator', updated_at = ?
+WHERE task_id = ?
+	AND name LIKE ?
+	AND verdict = ?`,
+			string(CheckPending),
+			sqlitex.FormatTime(now),
+			run.TaskID,
+			"%.node."+nodeRun.ID,
+			string(CheckErrored),
+		)
+		if err != nil {
+			return WorkflowRun{}, err
+		}
+		resetChecks, err = result.RowsAffected()
+		if err != nil {
+			return WorkflowRun{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE workflow_node_runs
+SET attempt = attempt + 1, state = ?, error = '', started_at = NULL, completed_at = NULL
+WHERE id = ?`, string(WorkflowNodeQueued), nodeRun.ID); err != nil {
+			return WorkflowRun{}, err
+		}
+		nodeRun.Attempt++
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE workflow_runs SET state = ?, version = version + 1 WHERE id = ?`,
+		string(WorkflowRunRunning), run.ID); err != nil {
+		return WorkflowRun{}, err
+	}
+	if err := resolveOpenWaitTx(ctx, tx, run.ID, actor, now); err != nil {
+		return WorkflowRun{}, err
+	}
+	payload, err := json.Marshal(map[string]any{
+		"attempt":      nodeRun.Attempt,
+		"checks_reset": resetChecks,
+	})
+	if err != nil {
+		return WorkflowRun{}, err
+	}
+	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
+		TaskID: run.TaskID, WorkflowRunID: run.ID,
+		FromTaskState: string(LifecycleInProgress), ToTaskState: string(LifecycleInProgress),
+		FromNodeKey: nodeRun.NodeKey, ToNodeKey: nodeRun.NodeKey,
+		EventKind: "node_retry_requested", PayloadJSON: string(payload),
+		Actor: string(actor), CreatedAt: now,
+	}); err != nil {
+		return WorkflowRun{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return WorkflowRun{}, err
+	}
+	return s.Get(ctx, run.ID)
+}
+
+func verifyPinnedChangeHeadTx(ctx context.Context, tx *sql.Tx, artifactID string) error {
+	artifactID = strings.TrimSpace(artifactID)
+	if artifactID == "" {
+		return nil
+	}
+	var kind string
+	var payloadJSON sql.NullString
+	if err := tx.QueryRowContext(ctx, `
+SELECT kind, payload_json FROM workflow_artifacts WHERE id = ?`, artifactID).Scan(&kind, &payloadJSON); err != nil {
+		return err
+	}
+	if ArtifactKind(kind) != ArtifactChange {
+		return nil
+	}
+	var payload struct {
+		ChangeID string `json:"change_id"`
+		HeadSHA  string `json:"head_sha"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON.String), &payload); err != nil {
+		return fmt.Errorf("decode pinned change artifact: %w", err)
+	}
+	var currentHead string
+	if err := tx.QueryRowContext(ctx, `SELECT head_sha FROM changes WHERE id = ?`, strings.TrimSpace(payload.ChangeID)).Scan(&currentHead); err != nil {
+		return err
+	}
+	if strings.TrimSpace(currentHead) != strings.TrimSpace(payload.HeadSHA) {
+		return fmt.Errorf(
+			"%w: change head moved from %s to %s; reset or start a new workflow run",
+			ErrWorkflowConflict,
+			strings.TrimSpace(payload.HeadSHA),
+			strings.TrimSpace(currentHead),
+		)
+	}
+	return nil
 }
 
 func (s *WorkflowRunService) GetNodeRun(ctx context.Context, nodeRunID string) (WorkflowNodeRun, bool, error) {
@@ -667,8 +899,18 @@ UPDATE workflow_runs SET state = ?, current_node_key = ?, current_node_run_id = 
 WHERE id = ?`, string(WorkflowRunWaiting), target, sqlitex.NullableNonEmptyString(artifactID), used, run.ID); err != nil {
 			return CompleteWorkflowNodeResult{}, err
 		}
-		if err := insertWaitTx(ctx, tx, run.ID, "", WorkflowWaitOperatorIntervention,
-			"Workflow transition budget exhausted", ActorSystem, now); err != nil {
+		if err := insertWaitWithReasonTx(
+			ctx,
+			tx,
+			run.ID,
+			"",
+			WorkflowWaitOperatorIntervention,
+			WorkflowWaitReasonTransitionBudgetExhausted,
+			map[string]any{"transition_budget": run.TransitionBudget, "transitions_used": used},
+			"Workflow transition budget exhausted",
+			ActorSystem,
+			now,
+		); err != nil {
 			return CompleteWorkflowNodeResult{}, err
 		}
 		if err := tx.Commit(); err != nil {
@@ -759,7 +1001,9 @@ WHERE task_id = ? AND state = 'waiting'`, taskID))
 	if err != nil {
 		return WorkflowRun{}, err
 	}
-	if !ok || wait.Kind != WorkflowWaitOperatorIntervention || !strings.Contains(wait.Message, "transition budget") {
+	if !ok ||
+		wait.Kind != WorkflowWaitOperatorIntervention ||
+		wait.Reason != WorkflowWaitReasonTransitionBudgetExhausted {
 		return WorkflowRun{}, fmt.Errorf("%w: workflow is not waiting on its transition budget", ErrWorkflowConflict)
 	}
 	if run.TransitionBudget+additional > MaxFlowTransitionBudget {
@@ -821,6 +1065,9 @@ UPDATE workflow_runs SET state = ?, cancelled_at = ?, current_node_run_id = NULL
 		return WorkflowRun{}, err
 	}
 	if err := resolveOpenWaitTx(ctx, tx, run.ID, actor, now); err != nil {
+		return WorkflowRun{}, err
+	}
+	if err := retireIncompleteWorkflowChecksTx(ctx, tx, taskID, run.ID, now); err != nil {
 		return WorkflowRun{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -899,6 +1146,9 @@ UPDATE workflow_runs SET state = ?, completed_at = ?, completion_source = 'owner
 		if err := resolveOpenWaitTx(ctx, tx, runID.String, actor, now); err != nil {
 			return Task{}, err
 		}
+		if err := retireIncompleteWorkflowChecksTx(ctx, tx, taskID, runID.String, now); err != nil {
+			return Task{}, err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE tasks SET lifecycle_state = ?, done_resolution = ?, done_at = ?, updated_at = ? WHERE id = ?`,
@@ -917,6 +1167,27 @@ UPDATE tasks SET lifecycle_state = ?, done_resolution = ?, done_at = ?, updated_
 		return Task{}, err
 	}
 	return s.tasks.GetTask(ctx, taskID)
+}
+
+func retireIncompleteWorkflowChecksTx(ctx context.Context, tx *sql.Tx, taskID, runID string, now time.Time) error {
+	_, err := tx.ExecContext(ctx, `
+UPDATE checks
+SET required = 0, updated_at = ?
+WHERE task_id = ?
+	AND required = 1
+	AND verdict != ?
+	AND EXISTS (
+		SELECT 1
+		FROM workflow_node_runs AS node
+		WHERE node.workflow_run_id = ?
+			AND checks.name LIKE '%.node.' || node.id
+	)`,
+		sqlitex.FormatTime(now),
+		taskID,
+		string(CheckSatisfied),
+		runID,
+	)
+	return err
 }
 
 func (s *WorkflowRunService) Reopen(ctx context.Context, taskID string, actor Actor) (Task, error) {
@@ -1180,14 +1451,37 @@ func humanGateWaitMessage(node FlowNodeSnapshot) string {
 }
 
 func insertWaitTx(ctx context.Context, tx *sql.Tx, runID, nodeRunID string, kind WorkflowWaitKind, message string, actor Actor, now time.Time) error {
+	return insertWaitWithReasonTx(ctx, tx, runID, nodeRunID, kind, "", nil, message, actor, now)
+}
+
+func insertWaitWithReasonTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	runID, nodeRunID string,
+	kind WorkflowWaitKind,
+	reason WorkflowWaitReason,
+	details any,
+	message string,
+	actor Actor,
+	now time.Time,
+) error {
 	id, err := randomPrefixedID("ww")
 	if err != nil {
 		return err
 	}
+	detailsJSON := []byte("{}")
+	if details != nil {
+		detailsJSON, err = json.Marshal(details)
+		if err != nil {
+			return fmt.Errorf("encode workflow wait details: %w", err)
+		}
+	}
 	_, err = tx.ExecContext(ctx, `
-INSERT INTO workflow_waits (id, workflow_run_id, node_run_id, kind, message, state, created_by, created_at)
-VALUES (?, ?, ?, ?, ?, 'open', ?, ?)`, id, runID, sqlitex.NullableNonEmptyString(nodeRunID),
-		string(kind), strings.TrimSpace(message), string(actor), sqlitex.FormatTime(now))
+INSERT INTO workflow_waits (
+	id, workflow_run_id, node_run_id, kind, reason, details_json, message, state, created_by, created_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`, id, runID, sqlitex.NullableNonEmptyString(nodeRunID),
+		string(kind), string(reason), string(detailsJSON), strings.TrimSpace(message), string(actor), sqlitex.FormatTime(now))
 	return err
 }
 
@@ -1307,14 +1601,24 @@ func scanWorkflowNodeRun(scanner taskScanner) (WorkflowNodeRun, error) {
 }
 
 const workflowWaitSelect = `
-SELECT id, workflow_run_id, node_run_id, kind, message, created_by, created_at
+SELECT id, workflow_run_id, node_run_id, kind, reason, details_json, message, created_by, created_at
 FROM workflow_waits`
 
 func scanWorkflowWaitMaybe(scanner taskScanner) (WorkflowWait, bool, error) {
 	var wait WorkflowWait
 	var nodeRunID sql.NullString
-	var kind, actor, createdAt string
-	if err := scanner.Scan(&wait.ID, &wait.WorkflowRunID, &nodeRunID, &kind, &wait.Message, &actor, &createdAt); err != nil {
+	var kind, reason, detailsJSON, actor, createdAt string
+	if err := scanner.Scan(
+		&wait.ID,
+		&wait.WorkflowRunID,
+		&nodeRunID,
+		&kind,
+		&reason,
+		&detailsJSON,
+		&wait.Message,
+		&actor,
+		&createdAt,
+	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return WorkflowWait{}, false, nil
 		}
@@ -1322,6 +1626,8 @@ func scanWorkflowWaitMaybe(scanner taskScanner) (WorkflowWait, bool, error) {
 	}
 	wait.NodeRunID = nodeRunID.String
 	wait.Kind = WorkflowWaitKind(kind)
+	wait.Reason = WorkflowWaitReason(reason)
+	wait.Details = json.RawMessage(detailsJSON)
 	wait.CreatedBy = Actor(actor)
 	parsed, err := sqlitex.ParseTime(createdAt)
 	if err != nil {

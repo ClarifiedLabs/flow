@@ -94,6 +94,8 @@ flow task edit --title TITLE TASK_ID
 flow task schedule TASK_ID
 flow task workflow TASK_ID
 flow task respond TASK_ID --node-run NODE_RUN_ID --outcome OUTCOME --feedback "..."
+flow task retry TASK_ID
+flow task budget TASK_ID --additional N
 flow task reset TASK_ID
 flow task done TASK_ID --resolution completed
 flow task reopen TASK_ID

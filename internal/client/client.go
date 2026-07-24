@@ -390,6 +390,16 @@ func (c *Client) ExtendWorkflowBudget(taskID string, additional int) (coordinato
 	return response.Run, nil
 }
 
+func (c *Client) RetryWorkflow(taskID string) (coordinator.WorkflowRun, error) {
+	var response struct {
+		Run coordinator.WorkflowRun `json:"run"`
+	}
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/workflow/retry", map[string]string{}, nil, &response); err != nil {
+		return coordinator.WorkflowRun{}, err
+	}
+	return response.Run, nil
+}
+
 func (c *Client) SetTaskState(id string, state coordinator.TaskState) (coordinator.Task, error) {
 	var response taskResponse
 	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(id))+"/state", taskStateRequest{State: string(state)}, nil, &response); err != nil {
@@ -757,6 +767,7 @@ func (c *Client) GetCheck(taskID string, name string) (CheckResult, error) {
 		Check:            response.Check,
 		ReviewState:      response.ReviewState,
 		FollowUpFailures: response.FollowUpFailures,
+		Workflow:         response.Workflow,
 	}, nil
 }
 
@@ -780,6 +791,7 @@ func (c *Client) ReportCheck(taskID string, name string, input ReportCheckInput)
 		Check:            response.Check,
 		ReviewState:      response.ReviewState,
 		FollowUpFailures: response.FollowUpFailures,
+		Workflow:         response.Workflow,
 	}, nil
 }
 
@@ -1615,6 +1627,7 @@ type CheckResult struct {
 	Check            coordinator.Check
 	ReviewState      coordinator.ReviewState
 	FollowUpFailures []CheckFollowUpFailure
+	Workflow         *coordinator.WorkflowRun
 }
 
 type CheckFollowUpFailure = contract.CheckFollowUpFailure

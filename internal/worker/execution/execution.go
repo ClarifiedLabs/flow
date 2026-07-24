@@ -165,8 +165,8 @@ type RunResult struct {
 	Worktree   string
 	Payload    JobPayload
 	// VerdictFilePath is where the check job's structured verdict file
-	// (FLOW_VERDICT_FILE) lives. Callers read it after the entrypoint exits to
-	// prefer a written verdict over the exit-code mapping.
+	// (FLOW_VERDICT_FILE) lives. Callers read it after the entrypoint exits as
+	// the required reviewer/verifier result.
 	VerdictFilePath string
 	// TranscriptPath is the local file the worker piped tmux pane output to.
 	// Empty when transcript capture could not be started. The caller uploads

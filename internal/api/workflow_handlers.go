@@ -326,6 +326,27 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 			}
 		}
 		writeJSON(w, http.StatusOK, workflowRunResponse{Run: run})
+	case "retry":
+		if !requireMethod(w, r, http.MethodPost) || !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+			return
+		}
+		run, err := s.workflowRuns.RetryExecution(r.Context(), taskID, coordinator.ActorHuman)
+		if err != nil {
+			writeWorkflowError(w, err, "retry_workflow_failed")
+			return
+		}
+		if s.workflowExecutor != nil {
+			if err := s.workflowExecutor.Advance(r.Context(), run.ID); err != nil {
+				writeWorkflowError(w, err, "advance_workflow_failed")
+				return
+			}
+			run, err = s.workflowRuns.Get(r.Context(), run.ID)
+			if err != nil {
+				writeWorkflowError(w, err, "load_workflow_failed")
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, workflowRunResponse{Run: run})
 	case "advance":
 		if !requireMethod(w, r, http.MethodPost) || !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
 			return

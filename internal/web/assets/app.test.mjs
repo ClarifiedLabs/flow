@@ -798,6 +798,42 @@ test("review run action posts to task review endpoint and refreshes", async () =
   assert.equal(status.textContent, "");
 });
 
+test("workflow retry action posts to the owner retry endpoint and refreshes", async () => {
+  let clickHandler;
+  const button = {
+    dataset: { workflowRetry: "t-alpha-0001", project: "p-alpha" },
+    disabled: false,
+    addEventListener(event, handler) {
+      if (event === "click") clickHandler = handler;
+    },
+  };
+  const fetchCalls = [];
+  const context = await scriptContext({}, {
+    fetch(path, options) {
+      fetchCalls.push({ path, options });
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ run: { id: "wr-1", state: "running" } }),
+      });
+    },
+  });
+  const app = new context.FlowApp();
+  app.querySelectorAll = (selector) => (selector === "[data-workflow-retry]" ? [button] : []);
+  app.querySelector = () => ({ textContent: "" });
+  let refreshed = false;
+  app.bindTaskActions(async () => {
+    refreshed = true;
+  });
+
+  await clickHandler();
+
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/workflow/retry");
+  assert.equal(fetchCalls[0].options.method, "POST");
+  assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
+  assert.equal(button.disabled, false);
+  assert.equal(refreshed, true);
+});
+
 test("triage edit action patches task title and refreshes", async () => {
   const harness = await triageEditHarness({ promptValue: "  New triage title  " });
 
@@ -1963,6 +1999,89 @@ test("task detail renders a human gate wait as a full-width approval panel", asy
   assert.ok(html.indexOf("human-attention-panel") < html.indexOf("task-detail-grid"));
 });
 
+test("task detail offers retry and diagnostics only for execution-failure waits", async () => {
+  const harness = await browserSmokeHarness("/ui/projects/p-alpha/tasks/t-alpha-0001", {
+    "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001": {
+      project_id: "p-alpha",
+      task: {
+        id: "t-alpha-0001",
+        title: "Failed review",
+        state: "in_progress",
+        priority: 1,
+        updated_at: "2026-07-23T12:00:00Z",
+      },
+      task_detail: {
+        checks: [{
+          id: 42,
+          task_id: "t-alpha-0001",
+          name: "security-review.node.nr-review",
+          kind: "reviewer",
+          required: true,
+          verdict: "errored",
+          details: "agent transcript invalid",
+        }],
+      },
+    },
+    "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/workflow": {
+      detail: {
+        run: {
+          id: "wr-1",
+          task_id: "t-alpha-0001",
+          state: "waiting",
+          current_node_key: "review",
+          current_node_run_id: "nr-review",
+          transition_budget: 50,
+          snapshot: {
+            flow_name: "secure flow",
+            start_node: "review",
+            nodes: [{ key: "review", name: "Security review", kind: "change_review", config: {} }],
+            edges: [],
+          },
+        },
+        node_runs: [{
+          id: "nr-review",
+          workflow_run_id: "wr-1",
+          node_key: "review",
+          visit: 1,
+          attempt: 1,
+          state: "waiting",
+          error: "agent transcript invalid",
+        }],
+        transitions: [],
+        open_wait: {
+          id: "wait-1",
+          workflow_run_id: "wr-1",
+          node_run_id: "nr-review",
+          kind: "operator_intervention",
+          reason: "execution_failed",
+          message: "run required reviewer check: agent transcript invalid",
+          details: {
+            operation: "run required reviewer check",
+            node_kind: "change_review",
+            attempt: 1,
+            check_id: 42,
+            job_id: "j-review",
+            message: "agent transcript invalid",
+          },
+        },
+      },
+    },
+  });
+
+  await harness.app.load();
+
+  const html = harness.content.innerHTML;
+  assert.match(html, /Workflow step failed/);
+  assert.match(html, /agent transcript invalid/);
+  assert.match(html, /Operation: run required reviewer check/);
+  assert.match(html, /Check: 42/);
+  assert.match(html, /Job: j-review/);
+  assert.match(html, /data-workflow-retry="t-alpha-0001"/);
+  assert.match(html, /data-job-transcript="j-review"/);
+  assert.doesNotMatch(html, /data-workflow-budget/);
+  assert.match(html, /errored/);
+});
+
 test("attachment previews are limited to safe raster image types", async () => {
   const context = await scriptContext();
 
@@ -2813,6 +2932,7 @@ test("check verdict badges map verdicts to status classes with pending fallback"
 
   assert.equal(context.renderVerdictBadge("satisfied"), `<span class="badge ok">satisfied</span>`);
   assert.equal(context.renderVerdictBadge("blocked"), `<span class="badge danger">blocked</span>`);
+  assert.equal(context.renderVerdictBadge("errored"), `<span class="badge danger">errored</span>`);
   assert.equal(context.renderVerdictBadge("failed"), `<span class="badge danger">failed</span>`);
   assert.equal(context.renderVerdictBadge("rejected"), `<span class="badge danger">rejected</span>`);
   assert.equal(context.renderVerdictBadge("needs_rerun"), `<span class="badge idle">needs rerun</span>`);

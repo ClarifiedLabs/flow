@@ -38,8 +38,8 @@
      and `"blocked"` when you filed concerns or the change cannot be reviewed reliably.
      `reason` and each comment `body` are free text (<= 4096 bytes each); at most 50
      comments. Re-filing the same comment is a no-op, so a retry never double-files.
-   - Also set the exit code as belt-and-braces: exit `0` when satisfied, nonzero when blocked.
-     The verdict file wins when present; the exit code is the fallback if it is missing.
+   - The verdict file is required. If it is missing or invalid, Flow pauses the workflow
+     for a human retry instead of interpreting the process exit as a review result.
    - Cross-check: a `satisfied` verdict is overridden to `blocked` when open review
      threads remain on the change (including ones you just filed), so do not report
      `satisfied` alongside blocking comments.

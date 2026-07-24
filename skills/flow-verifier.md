@@ -42,5 +42,5 @@
      must be `certify` or `reopen`; `reopen` requires a non-empty `body`. `reason` and
      each `body` are free text (<= 4096 bytes each); at most 100 decisions. Re-applying a
      decision that already took effect is a no-op, so a retry is safe.
-   - Also set the exit code as belt-and-braces: exit `0` when satisfied, nonzero when blocked.
-     The verdict file wins when present; the exit code is the fallback if it is missing.
+   - The verdict file is required. If it is missing or invalid, Flow pauses the workflow
+     for a human retry instead of interpreting the process exit as a verification result.

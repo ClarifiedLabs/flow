@@ -837,25 +837,31 @@ func (s *CheckConfigService) ensureCheckExists(ctx context.Context, taskID strin
 }
 
 func (s *CheckConfigService) enqueueCheckJob(ctx context.Context, taskID string, change Change, definition CheckDefinition) (bool, error) {
-	return s.enqueueCheckJobForWorkflow(ctx, taskID, change, definition, "", "")
+	_, created, err := s.enqueueCheckJobForWorkflow(ctx, taskID, change, definition, "", "")
+	return created, err
 }
 
-func (s *CheckConfigService) enqueueCheckJobForWorkflow(ctx context.Context, taskID string, change Change, definition CheckDefinition, workflowRunID, nodeRunID string) (bool, error) {
+func (s *CheckConfigService) enqueueCheckJobForWorkflow(ctx context.Context, taskID string, change Change, definition CheckDefinition, workflowRunID, nodeRunID string) (flowworker.Job, bool, error) {
 	role, bucket, err := jobRoleForCheck(definition.Kind)
 	if err != nil {
-		return false, err
+		return flowworker.Job{}, false, err
 	}
 	headSHA := strings.TrimSpace(change.HeadSHA)
 	dispatchKey := ""
+	nodeAttempt := 0
 	if strings.TrimSpace(nodeRunID) != "" {
-		dispatchKey = workflowCheckDispatchKey(nodeRunID, definition.Name)
+		if err := s.db.QueryRowContext(ctx, `
+SELECT attempt FROM workflow_node_runs WHERE id = ?`, nodeRunID).Scan(&nodeAttempt); err != nil {
+			return flowworker.Job{}, false, err
+		}
+		dispatchKey = workflowCheckDispatchKey(nodeRunID, nodeAttempt, definition.Name)
 	} else {
 		exists, err := s.liveCheckJobExists(ctx, taskID, change.ID, role, definition.Name, headSHA)
 		if err != nil {
-			return false, err
+			return flowworker.Job{}, false, err
 		}
 		if exists {
-			return false, nil
+			return flowworker.Job{}, false, nil
 		}
 	}
 
@@ -868,6 +874,9 @@ func (s *CheckConfigService) enqueueCheckJobForWorkflow(ctx context.Context, tas
 		"base":       change.Base,
 		"blocking":   requiredForCheckDefinition(definition),
 	}
+	if nodeAttempt > 0 {
+		payload["node_attempt"] = nodeAttempt
+	}
 	if strings.TrimSpace(definition.roleInstructions) != "" {
 		payload["role_instructions"] = definition.roleInstructions
 	}
@@ -875,7 +884,7 @@ func (s *CheckConfigService) enqueueCheckJobForWorkflow(ctx context.Context, tas
 	if (role == flowworker.RoleReviewer || role == flowworker.RoleVerifier) && s.threads != nil {
 		reviewContext, err := s.threads.ReviewContextForTask(ctx, taskID)
 		if err != nil {
-			return false, err
+			return flowworker.Job{}, false, err
 		}
 		payload["review_context"] = reviewContext
 	}
@@ -893,19 +902,39 @@ func (s *CheckConfigService) enqueueCheckJobForWorkflow(ctx context.Context, tas
 		Payload:        payload,
 	}
 	if dispatchKey != "" {
-		_, created, err := s.workers.EnqueueJobWithDispatchKey(ctx, dispatchKey, input)
-		return created, err
+		job, created, err := s.workers.EnqueueJobWithDispatchKey(ctx, dispatchKey, input)
+		if err != nil {
+			return flowworker.Job{}, false, err
+		}
+		if err := s.bindPendingWorkflowCheckJob(ctx, taskID, definition.Name, job.ID); err != nil {
+			return flowworker.Job{}, false, err
+		}
+		return job, created, nil
 	}
 	job, err := s.workers.EnqueueJob(ctx, input)
 	if err != nil {
 		exists, lookupErr := s.liveCheckJobExists(ctx, taskID, change.ID, role, definition.Name, headSHA)
 		if lookupErr == nil && exists {
-			return false, nil
+			return flowworker.Job{}, false, nil
 		}
-		return false, err
+		return flowworker.Job{}, false, err
 	}
 
-	return job.ID != "", nil
+	return job, job.ID != "", nil
+}
+
+func (s *CheckConfigService) bindPendingWorkflowCheckJob(ctx context.Context, taskID, checkName, jobID string) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE checks
+SET source_job_id = ?, updated_at = ?
+WHERE task_id = ? AND name = ? AND verdict = ?`,
+		jobID,
+		formatTime(s.checks.now().UTC()),
+		taskID,
+		checkName,
+		string(CheckPending),
+	)
+	return err
 }
 
 type WorkflowCheckMode string
@@ -968,7 +997,7 @@ SET required = 0,
 	updated_at = ?
 WHERE task_id = ?
 	AND required = 1
-	AND verdict IN (?, ?)
+	AND verdict IN (?, ?, ?)
 	AND EXISTS (
 		SELECT 1
 		FROM workflow_node_runs AS current_node
@@ -983,7 +1012,7 @@ WHERE task_id = ?
 			)
 			AND checks.name LIKE '%.node.' || prior_node.id
 	)`, string(CheckSkipped), "retired by a later visit to this workflow node", "Retired by a later visit to this workflow node.", formatTime(s.checks.now().UTC()),
-		task.ID, string(CheckPending), string(CheckBlocked), nodeRunID, workflowRunID); err != nil {
+		task.ID, string(CheckPending), string(CheckBlocked), string(CheckErrored), nodeRunID, workflowRunID); err != nil {
 		return nil, fmt.Errorf("retire prior workflow checks: %w", err)
 	}
 
@@ -998,7 +1027,31 @@ WHERE task_id = ?
 			return nil, err
 		}
 		if check.Verdict == CheckPending {
-			if _, err := s.enqueueCheckJobForWorkflow(ctx, task.ID, change, definition, workflowRunID, nodeRunID); err != nil {
+			if check.SourceJobID != nil {
+				job, err := s.workers.GetJob(ctx, *check.SourceJobID)
+				if err != nil {
+					return nil, fmt.Errorf("load source job for check %s: %w", definition.Name, err)
+				}
+				if flowworker.IsTerminalJobState(job.State) {
+					if _, err := s.checks.ReportCheck(ctx, ReportCheckInput{
+						TaskID:      task.ID,
+						Name:        definition.Name,
+						Kind:        definition.Kind,
+						Required:    definition.Required,
+						Verdict:     CheckErrored,
+						Details:     fmt.Sprintf("check job %s ended in state %s without reporting a result", job.ID, job.State),
+						SourceJobID: &job.ID,
+						Reporter:    "coordinator",
+					}); err != nil {
+						return nil, err
+					}
+					names = append(names, definition.Name)
+					continue
+				}
+				names = append(names, definition.Name)
+				continue
+			}
+			if _, _, err := s.enqueueCheckJobForWorkflow(ctx, task.ID, change, definition, workflowRunID, nodeRunID); err != nil {
 				return nil, err
 			}
 		}
@@ -1007,8 +1060,13 @@ WHERE task_id = ?
 	return names, nil
 }
 
-func workflowCheckDispatchKey(nodeRunID, checkName string) string {
-	return "workflow-check:" + strings.TrimSpace(nodeRunID) + ":" + strings.TrimSpace(checkName)
+func workflowCheckDispatchKey(nodeRunID string, attempt int, checkName string) string {
+	return fmt.Sprintf(
+		"workflow-check:%s:%d:%s",
+		strings.TrimSpace(nodeRunID),
+		attempt,
+		strings.TrimSpace(checkName),
+	)
 }
 
 func workflowNodeCheckName(name, nodeRunID string, index int) string {

@@ -442,6 +442,8 @@ func runTask(args []string, stdout, stderr io.Writer) int {
 		return runTaskRespond(args[1:], stdout, stderr)
 	case "budget":
 		return runTaskBudget(args[1:], stdout, stderr)
+	case "retry":
+		return runTaskRetry(args[1:], stdout, stderr)
 	case "link":
 		return runTaskLink(args[1:], stdout, stderr)
 	case "unlink":
@@ -892,6 +894,20 @@ func runTaskBudget(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "%s\t%d/%d\n", run.TaskID, run.TransitionsUsed, run.TransitionBudget)
+	return 0
+}
+
+func runTaskRetry(args []string, stdout, stderr io.Writer) int {
+	parsed, taskRef, code := parseScopedTaskAPICommand(args, stderr, "task retry", 1, "usage: flow task retry [flags] TASK_ID")
+	if code != 0 {
+		return code
+	}
+	run, err := parsed.client.RetryWorkflow(taskRef)
+	if err != nil {
+		fmt.Fprintf(stderr, "retry workflow: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s\t%s\t%s\n", run.TaskID, run.State, run.CurrentNodeKey)
 	return 0
 }
 
@@ -2714,7 +2730,7 @@ func printUsage(out io.Writer) {
   flow task show [--project PROJECT] TASK_ID
   flow task reply TASK_ID MESSAGE
   flow task schedule TASK_ID
-  flow task reset|reopen|workflow TASK_ID
+  flow task reset|reopen|retry|workflow TASK_ID
   flow task respond TASK_ID --node-run NODE_RUN_ID --outcome OUTCOME [--feedback TEXT]
   flow task budget TASK_ID --additional N
   flow task done TASK_ID [--resolution RESOLUTION]
@@ -2761,6 +2777,7 @@ func printTaskUsage(out io.Writer) {
   flow task workflow [flags] TASK_ID
   flow task respond [flags] TASK_ID --node-run NODE_RUN_ID --outcome OUTCOME
   flow task budget [flags] TASK_ID --additional N
+  flow task retry [flags] TASK_ID
   flow task link [flags] SOURCE_ID blocks|parent_of|related_to TARGET_ID
   flow task unlink [flags] SOURCE_ID blocks|parent_of|related_to TARGET_ID
 `)

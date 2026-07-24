@@ -3,8 +3,10 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -283,5 +285,161 @@ func TestWorkflowExecutorParallelReviewBarrier(t *testing.T) {
 			t.Fatalf("final advance: %v", err)
 		}
 		fixture.assertReviewOutcome(t, "changes_requested")
+	})
+
+	t.Run("pauses on a required reviewer execution error and retries only that check", func(t *testing.T) {
+		fixture := newReviewBarrierFixture(t, barrierAgents(true))
+		ctx := context.Background()
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("initial advance: %v", err)
+		}
+		fixture.report(t, "code-review.node."+fixture.nodeID, CheckSatisfied)
+		fixture.report(t, "security-review.node."+fixture.nodeID, CheckErrored)
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("advance after reviewer execution error: %v", err)
+		}
+
+		detail, err := fixture.runs.Detail(ctx, fixture.runID)
+		if err != nil {
+			t.Fatalf("load paused workflow: %v", err)
+		}
+		if detail.Run.State != WorkflowRunWaiting ||
+			detail.OpenWait == nil ||
+			detail.OpenWait.Reason != WorkflowWaitReasonExecutionFailed {
+			t.Fatalf("workflow detail = %+v, want execution-failure wait", detail)
+		}
+		if state, err := fixture.checks.ReviewState(ctx, fixture.task.ID); err != nil || state != ReviewInReview {
+			t.Fatalf("review state = %s err=%v, want in_review", state, err)
+		}
+
+		retried, err := fixture.runs.RetryExecution(ctx, fixture.task.ID, ActorHuman)
+		if err != nil {
+			t.Fatalf("retry execution: %v", err)
+		}
+		if retried.State != WorkflowRunRunning {
+			t.Fatalf("retried run = %+v, want running", retried)
+		}
+		node, found, err := fixture.runs.GetNodeRun(ctx, fixture.nodeID)
+		if err != nil || !found || node.Attempt != 2 || node.State != WorkflowNodeQueued || node.Error != "" {
+			t.Fatalf("retried node = %+v found=%v err=%v", node, found, err)
+		}
+		satisfied, err := fixture.checks.GetCheck(ctx, fixture.task.ID, "code-review.node."+fixture.nodeID)
+		if err != nil || satisfied.Verdict != CheckSatisfied {
+			t.Fatalf("satisfied check after retry = %+v err=%v", satisfied, err)
+		}
+		errored, err := fixture.checks.GetCheck(ctx, fixture.task.ID, "security-review.node."+fixture.nodeID)
+		if err != nil || errored.Verdict != CheckPending || errored.SourceJobID != nil {
+			t.Fatalf("errored check after retry = %+v err=%v, want fresh pending", errored, err)
+		}
+
+		const retryAdvances = 10
+		retryErrs := make(chan error, retryAdvances)
+		var retryWG sync.WaitGroup
+		for i := 0; i < retryAdvances; i++ {
+			retryWG.Add(1)
+			go func() {
+				defer retryWG.Done()
+				if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+					retryErrs <- err
+				}
+			}()
+		}
+		retryWG.Wait()
+		close(retryErrs)
+		for err := range retryErrs {
+			t.Fatalf("concurrent advance after retry: %v", err)
+		}
+		jobs, err := fixture.workers.ListJobs(ctx)
+		if err != nil {
+			t.Fatalf("list jobs: %v", err)
+		}
+		attemptTwoJobs := 0
+		for _, job := range jobs {
+			if attempt, ok := job.Payload["node_attempt"].(float64); ok && int(attempt) == 2 {
+				attemptTwoJobs++
+				if job.Payload["check_name"] != "security-review.node."+fixture.nodeID {
+					t.Fatalf("retried wrong check: %+v", job.Payload)
+				}
+			}
+		}
+		if attemptTwoJobs != 1 {
+			t.Fatalf("attempt-two jobs = %d, want one errored-check retry; jobs=%+v", attemptTwoJobs, jobs)
+		}
+	})
+
+	t.Run("rejects retry after the pinned change head moves", func(t *testing.T) {
+		fixture := newReviewBarrierFixture(t, barrierAgents(true))
+		ctx := context.Background()
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("initial advance: %v", err)
+		}
+		fixture.report(t, "code-review.node."+fixture.nodeID, CheckErrored)
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("pause workflow: %v", err)
+		}
+		if _, err := fixture.db.DB().ExecContext(ctx, `
+UPDATE changes SET head_sha = 'head-moved' WHERE workflow_run_id = ?`, fixture.runID); err != nil {
+			t.Fatalf("move change head: %v", err)
+		}
+		if _, err := fixture.runs.RetryExecution(ctx, fixture.task.ID, ActorHuman); !errors.Is(err, ErrWorkflowConflict) {
+			t.Fatalf("retry error = %v, want workflow conflict", err)
+		}
+		detail, err := fixture.runs.Detail(ctx, fixture.runID)
+		if err != nil {
+			t.Fatalf("load still-paused workflow: %v", err)
+		}
+		if detail.Run.State != WorkflowRunWaiting || detail.OpenWait == nil {
+			t.Fatalf("workflow after rejected retry = %+v, want original wait", detail)
+		}
+		if _, err := fixture.runs.Reset(ctx, fixture.task.ID, ActorHuman); err != nil {
+			t.Fatalf("reset workflow after rejected retry: %v", err)
+		}
+		check, err := fixture.checks.GetCheck(ctx, fixture.task.ID, "code-review.node."+fixture.nodeID)
+		if err != nil {
+			t.Fatalf("load reset workflow check: %v", err)
+		}
+		if check.Required {
+			t.Fatalf("reset workflow check = %+v, want historical non-required result", check)
+		}
+	})
+
+	t.Run("reconciles a terminal check job that never reported", func(t *testing.T) {
+		fixture := newReviewBarrierFixture(t, barrierAgents(true))
+		ctx := context.Background()
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("initial advance: %v", err)
+		}
+		name := "code-review.node." + fixture.nodeID
+		check, err := fixture.checks.GetCheck(ctx, fixture.task.ID, name)
+		if err != nil {
+			t.Fatalf("load scheduled check: %v", err)
+		}
+		if check.SourceJobID == nil {
+			t.Fatalf("scheduled check = %+v, want bound source job", check)
+		}
+		if _, err := fixture.db.DB().ExecContext(ctx, `
+UPDATE jobs SET state = ? WHERE id = ?`, string(flowworker.JobFailed), *check.SourceJobID); err != nil {
+			t.Fatalf("fail source job: %v", err)
+		}
+
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("reconcile terminal source job: %v", err)
+		}
+		check, err = fixture.checks.GetCheck(ctx, fixture.task.ID, name)
+		if err != nil {
+			t.Fatalf("reload reconciled check: %v", err)
+		}
+		if check.Verdict != CheckErrored || !strings.Contains(check.Details, "without reporting a result") {
+			t.Fatalf("reconciled check = %+v, want errored missing-result detail", check)
+		}
+		detail, err := fixture.runs.Detail(ctx, fixture.runID)
+		if err != nil {
+			t.Fatalf("load paused workflow: %v", err)
+		}
+		if detail.Run.State != WorkflowRunWaiting ||
+			detail.OpenWait == nil ||
+			detail.OpenWait.Reason != WorkflowWaitReasonExecutionFailed {
+			t.Fatalf("workflow after missing check result = %+v, want execution-failure wait", detail)
+		}
 	})
 }

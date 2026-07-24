@@ -278,9 +278,10 @@ type WebBootstrapResponse struct {
 type CheckFollowUpFailure = lifecycle.FollowUpFailure
 
 type CheckResponse struct {
-	Check            coordinator.Check       `json:"check"`
-	ReviewState      coordinator.ReviewState `json:"review_state"`
-	FollowUpFailures []CheckFollowUpFailure  `json:"follow_up_failures,omitempty"`
+	Check            coordinator.Check        `json:"check"`
+	ReviewState      coordinator.ReviewState  `json:"review_state"`
+	FollowUpFailures []CheckFollowUpFailure   `json:"follow_up_failures,omitempty"`
+	Workflow         *coordinator.WorkflowRun `json:"workflow,omitempty"`
 }
 
 type ChecksResponse struct {

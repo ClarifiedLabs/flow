@@ -233,6 +233,8 @@ func uiRequiredCheckSummaryFromChecks(checks []coordinator.Check) uiRequiredChec
 			summary.Blocked++
 		case coordinator.CheckSkipped:
 			summary.Skipped++
+		case coordinator.CheckErrored:
+			summary.Errored++
 		}
 	}
 

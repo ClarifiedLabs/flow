@@ -3153,6 +3153,7 @@ func TestWorkerReviewerJobCanReportReviewerCheck(t *testing.T) {
 	var response checkResponse
 	doJSONRequestAs(t, fixture.Server, "reviewer-token", http.MethodPost, "/v2/tasks/"+started.Session.TaskID+"/checks/reviewer", reportCheckRequest{
 		Kind:        string(coordinator.CheckKindReviewer),
+		Verdict:     string(coordinator.CheckSatisfied),
 		SourceJobID: &sourceJobID,
 		LeaseID:     &leaseID,
 		ExitCode:    intPointer(0),
@@ -4371,7 +4372,7 @@ func TestSessionProcessExitRejectsConsoleSession(t *testing.T) {
 	}
 }
 
-func TestWorkflowAuthorProcessExitStopsAfterCrashRestartLimit(t *testing.T) {
+func TestWorkflowAuthorProcessExitPausesUntilHumanRetry(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	started := startAuthorSessionForStatusTest(t, fixture, "Bounded workflow author crashes")
@@ -4388,38 +4389,20 @@ func TestWorkflowAuthorProcessExitStopsAfterCrashRestartLimit(t *testing.T) {
 
 	crash(started.Session)
 	live := liveAuthorJobsForTask(t, fixture, taskID)
-	if len(live) != 1 {
-		t.Fatalf("live author jobs after first crash = %+v, want one automatic restart", live)
-	}
-
-	claimed := claimSpecificJob(t, fixture, "w-local", live[0].ID, []flowworker.CapacityBucket{flowworker.BucketPersistentAgent})
-	if _, err := fixture.Workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
-		t.Fatalf("mark restarted author running: %v", err)
-	}
-	if claimed.Job.NodeRunID != nil {
-		if _, err := fixture.Bundle.WorkflowRuns.MarkNodeRunning(ctx, *claimed.Job.NodeRunID); err != nil {
-			t.Fatalf("keep workflow node running: %v", err)
-		}
-	}
-	restarted, err := fixture.Sessions.StartAuthorSession(ctx, coordinator.StartAuthorSessionInput{
-		JobID: claimed.Job.ID, LeaseID: claimed.Lease.ID, WorkerID: "w-local",
-	})
-	if err != nil {
-		t.Fatalf("start restarted author session: %v", err)
-	}
-
-	crash(restarted.Session)
-	if live := liveAuthorJobsForTask(t, fixture, taskID); len(live) != 0 {
-		t.Fatalf("live author jobs after crash limit = %+v, want none", live)
+	if len(live) != 0 {
+		t.Fatalf("live author jobs after crash = %+v, want no automatic restart", live)
 	}
 	detail, err := fixture.Bundle.WorkflowRuns.Detail(ctx, runID)
 	if err != nil {
 		t.Fatalf("load crash-held workflow: %v", err)
 	}
-	if detail.Run.State != coordinator.WorkflowRunWaiting || detail.OpenWait == nil || detail.OpenWait.Kind != coordinator.WorkflowWaitOperatorIntervention {
-		t.Fatalf("workflow after crash limit = %+v, want operator intervention wait", detail)
+	if detail.Run.State != coordinator.WorkflowRunWaiting ||
+		detail.OpenWait == nil ||
+		detail.OpenWait.Kind != coordinator.WorkflowWaitOperatorIntervention ||
+		detail.OpenWait.Reason != coordinator.WorkflowWaitReasonExecutionFailed {
+		t.Fatalf("workflow after crash = %+v, want execution-failure wait", detail)
 	}
-	if !strings.Contains(detail.OpenWait.Message, "Author job crashed") {
+	if !strings.Contains(detail.OpenWait.Message, "ended in state crashed") {
 		t.Fatalf("crash wait message = %q, want crash explanation", detail.OpenWait.Message)
 	}
 
@@ -4430,5 +4413,22 @@ func TestWorkflowAuthorProcessExitStopsAfterCrashRestartLimit(t *testing.T) {
 	}
 	if live := liveAuthorJobsForTask(t, fixture, taskID); len(live) != 0 {
 		t.Fatalf("repeated advances re-enqueued author jobs: %+v", live)
+	}
+
+	var retry workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+taskID+"/workflow/retry", map[string]any{}, http.StatusOK, &retry)
+	if retry.Run.State != coordinator.WorkflowRunRunning {
+		t.Fatalf("retried workflow = %+v, want running", retry.Run)
+	}
+	live = liveAuthorJobsForTask(t, fixture, taskID)
+	if len(live) != 1 {
+		t.Fatalf("live author jobs after human retry = %+v, want one", live)
+	}
+	node, ok, err := fixture.Bundle.WorkflowRuns.GetNodeRun(ctx, retry.Run.CurrentNodeRunID)
+	if err != nil || !ok {
+		t.Fatalf("load retried node: ok=%t err=%v", ok, err)
+	}
+	if node.Attempt != 2 || node.State != coordinator.WorkflowNodeQueued || node.Error != "" {
+		t.Fatalf("retried node = %+v, want queued attempt 2 with cleared error", node)
 	}
 }

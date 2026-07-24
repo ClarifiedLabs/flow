@@ -10,8 +10,8 @@ import (
 	"strings"
 )
 
-// VerdictReport is the structured outcome a check job may write to
-// FLOW_VERDICT_FILE; it takes precedence over the exit-code mapping. Reviewer
+// VerdictReport is the structured outcome a reviewer or verifier job writes to
+// FLOW_VERDICT_FILE. It is the only source of a reviewer/verifier result.
 // jobs may additionally carry the blocking concerns they want filed as review
 // threads, and verifier jobs the certify/reopen decisions they reached, so the
 // worker applies them mechanically instead of relying on the agent to remember
@@ -67,11 +67,11 @@ const verdictFileMaxBytes = 256 * 1024
 
 // ReadVerdictFile reads a check job's structured verdict from path. It returns
 // (report, true, nil) when a valid verdict file is present, (zero, false, nil)
-// when the file is absent (the common case: the job relied on its exit code),
+// when the file is absent,
 // and (zero, false, err) when the file exists but is unreadable, unparseable,
 // or carries a verdict, comment, or thread decision that fails validation.
-// Callers fall back to the exit-code mapping on the false/err path and must
-// surface err to job stdout (never silently swallow it).
+// Callers must treat absence or invalid contents as an execution error for
+// reviewer/verifier jobs and surface err to job stdout.
 func ReadVerdictFile(path string) (VerdictReport, bool, error) {
 	file, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {

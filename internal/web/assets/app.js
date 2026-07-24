@@ -575,6 +575,17 @@ export class FlowApp extends HTMLElement {
         await refresh();
       });
     });
+    this.querySelectorAll("[data-workflow-retry]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowRetry)}/workflow/retry`, {});
+          await refresh();
+        } finally {
+          button.disabled = false;
+        }
+      });
+    });
     this.querySelectorAll("[data-task-edit]").forEach((button) => {
       button.addEventListener("click", async () => {
         const nextTitle = window.prompt("Title", button.dataset.taskTitle || "");

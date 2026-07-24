@@ -181,7 +181,8 @@ func TestBuildReviewerPromptUsesReviewerVerdictInstructions(t *testing.T) {
 		"Check: reviewer",
 		"Use flow comment",
 		"comments[] entries in $FLOW_VERDICT_FILE",
-		"Exit 0 only when the reviewer check is satisfied",
+		"only source of a reviewer outcome",
+		"pauses the workflow for human retry",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, rendered)
@@ -265,7 +266,8 @@ func TestBuildVerifierPromptUsesVerifierThreadInstructions(t *testing.T) {
 		"flow thread certify",
 		"flow thread reopen --body",
 		"threads[] entries in $FLOW_VERDICT_FILE",
-		"Exit 0 only when verification is satisfied",
+		"only source of a verifier outcome",
+		"pauses the workflow for human retry",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, rendered)

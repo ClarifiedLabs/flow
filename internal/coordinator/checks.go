@@ -27,6 +27,7 @@ const (
 	CheckSatisfied CheckVerdict = "satisfied"
 	CheckBlocked   CheckVerdict = "blocked"
 	CheckSkipped   CheckVerdict = "skipped"
+	CheckErrored   CheckVerdict = "errored"
 )
 
 type ReviewState string
@@ -451,6 +452,9 @@ func normalizeReportCheckInput(input ReportCheckInput) (ReportCheckInput, error)
 		input.Required = &required
 	}
 	if input.Verdict == "" {
+		if input.Kind == CheckKindReviewer || input.Kind == CheckKindVerifier {
+			return ReportCheckInput{}, errors.New("reviewer and verifier checks require an explicit structured verdict")
+		}
 		input.Verdict = verdictForExitCode(input.ExitCode)
 	}
 	if err := validateCheckVerdict(input.Verdict); err != nil {
@@ -513,7 +517,7 @@ func validateCheckKind(kind CheckKind) error {
 
 func validateCheckVerdict(verdict CheckVerdict) error {
 	switch verdict {
-	case CheckPending, CheckSatisfied, CheckBlocked, CheckSkipped:
+	case CheckPending, CheckSatisfied, CheckBlocked, CheckSkipped, CheckErrored:
 		return nil
 	default:
 		return fmt.Errorf("invalid check verdict: %s", verdict)

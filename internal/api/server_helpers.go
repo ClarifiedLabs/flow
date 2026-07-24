@@ -585,6 +585,7 @@ type uiRequiredCheckSummary struct {
 	Satisfied          int  `json:"satisfied"`
 	Blocked            int  `json:"blocked"`
 	Skipped            int  `json:"skipped"`
+	Errored            int  `json:"errored"`
 }
 
 type uiBlockerSummary struct {

@@ -387,8 +387,11 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 	})
 	fmt.Fprintf(stdout, "ran: %s session=%s exit=%d\n", claim.Job.ID, result.Session, result.ExitCode)
 	slog.Debug("flow-worker job completed", "job_id", claim.Job.ID, "session", result.Session, "exit_code", result.ExitCode, "final_state", result.FinalState, "error", result.Err)
+	var reportedCheckVerdict coordinator.CheckVerdict
 	checkErr := retryTransientOperation("report check", stdout, func() error {
-		return reportCheckIfNeeded(client, *claim.Job, *claim.Lease, result, stdout)
+		var err error
+		reportedCheckVerdict, err = reportCheckIfNeeded(client, *claim.Job, *claim.Lease, result, stdout)
+		return err
 	})
 	staleCheckResult := isStaleSourceJobHeadReport(checkErr)
 	if staleCheckResult {
@@ -400,12 +403,7 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 	// logged and never fail the job.
 	uploadTranscript(client, cfg, *claim.Job, *claim.Lease, running.Session, running.SessionToken, result, stdout)
 
-	finalState := result.FinalState
-	if staleCheckResult {
-		finalState = flowworker.JobCanceled
-	} else if checkErr != nil {
-		finalState = flowworker.JobFailed
-	}
+	finalState := finalStateForCheckReport(result, reportedCheckVerdict, checkErr, staleCheckResult)
 
 	if persistentSession {
 		// A console session always releases its lease through /v2/console
@@ -493,10 +491,26 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 	if checkErr != nil && !staleCheckResult {
 		return true, jobFailure(checkErr)
 	}
-	if result.Err != nil && !staleCheckResult {
+	if result.Err != nil &&
+		!staleCheckResult &&
+		reportedCheckVerdict != coordinator.CheckSatisfied &&
+		reportedCheckVerdict != coordinator.CheckBlocked {
 		return true, jobFailure(fmt.Errorf("run job: %w", result.Err))
 	}
 	return true, nil
+}
+
+func finalStateForCheckReport(result workerexec.RunResult, verdict coordinator.CheckVerdict, reportErr error, stale bool) flowworker.JobState {
+	switch {
+	case stale:
+		return flowworker.JobCanceled
+	case reportErr != nil:
+		return flowworker.JobFailed
+	case verdict == coordinator.CheckSatisfied || verdict == coordinator.CheckBlocked:
+		return flowworker.JobFinished
+	default:
+		return result.FinalState
+	}
 }
 
 func releaseConsoleSession(cfg config.WorkerConfig, sessionToken string) error {
@@ -673,16 +687,16 @@ func retryTransientOperation(action string, stdout io.Writer, fn func() error) e
 	}
 }
 
-func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease flowworker.Lease, result workerexec.RunResult, stdout io.Writer) error {
+func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease flowworker.Lease, result workerexec.RunResult, stdout io.Writer) (coordinator.CheckVerdict, error) {
 	checkName := strings.TrimSpace(result.Payload.CheckName)
 	if checkName == "" || job.TaskID == nil {
 		slog.Debug("flow-worker skipping check report", "job_id", job.ID, "reason", "missing check name or task")
-		return nil
+		return "", nil
 	}
 	kind, ok := checkKindForJob(job)
 	if !ok {
 		slog.Debug("flow-worker skipping check report", "job_id", job.ID, "role", job.Role, "bucket", job.CapacityBucket, "reason", "unsupported check kind")
-		return nil
+		return "", nil
 	}
 	slog.Debug("flow-worker report check", "job_id", job.ID, "lease_id", lease.ID, "check_name", checkName, "kind", kind, "exit_code", result.ExitCode)
 	sourceJobID := job.ID
@@ -693,18 +707,20 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 		details = result.Err.Error()
 	}
 
-	// Prefer a structured verdict the job wrote to FLOW_VERDICT_FILE over the
-	// exit-code mapping. A missing file is the normal exit-code path; a parse
-	// error is logged to job stdout (never silently swallowed) and we fall back
-	// to the exit code. The exit code still rides along for the audit trail.
+	// Reviewer and verifier outcomes must come from a valid structured verdict.
+	// Their process exit is diagnostic only: a missing/invalid verdict is an
+	// execution error, never an implicit request for changes. CI keeps its
+	// command-exit result semantics.
 	var verdict coordinator.CheckVerdict
 	var verdictReport workerexec.VerdictReport
 	var haveVerdict bool
+	var verdictFileErr error
 	if result.VerdictFilePath != "" {
 		v, ok, err := workerexec.ReadVerdictFile(result.VerdictFilePath)
 		switch {
 		case err != nil:
-			fmt.Fprintf(stdout, "check: verdict file unusable, falling back to exit code: %v\n", err)
+			verdictFileErr = err
+			fmt.Fprintf(stdout, "check: verdict file unusable: %v\n", err)
 		case ok:
 			verdict = coordinator.CheckVerdict(v.Verdict)
 			verdictReport = v
@@ -712,6 +728,28 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 			if strings.TrimSpace(v.Reason) != "" {
 				details = v.Reason
 			}
+		}
+	}
+	structuredVerdictRequired := kind == coordinator.CheckKindReviewer || kind == coordinator.CheckKindVerifier
+	if structuredVerdictRequired && !haveVerdict {
+		verdict = coordinator.CheckErrored
+		if verdictFileErr != nil {
+			details = "structured verdict invalid: " + verdictFileErr.Error()
+		} else {
+			details = "structured verdict missing"
+		}
+	}
+	if !haveVerdict && (result.Err != nil || result.ExitCode == 126 || result.ExitCode == 127 || result.ExitCode >= 128) {
+		verdict = coordinator.CheckErrored
+		switch {
+		case result.Err != nil:
+			details = "check execution failed: " + result.Err.Error()
+		case result.ExitCode == 126:
+			details = "check execution failed: command is not executable"
+		case result.ExitCode == 127:
+			details = "check execution failed: command was not found"
+		default:
+			details = fmt.Sprintf("check execution failed: process terminated by signal (exit code %d)", result.ExitCode)
 		}
 	}
 
@@ -735,7 +773,10 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 	// thread that independently blocks approval. The worker lease is still live
 	// here, so blocking jobs' writes pass the change-access check.
 	if haveVerdict {
-		applyVerdictActions(client, kind, blocking, lease, result, verdictReport, stdout)
+		if err := applyVerdictActions(client, kind, blocking, lease, result, verdictReport, stdout); err != nil {
+			verdict = coordinator.CheckErrored
+			details = "structured verdict actions failed: " + err.Error()
+		}
 	}
 
 	check, err := client.ReportCheck(*job.TaskID, checkName, flowclient.ReportCheckInput{
@@ -748,39 +789,43 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 		LeaseID:     &leaseID,
 	})
 	if err != nil {
-		return fmt.Errorf("report check: %w", err)
+		return "", fmt.Errorf("report check: %w", err)
 	}
 	fmt.Fprintf(stdout, "check: %s verdict=%s review_state=%s\n", check.Check.Name, check.Check.Verdict, check.ReviewState)
 	for _, failure := range check.FollowUpFailures {
 		fmt.Fprintf(stdout, "check follow-up: %s failed: %s\n", failure.EventKind, failure.Details)
 	}
-	return nil
+	if check.Check.Verdict == coordinator.CheckErrored {
+		return check.Check.Verdict, fmt.Errorf("check execution failed: %s", details)
+	}
+	return check.Check.Verdict, nil
 }
 
 // applyVerdictActions deterministically files a reviewer job's blocking concerns
 // as review threads and applies a verifier job's certify/reopen decisions,
 // carrying out mechanically what the agent declared in its verdict file. Failures
-// are logged to job stdout and never fail the job: the check verdict still needs
-// to be recorded, and CreateThread is idempotent (a retry is a no-op) while
-// certify/reopen are state-guarded.
-func applyVerdictActions(client *flowclient.Client, kind coordinator.CheckKind, blocking bool, lease flowworker.Lease, result workerexec.RunResult, report workerexec.VerdictReport, stdout io.Writer) {
+// are returned so the caller records an execution error instead of committing a
+// result whose declared actions were only partially applied. CreateThread is
+// idempotent and certify/reopen are state-guarded, so retry is safe.
+func applyVerdictActions(client *flowclient.Client, kind coordinator.CheckKind, blocking bool, lease flowworker.Lease, result workerexec.RunResult, report workerexec.VerdictReport, stdout io.Writer) error {
 	if !blocking {
 		findings := len(report.Comments) + len(report.Threads)
 		if findings > 0 {
 			fmt.Fprintf(stdout, "check: retained %d advisory finding(s) in check details; no review threads changed\n", findings)
 		}
-		return
+		return nil
 	}
 	leaseID := lease.ID
+	var actionErr error
 	switch kind {
 	case coordinator.CheckKindReviewer:
 		if len(report.Comments) == 0 {
-			return
+			return nil
 		}
 		changeID := strings.TrimSpace(result.Payload.ChangeID)
 		if changeID == "" {
 			fmt.Fprintf(stdout, "check: cannot file %d verdict comment(s): missing change id\n", len(report.Comments))
-			return
+			return errors.New("cannot file verdict comments: missing change id")
 		}
 		for _, comment := range report.Comments {
 			err := retryTransientOperation("file verdict comment", stdout, func() error {
@@ -795,6 +840,7 @@ func applyVerdictActions(client *flowclient.Client, kind coordinator.CheckKind, 
 			})
 			if err != nil {
 				fmt.Fprintf(stdout, "check: file verdict comment %s:%s:%d failed: %v\n", comment.SHA, comment.File, comment.Line, err)
+				actionErr = errors.Join(actionErr, err)
 				continue
 			}
 			fmt.Fprintf(stdout, "check: filed verdict comment %s:%d\n", comment.File, comment.Line)
@@ -819,11 +865,13 @@ func applyVerdictActions(client *flowclient.Client, kind coordinator.CheckKind, 
 					continue
 				}
 				fmt.Fprintf(stdout, "check: verdict thread %s %s failed: %v\n", decision.ID, decision.Decision, err)
+				actionErr = errors.Join(actionErr, err)
 				continue
 			}
 			fmt.Fprintf(stdout, "check: applied verdict thread %s %s\n", decision.ID, decision.Decision)
 		}
 	}
+	return actionErr
 }
 
 func checkJobBlocksApproval(job flowworker.Job) bool {

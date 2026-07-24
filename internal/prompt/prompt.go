@@ -362,13 +362,13 @@ func roleInstructions(role string, input Input) []string {
 		return []string{
 			"Review the task and current branch against ${FLOW_BASE:-the base branch}.",
 			"Record actionable blocking concerns as comments[] entries in $FLOW_VERDICT_FILE (each {sha,file,line,body}); the worker files each as a review thread. Use flow comment to file one directly instead if you prefer. Do not edit files, commit, push, certify threads, or call flow complete.",
-			"Write the structured verdict to $FLOW_VERDICT_FILE as the source of truth. Exit 0 only when the reviewer check is satisfied; exit nonzero after filing blocking concerns or when review is unreliable, as the belt-and-braces fallback.",
+			"Write a valid structured verdict to $FLOW_VERDICT_FILE; it is the only source of a reviewer outcome. A missing or invalid verdict pauses the workflow for human retry instead of requesting changes.",
 		}
 	case RoleVerifier:
 		return []string{
 			"Verify the task requirements and claimed review-thread resolutions against the current branch.",
 			"Record certify/reopen decisions as threads[] entries in $FLOW_VERDICT_FILE (each {id,decision,body}; reopen requires a body); the worker applies each. Use flow thread certify and flow thread reopen --body to apply one directly instead if you prefer. Do not edit files, commit, push, or call flow complete.",
-			"Write the structured verdict to $FLOW_VERDICT_FILE as the source of truth. Exit 0 only when verification is satisfied; exit nonzero when requirements are not met, claims are reopened, or verification is unreliable, as the belt-and-braces fallback.",
+			"Write a valid structured verdict to $FLOW_VERDICT_FILE; it is the only source of a verifier outcome. A missing or invalid verdict pauses the workflow for human retry instead of requesting changes.",
 		}
 	default:
 		panic("unreachable role")

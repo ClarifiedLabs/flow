@@ -59,6 +59,48 @@ func TestReportCheckMapsCIExitCodeToVerdict(t *testing.T) {
 	}
 }
 
+func TestReviewerCheckRequiresExplicitResultAndKeepsErrorsInReview(t *testing.T) {
+	ctx := context.Background()
+	_, tasks, checks := newCheckService(t)
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Reviewer execution failure"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	required := true
+	exitFailure := 1
+	if _, err := checks.ReportCheck(ctx, ReportCheckInput{
+		TaskID:   task.ID,
+		Name:     "security-review",
+		Kind:     CheckKindReviewer,
+		Required: &required,
+		ExitCode: &exitFailure,
+	}); err == nil || !strings.Contains(err.Error(), "explicit structured verdict") {
+		t.Fatalf("implicit reviewer verdict error = %v", err)
+	}
+	check, err := checks.ReportCheck(ctx, ReportCheckInput{
+		TaskID:   task.ID,
+		Name:     "security-review",
+		Kind:     CheckKindReviewer,
+		Required: &required,
+		Verdict:  CheckErrored,
+		ExitCode: &exitFailure,
+		Details:  "agent transcript invalid",
+	})
+	if err != nil {
+		t.Fatalf("report reviewer execution error: %v", err)
+	}
+	if check.Verdict != CheckErrored {
+		t.Fatalf("reviewer verdict = %s, want errored", check.Verdict)
+	}
+	state, err := checks.ReviewState(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("load review state: %v", err)
+	}
+	if state != ReviewInReview {
+		t.Fatalf("review state = %s, want in_review", state)
+	}
+}
+
 func TestResetAutomatedChecksForNewRevisionLeavesHumanChecksBlocked(t *testing.T) {
 	ctx := context.Background()
 	_, tasks, checks := newCheckService(t)

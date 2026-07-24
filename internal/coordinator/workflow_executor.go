@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	flowgit "github.com/ClarifiedLabs/flow/internal/git"
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	"github.com/ClarifiedLabs/flow/internal/sqlitex"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
@@ -32,6 +33,19 @@ type WorkflowExecutor struct {
 }
 
 type workflowNodeHandler func(context.Context, WorkflowRun, WorkflowNodeRun, FlowNodeSnapshot) (bool, error)
+
+type workflowExecutionError struct {
+	failure WorkflowExecutionFailure
+	err     error
+}
+
+func (e *workflowExecutionError) Error() string {
+	return e.err.Error()
+}
+
+func (e *workflowExecutionError) Unwrap() error {
+	return e.err
+}
 
 type WorkflowExecutorOptions struct {
 	Database     *sql.DB
@@ -84,12 +98,13 @@ SELECT id FROM workflow_runs WHERE state IN ('scheduled', 'running') ORDER BY cr
 	if err := rows.Close(); err != nil {
 		return err
 	}
+	var errs error
 	for _, id := range ids {
 		if err := e.Advance(ctx, id); err != nil {
-			return fmt.Errorf("advance workflow %s: %w", id, err)
+			errs = errors.Join(errs, fmt.Errorf("advance workflow %s: %w", id, err))
 		}
 	}
-	return nil
+	return errs
 }
 
 func (e *WorkflowExecutor) Advance(ctx context.Context, runID string) error {
@@ -103,31 +118,104 @@ func (e *WorkflowExecutor) Advance(ctx context.Context, runID string) error {
 		}
 		nodeRun, _, err := e.runs.EnsureCurrentNode(ctx, run.ID)
 		if err != nil {
-			return err
+			return e.pauseExecutionError(ctx, run, WorkflowNodeRun{}, NodeKind(""), "prepare workflow node", err)
 		}
 		if nodeRun.ID == "" {
 			return nil
 		}
 		node, ok := run.Snapshot.Node(nodeRun.NodeKey)
 		if !ok {
-			return fmt.Errorf("snapshot node %q not found", nodeRun.NodeKey)
+			return e.pauseExecutionError(
+				ctx,
+				run,
+				nodeRun,
+				NodeKind(""),
+				"load workflow node",
+				fmt.Errorf("snapshot node %q not found", nodeRun.NodeKey),
+			)
 		}
 		if node.Kind == NodeHumanGate || node.Kind == NodeTerminal {
 			return nil
 		}
 		handler := e.handlers[node.Kind]
 		if handler == nil {
-			return fmt.Errorf("no trusted handler registered for node kind %q", node.Kind)
+			return e.pauseExecutionError(
+				ctx,
+				run,
+				nodeRun,
+				node.Kind,
+				"dispatch workflow node",
+				fmt.Errorf("no trusted handler registered for node kind %q", node.Kind),
+			)
 		}
 		completed, err := handler(ctx, run, nodeRun, node)
 		if err != nil {
-			return err
+			return e.pauseExecutionError(ctx, run, nodeRun, node.Kind, "execute "+string(node.Kind)+" node", err)
 		}
 		if !completed {
 			return nil
 		}
 	}
-	return errors.New("workflow executor local cascade limit exceeded")
+	run, err := e.runs.Get(ctx, runID)
+	if err != nil {
+		return err
+	}
+	return e.pauseExecutionError(
+		ctx,
+		run,
+		WorkflowNodeRun{ID: run.CurrentNodeRunID, NodeKey: run.CurrentNodeKey},
+		NodeKind(""),
+		"advance workflow",
+		errors.New("workflow executor local cascade limit exceeded"),
+	)
+}
+
+func (e *WorkflowExecutor) pauseExecutionError(
+	ctx context.Context,
+	run WorkflowRun,
+	nodeRun WorkflowNodeRun,
+	nodeKind NodeKind,
+	operation string,
+	executionErr error,
+) error {
+	if executionErr == nil {
+		return nil
+	}
+	if errors.Is(executionErr, context.Canceled) || errors.Is(executionErr, context.DeadlineExceeded) {
+		return executionErr
+	}
+	if errors.Is(executionErr, ErrWorkflowConflict) {
+		return nil
+	}
+	failure := WorkflowExecutionFailure{
+		Operation: operation,
+		NodeKind:  nodeKind,
+		Attempt:   nodeRun.Attempt,
+		Message:   executionErr.Error(),
+	}
+	var typed *workflowExecutionError
+	if errors.As(executionErr, &typed) {
+		failure = typed.failure
+		if strings.TrimSpace(failure.Operation) == "" {
+			failure.Operation = operation
+		}
+		if failure.NodeKind == "" {
+			failure.NodeKind = nodeKind
+		}
+		if failure.Attempt == 0 {
+			failure.Attempt = nodeRun.Attempt
+		}
+		if strings.TrimSpace(failure.Message) == "" {
+			failure.Message = executionErr.Error()
+		}
+	}
+	if err := e.runs.PauseForExecutionError(ctx, run.ID, nodeRun.ID, failure); err != nil {
+		if errors.Is(err, ErrWorkflowConflict) {
+			return nil
+		}
+		return errors.Join(executionErr, fmt.Errorf("park workflow after execution failure: %w", err))
+	}
+	return nil
 }
 
 func (e *WorkflowExecutor) handleAgent(ctx context.Context, run WorkflowRun, nodeRun WorkflowNodeRun, node FlowNodeSnapshot) (bool, error) {
@@ -142,14 +230,39 @@ SELECT COUNT(*) FROM jobs WHERE node_run_id = ? AND state IN ('queued', 'claimed
 	if live > 0 {
 		return false, nil
 	}
-	var crashedAttempts int
-	if err := e.db.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM jobs WHERE node_run_id = ? AND role = ? AND state = ?`,
-		nodeRun.ID, string(flowworker.RoleAuthor), string(flowworker.JobCrashed)).Scan(&crashedAttempts); err != nil {
+	var terminalJobID, terminalState string
+	err := e.db.QueryRowContext(ctx, `
+SELECT id, state
+FROM jobs
+WHERE node_run_id = ?
+	AND role = ?
+	AND state IN (?, ?, ?, ?)
+	AND CAST(COALESCE(json_extract(payload_json, '$.node_attempt'), 0) AS INTEGER) = ?
+ORDER BY created_at DESC, id DESC
+LIMIT 1`,
+		nodeRun.ID,
+		string(flowworker.RoleAuthor),
+		string(flowworker.JobFinished),
+		string(flowworker.JobFailed),
+		string(flowworker.JobCrashed),
+		string(flowworker.JobCanceled),
+		nodeRun.Attempt,
+	).Scan(&terminalJobID, &terminalState)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
-	if crashedAttempts >= maxAutomaticCrashAttempts {
-		return false, e.runs.waitForAgentCrashLimit(ctx, nodeRun.ID, crashedAttempts)
+	if err == nil {
+		cause := fmt.Errorf("author job %s ended in state %s before completing the workflow node", terminalJobID, terminalState)
+		return false, &workflowExecutionError{
+			failure: WorkflowExecutionFailure{
+				Operation: "run author agent",
+				NodeKind:  NodeAgent,
+				Attempt:   nodeRun.Attempt,
+				JobID:     terminalJobID,
+				Message:   cause.Error(),
+			},
+			err: cause,
+		}
 	}
 
 	taskID := run.TaskID
@@ -179,6 +292,7 @@ SELECT COUNT(*) FROM jobs WHERE node_run_id = ? AND role = ? AND state = ?`,
 	}
 	payload := map[string]any{
 		"entrypoint": entrypoint, "workflow_run_id": run.ID, "node_run_id": nodeRun.ID,
+		"node_attempt":   nodeRun.Attempt,
 		"workspace_mode": node.Config.Agent.Workspace, "artifact_kind": node.Config.Agent.Artifact,
 		"agent": node.Config.Agent.Agent, "role_instructions": node.Config.Agent.Agent.Prompt,
 		"branch": branch, "base": base, "project_id": e.project.ID, "project_name": e.project.Name,
@@ -292,6 +406,24 @@ func (e *WorkflowExecutor) handleChecks(ctx context.Context, run WorkflowRun, no
 			allFinished = false
 			continue
 		}
+		if check.Required && check.Verdict == CheckErrored {
+			jobID := ""
+			if check.SourceJobID != nil {
+				jobID = *check.SourceJobID
+			}
+			cause := fmt.Errorf("required check %s failed to produce a result: %s", check.Name, strings.TrimSpace(check.Details))
+			return false, &workflowExecutionError{
+				failure: WorkflowExecutionFailure{
+					Operation: "run required " + string(check.Kind) + " check",
+					NodeKind:  nodeKindForCheckMode(mode),
+					Attempt:   nodeRun.Attempt,
+					CheckID:   check.ID,
+					JobID:     jobID,
+					Message:   cause.Error(),
+				},
+				err: cause,
+			}
+		}
 		if check.Required && check.Verdict != CheckSatisfied {
 			failed = true
 		}
@@ -305,6 +437,19 @@ func (e *WorkflowExecutor) handleChecks(ctx context.Context, run WorkflowRun, no
 	}
 	_, err = e.runs.CompleteNode(ctx, CompleteWorkflowNodeInput{NodeRunID: nodeRun.ID, Outcome: outcome, Actor: ActorSystem})
 	return err == nil, err
+}
+
+func nodeKindForCheckMode(mode WorkflowCheckMode) NodeKind {
+	switch mode {
+	case WorkflowChecksAutomated:
+		return NodeAutomatedChecks
+	case WorkflowChecksReview:
+		return NodeChangeReview
+	case WorkflowChecksVerify:
+		return NodeVerifyChange
+	default:
+		return ""
+	}
 }
 
 func (e *WorkflowExecutor) handleMaterializeTaskSet(ctx context.Context, run WorkflowRun, nodeRun WorkflowNodeRun, node FlowNodeSnapshot) (bool, error) {
@@ -357,8 +502,11 @@ func (e *WorkflowExecutor) handleMergeChange(ctx context.Context, run WorkflowRu
 		}
 	}
 	if err != nil {
-		message := strings.ToLower(err.Error())
-		if strings.Contains(message, "conflict") || strings.Contains(message, "base advanced") || strings.Contains(message, "not current") {
+		var conflict *flowgit.MergeConflictError
+		if errors.As(err, &conflict) ||
+			errors.Is(err, flowgit.ErrHeadMismatch) ||
+			errors.Is(err, flowgit.ErrNoMergeChanges) ||
+			errors.Is(err, errRecordMergedConflict) {
 			outcome = "conflict"
 		} else {
 			return false, err

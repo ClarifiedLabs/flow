@@ -695,10 +695,24 @@ func (s *projectServer) handleReportCheck(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "report_check_failed", err.Error())
 		return
 	}
+	var workflowRun *coordinator.WorkflowRun
 	if s.workflowExecutor != nil {
-		if err := s.workflowExecutor.Tick(r.Context()); err != nil {
-			writeError(w, http.StatusInternalServerError, "advance_workflow_failed", err.Error())
+		run, active, err := s.workflowRuns.ActiveForTask(r.Context(), taskID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "load_workflow_failed", err.Error())
 			return
+		}
+		if active {
+			if err := s.workflowExecutor.Advance(r.Context(), run.ID); err != nil {
+				writeError(w, http.StatusInternalServerError, "advance_workflow_failed", err.Error())
+				return
+			}
+			latest, err := s.workflowRuns.Get(r.Context(), run.ID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "load_workflow_failed", err.Error())
+				return
+			}
+			workflowRun = &latest
 		}
 	}
 	reviewState, err := s.checks.ReviewState(r.Context(), taskID)
@@ -710,6 +724,7 @@ func (s *projectServer) handleReportCheck(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, checkResponse{
 		Check:       check,
 		ReviewState: reviewState,
+		Workflow:    workflowRun,
 	})
 }
 

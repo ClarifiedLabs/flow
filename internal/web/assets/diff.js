@@ -86,7 +86,7 @@ export function renderVerdictBadge(verdict) {
   const raw = String(verdict || "");
   const cls = raw === "satisfied"
     ? "ok"
-    : ["blocked", "failed", "rejected"].includes(raw)
+    : ["blocked", "errored", "failed", "rejected"].includes(raw)
       ? "danger"
       : "idle";
   return `<span class="badge ${cls}">${escapeHTML(raw.replaceAll("_", " ") || "pending")}</span>`;

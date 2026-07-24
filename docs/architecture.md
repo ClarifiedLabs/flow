@@ -111,10 +111,15 @@ active node visit, and its successor cannot begin until the node's barrier
 closes. A per-run transition budget opens an operator wait before a cycle can
 run forever.
 
-Human gates and budget exhaustion derive Blocked. Reset cancels run-owned jobs,
-leases, sessions, and the active node and returns the task to Unscheduled.
-Terminal nodes derive Done; a merged terminal additionally proves the run owns
-a merged change.
+Only explicit typed results traverse graph edges. An agent artifact completion,
+a launched CI command's exit status, a structured reviewer/verifier verdict,
+a valid human response, or a typed merge result can select an outcome. A
+handler, harness, worker, or action-application error instead records the node
+error and opens a durable `execution_failed` operator wait without consuming a
+transition. Human gates, execution failures, and budget exhaustion derive
+Blocked. Reset cancels run-owned jobs, leases, sessions, and the active node and
+returns the task to Unscheduled. Terminal nodes derive Done; a merged terminal
+additionally proves the run owns a merged change.
 
 ## Worker scheduling and execution
 
@@ -207,6 +212,15 @@ visible without changing the outcome. New configuration uses
 `blocking: false` for advisory agents. `required` is retained only as a
 deprecated compatibility alias (`true` is blocking, `false` is advisory), and
 configurations should not specify both fields.
+
+Reviewer and verifier children must report `satisfied` or `blocked` through a
+valid structured verdict file. Missing or invalid verdicts, harness failures,
+and failures while applying declared thread actions are `errored`, never a
+domain outcome. CI maps an ordinary launched-command exit to pass/fail, while
+worker/setup, command-resolution, and signal-termination failures are
+`errored`. A required errored check pauses the node for owner retry; advisory
+errors remain visible and non-blocking. Retrying a check node preserves
+same-revision results and enqueues only its errored checks.
 
 The coordinator seeds global task-planner, author, code-reviewer,
 security-reviewer, and verifier definitions. Fresh projects inherit those rows
