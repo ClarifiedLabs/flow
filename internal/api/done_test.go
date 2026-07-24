@@ -160,6 +160,23 @@ func TestSidebarReportsClosedCount(t *testing.T) {
 	}
 }
 
+func TestSidebarBoardCountsSeparateBlockedFromInProgress(t *testing.T) {
+	response := sidebarResponse{}
+	addSidebarBoardCounts(&response, coordinator.BoardResult{
+		Board: coordinator.Board{
+			Unscheduled: make([]coordinator.Task, 2),
+			Scheduled:   make([]coordinator.Task, 3),
+			InProgress:  make([]coordinator.Task, 5),
+		},
+		BlockedIDs: []string{"t-0001", "t-0002"},
+	})
+
+	want := uiSidebarBoardSummary{Unscheduled: 2, Scheduled: 3, InProgress: 3, Blocked: 2}
+	if response.Board != want {
+		t.Fatalf("sidebar board counts = %+v, want %+v", response.Board, want)
+	}
+}
+
 func taskIDsFromAPI(tasks []coordinator.Task) []string {
 	ids := make([]string, len(tasks))
 	for i, task := range tasks {

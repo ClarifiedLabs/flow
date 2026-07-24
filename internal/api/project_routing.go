@@ -443,6 +443,7 @@ type uiSidebarBoardSummary struct {
 	Unscheduled int `json:"unscheduled"`
 	Scheduled   int `json:"scheduled"`
 	InProgress  int `json:"in_progress"`
+	Blocked     int `json:"blocked"`
 }
 
 type uiSidebarWorkerSummary struct {
@@ -690,9 +691,11 @@ func (s *Server) handleSidebar(w http.ResponseWriter, r *http.Request, principal
 }
 
 func addSidebarBoardCounts(response *sidebarResponse, result coordinator.BoardResult) {
+	blocked := len(result.BlockedIDs)
 	response.Board.Unscheduled += len(result.Board.Unscheduled)
 	response.Board.Scheduled += len(result.Board.Scheduled)
-	response.Board.InProgress += len(result.Board.InProgress)
+	response.Board.InProgress += len(result.Board.InProgress) - blocked
+	response.Board.Blocked += blocked
 
 	for id, state := range result.LaneStates {
 		switch state {

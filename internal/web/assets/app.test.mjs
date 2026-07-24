@@ -3280,6 +3280,22 @@ test("pollDelay applies capped exponential backoff", async () => {
   assert.equal(pollDelay(10000, 0, 120000), 10000); // backoff disabled -> base
 });
 
+test("board sidebar status separates blocked tasks in compact lifecycle groups", async () => {
+  const context = await scriptContext();
+  const html = context.renderNavStatus("/ui/board", {
+    board: { unscheduled: 2, scheduled: 3, in_progress: 4, blocked: 1 },
+  });
+
+  assert.equal((html.match(/class="nav-board-group"/g) || []).length, 2);
+  assert.match(html, /data-board-group="queued"/);
+  assert.match(html, /data-board-group="active"/);
+  assert.match(html, /data-board-lane="unscheduled" title="2 unscheduled tasks">2<\/span>/);
+  assert.match(html, /data-board-lane="scheduled" title="3 scheduled tasks">3<\/span>/);
+  assert.match(html, /data-board-lane="in_progress" title="4 in progress tasks">4<\/span>/);
+  assert.match(html, /data-board-lane="blocked" title="1 blocked task">1<\/span>/);
+  assert.match(html, /aria-label="2 unscheduled tasks, 3 scheduled tasks, 4 in progress tasks, 1 blocked task"/);
+});
+
 test("sidebar status refresh renders live nav badges and polls", async () => {
   const timers = [];
   const fetchCalls = [];

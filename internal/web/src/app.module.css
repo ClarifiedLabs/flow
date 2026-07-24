@@ -324,6 +324,19 @@ textarea {
   line-height: 1;
 }
 
+.nav-board-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.nav-board-group .nav-board-status {
+  border-radius: 0;
+}
+
 .nav-board-status[data-board-lane="unscheduled"] {
   background: var(--ph-backlog-bg);
   color: var(--ph-backlog);
@@ -337,6 +350,11 @@ textarea {
 .nav-board-status[data-board-lane="in_progress"] {
   background: var(--ph-authoring-bg);
   color: var(--ph-authoring);
+}
+
+.nav-board-status[data-board-lane="blocked"] {
+  background: var(--st-blocked-bg);
+  color: var(--st-blocked);
 }
 
 .nav-job-status[data-job-status="active"] {

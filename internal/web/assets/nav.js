@@ -12,17 +12,25 @@ export function renderNavStatus(href, status) {
   if (!status) return "";
   if (href === "/ui/board") {
     const board = value(status, "board", "Board") || {};
-    const counts = [
-      ["unscheduled", "Unscheduled", "unscheduled"],
-      ["scheduled", "Scheduled", "scheduled"],
-      ["in_progress", "InProgress", "in progress"],
+    const groups = [
+      ["queued", [
+        ["unscheduled", "Unscheduled", "unscheduled"],
+        ["scheduled", "Scheduled", "scheduled"],
+      ]],
+      ["active", [
+        ["in_progress", "InProgress", "in progress"],
+        ["blocked", "Blocked", "blocked"],
+      ]],
     ];
     const labels = [];
-    const badges = counts.map(([key, fallback, label]) => {
-      const count = Number(value(board, key, fallback) || 0);
-      const description = `${count} ${label} tasks`;
-      labels.push(description);
-      return `<span class="nav-board-status" data-board-lane="${key}" title="${escapeAttr(description)}">${count}</span>`;
+    const badges = groups.map(([group, counts]) => {
+      const groupBadges = counts.map(([key, fallback, label]) => {
+        const count = Number(value(board, key, fallback) || 0);
+        const description = `${count} ${label} task${count === 1 ? "" : "s"}`;
+        labels.push(description);
+        return `<span class="nav-board-status" data-board-lane="${key}" title="${escapeAttr(description)}">${count}</span>`;
+      }).join("");
+      return `<span class="nav-board-group" data-board-group="${group}">${groupBadges}</span>`;
     }).join("");
     return `<span class="nav-status nav-status-board" title="${escapeAttr(labels.join(", "))}" aria-label="${escapeAttr(labels.join(", "))}">${badges}</span>`;
   }
