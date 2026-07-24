@@ -4539,20 +4539,35 @@ test("flows editor markup opts into shared form styling and accessible row contr
   const context = await scriptContext();
   const agentOptions = [{ name: "codex", display_name: "Codex", models: [] }];
 
-  const agentHTML = context.renderAgentDefFormView(null, agentOptions);
-  assert.match(agentHTML, /<form class="agent-def-form task-form"/);
-  assert.match(agentHTML, /class="agent-def-model-fields" data-def-model-fields/);
+  const inheritedDef = { id: "ad-global", name: "shared", harness: "codex", prompt: "Shared prompt", inherited: true };
+  const inheritedReadHTML = context.renderAgentDefsSectionView([inheritedDef], agentOptions, { editingDefID: "" });
+  assert.match(inheritedReadHTML, /Project Agent Definitions/);
+  assert.match(inheritedReadHTML, /badge idle">inherited/);
+  assert.match(inheritedReadHTML, /data-edit-def="ad-global">Override/);
+  assert.match(inheritedReadHTML, /data-add-def/);
+  assert.doesNotMatch(inheritedReadHTML, /data-agent-def-form/);
 
-  const inheritedHTML = context.renderAgentDefsSectionView([{ id: "ad-global", name: "shared", harness: "codex", inherited: true }], agentOptions, { editingDefID: "ad-global" });
-  assert.match(inheritedHTML, /Project Agent Definitions/);
-  assert.match(inheritedHTML, /badge idle">inherited/);
-  assert.match(inheritedHTML, /data-edit-def="ad-global">Override/);
-  assert.match(inheritedHTML, /name="def_name" value="shared" readonly required/);
-  assert.doesNotMatch(inheritedHTML, /data-delete-def="ad-global"/);
+  const inheritedEditHTML = context.renderAgentDefsSectionView([inheritedDef], agentOptions, { editingDefID: "ad-global" });
+  assert.match(inheritedEditHTML, /<form class="agent-def-table-form" data-agent-def-form data-def-id="ad-global">/);
+  assert.match(inheritedEditHTML, /name="def_name" value="shared" aria-label="Name" readonly required/);
+  assert.match(inheritedEditHTML, /name="def_harness" data-def-harness aria-label="Harness"/);
+  assert.match(inheritedEditHTML, /name="def_model" data-def-model aria-label="Model"/);
+  assert.match(inheritedEditHTML, /name="def_reasoning_effort" data-def-reasoning aria-label="Effort"/);
+  assert.match(inheritedEditHTML, /type="submit">Save<\/button>[\s\S]*data-def-cancel>Cancel<\/button>/);
+  assert.match(inheritedEditHTML, /data-agent-def-edit-row>[\s\S]*<\/tr>\s*<tr class="agent-def-prompt-row" data-agent-def-prompt-row>[\s\S]*Shared prompt/);
+  assert.doesNotMatch(inheritedEditHTML, /data-delete-def="ad-global"/);
 
   const globalHTML = context.renderGlobalAgentDefsSectionView([], agentOptions, { editingGlobalDefID: "" });
   assert.match(globalHTML, /Global Agent Definitions/);
   assert.match(globalHTML, /Every project inherits/);
+  assert.match(globalHTML, /<tr class="agent-def-add-row">[\s\S]*data-add-def[\s\S]*>\+<\/button>/);
+  assert.doesNotMatch(globalHTML, /data-agent-def-form|No agent definitions/);
+
+  const globalCreateHTML = context.renderGlobalAgentDefsSectionView([], agentOptions, { editingGlobalDefID: context.NEW_AGENT_DEF_STATE });
+  assert.match(globalCreateHTML, /data-agent-def-form data-def-id=""/);
+  assert.match(globalCreateHTML, /name="def_name" value="" aria-label="Name" required/);
+  assert.match(globalCreateHTML, /data-agent-def-edit-row>[\s\S]*<\/tr>\s*<tr class="agent-def-prompt-row"/);
+  assert.doesNotMatch(globalCreateHTML, /data-add-def/);
 
   const flowHTML = context.renderFlowEditorView({
     name: "custom",
@@ -4586,6 +4601,46 @@ test("flows editor markup opts into shared form styling and accessible row contr
   assert.match(edgeHTML, /aria-label="From node"/);
   assert.match(edgeHTML, /aria-label="Target node"/);
   assert.match(edgeHTML, /title="Remove transition"/);
+});
+
+test("agent definition table actions enter inline edit and create modes", async () => {
+  const context = await scriptContext();
+  const editListeners = new Map();
+  const addListeners = new Map();
+  const editButton = {
+    dataset: { editDef: "ad-review" },
+    addEventListener(type, listener) { editListeners.set(type, listener); },
+  };
+  const addButton = {
+    dataset: {},
+    addEventListener(type, listener) { addListeners.set(type, listener); },
+  };
+  const section = {
+    querySelector() {
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === "[data-edit-def]") return [editButton];
+      if (selector === "[data-add-def]") return [addButton];
+      return [];
+    },
+  };
+  let loads = 0;
+  const app = {
+    querySelector(selector) {
+      assert.equal(selector, "[data-agent-defs-section]");
+      return section;
+    },
+    load() { loads += 1; },
+  };
+  const state = { editingDefID: "" };
+
+  context.bindAgentDefsSectionView(app, { id: "p-alpha" }, [], [], state);
+  editListeners.get("click")();
+  assert.equal(state.editingDefID, "ad-review");
+  addListeners.get("click")();
+  assert.equal(state.editingDefID, context.NEW_AGENT_DEF_STATE);
+  assert.equal(loads, 2);
 });
 
 test("parallel review editors render ordered structured rows without generic JSON", async () => {
@@ -5079,7 +5134,8 @@ test("flows view renders agent definitions and flow tables for the active projec
   assert.match(html, /Project Agent Definitions/);
   assert.match(html, /author/);
   assert.match(html, /builtin/);
-  assert.match(html, /data-agent-def-form/);
+  assert.equal((html.match(/data-add-def/g) || []).length, 2);
+  assert.doesNotMatch(html, /data-agent-def-form/);
   assert.match(html, /default flow/);
   assert.match(html, /start: plan · plan\.done → implement/);
   assert.match(html, /class="flows-table"/);

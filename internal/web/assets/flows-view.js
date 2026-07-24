@@ -136,6 +136,8 @@ function flowsProjectOptionsView(app) {
 
 // --- Agent definitions ---------------------------------------------------------
 
+export const NEW_AGENT_DEF_STATE = "__new_agent_def__";
+
 export function renderAgentDefsSectionView(agentDefs, agentOptions, state) {
   return renderAgentDefsCatalogView(agentDefs, agentOptions, state, {
     editingKey: "editingDefID",
@@ -155,80 +157,114 @@ export function renderGlobalAgentDefsSectionView(agentDefs, agentOptions, state)
 }
 
 function renderAgentDefsCatalogView(agentDefs, agentOptions, state, options) {
-  const editingDef = (agentDefs || []).find((def) => value(def, "id", "ID") === state[options.editingKey]) || null;
-  const rows = (agentDefs || []).length
-    ? agentDefs.map((def) => {
-        const id = value(def, "id", "ID");
-        const builtin = Boolean(value(def, "builtin", "Builtin"));
-        const inherited = Boolean(value(def, "inherited", "Inherited"));
-        return `
-          <tr>
-            <td>${escapeHTML(value(def, "name", "Name"))}${builtin ? ` <span class="badge idle">builtin</span>` : ""}${inherited ? ` <span class="badge idle">inherited</span>` : ""}</td>
-            <td>${escapeHTML(value(def, "harness", "Harness"))}</td>
-            <td>${escapeHTML(value(def, "model", "Model") || "default")}</td>
-            <td>${escapeHTML(value(def, "reasoning_effort", "ReasoningEffort") || "—")}</td>
-            <td>
-              <div class="actions table-actions">
-                <button class="button secondary" type="button" data-edit-def="${escapeAttr(id)}">${inherited ? "Override" : "Edit"}</button>
-                ${builtin || inherited ? "" : `<button class="button secondary" type="button" data-delete-def="${escapeAttr(id)}">Delete</button>`}
-              </div>
-            </td>
-          </tr>`;
-      }).join("")
-    : `<tr><td colspan="5">No agent definitions</td></tr>`;
+  const editingID = state[options.editingKey] || "";
+  const creating = editingID === NEW_AGENT_DEF_STATE;
+  const editingDef = creating
+    ? null
+    : (agentDefs || []).find((def) => value(def, "id", "ID") === editingID) || null;
+  const hasEditor = creating || Boolean(editingDef);
+  const rows = (agentDefs || []).map((def) => {
+    if (def === editingDef) return renderAgentDefEditRowsView(def, agentOptions);
+    return renderAgentDefReadRowView(def);
+  }).join("");
+  const table = `
+    <div class="table-wrap">
+      <table class="agent-def-table">
+        <thead><tr><th>Name</th><th>Harness</th><th>Model</th><th>Effort</th><th class="agent-def-actions-column"></th></tr></thead>
+        <tbody>${rows}${creating ? renderAgentDefEditRowsView(null, agentOptions) : renderAgentDefAddRowView()}</tbody>
+      </table>
+    </div>`;
   return `
     <section class="flows-section" ${options.sectionAttribute}>
       <h3>${escapeHTML(options.title)}</h3>
       <p class="meta">${escapeHTML(options.description)}</p>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Name</th><th>Harness</th><th>Model</th><th>Effort</th><th></th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-      ${renderAgentDefFormView(editingDef, agentOptions)}
+      ${hasEditor
+        ? `<form class="agent-def-table-form" data-agent-def-form data-def-id="${escapeAttr(value(editingDef, "id", "ID"))}">${table}</form>`
+        : table}
     </section>
   `;
 }
 
-export function renderAgentDefFormView(def, agentOptions) {
-  const defID = value(def, "id", "ID");
+function renderAgentDefReadRowView(def) {
+  const id = value(def, "id", "ID");
+  const builtin = Boolean(value(def, "builtin", "Builtin"));
+  const inherited = Boolean(value(def, "inherited", "Inherited"));
+  return `
+    <tr>
+      <td>${escapeHTML(value(def, "name", "Name"))}${renderAgentDefBadgesView(def)}</td>
+      <td>${escapeHTML(value(def, "harness", "Harness"))}</td>
+      <td>${escapeHTML(value(def, "model", "Model") || "default")}</td>
+      <td>${escapeHTML(value(def, "reasoning_effort", "ReasoningEffort") || "—")}</td>
+      <td>
+        <div class="actions table-actions">
+          <button class="button secondary" type="button" data-edit-def="${escapeAttr(id)}">${inherited ? "Override" : "Edit"}</button>
+          ${builtin || inherited ? "" : `<button class="button secondary" type="button" data-delete-def="${escapeAttr(id)}">Delete</button>`}
+        </div>
+      </td>
+    </tr>`;
+}
+
+export function renderAgentDefEditRowsView(def, agentOptions) {
   const name = value(def, "name", "Name");
   const inherited = Boolean(value(def, "inherited", "Inherited"));
-  const harness = def ? value(def, "harness", "Harness") : (agentOptions[0] ? agentOptions[0].name : "codex");
+  const harness = def ? value(def, "harness", "Harness") : (agentOptions[0] ? value(agentOptions[0], "name", "Name") : "codex");
   const prompt = value(def, "prompt", "Prompt");
   const models = harnessModels(agentOptions, harness);
   const selectedQID = resolveAgentDefModelQID(models, harness, value(def, "model", "Model"));
   const selectedEffort = value(def, "reasoning_effort", "ReasoningEffort");
   return `
-    <form class="agent-def-form task-form" data-agent-def-form data-def-id="${escapeAttr(defID)}">
-      <label><span>Name</span><input name="def_name" value="${escapeAttr(name)}" ${inherited ? "readonly" : ""} required></label>
-      <label><span>Harness</span>
-        <select name="def_harness" data-def-harness>${renderHarnessOptions(agentOptions, harness, true)}</select>
-      </label>
-      <div class="agent-def-model-fields" data-def-model-fields>
-        ${renderAgentDefModelFieldsView(agentOptions, harness, selectedQID, selectedEffort)}
-      </div>
-      <label class="wide"><span>Prompt</span><textarea name="def_prompt" rows="4">${escapeHTML(prompt)}</textarea></label>
-      <div class="form-actions">
-        <button class="button" type="submit">${defID ? "Save agent" : "Create agent"}</button>
-        ${defID ? `<button class="button secondary" type="button" data-def-cancel>Cancel</button>` : ""}
-      </div>
-    </form>
-  `;
+    <tr class="agent-def-edit-row" data-agent-def-edit-row>
+      <td>
+        <div class="agent-def-name-editor">
+          <input name="def_name" value="${escapeAttr(name)}" aria-label="Name"${inherited ? " readonly" : ""} required>
+          ${renderAgentDefBadgesView(def)}
+        </div>
+      </td>
+      <td><select name="def_harness" data-def-harness aria-label="Harness">${renderHarnessOptions(agentOptions, harness, true)}</select></td>
+      ${renderAgentDefModelFieldsView(agentOptions, harness, selectedQID, selectedEffort)}
+      <td>
+        <div class="actions table-actions">
+          <button class="button" type="submit">Save</button>
+          <button class="button secondary" type="button" data-def-cancel>Cancel</button>
+        </div>
+      </td>
+    </tr>
+    <tr class="agent-def-prompt-row" data-agent-def-prompt-row>
+      <td colspan="5">
+        <label class="agent-def-prompt-field"><span>Prompt</span><textarea name="def_prompt" rows="5">${escapeHTML(prompt)}</textarea></label>
+      </td>
+    </tr>`;
+}
+
+function renderAgentDefBadgesView(def) {
+  const builtin = Boolean(value(def, "builtin", "Builtin"));
+  const inherited = Boolean(value(def, "inherited", "Inherited"));
+  return `${builtin ? ` <span class="badge idle">builtin</span>` : ""}${inherited ? ` <span class="badge idle">inherited</span>` : ""}`;
+}
+
+function renderAgentDefAddRowView() {
+  return `
+    <tr class="agent-def-add-row">
+      <td colspan="4"></td>
+      <td><button class="button secondary icon-button" type="button" data-add-def title="Add agent definition" aria-label="Add agent definition">+</button></td>
+    </tr>`;
 }
 
 export function renderAgentDefModelFieldsView(agentOptions, harness, selectedQID, selectedEffort) {
   const models = harnessModels(agentOptions, harness);
   const model = findHarnessModel(models, selectedQID);
   return `
-    <label><span>Model</span>
-      <select name="def_model" data-def-model>${renderHarnessModelOptions(models, model ? model.qualified_id : "")}</select>
-    </label>
-    <label><span>Reasoning</span>
-      <select name="def_reasoning_effort" data-def-reasoning>${renderReasoningOptionsView(model, selectedEffort)}</select>
-    </label>
+    <td data-def-model-cell>${renderAgentDefModelSelectView(models, model)}</td>
+    <td data-def-reasoning-cell>${renderAgentDefReasoningSelectView(model, selectedEffort)}</td>
   `;
+}
+
+function renderAgentDefModelSelectView(models, model) {
+  return `<select name="def_model" data-def-model aria-label="Model">${renderHarnessModelOptions(models, model ? model.qualified_id : "")}</select>`;
+}
+
+function renderAgentDefReasoningSelectView(model, selectedEffort) {
+  return `<select name="def_reasoning_effort" data-def-reasoning aria-label="Effort">${renderReasoningOptionsView(model, selectedEffort)}</select>`;
 }
 
 export function renderReasoningOptionsView(model, selectedEffort) {
@@ -304,6 +340,12 @@ function bindAgentDefsCatalogView(app, agentOptions, state, options) {
       reload();
     });
   });
+  section.querySelectorAll("[data-add-def]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state[options.editingKey] = NEW_AGENT_DEF_STATE;
+      reload();
+    });
+  });
   section.querySelectorAll("[data-delete-def]").forEach((button) => {
     button.addEventListener("click", async () => {
       if (typeof window.confirm === "function" && !window.confirm("Delete this agent definition?")) return;
@@ -320,7 +362,8 @@ function bindAgentDefsCatalogView(app, agentOptions, state, options) {
   const form = section.querySelector("[data-agent-def-form]");
   if (!form) return;
   const harnessSelect = form.querySelector("[data-def-harness]");
-  const modelFields = form.querySelector("[data-def-model-fields]");
+  const modelCell = form.querySelector("[data-def-model-cell]");
+  const reasoningCell = form.querySelector("[data-def-reasoning-cell]");
   const bindModelChange = () => {
     const modelSelect = form.querySelector("[data-def-model]");
     if (modelSelect && typeof modelSelect.addEventListener === "function") {
@@ -332,9 +375,11 @@ function bindAgentDefsCatalogView(app, agentOptions, state, options) {
       });
     }
   };
-  if (harnessSelect && typeof harnessSelect.addEventListener === "function" && modelFields) {
+  if (harnessSelect && typeof harnessSelect.addEventListener === "function" && modelCell && reasoningCell) {
     harnessSelect.addEventListener("change", () => {
-      modelFields.innerHTML = renderAgentDefModelFieldsView(agentOptions, harnessSelect.value, "", "");
+      const models = harnessModels(agentOptions, harnessSelect.value);
+      modelCell.innerHTML = renderAgentDefModelSelectView(models, null);
+      reasoningCell.innerHTML = renderAgentDefReasoningSelectView(null, "");
       bindModelChange();
     });
   }

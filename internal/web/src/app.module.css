@@ -2158,13 +2158,71 @@ tr.row-idle {
   min-height: 110px;
 }
 
-.agent-def-form {
-  grid-template-columns: minmax(150px, 1fr) minmax(132px, 170px) minmax(220px, 1.5fr) minmax(130px, 170px);
-  align-items: start;
+.agent-def-table {
+  min-width: 800px;
 }
 
-.agent-def-form .agent-def-model-fields {
-  display: contents;
+.agent-def-table .agent-def-actions-column {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.agent-def-table input,
+.agent-def-table select,
+.agent-def-table textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--ink);
+  padding: 8px 9px;
+  font-size: 0.8125rem;
+}
+
+.agent-def-table input:focus,
+.agent-def-table select:focus,
+.agent-def-table textarea:focus {
+  border-color: var(--accent);
+}
+
+.agent-def-name-editor {
+  display: grid;
+  gap: 6px;
+}
+
+.agent-def-name-editor .badge {
+  width: fit-content;
+}
+
+.agent-def-edit-row td,
+tbody tr:nth-child(even).agent-def-edit-row td,
+.agent-def-prompt-row td,
+tbody tr:nth-child(even).agent-def-prompt-row td {
+  background: var(--panel-2);
+}
+
+.agent-def-prompt-field {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.65625rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.agent-def-prompt-field textarea {
+  min-height: 112px;
+  font-family: var(--font-prose);
+  font-weight: 400;
+  letter-spacing: normal;
+  resize: vertical;
+  text-transform: none;
+}
+
+.agent-def-add-row td {
+  height: 48px;
+  vertical-align: middle;
 }
 
 .flow-editor {
@@ -2686,7 +2744,6 @@ th {
   }
 
   .task-form,
-  .agent-def-form,
   .flow-editor,
   .attachment-upload,
   .attachment-main {

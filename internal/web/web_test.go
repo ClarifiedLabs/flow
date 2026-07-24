@@ -118,7 +118,7 @@ func TestCSSModuleBuildScopesSelectors(t *testing.T) {
 		"flow-app .flows-detail {",
 		"flow-app .flows-table .flow-name-column,",
 		"flow-app .flows-table .flow-graph-column {",
-		"flow-app .agent-def-form {",
+		"flow-app .agent-def-table {",
 		"flow-app .flow-row {",
 		"flow-app .flow-row[data-review-row] {",
 		"flow-app .console-actions {",
