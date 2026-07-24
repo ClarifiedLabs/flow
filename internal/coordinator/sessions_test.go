@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,97 @@ import (
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
+
+func TestEnsureChangeUsesTaskAlignedIncrementingIDs(t *testing.T) {
+	ctx := context.Background()
+	fixture := newSessionServiceFixture(t)
+	task, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Friendly change IDs"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	first, err := fixture.sessions.ensureChange(ctx, task.ID, "task/"+task.ID+"/run-1", "main")
+	if err != nil {
+		t.Fatalf("ensure first change: %v", err)
+	}
+	if first.ID != "ch-test-0001" {
+		t.Fatalf("first change ID = %q, want ch-test-0001", first.ID)
+	}
+
+	replayed, err := fixture.sessions.ensureChange(ctx, task.ID, first.Branch, "main")
+	if err != nil {
+		t.Fatalf("replay first change: %v", err)
+	}
+	if replayed.ID != first.ID {
+		t.Fatalf("replayed change ID = %q, want %q", replayed.ID, first.ID)
+	}
+
+	for sequence, want := range []string{"ch-test-0001-2", "ch-test-0001-3"} {
+		change, err := fixture.sessions.ensureChange(ctx, task.ID, fmt.Sprintf("task/%s/run-%d", task.ID, sequence+2), "main")
+		if err != nil {
+			t.Fatalf("ensure change %d: %v", sequence+2, err)
+		}
+		if change.ID != want {
+			t.Fatalf("change %d ID = %q, want %q", sequence+2, change.ID, want)
+		}
+	}
+}
+
+func TestInsertWithTaskChangeIDRecoversConcurrentLogicalChange(t *testing.T) {
+	ctx := context.Background()
+	fixture := newSessionServiceFixture(t)
+	task, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Concurrent friendly change ID"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	branch := "task/" + task.ID + "/run-1"
+	ready := make(chan struct{}, 2)
+	release := make(chan struct{})
+	type allocation struct {
+		id      string
+		created bool
+		err     error
+	}
+	allocations := make(chan allocation, 2)
+	for range 2 {
+		go func() {
+			firstAttempt := true
+			id, created, err := insertWithTaskChangeID(ctx, fixture.store.DB(), task.ID, branch, "", func(id string) error {
+				if firstAttempt {
+					firstAttempt = false
+					ready <- struct{}{}
+					<-release
+				}
+				_, err := fixture.store.DB().ExecContext(ctx, `
+INSERT INTO changes (id, task_id, branch, base, created_at, updated_at)
+VALUES (?, ?, ?, 'main', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, id, task.ID, branch)
+				return err
+			})
+			allocations <- allocation{id: id, created: created, err: err}
+		}()
+	}
+	<-ready
+	<-ready
+	close(release)
+
+	createdCount := 0
+	for range 2 {
+		allocation := <-allocations
+		if allocation.err != nil {
+			t.Fatalf("allocate concurrent change: %v", allocation.err)
+		}
+		if allocation.id != "ch-test-0001" {
+			t.Errorf("concurrent change ID = %q, want ch-test-0001", allocation.id)
+		}
+		if allocation.created {
+			createdCount++
+		}
+	}
+	if createdCount != 1 {
+		t.Fatalf("created allocations = %d, want 1", createdCount)
+	}
+}
 
 func TestConsoleSessionLifecycle(t *testing.T) {
 	ctx := context.Background()

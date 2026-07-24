@@ -297,11 +297,13 @@ LIMIT 1`,
 		"agent": node.Config.Agent.Agent, "role_instructions": node.Config.Agent.Agent.Prompt,
 		"branch": branch, "base": base, "project_id": e.project.ID, "project_name": e.project.Name,
 	}
-	_, err = e.queue.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		TaskID: &taskID, ChangeID: changeID, WorkflowRunID: &run.ID, NodeRunID: &nodeRun.ID,
-		Role: flowworker.RoleAuthor, CapacityBucket: flowworker.BucketPersistentAgent,
-		Priority: 0, Requires: []string{flowharness.AgentHarnessLabel(harness)}, Payload: payload,
-	})
+	_, _, err = e.queue.EnqueueJobWithDispatchKey(ctx,
+		fmt.Sprintf("workflow-agent:%s:%d", nodeRun.ID, nodeRun.Attempt),
+		flowworker.EnqueueJobInput{
+			TaskID: &taskID, ChangeID: changeID, WorkflowRunID: &run.ID, NodeRunID: &nodeRun.ID,
+			Role: flowworker.RoleAuthor, CapacityBucket: flowworker.BucketPersistentAgent,
+			Priority: 0, Requires: []string{flowharness.AgentHarnessLabel(harness)}, Payload: payload,
+		})
 	return false, err
 }
 
@@ -320,24 +322,28 @@ func (e *WorkflowExecutor) changeForAgentNode(ctx context.Context, run WorkflowR
 		}
 	}
 	branch := fmt.Sprintf("task/%s/run-%d", run.TaskID, run.RunSequence)
-	var existingID string
-	err := e.db.QueryRowContext(ctx, `
-SELECT id FROM changes WHERE workflow_run_id = ? ORDER BY created_at DESC LIMIT 1`, run.ID).Scan(&existingID)
-	if err == nil {
-		return e.sessions.GetChange(ctx, existingID)
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return Change{}, err
-	}
-	id, err := randomPrefixedID("ch")
-	if err != nil {
-		return Change{}, err
-	}
 	now := sqlitex.FormatTime(sqlitex.UTCNow())
-	if _, err := e.db.ExecContext(ctx, `
+	id, _, err := insertWithTaskChangeID(ctx, e.db, run.TaskID, branch, run.ID, func(id string) error {
+		_, err := e.db.ExecContext(ctx, `
 INSERT INTO changes (id, task_id, workflow_run_id, branch, base, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)`, id, run.TaskID, run.ID, branch, base, now, now); err != nil {
-		return Change{}, err
+VALUES (?, ?, ?, ?, ?, ?, ?)`, id, run.TaskID, run.ID, branch, base, now, now)
+		return err
+	})
+	if err != nil {
+		return Change{}, fmt.Errorf("insert workflow change: %w", err)
+	}
+	if _, err := e.db.ExecContext(ctx, `
+UPDATE changes
+SET workflow_run_id = ?, updated_at = ?
+WHERE id = ? AND workflow_run_id IS NULL`, run.ID, now, id); err != nil {
+		return Change{}, fmt.Errorf("associate workflow change: %w", err)
+	}
+	var associatedRunID sql.NullString
+	if err := e.db.QueryRowContext(ctx, `SELECT workflow_run_id FROM changes WHERE id = ?`, id).Scan(&associatedRunID); err != nil {
+		return Change{}, fmt.Errorf("load workflow change association: %w", err)
+	}
+	if !associatedRunID.Valid || associatedRunID.String != run.ID {
+		return Change{}, fmt.Errorf("change %s belongs to workflow run %s", id, associatedRunID.String)
 	}
 	return e.sessions.GetChange(ctx, id)
 }

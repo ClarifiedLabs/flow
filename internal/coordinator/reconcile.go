@@ -133,18 +133,9 @@ WHERE id = ?`, taskID).Scan(&count); err != nil {
 }
 
 func (s *ReconcileService) ensureChangeProjection(ctx context.Context, taskID string, branch string, base string, headSHA string) (Change, bool, bool, error) {
-	existing, err := s.changeForTaskBranch(ctx, taskID, branch)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return Change{}, false, false, err
-	}
-
 	nowText := formatTime(s.now().UTC())
-	if errors.Is(err, sql.ErrNoRows) {
-		id, err := randomPrefixedID("ch")
-		if err != nil {
-			return Change{}, false, false, err
-		}
-		if _, err := s.db.ExecContext(ctx, `
+	id, created, err := insertWithTaskChangeID(ctx, s.db, taskID, branch, "", func(id string) error {
+		_, err := s.db.ExecContext(ctx, `
 INSERT INTO changes (
 	id,
 	task_id,
@@ -161,15 +152,18 @@ INSERT INTO changes (
 			headSHA,
 			nowText,
 			nowText,
-		); err != nil {
-			return Change{}, false, false, fmt.Errorf("insert reconciled change: %w", err)
-		}
-		change, err := s.getChange(ctx, id)
-		return change, true, false, err
+		)
+		return err
+	})
+	if err != nil {
+		return Change{}, false, false, fmt.Errorf("insert reconciled change: %w", err)
 	}
-
-	if existing.HeadSHA == headSHA {
-		return existing, false, false, nil
+	existing, err := s.getChange(ctx, id)
+	if err != nil {
+		return Change{}, false, false, err
+	}
+	if created || existing.HeadSHA == headSHA {
+		return existing, created, false, nil
 	}
 	if _, err := s.db.ExecContext(ctx, `
 UPDATE changes
@@ -184,15 +178,6 @@ WHERE id = ?`,
 	}
 	change, err := s.getChange(ctx, existing.ID)
 	return change, false, true, err
-}
-
-func (s *ReconcileService) changeForTaskBranch(ctx context.Context, taskID string, branch string) (Change, error) {
-	row := s.db.QueryRowContext(ctx, `
-SELECT id, task_id, branch, base, head_sha, created_at, updated_at, ready_at, merged_at
-FROM changes
-WHERE task_id = ? AND branch = ?`, taskID, branch)
-
-	return scanChange(row)
 }
 
 func (s *ReconcileService) getChange(ctx context.Context, changeID string) (Change, error) {

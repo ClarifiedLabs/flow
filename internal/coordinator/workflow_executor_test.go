@@ -169,6 +169,106 @@ WHERE workflow_run_id = ? AND from_node_key = 'review' AND event_kind = 'node_co
 	}
 }
 
+func TestWorkflowExecutorConcurrentChangeWorkspaceUsesOneChange(t *testing.T) {
+	ctx := context.Background()
+	fixture := newSessionServiceFixture(t)
+	task, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Concurrent change workspace"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	const runID = "wr-concurrent-change"
+	const nodeID = "nr-concurrent-change"
+	snapshotJSON, err := json.Marshal(FlowSnapshot{
+		FlowName: "concurrent change", StartNode: "implement", TransitionBudget: 10,
+		Nodes: []FlowNodeSnapshot{{
+			Key: "implement", Name: "Implement", Kind: NodeAgent,
+			Config: FlowNodeSnapshotConfig{Agent: &AgentNodeSnapshotConfig{
+				Agent:     AgentDefSnapshot{Name: "author", Harness: "codex", Prompt: "Implement the task."},
+				Workspace: WorkspaceChange,
+				Artifact:  ArtifactChange,
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal workflow snapshot: %v", err)
+	}
+	if _, err := fixture.store.DB().ExecContext(ctx, `
+UPDATE tasks SET lifecycle_state = 'in_progress' WHERE id = ?`, task.ID); err != nil {
+		t.Fatalf("mark task in progress: %v", err)
+	}
+	if _, err := fixture.store.DB().ExecContext(ctx, `
+INSERT INTO workflow_runs (
+	id, task_id, run_sequence, flow_snapshot_json, state, current_node_key,
+	current_node_run_id, transition_budget, created_at, started_at
+) VALUES (?, ?, 1, ?, 'running', 'implement', ?, 10,
+	'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, runID, task.ID, string(snapshotJSON), nodeID); err != nil {
+		t.Fatalf("insert workflow run: %v", err)
+	}
+	if _, err := fixture.store.DB().ExecContext(ctx, `
+INSERT INTO workflow_node_runs (
+	id, workflow_run_id, node_key, visit, attempt, state, created_at
+) VALUES (?, ?, 'implement', 1, 1, 'queued', '2026-01-01T00:00:00Z')`, nodeID, runID); err != nil {
+		t.Fatalf("insert workflow node: %v", err)
+	}
+
+	runs := NewWorkflowRunService(fixture.store.DB(), NewFlowService(fixture.store.DB()), fixture.tasks)
+	executor := NewWorkflowExecutor(WorkflowExecutorOptions{
+		Database: fixture.store.DB(), Runs: runs,
+		Artifacts: NewWorkflowArtifactService(fixture.store.DB(), fixture.tasks),
+		Tasks:     fixture.tasks, Sessions: fixture.sessions, Queue: fixture.workers,
+		Project: fixture.project,
+	})
+	const advances = 20
+	start := make(chan struct{})
+	errs := make(chan error, advances)
+	var wg sync.WaitGroup
+	for i := 0; i < advances; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- executor.Advance(ctx, runID)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent advance: %v", err)
+		}
+	}
+
+	detail, err := runs.Detail(ctx, runID)
+	if err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	if detail.Run.State != WorkflowRunRunning {
+		t.Fatalf("workflow detail = %+v, want running (not parked after a change conflict)", detail)
+	}
+	var changeID string
+	var associatedRunID string
+	var changeCount int
+	if err := fixture.store.DB().QueryRowContext(ctx, `
+SELECT MIN(id), MIN(workflow_run_id), COUNT(*)
+FROM changes
+WHERE task_id = ? AND branch = ?`, task.ID, "task/"+task.ID+"/run-1").Scan(&changeID, &associatedRunID, &changeCount); err != nil {
+		t.Fatalf("load workflow change: %v", err)
+	}
+	if changeCount != 1 || changeID != "ch-test-0001" || associatedRunID != runID {
+		t.Fatalf("workflow changes = count %d id %q run %q, want one ch-test-0001 for %s", changeCount, changeID, associatedRunID, runID)
+	}
+	var authorJobs int
+	if err := fixture.store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM jobs WHERE node_run_id = ? AND role = 'author'`, nodeID).Scan(&authorJobs); err != nil {
+		t.Fatalf("count workflow author jobs: %v", err)
+	}
+	if authorJobs != 1 {
+		t.Fatalf("workflow author jobs = %d, want 1", authorJobs)
+	}
+}
+
 func TestWorkflowExecutorParallelReviewBarrier(t *testing.T) {
 	t.Run("queues every job once and waits for the first blocking result", func(t *testing.T) {
 		fixture := newReviewBarrierFixture(t, barrierAgents(true))

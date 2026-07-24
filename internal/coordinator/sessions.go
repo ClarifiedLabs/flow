@@ -2971,21 +2971,9 @@ WHERE token_hash = ?
 }
 
 func (s *SessionService) ensureChange(ctx context.Context, taskID string, branch string, base string) (Change, error) {
-	if existing, ok, err := s.changeForTaskBranch(ctx, taskID, branch); err != nil {
-		return Change{}, err
-	} else if ok {
-		if existing.Base != base {
-			return Change{}, errors.New("existing change uses a different base")
-		}
-		return existing, nil
-	}
-
-	id, err := randomPrefixedID("ch")
-	if err != nil {
-		return Change{}, err
-	}
 	now := s.now().UTC()
-	if _, err := s.db.ExecContext(ctx, `
+	id, _, err := insertWithTaskChangeID(ctx, s.db, taskID, branch, "", func(id string) error {
+		_, err := s.db.ExecContext(ctx, `
 INSERT INTO changes (
 	id,
 	task_id,
@@ -2995,36 +2983,27 @@ INSERT INTO changes (
 	created_at,
 	updated_at
 ) VALUES (?, ?, ?, ?, '', ?, ?)`,
-		id,
-		taskID,
-		branch,
-		base,
-		formatTime(now),
-		formatTime(now),
-	); err != nil {
-		if existing, ok, lookupErr := s.changeForTaskBranch(ctx, taskID, branch); lookupErr == nil && ok && existing.Base == base {
-			return existing, nil
-		}
+			id,
+			taskID,
+			branch,
+			base,
+			formatTime(now),
+			formatTime(now),
+		)
+		return err
+	})
+	if err != nil {
 		return Change{}, fmt.Errorf("insert change: %w", err)
 	}
 
-	return s.GetChange(ctx, id)
-}
-
-func (s *SessionService) changeForTaskBranch(ctx context.Context, taskID string, branch string) (Change, bool, error) {
-	row := s.db.QueryRowContext(ctx, `
-SELECT id, task_id, branch, base, head_sha, created_at, updated_at, ready_at, merged_at
-FROM changes
-WHERE task_id = ? AND branch = ?`, taskID, branch)
-	change, err := scanChange(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Change{}, false, nil
-	}
+	change, err := s.GetChange(ctx, id)
 	if err != nil {
-		return Change{}, false, err
+		return Change{}, err
 	}
-
-	return change, true, nil
+	if change.Base != base {
+		return Change{}, errors.New("existing change uses a different base")
+	}
+	return change, nil
 }
 
 func (s *SessionService) hasActiveAuthorSession(ctx context.Context, taskID string) (bool, error) {

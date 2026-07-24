@@ -574,7 +574,7 @@ IDs use stable prefixes:
 
 - Task: `t-my-project-0001`
 - Session: `s-<random>`
-- Change: `ch-<random>`
+- Change: `ch-my-project-0001` (then `ch-my-project-0001-2`, etc. for additional changes on the task)
 - Job: `j-<random>`
 - Lease: `l-<random>`
 - Check: `ck-<random>`

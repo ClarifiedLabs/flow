@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -83,12 +84,89 @@ FROM changes
 WHERE task_id = ? AND branch = ?`, task.ID, branch).Scan(&changeID, &head); err != nil {
 		t.Fatalf("load reconciled change: %v", err)
 	}
+	if changeID != "ch-test-0001" {
+		t.Fatalf("reconciled change ID = %q, want ch-test-0001", changeID)
+	}
 	if head != headSHA {
 		t.Fatalf("change head = %s, want %s", head, headSHA)
 	}
 	// The committed handoff file is never projected into a snapshot.
 	if _, err := reconciler.GetHandoffSnapshot(ctx, changeID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("get handoff snapshot err = %v, want sql.ErrNoRows (reconcile must ignore committed handoff)", err)
+	}
+}
+
+// TestReconcileConcurrentCreationUsesExistingLogicalChange exercises parallel
+// projections of the same task branch.
+func TestReconcileConcurrentCreationUsesExistingLogicalChange(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newProjectFixture(t)
+	task, err := NewTaskService(fixture.store.DB(), testProjectID).CreateTask(ctx, CreateTaskInput{Title: "Concurrent reconciliation"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	branch := "task/" + task.ID
+	if err := runReconcileGit(fixture.repoPath, nil, "checkout", "-b", branch, "main"); err != nil {
+		t.Fatalf("checkout branch: %v", err)
+	}
+	writeReconcileFile(t, fixture.repoPath, "concurrent.txt", "work\n")
+	if err := runReconcileGit(fixture.repoPath, nil, "add", "concurrent.txt"); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if err := runReconcileGit(fixture.repoPath, nil, "commit", "-m", "concurrent work"); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+	if err := runReconcileGit(fixture.repoPath, []string{"FLOW_GIT_PRINCIPAL=worker:w-local"}, "push", fixture.project.ExchangePath, branch+":"+branch); err != nil {
+		t.Fatalf("push task branch: %v", err)
+	}
+
+	const passes = 12
+	type reconcileOutput struct {
+		result ReconcileResult
+		err    error
+	}
+	start := make(chan struct{})
+	outputs := make(chan reconcileOutput, passes)
+	var wg sync.WaitGroup
+	for i := 0; i < passes; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			result, err := NewReconcileService(fixture.store.DB()).Reconcile(ctx, fixture.project)
+			outputs <- reconcileOutput{result: result, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(outputs)
+
+	created := 0
+	for output := range outputs {
+		if output.err != nil {
+			t.Errorf("concurrent reconcile: %v", output.err)
+		}
+		if output.result.BranchesScanned != 1 {
+			t.Errorf("branches scanned = %d, want 1", output.result.BranchesScanned)
+		}
+		created += output.result.ChangesCreated
+	}
+	if created != 1 {
+		t.Fatalf("changes reported created = %d, want 1", created)
+	}
+
+	var changeID string
+	var changeCount int
+	if err := fixture.store.DB().QueryRowContext(ctx, `
+SELECT MIN(id), COUNT(*)
+FROM changes
+WHERE task_id = ? AND branch = ?`, task.ID, branch).Scan(&changeID, &changeCount); err != nil {
+		t.Fatalf("load reconciled change: %v", err)
+	}
+	if changeCount != 1 || changeID != "ch-test-0001" {
+		t.Fatalf("reconciled changes = count %d id %q, want one ch-test-0001", changeCount, changeID)
 	}
 }
 

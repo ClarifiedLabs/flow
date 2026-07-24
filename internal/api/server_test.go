@@ -3140,6 +3140,15 @@ func TestWorkerCheckReportRejectsSourceJobMissingCheckMetadata(t *testing.T) {
 	}, http.StatusForbidden, nil)
 }
 
+func TestWorkflowAuthorChangeUsesTaskAlignedID(t *testing.T) {
+	fixture := newTestFixture(t)
+	started := startAuthorSessionForStatusTest(t, fixture, "Friendly workflow change ID")
+	want := "ch-" + strings.TrimPrefix(started.Session.TaskID, "t-")
+	if started.Change.ID != want {
+		t.Fatalf("workflow change ID = %q, want %q", started.Change.ID, want)
+	}
+}
+
 func TestWorkerReviewerJobCanReportReviewerCheck(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()

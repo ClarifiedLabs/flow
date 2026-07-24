@@ -228,7 +228,7 @@ func (s *Service) EnqueueJobWithDispatchKey(ctx context.Context, dispatchKey str
 	if err == nil {
 		return job, true, nil
 	}
-	if !strings.Contains(err.Error(), "jobs.dispatch_key") {
+	if !strings.Contains(err.Error(), "UNIQUE constraint failed: jobs.") {
 		return Job{}, false, err
 	}
 	row := s.db.QueryRowContext(ctx, jobSelectSQL+`
