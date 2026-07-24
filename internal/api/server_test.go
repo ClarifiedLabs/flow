@@ -3094,6 +3094,83 @@ func TestWorkerCheckReportRejectsSourceJobFromStaleHead(t *testing.T) {
 	}, http.StatusForbidden, nil)
 }
 
+func TestWorkerCheckReportRejectsHeadAdvancedAfterScopeValidation(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	started := startAuthorSessionForStatusTest(t, fixture, "Interleaved stale check job task")
+	if _, err := fixture.Sessions.UpdateChangeHead(ctx, started.Change.ID, "head-1"); err != nil {
+		t.Fatalf("set initial change head: %v", err)
+	}
+	claimed := startLiveCheckJobForTask(
+		t,
+		fixture,
+		"interleaved-ci-token",
+		"w-interleaved-ci",
+		started.Session.TaskID,
+		started.Change.ID,
+		"head-1",
+		"unit",
+		flowworker.RoleCI,
+		flowworker.BucketEphemeral,
+	)
+	sourceJobID := claimed.Job.ID
+	leaseID := claimed.Lease.ID
+	request := reportCheckRequest{
+		Kind:        string(coordinator.CheckKindCI),
+		SourceJobID: &sourceJobID,
+		LeaseID:     &leaseID,
+		ExitCode:    intPointer(0),
+	}
+	principal := coordinator.Principal{Scope: coordinator.TokenScopeWorker, Subject: "w-interleaved-ci"}
+	projectServer := fixture.Server.forBundle(fixture.Bundle)
+	if err := projectServer.checkReportScope(
+		httptest.NewRequest(http.MethodPost, "/v2/tasks/"+started.Session.TaskID+"/checks/unit", nil),
+		started.Session.TaskID,
+		"unit",
+		request,
+		principal,
+	); err != nil {
+		t.Fatalf("validate worker check scope: %v", err)
+	}
+
+	// Reproduce the handler interleaving: the job passed scope validation for
+	// head-1, then a new revision became current before ReportCheck wrote.
+	if _, err := fixture.Sessions.UpdateChangeHead(ctx, started.Change.ID, "head-2"); err != nil {
+		t.Fatalf("advance change head after scope validation: %v", err)
+	}
+	required := true
+	if _, err := fixture.Checks.ReportCheck(ctx, coordinator.ReportCheckInput{
+		TaskID:   started.Session.TaskID,
+		Name:     "unit",
+		Kind:     coordinator.CheckKindCI,
+		Required: &required,
+		Verdict:  coordinator.CheckPending,
+	}); err != nil {
+		t.Fatalf("seed reset pending check: %v", err)
+	}
+
+	_, err := fixture.Checks.ReportCheck(ctx, coordinator.ReportCheckInput{
+		TaskID:        started.Session.TaskID,
+		Name:          "unit",
+		Kind:          coordinator.CheckKindCI,
+		ExitCode:      intPointer(0),
+		SourceJobID:   &sourceJobID,
+		Reporter:      "worker:w-interleaved-ci",
+		WorkerID:      principal.Subject,
+		WorkerLeaseID: leaseID,
+	})
+	if !errors.Is(err, coordinator.ErrCheckReportLeaseInvalid) {
+		t.Fatalf("stale worker report error = %v, want atomic authorization rejection", err)
+	}
+	check, err := fixture.Checks.GetCheck(ctx, started.Session.TaskID, "unit")
+	if err != nil {
+		t.Fatalf("get check after stale report: %v", err)
+	}
+	if check.Verdict != coordinator.CheckPending || check.SourceJobID != nil {
+		t.Fatalf("check after stale report = %+v, want pending check without stale source job", check)
+	}
+}
+
 func TestWorkerCheckReportRejectsSourceJobMissingCheckMetadata(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
@@ -4491,5 +4568,187 @@ func TestWorkflowAuthorProcessExitPausesUntilHumanRetry(t *testing.T) {
 	}
 	if node.Attempt != 2 || node.State != coordinator.WorkflowNodeQueued || node.Error != "" {
 		t.Fatalf("retried node = %+v, want queued attempt 2 with cleared error", node)
+	}
+}
+
+func TestWorkflowFailedStepCanBeSkippedByOwner(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	started := startAuthorSessionForStatusTest(t, fixture, "Skippable workflow review failure")
+	taskID := started.Session.TaskID
+	runID := started.Session.WorkflowRunID
+
+	repoPath := t.TempDir()
+	runAPIGit(t, repoPath, "init", "-b", "main")
+	runAPIGit(t, repoPath, "config", "user.name", "Flow Test")
+	runAPIGit(t, repoPath, "config", "user.email", "flow-test@example.com")
+	writeAPIFile(t, repoPath, "README.md", "skip API test")
+	runAPIGit(t, repoPath, "add", "README.md")
+	runAPIGit(t, repoPath, "commit", "-m", "test: seed skip workflow")
+	headSHA := apiGitOutput(t, repoPath, "rev-parse", "HEAD")
+	runAPIGit(t, "", "--git-dir", fixture.Project.ExchangePath, "fetch", repoPath, "HEAD:refs/heads/main")
+	runAPIGit(t, "", "--git-dir", fixture.Project.ExchangePath, "update-ref", "refs/heads/"+started.Change.Branch, headSHA)
+	if _, err := fixture.DB.ExecContext(ctx, `UPDATE changes SET head_sha = ? WHERE id = ?`, headSHA, started.Change.ID); err != nil {
+		t.Fatalf("pin test change head: %v", err)
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"change_id": started.Change.ID,
+		"head_sha":  headSHA,
+	})
+	if err != nil {
+		t.Fatalf("marshal change artifact: %v", err)
+	}
+	artifact, _, err := fixture.Bundle.WorkflowArtifacts.Create(ctx, coordinator.CreateWorkflowArtifactInput{
+		WorkflowRunID:   runID,
+		NodeRunID:       started.Session.NodeRunID,
+		SessionID:       started.Session.ID,
+		CreatorKey:      "test-skip-session",
+		Kind:            coordinator.ArtifactChange,
+		SummaryMarkdown: "Author work completed for the skip API test.",
+		Payload:         payload,
+		ClientKey:       "skip-api-change",
+	})
+	if err != nil {
+		t.Fatalf("create change artifact: %v", err)
+	}
+	if _, err := fixture.Sessions.ReadyAuthorSession(ctx, started.Session.ID); err != nil {
+		t.Fatalf("ready author session: %v", err)
+	}
+	if _, err := fixture.Bundle.WorkflowRuns.CompleteNode(ctx, coordinator.CompleteWorkflowNodeInput{
+		NodeRunID:  started.Session.NodeRunID,
+		Outcome:    "completed",
+		ArtifactID: artifact.ID,
+		Actor:      coordinator.ActorAgent,
+	}); err != nil {
+		t.Fatalf("complete author node: %v", err)
+	}
+	if err := fixture.Bundle.WorkflowExecutor.Advance(ctx, runID); err != nil {
+		t.Fatalf("advance workflow to review: %v", err)
+	}
+	beforeFailure, err := fixture.Bundle.WorkflowRuns.Detail(ctx, runID)
+	if err != nil {
+		t.Fatalf("load workflow at review: %v", err)
+	}
+	failedNodeRunID := beforeFailure.Run.CurrentNodeRunID
+	failedNode, ok, err := fixture.Bundle.WorkflowRuns.GetNodeRun(ctx, failedNodeRunID)
+	if err != nil || !ok {
+		t.Fatalf("load review node: ok=%t err=%v", ok, err)
+	}
+	node, ok := beforeFailure.Run.Snapshot.Node(failedNode.NodeKey)
+	if !ok || node.Kind != coordinator.NodeChangeReview {
+		t.Fatalf("active workflow node = %+v, want change review", node)
+	}
+	checks, err := fixture.Checks.ListChecks(ctx, taskID)
+	if err != nil {
+		t.Fatalf("list review checks: %v", err)
+	}
+	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
+		Token: "skip-reviewer-token", Scope: coordinator.TokenScopeWorker, Subject: "w-skip-reviewer",
+	}); err != nil {
+		t.Fatalf("store skip reviewer token: %v", err)
+	}
+	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
+		ID: "w-skip-reviewer", Labels: map[string]string{"agent.harness.codex": "true"}, CapacityPersistentAgent: 1,
+	}); err != nil {
+		t.Fatalf("register skip reviewer: %v", err)
+	}
+	claimed, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
+		WorkerID: "w-skip-reviewer", Buckets: []flowworker.CapacityBucket{flowworker.BucketPersistentAgent}, LeaseDuration: time.Minute,
+	})
+	if err != nil || !ok {
+		jobs, listErr := fixture.Workers.ListJobs(ctx)
+		t.Fatalf("claim review job: ok=%t err=%v jobs=%+v list_err=%v", ok, err, jobs, listErr)
+	}
+	if _, err := fixture.Workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
+		t.Fatalf("mark review job running: %v", err)
+	}
+	checkName, _ := claimed.Job.Payload["check_name"].(string)
+	var failedCheck coordinator.Check
+	for _, check := range checks {
+		if check.Required && check.Name == checkName && strings.HasSuffix(check.Name, ".node."+failedNodeRunID) {
+			failedCheck = check
+			break
+		}
+	}
+	if failedCheck.ID == 0 {
+		t.Fatalf("claimed job = %+v checks = %+v, want a required node-scoped review check", claimed.Job, checks)
+	}
+	required := true
+	sourceJobID := claimed.Job.ID
+	leaseID := claimed.Lease.ID
+	reportPath := "/v2/tasks/" + taskID + "/checks/" + failedCheck.Name
+	doJSONRequestAs(t, fixture.Server, "skip-reviewer-token", http.MethodPost, reportPath, reportCheckRequest{
+		Kind: string(failedCheck.Kind), Required: &required, Verdict: string(coordinator.CheckErrored),
+		Details: "review harness failed", SourceJobID: &sourceJobID, LeaseID: &leaseID,
+	}, http.StatusOK, nil)
+	if err := fixture.Bundle.WorkflowExecutor.Advance(ctx, runID); err != nil {
+		t.Fatalf("pause failed review: %v", err)
+	}
+	before, err := fixture.Bundle.WorkflowRuns.Detail(ctx, runID)
+	if err != nil || before.OpenWait == nil || before.OpenWait.NodeRunID != failedNodeRunID {
+		t.Fatalf("load failed workflow before skip: detail=%+v err=%v", before, err)
+	}
+
+	skipPath := "/v2/tasks/" + taskID + "/workflow/skip"
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, skipPath, workflowSkipRequest{
+		NodeRunID: started.Session.NodeRunID,
+	}, http.StatusConflict, nil)
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, skipPath, workflowSkipRequest{
+		NodeRunID: failedNodeRunID,
+	}, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, skipPath, workflowSkipRequest{}, http.StatusBadRequest, nil)
+
+	var skipped coordinator.CompleteWorkflowNodeResult
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, skipPath, workflowSkipRequest{
+		NodeRunID: failedNodeRunID,
+	}, http.StatusOK, &skipped)
+	if skipped.Run.CurrentNodeKey == failedNode.NodeKey {
+		t.Fatalf("skipped workflow = %+v, want workflow advanced beyond failed review", skipped.Run)
+	}
+	failedNode, ok, err = fixture.Bundle.WorkflowRuns.GetNodeRun(ctx, failedNodeRunID)
+	if err != nil || !ok || failedNode.State != coordinator.WorkflowNodeSucceeded || failedNode.Outcome != "approved" {
+		t.Fatalf("skipped node = %+v ok=%t err=%v", failedNode, ok, err)
+	}
+	retired, err := fixture.Checks.GetCheck(ctx, taskID, failedCheck.Name)
+	if err != nil || retired.Required || retired.Verdict != coordinator.CheckSkipped {
+		t.Fatalf("retired failed check = %+v err=%v", retired, err)
+	}
+	doJSONRequestAs(t, fixture.Server, "skip-reviewer-token", http.MethodPost, reportPath, reportCheckRequest{
+		Kind: string(failedCheck.Kind), Required: &required, Verdict: string(coordinator.CheckSatisfied),
+		Details: "late worker result", SourceJobID: &sourceJobID, LeaseID: &leaseID,
+	}, http.StatusForbidden, nil)
+	retired, err = fixture.Checks.GetCheck(ctx, taskID, failedCheck.Name)
+	if err != nil || retired.Required || retired.Verdict != coordinator.CheckSkipped {
+		t.Fatalf("retired check after late report = %+v err=%v", retired, err)
+	}
+	waiver, err := fixture.Checks.GetCheck(ctx, taskID, "workflow-step-skipped.node."+failedNodeRunID)
+	if err != nil || !waiver.Required || waiver.Verdict != coordinator.CheckSatisfied {
+		t.Fatalf("skip waiver = %+v err=%v", waiver, err)
+	}
+	if reviewState, err := fixture.Checks.ReviewState(ctx, taskID); err != nil || reviewState != coordinator.ReviewApproved {
+		t.Fatalf("review state after skipped review = %s err=%v, want approved", reviewState, err)
+	}
+	after, err := fixture.Bundle.WorkflowRuns.Detail(ctx, runID)
+	if err != nil {
+		t.Fatalf("load skipped workflow: %v", err)
+	}
+	foundSkip := false
+	for _, transition := range after.Transitions {
+		if transition.EventKind == "node_skipped" && transition.FromNodeKey == failedNode.NodeKey && transition.Outcome == "approved" {
+			foundSkip = true
+			break
+		}
+	}
+	if !foundSkip {
+		t.Fatalf("workflow transitions = %+v, want node_skipped audit event", after.Transitions)
+	}
+
+	var replay coordinator.CompleteWorkflowNodeResult
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, skipPath, workflowSkipRequest{
+		NodeRunID: failedNodeRunID,
+	}, http.StatusOK, &replay)
+	if !replay.Replayed {
+		t.Fatalf("duplicate skip = %+v, want idempotent replay", replay)
 	}
 }

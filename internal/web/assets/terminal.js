@@ -57,6 +57,17 @@ export function inlineTerminalMount(button, root) {
     return terminalRow.querySelector("[data-inline-terminal]");
   }
 
+  const anchor = button.closest?.("[data-inline-terminal-anchor]");
+  if (anchor?.parentElement) {
+    let mount = anchor.nextElementSibling?.dataset?.inlineTerminal === "true" ? anchor.nextElementSibling : null;
+    if (!mount) {
+      mount = document.createElement("div");
+      mount.dataset.inlineTerminal = "true";
+      anchor.after(mount);
+    }
+    return mount;
+  }
+
   const detailHead = button.closest?.(".detail-head");
   if (detailHead?.parentElement && elementHasClass(detailHead.parentElement, "detail")) {
     let mount = detailHead.nextElementSibling?.dataset?.inlineTerminal === "true" ? detailHead.nextElementSibling : null;
@@ -83,7 +94,17 @@ export function closeInlineTerminal(button, root) {
   if (row) {
     const terminalRow = row.nextElementSibling?.dataset?.inlineTerminalRow === "true" ? row.nextElementSibling : null;
     if (!terminalRow) return false;
+    resetInlineTerminalDisclosure(terminalRow.querySelector("[data-inline-terminal]"));
     terminalRow.remove();
+    return true;
+  }
+
+  const anchor = button.closest?.("[data-inline-terminal-anchor]");
+  if (anchor?.parentElement) {
+    const mount = anchor.nextElementSibling?.dataset?.inlineTerminal === "true" ? anchor.nextElementSibling : null;
+    if (!mount) return false;
+    resetInlineTerminalDisclosure(mount);
+    mount.remove();
     return true;
   }
 
@@ -91,6 +112,7 @@ export function closeInlineTerminal(button, root) {
   if (detailHead?.parentElement && elementHasClass(detailHead.parentElement, "detail")) {
     const mount = detailHead.nextElementSibling?.dataset?.inlineTerminal === "true" ? detailHead.nextElementSibling : null;
     if (!mount) return false;
+    resetInlineTerminalDisclosure(mount);
     mount.remove();
     return true;
   }
@@ -98,7 +120,21 @@ export function closeInlineTerminal(button, root) {
   const host = button.closest?.(".card, .feed-item, .detail") || button.parentElement || root.querySelector(".content");
   const mount = directInlineTerminalChild(host);
   if (!mount) return false;
+  resetInlineTerminalDisclosure(mount);
   mount.remove();
+  return true;
+}
+
+export function registerInlineTerminalDisclosure(mount, reset) {
+  resetInlineTerminalDisclosure(mount);
+  if (mount && typeof reset === "function") mount.inlineTerminalDisclosureReset = reset;
+}
+
+export function resetInlineTerminalDisclosure(mount) {
+  const reset = mount?.inlineTerminalDisclosureReset;
+  if (typeof reset !== "function") return false;
+  delete mount.inlineTerminalDisclosureReset;
+  reset();
   return true;
 }
 
@@ -208,6 +244,7 @@ export function closeTerminalDialog(source) {
 export function hideInlineTerminal(source) {
   const mount = source.closest?.("[data-inline-terminal=\"true\"]");
   if (!mount) return false;
+  resetInlineTerminalDisclosure(mount);
   mount.remove();
   return true;
 }
@@ -242,10 +279,10 @@ export function renderTerminalButton(kind, id, options = {}) {
 export function renderTranscriptButton(kind, id, options = {}) {
   const attribute = kind === "job" ? "data-job-transcript" : "data-session-transcript";
   if (!options.iconOnly) {
-    return `<button class="button secondary transcript-button" ${attribute}="${escapeAttr(id)}">Transcript</button>`;
+    return `<button class="button secondary transcript-button" ${attribute}="${escapeAttr(id)}" aria-expanded="false">Transcript</button>`;
   }
   const label = "View transcript";
-  return `<button class="button secondary transcript-button icon-button" ${attribute}="${escapeAttr(id)}" aria-label="${escapeAttr(label)}" title="${escapeAttr(label)}">${TRANSCRIPT_ICON}<span class="visually-hidden">${escapeHTML(label)}</span></button>`;
+  return `<button class="button secondary transcript-button icon-button" ${attribute}="${escapeAttr(id)}" aria-expanded="false" aria-label="${escapeAttr(label)}" title="${escapeAttr(label)}">${TRANSCRIPT_ICON}<span class="visually-hidden">${escapeHTML(label)}</span></button>`;
 }
 
 export const TERMINAL_ICON = `<svg class="button-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>`;

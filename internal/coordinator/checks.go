@@ -39,6 +39,10 @@ const (
 	ReviewMerged           ReviewState = "merged"
 )
 
+// ErrCheckReportLeaseInvalid indicates that a worker lost its job lease before
+// its check result could be committed.
+var ErrCheckReportLeaseInvalid = errors.New("worker check report lease is no longer live")
+
 const (
 	AutoMergeCheckName             = "auto-merge"
 	AutoMergeConflictDetailsPrefix = "auto-merge failed:"
@@ -66,15 +70,17 @@ type Check struct {
 }
 
 type ReportCheckInput struct {
-	TaskID      string
-	Name        string
-	Kind        CheckKind
-	Required    *bool
-	Verdict     CheckVerdict
-	ExitCode    *int
-	Details     string
-	SourceJobID *string
-	Reporter    string
+	TaskID        string
+	Name          string
+	Kind          CheckKind
+	Required      *bool
+	Verdict       CheckVerdict
+	ExitCode      *int
+	Details       string
+	SourceJobID   *string
+	Reporter      string
+	WorkerID      string
+	WorkerLeaseID string
 }
 
 type CheckService struct {
@@ -93,6 +99,11 @@ func (s *CheckService) ReportCheck(ctx context.Context, input ReportCheckInput) 
 	input, err := normalizeReportCheckInput(input)
 	if err != nil {
 		return Check{}, err
+	}
+	input.WorkerID = strings.TrimSpace(input.WorkerID)
+	input.WorkerLeaseID = strings.TrimSpace(input.WorkerLeaseID)
+	if (input.WorkerID == "") != (input.WorkerLeaseID == "") {
+		return Check{}, errors.New("worker id and lease id must be provided together")
 	}
 	if err := s.validateSourceJob(ctx, input.TaskID, input.SourceJobID); err != nil {
 		return Check{}, err
@@ -115,7 +126,23 @@ INSERT INTO checks (
 	reporter,
 	created_at,
 	updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+WHERE ? = '' OR EXISTS (
+	SELECT 1
+	FROM leases AS l
+	JOIN jobs AS j ON j.id = l.job_id
+	JOIN changes AS c ON c.id = j.change_id
+	WHERE l.id = ?
+		AND l.worker_id = ?
+		AND l.job_id = ?
+		AND l.released_at IS NULL
+		AND l.expires_at > ?
+		AND j.task_id = ?
+		AND j.state IN ('claimed', 'running')
+		AND json_type(j.payload_json, '$.head_sha') = 'text'
+		AND TRIM(json_extract(j.payload_json, '$.head_sha')) <> ''
+		AND TRIM(json_extract(j.payload_json, '$.head_sha')) = TRIM(c.head_sha)
+)
 ON CONFLICT(task_id, name) DO UPDATE SET
 	kind = excluded.kind,
 	required = excluded.required,
@@ -137,9 +164,18 @@ RETURNING`+checkColumns,
 		input.Reporter,
 		nowText,
 		nowText,
+		input.WorkerLeaseID,
+		input.WorkerLeaseID,
+		input.WorkerID,
+		nullableStringValue(input.SourceJobID),
+		nowText,
+		input.TaskID,
 	)
 
 	check, err := scanCheck(row)
+	if errors.Is(err, sql.ErrNoRows) && input.WorkerLeaseID != "" {
+		return Check{}, ErrCheckReportLeaseInvalid
+	}
 	if err != nil {
 		return Check{}, fmt.Errorf("report check: %w", err)
 	}

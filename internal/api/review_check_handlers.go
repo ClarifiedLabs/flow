@@ -685,12 +685,21 @@ func (s *projectServer) handleReportCheck(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	check, err := s.checks.ReportCheck(r.Context(), coordinator.ReportCheckInput{
+	reportInput := coordinator.ReportCheckInput{
 		TaskID: taskID, Name: name,
 		Kind: coordinator.CheckKind(strings.TrimSpace(request.Kind)), Required: request.Required,
 		Verdict: coordinator.CheckVerdict(strings.TrimSpace(request.Verdict)), ExitCode: request.ExitCode,
 		Details: request.Details, SourceJobID: request.SourceJobID, Reporter: checkReporter(request, principal),
-	})
+	}
+	if principal.Scope == coordinator.TokenScopeWorker {
+		reportInput.WorkerID = principal.Subject
+		reportInput.WorkerLeaseID = stringValue(request.LeaseID)
+	}
+	check, err := s.checks.ReportCheck(r.Context(), reportInput)
+	if errors.Is(err, coordinator.ErrCheckReportLeaseInvalid) {
+		writeError(w, http.StatusForbidden, "forbidden", err.Error())
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "report_check_failed", err.Error())
 		return

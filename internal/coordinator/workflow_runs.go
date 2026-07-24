@@ -664,7 +664,7 @@ WHERE task_id = ? AND state = ?`, taskID, string(WorkflowRunWaiting)))
 		if !ok {
 			return WorkflowRun{}, fmt.Errorf("snapshot node %q not found", nodeRun.NodeKey)
 		}
-		if node.Kind == NodeAutomatedChecks || node.Kind == NodeChangeReview || node.Kind == NodeVerifyChange {
+		if requiresPinnedChangeHead(node.Kind) {
 			if err := verifyPinnedChangeHeadTx(ctx, tx, run.CurrentArtifactID); err != nil {
 				return WorkflowRun{}, err
 			}
@@ -837,6 +837,15 @@ func workflowAgentRuntimeSettings(agent AgentDefSnapshot) WorkflowAgentRuntimeSe
 	}
 }
 
+func requiresPinnedChangeHead(kind NodeKind) bool {
+	switch kind {
+	case NodeAutomatedChecks, NodeChangeReview, NodeVerifyChange:
+		return true
+	default:
+		return false
+	}
+}
+
 func verifyPinnedChangeHeadTx(ctx context.Context, tx *sql.Tx, artifactID string) error {
 	artifactID = strings.TrimSpace(artifactID)
 	if artifactID == "" {
@@ -888,6 +897,7 @@ type CompleteWorkflowNodeInput struct {
 	Actor          Actor
 	Payload        map[string]any
 	IdempotencyKey string
+	SkipTaskID     string
 }
 
 type CompleteWorkflowNodeResult struct {
@@ -916,9 +926,38 @@ func (s *WorkflowRunService) CompleteNode(ctx context.Context, input CompleteWor
 	if err != nil {
 		return CompleteWorkflowNodeResult{}, err
 	}
+	sourceNode, ok := run.Snapshot.Node(nodeRun.NodeKey)
+	if !ok {
+		return CompleteWorkflowNodeResult{}, fmt.Errorf("snapshot node %q not found", nodeRun.NodeKey)
+	}
+	skipping := strings.TrimSpace(input.SkipTaskID) != ""
+	if skipping {
+		if run.TaskID != strings.TrimSpace(input.SkipTaskID) {
+			return CompleteWorkflowNodeResult{}, ErrWorkflowRunNotFound
+		}
+		if input.IdempotencyKey != "skip:"+nodeRun.ID {
+			return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: skip idempotency key does not match the node run", ErrWorkflowConflict)
+		}
+		skipOutcome, allowed := workflowSkipOutcome(sourceNode.Kind)
+		if !allowed || input.Outcome != skipOutcome {
+			return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: workflow node kind %q cannot be skipped", ErrWorkflowConflict, sourceNode.Kind)
+		}
+	}
 	if nodeRun.State == WorkflowNodeSucceeded {
 		if nodeRun.Outcome != input.Outcome || (strings.TrimSpace(input.ArtifactID) != "" && strings.TrimSpace(nodeRun.OutputArtifactID) != strings.TrimSpace(input.ArtifactID)) {
 			return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: completed node replay does not match the recorded outcome and artifact", ErrWorkflowConflict)
+		}
+		if skipping {
+			var recorded int
+			if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM workflow_transitions
+WHERE workflow_run_id = ? AND event_kind = 'node_skipped' AND idempotency_key = ?`,
+				run.ID, input.IdempotencyKey).Scan(&recorded); err != nil {
+				return CompleteWorkflowNodeResult{}, err
+			}
+			if recorded == 0 {
+				return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: failed workflow step is no longer active", ErrWorkflowConflict)
+			}
 		}
 		return CompleteWorkflowNodeResult{Run: run, Done: run.State == WorkflowRunCompleted, Replayed: true}, nil
 	}
@@ -928,9 +967,22 @@ func (s *WorkflowRunService) CompleteNode(ctx context.Context, input CompleteWor
 	if run.CurrentNodeRunID != nodeRun.ID {
 		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: node run is not active", ErrWorkflowConflict)
 	}
-	sourceNode, ok := run.Snapshot.Node(nodeRun.NodeKey)
-	if !ok {
-		return CompleteWorkflowNodeResult{}, fmt.Errorf("snapshot node %q not found", nodeRun.NodeKey)
+	if skipping {
+		wait, waiting, err := openWaitTx(ctx, tx, run.ID)
+		if err != nil {
+			return CompleteWorkflowNodeResult{}, err
+		}
+		if run.State != WorkflowRunWaiting || !waiting ||
+			wait.Kind != WorkflowWaitOperatorIntervention ||
+			wait.Reason != WorkflowWaitReasonExecutionFailed ||
+			wait.NodeRunID != nodeRun.ID {
+			return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: workflow is not waiting on this failed step", ErrWorkflowConflict)
+		}
+		if requiresPinnedChangeHead(sourceNode.Kind) {
+			if err := verifyPinnedChangeHeadTx(ctx, tx, run.CurrentArtifactID); err != nil {
+				return CompleteWorkflowNodeResult{}, err
+			}
+		}
 	}
 	target, ok := run.Snapshot.Target(nodeRun.NodeKey, input.Outcome)
 	if !ok {
@@ -941,8 +993,22 @@ func (s *WorkflowRunService) CompleteNode(ctx context.Context, input CompleteWor
 		return CompleteWorkflowNodeResult{}, fmt.Errorf("target node %q not found", target)
 	}
 	now := s.now().UTC()
+	if skipping {
+		retiredChecks, cancelledJobs, err := retireSkippedWorkflowNodeTx(ctx, tx, run.TaskID, run.ID, nodeRun.ID, sourceNode.Kind, now)
+		if err != nil {
+			return CompleteWorkflowNodeResult{}, err
+		}
+		payload := make(map[string]any, len(input.Payload)+3)
+		for key, value := range input.Payload {
+			payload[key] = value
+		}
+		payload["node_run_id"] = nodeRun.ID
+		payload["retired_checks"] = retiredChecks
+		payload["cancelled_jobs"] = cancelledJobs
+		input.Payload = payload
+	}
 	artifactID := strings.TrimSpace(input.ArtifactID)
-	if sourceNode.Kind == NodeAgent {
+	if sourceNode.Kind == NodeAgent && !skipping {
 		if artifactID == "" {
 			return CompleteWorkflowNodeResult{}, errors.New("agent node completion requires an artifact")
 		}
@@ -980,10 +1046,14 @@ WHERE id = ?`, string(WorkflowNodeSucceeded), sqlitex.NullableNonEmptyString(art
 	if err != nil {
 		return CompleteWorkflowNodeResult{}, err
 	}
+	eventKind := "node_completed"
+	if skipping {
+		eventKind = "node_skipped"
+	}
 	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
 		TaskID: run.TaskID, WorkflowRunID: run.ID, FromTaskState: string(LifecycleInProgress),
 		ToTaskState: string(LifecycleInProgress), FromNodeKey: nodeRun.NodeKey, ToNodeKey: target,
-		Outcome: input.Outcome, EventKind: "node_completed", PayloadJSON: string(payloadJSON),
+		Outcome: input.Outcome, EventKind: eventKind, PayloadJSON: string(payloadJSON),
 		Actor: string(input.Actor), IdempotencyKey: input.IdempotencyKey, CreatedAt: now,
 	}); err != nil {
 		return CompleteWorkflowNodeResult{}, err
@@ -1071,6 +1141,143 @@ WHERE id = ?`, string(WorkflowRunRunning), target, sqlitex.NullableNonEmptyStrin
 	}
 	nextLoaded, _, err := s.GetNodeRun(ctx, next.ID)
 	return CompleteWorkflowNodeResult{Run: updated, Next: &nextLoaded}, err
+}
+
+// SkipExecution resolves a specific execution-failure wait by waiving a failed
+// check barrier. The expected node-run identity prevents a stale browser action
+// from skipping a later failure after the workflow has advanced.
+func (s *WorkflowRunService) SkipExecution(ctx context.Context, taskID, expectedNodeRunID string, actor Actor) (CompleteWorkflowNodeResult, error) {
+	taskID = strings.TrimSpace(taskID)
+	expectedNodeRunID = strings.TrimSpace(expectedNodeRunID)
+	if taskID == "" {
+		return CompleteWorkflowNodeResult{}, errors.New("task id is required")
+	}
+	if expectedNodeRunID == "" {
+		return CompleteWorkflowNodeResult{}, errors.New("node run id is required")
+	}
+	if actor == "" {
+		actor = ActorHuman
+	}
+	nodeRun, found, err := s.GetNodeRun(ctx, expectedNodeRunID)
+	if err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	if !found {
+		return CompleteWorkflowNodeResult{}, ErrWorkflowRunNotFound
+	}
+	run, err := s.Get(ctx, nodeRun.WorkflowRunID)
+	if err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	if run.TaskID != taskID {
+		return CompleteWorkflowNodeResult{}, ErrWorkflowRunNotFound
+	}
+	node, ok := run.Snapshot.Node(nodeRun.NodeKey)
+	if !ok {
+		return CompleteWorkflowNodeResult{}, fmt.Errorf("snapshot node %q not found", nodeRun.NodeKey)
+	}
+	outcome, ok := workflowSkipOutcome(node.Kind)
+	if !ok {
+		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: workflow node kind %q cannot be skipped", ErrWorkflowConflict, node.Kind)
+	}
+	return s.CompleteNode(ctx, CompleteWorkflowNodeInput{
+		NodeRunID:      expectedNodeRunID,
+		Outcome:        outcome,
+		Actor:          actor,
+		Payload:        map[string]any{"skipped": true},
+		IdempotencyKey: "skip:" + expectedNodeRunID,
+		SkipTaskID:     taskID,
+	})
+}
+
+func workflowSkipOutcome(kind NodeKind) (string, bool) {
+	switch kind {
+	case NodeAutomatedChecks, NodeVerifyChange:
+		return "passed", true
+	case NodeChangeReview:
+		return "approved", true
+	default:
+		return "", false
+	}
+}
+
+func retireSkippedWorkflowNodeTx(ctx context.Context, tx *sql.Tx, taskID, workflowRunID, nodeRunID string, kind NodeKind, now time.Time) (int64, int64, error) {
+	nowText := sqlitex.FormatTime(now)
+	jobResult, err := tx.ExecContext(ctx, `
+UPDATE jobs SET state = 'canceled', updated_at = ?
+WHERE workflow_run_id = ? AND node_run_id = ? AND state IN ('queued', 'claimed', 'running')`,
+		nowText, workflowRunID, nodeRunID)
+	if err != nil {
+		return 0, 0, err
+	}
+	cancelledJobs, err := jobResult.RowsAffected()
+	if err != nil {
+		return 0, 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE leases SET released_at = COALESCE(released_at, ?)
+WHERE job_id IN (
+	SELECT id FROM jobs WHERE workflow_run_id = ? AND node_run_id = ?
+) AND released_at IS NULL`, nowText, workflowRunID, nodeRunID); err != nil {
+		return 0, 0, err
+	}
+	result, err := tx.ExecContext(ctx, `
+UPDATE checks
+SET required = 0,
+	verdict = ?,
+	details = CASE
+		WHEN trim(details) = '' THEN ?
+		ELSE details || char(10) || char(10) || ?
+	END,
+	updated_at = ?
+WHERE task_id = ?
+	AND name LIKE ?
+	AND verdict != ?`,
+		string(CheckSkipped), "Skipped with the workflow step by an operator.", "Skipped with the workflow step by an operator.", nowText,
+		taskID, "%.node."+nodeRunID, string(CheckSatisfied))
+	if err != nil {
+		return 0, 0, err
+	}
+	retiredChecks, err := result.RowsAffected()
+	if err != nil {
+		return 0, 0, err
+	}
+	checkKind, ok := workflowSkipCheckKind(kind)
+	if !ok {
+		return 0, 0, fmt.Errorf("%w: workflow node kind %q cannot be skipped", ErrWorkflowConflict, kind)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO checks (
+	task_id, name, kind, required, verdict, exit_code, details,
+	source_job_id, reporter, created_at, updated_at
+) VALUES (?, ?, ?, 1, ?, NULL, ?, NULL, 'coordinator', ?, ?)
+ON CONFLICT(task_id, name) DO UPDATE SET
+	kind = excluded.kind,
+	required = excluded.required,
+	verdict = excluded.verdict,
+	exit_code = NULL,
+	details = excluded.details,
+	source_job_id = NULL,
+	reporter = excluded.reporter,
+	updated_at = excluded.updated_at`,
+		taskID, "workflow-step-skipped.node."+nodeRunID, string(checkKind), string(CheckSatisfied),
+		"Workflow step skipped by an operator; its required checks were waived.", nowText, nowText); err != nil {
+		return 0, 0, err
+	}
+	return retiredChecks, cancelledJobs, nil
+}
+
+func workflowSkipCheckKind(kind NodeKind) (CheckKind, bool) {
+	switch kind {
+	case NodeAutomatedChecks:
+		return CheckKindCI, true
+	case NodeChangeReview:
+		return CheckKindReviewer, true
+	case NodeVerifyChange:
+		return CheckKindVerifier, true
+	default:
+		return "", false
+	}
 }
 
 func (s *WorkflowRunService) Respond(ctx context.Context, taskID, nodeRunID, outcome, feedback string, actor Actor) (CompleteWorkflowNodeResult, error) {

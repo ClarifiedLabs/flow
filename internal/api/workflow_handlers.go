@@ -33,6 +33,10 @@ type workflowRetryRequest struct {
 	RefreshAgentRuntime bool `json:"refresh_agent_runtime"`
 }
 
+type workflowSkipRequest struct {
+	NodeRunID string `json:"node_run_id"`
+}
+
 type workflowDoneRequest struct {
 	Resolution coordinator.DoneResolution `json:"resolution"`
 	Note       string                     `json:"note,omitempty"`
@@ -356,6 +360,33 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 			}
 		}
 		writeJSON(w, http.StatusOK, workflowRunResponse{Run: run})
+	case "skip":
+		if !requireMethod(w, r, http.MethodPost) || !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+			return
+		}
+		var request workflowSkipRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+			return
+		}
+		result, err := s.workflowRuns.SkipExecution(r.Context(), taskID, request.NodeRunID, coordinator.ActorHuman)
+		if err != nil {
+			writeWorkflowError(w, err, "skip_workflow_step_failed")
+			return
+		}
+		if s.workflowExecutor != nil && !result.Done {
+			if err := s.workflowExecutor.Advance(r.Context(), result.Run.ID); err != nil {
+				writeWorkflowError(w, err, "advance_workflow_failed")
+				return
+			}
+			result.Run, err = s.workflowRuns.Get(r.Context(), result.Run.ID)
+			if err != nil {
+				writeWorkflowError(w, err, "load_workflow_failed")
+				return
+			}
+			result.Done = result.Run.State == coordinator.WorkflowRunCompleted
+		}
+		writeJSON(w, http.StatusOK, result)
 	case "advance":
 		if !requireMethod(w, r, http.MethodPost) || !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
 			return

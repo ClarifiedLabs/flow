@@ -586,6 +586,22 @@ export class FlowApp extends HTMLElement {
         }
       });
     });
+    this.querySelectorAll("[data-workflow-skip]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        if (!window.confirm("Skip this failed workflow step and continue?")) return;
+        button.disabled = true;
+        try {
+          await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowSkip)}/workflow/skip`, {
+            node_run_id: button.dataset.workflowSkipNode,
+          });
+          await refresh();
+        } catch (error) {
+          this.setStatus(error.message || String(error));
+        } finally {
+          button.disabled = false;
+        }
+      });
+    });
     this.querySelectorAll("[data-task-edit]").forEach((button) => {
       button.addEventListener("click", async () => {
         const nextTitle = window.prompt("Title", button.dataset.taskTitle || "");

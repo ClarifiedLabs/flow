@@ -14,6 +14,12 @@ import { renderTerminalButton, renderTranscriptButton } from "./terminal.js";
 import { renderTaskChange, renderRelation, renderTag, renderTimeline } from "./timeline.js";
 import { renderWorkflowGraph, workflowTransitionCounts } from "./workflow-graph.js";
 
+const SKIPPABLE_WORKFLOW_STEP_KINDS = new Set(["automated_checks", "change_review", "verify_change"]);
+
+export function workflowStepCanBeSkipped(kind) {
+  return SKIPPABLE_WORKFLOW_STEP_KINDS.has(String(kind || ""));
+}
+
 export async function renderNewTaskView(app, context) {
   if (context && !app.isActiveLoad(context)) return false;
   const defaultProject = defaultCreateProject(app, "");
@@ -377,16 +383,19 @@ export async function renderTaskView(app, id, context, projectID = "") {
   const failedOperation = String(value(workflowWaitDetails, "operation", "Operation") || "").trim();
   const failedJobID = String(value(workflowWaitDetails, "job_id", "JobID") || "").trim();
   const failedCheckID = String(value(workflowWaitDetails, "check_id", "CheckID") || "").trim();
-  const retryWorkflowLabel = ["automated_checks", "change_review", "verify_change"].includes(String(currentStep?.kind || ""))
-    ? "Retry failed checks"
-    : "Retry failed step";
+  const failedNodeRunID = String(value(workflowWait || {}, "node_run_id", "NodeRunID") || "").trim();
+  const checkNodeFailed = workflowStepCanBeSkipped(currentStep?.kind);
+  const retryWorkflowLabel = checkNodeFailed ? "Retry failed checks" : "Retry failed step";
+  const skipWorkflowHTML = checkNodeFailed && failedNodeRunID
+    ? `<button class="button secondary" data-workflow-skip="${escapeAttr(taskID)}" data-workflow-skip-node="${escapeAttr(failedNodeRunID)}"${projectButtonAttr(resolvedProject)}>Skip step</button>`
+    : "";
   const workflowActions = lifecycleState === "unscheduled"
     ? `<button class="button" data-workflow-schedule="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>Schedule</button>`
     : lifecycleState === "done"
       ? `<button class="button" data-workflow-reopen="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>Reopen</button>`
       : `<button class="button secondary" data-workflow-reset="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>Reset</button><button class="button secondary" data-workflow-done="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>Done</button>`;
   const gatePanelHTML = humanGatePanelHTML || (workflowWait && value(workflowWait, "kind", "Kind") === "operator_intervention"
-    ? `<section class="human-attention-panel"><div><h3>${workflowWaitReason === "execution_failed" ? "Workflow step failed" : "Workflow paused"}</h3><p>${escapeHTML(value(workflowWait, "message", "Message") || "Operator action is required.")}</p>${failedOperation ? `<p class="meta-quiet">Operation: ${escapeHTML(failedOperation)}</p>` : ""}${failedCheckID ? `<p class="meta-quiet">Check: ${escapeHTML(failedCheckID)}</p>` : ""}${failedJobID ? `<p class="meta-quiet">Job: ${escapeHTML(failedJobID)}</p>` : ""}</div><div class="actions">${workflowWaitReason === "execution_failed" ? `<button class="button" data-workflow-retry="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>${escapeHTML(retryWorkflowLabel)}</button>${failedJobID ? renderTranscriptButton("job", failedJobID) : ""}` : workflowWaitReason === "transition_budget_exhausted" ? `<button class="button" data-workflow-budget="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>Extend budget</button>` : ""}</div></section>`
+    ? `<section class="human-attention-panel"${workflowWaitReason === "execution_failed" ? ` data-inline-terminal-anchor="true"` : ""}><div><h3>${workflowWaitReason === "execution_failed" ? "Workflow step failed" : "Workflow paused"}</h3><p>${escapeHTML(value(workflowWait, "message", "Message") || "Operator action is required.")}</p>${failedOperation ? `<p class="meta-quiet">Operation: ${escapeHTML(failedOperation)}</p>` : ""}${failedCheckID ? `<p class="meta-quiet">Check: ${escapeHTML(failedCheckID)}</p>` : ""}${failedJobID ? `<p class="meta-quiet">Job: ${escapeHTML(failedJobID)}</p>` : ""}</div><div class="actions">${workflowWaitReason === "execution_failed" ? `<button class="button" data-workflow-retry="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>${escapeHTML(retryWorkflowLabel)}</button>${skipWorkflowHTML}${failedJobID ? renderTranscriptButton("job", failedJobID) : ""}` : workflowWaitReason === "transition_budget_exhausted" ? `<button class="button" data-workflow-budget="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>Extend budget</button>` : ""}</div></section>`
     : "");
   const workflowHTML = renderWorkflowDetail(
     workflowRun,

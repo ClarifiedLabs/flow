@@ -4,7 +4,7 @@
 import { apiGetText, apiPost } from "./api.js";
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
-import { closeInlineTerminal, inlineTerminalMount, renderTerminalPopOutButton, renderTerminalSurface, terminalMount, terminalSelectionHint } from "./terminal.js";
+import { closeInlineTerminal, inlineTerminalMount, registerInlineTerminalDisclosure, renderTerminalPopOutButton, renderTerminalSurface, resetInlineTerminalDisclosure, terminalMount, terminalSelectionHint } from "./terminal.js";
 
 export async function renderTerminalView(app, sessionID, context) {
   app.setTitle("Terminal");
@@ -38,6 +38,7 @@ export async function openInlineTerminalView(app, button, kind, id) {
   const terminalID = String(id || "").trim();
   if (!terminalID) return;
   const target = terminalMount(button, app);
+  resetInlineTerminalDisclosure(target.mount);
   if (
     target.mount?.dataset?.inlineTerminalMode === "terminal"
     && target.mount.dataset.inlineTerminalKind === kind
@@ -81,14 +82,25 @@ export async function openInlineTerminalView(app, button, kind, id) {
 export async function showTranscriptView(app, button, kind, id) {
   const transcriptID = String(id || "").trim();
   if (!transcriptID) return;
+  const mount = inlineTerminalMount(button, app);
+  if (
+    mount.dataset.inlineTerminalMode === "transcript"
+    && mount.dataset.inlineTerminalKind === kind
+    && mount.dataset.inlineTerminalId === transcriptID
+  ) {
+    closeInlineTerminal(button, app);
+    app.setStatus("");
+    return;
+  }
   const path = kind === "job"
     ? `/v2/jobs/${encodeURIComponent(transcriptID)}/transcript`
     : `/v2/sessions/${encodeURIComponent(transcriptID)}/transcript`;
-  const mount = inlineTerminalMount(button, app);
   mount.dataset.inlineTerminalMode = "transcript";
   mount.dataset.inlineTerminalKind = kind;
   mount.dataset.inlineTerminalId = transcriptID;
   mount.innerHTML = `<div class="empty">Loading transcript</div>`;
+  registerInlineTerminalDisclosure(mount, () => setTranscriptButtonExpanded(button, false));
+  setTranscriptButtonExpanded(button, true);
   try {
     const text = await apiGetText(path);
     mount.innerHTML = `<pre class="transcript-view">${escapeHTML(text)}</pre>`;
@@ -98,4 +110,16 @@ export async function showTranscriptView(app, button, kind, id) {
     mount.innerHTML = `<div class="empty">${escapeHTML(message)}</div>`;
     app.setStatus(message);
   }
+}
+
+function setTranscriptButtonExpanded(button, expanded) {
+  button.setAttribute?.("aria-expanded", String(expanded));
+  const iconOnly = String(button.className || "").split(/\s+/).includes("icon-button");
+  if (iconOnly) {
+    const label = expanded ? "Hide transcript" : "View transcript";
+    button.setAttribute?.("aria-label", label);
+    button.setAttribute?.("title", label);
+    return;
+  }
+  button.textContent = expanded ? "Hide transcript" : "Transcript";
 }

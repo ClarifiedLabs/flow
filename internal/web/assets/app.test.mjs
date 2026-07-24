@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { workflowStepCanBeSkipped } from "./task-view.js";
+import { renderTranscriptButton } from "./terminal.js";
 
 const DIFF_MODE_STORAGE_KEY = "flow.ui.diffMode";
 
@@ -832,6 +834,231 @@ test("workflow retry action posts to the owner retry endpoint and refreshes", as
   assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {});
   assert.equal(button.disabled, false);
   assert.equal(refreshed, true);
+});
+
+test("workflow skip action confirms, posts to the owner skip endpoint, and refreshes", async () => {
+  let clickHandler;
+  const button = {
+    dataset: { workflowSkip: "t-alpha-0001", workflowSkipNode: "nr-review", project: "p-alpha" },
+    disabled: false,
+    addEventListener(event, handler) {
+      if (event === "click") clickHandler = handler;
+    },
+  };
+  const fetchCalls = [];
+  const context = await scriptContext({ confirm: () => true }, {
+    fetch(path, options) {
+      fetchCalls.push({ path, options });
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ run: { id: "wr-1", state: "running" } }),
+      });
+    },
+  });
+  const app = new context.FlowApp();
+  app.querySelectorAll = (selector) => (selector === "[data-workflow-skip]" ? [button] : []);
+  app.querySelector = () => ({ textContent: "" });
+  let refreshed = false;
+  app.bindTaskActions(async () => {
+    refreshed = true;
+  });
+
+  await clickHandler();
+
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/workflow/skip");
+  assert.equal(fetchCalls[0].options.method, "POST");
+  assert.deepEqual(JSON.parse(fetchCalls[0].options.body), { node_run_id: "nr-review" });
+  assert.equal(button.disabled, false);
+  assert.equal(refreshed, true);
+});
+
+test("workflow skip action surfaces request conflicts and re-enables the action", async () => {
+  let clickHandler;
+  const button = {
+    dataset: { workflowSkip: "t-alpha-0001", workflowSkipNode: "nr-review", project: "p-alpha" },
+    disabled: false,
+    addEventListener(event, handler) {
+      if (event === "click") clickHandler = handler;
+    },
+  };
+  const status = { textContent: "" };
+  const context = await scriptContext({ confirm: () => true }, {
+    fetch() {
+      return Promise.resolve({
+        ok: false,
+        status: 409,
+        json: () => Promise.resolve({ error: { message: "workflow already advanced" } }),
+      });
+    },
+  });
+  const app = new context.FlowApp();
+  app.querySelectorAll = (selector) => (selector === "[data-workflow-skip]" ? [button] : []);
+  app.querySelector = (selector) => (selector === ".status" ? status : { textContent: "" });
+  let refreshed = false;
+  app.bindTaskActions(async () => {
+    refreshed = true;
+  });
+
+  await clickHandler();
+
+  assert.equal(status.textContent, "workflow already advanced");
+  assert.equal(button.disabled, false);
+  assert.equal(refreshed, false);
+});
+
+test("workflow skip action stops when confirmation is declined", async () => {
+  let clickHandler;
+  const button = {
+    dataset: { workflowSkip: "t-alpha-0001", workflowSkipNode: "nr-review", project: "p-alpha" },
+    disabled: false,
+    addEventListener(event, handler) {
+      if (event === "click") clickHandler = handler;
+    },
+  };
+  const fetchCalls = [];
+  const context = await scriptContext({ confirm: () => false }, {
+    fetch(path, options) {
+      fetchCalls.push({ path, options });
+      throw new Error("skip request should not be sent");
+    },
+  });
+  const app = new context.FlowApp();
+  app.querySelectorAll = (selector) => (selector === "[data-workflow-skip]" ? [button] : []);
+  app.querySelector = () => ({ textContent: "" });
+  let refreshed = false;
+  app.bindTaskActions(async () => {
+    refreshed = true;
+  });
+
+  await clickHandler();
+
+  assert.equal(fetchCalls.length, 0);
+  assert.equal(button.disabled, false);
+  assert.equal(refreshed, false);
+});
+
+test("workflow skip eligibility excludes author and side-effecting steps", () => {
+  assert.equal(workflowStepCanBeSkipped("automated_checks"), true);
+  assert.equal(workflowStepCanBeSkipped("change_review"), true);
+  assert.equal(workflowStepCanBeSkipped("verify_change"), true);
+  assert.equal(workflowStepCanBeSkipped("agent"), false);
+  assert.equal(workflowStepCanBeSkipped("materialize_task_set"), false);
+  assert.equal(workflowStepCanBeSkipped("merge"), false);
+  assert.equal(workflowStepCanBeSkipped("human_gate"), false);
+  assert.equal(workflowStepCanBeSkipped("terminal"), false);
+});
+
+test("shared row mount resets transcript disclosure when terminal replaces it", async () => {
+  const context = await scriptContext({}, {
+    document: inlineDocument(),
+    fetch(path) {
+      if (path === "/ui/api/v2/jobs/j-review/transcript") {
+        return Promise.resolve({
+          ok: true,
+          text: () => Promise.resolve("review failed\nfull diagnostics"),
+        });
+      }
+      if (path === "/ui/api/v2/jobs/j-review/terminal-token") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ access: { login_path: "/v2/jobs/j-review/terminal-login?token=abc" } }),
+        });
+      }
+      throw new Error(`unexpected request ${path}`);
+    },
+  });
+  const row = new InlineDOMElement("tr");
+  row.cells = [new InlineDOMElement("td"), new InlineDOMElement("td")];
+  const transcriptButton = new InlineDOMElement("button");
+  transcriptButton.dataset.jobTranscript = "j-review";
+  transcriptButton.closest = (selector) => (selector === "tr" ? row : null);
+  const terminalButton = new InlineDOMElement("button");
+  terminalButton.dataset.jobTerminal = "j-review";
+  terminalButton.closest = (selector) => (selector === "tr" ? row : null);
+  const status = { textContent: "" };
+  const app = new context.FlowApp();
+  app.querySelectorAll = (selector) => {
+    if (selector === "[data-job-transcript]") return [transcriptButton];
+    if (selector === "[data-job-terminal]") return [terminalButton];
+    return [];
+  };
+  app.querySelector = (selector) => (selector === ".status" ? status : new InlineDOMElement());
+  app.installTerminalActions();
+
+  await transcriptButton.listeners.get("click")();
+  const mount = row.nextElementSibling.querySelector("[data-inline-terminal]");
+  assert.equal(mount.dataset.inlineTerminalMode, "transcript");
+  assert.equal(transcriptButton.textContent, "Hide transcript");
+  assert.equal(transcriptButton.attributes.get("aria-expanded"), "true");
+
+  await terminalButton.listeners.get("click")();
+  assert.equal(mount.dataset.inlineTerminalMode, "terminal");
+  assert.match(mount.innerHTML, /class="terminal-frame"/);
+  assert.equal(transcriptButton.textContent, "Transcript");
+  assert.equal(transcriptButton.attributes.get("aria-expanded"), "false");
+
+  await transcriptButton.listeners.get("click")();
+  assert.equal(mount.dataset.inlineTerminalMode, "transcript");
+  assert.match(mount.innerHTML, /review failed\nfull diagnostics/);
+  assert.equal(transcriptButton.textContent, "Hide transcript");
+  assert.equal(transcriptButton.attributes.get("aria-expanded"), "true");
+  assert.equal(status.textContent, "");
+});
+
+test("workflow failure transcript starts collapsed, opens directly below its panel, and toggles closed", async () => {
+  assert.match(
+    renderTranscriptButton("job", "j-review"),
+    /data-job-transcript="j-review" aria-expanded="false"/,
+  );
+  assert.match(
+    renderTranscriptButton("session", "s-review", { iconOnly: true }),
+    /data-session-transcript="s-review" aria-expanded="false"/,
+  );
+
+  const detail = new InlineDOMElement("section");
+  const panel = new InlineDOMElement("section");
+  const followingContent = new InlineDOMElement("div");
+  detail.appendChild(panel);
+  detail.appendChild(followingContent);
+  panel.nextElementSibling = followingContent;
+  followingContent.previousElementSibling = panel;
+  const button = new InlineDOMElement("button");
+  button.dataset.jobTranscript = "j-review";
+  button.closest = (selector) => (selector === "[data-inline-terminal-anchor]" ? panel : null);
+  const status = { textContent: "" };
+  const fetchCalls = [];
+  const context = await scriptContext({}, {
+    document: inlineDocument(),
+    fetch(path, options) {
+      fetchCalls.push({ path, options });
+      return Promise.resolve({
+        ok: true,
+        text: () => Promise.resolve("review failed\nfull diagnostics"),
+      });
+    },
+  });
+  const app = new context.FlowApp();
+  app.querySelectorAll = (selector) => (selector === "[data-job-transcript]" ? [button] : []);
+  app.querySelector = (selector) => (selector === ".status" ? status : detail);
+  app.bindTaskActions(async () => {});
+
+  await button.listeners.get("click")();
+
+  const transcript = panel.nextElementSibling;
+  assert.notEqual(transcript, followingContent);
+  assert.equal(transcript.nextElementSibling, followingContent);
+  assert.match(transcript.innerHTML, /review failed\nfull diagnostics/);
+  assert.equal(button.textContent, "Hide transcript");
+  assert.equal(button.attributes.get("aria-expanded"), "true");
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/jobs/j-review/transcript");
+
+  await button.listeners.get("click")();
+
+  assert.equal(panel.nextElementSibling, followingContent);
+  assert.equal(button.textContent, "Transcript");
+  assert.equal(button.attributes.get("aria-expanded"), "false");
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(status.textContent, "");
 });
 
 test("triage edit action patches task title and refreshes", async () => {
@@ -2158,7 +2385,11 @@ test("task detail offers retry and diagnostics only for execution-failure waits"
   assert.match(html, /Operation: run required reviewer check/);
   assert.match(html, /Check: 42/);
   assert.match(html, /Job: j-review/);
+  assert.match(html, /data-inline-terminal-anchor="true"/);
   assert.match(html, /data-workflow-retry="t-alpha-0001"/);
+  assert.match(html, /data-workflow-skip="t-alpha-0001"/);
+  assert.match(html, /data-workflow-skip-node="nr-review"/);
+  assert.match(html, /Skip step/);
   assert.match(html, /data-job-transcript="j-review"/);
   assert.doesNotMatch(html, /data-workflow-budget/);
   assert.match(html, /errored/);

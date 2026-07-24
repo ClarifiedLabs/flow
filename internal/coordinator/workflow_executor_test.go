@@ -639,6 +639,145 @@ func TestWorkflowExecutorParallelReviewBarrier(t *testing.T) {
 		}
 	})
 
+	t.Run("skips a failed review node along its successful outcome", func(t *testing.T) {
+		fixture := newReviewBarrierFixture(t, barrierAgents(true))
+		ctx := context.Background()
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("initial advance: %v", err)
+		}
+		fixture.report(t, "code-review.node."+fixture.nodeID, CheckErrored)
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("pause workflow: %v", err)
+		}
+
+		if _, err := fixture.db.DB().ExecContext(ctx, `
+INSERT INTO workflow_node_runs (
+	id, workflow_run_id, node_key, visit, attempt, state, input_artifact_id,
+	output_artifact_id, outcome, created_at, started_at, completed_at
+) VALUES ('nr-review-prior', ?, 'review', 2, 1, 'succeeded', ?, ?, 'approved',
+	'2025-12-31T00:00:00Z', '2025-12-31T00:00:00Z', '2025-12-31T00:00:00Z')`,
+			fixture.runID, "wa-review-barrier", "wa-review-barrier"); err != nil {
+			t.Fatalf("insert prior review visit: %v", err)
+		}
+		if _, err := fixture.runs.SkipExecution(ctx, fixture.task.ID, "nr-review-prior", ActorHuman); !errors.Is(err, ErrWorkflowConflict) {
+			t.Fatalf("stale skip error = %v, want workflow conflict", err)
+		}
+		paused, err := fixture.runs.Get(ctx, fixture.runID)
+		if err != nil || paused.State != WorkflowRunWaiting || paused.CurrentNodeRunID != fixture.nodeID {
+			t.Fatalf("workflow after stale skip = %+v err=%v, want original failed node", paused, err)
+		}
+
+		result, err := fixture.runs.SkipExecution(ctx, fixture.task.ID, fixture.nodeID, ActorHuman)
+		if err != nil {
+			t.Fatalf("skip failed review: %v", err)
+		}
+		if !result.Done || result.Run.State != WorkflowRunCompleted {
+			t.Fatalf("skip result = %+v, want completed workflow", result)
+		}
+		node, found, err := fixture.runs.GetNodeRun(ctx, fixture.nodeID)
+		if err != nil || !found || node.State != WorkflowNodeSucceeded || node.Outcome != "approved" {
+			t.Fatalf("skipped node = %+v found=%v err=%v", node, found, err)
+		}
+		for _, name := range []string{"code-review.node." + fixture.nodeID, "security-review.node." + fixture.nodeID} {
+			check, err := fixture.checks.GetCheck(ctx, fixture.task.ID, name)
+			if err != nil || check.Required || check.Verdict != CheckSkipped || !strings.Contains(check.Details, "Skipped with the workflow step") {
+				t.Fatalf("retired check %s = %+v err=%v", name, check, err)
+			}
+		}
+		waiver, err := fixture.checks.GetCheck(ctx, fixture.task.ID, "workflow-step-skipped.node."+fixture.nodeID)
+		if err != nil || !waiver.Required || waiver.Verdict != CheckSatisfied {
+			t.Fatalf("skip waiver = %+v err=%v, want required satisfied check", waiver, err)
+		}
+		if state, err := fixture.checks.ReviewState(ctx, fixture.task.ID); err != nil || state != ReviewApproved {
+			t.Fatalf("review state after skip = %s err=%v, want approved", state, err)
+		}
+		jobs, err := fixture.workers.ListJobs(ctx)
+		if err != nil {
+			t.Fatalf("list skipped node jobs: %v", err)
+		}
+		for _, job := range jobs {
+			if job.NodeRunID != nil && *job.NodeRunID == fixture.nodeID && job.State != flowworker.JobCanceled {
+				t.Fatalf("skipped node job = %+v, want canceled", job)
+			}
+		}
+		detail, err := fixture.runs.Detail(ctx, fixture.runID)
+		if err != nil {
+			t.Fatalf("load skipped workflow: %v", err)
+		}
+		if detail.OpenWait != nil {
+			t.Fatalf("skip left open wait: %+v", detail.OpenWait)
+		}
+		foundSkip := false
+		for _, transition := range detail.Transitions {
+			if transition.EventKind == "node_skipped" && transition.FromNodeKey == "review" && transition.Outcome == "approved" {
+				foundSkip = true
+				var payload struct {
+					RetiredChecks int64 `json:"retired_checks"`
+					CancelledJobs int64 `json:"cancelled_jobs"`
+				}
+				if err := json.Unmarshal(transition.Payload, &payload); err != nil {
+					t.Fatalf("decode skip transition payload: %v", err)
+				}
+				if payload.RetiredChecks != 2 || payload.CancelledJobs != 2 {
+					t.Fatalf("skip transition payload = %+v, want two retired checks and canceled jobs", payload)
+				}
+				break
+			}
+		}
+		if !foundSkip {
+			t.Fatalf("workflow transitions = %+v, want node_skipped audit event", detail.Transitions)
+		}
+		replayed, err := fixture.runs.SkipExecution(ctx, fixture.task.ID, fixture.nodeID, ActorHuman)
+		if err != nil || !replayed.Replayed || !replayed.Done {
+			t.Fatalf("duplicate skip = %+v err=%v, want completed replay", replayed, err)
+		}
+	})
+
+	t.Run("rejects skip after the pinned change head moves", func(t *testing.T) {
+		fixture := newReviewBarrierFixture(t, barrierAgents(true))
+		ctx := context.Background()
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("initial advance: %v", err)
+		}
+		fixture.report(t, "code-review.node."+fixture.nodeID, CheckErrored)
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("pause workflow: %v", err)
+		}
+		if _, err := fixture.db.DB().ExecContext(ctx, `
+UPDATE changes SET head_sha = 'head-moved' WHERE workflow_run_id = ?`, fixture.runID); err != nil {
+			t.Fatalf("move change head: %v", err)
+		}
+
+		if _, err := fixture.runs.SkipExecution(ctx, fixture.task.ID, fixture.nodeID, ActorHuman); !errors.Is(err, ErrWorkflowConflict) {
+			t.Fatalf("skip error = %v, want workflow conflict", err)
+		}
+		detail, err := fixture.runs.Detail(ctx, fixture.runID)
+		if err != nil {
+			t.Fatalf("load still-paused workflow: %v", err)
+		}
+		if detail.Run.State != WorkflowRunWaiting || detail.OpenWait == nil || detail.OpenWait.NodeRunID != fixture.nodeID {
+			t.Fatalf("workflow after rejected skip = %+v, want original wait", detail)
+		}
+		check, err := fixture.checks.GetCheck(ctx, fixture.task.ID, "code-review.node."+fixture.nodeID)
+		if err != nil || !check.Required || check.Verdict != CheckErrored {
+			t.Fatalf("failed check after rejected skip = %+v err=%v, want required errored check", check, err)
+		}
+		var waivers int
+		if err := fixture.db.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM checks WHERE task_id = ? AND name = ?`,
+			fixture.task.ID, "workflow-step-skipped.node."+fixture.nodeID).Scan(&waivers); err != nil {
+			t.Fatalf("count skip waivers: %v", err)
+		}
+		if waivers != 0 {
+			t.Fatalf("skip waivers = %d, want none", waivers)
+		}
+		for _, transition := range detail.Transitions {
+			if transition.EventKind == "node_skipped" {
+				t.Fatalf("workflow transitions = %+v, want no node_skipped event", detail.Transitions)
+			}
+		}
+	})
+
 	t.Run("rejects retry after the pinned change head moves", func(t *testing.T) {
 		fixture := newReviewBarrierFixture(t, barrierAgents(true))
 		ctx := context.Background()

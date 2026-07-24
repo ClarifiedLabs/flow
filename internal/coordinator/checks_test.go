@@ -2,9 +2,11 @@ package coordinator
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
@@ -311,6 +313,57 @@ func TestReportCheckRejectsSourceJobForDifferentTask(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "source job does not belong") {
 		t.Fatalf("ReportCheck err = %v, want source job mismatch", err)
+	}
+}
+
+func TestWorkerCheckReportRejectsLeaseReleasedBeforeAtomicWrite(t *testing.T) {
+	ctx := context.Background()
+	store, tasks, checks := newCheckService(t)
+	task, change := seedReadyChange(t, store, tasks)
+	workers := flowworker.NewService(store.DB())
+	job, err := workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
+		TaskID: &task.ID, ChangeID: &change.ID, Role: flowworker.RoleCI, CapacityBucket: flowworker.BucketEphemeral,
+		Payload: map[string]any{"check_name": "unit", "change_id": change.ID, "head_sha": change.HeadSHA},
+	})
+	if err != nil {
+		t.Fatalf("enqueue check job: %v", err)
+	}
+	leaseID := "l-check"
+	now := time.Now().UTC()
+	if _, err := store.DB().ExecContext(ctx, `UPDATE jobs SET state = 'claimed', updated_at = ? WHERE id = ?`, formatTime(now), job.ID); err != nil {
+		t.Fatalf("claim check job: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO leases (id, job_id, worker_id, capacity_bucket, leased_at, expires_at)
+VALUES (?, ?, 'w-check', 'ephemeral', ?, ?)`, leaseID, job.ID, formatTime(now), formatTime(now.Add(time.Minute))); err != nil {
+		t.Fatalf("create check lease: %v", err)
+	}
+	if _, err := workers.MarkJobRunning(ctx, leaseID); err != nil {
+		t.Fatalf("mark check job running: %v", err)
+	}
+
+	required := true
+	sourceJobID := job.ID
+	input := ReportCheckInput{
+		TaskID: task.ID, Name: "unit", Kind: CheckKindCI, Required: &required,
+		Verdict: CheckSatisfied, SourceJobID: &sourceJobID, Reporter: "w-check",
+		WorkerID: "w-check", WorkerLeaseID: leaseID,
+	}
+	if _, err := checks.ReportCheck(ctx, input); err != nil {
+		t.Fatalf("report check with live lease: %v", err)
+	}
+	if _, err := workers.ReleaseLease(ctx, leaseID, flowworker.JobCanceled); err != nil {
+		t.Fatalf("release check lease: %v", err)
+	}
+
+	input.Verdict = CheckBlocked
+	input.Details = "late result"
+	if _, err := checks.ReportCheck(ctx, input); !errors.Is(err, ErrCheckReportLeaseInvalid) {
+		t.Fatalf("late worker report error = %v, want lease invalid", err)
+	}
+	check, err := checks.GetCheck(ctx, task.ID, input.Name)
+	if err != nil || check.Verdict != CheckSatisfied || check.Details == "late result" {
+		t.Fatalf("check after late worker report = %+v err=%v, want original satisfied result", check, err)
 	}
 }
 
