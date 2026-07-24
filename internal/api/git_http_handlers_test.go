@@ -3,6 +3,9 @@ package api
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -26,45 +29,9 @@ func TestGitHTTPExchangeAuthAndHooks(t *testing.T) {
 	t.Setenv("GIT_CONFIG_KEY_0", "http.extraHeader")
 	t.Setenv("GIT_CONFIG_VALUE_0", "Authorization: Bearer inherited-worker-token")
 
-	ctx := context.Background()
-	dataDir := t.TempDir()
-	global, err := flowdb.OpenGlobal(ctx, filepath.Join(dataDir, "global.db"))
-	if err != nil {
-		t.Fatalf("open global database: %v", err)
-	}
-	t.Cleanup(func() { _ = global.Close() })
-
-	registry, err := NewRegistry(RegistryOptions{DataDir: dataDir, Global: global})
-	if err != nil {
-		t.Fatalf("new registry: %v", err)
-	}
-	t.Cleanup(func() { _ = registry.Close() })
-	if err := registry.Credentials().EnsureToken(ctx, coordinator.CredentialInput{
-		Token: "owner-token",
-		Scope: coordinator.TokenScopeOwner,
-	}); err != nil {
-		t.Fatalf("store owner token: %v", err)
-	}
-	if err := registry.Credentials().EnsureToken(ctx, coordinator.CredentialInput{
-		Token:   "worker-token",
-		Scope:   coordinator.TokenScopeWorker,
-		Subject: "w-test",
-	}); err != nil {
-		t.Fatalf("store worker token: %v", err)
-	}
-
-	project, err := registry.CreateProject(ctx, coordinator.Project{Name: "demo", BaseBranch: "main"})
-	if err != nil {
-		t.Fatalf("create project: %v", err)
-	}
-	installGitHTTPTestHooks(t, project)
-
-	server, err := NewServer(ServerOptions{Registry: registry, ProtocolVersion: config.DefaultProtocolVersion})
-	if err != nil {
-		t.Fatalf("new server: %v", err)
-	}
-	httpServer := httptest.NewServer(server)
-	t.Cleanup(httpServer.Close)
+	fixture := newGitHTTPServerFixture(t)
+	project := fixture.project
+	httpServer := fixture.httpServer
 
 	exchangeURL := httpServer.URL + "/git/projects/" + project.ID + "/exchange.git"
 	ownerURL := urlWithCredentials(exchangeURL, "flow", "owner-token")
@@ -77,6 +44,7 @@ func TestGitHTTPExchangeAuthAndHooks(t *testing.T) {
 	if exchangeMainSHA != mainSHA {
 		t.Fatalf("exchange main = %q, want %q", exchangeMainSHA, mainSHA)
 	}
+	assertGitHTTPProtocolV2(t, httpServer, exchangeURL)
 
 	if err := runGitHTTPTestGitErr(t, repoPath, "ls-remote", exchangeURL); err == nil {
 		t.Fatal("unauthenticated ls-remote succeeded")
@@ -124,6 +92,134 @@ func TestGitHTTPExchangeAuthAndHooks(t *testing.T) {
 	runGitHTTPTestGit(t, repoPath, "commit", "-m", "worker base update")
 	if err := runGitHTTPTestGitErr(t, repoPath, "push", workerURL, "refs/heads/main:refs/heads/main"); err == nil {
 		t.Fatal("worker base update succeeded, want protected-base rejection")
+	}
+}
+
+func TestGitHTTPExchangeCompressedFetch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git is not installed")
+	}
+
+	fixture := newGitHTTPServerFixture(t)
+	exchangeURL := fixture.httpServer.URL + "/git/projects/" + fixture.project.ID + "/exchange.git"
+	ownerURL := urlWithCredentials(exchangeURL, "flow", "owner-token")
+
+	sourcePath := newGitHTTPWorktree(t)
+	for i := 0; i < 32; i++ {
+		runGitHTTPTestGit(t, sourcePath, "commit", "--allow-empty", "-m", fmt.Sprintf("common %d", i+1))
+	}
+	commonSHA := gitHTTPTestOutput(t, sourcePath, "rev-parse", "HEAD")
+	runGitHTTPTestGit(t, sourcePath, "push", ownerURL, "refs/heads/main:refs/heads/main")
+
+	clientPath := filepath.Join(t.TempDir(), "client")
+	runGitHTTPTestGit(t, "", "clone", "--branch", "main", ownerURL, clientPath)
+
+	runGitHTTPTestGit(t, sourcePath, "commit", "--allow-empty", "-m", "remote main")
+	wantRefs := map[string]string{
+		"refs/remotes/origin/main": gitHTTPTestOutput(t, sourcePath, "rev-parse", "HEAD"),
+	}
+	pushArgs := []string{"push", ownerURL, "refs/heads/main:refs/heads/main"}
+	for i := 1; i <= 6; i++ {
+		branch := fmt.Sprintf("task/t-demo-%04d/run-1", i)
+		runGitHTTPTestGit(t, sourcePath, "checkout", "-b", branch, commonSHA)
+		runGitHTTPTestGit(t, sourcePath, "commit", "--allow-empty", "-m", fmt.Sprintf("remote task %d", i))
+		pushArgs = append(pushArgs, "refs/heads/"+branch+":refs/heads/"+branch)
+		wantRefs["refs/remotes/origin/"+branch] = gitHTTPTestOutput(t, sourcePath, "rev-parse", "HEAD")
+	}
+	runGitHTTPTestGit(t, sourcePath, pushArgs...)
+
+	trace, err := runGitHTTPTestGitOutputWithEnv(t, clientPath, []string{
+		"GIT_TRACE_CURL=1",
+		"GIT_TRACE_CURL_NO_DATA=1",
+	}, "-c", "protocol.version=0", "fetch", "origin")
+	if err != nil {
+		t.Fatalf("fetch gzip-compressed negotiation: %v", err)
+	}
+	if !strings.Contains(trace, "Content-Encoding: gzip") {
+		t.Fatalf("fetch did not exercise gzip request encoding:\n%s", trace)
+	}
+	for ref, wantSHA := range wantRefs {
+		gotSHA := gitHTTPTestOutput(t, clientPath, "rev-parse", ref)
+		if gotSHA != wantSHA {
+			t.Errorf("%s = %q, want %q", ref, gotSHA, wantSHA)
+		}
+	}
+}
+
+type gitHTTPServerFixture struct {
+	httpServer *httptest.Server
+	project    coordinator.Project
+}
+
+func newGitHTTPServerFixture(t *testing.T) gitHTTPServerFixture {
+	t.Helper()
+
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	global, err := flowdb.OpenGlobal(ctx, filepath.Join(dataDir, "global.db"))
+	if err != nil {
+		t.Fatalf("open global database: %v", err)
+	}
+	t.Cleanup(func() { _ = global.Close() })
+
+	registry, err := NewRegistry(RegistryOptions{DataDir: dataDir, Global: global})
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	if err := registry.Credentials().EnsureToken(ctx, coordinator.CredentialInput{
+		Token: "owner-token",
+		Scope: coordinator.TokenScopeOwner,
+	}); err != nil {
+		t.Fatalf("store owner token: %v", err)
+	}
+	if err := registry.Credentials().EnsureToken(ctx, coordinator.CredentialInput{
+		Token:   "worker-token",
+		Scope:   coordinator.TokenScopeWorker,
+		Subject: "w-test",
+	}); err != nil {
+		t.Fatalf("store worker token: %v", err)
+	}
+
+	project, err := registry.CreateProject(ctx, coordinator.Project{Name: "demo", BaseBranch: "main"})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	installGitHTTPTestHooks(t, project)
+
+	server, err := NewServer(ServerOptions{Registry: registry, ProtocolVersion: config.DefaultProtocolVersion})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	httpServer := httptest.NewServer(server)
+	t.Cleanup(httpServer.Close)
+
+	return gitHTTPServerFixture{httpServer: httpServer, project: project}
+}
+
+func assertGitHTTPProtocolV2(t *testing.T, httpServer *httptest.Server, exchangeURL string) {
+	t.Helper()
+
+	request, err := http.NewRequest(http.MethodGet, exchangeURL+"/info/refs?service=git-upload-pack", nil)
+	if err != nil {
+		t.Fatalf("new protocol v2 request: %v", err)
+	}
+	request.SetBasicAuth("flow", "owner-token")
+	request.Header.Set("Git-Protocol", "version=2")
+	response, err := httpServer.Client().Do(request)
+	if err != nil {
+		t.Fatalf("request protocol v2 advertisement: %v", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read protocol v2 advertisement: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("protocol v2 advertisement status = %d, want %d: %s", response.StatusCode, http.StatusOK, strings.TrimSpace(string(body)))
+	}
+	if !strings.Contains(string(body), "version 2") {
+		t.Fatalf("protocol v2 advertisement did not negotiate version 2: %q", body)
 	}
 }
 
@@ -231,6 +327,12 @@ func runGitHTTPTestGitErr(t *testing.T, dir string, args ...string) error {
 
 func runGitHTTPTestGitErrWithEnv(t *testing.T, dir string, env []string, args ...string) error {
 	t.Helper()
+	_, err := runGitHTTPTestGitOutputWithEnv(t, dir, env, args...)
+	return err
+}
+
+func runGitHTTPTestGitOutputWithEnv(t *testing.T, dir string, env []string, args ...string) (string, error) {
+	t.Helper()
 	fullArgs := append([]string{"-c", "credential.helper="}, args...)
 	cmd := exec.Command("git", fullArgs...)
 	if dir != "" {
@@ -243,9 +345,9 @@ func runGitHTTPTestGitErrWithEnv(t *testing.T, dir string, env []string, args ..
 	cmd.Env = append(cmd.Env, env...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return errWithOutput{err: err, output: strings.TrimSpace(string(output))}
+		return "", errWithOutput{err: err, output: strings.TrimSpace(string(output))}
 	}
-	return nil
+	return string(output), nil
 }
 
 func gitHTTPTestEnvironment(environ []string) []string {

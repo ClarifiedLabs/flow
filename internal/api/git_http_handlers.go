@@ -170,6 +170,13 @@ func serveGitHTTPBackend(ctx context.Context, w http.ResponseWriter, r *http.Req
 	if contentType := strings.TrimSpace(r.Header.Get("Content-Type")); contentType != "" {
 		cmd.Env = append(cmd.Env, "CONTENT_TYPE="+contentType)
 	}
+	// git http-backend expects these request headers under their CGI names.
+	if contentEncoding := strings.TrimSpace(r.Header.Get("Content-Encoding")); contentEncoding != "" {
+		cmd.Env = append(cmd.Env, "HTTP_CONTENT_ENCODING="+contentEncoding)
+	}
+	if gitProtocol := strings.TrimSpace(r.Header.Get("Git-Protocol")); gitProtocol != "" {
+		cmd.Env = append(cmd.Env, "HTTP_GIT_PROTOCOL="+gitProtocol)
+	}
 	if r.ContentLength >= 0 {
 		cmd.Env = append(cmd.Env, "CONTENT_LENGTH="+strconv.FormatInt(r.ContentLength, 10))
 	}
