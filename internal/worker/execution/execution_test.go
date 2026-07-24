@@ -1020,6 +1020,152 @@ func TestWorkerEnvForwardsHarnessModelProxyConfiguration(t *testing.T) {
 	}
 }
 
+func TestWorkerEnvForwardsClaudeOAuthToken(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "worker-oauth-token")
+
+	for _, role := range []JobRole{RoleAuthor, RoleReviewer, RoleVerifier, RoleConsole} {
+		t.Run(string(role), func(t *testing.T) {
+			env := workerEnv(tmuxInput{
+				Config: workerConfig("/tmp/work", "file:///tmp/exchange.git"),
+				Job:    Job{ID: "j-claude-" + string(role), Role: role},
+				Lease:  Lease{ID: "l-claude-" + string(role), WorkerID: "w-local"},
+				Entrypoint: Entrypoint{
+					Argv:    []string{"claude"},
+					Harness: flowharness.Claude,
+				},
+			})
+			if env["CLAUDE_CODE_OAUTH_TOKEN"] != "worker-oauth-token" {
+				t.Fatalf("CLAUDE_CODE_OAUTH_TOKEN = %q, want worker deployment value", env["CLAUDE_CODE_OAUTH_TOKEN"])
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		name    string
+		role    JobRole
+		harness string
+	}{
+		{name: "ci", role: RoleCI, harness: flowharness.Claude},
+		{name: "other harness", role: RoleAuthor, harness: flowharness.Codex},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env := workerEnv(tmuxInput{
+				Config: workerConfig("/tmp/work", "file:///tmp/exchange.git"),
+				Job:    Job{ID: "j-claude-isolation", Role: tt.role},
+				Lease:  Lease{ID: "l-claude-isolation", WorkerID: "w-local"},
+				Entrypoint: Entrypoint{
+					Argv:    []string{tt.harness},
+					Harness: tt.harness,
+				},
+			})
+			if _, ok := env["CLAUDE_CODE_OAUTH_TOKEN"]; ok {
+				t.Fatalf("CLAUDE_CODE_OAUTH_TOKEN leaked into %s job", tt.name)
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		name  string
+		value string
+	}{
+		{name: "explicit override", value: "job-oauth-token"},
+		{name: "explicit empty", value: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env := workerEnv(tmuxInput{
+				Config: workerConfig("/tmp/work", "file:///tmp/exchange.git"),
+				Job:    Job{ID: "j-claude-explicit", Role: RoleAuthor},
+				Lease:  Lease{ID: "l-claude-explicit", WorkerID: "w-local"},
+				Entrypoint: Entrypoint{
+					Argv:    []string{"claude"},
+					Harness: flowharness.Claude,
+					Env: map[string]string{
+						"CLAUDE_CODE_OAUTH_TOKEN": tt.value,
+					},
+				},
+			})
+			if got, ok := env["CLAUDE_CODE_OAUTH_TOKEN"]; !ok || got != tt.value {
+				t.Fatalf("CLAUDE_CODE_OAUTH_TOKEN = %q, %t, want explicit %q", got, ok, tt.value)
+			}
+		})
+	}
+}
+
+func TestWorkerEnvForwardsCodexHome(t *testing.T) {
+	deploymentHome := t.TempDir()
+	t.Setenv("CODEX_HOME", deploymentHome)
+
+	for _, role := range []JobRole{RoleAuthor, RoleReviewer, RoleVerifier, RoleConsole} {
+		t.Run(string(role), func(t *testing.T) {
+			env := workerEnv(tmuxInput{
+				Config: workerConfig("/tmp/work", "file:///tmp/exchange.git"),
+				Job:    Job{ID: "j-codex-" + string(role), Role: role},
+				Lease:  Lease{ID: "l-codex-" + string(role), WorkerID: "w-local"},
+				Entrypoint: Entrypoint{
+					Argv:    []string{"codex"},
+					Harness: flowharness.Codex,
+				},
+			})
+			if env["CODEX_HOME"] != deploymentHome {
+				t.Fatalf("CODEX_HOME = %q, want worker deployment value %q", env["CODEX_HOME"], deploymentHome)
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		name    string
+		role    JobRole
+		harness string
+	}{
+		{name: "ci", role: RoleCI, harness: flowharness.Codex},
+		{name: "other harness", role: RoleAuthor, harness: flowharness.Claude},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			jobID := "j-codex-isolation-" + strings.ReplaceAll(tt.name, " ", "-")
+			workDir := t.TempDir()
+			env := workerEnv(tmuxInput{
+				Config: workerConfig(workDir, "file:///tmp/exchange.git"),
+				Job:    Job{ID: jobID, Role: tt.role},
+				Lease:  Lease{ID: "l-codex-isolation", WorkerID: "w-local"},
+				Entrypoint: Entrypoint{
+					Argv:    []string{tt.harness},
+					Harness: tt.harness,
+				},
+			})
+			want := hermeticJobEnv(workDir, jobID)["CODEX_HOME"]
+			if env["CODEX_HOME"] != want {
+				t.Fatalf("CODEX_HOME = %q, want hermetic value %q", env["CODEX_HOME"], want)
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		name  string
+		value string
+	}{
+		{name: "explicit override", value: t.TempDir()},
+		{name: "explicit empty", value: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env := workerEnv(tmuxInput{
+				Config: workerConfig("/tmp/work", "file:///tmp/exchange.git"),
+				Job:    Job{ID: "j-codex-explicit", Role: RoleAuthor},
+				Lease:  Lease{ID: "l-codex-explicit", WorkerID: "w-local"},
+				Entrypoint: Entrypoint{
+					Argv:    []string{"codex"},
+					Harness: flowharness.Codex,
+					Env: map[string]string{
+						"CODEX_HOME": tt.value,
+					},
+				},
+			})
+			if got, ok := env["CODEX_HOME"]; !ok || got != tt.value {
+				t.Fatalf("CODEX_HOME = %q, %t, want explicit %q", got, ok, tt.value)
+			}
+		})
+	}
+}
+
 func TestWorkerEnvDefaultsUTF8LocaleForAgentTerminal(t *testing.T) {
 	t.Setenv("LANG", "")
 	t.Setenv("LC_ALL", "")
@@ -1210,6 +1356,11 @@ func TestPrepareHookConfigWritesCodexProfile(t *testing.T) {
 	workDir := t.TempDir()
 	codexHomeDir := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHomeDir)
+	authPath := filepath.Join(codexHomeDir, "auth.json")
+	authData := []byte(`{"tokens":"mounted-auth"}`)
+	if err := os.WriteFile(authPath, authData, 0o600); err != nil {
+		t.Fatalf("write auth fixture: %v", err)
+	}
 
 	value, envVar, err := prepareHookConfig(tmuxInput{
 		Config: workerConfig(workDir, "file:///tmp/exchange.git"),
@@ -1234,13 +1385,21 @@ func TestPrepareHookConfigWritesCodexProfile(t *testing.T) {
 		t.Fatalf("env var = %q, want FLOW_CODEX_HOOK_PROFILE", envVar)
 	}
 	profileName := flowharness.CodexHookProfileName + ".config.toml"
-	profilePath := filepath.Join(hermeticJobEnv(workDir, "j-codex")["CODEX_HOME"], profileName)
+	profilePath := filepath.Join(codexHomeDir, profileName)
 	data, err := os.ReadFile(profilePath)
 	if err != nil {
 		t.Fatalf("read codex profile: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(codexHomeDir, profileName)); !os.IsNotExist(err) {
-		t.Fatalf("host CODEX_HOME profile stat err = %v, want not exist", err)
+	hermeticProfilePath := filepath.Join(hermeticJobEnv(workDir, "j-codex")["CODEX_HOME"], profileName)
+	if _, err := os.Stat(hermeticProfilePath); !os.IsNotExist(err) {
+		t.Fatalf("hermetic CODEX_HOME profile stat err = %v, want not exist", err)
+	}
+	gotAuth, err := os.ReadFile(authPath)
+	if err != nil {
+		t.Fatalf("read auth fixture: %v", err)
+	}
+	if !bytes.Equal(gotAuth, authData) {
+		t.Fatal("Codex hook preparation changed auth.json")
 	}
 	def, ok := flowharness.Lookup(flowharness.Codex)
 	if !ok {
@@ -1269,6 +1428,9 @@ func TestPrepareHookConfigWritesCodexProfile(t *testing.T) {
 	})
 	if env["FLOW_CODEX_HOOK_PROFILE"] != flowharness.CodexHookProfileName {
 		t.Fatalf("FLOW_CODEX_HOOK_PROFILE = %q, want %q", env["FLOW_CODEX_HOOK_PROFILE"], flowharness.CodexHookProfileName)
+	}
+	if env["CODEX_HOME"] != codexHomeDir {
+		t.Fatalf("CODEX_HOME = %q, want deployment value %q", env["CODEX_HOME"], codexHomeDir)
 	}
 }
 

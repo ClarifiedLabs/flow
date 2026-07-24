@@ -175,7 +175,11 @@ docker compose -f compose.yaml -f compose.auth.yaml up -d --build
 
 The Codex auth file is mounted writable because Codex refreshes ChatGPT
 subscription tokens during normal use and writes the updated token bundle back
-to `auth.json`. Keep `.env` and `auth.json` private; `.env` is ignored by git.
+to `auth.json`. Codex agent jobs share that mounted `CODEX_HOME`; Claude agent
+jobs receive `CLAUDE_CODE_OAUTH_TOKEN`. The worker scopes both credentials to
+author, reviewer, verifier, and console jobs using the matching harness, so CI
+and other harnesses keep their hermetic environments. Keep `.env` and
+`auth.json` private; `.env` is ignored by git.
 
 Load the generated owner token from `.env`, then onboard a repository from your
 normal host checkout:

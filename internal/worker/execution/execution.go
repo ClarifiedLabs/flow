@@ -1063,9 +1063,8 @@ func envCommand(env map[string]string, argv []string) string {
 }
 
 func workerEnv(input tmuxInput) map[string]string {
-	env := entrypointEnvWithHermeticDefaults(input)
+	env := entrypointEnvWithDeploymentDefaults(input)
 	scrubWorkerDeploymentEnv(env)
-	forwardHarnessModelProxyEnv(env, input)
 	reserved := map[string]string{
 		"FLOW_COORDINATOR_URL":  input.Config.CoordinatorURL,
 		"FLOW_PROTOCOL_VERSION": input.Config.ProtocolVersion,
@@ -1177,25 +1176,36 @@ func workerEnv(input tmuxInput) map[string]string {
 	return env
 }
 
-var harnessModelProxyEnvKeys = []string{
-	"HARNESS_MODEL_PROXY_URL",
-	"HARNESS_MODEL_PROXY_API_KEY",
+var agentDeploymentEnvKeys = map[string][]string{
+	flowharness.Codex: {
+		"CODEX_HOME",
+	},
+	flowharness.Claude: {
+		"CLAUDE_CODE_OAUTH_TOKEN",
+	},
+	flowharness.Harness: {
+		"HARNESS_MODEL_PROXY_URL",
+		"HARNESS_MODEL_PROXY_API_KEY",
+	},
 }
 
-// forwardHarnessModelProxyEnv carries the worker's model-proxy configuration
-// across the hermetic env -i boundary for jobs that actually run harness. CI
-// entrypoints remain isolated from agent credentials, and an entrypoint's
-// explicit env (including an intentional empty value) wins over deployment
-// defaults.
-func forwardHarnessModelProxyEnv(env map[string]string, input tmuxInput) {
-	if resolveHarness(input) != flowharness.Harness || !jobUsesAgentCredentials(input.Job.Role) {
+// forwardAgentDeploymentEnv carries only the selected harness's worker
+// authentication configuration across the hermetic env -i boundary. CI and
+// non-matching harnesses remain isolated from agent credentials, and an
+// entrypoint's explicit env (including an intentional empty value) wins over
+// deployment defaults.
+func forwardAgentDeploymentEnv(env map[string]string, input tmuxInput) {
+	if !jobUsesAgentCredentials(input.Job.Role) {
 		return
 	}
-	for _, key := range harnessModelProxyEnvKeys {
+	for _, key := range agentDeploymentEnvKeys[resolveHarness(input)] {
 		if _, explicit := input.Entrypoint.Env[key]; explicit {
 			continue
 		}
 		if value, ok := os.LookupEnv(key); ok {
+			if key == "CODEX_HOME" && strings.TrimSpace(value) == "" {
+				continue
+			}
 			env[key] = value
 		}
 	}
@@ -1223,6 +1233,12 @@ func entrypointEnvWithHermeticDefaults(input tmuxInput) map[string]string {
 		}
 	}
 	ensureDefaultUTF8Locale(env)
+	return env
+}
+
+func entrypointEnvWithDeploymentDefaults(input tmuxInput) map[string]string {
+	env := entrypointEnvWithHermeticDefaults(input)
+	forwardAgentDeploymentEnv(env, input)
 	return env
 }
 
@@ -1408,7 +1424,7 @@ func prepareCodexHookConfig(input tmuxInput) (string, string, error) {
 	if err != nil {
 		return "", "", fmt.Errorf("render codex hook profile: %w", err)
 	}
-	home := entrypointEnvWithHermeticDefaults(input)["CODEX_HOME"]
+	home := entrypointEnvWithDeploymentDefaults(input)["CODEX_HOME"]
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return "", "", fmt.Errorf("create codex home: %w", err)
 	}
