@@ -4372,6 +4372,58 @@ func TestSessionProcessExitRejectsConsoleSession(t *testing.T) {
 	}
 }
 
+func TestWorkflowRetryAPIRefreshesCurrentAuthorRuntime(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	started := startAuthorSessionForStatusTest(t, fixture, "Refresh blocked author runtime")
+	taskID := started.Session.TaskID
+	runID := started.Session.WorkflowRunID
+
+	before, err := fixture.Bundle.WorkflowRuns.Get(ctx, runID)
+	if err != nil {
+		t.Fatalf("load workflow before crash: %v", err)
+	}
+	authorNode, ok := before.Snapshot.Node(before.CurrentNodeKey)
+	if !ok || authorNode.Config.Agent == nil {
+		t.Fatalf("current author node = %+v, found=%t", authorNode, ok)
+	}
+	frozen := authorNode.Config.Agent.Agent
+	newHarness := flowharness.Claude
+	if frozen.Harness == newHarness {
+		newHarness = flowharness.Codex
+	}
+	override, err := fixture.Bundle.AgentDefs.Update(ctx, frozen.ID, coordinator.AgentDefInput{
+		Name: frozen.Name, Harness: newHarness, Model: "api-refreshed-model", ReasoningEffort: "high",
+		Prompt: "Updated live prompt must remain outside the frozen workflow.",
+	})
+	if err != nil {
+		t.Fatalf("create project author override: %v", err)
+	}
+	if override.ID == frozen.ID {
+		t.Fatalf("project override id = frozen global id %q, want a local definition", override.ID)
+	}
+
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/sessions/"+started.Session.ID+"/process-exit", sessionProcessExitRequest{
+		LeaseID: started.Session.LeaseID, ExitCode: 1,
+	}, http.StatusOK, nil)
+
+	var retry workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+taskID+"/workflow/retry", workflowRetryRequest{
+		RefreshAgentRuntime: true,
+	}, http.StatusOK, &retry)
+	refreshedNode, ok := retry.Run.Snapshot.Node(retry.Run.CurrentNodeKey)
+	if !ok || refreshedNode.Config.Agent == nil {
+		t.Fatalf("retried author node = %+v, found=%t", refreshedNode, ok)
+	}
+	refreshed := refreshedNode.Config.Agent.Agent
+	if refreshed.Harness != override.Harness || refreshed.Model != override.Model || refreshed.ReasoningEffort != override.ReasoningEffort {
+		t.Fatalf("refreshed runtime = %+v, want override %+v", refreshed, override)
+	}
+	if refreshed.ID != frozen.ID || refreshed.Name != frozen.Name || refreshed.Prompt != frozen.Prompt {
+		t.Fatalf("refreshed frozen fields = %+v, want id/name/prompt from %+v", refreshed, frozen)
+	}
+}
+
 func TestWorkflowAuthorProcessExitPausesUntilHumanRetry(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()

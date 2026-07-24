@@ -111,6 +111,18 @@ type WorkflowExecutionFailure struct {
 	Message   string   `json:"message"`
 }
 
+type WorkflowAgentRuntimeSettings struct {
+	Harness         string `json:"harness"`
+	Model           string `json:"model"`
+	ReasoningEffort string `json:"reasoning_effort"`
+}
+
+type WorkflowAgentRuntimeRefresh struct {
+	AgentID string                       `json:"agent_id"`
+	Old     WorkflowAgentRuntimeSettings `json:"old"`
+	New     WorkflowAgentRuntimeSettings `json:"new"`
+}
+
 type WorkflowTransition struct {
 	Sequence      int64           `json:"sequence"`
 	TaskID        string          `json:"task_id"`
@@ -607,8 +619,10 @@ UPDATE tasks SET lifecycle_state = ?, updated_at = ? WHERE id = ?`,
 
 // RetryExecution resolves an execution-failure wait and reruns only the current
 // node attempt. For check nodes, only errored checks are reset; completed
-// results for the same pinned change revision remain authoritative.
-func (s *WorkflowRunService) RetryExecution(ctx context.Context, taskID string, actor Actor) (WorkflowRun, error) {
+// results for the same pinned change revision remain authoritative. When
+// refreshAgentRuntime is true, the current node's frozen agents keep their
+// identity and prompts while adopting the latest effective runtime settings.
+func (s *WorkflowRunService) RetryExecution(ctx context.Context, taskID string, actor Actor, refreshAgentRuntime bool) (WorkflowRun, error) {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
 		return WorkflowRun{}, errors.New("task id is required")
@@ -657,6 +671,18 @@ WHERE task_id = ? AND state = ?`, taskID, string(WorkflowRunWaiting)))
 		}
 	}
 
+	var refreshedAgents []WorkflowAgentRuntimeRefresh
+	if refreshAgentRuntime {
+		nodeKey := nodeRun.NodeKey
+		if nodeKey == "" {
+			nodeKey = run.CurrentNodeKey
+		}
+		refreshedAgents, err = s.refreshNodeAgentRuntime(ctx, tx, &run.Snapshot, nodeKey)
+		if err != nil {
+			return WorkflowRun{}, err
+		}
+	}
+
 	now := s.now().UTC()
 	resetChecks := int64(0)
 	if nodeRun.ID != "" {
@@ -688,7 +714,17 @@ WHERE id = ?`, string(WorkflowNodeQueued), nodeRun.ID); err != nil {
 		}
 		nodeRun.Attempt++
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if refreshAgentRuntime {
+		snapshotJSON, err := json.Marshal(run.Snapshot)
+		if err != nil {
+			return WorkflowRun{}, fmt.Errorf("encode refreshed workflow snapshot: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE workflow_runs SET flow_snapshot_json = ?, state = ?, version = version + 1 WHERE id = ?`,
+			string(snapshotJSON), string(WorkflowRunRunning), run.ID); err != nil {
+			return WorkflowRun{}, err
+		}
+	} else if _, err := tx.ExecContext(ctx, `
 UPDATE workflow_runs SET state = ?, version = version + 1 WHERE id = ?`,
 		string(WorkflowRunRunning), run.ID); err != nil {
 		return WorkflowRun{}, err
@@ -696,10 +732,14 @@ UPDATE workflow_runs SET state = ?, version = version + 1 WHERE id = ?`,
 	if err := resolveOpenWaitTx(ctx, tx, run.ID, actor, now); err != nil {
 		return WorkflowRun{}, err
 	}
-	payload, err := json.Marshal(map[string]any{
+	payloadFields := map[string]any{
 		"attempt":      nodeRun.Attempt,
 		"checks_reset": resetChecks,
-	})
+	}
+	if refreshAgentRuntime {
+		payloadFields["refreshed_agents"] = refreshedAgents
+	}
+	payload, err := json.Marshal(payloadFields)
 	if err != nil {
 		return WorkflowRun{}, err
 	}
@@ -716,6 +756,85 @@ UPDATE workflow_runs SET state = ?, version = version + 1 WHERE id = ?`,
 		return WorkflowRun{}, err
 	}
 	return s.Get(ctx, run.ID)
+}
+
+func (s *WorkflowRunService) refreshNodeAgentRuntime(
+	ctx context.Context,
+	tx *sql.Tx,
+	snapshot *FlowSnapshot,
+	nodeKey string,
+) ([]WorkflowAgentRuntimeRefresh, error) {
+	if s.flows == nil || s.flows.agentDefs == nil {
+		return nil, errors.New("workflow agent definitions are unavailable")
+	}
+	var node *FlowNodeSnapshot
+	for i := range snapshot.Nodes {
+		if snapshot.Nodes[i].Key == nodeKey {
+			node = &snapshot.Nodes[i]
+			break
+		}
+	}
+	if node == nil {
+		return nil, fmt.Errorf("snapshot node %q not found", nodeKey)
+	}
+
+	var agents []*AgentDefSnapshot
+	switch node.Kind {
+	case NodeAgent:
+		if node.Config.Agent == nil {
+			return nil, fmt.Errorf("snapshot agent node %q is missing configuration", nodeKey)
+		}
+		agents = append(agents, &node.Config.Agent.Agent)
+	case NodeChangeReview:
+		if node.Config.ChangeReview == nil {
+			return nil, fmt.Errorf("snapshot review node %q is missing configuration", nodeKey)
+		}
+		for i := range node.Config.ChangeReview.Agents {
+			agents = append(agents, &node.Config.ChangeReview.Agents[i].Agent)
+		}
+	case NodeVerifyChange:
+		if node.Config.VerifyChange == nil {
+			return nil, fmt.Errorf("snapshot verification node %q is missing configuration", nodeKey)
+		}
+		for i := range node.Config.VerifyChange.Agents {
+			agents = append(agents, &node.Config.VerifyChange.Agents[i].Agent)
+		}
+	}
+
+	refreshed := make([]WorkflowAgentRuntimeRefresh, 0, len(agents))
+	for _, agent := range agents {
+		agentID := strings.TrimSpace(agent.ID)
+		if agentID == "" {
+			return nil, fmt.Errorf("snapshot agent %q in node %q has no id", agent.Name, nodeKey)
+		}
+		definition, err := s.flows.agentDefs.resolveWith(ctx, tx, agentID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve snapshot agent %q in node %q: %w", agentID, nodeKey, err)
+		}
+		oldRuntime := workflowAgentRuntimeSettings(*agent)
+		newRuntime := WorkflowAgentRuntimeSettings{
+			Harness:         definition.Harness,
+			Model:           definition.Model,
+			ReasoningEffort: definition.ReasoningEffort,
+		}
+		agent.Harness = newRuntime.Harness
+		agent.Model = newRuntime.Model
+		agent.ReasoningEffort = newRuntime.ReasoningEffort
+		refreshed = append(refreshed, WorkflowAgentRuntimeRefresh{
+			AgentID: agentID,
+			Old:     oldRuntime,
+			New:     newRuntime,
+		})
+	}
+	return refreshed, nil
+}
+
+func workflowAgentRuntimeSettings(agent AgentDefSnapshot) WorkflowAgentRuntimeSettings {
+	return WorkflowAgentRuntimeSettings{
+		Harness:         agent.Harness,
+		Model:           agent.Model,
+		ReasoningEffort: agent.ReasoningEffort,
+	}
 }
 
 func verifyPinnedChangeHeadTx(ctx context.Context, tx *sql.Tx, artifactID string) error {

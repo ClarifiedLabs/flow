@@ -312,7 +312,7 @@ func TestWorkflowExecutorParallelReviewBarrier(t *testing.T) {
 			t.Fatalf("review state = %s err=%v, want in_review", state, err)
 		}
 
-		retried, err := fixture.runs.RetryExecution(ctx, fixture.task.ID, ActorHuman)
+		retried, err := fixture.runs.RetryExecution(ctx, fixture.task.ID, ActorHuman, false)
 		if err != nil {
 			t.Fatalf("retry execution: %v", err)
 		}
@@ -381,7 +381,7 @@ func TestWorkflowExecutorParallelReviewBarrier(t *testing.T) {
 UPDATE changes SET head_sha = 'head-moved' WHERE workflow_run_id = ?`, fixture.runID); err != nil {
 			t.Fatalf("move change head: %v", err)
 		}
-		if _, err := fixture.runs.RetryExecution(ctx, fixture.task.ID, ActorHuman); !errors.Is(err, ErrWorkflowConflict) {
+		if _, err := fixture.runs.RetryExecution(ctx, fixture.task.ID, ActorHuman, false); !errors.Is(err, ErrWorkflowConflict) {
 			t.Fatalf("retry error = %v, want workflow conflict", err)
 		}
 		detail, err := fixture.runs.Detail(ctx, fixture.runID)

@@ -898,11 +898,23 @@ func runTaskBudget(args []string, stdout, stderr io.Writer) int {
 }
 
 func runTaskRetry(args []string, stdout, stderr io.Writer) int {
-	parsed, taskRef, code := parseScopedTaskAPICommand(args, stderr, "task retry", 1, "usage: flow task retry [flags] TASK_ID")
-	if code != 0 {
-		return code
+	flags, apiFlags := newAPIFlagSet("task retry", stderr)
+	var refreshAgentRuntime bool
+	flags.BoolVar(&refreshAgentRuntime, "refresh-agent-runtime", false, "refresh the current node's harness, model, and reasoning effort before retrying")
+	if err := flags.Parse(args); err != nil {
+		return 2
 	}
-	run, err := parsed.client.RetryWorkflow(taskRef)
+	if flags.NArg() != 1 {
+		fmt.Fprintln(stderr, "usage: flow task retry [flags] TASK_ID")
+		return 2
+	}
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return 1
+	}
+	client, taskRef := scopeClientForRef(client, flags.Arg(0))
+	run, err := client.RetryWorkflow(taskRef, refreshAgentRuntime)
 	if err != nil {
 		fmt.Fprintf(stderr, "retry workflow: %v\n", err)
 		return 1

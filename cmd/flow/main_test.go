@@ -110,6 +110,53 @@ func TestFlowsListSummarizesGraphReviewAgents(t *testing.T) {
 	}
 }
 
+func TestTaskRetryPropagatesRefreshAgentRuntimeFlag(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	for _, tc := range []struct {
+		name     string
+		flag     bool
+		wantBody string
+	}{
+		{name: "ordinary retry", wantBody: "{}\n"},
+		{name: "refresh runtime", flag: true, wantBody: "{\"refresh_agent_runtime\":true}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v2/projects/p-demo/tasks/t-demo-0001/workflow/retry" {
+					t.Fatalf("request = %s %s, want POST retry endpoint", r.Method, r.URL.Path)
+				}
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatalf("read retry body: %v", err)
+				}
+				if string(body) != tc.wantBody {
+					t.Fatalf("retry body = %q, want %q", body, tc.wantBody)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"run":{"task_id":"t-demo-0001","state":"running","current_node_key":"author"}}`)
+			}))
+			t.Cleanup(server.Close)
+
+			args := []string{"task", "retry", "--server", server.URL, "--token", "owner-token"}
+			if tc.flag {
+				args = append(args, "--refresh-agent-runtime")
+			}
+			args = append(args, "t-demo-0001")
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := run(args, &stdout, &stderr)
+			if exitCode != 0 {
+				t.Fatalf("task retry exitCode = %d, stderr = %q", exitCode, stderr.String())
+			}
+			if stdout.String() != "t-demo-0001\trunning\tauthor\n" {
+				t.Fatalf("task retry output = %q", stdout.String())
+			}
+		})
+	}
+}
+
 func TestAgentDefsListGlobalUsesGlobalCatalog(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Chdir(t.TempDir())

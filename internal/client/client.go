@@ -390,11 +390,14 @@ func (c *Client) ExtendWorkflowBudget(taskID string, additional int) (coordinato
 	return response.Run, nil
 }
 
-func (c *Client) RetryWorkflow(taskID string) (coordinator.WorkflowRun, error) {
+func (c *Client) RetryWorkflow(taskID string, refreshAgentRuntime bool) (coordinator.WorkflowRun, error) {
 	var response struct {
 		Run coordinator.WorkflowRun `json:"run"`
 	}
-	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/workflow/retry", map[string]string{}, nil, &response); err != nil {
+	request := struct {
+		RefreshAgentRuntime bool `json:"refresh_agent_runtime,omitempty"`
+	}{RefreshAgentRuntime: refreshAgentRuntime}
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/workflow/retry", request, nil, &response); err != nil {
 		return coordinator.WorkflowRun{}, err
 	}
 	return response.Run, nil

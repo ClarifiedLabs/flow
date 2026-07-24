@@ -29,6 +29,10 @@ type workflowBudgetRequest struct {
 	Additional int `json:"additional"`
 }
 
+type workflowRetryRequest struct {
+	RefreshAgentRuntime bool `json:"refresh_agent_runtime"`
+}
+
 type workflowDoneRequest struct {
 	Resolution coordinator.DoneResolution `json:"resolution"`
 	Note       string                     `json:"note,omitempty"`
@@ -330,7 +334,12 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 		if !requireMethod(w, r, http.MethodPost) || !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
 			return
 		}
-		run, err := s.workflowRuns.RetryExecution(r.Context(), taskID, coordinator.ActorHuman)
+		var request workflowRetryRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+			return
+		}
+		run, err := s.workflowRuns.RetryExecution(r.Context(), taskID, coordinator.ActorHuman, request.RefreshAgentRuntime)
 		if err != nil {
 			writeWorkflowError(w, err, "retry_workflow_failed")
 			return
