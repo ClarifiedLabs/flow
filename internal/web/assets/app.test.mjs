@@ -974,7 +974,8 @@ test("change detail fetches read model and renders checks and threads", async ()
   await flowApp.renderChange("ch-0001");
 
   assert.equal(fetchCalls[0].path, "/ui/api/v2/changes/ch-0001");
-  assert.equal(fetchCalls[1].path, "/ui/api/v2/changes/ch-0001/diff");
+  assert.equal(fetchCalls[1].path, "/ui/api/v2/tasks/t-alpha-0001/workflow");
+  assert.equal(fetchCalls[2].path, "/ui/api/v2/changes/ch-0001/diff");
   assert.equal(fetchCalls[0].options.headers["X-Flow-CSRF"], "csrf-token");
   assert.equal(title.textContent, "Change");
   assert.match(content.innerHTML, /ch-0001/);
@@ -1012,6 +1013,87 @@ test("change detail fetches read model and renders checks and threads", async ()
   assert.match(diffContainer.innerHTML, /data-diff-mode="unified">/);
   assert.match(diffContainer.innerHTML, /diff-unified-line diff-add">\+const New = 1/);
   assert.equal(fetchCalls.filter((call) => call.path === "/ui/api/v2/changes/ch-0001/diff").length, 1);
+});
+
+test("human change review actions render on the matching change instead of task detail", async () => {
+  const workflow = {
+    detail: {
+      run: {
+        id: "wr-1",
+        task_id: "t-alpha-0001",
+        state: "waiting",
+        current_node_key: "human-review",
+        current_node_run_id: "nr-human-review",
+        current_artifact_id: "wa-change",
+        snapshot: {
+          flow_id: "fl-coding",
+          flow_name: "coding",
+          nodes: [{
+            key: "human-review",
+            name: "Human change review",
+            kind: "human_gate",
+            config: {
+              human_gate: {
+                instructions: "Review the change and choose whether it can proceed.",
+                outcomes: ["approved", "changes_requested", "rejected"],
+              },
+            },
+          }],
+          edges: [],
+        },
+      },
+      node_runs: [{ id: "nr-human-review", node_key: "human-review", state: "waiting" }],
+      transitions: [],
+      open_wait: {
+        id: "wait-1",
+        node_run_id: "nr-human-review",
+        kind: "human_gate",
+        message: "Waiting for a human decision.",
+      },
+    },
+    artifacts: [{ id: "wa-change", kind: "change", payload: { change_id: "ch-0001" } }],
+  };
+  const humanCheck = { name: "human-review", kind: "human", required: true, verdict: "pending" };
+
+  const changeHarness = await browserSmokeHarness("/ui/changes/ch-0001", {
+    "/ui/api/v2/changes/ch-0001": {
+      project_id: "p-alpha",
+      change: { id: "ch-0001", branch: "task/t-alpha-0001/run-1", base: "main", updated_at: "2026-07-24T12:00:00Z" },
+      task: { id: "t-alpha-0001", title: "Move review actions" },
+      checks: [humanCheck],
+      required_checks: { total: 1, satisfied: 0 },
+      review_state: "in_review",
+      threads: [],
+    },
+    "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/workflow": workflow,
+  });
+
+  await changeHarness.app.renderChange("ch-0001");
+
+  assert.match(changeHarness.content.innerHTML, /Human change review/);
+  assert.match(changeHarness.content.innerHTML, /Review the change and choose whether it can proceed\./);
+  assert.match(changeHarness.content.innerHTML, /data-workflow-feedback/);
+  assert.match(changeHarness.content.innerHTML, /data-workflow-respond="nr-human-review"[^>]*data-outcome="approved"/);
+  assert.match(changeHarness.content.innerHTML, /data-workflow-respond="nr-human-review"[^>]*data-outcome="changes_requested"/);
+  assert.match(changeHarness.content.innerHTML, /data-workflow-respond="nr-human-review"[^>]*data-outcome="rejected"/);
+  assert.match(changeHarness.content.innerHTML, /data-human-review-approve="t-alpha-0001"/);
+
+  const taskHarness = await browserSmokeHarness("/ui/projects/p-alpha/tasks/t-alpha-0001", {
+    "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001": {
+      project_id: "p-alpha",
+      task: { id: "t-alpha-0001", title: "Move review actions", state: "in_progress", updated_at: "2026-07-24T12:00:00Z" },
+      task_detail: { checks: [humanCheck] },
+    },
+    "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0001/workflow": workflow,
+    "/ui/api/v2/projects/p-alpha/flows": { flows: [] },
+  });
+
+  await taskHarness.app.renderTask("t-alpha-0001", undefined, "p-alpha");
+
+  assert.doesNotMatch(taskHarness.content.innerHTML, /data-workflow-feedback/);
+  assert.doesNotMatch(taskHarness.content.innerHTML, /data-workflow-respond=/);
+  assert.doesNotMatch(taskHarness.content.innerHTML, /data-human-review-approve=/);
+  assert.match(taskHarness.content.innerHTML, /Human change review/);
 });
 
 test("change detail diff uses the same width for all files and hunks", async () => {
@@ -3188,6 +3270,7 @@ test("browser smoke loads task and change deep links", async () => {
         comments: [{ body: "Review note" }],
       }],
     },
+    "/ui/api/v2/tasks/t-alpha-0001/workflow": { detail: null },
     "/ui/api/v2/changes/ch-0001/diff": {
       change_id: "ch-0001",
       head_sha: "abcdef1234567890",
@@ -3209,6 +3292,7 @@ test("browser smoke loads task and change deep links", async () => {
   assert.deepEqual(changeHarness.fetchCalls, [
     "/ui/api/v2/projects",
     "/ui/api/v2/changes/ch-0001",
+    "/ui/api/v2/tasks/t-alpha-0001/workflow",
     "/ui/api/v2/changes/ch-0001/diff",
   ]);
 });

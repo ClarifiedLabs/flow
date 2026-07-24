@@ -2,7 +2,7 @@
 // flow selector, and the edit-form toggle.
 
 import { apiGet, taskAPIBase } from "./api.js";
-import { renderHumanAttentionPanel } from "./attention.js";
+import { renderHumanAttentionPanel, renderWorkflowHumanGatePanel, workflowCurrentArtifact } from "./attention.js";
 import { renderPhaseBadge, renderStateBadge, workflowActivityLabel } from "./board.js";
 import { renderCheck } from "./diff.js";
 import { formatDate } from "./format.js";
@@ -342,7 +342,7 @@ export async function renderTaskView(app, id, context, projectID = "") {
   const relationsHTML = relations.length ? `<h3>Relationships</h3><div class="feed">${relations.map((relation) => renderRelation(relation, taskID, resolvedProject)).join("")}</div>` : "";
   const readyChangeHTML = readyChange ? `<h3>Ready Change</h3><div class="feed">${renderTaskChange(readyChange)}</div>` : "";
   const changesHTML = changes.length ? `<h3>Changes</h3><div class="feed">${changes.map(renderTaskChange).join("")}</div>` : "";
-  const checksHTML = checks.length ? `<h3>Checks</h3><div class="check-list">${checks.map((check) => renderCheck(check, taskID, resolvedProject)).join("")}</div>` : "";
+  const checksHTML = checks.length ? `<h3>Checks</h3><div class="check-list">${checks.map((check) => renderCheck(check, taskID, resolvedProject, false)).join("")}</div>` : "";
   const attachmentsHTML = attachments.length ? `<h3>Attachments</h3><div class="attachment-list">${attachments.map((attachment) => renderTaskAttachment(attachment, taskID, resolvedProject)).join("")}</div>` : "";
   const attachmentUploadHTML = renderAttachmentUploadForm(taskID, resolvedProject);
   const attentionHTML = renderHumanAttentionPanel(task, statusLog, resolvedProject, activeSession);
@@ -368,8 +368,10 @@ export async function renderTaskView(app, id, context, projectID = "") {
   const currentStepHTML = renderCurrentWorkflowStep(workflowRun, currentStep, currentNodeRun, workflowWait, workActive)
     || (workActive ? `<div class="task-current-step"><strong>Work in progress</strong></div>` : "");
   const stateBadgeHTML = workActive ? "" : renderPhaseBadge(taskDisplayState);
-  const gateConfig = value(value(currentNode || {}, "config", "Config") || {}, "human_gate", "HumanGate") || null;
-  const gateOutcomes = value(gateConfig || {}, "outcomes", "Outcomes") || [];
+  const currentArtifact = workflowCurrentArtifact(workflowData);
+  const humanGatePanelHTML = value(currentArtifact || {}, "kind", "Kind") === "change"
+    ? ""
+    : renderWorkflowHumanGatePanel(workflowData, taskID, resolvedProject);
   const workflowWaitReason = String(value(workflowWait || {}, "reason", "Reason") || "").trim();
   const workflowWaitDetails = value(workflowWait || {}, "details", "Details") || {};
   const failedOperation = String(value(workflowWaitDetails, "operation", "Operation") || "").trim();
@@ -383,11 +385,9 @@ export async function renderTaskView(app, id, context, projectID = "") {
     : lifecycleState === "done"
       ? `<button class="button" data-workflow-reopen="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>Reopen</button>`
       : `<button class="button secondary" data-workflow-reset="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>Reset</button><button class="button secondary" data-workflow-done="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>Done</button>`;
-  const gatePanelHTML = workflowWait && value(workflowWait, "kind", "Kind") === "human_gate"
-    ? `<section class="human-attention-panel"><div><h3>${escapeHTML(value(currentNode, "name", "Name") || "Human action required")}</h3><p>${escapeHTML(value(gateConfig, "instructions", "Instructions") || value(workflowWait, "message", "Message") || "Choose the next workflow outcome.")}</p><textarea data-workflow-feedback rows="3" placeholder="Optional feedback for the next node"></textarea></div><div class="actions">${gateOutcomes.map((outcome) => `<button class="button${outcome === "changes_requested" ? " secondary" : ""}" data-workflow-respond="${escapeAttr(value(workflowWait, "node_run_id", "NodeRunID"))}" data-task="${escapeAttr(taskID)}" data-outcome="${escapeAttr(outcome)}"${projectButtonAttr(resolvedProject)}>${escapeHTML(String(outcome).replaceAll("_", " "))}</button>`).join("")}</div></section>`
-    : workflowWait && value(workflowWait, "kind", "Kind") === "operator_intervention"
-      ? `<section class="human-attention-panel"><div><h3>${workflowWaitReason === "execution_failed" ? "Workflow step failed" : "Workflow paused"}</h3><p>${escapeHTML(value(workflowWait, "message", "Message") || "Operator action is required.")}</p>${failedOperation ? `<p class="meta-quiet">Operation: ${escapeHTML(failedOperation)}</p>` : ""}${failedCheckID ? `<p class="meta-quiet">Check: ${escapeHTML(failedCheckID)}</p>` : ""}${failedJobID ? `<p class="meta-quiet">Job: ${escapeHTML(failedJobID)}</p>` : ""}</div><div class="actions">${workflowWaitReason === "execution_failed" ? `<button class="button" data-workflow-retry="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>${escapeHTML(retryWorkflowLabel)}</button>${failedJobID ? renderTranscriptButton("job", failedJobID) : ""}` : workflowWaitReason === "transition_budget_exhausted" ? `<button class="button" data-workflow-budget="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>Extend budget</button>` : ""}</div></section>`
-      : "";
+  const gatePanelHTML = humanGatePanelHTML || (workflowWait && value(workflowWait, "kind", "Kind") === "operator_intervention"
+    ? `<section class="human-attention-panel"><div><h3>${workflowWaitReason === "execution_failed" ? "Workflow step failed" : "Workflow paused"}</h3><p>${escapeHTML(value(workflowWait, "message", "Message") || "Operator action is required.")}</p>${failedOperation ? `<p class="meta-quiet">Operation: ${escapeHTML(failedOperation)}</p>` : ""}${failedCheckID ? `<p class="meta-quiet">Check: ${escapeHTML(failedCheckID)}</p>` : ""}${failedJobID ? `<p class="meta-quiet">Job: ${escapeHTML(failedJobID)}</p>` : ""}</div><div class="actions">${workflowWaitReason === "execution_failed" ? `<button class="button" data-workflow-retry="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>${escapeHTML(retryWorkflowLabel)}</button>${failedJobID ? renderTranscriptButton("job", failedJobID) : ""}` : workflowWaitReason === "transition_budget_exhausted" ? `<button class="button" data-workflow-budget="${escapeAttr(taskID)}"${projectButtonAttr(resolvedProject)}>Extend budget</button>` : ""}</div></section>`
+    : "");
   const workflowHTML = renderWorkflowDetail(
     workflowRun,
     workflowNodeRuns,

@@ -52,14 +52,14 @@ export function renderThreadComment(comment) {
   `;
 }
 
-export function renderCheck(check, taskID = "", projectID = "") {
+export function renderCheck(check, taskID = "", projectID = "", showHumanReviewAction = true) {
   const name = value(check, "name", "Name");
   const verdict = value(check, "verdict", "Verdict");
   const kind = value(check, "kind", "Kind");
   const required = value(check, "required", "Required");
   const details = value(check, "details", "Details");
   const checkTaskID = taskID || value(check, "task_id", "TaskID");
-  const approveAction = canApproveHumanReview(check, checkTaskID)
+  const approveAction = showHumanReviewAction && canApproveHumanReview(check, checkTaskID)
     ? renderHumanReviewApproveButton(check, checkTaskID, projectID, "button check-action")
     : "";
   return `

@@ -1,7 +1,8 @@
 // Change (branch diff) detail view. Caches the rendered diff per head SHA on
 // the app instance (app.changeDiffCache).
 
-import { apiGet, taskHref } from "./api.js";
+import { apiGet, taskAPIBase, taskHref } from "./api.js";
+import { renderWorkflowHumanGatePanel, workflowChangeArtifactID, workflowCurrentArtifact } from "./attention.js";
 import { renderReviewBadge } from "./board.js";
 import { canApproveHumanReview, renderCheck, renderDiffSummary, renderHumanReviewApproveButton, renderThread } from "./diff.js";
 import { formatDate, shortSHA } from "./format.js";
@@ -24,6 +25,14 @@ export async function renderChangeView(app, id, context) {
   const changeID = value(change, "id", "ID") || id;
   const changeProjectID = data.project_id || data.ProjectID || "";
   const taskID = value(task, "id", "ID");
+  const workflowData = taskID
+    ? await apiGet(`${taskAPIBase(changeProjectID)}/${encodeURIComponent(taskID)}/workflow`).catch(() => null)
+    : null;
+  if (context && !app.isActiveLoad(context)) return false;
+  const currentArtifact = workflowCurrentArtifact(workflowData);
+  const workflowGateHTML = workflowChangeArtifactID(currentArtifact) === changeID
+    ? renderWorkflowHumanGatePanel(workflowData, taskID, changeProjectID)
+    : "";
   const headSHA = value(change, "head_sha", "HeadSHA");
   const checkTotal = Number(value(requiredChecks, "total", "Total") || 0);
   const checkSatisfied = Number(value(requiredChecks, "satisfied", "Satisfied") || 0);
@@ -56,6 +65,7 @@ export async function renderChangeView(app, id, context) {
         <div><span>Updated</span><strong>${escapeHTML(formatDate(value(change, "updated_at", "UpdatedAt")))}</strong></div>
       </div>
       ${mergeBlockedReason ? `<p class="card-status">${escapeHTML(mergeBlockedReason)}</p>` : ""}
+      ${workflowGateHTML}
       <h3>Diff</h3>
       <div data-change-diff="${escapeAttr(changeID)}">${headSHA ? `<div class="empty">Loading diff</div>` : `<div class="empty">Diff unavailable</div>`}</div>
       <h3>Checks</h3>
