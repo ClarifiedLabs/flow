@@ -434,8 +434,15 @@ type sidebarResponse struct {
 	Feedback int                      `json:"feedback"`
 	Merge    int                      `json:"merge"`
 	Done     int                      `json:"done"`
+	Board    uiSidebarBoardSummary    `json:"board"`
 	Workers  uiSidebarWorkerSummary   `json:"workers"`
 	Jobs     uiSidebarJobStateSummary `json:"jobs"`
+}
+
+type uiSidebarBoardSummary struct {
+	Unscheduled int `json:"unscheduled"`
+	Scheduled   int `json:"scheduled"`
+	InProgress  int `json:"in_progress"`
 }
 
 type uiSidebarWorkerSummary struct {
@@ -683,6 +690,10 @@ func (s *Server) handleSidebar(w http.ResponseWriter, r *http.Request, principal
 }
 
 func addSidebarBoardCounts(response *sidebarResponse, result coordinator.BoardResult) {
+	response.Board.Unscheduled += len(result.Board.Unscheduled)
+	response.Board.Scheduled += len(result.Board.Scheduled)
+	response.Board.InProgress += len(result.Board.InProgress)
+
 	for id, state := range result.LaneStates {
 		switch state {
 		case coordinator.LaneStateTriage:

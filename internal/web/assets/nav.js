@@ -10,6 +10,22 @@ export function renderNavLink(href, label, status) {
 
 export function renderNavStatus(href, status) {
   if (!status) return "";
+  if (href === "/ui/board") {
+    const board = value(status, "board", "Board") || {};
+    const counts = [
+      ["unscheduled", "Unscheduled", "unscheduled"],
+      ["scheduled", "Scheduled", "scheduled"],
+      ["in_progress", "InProgress", "in progress"],
+    ];
+    const labels = [];
+    const badges = counts.map(([key, fallback, label]) => {
+      const count = Number(value(board, key, fallback) || 0);
+      const description = `${count} ${label} tasks`;
+      labels.push(description);
+      return `<span class="nav-board-status" data-board-lane="${key}" title="${escapeAttr(description)}">${count}</span>`;
+    }).join("");
+    return `<span class="nav-status nav-status-board" title="${escapeAttr(labels.join(", "))}" aria-label="${escapeAttr(labels.join(", "))}">${badges}</span>`;
+  }
   if (href === "/ui/triage") return renderNavCount(value(status, "triage", "Triage"), "triage items");
   if (href === "/ui/feedback") return renderNavCount(value(status, "feedback", "Feedback"), "needs attention items");
   if (href === "/ui/merge") return renderNavCount(value(status, "merge", "Merge"), "merge items");

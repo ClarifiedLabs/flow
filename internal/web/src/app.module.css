@@ -302,6 +302,7 @@ textarea {
   text-transform: none;
 }
 
+.nav-status-board,
 .nav-status-jobs {
   gap: 4px;
   min-width: 0;
@@ -310,6 +311,7 @@ textarea {
   background: transparent;
 }
 
+.nav-board-status,
 .nav-job-status {
   display: inline-flex;
   align-items: center;
@@ -320,6 +322,21 @@ textarea {
   border-radius: 999px;
   font-size: 0.6875rem;
   line-height: 1;
+}
+
+.nav-board-status[data-board-lane="unscheduled"] {
+  background: var(--ph-backlog-bg);
+  color: var(--ph-backlog);
+}
+
+.nav-board-status[data-board-lane="scheduled"] {
+  background: var(--ph-upnext-bg);
+  color: var(--ph-upnext);
+}
+
+.nav-board-status[data-board-lane="in_progress"] {
+  background: var(--ph-authoring-bg);
+  color: var(--ph-authoring);
 }
 
 .nav-job-status[data-job-status="active"] {
