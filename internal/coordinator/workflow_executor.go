@@ -25,11 +25,15 @@ type WorkflowExecutor struct {
 	checks       *CheckService
 	checkConfigs *CheckConfigService
 	sessions     *SessionService
-	merges       *MergeService
+	merges       workflowChangeMerger
 	queue        *flowworker.Service
 	project      Project
 	harnessArgs  flowharness.Args
 	handlers     map[NodeKind]workflowNodeHandler
+}
+
+type workflowChangeMerger interface {
+	MergeChange(context.Context, string) (MergeResult, error)
 }
 
 type workflowNodeHandler func(context.Context, WorkflowRun, WorkflowNodeRun, FlowNodeSnapshot) (bool, error)
@@ -513,6 +517,9 @@ func (e *WorkflowExecutor) handleMergeChange(ctx context.Context, run WorkflowRu
 			errors.Is(err, flowgit.ErrHeadMismatch) ||
 			errors.Is(err, flowgit.ErrNoMergeChanges) ||
 			errors.Is(err, errRecordMergedConflict) {
+			if reportErr := e.reportWorkflowMergeConflict(ctx, run.TaskID, change, err, conflict); reportErr != nil {
+				return false, reportErr
+			}
 			outcome = "conflict"
 		} else {
 			return false, err
@@ -520,6 +527,46 @@ func (e *WorkflowExecutor) handleMergeChange(ctx context.Context, run WorkflowRu
 	}
 	_, err = e.runs.CompleteNode(ctx, CompleteWorkflowNodeInput{NodeRunID: nodeRun.ID, Outcome: outcome, Actor: ActorSystem})
 	return err == nil, err
+}
+
+func (e *WorkflowExecutor) reportWorkflowMergeConflict(
+	ctx context.Context,
+	taskID string,
+	change Change,
+	mergeErr error,
+	conflict *flowgit.MergeConflictError,
+) error {
+	required := true
+	exitCode := 1
+	details := ""
+	if conflict != nil {
+		details = strings.TrimSpace(conflict.Output)
+	}
+	if details == "" {
+		details = strings.TrimSpace(mergeErr.Error())
+	}
+	if details == "" {
+		details = flowgit.ErrMergeConflict.Error()
+	}
+	guidance := fmt.Sprintf(
+		"Integrate origin/%s into %s, resolve the merge conflicts, commit the result, then run flow complete.",
+		change.Base,
+		change.Branch,
+	)
+	_, err := e.checks.ReportCheck(ctx, ReportCheckInput{
+		TaskID:   taskID,
+		Name:     AutoMergeCheckName,
+		Kind:     CheckKindCI,
+		Required: &required,
+		Verdict:  CheckBlocked,
+		ExitCode: &exitCode,
+		Details:  AutoMergeConflictDetailsPrefix + " " + guidance + "\n" + details,
+		Reporter: "coordinator",
+	})
+	if err != nil {
+		return fmt.Errorf("report workflow merge conflict: %w", err)
+	}
+	return nil
 }
 
 func changeIDFromArtifact(artifact WorkflowArtifact) (string, error) {

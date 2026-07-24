@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
+	flowgit "github.com/ClarifiedLabs/flow/internal/git"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
@@ -166,6 +167,177 @@ WHERE workflow_run_id = ? AND from_node_key = 'review' AND event_kind = 'node_co
 	}
 	if transitions != 1 {
 		t.Fatalf("review completion transitions = %d, want 1", transitions)
+	}
+}
+
+type workflowMergeConflictStub struct {
+	err error
+}
+
+func (s workflowMergeConflictStub) MergeChange(context.Context, string) (MergeResult, error) {
+	return MergeResult{}, s.err
+}
+
+func TestWorkflowExecutorMergeConflictReportsBlockedCheckForImplementor(t *testing.T) {
+	ctx := context.Background()
+	store, err := flowdb.Open(ctx, filepath.Join(t.TempDir(), "flow.db"))
+	if err != nil {
+		t.Fatalf("open workflow executor database: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	tasks := NewTaskService(store.DB(), "p-test")
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Resolve merge conflict"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	snapshot := FlowSnapshot{
+		FlowName: "merge conflict", StartNode: "merge", TransitionBudget: 10,
+		Nodes: []FlowNodeSnapshot{
+			{Key: "merge", Name: "Merge", Kind: NodeMergeChange, Config: FlowNodeSnapshotConfig{MergeChange: &MergeChangeNodeConfig{}}},
+			{Key: "implement", Name: "Implement", Kind: NodeAgent, Config: FlowNodeSnapshotConfig{Agent: &AgentNodeSnapshotConfig{
+				Workspace: WorkspaceChange,
+				Artifact:  ArtifactChange,
+				Agent:     AgentDefSnapshot{Name: "author", Harness: "codex", Prompt: "Implement the task."},
+			}}},
+		},
+		Edges: []FlowEdge{{From: "merge", Outcome: "conflict", To: "implement"}},
+	}
+	snapshotJSON, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("marshal workflow snapshot: %v", err)
+	}
+
+	const (
+		runID       = "wr-merge-conflict"
+		sourceNode  = "nr-author-complete"
+		mergeNode   = "nr-merge-conflict"
+		artifactID  = "wa-merge-conflict"
+		changeID    = "ch-merge-conflict"
+		branch      = "task/t-test-0001/run-1"
+		conflictLog = "Auto-merging internal/coordinator/workflow_executor.go\n" +
+			"CONFLICT (content): Merge conflict in internal/coordinator/workflow_executor.go\n" +
+			"Automatic merge failed; fix conflicts and then commit the result."
+	)
+	if _, err := store.DB().ExecContext(ctx, `
+UPDATE tasks SET lifecycle_state = 'in_progress' WHERE id = ?`, task.ID); err != nil {
+		t.Fatalf("mark task in progress: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO workflow_runs (
+	id, task_id, run_sequence, flow_snapshot_json, state, current_node_key,
+	current_node_run_id, current_artifact_id, transition_budget, created_at, started_at
+) VALUES (?, ?, 1, ?, 'running', 'merge', ?, ?, 10,
+	'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		runID, task.ID, string(snapshotJSON), mergeNode, artifactID); err != nil {
+		t.Fatalf("insert workflow run: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO workflow_node_runs (
+	id, workflow_run_id, node_key, visit, attempt, state, output_artifact_id,
+	outcome, created_at, started_at, completed_at
+) VALUES (?, ?, 'author', 1, 1, 'succeeded', ?, 'completed',
+	'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		sourceNode, runID, artifactID); err != nil {
+		t.Fatalf("insert source node: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO workflow_node_runs (
+	id, workflow_run_id, node_key, visit, attempt, state, input_artifact_id, created_at
+) VALUES (?, ?, 'merge', 1, 1, 'queued', ?, '2026-01-01T00:00:01Z')`,
+		mergeNode, runID, artifactID); err != nil {
+		t.Fatalf("insert merge node: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO changes (
+	id, task_id, workflow_run_id, branch, base, head_sha, ready_at, created_at, updated_at
+) VALUES (?, ?, ?, ?, 'main', 'head-merge-conflict',
+	'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		changeID, task.ID, runID, branch); err != nil {
+		t.Fatalf("insert change: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO workflow_artifacts (
+	id, workflow_run_id, node_run_id, creator_key, kind, summary_markdown,
+	payload_json, payload_sha256, client_key, created_at
+) VALUES (?, ?, ?, 'test-author', 'change', 'Implemented', ?, 'digest', 'artifact-1',
+	'2026-01-01T00:00:00Z')`,
+		artifactID, runID, sourceNode,
+		fmt.Sprintf(`{"change_id":%q,"head_sha":"head-merge-conflict"}`, changeID)); err != nil {
+		t.Fatalf("insert artifact: %v", err)
+	}
+
+	flows := NewFlowService(store.DB())
+	runs := NewWorkflowRunService(store.DB(), flows, tasks)
+	checks := NewCheckService(store.DB())
+	sessions := NewSessionService(store.DB(), tasks, nil)
+	executor := NewWorkflowExecutor(WorkflowExecutorOptions{
+		Database: store.DB(), Runs: runs, Artifacts: NewWorkflowArtifactService(store.DB(), tasks),
+		Tasks: tasks, Checks: checks, Sessions: sessions,
+		Project: Project{ID: "p-test", Name: "test", BaseBranch: "main"},
+	})
+	executor.merges = workflowMergeConflictStub{
+		err: fmt.Errorf("squash merge task branch: %w", &flowgit.MergeConflictError{Output: conflictLog}),
+	}
+
+	run, err := runs.Get(ctx, runID)
+	if err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	nodeRun, found, err := runs.GetNodeRun(ctx, mergeNode)
+	if err != nil || !found {
+		t.Fatalf("load merge node: found=%v err=%v", found, err)
+	}
+	node, ok := run.Snapshot.Node("merge")
+	if !ok {
+		t.Fatal("merge node missing from snapshot")
+	}
+	completed, err := executor.handleMergeChange(ctx, run, nodeRun, node)
+	if err != nil {
+		t.Fatalf("handle merge conflict: %v", err)
+	}
+	if !completed {
+		t.Fatal("merge conflict did not complete the merge node")
+	}
+
+	completedNode, found, err := runs.GetNodeRun(ctx, mergeNode)
+	if err != nil || !found {
+		t.Fatalf("reload merge node: found=%v err=%v", found, err)
+	}
+	if completedNode.State != WorkflowNodeSucceeded || completedNode.Outcome != "conflict" {
+		t.Fatalf("merge node = %+v, want succeeded/conflict", completedNode)
+	}
+	advanced, err := runs.Get(ctx, runID)
+	if err != nil {
+		t.Fatalf("reload workflow run: %v", err)
+	}
+	if advanced.CurrentNodeKey != "implement" {
+		t.Fatalf("workflow current node = %q, want implement", advanced.CurrentNodeKey)
+	}
+
+	check, err := checks.GetCheck(ctx, task.ID, AutoMergeCheckName)
+	if err != nil {
+		t.Fatalf("load auto-merge check: %v", err)
+	}
+	if !check.Required || check.Kind != CheckKindCI || check.Verdict != CheckBlocked ||
+		check.ExitCode == nil || *check.ExitCode != 1 || check.Reporter != "coordinator" {
+		t.Fatalf("auto-merge check = %+v, want required blocked coordinator CI failure", check)
+	}
+	for _, want := range []string{
+		AutoMergeConflictDetailsPrefix,
+		"Integrate origin/main into " + branch,
+		"CONFLICT (content): Merge conflict in internal/coordinator/workflow_executor.go",
+	} {
+		if !strings.Contains(check.Details, want) {
+			t.Fatalf("auto-merge check details missing %q:\n%s", want, check.Details)
+		}
+	}
+	state, err := checks.ReviewState(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("load review state: %v", err)
+	}
+	if state != ReviewChangesRequested {
+		t.Fatalf("review state = %q, want %q so the next author receives fix context", state, ReviewChangesRequested)
 	}
 }
 
