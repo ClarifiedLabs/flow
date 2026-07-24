@@ -615,9 +615,15 @@ func (s *projectServer) serveTranscript(w http.ResponseWriter, id string) {
 	}
 	defer reader.Close()
 
+	transcript, err := terminal.NormalizeTranscript(reader)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "transcript_read_failed", err.Error())
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(w, reader)
+	_, _ = w.Write(transcript)
 }
 
 func (s *Server) proxyTerminalTarget(w http.ResponseWriter, r *http.Request, targetURL string, suffix []string, clipboardScriptTag string) {

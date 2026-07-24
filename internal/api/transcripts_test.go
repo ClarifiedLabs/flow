@@ -69,6 +69,40 @@ func TestSessionTranscriptUploadAndDownload(t *testing.T) {
 	}
 }
 
+func TestSessionTranscriptDownloadRendersTerminalOutputAndPreservesRawStorage(t *testing.T) {
+	fixture := newTestFixture(t)
+	started := startAuthorSessionForStatusTest(t, fixture, "Rendered transcript")
+	sessionID := started.Session.ID
+
+	raw := "working 10%\rworking 100%\x1b[K\n\x1b[32mcomplete\x1b[0m\n"
+	upload := putTranscriptAs(t, fixture.Server, started.Token, "/v2/sessions/"+sessionID+"/transcript", raw)
+	if upload.Code != http.StatusNoContent {
+		t.Fatalf("upload status = %d, want 204; body: %s", upload.Code, upload.Body.String())
+	}
+
+	download := getAs(t, fixture.Server, "owner-token", "/v2/sessions/"+sessionID+"/transcript")
+	if download.Code != http.StatusOK {
+		t.Fatalf("download status = %d, want 200; body: %s", download.Code, download.Body.String())
+	}
+	const want = "working 100%\ncomplete\n"
+	if download.Body.String() != want {
+		t.Fatalf("download body = %q, want rendered %q", download.Body.String(), want)
+	}
+
+	stored, err := fixture.Bundle.Transcripts.Open(sessionID)
+	if err != nil {
+		t.Fatalf("open raw transcript: %v", err)
+	}
+	defer stored.Close()
+	storedBytes, err := io.ReadAll(stored)
+	if err != nil {
+		t.Fatalf("read raw transcript: %v", err)
+	}
+	if string(storedBytes) != raw {
+		t.Fatalf("stored transcript = %q, want raw bytes %q", storedBytes, raw)
+	}
+}
+
 func TestSessionTranscriptUploadRejectsOtherSession(t *testing.T) {
 	fixture := newTestFixture(t)
 	owner := startAuthorSessionForStatusTestWithWorker(t, fixture, "Owner session", "w-owner")
@@ -116,7 +150,7 @@ func TestJobTranscriptUploadRequiresLiveLease(t *testing.T) {
 	claimed := startLiveCheckJobForTask(t, fixture, "worker-token-rev", "w-rev", task.ID, change.ID, "", "reviewer-check", flowworker.RoleReviewer, flowworker.BucketEphemeral)
 	jobID := claimed.Job.ID
 
-	content := "reviewer job pane output\n"
+	content := "checking 1%\rchecking 100%\x1b[K\n\x1b[36mreview passed\x1b[0m\n"
 	path := "/v2/jobs/" + jobID + "/transcript?lease_id=" + claimed.Lease.ID
 	upload := putTranscriptAs(t, fixture.Server, "worker-token-rev", path, content)
 	if upload.Code != http.StatusNoContent {
@@ -131,13 +165,14 @@ func TestJobTranscriptUploadRequiresLiveLease(t *testing.T) {
 		t.Fatalf("job transcript path was not recorded")
 	}
 
-	// Owner download round-trips.
+	// Owner download receives terminal-rendered plain text.
 	download := getAs(t, fixture.Server, "owner-token", "/v2/jobs/"+jobID+"/transcript")
 	if download.Code != http.StatusOK {
 		t.Fatalf("job download status = %d, want 200; body: %s", download.Code, download.Body.String())
 	}
-	if download.Body.String() != content {
-		t.Fatalf("job download body = %q, want %q", download.Body.String(), content)
+	const want = "checking 100%\nreview passed\n"
+	if download.Body.String() != want {
+		t.Fatalf("job download body = %q, want rendered %q", download.Body.String(), want)
 	}
 }
 

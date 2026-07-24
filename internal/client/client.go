@@ -1283,12 +1283,14 @@ func (c *Client) UploadJobTranscript(ctx context.Context, jobID string, leaseID 
 	return c.doRaw(ctx, http.MethodPut, "/v2/jobs/"+url.PathEscape(jobID)+"/transcript", query, r)
 }
 
-// SessionTranscript GETs an author session's stored transcript (owner scope).
+// SessionTranscript GETs an author session's terminal-rendered plain-text
+// transcript (owner scope).
 func (c *Client) SessionTranscript(sessionID string) (string, error) {
 	return c.getText("/v2/sessions/" + url.PathEscape(sessionID) + "/transcript")
 }
 
-// JobTranscript GETs a job's stored transcript (owner scope).
+// JobTranscript GETs a job's terminal-rendered plain-text transcript (owner
+// scope).
 func (c *Client) JobTranscript(jobID string) (string, error) {
 	return c.getText("/v2/jobs/" + url.PathEscape(jobID) + "/transcript")
 }
