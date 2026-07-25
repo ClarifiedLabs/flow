@@ -54,10 +54,9 @@ export function defaultCreateProject(app, projectID) {
 }
 
 // flowSelectOptionsView renders the <option>s for the flow selector from the
-// per-project flow cache (app.ensureFlows). The project default is marked
-// "(default)"; it is preselected for create mode and as the edit-mode
-// fallback. Falls back to a single "Project default" option when no flows are
-// loaded for the project yet.
+// per-project flow cache (app.ensureFlows). The project default is preselected
+// for create mode and as the edit-mode fallback. Falls back to a single
+// "Project default" option when no flows are loaded for the project yet.
 export function flowSelectOptionsView(app, projectID, selectedFlowID) {
   const cache = (app.flowsByProject && app.flowsByProject.get(String(projectID || "").trim())) || { flows: [], defaultFlowID: "" };
   const flows = cache.flows || [];
@@ -69,9 +68,7 @@ export function flowSelectOptionsView(app, projectID, selectedFlowID) {
   return flows.map((flow) => {
     const id = value(flow, "id", "ID");
     const name = value(flow, "name", "Name") || id;
-    const isDefault = id === defaultFlowID || Boolean(value(flow, "default", "Default"));
-    const label = isDefault ? `${name} (default)` : name;
-    return `<option value="${escapeAttr(id)}" ${id === selected ? "selected" : ""}>${escapeHTML(label)}</option>`;
+    return `<option value="${escapeAttr(id)}" ${id === selected ? "selected" : ""}>${escapeHTML(name)}</option>`;
   }).join("");
 }
 

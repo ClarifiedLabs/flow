@@ -655,9 +655,9 @@ test("new task route renders project-scoped blank form with the selected project
   assert.equal(content.innerHTML.match(/<textarea\b/g)?.length, 1);
   assert.match(content.innerHTML, /<span>Flow<\/span>/);
   assert.match(content.innerHTML, /<select name="flow_id" data-flow-select>/);
-  assert.match(content.innerHTML, /<option value="fl-coding" selected>coding \(default\)<\/option>/);
+  assert.match(content.innerHTML, /<option value="fl-coding" selected>coding<\/option>/);
   assert.match(content.innerHTML, /<option value="fl-planning" >planning<\/option>/);
-  assert.doesNotMatch(content.innerHTML, /Project default/);
+  assert.doesNotMatch(content.innerHTML, /\(default\)|Project default/);
   assert.match(content.innerHTML, /<input name="queue_task" type="checkbox" checked>/);
   assert.match(content.innerHTML, /<button class="button" type="submit">Create<\/button>/);
   assert.equal(status.textContent, "");
@@ -4808,7 +4808,7 @@ test("block markdown surfaces do not double-wrap the .md container", async () =>
 
 // --- composable flows: task form, board badge, gate + flows editor ------------
 
-test("task form flow select preselects the project default flow", async () => {
+test("task form flow select preselects the project default flow without annotating its name", async () => {
   const context = await scriptContext();
   const app = new context.FlowApp();
   app.projects = [{ id: "p-alpha", name: "alpha" }];
@@ -4824,7 +4824,8 @@ test("task form flow select preselects the project default flow", async () => {
 
   assert.match(html, /<select name="flow_id" data-flow-select>/);
   assert.match(html, /<option value="fl-basic" >basic<\/option>/);
-  assert.match(html, /<option value="fl-plan" selected>planned \(default\)<\/option>/);
+  assert.match(html, /<option value="fl-plan" selected>planned<\/option>/);
+  assert.doesNotMatch(html, /\(default\)/);
 });
 
 test("task form flow select preselects the task's saved flow when editing", async () => {
@@ -4841,7 +4842,8 @@ test("task form flow select preselects the task's saved flow when editing", asyn
   const html = app.renderTaskForm({ title: "T", flow_id: "fl-basic" }, { taskID: "t-alpha-0001", projectID: "p-alpha" });
 
   assert.match(html, /<option value="fl-basic" selected>basic<\/option>/);
-  assert.match(html, /<option value="fl-plan" >planned \(default\)<\/option>/);
+  assert.match(html, /<option value="fl-plan" >planned<\/option>/);
+  assert.doesNotMatch(html, /\(default\)/);
 });
 
 test("scheduled board cards show the frozen start step and ignore legacy flow cursors", async () => {
