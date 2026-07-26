@@ -921,6 +921,17 @@ test("board sidebar status separates blocked tasks in compact lifecycle groups",
   assert.match(html, /aria-label="2 unscheduled tasks, 3 scheduled tasks, 4 in progress tasks, 1 blocked task"/);
 });
 
+test("jobs sidebar status describes each number", async () => {
+  const context = await scriptContext();
+  const html = context.renderNavStatus("/ui/jobs", {
+    jobs: { active: 1, queued: 2 },
+  });
+
+  assert.match(html, /data-job-status="active" title="1 active job">1<\/span>/);
+  assert.match(html, /data-job-status="queued" title="2 queued jobs">2<\/span>/);
+  assert.match(html, /aria-label="1 active job, 2 queued jobs"/);
+});
+
 test("sidebar status refresh renders live nav badges and polls", async () => {
   const timers = [];
   const fetchCalls = [];
@@ -972,8 +983,8 @@ test("sidebar status refresh renders live nav badges and polls", async () => {
   assert.deepEqual(fetchCalls, ["/ui/api/v2/sidebar"]);
   assert.match(nav.innerHTML, /title="8 done items">8<\/span>/);
   assert.match(nav.innerHTML, /title="2 in use of 5 worker slots">2\/5<\/span>/);
-  assert.match(nav.innerHTML, /data-job-status="active">6<\/span>/);
-  assert.match(nav.innerHTML, /data-job-status="queued">7<\/span>/);
+  assert.match(nav.innerHTML, /data-job-status="active" title="6 active jobs">6<\/span>/);
+  assert.match(nav.innerHTML, /data-job-status="queued" title="7 queued jobs">7<\/span>/);
   assert.equal(timers[0].delay, 10000);
 });
 

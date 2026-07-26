@@ -48,10 +48,13 @@ export function renderNavStatus(href, status) {
     const jobs = value(status, "jobs", "Jobs") || {};
     const active = Number(value(jobs, "active", "Active") || 0);
     const queued = Number(value(jobs, "queued", "Queued") || 0);
+    const activeDescription = `${active} active job${active === 1 ? "" : "s"}`;
+    const queuedDescription = `${queued} queued job${queued === 1 ? "" : "s"}`;
+    const description = `${activeDescription}, ${queuedDescription}`;
     return `
-      <span class="nav-status nav-status-jobs" title="${escapeAttr(`${active} active, ${queued} queued`)}">
-        <span class="nav-job-status" data-job-status="active">${active}</span>
-        <span class="nav-job-status" data-job-status="queued">${queued}</span>
+      <span class="nav-status nav-status-jobs" title="${escapeAttr(description)}" aria-label="${escapeAttr(description)}">
+        <span class="nav-job-status" data-job-status="active" title="${escapeAttr(activeDescription)}">${active}</span>
+        <span class="nav-job-status" data-job-status="queued" title="${escapeAttr(queuedDescription)}">${queued}</span>
       </span>
     `;
   }
