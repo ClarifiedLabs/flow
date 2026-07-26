@@ -1,0 +1,71 @@
+:host {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 11px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--tone, var(--muted));
+  border-radius: var(--radius);
+  min-width: 0;
+}
+
+.row[data-tone="ok"] {
+  --tone: var(--st-ok);
+}
+
+.row[data-tone="accent"] {
+  --tone: var(--accent);
+}
+
+.row[data-tone="danger"] {
+  --tone: var(--st-danger);
+}
+
+.row[data-tone="muted"] {
+  --tone: var(--muted);
+}
+
+.kind {
+  flex: none;
+  font-size: var(--text-nano);
+  text-transform: uppercase;
+  letter-spacing: var(--track-badge);
+  color: var(--tone, var(--muted));
+  background: var(--panel-2);
+  border-radius: 3px;
+  padding: 2px 6px;
+}
+
+/* The event text is prose because it describes what someone or something did. */
+.text {
+  font-family: var(--font-prose);
+  font-size: var(--text-prose);
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.spacer {
+  flex: 1;
+}
+
+time {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.empty {
+  font-size: var(--text-quiet);
+  letter-spacing: var(--track-chrome);
+  color: var(--muted);
+}

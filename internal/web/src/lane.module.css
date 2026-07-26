@@ -56,3 +56,33 @@ h2 {
   border-radius: var(--radius);
   padding: 12px;
 }
+
+.lane-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.chip {
+  font: inherit;
+  font-size: var(--text-nano);
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease;
+}
+
+.chip:hover {
+  color: var(--ink);
+  border-color: var(--muted);
+}
+
+.chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}

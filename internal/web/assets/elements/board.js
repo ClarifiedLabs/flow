@@ -3,10 +3,11 @@
 // what state a task is in.
 
 import { cardModel } from "../board-model.js";
-import { LANES } from "../config.js";
-import { laneTasks } from "../board.js";
+import { flattenDonePage, laneTasks } from "../board.js";
+import { DONE_OUTCOMES, LANES } from "../config.js";
+import { escapeAttr, escapeHTML } from "../html.js";
 import { value } from "../normalize.js";
-import { readBoardView, writeBoardView } from "../storage.js";
+import { boardDoneConfig, readBoardView, writeBoardDoneConfig, writeBoardView } from "../storage.js";
 import { define, FlowElement, mount, reconcile } from "./base.js";
 import "./attention-strip.js";
 import "./board-table.js";
@@ -80,7 +81,26 @@ export class FlowBoard extends FlowElement {
       label,
       cards: entries.filter((entry) => entry.lane === key).map((entry) => entry.model),
     }));
+    // The Done lane is a preview of closed work with its own scope controls;
+    // it is not one of the live lanes, so it carries its own payload.
+    lanes.push({
+      key: "done",
+      label: "Done",
+      controls: renderDoneControls(boardDoneConfig()),
+      cards: doneCards(this.data?.doneData, this.data?.showProject),
+    });
     reconcile(surface, lanes, { tag: "flow-lane", key: (lane) => lane.key });
+  }
+
+  async handleClick(event) {
+    const scope = event.target.closest?.("[data-board-done-outcome]");
+    if (!scope) return;
+    event.preventDefault();
+    const config = boardDoneConfig();
+    if (config.outcome === scope.dataset.boardDoneOutcome) return;
+    config.outcome = scope.dataset.boardDoneOutcome;
+    writeBoardDoneConfig(config);
+    await this.app?.refresh();
   }
 
   // toggleView is bound to the topbar control and to `v`. The choice persists,
@@ -99,3 +119,23 @@ export class FlowBoard extends FlowElement {
 }
 
 define("flow-board", FlowBoard);
+
+function doneCards(doneData, showProject) {
+  if (!doneData) return [];
+  const { entries } = flattenDonePage(doneData, showProject);
+  return entries.map((entry) => cardModel({ ...entry, blocked: false }, { showProject }));
+}
+
+function renderDoneControls(config) {
+  const outcomes = [...DONE_OUTCOMES];
+  return `
+    <div class="lane-controls" role="group" aria-label="Filter closed work by outcome">
+      ${outcomes
+        .map(
+          (outcome) =>
+            `<button class="chip${config.outcome === outcome ? " active" : ""}" data-board-done-outcome="${escapeAttr(outcome)}"${config.outcome === outcome ? ' aria-pressed="true"' : ""}>${escapeHTML(outcome)}</button>`,
+        )
+        .join("")}
+    </div>
+  `;
+}

@@ -8,7 +8,22 @@
 import { apiGet } from "./api.js";
 import { boardEntries } from "./elements/board.js";
 import { mount } from "./elements/base.js";
-import { boardDoneQueryView } from "./board-view.js";
+import { boardDoneConfig } from "./storage.js";
+import { doneQueryView } from "./done-view.js";
+
+// boardDoneQueryView scopes the board's Done preview: either the last N closed
+// tasks or everything closed within a window, filtered by outcome.
+export function boardDoneQueryView(app) {
+  const config = boardDoneConfig();
+  const extra = config.mode === "within" ? { within: config.within } : { limit: config.count };
+  return doneQueryView(app, config.outcome, extra);
+}
+
+// createTaskView is the topbar's New Task action.
+export async function createTaskView(app) {
+  history.pushState({}, "", "/ui/tasks/new");
+  await app.load();
+}
 
 export async function renderBoardRoute(app, context) {
   const [data, doneData] = await Promise.all([

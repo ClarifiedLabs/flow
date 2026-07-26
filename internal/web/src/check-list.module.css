@@ -1,0 +1,99 @@
+:host {
+  display: block;
+}
+
+.rows {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 9px;
+  padding: 9px 11px;
+  border-top: 1px solid var(--line);
+}
+
+.row:first-child {
+  border-top: 0;
+}
+
+/* A failed check is the row you came here for, so it carries the tint and the
+   full-strength text. */
+.row[data-failed] {
+  background: var(--st-danger-bg);
+  color: var(--ink);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--muted);
+  flex: none;
+}
+
+.row[data-verdict="satisfied"] .dot {
+  background: var(--st-ok);
+}
+
+.row[data-failed] .dot {
+  background: var(--st-danger);
+}
+
+.name {
+  font-size: var(--text-prose);
+  color: var(--ink);
+}
+
+.detail,
+.duration {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+.spacer {
+  flex: 1;
+}
+
+/* The transcript is the immediate next sibling of the row that owns it. That
+   locality is the whole point: a panel further down the page reads as though
+   the click did nothing. */
+.transcript-panel {
+  background: var(--term);
+  border-top: 1px solid var(--line);
+}
+
+.transcript {
+  display: flex;
+  flex-direction: column;
+  padding: 9px 12px;
+  font-size: var(--text-quiet);
+  line-height: var(--leading-relaxed);
+  color: var(--ink-2);
+  max-height: 320px;
+  overflow: auto;
+}
+
+.transcript .line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.transcript .line[data-tone="fail"] {
+  color: var(--st-danger);
+}
+
+.transcript .line[data-tone="chrome"] {
+  color: var(--muted);
+}
+
+.note,
+.empty {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+  margin: 12px 0 0;
+}

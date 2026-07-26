@@ -12,7 +12,8 @@ export class FlowLane extends FlowElement {
     this.setAttribute("data-lane", lane.key || "");
     return `
       <h2><span class="marker">▸</span>${escapeHTML(lane.label)} · ${lane.cards.length}</h2>
-      ${lane.cards.length ? `<div class="cards"></div>` : `<div class="empty">No tasks</div>`}
+      ${lane.controls || ""}
+      ${lane.cards.length ? `<div class="cards"></div>` : `<div class="empty">${escapeHTML(lane.emptyLabel || "No tasks")}</div>`}
     `;
   }
 

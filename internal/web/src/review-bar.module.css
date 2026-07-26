@@ -1,0 +1,32 @@
+:host {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 11px 14px;
+  background: var(--panel);
+  border-top: 1px solid var(--line-2);
+}
+
+.caption {
+  font-size: var(--text-label);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* The field states how many pending notes ride along with the verdict, so
+   pressing Approve is never a surprise. */
+input {
+  flex: 1;
+  min-width: 200px;
+  background: var(--panel-2);
+  color: var(--ink);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 5px 9px;
+  font-family: var(--font-prose);
+  font-size: var(--text-prose);
+}

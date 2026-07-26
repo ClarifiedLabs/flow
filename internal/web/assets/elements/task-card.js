@@ -38,6 +38,10 @@ function renderQuietMeta(model) {
     `p${model.priority}`,
     additions || deletions ? `+${additions} −${deletions}` : "",
     total ? `checks ${satisfied}/${total}` : "",
+    // `extra` is how a surface with different needs adds to the line without
+    // the card guessing: the Done page wants the change and the closing date,
+    // which are noise on a live board.
+    ...(model.extra || []).map((fragment) => escapeHTML(fragment)),
   ].filter(Boolean);
   return parts.length ? `<p class="quiet">${parts.join(" · ")}</p>` : "";
 }

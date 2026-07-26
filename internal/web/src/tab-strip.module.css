@@ -1,0 +1,73 @@
+/* Scrolls inside its own track at any width, so a long tab set never pushes
+   the page sideways. */
+:host {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+:host::-webkit-scrollbar {
+  display: none;
+}
+
+button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font: inherit;
+  font-size: var(--text-ui);
+  padding: 7px 12px;
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease;
+}
+
+button:hover {
+  color: var(--ink);
+}
+
+button[aria-selected="true"] {
+  border-bottom-color: var(--accent);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.badge {
+  font-size: var(--text-nano);
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--st-idle-bg);
+  color: var(--muted);
+}
+
+.badge[data-tone="ok"] {
+  background: var(--st-ok-bg);
+  color: var(--st-ok);
+}
+
+.badge[data-tone="warn"] {
+  background: var(--st-warn-bg);
+  color: var(--st-warn);
+}
+
+.badge[data-tone="danger"] {
+  background: var(--st-danger-bg);
+  color: var(--st-danger);
+}
+
+.live {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--st-ok);
+}

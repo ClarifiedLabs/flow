@@ -7,50 +7,6 @@ import { renderMarkdown } from "./markdown.js";
 import { value } from "./normalize.js";
 import { DIFF_MODES } from "./config.js";
 
-export function renderThread(thread, changeHeadSHA) {
-  const threadID = value(thread, "id", "ID");
-  const state = value(thread, "state", "State");
-  const filePath = value(thread, "file_path", "FilePath");
-  const line = value(thread, "line", "Line");
-  const anchor = value(thread, "anchor_commit_sha", "AnchorCommitSHA");
-  const claimKind = value(thread, "claim_kind", "ClaimKind");
-  const claimCommitSHA = value(thread, "claim_commit_sha", "ClaimCommitSHA");
-  const context = value(thread, "context", "Context");
-  const comments = value(thread, "comments", "Comments") || [];
-  const location = `${filePath}:${Number(line || 0)}`;
-  const anchorText = anchor ? ` @ ${shortSHA(anchor)}` : "";
-  const outdatedAnchor = Boolean(anchor && changeHeadSHA && anchor !== changeHeadSHA);
-  const claimActions = threadID && (state === "open" || state === "reopened") ? `
-    <div class="actions">
-      <button class="button secondary" data-thread-claim="${escapeAttr(threadID)}" data-claim-kind="fixed" data-claim-commit="${escapeAttr(changeHeadSHA || "")}">Fixed</button>
-      <button class="button secondary" data-thread-claim="${escapeAttr(threadID)}" data-claim-kind="not_warranted">Not warranted</button>
-      <button class="button secondary" data-thread-claim="${escapeAttr(threadID)}" data-claim-kind="superseded">Superseded</button>
-    </div>
-  ` : "";
-  const replyAction = threadID ? `<div class="actions"><button class="button secondary" data-thread-reply="${escapeAttr(threadID)}">Reply</button></div>` : "";
-  return `
-    <article class="feed-item">
-      <strong>${escapeHTML(state)}</strong><span>${escapeHTML(location + anchorText)}</span>
-      ${outdatedAnchor ? `<span class="badge warn">outdated anchor</span>` : ""}
-      ${claimKind ? `<span class="badge idle">claim ${escapeHTML(claimKind)}</span>` : ""}
-      ${claimCommitSHA ? `<span class="badge idle">claim head ${escapeHTML(shortSHA(claimCommitSHA))}</span>` : ""}
-      ${context ? `<pre class="thread-context">${escapeHTML(context)}</pre>` : ""}
-      ${comments.length ? `<div class="feed thread-comments">${comments.map(renderThreadComment).join("")}</div>` : ""}
-      ${claimActions}
-      ${replyAction}
-    </article>
-  `;
-}
-
-export function renderThreadComment(comment) {
-  return `
-    <article class="feed-item">
-      <strong>${escapeHTML(value(comment, "actor", "Actor"))}</strong>
-      <span>${escapeHTML(formatDate(value(comment, "created_at", "CreatedAt")))}</span>
-      ${renderMarkdown(value(comment, "body", "Body"))}
-    </article>
-  `;
-}
 
 export function renderCheck(check, taskID = "", projectID = "", showHumanReviewAction = true) {
   const name = value(check, "name", "Name");
@@ -104,140 +60,12 @@ export function canApproveHumanReview(check, taskID) {
     && verdict !== "satisfied";
 }
 
-export function renderDiffSummary(diff, mode = "unified") {
-  const available = Boolean(value(diff, "available", "Available"));
-  if (!available) {
-    return `<div class="empty">${escapeHTML(value(diff, "unavailable_reason", "UnavailableReason") || "Diff unavailable")}</div>`;
-  }
-  const files = value(diff, "files", "Files") || [];
-  const additions = Number(value(diff, "additions", "Additions") || 0);
-  const deletions = Number(value(diff, "deletions", "Deletions") || 0);
-  const normalizedMode = DIFF_MODES.has(mode) ? mode : "unified";
-  const widthChars = diffFilesWidthChars(files, normalizedMode);
-  return `
-    <div class="diff-mode-bar" data-diff-mode-toggle>
-      <button type="button" class="button secondary" data-diff-mode="unified" aria-pressed="${normalizedMode === "unified"}">Unified</button>
-      <button type="button" class="button secondary" data-diff-mode="split" aria-pressed="${normalizedMode === "split"}">Split</button>
-    </div>
-    <div class="summary-strip">
-      <span>files ${Number(value(diff, "total_files", "TotalFiles") || files.length)}</span>
-      <span>+${additions}</span>
-      <span>-${deletions}</span>
-    </div>
-    <div class="table-wrap compact">
-      <table>
-        <thead><tr><th>File</th><th>Add</th><th>Del</th></tr></thead>
-        <tbody>${files.map(renderDiffFileRow).join("") || `<tr><td colspan="3">No file changes</td></tr>`}</tbody>
-      </table>
-    </div>
-    <div class="diff-content" data-diff-mode="${escapeAttr(normalizedMode)}">${files.map((file) => renderDiffFileHunks(file, normalizedMode, widthChars)).join("")}</div>
-  `;
-}
-
-export function renderDiffFileRow(file) {
-  const binary = Boolean(value(file, "binary", "Binary"));
-  return `
-    <tr>
-      <td>${escapeHTML(value(file, "path", "Path"))}</td>
-      <td>${binary ? "binary" : Number(value(file, "additions", "Additions") || 0)}</td>
-      <td>${binary ? "binary" : Number(value(file, "deletions", "Deletions") || 0)}</td>
-    </tr>
-  `;
-}
-
-export function renderDiffFileHunks(file, mode = "unified", widthChars = null) {
-  const hunks = value(file, "hunks", "Hunks") || [];
-  if (!hunks.length) return "";
-  const normalizedMode = DIFF_MODES.has(mode) ? mode : "unified";
-  const resolvedWidthChars = widthChars ?? (normalizedMode === "split"
-    ? diffFileSplitWidthChars(hunks)
-    : diffFileUnifiedWidthChars(hunks));
-  return `
-    <article class="feed-item diff-file">
-      <strong>${escapeHTML(value(file, "path", "Path"))}</strong>
-      ${hunks.map((hunk) => renderDiffHunk(hunk, normalizedMode, resolvedWidthChars)).join("")}
-    </article>
-  `;
-}
-
-export function renderDiffHunk(hunk, mode = "unified", widthChars = null) {
-  if (mode === "split") return renderDiffHunkSplit(hunk, widthChars);
-  const header = value(hunk, "header", "Header");
-  const lines = value(hunk, "lines", "Lines") || [];
-  const renderedLines = [
-    header ? `<span class="diff-unified-line diff-hunk-header">${escapeHTML(header)}</span>` : "",
-    ...lines.map(renderDiffLine),
-  ].filter(Boolean);
-  return `<pre class="diff-unified"${diffWidthStyle("--diff-unified-width", widthChars ?? diffUnifiedWidthChars(hunk))}>${renderedLines.join("")}</pre>`;
-}
-
-function renderDiffHunkSplit(hunk, widthChars = null) {
-  const header = value(hunk, "header", "Header");
-  const lines = value(hunk, "lines", "Lines") || [];
-  const rows = [];
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-    const kind = value(line, "kind", "Kind");
-    if (kind === "meta") {
-      rows.push(renderDiffSplitMetaRow(line));
-      i += 1;
-      continue;
-    }
-    if (kind === "context") {
-      rows.push(renderDiffSplitContextRow(line));
-      i += 1;
-      continue;
-    }
-    if (kind === "delete") {
-      const deletes = [];
-      while (i < lines.length && value(lines[i], "kind", "Kind") === "delete") {
-        deletes.push(lines[i]);
-        i += 1;
-      }
-      const adds = [];
-      while (i < lines.length && value(lines[i], "kind", "Kind") === "add") {
-        adds.push(lines[i]);
- i += 1;
-      }
-      const pairs = Math.min(deletes.length, adds.length);
-      for (let p = 0; p < pairs; p++) rows.push(renderDiffSplitPairRow(deletes[p], adds[p]));
-      for (let p = pairs; p < deletes.length; p++) rows.push(renderDiffSplitDeleteRow(deletes[p]));
-      for (let p = pairs; p < adds.length; p++) rows.push(renderDiffSplitAddRow(adds[p]));
-      continue;
-    }
-    if (kind === "add") {
-      const adds = [];
-      while (i < lines.length && value(lines[i], "kind", "Kind") === "add") {
-        adds.push(lines[i]);
-        i += 1;
-      }
-      for (const add of adds) rows.push(renderDiffSplitAddRow(add));
-      continue;
-    }
-    rows.push(renderDiffSplitContextRow(line));
-    i += 1;
-  }
-  return `<div class="diff-split-wrap"><table class="diff-split"${diffWidthStyle("--diff-split-width", widthChars ?? diffSplitWidthChars(hunk))}><thead><tr><th class="diff-col-old">Old</th><th class="diff-col-new">New</th></tr></thead><tbody>${header ? `<tr class="diff-hunk-header"><td colspan="2">${escapeHTML(header)}</td></tr>` : ""}${rows.join("")}</tbody></table></div>`;
-}
 
 function diffWidthStyle(name, chars) {
   const width = Math.max(1, Math.ceil(Number(chars) || 1));
   return ` style="${name}: ${width}ch;"`;
 }
 
-function diffFilesWidthChars(files, mode) {
-  const widthForHunks = mode === "split" ? diffFileSplitWidthChars : diffFileUnifiedWidthChars;
-  return files.reduce((max, file) => {
-    const hunks = value(file, "hunks", "Hunks") || [];
-    if (!hunks.length) return max;
-    return Math.max(max, widthForHunks(hunks));
-  }, 1);
-}
-
-function diffFileUnifiedWidthChars(hunks) {
-  return hunks.reduce((max, hunk) => Math.max(max, diffUnifiedWidthChars(hunk)), 1);
-}
 
 function diffUnifiedWidthChars(hunk) {
   const header = value(hunk, "header", "Header");
@@ -257,24 +85,6 @@ function diffFileSplitWidthChars(hunks) {
   return hunks.reduce((max, hunk) => Math.max(max, diffSplitWidthChars(hunk)), 1);
 }
 
-function diffSplitWidthChars(hunk) {
-  const header = value(hunk, "header", "Header");
-  const lines = value(hunk, "lines", "Lines") || [];
-  let maxSideText = 0;
-  let maxFullRowText = textLength(header);
-  for (const line of lines) {
-    const kind = value(line, "kind", "Kind");
-    const length = textLength(value(line, "text", "Text"));
-    if (kind === "meta") {
-      maxFullRowText = Math.max(maxFullRowText, length);
-    } else {
-      maxSideText = Math.max(maxSideText, length);
-    }
-  }
-  // Split mode uses fixed-width columns; size both sides for the longest line so
-  // either column can show that line without wrapping when space is available.
-  return Math.max(maxFullRowText, (maxSideText + 4) * 2, 1);
-}
 
 function textLength(text) {
   return String(text || "").length;
@@ -317,9 +127,3 @@ function renderDiffSplitMetaRow(line) {
   return `<tr class="diff-row-meta"><td colspan="2"><span class="diff-text diff-meta">${escapeHTML(text)}</span></td></tr>`;
 }
 
-export function renderDiffLine(line) {
-  const kind = value(line, "kind", "Kind");
-  const prefix = kind === "add" ? "+" : kind === "delete" ? "-" : kind === "meta" ? "" : " ";
-  const cls = kind === "add" ? " diff-add" : kind === "delete" ? " diff-del" : kind === "meta" ? " diff-meta" : "";
-  return `<span class="diff-unified-line${cls}">${escapeHTML(`${prefix}${value(line, "text", "Text")}`)}</span>`;
-}

@@ -6,23 +6,22 @@ import { value } from "./normalize.js";
 import { escapeHTML, escapeAttr } from "./html.js";
 import { NAV, SIDEBAR_STATUS_POLL_MS, MAX_POLL_BACKOFF_MS, DEFAULT_AGENT_HARNESSES, DEFAULT_CONSOLE_HARNESSES } from "./config.js";
 import { apiGet, apiPost, taskConsoleAPIPath, taskAPIBase, taskHref, flowsAPIBase } from "./api.js";
-import { readSelectedProjects, writeSelectedProjects, terminalSessionIDForPath, pollConfigForPath, readThemePreference, writeThemePreference, applyThemePreference, readDiffMode, writeDiffMode } from "./storage.js";
+import { readSelectedProjects, writeSelectedProjects, terminalSessionIDForPath, pollConfigForPath, readThemePreference, writeThemePreference, applyThemePreference } from "./storage.js";
 import { renderNavLink, THEME_ICONS, THEME_OPTIONS } from "./nav.js";
 import { normalizeHarnessOptions } from "./harness-models.js";
 import { openTerminalWindow, closeTerminalDialog, hideInlineTerminal, closeTerminalModalLayers } from "./terminal.js";
 import { pollDelay, Poller } from "./poller.js";
 import { renderWorkersView, renderJobsView } from "./diagnostics-view.js";
-import { renderChangeView, renderChangeDiffView } from "./change-view.js";
-import { renderDiffSummary } from "./diff.js";
 import { renderTerminalView, openInlineTerminalView, showTranscriptView } from "./terminal-view.js";
 import { renderConsoleView, stopConsolePollView, startConsoleView, releaseConsoleView } from "./console-view.js";
 import { renderDoneView } from "./done-view.js";
-import { createTaskView } from "./board-view.js";
-import { renderBoardRoute } from "./board-route.js";
+import { createTaskView, renderBoardRoute } from "./board-route.js";
+import { renderTaskRoute } from "./task-route.js";
+import { renderChangeRoute } from "./change-route.js";
 import { renderEpicRoute } from "./epic-route.js";
 import { handleAction } from "./actions.js";
 import { handleFormSubmit } from "./forms.js";
-import { renderNewTaskView, renderTaskFormView, renderTaskReadOnlyDetailView, renderTaskView, bindTaskFlowControlsView } from "./task-view.js";
+import { renderNewTaskView, renderTaskFormView, bindTaskFlowControlsView } from "./task-view.js";
 import { renderFlowsView } from "./flows-view.js";
 
 export * from "./normalize.js";
@@ -36,6 +35,8 @@ export * from "./nav.js";
 export * from "./harness-models.js";
 export * from "./terminal.js";
 export * from "./board.js";
+export * from "./board-model.js";
+export * from "./task-model.js";
 export * from "./queue.js";
 export * from "./diagnostics-view.js";
 export * from "./diff.js";
@@ -58,14 +59,14 @@ const ROUTES = [
       const m = p.match(/^\/ui\/tasks\/([^/]+)$/);
       return m && { task: decodeURIComponent(m[1]) };
     },
-    render: (app, ctx, p) => app.renderTask(p.task, ctx),
+    render: (app, ctx, p) => renderTaskRoute(app, p.task, ctx),
   },
   {
     match: (p) => {
       const m = p.match(/^\/ui\/projects\/([^/]+)\/tasks\/([^/]+)$/);
       return m && { project: decodeURIComponent(m[1]), task: decodeURIComponent(m[2]) };
     },
-    render: (app, ctx, p) => app.renderTask(p.task, ctx, p.project),
+    render: (app, ctx, p) => renderTaskRoute(app, p.task, ctx, p.project),
   },
   {
     match: (p) => {
@@ -74,7 +75,7 @@ const ROUTES = [
     },
     render: (app, ctx, p) => renderEpicRoute(app, p.task, ctx),
   },
-  { match: (p) => p.startsWith("/ui/changes/") && { id: p.split("/").pop() }, render: (app, ctx, p) => app.renderChange(p.id, ctx) },
+  { match: (p) => p.startsWith("/ui/changes/") && { id: p.split("/").pop() }, render: (app, ctx, p) => renderChangeRoute(app, p.id, ctx) },
   { match: (p) => p === "/ui/console", render: (app, ctx) => app.renderConsole(ctx) },
   { match: (p) => { const id = terminalSessionIDForPath(p); return id && { id }; }, render: (app, ctx, p) => renderTerminalView(app, p.id, ctx) },
   { match: (p) => p === "/ui/flows", render: (app, ctx) => renderFlowsView(app, ctx) },
@@ -532,25 +533,6 @@ export class FlowApp extends HTMLElement {
     return renderTaskFormView(this, task, options);
   }
 
-  // renderTaskReadOnlyDetail renders the title, body and flow as a read-only
-  // summary with an Edit button that reveals the full edit form. Replacing the
-  // always-visible form with this collapsed view keeps the editor column short,
-  // so the (now timeline-merged) sessions list cannot overwhelm the task text.
-  renderTaskReadOnlyDetail(task, options) {
-    return renderTaskReadOnlyDetailView(this, task, options);
-  }
-
-  renderTask(id, context, projectID) {
-    return renderTaskView(this, id, context, projectID);
-  }
-
-  renderChange(id, context) {
-    return renderChangeView(this, id, context);
-  }
-
-  renderChangeDiff(changeID, headSHA, context) {
-    return renderChangeDiffView(this, changeID, headSHA, context);
-  }
 
   renderConsole(context) {
     return renderConsoleView(this, context);
@@ -564,50 +546,6 @@ export class FlowApp extends HTMLElement {
     return startConsoleView(this, projectID, harness, taskID);
   }
 
-
-  // toggleDiffMode switches the change detail diff between unified and split
-  // rendering. It persists the preference and re-renders the cached diff payload
-  // in the new mode without refetching it from the API.
-  toggleDiffMode(button) {
-    const mode = button.getAttribute("data-diff-mode");
-    if (!mode) return;
-    writeDiffMode(mode);
-    const container = button.closest?.("[data-change-diff]");
-    if (!container) return;
-    const cacheKey = container.getAttribute?.("data-diff-cache-key");
-    const diff = cacheKey && this.changeDiffCache?.get(cacheKey);
-    if (!diff) return;
-    container.innerHTML = renderDiffSummary(diff, mode);
-    container.querySelectorAll?.("[data-diff-mode-toggle] button").forEach((btn) => {
-      btn.addEventListener("click", () => this.toggleDiffMode(btn));
-    });
-  }
-
-  // toggleTaskEditForm swaps the read-only detail summary for the full edit
-  // form (and back), re-binding the form's flow controls after it is revealed
-  // from a hidden container.
-
-  // expandTimeline reveals the capped timeline rows behind the "Show more"
-  // control and removes the control once everything is visible.
-  expandTimeline(button) {
-    const feed = button.closest("[data-timeline]");
-    if (!feed) return;
-    const hidden = feed.querySelector(".timeline-hidden");
-    if (hidden) hidden.hidden = false;
-    button.remove();
-  }
-
-  // toggleTimelineRun expands/collapses a grouped run of session_state_changed
-  // rows.
-  toggleTimelineRun(button) {
-    const run = button.closest(".timeline-run");
-    if (!run) return;
-    const rows = run.querySelector(".timeline-run-rows");
-    if (!rows) return;
-    const expanded = !rows.hidden;
-    rows.hidden = expanded;
-    button.setAttribute("aria-expanded", String(!expanded));
-  }
 
 
   openInlineTerminal(button, kind, id) {

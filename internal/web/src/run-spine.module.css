@@ -1,0 +1,108 @@
+:host {
+  display: block;
+}
+
+.spine-head {
+  margin-bottom: 7px;
+}
+
+.caption {
+  font-size: var(--text-label);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.spine {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.spine li {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  position: relative;
+}
+
+/* One connector, drawn behind the dots, so the spine reads as a single line
+   rather than a column of unrelated bullets. */
+.spine li::before {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--line);
+}
+
+.spine li:first-child::before {
+  top: 50%;
+}
+
+.spine li:last-child::before {
+  bottom: 50%;
+}
+
+.spine li[data-state="done"]::before,
+.spine li[data-state="failed"]::before {
+  background: var(--line-2);
+}
+
+.dot {
+  position: relative;
+  justify-self: center;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--line-2);
+}
+
+.spine li[data-state="done"] .dot {
+  background: var(--st-ok);
+  border-color: var(--st-ok);
+}
+
+.spine li[data-state="failed"] .dot {
+  background: var(--st-danger);
+  border-color: var(--st-danger);
+}
+
+.spine li[data-state="current"] .dot {
+  width: 9px;
+  height: 9px;
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.name {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spine li[data-state="current"] .name {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.note {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.spine li[data-state="current"] .note {
+  color: var(--accent);
+}

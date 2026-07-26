@@ -1,0 +1,92 @@
+/* Aligned past the gutter so the thread visibly belongs to the line above it. */
+:host {
+  display: block;
+  padding: 7px 12px 9px 46px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.card {
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  border-left: 2px solid var(--st-warn);
+  border-radius: var(--radius);
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* A claimed thread turns green: the spine is the fastest read of whether a
+   thread still blocks the merge. */
+.card[data-state="claimed"],
+.card[data-state="resolved"],
+.card[data-state="certified"] {
+  border-left-color: var(--st-ok);
+}
+
+.head,
+.comment-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: var(--text-quiet);
+}
+
+.actor {
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+.meta {
+  color: var(--muted);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.flag {
+  color: var(--st-warn);
+}
+
+.state {
+  color: var(--st-warn);
+  white-space: nowrap;
+}
+
+.card[data-state="claimed"] .state,
+.card[data-state="resolved"] .state,
+.card[data-state="certified"] .state {
+  color: var(--st-ok);
+}
+
+.prose {
+  font-family: var(--font-prose);
+  font-size: var(--text-prose);
+  color: var(--ink);
+  line-height: var(--leading-relaxed);
+}
+
+.prose p {
+  margin: 0;
+}
+
+.reply input {
+  width: 100%;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 5px 8px;
+  font-family: var(--font-prose);
+  font-size: var(--text-prose);
+}
+
+.claims {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}

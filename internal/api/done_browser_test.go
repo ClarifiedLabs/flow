@@ -72,7 +72,7 @@ func TestWebUIDoneViewSurfacesClosedWork(t *testing.T) {
 	navigateAndWaitForText(t, browserCtx, httpServer.URL+"/ui/board", merged.ID)
 	var hasDoneLane bool
 	if err := chromedp.Run(browserCtx,
-		chromedp.Evaluate(`document.querySelector('.lane[data-lane="done"]') !== null`, &hasDoneLane),
+		chromedp.Evaluate(`document.querySelector('flow-lane[data-lane="done"]') !== null`, &hasDoneLane),
 	); err != nil {
 		t.Fatalf("evaluate board Done lane presence: %v", err)
 	}

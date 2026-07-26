@@ -1,0 +1,138 @@
+/* Bled to the full width of the main column: the rail is chrome, not content,
+   so it should meet the edge of the pane the way the sidebar does. */
+:host {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  margin: 0 -22px;
+  min-height: 0;
+}
+
+.surface {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 22px 24px;
+  min-width: 0;
+}
+
+.panel {
+  min-width: 0;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.section h3,
+.section-head h3 {
+  margin: 0;
+  font-size: var(--text-meta);
+  font-weight: 600;
+  letter-spacing: var(--track-section);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.segmented {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.segmented button {
+  font: inherit;
+  font-size: var(--text-ui);
+  padding: 3px 11px;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    background 120ms ease;
+}
+
+.segmented button:hover {
+  color: var(--ink);
+}
+
+.segmented button[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.requirements {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  font-family: var(--font-prose);
+  font-size: var(--text-prose);
+  color: var(--ink-2);
+  line-height: var(--leading-relaxed);
+}
+
+.change-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.quiet {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px 16px;
+  margin: 0;
+}
+
+.facts dt {
+  font-size: var(--text-label);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.facts dd {
+  margin: 2px 0 0;
+  font-size: var(--text-quiet);
+  color: var(--ink-2);
+}
+
+.empty {
+  font-size: var(--text-quiet);
+  letter-spacing: var(--track-chrome);
+  color: var(--muted);
+  padding: 14px 0;
+}
+
+/* One column below the compact breakpoint: the rail becomes a normal block
+   above the work surface rather than a squeezed sidebar. */
+@media (max-width: 760px) {
+  :host {
+    grid-template-columns: 1fr;
+    margin: 0;
+  }
+
+  .surface {
+    padding: 14px 0 24px;
+  }
+}
