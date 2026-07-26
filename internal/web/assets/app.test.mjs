@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { handleFormSubmit } from "./forms.js";
 import { workflowStepCanBeSkipped } from "./task-view.js";
 import { renderTranscriptButton } from "./terminal.js";
 
@@ -356,6 +357,73 @@ test("new task form shows the project field even with one project", async () => 
   assert.ok(html.indexOf('class="task-field-project"') < html.indexOf('class="task-field-priority"'));
   assert.ok(html.indexOf('class="task-field-priority"') < html.indexOf('class="task-field-flow"'));
   assert.ok(html.indexOf('class="task-field-flow"') < html.indexOf('class="task-field-title wide"'));
+});
+
+test("new task form submission posts to the selected project collection", async () => {
+  const fetchCalls = [];
+  let pushedPath = "";
+  let loads = 0;
+  await scriptContext({}, {
+    history: {
+      pushState(_state, _title, path) {
+        pushedPath = path;
+      },
+    },
+    fetch(path, options) {
+      fetchCalls.push({ path, options });
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ task: { id: "t-alpha-0001" } }),
+      });
+    },
+  });
+  const form = {
+    tagName: "FORM",
+    dataset: {
+      project: "p-alpha",
+      taskForm: "",
+      taskFormMode: "create",
+    },
+    elements: {
+      project: { value: "p-alpha" },
+      priority: { value: "2" },
+      flow_id: { value: "fl-coding" },
+      title: { value: "First task" },
+      body: { value: "Task details" },
+      attachments: { files: [] },
+      queue_task: { checked: false },
+    },
+    reportValidity() {
+      return true;
+    },
+  };
+  const app = {
+    setStatus() {},
+    async load() {
+      loads += 1;
+    },
+    async refresh() {
+      throw new Error("create submission should not refresh the edit route");
+    },
+  };
+
+  const handled = await handleFormSubmit(app, {
+    target: form,
+    preventDefault() {},
+  });
+
+  assert.equal(handled, true);
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks");
+  assert.equal(fetchCalls[0].options.method, "POST");
+  assert.deepEqual(JSON.parse(fetchCalls[0].options.body), {
+    title: "First task",
+    body: "Task details",
+    priority: 2,
+    flow_id: "fl-coding",
+  });
+  assert.equal(pushedPath, "/ui/tasks/t-alpha-0001");
+  assert.equal(loads, 1);
 });
 
 test("workflow skip eligibility excludes author and side-effecting steps", () => {

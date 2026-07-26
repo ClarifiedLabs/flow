@@ -9,7 +9,7 @@ import { uploadTaskAttachment } from "./task.js";
 
 export const FORMS = {
   async taskForm(app, form) {
-    const mode = form.dataset.mode || "edit";
+    const mode = form.dataset.taskFormMode || "edit";
     const priority = Number(form.elements.priority?.value || 0);
     if (!Number.isInteger(priority)) {
       app.setStatus("Priority must be a whole number");
