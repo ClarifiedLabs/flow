@@ -52,7 +52,7 @@ Variables a test intentionally consumes (currently `FLOW_BROWSER_BIN`) are
 preserved through the isolation layer, so they can be passed the ordinary way:
 
 ```sh
-FLOW_BROWSER_BIN=/path/to/chrome go test ./internal/api -run TestWebUIBrowserSmokeRoutesAndDeepLinks -count=1
+FLOW_BROWSER_BIN=/path/to/chrome go test ./internal/api -run TestWebUI -count=1
 ```
 
 Run the web UI's native-ESM Node tests:
@@ -61,18 +61,9 @@ Run the web UI's native-ESM Node tests:
 make js-test
 ```
 
-Run the local lifecycle integration and E2E tests:
-
-```sh
-make lifecycle-test
-```
-
-The lifecycle tests build local binaries, start `flow-server`, onboard two
-throwaway git repositories as separate projects, and drive `flow-worker` through
-tmux for both. The browser E2E test uses Chrome or Chromium when available; set
-`FLOW_BROWSER_BIN=/path/to/chrome` if it is not on a standard path.
-
-Run the isolated web UI smoke test:
+Run the browser smoke tests, which drive the real UI through Chrome or
+Chromium; set `FLOW_BROWSER_BIN=/path/to/chrome` if it is not on a standard
+path:
 
 ```sh
 make web-smoke
@@ -80,10 +71,17 @@ make web-smoke
 
 ## Web Assets
 
-The web app uses browser-native custom elements, browser-native ES modules, and
-`internal/web/src/app.module.css`. `flow-server` embeds the source files and the
-Go helper in `internal/web/webassetbuild` scopes the CSS at serve/test time, so
-there is no separate asset generation step after CSS or JavaScript edits.
+The web app is built from hand-written custom elements in
+`internal/web/assets/elements/`, browser-native ES modules, and one stylesheet
+per component in `internal/web/src/`. `flow-server` embeds the source files and
+the Go helper in `internal/web/webassetbuild` scopes each stylesheet to its own
+element at serve/test time, so there is no separate asset generation step after
+CSS or JavaScript edits.
+
+An element renders from a pure function that returns an HTML string, so markup
+is testable in Node without a DOM; the element class is a thin shell over it.
+Lifecycle behaviour that needs a DOM is tested against
+`internal/web/assets/test-dom.mjs`.
 
 Run the native-ESM tests after web UI changes:
 

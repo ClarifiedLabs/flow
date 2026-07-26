@@ -265,11 +265,16 @@ bearer credentials stored through Git's credential helper when available.
 `flow-server` serves the browser UI directly; there is no separate frontend
 server. The implementation lives under `internal/web`:
 
-- `internal/web/assets/*.js`: browser-native ES modules and custom elements.
+- `internal/web/assets/*.js`: browser-native ES modules; routes, models and
+  shared helpers.
+- `internal/web/assets/elements/*.js`: the custom elements the UI is built from.
+  Each renders from its own `data` property and listens on itself once, so
+  polling updates a view in place instead of rebuilding it.
 - `internal/web/assets/index.html`: embedded shell page.
-- `internal/web/src/app.module.css`: source CSS.
-- `internal/web/webassetbuild`: small Go CSS scoping step used by embedded asset
-  serving and tests.
+- `internal/web/src/*.module.css`: one stylesheet per component, plus the shared
+  token and base sheets.
+- `internal/web/webassetbuild`: small Go step that scopes each stylesheet to its
+  own element and concatenates them, used by embedded asset serving and tests.
 
 The UI treats coordinator read models as the source of truth. It keeps a small
 client-side cache for convenience, but task lanes, review state, checks,
@@ -285,7 +290,6 @@ terminal state, and flow state are authoritative on the server.
 | CLI client plumbing | `internal/client` |
 | Configuration loading and defaults | `internal/config` |
 | Domain services | `internal/coordinator` |
-| Lifecycle FSM, timers, inbox redelivery | `internal/lifecycle` |
 | SQLite schema/migrations | `internal/db`, `internal/sqlitex` |
 | Worker directory, queues, claims, leases | `internal/worker` |
 | Worker checkout/tmux/entrypoint execution | `internal/worker/execution` |
@@ -303,9 +307,8 @@ Common verification targets are documented in [development.md](development.md):
 make test
 make js-test
 make web-smoke
-make lifecycle-test
 ```
 
-For changes that affect lifecycle transitions, worker execution, git exchange
+For changes that affect workflow transitions, worker execution, git exchange
 hooks, or web routes, prefer a targeted package test first and then the broadest
 relevant Make target.
