@@ -1,0 +1,186 @@
+:host {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 900px;
+}
+
+.head {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.epic-id {
+  font-size: var(--text-meta);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.title-row h2 {
+  margin: 0;
+  font-size: var(--text-title);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.count {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* One bar for the shape of the epic. Segments are flexed by member count, so
+   the width of a colour is the size of that group. */
+.rollup {
+  display: flex;
+  gap: 2px;
+  height: 6px;
+}
+
+.rollup span {
+  background: var(--ph, var(--muted));
+}
+
+.rollup span:first-child {
+  border-radius: 999px 0 0 999px;
+}
+
+.rollup span:last-child {
+  border-radius: 0 999px 999px 0;
+}
+
+.legend {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-item i {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--ph, var(--muted));
+}
+
+/* Only the entry that wants something from you is coloured; the rest stay
+   muted so it is the one thing that reads as urgent. */
+.legend-item.is-attention {
+  color: var(--ph-await);
+}
+
+.members {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.member {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  background: var(--panel-2);
+  border-left: 2px solid var(--ph, var(--line-2));
+  border-radius: 0 var(--radius) var(--radius) 0;
+  text-decoration: none;
+  min-width: 0;
+  transition: background 120ms ease;
+}
+
+.member:hover {
+  background: var(--panel);
+}
+
+.member[data-needs-you] {
+  background: var(--ph-await-bg);
+}
+
+.member[data-merged] {
+  opacity: 0.62;
+}
+
+.member-id {
+  font-size: var(--text-meta);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.member-title {
+  font-size: var(--text-body);
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.member[data-needs-you] .member-title {
+  color: var(--ink);
+}
+
+.member-note {
+  font-size: var(--text-quiet);
+  color: var(--ph, var(--muted));
+  white-space: nowrap;
+}
+
+.member[data-merged] .member-note,
+.member[data-phase="blocked"] .member-note {
+  color: var(--muted);
+}
+
+.critical {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  font-size: var(--text-quiet);
+}
+
+.critical-label {
+  color: var(--muted);
+}
+
+.critical a {
+  color: var(--ph, var(--ink-2));
+  text-decoration: none;
+}
+
+.critical a:hover {
+  color: var(--accent);
+}
+
+.arrow {
+  color: var(--line-2);
+}
+
+.critical-action {
+  color: var(--accent);
+}

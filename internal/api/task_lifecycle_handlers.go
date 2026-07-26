@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/ClarifiedLabs/flow/internal/api/contract"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
-	"github.com/ClarifiedLabs/flow/internal/lifecycle"
 	"github.com/ClarifiedLabs/flow/internal/sqlitex"
 )
 
@@ -35,26 +33,6 @@ func (s *projectServer) handleCreateTask(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusCreated, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
 }
 
-func (s *projectServer) ensureAuthorJobForCreatedTask(r *http.Request, task coordinator.Task, principal coordinator.Principal) error {
-	if task.ScheduleState != coordinator.ScheduleUpNext {
-		return nil
-	}
-	if s.engine != nil {
-		_, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-			Kind:   lifecycle.EventEnsureWorkPhaseJob,
-			TaskID: task.ID,
-		}))
-		return err
-	}
-	if s.sessions != nil {
-		_, err := s.sessions.EnsureAuthorJob(r.Context(), coordinator.EnsureAuthorJobInput{TaskID: task.ID})
-		if errors.Is(err, coordinator.ErrAuthorJobSuppressed) {
-			return nil
-		}
-		return err
-	}
-	return errors.New("lifecycle engine is not configured")
-}
 
 func (s *projectServer) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	filter, err := taskFilterFromQuery(r)
@@ -159,6 +137,17 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 			return
 		}
 		s.handlePromptContext(w, r, taskID)
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "epic" {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+			return
+		}
+		s.handleGetEpic(w, r, taskID)
 		return
 	}
 
@@ -302,83 +291,6 @@ func (s *projectServer) handlePromptContext(w http.ResponseWriter, r *http.Reque
 			return
 		}
 	}
-	if s.cursors == nil {
-		writeJSON(w, http.StatusOK, response)
-		return
-	}
-	cursor, ok, err := s.cursors.GetCursor(r.Context(), taskID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "prompt_context_failed", err.Error())
-		return
-	}
-	if !ok {
-		writeJSON(w, http.StatusOK, response)
-		return
-	}
-
-	completed := cursor.PhaseState == coordinator.FlowPhaseCompleted
-	response.PhaseIndex = cursor.PhaseIndex
-	response.FinalPhase = cursor.OnFinalPhase() || completed
-	response.GateFeedback = cursor.GateFeedback
-	if checkName := strings.TrimSpace(r.URL.Query().Get("check")); checkName != "" {
-		// A review check job's prompt: the flow review agent running under this
-		// check name (checks are named after their agent defs). Unmatched names
-		// (repo-defined checks, deduped collisions) fall back to the embedded
-		// role skill client-side.
-		response = promptContextResponse{FinalPhase: true}
-		for _, reviewAgent := range cursor.Snapshot.ReviewAgents {
-			if strings.TrimSpace(reviewAgent.Agent.Name) == checkName {
-				response.RoleInstructions = reviewAgent.Agent.Prompt
-				break
-			}
-		}
-		handoffs, err := s.cursors.PhaseHandoffs(r.Context(), taskID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "prompt_context_failed", err.Error())
-			return
-		}
-		for _, handoff := range handoffs {
-			if strings.TrimSpace(handoff.Content) == "" {
-				continue
-			}
-			response.PriorHandoffs = append(response.PriorHandoffs, promptPhaseHandoff{
-				PhaseName: handoff.PhaseName,
-				Content:   handoff.Content,
-			})
-		}
-		writeJSON(w, http.StatusOK, response)
-		return
-	}
-	if completed {
-		// The pipeline already readied its change: this is a review fix round,
-		// driven by the flow's fix agent.
-		if agent, err := cursor.Snapshot.FixAgentOrLastPhase(); err == nil {
-			response.PhaseName = "fix"
-			response.RoleInstructions = agent.Prompt
-		}
-	} else if phase, ok := cursor.CurrentPhase(); ok {
-		response.PhaseName = phase.Name
-		response.RoleInstructions = phase.Agent.Prompt
-	}
-
-	handoffs, err := s.cursors.PhaseHandoffs(r.Context(), taskID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "prompt_context_failed", err.Error())
-		return
-	}
-	for _, handoff := range handoffs {
-		if !completed && handoff.PhaseIndex >= cursor.PhaseIndex {
-			continue
-		}
-		if strings.TrimSpace(handoff.Content) == "" {
-			continue
-		}
-		response.PriorHandoffs = append(response.PriorHandoffs, promptPhaseHandoff{
-			PhaseName: handoff.PhaseName,
-			Content:   handoff.Content,
-		})
-	}
-
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -407,115 +319,6 @@ func (s *projectServer) handleGetTask(w http.ResponseWriter, r *http.Request, pr
 		response.Detail = detail
 	}
 	writeJSON(w, http.StatusOK, response)
-}
-
-// handleApproveWorkPhase applies a human's approval of a gate-paused work
-// phase through the engine: the cursor advances to the next phase (or the
-// final phase's change is published into review).
-func (s *projectServer) handleApproveWorkPhase(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
-	if !s.requireEngine(w) {
-		return
-	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-		Kind:   lifecycle.EventWorkPhaseApproved,
-		TaskID: taskID,
-	}))
-	if err != nil {
-		writeEngineError(w, err, "approve_phase_failed")
-		return
-	}
-
-	task, err := s.taskForResult(r.Context(), result, taskID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "approve_phase_failed", err.Error())
-		return
-	}
-	response := taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name}
-	response.Flow = s.taskFlowStatus(r.Context(), taskID)
-	writeJSON(w, http.StatusOK, response)
-}
-
-// handleReworkWorkPhase applies a human's request-changes on a gate-paused
-// work phase: the same phase re-runs with the feedback injected into its
-// prompt.
-func (s *projectServer) handleReworkWorkPhase(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
-	var request phaseRequestChangesRequest
-	if err := decodeJSON(r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
-		return
-	}
-	feedback := strings.TrimSpace(request.Feedback)
-	if feedback == "" {
-		writeError(w, http.StatusBadRequest, "request_changes_failed", "feedback is required")
-		return
-	}
-	if !s.requireEngine(w) {
-		return
-	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-		Kind:    lifecycle.EventWorkPhaseRework,
-		TaskID:  taskID,
-		Payload: lifecycle.EventPayload{GateFeedback: feedback},
-	}))
-	if err != nil {
-		writeEngineError(w, err, "request_changes_failed")
-		return
-	}
-
-	task, err := s.taskForResult(r.Context(), result, taskID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "request_changes_failed", err.Error())
-		return
-	}
-	response := taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name}
-	response.Flow = s.taskFlowStatus(r.Context(), taskID)
-	writeJSON(w, http.StatusOK, response)
-}
-
-type phaseRequestChangesRequest struct {
-	Feedback string `json:"feedback"`
-}
-
-// taskFlowStatus assembles the task's flow position for API/UI consumers:
-// which flow, the ordered phases, the cursor position and gate state, and —
-// when paused at a gate — the pending handoff awaiting review. Nil when the
-// task has no cursor.
-func (s *projectServer) taskFlowStatus(ctx context.Context, taskID string) *taskFlowStatus {
-	if s.cursors == nil {
-		return nil
-	}
-	cursor, ok, err := s.cursors.GetCursor(ctx, taskID)
-	if err != nil || !ok {
-		return nil
-	}
-	status := &taskFlowStatus{
-		FlowID:       cursor.Snapshot.FlowID,
-		FlowName:     cursor.Snapshot.FlowName,
-		PhaseIndex:   cursor.PhaseIndex,
-		PhaseCount:   len(cursor.Snapshot.Phases),
-		PhaseState:   string(cursor.PhaseState),
-		GateFeedback: cursor.GateFeedback,
-	}
-	if phase, ok := cursor.CurrentPhase(); ok {
-		status.PhaseName = phase.Name
-		status.Gate = string(phase.Gate)
-	}
-	for _, phase := range cursor.Snapshot.Phases {
-		status.Phases = append(status.Phases, taskFlowPhase{
-			Name:            phase.Name,
-			Gate:            string(phase.Gate),
-			AgentName:       phase.Agent.Name,
-			AgentHarness:    phase.Agent.Harness,
-			Model:           phase.Agent.Model,
-			ReasoningEffort: phase.Agent.ReasoningEffort,
-		})
-	}
-	if cursor.PhaseState == coordinator.FlowPhaseAwaitingApproval {
-		if handoff, ok, err := s.cursors.PhaseHandoff(ctx, taskID, cursor.PhaseIndex); err == nil && ok {
-			status.PendingHandoff = handoff.Content
-		}
-	}
-	return status
 }
 
 func (s *projectServer) handleAttentionReply(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
@@ -607,55 +410,6 @@ func (s *projectServer) ensureAuthorJobWithHumanInstructions(r *http.Request, pr
 	return errors.New("lifecycle engine is not configured")
 }
 
-func (s *projectServer) handleApproveReviewCycles(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
-	if s.sessions == nil {
-		writeError(w, http.StatusInternalServerError, "sessions_unavailable", "session service is not configured")
-		return
-	}
-	var request approveReviewCyclesRequest
-	if err := decodeJSON(r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
-		return
-	}
-	if _, err := s.tasks.GetTask(r.Context(), taskID); errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "task_not_found", "task not found")
-		return
-	} else if err != nil {
-		writeError(w, http.StatusBadRequest, "get_task_failed", err.Error())
-		return
-	}
-
-	_, err := s.sessions.ApproveReviewCycles(r.Context(), coordinator.ApproveReviewCyclesInput{
-		TaskID:       taskID,
-		Cycles:       request.Cycles,
-		Instructions: request.Instructions,
-		Actor:        principal.Actor(),
-	})
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "approve_review_cycles_failed", err.Error())
-		return
-	}
-
-	var failures []lifecycle.FollowUpFailure
-	if s.engine != nil {
-		result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-			Kind:   lifecycle.EventEnsureWorkPhaseJob,
-			TaskID: taskID,
-		}))
-		if err != nil && !errors.Is(err, lifecycle.ErrInvalidTransition) {
-			writeEngineError(w, err, "approve_review_cycles_failed")
-			return
-		}
-		failures = result.FollowUpFailures
-	}
-
-	budget, err := s.sessions.ReviewCycleBudget(r.Context(), taskID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "load_review_cycles_failed", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, reviewCycleBudgetResponse{Budget: budget, FollowUpFailures: failures})
-}
 
 func (s *projectServer) buildUITaskDetail(ctx context.Context, task coordinator.Task) (*uiTaskDetail, error) {
 	tags, err := s.tasks.TagsForTask(ctx, task.ID)
@@ -755,17 +509,12 @@ func (s *projectServer) buildUITaskDetail(ctx context.Context, task coordinator.
 		}
 		detail.ReviewState = reviewState
 	}
-	if s.transitions != nil {
-		transitions, err := s.transitions.ListForTask(ctx, task.ID, 50)
+	if s.workflowRuns != nil {
+		transitions, err := s.workflowRuns.ListTransitionsForTask(ctx, task.ID, 50)
 		if err != nil {
 			return nil, fmt.Errorf("load transitions: %w", err)
 		}
 		detail.Transitions = transitions
-		timeline, err := s.transitions.ListForTaskWithPayload(ctx, task.ID, 50)
-		if err != nil {
-			return nil, fmt.Errorf("load timeline transitions: %w", err)
-		}
-		detail.TimelineTransitions = timeline
 	}
 	attachments, err := s.tasks.ListTaskAttachments(ctx, task.ID)
 	if err != nil {
@@ -848,269 +597,7 @@ func (s *projectServer) handleListTransitions(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, transitionsResponse{Transitions: entries})
 }
 
-// requireEngine guards lifecycle handlers against a server constructed without
-// the engine's dependencies, returning false (and a 503) instead of panicking.
-func (s *projectServer) requireEngine(w http.ResponseWriter) bool {
-	if s.engine == nil {
-		writeError(w, http.StatusServiceUnavailable, "lifecycle_unavailable", "lifecycle engine is not configured")
-		return false
-	}
-	return true
-}
 
-// writeEngineError maps a lifecycle engine error to an HTTP response, preserving
-// the per-handler default code for ordinary failures while surfacing the FSM's
-// own sentinels with appropriate statuses.
-func writeEngineError(w http.ResponseWriter, err error, defaultCode string) {
-	switch {
-	case errors.Is(err, lifecycle.ErrInvalidTransition):
-		writeError(w, http.StatusConflict, "invalid_transition", err.Error())
-	case errors.Is(err, lifecycle.ErrVersionConflict):
-		writeError(w, http.StatusConflict, "version_conflict", err.Error())
-	case errors.Is(err, lifecycle.ErrCascadeLimit):
-		writeError(w, http.StatusInternalServerError, "cascade_limit", err.Error())
-	default:
-		writeError(w, http.StatusBadRequest, defaultCode, err.Error())
-	}
-}
-
-func (s *projectServer) handleScheduleTask(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
-	var request scheduleTaskRequest
-	if err := decodeJSON(r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
-		return
-	}
-
-	if !s.requireEngine(w) {
-		return
-	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-		Kind:    lifecycle.EventScheduleTask,
-		TaskID:  taskID,
-		Payload: lifecycle.EventPayload{Schedule: coordinator.ScheduleState(request.State)},
-	}))
-	if err != nil {
-		writeEngineError(w, err, "schedule_task_failed")
-		return
-	}
-
-	task, err := s.taskForResult(r.Context(), result, taskID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "schedule_task_failed", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
-}
-
-func (s *projectServer) handleSetTaskState(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
-	var request taskStateRequest
-	if err := decodeJSON(r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
-		return
-	}
-
-	if !s.requireEngine(w) {
-		return
-	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-		Kind:    lifecycle.EventSetTaskState,
-		TaskID:  taskID,
-		Payload: lifecycle.EventPayload{TaskState: coordinator.TaskState(request.State)},
-	}))
-	if err != nil {
-		writeEngineError(w, err, "set_task_state_failed")
-		return
-	}
-
-	task, err := s.taskForResult(r.Context(), result, taskID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "set_task_state_failed", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
-}
-
-func (s *projectServer) handleResetTask(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
-	if !s.requireEngine(w) {
-		return
-	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-		Kind:   lifecycle.EventResetTask,
-		TaskID: taskID,
-	}))
-	if err != nil {
-		writeEngineError(w, err, "reset_task_failed")
-		return
-	}
-
-	task, err := s.taskForResult(r.Context(), result, taskID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "reset_task_failed", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
-}
-
-// taskForResult returns the task carried by a StepResult, falling back to a
-// fresh load when the transition did not surface one (e.g. an idempotent replay).
-func (s *projectServer) taskForResult(ctx context.Context, result lifecycle.StepResult, taskID string) (coordinator.Task, error) {
-	if result.Task != nil {
-		return *result.Task, nil
-	}
-	return s.tasks.GetTask(ctx, taskID)
-}
-
-func (s *projectServer) handleCloseTask(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
-	if !s.requireEngine(w) {
-		return
-	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{Kind: lifecycle.EventCloseTask, TaskID: taskID}))
-	if err != nil {
-		writeEngineError(w, err, "close_task_failed")
-		return
-	}
-	task, err := s.taskForResult(r.Context(), result, taskID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "close_task_failed", err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
-}
-
-func (s *projectServer) handlePauseTask(w http.ResponseWriter, r *http.Request, taskID string) {
-	if s.sessions == nil {
-		writeError(w, http.StatusServiceUnavailable, "sessions_unavailable", "session service is not configured")
-		return
-	}
-	if _, err := s.sessions.PauseAuthorSession(r.Context(), taskID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusConflict, "pause_task_failed", "task has no active author session")
-			return
-		}
-		writeError(w, http.StatusBadRequest, "pause_task_failed", err.Error())
-		return
-	}
-	task, err := s.tasks.GetTask(r.Context(), taskID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "pause_task_failed", err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
-}
-
-func (s *projectServer) handleResumeTask(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
-	if !s.requireEngine(w) {
-		return
-	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{Kind: lifecycle.EventEnsureWorkPhaseJob, TaskID: taskID}))
-	if err != nil {
-		writeEngineError(w, err, "resume_task_failed")
-		return
-	}
-	task, err := s.taskForResult(r.Context(), result, taskID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "resume_task_failed", err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
-}
-
-func (s *projectServer) handleRetryCrashedAuthorJob(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
-	if !s.requireEngine(w) {
-		return
-	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{Kind: lifecycle.EventRetryCrashedAuthorJob, TaskID: taskID}))
-	if err != nil {
-		writeEngineError(w, err, "retry_crashed_author_job_failed")
-		return
-	}
-	task, err := s.taskForResult(r.Context(), result, taskID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "retry_crashed_author_job_failed", err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
-}
-
-func (s *projectServer) handleMergeTask(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
-	if !s.requireEngine(w) {
-		return
-	}
-	if s.merges == nil {
-		writeError(w, http.StatusInternalServerError, "merges_unavailable", "merge service is not configured")
-		return
-	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{Kind: lifecycle.EventMergeRequested, TaskID: taskID}))
-	if err != nil {
-		writeEngineError(w, err, "merge_failed")
-		return
-	}
-	if result.Merge == nil {
-		writeError(w, http.StatusBadRequest, "merge_failed", "merge produced no result")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, mergeResponse{Merge: *result.Merge})
-}
-
-func (s *projectServer) handleMergeChange(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, changeID string) {
-	if !s.requireEngine(w) {
-		return
-	}
-	if s.merges == nil {
-		writeError(w, http.StatusInternalServerError, "merges_unavailable", "merge service is not configured")
-		return
-	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{Kind: lifecycle.EventMergeChange, ChangeID: changeID}))
-	if err != nil {
-		writeEngineError(w, err, "merge_failed")
-		return
-	}
-	if result.Merge == nil {
-		writeError(w, http.StatusBadRequest, "merge_failed", "merge produced no result")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, mergeResponse{Merge: *result.Merge})
-}
-
-func (s *projectServer) handleTriageTask(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
-	var request triageTaskRequest
-	if err := decodeJSON(r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
-		return
-	}
-
-	state := coordinator.TriageState(request.State)
-	if state != coordinator.TriageAccepted && state != coordinator.TriageRejected {
-		writeError(w, http.StatusBadRequest, "invalid_triage_state", "triage state must be accepted or rejected")
-		return
-	}
-
-	if !s.requireEngine(w) {
-		return
-	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-		Kind:    lifecycle.EventTriageTask,
-		TaskID:  taskID,
-		Payload: lifecycle.EventPayload{Triage: state},
-	}))
-	if err != nil {
-		writeEngineError(w, err, "triage_task_failed")
-		return
-	}
-
-	task, err := s.taskForResult(r.Context(), result, taskID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "triage_task_failed", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
-}
 
 func (s *projectServer) handleBoard(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
 	response, err := s.boardResponseForProject(r.Context(), principal)

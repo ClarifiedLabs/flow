@@ -35,14 +35,14 @@ func TestOpenInitializesSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_init", "0002_job_dispatch_keys")
+	assertAppliedMigrations(t, migrations, "0001_init", "0002_job_dispatch_keys", "0003_workflow_hold")
 
 	var schemaVersion string
 	if err := store.DB().QueryRowContext(ctx, "SELECT value FROM app_metadata WHERE key = 'schema_version'").Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version metadata: %v", err)
 	}
-	if schemaVersion != "0002_job_dispatch_keys" {
-		t.Fatalf("schema version = %q, want 0002_job_dispatch_keys", schemaVersion)
+	if schemaVersion != "0003_workflow_hold" {
+		t.Fatalf("schema version = %q, want 0003_workflow_hold", schemaVersion)
 	}
 	assertStorageFormat(t, store, "4")
 
@@ -277,7 +277,7 @@ func TestOpenMigrationIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_init", "0002_job_dispatch_keys")
+	assertAppliedMigrations(t, migrations, "0001_init", "0002_job_dispatch_keys", "0003_workflow_hold")
 }
 
 func assertAppliedMigrations(t *testing.T, got []string, want ...string) {

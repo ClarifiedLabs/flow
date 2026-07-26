@@ -21,7 +21,6 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
-	"github.com/ClarifiedLabs/flow/internal/lifecycle"
 	flowlog "github.com/ClarifiedLabs/flow/internal/logging"
 	flowtoken "github.com/ClarifiedLabs/flow/internal/token"
 	"github.com/ClarifiedLabs/flow/internal/version"
@@ -211,8 +210,7 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	}
 	defer globalStore.Close()
 
-	deadlines, err := cfg.Deadlines.ResolveDeadlines()
-	if err != nil {
+	if _, err := cfg.Deadlines.ResolveDeadlines(); err != nil {
 		fmt.Fprintf(stderr, "resolve deadlines: %v\n", err)
 		return 1
 	}
@@ -233,10 +231,6 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		AuthorEntrypoint:           cfg.AuthorEntrypoint,
 		AuthorEntrypointConfigured: cfg.AuthorEntrypointConfigured,
 		HarnessArgs:                cfg.HarnessArgs,
-		Deadlines: lifecycle.DeadlineConfig{
-			CheckPending:   deadlines.CheckPending,
-			AuthoringStall: deadlines.AuthoringStall,
-		},
 		ReviewAuthorCycleLimit: limits.ReviewAuthorCycles,
 		CommitIdentity: flowgit.CommitIdentity{
 			Name:  cfg.Git.CommitName,

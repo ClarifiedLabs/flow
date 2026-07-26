@@ -1,0 +1,109 @@
+:host {
+  display: block;
+  border: 1px solid var(--line-2);
+  border-left: 2px solid var(--ph-triage);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+
+:host([hidden]) {
+  display: none;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-nano);
+  font-weight: 600;
+  letter-spacing: var(--track-badge);
+  text-transform: uppercase;
+  background: var(--ph-triage-bg);
+  color: var(--ph-triage);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.badge .dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--ph-triage);
+}
+
+.line {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+/* The session is embedded rather than launched: taking over should not mean
+   leaving the page you were reading. */
+.session {
+  background: var(--term);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.chrome {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--panel-2);
+  font-size: var(--text-quiet);
+  letter-spacing: var(--track-chrome);
+  color: var(--muted);
+}
+
+.chrome svg {
+  width: 16px;
+  height: 16px;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.pop-out {
+  font: inherit;
+  font-size: var(--text-quiet);
+  background: none;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+.pop-out:hover {
+  color: var(--accent);
+}
+
+.frame {
+  min-height: 120px;
+}
+
+/* Handing back is an explicit choice of which edge to take, not a mystery. */
+.hand-back {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.caption {
+  font-size: var(--text-label);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--muted);
+  margin-right: 4px;
+}

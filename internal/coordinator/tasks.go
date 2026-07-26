@@ -184,6 +184,9 @@ const (
 	LaneStateScheduled        LaneState = "scheduled"
 	LaneStateWorking          LaneState = "working"
 	LaneStateBlocked          LaneState = "blocked"
+	// LaneStateHeld is an operator holding the run. It outranks blocked: who
+	// owns the task is more useful than what the task was waiting on.
+	LaneStateHeld LaneState = "held"
 )
 
 type WaitReason string
@@ -876,18 +879,26 @@ func (s *TaskService) BoardResult(ctx context.Context) (BoardResult, error) {
 			result.LaneStates[task.ID] = LaneStateScheduled
 		case LifecycleInProgress:
 			result.Board.InProgress = append(result.Board.InProgress, task)
-			var openWaits int
+			var openWaits, held int
 			if err := s.db.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM workflow_waits w
-JOIN workflow_runs r ON r.id = w.workflow_run_id
-WHERE r.task_id = ? AND w.state = 'open'`, task.ID).Scan(&openWaits); err != nil {
+SELECT
+	(SELECT COUNT(*) FROM workflow_waits w
+		JOIN workflow_runs r ON r.id = w.workflow_run_id
+		WHERE r.task_id = ? AND w.state = 'open'),
+	(SELECT COUNT(*) FROM workflow_runs r
+		WHERE r.task_id = ? AND r.held_at IS NOT NULL
+			AND r.state IN ('scheduled', 'running', 'waiting'))`,
+				task.ID, task.ID).Scan(&openWaits, &held); err != nil {
 				return BoardResult{}, err
 			}
-			if openWaits > 0 {
+			switch {
+			case held > 0:
+				result.LaneStates[task.ID] = LaneStateHeld
+			case openWaits > 0:
 				result.LaneStates[task.ID] = LaneStateBlocked
 				result.BlockedIDs = append(result.BlockedIDs, task.ID)
 				result.WaitReasons[task.ID] = WaitReasonBlocked
-			} else {
+			default:
 				result.LaneStates[task.ID] = LaneStateWorking
 			}
 		case LifecycleDone:
@@ -898,87 +909,6 @@ WHERE r.task_id = ? AND w.state = 'open'`, task.ID).Scan(&openWaits); err != nil
 	return result, nil
 }
 
-// laneStateForPhase projects the lifecycle phase into the board's visible
-// fine-grained state. Closed phases are omitted from the board. Critique keeps
-// the existing user-facing distinction between a change under review and one
-// that explicitly has requested changes.
-func (s *TaskService) laneStateForPhase(ctx context.Context, taskID string, phase Phase) (LaneState, bool, error) {
-	state, ok := laneStateForPhase(phase)
-	if !ok || phase != PhaseCritique {
-		return state, ok, nil
-	}
-	reviewState, err := s.reviewState(ctx, taskID)
-	if err != nil {
-		return "", false, err
-	}
-	if reviewState == ReviewChangesRequested {
-		return LaneStateChangesRequested, true, nil
-	}
-	return state, true, nil
-}
-
-func laneStateForPhase(phase Phase) (LaneState, bool) {
-	switch phase {
-	case PhaseBacklog:
-		return LaneStateBacklog, true
-	case PhaseTriage:
-		return LaneStateTriage, true
-	case PhaseUpNext:
-		return LaneStateUpNext, true
-	case PhaseWorking:
-		return LaneStateInProgress, true
-	case PhaseCritique, PhaseAcceptance:
-		return LaneStateInReview, true
-	case PhaseApproved:
-		return LaneStateReadyToMerge, true
-	case PhaseMergedClosed, PhaseRejectedClosed, PhaseAbandoned:
-		return "", false
-	default:
-		return LaneStateBacklog, true
-	}
-}
-
-func (s *TaskService) waitReason(ctx context.Context, task Task, state LaneState) (WaitReason, error) {
-	// A flow paused at a human gate has no active session; the cursor is the
-	// signal that a phase handoff awaits approval.
-	if _, cursorState, ok, err := cursorStateForTask(ctx, s.db, task.ID); err != nil {
-		return "", err
-	} else if ok && cursorState == FlowPhaseAwaitingApproval {
-		return WaitReasonPhaseApproval, nil
-	}
-	if sessionState, ok, err := activeSessionStateForTask(ctx, s.db, task.ID); err != nil {
-		return "", err
-	} else if ok && sessionState == SessionWaiting {
-		return WaitReasonQuestion, nil
-	}
-	if state == LaneStateReadyToMerge && !task.AutoMerge {
-		return WaitReasonManualMerge, nil
-	}
-	if state == LaneStateInReview {
-		pending, err := pendingHumanReview(ctx, s.db, task.ID)
-		if err != nil {
-			return "", err
-		}
-		if pending {
-			return WaitReasonHumanReview, nil
-		}
-	}
-	crashLoop, err := crashLoopStatusExists(ctx, s.db, task.ID)
-	if err != nil {
-		return "", err
-	}
-	if crashLoop {
-		return WaitReasonCrashLoop, nil
-	}
-	exhausted, err := reviewCycleBudgetExhausted(ctx, s.db, task.ID)
-	if err != nil {
-		return "", err
-	}
-	if exhausted {
-		return WaitReasonReviewCycles, nil
-	}
-	return "", nil
-}
 
 func pendingHumanReview(ctx context.Context, db *sql.DB, taskID string) (bool, error) {
 	var count int
@@ -1022,24 +952,6 @@ func (s *TaskService) CrashRetryAvailable(ctx context.Context, taskID string) (b
 	return crashLoopStatusExists(ctx, s.db, taskID)
 }
 
-// laneForState coarsens a fine-grained sub-state into one of the four board
-// lanes, grouped by who acts next: backlog (undecided or unscheduled),
-// up_next (waiting for an agent), in_progress (automation working),
-// needs_attention (waiting on a human). Unresolved blockers are applied by
-// BoardResult as a needs_attention override after this coarsening.
-func laneForState(state LaneState) string {
-	switch state {
-	case LaneStateTriage, LaneStateBacklog:
-		return "backlog"
-	case LaneStateUpNext:
-		return "up_next"
-	case LaneStateInProgress, LaneStateInReview, LaneStateChangesRequested:
-		return "in_progress"
-	case LaneStateReadyToMerge:
-		return "needs_attention"
-	}
-	return "backlog"
-}
 
 func (s *TaskService) reviewState(ctx context.Context, taskID string) (ReviewState, error) {
 	return reviewStateForTask(ctx, s.db, taskID)
@@ -1062,6 +974,31 @@ JOIN tasks blocker ON blocker.id = r.source_task_id
 	}
 
 	return count > 0, nil
+}
+
+// TaskIDsWithSource returns tasks an agent session created while working the
+// given task. Together with the parent_of relation the task-set materializer
+// writes, this is how an epic finds its members.
+func (s *TaskService) TaskIDsWithSource(ctx context.Context, sourceTaskID string) ([]string, error) {
+	sourceTaskID = strings.TrimSpace(sourceTaskID)
+	if sourceTaskID == "" {
+		return nil, errors.New("source task id is required")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id FROM tasks WHERE source_task_id = ? ORDER BY id`, sourceTaskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (s *TaskService) UnresolvedBlockers(ctx context.Context, taskID string) ([]Task, error) {
@@ -1228,14 +1165,6 @@ func validateScheduleState(state ScheduleState) error {
 	}
 }
 
-func validateTaskState(state TaskState) error {
-	switch state {
-	case TaskStateTriage, TaskStateBacklog, TaskStateUpNext, TaskStateClosed, TaskStateRejected:
-		return nil
-	default:
-		return fmt.Errorf("invalid task state: %s", state)
-	}
-}
 
 func validateTriageState(state TriageState) error {
 	switch state {

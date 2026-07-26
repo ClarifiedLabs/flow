@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := build
 
-.PHONY: build ci format install test js-test lifecycle-test release web-smoke
+.PHONY: build ci format install test js-test release web-smoke
 
 COMMAND_PACKAGES := ./cmd/flow ./cmd/flow-server ./cmd/flow-worker
 BINDIR ?= $(HOME)/bin
@@ -26,10 +26,8 @@ test:
 # modules served as-is to the browser; these tests import them directly).
 js-test:
 	node --test internal/web/assets/app.test.mjs
+	node --test internal/web/assets/elements.test.mjs
 	node internal/web/assets/harness_models.test.mjs
-
-lifecycle-test:
-	go test ./tests/lifecycle -count=1
 
 release:
 ifndef VERSION
@@ -42,4 +40,4 @@ endif
 	VERSION="$(VERSION)" AUTOPUSH="$(AUTOPUSH)" scripts/release/tag.sh
 
 web-smoke:
-	FLOW_BROWSER_BIN="$(FLOW_BROWSER_BIN)" go test ./internal/api -run TestWebUIBrowserSmokeRoutesAndDeepLinks -count=1
+	FLOW_BROWSER_BIN="$(FLOW_BROWSER_BIN)" go test ./internal/api -run TestWebUI -count=1

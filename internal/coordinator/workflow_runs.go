@@ -72,7 +72,13 @@ type WorkflowRun struct {
 	CompletedAt       *time.Time       `json:"completed_at,omitempty"`
 	CancelledAt       *time.Time       `json:"cancelled_at,omitempty"`
 	CompletionSource  string           `json:"completion_source,omitempty"`
+	HeldAt            *time.Time       `json:"held_at,omitempty"`
+	HeldBy            string           `json:"held_by,omitempty"`
 }
+
+// Held reports whether an operator has taken the run: the executor will not
+// advance it to the next node until the hold is released.
+func (r WorkflowRun) Held() bool { return r.HeldAt != nil }
 
 type WorkflowNodeRun struct {
 	ID               string               `json:"id"`
@@ -88,6 +94,35 @@ type WorkflowNodeRun struct {
 	CreatedAt        time.Time            `json:"created_at"`
 	StartedAt        *time.Time           `json:"started_at,omitempty"`
 	CompletedAt      *time.Time           `json:"completed_at,omitempty"`
+
+	// Resolved against the run's frozen snapshot and the jobs table when the
+	// node run is read as part of a run detail. Not columns.
+	Name string               `json:"name,omitempty"`
+	Kind NodeKind             `json:"kind,omitempty"`
+	Jobs []WorkflowNodeRunJob `json:"jobs,omitempty"`
+}
+
+// WorkflowNodeRunJob is one unit of work fanned out under a node run — the
+// review agents on a change_review node, the check runner on a ci node. The run
+// spine renders one row per job under the node it belongs to.
+type WorkflowNodeRunJob struct {
+	ID       string       `json:"id"`
+	Role     string       `json:"role"`
+	State    string       `json:"state"`
+	Name     string       `json:"name,omitempty"`
+	Verdict  CheckVerdict `json:"verdict,omitempty"`
+	Details  string       `json:"details,omitempty"`
+	WorkerID string       `json:"worker_id,omitempty"`
+}
+
+// WorkflowEdgeCount is how many times this run traversed one graph edge. The
+// graph draws taken edges differently from possible-but-not-taken ones and
+// annotates repeats with a visit count.
+type WorkflowEdgeCount struct {
+	From    string `json:"from"`
+	Outcome string `json:"outcome"`
+	To      string `json:"to"`
+	Count   int    `json:"count"`
 }
 
 type WorkflowWait struct {
@@ -139,11 +174,12 @@ type WorkflowTransition struct {
 }
 
 type WorkflowRunDetail struct {
-	Run         WorkflowRun          `json:"run"`
-	NodeRuns    []WorkflowNodeRun    `json:"node_runs"`
-	OpenWait    *WorkflowWait        `json:"open_wait,omitempty"`
-	Substate    InProgressSubstate   `json:"substate,omitempty"`
-	Transitions []WorkflowTransition `json:"transitions"`
+	Run              WorkflowRun          `json:"run"`
+	NodeRuns         []WorkflowNodeRun    `json:"node_runs"`
+	OpenWait         *WorkflowWait        `json:"open_wait,omitempty"`
+	Substate         InProgressSubstate   `json:"substate,omitempty"`
+	Transitions      []WorkflowTransition `json:"transitions"`
+	TransitionCounts []WorkflowEdgeCount  `json:"transition_counts,omitempty"`
 }
 
 type WorkflowRunService struct {
@@ -305,7 +341,24 @@ func (s *WorkflowRunService) Detail(ctx context.Context, runID string) (Workflow
 	if err != nil {
 		return WorkflowRunDetail{}, err
 	}
+	// The run spine renders a node name once and its kind as a tag, so resolve
+	// both here rather than making every reader re-join the frozen snapshot.
+	for index := range nodes {
+		if node, ok := run.Snapshot.Node(nodes[index].NodeKey); ok {
+			nodes[index].Kind = node.Kind
+			nodes[index].Name = strings.TrimSpace(node.Name)
+		}
+		if nodes[index].Name == "" {
+			nodes[index].Name = workflowNodeKeyLabel(nodes[index].NodeKey)
+		}
+	}
+	if err := s.attachNodeRunJobs(ctx, run, nodes); err != nil {
+		return WorkflowRunDetail{}, err
+	}
 	detail := WorkflowRunDetail{Run: run, NodeRuns: nodes}
+	if detail.TransitionCounts, err = s.transitionCounts(ctx, run.ID); err != nil {
+		return WorkflowRunDetail{}, err
+	}
 	if wait, ok, err := scanWorkflowWaitMaybe(s.db.QueryRowContext(ctx, workflowWaitSelect+`
 WHERE workflow_run_id = ? AND state = 'open'`, run.ID)); err != nil {
 		return WorkflowRunDetail{}, err
@@ -898,6 +951,10 @@ type CompleteWorkflowNodeInput struct {
 	Payload        map[string]any
 	IdempotencyKey string
 	SkipTaskID     string
+	// OperatorSatisfied waives the agent-node artifact contract: the operator
+	// has done the work by hand and is asserting the node is done. Set only by
+	// the ReleaseSatisfy hand-back.
+	OperatorSatisfied bool
 }
 
 type CompleteWorkflowNodeResult struct {
@@ -1008,7 +1065,7 @@ WHERE workflow_run_id = ? AND event_kind = 'node_skipped' AND idempotency_key = 
 		input.Payload = payload
 	}
 	artifactID := strings.TrimSpace(input.ArtifactID)
-	if sourceNode.Kind == NodeAgent && !skipping {
+	if sourceNode.Kind == NodeAgent && !skipping && !input.OperatorSatisfied {
 		if artifactID == "" {
 			return CompleteWorkflowNodeResult{}, errors.New("agent node completion requires an artifact")
 		}
@@ -1860,17 +1917,18 @@ const workflowRunSelect = `
 SELECT id, task_id, run_sequence, flow_id, flow_snapshot_json, state,
 	current_node_key, current_node_run_id, current_artifact_id,
 	transition_budget, transitions_used, version, created_at, started_at,
-	completed_at, cancelled_at, completion_source
+	completed_at, cancelled_at, completion_source, held_at, held_by
 FROM workflow_runs`
 
 func scanWorkflowRun(scanner taskScanner) (WorkflowRun, error) {
 	var run WorkflowRun
 	var flowID, nodeRunID, artifactID sql.NullString
 	var snapshotJSON, state, createdAt string
-	var startedAt, completedAt, cancelledAt sql.NullString
+	var startedAt, completedAt, cancelledAt, heldAt sql.NullString
 	if err := scanner.Scan(&run.ID, &run.TaskID, &run.RunSequence, &flowID, &snapshotJSON, &state,
 		&run.CurrentNodeKey, &nodeRunID, &artifactID, &run.TransitionBudget, &run.TransitionsUsed,
-		&run.Version, &createdAt, &startedAt, &completedAt, &cancelledAt, &run.CompletionSource); err != nil {
+		&run.Version, &createdAt, &startedAt, &completedAt, &cancelledAt, &run.CompletionSource,
+		&heldAt, &run.HeldBy); err != nil {
 		return WorkflowRun{}, err
 	}
 	if err := json.Unmarshal([]byte(snapshotJSON), &run.Snapshot); err != nil {
@@ -1891,6 +1949,9 @@ func scanWorkflowRun(scanner taskScanner) (WorkflowRun, error) {
 		return WorkflowRun{}, err
 	}
 	if run.CancelledAt, err = parseNullableTime(cancelledAt); err != nil {
+		return WorkflowRun{}, err
+	}
+	if run.HeldAt, err = parseNullableTime(heldAt); err != nil {
 		return WorkflowRun{}, err
 	}
 	return run, nil

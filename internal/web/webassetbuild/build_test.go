@@ -67,3 +67,31 @@ func TestBuildCSSScopesSelectors(t *testing.T) {
 		})
 	}
 }
+
+// A comment above a rule must not be swept into that rule's selector list: the
+// scope prefix would turn it into an invalid selector and browsers drop the
+// whole rule, which is invisible until something silently stops being styled.
+func TestBuildModulesLeavesCommentsAlone(t *testing.T) {
+	source := strings.Join([]string{
+		"/* The lane grid reflows on its own; 260px is the width below",
+		"   which a card's title stops being readable. */",
+		".lanes {",
+		"  display: grid;",
+		"}",
+		"",
+		"/* single line */",
+		".other {",
+		"  color: red;",
+		"}",
+	}, "\n")
+
+	css := string(BuildModules([]Module{{Name: "board.module.css", Scope: "flow-board", Source: []byte(source)}}))
+	for _, want := range []string{"flow-board .lanes {", "flow-board .other {"} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("generated css missing %q:\n%s", want, css)
+		}
+	}
+	if strings.Contains(css, "flow-board /*") || strings.Contains(css, "flow-board    which") {
+		t.Fatalf("comment lines were scoped as selectors:\n%s", css)
+	}
+}

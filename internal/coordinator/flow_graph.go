@@ -249,6 +249,30 @@ func (s FlowSnapshot) Node(key string) (FlowNodeSnapshot, bool) {
 	return FlowNodeSnapshot{}, false
 }
 
+// NodeIndex reports the node's position in the frozen node list. The snapshot
+// preserves authoring order, so the index is a display ordinal ("step 3 of 6")
+// rather than a claim about progress — branching and cyclic graphs visit nodes
+// out of slice order.
+func (s FlowSnapshot) NodeIndex(key string) (int, bool) {
+	for index, node := range s.Nodes {
+		if node.Key == key {
+			return index, true
+		}
+	}
+	return 0, false
+}
+
+// TerminalNodeKey returns the key of the first terminal node, which is where
+// "skip to merge" hands a held run back to the executor.
+func (s FlowSnapshot) TerminalNodeKey() (string, bool) {
+	for _, node := range s.Nodes {
+		if node.Kind == NodeTerminal {
+			return node.Key, true
+		}
+	}
+	return "", false
+}
+
 func (s FlowSnapshot) Target(from, outcome string) (string, bool) {
 	for _, edge := range s.Edges {
 		if edge.From == from && edge.Outcome == outcome {

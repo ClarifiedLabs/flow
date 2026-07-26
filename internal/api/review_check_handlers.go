@@ -11,7 +11,6 @@ import (
 
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
-	"github.com/ClarifiedLabs/flow/internal/lifecycle"
 	"github.com/ClarifiedLabs/flow/internal/worker"
 )
 
@@ -66,6 +65,22 @@ func (s *projectServer) handleChangePath(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		s.handleListThreads(w, r, principal, parts[0])
+	case "review":
+		if len(parts) != 2 || !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+			return
+		}
+		s.handleSubmitReview(w, r, principal, parts[0])
+	case "merge":
+		if len(parts) != 2 || !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+			return
+		}
+		s.handleMergeChange(w, r, parts[0])
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 	}
@@ -330,114 +345,30 @@ func (s *projectServer) handleListThreads(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, threadsResponse{Threads: threads})
 }
 
-// handlePutHandoff records the handoff an author agent just wrote into the
-// coordinator's snapshot store, so the latest handoff reaches the coordinator
-// the moment it is written rather than waiting for the next git reconcile. Git
-// remains the durable source of truth: a later reconcile pass still overwrites
-// this snapshot from the branch ref. Invalid handoffs are recorded (valid=false)
-// rather than rejected, mirroring reconcile semantics.
-func (s *projectServer) handlePutHandoff(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, changeID string) {
-	if s.sessions == nil {
-		writeError(w, http.StatusInternalServerError, "sessions_unavailable", "session service is not configured")
-		return
-	}
-	if s.reconciler == nil {
-		writeError(w, http.StatusInternalServerError, "reconciler_unavailable", "reconcile service is not configured")
-		return
-	}
-	var request putHandoffRequest
-	if err := decodeJSON(r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
-		return
-	}
-	change, err := s.sessions.GetChange(r.Context(), changeID)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "change_not_found", "change not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "load_change_failed", err.Error())
-		return
-	}
-	// A session token must own this change; owners may write any change's
-	// handoff. Workers cannot write handoffs (no allowed worker roles passed).
-	if err := s.checkThreadChangeAccess(r, principal, change.TaskID, change.ID, "", true); err != nil {
-		writeError(w, http.StatusForbidden, "forbidden", err.Error())
-		return
-	}
-	if err := s.reconciler.UpsertHandoffSnapshot(r.Context(), change.ID, strings.TrimSpace(request.HeadSHA), request.Content); err != nil {
-		writeError(w, http.StatusBadRequest, "put_handoff_failed", err.Error())
-		return
-	}
-	snapshot, err := s.reconciler.GetHandoffSnapshot(r.Context(), change.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "load_handoff_failed", err.Error())
-		return
-	}
 
-	writeJSON(w, http.StatusOK, handoffResponse{
-		ChangeID: snapshot.ChangeID,
-		HeadSHA:  snapshot.HeadSHA,
-		Present:  snapshot.Present,
-		Valid:    snapshot.Valid,
-		Summary:  snapshot.Summary,
-	})
+// threadMutation names which review-thread verb an endpoint is performing.
+// Thread mutations are workflow inputs, not state-machine transitions: active
+// workflow check nodes observe the resulting thread/check state when the
+// executor next advances.
+type threadMutation string
+
+const (
+	threadMutationComment threadMutation = "comment"
+	threadMutationClaim   threadMutation = "claim"
+	threadMutationCertify threadMutation = "certify"
+	threadMutationReopen  threadMutation = "reopen"
+)
+
+type threadMutationInput struct {
+	Kind           threadMutation
+	Body           string
+	ClaimKind      coordinator.ReviewClaimKind
+	ClaimCommitSHA string
 }
 
-// handleGetHandoff returns the coordinator's current handoff snapshot for a
-// change, including the full body. The session builder injects this prior
-// handoff into the next author (fix round) and verifier prompt, replacing the
-// committed .handoff.md the next session used to cat. A missing snapshot returns
-// 404 so callers can treat "no prior handoff" as a normal, empty case.
-func (s *projectServer) handleGetHandoff(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, changeID string) {
-	if s.sessions == nil {
-		writeError(w, http.StatusInternalServerError, "sessions_unavailable", "session service is not configured")
-		return
-	}
-	if s.reconciler == nil {
-		writeError(w, http.StatusInternalServerError, "reconciler_unavailable", "reconcile service is not configured")
-		return
-	}
-	change, err := s.sessions.GetChange(r.Context(), changeID)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "change_not_found", "change not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "load_change_failed", err.Error())
-		return
-	}
-	// Owners read any change; the change's session and the reviewer/verifier
-	// workers acting on it read its handoff for prompt context.
-	if err := s.checkThreadChangeAccess(r, principal, change.TaskID, change.ID, r.URL.Query().Get("lease_id"), true, worker.RoleReviewer, worker.RoleVerifier); err != nil {
-		writeError(w, http.StatusForbidden, "forbidden", err.Error())
-		return
-	}
-	snapshot, err := s.reconciler.GetHandoffSnapshot(r.Context(), change.ID)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "handoff_not_found", "handoff not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "load_handoff_failed", err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, handoffResponse{
-		ChangeID: snapshot.ChangeID,
-		HeadSHA:  snapshot.HeadSHA,
-		Present:  snapshot.Present,
-		Valid:    snapshot.Valid,
-		Summary:  snapshot.Summary,
-		Content:  snapshot.Content,
-	})
-}
-
-// stepThreadEvent runs the shared thread-mutation flow against the review
-// thread service. Thread mutations are workflow inputs, not lifecycle-engine
-// transitions; active workflow check nodes observe the resulting thread/check
-// state when the executor advances.
-func (s *projectServer) stepThreadEvent(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, threadID string, leaseID string, allowSession bool, roles []worker.JobRole, event lifecycle.Event, failCode string, notFoundMsg string) {
+// applyThreadMutation runs the shared thread-mutation flow — load, authorize,
+// dispatch — against the review thread service.
+func (s *projectServer) applyThreadMutation(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, threadID string, leaseID string, allowSession bool, roles []worker.JobRole, mutation threadMutationInput, failCode string, notFoundMsg string) {
 	thread, err := s.threads.GetThread(r.Context(), threadID)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "thread_not_found", "thread not found")
@@ -453,23 +384,23 @@ func (s *projectServer) stepThreadEvent(w http.ResponseWriter, r *http.Request, 
 	}
 	actor := principal.Actor()
 	var updated coordinator.ReviewThread
-	switch event.Kind {
-	case lifecycle.EventThreadComment:
+	switch mutation.Kind {
+	case threadMutationComment:
 		updated, err = s.threads.AddComment(r.Context(), coordinator.AddThreadCommentInput{
-			ThreadID: threadID, Body: event.Payload.Body, Actor: actor,
+			ThreadID: threadID, Body: mutation.Body, Actor: actor,
 		})
-	case lifecycle.EventThreadClaimed:
+	case threadMutationClaim:
 		updated, err = s.threads.ClaimThread(r.Context(), coordinator.ClaimThreadInput{
-			ThreadID: threadID, Kind: event.Payload.ThreadKind, Body: event.Payload.Body,
-			ClaimCommitSHA: event.Payload.ClaimCommitSHA, Actor: actor,
+			ThreadID: threadID, Kind: mutation.ClaimKind, Body: mutation.Body,
+			ClaimCommitSHA: mutation.ClaimCommitSHA, Actor: actor,
 		})
-	case lifecycle.EventThreadCertify:
+	case threadMutationCertify:
 		updated, err = s.threads.CertifyThread(r.Context(), coordinator.VerifyThreadInput{
-			ThreadID: threadID, Body: event.Payload.Body, Actor: actor,
+			ThreadID: threadID, Body: mutation.Body, Actor: actor,
 		})
-	case lifecycle.EventThreadReopen:
+	case threadMutationReopen:
 		updated, err = s.threads.ReopenThread(r.Context(), coordinator.VerifyThreadInput{
-			ThreadID: threadID, Body: event.Payload.Body, Actor: actor,
+			ThreadID: threadID, Body: mutation.Body, Actor: actor,
 		})
 	default:
 		err = errors.New("unsupported review thread mutation")
@@ -491,13 +422,9 @@ func (s *projectServer) handleReplyThread(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	s.stepThreadEvent(w, r, principal, threadID, request.LeaseID, true,
+	s.applyThreadMutation(w, r, principal, threadID, request.LeaseID, true,
 		[]worker.JobRole{worker.RoleReviewer, worker.RoleVerifier},
-		lifecycle.Event{
-			Kind:     lifecycle.EventThreadComment,
-			ThreadID: threadID,
-			Payload:  lifecycle.EventPayload{Body: request.Body},
-		},
+		threadMutationInput{Kind: threadMutationComment, Body: request.Body},
 		"reply_thread_failed", "thread not found")
 }
 
@@ -507,15 +434,12 @@ func (s *projectServer) handleClaimThread(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	s.stepThreadEvent(w, r, principal, threadID, request.LeaseID, true, nil,
-		lifecycle.Event{
-			Kind:     lifecycle.EventThreadClaimed,
-			ThreadID: threadID,
-			Payload: lifecycle.EventPayload{
-				ThreadKind:     coordinator.ReviewClaimKind(strings.TrimSpace(request.Kind)),
-				Body:           request.Body,
-				ClaimCommitSHA: request.ClaimCommitSHA,
-			},
+	s.applyThreadMutation(w, r, principal, threadID, request.LeaseID, true, nil,
+		threadMutationInput{
+			Kind:           threadMutationClaim,
+			Body:           request.Body,
+			ClaimKind:      coordinator.ReviewClaimKind(strings.TrimSpace(request.Kind)),
+			ClaimCommitSHA: request.ClaimCommitSHA,
 		},
 		"claim_thread_failed", "thread not found or not claimable")
 }
@@ -526,13 +450,9 @@ func (s *projectServer) handleCertifyThread(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	s.stepThreadEvent(w, r, principal, threadID, request.LeaseID, false,
+	s.applyThreadMutation(w, r, principal, threadID, request.LeaseID, false,
 		[]worker.JobRole{worker.RoleVerifier},
-		lifecycle.Event{
-			Kind:     lifecycle.EventThreadCertify,
-			ThreadID: threadID,
-			Payload:  lifecycle.EventPayload{Body: request.Body},
-		},
+		threadMutationInput{Kind: threadMutationCertify, Body: request.Body},
 		"certify_thread_failed", "thread not found or not certifiable")
 }
 
@@ -542,13 +462,9 @@ func (s *projectServer) handleReopenThread(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	s.stepThreadEvent(w, r, principal, threadID, request.LeaseID, false,
+	s.applyThreadMutation(w, r, principal, threadID, request.LeaseID, false,
 		[]worker.JobRole{worker.RoleVerifier},
-		lifecycle.Event{
-			Kind:     lifecycle.EventThreadReopen,
-			ThreadID: threadID,
-			Payload:  lifecycle.EventPayload{Body: request.Body},
-		},
+		threadMutationInput{Kind: threadMutationReopen, Body: request.Body},
 		"reopen_thread_failed", "thread not found or not reopenable")
 }
 
@@ -601,55 +517,6 @@ func (s *projectServer) handleListChecks(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, checksResponse{Checks: checks, ReviewState: reviewState})
 }
 
-func (s *projectServer) handleRunReview(w http.ResponseWriter, r *http.Request, taskID string) {
-	if s.checkConfigs == nil || s.sessions == nil || s.checks == nil {
-		writeError(w, http.StatusInternalServerError, "review_unavailable", "review services are not configured")
-		return
-	}
-	task, err := s.tasks.GetTask(r.Context(), taskID)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "task_not_found", "task not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "get_task_failed", err.Error())
-		return
-	}
-	change, ok, err := s.sessions.ReadyUnmergedChangeForTask(r.Context(), taskID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "load_ready_change_failed", err.Error())
-		return
-	}
-	if !ok {
-		writeError(w, http.StatusBadRequest, "review_run_failed", "task has no ready unmerged change")
-		return
-	}
-	scheduled, err := s.checkConfigs.ScheduleReviewRound(r.Context(), coordinator.ScheduleReviewRoundInput{
-		Task:   task,
-		Change: change,
-	})
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "schedule_review_failed", err.Error())
-		return
-	}
-	checks, err := s.checks.ListChecks(r.Context(), taskID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "list_checks_failed", err.Error())
-		return
-	}
-	reviewState, err := s.checks.ReviewState(r.Context(), taskID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "review_state_failed", err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, reviewRunResponse{
-		Change:      change,
-		Scheduled:   scheduled,
-		Checks:      checks,
-		ReviewState: reviewState,
-	})
-}
 
 func (s *projectServer) handleGetCheck(w http.ResponseWriter, r *http.Request, taskID string, name string) {
 	check, err := s.checks.GetCheck(r.Context(), taskID, name)
@@ -752,29 +619,6 @@ func checkReporter(request reportCheckRequest, principal coordinator.Principal) 
 	return string(principal.Scope)
 }
 
-func (s *projectServer) lifecycleEvent(r *http.Request, principal coordinator.Principal, ev lifecycle.Event) lifecycle.Event {
-	if ev.Actor.Scope == "" {
-		ev.Actor = principal
-	}
-	ev.Audit = s.lifecycleAudit(r, principal, ev)
-	return ev
-}
-
-func (s *projectServer) lifecycleAudit(r *http.Request, principal coordinator.Principal, ev lifecycle.Event) lifecycle.EventAudit {
-	return lifecycle.EventAudit{
-		Method:       r.Method,
-		Path:         r.URL.Path,
-		Principal:    principal.Actor(),
-		ProjectID:    s.project.ID,
-		ProjectName:  s.project.Name,
-		TaskID:       strings.TrimSpace(ev.TaskID),
-		ChangeID:     strings.TrimSpace(ev.ChangeID),
-		ThreadID:     strings.TrimSpace(ev.ThreadID),
-		SessionID:    strings.TrimSpace(ev.SessionID),
-		UserAgent:    strings.TrimSpace(r.UserAgent()),
-		WebSessionID: strings.TrimSpace(principal.WebSessionID),
-	}
-}
 
 func (s *projectServer) checkThreadChangeAccess(r *http.Request, principal coordinator.Principal, taskID string, changeID string, leaseID string, allowSession bool, workerRoles ...worker.JobRole) error {
 	taskID = strings.TrimSpace(taskID)

@@ -1,0 +1,138 @@
+:host {
+  display: block;
+  min-width: 0;
+}
+
+.hunk-head {
+  padding: 7px 12px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+.line {
+  display: flex;
+  align-items: flex-start;
+  font-size: var(--text-prose);
+  line-height: 1.65;
+  min-width: 0;
+}
+
+.line[data-kind="add"] {
+  background: color-mix(in srgb, var(--st-ok) 8%, transparent);
+}
+
+.line[data-kind="del"] {
+  background: color-mix(in srgb, var(--st-danger) 8%, transparent);
+}
+
+.lineno {
+  flex: none;
+  width: 46px;
+  padding: 0 8px;
+  text-align: right;
+  color: var(--muted);
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+/* The gutter mark is the add-a-comment affordance, not decoration. It is a
+   button at every line, so pointing at a line is always one click away. */
+.gutter {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  padding: 0;
+  font: inherit;
+  line-height: 1;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  opacity: 0.35;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    color 120ms ease,
+    opacity 120ms ease;
+}
+
+.line[data-kind="add"] .gutter {
+  opacity: 1;
+  color: var(--st-ok);
+}
+
+.line[data-kind="del"] .gutter {
+  opacity: 1;
+  color: var(--st-danger);
+}
+
+.gutter:hover,
+.gutter[data-drafted] {
+  opacity: 1;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* Wrapping with a hanging indent, not horizontal scroll: on the screen whose
+   whole job is reading changed lines, nothing should be off-screen. */
+code {
+  flex: 1;
+  padding: 0 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  text-indent: -2ch;
+  padding-left: calc(10px + 2ch);
+}
+
+.draft-note {
+  flex: none;
+  padding: 0 10px;
+  font-size: var(--text-quiet);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.draft {
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 7px 12px 9px 46px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.draft textarea {
+  width: 100%;
+  resize: vertical;
+  background: var(--panel-2);
+  color: var(--ink);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  font-family: var(--font-prose);
+  font-size: var(--text-prose);
+}
+
+.draft-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.draft-hint {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+.empty {
+  font-size: var(--text-quiet);
+  letter-spacing: var(--track-chrome);
+  color: var(--muted);
+  padding: 18px;
+}

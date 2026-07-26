@@ -85,8 +85,12 @@ func NewWorkflowExecutor(opts WorkflowExecutorOptions) *WorkflowExecutor {
 // Tick advances every active workflow until it reaches asynchronous work, a
 // human wait, a dependency wait, or Done. Repeated calls are idempotent.
 func (e *WorkflowExecutor) Tick(ctx context.Context) error {
+	// held_at excludes runs an operator has taken over; they resume only when
+	// the hold is released.
 	rows, err := e.db.QueryContext(ctx, `
-SELECT id FROM workflow_runs WHERE state IN ('scheduled', 'running') ORDER BY created_at, id`)
+SELECT id FROM workflow_runs
+WHERE state IN ('scheduled', 'running') AND held_at IS NULL
+ORDER BY created_at, id`)
 	if err != nil {
 		return err
 	}
@@ -98,6 +102,10 @@ SELECT id FROM workflow_runs WHERE state IN ('scheduled', 'running') ORDER BY cr
 			return err
 		}
 		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
 	}
 	if err := rows.Close(); err != nil {
 		return err
@@ -118,6 +126,12 @@ func (e *WorkflowExecutor) Advance(ctx context.Context, runID string) error {
 			return err
 		}
 		if run.State == WorkflowRunWaiting || run.State == WorkflowRunCompleted || run.State == WorkflowRunCancelled {
+			return nil
+		}
+		// An operator holds the run. Advance is also called synchronously by
+		// every mutating workflow endpoint, so this guard — not just Tick's
+		// query — is what actually keeps a held run still.
+		if run.Held() {
 			return nil
 		}
 		nodeRun, _, err := e.runs.EnsureCurrentNode(ctx, run.ID)

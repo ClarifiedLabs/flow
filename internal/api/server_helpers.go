@@ -501,12 +501,33 @@ type uiTaskCard struct {
 	LatestStatus          *coordinator.StatusLogEntry    `json:"latest_status,omitempty"`
 	Blockers              uiBlockerSummary               `json:"blockers"`
 	CrashRetryAvailable   bool                           `json:"crash_retry_available,omitempty"`
+	// DwellSince is when the task entered the state it is in now. The board
+	// renders the elapsed time as its load-bearing number: a task sitting
+	// somewhere too long is the thing worth noticing.
+	DwellSince *time.Time `json:"dwell_since,omitempty"`
+	// StepIndex/StepCount place the current node in the frozen graph ("3/6").
+	// Ordinals, not progress: branching graphs visit nodes out of slice order.
+	StepIndex int `json:"step_index,omitempty"`
+	StepCount int `json:"step_count,omitempty"`
+	// Wait is the open durable wait, so the board can state the real question
+	// or the verbatim error instead of a generic "blocked".
+	Wait   *uiWorkflowWait `json:"wait,omitempty"`
+	Held   bool            `json:"held,omitempty"`
+	HeldBy string          `json:"held_by,omitempty"`
 }
 
 type uiWorkflowStepSummary struct {
 	Key  string               `json:"key"`
 	Name string               `json:"name"`
 	Kind coordinator.NodeKind `json:"kind,omitempty"`
+}
+
+type uiWorkflowWait struct {
+	Kind      coordinator.WorkflowWaitKind   `json:"kind"`
+	Reason    coordinator.WorkflowWaitReason `json:"reason,omitempty"`
+	Message   string                         `json:"message,omitempty"`
+	NodeRunID string                         `json:"node_run_id,omitempty"`
+	CreatedAt time.Time                      `json:"created_at"`
 }
 
 type uiTaskDetail struct {
@@ -526,17 +547,10 @@ type uiTaskDetail struct {
 	CrashRetryAvailable bool                             `json:"crash_retry_available,omitempty"`
 	TaskConsole         *consoleResponse                 `json:"task_console,omitempty"`
 	Checks              []coordinator.Check              `json:"checks,omitempty"`
-	Transitions         []coordinator.TransitionLogEntry `json:"transitions,omitempty"`
-	// TimelineTransitions is the enriched view of Transitions used by the web
-	// UI's unified timeline: session_ready / session_state_changed rows carry
-	// the decoded session_id, session_state, head_sha, and change_id so a
-	// timeline entry can render the exact session's terminal/transcript
-	// controls. It is populated in parallel with Transitions (which stays the
-	// raw log for the timeline endpoint and CLI) and is empty when no
-	// transitions exist.
-	TimelineTransitions []coordinator.SessionTimelineEntry `json:"timeline_transitions,omitempty"`
-	LifecycleGraph      *coordinator.LifecycleGraphSummary `json:"lifecycle_graph,omitempty"`
-	Attachments         []coordinator.TaskAttachment       `json:"attachments,omitempty"`
+	// Transitions is the task's workflow transition log, newest first. It is
+	// what the Activity tab renders.
+	Transitions []coordinator.WorkflowTransition `json:"transitions,omitempty"`
+	Attachments []coordinator.TaskAttachment     `json:"attachments,omitempty"`
 }
 
 type uiSessionSummary struct {

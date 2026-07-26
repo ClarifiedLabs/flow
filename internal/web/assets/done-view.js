@@ -3,6 +3,9 @@
 
 import { apiGet, taskHref } from "./api.js";
 import { doneClosedAtMs, flattenDonePage, phaseKey, renderPhaseBadge } from "./board.js";
+import { cardModel } from "./board-model.js";
+import { reconcile } from "./elements/base.js";
+import "./elements/task-card.js";
 import { formatDate } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
@@ -77,19 +80,35 @@ export function renderDoneListView(app) {
   if (!list) return;
   list.dataset.density = app.doneDensity;
   const entries = [...app.doneEntries].sort((a, b) => doneClosedAtMs(b.task) - doneClosedAtMs(a.task));
-  list.innerHTML = entries.length
-    ? entries.map((entry, index) => app.doneDensity === "compact"
-        ? renderDoneRowView(app, entry)
-        : app.renderTaskCard(entry.task, entry.card, entry.laneState, false, Math.min(index, 8), entry.project, "")
-      ).join("")
-    : `<div class="empty">No closed tasks</div>`;
+  if (!entries.length) {
+    list.innerHTML = `<div class="empty">No closed tasks</div>`;
+  } else if (app.doneDensity === "compact") {
+    list.innerHTML = entries.map((entry) => renderDoneRowView(app, entry)).join("");
+  } else {
+    // Extended density reuses the board card, so a closed task looks like the
+    // task it was rather than like a different kind of thing.
+    list.innerHTML = "";
+    reconcile(list, entries.map((entry) => doneCardModel(app, entry)), {
+      tag: "flow-task-card",
+      key: (model) => `${model.projectID}:${model.id}`,
+    });
+  }
   const more = app.querySelector(".done-more");
   if (more) {
     more.innerHTML = Object.keys(app.doneCursors).length
       ? `<button class="button secondary" data-done-more>Load more</button>`
       : "";
   }
-  app.bindTaskActions(() => app.load());
+}
+
+// doneCardModel is the board card plus what a history view needs: which change
+// the task produced, and when it closed.
+function doneCardModel(app, entry) {
+  const model = cardModel(entry, { showProject: app.doneProjectBadge });
+  const changeID = value(value(entry.card, "change", "Change"), "id", "ID");
+  const closedAt = formatDate(value(entry.task, "done_at", "DoneAt"));
+  model.extra = [changeID, closedAt].filter(Boolean);
+  return model;
 }
 
 export function renderDoneRowView(app, entry) {

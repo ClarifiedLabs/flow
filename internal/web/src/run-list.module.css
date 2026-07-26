@@ -1,0 +1,167 @@
+:host {
+  display: block;
+  min-width: 0;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 26px minmax(0, auto) auto 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+}
+
+.gutter {
+  display: flex;
+  justify-content: center;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--line-2);
+}
+
+.row[data-state="done"] .dot {
+  background: var(--st-ok);
+  border-color: var(--st-ok);
+}
+
+.row[data-state="failed"] .dot {
+  background: var(--st-danger);
+  border-color: var(--st-danger);
+}
+
+.row[data-state="current"] .dot {
+  width: 9px;
+  height: 9px;
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.name {
+  font-size: var(--text-body);
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row[data-state="future"] .name {
+  color: var(--muted);
+}
+
+/* The kind is a tag, not a second line of prose repeating the name. */
+.tag {
+  font-size: var(--text-nano);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 1px 4px;
+  white-space: nowrap;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.outcome {
+  font-size: var(--text-quiet);
+  color: var(--st-ok);
+  white-space: nowrap;
+}
+
+.row[data-state="failed"] .outcome {
+  color: var(--st-danger);
+}
+
+.duration {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A loop back is one muted line under the row that caused it, with an elbow
+   pointing at where the run went. */
+.loop {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 32px;
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+.elbow {
+  width: 20px;
+  height: 14px;
+  border-left: 1px solid var(--line-2);
+  border-bottom: 1px solid var(--line-2);
+  border-bottom-left-radius: 7px;
+  margin-top: -10px;
+}
+
+.row.is-current {
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: start;
+}
+
+.current {
+  background: var(--panel-2);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.current-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.current-head strong {
+  font-size: var(--text-strong);
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.current-head .duration {
+  color: var(--accent);
+}
+
+.child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+.child-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--line-2);
+}
+
+.child[data-live] .child-dot {
+  background: var(--st-ok);
+}
+
+.child-name {
+  color: var(--ink-2);
+}
+
+.empty {
+  font-size: var(--text-quiet);
+  letter-spacing: var(--track-chrome);
+  color: var(--muted);
+}

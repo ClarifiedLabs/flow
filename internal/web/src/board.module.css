@@ -1,0 +1,32 @@
+:host {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.surface {
+  min-width: 0;
+}
+
+/* The lane grid reflows to fewer columns on its own; 260px is the width below
+   which a card's title stops being readable at two lines. */
+.surface.lanes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.empty {
+  font-size: var(--text-quiet);
+  letter-spacing: var(--track-chrome);
+  color: var(--muted);
+  padding: 18px;
+}
+
+@media (max-width: 760px) {
+  .surface.lanes {
+    grid-template-columns: 1fr;
+  }
+}

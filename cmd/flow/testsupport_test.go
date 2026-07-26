@@ -10,7 +10,6 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
-	"github.com/ClarifiedLabs/flow/internal/lifecycle"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
@@ -146,15 +145,4 @@ func repointFlowTestFixtureExchange(t *testing.T, fixture flowTestFixture, excha
 	bundle.Merges = coordinator.NewMergeService(db, bundle.Tasks, bundle.Sessions, project)
 	bundle.CheckConfigs = coordinator.NewCheckConfigServiceWithOptions(db, bundle.Checks, bundle.Queue, bundle.Threads, project, coordinator.CheckConfigServiceOptions{})
 	bundle.GitEventConsumer = coordinator.NewGitEventConsumer(db, project)
-	bundle.Engine = lifecycle.NewEngine(db, lifecycle.NewEffects(
-		bundle.Tasks,
-		bundle.Checks,
-		bundle.CheckConfigs,
-		bundle.Sessions,
-		bundle.Merges,
-		bundle.Threads,
-		bundle.Status,
-		coordinator.NewFlowCursorService(db, bundle.Flows),
-		bundle.Reconciler,
-	))
 }

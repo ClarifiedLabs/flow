@@ -1,0 +1,129 @@
+:host {
+  display: block;
+  min-width: 0;
+}
+
+/* Horizontally scrollable rather than wrapped: wrapping is what produced the
+   crossing edges the redesign is fixing. */
+.scroll {
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+svg {
+  display: block;
+}
+
+.node rect {
+  fill: var(--panel);
+  stroke: var(--line-2);
+  stroke-width: 1;
+}
+
+.node.is-unreached rect {
+  stroke: var(--line);
+  stroke-dasharray: 3 3;
+  opacity: 0.6;
+}
+
+.node.is-current rect {
+  fill: color-mix(in srgb, var(--accent) 22%, var(--panel));
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.node .halo {
+  fill: var(--accent-soft);
+  stroke: none;
+}
+
+.node .name {
+  font-size: var(--text-nano);
+  font-weight: var(--weight-node);
+  fill: var(--ink);
+}
+
+.node .kind {
+  font-size: var(--text-nano);
+  fill: var(--muted);
+}
+
+.node.is-current .name {
+  font-weight: var(--weight-heavy);
+}
+
+/* A visit count only earns its ink when there was more than one visit. */
+.node .visits {
+  font-size: var(--text-nano);
+  font-weight: 700;
+  fill: var(--accent);
+  text-anchor: end;
+}
+
+.edge path {
+  fill: none;
+  stroke-width: 1;
+}
+
+.edge.is-taken {
+  color: var(--accent);
+}
+
+.edge.is-taken path {
+  stroke: var(--accent);
+}
+
+.edge.is-untaken {
+  color: var(--line-2);
+  opacity: 0.45;
+}
+
+.edge.is-untaken path {
+  stroke: var(--line-2);
+}
+
+.edge-label {
+  font-size: var(--text-micro);
+  fill: var(--muted);
+  text-anchor: middle;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+.key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.key i {
+  width: 14px;
+  height: 1px;
+  background: var(--line-2);
+}
+
+.key.is-taken i {
+  background: var(--accent);
+}
+
+.key.is-unreached i {
+  height: 8px;
+  width: 8px;
+  background: transparent;
+  border: 1px dashed var(--line);
+}
+
+.empty {
+  font-size: var(--text-quiet);
+  letter-spacing: var(--track-chrome);
+  color: var(--muted);
+}

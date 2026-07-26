@@ -13,8 +13,39 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/web/webassetbuild"
 )
 
-//go:embed assets/* src/app.module.css
+//go:embed assets/* assets/elements/* src/*.module.css
 var assetFS embed.FS
+
+// cssModules is the ordered stylesheet manifest. Each entry names the element
+// its selectors are scoped to; tag names are unique, so a component's rules
+// cannot leak. The token sheet is unscoped because :root and the theme media
+// queries have to reach the whole document. Order is cascade order: tokens,
+// then shared chrome, then components.
+var cssModules = []struct{ Name, Scope string }{
+	{"tokens.module.css", ""},
+	{"base.module.css", "flow-app"},
+	{"board.module.css", "flow-board"},
+	{"attention-strip.module.css", "flow-attention-strip"},
+	{"lane.module.css", "flow-lane"},
+	{"task-card.module.css", "flow-task-card"},
+	{"step-rail.module.css", "flow-step-rail"},
+	{"board-table.module.css", "flow-board-table"},
+	{"task-detail.module.css", "flow-task-detail"},
+	{"task-rail.module.css", "flow-task-rail"},
+	{"run-spine.module.css", "flow-run-spine"},
+	{"now-card.module.css", "flow-now-card"},
+	{"held-panel.module.css", "flow-held-panel"},
+	{"tab-strip.module.css", "flow-tab-strip"},
+	{"run-list.module.css", "flow-run-list"},
+	{"workflow-graph.module.css", "flow-workflow-graph"},
+	{"check-list.module.css", "flow-check-list"},
+	{"activity-feed.module.css", "flow-activity-feed"},
+	{"change.module.css", "flow-change"},
+	{"diff.module.css", "flow-diff"},
+	{"inline-thread.module.css", "flow-inline-thread"},
+	{"review-bar.module.css", "flow-review-bar"},
+	{"epic.module.css", "flow-epic"},
+}
 
 var assetVersion = computeAssetVersion()
 
@@ -75,11 +106,15 @@ func AssetETag(contents []byte) string {
 }
 
 func generatedCSS() ([]byte, error) {
-	source, err := assetFS.ReadFile("src/app.module.css")
-	if err != nil {
-		return nil, fmt.Errorf("read css module source: %w", err)
+	modules := make([]webassetbuild.Module, 0, len(cssModules))
+	for _, module := range cssModules {
+		source, err := assetFS.ReadFile("src/" + module.Name)
+		if err != nil {
+			return nil, fmt.Errorf("read css module %s: %w", module.Name, err)
+		}
+		modules = append(modules, webassetbuild.Module{Name: module.Name, Scope: module.Scope, Source: source})
 	}
-	return webassetbuild.BuildCSS(source), nil
+	return webassetbuild.BuildModules(modules), nil
 }
 
 func contentType(name string) string {

@@ -1,0 +1,188 @@
+:host {
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+/* Every fixed child holds its width; only the spacer flexes, so a long change
+   id or branch name cannot squeeze the toggle off the row. */
+.head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.head > * {
+  flex: none;
+  white-space: nowrap;
+}
+
+.change-id {
+  font-size: var(--text-title);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.task-link {
+  font-size: var(--text-meta);
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.summary {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.review-state {
+  font-size: var(--text-nano);
+  text-transform: uppercase;
+  letter-spacing: var(--track-badge);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--st-idle-bg);
+  color: var(--muted);
+}
+
+.review-state[data-state="changes_requested"] {
+  background: var(--st-warn-bg);
+  color: var(--st-warn);
+}
+
+.review-state[data-state="approved"] {
+  background: var(--st-ok-bg);
+  color: var(--st-ok);
+}
+
+.segmented {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.segmented button {
+  font: inherit;
+  font-size: var(--text-ui);
+  padding: 3px 11px;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    background 120ms ease;
+}
+
+.segmented button[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.body {
+  display: grid;
+  grid-template-columns: 236px minmax(0, 1fr);
+}
+
+.files {
+  border-right: 1px solid var(--line);
+  padding: 10px 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: inherit;
+  text-align: left;
+  padding: 5px 12px;
+  background: none;
+  border: 0;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+  min-width: 0;
+  transition:
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.file:hover {
+  background: var(--panel-2);
+}
+
+.file.is-selected {
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* Long paths ellipsise from the front: the filename is what you are looking
+   for, not the repository root. */
+.path {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+  direction: rtl;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+.file.is-selected .path {
+  color: var(--ink);
+}
+
+.badge {
+  flex: none;
+  font-size: var(--text-nano);
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--st-idle-bg);
+  color: var(--muted);
+}
+
+.badge[data-tone="warn"] {
+  background: var(--st-warn-bg);
+  color: var(--st-warn);
+}
+
+.badge[data-tone="ok"] {
+  background: var(--st-ok-bg);
+  color: var(--st-ok);
+}
+
+.pane {
+  background: var(--pre);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.empty {
+  font-size: var(--text-quiet);
+  letter-spacing: var(--track-chrome);
+  color: var(--muted);
+  padding: 18px;
+}
+
+@media (max-width: 760px) {
+  .body {
+    grid-template-columns: 1fr;
+  }
+
+  .files {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+}

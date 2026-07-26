@@ -5,7 +5,6 @@ import (
 
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
-	"github.com/ClarifiedLabs/flow/internal/lifecycle"
 	"github.com/ClarifiedLabs/flow/internal/scheduler"
 	"github.com/ClarifiedLabs/flow/internal/terminal"
 	"github.com/ClarifiedLabs/flow/internal/worker"
@@ -275,7 +274,13 @@ type WebBootstrapResponse struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-type CheckFollowUpFailure = lifecycle.FollowUpFailure
+// CheckFollowUpFailure reports work that a satisfied check triggered and that
+// then failed — the check itself stands, but something downstream of it did
+// not. Surfaced to the worker so a follow-up failure is not silent.
+type CheckFollowUpFailure struct {
+	EventKind string `json:"event_kind"`
+	Details   string `json:"details"`
+}
 
 type CheckResponse struct {
 	Check            coordinator.Check        `json:"check"`

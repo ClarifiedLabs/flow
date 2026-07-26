@@ -1,0 +1,95 @@
+:host {
+  display: block;
+  border: 1px solid var(--line-2);
+  border-left: 2px solid var(--tone, var(--ph-await));
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+
+:host([hidden]) {
+  display: none;
+}
+
+:host([data-tone="danger"]) {
+  --tone: var(--st-danger);
+}
+
+:host([data-tone="warn"]) {
+  --tone: var(--st-warn);
+}
+
+:host([data-tone="await"]) {
+  --tone: var(--ph-await);
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.head strong {
+  font-size: var(--text-strong);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.age {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.body {
+  background: var(--panel-2);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.who {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: var(--text-quiet);
+}
+
+.actor {
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+.locus {
+  color: var(--muted);
+}
+
+/* A comment written against an older revision is not wrong, but you need to
+   know before you act on it. */
+.flag {
+  color: var(--st-warn);
+}
+
+.prose {
+  font-family: var(--font-prose);
+  font-size: var(--text-prose);
+  color: var(--ink);
+  line-height: var(--leading-relaxed);
+}
+
+.prose p {
+  margin: 0;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}

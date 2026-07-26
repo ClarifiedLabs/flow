@@ -2,24 +2,62 @@ package webassetbuild
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 )
 
-const generatedCSSHeader = "/* Generated from internal/web/src/app.module.css. */\n"
+// Module is one component stylesheet plus the element its selectors are scoped
+// to. An empty Scope leaves selectors alone, which is what the token sheet
+// wants: :root and the theme media queries must reach the whole document.
+type Module struct {
+	Name   string
+	Scope  string
+	Source []byte
+}
+
+// BuildModules concatenates component stylesheets, each scoped to its own
+// element. Element tag names are unique, so tag-name scoping isolates a
+// component's rules without hashing class names.
+func BuildModules(modules []Module) []byte {
+	var output bytes.Buffer
+	for _, module := range modules {
+		fmt.Fprintf(&output, "/* Generated from internal/web/src/%s. */\n", module.Name)
+		output.Write(buildScoped(module.Source, module.Scope))
+		output.WriteByte('\n')
+	}
+	return output.Bytes()
+}
 
 // BuildCSS scopes module selectors to the Flow custom element.
 func BuildCSS(source []byte) []byte {
 	var output bytes.Buffer
-	output.WriteString(generatedCSSHeader)
+	output.WriteString("/* Generated from internal/web/src/app.module.css. */\n")
+	output.Write(buildScoped(source, "flow-app"))
+	return output.Bytes()
+}
+
+func buildScoped(source []byte, scope string) []byte {
+	var output bytes.Buffer
 
 	var stack []string
 	var selector []string
+	inComment := false
 	for _, line := range strings.Split(strings.TrimRight(string(source), " \t\r\n"), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			flushSelector(&output, selector)
 			selector = nil
 			output.WriteByte('\n')
+			continue
+		}
+
+		// Comments pass through untouched. Accumulating them into the selector
+		// buffer would prefix the scope onto every comment line and turn the
+		// rule that follows into an invalid selector list, silently dropping it.
+		if inComment || strings.HasPrefix(trimmed, "/*") {
+			output.WriteString(line)
+			output.WriteByte('\n')
+			inComment = !strings.Contains(line, "*/")
 			continue
 		}
 
@@ -64,7 +102,7 @@ func BuildCSS(source []byte) []byte {
 
 		selector = append(selector, line)
 		if strings.Contains(trimmed, "{") {
-			flushScopedSelector(&output, selector)
+			flushScopedSelector(&output, selector, scope)
 			selector = nil
 			stack = append(stack, "rule")
 		}
@@ -103,17 +141,17 @@ func flushSelector(output *bytes.Buffer, lines []string) {
 	}
 }
 
-func flushScopedSelector(output *bytes.Buffer, lines []string) {
+func flushScopedSelector(output *bytes.Buffer, lines []string, scope string) {
 	for _, line := range lines {
-		output.WriteString(scopeSelectorLine(line))
+		output.WriteString(scopeSelectorLine(line, scope))
 		output.WriteByte('\n')
 	}
 }
 
-func scopeSelectorLine(line string) string {
+func scopeSelectorLine(line string, scope string) string {
 	indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
 	body := strings.TrimSpace(line)
-	if body == "" || strings.HasPrefix(body, "flow-app ") || strings.HasPrefix(body, "@") {
+	if scope == "" || body == "" || strings.HasPrefix(body, scope+" ") || body == scope || strings.HasPrefix(body, "@") {
 		return line
 	}
 
@@ -130,11 +168,20 @@ func scopeSelectorLine(line string) string {
 		return line
 	}
 
-	switch body {
-	case "*":
-		body = "flow-app, flow-app *"
+	switch {
+	case body == "*":
+		body = scope + ", " + scope + " *"
+	case body == ":host":
+		// A component sheet styles its own element box. Custom elements are
+		// display: inline by default, so every component needs this.
+		body = scope
+	case strings.HasPrefix(body, ":host("):
+		// :host(:hover) -> flow-x:hover, and :host(:hover) .y -> flow-x:hover .y.
+		// These are light-DOM elements, so :host is only borrowed notation for
+		// "this element"; there is no shadow boundary to cross.
+		body = expandHostSelector(body, scope)
 	default:
-		body = "flow-app " + body
+		body = scope + " " + body
 	}
 	if trailingComma {
 		body += ","
@@ -143,6 +190,25 @@ func scopeSelectorLine(line string) string {
 		body += " " + suffix
 	}
 	return indent + body
+}
+
+// expandHostSelector rewrites a :host(<inner>) prefix into scope<inner>,
+// keeping whatever descendant selector follows.
+func expandHostSelector(body string, scope string) string {
+	rest := body[len(":host("):]
+	depth := 1
+	for index := range len(rest) {
+		switch rest[index] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return scope + rest[:index] + rest[index+1:]
+			}
+		}
+	}
+	return scope + " " + body
 }
 
 func isRootSelector(selector string) bool {

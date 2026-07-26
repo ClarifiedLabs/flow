@@ -44,9 +44,28 @@ export const BOARD_DONE_STORAGE_KEY = "flow.ui.boardDone.v1";
 
 export const DIFF_MODE_STORAGE_KEY = "flow.ui.diffMode";
 
+export const BOARD_VIEW_STORAGE_KEY = "flow.ui.boardView";
+
+export const DIAGRAM_MODE_STORAGE_KEY = "flow.ui.diagramMode";
+
 export const DONE_DENSITIES = new Set(["extended", "compact"]);
 
 export const DIFF_MODES = new Set(["unified", "split"]);
+
+export const BOARD_VIEWS = new Set(["lanes", "table"]);
+
+export const DIAGRAM_MODES = new Set(["run", "graph"]);
+
+// TASK_TABS is the task detail work surface. Order is the reading order of the
+// page: what is happening, then the change, then the evidence, then the log.
+export const TASK_TABS = [
+  ["overview", "Overview"],
+  ["change", "Change"],
+  ["checks", "Checks"],
+  ["activity", "Activity"],
+  ["terminal", "Terminal"],
+  ["detail", "Detail"],
+];
 
 export const DONE_OUTCOMES = new Set(["all", "completed", "merged", "rejected", "abandoned", "cancelled", "failed"]);
 
