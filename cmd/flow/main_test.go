@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"flag"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1261,4 +1262,28 @@ func gitHTTPTestConfig(t *testing.T, repoPath string, key string) string {
 		t.Fatalf("git config --get %s: %s: %v", key, strings.TrimSpace(string(output)), err)
 	}
 	return strings.TrimSpace(string(output))
+}
+
+// Every owner command registers the same API override flags through
+// addAPIFlags, so the shared block in the usage text has to list all of them.
+// Omitting one reads as "this command does not take it" — which is how you end
+// up pointing a mutating command at whichever coordinator the default config
+// happens to name.
+func TestUsageListsEveryAPIOverrideFlag(t *testing.T) {
+	var usage bytes.Buffer
+	printUsage(&usage)
+
+	const heading = "API override flags on owner commands:"
+	_, block, found := strings.Cut(usage.String(), heading)
+	if !found {
+		t.Fatalf("usage text has no %q section:\n%s", heading, usage.String())
+	}
+
+	registered := flag.NewFlagSet("probe", flag.ContinueOnError)
+	addAPIFlags(registered)
+	registered.VisitAll(func(f *flag.Flag) {
+		if !strings.Contains(block, "--"+f.Name+" ") {
+			t.Fatalf("the shared flag block does not document --%s:\n%s", f.Name, block)
+		}
+	})
 }

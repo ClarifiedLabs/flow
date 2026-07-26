@@ -2768,6 +2768,7 @@ Global flags:
   --log-level LEVEL   structured log level: debug, info, warn, error, or off (overrides LOG_LEVEL)
 
 API override flags on owner commands:
+  --config PATH       client config path (default: $XDG_CONFIG_HOME/flow/config.yaml)
   --server URL        coordinator server URL
   --token TOKEN       bearer token
   --project PROJECT   project id or name
