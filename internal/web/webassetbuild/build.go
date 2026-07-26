@@ -41,12 +41,23 @@ func buildScoped(source []byte, scope string) []byte {
 
 	var stack []string
 	var selector []string
+	inComment := false
 	for _, line := range strings.Split(strings.TrimRight(string(source), " \t\r\n"), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			flushSelector(&output, selector)
 			selector = nil
 			output.WriteByte('\n')
+			continue
+		}
+
+		// Comments pass through untouched. Accumulating them into the selector
+		// buffer would prefix the scope onto every comment line and turn the
+		// rule that follows into an invalid selector list, silently dropping it.
+		if inComment || strings.HasPrefix(trimmed, "/*") {
+			output.WriteString(line)
+			output.WriteByte('\n')
+			inComment = !strings.Contains(line, "*/")
 			continue
 		}
 

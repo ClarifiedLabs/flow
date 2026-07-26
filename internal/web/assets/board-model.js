@@ -79,7 +79,9 @@ export function waitReasonText(card, { readyToMerge = false } = {}) {
 }
 
 // waitActionLabel names the button. Bare imperatives, one word where possible.
-export function waitActionLabel(card, { readyToMerge = false } = {}) {
+export function waitActionLabel(card, { readyToMerge = false, held = false } = {}) {
+  // A held task is already yours; the only thing to do with it is give it back.
+  if (held) return "Resume";
   switch (waitKindOf(value(card, "wait", "Wait"))) {
     case "gate":
       return "Answer";
@@ -179,9 +181,11 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
     wait,
     waitKind,
     readyToMerge,
-    needsYou: Boolean(waitKind === "gate" || waitKind === "failed" || waitKind === "budget" || readyToMerge),
-    reason: waitReasonText(card, { readyToMerge }),
-    actionLabel: waitActionLabel(card, { readyToMerge }),
+    // Held work is not waiting on you to notice it — you are already holding
+    // it. Leaving it in the attention strip would drown the tasks that are.
+    needsYou: !held && Boolean(waitKind === "gate" || waitKind === "failed" || waitKind === "budget" || readyToMerge),
+    reason: held ? "Held by you — the workflow will not advance" : waitReasonText(card, { readyToMerge }),
+    actionLabel: waitActionLabel(card, { readyToMerge, held }),
     stepIndex,
     stepCount,
     stepName,

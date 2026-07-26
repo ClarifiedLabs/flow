@@ -74,6 +74,19 @@ test("held outranks blocked so the board says who owns the task", () => {
   assert.match(model.activity, /Held by you/);
 });
 
+test("held work leaves the attention strip: you are already on it", () => {
+  const held = cardModel(entry({ task: { id: "t-held" }, card: { held: true, wait: { kind: "human_gate", message: "Ship it?" } } }));
+  const waiting = cardModel(entry({ task: { id: "t-waiting" }, card: { wait: { kind: "human_gate", message: "Ship it?" } } }));
+  assert.ok(waiting.needsYou, "an unheld gate still needs a human");
+  assert.ok(!held.needsYou, "held work would otherwise drown the tasks actually waiting");
+  assert.equal(held.actionLabel, "Resume");
+  assert.match(held.reason, /Held by you/);
+  // The board feeds the strip only what needs a human, so a board whose sole
+  // open item is held stays silent.
+  assert.equal(renderAttentionStrip([held, waiting].filter((model) => model.needsYou)).includes(held.id), false);
+  assert.equal(renderAttentionStrip([held].filter((model) => model.needsYou)), "");
+});
+
 test("the attention reason is the agent's own words, never a generic label", () => {
   const question = "Should the done cursor include merged tasks?";
   assert.equal(waitReasonText({ wait: { kind: "human_gate", message: question } }), question);

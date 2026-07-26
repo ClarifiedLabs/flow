@@ -768,13 +768,19 @@ tr.row-idle {
   background: var(--accent);
   color: var(--accent-ink);
   border-radius: var(--radius);
-  font-size: 0.75rem;
+  font-size: var(--text-ui);
   font-weight: 600;
-  letter-spacing: 0.03em;
+  letter-spacing: var(--track-button);
   padding: 6px 10px;
   cursor: pointer;
   min-height: 30px;
-  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+  /* A button that navigates is still a button: an <a class="button"> must not
+     inherit the link underline. */
+  text-decoration: none;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
 }
 
 .button:hover {
@@ -2729,5 +2735,44 @@ table.diff-split .diff-hunk-header td {
 }
 
 table.diff-split .diff-row-meta .diff-text {
+  color: var(--muted);
+}
+
+
+/* Step rail. Shared because the card, the dense table row and the standalone
+   <flow-step-rail> all inline the same markup; scoping it to one of them would
+   leave it unstyled in the others. */
+.rail {
+  display: flex;
+  gap: 2px;
+  flex: none;
+}
+
+.rail i {
+  display: block;
+  width: 16px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line);
+}
+
+.rail i[data-seg="done"] {
+  background: var(--ink-2);
+}
+
+.rail i[data-seg="current"] {
+  background: var(--ph, var(--accent));
+}
+
+.rail-label {
+  font-size: var(--text-meta);
+  color: var(--ph, var(--muted));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.rail-label.is-idle {
   color: var(--muted);
 }

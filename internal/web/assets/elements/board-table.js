@@ -62,6 +62,9 @@ function renderRow(model) {
 // Rows that need a human get a real button; the rest get a quiet text action,
 // so the eye is drawn only to the work that is actually blocked on someone.
 function renderRowAction(model, href, projectAttr) {
+  if (model.held) {
+    return `<button class="quiet-action" data-workflow-release="${escapeAttr(model.id)}" data-edge="resume"${projectAttr}>resume</button>`;
+  }
   if (model.needsYou && model.actionLabel) {
     return model.actionLabel === "Merge"
       ? `<button class="button" data-attention-merge="${escapeAttr(model.id)}"${projectAttr}>Merge</button>`
