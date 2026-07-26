@@ -14,7 +14,6 @@ import (
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
-	"github.com/ClarifiedLabs/flow/internal/lifecycle"
 	"github.com/ClarifiedLabs/flow/internal/worker"
 )
 
@@ -30,7 +29,6 @@ type ProjectBundle struct {
 	WorkflowRuns      *coordinator.WorkflowRunService
 	WorkflowArtifacts *coordinator.WorkflowArtifactService
 	WorkflowExecutor  *coordinator.WorkflowExecutor
-	Cursors           *coordinator.FlowCursorService
 	Checks            *coordinator.CheckService
 	Threads           *coordinator.ThreadService
 	Sessions          *coordinator.SessionService
@@ -40,12 +38,10 @@ type ProjectBundle struct {
 	Reconciler        *coordinator.ReconcileService
 	CheckConfigs      *coordinator.CheckConfigService
 	Merges            *coordinator.MergeService
-	Transitions       *coordinator.TransitionService
 	GitEvents         *coordinator.GitEventService
 	Idempotency       *coordinator.IdempotencyService
 	GitEventConsumer  *coordinator.GitEventConsumer
 	Queue             *worker.Service
-	Engine            *lifecycle.Engine
 }
 
 type RegistryOptions struct {
@@ -59,10 +55,6 @@ type RegistryOptions struct {
 	AuthorEntrypoint           map[string]any
 	AuthorEntrypointConfigured bool
 	HarnessArgs                flowharness.Args
-
-	// Deadlines bounds hung planning/authoring sessions and never-reporting
-	// checks. The zero value disables every deadline.
-	Deadlines lifecycle.DeadlineConfig
 
 	// ReviewAuthorCycleLimit bounds automated review/acceptance -> author fix
 	// loops before a human must grant more cycles.
@@ -89,7 +81,6 @@ type Registry struct {
 	authorEntrypoint           map[string]any
 	authorEntrypointConfigured bool
 	harnessArgs                flowharness.Args
-	deadlines                  lifecycle.DeadlineConfig
 	reviewAuthorCycleLimit     int
 	commitIdentity             flowgit.CommitIdentity
 
@@ -135,7 +126,6 @@ func NewRegistry(opts RegistryOptions) (*Registry, error) {
 		authorEntrypoint:           opts.AuthorEntrypoint,
 		authorEntrypointConfigured: opts.AuthorEntrypointConfigured,
 		harnessArgs:                harnessArgs,
-		deadlines:                  opts.Deadlines,
 		reviewAuthorCycleLimit:     opts.ReviewAuthorCycleLimit,
 		commitIdentity:             opts.CommitIdentity,
 		bundles:                    map[string]*ProjectBundle{},
@@ -309,9 +299,6 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 	})
 	status := coordinator.NewStatusService(db)
 
-	engine := lifecycle.NewEngine(db, lifecycle.NewEffects(tasks, checks, checkConfigs, sessions, merges, threads, status, nil, reconciler))
-	engine.SetDeadlines(r.deadlines)
-
 	bundle := &ProjectBundle{
 		Project:           project,
 		Store:             store,
@@ -334,7 +321,6 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 		Idempotency:       coordinator.NewIdempotencyService(db),
 		GitEventConsumer:  coordinator.NewGitEventConsumer(db, project),
 		Queue:             queue,
-		Engine:            engine,
 	}
 	r.bundles[project.ID] = bundle
 	keepStore = true

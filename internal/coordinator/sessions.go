@@ -232,10 +232,6 @@ type SessionServiceOptions struct {
 	HandoffSnapshots handoffSnapshotGetter
 	ReviewRounds     reviewRoundScheduler
 
-	// FlowCursors resolves the task's flow cursor so author jobs launch the
-	// current work phase's agent (harness, model/effort, prompt). Optional:
-	// when nil, jobs fall back to the task-level harness selection.
-	FlowCursors *FlowCursorService
 }
 
 // handoffSnapshotGetter reads the coordinator-owned handoff snapshot for a
@@ -262,7 +258,6 @@ type SessionService struct {
 	reviewCycles                    *ReviewCycleService
 	handoffSnapshots                handoffSnapshotGetter
 	reviewRounds                    reviewRoundScheduler
-	flowCursors                     *FlowCursorService
 	now                             func() time.Time
 }
 
@@ -300,7 +295,6 @@ func NewSessionServiceWithOptions(database *sql.DB, tasks *TaskService, workers 
 		reviewCycles:                    NewReviewCycleService(database, opts.ReviewAuthorCycleLimit),
 		handoffSnapshots:                opts.HandoffSnapshots,
 		reviewRounds:                    opts.ReviewRounds,
-		flowCursors:                     opts.FlowCursors,
 		now:                             sqlitex.UTCNow,
 	}
 }
@@ -327,48 +321,6 @@ func (c workPhaseContext) harness() string {
 	return flowharness.DefaultAgentName()
 }
 
-// resolveWorkPhase freezes/loads the task's flow cursor and picks the agent
-// for the next author job. A completed cursor means the pipeline already
-// readied its change, so the job is a review fix round and uses the flow's
-// fix agent.
-func (s *SessionService) resolveWorkPhase(ctx context.Context, taskID string) (workPhaseContext, error) {
-	fallback := workPhaseContext{finalPhase: true}
-	if s.flowCursors == nil {
-		return fallback, nil
-	}
-	cursor, ok, err := s.flowCursors.EnsureCursor(ctx, taskID)
-	if err != nil {
-		return workPhaseContext{}, err
-	}
-	if !ok {
-		return fallback, nil
-	}
-	if cursor.PhaseState == FlowPhaseCompleted {
-		agent, err := cursor.Snapshot.FixAgentOrLastPhase()
-		if err != nil {
-			return workPhaseContext{}, err
-		}
-		return workPhaseContext{
-			hasCursor:  true,
-			phaseName:  "fix",
-			phaseIndex: cursor.PhaseIndex,
-			finalPhase: true,
-			agent:      agent,
-		}, nil
-	}
-	phase, ok := cursor.CurrentPhase()
-	if !ok {
-		return fallback, nil
-	}
-	return workPhaseContext{
-		hasCursor:    true,
-		phaseName:    phase.Name,
-		phaseIndex:   cursor.PhaseIndex,
-		finalPhase:   cursor.OnFinalPhase(),
-		gateFeedback: cursor.GateFeedback,
-		agent:        phase.Agent,
-	}, nil
-}
 
 func (s *SessionService) EnsureAuthorJob(ctx context.Context, input EnsureAuthorJobInput) (EnsureAuthorJobResult, error) {
 	if _, err := s.ReconcileCrashedAuthorSessions(ctx); err != nil {
@@ -503,10 +455,7 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 	if err := validateBranchLike("base", base); err != nil {
 		return EnsureAuthorJobResult{}, err
 	}
-	phaseCtx, err := s.resolveWorkPhase(ctx, task.ID)
-	if err != nil {
-		return EnsureAuthorJobResult{}, err
-	}
+	phaseCtx := workPhaseContext{finalPhase: true}
 	jobHarness := phaseCtx.harness()
 
 	if existing, ok, err := s.workers.LiveAuthorJobForTask(ctx, task.ID); err != nil {
@@ -1121,14 +1070,10 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 			payload["review_cycle_instructions"] = strings.TrimSpace(budget.LastInstructions)
 		}
 	}
-	// The crashed job's payload carries its phase coordinates and entrypoint;
-	// the relaunch re-runs the SAME phase with the same agent (the cursor did
-	// not move — the phase never completed).
+	// The crashed job's payload carries its entrypoint; the relaunch re-runs
+	// the same author attempt with the same agent.
 	if _, ok := payload["entrypoint"]; !ok {
-		phaseCtx, err := s.resolveWorkPhase(ctx, task.ID)
-		if err != nil {
-			return false, err
-		}
+		phaseCtx := workPhaseContext{finalPhase: true}
 		entrypoint, injectInitialPrompt, err := s.authorEntrypointPayload(phaseCtx)
 		if err != nil {
 			return false, err

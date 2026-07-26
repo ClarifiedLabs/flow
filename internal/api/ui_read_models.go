@@ -44,6 +44,13 @@ func (s *projectServer) buildUITaskCards(ctx context.Context, tasks []coordinato
 			if active {
 				card.CurrentStep = uiWorkflowStepSummaryFromRun(run)
 			}
+			state, ok, err := s.workflowRuns.CardState(ctx, task.ID)
+			if err != nil {
+				return nil, fmt.Errorf("load workflow card state for %s: %w", task.ID, err)
+			}
+			if ok {
+				applyUIWorkflowCardState(&card, state)
+			}
 		}
 		if s.sessions != nil {
 			active, ok, err := s.sessions.ActiveAuthorSessionForTask(ctx, task.ID)
@@ -305,8 +312,29 @@ func uiWorkflowStepSummaryFromRun(run coordinator.WorkflowRun) *uiWorkflowStepSu
 }
 
 func workflowNodeKeyLabel(key string) string {
-	label := strings.NewReplacer("_", " ", "-", " ").Replace(key)
-	return strings.Join(strings.Fields(label), " ")
+	return coordinator.NodeKeyLabel(key)
+}
+
+// applyUIWorkflowCardState projects the coordinator's per-run board summary
+// onto the card the web UI renders.
+func applyUIWorkflowCardState(card *uiTaskCard, state coordinator.WorkflowCardState) {
+	card.StepIndex = state.StepIndex
+	card.StepCount = state.StepCount
+	card.Held = state.Held
+	card.HeldBy = state.HeldBy
+	if !state.DwellSince.IsZero() {
+		dwell := state.DwellSince
+		card.DwellSince = &dwell
+	}
+	if state.Wait != nil {
+		card.Wait = &uiWorkflowWait{
+			Kind:      state.Wait.Kind,
+			Reason:    state.Wait.Reason,
+			Message:   state.Wait.Message,
+			NodeRunID: state.Wait.NodeRunID,
+			CreatedAt: state.Wait.CreatedAt,
+		}
+	}
 }
 
 func uiWorkerDiagnosticsFromLeases(workers []worker.Worker, leases []worker.Lease, now time.Time) map[string]uiWorkerDiagnostics {

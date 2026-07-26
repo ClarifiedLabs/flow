@@ -72,14 +72,6 @@ func derivePhaseFromTask(ctx context.Context, db *sql.DB, task Task) (Phase, err
 	} else if ok {
 		return PhaseWorking, nil
 	}
-	// No active session, but the flow cursor can still pin the task in
-	// working: paused at a human gate, or mid-pipeline between phase jobs.
-	// This must match the lifecycle engine's derivePhase.
-	if index, state, ok, err := cursorStateForTask(ctx, db, task.ID); err != nil {
-		return "", err
-	} else if ok && cursorIndicatesWorking(index, state) {
-		return PhaseWorking, nil
-	}
 	if task.TriageState == TriagePending {
 		return PhaseTriage, nil
 	}

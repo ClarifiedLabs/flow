@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
-	"github.com/ClarifiedLabs/flow/internal/lifecycle"
 	"github.com/ClarifiedLabs/flow/internal/terminal"
 	flowweb "github.com/ClarifiedLabs/flow/internal/web"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
@@ -312,30 +311,25 @@ func (s *projectServer) handleSessionPath(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 			return
 		}
-		if !s.requireEngine(w) {
-			return
-		}
-		result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-			Kind:      lifecycle.EventSessionReady,
-			SessionID: sessionID,
-			ChangeID:  currentSession.ChangeID,
-			Payload:   lifecycle.EventPayload{HeadSHA: strings.TrimSpace(request.HeadSHA)},
-		}))
-		if err != nil {
-			writeEngineError(w, err, "ready_session_failed")
-			return
-		}
-		s.touchAgentActivity(r.Context(), sessionID)
-		session := result.Session
-		if session == nil {
-			loaded, err := s.sessions.GetSession(r.Context(), sessionID)
-			if err != nil {
+		if changeID := strings.TrimSpace(currentSession.ChangeID); changeID != "" {
+			if headSHA := strings.TrimSpace(request.HeadSHA); headSHA != "" {
+				if _, err := s.sessions.UpdateChangeHead(r.Context(), changeID, headSHA); err != nil {
+					writeError(w, http.StatusBadRequest, "ready_session_failed", err.Error())
+					return
+				}
+			}
+			if _, err := s.sessions.ReadyChange(r.Context(), changeID); err != nil {
 				writeError(w, http.StatusBadRequest, "ready_session_failed", err.Error())
 				return
 			}
-			session = &loaded
 		}
-		writeJSON(w, http.StatusOK, sessionResponse{Session: *session})
+		session, err := s.sessions.ReadyAuthorSession(r.Context(), sessionID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "ready_session_failed", err.Error())
+			return
+		}
+		s.touchAgentActivity(r.Context(), sessionID)
+		writeJSON(w, http.StatusOK, sessionResponse{Session: session})
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 	}
@@ -825,12 +819,6 @@ func (s *projectServer) applySessionStateSignal(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusOK, sessionResponse{Session: session})
 		return
 	}
-	if s.suppressNativeHookStateLoop(r.Context(), principal, session, state, source) {
-		s.touchAgentActivity(r.Context(), sessionID)
-		writeJSON(w, http.StatusOK, sessionResponse{Session: session})
-		return
-	}
-
 	if session.Role == flowworker.RoleConsole {
 		updated, err := s.sessions.UpdateConsoleSessionState(r.Context(), sessionID, state)
 		if err != nil {
@@ -852,92 +840,15 @@ func (s *projectServer) applySessionStateSignal(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	if !s.requireEngine(w) {
-		return
-	}
-	result, err := s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-		Kind:      lifecycle.EventSessionStateChanged,
-		SessionID: sessionID,
-		ChangeID:  session.ChangeID,
-		Payload:   lifecycle.EventPayload{SessionState: state},
-	}))
+	updated, err := s.sessions.UpdateSessionState(r.Context(), sessionID, state)
 	if err != nil {
-		writeEngineError(w, err, failureCode)
-		return
-	}
-	if result.Session == nil {
-		writeError(w, http.StatusInternalServerError, failureCode, "session signal produced no result")
+		writeError(w, http.StatusBadRequest, failureCode, err.Error())
 		return
 	}
 	s.touchAgentActivity(r.Context(), sessionID)
-	writeJSON(w, http.StatusOK, sessionResponse{Session: *result.Session})
+	writeJSON(w, http.StatusOK, sessionResponse{Session: updated})
 }
 
-func (s *projectServer) suppressNativeHookStateLoop(ctx context.Context, principal coordinator.Principal, session coordinator.Session, requested coordinator.SessionRuntimeState, source string) bool {
-	if source != coordinator.SessionEventSourceNativeHook ||
-		session.RuntimeState != coordinator.SessionWaiting ||
-		requested != coordinator.SessionWorking ||
-		session.Role == flowworker.RoleConsole ||
-		s.transitions == nil {
-		return false
-	}
-	transitions, err := s.transitions.RecentSessionStateTransitions(ctx, session.TaskID, session.ID, time.Now().UTC().Add(-nativeHookStateLoopWindow), nativeHookStateLoopTransitionLimit)
-	if err != nil {
-		slog.Warn("native hook state loop detection failed", "session_id", session.ID, "error", err)
-		return false
-	}
-	if !isNativeHookStateLoop(transitions) {
-		return false
-	}
-	if err := s.writeNativeHookStateLoopStatus(ctx, principal, session); err != nil {
-		slog.Warn("native hook state loop status failed", "session_id", session.ID, "error", err)
-	}
-	return true
-}
-
-func isNativeHookStateLoop(transitions []coordinator.SessionStateTransition) bool {
-	count := 0
-	var last coordinator.SessionRuntimeState
-	for _, transition := range transitions {
-		if transition.FromPhase == "" || transition.FromPhase != transition.ToPhase {
-			return false
-		}
-		if transition.State != coordinator.SessionWorking && transition.State != coordinator.SessionWaiting {
-			return false
-		}
-		if last != "" && transition.State == last {
-			return false
-		}
-		last = transition.State
-		count++
-		if count >= nativeHookStateLoopTransitionThreshold {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *projectServer) writeNativeHookStateLoopStatus(ctx context.Context, principal coordinator.Principal, session coordinator.Session) error {
-	if s.status == nil {
-		return nil
-	}
-	exists, err := s.status.SessionHasStatusMessage(ctx, session.ID, coordinator.StatusKindBlocker, nativeHookStateLoopStatusMessage)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-	_, err = s.status.Write(ctx, coordinator.WriteStatusInput{
-		TaskID:    session.TaskID,
-		ChangeID:  session.ChangeID,
-		SessionID: session.ID,
-		Actor:     principal.Actor(),
-		Message:   nativeHookStateLoopStatusMessage,
-		Kind:      coordinator.StatusKindBlocker,
-	})
-	return err
-}
 
 // touchAgentActivity records agent-level liveness best-effort: a failure to
 // stamp last_agent_activity_at is logged and swallowed so it never fails the
@@ -984,7 +895,7 @@ func (s *projectServer) handleSessionStatus(w http.ResponseWriter, r *http.Reque
 			err = s.awaitHumanForSessionStatus(r, sessionID, principal, entry.Kind)
 		}
 		if err != nil {
-			writeEngineError(w, err, "status_session_event_failed")
+			writeError(w, http.StatusBadRequest, "status_session_event_failed", err.Error())
 			return
 		}
 	}
@@ -1089,15 +1000,7 @@ func (s *projectServer) awaitHumanForSessionStatus(r *http.Request, sessionID st
 	default:
 		return nil
 	}
-	if s.engine == nil {
-		return errors.New("lifecycle engine is not configured")
-	}
-	_, err = s.engine.Step(r.Context(), s.lifecycleEvent(r, principal, lifecycle.Event{
-		Kind:      lifecycle.EventSessionStateChanged,
-		SessionID: sessionID,
-		Payload:   lifecycle.EventPayload{SessionState: coordinator.SessionWaiting},
-	}))
-	if err != nil {
+	if _, err := s.sessions.UpdateSessionState(r.Context(), sessionID, coordinator.SessionWaiting); err != nil {
 		return err
 	}
 	return s.sessions.ProtectHumanWaitFromWatchdog(r.Context(), sessionID, kind)

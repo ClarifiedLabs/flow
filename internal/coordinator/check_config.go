@@ -111,16 +111,10 @@ type CheckConfigService struct {
 	threads     *ThreadService
 	project     Project
 	harnessArgs flowharness.Args
-	flowCursors *FlowCursorService
 }
 
 type CheckConfigServiceOptions struct {
 	HarnessArgs flowharness.Args
-	// FlowCursors resolves the task's frozen flow snapshot so review rounds
-	// run the flow's agent reviewer/verifier set. Optional: when nil (or when
-	// an task has no cursor), the legacy task-harness defaults are
-	// synthesized instead.
-	FlowCursors *FlowCursorService
 }
 
 func NewCheckConfigServiceWithOptions(database *sql.DB, checks *CheckService, workers *flowworker.Service, threads *ThreadService, project Project, opts CheckConfigServiceOptions) *CheckConfigService {
@@ -142,7 +136,6 @@ func NewCheckConfigServiceWithOptions(database *sql.DB, checks *CheckService, wo
 		threads:     threads,
 		project:     project,
 		harnessArgs: harnessArgs,
-		flowCursors: opts.FlowCursors,
 	}
 }
 
@@ -151,17 +144,7 @@ func NewCheckConfigServiceWithOptions(database *sql.DB, checks *CheckService, wo
 // review set), else the default agent reviewer/verifier synthesized from the
 // default harness.
 func (s *CheckConfigService) reviewChecksForTask(ctx context.Context, suite CheckSuite, task Task) (CheckSuite, error) {
-	args := s.harnessArgs
-	if s.flowCursors != nil {
-		cursor, ok, err := s.flowCursors.GetCursor(ctx, task.ID)
-		if err != nil {
-			return CheckSuite{}, err
-		}
-		if ok {
-			return withFlowSnapshotReviewChecks(suite, cursor.Snapshot, args)
-		}
-	}
-	return withDefaultAgentChecks(suite, flowharness.DefaultAgentName(), args)
+	return withDefaultAgentChecks(suite, flowharness.DefaultAgentName(), s.harnessArgs)
 }
 
 // withFlowSnapshotReviewChecks appends the flow's frozen review set — one

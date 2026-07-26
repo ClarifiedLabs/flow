@@ -10,7 +10,6 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/api/contract"
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
-	"github.com/ClarifiedLabs/flow/internal/lifecycle"
 	"github.com/ClarifiedLabs/flow/internal/worker"
 )
 
@@ -94,7 +93,6 @@ type projectServer struct {
 	attachments       *coordinator.TaskAttachmentStore
 	status            *coordinator.StatusService
 	reconciler        *coordinator.ReconcileService
-	cursors           *coordinator.FlowCursorService
 	agentDefs         *coordinator.AgentDefService
 	flows             *coordinator.FlowService
 	workflowRuns      *coordinator.WorkflowRunService
@@ -102,10 +100,8 @@ type projectServer struct {
 	workflowExecutor  *coordinator.WorkflowExecutor
 	checkConfigs      *coordinator.CheckConfigService
 	merges            *coordinator.MergeService
-	transitions       *coordinator.TransitionService
 	gitEvents         *coordinator.GitEventService
 	workers           *worker.Service
-	engine            *lifecycle.Engine
 }
 
 func (s *Server) forBundle(bundle *ProjectBundle) *projectServer {
@@ -120,7 +116,6 @@ func (s *Server) forBundle(bundle *ProjectBundle) *projectServer {
 		attachments:       bundle.Attachments,
 		status:            bundle.Status,
 		reconciler:        bundle.Reconciler,
-		cursors:           bundle.Cursors,
 		agentDefs:         bundle.AgentDefs,
 		flows:             bundle.Flows,
 		workflowRuns:      bundle.WorkflowRuns,
@@ -128,10 +123,8 @@ func (s *Server) forBundle(bundle *ProjectBundle) *projectServer {
 		workflowExecutor:  bundle.WorkflowExecutor,
 		checkConfigs:      bundle.CheckConfigs,
 		merges:            bundle.Merges,
-		transitions:       bundle.Transitions,
 		gitEvents:         bundle.GitEvents,
 		workers:           bundle.Queue,
-		engine:            bundle.Engine,
 	}
 }
 

@@ -27,7 +27,6 @@ import (
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
-	"github.com/ClarifiedLabs/flow/internal/lifecycle"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
@@ -3531,17 +3530,6 @@ WHERE id = ?`, exchangePath, project.ID); err != nil {
 	bundle.Merges = coordinator.NewMergeService(db, bundle.Tasks, bundle.Sessions, project)
 	bundle.CheckConfigs = coordinator.NewCheckConfigServiceWithOptions(db, bundle.Checks, bundle.Queue, bundle.Threads, project, coordinator.CheckConfigServiceOptions{})
 	bundle.GitEventConsumer = coordinator.NewGitEventConsumer(db, project)
-	bundle.Engine = lifecycle.NewEngine(db, lifecycle.NewEffects(
-		bundle.Tasks,
-		bundle.Checks,
-		bundle.CheckConfigs,
-		bundle.Sessions,
-		bundle.Merges,
-		bundle.Threads,
-		bundle.Status,
-		coordinator.NewFlowCursorService(db, bundle.Flows),
-		bundle.Reconciler,
-	))
 }
 
 func startLiveCheckJobForTask(t *testing.T, fixture testFixture, token string, workerID string, taskID string, changeID string, headSHA string, checkName string, role flowworker.JobRole, bucket flowworker.CapacityBucket) flowworker.ClaimedJob {
