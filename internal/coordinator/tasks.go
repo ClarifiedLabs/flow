@@ -976,6 +976,31 @@ JOIN tasks blocker ON blocker.id = r.source_task_id
 	return count > 0, nil
 }
 
+// TaskIDsWithSource returns tasks an agent session created while working the
+// given task. Together with the parent_of relation the task-set materializer
+// writes, this is how an epic finds its members.
+func (s *TaskService) TaskIDsWithSource(ctx context.Context, sourceTaskID string) ([]string, error) {
+	sourceTaskID = strings.TrimSpace(sourceTaskID)
+	if sourceTaskID == "" {
+		return nil, errors.New("source task id is required")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id FROM tasks WHERE source_task_id = ? ORDER BY id`, sourceTaskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (s *TaskService) UnresolvedBlockers(ctx context.Context, taskID string) ([]Task, error) {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {

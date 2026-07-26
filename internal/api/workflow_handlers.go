@@ -47,6 +47,15 @@ type workflowCompleteRequest struct {
 	ArtifactID string `json:"artifact_id"`
 }
 
+// workflowReleaseRequest hands a held run back to the executor. Edge names
+// which way out the operator is taking: resume (leave it where it is), submit
+// (an artifact they produced), satisfy (done, no artifact), merge (jump to the
+// terminal). ArtifactID is required by submit and ignored otherwise.
+type workflowReleaseRequest struct {
+	Edge       string `json:"edge"`
+	ArtifactID string `json:"artifact_id,omitempty"`
+}
+
 type workflowArtifactResponse struct {
 	Artifact coordinator.WorkflowArtifact `json:"artifact"`
 	Replayed bool                         `json:"replayed"`
@@ -387,6 +396,54 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 			result.Done = result.Run.State == coordinator.WorkflowRunCompleted
 		}
 		writeJSON(w, http.StatusOK, result)
+	case "hold":
+		if !requireMethod(w, r, http.MethodPost) || !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+			return
+		}
+		run, err := s.workflowRuns.Hold(r.Context(), taskID, workflowActor(principal))
+		if err != nil {
+			writeWorkflowError(w, err, "hold_workflow_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, workflowRunResponse{Run: run})
+	case "release":
+		if !requireMethod(w, r, http.MethodPost) || !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+			return
+		}
+		var request workflowReleaseRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+			return
+		}
+		edge := coordinator.ReleaseEdge(strings.TrimSpace(request.Edge))
+		if edge == "" {
+			edge = coordinator.ReleaseResume
+		}
+		result, err := s.workflowRuns.Release(r.Context(), coordinator.ReleaseWorkflowInput{
+			TaskID:     taskID,
+			Edge:       edge,
+			ArtifactID: request.ArtifactID,
+			Actor:      workflowActor(principal),
+		})
+		if err != nil {
+			writeWorkflowError(w, err, "release_workflow_failed")
+			return
+		}
+		// The executor skipped this run while it was held, so pick it back up
+		// rather than waiting out a tick.
+		if s.workflowExecutor != nil && !result.Done {
+			if err := s.workflowExecutor.Advance(r.Context(), result.Run.ID); err != nil {
+				writeWorkflowError(w, err, "advance_workflow_failed")
+				return
+			}
+			result.Run, err = s.workflowRuns.Get(r.Context(), result.Run.ID)
+			if err != nil {
+				writeWorkflowError(w, err, "load_workflow_failed")
+				return
+			}
+			result.Done = result.Run.State == coordinator.WorkflowRunCompleted
+		}
+		writeJSON(w, http.StatusOK, result)
 	case "advance":
 		if !requireMethod(w, r, http.MethodPost) || !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
 			return
@@ -426,6 +483,8 @@ func writeWorkflowError(w http.ResponseWriter, err error, code string) {
 		writeError(w, http.StatusNotFound, code, err.Error())
 	case errors.Is(err, coordinator.ErrWorkflowConflict):
 		writeError(w, http.StatusConflict, "workflow_conflict", err.Error())
+	case errors.Is(err, coordinator.ErrWorkflowNotHeld):
+		writeError(w, http.StatusConflict, "workflow_not_held", err.Error())
 	case errors.Is(err, coordinator.ErrFlowNotFound):
 		writeError(w, http.StatusBadRequest, "flow_not_found", err.Error())
 	default:

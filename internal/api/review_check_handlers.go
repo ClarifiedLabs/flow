@@ -65,6 +65,22 @@ func (s *projectServer) handleChangePath(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		s.handleListThreads(w, r, principal, parts[0])
+	case "review":
+		if len(parts) != 2 || !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+			return
+		}
+		s.handleSubmitReview(w, r, principal, parts[0])
+	case "merge":
+		if len(parts) != 2 || !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+			return
+		}
+		s.handleMergeChange(w, r, parts[0])
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 	}
