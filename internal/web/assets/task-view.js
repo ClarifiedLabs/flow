@@ -36,7 +36,6 @@ export async function renderNewTaskView(app, context) {
       ${renderTaskFormView(app, { priority: 0 }, { mode: "create", submitLabel: "Create" })}
     </section>
   `;
-  app.bindTaskActions(() => renderNewTaskView(app, context));
   return true;
 }
 
@@ -457,7 +456,6 @@ export async function renderTaskView(app, id, context, projectID = "") {
       <div class="task-detail-grid">${detailColumns}</div>
     </section>
   `;
-  app.bindTaskActions(() => renderTaskView(app, id, undefined, resolvedProject));
   return true;
 }
 

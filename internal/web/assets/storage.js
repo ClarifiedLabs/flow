@@ -2,7 +2,7 @@
 // done-view and board-done config) plus pure path -> route / poll-config
 // parsing.
 
-import { BOARD_DONE_COUNTS, BOARD_DONE_STORAGE_KEY, BOARD_DONE_WINDOWS, BOARD_POLL_MS, CHANGE_POLL_MS, DIAGNOSTICS_POLL_MS, DIFF_MODES, DIFF_MODE_STORAGE_KEY, DONE_DENSITIES, DONE_DENSITY_STORAGE_KEY, DONE_OUTCOMES, DONE_OUTCOME_STORAGE_KEY, MAX_POLL_BACKOFF_MS, PROJECT_STORAGE_KEY, THEME_PREFERENCES, THEME_STORAGE_KEY } from "./config.js";
+import { BOARD_DONE_COUNTS, BOARD_DONE_STORAGE_KEY, BOARD_DONE_WINDOWS, BOARD_VIEWS, BOARD_VIEW_STORAGE_KEY, DIAGRAM_MODES, DIAGRAM_MODE_STORAGE_KEY, BOARD_POLL_MS, CHANGE_POLL_MS, DIAGNOSTICS_POLL_MS, DIFF_MODES, DIFF_MODE_STORAGE_KEY, DONE_DENSITIES, DONE_DENSITY_STORAGE_KEY, DONE_OUTCOMES, DONE_OUTCOME_STORAGE_KEY, MAX_POLL_BACKOFF_MS, PROJECT_STORAGE_KEY, THEME_PREFERENCES, THEME_STORAGE_KEY } from "./config.js";
 
 export function readSelectedProjects() {
   try {
@@ -47,6 +47,43 @@ export function boardDoneConfig() {
 export function writeBoardDoneConfig(config) {
   try {
     window.localStorage?.setItem(BOARD_DONE_STORAGE_KEY, JSON.stringify(config));
+  } catch {
+    // Persistence is best-effort.
+  }
+}
+
+// Which board view you prefer is a property of how you work, not of a visit,
+// so it persists. The diagram mode is per-session: it tracks what you happen
+// to be doing with one task.
+export function readBoardView() {
+  try {
+    const raw = window.localStorage?.getItem(BOARD_VIEW_STORAGE_KEY);
+    return BOARD_VIEWS.has(raw) ? raw : "lanes";
+  } catch {
+    return "lanes";
+  }
+}
+
+export function writeBoardView(view) {
+  try {
+    window.localStorage?.setItem(BOARD_VIEW_STORAGE_KEY, view);
+  } catch {
+    // Persistence is best-effort.
+  }
+}
+
+export function readDiagramMode() {
+  try {
+    const raw = window.sessionStorage?.getItem(DIAGRAM_MODE_STORAGE_KEY);
+    return DIAGRAM_MODES.has(raw) ? raw : "run";
+  } catch {
+    return "run";
+  }
+}
+
+export function writeDiagramMode(mode) {
+  try {
+    window.sessionStorage?.setItem(DIAGRAM_MODE_STORAGE_KEY, mode);
   } catch {
     // Persistence is best-effort.
   }
@@ -101,10 +138,6 @@ export function writeDoneOutcome(outcome) {
   } catch {
     // Persistence is best-effort.
   }
-}
-
-export function routeFilter(path) {
-  return null;
 }
 
 export function terminalSessionIDForPath(path) {

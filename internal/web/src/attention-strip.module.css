@@ -1,0 +1,106 @@
+:host {
+  display: block;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-left: 2px solid var(--ph-await);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+:host([hidden]) {
+  display: none;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.label {
+  font-size: var(--text-meta);
+  font-weight: 600;
+  letter-spacing: var(--track-section);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.count {
+  font-size: var(--text-nano);
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--ph-await-bg);
+  color: var(--ph-await);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.oldest,
+.age {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.age[data-tone="warn"] {
+  color: var(--st-warn);
+}
+
+.age[data-tone="danger"] {
+  color: var(--st-danger);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+  min-width: 0;
+}
+
+.row:first-of-type {
+  border-top: 0;
+}
+
+.dot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--ph, var(--muted));
+}
+
+.id {
+  flex: none;
+  font-size: var(--text-meta);
+  color: var(--muted);
+  white-space: nowrap;
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+
+.id:hover {
+  color: var(--accent);
+}
+
+/* The reason is the agent's own question or the failure verbatim, so it is
+   prose and it stays on one line: the strip is a scan, not a read. */
+.reason {
+  font-family: var(--font-prose);
+  font-size: var(--text-prose);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.button {
+  flex: none;
+}

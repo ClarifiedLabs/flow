@@ -1,0 +1,203 @@
+:host {
+  display: block;
+  min-width: 0;
+}
+
+.chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  font-size: var(--text-ui);
+  padding: 3px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease;
+}
+
+.chip:hover {
+  color: var(--ink);
+  border-color: var(--muted);
+}
+
+.chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.chip-count {
+  font-size: var(--text-nano);
+  font-variant-numeric: tabular-nums;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.sort-note {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+/* Scroll horizontally rather than wrap: a wrapped dense table is unreadable,
+   and the columns already carry the minimum widths they need. */
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 680px;
+}
+
+th {
+  padding: 7px 12px;
+  text-align: left;
+  font-size: var(--text-label);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+
+td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+/* The phase spine rides the first cell so the row keeps its identity even
+   when the row itself carries an attention tint. */
+tbody td:first-child {
+  border-left: 2px solid var(--ph, transparent);
+}
+
+tbody tr[data-needs-you] {
+  background: var(--ph-bg, transparent);
+}
+
+.col-task .id {
+  display: block;
+  font-size: var(--text-meta);
+  color: var(--muted);
+}
+
+.col-task .title {
+  display: block;
+  font-size: var(--text-body);
+  font-weight: 600;
+  color: var(--ink-2);
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+
+tbody tr[data-needs-you] .col-task .title {
+  color: var(--ink);
+}
+
+.col-task .title:hover {
+  color: var(--accent);
+}
+
+.col-step {
+  width: 150px;
+}
+
+.col-step .rail {
+  display: flex;
+  gap: 2px;
+}
+
+.col-step .rail i {
+  display: block;
+  width: 12px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line);
+}
+
+.col-step .rail i[data-seg="done"] {
+  background: var(--ink-2);
+}
+
+.col-step .rail i[data-seg="current"] {
+  background: var(--ph, var(--accent));
+}
+
+.col-step .rail-label {
+  display: block;
+  margin-top: 3px;
+  font-size: var(--text-meta);
+  color: var(--ph, var(--muted));
+}
+
+.col-step .rail-label.is-idle {
+  color: var(--muted);
+}
+
+.col-now {
+  font-family: var(--font-prose);
+  font-size: var(--text-prose);
+  color: var(--ink-2);
+}
+
+.col-dwell {
+  width: 74px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.col-dwell[data-tone="warn"] {
+  color: var(--st-warn);
+}
+
+.col-dwell[data-tone="danger"] {
+  color: var(--st-danger);
+}
+
+.col-action {
+  width: 118px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.quiet-action {
+  font: inherit;
+  font-size: var(--text-quiet);
+  color: var(--muted);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+
+.quiet-action:hover {
+  color: var(--accent);
+}
+
+.empty {
+  text-align: center;
+  color: var(--muted);
+  font-size: var(--text-quiet);
+  letter-spacing: var(--track-chrome);
+  padding: 18px;
+}

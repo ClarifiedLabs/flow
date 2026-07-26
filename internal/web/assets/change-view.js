@@ -74,7 +74,6 @@ export async function renderChangeView(app, id, context) {
       ${threads.length ? `<div class="feed">${threads.map((thread) => renderThread(thread, headSHA)).join("")}</div>` : `<div class="empty">No review threads</div>`}
     </section>
   `;
-  app.bindTaskActions(() => renderChangeView(app, id));
   if (headSHA && await renderChangeDiffView(app, changeID, headSHA, context) === false) return false;
   return true;
 }

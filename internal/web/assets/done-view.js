@@ -89,7 +89,6 @@ export function renderDoneListView(app) {
       ? `<button class="button secondary" data-done-more>Load more</button>`
       : "";
   }
-  app.bindTaskActions(() => app.load());
 }
 
 export function renderDoneRowView(app, entry) {

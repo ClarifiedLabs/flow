@@ -117,7 +117,6 @@ export async function renderJobsView(app, context) {
   bindChange("[data-jobs-sort-field]", (value) => { view.sort.field = value === "created" ? "created" : "updated"; });
   bindChange("[data-jobs-sort-order]", (value) => { view.sort.order = value === "asc" ? "asc" : "desc"; });
 
-  app.bindTaskActions(refresh);
   return true;
 }
 

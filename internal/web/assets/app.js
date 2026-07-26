@@ -5,12 +5,11 @@
 import { value } from "./normalize.js";
 import { escapeHTML, escapeAttr } from "./html.js";
 import { NAV, SIDEBAR_STATUS_POLL_MS, MAX_POLL_BACKOFF_MS, DEFAULT_AGENT_HARNESSES, DEFAULT_CONSOLE_HARNESSES } from "./config.js";
-import { apiGet, apiPost, apiPatch, apiDelete, taskConsoleAPIPath, taskAPIBase, taskHref, flowsAPIBase } from "./api.js";
-import { readSelectedProjects, writeSelectedProjects, routeFilter, terminalSessionIDForPath, pollConfigForPath, readThemePreference, writeThemePreference, applyThemePreference, readDiffMode, writeDiffMode } from "./storage.js";
+import { apiGet, apiPost, taskConsoleAPIPath, taskAPIBase, taskHref, flowsAPIBase } from "./api.js";
+import { readSelectedProjects, writeSelectedProjects, terminalSessionIDForPath, pollConfigForPath, readThemePreference, writeThemePreference, applyThemePreference, readDiffMode, writeDiffMode } from "./storage.js";
 import { renderNavLink, THEME_ICONS, THEME_OPTIONS } from "./nav.js";
 import { normalizeHarnessOptions } from "./harness-models.js";
 import { openTerminalWindow, closeTerminalDialog, hideInlineTerminal, closeTerminalModalLayers } from "./terminal.js";
-import { uploadTaskAttachment } from "./task.js";
 import { pollDelay, Poller } from "./poller.js";
 import { renderWorkersView, renderJobsView } from "./diagnostics-view.js";
 import { renderChangeView, renderChangeDiffView } from "./change-view.js";
@@ -18,8 +17,12 @@ import { renderDiffSummary } from "./diff.js";
 import { renderTerminalView, openInlineTerminalView, showTranscriptView } from "./terminal-view.js";
 import { renderConsoleView, stopConsolePollView, startConsoleView, releaseConsoleView } from "./console-view.js";
 import { renderDoneView } from "./done-view.js";
-import { renderBoardView, createTaskView, renderTaskCardView } from "./board-view.js";
-import { renderNewTaskView, renderTaskFormView, renderTaskReadOnlyDetailView, renderTaskView, toggleTaskEditFormView, bindTaskFlowControlsView } from "./task-view.js";
+import { createTaskView } from "./board-view.js";
+import { renderBoardRoute } from "./board-route.js";
+import { renderEpicRoute } from "./epic-route.js";
+import { handleAction } from "./actions.js";
+import { handleFormSubmit } from "./forms.js";
+import { renderNewTaskView, renderTaskFormView, renderTaskReadOnlyDetailView, renderTaskView, bindTaskFlowControlsView } from "./task-view.js";
 import { renderFlowsView } from "./flows-view.js";
 
 export * from "./normalize.js";
@@ -64,6 +67,13 @@ const ROUTES = [
     },
     render: (app, ctx, p) => app.renderTask(p.task, ctx, p.project),
   },
+  {
+    match: (p) => {
+      const m = p.match(/^\/ui\/tasks\/([^/]+)\/epic$/);
+      return m && { task: decodeURIComponent(m[1]) };
+    },
+    render: (app, ctx, p) => renderEpicRoute(app, p.task, ctx),
+  },
   { match: (p) => p.startsWith("/ui/changes/") && { id: p.split("/").pop() }, render: (app, ctx, p) => app.renderChange(p.id, ctx) },
   { match: (p) => p === "/ui/console", render: (app, ctx) => app.renderConsole(ctx) },
   { match: (p) => { const id = terminalSessionIDForPath(p); return id && { id }; }, render: (app, ctx, p) => renderTerminalView(app, p.id, ctx) },
@@ -71,7 +81,7 @@ const ROUTES = [
   { match: (p) => p === "/ui/workers", render: (app, ctx) => renderWorkersView(app, ctx) },
   { match: (p) => p === "/ui/jobs", render: (app, ctx) => renderJobsView(app, ctx) },
   { match: (p) => p === "/ui/done", render: (app, ctx) => renderDoneView(app, ctx) },
-  { match: () => true, render: (app, ctx) => renderBoardView(app, routeFilter(ctx.path), ctx) },
+  { match: () => true, render: (app, ctx) => renderBoardRoute(app, ctx) },
 ];
 
 export class FlowApp extends HTMLElement {
@@ -154,31 +164,72 @@ export class FlowApp extends HTMLElement {
     this.renderNav();
   }
 
+  // One delegated listener for the whole app. Elements own their own innerHTML
+  // and repaint on poll, so a listener attached to their children would not
+  // survive; a listener on the app root does.
   bindDelegatedActions() {
     if (typeof this.addEventListener !== "function") return;
     if (this.delegatedActionsBound) return;
     this.delegatedActionsBound = true;
     this.addEventListener("click", async (event) => {
-      const button = event.target?.closest?.("[data-human-review-approve]");
-      if (!button || !this.contains(button) || event.defaultPrevented) return;
-      event.preventDefault();
-      await this.approveHumanReview(button, () => this.load());
-    });
-    this.addEventListener("click", async (event) => {
+      if (event.defaultPrevented) return;
+      if (await handleAction(this, event)) return;
+
       const start = event.target?.closest?.("[data-start-console]");
-      if (start && this.contains(start) && !event.defaultPrevented) {
+      if (start && this.contains(start)) {
         event.preventDefault();
         const harness = this.querySelector("[data-console-harness]")?.value || "claude";
         await this.startConsole(start.dataset.project || "", harness, start.dataset.task || "");
         return;
       }
-
       const release = event.target?.closest?.("[data-release-console]");
-      if (release && this.contains(release) && !event.defaultPrevented) {
+      if (release && this.contains(release)) {
         event.preventDefault();
         await releaseConsoleView(this, release.dataset.project || "", release.dataset.task || "");
+        return;
+      }
+      const terminal = event.target?.closest?.("[data-terminal], [data-job-terminal]");
+      if (terminal && this.contains(terminal)) {
+        event.preventDefault();
+        const kind = terminal.dataset.terminal ? "session" : "job";
+        await this.openInlineTerminal(terminal, kind, terminal.dataset.terminal || terminal.dataset.jobTerminal);
+        return;
+      }
+      const transcript = event.target?.closest?.("[data-session-transcript], [data-job-transcript]");
+      if (transcript && this.contains(transcript)) {
+        event.preventDefault();
+        const kind = transcript.dataset.sessionTranscript ? "session" : "job";
+        await showTranscriptView(this, transcript, kind, transcript.dataset.sessionTranscript || transcript.dataset.jobTranscript);
       }
     });
+    this.addEventListener("submit", async (event) => {
+      if (event.defaultPrevented) return;
+      await handleFormSubmit(this, event);
+    });
+    // The board's view toggle is reachable from the keyboard anywhere on the
+    // board, and Escape/b always take you back to it.
+    document.addEventListener("keydown", (event) => this.handleShortcut(event));
+  }
+
+  handleShortcut(event) {
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    const tag = event.target?.tagName || "";
+    if (/^(INPUT|TEXTAREA|SELECT)$/i.test(tag) || event.target?.isContentEditable) return;
+    if (event.key === "v") {
+      this.querySelector("flow-board")?.toggleView();
+      return;
+    }
+    if (event.key === "b" || event.key === "Escape") {
+      if (window.location.pathname === "/ui/board") return;
+      history.pushState({}, "", "/ui/board");
+      this.load();
+    }
+  }
+
+  // refresh re-runs the current route. Action handlers call it rather than
+  // knowing which view they were pressed in.
+  refresh() {
+    return this.load();
   }
 
   renderNav() {
@@ -467,9 +518,6 @@ export class FlowApp extends HTMLElement {
     return createTaskView(this);
   }
 
-  renderTaskCard(task, card, laneState, blocked, stagger, project, waitReason) {
-    return renderTaskCardView(this, task, card, laneState, blocked, stagger, project, waitReason);
-  }
 
   // doneQuery combines the active project selection with the outcome filter and
   // any extra params (cursor, single-project scope for load-more).
@@ -516,384 +564,6 @@ export class FlowApp extends HTMLElement {
     return startConsoleView(this, projectID, harness, taskID);
   }
 
-  bindTaskActions(refresh) {
-    this.installLifecycleActions(refresh);
-    this.installReviewActions(refresh);
-    this.installConsoleActions(refresh);
-    this.installThreadActions(refresh);
-    this.installFormActions(refresh);
-    this.installTerminalActions();
-    this.installToggleActions();
-  }
-
-  // installLifecycleActions wires the public workflow lifecycle controls.
-  installLifecycleActions(refresh) {
-    this.querySelectorAll("[data-workflow-schedule]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowSchedule)}/schedule`, {});
-        await refresh();
-      });
-    });
-    this.querySelectorAll("[data-workflow-reset]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        if (!window.confirm("Cancel this workflow run and return the task to Unscheduled?")) return;
-        await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowReset)}/reset`, {});
-        await refresh();
-      });
-    });
-    this.querySelectorAll("[data-workflow-done]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        const resolution = (window.prompt("Done resolution: completed, rejected, abandoned, cancelled, or failed", "completed") || "").trim();
-        if (!resolution) return;
-        await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowDone)}/done`, { resolution });
-        await refresh();
-      });
-    });
-    this.querySelectorAll("[data-workflow-reopen]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowReopen)}/reopen`, {});
-        await refresh();
-      });
-    });
-    this.querySelectorAll("[data-workflow-respond]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        const outcome = button.dataset.outcome || "";
-        const feedback = String(button.closest(".human-attention-panel")?.querySelector("[data-workflow-feedback]")?.value || "").trim();
-        await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.task)}/workflow/respond`, {
-          node_run_id: button.dataset.workflowRespond,
-          outcome,
-          feedback,
-        });
-        await refresh();
-      });
-    });
-    this.querySelectorAll("[data-workflow-budget]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        const additional = Number(window.prompt("Additional workflow transitions", "50"));
-        if (!Number.isInteger(additional) || additional < 1) return;
-        await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowBudget)}/workflow/budget`, { additional });
-        await refresh();
-      });
-    });
-    this.querySelectorAll("[data-workflow-retry]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        button.disabled = true;
-        try {
-          const refreshAgentRuntime = button.dataset.workflowRetryRefresh === "true";
-          await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowRetry)}/workflow/retry`, { refresh_agent_runtime: refreshAgentRuntime });
-          await refresh();
-        } finally {
-          button.disabled = false;
-        }
-      });
-    });
-    this.querySelectorAll("[data-workflow-skip]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        if (!window.confirm("Skip this failed workflow step and continue?")) return;
-        button.disabled = true;
-        try {
-          await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.workflowSkip)}/workflow/skip`, {
-            node_run_id: button.dataset.workflowSkipNode,
-          });
-          await refresh();
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-        } finally {
-          button.disabled = false;
-        }
-      });
-    });
-    this.querySelectorAll("[data-task-edit]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        const nextTitle = window.prompt("Title", button.dataset.taskTitle || "");
-        if (nextTitle === null) return;
-        const title = nextTitle.trim();
-        if (!title) {
-          this.setStatus("Task title is required");
-          return;
-        }
-        try {
-          await apiPatch(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.taskEdit)}`, { title });
-          await refresh();
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-        }
-      });
-    });
-  }
-
-  // installReviewActions wires review, plan and human-review approval actions.
-  installReviewActions(refresh) {
-    this.querySelectorAll("[data-merge-change]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        try {
-          await apiPost(`/v2/changes/${encodeURIComponent(button.dataset.mergeChange)}/merge`, {});
-          await refresh();
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-        }
-      });
-    });
-    this.querySelectorAll("[data-review-run]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        try {
-          await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.reviewRun)}/review/run`, {});
-          await refresh();
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-        }
-      });
-    });
-    this.querySelectorAll("[data-review-cycles-approve]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        const instructions = (window.prompt("Instructions for the next author run") || "").trim();
-        if (!instructions) {
-          this.setStatus("Approval instructions are required");
-          return;
-        }
-        try {
-          await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.reviewCyclesApprove)}/review-cycles/approve`, { instructions });
-          await refresh();
-          this.setStatus("review cycles approved");
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-        }
-      });
-    });
-    this.querySelectorAll("[data-phase-approve]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        try {
-          await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.phaseApprove)}/phase/approve`, {});
-          await refresh();
-          this.setStatus("phase approved");
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-        }
-      });
-    });
-    this.querySelectorAll("[data-phase-request-changes]").forEach((form) => {
-      form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const feedback = (form.elements.feedback?.value || "").trim();
-        if (!feedback) {
-          this.setStatus("Change request feedback is required");
-          return;
-        }
-        try {
-          await apiPost(`${taskAPIBase(form.dataset.project)}/${encodeURIComponent(form.dataset.phaseRequestChanges)}/phase/request-changes`, { feedback });
-          await refresh();
-          this.setStatus("changes requested");
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-        }
-      });
-    });
-    this.querySelectorAll("[data-human-review-approve]").forEach((button) => {
-      button.addEventListener("click", async (event) => {
-        event?.preventDefault?.();
-        await this.approveHumanReview(button, refresh);
-      });
-    });
-  }
-
-  // installConsoleActions wires task console start/release.
-  installConsoleActions(refresh) {
-    this.querySelectorAll("[data-start-task-console]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        try {
-          await apiPost(taskConsoleAPIPath(button.dataset.project, button.dataset.startTaskConsole), { harness: "claude" });
-          await refresh();
-          this.setStatus("task console starting");
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-        }
-      });
-    });
-    this.querySelectorAll("[data-release-task-console]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        try {
-          await apiDelete(taskConsoleAPIPath(button.dataset.project, button.dataset.releaseTaskConsole));
-          await refresh();
-          this.setStatus("task console released");
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-        }
-      });
-    });
-  }
-
-  // installThreadActions wires review-thread and human-attention reply actions.
-  installThreadActions(refresh) {
-    this.querySelectorAll("[data-attention-reply-form]").forEach((form) => {
-      form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const message = (form.elements.message?.value || "").trim();
-        if (!message) {
-          this.setStatus("Reply message is required");
-          return;
-        }
-        const statusLogID = Number(form.dataset.statusLogId || 0);
-        const payload = { message };
-        if (statusLogID > 0) payload.status_log_id = statusLogID;
-        try {
-          await apiPost(`${taskAPIBase(form.dataset.project)}/${encodeURIComponent(form.dataset.attentionReplyForm)}/attention/reply`, payload);
-          await refresh();
-          this.setStatus("reply sent");
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-        }
-      });
-    });
-    this.querySelectorAll("[data-thread-claim]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        const kind = button.dataset.claimKind;
-        const body = kind === "fixed" ? "" : (window.prompt("Rationale") || "").trim();
-        if (kind !== "fixed" && !body) {
-          this.setStatus("Thread claim rationale is required");
-          return;
-        }
-        try {
-          await apiPost(`/v2/threads/${encodeURIComponent(button.dataset.threadClaim)}/claims`, {
-            kind,
-            body,
-            claim_commit_sha: button.dataset.claimCommit || "",
-          });
-          await refresh();
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-        }
-      });
-    });
-    this.querySelectorAll("[data-thread-reply]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        const body = (window.prompt("Reply") || "").trim();
-        if (!body) {
-          this.setStatus("Thread reply is required");
-          return;
-        }
-        try {
-          await apiPost(`/v2/threads/${encodeURIComponent(button.dataset.threadReply)}/comments`, { body });
-          await refresh();
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-        }
-      });
-    });
-  }
-
-  // installFormActions wires the task create/edit form and attachment upload form.
-  installFormActions(refresh) {
-    this.querySelectorAll("[data-task-form]").forEach((form) => {
-      bindTaskFlowControlsView(this, form);
-      form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        if (form.reportValidity && !form.reportValidity()) return;
-        const mode = form.dataset.taskFormMode || "edit";
-        const priority = Number(form.elements.priority.value || 0);
-        if (!Number.isInteger(priority) || priority < 0) {
-          this.setStatus("Priority must be a non-negative integer");
-          return;
-        }
-        const payload = {
-          title: form.elements.title.value.trim(),
-          body: form.elements.body.value,
-          priority,
-          flow_id: form.elements.flow_id ? form.elements.flow_id.value : "",
-        };
-        if (!payload.title) {
-          this.setStatus("Task title is required");
-          return;
-        }
-        try {
-          if (mode === "create") {
-            const scheduleAfterCreate = Boolean(form.elements.queue_task && form.elements.queue_task.checked);
-            const formProject = form.elements.project ? form.elements.project.value : (form.dataset.project || "");
-            if (!formProject) {
-              this.setStatus("Project is required");
-              return;
-            }
-            const data = await apiPost(taskAPIBase(formProject), payload);
-            const task = data.task || data.Task || {};
-            const taskID = value(task, "id", "ID");
-            if (!taskID) {
-              throw new Error("Created task ID unavailable");
-            }
-            const createdProject = data.project_id || data.ProjectID || formProject;
-            history.pushState({}, "", taskHref(createdProject, taskID));
-            const files = Array.from(form.elements.attachments?.files || []);
-            for (const file of files) {
-              await uploadTaskAttachment(createdProject, taskID, file, "initial");
-            }
-            if (scheduleAfterCreate) {
-              await apiPost(`${taskAPIBase(createdProject)}/${encodeURIComponent(taskID)}/schedule`, {});
-            }
-            await this.load();
-          } else {
-            const taskID = form.dataset.taskForm;
-            await apiPatch(`${taskAPIBase(form.dataset.project)}/${encodeURIComponent(taskID)}`, payload);
-            await refresh();
-          }
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-        }
-      });
-    });
-    this.querySelectorAll("[data-attachment-form]").forEach((form) => {
-      form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        if (form.reportValidity && !form.reportValidity()) return;
-        const taskID = form.dataset.task;
-        const file = form.elements.file?.files?.[0];
-        try {
-          await uploadTaskAttachment(form.dataset.project, taskID, file, form.elements.stage.value);
-          form.reset();
-          await refresh();
-        } catch (error) {
-          this.setStatus(error.message || String(error));
-        }
-      });
-    });
-  }
-
-  // installTerminalActions wires embedded terminal and transcript launch buttons.
-  installTerminalActions() {
-    this.querySelectorAll("[data-terminal]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        await this.openInlineTerminal(button, "session", button.dataset.terminal);
-      });
-    });
-    this.querySelectorAll("[data-job-terminal]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        await this.openInlineTerminal(button, "job", button.dataset.jobTerminal);
-      });
-    });
-    this.querySelectorAll("[data-session-transcript]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        await showTranscriptView(this, button, "session", button.dataset.sessionTranscript);
-      });
-    });
-    this.querySelectorAll("[data-job-transcript]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        await showTranscriptView(this, button, "job", button.dataset.jobTranscript);
-      });
-    });
-  }
-
-  // installToggleActions wires in-place UI toggles (edit form, timeline expand/collapse).
-  installToggleActions() {
-    this.querySelectorAll("[data-task-edit-toggle]").forEach((button) => {
-      button.addEventListener("click", () => toggleTaskEditFormView(this, button));
-    });
-    this.querySelectorAll("[data-timeline-show-more]").forEach((button) => {
-      button.addEventListener("click", () => this.expandTimeline(button));
-    });
-    this.querySelectorAll("[data-timeline-run-toggle]").forEach((button) => {
-      button.addEventListener("click", () => this.toggleTimelineRun(button));
-    });
-    this.querySelectorAll("[data-diff-mode-toggle] button").forEach((button) => {
-      button.addEventListener("click", () => this.toggleDiffMode(button));
-    });
-  }
 
   // toggleDiffMode switches the change detail diff between unified and split
   // rendering. It persists the preference and re-renders the cached diff payload
@@ -939,20 +609,6 @@ export class FlowApp extends HTMLElement {
     button.setAttribute("aria-expanded", String(!expanded));
   }
 
-  async approveHumanReview(button, refresh) {
-    try {
-      await apiPost(`${taskAPIBase(button.dataset.project)}/${encodeURIComponent(button.dataset.humanReviewApprove)}/checks/${encodeURIComponent(button.dataset.checkName || "human-review")}`, {
-        kind: "human",
-        required: true,
-        verdict: "satisfied",
-        details: "approved via web UI",
-        reporter: "web-ui",
-      });
-      await refresh();
-    } catch (error) {
-      this.setStatus(error.message || String(error));
-    }
-  }
 
   openInlineTerminal(button, kind, id) {
     return openInlineTerminalView(this, button, kind, id);
