@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
@@ -124,8 +125,36 @@ func (s *projectServer) handleSubmitReview(w http.ResponseWriter, r *http.Reques
 	}
 	response.Check = &check
 
+	if err := s.respondToReviewGate(ctx, taskID, verdict, request.Body); err != nil {
+		writeWorkflowError(w, err, "respond_workflow_failed")
+		return
+	}
 	s.advanceWorkflowForTask(w, r, taskID)
 	writeJSON(w, http.StatusOK, response)
+}
+
+// respondToReviewGate applies the review verdict to an active human gate. A
+// check report alone cannot move a waiting workflow because the executor needs
+// the gate's explicit outcome before it can continue.
+func (s *projectServer) respondToReviewGate(ctx context.Context, taskID, verdict, feedback string) error {
+	if s.workflowRuns == nil {
+		return nil
+	}
+	run, active, err := s.workflowRuns.ActiveForTask(ctx, taskID)
+	if err != nil || !active || run.State != coordinator.WorkflowRunWaiting || run.CurrentNodeRunID == "" {
+		return err
+	}
+	node, ok := run.Snapshot.Node(run.CurrentNodeKey)
+	if !ok || node.Kind != coordinator.NodeHumanGate {
+		return nil
+	}
+
+	outcome := "changes_requested"
+	if verdict == "approve" {
+		outcome = "approved"
+	}
+	_, err = s.workflowRuns.Respond(ctx, taskID, run.CurrentNodeRunID, outcome, feedback, coordinator.ActorHuman)
+	return err
 }
 
 // advanceWorkflowForTask nudges the executor after a human input so the run
