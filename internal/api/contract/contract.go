@@ -71,6 +71,35 @@ type TaskRelationRequest struct {
 	Kind         string `json:"kind"`
 }
 
+type ReviewFollowUpFinding struct {
+	SHA                string `json:"sha"`
+	File               string `json:"file"`
+	Line               int    `json:"line"`
+	Body               string `json:"body"`
+	Severity           string `json:"severity"`
+	IntroducedByChange bool   `json:"introduced_by_change"`
+	Requirement        string `json:"requirement"`
+	DuplicateOf        string `json:"duplicate_of,omitempty"`
+}
+
+type ReviewFollowUpTaskAction struct {
+	Action string `json:"action"`
+	Title  string `json:"title,omitempty"`
+	Body   string `json:"body,omitempty"`
+	TaskID string `json:"task_id,omitempty"`
+}
+
+type ApplyReviewFollowUpRequest struct {
+	LeaseID    string                   `json:"lease_id"`
+	Finding    ReviewFollowUpFinding    `json:"finding"`
+	TaskAction ReviewFollowUpTaskAction `json:"task_action"`
+}
+
+type ApplyReviewFollowUpResponse struct {
+	Task        coordinator.Task `json:"task"`
+	Disposition string           `json:"disposition"`
+}
+
 type RegisterWorkerRequest struct {
 	ID                      string              `json:"id"`
 	Labels                  map[string]string   `json:"labels"`

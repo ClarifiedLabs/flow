@@ -2,15 +2,18 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/api/contract"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	"github.com/ClarifiedLabs/flow/internal/sqlitex"
+	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
 func (s *projectServer) handleCreateTask(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
@@ -124,6 +127,17 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 			return
 		}
 		s.handleTaskRelations(w, r, principal, taskID)
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "review-follow-ups" {
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		if !requireScope(w, principal, "review follow-up requires a worker token", coordinator.TokenScopeWorker) {
+			return
+		}
+		s.handleApplyReviewFollowUp(w, r, principal, taskID)
 		return
 	}
 
@@ -586,6 +600,107 @@ func (s *projectServer) handleTaskRelations(w http.ResponseWriter, r *http.Reque
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+func (s *projectServer) handleApplyReviewFollowUp(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
+	var request contract.ApplyReviewFollowUpRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	job, err := s.reviewAggregationJobForLease(r.Context(), principal, request.LeaseID, taskID)
+	if err != nil {
+		writeError(w, http.StatusForbidden, "forbidden", err.Error())
+		return
+	}
+	if job.ChangeID == nil || strings.TrimSpace(*job.ChangeID) == "" {
+		writeError(w, http.StatusForbidden, "forbidden", "review aggregation job is not bound to a change")
+		return
+	}
+	result, err := s.tasks.ApplyReviewFollowUp(r.Context(), coordinator.ApplyReviewFollowUpInput{
+		SourceTaskID:   taskID,
+		SourceChangeID: strings.TrimSpace(*job.ChangeID),
+		CheckName:      payloadString(job.Payload, "check_name"),
+		Finding: coordinator.ReviewFollowUpFinding{
+			SHA:                request.Finding.SHA,
+			File:               request.Finding.File,
+			Line:               request.Finding.Line,
+			Body:               request.Finding.Body,
+			Severity:           request.Finding.Severity,
+			IntroducedByChange: request.Finding.IntroducedByChange,
+			Requirement:        request.Finding.Requirement,
+			DuplicateOf:        request.Finding.DuplicateOf,
+		},
+		TaskAction: coordinator.ReviewFollowUpTaskAction{
+			Action: request.TaskAction.Action,
+			Title:  request.TaskAction.Title,
+			Body:   request.TaskAction.Body,
+			TaskID: request.TaskAction.TaskID,
+		},
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "review_follow_up_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, contract.ApplyReviewFollowUpResponse{
+		Task:        result.Task,
+		Disposition: result.Disposition,
+	})
+}
+
+func (s *projectServer) reviewAggregationJobForLease(
+	ctx context.Context,
+	principal coordinator.Principal,
+	leaseID string,
+	taskID string,
+) (flowworker.Job, error) {
+	if s.workers == nil {
+		return flowworker.Job{}, errors.New("worker service is not configured")
+	}
+	leaseID = strings.TrimSpace(leaseID)
+	if leaseID == "" {
+		return flowworker.Job{}, errors.New("review follow-up requires lease_id")
+	}
+	if err := s.sweepExpiredLeases(ctx); err != nil {
+		return flowworker.Job{}, fmt.Errorf("sweep expired leases: %w", err)
+	}
+	lease, err := s.workers.GetLease(ctx, leaseID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return flowworker.Job{}, errors.New("lease not found")
+	}
+	if err != nil {
+		return flowworker.Job{}, fmt.Errorf("load lease: %w", err)
+	}
+	if lease.WorkerID != strings.TrimSpace(principal.Subject) ||
+		lease.ReleasedAt != nil ||
+		!time.Now().UTC().Before(lease.ExpiresAt) {
+		return flowworker.Job{}, errors.New("worker token does not own a live review aggregation lease")
+	}
+	job, err := s.workers.GetJob(ctx, lease.JobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return flowworker.Job{}, errors.New("review aggregation job not found")
+	}
+	if err != nil {
+		return flowworker.Job{}, fmt.Errorf("load review aggregation job: %w", err)
+	}
+	if job.State != flowworker.JobClaimed && job.State != flowworker.JobRunning {
+		return flowworker.Job{}, errors.New("review aggregation job is not live")
+	}
+	if job.Role != flowworker.RoleReviewer {
+		return flowworker.Job{}, errors.New("only reviewer jobs may apply review follow-ups")
+	}
+	aggregation, _ := job.Payload["review_aggregation"].(bool)
+	checkName := payloadString(job.Payload, "check_name")
+	if !aggregation || !strings.HasPrefix(checkName, coordinator.ReviewAggregationCheckName+".node.") {
+		return flowworker.Job{}, errors.New("only the final review aggregation job may apply review follow-ups")
+	}
+	if job.TaskID == nil || strings.TrimSpace(*job.TaskID) != strings.TrimSpace(taskID) {
+		return flowworker.Job{}, errors.New("review aggregation job belongs to a different task")
+	}
+	if err := s.checkSourceJobHead(ctx, job); err != nil {
+		return flowworker.Job{}, err
+	}
+	return job, nil
 }
 
 func (s *projectServer) handleListTransitions(w http.ResponseWriter, r *http.Request, taskID string) {

@@ -177,6 +177,23 @@ func TestScheduleWorkflowNodeChecksConcurrentlyFansOutAndAggregatesExactlyOnce(t
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
+	openCandidate, err := services.tasks.CreateTask(ctx, CreateTaskInput{
+		Title: "Bound the shared cache",
+		Body:  "Add a size limit and eviction coverage.",
+	})
+	if err != nil {
+		t.Fatalf("create open task candidate: %v", err)
+	}
+	doneCandidate, err := services.tasks.CreateTask(ctx, CreateTaskInput{Title: "Completed cache cleanup"})
+	if err != nil {
+		t.Fatalf("create completed task candidate: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+UPDATE tasks
+SET lifecycle_state = 'done', done_resolution = 'completed', done_at = '2026-01-01T00:00:00Z'
+WHERE id = ?`, doneCandidate.ID); err != nil {
+		t.Fatalf("complete task candidate: %v", err)
+	}
 	change := Change{ID: "ch-parallel", TaskID: task.ID, Branch: "task/parallel", Base: "main", HeadSHA: "head-parallel"}
 	if _, err := store.DB().ExecContext(ctx, `
 INSERT INTO changes (id, task_id, branch, base, head_sha, created_at, updated_at)
@@ -308,7 +325,11 @@ INSERT INTO workflow_node_runs (
 	aggregation, err := services.checks.GetCheck(ctx, task.ID, aggregationName)
 	if err != nil || !aggregation.Required || aggregation.Verdict != CheckPending ||
 		!strings.Contains(aggregation.Details, "Advisory cache finding.") ||
-		!strings.Contains(aggregation.Details, "blocking source") {
+		!strings.Contains(aggregation.Details, "blocking source") ||
+		!strings.Contains(aggregation.Details, "## Open Task Candidates") ||
+		!strings.Contains(aggregation.Details, openCandidate.ID+" — Bound the shared cache") ||
+		strings.Contains(aggregation.Details, doneCandidate.ID) ||
+		strings.Contains(aggregation.Details, task.ID+" — Parallel review") {
 		t.Fatalf("aggregation check = %+v err=%v", aggregation, err)
 	}
 	codeSource, err := services.checks.GetCheck(ctx, task.ID, "code-review.node.nr-parallel")
@@ -327,6 +348,7 @@ INSERT INTO workflow_node_runs (
 	}
 	entrypoint, _ := aggregateJob.Payload["entrypoint"].(map[string]any)
 	if aggregateJob.ID == "" || aggregateJob.Payload["blocking"] != true ||
+		aggregateJob.Payload["review_aggregation"] != true ||
 		aggregateJob.Payload["review_discovery"] != nil ||
 		!strings.Contains(fmt.Sprint(entrypoint["argv"]), "gpt-5") {
 		t.Fatalf("aggregation job = %+v, want blocking code-review runtime", aggregateJob)

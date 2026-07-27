@@ -3322,6 +3322,104 @@ UPDATE jobs SET payload_json = json_set(payload_json, '$.blocking', json('false'
 	}
 }
 
+func TestReviewAggregationLeaseCreatesOrIdentifiesFollowUpTasks(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	started := startAuthorSessionForStatusTest(t, fixture, "Review follow-up source")
+	if _, err := fixture.Sessions.UpdateChangeHead(ctx, started.Change.ID, "head-1"); err != nil {
+		t.Fatalf("update change head: %v", err)
+	}
+	existing, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Existing metrics cleanup"})
+	if err != nil {
+		t.Fatalf("create existing task: %v", err)
+	}
+	aggregation := startLiveCheckJobForTask(
+		t,
+		fixture,
+		"aggregation-token",
+		"w-aggregation",
+		started.Session.TaskID,
+		started.Change.ID,
+		"head-1",
+		coordinator.ReviewAggregationCheckName+".node.nr-api",
+		flowworker.RoleReviewer,
+		flowworker.BucketPersistentAgent,
+	)
+	if _, err := fixture.Store.DB().ExecContext(ctx, `
+UPDATE jobs
+SET payload_json = json_set(payload_json, '$.review_aggregation', json('true'), '$.blocking', json('false'))
+WHERE id = ?`, aggregation.Job.ID); err != nil {
+		t.Fatalf("mark aggregation job: %v", err)
+	}
+
+	path := "/v2/tasks/" + started.Session.TaskID + "/review-follow-ups"
+	createRequest := contract.ApplyReviewFollowUpRequest{
+		LeaseID: aggregation.Lease.ID,
+		Finding: contract.ReviewFollowUpFinding{
+			SHA: "head-1", File: "internal/cache.go", Line: 42,
+			Body: "The legacy cache has no size bound.", Severity: "high",
+			IntroducedByChange: false, Requirement: "cache memory remains bounded",
+		},
+		TaskAction: contract.ReviewFollowUpTaskAction{
+			Action: "create_task",
+			Title:  "Bound the legacy cache",
+			Body:   "Add a configurable cache bound and tests covering eviction.",
+		},
+	}
+	var created contract.ApplyReviewFollowUpResponse
+	doJSONRequestAs(t, fixture.Server, "aggregation-token", http.MethodPost, path, createRequest, http.StatusOK, &created)
+	if created.Disposition != "created" || created.Task.ID == "" ||
+		created.Task.SourceTaskID == nil || *created.Task.SourceTaskID != started.Session.TaskID ||
+		created.Task.SourceChangeID == nil || *created.Task.SourceChangeID != started.Change.ID {
+		t.Fatalf("created review follow-up = %+v", created)
+	}
+	var replayed contract.ApplyReviewFollowUpResponse
+	doJSONRequestAs(t, fixture.Server, "aggregation-token", http.MethodPost, path, createRequest, http.StatusOK, &replayed)
+	if replayed.Task.ID != created.Task.ID || replayed.Disposition != "created" {
+		t.Fatalf("replayed review follow-up = %+v, want %s", replayed, created.Task.ID)
+	}
+
+	var reused contract.ApplyReviewFollowUpResponse
+	doJSONRequestAs(t, fixture.Server, "aggregation-token", http.MethodPost, path, contract.ApplyReviewFollowUpRequest{
+		LeaseID: aggregation.Lease.ID,
+		Finding: contract.ReviewFollowUpFinding{
+			SHA: "head-1", File: "internal/metrics.go", Line: 7,
+			Body: "Metric naming is inconsistent.", Severity: "low",
+			IntroducedByChange: true, Requirement: "metric names remain stable",
+		},
+		TaskAction: contract.ReviewFollowUpTaskAction{
+			Action: "use_existing_task",
+			TaskID: existing.ID,
+		},
+	}, http.StatusOK, &reused)
+	if reused.Disposition != "existing" || reused.Task.ID != existing.ID {
+		t.Fatalf("reused review follow-up = %+v", reused)
+	}
+
+	relations, err := fixture.Tasks.RelationsForTask(ctx, started.Session.TaskID)
+	if err != nil {
+		t.Fatalf("list review follow-up relations: %v", err)
+	}
+	if len(relations) != 2 {
+		t.Fatalf("review follow-up relations = %+v, want two", relations)
+	}
+
+	ordinary := startLiveCheckJobForTask(
+		t,
+		fixture,
+		"ordinary-reviewer-token",
+		"w-ordinary-reviewer",
+		started.Session.TaskID,
+		started.Change.ID,
+		"head-1",
+		"ordinary-reviewer",
+		flowworker.RoleReviewer,
+		flowworker.BucketPersistentAgent,
+	)
+	createRequest.LeaseID = ordinary.Lease.ID
+	doJSONRequestAs(t, fixture.Server, "ordinary-reviewer-token", http.MethodPost, path, createRequest, http.StatusForbidden, nil)
+}
+
 func startAuthorSessionForStatusTest(t *testing.T, fixture testFixture, title string) coordinator.StartAuthorSessionResult {
 	return startAuthorSessionForStatusTestWithWorker(t, fixture, title, "w-local")
 }

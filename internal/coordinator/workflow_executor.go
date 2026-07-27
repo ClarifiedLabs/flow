@@ -471,7 +471,7 @@ func (e *WorkflowExecutor) handleChangeReview(ctx context.Context, run WorkflowR
 	if aggregation.Verdict == CheckPending {
 		return false, nil
 	}
-	if aggregation.Required && aggregation.Verdict == CheckErrored {
+	if aggregation.Verdict == CheckErrored {
 		return false, workflowRequiredCheckError(aggregation, WorkflowChecksReview, nodeRun.Attempt)
 	}
 	outcome := "approved"

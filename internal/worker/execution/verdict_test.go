@@ -1,6 +1,7 @@
 package execution
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -188,6 +189,94 @@ func TestReadVerdictFileAllowsClassifiedNonBlockingCommentsOnSatisfiedVerdict(t 
 	}
 	if len(v.Comments) != 1 || v.Comments[0].BlocksApproval() {
 		t.Fatalf("comments = %+v, want one non-blocking finding", v.Comments)
+	}
+}
+
+func TestReadVerdictFileParsesReviewFollowUpTaskActions(t *testing.T) {
+	path := writeVerdict(t, `{
+		"verdict": "satisfied",
+		"reason": "actionable findings are deferred",
+		"comments": [
+			{
+				"sha": "abc123",
+				"file": "internal/cache.go",
+				"line": 42,
+				"body": "The legacy cache has no size bound.",
+				"severity": "high",
+				"introduced_by_change": false,
+				"requirement": "cache memory remains bounded",
+				"task_action": {
+					"action": "create_task",
+					"title": "Bound the legacy cache",
+					"body": "Add a configurable cache bound and tests covering eviction."
+				}
+			},
+			{
+				"sha": "abc123",
+				"file": "internal/metrics.go",
+				"line": 7,
+				"body": "This metric name is inconsistent.",
+				"severity": "low",
+				"introduced_by_change": true,
+				"requirement": "metrics use stable naming",
+				"task_action": {
+					"action": "use_existing_task",
+					"task_id": "t-test-0042"
+				}
+			}
+		]
+	}`)
+	v, ok, err := ReadVerdictFile(path)
+	if err != nil || !ok {
+		t.Fatalf("ReadVerdictFile ok=%v err=%v, want true/nil", ok, err)
+	}
+	if got := v.Comments[0].TaskAction; got == nil ||
+		got.Action != "create_task" ||
+		got.Title != "Bound the legacy cache" ||
+		!strings.Contains(got.Body, "eviction") {
+		t.Fatalf("create task action = %+v", got)
+	}
+	if got := v.Comments[1].TaskAction; got == nil ||
+		got.Action != "use_existing_task" ||
+		got.TaskID != "t-test-0042" {
+		t.Fatalf("existing task action = %+v", got)
+	}
+}
+
+func TestReadVerdictFileRejectsInvalidReviewFollowUpTaskActions(t *testing.T) {
+	base := `{
+		"verdict": "blocked",
+		"reason": "finding",
+		"comments": [{
+			"sha": "abc123",
+			"file": "internal/app.go",
+			"line": 42,
+			"body": "finding",
+			"severity": %q,
+			"introduced_by_change": %t,
+			"requirement": "invariant",
+			%s
+		}]
+	}`
+	cases := map[string]string{
+		"blocking finding": fmt.Sprintf(base, "high", true,
+			`"task_action":{"action":"create_task","title":"Follow up","body":"Do work."}`),
+		"thread duplicate": fmt.Sprintf(base, "low", false,
+			`"duplicate_of":"th-1","task_action":{"action":"use_existing_task","task_id":"t-test-0002"}`),
+		"create missing body": fmt.Sprintf(base, "medium", false,
+			`"task_action":{"action":"create_task","title":"Follow up"}`),
+		"create with task id": fmt.Sprintf(base, "medium", false,
+			`"task_action":{"action":"create_task","title":"Follow up","body":"Do work.","task_id":"t-test-0002"}`),
+		"existing with title": fmt.Sprintf(base, "medium", false,
+			`"task_action":{"action":"use_existing_task","task_id":"t-test-0002","title":"Wrong"}`),
+	}
+	for name, contents := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, ok, err := ReadVerdictFile(writeVerdict(t, contents))
+			if ok || err == nil {
+				t.Fatalf("ReadVerdictFile ok=%v err=%v, want false/non-nil", ok, err)
+			}
+		})
 	}
 }
 

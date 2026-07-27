@@ -433,6 +433,21 @@ CREATE TABLE review_comments (
 	CHECK (length(trim(body)) > 0)
 );
 
+CREATE TABLE review_follow_up_actions (
+	source_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	check_name TEXT NOT NULL,
+	finding_hash TEXT NOT NULL,
+	request_hash TEXT NOT NULL,
+	action TEXT NOT NULL CHECK (action IN ('create_task', 'use_existing_task')),
+	task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	created_at TEXT NOT NULL,
+	PRIMARY KEY (source_task_id, check_name, finding_hash),
+	CHECK (length(trim(check_name)) > 0),
+	CHECK (length(trim(finding_hash)) > 0),
+	CHECK (length(trim(request_hash)) > 0),
+	CHECK (source_task_id != task_id)
+);
+
 CREATE TABLE job_terminals (
 	job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
 	lease_id TEXT NOT NULL REFERENCES leases(id) ON DELETE CASCADE,

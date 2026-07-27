@@ -121,14 +121,14 @@ func TestAdvisoryVerdictFindingsStayInCheckDetailsWithoutThreadActions(t *testin
 			ID: "th-1", Decision: "reopen", Body: "Recheck this path.",
 		}},
 	}
-	details := advisoryVerdictDetails(report.Reason, report)
+	details := advisoryVerdictDetails(report.Reason, report, nil)
 	for _, want := range []string{"Advisory (non-blocking)", "auth.go:42", "constant-time comparison", "thread th-1", "recommends reopen"} {
 		if !strings.Contains(details, want) {
 			t.Fatalf("advisory details %q missing %q", details, want)
 		}
 	}
 	var stdout bytes.Buffer
-	applyVerdictActions(nil, coordinator.CheckKindReviewer, false, flowworker.Lease{}, workerexec.RunResult{}, report, &stdout)
+	_, _ = applyVerdictActions(nil, coordinator.CheckKindReviewer, false, false, "", flowworker.Lease{}, workerexec.RunResult{}, report, &stdout)
 	if !strings.Contains(stdout.String(), "retained 2 advisory finding(s)") || !strings.Contains(stdout.String(), "no review threads changed") {
 		t.Fatalf("advisory action output = %q", stdout.String())
 	}
@@ -149,10 +149,12 @@ func TestReviewDiscoveryKeepsBlockingPolicyButSuppressesThreadActions(t *testing
 		SHA: "abc123", File: "auth.go", Line: 42, Body: "Authorization is bypassed.",
 		Severity: "high", IntroducedByChange: boolPtr(true), Requirement: "authorize requests",
 	}}}
-	if err := applyVerdictActions(
+	if _, err := applyVerdictActions(
 		nil,
 		coordinator.CheckKindReviewer,
 		checkJobBlocksApproval(job) && !reviewDiscoveryJob(job),
+		false,
+		"",
 		flowworker.Lease{},
 		workerexec.RunResult{},
 		report,
@@ -188,7 +190,7 @@ func TestBlockingReviewerOnlyCountsTaskCausedUniqueHighSeverityFindings(t *testi
 	if got := blockingReviewFindings(report); got != 1 {
 		t.Fatalf("blockingReviewFindings = %d, want 1", got)
 	}
-	details := classifiedReviewDetails("review complete", report)
+	details := classifiedReviewDetails("review complete", report, nil)
 	for _, want := range []string{"pre-existing", "medium", "duplicate of th-1", "security hardening task"} {
 		if !strings.Contains(details, want) {
 			t.Fatalf("classified details %q missing %q", details, want)
@@ -197,10 +199,12 @@ func TestBlockingReviewerOnlyCountsTaskCausedUniqueHighSeverityFindings(t *testi
 	if strings.Contains(details, "Authorization is bypassed") {
 		t.Fatalf("blocking finding leaked into non-blocking follow-ups: %q", details)
 	}
-	if err := applyVerdictActions(
+	if _, err := applyVerdictActions(
 		nil,
 		coordinator.CheckKindReviewer,
 		true,
+		false,
+		"",
 		flowworker.Lease{},
 		workerexec.RunResult{},
 		workerexec.VerdictReport{Comments: report.Comments[1:]},
@@ -271,6 +275,108 @@ func TestReviewerHarnessFailureReportsErroredInsteadOfBlocked(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "falling back to exit code") {
 		t.Fatalf("worker output used exit-code fallback: %q", stdout.String())
+	}
+}
+
+func TestAdvisoryReviewAggregationAppliesTaskActionBeforeReportingVerdict(t *testing.T) {
+	var followUpCalls int
+	var reported struct {
+		Verdict string `json:"verdict"`
+		Details string `json:"details"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/tasks/t-review/review-follow-ups":
+			followUpCalls++
+			var request struct {
+				LeaseID string `json:"lease_id"`
+				Finding struct {
+					File string `json:"file"`
+				} `json:"finding"`
+				TaskAction struct {
+					Action string `json:"action"`
+					Title  string `json:"title"`
+				} `json:"task_action"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode follow-up: %v", err)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if request.LeaseID != "l-review" || request.Finding.File != "internal/cache.go" ||
+				request.TaskAction.Action != "create_task" || request.TaskAction.Title != "Bound the legacy cache" {
+				t.Errorf("review follow-up request = %+v", request)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"task":{"ID":"t-review-0002","Title":"Bound the legacy cache","Body":"Add a bound."},"disposition":"created"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/tasks/t-review/checks/review-aggregation.node.nr-1":
+			if err := json.NewDecoder(r.Body).Decode(&reported); err != nil {
+				t.Errorf("decode report: %v", err)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"check":{"task_id":"t-review","name":"review-aggregation.node.nr-1","kind":"reviewer","required":false,"verdict":"satisfied"},"review_state":"approved"}`)
+		default:
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client, err := flowclient.New(config.ClientConfig{ServerURL: server.URL, Token: "worker-token"})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	verdictPath := filepath.Join(t.TempDir(), workerexec.VerdictFileName)
+	if err := os.WriteFile(verdictPath, []byte(`{
+		"verdict":"satisfied",
+		"reason":"one deferred issue",
+		"comments":[{
+			"sha":"head-1",
+			"file":"internal/cache.go",
+			"line":42,
+			"body":"The legacy cache has no size bound.",
+			"severity":"high",
+			"introduced_by_change":false,
+			"requirement":"cache memory remains bounded",
+			"task_action":{
+				"action":"create_task",
+				"title":"Bound the legacy cache",
+				"body":"Add a configurable cache bound and tests covering eviction."
+			}
+		}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write verdict: %v", err)
+	}
+	taskID := "t-review"
+	job := flowworker.Job{
+		ID: "j-review", TaskID: &taskID, Role: flowworker.RoleReviewer,
+		CapacityBucket: flowworker.BucketPersistentAgent,
+		Payload: map[string]any{
+			"blocking":           false,
+			"review_aggregation": true,
+		},
+	}
+	result := workerexec.RunResult{
+		ExitCode: 0,
+		Payload: workerexec.JobPayload{
+			CheckName: "review-aggregation.node.nr-1",
+			ChangeID:  "ch-review",
+		},
+		VerdictFilePath: verdictPath,
+	}
+	var stdout bytes.Buffer
+	verdict, err := reportCheckIfNeeded(client, job, flowworker.Lease{ID: "l-review"}, result, &stdout)
+	if err != nil || verdict != coordinator.CheckSatisfied {
+		t.Fatalf("reportCheckIfNeeded verdict=%s err=%v stdout=%q", verdict, err, stdout.String())
+	}
+	if followUpCalls != 1 {
+		t.Fatalf("follow-up calls = %d, want 1", followUpCalls)
+	}
+	for _, want := range []string{"Advisory (non-blocking)", "[t-review-0002](/ui/tasks/t-review-0002)", "(created)"} {
+		if !strings.Contains(reported.Details, want) {
+			t.Fatalf("reported details %q missing %q", reported.Details, want)
+		}
 	}
 }
 

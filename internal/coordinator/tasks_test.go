@@ -61,6 +61,153 @@ func TestCreateTaskAllocatesIDAndPersistsAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestApplyReviewFollowUpCreatesOrReusesRelatedOpenTaskIdempotently(t *testing.T) {
+	ctx := context.Background()
+	store, tasks := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
+	t.Cleanup(func() { _ = store.Close() })
+
+	source, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Source task"})
+	if err != nil {
+		t.Fatalf("create source task: %v", err)
+	}
+	finding := ReviewFollowUpFinding{
+		SHA: "abc123", File: "internal/cache.go", Line: 42,
+		Body: "The legacy cache has no size bound.", Severity: "high",
+		IntroducedByChange: false, Requirement: "cache memory remains bounded",
+	}
+	createInput := ApplyReviewFollowUpInput{
+		SourceTaskID: source.ID, SourceChangeID: "ch-source", CheckName: "review-aggregation.node.nr-1",
+		Finding: finding,
+		TaskAction: ReviewFollowUpTaskAction{
+			Action: ReviewFollowUpCreateTask,
+			Title:  "Bound the legacy cache",
+			Body:   "Add a configurable cache bound and tests covering eviction.",
+		},
+	}
+	created, err := tasks.ApplyReviewFollowUp(ctx, createInput)
+	if err != nil {
+		t.Fatalf("create review follow-up: %v", err)
+	}
+	if created.Disposition != "created" || created.Task.ID == "" || created.Task.State != nil ||
+		created.Task.CreatedBy != ActorSystem ||
+		created.Task.SourceTaskID == nil || *created.Task.SourceTaskID != source.ID ||
+		created.Task.SourceChangeID == nil || *created.Task.SourceChangeID != "ch-source" {
+		t.Fatalf("created review follow-up = %+v", created)
+	}
+	replayed, err := tasks.ApplyReviewFollowUp(ctx, createInput)
+	if err != nil {
+		t.Fatalf("replay review follow-up: %v", err)
+	}
+	if replayed.Task.ID != created.Task.ID || replayed.Disposition != "created" {
+		t.Fatalf("replayed review follow-up = %+v, want task %s", replayed, created.Task.ID)
+	}
+
+	existing, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Existing cleanup"})
+	if err != nil {
+		t.Fatalf("create existing task: %v", err)
+	}
+	reused, err := tasks.ApplyReviewFollowUp(ctx, ApplyReviewFollowUpInput{
+		SourceTaskID: source.ID, SourceChangeID: "ch-source", CheckName: "review-aggregation.node.nr-1",
+		Finding: ReviewFollowUpFinding{
+			SHA: "abc123", File: "internal/metrics.go", Line: 7,
+			Body: "Metric naming is inconsistent.", Severity: "low",
+			IntroducedByChange: true, Requirement: "metric names remain stable",
+		},
+		TaskAction: ReviewFollowUpTaskAction{
+			Action: ReviewFollowUpUseExistingTask,
+			TaskID: existing.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("reuse review follow-up: %v", err)
+	}
+	if reused.Disposition != "existing" || reused.Task.ID != existing.ID {
+		t.Fatalf("reused review follow-up = %+v", reused)
+	}
+
+	relations, err := tasks.RelationsForTask(ctx, source.ID)
+	if err != nil {
+		t.Fatalf("list review follow-up relations: %v", err)
+	}
+	if len(relations) != 2 {
+		t.Fatalf("relations = %+v, want two review follow-ups", relations)
+	}
+	var taskCount, actionCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks`).Scan(&taskCount); err != nil {
+		t.Fatalf("count tasks: %v", err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM review_follow_up_actions`).Scan(&actionCount); err != nil {
+		t.Fatalf("count review follow-up actions: %v", err)
+	}
+	if taskCount != 3 || actionCount != 2 {
+		t.Fatalf("task/action counts = %d/%d, want 3/2", taskCount, actionCount)
+	}
+
+	conflict := createInput
+	conflict.TaskAction.Title = "Different title"
+	if _, err := tasks.ApplyReviewFollowUp(ctx, conflict); err == nil ||
+		!strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("conflicting replay err = %v, want conflict", err)
+	}
+}
+
+func TestApplyReviewFollowUpRejectsBlockingDuplicateClosedAndSelfTargets(t *testing.T) {
+	ctx := context.Background()
+	store, tasks := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
+	t.Cleanup(func() { _ = store.Close() })
+	source, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Source task"})
+	if err != nil {
+		t.Fatalf("create source task: %v", err)
+	}
+	closed, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Closed task"})
+	if err != nil {
+		t.Fatalf("create closed task: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+UPDATE tasks
+SET lifecycle_state = 'done', done_resolution = 'completed', done_at = '2026-01-01T00:00:00Z'
+WHERE id = ?`, closed.ID); err != nil {
+		t.Fatalf("close target task: %v", err)
+	}
+
+	base := ApplyReviewFollowUpInput{
+		SourceTaskID: source.ID, SourceChangeID: "ch-source", CheckName: "review-aggregation.node.nr-1",
+		Finding: ReviewFollowUpFinding{
+			SHA: "abc", File: "a.go", Line: 1, Body: "finding",
+			Severity: "medium", Requirement: "invariant",
+		},
+		TaskAction: ReviewFollowUpTaskAction{Action: ReviewFollowUpUseExistingTask, TaskID: closed.ID},
+	}
+	cases := map[string]ApplyReviewFollowUpInput{
+		"closed": base,
+		"self": func() ApplyReviewFollowUpInput {
+			value := base
+			value.TaskAction.TaskID = source.ID
+			return value
+		}(),
+		"blocking": func() ApplyReviewFollowUpInput {
+			value := base
+			value.TaskAction.TaskID = closed.ID
+			value.Finding.Severity = "high"
+			value.Finding.IntroducedByChange = true
+			return value
+		}(),
+		"duplicate": func() ApplyReviewFollowUpInput {
+			value := base
+			value.TaskAction.TaskID = closed.ID
+			value.Finding.DuplicateOf = "th-1"
+			return value
+		}(),
+	}
+	for name, input := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := tasks.ApplyReviewFollowUp(ctx, input); err == nil {
+				t.Fatal("ApplyReviewFollowUp succeeded, want error")
+			}
+		})
+	}
+}
+
 func TestConcurrentTaskCreationAllocatesUniqueIDs(t *testing.T) {
 	ctx := context.Background()
 	_, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))

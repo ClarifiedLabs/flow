@@ -781,26 +781,44 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 
 	blocking := checkJobBlocksApproval(job)
 	reviewDiscovery := reviewDiscoveryJob(job)
-	if haveVerdict && (!blocking || reviewDiscovery) {
-		details = advisoryVerdictDetails(details, verdictReport)
-	} else if haveVerdict && kind == coordinator.CheckKindReviewer {
+	if haveVerdict && kind == coordinator.CheckKindReviewer && blocking && !reviewDiscovery {
 		blockingFindings := blockingReviewFindings(verdictReport)
 		if verdict == coordinator.CheckBlocked && len(verdictReport.Comments) > 0 && blockingFindings == 0 {
 			verdict = coordinator.CheckSatisfied
 			details = "No task-caused high-severity blocker. " + strings.TrimSpace(details)
 		}
-		details = classifiedReviewDetails(details, verdictReport)
 	}
 
 	// Apply the structured reviewer concerns / verifier decisions the job carried
 	// in its verdict file BEFORE recording the check verdict. Advisory jobs retain
 	// those findings in check details instead: they must not create or reopen a
-	// thread that independently blocks approval. The worker lease is still live
-	// here, so blocking jobs' writes pass the change-access check.
+	// thread that independently blocks approval. Aggregation jobs may still apply
+	// non-blocking follow-up tasks. The worker lease is live here, so every
+	// coordinator mutation can be bound to the exact source job.
+	var followUpResults map[int]reviewFollowUpResult
 	if haveVerdict {
-		if err := applyVerdictActions(client, kind, blocking && !reviewDiscovery, lease, result, verdictReport, stdout); err != nil {
+		var err error
+		followUpResults, err = applyVerdictActions(
+			client,
+			kind,
+			blocking && !reviewDiscovery,
+			reviewAggregationJob(job),
+			*job.TaskID,
+			lease,
+			result,
+			verdictReport,
+			stdout,
+		)
+		if err != nil {
 			verdict = coordinator.CheckErrored
 			details = "structured verdict actions failed: " + err.Error()
+		}
+	}
+	if haveVerdict && verdict != coordinator.CheckErrored {
+		if !blocking || reviewDiscovery {
+			details = advisoryVerdictDetails(details, verdictReport, followUpResults)
+		} else if kind == coordinator.CheckKindReviewer {
+			details = classifiedReviewDetails(details, verdictReport, followUpResults)
 		}
 	}
 
@@ -826,55 +844,109 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 	return check.Check.Verdict, nil
 }
 
-// applyVerdictActions deterministically files a reviewer job's blocking concerns
-// as review threads and applies a verifier job's certify/reopen decisions,
-// carrying out mechanically what the agent declared in its verdict file. Failures
-// are returned so the caller records an execution error instead of committing a
-// result whose declared actions were only partially applied. CreateThread is
-// idempotent and certify/reopen are state-guarded, so retry is safe.
-func applyVerdictActions(client *flowclient.Client, kind coordinator.CheckKind, blocking bool, lease flowworker.Lease, result workerexec.RunResult, report workerexec.VerdictReport, stdout io.Writer) error {
-	if !blocking {
-		findings := len(report.Comments) + len(report.Threads)
-		if findings > 0 {
-			fmt.Fprintf(stdout, "check: retained %d advisory finding(s) in check details; no review threads changed\n", findings)
-		}
-		return nil
-	}
+// applyVerdictActions deterministically files a reviewer job's blocking
+// concerns, applies final-aggregation follow-up tasks, and carries out verifier
+// decisions. Failures make the check errored so declared work is never silently
+// lost. Every operation is idempotent or state-guarded, making retry safe.
+type reviewFollowUpResult struct {
+	TaskID      string
+	Disposition string
+}
+
+func applyVerdictActions(
+	client *flowclient.Client,
+	kind coordinator.CheckKind,
+	blocking bool,
+	reviewAggregation bool,
+	sourceTaskID string,
+	lease flowworker.Lease,
+	result workerexec.RunResult,
+	report workerexec.VerdictReport,
+	stdout io.Writer,
+) (map[int]reviewFollowUpResult, error) {
 	leaseID := lease.ID
 	var actionErr error
+	followUpResults := map[int]reviewFollowUpResult{}
 	switch kind {
 	case coordinator.CheckKindReviewer:
-		blockingFindings := blockingReviewFindings(report)
-		if blockingFindings == 0 {
-			return nil
-		}
-		changeID := strings.TrimSpace(result.Payload.ChangeID)
-		if changeID == "" {
-			fmt.Fprintf(stdout, "check: cannot file %d blocking verdict comment(s): missing change id\n", blockingFindings)
-			return errors.New("cannot file verdict comments: missing change id")
-		}
-		for _, comment := range report.Comments {
-			if !comment.BlocksApproval() {
+		for index, comment := range report.Comments {
+			if comment.TaskAction == nil {
 				continue
 			}
-			err := retryTransientOperation("file verdict comment", stdout, func() error {
-				_, err := client.CreateThread(changeID, flowclient.CreateThreadInput{
-					AnchorCommitSHA: comment.SHA,
-					FilePath:        comment.File,
-					Line:            comment.Line,
-					Body:            comment.Body,
-					LeaseID:         leaseID,
+			if !reviewAggregation {
+				actionErr = errors.Join(actionErr, errors.New("only a review aggregation job may apply task_action"))
+				continue
+			}
+			introduced := comment.IntroducedByChange != nil && *comment.IntroducedByChange
+			var applied flowclient.ApplyReviewFollowUpResult
+			err := retryTransientOperation("apply review follow-up", stdout, func() error {
+				var err error
+				applied, err = client.ApplyReviewFollowUp(sourceTaskID, flowclient.ApplyReviewFollowUpInput{
+					LeaseID: leaseID,
+					Finding: flowclient.ReviewFollowUpFinding{
+						SHA:                comment.SHA,
+						File:               comment.File,
+						Line:               comment.Line,
+						Body:               comment.Body,
+						Severity:           comment.Severity,
+						IntroducedByChange: introduced,
+						Requirement:        comment.Requirement,
+						DuplicateOf:        comment.DuplicateOf,
+					},
+					TaskAction: flowclient.ReviewFollowUpTaskAction{
+						Action: comment.TaskAction.Action,
+						Title:  comment.TaskAction.Title,
+						Body:   comment.TaskAction.Body,
+						TaskID: comment.TaskAction.TaskID,
+					},
 				})
 				return err
 			})
 			if err != nil {
-				fmt.Fprintf(stdout, "check: file verdict comment %s:%s:%d failed: %v\n", comment.SHA, comment.File, comment.Line, err)
+				fmt.Fprintf(stdout, "check: apply review follow-up %s:%d failed: %v\n", comment.File, comment.Line, err)
 				actionErr = errors.Join(actionErr, err)
 				continue
 			}
-			fmt.Fprintf(stdout, "check: filed verdict comment %s:%d\n", comment.File, comment.Line)
+			followUpResults[index] = reviewFollowUpResult{
+				TaskID:      applied.Task.ID,
+				Disposition: applied.Disposition,
+			}
+			fmt.Fprintf(stdout, "check: review follow-up %s task %s\n", applied.Disposition, applied.Task.ID)
+		}
+
+		if blocking {
+			blockingFindings := blockingReviewFindings(report)
+			changeID := strings.TrimSpace(result.Payload.ChangeID)
+			if blockingFindings > 0 && changeID == "" {
+				fmt.Fprintf(stdout, "check: cannot file %d blocking verdict comment(s): missing change id\n", blockingFindings)
+				actionErr = errors.Join(actionErr, errors.New("cannot file verdict comments: missing change id"))
+			}
+			for _, comment := range report.Comments {
+				if !comment.BlocksApproval() || changeID == "" {
+					continue
+				}
+				err := retryTransientOperation("file verdict comment", stdout, func() error {
+					_, err := client.CreateThread(changeID, flowclient.CreateThreadInput{
+						AnchorCommitSHA: comment.SHA,
+						FilePath:        comment.File,
+						Line:            comment.Line,
+						Body:            comment.Body,
+						LeaseID:         leaseID,
+					})
+					return err
+				})
+				if err != nil {
+					fmt.Fprintf(stdout, "check: file verdict comment %s:%s:%d failed: %v\n", comment.SHA, comment.File, comment.Line, err)
+					actionErr = errors.Join(actionErr, err)
+					continue
+				}
+				fmt.Fprintf(stdout, "check: filed verdict comment %s:%d\n", comment.File, comment.Line)
+			}
 		}
 	case coordinator.CheckKindVerifier:
+		if !blocking {
+			break
+		}
 		for _, decision := range report.Threads {
 			err := retryTransientOperation("apply verdict thread decision", stdout, func() error {
 				if decision.Decision == "reopen" {
@@ -900,7 +972,13 @@ func applyVerdictActions(client *flowclient.Client, kind coordinator.CheckKind, 
 			fmt.Fprintf(stdout, "check: applied verdict thread %s %s\n", decision.ID, decision.Decision)
 		}
 	}
-	return actionErr
+	if !blocking {
+		findings := len(report.Comments) + len(report.Threads)
+		if findings > 0 {
+			fmt.Fprintf(stdout, "check: retained %d advisory finding(s) in check details; no review threads changed\n", findings)
+		}
+	}
+	return followUpResults, actionErr
 }
 
 func checkJobBlocksApproval(job flowworker.Job) bool {
@@ -913,15 +991,20 @@ func reviewDiscoveryJob(job flowworker.Job) bool {
 	return discovery
 }
 
-func advisoryVerdictDetails(details string, report workerexec.VerdictReport) string {
+func reviewAggregationJob(job flowworker.Job) bool {
+	aggregation, _ := job.Payload["review_aggregation"].(bool)
+	return aggregation
+}
+
+func advisoryVerdictDetails(details string, report workerexec.VerdictReport, taskResults map[int]reviewFollowUpResult) string {
 	var lines []string
 	if trimmed := strings.TrimSpace(details); trimmed != "" {
 		lines = append(lines, "Advisory (non-blocking): "+trimmed)
 	} else {
 		lines = append(lines, "Advisory (non-blocking) finding")
 	}
-	for _, comment := range report.Comments {
-		lines = append(lines, formatReviewFinding(comment))
+	for index, comment := range report.Comments {
+		lines = append(lines, formatReviewFinding(comment, taskResults[index]))
 	}
 	for _, decision := range report.Threads {
 		finding := fmt.Sprintf("- thread %s: recommends %s", decision.ID, decision.Decision)
@@ -943,12 +1026,12 @@ func blockingReviewFindings(report workerexec.VerdictReport) int {
 	return count
 }
 
-func classifiedReviewDetails(details string, report workerexec.VerdictReport) string {
+func classifiedReviewDetails(details string, report workerexec.VerdictReport, taskResults map[int]reviewFollowUpResult) string {
 	lines := []string{strings.TrimSpace(details)}
 	var followUps []string
-	for _, comment := range report.Comments {
+	for index, comment := range report.Comments {
 		if !comment.BlocksApproval() {
-			followUps = append(followUps, formatReviewFinding(comment))
+			followUps = append(followUps, formatReviewFinding(comment, taskResults[index]))
 		}
 	}
 	if len(followUps) == 0 {
@@ -959,7 +1042,7 @@ func classifiedReviewDetails(details string, report workerexec.VerdictReport) st
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
-func formatReviewFinding(comment workerexec.ReviewCommentReport) string {
+func formatReviewFinding(comment workerexec.ReviewCommentReport, taskResult reviewFollowUpResult) string {
 	classification := comment.Severity
 	if comment.IntroducedByChange != nil && !*comment.IntroducedByChange {
 		classification += ", pre-existing"
@@ -977,6 +1060,14 @@ func formatReviewFinding(comment workerexec.ReviewCommentReport) string {
 	)
 	if comment.FollowUp != "" {
 		finding += " Follow-up: " + strings.TrimSpace(comment.FollowUp)
+	}
+	if taskResult.TaskID != "" {
+		finding += fmt.Sprintf(
+			" Follow-up task: [%s](/ui/tasks/%s) (%s).",
+			taskResult.TaskID,
+			taskResult.TaskID,
+			taskResult.Disposition,
+		)
 	}
 	return finding
 }

@@ -195,6 +195,8 @@ func reviewAggregationInstructions() []string {
 		"You are the final aggregation step after parallel review discovery. Validate and synthesize the candidate reports; do not start a new open-ended review pass.",
 		"Combine duplicate symptoms that share one root cause and emit at most one anchored comment for each unique task-caused blocker.",
 		"A candidate from an advisory source may remain non-blocking follow-up context but cannot block approval. A blocking-source candidate may block only when it satisfies the critical/high, introduced-by-change, non-duplicate policy.",
+		"For each unique, actionable issue that is safe to defer from this change, declare task_action on its non-blocking comment. Use use_existing_task only for a high-confidence same-root-issue match from Open Task Candidates; otherwise use create_task with a concise title and a self-contained Markdown body covering the problem, review evidence and anchor, why it is out of scope, and testable completion criteria.",
+		"Do not declare task_action for blocking findings, review-thread duplicates, speculative observations, or informational notes. A created or reused follow-up task is related to the reviewed task but never blocks it.",
 		"Use a satisfied verdict when no eligible unique blocker remains. This aggregate verdict is the only reviewer result that opens threads or selects the workflow outcome.",
 	}
 }
@@ -401,14 +403,14 @@ func roleInstructions(role string, input Input) []string {
 		if strings.TrimSpace(input.ReviewAggregationContext) != "" {
 			return []string{
 				"Validate and deduplicate the supplied parallel candidate reports against the task and current branch.",
-				"Write the one final structured verdict to $FLOW_VERDICT_FILE. Only its unique eligible comments are filed as blocking review threads.",
+				"Write the one final structured verdict to $FLOW_VERDICT_FILE. Only its unique eligible comments are filed as blocking review threads; task_action on actionable non-blocking comments is applied as durable follow-up work.",
 				"The verdict file is required. A missing or invalid verdict pauses the workflow for human retry.",
 			}
 		}
 		return []string{
 			"Review the task and current branch against ${FLOW_BASE:-the base branch}.",
 			"First derive the change's correctness and security invariants and review related edge cases together. On later cycles, inspect claimed threads and the delta since the prior reviewed head; a new blocker must be introduced by that delta or directly violate an original task requirement.",
-			"Classify every comments[] finding in $FLOW_VERDICT_FILE as {sha,file,line,body,severity,introduced_by_change,requirement,duplicate_of,follow_up}. Only critical/high findings introduced by this change and not duplicating an existing thread block this task; pre-existing, medium/low, and duplicate findings remain non-blocking follow-up context. For this workflow, high includes a reproducible correctness regression, security flaw, unmet explicit task requirement, or a missing test that leaves such a task-caused bug unprotected; medium/low means the requested behavior remains correct and the finding can safely be separate follow-up work. Use flow comment to file one directly instead if you prefer. Do not edit files, commit, push, certify threads, or call flow complete.",
+			"Classify every comments[] finding in $FLOW_VERDICT_FILE as {sha,file,line,body,severity,introduced_by_change,requirement,duplicate_of,follow_up,task_action}. task_action is reserved for the final parallel-review aggregation job and is either {action:\"create_task\",title,body} or {action:\"use_existing_task\",task_id}. Only critical/high findings introduced by this change and not duplicating an existing thread block this task; pre-existing, medium/low, and duplicate findings remain non-blocking follow-up context. For this workflow, high includes a reproducible correctness regression, security flaw, unmet explicit task requirement, or a missing test that leaves such a task-caused bug unprotected; medium/low means the requested behavior remains correct and the finding can safely be separate follow-up work. Use flow comment to file one directly instead if you prefer. Do not edit files, commit, push, certify threads, or call flow complete.",
 			"Write a valid structured verdict to $FLOW_VERDICT_FILE; it is the only source of a reviewer outcome. A missing or invalid verdict pauses the workflow for human retry instead of requesting changes.",
 		}
 	case RoleVerifier:

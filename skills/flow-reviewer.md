@@ -60,12 +60,24 @@
            "introduced_by_change": true,
            "requirement": "<task requirement or invariant this finding violates>",
            "duplicate_of": "<existing thread id, only when duplicated>",
-           "follow_up": "<suggested separate task or next action, when non-blocking>"
+           "follow_up": "<suggested separate task or next action, when non-blocking>",
+           "task_action": {
+             "action": "create_task|use_existing_task",
+             "title": "<required only for create_task>",
+             "body": "<self-contained Markdown scope and acceptance criteria; required only for create_task>",
+             "task_id": "<required only for use_existing_task>"
+           }
          }
        ]
      }
      ```
 
+     `task_action` is optional and reserved for the final parallel-review
+     aggregation job. Add it only to a unique, actionable non-blocking issue that
+     is safe to defer from the current change. Reuse an open task only for a
+     high-confidence same-root-issue match from the supplied task candidates;
+     otherwise create a task. Omit it for blocking findings, review-thread
+     duplicates, speculative observations, and informational notes.
      Use `"blocked"` only when at least one comment is `critical`/`high`,
      introduced by this change, and not a duplicate, or when the change cannot
      be reviewed reliably. Otherwise use `"satisfied"`; keep non-blocking

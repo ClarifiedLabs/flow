@@ -27,15 +27,27 @@ type VerdictReport struct {
 // critical/high concerns become anchored review threads; the rest remain
 // non-blocking follow-up context.
 type ReviewCommentReport struct {
-	SHA                string `json:"sha"`
-	File               string `json:"file"`
-	Line               int    `json:"line"`
-	Body               string `json:"body"`
-	Severity           string `json:"severity"`
-	IntroducedByChange *bool  `json:"introduced_by_change"`
-	Requirement        string `json:"requirement"`
-	DuplicateOf        string `json:"duplicate_of,omitempty"`
-	FollowUp           string `json:"follow_up,omitempty"`
+	SHA                string                  `json:"sha"`
+	File               string                  `json:"file"`
+	Line               int                     `json:"line"`
+	Body               string                  `json:"body"`
+	Severity           string                  `json:"severity"`
+	IntroducedByChange *bool                   `json:"introduced_by_change"`
+	Requirement        string                  `json:"requirement"`
+	DuplicateOf        string                  `json:"duplicate_of,omitempty"`
+	FollowUp           string                  `json:"follow_up,omitempty"`
+	TaskAction         *ReviewTaskActionReport `json:"task_action,omitempty"`
+}
+
+// ReviewTaskActionReport tells the final review aggregator how to retain one
+// unique, actionable, non-blocking finding as durable work. CreateTask carries
+// a self-contained task specification; UseExistingTask names an open task that
+// already covers the same root issue.
+type ReviewTaskActionReport struct {
+	Action string `json:"action"`
+	Title  string `json:"title,omitempty"`
+	Body   string `json:"body,omitempty"`
+	TaskID string `json:"task_id,omitempty"`
 }
 
 // BlocksApproval reports whether this finding is allowed to veto the current
@@ -66,6 +78,8 @@ const VerdictFileName = ".flow-verdict.json"
 // flood the coordinator's check details column. It also bounds each review
 // comment and thread-decision body.
 const verdictReasonMaxBytes = 4096
+
+const verdictTaskTitleMaxBytes = 256
 
 // verdictMaxComments and verdictMaxThreadDecisions cap how many actions a single
 // job can carry so a buggy or adversarial job cannot enqueue an unbounded number
@@ -192,6 +206,59 @@ func normalizeVerdictComments(v *VerdictReport) error {
 		if len(c.FollowUp) > verdictReasonMaxBytes {
 			c.FollowUp = c.FollowUp[:verdictReasonMaxBytes]
 		}
+		if err := normalizeReviewTaskAction(i, c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizeReviewTaskAction(index int, comment *ReviewCommentReport) error {
+	action := comment.TaskAction
+	if action == nil {
+		return nil
+	}
+	action.Action = strings.TrimSpace(action.Action)
+	action.Title = strings.TrimSpace(action.Title)
+	action.Body = strings.TrimSpace(action.Body)
+	action.TaskID = strings.TrimSpace(action.TaskID)
+
+	if comment.BlocksApproval() {
+		return fmt.Errorf("verdict file: comment %d blocking finding cannot declare task_action", index)
+	}
+	if comment.DuplicateOf != "" {
+		return fmt.Errorf("verdict file: comment %d review-thread duplicate cannot declare task_action", index)
+	}
+	switch action.Action {
+	case "create_task":
+		if action.Title == "" {
+			return fmt.Errorf("verdict file: comment %d create_task requires title", index)
+		}
+		if action.Body == "" {
+			return fmt.Errorf("verdict file: comment %d create_task requires body", index)
+		}
+		if action.TaskID != "" {
+			return fmt.Errorf("verdict file: comment %d create_task must not specify task_id", index)
+		}
+		if len(action.Title) > verdictTaskTitleMaxBytes {
+			return fmt.Errorf("verdict file: comment %d task title exceeds %d bytes", index, verdictTaskTitleMaxBytes)
+		}
+		if len(action.Body) > verdictReasonMaxBytes {
+			return fmt.Errorf("verdict file: comment %d task body exceeds %d bytes", index, verdictReasonMaxBytes)
+		}
+	case "use_existing_task":
+		if action.TaskID == "" {
+			return fmt.Errorf("verdict file: comment %d use_existing_task requires task_id", index)
+		}
+		if action.Title != "" || action.Body != "" {
+			return fmt.Errorf("verdict file: comment %d use_existing_task must not specify title or body", index)
+		}
+	default:
+		return fmt.Errorf(
+			"verdict file: comment %d has invalid task_action %q (want create_task|use_existing_task)",
+			index,
+			action.Action,
+		)
 	}
 	return nil
 }

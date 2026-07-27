@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
@@ -58,18 +59,19 @@ type CheckEntrypoint struct {
 }
 
 type CheckDefinition struct {
-	Name             string                 `json:"name" yaml:"name"`
-	Kind             CheckKind              `json:"kind" yaml:"kind"`
-	Phase            CheckPhase             `json:"phase" yaml:"phase"`
-	Required         *bool                  `json:"required" yaml:"required"`
-	Entrypoint       *CheckEntrypoint       `json:"entrypoint" yaml:"entrypoint"`
-	RunsOn           map[string]string      `json:"runs_on" yaml:"runs_on"`
-	Requires         []string               `json:"requires" yaml:"requires"`
-	Size             string                 `json:"size" yaml:"size"`
-	Tolerations      []scheduler.Toleration `json:"tolerations" yaml:"tolerations"`
-	sourcePath       string
-	roleInstructions string
-	reviewDiscovery  bool
+	Name              string                 `json:"name" yaml:"name"`
+	Kind              CheckKind              `json:"kind" yaml:"kind"`
+	Phase             CheckPhase             `json:"phase" yaml:"phase"`
+	Required          *bool                  `json:"required" yaml:"required"`
+	Entrypoint        *CheckEntrypoint       `json:"entrypoint" yaml:"entrypoint"`
+	RunsOn            map[string]string      `json:"runs_on" yaml:"runs_on"`
+	Requires          []string               `json:"requires" yaml:"requires"`
+	Size              string                 `json:"size" yaml:"size"`
+	Tolerations       []scheduler.Toleration `json:"tolerations" yaml:"tolerations"`
+	sourcePath        string
+	roleInstructions  string
+	reviewDiscovery   bool
+	reviewAggregation bool
 }
 
 type CheckSuite struct {
@@ -889,6 +891,9 @@ SELECT attempt FROM workflow_node_runs WHERE id = ?`, nodeRunID).Scan(&nodeAttem
 	if definition.reviewDiscovery {
 		payload["review_discovery"] = true
 	}
+	if definition.reviewAggregation {
+		payload["review_aggregation"] = true
+	}
 	if nodeAttempt > 0 {
 		payload["node_attempt"] = nodeAttempt
 	}
@@ -1132,6 +1137,7 @@ func (s *CheckConfigService) ScheduleWorkflowReviewAggregation(
 	definition := suite.Definitions[0]
 	definition.Name = workflowNodeCheckName(ReviewAggregationCheckName, nodeRunID, len(sourceNames))
 	definition.Required = &blocksApproval
+	definition.reviewAggregation = true
 
 	details, err := s.reviewAggregationDetails(ctx, task.ID, agents, sourceNames)
 	if err != nil {
@@ -1187,7 +1193,11 @@ WHERE task_id = ? AND name = ? AND verdict != ?`,
 	return definition.Name, nil
 }
 
-const reviewAggregationContextMaxBytes = 128 << 10
+const (
+	reviewAggregationContextMaxBytes     = 128 << 10
+	reviewAggregationTaskCatalogMaxBytes = 32 << 10
+	reviewAggregationTaskBodyMaxBytes    = 2 << 10
+)
 
 func (s *CheckConfigService) reviewAggregationDetails(
 	ctx context.Context,
@@ -1195,9 +1205,8 @@ func (s *CheckConfigService) reviewAggregationDetails(
 	agents []SnapshotReviewAgent,
 	sourceNames []string,
 ) (string, error) {
-	var content strings.Builder
-	content.WriteString(ReviewAggregationDetailsPrefix)
-	content.WriteString("Synthesize the parallel discovery reports below. A finding from an advisory source may be retained as follow-up context but cannot block approval.\n")
+	const intro = "Synthesize the parallel discovery reports below. A finding from an advisory source may be retained as follow-up context but cannot block approval.\n"
+	var reports strings.Builder
 	for index, name := range sourceNames {
 		check, err := s.checks.GetCheck(ctx, taskID, name)
 		if err != nil {
@@ -1208,7 +1217,7 @@ func (s *CheckConfigService) reviewAggregationDetails(
 			sourcePolicy = "blocking source"
 		}
 		fmt.Fprintf(
-			&content,
+			&reports,
 			"\n### %s (%s)\nVerdict: %s\n\n%s\n",
 			name,
 			sourcePolicy,
@@ -1216,18 +1225,100 @@ func (s *CheckConfigService) reviewAggregationDetails(
 			strings.TrimSpace(check.Details),
 		)
 	}
-	return truncateReviewAggregationContext(content.String()), nil
+	catalog, err := s.reviewAggregationOpenTaskCatalog(ctx, taskID)
+	if err != nil {
+		return "", err
+	}
+
+	fixed := ReviewAggregationDetailsPrefix + intro
+	reportBudget := reviewAggregationContextMaxBytes - len(fixed) - len(catalog)
+	if reportBudget < 0 {
+		reportBudget = 0
+	}
+	reportContent := truncateUTF8Bytes(
+		reports.String(),
+		reportBudget,
+		"\n\n[discovery reports truncated]",
+	)
+	return fixed + reportContent + catalog, nil
 }
 
 func truncateReviewAggregationContext(value string) string {
-	if len(value) <= reviewAggregationContextMaxBytes {
+	return truncateUTF8Bytes(value, reviewAggregationContextMaxBytes, "\n\n[aggregation context truncated]")
+}
+
+func (s *CheckConfigService) reviewAggregationOpenTaskCatalog(ctx context.Context, sourceTaskID string) (string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, title, body
+FROM tasks
+WHERE id != ?
+	AND (lifecycle_state IS NULL OR lifecycle_state != ?)
+ORDER BY updated_at DESC, id DESC`,
+		strings.TrimSpace(sourceTaskID),
+		string(LifecycleDone),
+	)
+	if err != nil {
+		return "", fmt.Errorf("list open task candidates: %w", err)
+	}
+	defer rows.Close()
+
+	const heading = "\n\n## Open Task Candidates\n\n"
+	var catalog strings.Builder
+	catalog.WriteString(heading)
+	count := 0
+	truncated := false
+	for rows.Next() {
+		var id, title, body string
+		if err := rows.Scan(&id, &title, &body); err != nil {
+			return "", fmt.Errorf("scan open task candidate: %w", err)
+		}
+		title = truncateUTF8Bytes(strings.TrimSpace(title), 256, "…")
+		body = truncateUTF8Bytes(strings.TrimSpace(body), reviewAggregationTaskBodyMaxBytes, "\n[body excerpt truncated]")
+		if body == "" {
+			body = "_No task body._"
+		}
+		entry := fmt.Sprintf("### %s — %s\n\n%s\n\n", id, title, body)
+		if catalog.Len()+len(entry) > reviewAggregationTaskCatalogMaxBytes {
+			truncated = true
+			break
+		}
+		catalog.WriteString(entry)
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("iterate open task candidates: %w", err)
+	}
+	if count == 0 {
+		catalog.WriteString("_No other open tasks._\n")
+	} else if truncated {
+		catalog.WriteString("[open task catalog truncated]\n")
+	}
+	return truncateUTF8Bytes(
+		catalog.String(),
+		reviewAggregationTaskCatalogMaxBytes,
+		"\n[open task catalog truncated]",
+	), nil
+}
+
+func truncateUTF8Bytes(value string, maxBytes int, marker string) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(value) <= maxBytes {
 		return value
 	}
-	cut := reviewAggregationContextMaxBytes
+	if len(marker) >= maxBytes {
+		marker = marker[:maxBytes]
+		for len(marker) > 0 && !utf8.ValidString(marker) {
+			marker = marker[:len(marker)-1]
+		}
+		return marker
+	}
+	cut := maxBytes - len(marker)
 	for cut > 0 && (value[cut]&0xc0) == 0x80 {
 		cut--
 	}
-	return value[:cut] + "\n\n[aggregation context truncated]"
+	return value[:cut] + marker
 }
 
 func workflowCheckDispatchKey(nodeRunID string, attempt int, checkName string) string {

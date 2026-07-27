@@ -481,6 +481,23 @@ func (c *Client) UnlinkTasks(sourceTaskID string, kind coordinator.RelationKind,
 	return c.do(http.MethodDelete, c.tasksPath("/"+url.PathEscape(sourceTaskID))+"/relations", request, nil, nil)
 }
 
+func (c *Client) ApplyReviewFollowUp(sourceTaskID string, input ApplyReviewFollowUpInput) (ApplyReviewFollowUpResult, error) {
+	var response contract.ApplyReviewFollowUpResponse
+	if err := c.do(
+		http.MethodPost,
+		c.tasksPath("/"+url.PathEscape(sourceTaskID))+"/review-follow-ups",
+		contract.ApplyReviewFollowUpRequest(input),
+		nil,
+		&response,
+	); err != nil {
+		return ApplyReviewFollowUpResult{}, err
+	}
+	return ApplyReviewFollowUpResult{
+		Task:        response.Task,
+		Disposition: response.Disposition,
+	}, nil
+}
+
 func (c *Client) MergeTask(id string) (coordinator.MergeResult, error) {
 	var response mergeResponse
 	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(id))+"/merge", map[string]string{}, nil, &response); err != nil {
@@ -1532,6 +1549,17 @@ type UploadTaskAttachmentInput struct {
 type TaskFilter struct {
 	LifecycleStates []string
 	TagSlugs        []string
+}
+
+type ReviewFollowUpFinding = contract.ReviewFollowUpFinding
+
+type ReviewFollowUpTaskAction = contract.ReviewFollowUpTaskAction
+
+type ApplyReviewFollowUpInput = contract.ApplyReviewFollowUpRequest
+
+type ApplyReviewFollowUpResult struct {
+	Task        coordinator.Task
+	Disposition string
 }
 
 type RegisterWorkerInput struct {

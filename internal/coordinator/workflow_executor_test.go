@@ -803,6 +803,35 @@ func TestWorkflowExecutorParallelReviewAggregationBarrier(t *testing.T) {
 		fixture.assertReviewOutcome(t, "approved")
 	})
 
+	t.Run("an all-advisory aggregation execution error still pauses", func(t *testing.T) {
+		agents := barrierAgents(false)
+		agents[0].Blocking = false
+		fixture := newReviewBarrierFixture(t, agents)
+		ctx := context.Background()
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("initial advance: %v", err)
+		}
+		fixture.report(t, "code-review.node."+fixture.nodeID, CheckSatisfied)
+		fixture.report(t, "security-review.node."+fixture.nodeID, CheckSatisfied)
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("schedule advisory aggregate: %v", err)
+		}
+		aggregationName := ReviewAggregationCheckName + ".node." + fixture.nodeID
+		aggregation, err := fixture.checks.GetCheck(ctx, fixture.task.ID, aggregationName)
+		if err != nil || aggregation.Required {
+			t.Fatalf("all-advisory aggregation = %+v err=%v", aggregation, err)
+		}
+		fixture.report(t, aggregationName, CheckErrored)
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("pause after advisory aggregation error: %v", err)
+		}
+		detail, err := fixture.runs.Detail(ctx, fixture.runID)
+		if err != nil || detail.Run.State != WorkflowRunWaiting ||
+			detail.OpenWait == nil || detail.OpenWait.Reason != WorkflowWaitReasonExecutionFailed {
+			t.Fatalf("workflow after advisory aggregation error = %+v err=%v", detail, err)
+		}
+	})
+
 	t.Run("skips a failed review node along its successful outcome", func(t *testing.T) {
 		fixture := newReviewBarrierFixture(t, barrierAgents(true))
 		ctx := context.Background()
