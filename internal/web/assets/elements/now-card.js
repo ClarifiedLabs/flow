@@ -40,7 +40,7 @@ function renderNowAction(action, card, model, projectAttr) {
     case "workflow-skip":
       return `<button class="${classes}" data-workflow-skip="${id}" data-workflow-skip-node="${escapeAttr(model?.nodeRunID || "")}"${projectAttr}>${escapeHTML(action.label)}</button>`;
     case "workflow-budget":
-      return `<button class="${classes}" data-workflow-budget="${id}"${projectAttr}>${escapeHTML(action.label)}</button>`;
+      return `<button class="${classes}" data-workflow-budget="${id}" data-workflow-budget-kind="${escapeAttr(action.budgetKind || "transitions")}"${projectAttr}>${escapeHTML(action.label)}</button>`;
     case "thread-claim":
       return `<button class="${classes}" data-thread-claim="${escapeAttr(card.threadID || "")}" data-claim-kind="${escapeAttr(action.kind)}">${escapeHTML(action.label)}</button>`;
     case "open-change":

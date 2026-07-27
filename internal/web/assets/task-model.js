@@ -229,7 +229,17 @@ function nowActions(model) {
         { label: "Transcript", key: "open-transcript" },
       ];
     case "budget":
-      return [{ label: "Extend budget", key: "workflow-budget", primary: true }];
+      return [
+        {
+          label: String(value(model.wait, "reason", "Reason") || "") === "review_cycle_limit" ? "Grant cycles" : "Extend budget",
+          key: "workflow-budget",
+          budgetKind:
+            String(value(model.wait, "reason", "Reason") || "") === "review_cycle_limit"
+              ? "review-cycles"
+              : "transitions",
+          primary: true,
+        },
+      ];
     default:
       return [];
   }

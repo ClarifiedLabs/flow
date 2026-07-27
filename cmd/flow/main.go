@@ -874,7 +874,7 @@ func runTaskBudget(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
 	var additional int
-	flags.IntVar(&additional, "additional", 50, "additional graph transitions")
+	flags.IntVar(&additional, "additional", 0, "additional transitions or review-author cycles for the active budget wait")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -893,7 +893,13 @@ func runTaskBudget(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "extend workflow budget: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "%s\t%d/%d\n", run.TaskID, run.TransitionsUsed, run.TransitionBudget)
+	fmt.Fprintf(stdout, "%s\ttransitions %d/%d\treview cycles %d/%d\n",
+		run.TaskID,
+		run.TransitionsUsed,
+		run.TransitionBudget,
+		run.ReviewCyclesUsed,
+		run.ReviewCycleBudget,
+	)
 	return 0
 }
 

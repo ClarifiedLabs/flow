@@ -52,7 +52,7 @@ export function waitKindOf(wait) {
   if (!wait) return "";
   const kind = String(value(wait, "kind", "Kind") || "");
   const reason = String(value(wait, "reason", "Reason") || "");
-  if (reason === "transition_budget_exhausted") return "budget";
+  if (reason === "transition_budget_exhausted" || reason === "review_cycle_limit") return "budget";
   if (kind === "operator_intervention") return "failed";
   if (kind === "human_gate") return "gate";
   if (kind === "agent_request") return "question";
@@ -72,7 +72,7 @@ export function waitReasonText(card, { readyToMerge = false } = {}) {
     case "failed":
       return message || "Workflow step failed";
     case "budget":
-      return message || "Transition budget exhausted";
+      return message || "Automation budget exhausted";
     default:
       return readyToMerge ? "Checks and review passed — ready to merge" : message;
   }
@@ -90,7 +90,9 @@ export function waitActionLabel(card, { readyToMerge = false, held = false } = {
     case "failed":
       return "Retry";
     case "budget":
-      return "Extend budget";
+      return String(value(value(card, "wait", "Wait"), "reason", "Reason") || "") === "review_cycle_limit"
+        ? "Grant cycles"
+        : "Extend budget";
     default:
       return readyToMerge ? "Merge" : "";
   }

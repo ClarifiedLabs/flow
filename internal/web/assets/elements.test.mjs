@@ -101,6 +101,7 @@ test("the action label follows the wait kind", () => {
   assert.equal(waitActionLabel({ wait: { kind: "human_gate" } }), "Answer");
   assert.equal(waitActionLabel({ wait: { kind: "operator_intervention" } }), "Retry");
   assert.equal(waitActionLabel({ wait: { reason: "transition_budget_exhausted" } }), "Extend budget");
+  assert.equal(waitActionLabel({ wait: { reason: "review_cycle_limit" } }), "Grant cycles");
   assert.equal(waitActionLabel({}, { readyToMerge: true }), "Merge");
   assert.equal(waitActionLabel({}), "");
 });
@@ -159,6 +160,16 @@ test("a failed card offers Retry and its transcript", () => {
   );
   assert.match(html, /data-workflow-retry="t-0001"/);
   assert.match(html, />Transcript</);
+});
+
+test("a review-cycle wait offers the cycle grant action instead of retry", () => {
+  const html = renderTaskCard(
+    cardModel(entry({ card: { wait: { kind: "operator_intervention", reason: "review_cycle_limit" } } })),
+  );
+  assert.match(html, /data-workflow-budget="t-0001"/);
+  assert.match(html, /data-workflow-budget-kind="review-cycles"/);
+  assert.match(html, />Grant cycles</);
+  assert.ok(!html.includes("data-workflow-retry"));
 });
 
 test("a resting card keeps its secondary controls out of the way", () => {

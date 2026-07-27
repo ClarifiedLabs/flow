@@ -51,6 +51,7 @@ type WorkflowWaitReason string
 
 const (
 	WorkflowWaitReasonExecutionFailed           WorkflowWaitReason = "execution_failed"
+	WorkflowWaitReasonReviewCycleLimit          WorkflowWaitReason = "review_cycle_limit"
 	WorkflowWaitReasonTransitionBudgetExhausted WorkflowWaitReason = "transition_budget_exhausted"
 )
 
@@ -66,6 +67,8 @@ type WorkflowRun struct {
 	CurrentArtifactID string           `json:"current_artifact_id,omitempty"`
 	TransitionBudget  int              `json:"transition_budget"`
 	TransitionsUsed   int              `json:"transitions_used"`
+	ReviewCycleBudget int              `json:"review_cycle_budget"`
+	ReviewCyclesUsed  int              `json:"review_cycles_used"`
 	Version           int64            `json:"version"`
 	CreatedAt         time.Time        `json:"created_at"`
 	StartedAt         *time.Time       `json:"started_at,omitempty"`
@@ -183,14 +186,31 @@ type WorkflowRunDetail struct {
 }
 
 type WorkflowRunService struct {
-	db    *sql.DB
-	flows *FlowService
-	tasks *TaskService
-	now   func() time.Time
+	db                     *sql.DB
+	flows                  *FlowService
+	tasks                  *TaskService
+	reviewAuthorCycleLimit int
+	now                    func() time.Time
 }
 
 func NewWorkflowRunService(db *sql.DB, flows *FlowService, tasks *TaskService) *WorkflowRunService {
-	return &WorkflowRunService{db: db, flows: flows, tasks: tasks, now: sqlitex.UTCNow}
+	return NewWorkflowRunServiceWithOptions(db, flows, tasks, WorkflowRunServiceOptions{})
+}
+
+type WorkflowRunServiceOptions struct {
+	ReviewAuthorCycleLimit int
+}
+
+func NewWorkflowRunServiceWithOptions(db *sql.DB, flows *FlowService, tasks *TaskService, opts WorkflowRunServiceOptions) *WorkflowRunService {
+	limit := opts.ReviewAuthorCycleLimit
+	if limit <= 0 {
+		limit = DefaultReviewAuthorCycleLimit
+	}
+	return &WorkflowRunService{
+		db: db, flows: flows, tasks: tasks,
+		reviewAuthorCycleLimit: limit,
+		now:                    sqlitex.UTCNow,
+	}
 }
 
 // Schedule freezes the selected flow and creates a new run. The task remains
@@ -252,10 +272,10 @@ SELECT COALESCE(MAX(run_sequence), 0) + 1 FROM workflow_runs WHERE task_id = ?`,
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO workflow_runs (
 	id, task_id, run_sequence, flow_id, flow_snapshot_json, state,
-	current_node_key, transition_budget, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, taskID, sequence,
+	current_node_key, transition_budget, review_cycle_budget, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, taskID, sequence,
 		sqlitex.NullableNonEmptyString(snapshot.FlowID), string(snapshotJSON), string(WorkflowRunScheduled),
-		snapshot.StartNode, snapshot.TransitionBudget, sqlitex.FormatTime(now)); err != nil {
+		snapshot.StartNode, snapshot.TransitionBudget, s.reviewAuthorCycleLimit, sqlitex.FormatTime(now)); err != nil {
 		return WorkflowRun{}, fmt.Errorf("insert workflow run: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -964,6 +984,18 @@ type CompleteWorkflowNodeResult struct {
 	Replayed bool             `json:"replayed,omitempty"`
 }
 
+func isAutomatedReviewAuthorCycle(source, target FlowNodeSnapshot, outcome string) bool {
+	if outcome != "changes_requested" {
+		return false
+	}
+	if source.Kind != NodeChangeReview && source.Kind != NodeVerifyChange {
+		return false
+	}
+	return target.Kind == NodeAgent &&
+		target.Config.Agent != nil &&
+		target.Config.Agent.Workspace == WorkspaceChange
+}
+
 func (s *WorkflowRunService) CompleteNode(ctx context.Context, input CompleteWorkflowNodeInput) (CompleteWorkflowNodeResult, error) {
 	input.NodeRunID = strings.TrimSpace(input.NodeRunID)
 	input.Outcome = strings.TrimSpace(input.Outcome)
@@ -1050,6 +1082,56 @@ WHERE workflow_run_id = ? AND event_kind = 'node_skipped' AND idempotency_key = 
 		return CompleteWorkflowNodeResult{}, fmt.Errorf("target node %q not found", target)
 	}
 	now := s.now().UTC()
+	reviewCycle := isAutomatedReviewAuthorCycle(sourceNode, targetNode, input.Outcome)
+	if reviewCycle && run.ReviewCyclesUsed >= run.ReviewCycleBudget {
+		if run.State == WorkflowRunWaiting && nodeRun.State == WorkflowNodeWaiting {
+			wait, waiting, err := openWaitTx(ctx, tx, run.ID)
+			if err != nil {
+				return CompleteWorkflowNodeResult{}, err
+			}
+			if waiting &&
+				wait.Kind == WorkflowWaitOperatorIntervention &&
+				wait.Reason == WorkflowWaitReasonReviewCycleLimit &&
+				wait.NodeRunID == nodeRun.ID {
+				return CompleteWorkflowNodeResult{Run: run, Replayed: true}, nil
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE workflow_node_runs SET state = ? WHERE id = ?`,
+			string(WorkflowNodeWaiting), nodeRun.ID); err != nil {
+			return CompleteWorkflowNodeResult{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE workflow_runs SET state = ?, version = version + 1 WHERE id = ?`,
+			string(WorkflowRunWaiting), run.ID); err != nil {
+			return CompleteWorkflowNodeResult{}, err
+		}
+		if err := insertWaitWithReasonTx(
+			ctx,
+			tx,
+			run.ID,
+			nodeRun.ID,
+			WorkflowWaitOperatorIntervention,
+			WorkflowWaitReasonReviewCycleLimit,
+			map[string]any{
+				"review_cycle_budget": run.ReviewCycleBudget,
+				"review_cycles_used":  run.ReviewCyclesUsed,
+			},
+			fmt.Sprintf(
+				"Review-author cycle limit reached after %d automated send-backs",
+				run.ReviewCyclesUsed,
+			),
+			ActorSystem,
+			now,
+		); err != nil {
+			return CompleteWorkflowNodeResult{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return CompleteWorkflowNodeResult{}, err
+		}
+		waiting, err := s.Get(ctx, run.ID)
+		return CompleteWorkflowNodeResult{Run: waiting}, err
+	}
 	if skipping {
 		retiredChecks, cancelledJobs, err := retireSkippedWorkflowNodeTx(ctx, tx, run.TaskID, run.ID, nodeRun.ID, sourceNode.Kind, now)
 		if err != nil {
@@ -1116,6 +1198,10 @@ WHERE id = ?`, string(WorkflowNodeSucceeded), sqlitex.NullableNonEmptyString(art
 		return CompleteWorkflowNodeResult{}, err
 	}
 	used := run.TransitionsUsed + 1
+	reviewCyclesUsed := run.ReviewCyclesUsed
+	if reviewCycle {
+		reviewCyclesUsed++
+	}
 	if targetNode.Kind == NodeTerminal {
 		terminalRun, err := createNodeRunTx(ctx, tx, run, targetNode.Key, 1, artifactID, now)
 		if err != nil {
@@ -1141,8 +1227,9 @@ UPDATE workflow_node_runs SET state = ?, started_at = ?, completed_at = ? WHERE 
 	if used >= run.TransitionBudget {
 		if _, err := tx.ExecContext(ctx, `
 UPDATE workflow_runs SET state = ?, current_node_key = ?, current_node_run_id = NULL,
-	current_artifact_id = ?, transitions_used = ?, version = version + 1
-WHERE id = ?`, string(WorkflowRunWaiting), target, sqlitex.NullableNonEmptyString(artifactID), used, run.ID); err != nil {
+	current_artifact_id = ?, transitions_used = ?, review_cycles_used = ?, version = version + 1
+WHERE id = ?`, string(WorkflowRunWaiting), target, sqlitex.NullableNonEmptyString(artifactID),
+			used, reviewCyclesUsed, run.ID); err != nil {
 			return CompleteWorkflowNodeResult{}, err
 		}
 		if err := insertWaitWithReasonTx(
@@ -1168,8 +1255,9 @@ WHERE id = ?`, string(WorkflowRunWaiting), target, sqlitex.NullableNonEmptyStrin
 
 	if _, err := tx.ExecContext(ctx, `
 UPDATE workflow_runs SET state = ?, current_node_key = ?, current_node_run_id = NULL,
-	current_artifact_id = ?, transitions_used = ?, version = version + 1
-WHERE id = ?`, string(WorkflowRunRunning), target, sqlitex.NullableNonEmptyString(artifactID), used, run.ID); err != nil {
+	current_artifact_id = ?, transitions_used = ?, review_cycles_used = ?, version = version + 1
+WHERE id = ?`, string(WorkflowRunRunning), target, sqlitex.NullableNonEmptyString(artifactID),
+		used, reviewCyclesUsed, run.ID); err != nil {
 		return CompleteWorkflowNodeResult{}, err
 	}
 	run.State = WorkflowRunRunning
@@ -1177,6 +1265,7 @@ WHERE id = ?`, string(WorkflowRunRunning), target, sqlitex.NullableNonEmptyStrin
 	run.CurrentNodeRunID = ""
 	run.CurrentArtifactID = artifactID
 	run.TransitionsUsed = used
+	run.ReviewCyclesUsed = reviewCyclesUsed
 	next, err := createNodeRunTx(ctx, tx, run, target, 1, artifactID, now)
 	if err != nil {
 		return CompleteWorkflowNodeResult{}, err
@@ -1368,7 +1457,10 @@ func (s *WorkflowRunService) Respond(ctx context.Context, taskID, nodeRunID, out
 
 func (s *WorkflowRunService) ExtendBudget(ctx context.Context, taskID string, additional int, actor Actor) (WorkflowRun, error) {
 	if additional < 1 || additional > MaxFlowTransitionBudget {
-		return WorkflowRun{}, fmt.Errorf("additional transitions must be between 1 and %d", MaxFlowTransitionBudget)
+		return WorkflowRun{}, fmt.Errorf("additional budget must be between 1 and %d", MaxFlowTransitionBudget)
+	}
+	if actor == "" {
+		actor = ActorHuman
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1384,19 +1476,37 @@ WHERE task_id = ? AND state = 'waiting'`, taskID))
 	if err != nil {
 		return WorkflowRun{}, err
 	}
-	if !ok ||
-		wait.Kind != WorkflowWaitOperatorIntervention ||
-		wait.Reason != WorkflowWaitReasonTransitionBudgetExhausted {
-		return WorkflowRun{}, fmt.Errorf("%w: workflow is not waiting on its transition budget", ErrWorkflowConflict)
-	}
-	if run.TransitionBudget+additional > MaxFlowTransitionBudget {
-		return WorkflowRun{}, fmt.Errorf("transition budget may not exceed %d", MaxFlowTransitionBudget)
+	if !ok || wait.Kind != WorkflowWaitOperatorIntervention {
+		return WorkflowRun{}, fmt.Errorf("%w: workflow is not waiting on an automation budget", ErrWorkflowConflict)
 	}
 	now := s.now().UTC()
-	if _, err := tx.ExecContext(ctx, `
+	switch wait.Reason {
+	case WorkflowWaitReasonTransitionBudgetExhausted:
+		if run.TransitionBudget+additional > MaxFlowTransitionBudget {
+			return WorkflowRun{}, fmt.Errorf("transition budget may not exceed %d", MaxFlowTransitionBudget)
+		}
+		if _, err := tx.ExecContext(ctx, `
 UPDATE workflow_runs SET transition_budget = transition_budget + ?, state = ?, version = version + 1 WHERE id = ?`,
-		additional, string(WorkflowRunRunning), run.ID); err != nil {
-		return WorkflowRun{}, err
+			additional, string(WorkflowRunRunning), run.ID); err != nil {
+			return WorkflowRun{}, err
+		}
+	case WorkflowWaitReasonReviewCycleLimit:
+		base := max(run.ReviewCycleBudget, run.ReviewCyclesUsed)
+		if base+additional > MaxFlowTransitionBudget {
+			return WorkflowRun{}, fmt.Errorf("review cycle budget may not exceed %d", MaxFlowTransitionBudget)
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE workflow_runs SET review_cycle_budget = ?, state = ?, version = version + 1 WHERE id = ?`,
+			base+additional, string(WorkflowRunRunning), run.ID); err != nil {
+			return WorkflowRun{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE workflow_node_runs SET state = ? WHERE id = ? AND state = ?`,
+			string(WorkflowNodeRunning), wait.NodeRunID, string(WorkflowNodeWaiting)); err != nil {
+			return WorkflowRun{}, err
+		}
+	default:
+		return WorkflowRun{}, fmt.Errorf("%w: workflow is not waiting on an automation budget", ErrWorkflowConflict)
 	}
 	if err := resolveOpenWaitTx(ctx, tx, run.ID, actor, now); err != nil {
 		return WorkflowRun{}, err
@@ -1916,7 +2026,8 @@ INSERT INTO workflow_transitions (
 const workflowRunSelect = `
 SELECT id, task_id, run_sequence, flow_id, flow_snapshot_json, state,
 	current_node_key, current_node_run_id, current_artifact_id,
-	transition_budget, transitions_used, version, created_at, started_at,
+	transition_budget, transitions_used, review_cycle_budget, review_cycles_used,
+	version, created_at, started_at,
 	completed_at, cancelled_at, completion_source, held_at, held_by
 FROM workflow_runs`
 
@@ -1927,8 +2038,8 @@ func scanWorkflowRun(scanner taskScanner) (WorkflowRun, error) {
 	var startedAt, completedAt, cancelledAt, heldAt sql.NullString
 	if err := scanner.Scan(&run.ID, &run.TaskID, &run.RunSequence, &flowID, &snapshotJSON, &state,
 		&run.CurrentNodeKey, &nodeRunID, &artifactID, &run.TransitionBudget, &run.TransitionsUsed,
-		&run.Version, &createdAt, &startedAt, &completedAt, &cancelledAt, &run.CompletionSource,
-		&heldAt, &run.HeldBy); err != nil {
+		&run.ReviewCycleBudget, &run.ReviewCyclesUsed, &run.Version, &createdAt, &startedAt,
+		&completedAt, &cancelledAt, &run.CompletionSource, &heldAt, &run.HeldBy); err != nil {
 		return WorkflowRun{}, err
 	}
 	if err := json.Unmarshal([]byte(snapshotJSON), &run.Snapshot); err != nil {

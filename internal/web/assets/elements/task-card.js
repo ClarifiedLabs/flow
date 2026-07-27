@@ -62,7 +62,16 @@ function renderCardActions(model, projectAttr) {
       </div>
     `;
   }
-  if (model.waitKind === "failed" || model.waitKind === "budget") {
+  if (model.waitKind === "budget") {
+    const reviewCycles = String(model.wait?.reason || model.wait?.Reason || "") === "review_cycle_limit";
+    return `
+      <div class="actions">
+        <button class="button" data-workflow-budget="${id}" data-workflow-budget-kind="${reviewCycles ? "review-cycles" : "transitions"}"${projectAttr}>${reviewCycles ? "Grant cycles" : "Extend budget"}</button>
+        <a class="button secondary" href="${escapeAttr(taskHref(model.projectID, model.id))}" data-link>Details</a>
+      </div>
+    `;
+  }
+  if (model.waitKind === "failed") {
     return `
       <div class="actions">
         <button class="button" data-workflow-retry="${id}"${projectAttr}>Retry</button>

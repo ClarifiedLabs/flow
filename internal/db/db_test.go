@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -35,14 +36,19 @@ func TestOpenInitializesSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_init", "0002_job_dispatch_keys", "0003_workflow_hold")
+	assertAppliedMigrations(t, migrations,
+		"0001_init",
+		"0002_job_dispatch_keys",
+		"0003_workflow_hold",
+		"0004_workflow_review_cycles",
+	)
 
 	var schemaVersion string
 	if err := store.DB().QueryRowContext(ctx, "SELECT value FROM app_metadata WHERE key = 'schema_version'").Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version metadata: %v", err)
 	}
-	if schemaVersion != "0003_workflow_hold" {
-		t.Fatalf("schema version = %q, want 0003_workflow_hold", schemaVersion)
+	if schemaVersion != "0004_workflow_review_cycles" {
+		t.Fatalf("schema version = %q, want 0004_workflow_review_cycles", schemaVersion)
 	}
 	assertStorageFormat(t, store, "4")
 
@@ -53,6 +59,14 @@ SELECT dflt_value FROM pragma_table_info('jobs') WHERE name = 'dispatch_key'`).S
 	}
 	if dispatchDefault != "''" {
 		t.Fatalf("jobs.dispatch_key default = %q, want empty string", dispatchDefault)
+	}
+	var reviewCycleBudgetDefault string
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT dflt_value FROM pragma_table_info('workflow_runs') WHERE name = 'review_cycle_budget'`).Scan(&reviewCycleBudgetDefault); err != nil {
+		t.Fatalf("inspect workflow_runs.review_cycle_budget: %v", err)
+	}
+	if reviewCycleBudgetDefault != "5" {
+		t.Fatalf("workflow_runs.review_cycle_budget default = %q, want 5", reviewCycleBudgetDefault)
 	}
 	var dispatchIndexSQL string
 	if err := store.DB().QueryRowContext(ctx, `
@@ -277,7 +291,76 @@ func TestOpenMigrationIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_init", "0002_job_dispatch_keys", "0003_workflow_hold")
+	assertAppliedMigrations(t, migrations,
+		"0001_init",
+		"0002_job_dispatch_keys",
+		"0003_workflow_hold",
+		"0004_workflow_review_cycles",
+	)
+}
+
+func TestReviewCycleMigrationBackfillsExistingWorkflowTransitions(t *testing.T) {
+	ctx := context.Background()
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "flow.db"))
+	if err != nil {
+		t.Fatalf("open pre-migration database: %v", err)
+	}
+	defer database.Close()
+	for _, name := range []string{
+		"migrations/0001_init.sql",
+		"migrations/0002_job_dispatch_keys.sql",
+		"migrations/0003_workflow_hold.sql",
+	} {
+		migration, err := migrationFS.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if _, err := database.ExecContext(ctx, string(migration)); err != nil {
+			t.Fatalf("apply %s: %v", name, err)
+		}
+	}
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO tasks (id, title, created_by, created_at, updated_at)
+VALUES ('t-existing', 'Existing loop', 'human', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+INSERT INTO workflow_runs (
+	id, task_id, run_sequence, flow_snapshot_json, state, current_node_key,
+	transition_budget, created_at
+) VALUES (
+	'wr-existing',
+	't-existing',
+	1,
+	'{"nodes":[{"key":"review","kind":"change_review","config":{"change_review":{"agents":[]}}},{"key":"implement","kind":"agent","config":{"agent":{"workspace":"change"}}}]}',
+	'running',
+	'review',
+	50,
+	'2026-01-01T00:00:00Z'
+);
+INSERT INTO workflow_transitions (
+	task_id, workflow_run_id, from_node_key, to_node_key, outcome,
+	event_kind, created_at
+) VALUES
+	('t-existing', 'wr-existing', 'review', 'implement', 'changes_requested', 'node_completed', '2026-01-01T00:01:00Z'),
+	('t-existing', 'wr-existing', 'review', 'implement', 'approved', 'node_completed', '2026-01-01T00:02:00Z');
+`); err != nil {
+		t.Fatalf("seed existing review transitions: %v", err)
+	}
+	migration, err := migrationFS.ReadFile("migrations/0004_workflow_review_cycles.sql")
+	if err != nil {
+		t.Fatalf("read review-cycle migration: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, string(migration)); err != nil {
+		t.Fatalf("apply review-cycle migration: %v", err)
+	}
+	var budget, used int
+	if err := database.QueryRowContext(ctx, `
+SELECT review_cycle_budget, review_cycles_used
+FROM workflow_runs
+WHERE id = 'wr-existing'`).Scan(&budget, &used); err != nil {
+		t.Fatalf("read backfilled workflow run: %v", err)
+	}
+	if budget != 5 || used != 1 {
+		t.Fatalf("review cycle budget/count = %d/%d, want 1/5 used/budget", used, budget)
+	}
 }
 
 func assertAppliedMigrations(t *testing.T, got []string, want ...string) {

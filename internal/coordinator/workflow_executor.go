@@ -315,6 +315,10 @@ LIMIT 1`,
 		"agent": node.Config.Agent.Agent, "role_instructions": node.Config.Agent.Agent.Prompt,
 		"branch": branch, "base": base, "project_id": e.project.ID, "project_name": e.project.Name,
 	}
+	if node.Config.Agent.Workspace == WorkspaceChange && run.ReviewCyclesUsed > 0 {
+		payload["review_cycle_number"] = run.ReviewCyclesUsed
+		payload["review_cycle_limit"] = run.ReviewCycleBudget
+	}
 	_, _, err = e.queue.EnqueueJobWithDispatchKey(ctx,
 		fmt.Sprintf("workflow-agent:%s:%d", nodeRun.ID, nodeRun.Attempt),
 		flowworker.EnqueueJobInput{

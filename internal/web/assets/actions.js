@@ -53,7 +53,10 @@ export const ACTIONS = {
   },
 
   async workflowBudget(app, element, dataset) {
-    const additional = Number(window.prompt("Additional workflow transitions", "50"));
+    const reviewCycles = dataset.workflowBudgetKind === "review-cycles";
+    const additional = Number(
+      window.prompt(reviewCycles ? "Additional review-author cycles" : "Additional workflow transitions", reviewCycles ? "5" : "50"),
+    );
     if (!Number.isInteger(additional) || additional < 1) return;
     await apiPost(workflowPath(dataset, dataset.workflowBudget, "/workflow/budget"), { additional });
     await app.refresh();

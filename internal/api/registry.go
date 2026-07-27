@@ -290,7 +290,9 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 	})
 	merges := coordinator.NewMergeService(db, tasks, sessions, project)
 	merges.CommitIdentity = r.commitIdentity
-	workflowRuns := coordinator.NewWorkflowRunService(db, flows, tasks)
+	workflowRuns := coordinator.NewWorkflowRunServiceWithOptions(db, flows, tasks, coordinator.WorkflowRunServiceOptions{
+		ReviewAuthorCycleLimit: r.reviewAuthorCycleLimit,
+	})
 	workflowArtifacts := coordinator.NewWorkflowArtifactService(db, tasks)
 	workflowExecutor := coordinator.NewWorkflowExecutor(coordinator.WorkflowExecutorOptions{
 		Database: db, Runs: workflowRuns, Artifacts: workflowArtifacts, Tasks: tasks,
