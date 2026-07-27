@@ -59,6 +59,8 @@ type RegistryOptions struct {
 	// ReviewAuthorCycleLimit bounds automated review/acceptance -> author fix
 	// loops before a human must grant more cycles.
 	ReviewAuthorCycleLimit int
+	ReviewScopeFileLimit   int
+	ReviewScopeLineLimit   int
 
 	// CommitIdentity sets the git author/committer identity the coordinator
 	// uses for the commits it creates (the squash-merge commit). The zero value
@@ -82,6 +84,8 @@ type Registry struct {
 	authorEntrypointConfigured bool
 	harnessArgs                flowharness.Args
 	reviewAuthorCycleLimit     int
+	reviewScopeFileLimit       int
+	reviewScopeLineLimit       int
 	commitIdentity             flowgit.CommitIdentity
 
 	mu       sync.RWMutex
@@ -127,6 +131,8 @@ func NewRegistry(opts RegistryOptions) (*Registry, error) {
 		authorEntrypointConfigured: opts.AuthorEntrypointConfigured,
 		harnessArgs:                harnessArgs,
 		reviewAuthorCycleLimit:     opts.ReviewAuthorCycleLimit,
+		reviewScopeFileLimit:       opts.ReviewScopeFileLimit,
+		reviewScopeLineLimit:       opts.ReviewScopeLineLimit,
 		commitIdentity:             opts.CommitIdentity,
 		bundles:                    map[string]*ProjectBundle{},
 	}
@@ -298,6 +304,8 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 		Database: db, Runs: workflowRuns, Artifacts: workflowArtifacts, Tasks: tasks,
 		Checks: checks, CheckConfigs: checkConfigs, Sessions: sessions, Merges: merges,
 		Queue: queue, Project: project, HarnessArgs: r.harnessArgs,
+		ReviewScopeFileLimit: r.reviewScopeFileLimit,
+		ReviewScopeLineLimit: r.reviewScopeLineLimit,
 	})
 	status := coordinator.NewStatusService(db)
 

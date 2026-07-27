@@ -114,6 +114,8 @@ func TestAdvisoryVerdictFindingsStayInCheckDetailsWithoutThreadActions(t *testin
 		Reason:  "Potential timing leak.",
 		Comments: []workerexec.ReviewCommentReport{{
 			SHA: "abc123", File: "auth.go", Line: 42, Body: "Use a constant-time comparison.",
+			Severity: "high", IntroducedByChange: boolPtr(false), Requirement: "secret comparisons are constant time",
+			FollowUp: "Track as a security-hardening task.",
 		}},
 		Threads: []workerexec.ThreadDecisionReport{{
 			ID: "th-1", Decision: "reopen", Body: "Recheck this path.",
@@ -130,6 +132,86 @@ func TestAdvisoryVerdictFindingsStayInCheckDetailsWithoutThreadActions(t *testin
 	if !strings.Contains(stdout.String(), "retained 2 advisory finding(s)") || !strings.Contains(stdout.String(), "no review threads changed") {
 		t.Fatalf("advisory action output = %q", stdout.String())
 	}
+}
+
+func TestReviewDiscoveryKeepsBlockingPolicyButSuppressesThreadActions(t *testing.T) {
+	job := flowworker.Job{Payload: map[string]any{
+		"blocking":         true,
+		"review_discovery": true,
+	}}
+	if !checkJobBlocksApproval(job) {
+		t.Fatal("blocking discovery source lost its error policy")
+	}
+	if !reviewDiscoveryJob(job) {
+		t.Fatal("review discovery marker was not recognized")
+	}
+	report := workerexec.VerdictReport{Comments: []workerexec.ReviewCommentReport{{
+		SHA: "abc123", File: "auth.go", Line: 42, Body: "Authorization is bypassed.",
+		Severity: "high", IntroducedByChange: boolPtr(true), Requirement: "authorize requests",
+	}}}
+	if err := applyVerdictActions(
+		nil,
+		coordinator.CheckKindReviewer,
+		checkJobBlocksApproval(job) && !reviewDiscoveryJob(job),
+		flowworker.Lease{},
+		workerexec.RunResult{},
+		report,
+		&bytes.Buffer{},
+	); err != nil {
+		t.Fatalf("parallel discovery attempted thread actions: %v", err)
+	}
+}
+
+func TestBlockingReviewerOnlyCountsTaskCausedUniqueHighSeverityFindings(t *testing.T) {
+	report := workerexec.VerdictReport{
+		Comments: []workerexec.ReviewCommentReport{
+			{
+				SHA: "a", File: "auth.go", Line: 1, Body: "Authorization is bypassed.",
+				Severity: "high", IntroducedByChange: boolPtr(true), Requirement: "authorize requests",
+			},
+			{
+				SHA: "b", File: "legacy.go", Line: 2, Body: "This old path is unsafe.",
+				Severity: "critical", IntroducedByChange: boolPtr(false), Requirement: "authorize requests",
+				FollowUp: "Create a security hardening task.",
+			},
+			{
+				SHA: "c", File: "style.go", Line: 3, Body: "This could be simpler.",
+				Severity: "medium", IntroducedByChange: boolPtr(true), Requirement: "keep code maintainable",
+			},
+			{
+				SHA: "d", File: "auth.go", Line: 4, Body: "Same authorization issue.",
+				Severity: "high", IntroducedByChange: boolPtr(true), Requirement: "authorize requests",
+				DuplicateOf: "th-1",
+			},
+		},
+	}
+	if got := blockingReviewFindings(report); got != 1 {
+		t.Fatalf("blockingReviewFindings = %d, want 1", got)
+	}
+	details := classifiedReviewDetails("review complete", report)
+	for _, want := range []string{"pre-existing", "medium", "duplicate of th-1", "security hardening task"} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("classified details %q missing %q", details, want)
+		}
+	}
+	if strings.Contains(details, "Authorization is bypassed") {
+		t.Fatalf("blocking finding leaked into non-blocking follow-ups: %q", details)
+	}
+	if err := applyVerdictActions(
+		nil,
+		coordinator.CheckKindReviewer,
+		true,
+		flowworker.Lease{},
+		workerexec.RunResult{},
+		workerexec.VerdictReport{Comments: report.Comments[1:]},
+		&bytes.Buffer{},
+	); err != nil {
+		t.Fatalf("non-blocking classified findings attempted thread actions: %v", err)
+	}
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 func TestReviewerHarnessFailureReportsErroredInsteadOfBlocked(t *testing.T) {

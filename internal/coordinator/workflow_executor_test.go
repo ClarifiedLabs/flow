@@ -134,6 +134,26 @@ func barrierAgents(secondBlocking bool) []SnapshotReviewAgent {
 	}
 }
 
+func TestReviewScopeThreshold(t *testing.T) {
+	tests := []struct {
+		name         string
+		files        int
+		lines        int
+		wantExceeded bool
+	}{
+		{name: "within limit", files: 10, lines: 500},
+		{name: "too many files", files: 11, lines: 1, wantExceeded: true},
+		{name: "too many lines", files: 1, lines: 501, wantExceeded: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := reviewScopeExceeded(test.files, test.lines, 10, 500); got != test.wantExceeded {
+				t.Fatalf("reviewScopeExceeded(%d, %d) = %t, want %t", test.files, test.lines, got, test.wantExceeded)
+			}
+		})
+	}
+}
+
 func (f *reviewBarrierFixture) report(t *testing.T, name string, verdict CheckVerdict) {
 	t.Helper()
 	ctx := context.Background()
@@ -441,8 +461,8 @@ SELECT COUNT(*) FROM jobs WHERE node_run_id = ? AND role = 'author'`, nodeID).Sc
 	}
 }
 
-func TestWorkflowExecutorParallelReviewBarrier(t *testing.T) {
-	t.Run("queues every job once and waits for the first blocking result", func(t *testing.T) {
+func TestWorkflowExecutorParallelReviewAggregationBarrier(t *testing.T) {
+	t.Run("fans out reviewers then queues one aggregate exactly once", func(t *testing.T) {
 		fixture := newReviewBarrierFixture(t, barrierAgents(true))
 		ctx := context.Background()
 		const advances = 20
@@ -466,11 +486,16 @@ func TestWorkflowExecutorParallelReviewBarrier(t *testing.T) {
 		if err != nil {
 			t.Fatalf("list jobs: %v", err)
 		}
-		if len(jobs) != 2 || jobs[0].State != flowworker.JobQueued || jobs[1].State != flowworker.JobQueued {
-			t.Fatalf("jobs before reports = %+v, want two queued", jobs)
+		if len(jobs) != 2 {
+			t.Fatalf("jobs before reports = %+v, want two parallel reviewers", jobs)
+		}
+		for _, job := range jobs {
+			if job.State != flowworker.JobQueued || job.Payload["review_discovery"] != true {
+				t.Fatalf("parallel discovery job = %+v", job)
+			}
 		}
 
-		fixture.report(t, "security-review.node."+fixture.nodeID, CheckSatisfied)
+		fixture.report(t, "code-review.node."+fixture.nodeID, CheckSatisfied)
 		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
 			t.Fatalf("advance after first report: %v", err)
 		}
@@ -478,8 +503,15 @@ func TestWorkflowExecutorParallelReviewBarrier(t *testing.T) {
 		if err != nil || !found || node.State != WorkflowNodeRunning || node.Outcome != "" {
 			t.Fatalf("node after first report = %+v found=%v err=%v", node, found, err)
 		}
+		jobs, err = fixture.workers.ListJobs(ctx)
+		if err != nil {
+			t.Fatalf("list jobs after first report: %v", err)
+		}
+		if len(jobs) != 2 {
+			t.Fatalf("jobs after first report = %+v, want no aggregate yet", jobs)
+		}
 
-		fixture.report(t, "code-review.node."+fixture.nodeID, CheckSatisfied)
+		fixture.report(t, "security-review.node."+fixture.nodeID, CheckSatisfied)
 		errs = make(chan error, advances)
 		wg = sync.WaitGroup{}
 		for i := 0; i < advances; i++ {
@@ -494,12 +526,41 @@ func TestWorkflowExecutorParallelReviewBarrier(t *testing.T) {
 		wg.Wait()
 		close(errs)
 		for err := range errs {
-			t.Fatalf("concurrent final advance: %v", err)
+			t.Fatalf("concurrent aggregation advance: %v", err)
+		}
+		jobs, err = fixture.workers.ListJobs(ctx)
+		if err != nil {
+			t.Fatalf("list jobs after discovery: %v", err)
+		}
+		aggregations := 0
+		for _, job := range jobs {
+			if payloadString(job.Payload, "check_name") == ReviewAggregationCheckName+".node."+fixture.nodeID {
+				aggregations++
+				if job.Payload["review_discovery"] != nil || job.Payload["blocking"] != true {
+					t.Fatalf("aggregation payload = %+v", job.Payload)
+				}
+			}
+		}
+		if len(jobs) != 3 || aggregations != 1 {
+			t.Fatalf("jobs after discovery = %+v, want one aggregate", jobs)
+		}
+		for _, source := range []string{
+			"code-review.node." + fixture.nodeID,
+			"security-review.node." + fixture.nodeID,
+		} {
+			check, err := fixture.checks.GetCheck(ctx, fixture.task.ID, source)
+			if err != nil || check.Required {
+				t.Fatalf("aggregated source %s = %+v err=%v, want advisory", source, check, err)
+			}
+		}
+		fixture.report(t, ReviewAggregationCheckName+".node."+fixture.nodeID, CheckSatisfied)
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("advance after aggregate: %v", err)
 		}
 		fixture.assertReviewOutcome(t, "approved")
 	})
 
-	t.Run("does not fail fast when a blocking reviewer blocks", func(t *testing.T) {
+	t.Run("a blocked discovery source waits for the aggregate decision", func(t *testing.T) {
 		fixture := newReviewBarrierFixture(t, barrierAgents(true))
 		ctx := context.Background()
 		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
@@ -515,12 +576,24 @@ func TestWorkflowExecutorParallelReviewBarrier(t *testing.T) {
 		}
 		fixture.report(t, "security-review.node."+fixture.nodeID, CheckSatisfied)
 		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
-			t.Fatalf("final advance: %v", err)
+			t.Fatalf("schedule aggregate: %v", err)
+		}
+		node, _, _ = fixture.runs.GetNodeRun(ctx, fixture.nodeID)
+		if node.State != WorkflowNodeRunning {
+			t.Fatalf("aggregate was not awaited: %+v", node)
+		}
+		aggregation, err := fixture.checks.GetCheck(ctx, fixture.task.ID, ReviewAggregationCheckName+".node."+fixture.nodeID)
+		if err != nil || !strings.Contains(aggregation.Details, "code-review") || !strings.Contains(aggregation.Details, "blocked") {
+			t.Fatalf("aggregation context = %+v err=%v", aggregation, err)
+		}
+		fixture.report(t, ReviewAggregationCheckName+".node."+fixture.nodeID, CheckBlocked)
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("final aggregate advance: %v", err)
 		}
 		fixture.assertReviewOutcome(t, "changes_requested")
 	})
 
-	t.Run("awaits an advisory reviewer but ignores its blocked verdict", func(t *testing.T) {
+	t.Run("an advisory discovery finding cannot block a satisfied aggregate", func(t *testing.T) {
 		fixture := newReviewBarrierFixture(t, barrierAgents(false))
 		ctx := context.Background()
 		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
@@ -536,16 +609,20 @@ func TestWorkflowExecutorParallelReviewBarrier(t *testing.T) {
 		}
 		fixture.report(t, "security-review.node."+fixture.nodeID, CheckBlocked)
 		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
-			t.Fatalf("final advance: %v", err)
+			t.Fatalf("schedule aggregate: %v", err)
 		}
 		advisory, err := fixture.checks.GetCheck(ctx, fixture.task.ID, "security-review.node."+fixture.nodeID)
 		if err != nil || advisory.Required || advisory.Verdict != CheckBlocked {
 			t.Fatalf("advisory result = %+v err=%v", advisory, err)
 		}
+		fixture.report(t, ReviewAggregationCheckName+".node."+fixture.nodeID, CheckSatisfied)
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("final aggregate advance: %v", err)
+		}
 		fixture.assertReviewOutcome(t, "approved")
 	})
 
-	t.Run("treats a skipped blocking reviewer as failure", func(t *testing.T) {
+	t.Run("the aggregate decides how to handle a skipped discovery source", func(t *testing.T) {
 		fixture := newReviewBarrierFixture(t, barrierAgents(true))
 		ctx := context.Background()
 		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
@@ -554,7 +631,11 @@ func TestWorkflowExecutorParallelReviewBarrier(t *testing.T) {
 		fixture.report(t, "security-review.node."+fixture.nodeID, CheckSatisfied)
 		fixture.report(t, "code-review.node."+fixture.nodeID, CheckSkipped)
 		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
-			t.Fatalf("final advance: %v", err)
+			t.Fatalf("schedule aggregate: %v", err)
+		}
+		fixture.report(t, ReviewAggregationCheckName+".node."+fixture.nodeID, CheckBlocked)
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("final aggregate advance: %v", err)
 		}
 		fixture.assertReviewOutcome(t, "changes_requested")
 	})
@@ -637,6 +718,89 @@ func TestWorkflowExecutorParallelReviewBarrier(t *testing.T) {
 		if attemptTwoJobs != 1 {
 			t.Fatalf("attempt-two jobs = %d, want one errored-check retry; jobs=%+v", attemptTwoJobs, jobs)
 		}
+	})
+
+	t.Run("pauses on aggregation execution error and retries only the aggregate", func(t *testing.T) {
+		fixture := newReviewBarrierFixture(t, barrierAgents(true))
+		ctx := context.Background()
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("initial advance: %v", err)
+		}
+		fixture.report(t, "code-review.node."+fixture.nodeID, CheckSatisfied)
+		fixture.report(t, "security-review.node."+fixture.nodeID, CheckSatisfied)
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("schedule aggregation: %v", err)
+		}
+		aggregationName := ReviewAggregationCheckName + ".node." + fixture.nodeID
+		fixture.report(t, aggregationName, CheckErrored)
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("pause after aggregation error: %v", err)
+		}
+		detail, err := fixture.runs.Detail(ctx, fixture.runID)
+		if err != nil || detail.Run.State != WorkflowRunWaiting ||
+			detail.OpenWait == nil || detail.OpenWait.Reason != WorkflowWaitReasonExecutionFailed {
+			t.Fatalf("workflow after aggregation error = %+v err=%v", detail, err)
+		}
+		if _, err := fixture.runs.RetryExecution(ctx, fixture.task.ID, ActorHuman, false); err != nil {
+			t.Fatalf("retry aggregation: %v", err)
+		}
+		for _, sourceName := range []string{
+			"code-review.node." + fixture.nodeID,
+			"security-review.node." + fixture.nodeID,
+		} {
+			source, err := fixture.checks.GetCheck(ctx, fixture.task.ID, sourceName)
+			if err != nil || source.Verdict != CheckSatisfied || source.Required {
+				t.Fatalf("source after aggregation retry %s = %+v err=%v", sourceName, source, err)
+			}
+		}
+		aggregation, err := fixture.checks.GetCheck(ctx, fixture.task.ID, aggregationName)
+		if err != nil || aggregation.Verdict != CheckPending || aggregation.SourceJobID != nil {
+			t.Fatalf("aggregate after retry = %+v err=%v", aggregation, err)
+		}
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("enqueue aggregate retry: %v", err)
+		}
+		jobs, err := fixture.workers.ListJobs(ctx)
+		if err != nil {
+			t.Fatalf("list jobs: %v", err)
+		}
+		attemptTwoJobs := 0
+		for _, job := range jobs {
+			if attempt, ok := job.Payload["node_attempt"].(float64); ok && int(attempt) == 2 {
+				attemptTwoJobs++
+				if job.Payload["check_name"] != aggregationName {
+					t.Fatalf("retried wrong check: %+v", job.Payload)
+				}
+			}
+		}
+		if attemptTwoJobs != 1 {
+			t.Fatalf("attempt-two jobs = %d, want one aggregation retry; jobs=%+v", attemptTwoJobs, jobs)
+		}
+	})
+
+	t.Run("an all-advisory review aggregate cannot block", func(t *testing.T) {
+		agents := barrierAgents(false)
+		agents[0].Blocking = false
+		fixture := newReviewBarrierFixture(t, agents)
+		ctx := context.Background()
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("initial advance: %v", err)
+		}
+		fixture.report(t, "code-review.node."+fixture.nodeID, CheckBlocked)
+		fixture.report(t, "security-review.node."+fixture.nodeID, CheckBlocked)
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("schedule advisory aggregate: %v", err)
+		}
+		aggregationName := ReviewAggregationCheckName + ".node." + fixture.nodeID
+		aggregation, err := fixture.checks.GetCheck(ctx, fixture.task.ID, aggregationName)
+		if err != nil || aggregation.Required {
+			t.Fatalf("all-advisory aggregation = %+v err=%v", aggregation, err)
+		}
+		fixture.report(t, aggregationName, CheckBlocked)
+		if err := fixture.executor.Advance(ctx, fixture.runID); err != nil {
+			t.Fatalf("complete advisory aggregate: %v", err)
+		}
+		fixture.assertReviewOutcome(t, "approved")
 	})
 
 	t.Run("skips a failed review node along its successful outcome", func(t *testing.T) {

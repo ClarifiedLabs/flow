@@ -193,6 +193,41 @@ func TestResolveCoordinatorWorkersRejectsBadReconnectGrace(t *testing.T) {
 	}
 }
 
+func TestResolveLimitsAppliesReviewConvergencePolicy(t *testing.T) {
+	resolved, err := (LimitConfig{}).ResolveLimits()
+	if err != nil {
+		t.Fatalf("resolve defaults: %v", err)
+	}
+	if resolved.ReviewAuthorCycles != 2 || resolved.ReviewScopeFiles != 10 || resolved.ReviewScopeLines != 500 {
+		t.Fatalf("resolved defaults = %+v, want 2 cycles, 10 files, and 500 lines", resolved)
+	}
+
+	resolved, err = (LimitConfig{
+		ReviewAuthorCycles: 4,
+		ReviewScopeFiles:   12,
+		ReviewScopeLines:   1500,
+	}).ResolveLimits()
+	if err != nil {
+		t.Fatalf("resolve explicit limits: %v", err)
+	}
+	if resolved.ReviewAuthorCycles != 4 || resolved.ReviewScopeFiles != 12 || resolved.ReviewScopeLines != 1500 {
+		t.Fatalf("resolved explicit limits = %+v", resolved)
+	}
+}
+
+func TestResolveLimitsRejectsNegativeValues(t *testing.T) {
+	tests := []LimitConfig{
+		{ReviewAuthorCycles: -1},
+		{ReviewScopeFiles: -1},
+		{ReviewScopeLines: -1},
+	}
+	for _, limits := range tests {
+		if _, err := limits.ResolveLimits(); err == nil {
+			t.Fatalf("ResolveLimits accepted %+v", limits)
+		}
+	}
+}
+
 func TestLoadCoordinatorParsesDeadlines(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "coordinator.yaml")
 	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow

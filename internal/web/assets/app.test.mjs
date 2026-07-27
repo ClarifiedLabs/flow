@@ -2240,7 +2240,8 @@ test("parallel review editors render ordered structured rows without generic JSO
   assert.equal((html.match(/name="review_agent_blocking" checked/g) || []).length, 1, "omitted blocking defaults to checked");
   assert.match(html, /Blocks approval/);
   assert.match(html, /data-review-agent-advisory >Advisory<\/span>/);
-  assert.match(html, /Every listed agent runs and is awaited/);
+  assert.match(html, /Reviewers run in parallel/);
+  assert.match(html, /one aggregation pass/);
   assert.match(html, /data-add-review-agent>Add agent/);
   assert.match(html, /title="Move agent up"/);
   assert.match(html, /title="Move agent down"/);
@@ -2257,6 +2258,7 @@ test("parallel review editors render ordered structured rows without generic JSO
   }, agentDefs);
   assert.match(verifyHTML, /data-review-config-key="verify_change"/);
   assert.match(verifyHTML, /Blocks success/);
+  assert.match(verifyHTML, /Every listed agent runs and is awaited/);
   assert.doesNotMatch(verifyHTML, /name="node_config"|Strict node configuration JSON/);
 });
 

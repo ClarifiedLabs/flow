@@ -231,7 +231,9 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		AuthorEntrypoint:           cfg.AuthorEntrypoint,
 		AuthorEntrypointConfigured: cfg.AuthorEntrypointConfigured,
 		HarnessArgs:                cfg.HarnessArgs,
-		ReviewAuthorCycleLimit: limits.ReviewAuthorCycles,
+		ReviewAuthorCycleLimit:     limits.ReviewAuthorCycles,
+		ReviewScopeFileLimit:       limits.ReviewScopeFiles,
+		ReviewScopeLineLimit:       limits.ReviewScopeLines,
 		CommitIdentity: flowgit.CommitIdentity{
 			Name:  cfg.Git.CommitName,
 			Email: cfg.Git.CommitEmail,

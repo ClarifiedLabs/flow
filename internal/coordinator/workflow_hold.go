@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -39,6 +40,92 @@ const (
 
 // ErrWorkflowNotHeld reports a release against a run no operator holds.
 var ErrWorkflowNotHeld = errors.New("workflow run is not held")
+
+// HoldForConvergence pauses an oversized change once per workflow run before
+// automated reviewers are dispatched. Releasing the hold with Resume records
+// the operator's decision and the durable transition marker prevents the same
+// run from being stopped again on every review visit.
+func (s *WorkflowRunService) HoldForConvergence(
+	ctx context.Context,
+	taskID string,
+	files int,
+	additions int,
+	deletions int,
+	maxFiles int,
+	maxLines int,
+) (WorkflowRun, bool, error) {
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return WorkflowRun{}, false, err
+	}
+	defer tx.Rollback()
+
+	run, err := scanWorkflowRun(tx.QueryRowContext(ctx, workflowRunSelect+`
+WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, strings.TrimSpace(taskID)))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return WorkflowRun{}, false, ErrWorkflowRunNotFound
+		}
+		return WorkflowRun{}, false, err
+	}
+	var prior int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM workflow_transitions
+WHERE workflow_run_id = ? AND event_kind = 'workflow_convergence_review_requested'`,
+		run.ID,
+	).Scan(&prior); err != nil {
+		return WorkflowRun{}, false, err
+	}
+	if prior > 0 || run.Held() {
+		return run, false, nil
+	}
+
+	now := s.now().UTC()
+	if _, err := tx.ExecContext(ctx, `
+UPDATE workflow_runs SET held_at = ?, held_by = ?, version = version + 1
+WHERE id = ? AND held_at IS NULL`,
+		sqlitex.FormatTime(now), string(ActorSystem), run.ID,
+	); err != nil {
+		return WorkflowRun{}, false, err
+	}
+	payload, err := json.Marshal(map[string]any{
+		"files": files, "additions": additions, "deletions": deletions,
+		"max_files": maxFiles, "max_lines": maxLines,
+	})
+	if err != nil {
+		return WorkflowRun{}, false, err
+	}
+	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
+		TaskID: run.TaskID, WorkflowRunID: run.ID, FromNodeKey: run.CurrentNodeKey,
+		ToNodeKey: run.CurrentNodeKey, EventKind: "workflow_convergence_review_requested",
+		PayloadJSON: string(payload), Actor: string(ActorSystem), CreatedAt: now,
+	}); err != nil {
+		return WorkflowRun{}, false, err
+	}
+	message := fmt.Sprintf(
+		"Convergence review required before automated review: this change touches %d files and %d lines (automatic threshold: %d files or %d lines). Decide whether to split or re-scope the task, then release the hold with Resume.",
+		files,
+		additions+deletions,
+		maxFiles,
+		maxLines,
+	)
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO status_log (task_id, actor, message, kind, created_at)
+VALUES (?, ?, ?, ?, ?)`,
+		run.TaskID,
+		string(ActorSystem),
+		message,
+		StatusKindPlan,
+		sqlitex.FormatTime(now),
+	); err != nil {
+		return WorkflowRun{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return WorkflowRun{}, false, err
+	}
+	held, err := s.Get(ctx, run.ID)
+	return held, true, err
+}
 
 // ReleaseWorkflowInput carries a hand-back. ArtifactID is required by
 // ReleaseSubmit and ignored otherwise.

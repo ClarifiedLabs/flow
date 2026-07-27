@@ -65,8 +65,8 @@ SELECT dflt_value FROM pragma_table_info('jobs') WHERE name = 'dispatch_key'`).S
 SELECT dflt_value FROM pragma_table_info('workflow_runs') WHERE name = 'review_cycle_budget'`).Scan(&reviewCycleBudgetDefault); err != nil {
 		t.Fatalf("inspect workflow_runs.review_cycle_budget: %v", err)
 	}
-	if reviewCycleBudgetDefault != "5" {
-		t.Fatalf("workflow_runs.review_cycle_budget default = %q, want 5", reviewCycleBudgetDefault)
+	if reviewCycleBudgetDefault != "2" {
+		t.Fatalf("workflow_runs.review_cycle_budget default = %q, want 2", reviewCycleBudgetDefault)
 	}
 	var dispatchIndexSQL string
 	if err := store.DB().QueryRowContext(ctx, `
@@ -358,8 +358,8 @@ FROM workflow_runs
 WHERE id = 'wr-existing'`).Scan(&budget, &used); err != nil {
 		t.Fatalf("read backfilled workflow run: %v", err)
 	}
-	if budget != 5 || used != 1 {
-		t.Fatalf("review cycle budget/count = %d/%d, want 1/5 used/budget", used, budget)
+	if budget != 2 || used != 1 {
+		t.Fatalf("review cycle budget/count = %d/%d, want 1/2 used/budget", used, budget)
 	}
 }
 

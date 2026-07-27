@@ -22,6 +22,17 @@ const checkConfigPrefix = ".flow/checks"
 const (
 	defaultReviewerCheckName = "reviewer"
 	defaultVerifierCheckName = "verifier"
+	// ReviewAggregationCheckName is the coordinator-owned final reviewer in a
+	// change-review node. Configured reviewers discover findings in parallel;
+	// this check deduplicates and decides which findings may block.
+	ReviewAggregationCheckName = "review-aggregation"
+	// ReviewAggregationDetailsPrefix marks the pending aggregation check's
+	// details as prompt input. The worker replaces Details with the aggregate's
+	// final verdict when it reports.
+	ReviewAggregationDetailsPrefix = "parallel-review-aggregation:\n"
+	// ReviewDiscoveryDetailsMarker identifies configured reviewer jobs that
+	// contribute candidates to an aggregate and must not create threads.
+	ReviewDiscoveryDetailsMarker = "parallel-review-discovery"
 )
 
 // CompletionAssessmentCheckMarker is stamped into the Details of a reviewer
@@ -58,6 +69,7 @@ type CheckDefinition struct {
 	Tolerations      []scheduler.Toleration `json:"tolerations" yaml:"tolerations"`
 	sourcePath       string
 	roleInstructions string
+	reviewDiscovery  bool
 }
 
 type CheckSuite struct {
@@ -633,6 +645,23 @@ ON CONFLICT(task_id, name) DO NOTHING`, taskID, definition.Name, string(definiti
 	return err
 }
 
+func (s *CheckConfigService) ensureWorkflowPendingCheckWithDetails(ctx context.Context, taskID string, definition CheckDefinition, details string) error {
+	if err := s.ensureWorkflowPendingCheck(ctx, taskID, definition); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `
+UPDATE checks
+SET details = ?, updated_at = ?
+WHERE task_id = ? AND name = ? AND verdict = ? AND source_job_id IS NULL`,
+		details,
+		formatTime(s.checks.now().UTC()),
+		taskID,
+		definition.Name,
+		string(CheckPending),
+	)
+	return err
+}
+
 // ensurePendingCheckWithDetails resets a check to pending, optionally seeding its
 // Details. Details is empty for an ordinary review round; the completion-
 // assessment round seeds CompletionAssessmentCheckMarker on the reviewer check so
@@ -857,6 +886,9 @@ SELECT attempt FROM workflow_node_runs WHERE id = ?`, nodeRunID).Scan(&nodeAttem
 		"base":       change.Base,
 		"blocking":   requiredForCheckDefinition(definition),
 	}
+	if definition.reviewDiscovery {
+		payload["review_discovery"] = true
+	}
 	if nodeAttempt > 0 {
 		payload["node_attempt"] = nodeAttempt
 	}
@@ -959,6 +991,15 @@ func (s *CheckConfigService) ScheduleWorkflowNodeChecks(ctx context.Context, tas
 			return nil, err
 		}
 		definitions = suite.Definitions
+		if mode == WorkflowChecksReview {
+			// Preserve each source's configured blocking/error policy on the
+			// check row, but tell the worker this is side-effect-free discovery.
+			// Source checks are made advisory once all have reported and the
+			// aggregate is ready to take over.
+			for index := range definitions {
+				definitions[index].reviewDiscovery = true
+			}
+		}
 	default:
 		return nil, fmt.Errorf("unknown workflow check mode %q", mode)
 	}
@@ -1002,8 +1043,19 @@ WHERE task_id = ?
 	var names []string
 	for index, definition := range definitions {
 		definition.Name = workflowNodeCheckName(definition.Name, nodeRunID, index)
-		if err := s.ensureWorkflowPendingCheck(ctx, task.ID, definition); err != nil {
-			return nil, err
+		var ensureErr error
+		if definition.reviewDiscovery {
+			ensureErr = s.ensureWorkflowPendingCheckWithDetails(
+				ctx,
+				task.ID,
+				definition,
+				ReviewDiscoveryDetailsMarker,
+			)
+		} else {
+			ensureErr = s.ensureWorkflowPendingCheck(ctx, task.ID, definition)
+		}
+		if ensureErr != nil {
+			return nil, ensureErr
 		}
 		check, err := s.checks.GetCheck(ctx, task.ID, definition.Name)
 		if err != nil {
@@ -1041,6 +1093,141 @@ WHERE task_id = ?
 		names = append(names, definition.Name)
 	}
 	return names, nil
+}
+
+// ScheduleWorkflowReviewAggregation enqueues the single blocking decision after
+// every configured discovery reviewer has reported. The first blocking
+// reviewer supplies the aggregation runtime; when every reviewer is advisory,
+// the first reviewer supplies it and the aggregate remains advisory.
+func (s *CheckConfigService) ScheduleWorkflowReviewAggregation(
+	ctx context.Context,
+	task Task,
+	change Change,
+	agents []SnapshotReviewAgent,
+	sourceNames []string,
+	workflowRunID string,
+	nodeRunID string,
+) (string, error) {
+	if len(agents) == 0 || len(sourceNames) != len(agents) {
+		return "", errors.New("review aggregation requires one source check per reviewer")
+	}
+	aggregator, ok := ReviewAggregationAgent(agents)
+	if !ok {
+		return "", errors.New("review aggregation could not resolve its reviewer")
+	}
+	blocksApproval := aggregator.Blocking
+
+	snapshot := FlowSnapshot{ReviewAgents: []FlowReviewAgentSnapshot{{
+		Role:     FlowReviewRoleReviewer,
+		Blocking: blocksApproval,
+		Agent:    aggregator.Agent,
+	}}}
+	suite, err := withFlowSnapshotReviewChecks(CheckSuite{}, snapshot, s.harnessArgs)
+	if err != nil {
+		return "", err
+	}
+	if len(suite.Definitions) != 1 {
+		return "", errors.New("review aggregation could not resolve its reviewer")
+	}
+	definition := suite.Definitions[0]
+	definition.Name = workflowNodeCheckName(ReviewAggregationCheckName, nodeRunID, len(sourceNames))
+	definition.Required = &blocksApproval
+
+	details, err := s.reviewAggregationDetails(ctx, task.ID, agents, sourceNames)
+	if err != nil {
+		return "", err
+	}
+	for _, sourceName := range sourceNames {
+		if _, err := s.db.ExecContext(ctx, `
+UPDATE checks
+SET required = 0, updated_at = ?
+WHERE task_id = ? AND name = ? AND verdict != ?`,
+			formatTime(s.checks.now().UTC()),
+			task.ID,
+			sourceName,
+			string(CheckPending),
+		); err != nil {
+			return "", fmt.Errorf("make aggregated review source %s advisory: %w", sourceName, err)
+		}
+	}
+	if err := s.ensureWorkflowPendingCheckWithDetails(ctx, task.ID, definition, details); err != nil {
+		return "", err
+	}
+	check, err := s.checks.GetCheck(ctx, task.ID, definition.Name)
+	if err != nil {
+		return "", err
+	}
+	if check.Verdict != CheckPending {
+		return definition.Name, nil
+	}
+	if check.SourceJobID != nil {
+		job, err := s.workers.GetJob(ctx, *check.SourceJobID)
+		if err != nil {
+			return "", fmt.Errorf("load source job for check %s: %w", definition.Name, err)
+		}
+		if flowworker.IsTerminalJobState(job.State) {
+			if _, err := s.checks.ReportCheck(ctx, ReportCheckInput{
+				TaskID:      task.ID,
+				Name:        definition.Name,
+				Kind:        definition.Kind,
+				Required:    definition.Required,
+				Verdict:     CheckErrored,
+				Details:     fmt.Sprintf("check job %s ended in state %s without reporting a result", job.ID, job.State),
+				SourceJobID: &job.ID,
+				Reporter:    "coordinator",
+			}); err != nil {
+				return "", err
+			}
+		}
+		return definition.Name, nil
+	}
+	if _, _, err := s.enqueueCheckJobForWorkflow(ctx, task.ID, change, definition, workflowRunID, nodeRunID); err != nil {
+		return "", err
+	}
+	return definition.Name, nil
+}
+
+const reviewAggregationContextMaxBytes = 128 << 10
+
+func (s *CheckConfigService) reviewAggregationDetails(
+	ctx context.Context,
+	taskID string,
+	agents []SnapshotReviewAgent,
+	sourceNames []string,
+) (string, error) {
+	var content strings.Builder
+	content.WriteString(ReviewAggregationDetailsPrefix)
+	content.WriteString("Synthesize the parallel discovery reports below. A finding from an advisory source may be retained as follow-up context but cannot block approval.\n")
+	for index, name := range sourceNames {
+		check, err := s.checks.GetCheck(ctx, taskID, name)
+		if err != nil {
+			return "", err
+		}
+		sourcePolicy := "advisory source"
+		if agents[index].Blocking {
+			sourcePolicy = "blocking source"
+		}
+		fmt.Fprintf(
+			&content,
+			"\n### %s (%s)\nVerdict: %s\n\n%s\n",
+			name,
+			sourcePolicy,
+			check.Verdict,
+			strings.TrimSpace(check.Details),
+		)
+	}
+	return truncateReviewAggregationContext(content.String()), nil
+}
+
+func truncateReviewAggregationContext(value string) string {
+	if len(value) <= reviewAggregationContextMaxBytes {
+		return value
+	}
+	cut := reviewAggregationContextMaxBytes
+	for cut > 0 && (value[cut]&0xc0) == 0x80 {
+		cut--
+	}
+	return value[:cut] + "\n\n[aggregation context truncated]"
 }
 
 func workflowCheckDispatchKey(nodeRunID string, attempt int, checkName string) string {

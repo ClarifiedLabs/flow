@@ -23,13 +23,30 @@ type VerdictReport struct {
 	Threads  []ThreadDecisionReport `json:"threads,omitempty"`
 }
 
-// ReviewCommentReport is one reviewer concern to file as an anchored review
-// thread. SHA/File/Line locate the concern; Body is the comment text.
+// ReviewCommentReport is one classified reviewer concern. Task-caused unique
+// critical/high concerns become anchored review threads; the rest remain
+// non-blocking follow-up context.
 type ReviewCommentReport struct {
-	SHA  string `json:"sha"`
-	File string `json:"file"`
-	Line int    `json:"line"`
-	Body string `json:"body"`
+	SHA                string `json:"sha"`
+	File               string `json:"file"`
+	Line               int    `json:"line"`
+	Body               string `json:"body"`
+	Severity           string `json:"severity"`
+	IntroducedByChange *bool  `json:"introduced_by_change"`
+	Requirement        string `json:"requirement"`
+	DuplicateOf        string `json:"duplicate_of,omitempty"`
+	FollowUp           string `json:"follow_up,omitempty"`
+}
+
+// BlocksApproval reports whether this finding is allowed to veto the current
+// change. Reviewers still report pre-existing, lower-severity, and duplicate
+// findings, but those are retained as follow-up context instead of extending
+// the current task's author-review loop.
+func (r ReviewCommentReport) BlocksApproval() bool {
+	if r.IntroducedByChange == nil || !*r.IntroducedByChange || r.DuplicateOf != "" {
+		return false
+	}
+	return r.Severity == "critical" || r.Severity == "high"
 }
 
 // ThreadDecisionReport is one verifier decision on an existing review thread.
@@ -107,6 +124,16 @@ func ReadVerdictFile(path string) (VerdictReport, bool, error) {
 	if err := normalizeVerdictComments(&v); err != nil {
 		return VerdictReport{}, false, err
 	}
+	if v.Verdict == "satisfied" {
+		for i, comment := range v.Comments {
+			if comment.BlocksApproval() {
+				return VerdictReport{}, false, fmt.Errorf(
+					"verdict file: satisfied verdict includes blocking comment %d",
+					i,
+				)
+			}
+		}
+	}
 	if err := normalizeVerdictThreads(&v); err != nil {
 		return VerdictReport{}, false, err
 	}
@@ -126,6 +153,10 @@ func normalizeVerdictComments(v *VerdictReport) error {
 		c.SHA = strings.TrimSpace(c.SHA)
 		c.File = strings.TrimSpace(c.File)
 		c.Body = strings.TrimSpace(c.Body)
+		c.Severity = strings.ToLower(strings.TrimSpace(c.Severity))
+		c.Requirement = strings.TrimSpace(c.Requirement)
+		c.DuplicateOf = strings.TrimSpace(c.DuplicateOf)
+		c.FollowUp = strings.TrimSpace(c.FollowUp)
 		if c.SHA == "" {
 			return fmt.Errorf("verdict file: comment %d missing sha", i)
 		}
@@ -138,8 +169,28 @@ func normalizeVerdictComments(v *VerdictReport) error {
 		if c.Body == "" {
 			return fmt.Errorf("verdict file: comment %d missing body", i)
 		}
+		switch c.Severity {
+		case "critical", "high", "medium", "low":
+		default:
+			return fmt.Errorf("verdict file: comment %d has invalid severity %q (want critical|high|medium|low)", i, c.Severity)
+		}
+		if c.IntroducedByChange == nil {
+			return fmt.Errorf("verdict file: comment %d missing introduced_by_change", i)
+		}
+		if c.Requirement == "" {
+			return fmt.Errorf("verdict file: comment %d missing requirement", i)
+		}
+		if c.DuplicateOf != "" && !strings.HasPrefix(c.DuplicateOf, "th-") {
+			return fmt.Errorf("verdict file: comment %d has invalid duplicate_of %q", i, c.DuplicateOf)
+		}
 		if len(c.Body) > verdictReasonMaxBytes {
 			c.Body = c.Body[:verdictReasonMaxBytes]
+		}
+		if len(c.Requirement) > verdictReasonMaxBytes {
+			c.Requirement = c.Requirement[:verdictReasonMaxBytes]
+		}
+		if len(c.FollowUp) > verdictReasonMaxBytes {
+			c.FollowUp = c.FollowUp[:verdictReasonMaxBytes]
 		}
 	}
 	return nil

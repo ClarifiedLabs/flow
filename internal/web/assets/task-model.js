@@ -108,6 +108,7 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
   const nodes = value(snapshot, "nodes", "Nodes") || [];
   const wait = value(workflow, "open_wait", "OpenWait");
   const held = Boolean(value(run, "held_at", "HeldAt"));
+  const heldBy = String(value(run, "held_by", "HeldBy") || "");
   const currentNodeKey = String(value(run, "current_node_key", "CurrentNodeKey") || "");
   const currentNode = nodes.find((node) => value(node, "key", "Key") === currentNodeKey) || {};
   const stepIndex = nodes.findIndex((node) => value(node, "key", "Key") === currentNodeKey) + 1;
@@ -116,7 +117,9 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
 
   const stepName = value(currentNode, "name", "Name") || currentNodeKey.replaceAll("_", " ");
   const activity = held
-    ? "Held by you"
+    ? heldBy === "system"
+      ? "Held for convergence review"
+      : "Held by you"
     : workflowActivityLabel(stepName, value(currentNode, "kind", "Kind")) || "Working";
 
   return {
@@ -139,7 +142,7 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
     rows: runRows(workflow),
 
     held,
-    heldBy: value(run, "held_by", "HeldBy"),
+    heldBy,
     wait,
     waitKind: waitKindOf(wait),
     activity,

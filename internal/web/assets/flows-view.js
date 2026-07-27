@@ -553,9 +553,12 @@ export function renderNodeConfigEditorView(node = {}, agentDefs = []) {
     return `<textarea name="node_config" rows="6" spellcheck="false" aria-label="Strict node configuration JSON">${escapeHTML(nodeConfigValue(node))}</textarea>`;
   }
   const agents = reviewAgentsFromNodeView(node, kind);
+  const policy = configKey === "verify_change"
+    ? "Every listed agent runs and is awaited. Blocks success controls whether that agent's findings can veto the node."
+    : "Reviewers run in parallel and are awaited, then Flow runs one aggregation pass. Blocks approval controls whether that reviewer's candidates may become aggregate blockers.";
   return `
     <div class="flow-review-agent-config" data-review-agent-config data-review-config-key="${configKey}">
-      <p class="muted">Every listed agent runs and is awaited. ${configKey === "verify_change" ? "Blocks success" : "Blocks approval"} only controls whether that agent's findings can veto the node.</p>
+      <p class="muted">${policy}</p>
       <div class="flow-row-list" data-review-agent-rows>${agents.map((agent) => renderReviewAgentRowView(agent, agentDefs, configKey)).join("")}</div>
       <div class="flow-row-actions"><button type="button" class="button secondary" data-add-review-agent>Add agent</button></div>
     </div>

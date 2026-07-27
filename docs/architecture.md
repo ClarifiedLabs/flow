@@ -212,13 +212,21 @@ Flow configuration is stored in SQLite:
 one node fans out one persistent-agent child job per configured focus agent.
 The workflow still has only that one active graph node: child jobs are internal
 work, not graph-node concurrency. Its barrier awaits every blocking and
-advisory child before evaluating the transition. Blocking is the default when
-an entry omits the flag. A blocked blocking child selects the node's
-failure/changes-requested outcome, while a blocked advisory child remains
-visible without changing the outcome. New configuration uses
-`blocking: false` for advisory agents. `required` is retained only as a
-deprecated compatibility alias (`true` is blocking, `false` is advisory), and
-configurations should not specify both fields.
+advisory child before evaluating the transition.
+
+For `change_review`, the parallel children are side-effect-free discovery
+reviewers. After their barrier closes, one coordinator-owned aggregation job
+uses the first blocking reviewer's frozen runtime (or the first reviewer when
+all are advisory), deduplicates their candidate findings, and becomes the only
+reviewer allowed to create threads or choose `changes_requested`.
+`verify_change` continues to evaluate its children directly.
+
+Blocking is the default when an entry omits the flag. A candidate from an
+advisory reviewer remains visible but cannot become a blocking aggregate
+finding. New configuration uses `blocking: false` for advisory agents.
+`required` is retained only as a deprecated compatibility alias (`true` is
+blocking, `false` is advisory), and configurations should not specify both
+fields.
 
 Reviewer and verifier children must report `satisfied` or `blocked` through a
 valid structured verdict file. Missing or invalid verdicts, harness failures,

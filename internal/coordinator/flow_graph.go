@@ -174,6 +174,21 @@ type SnapshotReviewAgent struct {
 	Agent    AgentDefSnapshot `json:"agent"`
 }
 
+// ReviewAggregationAgent selects the runtime for the final aggregation pass:
+// prefer the first reviewer allowed to block, otherwise use the first advisory
+// reviewer and keep the aggregate advisory.
+func ReviewAggregationAgent(agents []SnapshotReviewAgent) (SnapshotReviewAgent, bool) {
+	for _, agent := range agents {
+		if agent.Blocking {
+			return agent, true
+		}
+	}
+	if len(agents) == 0 {
+		return SnapshotReviewAgent{}, false
+	}
+	return agents[0], true
+}
+
 // UnmarshalJSON keeps already-scheduled workflow snapshots readable after the
 // workflow-facing field was renamed from required to blocking.
 func (a *SnapshotReviewAgent) UnmarshalJSON(data []byte) error {

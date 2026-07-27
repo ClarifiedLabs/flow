@@ -3295,6 +3295,17 @@ UPDATE jobs SET payload_json = json_set(payload_json, '$.blocking', json('false'
 	if created.Thread.ID == "" || created.Thread.State != coordinator.ThreadOpen {
 		t.Fatalf("blocking reviewer thread = %+v", created.Thread)
 	}
+	discoveryJob := startLiveCheckJobForTask(t, fixture, "discovery-token", "w-discovery-review", started.Session.TaskID, started.Change.ID, "head-1", "parallel-discovery", flowworker.RoleReviewer, flowworker.BucketPersistentAgent)
+	if _, err := fixture.Store.DB().ExecContext(ctx, `
+UPDATE jobs
+SET payload_json = json_set(payload_json, '$.blocking', json('true'), '$.review_discovery', json('true'))
+WHERE id = ?`, discoveryJob.Job.ID); err != nil {
+		t.Fatalf("mark reviewer job as discovery: %v", err)
+	}
+	doJSONRequestAs(t, fixture.Server, "discovery-token", http.MethodPost, "/v2/changes/"+started.Change.ID+"/comments", createThreadRequest{
+		AnchorCommitSHA: "head-1", FilePath: "auth.go", Line: 8,
+		Body: "Discovery must wait for aggregation.", LeaseID: discoveryJob.Lease.ID,
+	}, http.StatusForbidden, nil)
 	doJSONRequestAs(t, fixture.Server, "advisory-token", http.MethodPost, "/v2/threads/"+created.Thread.ID+"/comments", threadCommentRequest{
 		Body: "Advisory jobs cannot reply.", LeaseID: advisoryJob.Lease.ID,
 	}, http.StatusForbidden, nil)

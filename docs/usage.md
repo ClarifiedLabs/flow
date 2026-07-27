@@ -251,15 +251,22 @@ child job per configured focus agent while remaining the workflow run's one
 active graph node. Successor graph nodes cannot start until that internal
 barrier closes.
 
-The barrier awaits every child, including advisory agents. Agent entries are
-blocking by default when the flag is omitted. Once all children finish, a
-blocking failure selects the node's failure/changes-requested outcome; an
-advisory failure is recorded and shown but does not change the outcome.
-Use `blocking: false` for an advisory entry. It does not skip or detach the
-job: the agent is always dispatched and the barrier still waits for its
-terminal result. The older `required` spelling is a deprecated compatibility
-alias (`required: true` means blocking and `required: false` means advisory);
-new flow files should use `blocking` and should not set both names.
+The barrier awaits every child, including advisory agents. In a
+`change_review` node, configured reviewers are parallel discovery inputs: they
+cannot create review threads directly. Once they all report, Flow runs one
+aggregation job using the first blocking reviewer's configured runtime (or the
+first reviewer when every entry is advisory). The aggregate deduplicates the
+candidate reports and is the only reviewer result that can create blocking
+threads or select `changes_requested`.
+
+Agent entries are blocking inputs by default when the flag is omitted. A
+finding from an advisory input is recorded and shown but cannot become a
+blocking aggregate finding. Use `blocking: false` for an advisory entry. It
+does not skip or detach the job: the agent is always dispatched and the
+barrier still waits for its terminal result. The older `required` spelling is
+a deprecated compatibility alias (`required: true` means blocking and
+`required: false` means advisory); new flow files should use `blocking` and
+should not set both names.
 
 Each node visit receives distinct check identities, so a loop back through
 review or verification executes every configured child again. All of those

@@ -117,6 +117,45 @@ func TestReleaseResumeClearsTheHoldWithoutMovingTheRun(t *testing.T) {
 	}
 }
 
+func TestConvergenceHoldIsRequestedOnlyOncePerRun(t *testing.T) {
+	ctx := context.Background()
+	flows, tasks, runs := newWorkflowModelServices(t)
+	task, _, _ := newHoldFlow(t, flows, tasks, runs)
+
+	held, created, err := runs.HoldForConvergence(ctx, task.ID, 8, 420, 160, 5, 500)
+	if err != nil {
+		t.Fatalf("hold for convergence: %v", err)
+	}
+	if !created || !held.Held() || held.HeldBy != string(ActorSystem) {
+		t.Fatalf("convergence hold = %+v created=%t, want a system hold", held, created)
+	}
+	if _, err := runs.Release(ctx, ReleaseWorkflowInput{
+		TaskID: task.ID, Edge: ReleaseResume, Actor: ActorHuman,
+	}); err != nil {
+		t.Fatalf("release convergence hold: %v", err)
+	}
+	replayed, created, err := runs.HoldForConvergence(ctx, task.ID, 12, 800, 200, 5, 500)
+	if err != nil {
+		t.Fatalf("repeat convergence hold: %v", err)
+	}
+	if created || replayed.Held() {
+		t.Fatalf("repeat convergence hold = %+v created=%t, want no second hold", replayed, created)
+	}
+	transitions, err := runs.ListTransitionsForTask(ctx, task.ID, 50)
+	if err != nil {
+		t.Fatalf("list convergence transitions: %v", err)
+	}
+	requested := 0
+	for _, transition := range transitions {
+		if transition.EventKind == "workflow_convergence_review_requested" {
+			requested++
+		}
+	}
+	if requested != 1 {
+		t.Fatalf("convergence requests = %d, want 1", requested)
+	}
+}
+
 func TestReleaseSatisfyTakesTheSuccessEdgeWithoutAnArtifact(t *testing.T) {
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)

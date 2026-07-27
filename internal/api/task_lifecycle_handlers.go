@@ -33,7 +33,6 @@ func (s *projectServer) handleCreateTask(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusCreated, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
 }
 
-
 func (s *projectServer) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	filter, err := taskFilterFromQuery(r)
 	if err != nil {
@@ -239,10 +238,16 @@ func (s *projectServer) handlePromptContext(w http.ResponseWriter, r *http.Reque
 					response.WorkspaceMode = node.Config.Agent.Workspace
 					response.ArtifactKind = node.Config.Agent.Artifact
 				case checkName != "" && node.Config.ChangeReview != nil:
-					for _, agent := range node.Config.ChangeReview.Agents {
-						if strings.TrimSpace(agent.Agent.Name) == baseCheckName {
+					if baseCheckName == coordinator.ReviewAggregationCheckName {
+						if agent, found := coordinator.ReviewAggregationAgent(node.Config.ChangeReview.Agents); found {
 							response.RoleInstructions = agent.Agent.Prompt
-							break
+						}
+					} else {
+						for _, agent := range node.Config.ChangeReview.Agents {
+							if strings.TrimSpace(agent.Agent.Name) == baseCheckName {
+								response.RoleInstructions = agent.Agent.Prompt
+								break
+							}
 						}
 					}
 				case checkName != "" && node.Config.VerifyChange != nil:
@@ -409,7 +414,6 @@ func (s *projectServer) ensureAuthorJobWithHumanInstructions(r *http.Request, pr
 	}
 	return errors.New("lifecycle engine is not configured")
 }
-
 
 func (s *projectServer) buildUITaskDetail(ctx context.Context, task coordinator.Task) (*uiTaskDetail, error) {
 	tags, err := s.tasks.TagsForTask(ctx, task.ID)
@@ -596,8 +600,6 @@ func (s *projectServer) handleListTransitions(w http.ResponseWriter, r *http.Req
 	}
 	writeJSON(w, http.StatusOK, transitionsResponse{Transitions: entries})
 }
-
-
 
 func (s *projectServer) handleBoard(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
 	response, err := s.boardResponseForProject(r.Context(), principal)

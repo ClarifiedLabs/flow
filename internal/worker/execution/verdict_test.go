@@ -129,7 +129,15 @@ func TestReadVerdictFileParsesCommentsAndThreads(t *testing.T) {
 		"verdict": "blocked",
 		"reason": "one concern",
 		"comments": [
-			{"sha": " abc123 ", "file": " internal/app.go ", "line": 42, "body": " needs a guard "}
+			{
+				"sha": " abc123 ",
+				"file": " internal/app.go ",
+				"line": 42,
+				"body": " needs a guard ",
+				"severity": " HIGH ",
+				"introduced_by_change": true,
+				"requirement": " request authorization "
+			}
 		],
 		"threads": [
 			{"id": "th-1", "decision": "certify", "body": "confirmed"},
@@ -145,7 +153,10 @@ func TestReadVerdictFileParsesCommentsAndThreads(t *testing.T) {
 		t.Fatalf("comments = %+v, want 1", v.Comments)
 	}
 	c := v.Comments[0]
-	if c.SHA != "abc123" || c.File != "internal/app.go" || c.Line != 42 || c.Body != "needs a guard" {
+	if c.SHA != "abc123" || c.File != "internal/app.go" || c.Line != 42 ||
+		c.Body != "needs a guard" || c.Severity != "high" ||
+		c.IntroducedByChange == nil || !*c.IntroducedByChange ||
+		c.Requirement != "request authorization" || !c.BlocksApproval() {
 		t.Fatalf("comment = %+v, want trimmed fields", c)
 	}
 	if len(v.Threads) != 2 {
@@ -153,6 +164,62 @@ func TestReadVerdictFileParsesCommentsAndThreads(t *testing.T) {
 	}
 	if v.Threads[0].Decision != "certify" || v.Threads[1].Decision != "reopen" {
 		t.Fatalf("threads = %+v, want certify then reopen", v.Threads)
+	}
+}
+
+func TestReadVerdictFileAllowsClassifiedNonBlockingCommentsOnSatisfiedVerdict(t *testing.T) {
+	path := writeVerdict(t, `{
+		"verdict": "satisfied",
+		"reason": "the only finding is follow-up work",
+		"comments": [{
+			"sha": "abc123",
+			"file": "internal/app.go",
+			"line": 42,
+			"body": "Simplify this branch separately.",
+			"severity": "medium",
+			"introduced_by_change": false,
+			"requirement": "keep the handler maintainable",
+			"follow_up": "Create a cleanup task."
+		}]
+	}`)
+	v, ok, err := ReadVerdictFile(path)
+	if err != nil || !ok {
+		t.Fatalf("ReadVerdictFile ok=%v err=%v, want true/nil", ok, err)
+	}
+	if len(v.Comments) != 1 || v.Comments[0].BlocksApproval() {
+		t.Fatalf("comments = %+v, want one non-blocking finding", v.Comments)
+	}
+}
+
+func TestReadVerdictFileRejectsSatisfiedVerdictWithBlockingComment(t *testing.T) {
+	path := writeVerdict(t, `{
+		"verdict": "satisfied",
+		"reason": "incorrectly approved",
+		"comments": [{
+			"sha": "abc123",
+			"file": "internal/app.go",
+			"line": 42,
+			"body": "This bypasses authorization.",
+			"severity": "high",
+			"introduced_by_change": true,
+			"requirement": "authorize every request"
+		}]
+	}`)
+	_, ok, err := ReadVerdictFile(path)
+	if ok || err == nil {
+		t.Fatalf("ReadVerdictFile ok=%v err=%v, want false/non-nil", ok, err)
+	}
+}
+
+func TestReadVerdictFileRequiresFindingClassification(t *testing.T) {
+	path := writeVerdict(t, `{
+		"verdict": "blocked",
+		"reason": "unclassified",
+		"comments": [{"sha":"abc123","file":"internal/app.go","line":42,"body":"needs work"}]
+	}`)
+	_, ok, err := ReadVerdictFile(path)
+	if ok || err == nil {
+		t.Fatalf("ReadVerdictFile ok=%v err=%v, want false/non-nil", ok, err)
 	}
 }
 
@@ -216,7 +283,7 @@ func TestReadVerdictFileRejectsCommentMissingAnchor(t *testing.T) {
 
 func TestReadVerdictFileTruncatesCommentAndThreadBodies(t *testing.T) {
 	long := strings.Repeat("y", 5000)
-	path := writeVerdict(t, `{"verdict":"blocked","reason":"x","comments":[{"sha":"abc","file":"a.go","line":1,"body":"`+long+`"}],"threads":[{"id":"th-1","decision":"reopen","body":"`+long+`"}]}`)
+	path := writeVerdict(t, `{"verdict":"blocked","reason":"x","comments":[{"sha":"abc","file":"a.go","line":1,"body":"`+long+`","severity":"high","introduced_by_change":true,"requirement":"guard requests"}],"threads":[{"id":"th-1","decision":"reopen","body":"`+long+`"}]}`)
 	v, ok, err := ReadVerdictFile(path)
 	if err != nil || !ok {
 		t.Fatalf("ReadVerdictFile ok=%v err=%v, want true/nil", ok, err)

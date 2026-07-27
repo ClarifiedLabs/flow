@@ -3,3 +3,9 @@ listen_addr: :8421
 protocol_version: "3"
 workers:
   reconnect_grace: "2m"
+limits:
+  # Pause for an owner convergence decision after two review-to-author cycles
+  # or before reviewing a change larger than either scope threshold.
+  review_author_cycles: 2
+  review_scope_files: 10
+  review_scope_lines: 500

@@ -180,7 +180,8 @@ func TestBuildReviewerPromptUsesReviewerVerdictInstructions(t *testing.T) {
 		"# Flow Reviewer",
 		"Check: reviewer",
 		"Use flow comment",
-		"comments[] entries in $FLOW_VERDICT_FILE",
+		"Classify every comments[] finding in $FLOW_VERDICT_FILE",
+		"introduced_by_change",
 		"only source of a reviewer outcome",
 		"pauses the workflow for human retry",
 	} {
@@ -211,6 +212,56 @@ func TestBuildReviewerPromptIncludesCompletionAssessmentGuidance(t *testing.T) {
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("completion-assessment prompt missing %q:\n%s", want, rendered)
+		}
+	}
+}
+
+func TestBuildReviewerPromptIncludesParallelDiscoveryGuidance(t *testing.T) {
+	rendered, err := Build(Input{
+		Role:            RoleReviewer,
+		TaskID:          "t-test-discovery",
+		ChangeID:        "ch-discovery",
+		CheckName:       "security-review",
+		ReviewDiscovery: true,
+	})
+	if err != nil {
+		t.Fatalf("build prompt: %v", err)
+	}
+	for _, want := range []string{
+		"Parallel Review Discovery:",
+		"parallel discovery reviewer",
+		"Do not call flow comment",
+		"only the aggregation job",
+		"complete set",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("discovery prompt missing %q:\n%s", want, rendered)
+		}
+	}
+}
+
+func TestBuildReviewerPromptIncludesAggregationReports(t *testing.T) {
+	rendered, err := Build(Input{
+		Role:                     RoleReviewer,
+		TaskID:                   "t-test-aggregate",
+		ChangeID:                 "ch-aggregate",
+		CheckName:                "review-aggregation",
+		ReviewAggregationContext: "### code-review (blocking source)\nAuthorization is bypassed.",
+	})
+	if err != nil {
+		t.Fatalf("build prompt: %v", err)
+	}
+	for _, want := range []string{
+		"Parallel Review Aggregation:",
+		"final aggregation step",
+		"Combine duplicate symptoms",
+		"advisory source",
+		"Candidate Reports:",
+		"Authorization is bypassed.",
+		"only reviewer result",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("aggregation prompt missing %q:\n%s", want, rendered)
 		}
 	}
 }

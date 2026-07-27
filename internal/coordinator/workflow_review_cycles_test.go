@@ -114,7 +114,7 @@ func TestWorkflowReviewAuthorCyclesWaitAtConfiguredLimit(t *testing.T) {
 
 	result := complete(current, "completed")
 	if result.Next == nil || result.Next.NodeKey != "review" {
-		t.Fatalf("sixth review node = %+v", result.Next)
+		t.Fatalf("over-budget review node = %+v", result.Next)
 	}
 	blockedReview := *result.Next
 	result = complete(blockedReview, "changes_requested")
@@ -124,8 +124,9 @@ func TestWorkflowReviewAuthorCyclesWaitAtConfiguredLimit(t *testing.T) {
 	if result.Run.ReviewCyclesUsed != DefaultReviewAuthorCycleLimit {
 		t.Fatalf("used cycles = %d, want %d", result.Run.ReviewCyclesUsed, DefaultReviewAuthorCycleLimit)
 	}
-	if result.Run.TransitionsUsed != 11 {
-		t.Fatalf("transitions used = %d, want 11 before the blocked send-back", result.Run.TransitionsUsed)
+	wantTransitions := 2*DefaultReviewAuthorCycleLimit + 1
+	if result.Run.TransitionsUsed != wantTransitions {
+		t.Fatalf("transitions used = %d, want %d before the blocked send-back", result.Run.TransitionsUsed, wantTransitions)
 	}
 	blockedNode, found, err := runs.GetNodeRun(ctx, blockedReview.ID)
 	if err != nil {
@@ -158,7 +159,7 @@ func TestWorkflowReviewAuthorCyclesWaitAtConfiguredLimit(t *testing.T) {
 		t.Fatalf("extended run = %+v", extended)
 	}
 	result = complete(blockedReview, "changes_requested")
-	if result.Next == nil || result.Next.NodeKey != "implement" || result.Run.ReviewCyclesUsed != 6 {
+	if result.Next == nil || result.Next.NodeKey != "implement" || result.Run.ReviewCyclesUsed != DefaultReviewAuthorCycleLimit+1 {
 		t.Fatalf("resumed review send-back = %+v", result)
 	}
 }

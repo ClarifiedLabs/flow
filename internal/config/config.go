@@ -71,20 +71,30 @@ type ResolvedDeadlines struct {
 
 // LimitConfig configures bounded automation loops.
 type LimitConfig struct {
-	// ReviewAuthorCycles limits how many times an task may be automatically
+	// ReviewAuthorCycles limits how many times a task may be automatically
 	// sent from review/acceptance back to authoring before a human grants more.
-	// The default is 5.
+	// The default is 2 so repeated send-backs become an explicit human
+	// convergence decision before they turn into an unbounded redesign.
 	ReviewAuthorCycles int `json:"review_author_cycles" yaml:"review_author_cycles"`
+	// ReviewScopeFiles and ReviewScopeLines pause an oversized change before
+	// automated review so a human can split or explicitly accept the scope.
+	// Defaults are 10 files and 500 added/deleted lines.
+	ReviewScopeFiles int `json:"review_scope_files" yaml:"review_scope_files"`
+	ReviewScopeLines int `json:"review_scope_lines" yaml:"review_scope_lines"`
 }
 
 type ResolvedLimits struct {
 	ReviewAuthorCycles int
+	ReviewScopeFiles   int
+	ReviewScopeLines   int
 }
 
 const (
 	defaultCheckPendingDeadline   = 30 * time.Minute
 	defaultAuthoringStallDeadline = 2 * time.Hour
-	defaultReviewAuthorCycles     = 5
+	defaultReviewAuthorCycles     = 2
+	defaultReviewScopeFiles       = 10
+	defaultReviewScopeLines       = 500
 	defaultWorkerReconnectGrace   = 2 * time.Minute
 )
 
@@ -129,7 +139,25 @@ func (c LimitConfig) ResolveLimits() (ResolvedLimits, error) {
 	if reviewAuthorCycles < 0 {
 		return ResolvedLimits{}, errors.New("coordinator limits.review_author_cycles must not be negative")
 	}
-	return ResolvedLimits{ReviewAuthorCycles: reviewAuthorCycles}, nil
+	reviewScopeFiles := c.ReviewScopeFiles
+	if reviewScopeFiles == 0 {
+		reviewScopeFiles = defaultReviewScopeFiles
+	}
+	if reviewScopeFiles < 0 {
+		return ResolvedLimits{}, errors.New("coordinator limits.review_scope_files must not be negative")
+	}
+	reviewScopeLines := c.ReviewScopeLines
+	if reviewScopeLines == 0 {
+		reviewScopeLines = defaultReviewScopeLines
+	}
+	if reviewScopeLines < 0 {
+		return ResolvedLimits{}, errors.New("coordinator limits.review_scope_lines must not be negative")
+	}
+	return ResolvedLimits{
+		ReviewAuthorCycles: reviewAuthorCycles,
+		ReviewScopeFiles:   reviewScopeFiles,
+		ReviewScopeLines:   reviewScopeLines,
+	}, nil
 }
 
 // Resolve parses coordinator-side worker lifecycle durations, applying their

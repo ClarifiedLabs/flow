@@ -2,7 +2,7 @@
 -- transitions. Keep the count on the frozen workflow run so it survives
 -- restarts and can be resolved through the workflow wait machinery.
 ALTER TABLE workflow_runs
-	ADD COLUMN review_cycle_budget INTEGER NOT NULL DEFAULT 5
+	ADD COLUMN review_cycle_budget INTEGER NOT NULL DEFAULT 2
 	CHECK (review_cycle_budget BETWEEN 1 AND 500);
 
 ALTER TABLE workflow_runs

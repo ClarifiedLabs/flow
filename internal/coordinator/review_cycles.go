@@ -11,7 +11,7 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/sqlitex"
 )
 
-const DefaultReviewAuthorCycleLimit = 5
+const DefaultReviewAuthorCycleLimit = 2
 
 var ErrReviewCycleLimitReached = errors.New("review-author cycle limit reached")
 

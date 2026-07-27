@@ -52,8 +52,14 @@ type Input struct {
 	// whether the work is actually complete (pass) or still has work remaining
 	// (block, so the author resumes) instead of running a blind full relaunch.
 	CompletionAssessment bool
-	BlockedChecks        []BlockedCheck
-	ReviewThreads        []ReviewThread
+	// ReviewAggregationContext contains the completed parallel discovery
+	// reports for the final reviewer that deduplicates and decides the node.
+	ReviewAggregationContext string
+	// ReviewDiscovery marks one parallel source reviewer whose verdict is an
+	// aggregation input and therefore must not create threads directly.
+	ReviewDiscovery bool
+	BlockedChecks   []BlockedCheck
+	ReviewThreads   []ReviewThread
 }
 
 type BlockedCheck struct {
@@ -142,6 +148,15 @@ func Build(input Input) (string, error) {
 		lines = append(lines, "", "Completion Assessment:")
 		lines = append(lines, completionAssessmentInstructions()...)
 	}
+	if role == RoleReviewer && input.ReviewDiscovery {
+		lines = append(lines, "", "Parallel Review Discovery:")
+		lines = append(lines, reviewDiscoveryInstructions()...)
+	}
+	if role == RoleReviewer && strings.TrimSpace(input.ReviewAggregationContext) != "" {
+		lines = append(lines, "", "Parallel Review Aggregation:")
+		lines = append(lines, reviewAggregationInstructions()...)
+		lines = append(lines, "", "Candidate Reports:", strings.TrimSpace(input.ReviewAggregationContext))
+	}
 	if role == RoleAuthor && strings.TrimSpace(input.GateFeedback) != "" {
 		lines = append(lines, "", "Gate Feedback (a human requested changes; address this feedback, then complete the active workflow node again):", strings.TrimSpace(input.GateFeedback))
 	}
@@ -172,6 +187,23 @@ func completionAssessmentInstructions() []string {
 		"Determine whether the task is actually complete and ready for review, or whether work remains.",
 		"If the work is complete, pass this check (record a satisfied verdict) so the change proceeds to verification.",
 		"If work remains, block this check and record exactly what is left as blocking concerns, so the author resumes from this point instead of restarting.",
+	}
+}
+
+func reviewAggregationInstructions() []string {
+	return []string{
+		"You are the final aggregation step after parallel review discovery. Validate and synthesize the candidate reports; do not start a new open-ended review pass.",
+		"Combine duplicate symptoms that share one root cause and emit at most one anchored comment for each unique task-caused blocker.",
+		"A candidate from an advisory source may remain non-blocking follow-up context but cannot block approval. A blocking-source candidate may block only when it satisfies the critical/high, introduced-by-change, non-duplicate policy.",
+		"Use a satisfied verdict when no eligible unique blocker remains. This aggregate verdict is the only reviewer result that opens threads or selects the workflow outcome.",
+	}
+}
+
+func reviewDiscoveryInstructions() []string {
+	return []string{
+		"You are one parallel discovery reviewer. Report classified candidate findings in the verdict file for the later aggregation step.",
+		"Do not call flow comment or otherwise create review threads directly; only the aggregation job may create blocking threads or choose the review-node outcome.",
+		"Review your assigned focus thoroughly in this pass so the aggregator receives the complete set rather than one newly discovered concern per cycle.",
 	}
 }
 
@@ -359,9 +391,24 @@ func roleInstructions(role string, input Input) []string {
 			"Finalize with two actions: (1) git commit your work with a conventional-commit message; (2) write a concise Markdown summary and run flow complete --summary-file SUMMARY.md. flow complete pushes the run branch and submits the change artifact.",
 		}
 	case RoleReviewer:
+		if input.ReviewDiscovery {
+			return []string{
+				"Review the task and current branch against ${FLOW_BASE:-the base branch} within your assigned focus.",
+				"Write every classified candidate to $FLOW_VERDICT_FILE. Do not call flow comment or mutate review threads; this discovery verdict is consumed by the aggregation job.",
+				"The verdict file is required. A missing or invalid verdict pauses the workflow for human retry.",
+			}
+		}
+		if strings.TrimSpace(input.ReviewAggregationContext) != "" {
+			return []string{
+				"Validate and deduplicate the supplied parallel candidate reports against the task and current branch.",
+				"Write the one final structured verdict to $FLOW_VERDICT_FILE. Only its unique eligible comments are filed as blocking review threads.",
+				"The verdict file is required. A missing or invalid verdict pauses the workflow for human retry.",
+			}
+		}
 		return []string{
 			"Review the task and current branch against ${FLOW_BASE:-the base branch}.",
-			"Record actionable blocking concerns as comments[] entries in $FLOW_VERDICT_FILE (each {sha,file,line,body}); the worker files each as a review thread. Use flow comment to file one directly instead if you prefer. Do not edit files, commit, push, certify threads, or call flow complete.",
+			"First derive the change's correctness and security invariants and review related edge cases together. On later cycles, inspect claimed threads and the delta since the prior reviewed head; a new blocker must be introduced by that delta or directly violate an original task requirement.",
+			"Classify every comments[] finding in $FLOW_VERDICT_FILE as {sha,file,line,body,severity,introduced_by_change,requirement,duplicate_of,follow_up}. Only critical/high findings introduced by this change and not duplicating an existing thread block this task; pre-existing, medium/low, and duplicate findings remain non-blocking follow-up context. For this workflow, high includes a reproducible correctness regression, security flaw, unmet explicit task requirement, or a missing test that leaves such a task-caused bug unprotected; medium/low means the requested behavior remains correct and the finding can safely be separate follow-up work. Use flow comment to file one directly instead if you prefer. Do not edit files, commit, push, certify threads, or call flow complete.",
 			"Write a valid structured verdict to $FLOW_VERDICT_FILE; it is the only source of a reviewer outcome. A missing or invalid verdict pauses the workflow for human retry instead of requesting changes.",
 		}
 	case RoleVerifier:

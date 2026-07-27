@@ -2007,7 +2007,11 @@ type workflowTransitionInput struct {
 	CreatedAt                                         time.Time
 }
 
-func insertWorkflowTransitionTx(ctx context.Context, tx *sql.Tx, input workflowTransitionInput) error {
+type workflowTransitionExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func insertWorkflowTransitionTx(ctx context.Context, tx workflowTransitionExecer, input workflowTransitionInput) error {
 	payload := strings.TrimSpace(input.PayloadJSON)
 	if payload == "" {
 		payload = "{}"

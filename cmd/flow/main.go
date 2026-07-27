@@ -1735,7 +1735,7 @@ func enrichPromptTaskContext(input *flowprompt.Input, apiFlags *apiFlagValues) e
 		}
 	}
 	if promptInputRole(*input) == flowprompt.RoleReviewer {
-		enrichPromptCompletionAssessment(input, client)
+		enrichPromptReviewerCheckContext(input, client)
 	}
 	return nil
 }
@@ -1774,12 +1774,10 @@ func combinePriorHandoffs(phaseHandoffs string, changeHandoff string) string {
 	return phaseHandoffs + "\n\n### Handoff from the previous session\n\n" + changeHandoff
 }
 
-// enrichPromptCompletionAssessment marks a reviewer prompt as a Mode-B recovery
-// review when its own check carries the completion-assessment marker (stamped by
-// the coordinator when a crashed author with a saved handoff was routed to a
-// targeted review rather than a blind relaunch). It is best-effort: the marker
-// is supplementary guidance, so a lookup failure must never strip the prompt.
-func enrichPromptCompletionAssessment(input *flowprompt.Input, client *flowclient.Client) {
+// enrichPromptReviewerCheckContext resolves coordinator-stamped reviewer modes
+// from the pending check's details. These markers are prompt inputs only; the
+// worker replaces Details with the actual verdict report.
+func enrichPromptReviewerCheckContext(input *flowprompt.Input, client *flowclient.Client) {
 	taskID := strings.TrimSpace(input.TaskID)
 	checkName := strings.TrimSpace(input.CheckName)
 	if taskID == "" || checkName == "" {
@@ -1790,8 +1788,18 @@ func enrichPromptCompletionAssessment(input *flowprompt.Input, client *flowclien
 		slog.Debug("skip completion-assessment detection", "task_id", taskID, "check", checkName, "error", err)
 		return
 	}
-	if strings.TrimSpace(result.Check.Details) == coordinator.CompletionAssessmentCheckMarker {
+	details := strings.TrimSpace(result.Check.Details)
+	if details == coordinator.CompletionAssessmentCheckMarker {
 		input.CompletionAssessment = true
+	}
+	if details == coordinator.ReviewDiscoveryDetailsMarker {
+		input.ReviewDiscovery = true
+	}
+	if strings.HasPrefix(details, strings.TrimSpace(coordinator.ReviewAggregationDetailsPrefix)) {
+		input.ReviewAggregationContext = strings.TrimSpace(strings.TrimPrefix(
+			details,
+			strings.TrimSpace(coordinator.ReviewAggregationDetailsPrefix),
+		))
 	}
 }
 

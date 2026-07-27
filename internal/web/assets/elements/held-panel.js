@@ -1,6 +1,6 @@
-// Held by you. Manual intervention as a first-class lifecycle state rather
-// than a side door: the run has stopped, you are holding it, and handing it
-// back is an explicit choice of which edge to take.
+// Held work. Manual intervention and convergence decisions are first-class
+// lifecycle states: the run has stopped and handing it back is an explicit
+// choice of which edge to take.
 
 import { escapeAttr, escapeHTML } from "../html.js";
 import { value } from "../normalize.js";
@@ -22,12 +22,20 @@ export function renderHeldPanel(model) {
   const session = value(model.taskConsole || {}, "session", "Session");
   const sessionID = value(session || {}, "id", "ID");
   const workerID = value(session || {}, "worker_id", "WorkerID");
+  const convergenceHold = String(model.heldBy || "") === "system";
+  const latestPlan = (model.statusLog || []).find(
+    (entry) => String(value(entry, "kind", "Kind") || "") === "plan",
+  );
+  const convergenceMessage = convergenceHold
+    ? String(value(latestPlan || {}, "message", "Message") || "")
+    : "";
 
   return `
     <div class="head">
-      <span class="badge"><span class="dot"></span>Held by you</span>
+      <span class="badge"><span class="dot"></span>${convergenceHold ? "Convergence review" : "Held by you"}</span>
       <span class="line">paused at ${escapeHTML(model.stepName)} · the workflow will not advance</span>
     </div>
+    ${convergenceMessage ? `<div class="prose">${escapeHTML(convergenceMessage)}</div>` : ""}
     ${sessionID ? renderSession(sessionID, workerID) : ""}
     <div class="hand-back">
       <span class="caption">Hand back</span>

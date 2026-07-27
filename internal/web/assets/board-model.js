@@ -129,6 +129,8 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
   const wait = value(card, "wait", "Wait");
   const lifecycleState = value(task, "state", "State") || "unscheduled";
   const held = Boolean(value(card, "held", "Held")) || entry.laneState === "held";
+  const heldBy = String(value(card, "held_by", "HeldBy") || "");
+  const convergenceHold = held && heldBy === "system";
   const waitKind = waitKindOf(wait);
   const readyToMerge = isReadyToMerge(entry);
 
@@ -179,21 +181,27 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
     laneState: entry.laneState || "",
     phase: phaseSlug(phaseState),
     held,
+    heldBy,
     blocked: Boolean(entry.blocked),
     wait,
     waitKind,
     readyToMerge,
-    // Held work is not waiting on you to notice it — you are already holding
-    // it. Leaving it in the attention strip would drown the tasks that are.
-    needsYou: !held && Boolean(waitKind === "gate" || waitKind === "failed" || waitKind === "budget" || readyToMerge),
-    reason: held ? "Held by you — the workflow will not advance" : waitReasonText(card, { readyToMerge }),
+    // A manual hold leaves the attention strip because the owner already
+    // initiated it. A system convergence hold stays visible until the owner
+    // makes the requested scope decision.
+    needsYou: convergenceHold || (!held && Boolean(waitKind === "gate" || waitKind === "failed" || waitKind === "budget" || readyToMerge)),
+    reason: held
+      ? convergenceHold
+        ? "Convergence review required — decide whether to split or re-scope"
+        : "Held by you — the workflow will not advance"
+      : waitReasonText(card, { readyToMerge }),
     actionLabel: waitActionLabel(card, { readyToMerge, held }),
     stepIndex,
     stepCount,
     stepName,
     scheduled: lifecycleState !== "unscheduled",
     running: Boolean(stepCount) && lifecycleState === "in_progress",
-    activity: activityLine(card, { held, waitKind, stepName, currentStep, lifecycleState }),
+    activity: activityLine(card, { held, convergenceHold, waitKind, stepName, currentStep, lifecycleState }),
     dwell,
     dwellLabel,
     dwellSince,
@@ -211,8 +219,12 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
 
 // activityLine is the one line of prose describing what is happening now,
 // present progressive, derived mechanically from the node name.
-function activityLine(card, { held, waitKind, stepName, currentStep, lifecycleState }) {
-  if (held) return "Held by you — the workflow will not advance";
+function activityLine(card, { held, convergenceHold, waitKind, stepName, currentStep, lifecycleState }) {
+  if (held) {
+    return convergenceHold
+      ? "Held for convergence review — decide whether to split or re-scope"
+      : "Held by you — the workflow will not advance";
+  }
   const wait = value(card, "wait", "Wait");
   const message = String(value(wait, "message", "Message") || "").trim();
   if (waitKind === "failed" || waitKind === "budget") return message || "Workflow step failed";

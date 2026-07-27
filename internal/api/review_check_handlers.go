@@ -345,7 +345,6 @@ func (s *projectServer) handleListThreads(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, threadsResponse{Threads: threads})
 }
 
-
 // threadMutation names which review-thread verb an endpoint is performing.
 // Thread mutations are workflow inputs, not state-machine transitions: active
 // workflow check nodes observe the resulting thread/check state when the
@@ -517,7 +516,6 @@ func (s *projectServer) handleListChecks(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, checksResponse{Checks: checks, ReviewState: reviewState})
 }
 
-
 func (s *projectServer) handleGetCheck(w http.ResponseWriter, r *http.Request, taskID string, name string) {
 	check, err := s.checks.GetCheck(r.Context(), taskID, name)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -619,7 +617,6 @@ func checkReporter(request reportCheckRequest, principal coordinator.Principal) 
 	return string(principal.Scope)
 }
 
-
 func (s *projectServer) checkThreadChangeAccess(r *http.Request, principal coordinator.Principal, taskID string, changeID string, leaseID string, allowSession bool, workerRoles ...worker.JobRole) error {
 	taskID = strings.TrimSpace(taskID)
 	changeID = strings.TrimSpace(changeID)
@@ -689,7 +686,7 @@ func (s *projectServer) checkWorkerThreadLease(ctx context.Context, principal co
 		return errors.New("worker job role cannot perform this thread operation")
 	}
 	if !jobBlocksApproval(job) {
-		return errors.New("advisory check jobs cannot mutate review threads")
+		return errors.New("advisory and discovery check jobs cannot mutate review threads")
 	}
 	if job.TaskID == nil || strings.TrimSpace(*job.TaskID) != taskID {
 		return errors.New("worker job does not belong to the thread task")
@@ -714,6 +711,9 @@ func jobBlockingValue(job worker.Job) (bool, bool) {
 }
 
 func jobBlocksApproval(job worker.Job) bool {
+	if discovery, _ := job.Payload["review_discovery"].(bool); discovery {
+		return false
+	}
 	blocking, stamped := jobBlockingValue(job)
 	return !stamped || blocking
 }

@@ -87,6 +87,16 @@ test("held work leaves the attention strip: you are already on it", () => {
   assert.equal(renderAttentionStrip([held].filter((model) => model.needsYou)), "");
 });
 
+test("a system convergence hold stays in the attention strip", () => {
+  const held = cardModel(entry({
+    task: { id: "t-convergence" },
+    card: { held: true, held_by: "system" },
+  }));
+  assert.equal(held.needsYou, true);
+  assert.match(held.reason, /Convergence review required/);
+  assert.match(held.activity, /split or re-scope/);
+});
+
 test("the attention reason is the agent's own words, never a generic label", () => {
   const question = "Should the done cursor include merged tasks?";
   assert.equal(waitReasonText({ wait: { kind: "human_gate", message: question } }), question);
@@ -388,6 +398,22 @@ test("handing back names every edge the executor can take", () => {
     assert.match(html, new RegExp(`data-edge="${edge}"`), `missing hand-back edge ${edge}`);
   }
   assert.match(html, /s-0413 · w-local-1 · tmux/);
+});
+
+test("a convergence hold explains the scope decision", () => {
+  const html = renderHeldPanel({
+    held: true,
+    heldBy: "system",
+    id: "t-0043",
+    stepName: "review",
+    statusLog: [{
+      kind: "plan",
+      message: "Convergence review required before automated review: this change touches 8 files.",
+    }],
+  });
+  assert.match(html, /Convergence review/);
+  assert.match(html, /touches 8 files/);
+  assert.match(html, /data-edge="resume"/);
 });
 
 test("the activity feed merges transitions and status entries newest first", () => {

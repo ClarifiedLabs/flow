@@ -18,18 +18,20 @@ import (
 // definitions select only these coordinator-owned handlers; definitions never
 // contain executable code, expressions, commands, or webhooks.
 type WorkflowExecutor struct {
-	db           *sql.DB
-	runs         *WorkflowRunService
-	artifacts    *WorkflowArtifactService
-	tasks        *TaskService
-	checks       *CheckService
-	checkConfigs *CheckConfigService
-	sessions     *SessionService
-	merges       workflowChangeMerger
-	queue        *flowworker.Service
-	project      Project
-	harnessArgs  flowharness.Args
-	handlers     map[NodeKind]workflowNodeHandler
+	db                   *sql.DB
+	runs                 *WorkflowRunService
+	artifacts            *WorkflowArtifactService
+	tasks                *TaskService
+	checks               *CheckService
+	checkConfigs         *CheckConfigService
+	sessions             *SessionService
+	merges               workflowChangeMerger
+	queue                *flowworker.Service
+	project              Project
+	harnessArgs          flowharness.Args
+	reviewScopeFileLimit int
+	reviewScopeLineLimit int
+	handlers             map[NodeKind]workflowNodeHandler
 }
 
 type workflowChangeMerger interface {
@@ -43,6 +45,11 @@ type workflowExecutionError struct {
 	err     error
 }
 
+const (
+	DefaultReviewScopeFileLimit = 10
+	DefaultReviewScopeLineLimit = 500
+)
+
 func (e *workflowExecutionError) Error() string {
 	return e.err.Error()
 }
@@ -52,24 +59,35 @@ func (e *workflowExecutionError) Unwrap() error {
 }
 
 type WorkflowExecutorOptions struct {
-	Database     *sql.DB
-	Runs         *WorkflowRunService
-	Artifacts    *WorkflowArtifactService
-	Tasks        *TaskService
-	Checks       *CheckService
-	CheckConfigs *CheckConfigService
-	Sessions     *SessionService
-	Merges       *MergeService
-	Queue        *flowworker.Service
-	Project      Project
-	HarnessArgs  flowharness.Args
+	Database             *sql.DB
+	Runs                 *WorkflowRunService
+	Artifacts            *WorkflowArtifactService
+	Tasks                *TaskService
+	Checks               *CheckService
+	CheckConfigs         *CheckConfigService
+	Sessions             *SessionService
+	Merges               *MergeService
+	Queue                *flowworker.Service
+	Project              Project
+	HarnessArgs          flowharness.Args
+	ReviewScopeFileLimit int
+	ReviewScopeLineLimit int
 }
 
 func NewWorkflowExecutor(opts WorkflowExecutorOptions) *WorkflowExecutor {
+	fileLimit := opts.ReviewScopeFileLimit
+	if fileLimit <= 0 {
+		fileLimit = DefaultReviewScopeFileLimit
+	}
+	lineLimit := opts.ReviewScopeLineLimit
+	if lineLimit <= 0 {
+		lineLimit = DefaultReviewScopeLineLimit
+	}
 	executor := &WorkflowExecutor{
 		db: opts.Database, runs: opts.Runs, artifacts: opts.Artifacts, tasks: opts.Tasks,
 		checks: opts.Checks, checkConfigs: opts.CheckConfigs, sessions: opts.Sessions,
 		merges: opts.Merges, queue: opts.Queue, project: opts.Project, harnessArgs: opts.HarnessArgs,
+		reviewScopeFileLimit: fileLimit, reviewScopeLineLimit: lineLimit,
 	}
 	executor.handlers = map[NodeKind]workflowNodeHandler{
 		NodeAgent:              executor.handleAgent,
@@ -378,7 +396,143 @@ func (e *WorkflowExecutor) handleChangeReview(ctx context.Context, run WorkflowR
 	if node.Config.ChangeReview == nil {
 		return false, errors.New("change review node is missing configuration")
 	}
-	return e.handleChecks(ctx, run, nodeRun, WorkflowChecksReview, node.Config.ChangeReview.Agents, "approved", "changes_requested")
+	held, err := e.holdOversizedChangeForConvergence(ctx, run, nodeRun)
+	if err != nil || held {
+		return false, err
+	}
+	if nodeRun.State == WorkflowNodeQueued {
+		if _, err := e.runs.MarkNodeRunning(ctx, nodeRun.ID); err != nil {
+			return false, err
+		}
+	}
+	artifact, err := e.artifacts.Get(ctx, nodeRun.InputArtifactID)
+	if err != nil {
+		return false, fmt.Errorf("load change artifact: %w", err)
+	}
+	changeID, err := changeIDFromArtifact(artifact)
+	if err != nil {
+		return false, err
+	}
+	change, err := e.sessions.GetChange(ctx, changeID)
+	if err != nil {
+		return false, err
+	}
+	task, err := e.tasks.GetTask(ctx, run.TaskID)
+	if err != nil {
+		return false, err
+	}
+	agents := node.Config.ChangeReview.Agents
+	names, err := e.checkConfigs.ScheduleWorkflowNodeChecks(
+		ctx,
+		task,
+		change,
+		WorkflowChecksReview,
+		agents,
+		run.ID,
+		nodeRun.ID,
+	)
+	if err != nil {
+		return false, err
+	}
+	checks, err := e.checks.ListChecks(ctx, run.TaskID)
+	if err != nil {
+		return false, err
+	}
+	byName := map[string]Check{}
+	for _, check := range checks {
+		byName[check.Name] = check
+	}
+	for index, name := range names {
+		check, ok := byName[name]
+		if !ok || check.Verdict == CheckPending {
+			return false, nil
+		}
+		if index < len(agents) && agents[index].Blocking && check.Verdict == CheckErrored {
+			return false, workflowRequiredCheckError(check, WorkflowChecksReview, nodeRun.Attempt)
+		}
+	}
+
+	aggregationName, err := e.checkConfigs.ScheduleWorkflowReviewAggregation(
+		ctx,
+		task,
+		change,
+		agents,
+		names,
+		run.ID,
+		nodeRun.ID,
+	)
+	if err != nil {
+		return false, err
+	}
+	aggregation, err := e.checks.GetCheck(ctx, run.TaskID, aggregationName)
+	if err != nil {
+		return false, err
+	}
+	if aggregation.Verdict == CheckPending {
+		return false, nil
+	}
+	if aggregation.Required && aggregation.Verdict == CheckErrored {
+		return false, workflowRequiredCheckError(aggregation, WorkflowChecksReview, nodeRun.Attempt)
+	}
+	outcome := "approved"
+	if aggregation.Required && aggregation.Verdict != CheckSatisfied {
+		outcome = "changes_requested"
+	}
+	_, err = e.runs.CompleteNode(ctx, CompleteWorkflowNodeInput{
+		NodeRunID: nodeRun.ID,
+		Outcome:   outcome,
+		Actor:     ActorSystem,
+	})
+	return err == nil, err
+}
+
+func (e *WorkflowExecutor) holdOversizedChangeForConvergence(ctx context.Context, run WorkflowRun, nodeRun WorkflowNodeRun) (bool, error) {
+	exchangePath := strings.TrimSpace(e.project.ExchangePath)
+	if exchangePath == "" {
+		return false, nil
+	}
+	artifact, err := e.artifacts.Get(ctx, nodeRun.InputArtifactID)
+	if err != nil {
+		return false, fmt.Errorf("load review artifact for convergence check: %w", err)
+	}
+	changeID, err := changeIDFromArtifact(artifact)
+	if err != nil {
+		return false, err
+	}
+	change, err := e.sessions.GetChange(ctx, changeID)
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(change.HeadSHA) == "" {
+		return false, nil
+	}
+	stats, err := flowgit.ChangedFileStats(
+		ctx,
+		exchangePath,
+		"refs/heads/"+change.Base,
+		change.HeadSHA,
+	)
+	if err != nil {
+		return false, fmt.Errorf("measure review scope: %w", err)
+	}
+	lines := stats.Additions + stats.Deletions
+	if !reviewScopeExceeded(len(stats.Files), lines, e.reviewScopeFileLimit, e.reviewScopeLineLimit) {
+		return false, nil
+	}
+	_, held, err := e.runs.HoldForConvergence(
+		ctx,
+		run.TaskID,
+		len(stats.Files),
+		stats.Additions,
+		stats.Deletions,
+		e.reviewScopeFileLimit,
+		e.reviewScopeLineLimit,
+	)
+	return held, err
+}
+
+func reviewScopeExceeded(files, lines, maxFiles, maxLines int) bool {
+	return files > maxFiles || lines > maxLines
 }
 
 func (e *WorkflowExecutor) handleVerifyChange(ctx context.Context, run WorkflowRun, nodeRun WorkflowNodeRun, node FlowNodeSnapshot) (bool, error) {
@@ -435,22 +589,7 @@ func (e *WorkflowExecutor) handleChecks(ctx context.Context, run WorkflowRun, no
 			continue
 		}
 		if check.Required && check.Verdict == CheckErrored {
-			jobID := ""
-			if check.SourceJobID != nil {
-				jobID = *check.SourceJobID
-			}
-			cause := fmt.Errorf("required check %s failed to produce a result: %s", check.Name, strings.TrimSpace(check.Details))
-			return false, &workflowExecutionError{
-				failure: WorkflowExecutionFailure{
-					Operation: "run required " + string(check.Kind) + " check",
-					NodeKind:  nodeKindForCheckMode(mode),
-					Attempt:   nodeRun.Attempt,
-					CheckID:   check.ID,
-					JobID:     jobID,
-					Message:   cause.Error(),
-				},
-				err: cause,
-			}
+			return false, workflowRequiredCheckError(check, mode, nodeRun.Attempt)
 		}
 		if check.Required && check.Verdict != CheckSatisfied {
 			failed = true
@@ -465,6 +604,25 @@ func (e *WorkflowExecutor) handleChecks(ctx context.Context, run WorkflowRun, no
 	}
 	_, err = e.runs.CompleteNode(ctx, CompleteWorkflowNodeInput{NodeRunID: nodeRun.ID, Outcome: outcome, Actor: ActorSystem})
 	return err == nil, err
+}
+
+func workflowRequiredCheckError(check Check, mode WorkflowCheckMode, attempt int) error {
+	jobID := ""
+	if check.SourceJobID != nil {
+		jobID = *check.SourceJobID
+	}
+	cause := fmt.Errorf("required check %s failed to produce a result: %s", check.Name, strings.TrimSpace(check.Details))
+	return &workflowExecutionError{
+		failure: WorkflowExecutionFailure{
+			Operation: "run required " + string(check.Kind) + " check",
+			NodeKind:  nodeKindForCheckMode(mode),
+			Attempt:   attempt,
+			CheckID:   check.ID,
+			JobID:     jobID,
+			Message:   cause.Error(),
+		},
+		err: cause,
+	}
 }
 
 func nodeKindForCheckMode(mode WorkflowCheckMode) NodeKind {

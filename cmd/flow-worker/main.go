@@ -780,8 +780,16 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 	}
 
 	blocking := checkJobBlocksApproval(job)
-	if haveVerdict && !blocking {
+	reviewDiscovery := reviewDiscoveryJob(job)
+	if haveVerdict && (!blocking || reviewDiscovery) {
 		details = advisoryVerdictDetails(details, verdictReport)
+	} else if haveVerdict && kind == coordinator.CheckKindReviewer {
+		blockingFindings := blockingReviewFindings(verdictReport)
+		if verdict == coordinator.CheckBlocked && len(verdictReport.Comments) > 0 && blockingFindings == 0 {
+			verdict = coordinator.CheckSatisfied
+			details = "No task-caused high-severity blocker. " + strings.TrimSpace(details)
+		}
+		details = classifiedReviewDetails(details, verdictReport)
 	}
 
 	// Apply the structured reviewer concerns / verifier decisions the job carried
@@ -790,7 +798,7 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 	// thread that independently blocks approval. The worker lease is still live
 	// here, so blocking jobs' writes pass the change-access check.
 	if haveVerdict {
-		if err := applyVerdictActions(client, kind, blocking, lease, result, verdictReport, stdout); err != nil {
+		if err := applyVerdictActions(client, kind, blocking && !reviewDiscovery, lease, result, verdictReport, stdout); err != nil {
 			verdict = coordinator.CheckErrored
 			details = "structured verdict actions failed: " + err.Error()
 		}
@@ -836,15 +844,19 @@ func applyVerdictActions(client *flowclient.Client, kind coordinator.CheckKind, 
 	var actionErr error
 	switch kind {
 	case coordinator.CheckKindReviewer:
-		if len(report.Comments) == 0 {
+		blockingFindings := blockingReviewFindings(report)
+		if blockingFindings == 0 {
 			return nil
 		}
 		changeID := strings.TrimSpace(result.Payload.ChangeID)
 		if changeID == "" {
-			fmt.Fprintf(stdout, "check: cannot file %d verdict comment(s): missing change id\n", len(report.Comments))
+			fmt.Fprintf(stdout, "check: cannot file %d blocking verdict comment(s): missing change id\n", blockingFindings)
 			return errors.New("cannot file verdict comments: missing change id")
 		}
 		for _, comment := range report.Comments {
+			if !comment.BlocksApproval() {
+				continue
+			}
 			err := retryTransientOperation("file verdict comment", stdout, func() error {
 				_, err := client.CreateThread(changeID, flowclient.CreateThreadInput{
 					AnchorCommitSHA: comment.SHA,
@@ -896,6 +908,11 @@ func checkJobBlocksApproval(job flowworker.Job) bool {
 	return !ok || blocking
 }
 
+func reviewDiscoveryJob(job flowworker.Job) bool {
+	discovery, _ := job.Payload["review_discovery"].(bool)
+	return discovery
+}
+
 func advisoryVerdictDetails(details string, report workerexec.VerdictReport) string {
 	var lines []string
 	if trimmed := strings.TrimSpace(details); trimmed != "" {
@@ -904,7 +921,7 @@ func advisoryVerdictDetails(details string, report workerexec.VerdictReport) str
 		lines = append(lines, "Advisory (non-blocking) finding")
 	}
 	for _, comment := range report.Comments {
-		lines = append(lines, fmt.Sprintf("- %s:%d: %s", comment.File, comment.Line, strings.TrimSpace(comment.Body)))
+		lines = append(lines, formatReviewFinding(comment))
 	}
 	for _, decision := range report.Threads {
 		finding := fmt.Sprintf("- thread %s: recommends %s", decision.ID, decision.Decision)
@@ -914,6 +931,54 @@ func advisoryVerdictDetails(details string, report workerexec.VerdictReport) str
 		lines = append(lines, finding)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func blockingReviewFindings(report workerexec.VerdictReport) int {
+	count := 0
+	for _, comment := range report.Comments {
+		if comment.BlocksApproval() {
+			count++
+		}
+	}
+	return count
+}
+
+func classifiedReviewDetails(details string, report workerexec.VerdictReport) string {
+	lines := []string{strings.TrimSpace(details)}
+	var followUps []string
+	for _, comment := range report.Comments {
+		if !comment.BlocksApproval() {
+			followUps = append(followUps, formatReviewFinding(comment))
+		}
+	}
+	if len(followUps) == 0 {
+		return strings.TrimSpace(details)
+	}
+	lines = append(lines, "", "Non-blocking follow-ups:")
+	lines = append(lines, followUps...)
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func formatReviewFinding(comment workerexec.ReviewCommentReport) string {
+	classification := comment.Severity
+	if comment.IntroducedByChange != nil && !*comment.IntroducedByChange {
+		classification += ", pre-existing"
+	}
+	if comment.DuplicateOf != "" {
+		classification += ", duplicate of " + comment.DuplicateOf
+	}
+	finding := fmt.Sprintf(
+		"- %s:%d [%s; invariant: %s] %s",
+		comment.File,
+		comment.Line,
+		classification,
+		strings.TrimSpace(comment.Requirement),
+		strings.TrimSpace(comment.Body),
+	)
+	if comment.FollowUp != "" {
+		finding += " Follow-up: " + strings.TrimSpace(comment.FollowUp)
+	}
+	return finding
 }
 
 // transcriptTailBytes is the maximum number of bytes the worker uploads from

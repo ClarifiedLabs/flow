@@ -264,6 +264,25 @@ func TestReviewAgentLegacyRequiredCompatibilityAndValidation(t *testing.T) {
 	}
 }
 
+func TestReviewAggregationAgentPrefersFirstBlockingRuntime(t *testing.T) {
+	agents := []SnapshotReviewAgent{
+		{Blocking: false, Agent: AgentDefSnapshot{Name: "advisory"}},
+		{Blocking: true, Agent: AgentDefSnapshot{Name: "primary-blocker"}},
+		{Blocking: true, Agent: AgentDefSnapshot{Name: "secondary-blocker"}},
+	}
+	selected, ok := ReviewAggregationAgent(agents)
+	if !ok || selected.Agent.Name != "primary-blocker" || !selected.Blocking {
+		t.Fatalf("selected aggregation agent = %+v ok=%t", selected, ok)
+	}
+	selected, ok = ReviewAggregationAgent(agents[:1])
+	if !ok || selected.Agent.Name != "advisory" || selected.Blocking {
+		t.Fatalf("all-advisory aggregation agent = %+v ok=%t", selected, ok)
+	}
+	if _, ok := ReviewAggregationAgent(nil); ok {
+		t.Fatal("empty review set resolved an aggregation agent")
+	}
+}
+
 func TestAgentDefCRUD(t *testing.T) {
 	ctx := context.Background()
 	_, defs := newFlowTestServices(t)

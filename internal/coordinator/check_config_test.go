@@ -164,7 +164,7 @@ VALUES (?, ?, ?, 'main', 'head-1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z
 	}
 }
 
-func TestScheduleWorkflowNodeChecksConcurrentlyFansOutExactlyOnce(t *testing.T) {
+func TestScheduleWorkflowNodeChecksConcurrentlyFansOutAndAggregatesExactlyOnce(t *testing.T) {
 	ctx := context.Background()
 	store, err := flowdb.Open(ctx, filepath.Join(t.TempDir(), "flow.db"))
 	if err != nil {
@@ -229,16 +229,17 @@ INSERT INTO workflow_node_runs (
 		t.Fatalf("list jobs: %v", err)
 	}
 	if len(jobs) != 2 {
-		t.Fatalf("jobs = %+v, want exactly two", jobs)
+		t.Fatalf("jobs = %+v, want two parallel reviewers", jobs)
 	}
 	for _, job := range jobs {
+		checkName := payloadString(job.Payload, "check_name")
 		if job.State != flowworker.JobQueued || job.Role != flowworker.RoleReviewer || job.TaskID == nil || *job.TaskID != task.ID || job.ChangeID == nil || *job.ChangeID != change.ID {
 			t.Errorf("job identity = %+v", job)
 		}
 		if job.WorkflowRunID == nil || *job.WorkflowRunID != "wr-parallel" || job.NodeRunID == nil || *job.NodeRunID != "nr-parallel" {
 			t.Errorf("job workflow ownership = %+v", job)
 		}
-		name := payloadString(job.Payload, "check_name")
+		name := checkName
 		if payloadString(job.Payload, "head_sha") != change.HeadSHA {
 			t.Errorf("job %s head = %#v", name, job.Payload["head_sha"])
 		}
@@ -246,11 +247,11 @@ INSERT INTO workflow_node_runs (
 		command := fmt.Sprint(entrypoint["argv"])
 		switch name {
 		case "code-review.node.nr-parallel":
-			if payloadString(job.Payload, "role_instructions") != "Focus on correctness." || !strings.Contains(command, "gpt-5") || job.Payload["blocking"] != true {
+			if payloadString(job.Payload, "role_instructions") != "Focus on correctness." || !strings.Contains(command, "gpt-5") || job.Payload["blocking"] != true || job.Payload["review_discovery"] != true {
 				t.Errorf("code review payload = %+v", job.Payload)
 			}
 		case "security-review.node.nr-parallel":
-			if payloadString(job.Payload, "role_instructions") != "Focus on security." || !strings.Contains(command, "claude-sonnet-4-6") || job.Payload["blocking"] != false {
+			if payloadString(job.Payload, "role_instructions") != "Focus on security." || !strings.Contains(command, "claude-sonnet-4-6") || job.Payload["blocking"] != false || job.Payload["review_discovery"] != true {
 				t.Errorf("security review payload = %+v", job.Payload)
 			}
 		default:
@@ -266,8 +267,9 @@ INSERT INTO workflow_node_runs (
 	}
 	for _, check := range checks {
 		wantRequired := check.Name == "code-review.node.nr-parallel"
-		if check.Kind != CheckKindReviewer || check.Verdict != CheckPending || check.Required != wantRequired {
-			t.Errorf("check = %+v, required want %v", check, wantRequired)
+		if check.Kind != CheckKindReviewer || check.Verdict != CheckPending || check.Required != wantRequired ||
+			check.Details != ReviewDiscoveryDetailsMarker {
+			t.Errorf("check = %+v, want pending discovery required %v", check, wantRequired)
 		}
 	}
 
@@ -287,6 +289,53 @@ INSERT INTO workflow_node_runs (
 	preserved, err := services.checks.GetCheck(ctx, task.ID, "security-review.node.nr-parallel")
 	if err != nil || preserved.Verdict != CheckBlocked || preserved.Required || preserved.Details != "Advisory cache finding." {
 		t.Fatalf("advisory result after stale schedule = %+v err=%v", preserved, err)
+	}
+	aggregationName, err := services.checkConfig.ScheduleWorkflowReviewAggregation(
+		ctx,
+		task,
+		change,
+		agents,
+		[]string{"code-review.node.nr-parallel", "security-review.node.nr-parallel"},
+		"wr-parallel",
+		"nr-parallel",
+	)
+	if err != nil {
+		t.Fatalf("schedule aggregation: %v", err)
+	}
+	if aggregationName != "review-aggregation.node.nr-parallel" {
+		t.Fatalf("aggregation name = %q", aggregationName)
+	}
+	aggregation, err := services.checks.GetCheck(ctx, task.ID, aggregationName)
+	if err != nil || !aggregation.Required || aggregation.Verdict != CheckPending ||
+		!strings.Contains(aggregation.Details, "Advisory cache finding.") ||
+		!strings.Contains(aggregation.Details, "blocking source") {
+		t.Fatalf("aggregation check = %+v err=%v", aggregation, err)
+	}
+	codeSource, err := services.checks.GetCheck(ctx, task.ID, "code-review.node.nr-parallel")
+	if err != nil || codeSource.Required {
+		t.Fatalf("aggregated code source = %+v err=%v, want advisory", codeSource, err)
+	}
+	jobs, err = services.workers.ListJobs(ctx)
+	if err != nil || len(jobs) != 3 {
+		t.Fatalf("jobs after aggregation = %+v err=%v", jobs, err)
+	}
+	var aggregateJob flowworker.Job
+	for _, job := range jobs {
+		if payloadString(job.Payload, "check_name") == aggregationName {
+			aggregateJob = job
+		}
+	}
+	entrypoint, _ := aggregateJob.Payload["entrypoint"].(map[string]any)
+	if aggregateJob.ID == "" || aggregateJob.Payload["blocking"] != true ||
+		aggregateJob.Payload["review_discovery"] != nil ||
+		!strings.Contains(fmt.Sprint(entrypoint["argv"]), "gpt-5") {
+		t.Fatalf("aggregation job = %+v, want blocking code-review runtime", aggregateJob)
+	}
+	if _, err := services.checks.ReportCheck(ctx, ReportCheckInput{
+		TaskID: task.ID, Name: aggregationName, Kind: CheckKindReviewer,
+		Required: &blocking, Verdict: CheckSatisfied,
+	}); err != nil {
+		t.Fatalf("complete aggregation: %v", err)
 	}
 	if _, err := services.checks.ReportCheck(ctx, ReportCheckInput{TaskID: task.ID, Name: "stale.node.nr-parallel", Kind: CheckKindReviewer, Required: &blocking, Verdict: CheckPending}); err != nil {
 		t.Fatalf("seed stale pending check: %v", err)
@@ -309,7 +358,7 @@ UPDATE workflow_runs SET current_node_run_id = 'nr-parallel-visit-2' WHERE id = 
 		t.Fatalf("second visit check names = %v", secondNames)
 	}
 	priorSatisfied, err := services.checks.GetCheck(ctx, task.ID, "code-review.node.nr-parallel")
-	if err != nil || priorSatisfied.Verdict != CheckSatisfied || !priorSatisfied.Required {
+	if err != nil || priorSatisfied.Verdict != CheckSatisfied || priorSatisfied.Required {
 		t.Fatalf("prior satisfied check = %+v err=%v", priorSatisfied, err)
 	}
 	priorAdvisory, err := services.checks.GetCheck(ctx, task.ID, "security-review.node.nr-parallel")
@@ -325,7 +374,7 @@ UPDATE workflow_runs SET current_node_run_id = 'nr-parallel-visit-2' WHERE id = 
 		t.Fatalf("count second-visit jobs: %v", err)
 	}
 	if liveJobs != 2 {
-		t.Fatalf("live jobs after revisit = %d, want two fresh jobs", liveJobs)
+		t.Fatalf("live jobs after revisit = %d, want two fresh parallel reviewers", liveJobs)
 	}
 
 	// A stale scheduling call for the prior review node must not retire checks
@@ -335,6 +384,24 @@ UPDATE workflow_runs SET current_node_run_id = 'nr-parallel-visit-2' WHERE id = 
 		if _, err := services.checks.ReportCheck(ctx, ReportCheckInput{TaskID: task.ID, Name: name, Kind: CheckKindReviewer, Required: &required, Verdict: CheckSatisfied}); err != nil {
 			t.Fatalf("complete second-visit check %s: %v", name, err)
 		}
+	}
+	secondAggregation, err := services.checkConfig.ScheduleWorkflowReviewAggregation(
+		ctx,
+		task,
+		change,
+		agents,
+		secondNames,
+		"wr-parallel",
+		"nr-parallel-visit-2",
+	)
+	if err != nil {
+		t.Fatalf("schedule second aggregation: %v", err)
+	}
+	if _, err := services.checks.ReportCheck(ctx, ReportCheckInput{
+		TaskID: task.ID, Name: secondAggregation, Kind: CheckKindReviewer,
+		Required: &blocking, Verdict: CheckSatisfied,
+	}); err != nil {
+		t.Fatalf("complete second aggregation: %v", err)
 	}
 	if _, err := store.DB().ExecContext(ctx, `
 UPDATE jobs SET state = 'finished' WHERE node_run_id = 'nr-parallel-visit-2';
