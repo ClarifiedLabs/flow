@@ -23,11 +23,23 @@ type CoordinatorConfig struct {
 	ProtocolVersion            string               `json:"protocol_version" yaml:"protocol_version"`
 	AuthorEntrypoint           map[string]any       `json:"author_entrypoint" yaml:"author_entrypoint"`
 	AuthorEntrypointConfigured bool                 `json:"-" yaml:"-"`
+	DefaultAgent               DefaultAgentConfig   `json:"default_agent" yaml:"default_agent"`
 	Deadlines                  DeadlineConfig       `json:"deadlines" yaml:"deadlines"`
 	Limits                     LimitConfig          `json:"limits" yaml:"limits"`
 	Workers                    CoordinatorWorkers   `json:"workers" yaml:"workers"`
 	HarnessArgs                flowharness.Args     `json:"harness_args" yaml:"harness_args"`
 	Git                        CoordinatorGitConfig `json:"git" yaml:"git"`
+}
+
+// DefaultAgentConfig configures the coordinator's fallback agent: the harness
+// (and optional model/reasoning effort) used for jobs without an explicit
+// agent definition, and for the default author entrypoint when
+// author_entrypoint is unset. The zero value keeps the built-in default: the
+// codex harness with the harness CLI's own default model.
+type DefaultAgentConfig struct {
+	Harness         string `json:"harness" yaml:"harness"`
+	Model           string `json:"model" yaml:"model"`
+	ReasoningEffort string `json:"reasoning_effort" yaml:"reasoning_effort"`
 }
 
 // CoordinatorWorkers configures coordinator-side worker lifecycle policy.
@@ -253,10 +265,9 @@ func DefaultCoordinator() (CoordinatorConfig, error) {
 	}
 
 	return CoordinatorConfig{
-		DataDir:          dataDir,
-		ListenAddr:       "127.0.0.1:8421",
-		ProtocolVersion:  DefaultProtocolVersion,
-		AuthorEntrypoint: DefaultAuthorEntrypoint(),
+		DataDir:         dataDir,
+		ListenAddr:      "127.0.0.1:8421",
+		ProtocolVersion: DefaultProtocolVersion,
 	}, nil
 }
 
@@ -301,6 +312,7 @@ func LoadCoordinator(path string) (CoordinatorConfig, error) {
 	cfg.Limits = fileCfg.Limits
 	cfg.Workers = fileCfg.Workers
 	cfg.HarnessArgs = fileCfg.HarnessArgs
+	cfg.DefaultAgent = fileCfg.DefaultAgent
 	if strings.TrimSpace(fileCfg.Git.CommitName) != "" {
 		cfg.Git.CommitName = strings.TrimSpace(fileCfg.Git.CommitName)
 	}
@@ -312,7 +324,30 @@ func LoadCoordinator(path string) (CoordinatorConfig, error) {
 }
 
 func DefaultAuthorEntrypoint() map[string]any {
-	entrypoint, err := flowharness.DefaultAuthorEntrypoint(flowharness.DefaultAgentName())
+	return DefaultAuthorEntrypointForAgent(flowharness.DefaultAgentSelection())
+}
+
+// ResolvedDefaultAgent normalizes and validates the configured default agent
+// selection, falling back to the built-in default harness when unset.
+func (c CoordinatorConfig) ResolvedDefaultAgent() (flowharness.AgentSelection, error) {
+	return flowharness.ResolveAgentSelection(flowharness.AgentSelection{
+		Harness:         c.DefaultAgent.Harness,
+		Model:           c.DefaultAgent.Model,
+		ReasoningEffort: c.DefaultAgent.ReasoningEffort,
+	})
+}
+
+// DefaultAuthorEntrypointForAgent builds the default author entrypoint for a
+// resolved agent selection: the selection's harness with its model/effort
+// tokens applied. The selection must already be resolved (see
+// ResolvedDefaultAgent); invalid values panic, mirroring
+// DefaultAuthorEntrypoint.
+func DefaultAuthorEntrypointForAgent(sel flowharness.AgentSelection) map[string]any {
+	modelTokens, err := sel.ModelArgs()
+	if err != nil {
+		panic(err)
+	}
+	entrypoint, err := flowharness.DefaultAuthorEntrypointWithArgs(sel.Harness, flowharness.ArgsFor(sel.Harness, modelTokens))
 	if err != nil {
 		panic(err)
 	}
@@ -742,8 +777,17 @@ func normalizeCoordinator(cfg CoordinatorConfig) (CoordinatorConfig, error) {
 	if strings.TrimSpace(cfg.ProtocolVersion) == "" {
 		return CoordinatorConfig{}, errors.New("coordinator protocol_version is required")
 	}
+	defaultAgent, err := cfg.ResolvedDefaultAgent()
+	if err != nil {
+		return CoordinatorConfig{}, fmt.Errorf("coordinator default_agent: %w", err)
+	}
+	cfg.DefaultAgent = DefaultAgentConfig{
+		Harness:         defaultAgent.Harness,
+		Model:           defaultAgent.Model,
+		ReasoningEffort: defaultAgent.ReasoningEffort,
+	}
 	if cfg.AuthorEntrypoint == nil {
-		cfg.AuthorEntrypoint = DefaultAuthorEntrypoint()
+		cfg.AuthorEntrypoint = DefaultAuthorEntrypointForAgent(defaultAgent)
 	}
 	if err := validateAuthorEntrypoint(cfg.AuthorEntrypoint); err != nil {
 		return CoordinatorConfig{}, err

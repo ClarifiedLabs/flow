@@ -304,8 +304,9 @@ chmod 600 .flow-local/worker-join.token
 
 The coordinator seeds global built-in `task-planner`, `author`,
 `code-reviewer`, `security-reviewer`, and `verifier` agent definitions using the
-default Codex harness. Fresh projects inherit those definitions and seed only
-the `coding` and `planning` flows; they do not create project-local copies. Each
+default agent harness (Codex unless `default_agent` configures another; see
+below). Fresh projects inherit those definitions and seed only the `coding` and
+`planning` flows; they do not create project-local copies. Each
 reusable agent definition combines a **model agent** selection (harness, model,
 and reasoning effort) with a **focus agent** name and prompt. Manage those
 model/focus definitions with `flow agent-defs list|create|edit|rm` and the graphs
@@ -346,6 +347,39 @@ author_entrypoint:
   env: {}
   shell: false
 ```
+
+### Default agent (`default_agent`)
+
+The coordinator's fallback agent — used for jobs launched without an agent
+definition, for the synthesized default reviewer/verifier checks, and for the
+generated author entrypoint — defaults to the Codex harness with the harness
+CLI's own default model. Serve with a coordinator config that sets
+`default_agent` to change it:
+
+```yaml
+default_agent:
+  harness: claude        # codex (default), claude, or harness
+  model: sonnet          # optional; empty = the harness CLI's default model
+  reasoning_effort: high # optional
+```
+
+Setting only `model` applies it to the built-in default harness (Codex).
+Invalid values fail `flow-server serve` at startup.
+
+Explicit selections keep precedence over this fallback, highest first:
+
+1. The agent definition on a flow node (or a task's frozen snapshot of one).
+2. An explicit `author_entrypoint` in the coordinator config, which fully
+   overrides the author command; `default_agent` is then ignored for author
+   jobs.
+3. `harness_args`, applied after the `default_agent` model tokens so a manual
+   `--model` there wins.
+4. The `default_agent` block.
+5. The built-in Codex fallback.
+
+Changing `default_agent` affects only freshly seeded (or restored) global agent
+definitions and newly enqueued jobs: existing definitions are never rewritten,
+and in-flight job payloads are frozen.
 
 Review convergence is bounded by coordinator limits. By default, Flow pauses a
 task for an owner decision before automated review when its change exceeds 10

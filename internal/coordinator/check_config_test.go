@@ -14,7 +14,7 @@ import (
 )
 
 func TestDefaultAgentChecksUseSelectedHarnessAndArgs(t *testing.T) {
-	suite, err := withDefaultAgentChecks(CheckSuite{}, flowharness.Claude, flowharness.Args{
+	suite, err := withDefaultAgentChecks(CheckSuite{}, flowharness.AgentSelection{Harness: flowharness.Claude}, flowharness.Args{
 		Claude: []string{"--model", "sonnet"},
 		Codex:  []string{"--model", "gpt-5", "-c", "model_reasoning_effort=high"},
 	})
@@ -33,6 +33,38 @@ func TestDefaultAgentChecksUseSelectedHarnessAndArgs(t *testing.T) {
 			if !strings.Contains(command, want) {
 				t.Fatalf("%s default command missing %q:\n%s", definition.Name, want, command)
 			}
+		}
+		if got := definition.Requires; len(got) != 1 || got[0] != flowharness.AgentHarnessLabel(flowharness.Claude) {
+			t.Fatalf("%s requires = %#v, want claude harness label", definition.Name, got)
+		}
+	}
+}
+
+func TestDefaultAgentChecksUseConfiguredDefaultModel(t *testing.T) {
+	suite, err := withDefaultAgentChecks(CheckSuite{}, flowharness.AgentSelection{
+		Harness:         flowharness.Claude,
+		Model:           "sonnet",
+		ReasoningEffort: "high",
+	}, flowharness.Args{
+		Claude: []string{"--model", "opus"},
+	})
+	if err != nil {
+		t.Fatalf("default agent checks: %v", err)
+	}
+	if len(suite.Definitions) != 2 {
+		t.Fatalf("default definitions = %+v, want reviewer and verifier", suite.Definitions)
+	}
+	for _, definition := range suite.Definitions {
+		command := definition.Entrypoint.Argv[0]
+		// The configured default model/effort tokens precede the manual
+		// harness_args so the manual --model wins (last-token-wins).
+		defaultIdx := strings.Index(command, "'--model' 'sonnet' '--effort' 'high'")
+		manualIdx := strings.Index(command, "'--model' 'opus'")
+		if defaultIdx < 0 || manualIdx < 0 {
+			t.Fatalf("%s default command missing default or manual model tokens:\n%s", definition.Name, command)
+		}
+		if defaultIdx > manualIdx {
+			t.Fatalf("%s default model tokens must precede harness_args:\n%s", definition.Name, command)
 		}
 		if got := definition.Requires; len(got) != 1 || got[0] != flowharness.AgentHarnessLabel(flowharness.Claude) {
 			t.Fatalf("%s requires = %#v, want claude harness label", definition.Name, got)

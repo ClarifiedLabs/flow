@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
+	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 )
 
 func TestProjectAgentDefsInheritGlobalsAndOverrideByName(t *testing.T) {
@@ -94,6 +95,55 @@ func TestProjectAgentDefsInheritGlobalsAndOverrideByName(t *testing.T) {
 	resurfaced, err := projectDefs.GetByName(ctx, "shared-author")
 	if err != nil || resurfaced.ID != globalAuthor.ID || !resurfaced.Inherited || resurfaced.Prompt != "updated global" {
 		t.Fatalf("resurfaced global author = %+v, err=%v", resurfaced, err)
+	}
+}
+
+func TestSeedDefaultsStampsConfiguredDefaultAgent(t *testing.T) {
+	ctx := context.Background()
+	globalStore, err := flowdb.OpenGlobal(ctx, filepath.Join(t.TempDir(), "global.db"))
+	if err != nil {
+		t.Fatalf("open global database: %v", err)
+	}
+	t.Cleanup(func() { _ = globalStore.Close() })
+
+	configured := flowharness.AgentSelection{Harness: flowharness.Claude, Model: "sonnet", ReasoningEffort: "high"}
+	globals := NewGlobalAgentDefServiceWithOptions(globalStore.DB(), AgentDefServiceOptions{DefaultAgent: configured})
+	if err := globals.SeedDefaults(ctx); err != nil {
+		t.Fatalf("seed global defaults: %v", err)
+	}
+	defs, err := globals.List(ctx)
+	if err != nil {
+		t.Fatalf("list global defaults: %v", err)
+	}
+	if len(defs) != 5 {
+		t.Fatalf("global defaults = %d, want 5", len(defs))
+	}
+	for _, def := range defs {
+		if def.Harness != flowharness.Claude || def.Model != "sonnet" || def.ReasoningEffort != "high" {
+			t.Errorf("seeded %q = harness %q model %q effort %q, want claude/sonnet/high",
+				def.Name, def.Harness, def.Model, def.ReasoningEffort)
+		}
+		if !def.Builtin {
+			t.Errorf("seeded %q Builtin = false, want true", def.Name)
+		}
+	}
+
+	// Re-seeding with a different configured default preserves the existing
+	// rows: the config shapes fresh seeds only, never rewrites operator state.
+	reseed := NewGlobalAgentDefServiceWithOptions(globalStore.DB(), AgentDefServiceOptions{
+		DefaultAgent: flowharness.AgentSelection{Harness: flowharness.Codex},
+	})
+	if err := reseed.SeedDefaults(ctx); err != nil {
+		t.Fatalf("re-seed global defaults: %v", err)
+	}
+	preserved, err := globals.List(ctx)
+	if err != nil {
+		t.Fatalf("list preserved defaults: %v", err)
+	}
+	for i, def := range preserved {
+		if def.ID != defs[i].ID || def.Harness != flowharness.Claude || def.Model != "sonnet" {
+			t.Errorf("re-seeded %q = %+v, want preserved %+v", def.Name, def, defs[i])
+		}
 	}
 }
 

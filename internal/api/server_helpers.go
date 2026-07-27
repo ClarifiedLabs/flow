@@ -277,7 +277,7 @@ func payloadString(payload map[string]any, key string) string {
 	}
 }
 
-func sessionHarnessForJob(job worker.Job) string {
+func sessionHarnessForJob(job worker.Job, defaultAgentHarness string) string {
 	if job.Role == worker.RoleConsole {
 		consoleHarness := flowharness.NormalizeName(payloadString(job.Payload, "console_harness"))
 		if err := flowharness.ValidateConsoleName(consoleHarness); err == nil && consoleHarness != "" {
@@ -289,6 +289,9 @@ func sessionHarnessForJob(job worker.Job) string {
 	agentHarness := flowharness.NormalizeName(payloadString(job.Payload, "agent_harness"))
 	if _, ok := flowharness.Lookup(agentHarness); ok {
 		return agentHarness
+	}
+	if fallback := flowharness.NormalizeName(defaultAgentHarness); fallback != "" {
+		return fallback
 	}
 	return flowharness.DefaultAgentName()
 }

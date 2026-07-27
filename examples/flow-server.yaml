@@ -11,6 +11,14 @@ limits:
   review_author_cycles: 2
   review_scope_files: 10
   review_scope_lines: 500
+# Fallback agent for jobs without an explicit agent definition, and for the
+# generated author entrypoint when author_entrypoint is unset. Defaults to the
+# codex harness with the harness CLI's own default model. Explicit selections
+# (agent definitions, author_entrypoint, harness_args) take precedence.
+# default_agent:
+#   harness: claude   # codex, claude, or harness
+#   model: sonnet     # optional; empty = the harness CLI's default model
+#   reasoning_effort: high  # optional
 # Git identity for the squash-merge commit the coordinator creates. When
 # omitted, Flow Coordinator <flow@example.invalid> is used.
 # git:

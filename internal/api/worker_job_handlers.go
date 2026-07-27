@@ -413,7 +413,7 @@ func (s *Server) handleMarkJobRunning(w http.ResponseWriter, r *http.Request, pr
 			JobID:    job.ID,
 			LeaseID:  leaseID,
 			WorkerID: strings.TrimSpace(principal.Subject),
-			Harness:  sessionHarnessForJob(job),
+			Harness:  sessionHarnessForJob(job, s.registry.DefaultAgent().Harness),
 		})
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "start_session_failed", err.Error())
@@ -427,7 +427,7 @@ func (s *Server) handleMarkJobRunning(w http.ResponseWriter, r *http.Request, pr
 			JobID:    job.ID,
 			LeaseID:  leaseID,
 			WorkerID: strings.TrimSpace(principal.Subject),
-			Harness:  sessionHarnessForJob(job),
+			Harness:  sessionHarnessForJob(job, s.registry.DefaultAgent().Harness),
 		})
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "start_session_failed", err.Error())

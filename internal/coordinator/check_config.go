@@ -118,17 +118,21 @@ type PendingCheckTimeout struct {
 }
 
 type CheckConfigService struct {
-	db          *sql.DB
-	tasks       *TaskService
-	checks      *CheckService
-	workers     *flowworker.Service
-	threads     *ThreadService
-	project     Project
-	harnessArgs flowharness.Args
+	db           *sql.DB
+	tasks        *TaskService
+	checks       *CheckService
+	workers      *flowworker.Service
+	threads      *ThreadService
+	project      Project
+	harnessArgs  flowharness.Args
+	defaultAgent flowharness.AgentSelection
 }
 
 type CheckConfigServiceOptions struct {
 	HarnessArgs flowharness.Args
+	// DefaultAgent is the configured fallback agent selection; the zero value
+	// resolves to the built-in default harness.
+	DefaultAgent flowharness.AgentSelection
 }
 
 func NewCheckConfigServiceWithOptions(database *sql.DB, checks *CheckService, workers *flowworker.Service, threads *ThreadService, project Project, opts CheckConfigServiceOptions) *CheckConfigService {
@@ -142,14 +146,19 @@ func NewCheckConfigServiceWithOptions(database *sql.DB, checks *CheckService, wo
 	if err != nil {
 		panic(fmt.Sprintf("normalize harness args: %v", err))
 	}
+	defaultAgent, err := flowharness.ResolveAgentSelection(opts.DefaultAgent)
+	if err != nil {
+		panic(fmt.Sprintf("resolve default agent: %v", err))
+	}
 	return &CheckConfigService{
-		db:          database,
-		tasks:       NewTaskService(database, project.ID),
-		checks:      checks,
-		workers:     workers,
-		threads:     threads,
-		project:     project,
-		harnessArgs: harnessArgs,
+		db:           database,
+		tasks:        NewTaskService(database, project.ID),
+		checks:       checks,
+		workers:      workers,
+		threads:      threads,
+		project:      project,
+		harnessArgs:  harnessArgs,
+		defaultAgent: defaultAgent,
 	}
 }
 
@@ -158,7 +167,7 @@ func NewCheckConfigServiceWithOptions(database *sql.DB, checks *CheckService, wo
 // review set), else the default agent reviewer/verifier synthesized from the
 // default harness.
 func (s *CheckConfigService) reviewChecksForTask(ctx context.Context, suite CheckSuite, task Task) (CheckSuite, error) {
-	return withDefaultAgentChecks(suite, flowharness.DefaultAgentName(), s.harnessArgs)
+	return withDefaultAgentChecks(suite, s.defaultAgent, s.harnessArgs)
 }
 
 // withFlowSnapshotReviewChecks appends the flow's frozen review set — one
@@ -555,12 +564,9 @@ func (s *CheckConfigService) ensureCurrentAutomatedChecks(ctx context.Context, t
 	return current, nil
 }
 
-func withDefaultAgentChecks(suite CheckSuite, harness string, args flowharness.Args) (CheckSuite, error) {
-	harness = flowharness.NormalizeName(harness)
-	if harness == "" {
-		harness = flowharness.DefaultAgentName()
-	}
-	if err := flowharness.ValidateAgentName(harness); err != nil {
+func withDefaultAgentChecks(suite CheckSuite, sel flowharness.AgentSelection, args flowharness.Args) (CheckSuite, error) {
+	resolved, err := flowharness.ResolveAgentSelection(sel)
+	if err != nil {
 		return CheckSuite{}, err
 	}
 	var hasReviewer, hasVerifier bool
@@ -576,7 +582,7 @@ func withDefaultAgentChecks(suite CheckSuite, harness string, args flowharness.A
 	}
 	if !hasReviewer {
 		name := unusedDefaultCheckName(defaultReviewerCheckName, usedNames)
-		definition, err := defaultAgentCheckDefinition(name, CheckKindReviewer, harness, args)
+		definition, err := defaultAgentCheckDefinition(name, CheckKindReviewer, resolved, args)
 		if err != nil {
 			return CheckSuite{}, err
 		}
@@ -585,7 +591,7 @@ func withDefaultAgentChecks(suite CheckSuite, harness string, args flowharness.A
 	}
 	if !hasVerifier {
 		name := unusedDefaultCheckName(defaultVerifierCheckName, usedNames)
-		definition, err := defaultAgentCheckDefinition(name, CheckKindVerifier, harness, args)
+		definition, err := defaultAgentCheckDefinition(name, CheckKindVerifier, resolved, args)
 		if err != nil {
 			return CheckSuite{}, err
 		}
@@ -596,12 +602,19 @@ func withDefaultAgentChecks(suite CheckSuite, harness string, args flowharness.A
 	return suite, nil
 }
 
-func defaultAgentCheckDefinition(name string, kind CheckKind, harness string, args flowharness.Args) (CheckDefinition, error) {
+func defaultAgentCheckDefinition(name string, kind CheckKind, sel flowharness.AgentSelection, args flowharness.Args) (CheckDefinition, error) {
 	phase := CheckPhaseCritique
 	if kind == CheckKindVerifier {
 		phase = CheckPhaseAcceptance
 	}
-	command, err := flowharness.DefaultAgentCheckCommandWithArgs(harness, args.For(harness))
+	// The default agent's model tokens precede the manual harness args so a
+	// --model in harness_args wins (last-token-wins) over the configured
+	// default model.
+	modelTokens, err := sel.ModelArgs()
+	if err != nil {
+		return CheckDefinition{}, err
+	}
+	command, err := flowharness.DefaultAgentCheckCommandWithArgs(sel.Harness, append(modelTokens, args.For(sel.Harness)...))
 	if err != nil {
 		return CheckDefinition{}, err
 	}
@@ -613,7 +626,7 @@ func defaultAgentCheckDefinition(name string, kind CheckKind, harness string, ar
 			Argv:  []string{command},
 			Shell: true,
 		},
-		Requires: []string{flowharness.AgentHarnessLabel(harness)},
+		Requires: []string{flowharness.AgentHarnessLabel(sel.Harness)},
 	}, nil
 }
 

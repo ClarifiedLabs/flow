@@ -216,7 +216,10 @@ type SessionServiceOptions struct {
 	DefaultAuthorEntrypoint         map[string]any
 	DefaultAuthorEntrypointOverride bool
 	HarnessArgs                     flowharness.Args
-	ReviewAuthorCycleLimit          int
+	// DefaultAgent is the configured fallback agent selection; the zero value
+	// resolves to the built-in default harness.
+	DefaultAgent           flowharness.AgentSelection
+	ReviewAuthorCycleLimit int
 
 	// Credentials is the coordinator-wide credential service; session
 	// tokens live in the global database and carry a project binding.
@@ -255,6 +258,7 @@ type SessionService struct {
 	defaultAuthorEntrypoint         map[string]any
 	defaultAuthorEntrypointOverride bool
 	harnessArgs                     flowharness.Args
+	defaultAgent                    flowharness.AgentSelection
 	reviewCycles                    *ReviewCycleService
 	handoffSnapshots                handoffSnapshotGetter
 	reviewRounds                    reviewRoundScheduler
@@ -272,16 +276,20 @@ func NewSessionServiceWithOptions(database *sql.DB, tasks *TaskService, workers 
 	if workers == nil {
 		workers = flowworker.NewService(database)
 	}
+	harnessArgs, err := flowharness.NormalizeArgs(opts.HarnessArgs)
+	if err != nil {
+		panic(fmt.Sprintf("normalize harness args: %v", err))
+	}
+	defaultAgent, err := flowharness.ResolveAgentSelection(opts.DefaultAgent)
+	if err != nil {
+		panic(fmt.Sprintf("resolve default agent: %v", err))
+	}
 	defaultEntrypoint := map[string]any{}
 	if opts.DefaultAuthorEntrypointOverride {
 		defaultEntrypoint = copyPayload(opts.DefaultAuthorEntrypoint)
 	}
 	if opts.DefaultAuthorEntrypointOverride && len(defaultEntrypoint) == 0 {
-		defaultEntrypoint = defaultAuthorEntrypoint()
-	}
-	harnessArgs, err := flowharness.NormalizeArgs(opts.HarnessArgs)
-	if err != nil {
-		panic(fmt.Sprintf("normalize harness args: %v", err))
+		defaultEntrypoint = defaultAuthorEntrypoint(defaultAgent)
 	}
 	return &SessionService{
 		db:                              database,
@@ -292,6 +300,7 @@ func NewSessionServiceWithOptions(database *sql.DB, tasks *TaskService, workers 
 		defaultAuthorEntrypoint:         defaultEntrypoint,
 		defaultAuthorEntrypointOverride: opts.DefaultAuthorEntrypointOverride,
 		harnessArgs:                     harnessArgs,
+		defaultAgent:                    defaultAgent,
 		reviewCycles:                    NewReviewCycleService(database, opts.ReviewAuthorCycleLimit),
 		handoffSnapshots:                opts.HandoffSnapshots,
 		reviewRounds:                    opts.ReviewRounds,
@@ -312,13 +321,14 @@ type workPhaseContext struct {
 	agent        AgentDefSnapshot
 }
 
-// harness returns the harness the job should launch: the phase agent's when a
-// cursor drives the job, else the default agent harness.
-func (c workPhaseContext) harness() string {
-	if c.hasCursor && strings.TrimSpace(c.agent.Harness) != "" {
-		return c.agent.Harness
+// workPhaseHarness returns the harness the job should launch: the phase
+// agent's when a cursor drives the job, else the configured default agent
+// harness.
+func (s *SessionService) workPhaseHarness(phaseCtx workPhaseContext) string {
+	if phaseCtx.hasCursor && strings.TrimSpace(phaseCtx.agent.Harness) != "" {
+		return phaseCtx.agent.Harness
 	}
-	return flowharness.DefaultAgentName()
+	return s.defaultAgent.Harness
 }
 
 
@@ -456,13 +466,13 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 		return EnsureAuthorJobResult{}, err
 	}
 	phaseCtx := workPhaseContext{finalPhase: true}
-	jobHarness := phaseCtx.harness()
+	jobHarness := s.workPhaseHarness(phaseCtx)
 
 	if existing, ok, err := s.workers.LiveAuthorJobForTask(ctx, task.ID); err != nil {
 		return EnsureAuthorJobResult{}, err
 	} else if ok {
 		existingChangeID := stringPointerValue(existing.ChangeID)
-		if existingChangeID == "" || !authorJobMatches(existing, existingChangeID, branch, base, jobHarness, phaseCtx.phaseIndex) {
+		if existingChangeID == "" || !authorJobMatches(existing, existingChangeID, branch, base, jobHarness, phaseCtx.phaseIndex, s.defaultAgent.Harness) {
 			return EnsureAuthorJobResult{}, errors.New("live author job has incompatible change or branch")
 		}
 		change, err := s.GetChange(ctx, existingChangeID)
@@ -535,7 +545,7 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 		Payload:        payload,
 	})
 	if err != nil {
-		if existing, ok, lookupErr := s.workers.LiveAuthorJobForTask(ctx, task.ID); lookupErr == nil && ok && authorJobMatches(existing, change.ID, branch, base, jobHarness, phaseCtx.phaseIndex) {
+		if existing, ok, lookupErr := s.workers.LiveAuthorJobForTask(ctx, task.ID); lookupErr == nil && ok && authorJobMatches(existing, change.ID, branch, base, jobHarness, phaseCtx.phaseIndex, s.defaultAgent.Harness) {
 			return EnsureAuthorJobResult{Job: existing, Change: change, Existing: true}, nil
 		}
 		return EnsureAuthorJobResult{}, err
@@ -1016,13 +1026,13 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 	}
 	crashedHarness := payloadString(job.Payload, "agent_harness")
 	if crashedHarness == "" {
-		crashedHarness = flowharness.DefaultAgentName()
+		crashedHarness = s.defaultAgent.Harness
 	}
 	crashedPhaseIndex := payloadPhaseIndex(job.Payload)
 	if existing, ok, err := s.workers.LiveAuthorJobForTask(ctx, task.ID); err != nil {
 		return false, err
 	} else if ok {
-		if authorJobMatches(existing, change.ID, session.Branch, session.Base, crashedHarness, crashedPhaseIndex) {
+		if authorJobMatches(existing, change.ID, session.Branch, session.Base, crashedHarness, crashedPhaseIndex, s.defaultAgent.Harness) {
 			return false, nil
 		}
 		return false, errors.New("live author job has incompatible change or branch")
@@ -1080,8 +1090,8 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 		}
 		payload["entrypoint"] = entrypoint
 		payload["inject_initial_prompt"] = injectInitialPrompt
-		payload["prompt_harness"] = phaseCtx.harness()
-		payload["agent_harness"] = phaseCtx.harness()
+		payload["prompt_harness"] = s.workPhaseHarness(phaseCtx)
+		payload["agent_harness"] = s.workPhaseHarness(phaseCtx)
 		stampWorkPhasePayload(payload, phaseCtx)
 	}
 	payload["change_id"] = change.ID
@@ -1348,8 +1358,8 @@ func consoleHarnessRequirements(harness string) []string {
 
 // authorEntrypointPayload builds the agent launch entrypoint for an author
 // job: the phase agent's harness with its model/effort selection appended to
-// the coordinator harness args, or the default agent when no cursor drives the
-// job.
+// the coordinator harness args, or the configured default agent when no cursor
+// drives the job.
 func (s *SessionService) authorEntrypointPayload(phaseCtx workPhaseContext) (map[string]any, bool, error) {
 	if s.defaultAuthorEntrypointOverride {
 		return copyPayload(s.defaultAuthorEntrypoint), true, nil
@@ -1361,8 +1371,17 @@ func (s *SessionService) authorEntrypointPayload(phaseCtx workPhaseContext) (map
 			return nil, false, err
 		}
 		args = args.Add(flowharness.ArgsFor(phaseCtx.agent.Harness, tokens))
+	} else {
+		// The default agent's model tokens precede the manual harness args so a
+		// --model in harness_args wins (last-token-wins) over the configured
+		// default model.
+		tokens, err := s.defaultAgent.ModelArgs()
+		if err != nil {
+			return nil, false, err
+		}
+		args = flowharness.ArgsFor(s.defaultAgent.Harness, tokens).Add(args)
 	}
-	entrypoint, err := flowharness.DefaultAuthorEntrypointWithArgs(phaseCtx.harness(), args)
+	entrypoint, err := flowharness.DefaultAuthorEntrypointWithArgs(s.workPhaseHarness(phaseCtx), args)
 	return entrypoint, false, err
 }
 
@@ -3331,14 +3350,14 @@ func scanSession(scanner taskScanner) (Session, error) {
 	return session, nil
 }
 
-func authorJobMatches(job flowworker.Job, changeID string, branch string, base string, agentHarness string, phaseIndex int) bool {
+func authorJobMatches(job flowworker.Job, changeID string, branch string, base string, agentHarness string, phaseIndex int, defaultHarness string) bool {
 	jobHarness := payloadString(job.Payload, "agent_harness")
 	if jobHarness == "" {
-		jobHarness = flowharness.DefaultAgentName()
+		jobHarness = defaultHarness
 	}
 	agentHarness = flowharness.NormalizeName(agentHarness)
 	if agentHarness == "" {
-		agentHarness = flowharness.DefaultAgentName()
+		agentHarness = defaultHarness
 	}
 	return stringPointerValue(job.ChangeID) == changeID &&
 		payloadString(job.Payload, "branch") == branch &&
@@ -3453,8 +3472,15 @@ func stampImageAttachments(ctx context.Context, tasks *TaskService, payload map[
 	return nil
 }
 
-func defaultAuthorEntrypoint() map[string]any {
-	entrypoint, err := flowharness.DefaultAuthorEntrypoint(flowharness.DefaultAgentName())
+// defaultAuthorEntrypoint builds the fallback author entrypoint for a
+// resolved default agent selection (the selection's harness with its
+// model/effort tokens applied).
+func defaultAuthorEntrypoint(sel flowharness.AgentSelection) map[string]any {
+	modelTokens, err := sel.ModelArgs()
+	if err != nil {
+		panic(err)
+	}
+	entrypoint, err := flowharness.DefaultAuthorEntrypointWithArgs(sel.Harness, flowharness.ArgsFor(sel.Harness, modelTokens))
 	if err != nil {
 		panic(err)
 	}

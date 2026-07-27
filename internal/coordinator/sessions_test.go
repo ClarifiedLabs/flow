@@ -374,6 +374,131 @@ WHERE id = ?`, formatTime(time.Now().UTC().Add(-time.Minute)), claimed.Lease.ID)
 	}
 }
 
+func TestEnsureAuthorJobUsesConfiguredDefaultAgent(t *testing.T) {
+	ctx := context.Background()
+	fixture := newSessionServiceFixture(t)
+	sessions := NewSessionServiceWithOptions(fixture.store.DB(), fixture.tasks, fixture.workers, SessionServiceOptions{
+		Credentials: fixture.credentials,
+		Project:     fixture.project,
+		DefaultAgent: flowharness.AgentSelection{
+			Harness:         flowharness.Claude,
+			Model:           "sonnet",
+			ReasoningEffort: "high",
+		},
+		HarnessArgs: flowharness.Args{Claude: []string{"--model", "opus"}},
+	})
+	task, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Configured default agent"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := fixture.store.DB().ExecContext(ctx, `UPDATE tasks SET lifecycle_state = 'scheduled' WHERE id = ?`, task.ID); err != nil {
+		t.Fatalf("schedule task: %v", err)
+	}
+
+	ensured, err := sessions.EnsureAuthorJob(ctx, EnsureAuthorJobInput{TaskID: task.ID})
+	if err != nil {
+		t.Fatalf("ensure author job: %v", err)
+	}
+	payload := ensured.Job.Payload
+	if got := payloadString(payload, "agent_harness"); got != flowharness.Claude {
+		t.Fatalf("agent_harness = %q, want claude", got)
+	}
+	if got := payloadString(payload, "prompt_harness"); got != flowharness.Claude {
+		t.Fatalf("prompt_harness = %q, want claude", got)
+	}
+	if got := ensured.Job.Selector[flowharness.AgentHarnessLabel(flowharness.Claude)]; got != "true" {
+		t.Fatalf("selector = %#v, want claude harness requirement", ensured.Job.Selector)
+	}
+	entrypoint, ok := payload["entrypoint"].(map[string]any)
+	if !ok {
+		t.Fatalf("entrypoint payload = %#v", payload["entrypoint"])
+	}
+	argv, ok := entrypoint["argv"].([]any)
+	if !ok || len(argv) != 1 {
+		t.Fatalf("entrypoint argv = %#v", entrypoint["argv"])
+	}
+	command, _ := argv[0].(string)
+	if !strings.Contains(command, "claude --dangerously-skip-permissions") {
+		t.Fatalf("entrypoint command does not launch claude:\n%s", command)
+	}
+	// The configured default model/effort tokens precede the manual
+	// harness_args so the manual --model wins (last-token-wins).
+	defaultIdx := strings.Index(command, "'--model' 'sonnet' '--effort' 'high'")
+	manualIdx := strings.Index(command, "'--model' 'opus'")
+	if defaultIdx < 0 || manualIdx < 0 {
+		t.Fatalf("entrypoint command missing default or manual model tokens:\n%s", command)
+	}
+	if defaultIdx > manualIdx {
+		t.Fatalf("default model tokens must precede harness_args:\n%s", command)
+	}
+}
+
+func TestEnsureAuthorJobExplicitEntrypointOverridesDefaultAgent(t *testing.T) {
+	ctx := context.Background()
+	fixture := newSessionServiceFixture(t)
+	sessions := NewSessionServiceWithOptions(fixture.store.DB(), fixture.tasks, fixture.workers, SessionServiceOptions{
+		Credentials:                     fixture.credentials,
+		Project:                         fixture.project,
+		DefaultAuthorEntrypoint:         map[string]any{"argv": []string{"claude --continue"}, "shell": true, "harness": "claude"},
+		DefaultAuthorEntrypointOverride: true,
+		DefaultAgent: flowharness.AgentSelection{
+			Harness: flowharness.Codex,
+			Model:   "gpt-5",
+		},
+	})
+	task, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Explicit entrypoint override"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := fixture.store.DB().ExecContext(ctx, `UPDATE tasks SET lifecycle_state = 'scheduled' WHERE id = ?`, task.ID); err != nil {
+		t.Fatalf("schedule task: %v", err)
+	}
+
+	ensured, err := sessions.EnsureAuthorJob(ctx, EnsureAuthorJobInput{TaskID: task.ID})
+	if err != nil {
+		t.Fatalf("ensure author job: %v", err)
+	}
+	entrypoint, ok := ensured.Job.Payload["entrypoint"].(map[string]any)
+	if !ok {
+		t.Fatalf("entrypoint payload = %#v", ensured.Job.Payload["entrypoint"])
+	}
+	argv, ok := entrypoint["argv"].([]any)
+	if !ok || len(argv) != 1 || argv[0] != "claude --continue" {
+		t.Fatalf("entrypoint argv = %#v, want the explicit override", entrypoint["argv"])
+	}
+	if !payloadBool(ensured.Job.Payload, "inject_initial_prompt") {
+		t.Fatal("inject_initial_prompt = false, want true for the explicit override")
+	}
+}
+
+func TestAuthorJobMatchesUsesConfiguredDefaultHarness(t *testing.T) {
+	changeID := "ch-test-0001"
+	legacyPayload := map[string]any{"branch": "task/t-1", "base": "main"}
+	claudePayload := map[string]any{"branch": "task/t-1", "base": "main", "agent_harness": "claude"}
+
+	for _, tc := range []struct {
+		name           string
+		payload        map[string]any
+		agentHarness   string
+		defaultHarness string
+		want           bool
+	}{
+		// A legacy payload without agent_harness matches the configured default.
+		{name: "legacy payload matches configured default", payload: legacyPayload, agentHarness: "", defaultHarness: "claude", want: true},
+		{name: "legacy payload matches codex default", payload: legacyPayload, agentHarness: "codex", defaultHarness: "codex", want: true},
+		{name: "legacy payload rejected for other harness", payload: legacyPayload, agentHarness: "claude", defaultHarness: "codex", want: false},
+		{name: "stamped payload matches configured default", payload: claudePayload, agentHarness: "", defaultHarness: "claude", want: true},
+		{name: "stamped payload rejected against codex default", payload: claudePayload, agentHarness: "", defaultHarness: "codex", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job := flowworker.Job{ChangeID: &changeID, Payload: tc.payload}
+			if got := authorJobMatches(job, changeID, "task/t-1", "main", tc.agentHarness, 0, tc.defaultHarness); got != tc.want {
+				t.Fatalf("authorJobMatches = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 // sessionFixture wires a project database (tasks, changes, sessions, jobs,
 // leases) together with the coordinator-wide global database (projects,
 // workers, tokens) so author sessions can mint project-scoped session tokens.

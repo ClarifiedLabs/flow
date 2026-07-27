@@ -224,6 +224,11 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "resolve worker policy: %v\n", err)
 		return 1
 	}
+	defaultAgent, err := cfg.ResolvedDefaultAgent()
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve default agent: %v\n", err)
+		return 1
+	}
 
 	registry, err := api.NewRegistry(api.RegistryOptions{
 		DataDir:                    cfg.DataDir,
@@ -231,6 +236,7 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		AuthorEntrypoint:           cfg.AuthorEntrypoint,
 		AuthorEntrypointConfigured: cfg.AuthorEntrypointConfigured,
 		HarnessArgs:                cfg.HarnessArgs,
+		DefaultAgent:               defaultAgent,
 		ReviewAuthorCycleLimit:     limits.ReviewAuthorCycles,
 		ReviewScopeFileLimit:       limits.ReviewScopeFiles,
 		ReviewScopeLineLimit:       limits.ReviewScopeLines,

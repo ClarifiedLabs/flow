@@ -55,6 +55,10 @@ type RegistryOptions struct {
 	AuthorEntrypoint           map[string]any
 	AuthorEntrypointConfigured bool
 	HarnessArgs                flowharness.Args
+	// DefaultAgent is the configured fallback agent selection (coordinator
+	// config default_agent); the zero value resolves to the built-in default
+	// harness.
+	DefaultAgent flowharness.AgentSelection
 
 	// ReviewAuthorCycleLimit bounds automated review/acceptance -> author fix
 	// loops before a human must grant more cycles.
@@ -83,6 +87,7 @@ type Registry struct {
 	authorEntrypoint           map[string]any
 	authorEntrypointConfigured bool
 	harnessArgs                flowharness.Args
+	defaultAgent               flowharness.AgentSelection
 	reviewAuthorCycleLimit     int
 	reviewScopeFileLimit       int
 	reviewScopeLineLimit       int
@@ -117,12 +122,16 @@ func NewRegistry(opts RegistryOptions) (*Registry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("harness args: %w", err)
 	}
+	defaultAgent, err := flowharness.ResolveAgentSelection(opts.DefaultAgent)
+	if err != nil {
+		return nil, fmt.Errorf("default agent: %w", err)
+	}
 
 	registry := &Registry{
 		dataDir:                    opts.DataDir,
 		global:                     opts.Global,
 		projects:                   coordinator.NewProjectService(opts.Global.DB()),
-		globalAgentDefs:            coordinator.NewGlobalAgentDefService(opts.Global.DB()),
+		globalAgentDefs:            coordinator.NewGlobalAgentDefServiceWithOptions(opts.Global.DB(), coordinator.AgentDefServiceOptions{DefaultAgent: defaultAgent}),
 		credentials:                coordinator.NewCredentialService(opts.Global.DB()),
 		directory:                  worker.NewDirectory(opts.Global.DB()),
 		webSessions:                coordinator.NewWebSessionService(opts.Global.DB()),
@@ -130,6 +139,7 @@ func NewRegistry(opts RegistryOptions) (*Registry, error) {
 		authorEntrypoint:           opts.AuthorEntrypoint,
 		authorEntrypointConfigured: opts.AuthorEntrypointConfigured,
 		harnessArgs:                harnessArgs,
+		defaultAgent:               defaultAgent,
 		reviewAuthorCycleLimit:     opts.ReviewAuthorCycleLimit,
 		reviewScopeFileLimit:       opts.ReviewScopeFileLimit,
 		reviewScopeLineLimit:       opts.ReviewScopeLineLimit,
@@ -202,6 +212,7 @@ func (r *Registry) Directory() *worker.Directory                       { return 
 func (r *Registry) WebSessions() *coordinator.WebSessionService        { return r.webSessions }
 func (r *Registry) GlobalIdempotency() *coordinator.IdempotencyService { return r.idempotency }
 func (r *Registry) HarnessArgs() flowharness.Args                      { return r.harnessArgs }
+func (r *Registry) DefaultAgent() flowharness.AgentSelection           { return r.defaultAgent }
 
 // OpenAll opens a bundle for every project in the global registry.
 func (r *Registry) OpenAll(ctx context.Context) error {
@@ -281,13 +292,15 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 	// service can route a crashed author with a saved handoff to a completion-
 	// assessment review (Mode-B recovery) instead of a blind full relaunch.
 	checkConfigs := coordinator.NewCheckConfigServiceWithOptions(db, checks, queue, threads, project, coordinator.CheckConfigServiceOptions{
-		HarnessArgs: r.harnessArgs,
+		HarnessArgs:  r.harnessArgs,
+		DefaultAgent: r.defaultAgent,
 	})
 	reconciler := coordinator.NewReconcileService(db)
 	sessions := coordinator.NewSessionServiceWithOptions(db, tasks, queue, coordinator.SessionServiceOptions{
 		DefaultAuthorEntrypoint:         r.authorEntrypoint,
 		DefaultAuthorEntrypointOverride: r.authorEntrypointConfigured,
 		HarnessArgs:                     r.harnessArgs,
+		DefaultAgent:                    r.defaultAgent,
 		Credentials:                     r.credentials,
 		Project:                         project,
 		ReviewAuthorCycleLimit:          r.reviewAuthorCycleLimit,

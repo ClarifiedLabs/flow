@@ -290,6 +290,172 @@ deadlines:
 	}
 }
 
+func TestLoadCoordinatorParsesDefaultAgent(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "coordinator.yaml")
+	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
+listen_addr: 127.0.0.1:8421
+default_agent:
+  harness: " Claude "
+  model: sonnet
+  reasoning_effort: high
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadCoordinator(configPath)
+	if err != nil {
+		t.Fatalf("load coordinator: %v", err)
+	}
+	if cfg.AuthorEntrypointConfigured {
+		t.Fatal("AuthorEntrypointConfigured = true, want false for default_agent-only config")
+	}
+	resolved, err := cfg.ResolvedDefaultAgent()
+	if err != nil {
+		t.Fatalf("resolve default agent: %v", err)
+	}
+	want := flowharness.AgentSelection{Harness: flowharness.Claude, Model: "sonnet", ReasoningEffort: "high"}
+	if resolved != want {
+		t.Fatalf("resolved default agent = %+v, want %+v", resolved, want)
+	}
+	// The default author entrypoint is rebuilt from the configured selection.
+	if cfg.AuthorEntrypoint["harness"] != flowharness.Claude {
+		t.Fatalf("author entrypoint harness = %#v, want claude", cfg.AuthorEntrypoint["harness"])
+	}
+	argv, ok := cfg.AuthorEntrypoint["argv"].([]string)
+	if !ok || len(argv) != 1 {
+		t.Fatalf("author entrypoint argv = %#v", cfg.AuthorEntrypoint["argv"])
+	}
+	for _, token := range []string{"claude --dangerously-skip-permissions", "'--model' 'sonnet'", "'--effort' 'high'"} {
+		if !strings.Contains(argv[0], token) {
+			t.Fatalf("author entrypoint command missing %q:\n%s", token, argv[0])
+		}
+	}
+}
+
+func TestLoadCoordinatorDefaultAgentModelWithoutHarnessAppliesToCodex(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "coordinator.yaml")
+	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
+listen_addr: 127.0.0.1:8421
+default_agent:
+  model: gpt-5
+  reasoning_effort: high
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadCoordinator(configPath)
+	if err != nil {
+		t.Fatalf("load coordinator: %v", err)
+	}
+	resolved, err := cfg.ResolvedDefaultAgent()
+	if err != nil {
+		t.Fatalf("resolve default agent: %v", err)
+	}
+	if resolved.Harness != flowharness.Codex {
+		t.Fatalf("resolved harness = %q, want codex", resolved.Harness)
+	}
+	if cfg.AuthorEntrypoint["harness"] != flowharness.Codex {
+		t.Fatalf("author entrypoint harness = %#v, want codex", cfg.AuthorEntrypoint["harness"])
+	}
+	argv, ok := cfg.AuthorEntrypoint["argv"].([]string)
+	if !ok || len(argv) != 1 {
+		t.Fatalf("author entrypoint argv = %#v", cfg.AuthorEntrypoint["argv"])
+	}
+	for _, token := range []string{"'--model' 'gpt-5'", "-c 'model_reasoning_effort=high'"} {
+		if !strings.Contains(argv[0], token) {
+			t.Fatalf("author entrypoint command missing %q:\n%s", token, argv[0])
+		}
+	}
+}
+
+func TestLoadCoordinatorRejectsInvalidDefaultAgent(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		block string
+	}{
+		{name: "unknown harness", block: "harness: bogus"},
+		{name: "non-agent harness", block: "harness: shell"},
+		{name: "whitespace model", block: "model: \"gpt 5\""},
+		{name: "whitespace effort", block: "reasoning_effort: \"very high\""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "coordinator.yaml")
+			if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
+listen_addr: 127.0.0.1:8421
+default_agent:
+  `+tc.block+`
+`), 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			_, err := LoadCoordinator(configPath)
+			if err == nil || !strings.Contains(err.Error(), "coordinator default_agent") {
+				t.Fatalf("load error = %v, want coordinator default_agent rejection", err)
+			}
+		})
+	}
+}
+
+func TestLoadCoordinatorAuthorEntrypointWinsOverDefaultAgent(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "coordinator.yaml")
+	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
+listen_addr: 127.0.0.1:8421
+author_entrypoint:
+  argv: ["claude --continue"]
+  shell: true
+  harness: claude
+default_agent:
+  harness: codex
+  model: gpt-5
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadCoordinator(configPath)
+	if err != nil {
+		t.Fatalf("load coordinator: %v", err)
+	}
+	if !cfg.AuthorEntrypointConfigured {
+		t.Fatal("AuthorEntrypointConfigured = false, want true for file override")
+	}
+	argv, ok := cfg.AuthorEntrypoint["argv"].([]any)
+	if !ok || len(argv) != 1 || argv[0] != "claude --continue" {
+		t.Fatalf("author entrypoint argv = %#v, want the explicit file entrypoint", cfg.AuthorEntrypoint["argv"])
+	}
+	// The selection still resolves for the other consumers (agent-def seeding,
+	// default checks); only the author entrypoint keeps the explicit override.
+	resolved, err := cfg.ResolvedDefaultAgent()
+	if err != nil {
+		t.Fatalf("resolve default agent: %v", err)
+	}
+	if resolved.Harness != flowharness.Codex || resolved.Model != "gpt-5" {
+		t.Fatalf("resolved default agent = %+v, want codex/gpt-5", resolved)
+	}
+}
+
+func TestLoadCoordinatorZeroConfigKeepsCodexDefault(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "coordinator.yaml")
+	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
+listen_addr: 127.0.0.1:8421
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadCoordinator(configPath)
+	if err != nil {
+		t.Fatalf("load coordinator: %v", err)
+	}
+	resolved, err := cfg.ResolvedDefaultAgent()
+	if err != nil {
+		t.Fatalf("resolve default agent: %v", err)
+	}
+	if resolved != flowharness.DefaultAgentSelection() {
+		t.Fatalf("resolved default agent = %+v, want the built-in default", resolved)
+	}
+	if cfg.AuthorEntrypoint["harness"] != flowharness.Codex {
+		t.Fatalf("author entrypoint harness = %#v, want codex", cfg.AuthorEntrypoint["harness"])
+	}
+}
+
 func TestDefaultAuthorEntrypointWrapsCodexHooks(t *testing.T) {
 	entrypoint := DefaultAuthorEntrypoint()
 	argv, ok := entrypoint["argv"].([]string)

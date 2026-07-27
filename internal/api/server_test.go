@@ -274,6 +274,71 @@ func TestHarnessOptionsIncludeDefaultArgs(t *testing.T) {
 	}
 }
 
+func TestRegistrySeedsGlobalDefsWithConfiguredDefaultAgent(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	global, err := flowdb.OpenGlobal(ctx, filepath.Join(dataDir, "global.db"))
+	if err != nil {
+		t.Fatalf("open global db: %v", err)
+	}
+	t.Cleanup(func() { _ = global.Close() })
+	configured := flowharness.AgentSelection{Harness: flowharness.Claude, Model: "sonnet", ReasoningEffort: "high"}
+	registry, err := NewRegistry(RegistryOptions{DataDir: dataDir, Global: global, DefaultAgent: configured})
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+
+	if got := registry.DefaultAgent(); got != configured {
+		t.Fatalf("DefaultAgent = %+v, want %+v", got, configured)
+	}
+	defs, err := registry.GlobalAgentDefs().List(ctx)
+	if err != nil {
+		t.Fatalf("list global agent defs: %v", err)
+	}
+	if len(defs) != 5 {
+		t.Fatalf("global default agent definitions = %d, want 5", len(defs))
+	}
+	for _, def := range defs {
+		if def.Harness != flowharness.Claude || def.Model != "sonnet" || def.ReasoningEffort != "high" {
+			t.Errorf("seeded %q = harness %q model %q effort %q, want claude/sonnet/high",
+				def.Name, def.Harness, def.Model, def.ReasoningEffort)
+		}
+	}
+}
+
+func TestNewRegistryRejectsInvalidDefaultAgent(t *testing.T) {
+	ctx := context.Background()
+	global, err := flowdb.OpenGlobal(ctx, filepath.Join(t.TempDir(), "global.db"))
+	if err != nil {
+		t.Fatalf("open global db: %v", err)
+	}
+	t.Cleanup(func() { _ = global.Close() })
+	_, err = NewRegistry(RegistryOptions{DataDir: t.TempDir(), Global: global, DefaultAgent: flowharness.AgentSelection{Harness: "bogus"}})
+	if err == nil || !strings.Contains(err.Error(), "default agent") {
+		t.Fatalf("new registry error = %v, want default agent rejection", err)
+	}
+}
+
+func TestSessionHarnessForJobFallsBackToConfiguredDefault(t *testing.T) {
+	changeID := "ch-test-0001"
+	legacy := flowworker.Job{Role: flowworker.RoleAuthor, ChangeID: &changeID, Payload: map[string]any{}}
+	if got := sessionHarnessForJob(legacy, flowharness.Claude); got != flowharness.Claude {
+		t.Fatalf("sessionHarnessForJob legacy payload = %q, want claude", got)
+	}
+	if got := sessionHarnessForJob(legacy, ""); got != flowharness.DefaultAgentName() {
+		t.Fatalf("sessionHarnessForJob empty default = %q, want %q", got, flowharness.DefaultAgentName())
+	}
+	stamped := flowworker.Job{Role: flowworker.RoleAuthor, ChangeID: &changeID, Payload: map[string]any{"agent_harness": "codex"}}
+	if got := sessionHarnessForJob(stamped, flowharness.Claude); got != flowharness.Codex {
+		t.Fatalf("sessionHarnessForJob stamped payload = %q, want codex", got)
+	}
+	console := flowworker.Job{Role: flowworker.RoleConsole, Payload: map[string]any{}}
+	if got := sessionHarnessForJob(console, flowharness.Claude); got != flowharness.DefaultConsoleName() {
+		t.Fatalf("sessionHarnessForJob console = %q, want %q", got, flowharness.DefaultConsoleName())
+	}
+}
+
 func TestDefaultAgentDefsAreGlobalAndInheritedByProjects(t *testing.T) {
 	fixture := newTestFixture(t)
 

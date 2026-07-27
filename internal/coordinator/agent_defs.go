@@ -61,6 +61,7 @@ type AgentDefService struct {
 	db           *sql.DB
 	inherited    *AgentDefService
 	projectOwned bool
+	defaultAgent flowharness.AgentSelection
 	now          func() time.Time
 }
 
@@ -72,8 +73,23 @@ func NewInheritedAgentDefService(database *sql.DB, inherited *AgentDefService) *
 	return &AgentDefService{db: database, inherited: inherited, projectOwned: true, now: sqlitex.UTCNow}
 }
 
+// AgentDefServiceOptions carries coordinator-wide defaults for the global
+// catalog. DefaultAgent is the configured fallback agent selection; the zero
+// value resolves to the built-in default harness.
+type AgentDefServiceOptions struct {
+	DefaultAgent flowharness.AgentSelection
+}
+
 func NewGlobalAgentDefService(database *sql.DB) *AgentDefService {
-	return &AgentDefService{db: database, now: sqlitex.UTCNow}
+	return NewGlobalAgentDefServiceWithOptions(database, AgentDefServiceOptions{})
+}
+
+func NewGlobalAgentDefServiceWithOptions(database *sql.DB, opts AgentDefServiceOptions) *AgentDefService {
+	defaultAgent, err := flowharness.ResolveAgentSelection(opts.DefaultAgent)
+	if err != nil {
+		panic(fmt.Sprintf("resolve default agent: %v", err))
+	}
+	return &AgentDefService{db: database, defaultAgent: defaultAgent, now: sqlitex.UTCNow}
 }
 
 type defaultAgentDefSeed struct {
@@ -95,12 +111,17 @@ func defaultAgentDefSeeds() []defaultAgentDefSeed {
 // SeedDefaults ensures the coordinator-global catalog contains the built-in
 // definitions referenced by newly seeded project flows. Existing same-name
 // global definitions are preserved so operators can customize a default role.
+// The configured default agent only shapes fresh seeds: it never rewrites
+// existing definitions.
 func (s *AgentDefService) SeedDefaults(ctx context.Context) error {
 	if s.projectOwned {
 		return errors.New("default agent definitions can only be seeded globally")
 	}
 
-	harness := flowharness.DefaultAgentName()
+	selection := s.defaultAgent
+	if strings.TrimSpace(selection.Harness) == "" {
+		selection = flowharness.DefaultAgentSelection()
+	}
 	for _, seed := range defaultAgentDefSeeds() {
 		if _, err := s.GetByName(ctx, seed.name); err == nil {
 			continue
@@ -115,7 +136,13 @@ func (s *AgentDefService) SeedDefaults(ctx context.Context) error {
 		if seed.focus != "" {
 			prompt += "\n\n" + seed.focus
 		}
-		if _, err := s.create(ctx, AgentDefInput{Name: seed.name, Harness: harness, Prompt: prompt}, true); err != nil {
+		if _, err := s.create(ctx, AgentDefInput{
+			Name:            seed.name,
+			Harness:         selection.Harness,
+			Model:           selection.Model,
+			ReasoningEffort: selection.ReasoningEffort,
+			Prompt:          prompt,
+		}, true); err != nil {
 			return fmt.Errorf("seed default agent def %s: %w", seed.name, err)
 		}
 	}
