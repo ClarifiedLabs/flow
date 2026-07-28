@@ -227,6 +227,28 @@ type promptPhaseHandoff struct {
 	Content   string `json:"content"`
 }
 
+func workflowCheckRoleInstructions(node coordinator.FlowNodeSnapshot, checkName string) string {
+	baseCheckName := strings.SplitN(strings.TrimSpace(checkName), ".node.", 2)[0]
+	if node.Config.ChangeReview != nil {
+		if baseCheckName == coordinator.ReviewAggregationCheckName {
+			return node.Config.ChangeReview.Aggregator.Prompt
+		}
+		for _, agent := range node.Config.ChangeReview.Agents {
+			if strings.TrimSpace(agent.Agent.Name) == baseCheckName {
+				return agent.Agent.Prompt
+			}
+		}
+	}
+	if node.Config.VerifyChange != nil {
+		for _, agent := range node.Config.VerifyChange.Agents {
+			if strings.TrimSpace(agent.Agent.Name) == baseCheckName {
+				return agent.Agent.Prompt
+			}
+		}
+	}
+	return ""
+}
+
 func (s *projectServer) handlePromptContext(w http.ResponseWriter, r *http.Request, taskID string) {
 	response := promptContextResponse{FinalPhase: true}
 	if s.workflowRuns != nil {
@@ -245,32 +267,13 @@ func (s *projectServer) handlePromptContext(w http.ResponseWriter, r *http.Reque
 			if ok {
 				response.PhaseName = node.Name
 				checkName := strings.TrimSpace(r.URL.Query().Get("check"))
-				baseCheckName := strings.SplitN(checkName, ".node.", 2)[0]
 				switch {
 				case checkName == "" && node.Config.Agent != nil:
 					response.RoleInstructions = node.Config.Agent.Agent.Prompt
 					response.WorkspaceMode = node.Config.Agent.Workspace
 					response.ArtifactKind = node.Config.Agent.Artifact
-				case checkName != "" && node.Config.ChangeReview != nil:
-					if baseCheckName == coordinator.ReviewAggregationCheckName {
-						if agent, found := coordinator.ReviewAggregationAgent(node.Config.ChangeReview.Agents); found {
-							response.RoleInstructions = agent.Agent.Prompt
-						}
-					} else {
-						for _, agent := range node.Config.ChangeReview.Agents {
-							if strings.TrimSpace(agent.Agent.Name) == baseCheckName {
-								response.RoleInstructions = agent.Agent.Prompt
-								break
-							}
-						}
-					}
-				case checkName != "" && node.Config.VerifyChange != nil:
-					for _, agent := range node.Config.VerifyChange.Agents {
-						if strings.TrimSpace(agent.Agent.Name) == baseCheckName {
-							response.RoleInstructions = agent.Agent.Prompt
-							break
-						}
-					}
+				case checkName != "":
+					response.RoleInstructions = workflowCheckRoleInstructions(node, checkName)
 				}
 			}
 			for index := len(detail.Transitions) - 1; index >= 0; index-- {

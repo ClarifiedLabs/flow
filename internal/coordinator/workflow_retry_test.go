@@ -248,13 +248,25 @@ func TestRetryExecutionRefreshesReviewAndVerificationAgentsAndOnlyErroredChecks(
 			if err != nil {
 				t.Fatalf("create second agent: %v", err)
 			}
+			var aggregator AgentDef
+			if tc.kind == NodeChangeReview {
+				aggregator, err = env.globals.Create(ctx, AgentDefInput{Name: "review-aggregator", Harness: "harness", Model: "aggregator-live-old", ReasoningEffort: "medium", Prompt: "Live aggregator prompt."})
+				if err != nil {
+					t.Fatalf("create aggregator agent: %v", err)
+				}
+			}
 			frozenAgents := []SnapshotReviewAgent{
 				{Blocking: true, Agent: AgentDefSnapshot{ID: first.ID, Name: "Frozen first", Harness: "harness", Model: "first-frozen", ReasoningEffort: "low", Prompt: "Frozen first prompt."}},
 				{Blocking: false, Agent: AgentDefSnapshot{ID: second.ID, Name: "Frozen second", Harness: "harness", Model: "second-frozen", ReasoningEffort: "medium", Prompt: "Frozen second prompt."}},
 			}
 			current := FlowNodeSnapshot{Key: tc.name, Name: "Frozen " + tc.name, Kind: tc.kind}
 			if tc.kind == NodeChangeReview {
-				current.Config.ChangeReview = &ChangeReviewNodeSnapshotConfig{Agents: frozenAgents}
+				current.Config.ChangeReview = &ChangeReviewNodeSnapshotConfig{
+					Agents: frozenAgents,
+					Aggregator: AgentDefSnapshot{
+						ID: aggregator.ID, Name: "Frozen aggregator", Harness: "harness", Model: "aggregator-frozen", ReasoningEffort: "low", Prompt: "Frozen aggregator prompt.",
+					},
+				}
 			} else {
 				current.Config.VerifyChange = &VerifyChangeNodeSnapshotConfig{Agents: frozenAgents}
 			}
@@ -290,6 +302,15 @@ func TestRetryExecutionRefreshesReviewAndVerificationAgentsAndOnlyErroredChecks(
 			if err != nil {
 				t.Fatalf("update second agent: %v", err)
 			}
+			var aggregatorLive AgentDef
+			if tc.kind == NodeChangeReview {
+				aggregatorLive, err = env.globals.Update(ctx, aggregator.ID, AgentDefInput{
+					Name: aggregator.Name, Harness: "harness", Model: "aggregator-new", ReasoningEffort: "high", Prompt: "Changed aggregator prompt.",
+				})
+				if err != nil {
+					t.Fatalf("update aggregator agent: %v", err)
+				}
+			}
 
 			expectedSnapshot := snapshot
 			var expectedAgents []SnapshotReviewAgent
@@ -304,6 +325,12 @@ func TestRetryExecutionRefreshesReviewAndVerificationAgentsAndOnlyErroredChecks(
 			expectedAgents[1].Agent.Harness = secondLive.Harness
 			expectedAgents[1].Agent.Model = secondLive.Model
 			expectedAgents[1].Agent.ReasoningEffort = secondLive.ReasoningEffort
+			if tc.kind == NodeChangeReview {
+				expectedAggregator := &expectedSnapshot.Nodes[1].Config.ChangeReview.Aggregator
+				expectedAggregator.Harness = aggregatorLive.Harness
+				expectedAggregator.Model = aggregatorLive.Model
+				expectedAggregator.ReasoningEffort = aggregatorLive.ReasoningEffort
+			}
 
 			retried, err := env.runs.RetryExecution(ctx, waiting.task.ID, ActorHuman, true)
 			if err != nil {
@@ -334,8 +361,12 @@ func TestRetryExecutionRefreshesReviewAndVerificationAgentsAndOnlyErroredChecks(
 				t.Fatalf("completed progress state = %q, want succeeded", progressState)
 			}
 			payload := retryTransitionPayload(t, env.runs, waiting.runID)
-			if payload.ChecksReset != 1 || len(payload.RefreshedAgents) != 2 {
-				t.Fatalf("retry transition payload = %+v, want one reset and two refreshed agents", payload)
+			wantRefreshed := 2
+			if tc.kind == NodeChangeReview {
+				wantRefreshed = 3
+			}
+			if payload.ChecksReset != 1 || len(payload.RefreshedAgents) != wantRefreshed {
+				t.Fatalf("retry transition payload = %+v, want one reset and %d refreshed agents", payload, wantRefreshed)
 			}
 		})
 	}
@@ -359,10 +390,13 @@ func TestRetryExecutionRuntimeRefreshFailureIsAtomic(t *testing.T) {
 			}
 			current := FlowNodeSnapshot{
 				Key: "review", Name: "Review", Kind: NodeChangeReview,
-				Config: FlowNodeSnapshotConfig{ChangeReview: &ChangeReviewNodeSnapshotConfig{Agents: []SnapshotReviewAgent{
-					{Blocking: true, Agent: AgentDefSnapshot{ID: valid.ID, Name: "Valid frozen", Harness: "harness", Model: "old-valid", Prompt: "Frozen valid."}},
-					{Blocking: true, Agent: tc.invalidAgent},
-				}}},
+				Config: FlowNodeSnapshotConfig{ChangeReview: &ChangeReviewNodeSnapshotConfig{
+					Agents: []SnapshotReviewAgent{
+						{Blocking: true, Agent: AgentDefSnapshot{ID: valid.ID, Name: "Valid frozen", Harness: "harness", Model: "old-valid", Prompt: "Frozen valid."}},
+						{Blocking: true, Agent: tc.invalidAgent},
+					},
+					Aggregator: AgentDefSnapshot{ID: valid.ID, Name: "Valid aggregator", Harness: "harness", Model: "old-valid", Prompt: "Frozen aggregator."},
+				}},
 			}
 			waiting := env.pauseWorkflowForRetry(t, retryTestSnapshot(current), "review")
 			required := true

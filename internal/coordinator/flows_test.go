@@ -46,8 +46,8 @@ func TestSeedDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List agent defs: %v", err)
 	}
-	if len(allDefs) != 5 {
-		t.Fatalf("inherited default agent defs = %d, want 5", len(allDefs))
+	if len(allDefs) != 6 {
+		t.Fatalf("inherited default agent defs = %d, want 6", len(allDefs))
 	}
 	defsByName := make(map[string]AgentDef, len(allDefs))
 	for _, def := range allDefs {
@@ -90,10 +90,20 @@ func TestSeedDefaults(t *testing.T) {
 	}
 	codeReviewer, hasCodeReviewer := defsByName["code-reviewer"]
 	securityReviewer, hasSecurityReviewer := defsByName["security-reviewer"]
-	if !hasCodeReviewer || !hasSecurityReviewer || !strings.Contains(strings.ToLower(securityReviewer.Prompt), "security focus") {
-		t.Fatalf("seeded reviewers = code:%+v security:%+v", codeReviewer, securityReviewer)
+	reviewAggregator, hasReviewAggregator := defsByName["review-aggregator"]
+	if !hasCodeReviewer || !hasSecurityReviewer || !hasReviewAggregator ||
+		!strings.Contains(strings.ToLower(securityReviewer.Prompt), "security focus") ||
+		!strings.Contains(strings.ToLower(reviewAggregator.Prompt), "aggregation focus") {
+		t.Fatalf("seeded review agents = code:%+v security:%+v aggregator:%+v", codeReviewer, securityReviewer, reviewAggregator)
 	}
-	reviewAgents := coding.Nodes[2].Config.ChangeReview.Agents
+	reviewConfig := coding.Nodes[2].Config.ChangeReview
+	if reviewConfig.AggregatorAgentDefID != reviewAggregator.ID {
+		t.Fatalf("default review aggregator = %q, want %q", reviewConfig.AggregatorAgentDefID, reviewAggregator.ID)
+	}
+	if !flowNodeConfigUsesAgent(coding.Nodes[2].Config, reviewAggregator.ID) {
+		t.Fatal("review aggregator is not tracked as a flow agent-definition reference")
+	}
+	reviewAgents := reviewConfig.Agents
 	if len(reviewAgents) != 2 || reviewAgents[0].AgentDefID != codeReviewer.ID || reviewAgents[1].AgentDefID != securityReviewer.ID {
 		t.Fatalf("default review agents = %+v", reviewAgents)
 	}
@@ -147,6 +157,12 @@ func TestParallelReviewGraphUsesCanonicalBlockingAndFreezesSnapshot(t *testing.T
 	if err != nil {
 		t.Fatalf("create security reviewer: %v", err)
 	}
+	reviewAggregator, err := defs.Create(ctx, AgentDefInput{
+		Name: "review-aggregator-test", Harness: "harness", Model: "openai:gpt-5-mini", ReasoningEffort: "medium", Prompt: "Synthesize review reports.",
+	})
+	if err != nil {
+		t.Fatalf("create review aggregator: %v", err)
+	}
 	advisory := false
 	created, err := flows.Create(ctx, FlowInput{
 		Name: "parallel-review", StartNode: "implement",
@@ -155,7 +171,7 @@ func TestParallelReviewGraphUsesCanonicalBlockingAndFreezesSnapshot(t *testing.T
 			{Key: "review", Name: "Review", Kind: NodeChangeReview, Config: FlowNodeConfig{ChangeReview: &ChangeReviewNodeConfig{Agents: []ReviewAgentConfig{
 				{AgentDefID: codeReview.ID},
 				{AgentDefID: securityReview.ID, Blocking: &advisory},
-			}}}},
+			}, AggregatorAgentDefID: reviewAggregator.ID}}},
 			{Key: "verify", Name: "Verify", Kind: NodeVerifyChange, Config: FlowNodeConfig{VerifyChange: &VerifyChangeNodeConfig{Agents: []ReviewAgentConfig{{AgentDefID: securityReview.ID}}}}},
 			{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
 		},
@@ -175,6 +191,9 @@ func TestParallelReviewGraphUsesCanonicalBlockingAndFreezesSnapshot(t *testing.T
 		t.Fatalf("review agent order = %+v", got)
 	} else if got[0].Blocking == nil || !*got[0].Blocking || got[1].Blocking == nil || *got[1].Blocking {
 		t.Fatalf("review blocking values = %+v, want true then false", got)
+	}
+	if got := created.Nodes[1].Config.ChangeReview.AggregatorAgentDefID; got != reviewAggregator.ID {
+		t.Fatalf("review aggregator = %q, want %q", got, reviewAggregator.ID)
 	}
 	verifyAgents := created.Nodes[2].Config.VerifyChange.Agents
 	if len(verifyAgents) != 1 || verifyAgents[0].Blocking == nil || !*verifyAgents[0].Blocking {
@@ -200,6 +219,10 @@ func TestParallelReviewGraphUsesCanonicalBlockingAndFreezesSnapshot(t *testing.T
 	if !frozen[0].Blocking || frozen[1].Blocking || frozen[0].Agent.Model != "openai:gpt-5" || frozen[0].Agent.ReasoningEffort != "high" || frozen[0].Agent.Prompt != "Review correctness." || frozen[1].Agent.Prompt != "Review security." {
 		t.Fatalf("frozen review agents = %+v", frozen)
 	}
+	frozenAggregator := reviewNode.Config.ChangeReview.Aggregator
+	if frozenAggregator.ID != reviewAggregator.ID || frozenAggregator.Model != "openai:gpt-5-mini" || frozenAggregator.ReasoningEffort != "medium" || frozenAggregator.Prompt != "Synthesize review reports." {
+		t.Fatalf("frozen review aggregator = %+v", frozenAggregator)
+	}
 	verifyNode, ok := snapshot.Node("verify")
 	if !ok || verifyNode.Config.VerifyChange == nil || len(verifyNode.Config.VerifyChange.Agents) != 1 || !verifyNode.Config.VerifyChange.Agents[0].Blocking {
 		t.Fatalf("verify snapshot node = %+v ok=%v", verifyNode, ok)
@@ -208,8 +231,14 @@ func TestParallelReviewGraphUsesCanonicalBlockingAndFreezesSnapshot(t *testing.T
 	if _, err := defs.Update(ctx, codeReview.ID, AgentDefInput{Name: "code-review", Harness: "harness", Model: "openai:gpt-5-mini", Prompt: "Changed live prompt."}); err != nil {
 		t.Fatalf("update live reviewer: %v", err)
 	}
+	if _, err := defs.Update(ctx, reviewAggregator.ID, AgentDefInput{Name: "review-aggregator-test", Harness: "harness", Model: "openai:gpt-5", Prompt: "Changed aggregator prompt."}); err != nil {
+		t.Fatalf("update live aggregator: %v", err)
+	}
 	if frozen[0].Agent.Model != "openai:gpt-5" || frozen[0].Agent.Prompt != "Review correctness." || !frozen[0].Blocking || frozen[1].Blocking {
 		t.Fatalf("snapshot changed after live edit: %+v", frozen)
+	}
+	if frozenAggregator.Model != "openai:gpt-5-mini" || frozenAggregator.Prompt != "Synthesize review reports." {
+		t.Fatalf("aggregator snapshot changed after live edit: %+v", frozenAggregator)
 	}
 }
 
@@ -244,6 +273,11 @@ func TestReviewAgentLegacyRequiredCompatibilityAndValidation(t *testing.T) {
 	if _, err := normalizeReviewAgents("review", []ReviewAgentConfig{{AgentDefID: "ad-code"}, {AgentDefID: "ad-code"}}); err == nil || !strings.Contains(err.Error(), "repeats agent definition") {
 		t.Fatalf("duplicate group error = %v", err)
 	}
+	if _, _, err := normalizeNodeConfig("review", NodeChangeReview, FlowNodeConfig{ChangeReview: &ChangeReviewNodeConfig{
+		Agents: []ReviewAgentConfig{{AgentDefID: "ad-code"}},
+	}}); err == nil || !strings.Contains(err.Error(), "requires an aggregator agent definition") {
+		t.Fatalf("missing aggregator error = %v", err)
+	}
 
 	var snapshotAgent SnapshotReviewAgent
 	if err := json.Unmarshal([]byte(`{"required":false,"agent":{"name":"legacy","harness":"harness"}}`), &snapshotAgent); err != nil {
@@ -264,22 +298,19 @@ func TestReviewAgentLegacyRequiredCompatibilityAndValidation(t *testing.T) {
 	}
 }
 
-func TestReviewAggregationAgentPrefersFirstBlockingRuntime(t *testing.T) {
+func TestReviewAggregationBlocksApprovalWhenAnySourceIsBlocking(t *testing.T) {
 	agents := []SnapshotReviewAgent{
 		{Blocking: false, Agent: AgentDefSnapshot{Name: "advisory"}},
-		{Blocking: true, Agent: AgentDefSnapshot{Name: "primary-blocker"}},
-		{Blocking: true, Agent: AgentDefSnapshot{Name: "secondary-blocker"}},
+		{Blocking: true, Agent: AgentDefSnapshot{Name: "blocker"}},
 	}
-	selected, ok := ReviewAggregationAgent(agents)
-	if !ok || selected.Agent.Name != "primary-blocker" || !selected.Blocking {
-		t.Fatalf("selected aggregation agent = %+v ok=%t", selected, ok)
+	if !ReviewAggregationBlocksApproval(agents) {
+		t.Fatal("blocking discovery source did not make aggregation blocking")
 	}
-	selected, ok = ReviewAggregationAgent(agents[:1])
-	if !ok || selected.Agent.Name != "advisory" || selected.Blocking {
-		t.Fatalf("all-advisory aggregation agent = %+v ok=%t", selected, ok)
+	if ReviewAggregationBlocksApproval(agents[:1]) {
+		t.Fatal("all-advisory discovery sources made aggregation blocking")
 	}
-	if _, ok := ReviewAggregationAgent(nil); ok {
-		t.Fatal("empty review set resolved an aggregation agent")
+	if ReviewAggregationBlocksApproval(nil) {
+		t.Fatal("empty discovery sources made aggregation blocking")
 	}
 }
 

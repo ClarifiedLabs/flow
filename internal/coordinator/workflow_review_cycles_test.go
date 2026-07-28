@@ -35,7 +35,8 @@ func TestWorkflowReviewAuthorCyclesWaitAtConfiguredLimit(t *testing.T) {
 			{
 				Key: "review", Name: "Review", Kind: NodeChangeReview,
 				Config: FlowNodeConfig{ChangeReview: &ChangeReviewNodeConfig{
-					Agents: []ReviewAgentConfig{{AgentDefID: reviewer.ID}},
+					Agents:               []ReviewAgentConfig{{AgentDefID: reviewer.ID}},
+					AggregatorAgentDefID: reviewer.ID,
 				}},
 			},
 			{

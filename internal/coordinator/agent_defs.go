@@ -104,6 +104,7 @@ func defaultAgentDefSeeds() []defaultAgentDefSeed {
 		{name: "author", skill: flowskills.AuthorSkill},
 		{name: "code-reviewer", skill: flowskills.ReviewerSkill},
 		{name: "security-reviewer", skill: flowskills.ReviewerSkill, focus: "Security focus: prioritize trust boundaries, authorization, input validation, secret handling, injection risks, and exploitable failure modes."},
+		{name: "review-aggregator", skill: flowskills.ReviewerSkill, focus: "Aggregation focus: validate the supplied parallel review reports, deduplicate findings by root cause, and produce the final review decision without starting a new open-ended review pass."},
 		{name: "verifier", skill: flowskills.VerifierSkill},
 	}
 }
@@ -307,6 +308,9 @@ func flowNodeConfigUsesAgent(config FlowNodeConfig, agentDefID string) bool {
 		return true
 	}
 	if config.ChangeReview != nil {
+		if config.ChangeReview.AggregatorAgentDefID == agentDefID {
+			return true
+		}
 		for _, agent := range config.ChangeReview.Agents {
 			if agent.AgentDefID == agentDefID {
 				return true

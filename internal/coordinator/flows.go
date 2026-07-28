@@ -337,6 +337,9 @@ func validateGraphReferencesInTx(ctx context.Context, tx *sqlitex.Tx, defs *Agen
 				return err
 			}
 		case NodeChangeReview:
+			if err := checkAgent(node.Key, node.Config.ChangeReview.AggregatorAgentDefID); err != nil {
+				return err
+			}
 			for _, agent := range node.Config.ChangeReview.Agents {
 				if err := checkAgent(node.Key, agent.AgentDefID); err != nil {
 					return err
@@ -601,7 +604,11 @@ func (s *FlowService) ResolveSnapshot(ctx context.Context, flowID string) (FlowS
 		case NodeAutomatedChecks:
 			snapshotNode.Config.AutomatedChecks = &AutomatedChecksNodeConfig{}
 		case NodeChangeReview:
-			config := &ChangeReviewNodeSnapshotConfig{}
+			aggregator, err := snapshotAgent(node.Config.ChangeReview.AggregatorAgentDefID)
+			if err != nil {
+				return FlowSnapshot{}, err
+			}
+			config := &ChangeReviewNodeSnapshotConfig{Aggregator: aggregator}
 			for _, inputAgent := range node.Config.ChangeReview.Agents {
 				agent, err := snapshotAgent(inputAgent.AgentDefID)
 				if err != nil {
@@ -667,7 +674,7 @@ func (s *FlowService) SeedDefaults(ctx context.Context) error {
 		Nodes: []FlowNodeInput{
 			{Key: "implement", Name: "Implement", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: defIDs["author"], Workspace: WorkspaceChange, Artifact: ArtifactChange}}},
 			{Key: "checks", Name: "Automated checks", Kind: NodeAutomatedChecks, Config: FlowNodeConfig{AutomatedChecks: &AutomatedChecksNodeConfig{}}},
-			{Key: "review", Name: "Code and security review", Kind: NodeChangeReview, Config: FlowNodeConfig{ChangeReview: &ChangeReviewNodeConfig{Agents: []ReviewAgentConfig{{AgentDefID: defIDs["code-reviewer"]}, {AgentDefID: defIDs["security-reviewer"]}}}}},
+			{Key: "review", Name: "Code and security review", Kind: NodeChangeReview, Config: FlowNodeConfig{ChangeReview: &ChangeReviewNodeConfig{Agents: []ReviewAgentConfig{{AgentDefID: defIDs["code-reviewer"]}, {AgentDefID: defIDs["security-reviewer"]}}, AggregatorAgentDefID: defIDs["review-aggregator"]}}},
 			{Key: "verify", Name: "Verify requirements", Kind: NodeVerifyChange, Config: FlowNodeConfig{VerifyChange: &VerifyChangeNodeConfig{Agents: []ReviewAgentConfig{{AgentDefID: defIDs["verifier"]}}}}},
 			{Key: "human-review", Name: "Human change review", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Instructions: "Review the change and choose whether it can proceed.", Outcomes: []string{"approved", "changes_requested", "rejected"}}}},
 			{Key: "merge", Name: "Merge change", Kind: NodeMergeChange, Config: FlowNodeConfig{MergeChange: &MergeChangeNodeConfig{}}},

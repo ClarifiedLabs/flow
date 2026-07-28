@@ -191,6 +191,7 @@ config:
         blocking: true
       - agent_def_id: ad-performance-review
         blocking: false
+    aggregator_agent_def_id: ad-review-aggregator
 ```
 
 A flow may reference an inherited global ID. At scheduling time Flow resolves a
@@ -264,10 +265,12 @@ barrier closes.
 The barrier awaits every child, including advisory agents. In a
 `change_review` node, configured reviewers are parallel discovery inputs: they
 cannot create review threads directly. Once they all report, Flow runs one
-aggregation job using the first blocking reviewer's configured runtime (or the
-first reviewer when every entry is advisory). The aggregate deduplicates the
-candidate reports and is the only reviewer result that can create blocking
-threads or select `changes_requested`.
+aggregation job using the agent definition selected by
+`aggregator_agent_def_id`. Its independently editable runtime and prompt control
+the synthesis pass. The aggregate deduplicates the candidate reports and is the
+only reviewer result that can create blocking threads or select
+`changes_requested`; whether it may block is derived from the discovery agents'
+blocking settings.
 
 Agent entries are blocking inputs by default when the flag is omitted. A
 finding from an advisory input is recorded and shown but cannot become a

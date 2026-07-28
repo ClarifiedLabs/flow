@@ -108,7 +108,8 @@ func (c *ReviewAgentConfig) UnmarshalJSON(data []byte) error {
 }
 
 type ChangeReviewNodeConfig struct {
-	Agents []ReviewAgentConfig `json:"agents"`
+	Agents               []ReviewAgentConfig `json:"agents"`
+	AggregatorAgentDefID string              `json:"aggregator_agent_def_id"`
 }
 
 type HumanGateNodeConfig struct {
@@ -174,19 +175,15 @@ type SnapshotReviewAgent struct {
 	Agent    AgentDefSnapshot `json:"agent"`
 }
 
-// ReviewAggregationAgent selects the runtime for the final aggregation pass:
-// prefer the first reviewer allowed to block, otherwise use the first advisory
-// reviewer and keep the aggregate advisory.
-func ReviewAggregationAgent(agents []SnapshotReviewAgent) (SnapshotReviewAgent, bool) {
+// ReviewAggregationBlocksApproval reports whether any discovery reviewer may
+// contribute a blocking finding to the final aggregate decision.
+func ReviewAggregationBlocksApproval(agents []SnapshotReviewAgent) bool {
 	for _, agent := range agents {
 		if agent.Blocking {
-			return agent, true
+			return true
 		}
 	}
-	if len(agents) == 0 {
-		return SnapshotReviewAgent{}, false
-	}
-	return agents[0], true
+	return false
 }
 
 // UnmarshalJSON keeps already-scheduled workflow snapshots readable after the
@@ -241,7 +238,8 @@ type AgentNodeSnapshotConfig struct {
 }
 
 type ChangeReviewNodeSnapshotConfig struct {
-	Agents []SnapshotReviewAgent `json:"agents"`
+	Agents     []SnapshotReviewAgent `json:"agents"`
+	Aggregator AgentDefSnapshot      `json:"aggregator"`
 }
 
 type VerifyChangeNodeSnapshotConfig struct {
@@ -437,6 +435,10 @@ func normalizeNodeConfig(key string, kind NodeKind, config FlowNodeConfig) ([]st
 				return nil, FlowNodeConfig{}, err
 			}
 			config.ChangeReview.Agents = agents
+			config.ChangeReview.AggregatorAgentDefID = strings.TrimSpace(config.ChangeReview.AggregatorAgentDefID)
+			if config.ChangeReview.AggregatorAgentDefID == "" {
+				return nil, FlowNodeConfig{}, fmt.Errorf("change review node %q requires an aggregator agent definition", key)
+			}
 			return []string{"approved", "changes_requested"}, config, nil
 		}
 	case NodeHumanGate:

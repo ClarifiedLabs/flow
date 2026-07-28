@@ -43,7 +43,12 @@ func newReviewBarrierFixture(t *testing.T, agents []SnapshotReviewAgent) *review
 	snapshot := FlowSnapshot{
 		FlowName: "review barrier", StartNode: "review", TransitionBudget: 50,
 		Nodes: []FlowNodeSnapshot{
-			{Key: "review", Name: "Review", Kind: NodeChangeReview, Config: FlowNodeSnapshotConfig{ChangeReview: &ChangeReviewNodeSnapshotConfig{Agents: agents}}},
+			{Key: "review", Name: "Review", Kind: NodeChangeReview, Config: FlowNodeSnapshotConfig{ChangeReview: &ChangeReviewNodeSnapshotConfig{
+				Agents: agents,
+				Aggregator: AgentDefSnapshot{
+					Name: "review-aggregator", Harness: "harness", Model: "openai:gpt-5-mini", Prompt: "Synthesize review reports.",
+				},
+			}}},
 			{Key: "approved", Name: "Approved", Kind: NodeTerminal, Config: FlowNodeSnapshotConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
 			{Key: "changes", Name: "Changes requested", Kind: NodeTerminal, Config: FlowNodeSnapshotConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionFailed}}},
 		},
@@ -536,7 +541,10 @@ func TestWorkflowExecutorParallelReviewAggregationBarrier(t *testing.T) {
 		for _, job := range jobs {
 			if payloadString(job.Payload, "check_name") == ReviewAggregationCheckName+".node."+fixture.nodeID {
 				aggregations++
-				if job.Payload["review_discovery"] != nil || job.Payload["blocking"] != true {
+				entrypoint, _ := job.Payload["entrypoint"].(map[string]any)
+				if job.Payload["review_discovery"] != nil || job.Payload["blocking"] != true ||
+					payloadString(job.Payload, "role_instructions") != "Synthesize review reports." ||
+					!strings.Contains(fmt.Sprint(entrypoint["argv"]), "gpt-5-mini") {
 					t.Fatalf("aggregation payload = %+v", job.Payload)
 				}
 			}

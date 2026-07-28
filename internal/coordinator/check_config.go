@@ -1018,6 +1018,8 @@ func (s *CheckConfigService) ScheduleWorkflowNodeChecks(ctx context.Context, tas
 		role := FlowReviewRoleReviewer
 		if mode == WorkflowChecksVerify {
 			role = FlowReviewRoleVerifier
+		} else if err := validateReviewDiscoveryAgents(agents); err != nil {
+			return nil, err
 		}
 		snapshot := FlowSnapshot{}
 		for _, agent := range agents {
@@ -1134,15 +1136,25 @@ WHERE task_id = ?
 	return names, nil
 }
 
-// ScheduleWorkflowReviewAggregation enqueues the single blocking decision after
-// every configured discovery reviewer has reported. The first blocking
-// reviewer supplies the aggregation runtime; when every reviewer is advisory,
-// the first reviewer supplies it and the aggregate remains advisory.
+func validateReviewDiscoveryAgents(agents []SnapshotReviewAgent) error {
+	for _, agent := range agents {
+		if strings.TrimSpace(agent.Agent.Name) == ReviewAggregationCheckName {
+			return fmt.Errorf("review discovery agent name %q is reserved for the final aggregation check", ReviewAggregationCheckName)
+		}
+	}
+	return nil
+}
+
+// ScheduleWorkflowReviewAggregation enqueues the single final decision after
+// every configured discovery reviewer has reported. The dedicated aggregator
+// supplies the runtime and prompt; discovery-agent policy controls whether its
+// decision may block approval.
 func (s *CheckConfigService) ScheduleWorkflowReviewAggregation(
 	ctx context.Context,
 	task Task,
 	change Change,
 	agents []SnapshotReviewAgent,
+	aggregator AgentDefSnapshot,
 	sourceNames []string,
 	workflowRunID string,
 	nodeRunID string,
@@ -1150,16 +1162,12 @@ func (s *CheckConfigService) ScheduleWorkflowReviewAggregation(
 	if len(agents) == 0 || len(sourceNames) != len(agents) {
 		return "", errors.New("review aggregation requires one source check per reviewer")
 	}
-	aggregator, ok := ReviewAggregationAgent(agents)
-	if !ok {
-		return "", errors.New("review aggregation could not resolve its reviewer")
-	}
-	blocksApproval := aggregator.Blocking
+	blocksApproval := ReviewAggregationBlocksApproval(agents)
 
 	snapshot := FlowSnapshot{ReviewAgents: []FlowReviewAgentSnapshot{{
 		Role:     FlowReviewRoleReviewer,
 		Blocking: blocksApproval,
-		Agent:    aggregator.Agent,
+		Agent:    aggregator,
 	}}}
 	suite, err := withFlowSnapshotReviewChecks(CheckSuite{}, snapshot, s.harnessArgs)
 	if err != nil {

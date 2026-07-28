@@ -500,13 +500,21 @@ function reviewNodeConfigKeyView(kind) {
   return REVIEW_NODE_CONFIG_KEYS[kind] || "";
 }
 
-function reviewAgentsFromNodeView(node, kind) {
+function reviewConfigFromNodeView(node, kind) {
   const config = value(node, "config", "Config") || {};
   const configKey = reviewNodeConfigKeyView(kind);
   const pascalKey = configKey === "change_review" ? "ChangeReview" : "VerifyChange";
-  const reviewConfig = value(config, configKey, pascalKey) || {};
-  const agents = value(reviewConfig, "agents", "Agents");
+  return value(config, configKey, pascalKey) || {};
+}
+
+function reviewAgentsFromNodeView(node, kind) {
+  const agents = value(reviewConfigFromNodeView(node, kind), "agents", "Agents");
   return Array.isArray(agents) ? agents : [];
+}
+
+function reviewAggregatorAgentDefIDFromNodeView(node, kind) {
+  if (kind !== "change_review") return "";
+  return value(reviewConfigFromNodeView(node, kind), "aggregator_agent_def_id", "AggregatorAgentDefID") || "";
 }
 
 // Saved legacy entries may still contain required. Treat it only as an input
@@ -553,10 +561,14 @@ export function renderNodeConfigEditorView(node = {}, agentDefs = []) {
   const agents = reviewAgentsFromNodeView(node, kind);
   const policy = configKey === "verify_change"
     ? "Every listed agent runs and is awaited. Blocks success controls whether that agent's findings can veto the node."
-    : "Reviewers run in parallel and are awaited, then Flow runs one aggregation pass. Blocks approval controls whether that reviewer's candidates may become aggregate blockers.";
+    : "Reviewers run in parallel and are awaited. The selected final review aggregator then validates and synthesizes their reports. Blocks approval controls whether a reviewer's candidates may become aggregate blockers.";
+  const aggregator = configKey === "change_review"
+    ? `<label class="flow-review-aggregator-field"><span>Final review aggregator</span><select name="review_aggregator_agent_def_id" aria-label="Final review aggregator" required>${agentDefOptionsHTML(agentDefs, reviewAggregatorAgentDefIDFromNodeView(node, kind), { includeEmpty: true, emptyLabel: "Select aggregator agent definition" })}</select></label>`
+    : "";
   return `
     <div class="flow-review-agent-config" data-review-agent-config data-review-config-key="${configKey}">
       <p class="muted">${policy}</p>
+      ${aggregator}
       <div class="flow-row-list" data-review-agent-rows>${agents.map((agent) => renderReviewAgentRowView(agent, agentDefs, configKey)).join("")}</div>
       <div class="flow-row-actions"><button type="button" class="button secondary" data-add-review-agent>Add agent</button></div>
     </div>
@@ -642,7 +654,11 @@ export function flowPayloadFromEditorView(form) {
           blocking: blocking ? Boolean(blocking.checked) : true,
         };
       });
-      config = { [reviewConfigKey]: { agents } };
+      const reviewConfig = { agents };
+      if (reviewConfigKey === "change_review") {
+        reviewConfig.aggregator_agent_def_id = readValue(card, '[name="review_aggregator_agent_def_id"]');
+      }
+      config = { [reviewConfigKey]: reviewConfig };
     } else {
       config = JSON.parse(readValue(card, '[name="node_config"]') || "{}");
     }
@@ -766,7 +782,9 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
     const editor = card?.querySelector("[data-node-config-editor]");
     if (!editor) return;
     const configKey = reviewNodeConfigKeyView(target.value);
-    const config = configKey ? { [configKey]: { agents: [{}] } } : {};
+    const reviewConfig = { agents: [{}] };
+    if (configKey === "change_review") reviewConfig.aggregator_agent_def_id = "";
+    const config = configKey ? { [configKey]: reviewConfig } : {};
     editor.innerHTML = renderNodeConfigEditorView({ kind: target.value, config }, agentDefs);
   });
   form.addEventListener("input", () => refreshGraphSelectorsView(form));

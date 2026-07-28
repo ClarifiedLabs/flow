@@ -2215,6 +2215,7 @@ test("parallel review editors render ordered structured rows without generic JSO
   const agentDefs = [
     { id: "ad-code", name: "Code review", harness: "harness", model: "gpt-code" },
     { id: "ad-security", name: "Security review", harness: "harness", model: "opus" },
+    { id: "ad-aggregator", name: "Review aggregator", harness: "harness", model: "gpt-mini" },
   ];
   const html = context.renderNodeCardView({
     key: "review",
@@ -2226,6 +2227,7 @@ test("parallel review editors render ordered structured rows without generic JSO
           { agent_def_id: "ad-code", blocking: false },
           { agent_def_id: "ad-retired" },
         ],
+        aggregator_agent_def_id: "ad-aggregator",
       },
     },
   }, agentDefs);
@@ -2238,7 +2240,10 @@ test("parallel review editors render ordered structured rows without generic JSO
   assert.match(html, /Blocks approval/);
   assert.match(html, /data-review-agent-advisory >Advisory<\/span>/);
   assert.match(html, /Reviewers run in parallel/);
-  assert.match(html, /one aggregation pass/);
+  assert.match(html, /selected final review aggregator/);
+  assert.match(html, /<span>Final review aggregator<\/span>/);
+  assert.match(html, /name="review_aggregator_agent_def_id" aria-label="Final review aggregator" required/);
+  assert.match(html, /<option value="ad-aggregator" selected>Review aggregator — harness \/ gpt-mini<\/option>/);
   assert.match(html, /data-add-review-agent>Add agent/);
   assert.match(html, /title="Move agent up"/);
   assert.match(html, /title="Move agent down"/);
@@ -2256,6 +2261,7 @@ test("parallel review editors render ordered structured rows without generic JSO
   assert.match(verifyHTML, /data-review-config-key="verify_change"/);
   assert.match(verifyHTML, /Blocks success/);
   assert.match(verifyHTML, /Every listed agent runs and is awaited/);
+  assert.doesNotMatch(verifyHTML, /review_aggregator_agent_def_id/);
   assert.doesNotMatch(verifyHTML, /name="node_config"|Strict node configuration JSON/);
 });
 
@@ -2415,6 +2421,7 @@ test("switching to either parallel review kind initializes its structured config
   assert.match(editor.innerHTML, /data-review-config-key="change_review"/);
   assert.equal((editor.innerHTML.match(/data-review-agent-row(?:\s|>)/g) || []).length, 1);
   assert.match(editor.innerHTML, /name="review_agent_def_id"[^>]*required/);
+  assert.match(editor.innerHTML, /name="review_aggregator_agent_def_id"[^>]*required/);
   assert.doesNotMatch(editor.innerHTML, /name="node_config"/);
 
   kindSelect.value = "verify_change";
@@ -2422,6 +2429,7 @@ test("switching to either parallel review kind initializes its structured config
   assert.match(editor.innerHTML, /data-review-config-key="verify_change"/);
   assert.equal((editor.innerHTML.match(/data-review-agent-row(?:\s|>)/g) || []).length, 1);
   assert.match(editor.innerHTML, /Blocks success/);
+  assert.doesNotMatch(editor.innerHTML, /review_aggregator_agent_def_id/);
   assert.doesNotMatch(editor.innerHTML, /name="node_config"/);
 });
 
@@ -2611,6 +2619,7 @@ test("parallel review payload preserves agent order and emits canonical blocking
           { review_agent_def_id: "ad-code", review_agent_blocking: true, review_required: false },
           { review_agent_def_id: "ad-security", review_agent_blocking: false, review_required: true },
         ],
+        review_aggregator_agent_def_id: "ad-aggregator",
       },
       {
         node_key: "verify",
@@ -2637,6 +2646,7 @@ test("parallel review payload preserves agent order and emits canonical blocking
             { agent_def_id: "ad-code", blocking: true },
             { agent_def_id: "ad-security", blocking: false },
           ],
+          aggregator_agent_def_id: "ad-aggregator",
         },
       },
     },
@@ -2665,6 +2675,7 @@ test("parallel review blocking checkbox toggles an agent to advisory", async () 
       node_name: "Review",
       node_kind: "change_review",
       review_agents: [{ review_agent_def_id: "ad-security", review_agent_blocking: blocking }],
+      review_aggregator_agent_def_id: "ad-aggregator",
     }],
   });
 

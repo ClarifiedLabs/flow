@@ -199,6 +199,16 @@ VALUES (?, ?, ?, 'main', 'head-1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z
 	}
 }
 
+func TestValidateReviewDiscoveryAgentsReservesAggregationCheckName(t *testing.T) {
+	agents := []SnapshotReviewAgent{{Agent: AgentDefSnapshot{Name: ReviewAggregationCheckName}}}
+	if err := validateReviewDiscoveryAgents(agents); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("validate review discovery agents error = %v, want reserved-name rejection", err)
+	}
+	if err := validateReviewDiscoveryAgents([]SnapshotReviewAgent{{Agent: AgentDefSnapshot{Name: "review-aggregator"}}}); err != nil {
+		t.Fatalf("dedicated aggregator-style discovery name rejected: %v", err)
+	}
+}
+
 func TestScheduleWorkflowNodeChecksConcurrentlyFansOutAndAggregatesExactlyOnce(t *testing.T) {
 	ctx := context.Background()
 	store, err := flowdb.Open(ctx, filepath.Join(t.TempDir(), "flow.db"))
@@ -252,6 +262,7 @@ INSERT INTO workflow_node_runs (
 		{Blocking: true, Agent: AgentDefSnapshot{Name: "code-review", Harness: "harness", Model: "openai:gpt-5", ReasoningEffort: "high", Prompt: "Focus on correctness."}},
 		{Blocking: false, Agent: AgentDefSnapshot{Name: "security-review", Harness: "harness", Model: "anthropic:claude-sonnet-4-6", Prompt: "Focus on security."}},
 	}
+	aggregator := AgentDefSnapshot{Name: "review-aggregator", Harness: "harness", Model: "openai:gpt-5-mini", ReasoningEffort: "medium", Prompt: "Synthesize the reports."}
 
 	const attempts = 24
 	errs := make(chan error, attempts)
@@ -347,6 +358,7 @@ INSERT INTO workflow_node_runs (
 		task,
 		change,
 		agents,
+		aggregator,
 		[]string{"code-review.node.nr-parallel", "security-review.node.nr-parallel"},
 		"wr-parallel",
 		"nr-parallel",
@@ -387,8 +399,9 @@ INSERT INTO workflow_node_runs (
 		aggregateJob.Payload["review_discovery"] != nil ||
 		payloadString(aggregateJob.Payload, "completion_protocol") != checkverdict.CompletionProtocol ||
 		payloadString(aggregateJob.Payload, "completion_mode") != string(checkverdict.ModeReviewAggregation) ||
-		!strings.Contains(fmt.Sprint(entrypoint["argv"]), "gpt-5") {
-		t.Fatalf("aggregation job = %+v, want blocking code-review runtime", aggregateJob)
+		payloadString(aggregateJob.Payload, "role_instructions") != "Synthesize the reports." ||
+		!strings.Contains(fmt.Sprint(entrypoint["argv"]), "gpt-5-mini") {
+		t.Fatalf("aggregation job = %+v, want dedicated blocking aggregator runtime", aggregateJob)
 	}
 	if _, err := services.checks.ReportCheck(ctx, ReportCheckInput{
 		TaskID: task.ID, Name: aggregationName, Kind: CheckKindReviewer,
@@ -449,6 +462,7 @@ UPDATE workflow_runs SET current_node_run_id = 'nr-parallel-visit-2' WHERE id = 
 		task,
 		change,
 		agents,
+		aggregator,
 		secondNames,
 		"wr-parallel",
 		"nr-parallel-visit-2",

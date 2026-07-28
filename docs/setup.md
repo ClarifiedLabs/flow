@@ -267,8 +267,9 @@ chmod 600 .flow-local/worker-join.token
 ```
 
 The coordinator seeds global built-in `task-planner`, `author`,
-`code-reviewer`, `security-reviewer`, and `verifier` agent definitions using the
-default agent selection (`default_agent`; see below). Fresh projects inherit those definitions and seed only the `coding` and
+`code-reviewer`, `security-reviewer`, `review-aggregator`, and `verifier` agent
+definitions using the default agent selection (`default_agent`; see below).
+Fresh projects inherit those definitions and seed only the `coding` and
 `planning` flows; they do not create project-local copies. Each
 reusable agent definition combines a **model agent** selection (harness, model,
 and reasoning effort) with a **focus agent** name and prompt. Manage those
@@ -287,8 +288,10 @@ corresponding `agent.harness.*` label.
 
 Review and verification graph nodes may name several focus agents. Flow runs
 their child jobs as an internal fan-out, awaits every child at a barrier, and
-then follows the node outcome. Entries are blocking by default; set
-`blocking: false` when a result is advisory. Advisory children are still
+then follows the node outcome. A change-review node also selects a dedicated
+final aggregator agent whose editable runtime and prompt synthesize the parallel
+review reports. Entries are blocking by default; set `blocking: false` when a
+result is advisory. Advisory children are still
 awaited, but their failures do not select the failure/changes-requested edge.
 `required` remains accepted as a deprecated compatibility spelling, with
 `true` mapping to blocking and `false` to advisory; use `blocking` in new flow

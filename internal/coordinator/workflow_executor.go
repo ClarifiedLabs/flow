@@ -457,6 +457,7 @@ func (e *WorkflowExecutor) handleChangeReview(ctx context.Context, run WorkflowR
 		task,
 		change,
 		agents,
+		node.Config.ChangeReview.Aggregator,
 		names,
 		run.ID,
 		nodeRun.ID,

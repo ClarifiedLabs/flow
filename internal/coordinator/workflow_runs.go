@@ -866,6 +866,7 @@ func (s *WorkflowRunService) refreshNodeAgentRuntime(
 		for i := range node.Config.ChangeReview.Agents {
 			agents = append(agents, &node.Config.ChangeReview.Agents[i].Agent)
 		}
+		agents = append(agents, &node.Config.ChangeReview.Aggregator)
 	case NodeVerifyChange:
 		if node.Config.VerifyChange == nil {
 			return nil, fmt.Errorf("snapshot verification node %q is missing configuration", nodeKey)

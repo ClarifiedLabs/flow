@@ -285,6 +285,23 @@ func TestHarnessOptionsIncludeDefaultArgs(t *testing.T) {
 	}
 }
 
+func TestWorkflowCheckRoleInstructionsUsesDedicatedReviewAggregator(t *testing.T) {
+	node := coordinator.FlowNodeSnapshot{Config: coordinator.FlowNodeSnapshotConfig{
+		ChangeReview: &coordinator.ChangeReviewNodeSnapshotConfig{
+			Agents: []coordinator.SnapshotReviewAgent{{Agent: coordinator.AgentDefSnapshot{
+				Name: "code-reviewer", Prompt: "Discover correctness findings.",
+			}}},
+			Aggregator: coordinator.AgentDefSnapshot{Name: "review-aggregator", Prompt: "Synthesize candidate reports."},
+		},
+	}}
+	if got := workflowCheckRoleInstructions(node, "code-reviewer.node.nr-1"); got != "Discover correctness findings." {
+		t.Fatalf("discovery role instructions = %q", got)
+	}
+	if got := workflowCheckRoleInstructions(node, coordinator.ReviewAggregationCheckName+".node.nr-1"); got != "Synthesize candidate reports." {
+		t.Fatalf("aggregation role instructions = %q", got)
+	}
+}
+
 func TestRegistrySeedsGlobalDefsWithConfiguredDefaultAgent(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
@@ -307,8 +324,8 @@ func TestRegistrySeedsGlobalDefsWithConfiguredDefaultAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list global agent defs: %v", err)
 	}
-	if len(defs) != 5 {
-		t.Fatalf("global default agent definitions = %d, want 5", len(defs))
+	if len(defs) != 6 {
+		t.Fatalf("global default agent definitions = %d, want 6", len(defs))
 	}
 	for _, def := range defs {
 		if def.Harness != flowharness.Harness || def.Model != "sonnet" || def.ReasoningEffort != "high" {
@@ -355,8 +372,8 @@ func TestDefaultAgentDefsAreGlobalAndInheritedByProjects(t *testing.T) {
 
 	var globalList agentDefsResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/global/agent-defs", nil, http.StatusOK, &globalList)
-	if len(globalList.AgentDefs) != 5 {
-		t.Fatalf("global default agent definitions = %d, want 5", len(globalList.AgentDefs))
+	if len(globalList.AgentDefs) != 6 {
+		t.Fatalf("global default agent definitions = %d, want 6", len(globalList.AgentDefs))
 	}
 
 	var projectList agentDefsResponse

@@ -216,10 +216,11 @@ advisory child before evaluating the transition.
 
 For `change_review`, the parallel children are side-effect-free discovery
 reviewers. After their barrier closes, one coordinator-owned aggregation job
-uses the first blocking reviewer's frozen runtime (or the first reviewer when
-all are advisory), deduplicates their candidate findings, and becomes the only
-reviewer allowed to create threads or choose `changes_requested`.
-`verify_change` continues to evaluate its children directly.
+uses the node's dedicated frozen aggregator runtime and prompt, deduplicates the
+candidate findings, and becomes the only reviewer allowed to create threads or
+choose `changes_requested`. Whether that final decision may block is still
+derived from the discovery agents' blocking policy. `verify_change` continues
+to evaluate its children directly.
 
 Blocking is the default when an entry omits the flag. A candidate from an
 advisory reviewer remains visible but cannot become a blocking aggregate
@@ -246,9 +247,10 @@ retry; advisory errors remain visible and non-blocking. Retrying a check node
 preserves same-revision results and enqueues only its errored checks.
 
 The coordinator seeds global task-planner, author, code-reviewer,
-security-reviewer, and verifier definitions. Fresh projects inherit those rows
-and seed only two project-owned flows: the default coding graph (implementation,
-checks, review, human gate, verification, and merge loops) and the planning graph
+security-reviewer, review-aggregator, and verifier definitions. Fresh projects
+inherit those rows and seed only two project-owned flows: the default coding
+graph (implementation, checks, review, human gate, verification, and merge
+loops) and the planning graph
 (task-set authoring, human review, transactional materialization, and
 completion). No default agent-definition rows are stored in project databases.
 Flows store global definition IDs; snapshot resolution applies a same-name
