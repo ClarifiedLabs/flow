@@ -42,7 +42,7 @@ func TestDefaultAgentCheckCommandMatchesBuilders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DefaultAgentCheckCommandWithArgs(%q): %v", Harness, err)
 	}
-	if want := DefaultHarnessPrintCommandWithArgs(args); got != want {
+	if want := DefaultHarnessInteractiveCheckCommandWithArgs(args); got != want {
 		t.Fatalf("DefaultAgentCheckCommandWithArgs(%q) =\n%s\nwant\n%s", Harness, got, want)
 	}
 	if _, err := DefaultAgentCheckCommandWithArgs(Shell, args); err == nil {

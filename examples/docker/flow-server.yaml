@@ -1,6 +1,6 @@
 data_dir: /var/lib/flow
 listen_addr: :8421
-protocol_version: "3"
+protocol_version: "4"
 workers:
   reconnect_grace: "2m"
 limits:

@@ -220,6 +220,16 @@ pins the artifact to HEAD. Task-planning nodes also pass
 `--output-file TASK_SET.json`; handoff nodes need only the Markdown summary.
 The command is idempotent for the active node run.
 
+Flow-owned reviewer, discovery, aggregation, and verifier jobs use the same
+command without flags. They run as interactive check terminals: write the
+structured verdict to `$FLOW_VERDICT_FILE`, then run `flow complete`. The
+command validates the role-specific verdict schema and seals its exact bytes;
+the worker closes the terminal and reports the captured result only after that
+seal is valid. A validation error is printed in the live terminal so the agent
+or an operator can correct the verdict and retry without starting another
+agent run. Repository-owned custom checks retain their configured process-exit
+behavior and do not require `flow complete`.
+
 Attach to a live author session or worker job:
 
 ```sh

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClarifiedLabs/flow/internal/checkverdict"
 	flowclient "github.com/ClarifiedLabs/flow/internal/client"
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
@@ -665,7 +666,7 @@ func TestWaitForTmuxWaitsForExitFileAfterSessionVanishes(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- waitForTmux(ctx, config.WorkerConfig{}, "flow-missing-session", exitFile, nil, nil, nil)
+		done <- waitForTmux(ctx, config.WorkerConfig{}, "flow-missing-session", exitFile, nil, nil, nil, nil)
 	}()
 	time.Sleep(150 * time.Millisecond)
 	if err := os.WriteFile(exitFile, []byte("0\n"), 0o600); err != nil {
@@ -1264,6 +1265,255 @@ func TestWorkerEnvIncludesWorkerTokenForReviewerAndVerifierJobs(t *testing.T) {
 	})
 	if env["FLOW_WORKER_TOKEN"] != "" {
 		t.Fatalf("ci FLOW_WORKER_TOKEN = %q, want empty", env["FLOW_WORKER_TOKEN"])
+	}
+}
+
+func TestWorkerEnvIncludesCompletionContextOnlyForFlowAgentChecks(t *testing.T) {
+	input := tmuxInput{
+		Config: workerConfig("/tmp/work", "file:///tmp/exchange.git"),
+		Job:    Job{ID: "j-review", Role: RoleReviewer},
+		Lease:  Lease{ID: "l-review", WorkerID: "w-local"},
+		Payload: JobPayload{
+			CheckName:          "review",
+			CompletionProtocol: checkverdict.CompletionProtocol,
+			CompletionMode:     string(checkverdict.ModeReviewDiscovery),
+			ReviewDiscovery:    true,
+		},
+	}
+	env := workerEnv(input)
+	if env["FLOW_COMPLETION_PROTOCOL"] != checkverdict.CompletionProtocol ||
+		env["FLOW_CHECK_MODE"] != string(checkverdict.ModeReviewDiscovery) ||
+		env["FLOW_COMPLETION_FILE"] != filepath.Join("/tmp/work", "jobs", "j-review", checkverdict.CompletionFileName) {
+		t.Fatalf("completion env = protocol:%q mode:%q file:%q", env["FLOW_COMPLETION_PROTOCOL"], env["FLOW_CHECK_MODE"], env["FLOW_COMPLETION_FILE"])
+	}
+
+	input.Payload = JobPayload{CheckName: "custom-review"}
+	env = workerEnv(input)
+	for _, key := range []string{"FLOW_COMPLETION_PROTOCOL", "FLOW_CHECK_MODE", "FLOW_COMPLETION_FILE"} {
+		if env[key] != "" {
+			t.Fatalf("custom check %s = %q, want empty", key, env[key])
+		}
+	}
+}
+
+func TestCheckCompletionContextDerivesModeFromJobRole(t *testing.T) {
+	tests := []struct {
+		name    string
+		role    JobRole
+		payload JobPayload
+		want    checkverdict.Mode
+	}{
+		{name: "review", role: RoleReviewer, want: checkverdict.ModeReview},
+		{name: "discovery", role: RoleReviewer, payload: JobPayload{ReviewDiscovery: true}, want: checkverdict.ModeReviewDiscovery},
+		{name: "aggregation", role: RoleReviewer, payload: JobPayload{ReviewAggregation: true}, want: checkverdict.ModeReviewAggregation},
+		{name: "verify", role: RoleVerifier, payload: JobPayload{ReviewAggregation: true}, want: checkverdict.ModeVerify},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			test.payload.CompletionProtocol = checkverdict.CompletionProtocol
+			test.payload.CheckName = "check"
+			context, ok := checkCompletionContext(tmuxInput{
+				Job:     Job{ID: "j-check", Role: test.role},
+				Payload: test.payload,
+			})
+			if !ok || context.Mode != test.want {
+				t.Fatalf("checkCompletionContext() = %+v, %v; want mode %s", context, ok, test.want)
+			}
+		})
+	}
+}
+
+func TestCheckCompletionWatcherWaitsForSealAndCapturesReport(t *testing.T) {
+	requireTool(t, "tmux")
+	workDir := t.TempDir()
+	cfg := workerConfigWithTmux(t, workDir, "file:///tmp/exchange.git")
+	jobCfg, err := tmuxConfigForJob(cfg, "j-review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionName := sessionNameForJob("j-review")
+	tmuxRun(t, jobCfg, "new-session", "-d", "-s", sessionName, "sleep 60")
+	t.Cleanup(func() { cleanupTmuxServer(jobCfg) })
+
+	capture := &checkCompletionCapture{}
+	input := tmuxInput{
+		Config: jobCfg,
+		Job:    Job{ID: "j-review", Role: RoleReviewer},
+		Payload: JobPayload{
+			CheckName:          "review",
+			CompletionProtocol: checkverdict.CompletionProtocol,
+			CompletionMode:     string(checkverdict.ModeReview),
+		},
+		CompletionCapture: capture,
+	}
+	watcher, err := newCheckCompletionWatcher(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealed, err := watcher.poll(); err != nil || sealed {
+		t.Fatalf("poll before seal = %v, %v", sealed, err)
+	}
+	verdictPath := verdictFilePath(workDir, "j-review")
+	if err := os.MkdirAll(filepath.Dir(verdictPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(verdictPath, []byte(`{"verdict":"satisfied","reason":"ready"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := checkverdict.SealVerdict(verdictPath, completionFilePath(workDir, "j-review"), watcher.context); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForTmux(context.Background(), jobCfg, sessionName, filepath.Join(workDir, "unused-exit"), nil, nil, nil, watcher); err != nil {
+		t.Fatalf("waitForTmux() error = %v", err)
+	}
+	if capture.report == nil || capture.report.Verdict != "satisfied" || capture.report.Reason != "ready" {
+		t.Fatalf("captured report = %+v", capture.report)
+	}
+	if tmuxSessionExists(context.Background(), jobCfg, sessionName) {
+		t.Fatal("tmux session remains after valid completion seal")
+	}
+}
+
+func TestWaitForTmuxKeepsUnsealedFlowCheckLive(t *testing.T) {
+	requireTool(t, "tmux")
+	for _, test := range []struct {
+		name        string
+		invalidSeal bool
+	}{
+		{name: "missing seal"},
+		{name: "invalid seal", invalidSeal: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			cfg := workerConfigWithTmux(t, workDir, "file:///tmp/exchange.git")
+			jobID := "j-live-" + strings.ReplaceAll(test.name, " ", "-")
+			jobCfg, err := tmuxConfigForJob(cfg, jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sessionName := sessionNameForJob(jobID)
+			tmuxRun(t, jobCfg, "new-session", "-d", "-s", sessionName, "sleep 60")
+			t.Cleanup(func() { cleanupTmuxServer(jobCfg) })
+			input := tmuxInput{
+				Config: jobCfg,
+				Job:    Job{ID: jobID, Role: RoleReviewer},
+				Payload: JobPayload{
+					CheckName:          "review",
+					CompletionProtocol: checkverdict.CompletionProtocol,
+					CompletionMode:     string(checkverdict.ModeReview),
+				},
+				CompletionCapture: &checkCompletionCapture{},
+			}
+			watcher, err := newCheckCompletionWatcher(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.invalidSeal {
+				verdictPath := verdictFilePath(workDir, jobID)
+				if err := os.MkdirAll(filepath.Dir(verdictPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(verdictPath, []byte(`{"verdict":"satisfied","reason":"ready"}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				wrongContext := watcher.context
+				wrongContext.JobID = "j-other"
+				if _, err := checkverdict.SealVerdict(verdictPath, completionFilePath(workDir, jobID), wrongContext); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+			defer cancel()
+			err = waitForTmux(ctx, jobCfg, sessionName, filepath.Join(workDir, "unused-exit"), nil, nil, nil, watcher)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("waitForTmux() error = %v, want context deadline while check remains live", err)
+			}
+			if input.CompletionCapture.report != nil {
+				t.Fatalf("captured unsealed report = %+v", input.CompletionCapture.report)
+			}
+		})
+	}
+}
+
+func TestRunJobFlowAgentCheckRejectsProcessExitWithoutSeal(t *testing.T) {
+	requireTool(t, "git")
+	requireTool(t, "tmux")
+	cfg := workerConfigWithTmux(t, t.TempDir(), createExchangeRemote(t))
+	entrypoint := writeScript(t, "#!/bin/sh\nexit 0\n")
+	input := RunInput{
+		Config:    cfg,
+		ProjectID: "p-test",
+		Job: Job{
+			ID:             "j-review-exit",
+			Role:           RoleReviewer,
+			CapacityBucket: BucketPersistentAgent,
+			Payload: map[string]any{
+				"base":                "main",
+				"branch":              "main",
+				"check_name":          "review",
+				"completion_protocol": checkverdict.CompletionProtocol,
+				"completion_mode":     string(checkverdict.ModeReview),
+				"entrypoint": map[string]any{
+					"argv":  []string{entrypoint},
+					"shell": false,
+				},
+			},
+		},
+		Lease: Lease{ID: "l-review-exit", WorkerID: "w-local"},
+	}
+	result := RunJob(context.Background(), input)
+	if result.FinalState != JobFailed || result.Err == nil || !strings.Contains(result.Err.Error(), "exited before running flow complete") {
+		t.Fatalf("RunJob() result = %+v", result)
+	}
+	if result.VerdictReport != nil {
+		t.Fatalf("RunJob() captured unsealed verdict = %+v", result.VerdictReport)
+	}
+}
+
+func TestRunJobFlowAgentCheckFinishesFromSealWithoutEntrypointExit(t *testing.T) {
+	requireTool(t, "git")
+	requireTool(t, "tmux")
+	workDir := t.TempDir()
+	cfg := workerConfigWithTmux(t, workDir, createExchangeRemote(t))
+	jobID := "j-review-sealed"
+	verdictPath := verdictFilePath(workDir, jobID)
+	if err := os.MkdirAll(filepath.Dir(verdictPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(verdictPath, []byte(`{"verdict":"satisfied","reason":"sealed result"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sealContext := checkverdict.Context{JobID: jobID, CheckName: "review", Mode: checkverdict.ModeReview}
+	if _, err := checkverdict.SealVerdict(verdictPath, completionFilePath(workDir, jobID), sealContext); err != nil {
+		t.Fatal(err)
+	}
+	input := RunInput{
+		Config:    cfg,
+		ProjectID: "p-test",
+		Job: Job{
+			ID:             jobID,
+			Role:           RoleReviewer,
+			CapacityBucket: BucketPersistentAgent,
+			Payload: map[string]any{
+				"base":                "main",
+				"branch":              "main",
+				"check_name":          "review",
+				"completion_protocol": checkverdict.CompletionProtocol,
+				"completion_mode":     string(checkverdict.ModeReview),
+				"entrypoint": map[string]any{
+					"argv":  []string{"/bin/sh", "-c", "sleep 60"},
+					"shell": false,
+				},
+			},
+		},
+		Lease: Lease{ID: "l-review-sealed", WorkerID: "w-local"},
+	}
+	result := RunJob(context.Background(), input)
+	if result.Err != nil || result.FinalState != JobFinished || result.ExitCode != 0 {
+		t.Fatalf("RunJob() result = %+v", result)
+	}
+	if result.VerdictReport == nil || result.VerdictReport.Verdict != "satisfied" || result.VerdictReport.Reason != "sealed result" {
+		t.Fatalf("RunJob() captured report = %+v", result.VerdictReport)
 	}
 }
 

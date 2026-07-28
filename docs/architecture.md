@@ -229,13 +229,21 @@ blocking, `false` is advisory), and configurations should not specify both
 fields.
 
 Reviewer and verifier children must report `satisfied` or `blocked` through a
-valid structured verdict file. Missing or invalid verdicts, harness failures,
-and failures while applying declared thread actions are `errored`, never a
-domain outcome. CI maps an ordinary launched-command exit to pass/fail, while
-worker/setup, command-resolution, and signal-termination failures are
-`errored`. A required errored check pauses the node for owner retry; advisory
-errors remain visible and non-blocking. Retrying a check node preserves
-same-revision results and enqueues only its errored checks.
+valid structured verdict file. Flow-owned agent checks run interactively and
+must call `flow complete`; the command validates the role-specific schema and
+atomically writes a job/check/mode/digest completion seal. The worker verifies
+that seal against authoritative job context, captures the validated report,
+and only then ends the terminal. A missing seal leaves the terminal live, so an
+operator can attach to the check job and continue the conversation. Repository
+check entrypoints retain process-exit semantics.
+
+Missing or invalid verdicts, an explicit harness exit before completion,
+harness failures, and failures while applying declared thread actions are
+`errored`, never a domain outcome. CI maps an ordinary launched-command exit to
+pass/fail, while worker/setup, command-resolution, and signal-termination
+failures are `errored`. A required errored check pauses the node for owner
+retry; advisory errors remain visible and non-blocking. Retrying a check node
+preserves same-revision results and enqueues only its errored checks.
 
 The coordinator seeds global task-planner, author, code-reviewer,
 security-reviewer, and verifier definitions. Fresh projects inherit those rows

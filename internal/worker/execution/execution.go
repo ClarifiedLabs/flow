@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ClarifiedLabs/flow/internal/checkverdict"
 	flowclient "github.com/ClarifiedLabs/flow/internal/client"
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
@@ -124,6 +125,10 @@ type JobPayload struct {
 	ReviewCycleInstructions    string      `json:"review_cycle_instructions,omitempty"`
 	HumanAttentionInstructions string      `json:"human_attention_instructions,omitempty"`
 	ConsoleScope               string      `json:"console_scope,omitempty"`
+	CompletionProtocol         string      `json:"completion_protocol,omitempty"`
+	CompletionMode             string      `json:"completion_mode,omitempty"`
+	ReviewDiscovery            bool        `json:"review_discovery,omitempty"`
+	ReviewAggregation          bool        `json:"review_aggregation,omitempty"`
 	// ImageAttachments is the coordinator-stamped list of image attachment
 	// descriptors {id, filename} the worker materializes into .flow/attachments
 	// for every author job, regardless of harness. Only the harness CLI receives
@@ -165,6 +170,10 @@ type RunResult struct {
 	// (FLOW_VERDICT_FILE) lives. Callers read it after the entrypoint exits as
 	// the required reviewer/verifier result.
 	VerdictFilePath string
+	// VerdictReport is populated from the exact bytes authenticated by a valid
+	// completion seal. Flow-owned interactive checks use this captured report
+	// instead of reopening the verdict file after the harness is stopped.
+	VerdictReport *VerdictReport
 	// TranscriptPath is the local file the worker piped tmux pane output to.
 	// Empty when transcript capture could not be started. The caller uploads
 	// its tail to the coordinator after the job completes.
@@ -236,21 +245,23 @@ func RunJob(ctx context.Context, input RunInput) RunResult {
 		return failedResult(input, payload, err)
 	}
 
+	completionCapture := &checkCompletionCapture{}
 	exitCode, err := runEntrypointInTmux(ctx, tmuxInput{
-		SessionName:      sessionName,
-		Worktree:         worktree,
-		ExitFile:         exitFile,
-		WorkerExitFile:   workerExitFile,
-		TranscriptFile:   transcriptFile,
-		Config:           tmuxConfig,
-		Job:              input.Job,
-		Lease:            input.Lease,
-		Session:          input.Session,
-		SessionToken:     input.SessionToken,
-		Payload:          payload,
-		Entrypoint:       entrypoint,
-		HookConfigValue:  hookConfigValue,
-		HookConfigEnvVar: hookConfigEnvVar,
+		SessionName:       sessionName,
+		Worktree:          worktree,
+		ExitFile:          exitFile,
+		WorkerExitFile:    workerExitFile,
+		TranscriptFile:    transcriptFile,
+		Config:            tmuxConfig,
+		Job:               input.Job,
+		Lease:             input.Lease,
+		Session:           input.Session,
+		SessionToken:      input.SessionToken,
+		Payload:           payload,
+		Entrypoint:        entrypoint,
+		HookConfigValue:   hookConfigValue,
+		HookConfigEnvVar:  hookConfigEnvVar,
+		CompletionCapture: completionCapture,
 	})
 	result := RunResult{
 		FinalState:      stateForExit(exitCode, err),
@@ -259,6 +270,7 @@ func RunJob(ctx context.Context, input RunInput) RunResult {
 		Worktree:        worktree,
 		Payload:         payload,
 		VerdictFilePath: verdictFilePath(input.Config.WorkDir, input.Job.ID),
+		VerdictReport:   completionCapture.report,
 		TranscriptPath:  transcriptFile,
 		Err:             err,
 	}
@@ -766,20 +778,25 @@ func agentTmuxTmpDirForJob(cfg config.WorkerConfig, jobID string) (string, error
 }
 
 type tmuxInput struct {
-	SessionName      string
-	Worktree         string
-	ExitFile         string
-	WorkerExitFile   string
-	TranscriptFile   string
-	HookConfigValue  string
-	HookConfigEnvVar string
-	Config           config.WorkerConfig
-	Job              Job
-	Lease            Lease
-	Session          *coordinator.Session
-	SessionToken     string
-	Payload          JobPayload
-	Entrypoint       Entrypoint
+	SessionName       string
+	Worktree          string
+	ExitFile          string
+	WorkerExitFile    string
+	TranscriptFile    string
+	HookConfigValue   string
+	HookConfigEnvVar  string
+	Config            config.WorkerConfig
+	Job               Job
+	Lease             Lease
+	Session           *coordinator.Session
+	SessionToken      string
+	Payload           JobPayload
+	Entrypoint        Entrypoint
+	CompletionCapture *checkCompletionCapture
+}
+
+type checkCompletionCapture struct {
+	report *VerdictReport
 }
 
 func runEntrypointInTmux(ctx context.Context, input tmuxInput) (int, error) {
@@ -869,12 +886,19 @@ func runEntrypointInTmux(ctx context.Context, input tmuxInput) (int, error) {
 		}
 	}
 	messenger := newSessionMessagePoller(input)
-	if err := waitForTmux(ctx, input.Config, input.SessionName, input.WorkerExitFile, reporter, reconciler, messenger); err != nil {
+	completion, err := newCheckCompletionWatcher(input)
+	if err != nil {
+		return -1, err
+	}
+	if err := waitForTmux(ctx, input.Config, input.SessionName, input.WorkerExitFile, reporter, reconciler, messenger, completion); err != nil {
 		if errors.Is(err, errPersistentSessionCoordinatorTerminal) {
 			slog.Debug("worker tmux session stopped because coordinator session is terminal", "job_id", input.Job.ID, "session", input.SessionName)
 			return 0, nil
 		}
 		return -1, err
+	}
+	if input.CompletionCapture != nil && input.CompletionCapture.report != nil {
+		return 0, nil
 	}
 	exitCode, err := readExitCode(input.WorkerExitFile)
 	if err != nil {
@@ -1102,6 +1126,11 @@ func workerEnv(input tmuxInput) map[string]string {
 	}
 	if input.Payload.CheckName != "" {
 		reserved["FLOW_CHECK_NAME"] = input.Payload.CheckName
+	}
+	if context, ok := checkCompletionContext(input); ok {
+		reserved["FLOW_COMPLETION_PROTOCOL"] = checkverdict.CompletionProtocol
+		reserved["FLOW_CHECK_MODE"] = string(context.Mode)
+		reserved["FLOW_COMPLETION_FILE"] = completionFilePath(input.Config.WorkDir, input.Job.ID)
 	}
 	if input.Job.ChangeID != nil {
 		reserved["FLOW_CHANGE_ID"] = *input.Job.ChangeID
@@ -1447,7 +1476,88 @@ func looksLikeCommitSHA(value string) bool {
 	return commitSHAPattern.MatchString(strings.TrimSpace(value))
 }
 
-func waitForTmux(ctx context.Context, cfg config.WorkerConfig, sessionName string, exitFile string, reporter *sessionStateReporter, reconciler *persistentSessionReconciler, messenger *sessionMessagePoller) error {
+type checkCompletionWatcher struct {
+	sealPath    string
+	verdictPath string
+	context     checkverdict.Context
+	capture     *checkCompletionCapture
+	lastError   string
+}
+
+func newCheckCompletionWatcher(input tmuxInput) (*checkCompletionWatcher, error) {
+	context, ok := checkCompletionContext(input)
+	if !ok {
+		if strings.TrimSpace(input.Payload.CompletionProtocol) == checkverdict.CompletionProtocol {
+			return nil, fmt.Errorf("check completion protocol is not valid for job role %q", input.Job.Role)
+		}
+		return nil, nil
+	}
+	if context.JobID == "" || context.CheckName == "" {
+		return nil, errors.New("check completion job id and check name are required")
+	}
+	if strings.TrimSpace(input.Payload.CompletionMode) != string(context.Mode) {
+		return nil, fmt.Errorf(
+			"check completion mode %q does not match authoritative mode %q",
+			input.Payload.CompletionMode,
+			context.Mode,
+		)
+	}
+	return &checkCompletionWatcher{
+		sealPath:    completionFilePath(input.Config.WorkDir, input.Job.ID),
+		verdictPath: verdictFilePath(input.Config.WorkDir, input.Job.ID),
+		context:     context,
+		capture:     input.CompletionCapture,
+	}, nil
+}
+
+func checkCompletionContext(input tmuxInput) (checkverdict.Context, bool) {
+	if strings.TrimSpace(input.Payload.CompletionProtocol) != checkverdict.CompletionProtocol {
+		return checkverdict.Context{}, false
+	}
+	var mode checkverdict.Mode
+	switch input.Job.Role {
+	case RoleVerifier:
+		mode = checkverdict.ModeVerify
+	case RoleReviewer:
+		switch {
+		case input.Payload.ReviewAggregation:
+			mode = checkverdict.ModeReviewAggregation
+		case input.Payload.ReviewDiscovery:
+			mode = checkverdict.ModeReviewDiscovery
+		default:
+			mode = checkverdict.ModeReview
+		}
+	default:
+		return checkverdict.Context{}, false
+	}
+	return checkverdict.Context{
+		JobID:     strings.TrimSpace(input.Job.ID),
+		CheckName: strings.TrimSpace(input.Payload.CheckName),
+		Mode:      mode,
+	}, true
+}
+
+func (w *checkCompletionWatcher) poll() (bool, error) {
+	validated, present, err := checkverdict.VerifySeal(w.sealPath, w.verdictPath, w.context)
+	if err != nil || !present {
+		return false, err
+	}
+	if w.capture != nil {
+		report := validated.Report
+		w.capture.report = &report
+	}
+	return true, nil
+}
+
+func (w *checkCompletionWatcher) logInvalid(err error) {
+	if err == nil || err.Error() == w.lastError {
+		return
+	}
+	w.lastError = err.Error()
+	slog.Warn("worker ignored invalid check completion seal", "job_id", w.context.JobID, "check_name", w.context.CheckName, "error", err)
+}
+
+func waitForTmux(ctx context.Context, cfg config.WorkerConfig, sessionName string, exitFile string, reporter *sessionStateReporter, reconciler *persistentSessionReconciler, messenger *sessionMessagePoller, completion *checkCompletionWatcher) error {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	watchdog := newTmuxWatchdogWithConfig(cfg, sessionName, defaultWatchdogSilenceThreshold)
@@ -1455,8 +1565,20 @@ func waitForTmux(ctx context.Context, cfg config.WorkerConfig, sessionName strin
 	nextReconcileAt := time.Time{}
 	nextMessageAt := time.Time{}
 	for {
+		if completion != nil {
+			sealed, err := completion.poll()
+			if err != nil {
+				completion.logInvalid(err)
+			} else if sealed {
+				killTmuxSession(cfg, sessionName)
+				return nil
+			}
+		}
 		if entrypointExitRecorded(exitFile) {
 			_ = tmuxCommandContext(ctx, cfg, "kill-session", "-t", sessionName).Run()
+			if completion != nil {
+				return errors.New("Flow-owned agent check exited before running flow complete")
+			}
 			return nil
 		}
 		now := time.Now().UTC()
@@ -1472,9 +1594,16 @@ func waitForTmux(ctx context.Context, cfg config.WorkerConfig, sessionName strin
 			nextMessageAt = now.Add(persistentReconcilePollInterval)
 		}
 		if !tmuxSessionExists(ctx, cfg, sessionName) {
+			if completion != nil {
+				return errors.New("Flow-owned agent check exited before running flow complete")
+			}
 			return waitForEntrypointExitFile(ctx, exitFile, exitFileAfterSessionExitTimeout)
 		}
 		if tmuxPaneDead(ctx, cfg, sessionName) {
+			if completion != nil {
+				killTmuxSession(cfg, sessionName)
+				return errors.New("Flow-owned agent check exited before running flow complete")
+			}
 			if err := waitForEntrypointExitFile(ctx, exitFile, exitFileAfterSessionExitTimeout); err != nil {
 				return err
 			}
@@ -2453,6 +2582,10 @@ func jobDir(workDir string, jobID string) string {
 // committed by accident.
 func verdictFilePath(workDir string, jobID string) string {
 	return filepath.Join(jobDir(workDir, jobID), VerdictFileName)
+}
+
+func completionFilePath(workDir string, jobID string) string {
+	return filepath.Join(jobDir(workDir, jobID), checkverdict.CompletionFileName)
 }
 
 func sessionNameForJob(jobID string) string {

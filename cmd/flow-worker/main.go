@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ClarifiedLabs/flow/internal/checkverdict"
 	flowclient "github.com/ClarifiedLabs/flow/internal/client"
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
@@ -732,7 +733,16 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 	var verdictReport workerexec.VerdictReport
 	var haveVerdict bool
 	var verdictFileErr error
-	if result.VerdictFilePath != "" {
+	if result.VerdictReport != nil {
+		verdict = coordinator.CheckVerdict(result.VerdictReport.Verdict)
+		verdictReport = *result.VerdictReport
+		haveVerdict = true
+		if strings.TrimSpace(verdictReport.Reason) != "" {
+			details = verdictReport.Reason
+		}
+	} else if result.Payload.CompletionProtocol == checkverdict.CompletionProtocol {
+		verdictFileErr = errors.New("flow complete did not seal the structured verdict")
+	} else if result.VerdictFilePath != "" {
 		v, ok, err := workerexec.ReadVerdictFile(result.VerdictFilePath)
 		switch {
 		case err != nil:

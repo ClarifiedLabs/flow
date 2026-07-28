@@ -11,6 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/ClarifiedLabs/flow/internal/checkverdict"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	"github.com/ClarifiedLabs/flow/internal/scheduler"
@@ -72,6 +73,7 @@ type CheckDefinition struct {
 	roleInstructions  string
 	reviewDiscovery   bool
 	reviewAggregation bool
+	flowAgent         bool
 }
 
 type CheckSuite struct {
@@ -211,6 +213,7 @@ func withFlowSnapshotReviewChecks(suite CheckSuite, snapshot FlowSnapshot, args 
 			},
 			Requires:         []string{flowharness.AgentHarnessLabel(harness)},
 			roleInstructions: reviewAgent.Agent.Prompt,
+			flowAgent:        true,
 		})
 		usedNames[name] = true
 	}
@@ -626,7 +629,8 @@ func defaultAgentCheckDefinition(name string, kind CheckKind, sel flowharness.Ag
 			Argv:  []string{command},
 			Shell: true,
 		},
-		Requires: []string{flowharness.AgentHarnessLabel(sel.Harness)},
+		Requires:  []string{flowharness.AgentHarnessLabel(sel.Harness)},
+		flowAgent: true,
 	}, nil
 }
 
@@ -907,6 +911,10 @@ SELECT attempt FROM workflow_node_runs WHERE id = ?`, nodeRunID).Scan(&nodeAttem
 	if definition.reviewAggregation {
 		payload["review_aggregation"] = true
 	}
+	if definition.flowAgent {
+		payload["completion_protocol"] = checkverdict.CompletionProtocol
+		payload["completion_mode"] = checkCompletionMode(role, definition)
+	}
 	if nodeAttempt > 0 {
 		payload["node_attempt"] = nodeAttempt
 	}
@@ -954,6 +962,19 @@ SELECT attempt FROM workflow_node_runs WHERE id = ?`, nodeRunID).Scan(&nodeAttem
 	}
 
 	return job, job.ID != "", nil
+}
+
+func checkCompletionMode(role flowworker.JobRole, definition CheckDefinition) checkverdict.Mode {
+	if role == flowworker.RoleVerifier {
+		return checkverdict.ModeVerify
+	}
+	if definition.reviewAggregation {
+		return checkverdict.ModeReviewAggregation
+	}
+	if definition.reviewDiscovery {
+		return checkverdict.ModeReviewDiscovery
+	}
+	return checkverdict.ModeReview
 }
 
 func (s *CheckConfigService) bindPendingWorkflowCheckJob(ctx context.Context, taskID, checkName, jobID string) error {

@@ -28,7 +28,7 @@
      follow-up work.
    - Treat an omitted requirement as introduced by the change when the task
      explicitly required that behavior.
-   - Do not modify files, commit, push, certify threads, or call `flow complete`.
+   - Do not modify files, commit, push, or certify threads.
    - If the prompt identifies this job as parallel review discovery, do not
      create threads or call `flow comment`; report candidates only through the
      verdict file for the aggregation step.
@@ -85,8 +85,11 @@
      opening blocking threads.
      `reason` and each comment `body` are free text (<= 4096 bytes each); at most 50
      comments. Re-filing the same comment is a no-op, so a retry never double-files.
-   - The verdict file is required. If it is missing or invalid, Flow pauses the workflow
-     for a human retry instead of interpreting the process exit as a review result.
+   - The verdict file is required. When `FLOW_COMPLETION_PROTOCOL=flow_complete`,
+     run `flow complete` after writing it. Fix any validation error and retry;
+     after success, do not modify the verdict. This interactive terminal remains
+     live until completion, cancellation, or lease loss. In a custom check
+     without that protocol, write the verdict before exiting as usual.
    - Cross-check: a `satisfied` verdict is overridden to `blocked` when open review
      threads remain on the change (including ones you just filed), so do not report
      `satisfied` alongside blocking comments.

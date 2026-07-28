@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ClarifiedLabs/flow/internal/checkverdict"
 	flowclient "github.com/ClarifiedLabs/flow/internal/client"
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
@@ -2537,6 +2538,9 @@ func uploadReadyTranscriptBestEffort(client *flowclient.Client, sessionID string
 }
 
 func runComplete(args []string, stdout, stderr io.Writer) int {
+	if strings.TrimSpace(os.Getenv("FLOW_COMPLETION_PROTOCOL")) == checkverdict.CompletionProtocol {
+		return runCheckComplete(args, stdout, stderr)
+	}
 	flags := flag.NewFlagSet("complete", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
@@ -2650,6 +2654,38 @@ func runComplete(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "%s\t%s\t%s\treplayed=%t\n", artifact.ID, result.Run.ID, result.Run.State, replayed || result.Replayed)
+	return 0
+}
+
+func runCheckComplete(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 0 {
+		fmt.Fprintln(stderr, "check completion does not accept flags or positional arguments")
+		return 2
+	}
+	jobID := strings.TrimSpace(os.Getenv("FLOW_JOB_ID"))
+	checkName := strings.TrimSpace(os.Getenv("FLOW_CHECK_NAME"))
+	verdictPath := strings.TrimSpace(os.Getenv("FLOW_VERDICT_FILE"))
+	completionPath := strings.TrimSpace(os.Getenv("FLOW_COMPLETION_FILE"))
+	modeValue := strings.TrimSpace(os.Getenv("FLOW_CHECK_MODE"))
+	if jobID == "" || checkName == "" || verdictPath == "" || completionPath == "" || modeValue == "" {
+		fmt.Fprintln(stderr, "check completion requires FLOW_JOB_ID, FLOW_CHECK_NAME, FLOW_CHECK_MODE, FLOW_VERDICT_FILE, and FLOW_COMPLETION_FILE")
+		return 2
+	}
+	mode, err := checkverdict.ParseMode(modeValue)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	validated, err := checkverdict.SealVerdict(verdictPath, completionPath, checkverdict.Context{
+		JobID:     jobID,
+		CheckName: checkName,
+		Mode:      mode,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "complete check: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s\t%s\t%s\n", jobID, checkName, validated.Report.Verdict)
 	return 0
 }
 
@@ -2927,7 +2963,7 @@ func printUsage(out io.Writer) {
   flow thread reply|claim|certify|reopen
   flow status MESSAGE
   flow ask QUESTION
-  flow complete --summary-file PATH [--output-file PATH]
+  flow complete [--summary-file PATH] [--output-file PATH]
   flow submit --summary-file PATH [--output-file PATH]
   flow reconcile
   flow --version

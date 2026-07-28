@@ -1,6 +1,6 @@
 data_dir: ~/.local/share/flow
 listen_addr: 127.0.0.1:8421
-protocol_version: "3"
+protocol_version: "4"
 # Existing active leases are reserved for surviving workers for this long after
 # a coordinator restart becomes ready.
 workers:

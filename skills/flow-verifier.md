@@ -10,7 +10,7 @@
 2. Verify requirements and claims:
    - Check the requirements in the task body against the current code and tests.
    - For claimed threads, inspect the original concern, author rationale, and claimed commit.
-   - Do not implement fixes, commit, push, create new review concerns, or call `flow complete`.
+   - Do not implement fixes, commit, push, or create new review concerns.
 
 3. Decide each claimed thread:
    - Decide `certify` when the claim is correct, `reopen` (with a body explaining why)
@@ -42,5 +42,8 @@
      must be `certify` or `reopen`; `reopen` requires a non-empty `body`. `reason` and
      each `body` are free text (<= 4096 bytes each); at most 100 decisions. Re-applying a
      decision that already took effect is a no-op, so a retry is safe.
-   - The verdict file is required. If it is missing or invalid, Flow pauses the workflow
-     for a human retry instead of interpreting the process exit as a verification result.
+   - The verdict file is required. When `FLOW_COMPLETION_PROTOCOL=flow_complete`,
+     run `flow complete` after writing it. Fix any validation error and retry;
+     after success, do not modify the verdict. This interactive terminal remains
+     live until completion, cancellation, or lease loss. In a custom check
+     without that protocol, write the verdict before exiting as usual.

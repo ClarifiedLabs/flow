@@ -275,7 +275,7 @@ func TestDefaultAgentCheckCommandUsesSelectedHarness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("default harness check command: %v", err)
 	}
-	for _, want := range []string{"flow fetch-prompt --harness harness", "harness '--model' 'fast' -p \"$prompt\""} {
+	for _, want := range []string{"flow fetch-prompt --harness harness", "harness '--model' 'fast' -i \"$prompt\""} {
 		if !strings.Contains(command, want) {
 			t.Fatalf("harness check command missing %q:\n%s", want, command)
 		}

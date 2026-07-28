@@ -15,7 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const DefaultProtocolVersion = "3"
+const DefaultProtocolVersion = "4"
 
 type CoordinatorConfig struct {
 	DataDir                    string               `json:"data_dir" yaml:"data_dir"`

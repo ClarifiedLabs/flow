@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ClarifiedLabs/flow/internal/checkverdict"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
@@ -28,10 +29,13 @@ func TestDefaultAgentChecksUseSelectedHarnessAndArgs(t *testing.T) {
 			t.Fatalf("%s entrypoint = %+v", definition.Name, definition.Entrypoint)
 		}
 		command := definition.Entrypoint.Argv[0]
-		for _, want := range []string{"flow fetch-prompt --harness harness", "harness '--model' 'anthropic:claude-sonnet-4-6' -p \"$prompt\""} {
+		for _, want := range []string{"flow fetch-prompt --harness harness", "harness '--model' 'anthropic:claude-sonnet-4-6' -i \"$prompt\""} {
 			if !strings.Contains(command, want) {
 				t.Fatalf("%s default command missing %q:\n%s", definition.Name, want, command)
 			}
+		}
+		if !definition.flowAgent {
+			t.Fatalf("%s is not marked as a Flow-owned agent check", definition.Name)
 		}
 		if got := definition.Requires; len(got) != 1 || got[0] != flowharness.AgentHarnessLabel(flowharness.Harness) {
 			t.Fatalf("%s requires = %#v, want harness harness label", definition.Name, got)
@@ -295,11 +299,11 @@ INSERT INTO workflow_node_runs (
 		command := fmt.Sprint(entrypoint["argv"])
 		switch name {
 		case "code-review.node.nr-parallel":
-			if payloadString(job.Payload, "role_instructions") != "Focus on correctness." || !strings.Contains(command, "openai:gpt-5") || job.Payload["blocking"] != true || job.Payload["review_discovery"] != true {
+			if payloadString(job.Payload, "role_instructions") != "Focus on correctness." || !strings.Contains(command, "openai:gpt-5") || !strings.Contains(command, `-i "$prompt"`) || job.Payload["blocking"] != true || job.Payload["review_discovery"] != true || payloadString(job.Payload, "completion_protocol") != checkverdict.CompletionProtocol || payloadString(job.Payload, "completion_mode") != string(checkverdict.ModeReviewDiscovery) {
 				t.Errorf("code review payload = %+v", job.Payload)
 			}
 		case "security-review.node.nr-parallel":
-			if payloadString(job.Payload, "role_instructions") != "Focus on security." || !strings.Contains(command, "anthropic:claude-sonnet-4-6") || job.Payload["blocking"] != false || job.Payload["review_discovery"] != true {
+			if payloadString(job.Payload, "role_instructions") != "Focus on security." || !strings.Contains(command, "anthropic:claude-sonnet-4-6") || !strings.Contains(command, `-i "$prompt"`) || job.Payload["blocking"] != false || job.Payload["review_discovery"] != true || payloadString(job.Payload, "completion_protocol") != checkverdict.CompletionProtocol || payloadString(job.Payload, "completion_mode") != string(checkverdict.ModeReviewDiscovery) {
 				t.Errorf("security review payload = %+v", job.Payload)
 			}
 		default:
@@ -381,6 +385,8 @@ INSERT INTO workflow_node_runs (
 	if aggregateJob.ID == "" || aggregateJob.Payload["blocking"] != true ||
 		aggregateJob.Payload["review_aggregation"] != true ||
 		aggregateJob.Payload["review_discovery"] != nil ||
+		payloadString(aggregateJob.Payload, "completion_protocol") != checkverdict.CompletionProtocol ||
+		payloadString(aggregateJob.Payload, "completion_mode") != string(checkverdict.ModeReviewAggregation) ||
 		!strings.Contains(fmt.Sprint(entrypoint["argv"]), "gpt-5") {
 		t.Fatalf("aggregation job = %+v, want blocking code-review runtime", aggregateJob)
 	}

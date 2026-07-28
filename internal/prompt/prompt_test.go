@@ -191,6 +191,43 @@ func TestBuildReviewerPromptUsesReviewerVerdictInstructions(t *testing.T) {
 	}
 }
 
+func TestBuildAgentCheckPromptUsesCompletionProtocolConditionally(t *testing.T) {
+	for _, role := range []string{RoleReviewer, RoleVerifier} {
+		t.Run(role+"/interactive", func(t *testing.T) {
+			rendered, err := Build(Input{
+				Role:               role,
+				TaskID:             "t-check",
+				CheckName:          role,
+				CompletionProtocol: "flow_complete",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{
+				"After writing the verdict, run flow complete.",
+				"correct the verdict and run it again",
+				"terminal remains live",
+			} {
+				if !strings.Contains(rendered, want) {
+					t.Fatalf("interactive prompt missing %q:\n%s", want, rendered)
+				}
+			}
+		})
+		t.Run(role+"/process-exit", func(t *testing.T) {
+			rendered, err := Build(Input{Role: role, TaskID: "t-custom", CheckName: role})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(rendered, "Write it before exiting") {
+				t.Fatalf("custom prompt missing process-exit instruction:\n%s", rendered)
+			}
+			if strings.Contains(rendered, "After writing the verdict, run flow complete.") {
+				t.Fatalf("custom prompt included interactive completion instruction:\n%s", rendered)
+			}
+		})
+	}
+}
+
 func TestBuildReviewerPromptIncludesCompletionAssessmentGuidance(t *testing.T) {
 	rendered, err := Build(Input{
 		Role:                 RoleReviewer,
@@ -340,15 +377,18 @@ func TestBuildRejectsUnsupportedRole(t *testing.T) {
 
 func TestInputFromEnvironmentPrefersWorkerRole(t *testing.T) {
 	env := map[string]string{
-		"FLOW_WORKER_ROLE": "reviewer",
-		"FLOW_ROLE":        "author",
-		"FLOW_TASK_ID":     "t-test-0004",
+		"FLOW_WORKER_ROLE":         "reviewer",
+		"FLOW_ROLE":                "author",
+		"FLOW_TASK_ID":             "t-test-0004",
+		"FLOW_COMPLETION_PROTOCOL": "flow_complete",
+		"FLOW_CHECK_MODE":          "review",
 	}
 	input := InputFromEnvironment(func(key string) string {
 		return env[key]
 	})
 
-	if input.Role != RoleReviewer || input.TaskID != "t-test-0004" {
+	if input.Role != RoleReviewer || input.TaskID != "t-test-0004" ||
+		input.CompletionProtocol != "flow_complete" || input.CheckMode != "review" {
 		t.Fatalf("input = %+v", input)
 	}
 }

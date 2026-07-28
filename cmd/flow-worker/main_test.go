@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/api"
+	"github.com/ClarifiedLabs/flow/internal/checkverdict"
 	flowclient "github.com/ClarifiedLabs/flow/internal/client"
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
@@ -346,6 +347,15 @@ func TestAdvisoryReviewAggregationAppliesTaskActionBeforeReportingVerdict(t *tes
 	}`), 0o600); err != nil {
 		t.Fatalf("write verdict: %v", err)
 	}
+	sealedReport, ok, err := workerexec.ReadVerdictFile(verdictPath)
+	if err != nil || !ok {
+		t.Fatalf("read sealed verdict: ok=%v err=%v", ok, err)
+	}
+	// The live worker captures this report while validating the completion
+	// seal. Changing the file afterward must not affect applied actions.
+	if err := os.WriteFile(verdictPath, []byte(`{"verdict":"blocked","reason":"mutated after seal"}`), 0o600); err != nil {
+		t.Fatalf("mutate verdict after capture: %v", err)
+	}
 	taskID := "t-review"
 	job := flowworker.Job{
 		ID: "j-review", TaskID: &taskID, Role: flowworker.RoleReviewer,
@@ -358,10 +368,12 @@ func TestAdvisoryReviewAggregationAppliesTaskActionBeforeReportingVerdict(t *tes
 	result := workerexec.RunResult{
 		ExitCode: 0,
 		Payload: workerexec.JobPayload{
-			CheckName: "review-aggregation.node.nr-1",
-			ChangeID:  "ch-review",
+			CheckName:          "review-aggregation.node.nr-1",
+			ChangeID:           "ch-review",
+			CompletionProtocol: checkverdict.CompletionProtocol,
 		},
 		VerdictFilePath: verdictPath,
+		VerdictReport:   &sealedReport,
 	}
 	var stdout bytes.Buffer
 	verdict, err := reportCheckIfNeeded(client, job, flowworker.Lease{ID: "l-review"}, result, &stdout)
@@ -1076,7 +1088,7 @@ capacity:
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"worker_id: w-local", "protocol: 3", "labels: 1", "capacity_persistent_agent: 1"} {
+	for _, want := range []string{"worker_id: w-local", "protocol: 4", "labels: 1", "capacity_persistent_agent: 1"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("config output missing %q:\n%s", want, output)
 		}
@@ -1663,7 +1675,7 @@ capacity:
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"worker_id: w-local", "protocol: 3", "labels: 1", "capacity_persistent_agent: 1"} {
+	for _, want := range []string{"worker_id: w-local", "protocol: 4", "labels: 1", "capacity_persistent_agent: 1"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("config output missing %q:\n%s", want, output)
 		}

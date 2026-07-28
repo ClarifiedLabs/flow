@@ -1041,6 +1041,10 @@ Important environment variables:
 - `FLOW_WORKER_ROLE`
 - `FLOW_WORKER_HARNESS`
 - `FLOW_ROLE`
+- `FLOW_COMPLETION_PROTOCOL`, `FLOW_CHECK_MODE`, and `FLOW_COMPLETION_FILE`:
+  present only for Flow-owned interactive reviewer/verifier checks. The agent
+  writes `$FLOW_VERDICT_FILE` and runs `flow complete`; the worker ends the
+  terminal only after verifying the resulting digest-bound completion seal.
 - `FLOW_PHASE_NAME`, `FLOW_PHASE_INDEX`, `FLOW_PHASE_FINAL`: the author job's
   work-phase coordinates. `FLOW_PHASE_FINAL=false` relaxes `flow ready`'s
   handoff-template validation (intermediate phase artifacts only need to be
@@ -1052,7 +1056,8 @@ Entrypoint contract:
 environment variables in
 -> entrypoint runs inside tmux
 -> lifecycle events, comments, status, and verdicts out through flow CLI
--> exit code is the verdict only for ephemeral CI/check jobs
+-> Flow-owned agent checks finish through `flow complete`; custom checks and CI
+   retain their configured process-exit semantics
 ```
 
 Author entrypoints should `exec` the harness so process-state detection can

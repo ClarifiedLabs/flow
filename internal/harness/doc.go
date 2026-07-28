@@ -382,13 +382,15 @@ func defaultConsoleCommandWithArgs(name string, args []string) (string, error) {
 	}
 }
 
-// DefaultAgentCheckCommandWithArgs builds the non-interactive check/print
-// command (used by reviewer/verifier jobs) for the given additive argv tokens.
+// DefaultAgentCheckCommandWithArgs builds the interactive command used by
+// Flow-owned reviewer/verifier jobs. The worker ends the harness only after a
+// valid `flow complete` seal, leaving the terminal available when an agent
+// needs to correct its verdict or an operator needs to continue the session.
 func DefaultAgentCheckCommandWithArgs(name string, args []string) (string, error) {
 	if NormalizeName(name) != Harness {
 		return "", fmt.Errorf("unsupported agent harness %q", name)
 	}
-	return DefaultHarnessPrintCommandWithArgs(args), nil
+	return DefaultHarnessInteractiveCheckCommandWithArgs(args), nil
 }
 
 func renderShellArgs(args []string) string {
@@ -443,6 +445,16 @@ func DefaultHarnessPrintCommandWithArgs(args []string) string {
 code=$?
 if [ "$code" -eq 0 ]; then
   harness` + renderOptionalShellArgs(args) + ` -p "$prompt"
+  code=$?
+fi
+exit "$code"`
+}
+
+func DefaultHarnessInteractiveCheckCommandWithArgs(args []string) string {
+	return `prompt="$(flow fetch-prompt --harness harness)"
+code=$?
+if [ "$code" -eq 0 ]; then
+  harness` + renderOptionalShellArgs(args) + ` -i "$prompt"
   code=$?
 fi
 exit "$code"`
