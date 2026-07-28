@@ -238,7 +238,6 @@ RUN set -eux \
         "$CARGO_HOME" \
         /flow \
         /home/flow \
-        /run/flow-worker \
         "$XDG_RUNTIME_DIR" \
     && go version \
     && bash -lc 'nvm --version && node --version && npm --version' \
