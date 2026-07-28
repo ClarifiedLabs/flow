@@ -196,10 +196,14 @@ WHERE workflow_run_id = ? AND from_node_key = 'review' AND event_kind = 'node_co
 }
 
 type workflowMergeConflictStub struct {
-	err error
+	err     error
+	onMerge func()
 }
 
 func (s workflowMergeConflictStub) MergeChange(context.Context, string) (MergeResult, error) {
+	if s.onMerge != nil {
+		s.onMerge()
+	}
 	return MergeResult{}, s.err
 }
 
@@ -301,8 +305,27 @@ INSERT INTO workflow_artifacts (
 		Tasks: tasks, Checks: checks, Sessions: sessions,
 		Project: Project{ID: "p-test", Name: "test", BaseBranch: "main"},
 	})
+	required := true
+	exitCode := 1
+	if _, err := checks.ReportCheck(ctx, ReportCheckInput{
+		TaskID: task.ID, Name: AutoMergeCheckName, Kind: CheckKindCI,
+		Required: &required, Verdict: CheckBlocked, ExitCode: &exitCode,
+		Details:  AutoMergeConflictDetailsPrefix + " conflict from the prior merge visit",
+		Reporter: "coordinator",
+	}); err != nil {
+		t.Fatalf("seed prior auto-merge conflict check: %v", err)
+	}
 	executor.merges = workflowMergeConflictStub{
 		err: fmt.Errorf("squash merge task branch: %w", &flowgit.MergeConflictError{Output: conflictLog}),
+		onMerge: func() {
+			check, err := checks.GetCheck(ctx, task.ID, AutoMergeCheckName)
+			if err != nil {
+				t.Fatalf("load retired auto-merge check: %v", err)
+			}
+			if check.Required || check.Verdict != CheckSkipped || check.Details != "reset after new author revision" {
+				t.Fatalf("auto-merge check before merge = %+v, want retired prior conflict", check)
+			}
+		},
 	}
 
 	run, err := runs.Get(ctx, runID)

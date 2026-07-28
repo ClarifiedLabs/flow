@@ -410,6 +410,18 @@ WHERE task_id = ?
 	return int(rows) + retiredAutoMerge, nil
 }
 
+// RetireAutoMergeConflictCheckForNewRevision clears the coordinator-owned
+// merge-conflict check after an author submits a new workflow revision. Graph
+// workflows schedule their other checks per node visit, so they must retire
+// this one global check explicitly instead of using the legacy broad reset.
+func (s *CheckService) RetireAutoMergeConflictCheckForNewRevision(ctx context.Context, taskID string) (int, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return 0, errors.New("task id is required")
+	}
+	return s.retireAutoMergeConflictCheckForNewRevision(ctx, taskID, formatTime(s.now().UTC()))
+}
+
 func (s *CheckService) retireAutoMergeConflictCheckForNewRevision(ctx context.Context, taskID string, nowText string) (int, error) {
 	result, err := s.db.ExecContext(ctx, `
 UPDATE checks

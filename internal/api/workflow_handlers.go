@@ -285,6 +285,15 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 				writeWorkflowError(w, err, "update_change_failed")
 				return
 			}
+			// Only the first completion of the active author node represents a
+			// new revision. A replay of this endpoint must not clear a merge
+			// conflict reported after that completion.
+			if nodeRun.State != coordinator.WorkflowNodeSucceeded && s.checks != nil {
+				if _, err := s.checks.RetireAutoMergeConflictCheckForNewRevision(r.Context(), taskID); err != nil {
+					writeWorkflowError(w, err, "reset_merge_conflict_check_failed")
+					return
+				}
+			}
 		}
 		result, err := s.workflowRuns.CompleteNode(r.Context(), coordinator.CompleteWorkflowNodeInput{
 			NodeRunID: request.NodeRunID, Outcome: "completed", ArtifactID: request.ArtifactID,

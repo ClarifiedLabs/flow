@@ -678,6 +678,12 @@ func (e *WorkflowExecutor) handleMergeChange(ctx context.Context, run WorkflowRu
 	if err != nil {
 		return false, err
 	}
+	// Author completion normally retires the prior conflict check. Keep merge
+	// execution self-healing for workflow runs that reached this node before
+	// that behavior was deployed or whose completion response was interrupted.
+	if _, err := e.checks.RetireAutoMergeConflictCheckForNewRevision(ctx, run.TaskID); err != nil {
+		return false, fmt.Errorf("retire prior workflow merge conflict: %w", err)
+	}
 	if change.MergedAt == nil {
 		_, err = e.merges.MergeChange(ctx, changeID)
 	}

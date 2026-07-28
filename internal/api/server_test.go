@@ -4757,6 +4757,75 @@ func TestWorkflowAuthorProcessExitPausesUntilHumanRetry(t *testing.T) {
 	}
 }
 
+func TestWorkflowAuthorCompletionRetiresPriorAutoMergeConflictCheck(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	started := startAuthorSessionForStatusTest(t, fixture, "Resolve prior merge conflict")
+
+	required := true
+	exitCode := 1
+	reportConflict := func() {
+		t.Helper()
+		if _, err := fixture.Checks.ReportCheck(ctx, coordinator.ReportCheckInput{
+			TaskID: started.Session.TaskID, Name: coordinator.AutoMergeCheckName, Kind: coordinator.CheckKindCI,
+			Required: &required, Verdict: coordinator.CheckBlocked, ExitCode: &exitCode,
+			Details:  coordinator.AutoMergeConflictDetailsPrefix + " resolve the prior conflict",
+			Reporter: "coordinator",
+		}); err != nil {
+			t.Fatalf("report auto-merge conflict: %v", err)
+		}
+	}
+	reportConflict()
+
+	payload, err := json.Marshal(map[string]string{
+		"change_id": started.Change.ID,
+		"head_sha":  "resolved-head",
+	})
+	if err != nil {
+		t.Fatalf("marshal change artifact: %v", err)
+	}
+	artifact, _, err := fixture.Bundle.WorkflowArtifacts.Create(ctx, coordinator.CreateWorkflowArtifactInput{
+		WorkflowRunID:   started.Session.WorkflowRunID,
+		NodeRunID:       started.Session.NodeRunID,
+		SessionID:       started.Session.ID,
+		CreatorKey:      "test-author",
+		Kind:            coordinator.ArtifactChange,
+		SummaryMarkdown: "Resolved the merge conflict.",
+		Payload:         payload,
+		ClientKey:       "resolved-merge-conflict",
+	})
+	if err != nil {
+		t.Fatalf("create change artifact: %v", err)
+	}
+
+	// Keep this API regression focused on completion. Node execution is covered
+	// by coordinator tests and would require a real exchange revision here.
+	fixture.Bundle.WorkflowExecutor = nil
+	path := "/v2/tasks/" + started.Session.TaskID + "/workflow/complete"
+	request := workflowCompleteRequest{NodeRunID: started.Session.NodeRunID, ArtifactID: artifact.ID}
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, path, request, http.StatusOK, nil)
+
+	check, err := fixture.Checks.GetCheck(ctx, started.Session.TaskID, coordinator.AutoMergeCheckName)
+	if err != nil {
+		t.Fatalf("load retired auto-merge check: %v", err)
+	}
+	if check.Required || check.Verdict != coordinator.CheckSkipped || check.Details != "reset after new author revision" {
+		t.Fatalf("auto-merge check after author completion = %+v, want retired", check)
+	}
+
+	// A replay is not a new author revision and must not erase a conflict that
+	// was reported after the original completion.
+	reportConflict()
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, path, request, http.StatusOK, nil)
+	check, err = fixture.Checks.GetCheck(ctx, started.Session.TaskID, coordinator.AutoMergeCheckName)
+	if err != nil {
+		t.Fatalf("reload auto-merge check after replay: %v", err)
+	}
+	if !check.Required || check.Verdict != coordinator.CheckBlocked {
+		t.Fatalf("auto-merge check after completion replay = %+v, want current conflict preserved", check)
+	}
+}
+
 func TestWorkflowFailedStepCanBeSkippedByOwner(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()

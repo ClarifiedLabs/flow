@@ -394,7 +394,15 @@ func (s *MergeService) ensureMergeIntent(ctx context.Context, taskID string, cha
 	if existing, ok, err := s.openMergeIntentForChange(ctx, change.ID); err != nil {
 		return mergeIntent{}, err
 	} else if ok {
-		return existing, nil
+		if existing.HeadSHA == strings.TrimSpace(change.HeadSHA) {
+			return existing, nil
+		}
+		// The author moved the branch after the prior attempt. Its intent no
+		// longer describes the revision being merged or the current base, so a
+		// new attempt must record a fresh recovery boundary.
+		if err := s.deleteMergeIntent(ctx, existing.ID); err != nil {
+			return mergeIntent{}, fmt.Errorf("discard stale merge intent: %w", err)
+		}
 	}
 	baseTip, ok, err := flowgit.BranchTip(ctx, exchangePath, change.Base)
 	if err != nil {
