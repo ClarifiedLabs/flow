@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ClarifiedLabs/flow/internal/config"
+	"github.com/ClarifiedLabs/flow/internal/api/contract"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
@@ -20,7 +20,7 @@ func putTranscriptAs(t *testing.T, server *Server, token string, path string, bo
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPut, path, strings.NewReader(body))
 	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set(protocolHeader, config.DefaultProtocolVersion)
+	request.Header.Set(protocolHeader, contract.ProtocolVersion)
 	request.Header.Set("Content-Type", "text/plain")
 	server.ServeHTTP(response, request)
 	return response
@@ -31,7 +31,7 @@ func getAs(t *testing.T, server *Server, token string, path string) *httptest.Re
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, path, nil)
 	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set(protocolHeader, config.DefaultProtocolVersion)
+	request.Header.Set(protocolHeader, contract.ProtocolVersion)
 	server.ServeHTTP(response, request)
 	return response
 }

@@ -18,9 +18,8 @@ func TestLoadCoordinatorOverlaysDataDir(t *testing.T) {
 	configPath := filepath.Join(tempDir, "coordinator.json")
 
 	payload, err := json.Marshal(CoordinatorConfig{
-		DataDir:         dataDir,
-		ListenAddr:      "127.0.0.1:9000",
-		ProtocolVersion: "2",
+		DataDir:    dataDir,
+		ListenAddr: "127.0.0.1:9000",
 		AuthorEntrypoint: map[string]any{
 			"argv":  []string{"harness", "--continue"},
 			"cwd":   "agents",
@@ -48,9 +47,6 @@ func TestLoadCoordinatorOverlaysDataDir(t *testing.T) {
 	}
 	if cfg.ListenAddr != "127.0.0.1:9000" {
 		t.Fatalf("ListenAddr = %q", cfg.ListenAddr)
-	}
-	if cfg.ProtocolVersion != "2" {
-		t.Fatalf("ProtocolVersion = %q", cfg.ProtocolVersion)
 	}
 	if !cfg.AuthorEntrypointConfigured {
 		t.Fatal("AuthorEntrypointConfigured = false, want true for file override")
@@ -491,9 +487,6 @@ func TestLoadWorkerDefaultsLabels(t *testing.T) {
 	if cfg.WorkDir == "" {
 		t.Fatal("WorkDir is empty")
 	}
-	if cfg.ProtocolVersion != DefaultProtocolVersion {
-		t.Fatalf("ProtocolVersion = %q, want %q", cfg.ProtocolVersion, DefaultProtocolVersion)
-	}
 }
 
 func TestLoadWorkerYAML(t *testing.T) {
@@ -532,9 +525,6 @@ git:
 	}
 	if cfg.Token != "worker-secret" {
 		t.Fatalf("Token = %q", cfg.Token)
-	}
-	if cfg.ProtocolVersion != DefaultProtocolVersion {
-		t.Fatalf("ProtocolVersion = %q, want %q", cfg.ProtocolVersion, DefaultProtocolVersion)
 	}
 	if cfg.Labels["local"] != "true" || cfg.Labels["agent.harness.harness"] != "true" {
 		t.Fatalf("Labels = %#v", cfg.Labels)
@@ -612,7 +602,6 @@ func TestApplyWorkerEnvOverrides(t *testing.T) {
 			"FLOW_WORKER_GIT_PRINCIPAL":             "worker:w-env",
 			"FLOW_WORKER_GIT_COMMIT_NAME":           "Flow Bot",
 			"FLOW_WORKER_GIT_COMMIT_EMAIL":          "flow-bot@example.com",
-			"FLOW_WORKER_PROTOCOL_VERSION":          "2",
 		}
 		return values[key]
 	}
@@ -641,9 +630,6 @@ func TestApplyWorkerEnvOverrides(t *testing.T) {
 	}
 	if cfg.Git.CommitName != "Flow Bot" || cfg.Git.CommitEmail != "flow-bot@example.com" {
 		t.Fatalf("Git commit identity = %+v", cfg.Git)
-	}
-	if cfg.ProtocolVersion != "2" {
-		t.Fatalf("ProtocolVersion = %q, want 2", cfg.ProtocolVersion)
 	}
 }
 
@@ -856,11 +842,11 @@ func TestLocalClientConfigReferencesOwnerTokenFile(t *testing.T) {
 		t.Fatalf("write owner token: %v", err)
 	}
 
-	cfg, err := LocalClientConfig(dataDir, "http://127.0.0.1:9000", "owner-token", "2")
+	cfg, err := LocalClientConfig(dataDir, "http://127.0.0.1:9000", "owner-token")
 	if err != nil {
 		t.Fatalf("local client config: %v", err)
 	}
-	if cfg.ServerURL != "http://127.0.0.1:9000" || cfg.ProtocolVersion != "2" || cfg.DataDir != dataDir {
+	if cfg.ServerURL != "http://127.0.0.1:9000" || cfg.DataDir != dataDir {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 	if cfg.Token != "" || cfg.TokenFile != tokenPath {

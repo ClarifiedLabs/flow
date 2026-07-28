@@ -1029,7 +1029,6 @@ The worker does the same setup for every job:
 Important environment variables:
 
 - `FLOW_COORDINATOR_URL`
-- `FLOW_PROTOCOL_VERSION`
 - `FLOW_SESSION_TOKEN`
 - `FLOW_TASK_ID`
 - `FLOW_SESSION_ID`
@@ -1158,9 +1157,10 @@ It registers the worker, claims jobs, holds the worker-scoped credential,
 prepares git worktrees, starts tmux sessions, injects only the session token
 into the job environment, supervises heartbeats, and releases leases.
 
-The three binaries share protocol types and version metadata. Coordinator,
-worker, and client requests still use `Flow-Protocol-Version`; startup should
-fail clearly when binary versions are incompatible.
+The three binaries share protocol types and version metadata. The protocol
+version is compiled into each binary rather than configured by users.
+Coordinator, worker, and client requests still use `Flow-Protocol-Version`;
+startup should fail clearly when binary versions are incompatible.
 
 Authority still comes from credentials. The binary split is defense in depth and
 deployment hygiene: `flow` lacks privileged server/worker entrypoints, while

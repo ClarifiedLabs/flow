@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/api/contract"
-	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	"github.com/ClarifiedLabs/flow/internal/worker"
 )
@@ -40,7 +39,6 @@ type ServerOptions struct {
 	OwnerToken      string
 	HookToken       string
 	WorkerJoinToken string
-	ProtocolVersion string
 }
 
 type Server struct {
@@ -50,17 +48,12 @@ type Server struct {
 	ownerToken      string
 	hookToken       string
 	workerJoinToken string
-	protocolVersion string
 }
 
 func NewServer(opts ServerOptions) (*Server, error) {
 	if opts.Registry == nil {
 		return nil, errors.New("project registry is required")
 	}
-	if strings.TrimSpace(opts.ProtocolVersion) == "" {
-		opts.ProtocolVersion = config.DefaultProtocolVersion
-	}
-
 	return &Server{
 		registry:        opts.Registry,
 		credentials:     opts.Registry.Credentials(),
@@ -68,7 +61,6 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		ownerToken:      strings.TrimSpace(opts.OwnerToken),
 		hookToken:       strings.TrimSpace(opts.HookToken),
 		workerJoinToken: strings.TrimSpace(opts.WorkerJoinToken),
-		protocolVersion: opts.ProtocolVersion,
 	}, nil
 }
 
@@ -130,7 +122,7 @@ func (s *Server) forBundle(bundle *ProjectBundle) *projectServer {
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("flow api server request", "method", r.Method, "path", r.URL.Path)
-	w.Header().Set(protocolHeader, s.protocolVersion)
+	w.Header().Set(protocolHeader, contract.ProtocolVersion)
 	if r.URL.Path == "/v2/health" {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return

@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/ClarifiedLabs/flow/internal/api"
-	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
@@ -83,9 +82,8 @@ func newFlowTestFixture(t *testing.T) flowTestFixture {
 	}
 
 	server, err := api.NewServer(api.ServerOptions{
-		Registry:        registry,
-		OwnerToken:      "owner-token",
-		ProtocolVersion: config.DefaultProtocolVersion,
+		Registry:   registry,
+		OwnerToken: "owner-token",
 	})
 	if err != nil {
 		t.Fatalf("new api server: %v", err)
@@ -111,23 +109,6 @@ func newFlowTestFixture(t *testing.T) flowTestFixture {
 // the same path the coordinator's claim endpoint uses.
 func (f flowTestFixture) claimNext(ctx context.Context, input flowworker.ClaimInput) (flowworker.ProjectClaim, bool, error) {
 	return f.Registry.Claim(ctx, input)
-}
-
-// newFlowTestFixtureWithProtocol constructs the server with an explicit
-// protocol version for tests that exercise the protocol header.
-func newFlowTestFixtureWithProtocol(t *testing.T, protocolVersion string) flowTestFixture {
-	t.Helper()
-	f := newFlowTestFixture(t)
-	server, err := api.NewServer(api.ServerOptions{
-		Registry:        f.Registry,
-		OwnerToken:      "owner-token",
-		ProtocolVersion: protocolVersion,
-	})
-	if err != nil {
-		t.Fatalf("new api server: %v", err)
-	}
-	f.Server = server
-	return f
 }
 
 func repointFlowTestFixtureExchange(t *testing.T, fixture flowTestFixture, exchangePath string) {

@@ -18,9 +18,8 @@ func newClientForTest(t *testing.T, handler http.Handler) *Client {
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	client, err := New(config.ClientConfig{
-		ServerURL:       server.URL,
-		Token:           "test-token",
-		ProtocolVersion: config.DefaultProtocolVersion,
+		ServerURL: server.URL,
+		Token:     "test-token",
 	})
 	if err != nil {
 		t.Fatalf("new client: %v", err)

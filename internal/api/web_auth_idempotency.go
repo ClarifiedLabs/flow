@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/ClarifiedLabs/flow/internal/api/contract"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowweb "github.com/ClarifiedLabs/flow/internal/web"
 )
@@ -174,11 +175,11 @@ func webLoginPath(token string) string {
 
 func (s *Server) checkProtocol(r *http.Request) error {
 	requested := strings.TrimSpace(r.Header.Get(protocolHeader))
-	if requested == "" || requested == s.protocolVersion {
+	if requested == "" || requested == contract.ProtocolVersion {
 		return nil
 	}
 
-	return fmt.Errorf("client protocol %s is not supported; server protocol is %s", requested, s.protocolVersion)
+	return fmt.Errorf("client protocol %s is not supported; server protocol is %s", requested, contract.ProtocolVersion)
 }
 
 func (s *Server) authenticate(r *http.Request) (coordinator.Principal, error) {

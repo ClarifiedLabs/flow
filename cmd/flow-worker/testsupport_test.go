@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/ClarifiedLabs/flow/internal/api"
-	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
@@ -88,8 +87,7 @@ func newWorkerTestFixture(t *testing.T) workerTestFixture {
 	}
 
 	server, err := api.NewServer(api.ServerOptions{
-		Registry:        registry,
-		ProtocolVersion: config.DefaultProtocolVersion,
+		Registry: registry,
 	})
 	if err != nil {
 		t.Fatalf("new api server: %v", err)

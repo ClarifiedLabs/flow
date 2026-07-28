@@ -15,12 +15,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const DefaultProtocolVersion = "4"
-
 type CoordinatorConfig struct {
 	DataDir                    string               `json:"data_dir" yaml:"data_dir"`
 	ListenAddr                 string               `json:"listen_addr" yaml:"listen_addr"`
-	ProtocolVersion            string               `json:"protocol_version" yaml:"protocol_version"`
 	AuthorEntrypoint           map[string]any       `json:"author_entrypoint" yaml:"author_entrypoint"`
 	AuthorEntrypointConfigured bool                 `json:"-" yaml:"-"`
 	DefaultAgent               DefaultAgentConfig   `json:"default_agent" yaml:"default_agent"`
@@ -202,23 +199,21 @@ type ClientConfig struct {
 	// TokenFile points at a mode-0600 file holding the bearer token; it is
 	// resolved into Token at load time. flow init prefers it over an inline
 	// token so the secret lives in exactly one place.
-	TokenFile       string `json:"token_file,omitempty" yaml:"token_file,omitempty"`
-	DataDir         string `json:"data_dir,omitempty" yaml:"data_dir,omitempty"`
-	ProtocolVersion string `json:"protocol_version" yaml:"protocol_version"`
+	TokenFile string `json:"token_file,omitempty" yaml:"token_file,omitempty"`
+	DataDir   string `json:"data_dir,omitempty" yaml:"data_dir,omitempty"`
 }
 
 type WorkerConfig struct {
-	WorkerID        string               `json:"worker_id" yaml:"worker_id"`
-	CoordinatorURL  string               `json:"coordinator_url" yaml:"coordinator_url"`
-	Token           string               `json:"token" yaml:"token"`
-	WorkDir         string               `json:"work_dir" yaml:"work_dir"`
-	ProtocolVersion string               `json:"protocol_version" yaml:"protocol_version"`
-	Labels          map[string]string    `json:"labels" yaml:"labels"`
-	Taints          []scheduler.Taint    `json:"taints" yaml:"taints"`
-	Capacity        WorkerCapacity       `json:"capacity" yaml:"capacity"`
-	Terminal        WorkerTerminalConfig `json:"terminal" yaml:"terminal"`
-	Tmux            WorkerTmuxConfig     `json:"tmux" yaml:"tmux"`
-	Git             WorkerGitConfig      `json:"git" yaml:"git"`
+	WorkerID       string               `json:"worker_id" yaml:"worker_id"`
+	CoordinatorURL string               `json:"coordinator_url" yaml:"coordinator_url"`
+	Token          string               `json:"token" yaml:"token"`
+	WorkDir        string               `json:"work_dir" yaml:"work_dir"`
+	Labels         map[string]string    `json:"labels" yaml:"labels"`
+	Taints         []scheduler.Taint    `json:"taints" yaml:"taints"`
+	Capacity       WorkerCapacity       `json:"capacity" yaml:"capacity"`
+	Terminal       WorkerTerminalConfig `json:"terminal" yaml:"terminal"`
+	Tmux           WorkerTmuxConfig     `json:"tmux" yaml:"tmux"`
+	Git            WorkerGitConfig      `json:"git" yaml:"git"`
 }
 
 type WorkerCapacity struct {
@@ -265,9 +260,8 @@ func DefaultCoordinator() (CoordinatorConfig, error) {
 	}
 
 	return CoordinatorConfig{
-		DataDir:         dataDir,
-		ListenAddr:      "127.0.0.1:8421",
-		ProtocolVersion: DefaultProtocolVersion,
+		DataDir:    dataDir,
+		ListenAddr: "127.0.0.1:8421",
 	}, nil
 }
 
@@ -300,9 +294,6 @@ func LoadCoordinator(path string) (CoordinatorConfig, error) {
 	}
 	if fileCfg.ListenAddr != "" {
 		cfg.ListenAddr = fileCfg.ListenAddr
-	}
-	if fileCfg.ProtocolVersion != "" {
-		cfg.ProtocolVersion = fileCfg.ProtocolVersion
 	}
 	if fileCfg.AuthorEntrypoint != nil {
 		cfg.AuthorEntrypoint = copyAnyMap(fileCfg.AuthorEntrypoint)
@@ -356,8 +347,7 @@ func DefaultAuthorEntrypointForAgent(sel flowharness.AgentSelection) map[string]
 
 func DefaultClient() ClientConfig {
 	return ClientConfig{
-		ServerURL:       "http://127.0.0.1:8421",
-		ProtocolVersion: DefaultProtocolVersion,
+		ServerURL: "http://127.0.0.1:8421",
 	}
 }
 
@@ -395,10 +385,6 @@ func LoadClient(path string) (ClientConfig, error) {
 	if fileCfg.DataDir != "" {
 		cfg.DataDir = cleanRequiredPath(fileCfg.DataDir)
 	}
-	if fileCfg.ProtocolVersion != "" {
-		cfg.ProtocolVersion = fileCfg.ProtocolVersion
-	}
-
 	if cfg.Token == "" && cfg.TokenFile != "" {
 		token, err := ReadTokenFile(cfg.TokenFile)
 		if err != nil {
@@ -464,7 +450,7 @@ func ResolveOwnerTokenFallback(cfg ClientConfig) (string, string, bool, error) {
 // LocalClientConfig returns the client config a same-machine coordinator should
 // publish for local CLIs. When the owner token matches data_dir/owner.token, the
 // config references that file instead of duplicating the secret.
-func LocalClientConfig(dataDir string, serverURL string, ownerToken string, protocolVersion string) (ClientConfig, error) {
+func LocalClientConfig(dataDir string, serverURL string, ownerToken string) (ClientConfig, error) {
 	if strings.TrimSpace(dataDir) == "" {
 		resolved, err := DefaultDataDir()
 		if err != nil {
@@ -479,10 +465,6 @@ func LocalClientConfig(dataDir string, serverURL string, ownerToken string, prot
 	if strings.TrimSpace(serverURL) != "" {
 		cfg.ServerURL = strings.TrimSpace(serverURL)
 	}
-	if strings.TrimSpace(protocolVersion) != "" {
-		cfg.ProtocolVersion = strings.TrimSpace(protocolVersion)
-	}
-
 	ownerToken = strings.TrimSpace(ownerToken)
 	if ownerToken != "" {
 		ownerTokenPath := OwnerTokenPath(dataDir)
@@ -564,10 +546,9 @@ func DefaultWorker() (WorkerConfig, error) {
 	}
 
 	return WorkerConfig{
-		CoordinatorURL:  "http://127.0.0.1:8421",
-		WorkDir:         filepath.Join(dataDir, "workers"),
-		ProtocolVersion: DefaultProtocolVersion,
-		Labels:          map[string]string{},
+		CoordinatorURL: "http://127.0.0.1:8421",
+		WorkDir:        filepath.Join(dataDir, "workers"),
+		Labels:         map[string]string{},
 	}, nil
 }
 
@@ -621,9 +602,6 @@ func LoadWorker(path string) (WorkerConfig, error) {
 	}
 	if fileCfg.WorkDir != "" {
 		cfg.WorkDir = fileCfg.WorkDir
-	}
-	if fileCfg.ProtocolVersion != "" {
-		cfg.ProtocolVersion = fileCfg.ProtocolVersion
 	}
 	if fileCfg.Labels != nil {
 		cfg.Labels = fileCfg.Labels
@@ -680,9 +658,6 @@ func ApplyWorkerEnvOverrides(cfg WorkerConfig, getenv func(string) string) (Work
 	}
 	if value := strings.TrimSpace(getenv("FLOW_WORKER_WORK_DIR")); value != "" {
 		cfg.WorkDir = value
-	}
-	if value := strings.TrimSpace(getenv("FLOW_WORKER_PROTOCOL_VERSION")); value != "" {
-		cfg.ProtocolVersion = value
 	}
 	if value := strings.TrimSpace(getenv("FLOW_WORKER_CAPACITY_PERSISTENT_AGENT")); value != "" {
 		capacity, err := strconv.Atoi(value)
@@ -774,9 +749,6 @@ func normalizeCoordinator(cfg CoordinatorConfig) (CoordinatorConfig, error) {
 	if strings.TrimSpace(cfg.ListenAddr) == "" {
 		return CoordinatorConfig{}, errors.New("coordinator listen_addr is required")
 	}
-	if strings.TrimSpace(cfg.ProtocolVersion) == "" {
-		return CoordinatorConfig{}, errors.New("coordinator protocol_version is required")
-	}
 	defaultAgent, err := cfg.ResolvedDefaultAgent()
 	if err != nil {
 		return CoordinatorConfig{}, fmt.Errorf("coordinator default_agent: %w", err)
@@ -818,9 +790,6 @@ func normalizeWorker(cfg WorkerConfig) (WorkerConfig, error) {
 	}
 	if strings.TrimSpace(cfg.WorkDir) == "" {
 		return WorkerConfig{}, errors.New("worker work_dir is required")
-	}
-	if strings.TrimSpace(cfg.ProtocolVersion) == "" {
-		return WorkerConfig{}, errors.New("worker protocol_version is required")
 	}
 	if cfg.Labels == nil {
 		cfg.Labels = map[string]string{}

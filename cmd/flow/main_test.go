@@ -849,7 +849,6 @@ func TestTaskCommandRejectsUnauthorizedToken(t *testing.T) {
 
 func TestSessionEnvironmentPrefersSessionTokenThenWorkerToken(t *testing.T) {
 	t.Setenv("FLOW_COORDINATOR_URL", "http://127.0.0.1:8421")
-	t.Setenv("FLOW_PROTOCOL_VERSION", "2")
 	t.Setenv("FLOW_SESSION_TOKEN", "session-token")
 	t.Setenv("FLOW_WORKER_TOKEN", "worker-token")
 	t.Setenv("FLOW_SESSION_ID", "s-env")
@@ -857,7 +856,7 @@ func TestSessionEnvironmentPrefersSessionTokenThenWorkerToken(t *testing.T) {
 	values := &apiFlagValues{}
 	var sessionID string
 	applySessionEnvironment(values, &sessionID)
-	if values.serverURL != "http://127.0.0.1:8421" || values.protocolVersion != "2" {
+	if values.serverURL != "http://127.0.0.1:8421" {
 		t.Fatalf("api flags = %+v", values)
 	}
 	if values.token != "session-token" {
@@ -1010,7 +1009,6 @@ func TestHookIngestDefaultModeSwallowsCoordinatorFailure(t *testing.T) {
 	}))
 	server.Close()
 	t.Setenv("FLOW_COORDINATOR_URL", server.URL)
-	t.Setenv("FLOW_PROTOCOL_VERSION", "2")
 	t.Setenv("FLOW_SESSION_ID", "s-1")
 	t.Setenv("FLOW_SESSION_TOKEN", "session-token")
 
@@ -1033,7 +1031,6 @@ func TestHookIngestDefaultModeSwallowsCoordinatorFailure(t *testing.T) {
 func TestHookIngestStrictModeRequiresSessionEnvironment(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("FLOW_COORDINATOR_URL", "http://127.0.0.1:1")
-	t.Setenv("FLOW_PROTOCOL_VERSION", "2")
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

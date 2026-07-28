@@ -114,9 +114,8 @@ func TestWriteServeClientConfigPublishesLocalDiscovery(t *testing.T) {
 	}
 
 	configPath, err := writeServeClientConfig(config.CoordinatorConfig{
-		DataDir:         dataDir,
-		ListenAddr:      "127.0.0.1:9000",
-		ProtocolVersion: "2",
+		DataDir:    dataDir,
+		ListenAddr: "127.0.0.1:9000",
 		AuthorEntrypoint: map[string]any{
 			"argv": []string{"flow"},
 		},
@@ -133,7 +132,7 @@ func TestWriteServeClientConfigPublishesLocalDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load client config: %v", err)
 	}
-	if cfg.ServerURL != "http://127.0.0.1:9000" || cfg.ProtocolVersion != "2" || cfg.DataDir != dataDir {
+	if cfg.ServerURL != "http://127.0.0.1:9000" || cfg.DataDir != dataDir {
 		t.Fatalf("client config = %+v", cfg)
 	}
 	if cfg.Token != "owner-token" || cfg.TokenFile != filepath.Join(dataDir, "owner.token") {
@@ -151,9 +150,8 @@ func TestWriteServeClientConfigSupportsExplicitPath(t *testing.T) {
 
 	explicitPath := filepath.Join(t.TempDir(), "isolated", "flow-client.yaml")
 	configPath, err := writeServeClientConfig(config.CoordinatorConfig{
-		DataDir:         dataDir,
-		ListenAddr:      "127.0.0.1:9001",
-		ProtocolVersion: "2",
+		DataDir:    dataDir,
+		ListenAddr: "127.0.0.1:9001",
 	}, "owner-token", "", explicitPath)
 	if err != nil {
 		t.Fatalf("write serve client config: %v", err)
@@ -184,9 +182,8 @@ func TestWriteServeClientConfigReferencesExplicitOwnerTokenFile(t *testing.T) {
 	}
 
 	if _, err := writeServeClientConfig(config.CoordinatorConfig{
-		DataDir:         dataDir,
-		ListenAddr:      "127.0.0.1:9003",
-		ProtocolVersion: "2",
+		DataDir:    dataDir,
+		ListenAddr: "127.0.0.1:9003",
 	}, "owner-token", ownerTokenPath, ""); err != nil {
 		t.Fatalf("write serve client config: %v", err)
 	}
@@ -205,9 +202,8 @@ func TestPrepareServeClientConfigCanSkipWriting(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 
 	path, err := prepareServeClientConfig(config.CoordinatorConfig{
-		DataDir:         t.TempDir(),
-		ListenAddr:      "127.0.0.1:9002",
-		ProtocolVersion: "2",
+		DataDir:    t.TempDir(),
+		ListenAddr: "127.0.0.1:9002",
 	}, "owner-token", "", "", true)
 	if err != nil {
 		t.Fatalf("prepare skipped client config: %v", err)
@@ -355,10 +351,9 @@ func TestServeAPIWiresWorkerDiagnostics(t *testing.T) {
 		t.Fatalf("create task: %v", err)
 	}
 	server, err := api.NewServer(api.ServerOptions{
-		Registry:        registry,
-		OwnerToken:      "owner-token",
-		HookToken:       "hook-token",
-		ProtocolVersion: "2",
+		Registry:   registry,
+		OwnerToken: "owner-token",
+		HookToken:  "hook-token",
 	})
 	if err != nil {
 		t.Fatalf("new serve api: %v", err)

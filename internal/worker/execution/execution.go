@@ -1088,7 +1088,6 @@ func workerEnv(input tmuxInput) map[string]string {
 	scrubWorkerDeploymentEnv(env)
 	reserved := map[string]string{
 		"FLOW_COORDINATOR_URL":  input.Config.CoordinatorURL,
-		"FLOW_PROTOCOL_VERSION": input.Config.ProtocolVersion,
 		"FLOW_JOB_ID":           input.Job.ID,
 		"FLOW_LEASE_ID":         input.Lease.ID,
 		"FLOW_ROLE":             string(input.Job.Role),
@@ -1318,7 +1317,6 @@ func scrubWorkerDeploymentEnv(env map[string]string) {
 		"FLOW_WORKER_GIT_PRINCIPAL",
 		"FLOW_WORKER_ID",
 		"FLOW_WORKER_JOIN_TOKEN",
-		"FLOW_WORKER_PROTOCOL_VERSION",
 		"FLOW_WORKER_TERMINAL_BIND_ADDRESS",
 		"FLOW_WORKER_TERMINAL_PUBLIC_BASE_URL",
 		"FLOW_WORKER_TERMINAL_TTYD_PATH",
@@ -1764,9 +1762,8 @@ func newSessionStateReporter(input tmuxInput) *sessionStateReporter {
 		return nil
 	}
 	client, err := flowclient.New(config.ClientConfig{
-		ServerURL:       input.Config.CoordinatorURL,
-		Token:           strings.TrimSpace(input.SessionToken),
-		ProtocolVersion: input.Config.ProtocolVersion,
+		ServerURL: input.Config.CoordinatorURL,
+		Token:     strings.TrimSpace(input.SessionToken),
 	})
 	if err != nil {
 		return nil
@@ -1837,9 +1834,8 @@ func registerJobTerminal(input tmuxInput, targetURL string) bool {
 		return false
 	}
 	client, err := flowclient.New(config.ClientConfig{
-		ServerURL:       input.Config.CoordinatorURL,
-		Token:           strings.TrimSpace(input.Config.Token),
-		ProtocolVersion: input.Config.ProtocolVersion,
+		ServerURL: input.Config.CoordinatorURL,
+		Token:     strings.TrimSpace(input.Config.Token),
 	})
 	if err != nil {
 		return false
@@ -2061,9 +2057,8 @@ func newSessionMessagePoller(input tmuxInput) *sessionMessagePoller {
 		return nil
 	}
 	client, err := flowclient.New(config.ClientConfig{
-		ServerURL:       input.Config.CoordinatorURL,
-		Token:           strings.TrimSpace(input.Config.Token),
-		ProtocolVersion: input.Config.ProtocolVersion,
+		ServerURL: input.Config.CoordinatorURL,
+		Token:     strings.TrimSpace(input.Config.Token),
 	})
 	if err != nil {
 		return nil
@@ -2180,9 +2175,8 @@ func newPersistentSessionReconciler(input tmuxInput) *persistentSessionReconcile
 		return nil
 	}
 	client, err := flowclient.New(config.ClientConfig{
-		ServerURL:       input.Config.CoordinatorURL,
-		Token:           strings.TrimSpace(input.Config.Token),
-		ProtocolVersion: input.Config.ProtocolVersion,
+		ServerURL: input.Config.CoordinatorURL,
+		Token:     strings.TrimSpace(input.Config.Token),
 	})
 	if err != nil {
 		return nil

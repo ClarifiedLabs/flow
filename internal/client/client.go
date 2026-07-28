@@ -33,11 +33,10 @@ const (
 )
 
 type Client struct {
-	baseURL         string
-	token           string
-	protocolVersion string
-	projectID       string
-	httpClient      *http.Client
+	baseURL    string
+	token      string
+	projectID  string
+	httpClient *http.Client
 }
 
 func New(cfg config.ClientConfig) (*Client, error) {
@@ -45,16 +44,10 @@ func New(cfg config.ClientConfig) (*Client, error) {
 	if baseURL == "" {
 		return nil, fmt.Errorf("server URL is required")
 	}
-	protocolVersion := cfg.ProtocolVersion
-	if protocolVersion == "" {
-		protocolVersion = config.DefaultProtocolVersion
-	}
-
 	return &Client{
-		baseURL:         baseURL,
-		token:           cfg.Token,
-		protocolVersion: protocolVersion,
-		httpClient:      http.DefaultClient,
+		baseURL:    baseURL,
+		token:      cfg.Token,
+		httpClient: http.DefaultClient,
 	}, nil
 }
 
@@ -597,7 +590,7 @@ func (c *Client) DownloadTaskAttachment(ctx context.Context, taskID, attachmentI
 	if err != nil {
 		return err
 	}
-	request.Header.Set(protocolHeader, c.protocolVersion)
+	request.Header.Set(protocolHeader, contract.ProtocolVersion)
 	if c.token != "" {
 		request.Header.Set("Authorization", authScheme+c.token)
 	}
@@ -1368,7 +1361,7 @@ func (c *Client) doRaw(ctx context.Context, method string, path string, query ur
 	if err != nil {
 		return err
 	}
-	request.Header.Set(protocolHeader, c.protocolVersion)
+	request.Header.Set(protocolHeader, contract.ProtocolVersion)
 	request.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	if c.token != "" {
 		request.Header.Set("Authorization", authScheme+c.token)
@@ -1396,7 +1389,7 @@ func (c *Client) doMultipart(method string, path string, query url.Values, conte
 	if err != nil {
 		return err
 	}
-	request.Header.Set(protocolHeader, c.protocolVersion)
+	request.Header.Set(protocolHeader, contract.ProtocolVersion)
 	request.Header.Set("Content-Type", contentType)
 	if c.token != "" {
 		request.Header.Set("Authorization", authScheme+c.token)
@@ -1424,7 +1417,7 @@ func (c *Client) getText(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	request.Header.Set(protocolHeader, c.protocolVersion)
+	request.Header.Set(protocolHeader, contract.ProtocolVersion)
 	if c.token != "" {
 		request.Header.Set("Authorization", authScheme+c.token)
 	}
@@ -1465,7 +1458,7 @@ func (c *Client) doContext(ctx context.Context, method string, path string, body
 	if err != nil {
 		return err
 	}
-	request.Header.Set(protocolHeader, c.protocolVersion)
+	request.Header.Set(protocolHeader, contract.ProtocolVersion)
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}

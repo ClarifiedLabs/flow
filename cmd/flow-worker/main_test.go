@@ -633,9 +633,8 @@ func TestLeaseHeartbeatCancelsJobAfterAuthoritativeLeaseLoss(t *testing.T) {
 	t.Cleanup(httpServer.Close)
 
 	client, err := flowclient.New(config.ClientConfig{
-		ServerURL:       httpServer.URL,
-		Token:           "worker-token",
-		ProtocolVersion: config.DefaultProtocolVersion,
+		ServerURL: httpServer.URL,
+		Token:     "worker-token",
 	})
 	if err != nil {
 		t.Fatalf("create worker client: %v", err)
@@ -1336,11 +1335,10 @@ printf next-ok > "$1"
 	t.Cleanup(gate.Close)
 
 	cfg := config.WorkerConfig{
-		WorkerID:        "w-local",
-		CoordinatorURL:  gate.URL,
-		Token:           "worker-token",
-		ProtocolVersion: config.DefaultProtocolVersion,
-		WorkDir:         t.TempDir(),
+		WorkerID:       "w-local",
+		CoordinatorURL: gate.URL,
+		Token:          "worker-token",
+		WorkDir:        t.TempDir(),
 		Terminal: config.WorkerTerminalConfig{
 			TTYDPath: fakeTTYDPath(t),
 		},
@@ -1560,11 +1558,10 @@ func putFakeTTYDOnPath(t *testing.T) {
 
 // workerConfigOptions describes the per-test variations of the worker
 // worker.yaml fixture assembled by writeWorkerConfig. The constant fields
-// (worker_id, token, dynamic work_dir, protocol_version) are shared across
+// (worker_id, token, and dynamic work_dir) are shared across
 // every call site; only the fields below differ.
 type workerConfigOptions struct {
 	coordinatorURL    string // coordinator_url value (e.g. httpServer.URL)
-	protocolVersion   string // protocol_version value; defaults to the current protocol
 	agentHarnessLabel bool   // include labels: { agent.harness.harness: "true" }
 	capacityBucket    string // capacity bucket key (e.g. "ephemeral")
 	capacityCount     int    // capacity bucket count
@@ -1578,10 +1575,6 @@ type workerConfigOptions struct {
 // capacity bucket, labels, and git fields used across the worker tests.
 func writeWorkerConfig(t *testing.T, dir string, opts workerConfigOptions) string {
 	t.Helper()
-	protocolVersion := opts.protocolVersion
-	if protocolVersion == "" {
-		protocolVersion = config.DefaultProtocolVersion
-	}
 	var b strings.Builder
 	b.WriteString("worker_id: w-local\n")
 	b.WriteString("coordinator_url: " + opts.coordinatorURL + "\n")
@@ -1589,7 +1582,6 @@ func writeWorkerConfig(t *testing.T, dir string, opts workerConfigOptions) strin
 		b.WriteString("token: worker-token\n")
 	}
 	b.WriteString("work_dir: " + filepath.ToSlash(t.TempDir()) + "\n")
-	b.WriteString("protocol_version: " + protocolVersion + "\n")
 	if opts.agentHarnessLabel {
 		b.WriteString("labels:\n  agent.harness.harness: \"true\"\n")
 	}

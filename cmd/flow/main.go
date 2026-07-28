@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ClarifiedLabs/flow/internal/api/contract"
 	"github.com/ClarifiedLabs/flow/internal/checkverdict"
 	flowclient "github.com/ClarifiedLabs/flow/internal/client"
 	"github.com/ClarifiedLabs/flow/internal/config"
@@ -158,7 +159,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintln(stdout, "flow doctor")
 	fmt.Fprintf(stdout, "version: %s\n", version.Current())
 	fmt.Fprintf(stdout, "server: %s\n", clientCfg.ServerURL)
-	fmt.Fprintf(stdout, "protocol: %s\n", clientCfg.ProtocolVersion)
+	fmt.Fprintf(stdout, "protocol: %s\n", contract.ProtocolVersion)
 	fmt.Fprintf(stdout, "database: %s\n", store.Path())
 	fmt.Fprintln(stdout, "sqlite: ok")
 	fmt.Fprintf(stdout, "migrations: %s\n", strings.Join(migrations, ", "))
@@ -393,7 +394,7 @@ func writeInitClientConfig(clientCfg config.ClientConfig) error {
 		return err
 	}
 
-	cfg, err := config.LocalClientConfig(clientCfg.DataDir, clientCfg.ServerURL, clientCfg.Token, clientCfg.ProtocolVersion)
+	cfg, err := config.LocalClientConfig(clientCfg.DataDir, clientCfg.ServerURL, clientCfg.Token)
 	if err != nil {
 		return err
 	}
@@ -1193,10 +1194,6 @@ func runAttach(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "flow attach --web is only available for author sessions")
 		return 2
 	}
-	if apiFlags.protocolVersion == "" {
-		apiFlags.protocolVersion = os.Getenv("FLOW_PROTOCOL_VERSION")
-	}
-
 	client, err := newAPIClient(apiFlags)
 	if err != nil {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
@@ -3041,11 +3038,10 @@ func printThreadUsage(out io.Writer) {
 }
 
 type apiFlagValues struct {
-	configPath      string
-	serverURL       string
-	token           string
-	protocolVersion string
-	project         string
+	configPath string
+	serverURL  string
+	token      string
+	project    string
 }
 
 type parsedAPICommand struct {
@@ -3175,10 +3171,6 @@ func resolvedAPIConfig(values *apiFlagValues) (config.ClientConfig, error) {
 	if values.token != "" {
 		cfg.Token = values.token
 	}
-	if values.protocolVersion != "" {
-		cfg.ProtocolVersion = values.protocolVersion
-	}
-
 	if strings.TrimSpace(cfg.Token) == "" {
 		token, _, ok, err := config.ResolveOwnerTokenFallback(cfg)
 		if err != nil {
@@ -3207,9 +3199,6 @@ func applyClientEnvironment(values *apiFlagValues) {
 	}
 	if values.token == "" {
 		values.token = os.Getenv("FLOW_OWNER_TOKEN")
-	}
-	if values.protocolVersion == "" {
-		values.protocolVersion = os.Getenv("FLOW_PROTOCOL_VERSION")
 	}
 }
 

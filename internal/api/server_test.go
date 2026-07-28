@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/api/contract"
-	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
@@ -2899,7 +2898,7 @@ func TestSessionTerminalProxyRequiresOwnerAndProxiesRegisteredTarget(t *testing.
 
 	request := httptest.NewRequest(http.MethodGet, "/v2/sessions/"+started.Session.ID+"/terminal/pty?q=1", nil)
 	request.Header.Set("Authorization", "Bearer owner-token")
-	request.Header.Set(protocolHeader, fixture.Server.protocolVersion)
+	request.Header.Set(protocolHeader, contract.ProtocolVersion)
 	response := httptest.NewRecorder()
 	fixture.Server.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -4398,7 +4397,7 @@ func authorizedRequest(method string, path string, body any) *http.Request {
 	}
 	request := httptest.NewRequest(method, path, &requestBody)
 	request.Header.Set("Authorization", "Bearer owner-token")
-	request.Header.Set(protocolHeader, config.DefaultProtocolVersion)
+	request.Header.Set(protocolHeader, contract.ProtocolVersion)
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}

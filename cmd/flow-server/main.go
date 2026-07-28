@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/api"
+	"github.com/ClarifiedLabs/flow/internal/api/contract"
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
@@ -277,7 +278,6 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		OwnerToken:      ownerToken,
 		HookToken:       hookToken,
 		WorkerJoinToken: workerJoinToken,
-		ProtocolVersion: cfg.ProtocolVersion,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "create api server: %v\n", err)
@@ -415,7 +415,7 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "data_dir: %s\n", cfg.DataDir)
 	fmt.Fprintf(stdout, "database_path: %s\n", cfg.GlobalDatabasePath())
 	fmt.Fprintf(stdout, "listen_addr: %s\n", cfg.ListenAddr)
-	fmt.Fprintf(stdout, "protocol: %s\n", cfg.ProtocolVersion)
+	fmt.Fprintf(stdout, "protocol: %s\n", contract.ProtocolVersion)
 	return 0
 }
 
@@ -560,7 +560,7 @@ func writeServeClientConfig(cfg config.CoordinatorConfig, ownerToken string, own
 		}
 		configPath = defaultPath
 	}
-	clientCfg, err := config.LocalClientConfig(cfg.DataDir, config.CoordinatorURLForListenAddr(cfg.ListenAddr), ownerToken, cfg.ProtocolVersion)
+	clientCfg, err := config.LocalClientConfig(cfg.DataDir, config.CoordinatorURLForListenAddr(cfg.ListenAddr), ownerToken)
 	if err != nil {
 		return "", err
 	}

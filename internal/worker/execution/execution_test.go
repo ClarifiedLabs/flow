@@ -2100,10 +2100,9 @@ func ciRunInput(cfg config.WorkerConfig, jobID, leaseID string, argv []string, s
 
 func workerConfig(workDir string, coordinatorURL string) config.WorkerConfig {
 	return config.WorkerConfig{
-		WorkerID:        "w-local",
-		CoordinatorURL:  coordinatorURL,
-		ProtocolVersion: config.DefaultProtocolVersion,
-		WorkDir:         workDir,
+		WorkerID:       "w-local",
+		CoordinatorURL: coordinatorURL,
+		WorkDir:        workDir,
 		Git: config.WorkerGitConfig{
 			Principal: "worker:w-local",
 		},

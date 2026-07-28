@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ClarifiedLabs/flow/internal/api/contract"
 	"github.com/ClarifiedLabs/flow/internal/checkverdict"
 	flowclient "github.com/ClarifiedLabs/flow/internal/client"
 	"github.com/ClarifiedLabs/flow/internal/config"
@@ -106,7 +107,7 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "worker_id: %s\n", cfg.WorkerID)
 	fmt.Fprintf(stdout, "coordinator_url: %s\n", cfg.CoordinatorURL)
 	fmt.Fprintf(stdout, "work_dir: %s\n", cfg.WorkDir)
-	fmt.Fprintf(stdout, "protocol: %s\n", cfg.ProtocolVersion)
+	fmt.Fprintf(stdout, "protocol: %s\n", contract.ProtocolVersion)
 	fmt.Fprintf(stdout, "labels: %d\n", len(cfg.Labels))
 	fmt.Fprintf(stdout, "capacity_persistent_agent: %d\n", cfg.Capacity.PersistentAgent)
 	fmt.Fprintf(stdout, "capacity_ephemeral: %d\n", cfg.Capacity.Ephemeral)
@@ -537,9 +538,8 @@ func releaseConsoleSession(cfg config.WorkerConfig, sessionToken string) error {
 		return errors.New("console session token is required")
 	}
 	client, err := flowclient.New(config.ClientConfig{
-		ServerURL:       cfg.CoordinatorURL,
-		Token:           sessionToken,
-		ProtocolVersion: cfg.ProtocolVersion,
+		ServerURL: cfg.CoordinatorURL,
+		Token:     sessionToken,
 	})
 	if err != nil {
 		return fmt.Errorf("create console client: %w", err)
@@ -592,9 +592,8 @@ func joinWorker(cfg config.WorkerConfig) (string, error) {
 		return "", errors.New("worker config token is required or FLOW_WORKER_JOIN_TOKEN must be set")
 	}
 	client, err := flowclient.New(config.ClientConfig{
-		ServerURL:       cfg.CoordinatorURL,
-		Token:           joinToken,
-		ProtocolVersion: cfg.ProtocolVersion,
+		ServerURL: cfg.CoordinatorURL,
+		Token:     joinToken,
 	})
 	if err != nil {
 		return "", err
@@ -1113,9 +1112,8 @@ func uploadTranscript(client *flowclient.Client, cfg config.WorkerConfig, job fl
 	ctx := context.Background()
 	if session != nil && strings.TrimSpace(sessionToken) != "" {
 		sessionClient, err := flowclient.New(config.ClientConfig{
-			ServerURL:       cfg.CoordinatorURL,
-			Token:           strings.TrimSpace(sessionToken),
-			ProtocolVersion: cfg.ProtocolVersion,
+			ServerURL: cfg.CoordinatorURL,
+			Token:     strings.TrimSpace(sessionToken),
 		})
 		if err != nil {
 			fmt.Fprintf(stdout, "transcript: client init failed: %v\n", err)
@@ -1395,9 +1393,8 @@ func reapOrphanedTmuxSessions(client *flowclient.Client, cfg config.WorkerConfig
 
 func newWorkerClient(cfg config.WorkerConfig) (*flowclient.Client, error) {
 	return flowclient.New(config.ClientConfig{
-		ServerURL:       cfg.CoordinatorURL,
-		Token:           cfg.Token,
-		ProtocolVersion: cfg.ProtocolVersion,
+		ServerURL: cfg.CoordinatorURL,
+		Token:     cfg.Token,
 	})
 }
 

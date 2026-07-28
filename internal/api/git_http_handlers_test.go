@@ -13,7 +13,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
@@ -187,7 +186,7 @@ func newGitHTTPServerFixture(t *testing.T) gitHTTPServerFixture {
 	}
 	installGitHTTPTestHooks(t, project)
 
-	server, err := NewServer(ServerOptions{Registry: registry, ProtocolVersion: config.DefaultProtocolVersion})
+	server, err := NewServer(ServerOptions{Registry: registry})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}

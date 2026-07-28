@@ -60,9 +60,8 @@ func materializeImageAttachments(ctx context.Context, input RunInput, payload Jo
 		return nil
 	}
 	client, err := flowclient.New(config.ClientConfig{
-		ServerURL:       input.Config.CoordinatorURL,
-		Token:           token,
-		ProtocolVersion: input.Config.ProtocolVersion,
+		ServerURL: input.Config.CoordinatorURL,
+		Token:     token,
 	})
 	if err != nil {
 		return err
