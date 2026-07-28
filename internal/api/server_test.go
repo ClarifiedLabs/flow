@@ -4875,6 +4875,10 @@ func TestWorkflowFailedStepCanBeSkippedByOwner(t *testing.T) {
 	if skipped.Run.CurrentNodeKey == failedNode.NodeKey {
 		t.Fatalf("skipped workflow = %+v, want workflow advanced beyond failed review", skipped.Run)
 	}
+	nextNode, ok := skipped.Run.Snapshot.Node(skipped.Run.CurrentNodeKey)
+	if !ok || nextNode.Kind != coordinator.NodeVerifyChange {
+		t.Fatalf("workflow node after skipped review = %+v found=%t, want verification", nextNode, ok)
+	}
 	failedNode, ok, err = fixture.Bundle.WorkflowRuns.GetNodeRun(ctx, failedNodeRunID)
 	if err != nil || !ok || failedNode.State != coordinator.WorkflowNodeSucceeded || failedNode.Outcome != "approved" {
 		t.Fatalf("skipped node = %+v ok=%t err=%v", failedNode, ok, err)
@@ -4895,8 +4899,8 @@ func TestWorkflowFailedStepCanBeSkippedByOwner(t *testing.T) {
 	if err != nil || !waiver.Required || waiver.Verdict != coordinator.CheckSatisfied {
 		t.Fatalf("skip waiver = %+v err=%v", waiver, err)
 	}
-	if reviewState, err := fixture.Checks.ReviewState(ctx, taskID); err != nil || reviewState != coordinator.ReviewApproved {
-		t.Fatalf("review state after skipped review = %s err=%v, want approved", reviewState, err)
+	if reviewState, err := fixture.Checks.ReviewState(ctx, taskID); err != nil || reviewState != coordinator.ReviewInReview {
+		t.Fatalf("review state after skipped review = %s err=%v, want in_review while verification runs", reviewState, err)
 	}
 	after, err := fixture.Bundle.WorkflowRuns.Detail(ctx, runID)
 	if err != nil {

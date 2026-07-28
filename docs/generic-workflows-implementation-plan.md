@@ -100,9 +100,9 @@ Only a successful `merge_change` node can produce the `merged` resolution, and t
 The **Coding** default is:
 
 ```text
-implement -> automated checks -> change review -> human review -> verify -> merge -> merged
-     ^             |                 |                |          |
-     +-------------+-----------------+----------------+----------+ conflict/changes
+implement -> automated checks -> change review -> verify -> human review -> merge -> merged
+     ^             |                 |          |                |
+     +-------------+-----------------+----------+----------------+ conflict/changes
 
 human review --rejected-----------------------------------------> rejected
 ```
