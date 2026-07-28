@@ -2,7 +2,6 @@ package harness
 
 import (
 	"sort"
-	"strings"
 	"testing"
 )
 
@@ -54,13 +53,13 @@ func TestDefaultAgentCheckCommandMatchesBuilders(t *testing.T) {
 // TestManagedArgValidationGolden proves the table-driven managed-flag
 // validation accepts/rejects exactly the intended inputs.
 func TestManagedArgValidationGolden(t *testing.T) {
-	reject := []Args{
-		{Harness: []string{"--hooks", "/tmp/h.json"}},
-		{Harness: []string{"--hooks=/tmp/h.json"}},
-		{Harness: []string{"-p", "prompt"}},
-		{Harness: []string{"--prompt", "prompt"}},
-		{Harness: []string{"-i", "prompt"}},
-		{Harness: []string{"--initial-prompt", "prompt"}},
+	reject := [][]string{
+		{"--hooks", "/tmp/h.json"},
+		{"--hooks=/tmp/h.json"},
+		{"-p", "prompt"},
+		{"--prompt", "prompt"},
+		{"-i", "prompt"},
+		{"--initial-prompt", "prompt"},
 	}
 	for _, args := range reject {
 		if _, err := NormalizeArgs(args); err == nil {
@@ -68,9 +67,9 @@ func TestManagedArgValidationGolden(t *testing.T) {
 		}
 	}
 
-	accept := []Args{
-		{Harness: []string{"--provider", "anthropic", "--model", "claude-sonnet-4-6"}},
-		{Harness: []string{"--profile", "review"}},
+	accept := [][]string{
+		{"--provider", "anthropic", "--model", "claude-sonnet-4-6"},
+		{"--profile", "review"},
 	}
 	for _, args := range accept {
 		if _, err := NormalizeArgs(args); err != nil {
@@ -99,7 +98,7 @@ func TestNativeHookMappingGolden(t *testing.T) {
 		t.Fatalf("definition %q missing HookState", Harness)
 	}
 	for _, test := range cases {
-		got := definition.HookState(test.event, "")
+		got := definition.HookState(test.event)
 		if got == "" {
 			got = SignalActivity // ParseNativeHook applies the default
 		}
@@ -125,11 +124,7 @@ func TestHookEventsParityWithHookState(t *testing.T) {
 			t.Fatalf("definition %q has no HookState mapper", name)
 		}
 		for _, event := range definition.HookEvents {
-			notificationType := ""
-			if strings.EqualFold(event.Name, "Notification") {
-				notificationType = firstMatcherAlternative(event.Matcher)
-			}
-			if mapped := definition.HookState(event.Name, notificationType); mapped == "" {
+			if mapped := definition.HookState(event.Name); mapped == "" {
 				t.Fatalf("definition %q HookEvent %q falls through to the default mapping", name, event.Name)
 			}
 		}
@@ -143,9 +138,6 @@ func TestHookEventsDataMatchesGenerators(t *testing.T) {
 	}
 	if len(definition.HookEvents) != 7 {
 		t.Fatalf("HookEvents count = %d, want 7", len(definition.HookEvents))
-	}
-	if definition.HookFormat != "json" {
-		t.Fatalf("HookFormat = %q, want json", definition.HookFormat)
 	}
 	if definition.HookEnvVar != "FLOW_HARNESS_HOOKS" {
 		t.Fatalf("HookEnvVar = %q, want FLOW_HARNESS_HOOKS", definition.HookEnvVar)
@@ -186,7 +178,7 @@ func TestDefaultEntrypointsStampHarness(t *testing.T) {
 		t.Fatalf("author harness = %#v, want %q", author["harness"], Harness)
 	}
 
-	console, err := DefaultConsoleEntrypointWithArgs(Harness, Args{})
+	console, err := DefaultConsoleEntrypointWithArgs(Harness, nil)
 	if err != nil {
 		t.Fatalf("DefaultConsoleEntrypointWithArgs(harness): %v", err)
 	}
@@ -194,7 +186,7 @@ func TestDefaultEntrypointsStampHarness(t *testing.T) {
 		t.Fatalf("console harness = %#v, want %q", console["harness"], Harness)
 	}
 
-	shell, err := DefaultConsoleEntrypointWithArgs(Shell, Args{})
+	shell, err := DefaultConsoleEntrypointWithArgs(Shell, nil)
 	if err != nil {
 		t.Fatalf("DefaultConsoleEntrypointWithArgs(shell): %v", err)
 	}
@@ -208,18 +200,4 @@ func TestAgentNamesSorted(t *testing.T) {
 	if !sort.StringsAreSorted(names) {
 		t.Fatalf("AgentNames() not sorted: %v", names)
 	}
-}
-
-// firstMatcherAlternative returns the first alternative in a "a|b|c" matcher,
-// used by the hook-event parity test to feed the Notification classifier a
-// value its matcher would accept.
-func firstMatcherAlternative(matcher string) string {
-	matcher = strings.TrimSpace(matcher)
-	if matcher == "" || matcher == "*" {
-		return ""
-	}
-	if before, _, ok := strings.Cut(matcher, "|"); ok {
-		return strings.TrimSpace(before)
-	}
-	return matcher
 }

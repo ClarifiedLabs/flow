@@ -27,7 +27,7 @@ type CoordinatorConfig struct {
 	Deadlines                  DeadlineConfig       `json:"deadlines" yaml:"deadlines"`
 	Limits                     LimitConfig          `json:"limits" yaml:"limits"`
 	Workers                    CoordinatorWorkers   `json:"workers" yaml:"workers"`
-	HarnessArgs                flowharness.Args     `json:"harness_args" yaml:"harness_args"`
+	HarnessArgs                []string             `json:"harness_args" yaml:"harness_args"`
 	Git                        CoordinatorGitConfig `json:"git" yaml:"git"`
 }
 
@@ -347,7 +347,7 @@ func DefaultAuthorEntrypointForAgent(sel flowharness.AgentSelection) map[string]
 	if err != nil {
 		panic(err)
 	}
-	entrypoint, err := flowharness.DefaultAuthorEntrypointWithArgs(sel.Harness, flowharness.ArgsFor(sel.Harness, modelTokens))
+	entrypoint, err := flowharness.DefaultAuthorEntrypointWithArgs(sel.Harness, modelTokens)
 	if err != nil {
 		panic(err)
 	}

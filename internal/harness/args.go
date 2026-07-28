@@ -7,75 +7,12 @@ import (
 	"unicode"
 )
 
-// Args holds additive argv tokens for Flow-managed harness commands.
-type Args struct {
-	Harness []string `json:"harness,omitempty" yaml:"harness,omitempty"`
-}
-
-// ArgsPatch is used by partial updates: a nil slice pointer leaves the harness
-// args unchanged, while a non-nil empty slice clears them.
-type ArgsPatch struct {
-	Harness *[]string `json:"harness,omitempty" yaml:"harness,omitempty"`
-}
-
-func NormalizeArgs(args Args) (Args, error) {
-	harness, err := normalizeArgList(Harness, args.Harness)
-	if err != nil {
-		return Args{}, err
-	}
-	return Args{Harness: harness}, nil
-}
-
-func NormalizeArgsPatch(patch ArgsPatch) (ArgsPatch, error) {
-	var normalized ArgsPatch
-	if patch.Harness != nil {
-		harness, err := normalizeArgList(Harness, *patch.Harness)
-		if err != nil {
-			return ArgsPatch{}, err
-		}
-		normalized.Harness = &harness
-	}
-	return normalized, nil
-}
-
-func (args Args) For(name string) []string {
-	switch NormalizeName(name) {
-	case Harness:
-		return copyArgs(args.Harness)
-	default:
-		return nil
-	}
-}
-
-func (args Args) Add(other Args) Args {
-	return Args{
-		Harness: append(copyArgs(args.Harness), other.Harness...),
-	}
-}
-
-func (args Args) ApplyPatch(patch ArgsPatch) Args {
-	out := Args{
-		Harness: copyArgs(args.Harness),
-	}
-	if patch.Harness != nil {
-		out.Harness = copyArgs(*patch.Harness)
-	}
-	return out
-}
-
-func (args Args) Empty() bool {
-	return len(args.Harness) == 0
-}
-
-// ArgsFor returns an Args carrying tokens under the named harness's slot,
-// e.g. the serialized model/effort selection for an agent definition.
-func ArgsFor(name string, tokens []string) Args {
-	switch NormalizeName(name) {
-	case Harness:
-		return Args{Harness: copyArgs(tokens)}
-	default:
-		return Args{}
-	}
+// NormalizeArgs validates and normalizes additive argv tokens for Flow-managed
+// harness commands: each entry may be a shell-style string containing several
+// tokens (split with quote handling), and no resulting token may override a
+// Flow-managed flag.
+func NormalizeArgs(args []string) ([]string, error) {
+	return normalizeArgList(Harness, args)
 }
 
 func normalizeArgList(name string, args []string) ([]string, error) {
@@ -180,11 +117,4 @@ func (d Definition) validateArgs(args []string) error {
 		}
 	}
 	return nil
-}
-
-func copyArgs(args []string) []string {
-	if len(args) == 0 {
-		return nil
-	}
-	return append([]string(nil), args...)
 }

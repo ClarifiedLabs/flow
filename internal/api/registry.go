@@ -54,7 +54,7 @@ type RegistryOptions struct {
 
 	AuthorEntrypoint           map[string]any
 	AuthorEntrypointConfigured bool
-	HarnessArgs                flowharness.Args
+	HarnessArgs                []string
 	// DefaultAgent is the configured fallback agent selection (coordinator
 	// config default_agent); the zero value resolves to the built-in default
 	// harness.
@@ -86,7 +86,7 @@ type Registry struct {
 	idempotency                *coordinator.IdempotencyService
 	authorEntrypoint           map[string]any
 	authorEntrypointConfigured bool
-	harnessArgs                flowharness.Args
+	harnessArgs                []string
 	defaultAgent               flowharness.AgentSelection
 	reviewAuthorCycleLimit     int
 	reviewScopeFileLimit       int
@@ -211,7 +211,7 @@ func (r *Registry) Credentials() *coordinator.CredentialService        { return 
 func (r *Registry) Directory() *worker.Directory                       { return r.directory }
 func (r *Registry) WebSessions() *coordinator.WebSessionService        { return r.webSessions }
 func (r *Registry) GlobalIdempotency() *coordinator.IdempotencyService { return r.idempotency }
-func (r *Registry) HarnessArgs() flowharness.Args                      { return r.harnessArgs }
+func (r *Registry) HarnessArgs() []string                              { return r.harnessArgs }
 func (r *Registry) DefaultAgent() flowharness.AgentSelection           { return r.defaultAgent }
 
 // OpenAll opens a bundle for every project in the global registry.

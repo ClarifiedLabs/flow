@@ -385,7 +385,7 @@ func TestEnsureAuthorJobUsesConfiguredDefaultAgent(t *testing.T) {
 			Model:           "anthropic:claude-sonnet-4-6",
 			ReasoningEffort: "high",
 		},
-		HarnessArgs: flowharness.Args{Harness: []string{"--model", "openai:gpt-5"}},
+		HarnessArgs: []string{"--model", "openai:gpt-5"},
 	})
 	task, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Configured default agent"})
 	if err != nil {

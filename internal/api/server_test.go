@@ -244,11 +244,9 @@ func TestHarnessOptionsIncludeDefaultArgs(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = global.Close() })
 	registry, err := NewRegistry(RegistryOptions{
-		DataDir: dataDir,
-		Global:  global,
-		HarnessArgs: flowharness.Args{
-			Harness: []string{"--model", "gpt-5"},
-		},
+		DataDir:     dataDir,
+		Global:      global,
+		HarnessArgs: []string{"--model", "gpt-5"},
 	})
 	if err != nil {
 		t.Fatalf("new registry: %v", err)

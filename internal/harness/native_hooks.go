@@ -54,9 +54,8 @@ func ParseNativeHook(input NativeHookInput) (NativeHookSignal, error) {
 		Harness:       harnessName,
 		HookEventName: event,
 	}
-	notificationType := firstStringField(payload, "notification_type", "notificationType")
 	if definition.HookState != nil {
-		if mapped := definition.HookState(event, notificationType); mapped != "" {
+		if mapped := definition.HookState(event); mapped != "" {
 			signal.Signal = mapped
 		}
 	}

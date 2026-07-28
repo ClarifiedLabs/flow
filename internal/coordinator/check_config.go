@@ -124,12 +124,12 @@ type CheckConfigService struct {
 	workers      *flowworker.Service
 	threads      *ThreadService
 	project      Project
-	harnessArgs  flowharness.Args
+	harnessArgs  []string
 	defaultAgent flowharness.AgentSelection
 }
 
 type CheckConfigServiceOptions struct {
-	HarnessArgs flowharness.Args
+	HarnessArgs []string
 	// DefaultAgent is the configured fallback agent selection; the zero value
 	// resolves to the built-in default harness.
 	DefaultAgent flowharness.AgentSelection
@@ -174,7 +174,7 @@ func (s *CheckConfigService) reviewChecksForTask(ctx context.Context, suite Chec
 // agent check per reviewer (critique) / verifier (acceptance) — to the
 // repo-configured suite. Unlike the legacy synthesized defaults, a flow whose
 // review set is empty deliberately runs the repo checks alone.
-func withFlowSnapshotReviewChecks(suite CheckSuite, snapshot FlowSnapshot, args flowharness.Args) (CheckSuite, error) {
+func withFlowSnapshotReviewChecks(suite CheckSuite, snapshot FlowSnapshot, args []string) (CheckSuite, error) {
 	usedNames := map[string]bool{}
 	for _, definition := range suite.Definitions {
 		usedNames[definition.Name] = true
@@ -195,7 +195,7 @@ func withFlowSnapshotReviewChecks(suite CheckSuite, snapshot FlowSnapshot, args 
 		if err != nil {
 			return CheckSuite{}, fmt.Errorf("review agent %q: %w", name, err)
 		}
-		command, err := flowharness.DefaultAgentCheckCommandWithArgs(harness, append(args.For(harness), modelArgs...))
+		command, err := flowharness.DefaultAgentCheckCommandWithArgs(harness, append(append([]string{}, args...), modelArgs...))
 		if err != nil {
 			return CheckSuite{}, fmt.Errorf("review agent %q: %w", name, err)
 		}
@@ -564,7 +564,7 @@ func (s *CheckConfigService) ensureCurrentAutomatedChecks(ctx context.Context, t
 	return current, nil
 }
 
-func withDefaultAgentChecks(suite CheckSuite, sel flowharness.AgentSelection, args flowharness.Args) (CheckSuite, error) {
+func withDefaultAgentChecks(suite CheckSuite, sel flowharness.AgentSelection, args []string) (CheckSuite, error) {
 	resolved, err := flowharness.ResolveAgentSelection(sel)
 	if err != nil {
 		return CheckSuite{}, err
@@ -602,7 +602,7 @@ func withDefaultAgentChecks(suite CheckSuite, sel flowharness.AgentSelection, ar
 	return suite, nil
 }
 
-func defaultAgentCheckDefinition(name string, kind CheckKind, sel flowharness.AgentSelection, args flowharness.Args) (CheckDefinition, error) {
+func defaultAgentCheckDefinition(name string, kind CheckKind, sel flowharness.AgentSelection, args []string) (CheckDefinition, error) {
 	phase := CheckPhaseCritique
 	if kind == CheckKindVerifier {
 		phase = CheckPhaseAcceptance
@@ -614,7 +614,7 @@ func defaultAgentCheckDefinition(name string, kind CheckKind, sel flowharness.Ag
 	if err != nil {
 		return CheckDefinition{}, err
 	}
-	command, err := flowharness.DefaultAgentCheckCommandWithArgs(sel.Harness, append(modelTokens, args.For(sel.Harness)...))
+	command, err := flowharness.DefaultAgentCheckCommandWithArgs(sel.Harness, append(modelTokens, args...))
 	if err != nil {
 		return CheckDefinition{}, err
 	}

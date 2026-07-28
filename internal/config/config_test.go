@@ -93,8 +93,7 @@ func TestLoadCoordinatorParsesHarnessArgs(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "coordinator.yaml")
 	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
 listen_addr: 127.0.0.1:8421
-harness_args:
-  harness: ["--profile", "review"]
+harness_args: ["--profile", "review"]
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -103,7 +102,7 @@ harness_args:
 	if err != nil {
 		t.Fatalf("load coordinator: %v", err)
 	}
-	if got := cfg.HarnessArgs.For(flowharness.Harness); len(got) != 2 || got[0] != "--profile" || got[1] != "review" {
+	if got := cfg.HarnessArgs; len(got) != 2 || got[0] != "--profile" || got[1] != "review" {
 		t.Fatalf("harness args = %#v", got)
 	}
 }
@@ -112,8 +111,7 @@ func TestLoadCoordinatorRejectsManagedHarnessArgs(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "coordinator.yaml")
 	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
 listen_addr: 127.0.0.1:8421
-harness_args:
-  harness: ["--hooks", "/tmp/evil-hooks.json"]
+harness_args: ["--hooks", "/tmp/evil-hooks.json"]
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}

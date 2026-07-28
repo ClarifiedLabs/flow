@@ -85,12 +85,6 @@ export function normalizeHarnessReasoning(raw) {
   return { supported, options };
 }
 
-export function normalizeHarnessArgs(raw) {
-  return {
-    harness: normalizeArgList(value(raw, "harness", "Harness")),
-  };
-}
-
 export function normalizeArgList(raw) {
   if (!Array.isArray(raw)) return [];
   return raw.map((arg) => String(arg || "")).filter((arg) => arg.trim());

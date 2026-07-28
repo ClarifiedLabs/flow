@@ -51,29 +51,21 @@ type Definition struct {
 	Executable        string
 	RequireExecutable bool
 	UsabilityCheck    []string
-	// CheckCommand builds the non-interactive check/print command (used by
-	// reviewer/verifier jobs) for the given additive argv tokens.
-	CheckCommand func([]string) string
-	// HookState classifies a native-hook event (and, for harnesses that use it,
-	// a notification type) into a session state signal. It returns "" for events
-	// it does not explicitly recognize; callers apply the activity default.
-	HookState func(event, notificationType string) string
+	// HookState classifies a native-hook event into a session state signal. It
+	// returns "" for events it does not explicitly recognize; callers apply the
+	// activity default.
+	HookState func(event string) string
 	// ManagedFlags are the argv flags Flow reserves; user-supplied harness args
 	// may not override them.
 	ManagedFlags []string
-	// HookEvents, HookFormat and HookEnvVar describe how this harness's native
-	// hooks are wired, as the data source of truth for the hook-config renderer.
-	// HookFormat is "json". HookEnvVar is the env var that points the harness at
-	// the generated config. HookTimeoutSeconds is the per-hook command timeout
-	// written into the config (0 omits the field; harness uses 5).
+	// HookEvents and HookEnvVar describe how this harness's native hooks are
+	// wired, as the data source of truth for the hook-config renderer. HookEnvVar
+	// is the env var that points the harness at the generated config.
+	// HookTimeoutSeconds is the per-hook command timeout written into the config
+	// (0 omits the field; harness uses 5).
 	HookEvents         []HookEvent
-	HookFormat         string
 	HookEnvVar         string
 	HookTimeoutSeconds int
-	// Models returns this harness's selectable model catalog (dynamic, from the
-	// harness CLI). Nil means the harness exposes no Flow-selectable models.
-	// AvailableModels wraps it to stamp each model with this harness's name.
-	Models func() ([]Model, error)
 }
 
 type Availability struct {
@@ -88,12 +80,13 @@ type Availability struct {
 
 // AvailableModels returns the harness's model catalog with every entry stamped
 // with this harness's name and normalized (lowercased harness/sorted/deduped,
-// qualified IDs filled). It returns nil when the harness exposes no models.
+// qualified IDs filled). It returns nil for non-agent kinds (shell), which
+// expose no Flow-selectable models.
 func (d Definition) AvailableModels() ([]Model, error) {
-	if d.Models == nil {
+	if d.Kind != KindHarness {
 		return nil, nil
 	}
-	models, err := d.Models()
+	models, err := AvailableHarnessModels()
 	if err != nil {
 		return nil, err
 	}
@@ -165,8 +158,7 @@ var definitions = map[string]Definition{
 		Executable:        "harness",
 		RequireExecutable: true,
 		UsabilityCheck:    []string{"--check-model-proxy"},
-		CheckCommand:      DefaultHarnessPrintCommandWithArgs,
-		HookState:         func(event, _ string) string { return mapHarnessNativeHook(event) },
+		HookState:         mapHarnessNativeHook,
 		ManagedFlags:      []string{"--hooks", "-p", "--prompt", "-i", "--initial-prompt"},
 		HookEvents: []HookEvent{
 			{Name: "SessionStart"},
@@ -177,10 +169,8 @@ var definitions = map[string]Definition{
 			{Name: "PostCompact", Matcher: "*"},
 			{Name: "Stop"},
 		},
-		HookFormat:         "json",
 		HookEnvVar:         "FLOW_HARNESS_HOOKS",
 		HookTimeoutSeconds: 5,
-		Models:             AvailableHarnessModels,
 	},
 }
 
@@ -310,10 +300,10 @@ func ValidatePromptConventionName(name string) error {
 }
 
 func DefaultAuthorEntrypoint(name string) (map[string]any, error) {
-	return DefaultAuthorEntrypointWithArgs(name, Args{})
+	return DefaultAuthorEntrypointWithArgs(name, nil)
 }
 
-func DefaultAuthorEntrypointWithArgs(name string, args Args) (map[string]any, error) {
+func DefaultAuthorEntrypointWithArgs(name string, args []string) (map[string]any, error) {
 	if err := ValidateAgentName(name); err != nil {
 		return nil, err
 	}
@@ -325,7 +315,7 @@ func DefaultAuthorEntrypointWithArgs(name string, args Args) (map[string]any, er
 	if err != nil {
 		return nil, err
 	}
-	command, err := defaultAuthorCommandWithArgs(definition.Name, normalizedArgs.For(definition.Name))
+	command, err := defaultAuthorCommandWithArgs(definition.Name, normalizedArgs)
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +328,7 @@ func DefaultAuthorEntrypointWithArgs(name string, args Args) (map[string]any, er
 	}, nil
 }
 
-func DefaultConsoleEntrypointWithArgs(name string, args Args) (map[string]any, error) {
+func DefaultConsoleEntrypointWithArgs(name string, args []string) (map[string]any, error) {
 	normalized := NormalizeName(name)
 	if normalized == "" {
 		normalized = DefaultConsoleName()
@@ -357,7 +347,7 @@ func DefaultConsoleEntrypointWithArgs(name string, args Args) (map[string]any, e
 	if err != nil {
 		return nil, err
 	}
-	command, err := defaultConsoleCommandWithArgs(definition.Name, normalizedArgs.For(definition.Name))
+	command, err := defaultConsoleCommandWithArgs(definition.Name, normalizedArgs)
 	if err != nil {
 		return nil, err
 	}
@@ -392,12 +382,13 @@ func defaultConsoleCommandWithArgs(name string, args []string) (string, error) {
 	}
 }
 
+// DefaultAgentCheckCommandWithArgs builds the non-interactive check/print
+// command (used by reviewer/verifier jobs) for the given additive argv tokens.
 func DefaultAgentCheckCommandWithArgs(name string, args []string) (string, error) {
-	definition, ok := Lookup(name)
-	if !ok || definition.CheckCommand == nil {
+	if NormalizeName(name) != Harness {
 		return "", fmt.Errorf("unsupported agent harness %q", name)
 	}
-	return definition.CheckCommand(args), nil
+	return DefaultHarnessPrintCommandWithArgs(args), nil
 }
 
 func renderShellArgs(args []string) string {

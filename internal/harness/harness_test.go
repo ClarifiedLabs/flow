@@ -53,7 +53,7 @@ func TestDefaultAuthorEntrypointUsesHarness(t *testing.T) {
 }
 
 func TestDefaultConsoleEntrypointsWithoutPrompt(t *testing.T) {
-	harnessEntrypoint, err := DefaultConsoleEntrypointWithArgs(Harness, Args{})
+	harnessEntrypoint, err := DefaultConsoleEntrypointWithArgs(Harness, nil)
 	if err != nil {
 		t.Fatalf("harness default console entrypoint: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestDefaultConsoleEntrypointsWithoutPrompt(t *testing.T) {
 		t.Fatalf("console harness = %#v, want %q", harnessEntrypoint["harness"], Harness)
 	}
 
-	shell, err := DefaultConsoleEntrypointWithArgs(Shell, Args{})
+	shell, err := DefaultConsoleEntrypointWithArgs(Shell, nil)
 	if err != nil {
 		t.Fatalf("shell default console entrypoint: %v", err)
 	}
@@ -81,8 +81,8 @@ func TestDefaultConsoleEntrypointsWithoutPrompt(t *testing.T) {
 }
 
 func TestDefaultEntrypointsAppendHarnessArgs(t *testing.T) {
-	author, err := DefaultAuthorEntrypointWithArgs(Harness, Args{
-		Harness: []string{"--provider anthropic --model claude-sonnet-4-6"},
+	author, err := DefaultAuthorEntrypointWithArgs(Harness, []string{
+		"--provider anthropic --model claude-sonnet-4-6",
 	})
 	if err != nil {
 		t.Fatalf("harness author entrypoint with shell-style args: %v", err)
@@ -92,8 +92,8 @@ func TestDefaultEntrypointsAppendHarnessArgs(t *testing.T) {
 		t.Fatalf("harness author command did not split shell-style args:\n%s", authorCommand)
 	}
 
-	console, err := DefaultConsoleEntrypointWithArgs(Harness, Args{
-		Harness: []string{"--model", "anthropic:claude-sonnet-4-6"},
+	console, err := DefaultConsoleEntrypointWithArgs(Harness, []string{
+		"--model", "anthropic:claude-sonnet-4-6",
 	})
 	if err != nil {
 		t.Fatalf("harness console entrypoint with args: %v", err)
@@ -106,37 +106,37 @@ func TestDefaultEntrypointsAppendHarnessArgs(t *testing.T) {
 }
 
 func TestNormalizeArgsRejectsManagedFlags(t *testing.T) {
-	tests := []Args{
-		{Harness: []string{"--hooks", "/tmp/hooks.json"}},
-		{Harness: []string{"--hooks=/tmp/hooks.json"}},
-		{Harness: []string{"-p", "prompt"}},
-		{Harness: []string{"--prompt", "prompt"}},
-		{Harness: []string{"-i", "prompt"}},
-		{Harness: []string{"--initial-prompt", "prompt"}},
+	tests := [][]string{
+		{"--hooks", "/tmp/hooks.json"},
+		{"--hooks=/tmp/hooks.json"},
+		{"-p", "prompt"},
+		{"--prompt", "prompt"},
+		{"-i", "prompt"},
+		{"--initial-prompt", "prompt"},
 	}
 	for _, test := range tests {
 		if _, err := NormalizeArgs(test); err == nil {
 			t.Fatalf("NormalizeArgs(%+v) succeeded, want error", test)
 		}
 	}
-	if _, err := NormalizeArgs(Args{Harness: []string{"--profile", "review", "--model", "anthropic:claude-sonnet-4-6"}}); err != nil {
+	if _, err := NormalizeArgs([]string{"--profile", "review", "--model", "anthropic:claude-sonnet-4-6"}); err != nil {
 		t.Fatalf("NormalizeArgs accepted safe flags with error: %v", err)
 	}
 }
 
 func TestNormalizeArgsSplitsShellStyleStrings(t *testing.T) {
-	normalized, err := NormalizeArgs(Args{
-		Harness: []string{`--provider anthropic --model "claude sonnet" --profile=review`},
+	normalized, err := NormalizeArgs([]string{
+		`--provider anthropic --model "claude sonnet" --profile=review`,
 	})
 	if err != nil {
 		t.Fatalf("NormalizeArgs shell-style strings: %v", err)
 	}
 	want := []string{"--provider", "anthropic", "--model", "claude sonnet", "--profile=review"}
-	if got := normalized.Harness; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+	if got := normalized; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("normalized harness args = %#v, want %#v", got, want)
 	}
 
-	if _, err := NormalizeArgs(Args{Harness: []string{`--model "unterminated`}}); err == nil {
+	if _, err := NormalizeArgs([]string{`--model "unterminated`}); err == nil {
 		t.Fatal("NormalizeArgs accepted unmatched quote")
 	}
 }

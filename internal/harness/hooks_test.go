@@ -26,14 +26,6 @@ func TestRenderHookConfigMatchesGolden(t *testing.T) {
 	}
 }
 
-// TestRenderHookConfigRejectsUnknownFormat ensures an unconfigured HookFormat is
-// a loud error rather than a silently empty file.
-func TestRenderHookConfigRejectsUnknownFormat(t *testing.T) {
-	if _, err := RenderHookConfig(Definition{Name: "bogus", HookFormat: "yaml"}); err == nil {
-		t.Fatal("RenderHookConfig accepted unsupported format")
-	}
-}
-
 // TestHookEventsMapperParity is the anti-drift guard: every native-hook event a
 // harness's generator emits must be explicitly classified by that harness's
 // consumer-side mapper (HookState), so a new event can never be wired into the
@@ -59,7 +51,7 @@ func TestHookEventsMapperParity(t *testing.T) {
 				t.Fatalf("%s has duplicate hook event %q", name, event.Name)
 			}
 			seen[event.Name] = true
-			if state := def.HookState(event.Name, ""); state == "" {
+			if state := def.HookState(event.Name); state == "" {
 				t.Fatalf("%s hook event %q is unclassified by HookState", name, event.Name)
 			}
 		}

@@ -32,20 +32,10 @@ func (d Definition) hookCommand() hookCommand {
 	return hookCommand{Type: "command", Command: d.hookIngestCommand(), TimeoutSeconds: d.HookTimeoutSeconds}
 }
 
-// RenderHookConfig renders the native-hook configuration file content for a
-// harness, driven entirely by its HookEvents/HookTimeoutSeconds. It is the
-// single source of truth for the per-job hook files; "json" is the only
-// supported format.
+// RenderHookConfig renders the harness's native-hook configuration file
+// content as JSON, driven by its HookEvents/HookTimeoutSeconds. It is the
+// single source of truth for the per-job hook files.
 func RenderHookConfig(def Definition) ([]byte, error) {
-	switch def.HookFormat {
-	case "json":
-		return renderHookJSON(def)
-	default:
-		return nil, fmt.Errorf("harness %q has unsupported hook format %q", def.Name, def.HookFormat)
-	}
-}
-
-func renderHookJSON(def Definition) ([]byte, error) {
 	command := def.hookCommand()
 	hooks := make(map[string][]hookMatcher, len(def.HookEvents))
 	for _, event := range def.HookEvents {

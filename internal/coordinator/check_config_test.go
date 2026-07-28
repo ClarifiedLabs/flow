@@ -14,8 +14,8 @@ import (
 )
 
 func TestDefaultAgentChecksUseSelectedHarnessAndArgs(t *testing.T) {
-	suite, err := withDefaultAgentChecks(CheckSuite{}, flowharness.AgentSelection{Harness: flowharness.Harness}, flowharness.Args{
-		Harness: []string{"--model", "anthropic:claude-sonnet-4-6"},
+	suite, err := withDefaultAgentChecks(CheckSuite{}, flowharness.AgentSelection{Harness: flowharness.Harness}, []string{
+		"--model", "anthropic:claude-sonnet-4-6",
 	})
 	if err != nil {
 		t.Fatalf("default agent checks: %v", err)
@@ -44,8 +44,8 @@ func TestDefaultAgentChecksUseConfiguredDefaultModel(t *testing.T) {
 		Harness:         flowharness.Harness,
 		Model:           "anthropic:claude-sonnet-4-6",
 		ReasoningEffort: "high",
-	}, flowharness.Args{
-		Harness: []string{"--model", "openai:gpt-5"},
+	}, []string{
+		"--model", "openai:gpt-5",
 	})
 	if err != nil {
 		t.Fatalf("default agent checks: %v", err)

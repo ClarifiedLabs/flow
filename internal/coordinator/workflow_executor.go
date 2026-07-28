@@ -28,7 +28,7 @@ type WorkflowExecutor struct {
 	merges               workflowChangeMerger
 	queue                *flowworker.Service
 	project              Project
-	harnessArgs          flowharness.Args
+	harnessArgs          []string
 	reviewScopeFileLimit int
 	reviewScopeLineLimit int
 	handlers             map[NodeKind]workflowNodeHandler
@@ -69,7 +69,7 @@ type WorkflowExecutorOptions struct {
 	Merges               *MergeService
 	Queue                *flowworker.Service
 	Project              Project
-	HarnessArgs          flowharness.Args
+	HarnessArgs          []string
 	ReviewScopeFileLimit int
 	ReviewScopeLineLimit int
 }
@@ -322,7 +322,7 @@ LIMIT 1`,
 	}
 	harness := flowharness.NormalizeName(node.Config.Agent.Agent.Harness)
 	entrypoint, err := flowharness.DefaultAuthorEntrypointWithArgs(harness,
-		e.harnessArgs.Add(flowharness.ArgsFor(harness, modelArgs)))
+		append(append([]string{}, e.harnessArgs...), modelArgs...))
 	if err != nil {
 		return false, err
 	}

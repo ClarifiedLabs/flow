@@ -36,13 +36,15 @@ func (s *Server) handleHarnesses(w http.ResponseWriter, r *http.Request, princip
 	writeJSON(w, http.StatusOK, response)
 }
 
-func harnessOptions(definitions []flowharness.Definition, defaultArgs flowharness.Args, modelsByHarness map[string][]flowharness.Model) []contract.HarnessOption {
+func harnessOptions(definitions []flowharness.Definition, defaultArgs []string, modelsByHarness map[string][]flowharness.Model) []contract.HarnessOption {
 	options := make([]contract.HarnessOption, 0, len(definitions))
 	for _, definition := range definitions {
 		option := contract.HarnessOption{
 			Name:        definition.Name,
 			DisplayName: definition.DisplayName,
-			DefaultArgs: defaultArgs.For(definition.Name),
+		}
+		if definition.Name == flowharness.Harness {
+			option.DefaultArgs = append([]string(nil), defaultArgs...)
 		}
 		if models := modelsByHarness[definition.Name]; len(models) > 0 {
 			option.Models = flowharness.CloneModels(models)

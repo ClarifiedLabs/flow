@@ -215,7 +215,7 @@ type JobTerminalAccess struct {
 type SessionServiceOptions struct {
 	DefaultAuthorEntrypoint         map[string]any
 	DefaultAuthorEntrypointOverride bool
-	HarnessArgs                     flowharness.Args
+	HarnessArgs                     []string
 	// DefaultAgent is the configured fallback agent selection; the zero value
 	// resolves to the built-in default harness.
 	DefaultAgent           flowharness.AgentSelection
@@ -257,7 +257,7 @@ type SessionService struct {
 	project                         Project
 	defaultAuthorEntrypoint         map[string]any
 	defaultAuthorEntrypointOverride bool
-	harnessArgs                     flowharness.Args
+	harnessArgs                     []string
 	defaultAgent                    flowharness.AgentSelection
 	reviewCycles                    *ReviewCycleService
 	handoffSnapshots                handoffSnapshotGetter
@@ -1364,13 +1364,13 @@ func (s *SessionService) authorEntrypointPayload(phaseCtx workPhaseContext) (map
 	if s.defaultAuthorEntrypointOverride {
 		return copyPayload(s.defaultAuthorEntrypoint), true, nil
 	}
-	args := s.harnessArgs
+	args := append([]string{}, s.harnessArgs...)
 	if phaseCtx.hasCursor {
 		tokens, err := phaseCtx.agent.ModelSelectionArgs()
 		if err != nil {
 			return nil, false, err
 		}
-		args = args.Add(flowharness.ArgsFor(phaseCtx.agent.Harness, tokens))
+		args = append(args, tokens...)
 	} else {
 		// The default agent's model tokens precede the manual harness args so a
 		// --model in harness_args wins (last-token-wins) over the configured
@@ -1379,7 +1379,7 @@ func (s *SessionService) authorEntrypointPayload(phaseCtx workPhaseContext) (map
 		if err != nil {
 			return nil, false, err
 		}
-		args = flowharness.ArgsFor(s.defaultAgent.Harness, tokens).Add(args)
+		args = append(tokens, args...)
 	}
 	entrypoint, err := flowharness.DefaultAuthorEntrypointWithArgs(s.workPhaseHarness(phaseCtx), args)
 	return entrypoint, false, err
@@ -3480,7 +3480,7 @@ func defaultAuthorEntrypoint(sel flowharness.AgentSelection) map[string]any {
 	if err != nil {
 		panic(err)
 	}
-	entrypoint, err := flowharness.DefaultAuthorEntrypointWithArgs(sel.Harness, flowharness.ArgsFor(sel.Harness, modelTokens))
+	entrypoint, err := flowharness.DefaultAuthorEntrypointWithArgs(sel.Harness, modelTokens)
 	if err != nil {
 		panic(err)
 	}
