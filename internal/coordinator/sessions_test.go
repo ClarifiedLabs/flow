@@ -305,6 +305,135 @@ func TestReleaseConsoleCancelsQueuedJob(t *testing.T) {
 	}
 }
 
+func TestReconcileCrashedWorkflowAuthorSessionAllowsReplacement(t *testing.T) {
+	ctx := context.Background()
+	fixture := newSessionServiceFixture(t)
+	sessions, workers, credentials := fixture.sessions, fixture.workers, fixture.credentials
+
+	task, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Retry crashed workflow author"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	const (
+		workflowRunID = "wr-crashed-author"
+		nodeRunID     = "wnr-crashed-author"
+	)
+	if _, err := fixture.store.DB().ExecContext(ctx, `
+INSERT INTO workflow_runs (
+	id, task_id, run_sequence, flow_snapshot_json, state, current_node_key,
+	current_node_run_id, transition_budget, created_at, started_at
+) VALUES (?, ?, 1, '{}', 'running', 'author', ?, 10, ?, ?)`,
+		workflowRunID, task.ID, nodeRunID, formatTime(time.Now().UTC()), formatTime(time.Now().UTC())); err != nil {
+		t.Fatalf("insert workflow run: %v", err)
+	}
+	if _, err := fixture.store.DB().ExecContext(ctx, `
+INSERT INTO workflow_node_runs (
+	id, workflow_run_id, node_key, visit, attempt, state, created_at, started_at
+) VALUES (?, ?, 'author', 1, 1, 'running', ?, ?)`,
+		nodeRunID, workflowRunID, formatTime(time.Now().UTC()), formatTime(time.Now().UTC())); err != nil {
+		t.Fatalf("insert workflow node run: %v", err)
+	}
+
+	if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
+		ID:                      "w-local",
+		CapacityPersistentAgent: 1,
+	}); err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	enqueueWorkflowAuthor := func(attempt int) flowworker.Job {
+		t.Helper()
+		runID := workflowRunID
+		currentNodeRunID := nodeRunID
+		job, err := workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
+			TaskID:         &task.ID,
+			WorkflowRunID:  &runID,
+			NodeRunID:      &currentNodeRunID,
+			Role:           flowworker.RoleAuthor,
+			CapacityBucket: flowworker.BucketPersistentAgent,
+			Payload: map[string]any{
+				"base":           "main",
+				"workspace_mode": string(WorkspaceBase),
+				"node_attempt":   attempt,
+			},
+		})
+		if err != nil {
+			t.Fatalf("enqueue workflow author attempt %d: %v", attempt, err)
+		}
+		return job
+	}
+	startWorkflowAuthor := func(job flowworker.Job) StartAuthorSessionResult {
+		t.Helper()
+		claimed, ok, err := fixture.claimNext(ctx, flowworker.ClaimInput{
+			WorkerID:      "w-local",
+			Buckets:       []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
+			LeaseDuration: time.Minute,
+		})
+		if err != nil {
+			t.Fatalf("claim workflow author %s: %v", job.ID, err)
+		}
+		if !ok || claimed.Job.ID != job.ID {
+			t.Fatalf("claim = %+v ok=%t, want %s", claimed.Job, ok, job.ID)
+		}
+		if _, err := workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
+			t.Fatalf("mark workflow author %s running: %v", job.ID, err)
+		}
+		started, err := sessions.StartAuthorSession(ctx, StartAuthorSessionInput{
+			JobID:    job.ID,
+			LeaseID:  claimed.Lease.ID,
+			WorkerID: "w-local",
+			Harness:  flowharness.Harness,
+		})
+		if err != nil {
+			t.Fatalf("start workflow author %s: %v", job.ID, err)
+		}
+		return started
+	}
+
+	firstJob := enqueueWorkflowAuthor(1)
+	first := startWorkflowAuthor(firstJob)
+	if _, err := sessions.UpdateSessionState(ctx, first.Session.ID, SessionWorking); err != nil {
+		t.Fatalf("mark first workflow session working: %v", err)
+	}
+	if _, err := fixture.store.DB().ExecContext(ctx, `
+UPDATE leases SET expires_at = ? WHERE id = ?`,
+		formatTime(time.Now().UTC().Add(-time.Minute)), first.Session.LeaseID); err != nil {
+		t.Fatalf("expire first workflow lease: %v", err)
+	}
+
+	recovered, err := sessions.ReconcileCrashedAuthorSessions(ctx)
+	if err != nil {
+		t.Fatalf("reconcile crashed workflow author: %v", err)
+	}
+	if recovered != 0 {
+		t.Fatalf("recovered jobs = %d, want workflow retry to remain operator-owned", recovered)
+	}
+	crashed, err := sessions.GetSession(ctx, first.Session.ID)
+	if err != nil {
+		t.Fatalf("get crashed workflow session: %v", err)
+	}
+	if crashed.RuntimeState != SessionCrashed || crashed.FinishedAt == nil {
+		t.Fatalf("crashed workflow session = %+v", crashed)
+	}
+	if _, err := credentials.Authenticate(ctx, first.Token); !errors.Is(err, ErrInvalidCredential) {
+		t.Fatalf("authenticate crashed workflow token err = %v, want ErrInvalidCredential", err)
+	}
+	jobs, err := workers.ListJobs(ctx)
+	if err != nil {
+		t.Fatalf("list jobs after workflow reconciliation: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != firstJob.ID || jobs[0].State != flowworker.JobCrashed {
+		t.Fatalf("jobs after workflow reconciliation = %+v, want only crashed job %s", jobs, firstJob.ID)
+	}
+
+	replacementJob := enqueueWorkflowAuthor(2)
+	replacement := startWorkflowAuthor(replacementJob)
+	if replacement.Session.ID == first.Session.ID ||
+		replacement.Session.WorkflowRunID != workflowRunID ||
+		replacement.Session.NodeRunID != nodeRunID {
+		t.Fatalf("replacement workflow session = %+v, first = %s", replacement.Session, first.Session.ID)
+	}
+}
+
 func TestReconcileCrashedConsoleSessionDoesNotReenqueue(t *testing.T) {
 	ctx := context.Background()
 	fixture := newSessionServiceFixture(t)

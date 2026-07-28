@@ -754,7 +754,6 @@ FROM sessions s
 JOIN jobs j ON j.id = s.job_id
 JOIN leases l ON l.id = s.lease_id
 WHERE s.role = ?
-	AND s.workflow_run_id IS NULL
 	AND (
 		(
 			s.runtime_state IN (?, ?, ?)
@@ -765,7 +764,8 @@ WHERE s.role = ?
 			)
 		)
 		OR (
-			s.runtime_state = ?
+			s.workflow_run_id IS NULL
+			AND s.runtime_state = ?
 			AND NOT EXISTS (
 				SELECT 1
 				FROM jobs live
@@ -873,6 +873,13 @@ WHERE id = ?
 		session, err := s.GetSession(ctx, sessionID)
 		if err != nil {
 			joinedErr = errors.Join(joinedErr, fmt.Errorf("get crashed author session %s: %w", sessionID, err))
+			continue
+		}
+		// Workflow retries are owned by the workflow executor and require an
+		// explicit operator action after an execution failure. Reconcile the
+		// dead session so it no longer blocks the one-active-author constraint,
+		// but do not route it through the legacy automatic author-job recovery.
+		if session.WorkflowRunID != "" {
 			continue
 		}
 		job, err := s.workers.GetJob(ctx, session.JobID)
