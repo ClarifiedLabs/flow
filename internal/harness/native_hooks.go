@@ -55,9 +55,6 @@ func ParseNativeHook(input NativeHookInput) (NativeHookSignal, error) {
 		HookEventName: event,
 	}
 	notificationType := firstStringField(payload, "notification_type", "notificationType")
-	if harnessName == Claude && notificationType != "" {
-		signal.Details = "notification_type=" + notificationType
-	}
 	if definition.HookState != nil {
 		if mapped := definition.HookState(event, notificationType); mapped != "" {
 			signal.Signal = mapped
@@ -67,44 +64,10 @@ func ParseNativeHook(input NativeHookInput) (NativeHookSignal, error) {
 	return signal, nil
 }
 
-// The map*NativeHook functions return "" for events they do not explicitly
-// recognize; ParseNativeHook applies SignalActivity as the default. This lets
-// the HookEvents/HookState parity test distinguish an explicit activity
+// mapHarnessNativeHook returns "" for events it does not explicitly recognize;
+// ParseNativeHook applies SignalActivity as the default. This lets the
+// HookEvents/HookState parity test distinguish an explicit activity
 // classification from an unrecognized event.
-
-func mapCodexNativeHook(event string) string {
-	switch strings.ToLower(strings.TrimSpace(event)) {
-	case "sessionstart", "userpromptsubmit", "pretooluse":
-		return StateWorking
-	case "permissionrequest", "stop":
-		return StateWaiting
-	case "posttooluse", "precompact", "postcompact":
-		return SignalActivity
-	default:
-		return ""
-	}
-}
-
-func mapClaudeNativeHook(event string, notificationType string) string {
-	switch strings.ToLower(strings.TrimSpace(event)) {
-	case "userpromptsubmit", "pretooluse":
-		return StateWorking
-	case "permissionrequest", "stop", "stopfailure":
-		return StateWaiting
-	case "notification":
-		switch strings.ToLower(strings.TrimSpace(notificationType)) {
-		case "permission_prompt", "idle_prompt":
-			return StateWaiting
-		default:
-			return SignalActivity
-		}
-	case "posttooluse", "posttoolusefailure":
-		return SignalActivity
-	default:
-		return ""
-	}
-}
-
 func mapHarnessNativeHook(event string) string {
 	switch strings.ToLower(strings.TrimSpace(event)) {
 	case "sessionstart", "userpromptsubmit", "pretooluse":

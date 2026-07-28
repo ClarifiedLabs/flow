@@ -11,8 +11,6 @@ func TestKindStringConstsMatch(t *testing.T) {
 		str  string
 		kind Kind
 	}{
-		{Codex, KindCodex},
-		{Claude, KindClaude},
 		{Harness, KindHarness},
 		{Agents, KindAgents},
 		{Shell, KindShell},
@@ -36,60 +34,33 @@ func TestDefinitionKindMatchesName(t *testing.T) {
 	}
 }
 
-// TestDefaultAgentCheckCommandMatchesBuilders is a golden behavior-unchanged
-// test: the table-driven DefaultAgentCheckCommandWithArgs must produce exactly
-// the same string the per-harness builders return.
+// TestDefaultAgentCheckCommandMatchesBuilders locks the table-driven
+// DefaultAgentCheckCommandWithArgs to exactly the string the harness's
+// CheckCommand builder returns.
 func TestDefaultAgentCheckCommandMatchesBuilders(t *testing.T) {
 	args := []string{"--model", "fast"}
-	cases := []struct {
-		name string
-		want string
-	}{
-		{Codex, DefaultCodexExecCommandWithArgs(args)},
-		{Claude, DefaultClaudePrintCommandWithArgs(args)},
-		{Harness, DefaultHarnessPrintCommandWithArgs(args)},
+	got, err := DefaultAgentCheckCommandWithArgs(Harness, args)
+	if err != nil {
+		t.Fatalf("DefaultAgentCheckCommandWithArgs(%q): %v", Harness, err)
 	}
-	for _, test := range cases {
-		got, err := DefaultAgentCheckCommandWithArgs(test.name, args)
-		if err != nil {
-			t.Fatalf("DefaultAgentCheckCommandWithArgs(%q): %v", test.name, err)
-		}
-		if got != test.want {
-			t.Fatalf("DefaultAgentCheckCommandWithArgs(%q) =\n%s\nwant\n%s", test.name, got, test.want)
-		}
+	if want := DefaultHarnessPrintCommandWithArgs(args); got != want {
+		t.Fatalf("DefaultAgentCheckCommandWithArgs(%q) =\n%s\nwant\n%s", Harness, got, want)
 	}
 	if _, err := DefaultAgentCheckCommandWithArgs(Shell, args); err == nil {
 		t.Fatal("DefaultAgentCheckCommandWithArgs(shell) err = nil, want error")
 	}
 }
 
-// TestManagedArgValidationGolden proves the table-driven managed-flag and
-// managed-config-key validation accepts/rejects exactly the same inputs the
-// hand-written switches did.
+// TestManagedArgValidationGolden proves the table-driven managed-flag
+// validation accepts/rejects exactly the intended inputs.
 func TestManagedArgValidationGolden(t *testing.T) {
 	reject := []Args{
-		// claude reserved flags (exact + value form)
-		{Claude: []string{"--settings", "/tmp/s.json"}},
-		{Claude: []string{"--settings=/tmp/s.json"}},
-		{Claude: []string{"--permission-mode", "bypassPermissions"}},
-		{Claude: []string{"--permission-mode=bypassPermissions"}},
-		{Claude: []string{"--dangerously-skip-permissions"}},
-		{Claude: []string{"--allow-dangerously-skip-permissions"}},
-		// harness reserved flags
 		{Harness: []string{"--hooks", "/tmp/h.json"}},
 		{Harness: []string{"--hooks=/tmp/h.json"}},
 		{Harness: []string{"-p", "prompt"}},
 		{Harness: []string{"--prompt", "prompt"}},
 		{Harness: []string{"-i", "prompt"}},
 		{Harness: []string{"--initial-prompt", "prompt"}},
-		// codex reserved flag + config keys
-		{Codex: []string{"--dangerously-bypass-hook-trust"}},
-		{Codex: []string{"--dangerously-bypass-hook-trust=1"}},
-		{Codex: []string{"-c", "features.hooks=true"}},
-		{Codex: []string{"-c", "hooks.Stop=[]"}},
-		{Codex: []string{"-c", "projects.foo.trust_level=trusted"}},
-		{Codex: []string{"--config=projects.$PWD.trust_level=trusted"}},
-		{Codex: []string{"-c=hooks.Stop=[]"}},
 	}
 	for _, args := range reject {
 		if _, err := NormalizeArgs(args); err == nil {
@@ -98,11 +69,8 @@ func TestManagedArgValidationGolden(t *testing.T) {
 	}
 
 	accept := []Args{
-		{Claude: []string{"--model", "sonnet"}},
 		{Harness: []string{"--provider", "anthropic", "--model", "claude-sonnet-4-6"}},
-		{Codex: []string{"-c", "model_reasoning_effort=high"}},
-		{Codex: []string{"-c", "model=gpt-5"}},
-		{Codex: []string{"--config=sandbox_mode=workspace-write"}},
+		{Harness: []string{"--profile", "review"}},
 	}
 	for _, args := range accept {
 		if _, err := NormalizeArgs(args); err != nil {
@@ -111,56 +79,39 @@ func TestManagedArgValidationGolden(t *testing.T) {
 	}
 }
 
-// TestNativeHookMappingGolden asserts the HookState wiring on each Definition
-// classifies events identically to the ParseNativeHook switch it replaced.
+// TestNativeHookMappingGolden asserts the HookState wiring on the harness
+// Definition classifies events as intended.
 func TestNativeHookMappingGolden(t *testing.T) {
 	cases := []struct {
-		harness          string
-		event            string
-		notificationType string
-		want             string
+		event string
+		want  string
 	}{
-		{Codex, "UserPromptSubmit", "", StateWorking},
-		{Codex, "PreToolUse", "", StateWorking},
-		{Codex, "PermissionRequest", "", StateWaiting},
-		{Codex, "Stop", "", StateWaiting},
-		{Codex, "PostToolUse", "", SignalActivity},
-		{Claude, "UserPromptSubmit", "", StateWorking},
-		{Claude, "PreToolUse", "", StateWorking},
-		{Claude, "PermissionRequest", "", StateWaiting},
-		{Claude, "Stop", "", StateWaiting},
-		{Claude, "StopFailure", "", StateWaiting},
-		{Claude, "PostToolUse", "", SignalActivity},
-		{Claude, "PostToolUseFailure", "", SignalActivity},
-		{Claude, "Notification", "permission_prompt", StateWaiting},
-		{Claude, "Notification", "idle_prompt", StateWaiting},
-		{Claude, "Notification", "auth_success", SignalActivity},
-		{Harness, "SessionStart", "", StateWorking},
-		{Harness, "UserPromptSubmit", "", StateWorking},
-		{Harness, "PreToolUse", "", StateWorking},
-		{Harness, "Stop", "", StateWaiting},
-		{Harness, "PostToolUse", "", SignalActivity},
-		{Harness, "PreCompact", "", SignalActivity},
-		{Harness, "PostCompact", "", SignalActivity},
+		{"SessionStart", StateWorking},
+		{"UserPromptSubmit", StateWorking},
+		{"PreToolUse", StateWorking},
+		{"Stop", StateWaiting},
+		{"PostToolUse", SignalActivity},
+		{"PreCompact", SignalActivity},
+		{"PostCompact", SignalActivity},
+	}
+	definition, ok := Lookup(Harness)
+	if !ok || definition.HookState == nil {
+		t.Fatalf("definition %q missing HookState", Harness)
 	}
 	for _, test := range cases {
-		definition, ok := Lookup(test.harness)
-		if !ok || definition.HookState == nil {
-			t.Fatalf("definition %q missing HookState", test.harness)
-		}
-		got := definition.HookState(test.event, test.notificationType)
+		got := definition.HookState(test.event, "")
 		if got == "" {
 			got = SignalActivity // ParseNativeHook applies the default
 		}
 		if got != test.want {
-			t.Fatalf("%s HookState(%q,%q) = %q, want %q", test.harness, test.event, test.notificationType, got, test.want)
+			t.Fatalf("HookState(%q) = %q, want %q", test.event, got, test.want)
 		}
 	}
 }
 
 // TestHookEventsParityWithHookState ensures every declared HookEvent maps to an
-// explicit (non-default) classification, so the future renderer's event table
-// stays in lockstep with the runtime classifier.
+// explicit (non-default) classification, so the renderer's event table stays in
+// lockstep with the runtime classifier.
 func TestHookEventsParityWithHookState(t *testing.T) {
 	for _, name := range AgentNames() {
 		definition, ok := Lookup(name)
@@ -186,96 +137,61 @@ func TestHookEventsParityWithHookState(t *testing.T) {
 }
 
 func TestHookEventsDataMatchesGenerators(t *testing.T) {
-	tests := []struct {
-		name      string
-		count     int
-		format    string
-		envVar    string
-		matchers  map[string]string
-		hasEvents []string
-	}{
-		{
-			name:      Claude,
-			count:     8,
-			format:    "json",
-			envVar:    "FLOW_CLAUDE_HOOK_SETTINGS",
-			matchers:  map[string]string{"Notification": "permission_prompt|idle_prompt", "PreToolUse": "*"},
-			hasEvents: []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest", "Notification", "Stop", "StopFailure"},
-		},
-		{
-			name:      Harness,
-			count:     7,
-			format:    "json",
-			envVar:    "FLOW_HARNESS_HOOKS",
-			matchers:  map[string]string{"PreToolUse": "*", "PostToolUse": "*"},
-			hasEvents: []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PreCompact", "PostCompact", "Stop"},
-		},
-		{
-			name:      Codex,
-			count:     8,
-			format:    "toml",
-			envVar:    "FLOW_CODEX_HOOK_PROFILE",
-			matchers:  map[string]string{"PermissionRequest": "*", "PreToolUse": "*", "PostToolUse": "*", "SessionStart": "", "PreCompact": "", "PostCompact": ""},
-			hasEvents: []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PreCompact", "PostCompact", "PermissionRequest", "Stop"},
-		},
+	definition, ok := Lookup(Harness)
+	if !ok {
+		t.Fatalf("Lookup(%q) missing", Harness)
 	}
-	for _, test := range tests {
-		definition, ok := Lookup(test.name)
-		if !ok {
-			t.Fatalf("Lookup(%q) missing", test.name)
+	if len(definition.HookEvents) != 7 {
+		t.Fatalf("HookEvents count = %d, want 7", len(definition.HookEvents))
+	}
+	if definition.HookFormat != "json" {
+		t.Fatalf("HookFormat = %q, want json", definition.HookFormat)
+	}
+	if definition.HookEnvVar != "FLOW_HARNESS_HOOKS" {
+		t.Fatalf("HookEnvVar = %q, want FLOW_HARNESS_HOOKS", definition.HookEnvVar)
+	}
+	byName := map[string]string{}
+	for _, event := range definition.HookEvents {
+		byName[event.Name] = event.Matcher
+	}
+	for _, want := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PreCompact", "PostCompact", "Stop"} {
+		if _, ok := byName[want]; !ok {
+			t.Fatalf("HookEvents missing %q: %+v", want, definition.HookEvents)
 		}
-		if len(definition.HookEvents) != test.count {
-			t.Fatalf("%s HookEvents count = %d, want %d", test.name, len(definition.HookEvents), test.count)
-		}
-		if definition.HookFormat != test.format {
-			t.Fatalf("%s HookFormat = %q, want %q", test.name, definition.HookFormat, test.format)
-		}
-		if definition.HookEnvVar != test.envVar {
-			t.Fatalf("%s HookEnvVar = %q, want %q", test.name, definition.HookEnvVar, test.envVar)
-		}
-		byName := map[string]string{}
-		for _, event := range definition.HookEvents {
-			byName[event.Name] = event.Matcher
-		}
-		for _, want := range test.hasEvents {
-			if _, ok := byName[want]; !ok {
-				t.Fatalf("%s HookEvents missing %q: %+v", test.name, want, definition.HookEvents)
-			}
-		}
-		for event, matcher := range test.matchers {
-			if byName[event] != matcher {
-				t.Fatalf("%s HookEvent %q matcher = %q, want %q", test.name, event, byName[event], matcher)
-			}
+	}
+	for event, matcher := range map[string]string{"PreToolUse": "*", "PostToolUse": "*"} {
+		if byName[event] != matcher {
+			t.Fatalf("HookEvent %q matcher = %q, want %q", event, byName[event], matcher)
 		}
 	}
 }
 
-func TestDetectEntrypointHarnessDeterministicTieBreak(t *testing.T) {
-	// A single token mentioning multiple harness executables must resolve to a
-	// deterministic, sorted-name winner (claude < codex < harness).
-	argv := []string{"env codex=1 claude harness run"}
+func TestDetectEntrypointHarnessDeterministic(t *testing.T) {
+	// A token mentioning the harness executable resolves to the harness; an
+	// unrelated token falls back to the agents pseudo-harness.
+	argv := []string{"env FOO=1 harness run"}
 	for i := 0; i < 8; i++ {
-		if got := DetectEntrypointHarness(argv); got != Claude {
-			t.Fatalf("DetectEntrypointHarness(multi) = %q, want %q (deterministic)", got, Claude)
+		if got := DetectEntrypointHarness(argv); got != Harness {
+			t.Fatalf("DetectEntrypointHarness(%v) = %q, want %q (deterministic)", argv, got, Harness)
 		}
 	}
 }
 
 func TestDefaultEntrypointsStampHarness(t *testing.T) {
-	author, err := DefaultAuthorEntrypoint(Codex)
+	author, err := DefaultAuthorEntrypoint(Harness)
 	if err != nil {
-		t.Fatalf("DefaultAuthorEntrypoint(codex): %v", err)
+		t.Fatalf("DefaultAuthorEntrypoint(harness): %v", err)
 	}
-	if author["harness"] != Codex {
-		t.Fatalf("author harness = %#v, want %q", author["harness"], Codex)
+	if author["harness"] != Harness {
+		t.Fatalf("author harness = %#v, want %q", author["harness"], Harness)
 	}
 
-	console, err := DefaultConsoleEntrypointWithArgs(Claude, Args{})
+	console, err := DefaultConsoleEntrypointWithArgs(Harness, Args{})
 	if err != nil {
-		t.Fatalf("DefaultConsoleEntrypointWithArgs(claude): %v", err)
+		t.Fatalf("DefaultConsoleEntrypointWithArgs(harness): %v", err)
 	}
-	if console["harness"] != Claude {
-		t.Fatalf("console harness = %#v, want %q", console["harness"], Claude)
+	if console["harness"] != Harness {
+		t.Fatalf("console harness = %#v, want %q", console["harness"], Harness)
 	}
 
 	shell, err := DefaultConsoleEntrypointWithArgs(Shell, Args{})

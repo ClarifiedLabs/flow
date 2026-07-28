@@ -15,9 +15,9 @@ func TestResolveHarnessPrefersStoredKind(t *testing.T) {
 		{
 			name: "stored entrypoint harness beats misleading argv",
 			input: tmuxInput{
-				Entrypoint: Entrypoint{Harness: flowharness.Codex, Argv: []string{`/usr/local/bin/claude "$prompt"`}},
+				Entrypoint: Entrypoint{Harness: flowharness.Harness, Argv: []string{`custom-agent run "$prompt"`}},
 			},
-			want: flowharness.Codex,
+			want: flowharness.Harness,
 		},
 		{
 			name: "agent_harness payload fallback",
@@ -30,25 +30,25 @@ func TestResolveHarnessPrefersStoredKind(t *testing.T) {
 		{
 			name: "console_harness payload fallback",
 			input: tmuxInput{
-				Payload:    JobPayload{ConsoleHarness: flowharness.Claude},
+				Payload:    JobPayload{ConsoleHarness: flowharness.Agents},
 				Entrypoint: Entrypoint{Argv: []string{`custom-agent run`}},
 			},
-			want: flowharness.Claude,
+			want: flowharness.Agents,
 		},
 		{
 			name: "entrypoint harness wins over payload harnesses",
 			input: tmuxInput{
-				Payload:    JobPayload{AgentHarness: flowharness.Codex, ConsoleHarness: flowharness.Codex},
-				Entrypoint: Entrypoint{Harness: flowharness.Claude, Argv: []string{`codex "$prompt"`}},
+				Payload:    JobPayload{AgentHarness: flowharness.Agents, ConsoleHarness: flowharness.Agents},
+				Entrypoint: Entrypoint{Harness: flowharness.Harness, Argv: []string{`custom-agent "$prompt"`}},
 			},
-			want: flowharness.Claude,
+			want: flowharness.Harness,
 		},
 		{
 			name: "agent_harness wins over console_harness",
 			input: tmuxInput{
-				Payload: JobPayload{AgentHarness: flowharness.Codex, ConsoleHarness: flowharness.Claude},
+				Payload: JobPayload{AgentHarness: flowharness.Harness, ConsoleHarness: flowharness.Agents},
 			},
-			want: flowharness.Codex,
+			want: flowharness.Harness,
 		},
 		{
 			name: "empty falls back to argv heuristic",
@@ -65,11 +65,18 @@ func TestResolveHarnessPrefersStoredKind(t *testing.T) {
 			want: flowharness.DefaultAgentName(),
 		},
 		{
+			name: "unmanaged argv resolves to agents",
+			input: tmuxInput{
+				Entrypoint: Entrypoint{Argv: []string{`custom-agent run`}},
+			},
+			want: flowharness.Agents,
+		},
+		{
 			name: "normalizes stored value",
 			input: tmuxInput{
-				Entrypoint: Entrypoint{Harness: "  Codex  "},
+				Entrypoint: Entrypoint{Harness: "  Harness  "},
 			},
-			want: flowharness.Codex,
+			want: flowharness.Harness,
 		},
 	}
 	for _, test := range tests {
@@ -86,18 +93,18 @@ func TestResolveHarnessPrefersStoredKind(t *testing.T) {
 // stored agent harness, preserving the deliberate prompt-vs-agent distinction.
 func TestPromptConventionHarnessKeepsPromptDistinction(t *testing.T) {
 	got := promptConventionHarness(tmuxInput{
-		Payload:    JobPayload{PromptHarness: flowharness.Agents, AgentHarness: flowharness.Codex},
-		Entrypoint: Entrypoint{Harness: flowharness.Codex},
+		Payload:    JobPayload{PromptHarness: flowharness.Agents, AgentHarness: flowharness.Harness},
+		Entrypoint: Entrypoint{Harness: flowharness.Harness},
 	})
 	if got != flowharness.Agents {
 		t.Fatalf("promptConventionHarness() = %q, want %q (prompt convention wins)", got, flowharness.Agents)
 	}
 
 	fallback := promptConventionHarness(tmuxInput{
-		Payload:    JobPayload{AgentHarness: flowharness.Claude},
+		Payload:    JobPayload{AgentHarness: flowharness.Harness},
 		Entrypoint: Entrypoint{Argv: []string{`custom-agent run`}},
 	})
-	if fallback != flowharness.Claude {
-		t.Fatalf("promptConventionHarness() fallback = %q, want %q", fallback, flowharness.Claude)
+	if fallback != flowharness.Harness {
+		t.Fatalf("promptConventionHarness() fallback = %q, want %q", fallback, flowharness.Harness)
 	}
 }

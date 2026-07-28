@@ -125,7 +125,7 @@ additionally proves the run owns a merged change.
 
 Workers register globally in `global.db` with:
 
-- labels such as `agent.harness.codex=true`;
+- labels such as `agent.harness.harness=true`;
 - taints;
 - `persistent_agent` and `ephemeral` capacity;
 - heartbeat expiry;

@@ -21,7 +21,7 @@ VALUES ('task', 1), ('task_attachment', 1);
 CREATE TABLE agent_defs (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL UNIQUE CHECK (length(trim(name)) > 0),
-	harness TEXT NOT NULL CHECK (harness IN ('codex', 'claude', 'harness')),
+	harness TEXT NOT NULL CHECK (harness IN ('harness')),
 	model TEXT NOT NULL DEFAULT '',
 	reasoning_effort TEXT NOT NULL DEFAULT '',
 	prompt TEXT NOT NULL DEFAULT '',

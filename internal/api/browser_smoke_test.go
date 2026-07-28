@@ -77,7 +77,7 @@ func activateBrowserConsoleSession(t *testing.T, fixture testFixture) coordinato
 	workerID := "w-browser-console"
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                      workerID,
-		Labels:                  map[string]string{"agent.harness.codex": "true"},
+		Labels:                  map[string]string{"agent.harness.harness": "true"},
 		CapacityPersistentAgent: 1,
 	}); err != nil {
 		t.Fatalf("register console worker: %v", err)

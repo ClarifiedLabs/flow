@@ -39,8 +39,6 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "create deny agent dir: %v\n", err)
 		os.Exit(2)
 	}
-	writeDenyAgentExecutable(denyDir, "codex", "login status")
-	writeDenyAgentExecutable(denyDir, "claude", "auth status")
 	writeDenyAgentExecutable(denyDir, "harness", "--check-model-proxy")
 	_ = os.Setenv("PATH", denyDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	_ = os.Setenv("HARNESS_MODEL_PROXY_URL", "http://127.0.0.1:1")
@@ -768,7 +766,7 @@ func TestWorkerConsoleCleanExitReleasesSession(t *testing.T) {
 printf console-exit > "$1"
 `)
 	ensured, err := fixture.Sessions.EnsureConsoleJob(ctx, coordinator.EnsureConsoleJobInput{
-		Harness: "codex",
+		Harness: "harness",
 		Entrypoint: map[string]any{
 			"argv":  []string{scriptPath, outPath},
 			"shell": false,
@@ -785,7 +783,7 @@ printf console-exit > "$1"
 	toolYAML, _ := workerToolConfigYAML(t)
 	configPath := writeWorkerConfig(t, t.TempDir(), workerConfigOptions{
 		coordinatorURL:    httpServer.URL,
-		codexHarnessLabel: true,
+		agentHarnessLabel: true,
 		capacityBucket:    "persistent_agent",
 		capacityCount:     1,
 		toolYAML:          toolYAML,
@@ -861,7 +859,7 @@ printf console-failed > "$1"
 exit 42
 `)
 	ensured, err := fixture.Sessions.EnsureConsoleJob(ctx, coordinator.EnsureConsoleJobInput{
-		Harness: "codex",
+		Harness: "harness",
 		Entrypoint: map[string]any{
 			"argv":  []string{scriptPath, outPath},
 			"shell": false,
@@ -877,7 +875,7 @@ exit 42
 	toolYAML, _ := workerToolConfigYAML(t)
 	configPath := writeWorkerConfig(t, t.TempDir(), workerConfigOptions{
 		coordinatorURL:    httpServer.URL,
-		codexHarnessLabel: true,
+		agentHarnessLabel: true,
 		capacityBucket:    "persistent_agent",
 		capacityCount:     1,
 		toolYAML:          toolYAML,
@@ -1087,10 +1085,8 @@ capacity:
 
 func TestRegistrationLabelsAdvertiseAvailableHarnessesAndDropGenericAgent(t *testing.T) {
 	toolDir := t.TempDir()
-	for _, name := range []string{"codex", "harness"} {
-		if err := os.WriteFile(filepath.Join(toolDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-			t.Fatalf("write fake %s: %v", name, err)
-		}
+	if err := os.WriteFile(filepath.Join(toolDir, "harness"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write fake harness: %v", err)
 	}
 	t.Setenv("PATH", toolDir)
 
@@ -1101,38 +1097,30 @@ func TestRegistrationLabelsAdvertiseAvailableHarnessesAndDropGenericAgent(t *tes
 	if labels["agent"] != "" {
 		t.Fatalf("labels = %#v, generic agent label should be dropped", labels)
 	}
-	for _, want := range []string{"local", "agent.harness.codex", "agent.harness.harness"} {
+	for _, want := range []string{"local", "agent.harness.harness"} {
 		if labels[want] != "true" {
 			t.Fatalf("labels = %#v, missing %s=true", labels, want)
 		}
-	}
-	if labels["agent.harness.claude"] == "true" {
-		t.Fatalf("labels = %#v, did not expect claude", labels)
 	}
 }
 
 func TestRegistrationLabelsReportHarnessAvailability(t *testing.T) {
 	toolDir := t.TempDir()
-	for _, name := range []string{"codex", "harness"} {
-		if err := os.WriteFile(filepath.Join(toolDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-			t.Fatalf("write fake %s: %v", name, err)
-		}
+	if err := os.WriteFile(filepath.Join(toolDir, "harness"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write fake harness: %v", err)
 	}
 	t.Setenv("PATH", toolDir)
 
 	labels, availability := registrationLabelsWithAvailability(map[string]string{"local": "true"})
-	if labels["agent.harness.codex"] != "true" || labels["agent.harness.harness"] != "true" {
-		t.Fatalf("labels = %#v, want codex and harness labels", labels)
+	if labels["agent.harness.harness"] != "true" {
+		t.Fatalf("labels = %#v, want harness label", labels)
 	}
 	statusByName := map[string]flowharness.Availability{}
 	for _, status := range availability {
 		statusByName[status.Name] = status
 	}
-	if !statusByName[flowharness.Codex].Available || !statusByName[flowharness.Harness].Available {
-		t.Fatalf("availability = %#v, want codex and harness available", statusByName)
-	}
-	if statusByName[flowharness.Claude].Available || !strings.Contains(statusByName[flowharness.Claude].Reason, "executable not found") {
-		t.Fatalf("claude availability = %#v, want missing executable", statusByName[flowharness.Claude])
+	if len(availability) != 1 || !statusByName[flowharness.Harness].Available {
+		t.Fatalf("availability = %#v, want only harness available", statusByName)
 	}
 }
 
@@ -1144,7 +1132,7 @@ func TestLogAgentHarnessAvailabilityIncludesDetectedAndMissing(t *testing.T) {
 
 	logAgentHarnessAvailability([]flowharness.Availability{
 		{Name: flowharness.Harness, Executable: "harness", Path: "/usr/bin/harness", Available: true, Reason: "usability check passed"},
-		{Name: flowharness.Claude, Executable: "claude", Available: false, Reason: "executable not found", Error: "not found"},
+		{Name: "bogus", Executable: "bogus", Available: false, Reason: "executable not found", Error: "not found"},
 	})
 
 	output := logs.String()
@@ -1152,9 +1140,9 @@ func TestLogAgentHarnessAvailabilityIncludesDetectedAndMissing(t *testing.T) {
 		"msg=\"flow-worker agent harness detected\"",
 		"harness=harness",
 		"msg=\"flow-worker agent harness not detected\"",
-		"harness=claude",
+		"harness=bogus",
 		"available=harness",
-		"unavailable=claude",
+		"unavailable=bogus",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("log output missing %q:\n%s", want, output)
@@ -1565,7 +1553,7 @@ func putFakeTTYDOnPath(t *testing.T) {
 type workerConfigOptions struct {
 	coordinatorURL    string // coordinator_url value (e.g. httpServer.URL)
 	protocolVersion   string // protocol_version value; defaults to the current protocol
-	codexHarnessLabel bool   // include labels: { agent.harness.codex: "true" }
+	agentHarnessLabel bool   // include labels: { agent.harness.harness: "true" }
 	capacityBucket    string // capacity bucket key (e.g. "ephemeral")
 	capacityCount     int    // capacity bucket count
 	toolYAML          string // tool/terminal/tmux config fragment
@@ -1590,8 +1578,8 @@ func writeWorkerConfig(t *testing.T, dir string, opts workerConfigOptions) strin
 	}
 	b.WriteString("work_dir: " + filepath.ToSlash(t.TempDir()) + "\n")
 	b.WriteString("protocol_version: " + protocolVersion + "\n")
-	if opts.codexHarnessLabel {
-		b.WriteString("labels:\n  agent.harness.codex: \"true\"\n")
+	if opts.agentHarnessLabel {
+		b.WriteString("labels:\n  agent.harness.harness: \"true\"\n")
 	}
 	b.WriteString("capacity:\n")
 	b.WriteString(fmt.Sprintf("  %s: %d\n", opts.capacityBucket, opts.capacityCount))
@@ -1697,7 +1685,7 @@ func TestWorkerConsoleRunErrorReleasesSessionAndSurfacesError(t *testing.T) {
 	fixture := newWorkerTestFixture(t)
 
 	ensured, err := fixture.Sessions.EnsureConsoleJob(ctx, coordinator.EnsureConsoleJobInput{
-		Harness: "codex",
+		Harness: "harness",
 		Entrypoint: map[string]any{
 			"argv":  []string{"/bin/sh", "-c", "true"},
 			"shell": false,
@@ -1716,7 +1704,7 @@ func TestWorkerConsoleRunErrorReleasesSessionAndSurfacesError(t *testing.T) {
 	toolYAML, _ := workerToolConfigYAML(t)
 	configPath := writeWorkerConfig(t, t.TempDir(), workerConfigOptions{
 		coordinatorURL:    httpServer.URL,
-		codexHarnessLabel: true,
+		agentHarnessLabel: true,
 		capacityBucket:    "persistent_agent",
 		capacityCount:     1,
 		toolYAML:          toolYAML,

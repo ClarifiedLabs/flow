@@ -112,7 +112,7 @@ func TestHookPrepushExitsZeroWithoutSession(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	var stdout, stderr bytes.Buffer
 	withStdin(t, "", func() {
-		if code := run([]string{"hook", "claude", "prepush"}, &stdout, &stderr); code != 0 {
+		if code := run([]string{"hook", "harness", "prepush"}, &stdout, &stderr); code != 0 {
 			t.Fatalf("prepush exit = %d, want 0; stderr=%q", code, stderr.String())
 		}
 	})
@@ -128,7 +128,7 @@ func TestHookPrepushAlwaysExitsZeroWhenCoordinatorUnreachable(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	withStdin(t, "", func() {
-		if code := run([]string{"hook", "claude", "prepush"}, &stdout, &stderr); code != 0 {
+		if code := run([]string{"hook", "harness", "prepush"}, &stdout, &stderr); code != 0 {
 			t.Fatalf("prepush exit = %d, want 0 even when coordinator is unreachable; stderr=%q", code, stderr.String())
 		}
 	})
@@ -151,7 +151,7 @@ func TestHookPrepushCapturesAndSteers(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	withStdin(t, "refs/heads/x abc refs/heads/x def\n", func() {
-		if code := run([]string{"hook", "claude", "prepush"}, &stdout, &stderr); code != 0 {
+		if code := run([]string{"hook", "harness", "prepush"}, &stdout, &stderr); code != 0 {
 			t.Fatalf("prepush exit = %d, want 0; stderr=%q", code, stderr.String())
 		}
 	})
@@ -193,7 +193,7 @@ func TestHookPrepushSilentWhenNoUnresolvedThreads(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	withStdin(t, "", func() {
-		if code := run([]string{"hook", "claude", "prepush"}, &stdout, &stderr); code != 0 {
+		if code := run([]string{"hook", "harness", "prepush"}, &stdout, &stderr); code != 0 {
 			t.Fatalf("prepush exit = %d, want 0; stderr=%q", code, stderr.String())
 		}
 	})
@@ -227,7 +227,7 @@ func TestHookCommitMsgInjectsResolvesForClaimedThreads(t *testing.T) {
 
 	msgPath := writeCommitMsg(t, "Fix the bug\n")
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"hook", "claude", "commit-msg", msgPath}, &stdout, &stderr); code != 0 {
+	if code := run([]string{"hook", "harness", "commit-msg", msgPath}, &stdout, &stderr); code != 0 {
 		t.Fatalf("commit-msg exit = %d, want 0; stderr=%q", code, stderr.String())
 	}
 
@@ -255,7 +255,7 @@ func TestHookCommitMsgDoesNotDuplicateExistingTrailer(t *testing.T) {
 
 	msgPath := writeCommitMsg(t, "Fix it\n\nResolves: t-claim\n")
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"hook", "claude", "commit-msg", msgPath}, &stdout, &stderr); code != 0 {
+	if code := run([]string{"hook", "harness", "commit-msg", msgPath}, &stdout, &stderr); code != 0 {
 		t.Fatalf("commit-msg exit = %d, want 0; stderr=%q", code, stderr.String())
 	}
 
@@ -270,7 +270,7 @@ func TestHookCommitMsgLeavesNonFlowCommitUntouched(t *testing.T) {
 	// No FLOW_SESSION_ID / token / change: a normal git op outside a flow session.
 	msgPath := writeCommitMsg(t, "Local commit\n")
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"hook", "claude", "commit-msg", msgPath}, &stdout, &stderr); code != 0 {
+	if code := run([]string{"hook", "harness", "commit-msg", msgPath}, &stdout, &stderr); code != 0 {
 		t.Fatalf("commit-msg exit = %d, want 0; stderr=%q", code, stderr.String())
 	}
 	if got := readTestFile(t, msgPath); got != "Local commit\n" {
@@ -287,7 +287,7 @@ func TestHookCommitMsgNeverFailsWhenCoordinatorUnreachable(t *testing.T) {
 
 	msgPath := writeCommitMsg(t, "Fix under outage\n")
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"hook", "claude", "commit-msg", msgPath}, &stdout, &stderr); code != 0 {
+	if code := run([]string{"hook", "harness", "commit-msg", msgPath}, &stdout, &stderr); code != 0 {
 		t.Fatalf("commit-msg exit = %d, want 0 even when coordinator is unreachable; stderr=%q", code, stderr.String())
 	}
 	if got := readTestFile(t, msgPath); got != "Fix under outage\n" {

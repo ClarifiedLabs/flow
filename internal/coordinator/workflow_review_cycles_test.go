@@ -10,13 +10,13 @@ func TestWorkflowReviewAuthorCyclesWaitAtConfiguredLimit(t *testing.T) {
 	flows, tasks, runs := newWorkflowModelServices(t)
 	agents := NewAgentDefService(flows.db)
 	author, err := agents.Create(ctx, AgentDefInput{
-		Name: "cycle author", Harness: "codex", Prompt: "Implement requested changes.",
+		Name: "cycle author", Harness: "harness", Prompt: "Implement requested changes.",
 	})
 	if err != nil {
 		t.Fatalf("create author: %v", err)
 	}
 	reviewer, err := agents.Create(ctx, AgentDefInput{
-		Name: "cycle reviewer", Harness: "codex", Prompt: "Review the change.",
+		Name: "cycle reviewer", Harness: "harness", Prompt: "Review the change.",
 	})
 	if err != nil {
 		t.Fatalf("create reviewer: %v", err)

@@ -16,47 +16,41 @@ func harnessModel(harness, provider, id string) flowharness.Model {
 	}
 }
 
-// TestLiveHarnessModelIntersectionPerHarness verifies that each harness's catalog
-// is intersected independently across the workers that offer that harness, and
-// keyed by harness name for attachment to the matching option.
-func TestLiveHarnessModelIntersectionPerHarness(t *testing.T) {
-	claudeLabel := flowharness.AgentHarnessLabel(flowharness.Claude)
-	codexLabel := flowharness.AgentHarnessLabel(flowharness.Codex)
+// TestLiveHarnessModelIntersectionAcrossWorkers verifies that the harness
+// catalog is intersected across the workers that offer the harness, and keyed
+// by harness name for attachment to the matching option.
+func TestLiveHarnessModelIntersectionAcrossWorkers(t *testing.T) {
+	harnessLabel := flowharness.AgentHarnessLabel(flowharness.Harness)
 
-	opus := harnessModel(flowharness.Claude, "anthropic", "claude-opus-4-8")
-	sonnet := harnessModel(flowharness.Claude, "anthropic", "claude-sonnet-4-6")
-	gpt := harnessModel(flowharness.Codex, "openai", "gpt-5.5")
+	opus := harnessModel(flowharness.Harness, "anthropic", "claude-opus-4-8")
+	sonnet := harnessModel(flowharness.Harness, "anthropic", "claude-sonnet-4-6")
 
 	workers := []worker.Worker{
 		{
 			ID:            "w-1",
-			Labels:        map[string]string{claudeLabel: "true", codexLabel: "true"},
-			HarnessModels: []flowharness.Model{opus, sonnet, gpt},
+			Labels:        map[string]string{harnessLabel: "true"},
+			HarnessModels: []flowharness.Model{opus, sonnet},
 		},
 		{
-			// Offers claude and codex but only advertises opus + gpt, so sonnet
-			// drops out of the claude intersection while opus and gpt survive.
+			// Only advertises opus, so sonnet drops out of the intersection
+			// while opus survives.
 			ID:            "w-2",
-			Labels:        map[string]string{claudeLabel: "true", codexLabel: "true"},
-			HarnessModels: []flowharness.Model{opus, gpt},
+			Labels:        map[string]string{harnessLabel: "true"},
+			HarnessModels: []flowharness.Model{opus},
 		},
 	}
 
 	got := liveHarnessModelIntersection(workers)
 
-	claude := got[flowharness.Claude]
-	if len(claude) != 1 || claude[0].QualifiedID != "anthropic:claude-opus-4-8" {
-		t.Fatalf("claude intersection = %+v, want only opus", claude)
+	if len(got) != 1 {
+		t.Fatalf("intersection = %+v, want only the harness entry", got)
 	}
-	if claude[0].Harness != flowharness.Claude {
-		t.Fatalf("claude model harness = %q", claude[0].Harness)
+	models := got[flowharness.Harness]
+	if len(models) != 1 || models[0].QualifiedID != "anthropic:claude-opus-4-8" {
+		t.Fatalf("harness intersection = %+v, want only opus", models)
 	}
-	codex := got[flowharness.Codex]
-	if len(codex) != 1 || codex[0].QualifiedID != "openai:gpt-5.5" {
-		t.Fatalf("codex intersection = %+v, want only gpt-5.5", codex)
-	}
-	if _, ok := got[flowharness.Harness]; ok {
-		t.Fatalf("did not expect a harness entry: %+v", got)
+	if models[0].Harness != flowharness.Harness {
+		t.Fatalf("harness model harness = %q", models[0].Harness)
 	}
 }
 
@@ -65,13 +59,13 @@ func TestLiveHarnessModelIntersectionPerHarness(t *testing.T) {
 func TestLiveHarnessModelIntersectionIgnoresUnofferedHarness(t *testing.T) {
 	workers := []worker.Worker{
 		{
-			ID:            "w-claude-only",
-			Labels:        map[string]string{flowharness.AgentHarnessLabel(flowharness.Claude): "true"},
-			HarnessModels: []flowharness.Model{harnessModel(flowharness.Codex, "openai", "gpt-5.5")},
+			ID:            "w-harness",
+			Labels:        map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+			HarnessModels: []flowharness.Model{harnessModel("bogus", "openai", "gpt-5.5")},
 		},
 	}
 	got := liveHarnessModelIntersection(workers)
 	if len(got) != 0 {
-		t.Fatalf("intersection = %+v, want empty (codex model on a claude-only worker)", got)
+		t.Fatalf("intersection = %+v, want empty (bogus-harness model on a harness-only worker)", got)
 	}
 }

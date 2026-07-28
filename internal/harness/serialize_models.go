@@ -5,19 +5,14 @@ import (
 	"strings"
 )
 
-// SerializeModelSelection renders the per-harness argv tokens for a
-// Flow-managed model + reasoning-effort choice. Empty model or effort omits
-// that half of the selection; both empty yields no tokens. It is the Go twin
-// of serializeHarnessModelSelection in internal/web/assets/harness-models.js —
-// the two must stay in agreement:
-//   - claude:  --model <id> --effort <level>
-//   - codex:   --model <id> -c model_reasoning_effort=<level>
+// SerializeModelSelection renders the harness argv tokens for a Flow-managed
+// model + reasoning-effort choice. Empty model or effort omits that half of the
+// selection; both empty yields no tokens. It is the Go twin of
+// serializeHarnessModelSelection in internal/web/assets/harness-models.js — the
+// two must stay in agreement:
 //   - harness: --model <target> --reasoning <profile>
 func SerializeModelSelection(name, model, effort string) ([]string, error) {
-	kind := NormalizeName(name)
-	switch kind {
-	case Codex, Claude, Harness:
-	default:
+	if NormalizeName(name) != Harness {
 		return nil, fmt.Errorf("unsupported harness %q for model selection", name)
 	}
 
@@ -35,14 +30,7 @@ func SerializeModelSelection(name, model, effort string) ([]string, error) {
 		args = append(args, "--model", model)
 	}
 	if effort != "" {
-		switch kind {
-		case Claude:
-			args = append(args, "--effort", effort)
-		case Codex:
-			args = append(args, "-c", "model_reasoning_effort="+effort)
-		default:
-			args = append(args, "--reasoning", effort)
-		}
+		args = append(args, "--reasoning", effort)
 	}
 
 	return args, nil

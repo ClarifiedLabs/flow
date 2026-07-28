@@ -35,7 +35,7 @@ type CoordinatorConfig struct {
 // (and optional model/reasoning effort) used for jobs without an explicit
 // agent definition, and for the default author entrypoint when
 // author_entrypoint is unset. The zero value keeps the built-in default: the
-// codex harness with the harness CLI's own default model.
+// harness CLI with its own default model.
 type DefaultAgentConfig struct {
 	Harness         string `json:"harness" yaml:"harness"`
 	Model           string `json:"model" yaml:"model"`

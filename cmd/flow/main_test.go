@@ -167,7 +167,7 @@ func TestAgentDefsListGlobalUsesGlobalCatalog(t *testing.T) {
 			t.Fatalf("request = %s %s, want GET /v2/global/agent-defs", r.Method, r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"agent_defs":[{"id":"ad-global","name":"shared-reviewer","harness":"codex","model":"gpt-5","reasoning_effort":"high"}]}`)
+		_, _ = io.WriteString(w, `{"agent_defs":[{"id":"ad-global","name":"shared-reviewer","harness":"harness","model":"gpt-5","reasoning_effort":"high"}]}`)
 	}))
 	t.Cleanup(server.Close)
 
@@ -177,7 +177,7 @@ func TestAgentDefsListGlobalUsesGlobalCatalog(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("agent-defs list exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	want := "ad-global\tshared-reviewer\tcodex\tgpt-5 effort=high\tglobal\n"
+	want := "ad-global\tshared-reviewer\tharness\tgpt-5 effort=high\tglobal\n"
 	if stdout.String() != want {
 		t.Fatalf("agent-defs list output = %q, want %q", stdout.String(), want)
 	}
@@ -239,7 +239,7 @@ func TestFetchPromptUsesWorkerRoleEnvironment(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"fetch-prompt", "--harness", "codex"}, &stdout, &stderr)
+	exitCode := run([]string{"fetch-prompt", "--harness", "harness"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("fetch-prompt exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
@@ -281,7 +281,7 @@ func TestFetchPromptIncludesTaskDetailsFromAPI(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"fetch-prompt", "--harness", "codex"}, &stdout, &stderr)
+	exitCode := run([]string{"fetch-prompt", "--harness", "harness"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("fetch-prompt exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
@@ -314,7 +314,7 @@ func TestFetchPromptContinuesWhenTaskContextFetchFails(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"fetch-prompt", "--harness", "codex"}, &stdout, &stderr)
+	exitCode := run([]string{"fetch-prompt", "--harness", "harness"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("fetch-prompt exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
@@ -373,7 +373,7 @@ func TestInitDoesNotSeedRepositorySkills(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(repoPath, ".flow", "skills")); !os.IsNotExist(err) {
 		t.Fatalf("flow init wrote repository skills; stat err = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(repoPath, ".codex", "skills")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(repoPath, ".harness", "skills")); !os.IsNotExist(err) {
 		t.Fatalf("flow init wrote harness skills; stat err = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(subdir, ".flow")); !os.IsNotExist(err) {
@@ -409,7 +409,7 @@ func TestFetchPromptUsesEmbeddedAuthorInstructions(t *testing.T) {
 
 func TestFetchPromptUsesEmbeddedVerifierInstructions(t *testing.T) {
 	t.Setenv("FLOW_WORKER_ROLE", "verifier")
-	t.Setenv("FLOW_WORKER_HARNESS", "claude")
+	t.Setenv("FLOW_WORKER_HARNESS", "harness")
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -449,7 +449,7 @@ func TestFetchPromptHarnessFlagOverridesEnvironment(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"fetch-prompt", "--harness", "codex"}, &stdout, &stderr)
+	exitCode := run([]string{"fetch-prompt", "--harness", "harness"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("fetch-prompt exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
@@ -943,7 +943,7 @@ func TestWorkerAndJobDiagnosticsUseAPI(t *testing.T) {
 	}
 	if _, err := fixture.Directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                      "w-local",
-		Labels:                  map[string]string{"agent.harness.codex": "true", "local": "true"},
+		Labels:                  map[string]string{"agent.harness.harness": "true", "local": "true"},
 		CapacityPersistentAgent: 1,
 		CapacityEphemeral:       2,
 	}); err != nil {
@@ -977,7 +977,7 @@ func TestWorkerAndJobDiagnosticsUseAPI(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("workers exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "w-local\tregistered\tpersistent_agent=1\tephemeral=2\tlabels=agent.harness.codex=true,local=true") {
+	if !strings.Contains(stdout.String(), "w-local\tregistered\tpersistent_agent=1\tephemeral=2\tlabels=agent.harness.harness=true,local=true") {
 		t.Fatalf("workers output = %q", stdout.String())
 	}
 
@@ -1017,7 +1017,7 @@ func TestHookIngestDefaultModeSwallowsCoordinatorFailure(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	withStdin(t, `{"hook_event_name":"Stop"}`, func() {
-		exitCode := run([]string{"hook", "codex", "ingest"}, &stdout, &stderr)
+		exitCode := run([]string{"hook", "harness", "ingest"}, &stdout, &stderr)
 		if exitCode != 0 {
 			t.Fatalf("hook ingest exitCode = %d, stderr = %q", exitCode, stderr.String())
 		}
@@ -1039,7 +1039,7 @@ func TestHookIngestStrictModeRequiresSessionEnvironment(t *testing.T) {
 	var stderr bytes.Buffer
 	var exitCode int
 	withStdin(t, `{"hook_event_name":"Stop"}`, func() {
-		exitCode = run([]string{"hook", "claude", "ingest", "--strict"}, &stdout, &stderr)
+		exitCode = run([]string{"hook", "harness", "ingest", "--strict"}, &stdout, &stderr)
 	})
 	if exitCode == 0 {
 		t.Fatalf("hook ingest strict exitCode = 0, want nonzero")

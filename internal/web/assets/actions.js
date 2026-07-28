@@ -165,7 +165,7 @@ export const ACTIONS = {
   },
 
   async startTaskConsole(app, element, dataset) {
-    await apiPost(taskConsoleAPIPath(dataset.project, dataset.startTaskConsole), { harness: "claude" });
+    await apiPost(taskConsoleAPIPath(dataset.project, dataset.startTaskConsole), { harness: "harness" });
     app.setStatus("task console starting");
     await app.refresh();
   },

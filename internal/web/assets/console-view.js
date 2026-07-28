@@ -61,7 +61,7 @@ export async function renderConsoleView(app, context) {
           ${active ? `<button class="button secondary" data-release-console data-project="${escapeAttr(projectID)}" data-task="${escapeAttr(selectedTask)}">Release Console</button>` : `
             <label>Harness
               <select data-console-harness>
-                ${renderHarnessOptions((app.harnesses && app.harnesses.consoles) || DEFAULT_CONSOLE_HARNESSES, "claude")}
+                ${renderHarnessOptions((app.harnesses && app.harnesses.consoles) || DEFAULT_CONSOLE_HARNESSES, "harness")}
               </select>
             </label>
             <button class="button" data-start-console data-project="${escapeAttr(projectID)}" data-task="${escapeAttr(selectedTask)}">Start Console</button>`}

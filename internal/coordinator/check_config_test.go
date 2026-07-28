@@ -14,9 +14,8 @@ import (
 )
 
 func TestDefaultAgentChecksUseSelectedHarnessAndArgs(t *testing.T) {
-	suite, err := withDefaultAgentChecks(CheckSuite{}, flowharness.AgentSelection{Harness: flowharness.Claude}, flowharness.Args{
-		Claude: []string{"--model", "sonnet"},
-		Codex:  []string{"--model", "gpt-5", "-c", "model_reasoning_effort=high"},
+	suite, err := withDefaultAgentChecks(CheckSuite{}, flowharness.AgentSelection{Harness: flowharness.Harness}, flowharness.Args{
+		Harness: []string{"--model", "anthropic:claude-sonnet-4-6"},
 	})
 	if err != nil {
 		t.Fatalf("default agent checks: %v", err)
@@ -29,24 +28,24 @@ func TestDefaultAgentChecksUseSelectedHarnessAndArgs(t *testing.T) {
 			t.Fatalf("%s entrypoint = %+v", definition.Name, definition.Entrypoint)
 		}
 		command := definition.Entrypoint.Argv[0]
-		for _, want := range []string{"claude --dangerously-skip-permissions --permission-mode bypassPermissions", "'--model' 'sonnet'", "--harness claude"} {
+		for _, want := range []string{"flow fetch-prompt --harness harness", "harness '--model' 'anthropic:claude-sonnet-4-6' -p \"$prompt\""} {
 			if !strings.Contains(command, want) {
 				t.Fatalf("%s default command missing %q:\n%s", definition.Name, want, command)
 			}
 		}
-		if got := definition.Requires; len(got) != 1 || got[0] != flowharness.AgentHarnessLabel(flowharness.Claude) {
-			t.Fatalf("%s requires = %#v, want claude harness label", definition.Name, got)
+		if got := definition.Requires; len(got) != 1 || got[0] != flowharness.AgentHarnessLabel(flowharness.Harness) {
+			t.Fatalf("%s requires = %#v, want harness harness label", definition.Name, got)
 		}
 	}
 }
 
 func TestDefaultAgentChecksUseConfiguredDefaultModel(t *testing.T) {
 	suite, err := withDefaultAgentChecks(CheckSuite{}, flowharness.AgentSelection{
-		Harness:         flowharness.Claude,
-		Model:           "sonnet",
+		Harness:         flowharness.Harness,
+		Model:           "anthropic:claude-sonnet-4-6",
 		ReasoningEffort: "high",
 	}, flowharness.Args{
-		Claude: []string{"--model", "opus"},
+		Harness: []string{"--model", "openai:gpt-5"},
 	})
 	if err != nil {
 		t.Fatalf("default agent checks: %v", err)
@@ -58,16 +57,16 @@ func TestDefaultAgentChecksUseConfiguredDefaultModel(t *testing.T) {
 		command := definition.Entrypoint.Argv[0]
 		// The configured default model/effort tokens precede the manual
 		// harness_args so the manual --model wins (last-token-wins).
-		defaultIdx := strings.Index(command, "'--model' 'sonnet' '--effort' 'high'")
-		manualIdx := strings.Index(command, "'--model' 'opus'")
+		defaultIdx := strings.Index(command, "'--model' 'anthropic:claude-sonnet-4-6' '--reasoning' 'high'")
+		manualIdx := strings.Index(command, "'--model' 'openai:gpt-5'")
 		if defaultIdx < 0 || manualIdx < 0 {
 			t.Fatalf("%s default command missing default or manual model tokens:\n%s", definition.Name, command)
 		}
 		if defaultIdx > manualIdx {
 			t.Fatalf("%s default model tokens must precede harness_args:\n%s", definition.Name, command)
 		}
-		if got := definition.Requires; len(got) != 1 || got[0] != flowharness.AgentHarnessLabel(flowharness.Claude) {
-			t.Fatalf("%s requires = %#v, want claude harness label", definition.Name, got)
+		if got := definition.Requires; len(got) != 1 || got[0] != flowharness.AgentHarnessLabel(flowharness.Harness) {
+			t.Fatalf("%s requires = %#v, want harness harness label", definition.Name, got)
 		}
 	}
 }
@@ -246,8 +245,8 @@ INSERT INTO workflow_node_runs (
 		t.Fatalf("insert workflow ownership: %v", err)
 	}
 	agents := []SnapshotReviewAgent{
-		{Blocking: true, Agent: AgentDefSnapshot{Name: "code-review", Harness: "codex", Model: "gpt-5", ReasoningEffort: "high", Prompt: "Focus on correctness."}},
-		{Blocking: false, Agent: AgentDefSnapshot{Name: "security-review", Harness: "claude", Model: "claude-sonnet-4-6", Prompt: "Focus on security."}},
+		{Blocking: true, Agent: AgentDefSnapshot{Name: "code-review", Harness: "harness", Model: "openai:gpt-5", ReasoningEffort: "high", Prompt: "Focus on correctness."}},
+		{Blocking: false, Agent: AgentDefSnapshot{Name: "security-review", Harness: "harness", Model: "anthropic:claude-sonnet-4-6", Prompt: "Focus on security."}},
 	}
 
 	const attempts = 24
@@ -296,11 +295,11 @@ INSERT INTO workflow_node_runs (
 		command := fmt.Sprint(entrypoint["argv"])
 		switch name {
 		case "code-review.node.nr-parallel":
-			if payloadString(job.Payload, "role_instructions") != "Focus on correctness." || !strings.Contains(command, "gpt-5") || job.Payload["blocking"] != true || job.Payload["review_discovery"] != true {
+			if payloadString(job.Payload, "role_instructions") != "Focus on correctness." || !strings.Contains(command, "openai:gpt-5") || job.Payload["blocking"] != true || job.Payload["review_discovery"] != true {
 				t.Errorf("code review payload = %+v", job.Payload)
 			}
 		case "security-review.node.nr-parallel":
-			if payloadString(job.Payload, "role_instructions") != "Focus on security." || !strings.Contains(command, "claude-sonnet-4-6") || job.Payload["blocking"] != false || job.Payload["review_discovery"] != true {
+			if payloadString(job.Payload, "role_instructions") != "Focus on security." || !strings.Contains(command, "anthropic:claude-sonnet-4-6") || job.Payload["blocking"] != false || job.Payload["review_discovery"] != true {
 				t.Errorf("security review payload = %+v", job.Payload)
 			}
 		default:
@@ -467,7 +466,7 @@ INSERT INTO workflow_node_runs (
 UPDATE workflow_runs SET current_node_key = 'verify', current_node_run_id = 'nr-verify' WHERE id = 'wr-parallel'`); err != nil {
 		t.Fatalf("enter verification node: %v", err)
 	}
-	verifiers := []SnapshotReviewAgent{{Blocking: true, Agent: AgentDefSnapshot{Name: "correctness-verifier", Harness: "codex", Prompt: "Verify the fixes."}}}
+	verifiers := []SnapshotReviewAgent{{Blocking: true, Agent: AgentDefSnapshot{Name: "correctness-verifier", Harness: "harness", Prompt: "Verify the fixes."}}}
 	verifyNames, err := services.checkConfig.ScheduleWorkflowNodeChecks(ctx, task, change, WorkflowChecksVerify, verifiers, "wr-parallel", "nr-verify")
 	if err != nil || len(verifyNames) != 1 {
 		t.Fatalf("schedule verification checks = %v err=%v", verifyNames, err)

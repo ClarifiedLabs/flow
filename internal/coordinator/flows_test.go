@@ -131,18 +131,18 @@ func TestParallelReviewGraphUsesCanonicalBlockingAndFreezesSnapshot(t *testing.T
 	ctx := context.Background()
 	flows, defs := newFlowTestServices(t)
 
-	author, err := defs.Create(ctx, AgentDefInput{Name: "author-test", Harness: "codex", Prompt: "Implement the task."})
+	author, err := defs.Create(ctx, AgentDefInput{Name: "author-test", Harness: "harness", Prompt: "Implement the task."})
 	if err != nil {
 		t.Fatalf("create author: %v", err)
 	}
 	codeReview, err := defs.Create(ctx, AgentDefInput{
-		Name: "code-review", Harness: "codex", Model: "gpt-5", ReasoningEffort: "high", Prompt: "Review correctness.",
+		Name: "code-review", Harness: "harness", Model: "openai:gpt-5", ReasoningEffort: "high", Prompt: "Review correctness.",
 	})
 	if err != nil {
 		t.Fatalf("create code reviewer: %v", err)
 	}
 	securityReview, err := defs.Create(ctx, AgentDefInput{
-		Name: "security-review", Harness: "claude", Model: "claude-sonnet-4-6", Prompt: "Review security.",
+		Name: "security-review", Harness: "harness", Model: "anthropic:claude-sonnet-4-6", Prompt: "Review security.",
 	})
 	if err != nil {
 		t.Fatalf("create security reviewer: %v", err)
@@ -197,7 +197,7 @@ func TestParallelReviewGraphUsesCanonicalBlockingAndFreezesSnapshot(t *testing.T
 		t.Fatalf("review snapshot node = %+v ok=%v", reviewNode, ok)
 	}
 	frozen := reviewNode.Config.ChangeReview.Agents
-	if !frozen[0].Blocking || frozen[1].Blocking || frozen[0].Agent.Model != "gpt-5" || frozen[0].Agent.ReasoningEffort != "high" || frozen[0].Agent.Prompt != "Review correctness." || frozen[1].Agent.Prompt != "Review security." {
+	if !frozen[0].Blocking || frozen[1].Blocking || frozen[0].Agent.Model != "openai:gpt-5" || frozen[0].Agent.ReasoningEffort != "high" || frozen[0].Agent.Prompt != "Review correctness." || frozen[1].Agent.Prompt != "Review security." {
 		t.Fatalf("frozen review agents = %+v", frozen)
 	}
 	verifyNode, ok := snapshot.Node("verify")
@@ -205,10 +205,10 @@ func TestParallelReviewGraphUsesCanonicalBlockingAndFreezesSnapshot(t *testing.T
 		t.Fatalf("verify snapshot node = %+v ok=%v", verifyNode, ok)
 	}
 
-	if _, err := defs.Update(ctx, codeReview.ID, AgentDefInput{Name: "code-review", Harness: "codex", Model: "gpt-5-mini", Prompt: "Changed live prompt."}); err != nil {
+	if _, err := defs.Update(ctx, codeReview.ID, AgentDefInput{Name: "code-review", Harness: "harness", Model: "openai:gpt-5-mini", Prompt: "Changed live prompt."}); err != nil {
 		t.Fatalf("update live reviewer: %v", err)
 	}
-	if frozen[0].Agent.Model != "gpt-5" || frozen[0].Agent.Prompt != "Review correctness." || !frozen[0].Blocking || frozen[1].Blocking {
+	if frozen[0].Agent.Model != "openai:gpt-5" || frozen[0].Agent.Prompt != "Review correctness." || !frozen[0].Blocking || frozen[1].Blocking {
 		t.Fatalf("snapshot changed after live edit: %+v", frozen)
 	}
 }
@@ -246,7 +246,7 @@ func TestReviewAgentLegacyRequiredCompatibilityAndValidation(t *testing.T) {
 	}
 
 	var snapshotAgent SnapshotReviewAgent
-	if err := json.Unmarshal([]byte(`{"required":false,"agent":{"name":"legacy","harness":"codex"}}`), &snapshotAgent); err != nil {
+	if err := json.Unmarshal([]byte(`{"required":false,"agent":{"name":"legacy","harness":"harness"}}`), &snapshotAgent); err != nil {
 		t.Fatalf("decode legacy snapshot agent: %v", err)
 	}
 	if snapshotAgent.Blocking {
@@ -259,7 +259,7 @@ func TestReviewAgentLegacyRequiredCompatibilityAndValidation(t *testing.T) {
 	if strings.Contains(string(snapshotJSON), `"required"`) || !strings.Contains(string(snapshotJSON), `"blocking":false`) {
 		t.Fatalf("canonical snapshot JSON = %s", snapshotJSON)
 	}
-	if err := json.Unmarshal([]byte(`{"blocking":false,"required":false,"agent":{"name":"bad","harness":"codex"}}`), &snapshotAgent); err == nil || !strings.Contains(err.Error(), "both blocking") {
+	if err := json.Unmarshal([]byte(`{"blocking":false,"required":false,"agent":{"name":"bad","harness":"harness"}}`), &snapshotAgent); err == nil || !strings.Contains(err.Error(), "both blocking") {
 		t.Fatalf("snapshot both-fields error = %v", err)
 	}
 }
@@ -289,8 +289,8 @@ func TestAgentDefCRUD(t *testing.T) {
 
 	created, err := defs.Create(ctx, AgentDefInput{
 		Name:            "opus-reviewer",
-		Harness:         "claude",
-		Model:           "claude-opus-4-8",
+		Harness:         "harness",
+		Model:           "anthropic:claude-opus-4-8",
 		ReasoningEffort: "xhigh",
 		Prompt:          "Review carefully.",
 	})
@@ -305,7 +305,7 @@ func TestAgentDefCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ModelSelectionArgs: %v", err)
 	}
-	want := []string{"--model", "claude-opus-4-8", "--effort", "xhigh"}
+	want := []string{"--model", "anthropic:claude-opus-4-8", "--reasoning", "xhigh"}
 	if len(args) != len(want) {
 		t.Fatalf("model args = %v, want %v", args, want)
 	}
@@ -315,7 +315,7 @@ func TestAgentDefCRUD(t *testing.T) {
 		}
 	}
 
-	if _, err := defs.Create(ctx, AgentDefInput{Name: "opus-reviewer", Harness: "codex"}); !errors.Is(err, ErrAgentDefNameTaken) {
+	if _, err := defs.Create(ctx, AgentDefInput{Name: "opus-reviewer", Harness: "harness"}); !errors.Is(err, ErrAgentDefNameTaken) {
 		t.Fatalf("duplicate name error = %v, want ErrAgentDefNameTaken", err)
 	}
 	if _, err := defs.Create(ctx, AgentDefInput{Name: "bad", Harness: "shell"}); err == nil {
@@ -324,13 +324,13 @@ func TestAgentDefCRUD(t *testing.T) {
 
 	updated, err := defs.Update(ctx, created.ID, AgentDefInput{
 		Name:    "opus-reviewer",
-		Harness: "claude",
-		Model:   "claude-sonnet-4-6",
+		Harness: "harness",
+		Model:   "anthropic:claude-sonnet-4-6",
 	})
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
-	if updated.Model != "claude-sonnet-4-6" || updated.ReasoningEffort != "" {
+	if updated.Model != "anthropic:claude-sonnet-4-6" || updated.ReasoningEffort != "" {
 		t.Errorf("updated def = %+v, want sonnet model and cleared effort", updated)
 	}
 

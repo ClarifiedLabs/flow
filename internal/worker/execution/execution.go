@@ -51,9 +51,7 @@ const (
 	terminalStartupTimeout          = 2 * time.Second
 	terminalProcessStopTimeout      = 2 * time.Second
 	tmuxHistoryLimit                = 100000
-	claudeHookSettingsFile          = "claude-flow-hooks-settings.json"
 	harnessHooksFile                = "harness-flow-hooks.json"
-	envClaudeHookSettings           = "FLOW_CLAUDE_HOOK_SETTINGS"
 	envHarnessHooks                 = "FLOW_HARNESS_HOOKS"
 	defaultUTF8Locale               = "C.UTF-8"
 	hermeticHomeDirName             = "home"
@@ -62,7 +60,6 @@ const (
 	hermeticCacheDirName            = "cache"
 	hermeticRuntimeDirName          = "runtime"
 	hermeticTempDirName             = "tmp"
-	hermeticCodexDirName            = "codex"
 	hermeticGoBuildCacheDirName     = "go-build-cache"
 	hermeticGoModCacheDirName       = "go-mod-cache"
 	hermeticDockerConfigDirName     = "docker"
@@ -1177,12 +1174,6 @@ func workerEnv(input tmuxInput) map[string]string {
 }
 
 var agentDeploymentEnvKeys = map[string][]string{
-	flowharness.Codex: {
-		"CODEX_HOME",
-	},
-	flowharness.Claude: {
-		"CLAUDE_CODE_OAUTH_TOKEN",
-	},
 	flowharness.Harness: {
 		"HARNESS_MODEL_PROXY_URL",
 		"HARNESS_MODEL_PROXY_API_KEY",
@@ -1203,9 +1194,6 @@ func forwardAgentDeploymentEnv(env map[string]string, input tmuxInput) {
 			continue
 		}
 		if value, ok := os.LookupEnv(key); ok {
-			if key == "CODEX_HOME" && strings.TrimSpace(value) == "" {
-				continue
-			}
 			env[key] = value
 		}
 	}
@@ -1254,7 +1242,6 @@ func hermeticJobEnv(workDir string, jobID string) map[string]string {
 		"TMPDIR":           tempDir,
 		"TMP":              tempDir,
 		"TEMP":             tempDir,
-		"CODEX_HOME":       filepath.Join(root, hermeticCodexDirName),
 		"GOCACHE":          filepath.Join(root, hermeticGoBuildCacheDirName),
 		"GOMODCACHE":       filepath.Join(root, hermeticGoModCacheDirName),
 		"DOCKER_CONFIG":    filepath.Join(root, hermeticDockerConfigDirName),
@@ -1370,27 +1357,18 @@ func jobUsesWorkerAPI(role JobRole) bool {
 }
 
 // prepareHookConfig renders and installs the native-hook config for the input's
-// harness, returning the value to export and the env var that carries it. Codex
-// is installed as a managed `codex --profile` file under $CODEX_HOME (the env
-// value is the profile name); claude and harness are written as per-job settings
-// files (the env value is the file path). It returns empty strings for jobs that
-// do not warrant managed hooks. This replaced the per-harness
-// prepareClaudeHookSettings / prepareHarnessHooks pair.
+// harness as a per-job settings file (the env value is the file path). It
+// returns empty strings for jobs that do not warrant managed hooks.
 func prepareHookConfig(input tmuxInput) (value string, envVar string, err error) {
 	if !shouldPrepareHookConfig(input) {
 		return "", "", nil
 	}
-	switch resolveHarness(input) {
-	case flowharness.Codex:
-		return prepareCodexHookConfig(input)
-	default:
-		return prepareHookConfigFile(input)
-	}
+	return prepareHookConfigFile(input)
 }
 
-// prepareHookConfigFile writes a per-job native-hook settings file (claude,
-// harness) from the table-driven renderer and returns its path plus the env var
-// that points the harness at it.
+// prepareHookConfigFile writes a per-job native-hook settings file from the
+// table-driven renderer and returns its path plus the env var that points the
+// harness at it.
 func prepareHookConfigFile(input tmuxInput) (string, string, error) {
 	definition, ok := flowharness.Lookup(resolveHarness(input))
 	if !ok || definition.HookEnvVar == "" {
@@ -1410,64 +1388,6 @@ func prepareHookConfigFile(input tmuxInput) (string, string, error) {
 	return path, definition.HookEnvVar, nil
 }
 
-// prepareCodexHookConfig writes codex's managed hook profile to
-// $CODEX_HOME/<profile>.config.toml (atomically, 0600) and returns the profile
-// name plus FLOW_CODEX_HOOK_PROFILE so the codex command builders pass it to
-// `codex --profile`. The profile content is deterministic, so concurrent jobs on
-// one worker safely converge on the same file.
-func prepareCodexHookConfig(input tmuxInput) (string, string, error) {
-	definition, ok := flowharness.Lookup(flowharness.Codex)
-	if !ok || definition.HookEnvVar == "" {
-		return "", "", nil
-	}
-	data, err := flowharness.RenderHookConfig(definition)
-	if err != nil {
-		return "", "", fmt.Errorf("render codex hook profile: %w", err)
-	}
-	home := entrypointEnvWithDeploymentDefaults(input)["CODEX_HOME"]
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return "", "", fmt.Errorf("create codex home: %w", err)
-	}
-	path := filepath.Join(home, flowharness.CodexHookProfileName+".config.toml")
-	if err := writeFileAtomic(path, data, 0o600); err != nil {
-		return "", "", fmt.Errorf("write codex hook profile: %w", err)
-	}
-	return flowharness.CodexHookProfileName, definition.HookEnvVar, nil
-}
-
-// writeFileAtomic writes data to path via a temp file in the same directory and a
-// rename, so a concurrent reader (or competing writer of identical bytes) never
-// observes a half-written file.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return err
-	}
-	cleanup = false
-	return nil
-}
-
 // shouldPrepareHookConfig gates managed-hook rendering to interactive author and
 // console jobs that carry the session identity native hooks report against.
 func shouldPrepareHookConfig(input tmuxInput) bool {
@@ -1478,8 +1398,6 @@ func shouldPrepareHookConfig(input tmuxInput) bool {
 
 func hookConfigFileName(harnessName string) string {
 	switch harnessName {
-	case flowharness.Claude:
-		return claudeHookSettingsFile
 	case flowharness.Harness:
 		return harnessHooksFile
 	default:
@@ -1838,12 +1756,9 @@ func injectInitialPrompt(ctx context.Context, input tmuxInput) error {
 var initialPromptReadyTimeout = 30 * time.Second
 
 // waitForAgentReady blocks until the agent TUI is ready to receive the initial
-// prompt or the readiness budget expires. It carries its own short-lived
-// watchdog so it can dismiss a trust prompt itself (rather than threading a
-// messenger through waitForTmux) and never pastes into a trust prompt. On
-// timeout it returns an error so the caller kills the session and fails loudly.
+// prompt or the readiness budget expires. On timeout it returns an error so the
+// caller kills the session and fails loudly.
 func waitForAgentReady(ctx context.Context, cfg config.WorkerConfig, sessionName string, harness string) error {
-	watchdog := newTmuxWatchdogWithConfig(cfg, sessionName, defaultWatchdogSilenceThreshold)
 	start := time.Now()
 	deadline := start.Add(initialPromptReadyTimeout)
 	ticker := time.NewTicker(pollInterval)
@@ -1852,13 +1767,6 @@ func waitForAgentReady(ctx context.Context, cfg config.WorkerConfig, sessionName
 	lastPane := unsetPane
 	stableChecks := 0
 	readyChecks := 0
-	// Tracked for timeout telemetry: the most recent pane and whether a trust
-	// prompt was up on the last observation. If readiness times out while a trust
-	// prompt is still visible, the prompt copy has likely drifted past the
-	// matcher; we log the pane head/tail so that drift is diagnosable instead of
-	// silently hanging until the budget expires.
-	lastObservedPane := ""
-	trustPromptUp := false
 	for {
 		// If the agent process exited before it was ready, the tmux session is
 		// gone. Report that distinctly so the caller skips the paste and lets the
@@ -1868,34 +1776,21 @@ func waitForAgentReady(ctx context.Context, cfg config.WorkerConfig, sessionName
 			return errAgentSessionEnded
 		}
 		if pane, err := tmuxPaneContents(ctx, cfg, sessionName); err == nil {
-			lastObservedPane = pane
 			foreground, _ := tmuxForegroundProcess(ctx, cfg, sessionName)
-			// Dismiss any visible trust prompt so the Enter that submits the
-			// prompt is never swallowed by it.
-			_ = watchdog.approveTrustPrompt(ctx, pane, foreground)
-			trustPromptUp = anyTrustPromptVisible(pane)
-			switch {
-			case trustPromptUp:
-				// Trust prompt still up: not ready, and reset both windows so we
-				// never count ticks during which input would be swallowed.
-				lastPane = pane
-				stableChecks = 0
-				readyChecks = 0
-			case agentReady(pane, foreground, harness):
+			if agentReady(pane, foreground, harness) {
 				// Fast path: the foreground is a recognized agent binary and the
 				// input box has drawn. Require a couple of consecutive ready
-				// observations so a trust prompt that draws a beat after the agent
-				// process appears is still caught before we paste.
+				// observations so a slow-drawing TUI is still caught before we paste.
 				readyChecks++
 				if readyChecks >= agentReadyConfirmChecks {
 					return nil
 				}
-			default:
+			} else {
 				readyChecks = 0
 				// Fallback for agents whose process name tmux does not report as
 				// the harness binary (e.g. a shell-wrapped agent): treat the agent
 				// as ready once the pane has stopped changing for a short window,
-				// after a startup grace long enough for a trust prompt to appear.
+				// after a startup grace period.
 				if pane == lastPane {
 					stableChecks++
 				} else {
@@ -1908,12 +1803,6 @@ func waitForAgentReady(ctx context.Context, cfg config.WorkerConfig, sessionName
 			}
 		}
 		if !time.Now().Before(deadline) {
-			if trustPromptUp {
-				head, tail := panePreviewLines(lastObservedPane, 4)
-				slog.Warn("agent readiness timed out with a trust prompt still visible; the harness TUI trust-prompt copy may have drifted past the matcher",
-					"session", sessionName, "harness", harness,
-					"pane_head", head, "pane_tail", tail)
-			}
 			return fmt.Errorf("agent for session %q was not ready for the initial prompt within %s", sessionName, initialPromptReadyTimeout)
 		}
 		select {
@@ -1925,37 +1814,25 @@ func waitForAgentReady(ctx context.Context, cfg config.WorkerConfig, sessionName
 }
 
 // agentReady reports whether the agent TUI is ready to receive the initial
-// prompt: no trust prompt is visible, the foreground process is the agent
-// binary (not the bootstrapping shell), and the pane has drawn something. It is
-// pure so the readiness gate can be tested without a live tmux server.
+// prompt: the foreground process is the agent binary (not the bootstrapping
+// shell) and the pane has drawn something. It is pure so the readiness gate can
+// be tested without a live tmux server.
 func agentReady(pane string, foreground string, harness string) bool {
 	if strings.TrimSpace(pane) == "" {
-		return false
-	}
-	if anyTrustPromptVisible(pane) {
 		return false
 	}
 	return foregroundIsAgent(foreground, harness)
 }
 
 // foregroundIsAgent reports whether the pane's foreground process is the agent
-// binary for the harness (or the node wrapper claude/codex commonly run under),
-// distinguishing a ready agent from the bootstrapping wrapper shell.
+// binary for the harness, distinguishing a ready agent from the bootstrapping
+// wrapper shell.
 func foregroundIsAgent(foreground string, harness string) bool {
 	name := strings.ToLower(filepath.Base(strings.TrimSpace(foreground)))
 	if name == "" {
 		return false
 	}
-	switch strings.ToLower(strings.TrimSpace(harness)) {
-	case flowharness.Codex:
-		return name == flowharness.Codex || name == "node"
-	case flowharness.Claude:
-		return name == flowharness.Claude || name == "node"
-	case flowharness.Harness:
-		return name == flowharness.Harness
-	default:
-		return name == strings.ToLower(strings.TrimSpace(harness))
-	}
+	return name == strings.ToLower(strings.TrimSpace(harness))
 }
 
 func renderInitialPrompt(ctx context.Context, input tmuxInput) (string, error) {
@@ -2233,22 +2110,13 @@ type tmuxWatchdog struct {
 	lastPane         string
 	lastActivityAt   time.Time
 	initialized      bool
-	// trustPromptApproved is the one-shot latch per scraped harness: once Flow has
-	// dismissed a harness's trust prompt it never sends the submit key again, so
-	// the keypress can never be swallowed by (or pasted into) a later prompt.
-	trustPromptApproved map[string]bool
-	sendKeys            func(context.Context, string, ...string) error
 }
 
 func newTmuxWatchdogWithConfig(cfg config.WorkerConfig, sessionName string, silenceThreshold time.Duration) *tmuxWatchdog {
 	return &tmuxWatchdog{
-		sessionName:         sessionName,
-		tmuxConfig:          cfg,
-		silenceThreshold:    silenceThreshold,
-		trustPromptApproved: map[string]bool{},
-		sendKeys: func(ctx context.Context, sessionName string, keys ...string) error {
-			return tmuxSendKeys(ctx, cfg, sessionName, keys...)
-		},
+		sessionName:      sessionName,
+		tmuxConfig:       cfg,
+		silenceThreshold: silenceThreshold,
 	}
 }
 
@@ -2261,60 +2129,12 @@ func observeTmuxSession(ctx context.Context, watchdog *tmuxWatchdog, reporter *s
 		return
 	}
 	foreground, _ := tmuxForegroundProcess(ctx, watchdog.tmuxConfig, watchdog.sessionName)
-	_ = watchdog.approveTrustPrompt(ctx, pane, foreground)
 	switch watchdog.observe(now, pane, foreground) {
 	case terminal.WatchdogWorking:
 		reporter.report(coordinator.SessionWorking)
 	case terminal.WatchdogWaiting:
 		reporter.report(coordinator.SessionWaiting)
 	}
-}
-
-// approveTrustPrompt dismisses any visible directory/workspace-trust prompt by
-// sending the harness's submit key once. It is driven entirely by the table data
-// in harness.Definition: the marker match (TrustPromptVisible) and the
-// foreground gate (TrustPromptForegroundAllowed) keep it from typing into an
-// unrelated foreground, and the per-harness one-shot latch ensures the submit
-// key is sent at most once per harness. It returns true when it dismissed a
-// prompt this call.
-func (w *tmuxWatchdog) approveTrustPrompt(ctx context.Context, paneContents string, foregroundProcess string) bool {
-	if w == nil {
-		return false
-	}
-	for _, def := range flowharness.TrustPromptDefinitions() {
-		if w.trustPromptApproved[def.Name] {
-			continue
-		}
-		if !def.TrustPromptForegroundAllowed(foregroundProcess) || !def.TrustPromptVisible(paneContents) {
-			continue
-		}
-		submitKey := def.TrustPromptSubmitKey
-		if submitKey == "" {
-			submitKey = "Enter"
-		}
-		if err := w.sendKeys(ctx, w.sessionName, submitKey); err != nil {
-			return false
-		}
-		if w.trustPromptApproved == nil {
-			w.trustPromptApproved = map[string]bool{}
-		}
-		w.trustPromptApproved[def.Name] = true
-		return true
-	}
-	return false
-}
-
-// anyTrustPromptVisible reports whether the pane shows the trust prompt of any
-// scraped harness, using the same data-driven matcher as the approver. Readiness
-// counters reset while this is true so the initial prompt is never pasted into a
-// trust dialog.
-func anyTrustPromptVisible(paneContents string) bool {
-	for _, def := range flowharness.TrustPromptDefinitions() {
-		if def.TrustPromptVisible(paneContents) {
-			return true
-		}
-	}
-	return false
 }
 
 func (w *tmuxWatchdog) observe(now time.Time, paneContents string, foregroundProcess string) terminal.WatchdogDecision {
@@ -2347,32 +2167,6 @@ func (w *tmuxWatchdog) observe(now time.Time, paneContents string, foregroundPro
 	return decision
 }
 
-// panePreviewLines returns up to n leading and n trailing non-empty lines of a
-// captured pane, joined with a visible separator, for trust-prompt timeout
-// telemetry. It drops tmux's blank padding rows so the log shows the real
-// prompt copy (head and tail) without dumping the whole pane.
-func panePreviewLines(pane string, n int) (head, tail string) {
-	lines := make([]string, 0)
-	for _, line := range strings.Split(pane, "\n") {
-		if trimmed := strings.TrimSpace(line); trimmed != "" {
-			lines = append(lines, trimmed)
-		}
-	}
-	if len(lines) == 0 {
-		return "", ""
-	}
-	headLines := lines
-	if len(headLines) > n {
-		headLines = headLines[:n]
-	}
-	tailLines := lines
-	if len(tailLines) > n {
-		tailLines = tailLines[len(tailLines)-n:]
-	}
-	const sep = " ⏎ "
-	return strings.Join(headLines, sep), strings.Join(tailLines, sep)
-}
-
 func tmuxPaneContents(ctx context.Context, cfg config.WorkerConfig, sessionName string) (string, error) {
 	output, err := tmuxCommandContext(ctx, cfg, "capture-pane", "-p", "-t", sessionName).Output()
 	if err != nil {
@@ -2401,7 +2195,7 @@ func foregroundLooksBusy(command string) bool {
 	}
 	name := strings.ToLower(filepath.Base(trimmed))
 	switch name {
-	case "bash", "claude", "codex", "fish", "harness", "node", "sh", "tmux", "zsh":
+	case "bash", "fish", "harness", "node", "sh", "tmux", "zsh":
 		return false
 	default:
 		return true

@@ -110,7 +110,7 @@ func TestConsoleSessionLifecycle(t *testing.T) {
 	fixture := newSessionServiceFixture(t)
 	sessions, workers, credentials := fixture.sessions, fixture.workers, fixture.credentials
 
-	ensured, err := sessions.EnsureConsoleJob(ctx, EnsureConsoleJobInput{Harness: flowharness.Claude})
+	ensured, err := sessions.EnsureConsoleJob(ctx, EnsureConsoleJobInput{Harness: flowharness.Harness})
 	if err != nil {
 		t.Fatalf("ensure console job: %v", err)
 	}
@@ -123,11 +123,11 @@ func TestConsoleSessionLifecycle(t *testing.T) {
 	if payloadString(ensured.Job.Payload, "branch") != fixture.project.BaseBranch || payloadString(ensured.Job.Payload, "base") != fixture.project.BaseBranch {
 		t.Fatalf("console payload branch/base = %+v", ensured.Job.Payload)
 	}
-	if payloadString(ensured.Job.Payload, "console_harness") != flowharness.Claude || payloadString(ensured.Job.Payload, "session_purpose") != "console" {
+	if payloadString(ensured.Job.Payload, "console_harness") != flowharness.Harness || payloadString(ensured.Job.Payload, "session_purpose") != "console" {
 		t.Fatalf("console payload = %+v", ensured.Job.Payload)
 	}
-	if got := ensured.Job.Selector[flowharness.AgentHarnessLabel(flowharness.Claude)]; got != "true" {
-		t.Fatalf("console selector = %#v, want claude harness requirement", ensured.Job.Selector)
+	if got := ensured.Job.Selector[flowharness.AgentHarnessLabel(flowharness.Harness)]; got != "true" {
+		t.Fatalf("console selector = %#v, want harness harness requirement", ensured.Job.Selector)
 	}
 	entrypoint, ok := ensured.Job.Payload["entrypoint"].(map[string]any)
 	if !ok {
@@ -138,7 +138,7 @@ func TestConsoleSessionLifecycle(t *testing.T) {
 		t.Fatalf("console entrypoint argv = %#v", entrypoint["argv"])
 	}
 	command, ok := argv[0].(string)
-	if !ok || !strings.Contains(command, `claude --settings "$FLOW_CLAUDE_HOOK_SETTINGS" --dangerously-skip-permissions --permission-mode bypassPermissions`) {
+	if !ok || !strings.Contains(command, `harness --hooks "$FLOW_HARNESS_HOOKS"`) {
 		t.Fatalf("console command = %#v", entrypoint["argv"])
 	}
 	for _, unexpected := range []string{"flow fetch-prompt", `"$prompt"`, "flow-console"} {
@@ -146,7 +146,7 @@ func TestConsoleSessionLifecycle(t *testing.T) {
 			t.Fatalf("console command includes prompt setup %q:\n%s", unexpected, command)
 		}
 	}
-	replayed, err := sessions.EnsureConsoleJob(ctx, EnsureConsoleJobInput{Harness: flowharness.Claude})
+	replayed, err := sessions.EnsureConsoleJob(ctx, EnsureConsoleJobInput{Harness: flowharness.Harness})
 	if err != nil {
 		t.Fatalf("replay console job: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestConsoleSessionLifecycle(t *testing.T) {
 
 	if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                      "w-local",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Claude): "true"},
+		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		CapacityPersistentAgent: 1,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
@@ -179,7 +179,7 @@ func TestConsoleSessionLifecycle(t *testing.T) {
 		JobID:    claimed.Job.ID,
 		LeaseID:  claimed.Lease.ID,
 		WorkerID: "w-local",
-		Harness:  flowharness.Claude,
+		Harness:  flowharness.Harness,
 	})
 	if err != nil {
 		t.Fatalf("start console session: %v", err)
@@ -285,7 +285,7 @@ func TestReleaseConsoleCancelsQueuedJob(t *testing.T) {
 	fixture := newSessionServiceFixture(t)
 	sessions, workers := fixture.sessions, fixture.workers
 
-	ensured, err := sessions.EnsureConsoleJob(ctx, EnsureConsoleJobInput{Harness: flowharness.Codex})
+	ensured, err := sessions.EnsureConsoleJob(ctx, EnsureConsoleJobInput{Harness: flowharness.Harness})
 	if err != nil {
 		t.Fatalf("ensure console job: %v", err)
 	}
@@ -310,13 +310,13 @@ func TestReconcileCrashedConsoleSessionDoesNotReenqueue(t *testing.T) {
 	fixture := newSessionServiceFixture(t)
 	sessions, workers, credentials := fixture.sessions, fixture.workers, fixture.credentials
 
-	ensured, err := sessions.EnsureConsoleJob(ctx, EnsureConsoleJobInput{Harness: flowharness.Codex})
+	ensured, err := sessions.EnsureConsoleJob(ctx, EnsureConsoleJobInput{Harness: flowharness.Harness})
 	if err != nil {
 		t.Fatalf("ensure console job: %v", err)
 	}
 	if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                      "w-local",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
+		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		CapacityPersistentAgent: 1,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
@@ -381,11 +381,11 @@ func TestEnsureAuthorJobUsesConfiguredDefaultAgent(t *testing.T) {
 		Credentials: fixture.credentials,
 		Project:     fixture.project,
 		DefaultAgent: flowharness.AgentSelection{
-			Harness:         flowharness.Claude,
-			Model:           "sonnet",
+			Harness:         flowharness.Harness,
+			Model:           "anthropic:claude-sonnet-4-6",
 			ReasoningEffort: "high",
 		},
-		HarnessArgs: flowharness.Args{Claude: []string{"--model", "opus"}},
+		HarnessArgs: flowharness.Args{Harness: []string{"--model", "openai:gpt-5"}},
 	})
 	task, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Configured default agent"})
 	if err != nil {
@@ -400,14 +400,14 @@ func TestEnsureAuthorJobUsesConfiguredDefaultAgent(t *testing.T) {
 		t.Fatalf("ensure author job: %v", err)
 	}
 	payload := ensured.Job.Payload
-	if got := payloadString(payload, "agent_harness"); got != flowharness.Claude {
-		t.Fatalf("agent_harness = %q, want claude", got)
+	if got := payloadString(payload, "agent_harness"); got != flowharness.Harness {
+		t.Fatalf("agent_harness = %q, want harness", got)
 	}
-	if got := payloadString(payload, "prompt_harness"); got != flowharness.Claude {
-		t.Fatalf("prompt_harness = %q, want claude", got)
+	if got := payloadString(payload, "prompt_harness"); got != flowharness.Harness {
+		t.Fatalf("prompt_harness = %q, want harness", got)
 	}
-	if got := ensured.Job.Selector[flowharness.AgentHarnessLabel(flowharness.Claude)]; got != "true" {
-		t.Fatalf("selector = %#v, want claude harness requirement", ensured.Job.Selector)
+	if got := ensured.Job.Selector[flowharness.AgentHarnessLabel(flowharness.Harness)]; got != "true" {
+		t.Fatalf("selector = %#v, want harness harness requirement", ensured.Job.Selector)
 	}
 	entrypoint, ok := payload["entrypoint"].(map[string]any)
 	if !ok {
@@ -418,13 +418,13 @@ func TestEnsureAuthorJobUsesConfiguredDefaultAgent(t *testing.T) {
 		t.Fatalf("entrypoint argv = %#v", entrypoint["argv"])
 	}
 	command, _ := argv[0].(string)
-	if !strings.Contains(command, "claude --dangerously-skip-permissions") {
-		t.Fatalf("entrypoint command does not launch claude:\n%s", command)
+	if !strings.Contains(command, `harness --hooks "$FLOW_HARNESS_HOOKS"`) {
+		t.Fatalf("entrypoint command does not launch harness:\n%s", command)
 	}
 	// The configured default model/effort tokens precede the manual
 	// harness_args so the manual --model wins (last-token-wins).
-	defaultIdx := strings.Index(command, "'--model' 'sonnet' '--effort' 'high'")
-	manualIdx := strings.Index(command, "'--model' 'opus'")
+	defaultIdx := strings.Index(command, "'--model' 'anthropic:claude-sonnet-4-6' '--reasoning' 'high'")
+	manualIdx := strings.Index(command, "'--model' 'openai:gpt-5'")
 	if defaultIdx < 0 || manualIdx < 0 {
 		t.Fatalf("entrypoint command missing default or manual model tokens:\n%s", command)
 	}
@@ -439,11 +439,11 @@ func TestEnsureAuthorJobExplicitEntrypointOverridesDefaultAgent(t *testing.T) {
 	sessions := NewSessionServiceWithOptions(fixture.store.DB(), fixture.tasks, fixture.workers, SessionServiceOptions{
 		Credentials:                     fixture.credentials,
 		Project:                         fixture.project,
-		DefaultAuthorEntrypoint:         map[string]any{"argv": []string{"claude --continue"}, "shell": true, "harness": "claude"},
+		DefaultAuthorEntrypoint:         map[string]any{"argv": []string{"harness --continue"}, "shell": true, "harness": "harness"},
 		DefaultAuthorEntrypointOverride: true,
 		DefaultAgent: flowharness.AgentSelection{
-			Harness: flowharness.Codex,
-			Model:   "gpt-5",
+			Harness: flowharness.Harness,
+			Model:   "openai:gpt-5",
 		},
 	})
 	task, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Explicit entrypoint override"})
@@ -463,7 +463,7 @@ func TestEnsureAuthorJobExplicitEntrypointOverridesDefaultAgent(t *testing.T) {
 		t.Fatalf("entrypoint payload = %#v", ensured.Job.Payload["entrypoint"])
 	}
 	argv, ok := entrypoint["argv"].([]any)
-	if !ok || len(argv) != 1 || argv[0] != "claude --continue" {
+	if !ok || len(argv) != 1 || argv[0] != "harness --continue" {
 		t.Fatalf("entrypoint argv = %#v, want the explicit override", entrypoint["argv"])
 	}
 	if !payloadBool(ensured.Job.Payload, "inject_initial_prompt") {
@@ -474,7 +474,7 @@ func TestEnsureAuthorJobExplicitEntrypointOverridesDefaultAgent(t *testing.T) {
 func TestAuthorJobMatchesUsesConfiguredDefaultHarness(t *testing.T) {
 	changeID := "ch-test-0001"
 	legacyPayload := map[string]any{"branch": "task/t-1", "base": "main"}
-	claudePayload := map[string]any{"branch": "task/t-1", "base": "main", "agent_harness": "claude"}
+	harnessPayload := map[string]any{"branch": "task/t-1", "base": "main", "agent_harness": "harness"}
 
 	for _, tc := range []struct {
 		name           string
@@ -484,11 +484,11 @@ func TestAuthorJobMatchesUsesConfiguredDefaultHarness(t *testing.T) {
 		want           bool
 	}{
 		// A legacy payload without agent_harness matches the configured default.
-		{name: "legacy payload matches configured default", payload: legacyPayload, agentHarness: "", defaultHarness: "claude", want: true},
-		{name: "legacy payload matches codex default", payload: legacyPayload, agentHarness: "codex", defaultHarness: "codex", want: true},
-		{name: "legacy payload rejected for other harness", payload: legacyPayload, agentHarness: "claude", defaultHarness: "codex", want: false},
-		{name: "stamped payload matches configured default", payload: claudePayload, agentHarness: "", defaultHarness: "claude", want: true},
-		{name: "stamped payload rejected against codex default", payload: claudePayload, agentHarness: "", defaultHarness: "codex", want: false},
+		{name: "legacy payload matches configured default", payload: legacyPayload, agentHarness: "", defaultHarness: "harness", want: true},
+		{name: "legacy payload matches agents default", payload: legacyPayload, agentHarness: "agents", defaultHarness: "agents", want: true},
+		{name: "legacy payload rejected for other harness", payload: legacyPayload, agentHarness: "harness", defaultHarness: "agents", want: false},
+		{name: "stamped payload matches configured default", payload: harnessPayload, agentHarness: "", defaultHarness: "harness", want: true},
+		{name: "stamped payload rejected against agents default", payload: harnessPayload, agentHarness: "", defaultHarness: "agents", want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			job := flowworker.Job{ChangeID: &changeID, Payload: tc.payload}
@@ -621,13 +621,13 @@ func TestMarkPersistentSessionExitedRejectsConsoleRole(t *testing.T) {
 	fixture := newSessionServiceFixture(t)
 	sessions, workers := fixture.sessions, fixture.workers
 
-	ensured, err := sessions.EnsureConsoleJob(ctx, EnsureConsoleJobInput{Harness: flowharness.Codex})
+	ensured, err := sessions.EnsureConsoleJob(ctx, EnsureConsoleJobInput{Harness: flowharness.Harness})
 	if err != nil {
 		t.Fatalf("ensure console job: %v", err)
 	}
 	if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                      "w-local",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
+		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		CapacityPersistentAgent: 1,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)

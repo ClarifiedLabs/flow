@@ -150,7 +150,7 @@ func retryTestSnapshot(current FlowNodeSnapshot) FlowSnapshot {
 			{
 				Key: "completed-progress", Name: "Completed progress", Kind: NodeAgent,
 				Config: FlowNodeSnapshotConfig{Agent: &AgentNodeSnapshotConfig{
-					Agent:     AgentDefSnapshot{ID: "ad-completed", Name: "completed", Harness: "codex", Model: "frozen-completed", Prompt: "Completed frozen prompt."},
+					Agent:     AgentDefSnapshot{ID: "ad-completed", Name: "completed", Harness: "harness", Model: "frozen-completed", Prompt: "Completed frozen prompt."},
 					Workspace: WorkspaceChange, Artifact: ArtifactChange,
 				}},
 			},
@@ -168,13 +168,13 @@ func TestRetryExecutionRefreshesAuthorRuntimeFromProjectOverride(t *testing.T) {
 	ctx := context.Background()
 	env := newRetryRuntimeTestEnv(t)
 	globalAuthor, err := env.globals.Create(ctx, AgentDefInput{
-		Name: "shared-author", Harness: "codex", Model: "global-model", ReasoningEffort: "medium", Prompt: "Live global prompt.",
+		Name: "shared-author", Harness: "harness", Model: "global-model", ReasoningEffort: "medium", Prompt: "Live global prompt.",
 	})
 	if err != nil {
 		t.Fatalf("create global author: %v", err)
 	}
 	frozenAgent := AgentDefSnapshot{
-		ID: globalAuthor.ID, Name: "Frozen author name", Harness: "codex", Model: "frozen-model",
+		ID: globalAuthor.ID, Name: "Frozen author name", Harness: "harness", Model: "frozen-model",
 		ReasoningEffort: "low", Prompt: "Frozen author prompt.",
 	}
 	snapshot := retryTestSnapshot(FlowNodeSnapshot{
@@ -185,7 +185,7 @@ func TestRetryExecutionRefreshesAuthorRuntimeFromProjectOverride(t *testing.T) {
 	})
 	waiting := env.pauseWorkflowForRetry(t, snapshot, "author")
 	projectOverride, err := env.defs.Create(ctx, AgentDefInput{
-		Name: globalAuthor.Name, Harness: "claude", Model: "project-model", ReasoningEffort: "high", Prompt: "New project prompt must not leak.",
+		Name: globalAuthor.Name, Harness: "harness", Model: "project-model", ReasoningEffort: "high", Prompt: "New project prompt must not leak.",
 	})
 	if err != nil {
 		t.Fatalf("create project override: %v", err)
@@ -240,17 +240,17 @@ func TestRetryExecutionRefreshesReviewAndVerificationAgentsAndOnlyErroredChecks(
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			env := newRetryRuntimeTestEnv(t)
-			first, err := env.globals.Create(ctx, AgentDefInput{Name: tc.name + "-first", Harness: "codex", Model: "first-live-old", ReasoningEffort: "medium", Prompt: "Live first prompt."})
+			first, err := env.globals.Create(ctx, AgentDefInput{Name: tc.name + "-first", Harness: "harness", Model: "first-live-old", ReasoningEffort: "medium", Prompt: "Live first prompt."})
 			if err != nil {
 				t.Fatalf("create first agent: %v", err)
 			}
-			second, err := env.globals.Create(ctx, AgentDefInput{Name: tc.name + "-second", Harness: "claude", Model: "second-live-old", ReasoningEffort: "low", Prompt: "Live second prompt."})
+			second, err := env.globals.Create(ctx, AgentDefInput{Name: tc.name + "-second", Harness: "harness", Model: "second-live-old", ReasoningEffort: "low", Prompt: "Live second prompt."})
 			if err != nil {
 				t.Fatalf("create second agent: %v", err)
 			}
 			frozenAgents := []SnapshotReviewAgent{
-				{Blocking: true, Agent: AgentDefSnapshot{ID: first.ID, Name: "Frozen first", Harness: "codex", Model: "first-frozen", ReasoningEffort: "low", Prompt: "Frozen first prompt."}},
-				{Blocking: false, Agent: AgentDefSnapshot{ID: second.ID, Name: "Frozen second", Harness: "claude", Model: "second-frozen", ReasoningEffort: "medium", Prompt: "Frozen second prompt."}},
+				{Blocking: true, Agent: AgentDefSnapshot{ID: first.ID, Name: "Frozen first", Harness: "harness", Model: "first-frozen", ReasoningEffort: "low", Prompt: "Frozen first prompt."}},
+				{Blocking: false, Agent: AgentDefSnapshot{ID: second.ID, Name: "Frozen second", Harness: "harness", Model: "second-frozen", ReasoningEffort: "medium", Prompt: "Frozen second prompt."}},
 			}
 			current := FlowNodeSnapshot{Key: tc.name, Name: "Frozen " + tc.name, Kind: tc.kind}
 			if tc.kind == NodeChangeReview {
@@ -279,13 +279,13 @@ func TestRetryExecutionRefreshesReviewAndVerificationAgentsAndOnlyErroredChecks(
 				t.Fatalf("report errored check: %v", err)
 			}
 			firstLive, err := env.globals.Update(ctx, first.ID, AgentDefInput{
-				Name: first.Name, Harness: "claude", Model: "first-new", ReasoningEffort: "high", Prompt: "Changed first prompt.",
+				Name: first.Name, Harness: "harness", Model: "first-new", ReasoningEffort: "high", Prompt: "Changed first prompt.",
 			})
 			if err != nil {
 				t.Fatalf("update first agent: %v", err)
 			}
 			secondLive, err := env.globals.Update(ctx, second.ID, AgentDefInput{
-				Name: second.Name, Harness: "codex", Model: "second-new", ReasoningEffort: "high", Prompt: "Changed second prompt.",
+				Name: second.Name, Harness: "harness", Model: "second-new", ReasoningEffort: "high", Prompt: "Changed second prompt.",
 			})
 			if err != nil {
 				t.Fatalf("update second agent: %v", err)
@@ -347,20 +347,20 @@ func TestRetryExecutionRuntimeRefreshFailureIsAtomic(t *testing.T) {
 		invalidAgent AgentDefSnapshot
 		wantError    string
 	}{
-		{name: "missing snapshot id", invalidAgent: AgentDefSnapshot{Name: "Missing id", Harness: "codex", Prompt: "Frozen."}, wantError: "has no id"},
-		{name: "unresolvable snapshot id", invalidAgent: AgentDefSnapshot{ID: "ad-does-not-exist", Name: "Missing definition", Harness: "codex", Prompt: "Frozen."}, wantError: "agent definition not found"},
+		{name: "missing snapshot id", invalidAgent: AgentDefSnapshot{Name: "Missing id", Harness: "harness", Prompt: "Frozen."}, wantError: "has no id"},
+		{name: "unresolvable snapshot id", invalidAgent: AgentDefSnapshot{ID: "ad-does-not-exist", Name: "Missing definition", Harness: "harness", Prompt: "Frozen."}, wantError: "agent definition not found"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			env := newRetryRuntimeTestEnv(t)
-			valid, err := env.globals.Create(ctx, AgentDefInput{Name: "valid-reviewer", Harness: "claude", Model: "new-valid", ReasoningEffort: "high", Prompt: "Live."})
+			valid, err := env.globals.Create(ctx, AgentDefInput{Name: "valid-reviewer", Harness: "harness", Model: "new-valid", ReasoningEffort: "high", Prompt: "Live."})
 			if err != nil {
 				t.Fatalf("create valid agent: %v", err)
 			}
 			current := FlowNodeSnapshot{
 				Key: "review", Name: "Review", Kind: NodeChangeReview,
 				Config: FlowNodeSnapshotConfig{ChangeReview: &ChangeReviewNodeSnapshotConfig{Agents: []SnapshotReviewAgent{
-					{Blocking: true, Agent: AgentDefSnapshot{ID: valid.ID, Name: "Valid frozen", Harness: "codex", Model: "old-valid", Prompt: "Frozen valid."}},
+					{Blocking: true, Agent: AgentDefSnapshot{ID: valid.ID, Name: "Valid frozen", Harness: "harness", Model: "old-valid", Prompt: "Frozen valid."}},
 					{Blocking: true, Agent: tc.invalidAgent},
 				}}},
 			}
@@ -406,20 +406,20 @@ func TestRetryExecutionRuntimeRefreshFailureIsAtomic(t *testing.T) {
 func TestRetryExecutionWithoutRefreshKeepsFrozenRuntime(t *testing.T) {
 	ctx := context.Background()
 	env := newRetryRuntimeTestEnv(t)
-	author, err := env.globals.Create(ctx, AgentDefInput{Name: "ordinary-author", Harness: "codex", Model: "live-old", Prompt: "Live old."})
+	author, err := env.globals.Create(ctx, AgentDefInput{Name: "ordinary-author", Harness: "harness", Model: "live-old", Prompt: "Live old."})
 	if err != nil {
 		t.Fatalf("create author: %v", err)
 	}
 	snapshot := retryTestSnapshot(FlowNodeSnapshot{
 		Key: "author", Name: "Author", Kind: NodeAgent,
 		Config: FlowNodeSnapshotConfig{Agent: &AgentNodeSnapshotConfig{
-			Agent:     AgentDefSnapshot{ID: author.ID, Name: "Frozen author", Harness: "codex", Model: "frozen-model", ReasoningEffort: "low", Prompt: "Frozen prompt."},
+			Agent:     AgentDefSnapshot{ID: author.ID, Name: "Frozen author", Harness: "harness", Model: "frozen-model", ReasoningEffort: "low", Prompt: "Frozen prompt."},
 			Workspace: WorkspaceChange, Artifact: ArtifactChange,
 		}},
 	})
 	waiting := env.pauseWorkflowForRetry(t, snapshot, "author")
 	if _, err := env.globals.Update(ctx, author.ID, AgentDefInput{
-		Name: author.Name, Harness: "claude", Model: "live-new", ReasoningEffort: "high", Prompt: "Live new.",
+		Name: author.Name, Harness: "harness", Model: "live-new", ReasoningEffort: "high", Prompt: "Live new.",
 	}); err != nil {
 		t.Fatalf("update live author: %v", err)
 	}

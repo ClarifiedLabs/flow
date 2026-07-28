@@ -1308,7 +1308,7 @@ func runHook(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
-	case harness.Codex, harness.Claude, harness.Harness:
+	case harness.Harness:
 		if len(args) > 1 {
 			switch args[1] {
 			case "ingest":
@@ -1651,7 +1651,7 @@ func runFetchPrompt(args []string, stdout, stderr io.Writer) int {
 	var role string
 	var harness string
 	flags.StringVar(&role, "role", "", "worker role: author, reviewer, or verifier")
-	flags.StringVar(&harness, "harness", "", "prompt harness: codex, claude, harness, or agents")
+	flags.StringVar(&harness, "harness", "", "prompt harness: harness or agents")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -2768,8 +2768,8 @@ func printUsage(out io.Writer) {
   flow ui
   flow attach [--job] SESSION_ID|JOB_ID
   flow session event working|waiting
-  flow hook codex|claude|harness EVENT|ingest
-  flow fetch-prompt [--role author|reviewer|verifier] [--harness codex|claude|harness|agents]
+  flow hook harness EVENT|ingest
+  flow fetch-prompt [--role author|reviewer|verifier] [--harness harness|agents]
   flow comment SHA:FILE:LINE BODY
   flow thread reply|claim|certify|reopen
   flow status MESSAGE
@@ -2831,16 +2831,12 @@ func printSessionUsage(out io.Writer) {
 
 func printHookUsage(out io.Writer) {
 	fmt.Fprint(out, `Usage:
-  flow hook codex [flags] start|stop|working|waiting
-  flow hook codex ingest [flags]
-  flow hook claude [flags] start|stop|notification|working|waiting
-  flow hook claude ingest [flags]
   flow hook harness [flags] start|stop|working|waiting
   flow hook harness ingest [flags]
 
 Client-side git hooks (installed into the agent worktree; never block git):
-  flow hook codex|claude|harness prepush       (capture push + steer threads)
-  flow hook codex|claude|harness commit-msg MSGFILE   (record Resolves: trailers)
+  flow hook harness prepush       (capture push + steer threads)
+  flow hook harness commit-msg MSGFILE   (record Resolves: trailers)
 `)
 }
 

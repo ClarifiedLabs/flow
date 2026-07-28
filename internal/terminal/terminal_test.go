@@ -78,7 +78,7 @@ func TestWatchdogSuppressesWaitingWhenChildProcessIsBusy(t *testing.T) {
 		TmuxSession:       "flow-j-1",
 		SilentFor:         10 * time.Minute,
 		SilenceThreshold:  time.Minute,
-		ForegroundProcess: "codex",
+		ForegroundProcess: "harness",
 		BusyChildProcess:  true,
 	})
 	if decision != WatchdogWorking {
@@ -91,7 +91,7 @@ func TestWatchdogClassifiesSilentIdleForegroundProcessAsWaiting(t *testing.T) {
 		TmuxSession:       "flow-j-1",
 		SilentFor:         10 * time.Minute,
 		SilenceThreshold:  time.Minute,
-		ForegroundProcess: "codex",
+		ForegroundProcess: "harness",
 	})
 	if decision != WatchdogWaiting {
 		t.Fatalf("decision = %q, want waiting", decision)

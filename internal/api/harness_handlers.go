@@ -86,7 +86,7 @@ type harnessModelAccumulator struct {
 
 // liveHarnessModelIntersection computes, per harness name, the models common to
 // all live workers offering that harness. Each model is grouped by its stamped
-// Harness so claude/codex/harness catalogs stay separate, and the result is
+// Harness so per-harness catalogs stay separate, and the result is
 // keyed by harness name for attachment to that harness's option.
 func liveHarnessModelIntersection(workers []worker.Worker) map[string][]flowharness.Model {
 	accumulators := map[string]*harnessModelAccumulator{}

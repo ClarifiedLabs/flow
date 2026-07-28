@@ -11,9 +11,8 @@ For a source-built local setup:
 - Git.
 - tmux for worker jobs.
 - ttyd on `PATH` for worker terminal attach.
-- At least one supported agent CLI on the worker `PATH`. Codex is the default
-  seeded harness; Claude Code and Harness can be selected through project flows
-  when workers advertise those capabilities.
+- The `harness` agent CLI on the worker `PATH`. It is the only supported agent
+  harness; workers advertise it when `harness --check-model-proxy` passes.
 
 ## Local Binaries
 
@@ -122,8 +121,8 @@ The server stores coordinator state in `flow-data`. The worker stores its
 `/flow/work` directory in `flow-worker-data` and its rootless Docker state in
 `flow-worker-docker`; it does not mount the server data volume.
 
-The `flow-server` image stays minimal. The `flow-worker` image includes
-`claude`, `codex`, `harness`, Go, nvm with Node.js LTS, Rust, Temurin JDK,
+The `flow-server` image stays minimal. The `flow-worker` image includes the
+`harness` agent CLI, Go, nvm with Node.js LTS, Rust, Temurin JDK,
 LLVM/clang/lld, build tools, Docker CLI/Compose/buildx, rootless
 Docker-in-Docker, age, GnuPG, OpenSSH, Python, GitHub CLI, and common
 build/debug utilities. Each pinned third-party package version and
@@ -136,50 +135,17 @@ internal Compose address, `http://flow-server:8421`. The worker uses that same
 base URL for API requests and project Git exchanges; host-side clients use
 their own configured server URL, normally `http://127.0.0.1:8421`.
 
-To run Docker-hosted agents with Claude and Codex subscription auth, add the
-auth values to `.env` and use the auth compose overlay:
+Docker-hosted agents authenticate through the Harness model proxy. Set the
+proxy URL (and API key, when your proxy requires one) in `.env`:
 
 ```sh
-FLOW_OWNER_TOKEN=generated-hex-token
-FLOW_WORKER_JOIN_TOKEN=generated-hex-token
-FLOW_CODEX_AUTH_JSON=/absolute/path/to/your/.codex/auth.json
-CLAUDE_CODE_OAUTH_TOKEN=your-claude-code-oauth-token
+HARNESS_MODEL_PROXY_URL=http://host.docker.internal:8765
+HARNESS_MODEL_PROXY_API_KEY=your-proxy-key
 ```
 
-For Codex, sign in on the host with file-backed credentials before starting the
-worker. Make sure your host `~/.codex/config.toml` contains:
-
-```toml
-cli_auth_credentials_store = "file"
-```
-
-Then run:
-
-```sh
-codex login --device-auth
-codex login status
-```
-
-For Claude Code, generate the subscription token on the host:
-
-```sh
-claude setup-token
-```
-
-Put the printed token in `.env` as `CLAUDE_CODE_OAUTH_TOKEN`, then start Flow
-with the auth overlay:
-
-```sh
-docker compose -f compose.yaml -f compose.auth.yaml up -d --build
-```
-
-The Codex auth file is mounted writable because Codex refreshes ChatGPT
-subscription tokens during normal use and writes the updated token bundle back
-to `auth.json`. Codex agent jobs share that mounted `CODEX_HOME`; Claude agent
-jobs receive `CLAUDE_CODE_OAUTH_TOKEN`. The worker scopes both credentials to
-author, reviewer, verifier, and console jobs using the matching harness, so CI
-and other harnesses keep their hermetic environments. Keep `.env` and
-`auth.json` private; `.env` is ignored by git.
+`compose.yaml` forwards both values into the worker container, and the worker
+scopes them to author, reviewer, verifier, and console jobs, so CI jobs keep
+their hermetic environments. Keep `.env` private; it is ignored by git.
 
 Load the generated owner token from `.env`, then onboard a repository from your
 normal host checkout:
@@ -274,8 +240,6 @@ capacity:
 At registration time, `flow-worker` probes its environment and advertises agent
 harness capabilities as labels:
 
-- `agent.harness.codex: "true"` when `codex login status` passes.
-- `agent.harness.claude: "true"` when `claude auth status` passes.
 - `agent.harness.harness: "true"` when `harness --check-model-proxy` passes.
 - `capacity.persistent_agent` controls concurrent author, reviewer, verifier,
   and console agent jobs.
@@ -304,8 +268,7 @@ chmod 600 .flow-local/worker-join.token
 
 The coordinator seeds global built-in `task-planner`, `author`,
 `code-reviewer`, `security-reviewer`, and `verifier` agent definitions using the
-default agent harness (Codex unless `default_agent` configures another; see
-below). Fresh projects inherit those definitions and seed only the `coding` and
+default agent selection (`default_agent`; see below). Fresh projects inherit those definitions and seed only the `coding` and
 `planning` flows; they do not create project-local copies. Each
 reusable agent definition combines a **model agent** selection (harness, model,
 and reasoning effort) with a **focus agent** name and prompt. Manage those
@@ -317,7 +280,7 @@ later workflow snapshots.
 
 Choose an task's work pipeline with `flow task create --flow direct`,
 `flow task create --flow planned`, or the web UI's **Flow** field. To use
-Claude Code, Harness, or model-specific settings, edit the project's agent
+model- or effort-specific settings, edit the project's agent
 definitions and flows in the web UI's **Flows** page or with those CLI commands.
 The UI lists only harnesses advertised by at least one live worker via the
 corresponding `agent.harness.*` label.
@@ -332,8 +295,8 @@ awaited, but their failures do not select the failure/changes-requested edge.
 files. The parent remains the run's sole active graph node throughout the
 fan-out—children are jobs, not independently active graph nodes.
 
-The worker environment needs `flow`, `ttyd`, and the selected harness CLI
-(`codex`, `claude`, or `harness`) available on `PATH`. To override the generated
+The worker environment needs `flow`, `ttyd`, and the `harness` CLI
+available on `PATH`. To override the generated
 author command for all default author jobs, serve with a coordinator config that
 sets `author_entrypoint`; flow-selected agent definitions are ignored when this
 explicit override is configured.
@@ -342,7 +305,7 @@ Example coordinator config fragment:
 
 ```yaml
 author_entrypoint:
-  argv: ["claude"]
+  argv: ["harness"]
   cwd: "."
   env: {}
   shell: false
@@ -352,18 +315,17 @@ author_entrypoint:
 
 The coordinator's fallback agent — used for jobs launched without an agent
 definition, for the synthesized default reviewer/verifier checks, and for the
-generated author entrypoint — defaults to the Codex harness with the harness
-CLI's own default model. Serve with a coordinator config that sets
-`default_agent` to change it:
+generated author entrypoint — defaults to the `harness` CLI with its own default
+model. Serve with a coordinator config that sets
+`default_agent` to change the model or reasoning effort:
 
 ```yaml
 default_agent:
-  harness: claude        # codex (default), claude, or harness
-  model: sonnet          # optional; empty = the harness CLI's default model
-  reasoning_effort: high # optional
+  model: anthropic:claude-sonnet-4-6 # optional; empty = the harness CLI's default model
+  reasoning_effort: high             # optional
 ```
 
-Setting only `model` applies it to the built-in default harness (Codex).
+Setting only `model` applies it to the built-in default harness.
 Invalid values fail `flow-server serve` at startup.
 
 Explicit selections keep precedence over this fallback, highest first:
@@ -375,7 +337,7 @@ Explicit selections keep precedence over this fallback, highest first:
 3. `harness_args`, applied after the `default_agent` model tokens so a manual
    `--model` there wins.
 4. The `default_agent` block.
-5. The built-in Codex fallback.
+5. The built-in harness fallback.
 
 Changing `default_agent` affects only freshly seeded (or restored) global agent
 definitions and newly enqueued jobs: existing definitions are never rewritten,

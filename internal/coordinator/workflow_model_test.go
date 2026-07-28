@@ -138,7 +138,7 @@ func TestWorkflowModelAgentInputWaitResumesSameNodeVisit(t *testing.T) {
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	agent, err := NewAgentDefService(flows.db).Create(ctx, AgentDefInput{
-		Name: "implementation agent", Harness: "codex", Prompt: "Implement the task.",
+		Name: "implementation agent", Harness: "harness", Prompt: "Implement the task.",
 	})
 	if err != nil {
 		t.Fatalf("create agent definition: %v", err)

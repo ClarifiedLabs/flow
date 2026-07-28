@@ -87,8 +87,6 @@ export function normalizeHarnessReasoning(raw) {
 
 export function normalizeHarnessArgs(raw) {
   return {
-    codex: normalizeArgList(value(raw, "codex", "Codex")),
-    claude: normalizeArgList(value(raw, "claude", "Claude")),
     harness: normalizeArgList(value(raw, "harness", "Harness")),
   };
 }
@@ -116,7 +114,7 @@ export function harnessModels(options, name = "harness") {
 // harness changes without another round trip.
 export function renderHarnessModelFields(options, selectionByHarness, agentHarness) {
   const catalog = {};
-  for (const name of ["codex", "claude", "harness"]) {
+  for (const name of ["harness"]) {
     const models = harnessModels(options, name);
     if (models.length) catalog[name] = models;
   }
@@ -230,28 +228,21 @@ export function syncHarnessReasoningVisibility(_root) {
   // controls, so there is no conditional visibility to sync.
 }
 
-// HARNESS_SELECTION_FLAGS maps each harness to the flag names it uses to carry
+// HARNESS_SELECTION_FLAGS maps the harness to the flag names it uses to carry
 // a Flow-managed model/reasoning selection. The harness CLI treats
 // provider:model as a target id, but we still parse old stored --provider args.
 //   - harness: --model provider:model + --reasoning <profile>
-//   - claude:  --model + --effort
-//   - codex:   --model (or -m) + -c model_reasoning_effort=<level>
 export const HARNESS_SELECTION_FLAGS = {
   harness: new Set(["provider", "model", "reasoning", "reasoning-effort", "reasoning-enabled", "reasoning-budget-tokens"]),
-  claude: new Set(["model", "m", "effort"]),
-  codex: new Set(["model", "m", "c", "config"]),
 };
-
-export const CODEX_REASONING_EFFORT_KEY = "model_reasoning_effort";
 
 export function harnessSelectionFlags(harness) {
   return HARNESS_SELECTION_FLAGS[harness] || HARNESS_SELECTION_FLAGS.harness;
 }
 
 // applyHarnessSelectionFlag records one recognized selection flag onto selection
-// and returns true. It returns false when the token is not a selection flag for
-// this harness (e.g. a codex `-c key=value` that is not model_reasoning_effort),
-// so the caller can keep it as an additional arg.
+// and returns true. It returns false when the token is not a selection flag, so
+// the caller can keep it as an additional arg.
 export function applyHarnessSelectionFlag(selection, harness, name, value) {
   if (!value) return false;
   if (name === "provider" && harness === "harness") {
@@ -289,42 +280,18 @@ export function applyHarnessSelectionFlag(selection, harness, name, value) {
     }
     return false;
   }
-  if (harness === "claude" && name === "effort") {
-    selection.reasoning_mode = "effort";
-    selection.reasoning_effort = value;
-    selection.reasoning_budget_tokens = null;
-    return true;
-  }
-  if (harness === "codex" && (name === "c" || name === "config")) {
-    const [key, effort] = splitOnce(value, "=");
-    if (key === CODEX_REASONING_EFFORT_KEY && effort) {
-      selection.reasoning_mode = "effort";
-      selection.reasoning_effort = effort;
-      selection.reasoning_budget_tokens = null;
-      return true;
-    }
-    return false;
-  }
   return false;
 }
 
-// serializeHarnessModelSelection renders the per-harness argv tokens for a model
-// + reasoning choice. It is the inverse of parseHarnessSelectionArgs.
-export function serializeHarnessModelSelection(harness, model, reasoning) {
-  const args = harness === "harness"
-    ? ["--model", model.target_id || model.qualified_id || model.model_id]
-    : ["--model", model.model_id];
+// serializeHarnessModelSelection renders the harness argv tokens for a model +
+// reasoning choice. It is the inverse of parseHarnessSelectionArgs.
+export function serializeHarnessModelSelection(_harness, model, reasoning) {
+  const args = ["--model", model.target_id || model.qualified_id || model.model_id];
   const mode = reasoning.mode || "default";
   if (mode === "effort") {
     const effort = String(reasoning.effort || "").trim();
     if (!effort) throw new Error("Reasoning effort is required");
-    if (harness === "claude") {
-      args.push("--effort", effort);
-    } else if (harness === "codex") {
-      args.push("-c", `${CODEX_REASONING_EFFORT_KEY}=${effort}`);
-    } else {
-      args.push("--reasoning", effort);
-    }
+    args.push("--reasoning", effort);
   } else if (mode !== "default") {
     throw new Error("Unsupported reasoning option");
   }
@@ -512,5 +479,5 @@ export function resolveHarnessSelection(options, selected, includeMissing = fals
   if (normalized.some((option) => option.name === selectedValue)) return selectedValue;
   if (includeMissing && selectedValue) return selectedValue;
   if (normalized.length) return normalized[0].name;
-  return selectedValue || "codex";
+  return selectedValue || "harness";
 }

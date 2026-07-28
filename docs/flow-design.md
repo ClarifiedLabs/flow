@@ -41,8 +41,8 @@ missing or internally ambiguous. These decisions resolve the blockers:
    Multi-user permissions, organizations, public auth flows, GitHub pull-down
    sync, and release/deploy workflows are out of scope.
 
-5. The initial harness order is Codex first, then Claude Code.
-   opencode support remains deferred. The watchdog is still implemented in the
+5. Harness is the only supported agent CLI.
+   The watchdog is still implemented in the
    MVP because harness hook support can vary and because missed waiting signals
    would leak hot worker slots.
 
@@ -148,7 +148,7 @@ The initial repository should be a Go monorepo:
 - `internal/scheduler`: selector/taint matching and queue selection.
 - `internal/worker`: worker registration, claim loop, heartbeat, release.
 - `internal/worker/execution`: checkout, tmux execution, entrypoint supervision.
-- `internal/harness`: Claude Code and Codex hook/watchdog integrations.
+- `internal/harness`: harness CLI hook/watchdog integrations.
 - `internal/git`: exchange remote, server hooks, branch, trailer, diff, and
   squash-merge helpers.
 - `internal/terminal`: ttyd/reverse-proxy integration.
@@ -508,10 +508,9 @@ and editable from the web UI (`/ui/flows`), the CLI, and the API.
 Agent definition: a reusable agent configuration.
 
 - `name`: unique per project, e.g. `opus-reviewer`.
-- `harness`: `codex`, `claude`, or `harness`.
+- `harness`: `harness`.
 - `model` and `reasoning_effort`: optional; serialized into the launch command
-  per harness (`--model X --effort Y`, `-c model_reasoning_effort=Y`,
-  `--reasoning Y`). Empty means the harness default.
+  (`--model X --reasoning Y`). Empty means the harness default.
 - `prompt`: the role-instruction markdown. It replaces the embedded
   `skills/flow-*.md` content in the session's prompt; task context (title,
   Markdown body, prior handoffs, review state) is still appended by `flow
@@ -933,7 +932,7 @@ Entrypoints are stored as structured data, not as an implicit shell string:
 
 ```yaml
 entrypoint:
-  argv: ['codex exec -c "projects.$PWD.trust_level=trusted" "$(flow fetch-prompt)"']
+  argv: ['harness -p "$(flow fetch-prompt)"']
   cwd: "."
   env: {}
   shell: true
@@ -1072,7 +1071,7 @@ because it does not contain coordinator or worker entrypoints.
 In-session commands:
 
 ```text
-flow fetch-prompt [--harness codex|claude|harness|agents]
+flow fetch-prompt [--harness harness|agents]
 flow status "<message>"
 flow handoff write   # optional progress snapshot (reads stdin), submitted to the coordinator
 flow task list [--tag <tag>] [--blocked-by <task-id>]
@@ -1095,7 +1094,7 @@ emits the initial harness prompt. `flow init` does not seed role skills into pro
 repositories, and `flow-worker` does not validate committed skill files in the
 worker checkout before starting the entrypoint. `FLOW_WORKER_HARNESS` is set by
 `flow-worker` from the
-entrypoint command; `--harness codex|claude|harness|agents` is an explicit
+entrypoint command; `--harness harness|agents` is an explicit
 override.
 
 Human commands:
@@ -1246,8 +1245,8 @@ They do not infer completion.
 Detection tiers:
 
 1. Native harness hooks.
-   Codex uses stop hooks where available. Claude Code uses notification/stop
-   hooks.
+   The harness CLI reports session, prompt-submit, tool, compaction, and stop
+   events through its native hooks.
 
 2. Universal watchdog.
    tmux silence plus process-state inspection detects foreground processes

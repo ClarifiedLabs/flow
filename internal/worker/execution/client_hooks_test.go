@@ -44,7 +44,7 @@ func TestPrepareWorktreeInstallsClientHooksForAuthorSession(t *testing.T) {
 		"project_id":    "p-test",
 		"base":          "main",
 		"branch":        "main",
-		"agent_harness": "claude",
+		"agent_harness": "harness",
 		"entrypoint":    map[string]any{"argv": []string{"true"}, "cwd": "."},
 	})
 	if err != nil {
@@ -70,7 +70,7 @@ func TestPrepareWorktreeInstallsClientHooksForAuthorSession(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", hook, err)
 		}
-		if want := "hook 'claude' '" + sub + "'"; !strings.Contains(string(data), want) {
+		if want := "hook 'harness' '" + sub + "'"; !strings.Contains(string(data), want) {
 			t.Fatalf("%s missing %q:\n%s", hook, want, string(data))
 		}
 	}

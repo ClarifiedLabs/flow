@@ -207,7 +207,7 @@ function renderAgentDefReadRowView(def) {
 export function renderAgentDefEditRowsView(def, agentOptions) {
   const name = value(def, "name", "Name");
   const inherited = Boolean(value(def, "inherited", "Inherited"));
-  const harness = def ? value(def, "harness", "Harness") : (agentOptions[0] ? value(agentOptions[0], "name", "Name") : "codex");
+  const harness = def ? value(def, "harness", "Harness") : (agentOptions[0] ? value(agentOptions[0], "name", "Name") : "harness");
   const prompt = value(def, "prompt", "Prompt");
   const models = harnessModels(agentOptions, harness);
   const selectedQID = resolveAgentDefModelQID(models, harness, value(def, "model", "Model"));
@@ -279,7 +279,7 @@ export function renderReasoningOptionsView(model, selectedEffort) {
 
 // resolveAgentDefModelQID maps a stored agent-def model string back onto a
 // catalog model's qualified id so the picker can preselect it. Harness stores
-// the target id (== qualified id); codex/claude store the bare model id.
+// the target id (== qualified id).
 export function resolveAgentDefModelQID(models, harness, defModel) {
   const raw = String(defModel || "").trim();
   if (!raw) return "";
@@ -290,8 +290,8 @@ export function resolveAgentDefModelQID(models, harness, defModel) {
 }
 
 // agentDefPayloadFromFormView reads the agent-def form into the API body. The
-// picked catalog model is stored as the plain model string the harness expects
-// (target id for harness, bare model id for codex/claude), NOT serialized args.
+// picked catalog model is stored as the plain model target id the harness
+// expects, NOT serialized args.
 export function agentDefPayloadFromFormView(form, agentOptions) {
   const readValue = (selector) => {
     const element = form.querySelector(selector);
@@ -300,9 +300,7 @@ export function agentDefPayloadFromFormView(form, agentOptions) {
   const harness = readValue('[name="def_harness"]').trim();
   const models = harnessModels(agentOptions, harness);
   const model = findHarnessModel(models, readValue('[name="def_model"]').trim());
-  const modelValue = model
-    ? (harness === "harness" ? (model.target_id || model.qualified_id || model.model_id) : model.model_id)
-    : "";
+  const modelValue = model ? (model.target_id || model.qualified_id || model.model_id) : "";
   const effort = readValue('[name="def_reasoning_effort"]').trim();
   return {
     name: readValue('[name="def_name"]').trim(),

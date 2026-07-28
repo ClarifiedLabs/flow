@@ -22,7 +22,7 @@ func TestLoadCoordinatorOverlaysDataDir(t *testing.T) {
 		ListenAddr:      "127.0.0.1:9000",
 		ProtocolVersion: "2",
 		AuthorEntrypoint: map[string]any{
-			"argv":  []string{"claude", "--continue"},
+			"argv":  []string{"harness", "--continue"},
 			"cwd":   "agents",
 			"env":   map[string]string{"CUSTOM": "true"},
 			"shell": false,
@@ -56,7 +56,7 @@ func TestLoadCoordinatorOverlaysDataDir(t *testing.T) {
 		t.Fatal("AuthorEntrypointConfigured = false, want true for file override")
 	}
 	argv, ok := cfg.AuthorEntrypoint["argv"].([]any)
-	if !ok || len(argv) != 2 || argv[0] != "claude" || argv[1] != "--continue" {
+	if !ok || len(argv) != 2 || argv[0] != "harness" || argv[1] != "--continue" {
 		t.Fatalf("AuthorEntrypoint argv = %#v", cfg.AuthorEntrypoint["argv"])
 	}
 }
@@ -94,8 +94,6 @@ func TestLoadCoordinatorParsesHarnessArgs(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
 listen_addr: 127.0.0.1:8421
 harness_args:
-  codex: ["--model", "gpt-5"]
-  claude: ["--model", "sonnet"]
   harness: ["--profile", "review"]
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -104,9 +102,6 @@ harness_args:
 	cfg, err := LoadCoordinator(configPath)
 	if err != nil {
 		t.Fatalf("load coordinator: %v", err)
-	}
-	if got := cfg.HarnessArgs.Codex; len(got) != 2 || got[0] != "--model" || got[1] != "gpt-5" {
-		t.Fatalf("codex harness args = %#v", got)
 	}
 	if got := cfg.HarnessArgs.For(flowharness.Harness); len(got) != 2 || got[0] != "--profile" || got[1] != "review" {
 		t.Fatalf("harness args = %#v", got)
@@ -118,12 +113,12 @@ func TestLoadCoordinatorRejectsManagedHarnessArgs(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
 listen_addr: 127.0.0.1:8421
 harness_args:
-  codex: ["-c", "hooks.Stop=[]"]
+  harness: ["--hooks", "/tmp/evil-hooks.json"]
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	if _, err := LoadCoordinator(configPath); err == nil {
-		t.Fatal("LoadCoordinator accepted Flow-managed codex hook config")
+		t.Fatal("LoadCoordinator accepted Flow-managed harness hooks arg")
 	}
 }
 
@@ -295,8 +290,8 @@ func TestLoadCoordinatorParsesDefaultAgent(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
 listen_addr: 127.0.0.1:8421
 default_agent:
-  harness: " Claude "
-  model: sonnet
+  harness: " Harness "
+  model: anthropic:claude-sonnet-4-6
   reasoning_effort: high
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -313,31 +308,31 @@ default_agent:
 	if err != nil {
 		t.Fatalf("resolve default agent: %v", err)
 	}
-	want := flowharness.AgentSelection{Harness: flowharness.Claude, Model: "sonnet", ReasoningEffort: "high"}
+	want := flowharness.AgentSelection{Harness: flowharness.Harness, Model: "anthropic:claude-sonnet-4-6", ReasoningEffort: "high"}
 	if resolved != want {
 		t.Fatalf("resolved default agent = %+v, want %+v", resolved, want)
 	}
 	// The default author entrypoint is rebuilt from the configured selection.
-	if cfg.AuthorEntrypoint["harness"] != flowharness.Claude {
-		t.Fatalf("author entrypoint harness = %#v, want claude", cfg.AuthorEntrypoint["harness"])
+	if cfg.AuthorEntrypoint["harness"] != flowharness.Harness {
+		t.Fatalf("author entrypoint harness = %#v, want harness", cfg.AuthorEntrypoint["harness"])
 	}
 	argv, ok := cfg.AuthorEntrypoint["argv"].([]string)
 	if !ok || len(argv) != 1 {
 		t.Fatalf("author entrypoint argv = %#v", cfg.AuthorEntrypoint["argv"])
 	}
-	for _, token := range []string{"claude --dangerously-skip-permissions", "'--model' 'sonnet'", "'--effort' 'high'"} {
+	for _, token := range []string{"harness --hooks", "'--model' 'anthropic:claude-sonnet-4-6'", "'--reasoning' 'high'"} {
 		if !strings.Contains(argv[0], token) {
 			t.Fatalf("author entrypoint command missing %q:\n%s", token, argv[0])
 		}
 	}
 }
 
-func TestLoadCoordinatorDefaultAgentModelWithoutHarnessAppliesToCodex(t *testing.T) {
+func TestLoadCoordinatorDefaultAgentModelWithoutHarnessAppliesToHarness(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "coordinator.yaml")
 	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
 listen_addr: 127.0.0.1:8421
 default_agent:
-  model: gpt-5
+  model: openai:gpt-5
   reasoning_effort: high
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -351,17 +346,17 @@ default_agent:
 	if err != nil {
 		t.Fatalf("resolve default agent: %v", err)
 	}
-	if resolved.Harness != flowharness.Codex {
-		t.Fatalf("resolved harness = %q, want codex", resolved.Harness)
+	if resolved.Harness != flowharness.Harness {
+		t.Fatalf("resolved harness = %q, want harness", resolved.Harness)
 	}
-	if cfg.AuthorEntrypoint["harness"] != flowharness.Codex {
-		t.Fatalf("author entrypoint harness = %#v, want codex", cfg.AuthorEntrypoint["harness"])
+	if cfg.AuthorEntrypoint["harness"] != flowharness.Harness {
+		t.Fatalf("author entrypoint harness = %#v, want harness", cfg.AuthorEntrypoint["harness"])
 	}
 	argv, ok := cfg.AuthorEntrypoint["argv"].([]string)
 	if !ok || len(argv) != 1 {
 		t.Fatalf("author entrypoint argv = %#v", cfg.AuthorEntrypoint["argv"])
 	}
-	for _, token := range []string{"'--model' 'gpt-5'", "-c 'model_reasoning_effort=high'"} {
+	for _, token := range []string{"'--model' 'openai:gpt-5'", "'--reasoning' 'high'"} {
 		if !strings.Contains(argv[0], token) {
 			t.Fatalf("author entrypoint command missing %q:\n%s", token, argv[0])
 		}
@@ -400,12 +395,11 @@ func TestLoadCoordinatorAuthorEntrypointWinsOverDefaultAgent(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
 listen_addr: 127.0.0.1:8421
 author_entrypoint:
-  argv: ["claude --continue"]
+  argv: ["harness --continue"]
   shell: true
-  harness: claude
+  harness: harness
 default_agent:
-  harness: codex
-  model: gpt-5
+  model: openai:gpt-5
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -418,7 +412,7 @@ default_agent:
 		t.Fatal("AuthorEntrypointConfigured = false, want true for file override")
 	}
 	argv, ok := cfg.AuthorEntrypoint["argv"].([]any)
-	if !ok || len(argv) != 1 || argv[0] != "claude --continue" {
+	if !ok || len(argv) != 1 || argv[0] != "harness --continue" {
 		t.Fatalf("author entrypoint argv = %#v, want the explicit file entrypoint", cfg.AuthorEntrypoint["argv"])
 	}
 	// The selection still resolves for the other consumers (agent-def seeding,
@@ -427,12 +421,12 @@ default_agent:
 	if err != nil {
 		t.Fatalf("resolve default agent: %v", err)
 	}
-	if resolved.Harness != flowharness.Codex || resolved.Model != "gpt-5" {
-		t.Fatalf("resolved default agent = %+v, want codex/gpt-5", resolved)
+	if resolved.Harness != flowharness.Harness || resolved.Model != "openai:gpt-5" {
+		t.Fatalf("resolved default agent = %+v, want harness/openai:gpt-5", resolved)
 	}
 }
 
-func TestLoadCoordinatorZeroConfigKeepsCodexDefault(t *testing.T) {
+func TestLoadCoordinatorZeroConfigKeepsHarnessDefault(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "coordinator.yaml")
 	if err := os.WriteFile(configPath, []byte(`data_dir: /tmp/flow
 listen_addr: 127.0.0.1:8421
@@ -451,12 +445,12 @@ listen_addr: 127.0.0.1:8421
 	if resolved != flowharness.DefaultAgentSelection() {
 		t.Fatalf("resolved default agent = %+v, want the built-in default", resolved)
 	}
-	if cfg.AuthorEntrypoint["harness"] != flowharness.Codex {
-		t.Fatalf("author entrypoint harness = %#v, want codex", cfg.AuthorEntrypoint["harness"])
+	if cfg.AuthorEntrypoint["harness"] != flowharness.Harness {
+		t.Fatalf("author entrypoint harness = %#v, want harness", cfg.AuthorEntrypoint["harness"])
 	}
 }
 
-func TestDefaultAuthorEntrypointWrapsCodexHooks(t *testing.T) {
+func TestDefaultAuthorEntrypointUsesHarnessHooks(t *testing.T) {
 	entrypoint := DefaultAuthorEntrypoint()
 	argv, ok := entrypoint["argv"].([]string)
 	if !ok || len(argv) != 1 {
@@ -465,17 +459,11 @@ func TestDefaultAuthorEntrypointWrapsCodexHooks(t *testing.T) {
 	if entrypoint["shell"] != true {
 		t.Fatalf("shell = %#v, want true", entrypoint["shell"])
 	}
-	if !strings.Contains(argv[0], "flow hook codex start") || !strings.Contains(argv[0], "flow hook codex stop") {
-		t.Fatalf("default command does not wrap hooks: %q", argv[0])
+	if !strings.Contains(argv[0], "flow fetch-prompt --harness harness") {
+		t.Fatalf("default command does not fetch a prompt: %q", argv[0])
 	}
-	if !strings.Contains(argv[0], `-c "projects.$PWD.trust_level=trusted"`) {
-		t.Fatalf("default command does not trust the job worktree: %q", argv[0])
-	}
-	if !strings.Contains(argv[0], "--dangerously-bypass-hook-trust") || !strings.Contains(argv[0], "flow hook codex ingest") {
-		t.Fatalf("default command does not configure Codex native hooks: %q", argv[0])
-	}
-	if !strings.Contains(argv[0], "flow fetch-prompt") || !strings.Contains(argv[0], `"$prompt"`) {
-		t.Fatalf("default command does not start codex with a prompt: %q", argv[0])
+	if !strings.Contains(argv[0], `harness --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`) {
+		t.Fatalf("default command does not configure harness native hooks: %q", argv[0])
 	}
 }
 
@@ -518,7 +506,7 @@ token: worker-secret
 work_dir: ~/flow/workers/local
 labels:
   local: "true"
-  agent.harness.codex: "true"
+  agent.harness.harness: "true"
 capacity:
   persistent_agent: 1
   ephemeral: 2
@@ -550,7 +538,7 @@ git:
 	if cfg.ProtocolVersion != DefaultProtocolVersion {
 		t.Fatalf("ProtocolVersion = %q, want %q", cfg.ProtocolVersion, DefaultProtocolVersion)
 	}
-	if cfg.Labels["local"] != "true" || cfg.Labels["agent.harness.codex"] != "true" {
+	if cfg.Labels["local"] != "true" || cfg.Labels["agent.harness.harness"] != "true" {
 		t.Fatalf("Labels = %#v", cfg.Labels)
 	}
 	if cfg.Capacity.PersistentAgent != 1 || cfg.Capacity.Ephemeral != 2 {

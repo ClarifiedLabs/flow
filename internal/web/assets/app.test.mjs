@@ -138,7 +138,6 @@ test("console page offers shell harness and posts selected harness", async () =>
           json: () => Promise.resolve({
             agents: [{ name: "harness", display_name: "Harness" }],
             consoles: [
-              { name: "claude", display_name: "Claude" },
               { name: "harness", display_name: "Harness" },
               { name: "shell", display_name: "Shell" },
             ],
@@ -176,9 +175,7 @@ test("console page offers shell harness and posts selected harness", async () =>
   app.querySelectorAll = () => [];
 
   await app.renderConsole();
-  assert.match(content.innerHTML, /<option value="claude" selected>Claude<\/option>/);
-  assert.doesNotMatch(content.innerHTML, /<option value="codex">Codex<\/option>/);
-  assert.match(content.innerHTML, /<option value="harness">Harness<\/option>/);
+  assert.match(content.innerHTML, /<option value="harness" selected>Harness<\/option>/);
   assert.match(content.innerHTML, /<option value="shell">Shell<\/option>/);
 
   await app.startConsole("p-alpha", "shell");
@@ -577,7 +574,7 @@ test("diagnostics rows render queue, lease, tmux, session, and taints", async ()
     status: "registered",
     capacity_persistent_agent: 2,
     capacity_ephemeral: 1,
-    labels: { "agent.harness.codex": "true" },
+    labels: { "agent.harness.harness": "true" },
     taints: [{ key: "gpu", value: "false", effect: "NoSchedule" }],
     last_seen_at: "2026-06-07T12:00:00Z",
   }, {
@@ -590,7 +587,7 @@ test("diagnostics rows render queue, lease, tmux, session, and taints", async ()
   assert.match(workerHTML, /1 jobs/);
   assert.match(workerHTML, /expired 1/);
   assert.match(workerHTML, /held 1\/0/);
-  assert.match(workerHTML, /agent\.harness\.codex=true/);
+  assert.match(workerHTML, /agent\.harness\.harness=true/);
   assert.match(workerHTML, /gpu=false:NoSchedule/);
 
   const jobHTML = context.renderJobRow({
@@ -2107,9 +2104,9 @@ test("wait reason phase_approval maps to a human label", async () => {
 
 test("flows editor markup opts into shared form styling and accessible row controls", async () => {
   const context = await scriptContext();
-  const agentOptions = [{ name: "codex", display_name: "Codex", models: [] }];
+  const agentOptions = [{ name: "harness", display_name: "Harness", models: [] }];
 
-  const inheritedDef = { id: "ad-global", name: "shared", harness: "codex", prompt: "Shared prompt", inherited: true };
+  const inheritedDef = { id: "ad-global", name: "shared", harness: "harness", prompt: "Shared prompt", inherited: true };
   const inheritedReadHTML = context.renderAgentDefsSectionView([inheritedDef], agentOptions, { editingDefID: "" });
   assert.match(inheritedReadHTML, /Project Agent Definitions/);
   assert.match(inheritedReadHTML, /badge idle">inherited/);
@@ -2216,8 +2213,8 @@ test("agent definition table actions enter inline edit and create modes", async 
 test("parallel review editors render ordered structured rows without generic JSON", async () => {
   const context = await scriptContext();
   const agentDefs = [
-    { id: "ad-code", name: "Code review", harness: "codex", model: "gpt-code" },
-    { id: "ad-security", name: "Security review", harness: "claude", model: "opus" },
+    { id: "ad-code", name: "Code review", harness: "harness", model: "gpt-code" },
+    { id: "ad-security", name: "Security review", harness: "harness", model: "opus" },
   ];
   const html = context.renderNodeCardView({
     key: "review",
@@ -2235,7 +2232,7 @@ test("parallel review editors render ordered structured rows without generic JSO
 
   assert.equal((html.match(/data-review-agent-row(?:\s|>)/g) || []).length, 2);
   assert.ok(html.indexOf('value="ad-code" selected') < html.indexOf('value="ad-retired" selected'));
-  assert.match(html, /<option value="ad-code" selected>Code review — codex \/ gpt-code<\/option>/);
+  assert.match(html, /<option value="ad-code" selected>Code review — harness \/ gpt-code<\/option>/);
   assert.match(html, /<option value="ad-retired" selected>ad-retired \(unavailable\)<\/option>/);
   assert.equal((html.match(/name="review_agent_blocking" checked/g) || []).length, 1, "omitted blocking defaults to checked");
   assert.match(html, /Blocks approval/);
@@ -2517,16 +2514,16 @@ test("agent def form payload stores plain harness target id and effort strings",
   });
 });
 
-test("agent def form payload uses the bare model id for codex/claude harnesses", async () => {
+test("agent def form payload stores the bare model id when the catalog model has no target id", async () => {
   const context = await scriptContext();
   const agentOptions = [{
-    name: "claude",
-    display_name: "Claude",
+    name: "harness",
+    display_name: "Harness",
     models: [{ provider_id: "anthropic", model_id: "sonnet", qualified_id: "anthropic:sonnet", reasoning: false }],
   }];
   const form = fakeFieldForm({
     def_name: "Author",
-    def_harness: "claude",
+    def_harness: "harness",
     def_model: "anthropic:sonnet",
     def_reasoning_effort: "",
     def_prompt: "",
@@ -2534,7 +2531,7 @@ test("agent def form payload uses the bare model id for codex/claude harnesses",
 
   const payload = context.agentDefPayloadFromFormView(form, agentOptions);
 
-  assert.equal(payload.model, "sonnet");
+  assert.equal(payload.model, "anthropic:sonnet");
   assert.equal(payload.reasoning_effort, "");
 });
 
@@ -2680,7 +2677,7 @@ test("flows view renders agent definitions and flow tables for the active projec
   const harness = await browserSmokeHarness("/ui/flows", {
     "/ui/api/v2/projects": { projects: [{ id: "p-alpha", name: "alpha" }] },
     "/ui/api/v2/harnesses": { agents: [{ name: "harness", display_name: "Harness" }], consoles: [] },
-    "/ui/api/v2/global/agent-defs": { agent_defs: [{ id: "ad-global", name: "organization-reviewer", harness: "codex" }] },
+    "/ui/api/v2/global/agent-defs": { agent_defs: [{ id: "ad-global", name: "organization-reviewer", harness: "harness" }] },
     "/ui/api/v2/projects/p-alpha/agent-defs": {
       agent_defs: [{ id: "ad-1", name: "author", harness: "harness", model: "anthropic:opus", reasoning_effort: "high", builtin: true }],
     },

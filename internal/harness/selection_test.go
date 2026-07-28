@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestResolveAgentSelectionDefaultsToCodex(t *testing.T) {
+func TestResolveAgentSelectionDefaultsToHarness(t *testing.T) {
 	t.Parallel()
 	resolved, err := ResolveAgentSelection(AgentSelection{})
 	if err != nil {
@@ -15,22 +15,22 @@ func TestResolveAgentSelectionDefaultsToCodex(t *testing.T) {
 	if resolved != want {
 		t.Fatalf("resolved = %+v, want %+v", resolved, want)
 	}
-	if resolved.Harness != Codex {
-		t.Fatalf("resolved harness = %q, want %q", resolved.Harness, Codex)
+	if resolved.Harness != Harness {
+		t.Fatalf("resolved harness = %q, want %q", resolved.Harness, Harness)
 	}
 }
 
 func TestResolveAgentSelectionNormalizesAndTrims(t *testing.T) {
 	t.Parallel()
 	resolved, err := ResolveAgentSelection(AgentSelection{
-		Harness:         " Claude ",
-		Model:           " sonnet ",
+		Harness:         " Harness ",
+		Model:           " anthropic:claude-sonnet-4-6 ",
 		ReasoningEffort: " high ",
 	})
 	if err != nil {
 		t.Fatalf("resolve selection: %v", err)
 	}
-	want := AgentSelection{Harness: Claude, Model: "sonnet", ReasoningEffort: "high"}
+	want := AgentSelection{Harness: Harness, Model: "anthropic:claude-sonnet-4-6", ReasoningEffort: "high"}
 	if resolved != want {
 		t.Fatalf("resolved = %+v, want %+v", resolved, want)
 	}
@@ -71,7 +71,7 @@ func TestAgentSelectionModelArgs(t *testing.T) {
 
 	t.Run("model without harness applies to the default harness", func(t *testing.T) {
 		t.Parallel()
-		resolved, err := ResolveAgentSelection(AgentSelection{Model: "gpt-5", ReasoningEffort: "high"})
+		resolved, err := ResolveAgentSelection(AgentSelection{Model: "anthropic:claude-sonnet-4-6", ReasoningEffort: "high"})
 		if err != nil {
 			t.Fatalf("resolve: %v", err)
 		}
@@ -79,19 +79,7 @@ func TestAgentSelectionModelArgs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("model args: %v", err)
 		}
-		want := []string{"--model", "gpt-5", "-c", "model_reasoning_effort=high"}
-		if strings.Join(args, " ") != strings.Join(want, " ") {
-			t.Fatalf("model args = %#v, want %#v", args, want)
-		}
-	})
-
-	t.Run("claude effort serializes as --effort", func(t *testing.T) {
-		t.Parallel()
-		args, err := AgentSelection{Harness: Claude, Model: "sonnet", ReasoningEffort: "high"}.ModelArgs()
-		if err != nil {
-			t.Fatalf("model args: %v", err)
-		}
-		want := []string{"--model", "sonnet", "--effort", "high"}
+		want := []string{"--model", "anthropic:claude-sonnet-4-6", "--reasoning", "high"}
 		if strings.Join(args, " ") != strings.Join(want, " ") {
 			t.Fatalf("model args = %#v, want %#v", args, want)
 		}

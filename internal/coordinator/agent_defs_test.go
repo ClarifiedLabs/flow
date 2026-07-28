@@ -25,13 +25,13 @@ func TestProjectAgentDefsInheritGlobalsAndOverrideByName(t *testing.T) {
 
 	globals := NewGlobalAgentDefService(globalStore.DB())
 	globalAuthor, err := globals.Create(ctx, AgentDefInput{
-		Name: "shared-author", Harness: "codex", Model: "gpt-global", Prompt: "global prompt",
+		Name: "shared-author", Harness: "harness", Model: "gpt-global", Prompt: "global prompt",
 	})
 	if err != nil {
 		t.Fatalf("create global author: %v", err)
 	}
 	globalReviewer, err := globals.Create(ctx, AgentDefInput{
-		Name: "shared-reviewer", Harness: "claude", Prompt: "global review",
+		Name: "shared-reviewer", Harness: "harness", Prompt: "global review",
 	})
 	if err != nil {
 		t.Fatalf("create global reviewer: %v", err)
@@ -47,7 +47,7 @@ func TestProjectAgentDefsInheritGlobalsAndOverrideByName(t *testing.T) {
 	}
 
 	localAuthor, err := projectDefs.Create(ctx, AgentDefInput{
-		Name: "shared-author", Harness: "codex", Model: "gpt-project", Prompt: "project prompt",
+		Name: "shared-author", Harness: "harness", Model: "gpt-project", Prompt: "project prompt",
 	})
 	if err != nil {
 		t.Fatalf("create local override: %v", err)
@@ -66,7 +66,7 @@ func TestProjectAgentDefsInheritGlobalsAndOverrideByName(t *testing.T) {
 	if resolved.ID != localAuthor.ID || resolved.Model != "gpt-project" || resolved.Prompt != "project prompt" {
 		t.Fatalf("resolved global reference = %+v, want local override %+v", resolved, localAuthor)
 	}
-	if _, err := globals.Update(ctx, globalAuthor.ID, AgentDefInput{Name: "shared-author", Harness: "codex", Model: "gpt-new", Prompt: "updated global"}); err != nil {
+	if _, err := globals.Update(ctx, globalAuthor.ID, AgentDefInput{Name: "shared-author", Harness: "harness", Model: "gpt-new", Prompt: "updated global"}); err != nil {
 		t.Fatalf("update shadowed global author: %v", err)
 	}
 	stillLocal, err := projectDefs.GetByName(ctx, "shared-author")
@@ -75,7 +75,7 @@ func TestProjectAgentDefsInheritGlobalsAndOverrideByName(t *testing.T) {
 	}
 
 	forkedReviewer, err := projectDefs.Update(ctx, globalReviewer.ID, AgentDefInput{
-		Name: "shared-reviewer", Harness: "claude", Model: "sonnet", Prompt: "project review",
+		Name: "shared-reviewer", Harness: "harness", Model: "sonnet", Prompt: "project review",
 	})
 	if err != nil {
 		t.Fatalf("override inherited reviewer through update: %v", err)
@@ -83,7 +83,7 @@ func TestProjectAgentDefsInheritGlobalsAndOverrideByName(t *testing.T) {
 	if forkedReviewer.ID == globalReviewer.ID || forkedReviewer.Inherited || forkedReviewer.Prompt != "project review" {
 		t.Fatalf("forked reviewer = %+v, want a local override", forkedReviewer)
 	}
-	if _, err := projectDefs.Update(ctx, globalAuthor.ID, AgentDefInput{Name: "renamed", Harness: "codex"}); err == nil {
+	if _, err := projectDefs.Update(ctx, globalAuthor.ID, AgentDefInput{Name: "renamed", Harness: "harness"}); err == nil {
 		t.Fatal("renaming an inherited definition while overriding it should fail")
 	}
 	if err := projectDefs.Delete(ctx, globalAuthor.ID); !errors.Is(err, ErrAgentDefNotFound) {
@@ -106,7 +106,7 @@ func TestSeedDefaultsStampsConfiguredDefaultAgent(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = globalStore.Close() })
 
-	configured := flowharness.AgentSelection{Harness: flowharness.Claude, Model: "sonnet", ReasoningEffort: "high"}
+	configured := flowharness.AgentSelection{Harness: flowharness.Harness, Model: "anthropic:claude-sonnet-4-6", ReasoningEffort: "high"}
 	globals := NewGlobalAgentDefServiceWithOptions(globalStore.DB(), AgentDefServiceOptions{DefaultAgent: configured})
 	if err := globals.SeedDefaults(ctx); err != nil {
 		t.Fatalf("seed global defaults: %v", err)
@@ -119,8 +119,8 @@ func TestSeedDefaultsStampsConfiguredDefaultAgent(t *testing.T) {
 		t.Fatalf("global defaults = %d, want 5", len(defs))
 	}
 	for _, def := range defs {
-		if def.Harness != flowharness.Claude || def.Model != "sonnet" || def.ReasoningEffort != "high" {
-			t.Errorf("seeded %q = harness %q model %q effort %q, want claude/sonnet/high",
+		if def.Harness != flowharness.Harness || def.Model != "anthropic:claude-sonnet-4-6" || def.ReasoningEffort != "high" {
+			t.Errorf("seeded %q = harness %q model %q effort %q, want harness/anthropic:claude-sonnet-4-6/high",
 				def.Name, def.Harness, def.Model, def.ReasoningEffort)
 		}
 		if !def.Builtin {
@@ -131,7 +131,7 @@ func TestSeedDefaultsStampsConfiguredDefaultAgent(t *testing.T) {
 	// Re-seeding with a different configured default preserves the existing
 	// rows: the config shapes fresh seeds only, never rewrites operator state.
 	reseed := NewGlobalAgentDefServiceWithOptions(globalStore.DB(), AgentDefServiceOptions{
-		DefaultAgent: flowharness.AgentSelection{Harness: flowharness.Codex},
+		DefaultAgent: flowharness.AgentSelection{Harness: flowharness.Harness},
 	})
 	if err := reseed.SeedDefaults(ctx); err != nil {
 		t.Fatalf("re-seed global defaults: %v", err)
@@ -141,7 +141,7 @@ func TestSeedDefaultsStampsConfiguredDefaultAgent(t *testing.T) {
 		t.Fatalf("list preserved defaults: %v", err)
 	}
 	for i, def := range preserved {
-		if def.ID != defs[i].ID || def.Harness != flowharness.Claude || def.Model != "sonnet" {
+		if def.ID != defs[i].ID || def.Harness != flowharness.Harness || def.Model != "anthropic:claude-sonnet-4-6" {
 			t.Errorf("re-seeded %q = %+v, want preserved %+v", def.Name, def, defs[i])
 		}
 	}
@@ -161,7 +161,7 @@ func TestSeedDefaultsUsesMatchingGlobalAgentDefinition(t *testing.T) {
 	t.Cleanup(func() { _ = projectStore.Close() })
 
 	globals := NewGlobalAgentDefService(globalStore.DB())
-	globalAuthor, err := globals.Create(ctx, AgentDefInput{Name: "author", Harness: "claude", Model: "sonnet", Prompt: "shared author"})
+	globalAuthor, err := globals.Create(ctx, AgentDefInput{Name: "author", Harness: "harness", Model: "anthropic:claude-sonnet-4-6", Prompt: "shared author"})
 	if err != nil {
 		t.Fatalf("create global author: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestSeedDefaultsUsesMatchingGlobalAgentDefinition(t *testing.T) {
 		t.Fatalf("resolve coding snapshot: %v", err)
 	}
 	node, _ := snapshot.Node("implement")
-	if node.Config.Agent == nil || node.Config.Agent.Agent.Prompt != "shared author" || node.Config.Agent.Agent.Model != "sonnet" {
+	if node.Config.Agent == nil || node.Config.Agent.Agent.Prompt != "shared author" || node.Config.Agent.Agent.Model != "anthropic:claude-sonnet-4-6" {
 		t.Fatalf("seeded coding snapshot author = %+v, want global author", node.Config.Agent)
 	}
 }
@@ -227,7 +227,7 @@ func TestFlowResolvesProjectOverrideForGlobalAgentReference(t *testing.T) {
 	t.Cleanup(func() { _ = projectStore.Close() })
 
 	globals := NewGlobalAgentDefService(globalStore.DB())
-	global, err := globals.Create(ctx, AgentDefInput{Name: "shared", Harness: "codex", Prompt: "global"})
+	global, err := globals.Create(ctx, AgentDefInput{Name: "shared", Harness: "harness", Prompt: "global"})
 	if err != nil {
 		t.Fatalf("create global definition: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestFlowResolvesProjectOverrideForGlobalAgentReference(t *testing.T) {
 		t.Fatalf("create flow with global definition: %v", err)
 	}
 
-	if _, err := projectDefs.Create(ctx, AgentDefInput{Name: "shared", Harness: "claude", Model: "sonnet", Prompt: "project"}); err != nil {
+	if _, err := projectDefs.Create(ctx, AgentDefInput{Name: "shared", Harness: "harness", Model: "anthropic:claude-sonnet-4-6", Prompt: "project"}); err != nil {
 		t.Fatalf("create project override: %v", err)
 	}
 	snapshot, err := flows.ResolveSnapshot(ctx, flow.ID)
@@ -256,7 +256,7 @@ func TestFlowResolvesProjectOverrideForGlobalAgentReference(t *testing.T) {
 	if !ok || node.Config.Agent == nil {
 		t.Fatalf("implement snapshot node = %+v, ok=%v", node, ok)
 	}
-	if node.Config.Agent.Agent.Harness != "claude" || node.Config.Agent.Agent.Model != "sonnet" || node.Config.Agent.Agent.Prompt != "project" {
+	if node.Config.Agent.Agent.Harness != "harness" || node.Config.Agent.Agent.Model != "anthropic:claude-sonnet-4-6" || node.Config.Agent.Agent.Prompt != "project" {
 		t.Fatalf("snapshot agent = %+v, want project override", node.Config.Agent.Agent)
 	}
 }

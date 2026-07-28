@@ -85,12 +85,6 @@ ARG TTYD_VERSION=1.7.7
 ARG HARNESS_VERSION=v0.3.3
 ARG HARNESS_DEB_SHA256_AMD64=e7e3ba1aacd9a0186c1309b28641a4a7a2a828cffae921fabfc2f4c456823c69
 ARG HARNESS_DEB_SHA256_ARM64=a9966b05df988435625e8a7cf02e5a72ff35974d407dc2a67e4d2b13956538a0
-ARG CLAUDE_CODE_VERSION=2.1.220-1
-ARG CLAUDE_CODE_DEB_SHA256_AMD64=fd35c424d805b8f6630cd8644a8434e6825c42bec1bf1ddcf0f4878d5ba6de7c
-ARG CLAUDE_CODE_DEB_SHA256_ARM64=6164abf8499422f70f5cd0037e4429fc3bbbee23522f6590f69908ce632976c1
-ARG CODEX_VERSION=0.145.0
-ARG CODEX_PACKAGE_SHA256_AMD64=71a28d362c96ac9829bf8203a2c71be451aeb726adb843167fdaf0eae8fe7dd9
-ARG CODEX_PACKAGE_SHA256_ARM64=54f79a05aba6f9abf8ef988abcae8bf2fcefba20beb549b4ff2b3acdb2cb6f54
 
 ENV NVM_DIR=/usr/local/share/nvm \
     NODE_VERSION=${NODE_VERSION} \
@@ -196,7 +190,7 @@ RUN set -eux \
     fi \
     && jdk_home="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")" \
     && ln -sfn "$jdk_home" "$JAVA_HOME" \
-    && mkdir -p "$XDG_RUNTIME_DIR" /flow/work /home/flow/.local/share/flow /home/flow/.local/share/docker /run/flow-worker/codex \
+    && mkdir -p "$XDG_RUNTIME_DIR" /flow/work /home/flow/.local/share/flow /home/flow/.local/share/docker \
     && chmod 0700 "$XDG_RUNTIME_DIR" \
     && if ! grep -q '^flow:' /etc/subuid; then echo 'flow:100000:65536' >> /etc/subuid; fi \
     && if ! grep -q '^flow:' /etc/subgid; then echo 'flow:100000:65536' >> /etc/subgid; fi \
@@ -204,20 +198,12 @@ RUN set -eux \
         amd64) \
             ttyd_arch="x86_64"; \
             harness_deb_arch="amd64"; \
-            harness_deb_sha256="$HARNESS_DEB_SHA256_AMD64"; \
-            claude_deb_arch="amd64"; \
-            claude_deb_sha256="$CLAUDE_CODE_DEB_SHA256_AMD64"; \
-            codex_target="x86_64-unknown-linux-musl"; \
-            codex_package_sha256="$CODEX_PACKAGE_SHA256_AMD64" \
+            harness_deb_sha256="$HARNESS_DEB_SHA256_AMD64" \
             ;; \
         arm64) \
             ttyd_arch="aarch64"; \
             harness_deb_arch="arm64"; \
-            harness_deb_sha256="$HARNESS_DEB_SHA256_ARM64"; \
-            claude_deb_arch="arm64"; \
-            claude_deb_sha256="$CLAUDE_CODE_DEB_SHA256_ARM64"; \
-            codex_target="aarch64-unknown-linux-musl"; \
-            codex_package_sha256="$CODEX_PACKAGE_SHA256_ARM64" \
+            harness_deb_sha256="$HARNESS_DEB_SHA256_ARM64" \
             ;; \
         *) echo "unsupported TARGETARCH for worker image: $TARGETARCH" >&2; exit 1 ;; \
     esac \
@@ -229,22 +215,6 @@ RUN set -eux \
     && rm -f "$harness_deb" \
     && curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${ttyd_arch}" -o /usr/local/bin/ttyd \
     && chmod 0755 /usr/local/bin/ttyd \
-    && claude_deb="/tmp/claude-code_${CLAUDE_CODE_VERSION}_${claude_deb_arch}.deb" \
-    && curl -fsSL "https://downloads.claude.ai/claude-code/apt/latest/pool/main/c/claude-code/claude-code_${CLAUDE_CODE_VERSION}_${claude_deb_arch}.deb" -o "$claude_deb" \
-    && printf '%s  %s\n' "$claude_deb_sha256" "$claude_deb" | sha256sum -c - \
-    && apt-get install -y --no-install-recommends "$claude_deb" \
-    && rm -f "$claude_deb" \
-    && codex_archive="/tmp/codex-package-${codex_target}.tar.gz" \
-    && codex_release_dir="/usr/local/share/codex/packages/standalone/releases/${CODEX_VERSION}-${codex_target}" \
-    && curl -fsSL "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-package-${codex_target}.tar.gz" -o "$codex_archive" \
-    && printf '%s  %s\n' "$codex_package_sha256" "$codex_archive" | sha256sum -c - \
-    && mkdir -p "$codex_release_dir" /run/flow-worker/codex \
-    && tar -xzf "$codex_archive" -C "$codex_release_dir" \
-    && chmod 0755 "$codex_release_dir/bin/codex" "$codex_release_dir/codex-path/rg" \
-    && chmod 0755 "$codex_release_dir/codex-resources/bwrap" \
-    && ln -sfn "$codex_release_dir" /usr/local/share/codex/packages/standalone/current \
-    && ln -sfn /usr/local/share/codex/packages/standalone/current/bin/codex /usr/local/bin/codex \
-    && rm -f "$codex_archive" \
     && rm -f /tmp/adoptium.asc \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p "$NVM_DIR" \
@@ -281,8 +251,7 @@ RUN set -eux \
     && age --version \
     && gpg --version \
     && ssh -V \
-    && claude --version \
-    && codex --version
+    && harness --version
 
 COPY --chmod=0644 docker/flow-worker-profile.sh /etc/profile.d/flow-dev-tools.sh
 COPY --chmod=0755 docker/flow-worker-entrypoint.sh /usr/local/bin/flow-worker-entrypoint

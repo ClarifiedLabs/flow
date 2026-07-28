@@ -129,8 +129,8 @@ INSERT INTO workflow_artifacts (
 
 func barrierAgents(secondBlocking bool) []SnapshotReviewAgent {
 	return []SnapshotReviewAgent{
-		{Blocking: true, Agent: AgentDefSnapshot{Name: "code-review", Harness: "codex", Prompt: "Review correctness."}},
-		{Blocking: secondBlocking, Agent: AgentDefSnapshot{Name: "security-review", Harness: "claude", Prompt: "Review security."}},
+		{Blocking: true, Agent: AgentDefSnapshot{Name: "code-review", Harness: "harness", Prompt: "Review correctness."}},
+		{Blocking: secondBlocking, Agent: AgentDefSnapshot{Name: "security-review", Harness: "harness", Prompt: "Review security."}},
 	}
 }
 
@@ -218,7 +218,7 @@ func TestWorkflowExecutorMergeConflictReportsBlockedCheckForImplementor(t *testi
 			{Key: "implement", Name: "Implement", Kind: NodeAgent, Config: FlowNodeSnapshotConfig{Agent: &AgentNodeSnapshotConfig{
 				Workspace: WorkspaceChange,
 				Artifact:  ArtifactChange,
-				Agent:     AgentDefSnapshot{Name: "author", Harness: "codex", Prompt: "Implement the task."},
+				Agent:     AgentDefSnapshot{Name: "author", Harness: "harness", Prompt: "Implement the task."},
 			}}},
 		},
 		Edges: []FlowEdge{{From: "merge", Outcome: "conflict", To: "implement"}},
@@ -376,7 +376,7 @@ func TestWorkflowExecutorConcurrentChangeWorkspaceUsesOneChange(t *testing.T) {
 		Nodes: []FlowNodeSnapshot{{
 			Key: "implement", Name: "Implement", Kind: NodeAgent,
 			Config: FlowNodeSnapshotConfig{Agent: &AgentNodeSnapshotConfig{
-				Agent:     AgentDefSnapshot{Name: "author", Harness: "codex", Prompt: "Implement the task."},
+				Agent:     AgentDefSnapshot{Name: "author", Harness: "harness", Prompt: "Implement the task."},
 				Workspace: WorkspaceChange,
 				Artifact:  ArtifactChange,
 			}},

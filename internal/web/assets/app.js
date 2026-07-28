@@ -179,7 +179,7 @@ export class FlowApp extends HTMLElement {
       const start = event.target?.closest?.("[data-start-console]");
       if (start && this.contains(start)) {
         event.preventDefault();
-        const harness = this.querySelector("[data-console-harness]")?.value || "claude";
+        const harness = this.querySelector("[data-console-harness]")?.value || "harness";
         await this.startConsole(start.dataset.project || "", harness, start.dataset.task || "");
         return;
       }

@@ -9,22 +9,14 @@ func TestParseNativeHookSignalMappings(t *testing.T) {
 		payload string
 		want    string
 	}{
-		{name: "codex stop", harness: Codex, payload: `{"hook_event_name":"Stop"}`, want: StateWaiting},
-		{name: "codex permission", harness: Codex, payload: `{"hook_event_name":"PermissionRequest"}`, want: StateWaiting},
-		{name: "codex prompt", harness: Codex, payload: `{"hook_event_name":"UserPromptSubmit"}`, want: StateWorking},
-		{name: "codex post tool", harness: Codex, payload: `{"hook_event_name":"PostToolUse"}`, want: SignalActivity},
-		{name: "codex session start", harness: Codex, payload: `{"hook_event_name":"SessionStart"}`, want: StateWorking},
-		{name: "codex pre compact", harness: Codex, payload: `{"hook_event_name":"PreCompact"}`, want: SignalActivity},
-		{name: "codex post compact", harness: Codex, payload: `{"hook_event_name":"PostCompact"}`, want: SignalActivity},
-		{name: "claude idle notification", harness: Claude, payload: `{"hook_event_name":"Notification","notification_type":"idle_prompt"}`, want: StateWaiting},
-		{name: "claude permission notification", harness: Claude, payload: `{"hook_event_name":"Notification","notification_type":"permission_prompt"}`, want: StateWaiting},
-		{name: "claude auth notification", harness: Claude, payload: `{"hook_event_name":"Notification","notification_type":"auth_success"}`, want: SignalActivity},
-		{name: "claude prompt", harness: Claude, payload: `{"hook_event_name":"UserPromptSubmit"}`, want: StateWorking},
-		{name: "harness session start", harness: Harness, payload: `{"hook_event_name":"SessionStart"}`, want: StateWorking},
-		{name: "harness prompt", harness: Harness, payload: `{"hook_event_name":"UserPromptSubmit"}`, want: StateWorking},
-		{name: "harness stop", harness: Harness, payload: `{"hook_event_name":"Stop"}`, want: StateWaiting},
-		{name: "harness post tool", harness: Harness, payload: `{"hook_event_name":"PostToolUse"}`, want: SignalActivity},
-		{name: "unknown event", harness: Codex, payload: `{"hook_event_name":"UnknownEvent"}`, want: SignalActivity},
+		{name: "session start", harness: Harness, payload: `{"hook_event_name":"SessionStart"}`, want: StateWorking},
+		{name: "prompt", harness: Harness, payload: `{"hook_event_name":"UserPromptSubmit"}`, want: StateWorking},
+		{name: "pre tool", harness: Harness, payload: `{"hook_event_name":"PreToolUse"}`, want: StateWorking},
+		{name: "stop", harness: Harness, payload: `{"hook_event_name":"Stop"}`, want: StateWaiting},
+		{name: "post tool", harness: Harness, payload: `{"hook_event_name":"PostToolUse"}`, want: SignalActivity},
+		{name: "pre compact", harness: Harness, payload: `{"hook_event_name":"PreCompact"}`, want: SignalActivity},
+		{name: "post compact", harness: Harness, payload: `{"hook_event_name":"PostCompact"}`, want: SignalActivity},
+		{name: "unknown event", harness: Harness, payload: `{"hook_event_name":"UnknownEvent"}`, want: SignalActivity},
 	}
 
 	for _, tt := range tests {
@@ -64,7 +56,7 @@ func TestParseNativeHookEventNameFallbacks(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			input := NativeHookInput{
-				Harness:       Codex,
+				Harness:       Harness,
 				RawJSON:       []byte(tt.payload),
 				ExplicitEvent: tt.want,
 			}
@@ -83,7 +75,13 @@ func TestParseNativeHookEventNameFallbacks(t *testing.T) {
 }
 
 func TestParseNativeHookRejectsInvalidPayloadWithoutFallback(t *testing.T) {
-	if _, err := ParseNativeHook(NativeHookInput{Harness: Codex, RawJSON: []byte(`{`)}); err == nil {
+	if _, err := ParseNativeHook(NativeHookInput{Harness: Harness, RawJSON: []byte(`{`)}); err == nil {
 		t.Fatal("ParseNativeHook invalid JSON err = nil, want error")
+	}
+}
+
+func TestParseNativeHookRejectsUnsupportedHarness(t *testing.T) {
+	if _, err := ParseNativeHook(NativeHookInput{Harness: "bogus", RawJSON: []byte(`{"hook_event_name":"Stop"}`)}); err == nil {
+		t.Fatal("ParseNativeHook unsupported harness err = nil, want error")
 	}
 }

@@ -63,7 +63,7 @@ func harnessAuthorPayload(command string) JobPayload {
 func TestMaterializeImagesDownloadsEveryImageForAnyHarness(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	for _, harness := range []string{flowharness.Harness, flowharness.Claude, flowharness.Codex} {
+	for _, harness := range []string{flowharness.Harness, flowharness.Agents, flowharness.Shell} {
 		downloader := newFakeImageDownloader()
 		downloader.bodies["att-0001"] = "png-bytes"
 		downloader.bodies["att-0002"] = "gif-bytes"
@@ -143,14 +143,14 @@ exit "$code"`
 		}
 	})
 
-	t.Run("claude materializes files but keeps original argv", func(t *testing.T) {
+	t.Run("agents materializes files but keeps original argv", func(t *testing.T) {
 		t.Parallel()
 		downloader := newFakeImageDownloader()
 		downloader.bodies["att-0001"] = "png-bytes"
 		payload := harnessAuthorPayload(command)
-		payload.AgentHarness = flowharness.Claude
-		payload.Entrypoint.Harness = flowharness.Claude
-		payload.Entrypoint.Argv = []string{`claude --dangerously-skip-permissions -p "$prompt"`}
+		payload.AgentHarness = flowharness.Agents
+		payload.Entrypoint.Harness = flowharness.Agents
+		payload.Entrypoint.Argv = []string{`custom-agent run -p "$prompt"`}
 		payload.ImageAttachments = []coordinator.TaskImageAttachment{
 			{ID: "att-0001", Filename: "shot.png"},
 		}
@@ -160,14 +160,14 @@ exit "$code"`
 		}
 		got := payload.Entrypoint.Argv[0]
 		if strings.Contains(got, "--image") {
-			t.Fatalf("claude argv should not contain --image: %s", got)
+			t.Fatalf("agents argv should not contain --image: %s", got)
 		}
-		if got != `claude --dangerously-skip-permissions -p "$prompt"` {
-			t.Fatalf("claude argv changed unexpectedly: %s", got)
+		if got != `custom-agent run -p "$prompt"` {
+			t.Fatalf("agents argv changed unexpectedly: %s", got)
 		}
 		// File still materialized.
 		if _, err := os.Stat(filepath.Join(worktree, imageAttachmentsRelDir, "att-0001-shot.png")); err != nil {
-			t.Fatalf("claude did not materialize image: %v", err)
+			t.Fatalf("agents job did not materialize image: %v", err)
 		}
 	})
 }

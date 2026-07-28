@@ -40,9 +40,8 @@ For Docker Compose and container auth details, see
 
 ## Quickstart
 
-Prerequisites for local package installs are Git, tmux, ttyd, and at least one
-supported agent CLI on the worker `PATH` (Codex is the default; Claude Code and
-Harness are also supported through Flow configuration).
+Prerequisites for local package installs are Git, tmux, ttyd, and the
+`harness` agent CLI on the worker `PATH`.
 
 Start the coordinator:
 

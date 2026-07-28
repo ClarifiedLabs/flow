@@ -73,35 +73,26 @@ func TestHarnessOptionsUseLiveWorkerHarnessLabels(t *testing.T) {
 	server := newTestServer(t)
 
 	if _, err := server.registry.Directory().RegisterWorker(context.Background(), flowworker.RegisterWorkerInput{
-		ID: "w-codex",
+		ID: "w-harness",
 		Labels: map[string]string{
-			flowharness.AgentHarnessLabel(flowharness.Codex):   "true",
 			flowharness.AgentHarnessLabel(flowharness.Harness): "true",
 		},
 		CapacityPersistentAgent: 1,
 		HeartbeatTTL:            time.Minute,
 	}); err != nil {
-		t.Fatalf("register codex/harness worker: %v", err)
+		t.Fatalf("register harness worker: %v", err)
 	}
 
 	var response contract.HarnessesResponse
 	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v2/harnesses", nil, http.StatusOK, &response)
 
 	agents := harnessOptionNames(response.Agents)
-	if !agents[flowharness.Codex] || !agents[flowharness.Harness] {
-		t.Fatalf("agent harness options = %+v, want codex and harness", response.Agents)
-	}
-	if agents[flowharness.Claude] {
-		t.Fatalf("agent harness options = %+v, did not expect claude without binary", response.Agents)
+	if len(agents) != 1 || !agents[flowharness.Harness] {
+		t.Fatalf("agent harness options = %+v, want only harness", response.Agents)
 	}
 	consoles := harnessOptionNames(response.Consoles)
-	for _, want := range []string{flowharness.Codex, flowharness.Harness, flowharness.Shell} {
-		if !consoles[want] {
-			t.Fatalf("console harness options = %+v, missing %s", response.Consoles, want)
-		}
-	}
-	if consoles[flowharness.Claude] {
-		t.Fatalf("console harness options = %+v, did not expect claude without binary", response.Consoles)
+	if len(consoles) != 2 || !consoles[flowharness.Harness] || !consoles[flowharness.Shell] {
+		t.Fatalf("console harness options = %+v, want harness and shell", response.Consoles)
 	}
 }
 
@@ -189,17 +180,31 @@ func TestHarnessOptionsExcludeExpiredWorkers(t *testing.T) {
 	server := newTestServer(t)
 
 	ctx := context.Background()
+	liveModel := flowharness.Model{
+		ProviderID:  "anthropic",
+		ModelID:     "claude-opus-4-8",
+		QualifiedID: "anthropic:claude-opus-4-8",
+		Harness:     flowharness.Harness,
+	}
 	if _, err := server.registry.Directory().RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-claude",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Claude): "true"},
+		ID:                      "w-live-harness",
+		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		HarnessModels:           []flowharness.Model{liveModel},
 		CapacityPersistentAgent: 1,
 		HeartbeatTTL:            time.Minute,
 	}); err != nil {
-		t.Fatalf("register live claude worker: %v", err)
+		t.Fatalf("register live harness worker: %v", err)
+	}
+	expiredModel := flowharness.Model{
+		ProviderID:  "openai",
+		ModelID:     "gpt-5.5",
+		QualifiedID: "openai:gpt-5.5",
+		Harness:     flowharness.Harness,
 	}
 	if _, err := server.registry.Directory().RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                      "w-expired-harness",
 		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		HarnessModels:           []flowharness.Model{expiredModel},
 		CapacityPersistentAgent: 1,
 		HeartbeatTTL:            time.Minute,
 	}); err != nil {
@@ -213,12 +218,20 @@ func TestHarnessOptionsExcludeExpiredWorkers(t *testing.T) {
 	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v2/harnesses", nil, http.StatusOK, &response)
 
 	agents := harnessOptionNames(response.Agents)
-	if agents[flowharness.Codex] || !agents[flowharness.Claude] || agents[flowharness.Harness] {
-		t.Fatalf("agent harness options = %+v, want only claude", response.Agents)
+	if len(agents) != 1 || !agents[flowharness.Harness] {
+		t.Fatalf("agent harness options = %+v, want only harness", response.Agents)
 	}
 	consoles := harnessOptionNames(response.Consoles)
-	if consoles[flowharness.Codex] || !consoles[flowharness.Claude] || consoles[flowharness.Harness] || !consoles[flowharness.Shell] {
-		t.Fatalf("console harness options = %+v, want claude and shell", response.Consoles)
+	if len(consoles) != 2 || !consoles[flowharness.Harness] || !consoles[flowharness.Shell] {
+		t.Fatalf("console harness options = %+v, want harness and shell", response.Consoles)
+	}
+	for _, option := range response.Agents {
+		if option.Name != flowharness.Harness {
+			continue
+		}
+		if len(option.Models) != 1 || option.Models[0].QualifiedID != liveModel.QualifiedID {
+			t.Fatalf("harness models = %+v, want only the live worker's %s", option.Models, liveModel.QualifiedID)
+		}
 	}
 }
 
@@ -234,7 +247,7 @@ func TestHarnessOptionsIncludeDefaultArgs(t *testing.T) {
 		DataDir: dataDir,
 		Global:  global,
 		HarnessArgs: flowharness.Args{
-			Codex: []string{"--model", "gpt-5"},
+			Harness: []string{"--model", "gpt-5"},
 		},
 	})
 	if err != nil {
@@ -253,24 +266,24 @@ func TestHarnessOptionsIncludeDefaultArgs(t *testing.T) {
 	}
 
 	if _, err := registry.Directory().RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-codex",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
+		ID:                      "w-harness",
+		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		CapacityPersistentAgent: 1,
 		HeartbeatTTL:            time.Minute,
 	}); err != nil {
-		t.Fatalf("register codex worker: %v", err)
+		t.Fatalf("register harness worker: %v", err)
 	}
 
 	var response contract.HarnessesResponse
 	doJSONRequestAs(t, server, "owner-token", http.MethodGet, "/v2/harnesses", nil, http.StatusOK, &response)
-	var codexDefaults []string
+	var harnessDefaults []string
 	for _, option := range response.Agents {
-		if option.Name == flowharness.Codex {
-			codexDefaults = option.DefaultArgs
+		if option.Name == flowharness.Harness {
+			harnessDefaults = option.DefaultArgs
 		}
 	}
-	if len(codexDefaults) != 2 || codexDefaults[0] != "--model" || codexDefaults[1] != "gpt-5" {
-		t.Fatalf("codex default args = %#v", codexDefaults)
+	if len(harnessDefaults) != 2 || harnessDefaults[0] != "--model" || harnessDefaults[1] != "gpt-5" {
+		t.Fatalf("harness default args = %#v", harnessDefaults)
 	}
 }
 
@@ -282,7 +295,7 @@ func TestRegistrySeedsGlobalDefsWithConfiguredDefaultAgent(t *testing.T) {
 		t.Fatalf("open global db: %v", err)
 	}
 	t.Cleanup(func() { _ = global.Close() })
-	configured := flowharness.AgentSelection{Harness: flowharness.Claude, Model: "sonnet", ReasoningEffort: "high"}
+	configured := flowharness.AgentSelection{Harness: flowharness.Harness, Model: "sonnet", ReasoningEffort: "high"}
 	registry, err := NewRegistry(RegistryOptions{DataDir: dataDir, Global: global, DefaultAgent: configured})
 	if err != nil {
 		t.Fatalf("new registry: %v", err)
@@ -300,8 +313,8 @@ func TestRegistrySeedsGlobalDefsWithConfiguredDefaultAgent(t *testing.T) {
 		t.Fatalf("global default agent definitions = %d, want 5", len(defs))
 	}
 	for _, def := range defs {
-		if def.Harness != flowharness.Claude || def.Model != "sonnet" || def.ReasoningEffort != "high" {
-			t.Errorf("seeded %q = harness %q model %q effort %q, want claude/sonnet/high",
+		if def.Harness != flowharness.Harness || def.Model != "sonnet" || def.ReasoningEffort != "high" {
+			t.Errorf("seeded %q = harness %q model %q effort %q, want harness/sonnet/high",
 				def.Name, def.Harness, def.Model, def.ReasoningEffort)
 		}
 	}
@@ -323,18 +336,18 @@ func TestNewRegistryRejectsInvalidDefaultAgent(t *testing.T) {
 func TestSessionHarnessForJobFallsBackToConfiguredDefault(t *testing.T) {
 	changeID := "ch-test-0001"
 	legacy := flowworker.Job{Role: flowworker.RoleAuthor, ChangeID: &changeID, Payload: map[string]any{}}
-	if got := sessionHarnessForJob(legacy, flowharness.Claude); got != flowharness.Claude {
-		t.Fatalf("sessionHarnessForJob legacy payload = %q, want claude", got)
+	if got := sessionHarnessForJob(legacy, flowharness.Agents); got != flowharness.Agents {
+		t.Fatalf("sessionHarnessForJob legacy payload = %q, want %q", got, flowharness.Agents)
 	}
 	if got := sessionHarnessForJob(legacy, ""); got != flowharness.DefaultAgentName() {
 		t.Fatalf("sessionHarnessForJob empty default = %q, want %q", got, flowharness.DefaultAgentName())
 	}
-	stamped := flowworker.Job{Role: flowworker.RoleAuthor, ChangeID: &changeID, Payload: map[string]any{"agent_harness": "codex"}}
-	if got := sessionHarnessForJob(stamped, flowharness.Claude); got != flowharness.Codex {
-		t.Fatalf("sessionHarnessForJob stamped payload = %q, want codex", got)
+	stamped := flowworker.Job{Role: flowworker.RoleAuthor, ChangeID: &changeID, Payload: map[string]any{"agent_harness": "harness"}}
+	if got := sessionHarnessForJob(stamped, flowharness.Agents); got != flowharness.Harness {
+		t.Fatalf("sessionHarnessForJob stamped payload = %q, want harness", got)
 	}
 	console := flowworker.Job{Role: flowworker.RoleConsole, Payload: map[string]any{}}
-	if got := sessionHarnessForJob(console, flowharness.Claude); got != flowharness.DefaultConsoleName() {
+	if got := sessionHarnessForJob(console, flowharness.Agents); got != flowharness.DefaultConsoleName() {
 		t.Fatalf("sessionHarnessForJob console = %q, want %q", got, flowharness.DefaultConsoleName())
 	}
 }
@@ -583,7 +596,7 @@ func TestProjectFlowMutationWaitsForGlobalAgentDefDelete(t *testing.T) {
 	ctx := context.Background()
 	fixture := newTestFixture(t)
 	custom, err := fixture.Registry.GlobalAgentDefs().Create(ctx, coordinator.AgentDefInput{
-		Name: "concurrent-delete", Harness: "codex", Prompt: "custom global definition",
+		Name: "concurrent-delete", Harness: "harness", Prompt: "custom global definition",
 	})
 	if err != nil {
 		t.Fatalf("create global agent definition: %v", err)
@@ -668,7 +681,7 @@ func TestGlobalAgentDefsAreInheritedAndProjectOverridesWin(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
-	input := coordinator.AgentDefInput{Name: "organization-reviewer", Harness: "codex", Model: "gpt-global", Prompt: "global prompt"}
+	input := coordinator.AgentDefInput{Name: "organization-reviewer", Harness: "harness", Model: "gpt-global", Prompt: "global prompt"}
 	var created agentDefResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/global/agent-defs", input, http.StatusCreated, &created)
 	if created.AgentDef.Inherited {
@@ -682,7 +695,7 @@ func TestGlobalAgentDefsAreInheritedAndProjectOverridesWin(t *testing.T) {
 		t.Fatalf("project agent definitions = %+v, want inherited global definition", projectList.AgentDefs)
 	}
 
-	overrideInput := coordinator.AgentDefInput{Name: input.Name, Harness: "claude", Model: "sonnet", Prompt: "project prompt"}
+	overrideInput := coordinator.AgentDefInput{Name: input.Name, Harness: "harness", Model: "sonnet", Prompt: "project prompt"}
 	var override agentDefResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPatch, "/v2/projects/"+fixture.Project.ID+"/agent-defs/"+created.AgentDef.ID, overrideInput, http.StatusOK, &override)
 	if override.AgentDef.ID == created.AgentDef.ID || override.AgentDef.Inherited || override.AgentDef.Prompt != "project prompt" {
@@ -1910,7 +1923,7 @@ func TestWorkerHTTPLifecycleAndJobDiagnostics(t *testing.T) {
 
 	var registered workerResponse
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
+		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		CapacityPersistentAgent: 1,
 		HeartbeatTTLSeconds:     60,
 	}, http.StatusOK, &registered)
@@ -2065,7 +2078,7 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 
 	var startedConsole consoleResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/console", consoleRequest{
-		Harness: "codex",
+		Harness: "harness",
 	}, http.StatusCreated, &startedConsole)
 	if !startedConsole.Active || startedConsole.Job == nil || startedConsole.Job.Role != flowworker.RoleConsole {
 		t.Fatalf("started console response = %+v", startedConsole)
@@ -2075,7 +2088,7 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 	}
 
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
+		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		CapacityPersistentAgent: 1,
 		HeartbeatTTLSeconds:     60,
 	}, http.StatusOK, nil)
@@ -2262,7 +2275,7 @@ func TestConsoleAPIStartsShellHarness(t *testing.T) {
 	}
 
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
+		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		CapacityPersistentAgent: 1,
 		HeartbeatTTLSeconds:     60,
 	}, http.StatusOK, nil)
@@ -2327,7 +2340,7 @@ func TestDiagnosticsDistinguishExpiredUnreleasedLeases(t *testing.T) {
 	}, http.StatusCreated, &enqueue)
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                      "w-local",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
+		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		CapacityPersistentAgent: 1,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
@@ -2430,7 +2443,7 @@ func startRunningAuthorSession(t *testing.T, fixture testFixture, taskID string)
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                      "w-local",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
+		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		CapacityPersistentAgent: 1,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
@@ -3520,7 +3533,7 @@ func startAuthorSessionForStatusTestWithWorker(t *testing.T, fixture testFixture
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                      workerID,
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
+		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		CapacityPersistentAgent: 1,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
@@ -3579,7 +3592,7 @@ func startLiveWorkerJobForTask(t *testing.T, fixture testFixture, token string, 
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                      workerID,
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true", "worker_id": workerID},
+		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true", "worker_id": workerID},
 		CapacityPersistentAgent: 1,
 	}); err != nil {
 		t.Fatalf("register worker %s: %v", workerID, err)
@@ -3637,17 +3650,17 @@ entrypoint:
 name: reviewer
 kind: reviewer
 entrypoint:
-  argv: ['codex exec -c "projects.$PWD.trust_level=trusted" "$(flow fetch-prompt)"']
+  argv: ['harness -p "$(flow fetch-prompt --harness harness)"']
   shell: true
-requires: ["agent.harness.codex"]
+requires: ["agent.harness.harness"]
 `)
 	writeAPIFile(t, repoPath, ".flow/checks/verifier.yaml", `
 name: verifier
 kind: verifier
 entrypoint:
-  argv: ['codex exec -c "projects.$PWD.trust_level=trusted" "$(flow fetch-prompt)"']
+  argv: ['harness -p "$(flow fetch-prompt --harness harness)"']
   shell: true
-requires: ["agent.harness.codex"]
+requires: ["agent.harness.harness"]
 `)
 	runAPIGit(t, repoPath, "add", ".flow/checks")
 	runAPIGit(t, repoPath, "commit", "-m", "add checks")
@@ -3719,7 +3732,7 @@ func startLiveCheckJobForTask(t *testing.T, fixture testFixture, token string, w
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                      workerID,
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true", "worker_id": workerID},
+		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true", "worker_id": workerID},
 		CapacityPersistentAgent: 1,
 		CapacityEphemeral:       1,
 	}); err != nil {
@@ -4573,14 +4586,14 @@ func TestSessionProcessExitRejectsConsoleSession(t *testing.T) {
 
 	var startedConsole consoleResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/console", consoleRequest{
-		Harness: "codex",
+		Harness: "harness",
 	}, http.StatusCreated, &startedConsole)
 	if startedConsole.Job == nil {
 		t.Fatalf("started console response = %+v", startedConsole)
 	}
 
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Codex): "true"},
+		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		CapacityPersistentAgent: 1,
 		HeartbeatTTLSeconds:     60,
 	}, http.StatusOK, nil)
@@ -4636,12 +4649,8 @@ func TestWorkflowRetryAPIRefreshesCurrentAuthorRuntime(t *testing.T) {
 		t.Fatalf("current author node = %+v, found=%t", authorNode, ok)
 	}
 	frozen := authorNode.Config.Agent.Agent
-	newHarness := flowharness.Claude
-	if frozen.Harness == newHarness {
-		newHarness = flowharness.Codex
-	}
 	override, err := fixture.Bundle.AgentDefs.Update(ctx, frozen.ID, coordinator.AgentDefInput{
-		Name: frozen.Name, Harness: newHarness, Model: "api-refreshed-model", ReasoningEffort: "high",
+		Name: frozen.Name, Harness: flowharness.Harness, Model: "api-refreshed-model", ReasoningEffort: "high",
 		Prompt: "Updated live prompt must remain outside the frozen workflow.",
 	})
 	if err != nil {
@@ -4811,7 +4820,7 @@ func TestWorkflowFailedStepCanBeSkippedByOwner(t *testing.T) {
 		t.Fatalf("store skip reviewer token: %v", err)
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID: "w-skip-reviewer", Labels: map[string]string{"agent.harness.codex": "true"}, CapacityPersistentAgent: 1,
+		ID: "w-skip-reviewer", Labels: map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"}, CapacityPersistentAgent: 1,
 	}); err != nil {
 		t.Fatalf("register skip reviewer: %v", err)
 	}

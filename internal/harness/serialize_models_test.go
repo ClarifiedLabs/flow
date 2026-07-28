@@ -17,17 +17,14 @@ func TestSerializeModelSelection(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{name: "claude model and effort", harness: "claude", model: "claude-opus-4-8", effort: "xhigh", want: []string{"--model", "claude-opus-4-8", "--effort", "xhigh"}},
-		{name: "claude model only", harness: "claude", model: "claude-haiku-4-5", want: []string{"--model", "claude-haiku-4-5"}},
-		{name: "claude effort only", harness: "claude", effort: "max", want: []string{"--effort", "max"}},
-		{name: "codex model and effort", harness: "codex", model: "gpt-5.5", effort: "high", want: []string{"--model", "gpt-5.5", "-c", "model_reasoning_effort=high"}},
-		{name: "codex effort only", harness: "codex", effort: "low", want: []string{"-c", "model_reasoning_effort=low"}},
 		{name: "harness model and reasoning", harness: "harness", model: "anthropic:claude-opus-4-8", effort: "high", want: []string{"--model", "anthropic:claude-opus-4-8", "--reasoning", "high"}},
-		{name: "empty selection", harness: "claude", want: nil},
-		{name: "whitespace trimmed", harness: "claude", model: " claude-opus-4-8 ", effort: " high ", want: []string{"--model", "claude-opus-4-8", "--effort", "high"}},
+		{name: "harness model only", harness: "harness", model: "anthropic:claude-haiku-4-5", want: []string{"--model", "anthropic:claude-haiku-4-5"}},
+		{name: "harness reasoning only", harness: "harness", effort: "max", want: []string{"--reasoning", "max"}},
+		{name: "empty selection", harness: "harness", want: nil},
+		{name: "whitespace trimmed", harness: "harness", model: " anthropic:claude-opus-4-8 ", effort: " high ", want: []string{"--model", "anthropic:claude-opus-4-8", "--reasoning", "high"}},
 		{name: "unknown harness", harness: "shell", model: "x", wantErr: true},
-		{name: "model with whitespace", harness: "claude", model: "opus 4.8", wantErr: true},
-		{name: "effort with whitespace", harness: "claude", effort: "very high", wantErr: true},
+		{name: "model with whitespace", harness: "harness", model: "opus 4.8", wantErr: true},
+		{name: "effort with whitespace", harness: "harness", effort: "very high", wantErr: true},
 	}
 
 	for _, tc := range cases {

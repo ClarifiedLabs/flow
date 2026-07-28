@@ -7,18 +7,16 @@ import (
 	"testing"
 )
 
-func TestStateForHookMapsCodexAndClaudeEvents(t *testing.T) {
+func TestStateForHookMapsHarnessEvents(t *testing.T) {
 	tests := []struct {
 		tool  string
 		event string
 		want  string
 	}{
-		{tool: "codex", event: "stop", want: StateWaiting},
-		{tool: "codex", event: "resume", want: StateWorking},
-		{tool: "claude", event: "notification", want: StateWaiting},
-		{tool: "claude", event: "start", want: StateWorking},
 		{tool: "harness", event: "stop", want: StateWaiting},
+		{tool: "harness", event: "idle", want: StateWaiting},
 		{tool: "harness", event: "start", want: StateWorking},
+		{tool: "harness", event: "resume", want: StateWorking},
 	}
 	for _, test := range tests {
 		got, err := StateForHook(test.tool, test.event)
@@ -35,60 +33,38 @@ func TestStateForHookRejectsUnknownInputs(t *testing.T) {
 	if _, err := StateForHook("opencode", "stop"); err == nil {
 		t.Fatal("unknown tool was accepted")
 	}
-	if _, err := StateForHook("codex", "mystery"); err == nil {
+	if _, err := StateForHook("harness", "mystery"); err == nil {
 		t.Fatal("unknown event was accepted")
 	}
 }
 
-func TestDefaultAuthorEntrypointUsesSelectedHarness(t *testing.T) {
-	codex, err := DefaultAuthorEntrypoint(Codex)
-	if err != nil {
-		t.Fatalf("codex default entrypoint: %v", err)
-	}
-	codexArgv := codex["argv"].([]string)
-	if len(codexArgv) != 1 || !contains(codexArgv[0], "codex -c") || !contains(codexArgv[0], "--harness codex") {
-		t.Fatalf("codex argv = %#v", codex["argv"])
-	}
-
-	claude, err := DefaultAuthorEntrypoint(Claude)
-	if err != nil {
-		t.Fatalf("claude default entrypoint: %v", err)
-	}
-	claudeArgv := claude["argv"].([]string)
-	if len(claudeArgv) != 1 || !contains(claudeArgv[0], `claude --dangerously-skip-permissions --permission-mode bypassPermissions "$prompt"`) || !contains(claudeArgv[0], "--harness claude") {
-		t.Fatalf("claude argv = %#v", claude["argv"])
-	}
-
-	harness, err := DefaultAuthorEntrypoint(Harness)
+func TestDefaultAuthorEntrypointUsesHarness(t *testing.T) {
+	entrypoint, err := DefaultAuthorEntrypoint(Harness)
 	if err != nil {
 		t.Fatalf("harness default entrypoint: %v", err)
 	}
-	harnessArgv := harness["argv"].([]string)
-	if len(harnessArgv) != 1 || !contains(harnessArgv[0], `harness --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`) || !contains(harnessArgv[0], "--harness harness") {
-		t.Fatalf("harness argv = %#v", harness["argv"])
+	argv := entrypoint["argv"].([]string)
+	if len(argv) != 1 || !contains(argv[0], `harness --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`) || !contains(argv[0], "--harness harness") {
+		t.Fatalf("harness argv = %#v", entrypoint["argv"])
+	}
+	if entrypoint["harness"] != Harness {
+		t.Fatalf("author harness = %#v, want %q", entrypoint["harness"], Harness)
 	}
 }
 
-func TestDefaultConsoleEntrypointUsesSelectedHarnessWithoutPrompt(t *testing.T) {
-	codex, err := DefaultConsoleEntrypointWithArgs(Codex, Args{})
+func TestDefaultConsoleEntrypointsWithoutPrompt(t *testing.T) {
+	harnessEntrypoint, err := DefaultConsoleEntrypointWithArgs(Harness, Args{})
 	if err != nil {
-		t.Fatalf("codex default console entrypoint: %v", err)
+		t.Fatalf("harness default console entrypoint: %v", err)
 	}
-	codexArgv := codex["argv"].([]string)
-	if len(codexArgv) != 1 || !contains(codexArgv[0], "codex -c") || !contains(codexArgv[0], `-c "projects.$PWD.trust_level=trusted"`) {
-		t.Fatalf("codex console argv = %#v", codex["argv"])
+	harnessArgv := harnessEntrypoint["argv"].([]string)
+	if len(harnessArgv) != 1 || !contains(harnessArgv[0], `harness --hooks "$FLOW_HARNESS_HOOKS"`) {
+		t.Fatalf("harness console argv = %#v", harnessEntrypoint["argv"])
 	}
-	assertNoConsolePrompt(t, codexArgv[0])
-
-	claude, err := DefaultConsoleEntrypointWithArgs(Claude, Args{})
-	if err != nil {
-		t.Fatalf("claude default console entrypoint: %v", err)
+	assertNoConsolePrompt(t, harnessArgv[0])
+	if harnessEntrypoint["harness"] != Harness {
+		t.Fatalf("console harness = %#v, want %q", harnessEntrypoint["harness"], Harness)
 	}
-	claudeArgv := claude["argv"].([]string)
-	if len(claudeArgv) != 1 || !contains(claudeArgv[0], `claude --settings "$FLOW_CLAUDE_HOOK_SETTINGS" --dangerously-skip-permissions --permission-mode bypassPermissions`) {
-		t.Fatalf("claude console argv = %#v", claude["argv"])
-	}
-	assertNoConsolePrompt(t, claudeArgv[0])
 
 	shell, err := DefaultConsoleEntrypointWithArgs(Shell, Args{})
 	if err != nil {
@@ -99,78 +75,51 @@ func TestDefaultConsoleEntrypointUsesSelectedHarnessWithoutPrompt(t *testing.T) 
 		t.Fatalf("shell console argv = %#v", shell["argv"])
 	}
 	assertNoConsolePrompt(t, shellArgv[0])
-
-	harness, err := DefaultConsoleEntrypointWithArgs(Harness, Args{})
-	if err != nil {
-		t.Fatalf("harness default console entrypoint: %v", err)
+	if shell["harness"] != Shell {
+		t.Fatalf("shell console harness = %#v, want %q", shell["harness"], Shell)
 	}
-	harnessArgv := harness["argv"].([]string)
-	if len(harnessArgv) != 1 || !contains(harnessArgv[0], `harness --hooks "$FLOW_HARNESS_HOOKS"`) {
-		t.Fatalf("harness console argv = %#v", harness["argv"])
-	}
-	assertNoConsolePrompt(t, harnessArgv[0])
 }
 
 func TestDefaultEntrypointsAppendHarnessArgs(t *testing.T) {
-	author, err := DefaultAuthorEntrypointWithArgs(Codex, Args{
-		Codex: []string{"--model", "gpt-5", "-c", "model_reasoning_effort=high"},
-	})
-	if err != nil {
-		t.Fatalf("codex author entrypoint with args: %v", err)
-	}
-	authorCommand := author["argv"].([]string)[0]
-	for _, want := range []string{
-		`--dangerously-bypass-hook-trust -c "projects.$PWD.trust_level=trusted" '--model' 'gpt-5' -c 'model_reasoning_effort=high' "$prompt"`,
-		"flow hook codex ingest",
-	} {
-		if !strings.Contains(authorCommand, want) {
-			t.Fatalf("codex author command missing %q:\n%s", want, authorCommand)
-		}
-	}
-
-	console, err := DefaultConsoleEntrypointWithArgs(Claude, Args{
-		Claude: []string{"--model", "sonnet"},
-	})
-	if err != nil {
-		t.Fatalf("claude console entrypoint with args: %v", err)
-	}
-	consoleCommand := console["argv"].([]string)[0]
-	if !strings.Contains(consoleCommand, `--permission-mode bypassPermissions '--model' 'sonnet'`) {
-		t.Fatalf("claude console command did not append args:\n%s", consoleCommand)
-	}
-	assertNoConsolePrompt(t, consoleCommand)
-
-	harnessAuthor, err := DefaultAuthorEntrypointWithArgs(Harness, Args{
+	author, err := DefaultAuthorEntrypointWithArgs(Harness, Args{
 		Harness: []string{"--provider anthropic --model claude-sonnet-4-6"},
 	})
 	if err != nil {
 		t.Fatalf("harness author entrypoint with shell-style args: %v", err)
 	}
-	harnessCommand := harnessAuthor["argv"].([]string)[0]
-	if !strings.Contains(harnessCommand, `'--provider' 'anthropic' '--model' 'claude-sonnet-4-6' -i "$prompt"`) {
-		t.Fatalf("harness author command did not split shell-style args:\n%s", harnessCommand)
+	authorCommand := author["argv"].([]string)[0]
+	if !strings.Contains(authorCommand, `'--provider' 'anthropic' '--model' 'claude-sonnet-4-6' -i "$prompt"`) {
+		t.Fatalf("harness author command did not split shell-style args:\n%s", authorCommand)
 	}
+
+	console, err := DefaultConsoleEntrypointWithArgs(Harness, Args{
+		Harness: []string{"--model", "anthropic:claude-sonnet-4-6"},
+	})
+	if err != nil {
+		t.Fatalf("harness console entrypoint with args: %v", err)
+	}
+	consoleCommand := console["argv"].([]string)[0]
+	if !strings.Contains(consoleCommand, `harness --hooks "$FLOW_HARNESS_HOOKS" '--model' 'anthropic:claude-sonnet-4-6'`) {
+		t.Fatalf("harness console command did not append args:\n%s", consoleCommand)
+	}
+	assertNoConsolePrompt(t, consoleCommand)
 }
 
 func TestNormalizeArgsRejectsManagedFlags(t *testing.T) {
 	tests := []Args{
-		{Codex: []string{"--dangerously-bypass-hook-trust"}},
-		{Codex: []string{"-c", "hooks.Stop=[]"}},
-		{Codex: []string{"--config=projects.$PWD.trust_level=trusted"}},
-		{Codex: []string{"--profile", "flow"}},
-		{Codex: []string{"-p", "flow"}},
-		{Claude: []string{"--settings", "/tmp/settings.json"}},
-		{Claude: []string{"--permission-mode=bypassPermissions"}},
+		{Harness: []string{"--hooks", "/tmp/hooks.json"}},
 		{Harness: []string{"--hooks=/tmp/hooks.json"}},
 		{Harness: []string{"-p", "prompt"}},
+		{Harness: []string{"--prompt", "prompt"}},
 		{Harness: []string{"-i", "prompt"}},
+		{Harness: []string{"--initial-prompt", "prompt"}},
 	}
 	for _, test := range tests {
 		if _, err := NormalizeArgs(test); err == nil {
 			t.Fatalf("NormalizeArgs(%+v) succeeded, want error", test)
 		}
 	}
-	if _, err := NormalizeArgs(Args{Codex: []string{"-c", "model=gpt-5"}, Claude: []string{"--model", "sonnet"}, Harness: []string{"--profile", "review"}}); err != nil {
+	if _, err := NormalizeArgs(Args{Harness: []string{"--profile", "review", "--model", "anthropic:claude-sonnet-4-6"}}); err != nil {
 		t.Fatalf("NormalizeArgs accepted safe flags with error: %v", err)
 	}
 }
@@ -211,23 +160,19 @@ func TestAvailableDefinitionsRequireExecutablesOnPath(t *testing.T) {
 	if len(consoles) != 1 || consoles[0].Name != Shell {
 		t.Fatalf("available console definitions with empty PATH = %+v, want shell only", consoles)
 	}
-	if err := ValidateAgentName(Codex); err != nil {
-		t.Fatalf("ValidateAgentName(%q) should not require executable: %v", Codex, err)
+	if err := ValidateAgentName(Harness); err != nil {
+		t.Fatalf("ValidateAgentName(%q) should not require executable: %v", Harness, err)
 	}
 
 	toolDir := t.TempDir()
-	for _, name := range []string{Codex, Claude, Harness} {
-		writeFakeExecutable(t, filepath.Join(toolDir, name))
-	}
+	writeFakeExecutable(t, filepath.Join(toolDir, Harness))
 	t.Setenv("PATH", toolDir)
 	agentNames := definitionNames(AvailableAgentDefinitions())
-	for _, want := range []string{Claude, Codex, Harness} {
-		if !agentNames[want] {
-			t.Fatalf("available agents = %v, missing %q", agentNames, want)
-		}
+	if !agentNames[Harness] {
+		t.Fatalf("available agents = %v, missing %q", agentNames, Harness)
 	}
 	consoleNames := definitionNames(ConsoleDefinitionsFromAvailableAgents(AvailableAgentDefinitions()))
-	for _, want := range []string{Claude, Codex, Harness, Shell} {
+	for _, want := range []string{Harness, Shell} {
 		if !consoleNames[want] {
 			t.Fatalf("available consoles = %v, missing %q", consoleNames, want)
 		}
@@ -239,20 +184,6 @@ func TestAvailableDefinitionsRunUsabilityChecks(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "checks.log")
 	t.Setenv("FLOW_FAKE_HARNESS_CHECK_LOG", logPath)
 
-	writeFakeExecutableScript(t, filepath.Join(toolDir, Codex), `#!/bin/sh
-printf 'codex %s\n' "$*" >> "$FLOW_FAKE_HARNESS_CHECK_LOG"
-if [ "$*" = "login status" ]; then
-  exit 1
-fi
-exit 0
-`)
-	writeFakeExecutableScript(t, filepath.Join(toolDir, Claude), `#!/bin/sh
-printf 'claude %s\n' "$*" >> "$FLOW_FAKE_HARNESS_CHECK_LOG"
-if [ "$*" = "auth status" ]; then
-  exit 0
-fi
-exit 1
-`)
 	writeFakeExecutableScript(t, filepath.Join(toolDir, Harness), `#!/bin/sh
 printf 'harness %s\n' "$*" >> "$FLOW_FAKE_HARNESS_CHECK_LOG"
 if [ "$*" = "--check-model-proxy" ]; then
@@ -263,151 +194,78 @@ exit 0
 	t.Setenv("PATH", toolDir)
 
 	agentNames := definitionNames(AvailableAgentDefinitions())
-	if agentNames[Codex] || !agentNames[Claude] || agentNames[Harness] {
-		t.Fatalf("available agents = %v, want only claude", agentNames)
+	if agentNames[Harness] {
+		t.Fatalf("available agents = %v, want none (usability check fails)", agentNames)
 	}
 	consoleNames := definitionNames(ConsoleDefinitionsFromAvailableAgents(AvailableAgentDefinitions()))
-	if consoleNames[Codex] || !consoleNames[Claude] || consoleNames[Harness] || !consoleNames[Shell] {
-		t.Fatalf("available consoles = %v, want claude and shell", consoleNames)
+	if consoleNames[Harness] || !consoleNames[Shell] {
+		t.Fatalf("available consoles = %v, want shell only", consoleNames)
 	}
 
 	logBytes, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read check log: %v", err)
 	}
-	log := string(logBytes)
-	for _, want := range []string{
-		"codex login status",
-		"claude auth status",
-		"harness --check-model-proxy",
-	} {
-		if !strings.Contains(log, want) {
-			t.Fatalf("check log missing %q:\n%s", want, log)
-		}
+	if !strings.Contains(string(logBytes), "harness --check-model-proxy") {
+		t.Fatalf("check log missing harness usability check:\n%s", logBytes)
 	}
 }
 
 func TestAvailableAgentLabelsUseUsableDefinitions(t *testing.T) {
 	toolDir := t.TempDir()
-	writeFakeExecutable(t, filepath.Join(toolDir, Codex))
 	writeFakeExecutable(t, filepath.Join(toolDir, Harness))
 	t.Setenv("PATH", toolDir)
 
 	labels := AvailableAgentLabels()
-	if labels[AgentHarnessLabel(Codex)] != "true" || labels[AgentHarnessLabel(Harness)] != "true" {
-		t.Fatalf("available labels = %#v, want codex and harness", labels)
-	}
-	if labels[AgentHarnessLabel(Claude)] == "true" {
-		t.Fatalf("available labels = %#v, did not expect claude", labels)
+	if labels[AgentHarnessLabel(Harness)] != "true" {
+		t.Fatalf("available labels = %#v, want harness", labels)
 	}
 
 	defs := AgentDefinitionsFromLabels(labels)
 	names := definitionNames(defs)
-	if !names[Codex] || !names[Harness] || names[Claude] {
-		t.Fatalf("definitions from labels = %v, want codex and harness", names)
+	if !names[Harness] || len(names) != 1 {
+		t.Fatalf("definitions from labels = %v, want harness only", names)
 	}
 }
 
-func TestDefaultCodexHookedCommandConfiguresNativeHooks(t *testing.T) {
-	command := DefaultCodexHookedCommandWithArgs(nil)
+func TestDefaultHarnessHookedCommandConfiguresHooks(t *testing.T) {
+	command := DefaultHarnessHookedCommandWithArgs(nil)
 	for _, want := range []string{
-		"flow hook codex start",
-		"flow hook codex stop",
-		"--dangerously-bypass-hook-trust",
-		// Managed profile branch (used when the worker exports the profile name).
-		`[ -n "${FLOW_CODEX_HOOK_PROFILE:-}" ]`,
-		`codex --profile "$FLOW_CODEX_HOOK_PROFILE" --dangerously-bypass-hook-trust -c "projects.$PWD.trust_level=trusted" "$prompt"`,
-		// Inline `-c` fallback branch (used when no profile is exported).
-		"features.hooks=true",
-		"hooks.SessionStart",
-		"hooks.UserPromptSubmit",
-		"hooks.PreCompact",
-		"hooks.PostCompact",
-		"hooks.Stop",
-		"hooks.PermissionRequest",
-		"hooks.PreToolUse",
-		"hooks.PostToolUse",
-		"flow hook codex ingest",
-		`-c "projects.$PWD.trust_level=trusted"`,
+		"flow fetch-prompt --harness harness",
+		`[ -n "${FLOW_HARNESS_HOOKS:-}" ]`,
+		`harness --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`,
+		`harness -i "$prompt"`,
 	} {
 		if !strings.Contains(command, want) {
-			t.Fatalf("default codex command missing %q:\n%s", want, command)
+			t.Fatalf("default harness command missing %q:\n%s", want, command)
 		}
 	}
 }
 
-func TestDefaultCodexConsoleCommandConfiguresHooksAndTrustWithoutPrompt(t *testing.T) {
-	command := DefaultCodexConsoleCommandWithArgs(nil)
+func TestDefaultHarnessConsoleCommandConfiguresHooksWithoutPrompt(t *testing.T) {
+	command := DefaultHarnessConsoleCommandWithArgs(nil)
 	for _, want := range []string{
-		"flow hook codex start",
-		"flow hook codex stop",
-		"--dangerously-bypass-hook-trust",
-		`[ -n "${FLOW_CODEX_HOOK_PROFILE:-}" ]`,
-		`codex --profile "$FLOW_CODEX_HOOK_PROFILE" --dangerously-bypass-hook-trust -c "projects.$PWD.trust_level=trusted"`,
-		"features.hooks=true",
-		"flow hook codex ingest",
-		`-c "projects.$PWD.trust_level=trusted"`,
+		`[ -n "${FLOW_HARNESS_HOOKS:-}" ]`,
+		`harness --hooks "$FLOW_HARNESS_HOOKS"`,
 	} {
 		if !strings.Contains(command, want) {
-			t.Fatalf("default codex console command missing %q:\n%s", want, command)
+			t.Fatalf("default harness console command missing %q:\n%s", want, command)
 		}
 	}
 	assertNoConsolePrompt(t, command)
 }
 
-func TestDefaultCodexExecCommandDoesNotConfigureNativeHooks(t *testing.T) {
-	command := DefaultCodexExecCommandWithArgs(nil)
-	for _, unexpected := range []string{
-		"features.hooks=true",
-		"flow hook codex ingest",
-		"--dangerously-bypass-hook-trust",
-	} {
-		if strings.Contains(command, unexpected) {
-			t.Fatalf("codex exec command includes author native hook config %q:\n%s", unexpected, command)
-		}
-	}
-}
-
-func TestDefaultClaudeHookedCommandUsesSettingsWhenPresent(t *testing.T) {
-	command := DefaultClaudeHookedCommandWithArgs(nil)
+func TestDefaultHarnessPrintCommandIsNonInteractive(t *testing.T) {
+	command := DefaultHarnessPrintCommandWithArgs(nil)
 	for _, want := range []string{
-		`[ -n "${FLOW_CLAUDE_HOOK_SETTINGS:-}" ]`,
-		`claude --settings "$FLOW_CLAUDE_HOOK_SETTINGS" --dangerously-skip-permissions --permission-mode bypassPermissions "$prompt"`,
-		`claude --dangerously-skip-permissions --permission-mode bypassPermissions "$prompt"`,
-	} {
-		if !strings.Contains(command, want) {
-			t.Fatalf("default claude command missing %q:\n%s", want, command)
-		}
-	}
-}
-
-func TestDefaultClaudeConsoleCommandUsesSettingsWithoutPrompt(t *testing.T) {
-	command := DefaultClaudeConsoleCommandWithArgs(nil)
-	for _, want := range []string{
-		"flow hook claude start",
-		"flow hook claude stop",
-		`[ -n "${FLOW_CLAUDE_HOOK_SETTINGS:-}" ]`,
-		`claude --settings "$FLOW_CLAUDE_HOOK_SETTINGS" --dangerously-skip-permissions --permission-mode bypassPermissions`,
-		`claude --dangerously-skip-permissions --permission-mode bypassPermissions`,
-	} {
-		if !strings.Contains(command, want) {
-			t.Fatalf("default claude console command missing %q:\n%s", want, command)
-		}
-	}
-	assertNoConsolePrompt(t, command)
-}
-
-func TestDefaultClaudePrintCommandIsNonInteractive(t *testing.T) {
-	command := DefaultClaudePrintCommandWithArgs(nil)
-	for _, want := range []string{
-		"flow fetch-prompt --harness claude",
-		`claude --dangerously-skip-permissions --permission-mode bypassPermissions -p "$prompt"`,
+		"flow fetch-prompt --harness harness",
+		`harness -p "$prompt"`,
 	} {
 		if !strings.Contains(command, want) {
 			t.Fatalf("print command missing %q:\n%s", want, command)
 		}
 	}
-	if strings.Contains(command, "flow hook claude") {
+	if strings.Contains(command, "FLOW_HARNESS_HOOKS") {
 		t.Fatalf("print command includes session hooks:\n%s", command)
 	}
 }
@@ -432,9 +290,7 @@ func TestDetectEntrypointHarnessUsesRegistry(t *testing.T) {
 		argv []string
 		want string
 	}{
-		{argv: nil, want: Codex},
-		{argv: []string{"/usr/local/bin/codex", "prompt"}, want: Codex},
-		{argv: []string{`claude "$(flow fetch-prompt)"`}, want: Claude},
+		{argv: nil, want: Harness},
 		{argv: []string{`harness --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`}, want: Harness},
 		{argv: []string{"custom-agent"}, want: Agents},
 	}

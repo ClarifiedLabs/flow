@@ -13,7 +13,7 @@ func TestInstallClientHooksWritesExecutableScripts(t *testing.T) {
 
 	if err := InstallClientHooks(repoDir, ClientHookInstallOptions{
 		HookCommand: HookCommand{Path: "/usr/local/bin/flow"},
-		HarnessKind: "claude",
+		HarnessKind: "harness",
 	}); err != nil {
 		t.Fatalf("install client hooks: %v", err)
 	}
@@ -30,7 +30,7 @@ func TestInstallClientHooksWritesExecutableScripts(t *testing.T) {
 		script := readFile(t, path)
 		for _, want := range []string{
 			"#!/bin/sh",
-			"'/usr/local/bin/flow' hook 'claude' '" + sub + "'",
+			"'/usr/local/bin/flow' hook 'harness' '" + sub + "'",
 			`"$@"`,
 			"|| true",
 			"exit 0",
@@ -51,7 +51,7 @@ func TestInstallClientHooksDefaultsToCurrentExecutable(t *testing.T) {
 	t.Parallel()
 	repoDir := newClonedRepoDir(t)
 
-	if err := InstallClientHooks(repoDir, ClientHookInstallOptions{HarnessKind: "codex"}); err != nil {
+	if err := InstallClientHooks(repoDir, ClientHookInstallOptions{HarnessKind: "harness"}); err != nil {
 		t.Fatalf("install client hooks: %v", err)
 	}
 
@@ -84,7 +84,7 @@ func TestInstallClientHooksDoesNotEmbedEnvByDefault(t *testing.T) {
 
 	if err := InstallClientHooks(repoDir, ClientHookInstallOptions{
 		HookCommand: HookCommand{Path: "flow"},
-		HarnessKind: "claude",
+		HarnessKind: "harness",
 	}); err != nil {
 		t.Fatalf("install client hooks: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestInstallClientHooksResolvesGitFileWorktree(t *testing.T) {
 
 	if err := InstallClientHooks(repoDir, ClientHookInstallOptions{
 		HookCommand: HookCommand{Path: "flow"},
-		HarnessKind: "claude",
+		HarnessKind: "harness",
 	}); err != nil {
 		t.Fatalf("install client hooks: %v", err)
 	}

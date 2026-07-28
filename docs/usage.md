@@ -156,8 +156,8 @@ For example, create two definitions with distinct models and review focuses:
 ```yaml
 # security-review.yaml
 name: security-review
-harness: codex
-model: gpt-5.2-codex
+harness: harness
+model: openai:gpt-5.2
 reasoning_effort: high
 prompt: Review authorization boundaries, input trust, and secret handling. Report concrete exploitable paths.
 ```
@@ -165,8 +165,8 @@ prompt: Review authorization boundaries, input trust, and secret handling. Repor
 ```yaml
 # performance-review.yaml
 name: performance-review
-harness: claude
-model: claude-opus-4-1
+harness: harness
+model: anthropic:claude-opus-4-8
 reasoning_effort: high
 prompt: Review algorithmic cost, database access patterns, allocation hot spots, and realistic scaling risks.
 ```
@@ -242,8 +242,8 @@ flow thread reopen THREAD_ID
 
 Repo-versioned CI configuration lives in `.flow/checks/*.yaml`. CI jobs use
 ephemeral capacity. Review and verification agents are selected by their graph
-nodes and use persistent agent capacity, so workers need the selected agent's
-harness label, such as `agent.harness.codex: "true"`.
+nodes and use persistent agent capacity, so workers need the
+`agent.harness.harness: "true"` label.
 
 An `automated_checks` node runs the repository CI definitions. A
 `change_review` or `verify_change` node is a multi-agent node: it fans out one
@@ -291,11 +291,11 @@ requires: []
 ```
 
 `flow-worker` sets `FLOW_WORKER_HARNESS` from an agent job's entrypoint. Use
-`flow fetch-prompt --harness claude|harness|agents` only when overriding that
+`flow fetch-prompt --harness harness|agents` only when overriding that
 automatic selection.
 
-Bare requirements such as `requires: ["agent.harness.codex"]` mean
-`agent.harness.codex=true` and match worker labels by exact key/value.
+Bare requirements such as `requires: ["agent.harness.harness"]` mean
+`agent.harness.harness=true` and match worker labels by exact key/value.
 
 ## Web UI Routes
 

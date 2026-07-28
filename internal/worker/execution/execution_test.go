@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/cgi"
@@ -767,8 +766,8 @@ func TestWorkerEnvIncludesSessionToken(t *testing.T) {
 	if env["PATH"] != "/tmp/flow-test-bin:/usr/bin" {
 		t.Fatalf("PATH = %q, want worker process PATH", env["PATH"])
 	}
-	if env["FLOW_WORKER_HARNESS"] != "codex" {
-		t.Fatalf("FLOW_WORKER_HARNESS = %q, want codex", env["FLOW_WORKER_HARNESS"])
+	if env["FLOW_WORKER_HARNESS"] != "harness" {
+		t.Fatalf("FLOW_WORKER_HARNESS = %q, want harness", env["FLOW_WORKER_HARNESS"])
 	}
 
 	env = workerEnv(tmuxInput{
@@ -897,7 +896,6 @@ func TestWorkerEnvUsesHermeticJobStateDefaults(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", "/host/data")
 	t.Setenv("XDG_CACHE_HOME", "/host/cache")
 	t.Setenv("XDG_RUNTIME_DIR", "/host/runtime")
-	t.Setenv("CODEX_HOME", "/host/codex")
 	t.Setenv("GOCACHE", "/host/go-build-cache")
 	t.Setenv("GOMODCACHE", "/host/go-mod-cache")
 	t.Setenv("DOCKER_CONFIG", "/host/docker")
@@ -926,7 +924,6 @@ func TestWorkerEnvUsesHermeticJobStateDefaults(t *testing.T) {
 		"TMPDIR":           filepath.Join(root, hermeticTempDirName),
 		"TMP":              filepath.Join(root, hermeticTempDirName),
 		"TEMP":             filepath.Join(root, hermeticTempDirName),
-		"CODEX_HOME":       filepath.Join(root, hermeticCodexDirName),
 		"GOCACHE":          filepath.Join(root, hermeticGoBuildCacheDirName),
 		"GOMODCACHE":       filepath.Join(root, hermeticGoModCacheDirName),
 		"DOCKER_CONFIG":    filepath.Join(root, hermeticDockerConfigDirName),
@@ -957,22 +954,17 @@ func TestWorkerEnvUsesHermeticJobStateDefaults(t *testing.T) {
 	}
 
 	overrideHome := filepath.Join(t.TempDir(), "home")
-	overrideCodex := filepath.Join(t.TempDir(), "codex")
 	env = workerEnv(tmuxInput{
 		Config: workerConfig(workDir, "file:///tmp/exchange.git"),
 		Job:    Job{ID: "j-explicit-env", Role: RoleCI},
 		Lease:  Lease{ID: "l-explicit-env", WorkerID: "w-local"},
 		Entrypoint: Entrypoint{Env: map[string]string{
-			"HOME":       overrideHome,
-			"CODEX_HOME": overrideCodex,
-			"PATH":       "/entrypoint/bin",
+			"HOME": overrideHome,
+			"PATH": "/entrypoint/bin",
 		}},
 	})
 	if env["HOME"] != overrideHome {
 		t.Fatalf("explicit HOME = %q, want %q", env["HOME"], overrideHome)
-	}
-	if env["CODEX_HOME"] != overrideCodex {
-		t.Fatalf("explicit CODEX_HOME = %q, want %q", env["CODEX_HOME"], overrideCodex)
 	}
 	if env["PATH"] != "/entrypoint/bin" {
 		t.Fatalf("explicit PATH = %q, want /entrypoint/bin", env["PATH"])
@@ -1017,152 +1009,6 @@ func TestWorkerEnvForwardsHarnessModelProxyConfiguration(t *testing.T) {
 	}
 	if _, ok := env["HARNESS_MODEL_PROXY_API_KEY"]; ok {
 		t.Fatalf("HARNESS_MODEL_PROXY_API_KEY leaked into CI job as %q", env["HARNESS_MODEL_PROXY_API_KEY"])
-	}
-}
-
-func TestWorkerEnvForwardsClaudeOAuthToken(t *testing.T) {
-	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "worker-oauth-token")
-
-	for _, role := range []JobRole{RoleAuthor, RoleReviewer, RoleVerifier, RoleConsole} {
-		t.Run(string(role), func(t *testing.T) {
-			env := workerEnv(tmuxInput{
-				Config: workerConfig("/tmp/work", "file:///tmp/exchange.git"),
-				Job:    Job{ID: "j-claude-" + string(role), Role: role},
-				Lease:  Lease{ID: "l-claude-" + string(role), WorkerID: "w-local"},
-				Entrypoint: Entrypoint{
-					Argv:    []string{"claude"},
-					Harness: flowharness.Claude,
-				},
-			})
-			if env["CLAUDE_CODE_OAUTH_TOKEN"] != "worker-oauth-token" {
-				t.Fatalf("CLAUDE_CODE_OAUTH_TOKEN = %q, want worker deployment value", env["CLAUDE_CODE_OAUTH_TOKEN"])
-			}
-		})
-	}
-
-	for _, tt := range []struct {
-		name    string
-		role    JobRole
-		harness string
-	}{
-		{name: "ci", role: RoleCI, harness: flowharness.Claude},
-		{name: "other harness", role: RoleAuthor, harness: flowharness.Codex},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			env := workerEnv(tmuxInput{
-				Config: workerConfig("/tmp/work", "file:///tmp/exchange.git"),
-				Job:    Job{ID: "j-claude-isolation", Role: tt.role},
-				Lease:  Lease{ID: "l-claude-isolation", WorkerID: "w-local"},
-				Entrypoint: Entrypoint{
-					Argv:    []string{tt.harness},
-					Harness: tt.harness,
-				},
-			})
-			if _, ok := env["CLAUDE_CODE_OAUTH_TOKEN"]; ok {
-				t.Fatalf("CLAUDE_CODE_OAUTH_TOKEN leaked into %s job", tt.name)
-			}
-		})
-	}
-
-	for _, tt := range []struct {
-		name  string
-		value string
-	}{
-		{name: "explicit override", value: "job-oauth-token"},
-		{name: "explicit empty", value: ""},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			env := workerEnv(tmuxInput{
-				Config: workerConfig("/tmp/work", "file:///tmp/exchange.git"),
-				Job:    Job{ID: "j-claude-explicit", Role: RoleAuthor},
-				Lease:  Lease{ID: "l-claude-explicit", WorkerID: "w-local"},
-				Entrypoint: Entrypoint{
-					Argv:    []string{"claude"},
-					Harness: flowharness.Claude,
-					Env: map[string]string{
-						"CLAUDE_CODE_OAUTH_TOKEN": tt.value,
-					},
-				},
-			})
-			if got, ok := env["CLAUDE_CODE_OAUTH_TOKEN"]; !ok || got != tt.value {
-				t.Fatalf("CLAUDE_CODE_OAUTH_TOKEN = %q, %t, want explicit %q", got, ok, tt.value)
-			}
-		})
-	}
-}
-
-func TestWorkerEnvForwardsCodexHome(t *testing.T) {
-	deploymentHome := t.TempDir()
-	t.Setenv("CODEX_HOME", deploymentHome)
-
-	for _, role := range []JobRole{RoleAuthor, RoleReviewer, RoleVerifier, RoleConsole} {
-		t.Run(string(role), func(t *testing.T) {
-			env := workerEnv(tmuxInput{
-				Config: workerConfig("/tmp/work", "file:///tmp/exchange.git"),
-				Job:    Job{ID: "j-codex-" + string(role), Role: role},
-				Lease:  Lease{ID: "l-codex-" + string(role), WorkerID: "w-local"},
-				Entrypoint: Entrypoint{
-					Argv:    []string{"codex"},
-					Harness: flowharness.Codex,
-				},
-			})
-			if env["CODEX_HOME"] != deploymentHome {
-				t.Fatalf("CODEX_HOME = %q, want worker deployment value %q", env["CODEX_HOME"], deploymentHome)
-			}
-		})
-	}
-
-	for _, tt := range []struct {
-		name    string
-		role    JobRole
-		harness string
-	}{
-		{name: "ci", role: RoleCI, harness: flowharness.Codex},
-		{name: "other harness", role: RoleAuthor, harness: flowharness.Claude},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			jobID := "j-codex-isolation-" + strings.ReplaceAll(tt.name, " ", "-")
-			workDir := t.TempDir()
-			env := workerEnv(tmuxInput{
-				Config: workerConfig(workDir, "file:///tmp/exchange.git"),
-				Job:    Job{ID: jobID, Role: tt.role},
-				Lease:  Lease{ID: "l-codex-isolation", WorkerID: "w-local"},
-				Entrypoint: Entrypoint{
-					Argv:    []string{tt.harness},
-					Harness: tt.harness,
-				},
-			})
-			want := hermeticJobEnv(workDir, jobID)["CODEX_HOME"]
-			if env["CODEX_HOME"] != want {
-				t.Fatalf("CODEX_HOME = %q, want hermetic value %q", env["CODEX_HOME"], want)
-			}
-		})
-	}
-
-	for _, tt := range []struct {
-		name  string
-		value string
-	}{
-		{name: "explicit override", value: t.TempDir()},
-		{name: "explicit empty", value: ""},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			env := workerEnv(tmuxInput{
-				Config: workerConfig("/tmp/work", "file:///tmp/exchange.git"),
-				Job:    Job{ID: "j-codex-explicit", Role: RoleAuthor},
-				Lease:  Lease{ID: "l-codex-explicit", WorkerID: "w-local"},
-				Entrypoint: Entrypoint{
-					Argv:    []string{"codex"},
-					Harness: flowharness.Codex,
-					Env: map[string]string{
-						"CODEX_HOME": tt.value,
-					},
-				},
-			})
-			if got, ok := env["CODEX_HOME"]; !ok || got != tt.value {
-				t.Fatalf("CODEX_HOME = %q, %t, want explicit %q", got, ok, tt.value)
-			}
-		})
 	}
 }
 
@@ -1236,64 +1082,6 @@ func envSliceMap(env []string) map[string]string {
 	return values
 }
 
-func TestPrepareHookConfigWritesClaudeAuthorSettings(t *testing.T) {
-	workDir := t.TempDir()
-	path, envVar, err := prepareHookConfig(tmuxInput{
-		Config: workerConfig(workDir, "file:///tmp/exchange.git"),
-		Job: Job{
-			ID:   "j-claude",
-			Role: RoleAuthor,
-		},
-		Session:      &coordinator.Session{ID: "s-claude"},
-		SessionToken: "session-token",
-		Entrypoint: Entrypoint{
-			Argv:  []string{`claude "$prompt"`},
-			Shell: true,
-		},
-	})
-	if err != nil {
-		t.Fatalf("prepareHookConfig: %v", err)
-	}
-	wantPath := filepath.Join(workDir, "jobs", "j-claude", claudeHookSettingsFile)
-	if path != wantPath {
-		t.Fatalf("settings path = %q, want %q", path, wantPath)
-	}
-	if envVar != envClaudeHookSettings {
-		t.Fatalf("env var = %q, want %q", envVar, envClaudeHookSettings)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read settings: %v", err)
-	}
-	def, ok := flowharness.Lookup(flowharness.Claude)
-	if !ok {
-		t.Fatal("lookup claude definition")
-	}
-	want, err := flowharness.RenderHookConfig(def)
-	if err != nil {
-		t.Fatalf("render claude hook config: %v", err)
-	}
-	if !bytes.Equal(data, want) {
-		t.Fatalf("settings content mismatch:\n got %s\nwant %s", data, want)
-	}
-	if info, err := os.Stat(path); err != nil {
-		t.Fatalf("stat settings: %v", err)
-	} else if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("settings perm = %o, want 600", perm)
-	}
-
-	env := workerEnv(tmuxInput{
-		Config:           workerConfig(workDir, "file:///tmp/exchange.git"),
-		Job:              Job{ID: "j-claude", Role: RoleAuthor},
-		HookConfigValue:  path,
-		HookConfigEnvVar: envVar,
-		Entrypoint:       Entrypoint{Argv: []string{`claude "$prompt"`}, Shell: true},
-	})
-	if env[envClaudeHookSettings] != path {
-		t.Fatalf("%s = %q, want %q", envClaudeHookSettings, env[envClaudeHookSettings], path)
-	}
-}
-
 func TestPrepareHookConfigWritesHarnessAuthorSettings(t *testing.T) {
 	workDir := t.TempDir()
 	path, envVar, err := prepareHookConfig(tmuxInput{
@@ -1352,114 +1140,12 @@ func TestPrepareHookConfigWritesHarnessAuthorSettings(t *testing.T) {
 	}
 }
 
-func TestPrepareHookConfigWritesCodexProfile(t *testing.T) {
-	workDir := t.TempDir()
-	codexHomeDir := t.TempDir()
-	t.Setenv("CODEX_HOME", codexHomeDir)
-	authPath := filepath.Join(codexHomeDir, "auth.json")
-	authData := []byte(`{"tokens":"mounted-auth"}`)
-	if err := os.WriteFile(authPath, authData, 0o600); err != nil {
-		t.Fatalf("write auth fixture: %v", err)
-	}
-
-	value, envVar, err := prepareHookConfig(tmuxInput{
-		Config: workerConfig(workDir, "file:///tmp/exchange.git"),
-		Job: Job{
-			ID:   "j-codex",
-			Role: RoleAuthor,
-		},
-		Session:      &coordinator.Session{ID: "s-codex"},
-		SessionToken: "session-token",
-		Entrypoint: Entrypoint{
-			Argv:  []string{`codex "$prompt"`},
-			Shell: true,
-		},
-	})
-	if err != nil {
-		t.Fatalf("prepareHookConfig: %v", err)
-	}
-	if value != flowharness.CodexHookProfileName {
-		t.Fatalf("profile value = %q, want %q", value, flowharness.CodexHookProfileName)
-	}
-	if envVar != "FLOW_CODEX_HOOK_PROFILE" {
-		t.Fatalf("env var = %q, want FLOW_CODEX_HOOK_PROFILE", envVar)
-	}
-	profileName := flowharness.CodexHookProfileName + ".config.toml"
-	profilePath := filepath.Join(codexHomeDir, profileName)
-	data, err := os.ReadFile(profilePath)
-	if err != nil {
-		t.Fatalf("read codex profile: %v", err)
-	}
-	hermeticProfilePath := filepath.Join(hermeticJobEnv(workDir, "j-codex")["CODEX_HOME"], profileName)
-	if _, err := os.Stat(hermeticProfilePath); !os.IsNotExist(err) {
-		t.Fatalf("hermetic CODEX_HOME profile stat err = %v, want not exist", err)
-	}
-	gotAuth, err := os.ReadFile(authPath)
-	if err != nil {
-		t.Fatalf("read auth fixture: %v", err)
-	}
-	if !bytes.Equal(gotAuth, authData) {
-		t.Fatal("Codex hook preparation changed auth.json")
-	}
-	def, ok := flowharness.Lookup(flowharness.Codex)
-	if !ok {
-		t.Fatal("lookup codex definition")
-	}
-	want, err := flowharness.RenderHookConfig(def)
-	if err != nil {
-		t.Fatalf("render codex hook config: %v", err)
-	}
-	if !bytes.Equal(data, want) {
-		t.Fatalf("codex profile content mismatch:\n got %s\nwant %s", data, want)
-	}
-	if info, err := os.Stat(profilePath); err != nil {
-		t.Fatalf("stat codex profile: %v", err)
-	} else if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("codex profile perm = %o, want 600", perm)
-	}
-
-	// The worker exports the profile NAME (not a path) under FLOW_CODEX_HOOK_PROFILE.
-	env := workerEnv(tmuxInput{
-		Config:           workerConfig(workDir, "file:///tmp/exchange.git"),
-		Job:              Job{ID: "j-codex", Role: RoleAuthor},
-		HookConfigValue:  value,
-		HookConfigEnvVar: envVar,
-		Entrypoint:       Entrypoint{Argv: []string{`codex "$prompt"`}, Shell: true},
-	})
-	if env["FLOW_CODEX_HOOK_PROFILE"] != flowharness.CodexHookProfileName {
-		t.Fatalf("FLOW_CODEX_HOOK_PROFILE = %q, want %q", env["FLOW_CODEX_HOOK_PROFILE"], flowharness.CodexHookProfileName)
-	}
-	if env["CODEX_HOME"] != codexHomeDir {
-		t.Fatalf("CODEX_HOME = %q, want deployment value %q", env["CODEX_HOME"], codexHomeDir)
-	}
-}
-
 func TestPrepareHookConfigSkipsHarnessesAndJobsWithoutManagedHooks(t *testing.T) {
 	workDir := t.TempDir()
 	tests := []struct {
 		name  string
 		input tmuxInput
 	}{
-		{
-			name: "codex reviewer role is not eligible",
-			input: tmuxInput{
-				Config:       workerConfig(workDir, "file:///tmp/exchange.git"),
-				Job:          Job{ID: "j-codex", Role: RoleReviewer},
-				Session:      &coordinator.Session{ID: "s-codex"},
-				SessionToken: "session-token",
-				Entrypoint:   Entrypoint{Argv: []string{`codex "$prompt"`}, Shell: true},
-			},
-		},
-		{
-			name: "claude reviewer role is not eligible",
-			input: tmuxInput{
-				Config:       workerConfig(workDir, "file:///tmp/exchange.git"),
-				Job:          Job{ID: "j-review", Role: RoleReviewer},
-				Session:      &coordinator.Session{ID: "s-review"},
-				SessionToken: "session-token",
-				Entrypoint:   Entrypoint{Argv: []string{`claude "$prompt"`}, Shell: true},
-			},
-		},
 		{
 			name: "harness reviewer role is not eligible",
 			input: tmuxInput{
@@ -1471,12 +1157,22 @@ func TestPrepareHookConfigSkipsHarnessesAndJobsWithoutManagedHooks(t *testing.T)
 			},
 		},
 		{
-			name: "claude author missing session token",
+			name: "agents author harness has no managed hooks",
+			input: tmuxInput{
+				Config:       workerConfig(workDir, "file:///tmp/exchange.git"),
+				Job:          Job{ID: "j-agents", Role: RoleAuthor},
+				Session:      &coordinator.Session{ID: "s-agents"},
+				SessionToken: "session-token",
+				Entrypoint:   Entrypoint{Argv: []string{`custom-agent run`}, Shell: true},
+			},
+		},
+		{
+			name: "harness author missing session token",
 			input: tmuxInput{
 				Config:     workerConfig(workDir, "file:///tmp/exchange.git"),
 				Job:        Job{ID: "j-missing-token", Role: RoleAuthor},
 				Session:    &coordinator.Session{ID: "s-missing-token"},
-				Entrypoint: Entrypoint{Argv: []string{`claude "$prompt"`}, Shell: true},
+				Entrypoint: Entrypoint{Argv: []string{`harness "$prompt"`}, Shell: true},
 			},
 		},
 	}
@@ -1503,19 +1199,9 @@ func TestHarnessForEntrypoint(t *testing.T) {
 		want       string
 	}{
 		{
-			name:       "codex argv",
-			entrypoint: Entrypoint{Argv: []string{"/usr/local/bin/codex", "prompt"}},
-			want:       "codex",
-		},
-		{
-			name:       "codex shell",
-			entrypoint: Entrypoint{Argv: []string{`codex "$(flow fetch-prompt)"`}, Shell: true},
-			want:       "codex",
-		},
-		{
-			name:       "claude shell",
-			entrypoint: Entrypoint{Argv: []string{`claude "$(flow fetch-prompt)"`}, Shell: true},
-			want:       "claude",
+			name:       "harness argv",
+			entrypoint: Entrypoint{Argv: []string{"/usr/local/bin/harness", "-i", "prompt"}},
+			want:       "harness",
 		},
 		{
 			name:       "harness shell",
@@ -1528,9 +1214,9 @@ func TestHarnessForEntrypoint(t *testing.T) {
 			want:       "agents",
 		},
 		{
-			name:       "empty defaults to codex",
+			name:       "empty defaults to harness",
 			entrypoint: Entrypoint{},
-			want:       "codex",
+			want:       "harness",
 		},
 	}
 	for _, tt := range tests {
@@ -1771,117 +1457,17 @@ func TestRunEntrypointInTmuxHandlesImmediateExit(t *testing.T) {
 	}
 }
 
-func TestAnyTrustPromptVisibleRecognizesActivePrompts(t *testing.T) {
-	if !anyTrustPromptVisible(codexTrustPromptPane()) {
-		t.Fatal("anyTrustPromptVisible returned false for active Codex trust prompt")
-	}
-	if !anyTrustPromptVisible(claudeTrustPromptPane()) {
-		t.Fatal("anyTrustPromptVisible returned false for active Claude trust prompt")
-	}
-	if anyTrustPromptVisible("> Type your message\n") {
-		t.Fatal("anyTrustPromptVisible returned true for an agent input pane")
-	}
-}
-
-func TestAnyTrustPromptVisibleRejectsEmbeddedPromptText(t *testing.T) {
-	// The trust-prompt copy quoted inside larger pane content (a task body) must
-	// not be mistaken for a live prompt: the submit instruction is no longer the
-	// last line on screen.
-	for _, pane := range []string{codexTrustPromptPane(), claudeTrustPromptPane()} {
-		embedded := "Flow role instructions (flow-author):\n\n# Flow Author\n\nTask: t-test-0005\n\n" +
-			pane + "\n\nTask body:\nthe agent no longer gets stuck at the trust prompt\n"
-		if anyTrustPromptVisible(embedded) {
-			t.Fatal("anyTrustPromptVisible accepted prompt text embedded in task content")
-		}
-	}
-}
-
-func TestTmuxWatchdogApprovesTrustPromptOnce(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		pane       string
-		foreground string
-	}{
-		{"codex", codexTrustPromptPane(), "codex"},
-		{"claude", claudeTrustPromptPane(), "claude"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			watchdog := newTmuxWatchdogWithConfig(config.WorkerConfig{}, "flow-j-session", time.Minute)
-			var sentSession string
-			var sentKeys []string
-			calls := 0
-			watchdog.sendKeys = func(_ context.Context, sessionName string, keys ...string) error {
-				calls++
-				sentSession = sessionName
-				sentKeys = append([]string(nil), keys...)
-				return nil
-			}
-
-			if !watchdog.approveTrustPrompt(context.Background(), tc.pane, tc.foreground) {
-				t.Fatalf("approveTrustPrompt returned false for active %s trust prompt", tc.name)
-			}
-			if sentSession != "flow-j-session" || strings.Join(sentKeys, " ") != "Enter" {
-				t.Fatalf("sent %q to %q, want Enter to flow-j-session", strings.Join(sentKeys, " "), sentSession)
-			}
-			if watchdog.approveTrustPrompt(context.Background(), tc.pane, tc.foreground) {
-				t.Fatalf("approveTrustPrompt sent the submit key more than once for %s", tc.name)
-			}
-			if calls != 1 {
-				t.Fatalf("sendKeys called %d times for %s, want exactly 1", calls, tc.name)
-			}
-		})
-	}
-}
-
-func TestTmuxWatchdogDoesNotApproveTrustPromptForOtherForegroundProcess(t *testing.T) {
-	watchdog := newTmuxWatchdogWithConfig(config.WorkerConfig{}, "flow-j-session", time.Minute)
-	watchdog.sendKeys = func(context.Context, string, ...string) error {
-		t.Fatal("sendKeys called for unrelated foreground process")
-		return nil
-	}
-
-	// A non-shell, non-agent foreground (a build/tool process) must never have the
-	// submit key typed into it.
-	if watchdog.approveTrustPrompt(context.Background(), codexTrustPromptPane(), "go") {
-		t.Fatal("approveTrustPrompt approved a Codex prompt under a non-shell/non-agent foreground")
-	}
-	if watchdog.approveTrustPrompt(context.Background(), claudeTrustPromptPane(), "go") {
-		t.Fatal("approveTrustPrompt approved a Claude prompt under a non-shell/non-agent foreground")
-	}
-}
-
-func TestTmuxWatchdogApprovesTrustPromptUnderWrappers(t *testing.T) {
-	// codex/claude commonly run under a node wrapper or a bootstrapping shell;
-	// tmux reports those as the foreground command name.
-	for _, tc := range []struct {
-		name       string
-		pane       string
-		foreground string
-	}{
-		{"codex-under-node", codexTrustPromptPane(), "node"},
-		{"claude-under-shell", claudeTrustPromptPane(), "zsh"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			watchdog := newTmuxWatchdogWithConfig(config.WorkerConfig{}, "flow-j-session", time.Minute)
-			watchdog.sendKeys = func(context.Context, string, ...string) error { return nil }
-			if !watchdog.approveTrustPrompt(context.Background(), tc.pane, tc.foreground) {
-				t.Fatalf("approveTrustPrompt rejected %s", tc.name)
-			}
-		})
-	}
-}
-
 func TestTmuxWatchdogReportsWorkingWhenOutputChangesAfterWaiting(t *testing.T) {
 	watchdog := newTmuxWatchdogWithConfig(config.WorkerConfig{}, "flow-j-session", time.Minute)
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
-	if decision := watchdog.observe(now, "Codex waiting for input", "codex"); decision != terminal.WatchdogNoChange {
+	if decision := watchdog.observe(now, "agent waiting for input", "harness"); decision != terminal.WatchdogNoChange {
 		t.Fatalf("initial decision = %q, want no_change", decision)
 	}
-	if decision := watchdog.observe(now.Add(2*time.Minute), "Codex waiting for input", "codex"); decision != terminal.WatchdogWaiting {
+	if decision := watchdog.observe(now.Add(2*time.Minute), "agent waiting for input", "harness"); decision != terminal.WatchdogWaiting {
 		t.Fatalf("silent decision = %q, want waiting", decision)
 	}
-	if decision := watchdog.observe(now.Add(2*time.Minute+time.Second), "Codex resumed work", "codex"); decision != terminal.WatchdogWorking {
+	if decision := watchdog.observe(now.Add(2*time.Minute+time.Second), "agent resumed work", "harness"); decision != terminal.WatchdogWorking {
 		t.Fatalf("output-change decision = %q, want working", decision)
 	}
 }
@@ -1894,7 +1480,7 @@ func TestTmuxWatchdogSuppressesWaitingForBusyForegroundProcess(t *testing.T) {
 	if decision := watchdog.observe(now.Add(2*time.Minute), "Running tests", "go"); decision != terminal.WatchdogWorking {
 		t.Fatalf("busy foreground decision = %q, want working", decision)
 	}
-	if decision := watchdog.observe(now.Add(2*time.Minute+30*time.Second), "Running tests", "codex"); decision != terminal.WatchdogNoChange {
+	if decision := watchdog.observe(now.Add(2*time.Minute+30*time.Second), "Running tests", "harness"); decision != terminal.WatchdogNoChange {
 		t.Fatalf("post-busy decision = %q, want no_change before threshold restarts", decision)
 	}
 }
@@ -1905,42 +1491,11 @@ func TestForegroundLooksBusy(t *testing.T) {
 			t.Fatalf("foregroundLooksBusy(%q) = false, want true", command)
 		}
 	}
-	for _, command := range []string{"codex", "claude", "zsh", "node", ""} {
+	for _, command := range []string{"harness", "zsh", "node", ""} {
 		if foregroundLooksBusy(command) {
 			t.Fatalf("foregroundLooksBusy(%q) = true, want false", command)
 		}
 	}
-}
-
-func codexTrustPromptPane() string {
-	return `> You are in /Users/tester/.local/share/flow/projects/p-1/workers/local/jobs/j-1/repo
-
-  Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection. Trusting the directory allows project-local config,
-  hooks, and exec policies to load.
-
-  1. Yes, continue
-  2. No, quit
-
-  Press enter to continue
-`
-}
-
-func claudeTrustPromptPane() string {
-	return `Accessing workspace:
-
- /Users/tester/.local/share/flow/projects/p-1/workers/local/jobs/j-1/repo
-
- Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.
-
- Claude Code'll be able to read, edit, and execute files here.
-
- Security guide
-
- > 1. Yes, I trust this folder
-   2. No, exit
-
- Enter to confirm / Esc to cancel
-`
 }
 
 func TestSessionStateReporterRefreshesDuplicateReportsWithThrottle(t *testing.T) {
@@ -2626,86 +2181,36 @@ func TestSessionMessagePollerContinuesBatchAfterPasteError(t *testing.T) {
 	}
 }
 
-func TestAgentReadyFalseWhileTrustPromptVisible(t *testing.T) {
-	if agentReady(codexTrustPromptPane(), "codex", "codex") {
-		t.Fatal("agentReady returned true while the Codex trust prompt was visible")
-	}
-	if agentReady(claudeTrustPromptPane(), "claude", "claude") {
-		t.Fatal("agentReady returned true while the Claude trust prompt was visible")
-	}
-}
-
 func TestAgentReadyFalseWhileBootstrappingShell(t *testing.T) {
 	// The wrapper shell is still the foreground process and the pane has not
 	// drawn the agent input box yet; the prompt must not be pasted.
-	if agentReady("", "sh", "codex") {
+	if agentReady("", "sh", "harness") {
 		t.Fatal("agentReady returned true for an empty pane")
 	}
-	if agentReady("starting agent...", "sh", "codex") {
+	if agentReady("starting agent...", "sh", "harness") {
 		t.Fatal("agentReady returned true while the bootstrapping shell was foreground")
 	}
-	if agentReady("starting agent...", "bash", "claude") {
+	if agentReady("starting agent...", "bash", "harness") {
 		t.Fatal("agentReady returned true while the bootstrapping shell was foreground")
 	}
 }
 
 func TestAgentReadyTrueOnceAgentInputBoxIsUp(t *testing.T) {
 	pane := "> Type your message\n"
-	if !agentReady(pane, "codex", "codex") {
-		t.Fatal("agentReady returned false once the Codex input box was up")
-	}
-	if !agentReady(pane, "claude", "claude") {
-		t.Fatal("agentReady returned false once the Claude input box was up")
-	}
 	if !agentReady(pane, "harness", "harness") {
 		t.Fatal("agentReady returned false once the harness input box was up")
 	}
-	// claude/codex commonly run under a node wrapper, which tmux reports as the
-	// foreground command name.
-	if !agentReady(pane, "node", "claude") {
-		t.Fatal("agentReady returned false for the node-wrapped Claude agent")
+	// tmux reports the foreground as the agent binary's basename, however it
+	// was invoked.
+	if !agentReady(pane, "/usr/local/bin/harness", "harness") {
+		t.Fatal("agentReady returned false for a path-qualified harness binary")
 	}
-}
-
-func TestWaitForAgentReadyDismissesTrustPromptThenReturnsNil(t *testing.T) {
-	requireTool(t, "tmux")
-	requireTool(t, "node")
-	cfg := workerConfigWithTmux(t, t.TempDir(), createExchangeRemote(t))
-	t.Cleanup(func() { cleanupTmuxServer(cfg) })
-
-	// A Node-driven fake agent draws a Claude trust prompt and blocks on stdin;
-	// the gate's own watchdog must send Enter, which advances the script to clear
-	// the prompt and draw the input box. agentReady then flips to true: no prompt
-	// is visible and tmux reports the foreground as "node", the wrapper Claude and
-	// Codex run under. Node is used because tmux reports a stable "node"
-	// foreground across the dismissal (a copied agent binary will not exec on a
-	// signed macOS, and a wrapper shell's reported command name is not stable).
-	agentScript := filepath.Join(t.TempDir(), "agent.js")
-	const agentJS = "process.stdout.write('Accessing workspace:\\n\\n');\n" +
-		"process.stdout.write(' /tmp/repo\\n\\n');\n" +
-		"process.stdout.write(\" Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.\\n\\n\");\n" +
-		"process.stdout.write(\" Claude Code'll be able to read, edit, and execute files here.\\n\\n\");\n" +
-		"process.stdout.write(' Security guide\\n\\n');\n" +
-		"process.stdout.write(' > 1. Yes, I trust this folder\\n   2. No, exit\\n\\n');\n" +
-		"process.stdout.write(' Enter to confirm / Esc to cancel\\n');\n" +
-		"process.stdin.once('data', () => { process.stdout.write('\\x1b[2J\\x1b[H'); process.stdout.write('> ready for input\\n'); setTimeout(() => {}, 30000); });\n" +
-		"process.stdin.resume();\n"
-	if err := os.WriteFile(agentScript, []byte(agentJS), 0o600); err != nil {
-		t.Fatalf("write fake agent: %v", err)
+	// A wrapped agent whose foreground tmux reports as the wrapper (not the
+	// harness binary) is not recognized by the fast path; readiness then falls
+	// back to the pane-stability window.
+	if agentReady(pane, "node", "harness") {
+		t.Fatal("agentReady returned true for a node-wrapped foreground")
 	}
-	session := "flow-test-ready-dismiss"
-	tmuxRun(t, cfg, "new-session", "-d", "-s", session, "node "+shellQuote(agentScript))
-
-	prev := initialPromptReadyTimeout
-	initialPromptReadyTimeout = 10 * time.Second
-	t.Cleanup(func() { initialPromptReadyTimeout = prev })
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := waitForAgentReady(ctx, cfg, session, "claude"); err != nil {
-		t.Fatalf("waitForAgentReady returned error after dismissing the trust prompt: %v", err)
-	}
-	killTmuxSession(cfg, session)
 }
 
 func TestWaitForAgentReadyTimesOutWhenNeverReady(t *testing.T) {
@@ -2724,7 +2229,7 @@ func TestWaitForAgentReadyTimesOutWhenNeverReady(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	err := waitForAgentReady(ctx, cfg, session, "codex")
+	err := waitForAgentReady(ctx, cfg, session, "harness")
 	if err == nil {
 		t.Fatal("waitForAgentReady returned nil for a pane that never became ready")
 	}
@@ -2740,9 +2245,9 @@ func TestWaitForAgentReadySettlesWhenForegroundUnrecognized(t *testing.T) {
 	t.Cleanup(func() { cleanupTmuxServer(cfg) })
 
 	// A shell-wrapped agent that draws output and then quiesces: tmux never
-	// reports the harness binary as the foreground (it stays a shell/sleep), and
-	// no trust prompt is shown, so the gate must fall back to the settle window
-	// and report ready once the pane stops changing past the startup grace.
+	// reports the harness binary as the foreground (it stays a shell/sleep), so
+	// the gate must fall back to the settle window and report ready once the
+	// pane stops changing past the startup grace.
 	session := "flow-test-ready-settle"
 	tmuxRun(t, cfg, "new-session", "-d", "-s", session, "sh -c 'printf \"working...\\n\"; sleep 30'")
 
@@ -2752,7 +2257,7 @@ func TestWaitForAgentReadySettlesWhenForegroundUnrecognized(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := waitForAgentReady(ctx, cfg, session, "codex"); err != nil {
+	if err := waitForAgentReady(ctx, cfg, session, "harness"); err != nil {
 		t.Fatalf("waitForAgentReady returned error for a settled shell-wrapped agent: %v", err)
 	}
 	killTmuxSession(cfg, session)
@@ -2777,89 +2282,12 @@ func TestWaitForAgentReadyReturnsWhenSessionEndsEarly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	start := time.Now()
-	err := waitForAgentReady(ctx, cfg, session, "codex")
+	err := waitForAgentReady(ctx, cfg, session, "harness")
 	if !errors.Is(err, errAgentSessionEnded) {
 		t.Fatalf("waitForAgentReady error = %v, want errAgentSessionEnded", err)
 	}
 	if elapsed := time.Since(start); elapsed >= initialPromptReadyTimeout {
 		t.Fatalf("waitForAgentReady took %s, want a prompt return well under the %s budget", elapsed, initialPromptReadyTimeout)
-	}
-}
-
-func TestPanePreviewLines(t *testing.T) {
-	pane := "first\n\n  second  \nthird\nfourth\nfifth\n\n\n"
-	head, tail := panePreviewLines(pane, 2)
-	if head != "first ⏎ second" {
-		t.Fatalf("head = %q, want first two non-empty lines", head)
-	}
-	if tail != "fourth ⏎ fifth" {
-		t.Fatalf("tail = %q, want last two non-empty lines", tail)
-	}
-
-	// Fewer non-empty lines than n: head and tail both span all of them.
-	head, tail = panePreviewLines("only\n\n", 4)
-	if head != "only" || tail != "only" {
-		t.Fatalf("single-line preview head=%q tail=%q, want both %q", head, tail, "only")
-	}
-
-	if head, tail := panePreviewLines("\n  \n\n", 3); head != "" || tail != "" {
-		t.Fatalf("blank pane preview head=%q tail=%q, want empty", head, tail)
-	}
-}
-
-func TestWaitForAgentReadyLogsPaneOnTrustPromptTimeout(t *testing.T) {
-	requireTool(t, "tmux")
-	requireTool(t, "node")
-	cfg := workerConfigWithTmux(t, t.TempDir(), createExchangeRemote(t))
-	t.Cleanup(func() { cleanupTmuxServer(cfg) })
-
-	// A Node-driven fake agent draws a Claude trust prompt and never reads stdin,
-	// so the watchdog's Enter does not clear it: the prompt stays up and readiness
-	// times out with a trust prompt still visible. The gate must then log the pane
-	// head/tail so copy drift past the matcher is diagnosable instead of silent.
-	agentScript := filepath.Join(t.TempDir(), "stuck-agent.js")
-	const agentJS = "process.stdout.write('Accessing workspace:\\n\\n');\n" +
-		"process.stdout.write(' /tmp/repo\\n\\n');\n" +
-		"process.stdout.write(\" Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.\\n\\n\");\n" +
-		"process.stdout.write(\" Claude Code'll be able to read, edit, and execute files here.\\n\\n\");\n" +
-		"process.stdout.write(' Security guide\\n\\n');\n" +
-		"process.stdout.write(' > 1. Yes, I trust this folder\\n   2. No, exit\\n\\n');\n" +
-		"process.stdout.write(' Enter to confirm / Esc to cancel\\n');\n" +
-		"setTimeout(() => {}, 30000);\n"
-	if err := os.WriteFile(agentScript, []byte(agentJS), 0o600); err != nil {
-		t.Fatalf("write fake agent: %v", err)
-	}
-	session := "flow-test-ready-trust-timeout"
-	tmuxRun(t, cfg, "new-session", "-d", "-s", session, "node "+shellQuote(agentScript))
-	t.Cleanup(func() { killTmuxSession(cfg, session) })
-
-	prev := initialPromptReadyTimeout
-	initialPromptReadyTimeout = 2 * time.Second
-	t.Cleanup(func() { initialPromptReadyTimeout = prev })
-
-	var logBuf bytes.Buffer
-	prevLogger := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prevLogger) })
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	err := waitForAgentReady(ctx, cfg, session, "claude")
-	if err == nil {
-		t.Fatal("waitForAgentReady returned nil while the trust prompt was never dismissed")
-	}
-	if !strings.Contains(err.Error(), "was not ready") {
-		t.Fatalf("error = %v, want a readiness-timeout error", err)
-	}
-	logged := logBuf.String()
-	if !strings.Contains(logged, "trust prompt") {
-		t.Fatalf("timeout log = %q, want a trust-prompt drift warning", logged)
-	}
-	if !strings.Contains(logged, "pane_head") || !strings.Contains(logged, "pane_tail") {
-		t.Fatalf("timeout log = %q, want pane head/tail telemetry", logged)
-	}
-	if !strings.Contains(logged, "Accessing workspace") {
-		t.Fatalf("timeout log = %q, want the captured pane copy", logged)
 	}
 }
 
