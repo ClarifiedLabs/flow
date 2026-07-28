@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -91,6 +93,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runAsk(args[1:], stdout, stderr)
 	case "complete":
 		return runComplete(args[1:], stdout, stderr)
+	case "submit":
+		return runSubmit(args[1:], stdout, stderr)
 	case "flows":
 		return runFlows(args[1:], stdout, stderr)
 	case "agent-defs":
@@ -2649,6 +2653,155 @@ func runComplete(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// runSubmit hands the agent node's artifact to the human reviewer without
+// ending the session: it creates the artifact, opens the interactive review
+// wait on the current node, then blocks until the review resolves and prints
+// the verdict. On "changes_requested" the agent revises and submits again in
+// the same session; any other outcome is final and the agent should stop.
+func runSubmit(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("submit", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	var taskID string
+	var nodeRunID string
+	var kind string
+	var summaryFile string
+	var outputFile string
+	var clientKey string
+	var sessionID string
+	flags.StringVar(&taskID, "task", "", "task id (default FLOW_TASK_ID)")
+	flags.StringVar(&nodeRunID, "node-run", "", "node run id (default FLOW_NODE_RUN_ID)")
+	flags.StringVar(&kind, "kind", "", "handoff|task_set (default FLOW_ARTIFACT_KIND)")
+	flags.StringVar(&summaryFile, "summary-file", "", "Markdown summary file")
+	flags.StringVar(&outputFile, "output-file", "", "JSON artifact payload file")
+	flags.StringVar(&clientKey, "client-key", "", "idempotency key (default node run id + content hash)")
+	flags.StringVar(&sessionID, "session-id", "", "session id (default FLOW_SESSION_ID)")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "submit does not accept positional arguments")
+		return 2
+	}
+	if strings.TrimSpace(taskID) == "" {
+		taskID = os.Getenv("FLOW_TASK_ID")
+	}
+	if strings.TrimSpace(nodeRunID) == "" {
+		nodeRunID = os.Getenv("FLOW_NODE_RUN_ID")
+	}
+	if strings.TrimSpace(kind) == "" {
+		kind = os.Getenv("FLOW_ARTIFACT_KIND")
+	}
+	if strings.TrimSpace(taskID) == "" || strings.TrimSpace(nodeRunID) == "" || strings.TrimSpace(kind) == "" {
+		fmt.Fprintln(stderr, "task, node run, and artifact kind are required")
+		return 2
+	}
+	if coordinator.ArtifactKind(kind) == coordinator.ArtifactChange {
+		fmt.Fprintln(stderr, "change artifacts are finalized with flow complete, not flow submit")
+		return 2
+	}
+	if strings.TrimSpace(summaryFile) == "" {
+		fmt.Fprintln(stderr, "--summary-file is required")
+		return 2
+	}
+	summary, err := os.ReadFile(summaryFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "read summary: %v\n", err)
+		return 1
+	}
+	var payload json.RawMessage
+	if strings.TrimSpace(outputFile) != "" {
+		payload, err = os.ReadFile(outputFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "read output: %v\n", err)
+			return 1
+		}
+	}
+	if clientKey == "" {
+		// Revision-friendly default: identical content replays, revised content
+		// gets a fresh key, so one node run can accumulate review rounds.
+		digest := sha256.Sum256(append(append([]byte(kind), summary...), payload...))
+		clientKey = nodeRunID + ":" + hex.EncodeToString(digest[:])[:12]
+	}
+	applySessionEnvironment(apiFlags, &sessionID)
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return 1
+	}
+	artifact, _, err := client.CreateWorkflowArtifact(taskID, coordinator.CreateWorkflowArtifactInput{
+		NodeRunID: nodeRunID, Kind: coordinator.ArtifactKind(kind), SummaryMarkdown: string(summary),
+		Payload: payload, ClientKey: clientKey,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "create workflow artifact: %v\n", err)
+		return 1
+	}
+	if err := client.SubmitForReview(taskID, nodeRunID, artifact.ID); err != nil {
+		fmt.Fprintf(stderr, "submit for review: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "submitted %s for review; waiting for the human verdict\n", artifact.ID)
+	if sessionID != "" {
+		if _, err := client.UpdateSessionState(sessionID, coordinator.SessionWaiting); err != nil {
+			fmt.Fprintf(stderr, "warning: mark session waiting: %v\n", err)
+		}
+	}
+	status, code := waitForReviewVerdict(client, taskID, nodeRunID, stderr)
+	if sessionID != "" {
+		if _, err := client.UpdateSessionState(sessionID, coordinator.SessionWorking); err != nil {
+			fmt.Fprintf(stderr, "warning: mark session working: %v\n", err)
+		}
+	}
+	if code != 0 {
+		return code
+	}
+	if status.Outcome != "changes_requested" {
+		// The review is final: finalize this session through the idempotent
+		// complete endpoint (the node already completed with this artifact, so
+		// this replays) — flow complete's handler is what finishes the session.
+		if _, err := client.CompleteWorkflowAgentNode(taskID, nodeRunID, artifact.ID); err != nil {
+			fmt.Fprintf(stderr, "warning: finalize session: %v\n", err)
+		}
+	}
+	switch status.Outcome {
+	case "changes_requested":
+		fmt.Fprintf(stdout, "REVIEW: changes requested\n\n%s\n\nRevise the plan and submit again with flow submit.\n", status.Feedback)
+	case "":
+		fmt.Fprintln(stdout, "REVIEW: resolved")
+	default:
+		fmt.Fprintf(stdout, "REVIEW: %s\n", strings.ReplaceAll(status.Outcome, "_", " "))
+		if strings.TrimSpace(status.Feedback) != "" {
+			fmt.Fprintf(stdout, "\n%s\n", status.Feedback)
+		}
+	}
+	return 0
+}
+
+func waitForReviewVerdict(client *flowclient.Client, taskID, nodeRunID string, stderr io.Writer) (coordinator.ReviewStatusResult, int) {
+	failures := 0
+	for {
+		status, err := client.GetReviewStatus(taskID, nodeRunID)
+		if err != nil {
+			failures++
+			if failures >= 30 {
+				fmt.Fprintf(stderr, "poll review status: %v\n", err)
+				return coordinator.ReviewStatusResult{}, 1
+			}
+		} else {
+			failures = 0
+			switch status.State {
+			case coordinator.ReviewStateResolved:
+				return status, 0
+			case coordinator.ReviewStateNone:
+				fmt.Fprintln(stderr, "review ended without a verdict")
+				return coordinator.ReviewStatusResult{}, 1
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
 func runMerge(args []string, stdout, stderr io.Writer) int {
 	parsed, code := parseAPICommand(args, stderr, "merge", 1, "usage: flow merge [flags] TASK_ID|CHANGE_ID")
 	if code != 0 {
@@ -2775,6 +2928,7 @@ func printUsage(out io.Writer) {
   flow status MESSAGE
   flow ask QUESTION
   flow complete --summary-file PATH [--output-file PATH]
+  flow submit --summary-file PATH [--output-file PATH]
   flow reconcile
   flow --version
 

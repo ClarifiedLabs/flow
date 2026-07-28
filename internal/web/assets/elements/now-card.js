@@ -46,7 +46,7 @@ function renderNowAction(action, card, model, projectAttr) {
     case "open-change":
       return `<a class="${classes}" href="/ui/changes/${escapeAttr(model?.change?.id || model?.change?.ID || "")}" data-link>${escapeHTML(action.label)}</a>`;
     case "focus-gate":
-      return `<button class="${classes}" data-focus-tab="checks">${escapeHTML(action.label)}</button>`;
+      return `<button class="${classes}" data-focus-tab="${escapeAttr(action.tab || "review")}">${escapeHTML(action.label)}</button>`;
     default:
       return `<button class="${classes}">${escapeHTML(action.label)}</button>`;
   }

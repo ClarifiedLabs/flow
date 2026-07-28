@@ -94,7 +94,12 @@ Most users can stay in the web UI:
 - **New Task** creates work, attaches files, chooses a Flow, and optionally
   queues the task immediately.
 - **Task detail** shows requirements, checks, changes, lifecycle history,
-  attachments, and terminal links.
+  attachments, and terminal links. Its **Review** tab answers human gates:
+  it renders the artifact under review (a plan's summary and task list, or a
+  link to the change), a feedback box, and one button per gate outcome. In
+  the `planning` flow the planning agent holds its session open during the
+  review — comments are delivered to it and you can open its terminal — so
+  the plan is refined in one conversation instead of fresh runs.
 - **Feedback**, **Merge**, **Workers**, and **Jobs** show human waits, ready
   merges, worker capacity, and job diagnostics.
 - **Flows** configures coordinator-global and project-specific agent definitions,

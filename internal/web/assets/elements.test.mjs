@@ -12,7 +12,7 @@ installTestDOM();
 
 const { cardModel, dwellTone, formatDwell, matchesFilter, sortForAttention, waitActionLabel, waitReasonText } =
   await import("./board-model.js");
-const { nowCardModel, runRows, tabBadges, isOutdatedAnchor } = await import("./task-model.js");
+const { nowCardModel, runRows, tabBadges, isOutdatedAnchor, reviewModel } = await import("./task-model.js");
 const { reconcile } = await import("./elements/base.js");
 const { renderTaskCard } = await import("./elements/task-card.js");
 const { renderAttentionStrip } = await import("./elements/attention-strip.js");
@@ -25,6 +25,8 @@ const { renderHeldPanel, HAND_BACK_EDGES } = await import("./elements/held-panel
 const { renderDiffFile } = await import("./elements/diff.js");
 const { renderReviewBar } = await import("./elements/review-bar.js");
 const { renderEpic, memberState } = await import("./elements/epic.js");
+const { renderNowCard } = await import("./elements/now-card.js");
+const { renderReviewPanel } = await import("./elements/review-panel.js");
 const { renderActivityFeed, activityEntries } = await import("./elements/activity-feed.js");
 await import("./elements/lane.js");
 await import("./elements/tab-strip.js");
@@ -592,4 +594,174 @@ test("a click bubbles to the app root, which is where actions are dispatched", a
   tab.dispatchEvent(new TestEvent("click", { bubbles: true }));
   assert.equal(seen, tab);
   strip.remove();
+});
+
+// --- review panel: gates, plans, questions ----------------------------------
+
+function reviewFixture(overrides = {}) {
+  const wait = {
+    id: "ww-1",
+    kind: "human_gate",
+    node_run_id: "wnr-1",
+    message: "Review the proposed implementation tasks.",
+    created_at: "2026-07-28T10:00:00Z",
+    details: {
+      instructions: "Review the proposed implementation tasks.",
+      outcomes: ["approved", "changes_requested", "rejected"],
+      artifact_id: "wa-1",
+      interactive: true,
+      gate_node_key: "review",
+    },
+  };
+  const artifacts = [
+    {
+      id: "wa-1",
+      kind: "task_set",
+      summary_markdown: "# Plan\n\nSplit storage.",
+      created_at: "2026-07-28T09:59:00Z",
+      payload: {
+        schema_version: 1,
+        tasks: [
+          { key: "one", title: "Split storage", body: "carve it up", tag_slugs: ["db"] },
+          { key: "two", title: "Migrate", body: "move the data" },
+        ],
+        dependencies: [{ blocker: "one", blocked: "two" }],
+      },
+    },
+  ];
+  return {
+    wait,
+    artifacts,
+    run: { current_artifact_id: "wa-1" },
+    currentNode: { key: "plan", name: "Write task plan" },
+    statusLog: [],
+    activeSession: null,
+    ...overrides,
+  };
+}
+
+test("the review model reads the interactive gate from the wait details", () => {
+  const review = reviewModel(reviewFixture());
+  assert.equal(review.gate.interactive, true);
+  assert.deepEqual(review.gate.outcomes, ["approved", "changes_requested", "rejected"]);
+  assert.equal(review.gate.artifactID, "wa-1");
+  assert.equal(review.gate.changeGate, false);
+  assert.equal(review.artifact.manifest.tasks.length, 2);
+  assert.equal(review.session, null, "no live session without an active waiting session");
+});
+
+test("the review model falls back to the gate node config for classic waits", () => {
+  const review = reviewModel(
+    reviewFixture({
+      wait: { kind: "human_gate", node_run_id: "wnr-9", message: "Review the change" },
+      currentNode: {
+        key: "review",
+        name: "Review plan",
+        config: { human_gate: { instructions: "Gate instructions", outcomes: ["approved", "rejected"] } },
+      },
+    }),
+  );
+  assert.equal(review.gate.interactive, false);
+  assert.equal(review.gate.instructions, "Gate instructions");
+  assert.deepEqual(review.gate.outcomes, ["approved", "rejected"]);
+});
+
+test("a change artifact marks the gate as a change gate", () => {
+  const review = reviewModel(
+    reviewFixture({ artifacts: [{ id: "wa-1", kind: "change", summary_markdown: "s", payload: {} }] }),
+  );
+  assert.equal(review.gate.changeGate, true);
+});
+
+test("the review panel renders the gate, the plan, and one button per outcome", () => {
+  const model = { id: "t-0001", projectID: "p-1", review: reviewModel(reviewFixture()) };
+  const html = renderReviewPanel(model);
+  assert.match(html, /Write task plan/);
+  assert.match(html, /Review the proposed implementation tasks/);
+  assert.match(html, /data-workflow-respond="wnr-1"/);
+  assert.match(html, /data-task="t-0001"/);
+  assert.match(html, /data-outcome="approved"/);
+  assert.match(html, /data-outcome="changes_requested"/);
+  assert.match(html, /data-outcome="rejected"/);
+  assert.match(html, /data-gate-comment="t-0001"/);
+  assert.match(html, /data-workflow-feedback/);
+  assert.match(html, /Split storage/);
+  assert.match(html, /← one/, "the dependency reads as blocked-by");
+  assert.match(html, />db</, "tag slugs render");
+  assert.match(html, /agent is live/, "interactive gates say the agent is live");
+});
+
+test("the review panel answers an agent question with a reply form", () => {
+  const review = reviewModel(
+    reviewFixture({
+      wait: { kind: "agent_request", message: "Which datastore?", created_at: "2026-07-28T10:00:00Z" },
+      statusLog: [{ id: 7, kind: "question", message: "Which datastore?", created_at: "2026-07-28T10:00:00Z" }],
+    }),
+  );
+  assert.equal(review.gate, null);
+  assert.equal(review.question.statusLogID, 7);
+  const html = renderReviewPanel({ id: "t-0001", projectID: "p-1", review });
+  assert.match(html, /Which datastore\?/);
+  assert.match(html, /data-attention-reply-form="t-0001"/);
+  assert.match(html, /data-status-log-id="7"/);
+});
+
+test("the review panel keeps the discussion and offers the live session", () => {
+  const review = reviewModel(
+    reviewFixture({
+      statusLog: [
+        { id: 1, kind: "note", actor: "human", message: "Can task two shrink?", created_at: "2026-07-28T10:01:00Z" },
+        { id: 2, kind: "note", actor: "human", message: "too old", created_at: "2026-07-27T10:00:00Z" },
+      ],
+      activeSession: { id: "s-0001", state: "waiting", terminal_available: true },
+    }),
+  );
+  assert.deepEqual(review.comments.map((comment) => comment.id), [1], "only the discussion since the wait opened");
+  assert.equal(review.session.id, "s-0001");
+  const html = renderReviewPanel({ id: "t-0001", projectID: "p-1", review });
+  assert.match(html, /Can task two shrink\?/);
+  assert.match(html, /Work with the agent/);
+  assert.match(html, /s-0001/);
+  assert.doesNotMatch(html, /too old/);
+});
+
+test("nothing to review renders the empty state", () => {
+  assert.equal(reviewModel({ wait: null, artifacts: [], statusLog: [] }), null);
+  assert.match(renderReviewPanel({ review: null }), /Nothing to review/);
+});
+
+test("the Answer action targets the review tab, never the empty checks tab", () => {
+  const model = {
+    wait: { kind: "human_gate", message: "Review the proposed implementation tasks." },
+    waitKind: "gate",
+    activity: "Write task plan working",
+    dwell: "2m",
+    stepName: "Write task plan",
+    review: { gate: { changeGate: false } },
+  };
+  const card = nowCardModel(model);
+  assert.equal(card.heading, "Now · waiting for your review");
+  assert.equal(card.actions[0].tab, "review");
+  const html = renderNowCard(card, { id: "t-0001", projectID: "p-1" });
+  assert.match(html, /data-focus-tab="review"/);
+  assert.doesNotMatch(html, /data-focus-tab="checks"/);
+});
+
+test("a change gate's Answer action goes to the change tab", () => {
+  const card = nowCardModel({
+    wait: { kind: "human_gate", message: "Review the change" },
+    waitKind: "gate",
+    activity: "Human change review",
+    dwell: "1m",
+    stepName: "Human change review",
+    review: { gate: { changeGate: true } },
+  });
+  assert.equal(card.actions[0].tab, "change");
+});
+
+test("an open gate badges the review tab", () => {
+  const badges = tabBadges({ review: { gate: { nodeRunID: "wnr-1" } }, checks: [], transitions: [], statusLog: [] });
+  assert.equal(badges.review.text, "!");
+  assert.equal(badges.review.tone, "warn");
+  assert.equal(tabBadges({ checks: [], transitions: [], statusLog: [] }).review, undefined);
 });

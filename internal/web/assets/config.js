@@ -57,8 +57,10 @@ export const BOARD_VIEWS = new Set(["lanes", "table"]);
 export const DIAGRAM_MODES = new Set(["run", "graph"]);
 
 // TASK_TABS is the task detail work surface. Order is the reading order of the
-// page: what is happening, then the change, then the evidence, then the log.
+// page: what needs you, what is happening, then the change, then the evidence,
+// then the log.
 export const TASK_TABS = [
+  ["review", "Review"],
   ["overview", "Overview"],
   ["change", "Change"],
   ["checks", "Checks"],
@@ -80,3 +82,5 @@ export const DEFAULT_CONSOLE_HARNESSES = [
 export const BOARD_DONE_COUNTS = [10, 20, 50];
 
 export const BOARD_DONE_WINDOWS = ["1d", "7d", "30d"];
+
+export const TASK_TAB_KEYS = new Set(TASK_TABS.map(([key]) => key));

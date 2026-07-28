@@ -13,12 +13,14 @@ import { value } from "../normalize.js";
 import { nowCardModel, tabBadges } from "../task-model.js";
 import { readDiagramMode, writeDiagramMode } from "../storage.js";
 import { renderTerminalPopOutButton, terminalSelectionHint } from "../terminal.js";
-import { define, FlowElement } from "./base.js";
+import { TASK_TAB_KEYS } from "../config.js";
+import { define, FlowElement, mount } from "./base.js";
 import "./activity-feed.js";
 import "./change.js";
 import "./check-list.js";
 import "./held-panel.js";
 import "./now-card.js";
+import "./review-panel.js";
 import "./run-list.js";
 import "./tab-strip.js";
 import "./task-rail.js";
@@ -57,6 +59,9 @@ export function renderTaskTerminal(target, loginPath) {
 export class FlowTaskDetail extends FlowElement {
   diagram = readDiagramMode();
   activePanel = "";
+  panelKey = "";
+  panelMarkup = "";
+  deepLinked = false;
   renderedModel = null;
   changeGeneration = 0;
   changeKey = "";
@@ -86,17 +91,38 @@ export class FlowTaskDetail extends FlowElement {
     `;
   }
 
+  // Poll-fresh models must reach the children even though the shell markup is
+  // stable: the base paint skips unchanged markup wholesale, so the children
+  // sync on every paint attempt, not just on writes.
+  paint() {
+    const hadShell = this.renderedModel != null;
+    super.paint();
+    if (hadShell) this.syncChildren();
+  }
+
   bind() {
     this.addEventListener("tab-change", () => this.paintPanel());
   }
 
   afterPaint() {
+    this.syncChildren();
+  }
+
+  syncChildren() {
     const model = this.data;
     if (!model) return;
-    this.querySelector("flow-task-rail").data = model;
+    const rail = this.querySelector("flow-task-rail");
+    if (!rail) return;
+    rail.data = model;
     this.querySelector("flow-held-panel").data = model;
     this.querySelector("flow-now-card").data = { card: nowCardModel(model), model };
-    this.querySelector("flow-tab-strip").data = { badges: tabBadges(model) };
+    const strip = this.querySelector("flow-tab-strip");
+    strip.data = { badges: tabBadges(model) };
+    if (!this.deepLinked) {
+      this.deepLinked = true;
+      const wanted = new URLSearchParams(window.location.search).get("tab");
+      if (wanted && TASK_TAB_KEYS.has(wanted)) strip.select(wanted);
+    }
     this.paintPanel();
   }
 
@@ -140,21 +166,25 @@ export class FlowTaskDetail extends FlowElement {
       // returning to the tab always mints fresh terminal access.
       this.resetTerminalLoad(this.terminalKey);
     }
+    if (active !== this.activePanel) {
+      this.panelKey = "";
+      this.panelMarkup = "";
+    }
     this.activePanel = active;
     panel.dataset.tab = active;
 
     switch (active) {
+      case "review":
+        mount(panel, "flow-review-panel", model);
+        break;
       case "overview":
-        panel.innerHTML = this.overviewMarkup(model);
-        this.paintOverview(model);
+        this.paintOverviewPanel(model, panel);
         break;
       case "checks":
-        panel.innerHTML = `<flow-check-list></flow-check-list>`;
-        panel.firstElementChild.data = model;
+        mount(panel, "flow-check-list", model);
         break;
       case "activity":
-        panel.innerHTML = `<flow-activity-feed></flow-activity-feed>`;
-        panel.firstElementChild.data = model;
+        mount(panel, "flow-activity-feed", model);
         break;
       case "change":
         this.paintChange(model, panel);
@@ -163,8 +193,27 @@ export class FlowTaskDetail extends FlowElement {
         this.paintTerminal(model, panel);
         break;
       default:
-        panel.innerHTML = this.detailMarkup(model);
+        this.paintStatic(panel, "detail", this.detailMarkup(model));
     }
+  }
+
+  // paintStatic swaps panel markup only when it actually changed, so a poll
+  // never clobbers element state — an open transcript, a draft review note, a
+  // terminal frame — with an identical rewrite.
+  paintStatic(panel, key, markup) {
+    if (this.panelKey === key && this.panelMarkup === markup) return false;
+    panel.innerHTML = markup;
+    this.panelKey = key;
+    this.panelMarkup = markup;
+    return true;
+  }
+
+  paintOverviewPanel(model, panel) {
+    this.paintStatic(panel, "overview", this.overviewMarkup(model));
+    const host = panel.querySelector(".diagram");
+    if (!host) return;
+    const tag = this.diagram === "graph" ? "flow-workflow-graph" : "flow-run-list";
+    mount(host, tag, this.diagram === "graph" ? model : model.rows);
   }
 
   overviewMarkup(model) {
@@ -187,14 +236,6 @@ export class FlowTaskDetail extends FlowElement {
     `;
   }
 
-  paintOverview(model) {
-    const host = this.querySelector(".diagram");
-    if (!host) return;
-    const tag = this.diagram === "graph" ? "flow-workflow-graph" : "flow-run-list";
-    host.innerHTML = `<${tag}></${tag}>`;
-    host.firstElementChild.data = this.diagram === "graph" ? model : model.rows;
-  }
-
   resetChangeLoad(key = "") {
     this.changeGeneration += 1;
     this.changeKey = key;
@@ -206,7 +247,7 @@ export class FlowTaskDetail extends FlowElement {
   paintChange(model, panel) {
     const change = model.change;
     if (!change) {
-      panel.innerHTML = `<p class="empty">No change yet</p>`;
+      this.paintStatic(panel, "change:empty", `<p class="empty">No change yet</p>`);
       return;
     }
     const id = String(value(change, "id", "ID") || "");
@@ -215,15 +256,21 @@ export class FlowTaskDetail extends FlowElement {
     if (key !== this.changeKey) this.resetChangeLoad(key);
 
     if (this.changeData) {
-      panel.innerHTML = `<flow-change></flow-change>`;
+      if (this.panelKey !== `change:${key}:data`) {
+        panel.innerHTML = `<flow-change></flow-change>`;
+        this.panelKey = `change:${key}:data`;
+        this.panelMarkup = "";
+      }
+      // Reusing the element keeps the selected file and the reviewer's pending
+      // inline notes; the element's own paint skips unchanged markup.
       panel.firstElementChild.data = this.changeData;
       return;
     }
     if (this.changeError) {
-      panel.innerHTML = `<div class="empty">${escapeHTML(this.changeError)} <button class="button secondary" type="button" data-change-retry>Retry</button></div>`;
+      this.paintStatic(panel, `change:${key}:error`, `<div class="empty">${escapeHTML(this.changeError)} <button class="button secondary" type="button" data-change-retry>Retry</button></div>`);
       return;
     }
-    panel.innerHTML = `<div class="empty">Loading change</div>`;
+    this.paintStatic(panel, `change:${key}:loading`, `<div class="empty">Loading change</div>`);
     if (!this.changePromise) this.loadChange(id, key);
   }
 
@@ -262,21 +309,25 @@ export class FlowTaskDetail extends FlowElement {
   paintTerminal(model, panel) {
     const target = taskTerminalTarget(model);
     if (!target) {
-      panel.innerHTML = `<p class="empty">No live terminal</p>`;
+      this.paintStatic(panel, "terminal:none", `<p class="empty">No live terminal</p>`);
       return;
     }
     const key = `${target.kind}:${target.id}`;
     if (key !== this.terminalKey) this.resetTerminalLoad(key);
 
     if (this.terminalLoginPath) {
-      panel.innerHTML = renderTaskTerminal(target, this.terminalLoginPath);
+      if (this.panelKey !== `terminal:${key}:ready`) {
+        panel.innerHTML = renderTaskTerminal(target, this.terminalLoginPath);
+        this.panelKey = `terminal:${key}:ready`;
+        this.panelMarkup = "";
+      }
       return;
     }
     if (this.terminalError) {
-      panel.innerHTML = `<div class="empty">${escapeHTML(this.terminalError)} <button class="button secondary" type="button" data-terminal-retry>Retry</button></div>`;
+      this.paintStatic(panel, `terminal:${key}:error`, `<div class="empty">${escapeHTML(this.terminalError)} <button class="button secondary" type="button" data-terminal-retry>Retry</button></div>`);
       return;
     }
-    panel.innerHTML = `<div class="empty">Connecting terminal</div>`;
+    this.paintStatic(panel, `terminal:${key}:connecting`, `<div class="empty">Connecting terminal</div>`);
     if (!this.terminalPromise) this.loadTerminal(target, key);
   }
 

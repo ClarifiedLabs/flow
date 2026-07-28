@@ -370,6 +370,29 @@ func (c *Client) CompleteWorkflowAgentNode(taskID, nodeRunID, artifactID string)
 	return response, nil
 }
 
+// SubmitForReview parks the active agent node on a human review of the
+// artifact instead of completing it: the session stays alive while the human
+// decides, and GetReviewStatus reports the verdict.
+func (c *Client) SubmitForReview(taskID, nodeRunID, artifactID string) error {
+	var response struct {
+		Wait coordinator.WorkflowWait `json:"wait"`
+	}
+	request := map[string]string{"node_run_id": nodeRunID, "artifact_id": artifactID}
+	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/workflow/submit-review", request, nil, &response); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Client) GetReviewStatus(taskID, nodeRunID string) (coordinator.ReviewStatusResult, error) {
+	var response coordinator.ReviewStatusResult
+	path := c.tasksPath("/"+url.PathEscape(taskID)) + "/workflow/review?node_run_id=" + url.QueryEscape(nodeRunID)
+	if err := c.do(http.MethodGet, path, nil, nil, &response); err != nil {
+		return coordinator.ReviewStatusResult{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) RespondWorkflow(taskID, nodeRunID, outcome, feedback string) (coordinator.CompleteWorkflowNodeResult, error) {
 	var response coordinator.CompleteWorkflowNodeResult
 	request := map[string]string{"node_run_id": nodeRunID, "outcome": outcome, "feedback": feedback}

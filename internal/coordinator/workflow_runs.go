@@ -494,7 +494,8 @@ UPDATE workflow_runs SET current_node_run_id = ?, version = version + 1 WHERE id
 		return WorkflowNodeRun{}, false, err
 	}
 	if node.Kind == NodeHumanGate {
-		if err := enterWaitTx(ctx, tx, &run, &nodeRun, WorkflowWaitHumanGate, humanGateWaitMessage(node), ActorSystem, s.now().UTC()); err != nil {
+		details := humanGateWaitDetails(node, run.CurrentArtifactID)
+		if err := enterWaitWithDetailsTx(ctx, tx, &run, &nodeRun, WorkflowWaitHumanGate, details, humanGateWaitMessage(node), ActorSystem, s.now().UTC()); err != nil {
 			return WorkflowNodeRun{}, false, err
 		}
 	}
@@ -1274,7 +1275,8 @@ WHERE id = ?`, string(WorkflowRunRunning), target, sqlitex.NullableNonEmptyStrin
 		return CompleteWorkflowNodeResult{}, err
 	}
 	if targetNode.Kind == NodeHumanGate {
-		if err := enterWaitTx(ctx, tx, &run, &next, WorkflowWaitHumanGate, humanGateWaitMessage(targetNode), ActorSystem, now); err != nil {
+		details := humanGateWaitDetails(targetNode, artifactID)
+		if err := enterWaitWithDetailsTx(ctx, tx, &run, &next, WorkflowWaitHumanGate, details, humanGateWaitMessage(targetNode), ActorSystem, now); err != nil {
 			return CompleteWorkflowNodeResult{}, err
 		}
 	}
@@ -1911,6 +1913,10 @@ INSERT INTO workflow_node_runs (
 }
 
 func enterWaitTx(ctx context.Context, tx *sql.Tx, run *WorkflowRun, nodeRun *WorkflowNodeRun, kind WorkflowWaitKind, message string, actor Actor, now time.Time) error {
+	return enterWaitWithDetailsTx(ctx, tx, run, nodeRun, kind, nil, message, actor, now)
+}
+
+func enterWaitWithDetailsTx(ctx context.Context, tx *sql.Tx, run *WorkflowRun, nodeRun *WorkflowNodeRun, kind WorkflowWaitKind, details any, message string, actor Actor, now time.Time) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE workflow_node_runs SET state = ? WHERE id = ?`, string(WorkflowNodeWaiting), nodeRun.ID); err != nil {
 		return err
 	}
@@ -1933,7 +1939,7 @@ UPDATE tasks SET lifecycle_state = ?, updated_at = ? WHERE id = ?`,
 			return err
 		}
 	}
-	return insertWaitTx(ctx, tx, run.ID, nodeRun.ID, kind, message, actor, now)
+	return insertWaitWithReasonTx(ctx, tx, run.ID, nodeRun.ID, kind, "", details, message, actor, now)
 }
 
 func humanGateWaitMessage(node FlowNodeSnapshot) string {

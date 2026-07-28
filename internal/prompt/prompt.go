@@ -380,7 +380,7 @@ func roleInstructions(role string, input Input) []string {
 		case "task_set":
 			return []string{
 				"Produce the requested task plan as a schema-version-1 task-set JSON document. This base workspace is read-only with respect to the exchange; do not create commits or push branches.",
-				"Write a concise Markdown summary and finalize with flow complete --summary-file SUMMARY.md --output-file TASK_SET.json.",
+				"Write a concise Markdown summary into SUMMARY.md and the task-set JSON into TASK_SET.json, then run flow submit --summary-file SUMMARY.md --output-file TASK_SET.json. flow submit hands the plan to the human reviewer and blocks for the verdict: revise and resubmit when changes are requested, stop when the review is final. If the node has no downstream human gate, finalize with flow complete --summary-file SUMMARY.md --output-file TASK_SET.json instead.",
 			}
 		case "handoff":
 			return []string{

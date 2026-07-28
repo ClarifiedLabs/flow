@@ -44,6 +44,7 @@ var cssModules = []struct{ Name, Scope string }{
 	{"diff.module.css", "flow-diff"},
 	{"inline-thread.module.css", "flow-inline-thread"},
 	{"review-bar.module.css", "flow-review-bar"},
+	{"review-panel.module.css", "flow-review-panel"},
 	{"epic.module.css", "flow-epic"},
 }
 

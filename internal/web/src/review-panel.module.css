@@ -1,0 +1,157 @@
+/* The Review tab: gate panel, the plan under review, the discussion, and the
+   live agent session. The gate is the thing blocking the task, so it carries
+   the same border treatment as the now-card. */
+
+:host {
+  display: block;
+}
+
+.gate,
+.artifact,
+.comments,
+.live-session {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+
+.gate {
+  border-left: 2px solid var(--ph-await);
+}
+
+.gate-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.gate-head h3 {
+  margin: 0;
+  font-size: var(--text-section);
+  letter-spacing: var(--track-section);
+}
+
+.gate-head .locus {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--text-nano);
+  font-weight: 600;
+  letter-spacing: var(--track-badge);
+  text-transform: uppercase;
+  background: var(--ph-await-bg);
+  color: var(--ph-await);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.instructions {
+  color: var(--muted);
+  margin-top: 0;
+}
+
+.gate textarea {
+  width: 100%;
+  margin: 8px 0;
+}
+
+.gate .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.plan-tasks {
+  border-top: 1px solid var(--line);
+  margin-top: 10px;
+}
+
+.plan-task {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 9px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.plan-task:last-child {
+  border-bottom: 0;
+}
+
+.plan-task .key {
+  font-family: var(--font-mono);
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+.plan-task .tag {
+  font-size: var(--text-nano);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.comment {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.comment:last-child {
+  border-bottom: 0;
+}
+
+.comment .actor {
+  font-weight: 600;
+  margin-right: 8px;
+}
+
+.comment .locus {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+.note {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+.terminal-bezel {
+  margin-top: 10px;
+  background: var(--term);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.terminal-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--panel-2);
+  font-size: var(--text-quiet);
+  letter-spacing: var(--track-chrome);
+  color: var(--muted);
+}
+
+.terminal-titlebar .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--muted);
+}
+
+.terminal-frame {
+  width: 100%;
+  height: 320px;
+  border: 0;
+  display: block;
+}

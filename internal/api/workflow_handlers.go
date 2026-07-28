@@ -47,6 +47,30 @@ type workflowCompleteRequest struct {
 	ArtifactID string `json:"artifact_id"`
 }
 
+// workflowSubmitReviewRequest parks the active agent node on a human review
+// of its artifact (interactive gate). The agent stays in its session and
+// polls the review GET below until a respond resolves the wait.
+type workflowSubmitReviewRequest struct {
+	NodeRunID  string `json:"node_run_id"`
+	ArtifactID string `json:"artifact_id"`
+}
+
+type workflowSubmitReviewResponse struct {
+	Wait coordinator.WorkflowWait `json:"wait"`
+}
+
+// workflowCommentRequest records plan feedback without resolving the gate.
+// When the reviewed agent session is still alive the comment is also queued
+// into it, so discussing the plan never requires a verdict.
+type workflowCommentRequest struct {
+	Message string `json:"message"`
+}
+
+type workflowCommentResponse struct {
+	Status coordinator.StatusLogEntry `json:"status"`
+	Queued bool                       `json:"queued"`
+}
+
 // workflowReleaseRequest hands a held run back to the executor. Edge names
 // which way out the operator is taking: resume (leave it where it is), submit
 // (an artifact they produced), satisfy (done, no artifact), merge (jump to the
@@ -301,10 +325,28 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 			return
 		}
-		result, err := s.workflowRuns.Respond(r.Context(), taskID, request.NodeRunID, request.Outcome, request.Feedback, coordinator.ActorHuman)
-		if err != nil {
-			writeWorkflowError(w, err, "respond_workflow_failed")
-			return
+		var result coordinator.CompleteWorkflowNodeResult
+		if wait, waiting, waitErr := s.workflowRuns.OpenWait(r.Context(), taskID); waitErr == nil && waiting &&
+			wait.Kind == coordinator.WorkflowWaitHumanGate &&
+			strings.TrimSpace(wait.NodeRunID) == strings.TrimSpace(request.NodeRunID) &&
+			coordinator.ParseReviewWaitDetails(wait.Details).Interactive {
+			review, err := s.workflowRuns.RespondReview(r.Context(), taskID, request.NodeRunID, request.Outcome, request.Feedback, coordinator.ActorHuman)
+			if err != nil {
+				writeWorkflowError(w, err, "respond_workflow_failed")
+				return
+			}
+			// The reviewed session is deliberately not finished here: the agent's
+			// flow submit is still polling with its session token, and finishing
+			// would revoke it before the verdict arrives. The agent finalizes its
+			// own session through the idempotent complete endpoint afterwards.
+			result = review.Result
+		} else {
+			legacy, err := s.workflowRuns.Respond(r.Context(), taskID, request.NodeRunID, request.Outcome, request.Feedback, coordinator.ActorHuman)
+			if err != nil {
+				writeWorkflowError(w, err, "respond_workflow_failed")
+				return
+			}
+			result = legacy
 		}
 		if s.workflowExecutor != nil && !result.Done {
 			if err := s.workflowExecutor.Advance(r.Context(), result.Run.ID); err != nil {
@@ -317,6 +359,89 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 			}
 		}
 		writeJSON(w, http.StatusOK, result)
+	case "submit-review":
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession) {
+			writeError(w, http.StatusForbidden, "forbidden", "review submission requires an owner or session token")
+			return
+		}
+		var request workflowSubmitReviewRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+			return
+		}
+		input := coordinator.SubmitForReviewInput{
+			NodeRunID:  request.NodeRunID,
+			ArtifactID: request.ArtifactID,
+			Actor:      workflowActor(principal),
+		}
+		if principal.Scope == coordinator.TokenScopeSession {
+			input.SessionID = strings.TrimSpace(principal.Subject)
+		}
+		wait, err := s.workflowRuns.SubmitForReview(r.Context(), input)
+		if err != nil {
+			writeWorkflowError(w, err, "submit_review_failed")
+			return
+		}
+		writeJSON(w, http.StatusCreated, workflowSubmitReviewResponse{Wait: wait})
+	case "review":
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession) {
+			writeError(w, http.StatusForbidden, "forbidden", "review status requires an owner or session token")
+			return
+		}
+		nodeRunID := strings.TrimSpace(r.URL.Query().Get("node_run_id"))
+		if nodeRunID == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request", "node_run_id is required")
+			return
+		}
+		status, err := s.workflowRuns.ReviewStatus(r.Context(), taskID, nodeRunID)
+		if err != nil {
+			writeWorkflowError(w, err, "review_status_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	case "comment":
+		if !requireMethod(w, r, http.MethodPost) || !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+			return
+		}
+		var request workflowCommentRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+			return
+		}
+		if strings.TrimSpace(request.Message) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request", "message is required")
+			return
+		}
+		entry, err := s.status.Write(r.Context(), coordinator.WriteStatusInput{
+			TaskID:  taskID,
+			Actor:   principal.Actor(),
+			Kind:    coordinator.StatusKindNote,
+			Message: request.Message,
+		})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "comment_failed", err.Error())
+			return
+		}
+		queued := false
+		if s.sessions != nil {
+			if _, ok, err := s.sessions.ReplyToTask(r.Context(), coordinator.ReplyToTaskInput{
+				TaskID:      taskID,
+				StatusLogID: &entry.ID,
+				Actor:       principal.Actor(),
+				Body:        request.Message,
+			}); err != nil {
+				slog.Warn("queue review comment for live session", "task_id", taskID, "error", err)
+			} else {
+				queued = ok
+			}
+		}
+		writeJSON(w, http.StatusCreated, workflowCommentResponse{Status: entry, Queued: queued})
 	case "budget":
 		if !requireMethod(w, r, http.MethodPost) || !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
 			return

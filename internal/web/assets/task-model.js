@@ -98,6 +98,115 @@ function loopBackLabel(nodeRuns, index, nodes) {
   return `↺ looped back to ${value(target, "name", "Name") || nextKey}${visit > 1 ? ` · ×${visit - 1}` : ""}`;
 }
 
+// parseWaitDetails decodes workflow_waits.details. Interactive review waits
+// carry the gate's instructions/outcomes/artifact with them; classic gate
+// waits get the same fields from the executor, and legacy rows fall back to
+// the current node's gate config.
+export function parseWaitDetails(wait) {
+  let details = value(wait || {}, "details", "Details");
+  if (typeof details === "string") {
+    try {
+      details = JSON.parse(details);
+    } catch {
+      details = null;
+    }
+  }
+  return details || {};
+}
+
+// reviewModel is the Review tab's projection: the open human gate or agent
+// question, the artifact under review, the discussion so far, and the live
+// agent session when the review is interactive. Null when there is nothing
+// to review and nothing under review.
+export function reviewModel({ wait, currentNode, run, artifacts, statusLog, activeSession }) {
+  const waitKind = String(value(wait, "kind", "Kind") || "");
+  const details = parseWaitDetails(wait);
+  const gateConfig = value(value(currentNode || {}, "config", "Config") || {}, "human_gate", "HumanGate") || {};
+
+  let gate = null;
+  if (waitKind === "human_gate") {
+    const outcomes = details.outcomes?.length ? details.outcomes : value(gateConfig, "outcomes", "Outcomes") || [];
+    const artifactID = String(details.artifact_id || value(run, "current_artifact_id", "CurrentArtifactID") || "");
+    const artifact = artifacts.find((candidate) => String(value(candidate, "id", "ID")) === artifactID) || null;
+    gate = {
+      nodeRunID: String(value(wait, "node_run_id", "NodeRunID") || ""),
+      heading: String(value(currentNode, "name", "Name") || "Review"),
+      instructions:
+        String(details.instructions || value(gateConfig, "instructions", "Instructions") || value(wait, "message", "Message") || ""),
+      outcomes: Array.isArray(outcomes) ? outcomes : [],
+      interactive: Boolean(details.interactive),
+      artifactID,
+      changeGate: String(value(artifact || {}, "kind", "Kind")) === "change",
+    };
+  }
+
+  let question = null;
+  if (waitKind === "agent_request") {
+    const entry = (statusLog || []).find((candidate) => value(candidate, "kind", "Kind") === "question") || {};
+    question = {
+      message: String(value(wait, "message", "Message") || ""),
+      statusLogID: value(entry, "id", "ID") || "",
+    };
+  }
+
+  let artifact = null;
+  const artifactID = gate?.artifactID || String(value(run, "current_artifact_id", "CurrentArtifactID") || "");
+  const found =
+    artifacts.find((candidate) => String(value(candidate, "id", "ID")) === artifactID) ||
+    [...artifacts].reverse().find((candidate) => String(value(candidate, "kind", "Kind")) === "task_set") ||
+    null;
+  if (found) {
+    let manifest = null;
+    let payload = value(found, "payload", "Payload");
+    if (typeof payload === "string") {
+      try {
+        payload = JSON.parse(payload);
+      } catch {
+        payload = null;
+      }
+    }
+    if (String(value(found, "kind", "Kind")) === "task_set" && payload && Array.isArray(payload.tasks)) manifest = payload;
+    artifact = {
+      id: String(value(found, "id", "ID") || ""),
+      kind: String(value(found, "kind", "Kind") || ""),
+      summary: String(value(found, "summary_markdown", "SummaryMarkdown") || ""),
+      manifest,
+      createdAt: value(found, "created_at", "CreatedAt"),
+    };
+  }
+
+  const waitSince = new Date(value(wait, "created_at", "CreatedAt") || 0).getTime();
+  const comments = (statusLog || [])
+    .filter((entry) => {
+      if (!wait) return false;
+      const at = new Date(value(entry, "created_at", "CreatedAt") || 0).getTime();
+      return Number.isFinite(at) && at >= waitSince;
+    })
+    .slice(-20)
+    .map((entry) => ({
+      id: value(entry, "id", "ID"),
+      actor: String(value(entry, "actor", "Actor") || ""),
+      kind: String(value(entry, "kind", "Kind") || "note"),
+      message: String(value(entry, "message", "Message") || ""),
+      createdAt: value(entry, "created_at", "CreatedAt"),
+    }));
+
+  let session = null;
+  if (gate?.interactive && activeSession) {
+    const sessionID = String(value(activeSession, "id", "ID") || "");
+    if (sessionID) {
+      session = {
+        id: sessionID,
+        state: String(value(activeSession, "state", "State") || ""),
+        terminalAvailable: Boolean(value(activeSession, "terminal_available", "TerminalAvailable")),
+      };
+    }
+  }
+
+  if (!gate && !question && !artifact) return null;
+  return { gate, question, artifact, comments, session };
+}
+
 // taskModel is the whole page in one object.
 export function taskModel(data, workflowData, { now = Date.now() } = {}) {
   const task = value(data, "task", "Task") || {};
@@ -114,6 +223,16 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
   const stepIndex = nodes.findIndex((node) => value(node, "key", "Key") === currentNodeKey) + 1;
   const checks = value(detail, "checks", "Checks") || [];
   const threads = value(data, "threads", "Threads") || [];
+  const artifacts = value(workflowData || {}, "artifacts", "Artifacts") || [];
+  const statusLog = value(data, "status_log", "StatusLog") || [];
+  const review = reviewModel({
+    wait,
+    currentNode,
+    run,
+    artifacts,
+    statusLog,
+    activeSession: value(detail, "active_session", "ActiveSession"),
+  });
 
   const stepName = value(currentNode, "name", "Name") || currentNodeKey.replaceAll("_", " ");
   const activity = held
@@ -164,7 +283,8 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
     terminalJobID: value(detail, "terminal_job_id", "TerminalJobID"),
     taskConsole: value(detail, "task_console", "TaskConsole"),
     transitions: value(detail, "transitions", "Transitions") || [],
-    statusLog: value(data, "status_log", "StatusLog") || [],
+    statusLog,
+    review,
     sessions: value(detail, "sessions", "Sessions") || [],
     relations: value(detail, "relations", "Relations") || [],
     attachments: value(detail, "attachments", "Attachments") || [],
@@ -192,7 +312,12 @@ export function nowCardModel(model) {
     const message = String(value(model.wait, "message", "Message") || "").trim();
     return {
       tone: model.waitKind === "failed" || model.waitKind === "budget" ? "danger" : "await",
-      heading: model.waitKind === "failed" ? "Now · workflow step failed" : `Now · ${model.activity.toLowerCase()}`,
+      heading:
+        model.waitKind === "failed"
+          ? "Now · workflow step failed"
+          : model.waitKind === "gate"
+            ? "Now · waiting for your review"
+            : `Now · ${model.activity.toLowerCase()}`,
       age: model.dwell,
       actor: model.stepName,
       body: message,
@@ -223,8 +348,9 @@ export function nowCardModel(model) {
 function nowActions(model) {
   switch (model.waitKind) {
     case "gate":
+      return [{ label: "Answer", key: "focus-gate", primary: true, tab: model.review?.gate?.changeGate ? "change" : "review" }];
     case "question":
-      return [{ label: "Answer", key: "focus-gate", primary: true }];
+      return [{ label: "Answer", key: "focus-gate", primary: true, tab: "review" }];
     case "failed":
       return [
         { label: "Retry", key: "workflow-retry", primary: true },
@@ -266,6 +392,7 @@ export function isOutdatedAnchor(thread, change) {
 // whether the number is good news.
 export function tabBadges(model) {
   const badges = {};
+  if (model.review?.gate || model.review?.question) badges.review = { text: "!", tone: "warn" };
   if (model.change) badges.change = { text: String(model.openThreads || ""), tone: model.openThreads ? "warn" : "" };
   if (model.checks.length) {
     const ok = model.checksSatisfied === model.checks.length;

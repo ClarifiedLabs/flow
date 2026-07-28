@@ -52,11 +52,13 @@ function renderQuietMeta(model) {
 function renderCardActions(model, projectAttr) {
   const id = escapeAttr(model.id);
   if (model.waitKind === "gate" || model.waitKind === "question") {
+    // Answer deep-links the tab that can actually answer: the Review tab
+    // renders the gate panel (or the agent's question) with its feedback box.
     return `
       <div class="ask">
         <p>${escapeHTML(model.reason)}</p>
         <div class="actions">
-          <a class="button" href="${escapeAttr(taskHref(model.projectID, model.id))}" data-link>Answer</a>
+          <a class="button" href="${escapeAttr(taskHref(model.projectID, model.id))}?tab=review" data-link>Answer</a>
           <button class="button secondary" data-card-approve="${id}"${projectAttr}>Approve</button>
         </div>
       </div>

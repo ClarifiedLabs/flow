@@ -8,6 +8,7 @@
 // app root does.
 
 import { apiDelete, apiGet, apiPatch, apiPost, taskAPIBase, taskConsoleAPIPath } from "./api.js";
+import { parseWaitDetails } from "./task-model.js";
 
 const workflowPath = (dataset, id, suffix = "") =>
   `${taskAPIBase(dataset.project)}/${encodeURIComponent(id)}${suffix}`;
@@ -49,6 +50,22 @@ export const ACTIONS = {
       outcome: dataset.outcome || "",
       feedback,
     });
+    await app.refresh();
+  },
+
+  // gateComment records plan feedback without a verdict. When the reviewed
+  // agent is still in its session the comment is queued into it, so the
+  // reviewer can discuss the plan before deciding.
+  async gateComment(app, element, dataset) {
+    const textarea = element.closest("[data-gate-panel]")?.querySelector("[data-workflow-feedback]");
+    const message = String(textarea?.value || "").trim();
+    if (!message) {
+      app.setStatus("Write a comment first");
+      return;
+    }
+    const result = await apiPost(workflowPath(dataset, dataset.gateComment, "/workflow/comment"), { message });
+    if (textarea) textarea.value = "";
+    app.setStatus(result?.queued ? "Comment sent to the agent" : "Comment recorded");
     await app.refresh();
   },
 
@@ -201,6 +218,10 @@ function releaseMessage(taskID, edge) {
 }
 
 function firstGateOutcome(detail) {
+  // Interactive review waits carry the gate's outcomes with them — the
+  // current node is the agent node then, so its own config has none.
+  const fromWait = parseWaitDetails(detail?.detail?.open_wait).outcomes?.[0];
+  if (fromWait) return fromWait;
   const snapshot = detail?.detail?.run?.snapshot || {};
   const key = detail?.detail?.run?.current_node_key || "";
   const node = (snapshot.nodes || []).find((candidate) => candidate.key === key);
