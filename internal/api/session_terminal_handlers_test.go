@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -48,9 +50,39 @@ func TestTerminalLoginRedirectUsesTrailingSlash(t *testing.T) {
 		t.Fatalf("terminal access cookie not set; cookies = %+v", login.Result().Cookies())
 	}
 
+	pathMatches := func(cookiePath, requestPath string) bool {
+		if cookiePath == requestPath {
+			return true
+		}
+		if !strings.HasPrefix(requestPath, cookiePath) {
+			return false
+		}
+		return strings.HasSuffix(cookiePath, "/") || requestPath[len(cookiePath)] == '/'
+	}
+
+	if !pathMatches(terminalCookie.Path, wantLocation) {
+		t.Fatalf("terminal access cookie path %q does not match redirected page %q", terminalCookie.Path, wantLocation)
+	}
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("create cookie jar: %v", err)
+	}
+	loginURL, err := url.Parse("http://example.com" + access.LoginPath)
+	if err != nil {
+		t.Fatalf("parse login URL: %v", err)
+	}
+	jar.SetCookies(loginURL, login.Result().Cookies())
+
 	page := httptest.NewRecorder()
 	pageRequest := httptest.NewRequest(http.MethodGet, wantLocation, nil)
-	pageRequest.AddCookie(terminalCookie)
+	pageURL, err := url.Parse("http://example.com" + wantLocation)
+	if err != nil {
+		t.Fatalf("parse terminal page URL: %v", err)
+	}
+	for _, c := range jar.Cookies(pageURL) {
+		pageRequest.AddCookie(c)
+	}
 	fixture.Server.ServeHTTP(page, pageRequest)
 	if page.Code != http.StatusOK {
 		t.Fatalf("terminal page status = %d, want 200; body: %s", page.Code, page.Body.String())
@@ -71,10 +103,20 @@ func TestTerminalLoginRedirectUsesTrailingSlash(t *testing.T) {
 		"terminal-page.js",
 	}
 	for _, asset := range assets {
-		assetURL := wantLocation + asset
+		assetURLPath := wantLocation + asset
+		if !pathMatches(terminalCookie.Path, assetURLPath) {
+			t.Fatalf("terminal access cookie path %q does not match asset URL %q", terminalCookie.Path, assetURLPath)
+		}
+
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, assetURL, nil)
-		req.AddCookie(terminalCookie)
+		req := httptest.NewRequest(http.MethodGet, assetURLPath, nil)
+		assetURL, err := url.Parse("http://example.com" + assetURLPath)
+		if err != nil {
+			t.Fatalf("parse asset URL %q: %v", assetURLPath, err)
+		}
+		for _, c := range jar.Cookies(assetURL) {
+			req.AddCookie(c)
+		}
 		fixture.Server.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("terminal asset %s status = %d, want 200; body: %s", asset, rec.Code, rec.Body.String())
