@@ -137,9 +137,49 @@ func TestNavPanelUsesDefinedThemeTokens(t *testing.T) {
 	}
 }
 
-// The chrome tokens the top bar and nav panel share must be defined in every
-// theme block — default dark, explicit light, and system light — or one mode
-// silently loses the panel background and border.
+// The project picker had the same bug as the nav panel: var(--surface, #111),
+// var(--border, #333), and var(--surface-raised, rgba(255, 255, 255, 0.06))
+// reference tokens that do not exist, so the dark fallbacks stayed active in
+// light mode while the picker foregrounds switched to the light palette. The
+// panel, item hover, and card badge must use defined chrome tokens.
+func TestProjectPickerUsesDefinedThemeTokens(t *testing.T) {
+	css := readModule(t, "base.module.css")
+	rules := []struct {
+		selector  string
+		want      []string
+		undefined []string
+	}{
+		{".project-picker-menu {", []string{"background: var(--panel);", "border: 1px solid var(--line);"}, []string{"--surface", "--border"}},
+		{".project-picker-item:hover {", []string{"background: var(--panel-2);"}, []string{"--surface-raised"}},
+		{".card-project-badge {", []string{"border: 1px solid var(--line);"}, []string{"--border"}},
+	}
+	for _, check := range rules {
+		start := strings.Index(css, check.selector)
+		if start < 0 {
+			t.Fatalf("base css is missing the %s rule", check.selector)
+		}
+		rule := css[start:]
+		end := strings.Index(rule, "\n}")
+		if end < 0 {
+			t.Fatalf("base css %s rule is not closed", check.selector)
+		}
+		rule = rule[:end]
+		for _, want := range check.want {
+			if !strings.Contains(rule, want) {
+				t.Fatalf("%s missing %q; the project picker must follow the active theme", check.selector, want)
+			}
+		}
+		for _, undefined := range check.undefined {
+			if strings.Contains(rule, undefined) {
+				t.Fatalf("%s references undefined token %s; its dark fallback stays active in light mode", check.selector, undefined)
+			}
+		}
+	}
+}
+
+// The chrome tokens the top bar, nav panel, and project picker share must be
+// defined in every theme block — default dark, explicit light, and system
+// light — or one mode silently loses the panel background, border, or hover.
 func TestChromeTokensDefinedInEveryTheme(t *testing.T) {
 	tokens := readModule(t, "tokens.module.css")
 	for _, block := range []string{":root {", ":root[data-theme=\"light\"] {", ":root:not([data-theme=\"dark\"]) {"} {
@@ -153,7 +193,7 @@ func TestChromeTokensDefinedInEveryTheme(t *testing.T) {
 			t.Fatalf("token sheet %s block is not closed", block)
 		}
 		section = section[:end]
-		for _, token := range []string{"--panel:", "--line:"} {
+		for _, token := range []string{"--panel:", "--panel-2:", "--line:"} {
 			if !strings.Contains(section, token) {
 				t.Fatalf("token sheet %s block does not define %s", block, token)
 			}
