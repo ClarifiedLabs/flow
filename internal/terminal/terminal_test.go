@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,29 +49,41 @@ func TestAttachInfoIncludesConfiguredTmuxSocket(t *testing.T) {
 	}
 }
 
-func TestTTYDServeCommandBindsToLoopback(t *testing.T) {
-	command := TTYDServeCommand("flow-j-author-1", "127.0.0.1", 9123)
-	want := []string{"ttyd", "-W", "-i", "127.0.0.1", "-p", "9123", "tmux", "attach-session", "-t", "flow-j-author-1"}
-	if !reflect.DeepEqual(command, want) {
-		t.Fatalf("command = %#v, want %#v", command, want)
+func TestTmuxClientEnvStripsTmuxAndDefaultsUTF8Locale(t *testing.T) {
+	env := envSliceMap(TmuxClientEnv([]string{
+		"PATH=/usr/bin",
+		"TMUX=/tmp/tmux.sock",
+		"TMUX_PANE=%1",
+		"LANG=POSIX",
+		"LC_CTYPE=en_US.UTF-8",
+	}))
+	if _, ok := env["TMUX"]; ok {
+		t.Fatalf("TMUX was not stripped: %+v", env)
+	}
+	if _, ok := env["TMUX_PANE"]; ok {
+		t.Fatalf("TMUX_PANE was not stripped: %+v", env)
+	}
+	if env["LANG"] != defaultUTF8Locale {
+		t.Fatalf("LANG = %q, want %q", env["LANG"], defaultUTF8Locale)
+	}
+	if env["LC_ALL"] != defaultUTF8Locale {
+		t.Fatalf("LC_ALL = %q, want %q", env["LC_ALL"], defaultUTF8Locale)
+	}
+	if env["LC_CTYPE"] != "en_US.UTF-8" {
+		t.Fatalf("LC_CTYPE = %q, want explicit locale", env["LC_CTYPE"])
 	}
 }
 
-func TestNormalizeProxyTargetURLRequiresLoopbackHTTP(t *testing.T) {
-	for _, target := range []string{"http://127.0.0.1:7681", "https://localhost/terminal", "http://10.0.0.4:7681", "http://100.64.1.2:7681"} {
-		normalized, err := NormalizeProxyTargetURL(target)
-		if err != nil {
-			t.Fatalf("NormalizeProxyTargetURL(%q): %v", target, err)
+func envSliceMap(env []string) map[string]string {
+	values := map[string]string{}
+	for _, item := range env {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok {
+			continue
 		}
-		if normalized != target {
-			t.Fatalf("normalized target = %q, want %q", normalized, target)
-		}
+		values[key] = value
 	}
-	for _, target := range []string{"http://example.com", "http://8.8.8.8:7681", "file:///tmp/socket", "http://user@127.0.0.1:7681"} {
-		if _, err := NormalizeProxyTargetURL(target); err == nil {
-			t.Fatalf("NormalizeProxyTargetURL(%q) succeeded, want error", target)
-		}
-	}
+	return values
 }
 
 func TestWatchdogSuppressesWaitingWhenChildProcessIsBusy(t *testing.T) {

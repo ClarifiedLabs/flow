@@ -40,8 +40,8 @@ For Docker Compose and container auth details, see
 
 ## Quickstart
 
-Prerequisites for local package installs are Git, tmux, ttyd, and the
-`harness` agent CLI on the worker `PATH`.
+Prerequisites for local package installs are Git, tmux, and the `harness`
+agent CLI on the worker `PATH`.
 
 Start the coordinator:
 

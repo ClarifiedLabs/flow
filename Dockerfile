@@ -81,7 +81,6 @@ ARG TEMURIN_JDK_VERSION=25
 ARG NVM_VERSION=0.40.5
 ARG NODE_VERSION=24.17.0
 ARG RUST_VERSION=1.96.0
-ARG TTYD_VERSION=1.7.7
 ARG HARNESS_VERSION=v0.4.0
 ARG HARNESS_DEB_SHA256_AMD64=1d619812abd5fab7066f4b40ccea90538752561c74e544b7b6ece9b7244e64f5
 ARG HARNESS_DEB_SHA256_ARM64=2473b6a67dbdfce9aaea61c6b948799972f6076c2d28aa3ec0b37845f17495a0
@@ -196,12 +195,10 @@ RUN set -eux \
     && if ! grep -q '^flow:' /etc/subgid; then echo 'flow:100000:65536' >> /etc/subgid; fi \
     && case "$TARGETARCH" in \
         amd64) \
-            ttyd_arch="x86_64"; \
             harness_deb_arch="amd64"; \
             harness_deb_sha256="$HARNESS_DEB_SHA256_AMD64" \
             ;; \
         arm64) \
-            ttyd_arch="aarch64"; \
             harness_deb_arch="arm64"; \
             harness_deb_sha256="$HARNESS_DEB_SHA256_ARM64" \
             ;; \
@@ -213,8 +210,6 @@ RUN set -eux \
     && printf '%s  %s\n' "$harness_deb_sha256" "$harness_deb" | sha256sum -c - \
     && apt-get install -y --no-install-recommends "$harness_deb" \
     && rm -f "$harness_deb" \
-    && curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${ttyd_arch}" -o /usr/local/bin/ttyd \
-    && chmod 0755 /usr/local/bin/ttyd \
     && rm -f /tmp/adoptium.asc \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p "$NVM_DIR" \

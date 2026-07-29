@@ -1,5 +1,5 @@
-// Terminal/transcript route + inline-terminal actions. These open ttyd frames
-// (and transcript surfaces) mounted into the app's DOM.
+// Terminal/transcript route + inline-terminal actions. These open flow-server
+// terminal frames (and transcript surfaces) mounted into the app's DOM.
 
 import { apiGetText, apiPost } from "./api.js";
 import { escapeAttr, escapeHTML } from "./html.js";

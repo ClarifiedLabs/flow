@@ -1,5 +1,5 @@
-// Embedded ttyd terminal surfaces: inline frames, modal/pop-out windows and
-// transcript views, plus their launch buttons and icons.
+// Embedded flow-server terminal surfaces: inline frames, modal/pop-out windows
+// and transcript views, plus their launch buttons and icons.
 
 import { escapeAttr, escapeHTML } from "./html.js";
 
@@ -211,11 +211,11 @@ export function renderTerminalPopOutButton(loginPath) {
 
 // terminalSelectionHint documents the copy paths. tmux owns mouse selection
 // (mouse is on so wheel scrolling works), but it also emits OSC 52 on selection
-// (see set-clipboard) and the coordinator terminal proxy injects a bridge script
-// into ttyd's page that forwards OSC 52 to the browser clipboard, so a plain
-// drag-select in the web UI auto-copies locally. Shift+drag bypasses tmux
-// selection for a native browser selection that Ctrl/Cmd+C copies on every
-// transport; it remains the fallback (e.g. non-web attach) and the manual path.
+// (see set-clipboard) and the coordinator terminal page forwards OSC 52 to the
+// browser clipboard, so a plain drag-select in the web UI auto-copies locally.
+// Shift+drag bypasses tmux selection for a native browser selection that
+// Ctrl/Cmd+C copies on every transport; it remains the fallback (e.g. non-web
+// attach) and the manual path.
 export const terminalSelectionHint = '<span class="terminal-hint">Drag to select (auto-copies) · Shift+drag for manual selection</span>';
 
 export function openTerminalWindow(loginPath) {

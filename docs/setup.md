@@ -10,7 +10,6 @@ For a source-built local setup:
 - Go 1.26.4 or newer.
 - Git.
 - tmux for worker jobs.
-- ttyd on `PATH` for worker terminal attach.
 - The `harness` agent CLI on the worker `PATH`. It is the only supported agent
   harness; workers advertise it when `harness --check-model-proxy` passes.
 
@@ -298,8 +297,8 @@ awaited, but their failures do not select the failure/changes-requested edge.
 files. The parent remains the run's sole active graph node throughout the
 fan-out—children are jobs, not independently active graph nodes.
 
-The worker environment needs `flow`, `ttyd`, and the `harness` CLI
-available on `PATH`. To override the generated
+The worker environment needs `flow` and the `harness` CLI available on
+`PATH`. To override the generated
 author command for all default author jobs, serve with a coordinator config that
 sets `author_entrypoint`; flow-selected agent definitions are ignored when this
 explicit override is configured.
@@ -457,26 +456,19 @@ a worker config with a unique `worker_id`, a reachable `coordinator_url`, an
 appropriate `work_dir`, and either `FLOW_WORKER_JOIN_TOKEN` or an existing
 worker token in the config.
 
-Terminal attach is required for workers. Same-machine browser attach works when
-`ttyd` is installed and the coordinator URL is loopback. Remote browser attach
-requires:
-
-```yaml
-terminal:
-  bind_address: 100.64.1.2
-  public_base_url: http://100.64.1.2
-```
-
-Use a private or tailnet address that the coordinator can reach.
+Terminal attach is required for workers. The worker opens terminal streams
+over its authenticated control WebSocket to the coordinator, so remote workers
+behind NAT work without any inbound listener or reverse tunnel.
 
 ## Web Terminal
 
-The browser terminal runs the agent inside a tmux session exposed over ttyd.
-Each job's tmux session is configured with mouse on, a 100k-line history limit,
-and `set-clipboard on`.
+The browser terminal runs the agent inside a tmux session whose PTY is
+streamed over a worker-dialed WebSocket to the coordinator. Each job's tmux
+session is configured with mouse on, a 100k-line history limit, and
+`set-clipboard on`.
 
 - Drag to select: a plain drag-select copies the selection to your local
-  clipboard automatically (tmux emits OSC 52 and the coordinator terminal proxy
+  clipboard automatically (tmux emits OSC 52 and the coordinator terminal page
   bridges it to the browser clipboard). This requires a secure context — HTTPS
   or localhost.
 - Hold Shift while dragging to make a native browser selection, then press

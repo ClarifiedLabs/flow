@@ -27,7 +27,7 @@ const isolatedMarker = "FLOW_TESTENV_ISOLATED"
 
 // preservedKeys survive isolation with their outer values:
 //
-//	PATH                         - tests need git, tmux, ttyd, node, sh
+//	PATH                         - tests need git, tmux, node, sh
 //	FLOW_BROWSER_BIN             - explicit browser for browser smoke tests
 //	GOCOVERDIR                   - coverage-instrumented runs write here
 //	FLOW_TESTENV_HERMETIC_HELPER - gate for the hermeticity regression test

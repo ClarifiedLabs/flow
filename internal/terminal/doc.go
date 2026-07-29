@@ -1,9 +1,7 @@
 package terminal
 
 import (
-	"net"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -57,15 +55,58 @@ func JobTerminalProxyPath(jobID string) string {
 	return "/v2/jobs/" + url.PathEscape(strings.TrimSpace(jobID)) + "/terminal"
 }
 
-func TTYDServeCommand(sessionName string, bindAddress string, port int) []string {
-	return []string{
-		"ttyd",
-		"-W",
-		"-i", strings.TrimSpace(bindAddress),
-		"-p", strconv.Itoa(port),
-		"tmux", "attach-session", "-t", strings.TrimSpace(sessionName),
+// TmuxClientEnv returns a copy of env with TMUX/TMUX_PANE stripped and a
+// default UTF-8 locale applied. It is suitable for tmux client commands that
+// must not inherit the caller's tmux session state.
+func TmuxClientEnv(env []string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, value := range env {
+		if strings.HasPrefix(value, "TMUX=") || strings.HasPrefix(value, "TMUX_PANE=") {
+			continue
+		}
+		filtered = append(filtered, value)
 	}
+	return withDefaultUTF8Locale(filtered)
 }
+
+func withDefaultUTF8Locale(env []string) []string {
+	result := append([]string(nil), env...)
+	present := map[string]bool{}
+	for i, value := range result {
+		key, rawValue, ok := strings.Cut(value, "=")
+		if !ok || !isUTF8LocaleKey(key) {
+			continue
+		}
+		present[key] = true
+		if !isUTF8Locale(rawValue) {
+			result[i] = key + "=" + defaultUTF8Locale
+		}
+	}
+	for _, key := range utf8LocaleEnvKeys {
+		if !present[key] {
+			result = append(result, key+"="+defaultUTF8Locale)
+		}
+	}
+	return result
+}
+
+func isUTF8LocaleKey(key string) bool {
+	for _, candidate := range utf8LocaleEnvKeys {
+		if key == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func isUTF8Locale(value string) bool {
+	normalized := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(value), "-", ""))
+	return strings.Contains(normalized, "UTF8")
+}
+
+const defaultUTF8Locale = "C.UTF-8"
+
+var utf8LocaleEnvKeys = []string{"LANG", "LC_ALL", "LC_CTYPE"}
 
 func TmuxSessionNameForJob(jobID string) string {
 	safe := strings.Map(func(r rune) rune {
@@ -110,46 +151,3 @@ func ClassifyWatchdog(observation WatchdogObservation) WatchdogDecision {
 
 	return WatchdogWaiting
 }
-
-func NormalizeProxyTargetURL(value string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(value))
-	if err != nil {
-		return "", err
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", errInvalidTargetURL
-	}
-	if parsed.User != nil || parsed.Fragment != "" || strings.TrimSpace(parsed.Host) == "" {
-		return "", errInvalidTargetURL
-	}
-	host := parsed.Hostname()
-	if strings.EqualFold(host, "localhost") {
-		return parsed.String(), nil
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !allowedTerminalTargetIP(ip) {
-		return "", errInvalidTargetURL
-	}
-
-	return parsed.String(), nil
-}
-
-func allowedTerminalTargetIP(ip net.IP) bool {
-	if ip.IsLoopback() || ip.IsPrivate() {
-		return true
-	}
-	ip = ip.To4()
-	if ip == nil {
-		return false
-	}
-
-	return ip[0] == 100 && ip[1] >= 64 && ip[1] <= 127
-}
-
-type invalidTargetURLError struct{}
-
-func (invalidTargetURLError) Error() string {
-	return "terminal target URL must be an HTTP loopback, private, or tailnet URL"
-}
-
-var errInvalidTargetURL invalidTargetURLError

@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/cgi"
 	"net/http/httptest"
@@ -1046,43 +1045,6 @@ func TestWorkerEnvDefaultsUTF8LocaleForAgentTerminal(t *testing.T) {
 	}
 }
 
-func TestTmuxClientEnvStripsTmuxAndDefaultsUTF8Locale(t *testing.T) {
-	env := envSliceMap(tmuxClientEnv([]string{
-		"PATH=/usr/bin",
-		"TMUX=/tmp/tmux.sock",
-		"TMUX_PANE=%1",
-		"LANG=POSIX",
-		"LC_CTYPE=en_US.UTF-8",
-	}))
-	if _, ok := env["TMUX"]; ok {
-		t.Fatalf("TMUX was not stripped: %+v", env)
-	}
-	if _, ok := env["TMUX_PANE"]; ok {
-		t.Fatalf("TMUX_PANE was not stripped: %+v", env)
-	}
-	if env["LANG"] != defaultUTF8Locale {
-		t.Fatalf("LANG = %q, want %q", env["LANG"], defaultUTF8Locale)
-	}
-	if env["LC_ALL"] != defaultUTF8Locale {
-		t.Fatalf("LC_ALL = %q, want %q", env["LC_ALL"], defaultUTF8Locale)
-	}
-	if env["LC_CTYPE"] != "en_US.UTF-8" {
-		t.Fatalf("LC_CTYPE = %q, want explicit locale", env["LC_CTYPE"])
-	}
-}
-
-func envSliceMap(env []string) map[string]string {
-	values := map[string]string{}
-	for _, item := range env {
-		key, value, ok := strings.Cut(item, "=")
-		if !ok {
-			continue
-		}
-		values[key] = value
-	}
-	return values
-}
-
 func TestPrepareHookConfigWritesHarnessAuthorSettings(t *testing.T) {
 	workDir := t.TempDir()
 	path, envVar, err := prepareHookConfig(tmuxInput{
@@ -1848,198 +1810,6 @@ func TestCanRegisterJobTerminalForNonAuthorWorkerJob(t *testing.T) {
 	}
 }
 
-func TestTerminalEndpointBaseUsesLoopbackOnlyForLocalCoordinator(t *testing.T) {
-	cfg := workerConfig("/tmp/work", "file:///tmp/exchange.git")
-	cfg.CoordinatorURL = "http://127.0.0.1:8421"
-
-	bindAddress, publicBaseURL, ok, err := terminalEndpointBase(cfg)
-	if err != nil {
-		t.Fatalf("terminalEndpointBase: %v", err)
-	}
-	if !ok || bindAddress != "127.0.0.1" || publicBaseURL != "http://127.0.0.1" {
-		t.Fatalf("endpoint = bind %q public %q ok=%t", bindAddress, publicBaseURL, ok)
-	}
-}
-
-func TestTerminalEndpointBaseSkipsRemoteWithoutPublicURL(t *testing.T) {
-	cfg := workerConfig("/tmp/work", "file:///tmp/exchange.git")
-	cfg.CoordinatorURL = "https://flow.example.test"
-
-	_, _, ok, err := terminalEndpointBase(cfg)
-	if err != nil {
-		t.Fatalf("terminalEndpointBase: %v", err)
-	}
-	if ok {
-		t.Fatal("remote worker without terminal.public_base_url was accepted")
-	}
-}
-
-func TestTerminalEndpointBaseUsesConfiguredTailnetURL(t *testing.T) {
-	cfg := workerConfig("/tmp/work", "file:///tmp/exchange.git")
-	cfg.CoordinatorURL = "https://flow.example.test"
-	cfg.Terminal = config.WorkerTerminalConfig{
-		BindAddress:   "100.64.1.2",
-		PublicBaseURL: "http://100.64.1.2",
-	}
-
-	bindAddress, publicBaseURL, ok, err := terminalEndpointBase(cfg)
-	if err != nil {
-		t.Fatalf("terminalEndpointBase: %v", err)
-	}
-	if !ok || bindAddress != "100.64.1.2" || publicBaseURL != "http://100.64.1.2" {
-		t.Fatalf("endpoint = bind %q public %q ok=%t", bindAddress, publicBaseURL, ok)
-	}
-	if got := terminalURLWithPort(publicBaseURL, 7681); got != "http://100.64.1.2:7681" {
-		t.Fatalf("terminalURLWithPort = %q", got)
-	}
-}
-
-func TestTerminalEndpointBaseRejectsPublicTargetBeforeStart(t *testing.T) {
-	cfg := workerConfig("/tmp/work", "file:///tmp/exchange.git")
-	cfg.CoordinatorURL = "https://flow.example.test"
-	cfg.Terminal = config.WorkerTerminalConfig{
-		BindAddress:   "0.0.0.0",
-		PublicBaseURL: "http://8.8.8.8",
-	}
-
-	if _, _, ok, err := terminalEndpointBase(cfg); err == nil || ok {
-		t.Fatalf("terminalEndpointBase ok=%t err=%v, want public target rejection", ok, err)
-	}
-}
-
-func TestTerminalEndpointBaseRejectsUnsafeWildcardBind(t *testing.T) {
-	cfg := workerConfig("/tmp/work", "file:///tmp/exchange.git")
-	cfg.CoordinatorURL = "https://flow.example.test"
-	cfg.Terminal = config.WorkerTerminalConfig{
-		BindAddress:   "0.0.0.0",
-		PublicBaseURL: "http://terminal.internal",
-	}
-
-	if _, _, ok, err := terminalEndpointBase(cfg); err == nil || ok {
-		t.Fatalf("terminalEndpointBase ok=%t err=%v, want wildcard host rejection", ok, err)
-	}
-}
-
-func TestRequireTerminalAttachRejectsMissingTTYD(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	cfg := workerConfig("/tmp/work", "file:///tmp/exchange.git")
-	cfg.CoordinatorURL = "http://127.0.0.1:8421"
-
-	if err := RequireTerminalAttach(cfg); err == nil || !strings.Contains(err.Error(), "ttyd is required") {
-		t.Fatalf("RequireTerminalAttach err = %v, want ttyd requirement", err)
-	}
-}
-
-func TestRequireTerminalAttachRejectsRemoteWithoutPublicURL(t *testing.T) {
-	putFakeToolOnPath(t, "ttyd")
-	cfg := workerConfig("/tmp/work", "file:///tmp/exchange.git")
-	cfg.CoordinatorURL = "https://flow.example.test"
-
-	if err := RequireTerminalAttach(cfg); err == nil || !strings.Contains(err.Error(), "public_base_url is required") {
-		t.Fatalf("RequireTerminalAttach err = %v, want public_base_url requirement", err)
-	}
-}
-
-func TestRequireTerminalAttachAcceptsLoopbackWithTTYD(t *testing.T) {
-	putFakeToolOnPath(t, "ttyd")
-	cfg := workerConfig("/tmp/work", "file:///tmp/exchange.git")
-	cfg.CoordinatorURL = "http://127.0.0.1:8421"
-
-	if err := RequireTerminalAttach(cfg); err != nil {
-		t.Fatalf("RequireTerminalAttach: %v", err)
-	}
-}
-
-func TestStartTmuxTerminalRejectsTTYDWithoutListener(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ttyd")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nsleep 5\n"), 0o700); err != nil {
-		t.Fatalf("write fake ttyd: %v", err)
-	}
-	cfg := workerConfig("/tmp/work", "file:///tmp/exchange.git")
-	cfg.CoordinatorURL = "http://127.0.0.1:8421"
-	cfg.Terminal.TTYDPath = path
-
-	process, err := startTmuxTerminal(context.Background(), cfg, "flow-terminal-test")
-	if process != nil {
-		process.stop()
-	}
-	if err == nil {
-		t.Fatal("startTmuxTerminal succeeded with a ttyd process that never listened")
-	}
-	if !strings.Contains(err.Error(), "did not start listening") {
-		t.Fatalf("startTmuxTerminal error = %v, want listener startup failure", err)
-	}
-}
-
-func TestStartTmuxTerminalWaitsForTTYDListener(t *testing.T) {
-	cfg := workerConfig("/tmp/work", "file:///tmp/exchange.git")
-	cfg.CoordinatorURL = "http://127.0.0.1:8421"
-	cfg.Terminal.TTYDPath = fakeListeningTTYDPath(t)
-
-	process, err := startTmuxTerminal(context.Background(), cfg, "flow-terminal-test")
-	if err != nil {
-		t.Fatalf("startTmuxTerminal: %v", err)
-	}
-	defer process.stop()
-	if strings.TrimSpace(process.targetURL) == "" {
-		t.Fatal("startTmuxTerminal returned an empty target URL")
-	}
-}
-
-func fakeListeningTTYDPath(t *testing.T) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "ttyd")
-	script := `#!/bin/sh
-bind="127.0.0.1"
-port=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -i)
-      shift
-      bind="$1"
-      ;;
-    -p)
-      shift
-      port="$1"
-      ;;
-  esac
-  shift
-done
-if [ -z "$port" ]; then
-  echo "missing -p" >&2
-  exit 2
-fi
-FLOW_FAKE_TTYD_HELPER=1 FLOW_FAKE_TTYD_BIND="$bind" FLOW_FAKE_TTYD_PORT="$port" exec ` + shellQuote(os.Args[0]) + ` -test.run=^TestFakeTTYDHelperProcess$
-`
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
-		t.Fatalf("write fake ttyd: %v", err)
-	}
-	return path
-}
-
-func TestFakeTTYDHelperProcess(t *testing.T) {
-	if os.Getenv("FLOW_FAKE_TTYD_HELPER") != "1" {
-		return
-	}
-	bind := strings.TrimSpace(os.Getenv("FLOW_FAKE_TTYD_BIND"))
-	if bind == "" {
-		bind = "127.0.0.1"
-	}
-	port := strings.TrimSpace(os.Getenv("FLOW_FAKE_TTYD_PORT"))
-	listener, err := net.Listen("tcp", net.JoinHostPort(bind, port))
-	if err != nil {
-		t.Fatalf("listen fake ttyd: %v", err)
-	}
-	defer listener.Close()
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		_ = conn.Close()
-	}
-}
-
 type fakeSessionStateClient struct {
 	states         []coordinator.SessionRuntimeState
 	sources        []string
@@ -2062,8 +1832,8 @@ func (f *fakeSessionStateClient) ReportSessionSignal(ctx context.Context, sessio
 	return coordinator.Session{ID: sessionID, RuntimeState: responseState}, nil
 }
 
-func (f *fakeSessionStateClient) RegisterSessionTerminal(ctx context.Context, sessionID string, targetURL string, tmuxSocketPath string) (coordinator.SessionTerminal, error) {
-	return coordinator.SessionTerminal{SessionID: sessionID, TargetURL: targetURL, TmuxSocketPath: tmuxSocketPath}, nil
+func (f *fakeSessionStateClient) RegisterSessionTerminal(ctx context.Context, sessionID string, tmuxSocketPath string) (coordinator.SessionTerminal, error) {
+	return coordinator.SessionTerminal{SessionID: sessionID, TmuxSocketPath: tmuxSocketPath}, nil
 }
 
 func runtimeStates(states []coordinator.SessionRuntimeState) []string {

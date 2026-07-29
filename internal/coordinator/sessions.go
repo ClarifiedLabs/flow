@@ -183,7 +183,6 @@ type ConsoleState struct {
 
 type SessionTerminal struct {
 	SessionID      string    `json:"session_id"`
-	TargetURL      string    `json:"target_url"`
 	TmuxSocketPath string    `json:"tmux_socket_path,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
@@ -199,7 +198,6 @@ type SessionTerminalAccess struct {
 type JobTerminal struct {
 	JobID          string    `json:"job_id"`
 	LeaseID        string    `json:"lease_id"`
-	TargetURL      string    `json:"target_url"`
 	TmuxSocketPath string    `json:"tmux_socket_path,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
@@ -2767,12 +2765,8 @@ WHERE session_id = ?`, session.ID).Scan(&storedSocketPath); err == nil {
 	return terminal.AttachInfoForSession(session.ID, session.JobID, tmuxSocketPath), nil
 }
 
-func (s *SessionService) RegisterTerminalTarget(ctx context.Context, sessionID string, targetURL string, tmuxSocketPaths ...string) (SessionTerminal, error) {
+func (s *SessionService) RegisterTerminal(ctx context.Context, sessionID string, tmuxSocketPaths ...string) (SessionTerminal, error) {
 	if _, err := s.AttachInfo(ctx, sessionID); err != nil {
-		return SessionTerminal{}, err
-	}
-	normalized, err := terminal.NormalizeProxyTargetURL(targetURL)
-	if err != nil {
 		return SessionTerminal{}, err
 	}
 	tmuxSocketPath := firstOptionalString(tmuxSocketPaths)
@@ -2780,22 +2774,19 @@ func (s *SessionService) RegisterTerminalTarget(ctx context.Context, sessionID s
 	if _, err := s.db.ExecContext(ctx, `
 INSERT INTO session_terminals (
 	session_id,
-	target_url,
 	tmux_socket_path,
 	created_at,
 	updated_at
-) VALUES (?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?)
 ON CONFLICT(session_id) DO UPDATE SET
-	target_url = excluded.target_url,
 	tmux_socket_path = excluded.tmux_socket_path,
 	updated_at = excluded.updated_at`,
 		strings.TrimSpace(sessionID),
-		normalized,
 		tmuxSocketPath,
 		formatTime(now),
 		formatTime(now),
 	); err != nil {
-		return SessionTerminal{}, fmt.Errorf("register terminal target: %w", err)
+		return SessionTerminal{}, fmt.Errorf("register terminal: %w", err)
 	}
 
 	return s.TerminalTarget(ctx, sessionID)
@@ -2806,7 +2797,7 @@ func (s *SessionService) TerminalTarget(ctx context.Context, sessionID string) (
 		return SessionTerminal{}, err
 	}
 	row := s.db.QueryRowContext(ctx, `
-SELECT session_id, target_url, tmux_socket_path, created_at, updated_at
+SELECT session_id, tmux_socket_path, created_at, updated_at
 FROM session_terminals
 WHERE session_id = ?`, strings.TrimSpace(sessionID))
 
@@ -2815,7 +2806,6 @@ WHERE session_id = ?`, strings.TrimSpace(sessionID))
 	var updatedAt string
 	if err := row.Scan(
 		&terminalTarget.SessionID,
-		&terminalTarget.TargetURL,
 		&terminalTarget.TmuxSocketPath,
 		&createdAt,
 		&updatedAt,

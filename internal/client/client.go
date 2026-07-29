@@ -1035,11 +1035,10 @@ func (c *Client) ReleaseConsole(ctx context.Context) error {
 	return c.doContext(ctx, http.MethodDelete, c.consolePath(), nil, nil, &response)
 }
 
-func (c *Client) RegisterJobTerminal(ctx context.Context, jobID string, leaseID string, targetURL string, tmuxSocketPath string) (coordinator.JobTerminal, error) {
+func (c *Client) RegisterJobTerminal(ctx context.Context, jobID string, leaseID string, tmuxSocketPath string) (coordinator.JobTerminal, error) {
 	var response jobTerminalResponse
 	request := jobTerminalRequest{
 		LeaseID:        leaseID,
-		TargetURL:      targetURL,
 		TmuxSocketPath: tmuxSocketPath,
 	}
 	if err := c.doContext(ctx, http.MethodPost, "/v2/jobs/"+url.PathEscape(jobID)+"/terminal", request, nil, &response); err != nil {
@@ -1153,9 +1152,9 @@ func (c *Client) SessionAttach(sessionID string) (terminal.AttachInfo, error) {
 	return response.Attach, nil
 }
 
-func (c *Client) RegisterSessionTerminal(ctx context.Context, sessionID string, targetURL string, tmuxSocketPath string) (coordinator.SessionTerminal, error) {
+func (c *Client) RegisterSessionTerminal(ctx context.Context, sessionID string, tmuxSocketPath string) (coordinator.SessionTerminal, error) {
 	var response sessionTerminalResponse
-	request := sessionTerminalRequest{TargetURL: targetURL, TmuxSocketPath: tmuxSocketPath}
+	request := sessionTerminalRequest{TmuxSocketPath: tmuxSocketPath}
 	if err := c.doContext(ctx, http.MethodPost, "/v2/sessions/"+url.PathEscape(sessionID)+"/terminal", request, nil, &response); err != nil {
 		return coordinator.SessionTerminal{}, err
 	}

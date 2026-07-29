@@ -151,7 +151,7 @@ The initial repository should be a Go monorepo:
 - `internal/harness`: harness CLI hook/watchdog integrations.
 - `internal/git`: exchange remote, server hooks, branch, trailer, diff, and
   squash-merge helpers.
-- `internal/terminal`: ttyd/reverse-proxy integration.
+- `internal/terminal`: tmux/terminal helpers.
 - `internal/web`: dependency-light browser UI, embedded and served by the
   coordinator. It uses browser-native custom elements, browser-native JavaScript
   ES modules, and a small Go CSS scoping helper. It does not use React, Vue,
@@ -1235,8 +1235,8 @@ POST /reconcile
 ```
 
 Workers initiate the control plane. The coordinator does not open control
-connections to workers. Terminal attach is a separate plane through ttyd,
-tailnet reachability, or a reverse tunnel.
+connections to workers. Terminal attach is brokered by the coordinator over worker-initiated
+WebSocket streams.
 
 ## Detection and Human Feedback
 
@@ -1529,8 +1529,8 @@ Required views:
   rows with agent and gate, review agent rows, fix agent, default flow).
 - Change detail: commit summary, base/head SHAs, parsed diff, check results,
   review threads, comments, claim actions, and merge eligibility.
-- Terminal attach: authenticated embedded ttyd frame or authenticated link in a
-  new tab. The UI does not persist terminal transcripts as application state.
+- Terminal attach: authenticated embedded terminal frame or authenticated link
+  in a new tab. The UI does not persist terminal transcripts as application state.
 - Workers/jobs: worker heartbeats, capacity buckets, labels, taints, queue
   pressure, live jobs, recent failures, leases, and tmux session identifiers.
 

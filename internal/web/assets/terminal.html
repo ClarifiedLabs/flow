@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>Flow Terminal</title>
+<link rel="stylesheet" href="./vendor/xterm/xterm.css">
+<style>
+  html,
+  body,
+  #terminal {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    overflow: hidden;
+    background: #0f111a;
+  }
+
+  #terminal {
+    box-sizing: border-box;
+    padding: 8px;
+  }
+</style>
+<div id="terminal"></div>
+<!--TERMINAL_PAGE_DATA-->
+<script src="./vendor/xterm/xterm.js"></script>
+<script src="./vendor/xterm/xterm-addon-fit.js"></script>
+<script src="./vendor/xterm/xterm-addon-web-links.js"></script>
+<script src="./terminal-clipboard.js"></script>
+<script src="./terminal-page.js"></script>

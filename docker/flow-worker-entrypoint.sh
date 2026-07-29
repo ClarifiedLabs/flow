@@ -22,27 +22,6 @@ should_start_dockerd() {
   esac
 }
 
-configure_worker_terminal() {
-  local public_base_url="${FLOW_WORKER_TERMINAL_PUBLIC_BASE_URL:-}"
-  local bind_address="${FLOW_WORKER_TERMINAL_BIND_ADDRESS:-0.0.0.0}"
-
-  if [ -z "$public_base_url" ]; then
-    return 0
-  fi
-  if [ "$public_base_url" = "auto" ]; then
-    local first_address
-    read -r first_address _ < <(hostname -i)
-    if [ -z "$first_address" ]; then
-      echo "could not determine worker container IP for terminal public_base_url" >&2
-      exit 1
-    fi
-    public_base_url="http://${first_address}"
-  fi
-
-  export FLOW_WORKER_TERMINAL_PUBLIC_BASE_URL="${public_base_url%/}"
-  export FLOW_WORKER_TERMINAL_BIND_ADDRESS="$bind_address"
-}
-
 wait_for_dockerd() {
   local pid="$1"
 
@@ -74,8 +53,6 @@ start_dockerd_rootless() {
   dockerd-rootless.sh --host="$DOCKER_HOST" "${extra_args[@]}" >"$log_path" 2>&1 &
   wait_for_dockerd "$!"
 }
-
-configure_worker_terminal "$@"
 
 if should_start_dockerd; then
   start_dockerd_rootless

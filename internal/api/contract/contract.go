@@ -225,13 +225,11 @@ type AttentionReplyRequest struct {
 }
 
 type SessionTerminalRequest struct {
-	TargetURL      string `json:"target_url"`
 	TmuxSocketPath string `json:"tmux_socket_path,omitempty"`
 }
 
 type JobTerminalRequest struct {
 	LeaseID        string `json:"lease_id"`
-	TargetURL      string `json:"target_url"`
 	TmuxSocketPath string `json:"tmux_socket_path,omitempty"`
 }
 

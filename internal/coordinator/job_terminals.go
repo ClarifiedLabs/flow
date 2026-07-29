@@ -13,7 +13,7 @@ import (
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
-func (s *SessionService) RegisterJobTerminalTarget(ctx context.Context, jobID string, leaseID string, targetURL string, tmuxSocketPaths ...string) (JobTerminal, error) {
+func (s *SessionService) RegisterJobTerminal(ctx context.Context, jobID string, leaseID string, tmuxSocketPaths ...string) (JobTerminal, error) {
 	jobID = strings.TrimSpace(jobID)
 	leaseID = strings.TrimSpace(leaseID)
 	if jobID == "" {
@@ -25,34 +25,27 @@ func (s *SessionService) RegisterJobTerminalTarget(ctx context.Context, jobID st
 	if err := s.validateLiveJobLease(ctx, jobID, leaseID); err != nil {
 		return JobTerminal{}, err
 	}
-	normalized, err := terminal.NormalizeProxyTargetURL(targetURL)
-	if err != nil {
-		return JobTerminal{}, err
-	}
 	tmuxSocketPath := firstOptionalString(tmuxSocketPaths)
 	now := s.now().UTC()
 	if _, err := s.db.ExecContext(ctx, `
 INSERT INTO job_terminals (
 	job_id,
 	lease_id,
-	target_url,
 	tmux_socket_path,
 	created_at,
 	updated_at
-) VALUES (?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(job_id) DO UPDATE SET
 	lease_id = excluded.lease_id,
-	target_url = excluded.target_url,
 	tmux_socket_path = excluded.tmux_socket_path,
 	updated_at = excluded.updated_at`,
 		jobID,
 		leaseID,
-		normalized,
 		tmuxSocketPath,
 		formatTime(now),
 		formatTime(now),
 	); err != nil {
-		return JobTerminal{}, fmt.Errorf("register job terminal target: %w", err)
+		return JobTerminal{}, fmt.Errorf("register job terminal: %w", err)
 	}
 
 	return s.JobTerminalTarget(ctx, jobID)
@@ -64,7 +57,7 @@ func (s *SessionService) JobTerminalTarget(ctx context.Context, jobID string) (J
 		return JobTerminal{}, errors.New("job id is required")
 	}
 	row := s.db.QueryRowContext(ctx, `
-SELECT job_id, lease_id, target_url, tmux_socket_path, created_at, updated_at
+SELECT job_id, lease_id, tmux_socket_path, created_at, updated_at
 FROM job_terminals
 WHERE job_id = ?`, jobID)
 
@@ -74,7 +67,6 @@ WHERE job_id = ?`, jobID)
 	if err := row.Scan(
 		&target.JobID,
 		&target.LeaseID,
-		&target.TargetURL,
 		&target.TmuxSocketPath,
 		&createdAt,
 		&updatedAt,

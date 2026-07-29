@@ -104,7 +104,7 @@ func activateBrowserConsoleSession(t *testing.T, fixture testFixture) coordinato
 	if err != nil {
 		t.Fatalf("start console session: %v", err)
 	}
-	if _, err := fixture.Sessions.RegisterTerminalTarget(ctx, started.Session.ID, "http://127.0.0.1:7777"); err != nil {
+	if _, err := fixture.Sessions.RegisterTerminal(ctx, started.Session.ID, "http://127.0.0.1:7777"); err != nil {
 		t.Fatalf("register console terminal target: %v", err)
 	}
 

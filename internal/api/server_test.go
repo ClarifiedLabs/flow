@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1210,7 +1209,7 @@ func TestWebUIRoutesAndAssets(t *testing.T) {
 func TestWebUITerminalAttachCreatesOwnerBrowserURL(t *testing.T) {
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Web terminal task")
-	if _, err := fixture.Sessions.RegisterTerminalTarget(context.Background(), started.Session.ID, "http://127.0.0.1:7777"); err != nil {
+	if _, err := fixture.Sessions.RegisterTerminal(context.Background(), started.Session.ID, "http://127.0.0.1:7777"); err != nil {
 		t.Fatalf("register terminal target: %v", err)
 	}
 
@@ -1350,7 +1349,7 @@ INSERT INTO handoff_snapshots (
 		t.Fatal("terminal should not be available before a target is registered")
 	}
 
-	if _, err := fixture.Sessions.RegisterTerminalTarget(context.Background(), started.Session.ID, "http://127.0.0.1:7777"); err != nil {
+	if _, err := fixture.Sessions.RegisterTerminal(context.Background(), started.Session.ID, "http://127.0.0.1:7777"); err != nil {
 		t.Fatalf("register terminal target: %v", err)
 	}
 	response = httptest.NewRecorder()
@@ -1706,7 +1705,7 @@ func TestTaskDetailReadModelIsOwnerOnly(t *testing.T) {
 	if err := fixture.Tasks.LinkTasks(ctx, blocker.ID, started.Session.TaskID, coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
 		t.Fatalf("link blocker: %v", err)
 	}
-	if _, err := fixture.Sessions.RegisterTerminalTarget(ctx, started.Session.ID, "http://127.0.0.1:7777"); err != nil {
+	if _, err := fixture.Sessions.RegisterTerminal(ctx, started.Session.ID, "http://127.0.0.1:7777"); err != nil {
 		t.Fatalf("register terminal target: %v", err)
 	}
 	required := true
@@ -2130,7 +2129,6 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 		t.Fatalf("current console = %+v", current)
 	}
 	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/sessions/"+sessionID+"/terminal", sessionTerminalRequest{
-		TargetURL: "http://127.0.0.1:65535",
 	}, http.StatusOK, nil)
 	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/sessions/"+sessionID+"/event", sessionEventRequest{
 		State: string(coordinator.SessionWaiting),
@@ -2691,7 +2689,7 @@ func TestSessionStatusTouchesAgentActivity(t *testing.T) {
 func TestSessionAttachRequiresOwnerToken(t *testing.T) {
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Attach task")
-	if _, err := fixture.Sessions.RegisterTerminalTarget(context.Background(), started.Session.ID, "http://127.0.0.1:7777", "/tmp/flow-session.sock"); err != nil {
+	if _, err := fixture.Sessions.RegisterTerminal(context.Background(), started.Session.ID, "/tmp/flow-session.sock"); err != nil {
 		t.Fatalf("register terminal target: %v", err)
 	}
 
@@ -2716,7 +2714,7 @@ func TestJobAttachAllowsLiveReviewerJobs(t *testing.T) {
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Reviewer attach task")
 	reviewer := startLiveCheckJobForTask(t, fixture, "reviewer-token", "w-review-attach", started.Session.TaskID, started.Change.ID, "head-1", "reviewer", flowworker.RoleReviewer, flowworker.BucketPersistentAgent)
-	if _, err := fixture.Sessions.RegisterJobTerminalTarget(context.Background(), reviewer.Job.ID, reviewer.Lease.ID, "http://127.0.0.1:7778", "/tmp/flow-job.sock"); err != nil {
+	if _, err := fixture.Sessions.RegisterJobTerminal(context.Background(), reviewer.Job.ID, reviewer.Lease.ID, "/tmp/flow-job.sock"); err != nil {
 		t.Fatalf("register job terminal target: %v", err)
 	}
 
@@ -2735,267 +2733,6 @@ func TestJobAttachAllowsLiveReviewerJobs(t *testing.T) {
 		t.Fatalf("release reviewer lease: %v", err)
 	}
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/jobs/"+reviewer.Job.ID+"/attach", nil, http.StatusBadRequest, nil)
-}
-
-func TestJobTerminalProxyAllowsLiveReviewerJobs(t *testing.T) {
-	fixture := newTestFixture(t)
-	started := startAuthorSessionForStatusTest(t, fixture, "Reviewer terminal task")
-	reviewer := startLiveCheckJobForTask(t, fixture, "reviewer-terminal-token", "w-review-terminal", started.Session.TaskID, started.Change.ID, "head-1", "reviewer", flowworker.RoleReviewer, flowworker.BucketPersistentAgent)
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/pty" || r.URL.RawQuery != "q=1" {
-			t.Fatalf("proxied request URL = %s?%s", r.URL.Path, r.URL.RawQuery)
-		}
-		if r.Header.Get("Authorization") != "" {
-			t.Fatalf("proxy forwarded authorization header")
-		}
-		w.Header().Set("X-Terminal-Target", "ok")
-		_, _ = w.Write([]byte("proxied job terminal"))
-	}))
-	t.Cleanup(target.Close)
-
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/jobs/"+reviewer.Job.ID+"/terminal", jobTerminalRequest{
-		LeaseID:   reviewer.Lease.ID,
-		TargetURL: target.URL,
-	}, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/jobs/"+reviewer.Job.ID+"/terminal", jobTerminalRequest{
-		LeaseID:   reviewer.Lease.ID,
-		TargetURL: target.URL,
-	}, http.StatusForbidden, nil)
-
-	var registered jobTerminalResponse
-	doJSONRequestAs(t, fixture.Server, "reviewer-terminal-token", http.MethodPost, "/v2/jobs/"+reviewer.Job.ID+"/terminal", jobTerminalRequest{
-		LeaseID:   reviewer.Lease.ID,
-		TargetURL: target.URL,
-	}, http.StatusOK, &registered)
-	if registered.Terminal.JobID != reviewer.Job.ID || registered.Terminal.LeaseID != reviewer.Lease.ID || registered.Terminal.TargetURL != target.URL {
-		t.Fatalf("registered job terminal = %+v", registered.Terminal)
-	}
-
-	var jobs jobsResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/jobs", nil, http.StatusOK, &jobs)
-	if !jobs.Diagnostics[reviewer.Job.ID].TerminalAvailable {
-		t.Fatalf("job terminal availability = %+v", jobs.Diagnostics[reviewer.Job.ID])
-	}
-
-	var board boardResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
-	card := board.TaskCards[started.Session.TaskID]
-	if !card.TerminalAvailable || card.TerminalJobID != reviewer.Job.ID {
-		t.Fatalf("task card terminal metadata = %+v", card)
-	}
-
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/jobs/"+reviewer.Job.ID+"/terminal-token", map[string]string{}, http.StatusForbidden, nil)
-	var access jobTerminalAccessResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/jobs/"+reviewer.Job.ID+"/terminal-token", map[string]string{}, http.StatusOK, &access)
-	if access.Access.LoginPath == "" || !strings.Contains(access.Access.LoginPath, "/v2/jobs/"+reviewer.Job.ID+"/terminal-login?token=") {
-		t.Fatalf("job terminal access = %+v", access.Access)
-	}
-
-	login := httptest.NewRecorder()
-	loginRequest := httptest.NewRequest(http.MethodGet, access.Access.LoginPath, nil)
-	fixture.Server.ServeHTTP(login, loginRequest)
-	if login.Code != http.StatusSeeOther {
-		t.Fatalf("job terminal login status = %d body = %q", login.Code, login.Body.String())
-	}
-	if login.Header().Get("Location") != "/v2/jobs/"+reviewer.Job.ID+"/terminal" {
-		t.Fatalf("job terminal login location = %q", login.Header().Get("Location"))
-	}
-	cookies := login.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != terminalAccessCookie || !cookies[0].HttpOnly || cookies[0].Path != "/v2/jobs/"+reviewer.Job.ID+"/terminal" {
-		t.Fatalf("job terminal login cookies = %+v", cookies)
-	}
-
-	cookieProxyRequest := httptest.NewRequest(http.MethodGet, "/v2/jobs/"+reviewer.Job.ID+"/terminal/pty?q=1", nil)
-	cookieProxyRequest.AddCookie(cookies[0])
-	cookieProxyResponse := httptest.NewRecorder()
-	fixture.Server.ServeHTTP(cookieProxyResponse, cookieProxyRequest)
-	if cookieProxyResponse.Code != http.StatusOK {
-		t.Fatalf("job terminal cookie proxy status = %d body = %q", cookieProxyResponse.Code, cookieProxyResponse.Body.String())
-	}
-	if cookieProxyResponse.Body.String() != "proxied job terminal" {
-		t.Fatalf("job terminal cookie proxy body = %q", cookieProxyResponse.Body.String())
-	}
-	if cookieProxyResponse.Header().Get("Content-Security-Policy") != terminalSandboxCSP {
-		t.Fatalf("job terminal cookie proxy CSP = %q, want %q", cookieProxyResponse.Header().Get("Content-Security-Policy"), terminalSandboxCSP)
-	}
-
-	if _, err := fixture.Workers.ReleaseLease(context.Background(), reviewer.Lease.ID, flowworker.JobFinished); err != nil {
-		t.Fatalf("release reviewer lease: %v", err)
-	}
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/jobs/"+reviewer.Job.ID+"/terminal-token", map[string]string{}, http.StatusBadRequest, nil)
-}
-
-func TestSessionTerminalProxyRequiresOwnerAndProxiesRegisteredTarget(t *testing.T) {
-	fixture := newTestFixture(t)
-	started := startAuthorSessionForStatusTest(t, fixture, "Terminal proxy task")
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/pty" || r.URL.RawQuery != "q=1" {
-			t.Fatalf("proxied request URL = %s?%s", r.URL.Path, r.URL.RawQuery)
-		}
-		if r.Header.Get("Authorization") != "" {
-			t.Fatalf("proxy forwarded authorization header")
-		}
-		w.Header().Set("X-Terminal-Target", "ok")
-		_, _ = w.Write([]byte("proxied terminal"))
-	}))
-	t.Cleanup(target.Close)
-
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/sessions/"+started.Session.ID+"/terminal", sessionTerminalRequest{
-		TargetURL: target.URL,
-	}, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/sessions/"+started.Session.ID+"/terminal", sessionTerminalRequest{
-		TargetURL: target.URL,
-	}, http.StatusForbidden, nil)
-
-	var registered sessionTerminalResponse
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v2/sessions/"+started.Session.ID+"/terminal", sessionTerminalRequest{
-		TargetURL: target.URL,
-	}, http.StatusOK, &registered)
-	if registered.Terminal.TargetURL != target.URL {
-		t.Fatalf("registered terminal = %+v", registered.Terminal)
-	}
-
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodGet, "/v2/sessions/"+started.Session.ID+"/terminal/pty?q=1", nil, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/sessions/"+started.Session.ID+"/terminal/pty?q=1", nil, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, "hook-token", http.MethodGet, "/v2/sessions/"+started.Session.ID+"/terminal/pty?q=1", nil, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/sessions/"+started.Session.ID+"/terminal-token", map[string]string{}, http.StatusForbidden, nil)
-
-	var access sessionTerminalAccessResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/sessions/"+started.Session.ID+"/terminal-token", map[string]string{}, http.StatusOK, &access)
-	if access.Access.LoginPath == "" || !strings.Contains(access.Access.LoginPath, "/terminal-login?token=") {
-		t.Fatalf("terminal access = %+v", access.Access)
-	}
-	login := httptest.NewRecorder()
-	loginRequest := httptest.NewRequest(http.MethodGet, access.Access.LoginPath, nil)
-	fixture.Server.ServeHTTP(login, loginRequest)
-	if login.Code != http.StatusSeeOther {
-		t.Fatalf("login status = %d body = %q", login.Code, login.Body.String())
-	}
-	if login.Header().Get("Location") != "/v2/sessions/"+started.Session.ID+"/terminal" {
-		t.Fatalf("login location = %q", login.Header().Get("Location"))
-	}
-	cookies := login.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != terminalAccessCookie || !cookies[0].HttpOnly {
-		t.Fatalf("login cookies = %+v", cookies)
-	}
-
-	cookieProxyRequest := httptest.NewRequest(http.MethodGet, "/v2/sessions/"+started.Session.ID+"/terminal/pty?q=1", nil)
-	cookieProxyRequest.AddCookie(cookies[0])
-	cookieProxyResponse := httptest.NewRecorder()
-	fixture.Server.ServeHTTP(cookieProxyResponse, cookieProxyRequest)
-	if cookieProxyResponse.Code != http.StatusOK {
-		t.Fatalf("cookie proxy status = %d body = %q", cookieProxyResponse.Code, cookieProxyResponse.Body.String())
-	}
-	if cookieProxyResponse.Body.String() != "proxied terminal" {
-		t.Fatalf("cookie proxy body = %q", cookieProxyResponse.Body.String())
-	}
-	if cookieProxyResponse.Header().Get("Content-Security-Policy") != terminalSandboxCSP {
-		t.Fatalf("cookie proxy CSP = %q, want %q", cookieProxyResponse.Header().Get("Content-Security-Policy"), terminalSandboxCSP)
-	}
-	if !strings.Contains(cookieProxyResponse.Header().Get("Content-Security-Policy"), "allow-same-origin") {
-		t.Fatalf("cookie proxy CSP = %q, want allow-same-origin so ttyd token fetch remains same-origin", cookieProxyResponse.Header().Get("Content-Security-Policy"))
-	}
-
-	request := httptest.NewRequest(http.MethodGet, "/v2/sessions/"+started.Session.ID+"/terminal/pty?q=1", nil)
-	request.Header.Set("Authorization", "Bearer owner-token")
-	request.Header.Set(protocolHeader, contract.ProtocolVersion)
-	response := httptest.NewRecorder()
-	fixture.Server.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("proxy status = %d body = %q", response.Code, response.Body.String())
-	}
-	if response.Header().Get("X-Terminal-Target") != "ok" || response.Body.String() != "proxied terminal" {
-		t.Fatalf("proxy response header=%q body=%q", response.Header().Get("X-Terminal-Target"), response.Body.String())
-	}
-	if response.Header().Get("Content-Security-Policy") != terminalSandboxCSP {
-		t.Fatalf("proxy CSP = %q, want %q", response.Header().Get("Content-Security-Policy"), terminalSandboxCSP)
-	}
-}
-
-func TestSessionTerminalProxyInjectsClipboardBridge(t *testing.T) {
-	fixture := newTestFixture(t)
-	started := startAuthorSessionForStatusTest(t, fixture, "Terminal clipboard task")
-	const terminalHTML = "<html><body>term</body></html>"
-	const ptyBody = "pty-stream"
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/":
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte(terminalHTML))
-		case "/pty":
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			_, _ = w.Write([]byte(ptyBody))
-		default:
-			t.Fatalf("unexpected proxied request path = %s", r.URL.Path)
-		}
-	}))
-	t.Cleanup(target.Close)
-
-	doJSONRequestAs(t, fixture.Server, started.Token, http.MethodPost, "/v2/sessions/"+started.Session.ID+"/terminal", sessionTerminalRequest{
-		TargetURL: target.URL,
-	}, http.StatusOK, nil)
-
-	var access sessionTerminalAccessResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/sessions/"+started.Session.ID+"/terminal-token", map[string]string{}, http.StatusOK, &access)
-	login := httptest.NewRecorder()
-	fixture.Server.ServeHTTP(login, httptest.NewRequest(http.MethodGet, access.Access.LoginPath, nil))
-	if login.Code != http.StatusSeeOther {
-		t.Fatalf("login status = %d body = %q", login.Code, login.Body.String())
-	}
-	cookies := login.Result().Cookies()
-	if len(cookies) != 1 {
-		t.Fatalf("login cookies = %+v", cookies)
-	}
-
-	proxyGet := func(path string) *httptest.ResponseRecorder {
-		request := httptest.NewRequest(http.MethodGet, path, nil)
-		request.AddCookie(cookies[0])
-		response := httptest.NewRecorder()
-		fixture.Server.ServeHTTP(response, request)
-		return response
-	}
-
-	// The terminal HTML page gets the clipboard-bridge <script> injected before
-	// </body>, with a matching Content-Length.
-	htmlResponse := proxyGet("/v2/sessions/" + started.Session.ID + "/terminal")
-	if htmlResponse.Code != http.StatusOK {
-		t.Fatalf("terminal page status = %d body = %q", htmlResponse.Code, htmlResponse.Body.String())
-	}
-	wantScript := `<script src="/v2/sessions/` + started.Session.ID + `/terminal/terminal-clipboard.js"></script>`
-	htmlBody := htmlResponse.Body.String()
-	if !strings.Contains(htmlBody, wantScript+"</body>") {
-		t.Fatalf("terminal page body = %q, want injected %q before </body>", htmlBody, wantScript)
-	}
-	if htmlResponse.Header().Get("Content-Security-Policy") != terminalSandboxCSP {
-		t.Fatalf("terminal page CSP = %q, want %q", htmlResponse.Header().Get("Content-Security-Policy"), terminalSandboxCSP)
-	}
-	if got := htmlResponse.Header().Get("Content-Length"); got != strconv.Itoa(len(htmlBody)) {
-		t.Fatalf("terminal page Content-Length = %q, want %d", got, len(htmlBody))
-	}
-
-	// Non-HTML proxied responses pass through untouched.
-	ptyResponse := proxyGet("/v2/sessions/" + started.Session.ID + "/terminal/pty")
-	if ptyResponse.Code != http.StatusOK {
-		t.Fatalf("pty status = %d body = %q", ptyResponse.Code, ptyResponse.Body.String())
-	}
-	if ptyResponse.Body.String() != ptyBody {
-		t.Fatalf("pty body = %q, want %q (non-HTML untouched)", ptyResponse.Body.String(), ptyBody)
-	}
-	if strings.Contains(ptyResponse.Body.String(), "terminal-clipboard.js") {
-		t.Fatalf("pty body unexpectedly injected: %q", ptyResponse.Body.String())
-	}
-
-	// The bridge script itself is served from the terminal path.
-	assetResponse := proxyGet("/v2/sessions/" + started.Session.ID + "/terminal/terminal-clipboard.js")
-	if assetResponse.Code != http.StatusOK {
-		t.Fatalf("clipboard asset status = %d body = %q", assetResponse.Code, assetResponse.Body.String())
-	}
-	if contentType := assetResponse.Header().Get("Content-Type"); !strings.Contains(contentType, "javascript") {
-		t.Fatalf("clipboard asset Content-Type = %q, want javascript", contentType)
-	}
-	if !strings.Contains(assetResponse.Body.String(), "registerOscHandler") {
-		t.Fatalf("clipboard asset body missing registerOscHandler: %q", assetResponse.Body.String())
-	}
 }
 
 func TestSessionAttachRejectsInactiveOrNonLiveSessions(t *testing.T) {

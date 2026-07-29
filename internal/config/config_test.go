@@ -501,10 +501,6 @@ labels:
 capacity:
   persistent_agent: 1
   ephemeral: 2
-terminal:
-  bind_address: 100.64.1.2
-  public_base_url: http://100.64.1.2
-  ttyd_path: /tmp/flow-test-ttyd
 tmux:
   socket_path: /tmp/flow-test-tmux.sock
 git:
@@ -531,11 +527,6 @@ git:
 	}
 	if cfg.Capacity.PersistentAgent != 1 || cfg.Capacity.Ephemeral != 2 {
 		t.Fatalf("Capacity = %+v", cfg.Capacity)
-	}
-	if cfg.Terminal.BindAddress != "100.64.1.2" ||
-		cfg.Terminal.PublicBaseURL != "http://100.64.1.2" ||
-		cfg.Terminal.TTYDPath != "/tmp/flow-test-ttyd" {
-		t.Fatalf("Terminal = %+v", cfg.Terminal)
 	}
 	if cfg.Tmux.SocketPath != "/tmp/flow-test-tmux.sock" {
 		t.Fatalf("Tmux = %+v", cfg.Tmux)
@@ -595,9 +586,6 @@ func TestApplyWorkerEnvOverrides(t *testing.T) {
 			"FLOW_WORKER_WORK_DIR":                  "~/flow-worker",
 			"FLOW_WORKER_CAPACITY_PERSISTENT_AGENT": "3",
 			"FLOW_WORKER_CAPACITY_EPHEMERAL":        "4",
-			"FLOW_WORKER_TERMINAL_BIND_ADDRESS":     "0.0.0.0",
-			"FLOW_WORKER_TERMINAL_PUBLIC_BASE_URL":  "http://worker.local",
-			"FLOW_WORKER_TERMINAL_TTYD_PATH":        "/tmp/ttyd",
 			"FLOW_WORKER_TMUX_SOCKET_PATH":          "/tmp/tmux.sock",
 			"FLOW_WORKER_GIT_PRINCIPAL":             "worker:w-env",
 			"FLOW_WORKER_GIT_COMMIT_NAME":           "Flow Bot",
@@ -618,9 +606,6 @@ func TestApplyWorkerEnvOverrides(t *testing.T) {
 	}
 	if cfg.Capacity.PersistentAgent != 3 || cfg.Capacity.Ephemeral != 4 {
 		t.Fatalf("Capacity = %+v", cfg.Capacity)
-	}
-	if cfg.Terminal.BindAddress != "0.0.0.0" || cfg.Terminal.PublicBaseURL != "http://worker.local" || cfg.Terminal.TTYDPath != "/tmp/ttyd" {
-		t.Fatalf("Terminal = %+v", cfg.Terminal)
 	}
 	if cfg.Tmux.SocketPath != "/tmp/tmux.sock" {
 		t.Fatalf("Tmux = %+v", cfg.Tmux)

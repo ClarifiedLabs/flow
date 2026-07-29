@@ -210,9 +210,8 @@ type WorkerConfig struct {
 	WorkDir        string               `json:"work_dir" yaml:"work_dir"`
 	Labels         map[string]string    `json:"labels" yaml:"labels"`
 	Taints         []scheduler.Taint    `json:"taints" yaml:"taints"`
-	Capacity       WorkerCapacity       `json:"capacity" yaml:"capacity"`
-	Terminal       WorkerTerminalConfig `json:"terminal" yaml:"terminal"`
-	Tmux           WorkerTmuxConfig     `json:"tmux" yaml:"tmux"`
+	Capacity WorkerCapacity   `json:"capacity" yaml:"capacity"`
+	Tmux     WorkerTmuxConfig `json:"tmux" yaml:"tmux"`
 	Git            WorkerGitConfig      `json:"git" yaml:"git"`
 }
 
@@ -225,12 +224,6 @@ type WorkerGitConfig struct {
 	Principal   string `json:"principal" yaml:"principal"`
 	CommitName  string `json:"commit_name" yaml:"commit_name"`
 	CommitEmail string `json:"commit_email" yaml:"commit_email"`
-}
-
-type WorkerTerminalConfig struct {
-	BindAddress   string `json:"bind_address" yaml:"bind_address"`
-	PublicBaseURL string `json:"public_base_url" yaml:"public_base_url"`
-	TTYDPath      string `json:"ttyd_path" yaml:"ttyd_path"`
 }
 
 type WorkerTmuxConfig struct {
@@ -624,15 +617,6 @@ func LoadWorker(path string) (WorkerConfig, error) {
 	if strings.TrimSpace(fileCfg.Git.CommitEmail) != "" {
 		cfg.Git.CommitEmail = strings.TrimSpace(fileCfg.Git.CommitEmail)
 	}
-	if fileCfg.Terminal.BindAddress != "" {
-		cfg.Terminal.BindAddress = fileCfg.Terminal.BindAddress
-	}
-	if fileCfg.Terminal.PublicBaseURL != "" {
-		cfg.Terminal.PublicBaseURL = fileCfg.Terminal.PublicBaseURL
-	}
-	if fileCfg.Terminal.TTYDPath != "" {
-		cfg.Terminal.TTYDPath = fileCfg.Terminal.TTYDPath
-	}
 	if fileCfg.Tmux.SocketPath != "" {
 		cfg.Tmux.SocketPath = fileCfg.Tmux.SocketPath
 	}
@@ -672,15 +656,6 @@ func ApplyWorkerEnvOverrides(cfg WorkerConfig, getenv func(string) string) (Work
 			return WorkerConfig{}, fmt.Errorf("FLOW_WORKER_CAPACITY_EPHEMERAL must be an integer: %w", err)
 		}
 		cfg.Capacity.Ephemeral = capacity
-	}
-	if value := strings.TrimSpace(getenv("FLOW_WORKER_TERMINAL_BIND_ADDRESS")); value != "" {
-		cfg.Terminal.BindAddress = value
-	}
-	if value := strings.TrimSpace(getenv("FLOW_WORKER_TERMINAL_PUBLIC_BASE_URL")); value != "" {
-		cfg.Terminal.PublicBaseURL = value
-	}
-	if value := strings.TrimSpace(getenv("FLOW_WORKER_TERMINAL_TTYD_PATH")); value != "" {
-		cfg.Terminal.TTYDPath = value
 	}
 	if value := strings.TrimSpace(getenv("FLOW_WORKER_TMUX_SOCKET_PATH")); value != "" {
 		cfg.Tmux.SocketPath = value
@@ -810,9 +785,6 @@ func normalizeWorker(cfg WorkerConfig) (WorkerConfig, error) {
 	}
 
 	cfg.WorkDir = cleanRequiredPath(cfg.WorkDir)
-	cfg.Terminal.BindAddress = strings.TrimSpace(cfg.Terminal.BindAddress)
-	cfg.Terminal.PublicBaseURL = strings.TrimRight(strings.TrimSpace(cfg.Terminal.PublicBaseURL), "/")
-	cfg.Terminal.TTYDPath = cleanOptionalPath(cfg.Terminal.TTYDPath)
 	cfg.Tmux.SocketPath = cleanOptionalPath(cfg.Tmux.SocketPath)
 	return cfg, nil
 }

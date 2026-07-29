@@ -1,17 +1,14 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
+	"html"
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +17,7 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/terminal"
 	flowweb "github.com/ClarifiedLabs/flow/internal/web"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
+	"github.com/coder/websocket"
 )
 
 const (
@@ -30,12 +28,7 @@ const (
 )
 
 const (
-	// terminalClipboardAssetName is the OSC 52 → browser clipboard bridge script
-	// served from the terminal path and injected into ttyd's terminal page.
-	terminalClipboardAssetName = "terminal-clipboard.js"
-	// terminalClipboardScriptTagFormat is the <script> tag injected into ttyd's
-	// terminal HTML page; %s is the terminal proxy base path (session or job).
-	terminalClipboardScriptTagFormat = `<script src="%s/terminal-clipboard.js"></script>`
+	terminalHTMLAssetName = "terminal.html"
 )
 
 func (s *Server) serveTerminalBrowserRequest(w http.ResponseWriter, r *http.Request) bool {
@@ -84,7 +77,7 @@ func (s *Server) serveTerminalBrowserRequest(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusUnauthorized, "unauthorized", err.Error())
 			return true
 		}
-		ps.handleSessionTerminalProxy(w, r, sessionID, suffix)
+		ps.handleSessionTerminalBrowser(w, r, sessionID, suffix)
 		return true
 	}
 
@@ -131,7 +124,7 @@ func (s *Server) serveTerminalBrowserRequest(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusUnauthorized, "unauthorized", err.Error())
 		return true
 	}
-	ps.handleJobTerminalProxy(w, r, jobID, suffix)
+	ps.handleJobTerminalBrowser(w, r, jobID, suffix)
 	return true
 }
 
@@ -159,6 +152,7 @@ func parseSessionTerminalPath(path string) (string, string, []string, bool) {
 func parseJobTerminalPath(path string) (string, string, []string, bool) {
 	return parseTerminalPath(path, "/v2/jobs/")
 }
+
 func (s *projectServer) handleSessionPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
 	if s.sessions == nil {
 		writeError(w, http.StatusInternalServerError, "sessions_unavailable", "session service is not configured")
@@ -190,13 +184,13 @@ func (s *projectServer) handleSessionPath(w http.ResponseWriter, r *http.Request
 			if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
 				return
 			}
-			s.handleSessionTerminalProxy(w, r, sessionID, parts[2:])
+			s.handleSessionTerminalBrowser(w, r, sessionID, parts[2:])
 		case http.MethodPost:
 			if len(parts) != 2 {
 				writeError(w, http.StatusNotFound, "not_found", "resource not found")
 				return
 			}
-			if err := checkSessionTokenScope(principal, sessionID); err != nil {
+			if err := checkSessionScope(principal, sessionID); err != nil {
 				writeError(w, http.StatusForbidden, "forbidden", err.Error())
 				return
 			}
@@ -355,7 +349,7 @@ func (s *projectServer) handleSessionTerminalRegister(w http.ResponseWriter, r *
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	registered, err := s.sessions.RegisterTerminalTarget(r.Context(), sessionID, request.TargetURL, request.TmuxSocketPath)
+	registered, err := s.sessions.RegisterTerminal(r.Context(), sessionID, request.TmuxSocketPath)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "session_not_found", "session not found")
 		return
@@ -371,7 +365,7 @@ func (s *projectServer) handleSessionTerminalRegister(w http.ResponseWriter, r *
 func (s *projectServer) handleSessionTerminalAccess(w http.ResponseWriter, r *http.Request, sessionID string) {
 	access, err := s.sessions.CreateTerminalAccess(r.Context(), sessionID, defaultTerminalAccessTTL)
 	if errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "terminal_not_found", "terminal target not found")
+		writeError(w, http.StatusNotFound, "terminal_not_found", "terminal not found")
 		return
 	}
 	if err != nil {
@@ -382,21 +376,16 @@ func (s *projectServer) handleSessionTerminalAccess(w http.ResponseWriter, r *ht
 	writeJSON(w, http.StatusOK, sessionTerminalAccessResponse{Access: access})
 }
 
-func (s *projectServer) handleSessionTerminalProxy(w http.ResponseWriter, r *http.Request, sessionID string, suffix []string) {
-	if len(suffix) == 1 && suffix[0] == terminalClipboardAssetName {
-		s.serveTerminalClipboardAsset(w)
+func (s *projectServer) handleSessionTerminalBrowser(w http.ResponseWriter, r *http.Request, sessionID string, suffix []string) {
+	if isWebSocketUpgrade(r) {
+		s.handleSessionTerminalStream(w, r, sessionID)
 		return
 	}
-	registered, err := s.sessions.TerminalTarget(r.Context(), sessionID)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "terminal_not_found", "terminal target not found")
+	if len(suffix) == 0 {
+		s.serveTerminalPage(w, r, terminal.TerminalProxyPath(sessionID))
 		return
 	}
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "terminal_proxy_failed", err.Error())
-		return
-	}
-	s.proxyTerminalTarget(w, r, registered.TargetURL, suffix, fmt.Sprintf(terminalClipboardScriptTagFormat, terminal.TerminalProxyPath(sessionID)))
+	s.serveTerminalAsset(w, suffix)
 }
 
 func (s *projectServer) handleJobTerminalRegister(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, jobID string) {
@@ -409,7 +398,7 @@ func (s *projectServer) handleJobTerminalRegister(w http.ResponseWriter, r *http
 		writeLeaseAuthError(w, err)
 		return
 	}
-	registered, err := s.sessions.RegisterJobTerminalTarget(r.Context(), jobID, request.LeaseID, request.TargetURL, request.TmuxSocketPath)
+	registered, err := s.sessions.RegisterJobTerminal(r.Context(), jobID, request.LeaseID, request.TmuxSocketPath)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "job_not_found", "job not found")
 		return
@@ -425,7 +414,7 @@ func (s *projectServer) handleJobTerminalRegister(w http.ResponseWriter, r *http
 func (s *projectServer) handleJobTerminalAccess(w http.ResponseWriter, r *http.Request, jobID string) {
 	access, err := s.sessions.CreateJobTerminalAccess(r.Context(), jobID, defaultTerminalAccessTTL)
 	if errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "terminal_not_found", "terminal target not found")
+		writeError(w, http.StatusNotFound, "terminal_not_found", "terminal not found")
 		return
 	}
 	if err != nil {
@@ -436,31 +425,60 @@ func (s *projectServer) handleJobTerminalAccess(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, jobTerminalAccessResponse{Access: access})
 }
 
-func (s *projectServer) handleJobTerminalProxy(w http.ResponseWriter, r *http.Request, jobID string, suffix []string) {
-	if len(suffix) == 1 && suffix[0] == terminalClipboardAssetName {
-		s.serveTerminalClipboardAsset(w)
+func (s *projectServer) handleJobTerminalBrowser(w http.ResponseWriter, r *http.Request, jobID string, suffix []string) {
+	if isWebSocketUpgrade(r) {
+		s.handleJobTerminalStream(w, r, jobID)
 		return
 	}
-	registered, err := s.sessions.JobTerminalTarget(r.Context(), jobID)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "terminal_not_found", "terminal target not found")
+	if len(suffix) == 0 {
+		s.serveTerminalPage(w, r, terminal.JobTerminalProxyPath(jobID))
 		return
 	}
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "terminal_proxy_failed", err.Error())
-		return
-	}
-	s.proxyTerminalTarget(w, r, registered.TargetURL, suffix, fmt.Sprintf(terminalClipboardScriptTagFormat, terminal.JobTerminalProxyPath(jobID)))
+	s.serveTerminalAsset(w, suffix)
 }
 
-// serveTerminalClipboardAsset serves the OSC 52 → browser clipboard bridge
-// script from the terminal path so the injected <script src> is same-origin
-// with ttyd's page. It sits behind the terminal access cookie / owner-token
-// auth already enforced on the terminal path.
-func (s *projectServer) serveTerminalClipboardAsset(w http.ResponseWriter) {
-	contents, contentType, ok := flowweb.Asset(terminalClipboardAssetName)
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+}
+
+func (s *projectServer) serveTerminalPage(w http.ResponseWriter, r *http.Request, wsPath string) {
+	contents, contentType, ok := flowweb.Asset(terminalHTMLAssetName)
 	if !ok {
-		writeError(w, http.StatusNotFound, "terminal_asset_not_found", "terminal clipboard asset not found")
+		writeError(w, http.StatusNotFound, "terminal_page_not_found", "terminal page not found")
+		return
+	}
+	wsURL := websocketURL(r, wsPath)
+	scriptTag := `<script id="terminal-page-data" data-ws-url="` + html.EscapeString(wsURL) + `"></script>`
+	rendered := strings.Replace(string(contents), "<!--TERMINAL_PAGE_DATA-->", scriptTag, 1)
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Security-Policy", terminalSandboxCSP)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write([]byte(rendered))
+}
+
+func websocketURL(r *http.Request, path string) string {
+	scheme := "ws"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "wss"
+	}
+	host := r.Host
+	if forwarded := r.Header.Get("X-Forwarded-Host"); forwarded != "" {
+		host = forwarded
+	}
+	return scheme + "://" + host + path
+}
+
+func (s *projectServer) serveTerminalAsset(w http.ResponseWriter, suffix []string) {
+	name := strings.Join(suffix, "/")
+	if name == "" || strings.Contains(name, "..") {
+		writeError(w, http.StatusNotFound, "terminal_asset_not_found", "terminal asset not found")
+		return
+	}
+	contents, contentType, ok := flowweb.Asset(name)
+	if !ok {
+		writeError(w, http.StatusNotFound, "terminal_asset_not_found", "terminal asset not found")
 		return
 	}
 	w.Header().Set("Content-Type", contentType)
@@ -468,6 +486,95 @@ func (s *projectServer) serveTerminalClipboardAsset(w http.ResponseWriter) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write(contents)
+}
+
+func (s *projectServer) handleSessionTerminalStream(w http.ResponseWriter, r *http.Request, sessionID string) {
+	ctx := r.Context()
+	if _, err := s.sessions.TerminalTarget(ctx, sessionID); errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "terminal_not_found", "terminal not registered")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusBadRequest, "terminal_stream_failed", err.Error())
+		return
+	}
+	session, err := s.sessions.GetSession(ctx, sessionID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "terminal_stream_failed", err.Error())
+		return
+	}
+	lease, err := s.workers.GetLease(ctx, session.LeaseID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "terminal_stream_failed", err.Error())
+		return
+	}
+	if lease.ReleasedAt != nil || time.Now().After(lease.ExpiresAt) {
+		writeError(w, http.StatusBadRequest, "terminal_not_live", "terminal is not live")
+		return
+	}
+	s.openTerminalStream(w, r, session.JobID, lease.WorkerID, "")
+}
+
+func (s *projectServer) handleJobTerminalStream(w http.ResponseWriter, r *http.Request, jobID string) {
+	ctx := r.Context()
+	registered, err := s.sessions.JobTerminalTarget(ctx, jobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "terminal_not_found", "terminal not registered")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "terminal_stream_failed", err.Error())
+		return
+	}
+	lease, err := s.workers.GetLease(ctx, registered.LeaseID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "terminal_stream_failed", err.Error())
+		return
+	}
+	if lease.ReleasedAt != nil || time.Now().After(lease.ExpiresAt) {
+		writeError(w, http.StatusBadRequest, "terminal_not_live", "terminal is not live")
+		return
+	}
+	s.openTerminalStream(w, r, jobID, lease.WorkerID, registered.TmuxSocketPath)
+}
+
+func (s *projectServer) openTerminalStream(w http.ResponseWriter, r *http.Request, jobID, workerID, tmuxSocketPath string) {
+	browserConn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		OriginPatterns: []string{"*"},
+	})
+	if err != nil {
+		slog.WarnContext(r.Context(), "accept browser terminal WebSocket", "error", err)
+		return
+	}
+
+	cols, rows := uint16(80), uint16(24)
+	if msgType, data, err := browserConn.Read(r.Context()); err == nil && msgType == websocket.MessageText {
+		var attach terminalAttachMessage
+		if err := json.Unmarshal(data, &attach); err == nil && attach.Type == "attach" {
+			if attach.Cols > 0 {
+				cols = attach.Cols
+			}
+			if attach.Rows > 0 {
+				rows = attach.Rows
+			}
+		}
+	}
+
+	streamID, err := coordinator.NewTerminalStreamID()
+	if err != nil {
+		_ = browserConn.Close(websocket.StatusInternalError, "failed to allocate stream")
+		return
+	}
+
+	if err := s.Server.workerTerminals.OpenStream(streamID, workerID, browserConn, jobID, cols, rows); err != nil {
+		slog.WarnContext(r.Context(), "open terminal stream", "stream_id", streamID, "worker_id", workerID, "error", err)
+		_ = browserConn.Close(websocket.StatusPolicyViolation, err.Error())
+	}
+}
+
+type terminalAttachMessage struct {
+	Type string `json:"type"`
+	Cols uint16 `json:"cols"`
+	Rows uint16 `json:"rows"`
 }
 
 // transcriptUploadLimit bounds the request body the coordinator will read for
@@ -616,121 +723,10 @@ func (s *projectServer) serveTranscript(w http.ResponseWriter, id string) {
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(transcript)
 }
-
-func (s *Server) proxyTerminalTarget(w http.ResponseWriter, r *http.Request, targetURL string, suffix []string, clipboardScriptTag string) {
-	target, err := url.Parse(targetURL)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "terminal_proxy_failed", err.Error())
-		return
-	}
-
-	proxy := &httputil.ReverseProxy{
-		Director: func(request *http.Request) {
-			incomingQuery := request.URL.RawQuery
-			request.URL.Scheme = target.Scheme
-			request.URL.Host = target.Host
-			request.URL.Path = terminalProxyPath(target.Path, suffix)
-			request.URL.RawPath = ""
-			if target.RawQuery == "" {
-				request.URL.RawQuery = incomingQuery
-			} else if incomingQuery == "" {
-				request.URL.RawQuery = target.RawQuery
-			} else {
-				request.URL.RawQuery = target.RawQuery + "&" + incomingQuery
-			}
-			request.Host = target.Host
-			request.Header.Del("Authorization")
-			request.Header.Del(protocolHeader)
-			// The terminal HTML page is rewritten below (a clipboard-bridge
-			// <script> is injected), so strip the conditional and encoding
-			// request headers that would otherwise let the browser or upstream
-			// serve a cached, un-injected copy or a body we cannot rewrite.
-			request.Header.Del("Accept-Encoding")
-			request.Header.Del("If-None-Match")
-			request.Header.Del("If-Modified-Since")
-		},
-		ModifyResponse: func(response *http.Response) error {
-			response.Header.Set("Content-Security-Policy", terminalSandboxCSP)
-			// Only rewrite the terminal HTML page itself: status 200, an HTML
-			// content type, and no upstream encoding we would have to decode
-			// first (Accept-Encoding is stripped in the Director, so this is a
-			// belt-and-braces guard). Non-HTML responses — /pty (WebSocket 101),
-			// /auth_token, and ttyd static assets — pass through untouched.
-			if clipboardScriptTag != "" &&
-				response.StatusCode == http.StatusOK &&
-				strings.Contains(response.Header.Get("Content-Type"), "text/html") &&
-				response.Header.Get("Content-Encoding") == "" {
-				if err := injectTerminalClipboardScript(response, clipboardScriptTag); err != nil {
-					return err
-				}
-			}
-			return nil
-		},
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			writeError(w, http.StatusBadGateway, "terminal_proxy_failed", err.Error())
-		},
-	}
-	proxy.ServeHTTP(w, r)
-}
-
-// injectTerminalClipboardScript appends the OSC 52 → browser clipboard bridge
-// <script> to ttyd's terminal HTML page. ttyd serves exactly one HTML page (the
-// terminal UI), so the text/html content-type guard in ModifyResponse is enough
-// to leave /pty (WebSocket 101), /auth_token, and static assets untouched. The
-// body length and validators change, so Content-Length is recomputed, ETag and
-// Last-Modified are dropped, and the page is marked no-store so browsers never
-// serve a cached, un-injected copy.
-func injectTerminalClipboardScript(response *http.Response, scriptTag string) error {
-	body, err := io.ReadAll(response.Body)
-	_ = response.Body.Close()
-	if err != nil {
-		return err
-	}
-	// Insert immediately before </body> (case-insensitive); append at the end if
-	// the tag is absent.
-	injected := insertBeforeClosingBody(body, scriptTag)
-	response.Body = io.NopCloser(bytes.NewReader(injected))
-	response.ContentLength = int64(len(injected))
-	response.Header.Set("Content-Length", strconv.Itoa(len(injected)))
-	response.Header.Del("ETag")
-	response.Header.Del("Last-Modified")
-	response.Header.Set("Cache-Control", "no-store")
-	return nil
-}
-
-// insertBeforeClosingBody returns body with scriptTag inserted immediately
-// before the first case-insensitive </body> occurrence, or appended if none is
-// present.
-func insertBeforeClosingBody(body []byte, scriptTag string) []byte {
-	lower := bytes.ToLower(body)
-	marker := []byte("</body>")
-	index := bytes.Index(lower, marker)
-	if index < 0 {
-		return append(append([]byte{}, body...), scriptTag...)
-	}
-	out := make([]byte, 0, len(body)+len(scriptTag))
-	out = append(out, body[:index]...)
-	out = append(out, scriptTag...)
-	out = append(out, body[index:]...)
-	return out
-}
-
-func terminalProxyPath(base string, suffix []string) string {
-	cleanBase := "/" + strings.Trim(strings.TrimSpace(base), "/")
-	cleanSuffix := strings.Trim(strings.Join(suffix, "/"), "/")
-	if cleanSuffix == "" {
-		return cleanBase
-	}
-	if cleanBase == "/" {
-		return "/" + cleanSuffix
-	}
-
-	return cleanBase + "/" + cleanSuffix
-}
-
 func (s *projectServer) handleSessionEvent(w http.ResponseWriter, r *http.Request, sessionID string, principal coordinator.Principal) {
 	var request sessionEventRequest
 	if err := decodeJSON(r, &request); err != nil {

@@ -159,7 +159,7 @@ For each claimed job, the worker:
 2. Checks out the job's task branch.
 3. Builds the job environment, including Flow session/job variables.
 4. Configures harness hooks and client-side git hooks where needed.
-5. Starts a tmux session and a ttyd terminal proxy.
+5. Starts a tmux session and registers it for coordinator terminal attach.
 6. Runs the entrypoint.
 7. Heartbeats the lease and reports session/check/job events.
 8. Uploads the tail of the transcript when the job finishes.
@@ -314,7 +314,7 @@ terminal state, and flow state are authoritative on the server.
 | Git exchange, hooks, refs, merge helpers | `internal/git` |
 | Harness definitions, hooks, model serialization | `internal/harness` |
 | Prompt and handoff rendering/validation | `internal/prompt`, `internal/handoff`, `skills/` |
-| ttyd/tmux terminal helpers | `internal/terminal` |
+| tmux/terminal helpers | `internal/terminal` |
 | Embedded web UI | `internal/web` |
 
 ## Development and verification

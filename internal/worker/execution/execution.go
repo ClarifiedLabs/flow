@@ -8,11 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -48,9 +46,6 @@ const (
 	agentReadyMinStartup            = 2 * time.Second
 	agentReadyStableChecks          = 3
 	agentReadyConfirmChecks         = 2
-	terminalStartupPollInterval     = 25 * time.Millisecond
-	terminalStartupTimeout          = 2 * time.Second
-	terminalProcessStopTimeout      = 2 * time.Second
 	tmuxHistoryLimit                = 100000
 	harnessHooksFile                = "harness-flow-hooks.json"
 	envHarnessHooks                 = "FLOW_HARNESS_HOOKS"
@@ -181,8 +176,39 @@ type RunResult struct {
 	Err            error
 }
 
+var (
+	activeJobsMu sync.RWMutex
+	activeJobs   = map[string]struct{}{}
+)
+
+// RegisterActiveJob marks jobID as active on this worker. The worker control
+// channel uses this set to decide whether to accept terminal-open requests.
+func RegisterActiveJob(jobID string) {
+	activeJobsMu.Lock()
+	defer activeJobsMu.Unlock()
+	activeJobs[jobID] = struct{}{}
+}
+
+// UnregisterActiveJob removes jobID from this worker's active set.
+func UnregisterActiveJob(jobID string) {
+	activeJobsMu.Lock()
+	defer activeJobsMu.Unlock()
+	delete(activeJobs, jobID)
+}
+
+// IsActiveJob reports whether jobID is currently active on this worker.
+func IsActiveJob(jobID string) bool {
+	activeJobsMu.RLock()
+	defer activeJobsMu.RUnlock()
+	_, ok := activeJobs[jobID]
+	return ok
+}
+
 func RunJob(ctx context.Context, input RunInput) RunResult {
 	slog.Debug("worker job start", "job_id", input.Job.ID, "role", input.Job.Role, "bucket", input.Job.CapacityBucket)
+	RegisterActiveJob(input.Job.ID)
+	defer UnregisterActiveJob(input.Job.ID)
+
 	payload, err := DecodePayload(input.Job.Payload)
 	if err != nil {
 		return failedResult(input, payload, fmt.Errorf("decode job payload: %w", err))
@@ -535,19 +561,6 @@ func remoteRefExists(ctx context.Context, repoDir string, cfg config.WorkerConfi
 	return err == nil
 }
 
-func RequireTerminalAttach(cfg config.WorkerConfig) error {
-	if _, err := exec.LookPath(ttydCommand(cfg)); err != nil {
-		return errors.New("ttyd is required for worker terminal attach")
-	}
-	if _, _, ok, err := terminalEndpointBase(cfg); err != nil {
-		return err
-	} else if !ok {
-		return errors.New("worker terminal public_base_url is required when coordinator_url is not loopback")
-	}
-
-	return nil
-}
-
 func git(ctx context.Context, dir string, cfg config.WorkerConfig, args ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, gitCloneFetchTimeout)
 	defer cancel()
@@ -609,23 +622,15 @@ func gitHTTPAuthEnv(token string) []string {
 	}
 }
 
-func ttydCommand(cfg config.WorkerConfig) string {
-	if path := strings.TrimSpace(cfg.Terminal.TTYDPath); path != "" {
-		return path
-	}
-
-	return "ttyd"
-}
-
 func tmuxCommandContext(ctx context.Context, cfg config.WorkerConfig, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "tmux", tmuxCommandArgs(cfg, args...)...)
-	cmd.Env = tmuxClientEnv(os.Environ())
+	cmd.Env = terminal.TmuxClientEnv(os.Environ())
 	return cmd
 }
 
 func tmuxCommand(cfg config.WorkerConfig, args ...string) *exec.Cmd {
 	cmd := exec.Command("tmux", tmuxCommandArgs(cfg, args...)...)
-	cmd.Env = tmuxClientEnv(os.Environ())
+	cmd.Env = terminal.TmuxClientEnv(os.Environ())
 	return cmd
 }
 
@@ -639,38 +644,6 @@ func tmuxCommandArgs(cfg config.WorkerConfig, args ...string) []string {
 	commandArgs = append(commandArgs, "-S", socketPath)
 	commandArgs = append(commandArgs, args...)
 	return commandArgs
-}
-
-func tmuxClientEnv(env []string) []string {
-	filtered := make([]string, 0, len(env))
-	for _, value := range env {
-		if strings.HasPrefix(value, "TMUX=") || strings.HasPrefix(value, "TMUX_PANE=") {
-			continue
-		}
-		filtered = append(filtered, value)
-	}
-	return withDefaultUTF8Locale(filtered)
-}
-
-func withDefaultUTF8Locale(env []string) []string {
-	result := append([]string(nil), env...)
-	present := map[string]bool{}
-	for i, value := range result {
-		key, rawValue, ok := strings.Cut(value, "=")
-		if !ok || !isUTF8LocaleKey(key) {
-			continue
-		}
-		present[key] = true
-		if !isUTF8Locale(rawValue) {
-			result[i] = key + "=" + defaultUTF8Locale
-		}
-	}
-	for _, key := range utf8LocaleEnvKeys {
-		if !present[key] {
-			result = append(result, key+"="+defaultUTF8Locale)
-		}
-	}
-	return result
 }
 
 func ensureDefaultUTF8Locale(env map[string]string) {
@@ -855,25 +828,14 @@ func runEntrypointInTmux(ctx context.Context, input tmuxInput) (int, error) {
 	reporter := newSessionStateReporter(input)
 	reconciler := newPersistentSessionReconciler(input)
 	if reporter != nil || canRegisterJobTerminal(input) {
-		terminalProcess, err := startTmuxTerminal(ctx, input.Config, input.SessionName)
-		if err != nil {
-			slog.Debug("worker tmux terminal start failed", "job_id", input.Job.ID, "session", input.SessionName, "error", err)
+		registered := false
+		if reporter != nil {
+			registered = reporter.registerTerminal(input.Config.Tmux.SocketPath) || registered
 		}
-		if terminalProcess != nil {
-			registered := false
-			if reporter != nil {
-				registered = reporter.registerTerminal(terminalProcess.targetURL, input.Config.Tmux.SocketPath) || registered
-			}
-			if canRegisterJobTerminal(input) {
-				registered = waitForJobTerminalRegistration(input, terminalProcess.targetURL) || registered
-			}
-			slog.Debug("worker tmux terminal registration", "job_id", input.Job.ID, "session", input.SessionName, "registered", registered)
-			if registered {
-				defer terminalProcess.stop()
-			} else {
-				terminalProcess.stop()
-			}
+		if canRegisterJobTerminal(input) {
+			registered = waitForJobTerminalRegistration(input) || registered
 		}
+		slog.Debug("worker tmux terminal registration", "job_id", input.Job.ID, "session", input.SessionName, "registered", registered)
 	}
 	if err := releaseEntrypointStartGate(startGate); err != nil {
 		killTmuxSession(input.Config, input.SessionName)
@@ -1023,10 +985,8 @@ func releaseEntrypointStartGate(path string) error {
 // means tmux owns plain-drag text selection, which drops on mouse-up in a
 // browser, so set-clipboard is enabled and terminal-features is extended with a
 // `*:clipboard` entry so tmux advertises the clipboard capability and emits an
-// OSC 52 clipboard sequence to the outer terminal even when its terminfo does
-// not. The ttyd build shipped here has no OSC 52 handler of its own, so the
-// coordinator terminal proxy injects a small bridge script into ttyd's page
-// that forwards those OSC 52 sequences to the browser clipboard
+// OSC 52 clipboard sequence to the outer terminal. The flow-server terminal
+// page forwards those OSC 52 sequences to the browser clipboard
 // (internal/web/assets/terminal-clipboard.js); as a result a plain drag-select
 // in the web UI copies locally while tmux keeps owning the mouse. Shift+drag
 // (bypasses tmux selection for a native browser selection) followed by
@@ -1317,9 +1277,6 @@ func scrubWorkerDeploymentEnv(env map[string]string) {
 		"FLOW_WORKER_GIT_PRINCIPAL",
 		"FLOW_WORKER_ID",
 		"FLOW_WORKER_JOIN_TOKEN",
-		"FLOW_WORKER_TERMINAL_BIND_ADDRESS",
-		"FLOW_WORKER_TERMINAL_PUBLIC_BASE_URL",
-		"FLOW_WORKER_TERMINAL_TTYD_PATH",
 		"FLOW_WORKER_TMUX_SOCKET_PATH",
 		"FLOW_WORKER_TOKEN",
 		"FLOW_WORKER_WORK_DIR",
@@ -1741,7 +1698,7 @@ func tmuxPaneDead(ctx context.Context, cfg config.WorkerConfig, sessionName stri
 
 type sessionStateClient interface {
 	ReportSessionSignal(ctx context.Context, sessionID string, input flowclient.SessionSignalInput) (coordinator.Session, error)
-	RegisterSessionTerminal(ctx context.Context, sessionID string, targetURL string, tmuxSocketPath string) (coordinator.SessionTerminal, error)
+	RegisterSessionTerminal(ctx context.Context, sessionID string, tmuxSocketPath string) (coordinator.SessionTerminal, error)
 }
 
 type sessionMessageClient interface {
@@ -1800,13 +1757,13 @@ func (r *sessionStateReporter) report(state coordinator.SessionRuntimeState) {
 	}
 }
 
-func (r *sessionStateReporter) registerTerminal(targetURL string, tmuxSocketPath string) bool {
-	if r == nil || r.client == nil || strings.TrimSpace(r.sessionID) == "" || strings.TrimSpace(targetURL) == "" {
+func (r *sessionStateReporter) registerTerminal(tmuxSocketPath string) bool {
+	if r == nil || r.client == nil || strings.TrimSpace(r.sessionID) == "" {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sessionStateReportTimeout)
 	defer cancel()
-	_, err := r.client.RegisterSessionTerminal(ctx, r.sessionID, targetURL, tmuxSocketPath)
+	_, err := r.client.RegisterSessionTerminal(ctx, r.sessionID, tmuxSocketPath)
 	return err == nil
 }
 
@@ -1816,10 +1773,10 @@ func canRegisterJobTerminal(input tmuxInput) bool {
 		strings.TrimSpace(input.Lease.ID) != ""
 }
 
-func waitForJobTerminalRegistration(input tmuxInput, targetURL string) bool {
+func waitForJobTerminalRegistration(input tmuxInput) bool {
 	result := make(chan bool, 1)
 	go func() {
-		result <- registerJobTerminal(input, targetURL)
+		result <- registerJobTerminal(input)
 	}()
 	select {
 	case registered := <-result:
@@ -1829,8 +1786,8 @@ func waitForJobTerminalRegistration(input tmuxInput, targetURL string) bool {
 	}
 }
 
-func registerJobTerminal(input tmuxInput, targetURL string) bool {
-	if !canRegisterJobTerminal(input) || strings.TrimSpace(targetURL) == "" {
+func registerJobTerminal(input tmuxInput) bool {
+	if !canRegisterJobTerminal(input) {
 		return false
 	}
 	client, err := flowclient.New(config.ClientConfig{
@@ -1842,7 +1799,7 @@ func registerJobTerminal(input tmuxInput, targetURL string) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sessionStateReportTimeout)
 	defer cancel()
-	_, err = client.RegisterJobTerminal(ctx, input.Job.ID, input.Lease.ID, targetURL, input.Config.Tmux.SocketPath)
+	_, err = client.RegisterJobTerminal(ctx, input.Job.ID, input.Lease.ID, input.Config.Tmux.SocketPath)
 	return err == nil
 }
 
@@ -1970,7 +1927,7 @@ func renderInitialPrompt(ctx context.Context, input tmuxInput) (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(promptCtx, resolveFlowBinary(input.Entrypoint), "fetch-prompt", "--harness", harness)
 	cmd.Dir = cwd
-	cmd.Env = tmuxClientEnv(envAssignments(workerEnv(input)))
+	cmd.Env = terminal.TmuxClientEnv(envAssignments(workerEnv(input)))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		details := strings.TrimSpace(string(output))
@@ -2322,216 +2279,6 @@ func foregroundLooksBusy(command string) bool {
 		return false
 	default:
 		return true
-	}
-}
-
-type tmuxTerminalProcess struct {
-	targetURL string
-	cmd       *exec.Cmd
-}
-
-func startTmuxTerminal(ctx context.Context, cfg config.WorkerConfig, sessionName string) (*tmuxTerminalProcess, error) {
-	if err := RequireTerminalAttach(cfg); err != nil {
-		return nil, err
-	}
-	bindAddress, publicBaseURL, ok, err := terminalEndpointBase(cfg)
-	if err != nil || !ok {
-		return nil, err
-	}
-	listener, err := net.Listen("tcp", net.JoinHostPort(bindAddress, "0"))
-	if err != nil {
-		return nil, err
-	}
-	address, ok := listener.Addr().(*net.TCPAddr)
-	if !ok {
-		_ = listener.Close()
-		return nil, errors.New("terminal listener did not allocate a TCP address")
-	}
-	port := address.Port
-	if err := listener.Close(); err != nil {
-		return nil, err
-	}
-
-	command := ttydServeCommand(cfg, sessionName, bindAddress, port)
-	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
-	cmd.Env = tmuxClientEnv(os.Environ())
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-
-	process := &tmuxTerminalProcess{
-		targetURL: terminalURLWithPort(publicBaseURL, port),
-		cmd:       cmd,
-	}
-	if err := waitForTerminalListener(ctx, bindAddress, port); err != nil {
-		process.stop()
-		return nil, err
-	}
-
-	return process, nil
-}
-
-func ttydServeCommand(cfg config.WorkerConfig, sessionName string, bindAddress string, port int) []string {
-	command := terminal.TTYDServeCommand(sessionName, bindAddress, port)
-	command[0] = ttydCommand(cfg)
-	socketPath := strings.TrimSpace(cfg.Tmux.SocketPath)
-	if socketPath == "" {
-		return command
-	}
-	for i, arg := range command {
-		if arg != "tmux" {
-			continue
-		}
-		withSocket := make([]string, 0, len(command)+2)
-		withSocket = append(withSocket, command[:i+1]...)
-		withSocket = append(withSocket, "-S", socketPath)
-		withSocket = append(withSocket, command[i+1:]...)
-		return withSocket
-	}
-
-	return command
-}
-
-func terminalEndpointBase(cfg config.WorkerConfig) (string, string, bool, error) {
-	publicBaseURL := strings.TrimRight(strings.TrimSpace(cfg.Terminal.PublicBaseURL), "/")
-	if publicBaseURL != "" {
-		parsed, err := url.Parse(publicBaseURL)
-		if err != nil {
-			return "", "", false, err
-		}
-		if parsed.Scheme != "http" && parsed.Scheme != "https" {
-			return "", "", false, errors.New("worker terminal public_base_url must use http or https")
-		}
-		if parsed.User != nil || strings.TrimSpace(parsed.Host) == "" || parsed.Port() != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
-			return "", "", false, errors.New("worker terminal public_base_url must be scheme and host without port, user, query, or fragment")
-		}
-		bindAddress := strings.TrimSpace(cfg.Terminal.BindAddress)
-		if bindAddress == "" {
-			bindAddress = parsed.Hostname()
-		}
-		targetURL := terminalURLWithPort(publicBaseURL, 1)
-		if _, err := terminal.NormalizeProxyTargetURL(targetURL); err != nil {
-			return "", "", false, err
-		}
-		if err := validateTerminalBindAddress(bindAddress, parsed.Hostname()); err != nil {
-			return "", "", false, err
-		}
-		return bindAddress, publicBaseURL, true, nil
-	}
-
-	parsedCoordinator, err := url.Parse(strings.TrimSpace(cfg.CoordinatorURL))
-	if err != nil {
-		return "", "", false, err
-	}
-	host := parsedCoordinator.Hostname()
-	if strings.EqualFold(host, "localhost") {
-		return "127.0.0.1", "http://127.0.0.1", true, nil
-	}
-	ip := net.ParseIP(host)
-	if ip != nil && ip.IsLoopback() {
-		return "127.0.0.1", "http://127.0.0.1", true, nil
-	}
-
-	return "", "", false, nil
-}
-
-func validateTerminalBindAddress(bindAddress string, publicHost string) error {
-	bindAddress = strings.TrimSpace(bindAddress)
-	if bindAddress == "" {
-		return errors.New("worker terminal bind_address is required")
-	}
-	ip := net.ParseIP(bindAddress)
-	if ip == nil {
-		return errors.New("worker terminal bind_address must be an IP address")
-	}
-	if ip.IsUnspecified() {
-		publicIP := net.ParseIP(strings.TrimSpace(publicHost))
-		if publicIP == nil || !(publicIP.IsLoopback() || publicIP.IsPrivate() || isTailnetIP(publicIP)) {
-			return errors.New("worker terminal wildcard bind requires a private or tailnet public_base_url host")
-		}
-	}
-
-	return nil
-}
-
-func isTailnetIP(ip net.IP) bool {
-	ip = ip.To4()
-	if ip == nil {
-		return false
-	}
-
-	return ip[0] == 100 && ip[1] >= 64 && ip[1] <= 127
-}
-
-func terminalURLWithPort(publicBaseURL string, port int) string {
-	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(publicBaseURL), "/"))
-	if err != nil {
-		return publicBaseURL
-	}
-	parsed.Host = net.JoinHostPort(parsed.Hostname(), strconv.Itoa(port))
-
-	return parsed.String()
-}
-
-func waitForTerminalListener(ctx context.Context, bindAddress string, port int) error {
-	address := terminalReadinessAddress(bindAddress, port)
-	waitCtx, cancel := context.WithTimeout(ctx, terminalStartupTimeout)
-	defer cancel()
-
-	ticker := time.NewTicker(terminalStartupPollInterval)
-	defer ticker.Stop()
-
-	var lastErr error
-	for {
-		conn, err := net.DialTimeout("tcp", address, terminalStartupPollInterval)
-		if err == nil {
-			_ = conn.Close()
-			return nil
-		}
-		lastErr = err
-
-		select {
-		case <-waitCtx.Done():
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return fmt.Errorf("terminal proxy did not start listening on %s within %s: %w", address, terminalStartupTimeout, lastErr)
-		case <-ticker.C:
-		}
-	}
-}
-
-func terminalReadinessAddress(bindAddress string, port int) string {
-	host := strings.TrimSpace(bindAddress)
-	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
-		if ip.To4() != nil {
-			host = "127.0.0.1"
-		} else {
-			host = "::1"
-		}
-	}
-
-	return net.JoinHostPort(host, strconv.Itoa(port))
-}
-
-func (p *tmuxTerminalProcess) stop() {
-	if p == nil || p.cmd == nil || p.cmd.Process == nil {
-		return
-	}
-	if err := syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL); err != nil {
-		_ = p.cmd.Process.Kill()
-	}
-	done := make(chan struct{})
-	go func() {
-		_ = p.cmd.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(terminalProcessStopTimeout):
 	}
 }
 

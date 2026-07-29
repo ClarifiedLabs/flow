@@ -45,6 +45,7 @@ type Server struct {
 	registry        *Registry
 	credentials     *coordinator.CredentialService
 	webSessions     *coordinator.WebSessionService
+	workerTerminals *coordinator.WorkerTerminalService
 	ownerToken      string
 	hookToken       string
 	workerJoinToken string
@@ -58,6 +59,7 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		registry:        opts.Registry,
 		credentials:     opts.Registry.Credentials(),
 		webSessions:     opts.Registry.WebSessions(),
+		workerTerminals: coordinator.NewWorkerTerminalService(),
 		ownerToken:      strings.TrimSpace(opts.OwnerToken),
 		hookToken:       strings.TrimSpace(opts.HookToken),
 		workerJoinToken: strings.TrimSpace(opts.WorkerJoinToken),
@@ -242,7 +244,7 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 	}
 
 	if strings.HasPrefix(r.URL.Path, "/v2/workers/") {
-		s.handleWorkerPath(w, r, principal)
+		s.dispatchWorkerPath(w, r, principal)
 		return
 	}
 

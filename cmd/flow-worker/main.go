@@ -25,6 +25,7 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/version"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 	workerexec "github.com/ClarifiedLabs/flow/internal/worker/execution"
+	"github.com/ClarifiedLabs/flow/internal/worker/terminalbridge"
 )
 
 const transientWorkerRetryDelay = time.Second
@@ -171,10 +172,17 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		cfg.Token = token
 	}
 	os.Unsetenv("FLOW_WORKER_JOIN_TOKEN")
-	if err := workerexec.RequireTerminalAttach(cfg); err != nil {
-		fmt.Fprintf(stderr, "terminal attach preflight: %v\n", err)
-		return 1
-	}
+
+	jobRegistry := executionJobRegistry{}
+	controlClient := terminalbridge.NewControlClient(cfg.CoordinatorURL, cfg.WorkerID, cfg.Token, cfg.Tmux.SocketPath, jobRegistry)
+	controlCtx, controlCancel := context.WithCancel(context.Background())
+	defer controlCancel()
+	go func() {
+		if err := controlClient.Run(controlCtx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Warn("worker control client exited", "error", err)
+		}
+	}()
+
 	slog.Debug("flow-worker worker configuration loaded",
 		"worker_id", cfg.WorkerID,
 		"coordinator_url", cfg.CoordinatorURL,
@@ -235,6 +243,12 @@ type workerTimings struct {
 	LeaseDuration time.Duration
 	HeartbeatTTL  time.Duration
 }
+
+type executionJobRegistry struct{}
+
+func (executionJobRegistry) Register(jobID string)   { workerexec.RegisterActiveJob(jobID) }
+func (executionJobRegistry) Unregister(jobID string) { workerexec.UnregisterActiveJob(jobID) }
+func (executionJobRegistry) Has(jobID string) bool   { return workerexec.IsActiveJob(jobID) }
 
 type lockedWriter struct {
 	mu     sync.Mutex

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -1203,7 +1202,6 @@ func TestRegistrationHarnessModelsFallsBackWhenCatalogFails(t *testing.T) {
 }
 
 func TestWorkerStartupReaperUsesWorkerToken(t *testing.T) {
-	putFakeTTYDOnPath(t)
 	putFakeEmptyTmuxOnPath(t)
 	fixture := newWorkerTestFixture(t)
 	server := fixture.Server
@@ -1232,30 +1230,6 @@ capacity:
 	}
 	if !strings.Contains(stderr.String(), "reaped orphaned tmux sessions: 0") {
 		t.Fatalf("stderr = %q, want startup reaper summary", stderr.String())
-	}
-}
-
-func TestWorkerRefusesToStartWithoutTTYD(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	configPath := filepath.Join(t.TempDir(), "worker.yaml")
-	if err := os.WriteFile(configPath, []byte(`worker_id: w-local
-coordinator_url: http://127.0.0.1:8421
-token: worker-token
-work_dir: /tmp/worker
-capacity:
-  persistent_agent: 1
-`), 0o600); err != nil {
-		t.Fatalf("write worker config: %v", err)
-	}
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	exitCode := run([]string{"-c", configPath, "--once"}, &stdout, &stderr)
-	if exitCode != 1 {
-		t.Fatalf("exitCode = %d, want 1; stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "terminal attach preflight: ttyd is required") {
-		t.Fatalf("stderr = %q, want ttyd preflight error", stderr.String())
 	}
 }
 
@@ -1339,9 +1313,6 @@ printf next-ok > "$1"
 		CoordinatorURL: gate.URL,
 		Token:          "worker-token",
 		WorkDir:        t.TempDir(),
-		Terminal: config.WorkerTerminalConfig{
-			TTYDPath: fakeTTYDPath(t),
-		},
 		Tmux: config.WorkerTmuxConfig{
 			SocketPath: isolatedWorkerTmuxSocket(t),
 		},
@@ -1490,72 +1461,6 @@ func workerTmuxSessionExists(socketPath string, sessionName string) bool {
 	return exec.Command("tmux", args...).Run() == nil
 }
 
-func fakeTTYDPath(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "ttyd")
-	script := `#!/bin/sh
-bind="127.0.0.1"
-port=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -i)
-      shift
-      bind="$1"
-      ;;
-    -p)
-      shift
-      port="$1"
-      ;;
-  esac
-  shift
-done
-if [ -z "$port" ]; then
-  echo "missing -p" >&2
-  exit 2
-fi
-FLOW_FAKE_TTYD_HELPER=1 FLOW_FAKE_TTYD_BIND="$bind" FLOW_FAKE_TTYD_PORT="$port" exec ` + testShellQuote(os.Args[0]) + ` -test.run=^TestFakeTTYDHelperProcess$
-`
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
-		t.Fatalf("write fake ttyd: %v", err)
-	}
-	return path
-}
-
-func TestFakeTTYDHelperProcess(t *testing.T) {
-	if os.Getenv("FLOW_FAKE_TTYD_HELPER") != "1" {
-		return
-	}
-	bind := strings.TrimSpace(os.Getenv("FLOW_FAKE_TTYD_BIND"))
-	if bind == "" {
-		bind = "127.0.0.1"
-	}
-	port := strings.TrimSpace(os.Getenv("FLOW_FAKE_TTYD_PORT"))
-	listener, err := net.Listen("tcp", net.JoinHostPort(bind, port))
-	if err != nil {
-		t.Fatalf("listen fake ttyd: %v", err)
-	}
-	defer listener.Close()
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		_ = conn.Close()
-	}
-}
-
-func testShellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
-}
-
-func putFakeTTYDOnPath(t *testing.T) {
-	t.Helper()
-	path := fakeTTYDPath(t)
-	dir := filepath.Dir(path)
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
 // workerConfigOptions describes the per-test variations of the worker
 // worker.yaml fixture assembled by writeWorkerConfig. The constant fields
 // (worker_id, token, and dynamic work_dir) are shared across
@@ -1602,9 +1507,7 @@ func writeWorkerConfig(t *testing.T, dir string, opts workerConfigOptions) strin
 func workerToolConfigYAML(t *testing.T) (string, string) {
 	t.Helper()
 	socketPath := isolatedWorkerTmuxSocket(t)
-	return `terminal:
-  ttyd_path: ` + filepath.ToSlash(fakeTTYDPath(t)) + `
-tmux:
+	return `tmux:
   socket_path: ` + filepath.ToSlash(socketPath) + `
 `, socketPath
 }

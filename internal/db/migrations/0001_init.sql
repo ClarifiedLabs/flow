@@ -383,11 +383,9 @@ CREATE TABLE handoff_history (
 
 CREATE TABLE session_terminals (
 	session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-	target_url TEXT NOT NULL,
 	tmux_socket_path TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL,
-	CHECK (length(trim(target_url)) > 0)
+	updated_at TEXT NOT NULL
 );
 
 CREATE TABLE terminal_access_tokens (
@@ -451,11 +449,9 @@ CREATE TABLE review_follow_up_actions (
 CREATE TABLE job_terminals (
 	job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
 	lease_id TEXT NOT NULL REFERENCES leases(id) ON DELETE CASCADE,
-	target_url TEXT NOT NULL,
 	tmux_socket_path TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL,
-	CHECK (length(trim(target_url)) > 0)
+	updated_at TEXT NOT NULL
 );
 
 CREATE TABLE job_terminal_access_tokens (

@@ -509,10 +509,7 @@ func (s *Server) handleJobsPath(w http.ResponseWriter, r *http.Request, principa
 	if len(parts) >= 2 && parts[1] == "terminal" {
 		switch r.Method {
 		case http.MethodGet:
-			if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
-				return
-			}
-			ps.handleJobTerminalProxy(w, r, jobID, parts[2:])
+			writeError(w, http.StatusUnauthorized, "unauthorized", "terminal access cookie is required")
 		case http.MethodPost:
 			if len(parts) != 2 {
 				writeError(w, http.StatusNotFound, "not_found", "resource not found")

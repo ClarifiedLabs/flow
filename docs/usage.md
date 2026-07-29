@@ -355,7 +355,8 @@ A failed upload is logged to the job's stdout and never fails the job.
 - Flow is designed for local/private coordination. The exchange remote is
   private application state.
 - The CLI remains the fallback for every core action.
-- Terminal attach requires a running author session or worker job. Browser
-  attach also needs a reachable ttyd target from the worker.
+- Terminal attach requires a running author session or worker job. The worker
+  streams terminal data to the coordinator over its control WebSocket, so no
+  worker-side listener or inbound reachability is required.
 - Direct protected-base pushes are rejected by Flow exchange hooks; merge
   through Flow after checks/review pass.
