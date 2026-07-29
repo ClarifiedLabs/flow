@@ -109,6 +109,58 @@ func TestTopbarSticksToTop(t *testing.T) {
 	}
 }
 
+// The nav dropdown panel once painted with var(--surface, #111) and
+// var(--border, #333); neither token exists, so the dark fallbacks stayed
+// active in light mode while the nav foregrounds switched to the light
+// palette. The panel must use the same defined chrome tokens as the top bar.
+func TestNavPanelUsesDefinedThemeTokens(t *testing.T) {
+	css := readModule(t, "base.module.css")
+	start := strings.Index(css, ".nav-panel {")
+	if start < 0 {
+		t.Fatal("base css is missing the .nav-panel rule")
+	}
+	rule := css[start:]
+	end := strings.Index(rule, "\n}")
+	if end < 0 {
+		t.Fatal("base css .nav-panel rule is not closed")
+	}
+	rule = rule[:end]
+	for _, want := range []string{"background: var(--panel);", "border: 1px solid var(--line);"} {
+		if !strings.Contains(rule, want) {
+			t.Fatalf(".nav-panel missing %q; the panel must follow the active theme", want)
+		}
+	}
+	for _, undefined := range []string{"--surface", "--border"} {
+		if strings.Contains(rule, undefined) {
+			t.Fatalf(".nav-panel references undefined token %s; its dark fallback stays active in light mode", undefined)
+		}
+	}
+}
+
+// The chrome tokens the top bar and nav panel share must be defined in every
+// theme block — default dark, explicit light, and system light — or one mode
+// silently loses the panel background and border.
+func TestChromeTokensDefinedInEveryTheme(t *testing.T) {
+	tokens := readModule(t, "tokens.module.css")
+	for _, block := range []string{":root {", ":root[data-theme=\"light\"] {", ":root:not([data-theme=\"dark\"]) {"} {
+		start := strings.Index(tokens, block)
+		if start < 0 {
+			t.Fatalf("token sheet is missing the %s block", block)
+		}
+		section := tokens[start:]
+		end := strings.Index(section, "\n}")
+		if end < 0 {
+			t.Fatalf("token sheet %s block is not closed", block)
+		}
+		section = section[:end]
+		for _, token := range []string{"--panel:", "--line:"} {
+			if !strings.Contains(section, token) {
+				t.Fatalf("token sheet %s block does not define %s", block, token)
+			}
+		}
+	}
+}
+
 // Each component sheet is scoped to its own element, so a rule written for one
 // component cannot reach another. Tokens stay global.
 func TestCSSModulesScopeToTheirOwnElement(t *testing.T) {
