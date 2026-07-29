@@ -24,6 +24,15 @@ func (s *projectServer) buildUITaskCards(ctx context.Context, tasks []coordinato
 	}
 
 	cards := make(map[string]uiTaskCard, len(tasks))
+	taskIDs := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		taskIDs = append(taskIDs, task.ID)
+	}
+	relationsByTask, err := s.tasks.RelationsForTasks(ctx, taskIDs)
+	if err != nil {
+		return nil, fmt.Errorf("load task relations: %w", err)
+	}
+
 	for _, task := range tasks {
 		card := uiTaskCard{TaskID: task.ID}
 		tags, err := s.tasks.TagsForTask(ctx, task.ID)
@@ -31,11 +40,7 @@ func (s *projectServer) buildUITaskCards(ctx context.Context, tasks []coordinato
 			return nil, fmt.Errorf("load tags for %s: %w", task.ID, err)
 		}
 		card.Tags = tags
-		relations, err := s.tasks.RelationsForTask(ctx, task.ID)
-		if err != nil {
-			return nil, fmt.Errorf("load relations for %s: %w", task.ID, err)
-		}
-		card.Relations = uiRelationSummaryFromRelations(task.ID, relations)
+		card.Relations = uiRelationSummaryFromRelations(task.ID, relationsByTask[task.ID])
 		if s.workflowRuns != nil && task.State != nil && (*task.State == coordinator.LifecycleScheduled || *task.State == coordinator.LifecycleInProgress) {
 			run, active, err := s.workflowRuns.ActiveForTask(ctx, task.ID)
 			if err != nil {

@@ -460,6 +460,76 @@ func TestTaskRelationsRejectCyclesAndDuplicateParents(t *testing.T) {
 	}
 }
 
+func TestRelationsForTaskDenormalizesRelatedTaskTitles(t *testing.T) {
+	ctx := context.Background()
+	_, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
+
+	blocker, blocked := createTwoTasks(t, service, "Blocker task", "Blocked task")
+	if err := service.LinkTasks(ctx, blocker.ID, blocked.ID, RelationBlocks, ActorHuman); err != nil {
+		t.Fatalf("link tasks: %v", err)
+	}
+
+	relations, err := service.RelationsForTask(ctx, blocker.ID)
+	if err != nil {
+		t.Fatalf("relations for blocker: %v", err)
+	}
+	if len(relations) != 1 {
+		t.Fatalf("relations = %+v, want one", relations)
+	}
+	if relations[0].SourceTitle != "Blocker task" || relations[0].TargetTitle != "Blocked task" {
+		t.Fatalf("relation titles = %q/%q, want %q/%q", relations[0].SourceTitle, relations[0].TargetTitle, "Blocker task", "Blocked task")
+	}
+
+	incoming, err := service.RelationsForTask(ctx, blocked.ID)
+	if err != nil {
+		t.Fatalf("relations for blocked: %v", err)
+	}
+	if len(incoming) != 1 || incoming[0].SourceTitle != "Blocker task" || incoming[0].TargetTitle != "Blocked task" {
+		t.Fatalf("incoming relation = %+v, want titles %q/%q", incoming, "Blocker task", "Blocked task")
+	}
+}
+
+func TestRelationsForTasksBatch(t *testing.T) {
+	ctx := context.Background()
+	_, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
+
+	tasks := createTasks(t, service, "Parent", "Child", "Other")
+	parent, child, other := tasks[0], tasks[1], tasks[2]
+	if err := service.LinkTasks(ctx, parent.ID, child.ID, RelationParentOf, ActorHuman); err != nil {
+		t.Fatalf("link parent child: %v", err)
+	}
+	if err := service.LinkTasks(ctx, other.ID, child.ID, RelationBlocks, ActorHuman); err != nil {
+		t.Fatalf("link other child: %v", err)
+	}
+
+	byTask, err := service.RelationsForTasks(ctx, []string{parent.ID, child.ID, other.ID})
+	if err != nil {
+		t.Fatalf("batch relations: %v", err)
+	}
+	if len(byTask[parent.ID]) != 1 || byTask[parent.ID][0].Kind != RelationParentOf {
+		t.Fatalf("parent relations = %+v, want one parent_of", byTask[parent.ID])
+	}
+	if len(byTask[child.ID]) != 2 {
+		t.Fatalf("child relations = %+v, want two (parent_of + blocks)", byTask[child.ID])
+	}
+	if len(byTask[other.ID]) != 1 || byTask[other.ID][0].Kind != RelationBlocks {
+		t.Fatalf("other relations = %+v, want one blocks", byTask[other.ID])
+	}
+	for _, relation := range byTask[child.ID] {
+		if relation.SourceTitle == "" || relation.TargetTitle == "" {
+			t.Fatalf("batch relation missing titles: %+v", relation)
+		}
+	}
+
+	empty, err := service.RelationsForTasks(ctx, nil)
+	if err != nil {
+		t.Fatalf("batch relations for no ids: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("empty batch = %+v, want no entries", empty)
+	}
+}
+
 func newTaskService(t *testing.T, dbPath string) (*flowdb.Store, *TaskService) {
 	t.Helper()
 

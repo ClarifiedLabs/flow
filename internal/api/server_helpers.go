@@ -72,9 +72,9 @@ func constrainSessionRelations(relations []coordinator.CreateTaskRelationInput, 
 	if sourceTaskID == nil && len(relations) > 0 {
 		return errors.New("session token is not bound to a source task")
 	}
-	for _, relation := range relations {
-		source := strings.TrimSpace(relation.SourceTaskID)
-		target := strings.TrimSpace(relation.TargetTaskID)
+	for i := range relations {
+		source := strings.TrimSpace(relations[i].SourceTaskID)
+		target := strings.TrimSpace(relations[i].TargetTaskID)
 		if source != "" && target != "" {
 			return errors.New("session-created task relations must involve the newly created task")
 		}
@@ -85,6 +85,9 @@ func constrainSessionRelations(relations []coordinator.CreateTaskRelationInput, 
 		switch {
 		case source == "" && target == ownedTaskID:
 		case target == "" && source == ownedTaskID:
+			// Authorized shorthand: the new task is the relation target, so let
+			// the coordinator resolve the blank target to the allocated task ID.
+			relations[i].BlankTargetIsNewTask = true
 		default:
 			return errors.New("session-created task relations must relate to the session source task")
 		}

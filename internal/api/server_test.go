@@ -2210,6 +2210,9 @@ func TestGetTaskRelationsAPI(t *testing.T) {
 	if len(sourceRelations.Relations) != 1 || sourceRelations.Relations[0].SourceTaskID != source.ID || sourceRelations.Relations[0].TargetTaskID != target.ID {
 		t.Fatalf("source relations = %+v, want one blocks relation", sourceRelations.Relations)
 	}
+	if sourceRelations.Relations[0].SourceTitle != "Source" || sourceRelations.Relations[0].TargetTitle != "Target" {
+		t.Fatalf("source relation titles = %q/%q, want %q/%q", sourceRelations.Relations[0].SourceTitle, sourceRelations.Relations[0].TargetTitle, "Source", "Target")
+	}
 
 	var targetRelations contract.TaskRelationsResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks/"+target.ID+"/relations", nil, http.StatusOK, &targetRelations)
@@ -2218,6 +2221,113 @@ func TestGetTaskRelationsAPI(t *testing.T) {
 	}
 
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/tasks/"+target.ID+"/relations", nil, http.StatusForbidden, nil)
+}
+
+func TestCreateTaskWithRelationsAPI(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	target, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Relation target"})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Task with relations",
+			Relations: []relationRequest{
+				{TargetTaskID: target.ID, Kind: string(coordinator.RelationBlocks)},
+			},
+		}, http.StatusCreated, &created)
+
+	relations, err := fixture.Tasks.RelationsForTask(ctx, created.Task.ID)
+	if err != nil {
+		t.Fatalf("relations for created task: %v", err)
+	}
+	if len(relations) != 1 || relations[0].SourceTaskID != created.Task.ID || relations[0].TargetTaskID != target.ID || relations[0].Kind != coordinator.RelationBlocks {
+		t.Fatalf("created task relations = %+v, want one blocks relation to target", relations)
+	}
+
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Invalid relation kind",
+			Relations: []relationRequest{
+				{TargetTaskID: target.ID, Kind: "depends_on"},
+			},
+		}, http.StatusBadRequest, nil)
+
+	// A relation whose source and target both resolve to the newly created task
+	// is a self-reference and must be rejected.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Self referencing relation",
+			Relations: []relationRequest{
+				{Kind: string(coordinator.RelationBlocks)},
+			},
+		}, http.StatusBadRequest, nil)
+
+	// A blank target_task_id is required to be rejected even when a source is
+	// supplied: it must not be rewritten to the newly created task.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Blank target relation",
+			Relations: []relationRequest{
+				{SourceTaskID: target.ID, TargetTaskID: "", Kind: string(coordinator.RelationBlocks)},
+			},
+		}, http.StatusBadRequest, nil)
+}
+
+func TestCreateTaskWithRelationsSessionShorthandAPI(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	source, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Session source task"})
+	if err != nil {
+		t.Fatalf("create source task: %v", err)
+	}
+	other, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Unowned task"})
+	if err != nil {
+		t.Fatalf("create unowned task: %v", err)
+	}
+	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
+		Token:        "session-token",
+		Scope:        coordinator.TokenScopeSession,
+		Subject:      "s-relations",
+		ProjectID:    &fixture.Project.ID,
+		SourceTaskID: &source.ID,
+	}); err != nil {
+		t.Fatalf("store session token: %v", err)
+	}
+
+	// A session bound to a task may relate that task to the newly created task
+	// using the source-owned -> blank-target shorthand; the blank target resolves
+	// to the new task rather than being rejected.
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "session-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Session child task",
+			Relations: []relationRequest{
+				{SourceTaskID: source.ID, TargetTaskID: "", Kind: string(coordinator.RelationParentOf)},
+			},
+		}, http.StatusCreated, &created)
+
+	relations, err := fixture.Tasks.RelationsForTask(ctx, source.ID)
+	if err != nil {
+		t.Fatalf("relations for source task: %v", err)
+	}
+	if len(relations) != 1 || relations[0].SourceTaskID != source.ID || relations[0].TargetTaskID != created.Task.ID || relations[0].Kind != coordinator.RelationParentOf {
+		t.Fatalf("source task relations = %+v, want one parent_of relation to the new task %s", relations, created.Task.ID)
+	}
+
+	// The shorthand must not extend to tasks the session does not own.
+	doJSONRequestAs(t, fixture.Server, "session-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Session unrelated relation",
+			Relations: []relationRequest{
+				{SourceTaskID: other.ID, TargetTaskID: "", Kind: string(coordinator.RelationBlocks)},
+			},
+		}, http.StatusForbidden, nil)
 }
 
 func TestTaskConsoleAPILifecycleAndScope(t *testing.T) {

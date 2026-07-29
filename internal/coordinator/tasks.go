@@ -104,8 +104,12 @@ type TaskRelation struct {
 	SourceTaskID string
 	TargetTaskID string
 	Kind         RelationKind
-	CreatedBy    Actor
-	CreatedAt    time.Time
+	// SourceTitle and TargetTitle denormalize the related tasks' titles so UI
+	// read models can render relation lists without an extra fetch per task.
+	SourceTitle string
+	TargetTitle string
+	CreatedBy   Actor
+	CreatedAt   time.Time
 }
 
 type CreateTaskInput struct {
@@ -134,6 +138,12 @@ type CreateTaskRelationInput struct {
 	TargetTaskID string
 	Kind         RelationKind
 	CreatedBy    Actor
+	// BlankTargetIsNewTask opts a relation into the shorthand where an empty
+	// TargetTaskID resolves to the task being created. It is only set by callers
+	// that have authorized that form (session tokens relating their bound source
+	// task to the new task); owner/form requests leave it false so a blank target
+	// is rejected.
+	BlankTargetIsNewTask bool
 }
 
 type EditTaskInput struct {
@@ -250,6 +260,9 @@ func (s *TaskService) CreateTaskWithDetails(ctx context.Context, input CreateTas
 		if input.Relations[i].Kind == "" {
 			return Task{}, errors.New("task relation kind is required")
 		}
+		if strings.TrimSpace(input.Relations[i].TargetTaskID) == "" && !input.Relations[i].BlankTargetIsNewTask {
+			return Task{}, errors.New("task relation target_task_id is required")
+		}
 		if err := validateRelationKind(input.Relations[i].Kind); err != nil {
 			return Task{}, err
 		}
@@ -324,6 +337,10 @@ VALUES (?, ?, ?, ?)`,
 		}
 		targetTaskID := strings.TrimSpace(relationInput.TargetTaskID)
 		if targetTaskID == "" {
+			if !relationInput.BlankTargetIsNewTask {
+				return Task{}, errors.New("task relation target_task_id is required")
+			}
+			// Authorized shorthand: the newly created task is the relation target.
 			targetTaskID = id
 		}
 		if err := linkTasksInTx(ctx, tx, sourceTaskID, targetTaskID, relationInput.Kind, defaultActor(relationInput.CreatedBy, taskInput.CreatedBy), nowText); err != nil {
@@ -828,10 +845,19 @@ WHERE source_task_id = ? AND target_task_id = ? AND kind = ?`,
 
 func (s *TaskService) RelationsForTask(ctx context.Context, taskID string) ([]TaskRelation, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT source_task_id, target_task_id, kind, created_by, created_at
-FROM task_relations
-WHERE source_task_id = ? OR target_task_id = ?
-ORDER BY created_at, source_task_id, target_task_id, kind`, taskID, taskID)
+SELECT
+	r.source_task_id,
+	r.target_task_id,
+	r.kind,
+	s.title,
+	t.title,
+	r.created_by,
+	r.created_at
+FROM task_relations r
+JOIN tasks s ON s.id = r.source_task_id
+JOIN tasks t ON t.id = r.target_task_id
+WHERE r.source_task_id = ? OR r.target_task_id = ?
+ORDER BY r.created_at, r.source_task_id, r.target_task_id, r.kind`, taskID, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("list task relations: %w", err)
 	}
@@ -850,6 +876,73 @@ ORDER BY created_at, source_task_id, target_task_id, kind`, taskID, taskID)
 	}
 
 	return relations, nil
+}
+
+// RelationsForTasks returns title-bearing relations for a set of task IDs in a
+// single query, keyed by the task each relation involves. A relation between
+// two requested tasks appears under both keys. It exists so board-style read
+// models can load relations for many tasks without an N+1 query.
+func (s *TaskService) RelationsForTasks(ctx context.Context, taskIDs []string) (map[string][]TaskRelation, error) {
+	result := make(map[string][]TaskRelation, len(taskIDs))
+	if len(taskIDs) == 0 {
+		return result, nil
+	}
+
+	ids := make([]string, 0, len(taskIDs))
+	seen := make(map[string]bool, len(taskIDs))
+	for _, id := range taskIDs {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" || seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		ids = append(ids, trimmed)
+	}
+	if len(ids) == 0 {
+		return result, nil
+	}
+
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+SELECT
+	r.source_task_id,
+	r.target_task_id,
+	r.kind,
+	s.title,
+	t.title,
+	r.created_by,
+	r.created_at
+FROM task_relations r
+JOIN tasks s ON s.id = r.source_task_id
+JOIN tasks t ON t.id = r.target_task_id
+WHERE `+inPredicate("r.source_task_id", len(ids))+` OR `+inPredicate("r.target_task_id", len(ids))+`
+ORDER BY r.created_at, r.source_task_id, r.target_task_id, r.kind`, append(args, args...)...)
+	if err != nil {
+		return nil, fmt.Errorf("list task relations: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		relation, err := scanTaskRelation(rows)
+		if err != nil {
+			return nil, err
+		}
+		if seen[relation.SourceTaskID] {
+			result[relation.SourceTaskID] = append(result[relation.SourceTaskID], relation)
+		}
+		if relation.TargetTaskID != relation.SourceTaskID && seen[relation.TargetTaskID] {
+			result[relation.TargetTaskID] = append(result[relation.TargetTaskID], relation)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate task relations: %w", err)
+	}
+
+	return result, nil
 }
 
 func (s *TaskService) Board(ctx context.Context) (Board, error) {
@@ -909,7 +1002,6 @@ SELECT
 	return result, nil
 }
 
-
 func pendingHumanReview(ctx context.Context, db *sql.DB, taskID string) (bool, error) {
 	var count int
 	if err := db.QueryRowContext(ctx, `
@@ -951,7 +1043,6 @@ WHERE task_id = ?
 func (s *TaskService) CrashRetryAvailable(ctx context.Context, taskID string) (bool, error) {
 	return crashLoopStatusExists(ctx, s.db, taskID)
 }
-
 
 func (s *TaskService) reviewState(ctx context.Context, taskID string) (ReviewState, error) {
 	return reviewStateForTask(ctx, s.db, taskID)
@@ -1164,7 +1255,6 @@ func validateScheduleState(state ScheduleState) error {
 		return fmt.Errorf("invalid schedule state: %s", state)
 	}
 }
-
 
 func validateTriageState(state TriageState) error {
 	switch state {
@@ -1419,6 +1509,8 @@ func scanTaskRelation(scanner taskScanner) (TaskRelation, error) {
 		&relation.SourceTaskID,
 		&relation.TargetTaskID,
 		&kind,
+		&relation.SourceTitle,
+		&relation.TargetTitle,
 		&createdBy,
 		&createdAt,
 	); err != nil {
