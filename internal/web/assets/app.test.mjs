@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { handleAction, inFlight } from "./actions.js";
 import { handleFormSubmit } from "./forms.js";
 import { workflowStepCanBeSkipped } from "./task-view.js";
 import { renderTranscriptButton } from "./terminal.js";
@@ -568,6 +569,290 @@ test("new task form submission posts to the selected project collection", async 
   });
   assert.equal(pushedPath, "/ui/tasks/t-alpha-0001");
   assert.equal(loads, 1);
+});
+
+// A button with just enough surface for handleAction's synchronous pending
+// state: a dataset, a disabled flag, and attribute/class tracking.
+class ActionButton {
+  constructor(dataset = {}) {
+    this.dataset = dataset;
+    this.disabled = false;
+    this.attributes = new Map();
+    this.classes = new Set();
+    this.classList = {
+      add: (name) => this.classes.add(name),
+      remove: (name) => this.classes.delete(name),
+      contains: (name) => this.classes.has(name),
+    };
+  }
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+  getAttribute(name) {
+    return this.attributes.has(name) ? this.attributes.get(name) : null;
+  }
+  removeAttribute(name) {
+    this.attributes.delete(name);
+  }
+}
+
+function statusApp() {
+  const statuses = [];
+  return {
+    statuses,
+    setStatus(message) {
+      statuses.push(message);
+    },
+    refresh() {},
+  };
+}
+
+test("an action click marks the control busy and names the in-flight action before the request resolves", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let resolveRequest;
+  globalThis.fetch = () =>
+    new Promise((resolve) => {
+      resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+  const button = new ActionButton({ workflowSchedule: "t-0001", project: "p-alpha" });
+
+  const handled = handleAction(app, { target: button, preventDefault() {} });
+
+  // The pending state is synchronous: before the network resolves the control
+  // is disabled and aria-busy, and the status line names the action.
+  assert.equal(button.disabled, true);
+  assert.equal(button.getAttribute("aria-busy"), "true");
+  assert.equal(button.classList.contains("is-busy"), true);
+  assert.deepEqual(app.statuses, ["Scheduling t-0001\u2026"]);
+
+  resolveRequest();
+  assert.equal(await handled, true);
+  assert.equal(button.disabled, false);
+  assert.equal(button.getAttribute("aria-busy"), null);
+  assert.equal(button.classList.contains("is-busy"), false);
+  assert.deepEqual(app.statuses, ["Scheduling t-0001\u2026", "Scheduled"]);
+});
+
+test("a poll re-render replacing the button cannot re-enable a duplicate submission", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let requests = 0;
+  let resolveRequest;
+  globalThis.fetch = () => {
+    requests += 1;
+    return new Promise((resolve) => {
+      resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+  };
+  const first = new ActionButton({ workflowSchedule: "t-0001", project: "p-alpha" });
+
+  const handled = handleAction(app, { target: first, preventDefault() {} });
+  assert.equal(requests, 1);
+
+  // The board's 10 s poll repaints and swaps the button node for a fresh one
+  // that starts out enabled.
+  const replacement = new ActionButton({ workflowSchedule: "t-0001", project: "p-alpha" });
+  assert.equal(replacement.disabled, false);
+
+  // Clicking the replacement while the first request is still in flight must
+  // not issue a second request: the guard lives in the in-flight registry, not
+  // on the (now discarded) node.
+  await handleAction(app, { target: replacement, preventDefault() {} });
+  assert.equal(requests, 1, "no duplicate request while the first is in flight");
+
+  resolveRequest();
+  await handled;
+
+  // Once the first request settles the action is available again.
+  const second = handleAction(app, { target: replacement, preventDefault() {} });
+  assert.equal(requests, 2);
+  resolveRequest();
+  await second;
+  assert.equal(inFlight.size, 0);
+});
+
+test("a failed action keeps the error on the status line and restores the control", async () => {
+  await scriptContext();
+  const app = statusApp();
+  globalThis.fetch = () =>
+    Promise.resolve({
+      ok: false,
+      status: 500,
+      json: () => Promise.resolve({ error: { message: "workflow is locked" } }),
+    });
+  const button = new ActionButton({ workflowSchedule: "t-0001", project: "p-alpha" });
+
+  await handleAction(app, { target: button, preventDefault() {} });
+
+  assert.deepEqual(app.statuses, ["Scheduling t-0001\u2026", "workflow is locked"]);
+  assert.equal(button.disabled, false);
+  assert.equal(button.getAttribute("aria-busy"), null);
+  assert.equal(button.classList.contains("is-busy"), false);
+  assert.equal(inFlight.size, 0, "the in-flight registry drains on failure");
+});
+
+test("a cancelled confirm clears the pending label and issues no request", async () => {
+  await scriptContext({ confirm: () => false });
+  const app = statusApp();
+  let requests = 0;
+  globalThis.fetch = () => {
+    requests += 1;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  };
+  const button = new ActionButton({ workflowReset: "t-0001", project: "p-alpha" });
+
+  const handled = handleAction(app, { target: button, preventDefault() {} });
+
+  // The pending label is written synchronously on click, before the confirm.
+  assert.deepEqual(app.statuses, ["Resetting t-0001\u2026"]);
+  assert.equal(button.disabled, true);
+
+  assert.equal(await handled, true);
+  // Backing out of the confirm clears the pending label the click created and
+  // restores the control — no request went out.
+  assert.deepEqual(app.statuses, ["Resetting t-0001\u2026", ""]);
+  assert.equal(requests, 0, "a cancelled confirm issues no request");
+  assert.equal(button.disabled, false);
+  assert.equal(button.getAttribute("aria-busy"), null);
+  assert.equal(button.classList.contains("is-busy"), false);
+  assert.equal(inFlight.size, 0);
+});
+
+test("a cancelled prompt clears the pending label and issues no request", async () => {
+  await scriptContext({ prompt: () => null });
+  const app = statusApp();
+  let requests = 0;
+  globalThis.fetch = () => {
+    requests += 1;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  };
+  const button = new ActionButton({ workflowDone: "t-0001", project: "p-alpha" });
+
+  const handled = handleAction(app, { target: button, preventDefault() {} });
+  assert.deepEqual(app.statuses, ["Closing out t-0001\u2026"]);
+
+  assert.equal(await handled, true);
+  assert.deepEqual(app.statuses, ["Closing out t-0001\u2026", ""]);
+  assert.equal(requests, 0, "a cancelled prompt issues no request");
+  assert.equal(button.disabled, false);
+  assert.equal(inFlight.size, 0);
+});
+
+test("a form submission marks its submit control busy and guards against a duplicate submit", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let requests = 0;
+  let resolveRequest;
+  globalThis.fetch = () => {
+    requests += 1;
+    return new Promise((resolve) => {
+      resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+  };
+  const submitButton = new ActionButton({});
+  const form = {
+    tagName: "FORM",
+    dataset: { taskForm: "t-0001", taskFormMode: "edit", project: "p-alpha" },
+    elements: {
+      priority: { value: "1" },
+      title: { value: "Renamed" },
+      body: { value: "Body" },
+      flow_id: { value: "fl-coding" },
+    },
+    reportValidity() {
+      return true;
+    },
+    querySelector(selector) {
+      return selector === '[type="submit"]' ? submitButton : null;
+    },
+  };
+
+  const handled = handleFormSubmit(app, { target: form, preventDefault() {} });
+
+  assert.equal(requests, 1);
+  assert.equal(submitButton.disabled, true);
+  assert.equal(submitButton.getAttribute("aria-busy"), "true");
+  assert.deepEqual(app.statuses, ["Saving task\u2026"]);
+
+  // A second submit while the first is in flight must not issue another request.
+  await handleFormSubmit(app, { target: form, preventDefault() {} });
+  assert.equal(requests, 1, "no duplicate request while the first is in flight");
+
+  resolveRequest();
+  await handled;
+  assert.equal(submitButton.disabled, false);
+  assert.equal(submitButton.getAttribute("aria-busy"), null);
+  assert.deepEqual(app.statuses, ["Saving task\u2026", "Task updated"]);
+});
+
+test("a validation-cancelled form submit replaces the pending label with the validation error", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let requests = 0;
+  globalThis.fetch = () => {
+    requests += 1;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  };
+  const submitButton = new ActionButton({});
+  const form = {
+    tagName: "FORM",
+    dataset: { taskForm: "t-0001", taskFormMode: "edit", project: "p-alpha" },
+    elements: {
+      priority: { value: "1" },
+      title: { value: "   " },
+      body: { value: "Body" },
+      flow_id: { value: "fl-coding" },
+    },
+    reportValidity() {
+      return true;
+    },
+    querySelector(selector) {
+      return selector === '[type="submit"]' ? submitButton : null;
+    },
+  };
+
+  await handleFormSubmit(app, { target: form, preventDefault() {} });
+
+  // The pending label is replaced by the validation error, which stays visible
+  // rather than being cleared.
+  assert.deepEqual(app.statuses, ["Saving task\u2026", "Task title is required"]);
+  assert.equal(requests, 0, "a validation-cancelled submit issues no request");
+  assert.equal(submitButton.disabled, false);
+  assert.equal(submitButton.getAttribute("aria-busy"), null);
+  assert.equal(inFlight.size, 0);
+});
+
+test("a backed-out form submit clears the pending label it created", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let requests = 0;
+  globalThis.fetch = () => {
+    requests += 1;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  };
+  const submitButton = new ActionButton({});
+  const form = {
+    tagName: "FORM",
+    dataset: { threadReplyForm: "th-0001" },
+    elements: {
+      body: { value: "   " },
+    },
+    reportValidity() {
+      return true;
+    },
+    querySelector(selector) {
+      return selector === '[type="submit"]' ? submitButton : null;
+    },
+  };
+
+  await handleFormSubmit(app, { target: form, preventDefault() {} });
+
+  // The handler backed out with nothing to show, so the pending label is cleared.
+  assert.deepEqual(app.statuses, ["Posting reply\u2026", ""]);
+  assert.equal(requests, 0, "a backed-out submit issues no request");
+  assert.equal(submitButton.disabled, false);
+  assert.equal(inFlight.size, 0);
 });
 
 test("workflow skip eligibility excludes author and side-effecting steps", () => {

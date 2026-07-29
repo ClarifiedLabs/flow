@@ -870,6 +870,19 @@ tr.row-idle {
   color: var(--danger-ink);
 }
 
+/* A mutating control that is mid-flight: dimmed, unclickable, and flagged to
+   assistive tech. handleAction sets disabled + aria-busy + .is-busy
+   synchronously on click, so the pending state is visible before the request
+   even goes out. */
+.button:disabled,
+.button[aria-busy="true"],
+.button.is-busy {
+  opacity: 0.55;
+  cursor: progress;
+  pointer-events: none;
+  filter: none;
+}
+
 .icon-button {
   width: 32px;
   padding: 0;

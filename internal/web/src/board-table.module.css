@@ -194,6 +194,17 @@ tbody tr[data-needs-you] .col-task .title {
   color: var(--accent);
 }
 
+/* Mid-flight pending state (see base.module.css .button): handleAction marks
+   the control disabled + aria-busy + .is-busy synchronously on click. */
+.quiet-action:disabled,
+.quiet-action[aria-busy="true"],
+.quiet-action.is-busy {
+  opacity: 0.55;
+  cursor: progress;
+  pointer-events: none;
+  color: var(--muted);
+}
+
 .empty {
   text-align: center;
   color: var(--muted);

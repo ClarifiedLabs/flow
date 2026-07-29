@@ -30,6 +30,8 @@ const { renderReviewPanel } = await import("./elements/review-panel.js");
 const { renderActivityFeed, activityEntries } = await import("./elements/activity-feed.js");
 await import("./elements/lane.js");
 await import("./elements/tab-strip.js");
+const { inFlight } = await import("./actions.js");
+await import("./elements/change.js");
 
 const HOUR = 3600_000;
 
@@ -854,4 +856,121 @@ test("an open gate badges the review tab", () => {
   assert.equal(badges.review.text, "!");
   assert.equal(badges.review.tone, "warn");
   assert.equal(tabBadges({ checks: [], transitions: [], statusLog: [] }).review, undefined);
+});
+
+// --- review verdict pending state (flow-change / submitReview) --------------
+
+function reviewChangeData() {
+  return {
+    change: { id: "ch-0001", head_sha: "abc123def456" },
+    task: { id: "t-0001" },
+    diff: {
+      files: [{ path: "a.go", hunks: [{ header: "@@ -1 +1 @@", lines: [{ kind: "add", new_line: 1, text: "x" }] }] }],
+    },
+    threads: [],
+    review_state: "in_review",
+  };
+}
+
+// Mounts a flow-change inside a fake <flow-app> so the element's `app` getter
+// resolves to a node that records status messages.
+function mountChange(root, data) {
+  const appNode = globalThis.document.createElement("flow-app");
+  const statuses = [];
+  appNode.setStatus = (message) => statuses.push(message);
+  appNode.refresh = () => {};
+  root.appendChild(appNode);
+  const change = mountElement(appNode, "flow-change", data);
+  return { appNode, change, statuses };
+}
+
+function stubReviewFetch(handler) {
+  const calls = [];
+  globalThis.fetch = (path, options) => {
+    calls.push({ path, options });
+    return handler(path, options);
+  };
+  return calls;
+}
+
+test("a review verdict marks the button busy and names the in-flight submission", async () => {
+  const root = globalThis.document.body;
+  let resolveRequest;
+  stubReviewFetch(
+    () =>
+      new Promise((resolve) => {
+        resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+      }),
+  );
+  const { appNode, change, statuses } = mountChange(root, reviewChangeData());
+  await flush();
+
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  const pending = change.handleClick({ target: approve, preventDefault() {} });
+
+  // Synchronous pending state, before the network resolves.
+  assert.equal(approve.disabled, true);
+  assert.equal(approve.getAttribute("aria-busy"), "true");
+  assert.equal(approve.classList.contains("is-busy"), true);
+  assert.deepEqual(statuses, ["Approving\u2026"]);
+
+  resolveRequest();
+  await pending;
+  assert.equal(approve.disabled, false);
+  assert.equal(approve.getAttribute("aria-busy"), null);
+  assert.equal(approve.classList.contains("is-busy"), false);
+  assert.deepEqual(statuses, ["Approving\u2026", "Approved"]);
+  change.remove();
+  appNode.remove();
+});
+
+test("a duplicate review verdict is suppressed while the first is in flight", async () => {
+  const root = globalThis.document.body;
+  let requests = 0;
+  let resolveRequest;
+  stubReviewFetch(() => {
+    requests += 1;
+    return new Promise((resolve) => {
+      resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+  });
+  const { appNode, change } = mountChange(root, reviewChangeData());
+  await flush();
+
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  const first = change.handleClick({ target: approve, preventDefault() {} });
+  assert.equal(requests, 1);
+
+  // A second click on the same verdict while the first is still running.
+  await change.handleClick({ target: approve, preventDefault() {} });
+  assert.equal(requests, 1, "no duplicate review submission while in flight");
+
+  resolveRequest();
+  await first;
+  assert.equal(inFlight.size, 0);
+  change.remove();
+  appNode.remove();
+});
+
+test("a failed review keeps the error on the status line and restores the button", async () => {
+  const root = globalThis.document.body;
+  stubReviewFetch(() =>
+    Promise.resolve({
+      ok: false,
+      status: 409,
+      json: () => Promise.resolve({ error: { message: "change already merged" } }),
+    }),
+  );
+  const { appNode, change, statuses } = mountChange(root, reviewChangeData());
+  await flush();
+
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  await change.handleClick({ target: approve, preventDefault() {} });
+
+  assert.deepEqual(statuses, ["Approving\u2026", "change already merged"]);
+  assert.equal(approve.disabled, false);
+  assert.equal(approve.getAttribute("aria-busy"), null);
+  assert.equal(inFlight.size, 0);
+  change.remove();
+  appNode.remove();
 });

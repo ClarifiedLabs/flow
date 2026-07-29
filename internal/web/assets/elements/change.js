@@ -3,6 +3,7 @@
 // inline notes, so neither survives only as long as the next poll.
 
 import { apiPost } from "../api.js";
+import { inFlight, markBusy } from "../actions.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { value } from "../normalize.js";
 import { readDiffMode, writeDiffMode } from "../storage.js";
@@ -121,7 +122,7 @@ export class FlowChange extends FlowElement {
     const verdict = event.target.closest?.("[data-review-verdict]");
     if (verdict) {
       event.preventDefault();
-      await this.submitReview(verdict.dataset.reviewVerdict);
+      await this.submitReview(verdict.dataset.reviewVerdict, verdict);
     }
   }
 
@@ -142,7 +143,12 @@ export class FlowChange extends FlowElement {
     }
   }
 
-  async submitReview(verdict) {
+  // submitReview gets the same pending state as the action buttons: the
+  // verdict button is marked busy synchronously, the status line names the
+  // in-flight submission, and the shared in-flight registry (keyed by change,
+  // not by DOM node) blocks a duplicate verdict while the first is running —
+  // even if a poll re-render replaced the button.
+  async submitReview(verdict, button) {
     this.captureDrafts();
     const changeID = value(this.data?.change || {}, "id", "ID");
     if (!changeID) return;
@@ -154,15 +160,29 @@ export class FlowChange extends FlowElement {
       this.app?.setStatus("Nothing to post");
       return;
     }
+    const busyKey = `review:${changeID}:${verdict}`;
+    if (inFlight.has(busyKey)) return;
+    inFlight.add(busyKey);
+    const restore = button ? markBusy(button) : () => {};
+    this.app?.setStatus(`${reviewPendingLabel(verdict)}…`);
     try {
       await apiPost(`/v2/changes/${encodeURIComponent(changeID)}/review`, { verdict, body, comments });
       this.drafts.clear();
-      this.app?.setStatus(reviewMessage(verdict, comments.length));
       await this.app?.refresh();
+      this.app?.setStatus(reviewMessage(verdict, comments.length));
     } catch (error) {
       this.app?.setStatus(error.message || String(error));
+    } finally {
+      inFlight.delete(busyKey);
+      restore();
     }
   }
+}
+
+function reviewPendingLabel(verdict) {
+  if (verdict === "approve") return "Approving";
+  if (verdict === "request_changes") return "Requesting changes";
+  return "Posting comment";
 }
 
 function reviewMessage(verdict, count) {

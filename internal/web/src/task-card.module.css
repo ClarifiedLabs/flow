@@ -112,6 +112,17 @@
   gap: 6px;
 }
 
+/* Mid-flight pending state for quiet text actions (see base.module.css
+   .button): handleAction marks the control disabled + aria-busy + .is-busy
+   synchronously on click. */
+.quiet-action:disabled,
+.quiet-action[aria-busy="true"],
+.quiet-action.is-busy {
+  opacity: 0.55;
+  cursor: progress;
+  pointer-events: none;
+}
+
 /* Resting cards are quiet. Secondary controls appear on hover or when the
    keyboard reaches them, never as permanent furniture. */
 .actions.on-hover {
