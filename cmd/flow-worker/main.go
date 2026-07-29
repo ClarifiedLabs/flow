@@ -819,9 +819,10 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 	// non-blocking follow-up tasks. The worker lease is live here, so every
 	// coordinator mutation can be bound to the exact source job.
 	var followUpResults map[int]reviewFollowUpResult
+	var followUpFailures []string
 	if haveVerdict {
 		var err error
-		followUpResults, err = applyVerdictActions(
+		followUpResults, followUpFailures, err = applyVerdictActions(
 			client,
 			kind,
 			blocking && !reviewDiscovery,
@@ -844,6 +845,7 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 			details = classifiedReviewDetails(details, verdictReport, followUpResults)
 		}
 	}
+	details = appendFollowUpActionFailures(details, followUpFailures)
 
 	check, err := client.ReportCheck(*job.TaskID, checkName, flowclient.ReportCheckInput{
 		Kind:        kind,
@@ -869,8 +871,12 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 
 // applyVerdictActions deterministically files a reviewer job's blocking
 // concerns, applies final-aggregation follow-up tasks, and carries out verifier
-// decisions. Failures make the check errored so declared work is never silently
-// lost. Every operation is idempotent or state-guarded, making retry safe.
+// decisions. Load-bearing failures — filing blocking concerns as threads and
+// applying verifier decisions — make the check errored so declared blocking
+// work is never silently lost. Follow-up task actions are non-blocking
+// bookkeeping: their failures are returned separately so the caller can record
+// them in the check details without erroring the check or halting the
+// workflow. Every operation is idempotent or state-guarded, making retry safe.
 type reviewFollowUpResult struct {
 	TaskID      string
 	Disposition string
@@ -886,9 +892,10 @@ func applyVerdictActions(
 	result workerexec.RunResult,
 	report workerexec.VerdictReport,
 	stdout io.Writer,
-) (map[int]reviewFollowUpResult, error) {
+) (map[int]reviewFollowUpResult, []string, error) {
 	leaseID := lease.ID
 	var actionErr error
+	var followUpFailures []string
 	followUpResults := map[int]reviewFollowUpResult{}
 	switch kind {
 	case coordinator.CheckKindReviewer:
@@ -897,7 +904,9 @@ func applyVerdictActions(
 				continue
 			}
 			if !reviewAggregation {
-				actionErr = errors.Join(actionErr, errors.New("only a review aggregation job may apply task_action"))
+				failure := fmt.Sprintf("%s:%d: task_action ignored: only a review aggregation job may apply task_action", comment.File, comment.Line)
+				fmt.Fprintf(stdout, "check: apply review follow-up %s\n", failure)
+				followUpFailures = append(followUpFailures, failure)
 				continue
 			}
 			introduced := comment.IntroducedByChange != nil && *comment.IntroducedByChange
@@ -927,7 +936,7 @@ func applyVerdictActions(
 			})
 			if err != nil {
 				fmt.Fprintf(stdout, "check: apply review follow-up %s:%d failed: %v\n", comment.File, comment.Line, err)
-				actionErr = errors.Join(actionErr, err)
+				followUpFailures = append(followUpFailures, fmt.Sprintf("%s:%d (%s): %v", comment.File, comment.Line, comment.TaskAction.Action, err))
 				continue
 			}
 			followUpResults[index] = reviewFollowUpResult{
@@ -1001,7 +1010,22 @@ func applyVerdictActions(
 			fmt.Fprintf(stdout, "check: retained %d advisory finding(s) in check details; no review threads changed\n", findings)
 		}
 	}
-	return followUpResults, actionErr
+	return followUpResults, followUpFailures, actionErr
+}
+
+// appendFollowUpActionFailures records non-blocking follow-up task action
+// failures in the check details. The coordinator rejected (or never received)
+// these actions, so the findings stay visible to humans instead of silently
+// vanishing — but unlike blocking work they must not error the check.
+func appendFollowUpActionFailures(details string, failures []string) string {
+	if len(failures) == 0 {
+		return details
+	}
+	lines := []string{strings.TrimSpace(details), "", "Follow-up task actions failed (non-blocking):"}
+	for _, failure := range failures {
+		lines = append(lines, "- "+failure)
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 func checkJobBlocksApproval(job flowworker.Job) bool {

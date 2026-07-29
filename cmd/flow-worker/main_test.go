@@ -126,7 +126,7 @@ func TestAdvisoryVerdictFindingsStayInCheckDetailsWithoutThreadActions(t *testin
 		}
 	}
 	var stdout bytes.Buffer
-	_, _ = applyVerdictActions(nil, coordinator.CheckKindReviewer, false, false, "", flowworker.Lease{}, workerexec.RunResult{}, report, &stdout)
+	_, _, _ = applyVerdictActions(nil, coordinator.CheckKindReviewer, false, false, "", flowworker.Lease{}, workerexec.RunResult{}, report, &stdout)
 	if !strings.Contains(stdout.String(), "retained 2 advisory finding(s)") || !strings.Contains(stdout.String(), "no review threads changed") {
 		t.Fatalf("advisory action output = %q", stdout.String())
 	}
@@ -147,7 +147,7 @@ func TestReviewDiscoveryKeepsBlockingPolicyButSuppressesThreadActions(t *testing
 		SHA: "abc123", File: "auth.go", Line: 42, Body: "Authorization is bypassed.",
 		Severity: "high", IntroducedByChange: boolPtr(true), Requirement: "authorize requests",
 	}}}
-	if _, err := applyVerdictActions(
+	if _, _, err := applyVerdictActions(
 		nil,
 		coordinator.CheckKindReviewer,
 		checkJobBlocksApproval(job) && !reviewDiscoveryJob(job),
@@ -197,7 +197,7 @@ func TestBlockingReviewerOnlyCountsTaskCausedUniqueHighSeverityFindings(t *testi
 	if strings.Contains(details, "Authorization is bypassed") {
 		t.Fatalf("blocking finding leaked into non-blocking follow-ups: %q", details)
 	}
-	if _, err := applyVerdictActions(
+	if _, _, err := applyVerdictActions(
 		nil,
 		coordinator.CheckKindReviewer,
 		true,
@@ -386,6 +386,147 @@ func TestAdvisoryReviewAggregationAppliesTaskActionBeforeReportingVerdict(t *tes
 		if !strings.Contains(reported.Details, want) {
 			t.Fatalf("reported details %q missing %q", reported.Details, want)
 		}
+	}
+}
+
+// Regression: a review aggregation verdict whose follow-up task_action is
+// rejected by the coordinator (here: use_existing_task naming a task that is
+// already done) must not error the check or block the workflow. The rejected
+// action is recorded in the check details while the verdict and the sibling
+// follow-ups still apply.
+func TestReviewAggregationFollowUpRejectionDegradesToCheckDetails(t *testing.T) {
+	var followUpCalls int
+	var reported struct {
+		Verdict string `json:"verdict"`
+		Details string `json:"details"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/tasks/t-review/review-follow-ups":
+			followUpCalls++
+			var request struct {
+				Finding struct {
+					File string `json:"file"`
+				} `json:"finding"`
+				TaskAction struct {
+					Action string `json:"action"`
+					TaskID string `json:"task_id"`
+				} `json:"task_action"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode follow-up: %v", err)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if request.TaskAction.Action == "use_existing_task" {
+				if request.TaskAction.TaskID != "t-review-0001" {
+					t.Errorf("use_existing_task target = %q", request.TaskAction.TaskID)
+				}
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":{"code":"review_follow_up_failed","message":"review follow-up task must be open"}}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"task":{"ID":"t-review-0002","Title":"Bound the legacy cache","Body":"Add a bound."},"disposition":"created"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/tasks/t-review/checks/review-aggregation.node.nr-1":
+			if err := json.NewDecoder(r.Body).Decode(&reported); err != nil {
+				t.Errorf("decode report: %v", err)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"check":{"task_id":"t-review","name":"review-aggregation.node.nr-1","kind":"reviewer","required":true,"verdict":"satisfied"},"review_state":"approved"}`)
+		default:
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client, err := flowclient.New(config.ClientConfig{ServerURL: server.URL, Token: "worker-token"})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	report := workerexec.VerdictReport{
+		Verdict: "satisfied",
+		Reason:  "two deferred issues",
+		Comments: []workerexec.ReviewCommentReport{
+			{
+				SHA: "head-1", File: "internal/cache.go", Line: 42, Body: "The legacy cache has no size bound.",
+				Severity: "medium", IntroducedByChange: boolPtr(true), Requirement: "cache memory remains bounded",
+				TaskAction: &workerexec.ReviewTaskActionReport{Action: "create_task", Title: "Bound the legacy cache", Body: "Add a configurable cache bound."},
+			},
+			{
+				SHA: "head-1", File: "internal/board.ts", Line: 7, Body: "Cancelled mutations leave a stale pending status.",
+				Severity: "medium", IntroducedByChange: boolPtr(true), Requirement: "pending status clears on cancel",
+				TaskAction: &workerexec.ReviewTaskActionReport{Action: "use_existing_task", TaskID: "t-review-0001"},
+			},
+		},
+	}
+	taskID := "t-review"
+	job := flowworker.Job{
+		ID: "j-review", TaskID: &taskID, Role: flowworker.RoleReviewer,
+		CapacityBucket: flowworker.BucketPersistentAgent,
+		Payload: map[string]any{
+			"blocking":           true,
+			"review_aggregation": true,
+		},
+	}
+	result := workerexec.RunResult{
+		ExitCode: 0,
+		Payload: workerexec.JobPayload{
+			CheckName:          "review-aggregation.node.nr-1",
+			ChangeID:           "ch-review",
+			CompletionProtocol: checkverdict.CompletionProtocol,
+		},
+		VerdictReport: &report,
+	}
+	var stdout bytes.Buffer
+	verdict, err := reportCheckIfNeeded(client, job, flowworker.Lease{ID: "l-review"}, result, &stdout)
+	if err != nil || verdict != coordinator.CheckSatisfied {
+		t.Fatalf("reportCheckIfNeeded verdict=%s err=%v stdout=%q", verdict, err, stdout.String())
+	}
+	if followUpCalls != 2 {
+		t.Fatalf("follow-up calls = %d, want 2", followUpCalls)
+	}
+	if reported.Verdict != string(coordinator.CheckSatisfied) {
+		t.Fatalf("reported verdict = %q, want satisfied", reported.Verdict)
+	}
+	for _, want := range []string{
+		"[t-review-0002](/ui/tasks/t-review-0002)",
+		"stale pending status",
+		"Follow-up task actions failed (non-blocking):",
+		"internal/board.ts:7 (use_existing_task)",
+		"review_follow_up_failed: review follow-up task must be open",
+	} {
+		if !strings.Contains(reported.Details, want) {
+			t.Fatalf("reported details %q missing %q", reported.Details, want)
+		}
+	}
+}
+
+// A non-aggregation reviewer has no business emitting task_action, but dropping
+// that action must not error the check: the finding itself is already retained
+// in the details, and the ignored action is recorded alongside it.
+func TestNonAggregationReviewerTaskActionDegradesToDetails(t *testing.T) {
+	report := workerexec.VerdictReport{Comments: []workerexec.ReviewCommentReport{{
+		SHA: "abc123", File: "auth.go", Line: 42, Body: "Pre-existing issue.",
+		Severity: "medium", IntroducedByChange: boolPtr(false), Requirement: "authorize requests",
+		TaskAction: &workerexec.ReviewTaskActionReport{Action: "create_task", Title: "Follow up on auth hardening"},
+	}}}
+	var stdout bytes.Buffer
+	results, failures, err := applyVerdictActions(nil, coordinator.CheckKindReviewer, false, false, "", flowworker.Lease{}, workerexec.RunResult{}, report, &stdout)
+	if err != nil {
+		t.Fatalf("applyVerdictActions error = %v, want nil", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("follow-up results = %v, want none", results)
+	}
+	if len(failures) != 1 || !strings.Contains(failures[0], "auth.go:42") || !strings.Contains(failures[0], "only a review aggregation job may apply task_action") {
+		t.Fatalf("follow-up failures = %v", failures)
+	}
+	details := appendFollowUpActionFailures("review complete", failures)
+	if !strings.Contains(details, "Follow-up task actions failed (non-blocking):") || !strings.Contains(details, "auth.go:42") {
+		t.Fatalf("details = %q", details)
 	}
 }
 
