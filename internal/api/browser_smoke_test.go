@@ -70,6 +70,71 @@ func TestWebUIConsoleAutoReleaseRefreshesOpenPage(t *testing.T) {
 	}
 }
 
+// TestWebUITopBarNavDropdown drives the top-bar navigation dropdown as the
+// primary navigation path: the sidebar is gone, the trigger lives in the top
+// bar, the panel opens from the trigger, and clicking a destination navigates
+// there, marks it aria-current, and closes the panel.
+func TestWebUITopBarNavDropdown(t *testing.T) {
+	browserPath, ok := findBrowserExecutable()
+	if !ok {
+		t.Skip("no Chromium or Chrome executable found for browser smoke test")
+	}
+
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	httpServer := httptest.NewServer(fixture.Server)
+	t.Cleanup(httpServer.Close)
+
+	bootstrap, err := fixture.WebSessions.CreateBootstrap(ctx, time.Minute)
+	if err != nil {
+		t.Fatalf("create web bootstrap: %v", err)
+	}
+
+	browserCtx, cancel := newBrowserTestContext(t, browserPath)
+	defer cancel()
+
+	navigateAndWaitForText(t, browserCtx, httpServer.URL+webLoginPath(bootstrap.Token), "No tasks")
+
+	// The sidebar is gone: the sticky top bar owns primary navigation through
+	// the dropdown trigger.
+	var sidebarGone, triggerExposed bool
+	if err := chromedp.Run(browserCtx,
+		chromedp.Evaluate(`document.querySelector(".sidebar") === null`, &sidebarGone),
+		chromedp.Evaluate(`document.querySelector("header.topbar summary.nav-trigger") !== null`, &triggerExposed),
+		chromedp.WaitVisible(`header.topbar summary.nav-trigger`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("inspect top bar shell: %v\nbody:\n%s", err, browserBody(t, browserCtx))
+	}
+	if !sidebarGone {
+		t.Fatalf("old .sidebar element still rendered\nbody:\n%s", browserBody(t, browserCtx))
+	}
+	if !triggerExposed {
+		t.Fatalf("top bar does not expose the nav trigger\nbody:\n%s", browserBody(t, browserCtx))
+	}
+
+	// The trigger opens the dropdown panel.
+	if err := chromedp.Run(browserCtx,
+		chromedp.Click(`header.topbar summary.nav-trigger`, chromedp.ByQuery),
+		chromedp.WaitVisible(`.nav-menu .nav-panel`, chromedp.ByQuery),
+		waitForNavMenuOpen(true),
+	); err != nil {
+		t.Fatalf("open nav dropdown: %v\nbody:\n%s", err, browserBody(t, browserCtx))
+	}
+
+	// Clicking the Done entry navigates to /ui/done, marks the link
+	// aria-current, and closes the panel.
+	if err := chromedp.Run(browserCtx,
+		chromedp.Click(`.nav-menu .nav-panel a[href="/ui/done"]`, chromedp.ByQuery),
+		waitForLocationPath("/ui/done"),
+	); err != nil {
+		t.Fatalf("navigate through nav dropdown: %v\nbody:\n%s", err, browserBody(t, browserCtx))
+	}
+	assertActiveNav(t, browserCtx, "/ui/done")
+	if err := chromedp.Run(browserCtx, waitForNavMenuOpen(false)); err != nil {
+		t.Fatalf("nav panel did not close after navigation: %v\nbody:\n%s", err, browserBody(t, browserCtx))
+	}
+}
+
 func activateBrowserConsoleSession(t *testing.T, fixture testFixture) coordinator.StartConsoleSessionResult {
 	t.Helper()
 
@@ -213,6 +278,25 @@ func assertActiveNav(t *testing.T, ctx context.Context, want string) {
 	if active != want {
 		t.Fatalf("active nav = %q, want %q", active, want)
 	}
+}
+
+// waitForNavMenuOpen polls until the top-bar nav dropdown reports the wanted
+// open state.
+func waitForNavMenuOpen(wantOpen bool) chromedp.Action {
+	var matched bool
+	return chromedp.PollFunction(`want => { const menu = document.querySelector(".nav-menu"); return !!menu && menu.open === want; }`, &matched,
+		chromedp.WithPollingArgs(wantOpen),
+		chromedp.WithPollingTimeout(browserTextPollingTimeout),
+	)
+}
+
+// waitForLocationPath polls until the SPA router lands on the wanted path.
+func waitForLocationPath(path string) chromedp.Action {
+	var matched bool
+	return chromedp.PollFunction(`path => window.location.pathname === path`, &matched,
+		chromedp.WithPollingArgs(path),
+		chromedp.WithPollingTimeout(browserTextPollingTimeout),
+	)
 }
 
 // Text matching is case-insensitive because the UI styles state labels with

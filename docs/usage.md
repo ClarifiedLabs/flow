@@ -21,9 +21,15 @@ The web UI setup is:
 exchanges that bootstrap token for an HttpOnly session cookie, so the long-lived
 owner token is not placed in JavaScript.
 
-The board shows every project's tasks as cards. A topbar project picker appears
-when more than one project is registered and filters the board by project.
-Task IDs embed their normalized project key, so links such as
+The board shows every project's tasks as cards. A sticky top bar frames every
+page: primary navigation lives in the dropdown on the left, whose trigger
+shows the current page label alongside compact board lane chips (unscheduled,
+scheduled, in progress, blocked). The panel lists every destination — Board,
+Console, Done, Flows, Workers, Jobs — with live per-destination badges such as
+the closed-task count, worker slot usage, and active and queued jobs, plus the
+theme switcher at the bottom. A project picker appears at the right edge of
+the bar when more than one project is registered and filters the board by
+project. Task IDs embed their normalized project key, so links such as
 `/ui/tasks/t-flow-app-0001` remain unambiguous across every registered project.
 
 Use **New Task** to create unscheduled work from the browser. The form can
