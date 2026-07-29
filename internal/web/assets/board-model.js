@@ -134,11 +134,15 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
   const waitKind = waitKindOf(wait);
   const readyToMerge = isReadyToMerge(entry);
 
-  // Held gets the triage tone so the board tells the truth about who owns the
-  // task. A task waiting on a person is amber (await), a failed one is red;
+  // A manual hold gets the triage tone so the board tells the truth about who
+  // owns the task. A convergence hold is different: the system parked the task
+  // on a human scope decision, so it reads as blocked — which is what it is.
+  // A task waiting on a person is amber (await), a failed one is red;
   // collapsing both into "blocked" hid the difference that matters most.
   const phaseState = held
-    ? "triage"
+    ? convergenceHold
+      ? "blocked"
+      : "triage"
     : waitKind === "gate" || waitKind === "question"
       ? "await"
       : waitKind === "failed" || waitKind === "budget"

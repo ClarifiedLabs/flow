@@ -113,6 +113,42 @@ func TestHoldEndpointStopsTheRunAndShowsOnTheBoard(t *testing.T) {
 		workflowReleaseRequest{Edge: string(coordinator.ReleaseResume)}, http.StatusConflict, nil)
 }
 
+func TestConvergenceHoldShowsAsBlockedOnTheBoardAndSidebar(t *testing.T) {
+	fixture := newTestFixture(t)
+	flow := newBoardFixtureFlow(t, fixture, "board convergence hold")
+
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{Title: "Oversized change", FlowID: flow.ID}, http.StatusCreated, &created)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
+		nil, http.StatusOK, nil)
+
+	if _, _, err := fixture.Bundle.WorkflowRuns.HoldForConvergence(context.Background(), created.Task.ID, 8, 420, 160, 5, 500); err != nil {
+		t.Fatalf("hold for convergence: %v", err)
+	}
+
+	board := fetchProjectBoard(t, fixture)
+	if lane := board.LaneStates[created.Task.ID]; lane != coordinator.LaneStateHeld {
+		t.Fatalf("lane state = %q, want held", lane)
+	}
+	blocked := false
+	for _, id := range board.BlockedIDs {
+		if id == created.Task.ID {
+			blocked = true
+		}
+	}
+	if !blocked {
+		t.Fatalf("blocked ids = %+v, want the convergence-held task %s", board.BlockedIDs, created.Task.ID)
+	}
+
+	var sidebar sidebarResponse
+	doJSONRequest(t, fixture.Server, http.MethodGet, "/v2/sidebar", nil, http.StatusOK, &sidebar)
+	want := uiSidebarBoardSummary{InProgress: 0, Blocked: 1}
+	if sidebar.Board != want {
+		t.Fatalf("sidebar board counts = %+v, want %+v", sidebar.Board, want)
+	}
+}
+
 func TestReleaseSkipToMergeClosesTheRun(t *testing.T) {
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "board skip to merge")

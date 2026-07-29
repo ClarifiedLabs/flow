@@ -99,6 +99,22 @@ test("a system convergence hold stays in the attention strip", () => {
   assert.match(held.activity, /split or re-scope/);
 });
 
+test("a convergence hold reads as blocked; a manual hold stays triage", () => {
+  const convergence = cardModel(entry({
+    task: { id: "t-convergence" },
+    card: { held: true, held_by: "system" },
+    blocked: true,
+  }));
+  const manual = cardModel(entry({
+    task: { id: "t-manual" },
+    card: { held: true, held_by: "human" },
+  }));
+  // The system parked this task on a human scope decision, so the card says
+  // blocked; a manual hold is owned by the operator, so it stays triage.
+  assert.equal(convergence.phase, "blocked");
+  assert.equal(manual.phase, "triage");
+});
+
 test("the attention reason is the agent's own words, never a generic label", () => {
   const question = "Should the done cursor include merged tasks?";
   assert.equal(waitReasonText({ wait: { kind: "human_gate", message: question } }), question);

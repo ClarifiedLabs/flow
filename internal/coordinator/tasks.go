@@ -972,7 +972,7 @@ func (s *TaskService) BoardResult(ctx context.Context) (BoardResult, error) {
 			result.LaneStates[task.ID] = LaneStateScheduled
 		case LifecycleInProgress:
 			result.Board.InProgress = append(result.Board.InProgress, task)
-			var openWaits, held int
+			var openWaits, held, heldBySystem int
 			if err := s.db.QueryRowContext(ctx, `
 SELECT
 	(SELECT COUNT(*) FROM workflow_waits w
@@ -980,13 +980,25 @@ SELECT
 		WHERE r.task_id = ? AND w.state = 'open'),
 	(SELECT COUNT(*) FROM workflow_runs r
 		WHERE r.task_id = ? AND r.held_at IS NOT NULL
+			AND r.state IN ('scheduled', 'running', 'waiting')),
+	(SELECT COUNT(*) FROM workflow_runs r
+		WHERE r.task_id = ? AND r.held_at IS NOT NULL
+			AND r.held_by = ?
 			AND r.state IN ('scheduled', 'running', 'waiting'))`,
-				task.ID, task.ID).Scan(&openWaits, &held); err != nil {
+				task.ID, task.ID, task.ID, string(ActorSystem)).Scan(&openWaits, &held, &heldBySystem); err != nil {
 				return BoardResult{}, err
 			}
 			switch {
 			case held > 0:
 				result.LaneStates[task.ID] = LaneStateHeld
+				// A convergence hold blocks the task on a human scope
+				// decision, so it counts as blocked too: the board counters
+				// and the task card both say so. A manual hold does not —
+				// the operator already owns the task.
+				if heldBySystem > 0 {
+					result.BlockedIDs = append(result.BlockedIDs, task.ID)
+					result.WaitReasons[task.ID] = WaitReasonBlocked
+				}
 			case openWaits > 0:
 				result.LaneStates[task.ID] = LaneStateBlocked
 				result.BlockedIDs = append(result.BlockedIDs, task.ID)

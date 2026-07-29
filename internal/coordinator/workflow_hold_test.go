@@ -156,6 +156,55 @@ func TestConvergenceHoldIsRequestedOnlyOncePerRun(t *testing.T) {
 	}
 }
 
+func TestConvergenceHoldCountsAsBlockedOnTheBoard(t *testing.T) {
+	ctx := context.Background()
+	flows, tasks, runs := newWorkflowModelServices(t)
+	task, _, _ := newHoldFlow(t, flows, tasks, runs)
+
+	if _, _, err := runs.HoldForConvergence(ctx, task.ID, 8, 420, 160, 5, 500); err != nil {
+		t.Fatalf("hold for convergence: %v", err)
+	}
+
+	result, err := tasks.BoardResult(ctx)
+	if err != nil {
+		t.Fatalf("board result: %v", err)
+	}
+	// The convergence hold parks the task on a human scope decision, so it is
+	// blocked: it shows up in the blocked overlay even though its lane state
+	// stays held.
+	if lane := result.LaneStates[task.ID]; lane != LaneStateHeld {
+		t.Fatalf("lane state = %q, want held", lane)
+	}
+	assertBlockedIDs(t, result.BlockedIDs, []string{task.ID})
+	if reason := result.WaitReasons[task.ID]; reason != WaitReasonBlocked {
+		t.Fatalf("wait reason = %q, want %q", reason, WaitReasonBlocked)
+	}
+}
+
+func TestManualHoldDoesNotCountAsBlockedOnTheBoard(t *testing.T) {
+	ctx := context.Background()
+	flows, tasks, runs := newWorkflowModelServices(t)
+	task, _, _ := newHoldFlow(t, flows, tasks, runs)
+
+	if _, err := runs.Hold(ctx, task.ID, ActorHuman); err != nil {
+		t.Fatalf("hold run: %v", err)
+	}
+
+	result, err := tasks.BoardResult(ctx)
+	if err != nil {
+		t.Fatalf("board result: %v", err)
+	}
+	// A manual hold is owned by the operator, not blocked on a decision, so it
+	// keeps the held lane state without joining the blocked overlay.
+	if lane := result.LaneStates[task.ID]; lane != LaneStateHeld {
+		t.Fatalf("lane state = %q, want held", lane)
+	}
+	assertBlockedIDs(t, result.BlockedIDs, nil)
+	if reason := result.WaitReasons[task.ID]; reason != "" {
+		t.Fatalf("wait reason = %q, want none for a manual hold", reason)
+	}
+}
+
 func TestReleaseSatisfyTakesTheSuccessEdgeWithoutAnArtifact(t *testing.T) {
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
