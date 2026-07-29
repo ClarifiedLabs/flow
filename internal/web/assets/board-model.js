@@ -170,6 +170,12 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
   const dwellSince = value(card, "dwell_since", "DwellSince") || value(task, "updated_at", "UpdatedAt");
   const dwell = formatDwell(dwellSince, now);
 
+  // A scheduled task that cannot start says what it is waiting on. The read
+  // model already drops resolved blockers, so anything left in the summary is
+  // live; the card only surfaces it while the task is queued, not once it is
+  // running (the step rail owns the story then).
+  const waitingOn = waitingOnBlockers(card, lifecycleState);
+
   // The card labels the number when the number needs explaining: a waiting or
   // stalled task says why, everything else just shows the elapsed time.
   let dwellLabel = dwell;
@@ -214,11 +220,28 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
     diffStats: value(card, "diff_stats", "DiffStats"),
     checks: value(card, "required_checks", "RequiredChecks") || {},
     blockers: value(card, "blockers", "Blockers") || {},
+    waitingOn,
     terminalAvailable: Boolean(value(card, "terminal_available", "TerminalAvailable")),
     terminalJobID: value(card, "terminal_job_id", "TerminalJobID"),
     activeSession: value(card, "active_session", "ActiveSession"),
     change: value(card, "change", "Change"),
   };
+}
+
+// waitingOnBlockers lists the unresolved blockers a scheduled card renders as
+// "waiting on …". Only scheduled work carries it: an in-progress task is past
+// its blockers, and an unscheduled one has not been asked to start yet. Each
+// entry keeps the blocker's id and title so the card can link to it.
+export function waitingOnBlockers(card, lifecycleState) {
+  if (String(lifecycleState || "") !== "scheduled") return [];
+  const blockers = value(card, "blockers", "Blockers") || {};
+  const tasks = value(blockers, "tasks", "Tasks") || [];
+  return tasks
+    .map((blocker) => ({
+      id: String(value(blocker, "id", "ID") || ""),
+      title: String(value(blocker, "title", "Title") || ""),
+    }))
+    .filter((blocker) => blocker.id || blocker.title);
 }
 
 // activityLine is the one line of prose describing what is happening now,

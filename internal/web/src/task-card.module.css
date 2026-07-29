@@ -89,6 +89,24 @@
   color: var(--ink-2);
 }
 
+/* A scheduled card that cannot start names its blockers. It reads like the
+   quiet line but links out, so it gets the accent on hover like any link. */
+.waiting-on {
+  margin: 0;
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+.waiting-on a {
+  color: var(--ink-2);
+  text-decoration: none;
+}
+
+.waiting-on a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
 .ask {
   background: var(--ph-await-bg);
   border-radius: var(--radius);

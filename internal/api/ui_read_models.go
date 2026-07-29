@@ -120,11 +120,7 @@ func (s *projectServer) buildUITaskCards(ctx context.Context, tasks []coordinato
 				card.LatestStatus = &statusLog[0]
 			}
 		}
-		blockers, err := s.tasks.UnresolvedBlockers(ctx, task.ID)
-		if err != nil {
-			return nil, fmt.Errorf("load blockers for %s: %w", task.ID, err)
-		}
-		card.Blockers = uiBlockerSummaryFromTasks(blockers)
+		card.Blockers = uiBlockerSummaryFromRelations(task.ID, relationsByTask[task.ID])
 		if jobID, ok := terminalJobs[task.ID]; ok {
 			card.TerminalJobID = jobID
 			card.TerminalAvailable = true
@@ -253,16 +249,31 @@ func uiRequiredCheckSummaryFromChecks(checks []coordinator.Check) uiRequiredChec
 	return summary
 }
 
-func uiBlockerSummaryFromTasks(blockers []coordinator.Task) uiBlockerSummary {
+// uiBlockerSummaryFromRelations derives a task's unresolved blockers from the
+// batched relations read model instead of a per-task query. A blocks relation
+// only bites while its source (the blocker) has not reached done, so the
+// relation's denormalized lifecycle state is enough to tell whether it counts.
+func uiBlockerSummaryFromRelations(taskID string, relations []coordinator.TaskRelation) uiBlockerSummary {
+	var blockers []uiBlockerTaskSummary
+	for _, relation := range relations {
+		if relation.Kind != coordinator.RelationBlocks || relation.TargetTaskID != taskID {
+			continue
+		}
+		if relation.SourceState == coordinator.LifecycleDone {
+			continue
+		}
+		blockers = append(blockers, uiBlockerTaskSummary{
+			ID:    relation.SourceTaskID,
+			Title: relation.SourceTitle,
+		})
+	}
+
 	summary := uiBlockerSummary{Count: len(blockers)}
 	for i, blocker := range blockers {
 		if i >= 3 {
 			break
 		}
-		summary.Tasks = append(summary.Tasks, uiBlockerTaskSummary{
-			ID:    blocker.ID,
-			Title: blocker.Title,
-		})
+		summary.Tasks = append(summary.Tasks, blocker)
 	}
 
 	return summary

@@ -108,6 +108,12 @@ type TaskRelation struct {
 	// read models can render relation lists without an extra fetch per task.
 	SourceTitle string
 	TargetTitle string
+	// SourceState and TargetState denormalize the related tasks' lifecycle
+	// state ("" when unscheduled) so read models can tell whether a blocks
+	// relation still bites — a blocker only counts until it reaches done —
+	// without a second query per relation.
+	SourceState LifecycleState
+	TargetState LifecycleState
 	CreatedBy   Actor
 	CreatedAt   time.Time
 }
@@ -851,6 +857,8 @@ SELECT
 	r.kind,
 	s.title,
 	t.title,
+	s.lifecycle_state,
+	t.lifecycle_state,
 	r.created_by,
 	r.created_at
 FROM task_relations r
@@ -914,6 +922,8 @@ SELECT
 	r.kind,
 	s.title,
 	t.title,
+	s.lifecycle_state,
+	t.lifecycle_state,
 	r.created_by,
 	r.created_at
 FROM task_relations r
@@ -1514,6 +1524,8 @@ func scanTag(scanner taskScanner) (Tag, error) {
 func scanTaskRelation(scanner taskScanner) (TaskRelation, error) {
 	var relation TaskRelation
 	var kind string
+	var sourceState sql.NullString
+	var targetState sql.NullString
 	var createdBy string
 	var createdAt string
 
@@ -1523,11 +1535,15 @@ func scanTaskRelation(scanner taskScanner) (TaskRelation, error) {
 		&kind,
 		&relation.SourceTitle,
 		&relation.TargetTitle,
+		&sourceState,
+		&targetState,
 		&createdBy,
 		&createdAt,
 	); err != nil {
 		return TaskRelation{}, fmt.Errorf("scan task relation: %w", err)
 	}
+	relation.SourceState = LifecycleState(sourceState.String)
+	relation.TargetState = LifecycleState(targetState.String)
 
 	parsedCreatedAt, err := parseTime(createdAt)
 	if err != nil {

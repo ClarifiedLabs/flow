@@ -2,10 +2,19 @@ package api
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
+	"fmt"
 	"net/http"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
+	flowdb "github.com/ClarifiedLabs/flow/internal/db"
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 // newBoardFixtureFlow builds gate -> merged, enough graph for the board's step
@@ -270,5 +279,264 @@ func TestEpicRollupReportsMembersAndCriticalPath(t *testing.T) {
 	}
 	if third == nil || len(third.BlockedBy) != 1 || third.BlockedBy[0] != ids[1] {
 		t.Fatalf("third member = %+v, want blocked by %s", third, ids[1])
+	}
+}
+
+// TestBoardCardNamesItsUnresolvedBlocker covers the on-card "waiting on"
+// read model: a scheduled task with a live blocks blocker carries the
+// blocker's id and title, and a task with no blocker carries none.
+func TestBoardCardNamesItsUnresolvedBlocker(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	blocker, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Finish dependency"})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	blocked, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Blocked work"})
+	if err != nil {
+		t.Fatalf("create blocked task: %v", err)
+	}
+	if err := fixture.Tasks.LinkTasks(ctx, blocker.ID, blocked.ID, coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
+		t.Fatalf("link blocker: %v", err)
+	}
+	if _, err := fixture.Bundle.WorkflowRuns.Schedule(ctx, blocked.ID); err != nil {
+		t.Fatalf("schedule blocked task: %v", err)
+	}
+
+	board := fetchProjectBoard(t, fixture)
+
+	card, ok := board.TaskCards[blocked.ID]
+	if !ok {
+		t.Fatalf("board cards = %+v, missing %s", board.TaskCards, blocked.ID)
+	}
+	if card.Blockers.Count != 1 || len(card.Blockers.Tasks) != 1 {
+		t.Fatalf("blocker summary = %+v, want one unresolved blocker", card.Blockers)
+	}
+	if card.Blockers.Tasks[0].ID != blocker.ID || card.Blockers.Tasks[0].Title != "Finish dependency" {
+		t.Fatalf("blocker = %+v, want %s \"Finish dependency\"", card.Blockers.Tasks[0], blocker.ID)
+	}
+
+	// The blocker itself has no blockers, so its card must carry none — the
+	// indicator only appears on the task that is actually waiting.
+	blockerCard, ok := board.TaskCards[blocker.ID]
+	if !ok {
+		t.Fatalf("board cards = %+v, missing %s", board.TaskCards, blocker.ID)
+	}
+	if blockerCard.Blockers.Count != 0 || len(blockerCard.Blockers.Tasks) != 0 {
+		t.Fatalf("blocker card blockers = %+v, want none", blockerCard.Blockers)
+	}
+}
+
+// TestBoardCardDropsResolvedBlocker is the regression the task calls out: once
+// the blocking task reaches done it stops counting as a blocker, so the card no
+// longer names it.
+func TestBoardCardDropsResolvedBlocker(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	blocker, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Finish dependency"})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	blocked, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Blocked work"})
+	if err != nil {
+		t.Fatalf("create blocked task: %v", err)
+	}
+	if err := fixture.Tasks.LinkTasks(ctx, blocker.ID, blocked.ID, coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
+		t.Fatalf("link blocker: %v", err)
+	}
+	if _, err := fixture.Bundle.WorkflowRuns.Schedule(ctx, blocked.ID); err != nil {
+		t.Fatalf("schedule blocked task: %v", err)
+	}
+
+	if card := fetchProjectBoard(t, fixture).TaskCards[blocked.ID]; card.Blockers.Count != 1 {
+		t.Fatalf("blockers before done = %+v, want the live blocker", card.Blockers)
+	}
+
+	if _, err := fixture.Bundle.WorkflowRuns.ForceDone(ctx, blocker.ID, coordinator.ResolutionCompleted, "done", coordinator.ActorHuman); err != nil {
+		t.Fatalf("finish blocker: %v", err)
+	}
+
+	card := fetchProjectBoard(t, fixture).TaskCards[blocked.ID]
+	if card.Blockers.Count != 0 || len(card.Blockers.Tasks) != 0 {
+		t.Fatalf("blockers after done = %+v, want the resolved blocker gone", card.Blockers)
+	}
+}
+
+// queryRecorder captures the SQL text of every query that reaches the driver,
+// so a read model can prove it batches a given table into a constant number of
+// queries no matter how many cards it builds. The board read model runs on a
+// single connection and the tests never build cards concurrently, so a plain
+// slice is enough.
+type queryRecorder struct {
+	mu      sync.Mutex
+	queries []string
+}
+
+func (r *queryRecorder) record(query string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.queries = append(r.queries, query)
+}
+
+func (r *queryRecorder) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.queries = nil
+}
+
+func (r *queryRecorder) countMatching(substr string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for _, query := range r.queries {
+		if strings.Contains(query, substr) {
+			count++
+		}
+	}
+	return count
+}
+
+// countingDriver wraps the real sqlite driver and records query text.
+type countingDriver struct {
+	driver.Driver
+	recorder *queryRecorder
+}
+
+func (d countingDriver) Open(name string) (driver.Conn, error) {
+	conn, err := d.Driver.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return countingConn{Conn: conn, recorder: d.recorder}, nil
+}
+
+type countingConn struct {
+	driver.Conn
+	recorder *queryRecorder
+}
+
+func (c countingConn) Prepare(query string) (driver.Stmt, error) {
+	stmt, err := c.Conn.Prepare(query)
+	if err != nil {
+		return nil, err
+	}
+	return countingStmt{Stmt: stmt, query: query, recorder: c.recorder}, nil
+}
+
+func (c countingConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	queryer, ok := c.Conn.(driver.QueryerContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+	c.recorder.record(query)
+	return queryer.QueryContext(ctx, query, args)
+}
+
+// ExecContext delegates to the wrapped driver so multi-statement migrations
+// still apply; only reads are recorded.
+func (c countingConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	execer, ok := c.Conn.(driver.ExecerContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+	return execer.ExecContext(ctx, query, args)
+}
+
+type countingStmt struct {
+	driver.Stmt
+	query    string
+	recorder *queryRecorder
+}
+
+func (s countingStmt) Query(args []driver.Value) (driver.Rows, error) {
+	s.recorder.record(s.query)
+	return s.Stmt.Query(args)
+}
+
+func (s countingStmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
+	stmt, ok := s.Stmt.(driver.StmtQueryContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+	s.recorder.record(s.query)
+	return stmt.QueryContext(ctx, args)
+}
+
+var countingDriverSeq int64
+
+// openCountingDB opens a project database (migrations applied) through a
+// recording driver and returns a handle plus the recorder it writes to. Each
+// call registers its own driver name so the recorder is not shared across
+// databases.
+func openCountingDB(t *testing.T) (*sql.DB, *queryRecorder) {
+	t.Helper()
+	recorder := &queryRecorder{}
+	driverName := fmt.Sprintf("sqlite3-counting-%d", atomic.AddInt64(&countingDriverSeq, 1))
+	sql.Register(driverName, countingDriver{Driver: &sqlite3.SQLiteDriver{}, recorder: recorder})
+	store, err := flowdb.OpenWithDriver(context.Background(), driverName, filepath.Join(t.TempDir(), "flow.db"))
+	if err != nil {
+		t.Fatalf("open counting database: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store.DB(), recorder
+}
+
+// TestBoardCardsLoadRelationsWithConstantQueries asserts the read model does
+// not regress to a per-task blocker query: building cards for any number of
+// tasks loads relations in a single batched query.
+func TestBoardCardsLoadRelationsWithConstantQueries(t *testing.T) {
+	ctx := context.Background()
+
+	build := func(taskCount int) int {
+		db, recorder := openCountingDB(t)
+		tasks := coordinator.NewTaskService(db, "p-test")
+		var blocker coordinator.Task
+		for i := 0; i < taskCount; i++ {
+			task, err := tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: fmt.Sprintf("Task %d", i)})
+			if err != nil {
+				t.Fatalf("create task %d: %v", i, err)
+			}
+			if i == 0 {
+				blocker = task
+				continue
+			}
+			if err := tasks.LinkTasks(ctx, blocker.ID, task.ID, coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
+				t.Fatalf("link blocker for task %d: %v", i, err)
+			}
+		}
+
+		all, err := tasks.ListTasks(ctx, coordinator.TaskFilter{})
+		if err != nil {
+			t.Fatalf("list tasks: %v", err)
+		}
+
+		server := &projectServer{tasks: tasks}
+		// Only count what building the cards does; task creation and linking
+		// above touch task_relations too and would drown the signal.
+		recorder.reset()
+		cards, err := server.buildUITaskCards(ctx, all)
+		if err != nil {
+			t.Fatalf("build cards: %v", err)
+		}
+		if len(cards) != taskCount {
+			t.Fatalf("built %d cards, want %d", len(cards), taskCount)
+		}
+		// Sanity: the blocked tasks still report their blocker, so the counting
+		// run exercised the same code path the board serves.
+		if taskCount > 1 && cards[all[1].ID].Blockers.Count != 1 {
+			t.Fatalf("card blockers = %+v, want the live blocker", cards[all[1].ID].Blockers)
+		}
+		return recorder.countMatching("task_relations")
+	}
+
+	one := build(1)
+	many := build(6)
+	if one != 1 {
+		t.Fatalf("relation queries for 1 task = %d, want a single batched query", one)
+	}
+	if many != one {
+		t.Fatalf("relation queries grew with card count: 1 task = %d, 6 tasks = %d", one, many)
 	}
 }

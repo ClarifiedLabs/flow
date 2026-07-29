@@ -10,7 +10,7 @@ import { flush, installTestDOM, mountElement, TestEvent } from "./test-dom.mjs";
 
 installTestDOM();
 
-const { cardModel, dwellTone, formatDwell, matchesFilter, sortForAttention, waitActionLabel, waitReasonText } =
+const { cardModel, dwellTone, formatDwell, matchesFilter, sortForAttention, waitActionLabel, waitReasonText, waitingOnBlockers } =
   await import("./board-model.js");
 const { nowCardModel, runRows, tabBadges, isOutdatedAnchor, reviewModel } = await import("./task-model.js");
 const { reconcile } = await import("./elements/base.js");
@@ -159,6 +159,42 @@ test("board filters partition the tasks they claim to", () => {
   assert.ok(matchesFilter(queued, "queued"));
 });
 
+// --- waiting on blockers ----------------------------------------------------
+
+test("a scheduled card with a live blocker carries it as waiting on", () => {
+  const model = cardModel(entry({
+    task: { state: "scheduled" },
+    card: { blockers: { count: 1, tasks: [{ id: "t-0009", title: "Finish dependency" }] } },
+  }));
+  assert.deepEqual(model.waitingOn, [{ id: "t-0009", title: "Finish dependency" }]);
+});
+
+test("a scheduled card with no blockers carries nothing to wait on", () => {
+  const empty = cardModel(entry({ task: { state: "scheduled" }, card: { blockers: { count: 0 } } }));
+  const absent = cardModel(entry({ task: { state: "scheduled" } }));
+  assert.deepEqual(empty.waitingOn, []);
+  assert.deepEqual(absent.waitingOn, []);
+});
+
+test("waiting on only applies while the task is scheduled", () => {
+  const blockers = { count: 1, tasks: [{ id: "t-0009", title: "Finish dependency" }] };
+  // The read model already drops resolved blockers; the card only surfaces what
+  // is left while the task is queued. An in-progress task is past its blockers.
+  assert.deepEqual(waitingOnBlockers({ blockers }, "scheduled").length, 1);
+  assert.deepEqual(waitingOnBlockers({ blockers }, "in_progress"), []);
+  assert.deepEqual(waitingOnBlockers({ blockers }, "unscheduled"), []);
+});
+
+test("a resolved blocker disappears from the card", () => {
+  // Once the blocker reaches done the read model empties the task list, so the
+  // card has nothing left to wait on.
+  const model = cardModel(entry({
+    task: { state: "scheduled" },
+    card: { blockers: { count: 0, tasks: [] } },
+  }));
+  assert.deepEqual(model.waitingOn, []);
+});
+
 // --- board rendering -------------------------------------------------------
 
 test("the card shows the title alone; the id moved to the meta row", () => {
@@ -166,6 +202,19 @@ test("the card shows the title alone; the id moved to the meta row", () => {
   assert.match(html, /<a class="title"[^>]*>Retry budget for failed check nodes<\/a>/);
   assert.match(html, /<span class="id">t-0001<\/span>/);
   assert.ok(!/title"[^>]*>t-0001 ·/.test(html), "the id must not be prefixed onto the title again");
+});
+
+test("a scheduled card with a blocker names what it is waiting on and links to it", () => {
+  const html = renderTaskCard(cardModel(entry({
+    task: { state: "scheduled" },
+    card: { blockers: { count: 1, tasks: [{ id: "t-0009", title: "Finish dependency" }] } },
+  })));
+  assert.match(html, /<p class="waiting-on">waiting on <a href="\/ui\/tasks\/t-0009"[^>]*>Finish dependency<\/a><\/p>/);
+});
+
+test("a card with no blockers renders no waiting-on indicator", () => {
+  const html = renderTaskCard(cardModel(entry({ task: { state: "scheduled" }, card: { blockers: { count: 0 } } })));
+  assert.ok(!html.includes("waiting-on"), "no blockers means no waiting-on line");
 });
 
 test("the card drops branch, change id and timestamps to the detail page", () => {

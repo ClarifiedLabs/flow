@@ -21,9 +21,26 @@ export function renderTaskCard(model) {
     <a class="title" href="${escapeAttr(taskHref(model.projectID, model.id))}" data-link>${escapeHTML(model.title)}</a>
     ${model.running ? `<div class="step">${renderStepRail(model)}</div>` : ""}
     ${model.activity ? `<div class="activity">${renderMarkdown(model.activity)}</div>` : ""}
+    ${renderWaitingOn(model)}
     ${renderQuietMeta(model)}
     ${renderCardActions(model, projectAttr)}
   `;
+}
+
+// A scheduled card that cannot start names what it is waiting on, linking each
+// blocker so the reader can jump straight to the task in the way. Only the
+// model's waitingOn list drives it, so a card with no live blockers renders
+// nothing here.
+function renderWaitingOn(model) {
+  const blockers = model.waitingOn || [];
+  if (!blockers.length) return "";
+  const links = blockers
+    .map((blocker) => {
+      const label = blocker.title || blocker.id;
+      return `<a href="${escapeAttr(taskHref(model.projectID, blocker.id))}" data-link>${escapeHTML(label)}</a>`;
+    })
+    .join(", ");
+  return `<p class="waiting-on">waiting on ${links}</p>`;
 }
 
 // The quiet line is trimmed hard: priority, diff stat, reviewer count, and the
