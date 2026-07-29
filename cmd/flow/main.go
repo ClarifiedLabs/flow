@@ -1758,6 +1758,7 @@ func enrichPromptTaskContext(input *flowprompt.Input, apiFlags *apiFlagValues) e
 			if promptContext.ArtifactKind != "" {
 				input.ArtifactKind = string(promptContext.ArtifactKind)
 			}
+			input.TaskSetWorkflow = taskSetWorkflowPromptContract(promptContext.TaskSetWorkflow)
 		}
 		priorPhaseHandoffs = renderPriorPhaseHandoffs(promptContext.PriorHandoffs)
 	}
@@ -1771,6 +1772,24 @@ func enrichPromptTaskContext(input *flowprompt.Input, apiFlags *apiFlagValues) e
 		enrichPromptReviewerCheckContext(input, client)
 	}
 	return nil
+}
+
+func taskSetWorkflowPromptContract(contract *coordinator.TaskSetWorkflowContract) *flowprompt.TaskSetWorkflowContract {
+	if contract == nil {
+		return nil
+	}
+	result := &flowprompt.TaskSetWorkflowContract{
+		DefaultChildFlowID:     contract.DefaultChildFlowID,
+		AllowChildFlowOverride: contract.AllowChildFlowOverride,
+		MaxItems:               contract.MaxItems,
+		AvailableFlows:         make([]flowprompt.TaskSetFlowOption, 0, len(contract.AvailableFlows)),
+	}
+	for _, flow := range contract.AvailableFlows {
+		result.AvailableFlows = append(result.AvailableFlows, flowprompt.TaskSetFlowOption{
+			ID: flow.ID, Name: flow.Name, Description: flow.Description,
+		})
+	}
+	return result
 }
 
 // renderPriorPhaseHandoffs formats the completed work phases' handoffs as

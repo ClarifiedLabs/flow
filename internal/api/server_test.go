@@ -1750,6 +1750,107 @@ func TestTaskDetailReadModelIsOwnerOnly(t *testing.T) {
 	}
 }
 
+func TestPromptContextAdvertisesNestedPlanningWorkflow(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	planning, err := fixture.Bundle.Flows.GetByName(ctx, "planning")
+	if err != nil {
+		t.Fatalf("get planning flow: %v", err)
+	}
+	coding, err := fixture.Bundle.Flows.GetByName(ctx, "coding")
+	if err != nil {
+		t.Fatalf("get coding flow: %v", err)
+	}
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{
+		Title: "Plan follow-on work", Body: "Produce coding tasks and narrower planning tasks where needed.", FlowID: planning.ID,
+	})
+	if err != nil {
+		t.Fatalf("create planning task: %v", err)
+	}
+	if _, err := fixture.Bundle.WorkflowRuns.Schedule(ctx, task.ID); err != nil {
+		t.Fatalf("schedule planning workflow: %v", err)
+	}
+	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
+		Token: "planner-session-token", Scope: coordinator.TokenScopeSession, Subject: "s-planner",
+		ProjectID: &fixture.Project.ID, SourceTaskID: &task.ID,
+	}); err != nil {
+		t.Fatalf("store planner session token: %v", err)
+	}
+
+	var response promptContextResponse
+	doJSONRequestAs(t, fixture.Server, "planner-session-token", http.MethodGet, "/v2/tasks/"+task.ID+"/prompt-context", nil, http.StatusOK, &response)
+	if response.ArtifactKind != coordinator.ArtifactTaskSet || response.TaskSetWorkflow == nil {
+		t.Fatalf("planning prompt context = %+v", response)
+	}
+	contract := response.TaskSetWorkflow
+	if contract.DefaultChildFlowID != coding.ID || !contract.AllowChildFlowOverride || contract.MaxItems != 25 {
+		t.Fatalf("task-set workflow contract = %+v", contract)
+	}
+	options := map[string]string{}
+	for _, option := range contract.AvailableFlows {
+		options[option.Name] = option.ID
+	}
+	if options["coding"] != coding.ID || options["planning"] != planning.ID {
+		t.Fatalf("available workflow options = %+v", contract.AvailableFlows)
+	}
+
+	var workerResponse promptContextResponse
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/tasks/"+task.ID+"/prompt-context", nil, http.StatusOK, &workerResponse)
+	if workerResponse.TaskSetWorkflow != nil {
+		t.Fatalf("worker prompt context leaked project workflow catalog: %+v", workerResponse.TaskSetWorkflow)
+	}
+
+	doJSONRequestAs(t, fixture.Server, "planner-session-token", http.MethodGet, "/v2/flows", nil, http.StatusForbidden, nil)
+}
+
+func TestArtifactSubmissionRejectsDisallowedChildWorkflowOverride(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	planning, err := fixture.Bundle.Flows.GetByName(ctx, "planning")
+	if err != nil {
+		t.Fatalf("get planning flow: %v", err)
+	}
+	if _, err := fixture.DB.ExecContext(ctx, `
+UPDATE flow_nodes
+SET config_json = json_set(config_json, '$.materialize_task_set.allow_child_flow_override', json('false'))
+WHERE flow_id = ? AND kind = 'materialize_task_set'`, planning.ID); err != nil {
+		t.Fatalf("disable planning child-workflow overrides: %v", err)
+	}
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Restricted plan", FlowID: planning.ID})
+	if err != nil {
+		t.Fatalf("create planning task: %v", err)
+	}
+	scheduled, err := fixture.Bundle.WorkflowRuns.Schedule(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("schedule planning workflow: %v", err)
+	}
+	if err := fixture.Bundle.WorkflowExecutor.Advance(ctx, scheduled.ID); err != nil {
+		t.Fatalf("advance planning workflow: %v", err)
+	}
+	run, ok, err := fixture.Bundle.WorkflowRuns.ActiveForTask(ctx, task.ID)
+	if err != nil || !ok || strings.TrimSpace(run.CurrentNodeRunID) == "" {
+		t.Fatalf("active planning workflow = %+v found=%t err=%v", run, ok, err)
+	}
+	if _, err := fixture.Bundle.WorkflowRuns.MarkNodeRunning(ctx, run.CurrentNodeRunID); err != nil {
+		t.Fatalf("mark planning node running: %v", err)
+	}
+	payload, err := json.Marshal(coordinator.TaskSetManifest{
+		SchemaVersion: 1,
+		Tasks:         []coordinator.TaskSetItem{{Key: "nested-plan", Title: "Nested plan", Body: "Plan the nested work.", FlowID: planning.ID}},
+	})
+	if err != nil {
+		t.Fatalf("marshal task set: %v", err)
+	}
+	var response errorResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+task.ID+"/workflow/artifacts", coordinator.CreateWorkflowArtifactInput{
+		NodeRunID: run.CurrentNodeRunID, Kind: coordinator.ArtifactTaskSet,
+		SummaryMarkdown: "Nested planning work.", Payload: payload, ClientKey: "restricted-override",
+	}, http.StatusBadRequest, &response)
+	if !strings.Contains(response.Error.Message, "may not override default child flow") {
+		t.Fatalf("artifact rejection = %+v, want override-policy error", response)
+	}
+}
+
 func TestWorkerTokenCanReadTask(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()

@@ -63,8 +63,24 @@ type Input struct {
 	// ReviewDiscovery marks one parallel source reviewer whose verdict is an
 	// aggregation input and therefore must not create threads directly.
 	ReviewDiscovery bool
+	// TaskSetWorkflow is the downstream materializer policy and the exact
+	// project workflow choices advertised to a task-planning author.
+	TaskSetWorkflow *TaskSetWorkflowContract
 	BlockedChecks   []BlockedCheck
 	ReviewThreads   []ReviewThread
+}
+
+type TaskSetWorkflowContract struct {
+	DefaultChildFlowID     string
+	AllowChildFlowOverride bool
+	MaxItems               int
+	AvailableFlows         []TaskSetFlowOption
+}
+
+type TaskSetFlowOption struct {
+	ID          string
+	Name        string
+	Description string
 }
 
 type BlockedCheck struct {
@@ -146,6 +162,10 @@ func Build(input Input) (string, error) {
 	if strings.TrimSpace(input.TaskBody) != "" {
 		lines = append(lines, "", "Task Body:", strings.TrimSpace(input.TaskBody))
 	}
+	if role == RoleAuthor && input.TaskSetWorkflow != nil {
+		lines = append(lines, "", "Task-set Workflow Selection:")
+		lines = append(lines, taskSetWorkflowInstructions(*input.TaskSetWorkflow)...)
+	}
 	if strings.TrimSpace(input.PriorHandoff) != "" {
 		lines = append(lines, "", "Prior Handoff (from the previous session; there is no handoff file in the worktree to read):", strings.TrimSpace(input.PriorHandoff))
 	}
@@ -186,6 +206,48 @@ func Build(input Input) (string, error) {
 // the work is actually finished. A satisfied verdict lets the change proceed to
 // normal verification; a blocked verdict routes back to an author fix round (the
 // existing review→fix cycle, bounded by the review-author cycle limit).
+func taskSetWorkflowInstructions(contract TaskSetWorkflowContract) []string {
+	defaultName := "unknown"
+	for _, flow := range contract.AvailableFlows {
+		if strings.TrimSpace(flow.ID) == strings.TrimSpace(contract.DefaultChildFlowID) {
+			defaultName = valueOrUnknown(flow.Name)
+			break
+		}
+	}
+	lines := []string{
+		fmt.Sprintf("Maximum generated tasks: %d", contract.MaxItems),
+		fmt.Sprintf("Default workflow: %s (%s)", defaultName, valueOrUnknown(contract.DefaultChildFlowID)),
+		"Omit flow_id to use the default workflow.",
+	}
+	if contract.AllowChildFlowOverride {
+		lines = append(lines,
+			"Per-task workflow overrides are allowed only to the advertised workflows below.",
+			"Available workflows:",
+		)
+		for _, flow := range contract.AvailableFlows {
+			label := fmt.Sprintf("- %s (%s)", valueOrUnknown(flow.Name), valueOrUnknown(flow.ID))
+			if strings.TrimSpace(flow.ID) == strings.TrimSpace(contract.DefaultChildFlowID) {
+				label += " [default]"
+			}
+			if description := strings.TrimSpace(flow.Description); description != "" {
+				label += ": " + description
+			}
+			lines = append(lines, label)
+		}
+		lines = append(lines,
+			"Choose the workflow from the child task's immediate deliverable:",
+			"- Use the default implementation workflow when the work is bounded enough to implement directly with concrete requirements and acceptance criteria.",
+			"- Select a planning workflow explicitly when the immediate output must be a decision, investigation, architecture proposal, or narrower human-reviewed task graph before implementation can be scoped responsibly.",
+			"- A nested planning task must name its unresolved questions, constraints, expected decisions, and the plan output required to make later work implementable.",
+			"- Do not use planning merely to defer implementation that is already well specified.",
+			"The source task's workflow is neither automatically correct nor automatically forbidden. Do not copy it as a fallback; choose an advertised workflow based on the child deliverable.",
+		)
+	} else {
+		lines = append(lines, "Per-task workflow overrides are not allowed. Omit flow_id from every task.")
+	}
+	return lines
+}
+
 func completionAssessmentInstructions() []string {
 	return []string{
 		"This author session ended without finalizing (no flow ready was run); its work-in-progress is on the branch and its prior handoff is shown above.",

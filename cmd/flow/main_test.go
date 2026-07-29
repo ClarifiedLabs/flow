@@ -301,6 +301,58 @@ func TestFetchPromptIncludesTaskDetailsFromAPI(t *testing.T) {
 	}
 }
 
+func TestFetchPromptIncludesTaskSetWorkflowSelection(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	serverURL := newFlowAPIServer(t)
+	client, err := flowclient.New(config.ClientConfig{ServerURL: serverURL, Token: "owner-token"})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	catalog, err := client.ListFlows()
+	if err != nil {
+		t.Fatalf("list flows: %v", err)
+	}
+	flowIDs := map[string]string{}
+	for _, flow := range catalog.Flows {
+		flowIDs[flow.Name] = flow.ID
+	}
+	if flowIDs["coding"] == "" || flowIDs["planning"] == "" {
+		t.Fatalf("flow catalog = %+v", catalog.Flows)
+	}
+	task, err := client.CreateTask(flowclient.CreateTaskInput{
+		Title: "Plan mixed follow-on work", Body: "Produce implementation tasks and narrower planning tasks where needed.", FlowID: flowIDs["planning"],
+	})
+	if err != nil {
+		t.Fatalf("create planning task: %v", err)
+	}
+	if _, err := client.ScheduleWorkflow(task.ID); err != nil {
+		t.Fatalf("schedule planning task: %v", err)
+	}
+
+	t.Setenv("FLOW_WORKER_ROLE", "author")
+	t.Setenv("FLOW_TASK_ID", task.ID)
+	t.Setenv("FLOW_COORDINATOR_URL", serverURL)
+	t.Setenv("FLOW_SESSION_TOKEN", "owner-token")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if exitCode := run([]string{"fetch-prompt", "--harness", "harness"}, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("fetch-prompt exitCode = %d, stderr = %q", exitCode, stderr.String())
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"Task-set Workflow Selection:",
+		"Default workflow: coding (" + flowIDs["coding"] + ")",
+		"- planning (" + flowIDs["planning"] + "):",
+		"Select a planning workflow explicitly",
+		"Do not copy it as a fallback",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("fetch-prompt output missing %q:\n%s", want, output)
+		}
+	}
+}
+
 func TestFetchPromptContinuesWhenTaskContextFetchFails(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	serverURL := newFlowAPIServer(t)

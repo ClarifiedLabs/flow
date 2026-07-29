@@ -149,7 +149,7 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 			writeError(w, http.StatusForbidden, "forbidden", "prompt context requires owner, session, or worker token")
 			return
 		}
-		s.handlePromptContext(w, r, taskID)
+		s.handlePromptContext(w, r, principal, taskID)
 		return
 	}
 
@@ -212,14 +212,15 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 // role instructions (from the frozen agent-def snapshot), gate feedback from a
 // human's request-changes, and the handoffs of the phases already completed.
 type promptContextResponse struct {
-	RoleInstructions string                    `json:"role_instructions,omitempty"`
-	PhaseName        string                    `json:"phase_name,omitempty"`
-	WorkspaceMode    coordinator.WorkspaceMode `json:"workspace_mode,omitempty"`
-	ArtifactKind     coordinator.ArtifactKind  `json:"artifact_kind,omitempty"`
-	PhaseIndex       int                       `json:"phase_index"`
-	FinalPhase       bool                      `json:"final_phase"`
-	GateFeedback     string                    `json:"gate_feedback,omitempty"`
-	PriorHandoffs    []promptPhaseHandoff      `json:"prior_handoffs,omitempty"`
+	RoleInstructions string                               `json:"role_instructions,omitempty"`
+	PhaseName        string                               `json:"phase_name,omitempty"`
+	WorkspaceMode    coordinator.WorkspaceMode            `json:"workspace_mode,omitempty"`
+	ArtifactKind     coordinator.ArtifactKind             `json:"artifact_kind,omitempty"`
+	PhaseIndex       int                                  `json:"phase_index"`
+	FinalPhase       bool                                 `json:"final_phase"`
+	GateFeedback     string                               `json:"gate_feedback,omitempty"`
+	PriorHandoffs    []promptPhaseHandoff                 `json:"prior_handoffs,omitempty"`
+	TaskSetWorkflow  *coordinator.TaskSetWorkflowContract `json:"task_set_workflow,omitempty"`
 }
 
 type promptPhaseHandoff struct {
@@ -249,7 +250,7 @@ func workflowCheckRoleInstructions(node coordinator.FlowNodeSnapshot, checkName 
 	return ""
 }
 
-func (s *projectServer) handlePromptContext(w http.ResponseWriter, r *http.Request, taskID string) {
+func (s *projectServer) handlePromptContext(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
 	response := promptContextResponse{FinalPhase: true}
 	if s.workflowRuns != nil {
 		run, active, err := s.workflowRuns.ActiveForTask(r.Context(), taskID)
@@ -272,6 +273,17 @@ func (s *projectServer) handlePromptContext(w http.ResponseWriter, r *http.Reque
 					response.RoleInstructions = node.Config.Agent.Agent.Prompt
 					response.WorkspaceMode = node.Config.Agent.Workspace
 					response.ArtifactKind = node.Config.Agent.Artifact
+					if node.Config.Agent.Artifact == coordinator.ArtifactTaskSet && s.flows != nil &&
+						scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession) {
+						contract, found, err := s.flows.TaskSetWorkflowContractForNode(r.Context(), run.Snapshot, node.Key)
+						if err != nil {
+							writeError(w, http.StatusInternalServerError, "prompt_context_failed", err.Error())
+							return
+						}
+						if found {
+							response.TaskSetWorkflow = &contract
+						}
+					}
 				case checkName != "":
 					response.RoleInstructions = workflowCheckRoleInstructions(node, checkName)
 				}

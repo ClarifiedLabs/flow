@@ -34,6 +34,98 @@ func newFlowTestServices(t *testing.T) (*FlowService, *AgentDefService) {
 	return NewFlowServiceWithAgentDefs(projectStore.DB(), defs), defs
 }
 
+func TestFlowCreateRejectsConflictingTaskSetMaterializerPolicies(t *testing.T) {
+	ctx := context.Background()
+	flows, defs := newFlowTestServices(t)
+	if err := flows.SeedDefaults(ctx); err != nil {
+		t.Fatalf("SeedDefaults: %v", err)
+	}
+	planner, err := defs.GetByName(ctx, "task-planner")
+	if err != nil {
+		t.Fatalf("GetByName task-planner: %v", err)
+	}
+	coding, err := flows.GetByName(ctx, "coding")
+	if err != nil {
+		t.Fatalf("GetByName coding: %v", err)
+	}
+	planning, err := flows.GetByName(ctx, "planning")
+	if err != nil {
+		t.Fatalf("GetByName planning: %v", err)
+	}
+
+	_, err = flows.Create(ctx, FlowInput{
+		Name:      "conflicting-materializers",
+		StartNode: "plan",
+		Nodes: []FlowNodeInput{
+			{Key: "plan", Name: "Plan", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: planner.ID, Workspace: WorkspaceBase, Artifact: ArtifactTaskSet}}},
+			{Key: "select", Name: "Select", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Instructions: "Select a policy", Outcomes: []string{"coding", "planning"}}}},
+			{Key: "materialize-coding", Name: "Materialize coding", Kind: NodeMaterializeTaskSet, Config: FlowNodeConfig{MaterializeTaskSet: &MaterializeTaskSetNodeConfig{DefaultChildFlowID: coding.ID, AllowChildFlowOverride: true}}},
+			{Key: "materialize-planning", Name: "Materialize planning", Kind: NodeMaterializeTaskSet, Config: FlowNodeConfig{MaterializeTaskSet: &MaterializeTaskSetNodeConfig{DefaultChildFlowID: planning.ID, AllowChildFlowOverride: true}}},
+			{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+		},
+		Edges: []FlowEdgeInput{
+			{From: "plan", Outcome: "completed", To: "select"},
+			{From: "select", Outcome: "coding", To: "materialize-coding"},
+			{From: "select", Outcome: "planning", To: "materialize-planning"},
+			{From: "materialize-coding", Outcome: "completed", To: "done"},
+			{From: "materialize-planning", Outcome: "completed", To: "done"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "conflicting policies") {
+		t.Fatalf("Create branched conflicting materializers error = %v, want conflicting policies", err)
+	}
+
+	_, err = flows.Create(ctx, FlowInput{
+		Name:      "sequential-conflicting-materializers",
+		StartNode: "plan",
+		Nodes: []FlowNodeInput{
+			{Key: "plan", Name: "Plan", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: planner.ID, Workspace: WorkspaceBase, Artifact: ArtifactTaskSet}}},
+			{Key: "materialize-coding", Name: "Materialize coding", Kind: NodeMaterializeTaskSet, Config: FlowNodeConfig{MaterializeTaskSet: &MaterializeTaskSetNodeConfig{DefaultChildFlowID: coding.ID, AllowChildFlowOverride: true}}},
+			{Key: "materialize-planning", Name: "Materialize planning", Kind: NodeMaterializeTaskSet, Config: FlowNodeConfig{MaterializeTaskSet: &MaterializeTaskSetNodeConfig{DefaultChildFlowID: planning.ID, AllowChildFlowOverride: true}}},
+			{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+		},
+		Edges: []FlowEdgeInput{
+			{From: "plan", Outcome: "completed", To: "materialize-coding"},
+			{From: "materialize-coding", Outcome: "completed", To: "materialize-planning"},
+			{From: "materialize-planning", Outcome: "completed", To: "done"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "conflicting policies") {
+		t.Fatalf("Create sequential conflicting materializers error = %v, want conflicting policies", err)
+	}
+}
+
+func TestFlowDeleteRejectsActiveSnapshotReference(t *testing.T) {
+	ctx := context.Background()
+	flows, _ := newFlowTestServices(t)
+	if err := flows.SeedDefaults(ctx); err != nil {
+		t.Fatalf("SeedDefaults: %v", err)
+	}
+	coding, err := flows.GetByName(ctx, "coding")
+	if err != nil {
+		t.Fatalf("GetByName coding: %v", err)
+	}
+	planning, err := flows.GetByName(ctx, "planning")
+	if err != nil {
+		t.Fatalf("GetByName planning: %v", err)
+	}
+	tasks := NewTaskService(flows.db, "p-test")
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Active planning task", FlowID: planning.ID})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	runs := NewWorkflowRunService(flows.db, flows, tasks)
+	if _, err := runs.Schedule(ctx, task.ID); err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+	if _, err := flows.db.ExecContext(ctx, `UPDATE tasks SET flow_id = ? WHERE id = ?`, coding.ID, task.ID); err != nil {
+		t.Fatalf("reassign task flow: %v", err)
+	}
+	if err := flows.Delete(ctx, planning.ID); !errors.Is(err, ErrFlowInUse) {
+		t.Fatalf("Delete active snapshot flow error = %v, want ErrFlowInUse", err)
+	}
+}
+
 func TestSeedDefaults(t *testing.T) {
 	ctx := context.Background()
 	flows, defs := newFlowTestServices(t)
@@ -134,6 +226,46 @@ func TestSeedDefaults(t *testing.T) {
 	}
 	if len(allFlows) != 2 {
 		t.Fatalf("flows after reseed = %d, want 2", len(allFlows))
+	}
+}
+
+func TestTaskSetWorkflowContractAdvertisesCodingAndPlanning(t *testing.T) {
+	ctx := context.Background()
+	flows, _ := newFlowTestServices(t)
+	if err := flows.SeedDefaults(ctx); err != nil {
+		t.Fatalf("SeedDefaults: %v", err)
+	}
+	planning, err := flows.GetByName(ctx, "planning")
+	if err != nil {
+		t.Fatalf("get planning flow: %v", err)
+	}
+	coding, err := flows.GetByName(ctx, "coding")
+	if err != nil {
+		t.Fatalf("get coding flow: %v", err)
+	}
+	snapshot, err := flows.ResolveSnapshot(ctx, planning.ID)
+	if err != nil {
+		t.Fatalf("resolve planning snapshot: %v", err)
+	}
+	contract, found, err := flows.TaskSetWorkflowContractForNode(ctx, snapshot, "write-plan")
+	if err != nil {
+		t.Fatalf("resolve task-set workflow contract: %v", err)
+	}
+	if !found {
+		t.Fatal("task-set workflow contract not found")
+	}
+	if contract.DefaultChildFlowID != coding.ID || !contract.AllowChildFlowOverride || contract.MaxItems != 25 {
+		t.Fatalf("task-set workflow contract = %+v", contract)
+	}
+	options := map[string]TaskSetFlowOption{}
+	for _, option := range contract.AvailableFlows {
+		options[option.Name] = option
+	}
+	if options["coding"].ID != coding.ID || options["planning"].ID != planning.ID {
+		t.Fatalf("task-set workflow options = %+v", contract.AvailableFlows)
+	}
+	if !strings.Contains(options["planning"].Description, "narrower planning") {
+		t.Fatalf("planning workflow description = %q", options["planning"].Description)
 	}
 }
 

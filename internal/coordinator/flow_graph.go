@@ -381,6 +381,9 @@ func normalizeGraphInput(input FlowInput) (FlowInput, error) {
 	if err := validateArtifactFlow(input.StartNode, nodes, edgesByNode); err != nil {
 		return FlowInput{}, err
 	}
+	if err := validateTaskSetMaterializerPolicies(nodes, edgesByNode); err != nil {
+		return FlowInput{}, err
+	}
 	if err := validateMergedTerminalPaths(input.StartNode, nodes, edgesByNode); err != nil {
 		return FlowInput{}, err
 	}

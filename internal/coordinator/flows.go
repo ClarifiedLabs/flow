@@ -352,7 +352,7 @@ func validateGraphReferencesInTx(ctx context.Context, tx *sqlitex.Tx, defs *Agen
 				}
 			}
 		case NodeMaterializeTaskSet:
-			if err := requireImplementationFlowTx(ctx, tx, node.Config.MaterializeTaskSet.DefaultChildFlowID); err != nil {
+			if err := requireFlowTx(ctx, tx, node.Config.MaterializeTaskSet.DefaultChildFlowID); err != nil {
 				return fmt.Errorf("node %q default child flow: %w", node.Key, err)
 			}
 		}
@@ -361,27 +361,48 @@ func validateGraphReferencesInTx(ctx context.Context, tx *sqlitex.Tx, defs *Agen
 }
 
 func (s *FlowService) Delete(ctx context.Context, id string) error {
-	defaultID, err := s.DefaultFlowID(ctx)
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
 	if err != nil {
 		return err
+	}
+	defer tx.Rollback()
+	var defaultID string
+	err = tx.QueryRowContext(ctx, `SELECT value FROM app_metadata WHERE key = ?`, defaultFlowMetadataKey).Scan(&defaultID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read default flow: %w", err)
 	}
 	if defaultID == id {
 		return ErrFlowIsDefault
 	}
 	var references int
-	if err := s.db.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, `
 SELECT
 	(SELECT COUNT(*) FROM tasks WHERE flow_id = ?) +
 	(SELECT COUNT(*) FROM flow_nodes
 	 WHERE kind = 'materialize_task_set'
-	   AND json_extract(config_json, '$.materialize_task_set.default_child_flow_id') = ?)`, id, id).Scan(&references); err != nil {
+	   AND json_extract(config_json, '$.materialize_task_set.default_child_flow_id') = ?) +
+	(SELECT COUNT(*)
+	 FROM workflow_runs wr
+	 WHERE wr.state IN ('scheduled', 'running', 'waiting')
+	   AND (wr.flow_id = ? OR json_extract(wr.flow_snapshot_json, '$.flow_id') = ?)) +
+	(SELECT COUNT(*)
+	 FROM workflow_runs wr, json_each(wr.flow_snapshot_json, '$.nodes') node
+	 WHERE wr.state IN ('scheduled', 'running', 'waiting')
+	   AND json_extract(node.value, '$.config.materialize_task_set.default_child_flow_id') = ?) +
+	(SELECT COUNT(*)
+	 FROM workflow_artifacts artifact
+	 JOIN workflow_runs wr ON wr.id = artifact.workflow_run_id,
+	      json_each(artifact.payload_json, '$.tasks') task
+	 WHERE artifact.kind = 'task_set'
+	   AND wr.state IN ('scheduled', 'running', 'waiting')
+	   AND trim(COALESCE(json_extract(task.value, '$.flow_id'), '')) = ?)`, id, id, id, id, id, id).Scan(&references); err != nil {
 		return fmt.Errorf("inspect flow references: %w", err)
 	}
 	if references > 0 {
 		return ErrFlowInUse
 	}
 
-	result, err := s.db.ExecContext(ctx, `DELETE FROM flows WHERE id = ?`, id)
+	result, err := tx.ExecContext(ctx, `DELETE FROM flows WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("delete flow: %w", err)
 	}
@@ -392,7 +413,7 @@ SELECT
 	if affected == 0 {
 		return ErrFlowNotFound
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (s *FlowService) Get(ctx context.Context, id string) (Flow, error) {
@@ -535,17 +556,25 @@ func (s *FlowService) DefaultFlowID(ctx context.Context) (string, error) {
 }
 
 func (s *FlowService) SetDefaultFlow(ctx context.Context, id string) error {
-	if _, err := s.Get(ctx, id); err != nil {
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `
+	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM flows WHERE id = ?`, id).Scan(&exists); err != nil {
+		return err
+	}
+	if exists == 0 {
+		return ErrFlowNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `
 INSERT INTO app_metadata (key, value, updated_at) VALUES (?, ?, ?)
 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-		defaultFlowMetadataKey, id, sqlitex.FormatTime(s.now().UTC()))
-	if err != nil {
+		defaultFlowMetadataKey, id, sqlitex.FormatTime(s.now().UTC())); err != nil {
 		return fmt.Errorf("set default flow: %w", err)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 // ResolveSnapshot freezes the flow (default flow when flowID is empty) into a
@@ -701,13 +730,13 @@ func (s *FlowService) SeedDefaults(ctx context.Context) error {
 	}
 	if _, err := s.create(ctx, FlowInput{
 		Name:             "planning",
-		Description:      "Create a human-approved implementation task graph.",
+		Description:      "Create a human-approved follow-on task graph, including narrower planning where needed.",
 		StartNode:        "write-plan",
 		TransitionBudget: DefaultFlowTransitionBudget,
 		Nodes: []FlowNodeInput{
 			{Key: "write-plan", Name: "Write task plan", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: defIDs["task-planner"], Workspace: WorkspaceBase, Artifact: ArtifactTaskSet}}},
-			{Key: "review-plan", Name: "Review plan", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Instructions: "Review the proposed implementation tasks.", Outcomes: []string{"approved", "changes_requested", "rejected"}}}},
-			{Key: "create-tasks", Name: "Create implementation tasks", Kind: NodeMaterializeTaskSet, Config: FlowNodeConfig{MaterializeTaskSet: &MaterializeTaskSetNodeConfig{DefaultChildFlowID: coding.ID, AllowChildFlowOverride: true, MaxItems: 25}}},
+			{Key: "review-plan", Name: "Review plan", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Instructions: "Review the proposed follow-on tasks and their selected workflows.", Outcomes: []string{"approved", "changes_requested", "rejected"}}}},
+			{Key: "create-tasks", Name: "Create planned tasks", Kind: NodeMaterializeTaskSet, Config: FlowNodeConfig{MaterializeTaskSet: &MaterializeTaskSetNodeConfig{DefaultChildFlowID: coding.ID, AllowChildFlowOverride: true, MaxItems: 25}}},
 			{Key: "done", Name: "Completed", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
 			{Key: "rejected", Name: "Rejected", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionRejected}}},
 		},

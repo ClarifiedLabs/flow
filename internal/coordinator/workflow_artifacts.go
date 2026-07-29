@@ -77,6 +77,16 @@ func (s *WorkflowArtifactService) Create(ctx context.Context, input CreateWorkfl
 	if err != nil {
 		return WorkflowArtifact{}, false, err
 	}
+	if input.Kind == ArtifactTaskSet {
+		manifest, err := DecodeTaskSetManifest(canonicalPayload)
+		if err != nil {
+			return WorkflowArtifact{}, false, err
+		}
+		canonicalPayload, err = json.Marshal(manifest)
+		if err != nil {
+			return WorkflowArtifact{}, false, fmt.Errorf("encode normalized task-set manifest: %w", err)
+		}
+	}
 	digest := artifactDigest(input.Kind, input.SummaryMarkdown, canonicalPayload, input.BaseRevision)
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -125,6 +135,21 @@ FROM workflow_node_runs nr WHERE nr.id = ?`, input.NodeRunID).Scan(&runID, &node
 	}
 	if node.Config.Agent.Artifact != input.Kind {
 		return WorkflowArtifact{}, false, fmt.Errorf("node %q requires a %s artifact", nodeKey, node.Config.Agent.Artifact)
+	}
+	if input.Kind == ArtifactTaskSet {
+		config, found, err := taskSetMaterializerConfig(snapshot, nodeKey)
+		if err != nil {
+			return WorkflowArtifact{}, false, err
+		}
+		if found {
+			manifest, err := DecodeTaskSetManifest(canonicalPayload)
+			if err != nil {
+				return WorkflowArtifact{}, false, err
+			}
+			if err := validateTaskSetWorkflowSelectionTx(ctx, tx, manifest, config); err != nil {
+				return WorkflowArtifact{}, false, err
+			}
+		}
 	}
 	if input.Kind == ArtifactChange {
 		var payload struct {
@@ -334,16 +359,6 @@ func (s *WorkflowArtifactService) MaterializeTaskSet(ctx context.Context, artifa
 		return MaterializeTaskSetResult{}, false, err
 	}
 	defer tx.Rollback()
-	var existingJSON string
-	if err := tx.QueryRowContext(ctx, `SELECT result_json FROM workflow_materializations WHERE artifact_id = ?`, artifactID).Scan(&existingJSON); err == nil {
-		var existing MaterializeTaskSetResult
-		if err := json.Unmarshal([]byte(existingJSON), &existing); err != nil {
-			return MaterializeTaskSetResult{}, false, err
-		}
-		return existing, true, nil
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return MaterializeTaskSetResult{}, false, err
-	}
 	artifact, found, err := scanWorkflowArtifactMaybe(tx.QueryRowContext(ctx, workflowArtifactSelect+` WHERE id = ?`, artifactID))
 	if err != nil {
 		return MaterializeTaskSetResult{}, false, err
@@ -358,23 +373,25 @@ func (s *WorkflowArtifactService) MaterializeTaskSet(ctx context.Context, artifa
 	if err != nil {
 		return MaterializeTaskSetResult{}, false, err
 	}
-	if config.MaxItems == 0 {
-		config.MaxItems = 25
+	config = normalizedTaskSetMaterializerConfig(config)
+	if err := validateTaskSetWorkflowSelectionTx(ctx, tx, manifest, config); err != nil {
+		return MaterializeTaskSetResult{}, false, err
 	}
-	if len(manifest.Tasks) > config.MaxItems {
-		return MaterializeTaskSetResult{}, false, fmt.Errorf("task-set contains %d tasks; maximum is %d", len(manifest.Tasks), config.MaxItems)
+	var existingJSON string
+	if err := tx.QueryRowContext(ctx, `SELECT result_json FROM workflow_materializations WHERE artifact_id = ?`, artifactID).Scan(&existingJSON); err == nil {
+		var existing MaterializeTaskSetResult
+		if err := json.Unmarshal([]byte(existingJSON), &existing); err != nil {
+			return MaterializeTaskSetResult{}, false, err
+		}
+		return existing, true, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return MaterializeTaskSetResult{}, false, err
 	}
 	var sourceTaskID string
 	if err := tx.QueryRowContext(ctx, `SELECT task_id FROM workflow_runs WHERE id = ?`, artifact.WorkflowRunID).Scan(&sourceTaskID); err != nil {
 		return MaterializeTaskSetResult{}, false, err
 	}
-	defaultFlowID := strings.TrimSpace(config.DefaultChildFlowID)
-	if defaultFlowID == "" {
-		return MaterializeTaskSetResult{}, false, errors.New("materialization requires a default child flow")
-	}
-	if err := requireImplementationFlowTx(ctx, tx, defaultFlowID); err != nil {
-		return MaterializeTaskSetResult{}, false, fmt.Errorf("default child flow: %w", err)
-	}
+	defaultFlowID := config.DefaultChildFlowID
 
 	now := s.now().UTC()
 	nowText := sqlitex.FormatTime(now)
@@ -383,11 +400,6 @@ func (s *WorkflowArtifactService) MaterializeTaskSet(ctx context.Context, artifa
 		flowID := strings.TrimSpace(item.FlowID)
 		if flowID == "" {
 			flowID = defaultFlowID
-		} else if !config.AllowChildFlowOverride {
-			return MaterializeTaskSetResult{}, false, fmt.Errorf("task %q may not override its child flow", item.Key)
-		}
-		if err := requireImplementationFlowTx(ctx, tx, flowID); err != nil {
-			return MaterializeTaskSetResult{}, false, fmt.Errorf("task %q flow: %w", item.Key, err)
 		}
 		id, err := s.tasks.allocateTaskID(ctx, tx)
 		if err != nil {
@@ -441,22 +453,6 @@ VALUES (?, ?, ?, ?)`, artifact.ID, artifact.WorkflowRunID, string(resultJSON), n
 		return MaterializeTaskSetResult{}, false, err
 	}
 	return result, false, nil
-}
-
-func requireImplementationFlowTx(ctx context.Context, tx queryer, flowID string) error {
-	var count int
-	if err := tx.QueryRowContext(ctx, `
-SELECT COUNT(*)
-FROM flows f
-WHERE f.id = ?
-	AND EXISTS (SELECT 1 FROM flow_nodes n WHERE n.flow_id = f.id AND n.kind = 'merge_change')
-	AND NOT EXISTS (SELECT 1 FROM flow_nodes n WHERE n.flow_id = f.id AND n.kind = 'materialize_task_set')`, flowID).Scan(&count); err != nil {
-		return err
-	}
-	if count == 0 {
-		return fmt.Errorf("flow %q is not an implementation workflow", flowID)
-	}
-	return nil
 }
 
 func DecodeTaskSetManifest(raw []byte) (TaskSetManifest, error) {

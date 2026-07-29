@@ -264,14 +264,15 @@ func (c *Client) RequestWorkPhaseChanges(taskID string, feedback string) (coordi
 // current work phase's role instructions, human gate feedback, and completed
 // prior-phase handoffs.
 type PromptContext struct {
-	RoleInstructions string                    `json:"role_instructions,omitempty"`
-	PhaseName        string                    `json:"phase_name,omitempty"`
-	WorkspaceMode    coordinator.WorkspaceMode `json:"workspace_mode,omitempty"`
-	ArtifactKind     coordinator.ArtifactKind  `json:"artifact_kind,omitempty"`
-	PhaseIndex       int                       `json:"phase_index"`
-	FinalPhase       bool                      `json:"final_phase"`
-	GateFeedback     string                    `json:"gate_feedback,omitempty"`
-	PriorHandoffs    []PromptPhaseHandoff      `json:"prior_handoffs,omitempty"`
+	RoleInstructions string                               `json:"role_instructions,omitempty"`
+	PhaseName        string                               `json:"phase_name,omitempty"`
+	WorkspaceMode    coordinator.WorkspaceMode            `json:"workspace_mode,omitempty"`
+	ArtifactKind     coordinator.ArtifactKind             `json:"artifact_kind,omitempty"`
+	PhaseIndex       int                                  `json:"phase_index"`
+	FinalPhase       bool                                 `json:"final_phase"`
+	GateFeedback     string                               `json:"gate_feedback,omitempty"`
+	PriorHandoffs    []PromptPhaseHandoff                 `json:"prior_handoffs,omitempty"`
+	TaskSetWorkflow  *coordinator.TaskSetWorkflowContract `json:"task_set_workflow,omitempty"`
 }
 
 type PromptPhaseHandoff struct {

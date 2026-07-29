@@ -48,6 +48,59 @@ func TestBuildAuthorPromptInvokesRoleSkill(t *testing.T) {
 	}
 }
 
+func TestBuildTaskSetWorkflowSelectionGuidance(t *testing.T) {
+	rendered, err := Build(Input{
+		Role:         RoleAuthor,
+		TaskID:       "t-plan-0001",
+		ArtifactKind: "task_set",
+		TaskSetWorkflow: &TaskSetWorkflowContract{
+			DefaultChildFlowID:     "fl-coding",
+			AllowChildFlowOverride: true,
+			MaxItems:               25,
+			AvailableFlows: []TaskSetFlowOption{
+				{ID: "fl-coding", Name: "coding", Description: "Implement and verify a change."},
+				{ID: "fl-planning", Name: "planning", Description: "Create a narrower human-reviewed task graph."},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build prompt: %v", err)
+	}
+	for _, want := range []string{
+		"Task-set Workflow Selection:",
+		"Maximum generated tasks: 25",
+		"Default workflow: coding (fl-coding)",
+		"Omit flow_id to use the default workflow.",
+		"- planning (fl-planning): Create a narrower human-reviewed task graph.",
+		"Select a planning workflow explicitly",
+		"The source task's workflow is neither automatically correct nor automatically forbidden.",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("task-set prompt missing %q:\n%s", want, rendered)
+		}
+	}
+}
+
+func TestBuildTaskSetWorkflowSelectionDisablesOverrides(t *testing.T) {
+	rendered, err := Build(Input{
+		Role: RoleAuthor,
+		TaskSetWorkflow: &TaskSetWorkflowContract{
+			DefaultChildFlowID: "fl-coding",
+			MaxItems:           10,
+			AvailableFlows:     []TaskSetFlowOption{{ID: "fl-coding", Name: "coding"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build prompt: %v", err)
+	}
+	if !strings.Contains(rendered, "Per-task workflow overrides are not allowed. Omit flow_id from every task.") {
+		t.Fatalf("task-set prompt missing disabled override guidance:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "Choose the workflow from the child task's immediate deliverable") {
+		t.Fatalf("task-set prompt advertised override selection when disabled:\n%s", rendered)
+	}
+}
+
 func TestBuildInjectsPriorHandoffForAuthorAndVerifier(t *testing.T) {
 	priorHandoff := "# Flow Handoff\n\n## Current Goal\nFinish the migration.\n"
 	for _, role := range []string{RoleAuthor, RoleVerifier} {
