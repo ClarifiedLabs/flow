@@ -120,6 +120,22 @@ The server stores coordinator state in `flow-data`. The worker stores its
 `/flow/work` directory in `flow-worker-data` and its rootless Docker state in
 `flow-worker-docker`; it does not mount the server data volume.
 
+Compose bind-mounts the repository's `docker/flow-worker.yaml` read-only at
+`/etc/flow/flow-worker.yaml`. Edit that file to change worker labels or
+capacity without modifying the image's example configuration. For example:
+
+```yaml
+capacity:
+  persistent_agent: 3 # concurrent author, reviewer, verifier, and console jobs
+  ephemeral: 8        # concurrent CI/check jobs
+```
+
+Restart the worker after editing its configuration; a rebuild is not required:
+
+```sh
+docker compose up -d --force-recreate flow-worker
+```
+
 The `flow-server` image stays minimal. The `flow-worker` image includes the
 `harness` agent CLI, Go, nvm with Node.js LTS, Rust, Temurin JDK,
 LLVM/clang/lld, build tools, Docker CLI/Compose/buildx, rootless

@@ -1,0 +1,10 @@
+worker_id: compose
+coordinator_url: http://flow-server:8421
+work_dir: /flow/work
+labels:
+  local: "true"
+capacity:
+  persistent_agent: 10
+  ephemeral: 10
+git:
+  principal: worker:compose

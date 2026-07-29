@@ -41,7 +41,7 @@ services:
     command:
       - flow-worker
       - -c
-      - /usr/share/flow/examples/docker/flow-worker.yaml
+      - /etc/flow/flow-worker.yaml
     environment:
       FLOW_WORKER_JOIN_TOKEN: ${FLOW_WORKER_JOIN_TOKEN:?Set FLOW_WORKER_JOIN_TOKEN in .env}
       FLOW_WORKER_COORDINATOR_URL: ${FLOW_WORKER_COORDINATOR_URL:-http://flow-server:8421}
@@ -58,6 +58,7 @@ services:
     tmpfs:
       - /run/user/${FLOW_UID:-1000}:uid=${FLOW_UID:-1000},gid=${FLOW_GID:-1000},mode=700
     volumes:
+      - ./docker/flow-worker.yaml:/etc/flow/flow-worker.yaml:ro
       - flow-worker-data:/flow/work
       - flow-worker-docker:/home/flow/.local/share/docker
 
