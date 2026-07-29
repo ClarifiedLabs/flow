@@ -43,7 +43,7 @@ function renderGate(model, review) {
         <h3>${escapeHTML(gate.heading)}</h3>
         ${gate.interactive ? `<span class="badge" data-tone="action">agent is live</span>` : ""}
       </div>
-      <p class="instructions">${escapeHTML(gate.instructions)}</p>
+      <div class="instructions">${renderMarkdown(gate.instructions)}</div>
       ${gate.changeGate ? renderChangePointer(changeID) : review.artifact ? renderArtifact(review.artifact, false) : ""}
       <textarea data-workflow-feedback rows="4" placeholder="Feedback — recorded with your decision, and delivered to the agent when it is still in its session"></textarea>
       <div class="actions">

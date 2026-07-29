@@ -8,6 +8,7 @@
 
 import { apiGetText } from "../api.js";
 import { escapeAttr, escapeHTML } from "../html.js";
+import { renderMarkdown } from "../markdown.js";
 import { value } from "../normalize.js";
 import { define, FlowElement } from "./base.js";
 
@@ -26,16 +27,19 @@ function renderCheckRow(check, model) {
   const jobID = value(check, "source_job_id", "SourceJobID") || "";
   const exitCode = value(check, "exit_code", "ExitCode");
   const failed = verdict === "blocked" || verdict === "errored";
-  const detail = [value(check, "details", "Details"), jobID, exitCode != null ? `exit ${exitCode}` : ""]
-    .filter(Boolean)
-    .join(" · ");
+  const details = String(value(check, "details", "Details") || "");
+  const meta = [jobID, exitCode != null ? `exit ${exitCode}` : ""].filter(Boolean).join(" · ");
+  const detail = [
+    details ? renderMarkdown(details, { inline: true }) : "",
+    escapeHTML(meta),
+  ].filter(Boolean).join(" · ");
   const projectAttr = model?.projectID ? ` data-project="${escapeAttr(model.projectID)}"` : "";
 
   return `
     <div class="row" data-check="${escapeAttr(name)}" data-verdict="${escapeAttr(verdict)}"${failed ? " data-failed" : ""}>
       <span class="dot"></span>
       <span class="name">${escapeHTML(name)}</span>
-      <span class="detail">${escapeHTML(detail)}</span>
+      <span class="detail">${detail}</span>
       <span class="spacer"></span>
       ${
         failed

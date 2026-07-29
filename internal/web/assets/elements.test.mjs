@@ -166,6 +166,20 @@ test("a waiting card shows the question with Answer and Approve", () => {
   assert.match(html, /data-card-approve="t-0001"/);
 });
 
+test("the card renders activity as markdown", () => {
+  const html = renderTaskCard(
+    cardModel(entry({ card: { wait: { kind: "operator_intervention", reason: "execution_failed", message: "Failed on **line 42**" } } })),
+  );
+  assert.match(html, /<div class="activity"><div class="md">/);
+  assert.match(html, /<strong>line 42<\/strong>/);
+});
+
+test("the card renders the ask reason as markdown", () => {
+  const html = renderTaskCard(cardModel(entry({ card: { wait: { kind: "human_gate", message: "Ship **it**?" } } })));
+  assert.match(html, /<div class="reason"><div class="md">/);
+  assert.match(html, /<strong>it<\/strong>/);
+});
+
 test("a failed card offers Retry and its transcript", () => {
   const html = renderTaskCard(
     cardModel(entry({ card: { wait: { kind: "operator_intervention", reason: "execution_failed" } } })),
@@ -225,6 +239,15 @@ test("the table marks attention rows and offers quiet actions elsewhere", () => 
   assert.match(html, /data-needs-you/);
   assert.match(html, /class="quiet-action"/);
   assert.match(html, /sort: attention, then dwell/);
+});
+
+test("the table renders the now column as markdown", () => {
+  const model = cardModel(
+    entry({ card: { wait: { kind: "operator_intervention", reason: "execution_failed", message: "Failed on **line 42**" } } }),
+  );
+  const html = renderBoardTable([model], "all");
+  assert.match(html, /<td class="col-now"><div class="md">/);
+  assert.match(html, /<strong>line 42<\/strong>/);
 });
 
 // --- task detail -----------------------------------------------------------
@@ -387,6 +410,16 @@ test("a failed check row carries the disclosure, retry and skip", () => {
   assert.match(html, /Skip/);
 });
 
+test("the check list renders details as markdown but keeps job id and exit code escaped", () => {
+  const html = renderCheckList({
+    id: "t-0042",
+    checks: [
+      { name: "reviewer", verdict: "blocked", details: "**Overall**: needs work", source_job_id: "j-<_1", exit_code: 1 },
+    ],
+  });
+  assert.match(html, /<span class="detail"><strong>Overall<\/strong>: needs work · j-&lt;_1 · exit 1<\/span>/);
+});
+
 test("handing back names every edge the executor can take", () => {
   const html = renderHeldPanel({
     held: true,
@@ -416,6 +449,21 @@ test("a convergence hold explains the scope decision", () => {
   assert.match(html, /Convergence review/);
   assert.match(html, /touches 8 files/);
   assert.match(html, /data-edge="resume"/);
+});
+
+test("the held panel renders convergence message as markdown", () => {
+  const html = renderHeldPanel({
+    held: true,
+    heldBy: "system",
+    id: "t-0043",
+    stepName: "review",
+    statusLog: [{
+      kind: "plan",
+      message: "Convergence **review** required.",
+    }],
+  });
+  assert.match(html, /<div class="prose"><div class="md">/);
+  assert.match(html, /<strong>review<\/strong>/);
 });
 
 test("the activity feed merges transitions and status entries newest first", () => {
@@ -689,6 +737,32 @@ test("the review panel renders the gate, the plan, and one button per outcome", 
   assert.match(html, /← one/, "the dependency reads as blocked-by");
   assert.match(html, />db</, "tag slugs render");
   assert.match(html, /agent is live/, "interactive gates say the agent is live");
+});
+
+test("the review panel renders gate instructions as markdown", () => {
+  const model = {
+    id: "t-0001",
+    projectID: "p-1",
+    review: reviewModel(
+      reviewFixture({
+        wait: {
+          id: "ww-1",
+          kind: "human_gate",
+          node_run_id: "wnr-1",
+          message: "Review the proposed implementation tasks.",
+          created_at: "2026-07-28T10:00:00Z",
+          details: {
+            instructions: "Check the **plan** and visit https://example.com",
+            outcomes: ["approved"],
+          },
+        },
+      }),
+    ),
+  };
+  const html = renderReviewPanel(model);
+  assert.match(html, /<div class="instructions"><div class="md">/);
+  assert.match(html, /<strong>plan<\/strong>/);
+  assert.match(html, /<a href="https:\/\/example\.com"/);
 });
 
 test("the review panel answers an agent question with a reply form", () => {

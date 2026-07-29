@@ -98,7 +98,7 @@
   gap: 8px;
 }
 
-.ask p {
+.ask .reason {
   margin: 0;
   font-family: var(--font-prose);
   font-size: var(--text-prose);

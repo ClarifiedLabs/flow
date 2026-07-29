@@ -5,6 +5,7 @@
 
 import { taskHref } from "../api.js";
 import { escapeAttr, escapeHTML } from "../html.js";
+import { renderMarkdown } from "../markdown.js";
 import { renderStepRail } from "./step-rail.js";
 import { define, FlowElement } from "./base.js";
 
@@ -19,7 +20,7 @@ export function renderTaskCard(model) {
     </div>
     <a class="title" href="${escapeAttr(taskHref(model.projectID, model.id))}" data-link>${escapeHTML(model.title)}</a>
     ${model.running ? `<div class="step">${renderStepRail(model)}</div>` : ""}
-    ${model.activity ? `<p class="activity">${escapeHTML(model.activity)}</p>` : ""}
+    ${model.activity ? `<div class="activity">${renderMarkdown(model.activity)}</div>` : ""}
     ${renderQuietMeta(model)}
     ${renderCardActions(model, projectAttr)}
   `;
@@ -56,7 +57,7 @@ function renderCardActions(model, projectAttr) {
     // renders the gate panel (or the agent's question) with its feedback box.
     return `
       <div class="ask">
-        <p>${escapeHTML(model.reason)}</p>
+        <div class="reason">${renderMarkdown(model.reason)}</div>
         <div class="actions">
           <a class="button" href="${escapeAttr(taskHref(model.projectID, model.id))}?tab=review" data-link>Answer</a>
           <button class="button secondary" data-card-approve="${id}"${projectAttr}>Approve</button>

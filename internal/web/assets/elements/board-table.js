@@ -4,6 +4,7 @@
 import { taskHref } from "../api.js";
 import { BOARD_FILTERS, matchesFilter, sortForAttention } from "../board-model.js";
 import { escapeAttr, escapeHTML } from "../html.js";
+import { renderMarkdown } from "../markdown.js";
 import { renderStepRail } from "./step-rail.js";
 import { define, FlowElement } from "./base.js";
 
@@ -52,7 +53,7 @@ function renderRow(model) {
         <a class="title" href="${href}" data-link>${escapeHTML(model.title)}</a>
       </td>
       <td class="col-step">${model.running ? renderStepRail(model) : `<span class="rail-label is-idle">${escapeHTML(model.lifecycleState.replace("_", " "))}</span>`}</td>
-      <td class="col-now">${escapeHTML(model.activity)}</td>
+      <td class="col-now">${renderMarkdown(model.activity)}</td>
       <td class="col-dwell" data-tone="${escapeAttr(model.dwellTone)}">${escapeHTML(model.dwell)}</td>
       <td class="col-action">${renderRowAction(model, href, projectAttr)}</td>
     </tr>

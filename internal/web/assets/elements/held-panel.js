@@ -3,6 +3,7 @@
 // choice of which edge to take.
 
 import { escapeAttr, escapeHTML } from "../html.js";
+import { renderMarkdown } from "../markdown.js";
 import { value } from "../normalize.js";
 import { TERMINAL_ICON } from "../terminal.js";
 import { define, FlowElement } from "./base.js";
@@ -35,7 +36,7 @@ export function renderHeldPanel(model) {
       <span class="badge"><span class="dot"></span>${convergenceHold ? "Convergence review" : "Held by you"}</span>
       <span class="line">paused at ${escapeHTML(model.stepName)} · the workflow will not advance</span>
     </div>
-    ${convergenceMessage ? `<div class="prose">${escapeHTML(convergenceMessage)}</div>` : ""}
+    ${convergenceMessage ? `<div class="prose">${renderMarkdown(convergenceMessage)}</div>` : ""}
     ${sessionID ? renderSession(sessionID, workerID) : ""}
     <div class="hand-back">
       <span class="caption">Hand back</span>
