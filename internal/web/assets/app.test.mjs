@@ -672,6 +672,77 @@ test("a poll re-render replacing the button cannot re-enable a duplicate submiss
   assert.equal(inFlight.size, 0);
 });
 
+test("approving one human check does not block a different check on the same task", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let requests = 0;
+  const resolvers = [];
+  globalThis.fetch = () => {
+    requests += 1;
+    return new Promise((resolve) => {
+      resolvers.push(() => resolve({ ok: true, json: () => Promise.resolve({}) }));
+    });
+  };
+  const checkA = new ActionButton({ humanReviewApprove: "t-0001", checkName: "tests", project: "p-alpha" });
+  const checkB = new ActionButton({ humanReviewApprove: "t-0001", checkName: "docs", project: "p-alpha" });
+
+  const approveA = handleAction(app, { target: checkA, preventDefault() {} });
+  assert.equal(requests, 1);
+  assert.equal(checkA.disabled, true);
+
+  // A different check on the same task has its own busy identity, so approving
+  // it issues its own request instead of being suppressed by the in-flight one.
+  const approveB = handleAction(app, { target: checkB, preventDefault() {} });
+  assert.equal(requests, 2, "a distinct check is not blocked by the in-flight one");
+  assert.equal(checkB.disabled, true);
+  assert.equal(checkA.disabled, true, "the first check stays busy while its request is in flight");
+
+  resolvers[0]();
+  resolvers[1]();
+  await approveA;
+  await approveB;
+  assert.equal(checkA.disabled, false);
+  assert.equal(checkB.disabled, false);
+  assert.equal(inFlight.size, 0);
+});
+
+test("a duplicate approval of the same human check stays suppressed while its request is in flight", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let requests = 0;
+  let resolveRequest;
+  globalThis.fetch = () => {
+    requests += 1;
+    return new Promise((resolve) => {
+      resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+  };
+  const first = new ActionButton({ humanReviewApprove: "t-0001", checkName: "tests", project: "p-alpha" });
+
+  const handled = handleAction(app, { target: first, preventDefault() {} });
+  assert.equal(requests, 1);
+  assert.equal(first.disabled, true);
+  assert.equal(first.getAttribute("aria-busy"), "true");
+  assert.equal(first.classList.contains("is-busy"), true);
+
+  // A poll repaint swaps the button for a fresh enabled node carrying the same
+  // task and check; clicking it must not issue a second request.
+  const replacement = new ActionButton({ humanReviewApprove: "t-0001", checkName: "tests", project: "p-alpha" });
+  assert.equal(replacement.disabled, false);
+  await handleAction(app, { target: replacement, preventDefault() {} });
+  assert.equal(requests, 1, "the same check's duplicate approval is suppressed");
+
+  resolveRequest();
+  await handled;
+
+  // Once the request settles the check is available again.
+  const second = handleAction(app, { target: replacement, preventDefault() {} });
+  assert.equal(requests, 2);
+  resolveRequest();
+  await second;
+  assert.equal(inFlight.size, 0);
+});
+
 test("a failed action keeps the error on the status line and restores the control", async () => {
   await scriptContext();
   const app = statusApp();

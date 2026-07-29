@@ -268,9 +268,19 @@ export function actionKeyFor(element) {
 
 // actionBusyKey names an in-flight action: its table key plus the target id
 // the dataset carries, so "schedule t-0001" stays blocked even when the
-// button node carrying it is replaced.
+// button node carrying it is replaced. Some actions act on a sub-target the
+// table key alone does not distinguish: a task can render several human
+// checks at once, each approve button targeting a distinct data-check-name,
+// so the busy identity includes the check name — keying on the task alone
+// would mark every sibling check busy and suppress their independent
+// approvals until the first request settles.
 export function actionBusyKey(key, dataset) {
-  return `${key}:${String(dataset?.[key] ?? "")}`;
+  const base = `${key}:${String(dataset?.[key] ?? "")}`;
+  if (key === "humanReviewApprove") {
+    const check = String(dataset?.checkName ?? "");
+    return check ? `${base}:${check}` : base;
+  }
+  return base;
 }
 
 // markBusy gives a mutating control its synchronous pending state: disabled,
