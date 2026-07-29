@@ -7,10 +7,12 @@ import { value } from "./normalize.js";
 import { NAV } from "./config.js";
 
 // navTriggerLabel maps a path onto the top-bar trigger's label: the board
-// aliases collapse to "board", other nav destinations use their label, and
-// everything else (task/change detail, terminal) falls back to "menu".
+// aliases and the task views (new task, task detail, epic) collapse to
+// "board", other nav destinations use their label, and everything else
+// (change detail, terminal) falls back to "menu".
 export function navTriggerLabel(path) {
   if (path === "/ui" || path === "/ui/" || path === "/ui/board") return "board";
+  if (path.startsWith("/ui/tasks/")) return "board";
   const match = NAV.find(([href]) => href === path);
   return match ? match[1].toLowerCase() : "menu";
 }
