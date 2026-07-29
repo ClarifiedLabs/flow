@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -68,6 +69,16 @@ func (s *Server) handleWorkerControl(w http.ResponseWriter, r *http.Request, pri
 		if err := json.Unmarshal(data, &message); err != nil || message.Type != "terminal-error" {
 			continue
 		}
+		message.StreamID = strings.TrimSpace(message.StreamID)
+		message.Error = strings.TrimSpace(message.Error)
+		if message.StreamID == "" {
+			continue
+		}
+		streamErr := errors.New("worker terminal open failed")
+		if message.Error != "" {
+			streamErr = errors.New(message.Error)
+		}
+		s.workerTerminals.FailStream(message.StreamID, workerID, streamErr)
 		slog.Warn("worker terminal open failed",
 			"worker_id", workerID,
 			"stream_id", message.StreamID,

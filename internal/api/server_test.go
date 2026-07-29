@@ -2129,6 +2129,7 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 		t.Fatalf("current console = %+v", current)
 	}
 	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/sessions/"+sessionID+"/terminal", sessionTerminalRequest{
+		TmuxSocketPath: "/tmp/flow-console-test.sock",
 	}, http.StatusOK, nil)
 	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/sessions/"+sessionID+"/event", sessionEventRequest{
 		State: string(coordinator.SessionWaiting),

@@ -490,7 +490,8 @@ func (s *projectServer) serveTerminalAsset(w http.ResponseWriter, suffix []strin
 
 func (s *projectServer) handleSessionTerminalStream(w http.ResponseWriter, r *http.Request, sessionID string) {
 	ctx := r.Context()
-	if _, err := s.sessions.TerminalTarget(ctx, sessionID); errors.Is(err, sql.ErrNoRows) {
+	registered, err := s.sessions.TerminalTarget(ctx, sessionID)
+	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "terminal_not_found", "terminal not registered")
 		return
 	} else if err != nil {
@@ -511,7 +512,7 @@ func (s *projectServer) handleSessionTerminalStream(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusBadRequest, "terminal_not_live", "terminal is not live")
 		return
 	}
-	s.openTerminalStream(w, r, session.JobID, lease.WorkerID, "")
+	s.openTerminalStream(w, r, session.JobID, lease.WorkerID, registered.TmuxSocketPath)
 }
 
 func (s *projectServer) handleJobTerminalStream(w http.ResponseWriter, r *http.Request, jobID string) {
@@ -538,6 +539,11 @@ func (s *projectServer) handleJobTerminalStream(w http.ResponseWriter, r *http.R
 }
 
 func (s *projectServer) openTerminalStream(w http.ResponseWriter, r *http.Request, jobID, workerID, tmuxSocketPath string) {
+	tmuxSocketPath = strings.TrimSpace(tmuxSocketPath)
+	if tmuxSocketPath == "" {
+		writeError(w, http.StatusBadRequest, "terminal_stream_failed", "tmux socket path is required")
+		return
+	}
 	browserConn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns: []string{"*"},
 	})
@@ -565,7 +571,7 @@ func (s *projectServer) openTerminalStream(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if err := s.Server.workerTerminals.OpenStream(streamID, workerID, browserConn, jobID, cols, rows); err != nil {
+	if err := s.Server.workerTerminals.OpenStream(streamID, workerID, browserConn, jobID, tmuxSocketPath, cols, rows); err != nil {
 		slog.WarnContext(r.Context(), "open terminal stream", "stream_id", streamID, "worker_id", workerID, "error", err)
 		_ = browserConn.Close(websocket.StatusPolicyViolation, err.Error())
 	}

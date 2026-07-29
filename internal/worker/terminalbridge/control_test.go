@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -45,7 +46,7 @@ func (r *memoryJobRegistry) Has(jobID string) bool {
 func TestControlClientUnknownJobReturnsTerminalError(t *testing.T) {
 	controlConnections := make(chan *websocket.Conn, 2)
 	server := newControlServer(t, controlConnections, nil)
-	client := NewControlClient(server.URL, "worker-1", "secret", "", newMemoryJobRegistry())
+	client := NewControlClient(server.URL, "worker-1", "secret", newMemoryJobRegistry())
 	client.reconnectMin = 10 * time.Millisecond
 	client.reconnectMax = 20 * time.Millisecond
 
@@ -73,20 +74,24 @@ func TestControlClientUnknownJobReturnsTerminalError(t *testing.T) {
 }
 
 func TestControlClientRegisteredJobStreamsTerminal(t *testing.T) {
-	installFakeTmux(t)
+	tmuxArgsPath := installFakeTmux(t)
 	controlConnections := make(chan *websocket.Conn, 2)
 	streamConnections := make(chan *websocket.Conn, 2)
 	server := newControlServer(t, controlConnections, streamConnections)
 	registry := newMemoryJobRegistry()
 	registry.Register("job-1")
-	client := NewControlClient(server.URL, "worker-1", "secret", filepath.Join(t.TempDir(), "tmux.sock"), registry)
+	client := NewControlClient(server.URL, "worker-1", "secret", registry)
+	jobSocketPath := filepath.Join(t.TempDir(), "job.sock")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
 	go func() { runErr <- client.Run(ctx) }()
 	control := receiveConnection(t, controlConnections)
 
-	writeJSON(t, control, `{"type":"terminal-open","stream_id":"stream-echo","job_id":"job-1","cols":90,"rows":30}`)
+	writeJSON(t, control, fmt.Sprintf(
+		`{"type":"terminal-open","stream_id":"stream-echo","job_id":"job-1","tmux_socket_path":%q,"cols":90,"rows":30}`,
+		jobSocketPath,
+	))
 	stream := receiveConnection(t, streamConnections)
 	ioCtx, ioCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer ioCancel()
@@ -94,6 +99,10 @@ func TestControlClientRegisteredJobStreamsTerminal(t *testing.T) {
 		t.Fatalf("write terminal stream: %v", err)
 	}
 	readWebSocketUntil(t, ioCtx, stream, websocket.MessageBinary, []byte("control-echo"))
+	wantArgs := strings.Join([]string{"-S", jobSocketPath, "attach-session", "-t", "flow-job-1", ""}, "\n")
+	if got := readFileEventually(t, tmuxArgsPath); got != wantArgs {
+		t.Fatalf("tmux args = %q, want %q", got, wantArgs)
+	}
 
 	if err := stream.Close(websocket.StatusNormalClosure, "test complete"); err != nil {
 		t.Fatalf("close terminal stream: %v", err)
@@ -108,7 +117,7 @@ func TestControlClientRegisteredJobStreamsTerminal(t *testing.T) {
 func TestControlClientReconnectReplacesConnection(t *testing.T) {
 	controlConnections := make(chan *websocket.Conn, 3)
 	server := newControlServer(t, controlConnections, nil)
-	client := NewControlClient(server.URL, "worker-1", "secret", "", newMemoryJobRegistry())
+	client := NewControlClient(server.URL, "worker-1", "secret", newMemoryJobRegistry())
 	client.reconnectMin = 10 * time.Millisecond
 	client.reconnectMax = 20 * time.Millisecond
 
@@ -172,14 +181,35 @@ func newControlServer(t *testing.T, controls chan<- *websocket.Conn, streams cha
 	return server
 }
 
-func installFakeTmux(t *testing.T) {
+func installFakeTmux(t *testing.T) string {
 	t.Helper()
 	directory := t.TempDir()
 	path := filepath.Join(directory, "tmux")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nexec cat\n"), 0o755); err != nil {
+	argsPath := filepath.Join(directory, "tmux-args")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FLOW_TEST_TMUX_ARGS\"\nexec cat\n"), 0o755); err != nil {
 		t.Fatalf("write fake tmux: %v", err)
 	}
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FLOW_TEST_TMUX_ARGS", argsPath)
+	return argsPath
+}
+
+func readFileEventually(t *testing.T, path string) string {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		contents, err := os.ReadFile(path)
+		if err == nil {
+			return string(contents)
+		}
+		if !os.IsNotExist(err) {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", path)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func receiveConnection(t *testing.T, connections <-chan *websocket.Conn) *websocket.Conn {

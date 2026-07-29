@@ -2765,11 +2765,14 @@ WHERE session_id = ?`, session.ID).Scan(&storedSocketPath); err == nil {
 	return terminal.AttachInfoForSession(session.ID, session.JobID, tmuxSocketPath), nil
 }
 
-func (s *SessionService) RegisterTerminal(ctx context.Context, sessionID string, tmuxSocketPaths ...string) (SessionTerminal, error) {
+func (s *SessionService) RegisterTerminal(ctx context.Context, sessionID string, tmuxSocketPath string) (SessionTerminal, error) {
 	if _, err := s.AttachInfo(ctx, sessionID); err != nil {
 		return SessionTerminal{}, err
 	}
-	tmuxSocketPath := firstOptionalString(tmuxSocketPaths)
+	tmuxSocketPath = strings.TrimSpace(tmuxSocketPath)
+	if tmuxSocketPath == "" {
+		return SessionTerminal{}, errors.New("tmux socket path is required")
+	}
 	now := s.now().UTC()
 	if _, err := s.db.ExecContext(ctx, `
 INSERT INTO session_terminals (

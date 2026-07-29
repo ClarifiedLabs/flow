@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,16 +34,18 @@ type workerControlConn struct {
 type pendingStream struct {
 	browserConn *websocket.Conn
 	workerConn  *websocket.Conn
+	workerID    string
 	done        chan struct{}
 	err         error
 }
 
 type terminalOpenMessage struct {
-	Type     string `json:"type"`
-	StreamID string `json:"stream_id"`
-	JobID    string `json:"job_id"`
-	Cols     uint16 `json:"cols"`
-	Rows     uint16 `json:"rows"`
+	Type           string `json:"type"`
+	StreamID       string `json:"stream_id"`
+	JobID          string `json:"job_id"`
+	TmuxSocketPath string `json:"tmux_socket_path"`
+	Cols           uint16 `json:"cols"`
+	Rows           uint16 `json:"rows"`
 }
 
 func NewWorkerTerminalService() *WorkerTerminalService {
@@ -97,16 +100,21 @@ func (svc *WorkerTerminalService) ControlConn(workerID string) (*workerControlCo
 // OpenStream asks a worker to dial back, then waits until CompleteStream pairs
 // the worker connection with browserConn. CompleteStream owns the relay after
 // the pair is formed.
-func (svc *WorkerTerminalService) OpenStream(streamID, workerID string, browserConn *websocket.Conn, jobID string, cols, rows uint16) error {
+func (svc *WorkerTerminalService) OpenStream(streamID, workerID string, browserConn *websocket.Conn, jobID, tmuxSocketPath string, cols, rows uint16) error {
 	if streamID == "" {
 		return errors.New("stream id is required")
 	}
 	if browserConn == nil {
 		return errors.New("browser terminal connection is required")
 	}
+	tmuxSocketPath = strings.TrimSpace(tmuxSocketPath)
+	if tmuxSocketPath == "" {
+		return errors.New("tmux socket path is required")
+	}
 
 	pending := &pendingStream{
 		browserConn: browserConn,
+		workerID:    workerID,
 		done:        make(chan struct{}),
 	}
 
@@ -129,11 +137,12 @@ func (svc *WorkerTerminalService) OpenStream(streamID, workerID string, browserC
 	svc.mu.Unlock()
 
 	payload, err := json.Marshal(terminalOpenMessage{
-		Type:     "terminal-open",
-		StreamID: streamID,
-		JobID:    jobID,
-		Cols:     cols,
-		Rows:     rows,
+		Type:           "terminal-open",
+		StreamID:       streamID,
+		JobID:          jobID,
+		TmuxSocketPath: tmuxSocketPath,
+		Cols:           cols,
+		Rows:           rows,
 	})
 	if err != nil {
 		svc.CancelStream(streamID, fmt.Errorf("marshal terminal open: %w", err))
@@ -207,6 +216,24 @@ func (svc *WorkerTerminalService) CancelStream(streamID string, err error) {
 		close(pending.done)
 	}
 	svc.mu.Unlock()
+}
+
+// FailStream cancels a pending stream only when it belongs to workerID. It is
+// used for terminal-error messages received on that worker's control channel.
+func (svc *WorkerTerminalService) FailStream(streamID, workerID string, err error) bool {
+	if err == nil {
+		err = errors.New("worker terminal open failed")
+	}
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	pending, ok := svc.pending[streamID]
+	if !ok || pending.workerID != workerID {
+		return false
+	}
+	delete(svc.pending, streamID)
+	pending.err = err
+	close(pending.done)
+	return true
 }
 
 func (svc *WorkerTerminalService) Close() {

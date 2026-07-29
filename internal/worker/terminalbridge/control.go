@@ -36,7 +36,6 @@ type ControlClient struct {
 	coordinatorURL string
 	workerID       string
 	token          string
-	tmuxSocketPath string
 	registry       JobRegistry
 	logger         *slog.Logger
 
@@ -49,14 +48,12 @@ type ControlClient struct {
 	reconnectMax time.Duration
 }
 
-// NewControlClient creates a worker control client. tmuxSocketPath may be empty
-// to use tmux's default socket.
-func NewControlClient(coordinatorURL, workerID, token, tmuxSocketPath string, registry JobRegistry) *ControlClient {
+// NewControlClient creates a worker control client.
+func NewControlClient(coordinatorURL, workerID, token string, registry JobRegistry) *ControlClient {
 	return &ControlClient{
 		coordinatorURL: strings.TrimSpace(coordinatorURL),
 		workerID:       strings.TrimSpace(workerID),
 		token:          strings.TrimSpace(token),
-		tmuxSocketPath: strings.TrimSpace(tmuxSocketPath),
 		registry:       registry,
 		logger:         slog.Default(),
 		reconnectMin:   controlReconnectMin,
@@ -65,11 +62,12 @@ func NewControlClient(coordinatorURL, workerID, token, tmuxSocketPath string, re
 }
 
 type controlMessage struct {
-	Type     string `json:"type"`
-	StreamID string `json:"stream_id"`
-	JobID    string `json:"job_id"`
-	Cols     uint16 `json:"cols"`
-	Rows     uint16 `json:"rows"`
+	Type           string `json:"type"`
+	StreamID       string `json:"stream_id"`
+	JobID          string `json:"job_id"`
+	TmuxSocketPath string `json:"tmux_socket_path"`
+	Cols           uint16 `json:"cols"`
+	Rows           uint16 `json:"rows"`
 }
 
 type terminalError struct {
@@ -154,8 +152,15 @@ func (c *ControlClient) readControl(ctx context.Context, conn *websocket.Conn) e
 
 		message.StreamID = strings.TrimSpace(message.StreamID)
 		message.JobID = strings.TrimSpace(message.JobID)
+		message.TmuxSocketPath = strings.TrimSpace(message.TmuxSocketPath)
 		if c.registry == nil || !c.registry.Has(message.JobID) {
 			if err := c.writeTerminalError(ctx, conn, message.StreamID, "job not active"); err != nil {
+				c.logger.WarnContext(ctx, "write terminal error", "stream_id", message.StreamID, "job_id", message.JobID, "error", err)
+			}
+			continue
+		}
+		if message.TmuxSocketPath == "" {
+			if err := c.writeTerminalError(ctx, conn, message.StreamID, "terminal socket path unavailable"); err != nil {
 				c.logger.WarnContext(ctx, "write terminal error", "stream_id", message.StreamID, "job_id", message.JobID, "error", err)
 			}
 			continue
@@ -181,7 +186,7 @@ func (c *ControlClient) openTerminal(ctx context.Context, controlConn *websocket
 		return
 	}
 
-	command := terminal.TmuxAttachCommand(terminal.TmuxSessionNameForJob(message.JobID), c.tmuxSocketPath)
+	command := terminal.TmuxAttachCommand(terminal.TmuxSessionNameForJob(message.JobID), message.TmuxSocketPath)
 	cmd := exec.Command(command[0], command[1:]...)
 	// TODO: Replace this local filtering with terminal.TmuxClientEnv once that
 	// helper is exported from internal/terminal.

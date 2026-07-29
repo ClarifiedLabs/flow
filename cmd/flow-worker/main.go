@@ -174,7 +174,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	os.Unsetenv("FLOW_WORKER_JOIN_TOKEN")
 
 	jobRegistry := executionJobRegistry{}
-	controlClient := terminalbridge.NewControlClient(cfg.CoordinatorURL, cfg.WorkerID, cfg.Token, cfg.Tmux.SocketPath, jobRegistry)
+	controlClient := terminalbridge.NewControlClient(cfg.CoordinatorURL, cfg.WorkerID, cfg.Token, jobRegistry)
 	controlCtx, controlCancel := context.WithCancel(context.Background())
 	defer controlCancel()
 	go func() {

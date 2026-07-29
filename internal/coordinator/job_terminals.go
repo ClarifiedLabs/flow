@@ -13,19 +13,22 @@ import (
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
-func (s *SessionService) RegisterJobTerminal(ctx context.Context, jobID string, leaseID string, tmuxSocketPaths ...string) (JobTerminal, error) {
+func (s *SessionService) RegisterJobTerminal(ctx context.Context, jobID string, leaseID string, tmuxSocketPath string) (JobTerminal, error) {
 	jobID = strings.TrimSpace(jobID)
 	leaseID = strings.TrimSpace(leaseID)
+	tmuxSocketPath = strings.TrimSpace(tmuxSocketPath)
 	if jobID == "" {
 		return JobTerminal{}, errors.New("job id is required")
 	}
 	if leaseID == "" {
 		return JobTerminal{}, errors.New("lease id is required")
 	}
+	if tmuxSocketPath == "" {
+		return JobTerminal{}, errors.New("tmux socket path is required")
+	}
 	if err := s.validateLiveJobLease(ctx, jobID, leaseID); err != nil {
 		return JobTerminal{}, err
 	}
-	tmuxSocketPath := firstOptionalString(tmuxSocketPaths)
 	now := s.now().UTC()
 	if _, err := s.db.ExecContext(ctx, `
 INSERT INTO job_terminals (
@@ -216,11 +219,4 @@ func jobTerminalLoginPath(jobID string, token string) string {
 	query := url.Values{}
 	query.Set("token", token)
 	return terminal.JobTerminalProxyPath(jobID) + "-login?" + query.Encode()
-}
-
-func firstOptionalString(values []string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	return strings.TrimSpace(values[0])
 }
