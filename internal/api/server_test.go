@@ -1440,7 +1440,9 @@ func TestBoardCurrentStepUsesFrozenWorkflowSnapshot(t *testing.T) {
 	if _, err := fixture.Bundle.WorkflowRuns.MarkNodeRunning(ctx, nodeRunID); err != nil {
 		t.Fatalf("mark current node running: %v", err)
 	}
-	assertCurrentStep(coordinator.LaneStateWorking)
+	// Advancing the run enqueued an author job that no worker has claimed, so
+	// the derived lane state is awaiting_worker rather than working.
+	assertCurrentStep(coordinator.LaneStateAwaitingWorker)
 }
 
 func TestBoardCurrentStepToleratesMissingAndMalformedRunData(t *testing.T) {

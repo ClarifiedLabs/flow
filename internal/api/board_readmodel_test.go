@@ -282,6 +282,70 @@ func TestEpicRollupReportsMembersAndCriticalPath(t *testing.T) {
 	}
 }
 
+func TestBoardExposesAwaitingWorkerLaneState(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{Title: "Waiting on a worker"}, http.StatusCreated, &created)
+	taskID := created.Task.ID
+
+	// Park the task in progress on an active agent node whose author job is
+	// queued: the board must say awaiting_worker, not working.
+	if _, err := fixture.DB.ExecContext(ctx, `UPDATE tasks SET lifecycle_state = 'in_progress' WHERE id = ?`, taskID); err != nil {
+		t.Fatalf("mark task in progress: %v", err)
+	}
+	if _, err := fixture.DB.ExecContext(ctx, `
+INSERT INTO workflow_runs (
+	id, task_id, run_sequence, flow_snapshot_json, state, current_node_key,
+	current_node_run_id, transition_budget, created_at, started_at
+) VALUES ('wr-await', ?, 1, '{}', 'running', 'author', 'nr-await', 10,
+	'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, taskID); err != nil {
+		t.Fatalf("insert workflow run: %v", err)
+	}
+	if _, err := fixture.DB.ExecContext(ctx, `
+INSERT INTO workflow_node_runs (
+	id, workflow_run_id, node_key, visit, attempt, state, created_at, started_at
+) VALUES ('nr-await', 'wr-await', 'author', 1, 1, 'running',
+	'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("insert workflow node run: %v", err)
+	}
+	if _, err := fixture.DB.ExecContext(ctx, `
+INSERT INTO jobs (
+	id, task_id, workflow_run_id, node_run_id, role, state, capacity_bucket,
+	created_at, updated_at
+) VALUES ('j-await', ?, 'wr-await', 'nr-await', 'author', 'queued',
+	'persistent_agent', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, taskID); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+
+	board := fetchProjectBoard(t, fixture)
+	if lane := board.LaneStates[taskID]; lane != coordinator.LaneStateAwaitingWorker {
+		t.Fatalf("per-project lane state = %q, want %q", lane, coordinator.LaneStateAwaitingWorker)
+	}
+
+	var aggregate aggregateBoardResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/board", nil, http.StatusOK, &aggregate)
+	var aggregateLane coordinator.LaneState
+	for _, projectBoard := range aggregate.Boards {
+		if projectBoard.ProjectID == fixture.Project.ID {
+			aggregateLane = projectBoard.LaneStates[taskID]
+		}
+	}
+	if aggregateLane != coordinator.LaneStateAwaitingWorker {
+		t.Fatalf("aggregate lane state = %q, want %q", aggregateLane, coordinator.LaneStateAwaitingWorker)
+	}
+
+	// The sidebar keeps counting the task as in progress: it is not blocked,
+	// awaiting-worker is a refinement of working, not a new chip.
+	var sidebar sidebarResponse
+	doJSONRequest(t, fixture.Server, http.MethodGet, "/v2/sidebar", nil, http.StatusOK, &sidebar)
+	if sidebar.Board.InProgress != 1 || sidebar.Board.Blocked != 0 {
+		t.Fatalf("sidebar board counts = %+v, want one in-progress task", sidebar.Board)
+	}
+}
+
 // TestBoardCardNamesItsUnresolvedBlocker covers the on-card "waiting on"
 // read model: a scheduled task with a live blocks blocker carries the
 // blocker's id and title, and a task with no blocker carries none.

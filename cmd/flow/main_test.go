@@ -926,10 +926,45 @@ func TestPrintBoardAnnotatesSubStateAndBlocked(t *testing.T) {
 		"scheduled:\n" +
 		"  t-demo-0002\tscheduled\tQueued\n" +
 		"in_progress:\n" +
-		"  t-demo-0003\tin_progress\tWorking\t[working]\n" +
+		"  t-demo-0003\tin_progress\tWorking\n" +
 		"  t-demo-0004\tin_progress\tNeeds input\t[blocked]\t[question]\n"
 	if out.String() != want {
 		t.Fatalf("board output = %q, want %q", out.String(), want)
+	}
+}
+
+func TestPrintBoardAnnotatesAwaitingWorker(t *testing.T) {
+	inProgress := coordinator.LifecycleInProgress
+	result := coordinator.BoardResult{
+		Board: coordinator.Board{
+			InProgress: []coordinator.Task{
+				{ID: "t-demo-0001", State: &inProgress, Title: "Queued job"},
+				{ID: "t-demo-0002", State: &inProgress, Title: "Running job"},
+			},
+		},
+		LaneStates: map[string]coordinator.LaneState{
+			"t-demo-0001": coordinator.LaneStateAwaitingWorker,
+			"t-demo-0002": coordinator.LaneStateWorking,
+		},
+	}
+
+	var out bytes.Buffer
+	printBoard(&out, result)
+
+	var awaitingLine, workingLine string
+	for _, line := range strings.Split(out.String(), "\n") {
+		switch {
+		case strings.Contains(line, "t-demo-0001"):
+			awaitingLine = line
+		case strings.Contains(line, "t-demo-0002"):
+			workingLine = line
+		}
+	}
+	if !strings.Contains(awaitingLine, "[awaiting worker]") {
+		t.Fatalf("awaiting-worker line = %q, want the [awaiting worker] annotation", awaitingLine)
+	}
+	if workingLine != "  t-demo-0002\tin_progress\tRunning job" {
+		t.Fatalf("working line = %q, want no annotation for a working task", workingLine)
 	}
 }
 

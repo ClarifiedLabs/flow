@@ -582,6 +582,181 @@ func createTasks(t *testing.T, service *TaskService, titles ...string) []Task {
 	return tasks
 }
 
+// seedActiveWorkflowRun inserts an active workflow run parked on the given
+// node, mirroring the shape the executor leaves an agent node in while its
+// author job is outstanding.
+func seedActiveWorkflowRun(t *testing.T, database *sql.DB, taskID, runID, nodeKey, nodeRunID string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO workflow_runs (
+	id, task_id, run_sequence, flow_snapshot_json, state, current_node_key,
+	current_node_run_id, transition_budget, created_at, started_at
+) VALUES (?, ?, 1, '{}', 'running', ?, ?, 10, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		runID, taskID, nodeKey, nodeRunID); err != nil {
+		t.Fatalf("insert workflow run: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO workflow_node_runs (
+	id, workflow_run_id, node_key, visit, attempt, state, created_at, started_at
+) VALUES (?, ?, ?, 1, 1, 'running', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		nodeRunID, runID, nodeKey); err != nil {
+		t.Fatalf("insert workflow node run: %v", err)
+	}
+}
+
+func seedJobOnNodeRun(t *testing.T, database *sql.DB, jobID, taskID, runID, nodeRunID, state string) {
+	t.Helper()
+	if _, err := database.ExecContext(context.Background(), `
+INSERT INTO jobs (
+	id, task_id, workflow_run_id, node_run_id, role, state, capacity_bucket,
+	created_at, updated_at
+) VALUES (?, ?, ?, ?, 'author', ?, 'persistent_agent', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		jobID, taskID, runID, nodeRunID, state); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+}
+
+func markTaskInProgress(t *testing.T, database *sql.DB, taskID string) {
+	t.Helper()
+	if _, err := database.ExecContext(context.Background(), `
+UPDATE tasks SET lifecycle_state = 'in_progress' WHERE id = ?`, taskID); err != nil {
+		t.Fatalf("mark task in progress: %v", err)
+	}
+}
+
+func TestBoardResultDerivesAwaitingWorkerFromLiveJobState(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name     string
+		jobState string // empty seeds no job at all
+		want     LaneState
+	}{
+		{"queued job awaits a worker", "queued", LaneStateAwaitingWorker},
+		{"claimed job awaits a worker", "claimed", LaneStateAwaitingWorker},
+		{"running job is working", "running", LaneStateWorking},
+		{"terminal job is working", "finished", LaneStateWorking},
+		{"no live job is working", "", LaneStateWorking},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
+			task := createTasks(t, service, "awaiting worker")[0]
+			markTaskInProgress(t, store.DB(), task.ID)
+			seedActiveWorkflowRun(t, store.DB(), task.ID, "wr-"+task.ID, "author", "nr-"+task.ID)
+			if tc.jobState != "" {
+				seedJobOnNodeRun(t, store.DB(), "j-"+task.ID, task.ID, "wr-"+task.ID, "nr-"+task.ID, tc.jobState)
+			}
+
+			result, err := service.BoardResult(ctx)
+			if err != nil {
+				t.Fatalf("board result: %v", err)
+			}
+			if got := result.LaneStates[task.ID]; got != tc.want {
+				t.Fatalf("lane state = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBoardResultAwaitingWorkerUsesCurrentVisitNotStaleAttempt guards against
+// selecting the wrong node run on a revisit. RetryExecution bumps attempt on the
+// earlier visit's node run, so a retried first visit (attempt 2) carries a
+// higher attempt than a fresh second visit (attempt 1). The board must report
+// the live job on the current visit (workflow_runs.current_node_run_id), not the
+// stale, higher-attempt earlier visit.
+func TestBoardResultAwaitingWorkerUsesCurrentVisitNotStaleAttempt(t *testing.T) {
+	ctx := context.Background()
+	store, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
+	task := createTasks(t, service, "revisited node")[0]
+	markTaskInProgress(t, store.DB(), task.ID)
+
+	db := store.DB()
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO workflow_runs (
+	id, task_id, run_sequence, flow_snapshot_json, state, current_node_key,
+	current_node_run_id, transition_budget, created_at, started_at
+) VALUES ('wr-revisit', ?, 1, '{}', 'running', 'author', 'nr-visit-2', 10,
+	'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, task.ID); err != nil {
+		t.Fatalf("insert workflow run: %v", err)
+	}
+	// Visit 1 was retried (attempt 2) and then completed; it has no live job.
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO workflow_node_runs (
+	id, workflow_run_id, node_key, visit, attempt, state, created_at, started_at, completed_at
+) VALUES
+	('nr-visit-1', 'wr-revisit', 'author', 1, 2, 'succeeded',
+		'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z'),
+	('nr-visit-2', 'wr-revisit', 'author', 2, 1, 'running',
+		'2026-01-01T00:02:00Z', '2026-01-01T00:02:00Z', NULL)`); err != nil {
+		t.Fatalf("insert workflow node runs: %v", err)
+	}
+	// A terminal job on the stale earlier visit must not be mistaken for a live
+	// one, and the live queued job sits on the current visit.
+	seedJobOnNodeRun(t, db, "j-visit-1", task.ID, "wr-revisit", "nr-visit-1", "finished")
+	seedJobOnNodeRun(t, db, "j-visit-2", task.ID, "wr-revisit", "nr-visit-2", "queued")
+
+	result, err := service.BoardResult(ctx)
+	if err != nil {
+		t.Fatalf("board result: %v", err)
+	}
+	if got := result.LaneStates[task.ID]; got != LaneStateAwaitingWorker {
+		t.Fatalf("lane state = %q, want %q", got, LaneStateAwaitingWorker)
+	}
+}
+
+func TestBoardResultHeldAndBlockedOutrankAwaitingWorker(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("open wait stays blocked with a queued job", func(t *testing.T) {
+		store, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
+		task := createTasks(t, service, "blocked task")[0]
+		markTaskInProgress(t, store.DB(), task.ID)
+		seedActiveWorkflowRun(t, store.DB(), task.ID, "wr-blocked", "author", "nr-blocked")
+		seedJobOnNodeRun(t, store.DB(), "j-blocked", task.ID, "wr-blocked", "nr-blocked", "queued")
+		if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO workflow_waits (
+	id, workflow_run_id, node_run_id, kind, state, created_by, created_at
+) VALUES ('ww-1', 'wr-blocked', 'nr-blocked', 'human_gate', 'open', 'system', '2026-01-01T00:00:00Z')`); err != nil {
+			t.Fatalf("insert workflow wait: %v", err)
+		}
+
+		result, err := service.BoardResult(ctx)
+		if err != nil {
+			t.Fatalf("board result: %v", err)
+		}
+		if got := result.LaneStates[task.ID]; got != LaneStateBlocked {
+			t.Fatalf("lane state = %q, want %q", got, LaneStateBlocked)
+		}
+		if !slices.Contains(result.BlockedIDs, task.ID) {
+			t.Fatalf("blocked ids = %v, want %s", result.BlockedIDs, task.ID)
+		}
+	})
+
+	t.Run("system hold stays held with a queued job", func(t *testing.T) {
+		store, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
+		task := createTasks(t, service, "held task")[0]
+		markTaskInProgress(t, store.DB(), task.ID)
+		seedActiveWorkflowRun(t, store.DB(), task.ID, "wr-held", "author", "nr-held")
+		seedJobOnNodeRun(t, store.DB(), "j-held", task.ID, "wr-held", "nr-held", "queued")
+		if _, err := store.DB().ExecContext(ctx, `
+UPDATE workflow_runs SET held_at = '2026-01-01T00:00:00Z', held_by = ? WHERE id = 'wr-held'`,
+			string(ActorSystem)); err != nil {
+			t.Fatalf("hold workflow run: %v", err)
+		}
+
+		result, err := service.BoardResult(ctx)
+		if err != nil {
+			t.Fatalf("board result: %v", err)
+		}
+		if got := result.LaneStates[task.ID]; got != LaneStateHeld {
+			t.Fatalf("lane state = %q, want %q", got, LaneStateHeld)
+		}
+	})
+}
+
 func createTwoTasks(t *testing.T, service *TaskService, firstTitle, secondTitle string) (Task, Task) {
 	t.Helper()
 

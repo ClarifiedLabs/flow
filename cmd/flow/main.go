@@ -3491,7 +3491,10 @@ func printBoardLane(out io.Writer, name string, tasks []coordinator.Task, states
 	fmt.Fprintf(out, "%s:\n", name)
 	for _, task := range tasks {
 		annotations := ""
-		if state, ok := states[task.ID]; ok && string(state) != taskLifecycleLabel(task) {
+		// The default working lane is not an annotation: a working in-progress
+		// task shows no bracket. Only genuine substates that differ from the
+		// lifecycle label (awaiting_worker, blocked, held) annotate the line.
+		if state, ok := states[task.ID]; ok && state != coordinator.LaneStateWorking && string(state) != taskLifecycleLabel(task) {
 			annotations += "\t[" + strings.ReplaceAll(string(state), "_", " ") + "]"
 		}
 		if reason := waitReasons[task.ID]; reason != "" {

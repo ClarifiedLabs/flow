@@ -199,7 +199,12 @@ const (
 	LaneStateUnscheduled      LaneState = "unscheduled"
 	LaneStateScheduled        LaneState = "scheduled"
 	LaneStateWorking          LaneState = "working"
-	LaneStateBlocked          LaneState = "blocked"
+	// LaneStateAwaitingWorker marks an in-progress task whose active workflow
+	// node has enqueued an author job that no worker has claimed yet. It is
+	// derived from the live job state, not stored: the board says "Working"
+	// while the job sits queued, so this surfaces the real stall.
+	LaneStateAwaitingWorker LaneState = "awaiting_worker"
+	LaneStateBlocked        LaneState = "blocked"
 	// LaneStateHeld is an operator holding the run. It outranks blocked: who
 	// owns the task is more useful than what the task was waiting on.
 	LaneStateHeld LaneState = "held"
@@ -1021,7 +1026,67 @@ SELECT
 		}
 	}
 
+	if err := s.applyAwaitingWorkerStates(ctx, result.LaneStates); err != nil {
+		return BoardResult{}, err
+	}
+
 	return result, nil
+}
+
+// applyAwaitingWorkerStates refines the working lane state for in-progress
+// tasks whose active workflow node has a live author job no worker has claimed
+// yet. It runs one batched lookup across every task currently classified
+// working: each task's active workflow run is joined to its current node run
+// (the one identified by workflow_runs.current_node_run_id, i.e. the current
+// visit) and then to any live job on that node run. A live job in state queued
+// or claimed means the task is actually awaiting a worker; a running job (or no
+// live job, e.g. a synchronous merge/checks node) stays working. Selecting by
+// current_node_run_id rather than the greatest attempt matters on a revisit:
+// RetryExecution bumps attempt on the earlier visit's node run, so a retried
+// earlier visit can carry a higher attempt than the fresh current visit; the
+// current_node_run_id always points at the live visit. Held and blocked tasks
+// never reach here, so those states keep precedence regardless of job state.
+func (s *TaskService) applyAwaitingWorkerStates(ctx context.Context, laneStates map[string]LaneState) error {
+	workingIDs := make([]string, 0, len(laneStates))
+	for taskID, state := range laneStates {
+		if state == LaneStateWorking {
+			workingIDs = append(workingIDs, taskID)
+		}
+	}
+	if len(workingIDs) == 0 {
+		return nil
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(workingIDs)), ",")
+	args := make([]any, len(workingIDs))
+	for i, id := range workingIDs {
+		args[i] = id
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+SELECT r.task_id, j.state
+FROM workflow_runs r
+JOIN workflow_node_runs n ON n.id = r.current_node_run_id
+JOIN jobs j ON j.node_run_id = n.id AND j.state IN ('queued', 'claimed', 'running')
+WHERE r.task_id IN (`+placeholders+`)
+	AND r.state IN ('scheduled', 'running', 'waiting')`, args...)
+	if err != nil {
+		return fmt.Errorf("query live jobs for awaiting-worker lane states: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var taskID, jobState string
+		if err := rows.Scan(&taskID, &jobState); err != nil {
+			return fmt.Errorf("scan live job lane state: %w", err)
+		}
+		if jobState == "queued" || jobState == "claimed" {
+			laneStates[taskID] = LaneStateAwaitingWorker
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate live job lane states: %w", err)
+	}
+	return nil
 }
 
 func pendingHumanReview(ctx context.Context, db *sql.DB, taskID string) (bool, error) {
