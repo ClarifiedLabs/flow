@@ -8,6 +8,7 @@ import { escapeAttr, escapeHTML } from "../html.js";
 import { value } from "../normalize.js";
 import { define, FlowElement } from "./base.js";
 import "./run-spine.js";
+import "./task-relations.js";
 
 export function renderTaskRail(model) {
   if (!model) return "";
@@ -22,6 +23,7 @@ export function renderTaskRail(model) {
     <flow-run-spine></flow-run-spine>
     ${renderRunControls(model, projectAttr)}
     ${renderFacts(model)}
+    <flow-task-relations></flow-task-relations>
     ${model.epicID ? `<a class="epic" href="${escapeAttr(taskHref(model.projectID, model.epicID))}/epic" data-link><span class="caption">Epic</span>${escapeHTML(model.epicID)}</a>` : ""}
   `;
 }
@@ -114,9 +116,24 @@ export class FlowTaskRail extends FlowElement {
     return renderTaskRail(model);
   }
 
+  // The base paint skips the write — and with it afterPaint — when the markup
+  // is unchanged, but a refresh that only changed a blocker's state leaves the
+  // rail markup identical while the relations child still needs the fresh
+  // model. Forward on every paint attempt, not just on writes.
+  paint() {
+    super.paint();
+    this.syncChildren();
+  }
+
   afterPaint() {
+    this.syncChildren();
+  }
+
+  syncChildren() {
     const spine = this.querySelector("flow-run-spine");
     if (spine) spine.data = this.data;
+    const relations = this.querySelector("flow-task-relations");
+    if (relations) relations.data = this.data;
   }
 }
 

@@ -287,6 +287,7 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
     review,
     sessions: value(detail, "sessions", "Sessions") || [],
     relations: value(detail, "relations", "Relations") || [],
+    relationGroups: relationGroups(value(detail, "relations", "Relations") || [], value(task, "id", "ID")),
     attachments: value(detail, "attachments", "Attachments") || [],
     epicID: epicParent(value(detail, "relations", "Relations") || [], value(task, "id", "ID")),
   };
@@ -302,6 +303,76 @@ export function epicParent(relations, taskID) {
     if (kind === "parent_of" && target === taskID) return source;
   }
   return "";
+}
+
+// RELATION_GROUPS is the order the relations panel lists its sections in. Each
+// group is one direction of one relation kind, read from the current task's
+// point of view.
+export const RELATION_GROUPS = [
+  { key: "parent", label: "Parent" },
+  { key: "children", label: "Children" },
+  { key: "blocks", label: "Blocks" },
+  { key: "blockedBy", label: "Blocked by" },
+  { key: "related", label: "Related" },
+];
+
+// relationGroups turns the flat, direction-agnostic relation rows the API
+// returns into the five lists a reader expects, each holding the *other* task
+// relative to the one being viewed. A relation row names a source and a target;
+// which side is "the other task" flips depending on which side the current task
+// is on, so each group records the direction too — the add/remove controls need
+// it to reconstruct the exact row the server stores.
+export function relationGroups(relations, taskID) {
+  const groups = {};
+  for (const group of RELATION_GROUPS) groups[group.key] = [];
+  const id = String(taskID || "");
+
+  for (const relation of relations || []) {
+    const kind = String(value(relation, "kind", "Kind") || "");
+    const source = String(value(relation, "source_task_id", "SourceTaskID") || "");
+    const target = String(value(relation, "target_task_id", "TargetTaskID") || "");
+    const sourceTitle = String(value(relation, "source_title", "SourceTitle") || "");
+    const targetTitle = String(value(relation, "target_title", "TargetTitle") || "");
+
+    // The current task is the source: the other task is the target.
+    if (source === id) {
+      if (kind === "parent_of") {
+        groups.children.push(entry(target, targetTitle, kind, "source"));
+      } else if (kind === "blocks") {
+        groups.blocks.push(entry(target, targetTitle, kind, "source"));
+      } else if (kind === "related_to") {
+        groups.related.push(entry(target, targetTitle, kind, "source"));
+      }
+      continue;
+    }
+
+    // The current task is the target: the other task is the source.
+    if (target === id) {
+      if (kind === "parent_of") {
+        groups.parent.push(entry(source, sourceTitle, kind, "target"));
+      } else if (kind === "blocks") {
+        groups.blockedBy.push(entry(source, sourceTitle, kind, "target"));
+      } else if (kind === "related_to") {
+        groups.related.push(entry(source, sourceTitle, kind, "target"));
+      }
+    }
+  }
+  return groups;
+}
+
+// entry is one row in a relation group. direction says which side of the stored
+// relation the current task sits on, so the remove control can reconstruct the
+// exact source/target pair the server stores.
+function entry(taskID, title, kind, direction) {
+  return {
+    taskID,
+    title: title || taskID,
+    kind,
+    direction,
+    // A blocker only stops mattering once it is done. The element resolves the
+    // blocker's lifecycle state and sets this; the grouping itself never knows.
+    unresolved: false,
+  };
 }
 
 // nowCardModel decides whether the page has something to say at the top. It is

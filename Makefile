@@ -27,6 +27,7 @@ test:
 js-test:
 	node --test internal/web/assets/app.test.mjs
 	node --test internal/web/assets/elements.test.mjs
+	node --test internal/web/assets/task-relations.test.mjs
 	node internal/web/assets/harness_models.test.mjs
 
 release:

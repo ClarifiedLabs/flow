@@ -54,10 +54,13 @@ export async function apiPatch(path, body) {
   });
 }
 
-export async function apiDelete(path) {
+export async function apiDelete(path, body) {
   return apiFetch(path, {
     method: "DELETE",
-    headers: { "X-Flow-CSRF": readCookie("flow_ui_csrf") },
+    headers: body === undefined
+      ? { "X-Flow-CSRF": readCookie("flow_ui_csrf") }
+      : { "Content-Type": "application/json", "X-Flow-CSRF": readCookie("flow_ui_csrf") },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
 }
 
@@ -90,6 +93,9 @@ export async function apiFetch(path, options) {
     }
     throw new Error(message);
   }
+  // Some mutating endpoints (task relation add/remove) answer 204 with no body;
+  // parsing that as JSON would throw after the request already succeeded.
+  if (response.status === 204) return null;
   return response.json();
 }
 

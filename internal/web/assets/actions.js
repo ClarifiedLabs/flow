@@ -219,6 +219,17 @@ export const ACTIONS = {
     await app.refresh();
     return "Thread claimed";
   },
+
+  // relationRemove unlinks one stored relation row. The button carries the row's
+  // source task (the path) and the target/kind (the body), so it removes the
+  // exact relation regardless of which side the viewed task sits on.
+  async relationRemove(app, element, dataset) {
+    await apiDelete(`${taskAPIBase(dataset.project)}/${encodeURIComponent(dataset.relationRemove)}/relations`, {
+      target_task_id: dataset.target,
+      kind: dataset.kind,
+    });
+    await app.refresh();
+  },
 };
 
 function releaseMessage(taskID, edge) {

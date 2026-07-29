@@ -82,6 +82,25 @@ export const FORMS = {
     await app.refresh();
     return "Reply posted";
   },
+
+  // relationAddForm links the viewed task (the relation source) to a target task
+  // with the chosen kind. The server defaults the source to the task in the
+  // path, so the payload only needs the target and the kind.
+  async relationAddForm(app, form) {
+    const taskID = String(form.dataset.relationAddForm || "").trim();
+    const kind = String(form.elements.kind?.value || "").trim();
+    const targetTaskID = String(form.elements.target_task_id?.value || "").trim();
+    if (!targetTaskID) {
+      app.setStatus("Target task ID is required");
+      return;
+    }
+    await apiPost(`${taskAPIBase(form.dataset.project)}/${encodeURIComponent(taskID)}/relations`, {
+      target_task_id: targetTaskID,
+      kind,
+    });
+    form.reset();
+    await app.refresh();
+  },
 };
 
 const FORM_PENDING_LABELS = {

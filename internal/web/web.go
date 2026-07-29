@@ -32,6 +32,7 @@ var cssModules = []struct{ Name, Scope string }{
 	{"board-table.module.css", "flow-board-table"},
 	{"task-detail.module.css", "flow-task-detail"},
 	{"task-rail.module.css", "flow-task-rail"},
+	{"task-relations.module.css", "flow-task-relations"},
 	{"run-spine.module.css", "flow-run-spine"},
 	{"now-card.module.css", "flow-now-card"},
 	{"held-panel.module.css", "flow-held-panel"},

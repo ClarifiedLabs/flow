@@ -1,0 +1,192 @@
+:host {
+  display: block;
+}
+
+.relations {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.caption {
+  font-size: var(--text-label);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.rel-empty {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  background: var(--empty-bg);
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+.rel-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rel-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: var(--text-label);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.rel-count {
+  font-size: var(--text-nano);
+  color: var(--ink-2);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 5px;
+  line-height: 1.5;
+}
+
+.rel-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.rel-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  padding: 5px 7px;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease;
+}
+
+.rel-row:hover {
+  border-color: var(--line-2);
+}
+
+/* An unfinished blocker is the row that matters: it carries the blocked tint so
+   the eye lands on it before reading a single title. */
+.rel-row.is-unresolved {
+  background: var(--st-blocked-bg);
+  border-color: var(--st-blocked);
+}
+
+.rel-link {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+  text-decoration: none;
+}
+
+.rel-title {
+  font-size: var(--text-quiet);
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rel-link:hover .rel-title {
+  color: var(--accent);
+}
+
+.rel-id {
+  font-size: var(--text-nano);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rel-flag {
+  flex: none;
+  font-size: var(--text-nano);
+  font-weight: 600;
+  letter-spacing: var(--track-badge);
+  text-transform: uppercase;
+  color: var(--st-blocked);
+  background: var(--st-blocked-bg);
+  border: 1px solid var(--st-blocked);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+.rel-remove {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-ui);
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease,
+    background 120ms ease;
+}
+
+.rel-remove:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: var(--st-danger-bg);
+}
+
+.rel-add {
+  display: flex;
+  gap: 5px;
+  margin-top: 2px;
+}
+
+.rel-add select,
+.rel-add input {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--ink);
+  padding: 4px 7px;
+  font-size: var(--text-quiet);
+}
+
+.rel-add select {
+  flex: none;
+}
+
+.rel-add input {
+  flex: 1;
+}
+
+.rel-add select:focus,
+.rel-add input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.rel-add .button {
+  flex: none;
+  padding: 4px 9px;
+  font-size: var(--text-quiet);
+}
