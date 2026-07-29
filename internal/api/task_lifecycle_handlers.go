@@ -123,7 +123,7 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 
 	if len(parts) == 2 && parts[1] == "relations" {
 		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
-			writeError(w, http.StatusForbidden, "forbidden", "relation updates require owner or console token")
+			writeError(w, http.StatusForbidden, "forbidden", "relation operations require owner or console token")
 			return
 		}
 		s.handleTaskRelations(w, r, principal, taskID)
@@ -568,8 +568,18 @@ func (s *projectServer) handleEditTask(w http.ResponseWriter, r *http.Request, t
 }
 
 func (s *projectServer) handleTaskRelations(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
-	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost && r.Method != http.MethodDelete {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method is not allowed")
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		relations, err := s.tasks.RelationsForTask(r.Context(), taskID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list_relations_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, contract.TaskRelationsResponse{Relations: relations})
 		return
 	}
 

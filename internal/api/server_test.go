@@ -2189,6 +2189,37 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodGet, "/v2/console", nil, http.StatusUnauthorized, nil)
 }
 
+func TestGetTaskRelationsAPI(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	source, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Source"})
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	target, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Target"})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	if err := fixture.Tasks.LinkTasks(ctx, source.ID, target.ID, coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
+		t.Fatalf("link tasks: %v", err)
+	}
+
+	var sourceRelations contract.TaskRelationsResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks/"+source.ID+"/relations", nil, http.StatusOK, &sourceRelations)
+	if len(sourceRelations.Relations) != 1 || sourceRelations.Relations[0].SourceTaskID != source.ID || sourceRelations.Relations[0].TargetTaskID != target.ID {
+		t.Fatalf("source relations = %+v, want one blocks relation", sourceRelations.Relations)
+	}
+
+	var targetRelations contract.TaskRelationsResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks/"+target.ID+"/relations", nil, http.StatusOK, &targetRelations)
+	if len(targetRelations.Relations) != 1 || targetRelations.Relations[0].SourceTaskID != source.ID {
+		t.Fatalf("target relations = %+v, want one incoming blocks relation", targetRelations.Relations)
+	}
+
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/tasks/"+target.ID+"/relations", nil, http.StatusForbidden, nil)
+}
+
 func TestTaskConsoleAPILifecycleAndScope(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()

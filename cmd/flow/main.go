@@ -454,6 +454,8 @@ func runTask(args []string, stdout, stderr io.Writer) int {
 		return runTaskLink(args[1:], stdout, stderr)
 	case "unlink":
 		return runTaskUnlink(args[1:], stdout, stderr)
+	case "relations":
+		return runTaskRelations(args[1:], stdout, stderr)
 	case "reply":
 		return runTaskReply(args[1:], stdout, stderr)
 	default:
@@ -988,6 +990,35 @@ func runTaskUnlink(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "%s\t%s\t%s\n", sourceRef, kind, targetRef)
+	return 0
+}
+
+func runTaskRelations(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("task relations", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(stderr, "usage: flow task relations [flags] TASK_ID")
+		return 2
+	}
+
+	applySessionEnvironment(apiFlags, nil)
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return 1
+	}
+	client, taskRef := scopeClientForRef(client, flags.Arg(0))
+	relations, err := client.GetTaskRelations(taskRef)
+	if err != nil {
+		fmt.Fprintf(stderr, "list relations: %v\n", err)
+		return 1
+	}
+
+	printTaskRelations(stdout, taskRef, relations)
 	return 0
 }
 
@@ -2940,6 +2971,7 @@ func printUsage(out io.Writer) {
   flow task attach TASK_ID --file PATH [--stage initial|author|reviewer|verifier]
   flow task list [--state unscheduled,scheduled,in_progress,done]
   flow task show [--project PROJECT] TASK_ID
+  flow task relations [--project PROJECT] TASK_ID
   flow task reply TASK_ID MESSAGE
   flow task schedule TASK_ID
   flow task reset|reopen|retry|workflow TASK_ID
@@ -2982,6 +3014,7 @@ func printTaskUsage(out io.Writer) {
   flow task attach [flags] TASK_ID
   flow task list
   flow task show [flags] TASK_ID
+  flow task relations [flags] TASK_ID
   flow task edit [flags] TASK_ID
   flow task reply [flags] TASK_ID [MESSAGE]
   flow task schedule [flags] TASK_ID
@@ -2994,6 +3027,7 @@ func printTaskUsage(out io.Writer) {
   flow task retry [flags] TASK_ID
   flow task link [flags] SOURCE_ID blocks|parent_of|related_to TARGET_ID
   flow task unlink [flags] SOURCE_ID blocks|parent_of|related_to TARGET_ID
+  flow task relations [flags] TASK_ID
 `)
 }
 
@@ -3411,6 +3445,16 @@ func printTaskDetail(out io.Writer, task coordinator.Task) {
 	printTaskLine(out, task)
 	if task.Body != "" {
 		fmt.Fprintf(out, "\n%s\n", task.Body)
+	}
+}
+
+func printTaskRelations(out io.Writer, taskID string, relations []coordinator.TaskRelation) {
+	if len(relations) == 0 {
+		fmt.Fprintf(out, "%s has no relations\n", taskID)
+		return
+	}
+	for _, relation := range relations {
+		fmt.Fprintf(out, "%s\t%s\t%s\n", relation.SourceTaskID, relation.Kind, relation.TargetTaskID)
 	}
 }
 

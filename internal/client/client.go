@@ -497,6 +497,14 @@ func (c *Client) UnlinkTasks(sourceTaskID string, kind coordinator.RelationKind,
 	return c.do(http.MethodDelete, c.tasksPath("/"+url.PathEscape(sourceTaskID))+"/relations", request, nil, nil)
 }
 
+func (c *Client) GetTaskRelations(id string) ([]coordinator.TaskRelation, error) {
+	var response taskRelationsResponse
+	if err := c.do(http.MethodGet, c.tasksPath("/"+url.PathEscape(id))+"/relations", nil, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Relations, nil
+}
+
 func (c *Client) ApplyReviewFollowUp(sourceTaskID string, input ApplyReviewFollowUpInput) (ApplyReviewFollowUpResult, error) {
 	var response contract.ApplyReviewFollowUpResponse
 	if err := c.do(
@@ -1787,6 +1795,7 @@ type taskResponse = contract.TaskResponse
 type tasksResponse = contract.TasksResponse
 type taskAttachmentResponse = contract.TaskAttachmentResponse
 type taskAttachmentsResponse = contract.TaskAttachmentsResponse
+type taskRelationsResponse = contract.TaskRelationsResponse
 type boardResponse = contract.BoardResponse
 type aggregateBoardResponse = contract.AggregateBoardResponse
 type consoleResponse = contract.ConsoleResponse

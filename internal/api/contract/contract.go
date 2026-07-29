@@ -276,6 +276,10 @@ type TaskAttachmentsResponse struct {
 	Attachments []coordinator.TaskAttachment `json:"attachments"`
 }
 
+type TaskRelationsResponse struct {
+	Relations []coordinator.TaskRelation `json:"relations"`
+}
+
 type BoardResponse struct {
 	Board       coordinator.Board                 `json:"board"`
 	LaneStates  map[string]coordinator.LaneState  `json:"lane_states,omitempty"`

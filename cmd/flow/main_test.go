@@ -636,6 +636,55 @@ func TestTaskRelationCommandsUseAPI(t *testing.T) {
 	}
 }
 
+func TestTaskRelationsCommandListsRelations(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ctx := context.Background()
+	fixture := newFlowTestFixture(t)
+	httpServer := httptest.NewServer(fixture.Server)
+	t.Cleanup(httpServer.Close)
+
+	source, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Source task"})
+	if err != nil {
+		t.Fatalf("create source task: %v", err)
+	}
+	target, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Target task"})
+	if err != nil {
+		t.Fatalf("create target task: %v", err)
+	}
+	if err := fixture.Tasks.LinkTasks(ctx, source.ID, target.ID, coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
+		t.Fatalf("link tasks: %v", err)
+	}
+	if err := fixture.Tasks.LinkTasks(ctx, target.ID, source.ID, coordinator.RelationRelatedTo, coordinator.ActorHuman); err != nil {
+		t.Fatalf("link related tasks: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"task", "relations", "--server", httpServer.URL, "--token", "owner-token", target.ID}, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("task relations exitCode = %d, stderr = %q", exitCode, stderr.String())
+	}
+	got := strings.TrimSpace(stdout.String())
+	want := source.ID + "\tblocks\t" + target.ID + "\n" + target.ID + "\trelated_to\t" + source.ID
+	if got != want {
+		t.Fatalf("relations output = %q, want %q", got, want)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	unrelated, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Unrelated task"})
+	if err != nil {
+		t.Fatalf("create unrelated task: %v", err)
+	}
+	exitCode = run([]string{"task", "relations", "--server", httpServer.URL, "--token", "owner-token", unrelated.ID}, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("task relations empty exitCode = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != unrelated.ID+" has no relations" {
+		t.Fatalf("empty relations output = %q", stdout.String())
+	}
+}
+
 func TestTaskCreateUploadsInitialAttachment(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Chdir(t.TempDir())
