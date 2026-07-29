@@ -87,20 +87,19 @@ func TestBridgeResizeChangesTerminalSize(t *testing.T) {
 // before the payload does. The hot burst covers output still streaming at
 // exit; the cold burst covers a prompt that prints and immediately exits.
 func TestBridgeDeliversFinalOutputBeforeExit(t *testing.T) {
-	hogs := make([]*exec.Cmd, 0, 2*runtime.NumCPU())
+	// Register cleanup right after each Start so that a failure spawning a
+	// later hog (t.Fatalf skips the rest of the test body) cannot leak the
+	// hogs that are already running.
 	for range 2 * runtime.NumCPU() {
 		hog := exec.Command("sh", "-c", "while :; do :; done")
 		if err := hog.Start(); err != nil {
 			t.Fatalf("start CPU hog: %v", err)
 		}
-		hogs = append(hogs, hog)
-	}
-	t.Cleanup(func() {
-		for _, hog := range hogs {
+		t.Cleanup(func() {
 			_ = hog.Process.Kill()
 			_, _ = hog.Process.Wait()
-		}
-	})
+		})
+	}
 
 	payload := bytes.Repeat([]byte("x"), 32<<10)
 	commands := []string{
