@@ -186,7 +186,9 @@ func installFakeTmux(t *testing.T) string {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "tmux")
 	argsPath := filepath.Join(directory, "tmux-args")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FLOW_TEST_TMUX_ARGS\"\nexec cat\n"), 0o755); err != nil {
+	// Write the args via rename so readFileEventually never observes the
+	// empty window between the shell creating the file and printf filling it.
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FLOW_TEST_TMUX_ARGS.tmp\"\nmv \"$FLOW_TEST_TMUX_ARGS.tmp\" \"$FLOW_TEST_TMUX_ARGS\"\nexec cat\n"), 0o755); err != nil {
 		t.Fatalf("write fake tmux: %v", err)
 	}
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))

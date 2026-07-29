@@ -17,6 +17,12 @@ import (
 
 const defaultReadLimit int64 = 4 << 20
 
+// ptyDrainTimeout bounds how long Run waits for the pump to forward output a
+// process wrote right before exiting. The pump normally ends on its own once
+// the last slave descriptor closes; a descendant keeping the slave open would
+// block it, so the drain is bounded before the master is forced closed.
+const ptyDrainTimeout = 500 * time.Millisecond
+
 // Bridge joins a process's PTY to a WebSocket terminal stream.
 type Bridge struct {
 	master    *os.File
@@ -53,7 +59,10 @@ type bridgeExit struct {
 }
 
 // Run copies terminal traffic until the process exits, the WebSocket closes,
-// or ctx is canceled. Run is the sole owner of cmd.Wait.
+// or ctx is canceled. Run is the sole owner of cmd.Wait. When the process
+// exits, Run first forwards any output still buffered in the terminal so the
+// tail of the session is not lost, then reports the exit status in-band and
+// closes the connection.
 func (b *Bridge) Run(ctx context.Context) error {
 	if b.master == nil {
 		return fmt.Errorf("run terminal bridge: nil PTY master")
@@ -69,10 +78,22 @@ func (b *Bridge) Run(ctx context.Context) error {
 
 	processExited := make(chan struct{})
 	processFinalized := make(chan struct{})
+	pumpDone := make(chan struct{})
 	go func() {
 		err := b.cmd.Wait()
 		close(processExited)
+
+		// Deliver output the process wrote right before exiting — its final
+		// prompt or command result — before the exit message and the close.
+		// Closing the master here instead would discard whatever the pump
+		// has not forwarded yet. A descendant keeping the slave open blocks
+		// the pump past ptyDrainTimeout, so the close below also unsticks it.
+		select {
+		case <-pumpDone:
+		case <-time.After(ptyDrainTimeout):
+		}
 		_ = b.master.Close()
+		<-pumpDone
 
 		code := b.cmd.ProcessState.ExitCode()
 		payload, _ := json.Marshal(bridgeExit{Type: "exit", Code: code})
@@ -84,7 +105,10 @@ func (b *Bridge) Run(ctx context.Context) error {
 		close(processFinalized)
 	}()
 
-	go b.copyPTYToWebSocket(ctx)
+	go func() {
+		b.copyPTYToWebSocket(ctx)
+		close(pumpDone)
+	}()
 
 	for {
 		messageType, data, err := b.conn.Read(ctx)

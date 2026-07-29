@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strconv"
 	"syscall"
 	"testing"
@@ -75,6 +76,73 @@ func TestBridgeResizeChangesTerminalSize(t *testing.T) {
 		}
 	}
 	waitBridge(t, runErr)
+}
+
+// TestBridgeDeliversFinalOutputBeforeExit is a regression test for a lost
+// session tail: the bridge used to close the PTY master and the WebSocket as
+// soon as the process exited, racing the pump and dropping output the process
+// had just written (TestBridgeResizeChangesTerminalSize flaked on this in CI).
+// The hog processes starve the scheduler the way parallel CI compilation
+// does, so without the drain the exit message and the close reliably arrive
+// before the payload does. The hot burst covers output still streaming at
+// exit; the cold burst covers a prompt that prints and immediately exits.
+func TestBridgeDeliversFinalOutputBeforeExit(t *testing.T) {
+	hogs := make([]*exec.Cmd, 0, 2*runtime.NumCPU())
+	for range 2 * runtime.NumCPU() {
+		hog := exec.Command("sh", "-c", "while :; do :; done")
+		if err := hog.Start(); err != nil {
+			t.Fatalf("start CPU hog: %v", err)
+		}
+		hogs = append(hogs, hog)
+	}
+	t.Cleanup(func() {
+		for _, hog := range hogs {
+			_ = hog.Process.Kill()
+			_, _ = hog.Process.Wait()
+		}
+	})
+
+	payload := bytes.Repeat([]byte("x"), 32<<10)
+	commands := []string{
+		`head -c 32768 /dev/zero | tr '\000' x; exit 0`,
+		`sleep 0.2; head -c 32768 /dev/zero | tr '\000' x; exit 0`,
+	}
+	for i := 0; i < 26; i++ {
+		workerConn, peerConn := websocketPair(t)
+		cmd := exec.Command("sh", "-c", commands[i%len(commands)])
+		master, err := StartWithSize(cmd, 24, 80)
+		if err != nil {
+			t.Fatalf("StartWithSize: %v", err)
+		}
+
+		runErr := make(chan error, 1)
+		go func() { runErr <- NewBridge(master, cmd, workerConn).Run(context.Background()) }()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		var output bytes.Buffer
+		for {
+			messageType, data, err := peerConn.Read(ctx)
+			if err != nil {
+				cancel()
+				t.Fatalf("iteration %d: read WebSocket before exit message: %v (received %d of %d payload bytes)", i, err, output.Len(), len(payload))
+			}
+			if messageType == websocket.MessageBinary {
+				output.Write(data)
+				continue
+			}
+			if string(data) != `{"type":"exit","code":0}` {
+				cancel()
+				t.Fatalf("iteration %d: exit message = %s", i, data)
+			}
+			break
+		}
+		cancel()
+
+		if !bytes.Contains(output.Bytes(), payload) {
+			t.Fatalf("iteration %d: received %d of %d payload bytes before the exit message", i, output.Len(), len(payload))
+		}
+		waitBridge(t, runErr)
+	}
 }
 
 func TestBridgeChildExitSendsExitAndCloses(t *testing.T) {
