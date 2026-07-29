@@ -25,7 +25,7 @@ func openPTY() (master *os.File, slave *os.File, err error) {
 		}
 	}()
 
-	if err = unix.IoctlSetInt(masterFD, unix.TIOCSPTLCK, 0); err != nil {
+	if err = unix.IoctlSetPointerInt(masterFD, unix.TIOCSPTLCK, 0); err != nil {
 		return nil, nil, fmt.Errorf("unlock /dev/ptmx: %w", err)
 	}
 	n, err := unix.IoctlGetInt(masterFD, unix.TIOCGPTN)

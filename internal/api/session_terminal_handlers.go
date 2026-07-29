@@ -62,7 +62,7 @@ func (s *Server) serveTerminalBrowserRequest(w http.ResponseWriter, r *http.Requ
 				Secure:   r.TLS != nil,
 				SameSite: http.SameSiteLaxMode,
 			})
-			http.Redirect(w, r, terminal.TerminalProxyPath(sessionID), http.StatusSeeOther)
+			http.Redirect(w, r, terminal.TerminalProxyPath(sessionID)+"/", http.StatusSeeOther)
 			return true
 		}
 		if kind != "terminal" || strings.TrimSpace(r.Header.Get("Authorization")) != "" {
@@ -109,7 +109,7 @@ func (s *Server) serveTerminalBrowserRequest(w http.ResponseWriter, r *http.Requ
 			Secure:   r.TLS != nil,
 			SameSite: http.SameSiteLaxMode,
 		})
-		http.Redirect(w, r, terminal.JobTerminalProxyPath(jobID), http.StatusSeeOther)
+		http.Redirect(w, r, terminal.JobTerminalProxyPath(jobID)+"/", http.StatusSeeOther)
 		return true
 	}
 	if kind != "terminal" || strings.TrimSpace(r.Header.Get("Authorization")) != "" {
@@ -381,7 +381,7 @@ func (s *projectServer) handleSessionTerminalBrowser(w http.ResponseWriter, r *h
 		s.handleSessionTerminalStream(w, r, sessionID)
 		return
 	}
-	if len(suffix) == 0 {
+	if len(suffix) == 0 || (len(suffix) == 1 && suffix[0] == "") {
 		s.serveTerminalPage(w, r, terminal.TerminalProxyPath(sessionID))
 		return
 	}
@@ -430,7 +430,7 @@ func (s *projectServer) handleJobTerminalBrowser(w http.ResponseWriter, r *http.
 		s.handleJobTerminalStream(w, r, jobID)
 		return
 	}
-	if len(suffix) == 0 {
+	if len(suffix) == 0 || (len(suffix) == 1 && suffix[0] == "") {
 		s.serveTerminalPage(w, r, terminal.JobTerminalProxyPath(jobID))
 		return
 	}
