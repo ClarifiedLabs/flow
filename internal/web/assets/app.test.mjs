@@ -285,6 +285,7 @@ test("nav trigger label tracks the current route", async () => {
     ["/ui/tasks/new", "board"],
     ["/ui/tasks/t-0001", "board"],
     ["/ui/tasks/t-0001/epic", "board"],
+    ["/ui/projects/p-alpha/tasks/t-0001", "board"],
     ["/ui/changes/ch-0001", "menu"],
     ["/ui/sessions/s-0001/terminal", "menu"],
   ];
