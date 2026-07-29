@@ -7,7 +7,7 @@ import { escapeHTML, escapeAttr } from "./html.js";
 import { NAV, SIDEBAR_STATUS_POLL_MS, MAX_POLL_BACKOFF_MS, DEFAULT_AGENT_HARNESSES, DEFAULT_CONSOLE_HARNESSES } from "./config.js";
 import { apiGet, apiPost, taskConsoleAPIPath, taskAPIBase, taskHref, flowsAPIBase } from "./api.js";
 import { readSelectedProjects, writeSelectedProjects, terminalSessionIDForPath, pollConfigForPath, readThemePreference, writeThemePreference, applyThemePreference } from "./storage.js";
-import { renderNavLink, THEME_ICONS, THEME_OPTIONS } from "./nav.js";
+import { renderNavLink, renderNavTrigger, THEME_ICONS, THEME_OPTIONS } from "./nav.js";
 import { normalizeHarnessOptions } from "./harness-models.js";
 import { openTerminalWindow, closeTerminalDialog, hideInlineTerminal, closeTerminalModalLayers } from "./terminal.js";
 import { pollDelay, Poller } from "./poller.js";
@@ -121,29 +121,36 @@ export class FlowApp extends HTMLElement {
 
   renderShell() {
     this.themePreference = applyThemePreference(this.themePreference || readThemePreference());
+    const path = (typeof window !== "undefined" && window.location?.pathname) || "/ui/board";
     this.innerHTML = `
       <div class="shell">
-        <aside class="sidebar">
-          <p class="brand">flow<span class="brand-cursor">_</span></p>
-          <nav class="nav"></nav>
-          <div class="theme-switcher" role="group" aria-label="Theme">
-            ${THEME_OPTIONS.map(([value, label]) => `
-              <button type="button" data-theme-option="${value}" title="${label}" aria-label="${label} theme">${THEME_ICONS[value]}</button>
-            `).join("")}
-          </div>
-        </aside>
-        <main class="main">
-          <div class="topbar">
-            <h1></h1>
-            <div class="topbar-actions">
-              <details class="project-picker" hidden>
-                <summary class="button secondary"></summary>
-                <div class="project-picker-menu"></div>
-              </details>
-              <button class="button" data-action="new-task">New Task</button>
-              <button class="button secondary" data-action="refresh">Refresh</button>
+        <header class="topbar">
+          <a class="brand" href="/ui/board" data-link>flow<span class="brand-cursor">_</span></a>
+          <details class="nav-menu">
+            <summary class="button secondary nav-trigger">${renderNavTrigger(path, this.sidebarStatus)}</summary>
+            <div class="nav-panel">
+              <nav class="nav"></nav>
+              <div class="nav-footer">
+                <span class="nav-footer-label">theme</span>
+                <div class="theme-switcher" role="group" aria-label="Theme">
+                  ${THEME_OPTIONS.map(([value, label]) => `
+                    <button type="button" data-theme-option="${value}" title="${label}" aria-label="${label} theme">${THEME_ICONS[value]}</button>
+                  `).join("")}
+                </div>
+              </div>
             </div>
+          </details>
+          <h1></h1>
+          <div class="topbar-actions">
+            <details class="project-picker" hidden>
+              <summary class="button secondary"></summary>
+              <div class="project-picker-menu"></div>
+            </details>
+            <button class="button" data-action="new-task">New Task</button>
+            <button class="button secondary" data-action="refresh">Refresh</button>
           </div>
+        </header>
+        <main class="main">
           <section class="content"></section>
           <footer class="statusbar" data-state="idle">
             <span class="sb-live"><span class="sb-dot"></span><span class="sb-label">idle</span></span>
@@ -157,12 +164,42 @@ export class FlowApp extends HTMLElement {
       button.addEventListener("click", () => this.setTheme(button.dataset.themeOption));
     });
     this.syncThemeButtons();
+    // One menu open at a time: opening the nav dropdown collapses the project
+    // picker and vice versa.
+    const navMenu = this.querySelector(".nav-menu");
+    navMenu.addEventListener("toggle", () => {
+      if (!navMenu.open) return;
+      const picker = this.querySelector(".project-picker");
+      if (picker) picker.open = false;
+    });
+    const projectPicker = this.querySelector(".project-picker");
+    projectPicker.addEventListener("toggle", () => {
+      if (!projectPicker.open) return;
+      this.closeNavMenu();
+    });
     this.querySelector('[data-action="refresh"]').addEventListener("click", () => {
       this.refreshSidebarStatus();
       this.load();
     });
     this.querySelector('[data-action="new-task"]').addEventListener("click", () => this.createTask());
     this.renderNav();
+  }
+
+  // closeNavMenu collapses the top-bar nav dropdown, reporting whether it
+  // closed an open menu so callers (Escape, outside clicks) can stop there.
+  closeNavMenu() {
+    const menu = typeof this.querySelector === "function" ? this.querySelector(".nav-menu") : null;
+    if (!menu || !menu.open) return false;
+    menu.open = false;
+    return true;
+  }
+
+  // handleMenuDismiss closes the nav dropdown when a click lands outside it.
+  handleMenuDismiss(event) {
+    const menu = typeof this.querySelector === "function" ? this.querySelector(".nav-menu") : null;
+    if (!menu || !menu.open) return;
+    if (event.target?.closest?.(".nav-menu")) return;
+    menu.open = false;
   }
 
   // One delegated listener for the whole app. Elements own their own innerHTML
@@ -210,6 +247,8 @@ export class FlowApp extends HTMLElement {
     // The board's view toggle is reachable from the keyboard anywhere on the
     // board, and Escape/b always take you back to it.
     document.addEventListener("keydown", (event) => this.handleShortcut(event));
+    // Clicks outside the top-bar nav dropdown collapse it.
+    document.addEventListener("click", (event) => this.handleMenuDismiss(event));
   }
 
   handleShortcut(event) {
@@ -221,6 +260,9 @@ export class FlowApp extends HTMLElement {
       return;
     }
     if (event.key === "b" || event.key === "Escape") {
+      // Escape on an open nav dropdown just closes it; the board shortcut
+      // still applies once the menu is shut.
+      if (event.key === "Escape" && this.closeNavMenu()) return;
       if (window.location.pathname === "/ui/board") return;
       history.pushState({}, "", "/ui/board");
       this.load();
@@ -239,6 +281,7 @@ export class FlowApp extends HTMLElement {
     nav.querySelectorAll("a").forEach((link) => {
       link.addEventListener("click", (event) => {
         event.preventDefault();
+        this.closeNavMenu();
         history.pushState({}, "", link.getAttribute("href"));
         this.load();
       });
@@ -510,6 +553,9 @@ export class FlowApp extends HTMLElement {
         link.removeAttribute("aria-current");
       }
     });
+    // The trigger mirrors the route (label) and the latest board lane chips.
+    const trigger = typeof this.querySelector === "function" ? this.querySelector(".nav-trigger") : null;
+    if (trigger) trigger.innerHTML = renderNavTrigger(path, this.sidebarStatus);
   }
 
   // refreshBoardDoneLane re-fetches and replaces only the board's Done column,

@@ -88,21 +88,24 @@ func TestBoardTableScrollsRatherThanWraps(t *testing.T) {
 	}
 }
 
-// TestSidebarStaysWithinViewport keeps the light/dark theme switcher visible
-// without scrolling when the main view pane is taller than the browser window.
-// The sidebar must be viewport-bound (sticky, 100vh) rather than stretching to
-// match the main pane's content height.
-func TestSidebarStaysWithinViewport(t *testing.T) {
+// TestTopbarSticksToTop keeps the navigation bar pinned above scrolling
+// content: the bar must be sticky with an opaque background and a bottom
+// border, and the shell must be a single column (no permanent nav column).
+func TestTopbarSticksToTop(t *testing.T) {
 	css := readModule(t, "base.module.css")
 	for _, want := range []string{
-		".sidebar {",
+		".topbar {",
 		"position: sticky;",
 		"top: 0;",
-		"height: 100vh;",
+		"background: var(--panel);",
+		"border-bottom: 1px solid var(--line);",
 	} {
 		if !strings.Contains(css, want) {
-			t.Fatalf("sidebar css missing %q (theme switcher would be hidden behind tall main content)", want)
+			t.Fatalf("topbar css missing %q (nav bar would scroll away or show content through)", want)
 		}
+	}
+	if strings.Contains(css, ".sidebar {") {
+		t.Fatal("base css still styles the removed sidebar")
 	}
 }
 

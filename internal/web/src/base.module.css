@@ -1,29 +1,16 @@
 .shell {
   min-height: 100vh;
-  display: grid;
-  grid-template-columns: 200px minmax(0, 1fr);
-}
-
-.sidebar {
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--line);
-  background: var(--rail);
-  padding: 18px 12px;
-  position: sticky;
-  top: 0;
-  align-self: start;
-  height: 100vh;
-  max-height: 100vh;
-  overflow-y: auto;
 }
 
 .brand {
   font-size: 1rem;
   font-weight: 600;
   letter-spacing: 0.14em;
-  margin: 0 4px 20px;
   color: var(--ink);
+  text-decoration: none;
+  flex: 0 0 auto;
 }
 
 .brand-cursor {
@@ -47,9 +34,8 @@
   letter-spacing: 0.08em;
   text-transform: lowercase;
   padding: 7px 10px;
-  border-left: 2px solid transparent;
-  border-radius: 0 var(--radius) var(--radius) 0;
-  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+  border-radius: var(--radius);
+  transition: color 120ms ease, background 120ms ease;
 }
 
 .nav a:hover {
@@ -58,7 +44,6 @@
 
 .nav a[aria-current="page"] {
   color: var(--accent);
-  border-left-color: var(--accent);
   background: var(--accent-soft);
 }
 
@@ -151,23 +136,105 @@
   color: var(--st-warn);
 }
 
+/* The nav dropdown reuses the project-picker pattern: a details/summary whose
+   panel floats below the trigger. */
+.nav-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.nav-menu summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.nav-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.nav-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.nav-trigger-label {
+  text-transform: lowercase;
+}
+
+.nav-trigger-status {
+  display: inline-flex;
+  align-items: center;
+}
+
+.nav-trigger-status:empty {
+  display: none;
+}
+
+.nav-panel {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  min-width: 240px;
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  background: var(--surface, #111);
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.nav-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 8px 4px 2px;
+  border-top: 1px solid var(--line);
+}
+
+.nav-footer-label {
+  color: var(--muted);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: lowercase;
+}
+
 .main {
   min-width: 0;
-  min-height: 100vh;
+  flex: 1;
   display: flex;
   flex-direction: column;
   padding: 20px 22px 0;
 }
 
+/* Sticky top bar: brand, nav dropdown, page title and view actions. The bar
+   is opaque so scrolled content never shows through, and its ~57px height is
+   what flow-task-rail's sticky offset tucks beneath. */
 .topbar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 18px;
+  gap: 12px;
+  min-height: 56px;
+  padding: 0 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
 }
 
 .topbar h1 {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 1.1875rem;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -202,8 +269,6 @@
 }
 
 .theme-switcher {
-  margin-top: auto;
-  align-self: flex-start;
   display: inline-flex;
   gap: 2px;
   padding: 3px;
@@ -2512,29 +2577,32 @@ th {
 }
 
 @media (max-width: 760px) {
-  .shell {
-    grid-template-columns: 1fr;
+  /* The bar wraps: brand + trigger + title on the first row, actions on the
+     second; the dropdown panel spans the full bar width. */
+  .topbar {
+    flex-wrap: wrap;
+    min-height: 0;
+    padding: 8px 12px;
   }
 
-  .sidebar {
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
+  .topbar-actions {
+    flex-basis: 100%;
+    justify-content: flex-start;
+  }
+
+  .nav-menu {
     position: static;
-    height: auto;
-    max-height: none;
-    overflow: visible;
+  }
+
+  .nav-panel {
+    left: 0;
+    right: 0;
+    top: 100%;
+    min-width: 0;
   }
 
   .nav {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .theme-switcher {
-    margin-top: 14px;
-  }
-
-  .main {
-    min-height: 0;
   }
 
   .statusbar {

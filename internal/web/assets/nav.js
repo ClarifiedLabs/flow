@@ -1,8 +1,31 @@
-// Sidebar navigation rendering (links, live status badges and counts) and the
-// theme-switcher icon/option assets.
+// Top-bar navigation rendering: the dropdown trigger (current-page label plus
+// compact board lane chips), the panel's links with live status badges and
+// counts, and the theme-switcher icon/option assets.
 
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
+import { NAV } from "./config.js";
+
+// navTriggerLabel maps a path onto the top-bar trigger's label: the board
+// aliases collapse to "board", other nav destinations use their label, and
+// everything else (task/change detail, terminal) falls back to "menu".
+export function navTriggerLabel(path) {
+  if (path === "/ui" || path === "/ui/" || path === "/ui/board") return "board";
+  const match = NAV.find(([href]) => href === path);
+  return match ? match[1].toLowerCase() : "menu";
+}
+
+// renderNavTrigger paints the dropdown trigger: hamburger, current-page label,
+// caret, and (once the first /v2/sidebar poll lands) the compact board lane
+// chips. Before the first poll the status is empty and only the label shows.
+export function renderNavTrigger(path, status) {
+  return [
+    `<span class="nav-trigger-icon" aria-hidden="true">\u2630</span>`,
+    `<span class="nav-trigger-label">${escapeHTML(navTriggerLabel(path))}</span>`,
+    `<span class="nav-trigger-caret" aria-hidden="true">\u25be</span>`,
+    `<span class="nav-trigger-status">${renderNavStatus("/ui/board", status)}</span>`,
+  ].join("");
+}
 
 export function renderNavLink(href, label, status) {
   return `<a href="${href}"><span class="nav-label">${escapeHTML(label)}</span>${renderNavStatus(href, status)}</a>`;
