@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -114,6 +115,13 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "labels: %d\n", len(cfg.Labels))
 	fmt.Fprintf(stdout, "capacity_persistent_agent: %d\n", cfg.Capacity.PersistentAgent)
 	fmt.Fprintf(stdout, "capacity_ephemeral: %d\n", cfg.Capacity.Ephemeral)
+	cleanup, _ := cfg.Cleanup.Resolve()
+	fmt.Fprintf(stdout, "cleanup_interval: %s\n", cleanup.Interval)
+	fmt.Fprintf(stdout, "cleanup_orphan_grace: %s\n", cleanup.OrphanGrace)
+	fmt.Fprintf(stdout, "cleanup_min_free_bytes: %d\n", cleanup.MinFreeBytes)
+	fmt.Fprintf(stdout, "cleanup_resume_free_bytes: %d\n", cleanup.ResumeFreeBytes)
+	fmt.Fprintf(stdout, "cleanup_min_free_percent: %g\n", cleanup.MinFreePercent)
+	fmt.Fprintf(stdout, "cleanup_resume_free_percent: %g\n", cleanup.ResumeFreePercent)
 	return 0
 }
 
@@ -171,6 +179,11 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
 	}
+	cleanupPolicy, err := cfg.Cleanup.Resolve()
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve worker cleanup policy: %v\n", err)
+		return 1
+	}
 	if strings.TrimSpace(cfg.WorkerID) == "" {
 		fmt.Fprintln(stderr, "worker config worker_id is required")
 		return 1
@@ -184,10 +197,17 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		cfg.Token = token
 	}
 	os.Unsetenv("FLOW_WORKER_JOIN_TOKEN")
+	if err := os.MkdirAll(filepath.Join(cfg.WorkDir, "jobs"), 0o700); err != nil {
+		fmt.Fprintf(stderr, "create worker jobs directory: %v\n", err)
+		return 1
+	}
 
 	// Telemetry: one unauthenticated port serving /readyz (set once the worker
-	// has registered with the coordinator), /livez, and /metrics.
+	// has registered with the coordinator and is not under disk pressure),
+	// /livez, and /metrics.
 	var registeredReady atomic.Bool
+	var diskReady atomic.Bool
+	diskReady.Store(true)
 	telemetryRegistry := metrics.NewWithBuildInfo(metrics.BuildInfo{
 		Name:    "flow_worker_build_info",
 		Help:    "flow-worker build information.",
@@ -197,13 +217,17 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		claimed:   telemetryRegistry.Counter("flow_jobs_claimed_total", "Jobs claimed by this worker."),
 		completed: telemetryRegistry.Counter("flow_jobs_completed_total", "Jobs released by this worker by final state."),
 	}
+	maintenanceMetrics := newWorkerMaintenanceMetrics(telemetryRegistry)
 	telemetrySettings := metrics.Resolve(cfg.Metrics, config.DefaultTelemetryListen, metrics.Overrides{
 		Disable:    noMetrics,
 		DisableSet: noMetrics,
 		Listen:     metricsListen,
 		ListenSet:  strings.TrimSpace(metricsListen) != "",
 	})
-	telemetry, err := metrics.StartEndpoint(context.Background(), slog.Default(), metrics.Mux(telemetryRegistry, registeredReady.Load), telemetrySettings)
+	ready := func() bool {
+		return registeredReady.Load() && diskReady.Load()
+	}
+	telemetry, err := metrics.StartEndpoint(context.Background(), slog.Default(), metrics.Mux(telemetryRegistry, ready), telemetrySettings)
 	if err != nil {
 		fmt.Fprintf(stderr, "start telemetry endpoint: %v\n", err)
 		return 1
@@ -237,14 +261,15 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
+	maintenance := newWorkerMaintenance(cfg, cleanupPolicy, client, maintenanceMetrics, &diskReady)
 	registered, err := registerWorkerWithRetry(client, cfg, heartbeatTTL, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "register worker: %v\n", err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "registered: %s\n", registered.ID)
-	registeredReady.Store(true)
 	if registerOnly {
+		registeredReady.Store(true)
 		heartbeat, err := client.HeartbeatWorker(flowclient.HeartbeatWorkerInput{
 			WorkerID:     cfg.WorkerID,
 			HeartbeatTTL: heartbeatTTL,
@@ -258,7 +283,18 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	reapOrphanedTmuxSessions(client, cfg, stderr)
+	maintenance.Maintain(true, stderr)
+	registeredReady.Store(true)
+	maintenanceCtx, maintenanceCancel := context.WithCancel(context.Background())
+	maintenanceDone := make(chan struct{})
+	go func() {
+		defer close(maintenanceDone)
+		maintenance.Run(maintenanceCtx)
+	}()
+	defer func() {
+		maintenanceCancel()
+		<-maintenanceDone
+	}()
 
 	timings := workerTimings{
 		ClaimWait:     claimWait,
@@ -268,11 +304,11 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	runOutput := &lockedWriter{writer: stdout}
 	var runErr error
 	if ephemeral {
-		runErr = runWorkerEphemeral(client, cfg, timings, runOutput)
+		runErr = runWorkerEphemeral(client, cfg, timings, maintenance, runOutput)
 	} else if slots := workerSlotCount(cfg); slots == 1 {
-		runErr = runWorkerLoop(client, cfg, timings, once, runOutput)
+		runErr = runWorkerLoop(client, cfg, timings, maintenance, once, runOutput)
 	} else {
-		runErr = runWorkerSlots(cfg, timings, slots, once, runOutput)
+		runErr = runWorkerSlots(cfg, timings, maintenance, slots, once, runOutput)
 	}
 	if runErr != nil {
 		fmt.Fprintf(stderr, "%v\n", runErr)
@@ -310,10 +346,10 @@ func (m *workerJobMetrics) jobCompleted(result string) {
 // to the coordinator (release, check verdict, or discarded-on-lease-loss), so
 // it is not a process failure: the worker exits 0 either way and the kubelet
 // restarts the container for the next assignment.
-func runWorkerEphemeral(client *flowclient.Client, cfg config.WorkerConfig, timings workerTimings, stdout io.Writer) error {
+func runWorkerEphemeral(client *flowclient.Client, cfg config.WorkerConfig, timings workerTimings, maintenance *workerMaintenance, stdout io.Writer) error {
 	for {
 		slog.Debug("flow-worker ephemeral claim attempt", "worker_id", cfg.WorkerID)
-		claimed, err := runWorkerOnce(client, cfg, timings, stdout)
+		claimed, err := runWorkerOnce(client, cfg, timings, maintenance, stdout)
 		if err != nil {
 			if flowclient.IsRetryableError(err) {
 				slog.Debug("flow-worker transient worker error", "worker_id", cfg.WorkerID, "error", err)
@@ -369,7 +405,7 @@ func workerSlotCount(cfg config.WorkerConfig) int {
 	return slots
 }
 
-func runWorkerSlots(cfg config.WorkerConfig, timings workerTimings, slots int, once bool, stdout io.Writer) error {
+func runWorkerSlots(cfg config.WorkerConfig, timings workerTimings, maintenance *workerMaintenance, slots int, once bool, stdout io.Writer) error {
 	if once {
 		errs := make(chan error, slots)
 		var wg sync.WaitGroup
@@ -382,7 +418,7 @@ func runWorkerSlots(cfg config.WorkerConfig, timings workerTimings, slots int, o
 					errs <- fmt.Errorf("create client: %w", err)
 					return
 				}
-				errs <- runWorkerLoop(client, cfg, timings, true, stdout)
+				errs <- runWorkerLoop(client, cfg, timings, maintenance, true, stdout)
 			}()
 		}
 		wg.Wait()
@@ -403,7 +439,7 @@ func runWorkerSlots(cfg config.WorkerConfig, timings workerTimings, slots int, o
 				errs <- fmt.Errorf("create client: %w", err)
 				return
 			}
-			if err := runWorkerLoop(client, cfg, timings, false, stdout); err != nil {
+			if err := runWorkerLoop(client, cfg, timings, maintenance, false, stdout); err != nil {
 				errs <- err
 			}
 		}()
@@ -411,10 +447,10 @@ func runWorkerSlots(cfg config.WorkerConfig, timings workerTimings, slots int, o
 	return <-errs
 }
 
-func runWorkerLoop(client *flowclient.Client, cfg config.WorkerConfig, timings workerTimings, once bool, stdout io.Writer) error {
+func runWorkerLoop(client *flowclient.Client, cfg config.WorkerConfig, timings workerTimings, maintenance *workerMaintenance, once bool, stdout io.Writer) error {
 	for {
 		slog.Debug("flow-worker claim loop iteration", "worker_id", cfg.WorkerID, "once", once)
-		claimed, err := runWorkerOnce(client, cfg, timings, stdout)
+		claimed, err := runWorkerOnce(client, cfg, timings, maintenance, stdout)
 		if err != nil {
 			if flowclient.IsRetryableError(err) {
 				slog.Debug("flow-worker transient worker error", "worker_id", cfg.WorkerID, "error", err)
@@ -439,7 +475,7 @@ func runWorkerLoop(client *flowclient.Client, cfg config.WorkerConfig, timings w
 	}
 }
 
-func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings workerTimings, stdout io.Writer) (bool, error) {
+func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings workerTimings, maintenance *workerMaintenance, stdout io.Writer) (bool, error) {
 	slog.Debug("flow-worker heartbeat worker", "worker_id", cfg.WorkerID, "heartbeat_ttl", timings.HeartbeatTTL)
 	heartbeat, err := client.HeartbeatWorker(flowclient.HeartbeatWorkerInput{
 		WorkerID:     cfg.WorkerID,
@@ -449,6 +485,10 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 		return false, fmt.Errorf("heartbeat worker: %w", err)
 	}
 	fmt.Fprintf(stdout, "heartbeat: %s\n", heartbeat.ID)
+	if !maintenance.Maintain(false, nil) {
+		slog.Debug("flow-worker claim paused by disk pressure", "worker_id", cfg.WorkerID)
+		return false, nil
+	}
 
 	slog.Debug("flow-worker claim job", "worker_id", cfg.WorkerID, "claim_wait", timings.ClaimWait, "lease_duration", timings.LeaseDuration)
 	claim, err := client.ClaimJob(flowclient.ClaimJobInput{
@@ -503,6 +543,12 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 		Session:      running.Session,
 		SessionToken: running.SessionToken,
 	})
+	cleanupFinalized := false
+	defer func() {
+		if cleanupFinalized {
+			maintenance.CleanupFinalized(running.Job.ID)
+		}
+	}()
 	fmt.Fprintf(stdout, "ran: %s session=%s exit=%d\n", claim.Job.ID, result.Session, result.ExitCode)
 	slog.Debug("flow-worker job completed", "job_id", claim.Job.ID, "session", result.Session, "exit_code", result.ExitCode, "final_state", result.FinalState, "error", result.Err)
 	if heartbeatErr := leaseHeartbeat.Err(); heartbeatErr != nil {
@@ -510,6 +556,7 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 		if isLeaseNotRenewable(heartbeatErr) &&
 			persistentSession &&
 			persistentSessionFinalized(context.Background(), client, running.Job, *claim.Lease, running.Session) {
+			cleanupFinalized = true
 			slog.Debug("flow-worker persistent session finalized while lease heartbeat was active", "job_id", running.Job.ID, "session_id", running.Session.ID, "lease_id", claim.Lease.ID)
 			fmt.Fprintf(stdout, "persistent session finalized: %s lease=%s\n", running.Session.ID, claim.Lease.ID)
 			return true, nil
@@ -561,6 +608,7 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 				slog.Debug("flow-worker console session released", "job_id", running.Job.ID, "session_id", running.Session.ID, "lease_id", claim.Lease.ID, "error", result.Err)
 				fmt.Fprintf(stdout, "released: %s state=%s\n", running.Job.ID, flowworker.JobFinished)
 			}
+			cleanupFinalized = true
 			if heartbeatErr != nil && !isLeaseNotRenewable(heartbeatErr) {
 				return true, jobFailure(fmt.Errorf("lease heartbeat: %w", heartbeatErr))
 			}
@@ -591,6 +639,7 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 		if processExitErr != nil {
 			return true, jobFailure(fmt.Errorf("report persistent session process exit: %w", processExitErr))
 		}
+		cleanupFinalized = true
 		if heartbeatErr != nil && !isLeaseNotRenewable(heartbeatErr) {
 			return true, jobFailure(fmt.Errorf("lease heartbeat: %w", heartbeatErr))
 		}
@@ -621,6 +670,7 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 	}
 	slog.Debug("flow-worker lease released", "job_id", released.ID, "state", released.State)
 	fmt.Fprintf(stdout, "released: %s state=%s\n", released.ID, released.State)
+	cleanupFinalized = true
 	jobMetrics.jobCompleted(string(released.State))
 	if checkErr != nil && !staleCheckResult {
 		return true, jobFailure(checkErr)
@@ -1508,26 +1558,6 @@ func heartbeatInterval(heartbeatTTL time.Duration, leaseDuration time.Duration) 
 	}
 
 	return interval
-}
-
-// reapOrphanedTmuxSessions kills tmux sessions leaked by a previously
-// SIGKILLed worker whose deferred cleanup never ran. It runs once at startup
-// before the claim/work loop begins; reaping must never fail boot, so any error
-// is logged and execution continues.
-func reapOrphanedTmuxSessions(client *flowclient.Client, cfg config.WorkerConfig, stderr io.Writer) {
-	slog.Debug("flow-worker reap orphaned tmux sessions")
-	jobs, err := client.ListWorkerReapJobs()
-	if err != nil {
-		slog.Debug("flow-worker reap orphaned tmux sessions failed to list jobs", "error", err)
-		fmt.Fprintf(stderr, "reap orphaned tmux sessions: list jobs: %v\n", err)
-		return
-	}
-	killed, err := workerexec.ReapOrphanedSessions(context.Background(), jobs, workerexec.WithWorkerConfig(cfg))
-	slog.Debug("flow-worker reaped orphaned tmux sessions", "killed", killed, "error", err)
-	fmt.Fprintf(stderr, "reaped orphaned tmux sessions: %d\n", killed)
-	if err != nil {
-		fmt.Fprintf(stderr, "reap orphaned tmux sessions: %v\n", err)
-	}
 }
 
 func newWorkerClient(cfg config.WorkerConfig) (*flowclient.Client, error) {

@@ -1465,6 +1465,14 @@ printf next-ok > "$1"
 	if err != nil {
 		t.Fatalf("create worker client: %v", err)
 	}
+	var diskReady atomic.Bool
+	diskReady.Store(true)
+	maintenance := newWorkerMaintenance(cfg, config.ResolvedWorkerCleanup{
+		Interval:          time.Hour,
+		OrphanGrace:       time.Hour,
+		MinFreePercent:    0.0001,
+		ResumeFreePercent: 0.0002,
+	}, client, nil, &diskReady)
 	timings := workerTimings{
 		ClaimWait:     0,
 		LeaseDuration: 30 * time.Second,
@@ -1474,7 +1482,7 @@ printf next-ok > "$1"
 	var stdout bytes.Buffer
 	loopDone := make(chan error, 1)
 	go func() {
-		loopDone <- runWorkerLoop(client, cfg, timings, false, &stdout)
+		loopDone <- runWorkerLoop(client, cfg, timings, maintenance, false, &stdout)
 	}()
 
 	waitForWorkerJobState(t, fixture, failingJob.ID, flowworker.JobFailed, 30*time.Second)
@@ -1506,6 +1514,7 @@ printf next-ok > "$1"
 	if finishedNext.State != flowworker.JobFinished {
 		t.Fatalf("next job state = %q, want finished", finishedNext.State)
 	}
+	waitForWorkerPathAbsent(t, filepath.Join(cfg.WorkDir, "jobs", nextJob.ID), 15*time.Second)
 }
 
 func waitForWorkerJobState(t *testing.T, fixture workerTestFixture, jobID string, want flowworker.JobState, timeout time.Duration) {
@@ -1580,6 +1589,19 @@ func waitForWorkerFile(t *testing.T, path string, timeout time.Duration) {
 		case <-ticker.C:
 		}
 	}
+}
+
+func waitForWorkerPathAbsent(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		_, err := os.Stat(path)
+		if os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("path still exists after %s: %s", timeout, path)
 }
 
 func isolatedWorkerTmuxSocket(t *testing.T) string {

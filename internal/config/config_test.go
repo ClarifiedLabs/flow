@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -501,6 +502,13 @@ labels:
 capacity:
   persistent_agent: 1
   ephemeral: 2
+cleanup:
+  interval: 2m
+  orphan_grace: 30m
+  min_free_bytes: 2GiB
+  resume_free_bytes: 4GiB
+  min_free_percent: 8
+  resume_free_percent: 12
 tmux:
   socket_path: /tmp/flow-test-tmux.sock
 git:
@@ -528,6 +536,19 @@ git:
 	if cfg.Capacity.PersistentAgent != 1 || cfg.Capacity.Ephemeral != 2 {
 		t.Fatalf("Capacity = %+v", cfg.Capacity)
 	}
+	cleanup, err := cfg.Cleanup.Resolve()
+	if err != nil {
+		t.Fatalf("resolve cleanup: %v", err)
+	}
+	if cleanup.Interval != 2*time.Minute || cleanup.OrphanGrace != 30*time.Minute {
+		t.Fatalf("cleanup durations = %+v", cleanup)
+	}
+	if cleanup.MinFreeBytes != 2<<30 || cleanup.ResumeFreeBytes != 4<<30 {
+		t.Fatalf("cleanup byte thresholds = %+v", cleanup)
+	}
+	if cleanup.MinFreePercent != 8 || cleanup.ResumeFreePercent != 12 {
+		t.Fatalf("cleanup percentage thresholds = %+v", cleanup)
+	}
 	if cfg.Tmux.SocketPath != "/tmp/flow-test-tmux.sock" {
 		t.Fatalf("Tmux = %+v", cfg.Tmux)
 	}
@@ -539,6 +560,51 @@ git:
 	}
 	if strings.Contains(cfg.WorkDir, "~") {
 		t.Fatalf("WorkDir was not expanded: %q", cfg.WorkDir)
+	}
+}
+
+func TestWorkerCleanupDefaultsAndValidation(t *testing.T) {
+	resolved, err := (WorkerCleanup{}).Resolve()
+	if err != nil {
+		t.Fatalf("Resolve defaults: %v", err)
+	}
+	if resolved.Interval != 5*time.Minute || resolved.OrphanGrace != time.Hour {
+		t.Fatalf("default durations = %+v", resolved)
+	}
+	if resolved.MinFreeBytes != 0 || resolved.ResumeFreeBytes != 0 {
+		t.Fatalf("default byte thresholds = %+v, want disabled", resolved)
+	}
+	if resolved.MinFreePercent != 10 || resolved.ResumeFreePercent != 15 {
+		t.Fatalf("default percentage thresholds = %+v", resolved)
+	}
+
+	for name, cleanup := range map[string]WorkerCleanup{
+		"bad interval": {
+			Interval: "later",
+		},
+		"zero interval": {
+			Interval: "0",
+		},
+		"bad bytes": {
+			MinFreeBytes: "lots",
+		},
+		"resume bytes below minimum": {
+			MinFreeBytes:    "2GiB",
+			ResumeFreeBytes: "1GiB",
+		},
+		"resume percent below minimum": {
+			MinFreePercent:    20,
+			ResumeFreePercent: 15,
+		},
+		"non-finite percent": {
+			MinFreePercent: math.NaN(),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := cleanup.Resolve(); err == nil {
+				t.Fatalf("Resolve(%+v) succeeded, want validation error", cleanup)
+			}
+		})
 	}
 }
 

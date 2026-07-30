@@ -120,6 +120,35 @@ The server stores coordinator state in `flow-data`. The worker stores its
 `/flow/work` directory in `flow-worker-data` and its rootless Docker state in
 `flow-worker-docker`; it does not mount the server data volume.
 
+The worker treats each `/flow/work/jobs/<job-id>` directory as lease-scoped
+scratch space. After it has reported the result, uploaded the transcript, and
+the coordinator has acknowledged the terminal lease or session transition, the
+worker removes the entire job directory, including its isolated language
+caches and repository checkout. At startup and every five minutes it also
+reconciles leftover directories against coordinator job state. Active and
+nonterminal jobs are preserved; unknown directories receive a one-hour grace
+period before removal.
+
+The same maintenance loop monitors free space on the filesystem containing
+`work_dir`. By default the worker stops claiming jobs below 10% free and resumes
+above 15% free; `/readyz` reports unavailable while claims are paused. Optional
+absolute thresholds can supplement the percentages:
+
+```yaml
+cleanup:
+  interval: 5m
+  orphan_grace: 1h
+  min_free_bytes: 10GiB
+  resume_free_bytes: 20GiB
+  min_free_percent: 10
+  resume_free_percent: 15
+```
+
+Cleanup never prunes an external Docker daemon because it may contain unrelated
+workloads. In Docker Desktop, host-side image and builder caches share the
+underlying VM filesystem with the named volumes; manage those caches through
+Docker Desktop or the host Docker CLI.
+
 Compose bind-mounts the repository's `docker/flow-worker.yaml` read-only at
 `/etc/flow/flow-worker.yaml`. Edit that file to change worker labels or
 capacity without modifying the image's example configuration. For example:

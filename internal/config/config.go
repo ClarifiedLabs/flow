@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -213,6 +214,7 @@ type WorkerConfig struct {
 	Labels         map[string]string `json:"labels" yaml:"labels"`
 	Taints         []scheduler.Taint `json:"taints" yaml:"taints"`
 	Capacity       WorkerCapacity    `json:"capacity" yaml:"capacity"`
+	Cleanup        WorkerCleanup     `json:"cleanup" yaml:"cleanup"`
 	Tmux           WorkerTmuxConfig  `json:"tmux" yaml:"tmux"`
 	Git            WorkerGitConfig   `json:"git" yaml:"git"`
 	Metrics        metrics.Config    `json:"metrics" yaml:"metrics"`
@@ -221,6 +223,139 @@ type WorkerConfig struct {
 type WorkerCapacity struct {
 	PersistentAgent int `json:"persistent_agent" yaml:"persistent_agent"`
 	Ephemeral       int `json:"ephemeral" yaml:"ephemeral"`
+}
+
+// WorkerCleanup configures lifecycle cleanup and disk-pressure admission for a
+// worker work directory. Duration and byte-size values are strings so configs
+// remain readable ("5m", "10GiB") while validation stays centralized.
+type WorkerCleanup struct {
+	Interval          string  `json:"interval" yaml:"interval"`
+	OrphanGrace       string  `json:"orphan_grace" yaml:"orphan_grace"`
+	MinFreeBytes      string  `json:"min_free_bytes" yaml:"min_free_bytes"`
+	ResumeFreeBytes   string  `json:"resume_free_bytes" yaml:"resume_free_bytes"`
+	MinFreePercent    float64 `json:"min_free_percent" yaml:"min_free_percent"`
+	ResumeFreePercent float64 `json:"resume_free_percent" yaml:"resume_free_percent"`
+}
+
+// ResolvedWorkerCleanup is the parsed, default-applied worker cleanup policy.
+type ResolvedWorkerCleanup struct {
+	Interval          time.Duration
+	OrphanGrace       time.Duration
+	MinFreeBytes      uint64
+	ResumeFreeBytes   uint64
+	MinFreePercent    float64
+	ResumeFreePercent float64
+}
+
+const (
+	defaultWorkerCleanupInterval    = 5 * time.Minute
+	defaultWorkerCleanupOrphanGrace = time.Hour
+	defaultWorkerMinFreePercent     = 10
+	defaultWorkerResumeFreePercent  = 15
+)
+
+// Resolve parses worker cleanup settings. Empty byte thresholds disable the
+// absolute-byte check; percentage thresholds are always enabled by default.
+func (c WorkerCleanup) Resolve() (ResolvedWorkerCleanup, error) {
+	interval, err := resolveWorkerCleanupDuration(c.Interval, defaultWorkerCleanupInterval, "interval", false)
+	if err != nil {
+		return ResolvedWorkerCleanup{}, err
+	}
+	orphanGrace, err := resolveWorkerCleanupDuration(c.OrphanGrace, defaultWorkerCleanupOrphanGrace, "orphan_grace", true)
+	if err != nil {
+		return ResolvedWorkerCleanup{}, err
+	}
+	minFreeBytes, err := parseWorkerByteSize(c.MinFreeBytes, "min_free_bytes")
+	if err != nil {
+		return ResolvedWorkerCleanup{}, err
+	}
+	resumeFreeBytes, err := parseWorkerByteSize(c.ResumeFreeBytes, "resume_free_bytes")
+	if err != nil {
+		return ResolvedWorkerCleanup{}, err
+	}
+	if resumeFreeBytes < minFreeBytes {
+		return ResolvedWorkerCleanup{}, errors.New("worker cleanup.resume_free_bytes must be >= min_free_bytes")
+	}
+
+	minFreePercent := c.MinFreePercent
+	if minFreePercent == 0 {
+		minFreePercent = defaultWorkerMinFreePercent
+	}
+	resumeFreePercent := c.ResumeFreePercent
+	if resumeFreePercent == 0 {
+		resumeFreePercent = defaultWorkerResumeFreePercent
+	}
+	if math.IsNaN(minFreePercent) || math.IsInf(minFreePercent, 0) || minFreePercent < 0 || minFreePercent > 100 {
+		return ResolvedWorkerCleanup{}, errors.New("worker cleanup.min_free_percent must be between 0 and 100")
+	}
+	if math.IsNaN(resumeFreePercent) || math.IsInf(resumeFreePercent, 0) || resumeFreePercent < minFreePercent || resumeFreePercent > 100 {
+		return ResolvedWorkerCleanup{}, errors.New("worker cleanup.resume_free_percent must be between min_free_percent and 100")
+	}
+
+	return ResolvedWorkerCleanup{
+		Interval:          interval,
+		OrphanGrace:       orphanGrace,
+		MinFreeBytes:      minFreeBytes,
+		ResumeFreeBytes:   resumeFreeBytes,
+		MinFreePercent:    minFreePercent,
+		ResumeFreePercent: resumeFreePercent,
+	}, nil
+}
+
+func resolveWorkerCleanupDuration(value string, fallback time.Duration, key string, allowZero bool) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("worker cleanup.%s: %w", key, err)
+	}
+	if duration < 0 || (!allowZero && duration == 0) {
+		if allowZero {
+			return 0, fmt.Errorf("worker cleanup.%s must not be negative", key)
+		}
+		return 0, fmt.Errorf("worker cleanup.%s must be greater than zero", key)
+	}
+	return duration, nil
+}
+
+func parseWorkerByteSize(value string, key string) (uint64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	lower := strings.ToLower(value)
+	multiplier := uint64(1)
+	number := lower
+	for _, unit := range []struct {
+		suffix     string
+		multiplier uint64
+	}{
+		{"tib", 1 << 40},
+		{"gib", 1 << 30},
+		{"mib", 1 << 20},
+		{"kib", 1 << 10},
+		{"tb", 1_000_000_000_000},
+		{"gb", 1_000_000_000},
+		{"mb", 1_000_000},
+		{"kb", 1_000},
+		{"b", 1},
+	} {
+		if strings.HasSuffix(lower, unit.suffix) {
+			number = strings.TrimSpace(strings.TrimSuffix(lower, unit.suffix))
+			multiplier = unit.multiplier
+			break
+		}
+	}
+	amount, err := strconv.ParseUint(number, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("worker cleanup.%s must be a byte size such as 10GiB: %w", key, err)
+	}
+	if amount > ^uint64(0)/multiplier {
+		return 0, fmt.Errorf("worker cleanup.%s is too large", key)
+	}
+	return amount * multiplier, nil
 }
 
 type WorkerGitConfig struct {
@@ -612,6 +747,7 @@ func LoadWorker(path string) (WorkerConfig, error) {
 	if fileCfg.Capacity.Ephemeral != 0 {
 		cfg.Capacity.Ephemeral = fileCfg.Capacity.Ephemeral
 	}
+	cfg.Cleanup = fileCfg.Cleanup
 	if fileCfg.Git.Principal != "" {
 		cfg.Git.Principal = fileCfg.Git.Principal
 	}
@@ -784,6 +920,9 @@ func normalizeWorker(cfg WorkerConfig) (WorkerConfig, error) {
 	}
 	if cfg.Capacity.PersistentAgent < 0 || cfg.Capacity.Ephemeral < 0 {
 		return WorkerConfig{}, errors.New("worker capacity cannot be negative")
+	}
+	if _, err := cfg.Cleanup.Resolve(); err != nil {
+		return WorkerConfig{}, err
 	}
 	if err := validateCommitIdentity(cfg.Git.CommitName, cfg.Git.CommitEmail, "worker"); err != nil {
 		return WorkerConfig{}, err

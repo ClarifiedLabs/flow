@@ -89,7 +89,7 @@ printf ephemeral-ok > "$1"
 		t.Fatalf("create worker client: %v", err)
 	}
 	var stdout bytes.Buffer
-	if err := runWorkerEphemeral(client, cfg, timings, &stdout); err != nil {
+	if err := runWorkerEphemeral(client, cfg, timings, nil, &stdout); err != nil {
 		t.Fatalf("runWorkerEphemeral() error = %v; stdout:\n%s", err, stdout.String())
 	}
 
@@ -117,7 +117,7 @@ func TestRunWorkerEphemeralWaitsForClaim(t *testing.T) {
 	var stdout bytes.Buffer
 	done := make(chan error, 1)
 	go func() {
-		done <- runWorkerEphemeral(client, cfg, timings, &stdout)
+		done <- runWorkerEphemeral(client, cfg, timings, nil, &stdout)
 	}()
 
 	// Enqueue only after the worker is already polling: the ephemeral worker
@@ -176,7 +176,7 @@ func TestRunWorkerEphemeralExitsZeroAfterJobError(t *testing.T) {
 	var stdout bytes.Buffer
 	done := make(chan error, 1)
 	go func() {
-		done <- runWorkerEphemeral(client, cfg, timings, &stdout)
+		done <- runWorkerEphemeral(client, cfg, timings, nil, &stdout)
 	}()
 
 	waitForWorkerJobState(t, fixture, job.ID, flowworker.JobFailed, 30*time.Second)

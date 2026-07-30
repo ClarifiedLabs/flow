@@ -6,5 +6,10 @@ labels:
 capacity:
   persistent_agent: 10
   ephemeral: 10
+cleanup:
+  interval: 5m
+  orphan_grace: 1h
+  min_free_percent: 10
+  resume_free_percent: 15
 git:
   principal: worker:compose

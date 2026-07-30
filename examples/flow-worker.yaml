@@ -6,6 +6,11 @@ labels:
 capacity:
   persistent_agent: 5
   ephemeral: 5
+cleanup:
+  interval: 5m
+  orphan_grace: 1h
+  min_free_percent: 10
+  resume_free_percent: 15
 git:
   principal: worker:w-local
   # Git identity the harness/agent commits under in the job worktree. When
