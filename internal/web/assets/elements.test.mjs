@@ -19,6 +19,7 @@ const { renderAttentionStrip } = await import("./elements/attention-strip.js");
 const { renderBoardTable } = await import("./elements/board-table.js");
 const { renderStepRail } = await import("./elements/step-rail.js");
 const { renderRunList } = await import("./elements/run-list.js");
+const { renderRunSpine } = await import("./elements/run-spine.js");
 const { renderWorkflowGraph, graphCounts } = await import("./elements/workflow-graph.js");
 const { renderCheckList } = await import("./elements/check-list.js");
 const { renderHeldPanel, HAND_BACK_EDGES } = await import("./elements/held-panel.js");
@@ -525,6 +526,42 @@ test("the run spine names the nodes still ahead", () => {
   });
   assert.equal(rows.length, 2);
   assert.equal(rows[1].state, "future");
+});
+
+test("the run spine marks the visit the run is on now as current after a loop-back", () => {
+  // Regression: the spine collapsed repeat visits by keeping the *first* one,
+  // so a merge conflict that looped the run back to implement left every node
+  // reading "done" and none current — contradicting the Overview tab, which
+  // showed the run implementing.
+  const rows = runRows({
+    run: {
+      current_node_run_id: "n3",
+      snapshot: {
+        nodes: [
+          { key: "implement", name: "Implement" },
+          { key: "merge", name: "Merge change" },
+          { key: "merged", name: "Merged" },
+        ],
+      },
+    },
+    node_runs: [
+      { id: "n1", node_key: "implement", visit: 1, state: "succeeded", outcome: "completed", kind: "agent", name: "Implement" },
+      { id: "n2", node_key: "merge", visit: 1, state: "succeeded", outcome: "conflict", kind: "merge_change", name: "Merge change" },
+      { id: "n3", node_key: "implement", visit: 2, state: "running", kind: "agent", name: "Implement" },
+    ],
+  });
+  const html = renderRunSpine({ rows, runSequence: 1 });
+  // One row per node, kept in graph order even though implement's latest
+  // visit is its second.
+  assert.equal((html.match(/<li /g) || []).length, 3);
+  const states = [...html.matchAll(/<li data-state="([^"]+)">\s*<span class="dot"><\/span>\s*<span class="name">([^<]+)<\/span>/g)].map(
+    (match) => [match[2], match[1]],
+  );
+  assert.deepEqual(states, [
+    ["Implement", "current"],
+    ["Merge change", "done"],
+    ["Merged", "future"],
+  ]);
 });
 
 test("the current run row lists its fanned-out agents, not just the node", () => {
