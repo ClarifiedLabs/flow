@@ -8,6 +8,60 @@ import (
 	"testing"
 )
 
+func TestChangedFileDiffExcludesChangesMadeOnlyOnAdvancedBase(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	repoPath := filepath.Join(root, "repo")
+	exchangePath := filepath.Join(root, "exchange.git")
+
+	runRefsGit(t, "", "-c", "init.defaultBranch=main", "init", repoPath)
+	runRefsGit(t, repoPath, "config", "user.name", "Flow Test")
+	runRefsGit(t, repoPath, "config", "user.email", "flow-test@example.com")
+	writeRefsFile(t, repoPath, "shared.txt", "initial\n")
+	runRefsGit(t, repoPath, "add", "shared.txt")
+	runRefsGit(t, repoPath, "commit", "-m", "initial")
+	runRefsGit(t, "", "init", "--bare", exchangePath)
+	runRefsGit(t, repoPath, "push", exchangePath, "main:main")
+
+	runRefsGit(t, repoPath, "checkout", "-b", "task/t-test-0001")
+	writeRefsFile(t, repoPath, "task.txt", "task change\n")
+	runRefsGit(t, repoPath, "add", "task.txt")
+	runRefsGit(t, repoPath, "commit", "-m", "task change")
+	head := refsGitOutput(t, repoPath, "rev-parse", "HEAD")
+	runRefsGit(t, repoPath, "push", exchangePath, "task/t-test-0001:task/t-test-0001")
+
+	runRefsGit(t, repoPath, "checkout", "main")
+	writeRefsFile(t, repoPath, "shared.txt", "updated only on main\n")
+	writeRefsFile(t, repoPath, "main-only.txt", "main change\n")
+	runRefsGit(t, repoPath, "add", "shared.txt", "main-only.txt")
+	runRefsGit(t, repoPath, "commit", "-m", "advance main")
+	runRefsGit(t, repoPath, "push", exchangePath, "main:main")
+
+	stats, err := ChangedFileStats(ctx, exchangePath, "refs/heads/main", head)
+	if err != nil {
+		t.Fatalf("changed file stats: %v", err)
+	}
+	if stats.Additions != 1 || stats.Deletions != 0 || len(stats.Files) != 1 {
+		t.Fatalf("stats = %+v, want only the task-side addition", stats)
+	}
+	if stats.Files[0].Path != "task.txt" {
+		t.Fatalf("files = %+v, want task.txt only", stats.Files)
+	}
+
+	diff, err := ChangedFileDiff(ctx, exchangePath, "refs/heads/main", head)
+	if err != nil {
+		t.Fatalf("changed file diff: %v", err)
+	}
+	if len(diff.Files) != 1 || diff.Files[0].Path != "task.txt" || len(diff.Files[0].Hunks) != 1 {
+		t.Fatalf("diff files = %+v, want only the task.txt hunk", diff.Files)
+	}
+	lines := diff.Files[0].Hunks[0].Lines
+	if len(lines) != 1 || lines[0].Kind != "add" || lines[0].Text != "task change" {
+		t.Fatalf("diff lines = %+v, want the task-side addition", lines)
+	}
+}
+
 func TestChangedFileStatsExcludesRestoredPathsButKeepsSourceDeletion(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

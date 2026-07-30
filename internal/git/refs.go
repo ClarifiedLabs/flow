@@ -179,15 +179,22 @@ func ChangedPaths(ctx context.Context, exchangeRepoPath string, oldRef string, n
 	return paths, nil
 }
 
+// ChangedFileStats reports the changes introduced by newRef since its merge
+// base with oldRef. Changes made only on oldRef after the refs diverged are not
+// part of the change under review and must not appear as reverse edits.
 func ChangedFileStats(ctx context.Context, exchangeRepoPath string, oldRef string, newRef string) (DiffStats, error) {
-	oldRef = strings.TrimSpace(oldRef)
-	newRef = strings.TrimSpace(newRef)
-	if oldRef == "" || newRef == "" {
-		return DiffStats{}, fmt.Errorf("old and new refs are required")
-	}
-	output, err := gitBareOutput(ctx, exchangeRepoPath, nil, "diff", "--numstat", "--no-renames", oldRef, newRef)
+	oldRef, newRef, diffSpec, err := mergeBaseDiffSpec(oldRef, newRef)
 	if err != nil {
-		return DiffStats{}, fmt.Errorf("list changed file stats %s..%s: %w", oldRef, newRef, err)
+		return DiffStats{}, err
+	}
+
+	return changedFileStats(ctx, exchangeRepoPath, oldRef, newRef, diffSpec)
+}
+
+func changedFileStats(ctx context.Context, exchangeRepoPath string, oldRef string, newRef string, diffSpec string) (DiffStats, error) {
+	output, err := gitBareOutput(ctx, exchangeRepoPath, nil, "diff", "--numstat", "--no-renames", diffSpec)
+	if err != nil {
+		return DiffStats{}, fmt.Errorf("list changed file stats %s...%s: %w", oldRef, newRef, err)
 	}
 	if strings.TrimSpace(output) == "" {
 		return DiffStats{}, nil
@@ -225,17 +232,23 @@ func ChangedFileStats(ctx context.Context, exchangeRepoPath string, oldRef strin
 	return stats, nil
 }
 
+// ChangedFileDiff returns merge-base-relative file stats and parsed hunks for
+// the changes introduced by newRef.
 func ChangedFileDiff(ctx context.Context, exchangeRepoPath string, oldRef string, newRef string) (DiffStats, error) {
-	stats, err := ChangedFileStats(ctx, exchangeRepoPath, oldRef, newRef)
+	oldRef, newRef, diffSpec, err := mergeBaseDiffSpec(oldRef, newRef)
+	if err != nil {
+		return DiffStats{}, err
+	}
+	stats, err := changedFileStats(ctx, exchangeRepoPath, oldRef, newRef, diffSpec)
 	if err != nil {
 		return DiffStats{}, err
 	}
 	if len(stats.Files) == 0 {
 		return stats, nil
 	}
-	result, err := runGit(ctx, "", exchangeRepoPath, nil, "diff", "--unified=3", "--no-renames", oldRef, newRef)
+	result, err := runGit(ctx, "", exchangeRepoPath, nil, "diff", "--unified=3", "--no-renames", diffSpec)
 	if err != nil {
-		return DiffStats{}, fmt.Errorf("parse changed file hunks %s..%s: %w", oldRef, newRef, err)
+		return DiffStats{}, fmt.Errorf("parse changed file hunks %s...%s: %w", oldRef, newRef, err)
 	}
 	output := strings.TrimSuffix(result.stdout, "\n")
 	hunksByPath, err := parseDiffHunks(output)
@@ -247,6 +260,16 @@ func ChangedFileDiff(ctx context.Context, exchangeRepoPath string, oldRef string
 	}
 
 	return stats, nil
+}
+
+func mergeBaseDiffSpec(oldRef string, newRef string) (string, string, string, error) {
+	oldRef = strings.TrimSpace(oldRef)
+	newRef = strings.TrimSpace(newRef)
+	if oldRef == "" || newRef == "" {
+		return "", "", "", fmt.Errorf("old and new refs are required")
+	}
+
+	return oldRef, newRef, oldRef + "..." + newRef, nil
 }
 
 func parseDiffHunks(output string) (map[string][]DiffHunk, error) {

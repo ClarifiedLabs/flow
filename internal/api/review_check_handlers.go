@@ -207,11 +207,10 @@ func (s *projectServer) changeDiffStats(ctx context.Context, change coordinator.
 		return flowgit.DiffStats{}, err.Error(), nil
 	}
 
-	// After a squash merge the base ref advances to a commit whose tree equals
-	// the branch content, so diffing the current base ref against the head is
-	// empty. When the change is merged, diff against the pre-merge base tip
-	// (previous_base_sha) recorded in the completed merge intent instead. Fall
-	// back to the current base ref when no intent is found.
+	// Keep a merged change's review baseline pinned to the pre-merge base tip
+	// (previous_base_sha) recorded in its completed merge intent. Unmerged
+	// changes compare against the current base ref; the git layer resolves the
+	// merge base so later base-only commits never appear as reverse edits.
 	oldRef := "refs/heads/" + change.Base
 	if change.MergedAt != nil {
 		if baseSHA, ok, baseErr := s.merges.MergeBaseForChange(ctx, change); baseErr != nil {
