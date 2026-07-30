@@ -10,6 +10,7 @@
 // [data-gate-panel], so this element never wires its own listeners for them.
 
 import { apiPost } from "../api.js";
+import { gateResponsePending } from "../actions.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { renderMarkdown } from "../markdown.js";
 import { value } from "../normalize.js";
@@ -38,7 +39,7 @@ function renderGate(model, review) {
   const outcomes = gate.outcomes.length ? gate.outcomes : ["approved", "changes_requested"];
   const changeID = String(value(model?.change || {}, "id", "ID") || "");
   return `
-    <section class="gate" data-gate-panel>
+    <section class="gate" data-gate-panel data-gate-node-run="${escapeAttr(gate.nodeRunID)}">
       <div class="gate-head">
         <h3>${escapeHTML(gate.heading)}</h3>
         ${gate.interactive ? `<span class="badge" data-tone="action">agent is live</span>` : ""}
@@ -47,16 +48,43 @@ function renderGate(model, review) {
       ${gate.changeGate ? renderChangePointer(changeID) : review.artifact ? renderArtifact(review.artifact, false) : ""}
       <textarea data-workflow-feedback rows="4" placeholder="Feedback — recorded with your decision, and delivered to the agent when it is still in its session"></textarea>
       <div class="actions">
-        ${outcomes
-          .map(
-            (outcome, index) => `
-          <button class="button${index === 0 ? "" : " secondary"}" data-workflow-respond="${escapeAttr(gate.nodeRunID)}" data-task="${escapeAttr(model.id)}" data-outcome="${escapeAttr(outcome)}"${projectAttr}>${escapeHTML(String(outcome).replaceAll("_", " "))}</button>`,
-          )
-          .join("")}
+        ${renderGateOutcomeButtons(outcomes, {
+          nodeRunID: gate.nodeRunID,
+          taskID: model.id,
+          projectAttr,
+          secondaryFrom: 1,
+        })}
         <button class="button secondary" data-gate-comment="${escapeAttr(model.id)}"${projectAttr}>Comment only</button>
       </div>
     </section>
   `;
+}
+
+// renderGateOutcomeButton renders one gate outcome control. A poll repaint
+// rebuilds the panel while a response for this node run is still in flight, so
+// the fresh button re-derives its suppressed state from the shared in-flight
+// registry instead of flashing enabled until the next click.
+function renderGateOutcomeButton(outcome, { nodeRunID, taskID, projectAttr = "", secondary = false, pending = false } = {}) {
+  const classes = ["button", secondary ? "secondary" : "", pending ? "is-busy" : ""].filter(Boolean).join(" ");
+  const busyAttrs = pending ? ` disabled aria-busy="true"` : "";
+  return `<button class="${classes}" data-workflow-respond="${escapeAttr(nodeRunID)}" data-task="${escapeAttr(taskID)}" data-outcome="${escapeAttr(outcome)}"${projectAttr}${busyAttrs}>${escapeHTML(String(outcome).replaceAll("_", " "))}</button>`;
+}
+
+// renderGateOutcomeButtons renders one control per outcome; while the shared
+// gate response is pending every outcome is suppressed together.
+export function renderGateOutcomeButtons(outcomes, { nodeRunID, taskID, projectAttr = "", secondaryFrom = null } = {}) {
+  const pending = gateResponsePending(nodeRunID);
+  return (Array.isArray(outcomes) ? outcomes : [])
+    .map((outcome, index) =>
+      renderGateOutcomeButton(outcome, {
+        nodeRunID,
+        taskID,
+        projectAttr,
+        secondary: secondaryFrom !== null ? index >= secondaryFrom : outcome === "changes_requested",
+        pending,
+      }),
+    )
+    .join("");
 }
 
 function renderChangePointer(changeID) {

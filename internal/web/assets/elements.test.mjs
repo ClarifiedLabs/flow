@@ -988,6 +988,33 @@ test("the review panel renders the gate, the plan, and one button per outcome", 
   assert.match(html, /agent is live/, "interactive gates say the agent is live");
 });
 
+test("a repaint while a gate response is pending keeps every outcome suppressed", () => {
+  const model = { id: "t-0001", projectID: "p-1", review: reviewModel(reviewFixture()) };
+  const idle = renderReviewPanel(model);
+  assert.match(idle, /data-gate-node-run="wnr-1"/);
+  assert.doesNotMatch(idle, /is-busy/, "no outcome is suppressed while idle");
+
+  // A response for this node run is in flight when the board's poll repaints
+  // the panel; the fresh buttons must re-derive their suppression from the
+  // shared in-flight registry instead of flashing enabled.
+  inFlight.add("workflowRespond:wnr-1");
+  try {
+    const pending = renderReviewPanel(model);
+    const outcomes = pending.match(/<button[^>]*data-workflow-respond="wnr-1"[^>]*>/g) || [];
+    assert.equal(outcomes.length, 3, "one button per gate outcome");
+    for (const button of outcomes) {
+      assert.match(button, /disabled/, "each outcome stays disabled during the repaint");
+      assert.match(button, /aria-busy="true"/, "each outcome stays aria-busy during the repaint");
+      assert.match(button, /is-busy/, "each outcome stays visually suppressed during the repaint");
+    }
+  } finally {
+    inFlight.delete("workflowRespond:wnr-1");
+  }
+
+  // Once the response settles, the next repaint restores the live controls.
+  assert.doesNotMatch(renderReviewPanel(model), /is-busy/);
+});
+
 test("the review panel renders gate instructions as markdown", () => {
   const model = {
     id: "t-0001",

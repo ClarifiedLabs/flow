@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { handleAction, inFlight } from "./actions.js";
+import { handleAction, inFlight, gateResponsePending } from "./actions.js";
 import { handleFormSubmit } from "./forms.js";
 import { workflowStepCanBeSkipped } from "./task-view.js";
 import { renderTranscriptButton } from "./terminal.js";
@@ -877,6 +877,34 @@ class ActionButton {
   }
 }
 
+// A gate outcome button: an ActionButton that also knows its enclosing gate
+// panel and its sibling outcome controls, so handleAction can suppress the
+// whole set when one of them is clicked.
+class GateButton extends ActionButton {
+  constructor(dataset, panel) {
+    super(dataset);
+    this.panel = panel;
+  }
+  closest(selector) {
+    if (selector === "[data-gate-panel]" || selector === "[data-gate-node-run]") return this.panel;
+    return null;
+  }
+}
+
+// A gate panel stub exposing the outcome buttons to suppressGateSiblings and a
+// null feedback textarea to the workflowRespond handler.
+function gatePanel() {
+  return {
+    buttons: [],
+    querySelector() {
+      return null;
+    },
+    querySelectorAll(selector) {
+      return selector === "[data-workflow-respond]" ? this.buttons : [];
+    },
+  };
+}
+
 function statusApp() {
   const statuses = [];
   return {
@@ -950,6 +978,126 @@ test("a poll re-render replacing the button cannot re-enable a duplicate submiss
   assert.equal(requests, 2);
   resolveRequest();
   await second;
+  assert.equal(inFlight.size, 0);
+});
+
+test("answering a gate suppresses every sibling outcome until the response settles", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let resolveRequest;
+  globalThis.fetch = () =>
+    new Promise((resolve) => {
+      resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+  const panel = gatePanel();
+  const approve = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
+  const revise = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "changes_requested", project: "p-alpha" }, panel);
+  const reject = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "rejected", project: "p-alpha" }, panel);
+  panel.buttons.push(approve, revise, reject);
+
+  const handled = handleAction(app, { target: approve, preventDefault() {} });
+
+  // Synchronously, before the request resolves, every outcome for the node run
+  // is suppressed — not just the one that was clicked.
+  for (const control of [approve, revise, reject]) {
+    assert.equal(control.disabled, true);
+    assert.equal(control.getAttribute("aria-busy"), "true");
+    assert.equal(control.classList.contains("is-busy"), true);
+  }
+
+  // The shared in-flight registry reports the gate response as pending, which
+  // is exactly what the render path consults to re-suppress fresh buttons after
+  // a poll repaint — so no sibling flashes enabled while the request is out.
+  assert.equal(gateResponsePending("wnr-1"), true);
+
+  resolveRequest();
+  assert.equal(await handled, true);
+
+  // Settling restores the live outcome controls and clears the pending flag.
+  for (const control of [approve, revise, reject]) {
+    assert.equal(control.disabled, false);
+    assert.equal(control.getAttribute("aria-busy"), null);
+    assert.equal(control.classList.contains("is-busy"), false);
+  }
+  assert.equal(gateResponsePending("wnr-1"), false);
+  assert.deepEqual(app.statuses, ["Sending feedback wnr-1\u2026", "Feedback sent"]);
+  assert.equal(inFlight.size, 0);
+});
+
+test("a failed gate response restores every suppressed sibling outcome", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let rejectRequest;
+  globalThis.fetch = () =>
+    new Promise((resolve, reject) => {
+      rejectRequest = () => reject(new Error("boom"));
+    });
+  const panel = gatePanel();
+  const approve = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
+  const reject = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "rejected", project: "p-alpha" }, panel);
+  panel.buttons.push(approve, reject);
+
+  const handled = handleAction(app, { target: approve, preventDefault() {} });
+  assert.equal(approve.disabled, true);
+  assert.equal(reject.disabled, true, "the sibling is suppressed while the response is pending");
+
+  rejectRequest();
+  assert.equal(await handled, true);
+
+  // Failure restores every outcome control, leaving the gate fully actionable.
+  assert.equal(approve.disabled, false);
+  assert.equal(reject.disabled, false);
+  assert.equal(reject.getAttribute("aria-busy"), null);
+  assert.equal(reject.classList.contains("is-busy"), false);
+  assert.deepEqual(app.statuses, ["Sending feedback wnr-1\u2026", "boom"]);
+  assert.equal(inFlight.size, 0);
+});
+
+test("a repaint mid-flight leaves no live outcome disabled after a failed settlement", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let rejectRequest;
+  globalThis.fetch = () =>
+    new Promise((resolve, reject) => {
+      rejectRequest = () => reject(new Error("boom"));
+    });
+  const panel = gatePanel();
+  const approve = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
+  const reject = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "rejected", project: "p-alpha" }, panel);
+  panel.buttons.push(approve, reject);
+
+  const handled = handleAction(app, { target: approve, preventDefault() {} });
+  assert.equal(approve.disabled, true);
+  assert.equal(reject.disabled, true, "the sibling is suppressed while the response is pending");
+
+  // A poll repaints while the response is still pending: the render path
+  // re-emits every outcome disabled (the shared key is still in flight) and
+  // swaps them in for the now-detached originals the click captured.
+  const liveApprove = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
+  const liveReject = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "rejected", project: "p-alpha" }, panel);
+  for (const control of [liveApprove, liveReject]) {
+    control.disabled = true;
+    control.setAttribute("aria-busy", "true");
+    control.classList.add("is-busy");
+  }
+  panel.buttons = [liveApprove, liveReject];
+  globalThis.document = {
+    querySelectorAll: (selector) => (selector === '[data-workflow-respond="wnr-1"]' ? panel.buttons : []),
+  };
+
+  rejectRequest();
+  assert.equal(await handled, true);
+
+  // Failure clears the shared key but issues no refresh, so nothing else
+  // repaints the panel. The live replacement outcomes must be restored
+  // directly — not left disabled/aria-busy/is-busy until a later poll.
+  for (const control of [liveApprove, liveReject]) {
+    assert.equal(control.disabled, false);
+    assert.equal(control.getAttribute("aria-busy"), null);
+    assert.equal(control.classList.contains("is-busy"), false);
+  }
+  assert.equal(gateResponsePending("wnr-1"), false);
+  assert.deepEqual(app.statuses, ["Sending feedback wnr-1\u2026", "boom"]);
   assert.equal(inFlight.size, 0);
 });
 

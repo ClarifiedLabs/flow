@@ -308,6 +308,49 @@ export function markBusy(element) {
   };
 }
 
+// The outcome buttons for one gate all carry the same data-workflow-respond
+// node-run id, so they share a single in-flight key. Marking only the clicked
+// one busy leaves its siblings looking enabled until a repaint; suppress the
+// whole set and hand back their restores so the pending state reads
+// consistently across every outcome and unwinds on settle.
+function gateOutcomeControls(element) {
+  const scope = element.closest?.("[data-gate-panel]") ?? element.closest?.("[data-gate-node-run]");
+  if (!scope?.querySelectorAll) return [];
+  return [...scope.querySelectorAll("[data-workflow-respond]")];
+}
+
+function suppressGateOutcomes(element) {
+  return gateOutcomeControls(element)
+    .filter((control) => control !== element)
+    .map((control) => markBusy(control));
+}
+
+// A poll repaint rebuilds the gate panel while the response is still in
+// flight, so renderGateOutcomeButtons re-emits every outcome disabled and
+// replaces the controls whose restores were captured at click time. Clearing
+// the in-flight key on settle only unwinds those now-detached originals; the
+// live replacements stay disabled until a later poll. Re-enable whatever
+// outcome controls are live in the document for this node run now, so a
+// repaint that landed mid-flight cannot strand the gate — on failure in
+// particular, when no refresh follows to rebuild the panel.
+function restoreLiveGateOutcomes(element, nodeRunID) {
+  const doc = globalThis.document;
+  if (!doc?.querySelectorAll || !nodeRunID) return;
+  for (const control of doc.querySelectorAll(`[data-workflow-respond="${nodeRunID}"]`)) {
+    control.disabled = false;
+    control.removeAttribute?.("aria-busy");
+    control.classList?.remove("is-busy");
+  }
+}
+
+// Render-time counterpart to suppressGateOutcomes: a poll repaint rebuilds the
+// gate panel from scratch, so the fresh outcome buttons re-derive their
+// suppression from the shared in-flight registry instead of waiting for the
+// next click.
+export function gateResponsePending(nodeRunID) {
+  return inFlight.has(`workflowRespond:${nodeRunID}`);
+}
+
 const PENDING_LABELS = {
   workflowSchedule: "Scheduling",
   workflowReset: "Resetting",
@@ -364,6 +407,11 @@ export async function handleAction(app, event) {
   if (element.disabled || inFlight.has(busyKey)) return true;
   inFlight.add(busyKey);
   const restore = markBusy(element);
+  // Every outcome button for a gate shares one in-flight key, so a sibling
+  // stays clickable-looking until a repaint even though its click would be
+  // rejected. Suppress the whole set synchronously so no sibling appears
+  // enabled while the shared response is pending; the restores run on settle.
+  const restoreSiblings = key === "workflowRespond" ? suppressGateOutcomes(element) : [];
   app.setStatus?.(pendingLabel(key, element.dataset));
   try {
     const result = await ACTIONS[key](app, element, element.dataset);
@@ -374,6 +422,11 @@ export async function handleAction(app, event) {
   } finally {
     inFlight.delete(busyKey);
     restore();
+    for (const restoreSibling of restoreSiblings) restoreSibling();
+    // A repaint mid-flight swapped the suppressed controls for fresh disabled
+    // ones; the restores above only reach the detached originals, so bring the
+    // live replacements back now that the key is cleared.
+    if (key === "workflowRespond") restoreLiveGateOutcomes(element, element.dataset?.workflowRespond);
   }
   return true;
 }

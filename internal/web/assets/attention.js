@@ -2,6 +2,7 @@
 // chart.
 
 import { phaseKey, renderPhaseBadge } from "./board.js";
+import { renderGateOutcomeButtons } from "./elements/review-panel.js";
 import { formatDate } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
 import { projectButtonAttr } from "./task.js";
@@ -86,7 +87,7 @@ export function renderWorkflowHumanGatePanel(workflowData, taskID, projectID) {
   const gateConfig = value(config, "human_gate", "HumanGate") || {};
   const outcomes = value(gateConfig, "outcomes", "Outcomes") || [];
   const nodeRunID = value(wait, "node_run_id", "NodeRunID");
-  return `<section class="human-attention-panel"><div><h3>${escapeHTML(value(currentNode, "name", "Name") || "Human action required")}</h3><p>${escapeHTML(value(gateConfig, "instructions", "Instructions") || value(wait, "message", "Message") || "Choose the next workflow outcome.")}</p><textarea data-workflow-feedback rows="3" placeholder="Optional feedback for the next node"></textarea></div><div class="actions">${(Array.isArray(outcomes) ? outcomes : []).map((outcome) => `<button class="button${outcome === "changes_requested" ? " secondary" : ""}" data-workflow-respond="${escapeAttr(nodeRunID)}" data-task="${escapeAttr(taskID)}" data-outcome="${escapeAttr(outcome)}"${projectButtonAttr(projectID)}>${escapeHTML(String(outcome).replaceAll("_", " "))}</button>`).join("")}</div></section>`;
+  return `<section class="human-attention-panel" data-gate-node-run="${escapeAttr(nodeRunID)}"><div><h3>${escapeHTML(value(currentNode, "name", "Name") || "Human action required")}</h3><p>${escapeHTML(value(gateConfig, "instructions", "Instructions") || value(wait, "message", "Message") || "Choose the next workflow outcome.")}</p><textarea data-workflow-feedback rows="3" placeholder="Optional feedback for the next node"></textarea></div><div class="actions">${renderGateOutcomeButtons(outcomes, { nodeRunID, taskID, projectAttr: projectButtonAttr(projectID) })}</div></section>`;
 }
 
 
