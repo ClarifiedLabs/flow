@@ -12,7 +12,7 @@ installTestDOM();
 
 const { cardModel, dwellTone, formatDwell, matchesFilter, sortForAttention, waitActionLabel, waitReasonText, waitingOnBlockers, waitingOnOmitted } =
   await import("./board-model.js");
-const { nowCardModel, runRows, tabBadges, isOutdatedAnchor, reviewModel } = await import("./task-model.js");
+const { nowCardModel, runRows, tabBadges, isOutdatedAnchor, reviewModel, taskModel } = await import("./task-model.js");
 const { reconcile } = await import("./elements/base.js");
 const { renderTaskCard } = await import("./elements/task-card.js");
 const { renderAttentionStrip } = await import("./elements/attention-strip.js");
@@ -33,6 +33,7 @@ await import("./elements/lane.js");
 await import("./elements/tab-strip.js");
 const { inFlight } = await import("./actions.js");
 await import("./elements/change.js");
+await import("./elements/task-detail.js");
 
 const HOUR = 3600_000;
 
@@ -1493,4 +1494,867 @@ test("a non-Error review rejection still drains the registry and shows a final f
   assert.equal(inFlight.size, 0, "the in-flight registry drains on a non-Error rejection");
   change.remove();
   appNode.remove();
+});
+
+// --- Change-tab revalidation lifecycle (flow-task-detail) -------------------
+//
+// A task poll delivers a brand-new model object every interval, so the Change
+// tab caches its /v2/changes/:id + /diff pair behind a task:change:head key and
+// revalidates in place on a same-key poll. These tests pin the head-move
+// behaviour: a revalidation that discovers a newer head re-keys the cache to
+// it, so the poll that reports that same head neither reloads nor flashes
+// "Loading change", while a genuine later head change still reloads and drops
+// old-head drafts.
+
+function taskDetailModel(head) {
+  return taskModel({
+    task: { id: "t-0001", title: "Fix the thing", state: "working" },
+    project_id: "p-1",
+    task_detail: { ready_change: { id: "ch-0001", head_sha: head } },
+  }, null);
+}
+
+function changeDetailResponse(head, files) {
+  return {
+    change: { id: "ch-0001", head_sha: head },
+    task: { id: "t-0001" },
+    threads: [],
+    review_state: "in_review",
+    diff: { head_sha: head, files },
+  };
+}
+
+function diffFiles(marker) {
+  return [{ path: `${marker}.go`, hunks: [{ header: "@@ -1 +1 @@", lines: [{ kind: "add", new_line: 1, text: marker }] }] }];
+}
+
+// stubChangeFetch serves the change and diff endpoints from a mutable `state`
+// ({ head, files }) and records every request path, so a test can assert both
+// what is on screen and exactly which fetches ran.
+function stubChangeFetch(state) {
+  const calls = [];
+  globalThis.fetch = (path) => {
+    calls.push(String(path));
+    const head = state.head;
+    const files = state.files;
+    if (path.endsWith("/diff")) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ head_sha: head, files }) });
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ change: { id: "ch-0001", head_sha: head }, task: { id: "t-0001" }, threads: [], review_state: "in_review" }),
+    });
+  };
+  return calls;
+}
+
+async function settleChange(detail) {
+  // Let the in-flight change/revalidation fetch and its follow-up repaint run.
+  await detail.changePromise;
+  await flush();
+}
+
+// The panel shell holds a <flow-change> child; the rendered diff lives inside
+// that child, not in the panel's own (verbatim) markup.
+function changePanelHTML(detail) {
+  return detail.querySelector("flow-change")?.innerHTML || "";
+}
+
+async function mountTaskDetail(root, head) {
+  const detail = mountElement(root, "flow-task-detail", taskDetailModel(head));
+  await flush();
+  detail.querySelector("flow-tab-strip").select("change");
+  await flush();
+  return detail;
+}
+
+test("a same-head task poll revalidates in place without a reload or a loading flash", async () => {
+  const root = globalThis.document.body;
+  const state = { head: "h1", files: diffFiles("h1") };
+  const calls = stubChangeFetch(state);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+
+  assert.match(changePanelHTML(detail), /h1\.go/, "the loaded diff is on screen");
+  const initial = calls.filter((path) => path.includes("/v2/changes/ch-0001"));
+  assert.deepEqual(initial, ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"], "one change+diff pair on first load");
+
+  // A poll reports the same head with a brand-new model object.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+
+  const after = calls.filter((path) => path.includes("/v2/changes/ch-0001"));
+  assert.deepEqual(after, [...initial, "/ui/api/v2/changes/ch-0001"], "a same-head poll revalidates the change only; no /diff re-fetch");
+  assert.match(changePanelHTML(detail), /h1\.go/, "the change stays rendered");
+  assert.doesNotMatch(changePanelHTML(detail), /Loading change/, "no loading flash on a same-head poll");
+  detail.remove();
+});
+
+test("a revalidation head move re-keys the cache so the matching poll does not reload or flash", async () => {
+  const root = globalThis.document.body;
+  const state = { head: "h1", files: diffFiles("h1") };
+  const calls = stubChangeFetch(state);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+  const initial = calls.filter((path) => path.includes("/v2/changes/ch-0001"));
+
+  // The change advances server-side before the poll reports it; the next
+  // same-head poll revalidates and discovers the new head.
+  state.head = "h2";
+  state.files = diffFiles("h2");
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+
+  assert.match(changePanelHTML(detail), /h2\.go/, "the revalidation renders the new head's diff");
+  assert.doesNotMatch(changePanelHTML(detail), /h1\.go/, "the old head's diff is gone — one head only");
+
+  // The following poll reports the head the cache already holds.
+  detail.data = taskDetailModel("h2");
+  await flush();
+  await settleChange(detail);
+
+  assert.match(changePanelHTML(detail), /h2\.go/);
+  assert.doesNotMatch(changePanelHTML(detail), /Loading change/, "the matching poll must not flash the loader");
+  const reloads = calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(initial.length);
+  assert.deepEqual(reloads, ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"], "only the revalidation fetched; the matching poll fetched nothing");
+  detail.remove();
+});
+
+test("a poll that arrives while a moved-head revalidation verifies its diff keeps the prior pair and does not reload", async () => {
+  const root = globalThis.document.body;
+  // The revalidation's /diff is deferred so a task poll can report the new head
+  // in the window after the metadata GET returns it but before the diff
+  // verifies — the exact ordering that used to reset the coherent cache.
+  let resolveDiff;
+  const diffGate = new Promise((resolve) => {
+    resolveDiff = resolve;
+  });
+  // The initial load serves a coherent h1 pair; the revalidation serves h2
+  // metadata whose diff is deferred behind diffGate until the test releases it.
+  const script = [
+    { change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) },
+    { change: changeResponse("h2"), diff: diffResponse("h2", diffFiles("h2")), defer: true },
+  ];
+  const calls = [];
+  let index = 0;
+  globalThis.fetch = (path) => {
+    calls.push(String(path));
+    if (path.endsWith("/diff")) {
+      // The diff pairs with the change fetch that preceded it (index already
+      // advanced past it).
+      const step = script[Math.max(0, Math.min(index - 1, script.length - 1))];
+      const response = { ok: true, status: 200, json: () => Promise.resolve(step.diff) };
+      if (step.defer) return diffGate.then(() => response);
+      return Promise.resolve(response);
+    }
+    const step = script[Math.min(index, script.length - 1)];
+    index += 1;
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(step.change) });
+  };
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the loaded diff is on screen");
+  const initial = calls.filter((path) => path.includes("/v2/changes/ch-0001"));
+  assert.deepEqual(initial, ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"], "one change+diff pair on first load");
+
+  // A same-head poll revalidates; the metadata comes back for h2 and the diff
+  // fetch starts but has not verified yet. Pump microtasks until the
+  // revalidation has fetched the moved head's metadata and parked on its
+  // deferred diff (bounded, so a regression fails the assert rather than hangs).
+  detail.data = taskDetailModel("h1");
+  for (let i = 0; i < 50 && detail.changePendingKey !== "ch-0001:h2"; i++) await flush();
+  assert.equal(detail.changePendingKey, "ch-0001:h2", "the moved head is pending while its diff verifies");
+  assert.equal(detail.changeKey, "ch-0001:h1", "the cache key does not move before the diff verifies");
+  assert.match(changePanelHTML(detail), /h1\.go/, "the prior coherent pair stays on screen");
+  const generationBeforePoll = detail.changeGeneration;
+
+  // The task poll reports h2 in that window. It must not reset the cache: no
+  // "Loading change" flash, no second full load, and the in-flight revalidation
+  // is not invalidated.
+  detail.data = taskDetailModel("h2");
+  await flush();
+  assert.match(changePanelHTML(detail), /h1\.go/, "the prior pair stays on screen through the matching poll");
+  assert.doesNotMatch(changePanelHTML(detail), /Loading change/, "the matching poll must not flash the loader");
+  assert.equal(detail.changePendingKey, "ch-0001:h2", "the pending marker survives the matching poll");
+  assert.equal(detail.changeKey, "ch-0001:h1", "the cache key is unchanged by the matching poll");
+  assert.equal(detail.changeGeneration, generationBeforePoll, "the matching poll did not reset the cache (the revalidation is not invalidated)");
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(initial.length),
+    ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"],
+    "only the revalidation fetched; the matching poll fetched nothing",
+  );
+
+  // The deferred diff verifies: the revalidation adopts h2 and re-keys the
+  // cache, so the already-reported head renders without another fetch.
+  resolveDiff();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h2\.go/, "the verified head renders once its diff lands");
+  assert.doesNotMatch(changePanelHTML(detail), /h1\.go/, "one head only");
+  assert.equal(detail.changeKey, "ch-0001:h2", "the cache re-keys to the verified head");
+  assert.equal(detail.changePendingKey, "", "the pending marker clears once the pair verifies");
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(initial.length),
+    ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"],
+    "the revalidation's single pair is the only fetch; the matching poll added none",
+  );
+
+  // A later same-head poll revalidates in place, as usual once caught up.
+  const caughtUp = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+  detail.data = taskDetailModel("h2");
+  await flush();
+  await settleChange(detail);
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(caughtUp),
+    ["/ui/api/v2/changes/ch-0001"],
+    "a caught-up same-head poll revalidates the change only",
+  );
+  detail.remove();
+});
+
+test("a poll that rolls back to the cached head while a moved-head revalidation verifies keeps the current head and drops the stale revalidation", async () => {
+  const root = globalThis.document.body;
+  // The revalidation's /diff is deferred so the model can report the new head
+  // and then roll back to the cached head before that diff verifies — the
+  // ordering that used to let the stale revalidation adopt the rolled-back head
+  // over the model's current head.
+  let resolveDiff;
+  const diffGate = new Promise((resolve) => {
+    resolveDiff = resolve;
+  });
+  const script = [
+    { change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) },
+    { change: changeResponse("h2"), diff: diffResponse("h2", diffFiles("h2")), defer: true },
+    // After the rollback the cache stays stale, so the next same-head poll
+    // revalidates the current head; the server still holds h1.
+    { change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) },
+  ];
+  const calls = [];
+  let index = 0;
+  globalThis.fetch = (path) => {
+    calls.push(String(path));
+    if (path.endsWith("/diff")) {
+      const step = script[Math.max(0, Math.min(index - 1, script.length - 1))];
+      const response = { ok: true, status: 200, json: () => Promise.resolve(step.diff) };
+      if (step.defer) return diffGate.then(() => response);
+      return Promise.resolve(response);
+    }
+    const step = script[Math.min(index, script.length - 1)];
+    index += 1;
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(step.change) });
+  };
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the loaded diff is on screen");
+  const initial = calls.filter((path) => path.includes("/v2/changes/ch-0001"));
+  assert.deepEqual(initial, ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"], "one change+diff pair on first load");
+
+  // A same-head poll revalidates; the metadata comes back for h2 and the diff
+  // fetch parks behind diffGate. Pump until the pending marker is set (bounded,
+  // so a regression fails the assert rather than hangs).
+  detail.data = taskDetailModel("h1");
+  for (let i = 0; i < 50 && detail.changePendingKey !== "ch-0001:h2"; i++) await flush();
+  assert.equal(detail.changePendingKey, "ch-0001:h2", "the moved head is pending while its diff verifies");
+
+  // The poll reports h2 in the verification window: the prior pair stays, and
+  // the observation is recorded so a later rollback can be recognized.
+  detail.data = taskDetailModel("h2");
+  await flush();
+  assert.match(changePanelHTML(detail), /h1\.go/, "the prior pair stays on screen through the matching poll");
+  assert.equal(detail.changePendingSeen, true, "the matching poll observes the pending head");
+  assert.equal(detail.changeKey, "ch-0001:h1", "the cache key is unchanged by the matching poll");
+
+  // Before the diff verifies, the model rolls back to h1. This divergent poll
+  // must invalidate the stale h2 revalidation: the pending marker clears, but
+  // the coherent h1 pair stays on screen with no reload and no flash.
+  const generationBeforeRollback = detail.changeGeneration;
+  detail.data = taskDetailModel("h1");
+  await flush();
+  assert.match(changePanelHTML(detail), /h1\.go/, "the rollback keeps the current head on screen");
+  assert.doesNotMatch(changePanelHTML(detail), /Loading change/, "the rollback must not flash the loader");
+  assert.equal(detail.changePendingKey, "", "the rollback clears the pending marker");
+  assert.equal(detail.changePendingSeen, false, "the rollback clears the pending observation");
+  assert.equal(detail.changeKey, "ch-0001:h1", "the cache key stays on the current head");
+  assert.equal(detail.changeGeneration, generationBeforeRollback, "the rollback did not reset the cache (the pair is still coherent)");
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(initial.length),
+    ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"],
+    "only the revalidation fetched; the rollback poll fetched nothing",
+  );
+
+  // The deferred h2 diff finally lands. The stale revalidation must NOT adopt
+  // it over the model's current h1 head: the pair stays h1 and the cache key
+  // does not move.
+  resolveDiff();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the current head stays on screen after the stale diff lands");
+  assert.doesNotMatch(changePanelHTML(detail), /h2\.go/, "the rolled-back head is never rendered — one head only");
+  assert.equal(detail.changeKey, "ch-0001:h1", "the stale revalidation does not adopt the rolled-back head");
+  assert.equal(detail.changeAheadKey, "", "no ahead window opens for the rolled-back head");
+
+  // The cache stayed stale, so the next same-head poll revalidates the current
+  // head in place and confirms it.
+  const caughtUp = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the revalidated current head stays rendered");
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(caughtUp),
+    ["/ui/api/v2/changes/ch-0001"],
+    "a caught-up same-head poll revalidates the change only",
+  );
+  detail.remove();
+});
+
+// The pending/ahead reconciliation above must run on every model poll, not only
+// while the Change tab is the one being painted. A moved-head revalidation can
+// be verifying its diff — or have adopted a head the poll has not reported —
+// while another tab is open; polls delivered to that hidden tab must still
+// observe the pending head and invalidate a rollback, or a stale revalidation
+// would adopt a head the model has already rolled back from.
+
+// deferredDiffFetch serves a scripted sequence of change/diff responses; an
+// entry flagged `defer` holds its /diff behind a gate the test releases, so a
+// task poll can land in the window after a revalidation fetched a moved head's
+// metadata but before its diff verifies.
+function deferredDiffFetch(script) {
+  let resolveDiff;
+  const diffGate = new Promise((resolve) => {
+    resolveDiff = resolve;
+  });
+  const calls = [];
+  let index = 0;
+  globalThis.fetch = (path) => {
+    calls.push(String(path));
+    if (path.endsWith("/diff")) {
+      const step = script[Math.max(0, Math.min(index - 1, script.length - 1))];
+      const response = { ok: true, status: 200, json: () => Promise.resolve(step.diff) };
+      if (step.defer) return diffGate.then(() => response);
+      return Promise.resolve(response);
+    }
+    const step = script[Math.min(index, script.length - 1)];
+    index += 1;
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(step.change) });
+  };
+  return { calls, release: resolveDiff };
+}
+
+test("a hidden-tab poll that rolls back to the cached head while a revalidation verifies keeps the current head and drops the stale revalidation", async () => {
+  const root = globalThis.document.body;
+  // Initial load serves a coherent h1 pair; the revalidation serves h2 metadata
+  // whose diff is deferred; the server then rolls back to h1, so the caught-up
+  // poll revalidates the current head in place (no re-adoption).
+  const { calls, release } = deferredDiffFetch([
+    { change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) },
+    { change: changeResponse("h2"), diff: diffResponse("h2", diffFiles("h2")), defer: true },
+    { change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) },
+  ]);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the loaded diff is on screen");
+
+  // A same-head poll revalidates and discovers h2; its diff is held.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  for (let i = 0; i < 20 && detail.changePendingKey !== "ch-0001:h2"; i += 1) await flush();
+  assert.equal(detail.changePendingKey, "ch-0001:h2", "the revalidation parked on its moved head's deferred diff");
+
+  // The reviewer leaves the Change tab while the diff verifies.
+  detail.querySelector("flow-tab-strip").select("overview");
+  await flush();
+
+  // Polls now land on a hidden tab: h2 (observes the pending head), then h1
+  // (rolls back to the cached head).
+  detail.data = taskDetailModel("h2");
+  await flush();
+  assert.equal(detail.changePendingSeen, true, "the hidden-tab h2 poll observed the pending head");
+  detail.data = taskDetailModel("h1");
+  await flush();
+  assert.equal(detail.changePendingKey, "", "the hidden-tab rollback cleared the pending marker");
+  assert.equal(detail.changeKey, "ch-0001:h1", "the cached pair is still the current head");
+
+  // The stale diff finally lands: the revalidation must not adopt h2 over the
+  // model's current h1 head.
+  release();
+  await settleChange(detail);
+  assert.equal(detail.changeKey, "ch-0001:h1", "the stale revalidation does not adopt the rolled-back head");
+  assert.equal(detail.changeAheadKey, "", "no ahead window opens for the rolled-back head");
+
+  // Reopening the Change tab renders the current head's pair — not the stale
+  // h2 pair — and a caught-up same-head poll revalidates in place.
+  detail.querySelector("flow-tab-strip").select("change");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the current head renders on reopen");
+  assert.doesNotMatch(changePanelHTML(detail), /h2\.go/, "the rolled-back head is never rendered — one head only");
+  const caughtUp = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(caughtUp),
+    ["/ui/api/v2/changes/ch-0001"],
+    "a caught-up same-head poll revalidates the change only",
+  );
+  detail.remove();
+});
+
+test("hidden-tab polls that keep naming the pre-adoption head expire the ahead window and reload the current head", async () => {
+  const root = globalThis.document.body;
+  const state = { head: "h1", files: diffFiles("h1") };
+  const calls = stubChangeFetch(state);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+
+  // A revalidation adopts h2 while the poll still reports h1.
+  state.head = "h2";
+  state.files = diffFiles("h2");
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.equal(detail.changeKey, "ch-0001:h2", "the revalidation adopted the new head");
+  assert.equal(detail.changeAheadKey, "ch-0001:h1", "the ahead window names the pre-adoption head");
+
+  // A reviewer's pending inline note anchored to the adopted head's diff.
+  detail.querySelector("flow-change").drafts.set("h2.go:1", "adopted-head note");
+
+  // The reviewer leaves the Change tab; the server rolls back to h1 before any
+  // poll reports h2.
+  detail.querySelector("flow-tab-strip").select("overview");
+  await flush();
+  state.head = "h1";
+  state.files = diffFiles("h1");
+
+  // The first hidden-tab h1 poll is inside the ahead window: it keeps the
+  // adopted pair (no reset) but counts against the bounded lag.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  assert.equal(detail.changeKey, "ch-0001:h2", "the first hidden-tab poll keeps the ahead pair");
+
+  // A persistent pre-adoption head is a rollback, not lag: the window expires
+  // on the next hidden-tab poll and the adopted pair is dropped (the cache no
+  // longer holds h2; it reloads the current head when the tab reopens).
+  detail.data = taskDetailModel("h1");
+  await flush();
+  assert.notEqual(detail.changeKey, "ch-0001:h2", "the expired ahead window drops the adopted head");
+  assert.equal(detail.changeAheadKey, "", "the ahead marker is gone");
+
+  // Reopening the Change tab reloads the current head and drops the adopted
+  // head's drafts.
+  detail.querySelector("flow-tab-strip").select("change");
+  await flush();
+  await settleChange(detail);
+  assert.equal(detail.changeKey, "ch-0001:h1", "the reopened tab reloads the current head");
+  assert.match(changePanelHTML(detail), /h1\.go/, "the current head's diff is rendered on reopen");
+  assert.doesNotMatch(changePanelHTML(detail), /h2\.go/, "the adopted head's diff is gone — one head only");
+  assert.equal(detail.querySelector("flow-change").drafts.size, 0, "the reset rebuilds the element, dropping the adopted head's drafts");
+  detail.remove();
+});
+
+test("a poll that skips the revalidation's adopted head reloads the later head and drops old-head drafts", async () => {
+  const root = globalThis.document.body;
+  const state = { head: "h1", files: diffFiles("h1") };
+  const calls = stubChangeFetch(state);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+
+  // Revalidation adopts h2 while the poll still reports h1.
+  state.head = "h2";
+  state.files = diffFiles("h2");
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h2\.go/, "the revalidation renders the adopted head's diff");
+
+  // A reviewer's pending inline note anchored to the adopted head's diff.
+  detail.querySelector("flow-change").drafts.set("h2.go:1", "adopted-head note");
+  const adopted = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+
+  // The change advances to h3 entirely between poll intervals, so the next
+  // poll reports h3 directly and never reports h2. The ahead cache must not
+  // pin the tab to h2: it has to reload h3 and drop the h2 draft.
+  state.head = "h3";
+  state.files = diffFiles("h3");
+  detail.data = taskDetailModel("h3");
+  await flush();
+  await settleChange(detail);
+
+  assert.match(changePanelHTML(detail), /h3\.go/, "the skipped-intermediate poll renders the later head's diff");
+  assert.doesNotMatch(changePanelHTML(detail), /h2\.go/, "the adopted head's diff is gone — one head only");
+  assert.equal(detail.querySelector("flow-change").drafts.size, 0, "a genuine later head rebuilds the element, dropping old-head drafts");
+  const h3Reload = calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(adopted);
+  assert.deepEqual(h3Reload, ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"], "the skipped-intermediate poll fetched a fresh change+diff pair");
+
+  // Once the model catches up, the ahead window is over: a same-head poll
+  // revalidates in place instead of staying pinned behind a stale ahead flag.
+  const caughtUp = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+  detail.data = taskDetailModel("h3");
+  await flush();
+  await settleChange(detail);
+  const revalidate = calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(caughtUp);
+  assert.deepEqual(revalidate, ["/ui/api/v2/changes/ch-0001"], "a caught-up same-head poll revalidates the change only");
+  assert.match(changePanelHTML(detail), /h3\.go/, "the change stays rendered");
+  detail.remove();
+});
+
+test("a genuine later head change reloads the pair and drops old-head drafts", async () => {
+  const root = globalThis.document.body;
+  const state = { head: "h1", files: diffFiles("h1") };
+  stubChangeFetch(state);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+
+  // A reviewer's pending inline note anchored to the old head's diff.
+  detail.querySelector("flow-change").drafts.set("h1.go:1", "old-head note");
+
+  // The poll itself reports the new head.
+  state.head = "h2";
+  state.files = diffFiles("h2");
+  detail.data = taskDetailModel("h2");
+  await flush();
+  await settleChange(detail);
+
+  assert.match(changePanelHTML(detail), /h2\.go/, "the new head's diff is rendered");
+  assert.doesNotMatch(changePanelHTML(detail), /h1\.go/, "the old head's diff is gone — one head only");
+  assert.equal(detail.querySelector("flow-change").drafts.size, 0, "a head move rebuilds the element, dropping old-head drafts");
+  detail.remove();
+});
+
+test("a rollback to the pre-adoption head reloads the current head and drops the adopted head's drafts", async () => {
+  const root = globalThis.document.body;
+  const state = { head: "h1", files: diffFiles("h1") };
+  const calls = stubChangeFetch(state);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+
+  // Revalidation adopts h2 while the poll still reports h1.
+  state.head = "h2";
+  state.files = diffFiles("h2");
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h2\.go/, "the revalidation renders the adopted head's diff");
+
+  // A reviewer's pending inline note anchored to the adopted head's diff.
+  detail.querySelector("flow-change").drafts.set("h2.go:1", "adopted-head note");
+
+  // The server rolls back to h1 before any poll reports h2. The first h1 poll
+  // after the adoption is inside the ahead window (the adoption repaint), so it
+  // keeps the fresh pair without a reload.
+  state.head = "h1";
+  state.files = diffFiles("h1");
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h2\.go/, "the adoption repaint keeps the ahead pair");
+
+  // The model keeps naming the pre-adoption head: a rollback, not lag. The
+  // bounded exemption must expire and the tab must reload the current head.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+
+  assert.match(changePanelHTML(detail), /h1\.go/, "the rollback reloads the current head's diff");
+  assert.doesNotMatch(changePanelHTML(detail), /h2\.go/, "the stale adopted head's diff is gone — one head only");
+  assert.equal(detail.querySelector("flow-change").drafts.size, 0, "the rollback rebuilds the element, dropping the adopted head's drafts");
+  assert.equal(detail.changeKey, "ch-0001:h1", "the cache re-keys to the current head");
+  assert.equal(detail.changeAheadKey, "", "the ahead exemption is cleared once the model rolls back");
+  assert.doesNotMatch(changePanelHTML(detail), /Loading change/, "the cached current-head pair renders without a loading flash");
+
+  // Once caught up, a same-head poll revalidates in place again.
+  const caughtUp = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(caughtUp),
+    ["/ui/api/v2/changes/ch-0001"],
+    "a caught-up same-head poll revalidates the change only",
+  );
+  detail.remove();
+});
+
+test("a coherent load that returns a different head than the model reloads on the next same-head poll", async () => {
+  const root = globalThis.document.body;
+  // The server already holds h2, but the task poll still reports h1: the
+  // initial load fetches a coherent h2 pair and adopts it ahead of the model.
+  const state = { head: "h2", files: diffFiles("h2") };
+  const calls = stubChangeFetch(state);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h2\.go/, "the coherent load renders the head the server actually holds");
+  assert.equal(detail.changeKey, "ch-0001:h2", "the load adopts the fetched head");
+
+  detail.querySelector("flow-change").drafts.set("h2.go:1", "adopted-head note");
+
+  // The server rolls back to h1 while the model keeps reporting h1. The first
+  // h1 poll after the adoption is inside the ahead window, so it keeps the
+  // adopted pair; the next one expires the exemption and reloads h1.
+  state.head = "h1";
+  state.files = diffFiles("h1");
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h2\.go/, "the adoption repaint keeps the ahead pair");
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+
+  assert.match(changePanelHTML(detail), /h1\.go/, "the persistent model head reloads and renders");
+  assert.doesNotMatch(changePanelHTML(detail), /h2\.go/, "the adopted head's diff is gone — one head only");
+  assert.equal(detail.querySelector("flow-change").drafts.size, 0, "the reload drops the adopted head's drafts");
+  assert.equal(detail.changeKey, "ch-0001:h1", "the cache re-keys to the model's head");
+  assert.equal(detail.changeAheadKey, "", "the ahead exemption is cleared");
+  const diffs = calls.filter((path) => path.includes("/v2/changes/ch-0001/diff"));
+  assert.equal(diffs.length, 2, "the rollback re-fetched the model's head with its own diff after the exemption expired");
+  detail.remove();
+});
+
+// --- ahead-cache rollback / ABA ---------------------------------------------
+//
+// A SHA has no ordering, so a model that keeps naming the pre-adoption head is
+// a rollback (or ABA), not lag. The ahead exemption may cover the adoption
+// repaint and a bounded lag window only; once that budget is exhausted the
+// cache must reset so the current head reloads and the adopted head's drafts
+// drop. Without the bound, a server that returns to the pre-adoption head
+// satisfies the exemption on every poll and the tab stays pinned to the stale
+// adopted head forever.
+
+// --- unverified revalidation/load responses --------------------------------
+//
+// A refreshed metadata response can be headless, name the wrong change, or
+// arrive with a diff that failed, came back headless, or names another head.
+// None of those may replace the cached pair: an unverified metadata head must
+// never become the current head, or the matching poll's ahead-key suppression
+// would skip the recovery load and render that metadata under a diff verified
+// for a different head. The cache keeps its prior coherent pair and the next
+// poll retries.
+
+function changeResponse(head, { changeID = "ch-0001" } = {}) {
+  return { change: { id: changeID, head_sha: head }, task: { id: "t-0001" }, threads: [], review_state: "in_review" };
+}
+
+function diffResponse(head, files) {
+  return { head_sha: head, files };
+}
+
+// scriptedChangeFetch serves the change and diff endpoints from a `script`
+// array of { change, diff } entries, one per change fetch; `diff` may be a
+// body, "fail" (a rejected fetch), or undefined (skip the diff fetch). When
+// the script runs out, the last entry repeats.
+function scriptedChangeFetch(script) {
+  const calls = [];
+  let index = 0;
+  globalThis.fetch = (path) => {
+    calls.push(String(path));
+    if (path.endsWith("/diff")) {
+      // The diff pairs with the change fetch that preceded it (index already
+      // advanced past it).
+      const step = script[Math.max(0, Math.min(index - 1, script.length - 1))];
+      if (step.diff === "fail") return Promise.reject(new Error("boom"));
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(step.diff) });
+    }
+    const step = script[Math.min(index, script.length - 1)];
+    index += 1;
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(step.change) });
+  };
+  return calls;
+}
+
+test("a headless revalidation response keeps the cached pair and recovers on the matching poll", async () => {
+  const root = globalThis.document.body;
+  const calls = scriptedChangeFetch([
+    { change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) },
+    { change: { change: { id: "ch-0001" }, task: { id: "t-0001" }, threads: [], review_state: "in_review" } },
+    { change: changeResponse("h2"), diff: diffResponse("h2", diffFiles("h2")) },
+  ]);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the loaded diff is on screen");
+
+  // The revalidation's metadata comes back without a head. It must not replace
+  // the cached pair or advance the cache key.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the headless response keeps the prior pair on screen");
+  assert.equal(detail.changeKey, "ch-0001:h1", "a headless response does not move the cache key");
+  assert.equal(detail.changeAheadKey, "", "a headless response does not set the ahead key");
+
+  // The poll reports the new head: a full reload fetches a verified h2 pair.
+  const before = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+  detail.data = taskDetailModel("h2");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h2\.go/, "the matching poll recovers the new head's diff");
+  assert.doesNotMatch(changePanelHTML(detail), /h1\.go/, "one head only");
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(before),
+    ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"],
+    "the matching poll fetched a fresh change+diff pair",
+  );
+  detail.remove();
+});
+
+test("a wrong-change revalidation response keeps the cached pair and recovers on the matching poll", async () => {
+  const root = globalThis.document.body;
+  const calls = scriptedChangeFetch([
+    { change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) },
+    { change: changeResponse("h2", { changeID: "ch-9999" }) },
+    { change: changeResponse("h2"), diff: diffResponse("h2", diffFiles("h2")) },
+  ]);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+
+  // The revalidation's metadata names another change. It must not replace the
+  // cached pair or move the cache key.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the wrong-change response keeps the prior pair on screen");
+  assert.equal(detail.changeKey, "ch-0001:h1", "a wrong-change response does not move the cache key");
+
+  const before = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+  detail.data = taskDetailModel("h2");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h2\.go/, "the matching poll recovers the new head's diff");
+  assert.doesNotMatch(changePanelHTML(detail), /h1\.go/, "one head only");
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(before),
+    ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"],
+    "the matching poll fetched a fresh change+diff pair",
+  );
+  detail.remove();
+});
+
+test("a revalidation whose diff fails or comes back headless keeps the prior pair and retries on the next poll", async () => {
+  const root = globalThis.document.body;
+  const calls = scriptedChangeFetch([
+    { change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) },
+    { change: changeResponse("h2"), diff: "fail" },
+    { change: changeResponse("h2"), diff: { files: diffFiles("h2") } },
+    { change: changeResponse("h2"), diff: diffResponse("h2", diffFiles("h2")) },
+  ]);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the loaded diff is on screen");
+
+  // The moved head's diff fetch fails: the h1 pair stays and no head is adopted.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "a failed diff keeps the prior pair on screen");
+  assert.equal(detail.changeKey, "ch-0001:h1", "a failed diff does not move the cache key");
+  assert.equal(detail.changeAheadKey, "", "a failed diff does not set the ahead key");
+
+  // The next same-head poll retries; now the diff comes back without a head, so
+  // it verifies nothing and the pair still does not move.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "a headless diff keeps the prior pair on screen");
+  assert.equal(detail.changeKey, "ch-0001:h1", "a headless diff does not move the cache key");
+
+  // The third poll gets a diff naming h2: the pair adopts and the matching poll
+  // neither reloads nor flashes.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h2\.go/, "a verified diff adopts the moved head");
+  assert.doesNotMatch(changePanelHTML(detail), /h1\.go/, "one head only");
+
+  const before = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+  detail.data = taskDetailModel("h2");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h2\.go/, "the matching poll keeps the adopted pair");
+  assert.doesNotMatch(changePanelHTML(detail), /Loading change/, "the matching poll must not flash the loader");
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(before),
+    [],
+    "the matching poll fetched nothing; the adopted pair is fresh",
+  );
+
+  // Once the model has caught up, the ahead window is over: the next same-head
+  // poll revalidates in place again.
+  const caughtUp = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+  detail.data = taskDetailModel("h2");
+  await flush();
+  await settleChange(detail);
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(caughtUp),
+    ["/ui/api/v2/changes/ch-0001"],
+    "a caught-up same-head poll revalidates the change only",
+  );
+  detail.remove();
+});
+
+test("a revalidation whose diff names yet another head keeps the prior pair until a verified one lands", async () => {
+  const root = globalThis.document.body;
+  const calls = scriptedChangeFetch([
+    { change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) },
+    { change: changeResponse("h2"), diff: diffResponse("h3", diffFiles("h3")) },
+    { change: changeResponse("h2"), diff: diffResponse("h2", diffFiles("h2")) },
+  ]);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+
+  // The change moved to h2, but /diff answered for h3 (it moved again between
+  // the two GETs). The mismatched diff must not install under h2's metadata.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "a mismatched diff keeps the prior pair on screen");
+  assert.doesNotMatch(changePanelHTML(detail), /h3\.go/, "the other head's diff is never rendered");
+  assert.equal(detail.changeKey, "ch-0001:h1", "a mismatched diff does not move the cache key");
+
+  // The next poll retries and lands a verified h2 pair.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h2\.go/, "a verified diff adopts the moved head");
+  assert.doesNotMatch(changePanelHTML(detail), /h1\.go/, "one head only");
+
+  const before = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+  detail.data = taskDetailModel("h2");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h2\.go/, "the matching poll keeps the adopted pair");
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(before),
+    [],
+    "the matching poll fetched nothing; the adopted pair is fresh",
+  );
+  detail.remove();
+});
+
+test("a load that never verifies shows a retryable error instead of an unverified pair", async () => {
+  const root = globalThis.document.body;
+  const calls = scriptedChangeFetch([
+    { change: changeResponse("h1"), diff: diffResponse("h2", diffFiles("h2")) },
+  ]);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+
+  // Every attempt's diff names another head, so no pair verifies: the tab shows
+  // a retryable error rather than metadata with a diff verified for another
+  // head.
+  const panel = detail.querySelector(".panel");
+  assert.match(panel.innerHTML, /advanced while it was loading/, "an unverified load fails with a retryable error");
+  assert.match(panel.innerHTML, /data-change-retry/, "the error offers a retry");
+  assert.doesNotMatch(panel.innerHTML, /h2\.go/, "no unverified diff is rendered");
+  assert.equal(
+    calls.filter((path) => path.endsWith("/v2/changes/ch-0001")).length,
+    3,
+    "the load retried its bounded number of reads",
+  );
+
+  // A retry that lands a verified pair installs it.
+  scriptedChangeFetch([{ change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) }]);
+  panel.querySelector("[data-change-retry]").dispatchEvent(new TestEvent("click", { bubbles: true }));
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the retry renders the verified pair");
+  detail.remove();
 });

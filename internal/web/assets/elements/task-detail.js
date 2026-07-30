@@ -56,6 +56,31 @@ export function renderTaskTerminal(target, loginPath) {
   `;
 }
 
+// changeModelKey identifies what the cached change load belongs to: this
+// task, this change, at this head. Polls deliver a brand-new model object
+// every interval, so object identity cannot gate the cache reset — that would
+// re-fetch the change (and rebuild the Change tab) on every poll. Only one of
+// the three moving does. A same-key model instead marks the cache stale, and
+// the Change tab revalidates it in place: another reviewer's comment, a
+// review-state flip, or a permission change becomes visible without losing
+// the selected file or the pending inline notes.
+export function changeModelKey(model) {
+  const change = model?.change;
+  return [model?.id, value(change, "id", "ID"), value(change, "head_sha", "HeadSHA")]
+    .map((part) => String(part || ""))
+    .join(":");
+}
+
+// CHANGE_AHEAD_LAG_POLLS bounds how many polls may keep naming the
+// pre-adoption head before the ahead-cache exemption expires. A revalidation
+// or load can fetch a head the poll has not reported yet; the exemption keeps
+// that fresh pair on screen for the adoption repaint plus a short lag window in
+// case the poll is about to catch up. A SHA has no ordering, though, so a model
+// that keeps naming the pre-adoption head past this window is a rollback/ABA
+// rather than lag, and the cache must reset so the current head reloads and the
+// adopted head's drafts drop instead of pinning the stale pair forever.
+const CHANGE_AHEAD_LAG_POLLS = 1;
+
 export class FlowTaskDetail extends FlowElement {
   diagram = readDiagramMode();
   activePanel = "";
@@ -63,11 +88,47 @@ export class FlowTaskDetail extends FlowElement {
   panelMarkup = "";
   deepLinked = false;
   renderedModel = null;
+  renderedChangeKey = "";
   changeGeneration = 0;
   changeKey = "";
   changeData = null;
   changeError = "";
   changePromise = null;
+  changeStale = false;
+  // changeAheadKey names the model head the cache was ahead of when it fetched
+  // a head the poll has not reported yet (a revalidation or load fetched
+  // ahead). While the model still names that exact head, a repaint must not
+  // throw the fresh pair away. It is cleared as soon as the model catches up
+  // (or moves past it), so a later head the ahead cache does not cover reloads
+  // the change instead of being pinned behind a stale ahead flag.
+  changeAheadKey = "";
+  // changeAheadSeen counts the polls that have kept naming changeAheadKey since
+  // the cache moved ahead of the model. It bounds the exemption: the adoption
+  // repaint plus CHANGE_AHEAD_LAG_POLLS polls may keep the fresh pair, but a
+  // model that keeps naming the pre-adoption head past that window is a
+  // rollback/ABA, not lag, and the cache resets to reload the current head.
+  changeAheadSeen = 0;
+  // changePendingKey names the head an in-flight revalidation has fetched
+  // metadata for but not yet verified a diff against. It is set only while
+  // revalidateChange awaits the moved head's /diff, and carries no data — the
+  // unverified head is never rendered. Its sole job is to tell a task poll that
+  // reports that exact head, in the window before the diff verifies, to keep the
+  // still-coherent prior pair instead of resetting it: a reset would flash
+  // "Loading change", start a second full change+diff load, and invalidate the
+  // in-flight revalidation by generation. The moment the pair verifies,
+  // adoptChangeHead re-keys the cache (and the ahead window takes over); if the
+  // attempt gives up, the marker clears and the cache stays stale for the next
+  // poll. A different head, or the lag window expiring, resets the cache.
+  changePendingKey = "";
+  // changePendingSeen records that a task poll observed the pending head while
+  // its diff was still verifying. Once the pending head has been observed, a
+  // later poll that diverges back to the cached head is a rollback: the pending
+  // head is no longer current, so the stale in-flight revalidation must not
+  // adopt it over the model's head when its diff finally lands. paintChange
+  // clears the pending marker on that divergent poll (which revalidateChange
+  // checks before adopting); the coherent pair stays on screen, and the cache
+  // stays stale so the next poll revalidates the current head.
+  changePendingSeen = false;
   terminalGeneration = 0;
   terminalKey = "";
   terminalLoginPath = "";
@@ -76,10 +137,42 @@ export class FlowTaskDetail extends FlowElement {
 
   render(model) {
     if (!model) return `<div class="empty">Loading task</div>`;
-    if (model !== this.renderedModel) {
-      this.renderedModel = model;
+    const changeKey = changeModelKey(model);
+    if (changeKey === this.renderedChangeKey) {
+      // A fresh model for the same task/change/head is a poll or a refresh.
+      // The cached change predates it, so the next Change-tab paint
+      // revalidates the cache in place rather than serving it forever. A cache
+      // that already fetched ahead of the poll is fresh; leave it alone.
+      // paintChange clears changeAheadKey once the model catches up (or moves
+      // past it), and bounds how long a pre-adoption head may keep the ahead
+      // cache, so subsequent same-head polls revalidate normally and a
+      // persistent rollback eventually reloads the current head.
+      if (this.changeData && !this.changeAheadKey) this.changeStale = true;
+    } else {
+      this.renderedChangeKey = changeKey;
+      // A different task/change/head normally resets the cache. A cache that
+      // fetched ahead of the poll is fresh and survives — but only while the
+      // ahead window is open; the reconciliation below expires it for a
+      // persistent rollback. A revalidation that has fetched a new head's
+      // metadata but not yet verified its diff (changePendingKey) likewise
+      // survives a poll reporting that head until the diff lands.
+      if (!((this.changeAheadKey || this.changePendingKey) && this.changeData)) this.resetChangeLoad();
+    }
+    // While the Change tab is active, paintChange reconciles the cached pair
+    // against the model head on every paint (and resets it when it no longer
+    // matches). While another tab is open, paintChange never runs, so reconcile
+    // here instead — on every poll, same-key or not: a moved-head revalidation
+    // can be verifying its diff, or have adopted a head the poll has not
+    // reported, while the tab is hidden, and the pending/ahead state (including
+    // a rollback back to the cached head, and the bounded ahead window for a
+    // persistent pre-adoption head) must be honoured so a stale revalidation
+    // cannot later adopt a head the model has already left. The cache survives
+    // only when it still matches this head; otherwise it resets, dropping
+    // old-head drafts.
+    if (this.querySelector("flow-tab-strip")?.active !== "change" && !this.reconcileChangeHead(model)) {
       this.resetChangeLoad();
     }
+    this.renderedModel = model;
     return `
       <flow-task-rail></flow-task-rail>
       <div class="surface">
@@ -242,6 +335,11 @@ export class FlowTaskDetail extends FlowElement {
     this.changeData = null;
     this.changeError = "";
     this.changePromise = null;
+    this.changeStale = false;
+    this.changeAheadKey = "";
+    this.changeAheadSeen = 0;
+    this.changePendingKey = "";
+    this.changePendingSeen = false;
   }
 
   paintChange(model, panel) {
@@ -252,8 +350,22 @@ export class FlowTaskDetail extends FlowElement {
     }
     const id = String(value(change, "id", "ID") || "");
     const head = String(value(change, "head_sha", "HeadSHA") || "");
-    const key = `${id}:${head}`;
-    if (key !== this.changeKey) this.resetChangeLoad(key);
+    const modelKey = `${id}:${head}`;
+    // Reconcile the cached pair against the model head before deciding whether
+    // to keep it. This is shared with render(), which runs it for polls that
+    // arrive while another tab is open, so a moved-head revalidation that is
+    // verifying its diff — or has adopted a head the poll has not reported —
+    // is honoured on every poll (including a rollback back to the cached head,
+    // and the bounded ahead window for a persistent pre-adoption head). When
+    // the cache no longer matches this head, it resets below and reloads,
+    // dropping old-head drafts.
+    if (!this.reconcileChangeHead(model)) {
+      // A different change, a genuine later head the cache never fetched, or a
+      // rollback that outlasted the ahead window: reload and drop old-head
+      // drafts.
+      this.resetChangeLoad(modelKey);
+    }
+    const key = this.changeKey;
 
     if (this.changeData) {
       if (this.panelKey !== `change:${key}:data`) {
@@ -262,8 +374,14 @@ export class FlowTaskDetail extends FlowElement {
         this.panelMarkup = "";
       }
       // Reusing the element keeps the selected file and the reviewer's pending
-      // inline notes; the element's own paint skips unchanged markup.
+      // inline notes; the element's own paint skips unchanged markup. A poll
+      // marks the cache stale (render), so revalidate it in place — the fresh
+      // copy lands on this same element, not a rebuilt one.
       panel.firstElementChild.data = this.changeData;
+      if (this.changeStale && !this.changePromise) {
+        const cachedHead = String(value(this.changeData.change || {}, "head_sha", "HeadSHA") || "");
+        this.revalidateChange(id, key, cachedHead);
+      }
       return;
     }
     if (this.changeError) {
@@ -274,28 +392,214 @@ export class FlowTaskDetail extends FlowElement {
     if (!this.changePromise) this.loadChange(id, key);
   }
 
+  // reconcileChangeHead keeps the cached change/diff pair honest against the
+  // model's head and reports whether the cache may be kept. It runs on every
+  // model poll — from paintChange when the Change tab is active, and from
+  // render() for polls that arrive while another tab is open — so a moved-head
+  // revalidation that is verifying its diff (or has adopted a head the poll has
+  // not reported) is reconciled on every poll regardless of the active tab.
+  // Without that, polls delivered to a hidden tab would skip the pending
+  // observation and the rollback invalidation, and a stale revalidation could
+  // adopt a head the model has already rolled back from. It never loads or
+  // repaints; it only adjusts the cache markers. It returns true when the cache
+  // still matches the model head (caught up, pending, or inside the ahead
+  // window) and false when it must be reset and reloaded.
+  reconcileChangeHead(model) {
+    const change = model.change;
+    if (!change) return false;
+    const id = String(value(change, "id", "ID") || "");
+    if (!id) return false;
+    const modelKey = `${id}:${String(value(change, "head_sha", "HeadSHA") || "")}`;
+    if (modelKey === this.changeKey) {
+      // The model has caught up to the cached head. If a moved-head
+      // revalidation is still verifying a different head that a poll already
+      // reported, the model has since diverged back to the cached head — a
+      // rollback. Clear the pending marker so the stale revalidation bails
+      // instead of adopting the head the model has left. The generation is
+      // deliberately not bumped: the cached pair is still coherent for this
+      // head, so it stays on screen, and the revalidation's finally block still
+      // clears changePromise. The cache stays stale, so the next same-head poll
+      // revalidates the current head. A poll that never reported the pending
+      // head leaves the marker alone.
+      if (this.changePendingKey && this.changePendingSeen) {
+        this.changePendingKey = "";
+        this.changePendingSeen = false;
+      }
+      this.changeAheadKey = "";
+      this.changeAheadSeen = 0;
+      return true;
+    }
+    if (this.changePendingKey === modelKey && Boolean(this.changeData)) {
+      // The poll reports exactly the head a moved-head revalidation is
+      // verifying. Keep the prior coherent pair — no reset, no reload, no flash
+      // — and record that this head was observed, so a later poll that diverges
+      // back to the cached head is recognized as a rollback and invalidates the
+      // pending work. The marker clears the moment the pair verifies
+      // (adoptChangeHead) or the attempt gives up.
+      this.changePendingSeen = true;
+      return true;
+    }
+    if (this.changeAheadKey === modelKey && this.changeAheadSeen <= CHANGE_AHEAD_LAG_POLLS && Boolean(this.changeData)) {
+      // The cache sits one verified head ahead of this exact model head (a
+      // revalidation/load adopted it before the poll reported it). Keep the
+      // fresh pair for the adoption repaint plus a bounded lag window; a SHA
+      // has no ordering, so a model that keeps naming the pre-adoption head
+      // past that window is a rollback/ABA and falls through to a reset.
+      this.changeAheadSeen += 1;
+      return true;
+    }
+    return false;
+  }
+
+  // loadChange fetches the change and its diff as one consistent pair. The
+  // change can advance between the two GETs, and /diff answers for the head
+  // the server then holds — installing that diff under the earlier metadata
+  // would show the new head's code under the old head's name, and let a
+  // verdict target code the reviewer never saw. A pair only installs once it
+  // is verified for one head: the metadata must name this change, and the diff
+  // must name the metadata's head. The server's explicit no-diff response (a
+  // 200 with no files when a diff is unavailable) still names that head, so it
+  // installs as an empty diff. A headless or wrong-change metadata response, a
+  // failed diff fetch, or a headless/mismatched diff is retried (up to three
+  // reads); a head that keeps moving — or a response that never verifies —
+  // fails with a retryable error instead of installing an unverified pair.
+  // When the pair lands for a head the poll has not reported yet, the cache key
+  // advances to that head so the poll that does report it finds a matching key
+  // and skips a second reload and its "Loading change" flash.
   loadChange(id, key) {
     const generation = this.changeGeneration;
+    this.changePromise = (async () => {
+      try {
+        let loaded = null;
+        for (let attempt = 0; attempt < 3 && !loaded; attempt += 1) {
+          const data = await apiGet(`/v2/changes/${encodeURIComponent(id)}`);
+          if (generation !== this.changeGeneration || key !== this.changeKey) return;
+          const change = value(data, "change", "Change") || {};
+          const changeID = String(value(change, "id", "ID") || "");
+          const headSHA = String(value(change, "head_sha", "HeadSHA") || "");
+          // Metadata that does not name this change, or names no head, cannot
+          // anchor a verified pair; skip the diff fetch and retry the read.
+          if (changeID !== id || !headSHA) continue;
+          const diff = await apiGet(`/v2/changes/${encodeURIComponent(id)}/diff`).catch(() => null);
+          if (generation !== this.changeGeneration || key !== this.changeKey) return;
+          const diffHead = String(value(diff, "head_sha", "HeadSHA") || "");
+          // Only a verified diff installs: one naming the metadata's head. A
+          // failed fetch, a headless diff, or one for another head verifies
+          // nothing and is retried.
+          if (!diff || diffHead !== headSHA) continue;
+          loaded = { data, diff, headSHA };
+        }
+        if (!loaded) throw new Error("The change advanced while it was loading");
+        this.changeData = { ...loaded.data, diff: loaded.diff };
+        if (loaded.headSHA !== key.split(":").pop()) this.adoptChangeHead(id, loaded.headSHA, key);
+      } catch (error) {
+        if (generation !== this.changeGeneration || key !== this.changeKey) return;
+        this.changeError = error.message || String(error);
+      } finally {
+        if (generation !== this.changeGeneration) return;
+        this.changePromise = null;
+        if (this.isConnected && this.querySelector("flow-tab-strip")?.active === "change") this.paintPanel();
+      }
+    })();
+  }
+
+  // revalidateChange freshens the cached change behind the visible Change
+  // tab. The poll reported the head this cache belongs to, and the diff is
+  // keyed by that head, so while the change still sits there only the change
+  // itself is re-fetched, and the result lands on the existing element in
+  // place. A failure keeps the cached copy on screen; the next poll marks the
+  // cache stale again and retries.
+  //
+  // A change that advanced between the task poll and this fetch comes back
+  // with a NEW head, and installing it over the cached diff would show the
+  // old head's code under the new head's name — and let a verdict target code
+  // the reviewer never saw. A moved head instead fetches a consistent
+  // change+diff pair for the new head and re-keys the cache to it: the rebuild
+  // drops drafts anchored to the old head's lines, and the poll that reports
+  // that head finds a matching key, so it neither reloads nor flashes
+  // "Loading change". The adoption happens only once the refreshed metadata
+  // names this change at the new head AND the diff verifies against that head
+  // (or names the head on an explicit, successful no-diff response). A
+  // headless or wrong-change metadata response, or a missing, headless, or
+  // mismatched diff, keeps the prior coherent pair in place and the cache
+  // stale, so the next poll retries the revalidation; adopting on metadata
+  // alone would let the matching poll's ahead-key suppression skip the
+  // recovery load and render the new head's metadata under the old head's
+  // diff.
+  revalidateChange(id, key, head) {
+    const generation = this.changeGeneration;
+    this.changeStale = false;
     this.changePromise = (async () => {
       try {
         const data = await apiGet(`/v2/changes/${encodeURIComponent(id)}`);
         if (generation !== this.changeGeneration || key !== this.changeKey) return;
         const change = value(data, "change", "Change") || {};
-        const headSHA = value(change, "head_sha", "HeadSHA");
-        const diff = headSHA
-          ? await apiGet(`/v2/changes/${encodeURIComponent(id)}/diff`).catch(() => null)
-          : null;
+        const changeID = String(value(change, "id", "ID") || "");
+        const fetchedHead = String(value(change, "head_sha", "HeadSHA") || "");
+        // A response that does not name this change, or names no head, cannot
+        // replace the cached pair: keep it and retry on the next poll.
+        if (changeID !== id || !fetchedHead) return;
+        if (fetchedHead === head) {
+          // Same head: refresh the metadata around the cached diff, which was
+          // verified for this head when the pair installed.
+          this.changeData = { ...data, diff: this.changeData?.diff || {} };
+          return;
+        }
+        // The metadata reports a newer head, but the diff that proves it is still
+        // in flight. Record the target head WITHOUT installing its metadata: a
+        // task poll that reports this head before the diff verifies must keep the
+        // coherent prior pair instead of resetting it (which would flash "Loading
+        // change", start a second full load, and invalidate this revalidation by
+        // generation). The marker carries no data, so an unverified head is never
+        // rendered; it clears below the moment the pair verifies (adoptChangeHead
+        // takes over) or the attempt gives up.
+        this.changePendingKey = `${id}:${fetchedHead}`;
+        this.changePendingSeen = false;
+        const diff = await apiGet(`/v2/changes/${encodeURIComponent(id)}/diff`).catch(() => null);
         if (generation !== this.changeGeneration || key !== this.changeKey) return;
-        this.changeData = { ...data, diff: diff || {} };
-      } catch (error) {
-        if (generation !== this.changeGeneration || key !== this.changeKey) return;
-        this.changeError = error.message || String(error);
+        const diffHead = String(value(diff, "head_sha", "HeadSHA") || "");
+        // Only adopt a verified pair: a diff naming the metadata's head (the
+        // server's explicit no-diff response still names it). A failed fetch, a
+        // headless diff, or one for yet another head (the change moved again)
+        // keeps the prior pair — still verified for its own head — and leaves
+        // the cache stale for the next poll rather than mixing two heads on
+        // screen. A poll that observed this pending head and then diverged back
+        // to the cached head (a rollback) cleared the marker in paintChange, so
+        // the stale revalidation bails here instead of adopting a head the model
+        // has since left. Either way the pending marker has served its purpose.
+        if (!this.changePendingKey) return;
+        this.changePendingKey = "";
+        this.changePendingSeen = false;
+        if (!diff || diffHead !== fetchedHead) return;
+        this.changeData = { ...data, diff };
+        this.adoptChangeHead(id, fetchedHead, key);
+      } catch {
+        // Cached data beats an error flash for a background revalidation.
       } finally {
-        if (generation !== this.changeGeneration || key !== this.changeKey) return;
+        if (generation !== this.changeGeneration) return;
         this.changePromise = null;
         if (this.isConnected && this.querySelector("flow-tab-strip")?.active === "change") this.paintPanel();
       }
     })();
+  }
+
+  // adoptChangeHead records that the cached change/diff pair belongs to a
+  // (possibly newer) head than the one the key named. It re-keys the cache
+  // without touching the cached data, generation, or in-flight promise, and
+  // records the pre-adoption model head (key) so a repaint that still carries
+  // that exact head keeps the fresh pair instead of resetting it. The ahead
+  // window starts fresh here: changeAheadSeen counts the polls that keep naming
+  // the pre-adoption head, so a persistent rollback eventually expires it.
+  adoptChangeHead(id, head, key) {
+    const next = `${id}:${head}`;
+    if (next === key) return;
+    this.changeKey = next;
+    this.renderedChangeKey = changeModelKey({ id: this.data?.id, change: { id, head_sha: head } });
+    this.changeAheadKey = key;
+    this.changeAheadSeen = 0;
+    // An adopted head is verified, so it is no longer pending.
+    this.changePendingKey = "";
+    this.changePendingSeen = false;
   }
 
   resetTerminalLoad(key) {
