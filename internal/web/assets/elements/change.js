@@ -3,7 +3,7 @@
 // inline notes, so neither survives only as long as the next poll.
 
 import { apiPost } from "../api.js";
-import { beginInFlight, failureMessage, inFlight, markBusy, settleStatus } from "../actions.js";
+import { acquireBusy, failureMessage, inFlightEntries, markBusy, releaseBusy, settleStatus } from "../actions.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { value } from "../normalize.js";
 import { readDiffMode, writeDiffMode } from "../storage.js";
@@ -160,12 +160,35 @@ export class FlowChange extends FlowElement {
       this.app?.setStatus("Nothing to post");
       return;
     }
-    const busyKey = `review:${changeID}:${verdict}`;
-    if (inFlight.has(busyKey)) return;
-    const restore = button ? markBusy(button) : () => {};
-    const pending = `${reviewPendingLabel(verdict)}…`;
-    beginInFlight(busyKey, pending);
-    this.app?.setStatus(pending);
+    // The change — not the individual verdict — is the review's mutation
+    // target: every verdict posts to the same review endpoint and reports to
+    // the same review gate, so while one verdict is in flight the others are
+    // suppressed too, and a contradictory verdict cannot race it.
+    const busyKey = `review:${changeID}`;
+    const entry = acquireBusy(busyKey, `${reviewPendingLabel(verdict)}…`);
+    if (!entry) return;
+    entry.verdict = verdict;
+    if (button) markBusy(button);
+    for (const control of this.querySelectorAll("[data-review-verdict]")) {
+      if (control !== button) control.disabled = true;
+    }
+    // Restore by re-querying the live DOM rather than the nodes marked above:
+    // a repaint (poll, draft change) replaces the bar mid-flight, and whatever
+    // is on screen when the submission settles is what must be re-enabled.
+    entry.restores.add(() => {
+      for (const control of this.querySelectorAll("[data-review-verdict]")) {
+        control.disabled = false;
+        control.removeAttribute?.("disabled");
+        control.removeAttribute?.("aria-busy");
+        control.classList?.remove("is-busy");
+      }
+      const input = this.querySelector("[data-review-body]");
+      if (input) {
+        input.disabled = false;
+        input.removeAttribute?.("disabled");
+      }
+    });
+    this.app?.setStatus(entry.label);
     try {
       await apiPost(`/v2/changes/${encodeURIComponent(changeID)}/review`, { verdict, body, comments });
       this.drafts.clear();
@@ -177,9 +200,23 @@ export class FlowChange extends FlowElement {
       // failureMessage is total, so settleStatus always runs and the key always
       // drains — even for a non-Error rejection such as `reject(null)`.
       settleStatus(this.app, busyKey, failureMessage(error));
+      // A repaint during the request replaces the comment input; give the
+      // reviewer their unsubmitted words back alongside the error.
+      const input = this.querySelector("[data-review-body]");
+      if (input && !input.value) input.value = body;
     } finally {
-      restore();
+      releaseBusy(busyKey);
     }
+  }
+
+  // reviewBusyVerdict is the verdict currently being submitted for this
+  // change, or "" when idle. The review bar reads it at render time, so a
+  // repaint while a submission is in flight reproduces the suppressed verdict
+  // controls instead of handing back enabled ones.
+  get reviewBusyVerdict() {
+    const changeID = value(this.data?.change || {}, "id", "ID");
+    if (!changeID) return "";
+    return inFlightEntries.get(`review:${changeID}`)?.verdict || "";
   }
 }
 

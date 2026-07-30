@@ -58,13 +58,13 @@ export async function renderConsoleView(app, context) {
           <p class="meta">${escapeHTML(active ? consoleState(job, session) : "not running")}</p>
         </div>
         <div class="actions console-actions">
-          ${active ? `<button class="button secondary" data-release-console data-project="${escapeAttr(projectID)}" data-task="${escapeAttr(selectedTask)}">Release Console</button>` : `
+          ${active ? `<button class="button secondary" data-release-console="${escapeAttr(selectedTask)}" data-project="${escapeAttr(projectID)}" data-task="${escapeAttr(selectedTask)}">Release Console</button>` : `
             <label>Harness
               <select data-console-harness>
                 ${renderHarnessOptions((app.harnesses && app.harnesses.consoles) || DEFAULT_CONSOLE_HARNESSES, "harness")}
               </select>
             </label>
-            <button class="button" data-start-console data-project="${escapeAttr(projectID)}" data-task="${escapeAttr(selectedTask)}">Start Console</button>`}
+            <button class="button" data-start-console="${escapeAttr(selectedTask)}" data-project="${escapeAttr(projectID)}" data-task="${escapeAttr(selectedTask)}">Start Console</button>`}
         </div>
       </div>
       ${terminal}
@@ -170,11 +170,9 @@ export function isCurrentConsoleTargetView(app, projectID, taskID = "") {
 export async function startConsoleView(app, projectID, harness, taskID = "") {
   await apiPost(taskID ? taskConsoleAPIPath(projectID, taskID) : consoleAPIPath(projectID), { harness });
   await app.load();
-  app.setStatus("console starting");
 }
 
 export async function releaseConsoleView(app, projectID, taskID = "") {
   await apiDelete(taskID ? taskConsoleAPIPath(projectID, taskID) : consoleAPIPath(projectID));
   await app.load();
-  app.setStatus("console released");
 }

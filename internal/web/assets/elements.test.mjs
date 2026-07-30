@@ -32,7 +32,9 @@ const { renderTaskFormView, bindRelationsPickerView, relationTargetSuggestionsVi
 await import("./elements/lane.js");
 await import("./elements/tab-strip.js");
 const { inFlight } = await import("./actions.js");
+const { handleFormSubmit } = await import("./forms.js");
 await import("./elements/change.js");
+await import("./elements/inline-thread.js");
 await import("./elements/task-detail.js");
 
 const HOUR = 3600_000;
@@ -1456,6 +1458,86 @@ test("a duplicate review verdict is suppressed while the first is in flight", as
   appNode.remove();
 });
 
+test("a different verdict cannot start while another review submission is in flight", async () => {
+  const root = globalThis.document.body;
+  let requests = 0;
+  let resolveRequest;
+  stubReviewFetch(() => {
+    requests += 1;
+    return new Promise((resolve) => {
+      resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+  });
+  const { appNode, change } = mountChange(root, reviewChangeData());
+  await flush();
+
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  const requestChanges = change.querySelector('[data-review-verdict="request_changes"]');
+  const first = change.handleClick({ target: approve, preventDefault() {} });
+  assert.equal(requests, 1);
+
+  // The change is the mutation target: while the approve submission is in
+  // flight the other verdict controls are suppressed too, not just the one
+  // that was clicked.
+  assert.equal(approve.disabled, true);
+  assert.equal(approve.getAttribute("aria-busy"), "true");
+  assert.equal(requestChanges.disabled, true);
+
+  // Clicking a different verdict must not issue a competing submission: the
+  // in-flight key is the change, not the verdict.
+  await change.handleClick({ target: requestChanges, preventDefault() {} });
+  assert.equal(requests, 1, "no competing verdict while the first is in flight");
+
+  resolveRequest();
+  await first;
+  assert.equal(inFlight.size, 0);
+  assert.equal(approve.disabled, false);
+  assert.equal(approve.getAttribute("aria-busy"), null);
+  assert.equal(requestChanges.disabled, false);
+  change.remove();
+  appNode.remove();
+});
+
+test("a repaint while a review is in flight keeps the verdict controls suppressed", async () => {
+  const root = globalThis.document.body;
+  let resolveRequest;
+  stubReviewFetch(
+    () =>
+      new Promise((resolve) => {
+        resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+      }),
+  );
+  const { appNode, change } = mountChange(root, reviewChangeData());
+  await flush();
+
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  const first = change.handleClick({ target: approve, preventDefault() {} });
+  assert.equal(approve.disabled, true);
+
+  // A poll (or any re-render) replaces the review bar's buttons mid-flight.
+  change.invalidate();
+  await flush();
+
+  const repaintedApprove = change.querySelector('[data-review-verdict="approve"]');
+  const repaintedRequestChanges = change.querySelector('[data-review-verdict="request_changes"]');
+  assert.ok(repaintedApprove && repaintedApprove !== approve, "the bar was replaced by the repaint");
+  assert.equal(repaintedApprove.hasAttribute("disabled"), true);
+  assert.equal(repaintedApprove.getAttribute("aria-busy"), "true");
+  assert.equal(repaintedApprove.classList.contains("is-busy"), true);
+  assert.equal(repaintedRequestChanges.hasAttribute("disabled"), true);
+  assert.equal(repaintedRequestChanges.getAttribute("aria-busy"), null);
+
+  resolveRequest();
+  await first;
+  assert.equal(repaintedApprove.disabled, false);
+  assert.equal(repaintedApprove.hasAttribute("disabled"), false);
+  assert.equal(repaintedApprove.getAttribute("aria-busy"), null);
+  assert.equal(repaintedRequestChanges.disabled, false);
+  assert.equal(inFlight.size, 0);
+  change.remove();
+  appNode.remove();
+});
+
 test("a failed review keeps the error on the status line and restores the button", async () => {
   const root = globalThis.document.body;
   stubReviewFetch(() =>
@@ -1476,6 +1558,88 @@ test("a failed review keeps the error on the status line and restores the button
   assert.equal(approve.getAttribute("aria-busy"), null);
   assert.equal(inFlight.size, 0);
   change.remove();
+  appNode.remove();
+});
+
+// --- inline thread reply pending state (buttonless form) --------------------
+
+function inlineThreadData() {
+  const now = new Date().toISOString();
+  return {
+    thread: {
+      id: "th-0001",
+      state: "open",
+      created_at: now,
+      comments: [{ actor: "reviewer", body: "Please add a test", created_at: now }],
+    },
+    change: { id: "ch-0001", head_sha: "abc123def456" },
+  };
+}
+
+// The production thread reply form (renderInlineThread) has no submit
+// control: a lone text input that submits implicitly on Enter. Its pending
+// state must land on that input, and a repaint replacement must inherit it.
+test("an inline thread reply marks its text input busy and suppresses a duplicate Enter", async () => {
+  const root = globalThis.document.body;
+  let requests = 0;
+  let resolveRequest;
+  stubReviewFetch(() => {
+    requests += 1;
+    return new Promise((resolve) => {
+      resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+  });
+  const appNode = globalThis.document.createElement("flow-app");
+  const statuses = [];
+  appNode.setStatus = (message) => statuses.push(message);
+  appNode.refresh = () => {};
+  root.appendChild(appNode);
+  const thread = mountElement(appNode, "flow-inline-thread", inlineThreadData());
+  await flush();
+
+  const form = thread.querySelector("form[data-thread-reply-form]");
+  assert.ok(form, "the thread renders its reply form");
+  assert.equal(form.querySelector('[type="submit"]'), null, "the reply form is buttonless");
+  const input = form.querySelector("input");
+  input.value = "On it";
+
+  const pending = handleFormSubmit(appNode, { target: form, preventDefault() {} });
+
+  // Synchronous pending state on the live control, before the network
+  // resolves: the input is disabled, aria-busy, and visibly busy, and the
+  // status line names the in-flight reply.
+  assert.equal(input.disabled, true);
+  assert.equal(input.getAttribute("aria-busy"), "true");
+  assert.equal(input.classList.contains("is-busy"), true);
+  assert.deepEqual(statuses, ["Posting reply\u2026"]);
+
+  // A repaint replacing the form re-applies the busy state to the
+  // replacement's input — the replacement must not look actionable.
+  thread.invalidate();
+  await flush();
+  const repaintedForm = thread.querySelector("form[data-thread-reply-form]");
+  const repaintedInput = repaintedForm && repaintedForm.querySelector("input");
+  assert.ok(repaintedInput && repaintedInput !== input, "the reply form was replaced by the repaint");
+  assert.equal(repaintedInput.disabled, true);
+  assert.equal(repaintedInput.getAttribute("aria-busy"), "true");
+  assert.equal(repaintedInput.classList.contains("is-busy"), true);
+
+  // A second Enter while the first reply is still in flight issues no
+  // duplicate request.
+  await handleFormSubmit(appNode, { target: repaintedForm, preventDefault() {} });
+  assert.equal(requests, 1, "no duplicate reply while the first is in flight");
+
+  resolveRequest();
+  await pending;
+
+  // Settling restores whatever control is on screen now — the repaint-marked
+  // replacement — and the confirmation reaches the status line.
+  assert.equal(repaintedInput.disabled, false);
+  assert.equal(repaintedInput.getAttribute("aria-busy"), null);
+  assert.equal(repaintedInput.classList.contains("is-busy"), false);
+  assert.deepEqual(statuses, ["Posting reply\u2026", "Reply posted"]);
+  assert.equal(inFlight.size, 0);
+  thread.remove();
   appNode.remove();
 });
 

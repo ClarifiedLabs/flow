@@ -77,6 +77,22 @@ export class TestNode {
     return this.children[0] || null;
   }
 
+  // The one piece of HTMLFormElement the app's delegated form handlers use:
+  // named access to the form's controls (form.elements.body, etc.).
+  get elements() {
+    if (this.tagName !== "FORM") return undefined;
+    const named = {};
+    const walk = (node) => {
+      for (const child of node.children) {
+        const name = child.getAttribute?.("name");
+        if (name) named[name] = child;
+        walk(child);
+      }
+    };
+    walk(this);
+    return named;
+  }
+
   get nextElementSibling() {
     const siblings = this.parentElement?.children || [];
     return siblings[siblings.indexOf(this) + 1] || null;

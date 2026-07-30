@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { handleAction, inFlight, gateResponsePending } from "./actions.js";
+import { applyBusyState, gateResponsePending, handleAction, inFlight, pendingStatus } from "./actions.js";
+import { startConsoleView } from "./console-view.js";
 import { handleFormSubmit, formBusyKey } from "./forms.js";
 import { workflowStepCanBeSkipped } from "./task-view.js";
 import { renderTranscriptButton } from "./terminal.js";
@@ -179,12 +180,13 @@ test("console page offers shell harness and posts selected harness", async () =>
   assert.match(content.innerHTML, /<option value="harness" selected>Harness<\/option>/);
   assert.match(content.innerHTML, /<option value="shell">Shell<\/option>/);
 
-  await app.startConsole("p-alpha", "shell");
+  await startConsoleView(app, "p-alpha", "shell");
   const post = fetchCalls.find((call) => call.path === "/ui/api/v2/projects/p-alpha/console" && call.options.method === "POST");
   assert.equal(post.options.headers["X-Flow-CSRF"], "csrf-token");
   assert.equal(JSON.parse(post.options.body).harness, "shell");
   assert.equal(loads, 1);
-  assert.equal(status.textContent, "console starting");
+  // The status line is the click dispatcher's now: ACTIONS.startConsole owns
+  // the pending and confirmation messages (covered by the tests below).
 });
 
 test("terminal pop out opens a popup-style window", async () => {
@@ -1043,7 +1045,7 @@ test("an action click marks the control busy and names the in-flight action befo
   assert.deepEqual(app.statuses, ["Scheduling t-0001\u2026", "Scheduled"]);
 });
 
-test("a poll re-render replacing the button cannot re-enable a duplicate submission", async () => {
+test("a poll re-render replacing the button re-applies the busy state instead of re-enabling it", async () => {
   await scriptContext();
   const app = statusApp();
   let requests = 0;
@@ -1059,10 +1061,18 @@ test("a poll re-render replacing the button cannot re-enable a duplicate submiss
   const handled = handleAction(app, { target: first, preventDefault() {} });
   assert.equal(requests, 1);
 
-  // The board's 10 s poll repaints and swaps the button node for a fresh one
-  // that starts out enabled.
+  // The busy metadata lives outside the node: the pending label survives the
+  // route render that clears the status line.
+  assert.equal(pendingStatus(), "Scheduling t-0001\u2026");
+
+  // The board's 10 s poll repaints and swaps the button node for a fresh one.
+  // The repaint re-applies the in-flight state from the registry, so the
+  // replacement is disabled and visibly busy — not actionable.
   const replacement = new ActionButton({ workflowSchedule: "t-0001", project: "p-alpha" });
-  assert.equal(replacement.disabled, false);
+  applyBusyState({ querySelectorAll: () => [replacement] });
+  assert.equal(replacement.disabled, true);
+  assert.equal(replacement.getAttribute("aria-busy"), "true");
+  assert.equal(replacement.classList.contains("is-busy"), true);
 
   // Clicking the replacement while the first request is still in flight must
   // not issue a second request: the guard lives in the in-flight registry, not
@@ -1072,6 +1082,13 @@ test("a poll re-render replacing the button cannot re-enable a duplicate submiss
 
   resolveRequest();
   await handled;
+
+  // Settling restores whatever control is on screen now — the repaint-marked
+  // replacement — not the discarded node the click started on.
+  assert.equal(replacement.disabled, false);
+  assert.equal(replacement.getAttribute("aria-busy"), null);
+  assert.equal(replacement.classList.contains("is-busy"), false);
+  assert.equal(pendingStatus(), "");
 
   // Once the first request settles the action is available again.
   const second = handleAction(app, { target: replacement, preventDefault() {} });
@@ -1290,6 +1307,176 @@ test("a failed action keeps the error on the status line and restores the contro
   assert.equal(button.getAttribute("aria-busy"), null);
   assert.equal(button.classList.contains("is-busy"), false);
   assert.equal(inFlight.size, 0, "the in-flight registry drains on failure");
+});
+
+test("a console start marks the control busy, blocks a duplicate across a repaint, and confirms the start", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let loads = 0;
+  app.load = async () => {
+    loads += 1;
+  };
+  app.querySelector = (selector) => (selector === "[data-console-harness]" ? { value: "shell" } : null);
+  const requests = [];
+  let resolveRequest;
+  globalThis.fetch = (path, options) => {
+    requests.push({ path, options });
+    return new Promise((resolve) => {
+      resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+  };
+  // The Console view's project-level Start button: data-start-console is
+  // empty (no task), the console target lives in data-project/data-task.
+  const button = new ActionButton({ startConsole: "", project: "p-alpha", task: "" });
+
+  const handled = handleAction(app, { target: button, preventDefault() {} });
+
+  // The pending state is synchronous: the control is disabled and aria-busy
+  // and the status line names the action before the POST resolves. The
+  // harness is the one picked in the view's select.
+  assert.equal(button.disabled, true);
+  assert.equal(button.getAttribute("aria-busy"), "true");
+  assert.equal(button.classList.contains("is-busy"), true);
+  assert.deepEqual(app.statuses, ["Starting console\u2026"]);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, "/ui/api/v2/projects/p-alpha/console");
+  assert.deepEqual(JSON.parse(requests[0].options.body), { harness: "shell" });
+
+  // A console repaint mid-flight swaps the button node: the registry
+  // re-applies the busy state to the replacement and the repeat click is
+  // swallowed without a second request.
+  const replacement = new ActionButton({ startConsole: "", project: "p-alpha", task: "" });
+  applyBusyState({ querySelectorAll: () => [replacement] });
+  assert.equal(replacement.disabled, true);
+  assert.equal(replacement.getAttribute("aria-busy"), "true");
+  assert.equal(replacement.classList.contains("is-busy"), true);
+  assert.equal(await handleAction(app, { target: replacement, preventDefault() {} }), true);
+  assert.equal(requests.length, 1, "no duplicate console start while the first is in flight");
+
+  resolveRequest();
+  assert.equal(await handled, true);
+  assert.equal(loads, 1, "the console view reloads after the start");
+  assert.deepEqual(app.statuses, ["Starting console\u2026", "Console starting"]);
+  assert.equal(replacement.disabled, false);
+  assert.equal(replacement.getAttribute("aria-busy"), null);
+  assert.equal(replacement.classList.contains("is-busy"), false);
+  assert.equal(inFlight.size, 0, "the in-flight registry drains on success");
+});
+
+test("a console release marks the control busy, suppresses a duplicate, and confirms the release", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let loads = 0;
+  app.load = async () => {
+    loads += 1;
+  };
+  const requests = [];
+  let resolveRequest;
+  globalThis.fetch = (path, options) => {
+    requests.push({ path, options });
+    return new Promise((resolve) => {
+      resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+  };
+  const button = new ActionButton({ releaseConsole: "t-0001", project: "p-alpha", task: "t-0001" });
+
+  const handled = handleAction(app, { target: button, preventDefault() {} });
+
+  assert.equal(button.disabled, true);
+  assert.equal(button.getAttribute("aria-busy"), "true");
+  assert.equal(button.classList.contains("is-busy"), true);
+  assert.deepEqual(app.statuses, ["Releasing console t-0001\u2026"]);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, "/ui/api/v2/projects/p-alpha/tasks/t-0001/console");
+  assert.equal(requests[0].options.method, "DELETE");
+
+  // A fresh node for the same console target is rejected by the registry
+  // even before any busy marking: no second DELETE goes out.
+  const repeat = new ActionButton({ releaseConsole: "t-0001", project: "p-alpha", task: "t-0001" });
+  assert.equal(await handleAction(app, { target: repeat, preventDefault() {} }), true);
+  assert.equal(requests.length, 1, "no duplicate console release while the first is in flight");
+
+  resolveRequest();
+  assert.equal(await handled, true);
+  assert.equal(loads, 1, "the console view reloads after the release");
+  assert.deepEqual(app.statuses, ["Releasing console t-0001\u2026", "Console released"]);
+  assert.equal(button.disabled, false);
+  assert.equal(button.getAttribute("aria-busy"), null);
+  assert.equal(button.classList.contains("is-busy"), false);
+  assert.equal(inFlight.size, 0, "the in-flight registry drains on success");
+});
+
+test("a failed console start keeps the error on the status line and restores the control", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let loads = 0;
+  app.load = async () => {
+    loads += 1;
+  };
+  globalThis.fetch = () =>
+    Promise.resolve({ ok: false, status: 409, json: () => Promise.resolve({ error: { message: "console is locked" } }) });
+  const button = new ActionButton({ startConsole: "t-0001", project: "p-alpha", task: "t-0001" });
+
+  const handled = handleAction(app, { target: button, preventDefault() {} });
+  assert.equal(button.disabled, true);
+  assert.deepEqual(app.statuses, ["Starting console t-0001\u2026"]);
+
+  assert.equal(await handled, true);
+  assert.deepEqual(app.statuses, ["Starting console t-0001\u2026", "console is locked"]);
+  assert.equal(loads, 0, "a rejected start never reaches the reload");
+  assert.equal(button.disabled, false);
+  assert.equal(button.getAttribute("aria-busy"), null);
+  assert.equal(button.classList.contains("is-busy"), false);
+  assert.equal(inFlight.size, 0, "the in-flight registry drains on failure");
+});
+
+test("starting one console does not suppress a different console target", async () => {
+  await scriptContext();
+  const app = statusApp();
+  app.load = async () => {};
+  app.querySelector = () => null;
+  const requests = [];
+  const resolvers = new Map();
+  globalThis.fetch = (path, options) => {
+    requests.push({ path, options });
+    return new Promise((resolve) => {
+      resolvers.set(path, () => resolve({ ok: true, json: () => Promise.resolve({}) }));
+    });
+  };
+  const taskConsole = new ActionButton({ startConsole: "t-0001", project: "p-alpha", task: "t-0001" });
+
+  const taskStart = handleAction(app, { target: taskConsole, preventDefault() {} });
+  assert.equal(requests.length, 1);
+  assert.equal(taskConsole.disabled, true);
+
+  // The same console target stays blocked while its start is in flight...
+  const repeat = new ActionButton({ startConsole: "t-0001", project: "p-alpha", task: "t-0001" });
+  assert.equal(await handleAction(app, { target: repeat, preventDefault() {} }), true);
+  assert.equal(requests.length, 1, "the same console target stays suppressed");
+
+  // ...but the project console is a different target: its start proceeds.
+  const projectConsole = new ActionButton({ startConsole: "", project: "p-alpha", task: "" });
+  const projectStart = handleAction(app, { target: projectConsole, preventDefault() {} });
+  assert.equal(requests.length, 2, "a distinct console target is not blocked");
+  assert.equal(requests[1].path, "/ui/api/v2/projects/p-alpha/console");
+  assert.equal(projectConsole.disabled, true);
+
+  resolvers.get("/ui/api/v2/projects/p-alpha/tasks/t-0001/console")();
+  assert.equal(await taskStart, true);
+  resolvers.get("/ui/api/v2/projects/p-alpha/console")();
+  assert.equal(await projectStart, true);
+  // The task console settles first, but the project console is still in
+  // flight, so settlement keeps its pending label on the line and reveals the
+  // confirmation only when the final start settles.
+  assert.deepEqual(app.statuses, [
+    "Starting console t-0001\u2026",
+    "Starting console\u2026",
+    "Starting console\u2026",
+    "Console starting",
+  ]);
+  assert.equal(taskConsole.disabled, false);
+  assert.equal(projectConsole.disabled, false);
+  assert.equal(inFlight.size, 0, "the in-flight registry drains once both settle");
 });
 
 // A promise can reject with a value that is not an Error (a bare reject(null),
@@ -1539,6 +1726,73 @@ test("a form submission marks its submit control busy and guards against a dupli
   assert.deepEqual(app.statuses, ["Saving task\u2026", "Task updated"]);
 });
 
+test("a poll re-render replacing the form re-applies the busy state to the replacement submitter", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let requests = 0;
+  let resolveRequest;
+  globalThis.fetch = () => {
+    requests += 1;
+    return new Promise((resolve) => {
+      resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+  };
+  const makeForm = (submitter) => ({
+    tagName: "FORM",
+    dataset: { taskForm: "t-0001", taskFormMode: "edit", project: "p-alpha" },
+    elements: {
+      priority: { value: "1" },
+      title: { value: "Renamed" },
+      body: { value: "Body" },
+      flow_id: { value: "fl-coding" },
+    },
+    reportValidity() {
+      return true;
+    },
+    querySelector(selector) {
+      return selector === '[type="submit"]' ? submitter : null;
+    },
+  });
+
+  const firstSubmit = new ActionButton({});
+  const handled = handleFormSubmit(app, { target: makeForm(firstSubmit), preventDefault() {} });
+  assert.equal(requests, 1);
+  assert.equal(firstSubmit.disabled, true);
+  assert.deepEqual(app.statuses, ["Saving task\u2026"]);
+
+  // The poll swaps the form for a fresh one. The repaint re-applies the
+  // in-flight state from the registry, so the replacement's submit control is
+  // disabled and visibly busy — not apparently actionable but inert.
+  const replacementSubmit = new ActionButton({});
+  const replacementForm = makeForm(replacementSubmit);
+  applyBusyState({ querySelectorAll: (selector) => (selector === "form" ? [replacementForm] : []) });
+  assert.equal(replacementSubmit.disabled, true);
+  assert.equal(replacementSubmit.getAttribute("aria-busy"), "true");
+  assert.equal(replacementSubmit.classList.contains("is-busy"), true);
+
+  // Submitting the replacement while the first request is in flight must not
+  // issue a second request: the guard lives in the registry, not on the node.
+  await handleFormSubmit(app, { target: replacementForm, preventDefault() {} });
+  assert.equal(requests, 1, "no duplicate request while the first is in flight");
+
+  resolveRequest();
+  await handled;
+
+  // Settling restores whatever control is on screen now — the repaint-marked
+  // replacement — not the discarded original form's submitter.
+  assert.equal(replacementSubmit.disabled, false);
+  assert.equal(replacementSubmit.getAttribute("aria-busy"), null);
+  assert.equal(replacementSubmit.classList.contains("is-busy"), false);
+  assert.equal(inFlight.size, 0);
+
+  // Once the first submission settles the form is submittable again.
+  const second = handleFormSubmit(app, { target: replacementForm, preventDefault() {} });
+  assert.equal(requests, 2);
+  resolveRequest();
+  await second;
+  assert.equal(inFlight.size, 0);
+});
+
 test("a validation-cancelled form submit replaces the pending label with the validation error", async () => {
   await scriptContext();
   const app = statusApp();
@@ -1636,7 +1890,7 @@ test("an empty relation target keeps its validation failure visible when it is t
 
   // The validation failure is the final mutation's outcome, so it must remain
   // on the status line rather than being cleared by settlement.
-  assert.deepEqual(app.statuses, ["Submitting\u2026", "Target task ID is required"]);
+  assert.deepEqual(app.statuses, ["Adding relation\u2026", "Target task ID is required"]);
   assert.equal(requests, 0, "an empty relation target issues no request");
   assert.equal(submitButton.disabled, false);
   assert.equal(inFlight.size, 0);

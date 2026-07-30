@@ -12,8 +12,12 @@
 // the status line synchronously on click. In-flight actions are tracked in a
 // registry keyed by action and target — not by DOM node — so a poll re-render
 // that replaces the button mid-flight cannot re-enable a duplicate submission.
+// The registry also carries each action's pending label and busy marks, so a
+// repaint re-applies disabled/aria-busy/is-busy and the status-line message to
+// whatever replacement control it swapped in.
 
 import { apiDelete, apiGet, apiPatch, apiPost, taskAPIBase, taskConsoleAPIPath } from "./api.js";
+import { releaseConsoleView, startConsoleView } from "./console-view.js";
 import { parseWaitDetails } from "./task-model.js";
 
 const workflowPath = (dataset, id, suffix = "") =>
@@ -209,6 +213,22 @@ export const ACTIONS = {
     return "Task console released";
   },
 
+  // startConsole/releaseConsole are the Console view's own controls. Their
+  // target is the console pair (project, task) — the task empty for a project
+  // console — and Start posts the harness picked in the view's select. The
+  // request and the reload live in the view module; the pending state and the
+  // status line are the dispatcher's, as for every action.
+  async startConsole(app, element, dataset) {
+    const harness = app.querySelector?.("[data-console-harness]")?.value || "harness";
+    await startConsoleView(app, dataset.project || "", harness, dataset.task || "");
+    return "Console starting";
+  },
+
+  async releaseConsole(app, element, dataset) {
+    await releaseConsoleView(app, dataset.project || "", dataset.task || "");
+    return "Console released";
+  },
+
   async threadClaim(app, element, dataset) {
     const body = dataset.claimKind === "fixed" ? "" : (window.prompt("Why?") || "").trim();
     if (dataset.claimKind !== "fixed" && !body) return CANCELLED;
@@ -229,6 +249,7 @@ export const ACTIONS = {
       kind: dataset.kind,
     });
     await app.refresh();
+    return "Relation removed";
   },
 };
 
@@ -266,34 +287,52 @@ async function resolveReadyChange(projectID, taskID) {
 // inFlight tracks running actions by identity, not by DOM node: the board
 // repaints on a 10 s poll and a re-render replaces the button mid-flight, so a
 // guard stored on the node would die with it and re-enable a duplicate
-// submission. Forms and the review bar share this registry through the
-// actionBusyKey helper.
+// submission. Delegated forms (through formBusyKey) and the review bar
+// (review:<change>) share this registry, and the render paths consult it
+// (gateResponsePending) to re-suppress fresh controls while a request is out.
 export const inFlight = new Set();
 
-// The status line is shared by every in-flight mutation, so settling one key
-// must not clobber the pending label of another key that is still running.
-// inFlightLabels records the pending label each key put on the line; when a
-// key settles, settleStatus re-shows the newest label still in flight and only
-// reveals the settling key's own result once nothing is pending. Map insertion
-// order tracks start order, so the newest still-pending label is the last
-// remaining entry.
-const inFlightLabels = new Map();
+// inFlightEntries carries the busy metadata for each in-flight key: the
+// pending label the click displayed — so a repaint can put the message back
+// after the route render clears it — and the restore functions of every
+// control marked busy for the key, including replacements a repaint re-marked
+// through applyBusyState, so settling restores whatever is on screen then.
+// Callers may also attach their own metadata (the review flow records its
+// verdict). Map insertion order tracks start order, so the newest
+// still-pending label is the last remaining entry.
+export const inFlightEntries = new Map();
 
-// beginInFlight registers a key as running and remembers the pending label it
-// displayed, so a later settlement can restore it while it is still in flight.
-export function beginInFlight(key, label) {
-  inFlight.add(key);
-  inFlightLabels.set(key, label);
+// acquireBusy registers an in-flight action and returns its entry, or null
+// when the same action and target is already running — the duplicate-click
+// guard. Callers attach metadata (the review flow records its verdict) and
+// restore functions to the entry; releaseBusy drains it.
+export function acquireBusy(busyKey, label) {
+  if (inFlight.has(busyKey)) return null;
+  inFlight.add(busyKey);
+  const entry = { label, restores: new Set() };
+  inFlightEntries.set(busyKey, entry);
+  return entry;
 }
 
-// endInFlight forgets a settled key and returns the pending label of the newest
-// key still in flight ("" when nothing remains pending).
-export function endInFlight(key) {
-  inFlight.delete(key);
-  inFlightLabels.delete(key);
-  let pending = "";
-  for (const label of inFlightLabels.values()) pending = label;
-  return pending;
+// releaseBusy settles an in-flight action: the key leaves the registry first
+// (the action is clickable again, and a throwing restore cannot leak the key),
+// then every control marked for it — the clicked one, any sibling suppressed
+// with it, and any replacement a repaint re-marked — is restored.
+export function releaseBusy(busyKey) {
+  const entry = inFlightEntries.get(busyKey);
+  inFlight.delete(busyKey);
+  inFlightEntries.delete(busyKey);
+  if (!entry) return;
+  for (const restore of entry.restores) restore();
+}
+
+// pendingStatus is the status line's memory across a repaint: route renders
+// clear the line (setTitle), so while an action is in flight its pending label
+// is put back after every load. Most recently started wins.
+export function pendingStatus() {
+  let label = "";
+  for (const entry of inFlightEntries.values()) label = entry.label || label;
+  return label;
 }
 
 // settleStatus arbitrates the shared status line when a mutation finishes.
@@ -303,8 +342,13 @@ export function endInFlight(key) {
 // confirmation, validation, or error message) is shown; an empty string — the
 // explicit clear a backed-out handler asks for — clears it; and undefined, a
 // silent success, leaves the pending label in place rather than blanking it.
+// The settling key is still registered (its restores run right after), so it
+// is excluded from the still-pending lookup.
 export function settleStatus(app, key, message) {
-  const stillPending = endInFlight(key);
+  let stillPending = "";
+  for (const [otherKey, entry] of inFlightEntries) {
+    if (otherKey !== key && entry.label) stillPending = entry.label;
+  }
   if (stillPending) {
     app?.setStatus?.(stillPending);
     return;
@@ -327,14 +371,72 @@ export function actionKeyFor(element) {
 // checks at once, each approve button targeting a distinct data-check-name,
 // so the busy identity includes the check name — keying on the task alone
 // would mark every sibling check busy and suppress their independent
-// approvals until the first request settles.
+// approvals until the first request settles. relationRemove deletes one
+// stored row identified by project, source, target, and kind, so the busy
+// identity includes them all — keying on the source task alone would
+// conflate two relation rows of one task, suppressing the second removal as
+// a duplicate and letting a repaint mark its row busy. The console controls
+// act on the (project, task) console pair — the attribute carries the task,
+// which is empty for a project console — so the busy identity adds both from
+// the dataset: the project console and a task console of the same project
+// (or the same task id in two projects) must not suppress each other.
 export function actionBusyKey(key, dataset) {
   const base = `${key}:${String(dataset?.[key] ?? "")}`;
   if (key === "humanReviewApprove") {
     const check = String(dataset?.checkName ?? "");
     return check ? `${base}:${check}` : base;
   }
+  if (key === "relationRemove") {
+    return [base, dataset?.project, dataset?.target, dataset?.kind].map((part) => String(part ?? "")).join(":");
+  }
+  if (key === "startConsole" || key === "releaseConsole") {
+    return [base, dataset?.project, dataset?.task].map((part) => String(part ?? "")).join(":");
+  }
   return base;
+}
+
+// formBusyKey names an in-flight delegated form submission by the mutation it
+// will run: the FORMS table key, the project, and the target task. Keying on
+// the form's data-attribute value alone breaks down for the two shapes that
+// share one attribute across targets — a boolean data-attachment-form
+// collapses every task's uploader onto one key, and a multi-project create
+// form carries no data-project at all, so two create forms for different
+// projects would collide and one in-flight create would swallow the other.
+// The identity therefore comes from the same fields the request itself uses:
+// the project comes from the form's project select when one is present
+// (multi-project create) and otherwise from data-project, and the target task
+// comes from data-task, which every per-task form carries, falling back to
+// the attribute's own value for forms like taskForm whose data value already
+// is the task id. The thread reply form's data value is the thread id, not a
+// task id, so it is read directly. formBusyKey lives here, next to the
+// registry, so applyBusyState can re-mark a replacement form's busy control
+// without importing forms.js (which already imports this module).
+export function formBusyKey(key, form) {
+  const dataset = form?.dataset || {};
+  const selectedProject = String(form?.elements?.project?.value ?? "");
+  const project = selectedProject || String(dataset.project ?? "");
+  const target =
+    key === "threadReplyForm"
+      ? String(dataset.threadReplyForm ?? "")
+      : String(dataset.task ?? dataset[key] ?? "");
+  return `form:${key}:${project}:${target}`;
+}
+
+// formBusyControl picks the live control a pending form submission marks
+// busy: the submit control when the form has one, otherwise the first
+// editable field. Buttonless forms submit implicitly — the inline thread
+// reply form posts on Enter and carries only a text input — and leaving that
+// field enabled would show an apparently actionable control whose submission
+// the in-flight guard then silently rejects.
+export function formBusyControl(form) {
+  if (typeof form?.querySelector !== "function") return null;
+  const submitter = form.querySelector('[type="submit"]');
+  if (submitter) return submitter;
+  if (typeof form.querySelectorAll !== "function") return null;
+  for (const field of form.querySelectorAll("input, textarea, select")) {
+    if (field.getAttribute?.("type") !== "hidden") return field;
+  }
+  return null;
 }
 
 // markBusy gives a mutating control its synchronous pending state: disabled,
@@ -349,6 +451,46 @@ export function markBusy(element) {
     element.removeAttribute?.("aria-busy");
     element.classList?.remove("is-busy");
   };
+}
+
+// ACTION_SELECTOR matches every control the delegated table can dispatch, so
+// applyBusyState can find the replacement nodes a repaint swapped in.
+const ACTION_SELECTOR = Object.keys(ACTIONS)
+  .map((key) => `[data-${key.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase()}]`)
+  .join(", ");
+
+// applyBusyState re-marks controls under root whose action is still in flight.
+// A poll re-render replaces a busy control with a freshly enabled node; the
+// busy state lives in the in-flight registry, not on the discarded node, so a
+// repaint (an element's own paint or a route load) calls this to keep the
+// replacement disabled and visibly busy — and to register its restore, so the
+// action settling re-enables whatever is on screen rather than a dead node.
+export function applyBusyState(root) {
+  if (!inFlight.size || typeof root?.querySelectorAll !== "function") return;
+  for (const element of root.querySelectorAll(ACTION_SELECTOR)) {
+    const key = actionKeyFor(element);
+    if (!key) continue;
+    const entry = inFlightEntries.get(actionBusyKey(key, element.dataset));
+    if (!entry || element.disabled || element.classList?.contains?.("is-busy")) continue;
+    entry.restores.add(markBusy(element));
+  }
+  // Delegated form controls carry no action attribute, so find them through
+  // their form: any dataset key producing an in-flight form:<key>:<project>:
+  // <target> busy key marks the form's busy control (its submitter, or its first
+  // editable field for a buttonless form like the thread reply input) busy.
+  // Without this a repaint would render the replacement form enabled —
+  // apparently actionable, yet inert because the in-flight guard keeps
+  // rejecting its submission.
+  for (const form of root.querySelectorAll("form")) {
+    const control = formBusyControl(form);
+    if (!control || control.disabled || control.classList?.contains?.("is-busy")) continue;
+    for (const key of Object.keys(form.dataset || {})) {
+      const entry = inFlightEntries.get(formBusyKey(key, form));
+      if (!entry) continue;
+      entry.restores.add(markBusy(control));
+      break;
+    }
+  }
 }
 
 // The outcome buttons for one gate all carry the same data-workflow-respond
@@ -393,7 +535,6 @@ function restoreLiveGateOutcomes(element, nodeRunID) {
 export function gateResponsePending(nodeRunID) {
   return inFlight.has(`workflowRespond:${nodeRunID}`);
 }
-
 const PENDING_LABELS = {
   workflowSchedule: "Scheduling",
   workflowReset: "Resetting",
@@ -415,7 +556,10 @@ const PENDING_LABELS = {
   humanReviewApprove: "Satisfying check",
   startTaskConsole: "Starting console",
   releaseTaskConsole: "Releasing console",
+  startConsole: "Starting console",
+  releaseConsole: "Releasing console",
   threadClaim: "Claiming thread",
+  relationRemove: "Removing relation",
 };
 
 // failureMessage renders an arbitrary rejection value as a status-line string.
@@ -454,9 +598,10 @@ function humanizeKey(key) {
 // and runs it. The control is marked busy synchronously on click and the
 // status line names the in-flight action; the in-flight registry blocks a
 // second submission for the same action and target until the first settles —
-// even if a poll re-render replaced the button node in between. Success and
-// failure both land on the status line and restore the control. Returns true
-// when it handled the event.
+// even if a poll re-render replaced the button node in between (repaints
+// re-apply the busy state through applyBusyState). Success and failure both
+// land on the status line and restore the control. Returns true when it
+// handled the event.
 export async function handleAction(app, event) {
   const element = event.target?.closest?.("[data-action-key]") || findActionElement(event.target);
   if (!element) return false;
@@ -465,16 +610,19 @@ export async function handleAction(app, event) {
 
   event.preventDefault?.();
   const busyKey = actionBusyKey(key, element.dataset);
-  if (element.disabled || inFlight.has(busyKey)) return true;
-  const restore = markBusy(element);
+  if (element.disabled) return true;
+  const entry = acquireBusy(busyKey, pendingLabel(key, element.dataset));
+  if (!entry) return true;
+  entry.restores.add(markBusy(element));
   // Every outcome button for a gate shares one in-flight key, so a sibling
   // stays clickable-looking until a repaint even though its click would be
   // rejected. Suppress the whole set synchronously so no sibling appears
-  // enabled while the shared response is pending; the restores run on settle.
-  const restoreSiblings = key === "workflowRespond" ? suppressGateOutcomes(element) : [];
-  const pending = pendingLabel(key, element.dataset);
-  beginInFlight(busyKey, pending);
-  app.setStatus?.(pending);
+  // enabled while the shared response is pending; their restores join the
+  // entry's, so settling re-enables them wherever a repaint left them.
+  if (key === "workflowRespond") {
+    for (const restoreSibling of suppressGateOutcomes(element)) entry.restores.add(restoreSibling);
+  }
+  app.setStatus?.(entry.label);
   try {
     const result = await ACTIONS[key](app, element, element.dataset);
     // settleStatus arbitrates the shared status line: it keeps a still-pending
@@ -487,11 +635,11 @@ export async function handleAction(app, event) {
     // drains — even for a non-Error rejection such as `reject(null)`.
     settleStatus(app, busyKey, failureMessage(error));
   } finally {
-    restore();
-    for (const restoreSibling of restoreSiblings) restoreSibling();
-    // A repaint mid-flight swapped the suppressed controls for fresh disabled
-    // ones; the restores above only reach the detached originals, so bring the
-    // live replacements back now that the key is cleared.
+    releaseBusy(busyKey);
+    // A repaint mid-flight swapped the suppressed controls for fresh ones the
+    // renderer emitted already-disabled; those were never marked through
+    // markBusy, so no restore reaches them. Bring the live replacements back
+    // now that the key is cleared.
     if (key === "workflowRespond") restoreLiveGateOutcomes(element, element.dataset?.workflowRespond);
   }
   return true;

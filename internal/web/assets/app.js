@@ -13,13 +13,13 @@ import { openTerminalWindow, closeTerminalDialog, hideInlineTerminal, closeTermi
 import { pollDelay, Poller } from "./poller.js";
 import { renderWorkersView, renderJobsView } from "./diagnostics-view.js";
 import { renderTerminalView, openInlineTerminalView, showTranscriptView } from "./terminal-view.js";
-import { renderConsoleView, stopConsolePollView, startConsoleView, releaseConsoleView } from "./console-view.js";
+import { renderConsoleView, stopConsolePollView } from "./console-view.js";
 import { renderDoneView } from "./done-view.js";
 import { createTaskView, renderBoardRoute } from "./board-route.js";
 import { renderTaskRoute } from "./task-route.js";
 import { renderChangeRoute } from "./change-route.js";
 import { renderEpicRoute } from "./epic-route.js";
-import { handleAction } from "./actions.js";
+import { applyBusyState, handleAction, pendingStatus } from "./actions.js";
 import { handleFormSubmit } from "./forms.js";
 import { renderNewTaskView, renderTaskFormView, bindTaskFlowControlsView } from "./task-view.js";
 import { renderFlowsView } from "./flows-view.js";
@@ -213,19 +213,6 @@ export class FlowApp extends HTMLElement {
       if (event.defaultPrevented) return;
       if (await handleAction(this, event)) return;
 
-      const start = event.target?.closest?.("[data-start-console]");
-      if (start && this.contains(start)) {
-        event.preventDefault();
-        const harness = this.querySelector("[data-console-harness]")?.value || "harness";
-        await this.startConsole(start.dataset.project || "", harness, start.dataset.task || "");
-        return;
-      }
-      const release = event.target?.closest?.("[data-release-console]");
-      if (release && this.contains(release)) {
-        event.preventDefault();
-        await releaseConsoleView(this, release.dataset.project || "", release.dataset.task || "");
-        return;
-      }
       const terminal = event.target?.closest?.("[data-terminal], [data-job-terminal]");
       if (terminal && this.contains(terminal)) {
         event.preventDefault();
@@ -528,6 +515,13 @@ export class FlowApp extends HTMLElement {
       this.setPollState("idle", "static");
     }
     this.schedulePolling(context.path);
+    // The route render cleared the status line (setTitle) and may have
+    // replaced controls whose action is still in flight: put the busy state
+    // and the pending message back, so a poll cannot make a running action
+    // look finished — or hand back a clickable control for it.
+    applyBusyState(this);
+    const pending = pendingStatus();
+    if (pending) this.setStatus(pending);
     return true;
   }
 
@@ -608,11 +602,6 @@ export class FlowApp extends HTMLElement {
   renderFlows(context) {
     return renderFlowsView(this, context);
   }
-
-  startConsole(projectID, harness, taskID) {
-    return startConsoleView(this, projectID, harness, taskID);
-  }
-
 
 
   openInlineTerminal(button, kind, id) {

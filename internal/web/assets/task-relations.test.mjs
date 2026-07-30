@@ -12,7 +12,7 @@ installTestDOM();
 const { relationGroups, RELATION_GROUPS, taskModel, blockerVerdict } = await import("./task-model.js");
 const { renderTaskRelations, RELATION_KIND_OPTIONS } = await import("./elements/task-relations.js");
 const { handleFormSubmit } = await import("./forms.js");
-const { handleAction } = await import("./actions.js");
+const { handleAction, inFlight } = await import("./actions.js");
 
 const TASK_ID = "t-me";
 
@@ -586,6 +586,193 @@ test("the remove control DELETEs the exact relation row and reloads", async () =
     assert.equal(deletes[0].path, "/ui/api/v2/projects/p-1/tasks/t-blocker/relations");
     assert.deepEqual(JSON.parse(deletes[0].options.body), { target_task_id: TASK_ID, kind: "blocks" });
     assert.equal(refreshed, 1, "the detail view reloads after removing");
+    element.remove();
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("the add control names the in-flight submission and confirms the added relation", async () => {
+  // Regression: relationAddForm returned undefined, so once the refresh
+  // cleared the pending status the dispatcher had no confirmation to show and
+  // the status line went blank on success.
+  const previousFetch = globalThis.fetch;
+  let resolveRequest;
+  globalThis.fetch = () =>
+    new Promise((resolve) => {
+      resolveRequest = () => resolve({ ok: true, status: 204, json: () => Promise.resolve(null) });
+    });
+  try {
+    const statuses = [];
+    const form = {
+      tagName: "FORM",
+      dataset: { project: "p-1", relationAddForm: TASK_ID },
+      elements: {
+        kind: { value: "blocks" },
+        target_task_id: { value: "t-new" },
+      },
+      reportValidity: () => true,
+      reset() {},
+    };
+    const app = { setStatus: (message) => statuses.push(message), async refresh() {} };
+
+    const handled = handleFormSubmit(app, { target: form, preventDefault() {} });
+
+    // The pending status is synchronous, before the request resolves.
+    assert.deepEqual(statuses, ["Adding relation\u2026"]);
+
+    resolveRequest();
+    assert.equal(await handled, true);
+    // The confirmation is written after the handler's refresh, so it survives
+    // the re-render clearing the status line.
+    assert.deepEqual(statuses, ["Adding relation\u2026", "Relation added"]);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("the add control reports the missing target on the status line without a request", async () => {
+  const previousFetch = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = () => {
+    requests += 1;
+    return Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) });
+  };
+  try {
+    const statuses = [];
+    const form = {
+      tagName: "FORM",
+      dataset: { project: "p-1", relationAddForm: TASK_ID },
+      elements: {
+        kind: { value: "blocks" },
+        target_task_id: { value: " " },
+      },
+      reportValidity: () => true,
+      reset() {},
+    };
+    const app = { setStatus: (message) => statuses.push(message), async refresh() {} };
+
+    assert.equal(await handleFormSubmit(app, { target: form, preventDefault() {} }), true);
+    assert.equal(requests, 0, "no request goes out without a target");
+    assert.deepEqual(statuses, ["Adding relation\u2026", "Target task ID is required"]);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("the remove control names the in-flight action and confirms the removed relation", async () => {
+  // Regression: relationRemove returned undefined, so once the refresh cleared
+  // the pending status the dispatcher had no confirmation to show and the
+  // status line went blank on success.
+  const previousFetch = globalThis.fetch;
+  let resolveRequest;
+  globalThis.fetch = () =>
+    new Promise((resolve) => {
+      resolveRequest = () => resolve({ ok: true, status: 204, json: () => Promise.resolve(null) });
+    });
+  try {
+    const statuses = [];
+    const root = globalThis.document.body;
+    const element = mountElement(root, "flow-task-relations", relationsModel());
+    await flush();
+
+    const button = element.querySelector('[data-relation-remove="t-blocker"]');
+    assert.ok(button, "the blocked-by row has a remove button");
+
+    const handled = handleAction(
+      { setStatus: (message) => statuses.push(message), async refresh() {} },
+      { target: button, preventDefault() {} },
+    );
+
+    // The pending state is synchronous: the control is busy and the status
+    // line names the action before the request resolves.
+    assert.equal(button.disabled, true);
+    assert.deepEqual(statuses, ["Removing relation t-blocker\u2026"]);
+
+    resolveRequest();
+    assert.equal(await handled, true);
+    // The confirmation is written after the handler's refresh, so it survives
+    // the re-render clearing the status line, and the control is restored.
+    assert.deepEqual(statuses, ["Removing relation t-blocker\u2026", "Relation removed"]);
+    assert.equal(button.disabled, false);
+    element.remove();
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("distinct relation removals sharing a source task proceed while an exact duplicate stays blocked", async () => {
+  // Regression: actionBusyKey keyed relationRemove on the source task alone,
+  // but the DELETE mutation is identified by project, source, target, and
+  // kind. Two rows with the same source — here the task blocks one task and is
+  // related to another — shared an in-flight key, so starting one removal
+  // silently rejected the other as a duplicate, and a repaint marked the
+  // unrelated row busy.
+  const previousFetch = globalThis.fetch;
+  const fetchCalls = [];
+  const resolvers = [];
+  globalThis.fetch = (path, options) => {
+    fetchCalls.push({ path, options });
+    return new Promise((resolve) => {
+      resolvers.push(() => resolve({ ok: true, status: 204, json: () => Promise.resolve(null) }));
+    });
+  };
+  try {
+    const root = globalThis.document.body;
+    // No blocked-by rows, so no blocker-state lookups interleave: every fetch
+    // recorded here is a removal.
+    const model = relationsModel({
+      relationGroups: relationGroups(
+        [
+          { source_task_id: TASK_ID, target_task_id: "t-blocked", kind: "blocks", target_title: "Blocked task" },
+          { source_task_id: TASK_ID, target_task_id: "t-linked", kind: "related_to", target_title: "Linked task" },
+        ],
+        TASK_ID,
+      ),
+    });
+    const element = mountElement(root, "flow-task-relations", model);
+    await flush();
+
+    const blocksButton = element.querySelector('[data-relation-remove="t-me"][data-kind="blocks"]');
+    assert.ok(blocksButton, "the blocks row carries a remove control");
+    const app = { setStatus() {}, async refresh() {} };
+
+    const first = handleAction(app, { target: blocksButton, preventDefault() {} });
+    assert.equal(blocksButton.disabled, true, "the first removal marks its control busy");
+    assert.equal(fetchCalls.length, 1);
+
+    // A poll repaint swaps in fresh nodes mid-flight; the busy state comes
+    // from the registry, keyed by the full mutation identity.
+    element.invalidate();
+    await flush();
+    const duplicate = element.querySelector('[data-relation-remove="t-me"][data-kind="blocks"]');
+    const related = element.querySelector('[data-relation-remove="t-me"][data-kind="related_to"]');
+    assert.ok(duplicate && related, "the repaint re-rendered both rows");
+    assert.equal(duplicate.disabled, true, "the exact duplicate stays busy through the repaint");
+    assert.ok(!related.disabled, "the distinct row is not conflated with the in-flight removal");
+
+    // The exact duplicate (same project, source, target, kind) stays blocked.
+    await handleAction(app, { target: duplicate, preventDefault() {} });
+    assert.equal(fetchCalls.length, 1, "the exact duplicate issues no second request");
+
+    // A distinct row on the same source is a different mutation and proceeds.
+    const second = handleAction(app, { target: related, preventDefault() {} });
+    assert.equal(related.disabled, true, "the second removal marks its own control busy");
+    assert.equal(fetchCalls.length, 2, "the distinct removal is not suppressed by the shared source");
+    assert.deepEqual(
+      fetchCalls.map((call) => JSON.parse(call.options.body)),
+      [
+        { target_task_id: "t-blocked", kind: "blocks" },
+        { target_task_id: "t-linked", kind: "related_to" },
+      ],
+    );
+
+    for (const resolve of resolvers) resolve();
+    assert.equal(await first, true);
+    assert.equal(await second, true);
+    assert.equal(duplicate.disabled, false, "settling restores the control on screen");
+    assert.equal(related.disabled, false);
+    assert.equal(inFlight.size, 0);
     element.remove();
   } finally {
     globalThis.fetch = previousFetch;

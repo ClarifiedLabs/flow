@@ -85,6 +85,16 @@
   font-size: var(--text-prose);
 }
 
+/* The reply form has no submit button — it posts on Enter — so the input
+   itself carries the pending state while the reply is in flight: dimmed and
+   uneditable, with aria-busy for assistive tech. */
+.reply input:disabled,
+.reply input[aria-busy="true"],
+.reply input.is-busy {
+  opacity: 0.55;
+  cursor: progress;
+}
+
 .claims {
   display: flex;
   flex-wrap: wrap;

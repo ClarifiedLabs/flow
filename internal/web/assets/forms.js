@@ -6,7 +6,21 @@
 import { apiPatch, apiPost, taskAPIBase, taskHref } from "./api.js";
 import { value } from "./normalize.js";
 import { uploadTaskAttachment } from "./task.js";
-import { beginInFlight, failureMessage, inFlight, markBusy, settleStatus } from "./actions.js";
+import {
+  acquireBusy,
+  failureMessage,
+  formBusyControl,
+  formBusyKey,
+  markBusy,
+  releaseBusy,
+  settleStatus,
+} from "./actions.js";
+
+// formBusyKey lives in actions.js next to the in-flight registry (forms.js
+// already imports actions.js, so the dependency stays one-way); it is
+// re-exported below for callers that think of it as part of the
+// delegated-forms API.
+export { formBusyKey };
 
 // FORMS handlers return the confirmation message for the status line, or a
 // validation message the dispatcher shows in place of the pending label. They
@@ -112,8 +126,7 @@ export const FORMS = {
     const targetTaskID = String(form.elements.target_task_id?.value || "").trim();
     // Return the validation message (rather than writing it and returning
     // undefined) so the dispatcher keeps it visible when this is the final
-    // in-flight submission. The success path below still returns undefined to
-    // clear the line, and CANCELLED remains the distinct backed-out sentinel.
+    // in-flight submission; CANCELLED remains the distinct backed-out sentinel.
     if (!targetTaskID) return "Target task ID is required";
     await apiPost(`${taskAPIBase(form.dataset.project)}/${encodeURIComponent(taskID)}/relations`, {
       target_task_id: targetTaskID,
@@ -121,40 +134,9 @@ export const FORMS = {
     });
     form.reset();
     await app.refresh();
+    return "Relation added";
   },
 };
-
-// formBusyKey names an in-flight form submission by its stable mutation
-// identity, not by DOM node: the form kind plus the project and the task (or
-// thread) target it mutates. Keying on the form kind and its primary dataset
-// value alone collides across distinct targets — a boolean data-attachment-form
-// and a create-mode data-task-form both carry an empty primary value, so two
-// uploaders on different tasks would share `form:attachmentForm:` and a pending
-// upload on one would suppress an unrelated uploader after navigation. Scoping
-// the key to project plus target lets independent forms run concurrently while
-// a duplicate submission of the same target stays blocked, even across a poll
-// repaint that replaced the form node.
-//
-// The project is the form's effective selected project, not just data-project:
-// a create form rendered with several projects intentionally carries no
-// data-project (renderTaskFormView puts the mutation target in the project
-// <select>), so reading the dataset alone would collapse every multi-project
-// create onto `form:taskForm::` and a pending create for one project would
-// suppress an unrelated project's create. Preferring the selected project keeps
-// per-project creates distinct; the dataset value remains the fallback for
-// forms that carry it (edit forms, single-project creates). The identity is
-// derived only from the form's data and fields — never the node — so a repaint
-// that rebuilds the same form recomputes the same key and stays blocked.
-export function formBusyKey(key, form) {
-  const dataset = form?.dataset || {};
-  const selectedProject = String(form?.elements?.project?.value ?? "");
-  const project = selectedProject || String(dataset.project ?? "");
-  const target =
-    key === "threadReplyForm"
-      ? String(dataset.threadReplyForm ?? "")
-      : String(dataset.task ?? dataset[key] ?? "");
-  return `form:${key}:${project}:${target}`;
-}
 
 // collectRelationRows reads the create form's relation picker rows and splits
 // them by direction. blocks/related_to rows make the new task the source, so
@@ -202,14 +184,18 @@ const FORM_PENDING_LABELS = {
   attachmentForm: "Uploading attachment",
   attentionReplyForm: "Sending reply",
   threadReplyForm: "Posting reply",
+  relationAddForm: "Adding relation",
 };
 
 // handleFormSubmit gives delegated form submissions the same pending state
-// and duplicate-submit guard as the action buttons: the submit control is
-// marked busy synchronously, the status line names the in-flight submission,
-// and the in-flight registry (keyed by form kind and target, not by DOM node)
-// blocks a re-submit while the first one is running — even across a poll
-// re-render that replaced the form.
+// and duplicate-submit guard as the action buttons: the form's busy control —
+// its submit control, or its first editable field when a buttonless form
+// (like the inline thread reply) submits implicitly — is marked busy
+// synchronously, the status line names the in-flight submission, and the
+// in-flight registry (keyed by form kind and target, not by DOM node) blocks
+// a re-submit while the first one is running — even across a poll re-render
+// that replaced the form. A repaint re-marks the replacement form's control
+// through applyBusyState, which matches forms by the same formBusyKey.
 export async function handleFormSubmit(app, event) {
   const form = event.target;
   if (!form || form.tagName !== "FORM") return false;
@@ -219,12 +205,11 @@ export async function handleFormSubmit(app, event) {
   event.preventDefault();
   if (form.reportValidity && !form.reportValidity()) return true;
   const busyKey = formBusyKey(key, form);
-  if (inFlight.has(busyKey)) return true;
-  const submitter = typeof form.querySelector === "function" ? form.querySelector('[type="submit"]') : null;
-  const restore = submitter ? markBusy(submitter) : () => {};
-  const pending = `${FORM_PENDING_LABELS[key] || "Submitting"}…`;
-  beginInFlight(busyKey, pending);
-  app.setStatus?.(pending);
+  const entry = acquireBusy(busyKey, `${FORM_PENDING_LABELS[key] || "Submitting"}…`);
+  if (!entry) return true;
+  const control = formBusyControl(form);
+  if (control) entry.restores.add(markBusy(control));
+  app.setStatus?.(entry.label);
   try {
     const result = await FORMS[key](app, form);
     // settleStatus arbitrates the shared status line: it keeps a still-pending
@@ -238,7 +223,7 @@ export async function handleFormSubmit(app, event) {
     // drains — even for a non-Error rejection such as `reject(null)`.
     settleStatus(app, busyKey, failureMessage(error));
   } finally {
-    restore();
+    releaseBusy(busyKey);
   }
   return true;
 }

@@ -19,6 +19,8 @@
 // DOM, which is the only way to test it without pulling in a third-party
 // browser environment.
 
+import { applyBusyState } from "../actions.js";
+
 export class FlowElement extends HTMLElement {
   #data = null;
   #painted = null;
@@ -61,6 +63,10 @@ export class FlowElement extends HTMLElement {
     this.#painted = html;
     this.innerHTML = html;
     this.afterPaint();
+    // The write may have swapped a control whose action is still in flight
+    // for a freshly enabled node; the busy state lives outside the DOM, so
+    // re-apply it to any matching control this paint just replaced.
+    applyBusyState(this);
   }
 
   // invalidate forces the next paint to write, for when render() depends on
