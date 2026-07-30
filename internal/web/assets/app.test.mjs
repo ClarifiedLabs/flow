@@ -710,53 +710,10 @@ test("new task form submission includes source-outward relation rows in the payl
   ]);
 });
 
-test("new task form links a child-of row as X parent_of new-task after creation", async () => {
-  const fetchCalls = [];
-  await scriptContext({}, {
-    history: { pushState() {} },
-    fetch(path, options) {
-      fetchCalls.push({ path, options });
-      if (path.endsWith("/relations")) {
-        return Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) });
-      }
-      return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ task: { id: "t-alpha-0001" } }) });
-    },
-  });
-  const form = createFormWithRelations([
-    relationRow("parent_of", "t-alpha-0009"),
-    relationRow("blocks", "t-alpha-0002"),
-  ]);
-  const app = { setStatus() {}, async load() {}, async refresh() {} };
-
-  const handled = await handleFormSubmit(app, { target: form, preventDefault() {} });
-
-  assert.equal(handled, true);
-  assert.equal(fetchCalls.length, 2, "create plus one child-of link call");
-
-  // The create payload carries only the source-outward row; the child-of row
-  // must not be sent there (it would make the new task the parent).
-  const createBody = JSON.parse(fetchCalls[0].options.body);
-  assert.deepEqual(createBody.relations, [{ target_task_id: "t-alpha-0002", kind: "blocks" }]);
-
-  // The child-of row is applied after creation by linking the chosen task as
-  // the source and the new task as the target: X parent_of new-task, i.e. the
-  // new task is a child of X.
-  const linkCall = fetchCalls[1];
-  assert.equal(linkCall.options.method, "POST");
-  assert.equal(linkCall.path, "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0009/relations");
-  const linkSource = linkCall.path.split("/tasks/")[1].replace("/relations", "");
-  const linkBody = JSON.parse(linkCall.options.body);
-  assert.equal(linkSource, "t-alpha-0009", "relation source is the chosen task X");
-  assert.equal(linkBody.target_task_id, "t-alpha-0001", "relation target is the new task");
-  assert.equal(linkBody.kind, "parent_of");
-});
-
-test("new task form navigates to the created task when the child-of link fails", async () => {
+test("new task form sends a child-of row atomically in the create request", async () => {
   const fetchCalls = [];
   let pushedPath = "";
   let loads = 0;
-  let status = "";
-  let relationAttempts = 0;
   await scriptContext({}, {
     history: {
       pushState(_state, _title, path) {
@@ -765,79 +722,158 @@ test("new task form navigates to the created task when the child-of link fails",
     },
     fetch(path, options) {
       fetchCalls.push({ path, options });
-      if (path.endsWith("/relations")) {
-        relationAttempts += 1;
-        if (relationAttempts === 1) {
-          return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({ error: { message: "target task not found" } }) });
-        }
-        return Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) });
-      }
-      return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ task: { id: "t-alpha-0001" } }) });
+      return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ task: { id: "t-alpha-0002" } }) });
     },
   });
   const form = createFormWithRelations([
-    relationRow("parent_of", "t-alpha-0009"),
-    relationRow("blocks", "t-alpha-0002"),
+    relationRow("parent_of", "t-alpha-0001"),
+    relationRow("blocks", "t-alpha-0003"),
   ]);
   const app = {
-    setStatus(message) {
-      status = message;
-    },
+    setStatus() {},
     async load() {
       loads += 1;
     },
-    async refresh() {},
+    async refresh() {
+      throw new Error("create submission should not refresh the edit route");
+    },
   };
 
   const handled = await handleFormSubmit(app, { target: form, preventDefault() {} });
 
   assert.equal(handled, true);
-  assert.equal(fetchCalls.length, 2, "create plus the failing child-of link call");
-  // The create POST committed, so the submission must land on the created
-  // task's page — not the still-populated create form, whose resubmission would
-  // POST a second task.
-  assert.equal(pushedPath, "/ui/tasks/t-alpha-0001");
-  assert.equal(loads, 1, "the created task's route is loaded");
-  // The status names the failure as a relation problem and points at the
-  // relation-retry path on the task page.
-  assert.match(status, /Task created/);
-  assert.match(status, /child of t-alpha-0009/);
-  assert.match(status, /target task not found/);
-  assert.match(status, /t-alpha-0009's page/);
+  // Both rows ride in the single create request. The child-of row makes the new
+  // task the relation target (chosen parent parent_of new task) via
+  // target_is_new_task, so the server applies it in the create transaction. There
+  // is no second, post-create link call that could partially succeed after the
+  // task has already been committed.
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks");
+  assert.deepEqual(JSON.parse(fetchCalls[0].options.body).relations, [
+    { target_task_id: "t-alpha-0003", kind: "blocks" },
+    { source_task_id: "t-alpha-0001", target_task_id: "", kind: "parent_of", target_is_new_task: true },
+  ]);
+  assert.equal(pushedPath, "/ui/tasks/t-alpha-0002");
+  assert.equal(loads, 1);
+});
 
-  // A follow-up submission from the parent task's page (its relation add form,
-  // "parent of" with the new task as the target) links the parent without ever
-  // issuing another create POST.
-  status = "";
-  const retryForm = {
-    tagName: "FORM",
-    dataset: { project: "p-alpha", relationAddForm: "t-alpha-0009" },
-    elements: {
-      kind: { value: "parent_of" },
-      target_task_id: { value: "t-alpha-0001" },
+test("a failed atomic child-of create leaves the form in place for a retry", async () => {
+  const fetchCalls = [];
+  let pushedPath = "";
+  let loads = 0;
+  const statuses = [];
+  await scriptContext({}, {
+    history: {
+      pushState(_state, _title, path) {
+        pushedPath = path;
+      },
     },
-    reset() {},
-    reportValidity() {
-      return true;
+    fetch(path, options) {
+      fetchCalls.push({ path, options });
+      return Promise.resolve({
+        ok: false,
+        status: 400,
+        json: () => Promise.resolve({ error: { message: "task relation would create a cycle" } }),
+        text: () => Promise.resolve(""),
+      });
     },
-  };
-  const retryApp = {
-    setStatus(message) {
-      status = message;
-    },
-    async load() {},
-    async refresh() {},
-  };
-  await handleFormSubmit(retryApp, { target: retryForm, preventDefault() {} });
-  assert.equal(fetchCalls.length, 3, "the retry issues only the link call");
-  assert.equal(fetchCalls[2].path, "/ui/api/v2/projects/p-alpha/tasks/t-alpha-0009/relations");
-  assert.deepEqual(JSON.parse(fetchCalls[2].options.body), {
-    target_task_id: "t-alpha-0001",
-    kind: "parent_of",
   });
-  assert.equal(status, "Submitting…", "the retry leaves only the pending label, no error status");
-  const createPosts = fetchCalls.filter((call) => call.path === "/ui/api/v2/projects/p-alpha/tasks");
-  assert.equal(createPosts.length, 1, "exactly one task is ever created");
+  const form = createFormWithRelations([relationRow("parent_of", "t-alpha-0001")]);
+  const app = {
+    setStatus(message) {
+      statuses.push(message);
+    },
+    async load() {
+      loads += 1;
+    },
+    async refresh() {
+      throw new Error("failed create should not refresh");
+    },
+  };
+
+  const handled = await handleFormSubmit(app, { target: form, preventDefault() {} });
+
+  assert.equal(handled, true);
+  // The failed create is the only request: the server rolled the whole create
+  // back, so nothing was committed and there is no orphaned task to recover.
+  // The form stays put (no navigation, no reload) and the failure is surfaced
+  // on the status line, so the user can resubmit. The failure-then-success
+  // retry itself is covered by the next test.
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(pushedPath, "");
+  assert.equal(loads, 0);
+  assert.match(statuses.at(-1), /task relation would create a cycle/);
+});
+
+
+test("retrying a failed atomic child-of create recovers with one task, one relation, and one navigation", async () => {
+  const fetchCalls = [];
+  const pushedPaths = [];
+  let loads = 0;
+  const statuses = [];
+  let submissions = 0;
+  await scriptContext({}, {
+    history: {
+      pushState(_state, _title, path) {
+        pushedPaths.push(path);
+      },
+    },
+    fetch(path, options) {
+      fetchCalls.push({ path, options });
+      // First submission fails (e.g. the chosen parent cannot be linked); the
+      // server rolls the whole create back. The retry succeeds.
+      submissions += 1;
+      if (submissions === 1) {
+        return Promise.resolve({
+          ok: false,
+          status: 400,
+          json: () => Promise.resolve({ error: { message: "task relation would create a cycle" } }),
+          text: () => Promise.resolve(""),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ task: { id: "t-alpha-0002" } }),
+      });
+    },
+  });
+  const form = createFormWithRelations([relationRow("parent_of", "t-alpha-0001")]);
+  const app = {
+    setStatus(message) {
+      statuses.push(message);
+    },
+    async load() {
+      loads += 1;
+    },
+    async refresh() {
+      throw new Error("create submission should not refresh the edit route");
+    },
+  };
+
+  // First submission fails; the form stays in place (no navigation, no reload).
+  await handleFormSubmit(app, { target: form, preventDefault() {} });
+  assert.equal(pushedPaths.length, 0);
+  assert.equal(loads, 0);
+  assert.match(statuses.at(-1), /task relation would create a cycle/);
+
+  // The user resubmits the same form. Because the failed create committed
+  // nothing, the retry creates exactly one task — not a duplicate — carrying
+  // the child-of relation, and navigates to it once.
+  const handled = await handleFormSubmit(app, { target: form, preventDefault() {} });
+
+  assert.equal(handled, true);
+  assert.equal(fetchCalls.length, 2);
+  for (const call of fetchCalls) {
+    assert.equal(call.path, "/ui/api/v2/projects/p-alpha/tasks");
+    assert.deepEqual(JSON.parse(call.options.body).relations, [
+      { source_task_id: "t-alpha-0001", target_task_id: "", kind: "parent_of", target_is_new_task: true },
+    ]);
+  }
+  // One successful create → one navigation and one load, to the single created
+  // task with its relation applied.
+  assert.deepEqual(pushedPaths, ["/ui/tasks/t-alpha-0002"]);
+  assert.equal(loads, 1);
+  assert.equal(statuses.at(-1), "Task created");
 });
 
 test("new task form drops relation rows with an empty target and omits the key when none remain", async () => {

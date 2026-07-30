@@ -3,7 +3,7 @@
 // dispatches. Same reason as the click table: forms live inside elements that
 // replace their own innerHTML.
 
-import { apiPatch, apiPost, taskAPIBase, taskHref, taskRelationsAPIPath } from "./api.js";
+import { apiPatch, apiPost, taskAPIBase, taskHref } from "./api.js";
 import { value } from "./normalize.js";
 import { uploadTaskAttachment } from "./task.js";
 import { inFlight, markBusy } from "./actions.js";
@@ -35,36 +35,31 @@ export const FORMS = {
 
     const formProject = form.elements.project ? form.elements.project.value : form.dataset.project || "";
     if (!formProject) return "Project is required";
+    // Relation rows ride in the create payload so the whole create is atomic.
+    // A child-of row makes the new task the relation target (chosen parent
+    // parent_of new task): it is sent with target_is_new_task set and a blank
+    // target, which the server resolves to the new task inside the create
+    // transaction. A parent that cannot be linked fails the whole create, so
+    // nothing is committed, the form stays put, and resubmitting creates exactly
+    // one task instead of a duplicate plus an orphan. There is no second,
+    // post-create link request that could partially succeed.
     const collected = collectRelationRows(form);
     if (collected instanceof Error) return collected.message;
-    if (collected.create.length) payload.relations = collected.create;
+    const relations = [
+      ...collected.create,
+      ...collected.childOf.map((relation) => ({
+        source_task_id: relation.target_task_id,
+        target_task_id: "",
+        kind: relation.kind,
+        target_is_new_task: true,
+      })),
+    ];
+    if (relations.length) payload.relations = relations;
     const data = await apiPost(taskAPIBase(formProject), payload);
     const task = data.task || data.Task || {};
     const taskID = value(task, "id", "ID");
     if (!taskID) throw new Error("Created task ID unavailable");
     const createdProject = data.project_id || data.ProjectID || formProject;
-    // child-of rows make the new task the relation target, which the create
-    // payload cannot express for owner tokens; link them now that the task id
-    // exists (X parent_of new-task). The create POST has already committed by
-    // the time a link is attempted, so a failing link must not leave the
-    // still-populated create form behind: submitting it again would POST a
-    // second, duplicate task while the first keeps its other relations but not
-    // its parent. Navigate to the created task no matter what the link does and
-    // report the failure as a relation-retry message naming the parent task's
-    // page, whose relation add form (parent of <new task>) can create the
-    // missing link without creating anything.
-    let linkFailure = "";
-    for (const relation of collected.childOf) {
-      try {
-        await apiPost(taskRelationsAPIPath(createdProject, relation.target_task_id), {
-          target_task_id: taskID,
-          kind: relation.kind,
-        });
-      } catch (error) {
-        linkFailure = `Task created, but linking it as a child of ${relation.target_task_id} failed: ${error.message || error}. Add the relation from ${relation.target_task_id}'s page (parent of ${taskID}).`;
-        break;
-      }
-    }
     history.pushState({}, "", taskHref(createdProject, taskID));
     for (const file of Array.from(form.elements.attachments?.files || [])) {
       await uploadTaskAttachment(createdProject, taskID, file, "initial");
@@ -73,7 +68,7 @@ export const FORMS = {
       await apiPost(`${taskAPIBase(createdProject)}/${encodeURIComponent(taskID)}/schedule`, {});
     }
     await app.load();
-    return linkFailure || "Task created";
+    return "Task created";
   },
 
   async attachmentForm(app, form) {

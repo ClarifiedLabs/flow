@@ -70,6 +70,13 @@ type TaskRelationRequest struct {
 	SourceTaskID string `json:"source_task_id,omitempty"`
 	TargetTaskID string `json:"target_task_id"`
 	Kind         string `json:"kind"`
+	// TargetIsNewTask is an explicit opt-in, honored only on the create-task
+	// path, that resolves a blank TargetTaskID to the task being created. It
+	// lets a caller make the new task the relation *target* — e.g. an existing
+	// parent linked parent_of the new task — inside the single create
+	// transaction, so a child-of link cannot partially succeed. The link and
+	// unlink endpoints ignore it.
+	TargetIsNewTask bool `json:"target_is_new_task,omitempty"`
 }
 
 type ReviewFollowUpFinding struct {

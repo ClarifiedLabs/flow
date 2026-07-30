@@ -490,6 +490,64 @@ func TestRelationsForTaskDenormalizesRelatedTaskTitles(t *testing.T) {
 	}
 }
 
+// TestCreateTaskWithParentRelationAtomically covers the new-task child-of path:
+// an existing task named as the source with a blank target flagged
+// BlankTargetIsNewTask resolves to the new task inside the create transaction,
+// producing "parent parent_of new task". A relation that cannot be linked (here
+// a nonexistent parent, which violates the source foreign key) must roll the
+// whole create back so no parentless task is left behind.
+func TestCreateTaskWithParentRelationAtomically(t *testing.T) {
+	ctx := context.Background()
+	_, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
+
+	parent, err := service.CreateTask(ctx, CreateTaskInput{Title: "Parent task"})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+
+	created, err := service.CreateTaskWithDetails(ctx, CreateTaskWithDetailsInput{
+		Task: CreateTaskInput{Title: "Child task"},
+		Relations: []CreateTaskRelationInput{
+			{SourceTaskID: parent.ID, Kind: RelationParentOf, BlankTargetIsNewTask: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create child with parent relation: %v", err)
+	}
+
+	relations, err := service.RelationsForTask(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("relations for child: %v", err)
+	}
+	if len(relations) != 1 || relations[0].SourceTaskID != parent.ID || relations[0].TargetTaskID != created.ID || relations[0].Kind != RelationParentOf {
+		t.Fatalf("child relations = %+v, want one %s parent_of %s", relations, parent.ID, created.ID)
+	}
+
+	before, err := service.ListTasks(ctx, TaskFilter{})
+	if err != nil {
+		t.Fatalf("list tasks before failed create: %v", err)
+	}
+
+	// A child-of link that cannot be applied (the named parent does not exist)
+	// must fail the whole create rather than commit a parentless task.
+	if _, err := service.CreateTaskWithDetails(ctx, CreateTaskWithDetailsInput{
+		Task: CreateTaskInput{Title: "Orphan task"},
+		Relations: []CreateTaskRelationInput{
+			{SourceTaskID: "t-test-missing", Kind: RelationParentOf, BlankTargetIsNewTask: true},
+		},
+	}); err == nil {
+		t.Fatal("create with a nonexistent parent relation succeeded")
+	}
+
+	after, err := service.ListTasks(ctx, TaskFilter{})
+	if err != nil {
+		t.Fatalf("list tasks after failed create: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("task count after failed create = %d, want %d (failed create must roll back)", len(after), len(before))
+	}
+}
+
 func TestRelationsForTaskDenormalizesLifecycleState(t *testing.T) {
 	ctx := context.Background()
 	_, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))

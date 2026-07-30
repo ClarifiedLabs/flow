@@ -2433,6 +2433,108 @@ func TestCreateTaskWithRelationsSessionShorthandAPI(t *testing.T) {
 		}, http.StatusForbidden, nil)
 }
 
+// TestCreateTaskWithParentOfRelationAtomicAPI covers the owner-token new-task
+// child-of path: a create request names an existing parent as the relation
+// source with a blank target flagged target_is_new_task, and the single create
+// transaction links "parent parent_of new task". A parent that cannot be linked
+// fails the whole create (no committed parentless task); resubmitting the same
+// request then recovers with exactly one linked child rather than a duplicate.
+// Malformed uses of the flag are rejected up front.
+func TestCreateTaskWithParentOfRelationAtomicAPI(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	parent, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Chosen parent"})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+
+	countTasks := func() int {
+		t.Helper()
+		tasks, err := fixture.Tasks.ListTasks(ctx, coordinator.TaskFilter{})
+		if err != nil {
+			t.Fatalf("list tasks: %v", err)
+		}
+		return len(tasks)
+	}
+	before := countTasks()
+
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Child task",
+			Relations: []relationRequest{
+				{SourceTaskID: parent.ID, TargetTaskID: "", Kind: string(coordinator.RelationParentOf), TargetIsNewTask: true},
+			},
+		}, http.StatusCreated, &created)
+
+	relations, err := fixture.Tasks.RelationsForTask(ctx, created.Task.ID)
+	if err != nil {
+		t.Fatalf("relations for created task: %v", err)
+	}
+	if len(relations) != 1 || relations[0].SourceTaskID != parent.ID || relations[0].TargetTaskID != created.Task.ID || relations[0].Kind != coordinator.RelationParentOf {
+		t.Fatalf("created task relations = %+v, want one %s parent_of %s", relations, parent.ID, created.Task.ID)
+	}
+
+	// A child-of link that cannot be applied (the named parent does not exist)
+	// must fail the whole create: nothing is committed, so resubmitting the form
+	// creates exactly one task rather than a duplicate plus an orphan.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Orphan task",
+			Relations: []relationRequest{
+				{SourceTaskID: "t-missing", TargetTaskID: "", Kind: string(coordinator.RelationParentOf), TargetIsNewTask: true},
+			},
+		}, http.StatusBadRequest, nil)
+	if got := countTasks(); got != before+1 {
+		t.Fatalf("task count after failed create = %d, want %d (failed create must not commit)", got, before+1)
+	}
+
+	// The flag requires a blank target and a named source; otherwise it is a
+	// malformed request, rejected before anything is created.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Flag with non-blank target",
+			Relations: []relationRequest{
+				{SourceTaskID: parent.ID, TargetTaskID: parent.ID, Kind: string(coordinator.RelationParentOf), TargetIsNewTask: true},
+			},
+		}, http.StatusBadRequest, nil)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Flag with blank source",
+			Relations: []relationRequest{
+				{SourceTaskID: "", TargetTaskID: "", Kind: string(coordinator.RelationParentOf), TargetIsNewTask: true},
+			},
+		}, http.StatusBadRequest, nil)
+	if got := countTasks(); got != before+1 {
+		t.Fatalf("task count after malformed requests = %d, want %d", got, before+1)
+	}
+
+	// Recovery: resubmitting the same create request after the earlier failure
+	// succeeds and commits exactly one more task. It is not a duplicate of a
+	// committed orphan, because the failed create left nothing behind, and the
+	// retried child carries the single "parent parent_of child" relation in the
+	// correct direction.
+	var retried taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Child task",
+			Relations: []relationRequest{
+				{SourceTaskID: parent.ID, TargetTaskID: "", Kind: string(coordinator.RelationParentOf), TargetIsNewTask: true},
+			},
+		}, http.StatusCreated, &retried)
+	if got := countTasks(); got != before+2 {
+		t.Fatalf("task count after recovery retry = %d, want %d (one recovered create on top of the first)", got, before+2)
+	}
+	retriedRelations, err := fixture.Tasks.RelationsForTask(ctx, retried.Task.ID)
+	if err != nil {
+		t.Fatalf("relations for retried task: %v", err)
+	}
+	if len(retriedRelations) != 1 || retriedRelations[0].SourceTaskID != parent.ID || retriedRelations[0].TargetTaskID != retried.Task.ID || retriedRelations[0].Kind != coordinator.RelationParentOf {
+		t.Fatalf("retried task relations = %+v, want one %s parent_of %s", retriedRelations, parent.ID, retried.Task.ID)
+	}
+}
+
 func TestTaskConsoleAPILifecycleAndScope(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()

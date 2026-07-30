@@ -150,10 +150,11 @@ type CreateTaskRelationInput struct {
 	Kind         RelationKind
 	CreatedBy    Actor
 	// BlankTargetIsNewTask opts a relation into the shorthand where an empty
-	// TargetTaskID resolves to the task being created. It is only set by callers
-	// that have authorized that form (session tokens relating their bound source
-	// task to the new task); owner/form requests leave it false so a blank target
-	// is rejected.
+	// TargetTaskID resolves to the task being created. It is set by callers that
+	// have authorized that form: session tokens relating their bound source task
+	// to the new task, and create-task requests that set target_is_new_task so an
+	// existing task (named as the source) can be linked parent_of/blocks the new
+	// task. Owner/form requests that leave it false have a blank target rejected.
 	BlankTargetIsNewTask bool
 }
 
@@ -278,6 +279,19 @@ func (s *TaskService) CreateTaskWithDetails(ctx context.Context, input CreateTas
 		}
 		if strings.TrimSpace(input.Relations[i].TargetTaskID) == "" && !input.Relations[i].BlankTargetIsNewTask {
 			return Task{}, errors.New("task relation target_task_id is required")
+		}
+		if input.Relations[i].BlankTargetIsNewTask {
+			// The blank-target shorthand makes the new task the relation target, so
+			// the other task must be named as the source and the target left blank.
+			// Enforcing it here keeps the create transaction atomic: a child-of link
+			// either commits with the task or rolls the whole create back, never a
+			// committed task missing its parent.
+			if strings.TrimSpace(input.Relations[i].TargetTaskID) != "" {
+				return Task{}, errors.New("task relation target_is_new_task requires a blank target_task_id")
+			}
+			if strings.TrimSpace(input.Relations[i].SourceTaskID) == "" {
+				return Task{}, errors.New("task relation target_is_new_task requires source_task_id to name the other task")
+			}
 		}
 		if err := validateRelationKind(input.Relations[i].Kind); err != nil {
 			return Task{}, err

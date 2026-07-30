@@ -119,6 +119,11 @@ func relationInputs(relations []relationRequest, actor coordinator.Actor) []coor
 			TargetTaskID: relation.TargetTaskID,
 			Kind:         coordinator.RelationKind(relation.Kind),
 			CreatedBy:    actor,
+			// An explicit target_is_new_task opt-in resolves the blank target to
+			// the task being created, letting the new task be the relation target
+			// (e.g. an existing parent linked parent_of the new task) inside the
+			// create transaction.
+			BlankTargetIsNewTask: relation.TargetIsNewTask,
 		})
 	}
 
