@@ -3,7 +3,7 @@
 // dispatches. Same reason as the click table: forms live inside elements that
 // replace their own innerHTML.
 
-import { apiPatch, apiPost, taskAPIBase, taskHref } from "./api.js";
+import { apiPatch, apiPost, featuresAPIBase, taskAPIBase, taskHref } from "./api.js";
 import { value } from "./normalize.js";
 import { uploadTaskAttachment } from "./task.js";
 import {
@@ -34,6 +34,7 @@ export const FORMS = {
     const mode = form.dataset.taskFormMode || "edit";
     const priority = Number(form.elements.priority?.value || 0);
     if (!Number.isInteger(priority)) return "Priority must be a whole number";
+    const featureID = String(form.elements.feature_id?.value || "").trim();
     const payload = {
       title: form.elements.title.value.trim(),
       body: form.elements.body.value,
@@ -42,10 +43,14 @@ export const FORMS = {
     };
     if (!payload.title) return "Task title is required";
     if (mode !== "create") {
+      // Edit sends the tri-state field verbatim: the select always reflects
+      // the current assignment, so "" clears it and a value re-assigns.
+      payload.feature_id = featureID;
       await apiPatch(`${taskAPIBase(form.dataset.project)}/${encodeURIComponent(form.dataset.taskForm)}`, payload);
       await app.refresh();
       return "Task updated";
     }
+    if (featureID) payload.feature_id = featureID;
 
     const formProject = form.elements.project ? form.elements.project.value : form.dataset.project || "";
     if (!formProject) return "Project is required";
@@ -83,6 +88,28 @@ export const FORMS = {
     }
     await app.load();
     return "Task created";
+  },
+
+  // featureForm creates (blank data-feature-form on the list page) or edits
+  // (data-feature-form = id on the detail page) a feature. Both invalidate
+  // the features cache so pickers refetch.
+  async featureForm(app, form) {
+    const featureID = String(form.dataset.featureForm || "").trim();
+    const projectID = String(form.dataset.project || "").trim();
+    if (!projectID) return "Project is required";
+    const title = String(form.elements.title?.value || "").trim();
+    if (!title) return "Feature title is required";
+    const body = String(form.elements.body?.value || "");
+    if (featureID) {
+      await apiPatch(`${featuresAPIBase(projectID)}/${encodeURIComponent(featureID)}`, { title, body });
+      app.featuresByProject?.delete(projectID);
+      await app.refresh();
+      return "Feature updated";
+    }
+    await apiPost(featuresAPIBase(projectID), { title, body });
+    app.featuresByProject?.delete(projectID);
+    await app.refresh();
+    return "Feature created";
   },
 
   async attachmentForm(app, form) {
@@ -181,6 +208,7 @@ export function collectRelationRows(form) {
 
 const FORM_PENDING_LABELS = {
   taskForm: "Saving task",
+  featureForm: "Saving feature",
   attachmentForm: "Uploading attachment",
   attentionReplyForm: "Sending reply",
   threadReplyForm: "Posting reply",

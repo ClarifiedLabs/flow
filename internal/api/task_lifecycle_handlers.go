@@ -28,12 +28,32 @@ func (s *projectServer) handleCreateTask(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 		return
 	}
+	// A session-created child task inherits its source task's feature unless
+	// the caller explicitly assigned one.
+	if input.Task.FeatureID == nil && principal.SourceTaskID != nil {
+		if source, err := s.tasks.GetTask(r.Context(), *principal.SourceTaskID); err == nil && source.FeatureID != nil {
+			input.Task.FeatureID = source.FeatureID
+		}
+	}
 	task, err := s.tasks.CreateTaskWithDetails(r.Context(), input)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_task", err.Error())
+		writeTaskFeatureError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
+}
+
+// writeTaskFeatureError maps feature-aware task create/edit failures to
+// statuses before falling back to the generic 400.
+func writeTaskFeatureError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, coordinator.ErrFeatureNotFound):
+		writeError(w, http.StatusNotFound, "feature_not_found", err.Error())
+	case errors.Is(err, coordinator.ErrFeatureClosed):
+		writeError(w, http.StatusConflict, "feature_closed", err.Error())
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_task", err.Error())
+	}
 }
 
 func (s *projectServer) handleListTasks(w http.ResponseWriter, r *http.Request) {
@@ -565,14 +585,27 @@ func (s *projectServer) handleEditTask(w http.ResponseWriter, r *http.Request, t
 		return
 	}
 
-	task, err := s.tasks.EditTask(r.Context(), taskID, coordinator.EditTaskInput{
+	input := coordinator.EditTaskInput{
 		Title:    request.Title,
 		Body:     request.Body,
 		Priority: request.Priority,
 		FlowID:   request.FlowID,
-	})
+	}
+	if request.FeatureID != nil {
+		// Tri-state: absent leaves the assignment alone, an empty string clears
+		// it, anything else assigns that feature.
+		value := strings.TrimSpace(*request.FeatureID)
+		var clear *string
+		if value == "" {
+			input.FeatureID = &clear
+		} else {
+			assign := &value
+			input.FeatureID = &assign
+		}
+	}
+	task, err := s.tasks.EditTask(r.Context(), taskID, input)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "edit_task_failed", err.Error())
+		writeTaskFeatureError(w, err)
 		return
 	}
 
@@ -768,6 +801,16 @@ func (s *projectServer) boardResponseForProject(ctx context.Context, principal c
 			WaitReasons: result.WaitReasons,
 			BlockedIDs:  result.BlockedIDs,
 		},
+	}
+
+	if s.features != nil {
+		features, err := s.features.List(ctx, coordinator.FeatureOpen)
+		if err != nil {
+			return boardResponse{}, err
+		}
+		for _, feature := range features {
+			response.Features = append(response.Features, featureBoardEntry{ID: feature.ID, Title: feature.Title})
+		}
 	}
 
 	if !scopeAllowed(principal, coordinator.TokenScopeOwner) {

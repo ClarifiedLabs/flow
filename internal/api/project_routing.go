@@ -296,6 +296,9 @@ func (s *Server) handleProjectScopedPath(w http.ResponseWriter, r *http.Request,
 		ps.handleTaskPath(w, requestWithPath(r, "/v2/"+sub), principal)
 	case sub == "agent-defs" || strings.HasPrefix(sub, "agent-defs/"):
 		ps.handleAgentDefsPath(w, requestWithPath(r, "/v2/"+sub), principal)
+	case sub == "features" || strings.HasPrefix(sub, "features/"):
+		ps.handleFeaturesPath(w, requestWithPath(r, "/v2/"+sub), principal)
+		return
 	case sub == "flows" || strings.HasPrefix(sub, "flows/"):
 		ps.handleFlowsPath(w, requestWithPath(r, "/v2/"+sub), principal)
 	case sub == "board":

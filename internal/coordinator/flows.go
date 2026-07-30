@@ -665,6 +665,8 @@ func (s *FlowService) ResolveSnapshot(ctx context.Context, flowID string) (FlowS
 			snapshotNode.Config.MaterializeTaskSet = &copyConfig
 		case NodeMergeChange:
 			snapshotNode.Config.MergeChange = &MergeChangeNodeConfig{}
+		case NodeFinalizeRebase:
+			snapshotNode.Config.FinalizeRebase = &FinalizeRebaseNodeConfig{}
 		case NodeTerminal:
 			copyConfig := *node.Config.Terminal
 			snapshotNode.Config.Terminal = &copyConfig
@@ -674,17 +676,27 @@ func (s *FlowService) ResolveSnapshot(ctx context.Context, flowID string) (FlowS
 	return snapshot, nil
 }
 
-// SeedDefaults populates a fresh project with the built-in coding and planning
-// graphs. Their agent definitions are coordinator-global rows inherited by the
-// project, so seeding never creates project-local agent definitions.
+// Names of the built-in flows every project is seeded with. Seeding matches
+// on these names so a project that already has a flow with the same name —
+// seeded earlier or user-created — is left untouched.
+const (
+	CodingFlowName        = "coding"
+	PlanningFlowName      = "planning"
+	FeatureRebaseFlowName = "feature-rebase"
+)
+
+// SeedDefaults populates a project with the built-in coding, planning, and
+// feature-rebase graphs. Their agent definitions are coordinator-global rows
+// inherited by the project, so seeding never creates project-local agent
+// definitions. Seeding is per-name so new built-ins roll out to existing
+// projects without disturbing customized or user-created flows; the default
+// flow is only chosen on a completely fresh seed.
 func (s *FlowService) SeedDefaults(ctx context.Context) error {
 	var count int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM flows`).Scan(&count); err != nil {
 		return fmt.Errorf("check seed state: %w", err)
 	}
-	if count > 0 {
-		return nil
-	}
+	fresh := count == 0
 
 	defIDs := map[string]string{}
 	for _, seed := range defaultAgentDefSeeds() {
@@ -695,8 +707,61 @@ func (s *FlowService) SeedDefaults(ctx context.Context) error {
 		defIDs[seed.name] = inherited.ID
 	}
 
-	coding, err := s.create(ctx, FlowInput{
-		Name:             "coding",
+	codingID, err := s.flowIDByName(ctx, CodingFlowName)
+	if err != nil {
+		return err
+	}
+	if codingID == "" {
+		coding, err := s.create(ctx, codingFlowInput(defIDs), true)
+		if err != nil {
+			return fmt.Errorf("seed coding flow: %w", err)
+		}
+		codingID = coding.ID
+	}
+
+	planningID, err := s.flowIDByName(ctx, PlanningFlowName)
+	if err != nil {
+		return err
+	}
+	if planningID == "" {
+		if _, err := s.create(ctx, planningFlowInput(defIDs, codingID), true); err != nil {
+			return fmt.Errorf("seed planning flow: %w", err)
+		}
+	}
+
+	rebaseID, err := s.flowIDByName(ctx, FeatureRebaseFlowName)
+	if err != nil {
+		return err
+	}
+	if rebaseID == "" {
+		if _, err := s.create(ctx, featureRebaseFlowInput(defIDs), true); err != nil {
+			return fmt.Errorf("seed feature rebase flow: %w", err)
+		}
+	}
+
+	if !fresh {
+		return nil
+	}
+	return s.SetDefaultFlow(ctx, codingID)
+}
+
+// flowIDByName returns the id of the flow with the given name, or "" when the
+// project has none.
+func (s *FlowService) flowIDByName(ctx context.Context, name string) (string, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM flows WHERE name = ?`, name).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("look up flow %s: %w", name, err)
+	}
+	return id, nil
+}
+
+func codingFlowInput(defIDs map[string]string) FlowInput {
+	return FlowInput{
+		Name:             CodingFlowName,
 		Description:      "Implement, check, review, verify, and merge a change.",
 		StartNode:        "implement",
 		TransitionBudget: DefaultFlowTransitionBudget,
@@ -724,19 +789,19 @@ func (s *FlowService) SeedDefaults(ctx context.Context) error {
 			{From: "merge", Outcome: "merged", To: "done"},
 			{From: "merge", Outcome: "conflict", To: "implement"},
 		},
-	}, true)
-	if err != nil {
-		return fmt.Errorf("seed coding flow: %w", err)
 	}
-	if _, err := s.create(ctx, FlowInput{
-		Name:             "planning",
+}
+
+func planningFlowInput(defIDs map[string]string, codingID string) FlowInput {
+	return FlowInput{
+		Name:             PlanningFlowName,
 		Description:      "Create a human-approved follow-on task graph, including narrower planning where needed.",
 		StartNode:        "write-plan",
 		TransitionBudget: DefaultFlowTransitionBudget,
 		Nodes: []FlowNodeInput{
 			{Key: "write-plan", Name: "Write task plan", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: defIDs["task-planner"], Workspace: WorkspaceBase, Artifact: ArtifactTaskSet}}},
 			{Key: "review-plan", Name: "Review plan", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Instructions: "Review the proposed follow-on tasks and their selected workflows.", Outcomes: []string{"approved", "changes_requested", "rejected"}}}},
-			{Key: "create-tasks", Name: "Create planned tasks", Kind: NodeMaterializeTaskSet, Config: FlowNodeConfig{MaterializeTaskSet: &MaterializeTaskSetNodeConfig{DefaultChildFlowID: coding.ID, AllowChildFlowOverride: true, MaxItems: 25}}},
+			{Key: "create-tasks", Name: "Create planned tasks", Kind: NodeMaterializeTaskSet, Config: FlowNodeConfig{MaterializeTaskSet: &MaterializeTaskSetNodeConfig{DefaultChildFlowID: codingID, AllowChildFlowOverride: true, MaxItems: 25}}},
 			{Key: "done", Name: "Completed", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
 			{Key: "rejected", Name: "Rejected", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionRejected}}},
 		},
@@ -747,9 +812,39 @@ func (s *FlowService) SeedDefaults(ctx context.Context) error {
 			{From: "review-plan", Outcome: "rejected", To: "rejected"},
 			{From: "create-tasks", Outcome: "completed", To: "done"},
 		},
-	}, true); err != nil {
-		return fmt.Errorf("seed planning flow: %w", err)
 	}
+}
 
-	return s.SetDefaultFlow(ctx, coding.ID)
+// featureRebaseFlowInput is the built-in flow a conflicted feature rebase runs
+// as a system-created task: the agent rebases its ordinary task branch onto
+// the project base, checks and the verifier prove the result, a human gates
+// the publish, and the trusted finalize node rewrites the shared feature ref.
+func featureRebaseFlowInput(defIDs map[string]string) FlowInput {
+	return FlowInput{
+		Name:             FeatureRebaseFlowName,
+		Description:      "Rebase a feature branch onto the project base with agent conflict resolution.",
+		StartNode:        "rebase",
+		TransitionBudget: DefaultFlowTransitionBudget,
+		Nodes: []FlowNodeInput{
+			{Key: "rebase", Name: "Rebase feature branch", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: defIDs["rebase-author"], Workspace: WorkspaceChange, Artifact: ArtifactChange}}},
+			{Key: "checks", Name: "Automated checks", Kind: NodeAutomatedChecks, Config: FlowNodeConfig{AutomatedChecks: &AutomatedChecksNodeConfig{}}},
+			{Key: "verify", Name: "Verify rebase", Kind: NodeVerifyChange, Config: FlowNodeConfig{VerifyChange: &VerifyChangeNodeConfig{Agents: []ReviewAgentConfig{{AgentDefID: defIDs["rebase-verifier"]}}}}},
+			{Key: "human-review", Name: "Human rebase review", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Instructions: "Review the rebased branch and choose whether to publish it to the feature branch.", Outcomes: []string{"approved", "changes_requested", "abandoned"}}}},
+			{Key: "finalize", Name: "Finalize rebase", Kind: NodeFinalizeRebase, Config: FlowNodeConfig{FinalizeRebase: &FinalizeRebaseNodeConfig{}}},
+			{Key: "done", Name: "Rebased", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+			{Key: "abandoned", Name: "Abandoned", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionAbandoned}}},
+		},
+		Edges: []FlowEdgeInput{
+			{From: "rebase", Outcome: "completed", To: "checks"},
+			{From: "checks", Outcome: "passed", To: "verify"},
+			{From: "checks", Outcome: "failed", To: "rebase"},
+			{From: "verify", Outcome: "passed", To: "human-review"},
+			{From: "verify", Outcome: "changes_requested", To: "rebase"},
+			{From: "human-review", Outcome: "approved", To: "finalize"},
+			{From: "human-review", Outcome: "changes_requested", To: "rebase"},
+			{From: "human-review", Outcome: "abandoned", To: "abandoned"},
+			{From: "finalize", Outcome: "finalized", To: "done"},
+			{From: "finalize", Outcome: "stale", To: "rebase"},
+		},
+	}
 }

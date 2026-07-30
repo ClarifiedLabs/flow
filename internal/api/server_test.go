@@ -322,8 +322,8 @@ func TestRegistrySeedsGlobalDefsWithConfiguredDefaultAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list global agent defs: %v", err)
 	}
-	if len(defs) != 6 {
-		t.Fatalf("global default agent definitions = %d, want 6", len(defs))
+	if len(defs) != 8 {
+		t.Fatalf("global default agent definitions = %d, want 8", len(defs))
 	}
 	for _, def := range defs {
 		if def.Harness != flowharness.Harness || def.Model != "sonnet" || def.ReasoningEffort != "high" {
@@ -370,8 +370,8 @@ func TestDefaultAgentDefsAreGlobalAndInheritedByProjects(t *testing.T) {
 
 	var globalList agentDefsResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/global/agent-defs", nil, http.StatusOK, &globalList)
-	if len(globalList.AgentDefs) != 6 {
-		t.Fatalf("global default agent definitions = %d, want 6", len(globalList.AgentDefs))
+	if len(globalList.AgentDefs) != 8 {
+		t.Fatalf("global default agent definitions = %d, want 8", len(globalList.AgentDefs))
 	}
 
 	var projectList agentDefsResponse

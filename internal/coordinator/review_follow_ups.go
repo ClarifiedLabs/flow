@@ -154,14 +154,21 @@ func (s *TaskService) createReviewFollowUpTaskInTx(ctx context.Context, tx *sql.
 		return Task{}, err
 	}
 	nowText := formatTime(s.now().UTC())
+	// Follow-up tasks inherit the source task's feature so fix work stays on
+	// the same feature branch.
+	var sourceFeatureID any
+	if err := tx.QueryRowContext(ctx, `SELECT feature_id FROM tasks WHERE id = ?`, input.SourceTaskID).Scan(&sourceFeatureID); err != nil {
+		return Task{}, fmt.Errorf("load source task feature: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO tasks (
-	id, title, body, priority, created_by, source_task_id, source_change_id,
+	id, title, body, priority, feature_id, created_by, source_task_id, source_change_id,
 	created_at, updated_at
-) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
 		id,
 		input.TaskAction.Title,
 		input.TaskAction.Body,
+		sourceFeatureID,
 		string(ActorSystem),
 		input.SourceTaskID,
 		input.SourceChangeID,
@@ -324,7 +331,7 @@ func reviewFollowUpDisposition(action string) string {
 func taskInTx(ctx context.Context, tx *sql.Tx, id string) (Task, error) {
 	return scanTask(tx.QueryRowContext(ctx, `
 SELECT
-	id, title, body, priority, flow_id, created_by, created_by_session_id,
+	id, title, body, priority, flow_id, feature_id, created_by, created_by_session_id,
 	source_task_id, source_change_id, created_at, updated_at, lifecycle_state,
 	done_resolution, done_at
 FROM tasks

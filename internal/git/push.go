@@ -32,3 +32,47 @@ func PushBranch(ctx context.Context, worktree string, branch string) error {
 
 	return nil
 }
+
+// PushRef publishes src (any commit-ish already present in the exchange) to
+// ref on the exchange remote at exchangePath, as the coordinator principal.
+// Feature refs are coordinator-only (see hooks.go), so every coordinator
+// write to them — creation, rebase finalize, land — flows through here.
+func PushRef(ctx context.Context, exchangePath, src, ref string) error {
+	exchangePath = strings.TrimSpace(exchangePath)
+	src = strings.TrimSpace(src)
+	ref = strings.TrimSpace(ref)
+	if exchangePath == "" {
+		return errors.New("exchange repo path is required")
+	}
+	if src == "" || ref == "" {
+		return errors.New("push source and ref are required")
+	}
+	if err := gitRun(ctx, exchangePath, []string{"FLOW_GIT_PRINCIPAL=" + coordinatorActor}, "push", exchangePath, src+":"+ref); err != nil {
+		return fmt.Errorf("push %s to %s: %w", src, ref, err)
+	}
+
+	return nil
+}
+
+// PushRefCompareAndSwap force-updates ref on the exchange remote only when it
+// still points at expectedSHA. This is the guard for the coordinator's
+// rewrites of shared feature refs (rebase finalize): a concurrent update to
+// the feature branch fails the lease and git rejects the push.
+func PushRefCompareAndSwap(ctx context.Context, exchangePath, ref, newSHA, expectedSHA string) error {
+	exchangePath = strings.TrimSpace(exchangePath)
+	ref = strings.TrimSpace(ref)
+	newSHA = strings.TrimSpace(newSHA)
+	expectedSHA = strings.TrimSpace(expectedSHA)
+	if exchangePath == "" {
+		return errors.New("exchange repo path is required")
+	}
+	if ref == "" || newSHA == "" || expectedSHA == "" {
+		return errors.New("ref, new sha, and expected sha are required")
+	}
+	if err := gitRun(ctx, exchangePath, []string{"FLOW_GIT_PRINCIPAL=" + coordinatorActor},
+		"push", "--force-with-lease="+ref+":"+expectedSHA, exchangePath, newSHA+":"+ref); err != nil {
+		return fmt.Errorf("compare-and-swap push %s to %s: %w", newSHA, ref, err)
+	}
+
+	return nil
+}

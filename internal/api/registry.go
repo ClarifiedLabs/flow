@@ -24,6 +24,7 @@ type ProjectBundle struct {
 	Project           coordinator.Project
 	Store             *flowdb.Store
 	Tasks             *coordinator.TaskService
+	Features          *coordinator.FeatureService
 	AgentDefs         *coordinator.AgentDefService
 	Flows             *coordinator.FlowService
 	WorkflowRuns      *coordinator.WorkflowRunService
@@ -312,10 +313,14 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 	workflowRuns := coordinator.NewWorkflowRunServiceWithOptions(db, flows, tasks, coordinator.WorkflowRunServiceOptions{
 		ReviewAuthorCycleLimit: r.reviewAuthorCycleLimit,
 	})
+	features := coordinator.NewFeatureService(db, tasks, project)
+	features.Runs = workflowRuns
+	workflowRuns.Features = features
 	workflowArtifacts := coordinator.NewWorkflowArtifactService(db, tasks)
 	workflowExecutor := coordinator.NewWorkflowExecutor(coordinator.WorkflowExecutorOptions{
 		Database: db, Runs: workflowRuns, Artifacts: workflowArtifacts, Tasks: tasks,
-		Checks: checks, CheckConfigs: checkConfigs, Sessions: sessions, Merges: merges,
+		Features: features,
+		Checks:   checks, CheckConfigs: checkConfigs, Sessions: sessions, Merges: merges,
 		Queue: queue, Project: project, HarnessArgs: r.harnessArgs,
 		ReviewScopeFileLimit: r.reviewScopeFileLimit,
 		ReviewScopeLineLimit: r.reviewScopeLineLimit,
@@ -326,6 +331,7 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 		Project:           project,
 		Store:             store,
 		Tasks:             tasks,
+		Features:          features,
 		AgentDefs:         agentDefs,
 		Flows:             flows,
 		WorkflowRuns:      workflowRuns,

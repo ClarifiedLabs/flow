@@ -170,6 +170,9 @@ export function workflowActivityLabel(name, kind = "") {
     const mergeObject = label.match(/^(.+?)\s+merge$/i);
     return `Merging ${activityObject(mergeObject ? mergeObject[1] : label)}`;
   }
+  if (normalizedKind === "finalize_rebase" && !["finalize", "publish"].includes(firstWord)) {
+    return `Finalizing ${activityObject(label)}`;
+  }
   if (normalizedKind === "human_gate") {
     return `Waiting for ${activityObject(label)}`;
   }

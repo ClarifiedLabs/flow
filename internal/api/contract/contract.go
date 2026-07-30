@@ -270,6 +270,49 @@ type TasksResponse struct {
 	Tasks []coordinator.Task `json:"tasks"`
 }
 
+// CreateFeatureRequest creates a feature: a project-child task group with its
+// own long-lived branch in the exchange.
+type CreateFeatureRequest struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
+}
+
+// UpdateFeatureRequest edits feature metadata; nil fields are left unchanged.
+type UpdateFeatureRequest struct {
+	Title *string `json:"title,omitempty"`
+	Body  *string `json:"body,omitempty"`
+}
+
+// FeatureTaskCounts summarizes the feature's assigned tasks by lifecycle.
+type FeatureTaskCounts struct {
+	Open       int `json:"open"`
+	Scheduled  int `json:"scheduled"`
+	InProgress int `json:"in_progress"`
+	Done       int `json:"done"`
+}
+
+// FeatureResponse is the feature payload: the row, task counts, the live
+// branch divergence, and — on the detail read — the assigned tasks and the
+// rebase history.
+type FeatureResponse struct {
+	Feature       coordinator.Feature             `json:"feature"`
+	Counts        FeatureTaskCounts               `json:"counts"`
+	BranchState   *coordinator.FeatureBranchState `json:"branch_state,omitempty"`
+	RunningRebase *coordinator.FeatureRebase      `json:"running_rebase,omitempty"`
+	Tasks         []coordinator.Task              `json:"tasks,omitempty"`
+	Rebases       []coordinator.FeatureRebase     `json:"rebases,omitempty"`
+}
+
+type FeaturesResponse struct {
+	Features []FeatureResponse `json:"features"`
+}
+
+// RebaseFeatureResponse reports what a rebase request did: rebased instantly,
+// already up to date, or a rebase task was created for a conflicted rebase.
+type RebaseFeatureResponse struct {
+	Result coordinator.RebaseStartResult `json:"result"`
+}
+
 type TaskResponse struct {
 	Task      coordinator.Task             `json:"task"`
 	StatusLog []coordinator.StatusLogEntry `json:"status_log,omitempty"`

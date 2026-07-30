@@ -13,6 +13,7 @@ export const LANES = [
 export const NAV = [
   ["/ui/board", "Board"],
   ["/ui/tasks", "Tasks"],
+  ["/ui/features", "Features"],
   ["/ui/console", "Console"],
   ["/ui/done", "Done"],
   ["/ui/flows", "Flows"],

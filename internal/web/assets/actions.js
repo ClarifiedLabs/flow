@@ -16,7 +16,7 @@
 // repaint re-applies disabled/aria-busy/is-busy and the status-line message to
 // whatever replacement control it swapped in.
 
-import { apiDelete, apiGet, apiPatch, apiPost, taskAPIBase, taskConsoleAPIPath } from "./api.js";
+import { apiDelete, apiGet, apiPatch, apiPost, featuresAPIBase, taskAPIBase, taskConsoleAPIPath } from "./api.js";
 import { releaseConsoleView, startConsoleView } from "./console-view.js";
 import { parseWaitDetails } from "./task-model.js";
 
@@ -39,6 +39,44 @@ export const ACTIONS = {
     await apiPost(workflowPath(dataset, dataset.workflowSchedule, "/schedule"), {});
     await app.refresh();
     return "Scheduled";
+  },
+
+  // Feature actions mutate the shared feature branch: rebase moves it onto
+  // the base tip (a conflict creates a rebase task that blocks the feature's
+  // other tasks), land squash-merges it into the base, archive closes the
+  // feature without landing. All three invalidate the features cache.
+  async featureRebase(app, element, dataset) {
+    const result = await apiPost(
+      `${featuresAPIBase(dataset.project)}/${encodeURIComponent(dataset.featureRebase)}/rebase`, {},
+    );
+    app.featuresByProject?.delete(dataset.project);
+    await app.refresh();
+    const kind = result?.result?.kind || "";
+    if (kind === "rebase_task_created") {
+      return `Rebase conflicted — created rebase task ${result.result.rebase_task_id}`;
+    }
+    if (kind === "rebased") return "Feature branch rebased";
+    return "Feature branch already up to date";
+  },
+
+  async featureLand(app, element, dataset) {
+    if (!window.confirm("Squash-merge the feature branch into the base branch and mark the feature landed?")) return CANCELLED;
+    await apiPost(
+      `${featuresAPIBase(dataset.project)}/${encodeURIComponent(dataset.featureLand)}/land`, {},
+    );
+    app.featuresByProject?.delete(dataset.project);
+    await app.refresh();
+    return "Feature landed";
+  },
+
+  async featureArchive(app, element, dataset) {
+    if (!window.confirm("Archive this feature? Its branch is kept for audit.")) return CANCELLED;
+    await apiPost(
+      `${featuresAPIBase(dataset.project)}/${encodeURIComponent(dataset.featureArchive)}/archive`, {},
+    );
+    app.featuresByProject?.delete(dataset.project);
+    await app.refresh();
+    return "Feature archived";
   },
 
   async workflowReset(app, element, dataset) {

@@ -47,6 +47,8 @@ var cssModules = []struct{ Name, Scope string }{
 	{"review-bar.module.css", "flow-review-bar"},
 	{"review-panel.module.css", "flow-review-panel"},
 	{"epic.module.css", "flow-epic"},
+	{"features.module.css", "flow-features"},
+	{"feature.module.css", "flow-feature"},
 }
 
 var assetVersion = computeAssetVersion()

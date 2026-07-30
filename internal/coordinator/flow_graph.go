@@ -44,6 +44,7 @@ const (
 	NodeVerifyChange       NodeKind = "verify_change"
 	NodeMaterializeTaskSet NodeKind = "materialize_task_set"
 	NodeMergeChange        NodeKind = "merge_change"
+	NodeFinalizeRebase     NodeKind = "finalize_rebase"
 	NodeTerminal           NodeKind = "terminal"
 )
 
@@ -129,6 +130,11 @@ type MaterializeTaskSetNodeConfig struct {
 
 type MergeChangeNodeConfig struct{}
 
+// FinalizeRebaseNodeConfig is empty: the trusted handler publishes the rebase
+// task's change head to the task's feature ref, guarded by a compare-and-swap
+// on the tip the running feature_rebases row recorded.
+type FinalizeRebaseNodeConfig struct{}
+
 type TerminalNodeConfig struct {
 	Resolution DoneResolution `json:"resolution"`
 }
@@ -143,6 +149,7 @@ type FlowNodeConfig struct {
 	VerifyChange       *VerifyChangeNodeConfig       `json:"verify_change,omitempty"`
 	MaterializeTaskSet *MaterializeTaskSetNodeConfig `json:"materialize_task_set,omitempty"`
 	MergeChange        *MergeChangeNodeConfig        `json:"merge_change,omitempty"`
+	FinalizeRebase     *FinalizeRebaseNodeConfig     `json:"finalize_rebase,omitempty"`
 	Terminal           *TerminalNodeConfig           `json:"terminal,omitempty"`
 }
 
@@ -228,6 +235,7 @@ type FlowNodeSnapshotConfig struct {
 	VerifyChange       *VerifyChangeNodeSnapshotConfig `json:"verify_change,omitempty"`
 	MaterializeTaskSet *MaterializeTaskSetNodeConfig   `json:"materialize_task_set,omitempty"`
 	MergeChange        *MergeChangeNodeConfig          `json:"merge_change,omitempty"`
+	FinalizeRebase     *FinalizeRebaseNodeConfig       `json:"finalize_rebase,omitempty"`
 	Terminal           *TerminalNodeConfig             `json:"terminal,omitempty"`
 }
 
@@ -395,7 +403,7 @@ func normalizeNodeConfig(key string, kind NodeKind, config FlowNodeConfig) ([]st
 	for _, present := range []bool{
 		config.Agent != nil, config.AutomatedChecks != nil, config.ChangeReview != nil,
 		config.HumanGate != nil, config.VerifyChange != nil, config.MaterializeTaskSet != nil,
-		config.MergeChange != nil, config.Terminal != nil,
+		config.MergeChange != nil, config.FinalizeRebase != nil, config.Terminal != nil,
 	} {
 		if present {
 			branchCount++
@@ -492,6 +500,10 @@ func normalizeNodeConfig(key string, kind NodeKind, config FlowNodeConfig) ([]st
 	case NodeMergeChange:
 		if config.MergeChange != nil {
 			return []string{"merged", "conflict"}, config, nil
+		}
+	case NodeFinalizeRebase:
+		if config.FinalizeRebase != nil {
+			return []string{"finalized", "stale"}, config, nil
 		}
 	case NodeTerminal:
 		if config.Terminal != nil {
@@ -634,7 +646,7 @@ func validateNodeInputArtifacts(node FlowNodeInput, incoming map[ArtifactKind]bo
 		return fmt.Errorf("node %q requires exactly one incoming %s artifact", node.Key, kind)
 	}
 	switch node.Kind {
-	case NodeAutomatedChecks, NodeChangeReview, NodeVerifyChange, NodeMergeChange:
+	case NodeAutomatedChecks, NodeChangeReview, NodeVerifyChange, NodeMergeChange, NodeFinalizeRebase:
 		return require(ArtifactChange)
 	case NodeMaterializeTaskSet:
 		return require(ArtifactTaskSet)

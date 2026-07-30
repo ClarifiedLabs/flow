@@ -123,6 +123,86 @@ func (c *Client) GetTask(id string) (coordinator.Task, error) {
 	return response.Task, nil
 }
 
+// CreateFeature posts a new feature: a project-child task group with its own
+// long-lived branch in the exchange.
+func (c *Client) CreateFeature(input CreateFeatureInput) (contract.FeatureResponse, error) {
+	var response featureResponse
+	if err := c.do(http.MethodPost, c.projectPath("/features"), input, nil, &response); err != nil {
+		return contract.FeatureResponse{}, err
+	}
+
+	return response, nil
+}
+
+// ListFeatures returns the project's features. The status filter selects the
+// lifecycle bucket (open, landed, archived); an empty filter lists open
+// features and "all" lists everything.
+func (c *Client) ListFeatures(status string) ([]contract.FeatureResponse, error) {
+	query := url.Values{}
+	if status != "" {
+		query.Set("status", status)
+	}
+
+	var response featuresResponse
+	if err := c.do(http.MethodGet, c.projectPath("/features"), nil, query, &response); err != nil {
+		return nil, err
+	}
+
+	return response.Features, nil
+}
+
+func (c *Client) GetFeature(id string) (contract.FeatureResponse, error) {
+	var response featureResponse
+	if err := c.do(http.MethodGet, c.projectPath("/features/"+url.PathEscape(id)), nil, nil, &response); err != nil {
+		return contract.FeatureResponse{}, err
+	}
+
+	return response, nil
+}
+
+// UpdateFeature edits feature metadata; nil fields are left unchanged.
+func (c *Client) UpdateFeature(id string, input UpdateFeatureInput) (contract.FeatureResponse, error) {
+	var response featureResponse
+	if err := c.do(http.MethodPatch, c.projectPath("/features/"+url.PathEscape(id)), input, nil, &response); err != nil {
+		return contract.FeatureResponse{}, err
+	}
+
+	return response, nil
+}
+
+// RebaseFeature rebases the feature branch onto the project's base branch.
+// The response reports whether the branch was rebased instantly, was already
+// up to date, or a rebase task was created to resolve conflicts.
+func (c *Client) RebaseFeature(id string) (contract.RebaseFeatureResponse, error) {
+	var response rebaseFeatureResponse
+	if err := c.do(http.MethodPost, c.projectPath("/features/"+url.PathEscape(id)+"/rebase"), map[string]any{}, nil, &response); err != nil {
+		return contract.RebaseFeatureResponse{}, err
+	}
+
+	return response, nil
+}
+
+// LandFeature squash-merges the feature branch into the project's base
+// branch and marks the feature landed.
+func (c *Client) LandFeature(id string) (contract.FeatureResponse, error) {
+	var response featureResponse
+	if err := c.do(http.MethodPost, c.projectPath("/features/"+url.PathEscape(id)+"/land"), map[string]any{}, nil, &response); err != nil {
+		return contract.FeatureResponse{}, err
+	}
+
+	return response, nil
+}
+
+// ArchiveFeature archives the feature; the branch is retained for audit.
+func (c *Client) ArchiveFeature(id string) (contract.FeatureResponse, error) {
+	var response featureResponse
+	if err := c.do(http.MethodPost, c.projectPath("/features/"+url.PathEscape(id)+"/archive"), map[string]any{}, nil, &response); err != nil {
+		return contract.FeatureResponse{}, err
+	}
+
+	return response, nil
+}
+
 // ListAgentDefs returns the project's effective agent definition catalog,
 // including inherited global definitions not overridden by name.
 func (c *Client) ListAgentDefs() ([]coordinator.AgentDef, error) {
@@ -1567,17 +1647,29 @@ func durationSeconds(duration time.Duration) int {
 }
 
 type CreateTaskInput struct {
-	Title    string `json:"title"`
-	Body     string `json:"body"`
-	Priority int    `json:"priority"`
-	FlowID   string `json:"flow_id,omitempty"`
+	Title     string `json:"title"`
+	Body      string `json:"body"`
+	Priority  int    `json:"priority"`
+	FlowID    string `json:"flow_id,omitempty"`
+	FeatureID string `json:"feature_id,omitempty"`
 }
 
 type EditTaskInput struct {
-	Title    *string `json:"title,omitempty"`
-	Body     *string `json:"body,omitempty"`
-	Priority *int    `json:"priority,omitempty"`
-	FlowID   *string `json:"flow_id,omitempty"`
+	Title     *string `json:"title,omitempty"`
+	Body      *string `json:"body,omitempty"`
+	Priority  *int    `json:"priority,omitempty"`
+	FlowID    *string `json:"flow_id,omitempty"`
+	FeatureID *string `json:"feature_id,omitempty"`
+}
+
+type CreateFeatureInput struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
+}
+
+type UpdateFeatureInput struct {
+	Title *string `json:"title,omitempty"`
+	Body  *string `json:"body,omitempty"`
 }
 
 type UploadTaskAttachmentInput struct {
@@ -1812,6 +1904,9 @@ type threadCommentRequest = contract.ThreadCommentRequest
 type threadClaimRequest = contract.ThreadClaimRequest
 type taskResponse = contract.TaskResponse
 type tasksResponse = contract.TasksResponse
+type featureResponse = contract.FeatureResponse
+type featuresResponse = contract.FeaturesResponse
+type rebaseFeatureResponse = contract.RebaseFeatureResponse
 type taskAttachmentResponse = contract.TaskAttachmentResponse
 type taskAttachmentsResponse = contract.TaskAttachmentsResponse
 type taskRelationsResponse = contract.TaskRelationsResponse

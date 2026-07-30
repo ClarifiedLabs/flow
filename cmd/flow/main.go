@@ -67,6 +67,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runDoctor(args[1:], stdout, stderr)
 	case "task":
 		return runTask(args[1:], stdout, stderr)
+	case "feature":
+		return runFeature(args[1:], stdout, stderr)
 	case "board":
 		return runBoard(args[1:], stdout, stderr)
 	case "checks":
@@ -478,7 +480,9 @@ func runTaskCreate(args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&body, "body", "", "task body")
 	flags.IntVar(&priority, "priority", 0, "task priority")
 	var flowRef string
+	var featureRef string
 	flags.StringVar(&flowRef, "flow", "", "workflow (id or name) used when the task is scheduled")
+	flags.StringVar(&featureRef, "feature", "", "feature (id or title) the task is assigned to")
 	flags.Var(&attachmentFiles, "file", "file to attach to the initial task prompt (repeatable)")
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -502,6 +506,14 @@ func runTaskCreate(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		input.FlowID = flowID
+	}
+	if strings.TrimSpace(featureRef) != "" {
+		featureID, err := resolveFeatureRef(client, featureRef)
+		if err != nil {
+			fmt.Fprintf(stderr, "resolve feature: %v\n", err)
+			return 1
+		}
+		input.FeatureID = featureID
 	}
 	task, err := client.CreateTask(input)
 	if err != nil {
@@ -685,10 +697,12 @@ func runTaskEdit(args []string, stdout, stderr io.Writer) int {
 	var body string
 	var priority string
 	var flowRef string
+	var featureRef string
 	flags.StringVar(&title, "title", "", "new task title")
 	flags.StringVar(&body, "body", "", "new task body")
 	flags.StringVar(&priority, "priority", "", "new task priority")
 	flags.StringVar(&flowRef, "flow", "", "workflow (id or name) used by the next run")
+	flags.StringVar(&featureRef, "feature", "", "feature (id or title) to assign; pass an empty value to clear the assignment")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -726,6 +740,26 @@ func runTaskEdit(args []string, stdout, stderr io.Writer) int {
 		}
 		input.FlowID = &flowID
 	}
+	// Feature assignment is tri-state: --feature absent leaves it alone, an
+	// empty value clears it, anything else assigns that feature.
+	featureAssigned := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "feature" {
+			featureAssigned = true
+		}
+	})
+	if featureAssigned {
+		featureID := strings.TrimSpace(featureRef)
+		if featureID != "" {
+			resolved, err := resolveFeatureRef(client, featureID)
+			if err != nil {
+				fmt.Fprintf(stderr, "resolve feature: %v\n", err)
+				return 1
+			}
+			featureID = resolved
+		}
+		input.FeatureID = &featureID
+	}
 
 	client, taskRef := scopeClientForRef(client, flags.Arg(0))
 	task, err := client.EditTask(taskRef, input)
@@ -735,6 +769,201 @@ func runTaskEdit(args []string, stdout, stderr io.Writer) int {
 	}
 
 	printTaskLine(stdout, task)
+	return 0
+}
+
+func runFeature(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		printFeatureUsage(stderr)
+		return 2
+	}
+
+	switch args[0] {
+	case "create":
+		return runFeatureCreate(args[1:], stdout, stderr)
+	case "list":
+		return runFeatureList(args[1:], stdout, stderr)
+	case "show":
+		return runFeatureShow(args[1:], stdout, stderr)
+	case "edit":
+		return runFeatureEdit(args[1:], stdout, stderr)
+	case "rebase":
+		return runFeatureRebase(args[1:], stdout, stderr)
+	case "land":
+		return runFeatureLand(args[1:], stdout, stderr)
+	case "archive":
+		return runFeatureArchive(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "unknown feature command: %s\n\n", args[0])
+		printFeatureUsage(stderr)
+		return 2
+	}
+}
+
+func runFeatureCreate(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("feature create", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+
+	var title string
+	var body string
+	flags.StringVar(&title, "title", "", "feature title")
+	flags.StringVar(&body, "body", "", "feature body")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if strings.TrimSpace(title) == "" {
+		fmt.Fprintln(stderr, "--title is required")
+		return 2
+	}
+
+	applySessionEnvironment(apiFlags, nil)
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return 1
+	}
+	feature, err := client.CreateFeature(flowclient.CreateFeatureInput{Title: title, Body: body})
+	if err != nil {
+		fmt.Fprintf(stderr, "create feature: %v\n", err)
+		return 1
+	}
+	printFeatureLine(stdout, feature.Feature)
+	return 0
+}
+
+func runFeatureList(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("feature list", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+
+	var status string
+	flags.StringVar(&status, "status", "", "lifecycle filter: open, landed, archived, all")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+
+	applySessionEnvironment(apiFlags, nil)
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return 1
+	}
+	features, err := client.ListFeatures(status)
+	if err != nil {
+		fmt.Fprintf(stderr, "list features: %v\n", err)
+		return 1
+	}
+
+	for _, feature := range features {
+		printFeatureLine(stdout, feature.Feature)
+	}
+	return 0
+}
+
+func runFeatureShow(args []string, stdout, stderr io.Writer) int {
+	parsed, featureRef, code := parseScopedTaskAPICommand(args, stderr, "feature show", 1, "usage: flow feature show [flags] FEATURE_ID")
+	if code != 0 {
+		return code
+	}
+	feature, err := parsed.client.GetFeature(featureRef)
+	if err != nil {
+		fmt.Fprintf(stderr, "show feature: %v\n", err)
+		return 1
+	}
+	printFeatureDetail(stdout, feature)
+	return 0
+}
+
+func runFeatureEdit(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("feature edit", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+
+	var title string
+	var body string
+	flags.StringVar(&title, "title", "", "new feature title")
+	flags.StringVar(&body, "body", "", "new feature body")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(stderr, "usage: flow feature edit [flags] FEATURE_ID")
+		return 2
+	}
+
+	applySessionEnvironment(apiFlags, nil)
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return 1
+	}
+
+	input := flowclient.UpdateFeatureInput{}
+	if title != "" {
+		input.Title = &title
+	}
+	if body != "" {
+		input.Body = &body
+	}
+
+	client, featureRef := scopeClientForRef(client, flags.Arg(0))
+	feature, err := client.UpdateFeature(featureRef, input)
+	if err != nil {
+		fmt.Fprintf(stderr, "edit feature: %v\n", err)
+		return 1
+	}
+	printFeatureLine(stdout, feature.Feature)
+	return 0
+}
+
+func runFeatureRebase(args []string, stdout, stderr io.Writer) int {
+	parsed, featureRef, code := parseScopedTaskAPICommand(args, stderr, "feature rebase", 1, "usage: flow feature rebase [flags] FEATURE_ID")
+	if code != 0 {
+		return code
+	}
+	result, err := parsed.client.RebaseFeature(featureRef)
+	if err != nil {
+		fmt.Fprintf(stderr, "rebase feature: %v\n", err)
+		return 1
+	}
+
+	switch result.Result.Kind {
+	case coordinator.RebaseAlreadyUpToDate:
+		fmt.Fprintf(stdout, "%s\tup to date\n", featureRef)
+	case coordinator.RebaseRebased:
+		fmt.Fprintf(stdout, "%s\trebased\t%s\n", featureRef, result.Result.NewTipSHA)
+	case coordinator.RebaseTaskCreated:
+		fmt.Fprintf(stdout, "%s\trebase task\t%s\n", featureRef, result.Result.RebaseTaskID)
+	}
+	return 0
+}
+
+func runFeatureLand(args []string, stdout, stderr io.Writer) int {
+	parsed, featureRef, code := parseScopedTaskAPICommand(args, stderr, "feature land", 1, "usage: flow feature land [flags] FEATURE_ID")
+	if code != 0 {
+		return code
+	}
+	feature, err := parsed.client.LandFeature(featureRef)
+	if err != nil {
+		fmt.Fprintf(stderr, "land feature: %v\n", err)
+		return 1
+	}
+	printFeatureLine(stdout, feature.Feature)
+	return 0
+}
+
+func runFeatureArchive(args []string, stdout, stderr io.Writer) int {
+	parsed, featureRef, code := parseScopedTaskAPICommand(args, stderr, "feature archive", 1, "usage: flow feature archive [flags] FEATURE_ID")
+	if code != 0 {
+		return code
+	}
+	feature, err := parsed.client.ArchiveFeature(featureRef)
+	if err != nil {
+		fmt.Fprintf(stderr, "archive feature: %v\n", err)
+		return 1
+	}
+	printFeatureLine(stdout, feature.Feature)
 	return 0
 }
 
@@ -2986,7 +3215,7 @@ func printUsage(out io.Writer) {
   flow [--log-level LEVEL] COMMAND
   flow init [--repo PATH] [--name NAME] [--base BRANCH]
   flow doctor [--db PATH] [--config PATH]
-  flow task create --title TITLE [--flow FLOW] [--file PATH]
+  flow task create --title TITLE [--flow FLOW] [--feature FEATURE] [--file PATH]
   flow task attach TASK_ID --file PATH [--stage initial|author|reviewer|verifier]
   flow task list [--state unscheduled,scheduled,in_progress,done]
   flow task show [--project PROJECT] TASK_ID
@@ -2997,6 +3226,9 @@ func printUsage(out io.Writer) {
   flow task respond TASK_ID --node-run NODE_RUN_ID --outcome OUTCOME [--feedback TEXT]
   flow task budget TASK_ID --additional N
   flow task done TASK_ID [--resolution RESOLUTION]
+  flow feature create --title TITLE [--body BODY]
+  flow feature list [--status open|landed|archived|all]
+  flow feature show|edit|rebase|land|archive FEATURE_ID
   flow board
   flow checks TASK_ID
   flow transitions TASK_ID
@@ -3029,7 +3261,7 @@ API override flags on owner commands:
 
 func printTaskUsage(out io.Writer) {
 	fmt.Fprint(out, `Usage:
-  flow task create --title TITLE [--flow FLOW] [--file PATH]
+  flow task create --title TITLE [--flow FLOW] [--feature FEATURE] [--file PATH]
   flow task attach [flags] TASK_ID
   flow task list
   flow task show [flags] TASK_ID
@@ -3047,6 +3279,24 @@ func printTaskUsage(out io.Writer) {
   flow task link [flags] SOURCE_ID blocks|parent_of|related_to TARGET_ID
   flow task unlink [flags] SOURCE_ID blocks|parent_of|related_to TARGET_ID
   flow task relations [flags] TASK_ID
+`)
+}
+
+func printFeatureUsage(out io.Writer) {
+	fmt.Fprint(out, `Usage:
+  flow feature create --title TITLE [--body BODY]
+  flow feature list [--status open|landed|archived|all]
+  flow feature show [flags] FEATURE_ID
+  flow feature edit [flags] FEATURE_ID
+  flow feature rebase [flags] FEATURE_ID
+  flow feature land [flags] FEATURE_ID
+  flow feature archive [flags] FEATURE_ID
+
+A feature groups a set of tasks behind one long-lived feature branch in the
+project's exchange remote. Tasks assigned to a feature merge back into the
+feature branch; rebase pulls the base branch into it and land squash-merges
+the feature into the base branch. Archive is the only delete; the branch is
+retained for audit.
 `)
 }
 
@@ -3288,7 +3538,7 @@ func splitQualifiedRef(ref string) (string, string) {
 	if !found {
 		return "", ref
 	}
-	if strings.HasPrefix(id, "t-") || strings.HasPrefix(id, "ch-") {
+	if strings.HasPrefix(id, "t-") || strings.HasPrefix(id, "ch-") || strings.HasPrefix(id, "f-") {
 		return projectRef, id
 	}
 
@@ -3447,6 +3697,27 @@ func printTaskLine(out io.Writer, task coordinator.Task) {
 		resolution = string(*task.DoneResolution)
 	}
 	fmt.Fprintf(out, "%s\t%s\t%s\t%s\n", task.ID, taskLifecycleLabel(task), resolution, task.Title)
+}
+
+func printFeatureLine(out io.Writer, feature coordinator.Feature) {
+	fmt.Fprintf(out, "%s\t%s\t%s\n", feature.ID, feature.Status, feature.Title)
+}
+
+func printFeatureDetail(out io.Writer, detail contract.FeatureResponse) {
+	feature := detail.Feature
+	printFeatureLine(out, feature)
+	fmt.Fprintf(out, "branch\t%s\n", feature.Branch)
+	if detail.BranchState != nil {
+		fmt.Fprintf(out, "divergence\t%d ahead, %d behind\n", detail.BranchState.Ahead, detail.BranchState.Behind)
+	}
+	fmt.Fprintf(out, "tasks\t%d open, %d scheduled, %d in progress, %d done\n",
+		detail.Counts.Open, detail.Counts.Scheduled, detail.Counts.InProgress, detail.Counts.Done)
+	if detail.RunningRebase != nil {
+		fmt.Fprintf(out, "rebase\t%s (task %s)\n", detail.RunningRebase.State, detail.RunningRebase.TaskID)
+	}
+	if strings.TrimSpace(feature.Body) != "" {
+		fmt.Fprintf(out, "\n%s\n", feature.Body)
+	}
 }
 
 func taskLifecycleLabel(task coordinator.Task) string {

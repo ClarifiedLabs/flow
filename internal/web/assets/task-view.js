@@ -13,6 +13,7 @@ export async function renderNewTaskView(app, context) {
   if (context && !app.isActiveLoad(context)) return false;
   const defaultProject = defaultCreateProject(app, "");
   if (defaultProject) await app.ensureFlows(defaultProject);
+  if (defaultProject && typeof app.ensureFeatures === "function") await app.ensureFeatures(defaultProject);
   // Load the default project's tasks too, so the relation picker's target-task
   // suggestions are populated even on a direct visit with an empty cache. A
   // failed or empty load just leaves the picker in manual-entry mode.
@@ -64,6 +65,25 @@ export function flowSelectOptionsView(app, projectID, selectedFlowID) {
     const name = value(flow, "name", "Name") || id;
     return `<option value="${escapeAttr(id)}" ${id === selected ? "selected" : ""}>${escapeHTML(name)}</option>`;
   }).join("");
+}
+
+// featureSelectOptionsView renders the <option>s for the feature picker from
+// the per-project feature cache (app.ensureFeatures). Open features only,
+// except the currently-assigned one, which stays selectable even after the
+// feature landed so an edit form never silently reassigns.
+export function featureSelectOptionsView(app, projectID, selectedFeatureID) {
+  const features = (app.featuresByProject && app.featuresByProject.get(String(projectID || "").trim())) || [];
+  const selected = String(selectedFeatureID || "").trim();
+  const options = [`<option value=""${selected ? "" : " selected"}>No feature</option>`];
+  for (const entry of features) {
+    const feature = value(entry, "feature", "Feature") || entry;
+    const id = value(feature, "id", "ID");
+    const title = value(feature, "title", "Title") || id;
+    const status = value(feature, "status", "Status") || "open";
+    if (status !== "open" && id !== selected) continue;
+    options.push(`<option value="${escapeAttr(id)}" ${id === selected ? "selected" : ""}>${escapeHTML(title)}</option>`);
+  }
+  return options.join("");
 }
 
 // RELATION_KIND_OPTIONS lists the relation kinds the create picker offers,
@@ -221,6 +241,12 @@ export function renderTaskFormView(app, task, options = {}) {
           ${flowOptions}
         </select>
       </label>
+      <label class="task-field-feature">
+        <span>Feature</span>
+        <select name="feature_id" data-feature-select aria-label="Feature">
+          ${featureSelectOptionsView(app, defaultProject, value(task, "feature_id", "FeatureID"))}
+        </select>
+      </label>
       <label class="task-field-title wide">
         <span>Title</span>
         <input name="title" value="${escapeAttr(value(task, "title", "Title"))}" required>
@@ -287,8 +313,13 @@ export function bindTaskFlowControlsView(app, form) {
   if (!projectSelect || !flowSelect || typeof projectSelect.addEventListener !== "function") return;
   projectSelect.addEventListener("change", async () => {
     const projectID = String(projectSelect.value || "").trim();
-    if (projectID) await app.ensureFlows(projectID);
+    if (projectID) {
+      await app.ensureFlows(projectID);
+      if (typeof app.ensureFeatures === "function") await app.ensureFeatures(projectID);
+    }
     flowSelect.innerHTML = flowSelectOptionsView(app, projectID, "");
+    const featureSelect = form.elements.feature_id;
+    if (featureSelect) featureSelect.innerHTML = featureSelectOptionsView(app, projectID, "");
   });
 }
 

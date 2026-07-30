@@ -191,6 +191,11 @@ type WorkflowRunService struct {
 	tasks                  *TaskService
 	reviewAuthorCycleLimit int
 	now                    func() time.Time
+
+	// Features gates task scheduling on a running feature rebase. It is wired
+	// through the project bundle and stays nil in tests that construct the
+	// service directly; scheduling then skips the rebase-block link.
+	Features *FeatureService
 }
 
 func NewWorkflowRunService(db *sql.DB, flows *FlowService, tasks *TaskService) *WorkflowRunService {
@@ -234,6 +239,16 @@ func (s *WorkflowRunService) ScheduleAs(ctx context.Context, taskID string, acto
 	}
 	if task.State != nil {
 		return WorkflowRun{}, fmt.Errorf("%w: task is already %s", ErrWorkflowConflict, *task.State)
+	}
+	// Gate before creating the run: a task whose feature is mid-rebase gets a
+	// rebase_task blocks link first, so the dependency gate in
+	// EnsureCurrentNode can never observe the new run ungated. The
+	// rebase-start sweep covers the inverse race (rebase starts after this
+	// schedule), and the rebase task itself is never self-blocked.
+	if s.Features != nil {
+		if err := s.Features.EnsureRebaseBlock(ctx, taskID); err != nil {
+			return WorkflowRun{}, fmt.Errorf("gate task on running feature rebase: %w", err)
+		}
 	}
 	snapshot, err := s.flows.ResolveSnapshot(ctx, task.FlowID)
 	if err != nil {
@@ -1651,6 +1666,18 @@ UPDATE tasks SET lifecycle_state = ?, done_resolution = ?, done_at = ?, updated_
 		string(LifecycleDone), string(resolution), sqlitex.FormatTime(now), sqlitex.FormatTime(now), taskID); err != nil {
 		return Task{}, err
 	}
+	// Force-done rebase tasks never finalized: close the running rebase row so
+	// the feature is not wedged and the blocks it holds resolve with the
+	// blocker done.
+	rebaseState := string(RebaseCancelled)
+	if resolution == ResolutionFailed {
+		rebaseState = string(RebaseFailed)
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE feature_rebases SET state = ?, completed_at = ?
+WHERE task_id = ? AND state = 'running'`, rebaseState, sqlitex.FormatTime(now), taskID); err != nil {
+		return Task{}, fmt.Errorf("close rebase row for force-done task: %w", err)
+	}
 	payload, _ := json.Marshal(map[string]any{"note": strings.TrimSpace(note), "resolution": resolution})
 	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
 		TaskID: taskID, WorkflowRunID: runID.String, FromTaskState: currentState.String,
@@ -1882,6 +1909,19 @@ UPDATE workflow_runs SET state = ?, current_node_key = ?, current_node_run_id = 
 UPDATE tasks SET lifecycle_state = ?, done_resolution = ?, done_at = ?, updated_at = ? WHERE id = ?`,
 		string(LifecycleDone), string(resolution), sqlitex.FormatTime(now), sqlitex.FormatTime(now), run.TaskID); err != nil {
 		return err
+	}
+	// A rebase task that reaches a terminal without finalizing leaves its
+	// feature_rebases row running; close it so the feature can rebase again.
+	// The finalize node stamps the row finalized before the terminal runs, so
+	// this only fires for cancelled, failed, abandoned, and force-done paths.
+	rebaseState := string(RebaseCancelled)
+	if resolution == ResolutionFailed {
+		rebaseState = string(RebaseFailed)
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE feature_rebases SET state = ?, completed_at = ?
+WHERE task_id = ? AND state = 'running'`, rebaseState, sqlitex.FormatTime(now), run.TaskID); err != nil {
+		return fmt.Errorf("close rebase row for terminal task: %w", err)
 	}
 	return insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
 		TaskID: run.TaskID, WorkflowRunID: run.ID, FromTaskState: string(LifecycleInProgress),

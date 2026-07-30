@@ -204,6 +204,70 @@ func TestPostReceiveSpoolsEvents(t *testing.T) {
 	}
 }
 
+func TestPreReceiveFeatureBranchPolicy(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	_, result, firstTaskSHA, secondTaskSHA := initializedTaskBranch(t)
+	featureRef := "refs/heads/feature/f-test-0001"
+
+	// Only the coordinator may create, update, or rewrite feature refs; there
+	// is no fast-forward requirement because rebases deliberately replace the
+	// ref (the compare-and-swap lease on the push is the guard).
+	for _, principal := range []string{"owner", "worker:w-1", "session:s-1", ""} {
+		if err := HandlePreReceive(ctx, HookOptions{
+			ExchangeRepoPath: result.ExchangePath,
+			BaseBranch:       "main",
+			Stdin:            strings.NewReader(refLine(zeroSHA, firstTaskSHA, featureRef)),
+			Principal:        hookTestPrincipal(principal),
+		}); err == nil {
+			t.Fatalf("feature branch creation by principal %q was accepted", principal)
+		}
+	}
+	if err := HandlePreReceive(ctx, HookOptions{
+		ExchangeRepoPath: result.ExchangePath,
+		BaseBranch:       "main",
+		Stdin:            strings.NewReader(refLine(zeroSHA, firstTaskSHA, featureRef)),
+		Principal:        hookTestPrincipal("coordinator"),
+	}); err != nil {
+		t.Fatalf("coordinator feature branch creation rejected: %v", err)
+	}
+	if err := HandlePreReceive(ctx, HookOptions{
+		ExchangeRepoPath: result.ExchangePath,
+		BaseBranch:       "main",
+		Stdin:            strings.NewReader(refLine(firstTaskSHA, secondTaskSHA, featureRef)),
+		Principal:        hookTestPrincipal("owner"),
+	}); err == nil {
+		t.Fatal("owner feature branch update was accepted")
+	}
+	// Non-fast-forward rewrites are allowed for the coordinator (rebase).
+	if err := HandlePreReceive(ctx, HookOptions{
+		ExchangeRepoPath: result.ExchangePath,
+		BaseBranch:       "main",
+		Stdin:            strings.NewReader(refLine(secondTaskSHA, firstTaskSHA, featureRef)),
+		Principal:        hookTestPrincipal("coordinator"),
+	}); err != nil {
+		t.Fatalf("coordinator feature branch rewrite rejected: %v", err)
+	}
+	// Branches are retained for audit: no deletions.
+	if err := HandlePreReceive(ctx, HookOptions{
+		ExchangeRepoPath: result.ExchangePath,
+		BaseBranch:       "main",
+		Stdin:            strings.NewReader(refLine(firstTaskSHA, zeroSHA, featureRef)),
+		Principal:        hookTestPrincipal("coordinator"),
+	}); err == nil {
+		t.Fatal("coordinator feature branch deletion was accepted")
+	}
+	// The namespace only matches canonical feature ids.
+	if err := HandlePreReceive(ctx, HookOptions{
+		ExchangeRepoPath: result.ExchangePath,
+		BaseBranch:       "main",
+		Stdin:            strings.NewReader(refLine(zeroSHA, firstTaskSHA, "refs/heads/feature/not-a-feature-id")),
+		Principal:        hookTestPrincipal("coordinator"),
+	}); err == nil {
+		t.Fatal("invalid feature branch namespace was accepted")
+	}
+}
+
 func hookTestPrincipal(value string) *string {
 	return &value
 }

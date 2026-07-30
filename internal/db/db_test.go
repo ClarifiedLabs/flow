@@ -41,14 +41,15 @@ func TestOpenInitializesSQLite(t *testing.T) {
 		"0002_job_dispatch_keys",
 		"0003_workflow_hold",
 		"0004_workflow_review_cycles",
+		"0005_features",
 	)
 
 	var schemaVersion string
 	if err := store.DB().QueryRowContext(ctx, "SELECT value FROM app_metadata WHERE key = 'schema_version'").Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version metadata: %v", err)
 	}
-	if schemaVersion != "0004_workflow_review_cycles" {
-		t.Fatalf("schema version = %q, want 0004_workflow_review_cycles", schemaVersion)
+	if schemaVersion != "0005_features" {
+		t.Fatalf("schema version = %q, want 0005_features", schemaVersion)
 	}
 	assertStorageFormat(t, store, "4")
 
@@ -80,9 +81,26 @@ SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_jobs_live_dis
 	}
 	assertColumnAbsent(t, store, "tasks", "acceptance_"+"criteria")
 
+	var flowNodesKindSQL string
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'flow_nodes'`).Scan(&flowNodesKindSQL); err != nil {
+		t.Fatalf("inspect flow_nodes table: %v", err)
+	}
+	if !strings.Contains(flowNodesKindSQL, "'finalize_rebase'") {
+		t.Fatalf("flow_nodes kind CHECK %q missing 'finalize_rebase'", flowNodesKindSQL)
+	}
+	var featureIDColumn int
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'feature_id'`).Scan(&featureIDColumn); err != nil {
+		t.Fatalf("inspect tasks.feature_id: %v", err)
+	}
+	if featureIDColumn != 1 {
+		t.Fatalf("tasks.feature_id column missing")
+	}
+
 	assertTables(t, store,
-		[]string{"tasks", "workflow_runs", "workflow_node_runs", "workflow_artifacts", "workflow_waits", "workflow_transitions", "jobs", "leases", "sessions", "changes"},
-		[]string{"projects", "workers", "tokens", "web_sessions", "web_bootstrap_tokens", "workflow_state", "transitions", "task_flow_cursor", "task_phase_handoffs"},
+		[]string{"tasks", "workflow_runs", "workflow_node_runs", "workflow_artifacts", "workflow_waits", "workflow_transitions", "jobs", "leases", "sessions", "changes", "features", "feature_rebases"},
+		[]string{"projects", "workers", "tokens", "web_sessions", "web_bootstrap_tokens", "workflow_state", "transitions", "task_flow_cursor", "task_phase_handoffs", "flow_nodes_new", "flow_edges_backup"},
 	)
 }
 
@@ -296,6 +314,7 @@ func TestOpenMigrationIsIdempotent(t *testing.T) {
 		"0002_job_dispatch_keys",
 		"0003_workflow_hold",
 		"0004_workflow_review_cycles",
+		"0005_features",
 	)
 }
 
@@ -360,6 +379,78 @@ WHERE id = 'wr-existing'`).Scan(&budget, &used); err != nil {
 	}
 	if budget != 2 || used != 1 {
 		t.Fatalf("review cycle budget/count = %d/%d, want 1/2 used/budget", used, budget)
+	}
+}
+
+func TestFeaturesMigrationPreservesFlowGraphs(t *testing.T) {
+	ctx := context.Background()
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "flow.db"))
+	if err != nil {
+		t.Fatalf("open pre-migration database: %v", err)
+	}
+	defer database.Close()
+	for _, name := range []string{
+		"migrations/0001_init.sql",
+		"migrations/0002_job_dispatch_keys.sql",
+		"migrations/0003_workflow_hold.sql",
+		"migrations/0004_workflow_review_cycles.sql",
+	} {
+		migration, err := migrationFS.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if _, err := database.ExecContext(ctx, string(migration)); err != nil {
+			t.Fatalf("apply %s: %v", name, err)
+		}
+	}
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO flows (id, name, start_node_key, created_at, updated_at)
+VALUES ('f-existing', 'existing', 'implement', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+INSERT INTO flow_nodes (id, flow_id, node_key, name, kind, position)
+VALUES
+	('fn-1', 'f-existing', 'implement', 'Implement', 'agent', 1),
+	('fn-2', 'f-existing', 'done', 'Done', 'terminal', 2);
+INSERT INTO flow_edges (flow_id, from_node_key, outcome, to_node_key)
+VALUES ('f-existing', 'implement', 'completed', 'done');
+`); err != nil {
+		t.Fatalf("seed existing flow graph: %v", err)
+	}
+	migration, err := migrationFS.ReadFile("migrations/0005_features.sql")
+	if err != nil {
+		t.Fatalf("read features migration: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, string(migration)); err != nil {
+		t.Fatalf("apply features migration: %v", err)
+	}
+
+	var nodeCount, edgeCount int
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM flow_nodes WHERE flow_id = 'f-existing'`).Scan(&nodeCount); err != nil {
+		t.Fatalf("count preserved flow nodes: %v", err)
+	}
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM flow_edges WHERE flow_id = 'f-existing'`).Scan(&edgeCount); err != nil {
+		t.Fatalf("count preserved flow edges: %v", err)
+	}
+	if nodeCount != 2 || edgeCount != 1 {
+		t.Fatalf("preserved flow graph = %d nodes/%d edges, want 2/1", nodeCount, edgeCount)
+	}
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO flow_nodes (id, flow_id, node_key, name, kind, position)
+VALUES ('fn-3', 'f-existing', 'finalize', 'Finalize', 'finalize_rebase', 3)`); err != nil {
+		t.Fatalf("insert finalize_rebase node: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO flows (id, name, created_at, updated_at) VALUES ('f-bad', 'bad', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+INSERT INTO flow_nodes (id, flow_id, node_key, name, kind, position)
+VALUES ('fn-4', 'f-bad', 'bogus', 'Bogus', 'bogus_kind', 1)`); err == nil {
+		t.Fatal("flow_nodes kind CHECK should still reject unknown kinds")
+	}
+	var scratchTables int
+	if err := database.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('flow_nodes_new', 'flow_edges_backup')`).Scan(&scratchTables); err != nil {
+		t.Fatalf("inspect scratch tables: %v", err)
+	}
+	if scratchTables != 0 {
+		t.Fatalf("rebuild scratch tables remain: %d", scratchTables)
 	}
 }
 

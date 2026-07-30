@@ -5,7 +5,7 @@
 import { value } from "./normalize.js";
 import { escapeHTML, escapeAttr } from "./html.js";
 import { NAV, SIDEBAR_STATUS_POLL_MS, MAX_POLL_BACKOFF_MS, DEFAULT_AGENT_HARNESSES, DEFAULT_CONSOLE_HARNESSES } from "./config.js";
-import { apiGet, apiPost, taskConsoleAPIPath, taskAPIBase, taskHref, flowsAPIBase } from "./api.js";
+import { apiGet, apiPost, taskConsoleAPIPath, taskAPIBase, taskHref, flowsAPIBase, featuresAPIBase } from "./api.js";
 import { readSelectedProjects, writeSelectedProjects, terminalSessionIDForPath, pollConfigForPath, readThemePreference, writeThemePreference, applyThemePreference } from "./storage.js";
 import { renderNavLink, renderNavTrigger, THEME_ICONS, THEME_OPTIONS } from "./nav.js";
 import { normalizeHarnessOptions } from "./harness-models.js";
@@ -20,6 +20,7 @@ import { createTaskView, renderBoardRoute } from "./board-route.js";
 import { renderTaskRoute } from "./task-route.js";
 import { renderChangeRoute } from "./change-route.js";
 import { renderEpicRoute } from "./epic-route.js";
+import { renderFeaturesRoute, renderFeatureRoute } from "./features-route.js";
 import { applyBusyState, handleAction, pendingStatus } from "./actions.js";
 import { handleFormSubmit } from "./forms.js";
 import { renderNewTaskView, renderTaskFormView, bindTaskFlowControlsView } from "./task-view.js";
@@ -55,6 +56,28 @@ export * from "./workflow-graph.js";
 // the catch-all last. render() receives the app instance, the load context and
 // the matched params.
 const ROUTES = [
+  {
+    match: (p) => {
+      const m = p.match(/^\/ui\/projects\/([^/]+)\/features\/([^/]+)$/);
+      return m && { project: decodeURIComponent(m[1]), ref: decodeURIComponent(m[2]) };
+    },
+    render: (app, ctx, p) => renderFeatureRoute(app, p.ref, ctx, p.project),
+  },
+  {
+    match: (p) => {
+      const m = p.match(/^\/ui\/projects\/([^/]+)\/features$/);
+      return m && { project: decodeURIComponent(m[1]) };
+    },
+    render: (app, ctx, p) => renderFeaturesRoute(app, ctx, p.project),
+  },
+  {
+    match: (p) => {
+      const m = p.match(/^\/ui\/features\/([^/]+)$/);
+      return m && { ref: decodeURIComponent(m[1]) };
+    },
+    render: (app, ctx, p) => renderFeatureRoute(app, p.ref, ctx, ""),
+  },
+  { match: (p) => p === "/ui/features", render: (app, ctx) => renderFeaturesRoute(app, ctx, "") },
   { match: (p) => p === "/ui/tasks/new", render: (app, ctx) => renderNewTaskView(app, ctx) },
   {
     match: (p) => {
@@ -396,6 +419,25 @@ export class FlowApp extends HTMLElement {
     }
     this.flowsByProject.set(id, result);
     return result;
+  }
+
+  // ensureFeatures caches the project's features (all statuses) for the task
+  // form's feature picker. The cache is keyed by project id; mutations delete
+  // the entry so the next render refetches.
+  async ensureFeatures(projectID, options = {}) {
+    const id = String(projectID || "").trim();
+    if (!id) return [];
+    if (!this.featuresByProject) this.featuresByProject = new Map();
+    if (this.featuresByProject.has(id) && !options.refresh) return this.featuresByProject.get(id);
+    let features = [];
+    try {
+      const data = await apiGet(featuresAPIBase(id) + "?status=all");
+      features = data.features || data.Features || [];
+    } catch (error) {
+      features = [];
+    }
+    this.featuresByProject.set(id, features);
+    return features;
   }
 
   // ensureTasks loads (and per-project caches) a project's task list so the

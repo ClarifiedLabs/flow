@@ -78,6 +78,7 @@ type Task struct {
 	RequiresHumanReview bool            `json:"-"`
 	AutoMerge           bool            `json:"-"`
 	FlowID              string          `json:"flow_id,omitempty"`
+	FeatureID           *string         `json:"feature_id,omitempty"`
 	State               *LifecycleState `json:"state"`
 	DoneResolution      *DoneResolution `json:"done_resolution,omitempty"`
 	DoneAt              *time.Time      `json:"done_at,omitempty"`
@@ -132,10 +133,13 @@ type CreateTaskInput struct {
 	RequiresHumanReview *bool
 	AutoMerge           *bool
 	FlowID              string
-	CreatedBy           Actor
-	CreatedBySessionID  *string
-	SourceTaskID        *string
-	SourceChangeID      *string
+	// FeatureID assigns the task to a feature at creation; the feature must
+	// exist and be open. Nil means no feature.
+	FeatureID          *string
+	CreatedBy          Actor
+	CreatedBySessionID *string
+	SourceTaskID       *string
+	SourceChangeID     *string
 }
 
 type CreateTaskWithDetailsInput struct {
@@ -165,6 +169,12 @@ type EditTaskInput struct {
 	RequiresHumanReview *bool
 	AutoMerge           *bool
 	FlowID              *string
+	// FeatureID moves the task to a feature: non-nil requests a change, an
+	// inner nil pointer clears the assignment, and a non-nil inner pointer
+	// assigns that feature. The change is rejected once the task is in
+	// progress or has a change row — moving the base mid-flight would strand
+	// the change.
+	FeatureID **string
 }
 
 type TaskFilter struct {
@@ -315,6 +325,12 @@ func (s *TaskService) CreateTaskWithDetails(ctx context.Context, input CreateTas
 		return Task{}, err
 	}
 
+	if taskInput.FeatureID != nil {
+		if err := featureOpenForAssignmentTx(ctx, tx, *taskInput.FeatureID); err != nil {
+			return Task{}, err
+		}
+	}
+
 	now := s.now().UTC()
 	nowText := formatTime(now)
 	if _, err := tx.ExecContext(ctx, `
@@ -324,18 +340,20 @@ INSERT INTO tasks (
 	body,
 	priority,
 	flow_id,
+	feature_id,
 	created_by,
 	created_by_session_id,
 	source_task_id,
 	source_change_id,
 	created_at,
 	updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id,
 		taskInput.Title,
 		taskInput.Body,
 		taskInput.Priority,
 		sqlitex.NullableNonEmptyString(taskInput.FlowID),
+		nullableStringValue(taskInput.FeatureID),
 		string(taskInput.CreatedBy),
 		nullableStringValue(taskInput.CreatedBySessionID),
 		nullableStringValue(taskInput.SourceTaskID),
@@ -397,6 +415,7 @@ SELECT
 	body,
 	priority,
 	flow_id,
+	feature_id,
 	created_by,
 	created_by_session_id,
 	source_task_id,
@@ -425,6 +444,7 @@ const taskSelectColumns = `
 	i.body,
 	i.priority,
 	i.flow_id,
+	i.feature_id,
 	i.created_by,
 	i.created_by_session_id,
 	i.source_task_id,
@@ -623,6 +643,13 @@ func (s *TaskService) EditTask(ctx context.Context, id string, input EditTaskInp
 	if input.FlowID != nil {
 		current.FlowID = strings.TrimSpace(*input.FlowID)
 	}
+	if input.FeatureID != nil {
+		featureID, err := s.guardFeatureChange(ctx, current, *input.FeatureID)
+		if err != nil {
+			return Task{}, err
+		}
+		current.FeatureID = featureID
+	}
 
 	if _, err := s.db.ExecContext(ctx, `
 UPDATE tasks
@@ -631,12 +658,14 @@ SET
 	body = ?,
 	priority = ?,
 	flow_id = ?,
+	feature_id = ?,
 	updated_at = ?
 WHERE id = ?`,
 		current.Title,
 		current.Body,
 		current.Priority,
 		sqlitex.NullableNonEmptyString(current.FlowID),
+		nullableStringValue(current.FeatureID),
 		formatTime(s.now().UTC()),
 		id,
 	); err != nil {
@@ -791,6 +820,51 @@ func (s *TaskService) UntagTask(ctx context.Context, taskID string, tagID int64)
 DELETE FROM task_tags
 WHERE task_id = ? AND tag_id = ?`, taskID, tagID); err != nil {
 		return fmt.Errorf("untag task: %w", err)
+	}
+
+	return nil
+}
+
+// BlockOnRebase inserts (rebaseTask blocks task) relations for every id,
+// tolerating duplicates and skipping the rebase task itself. A running
+// feature rebase holds the feature's other tasks at the workflow dependency
+// gate through these ordinary blocks relations; done blockers resolve by
+// definition, so release needs no cleanup. A relation that would cycle is
+// skipped rather than failing the caller's schedule path.
+func (s *TaskService) BlockOnRebase(ctx context.Context, rebaseTaskID string, taskIDs []string) error {
+	rebaseTaskID = strings.TrimSpace(rebaseTaskID)
+	if rebaseTaskID == "" {
+		return errors.New("rebase task id is required")
+	}
+	nowText := formatTime(s.now().UTC())
+	for _, taskID := range taskIDs {
+		taskID = strings.TrimSpace(taskID)
+		if taskID == "" || taskID == rebaseTaskID {
+			continue
+		}
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		cycle, err := relationPathExists(ctx, tx, RelationBlocks, taskID, rebaseTaskID)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		if cycle {
+			tx.Rollback()
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO task_relations (source_task_id, target_task_id, kind, created_by, created_at)
+VALUES (?, ?, ?, ?, ?)`,
+			rebaseTaskID, taskID, string(RelationBlocks), string(ActorSystem), nowText); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("block task on rebase: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit rebase block: %w", err)
+		}
 	}
 
 	return nil
@@ -1221,15 +1295,16 @@ SELECT
 	blocker.id,
 	blocker.title,
 	blocker.body,
-		blocker.priority,
-		blocker.flow_id,
+	blocker.priority,
+	blocker.flow_id,
+	blocker.feature_id,
 	blocker.created_by,
 	blocker.created_by_session_id,
 	blocker.source_task_id,
 	blocker.source_change_id,
 	blocker.created_at,
-		blocker.updated_at,
-		blocker.lifecycle_state,
+	blocker.updated_at,
+	blocker.lifecycle_state,
 	blocker.done_resolution,
 	blocker.done_at
 FROM task_relations r
@@ -1496,6 +1571,7 @@ func scanRows[T any](rows *sql.Rows, scan func(taskScanner) (T, error)) ([]T, er
 func scanTask(scanner taskScanner) (Task, error) {
 	var task Task
 	var flowID sql.NullString
+	var featureID sql.NullString
 	var createdBy string
 	var createdBySessionID sql.NullString
 	var sourceTaskID sql.NullString
@@ -1512,6 +1588,7 @@ func scanTask(scanner taskScanner) (Task, error) {
 		&task.Body,
 		&task.Priority,
 		&flowID,
+		&featureID,
 		&createdBy,
 		&createdBySessionID,
 		&sourceTaskID,
@@ -1543,6 +1620,7 @@ func scanTask(scanner taskScanner) (Task, error) {
 	if flowID.Valid {
 		task.FlowID = flowID.String
 	}
+	task.FeatureID = nullableStringPointer(featureID)
 	task.CreatedBy = Actor(createdBy)
 	task.CreatedBySessionID = nullableStringPointer(createdBySessionID)
 	task.SourceTaskID = nullableStringPointer(sourceTaskID)
@@ -1573,6 +1651,74 @@ func scanTask(scanner taskScanner) (Task, error) {
 	}
 
 	return task, nil
+}
+
+// featureOpenForAssignmentTx confirms the referenced feature exists and is
+// open. Tasks can only join an open feature: a landed or archived feature's
+// branch is frozen.
+func featureOpenForAssignmentTx(ctx context.Context, tx *sql.Tx, featureID string) error {
+	var status string
+	err := tx.QueryRowContext(ctx, `SELECT status FROM features WHERE id = ?`, strings.TrimSpace(featureID)).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrFeatureNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("load feature: %w", err)
+	}
+	if FeatureStatus(status) != FeatureOpen {
+		return ErrFeatureClosed
+	}
+
+	return nil
+}
+
+// guardFeatureChange applies the feature-assignment edit rules: a no-op
+// assignment always succeeds, but changing a task's feature is rejected once
+// the task is in progress or has a change row — moving the base mid-flight
+// would strand the change. Returns the feature id to persist.
+func (s *TaskService) guardFeatureChange(ctx context.Context, current Task, requested *string) (*string, error) {
+	if requested == nil {
+		if current.FeatureID == nil {
+			return current.FeatureID, nil
+		}
+	} else {
+		trimmed := strings.TrimSpace(*requested)
+		if current.FeatureID != nil && *current.FeatureID == trimmed {
+			return current.FeatureID, nil
+		}
+		if trimmed == "" {
+			return nil, ErrFeatureNotFound
+		}
+	}
+
+	if current.State != nil && *current.State == LifecycleInProgress {
+		return nil, errors.New("cannot change feature while the task is in progress")
+	}
+	var changeCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM changes WHERE task_id = ?`, current.ID).Scan(&changeCount); err != nil {
+		return nil, fmt.Errorf("count task changes: %w", err)
+	}
+	if changeCount > 0 {
+		return nil, errors.New("cannot change feature once the task has a change")
+	}
+
+	if requested == nil {
+		return nil, nil
+	}
+	var status string
+	err := s.db.QueryRowContext(ctx, `SELECT status FROM features WHERE id = ?`, strings.TrimSpace(*requested)).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrFeatureNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load feature: %w", err)
+	}
+	if FeatureStatus(status) != FeatureOpen {
+		return nil, ErrFeatureClosed
+	}
+	trimmed := strings.TrimSpace(*requested)
+
+	return &trimmed, nil
 }
 
 func scanTasks(rows *sql.Rows) ([]Task, error) {

@@ -138,8 +138,8 @@ func TestSeedDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List agent defs: %v", err)
 	}
-	if len(allDefs) != 6 {
-		t.Fatalf("inherited default agent defs = %d, want 6", len(allDefs))
+	if len(allDefs) != 8 {
+		t.Fatalf("inherited default agent defs = %d, want 8", len(allDefs))
 	}
 	defsByName := make(map[string]AgentDef, len(allDefs))
 	for _, def := range allDefs {
@@ -163,8 +163,8 @@ func TestSeedDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List flows: %v", err)
 	}
-	if len(allFlows) != 2 {
-		t.Fatalf("seeded flows = %d, want 2", len(allFlows))
+	if len(allFlows) != 3 {
+		t.Fatalf("seeded flows = %d, want 3", len(allFlows))
 	}
 
 	coding, err := flows.GetByName(ctx, "coding")
@@ -224,8 +224,8 @@ func TestSeedDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List flows after reseed: %v", err)
 	}
-	if len(allFlows) != 2 {
-		t.Fatalf("flows after reseed = %d, want 2", len(allFlows))
+	if len(allFlows) != 3 {
+		t.Fatalf("flows after reseed = %d, want 3", len(allFlows))
 	}
 }
 

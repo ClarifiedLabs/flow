@@ -498,6 +498,25 @@ func resolveFlowRef(client *flowclient.Client, ref string) (string, error) {
 	return "", fmt.Errorf("no flow named %q", ref)
 }
 
+// resolveFeatureRef accepts a feature id ("f-...") or an open feature's title
+// and returns the id.
+func resolveFeatureRef(client *flowclient.Client, ref string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	if strings.HasPrefix(ref, "f-") {
+		return ref, nil
+	}
+	features, err := client.ListFeatures("open")
+	if err != nil {
+		return "", err
+	}
+	for _, feature := range features {
+		if feature.Feature.Title == ref {
+			return feature.Feature.ID, nil
+		}
+	}
+	return "", fmt.Errorf("no open feature titled %q", ref)
+}
+
 // decodeConfigFile reads a YAML or JSON config document (path "-" = stdin)
 // into target. YAML is normalized through JSON so the struct json tags apply.
 func decodeConfigFile(path string, target any) error {

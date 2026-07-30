@@ -106,6 +106,12 @@ Most users can stay in the web UI:
   merges, worker capacity, and job diagnostics.
 - **Flows** configures coordinator-global and project-specific agent definitions,
   plus project work/review flows.
+- **Features** groups a set of tasks behind one long-lived feature branch.
+  Tasks assigned to a feature merge back into the feature branch instead of
+  the base branch; the feature branch can be rebased onto the base branch on
+  demand (agent-assisted on conflicts) and eventually landed as one squash
+  merge. The CLI mirrors the page: `flow feature create|list|show|edit|rebase|land|archive`
+  and `flow task create --feature FEATURE`.
 
 Flow derives readable IDs from the project name: `--name "My Project"` creates
 project `p-my-project`, and its tasks are `t-my-project-0001`,

@@ -391,6 +391,12 @@ func (s *WorkflowArtifactService) MaterializeTaskSet(ctx context.Context, artifa
 	if err := tx.QueryRowContext(ctx, `SELECT task_id FROM workflow_runs WHERE id = ?`, artifact.WorkflowRunID).Scan(&sourceTaskID); err != nil {
 		return MaterializeTaskSetResult{}, false, err
 	}
+	// Materialized children inherit the source (planner) task's feature so the
+	// whole planned set lands on the same feature branch.
+	var sourceFeatureID any
+	if err := tx.QueryRowContext(ctx, `SELECT feature_id FROM tasks WHERE id = ?`, sourceTaskID).Scan(&sourceFeatureID); err != nil {
+		return MaterializeTaskSetResult{}, false, err
+	}
 	defaultFlowID := config.DefaultChildFlowID
 
 	now := s.now().UTC()
@@ -413,10 +419,10 @@ func (s *WorkflowArtifactService) MaterializeTaskSet(ctx context.Context, artifa
 		}
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO tasks (
-	id, title, body, priority, flow_id, created_by, created_by_session_id,
+	id, title, body, priority, flow_id, feature_id, created_by, created_by_session_id,
 	source_task_id, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.Title, item.Body,
-			item.Priority, flowID, string(createdBy), sessionID, sourceTaskID, nowText, nowText); err != nil {
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.Title, item.Body,
+			item.Priority, flowID, sourceFeatureID, string(createdBy), sessionID, sourceTaskID, nowText, nowText); err != nil {
 			return MaterializeTaskSetResult{}, false, fmt.Errorf("create generated task %q: %w", item.Key, err)
 		}
 		if err := linkTasksInTx(ctx, tx, sourceTaskID, id, RelationParentOf, ActorSystem, nowText); err != nil {

@@ -189,6 +189,40 @@ The coordinator drains those events into SQLite and uses them to update change
 heads, stale checks, and review-thread trailer claims. `flow reconcile` remains a
 manual recovery path when git and SQLite drift.
 
+## Features
+
+A **feature** is a project-owned task group with its own long-lived exchange
+branch `feature/f-<project-key>-<number>` (migration `0005_features.sql`; code in
+`internal/coordinator/features.go`). The nullable `tasks.feature_id` column
+records membership; it is orthogonal to `task_relations` and tags. A task's
+feature can change only until the task has a change row or is in progress, so a
+change's base never moves mid-flight. Session-created child tasks and
+planner-materialized tasks inherit their source task's feature.
+
+Feature tasks treat the feature branch as their protected base: they branch off
+its tip and (squash-)merge back into it via the same base-generic
+`MergeService` used for the project base branch. A task merged into its feature
+branch still resolves `merged`; landing is a separate event.
+
+`POST /v2/projects/{id}/features/{feature_id}/rebase` rebases the feature
+branch onto the project's base branch. A clean rebase updates the shared ref
+immediately; a conflicted rebase creates a system-owned **rebase task** assigned
+to the feature that runs the built-in `feature-rebase` flow (agent → automated
+checks → verifier → human gate → trusted `finalize_rebase` node). The agent
+works on an ordinary task branch under its session `AllowedRef` confinement;
+only the coordinator rewrites the shared feature ref, compare-and-swapped in
+`finalize_rebase`. On creation the rebase task blocks the feature's non-done
+tasks through ordinary `blocks` relations, so nothing starts from the stale
+tip; unblocking follows the existing `has_active_blockers` semantics. The
+bundled `flow-rebase-author` and `flow-rebase-verifier` skills carry the role
+instructions; the verifier proves the delta between the old feature tip and the
+rebased head is exactly the base branch's incoming changes.
+
+`.../land` squash-merges the feature branch into the base branch and marks the
+feature `landed`, healing on a no-op after a crash between the ref update and
+the row update. `.../archive` marks the feature `archived`; the branch is
+retained for audit.
+
 Agent outputs are immutable typed workflow artifacts. `flow complete` submits a
 Markdown summary plus a `handoff`, `change`, or `task_set` payload. Change
 artifacts are pinned to the submitted HEAD; later prompts receive prior artifact

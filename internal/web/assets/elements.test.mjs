@@ -26,6 +26,8 @@ const { renderHeldPanel, HAND_BACK_EDGES } = await import("./elements/held-panel
 const { renderDiffFile } = await import("./elements/diff.js");
 const { renderReviewBar } = await import("./elements/review-bar.js");
 const { renderEpic, memberState } = await import("./elements/epic.js");
+const { renderFeatures, featureCountsLabel, featureDivergenceLabel } = await import("./elements/features.js");
+const { renderFeature } = await import("./elements/feature.js");
 const { renderNowCard } = await import("./elements/now-card.js");
 const { renderReviewPanel } = await import("./elements/review-panel.js");
 const { renderActivityFeed, activityEntries } = await import("./elements/activity-feed.js");
@@ -831,6 +833,75 @@ test("epic members reduce to the one word the rollup groups by", () => {
   assert.equal(memberState({ resolution: "merged" }), "merged");
   assert.equal(memberState({ blocked_by: ["t-1"] }), "blocked");
   assert.equal(memberState({ state: "in_progress" }), "working");
+});
+
+test("feature count and divergence labels compress to one short legend", () => {
+  assert.equal(featureCountsLabel({ open: 1, scheduled: 2, in_progress: 1, done: 3 }), "1 open · 2 scheduled · 1 working · 3 done");
+  assert.equal(featureCountsLabel({}), "no tasks");
+  assert.equal(featureDivergenceLabel({ ahead: 0, behind: 0 }), "up to date");
+  assert.equal(featureDivergenceLabel({ ahead: 3, behind: 2 }), "3 ahead · 2 behind");
+  assert.equal(featureDivergenceLabel(null), "");
+});
+
+test("features list sorts open before landed and renders counts, divergence and the create form", () => {
+  const html = renderFeatures({
+    projectID: "p-alpha",
+    features: [
+      {
+        feature: { id: "f-alpha-0002", title: "billing rework", status: "landed", landed_at: "2026-01-01T00:00:00Z" },
+        counts: { done: 4 },
+        branch_state: { ahead: 0, behind: 0 },
+      },
+      {
+        feature: { id: "f-alpha-0001", title: "payments", status: "open" },
+        counts: { open: 2, in_progress: 1 },
+        branch_state: { ahead: 3, behind: 2 },
+        running_rebase: { id: "rb-alpha-0001", state: "running", task_id: "t-alpha-0009" },
+      },
+    ],
+  });
+  const openIndex = html.indexOf("payments");
+  const landedIndex = html.indexOf("billing rework");
+  assert.ok(openIndex !== -1 && landedIndex !== -1 && openIndex < landedIndex, "open feature sorts first");
+  assert.match(html, /href="\/ui\/projects\/p-alpha\/features\/f-alpha-0001"/);
+  assert.match(html, /2 open · 1 working/);
+  assert.match(html, /3 ahead · 2 behind/);
+  assert.match(html, /rebasing/);
+  assert.match(html, /data-feature-form="" data-project="p-alpha"/);
+  assert.match(html, /data-landed/);
+});
+
+test("feature detail renders actions for an open feature and none once landed", () => {
+  const open = renderFeature({
+    projectID: "p-alpha",
+    feature: { id: "f-alpha-0001", title: "payments", status: "open", branch: "feature/f-alpha-0001", body: "payment work" },
+    counts: { open: 1 },
+    branch_state: { ahead: 1, behind: 2 },
+    running_rebase: { id: "rb-alpha-0001", state: "running", task_id: "t-alpha-0009" },
+    tasks: [
+      { id: "t-alpha-0003", title: "scoped work" },
+      { id: "t-alpha-0004", title: "merged work", state: "done", done_resolution: "merged" },
+    ],
+    rebases: [
+      { id: "rb-alpha-0001", state: "running", task_id: "t-alpha-0009", old_tip_sha: "abc123", created_at: "2026-01-01T00:00:00Z" },
+    ],
+  });
+  assert.match(open, /data-feature-rebase="f-alpha-0001" data-project="p-alpha"/);
+  assert.match(open, /data-feature-land="f-alpha-0001" data-project="p-alpha"/);
+  assert.match(open, /data-feature-archive="f-alpha-0001" data-project="p-alpha"/);
+  assert.match(open, /Rebase in progress/);
+  assert.match(open, /href="\/ui\/tasks\/t-alpha-0009"/);
+  assert.match(open, /done \(merged\)/);
+  assert.match(open, /data-feature-form="f-alpha-0001" data-project="p-alpha"/);
+
+  const landed = renderFeature({
+    projectID: "p-alpha",
+    feature: { id: "f-alpha-0001", title: "payments", status: "landed", branch: "feature/f-alpha-0001", landed_at: "2026-01-02T00:00:00Z", land_sha: "def456" },
+    counts: { done: 2 },
+  });
+  assert.doesNotMatch(landed, /data-feature-rebase/);
+  assert.doesNotMatch(landed, /data-feature-form/);
+  assert.match(landed, /landed/);
 });
 
 test("the epic rollup bar and its legend are built from one grouping", () => {

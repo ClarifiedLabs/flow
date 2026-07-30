@@ -136,6 +136,23 @@ export function taskHref(projectID, taskID) {
   return task ? `/ui/tasks/${encodeURIComponent(task)}` : "#";
 }
 
+// featuresAPIBase is the project-scoped features endpoint; features never
+// leave their project, so the id is required.
+export function featuresAPIBase(projectID) {
+  const id = String(projectID || "").trim();
+  if (!id) throw new Error("project id is required");
+  return `/v2/projects/${encodeURIComponent(id)}/features`;
+}
+
+export function featureHref(projectID, ref) {
+  const feature = String(ref || "").trim();
+  const id = String(projectID || "").trim();
+  if (!feature) return "#";
+  return id
+    ? `/ui/projects/${encodeURIComponent(id)}/features/${encodeURIComponent(feature)}`
+    : `/ui/features/${encodeURIComponent(feature)}`;
+}
+
 export function attachmentHref(projectID, taskID, attachmentID) {
   return `${API_PREFIX}${taskAPIBase(projectID)}/${encodeURIComponent(taskID)}/attachments/${encodeURIComponent(attachmentID)}`;
 }

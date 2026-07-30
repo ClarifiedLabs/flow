@@ -359,6 +359,8 @@ func workflowSuccessOutcome(node FlowNodeSnapshot) (string, bool) {
 		return "approved", true
 	case NodeMergeChange:
 		return "merged", true
+	case NodeFinalizeRebase:
+		return "finalized", true
 	case NodeHumanGate:
 		if node.Config.HumanGate != nil && len(node.Config.HumanGate.Outcomes) > 0 {
 			return node.Config.HumanGate.Outcomes[0], true

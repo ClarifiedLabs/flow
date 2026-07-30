@@ -22,6 +22,7 @@ type WorkflowExecutor struct {
 	runs                 *WorkflowRunService
 	artifacts            *WorkflowArtifactService
 	tasks                *TaskService
+	features             *FeatureService
 	checks               *CheckService
 	checkConfigs         *CheckConfigService
 	sessions             *SessionService
@@ -59,10 +60,13 @@ func (e *workflowExecutionError) Unwrap() error {
 }
 
 type WorkflowExecutorOptions struct {
-	Database             *sql.DB
-	Runs                 *WorkflowRunService
-	Artifacts            *WorkflowArtifactService
-	Tasks                *TaskService
+	Database  *sql.DB
+	Runs      *WorkflowRunService
+	Artifacts *WorkflowArtifactService
+	Tasks     *TaskService
+	// Features resolves the task's feature for the finalize_rebase handler.
+	// Nil disables finalize_rebase nodes (tests construct executors directly).
+	Features             *FeatureService
 	Checks               *CheckService
 	CheckConfigs         *CheckConfigService
 	Sessions             *SessionService
@@ -85,7 +89,8 @@ func NewWorkflowExecutor(opts WorkflowExecutorOptions) *WorkflowExecutor {
 	}
 	executor := &WorkflowExecutor{
 		db: opts.Database, runs: opts.Runs, artifacts: opts.Artifacts, tasks: opts.Tasks,
-		checks: opts.Checks, checkConfigs: opts.CheckConfigs, sessions: opts.Sessions,
+		features: opts.Features,
+		checks:   opts.Checks, checkConfigs: opts.CheckConfigs, sessions: opts.Sessions,
 		merges: opts.Merges, queue: opts.Queue, project: opts.Project, harnessArgs: opts.HarnessArgs,
 		reviewScopeFileLimit: fileLimit, reviewScopeLineLimit: lineLimit,
 	}
@@ -96,6 +101,7 @@ func NewWorkflowExecutor(opts WorkflowExecutorOptions) *WorkflowExecutor {
 		NodeVerifyChange:       executor.handleVerifyChange,
 		NodeMaterializeTaskSet: executor.handleMaterializeTaskSet,
 		NodeMergeChange:        executor.handleMergeChange,
+		NodeFinalizeRebase:     executor.handleFinalizeRebase,
 	}
 	return executor
 }
@@ -304,9 +310,9 @@ LIMIT 1`,
 	taskID := run.TaskID
 	var changeID *string
 	branch := ""
-	base := strings.TrimSpace(e.project.BaseBranch)
-	if base == "" {
-		base = "main"
+	base, err := e.changeBaseForTask(ctx, taskID)
+	if err != nil {
+		return false, err
 	}
 	if node.Config.Agent.Workspace == WorkspaceChange {
 		change, err := e.changeForAgentNode(ctx, run, nodeRun, base)
@@ -345,6 +351,38 @@ LIMIT 1`,
 			Priority: 0, Requires: []string{flowharness.AgentHarnessLabel(harness)}, Payload: payload,
 		})
 	return false, err
+}
+
+// changeBaseForTask resolves the base branch a task's changes branch from
+// and merge into: the feature branch when the task belongs to an open
+// feature, the project base branch otherwise. A landed or archived feature no
+// longer routes work to its frozen branch; a dangling feature_id (defensive —
+// the FK normally keeps this impossible) falls back the same way.
+func (e *WorkflowExecutor) changeBaseForTask(ctx context.Context, taskID string) (string, error) {
+	base := strings.TrimSpace(e.project.BaseBranch)
+	if base == "" {
+		base = "main"
+	}
+	var featureBranch, featureStatus string
+	err := e.db.QueryRowContext(ctx, `
+SELECT f.branch, f.status
+FROM features f
+JOIN tasks t ON t.feature_id = f.id
+WHERE t.id = ?`, strings.TrimSpace(taskID)).Scan(&featureBranch, &featureStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return base, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("load task feature: %w", err)
+	}
+	if FeatureStatus(featureStatus) != FeatureOpen {
+		return base, nil
+	}
+	if strings.TrimSpace(featureBranch) == "" {
+		return base, nil
+	}
+
+	return featureBranch, nil
 }
 
 func (e *WorkflowExecutor) changeForAgentNode(ctx context.Context, run WorkflowRun, nodeRun WorkflowNodeRun, base string) (Change, error) {
@@ -707,6 +745,46 @@ func (e *WorkflowExecutor) handleMergeChange(ctx context.Context, run WorkflowRu
 		} else {
 			return false, err
 		}
+	}
+	_, err = e.runs.CompleteNode(ctx, CompleteWorkflowNodeInput{NodeRunID: nodeRun.ID, Outcome: outcome, Actor: ActorSystem})
+	return err == nil, err
+}
+
+// handleFinalizeRebase publishes the rebase task's change head to the task's
+// feature ref. The compare-and-swap guard in FeatureService.FinalizeRebase
+// decides the outcome: "finalized" publishes, "stale" loops back to the
+// rebase agent because the feature branch moved mid-rebase.
+func (e *WorkflowExecutor) handleFinalizeRebase(ctx context.Context, run WorkflowRun, nodeRun WorkflowNodeRun, _ FlowNodeSnapshot) (bool, error) {
+	if e.features == nil {
+		return false, errors.New("feature service is not configured")
+	}
+	if nodeRun.State == WorkflowNodeQueued {
+		if _, err := e.runs.MarkNodeRunning(ctx, nodeRun.ID); err != nil {
+			return false, err
+		}
+	}
+	artifact, err := e.artifacts.Get(ctx, nodeRun.InputArtifactID)
+	if err != nil {
+		return false, fmt.Errorf("load change artifact: %w", err)
+	}
+	changeID, err := changeIDFromArtifact(artifact)
+	if err != nil {
+		return false, err
+	}
+	change, err := e.sessions.GetChange(ctx, changeID)
+	if err != nil {
+		return false, err
+	}
+	task, err := e.tasks.GetTask(ctx, run.TaskID)
+	if err != nil {
+		return false, err
+	}
+	if task.FeatureID == nil {
+		return false, errors.New("finalize_rebase task is not assigned to a feature")
+	}
+	outcome, err := e.features.FinalizeRebase(ctx, *task.FeatureID, run.TaskID, change)
+	if err != nil {
+		return false, err
 	}
 	_, err = e.runs.CompleteNode(ctx, CompleteWorkflowNodeInput{NodeRunID: nodeRun.ID, Outcome: outcome, Actor: ActorSystem})
 	return err == nil, err

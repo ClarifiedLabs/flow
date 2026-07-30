@@ -1,0 +1,262 @@
+package api
+
+import (
+	"context"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/ClarifiedLabs/flow/internal/api/contract"
+	"github.com/ClarifiedLabs/flow/internal/coordinator"
+)
+
+// makeExchangeHooksInert replaces the fixture exchange's hook scripts. The
+// fixture registry points hooks at the test binary; feature operations push to
+// the exchange, which would re-exec the whole test suite as a hook.
+func makeExchangeHooksInert(t *testing.T, exchangePath string) {
+	t.Helper()
+	for _, name := range []string{"pre-receive", "post-receive"} {
+		path := filepath.Join(exchangePath, "hooks", name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\ncat >/dev/null\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("write inert %s hook: %v", name, err)
+		}
+	}
+}
+
+// seedAPIMain pushes an initial main commit into the fixture exchange.
+func seedAPIMain(t *testing.T, exchangePath string) string {
+	t.Helper()
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	runAPIGit(t, "", "-c", "init.defaultBranch=main", "init", repoPath)
+	runAPIGit(t, repoPath, "config", "user.name", "Flow Test")
+	runAPIGit(t, repoPath, "config", "user.email", "flow-test@example.com")
+	writeAPIFile(t, repoPath, "README.md", "initial")
+	runAPIGit(t, repoPath, "add", "README.md")
+	runAPIGit(t, repoPath, "commit", "-m", "initial")
+	runAPIGit(t, repoPath, "push", exchangePath, "HEAD:refs/heads/main")
+	return apiGitOutput(t, repoPath, "rev-parse", "HEAD")
+}
+
+// advanceAPIMain clones the exchange, commits a file, and pushes main forward.
+func advanceAPIMain(t *testing.T, exchangePath, file, contents string) string {
+	t.Helper()
+	clonePath := filepath.Join(t.TempDir(), "clone")
+	runAPIGit(t, "", "clone", exchangePath, clonePath)
+	runAPIGit(t, clonePath, "config", "user.name", "Flow Test")
+	runAPIGit(t, clonePath, "config", "user.email", "flow-test@example.com")
+	runAPIGit(t, clonePath, "checkout", "-B", "main", "origin/main")
+	writeAPIFile(t, clonePath, file, contents)
+	runAPIGit(t, clonePath, "add", file)
+	runAPIGit(t, clonePath, "commit", "-m", "advance main")
+	runAPIGit(t, clonePath, "push", "origin", "HEAD:refs/heads/main")
+	return apiGitOutput(t, clonePath, "rev-parse", "HEAD")
+}
+
+func apiRefTip(t *testing.T, exchangePath, branch string) string {
+	t.Helper()
+	return apiGitOutput(t, "", "--git-dir", exchangePath, "rev-parse", "refs/heads/"+branch)
+}
+
+func TestFeatureAPIEndpoints(t *testing.T) {
+	fixture := newTestFixture(t)
+	exchangePath := fixture.Project.ExchangePath
+	makeExchangeHooksInert(t, exchangePath)
+	mainSHA := seedAPIMain(t, exchangePath)
+	featuresPath := "/v2/projects/" + fixture.Project.ID + "/features"
+
+	// Mutations require owner or console scope.
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, featuresPath,
+		contract.CreateFeatureRequest{Title: "payments"}, http.StatusForbidden, nil)
+
+	var created contract.FeatureResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, featuresPath,
+		contract.CreateFeatureRequest{Title: "payments", Body: "payment work"}, http.StatusCreated, &created)
+	feature := created.Feature
+	if feature.ID != "f-api-0001" || feature.Branch != "feature/f-api-0001" || feature.Status != coordinator.FeatureOpen {
+		t.Fatalf("created feature = %+v", feature)
+	}
+	if created.Counts != (contract.FeatureTaskCounts{}) {
+		t.Fatalf("created counts = %+v, want zero", created.Counts)
+	}
+	if created.BranchState == nil || created.BranchState.FeatureTipSHA != mainSHA || created.BranchState.Behind != 0 {
+		t.Fatalf("created branch state = %+v, want seeded at %s", created.BranchState, mainSHA)
+	}
+	if tip := apiRefTip(t, exchangePath, "feature/f-api-0001"); tip != mainSHA {
+		t.Fatalf("feature ref tip = %s, want %s", tip, mainSHA)
+	}
+
+	// Duplicate titles conflict.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, featuresPath,
+		contract.CreateFeatureRequest{Title: "payments"}, http.StatusConflict, nil)
+
+	// List (default = open).
+	var listed contract.FeaturesResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, featuresPath, nil, http.StatusOK, &listed)
+	if len(listed.Features) != 1 || listed.Features[0].Feature.ID != feature.ID {
+		t.Fatalf("listed features = %+v", listed.Features)
+	}
+
+	// Assign a task at creation.
+	var taskResp taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		map[string]any{"title": "scoped work", "feature_id": feature.ID}, http.StatusCreated, &taskResp)
+	if taskResp.Task.FeatureID == nil || *taskResp.Task.FeatureID != feature.ID {
+		t.Fatalf("created task feature = %v", taskResp.Task.FeatureID)
+	}
+	taskID := taskResp.Task.ID
+
+	// Unknown features are 404 on task create.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		map[string]any{"title": "bad", "feature_id": "f-api-9999"}, http.StatusNotFound, nil)
+
+	// Detail: counts + tasks.
+	var detail contract.FeatureResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, featuresPath+"/"+feature.ID, nil, http.StatusOK, &detail)
+	if detail.Counts.Open != 1 || len(detail.Tasks) != 1 || detail.Tasks[0].ID != taskID {
+		t.Fatalf("feature detail = counts %+v tasks %+v", detail.Counts, detail.Tasks)
+	}
+
+	// Task edit: reassign and clear via the tri-state field.
+	var edited taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPatch, "/v2/tasks/"+taskID,
+		map[string]any{"feature_id": ""}, http.StatusOK, &edited)
+	if edited.Task.FeatureID != nil {
+		t.Fatalf("cleared task feature = %v, want nil", edited.Task.FeatureID)
+	}
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPatch, "/v2/tasks/"+taskID,
+		map[string]any{"feature_id": feature.ID}, http.StatusOK, &edited)
+	if edited.Task.FeatureID == nil || *edited.Task.FeatureID != feature.ID {
+		t.Fatalf("reassigned task feature = %v", edited.Task.FeatureID)
+	}
+
+	// Metadata edit, resolvable by title too.
+	var renamed contract.FeatureResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPatch, featuresPath+"/payments",
+		contract.UpdateFeatureRequest{Title: stringPtr("payments v2")}, http.StatusOK, &renamed)
+	if renamed.Feature.Title != "payments v2" {
+		t.Fatalf("renamed feature = %+v", renamed.Feature)
+	}
+
+	// Rebase: up to date at first, then a clean instant rebase after main moves.
+	var rebase contract.RebaseFeatureResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, featuresPath+"/"+feature.ID+"/rebase",
+		nil, http.StatusOK, &rebase)
+	if rebase.Result.Kind != coordinator.RebaseAlreadyUpToDate {
+		t.Fatalf("rebase kind = %q, want already_up_to_date", rebase.Result.Kind)
+	}
+	advanceAPIMain(t, exchangePath, "main.txt", "main work")
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, featuresPath+"/"+feature.ID+"/rebase",
+		nil, http.StatusOK, &rebase)
+	if rebase.Result.Kind != coordinator.RebaseRebased || rebase.Result.NewTipSHA == "" {
+		t.Fatalf("rebase result = %+v, want rebased", rebase.Result)
+	}
+	if tip := apiRefTip(t, exchangePath, feature.Branch); tip != rebase.Result.NewTipSHA {
+		t.Fatalf("feature tip = %s, want %s", tip, rebase.Result.NewTipSHA)
+	}
+
+	// Archive refuses while the task is open.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, featuresPath+"/"+feature.ID+"/archive",
+		nil, http.StatusConflict, nil)
+
+	// Board exposes the open feature for card chips.
+	var board boardResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
+	foundBoardEntry := false
+	for _, entry := range board.Features {
+		if entry.ID == feature.ID && entry.Title == "payments v2" {
+			foundBoardEntry = true
+		}
+	}
+	if !foundBoardEntry {
+		t.Fatalf("board features = %+v, want the open feature listed", board.Features)
+	}
+
+	// Finish the task, then land.
+	if _, err := fixture.DB.Exec(
+		`UPDATE tasks SET lifecycle_state = 'done', done_resolution = 'merged', done_at = '2026-01-01T00:00:00Z' WHERE id = ?`, taskID); err != nil {
+		t.Fatalf("mark task done: %v", err)
+	}
+	var landed contract.FeatureResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, featuresPath+"/"+feature.ID+"/land",
+		nil, http.StatusOK, &landed)
+	if landed.Feature.Status != coordinator.FeatureLanded || landed.Feature.LandSHA == "" || landed.Feature.LandedAt == nil {
+		t.Fatalf("landed feature = %+v", landed.Feature)
+	}
+
+	// Landed features vanish from the default list, show under ?status=landed.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, featuresPath, nil, http.StatusOK, &listed)
+	if len(listed.Features) != 0 {
+		t.Fatalf("default list after land = %+v, want empty", listed.Features)
+	}
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, featuresPath+"?status=landed", nil, http.StatusOK, &listed)
+	if len(listed.Features) != 1 || listed.Features[0].Feature.ID != feature.ID {
+		t.Fatalf("landed list = %+v", listed.Features)
+	}
+
+	// Archive a fresh empty feature end to end.
+	var second contract.FeatureResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, featuresPath,
+		contract.CreateFeatureRequest{Title: "abandoned"}, http.StatusCreated, &second)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, featuresPath+"/"+second.Feature.ID+"/archive",
+		nil, http.StatusOK, &second)
+	if second.Feature.Status != coordinator.FeatureArchived {
+		t.Fatalf("archived feature = %+v", second.Feature)
+	}
+
+	// Unknown features are 404.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, featuresPath+"/f-api-9999", nil, http.StatusNotFound, nil)
+}
+
+func TestSessionCreatedTaskInheritsFeature(t *testing.T) {
+	fixture := newTestFixture(t)
+	exchangePath := fixture.Project.ExchangePath
+	makeExchangeHooksInert(t, exchangePath)
+	seedAPIMain(t, exchangePath)
+	ctx := context.Background()
+
+	feature, err := fixture.Bundle.Features.Create(ctx, coordinator.CreateFeatureInput{Title: "scoped"})
+	if err != nil {
+		t.Fatalf("create feature: %v", err)
+	}
+	parent, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "parent", FeatureID: &feature.ID})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+
+	// Mint a session token bound to the parent task, then create a child task
+	// with it: the child inherits the parent's feature.
+	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
+		Token:        "feature-session-token",
+		Scope:        coordinator.TokenScopeSession,
+		Subject:      "s-feature-test",
+		ProjectID:    &fixture.Project.ID,
+		SourceTaskID: &parent.ID,
+	}); err != nil {
+		t.Fatalf("store session token: %v", err)
+	}
+	var child taskResponse
+	doJSONRequestAs(t, fixture.Server, "feature-session-token", http.MethodPost, "/v2/tasks",
+		map[string]any{"title": "child"}, http.StatusCreated, &child)
+	if child.Task.FeatureID == nil || *child.Task.FeatureID != feature.ID {
+		t.Fatalf("session child feature = %v, want %s", child.Task.FeatureID, feature.ID)
+	}
+
+	// An explicit feature_id still wins.
+	other, err := fixture.Bundle.Features.Create(ctx, coordinator.CreateFeatureInput{Title: "other"})
+	if err != nil {
+		t.Fatalf("create other feature: %v", err)
+	}
+	var explicit taskResponse
+	doJSONRequestAs(t, fixture.Server, "feature-session-token", http.MethodPost, "/v2/tasks",
+		map[string]any{"title": "explicit", "feature_id": other.ID}, http.StatusCreated, &explicit)
+	if explicit.Task.FeatureID == nil || *explicit.Task.FeatureID != other.ID {
+		t.Fatalf("explicit child feature = %v, want %s", explicit.Task.FeatureID, other.ID)
+	}
+	if !strings.HasPrefix(child.Task.ID, "t-") {
+		t.Fatalf("child task id = %q", child.Task.ID)
+	}
+}
+
+func stringPtr(value string) *string { return &value }

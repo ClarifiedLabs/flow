@@ -23,6 +23,7 @@ const (
 )
 
 var taskRefPattern = regexp.MustCompile(`^refs/heads/task/t-(?:[a-z0-9]|[a-z0-9][a-z0-9-]{0,46}[a-z0-9])-[0-9]{4,}(?:/run-[0-9]+)?$`)
+var featureRefPattern = regexp.MustCompile(`^refs/heads/feature/f-(?:[a-z0-9]|[a-z0-9][a-z0-9-]{0,46}[a-z0-9])-[0-9]{4,}$`)
 
 type HookInstallOptions struct {
 	BaseBranch  string
@@ -199,6 +200,8 @@ func validateRefUpdate(ctx context.Context, exchangeRepoPath string, baseBranch 
 		return validateBaseUpdate(ctx, exchangeRepoPath, principal, update)
 	case taskRefPattern.MatchString(update.Ref):
 		return validateTaskUpdate(ctx, exchangeRepoPath, principal, update)
+	case featureRefPattern.MatchString(update.Ref):
+		return validateFeatureUpdate(principal, update)
 	case strings.HasPrefix(update.Ref, "refs/tags/"):
 		if principal != coordinatorActor {
 			return errors.New("only the coordinator may update tags")
@@ -260,6 +263,21 @@ func validateTaskUpdate(ctx context.Context, exchangeRepoPath string, principal 
 		return errors.New("non-fast-forward task branch updates require coordinator principal")
 	}
 
+	return nil
+}
+
+// Feature refs are shared long-lived branches written only by the
+// coordinator: creation seeds from the base tip, rebases compare-and-swap the
+// ref, and landing never rewrites it. There is no human or agent push path,
+// and no fast-forward requirement — a rebase deliberately replaces the ref;
+// the compare-and-swap lease on the push is the guard.
+func validateFeatureUpdate(principal string, update RefUpdate) error {
+	if principal != coordinatorActor {
+		return errors.New("only the coordinator may update feature branches")
+	}
+	if update.NewSHA == zeroSHA {
+		return errors.New("feature branches are retained for audit; archive the feature instead")
+	}
 	return nil
 }
 

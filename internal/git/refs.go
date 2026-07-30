@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -68,6 +69,56 @@ func BranchTip(ctx context.Context, exchangeRepoPath string, branch string) (str
 	}
 
 	return strings.TrimSpace(sha), true, nil
+}
+
+// UpdateRef points ref at sha in the bare exchange repository directly. It
+// bypasses receive hooks, so it is reserved for coordinator-local
+// administrative writes that precede any other writer (seeding a feature
+// branch at creation).
+func UpdateRef(ctx context.Context, exchangeRepoPath, ref, sha string) error {
+	ref = strings.TrimSpace(ref)
+	sha = strings.TrimSpace(sha)
+	if ref == "" || sha == "" {
+		return errors.New("ref and sha are required")
+	}
+	if err := gitBareRun(ctx, exchangeRepoPath, nil, "update-ref", ref, sha); err != nil {
+		return fmt.Errorf("update %s to %s: %w", ref, sha, err)
+	}
+
+	return nil
+}
+
+// RefDivergence reports how many commits branch is ahead of and behind base
+// in the bare exchange repository. Both refs must exist.
+func RefDivergence(ctx context.Context, exchangeRepoPath, base, branch string) (int, int, error) {
+	base = strings.TrimSpace(base)
+	branch = strings.TrimSpace(branch)
+	if base == "" || branch == "" {
+		return 0, 0, errors.New("base and branch are required")
+	}
+	ahead, err := revListCount(ctx, exchangeRepoPath, "refs/heads/"+base+"..refs/heads/"+branch)
+	if err != nil {
+		return 0, 0, err
+	}
+	behind, err := revListCount(ctx, exchangeRepoPath, "refs/heads/"+branch+"..refs/heads/"+base)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return ahead, behind, nil
+}
+
+func revListCount(ctx context.Context, exchangeRepoPath, rangeSpec string) (int, error) {
+	output, err := gitBareOutput(ctx, exchangeRepoPath, nil, "rev-list", "--count", rangeSpec)
+	if err != nil {
+		return 0, fmt.Errorf("count %s: %w", rangeSpec, err)
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(output))
+	if err != nil {
+		return 0, fmt.Errorf("parse rev-list count %q: %w", output, err)
+	}
+
+	return count, nil
 }
 
 func ListTaskBranchRefs(ctx context.Context, exchangeRepoPath string) ([]TaskBranchRef, error) {

@@ -1281,6 +1281,7 @@ func TestSplitQualifiedRef(t *testing.T) {
 		{"t-demo-0001", "", "t-demo-0001"},
 		{"myproj/t-demo-0001", "myproj", "t-demo-0001"},
 		{"myproj/ch-abc123", "myproj", "ch-abc123"},
+		{"myproj/f-demo-0001", "myproj", "f-demo-0001"},
 		{"p-demo/t-demo-0042", "p-demo", "t-demo-0042"},
 		{"task/t-demo-0001", "task", "t-demo-0001"},
 		{"refs/heads/main", "", "refs/heads/main"},

@@ -80,6 +80,7 @@ type projectServer struct {
 	*Server
 	project           coordinator.Project
 	tasks             *coordinator.TaskService
+	features          *coordinator.FeatureService
 	checks            *coordinator.CheckService
 	threads           *coordinator.ThreadService
 	sessions          *coordinator.SessionService
@@ -103,6 +104,7 @@ func (s *Server) forBundle(bundle *ProjectBundle) *projectServer {
 		Server:            s,
 		project:           bundle.Project,
 		tasks:             bundle.Tasks,
+		features:          bundle.Features,
 		checks:            bundle.Checks,
 		threads:           bundle.Threads,
 		sessions:          bundle.Sessions,

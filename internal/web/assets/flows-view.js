@@ -491,7 +491,7 @@ export function agentDefOptionsHTML(agentDefs, selectedID, options = {}) {
   }).join("");
 }
 
-const NODE_KINDS = ["agent", "automated_checks", "change_review", "human_gate", "verify_change", "materialize_task_set", "merge_change", "terminal"];
+const NODE_KINDS = ["agent", "automated_checks", "change_review", "human_gate", "verify_change", "materialize_task_set", "merge_change", "finalize_rebase", "terminal"];
 const REVIEW_NODE_CONFIG_KEYS = {
   change_review: "change_review",
   verify_change: "verify_change",

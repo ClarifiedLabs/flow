@@ -51,6 +51,7 @@ func createTaskInputForPrincipal(request createTaskRequest, principal coordinato
 			ScheduleState:      scheduleState,
 			TriageState:        triageState,
 			FlowID:             request.FlowID,
+			FeatureID:          request.FeatureID,
 			CreatedBy:          actor,
 			CreatedBySessionID: createdBySessionID,
 			SourceTaskID:       sourceTaskID,
@@ -309,6 +310,7 @@ type createTaskRequest struct {
 	Body               string            `json:"body"`
 	Priority           int               `json:"priority"`
 	FlowID             string            `json:"flow_id"`
+	FeatureID          *string           `json:"feature_id"`
 	ScheduleState      string            `json:"-"`
 	TriageState        string            `json:"-"`
 	CreatedBySessionID *string           `json:"created_by_session_id"`
@@ -332,6 +334,7 @@ type editTaskRequest struct {
 	Body     *string `json:"body"`
 	Priority *int    `json:"priority"`
 	FlowID   *string `json:"flow_id"`
+	FeatureID *string `json:"feature_id"`
 }
 
 type scheduleTaskRequest = contract.ScheduleTaskRequest
@@ -446,6 +449,15 @@ type sessionMessageResponse = contract.SessionMessageResponse
 type boardResponse struct {
 	contract.BoardResponse
 	TaskCards map[string]uiTaskCard `json:"task_cards,omitempty"`
+	// Features lists the project's open features (id + title) so the board can
+	// render a group chip on cards whose task carries feature_id without extra
+	// round trips.
+	Features []featureBoardEntry `json:"features,omitempty"`
+}
+
+type featureBoardEntry struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
 }
 
 // doneResponse is the per-project read model for terminal (closed) tasks. It

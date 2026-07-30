@@ -107,10 +107,10 @@ normalize to the same key are rejected so identifiers remain predictable.
 Tasks:
 
 ```sh
-flow task create --title TITLE [--flow FLOW]
+flow task create --title TITLE [--flow FLOW] [--feature FEATURE]
 flow task list
 flow task show TASK_ID
-flow task edit --title TITLE TASK_ID
+flow task edit --title TITLE [--feature FEATURE] TASK_ID
 flow task schedule TASK_ID
 flow task workflow TASK_ID
 flow task respond TASK_ID --node-run NODE_RUN_ID --outcome OUTCOME --feedback "..."
@@ -120,6 +120,29 @@ flow task reset TASK_ID
 flow task done TASK_ID --resolution completed
 flow task reopen TASK_ID
 ```
+
+Features (project-child task groups with their own exchange branch):
+
+```sh
+flow feature create --title TITLE [--body BODY]
+flow feature list [--status open|landed|archived|all]
+flow feature show FEATURE_ID
+flow feature edit --title TITLE FEATURE_ID
+flow feature rebase FEATURE_ID
+flow feature land FEATURE_ID
+flow feature archive FEATURE_ID
+```
+
+A feature groups a set of tasks behind one long-lived `feature/f-...` branch.
+Tasks assigned to a feature (`flow task create --feature`, the web task form's
+feature picker) branch off the feature branch and merge back into it instead of
+the base branch. `flow feature rebase` rebases the feature branch onto the base
+branch — instantly when the merge is clean, otherwise by creating a rebase task
+whose agent resolves the conflicts and whose verification gates a
+compare-and-swap update of the shared branch. A running rebase blocks the
+feature's other tasks via ordinary `blocks` relations. `flow feature land`
+squash-merges the feature branch into the base branch; archive is the only
+delete and retains the branch for audit.
 
 Board and diagnostics:
 
@@ -339,6 +362,8 @@ The coordinator serves a dependency-light web app under `/ui/*`:
 
 - `/ui/board`
 - `/ui/projects/<project-id>/tasks/<task-id>`
+- `/ui/features`
+- `/ui/projects/<project-id>/features/<feature-id>`
 - `/ui/changes/<change-id>`
 - `/ui/console`
 - `/ui/flows`
