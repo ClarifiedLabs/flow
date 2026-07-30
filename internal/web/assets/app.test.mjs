@@ -3287,6 +3287,105 @@ test("parallel review blocking checkbox toggles an agent to advisory", async () 
   assert.equal(context.flowPayloadFromEditorView(form).nodes[0].config.change_review.agents[0].blocking, false);
 });
 
+test("cloneFlowView builds a create payload that copies the graph under a new name", async () => {
+  const context = await scriptContext();
+
+  const payload = context.cloneFlowView({
+    id: "fl-1",
+    name: "coding",
+    description: "Ship it",
+    start_node: "implement",
+    transition_budget: 75,
+    builtin: true,
+    default: true,
+    nodes: [
+      { id: "fn-1", key: "implement", name: "Implement", kind: "agent", position: 0, config: { agent: { agent_def_id: "ad-author", workspace: "change", artifact: "change" } } },
+      { id: "fn-2", key: "review", name: "Review", kind: "change_review", position: 1, config: { change_review: { agents: [{ agent_def_id: "ad-reviewer", blocking: true }], aggregator_agent_def_id: "ad-aggregator" } } },
+    ],
+    edges: [{ from: "implement", outcome: "done", to: "review" }],
+  });
+
+  assert.equal(payload.name, "coding (copy)");
+  assert.equal(payload.description, "Ship it");
+  assert.equal(payload.start_node, "implement");
+  assert.equal(payload.transition_budget, 75);
+  // Server-assigned ids/positions and the builtin/default flags are dropped so
+  // the copy is a fresh, editable flow.
+  assert.doesNotMatch(JSON.stringify(payload), /"id"|"position"|builtin|default/);
+  assert.deepEqual(payload.nodes, [
+    { key: "implement", name: "Implement", kind: "agent", config: { agent: { agent_def_id: "ad-author", workspace: "change", artifact: "change" } } },
+    { key: "review", name: "Review", kind: "change_review", config: { change_review: { agents: [{ agent_def_id: "ad-reviewer", blocking: true }], aggregator_agent_def_id: "ad-aggregator" } } },
+  ]);
+  assert.deepEqual(payload.edges, [{ from: "implement", outcome: "done", to: "review" }]);
+});
+
+test("clone flow button posts a copied create payload and opens the new flow editor", async () => {
+  const context = await scriptContext();
+  const listeners = new Map();
+  const cloneButton = {
+    dataset: { cloneFlow: "fl-1" },
+    addEventListener(event, handler) {
+      listeners.set(event, handler);
+    },
+  };
+  const section = {
+    querySelector() {
+      return null; // no inline editor form open
+    },
+    querySelectorAll(selector) {
+      return selector === "[data-clone-flow]" ? [cloneButton] : [];
+    },
+  };
+  let reloaded = 0;
+  const statuses = [];
+  const app = {
+    querySelector(selector) {
+      return selector === "[data-flows-section]" ? section : null;
+    },
+    load() {
+      reloaded += 1;
+    },
+    setStatus(message) {
+      statuses.push(message);
+    },
+  };
+
+  const fetchCalls = [];
+  globalThis.fetch = (path, options) => {
+    fetchCalls.push({ path, options });
+    return Promise.resolve({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ flow: { id: "fl-new" } }),
+    });
+  };
+
+  const state = { editingFlowID: "" };
+  const flows = [{
+    id: "fl-1",
+    name: "coding",
+    start_node: "implement",
+    nodes: [{ id: "fn-1", key: "implement", name: "Implement", kind: "agent", position: 0, config: { agent: { agent_def_id: "ad-author" } } }],
+    edges: [{ from: "implement", outcome: "done", to: "review" }],
+  }];
+  context.bindFlowsSectionView(app, { id: "p-alpha" }, flows, [], state);
+
+  assert.ok(listeners.has("click"), "clone button binds a click handler");
+  await listeners.get("click")();
+
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/flows");
+  assert.equal(fetchCalls[0].options.method, "POST");
+  const body = JSON.parse(fetchCalls[0].options.body);
+  assert.equal(body.name, "coding (copy)");
+  assert.deepEqual(body.nodes, [{ key: "implement", name: "Implement", kind: "agent", config: { agent: { agent_def_id: "ad-author" } } }]);
+  assert.deepEqual(body.edges, [{ from: "implement", outcome: "done", to: "review" }]);
+  // The created flow's id is unwrapped from the {flow} envelope and opened for editing.
+  assert.equal(state.editingFlowID, "fl-new");
+  assert.equal(reloaded, 1);
+  assert.deepEqual(statuses, ["flow cloned; rename and edit your copy"]);
+});
+
 test("flows view renders agent definitions and flow tables for the active project", async () => {
   const harness = await browserSmokeHarness("/ui/flows", {
     "/ui/api/v2/projects": { projects: [{ id: "p-alpha", name: "alpha" }] },
@@ -3329,6 +3428,8 @@ test("flows view renders agent definitions and flow tables for the active projec
   assert.match(html, /<svg[^>]*aria-label="default flow workflow definition"/);
   assert.match(html, /data-node="implement"/);
   assert.match(html, /data-flow-editor/);
+  // Every flow row offers a Clone action to seed a custom copy.
+  assert.match(html, /data-clone-flow="fl-1">Clone</);
   // Keeps the project's flow cache warm for the task form.
   assert.deepEqual(harness.app.flowsByProject.get("p-alpha").defaultFlowID, "fl-1");
 });

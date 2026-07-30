@@ -433,6 +433,7 @@ export function renderFlowsSectionView(flows, agentDefs, defaultFlowID, state) {
             <td class="flow-actions-column">
               <div class="actions table-actions">
                 <button class="button secondary" type="button" data-edit-flow="${escapeAttr(id)}">Edit</button>
+                <button class="button secondary" type="button" data-clone-flow="${escapeAttr(id)}">Clone</button>
                 ${isDefault ? "" : `<button class="button secondary" type="button" data-default-flow="${escapeAttr(id)}">Set default</button>`}
                 ${isDefault ? "" : `<button class="button secondary" type="button" data-delete-flow="${escapeAttr(id)}">Delete</button>`}
               </div>
@@ -684,6 +685,34 @@ export function flowPayloadFromEditorView(form) {
   };
 }
 
+// cloneFlowView builds a create-flow payload from an existing flow so it can
+// be saved as a new, editable copy: a starting point for a custom version.
+// Node ids/positions and the builtin/default flags are dropped (the server
+// assigns fresh ids; a new flow is never builtin or default), and the name gets
+// a copy suffix that the author can rename before saving.
+export function cloneFlowView(flow) {
+  const name = value(flow, "name", "Name") || "flow";
+  const nodes = (value(flow, "nodes", "Nodes") || []).map((node) => ({
+    key: value(node, "key", "Key"),
+    name: value(node, "name", "Name"),
+    kind: value(node, "kind", "Kind"),
+    config: value(node, "config", "Config") || {},
+  }));
+  const edges = (value(flow, "edges", "Edges") || []).map((edge) => ({
+    from: value(edge, "from", "From"),
+    outcome: value(edge, "outcome", "Outcome"),
+    to: value(edge, "to", "To"),
+  }));
+  return {
+    name: name + " (copy)",
+    description: value(flow, "description", "Description") || "",
+    start_node: value(flow, "start_node", "StartNode") || "",
+    transition_budget: Number(value(flow, "transition_budget", "TransitionBudget") || 0) || undefined,
+    nodes,
+    edges,
+  };
+}
+
 export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
   const section = app.querySelector("[data-flows-section]");
   if (!section) return;
@@ -693,6 +722,21 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
     button.addEventListener("click", () => {
       state.editingFlowID = button.dataset.editFlow || "";
       reload();
+    });
+  });
+  section.querySelectorAll("[data-clone-flow]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const source = (flows || []).find((flow) => value(flow, "id", "ID") === button.dataset.cloneFlow);
+      if (!source) return;
+      try {
+        const response = await apiPost(flowsAPIBase(project.id), cloneFlowView(source));
+        const created = value(response, "flow", "Flow") || response || {};
+        state.editingFlowID = value(created, "id", "ID") || "";
+        await reload();
+        app.setStatus("flow cloned; rename and edit your copy");
+      } catch (error) {
+        app.setStatus(error.message || String(error));
+      }
     });
   });
   section.querySelectorAll("[data-default-flow]").forEach((button) => {
