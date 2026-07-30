@@ -21,16 +21,25 @@ The web UI setup is:
 exchanges that bootstrap token for an HttpOnly session cookie, so the long-lived
 owner token is not placed in JavaScript.
 
-The board shows every project's tasks as cards. An in-progress task whose workflow is parked on a worker job that is queued or claimed — but not yet running — is labeled **awaiting worker** rather than **working**, so a stalled dispatch is visible at a glance. A sticky top bar frames every
+The board shows every project's live tasks as cards in Scheduled and In
+Progress lanes. An in-progress task whose workflow is parked on a worker job that is queued or claimed — but not yet running — is labeled **awaiting worker** rather than **working**, so a stalled dispatch is visible at a glance. A sticky top bar frames every
 page: primary navigation lives in the dropdown on the left, whose trigger
-shows the current page label alongside compact board lane chips (unscheduled,
-scheduled, in progress, blocked). The panel lists every destination — Board,
+shows the current page label alongside compact board lane chips (scheduled,
+in progress, blocked). The panel lists every destination — Board, Tasks,
 Console, Done, Flows, Workers, Jobs — with live per-destination badges such as
-the closed-task count, worker slot usage, and active and queued jobs, plus the
+the unscheduled-task count, closed-task count, worker slot usage, and active and queued jobs, plus the
 theme switcher at the bottom. A project picker appears at the right edge of
 the bar when more than one project is registered and filters the board by
 project. Task IDs embed their normalized project key, so links such as
 `/ui/tasks/t-flow-app-0001` remain unambiguous across every registered project.
+
+The **Tasks** page is a flat, filterable list of every task across the visible
+projects — including unscheduled work, which no longer has a board lane.
+Lifecycle-state chips (All, Unscheduled, Scheduled, In Progress, Done), an
+in-view project dropdown (composing with the topbar project picker) and a
+title/body text search narrow the list. Row checkboxes (plus select-all)
+enable bulk edits that fan out over the selected tasks: set priority, set
+flow, schedule, reset to unscheduled, and retry a failed workflow.
 
 Use **New Task** to create unscheduled work from the browser. The form can
 select a project, workflow, priority, attachments, and whether to schedule the

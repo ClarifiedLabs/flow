@@ -925,6 +925,39 @@ func TestIdempotentCreateDoesNotDuplicateTask(t *testing.T) {
 	}, http.StatusConflict, nil, idempotencyHeader, "create-1")
 }
 
+func TestListTasksFiltersByTextSearch(t *testing.T) {
+	fixture := newTestFixture(t)
+
+	var match taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks", createTaskRequest{
+		Title: "Fix flaky checkout retries",
+	}, http.StatusCreated, &match)
+	var other taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks", createTaskRequest{
+		Title: "Ship the changelog",
+	}, http.StatusCreated, &other)
+
+	// ?q= matches title/body case-insensitively and narrows the aggregate list.
+	var found aggregateTasksResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks?q=FLAKY", nil, http.StatusOK, &found)
+	if len(found.Tasks) != 1 || found.Tasks[0].ID != match.Task.ID {
+		t.Fatalf("q=FLAKY tasks = %+v, want only %s", found.Tasks, match.Task.ID)
+	}
+
+	// The text search composes with the lifecycle state filter (AND): both
+	// tasks are unscheduled, so the scheduled filter empties the same search.
+	found = aggregateTasksResponse{}
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks?q=flaky&state=scheduled", nil, http.StatusOK, &found)
+	if len(found.Tasks) != 0 {
+		t.Fatalf("q=flaky&state=scheduled tasks = %+v, want none", found.Tasks)
+	}
+	found = aggregateTasksResponse{}
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks?q=flaky&state=unscheduled", nil, http.StatusOK, &found)
+	if len(found.Tasks) != 1 || found.Tasks[0].ID != match.Task.ID {
+		t.Fatalf("q=flaky&state=unscheduled tasks = %+v, want %s", found.Tasks, match.Task.ID)
+	}
+}
+
 func TestConcurrentIdempotentCreateDoesNotDuplicateTask(t *testing.T) {
 	fixture := newTestFixture(t)
 

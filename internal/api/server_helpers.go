@@ -759,6 +759,7 @@ func taskFilterFromQuery(r *http.Request) (coordinator.TaskFilter, error) {
 		}
 	}
 	filter.TagSlugs = r.URL.Query()["tag"]
+	filter.Search = r.URL.Query().Get("q")
 
 	return filter, nil
 }

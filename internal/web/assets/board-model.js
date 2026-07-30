@@ -327,12 +327,11 @@ export function sortForAttention(models) {
 }
 
 // BOARD_FILTERS are the table view's chips. `all` is implicit in the design's
-// "Needs you / Running / Queued / Unscheduled" set.
+// "Needs you / Running / Queued" set; unscheduled work lives in the Tasks view.
 export const BOARD_FILTERS = [
   ["attention", "Needs you"],
   ["running", "Running"],
   ["queued", "Queued"],
-  ["unscheduled", "Unscheduled"],
 ];
 
 export function matchesFilter(model, filter) {
@@ -345,8 +344,6 @@ export function matchesFilter(model, filter) {
       return model.lifecycleState === "in_progress" && !model.needsYou && !model.queuedForWorker;
     case "queued":
       return model.lifecycleState === "scheduled";
-    case "unscheduled":
-      return model.lifecycleState === "unscheduled";
     default:
       return true;
   }

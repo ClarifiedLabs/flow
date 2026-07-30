@@ -62,6 +62,74 @@ func TestCreateTaskAllocatesIDAndPersistsAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestListTasksSearchMatchesTitleAndBodyCaseInsensitively(t *testing.T) {
+	ctx := context.Background()
+	store, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
+	t.Cleanup(func() { _ = store.Close() })
+
+	titleHit, err := service.CreateTask(ctx, CreateTaskInput{Title: "Fix flaky checkout retries", Body: "unrelated"})
+	if err != nil {
+		t.Fatalf("create title-hit task: %v", err)
+	}
+	bodyHit, err := service.CreateTask(ctx, CreateTaskInput{Title: "unrelated", Body: "Deep dive on FLAKY checkouts"})
+	if err != nil {
+		t.Fatalf("create body-hit task: %v", err)
+	}
+	miss, err := service.CreateTask(ctx, CreateTaskInput{Title: "Ship the changelog", Body: "nothing to see"})
+	if err != nil {
+		t.Fatalf("create miss task: %v", err)
+	}
+
+	found, err := service.ListTasks(ctx, TaskFilter{Search: "flaky"})
+	if err != nil {
+		t.Fatalf("list tasks by search: %v", err)
+	}
+	ids := make([]string, 0, len(found))
+	for _, task := range found {
+		ids = append(ids, task.ID)
+	}
+	if !slices.Contains(ids, titleHit.ID) || !slices.Contains(ids, bodyHit.ID) {
+		t.Fatalf("search ids = %v, want title hit %s and body hit %s", ids, titleHit.ID, bodyHit.ID)
+	}
+	if slices.Contains(ids, miss.ID) {
+		t.Fatalf("search ids = %v, want no %s", ids, miss.ID)
+	}
+
+	// The search composes with the other predicates (AND) rather than
+	// replacing them: every task here is unscheduled, so adding the scheduled
+	// state filter empties the same search.
+	found, err = service.ListTasks(ctx, TaskFilter{Search: "flaky", LifecycleStates: []string{"unscheduled"}})
+	if err != nil {
+		t.Fatalf("list tasks by search and unscheduled state: %v", err)
+	}
+	if len(found) != 2 {
+		t.Fatalf("search+unscheduled tasks = %+v, want both hits", found)
+	}
+	found, err = service.ListTasks(ctx, TaskFilter{Search: "flaky", LifecycleStates: []string{string(LifecycleScheduled)}})
+	if err != nil {
+		t.Fatalf("list tasks by search and scheduled state: %v", err)
+	}
+	if len(found) != 0 {
+		t.Fatalf("search+scheduled tasks = %+v, want none (search and state are ANDed)", found)
+	}
+
+	// Blank and non-matching searches are neutral and exclusive respectively.
+	all, err := service.ListTasks(ctx, TaskFilter{Search: "   "})
+	if err != nil {
+		t.Fatalf("list tasks by blank search: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("blank search tasks = %+v, want all three", all)
+	}
+	none, err := service.ListTasks(ctx, TaskFilter{Search: "zzz-no-such-text"})
+	if err != nil {
+		t.Fatalf("list tasks by non-matching search: %v", err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("non-matching search tasks = %+v, want none", none)
+	}
+}
+
 func TestApplyReviewFollowUpCreatesOrReusesRelatedOpenTaskIdempotently(t *testing.T) {
 	ctx := context.Background()
 	store, tasks := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))

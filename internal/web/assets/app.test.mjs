@@ -280,6 +280,7 @@ test("nav trigger label tracks the current route", async () => {
   const cases = [
     ["/ui/", "board"],
     ["/ui/board", "board"],
+    ["/ui/tasks", "tasks"],
     ["/ui/console", "console"],
     ["/ui/done", "done"],
     ["/ui/flows", "flows"],
@@ -323,8 +324,8 @@ test("nav trigger gains board lane chips once sidebar status lands", async () =>
   assert.deepEqual(fetchCalls, ["/ui/api/v2/sidebar"]);
   assert.match(harness.trigger.innerHTML, /class="nav-board-group"/);
   assert.match(harness.trigger.innerHTML, /data-board-lane="blocked" title="1 blocked task">1<\/span>/);
-  // The panel keeps the six nav destinations with the board badge markup.
-  assert.equal(harness.nav.links.length, 6);
+  // The panel keeps the seven nav destinations with the board badge markup.
+  assert.equal(harness.nav.links.length, 7);
   assert.match(harness.nav.innerHTML, /class="nav-board-group"/);
 });
 
@@ -2720,11 +2721,22 @@ test("board sidebar status separates blocked tasks in compact lifecycle groups",
   assert.equal((html.match(/class="nav-board-group"/g) || []).length, 2);
   assert.match(html, /data-board-group="queued"/);
   assert.match(html, /data-board-group="active"/);
-  assert.match(html, /data-board-lane="unscheduled" title="2 unscheduled tasks">2<\/span>/);
+  // The board badge no longer renders the unscheduled lane even though the
+  // sidebar payload still carries it (the Tasks view badge uses it).
+  assert.doesNotMatch(html, /data-board-lane="unscheduled"/);
   assert.match(html, /data-board-lane="scheduled" title="3 scheduled tasks">3<\/span>/);
   assert.match(html, /data-board-lane="in_progress" title="4 in progress tasks">4<\/span>/);
   assert.match(html, /data-board-lane="blocked" title="1 blocked task">1<\/span>/);
-  assert.match(html, /aria-label="2 unscheduled tasks, 3 scheduled tasks, 4 in progress tasks, 1 blocked task"/);
+  assert.match(html, /aria-label="3 scheduled tasks, 4 in progress tasks, 1 blocked task"/);
+});
+
+test("tasks sidebar status badge shows the unscheduled count", async () => {
+  const context = await scriptContext();
+  const html = context.renderNavStatus("/ui/tasks", {
+    board: { unscheduled: 2, scheduled: 3, in_progress: 4, blocked: 1 },
+  });
+
+  assert.match(html, /title="2 unscheduled tasks">2<\/span>/);
 });
 
 test("jobs sidebar status describes each number", async () => {

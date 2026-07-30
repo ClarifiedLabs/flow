@@ -41,7 +41,6 @@ export function renderNavStatus(href, status) {
     const board = value(status, "board", "Board") || {};
     const groups = [
       ["queued", [
-        ["unscheduled", "Unscheduled", "unscheduled"],
         ["scheduled", "Scheduled", "scheduled"],
       ]],
       ["active", [
@@ -62,6 +61,10 @@ export function renderNavStatus(href, status) {
     return `<span class="nav-status nav-status-board" title="${escapeAttr(labels.join(", "))}" aria-label="${escapeAttr(labels.join(", "))}">${badges}</span>`;
   }
   if (href === "/ui/triage") return renderNavCount(value(status, "triage", "Triage"), "triage items");
+  if (href === "/ui/tasks") {
+    const board = value(status, "board", "Board") || {};
+    return renderNavCount(value(board, "unscheduled", "Unscheduled"), "unscheduled tasks");
+  }
   if (href === "/ui/feedback") return renderNavCount(value(status, "feedback", "Feedback"), "needs attention items");
   if (href === "/ui/merge") return renderNavCount(value(status, "merge", "Merge"), "merge items");
   if (href === "/ui/done") return renderNavCount(value(status, "done", "Done"), "done items");

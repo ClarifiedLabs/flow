@@ -3,14 +3,16 @@
 // Feature-specific constants (theme/terminal icons, harness flags, lifecycle
 // layout, etc.) live with their owning module, not here.
 
+// LANES are the board's live columns. Unscheduled work is no longer a board
+// lane; it lives in the Tasks view (/ui/tasks).
 export const LANES = [
-  ["unscheduled", "Unscheduled", "Unscheduled"],
   ["scheduled", "Scheduled", "Scheduled"],
   ["in_progress", "In Progress", "InProgress"],
 ];
 
 export const NAV = [
   ["/ui/board", "Board"],
+  ["/ui/tasks", "Tasks"],
   ["/ui/console", "Console"],
   ["/ui/done", "Done"],
   ["/ui/flows", "Flows"],
@@ -39,6 +41,12 @@ export const PROJECT_STORAGE_KEY = "flow.ui.projects";
 export const DONE_DENSITY_STORAGE_KEY = "flow.ui.doneDensity";
 
 export const DONE_OUTCOME_STORAGE_KEY = "flow.ui.doneOutcome";
+
+export const TASKS_STATE_STORAGE_KEY = "flow.ui.tasksState";
+
+export const TASKS_PROJECT_STORAGE_KEY = "flow.ui.tasksProject";
+
+export const TASKS_QUERY_STORAGE_KEY = "flow.ui.tasksQuery";
 
 export const BOARD_DONE_STORAGE_KEY = "flow.ui.boardDone.v1";
 
@@ -70,6 +78,8 @@ export const TASK_TABS = [
 ];
 
 export const DONE_OUTCOMES = new Set(["all", "completed", "merged", "rejected", "abandoned", "cancelled", "failed"]);
+
+export const TASKS_STATES = new Set(["all", "unscheduled", "scheduled", "in_progress", "done"]);
 
 export const THEME_PREFERENCES = new Set(["system", "light", "dark"]);
 

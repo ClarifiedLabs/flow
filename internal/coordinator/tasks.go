@@ -170,6 +170,10 @@ type EditTaskInput struct {
 type TaskFilter struct {
 	LifecycleStates []string
 	TagSlugs        []string
+	// Search matches a case-insensitive substring against the task's title or
+	// body; empty means no text filtering. The input is always bound as a
+	// parameter, never interpolated into SQL.
+	Search string
 }
 
 type CreateTagInput struct {
@@ -444,6 +448,11 @@ JOIN tags t ON t.id = it.tag_id`
 		for _, slug := range filter.TagSlugs {
 			args = append(args, slug)
 		}
+	}
+	if search := strings.TrimSpace(filter.Search); search != "" {
+		pattern := "%" + strings.ToLower(search) + "%"
+		predicates = append(predicates, "(LOWER(i.title) LIKE ? OR LOWER(i.body) LIKE ?)")
+		args = append(args, pattern, pattern)
 	}
 	if len(filter.LifecycleStates) > 0 {
 		var statePredicates []string

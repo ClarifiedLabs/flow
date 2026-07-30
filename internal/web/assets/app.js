@@ -15,6 +15,7 @@ import { renderWorkersView, renderJobsView } from "./diagnostics-view.js";
 import { renderTerminalView, openInlineTerminalView, showTranscriptView } from "./terminal-view.js";
 import { renderConsoleView, stopConsolePollView } from "./console-view.js";
 import { renderDoneView } from "./done-view.js";
+import { renderTasksView } from "./tasks-view.js";
 import { createTaskView, renderBoardRoute } from "./board-route.js";
 import { renderTaskRoute } from "./task-route.js";
 import { renderChangeRoute } from "./change-route.js";
@@ -45,6 +46,7 @@ export * from "./attention.js";
 export * from "./task.js";
 export * from "./poller.js";
 export * from "./flows-view.js";
+export * from "./tasks-view.js";
 export * from "./workflow-graph.js";
 
 // Client-side route table consumed by load(). Each entry's match(path) returns a
@@ -77,6 +79,7 @@ const ROUTES = [
   },
   { match: (p) => p.startsWith("/ui/changes/") && { id: p.split("/").pop() }, render: (app, ctx, p) => renderChangeRoute(app, p.id, ctx) },
   { match: (p) => p === "/ui/console", render: (app, ctx) => app.renderConsole(ctx) },
+  { match: (p) => p === "/ui/tasks", render: (app, ctx) => renderTasksView(app, ctx) },
   { match: (p) => { const id = terminalSessionIDForPath(p); return id && { id }; }, render: (app, ctx, p) => renderTerminalView(app, p.id, ctx) },
   { match: (p) => p === "/ui/flows", render: (app, ctx) => renderFlowsView(app, ctx) },
   { match: (p) => p === "/ui/workers", render: (app, ctx) => renderWorkersView(app, ctx) },

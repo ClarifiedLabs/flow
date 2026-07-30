@@ -2,7 +2,7 @@
 // done-view and board-done config) plus pure path -> route / poll-config
 // parsing.
 
-import { BOARD_DONE_COUNTS, BOARD_DONE_STORAGE_KEY, BOARD_DONE_WINDOWS, BOARD_VIEWS, BOARD_VIEW_STORAGE_KEY, DIAGRAM_MODES, DIAGRAM_MODE_STORAGE_KEY, BOARD_POLL_MS, CHANGE_POLL_MS, DIAGNOSTICS_POLL_MS, DIFF_MODES, DIFF_MODE_STORAGE_KEY, DONE_DENSITIES, DONE_DENSITY_STORAGE_KEY, DONE_OUTCOMES, DONE_OUTCOME_STORAGE_KEY, MAX_POLL_BACKOFF_MS, PROJECT_STORAGE_KEY, THEME_PREFERENCES, THEME_STORAGE_KEY } from "./config.js";
+import { BOARD_DONE_COUNTS, BOARD_DONE_STORAGE_KEY, BOARD_DONE_WINDOWS, BOARD_VIEWS, BOARD_VIEW_STORAGE_KEY, DIAGRAM_MODES, DIAGRAM_MODE_STORAGE_KEY, BOARD_POLL_MS, CHANGE_POLL_MS, DIAGNOSTICS_POLL_MS, DIFF_MODES, DIFF_MODE_STORAGE_KEY, DONE_DENSITIES, DONE_DENSITY_STORAGE_KEY, DONE_OUTCOMES, DONE_OUTCOME_STORAGE_KEY, MAX_POLL_BACKOFF_MS, PROJECT_STORAGE_KEY, TASKS_PROJECT_STORAGE_KEY, TASKS_QUERY_STORAGE_KEY, TASKS_STATE_STORAGE_KEY, TASKS_STATES, THEME_PREFERENCES, THEME_STORAGE_KEY } from "./config.js";
 
 export function readSelectedProjects() {
   try {
@@ -135,6 +135,67 @@ export function readDoneOutcome() {
 export function writeDoneOutcome(outcome) {
   try {
     if (DONE_OUTCOMES.has(outcome)) window.localStorage?.setItem(DONE_OUTCOME_STORAGE_KEY, outcome);
+  } catch {
+    // Persistence is best-effort.
+  }
+}
+
+// The Tasks view's chips, in-view project filter and search text are working
+// preferences too, so they persist the same way the Done outcome does.
+export function readTasksState() {
+  try {
+    const raw = window.localStorage?.getItem(TASKS_STATE_STORAGE_KEY);
+    return TASKS_STATES.has(raw) ? raw : "all";
+  } catch {
+    return "all";
+  }
+}
+
+export function writeTasksState(state) {
+  try {
+    if (TASKS_STATES.has(state)) window.localStorage?.setItem(TASKS_STATE_STORAGE_KEY, state);
+  } catch {
+    // Persistence is best-effort.
+  }
+}
+
+export function readTasksProject() {
+  try {
+    return String(window.localStorage?.getItem(TASKS_PROJECT_STORAGE_KEY) || "");
+  } catch {
+    return "";
+  }
+}
+
+export function writeTasksProject(project) {
+  try {
+    const id = String(project || "").trim();
+    if (id) {
+      window.localStorage?.setItem(TASKS_PROJECT_STORAGE_KEY, id);
+    } else {
+      window.localStorage?.removeItem(TASKS_PROJECT_STORAGE_KEY);
+    }
+  } catch {
+    // Persistence is best-effort.
+  }
+}
+
+export function readTasksQuery() {
+  try {
+    return String(window.localStorage?.getItem(TASKS_QUERY_STORAGE_KEY) || "");
+  } catch {
+    return "";
+  }
+}
+
+export function writeTasksQuery(query) {
+  try {
+    const text = String(query || "").trim();
+    if (text) {
+      window.localStorage?.setItem(TASKS_QUERY_STORAGE_KEY, text);
+    } else {
+      window.localStorage?.removeItem(TASKS_QUERY_STORAGE_KEY);
+    }
   } catch {
     // Persistence is best-effort.
   }
