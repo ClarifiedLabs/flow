@@ -3,7 +3,7 @@
 // inline notes, so neither survives only as long as the next poll.
 
 import { apiPost } from "../api.js";
-import { inFlight, markBusy } from "../actions.js";
+import { beginInFlight, failureMessage, inFlight, markBusy, settleStatus } from "../actions.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { value } from "../normalize.js";
 import { readDiffMode, writeDiffMode } from "../storage.js";
@@ -162,18 +162,22 @@ export class FlowChange extends FlowElement {
     }
     const busyKey = `review:${changeID}:${verdict}`;
     if (inFlight.has(busyKey)) return;
-    inFlight.add(busyKey);
     const restore = button ? markBusy(button) : () => {};
-    this.app?.setStatus(`${reviewPendingLabel(verdict)}…`);
+    const pending = `${reviewPendingLabel(verdict)}…`;
+    beginInFlight(busyKey, pending);
+    this.app?.setStatus(pending);
     try {
       await apiPost(`/v2/changes/${encodeURIComponent(changeID)}/review`, { verdict, body, comments });
       this.drafts.clear();
       await this.app?.refresh();
-      this.app?.setStatus(reviewMessage(verdict, comments.length));
+      // settleStatus keeps a still-pending sibling's label visible instead of
+      // showing this verdict's result early.
+      settleStatus(this.app, busyKey, reviewMessage(verdict, comments.length));
     } catch (error) {
-      this.app?.setStatus(error.message || String(error));
+      // failureMessage is total, so settleStatus always runs and the key always
+      // drains — even for a non-Error rejection such as `reject(null)`.
+      settleStatus(this.app, busyKey, failureMessage(error));
     } finally {
-      inFlight.delete(busyKey);
       restore();
     }
   }

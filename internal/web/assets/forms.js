@@ -6,7 +6,7 @@
 import { apiPatch, apiPost, taskAPIBase, taskHref } from "./api.js";
 import { value } from "./normalize.js";
 import { uploadTaskAttachment } from "./task.js";
-import { inFlight, markBusy } from "./actions.js";
+import { beginInFlight, failureMessage, inFlight, markBusy, settleStatus } from "./actions.js";
 
 // FORMS handlers return the confirmation message for the status line, or a
 // validation message the dispatcher shows in place of the pending label. They
@@ -110,10 +110,11 @@ export const FORMS = {
     const taskID = String(form.dataset.relationAddForm || "").trim();
     const kind = String(form.elements.kind?.value || "").trim();
     const targetTaskID = String(form.elements.target_task_id?.value || "").trim();
-    if (!targetTaskID) {
-      app.setStatus("Target task ID is required");
-      return;
-    }
+    // Return the validation message (rather than writing it and returning
+    // undefined) so the dispatcher keeps it visible when this is the final
+    // in-flight submission. The success path below still returns undefined to
+    // clear the line, and CANCELLED remains the distinct backed-out sentinel.
+    if (!targetTaskID) return "Target task ID is required";
     await apiPost(`${taskAPIBase(form.dataset.project)}/${encodeURIComponent(taskID)}/relations`, {
       target_task_id: targetTaskID,
       kind,
@@ -219,18 +220,24 @@ export async function handleFormSubmit(app, event) {
   if (form.reportValidity && !form.reportValidity()) return true;
   const busyKey = formBusyKey(key, form);
   if (inFlight.has(busyKey)) return true;
-  inFlight.add(busyKey);
   const submitter = typeof form.querySelector === "function" ? form.querySelector('[type="submit"]') : null;
   const restore = submitter ? markBusy(submitter) : () => {};
-  app.setStatus?.(`${FORM_PENDING_LABELS[key] || "Submitting"}…`);
+  const pending = `${FORM_PENDING_LABELS[key] || "Submitting"}…`;
+  beginInFlight(busyKey, pending);
+  app.setStatus?.(pending);
   try {
     const result = await FORMS[key](app, form);
-    if (typeof result === "string" && result) app.setStatus?.(result);
-    else if (result === CANCELLED) app.setStatus?.("");
+    // settleStatus arbitrates the shared status line: it keeps a still-pending
+    // sibling's label visible instead of showing this submission's result
+    // early, and distinguishes a confirmation message from CANCELLED (an
+    // explicit clear) and undefined (a silent success that leaves the pending
+    // label in place).
+    settleStatus(app, busyKey, result === CANCELLED ? "" : result);
   } catch (error) {
-    app.setStatus?.(error.message || String(error));
+    // failureMessage is total, so settleStatus always runs and the key always
+    // drains — even for a non-Error rejection such as `reject(null)`.
+    settleStatus(app, busyKey, failureMessage(error));
   } finally {
-    inFlight.delete(busyKey);
     restore();
   }
   return true;

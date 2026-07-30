@@ -270,6 +270,49 @@ async function resolveReadyChange(projectID, taskID) {
 // actionBusyKey helper.
 export const inFlight = new Set();
 
+// The status line is shared by every in-flight mutation, so settling one key
+// must not clobber the pending label of another key that is still running.
+// inFlightLabels records the pending label each key put on the line; when a
+// key settles, settleStatus re-shows the newest label still in flight and only
+// reveals the settling key's own result once nothing is pending. Map insertion
+// order tracks start order, so the newest still-pending label is the last
+// remaining entry.
+const inFlightLabels = new Map();
+
+// beginInFlight registers a key as running and remembers the pending label it
+// displayed, so a later settlement can restore it while it is still in flight.
+export function beginInFlight(key, label) {
+  inFlight.add(key);
+  inFlightLabels.set(key, label);
+}
+
+// endInFlight forgets a settled key and returns the pending label of the newest
+// key still in flight ("" when nothing remains pending).
+export function endInFlight(key) {
+  inFlight.delete(key);
+  inFlightLabels.delete(key);
+  let pending = "";
+  for (const label of inFlightLabels.values()) pending = label;
+  return pending;
+}
+
+// settleStatus arbitrates the shared status line when a mutation finishes.
+// While another mutation is still in flight it keeps that mutation's pending
+// label visible and suppresses this key's outcome. Once this is the final
+// mutation to settle, its outcome decides the line: a non-empty string (a
+// confirmation, validation, or error message) is shown; an empty string — the
+// explicit clear a backed-out handler asks for — clears it; and undefined, a
+// silent success, leaves the pending label in place rather than blanking it.
+export function settleStatus(app, key, message) {
+  const stillPending = endInFlight(key);
+  if (stillPending) {
+    app?.setStatus?.(stillPending);
+    return;
+  }
+  if (message === undefined) return;
+  app?.setStatus?.(message);
+}
+
 export function actionKeyFor(element) {
   for (const key of Object.keys(element.dataset || {})) {
     if (Object.hasOwn(ACTIONS, key)) return key;
@@ -375,11 +418,29 @@ const PENDING_LABELS = {
   threadClaim: "Claiming thread",
 };
 
+// failureMessage renders an arbitrary rejection value as a status-line string.
+// A promise may reject with something that is not an Error (fetch middleware,
+// aborts, or a bare `reject(null)`), so reading `error.message` directly can
+// itself throw. The settlement catch paths must stay total: if formatting the
+// failure threw, settleStatus would never run and the in-flight key would leak,
+// permanently disabling the control after a repaint.
+export function failureMessage(error) {
+  if (error instanceof Error) return error.message || error.name || "Failed";
+  if (error === null || error === undefined) return "Request failed";
+  if (typeof error === "string") return error;
+  try {
+    const text = String(error);
+    if (text && text !== "[object Object]") return text;
+  } catch {
+    // An exotic rejection value can throw even on String(); fall through.
+  }
+  return "Request failed";
+}
+
 // pendingLabel names the in-flight action on the status line: "Scheduling
 // t-0001…". Unknown keys fall back to a humanized form so a new action is
 // never silent while it runs.
-export function pendingLabel(key, dataset) {
-  const label = PENDING_LABELS[key] || humanizeKey(key);
+export function pendingLabel(key, dataset, label = PENDING_LABELS[key] || humanizeKey(key)) {
   const target = String(dataset?.[key] || "").trim();
   return target ? `${label} ${target}…` : `${label}…`;
 }
@@ -405,22 +466,27 @@ export async function handleAction(app, event) {
   event.preventDefault?.();
   const busyKey = actionBusyKey(key, element.dataset);
   if (element.disabled || inFlight.has(busyKey)) return true;
-  inFlight.add(busyKey);
   const restore = markBusy(element);
   // Every outcome button for a gate shares one in-flight key, so a sibling
   // stays clickable-looking until a repaint even though its click would be
   // rejected. Suppress the whole set synchronously so no sibling appears
   // enabled while the shared response is pending; the restores run on settle.
   const restoreSiblings = key === "workflowRespond" ? suppressGateOutcomes(element) : [];
-  app.setStatus?.(pendingLabel(key, element.dataset));
+  const pending = pendingLabel(key, element.dataset);
+  beginInFlight(busyKey, pending);
+  app.setStatus?.(pending);
   try {
     const result = await ACTIONS[key](app, element, element.dataset);
-    if (typeof result === "string" && result) app.setStatus?.(result);
-    else if (result === CANCELLED) app.setStatus?.("");
+    // settleStatus arbitrates the shared status line: it keeps a still-pending
+    // sibling's label visible instead of showing this result early, and
+    // distinguishes a confirmation message from CANCELLED (an explicit clear)
+    // and undefined (a silent success that leaves the pending label in place).
+    settleStatus(app, busyKey, result === CANCELLED ? "" : result);
   } catch (error) {
-    app.setStatus?.(error.message || String(error));
+    // failureMessage is total, so settleStatus always runs and the key always
+    // drains — even for a non-Error rejection such as `reject(null)`.
+    settleStatus(app, busyKey, failureMessage(error));
   } finally {
-    inFlight.delete(busyKey);
     restore();
     for (const restoreSibling of restoreSiblings) restoreSibling();
     // A repaint mid-flight swapped the suppressed controls for fresh disabled

@@ -1477,3 +1477,20 @@ test("a failed review keeps the error on the status line and restores the button
   change.remove();
   appNode.remove();
 });
+
+test("a non-Error review rejection still drains the registry and shows a final failure", async () => {
+  const root = globalThis.document.body;
+  stubReviewFetch(() => Promise.reject(null));
+  const { appNode, change, statuses } = mountChange(root, reviewChangeData());
+  await flush();
+
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  await change.handleClick({ target: approve, preventDefault() {} });
+
+  assert.deepEqual(statuses, ["Approving\u2026", "Request failed"]);
+  assert.equal(approve.disabled, false, "the verdict control is restored");
+  assert.equal(approve.getAttribute("aria-busy"), null);
+  assert.equal(inFlight.size, 0, "the in-flight registry drains on a non-Error rejection");
+  change.remove();
+  appNode.remove();
+});

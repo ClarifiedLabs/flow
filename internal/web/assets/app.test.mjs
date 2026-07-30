@@ -1292,6 +1292,159 @@ test("a failed action keeps the error on the status line and restores the contro
   assert.equal(inFlight.size, 0, "the in-flight registry drains on failure");
 });
 
+// A promise can reject with a value that is not an Error (a bare reject(null),
+// an abort, or fetch middleware). Formatting that failure must stay total: if
+// reading error.message threw before settleStatus ran, the in-flight key would
+// leak and a repainted control would stay disabled forever.
+test("a non-Error action rejection still drains the registry and shows a final failure", async () => {
+  await scriptContext();
+  const app = statusApp();
+  globalThis.fetch = () => Promise.reject(null);
+  const button = new ActionButton({ workflowSchedule: "t-0001", project: "p-alpha" });
+
+  await handleAction(app, { target: button, preventDefault() {} });
+
+  assert.deepEqual(app.statuses, ["Scheduling t-0001\u2026", "Request failed"]);
+  assert.equal(button.disabled, false, "the control is restored");
+  assert.equal(button.getAttribute("aria-busy"), null);
+  assert.equal(button.classList.contains("is-busy"), false);
+  assert.equal(inFlight.size, 0, "the in-flight registry drains on a non-Error rejection");
+
+  // A repainted replacement is accepted again, proving the key did not leak.
+  let requests = 0;
+  globalThis.fetch = () => {
+    requests += 1;
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+  };
+  const replacement = new ActionButton({ workflowSchedule: "t-0001", project: "p-alpha" });
+  await handleAction(app, { target: replacement, preventDefault() {} });
+  assert.equal(requests, 1, "the replacement control is not rejected by a leaked key");
+  assert.equal(inFlight.size, 0);
+});
+
+test("a non-Error form rejection still drains the registry and shows a final failure", async () => {
+  await scriptContext();
+  const app = statusApp();
+  globalThis.fetch = () => Promise.reject(null);
+  const submitter = new ActionButton();
+  const form = {
+    tagName: "FORM",
+    dataset: { project: "p-alpha", taskForm: "t-0001", taskFormMode: "edit" },
+    elements: {
+      priority: { value: "0" },
+      title: { value: "Renamed" },
+      body: { value: "" },
+      flow_id: { value: "" },
+    },
+    reportValidity() {
+      return true;
+    },
+    querySelector(selector) {
+      return selector === '[type="submit"]' ? submitter : null;
+    },
+  };
+
+  const handled = await handleFormSubmit(app, { target: form, preventDefault() {} });
+
+  assert.equal(handled, true);
+  assert.deepEqual(app.statuses, ["Saving task\u2026", "Request failed"]);
+  assert.equal(submitter.disabled, false, "the submit control is restored");
+  assert.equal(inFlight.size, 0, "the in-flight registry drains on a non-Error rejection");
+});
+
+// Two distinct mutations may be in flight at once; the shared status line must
+// keep naming a still-pending mutation after an earlier one settles, and only
+// reveal a result once nothing is pending. These cover out-of-order success
+// and failure settlement.
+function controllableFetch() {
+  const pending = [];
+  globalThis.fetch = () =>
+    new Promise((resolve) => {
+      pending.push((ok = true, body = {}) =>
+        resolve({ ok, status: ok ? 200 : 409, json: () => Promise.resolve(body) }),
+      );
+    });
+  return pending;
+}
+
+test("settling one action keeps a still-pending sibling's label on the status line", async () => {
+  await scriptContext();
+  const app = statusApp();
+  const pending = controllableFetch();
+  const taskA = new ActionButton({ workflowSchedule: "t-0001", project: "p-alpha" });
+  const taskB = new ActionButton({ workflowSchedule: "t-0002", project: "p-alpha" });
+
+  const first = handleAction(app, { target: taskA, preventDefault() {} });
+  const second = handleAction(app, { target: taskB, preventDefault() {} });
+  assert.deepEqual(app.statuses, ["Scheduling t-0001\u2026", "Scheduling t-0002\u2026"]);
+  assert.equal(inFlight.size, 2);
+
+  // The second mutation settles first: its "Scheduled" must not clobber the
+  // first mutation's still-pending label.
+  pending[1](true);
+  await second;
+  assert.equal(app.statuses[app.statuses.length - 1], "Scheduling t-0001\u2026");
+  assert.equal(inFlight.size, 1);
+
+  // When the final mutation settles, its own result stays visible.
+  pending[0](true);
+  await first;
+  assert.deepEqual(app.statuses, [
+    "Scheduling t-0001\u2026",
+    "Scheduling t-0002\u2026",
+    "Scheduling t-0001\u2026",
+    "Scheduled",
+  ]);
+  assert.equal(inFlight.size, 0);
+});
+
+test("an early failure does not hide a still-pending sibling's label", async () => {
+  await scriptContext();
+  const app = statusApp();
+  const pending = controllableFetch();
+  const taskA = new ActionButton({ workflowSchedule: "t-0001", project: "p-alpha" });
+  const taskB = new ActionButton({ workflowSchedule: "t-0002", project: "p-alpha" });
+
+  const first = handleAction(app, { target: taskA, preventDefault() {} });
+  const second = handleAction(app, { target: taskB, preventDefault() {} });
+
+  // The first mutation fails while the second is still running: the failure is
+  // suppressed in favour of the second mutation's pending label.
+  pending[0](false, { error: { message: "workflow is locked" } });
+  await first;
+  assert.equal(app.statuses[app.statuses.length - 1], "Scheduling t-0002\u2026");
+  assert.equal(inFlight.size, 1);
+
+  // The final mutation's success then stays visible.
+  pending[1](true);
+  await second;
+  assert.equal(app.statuses[app.statuses.length - 1], "Scheduled");
+  assert.equal(inFlight.size, 0);
+});
+
+test("the final mutation's failure stays visible after a sibling already settled", async () => {
+  await scriptContext();
+  const app = statusApp();
+  const pending = controllableFetch();
+  const taskA = new ActionButton({ workflowSchedule: "t-0001", project: "p-alpha" });
+  const taskB = new ActionButton({ workflowSchedule: "t-0002", project: "p-alpha" });
+
+  const first = handleAction(app, { target: taskA, preventDefault() {} });
+  const second = handleAction(app, { target: taskB, preventDefault() {} });
+
+  // The first mutation succeeds while the second is pending: its result is
+  // suppressed and the second's pending label stays.
+  pending[0](true);
+  await first;
+  assert.equal(app.statuses[app.statuses.length - 1], "Scheduling t-0002\u2026");
+
+  // The final mutation fails: with nothing left pending, the failure shows.
+  pending[1](false, { error: { message: "boom" } });
+  await second;
+  assert.equal(app.statuses[app.statuses.length - 1], "boom");
+  assert.equal(inFlight.size, 0);
+});
+
 test("a cancelled confirm clears the pending label and issues no request", async () => {
   await scriptContext({ confirm: () => false });
   const app = statusApp();
@@ -1451,6 +1604,40 @@ test("a backed-out form submit clears the pending label it created", async () =>
   // The handler backed out with nothing to show, so the pending label is cleared.
   assert.deepEqual(app.statuses, ["Posting reply\u2026", ""]);
   assert.equal(requests, 0, "a backed-out submit issues no request");
+  assert.equal(submitButton.disabled, false);
+  assert.equal(inFlight.size, 0);
+});
+
+test("an empty relation target keeps its validation failure visible when it is the final submission", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let requests = 0;
+  globalThis.fetch = () => {
+    requests += 1;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  };
+  const submitButton = new ActionButton({});
+  const form = {
+    tagName: "FORM",
+    dataset: { relationAddForm: "t-0001", project: "p-alpha" },
+    elements: {
+      kind: { value: "blocked_by" },
+      target_task_id: { value: "   " },
+    },
+    reportValidity() {
+      return true;
+    },
+    querySelector(selector) {
+      return selector === '[type="submit"]' ? submitButton : null;
+    },
+  };
+
+  await handleFormSubmit(app, { target: form, preventDefault() {} });
+
+  // The validation failure is the final mutation's outcome, so it must remain
+  // on the status line rather than being cleared by settlement.
+  assert.deepEqual(app.statuses, ["Submitting\u2026", "Target task ID is required"]);
+  assert.equal(requests, 0, "an empty relation target issues no request");
   assert.equal(submitButton.disabled, false);
   assert.equal(inFlight.size, 0);
 });
