@@ -53,7 +53,7 @@ function renderLine(line, { path, byLine, drafts }) {
   const newLine = value(line, "new_line", "NewLine");
   const oldLine = value(line, "old_line", "OldLine");
   const number = newLine ?? oldLine ?? "";
-  const mark = kind === "add" ? "+" : kind === "del" ? "−" : kind === "add" ? "+" : " ";
+  const mark = kind === "add" ? "+" : kind === "delete" ? "−" : " ";
   const draftKey = `${path}:${number}`;
   const draft = drafts.get(draftKey);
   const anchored = byLine.get(Number(number)) || [];

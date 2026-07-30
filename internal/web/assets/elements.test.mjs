@@ -777,7 +777,7 @@ test("every diff line carries a comment affordance in its gutter", () => {
         header: "@@ -210,6 +210,8 @@",
         lines: [
           { kind: "context", new_line: 210, text: "if run.Budget <= 0 {" },
-          { kind: "del", old_line: 211, text: "  return ErrBudgetExhausted" },
+          { kind: "delete", old_line: 211, text: "  return ErrBudgetExhausted" },
           { kind: "add", new_line: 211, text: "  return e.pauseForOperator(ctx, run)" },
         ],
       },
@@ -785,6 +785,26 @@ test("every diff line carries a comment affordance in its gutter", () => {
   });
   assert.equal((html.match(/data-comment-line=/g) || []).length, 3);
   assert.match(html, /aria-label="Comment on line 210"/);
+});
+
+test("a deleted line keeps its minus mark and deletion styling hook", () => {
+  // The server (internal/git parseDiffLine) emits kind "delete" for '-' lines;
+  // the gutter mark and the diff.module.css [data-kind="delete"] rules both
+  // hang off that exact string.
+  const html = renderDiffFile({
+    path: "a.go",
+    hunks: [
+      {
+        header: "@@ -1,2 +1,2 @@",
+        lines: [
+          { kind: "delete", old_line: 1, text: "old" },
+          { kind: "add", new_line: 1, text: "new" },
+        ],
+      },
+    ],
+  });
+  assert.match(html, /<div class="line" data-kind="delete">[\s\S]*?>−<\/button>/);
+  assert.match(html, /<div class="line" data-kind="add">[\s\S]*?>\+<\/button>/);
 });
 
 test("a drafted line keeps its note and says so", () => {

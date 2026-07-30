@@ -23,7 +23,7 @@
   background: color-mix(in srgb, var(--st-ok) 8%, transparent);
 }
 
-.line[data-kind="del"] {
+.line[data-kind="delete"] {
   background: color-mix(in srgb, var(--st-danger) 8%, transparent);
 }
 
@@ -65,7 +65,7 @@
   color: var(--st-ok);
 }
 
-.line[data-kind="del"] .gutter {
+.line[data-kind="delete"] .gutter {
   opacity: 1;
   color: var(--st-danger);
 }
