@@ -4,7 +4,7 @@
 // by following these imports).
 import { value } from "./normalize.js";
 import { escapeHTML, escapeAttr } from "./html.js";
-import { NAV, SIDEBAR_STATUS_POLL_MS, MAX_POLL_BACKOFF_MS, DEFAULT_AGENT_HARNESSES, DEFAULT_CONSOLE_HARNESSES } from "./config.js";
+import { NAV, SIDEBAR_STATUS_POLL_MS, MAX_POLL_BACKOFF_MS, SETTLE_BURST_DELAYS_MS, DEFAULT_AGENT_HARNESSES, DEFAULT_CONSOLE_HARNESSES } from "./config.js";
 import { apiGet, apiPost, taskConsoleAPIPath, taskAPIBase, taskHref, flowsAPIBase, featuresAPIBase } from "./api.js";
 import { readSelectedProjects, writeSelectedProjects, terminalSessionIDForPath, pollConfigForPath, readThemePreference, writeThemePreference, applyThemePreference } from "./storage.js";
 import { renderNavLink, renderNavTrigger, THEME_ICONS, THEME_OPTIONS } from "./nav.js";
@@ -21,7 +21,7 @@ import { renderTaskRoute } from "./task-route.js";
 import { renderChangeRoute } from "./change-route.js";
 import { renderEpicRoute } from "./epic-route.js";
 import { renderFeaturesRoute, renderFeatureRoute } from "./features-route.js";
-import { applyBusyState, handleAction, pendingStatus } from "./actions.js";
+import { ACTION_SETTLE, applyBusyState, handleAction, pendingStatus } from "./actions.js";
 import { handleFormSubmit } from "./forms.js";
 import { renderNewTaskView, renderTaskFormView, bindTaskFlowControlsView } from "./task-view.js";
 import { renderFlowsView } from "./flows-view.js";
@@ -117,6 +117,7 @@ export class FlowApp extends HTMLElement {
     this.mainPoll = new Poller();
     this.sidebarPoll = new Poller();
     this.consolePoll = new Poller();
+    this.settlePoll = new Poller();
   }
 
   connectedCallback() {
@@ -142,6 +143,7 @@ export class FlowApp extends HTMLElement {
     this.sidebarStatusGeneration = (this.sidebarStatusGeneration || 0) + 1;
     this.clearPolling();
     this.clearSidebarStatusPolling();
+    this.settlePoll.clear();
     stopConsolePollView(this);
   }
 
@@ -283,9 +285,39 @@ export class FlowApp extends HTMLElement {
   }
 
   // refresh re-runs the current route. Action handlers call it rather than
-  // knowing which view they were pressed in.
-  refresh() {
-    return this.load();
+  // knowing which view they were pressed in. A successful action's refresh —
+  // one the dispatcher scoped with the ACTION_SETTLE provenance token (see
+  // actions.js) — also arms a short settle burst of follow-up reloads once
+  // its own load completes: the mutation lands synchronously inside the
+  // request, but its visible follow-on effects (the agent session starting,
+  // the next gate opening, checks beginning) only settle asynchronously over
+  // the next few seconds. Failed actions never reach their reload at all —
+  // their handlers unwind first — and a cancelled confirm returns before it,
+  // so only a completed mutation arms the burst.
+  //
+  // Handlers that own their concluding reload instead of going through
+  // refresh() — the Console view's start and release helpers reload with
+  // app.load() — carry the same token stamped on that load by the action
+  // scope, and load() applies the same gate (see maybeArmSettleBurst). An
+  // ordinary refresh or load — a manual one, a poll, navigation, the board's
+  // Done filter — carries no token and stays the single load it always was,
+  // even when an unrelated action happens to be in flight.
+  async refresh(options = {}) {
+    const context = await this.load();
+    this.maybeArmSettleBurst(options, context);
+  }
+
+  // maybeArmSettleBurst decides whether a just-completed load arms the settle
+  // burst: it does when — and only when — the call carried the dispatcher's
+  // ACTION_SETTLE provenance token and the load is still the active one.
+  // Arming only off the refresh's (or handler-owned load's) own context keeps
+  // the burst off a route the action never saw: navigating away, or any newer
+  // load, while the immediate load runs supersedes it, and a superseded or
+  // failed load hands back no context at all.
+  maybeArmSettleBurst(options, context) {
+    if (options?.settle !== ACTION_SETTLE) return;
+    if (!this.isActiveLoad(context)) return;
+    this.scheduleSettleBurst(context);
   }
 
   renderNav() {
@@ -533,6 +565,9 @@ export class FlowApp extends HTMLElement {
       path,
     };
     this.loadGeneration = context.generation;
+    // Track in-flight loads so a settle-burst tick can skip its reload rather
+    // than overlap a load that is still running (see scheduleSettleBurst).
+    this.loadsInFlight = (this.loadsInFlight || 0) + 1;
     try {
       await this.ensureProjects({ refresh: path === "/ui/tasks/new" || path === "/ui/flows" });
       for (const route of ROUTES) {
@@ -540,7 +575,16 @@ export class FlowApp extends HTMLElement {
         if (!params) continue;
         if (await route.render(this, context, params) === false) return;
         this.finishLoad(context);
-        return;
+        // A handler-owned reload arrives here carrying the settle provenance
+        // the action scope stamped on load() (see actions.js), so a
+        // successful action that reloads without refresh() — the Console
+        // view's start and release — arms its burst here; refresh() instead
+        // gates itself off the returned context below.
+        this.maybeArmSettleBurst(options, context);
+        // refresh() keys its settle-burst decision off the returned context:
+        // a completed load hands its generation/path back, a superseded or
+        // failed one hands back nothing.
+        return context;
       }
     } catch (error) {
       if (!this.isActiveLoad(context)) return;
@@ -548,6 +592,8 @@ export class FlowApp extends HTMLElement {
       this.pollFailures = options.fromPoll ? this.pollFailures + 1 : 1;
       this.setPollState("error", this.pollFailures > 1 ? `retry ${this.pollFailures}` : "error");
       this.schedulePolling(path);
+    } finally {
+      this.loadsInFlight -= 1;
     }
   }
 
@@ -587,6 +633,49 @@ export class FlowApp extends HTMLElement {
 
   clearPolling() {
     this.mainPoll.clear();
+  }
+
+  // scheduleSettleBurst arms the settle burst: a short, bounded series of
+  // follow-up reloads of the current route after a successful
+  // action-triggered refresh (see SETTLE_BURST_DELAYS_MS). origin is the load
+  // context that refresh produced: the burst belongs to that load's route
+  // and generation, not to wherever the app happens to be when the burst is
+  // armed. It reuses the load machinery's own guards rather than adding
+  // parallel state:
+  //
+  // - Each tick captures the load generation and path as it is armed — the
+  //   first from origin itself — and re-checks them through isActiveLoad when
+  //   it fires, so navigating to another route, or any newer load starting
+  //   (a poll, a manual refresh, another action), supersedes the pending
+  //   tick and ends the burst.
+  // - A tick that finds a load still in flight skips its own reload, so the
+  //   burst never overlaps load() calls; the remaining ticks still fire.
+  //
+  // Regular poll scheduling is untouched: the burst's timer lives on its own
+  // Poller, and each burst load re-arms the route's usual poll through
+  // finishLoad like any other load.
+  scheduleSettleBurst(origin) {
+    if (this.pollingActive === false) return;
+    this.settlePoll.clear();
+    const path = origin.path;
+    const delays = SETTLE_BURST_DELAYS_MS;
+    const armTick = (index, guard = { generation: this.loadGeneration, path }) => {
+      if (index >= delays.length) return;
+      // Delays are absolute offsets from the action's refresh; the one-shot
+      // Poller re-arms per tick, so each arm waits out only the delta.
+      const offset = index > 0 ? delays[index] - delays[index - 1] : delays[index];
+      this.settlePoll.arm(offset, async () => {
+        if (!this.isActiveLoad(guard)) return;
+        try {
+          if (!this.loadsInFlight) await this.load({ fromPoll: true });
+        } catch {
+          // load() reports its own failures on the status line; a rejection
+          // escaping it must not strand the remaining burst ticks.
+        }
+        armTick(index + 1);
+      });
+    };
+    armTick(0, { generation: origin.generation, path: origin.path });
   }
 
   schedulePolling(path) {

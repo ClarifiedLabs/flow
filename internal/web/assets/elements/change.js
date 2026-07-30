@@ -3,7 +3,7 @@
 // inline notes, so neither survives only as long as the next poll.
 
 import { apiPost } from "../api.js";
-import { acquireBusy, failureMessage, inFlightEntries, markBusy, releaseBusy, settleStatus } from "../actions.js";
+import { ACTION_SETTLE, acquireBusy, failureMessage, inFlightEntries, markBusy, releaseBusy, settleStatus } from "../actions.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { value } from "../normalize.js";
 import { readDiffMode, writeDiffMode } from "../storage.js";
@@ -192,7 +192,10 @@ export class FlowChange extends FlowElement {
     try {
       await apiPost(`/v2/changes/${encodeURIComponent(changeID)}/review`, { verdict, body, comments });
       this.drafts.clear();
-      await this.app?.refresh();
+      // The verdict flow is its own dispatcher (acquireBusy/POST/settleStatus
+      // run inline here), so stamp the refresh with the settle-burst
+      // provenance token directly instead of going through actionScope.
+      await this.app?.refresh({ settle: ACTION_SETTLE });
       // settleStatus keeps a still-pending sibling's label visible instead of
       // showing this verdict's result early.
       settleStatus(this.app, busyKey, reviewMessage(verdict, comments.length));

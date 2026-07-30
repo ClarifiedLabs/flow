@@ -373,6 +373,46 @@ export function pendingStatus() {
   return label;
 }
 
+// ACTION_SETTLE is the settle-burst provenance token. FlowApp arms the
+// follow-up reload burst only for a reload — a refresh() or a load() — that
+// arrives carrying this token, and only a dispatcher can send one: the
+// action, form, and review dispatchers run their handlers against an
+// action-scoped app (see actionScope) whose refresh and load stamp the token
+// on. A token-carrying reload therefore proves it belongs to one specific
+// successful action run — an unrelated reload that merely *overlaps* an
+// in-flight action (the board's Done filter firing while a slow POST is
+// pending) carries no token and arms nothing, whether or not that action
+// goes on to fail. A failed action never reaches its reload at all: the
+// rejection unwinds the handler first.
+export const ACTION_SETTLE = Symbol("action-settle");
+
+// actionScope hands an action handler the app with its settle provenance
+// attached: every property and method forwards to the real app — bound to it,
+// so `this` inside app methods is never the scope — except refresh() and
+// load(), which stamp the call with ACTION_SETTLE. load() is stamped because
+// some handlers own their concluding reload instead of going through
+// refresh(): the Console view's start and release helpers reload with
+// app.load() (console-view.js), and so does the task-create form (forms.js).
+// That is how FlowApp tells the handler's own reload (the one a successful
+// action arms the settle burst for) apart from any ordinary reload — polls,
+// navigation, manual refreshes — without a line of code in the handlers
+// themselves.
+export function actionScope(app) {
+  if (!app) return app;
+  return new Proxy(app, {
+    get(target, prop) {
+      if (prop === "refresh") {
+        return (options = {}) => target.refresh({ ...options, settle: ACTION_SETTLE });
+      }
+      if (prop === "load") {
+        return (options = {}) => target.load({ ...options, settle: ACTION_SETTLE });
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 // settleStatus arbitrates the shared status line when a mutation finishes.
 // While another mutation is still in flight it keeps that mutation's pending
 // label visible and suppresses this key's outcome. Once this is the final
@@ -662,7 +702,9 @@ export async function handleAction(app, event) {
   }
   app.setStatus?.(entry.label);
   try {
-    const result = await ACTIONS[key](app, element, element.dataset);
+    // The handler runs against the action-scoped app so its own refresh
+    // carries the settle-burst provenance token (see actionScope).
+    const result = await ACTIONS[key](actionScope(app), element, element.dataset);
     // settleStatus arbitrates the shared status line: it keeps a still-pending
     // sibling's label visible instead of showing this result early, and
     // distinguishes a confirmation message from CANCELLED (an explicit clear)

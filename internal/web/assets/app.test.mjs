@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyBusyState, gateResponsePending, handleAction, inFlight, pendingStatus } from "./actions.js";
+import { actionScope, applyBusyState, gateResponsePending, handleAction, inFlight, pendingStatus } from "./actions.js";
 import { startConsoleView } from "./console-view.js";
 import { handleFormSubmit, formBusyKey } from "./forms.js";
 import { workflowStepCanBeSkipped } from "./task-view.js";
@@ -2717,6 +2717,361 @@ test("pollDelay applies capped exponential backoff", async () => {
   assert.equal(pollDelay(30000, 2, 120000), 120000); // would be 120000, at the cap
   assert.equal(pollDelay(30000, 3, 120000), 120000); // capped, not 240000
   assert.equal(pollDelay(10000, 0, 120000), 10000); // backoff disabled -> base
+});
+
+// A settle-burst harness: a real FlowApp with a recording setTimeout and a
+// stub load() that counts invocations and mimics the real load's contract —
+// the generation moves synchronously as the load starts and the returned
+// context carries the path the load started on — so refresh() and the burst
+// ticks observe the same load-generation movement as with the real load. The
+// status line is stubbed because handleAction writes to it.
+async function settleBurstHarness(pathname = "/ui/board") {
+  const timers = [];
+  const context = await scriptContext({
+    setTimeout(callback, delay) {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    clearTimeout() {},
+  });
+  context.window.location.pathname = pathname;
+  const app = new context.FlowApp();
+  app.pollingActive = true;
+  const status = { textContent: "" };
+  app.querySelector = (selector) => (selector === ".status" ? status : null);
+  let loads = 0;
+  app.load = async () => {
+    loads += 1;
+    const loadContext = {
+      generation: (app.loadGeneration || 0) + 1,
+      path: context.window.location.pathname,
+    };
+    app.loadGeneration = loadContext.generation;
+    return loadContext;
+  };
+  return {
+    app,
+    context,
+    status,
+    timers,
+    loads: () => loads,
+    // actionRefresh runs a refresh the way an action handler does: the
+    // dispatcher hands the handler an action-scoped app whose refresh carries
+    // the ACTION_SETTLE provenance token — which is how refresh() tells an
+    // action-triggered refresh (arm the settle burst) from an ordinary one
+    // (stay one load).
+    async actionRefresh() {
+      await actionScope(app).refresh();
+    },
+    // fire runs a pending timer callback the way the browser would — Poller's
+    // wrapper invokes the async burst tick without awaiting it — then flushes
+    // the microtask queue so the tick settles.
+    async fire(index) {
+      timers[index].callback();
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+  };
+}
+
+test("a successful action arms a bounded settle burst of follow-up reloads", async () => {
+  const harness = await settleBurstHarness();
+  globalThis.fetch = (path) => {
+    assert.equal(path, "/ui/api/v2/projects/p-alpha/tasks/t-0001/schedule");
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  };
+  const button = new ActionButton({ workflowSchedule: "t-0001", project: "p-alpha" });
+
+  await handleAction(harness.app, { target: button, preventDefault() {} });
+
+  const [firstDelay, secondDelay] = harness.context.SETTLE_BURST_DELAYS_MS;
+  assert.equal(harness.status.textContent, "Scheduled");
+  assert.equal(harness.loads(), 1, "the action triggers the immediate refresh");
+  assert.equal(harness.timers.length, 1, "the first burst tick is pending");
+  assert.equal(harness.timers[0].delay, firstDelay);
+
+  await harness.fire(0);
+  assert.equal(harness.loads(), 2, "the first burst tick reloads the route");
+  assert.equal(harness.timers.length, 2, "the second burst tick is pending");
+  // Delays are absolute offsets from the action's refresh; the one-shot
+  // Poller re-arms per tick, so the second arm waits out only the delta.
+  assert.equal(harness.timers[1].delay, secondDelay - firstDelay);
+
+  await harness.fire(1);
+  assert.equal(harness.loads(), 3, "the second burst tick reloads the route");
+  assert.equal(harness.timers.length, 2, "the burst is bounded");
+});
+
+test("navigating away before the burst fires cancels the pending reloads", async () => {
+  const harness = await settleBurstHarness("/ui/board");
+  await harness.actionRefresh();
+  assert.equal(harness.loads(), 1);
+  assert.equal(harness.timers.length, 1);
+
+  // Opening another route starts a newer load: the generation bumps and the
+  // pathname changes, so the pending burst tick's isActiveLoad guard is stale
+  // before the timer fires.
+  harness.context.window.location.pathname = "/ui/jobs";
+  await harness.app.load();
+  assert.equal(harness.loads(), 2);
+
+  await harness.fire(0);
+  assert.equal(harness.loads(), 2, "the stale burst tick never reloads the new route");
+  assert.equal(harness.timers.length, 1, "the burst ends instead of arming another tick");
+});
+
+test("a failed action does not schedule a settle burst", async () => {
+  const harness = await settleBurstHarness();
+  globalThis.fetch = () => Promise.resolve({
+    ok: false,
+    json: () => Promise.resolve({ error: { message: "boom" } }),
+  });
+  const button = new ActionButton({ workflowSchedule: "t-0001", project: "p-alpha" });
+
+  await handleAction(harness.app, { target: button, preventDefault() {} });
+
+  assert.equal(harness.status.textContent, "boom");
+  assert.equal(harness.loads(), 0, "a failed action never reaches the refresh");
+  assert.equal(harness.timers.length, 0, "no settle burst follows a failed action");
+});
+
+test("a refresh with no action in flight does not arm the settle burst", async () => {
+  const harness = await settleBurstHarness();
+
+  // The board's Done filter change is the ordinary case: it only re-reads
+  // the current route and carries no settle provenance, so it must stay the
+  // single load it always was.
+  await harness.app.refresh();
+
+  assert.equal(harness.loads(), 1, "an ordinary refresh stays a single load");
+  assert.equal(harness.timers.length, 0, "no burst timers without the action's provenance");
+});
+
+test("an unrelated refresh during a pending action arms no burst, even if the action fails", async () => {
+  const harness = await settleBurstHarness();
+  const post = deferred();
+  globalThis.fetch = () => post.promise;
+  const button = new ActionButton({ workflowSchedule: "t-0001", project: "p-alpha" });
+  const action = handleAction(harness.app, { target: button, preventDefault() {} });
+
+  // The board's Done filter change while the action's POST is still pending:
+  // overlapping an in-flight action is not provenance — this refresh carries
+  // no token, so it stays a single load whether or not the action succeeds.
+  assert.equal(inFlight.size, 1, "the action is still in flight");
+  await harness.app.refresh();
+  assert.equal(harness.loads(), 1, "the unrelated refresh runs its single load");
+  assert.equal(harness.timers.length, 0, "no burst timers without the action's provenance");
+
+  post.resolve({ ok: false, json: () => Promise.resolve({ error: { message: "boom" } }) });
+  await action;
+  assert.equal(harness.status.textContent, "boom");
+  assert.equal(harness.loads(), 1, "the failed action never reaches a refresh");
+  assert.equal(harness.timers.length, 0, "the failed action arms no burst either");
+});
+
+test("navigating away during the action's immediate refresh cancels the settle burst", async () => {
+  const harness = await settleBurstHarness("/ui/board");
+  // Hold the action's immediate load in flight so the navigation lands while
+  // the refresh is still awaiting it; the load's generation and path were
+  // already captured, exactly like the real load.
+  const gate = deferred();
+  const baseLoad = harness.app.load;
+  let holdLoad = true;
+  harness.app.load = async () => {
+    const loadContext = await baseLoad();
+    if (holdLoad) {
+      holdLoad = false;
+      await gate.promise;
+    }
+    return loadContext;
+  };
+
+  const refresh = harness.actionRefresh();
+  // Opening another route starts a newer load: the generation bumps and the
+  // pathname changes while the action's refresh is still awaiting its own —
+  // now stale — load.
+  harness.context.window.location.pathname = "/ui/jobs";
+  await harness.app.load();
+  gate.resolve();
+  await refresh;
+
+  assert.equal(harness.loads(), 2);
+  assert.equal(harness.timers.length, 0, "a superseded refresh arms no burst on the new route");
+});
+
+test("a burst tick that finds a load in flight skips its reload instead of overlapping", async () => {
+  const harness = await settleBurstHarness();
+  await harness.actionRefresh();
+  assert.equal(harness.loads(), 1);
+
+  harness.app.loadsInFlight = 1;
+  await harness.fire(0);
+  assert.equal(harness.loads(), 1, "the tick skips rather than overlap the running load");
+  assert.equal(harness.timers.length, 2, "the burst still arms its next tick");
+
+  harness.app.loadsInFlight = 0;
+  await harness.fire(1);
+  assert.equal(harness.loads(), 2, "the next tick reloads once no load is in flight");
+  assert.equal(harness.timers.length, 2, "the burst is bounded");
+});
+
+// A console-action harness: a real FlowApp (real load, real settle-burst
+// machinery) parked on /ui/console with the project and harness registries
+// preloaded, a recording setTimeout, and a fetch stub that answers the
+// start/release mutations and serves every console state reload as an
+// inactive console. /ui/console has no regular poll (pollConfigForPath) and
+// an inactive console schedules no console poll, so every timer recorded
+// after the action belongs to the settle burst. The Console view's
+// startConsole/releaseConsole handlers reload with app.load() instead of
+// refresh(), so these tests pin the provenance stamping of handler-owned
+// loads: a successful Console Start or Release must arm the burst exactly
+// like a refresh()-based action, while the GET reload a burst tick performs
+// (fromPoll, untokened) must not re-arm it.
+async function consoleActionHarness() {
+  const timers = [];
+  const fetches = [];
+  const title = { textContent: "" };
+  const status = { textContent: "" };
+  const content = { innerHTML: "", dataset: {} };
+  const context = await scriptContext({
+    location: { pathname: "/ui/console", search: "" },
+    setTimeout(callback, delay) {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    clearTimeout() {},
+  }, {
+    URLSearchParams,
+    fetch(path, options) {
+      fetches.push({ path, options });
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ active: false, project_id: "p-alpha" }),
+      });
+    },
+  });
+  const app = new context.FlowApp();
+  app.pollingActive = true;
+  app.projects = [{ id: "p-alpha", name: "Alpha" }];
+  app.harnesses = { agents: [], consoles: [{ name: "harness", display_name: "Harness" }] };
+  app.querySelector = (selector) => {
+    if (selector === ".content") return content;
+    if (selector === "h1") return title;
+    if (selector === ".status") return status;
+    if (selector === "[data-console-harness]") return { value: "harness" };
+    return null;
+  };
+  app.querySelectorAll = () => [];
+  return {
+    app,
+    context,
+    status,
+    timers,
+    fetches,
+    // consoleGets counts the console state reloads (the GETs), ignoring the
+    // start/release mutations themselves.
+    consoleGets: () => fetches.filter((call) => call.options.method === "GET").length,
+    async fire(index) {
+      timers[index].callback();
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+  };
+}
+
+test("a successful console start performs its reload and arms the settle burst", async () => {
+  const harness = await consoleActionHarness();
+  // The Console view's project-level Start button: data-start-console is
+  // empty (no task), the console target lives in data-project/data-task.
+  const button = new ActionButton({ startConsole: "", project: "p-alpha", task: "" });
+
+  await handleAction(harness.app, { target: button, preventDefault() {} });
+
+  const [firstDelay, secondDelay] = harness.context.SETTLE_BURST_DELAYS_MS;
+  const post = harness.fetches.find((call) => call.options.method === "POST");
+  assert.equal(post.path, "/ui/api/v2/projects/p-alpha/console");
+  assert.deepEqual(JSON.parse(post.options.body), { harness: "harness" });
+  assert.equal(harness.status.textContent, "Console starting");
+  assert.equal(harness.consoleGets(), 1, "the start performs its immediate reload");
+  assert.equal(harness.timers.length, 1, "the first burst tick is pending");
+  assert.equal(harness.timers[0].delay, firstDelay);
+
+  await harness.fire(0);
+  assert.equal(harness.consoleGets(), 2, "the first burst tick reloads the console view");
+  assert.equal(harness.timers.length, 2, "the second burst tick is pending");
+  assert.equal(harness.timers[1].delay, secondDelay - firstDelay);
+
+  await harness.fire(1);
+  assert.equal(harness.consoleGets(), 3, "the second burst tick reloads the console view");
+  assert.equal(harness.timers.length, 2, "the burst is bounded");
+});
+
+test("a successful console release performs its reload and arms the settle burst", async () => {
+  const harness = await consoleActionHarness();
+  const button = new ActionButton({ releaseConsole: "t-0001", project: "p-alpha", task: "t-0001" });
+
+  await handleAction(harness.app, { target: button, preventDefault() {} });
+
+  const [firstDelay] = harness.context.SETTLE_BURST_DELAYS_MS;
+  const mutation = harness.fetches.find((call) => call.options.method === "DELETE");
+  assert.equal(mutation.path, "/ui/api/v2/projects/p-alpha/tasks/t-0001/console");
+  assert.equal(harness.status.textContent, "Console released");
+  assert.equal(harness.consoleGets(), 1, "the release performs its immediate reload");
+  assert.equal(harness.timers.length, 1, "the first burst tick is pending");
+  assert.equal(harness.timers[0].delay, firstDelay);
+
+  await harness.fire(0);
+  assert.equal(harness.consoleGets(), 2, "the first burst tick reloads the console view");
+  assert.equal(harness.timers.length, 2, "the second burst tick is pending");
+
+  await harness.fire(1);
+  assert.equal(harness.consoleGets(), 3, "the second burst tick reloads the console view");
+  assert.equal(harness.timers.length, 2, "the burst is bounded");
+});
+
+test("load tracks in-flight invocations and never arms a settle burst itself", async () => {
+  const timers = [];
+  const jobsResponse = deferred();
+  const title = { textContent: "" };
+  const status = { textContent: "" };
+  const content = { innerHTML: "", dataset: {} };
+  const context = await scriptContext({
+    setTimeout(callback, delay) {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    clearTimeout() {},
+  }, {
+    fetch(path) {
+      if (path === "/ui/api/v2/projects") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ projects: [] }) });
+      }
+      assert.equal(path, "/ui/api/v2/jobs");
+      return jobsResponse.promise;
+    },
+  });
+  context.window.location.pathname = "/ui/jobs";
+  const app = new context.FlowApp();
+  app.pollingActive = true;
+  app.querySelectorAll = () => [];
+  app.querySelector = (selector) => {
+    if (selector === ".content") return content;
+    if (selector === "h1") return title;
+    if (selector === ".status") return status;
+    return null;
+  };
+
+  assert.equal(app.loadsInFlight || 0, 0);
+  const loadPromise = app.load();
+  assert.equal(app.loadsInFlight, 1, "the load is tracked while it is in flight");
+
+  jobsResponse.resolve({ ok: true, json: () => Promise.resolve({ jobs: [] }) });
+  await loadPromise;
+
+  assert.equal(app.loadsInFlight, 0, "the counter settles once the load completes");
+  assert.equal(title.textContent, "Jobs");
+  // A manual/navigation load re-arms only the regular poll; the settle burst
+  // belongs to action-triggered refreshes alone.
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].delay, context.DIAGNOSTICS_POLL_MS);
 });
 
 test("board sidebar status separates blocked tasks in compact lifecycle groups", async () => {
