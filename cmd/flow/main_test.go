@@ -968,6 +968,36 @@ func TestPrintBoardAnnotatesAwaitingWorker(t *testing.T) {
 	}
 }
 
+func TestPrintBoardDeduplicatesBlockedAnnotation(t *testing.T) {
+	inProgress := coordinator.LifecycleInProgress
+	result := coordinator.BoardResult{
+		Board: coordinator.Board{
+			InProgress: []coordinator.Task{
+				{ID: "t-demo-0001", State: &inProgress, Title: "Stuck"},
+			},
+		},
+		// A normal blocked in-progress task agrees across all three sources:
+		// the lane state, the wait reason, and the blocked membership.
+		LaneStates:  map[string]coordinator.LaneState{"t-demo-0001": coordinator.LaneStateBlocked},
+		WaitReasons: map[string]coordinator.WaitReason{"t-demo-0001": coordinator.WaitReasonBlocked},
+		BlockedIDs:  []string{"t-demo-0001"},
+	}
+
+	var out bytes.Buffer
+	printBoard(&out, result)
+
+	want := "unscheduled:\n" +
+		"scheduled:\n" +
+		"in_progress:\n" +
+		"  t-demo-0001\tin_progress\tStuck\t[blocked]\n"
+	if out.String() != want {
+		t.Fatalf("board output = %q, want %q", out.String(), want)
+	}
+	if got := strings.Count(out.String(), "[blocked]"); got != 1 {
+		t.Fatalf("[blocked] count = %d, want exactly 1", got)
+	}
+}
+
 func TestTaskCommandRejectsUnauthorizedToken(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	serverURL := newFlowAPIServer(t)

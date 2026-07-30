@@ -3490,18 +3490,30 @@ func printBoard(out io.Writer, result coordinator.BoardResult) {
 func printBoardLane(out io.Writer, name string, tasks []coordinator.Task, states map[string]coordinator.LaneState, waitReasons map[string]coordinator.WaitReason, blocked map[string]bool) {
 	fmt.Fprintf(out, "%s:\n", name)
 	for _, task := range tasks {
+		// A semantic label is emitted at most once: the lane state, wait reason,
+		// and blocked membership can all agree (a blocked in-progress task
+		// carries LaneStateBlocked, WaitReasonBlocked, and a BlockedIDs entry),
+		// and repeating [blocked] three times is noise, not signal.
+		seen := make(map[string]bool, 3)
 		annotations := ""
+		appendAnnotation := func(label string) {
+			if label == "" || seen[label] {
+				return
+			}
+			seen[label] = true
+			annotations += "\t[" + label + "]"
+		}
 		// The default working lane is not an annotation: a working in-progress
 		// task shows no bracket. Only genuine substates that differ from the
 		// lifecycle label (awaiting_worker, blocked, held) annotate the line.
 		if state, ok := states[task.ID]; ok && state != coordinator.LaneStateWorking && string(state) != taskLifecycleLabel(task) {
-			annotations += "\t[" + strings.ReplaceAll(string(state), "_", " ") + "]"
+			appendAnnotation(strings.ReplaceAll(string(state), "_", " "))
 		}
 		if reason := waitReasons[task.ID]; reason != "" {
-			annotations += "\t[" + strings.ReplaceAll(string(reason), "_", " ") + "]"
+			appendAnnotation(strings.ReplaceAll(string(reason), "_", " "))
 		}
 		if blocked[task.ID] {
-			annotations += "\t[blocked]"
+			appendAnnotation("blocked")
 		}
 		fmt.Fprintf(out, "  %s\t%s\t%s%s\n", task.ID, taskLifecycleLabel(task), task.Title, annotations)
 	}
