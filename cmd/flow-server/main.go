@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -516,6 +518,24 @@ func (w *statusCapturingWriter) Write(p []byte) (int, error) {
 		w.body.Write(p)
 	}
 	return w.ResponseWriter.Write(p)
+}
+
+// Hijack delegates connection hijacking to the wrapped ResponseWriter so
+// WebSocket upgrades (coder/websocket Accept) keep working through the
+// instrumentation wrapper.
+func (w *statusCapturingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("wrapped ResponseWriter does not implement http.Hijacker")
+	}
+	return hj.Hijack()
+}
+
+// Unwrap exposes the wrapped ResponseWriter for http.ResponseController and
+// middleware-aware libraries (coder/websocket's hijacker lookup) that walk
+// the wrapper chain.
+func (w *statusCapturingWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 // tickProjects ticks every project's engine and git-event consumer concurrently,

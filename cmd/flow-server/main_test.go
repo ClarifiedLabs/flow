@@ -11,11 +11,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/ClarifiedLabs/flow/internal/api"
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
+	"github.com/ClarifiedLabs/flow/internal/metrics"
 )
 
 func TestLogLevelFlagEnablesDebugLogging(t *testing.T) {
@@ -236,6 +240,45 @@ func TestServeRejectsConflictingOwnerTokenFlags(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "--owner-token and --owner-token-file cannot be used together") {
 		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestInstrumentAPIHandlerPreservesWebSocketUpgrade(t *testing.T) {
+	registry := metrics.New()
+	counters := telemetryCounters{
+		requests:  registry.Counter("test_requests", "requests"),
+		enqueued:  registry.Counter("test_enqueued", "enqueued"),
+		completed: registry.Counter("test_completed", "completed"),
+	}
+
+	accepted := make(chan error, 1)
+	handler := instrumentAPIHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			accepted <- err
+			return
+		}
+		accepted <- nil
+		_ = conn.Close(websocket.StatusNormalClosure, "done")
+	}), counters)
+
+	// A real TCP server is required: httptest.NewRecorder is not hijackable
+	// and would fail even with the fix.
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial through instrumented handler: %v", err)
+	}
+	defer func() {
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+	}()
+
+	if err := <-accepted; err != nil {
+		t.Fatalf("server-side accept through instrumented handler: %v", err)
 	}
 }
 
