@@ -13,6 +13,10 @@ export async function renderNewTaskView(app, context) {
   if (context && !app.isActiveLoad(context)) return false;
   const defaultProject = defaultCreateProject(app, "");
   if (defaultProject) await app.ensureFlows(defaultProject);
+  // Load the default project's tasks too, so the relation picker's target-task
+  // suggestions are populated even on a direct visit with an empty cache. A
+  // failed or empty load just leaves the picker in manual-entry mode.
+  if (defaultProject && typeof app.ensureTasks === "function") await app.ensureTasks(defaultProject);
   if (context && !app.isActiveLoad(context)) return false;
   app.setTitle("New Task");
   const content = app.querySelector(".content");
@@ -26,7 +30,7 @@ export async function renderNewTaskView(app, context) {
       ${renderTaskFormView(app, { priority: 0 }, { mode: "create", submitLabel: "Create" })}
     </section>
   `;
-  bindRelationsPickerView(content.querySelector?.("[data-task-form]"));
+  bindRelationsPickerView(content.querySelector?.("[data-task-form]"), app);
   return true;
 }
 
@@ -99,18 +103,28 @@ export function relationPickerRowView() {
   `;
 }
 
-// relationsPickerView renders the create-mode-only picker: a labelled list of
-// relation rows plus an "Add relation" button, and a datalist of existing task
-// ids so the target input can autocomplete. It starts with one row so the
-// picker's shape is visible immediately; a row left with a blank target is
-// dropped on submit.
-export function relationsPickerView(app) {
-  const tasks = app.tasks || [];
-  const suggestions = tasks.map((task) => {
-    const id = value(task, "id", "ID");
+// relationTargetSuggestionsView renders the datalist <option>s offering the
+// selected project's existing tasks as relation targets. The value is the task
+// id (what gets submitted); when a title is present the label shows it so a
+// reader can tell tasks apart. The list is read from the per-project task cache
+// (app.ensureTasks) so it stays project-scoped; a missing cache entry yields no
+// options and the input falls back to manual entry.
+export function relationTargetSuggestionsView(app, projectID) {
+  const id = String(projectID || "").trim();
+  const tasks = (app && app.tasksByProject && app.tasksByProject.get(id)) || [];
+  return tasks.map((task) => {
+    const taskID = value(task, "id", "ID");
     const title = value(task, "title", "Title");
-    return `<option value="${escapeAttr(id)}"${title ? ` label="${escapeAttr(title)}"` : ""}></option>`;
+    return `<option value="${escapeAttr(taskID)}"${title ? ` label="${escapeAttr(title)}"` : ""}></option>`;
   }).join("");
+}
+
+// relationsPickerView renders the create-mode-only picker: a labelled list of
+// relation rows plus an "Add relation" button, and a datalist of the selected
+// project's existing task ids so the target input can autocomplete. It starts
+// with one row so the picker's shape is visible immediately; a row left with a
+// blank target is dropped on submit.
+export function relationsPickerView(app, projectID) {
   return `
       <div class="wide relation-picker" data-relation-picker>
         <span class="relation-picker-label">Relations</span>
@@ -118,7 +132,7 @@ export function relationsPickerView(app) {
         <div class="relation-picker-actions">
           <button class="button secondary" type="button" data-relation-add>Add relation</button>
         </div>
-        <datalist id="relation-target-tasks">${suggestions}</datalist>
+        <datalist id="relation-target-tasks">${relationTargetSuggestionsView(app, projectID)}</datalist>
       </div>`;
 }
 
@@ -135,7 +149,13 @@ function bindRelationRowRemove(row) {
 // parsing relationPickerRowView into a detached container so the markup stays
 // the single source of truth. The new-task page is static (no poll), so these
 // direct listeners are never lost to a repaint.
-export function bindRelationsPickerView(form) {
+//
+// When app is supplied and the form can switch projects, changing the project
+// select reloads that project's task suggestions into the shared datalist, so
+// the target-task autocomplete stays scoped to the chosen project. The refresh
+// is best-effort: a failed or empty load leaves the datalist empty and the
+// input in manual-entry mode.
+export function bindRelationsPickerView(form, app) {
   if (!form || typeof form.querySelector !== "function") return;
   const rows = form.querySelector("[data-relation-rows]");
   const addButton = form.querySelector("[data-relation-add]");
@@ -150,6 +170,19 @@ export function bindRelationsPickerView(form) {
     rows.appendChild(row);
     row.querySelector("[data-relation-target]")?.focus?.();
   });
+  const projectSelect = form.querySelector('[name="project"]');
+  if (app && projectSelect && typeof app.ensureTasks === "function" && typeof projectSelect.addEventListener === "function") {
+    projectSelect.addEventListener("change", async () => {
+      const projectID = String(projectSelect.value || "").trim();
+      await app.ensureTasks(projectID);
+      // A rapid project switch could resolve out of order; only repaint when
+      // this load is still for the selected project so the suggestions never
+      // disagree with the project select.
+      if (String(projectSelect.value || "").trim() !== projectID) return;
+      const datalist = form.querySelector("#relation-target-tasks");
+      if (datalist) datalist.innerHTML = relationTargetSuggestionsView(app, projectID);
+    });
+  }
 }
 
 export function renderTaskFormView(app, task, options = {}) {
@@ -201,7 +234,7 @@ export function renderTaskFormView(app, task, options = {}) {
         <span>Attachments</span>
         <input name="attachments" type="file" multiple>
       </label>` : ""}
-      ${mode === "create" ? relationsPickerView(app) : ""}
+      ${mode === "create" ? relationsPickerView(app, defaultProject) : ""}
       ${mode === "create" ? `
       <label class="check wide">
         <input name="queue_task" type="checkbox" checked>

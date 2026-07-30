@@ -28,7 +28,7 @@ const { renderEpic, memberState } = await import("./elements/epic.js");
 const { renderNowCard } = await import("./elements/now-card.js");
 const { renderReviewPanel } = await import("./elements/review-panel.js");
 const { renderActivityFeed, activityEntries } = await import("./elements/activity-feed.js");
-const { renderTaskFormView, bindRelationsPickerView } = await import("./task-view.js");
+const { renderTaskFormView, bindRelationsPickerView, relationTargetSuggestionsView } = await import("./task-view.js");
 await import("./elements/lane.js");
 await import("./elements/tab-strip.js");
 const { inFlight } = await import("./actions.js");
@@ -1278,6 +1278,88 @@ test("the relation picker adds and removes rows", () => {
 
   firstRow.querySelector("[data-relation-remove]").click();
   assert.equal(rows.children.length, 2);
+});
+
+test("relationTargetSuggestionsView is project-scoped and title-optional", () => {
+  const app = { tasksByProject: new Map([["p-1", [{ id: "t-1", title: "Alpha" }]]]) };
+  assert.equal(relationTargetSuggestionsView(app, "p-1"), `<option value="t-1" label="Alpha"></option>`);
+  assert.equal(relationTargetSuggestionsView(app, "p-2"), "");
+  assert.equal(relationTargetSuggestionsView({}, "p-1"), "");
+});
+
+test("the relation picker suggests the selected project's cached tasks", () => {
+  const app = {
+    projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }],
+    tasksByProject: new Map([
+      ["p-1", [{ id: "t-1", title: "Alpha" }, { id: "t-2", title: "" }]],
+      ["p-2", [{ id: "t-9", title: "Other project" }]],
+    ]),
+  };
+  const host = document.createElement("div");
+  host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
+  const options = host.querySelector("#relation-target-tasks").children;
+  assert.equal(options.length, 2);
+  assert.equal(options[0].getAttribute("value"), "t-1");
+  assert.equal(options[0].getAttribute("label"), "Alpha");
+  // A task without a title still suggests its id, with no label attribute.
+  assert.equal(options[1].getAttribute("value"), "t-2");
+  assert.equal(options[1].getAttribute("label"), null);
+  // Suggestions stay scoped to the selected project, not the whole cache.
+  assert.ok(!options.some((option) => option.getAttribute("value") === "t-9"));
+});
+
+test("the relation picker falls back to manual entry with an empty task cache", () => {
+  const app = { projects: [{ id: "p-1", name: "one" }] };
+  const host = document.createElement("div");
+  host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
+  assert.equal(host.querySelector("#relation-target-tasks").children.length, 0);
+  // The free-text target input is still present, so an id can be typed by hand.
+  assert.ok(host.querySelector("[data-relation-target]"));
+});
+
+test("changing the create form project reloads the relation target suggestions", async () => {
+  const app = {
+    projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }],
+    tasksByProject: new Map([["p-1", [{ id: "t-1", title: "Alpha" }]]]),
+  };
+  const ensured = [];
+  app.ensureTasks = async (projectID) => {
+    ensured.push(projectID);
+    if (projectID === "p-2") app.tasksByProject.set("p-2", [{ id: "t-9", title: "Beta" }]);
+    return app.tasksByProject.get(projectID) || [];
+  };
+  const host = document.createElement("div");
+  host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
+  const form = host.querySelector("[data-task-form]");
+  bindRelationsPickerView(form, app);
+  const projectSelect = form.querySelector('[name="project"]');
+  projectSelect.value = "p-2";
+  projectSelect.dispatchEvent(new TestEvent("change"));
+  await flush();
+  await flush();
+  assert.deepEqual(ensured, ["p-2"]);
+  const options = form.querySelector("#relation-target-tasks").children;
+  assert.deepEqual(options.map((option) => option.getAttribute("value")), ["t-9"]);
+  assert.equal(options[0].getAttribute("label"), "Beta");
+});
+
+test("a failed suggestion reload leaves the picker in manual-entry mode", async () => {
+  const app = {
+    projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }],
+    tasksByProject: new Map([["p-1", [{ id: "t-1", title: "Alpha" }]]]),
+  };
+  app.ensureTasks = async (projectID) => app.tasksByProject.get(projectID) || [];
+  const host = document.createElement("div");
+  host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
+  const form = host.querySelector("[data-task-form]");
+  bindRelationsPickerView(form, app);
+  const projectSelect = form.querySelector('[name="project"]');
+  projectSelect.value = "p-2";
+  projectSelect.dispatchEvent(new TestEvent("change"));
+  await flush();
+  await flush();
+  assert.equal(form.querySelector("#relation-target-tasks").children.length, 0);
+  assert.ok(form.querySelector("[data-relation-target]"), "the manual target input remains");
 });
 // --- review verdict pending state (flow-change / submitReview) --------------
 

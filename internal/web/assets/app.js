@@ -408,6 +408,27 @@ export class FlowApp extends HTMLElement {
     return result;
   }
 
+  // ensureTasks loads (and per-project caches) a project's task list so the
+  // new-task relation picker can offer target-task suggestions synchronously.
+  // Like ensureFlows the cache is keyed by project id; a failed or empty fetch
+  // caches an empty list so the picker falls back to manual entry instead of
+  // re-fetching on every render.
+  async ensureTasks(projectID, options = {}) {
+    const id = String(projectID || "").trim();
+    if (!id) return [];
+    if (!this.tasksByProject) this.tasksByProject = new Map();
+    if (this.tasksByProject.has(id) && !options.refresh) return this.tasksByProject.get(id);
+    let tasks;
+    try {
+      const data = await apiGet(taskAPIBase(id));
+      tasks = data.tasks || data.Tasks || [];
+    } catch (error) {
+      tasks = [];
+    }
+    this.tasksByProject.set(id, tasks);
+    return tasks;
+  }
+
   selectedProjectIDs() {
     const projects = this.projects || [];
     const stored = readSelectedProjects();

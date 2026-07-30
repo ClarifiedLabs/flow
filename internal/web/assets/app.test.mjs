@@ -451,6 +451,17 @@ test("new task route renders project-scoped blank form with the selected project
           }),
         });
       }
+      if (path === "/ui/api/v2/projects/p-alpha/tasks") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            tasks: [
+              { id: "t-alpha-0001", title: "First task" },
+              { id: "t-alpha-0002", title: "Second task" },
+            ],
+          }),
+        });
+      }
       throw new Error(`new task route unexpectedly fetched ${path}`);
     },
   });
@@ -470,6 +481,7 @@ test("new task route renders project-scoped blank form with the selected project
   assert.deepEqual(fetchCalls.map((call) => call.path), [
     "/ui/api/v2/projects",
     "/ui/api/v2/projects/p-alpha/flows",
+    "/ui/api/v2/projects/p-alpha/tasks",
   ]);
   assert.equal(title.textContent, "New Task");
   assert.match(content.innerHTML, /data-task-form-mode="create"/);
@@ -484,8 +496,60 @@ test("new task route renders project-scoped blank form with the selected project
   assert.match(content.innerHTML, /<option value="fl-coding" selected>coding<\/option>/);
   assert.match(content.innerHTML, /<option value="fl-planning" >planning<\/option>/);
   assert.doesNotMatch(content.innerHTML, /\(default\)|Project default/);
+  // The relation picker's target-task datalist is populated from the selected
+  // project's freshly loaded tasks, even though the cache started empty.
+  assert.match(content.innerHTML, /<datalist id="relation-target-tasks">/);
+  assert.match(content.innerHTML, /<option value="t-alpha-0001" label="First task"><\/option>/);
+  assert.match(content.innerHTML, /<option value="t-alpha-0002" label="Second task"><\/option>/);
   assert.match(content.innerHTML, /<input name="queue_task" type="checkbox" checked>/);
   assert.match(content.innerHTML, /<button class="button" type="submit">Create<\/button>/);
+  assert.equal(status.textContent, "");
+});
+
+test("new task route keeps the relation picker in manual-entry mode when task suggestions fail to load", async () => {
+  const fetchCalls = [];
+  const title = { textContent: "" };
+  const status = { textContent: "" };
+  const content = { innerHTML: "" };
+  const context = await scriptContext({
+    location: { pathname: "/ui/tasks/new" },
+  }, {
+    fetch(path, options) {
+      fetchCalls.push({ path, options });
+      if (path === "/ui/api/v2/projects") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ projects: [{ id: "p-alpha", name: "alpha" }] }),
+        });
+      }
+      if (path === "/ui/api/v2/projects/p-alpha/flows") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ flows: [], default_flow_id: "" }) });
+      }
+      if (path === "/ui/api/v2/projects/p-alpha/tasks") {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: { message: "boom" } }) });
+      }
+      throw new Error(`new task route unexpectedly fetched ${path}`);
+    },
+  });
+  const app = new context.FlowApp();
+  app.pollingActive = true;
+  app.renderProjectPicker = () => {};
+  app.querySelector = (selector) => {
+    if (selector === "h1") return title;
+    if (selector === ".status") return status;
+    if (selector === ".content") return content;
+    return { textContent: "" };
+  };
+  app.querySelectorAll = () => [];
+
+  await app.load();
+
+  // The failed task fetch is swallowed: the route still renders and the picker
+  // simply has no suggestions, leaving the target input free-text.
+  assert.ok(fetchCalls.some((call) => call.path === "/ui/api/v2/projects/p-alpha/tasks"));
+  assert.equal(title.textContent, "New Task");
+  assert.match(content.innerHTML, /<datalist id="relation-target-tasks"><\/datalist>/);
+  assert.match(content.innerHTML, /data-relation-target/);
   assert.equal(status.textContent, "");
 });
 
