@@ -8,6 +8,7 @@ import { value } from "./normalize.js";
 import { uploadTaskAttachment } from "./task.js";
 import {
   acquireBusy,
+  actionScope,
   failureMessage,
   formBusyControl,
   formBusyKey,
@@ -211,7 +212,9 @@ export async function handleFormSubmit(app, event) {
   if (control) entry.restores.add(markBusy(control));
   app.setStatus?.(entry.label);
   try {
-    const result = await FORMS[key](app, form);
+    // The handler runs against the action-scoped app so its own refresh
+    // carries the settle-burst provenance token (see actionScope).
+    const result = await FORMS[key](actionScope(app), form);
     // settleStatus arbitrates the shared status line: it keeps a still-pending
     // sibling's label visible instead of showing this submission's result
     // early, and distinguishes a confirmation message from CANCELLED (an

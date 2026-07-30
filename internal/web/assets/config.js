@@ -32,6 +32,16 @@ export const CONSOLE_REFRESH_MS = 2000;
 
 export const MAX_POLL_BACKOFF_MS = 120000;
 
+// SETTLE_BURST_DELAYS_MS paces the settle burst: the short, bounded series of
+// follow-up reloads of the current route after a successful action-triggered
+// refresh. Mutations such as schedule or approve advance the workflow
+// synchronously inside the request, but their visible follow-on effects — the
+// agent session starting, the next gate opening, checks beginning — complete
+// asynchronously seconds later, so the single immediate refresh renders a
+// state that is already on its way out. Each entry is an offset from the
+// completed action refresh; the burst is bounded to this list.
+export const SETTLE_BURST_DELAYS_MS = [1500, 4000];
+
 export const THEME_STORAGE_KEY = "flow.ui.theme";
 
 export const PROJECT_STORAGE_KEY = "flow.ui.projects";
