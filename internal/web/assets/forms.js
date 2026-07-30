@@ -123,6 +123,38 @@ export const FORMS = {
   },
 };
 
+// formBusyKey names an in-flight form submission by its stable mutation
+// identity, not by DOM node: the form kind plus the project and the task (or
+// thread) target it mutates. Keying on the form kind and its primary dataset
+// value alone collides across distinct targets — a boolean data-attachment-form
+// and a create-mode data-task-form both carry an empty primary value, so two
+// uploaders on different tasks would share `form:attachmentForm:` and a pending
+// upload on one would suppress an unrelated uploader after navigation. Scoping
+// the key to project plus target lets independent forms run concurrently while
+// a duplicate submission of the same target stays blocked, even across a poll
+// repaint that replaced the form node.
+//
+// The project is the form's effective selected project, not just data-project:
+// a create form rendered with several projects intentionally carries no
+// data-project (renderTaskFormView puts the mutation target in the project
+// <select>), so reading the dataset alone would collapse every multi-project
+// create onto `form:taskForm::` and a pending create for one project would
+// suppress an unrelated project's create. Preferring the selected project keeps
+// per-project creates distinct; the dataset value remains the fallback for
+// forms that carry it (edit forms, single-project creates). The identity is
+// derived only from the form's data and fields — never the node — so a repaint
+// that rebuilds the same form recomputes the same key and stays blocked.
+export function formBusyKey(key, form) {
+  const dataset = form?.dataset || {};
+  const selectedProject = String(form?.elements?.project?.value ?? "");
+  const project = selectedProject || String(dataset.project ?? "");
+  const target =
+    key === "threadReplyForm"
+      ? String(dataset.threadReplyForm ?? "")
+      : String(dataset.task ?? dataset[key] ?? "");
+  return `form:${key}:${project}:${target}`;
+}
+
 // collectRelationRows reads the create form's relation picker rows and splits
 // them by direction. blocks/related_to rows make the new task the source, so
 // they become `relations` payload entries ({target_task_id, kind}; the server
@@ -185,7 +217,7 @@ export async function handleFormSubmit(app, event) {
 
   event.preventDefault();
   if (form.reportValidity && !form.reportValidity()) return true;
-  const busyKey = `form:${key}:${String(form.dataset[key] ?? "")}`;
+  const busyKey = formBusyKey(key, form);
   if (inFlight.has(busyKey)) return true;
   inFlight.add(busyKey);
   const submitter = typeof form.querySelector === "function" ? form.querySelector('[type="submit"]') : null;
