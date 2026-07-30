@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 )
@@ -486,6 +487,47 @@ func TestRelationsForTaskDenormalizesRelatedTaskTitles(t *testing.T) {
 	}
 	if len(incoming) != 1 || incoming[0].SourceTitle != "Blocker task" || incoming[0].TargetTitle != "Blocked task" {
 		t.Fatalf("incoming relation = %+v, want titles %q/%q", incoming, "Blocker task", "Blocked task")
+	}
+}
+
+func TestRelationsForTaskDenormalizesLifecycleState(t *testing.T) {
+	ctx := context.Background()
+	_, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
+
+	blocker, blocked := createTwoTasks(t, service, "Blocker task", "Blocked task")
+	if err := service.LinkTasks(ctx, blocker.ID, blocked.ID, RelationBlocks, ActorHuman); err != nil {
+		t.Fatalf("link tasks: %v", err)
+	}
+
+	// A blocker that has never been scheduled reads back as an empty state, and
+	// the relation carries it on the blocker's side — the task-detail panel
+	// treats anything but done as still blocking, so it needs this denormalized
+	// value to flag the row without a fetch per blocker.
+	relations, err := service.RelationsForTask(ctx, blocked.ID)
+	if err != nil {
+		t.Fatalf("relations for blocked: %v", err)
+	}
+	if len(relations) != 1 {
+		t.Fatalf("relations = %+v, want one blocks relation", relations)
+	}
+	if relations[0].SourceState != "" || relations[0].TargetState != "" {
+		t.Fatalf("relation states = %q/%q, want empty for unscheduled tasks", relations[0].SourceState, relations[0].TargetState)
+	}
+
+	// Once the blocker finishes, the same read reflects done, so the panel can
+	// drop the flag on the next refresh of the task detail.
+	stamp := formatTime(time.Now().UTC())
+	if _, err := service.db.ExecContext(ctx, `
+UPDATE tasks SET lifecycle_state = ?, done_resolution = ?, done_at = ?, updated_at = ? WHERE id = ?`,
+		string(LifecycleDone), string(ResolutionCompleted), stamp, stamp, blocker.ID); err != nil {
+		t.Fatalf("finish blocker: %v", err)
+	}
+	relations, err = service.RelationsForTask(ctx, blocked.ID)
+	if err != nil {
+		t.Fatalf("relations after done: %v", err)
+	}
+	if len(relations) != 1 || relations[0].SourceState != LifecycleDone {
+		t.Fatalf("relation source state = %+v, want the blocker done", relations)
 	}
 }
 

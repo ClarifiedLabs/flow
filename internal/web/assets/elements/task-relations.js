@@ -5,16 +5,13 @@
 // the blockers that have not finished yet.
 //
 // The grouping is pure and lives in task-model.js so it is testable as data.
-// The one thing the grouping cannot know — whether a blocker is done — is
-// resolved here, because it needs a fetch per blocker. A blocker's state is not
-// in the detail payload, so every refresh of the task view asks for it again;
-// the last answer is kept only as a flicker guard while a re-check is in
-// flight, never as a permanent cache. The element writes the answer back onto
-// the group rows and repaints.
+// Whether a blocker is done comes for free: the relation payload denormalizes
+// each side's lifecycle state, so the grouping marks a blocked-by row
+// unresolved at projection time. No per-blocker fetch — a task with N blockers
+// costs no extra round trips when its relations panel opens.
 
-import { apiGet, taskAPIBase, taskHref } from "../api.js";
+import { taskHref } from "../api.js";
 import { escapeAttr, escapeHTML } from "../html.js";
-import { value } from "../normalize.js";
 import { RELATION_GROUPS } from "../task-model.js";
 import { define, FlowElement } from "./base.js";
 
@@ -92,108 +89,12 @@ function renderAddForm(taskID, projectID) {
 }
 
 export class FlowTaskRelations extends FlowElement {
-  // blockerStates remembers the last observed lifecycle state of each blocker
-  // so the flag survives a repaint while a re-check is in flight. Keyed by
-  // task id; "" means the fetch failed and we treat the blocker as unresolved
-  // rather than silently clearing the flag.
-  blockerStates = new Map();
-  // blockerFetches dedupes in-flight lookups per blocker id within one refresh
-  // of the task view, so the repaint cascade a refresh triggers (the
-  // invalidate after applying a new state) costs one request per blocker.
-  blockerFetches = new Map();
-  #generation = 0;
-
-  // Each assignment of `data` is one refresh of the task view. Re-checks are
-  // keyed to that generation: a refresh always asks the server again — caching
-  // the answer forever would keep the flag standing after a blocker finishes —
-  // but the paints one refresh triggers share the fetch already in flight.
-  set data(next) {
-    this.#generation += 1;
-    super.data = next;
-  }
-
-  get data() {
-    return super.data;
-  }
-
+  // The blocker flag is derived from the relation payload's denormalized
+  // lifecycle state during grouping, so this element is a plain render shell:
+  // every refresh of the task view carries fresh blocker states and paints them
+  // directly, with no per-blocker fetch to drive or dedupe.
   render(model) {
     return renderTaskRelations(model);
-  }
-
-  // The base paint skips the write — and with it afterPaint — when the markup
-  // is unchanged, but a refresh that only changed a blocker's state leaves the
-  // markup identical while the blocker states still need re-checking. Drive
-  // that from every paint attempt, not just from writes.
-  paint() {
-    super.paint();
-    this.afterPaint();
-  }
-
-  afterPaint() {
-    if (this.applyBlockerStates()) {
-      this.invalidate();
-      return;
-    }
-    this.refreshBlockerStates();
-  }
-
-  // applyBlockerStates writes the cached blocker states onto the current model's
-  // blocked-by rows and reports whether anything changed, so the caller knows a
-  // repaint is owed.
-  applyBlockerStates() {
-    const blockers = this.data?.relationGroups?.blockedBy || [];
-    let changed = false;
-    for (const blocker of blockers) {
-      const state = this.blockerStates.get(blocker.taskID);
-      if (state === undefined) continue;
-      const unresolved = state !== "done";
-      if (blocker.unresolved !== unresolved) {
-        blocker.unresolved = unresolved;
-        changed = true;
-      }
-    }
-    return changed;
-  }
-
-  // refreshBlockerStates re-checks every blocker on every refresh. A blocker's
-  // state is the one fact the detail payload does not carry, so each fresh
-  // model the task view receives asks for it again. The last known state stays
-  // applied while the re-check is in flight, so the flag never flickers away
-  // only to return.
-  refreshBlockerStates() {
-    const model = this.data;
-    if (!model) return;
-    const blockers = model.relationGroups?.blockedBy || [];
-    const ids = [...new Set(blockers.map((blocker) => blocker.taskID).filter(Boolean))];
-    for (const cached of [...this.blockerStates.keys()]) {
-      if (!ids.includes(cached)) this.blockerStates.delete(cached);
-    }
-    for (const cached of [...this.blockerFetches.keys()]) {
-      if (!ids.includes(cached)) this.blockerFetches.delete(cached);
-    }
-    if (!ids.length) return;
-    const projectID = model.projectID || "";
-    const taskID = model.id;
-    for (const id of ids) {
-      this.fetchBlockerState(projectID, id).then((state) => {
-        // Navigation may have moved us to another task while the fetch was in
-        // flight; drop the result rather than painting stale flags onto a
-        // different task.
-        if (!this.isConnected || this.data?.id !== taskID) return;
-        this.blockerStates.set(id, state);
-        if (this.applyBlockerStates()) this.invalidate();
-      });
-    }
-  }
-
-  fetchBlockerState(projectID, id) {
-    const inflight = this.blockerFetches.get(id);
-    if (inflight && inflight.generation === this.#generation) return inflight.promise;
-    const promise = apiGet(`${taskAPIBase(projectID)}/${encodeURIComponent(id)}`)
-      .then((data) => String(value(value(data, "task", "Task") || {}, "state", "State") || ""))
-      .catch(() => "");
-    this.blockerFetches.set(id, { promise, generation: this.#generation });
-    return promise;
   }
 }
 

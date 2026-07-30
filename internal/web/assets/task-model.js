@@ -333,6 +333,9 @@ export function relationGroups(relations, taskID) {
     const target = String(value(relation, "target_task_id", "TargetTaskID") || "");
     const sourceTitle = String(value(relation, "source_title", "SourceTitle") || "");
     const targetTitle = String(value(relation, "target_title", "TargetTitle") || "");
+    // The relation payload denormalizes each side's lifecycle state, so a
+    // blocked-by row can tell whether its blocker still bites without a fetch.
+    const sourceState = String(value(relation, "source_state", "SourceState") || "");
 
     // The current task is the source: the other task is the target.
     if (source === id) {
@@ -351,7 +354,9 @@ export function relationGroups(relations, taskID) {
       if (kind === "parent_of") {
         groups.parent.push(entry(source, sourceTitle, kind, "target"));
       } else if (kind === "blocks") {
-        groups.blockedBy.push(entry(source, sourceTitle, kind, "target"));
+        // A blocker only stops mattering once it is done; an unknown state is
+        // treated as blocking, matching the server's blocked-by read model.
+        groups.blockedBy.push(entry(source, sourceTitle, kind, "target", sourceState !== "done"));
       } else if (kind === "related_to") {
         groups.related.push(entry(source, sourceTitle, kind, "target"));
       }
@@ -362,16 +367,16 @@ export function relationGroups(relations, taskID) {
 
 // entry is one row in a relation group. direction says which side of the stored
 // relation the current task sits on, so the remove control can reconstruct the
-// exact source/target pair the server stores.
-function entry(taskID, title, kind, direction) {
+// exact source/target pair the server stores. unresolved flags a blocker that
+// has not finished; only blocked-by rows ever set it, from the relation's
+// denormalized lifecycle state.
+function entry(taskID, title, kind, direction, unresolved = false) {
   return {
     taskID,
     title: title || taskID,
     kind,
     direction,
-    // A blocker only stops mattering once it is done. The element resolves the
-    // blocker's lifecycle state and sets this; the grouping itself never knows.
-    unresolved: false,
+    unresolved,
   };
 }
 

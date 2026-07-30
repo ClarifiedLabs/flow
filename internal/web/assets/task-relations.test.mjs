@@ -100,6 +100,47 @@ test("a related_to where the task is the target still lands in related", () => {
   assert.equal(groups.related[0].direction, "target");
 });
 
+// --- unresolved derivation from the payload ----------------------------------
+
+test("relationGroups marks a blocked-by row unresolved from the blocker's denormalized state", () => {
+  const groups = relationGroups(
+    [
+      { source_task_id: "t-live", target_task_id: TASK_ID, kind: "blocks", source_state: "in_progress" },
+      { source_task_id: "t-finished", target_task_id: TASK_ID, kind: "blocks", source_state: "done" },
+      { source_task_id: "t-unknown", target_task_id: TASK_ID, kind: "blocks" },
+    ],
+    TASK_ID,
+  );
+  const byID = Object.fromEntries(groups.blockedBy.map((row) => [row.taskID, row.unresolved]));
+  assert.equal(byID["t-live"], true, "an unfinished blocker is unresolved");
+  assert.equal(byID["t-finished"], false, "a done blocker is resolved");
+  // A missing state is treated as blocking, matching the server's read model.
+  assert.equal(byID["t-unknown"], true, "an unknown-state blocker is unresolved");
+});
+
+test("relationGroups reads the PascalCase lifecycle state the Go structs serialize", () => {
+  const groups = relationGroups(
+    [{ SourceTaskID: "t-blocker", TargetTaskID: TASK_ID, Kind: "blocks", SourceState: "done" }],
+    TASK_ID,
+  );
+  assert.equal(groups.blockedBy[0].unresolved, false);
+});
+
+test("only blocked-by rows are ever marked unresolved", () => {
+  const groups = relationGroups(
+    [
+      { source_task_id: "t-parent", target_task_id: TASK_ID, kind: "parent_of", source_state: "in_progress" },
+      { source_task_id: TASK_ID, target_task_id: "t-child", kind: "parent_of", target_state: "in_progress" },
+      { source_task_id: TASK_ID, target_task_id: "t-blocked", kind: "blocks", target_state: "in_progress" },
+      { source_task_id: TASK_ID, target_task_id: "t-related", kind: "related_to", target_state: "in_progress" },
+    ],
+    TASK_ID,
+  );
+  for (const key of ["parent", "children", "blocks", "related"]) {
+    for (const row of groups[key]) assert.equal(row.unresolved, false, `${key} rows are never unresolved`);
+  }
+});
+
 test("taskModel exposes the grouped relations alongside the raw rows", () => {
   const model = taskModel(
     { task: { id: TASK_ID, title: "My task", state: "in_progress" }, task_detail: { relations: oneOfEach() } },
@@ -166,10 +207,18 @@ test("no relations renders a defined empty state, not a broken section", () => {
 });
 
 test("a blocked-by row is only flagged when its blocker is unresolved", () => {
-  const model = relationsModel();
-  // Before the blocker's state is known there is no flag.
+  // A done blocker derives unresolved=false, so nothing is flagged.
+  const model = {
+    id: TASK_ID,
+    projectID: "p-1",
+    relationGroups: relationGroups(
+      [{ source_task_id: "t-blocker", target_task_id: TASK_ID, kind: "blocks", source_title: "Blocking task", source_state: "done" }],
+      TASK_ID,
+    ),
+  };
   assert.doesNotMatch(renderTaskRelations(model), /is-unresolved/);
 
+  // Flip the derived flag (as a non-done blocker would) and the flag appears.
   model.relationGroups.blockedBy[0].unresolved = true;
   const flagged = renderTaskRelations(model);
   assert.match(flagged, /is-unresolved/);
@@ -189,147 +238,114 @@ test("only the blocked-by group is ever flagged unresolved", () => {
   assert.equal((html.match(/is-unresolved/g) || []).length, 1);
 });
 
-// --- unresolved-blocker resolution (element) ---------------------------------
+// --- unresolved-blocker resolution (payload-driven) --------------------------
 
-function taskResponse(state) {
-  return { ok: true, status: 200, json: () => Promise.resolve({ task: { state } }) };
+// blockedByRelations builds one blocked-by relation row per lifecycle state, so
+// a test can describe a panel with several blockers without repeating the row
+// shape. source_state is the denormalized lifecycle state the API ships in the
+// relation payload — the only input the unresolved flag needs.
+function blockedByRelations(states) {
+  return states.map((state, index) => ({
+    source_task_id: `t-blocker-${index}`,
+    target_task_id: TASK_ID,
+    kind: "blocks",
+    source_title: `Blocker ${index}`,
+    source_state: state,
+  }));
 }
 
-// settle flushes enough microtasks for the element's async blocker-state fetch
-// chain (apiGet -> apiFetch -> json -> applyBlockerStates -> repaint) to run to
-// completion. Over-flushing is harmless once the queue is drained.
-async function settle(times = 16) {
+function modelWithBlockers(states) {
+  return {
+    id: TASK_ID,
+    projectID: "p-1",
+    relationGroups: relationGroups(blockedByRelations(states), TASK_ID),
+  };
+}
+
+// settle flushes the microtask repaints a data assignment schedules. The panel
+// no longer fetches, so a handful is plenty; over-flushing is harmless.
+async function settle(times = 4) {
   for (let i = 0; i < times; i++) await flush();
 }
 
-test("the element fetches each blocker's state and flags the unfinished ones", async () => {
+test("the panel flags every non-done blocker straight from the payload, with no fetch", async () => {
   const calls = [];
   const previousFetch = globalThis.fetch;
   globalThis.fetch = (path) => {
     calls.push(path);
-    if (path.endsWith("/tasks/t-blocker")) return Promise.resolve(taskResponse("in_progress"));
-    return Promise.resolve(taskResponse("done"));
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
   };
   try {
     const root = globalThis.document.body;
-    const element = mountElement(root, "flow-task-relations", relationsModel());
+    const element = mountElement(root, "flow-task-relations", modelWithBlockers(["in_progress", "done", "scheduled"]));
     await settle();
 
-    assert.ok(calls.some((path) => path.endsWith("/tasks/t-blocker")), "blocker state is fetched");
-    assert.match(element.innerHTML, /is-unresolved/, "an unfinished blocker is flagged");
-    assert.equal(element.data.relationGroups.blockedBy[0].unresolved, true);
+    assert.equal(calls.length, 0, "opening the panel makes no lifecycle-resolution requests");
+    // Three blockers, but only the two that have not reached done are flagged.
+    assert.equal(element.querySelectorAll(".rel-row").length, 3);
+    assert.equal(element.querySelectorAll('[data-unresolved="true"]').length, 2);
+    assert.equal((element.innerHTML.match(/is-unresolved/g) || []).length, 2);
     element.remove();
   } finally {
     globalThis.fetch = previousFetch;
   }
 });
 
-test("a done blocker is not flagged", async () => {
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = () => Promise.resolve(taskResponse("done"));
-  try {
-    const root = globalThis.document.body;
-    const element = mountElement(root, "flow-task-relations", relationsModel());
-    await settle();
+test("the number of lifecycle-resolution requests is constant regardless of blocker count", async () => {
+  // Acceptance: a task with N blockers must not fan out into N requests. The
+  // panel reads the denormalized state, so the count is zero — and, crucially,
+  // does not grow as blockers are added.
+  const requestCount = async (states) => {
+    const calls = [];
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = (path) => {
+      calls.push(path);
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    };
+    try {
+      const root = globalThis.document.body;
+      const element = mountElement(root, "flow-task-relations", modelWithBlockers(states));
+      await settle();
+      element.remove();
+      return calls.length;
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+  };
 
-    assert.doesNotMatch(element.innerHTML, /is-unresolved/);
-    assert.equal(element.data.relationGroups.blockedBy[0].unresolved, false);
-    element.remove();
-  } finally {
-    globalThis.fetch = previousFetch;
-  }
+  const one = await requestCount(["in_progress"]);
+  const many = await requestCount(["in_progress", "in_progress", "in_progress", "done", "scheduled"]);
+  assert.equal(one, 0, "a single blocker costs no lifecycle request");
+  assert.equal(many, one, "the request count does not grow with the number of blockers");
 });
 
 test("a blocker that finishes is unflagged on the next refresh of the task", async () => {
-  // Regression: blockerStates cached each blocker's state forever, so a
-  // blocker observed as in_progress stayed flagged after it reached done.
-  let blockerState = "in_progress";
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = (path) => {
-    if (path.endsWith("/tasks/t-blocker")) return Promise.resolve(taskResponse(blockerState));
-    return Promise.resolve(taskResponse("done"));
-  };
-  try {
-    const root = globalThis.document.body;
-    const element = mountElement(root, "flow-task-relations", relationsModel());
-    await settle();
-    assert.match(element.innerHTML, /is-unresolved/, "an in-progress blocker starts flagged");
+  const root = globalThis.document.body;
+  const element = mountElement(root, "flow-task-relations", modelWithBlockers(["in_progress"]));
+  await settle();
+  assert.match(element.innerHTML, /is-unresolved/, "an in-progress blocker starts flagged");
 
-    // The blocker finishes, and the task detail refreshes with a fresh model —
-    // the same element instance, as the rail reuses it.
-    blockerState = "done";
-    element.data = relationsModel();
-    await settle();
+  // The blocker finishes, and the task detail refreshes with a fresh model
+  // carrying the new denormalized state — the same element instance, as the
+  // rail reuses it.
+  element.data = modelWithBlockers(["done"]);
+  await settle();
 
-    assert.doesNotMatch(element.innerHTML, /is-unresolved/, "a finished blocker is no longer flagged");
-    assert.equal(element.data.relationGroups.blockedBy[0].unresolved, false);
-    element.remove();
-  } finally {
-    globalThis.fetch = previousFetch;
-  }
+  assert.doesNotMatch(element.innerHTML, /is-unresolved/, "a finished blocker is no longer flagged");
+  element.remove();
 });
 
 test("a blocker that reopens is flagged again on the next refresh", async () => {
-  let blockerState = "done";
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = (path) => {
-    if (path.endsWith("/tasks/t-blocker")) return Promise.resolve(taskResponse(blockerState));
-    return Promise.resolve(taskResponse("done"));
-  };
-  try {
-    const root = globalThis.document.body;
-    const element = mountElement(root, "flow-task-relations", relationsModel());
-    await settle();
-    assert.doesNotMatch(element.innerHTML, /is-unresolved/);
+  const root = globalThis.document.body;
+  const element = mountElement(root, "flow-task-relations", modelWithBlockers(["done"]));
+  await settle();
+  assert.doesNotMatch(element.innerHTML, /is-unresolved/);
 
-    blockerState = "in_progress";
-    element.data = relationsModel();
-    await settle();
+  element.data = modelWithBlockers(["in_progress"]);
+  await settle();
 
-    assert.match(element.innerHTML, /is-unresolved/, "a reopened blocker is flagged again");
-    element.remove();
-  } finally {
-    globalThis.fetch = previousFetch;
-  }
-});
-
-test("the last known blocker state stays applied while the re-check is in flight", async () => {
-  // The cache is a flicker guard, not a truth source: while the re-check has
-  // not answered, the previous observation is what gets painted.
-  let answer = "in_progress";
-  let resolveBlocker;
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = (path) => {
-    if (path.endsWith("/tasks/t-blocker")) {
-      return new Promise((resolve) => {
-        resolveBlocker = () => resolve(taskResponse(answer));
-      });
-    }
-    return Promise.resolve(taskResponse("done"));
-  };
-  try {
-    const root = globalThis.document.body;
-    const element = mountElement(root, "flow-task-relations", relationsModel());
-    await settle();
-    assert.equal(typeof resolveBlocker, "function", "the first re-check is in flight");
-    resolveBlocker();
-    await settle();
-    assert.match(element.innerHTML, /is-unresolved/, "the first observation is painted");
-
-    // A refresh arrives while the next re-check is still pending: the flag
-    // holds rather than blinking off.
-    element.data = relationsModel();
-    await settle();
-    assert.match(element.innerHTML, /is-unresolved/, "the flag holds during the re-check");
-
-    answer = "done";
-    resolveBlocker();
-    await settle();
-    assert.doesNotMatch(element.innerHTML, /is-unresolved/, "the answered re-check clears the flag");
-    element.remove();
-  } finally {
-    globalThis.fetch = previousFetch;
-  }
+  assert.match(element.innerHTML, /is-unresolved/, "a reopened blocker is flagged again");
+  element.remove();
 });
 
 test("the rail forwards fresh data to the relations element even when its own markup is unchanged", async () => {
@@ -339,30 +355,21 @@ test("the rail forwards fresh data to the relations element even when its own ma
   const { renderTaskRail } = await import("./elements/task-rail.js");
   await import("./elements/run-spine.js");
 
-  let blockerState = "in_progress";
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = (path) => {
-    if (path.endsWith("/tasks/t-blocker")) return Promise.resolve(taskResponse(blockerState));
-    return Promise.resolve(taskResponse("done"));
-  };
-  try {
-    const root = globalThis.document.body;
-    const rail = mountElement(root, "flow-task-rail", relationsModel());
-    await settle();
-    const relations = rail.querySelector("flow-task-relations");
-    assert.ok(relations, "the rail mounts the relations element");
-    assert.match(relations.innerHTML, /is-unresolved/);
+  const root = globalThis.document.body;
+  const rail = mountElement(root, "flow-task-rail", modelWithBlockers(["in_progress"]));
+  await settle();
+  const relations = rail.querySelector("flow-task-relations");
+  assert.ok(relations, "the rail mounts the relations element");
+  assert.match(relations.innerHTML, /is-unresolved/);
 
-    blockerState = "done";
-    rail.data = relationsModel();
-    await settle();
+  const markupBefore = rail.innerHTML;
+  rail.data = modelWithBlockers(["done"]);
+  await settle();
 
-    assert.equal(rail.innerHTML, renderTaskRail(relationsModel()), "the rail markup itself is unchanged");
-    assert.doesNotMatch(relations.innerHTML, /is-unresolved/, "the relations element saw the fresh model");
-    rail.remove();
-  } finally {
-    globalThis.fetch = previousFetch;
-  }
+  assert.equal(rail.innerHTML, markupBefore, "the rail markup itself is unchanged");
+  assert.equal(rail.innerHTML, renderTaskRail(modelWithBlockers(["done"])), "and still matches the model");
+  assert.doesNotMatch(relations.innerHTML, /is-unresolved/, "the relations element saw the fresh model");
+  rail.remove();
 });
 
 // --- add / remove controls ---------------------------------------------------
