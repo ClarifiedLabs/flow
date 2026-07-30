@@ -1080,6 +1080,150 @@ test("nothing to review renders the empty state", () => {
   assert.match(renderReviewPanel({ review: null }), /Nothing to review/);
 });
 
+// --- review panel: live terminal lifecycle ----------------------------------
+//
+// The live terminal is minted once per session and must survive the panel
+// repainting around it (task-detail polling rewrites the model on every
+// discussion change). These tests drive the element, not just the render
+// string, because the preservation is a DOM-lifecycle behaviour.
+
+function reviewPanelModel(sessionID, { state = "waiting", comment = "", terminalAvailable = true } = {}) {
+  const statusLog = comment
+    ? [{ id: 1, kind: "note", actor: "human", message: comment, created_at: "2026-07-28T10:01:00Z" }]
+    : [];
+  return {
+    id: "t-0001",
+    projectID: "p-1",
+    review: reviewModel(reviewFixture({ activeSession: { id: sessionID, state, terminal_available: terminalAvailable }, statusLog })),
+  };
+}
+
+function stubTerminalTokenFetch(loginPathFor) {
+  const calls = [];
+  globalThis.fetch = (path) => {
+    if (String(path).includes("/terminal-token")) calls.push(String(path));
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ access: { login_path: loginPathFor(path) } }) });
+  };
+  return calls;
+}
+
+// settle lets the mint-terminal promise chain (fetch -> json -> invalidate ->
+// repaint) run to completion; each flush is one microtask, and the chain spans
+// several.
+async function settle(times = 8) {
+  for (let i = 0; i < times; i += 1) await flush();
+}
+
+// collectText concatenates the text of a live subtree. The review panel
+// reconciles its sections in place (moving nodes rather than reassigning
+// innerHTML), so assertions about what is actually on screen read the live tree
+// instead of the element's last-assigned innerHTML string.
+function collectText(node) {
+  if (!node) return "";
+  let out = node.textContent || "";
+  for (const child of node.children || []) out += collectText(child);
+  return out;
+}
+
+test("a same-session changed-model repaint keeps the live terminal iframe", async () => {
+  const root = globalThis.document.body;
+  const calls = stubTerminalTokenFetch(() => "/ui/terminal/login?tok=abc");
+  const panel = mountElement(root, "flow-review-panel", reviewPanelModel("s-0001"));
+  await settle();
+
+  const firstIframe = panel.querySelector("iframe");
+  assert.ok(firstIframe, "the minted terminal iframe is mounted");
+  assert.equal(firstIframe.getAttribute("src"), "/ui/terminal/login?tok=abc");
+  assert.equal(firstIframe.loadCount, 1, "the iframe loaded once on mount");
+
+  // A poll delivers a changed model for the same waiting session (a new
+  // comment landed). The panel repaints, but the terminal must not reload.
+  panel.data = reviewPanelModel("s-0001", { comment: "Can task two shrink?" });
+  await flush();
+
+  assert.match(collectText(panel), /Can task two shrink\?/, "the changed content repaints");
+  assert.strictEqual(panel.querySelector("iframe"), firstIframe, "the same iframe node survives the repaint");
+  assert.equal(firstIframe.loadCount, 1, "the preserved iframe is never reloaded (browser-observable continuity)");
+  assert.equal(calls.length, 1, "terminal access is minted once, not per repaint");
+  panel.remove();
+});
+
+test("a session-identity change remints the terminal for the new session", async () => {
+  const root = globalThis.document.body;
+  const calls = stubTerminalTokenFetch((path) =>
+    path.includes("s-0002") ? "/ui/terminal/login?tok=two" : "/ui/terminal/login?tok=one",
+  );
+  const panel = mountElement(root, "flow-review-panel", reviewPanelModel("s-0001"));
+  await settle();
+
+  const firstIframe = panel.querySelector("iframe");
+  assert.equal(firstIframe.getAttribute("src"), "/ui/terminal/login?tok=one");
+
+  // The session under review changes identity: the old terminal is replaced
+  // with freshly minted access for the new session.
+  panel.data = reviewPanelModel("s-0002");
+  await settle();
+
+  const secondIframe = panel.querySelector("iframe");
+  assert.ok(secondIframe, "a terminal is mounted for the new session");
+  assert.notStrictEqual(secondIframe, firstIframe, "the new session gets a freshly minted iframe");
+  assert.equal(secondIframe.getAttribute("src"), "/ui/terminal/login?tok=two");
+  assert.equal(secondIframe.parentElement.getAttribute("data-terminal-session"), "s-0002");
+  assert.equal(calls.length, 2, "each session identity mints its own access");
+  assert.ok(calls[0].includes("s-0001") && calls[1].includes("s-0002"));
+  panel.remove();
+});
+
+test("a session leaving the waiting state removes the terminal", async () => {
+  const root = globalThis.document.body;
+  stubTerminalTokenFetch(() => "/ui/terminal/login?tok=abc");
+  const panel = mountElement(root, "flow-review-panel", reviewPanelModel("s-0001"));
+  await settle();
+  assert.ok(panel.querySelector("iframe"), "the terminal is mounted while waiting");
+
+  // The agent resumes: the session is no longer waiting, so the terminal goes.
+  panel.data = reviewPanelModel("s-0001", { state: "working" });
+  await flush();
+
+  assert.equal(panel.querySelector("iframe"), null, "the terminal is removed once the session leaves waiting");
+  assert.equal(panel.querySelector('[data-section="live"]'), null, "the live-session section is removed");
+  assert.doesNotMatch(collectText(panel), /Work with the agent/);
+  panel.remove();
+});
+
+test("a session transition never exposes a prior session's terminal credential", async () => {
+  const root = globalThis.document.body;
+  const calls = stubTerminalTokenFetch((path) =>
+    path.includes("s-0002") ? "/ui/terminal/login?tok=two" : "/ui/terminal/login?tok=one",
+  );
+  const panel = mountElement(root, "flow-review-panel", reviewPanelModel("s-0001"));
+  await settle();
+  assert.equal(panel.querySelector("iframe").getAttribute("src"), "/ui/terminal/login?tok=one");
+
+  // Session B arrives while its terminal is not yet available. The panel must
+  // reset A's minted access before rendering — it may not show B's section with
+  // A's session-bound login URL.
+  panel.data = reviewPanelModel("s-0002", { terminalAvailable: false });
+  await flush();
+
+  assert.match(collectText(panel), /s-0002/, "the new session is shown");
+  assert.doesNotMatch(collectText(panel), /tok=one/, "the prior session's credential is gone");
+  assert.equal(panel.querySelector("iframe"), null, "no iframe renders until B's terminal is available");
+  assert.equal(calls.length, 1, "no access is minted for an unavailable terminal");
+
+  // Once B's terminal becomes available, it mints and mounts B's own access.
+  panel.data = reviewPanelModel("s-0002", { terminalAvailable: true });
+  await settle();
+
+  const iframe = panel.querySelector("iframe");
+  assert.ok(iframe, "B's terminal mounts once available");
+  assert.equal(iframe.getAttribute("src"), "/ui/terminal/login?tok=two");
+  assert.equal(iframe.parentElement.getAttribute("data-terminal-session"), "s-0002");
+  assert.equal(calls.length, 2);
+  assert.ok(calls[1].includes("s-0002"));
+  panel.remove();
+});
+
 test("the Answer action targets the review tab, never the empty checks tab", () => {
   const model = {
     wait: { kind: "human_gate", message: "Review the proposed implementation tasks." },

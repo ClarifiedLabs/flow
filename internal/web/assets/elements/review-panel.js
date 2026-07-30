@@ -17,16 +17,28 @@ import { value } from "../normalize.js";
 import { formatDate } from "../format.js";
 import { define, FlowElement } from "./base.js";
 
-export function renderReviewPanel(model) {
+// reviewPanelSections is the panel's content as an ordered list of keyed
+// sections. FlowReviewPanel.paint reconciles these by key so a content-only
+// repaint rewrites just the sections that changed and never disturbs the
+// mounted live terminal. renderReviewPanel serialises the same list to one
+// string for the initial paint and the markup tests.
+export function reviewPanelSections(model) {
   const review = model?.review;
-  if (!review) return `<p class="empty">Nothing to review</p>`;
-  const parts = [];
-  if (review.gate) parts.push(renderGate(model, review));
-  if (review.question) parts.push(renderQuestion(model, review));
-  if (review.artifact && !review.gate) parts.push(renderArtifact(review.artifact, !review.gate));
-  if (review.comments.length) parts.push(renderComments(review.comments));
-  if (review.session && review.session.state === "waiting") parts.push(renderLiveSession(review.session));
-  return parts.join("");
+  if (!review) return [];
+  const sections = [];
+  if (review.gate) sections.push({ key: "gate", html: renderGate(model, review) });
+  if (review.question) sections.push({ key: "question", html: renderQuestion(model, review) });
+  if (review.artifact && !review.gate) sections.push({ key: "artifact", html: renderArtifact(review.artifact, !review.gate) });
+  if (review.comments.length) sections.push({ key: "comments", html: renderComments(review.comments) });
+  if (review.session && review.session.state === "waiting") sections.push({ key: "live", html: renderLiveSession(review.session) });
+  return sections;
+}
+
+export function renderReviewPanel(model) {
+  if (!model?.review) return `<p class="empty">Nothing to review</p>`;
+  return reviewPanelSections(model)
+    .map((section) => `<div data-section="${section.key}">${section.html}</div>`)
+    .join("");
 }
 
 function projectAttrOf(model) {
@@ -171,7 +183,7 @@ function renderComments(comments) {
 
 // The live session renders as a bezel the element fills with an iframe once
 // it has minted terminal access — mint-once, like the Terminal tab, so a poll
-// never bounces the connection.
+// never bounces the connection. The bezel starts empty; syncTerminal fills it.
 function renderLiveSession(session) {
   return `
     <section class="live-session" data-live-session="${escapeAttr(session.id)}">
@@ -187,7 +199,7 @@ function renderLiveSession(session) {
 
 export function renderReviewTerminal(sessionID, loginPath) {
   return `
-    <div class="terminal-bezel">
+    <div class="terminal-bezel" data-terminal-session="${escapeAttr(sessionID)}">
       <div class="terminal-titlebar"><span class="dot"></span><span>session ${escapeHTML(sessionID)}</span></div>
       <iframe class="terminal-frame" title="Session terminal ${escapeAttr(sessionID)}" src="${escapeAttr(loginPath)}" referrerpolicy="no-referrer"></iframe>
     </div>
@@ -200,27 +212,126 @@ export class FlowReviewPanel extends FlowElement {
   terminalError = "";
   terminalPromise = null;
   terminalGeneration = 0;
+  // The sections currently painted, as [{ key, html }]; null until the first
+  // paint. The reconciler compares against this record — not the live DOM — so
+  // syncTerminal's mutations inside the live section never look like a content
+  // change and never trigger a rewrite that would reload the terminal iframe.
+  #paintedSections = null;
 
   render(model) {
-    const session = model?.review?.session || null;
-    let html = renderReviewPanel(model);
-    if (session && session.state === "waiting") {
-      const bezel = this.terminalLoginPath
-        ? renderReviewTerminal(session.id, this.terminalLoginPath)
-        : this.terminalError
-          ? `<div class="empty">${escapeHTML(this.terminalError)} <button class="button secondary" type="button" data-review-terminal-retry>Retry</button></div>`
-          : `<div class="empty">Connecting terminal</div>`;
-      html = html.replace(`<div class="bezel" data-terminal-bezel></div>`, bezel);
-    }
-    return html;
+    return renderReviewPanel(model);
   }
 
-  afterPaint() {
+  // paint reconciles the panel section by section instead of rewriting the whole
+  // element. A changed-model poll (task-detail polling rewrites the model on
+  // every discussion change) updates only the sections whose markup changed and
+  // leaves the rest — crucially the live terminal — connected. Removing and
+  // re-appending the terminal iframe would reload it in a browser (disconnecting
+  // an iframe tears down its nested browsing context), which is exactly the
+  // bounce this element exists to prevent.
+  paint() {
+    // Key the terminal to the session under review before rendering anything,
+    // so a session transition can never expose a prior session's credential.
+    this.ensureTerminalLoad();
+
+    const sections = reviewPanelSections(this.data);
+    if (!sections.length) {
+      this.#paintedSections = null;
+      const html = renderReviewPanel(this.data);
+      if (this.innerHTML !== html) this.innerHTML = html;
+      this.syncTerminal();
+      return;
+    }
+
+    if (!this.#paintedSections) {
+      // First paint (or a rebuild after an empty state): write it all at once.
+      this.#paintedSections = sections.map((section) => ({ key: section.key, html: section.html }));
+      this.innerHTML = sections.map((section) => `<div data-section="${section.key}">${section.html}</div>`).join("");
+      this.syncTerminal();
+      return;
+    }
+
+    const wrappers = new Map();
+    for (const child of Array.from(this.children)) {
+      const key = child.getAttribute?.("data-section");
+      if (key) wrappers.set(key, child);
+    }
+    const stored = new Map(this.#paintedSections.map((section) => [section.key, section.html]));
+
+    // Walk the desired order back to front, positioning each section just
+    // before the one after it. A section whose markup is unchanged is left
+    // completely untouched; only changed sections rewrite their interior.
+    const seen = new Set();
+    let reference = null;
+    for (let index = sections.length - 1; index >= 0; index -= 1) {
+      const { key, html } = sections[index];
+      seen.add(key);
+      let wrapper = wrappers.get(key);
+      if (!wrapper) {
+        wrapper = document.createElement("div");
+        wrapper.setAttribute("data-section", key);
+        wrapper.innerHTML = html;
+      } else if (stored.get(key) !== html) {
+        wrapper.innerHTML = html;
+      }
+      if (wrapper.parentElement !== this || wrapper.nextElementSibling !== reference) {
+        this.insertBefore(wrapper, reference);
+      }
+      reference = wrapper;
+    }
+    for (const [key, wrapper] of wrappers) {
+      if (!seen.has(key)) wrapper.remove();
+    }
+
+    this.#paintedSections = sections.map((section) => ({ key: section.key, html: section.html }));
+    this.syncTerminal();
+  }
+
+  // ensureTerminalLoad keys the mint to the session under review and starts it
+  // once. The session identity is keyed and reset *before* the availability
+  // guard, so a changed session is always reset even while its terminal is not
+  // yet available — a session transition never reuses a prior login URL.
+  ensureTerminalLoad() {
     const session = this.data?.review?.session || null;
-    if (!session || session.state !== "waiting" || !session.terminalAvailable) return;
-    const key = `session:${session.id}`;
+    const waiting = session && session.state === "waiting" ? session : null;
+    const key = waiting ? `session:${waiting.id}` : "";
     if (key !== this.terminalKey) this.resetTerminalLoad(key);
-    if (!this.terminalLoginPath && !this.terminalError && !this.terminalPromise) this.loadTerminal(session.id, key);
+    if (!waiting || !waiting.terminalAvailable) return;
+    if (!this.terminalLoginPath && !this.terminalError && !this.terminalPromise) this.loadTerminal(waiting.id, key);
+  }
+
+  // syncTerminal matches the mounted terminal to the session under review. When
+  // the bezel already carries the live iframe for the current session it is left
+  // untouched so the connection is never reloaded. Any other case — a changed
+  // session identity, a session that left the waiting state, or a pre-iframe
+  // state that must now show the minted iframe / connecting / error notice —
+  // rebuilds the bezel content.
+  syncTerminal() {
+    const session = this.data?.review?.session || null;
+    const waiting = session && session.state === "waiting" ? session : null;
+    // The test DOM's querySelector only supports simple selectors, so find the
+    // live section first and then the bezel within it.
+    const live = this.querySelector('[data-section="live"]');
+    const placeholder = live?.querySelector("[data-terminal-bezel]");
+    if (!placeholder) return;
+
+    const mounted = placeholder.querySelector("[data-terminal-session]");
+    if (waiting && mounted?.querySelector("iframe") && mounted.getAttribute("data-terminal-session") === waiting.id) {
+      return;
+    }
+    placeholder.innerHTML = waiting ? this.terminalStateMarkup(waiting) : "";
+  }
+
+  // terminalStateMarkup renders what the bezel holds while the iframe is not yet
+  // mounted (connecting / unavailable / mint error), or the iframe itself once
+  // access is minted. The iframe is only ever created here, once per session.
+  terminalStateMarkup(session) {
+    if (this.terminalLoginPath) return renderReviewTerminal(session.id, this.terminalLoginPath);
+    if (this.terminalError) {
+      return `<div class="empty">${escapeHTML(this.terminalError)} <button class="button secondary" type="button" data-review-terminal-retry>Retry</button></div>`;
+    }
+    if (!session.terminalAvailable) return `<div class="empty">Terminal not available yet</div>`;
+    return `<div class="empty">Connecting terminal</div>`;
   }
 
   resetTerminalLoad(key = "") {

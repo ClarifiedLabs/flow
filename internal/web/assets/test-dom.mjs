@@ -120,6 +120,16 @@ export class TestNode {
     return child;
   }
 
+  insertBefore(child, reference) {
+    child.remove();
+    child.parentElement = this;
+    const index = reference ? this.children.indexOf(reference) : -1;
+    if (index >= 0) this.children.splice(index, 0, child);
+    else this.children.push(child);
+    setConnected(child, this.isConnected);
+    return child;
+  }
+
   after(node) {
     if (!this.parentElement) return;
     node.remove();
@@ -217,9 +227,25 @@ export class TestNode {
 function setConnected(node, connected) {
   if (node.isConnected === connected) return;
   node.isConnected = connected;
-  if (connected) node.connectedCallback?.();
-  else node.disconnectedCallback?.();
+  if (connected) {
+    node.connectedCallback?.();
+    if (node.localName === "iframe") navigateIframe(node);
+  } else {
+    node.disconnectedCallback?.();
+  }
   for (const child of node.children) setConnected(child, connected);
+}
+
+// navigateIframe models a browser navigating an iframe's nested browsing
+// context to its src. Connecting an iframe loads it — and so does reconnecting
+// a node that was detached, which is how a browser reloads an iframe that was
+// removed and re-appended. Tests assert terminal continuity by checking that a
+// preserved iframe's loadCount does not climb across a repaint.
+function navigateIframe(node) {
+  const src = node.getAttribute("src");
+  if (src === null) return;
+  node.loadCount = (node.loadCount || 0) + 1;
+  (node.loads ||= []).push(src);
 }
 
 function dataKey(name) {
