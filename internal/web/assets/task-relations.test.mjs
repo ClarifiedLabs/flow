@@ -9,7 +9,7 @@ import { flush, installTestDOM, mountElement } from "./test-dom.mjs";
 
 installTestDOM();
 
-const { relationGroups, RELATION_GROUPS, taskModel } = await import("./task-model.js");
+const { relationGroups, RELATION_GROUPS, taskModel, blockerVerdict } = await import("./task-model.js");
 const { renderTaskRelations, RELATION_KIND_OPTIONS } = await import("./elements/task-relations.js");
 const { handleFormSubmit } = await import("./forms.js");
 const { handleAction } = await import("./actions.js");
@@ -28,7 +28,8 @@ function oneOfEach() {
     // I block someone: the blocked task is the target of my blocks.
     { source_task_id: TASK_ID, target_task_id: "t-blocked", kind: "blocks", source_title: "My task", target_title: "Blocked task" },
     // Someone blocks me: the blocker is the source of a blocks I am target of.
-    { source_task_id: "t-blocker", target_task_id: TASK_ID, kind: "blocks", source_title: "Blocking task", target_title: "My task" },
+    // The row ships the blocker's denormalized lifecycle state, as the API does.
+    { source_task_id: "t-blocker", target_task_id: TASK_ID, kind: "blocks", source_title: "Blocking task", target_title: "My task", source_state: "in_progress" },
     // A symmetric related_to where I am the source.
     { source_task_id: TASK_ID, target_task_id: "t-related", kind: "related_to", source_title: "My task", target_title: "Related task" },
   ];
@@ -107,15 +108,16 @@ test("relationGroups marks a blocked-by row unresolved from the blocker's denorm
     [
       { source_task_id: "t-live", target_task_id: TASK_ID, kind: "blocks", source_state: "in_progress" },
       { source_task_id: "t-finished", target_task_id: TASK_ID, kind: "blocks", source_state: "done" },
-      { source_task_id: "t-unknown", target_task_id: TASK_ID, kind: "blocks" },
+      { source_task_id: "t-unscheduled", target_task_id: TASK_ID, kind: "blocks", source_state: "" },
     ],
     TASK_ID,
   );
   const byID = Object.fromEntries(groups.blockedBy.map((row) => [row.taskID, row.unresolved]));
   assert.equal(byID["t-live"], true, "an unfinished blocker is unresolved");
   assert.equal(byID["t-finished"], false, "a done blocker is resolved");
-  // A missing state is treated as blocking, matching the server's read model.
-  assert.equal(byID["t-unknown"], true, "an unknown-state blocker is unresolved");
+  // A present empty state is the wire encoding of a valid unscheduled task, so
+  // it is a confirmed blocker, matching the server's read model.
+  assert.equal(byID["t-unscheduled"], true, "an unscheduled blocker is unresolved");
 });
 
 test("relationGroups reads the PascalCase lifecycle state the Go structs serialize", () => {
@@ -238,6 +240,22 @@ test("only the blocked-by group is ever flagged unresolved", () => {
   assert.equal((html.match(/is-unresolved/g) || []).length, 1);
 });
 
+test("a blocked-by row whose state is unknown renders a neutral marker, not the blocking flag", () => {
+  const model = relationsModel();
+  model.relationGroups.blockedBy[0].unresolved = null;
+  const html = renderTaskRelations(model);
+  assert.match(html, /is-unknown/, "an unknown blocker is marked neutrally");
+  assert.match(html, /rel-flag-unknown/, "the unknown marker uses the neutral style");
+  assert.match(html, />unknown</, "the row names the unknown state");
+  assert.doesNotMatch(html, /is-unresolved/, "an unknown blocker is not the confirmed blocking state");
+  assert.doesNotMatch(html, />blocking</, "an unknown blocker does not carry the blocking label");
+
+  // Only the blocked-by group can be unknown: null on another group is ignored.
+  const other = relationsModel();
+  other.relationGroups.blocks[0].unresolved = null;
+  assert.doesNotMatch(renderTaskRelations(other), /is-unknown/);
+});
+
 // --- unresolved-blocker resolution (payload-driven) --------------------------
 
 // blockedByRelations builds one blocked-by relation row per lifecycle state, so
@@ -254,12 +272,16 @@ function blockedByRelations(states) {
   }));
 }
 
-function modelWithBlockers(states) {
+function modelWithBlockerRelations(relations) {
   return {
     id: TASK_ID,
     projectID: "p-1",
-    relationGroups: relationGroups(blockedByRelations(states), TASK_ID),
+    relationGroups: relationGroups(relations, TASK_ID),
   };
+}
+
+function modelWithBlockers(states) {
+  return modelWithBlockerRelations(blockedByRelations(states));
 }
 
 // settle flushes the microtask repaints a data assignment schedules. The panel
@@ -317,6 +339,114 @@ test("the number of lifecycle-resolution requests is constant regardless of bloc
   const many = await requestCount(["in_progress", "in_progress", "in_progress", "done", "scheduled"]);
   assert.equal(one, 0, "a single blocker costs no lifecycle request");
   assert.equal(many, one, "the request count does not grow with the number of blockers");
+});
+
+// blockerVerdict is the pure read of the denormalized lifecycle state the
+// relation payload ships, and it is what decides whether a blocked-by row is a
+// confirmed blocker, a finished one, or an unknown one.
+
+test("blockerVerdict reads the lifecycle vocabulary the API serializes", () => {
+  // done clears the flag; the other real states confirm an unfinished blocker.
+  assert.equal(blockerVerdict({ source_state: "done" }), false);
+  assert.equal(blockerVerdict({ source_state: "scheduled" }), true);
+  assert.equal(blockerVerdict({ source_state: "in_progress" }), true);
+});
+
+test("blockerVerdict treats a present empty state as a confirmed blocker", () => {
+  // The wire encoding of a valid unscheduled task is a *present* empty state
+  // (the server's SourceState is a non-pointer LifecycleState); like the
+  // server's read model, that is a blocker until proven done, never unknown.
+  assert.equal(blockerVerdict({ source_state: "" }), true);
+  assert.equal(blockerVerdict({ SourceState: "" }), true);
+});
+
+test("blockerVerdict treats a missing or null state as unknown, not blocking", () => {
+  // The server always serializes SourceState, so a payload without it — or with
+  // an explicit null — is malformed lifecycle data, not an unscheduled task; it
+  // must render unknown rather than the confirmed red blocking state.
+  assert.equal(blockerVerdict({}), null);
+  assert.equal(blockerVerdict({ source_state: null }), null);
+  assert.equal(blockerVerdict({ SourceState: null }), null);
+});
+
+test("blockerVerdict renders a malformed lifecycle value unknown, not blocking", () => {
+  // A state that is present but outside the lifecycle vocabulary — whitespace,
+  // an unknown token, or a non-string — is a payload we cannot trust, so it is
+  // unknown rather than read as a confirmed non-done blocker.
+  assert.equal(blockerVerdict({ source_state: "   " }), null);
+  assert.equal(blockerVerdict({ source_state: "bogus" }), null);
+  assert.equal(blockerVerdict({ source_state: "DONE" }), null);
+  assert.equal(blockerVerdict({ source_state: {} }), null);
+  assert.equal(blockerVerdict({ SourceState: "bogus" }), null);
+});
+
+test("a blocked-by row with a malformed state renders unknown, not the blocking flag", async () => {
+  const root = globalThis.document.body;
+  const element = mountElement(root, "flow-task-relations", modelWithBlockers(["bogus"]));
+  await settle();
+
+  assert.match(element.innerHTML, /is-unknown/, "a malformed state is marked unknown");
+  assert.match(element.innerHTML, /rel-flag-unknown/, "the unknown marker uses the neutral style");
+  assert.match(element.innerHTML, />unknown</, "the row names the unknown state");
+  assert.doesNotMatch(element.innerHTML, /is-unresolved/, "a malformed state is not the confirmed blocking state");
+  assert.doesNotMatch(element.innerHTML, />blocking</, "a malformed state does not carry the blocking label");
+  assert.equal(element.data.relationGroups.blockedBy[0].unresolved, null);
+  element.remove();
+});
+
+test("a blocked-by row with a missing source_state renders unknown, not the blocking flag", async () => {
+  // The server always serializes SourceState, so a payload without the field is
+  // malformed lifecycle data; it must render the neutral unknown marker rather
+  // than the confirmed red blocking state.
+  const root = globalThis.document.body;
+  const element = mountElement(
+    root,
+    "flow-task-relations",
+    modelWithBlockerRelations([{ source_task_id: "t-blocker", target_task_id: TASK_ID, kind: "blocks", source_title: "Blocker" }]),
+  );
+  await settle();
+
+  assert.match(element.innerHTML, /is-unknown/, "a missing state is marked unknown");
+  assert.match(element.innerHTML, /rel-flag-unknown/, "the unknown marker uses the neutral style");
+  assert.doesNotMatch(element.innerHTML, /is-unresolved/, "a missing state is not the confirmed blocking state");
+  assert.doesNotMatch(element.innerHTML, />blocking</, "a missing state does not carry the blocking label");
+  assert.equal(element.data.relationGroups.blockedBy[0].unresolved, null);
+  element.remove();
+});
+
+test("a blocked-by row with a null source_state renders unknown, not the blocking flag", async () => {
+  // An explicit null is malformed lifecycle data in the same way an absent
+  // field is: not the present empty string the server serializes for a valid
+  // unscheduled task, so it renders unknown rather than blocking.
+  const root = globalThis.document.body;
+  const element = mountElement(
+    root,
+    "flow-task-relations",
+    modelWithBlockerRelations([{ source_task_id: "t-blocker", target_task_id: TASK_ID, kind: "blocks", source_title: "Blocker", source_state: null }]),
+  );
+  await settle();
+
+  assert.match(element.innerHTML, /is-unknown/, "a null state is marked unknown");
+  assert.match(element.innerHTML, /rel-flag-unknown/, "the unknown marker uses the neutral style");
+  assert.doesNotMatch(element.innerHTML, /is-unresolved/, "a null state is not the confirmed blocking state");
+  assert.doesNotMatch(element.innerHTML, />blocking</, "a null state does not carry the blocking label");
+  assert.equal(element.data.relationGroups.blockedBy[0].unresolved, null);
+  element.remove();
+});
+
+test("a blocked-by row with an empty (unscheduled) state renders the blocking flag", async () => {
+  // The denormalized payload ships "" for a valid unscheduled blocker; that is a
+  // confirmed unfinished blocker, so it keeps the red marker rather than the
+  // neutral unknown one.
+  const root = globalThis.document.body;
+  const element = mountElement(root, "flow-task-relations", modelWithBlockers([""]));
+  await settle();
+
+  assert.match(element.innerHTML, /is-unresolved/, "an unscheduled blocker is confirmed blocking");
+  assert.match(element.innerHTML, />blocking</, "the row carries the blocking label");
+  assert.doesNotMatch(element.innerHTML, /is-unknown/, "an unscheduled blocker is not unknown");
+  assert.equal(element.data.relationGroups.blockedBy[0].unresolved, true);
+  element.remove();
 });
 
 test("a blocker that finishes is unflagged on the next refresh of the task", async () => {

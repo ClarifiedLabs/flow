@@ -6,9 +6,18 @@
 //
 // The grouping is pure and lives in task-model.js so it is testable as data.
 // Whether a blocker is done comes for free: the relation payload denormalizes
-// each side's lifecycle state, so the grouping marks a blocked-by row
-// unresolved at projection time. No per-blocker fetch — a task with N blockers
-// costs no extra round trips when its relations panel opens.
+// each side's lifecycle state, so the grouping marks a blocked-by row at
+// projection time. No per-blocker fetch — a task with N blockers costs no extra
+// round trips when its relations panel opens.
+//
+// A blocker's derived state has three outcomes, and the row renders all three
+// distinctly: a confirmed non-done blocker is flagged as blocking, a confirmed
+// done blocker is left alone, and a lifecycle value that is present but
+// malformed — a string outside the lifecycle vocabulary, or not a string at all
+// — is unknown, rendered neutrally rather than as the red confirmed blocking
+// state, so a bad payload is not mistaken for a real obstacle. An absent state
+// (the wire encoding of a valid unscheduled task) stays blocking, matching the
+// server's own read model.
 
 import { taskHref } from "../api.js";
 import { escapeAttr, escapeHTML } from "../html.js";
@@ -58,17 +67,22 @@ function renderRelationRow(item, groupKey, model) {
   const taskID = model.id || "";
   const projectID = model.projectID || "";
   // Only a blocker that has not finished is worth flagging: a done blocker is
-  // history, not an obstacle.
-  const unresolved = groupKey === "blockedBy" && item.unresolved;
+  // history, not an obstacle. A blocker whose state could not be confirmed is
+  // unknown — it may well be blocking, but saying so for certain would be a
+  // lie, so it gets the neutral unknown marker instead of the red flag.
+  const isBlocker = groupKey === "blockedBy";
+  const unresolved = isBlocker && item.unresolved === true;
+  const unknown = isBlocker && item.unresolved === null;
+  const rowClass = unresolved ? " is-unresolved" : unknown ? " is-unknown" : "";
   const source = item.direction === "source" ? taskID : item.taskID;
   const target = item.direction === "source" ? item.taskID : taskID;
   return `
-    <li class="rel-row${unresolved ? " is-unresolved" : ""}"${unresolved ? ` data-unresolved="true"` : ""}>
+    <li class="rel-row${rowClass}"${unresolved ? ` data-unresolved="true"` : ""}>
       <a class="rel-link" href="${escapeAttr(taskHref(projectID, item.taskID))}" data-link>
         <span class="rel-title">${escapeHTML(item.title)}</span>
         <span class="rel-id">${escapeHTML(item.taskID)}</span>
       </a>
-      ${unresolved ? `<span class="rel-flag">blocking</span>` : ""}
+      ${unresolved ? `<span class="rel-flag">blocking</span>` : unknown ? `<span class="rel-flag rel-flag-unknown">unknown</span>` : ""}
       <button class="rel-remove" type="button" aria-label="${escapeAttr(`Remove relation to ${item.title}`)}"
         data-relation-remove="${escapeAttr(source)}" data-project="${escapeAttr(projectID)}"
         data-kind="${escapeAttr(item.kind)}" data-target="${escapeAttr(target)}">×</button>

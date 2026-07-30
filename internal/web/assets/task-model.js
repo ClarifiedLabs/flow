@@ -316,6 +316,26 @@ export const RELATION_GROUPS = [
   { key: "related", label: "Related" },
 ];
 
+// blockerVerdict reads the denormalized lifecycle state a relation payload ships
+// for the blocker side and reduces it to the tri-state the relations row renders:
+// true is a confirmed unfinished blocker, false a confirmed done one, and null an
+// unknown one. Field presence is preserved on purpose: the wire encoding of a
+// valid unscheduled task is a *present* empty state (the server's SourceState is
+// a non-pointer LifecycleState), so only that — or a present scheduled /
+// in_progress state — is a confirmed blocker, matching the server's blocked-by
+// read model, which clears a blocker only once it is done. A missing or null
+// state is a malformed payload the read model never emits, and a state that is
+// present but outside the lifecycle vocabulary (whitespace, an unknown token)
+// or not a string at all is one we cannot trust — both render unknown rather
+// than being read as a confirmed non-done blocker.
+export function blockerVerdict(relation) {
+  const state = relation == null ? undefined : relation["source_state"] ?? relation["SourceState"];
+  if (state === "done") return false;
+  if (typeof state !== "string") return null; // absent, null, or not a string: malformed.
+  if (state === "" || state === "scheduled" || state === "in_progress") return true;
+  return null; // any other string is outside the lifecycle vocabulary.
+}
+
 // relationGroups turns the flat, direction-agnostic relation rows the API
 // returns into the five lists a reader expects, each holding the *other* task
 // relative to the one being viewed. A relation row names a source and a target;
@@ -333,9 +353,6 @@ export function relationGroups(relations, taskID) {
     const target = String(value(relation, "target_task_id", "TargetTaskID") || "");
     const sourceTitle = String(value(relation, "source_title", "SourceTitle") || "");
     const targetTitle = String(value(relation, "target_title", "TargetTitle") || "");
-    // The relation payload denormalizes each side's lifecycle state, so a
-    // blocked-by row can tell whether its blocker still bites without a fetch.
-    const sourceState = String(value(relation, "source_state", "SourceState") || "");
 
     // The current task is the source: the other task is the target.
     if (source === id) {
@@ -354,9 +371,10 @@ export function relationGroups(relations, taskID) {
       if (kind === "parent_of") {
         groups.parent.push(entry(source, sourceTitle, kind, "target"));
       } else if (kind === "blocks") {
-        // A blocker only stops mattering once it is done; an unknown state is
-        // treated as blocking, matching the server's blocked-by read model.
-        groups.blockedBy.push(entry(source, sourceTitle, kind, "target", sourceState !== "done"));
+        // A blocker only stops mattering once it is done; its denormalized
+        // lifecycle state decides whether the row is a confirmed blocker, a
+        // finished one, or an unknown one (see blockerVerdict).
+        groups.blockedBy.push(entry(source, sourceTitle, kind, "target", blockerVerdict(relation)));
       } else if (kind === "related_to") {
         groups.related.push(entry(source, sourceTitle, kind, "target"));
       }

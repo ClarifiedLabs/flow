@@ -86,6 +86,13 @@
   border-color: var(--st-blocked);
 }
 
+/* A blocker whose state could not be confirmed is unknown, not confirmed
+   blocking: it keeps the default row and a neutral marker so a failed lookup
+   is never mistaken for a real obstacle. */
+.rel-row.is-unknown {
+  border-color: var(--line-2);
+}
+
 .rel-link {
   display: flex;
   flex-direction: column;
@@ -126,6 +133,14 @@
   border: 1px solid var(--st-blocked);
   border-radius: 999px;
   padding: 0 6px;
+}
+
+/* The unknown marker deliberately drops the blocked tint: it signals "we could
+   not confirm this blocker", which is not the same as "this is blocking you". */
+.rel-flag-unknown {
+  color: var(--muted);
+  background: transparent;
+  border-color: var(--line-2);
 }
 
 .rel-remove {
