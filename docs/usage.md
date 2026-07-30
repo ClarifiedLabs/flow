@@ -21,7 +21,7 @@ The web UI setup is:
 exchanges that bootstrap token for an HttpOnly session cookie, so the long-lived
 owner token is not placed in JavaScript.
 
-The board shows every project's tasks as cards. A sticky top bar frames every
+The board shows every project's tasks as cards. An in-progress task whose workflow is parked on a worker job that is queued or claimed — but not yet running — is labeled **awaiting worker** rather than **working**, so a stalled dispatch is visible at a glance. A sticky top bar frames every
 page: primary navigation lives in the dropdown on the left, whose trigger
 shows the current page label alongside compact board lane chips (unscheduled,
 scheduled, in progress, blocked). The panel lists every destination — Board,
@@ -52,6 +52,7 @@ flowchart LR
     unscheduled([Unscheduled / null]) -->|schedule| scheduled([Scheduled])
     scheduled -->|worker starts| progress([In Progress])
     progress --> done([Done])
+    progress --- awaiting([Awaiting Worker])
     progress --- working([Working])
     progress --- blocked([Blocked])
     scheduled -->|reset| unscheduled
@@ -60,11 +61,15 @@ flowchart LR
 ```
 
 New tasks have no persisted lifecycle state and appear as **Unscheduled**.
-**Scheduled** means queued for the selected workflow; unresolved blocker tasks
-hold execution at the dependency gate. **In Progress / Working** means the
-workflow can act. **In Progress / Blocked** means a human gate or safety budget
-requires owner action. **Done** carries a fixed resolution: `completed`,
-`merged`, `rejected`, `abandoned`, `cancelled`, or `failed`.
+**Scheduled** means the workflow run has not started yet: the task is queued
+for its first worker job, and unresolved blocker tasks hold execution at the
+dependency gate. **In Progress / Awaiting worker** (the derived `awaiting_worker`
+lane state) means the active workflow node has a live job that is queued or
+claimed but not yet running. **In Progress / Working** means a job is running
+or the node is executing synchronously. **In Progress / Blocked** means a human
+gate or safety budget requires owner action. **Done** carries a fixed
+resolution: `completed`, `merged`, `rejected`, `abandoned`, `cancelled`, or
+`failed`.
 
 The work inside In Progress is a frozen directed graph. It may branch and loop,
 but has one active node at a time. Human gates expose their configured outcomes
@@ -138,6 +143,9 @@ flow flows set-default FLOW_ID
 
 `flow board` aggregates the lanes of every registered project. Use `--project`
 to scope a command to one project when you are not inside its worktree.
+In-progress tasks whose active workflow node has a queued or claimed worker job
+are annotated `[awaiting worker]`, distinguishing them from tasks that are
+actively working (which carry no annotation).
 
 `flow agent-defs` and `flow flows` manage the same configuration shown in the
 web UI's **Flows** page. Agent definitions are project-scoped by default; pass
