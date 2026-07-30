@@ -1899,6 +1899,67 @@ tr.row-idle {
   accent-color: var(--accent);
 }
 
+/* Relations picker (create mode only): rows of {kind, target task id} that
+   declare the new task's relations up front. */
+.task-form .relation-picker {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.task-form .relation-picker-label {
+  color: var(--muted);
+  font-size: 0.65625rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.task-form .relation-rows {
+  display: grid;
+  gap: 8px;
+}
+
+.task-form .relation-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 180px) minmax(200px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .task-form .relation-row {
+    animation: rise 180ms ease both;
+  }
+}
+
+.task-form .relation-remove {
+  width: 32px;
+  padding: 6px 0;
+  line-height: 1;
+  text-align: center;
+  color: var(--muted);
+}
+
+.task-form .relation-remove:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+  filter: none;
+}
+
+.task-form .relation-picker-actions {
+  display: flex;
+}
+
+.task-form .relation-picker-actions .button {
+  padding: 5px 12px;
+  font-size: 0.75rem;
+}
+
 .flows-detail {
   width: 100%;
   max-width: none;

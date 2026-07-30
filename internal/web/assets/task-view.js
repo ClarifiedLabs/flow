@@ -15,7 +15,8 @@ export async function renderNewTaskView(app, context) {
   if (defaultProject) await app.ensureFlows(defaultProject);
   if (context && !app.isActiveLoad(context)) return false;
   app.setTitle("New Task");
-  app.querySelector(".content").innerHTML = `
+  const content = app.querySelector(".content");
+  content.innerHTML = `
     <section class="detail">
       <div class="detail-head">
         <div>
@@ -25,6 +26,7 @@ export async function renderNewTaskView(app, context) {
       ${renderTaskFormView(app, { priority: 0 }, { mode: "create", submitLabel: "Create" })}
     </section>
   `;
+  bindRelationsPickerView(content.querySelector?.("[data-task-form]"));
   return true;
 }
 
@@ -58,6 +60,96 @@ export function flowSelectOptionsView(app, projectID, selectedFlowID) {
     const name = value(flow, "name", "Name") || id;
     return `<option value="${escapeAttr(id)}" ${id === selected ? "selected" : ""}>${escapeHTML(name)}</option>`;
   }).join("");
+}
+
+// RELATION_KIND_OPTIONS lists the relation kinds the create picker offers,
+// labelled from the new task's perspective. "child of X" means the new task
+// becomes X's child. parent_of stores source = parent, so a child-of row must
+// make the new task the relation *target*; the create payload cannot express
+// that for owner tokens (a blank target is rejected), so such rows are applied
+// after creation via the link endpoint (X parent_of new-task). blocks and
+// related_to store source = the new task, so they go straight into the create
+// payload as {target_task_id, kind}.
+export const RELATION_KIND_OPTIONS = [
+  { kind: "parent_of", label: "child of" },
+  { kind: "blocks", label: "blocks" },
+  { kind: "related_to", label: "related to" },
+];
+
+// relationKindOptionsView renders the picker's kind <option>s, optionally
+// preselecting one kind.
+export function relationKindOptionsView(selectedKind = "") {
+  return RELATION_KIND_OPTIONS.map((option) =>
+    `<option value="${escapeAttr(option.kind)}" ${option.kind === selectedKind ? "selected" : ""}>${escapeHTML(option.label)}</option>`,
+  ).join("");
+}
+
+// relationPickerRowView renders one picker row: a kind select, a target task
+// id input, and a remove button. Rows are appended to [data-relation-rows]
+// after render, so the markup here is the initial empty state.
+export function relationPickerRowView() {
+  return `
+    <div class="relation-row" data-relation-row>
+      <select name="relation_kind" data-relation-kind>
+        ${relationKindOptionsView()}
+      </select>
+      <input name="relation_target" data-relation-target placeholder="Task id" list="relation-target-tasks">
+      <button class="button secondary relation-remove" type="button" data-relation-remove aria-label="Remove relation">&times;</button>
+    </div>
+  `;
+}
+
+// relationsPickerView renders the create-mode-only picker: a labelled list of
+// relation rows plus an "Add relation" button, and a datalist of existing task
+// ids so the target input can autocomplete. It starts with one row so the
+// picker's shape is visible immediately; a row left with a blank target is
+// dropped on submit.
+export function relationsPickerView(app) {
+  const tasks = app.tasks || [];
+  const suggestions = tasks.map((task) => {
+    const id = value(task, "id", "ID");
+    const title = value(task, "title", "Title");
+    return `<option value="${escapeAttr(id)}"${title ? ` label="${escapeAttr(title)}"` : ""}></option>`;
+  }).join("");
+  return `
+      <div class="wide relation-picker" data-relation-picker>
+        <span class="relation-picker-label">Relations</span>
+        <div class="relation-rows" data-relation-rows>${relationPickerRowView()}</div>
+        <div class="relation-picker-actions">
+          <button class="button secondary" type="button" data-relation-add>Add relation</button>
+        </div>
+        <datalist id="relation-target-tasks">${suggestions}</datalist>
+      </div>`;
+}
+
+// bindRelationRowRemove wires a row's remove button to drop the row.
+function bindRelationRowRemove(row) {
+  const removeButton = row.querySelector?.("[data-relation-remove]");
+  if (removeButton && typeof removeButton.addEventListener === "function") {
+    removeButton.addEventListener("click", () => row.remove());
+  }
+}
+
+// bindRelationsPickerView wires the create form's relation picker: the add
+// button appends a row, each row's remove button drops it. Rows are created by
+// parsing relationPickerRowView into a detached container so the markup stays
+// the single source of truth. The new-task page is static (no poll), so these
+// direct listeners are never lost to a repaint.
+export function bindRelationsPickerView(form) {
+  if (!form || typeof form.querySelector !== "function") return;
+  const rows = form.querySelector("[data-relation-rows]");
+  const addButton = form.querySelector("[data-relation-add]");
+  if (!rows || !addButton || typeof addButton.addEventListener !== "function") return;
+  for (const row of rows.querySelectorAll?.("[data-relation-row]") || []) bindRelationRowRemove(row);
+  addButton.addEventListener("click", () => {
+    const container = document.createElement("div");
+    container.innerHTML = relationPickerRowView();
+    const row = container.firstElementChild;
+    if (!row) return;
+    bindRelationRowRemove(row);
+    rows.appendChild(row);
+    row.querySelector("[data-relation-target]")?.focus?.();
+  });
 }
 
 export function renderTaskFormView(app, task, options = {}) {
@@ -109,6 +201,7 @@ export function renderTaskFormView(app, task, options = {}) {
         <span>Attachments</span>
         <input name="attachments" type="file" multiple>
       </label>` : ""}
+      ${mode === "create" ? relationsPickerView(app) : ""}
       ${mode === "create" ? `
       <label class="check wide">
         <input name="queue_task" type="checkbox" checked>

@@ -3,7 +3,7 @@
 // dispatches. Same reason as the click table: forms live inside elements that
 // replace their own innerHTML.
 
-import { apiPatch, apiPost, taskAPIBase, taskHref } from "./api.js";
+import { apiPatch, apiPost, taskAPIBase, taskHref, taskRelationsAPIPath } from "./api.js";
 import { value } from "./normalize.js";
 import { uploadTaskAttachment } from "./task.js";
 import { inFlight, markBusy } from "./actions.js";
@@ -35,11 +35,36 @@ export const FORMS = {
 
     const formProject = form.elements.project ? form.elements.project.value : form.dataset.project || "";
     if (!formProject) return "Project is required";
+    const collected = collectRelationRows(form);
+    if (collected instanceof Error) return collected.message;
+    if (collected.create.length) payload.relations = collected.create;
     const data = await apiPost(taskAPIBase(formProject), payload);
     const task = data.task || data.Task || {};
     const taskID = value(task, "id", "ID");
     if (!taskID) throw new Error("Created task ID unavailable");
     const createdProject = data.project_id || data.ProjectID || formProject;
+    // child-of rows make the new task the relation target, which the create
+    // payload cannot express for owner tokens; link them now that the task id
+    // exists (X parent_of new-task). The create POST has already committed by
+    // the time a link is attempted, so a failing link must not leave the
+    // still-populated create form behind: submitting it again would POST a
+    // second, duplicate task while the first keeps its other relations but not
+    // its parent. Navigate to the created task no matter what the link does and
+    // report the failure as a relation-retry message naming the parent task's
+    // page, whose relation add form (parent of <new task>) can create the
+    // missing link without creating anything.
+    let linkFailure = "";
+    for (const relation of collected.childOf) {
+      try {
+        await apiPost(taskRelationsAPIPath(createdProject, relation.target_task_id), {
+          target_task_id: taskID,
+          kind: relation.kind,
+        });
+      } catch (error) {
+        linkFailure = `Task created, but linking it as a child of ${relation.target_task_id} failed: ${error.message || error}. Add the relation from ${relation.target_task_id}'s page (parent of ${taskID}).`;
+        break;
+      }
+    }
     history.pushState({}, "", taskHref(createdProject, taskID));
     for (const file of Array.from(form.elements.attachments?.files || [])) {
       await uploadTaskAttachment(createdProject, taskID, file, "initial");
@@ -48,7 +73,7 @@ export const FORMS = {
       await apiPost(`${taskAPIBase(createdProject)}/${encodeURIComponent(taskID)}/schedule`, {});
     }
     await app.load();
-    return "Task created";
+    return linkFailure || "Task created";
   },
 
   async attachmentForm(app, form) {
@@ -102,6 +127,47 @@ export const FORMS = {
     await app.refresh();
   },
 };
+
+// collectRelationRows reads the create form's relation picker rows and splits
+// them by direction. blocks/related_to rows make the new task the source, so
+// they become `relations` payload entries ({target_task_id, kind}; the server
+// defaults the source to the new task). parent_of ("child of") rows make the
+// new task the *target*, so they are returned separately and applied after
+// creation via the link endpoint. Rows with a blank target are dropped so they
+// can never produce a 400; a duplicate (kind, target) pair is rejected
+// outright. At most one child-of row is accepted: a task has exactly one
+// parent, and because child-of links are applied after the create POST has
+// committed, a second distinct child-of row would leave a partially related
+// task instead of failing the submission — so it is rejected before any
+// request goes out. Returns {create, childOf}, or an Error describing the
+// first problem.
+export function collectRelationRows(form) {
+  const rows = typeof form.querySelectorAll === "function"
+    ? form.querySelectorAll("[data-relation-row]")
+    : [];
+  const create = [];
+  const childOf = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const target = String(row.querySelector?.("[data-relation-target]")?.value || "").trim();
+    if (!target) continue;
+    const kind = String(row.querySelector?.("[data-relation-kind]")?.value || "").trim();
+    const key = `${kind}\u0000${target}`;
+    if (seen.has(key)) {
+      return new Error(`Duplicate relation: ${kind || "relation"} ${target}`);
+    }
+    seen.add(key);
+    if (kind === "parent_of") {
+      if (childOf.length) {
+        return new Error("A task can have only one parent; remove the extra child-of rows");
+      }
+      childOf.push({ target_task_id: target, kind });
+    } else {
+      create.push({ target_task_id: target, kind });
+    }
+  }
+  return { create, childOf };
+}
 
 const FORM_PENDING_LABELS = {
   taskForm: "Saving task",

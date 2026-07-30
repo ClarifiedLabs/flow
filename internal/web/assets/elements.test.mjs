@@ -28,6 +28,7 @@ const { renderEpic, memberState } = await import("./elements/epic.js");
 const { renderNowCard } = await import("./elements/now-card.js");
 const { renderReviewPanel } = await import("./elements/review-panel.js");
 const { renderActivityFeed, activityEntries } = await import("./elements/activity-feed.js");
+const { renderTaskFormView, bindRelationsPickerView } = await import("./task-view.js");
 await import("./elements/lane.js");
 await import("./elements/tab-strip.js");
 const { inFlight } = await import("./actions.js");
@@ -906,7 +907,26 @@ test("an open gate badges the review tab", () => {
   assert.equal(badges.review.tone, "warn");
   assert.equal(tabBadges({ checks: [], transitions: [], statusLog: [] }).review, undefined);
 });
+test("the relation picker adds and removes rows", () => {
+  const app = { projects: [{ id: "p-1", name: "flow" }], tasks: [] };
+  const host = document.createElement("div");
+  host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
+  const form = host.querySelector("[data-task-form]");
+  bindRelationsPickerView(form);
+  const rows = form.querySelector("[data-relation-rows]");
+  const addButton = form.querySelector("[data-relation-add]");
 
+  assert.equal(rows.children.length, 1, "the picker starts with one row");
+  addButton.click();
+  addButton.click();
+  assert.equal(rows.children.length, 3);
+  const firstRow = rows.children[0];
+  assert.equal(firstRow.querySelector("[data-relation-kind]").children[0].getAttribute("value"), "parent_of");
+  assert.ok(firstRow.querySelector("[data-relation-target]"));
+
+  firstRow.querySelector("[data-relation-remove]").click();
+  assert.equal(rows.children.length, 2);
+});
 // --- review verdict pending state (flow-change / submitReview) --------------
 
 function reviewChangeData() {

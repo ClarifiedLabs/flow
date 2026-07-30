@@ -107,6 +107,12 @@ export function taskAPIBase(projectID) {
   return id ? `/v2/projects/${encodeURIComponent(id)}/tasks` : "/v2/tasks";
 }
 
+// taskRelationsAPIPath builds the per-task relations endpoint used to link and
+// unlink relations after a task exists.
+export function taskRelationsAPIPath(projectID, taskID) {
+  return `${taskAPIBase(projectID)}/${encodeURIComponent(taskID)}/relations`;
+}
+
 // flowsAPIBase / agentDefsAPIBase scope the flow-configuration endpoints to a
 // project, mirroring taskAPIBase: an explicit project id yields the
 // project-scoped path, an empty id falls back to the unscoped route that only
