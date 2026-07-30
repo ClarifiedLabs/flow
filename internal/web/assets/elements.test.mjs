@@ -160,6 +160,112 @@ test("board filters partition the tasks they claim to", () => {
   assert.ok(matchesFilter(queued, "queued"));
 });
 
+test("a task parked in the queue reads as awaiting a worker, not working", () => {
+  const now = Date.now();
+  const fiftyMinutesAgo = new Date(now - 50 * 60_000).toISOString();
+  const model = cardModel(
+    entry({ laneState: "awaiting_worker", card: { dwell_since: fiftyMinutesAgo } }),
+    { now },
+  );
+  assert.equal(model.lifecycleState, "in_progress");
+  assert.equal(model.queuedForWorker, true);
+  assert.equal(model.phase, "await");
+  assert.equal(model.activity, `Awaiting worker · ${model.dwell}`);
+  assert.match(model.activity, /Awaiting worker · 50m/);
+  // Fifty minutes in the queue is ordinary queue time, not a stall: the dwell
+  // is graded on the queued thresholds, and the label carries no prefix.
+  assert.equal(model.dwellTone, "muted");
+  assert.equal(model.dwellLabel, model.dwell);
+  assert.doesNotMatch(model.dwellLabel, /stalled|waiting/);
+  assert.equal(model.running, false);
+  assert.ok(!matchesFilter(model, "running"), "nobody is working on it");
+  assert.ok(!matchesFilter(model, "queued"), "Queued still means lifecycle scheduled only");
+  assert.ok(matchesFilter(model, "all"), "it stays visible on the board");
+});
+
+test("an awaiting-worker card without a dwell clock still names the wait", () => {
+  const model = cardModel(entry({ laneState: "awaiting_worker", card: { dwell_since: "" } }));
+  assert.equal(model.activity, "Awaiting worker");
+});
+
+test("a long queue warms on queue time, not running time", () => {
+  const now = Date.now();
+  const threeHoursAgo = new Date(now - 3 * HOUR).toISOString();
+  const model = cardModel(entry({ laneState: "awaiting_worker", card: { dwell_since: threeHoursAgo } }), { now });
+  assert.equal(model.dwellTone, "warn", "3h in the queue is a warning, not a danger");
+});
+
+test("held, gate and failed waits outrank the queued-for-worker tone", () => {
+  const held = cardModel(entry({ laneState: "awaiting_worker", card: { held: true } }));
+  assert.equal(held.phase, "triage");
+  assert.match(held.activity, /Held by you/);
+
+  const gate = cardModel(entry({ laneState: "awaiting_worker", card: { wait: { kind: "human_gate", message: "Ship it?" } } }));
+  assert.equal(gate.phase, "await");
+  assert.equal(gate.activity, "Ship it?");
+
+  const failed = cardModel(
+    entry({ laneState: "awaiting_worker", card: { wait: { kind: "operator_intervention", reason: "execution_failed" } } }),
+  );
+  assert.equal(failed.phase, "danger");
+  assert.match(failed.activity, /Workflow step failed/);
+});
+
+test("a parked task that is otherwise ready to merge keeps the await presentation", () => {
+  // in_progress at its last step with the required checks satisfied is normally
+  // ready to merge. Parked in the queue, the amber await tone and the "Awaiting
+  // worker" line must win: no Merge action, no attention flag, no merge copy.
+  const checks = {
+    step_index: 5,
+    step_count: 6,
+    required_checks: { total: 2, satisfied: 2 },
+  };
+  const model = cardModel(entry({ laneState: "awaiting_worker", card: { ...checks } }));
+  assert.equal(model.queuedForWorker, true);
+  assert.equal(model.phase, "await", "the await tone wins over ready-to-merge");
+  assert.equal(model.readyToMerge, false, "no Merge action while the job is unclaimed");
+  assert.equal(model.actionLabel, "");
+  assert.equal(model.needsYou, false);
+  assert.match(model.activity, /Awaiting worker/);
+  assert.doesNotMatch(model.reason, /ready to merge/);
+  assert.ok(!renderTaskCard(model).includes("data-card-merge"), "the lane card must not advertise Merge");
+
+  // Sanity: the very same entry, once claimed, is ready to merge — so it is the
+  // queue gate, not a malformed entry, that holds the action back.
+  const claimed = cardModel(entry({ card: { ...checks } }));
+  assert.equal(claimed.readyToMerge, true);
+  assert.equal(claimed.actionLabel, "Merge");
+  assert.equal(claimed.needsYou, true);
+});
+
+test("the table hides an awaiting-worker row from Running but keeps it under all", () => {
+  const parked = cardModel(entry({ task: { id: "t-parked" }, laneState: "awaiting_worker" }));
+  const working = cardModel(entry({ task: { id: "t-working" } }));
+  const all = renderBoardTable([parked, working], "all");
+  assert.match(all, /t-parked/);
+  assert.match(all, /Awaiting worker/);
+  assert.match(all, /rail-label is-idle">in progress</, "the step rail must not pretend work is happening");
+  const running = renderBoardTable([parked, working], "running");
+  assert.ok(!running.includes("t-parked"));
+  assert.match(running, /t-working/);
+});
+
+test("a lane card for a queued-for-worker task wears the await tone and names the wait", async () => {
+  const root = globalThis.document.body;
+  const lane = mountElement(root, "flow-lane", {
+    key: "in_progress",
+    label: "In Progress",
+    cards: [cardModel(entry({ laneState: "awaiting_worker" }))],
+  });
+  await flush();
+  const card = lane.querySelector("flow-task-card");
+  assert.ok(card, "the lane renders the card");
+  assert.equal(card.getAttribute("data-phase"), "await");
+  assert.match(card.innerHTML, /Awaiting worker/);
+  assert.ok(!card.innerHTML.includes('class="step"'), "no rail while the job sits unclaimed");
+  lane.remove();
+});
+
 // --- waiting on blockers ----------------------------------------------------
 
 test("a scheduled card with a live blocker carries it as waiting on", () => {

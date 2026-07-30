@@ -132,13 +132,25 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
   const heldBy = String(value(card, "held_by", "HeldBy") || "");
   const convergenceHold = held && heldBy === "system";
   const waitKind = waitKindOf(wait);
-  const readyToMerge = isReadyToMerge(entry);
+  // Queued for a worker: the task is in progress but its job sits unclaimed
+  // in the queue. The board must not pretend anyone is working on it, so this
+  // one fact drives the phase tone, the activity line, the dwell thresholds
+  // and the Running filter all at once.
+  const queuedForWorker = entry.laneState === "awaiting_worker";
+  // A task parked in the queue may independently satisfy the ready-to-merge
+  // heuristic, but it is not actionable until a worker claims it: hold back the
+  // Merge action, the attention flag, and the "ready to merge" copy so the card
+  // keeps its amber await presentation and cannot contradict its own "Awaiting
+  // worker" line. Only held/gate/question/failed waits outrank this.
+  const readyToMerge = isReadyToMerge(entry) && !queuedForWorker;
 
   // A manual hold gets the triage tone so the board tells the truth about who
   // owns the task. A convergence hold is different: the system parked the task
   // on a human scope decision, so it reads as blocked — which is what it is.
   // A task waiting on a person is amber (await), a failed one is red;
   // collapsing both into "blocked" hid the difference that matters most.
+  // A task parked in the queue borrows the same amber await tone: it is
+  // waiting too, just on a worker rather than a person.
   const phaseState = held
     ? convergenceHold
       ? "blocked"
@@ -149,9 +161,11 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
         ? "danger"
         : readyToMerge
           ? "approved"
-          : entry.blocked
-            ? "blocked"
-            : entry.laneState || lifecycleState;
+          : queuedForWorker
+            ? "await"
+            : entry.blocked
+              ? "blocked"
+              : entry.laneState || lifecycleState;
   const stepIndex = Number(value(card, "step_index", "StepIndex") || 0);
   const stepCount = Number(value(card, "step_count", "StepCount") || 0);
   const currentStep = value(card, "current_step", "CurrentStep") || {};
@@ -161,8 +175,11 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
       .replace(/[_-]+/g, " ")
       .trim();
 
+  // A task parked in the queue is queued work whatever the lifecycle says:
+  // it gets the generous queued dwell thresholds, not the running ones.
   let dwellKind = "running";
-  if (lifecycleState === "unscheduled") dwellKind = "unscheduled";
+  if (queuedForWorker) dwellKind = "queued";
+  else if (lifecycleState === "unscheduled") dwellKind = "unscheduled";
   else if (lifecycleState === "scheduled") dwellKind = "queued";
   else if (waitKind === "failed" || waitKind === "budget") dwellKind = "failed";
   else if (waitKind) dwellKind = "waiting";
@@ -189,6 +206,7 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
     projectName: showProject ? entry.project?.name || "" : "",
     lifecycleState,
     laneState: entry.laneState || "",
+    queuedForWorker,
     phase: phaseSlug(phaseState),
     held,
     heldBy,
@@ -210,8 +228,17 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
     stepCount,
     stepName,
     scheduled: lifecycleState !== "unscheduled",
-    running: Boolean(stepCount) && lifecycleState === "in_progress",
-    activity: activityLine(card, { held, convergenceHold, waitKind, stepName, currentStep, lifecycleState }),
+    running: Boolean(stepCount) && lifecycleState === "in_progress" && !queuedForWorker,
+    activity: activityLine(card, {
+      held,
+      convergenceHold,
+      waitKind,
+      queuedForWorker,
+      dwellSince,
+      stepName,
+      currentStep,
+      lifecycleState,
+    }),
     dwell,
     dwellLabel,
     dwellSince,
@@ -257,7 +284,16 @@ export function waitingOnOmitted(card, lifecycleState) {
 
 // activityLine is the one line of prose describing what is happening now,
 // present progressive, derived mechanically from the node name.
-function activityLine(card, { held, convergenceHold, waitKind, stepName, currentStep, lifecycleState }) {
+function activityLine(card, {
+  held,
+  convergenceHold,
+  waitKind,
+  queuedForWorker,
+  dwellSince,
+  stepName,
+  currentStep,
+  lifecycleState,
+}) {
   if (held) {
     return convergenceHold
       ? "Held for convergence review — decide whether to split or re-scope"
@@ -269,6 +305,10 @@ function activityLine(card, { held, convergenceHold, waitKind, stepName, current
   if (waitKind === "gate" || waitKind === "question") return message || "Waiting for a human decision";
   if (lifecycleState === "unscheduled") return "";
   if (lifecycleState === "scheduled") return "Queued for a worker";
+  if (queuedForWorker) {
+    const dwell = formatDwell(dwellSince);
+    return dwell ? `Awaiting worker · ${dwell}` : "Awaiting worker";
+  }
   const kind = String(value(currentStep, "kind", "Kind") || "");
   return workflowActivityLabel(stepName, kind) || "Working";
 }
@@ -300,7 +340,9 @@ export function matchesFilter(model, filter) {
     case "attention":
       return model.needsYou;
     case "running":
-      return model.lifecycleState === "in_progress" && !model.needsYou;
+      // Queued-for-worker tasks are in progress on paper but nobody is
+      // working on them, so they do not count as running.
+      return model.lifecycleState === "in_progress" && !model.needsYou && !model.queuedForWorker;
     case "queued":
       return model.lifecycleState === "scheduled";
     case "unscheduled":
