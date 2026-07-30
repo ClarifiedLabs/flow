@@ -348,6 +348,27 @@ test("a blocker that reopens is flagged again on the next refresh", async () => 
   element.remove();
 });
 
+test("navigating the mounted element to another task drops the previous task's blocker flags", async () => {
+  // Acceptance: navigation guards must keep one task's blocker state from
+  // leaking onto another. The panel is a stateless render shell, so the
+  // guarantee is that each paint reflects only the model it was handed: when
+  // the rail reuses the same element instance for a different task, the old
+  // task's unresolved markers must not survive into the new task's view.
+  const root = globalThis.document.body;
+  const element = mountElement(root, "flow-task-relations", modelWithBlockers(["in_progress"]));
+  await settle();
+  assert.match(element.innerHTML, /is-unresolved/, "the first task's live blocker starts flagged");
+
+  // Navigate to a different task whose blockers are all done. Same element
+  // instance, fresh model — as the rail reuses it across tasks.
+  element.data = modelWithBlockers(["done", "done"]);
+  await settle();
+
+  assert.doesNotMatch(element.innerHTML, /is-unresolved/, "the previous task's flags do not leak across navigation");
+  assert.equal(element.querySelectorAll('[data-unresolved="true"]').length, 0);
+  element.remove();
+});
+
 test("the rail forwards fresh data to the relations element even when its own markup is unchanged", async () => {
   // Regression: the rail only forwarded data in afterPaint, which the base
   // paint skips when the markup is stable — so a refresh that changed only a
