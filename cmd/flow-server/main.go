@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,8 +26,10 @@ import (
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
 	flowlog "github.com/ClarifiedLabs/flow/internal/logging"
+	"github.com/ClarifiedLabs/flow/internal/metrics"
 	flowtoken "github.com/ClarifiedLabs/flow/internal/token"
 	"github.com/ClarifiedLabs/flow/internal/version"
+	"github.com/ClarifiedLabs/flow/internal/worker"
 )
 
 // lifecycleTickInterval is how often the durable background ticker drains timers
@@ -83,6 +88,10 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	var hookTokenFile string
 	var workerJoinToken string
 	var workerJoinTokenFile string
+	var orchestratorToken string
+	var orchestratorTokenFile string
+	var noMetrics bool
+	var metricsListen string
 	var clientConfigPathFlag string
 	var noWriteClientConfig bool
 	var gitCommitName string
@@ -96,6 +105,10 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&hookTokenFile, "hook-token-file", "", "mode-0600 file containing the hook bearer token")
 	flags.StringVar(&workerJoinToken, "worker-join-token", "", "worker join bearer token")
 	flags.StringVar(&workerJoinTokenFile, "worker-join-token-file", "", "mode-0600 file containing the worker join bearer token")
+	flags.StringVar(&orchestratorToken, "orchestrator-token", "", "orchestrator bearer token (authorizes only GET /v2/queue/stats; not generated when unset)")
+	flags.StringVar(&orchestratorTokenFile, "orchestrator-token-file", "", "mode-0600 file containing the orchestrator bearer token")
+	flags.BoolVar(&noMetrics, "no-metrics", false, "disable the telemetry endpoint (/readyz, /livez, /metrics)")
+	flags.StringVar(&metricsListen, "metrics-listen", "", "telemetry endpoint listen address")
 	flags.StringVar(&clientConfigPathFlag, "client-config", "", "client config path to write for local CLI discovery")
 	flags.BoolVar(&noWriteClientConfig, "no-write-client-config", false, "do not write a local client config")
 	flags.StringVar(&gitCommitName, "git-commit-name", "", "git user.name for coordinator-created commits")
@@ -171,6 +184,20 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		workerJoinToken, err = config.ReadTokenFile(workerJoinTokenFile)
 		if err != nil {
 			fmt.Fprintf(stderr, "read worker join token: %v\n", err)
+			return 1
+		}
+	}
+	if strings.TrimSpace(orchestratorToken) == "" {
+		orchestratorToken = strings.TrimSpace(os.Getenv("FLOW_ORCHESTRATOR_TOKEN"))
+	}
+	if strings.TrimSpace(orchestratorTokenFile) != "" {
+		if strings.TrimSpace(orchestratorToken) != "" {
+			fmt.Fprintln(stderr, "--orchestrator-token and --orchestrator-token-file cannot be used together")
+			return 2
+		}
+		orchestratorToken, err = config.ReadTokenFile(orchestratorTokenFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "read orchestrator token: %v\n", err)
 			return 1
 		}
 	}
@@ -267,6 +294,15 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "store hook token: %v\n", err)
 		return 1
 	}
+	if orchestratorToken != "" {
+		if err := credentials.ReplaceSubjectCredential(context.Background(), coordinator.CredentialInput{
+			Token: orchestratorToken,
+			Scope: coordinator.TokenScopeOrchestrator,
+		}); err != nil {
+			fmt.Fprintf(stderr, "store orchestrator token: %v\n", err)
+			return 1
+		}
+	}
 
 	if err := registry.OpenAll(context.Background()); err != nil {
 		fmt.Fprintf(stderr, "open projects: %v\n", err)
@@ -308,6 +344,41 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// Telemetry: a single unauthenticated port serving /readyz (global DB
+	// ping), /livez, and /metrics. It must only be exposed inside the cluster.
+	telemetryRegistry := metrics.NewWithBuildInfo(metrics.BuildInfo{
+		Name:    "flow_server_build_info",
+		Help:    "flow-server build information.",
+		Version: version.Current().String(),
+	})
+	counters := telemetryCounters{
+		requests:  telemetryRegistry.Counter("flow_http_requests_total", "HTTP API requests by route and response status."),
+		enqueued:  telemetryRegistry.Counter("flow_jobs_enqueued_total", "Jobs successfully enqueued via POST /v2/jobs."),
+		completed: telemetryRegistry.Counter("flow_jobs_completed_total", "Jobs released to the finished state."),
+	}
+	queueDepth := telemetryRegistry.Gauge("flow_queue_depth", "Jobs by state across every project database.")
+	updateQueueDepthGauge(ctx, registry.All(), queueDepth)
+	telemetrySettings := metrics.Resolve(cfg.Metrics, config.DefaultTelemetryListen, metrics.Overrides{
+		Disable:    noMetrics,
+		DisableSet: noMetrics,
+		Listen:     metricsListen,
+		ListenSet:  strings.TrimSpace(metricsListen) != "",
+	})
+	telemetry, err := metrics.StartEndpoint(ctx, slog.Default(), metrics.Mux(telemetryRegistry, func() bool {
+		pingCtx, pingCancel := context.WithTimeout(context.Background(), time.Second)
+		defer pingCancel()
+		return globalStore.DB().PingContext(pingCtx) == nil
+	}), telemetrySettings)
+	if err != nil {
+		fmt.Fprintf(stderr, "start telemetry endpoint: %v\n", err)
+		return 1
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), metrics.DefaultShutdownTimeout)
+		defer shutdownCancel()
+		_ = telemetry.Shutdown(shutdownCtx)
+	}()
+
 	// Durable background ticker: drains due timers and runs crash recovery on an
 	// interval, so recovery fires regardless of inbound API traffic. It is
 	// stopped (and awaited) before the deferred close runs. Projects opened
@@ -315,10 +386,10 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	tickerDone := make(chan struct{})
 	go func() {
 		defer close(tickerDone)
-		runLifecycleTicker(ctx, registry, stderr)
+		runLifecycleTicker(ctx, registry, stderr, queueDepth)
 	}()
 
-	srv := &http.Server{Addr: cfg.ListenAddr, Handler: server}
+	srv := &http.Server{Addr: cfg.ListenAddr, Handler: instrumentAPIHandler(server, counters)}
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
@@ -348,7 +419,7 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 // a large registry cannot exhaust connections or goroutines.
 const lifecycleTickConcurrency = 8
 
-func runLifecycleTicker(ctx context.Context, registry *api.Registry, stderr io.Writer) {
+func runLifecycleTicker(ctx context.Context, registry *api.Registry, stderr io.Writer, queueDepth *metrics.Gauge) {
 	ticker := time.NewTicker(lifecycleTickInterval)
 	defer ticker.Stop()
 	for {
@@ -358,8 +429,93 @@ func runLifecycleTicker(ctx context.Context, registry *api.Registry, stderr io.W
 		case <-ticker.C:
 			slog.Debug("lifecycle ticker tick")
 			tickProjects(ctx, registry.All(), stderr)
+			updateQueueDepthGauge(ctx, registry.All(), queueDepth)
 		}
 	}
+}
+
+// updateQueueDepthGauge refreshes the flow_queue_depth gauge from every open
+// project database. A project whose jobs cannot be listed is skipped rather
+// than failing the whole refresh: partial depth is better than a stale zero.
+func updateQueueDepthGauge(ctx context.Context, bundles []*api.ProjectBundle, gauge *metrics.Gauge) {
+	var queued, claimed, running float64
+	for _, bundle := range bundles {
+		jobs, err := bundle.Queue.ListJobs(ctx)
+		if err != nil {
+			slog.Debug("queue depth refresh failed", "project", bundle.Project.ID, "error", err)
+			continue
+		}
+		for _, job := range jobs {
+			switch job.State {
+			case worker.JobQueued:
+				queued++
+			case worker.JobClaimed:
+				claimed++
+			case worker.JobRunning:
+				running++
+			}
+		}
+	}
+	gauge.Set(queued, map[string]string{"state": "queued"})
+	gauge.Set(claimed, map[string]string{"state": "claimed"})
+	gauge.Set(running, map[string]string{"state": "running"})
+}
+
+// telemetryCounters holds the flow-server API counters.
+type telemetryCounters struct {
+	requests  *metrics.Counter
+	enqueued  *metrics.Counter
+	completed *metrics.Counter
+}
+
+// instrumentAPIHandler wraps the API server to count requests by route and
+// status, successful enqueues, and jobs released to the finished state.
+func instrumentAPIHandler(handler http.Handler, counters telemetryCounters) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captureRelease := r.Method == http.MethodPost && r.URL.Path == "/v2/workers/release"
+		recorder := &statusCapturingWriter{ResponseWriter: w, status: http.StatusOK}
+		if captureRelease {
+			recorder.body = &bytes.Buffer{}
+		}
+		handler.ServeHTTP(recorder, r)
+		counters.requests.Inc(map[string]string{
+			"route":  r.Method + " " + r.URL.Path,
+			"status": strconv.Itoa(recorder.status),
+		})
+		if r.Method == http.MethodPost && r.URL.Path == "/v2/jobs" && recorder.status/100 == 2 {
+			counters.enqueued.Inc(nil)
+		}
+		if captureRelease && recorder.status/100 == 2 {
+			var released struct {
+				Job struct {
+					State string `json:"state"`
+				} `json:"job"`
+			}
+			if json.Unmarshal(recorder.body.Bytes(), &released) == nil && released.Job.State == string(worker.JobFinished) {
+				counters.completed.Inc(nil)
+			}
+		}
+	})
+}
+
+// statusCapturingWriter records the response status, and optionally buffers
+// the body so the instrumenting wrapper can inspect small JSON responses.
+type statusCapturingWriter struct {
+	http.ResponseWriter
+	status int
+	body   *bytes.Buffer
+}
+
+func (w *statusCapturingWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusCapturingWriter) Write(p []byte) (int, error) {
+	if w.body != nil {
+		w.body.Write(p)
+	}
+	return w.ResponseWriter.Write(p)
 }
 
 // tickProjects ticks every project's engine and git-event consumer concurrently,

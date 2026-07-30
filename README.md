@@ -36,7 +36,9 @@ docker pull ghcr.io/clarifiedlabs/flow-worker:latest
 ```
 
 For Docker Compose and container auth details, see
-[Detailed setup](docs/setup.md#docker-compose).
+[Detailed setup](docs/setup.md#docker-compose). For Kubernetes (telemetry
+probes, ephemeral workers, and the `flow-orchestrator` autoscaler), see
+[docs/kubernetes.md](docs/kubernetes.md).
 
 ## Quickstart
 

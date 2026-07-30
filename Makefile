@@ -2,7 +2,7 @@
 
 .PHONY: build ci format install test js-test release web-smoke
 
-COMMAND_PACKAGES := ./cmd/flow ./cmd/flow-server ./cmd/flow-worker
+COMMAND_PACKAGES := ./cmd/flow ./cmd/flow-server ./cmd/flow-worker ./cmd/flow-orchestrator
 BINDIR ?= $(HOME)/bin
 GO_TEST_P ?= 4
 
@@ -17,7 +17,7 @@ format:
 
 install: build
 	mkdir -p $(BINDIR)
-	install -m 0755 bin/flow bin/flow-server bin/flow-worker $(BINDIR)/
+	install -m 0755 bin/flow bin/flow-server bin/flow-worker bin/flow-orchestrator $(BINDIR)/
 
 test:
 	go test -p $(GO_TEST_P) ./...

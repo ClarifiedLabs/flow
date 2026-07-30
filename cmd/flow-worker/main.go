@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/api/contract"
@@ -22,6 +23,7 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	flowlog "github.com/ClarifiedLabs/flow/internal/logging"
+	"github.com/ClarifiedLabs/flow/internal/metrics"
 	"github.com/ClarifiedLabs/flow/internal/version"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 	workerexec "github.com/ClarifiedLabs/flow/internal/worker/execution"
@@ -122,6 +124,9 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	var configPath string
 	var registerOnly bool
 	var once bool
+	var ephemeral bool
+	var noMetrics bool
+	var metricsListen string
 	var claimWait time.Duration
 	var leaseDuration time.Duration
 	var heartbeatTTL time.Duration
@@ -131,6 +136,9 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&configPath, "config", "", "worker config path")
 	flags.BoolVar(&registerOnly, "register-only", false, "register and heartbeat without claiming jobs")
 	flags.BoolVar(&once, "once", false, "run at most one claim attempt")
+	flags.BoolVar(&ephemeral, "ephemeral", false, "keep long-polling until one job is claimed, run it, then exit")
+	flags.BoolVar(&noMetrics, "no-metrics", false, "disable the telemetry endpoint (/readyz, /livez, /metrics)")
+	flags.StringVar(&metricsListen, "metrics-listen", "", "telemetry endpoint listen address")
 	flags.DurationVar(&claimWait, "claim-wait", 30*time.Second, "claim long-poll duration")
 	flags.DurationVar(&leaseDuration, "lease", 60*time.Second, "lease duration")
 	flags.DurationVar(&heartbeatTTL, "heartbeat-ttl", 60*time.Second, "worker heartbeat TTL")
@@ -141,6 +149,10 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	}
 	if flags.NArg() != 0 {
 		fmt.Fprintln(stderr, "flow-worker does not accept positional arguments")
+		return 2
+	}
+	if once && ephemeral {
+		fmt.Fprintln(stderr, "--once and --ephemeral cannot be used together")
 		return 2
 	}
 
@@ -173,6 +185,35 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	}
 	os.Unsetenv("FLOW_WORKER_JOIN_TOKEN")
 
+	// Telemetry: one unauthenticated port serving /readyz (set once the worker
+	// has registered with the coordinator), /livez, and /metrics.
+	var registeredReady atomic.Bool
+	telemetryRegistry := metrics.NewWithBuildInfo(metrics.BuildInfo{
+		Name:    "flow_worker_build_info",
+		Help:    "flow-worker build information.",
+		Version: version.Current().String(),
+	})
+	jobMetrics = &workerJobMetrics{
+		claimed:   telemetryRegistry.Counter("flow_jobs_claimed_total", "Jobs claimed by this worker."),
+		completed: telemetryRegistry.Counter("flow_jobs_completed_total", "Jobs released by this worker by final state."),
+	}
+	telemetrySettings := metrics.Resolve(cfg.Metrics, config.DefaultTelemetryListen, metrics.Overrides{
+		Disable:    noMetrics,
+		DisableSet: noMetrics,
+		Listen:     metricsListen,
+		ListenSet:  strings.TrimSpace(metricsListen) != "",
+	})
+	telemetry, err := metrics.StartEndpoint(context.Background(), slog.Default(), metrics.Mux(telemetryRegistry, registeredReady.Load), telemetrySettings)
+	if err != nil {
+		fmt.Fprintf(stderr, "start telemetry endpoint: %v\n", err)
+		return 1
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), metrics.DefaultShutdownTimeout)
+		defer shutdownCancel()
+		_ = telemetry.Shutdown(shutdownCtx)
+	}()
+
 	jobRegistry := executionJobRegistry{}
 	controlClient := terminalbridge.NewControlClient(cfg.CoordinatorURL, cfg.WorkerID, cfg.Token, jobRegistry)
 	controlCtx, controlCancel := context.WithCancel(context.Background())
@@ -202,6 +243,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "registered: %s\n", registered.ID)
+	registeredReady.Store(true)
 	if registerOnly {
 		heartbeat, err := client.HeartbeatWorker(flowclient.HeartbeatWorkerInput{
 			WorkerID:     cfg.WorkerID,
@@ -224,9 +266,10 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		HeartbeatTTL:  heartbeatTTL,
 	}
 	runOutput := &lockedWriter{writer: stdout}
-	slots := workerSlotCount(cfg)
 	var runErr error
-	if slots == 1 {
+	if ephemeral {
+		runErr = runWorkerEphemeral(client, cfg, timings, runOutput)
+	} else if slots := workerSlotCount(cfg); slots == 1 {
 		runErr = runWorkerLoop(client, cfg, timings, once, runOutput)
 	} else {
 		runErr = runWorkerSlots(cfg, timings, slots, once, runOutput)
@@ -236,6 +279,62 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// workerJobMetrics are the per-worker job counters. The package-level handle
+// is nil-safe so claim paths can count without threading state through every
+// helper, and tests that never start the telemetry endpoint stay unaffected.
+type workerJobMetrics struct {
+	claimed   *metrics.Counter
+	completed *metrics.Counter
+}
+
+var jobMetrics *workerJobMetrics
+
+func (m *workerJobMetrics) jobClaimed() {
+	if m == nil {
+		return
+	}
+	m.claimed.Inc(nil)
+}
+
+func (m *workerJobMetrics) jobCompleted(result string) {
+	if m == nil {
+		return
+	}
+	m.completed.Inc(map[string]string{"result": result})
+}
+
+// runWorkerEphemeral keeps long-polling until a job is claimed, runs exactly
+// that one job, then returns. A job-scoped failure has already been reported
+// to the coordinator (release, check verdict, or discarded-on-lease-loss), so
+// it is not a process failure: the worker exits 0 either way and the kubelet
+// restarts the container for the next assignment.
+func runWorkerEphemeral(client *flowclient.Client, cfg config.WorkerConfig, timings workerTimings, stdout io.Writer) error {
+	for {
+		slog.Debug("flow-worker ephemeral claim attempt", "worker_id", cfg.WorkerID)
+		claimed, err := runWorkerOnce(client, cfg, timings, stdout)
+		if err != nil {
+			if flowclient.IsRetryableError(err) {
+				slog.Debug("flow-worker transient worker error", "worker_id", cfg.WorkerID, "error", err)
+				fmt.Fprintf(stdout, "worker transient error: %v; retrying in %s\n", err, transientWorkerRetryDelay)
+				time.Sleep(transientWorkerRetryDelay)
+				continue
+			}
+			var jobErr *jobError
+			if errors.As(err, &jobErr) {
+				fmt.Fprintf(stdout, "job error: %v; exiting\n", err)
+				return nil
+			}
+			return err
+		}
+		if claimed {
+			return nil
+		}
+		if timings.ClaimWait <= 0 {
+			time.Sleep(time.Second)
+		}
+	}
 }
 
 type workerTimings struct {
@@ -380,6 +479,7 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 		"bucket", claim.Job.CapacityBucket,
 	)
 	fmt.Fprintf(stdout, "claimed: %s lease=%s\n", claim.Job.ID, claim.Lease.ID)
+	jobMetrics.jobClaimed()
 	running, err := client.MarkJobRunning(claim.Lease.ID)
 	if err != nil {
 		return true, jobFailure(fmt.Errorf("mark job running: %w", err))
@@ -521,6 +621,7 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 	}
 	slog.Debug("flow-worker lease released", "job_id", released.ID, "state", released.State)
 	fmt.Fprintf(stdout, "released: %s state=%s\n", released.ID, released.State)
+	jobMetrics.jobCompleted(string(released.State))
 	if checkErr != nil && !staleCheckResult {
 		return true, jobFailure(checkErr)
 	}

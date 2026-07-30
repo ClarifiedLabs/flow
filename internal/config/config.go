@@ -11,6 +11,7 @@ import (
 	"time"
 
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
+	"github.com/ClarifiedLabs/flow/internal/metrics"
 	"github.com/ClarifiedLabs/flow/internal/scheduler"
 	"gopkg.in/yaml.v3"
 )
@@ -26,6 +27,7 @@ type CoordinatorConfig struct {
 	Workers                    CoordinatorWorkers   `json:"workers" yaml:"workers"`
 	HarnessArgs                []string             `json:"harness_args" yaml:"harness_args"`
 	Git                        CoordinatorGitConfig `json:"git" yaml:"git"`
+	Metrics                    metrics.Config       `json:"metrics" yaml:"metrics"`
 }
 
 // DefaultAgentConfig configures the coordinator's fallback agent: the harness
@@ -204,15 +206,16 @@ type ClientConfig struct {
 }
 
 type WorkerConfig struct {
-	WorkerID       string               `json:"worker_id" yaml:"worker_id"`
-	CoordinatorURL string               `json:"coordinator_url" yaml:"coordinator_url"`
-	Token          string               `json:"token" yaml:"token"`
-	WorkDir        string               `json:"work_dir" yaml:"work_dir"`
-	Labels         map[string]string    `json:"labels" yaml:"labels"`
-	Taints         []scheduler.Taint    `json:"taints" yaml:"taints"`
-	Capacity WorkerCapacity   `json:"capacity" yaml:"capacity"`
-	Tmux     WorkerTmuxConfig `json:"tmux" yaml:"tmux"`
-	Git            WorkerGitConfig      `json:"git" yaml:"git"`
+	WorkerID       string            `json:"worker_id" yaml:"worker_id"`
+	CoordinatorURL string            `json:"coordinator_url" yaml:"coordinator_url"`
+	Token          string            `json:"token" yaml:"token"`
+	WorkDir        string            `json:"work_dir" yaml:"work_dir"`
+	Labels         map[string]string `json:"labels" yaml:"labels"`
+	Taints         []scheduler.Taint `json:"taints" yaml:"taints"`
+	Capacity       WorkerCapacity    `json:"capacity" yaml:"capacity"`
+	Tmux           WorkerTmuxConfig  `json:"tmux" yaml:"tmux"`
+	Git            WorkerGitConfig   `json:"git" yaml:"git"`
+	Metrics        metrics.Config    `json:"metrics" yaml:"metrics"`
 }
 
 type WorkerCapacity struct {
@@ -297,6 +300,7 @@ func LoadCoordinator(path string) (CoordinatorConfig, error) {
 	cfg.Workers = fileCfg.Workers
 	cfg.HarnessArgs = fileCfg.HarnessArgs
 	cfg.DefaultAgent = fileCfg.DefaultAgent
+	cfg.Metrics = fileCfg.Metrics
 	if strings.TrimSpace(fileCfg.Git.CommitName) != "" {
 		cfg.Git.CommitName = strings.TrimSpace(fileCfg.Git.CommitName)
 	}
@@ -620,6 +624,7 @@ func LoadWorker(path string) (WorkerConfig, error) {
 	if fileCfg.Tmux.SocketPath != "" {
 		cfg.Tmux.SocketPath = fileCfg.Tmux.SocketPath
 	}
+	cfg.Metrics = fileCfg.Metrics
 
 	return normalizeWorker(cfg)
 }

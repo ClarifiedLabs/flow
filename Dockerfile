@@ -20,7 +20,7 @@ RUN go mod download
 COPY . .
 RUN mkdir -p /out \
     && ldflags="-s -w -X github.com/ClarifiedLabs/flow/internal/version.Version=${VERSION} -X github.com/ClarifiedLabs/flow/internal/version.Commit=${COMMIT} -X github.com/ClarifiedLabs/flow/internal/version.Date=${DATE}" \
-    && CGO_ENABLED=1 go build -trimpath -ldflags="$ldflags" -o /out/ ./cmd/flow ./cmd/flow-server ./cmd/flow-worker
+    && CGO_ENABLED=1 go build -trimpath -ldflags="$ldflags" -o /out/ ./cmd/flow ./cmd/flow-server ./cmd/flow-worker ./cmd/flow-orchestrator
 
 FROM debian:trixie-slim AS flow-server
 
@@ -52,10 +52,10 @@ RUN apt-get update \
     && mkdir -p /var/lib/flow/config \
     && chown -R flow:flow /home/flow /var/lib/flow
 
-COPY --from=build /out/flow /out/flow-server /out/flow-worker /usr/local/bin/
+COPY --from=build /out/flow /out/flow-server /out/flow-worker /out/flow-orchestrator /usr/local/bin/
 COPY examples /usr/share/flow/examples
 VOLUME ["/var/lib/flow"]
-EXPOSE 8421
+EXPOSE 8421 8422
 USER flow
 CMD ["flow-server", "serve", "--config", "/usr/share/flow/examples/docker/flow-server.yaml"]
 
@@ -256,6 +256,25 @@ RUN printf '\n[ -r /etc/profile.d/flow-dev-tools.sh ] && . /etc/profile.d/flow-d
     && chown flow:flow /home/flow/.bashrc
 
 VOLUME ["/flow/work", "/home/flow/.local/share/docker"]
+EXPOSE 8422
 USER flow
 ENTRYPOINT ["tini", "-g", "--", "flow-worker-entrypoint"]
 CMD ["flow-worker", "-c", "/usr/share/flow/examples/docker/flow-worker.yaml"]
+
+FROM flow-server AS flow-orchestrator
+
+ARG VERSION
+ARG COMMIT
+ARG DATE
+
+LABEL org.opencontainers.image.source="https://github.com/ClarifiedLabs/flow" \
+      org.opencontainers.image.title="Flow Orchestrator" \
+      org.opencontainers.image.description="Flow worker autoscaler: scales the worker Kubernetes Deployment from the coordinator queue depth" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.created="${DATE}" \
+      org.opencontainers.image.licenses="MIT"
+
+EXPOSE 8422
+USER flow
+CMD ["flow-orchestrator"]

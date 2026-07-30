@@ -232,6 +232,11 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
+	if r.URL.Path == "/v2/queue/stats" {
+		s.handleQueueStats(w, r, principal)
+		return
+	}
+
 	if r.URL.Path == "/v2/reconcile" {
 		if !requireMethod(w, r, http.MethodPost) {
 			return

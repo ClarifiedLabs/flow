@@ -1,0 +1,90 @@
+# flow-orchestrator: polls GET /v2/queue/stats on the coordinator with a
+# dedicated orchestrator-scoped token (the only endpoint that token can reach)
+# and scales the flow-worker Deployment via the apps/v1 deployments/scale
+# subresource.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flow-orchestrator
+  namespace: flow
+---
+# Least privilege: read and write only the scale subresource of Deployments in
+# this namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flow-orchestrator
+  namespace: flow
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flow-orchestrator
+  namespace: flow
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: flow-orchestrator
+subjects:
+  - kind: ServiceAccount
+    name: flow-orchestrator
+    namespace: flow
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flow-orchestrator
+  namespace: flow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flow-orchestrator
+  template:
+    metadata:
+      labels:
+        app: flow-orchestrator
+    spec:
+      serviceAccountName: flow-orchestrator
+      containers:
+        - name: flow-orchestrator
+          image: ghcr.io/clarifiedlabs/flow-orchestrator:latest
+          args:
+            - --metrics-listen
+            - :8422
+          env:
+            - name: FLOW_ORCHESTRATOR_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: flow-tokens
+                  key: orchestrator
+            - name: FLOW_ORCHESTRATOR_COORDINATOR_URL
+              value: http://flow-server:8421
+            - name: FLOW_ORCHESTRATOR_NAMESPACE
+              value: flow
+            - name: FLOW_ORCHESTRATOR_DEPLOYMENT
+              value: flow-worker
+            # Standby pool: workers up and ready for a job assignment.
+            - name: FLOW_ORCHESTRATOR_MIN_REPLICAS
+              value: "0"
+            - name: FLOW_ORCHESTRATOR_DESIRED_REPLICAS
+              value: "1"
+            - name: FLOW_ORCHESTRATOR_MAX_REPLICAS
+              value: "10"
+          ports:
+            - name: telemetry
+              containerPort: 8422
+          # Ready after the first successful poll of both the coordinator and
+          # the Kubernetes API.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: telemetry
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: telemetry

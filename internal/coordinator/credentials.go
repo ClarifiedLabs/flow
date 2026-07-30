@@ -22,6 +22,9 @@ const (
 	TokenScopeSession TokenScope = "session"
 	TokenScopeConsole TokenScope = "console"
 	TokenScopeHook    TokenScope = "hook"
+	// TokenScopeOrchestrator authorizes only GET /v2/queue/stats: the
+	// read-only queue depth the flow-orchestrator needs for autoscaling.
+	TokenScopeOrchestrator TokenScope = "orchestrator"
 )
 
 var ErrInvalidCredential = errors.New("invalid bearer token")
@@ -300,6 +303,10 @@ func normalizeCredentialInput(input CredentialInput) (CredentialInput, error) {
 	case TokenScopeHook:
 		if input.Subject == "" {
 			input.Subject = "hook"
+		}
+	case TokenScopeOrchestrator:
+		if input.Subject == "" {
+			input.Subject = "orchestrator"
 		}
 	case TokenScopeSession, TokenScopeConsole:
 		if input.Subject == "" {

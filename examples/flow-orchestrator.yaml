@@ -1,0 +1,29 @@
+# flow-orchestrator configuration: poll the coordinator's queue depth and
+# scale the worker Kubernetes Deployment, maintaining a standby pool of
+# ephemeral workers up and ready for a job assignment.
+coordinator_url: http://127.0.0.1:8421
+
+# Kubernetes target (the reference manifests in k8s/ use these values).
+namespace: flow
+deployment: flow-worker
+
+# Standby pool and scale-out bounds.
+min_replicas: 0
+max_replicas: 10
+desired_replicas: 1
+
+# target = clamp(max(desired_replicas, queued), min_replicas, max_replicas).
+# Scale up immediately; scale down only after the queue has been empty for
+# scaledown_idle. The orchestrator never scales while blind: an unreachable
+# coordinator or Kubernetes API skips the cycle and counts a poll error.
+poll_interval: 5s
+scaledown_idle: 2m
+
+# Telemetry endpoint (/readyz, /livez, /metrics). Unauthenticated; in
+# Kubernetes set ":8422" and keep it cluster-internal.
+metrics:
+  listen: 127.0.0.1:8422
+
+# The orchestrator-scoped bearer token (authorizes only GET /v2/queue/stats)
+# usually comes from FLOW_ORCHESTRATOR_TOKEN instead of the config file.
+# token: ...

@@ -1,0 +1,78 @@
+# flow-worker: ephemeral workers. Each worker process claims exactly one job,
+# runs it, and exits 0; the kubelet restarts the container for the next
+# assignment. flow-orchestrator owns this Deployment's replica count — do not
+# scale it manually or with an HPA.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flow-worker-config
+  namespace: flow
+data:
+  flow-worker.yaml: |
+    coordinator_url: http://flow-server:8421
+    work_dir: /flow/work
+    capacity:
+      persistent_agent: 0
+      ephemeral: 1
+    metrics:
+      listen: ":8422"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flow-worker
+  namespace: flow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flow-worker
+  template:
+    metadata:
+      labels:
+        app: flow-worker
+    spec:
+      containers:
+        - name: flow-worker
+          image: ghcr.io/clarifiedlabs/flow-worker:latest
+          args:
+            - -c
+            - /etc/flow/flow-worker.yaml
+            - --ephemeral
+          env:
+            # One worker identity per pod; the join token exchanges for a
+            # worker-scoped token at startup.
+            - name: FLOW_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: FLOW_WORKER_JOIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: flow-tokens
+                  key: worker-join
+          ports:
+            - name: telemetry
+              containerPort: 8422
+          # Ready once the worker has registered with the coordinator and is
+          # long-polling for its job assignment.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: telemetry
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: telemetry
+          volumeMounts:
+            - name: config
+              mountPath: /etc/flow/flow-worker.yaml
+              subPath: flow-worker.yaml
+            - name: work
+              mountPath: /flow/work
+      volumes:
+        - name: config
+          configMap:
+            name: flow-worker-config
+        - name: work
+          emptyDir: {}

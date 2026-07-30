@@ -1,0 +1,158 @@
+# flow-server: coordinator API, web UI, and telemetry endpoint.
+#
+# The telemetry port (8422: /readyz, /livez, /metrics) is unauthenticated and
+# must only be reachable inside the cluster (probes and Prometheus scraping).
+# Do not expose it through an Ingress or LoadBalancer.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flow
+---
+# Generate real values before applying, e.g.:
+#   kubectl -n flow create secret generic flow-tokens \
+#     --from-literal=owner="$(openssl rand -hex 32)" \
+#     --from-literal=hook="$(openssl rand -hex 32)" \
+#     --from-literal=worker-join="$(openssl rand -hex 32)" \
+#     --from-literal=orchestrator="$(openssl rand -hex 32)"
+apiVersion: v1
+kind: Secret
+metadata:
+  name: flow-tokens
+  namespace: flow
+type: Opaque
+stringData:
+  owner: CHANGE_ME_owner_token
+  hook: CHANGE_ME_hook_token
+  worker-join: CHANGE_ME_worker_join_token
+  orchestrator: CHANGE_ME_orchestrator_token
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flow-server-config
+  namespace: flow
+data:
+  flow-server.yaml: |
+    data_dir: /var/lib/flow
+    listen_addr: :8421
+    metrics:
+      listen: ":8422"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flow-server-data
+  namespace: flow
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flow-server
+  namespace: flow
+spec:
+  # Single writer: the coordinator keeps state in SQLite on a RWO volume.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: flow-server
+  template:
+    metadata:
+      labels:
+        app: flow-server
+    spec:
+      # Token files must be mode-0600 and owned by the flow user (UID 1000);
+      # Kubernetes secret volumes are root-owned, so an init container copies
+      # them onto an emptyDir with the required ownership and permissions.
+      initContainers:
+        - name: install-tokens
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              for name in owner hook worker-join orchestrator; do
+                install -m 0600 -o 1000 -g 1000 "/etc/flow/tokens-ro/$name" "/etc/flow/tokens/$name"
+              done
+          volumeMounts:
+            - name: tokens-ro
+              mountPath: /etc/flow/tokens-ro
+              readOnly: true
+            - name: tokens
+              mountPath: /etc/flow/tokens
+      containers:
+        - name: flow-server
+          image: ghcr.io/clarifiedlabs/flow-server:latest
+          args:
+            - serve
+            - --config
+            - /etc/flow/flow-server.yaml
+            - --owner-token-file
+            - /etc/flow/tokens/owner
+            - --hook-token-file
+            - /etc/flow/tokens/hook
+            - --worker-join-token-file
+            - /etc/flow/tokens/worker-join
+            - --orchestrator-token-file
+            - /etc/flow/tokens/orchestrator
+            - --no-write-client-config
+          ports:
+            - name: api
+              containerPort: 8421
+            - name: telemetry
+              containerPort: 8422
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: telemetry
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: telemetry
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/flow
+            - name: config
+              mountPath: /etc/flow/flow-server.yaml
+              subPath: flow-server.yaml
+            - name: tokens
+              mountPath: /etc/flow/tokens
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: flow-server-data
+        - name: config
+          configMap:
+            name: flow-server-config
+        - name: tokens-ro
+          secret:
+            secretName: flow-tokens
+        - name: tokens
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flow-server
+  namespace: flow
+  labels:
+    app: flow-server
+spec:
+  selector:
+    app: flow-server
+  ports:
+    - name: api
+      port: 8421
+      targetPort: api
+    # Cluster-internal only: Prometheus scraping and (optionally) probes via
+    # the service. Never expose this port outside the cluster.
+    - name: telemetry
+      port: 8422
+      targetPort: telemetry
