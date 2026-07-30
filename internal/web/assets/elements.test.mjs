@@ -10,7 +10,7 @@ import { flush, installTestDOM, mountElement, TestEvent } from "./test-dom.mjs";
 
 installTestDOM();
 
-const { cardModel, dwellTone, formatDwell, matchesFilter, sortForAttention, waitActionLabel, waitReasonText, waitingOnBlockers } =
+const { cardModel, dwellTone, formatDwell, matchesFilter, sortForAttention, waitActionLabel, waitReasonText, waitingOnBlockers, waitingOnOmitted } =
   await import("./board-model.js");
 const { nowCardModel, runRows, tabBadges, isOutdatedAnchor, reviewModel } = await import("./task-model.js");
 const { reconcile } = await import("./elements/base.js");
@@ -196,6 +196,40 @@ test("a resolved blocker disappears from the card", () => {
   assert.deepEqual(model.waitingOn, []);
 });
 
+test("the card carries the read model's priority-ordered blocker titles in order", () => {
+  // The Go read model ranks live blockers (priority, then recency) before
+  // bounding the display; the model must hand those titles to the card in the
+  // same order so the most important blockers read first.
+  const model = cardModel(entry({
+    task: { state: "scheduled" },
+    card: {
+      blockers: {
+        count: 4,
+        omitted: 1,
+        tasks: [
+          { id: "t-high", title: "High priority blocker" },
+          { id: "t-mid", title: "Mid priority blocker" },
+          { id: "t-overflow", title: "Overflow blocker" },
+        ],
+      },
+    },
+  }));
+  assert.deepEqual(model.waitingOn, [
+    { id: "t-high", title: "High priority blocker" },
+    { id: "t-mid", title: "Mid priority blocker" },
+    { id: "t-overflow", title: "Overflow blocker" },
+  ]);
+  assert.equal(model.waitingOnOmitted, 1);
+});
+
+test("waiting-on overflow only counts while the task is scheduled", () => {
+  const blockers = { count: 4, omitted: 1, tasks: [{ id: "t-0009", title: "x" }] };
+  assert.equal(waitingOnOmitted({ blockers }, "scheduled"), 1);
+  assert.equal(waitingOnOmitted({ blockers }, "in_progress"), 0);
+  assert.equal(waitingOnOmitted({ blockers }, "unscheduled"), 0);
+  assert.equal(waitingOnOmitted({ blockers: { count: 1 } }, "scheduled"), 0);
+});
+
 // --- board rendering -------------------------------------------------------
 
 test("the card shows the title alone; the id moved to the meta row", () => {
@@ -216,6 +250,47 @@ test("a scheduled card with a blocker names what it is waiting on and links to i
 test("a card with no blockers renders no waiting-on indicator", () => {
   const html = renderTaskCard(cardModel(entry({ task: { state: "scheduled" }, card: { blockers: { count: 0 } } })));
   assert.ok(!html.includes("waiting-on"), "no blockers means no waiting-on line");
+});
+
+test("a card past the blocker limit discloses the overflow as +N more", () => {
+  const html = renderTaskCard(cardModel(entry({
+    task: { state: "scheduled" },
+    card: {
+      blockers: {
+        count: 4,
+        omitted: 1,
+        tasks: [
+          { id: "t-high", title: "High priority blocker" },
+          { id: "t-mid", title: "Mid priority blocker" },
+          { id: "t-overflow", title: "Overflow blocker" },
+        ],
+      },
+    },
+  })));
+  // The shown titles keep the priority order and each links to its task; the
+  // omitted blocker is disclosed, not dropped.
+  assert.match(
+    html,
+    /<p class="waiting-on">waiting on <a href="\/ui\/tasks\/t-high"[^>]*>High priority blocker<\/a>, <a href="\/ui\/tasks\/t-mid"[^>]*>Mid priority blocker<\/a>, <a href="\/ui\/tasks\/t-overflow"[^>]*>Overflow blocker<\/a>, \+1 more<\/p>/,
+  );
+});
+
+test("a card at the blocker limit renders no overflow suffix", () => {
+  const html = renderTaskCard(cardModel(entry({
+    task: { state: "scheduled" },
+    card: {
+      blockers: {
+        count: 3,
+        tasks: [
+          { id: "t-a", title: "A" },
+          { id: "t-b", title: "B" },
+          { id: "t-c", title: "C" },
+        ],
+      },
+    },
+  })));
+  assert.match(html, /<a href="\/ui\/tasks\/t-c"[^>]*>C<\/a><\/p>/);
+  assert.ok(!html.includes("more"), "at the limit means no +N more suffix");
 });
 
 test("the card drops branch, change id and timestamps to the detail page", () => {

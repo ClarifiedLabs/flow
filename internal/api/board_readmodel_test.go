@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
@@ -425,6 +426,125 @@ func TestBoardCardDropsResolvedBlocker(t *testing.T) {
 	card := fetchProjectBoard(t, fixture).TaskCards[blocked.ID]
 	if card.Blockers.Count != 0 || len(card.Blockers.Tasks) != 0 {
 		t.Fatalf("blockers after done = %+v, want the resolved blocker gone", card.Blockers)
+	}
+}
+
+// TestBlockerSummaryRanksByPriorityAndDisclosesOverflow pins the "waiting on"
+// ordering: when a task has more live blockers than the card can display, the
+// shown ones are the most important (highest priority, then most recently
+// updated, then a stable id tiebreak) and the rest are disclosed as a count
+// rather than dropped silently.
+func TestBlockerSummaryRanksByPriorityAndDisclosesOverflow(t *testing.T) {
+	now := time.Now().UTC()
+	stale := now.Add(-time.Hour)
+
+	relation := func(id string, priority int, updated time.Time) coordinator.TaskRelation {
+		return coordinator.TaskRelation{
+			SourceTaskID:    id,
+			TargetTaskID:    "t-blocked",
+			Kind:            coordinator.RelationBlocks,
+			SourceTitle:     "Blocker " + id,
+			SourceState:     coordinator.LifecycleScheduled,
+			SourcePriority:  priority,
+			SourceUpdatedAt: updated,
+		}
+	}
+
+	// Feed the relations in creation-time order (lowest priority first) to prove
+	// the summary re-ranks rather than trusting the input order.
+	relations := []coordinator.TaskRelation{
+		relation("t-low", 0, now),
+		relation("t-mid", 5, stale),
+		relation("t-high", 9, stale),
+		relation("t-tie-new", 5, now),
+		relation("t-done", 99, now),
+	}
+	relations[4].SourceState = coordinator.LifecycleDone
+
+	summary := uiBlockerSummaryFromRelations("t-blocked", relations)
+
+	if summary.Count != 4 {
+		t.Fatalf("count = %d, want 4 live blockers (the done one excluded)", summary.Count)
+	}
+	wantOrder := []string{"t-high", "t-tie-new", "t-mid"}
+	if len(summary.Tasks) != len(wantOrder) {
+		t.Fatalf("shown tasks = %+v, want %d", summary.Tasks, len(wantOrder))
+	}
+	for i, want := range wantOrder {
+		if summary.Tasks[i].ID != want {
+			t.Fatalf("task[%d] = %q, want %q (full order %+v)", i, summary.Tasks[i].ID, want, summary.Tasks)
+		}
+	}
+	if summary.Omitted != 1 {
+		t.Fatalf("omitted = %d, want 1 (the priority-0 blocker past the display limit)", summary.Omitted)
+	}
+}
+
+// TestBoardCardOrdersBlockersAndDisclosesOverflow exercises the full read model:
+// a scheduled card with more live blockers than the display limit shows the
+// highest-priority titles in order, discloses the overflow count, and keeps the
+// resolved blocker out of both.
+func TestBoardCardOrdersBlockersAndDisclosesOverflow(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	blocked, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Blocked work"})
+	if err != nil {
+		t.Fatalf("create blocked task: %v", err)
+	}
+
+	// Create the blockers in ascending priority order so the relations'
+	// creation-time order is the reverse of the priority order: if the card
+	// shows the right titles, the read model really did re-rank them.
+	for _, spec := range []struct {
+		title    string
+		priority int
+	}{
+		{"Low priority blocker", 0},
+		{"Mid priority blocker", 5},
+		{"High priority blocker", 9},
+		{"Overflow blocker", 1},
+	} {
+		blocker, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: spec.title, Priority: spec.priority})
+		if err != nil {
+			t.Fatalf("create blocker %q: %v", spec.title, err)
+		}
+		if err := fixture.Tasks.LinkTasks(ctx, blocker.ID, blocked.ID, coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
+			t.Fatalf("link blocker %q: %v", spec.title, err)
+		}
+	}
+
+	// A resolved blocker with the highest priority must not steal a display slot.
+	resolved, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Resolved blocker", Priority: 99})
+	if err != nil {
+		t.Fatalf("create resolved blocker: %v", err)
+	}
+	if err := fixture.Tasks.LinkTasks(ctx, resolved.ID, blocked.ID, coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
+		t.Fatalf("link resolved blocker: %v", err)
+	}
+
+	if _, err := fixture.Bundle.WorkflowRuns.Schedule(ctx, blocked.ID); err != nil {
+		t.Fatalf("schedule blocked task: %v", err)
+	}
+	if _, err := fixture.Bundle.WorkflowRuns.ForceDone(ctx, resolved.ID, coordinator.ResolutionCompleted, "done", coordinator.ActorHuman); err != nil {
+		t.Fatalf("finish resolved blocker: %v", err)
+	}
+
+	card := fetchProjectBoard(t, fixture).TaskCards[blocked.ID]
+	if card.Blockers.Count != 4 {
+		t.Fatalf("blocker count = %d, want 4 live blockers", card.Blockers.Count)
+	}
+	wantTitles := []string{"High priority blocker", "Mid priority blocker", "Overflow blocker"}
+	if len(card.Blockers.Tasks) != len(wantTitles) {
+		t.Fatalf("shown blockers = %+v, want %d", card.Blockers.Tasks, len(wantTitles))
+	}
+	for i, want := range wantTitles {
+		if card.Blockers.Tasks[i].Title != want {
+			t.Fatalf("blocker[%d] = %q, want %q (full list %+v)", i, card.Blockers.Tasks[i].Title, want, card.Blockers.Tasks)
+		}
+	}
+	if card.Blockers.Omitted != 1 {
+		t.Fatalf("omitted = %d, want 1 (the priority-0 blocker past the limit)", card.Blockers.Omitted)
 	}
 }
 

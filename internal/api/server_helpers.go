@@ -611,6 +611,9 @@ type uiRequiredCheckSummary struct {
 type uiBlockerSummary struct {
 	Count int                    `json:"count"`
 	Tasks []uiBlockerTaskSummary `json:"tasks,omitempty"`
+	// Omitted counts live blockers left out of Tasks because the display is
+	// bounded; the card renders it as "+N more" so nothing hides silently.
+	Omitted int `json:"omitted,omitempty"`
 }
 
 type uiBlockerTaskSummary struct {

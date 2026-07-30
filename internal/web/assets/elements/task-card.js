@@ -30,7 +30,8 @@ export function renderTaskCard(model) {
 // A scheduled card that cannot start names what it is waiting on, linking each
 // blocker so the reader can jump straight to the task in the way. Only the
 // model's waitingOn list drives it, so a card with no live blockers renders
-// nothing here.
+// nothing here. When the read model bounded the list it says how many titles
+// were left off ("+N more") so the reader knows the line is not the full set.
 function renderWaitingOn(model) {
   const blockers = model.waitingOn || [];
   if (!blockers.length) return "";
@@ -40,7 +41,9 @@ function renderWaitingOn(model) {
       return `<a href="${escapeAttr(taskHref(model.projectID, blocker.id))}" data-link>${escapeHTML(label)}</a>`;
     })
     .join(", ");
-  return `<p class="waiting-on">waiting on ${links}</p>`;
+  const omitted = Number(model.waitingOnOmitted || 0);
+  const suffix = omitted > 0 ? `, +${omitted} more` : "";
+  return `<p class="waiting-on">waiting on ${links}${suffix}</p>`;
 }
 
 // The quiet line is trimmed hard: priority, diff stat, reviewer count, and the

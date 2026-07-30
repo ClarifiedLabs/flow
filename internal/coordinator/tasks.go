@@ -114,8 +114,13 @@ type TaskRelation struct {
 	// without a second query per relation.
 	SourceState LifecycleState
 	TargetState LifecycleState
-	CreatedBy   Actor
-	CreatedAt   time.Time
+	// SourcePriority and SourceUpdatedAt denormalize the blocker (source)
+	// task's priority and recency so read models can rank a task's live
+	// blockers — most important first — without a second query per relation.
+	SourcePriority  int
+	SourceUpdatedAt time.Time
+	CreatedBy       Actor
+	CreatedAt       time.Time
 }
 
 type CreateTaskInput struct {
@@ -864,6 +869,8 @@ SELECT
 	t.title,
 	s.lifecycle_state,
 	t.lifecycle_state,
+	s.priority,
+	s.updated_at,
 	r.created_by,
 	r.created_at
 FROM task_relations r
@@ -929,6 +936,8 @@ SELECT
 	t.title,
 	s.lifecycle_state,
 	t.lifecycle_state,
+	s.priority,
+	s.updated_at,
 	r.created_by,
 	r.created_at
 FROM task_relations r
@@ -1591,6 +1600,7 @@ func scanTaskRelation(scanner taskScanner) (TaskRelation, error) {
 	var kind string
 	var sourceState sql.NullString
 	var targetState sql.NullString
+	var sourceUpdatedAt string
 	var createdBy string
 	var createdAt string
 
@@ -1602,6 +1612,8 @@ func scanTaskRelation(scanner taskScanner) (TaskRelation, error) {
 		&relation.TargetTitle,
 		&sourceState,
 		&targetState,
+		&relation.SourcePriority,
+		&sourceUpdatedAt,
 		&createdBy,
 		&createdAt,
 	); err != nil {
@@ -1609,6 +1621,11 @@ func scanTaskRelation(scanner taskScanner) (TaskRelation, error) {
 	}
 	relation.SourceState = LifecycleState(sourceState.String)
 	relation.TargetState = LifecycleState(targetState.String)
+	parsedSourceUpdatedAt, err := parseTime(sourceUpdatedAt)
+	if err != nil {
+		return TaskRelation{}, err
+	}
+	relation.SourceUpdatedAt = parsedSourceUpdatedAt
 
 	parsedCreatedAt, err := parseTime(createdAt)
 	if err != nil {

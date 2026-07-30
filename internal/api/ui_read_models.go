@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -249,12 +250,20 @@ func uiRequiredCheckSummaryFromChecks(checks []coordinator.Check) uiRequiredChec
 	return summary
 }
 
+// uiBlockerDisplayLimit bounds how many blocker titles a card renders inline;
+// anything past it is disclosed as a "+N more" count rather than hidden.
+const uiBlockerDisplayLimit = 3
+
 // uiBlockerSummaryFromRelations derives a task's unresolved blockers from the
 // batched relations read model instead of a per-task query. A blocks relation
 // only bites while its source (the blocker) has not reached done, so the
 // relation's denormalized lifecycle state is enough to tell whether it counts.
+// The relations arrive ordered by creation time, but the card shows the most
+// important blockers first: highest priority, then most recently updated, then
+// a stable id tiebreak, so a card with more live blockers than the display
+// limit surfaces the ones that matter and discards none silently.
 func uiBlockerSummaryFromRelations(taskID string, relations []coordinator.TaskRelation) uiBlockerSummary {
-	var blockers []uiBlockerTaskSummary
+	var blockers []coordinator.TaskRelation
 	for _, relation := range relations {
 		if relation.Kind != coordinator.RelationBlocks || relation.TargetTaskID != taskID {
 			continue
@@ -262,18 +271,30 @@ func uiBlockerSummaryFromRelations(taskID string, relations []coordinator.TaskRe
 		if relation.SourceState == coordinator.LifecycleDone {
 			continue
 		}
-		blockers = append(blockers, uiBlockerTaskSummary{
-			ID:    relation.SourceTaskID,
-			Title: relation.SourceTitle,
-		})
+		blockers = append(blockers, relation)
 	}
 
-	summary := uiBlockerSummary{Count: len(blockers)}
-	for i, blocker := range blockers {
-		if i >= 3 {
-			break
+	sort.SliceStable(blockers, func(i, j int) bool {
+		if blockers[i].SourcePriority != blockers[j].SourcePriority {
+			return blockers[i].SourcePriority > blockers[j].SourcePriority
 		}
-		summary.Tasks = append(summary.Tasks, blocker)
+		if !blockers[i].SourceUpdatedAt.Equal(blockers[j].SourceUpdatedAt) {
+			return blockers[i].SourceUpdatedAt.After(blockers[j].SourceUpdatedAt)
+		}
+		return blockers[i].SourceTaskID < blockers[j].SourceTaskID
+	})
+
+	summary := uiBlockerSummary{Count: len(blockers)}
+	shown := len(blockers)
+	if shown > uiBlockerDisplayLimit {
+		summary.Omitted = shown - uiBlockerDisplayLimit
+		shown = uiBlockerDisplayLimit
+	}
+	for _, blocker := range blockers[:shown] {
+		summary.Tasks = append(summary.Tasks, uiBlockerTaskSummary{
+			ID:    blocker.SourceTaskID,
+			Title: blocker.SourceTitle,
+		})
 	}
 
 	return summary

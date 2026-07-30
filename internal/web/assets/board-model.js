@@ -221,6 +221,7 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
     checks: value(card, "required_checks", "RequiredChecks") || {},
     blockers: value(card, "blockers", "Blockers") || {},
     waitingOn,
+    waitingOnOmitted: waitingOnOmitted(card, lifecycleState),
     terminalAvailable: Boolean(value(card, "terminal_available", "TerminalAvailable")),
     terminalJobID: value(card, "terminal_job_id", "TerminalJobID"),
     activeSession: value(card, "active_session", "ActiveSession"),
@@ -242,6 +243,16 @@ export function waitingOnBlockers(card, lifecycleState) {
       title: String(value(blocker, "title", "Title") || ""),
     }))
     .filter((blocker) => blocker.id || blocker.title);
+}
+
+// waitingOnOmitted counts the live blockers the read model left off the card
+// because the display is bounded; the card renders it as "+N more" so the
+// reader knows titles were omitted rather than guessing the list is complete.
+// It mirrors waitingOnBlockers: only scheduled work carries it.
+export function waitingOnOmitted(card, lifecycleState) {
+  if (String(lifecycleState || "") !== "scheduled") return 0;
+  const blockers = value(card, "blockers", "Blockers") || {};
+  return Number(value(blockers, "omitted", "Omitted") || 0);
 }
 
 // activityLine is the one line of prose describing what is happening now,
