@@ -42,14 +42,15 @@ func TestOpenInitializesSQLite(t *testing.T) {
 		"0003_workflow_hold",
 		"0004_workflow_review_cycles",
 		"0005_features",
+		"0006_convergence_promotions",
 	)
 
 	var schemaVersion string
 	if err := store.DB().QueryRowContext(ctx, "SELECT value FROM app_metadata WHERE key = 'schema_version'").Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version metadata: %v", err)
 	}
-	if schemaVersion != "0005_features" {
-		t.Fatalf("schema version = %q, want 0005_features", schemaVersion)
+	if schemaVersion != "0006_convergence_promotions" {
+		t.Fatalf("schema version = %q, want 0006_convergence_promotions", schemaVersion)
 	}
 	assertStorageFormat(t, store, "4")
 

@@ -64,10 +64,13 @@ type ResolveConvergenceReviewInput struct {
 }
 
 type ConvergenceReviewResult struct {
-	Disposition ConvergenceDisposition `json:"disposition"`
-	Evidence    ConvergenceEvidence    `json:"evidence"`
-	Run         WorkflowRun            `json:"run"`
-	Task        *Task                  `json:"task,omitempty"`
+	Disposition  ConvergenceDisposition `json:"disposition"`
+	Evidence     ConvergenceEvidence    `json:"evidence"`
+	Run          WorkflowRun            `json:"run"`
+	Task         *Task                  `json:"task,omitempty"`
+	Feature      *Feature               `json:"feature,omitempty"`
+	PlanningTask *Task                  `json:"planning_task,omitempty"`
+	PlanningRun  *WorkflowRun           `json:"planning_run,omitempty"`
 }
 
 type convergenceResolutionPayload struct {
@@ -75,6 +78,8 @@ type convergenceResolutionPayload struct {
 	EvidenceFingerprint string                 `json:"evidence_fingerprint"`
 	Actor               string                 `json:"actor"`
 	Note                string                 `json:"note,omitempty"`
+	FeatureID           string                 `json:"feature_id,omitempty"`
+	PlanningTaskID      string                 `json:"planning_task_id,omitempty"`
 }
 
 func normalizeConvergenceEvidence(run WorkflowRun, evidence ConvergenceEvidence, now time.Time) (ConvergenceEvidence, error) {
@@ -380,6 +385,15 @@ func (s *WorkflowRunService) ResolveConvergenceReview(ctx context.Context, input
 		return ConvergenceReviewResult{}, err
 	}
 	defer tx.Rollback()
+	var pendingPromotion int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM convergence_promotions
+WHERE source_task_id = ? AND state != 'completed'`, input.TaskID).Scan(&pendingPromotion); err != nil {
+		return ConvergenceReviewResult{}, err
+	}
+	if pendingPromotion > 0 {
+		return ConvergenceReviewResult{}, fmt.Errorf("%w: convergence promotion is already in progress", ErrWorkflowConflict)
+	}
 	run, err := scanWorkflowRun(tx.QueryRowContext(ctx, workflowRunSelect+`
 WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, input.TaskID))
 	if err != nil {
@@ -557,6 +571,10 @@ UPDATE workflow_runs SET state = ?, completed_at = ?, completion_source = 'owner
 			return Task{}, err
 		}
 		if err := retireIncompleteWorkflowChecksTx(ctx, tx, taskID, runID.String, now); err != nil {
+			return Task{}, err
+		}
+	} else {
+		if err := resolveOpenWaitTx(ctx, tx, "", actor, now); err != nil {
 			return Task{}, err
 		}
 	}

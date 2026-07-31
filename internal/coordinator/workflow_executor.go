@@ -119,6 +119,10 @@ func NewWorkflowExecutor(opts WorkflowExecutorOptions) *WorkflowExecutor {
 // Tick advances every active workflow until it reaches asynchronous work, a
 // human wait, a dependency wait, or Done. Repeated calls are idempotent.
 func (e *WorkflowExecutor) Tick(ctx context.Context) error {
+	var errs error
+	if err := e.ResumeConvergencePromotions(ctx); err != nil {
+		errs = errors.Join(errs, err)
+	}
 	// held_at excludes runs an operator has taken over; they resume only when
 	// the hold is released.
 	rows, err := e.db.QueryContext(ctx, `
@@ -126,7 +130,7 @@ SELECT id FROM workflow_runs
 WHERE state IN ('scheduled', 'running') AND held_at IS NULL
 ORDER BY created_at, id`)
 	if err != nil {
-		return err
+		return errors.Join(errs, err)
 	}
 	var ids []string
 	for rows.Next() {
@@ -144,7 +148,6 @@ ORDER BY created_at, id`)
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	var errs error
 	for _, id := range ids {
 		if err := e.Advance(ctx, id); err != nil {
 			errs = errors.Join(errs, fmt.Errorf("advance workflow %s: %w", id, err))

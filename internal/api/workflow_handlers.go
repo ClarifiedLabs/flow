@@ -644,15 +644,20 @@ func (s *projectServer) handleConvergenceDisposition(w http.ResponseWriter, r *h
 		TaskID: taskID, Disposition: request.Disposition, Note: request.Note, Actor: workflowActor(principal),
 		ExpectedEvidenceFingerprint: request.ExpectedEvidenceFingerprint,
 	}
-	if request.Disposition != coordinator.ConvergenceRepairBranch && request.Disposition != coordinator.ConvergencePromote {
+	if request.Disposition != coordinator.ConvergenceRepairBranch {
 		unlockGitWrites := s.drainGitWrites()
 		defer unlockGitWrites()
 	}
 	var result coordinator.ConvergenceReviewResult
 	var err error
 	advanceAttemptedUnderRefLock := false
-	if request.Disposition != coordinator.ConvergenceRepairBranch &&
-		request.Disposition != coordinator.ConvergencePromote && s.workflowExecutor != nil {
+	if request.Disposition == coordinator.ConvergencePromote {
+		if s.workflowExecutor == nil {
+			err = coordinator.ErrConvergencePromotionRequired
+		} else {
+			result, err = s.workflowExecutor.PromoteConvergenceReview(r.Context(), resolveInput)
+		}
+	} else if request.Disposition != coordinator.ConvergenceRepairBranch && s.workflowExecutor != nil {
 		refreshed, refreshErr := s.workflowExecutor.RefreshConvergenceEvidence(r.Context(), taskID)
 		if refreshErr != nil {
 			writeWorkflowError(w, refreshErr, "refresh_convergence_evidence_failed")
@@ -710,6 +715,19 @@ func (s *projectServer) handleConvergenceDisposition(w http.ResponseWriter, r *h
 			if err != nil {
 				writeWorkflowError(w, err, "load_workflow_failed")
 				return
+			}
+		}
+	case coordinator.ConvergencePromote:
+		if err := s.sessions.RevokeWorkflowRunSessionTokens(r.Context(), result.Evidence.WorkflowRunID); err != nil {
+			slog.Warn("revoke convergence-promoted workflow session tokens", "workflow_run_id", result.Evidence.WorkflowRunID, "error", err)
+		}
+		if s.workflowExecutor != nil && result.PlanningRun != nil {
+			if err := s.workflowExecutor.Advance(r.Context(), result.PlanningRun.ID); err != nil {
+				slog.Warn("advance promoted planning workflow", "workflow_run_id", result.PlanningRun.ID, "error", err)
+			} else if latest, err := s.workflowRuns.Get(r.Context(), result.PlanningRun.ID); err != nil {
+				slog.Warn("load promoted planning workflow", "workflow_run_id", result.PlanningRun.ID, "error", err)
+			} else {
+				result.PlanningRun = &latest
 			}
 		}
 	case coordinator.ConvergenceCancel:
