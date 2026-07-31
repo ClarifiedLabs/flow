@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
@@ -136,6 +137,270 @@ func barrierAgents(secondBlocking bool) []SnapshotReviewAgent {
 	return []SnapshotReviewAgent{
 		{Blocking: true, Agent: AgentDefSnapshot{Name: "code-review", Harness: "harness", Prompt: "Review correctness."}},
 		{Blocking: secondBlocking, Agent: AgentDefSnapshot{Name: "security-review", Harness: "harness", Prompt: "Review security."}},
+	}
+}
+
+func TestRefreshConvergenceEvidenceAdoptsRepairedBranchHead(t *testing.T) {
+	ctx := context.Background()
+	fixture := newProjectFixture(t)
+	tasks := NewTaskService(fixture.store.DB(), fixture.project.ID)
+	flows := NewFlowService(fixture.store.DB())
+	runs := NewWorkflowRunService(fixture.store.DB(), flows, tasks)
+	task, run, nodeRun := newHoldFlow(t, flows, tasks, runs)
+
+	branch := "task/" + task.ID
+	if err := runReconcileGit(fixture.repoPath, nil, "checkout", "-b", branch, "main"); err != nil {
+		t.Fatalf("create source branch: %v", err)
+	}
+	writeReconcileFile(t, fixture.repoPath, "repair.txt", "first oversized observation\n")
+	if err := runReconcileGit(fixture.repoPath, nil, "add", "repair.txt"); err != nil {
+		t.Fatalf("stage source change: %v", err)
+	}
+	if err := runReconcileGit(fixture.repoPath, nil, "commit", "-m", "initial source change"); err != nil {
+		t.Fatalf("commit source change: %v", err)
+	}
+	firstHead, err := reconcileGitOutput(fixture.repoPath, nil, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("resolve initial source head: %v", err)
+	}
+	if err := runReconcileGit(fixture.repoPath, nil, "push", fixture.project.ExchangePath, "HEAD:refs/heads/"+branch); err != nil {
+		t.Fatalf("push initial source branch: %v", err)
+	}
+	const changeID = "ch-convergence-repair"
+	if _, err := fixture.store.DB().ExecContext(ctx, `
+INSERT INTO changes (id, task_id, workflow_run_id, branch, base, head_sha, created_at, updated_at)
+VALUES (?, ?, ?, ?, 'main', ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		changeID, task.ID, run.ID, branch, firstHead); err != nil {
+		t.Fatalf("insert source change: %v", err)
+	}
+
+	global, err := flowdb.OpenGlobal(ctx, filepath.Join(t.TempDir(), "global.db"))
+	if err != nil {
+		t.Fatalf("open global database: %v", err)
+	}
+	t.Cleanup(func() { _ = global.Close() })
+	if _, err := NewProjectService(global.DB()).Insert(ctx, fixture.project); err != nil {
+		t.Fatalf("register project: %v", err)
+	}
+	workers := flowworker.NewService(fixture.store.DB())
+	credentials := NewCredentialService(global.DB())
+	sessions := NewSessionServiceWithOptions(fixture.store.DB(), tasks, workers, SessionServiceOptions{
+		Credentials: credentials,
+		Project:     fixture.project,
+	})
+	artifacts := NewWorkflowArtifactService(fixture.store.DB(), tasks)
+	executor := NewWorkflowExecutor(WorkflowExecutorOptions{
+		Database: fixture.store.DB(), Runs: runs, Artifacts: artifacts, Tasks: tasks,
+		Sessions: sessions, Project: fixture.project,
+	})
+	change, err := sessions.GetChange(ctx, changeID)
+	if err != nil {
+		t.Fatalf("load source change: %v", err)
+	}
+	firstEvidence, err := executor.convergenceEvidenceForChange(ctx, run, nodeRun, change)
+	if err != nil {
+		t.Fatalf("capture initial convergence evidence: %v", err)
+	}
+	for _, sha := range []string{firstEvidence.SourceHeadSHA, firstEvidence.TargetBaseTipSHA, firstEvidence.MergeBaseSHA} {
+		ref := "refs/flow/convergence/objects/" + sha
+		retained, err := reconcileGitOutput(fixture.repoPath, nil, "--git-dir", fixture.project.ExchangePath, "rev-parse", ref)
+		if err != nil || retained != sha {
+			t.Fatalf("retained convergence ref %s = %q err=%v, want %q", ref, retained, err, sha)
+		}
+	}
+	if _, _, err := runs.HoldForConvergence(ctx, firstEvidence); err != nil {
+		t.Fatalf("hold initial convergence evidence: %v", err)
+	}
+	activeEvidence, err := runs.ActiveConvergenceEvidenceForTask(ctx, task.ID)
+	if err != nil || activeEvidence == nil {
+		t.Fatalf("load initial convergence evidence: evidence=%+v err=%v", activeEvidence, err)
+	}
+	firstEvidence = *activeEvidence
+	if _, err := runs.ResolveConvergenceReview(ctx, ResolveConvergenceReviewInput{
+		TaskID: task.ID, Disposition: ConvergenceRepairBranch, Actor: ActorHuman,
+		ExpectedEvidenceFingerprint: firstEvidence.Fingerprint,
+	}); err != nil {
+		t.Fatalf("choose repair disposition: %v", err)
+	}
+	otherChangeID := "ch-other-convergence-change"
+	if _, err := fixture.store.DB().ExecContext(ctx, `
+INSERT INTO changes (id, task_id, workflow_run_id, branch, base, head_sha, created_at, updated_at, ready_at)
+VALUES (?, ?, ?, 'task/other-change', 'main', ?, '2026-01-01T00:00:02Z', '2026-01-01T00:00:02Z', '2026-01-01T00:00:02Z')`,
+		otherChangeID, task.ID, run.ID, firstEvidence.SourceHeadSHA); err != nil {
+		t.Fatalf("insert newer unrelated task change: %v", err)
+	}
+	wrongConsole, err := workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
+		TaskID: &task.ID, ChangeID: &otherChangeID, Role: flowworker.RoleConsole,
+		CapacityBucket: flowworker.BucketPersistentAgent,
+		Payload:        map[string]any{"change_id": otherChangeID, "branch": "task/other-change", "base": "main"},
+	})
+	if err != nil {
+		t.Fatalf("queue unrelated task console: %v", err)
+	}
+	ensureInput := EnsureTaskConsoleJobInput{
+		TaskID: task.ID, Harness: "shell", ConvergenceWorkflowRunID: run.ID,
+		ConvergenceChangeID: firstEvidence.ChangeID, ConvergenceEvidenceFingerprint: firstEvidence.Fingerprint,
+	}
+	if _, err := sessions.EnsureTaskConsoleJob(ctx, ensureInput); !errors.Is(err, ErrWorkflowConflict) {
+		t.Fatalf("attach convergence repair to unrelated console err = %v, want workflow conflict", err)
+	}
+	if _, err := fixture.store.DB().ExecContext(ctx, `UPDATE jobs SET state = 'canceled' WHERE id = ?`, wrongConsole.ID); err != nil {
+		t.Fatalf("cancel unrelated task console: %v", err)
+	}
+	staleFingerprint := strings.Repeat("f", 64)
+	convergenceChangeID := changeID
+	if _, err := workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
+		TaskID: &task.ID, ChangeID: &convergenceChangeID, RequireHeldWorkflowRunID: &run.ID,
+		RequireHeldWorkflowEvidenceFingerprint: &staleFingerprint, Role: flowworker.RoleConsole,
+		CapacityBucket: flowworker.BucketPersistentAgent,
+	}); err == nil {
+		t.Fatal("atomic convergence enqueue accepted a stale evidence fingerprint")
+	}
+	if _, err := fixture.store.DB().ExecContext(ctx, `UPDATE changes SET head_sha = 'stale-projected-head' WHERE id = ?`, changeID); err != nil {
+		t.Fatalf("move convergence change head projection: %v", err)
+	}
+	if _, err := sessions.EnsureTaskConsoleJob(ctx, ensureInput); !errors.Is(err, ErrWorkflowConflict) {
+		t.Fatalf("queue repair console with stale change head err = %v, want workflow conflict", err)
+	}
+	if _, err := fixture.store.DB().ExecContext(ctx, `UPDATE changes SET head_sha = ? WHERE id = ?`, firstEvidence.SourceHeadSHA, changeID); err != nil {
+		t.Fatalf("restore convergence change head projection: %v", err)
+	}
+	console, err := sessions.EnsureTaskConsoleJob(ctx, ensureInput)
+	if err != nil {
+		t.Fatalf("queue exact repair console: %v", err)
+	}
+	if console.Job.ChangeID == nil || *console.Job.ChangeID != firstEvidence.ChangeID {
+		t.Fatalf("repair console change = %+v, want %q", console.Job.ChangeID, firstEvidence.ChangeID)
+	}
+	if console.Job.WorkflowRunID == nil || *console.Job.WorkflowRunID != run.ID {
+		t.Fatalf("repair console workflow = %+v, want %q", console.Job.WorkflowRunID, run.ID)
+	}
+	if got := strings.TrimSpace(fmt.Sprint(console.Job.Payload["convergence_evidence_fingerprint"])); got != firstEvidence.Fingerprint {
+		t.Fatalf("repair console fingerprint = %q, want %q", got, firstEvidence.Fingerprint)
+	}
+	if got := strings.TrimSpace(fmt.Sprint(console.Job.Payload["convergence_source_head_sha"])); got != firstEvidence.SourceHeadSHA {
+		t.Fatalf("repair console source head = %q, want %q", got, firstEvidence.SourceHeadSHA)
+	}
+	now := time.Now().UTC()
+	if _, err := fixture.store.DB().ExecContext(ctx, `UPDATE jobs SET state = 'claimed', updated_at = ? WHERE id = ?`,
+		formatTime(now), console.Job.ID); err != nil {
+		t.Fatalf("claim repair console: %v", err)
+	}
+	const leaseID = "l-convergence-repair"
+	if _, err := fixture.store.DB().ExecContext(ctx, `
+INSERT INTO leases (id, job_id, worker_id, capacity_bucket, leased_at, expires_at)
+VALUES (?, ?, 'w-repair', 'persistent_agent', ?, ?)`, leaseID, console.Job.ID,
+		formatTime(now), formatTime(now.Add(time.Minute))); err != nil {
+		t.Fatalf("lease repair console: %v", err)
+	}
+	if _, err := workers.MarkJobRunning(ctx, leaseID); err != nil {
+		t.Fatalf("start repair console job: %v", err)
+	}
+	started, err := sessions.StartConsoleSession(ctx, StartConsoleSessionInput{
+		JobID: console.Job.ID, LeaseID: leaseID, WorkerID: "w-repair", Harness: "shell",
+	})
+	if err != nil {
+		t.Fatalf("start repair console session: %v", err)
+	}
+
+	writeReconcileFile(t, fixture.repoPath, "repair.txt", "repaired branch observation\n")
+	if err := runReconcileGit(fixture.repoPath, nil, "add", "repair.txt"); err != nil {
+		t.Fatalf("stage repaired source change: %v", err)
+	}
+	if err := runReconcileGit(fixture.repoPath, nil, "commit", "-m", "repair source change"); err != nil {
+		t.Fatalf("commit repaired source change: %v", err)
+	}
+	repairedHead, err := reconcileGitOutput(fixture.repoPath, nil, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("resolve repaired source head: %v", err)
+	}
+	if err := runReconcileGit(fixture.repoPath, nil, "push", fixture.project.ExchangePath, "HEAD:refs/heads/"+branch); err != nil {
+		t.Fatalf("push repaired source branch: %v", err)
+	}
+	stopped, err := sessions.StopConvergenceRepairConsole(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("stop repair console: %v", err)
+	}
+	if !stopped.Active || stopped.Session == nil || stopped.Session.ID != started.Session.ID {
+		t.Fatalf("stopped repair console = %+v, want active process-exit fence", stopped)
+	}
+	if _, err := credentials.Authenticate(ctx, started.Token); err == nil {
+		t.Fatal("repair console token still authenticates after stop request")
+	}
+	if _, err := executor.RefreshConvergenceEvidence(ctx, task.ID); !errors.Is(err, ErrWorkflowConflict) {
+		t.Fatalf("refresh while repair process may be live err = %v, want workflow conflict", err)
+	}
+	exited, err := sessions.MarkPersistentSessionExited(ctx, MarkPersistentSessionExitedInput{
+		SessionID: started.Session.ID, LeaseID: leaseID, ExitCode: 0,
+	})
+	if err != nil {
+		t.Fatalf("acknowledge repair console exit: %v", err)
+	}
+	if exited.RuntimeState != SessionFinished {
+		t.Fatalf("exited repair console = %+v, want finished", exited)
+	}
+	projected, err := sessions.GetChange(ctx, changeID)
+	if err != nil {
+		t.Fatalf("load projected repaired change: %v", err)
+	}
+	if projected.HeadSHA != repairedHead {
+		t.Fatalf("projected repaired head = %q, want %q", projected.HeadSHA, repairedHead)
+	}
+
+	refreshed, err := executor.RefreshConvergenceEvidence(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("refresh repaired convergence evidence: %v", err)
+	}
+	if refreshed.SourceHeadSHA != repairedHead || refreshed.Fingerprint == firstEvidence.Fingerprint {
+		t.Fatalf("refreshed evidence = %+v, want repaired head and a new fingerprint", refreshed)
+	}
+	ref := "refs/flow/convergence/objects/" + repairedHead
+	if retained, err := reconcileGitOutput(fixture.repoPath, nil, "--git-dir", fixture.project.ExchangePath, "rev-parse", ref); err != nil || retained != repairedHead {
+		t.Fatalf("retained repaired convergence ref %s = %q err=%v, want %q", ref, retained, err, repairedHead)
+	}
+	refreshedRun, err := runs.Get(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("load refreshed workflow: %v", err)
+	}
+	refreshedNode, found, err := runs.GetNodeRun(ctx, nodeRun.ID)
+	if err != nil || !found {
+		t.Fatalf("load refreshed node: found=%t err=%v", found, err)
+	}
+	if refreshedRun.CurrentArtifactID == "" || refreshedNode.InputArtifactID != refreshedRun.CurrentArtifactID {
+		t.Fatalf("refreshed artifact pointers: run=%q node=%q", refreshedRun.CurrentArtifactID, refreshedNode.InputArtifactID)
+	}
+	artifact, err := artifacts.Get(ctx, refreshedRun.CurrentArtifactID)
+	if err != nil {
+		t.Fatalf("load refreshed artifact: %v", err)
+	}
+	artifactChangeID, artifactHead, err := changeIdentityFromArtifact(artifact)
+	if err != nil || artifactChangeID != changeID || artifactHead != repairedHead {
+		t.Fatalf("refreshed artifact identity = %q/%q err=%v", artifactChangeID, artifactHead, err)
+	}
+	if _, err := fixture.store.DB().ExecContext(ctx, `UPDATE changes SET head_sha = ? WHERE id = ?`, firstEvidence.SourceHeadSHA, changeID); err != nil {
+		t.Fatalf("move change projection after refresh: %v", err)
+	}
+	if _, err := runs.ResolveConvergenceReview(ctx, ResolveConvergenceReviewInput{
+		TaskID: task.ID, Disposition: ConvergenceAcceptScope, Actor: ActorHuman,
+		ExpectedEvidenceFingerprint: refreshed.Fingerprint,
+	}); !errors.Is(err, ErrWorkflowConflict) {
+		t.Fatalf("accept after projected head moved err = %v, want workflow conflict", err)
+	}
+	if stillHeld, err := runs.Get(ctx, run.ID); err != nil || !stillHeld.Held() {
+		t.Fatalf("run after stale disposition = %+v err=%v, want held", stillHeld, err)
+	}
+	if _, err := fixture.store.DB().ExecContext(ctx, `UPDATE changes SET head_sha = ? WHERE id = ?`, repairedHead, changeID); err != nil {
+		t.Fatalf("restore repaired change projection: %v", err)
+	}
+	resolved, err := runs.ResolveConvergenceReview(ctx, ResolveConvergenceReviewInput{
+		TaskID: task.ID, Disposition: ConvergenceAcceptScope, Actor: ActorHuman,
+		ExpectedEvidenceFingerprint: refreshed.Fingerprint,
+	})
+	if err != nil {
+		t.Fatalf("accept refreshed convergence evidence: %v", err)
+	}
+	if resolved.Run.Held() || resolved.Evidence.Fingerprint != refreshed.Fingerprint {
+		t.Fatalf("accepted convergence result = %+v, want refreshed evidence and released hold", resolved)
 	}
 }
 
@@ -1026,8 +1291,54 @@ UPDATE changes SET head_sha = 'head-moved' WHERE workflow_run_id = ?`, fixture.r
 		if detail.Run.State != WorkflowRunWaiting || detail.OpenWait == nil {
 			t.Fatalf("workflow after rejected retry = %+v, want original wait", detail)
 		}
+		consoleJob, err := fixture.workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
+			TaskID: &fixture.task.ID, Role: flowworker.RoleConsole, CapacityBucket: flowworker.BucketPersistentAgent,
+		})
+		if err != nil {
+			t.Fatalf("enqueue task console before reset: %v", err)
+		}
+		now := time.Now().UTC()
+		if _, err := fixture.db.DB().ExecContext(ctx, `UPDATE jobs SET state = 'claimed', updated_at = ? WHERE id = ?`,
+			formatTime(now), consoleJob.ID); err != nil {
+			t.Fatalf("claim task console before reset: %v", err)
+		}
+		const leaseID = "l-reset-task-console"
+		if _, err := fixture.db.DB().ExecContext(ctx, `
+INSERT INTO leases (id, job_id, worker_id, capacity_bucket, leased_at, expires_at)
+VALUES (?, ?, 'w-reset', 'persistent_agent', ?, ?)`, leaseID, consoleJob.ID,
+			formatTime(now), formatTime(now.Add(time.Minute))); err != nil {
+			t.Fatalf("lease task console before reset: %v", err)
+		}
+		if _, err := fixture.workers.MarkJobRunning(ctx, leaseID); err != nil {
+			t.Fatalf("start task console before reset: %v", err)
+		}
+		const sessionID = "s-reset-task-console"
+		if _, err := fixture.db.DB().ExecContext(ctx, `
+INSERT INTO sessions (
+	id, task_id, job_id, lease_id, worker_id, role, workspace_mode, runtime_state,
+	branch, base, harness, token_hash, created_at, updated_at
+) VALUES (?, ?, ?, ?, 'w-reset', 'console', 'change', 'working',
+	'task/reset', 'main', 'shell', 'reset-token-hash', ?, ?)`, sessionID, fixture.task.ID,
+			consoleJob.ID, leaseID, formatTime(now), formatTime(now)); err != nil {
+			t.Fatalf("insert task console before reset: %v", err)
+		}
 		if _, err := fixture.runs.Reset(ctx, fixture.task.ID, ActorHuman); err != nil {
 			t.Fatalf("reset workflow after rejected retry: %v", err)
+		}
+		resetJob, err := fixture.workers.GetJob(ctx, consoleJob.ID)
+		if err != nil || resetJob.State != flowworker.JobCanceled {
+			t.Fatalf("task console job after reset = %+v err=%v, want canceled", resetJob, err)
+		}
+		resetLease, err := fixture.workers.GetLease(ctx, leaseID)
+		if err != nil || resetLease.ReleasedAt == nil {
+			t.Fatalf("task console lease after reset = %+v err=%v, want released", resetLease, err)
+		}
+		var runtimeState string
+		if err := fixture.db.DB().QueryRowContext(ctx, `SELECT runtime_state FROM sessions WHERE id = ?`, sessionID).Scan(&runtimeState); err != nil {
+			t.Fatalf("load task console session after reset: %v", err)
+		}
+		if runtimeState != string(SessionAbandoned) {
+			t.Fatalf("task console session state after reset = %q, want abandoned", runtimeState)
 		}
 		check, err := fixture.checks.GetCheck(ctx, fixture.task.ID, "code-review.node."+fixture.nodeID)
 		if err != nil {

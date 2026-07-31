@@ -947,6 +947,223 @@ func TestInvalidWorkerInputsAreRejected(t *testing.T) {
 	}
 }
 
+func TestTerminalTaskRejectsNewJobsAndCancelsQueuedWorkAtClaim(t *testing.T) {
+	ctx := context.Background()
+	store, directory, service := newWorkerService(t)
+	task := createTask(t, store)
+	queued, err := service.EnqueueJob(ctx, EnqueueJobInput{
+		TaskID: &task.ID, Role: RoleReviewer, CapacityBucket: BucketEphemeral,
+	})
+	if err != nil {
+		t.Fatalf("enqueue pre-terminal job: %v", err)
+	}
+	now := formatTime(time.Now().UTC())
+	if _, err := store.DB().ExecContext(ctx, `
+UPDATE tasks
+SET lifecycle_state = 'done', done_resolution = 'completed', done_at = ?, updated_at = ?
+WHERE id = ?`, now, now, task.ID); err != nil {
+		t.Fatalf("finish task: %v", err)
+	}
+	if _, err := service.EnqueueJob(ctx, EnqueueJobInput{
+		TaskID: &task.ID, Role: RoleCI, CapacityBucket: BucketEphemeral,
+	}); err == nil {
+		t.Fatal("terminal task accepted new non-console job")
+	}
+	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
+		ID: "w-terminal", CapacityEphemeral: 1, HeartbeatTTL: time.Minute,
+	}); err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	if claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
+		WorkerID: "w-terminal", Buckets: []CapacityBucket{BucketEphemeral}, LeaseDuration: time.Minute,
+	}); err != nil {
+		t.Fatalf("claim after task completion: %v", err)
+	} else if ok {
+		t.Fatalf("claimed terminal task job: %+v", claimed.Job)
+	}
+	canceled, err := service.GetJob(ctx, queued.ID)
+	if err != nil {
+		t.Fatalf("load stale queued job: %v", err)
+	}
+	if canceled.State != JobCanceled {
+		t.Fatalf("stale queued job state = %q, want canceled", canceled.State)
+	}
+}
+
+func TestClaimCancelsRepairJobWhenConvergenceFingerprintChanges(t *testing.T) {
+	ctx := context.Background()
+	store, directory, service := newWorkerService(t)
+	task := createTask(t, store)
+	const runID = "wr-convergence-claim"
+	const changeID = "ch-convergence-claim"
+	const oldFingerprint = "sha256:old"
+	now := formatTime(time.Now().UTC())
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO workflow_runs (
+	id, task_id, run_sequence, flow_snapshot_json, state, current_node_key,
+	transition_budget, created_at, held_at, held_by
+) VALUES (?, ?, 1, '{}', 'running', 'review', 10, ?, ?, 'system')`, runID, task.ID, now, now); err != nil {
+		t.Fatalf("insert held workflow: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO changes (id, task_id, workflow_run_id, branch, base, head_sha, created_at, updated_at)
+VALUES (?, ?, ?, ?, 'main', 'head', ?, ?)`, changeID, task.ID, runID, "task/"+task.ID, now, now); err != nil {
+		t.Fatalf("insert convergence change: %v", err)
+	}
+	requestPayload := fmt.Sprintf(`{"fingerprint":%q,"change_id":%q,"source_branch":%q,"source_head_sha":"head","target_base_branch":"main"}`,
+		oldFingerprint, changeID, "task/"+task.ID)
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO workflow_transitions (task_id, workflow_run_id, event_kind, payload_json, actor, created_at)
+VALUES (?, ?, 'workflow_convergence_review_requested', ?, 'system', ?)`, task.ID, runID, requestPayload, now); err != nil {
+		t.Fatalf("insert convergence request: %v", err)
+	}
+	runIDValue := runID
+	changeIDValue := changeID
+	fingerprintValue := oldFingerprint
+	if _, err := service.EnqueueJob(ctx, EnqueueJobInput{
+		TaskID: &task.ID, ChangeID: &changeIDValue, WorkflowRunID: &runIDValue,
+		RequireHeldWorkflowRunID: &runIDValue, RequireHeldWorkflowEvidenceFingerprint: &fingerprintValue,
+		Role: RoleConsole, CapacityBucket: BucketPersistentAgent,
+		Payload: map[string]any{"convergence_evidence_fingerprint": "spoofed-fingerprint", "convergence_source_head_sha": "head"},
+	}); err == nil {
+		t.Fatal("enqueue accepted a payload fingerprint that disagrees with its held-evidence precondition")
+	}
+	job, err := service.EnqueueJob(ctx, EnqueueJobInput{
+		TaskID: &task.ID, ChangeID: &changeIDValue, WorkflowRunID: &runIDValue,
+		RequireHeldWorkflowRunID: &runIDValue, RequireHeldWorkflowEvidenceFingerprint: &fingerprintValue,
+		Role: RoleConsole, CapacityBucket: BucketPersistentAgent,
+		Payload: map[string]any{"convergence_source_head_sha": "head"},
+	})
+	if err != nil {
+		t.Fatalf("enqueue convergence repair: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+UPDATE workflow_transitions
+SET payload_json = json_set(payload_json, '$.fingerprint', 'sha256:new')
+WHERE workflow_run_id = ?`, runID); err != nil {
+		t.Fatalf("replace convergence fingerprint: %v", err)
+	}
+	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
+		ID: "w-repair", CapacityPersistentAgent: 1, HeartbeatTTL: time.Minute,
+	}); err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	if claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
+		WorkerID: "w-repair", Buckets: []CapacityBucket{BucketPersistentAgent}, LeaseDuration: time.Minute,
+	}); err != nil {
+		t.Fatalf("claim stale convergence repair: %v", err)
+	} else if ok {
+		t.Fatalf("claimed stale convergence repair: %+v", claimed.Job)
+	}
+	canceled, err := service.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("load stale convergence repair: %v", err)
+	}
+	if canceled.State != JobCanceled {
+		t.Fatalf("stale convergence repair state = %q, want canceled", canceled.State)
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `UPDATE workflow_transitions SET payload_json = json_set(payload_json, '$.fingerprint', ?) WHERE workflow_run_id = ?`, oldFingerprint, runID); err != nil {
+		t.Fatalf("restore convergence fingerprint: %v", err)
+	}
+	headStaleJob, err := service.EnqueueJob(ctx, EnqueueJobInput{
+		TaskID: &task.ID, ChangeID: &changeIDValue, WorkflowRunID: &runIDValue,
+		RequireHeldWorkflowRunID: &runIDValue, RequireHeldWorkflowEvidenceFingerprint: &fingerprintValue,
+		Role: RoleConsole, CapacityBucket: BucketPersistentAgent,
+		Payload: map[string]any{"convergence_source_head_sha": "head"},
+	})
+	if err != nil {
+		t.Fatalf("enqueue repair before head movement: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE changes SET head_sha = 'moved-head' WHERE id = ?`, changeID); err != nil {
+		t.Fatalf("move convergence change head: %v", err)
+	}
+	if claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
+		WorkerID: "w-repair", Buckets: []CapacityBucket{BucketPersistentAgent}, LeaseDuration: time.Minute,
+	}); err != nil {
+		t.Fatalf("claim head-stale convergence repair: %v", err)
+	} else if ok {
+		t.Fatalf("claimed head-stale convergence repair: %+v", claimed.Job)
+	}
+	headCanceled, err := service.GetJob(ctx, headStaleJob.ID)
+	if err != nil {
+		t.Fatalf("load head-stale convergence repair: %v", err)
+	}
+	if headCanceled.State != JobCanceled {
+		t.Fatalf("head-stale convergence repair state = %q, want canceled", headCanceled.State)
+	}
+}
+
+func TestWorkflowJobEnqueueAndClaimRequireCurrentActiveNode(t *testing.T) {
+	ctx := context.Background()
+	store, directory, service := newWorkerService(t)
+	task := createTask(t, store)
+	const (
+		runID  = "wr-job-fence"
+		nodeID = "wnr-job-fence"
+	)
+	now := formatTime(time.Now().UTC())
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO workflow_runs (
+	id, task_id, run_sequence, flow_snapshot_json, state, current_node_key,
+	current_node_run_id, transition_budget, created_at, started_at
+) VALUES (?, ?, 1, '{}', 'running', 'review', ?, 10, ?, ?);
+INSERT INTO workflow_node_runs (
+	id, workflow_run_id, node_key, visit, attempt, state, created_at, started_at
+) VALUES (?, ?, 'review', 1, 1, 'running', ?, ?)`,
+		runID, task.ID, nodeID, now, now, nodeID, runID, now, now); err != nil {
+		t.Fatalf("insert active workflow node: %v", err)
+	}
+	runIDValue, nodeIDValue := runID, nodeID
+	job, err := service.EnqueueJob(ctx, EnqueueJobInput{
+		TaskID: &task.ID, WorkflowRunID: &runIDValue, NodeRunID: &nodeIDValue,
+		Role: RoleReviewer, CapacityBucket: BucketPersistentAgent,
+	})
+	if err != nil {
+		t.Fatalf("enqueue current workflow node job: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+UPDATE workflow_node_runs SET state = 'succeeded', completed_at = ? WHERE id = ?;
+UPDATE workflow_runs SET current_node_key = '', current_node_run_id = NULL WHERE id = ?`, now, nodeID, runID); err != nil {
+		t.Fatalf("move workflow beyond queued job: %v", err)
+	}
+	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
+		ID: "w-workflow-fence", CapacityPersistentAgent: 1, HeartbeatTTL: time.Minute,
+	}); err != nil {
+		t.Fatalf("register workflow worker: %v", err)
+	}
+	if claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
+		WorkerID: "w-workflow-fence", Buckets: []CapacityBucket{BucketPersistentAgent}, LeaseDuration: time.Minute,
+	}); err != nil {
+		t.Fatalf("claim stale workflow job: %v", err)
+	} else if ok {
+		t.Fatalf("claimed stale workflow job %+v", claimed.Job)
+	}
+	canceled, err := service.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get stale workflow job: %v", err)
+	}
+	if canceled.State != JobCanceled {
+		t.Fatalf("stale workflow job state = %q, want canceled", canceled.State)
+	}
+	if _, err := service.EnqueueJob(ctx, EnqueueJobInput{
+		TaskID: &task.ID, WorkflowRunID: &runIDValue, NodeRunID: &nodeIDValue,
+		Role: RoleReviewer, CapacityBucket: BucketPersistentAgent,
+	}); err == nil {
+		t.Fatal("enqueue accepted a noncurrent completed workflow node")
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+UPDATE workflow_runs SET state = 'completed', completed_at = ? WHERE id = ?`, now, runID); err != nil {
+		t.Fatalf("complete workflow run: %v", err)
+	}
+	if _, err := service.EnqueueJob(ctx, EnqueueJobInput{
+		TaskID: &task.ID, WorkflowRunID: &runIDValue,
+		Role: RoleReviewer, CapacityBucket: BucketPersistentAgent,
+	}); err == nil {
+		t.Fatal("enqueue accepted a completed workflow run")
+	}
+}
+
 func TestEnqueueJobRejectsChangeTaskMismatch(t *testing.T) {
 	ctx := context.Background()
 	store, _, service := newWorkerService(t)

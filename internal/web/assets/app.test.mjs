@@ -1026,6 +1026,39 @@ function statusApp() {
   };
 }
 
+test("a convergence decision posts an explicit disposition instead of a workflow edge", async () => {
+  await scriptContext();
+  const app = statusApp();
+  const calls = [];
+  globalThis.fetch = (path, options) => {
+    calls.push({ path, options });
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  };
+  const button = new ActionButton({
+    convergenceDecision: "t-0043",
+    disposition: "accept_scope",
+    evidenceFingerprint: "sha256:reviewed-evidence",
+    project: "p-alpha",
+  });
+  button.closest = (selector) => selector === "[data-convergence-panel]"
+    ? { querySelector: () => ({ value: "  reviewed scope  " }) }
+    : button;
+
+  assert.equal(await handleAction(app, { target: button, preventDefault() {} }), true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/ui/api/v2/projects/p-alpha/tasks/t-0043/workflow/convergence");
+  assert.equal(calls[0].options.method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    disposition: "accept_scope",
+    expected_evidence_fingerprint: "sha256:reviewed-evidence",
+    note: "reviewed scope",
+  });
+  assert.deepEqual(app.statuses, [
+    "Resolving convergence review t-0043\u2026",
+    "Continuing t-0043 as-is",
+  ]);
+});
+
 test("an action click marks the control busy and names the in-flight action before the request resolves", async () => {
   await scriptContext();
   const app = statusApp();

@@ -726,35 +726,58 @@ test("handing back names every edge the executor can take", () => {
   assert.match(html, /s-0413 · w-local-1 · tmux/);
 });
 
-test("a convergence hold explains the scope decision", () => {
+test("a typed convergence hold renders immutable evidence and explicit dispositions", () => {
   const html = renderHeldPanel({
     held: true,
     heldBy: "system",
     id: "t-0043",
     stepName: "review",
-    statusLog: [{
-      kind: "plan",
-      message: "Convergence review required before automated review: this change touches 8 files.",
-    }],
+    convergenceEvidence: {
+      schema_version: 1,
+      fingerprint: "sha256:reviewed-evidence",
+      source_branch: "task/t-0043",
+      source_head_sha: "1234567890abcdef1234567890abcdef12345678",
+      target_base_branch: "main",
+      target_base_tip_sha: "abcdef1234567890abcdef1234567890abcdef12",
+      files: 8,
+      additions: 420,
+      deletions: 160,
+      review_cycles_used: 2,
+      review_cycle_budget: 3,
+      changed_files: [{ path: "internal/<unsafe>.go", additions: 200, deletions: 10 }],
+      changed_files_omitted: 7,
+    },
   });
   assert.match(html, /Convergence review/);
-  assert.match(html, /touches 8 files/);
-  assert.match(html, /data-edge="resume"/);
+  assert.match(html, /task\/t-0043@1234567890ab/);
+  assert.match(html, /main@abcdef123456/);
+  assert.match(html, /8 files · \+420\/-160/);
+  assert.match(html, /internal\/&lt;unsafe&gt;\.go/);
+  assert.match(html, /data-convergence-note/);
+  assert.equal((html.match(/data-evidence-fingerprint="sha256:reviewed-evidence"/g) || []).length, 4);
+  for (const disposition of ["accept_scope", "repair_branch", "promote", "cancel"]) {
+    assert.match(html, new RegExp(`data-disposition="${disposition}"`), `missing disposition ${disposition}`);
+  }
+  assert.doesNotMatch(html, /data-workflow-release/);
 });
 
-test("the held panel renders convergence message as markdown", () => {
-  const html = renderHeldPanel({
-    held: true,
-    heldBy: "system",
-    id: "t-0043",
-    stepName: "review",
-    statusLog: [{
-      kind: "plan",
-      message: "Convergence **review** required.",
-    }],
+test("held_by system alone does not masquerade as typed convergence evidence", () => {
+  const html = renderHeldPanel({ held: true, heldBy: "system", id: "t-0043", stepName: "review" });
+  assert.match(html, /Held by you/);
+  assert.match(html, /data-workflow-release/);
+  assert.doesNotMatch(html, /data-convergence-decision/);
+});
+
+test("task model projects typed convergence evidence from task detail", () => {
+  const evidence = { schema_version: 1, fingerprint: "sha256:evidence" };
+  const model = taskModel({
+    task: { id: "t-0043", title: "Oversized" },
+    task_detail: { convergence_evidence: evidence },
+  }, {
+    detail: { run: { held_at: "2026-07-30T12:00:00Z", held_by: "system", snapshot: { nodes: [] } } },
   });
-  assert.match(html, /<div class="prose"><div class="md">/);
-  assert.match(html, /<strong>review<\/strong>/);
+  assert.equal(model.convergenceEvidence, evidence);
+  assert.equal(model.activity, "Held for convergence review");
 });
 
 test("the activity feed merges transitions and status entries newest first", () => {

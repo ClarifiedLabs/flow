@@ -3115,6 +3115,119 @@ func TestJobAttachAllowsLiveReviewerJobs(t *testing.T) {
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/jobs/"+reviewer.Job.ID+"/attach", nil, http.StatusBadRequest, nil)
 }
 
+func TestProjectGitWriteGateDrainsAdmittedWriters(t *testing.T) {
+	server := &Server{}
+	project := &projectServer{Server: server, project: coordinator.Project{ID: "p-git-gate"}}
+	gate := server.gitWriteGate(project.project.ID)
+	gate.RLock()
+
+	drained := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		unlock := project.drainGitWrites()
+		close(drained)
+		<-release
+		unlock()
+	}()
+	select {
+	case <-drained:
+		t.Fatal("terminal decision did not wait for admitted Git writer")
+	case <-time.After(25 * time.Millisecond):
+	}
+	gate.RUnlock()
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("terminal decision did not proceed after Git writer drained")
+	}
+
+	writerAdmitted := make(chan struct{})
+	go func() {
+		gate.RLock()
+		close(writerAdmitted)
+		gate.RUnlock()
+	}()
+	select {
+	case <-writerAdmitted:
+		t.Fatal("new Git writer passed an active terminal decision")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-writerAdmitted:
+	case <-time.After(time.Second):
+		t.Fatal("Git writer did not resume after terminal decision")
+	}
+}
+
+func TestWorkerReportedConsoleExitWaitsForAdmittedGitWriter(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	fixture.Server.forBundle(fixture.Bundle) // installs the session projection fence
+
+	ensured, err := fixture.Sessions.EnsureConsoleJob(ctx, coordinator.EnsureConsoleJobInput{Harness: "shell"})
+	if err != nil {
+		t.Fatalf("ensure console job: %v", err)
+	}
+	if _, err := fixture.Registry.Directory().RegisterWorker(ctx, flowworker.RegisterWorkerInput{
+		ID: "w-console-exit-fence", Labels: map[string]string{flowharness.AgentHarnessLabel("shell"): "true"},
+		CapacityPersistentAgent: 1, HeartbeatTTL: time.Minute,
+	}); err != nil {
+		t.Fatalf("register console worker: %v", err)
+	}
+	claimed, ok, err := fixture.Registry.Claim(ctx, flowworker.ClaimInput{
+		WorkerID: "w-console-exit-fence", Buckets: []flowworker.CapacityBucket{flowworker.BucketPersistentAgent}, LeaseDuration: time.Minute,
+	})
+	if err != nil || !ok || claimed.Job.ID != ensured.Job.ID {
+		t.Fatalf("claim console job: claim=%+v ok=%t err=%v", claimed, ok, err)
+	}
+	if _, err := fixture.Workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
+		t.Fatalf("mark console job running: %v", err)
+	}
+	started, err := fixture.Sessions.StartConsoleSession(ctx, coordinator.StartConsoleSessionInput{
+		JobID: claimed.Job.ID, LeaseID: claimed.Lease.ID, WorkerID: "w-console-exit-fence", Harness: "shell",
+	})
+	if err != nil {
+		t.Fatalf("start console session: %v", err)
+	}
+	if _, err := fixture.Bundle.Queue.ReleaseLease(ctx, claimed.Lease.ID, flowworker.JobCanceled); err != nil {
+		t.Fatalf("cancel console lease: %v", err)
+	}
+
+	gate := fixture.Server.gitWriteGate(fixture.Project.ID)
+	gate.RLock() // models an already-admitted receive-pack request
+	type exitResult struct {
+		session coordinator.Session
+		err     error
+	}
+	done := make(chan exitResult, 1)
+	go func() {
+		session, err := fixture.Sessions.MarkPersistentSessionExited(ctx, coordinator.MarkPersistentSessionExitedInput{
+			SessionID: started.Session.ID, LeaseID: claimed.Lease.ID, ExitCode: 0,
+		})
+		done <- exitResult{session: session, err: err}
+	}()
+	select {
+	case result := <-done:
+		gate.RUnlock()
+		t.Fatalf("worker exit projection bypassed admitted Git writer: %+v", result)
+	case <-time.After(25 * time.Millisecond):
+	}
+	gate.RUnlock()
+
+	select {
+	case result := <-done:
+		if result.err != nil {
+			t.Fatalf("mark console process exited: %v", result.err)
+		}
+		if result.session.RuntimeState != coordinator.SessionFinished {
+			t.Fatalf("console runtime state = %q, want finished", result.session.RuntimeState)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker exit projection did not proceed after Git writer drained")
+	}
+}
+
 func TestSessionAttachRejectsInactiveOrNonLiveSessions(t *testing.T) {
 	t.Run("finished", func(t *testing.T) {
 		fixture := newTestFixture(t)

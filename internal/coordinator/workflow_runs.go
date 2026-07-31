@@ -177,12 +177,13 @@ type WorkflowTransition struct {
 }
 
 type WorkflowRunDetail struct {
-	Run              WorkflowRun          `json:"run"`
-	NodeRuns         []WorkflowNodeRun    `json:"node_runs"`
-	OpenWait         *WorkflowWait        `json:"open_wait,omitempty"`
-	Substate         InProgressSubstate   `json:"substate,omitempty"`
-	Transitions      []WorkflowTransition `json:"transitions"`
-	TransitionCounts []WorkflowEdgeCount  `json:"transition_counts,omitempty"`
+	Run                 WorkflowRun          `json:"run"`
+	NodeRuns            []WorkflowNodeRun    `json:"node_runs"`
+	OpenWait            *WorkflowWait        `json:"open_wait,omitempty"`
+	Substate            InProgressSubstate   `json:"substate,omitempty"`
+	Transitions         []WorkflowTransition `json:"transitions"`
+	TransitionCounts    []WorkflowEdgeCount  `json:"transition_counts,omitempty"`
+	ConvergenceEvidence *ConvergenceEvidence `json:"convergence_evidence,omitempty"`
 }
 
 type WorkflowRunService struct {
@@ -429,7 +430,14 @@ FROM workflow_transitions WHERE workflow_run_id = ? ORDER BY seq`, run.ID)
 		}
 		detail.Transitions = append(detail.Transitions, transition)
 	}
-	return detail, transitionRows.Err()
+	if err := transitionRows.Err(); err != nil {
+		return WorkflowRunDetail{}, err
+	}
+	detail.ConvergenceEvidence, err = ActiveConvergenceEvidence(detail.Transitions)
+	if err != nil {
+		return WorkflowRunDetail{}, err
+	}
+	return detail, nil
 }
 
 // EnsureCurrentNode creates the run's current node visit once its initial
@@ -1546,21 +1554,30 @@ WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, taskID))
 	if err != nil {
 		return WorkflowRun{}, err
 	}
+	convergenceEvidence, err := activeConvergenceEvidenceTx(ctx, tx, run.ID)
+	if err != nil {
+		return WorkflowRun{}, err
+	}
+	if convergenceEvidence != nil {
+		return WorkflowRun{}, fmt.Errorf("%w: convergence hold requires an explicit disposition", ErrWorkflowConflict)
+	}
 	now := s.now().UTC()
 	if _, err := tx.ExecContext(ctx, `
 UPDATE jobs SET state = 'canceled', updated_at = ?
-WHERE workflow_run_id = ? AND state IN ('queued', 'claimed', 'running')`, sqlitex.FormatTime(now), run.ID); err != nil {
+WHERE (workflow_run_id = ? OR task_id = ?) AND state IN ('queued', 'claimed', 'running')`,
+		sqlitex.FormatTime(now), run.ID, taskID); err != nil {
 		return WorkflowRun{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE leases SET released_at = COALESCE(released_at, ?)
-WHERE job_id IN (SELECT id FROM jobs WHERE workflow_run_id = ?) AND released_at IS NULL`, sqlitex.FormatTime(now), run.ID); err != nil {
+WHERE job_id IN (SELECT id FROM jobs WHERE workflow_run_id = ? OR task_id = ?) AND released_at IS NULL`,
+		sqlitex.FormatTime(now), run.ID, taskID); err != nil {
 		return WorkflowRun{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE sessions SET runtime_state = 'abandoned', updated_at = ?, finished_at = COALESCE(finished_at, ?)
-WHERE workflow_run_id = ? AND runtime_state IN ('starting', 'working', 'waiting')`,
-		sqlitex.FormatTime(now), sqlitex.FormatTime(now), run.ID); err != nil {
+WHERE (workflow_run_id = ? OR task_id = ?) AND runtime_state IN ('starting', 'working', 'waiting')`,
+		sqlitex.FormatTime(now), sqlitex.FormatTime(now), run.ID, taskID); err != nil {
 		return WorkflowRun{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -1626,22 +1643,39 @@ func (s *WorkflowRunService) ForceDone(ctx context.Context, taskID string, resol
 	_ = tx.QueryRowContext(ctx, `
 SELECT id FROM workflow_runs WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, taskID).Scan(&runID)
 	if runID.Valid {
-		if _, err := tx.ExecContext(ctx, `
+		convergenceEvidence, err := activeConvergenceEvidenceTx(ctx, tx, runID.String)
+		if err != nil {
+			return Task{}, err
+		}
+		if convergenceEvidence != nil {
+			return Task{}, fmt.Errorf("%w: convergence hold requires an explicit disposition", ErrWorkflowConflict)
+		}
+	}
+	var runIDArg any
+	if runID.Valid {
+		runIDArg = runID.String
+	}
+	if _, err := tx.ExecContext(ctx, `
 UPDATE jobs SET state = 'canceled', updated_at = ?
-WHERE workflow_run_id = ? AND state IN ('queued', 'claimed', 'running')`, sqlitex.FormatTime(now), runID.String); err != nil {
-			return Task{}, err
-		}
-		if _, err := tx.ExecContext(ctx, `
+WHERE (task_id = ? OR (? IS NOT NULL AND workflow_run_id = ?))
+	AND state IN ('queued', 'claimed', 'running')`, sqlitex.FormatTime(now), taskID, runIDArg, runIDArg); err != nil {
+		return Task{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
 UPDATE leases SET released_at = COALESCE(released_at, ?)
-WHERE job_id IN (SELECT id FROM jobs WHERE workflow_run_id = ?) AND released_at IS NULL`, sqlitex.FormatTime(now), runID.String); err != nil {
-			return Task{}, err
-		}
-		if _, err := tx.ExecContext(ctx, `
+WHERE job_id IN (
+	SELECT id FROM jobs WHERE task_id = ? OR (? IS NOT NULL AND workflow_run_id = ?)
+) AND released_at IS NULL`, sqlitex.FormatTime(now), taskID, runIDArg, runIDArg); err != nil {
+		return Task{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
 UPDATE sessions SET runtime_state = 'abandoned', updated_at = ?, finished_at = COALESCE(finished_at, ?)
-WHERE workflow_run_id = ? AND runtime_state IN ('starting', 'working', 'waiting')`,
-			sqlitex.FormatTime(now), sqlitex.FormatTime(now), runID.String); err != nil {
-			return Task{}, err
-		}
+WHERE (task_id = ? OR (? IS NOT NULL AND workflow_run_id = ?))
+	AND runtime_state IN ('starting', 'working', 'waiting')`,
+		sqlitex.FormatTime(now), sqlitex.FormatTime(now), taskID, runIDArg, runIDArg); err != nil {
+		return Task{}, err
+	}
+	if runID.Valid {
 		if _, err := tx.ExecContext(ctx, `
 UPDATE workflow_node_runs SET state = ?, completed_at = COALESCE(completed_at, ?)
 WHERE workflow_run_id = ? AND state IN ('queued', 'running', 'waiting')`,
@@ -1692,7 +1726,7 @@ WHERE task_id = ? AND state = 'running'`, rebaseState, sqlitex.FormatTime(now), 
 	return s.tasks.GetTask(ctx, taskID)
 }
 
-func retireIncompleteWorkflowChecksTx(ctx context.Context, tx *sql.Tx, taskID, runID string, now time.Time) error {
+func retireIncompleteWorkflowChecksTx(ctx context.Context, tx workflowTransitionExecer, taskID, runID string, now time.Time) error {
 	_, err := tx.ExecContext(ctx, `
 UPDATE checks
 SET required = 0, updated_at = ?
@@ -2025,7 +2059,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`, id, runID, sqlitex.NullableNonEmpty
 	return err
 }
 
-func resolveOpenWaitTx(ctx context.Context, tx *sql.Tx, runID string, actor Actor, now time.Time) error {
+func resolveOpenWaitTx(ctx context.Context, tx workflowTransitionExecer, runID string, actor Actor, now time.Time) error {
 	_, err := tx.ExecContext(ctx, `
 UPDATE workflow_waits SET state = 'resolved', resolved_by = ?, resolved_at = ?
 WHERE workflow_run_id = ? AND state = 'open'`, string(actor), sqlitex.FormatTime(now), runID)

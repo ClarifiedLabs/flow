@@ -568,6 +568,10 @@ func (s *projectServer) buildUITaskDetail(ctx context.Context, task coordinator.
 			return nil, fmt.Errorf("load transitions: %w", err)
 		}
 		detail.Transitions = transitions
+		detail.ConvergenceEvidence, err = s.workflowRuns.ActiveConvergenceEvidenceForTask(ctx, task.ID)
+		if err != nil {
+			return nil, fmt.Errorf("load active convergence evidence: %w", err)
+		}
 	}
 	attachments, err := s.tasks.ListTaskAttachments(ctx, task.ID)
 	if err != nil {

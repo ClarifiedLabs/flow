@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,18 +43,28 @@ const (
 // ErrWorkflowNotHeld reports a release against a run no operator holds.
 var ErrWorkflowNotHeld = errors.New("workflow run is not held")
 
+// ConvergenceFile describes changed-path evidence attached to a scope hold.
+type ConvergenceFile struct {
+	Path      string `json:"path"`
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+	Binary    bool   `json:"binary,omitempty"`
+}
+
+const (
+	convergenceMessageFileLimit = 20
+	convergencePayloadFileLimit = 100
+	convergencePayloadByteLimit = 64 * 1024
+	convergenceDisplayPathLimit = 320
+)
+
 // HoldForConvergence pauses an oversized change once per workflow run before
-// automated reviewers are dispatched. Releasing the hold with Resume records
-// the operator's decision and the durable transition marker prevents the same
-// run from being stopped again on every review visit.
+// automated reviewers are dispatched. The typed evidence captures immutable
+// Git identities; the durable transition marker prevents the same run from
+// being stopped again on every review visit.
 func (s *WorkflowRunService) HoldForConvergence(
 	ctx context.Context,
-	taskID string,
-	files int,
-	additions int,
-	deletions int,
-	maxFiles int,
-	maxLines int,
+	evidence ConvergenceEvidence,
 ) (WorkflowRun, bool, error) {
 	tx, err := sqlitex.BeginImmediate(ctx, s.db)
 	if err != nil {
@@ -61,7 +73,7 @@ func (s *WorkflowRunService) HoldForConvergence(
 	defer tx.Rollback()
 
 	run, err := scanWorkflowRun(tx.QueryRowContext(ctx, workflowRunSelect+`
-WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, strings.TrimSpace(taskID)))
+WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, strings.TrimSpace(evidence.TaskID)))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return WorkflowRun{}, false, ErrWorkflowRunNotFound
@@ -81,6 +93,13 @@ WHERE workflow_run_id = ? AND event_kind = 'workflow_convergence_review_requeste
 	}
 
 	now := s.now().UTC()
+	evidence, err = normalizeConvergenceEvidence(run, evidence, now)
+	if err != nil {
+		return WorkflowRun{}, false, err
+	}
+	if run.CurrentNodeRunID != evidence.NodeRunID {
+		return WorkflowRun{}, false, fmt.Errorf("%w: convergence evidence node run is not active", ErrWorkflowConflict)
+	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE workflow_runs SET held_at = ?, held_by = ?, version = version + 1
 WHERE id = ? AND held_at IS NULL`,
@@ -88,10 +107,7 @@ WHERE id = ? AND held_at IS NULL`,
 	); err != nil {
 		return WorkflowRun{}, false, err
 	}
-	payload, err := json.Marshal(map[string]any{
-		"files": files, "additions": additions, "deletions": deletions,
-		"max_files": maxFiles, "max_lines": maxLines,
-	})
+	payload, err := json.Marshal(evidence)
 	if err != nil {
 		return WorkflowRun{}, false, err
 	}
@@ -102,12 +118,9 @@ WHERE id = ? AND held_at IS NULL`,
 	}); err != nil {
 		return WorkflowRun{}, false, err
 	}
-	message := fmt.Sprintf(
-		"Convergence review required before automated review: this change touches %d files and %d lines (automatic threshold: %d files or %d lines). Decide whether to split or re-scope the task, then release the hold with Resume.",
-		files,
-		additions+deletions,
-		maxFiles,
-		maxLines,
+	message := convergenceHoldMessage(
+		evidence.Files, evidence.Additions, evidence.Deletions,
+		evidence.MaxFiles, evidence.MaxLines, evidence.ChangedFiles,
 	)
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO status_log (task_id, actor, message, kind, created_at)
@@ -125,6 +138,87 @@ VALUES (?, ?, ?, ?, ?)`,
 	}
 	held, err := s.Get(ctx, run.ID)
 	return held, true, err
+}
+
+func convergenceHoldMessage(files int, additions int, deletions int, maxFiles int, maxLines int, changedFiles []ConvergenceFile) string {
+	var message strings.Builder
+	fmt.Fprintf(
+		&message,
+		"Convergence review required before automated review: this change touches %d files and %d lines (+%d/-%d; automatic threshold: %d files or %d lines).",
+		files,
+		additions+deletions,
+		additions,
+		deletions,
+		maxFiles,
+		maxLines,
+	)
+
+	if len(changedFiles) > 0 {
+		reported := min(len(changedFiles), convergenceMessageFileLimit)
+		message.WriteString("\n\n### Largest changed files\n")
+		for _, file := range changedFiles[:reported] {
+			path, truncated := convergenceDisplayPath(file.Path)
+			suffix := ""
+			if truncated {
+				suffix = " (path truncated)"
+			}
+			if file.Binary {
+				fmt.Fprintf(&message, "- `%s` — binary%s\n", path, suffix)
+				continue
+			}
+			fmt.Fprintf(&message, "- `%s` — +%d/-%d%s\n", path, file.Additions, file.Deletions, suffix)
+		}
+		if omitted := files - reported; omitted > 0 {
+			fmt.Fprintf(&message, "- _%d more changed files omitted._\n", omitted)
+		}
+	}
+
+	message.WriteString("\nBefore resuming:\n")
+	message.WriteString("1. Compare the changed paths with the task's declared scope.\n")
+	message.WriteString("2. Split independent work into follow-up tasks; keep task-caused correctness requirements here.\n")
+	message.WriteString("3. Repair the branch first if the diff contains unrelated reversions, merge fallout, or base updates.\n")
+	message.WriteString("4. Resume only when the remaining change is one coherent review unit.")
+	return message.String()
+}
+
+func sortConvergenceFiles(changedFiles []ConvergenceFile) []ConvergenceFile {
+	filesByChurn := append([]ConvergenceFile(nil), changedFiles...)
+	sort.Slice(filesByChurn, func(i, j int) bool {
+		iLines := filesByChurn[i].Additions + filesByChurn[i].Deletions
+		jLines := filesByChurn[j].Additions + filesByChurn[j].Deletions
+		if iLines == jLines {
+			return filesByChurn[i].Path < filesByChurn[j].Path
+		}
+		return iLines > jLines
+	})
+	return filesByChurn
+}
+
+func convergencePayloadFiles(totalFiles int, changedFiles []ConvergenceFile) ([]ConvergenceFile, int) {
+	payloadBytes := 2 // JSON array brackets.
+	payloadFiles := make([]ConvergenceFile, 0, min(len(changedFiles), convergencePayloadFileLimit))
+	for _, file := range changedFiles {
+		encoded, err := json.Marshal(file)
+		separatorBytes := 0
+		if len(payloadFiles) > 0 {
+			separatorBytes = 1
+		}
+		if err != nil || len(payloadFiles) >= convergencePayloadFileLimit || payloadBytes+separatorBytes+len(encoded) > convergencePayloadByteLimit {
+			continue
+		}
+		payloadFiles = append(payloadFiles, file)
+		payloadBytes += separatorBytes + len(encoded)
+	}
+	return payloadFiles, max(totalFiles, len(changedFiles)) - len(payloadFiles)
+}
+
+func convergenceDisplayPath(path string) (string, bool) {
+	quoted := strconv.QuoteToASCII(path)
+	path = strings.ReplaceAll(quoted[1:len(quoted)-1], "`", `\x60`)
+	if len(path) <= convergenceDisplayPathLimit {
+		return path, false
+	}
+	return path[:convergenceDisplayPathLimit] + "…", true
 }
 
 // ReleaseWorkflowInput carries a hand-back. ArtifactID is required by
@@ -249,6 +343,13 @@ WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, taskID))
 	}
 	if !run.Held() {
 		return WorkflowRun{}, nil, ErrWorkflowNotHeld
+	}
+	convergenceEvidence, err := activeConvergenceEvidenceTx(ctx, tx, run.ID)
+	if err != nil {
+		return WorkflowRun{}, nil, err
+	}
+	if convergenceEvidence != nil {
+		return WorkflowRun{}, nil, fmt.Errorf("%w: convergence hold requires an explicit disposition", ErrWorkflowConflict)
 	}
 
 	now := s.now().UTC()

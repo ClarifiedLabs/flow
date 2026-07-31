@@ -170,7 +170,20 @@ func (s *projectServer) handleStartTaskConsole(w http.ResponseWriter, r *http.Re
 }
 
 func (s *projectServer) handleReleaseTaskConsole(w http.ResponseWriter, r *http.Request, taskID string) {
-	state, err := s.sessions.ReleaseTaskConsole(r.Context(), taskID)
+	unlockGitWrites := s.drainGitWrites()
+	defer unlockGitWrites()
+	var (
+		state coordinator.ConsoleState
+		err   error
+	)
+	if evidence, evidenceErr := s.workflowRuns.ActiveConvergenceEvidenceForTask(r.Context(), taskID); evidenceErr != nil {
+		writeError(w, http.StatusInternalServerError, "convergence_evidence_failed", evidenceErr.Error())
+		return
+	} else if evidence != nil {
+		state, err = s.sessions.StopConvergenceRepairConsole(r.Context(), taskID)
+	} else {
+		state, err = s.sessions.ReleaseTaskConsole(r.Context(), taskID)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "console_not_found", "console not found")
 		return

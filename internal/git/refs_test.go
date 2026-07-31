@@ -2,10 +2,13 @@ package git
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestChangedFileDiffExcludesChangesMadeOnlyOnAdvancedBase(t *testing.T) {
@@ -229,6 +232,160 @@ func TestChangedFileDiffMatchesQuotedPatchPaths(t *testing.T) {
 	}
 	if !sawNew {
 		t.Fatalf("hunk lines = %+v, want added new line", diff.Files[0].Hunks[0].Lines)
+	}
+}
+
+func TestImmutableEvidenceGitHelpers(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	repoPath := filepath.Join(root, "repo")
+	exchangePath := filepath.Join(root, "exchange.git")
+
+	runRefsGit(t, "", "-c", "init.defaultBranch=main", "init", repoPath)
+	runRefsGit(t, repoPath, "config", "user.name", "Flow Test")
+	runRefsGit(t, repoPath, "config", "user.email", "flow-test@example.com")
+	writeRefsFile(t, repoPath, "README.md", "base\n")
+	runRefsGit(t, repoPath, "add", "README.md")
+	runRefsGit(t, repoPath, "commit", "-m", "base")
+	baseSHA := refsGitOutput(t, repoPath, "rev-parse", "HEAD")
+	baseBlobSHA := refsGitOutput(t, repoPath, "rev-parse", "HEAD:README.md")
+	runRefsGit(t, "", "init", "--bare", exchangePath)
+	runRefsGit(t, repoPath, "push", exchangePath, "main:main")
+
+	runRefsGit(t, repoPath, "checkout", "-b", "task/t-evidence-0001")
+	writeRefsFile(t, repoPath, "feature.txt", "source evidence\n")
+	runRefsGit(t, repoPath, "add", "feature.txt")
+	runRefsGit(t, repoPath, "commit", "-m", "source change")
+	headSHA := refsGitOutput(t, repoPath, "rev-parse", "HEAD")
+	runRefsGit(t, repoPath, "push", exchangePath, "task/t-evidence-0001:task/t-evidence-0001")
+
+	exists, err := CommitExists(ctx, exchangePath, headSHA)
+	if err != nil || !exists {
+		t.Fatalf("source commit exists = %t, err = %v", exists, err)
+	}
+	exists, err = CommitExists(ctx, exchangePath, strings.Repeat("f", 40))
+	if err != nil || exists {
+		t.Fatalf("missing commit exists = %t, err = %v", exists, err)
+	}
+	exists, err = CommitExists(ctx, exchangePath, baseBlobSHA)
+	if err != nil || exists {
+		t.Fatalf("blob exists as commit = %t, err = %v", exists, err)
+	}
+	mergeBase, err := MergeBase(ctx, exchangePath, "refs/heads/main", headSHA)
+	if err != nil {
+		t.Fatalf("merge base: %v", err)
+	}
+	if mergeBase != baseSHA {
+		t.Fatalf("merge base = %q, want %q", mergeBase, baseSHA)
+	}
+	digest, err := CanonicalDiffDigest(ctx, exchangePath, mergeBase, headSHA)
+	if err != nil {
+		t.Fatalf("canonical diff digest: %v", err)
+	}
+	replayedDigest, err := CanonicalDiffDigest(ctx, exchangePath, mergeBase, headSHA)
+	if err != nil || replayedDigest != digest || !strings.HasPrefix(digest, "sha256:") {
+		t.Fatalf("replayed digest = %q, err = %v, want %q", replayedDigest, err, digest)
+	}
+	if err := os.MkdirAll(filepath.Join(repoPath, ".flow", "session"), 0o755); err != nil {
+		t.Fatalf("mkdir session evidence: %v", err)
+	}
+	writeRefsFile(t, repoPath, ".flow/session/transcript", "mutable session data\n")
+	runRefsGit(t, repoPath, "add", ".flow/session/transcript")
+	runRefsGit(t, repoPath, "commit", "-m", "session-only data")
+	sessionHeadSHA := refsGitOutput(t, repoPath, "rev-parse", "HEAD")
+	runRefsGit(t, repoPath, "push", exchangePath, "task/t-evidence-0001:task/t-evidence-0001")
+	sessionDigest, err := CanonicalDiffDigest(ctx, exchangePath, mergeBase, sessionHeadSHA)
+	if err != nil || sessionDigest != digest {
+		t.Fatalf("session-only digest = %q, err = %v, want %q", sessionDigest, err, digest)
+	}
+
+	ref := "refs/flow/promotions/pr-test/source"
+	if err := CreateOrVerifyRef(ctx, exchangePath, ref, headSHA); err != nil {
+		t.Fatalf("create immutable ref: %v", err)
+	}
+	if err := CreateOrVerifyRef(ctx, exchangePath, ref, headSHA); err != nil {
+		t.Fatalf("verify immutable ref replay: %v", err)
+	}
+	if err := CreateOrVerifyRef(ctx, exchangePath, ref, baseSHA); err == nil || !strings.Contains(err.Error(), "already points to") {
+		t.Fatalf("repoint immutable ref error = %v, want mismatch", err)
+	}
+
+	symbolicRef := "refs/flow/promotions/pr-test/symbolic-source"
+	runRefsGit(t, "", "--git-dir", exchangePath, "symbolic-ref", symbolicRef, "refs/heads/main")
+	if err := CreateOrVerifyRef(ctx, exchangePath, symbolicRef, baseSHA); err == nil {
+		t.Fatal("symbolic immutable ref unexpectedly verified")
+	}
+}
+
+func TestWithLockedRefsFencesConcurrentUpdatesAndRejectsStaleTips(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	repoPath := filepath.Join(root, "repo")
+	exchangePath := filepath.Join(root, "exchange.git")
+
+	runRefsGit(t, "", "-c", "init.defaultBranch=main", "init", repoPath)
+	runRefsGit(t, repoPath, "config", "user.name", "Flow Test")
+	runRefsGit(t, repoPath, "config", "user.email", "flow-test@example.com")
+	writeRefsFile(t, repoPath, "file.txt", "first\n")
+	runRefsGit(t, repoPath, "add", "file.txt")
+	runRefsGit(t, repoPath, "commit", "-m", "first")
+	first := refsGitOutput(t, repoPath, "rev-parse", "HEAD")
+	runRefsGit(t, "", "init", "--bare", exchangePath)
+	runRefsGit(t, repoPath, "push", exchangePath, "HEAD:refs/heads/main")
+
+	writeRefsFile(t, repoPath, "file.txt", "second\n")
+	runRefsGit(t, repoPath, "commit", "-am", "second")
+	second := refsGitOutput(t, repoPath, "rev-parse", "HEAD")
+	runRefsGit(t, repoPath, "push", exchangePath, "HEAD:refs/heads/next")
+
+	var updateErr error
+	if err := WithLockedRefs(ctx, exchangePath, map[string]string{"refs/heads/main": first}, func(context.Context) error {
+		cmd := exec.Command("git", "--git-dir", exchangePath, "update-ref", "refs/heads/main", second, first)
+		output, err := cmd.CombinedOutput()
+		if err == nil {
+			return fmt.Errorf("competing ref update unexpectedly succeeded")
+		}
+		updateErr = fmt.Errorf("%w: %s", err, output)
+		return nil
+	}); err != nil {
+		t.Fatalf("lock expected ref: %v", err)
+	}
+	if updateErr == nil || !strings.Contains(updateErr.Error(), "cannot lock ref") {
+		t.Fatalf("competing update err = %v, want lock rejection", updateErr)
+	}
+	if got := refsGitOutput(t, "", "--git-dir", exchangePath, "rev-parse", "refs/heads/main"); got != first {
+		t.Fatalf("main after locked update = %q, want %q", got, first)
+	}
+
+	called := false
+	if err := WithLockedRefs(ctx, exchangePath, map[string]string{"refs/heads/main": second}, func(context.Context) error {
+		called = true
+		return nil
+	}); err == nil {
+		t.Fatal("stale expected ref unexpectedly locked")
+	}
+	if called {
+		t.Fatal("stale expected ref invoked callback")
+	}
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	lockedAfterTimeout := false
+	timeoutErr := WithLockedRefs(timeoutCtx, exchangePath, map[string]string{"refs/heads/main": first}, func(lockedCtx context.Context) error {
+		<-lockedCtx.Done()
+		cmd := exec.Command("git", "--git-dir", exchangePath, "update-ref", "refs/heads/main", second, first)
+		if output, updateErr := cmd.CombinedOutput(); updateErr != nil && strings.Contains(string(output), "cannot lock ref") {
+			lockedAfterTimeout = true
+		}
+		return lockedCtx.Err()
+	})
+	if timeoutErr == nil {
+		t.Fatal("timed out ref-lock callback returned nil")
+	}
+	if !lockedAfterTimeout {
+		t.Fatal("ref lock was released before the timed-out callback returned")
 	}
 }
 

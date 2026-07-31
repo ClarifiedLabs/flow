@@ -997,6 +997,103 @@ printf console-exit > "$1"
 	}
 }
 
+func TestWorkerStoppedTaskConsoleReportsProcessExit(t *testing.T) {
+	requireWorkerTool(t, "git")
+	requireWorkerTool(t, "tmux")
+	ctx := context.Background()
+	fixture := newWorkerTestFixture(t)
+
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Stopped repair console"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	ensured, err := fixture.Sessions.EnsureTaskConsoleJob(ctx, coordinator.EnsureTaskConsoleJobInput{
+		TaskID:  task.ID,
+		Harness: "harness",
+	})
+	if err != nil {
+		t.Fatalf("ensure task console job: %v", err)
+	}
+	startedPath := filepath.Join(t.TempDir(), "console-started")
+	stopPath := filepath.Join(t.TempDir(), "console-stop")
+	scriptPath := writeWorkerScript(t, `#!/bin/sh
+set -eu
+: > "$1"
+while [ ! -f "$2" ]; do sleep 0.1; done
+`)
+	payload := ensured.Job.Payload
+	payload["entrypoint"] = map[string]any{
+		"argv":       []string{scriptPath, startedPath, stopPath},
+		"shell":      false,
+		"persistent": true,
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal task console payload: %v", err)
+	}
+	if _, err := fixture.DB.ExecContext(ctx, `UPDATE jobs SET payload_json = ? WHERE id = ?`, string(payloadJSON), ensured.Job.ID); err != nil {
+		t.Fatalf("install blocking task console entrypoint: %v", err)
+	}
+
+	httpServer := httptest.NewServer(fixture.Server)
+	t.Cleanup(httpServer.Close)
+	toolYAML, _ := workerToolConfigYAML(t)
+	configPath := writeWorkerConfig(t, t.TempDir(), workerConfigOptions{
+		coordinatorURL: httpServer.URL, agentHarnessLabel: true,
+		capacityBucket: "persistent_agent", capacityCount: 1,
+		toolYAML: toolYAML, principal: true,
+	})
+
+	type runResult struct {
+		exitCode int
+		stdout   string
+		stderr   string
+	}
+	done := make(chan runResult, 1)
+	go func() {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		exitCode := run([]string{"-c", configPath, "--once", "--claim-wait", "0s", "--lease", "3s"}, &stdout, &stderr)
+		done <- runResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String()}
+	}()
+
+	waitForWorkerFile(t, startedPath, 15*time.Second)
+	session := waitForWorkerSessionState(t, fixture, task.ID, coordinator.SessionStarting, 15*time.Second)
+	state, err := fixture.Sessions.StopConvergenceRepairConsole(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("stop repair console: %v", err)
+	}
+	if !state.Active || state.Session == nil || state.Session.ID != session.ID {
+		t.Fatalf("stopped repair console state = %+v, want active process-exit fence", state)
+	}
+	// Let the worker observe the canceled lease before the local tmux process
+	// exits, exercising the lease-loss completion path.
+	time.Sleep(1500 * time.Millisecond)
+	if err := os.WriteFile(stopPath, []byte("stop\n"), 0o600); err != nil {
+		t.Fatalf("signal console exit: %v", err)
+	}
+
+	select {
+	case result := <-done:
+		if result.exitCode != 0 {
+			t.Fatalf("exitCode = %d, stderr = %q, stdout = %q", result.exitCode, result.stderr, result.stdout)
+		}
+		if !strings.Contains(result.stdout, "console process exit acknowledged: "+session.ID) {
+			t.Fatalf("worker did not acknowledge stopped process exit:\n%s", result.stdout)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("worker did not finish after stopped console process exited")
+	}
+
+	finished, err := fixture.Sessions.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get stopped console session: %v", err)
+	}
+	if finished.RuntimeState != coordinator.SessionFinished || finished.FinishedAt == nil {
+		t.Fatalf("stopped console session = %+v, want finished", finished)
+	}
+}
+
 func TestWorkerConsoleNonZeroExitReleasesSession(t *testing.T) {
 	t.Parallel()
 	requireWorkerTool(t, "git")

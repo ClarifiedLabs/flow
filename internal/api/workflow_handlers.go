@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -80,6 +82,12 @@ type workflowReleaseRequest struct {
 	ArtifactID string `json:"artifact_id,omitempty"`
 }
 
+type workflowConvergenceRequest struct {
+	Disposition                 coordinator.ConvergenceDisposition `json:"disposition"`
+	Note                        string                             `json:"note,omitempty"`
+	ExpectedEvidenceFingerprint string                             `json:"expected_evidence_fingerprint"`
+}
+
 type workflowArtifactResponse struct {
 	Artifact coordinator.WorkflowArtifact `json:"artifact"`
 	Replayed bool                         `json:"replayed"`
@@ -106,6 +114,8 @@ func (s *projectServer) handleScheduleWorkflow(w http.ResponseWriter, r *http.Re
 }
 
 func (s *projectServer) handleResetWorkflow(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
+	unlockGitWrites := s.drainGitWrites()
+	defer unlockGitWrites()
 	run, err := s.workflowRuns.Reset(r.Context(), taskID, workflowActor(principal))
 	if err != nil {
 		writeWorkflowError(w, err, "reset_workflow_failed")
@@ -123,20 +133,15 @@ func (s *projectServer) handleForceDoneWorkflow(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	activeRun, hadActiveRun, lookupErr := s.workflowRuns.ActiveForTask(r.Context(), taskID)
-	if lookupErr != nil {
-		writeWorkflowError(w, lookupErr, "complete_workflow_failed")
-		return
-	}
+	unlockGitWrites := s.drainGitWrites()
+	defer unlockGitWrites()
 	task, err := s.workflowRuns.ForceDone(r.Context(), taskID, request.Resolution, request.Note, workflowActor(principal))
 	if err != nil {
 		writeWorkflowError(w, err, "complete_workflow_failed")
 		return
 	}
-	if hadActiveRun {
-		if err := s.sessions.RevokeWorkflowRunSessionTokens(r.Context(), activeRun.ID); err != nil {
-			slog.Warn("revoke completed workflow session tokens", "workflow_run_id", activeRun.ID, "error", err)
-		}
+	if err := s.sessions.RevokeTaskSessionTokens(r.Context(), taskID); err != nil {
+		slog.Warn("revoke completed task session tokens", "task_id", taskID, "error", err)
 	}
 	writeJSON(w, http.StatusOK, taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
 }
@@ -236,6 +241,10 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession) {
 			writeError(w, http.StatusForbidden, "forbidden", "agent node completion requires an owner or session token")
 			return
+		}
+		if principal.Scope == coordinator.TokenScopeSession {
+			unlockSessionGitWrites := s.drainGitWrites()
+			defer unlockSessionGitWrites()
 		}
 		var request workflowCompleteRequest
 		if err := decodeJSON(r, &request); err != nil {
@@ -540,6 +549,11 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		writeJSON(w, http.StatusOK, workflowRunResponse{Run: run})
+	case "convergence":
+		if !requireMethod(w, r, http.MethodPost) || !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+			return
+		}
+		s.handleConvergenceDisposition(w, r, principal, taskID)
 	case "release":
 		if !requireMethod(w, r, http.MethodPost) || !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
 			return
@@ -599,6 +613,92 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 	}
+}
+
+func (s *projectServer) handleConvergenceDisposition(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
+	var request workflowConvergenceRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	resolveInput := coordinator.ResolveConvergenceReviewInput{
+		TaskID: taskID, Disposition: request.Disposition, Note: request.Note, Actor: workflowActor(principal),
+		ExpectedEvidenceFingerprint: request.ExpectedEvidenceFingerprint,
+	}
+	if request.Disposition != coordinator.ConvergenceRepairBranch && request.Disposition != coordinator.ConvergencePromote {
+		unlockGitWrites := s.drainGitWrites()
+		defer unlockGitWrites()
+	}
+	var result coordinator.ConvergenceReviewResult
+	var err error
+	advanceAttemptedUnderRefLock := false
+	if request.Disposition != coordinator.ConvergenceRepairBranch &&
+		request.Disposition != coordinator.ConvergencePromote && s.workflowExecutor != nil {
+		refreshed, refreshErr := s.workflowExecutor.RefreshConvergenceEvidence(r.Context(), taskID)
+		if refreshErr != nil {
+			writeWorkflowError(w, refreshErr, "refresh_convergence_evidence_failed")
+			return
+		}
+		if refreshed.Fingerprint != strings.TrimSpace(request.ExpectedEvidenceFingerprint) {
+			writeWorkflowError(w, fmt.Errorf("%w: convergence evidence changed before disposition", coordinator.ErrWorkflowConflict), "resolve_convergence_review_failed")
+			return
+		}
+		err = s.workflowExecutor.WithConvergenceEvidenceRefsLocked(r.Context(), refreshed, func(lockedCtx context.Context) error {
+			result, err = s.workflowRuns.ResolveConvergenceReview(lockedCtx, resolveInput)
+			if err != nil || request.Disposition != coordinator.ConvergenceAcceptScope {
+				return err
+			}
+			advanceAttemptedUnderRefLock = true
+			if advanceErr := s.workflowExecutor.Advance(lockedCtx, result.Run.ID); advanceErr != nil {
+				slog.Warn("advance accepted convergence workflow", "workflow_run_id", result.Run.ID, "error", advanceErr)
+				return nil
+			}
+			if latest, loadErr := s.workflowRuns.Get(lockedCtx, result.Run.ID); loadErr != nil {
+				slog.Warn("load accepted convergence workflow", "workflow_run_id", result.Run.ID, "error", loadErr)
+			} else {
+				result.Run = latest
+			}
+			return nil
+		})
+	} else {
+		result, err = s.workflowRuns.ResolveConvergenceReview(r.Context(), resolveInput)
+	}
+	if errors.Is(err, coordinator.ErrConvergencePromotionRequired) {
+		writeError(w, http.StatusServiceUnavailable, "promotion_unavailable", err.Error())
+		return
+	}
+	if err != nil {
+		writeWorkflowError(w, err, "resolve_convergence_review_failed")
+		return
+	}
+
+	switch request.Disposition {
+	case coordinator.ConvergenceRepairBranch:
+		if _, err := s.sessions.EnsureTaskConsoleJob(r.Context(), coordinator.EnsureTaskConsoleJobInput{
+			TaskID: taskID, Harness: "shell", ConvergenceWorkflowRunID: result.Evidence.WorkflowRunID,
+			ConvergenceChangeID: result.Evidence.ChangeID, ConvergenceEvidenceFingerprint: result.Evidence.Fingerprint,
+		}); err != nil {
+			writeError(w, http.StatusBadRequest, "start_console_failed", err.Error())
+			return
+		}
+	case coordinator.ConvergenceAcceptScope:
+		if s.workflowExecutor != nil && !advanceAttemptedUnderRefLock {
+			if err := s.workflowExecutor.Advance(r.Context(), result.Run.ID); err != nil {
+				writeWorkflowError(w, err, "advance_workflow_failed")
+				return
+			}
+			result.Run, err = s.workflowRuns.Get(r.Context(), result.Run.ID)
+			if err != nil {
+				writeWorkflowError(w, err, "load_workflow_failed")
+				return
+			}
+		}
+	case coordinator.ConvergenceCancel:
+		if err := s.sessions.RevokeWorkflowRunSessionTokens(r.Context(), result.Evidence.WorkflowRunID); err != nil {
+			slog.Warn("revoke convergence-cancelled workflow session tokens", "workflow_run_id", result.Evidence.WorkflowRunID, "error", err)
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func workflowActor(principal coordinator.Principal) coordinator.Actor {

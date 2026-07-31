@@ -188,6 +188,38 @@ export const ACTIONS = {
     return releaseMessage(dataset.workflowRelease, dataset.edge);
   },
 
+  async convergenceDecision(app, element, dataset) {
+    const taskID = dataset.convergenceDecision;
+    const disposition = dataset.disposition || "";
+    if (disposition === "cancel" && !window.confirm("Cancel this oversized implementation? Its Git evidence will remain available.")) {
+      return CANCELLED;
+    }
+    if (disposition === "promote" && !window.confirm("Promote this implementation to a clean-base feature planning workflow?")) {
+      return CANCELLED;
+    }
+    const note = String(
+      element.closest?.("[data-convergence-panel]")?.querySelector("[data-convergence-note]")?.value || "",
+    ).trim();
+    await apiPost(workflowPath(dataset, taskID, "/workflow/convergence"), {
+      disposition,
+      expected_evidence_fingerprint: dataset.evidenceFingerprint || "",
+      ...(note ? { note } : {}),
+    });
+    await app.refresh();
+    switch (disposition) {
+      case "accept_scope":
+        return `Continuing ${taskID} as-is`;
+      case "repair_branch":
+        return `Opened ${taskID} for branch repair`;
+      case "promote":
+        return `Promoting ${taskID} to a feature`;
+      case "cancel":
+        return `Cancelled ${taskID}`;
+      default:
+        return `Resolved convergence review for ${taskID}`;
+    }
+  },
+
   async attentionMerge(app, element, dataset) {
     const taskID = dataset.attentionMerge;
     const change = await resolveReadyChange(dataset.project, taskID);
@@ -626,6 +658,7 @@ const PENDING_LABELS = {
   workflowHold: "Holding",
   workflowTakeOver: "Taking over",
   workflowRelease: "Releasing",
+  convergenceDecision: "Resolving convergence review",
   attentionMerge: "Merging",
   cardMerge: "Merging",
   cardApprove: "Approving",

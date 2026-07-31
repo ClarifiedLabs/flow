@@ -736,6 +736,137 @@ func countRows(database *sql.DB, table string) (int, error) {
 	return count, err
 }
 
+func TestTaskSessionRevocationAndGitWriteLivenessFence(t *testing.T) {
+	ctx := context.Background()
+	fixture := newSessionServiceFixture(t)
+	task, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Task console revocation"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	ensured, err := fixture.sessions.EnsureTaskConsoleJob(ctx, EnsureTaskConsoleJobInput{
+		TaskID: task.ID, Harness: flowharness.Harness,
+	})
+	if err != nil {
+		t.Fatalf("ensure task console: %v", err)
+	}
+	if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
+		ID:                      "w-task-console",
+		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		CapacityPersistentAgent: 1,
+		HeartbeatTTL:            time.Minute,
+	}); err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	claimed, ok, err := fixture.claimNext(ctx, flowworker.ClaimInput{
+		WorkerID: "w-task-console", Buckets: []flowworker.CapacityBucket{flowworker.BucketPersistentAgent}, LeaseDuration: time.Minute,
+	})
+	if err != nil || !ok || claimed.Job.ID != ensured.Job.ID {
+		t.Fatalf("claim task console: claim=%+v ok=%t err=%v", claimed.Job, ok, err)
+	}
+	if _, err := fixture.workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
+		t.Fatalf("mark task console running: %v", err)
+	}
+	started, err := fixture.sessions.StartConsoleSession(ctx, StartConsoleSessionInput{
+		JobID: claimed.Job.ID, LeaseID: claimed.Lease.ID, WorkerID: "w-task-console", Harness: flowharness.Harness,
+	})
+	if err != nil {
+		t.Fatalf("start task console: %v", err)
+	}
+	if allowed, err := fixture.sessions.SessionAllowsGitWrites(ctx, started.Session.ID); err != nil || !allowed {
+		t.Fatalf("live session git writes: allowed=%t err=%v", allowed, err)
+	}
+	if err := fixture.sessions.RevokeTaskSessionTokens(ctx, task.ID); err != nil {
+		t.Fatalf("revoke task session tokens: %v", err)
+	}
+	if _, err := fixture.credentials.Authenticate(ctx, started.Token); err == nil {
+		t.Fatal("revoked task console token still authenticates")
+	}
+	if _, err := fixture.workers.ReleaseLease(ctx, claimed.Lease.ID, flowworker.JobCanceled); err != nil {
+		t.Fatalf("cancel task console runtime: %v", err)
+	}
+	if allowed, err := fixture.sessions.SessionAllowsGitWrites(ctx, started.Session.ID); err != nil || allowed {
+		t.Fatalf("canceled session git writes: allowed=%t err=%v", allowed, err)
+	}
+}
+
+func TestLateTaskConsoleExitDoesNotRestoreTerminalTaskChange(t *testing.T) {
+	ctx := context.Background()
+	fixture := newSessionServiceFixture(t)
+	task, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Late task console exit"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	ensured, err := fixture.sessions.EnsureTaskConsoleJob(ctx, EnsureTaskConsoleJobInput{
+		TaskID: task.ID, Harness: flowharness.Harness,
+	})
+	if err != nil {
+		t.Fatalf("ensure task console: %v", err)
+	}
+	if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
+		ID: "w-late-console", Labels: map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		CapacityPersistentAgent: 1, HeartbeatTTL: time.Minute,
+	}); err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	claimed, ok, err := fixture.claimNext(ctx, flowworker.ClaimInput{
+		WorkerID: "w-late-console", Buckets: []flowworker.CapacityBucket{flowworker.BucketPersistentAgent}, LeaseDuration: time.Minute,
+	})
+	if err != nil || !ok || claimed.Job.ID != ensured.Job.ID {
+		t.Fatalf("claim task console: claim=%+v ok=%t err=%v", claimed.Job, ok, err)
+	}
+	if _, err := fixture.workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
+		t.Fatalf("mark task console running: %v", err)
+	}
+	started, err := fixture.sessions.StartConsoleSession(ctx, StartConsoleSessionInput{
+		JobID: claimed.Job.ID, LeaseID: claimed.Lease.ID, WorkerID: "w-late-console", Harness: flowharness.Harness,
+	})
+	if err != nil {
+		t.Fatalf("start task console: %v", err)
+	}
+
+	exchangePath := t.TempDir() + "/exchange.git"
+	workPath := t.TempDir() + "/work"
+	if _, err := reconcileGitOutput("", nil, "init", "--bare", exchangePath); err != nil {
+		t.Fatalf("init exchange: %v", err)
+	}
+	if _, err := reconcileGitOutput("", nil, "init", "-b", "main", workPath); err != nil {
+		t.Fatalf("init worktree: %v", err)
+	}
+	if _, err := reconcileGitOutput(workPath, nil, "-c", "user.name=Flow Test", "-c", "user.email=flow@example.test", "commit", "--allow-empty", "-m", "repair"); err != nil {
+		t.Fatalf("commit repair tip: %v", err)
+	}
+	repairTip, err := reconcileGitOutput(workPath, nil, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("resolve repair tip: %v", err)
+	}
+	repairTip = strings.TrimSpace(repairTip)
+	if _, err := reconcileGitOutput(workPath, nil, "push", exchangePath, "HEAD:refs/heads/"+started.Session.Branch); err != nil {
+		t.Fatalf("create repaired branch at %s: %v", repairTip, err)
+	}
+	fixture.sessions.project.ExchangePath = exchangePath
+
+	const preservedHead = "preserved-terminal-head"
+	if _, err := fixture.store.DB().ExecContext(ctx, `
+UPDATE changes SET head_sha = ? WHERE id = ?;
+UPDATE sessions SET runtime_state = 'abandoned' WHERE id = ?`, preservedHead, started.Session.ChangeID, started.Session.ID); err != nil {
+		t.Fatalf("simulate force-done cleanup: %v", err)
+	}
+	exited, err := fixture.sessions.markConsoleSessionExited(ctx, started.Session)
+	if err != nil {
+		t.Fatalf("acknowledge late console exit: %v", err)
+	}
+	if exited.RuntimeState != SessionAbandoned {
+		t.Fatalf("late exit session state = %q, want abandoned", exited.RuntimeState)
+	}
+	var head string
+	if err := fixture.store.DB().QueryRowContext(ctx, `SELECT head_sha FROM changes WHERE id = ?`, started.Session.ChangeID).Scan(&head); err != nil {
+		t.Fatalf("load preserved change projection: %v", err)
+	}
+	if head != preservedHead {
+		t.Fatalf("late exit restored change head %q, want %q", head, preservedHead)
+	}
+}
+
 // startAuthorSessionForFixture drives the schedule->claim->run->start path and
 // returns the live author session so liveness tests can exercise it directly.
 func TestTouchAgentActivityRequiresSessionID(t *testing.T) {

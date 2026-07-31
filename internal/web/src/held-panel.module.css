@@ -107,3 +107,71 @@
   color: var(--muted);
   margin-right: 4px;
 }
+
+.evidence-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px 16px;
+  padding: 10px 0;
+  border-block: 1px solid var(--line-2);
+  margin-bottom: 10px;
+}
+
+.evidence-summary > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.evidence-summary span,
+.evidence-files span {
+  color: var(--muted);
+  font-size: var(--text-quiet);
+}
+
+.evidence-summary code,
+.evidence-files code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-files {
+  display: grid;
+  gap: 3px;
+  max-height: 180px;
+  overflow: auto;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.evidence-files li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.evidence-files .omitted {
+  color: var(--muted);
+  font-size: var(--text-quiet);
+}
+
+.convergence-note {
+  display: grid;
+  width: 100%;
+  gap: 4px;
+  color: var(--muted);
+  font-size: var(--text-quiet);
+}
+
+.convergence-note textarea {
+  width: 100%;
+  min-height: 54px;
+  resize: vertical;
+}
+
+.convergence-actions .danger {
+  color: var(--danger);
+}

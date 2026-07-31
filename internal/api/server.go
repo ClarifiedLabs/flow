@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/api/contract"
@@ -46,6 +47,7 @@ type Server struct {
 	credentials     *coordinator.CredentialService
 	webSessions     *coordinator.WebSessionService
 	workerTerminals *coordinator.WorkerTerminalService
+	gitWriteGates   sync.Map
 	ownerToken      string
 	hookToken       string
 	workerJoinToken string
@@ -70,6 +72,24 @@ func NewServer(opts ServerOptions) (*Server, error) {
 // background work (lifecycle ticks, git event consumption, lease sweeps).
 func (s *Server) Registry() *Registry {
 	return s.registry
+}
+
+// gitWriteGate serializes terminal session decisions and convergence review
+// with HTTP receive-pack requests for one project. Writers hold a read lock for
+// their entire request; terminal/final decisions take the exclusive lock, drain
+// admitted writes, then revalidate state before committing.
+func (s *Server) gitWriteGate(projectID string) *sync.RWMutex {
+	value, _ := s.gitWriteGates.LoadOrStore(strings.TrimSpace(projectID), &sync.RWMutex{})
+	return value.(*sync.RWMutex)
+}
+
+func (s *projectServer) drainGitWrites() func() {
+	if s == nil || s.Server == nil {
+		return func() {}
+	}
+	gate := s.gitWriteGate(s.project.ID)
+	gate.Lock()
+	return gate.Unlock
 }
 
 // projectServer is the per-request view of the server scoped to one project.
@@ -100,6 +120,15 @@ type projectServer struct {
 }
 
 func (s *Server) forBundle(bundle *ProjectBundle) *projectServer {
+	if bundle.Sessions != nil {
+		projectID := bundle.Project.ID
+		bundle.Sessions.SetGitWriteProjectionFence(func(operation func() error) error {
+			gate := s.gitWriteGate(projectID)
+			gate.Lock()
+			defer gate.Unlock()
+			return operation()
+		})
+	}
 	return &projectServer{
 		Server:            s,
 		project:           bundle.Project,

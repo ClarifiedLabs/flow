@@ -35,6 +35,12 @@ func (s *Server) serveGitHTTPRequest(w http.ResponseWriter, r *http.Request) boo
 		http.Error(w, "project exchange path is not configured", http.StatusInternalServerError)
 		return true
 	}
+	writeRequest := gitHTTPWriteRequest(r, pathInfo)
+	if writeRequest {
+		gate := s.gitWriteGate(projectID)
+		gate.RLock()
+		defer gate.RUnlock()
+	}
 
 	principal, err := s.authenticateGit(r)
 	if err != nil {
@@ -42,12 +48,12 @@ func (s *Server) serveGitHTTPRequest(w http.ResponseWriter, r *http.Request) boo
 		http.Error(w, "authentication required", http.StatusUnauthorized)
 		return true
 	}
-	if err := authorizeGitHTTPPrincipal(principal, projectID, gitHTTPWriteRequest(r, pathInfo)); err != nil {
+	if err := authorizeGitHTTPPrincipal(principal, projectID, writeRequest); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return true
 	}
 	allowedRef := ""
-	if principal.Scope == coordinator.TokenScopeSession && gitHTTPWriteRequest(r, pathInfo) {
+	if principal.Scope == coordinator.TokenScopeSession && writeRequest {
 		session, err := bundle.Sessions.GetSession(r.Context(), principal.Subject)
 		if err != nil {
 			http.Error(w, "session is not valid for git writes", http.StatusForbidden)
@@ -55,6 +61,11 @@ func (s *Server) serveGitHTTPRequest(w http.ResponseWriter, r *http.Request) boo
 		}
 		if session.WorkspaceMode == coordinator.WorkspaceBase {
 			http.Error(w, "base-workspace sessions cannot push", http.StatusForbidden)
+			return true
+		}
+		live, err := bundle.Sessions.SessionAllowsGitWrites(r.Context(), session.ID)
+		if err != nil || !live {
+			http.Error(w, "session is not valid for git writes", http.StatusForbidden)
 			return true
 		}
 		allowedRef = "refs/heads/" + strings.TrimSpace(session.Branch)

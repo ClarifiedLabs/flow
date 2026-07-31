@@ -104,19 +104,21 @@ type RegisterWorkerInput struct {
 }
 
 type EnqueueJobInput struct {
-	TaskID         *string
-	ChangeID       *string
-	WorkflowRunID  *string
-	NodeRunID      *string
-	Role           JobRole
-	CapacityBucket CapacityBucket
-	Priority       int
-	RunsOn         map[string]string
-	Requires       []string
-	Size           string
-	Tolerations    []scheduler.Toleration
-	Payload        map[string]any
-	dispatchKey    string
+	TaskID                                 *string
+	ChangeID                               *string
+	WorkflowRunID                          *string
+	NodeRunID                              *string
+	RequireHeldWorkflowRunID               *string
+	RequireHeldWorkflowEvidenceFingerprint *string
+	Role                                   JobRole
+	CapacityBucket                         CapacityBucket
+	Priority                               int
+	RunsOn                                 map[string]string
+	Requires                               []string
+	Size                                   string
+	Tolerations                            []scheduler.Toleration
+	Payload                                map[string]any
+	dispatchKey                            string
 }
 
 type ClaimInput struct {
@@ -147,6 +149,41 @@ func (s *Service) EnqueueJob(ctx context.Context, input EnqueueJobInput) (Job, e
 	if err := s.validateJobChange(ctx, input.TaskID, input.ChangeID); err != nil {
 		return Job{}, err
 	}
+	if input.RequireHeldWorkflowEvidenceFingerprint != nil && input.RequireHeldWorkflowRunID == nil {
+		return Job{}, errors.New("held workflow evidence fingerprint requires workflow run id")
+	}
+	if input.RequireHeldWorkflowRunID != nil {
+		if input.WorkflowRunID == nil || strings.TrimSpace(*input.WorkflowRunID) != strings.TrimSpace(*input.RequireHeldWorkflowRunID) {
+			return Job{}, errors.New("held workflow precondition must match job workflow run")
+		}
+	}
+	if input.RequireHeldWorkflowEvidenceFingerprint != nil {
+		expectedFingerprint := strings.TrimSpace(*input.RequireHeldWorkflowEvidenceFingerprint)
+		if expectedFingerprint == "" || input.ChangeID == nil || strings.TrimSpace(*input.ChangeID) == "" {
+			return Job{}, errors.New("held workflow evidence precondition requires fingerprint and change id")
+		}
+		payload := make(map[string]any, len(input.Payload)+2)
+		for key, value := range input.Payload {
+			payload[key] = value
+		}
+		if raw, ok := payload["convergence_evidence_fingerprint"]; ok {
+			if supplied := strings.TrimSpace(fmt.Sprint(raw)); supplied != expectedFingerprint {
+				return Job{}, errors.New("job payload convergence fingerprint does not match held workflow precondition")
+			}
+		}
+		expectedRunID := strings.TrimSpace(*input.RequireHeldWorkflowRunID)
+		if raw, ok := payload["convergence_workflow_run_id"]; ok {
+			if supplied := strings.TrimSpace(fmt.Sprint(raw)); supplied != expectedRunID {
+				return Job{}, errors.New("job payload convergence workflow does not match held workflow precondition")
+			}
+		}
+		payload["convergence_evidence_fingerprint"] = expectedFingerprint
+		payload["convergence_workflow_run_id"] = expectedRunID
+		input.Payload = payload
+	}
+	if input.NodeRunID != nil && input.WorkflowRunID == nil {
+		return Job{}, errors.New("node jobs require workflow run id")
+	}
 	if err := validateCapacityBucket(input.CapacityBucket); err != nil {
 		return Job{}, err
 	}
@@ -176,7 +213,7 @@ func (s *Service) EnqueueJob(ctx context.Context, input EnqueueJobInput) (Job, e
 		return Job{}, err
 	}
 	now := s.now().UTC()
-	if _, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 INSERT INTO jobs (
 	id,
 	task_id,
@@ -193,7 +230,64 @@ INSERT INTO jobs (
 	dispatch_key,
 	created_at,
 	updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+WHERE (
+	? IS NULL OR EXISTS (
+		SELECT 1 FROM workflow_runs AS wr
+		WHERE wr.id = ? AND wr.task_id = ? AND wr.held_at IS NOT NULL
+			AND wr.state IN ('scheduled', 'running', 'waiting')
+			AND (
+				? IS NULL OR EXISTS (
+					SELECT 1
+					FROM workflow_transitions AS wt
+					WHERE wt.workflow_run_id = wr.id
+						AND wt.event_kind = 'workflow_convergence_review_requested'
+						AND wt.seq = (
+							SELECT MAX(latest.seq)
+							FROM workflow_transitions AS latest
+							WHERE latest.workflow_run_id = wr.id
+								AND latest.event_kind = 'workflow_convergence_review_requested'
+						)
+						AND json_extract(wt.payload_json, '$.fingerprint') = ?
+						AND json_extract(wt.payload_json, '$.change_id') = ?
+						AND EXISTS (
+							SELECT 1 FROM changes AS c
+							WHERE c.id = json_extract(wt.payload_json, '$.change_id')
+								AND c.task_id = wr.task_id
+								AND c.workflow_run_id = wr.id
+								AND c.branch = json_extract(wt.payload_json, '$.source_branch')
+								AND c.base = json_extract(wt.payload_json, '$.target_base_branch')
+								AND c.head_sha = json_extract(wt.payload_json, '$.source_head_sha')
+								AND json_extract(?, '$.convergence_workflow_run_id') = wr.id
+								AND json_extract(?, '$.convergence_source_head_sha') = c.head_sha
+						)
+				)
+			)
+	)
+) AND (
+	? IS NULL OR EXISTS (
+		SELECT 1 FROM tasks WHERE id = ? AND done_at IS NULL
+	)
+) AND (
+	? IS NULL OR EXISTS (
+		SELECT 1 FROM workflow_runs AS active_wr
+		WHERE active_wr.id = ?
+			AND active_wr.task_id = ?
+			AND active_wr.state IN ('scheduled', 'running', 'waiting')
+	)
+) AND (
+	? IS NULL OR EXISTS (
+		SELECT 1
+		FROM workflow_node_runs AS active_nr
+		JOIN workflow_runs AS node_wr ON node_wr.id = active_nr.workflow_run_id
+		WHERE active_nr.id = ?
+			AND active_nr.workflow_run_id = ?
+			AND active_nr.state IN ('queued', 'running', 'waiting')
+			AND node_wr.current_node_run_id = active_nr.id
+			AND node_wr.state IN ('scheduled', 'running', 'waiting')
+	)
+)`,
 		id,
 		nullableString(input.TaskID),
 		nullableString(input.ChangeID),
@@ -209,8 +303,32 @@ INSERT INTO jobs (
 		input.dispatchKey,
 		formatTime(now),
 		formatTime(now),
-	); err != nil {
+		nullableString(input.RequireHeldWorkflowRunID),
+		nullableString(input.RequireHeldWorkflowRunID),
+		nullableString(input.TaskID),
+		nullableString(input.RequireHeldWorkflowEvidenceFingerprint),
+		nullableString(input.RequireHeldWorkflowEvidenceFingerprint),
+		nullableString(input.ChangeID),
+		payload,
+		payload,
+		nullableString(input.TaskID),
+		nullableString(input.TaskID),
+		nullableString(input.WorkflowRunID),
+		nullableString(input.WorkflowRunID),
+		nullableString(input.TaskID),
+		nullableString(input.NodeRunID),
+		nullableString(input.NodeRunID),
+		nullableString(input.WorkflowRunID),
+	)
+	if err != nil {
 		return Job{}, fmt.Errorf("enqueue job: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return Job{}, fmt.Errorf("read enqueued job rows: %w", err)
+	}
+	if rows == 0 {
+		return Job{}, errors.New("job precondition is no longer active")
 	}
 
 	return s.GetJob(ctx, id)
@@ -370,6 +488,64 @@ func (s *Service) claimQueuedJob(ctx context.Context, worker Worker, buckets []C
 	}
 	defer tx.Rollback()
 
+	now := s.now().UTC()
+	if _, err := tx.ExecContext(ctx, `
+UPDATE jobs
+SET state = ?, updated_at = ?
+WHERE state = ?
+	AND (
+		(task_id IS NOT NULL AND NOT EXISTS (
+			SELECT 1 FROM tasks AS t WHERE t.id = jobs.task_id AND t.done_at IS NULL
+		))
+		OR (workflow_run_id IS NOT NULL AND NOT EXISTS (
+			SELECT 1 FROM workflow_runs AS wr
+			WHERE wr.id = jobs.workflow_run_id
+				AND wr.task_id = jobs.task_id
+				AND wr.state IN ('scheduled', 'running', 'waiting')
+		))
+		OR (node_run_id IS NOT NULL AND NOT EXISTS (
+			SELECT 1
+			FROM workflow_node_runs AS nr
+			JOIN workflow_runs AS wr ON wr.id = nr.workflow_run_id
+			WHERE nr.id = jobs.node_run_id
+				AND nr.workflow_run_id = jobs.workflow_run_id
+				AND nr.state IN ('queued', 'running', 'waiting')
+				AND wr.current_node_run_id = nr.id
+				AND wr.state IN ('scheduled', 'running', 'waiting')
+		))
+		OR (
+			json_type(payload_json, '$.convergence_evidence_fingerprint') IS NOT NULL
+			AND NOT EXISTS (
+				SELECT 1
+				FROM workflow_runs AS held_wr
+				JOIN workflow_transitions AS wt ON wt.workflow_run_id = held_wr.id
+				JOIN changes AS c ON c.id = jobs.change_id
+				WHERE held_wr.id = jobs.workflow_run_id
+					AND held_wr.task_id = jobs.task_id
+					AND held_wr.held_at IS NOT NULL
+					AND held_wr.state IN ('scheduled', 'running', 'waiting')
+					AND wt.event_kind = 'workflow_convergence_review_requested'
+					AND wt.seq = (
+						SELECT MAX(latest.seq)
+						FROM workflow_transitions AS latest
+						WHERE latest.workflow_run_id = held_wr.id
+							AND latest.event_kind = 'workflow_convergence_review_requested'
+					)
+					AND json_extract(wt.payload_json, '$.fingerprint') = json_extract(jobs.payload_json, '$.convergence_evidence_fingerprint')
+					AND json_extract(wt.payload_json, '$.change_id') = jobs.change_id
+					AND c.task_id = held_wr.task_id
+					AND c.workflow_run_id = held_wr.id
+					AND c.branch = json_extract(wt.payload_json, '$.source_branch')
+					AND c.base = json_extract(wt.payload_json, '$.target_base_branch')
+					AND c.head_sha = json_extract(wt.payload_json, '$.source_head_sha')
+					AND json_extract(jobs.payload_json, '$.convergence_workflow_run_id') = held_wr.id
+					AND json_extract(jobs.payload_json, '$.convergence_source_head_sha') = c.head_sha
+			)
+		)
+	)`, string(JobCanceled), formatTime(now), string(JobQueued)); err != nil {
+		return ClaimedJob{}, false, fmt.Errorf("cancel stale queued jobs: %w", err)
+	}
+
 	candidates, err := queuedJobCandidates(ctx, tx, buckets)
 	if err != nil {
 		return ClaimedJob{}, false, err
@@ -386,10 +562,12 @@ func (s *Service) claimQueuedJob(ctx context.Context, worker Worker, buckets []C
 		}
 	}
 	if selected.ID == "" {
+		if err := tx.Commit(ctx); err != nil {
+			return ClaimedJob{}, false, fmt.Errorf("commit stale queued job cleanup: %w", err)
+		}
 		return ClaimedJob{}, false, nil
 	}
 
-	now := s.now().UTC()
 	result, err := tx.ExecContext(ctx, `
 UPDATE jobs
 SET state = ?, updated_at = ?

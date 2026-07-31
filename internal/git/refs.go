@@ -2,8 +2,13 @@ package git
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
+	"io"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -45,6 +50,7 @@ type DiffLine struct {
 
 type DiffStats struct {
 	Files     []DiffFileStat `json:"files"`
+	FileCount int            `json:"-"`
 	Additions int            `json:"additions"`
 	Deletions int            `json:"deletions"`
 }
@@ -88,8 +94,138 @@ func UpdateRef(ctx context.Context, exchangeRepoPath, ref, sha string) error {
 	return nil
 }
 
+// CreateOrVerifyRef creates a coordinator-owned ref exactly once. A replay is
+// successful only when the existing ref already names expectedSHA; it can
+// never repoint a ref created by an earlier attempt.
+func CreateOrVerifyRef(ctx context.Context, exchangeRepoPath, ref, expectedSHA string) error {
+	ref = strings.TrimSpace(ref)
+	expectedSHA = strings.TrimSpace(expectedSHA)
+	if ref == "" || expectedSHA == "" {
+		return errors.New("ref and expected sha are required")
+	}
+	if (len(expectedSHA) != 40 && len(expectedSHA) != 64) || !isHexObjectID(expectedSHA) {
+		return errors.New("expected sha must be a full SHA-1 or SHA-256 object id")
+	}
+	if err := gitBareRun(ctx, exchangeRepoPath, nil, "check-ref-format", ref); err != nil {
+		return fmt.Errorf("validate ref %s: %w", ref, err)
+	}
+	if exists, err := CommitExists(ctx, exchangeRepoPath, expectedSHA); err != nil {
+		return err
+	} else if !exists {
+		return fmt.Errorf("expected commit %s does not exist", expectedSHA)
+	}
+
+	if symbolic, err := gitExitCode(ctx, "", exchangeRepoPath, nil, "symbolic-ref", "-q", ref); err != nil {
+		return fmt.Errorf("inspect ref %s: %w", ref, err)
+	} else if symbolic == 0 {
+		return fmt.Errorf("ref %s is symbolic; immutable refs must be direct", ref)
+	}
+
+	zeroSHA := strings.Repeat("0", len(expectedSHA))
+	createErr := gitBareRun(ctx, exchangeRepoPath, nil, "update-ref", "--no-deref", ref, expectedSHA, zeroSHA)
+	if createErr == nil {
+		return nil
+	}
+	if symbolic, err := gitExitCode(ctx, "", exchangeRepoPath, nil, "symbolic-ref", "-q", ref); err != nil {
+		return fmt.Errorf("inspect ref %s after create conflict: %w", ref, err)
+	} else if symbolic == 0 {
+		return fmt.Errorf("ref %s is symbolic; immutable refs must be direct", ref)
+	}
+
+	actualSHA, resolveErr := gitBareOutput(ctx, exchangeRepoPath, nil, "rev-parse", "--verify", ref)
+	if resolveErr == nil && strings.TrimSpace(actualSHA) == expectedSHA {
+		return nil
+	}
+	if resolveErr != nil {
+		return fmt.Errorf("create ref %s at %s: %w", ref, expectedSHA, createErr)
+	}
+	return fmt.Errorf("ref %s already points to %s, expected %s", ref, strings.TrimSpace(actualSHA), expectedSHA)
+}
+
+func isHexObjectID(value string) bool {
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+// CommitExists reports whether commitish resolves to a commit in the bare
+// exchange repository. Missing objects are not errors.
+func CommitExists(ctx context.Context, exchangeRepoPath, commitish string) (bool, error) {
+	commitish = strings.TrimSpace(commitish)
+	if commitish == "" {
+		return false, errors.New("commit is required")
+	}
+	if strings.HasPrefix(commitish, "-") {
+		return false, errors.New("commit may not start with '-'")
+	}
+	result, err := runGit(ctx, "", exchangeRepoPath, nil, "cat-file", "-t", commitish)
+	if err != nil {
+		var commandErr *gitCommandError
+		if errors.As(err, &commandErr) && (strings.Contains(commandErr.stderr, "Not a valid object name") ||
+			strings.Contains(commandErr.stderr, "could not get object info")) {
+			return false, nil
+		}
+		return false, fmt.Errorf("verify commit %s: %w", commitish, err)
+	}
+	return strings.TrimSpace(result.stdout) == "commit", nil
+}
+
+// MergeBase resolves the exact common ancestor used to describe the source
+// change relative to its target base.
+func MergeBase(ctx context.Context, exchangeRepoPath, left, right string) (string, error) {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == "" || right == "" {
+		return "", errors.New("left and right revisions are required")
+	}
+	sha, err := gitBareOutput(ctx, exchangeRepoPath, nil, "merge-base", left, right)
+	if err != nil {
+		return "", fmt.Errorf("resolve merge base for %s and %s: %w", left, right, err)
+	}
+	sha = strings.TrimSpace(sha)
+	if sha == "" {
+		return "", fmt.Errorf("resolve merge base for %s and %s: empty result", left, right)
+	}
+	return sha, nil
+}
+
+// CanonicalDiffDigest hashes a bounded-independent, deterministic description
+// of the merge-base-to-head change. The detailed patch stays in Git; SQLite
+// stores this fingerprint plus bounded file statistics.
+func CanonicalDiffDigest(ctx context.Context, exchangeRepoPath, mergeBaseSHA, headSHA string) (string, error) {
+	mergeBaseSHA = strings.TrimSpace(mergeBaseSHA)
+	headSHA = strings.TrimSpace(headSHA)
+	if mergeBaseSHA == "" || headSHA == "" {
+		return "", errors.New("merge base and head sha are required")
+	}
+	diffLabel := mergeBaseSHA + ".." + headSHA
+	gitEnv := []string{"LC_ALL=C", "LANG=C"}
+	digest := sha256.New()
+	if _, err := io.WriteString(digest, "flow-canonical-diff-v1\x00"); err != nil {
+		return "", err
+	}
+	if err := streamCanonicalDiffPart(ctx, exchangeRepoPath, gitEnv, digest,
+		"--numstat", "-z", "--no-renames", mergeBaseSHA, headSHA, "--", ".", ":(exclude).flow/session"); err != nil {
+		return "", fmt.Errorf("read canonical stats %s: %w", diffLabel, err)
+	}
+	if _, err := digest.Write([]byte{0}); err != nil {
+		return "", err
+	}
+	if err := streamCanonicalDiffPart(ctx, exchangeRepoPath, gitEnv, digest,
+		"--no-ext-diff", "--no-textconv", "--binary", "--full-index", "--no-renames",
+		mergeBaseSHA, headSHA, "--", ".", ":(exclude).flow/session"); err != nil {
+		return "", fmt.Errorf("read canonical patch %s: %w", diffLabel, err)
+	}
+	return fmt.Sprintf("sha256:%x", digest.Sum(nil)), nil
+}
+
 // RefDivergence reports how many commits branch is ahead of and behind base
 // in the bare exchange repository. Both refs must exist.
+func streamCanonicalDiffPart(ctx context.Context, exchangeRepoPath string, gitEnv []string, digest hash.Hash, args ...string) error {
+	gitArgs := []string{"-c", "core.quotePath=true", "-c", "color.ui=false", "diff", "--diff-algorithm=myers"}
+	gitArgs = append(gitArgs, args...)
+	return writeGitOutput(ctx, "", exchangeRepoPath, gitEnv, digest, gitArgs...)
+}
+
 func RefDivergence(ctx context.Context, exchangeRepoPath, base, branch string) (int, int, error) {
 	base = strings.TrimSpace(base)
 	branch = strings.TrimSpace(branch)
@@ -239,48 +375,79 @@ func ChangedFileStats(ctx context.Context, exchangeRepoPath string, oldRef strin
 		return DiffStats{}, err
 	}
 
-	return changedFileStats(ctx, exchangeRepoPath, oldRef, newRef, diffSpec)
+	return changedFileStats(ctx, exchangeRepoPath, oldRef, newRef, diffSpec, 0)
 }
 
-func changedFileStats(ctx context.Context, exchangeRepoPath string, oldRef string, newRef string, diffSpec string) (DiffStats, error) {
-	output, err := gitBareOutput(ctx, exchangeRepoPath, nil, "diff", "--numstat", "--no-renames", diffSpec)
-	if err != nil {
-		return DiffStats{}, fmt.Errorf("list changed file stats %s...%s: %w", oldRef, newRef, err)
+// ChangedFileStatsBounded reports exact aggregate counts while retaining at
+// most maxFiles deterministic path details. This keeps evidence collection
+// bounded even when Git emits numstat output for an enormous change.
+func ChangedFileStatsBounded(ctx context.Context, exchangeRepoPath string, oldRef string, newRef string, maxFiles int) (DiffStats, error) {
+	if maxFiles <= 0 {
+		return DiffStats{}, errors.New("maximum retained changed files must be positive")
 	}
-	if strings.TrimSpace(output) == "" {
-		return DiffStats{}, nil
+	oldRef, newRef, diffSpec, err := mergeBaseDiffSpec(oldRef, newRef)
+	if err != nil {
+		return DiffStats{}, err
 	}
 
+	return changedFileStats(ctx, exchangeRepoPath, oldRef, newRef, diffSpec, maxFiles)
+}
+
+func changedFileStats(ctx context.Context, exchangeRepoPath string, oldRef string, newRef string, diffSpec string, maxFiles int) (DiffStats, error) {
 	var stats DiffStats
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
+	err := scanGitOutput(ctx, "", exchangeRepoPath, nil, func(line string) error {
 		if line == "" {
-			continue
+			return nil
 		}
 		parts := strings.SplitN(line, "\t", 3)
 		if len(parts) != 3 {
-			return DiffStats{}, fmt.Errorf("invalid diff numstat line %q", line)
+			return fmt.Errorf("invalid diff numstat line %q", line)
 		}
 		file := DiffFileStat{Path: normalizeDiffPath(parts[2])}
 		if excludedMergePath(file.Path) {
-			continue
+			return nil
 		}
 		if parts[0] == "-" || parts[1] == "-" {
 			file.Binary = true
 		} else {
-			if _, err := fmt.Sscan(parts[0], &file.Additions); err != nil {
-				return DiffStats{}, fmt.Errorf("parse additions in %q: %w", line, err)
+			additions, err := strconv.Atoi(parts[0])
+			if err != nil {
+				return fmt.Errorf("parse additions in %q: %w", line, err)
 			}
-			if _, err := fmt.Sscan(parts[1], &file.Deletions); err != nil {
-				return DiffStats{}, fmt.Errorf("parse deletions in %q: %w", line, err)
+			deletions, err := strconv.Atoi(parts[1])
+			if err != nil {
+				return fmt.Errorf("parse deletions in %q: %w", line, err)
 			}
+			file.Additions = additions
+			file.Deletions = deletions
 		}
+		stats.FileCount++
 		stats.Additions += file.Additions
 		stats.Deletions += file.Deletions
-		stats.Files = append(stats.Files, file)
+		stats.Files = retainChangedFile(stats.Files, file, maxFiles)
+		return nil
+	}, "diff", "--numstat", "--no-renames", diffSpec)
+	if err != nil {
+		return DiffStats{}, fmt.Errorf("list changed file stats %s...%s: %w", oldRef, newRef, err)
 	}
-
+	sort.Slice(stats.Files, func(i, j int) bool { return stats.Files[i].Path < stats.Files[j].Path })
 	return stats, nil
+}
+
+func retainChangedFile(files []DiffFileStat, file DiffFileStat, maxFiles int) []DiffFileStat {
+	if maxFiles <= 0 || len(files) < maxFiles {
+		return append(files, file)
+	}
+	largest := 0
+	for index := 1; index < len(files); index++ {
+		if files[index].Path > files[largest].Path {
+			largest = index
+		}
+	}
+	if file.Path < files[largest].Path {
+		files[largest] = file
+	}
+	return files
 }
 
 // ChangedFileDiff returns merge-base-relative file stats and parsed hunks for
@@ -290,7 +457,7 @@ func ChangedFileDiff(ctx context.Context, exchangeRepoPath string, oldRef string
 	if err != nil {
 		return DiffStats{}, err
 	}
-	stats, err := changedFileStats(ctx, exchangeRepoPath, oldRef, newRef, diffSpec)
+	stats, err := changedFileStats(ctx, exchangeRepoPath, oldRef, newRef, diffSpec, 0)
 	if err != nil {
 		return DiffStats{}, err
 	}

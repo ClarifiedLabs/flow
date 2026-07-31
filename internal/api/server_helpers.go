@@ -330,10 +330,10 @@ type tagRequest struct {
 type relationRequest = contract.TaskRelationRequest
 
 type editTaskRequest struct {
-	Title    *string `json:"title"`
-	Body     *string `json:"body"`
-	Priority *int    `json:"priority"`
-	FlowID   *string `json:"flow_id"`
+	Title     *string `json:"title"`
+	Body      *string `json:"body"`
+	Priority  *int    `json:"priority"`
+	FlowID    *string `json:"flow_id"`
 	FeatureID *string `json:"feature_id"`
 }
 
@@ -554,26 +554,27 @@ type uiWorkflowWait struct {
 }
 
 type uiTaskDetail struct {
-	Tags                []coordinator.Tag                `json:"tags,omitempty"`
-	Relations           []coordinator.TaskRelation       `json:"relations,omitempty"`
-	ActiveSession       *uiSessionSummary                `json:"active_session,omitempty"`
-	Paused              bool                             `json:"paused,omitempty"`
-	TerminalAvailable   bool                             `json:"terminal_available,omitempty"`
-	TerminalJobID       string                           `json:"terminal_job_id,omitempty"`
-	Sessions            []uiSessionSummary               `json:"sessions,omitempty"`
-	Changes             []uiChangeSummary                `json:"changes,omitempty"`
-	ReadyChange         *uiChangeSummary                 `json:"ready_change,omitempty"`
-	ReviewState         coordinator.ReviewState          `json:"review_state,omitempty"`
-	RequiredChecks      uiRequiredCheckSummary           `json:"required_checks"`
-	ReviewCycleBudget   *coordinator.ReviewCycleBudget   `json:"review_cycle_budget,omitempty"`
-	WaitReason          coordinator.WaitReason           `json:"wait_reason,omitempty"`
-	CrashRetryAvailable bool                             `json:"crash_retry_available,omitempty"`
-	TaskConsole         *consoleResponse                 `json:"task_console,omitempty"`
-	Checks              []coordinator.Check              `json:"checks,omitempty"`
+	Tags                []coordinator.Tag              `json:"tags,omitempty"`
+	Relations           []coordinator.TaskRelation     `json:"relations,omitempty"`
+	ActiveSession       *uiSessionSummary              `json:"active_session,omitempty"`
+	Paused              bool                           `json:"paused,omitempty"`
+	TerminalAvailable   bool                           `json:"terminal_available,omitempty"`
+	TerminalJobID       string                         `json:"terminal_job_id,omitempty"`
+	Sessions            []uiSessionSummary             `json:"sessions,omitempty"`
+	Changes             []uiChangeSummary              `json:"changes,omitempty"`
+	ReadyChange         *uiChangeSummary               `json:"ready_change,omitempty"`
+	ReviewState         coordinator.ReviewState        `json:"review_state,omitempty"`
+	RequiredChecks      uiRequiredCheckSummary         `json:"required_checks"`
+	ReviewCycleBudget   *coordinator.ReviewCycleBudget `json:"review_cycle_budget,omitempty"`
+	WaitReason          coordinator.WaitReason         `json:"wait_reason,omitempty"`
+	CrashRetryAvailable bool                           `json:"crash_retry_available,omitempty"`
+	TaskConsole         *consoleResponse               `json:"task_console,omitempty"`
+	Checks              []coordinator.Check            `json:"checks,omitempty"`
 	// Transitions is the task's workflow transition log, newest first. It is
 	// what the Activity tab renders.
-	Transitions []coordinator.WorkflowTransition `json:"transitions,omitempty"`
-	Attachments []coordinator.TaskAttachment     `json:"attachments,omitempty"`
+	Transitions         []coordinator.WorkflowTransition `json:"transitions,omitempty"`
+	ConvergenceEvidence *coordinator.ConvergenceEvidence `json:"convergence_evidence,omitempty"`
+	Attachments         []coordinator.TaskAttachment     `json:"attachments,omitempty"`
 }
 
 type uiSessionSummary struct {

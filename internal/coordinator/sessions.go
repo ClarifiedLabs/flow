@@ -11,8 +11,10 @@ import (
 	"log/slog"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
+	flowgit "github.com/ClarifiedLabs/flow/internal/git"
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	"github.com/ClarifiedLabs/flow/internal/sqlitex"
 	"github.com/ClarifiedLabs/flow/internal/terminal"
@@ -144,9 +146,12 @@ type EnsureConsoleJobInput struct {
 }
 
 type EnsureTaskConsoleJobInput struct {
-	TaskID   string
-	Harness  string
-	Priority int
+	TaskID                         string
+	Harness                        string
+	Priority                       int
+	ConvergenceWorkflowRunID       string
+	ConvergenceChangeID            string
+	ConvergenceEvidenceFingerprint string
 }
 
 type EnsureConsoleJobResult struct {
@@ -232,7 +237,6 @@ type SessionServiceOptions struct {
 	// skipped and crash recovery falls back to the bounded author relaunch.
 	HandoffSnapshots handoffSnapshotGetter
 	ReviewRounds     reviewRoundScheduler
-
 }
 
 // handoffSnapshotGetter reads the coordinator-owned handoff snapshot for a
@@ -261,6 +265,8 @@ type SessionService struct {
 	handoffSnapshots                handoffSnapshotGetter
 	reviewRounds                    reviewRoundScheduler
 	now                             func() time.Time
+	gitWriteProjectionFenceOnce     sync.Once
+	gitWriteProjectionFence         func(func() error) error
 }
 
 func NewSessionService(database *sql.DB, tasks *TaskService, workers *flowworker.Service) *SessionService {
@@ -319,6 +325,18 @@ type workPhaseContext struct {
 	agent        AgentDefSnapshot
 }
 
+// SetGitWriteProjectionFence installs the API server's per-project exclusive
+// Git writer gate. The callback is immutable once installed because this
+// service is shared by concurrent requests.
+func (s *SessionService) SetGitWriteProjectionFence(fence func(func() error) error) {
+	if fence == nil {
+		return
+	}
+	s.gitWriteProjectionFenceOnce.Do(func() {
+		s.gitWriteProjectionFence = fence
+	})
+}
+
 // workPhaseHarness returns the harness the job should launch: the phase
 // agent's when a cursor drives the job, else the configured default agent
 // harness.
@@ -328,7 +346,6 @@ func (s *SessionService) workPhaseHarness(phaseCtx workPhaseContext) string {
 	}
 	return s.defaultAgent.Harness
 }
-
 
 func (s *SessionService) EnsureAuthorJob(ctx context.Context, input EnsureAuthorJobInput) (EnsureAuthorJobResult, error) {
 	if _, err := s.ReconcileCrashedAuthorSessions(ctx); err != nil {
@@ -663,14 +680,39 @@ func (s *SessionService) EnsureTaskConsoleJob(ctx context.Context, input EnsureT
 	if taskID == "" {
 		return EnsureConsoleJobResult{}, errors.New("task id is required")
 	}
+	var requireHeldWorkflowRunID, requireEvidenceFingerprint *string
+	var convergenceEvidence *ConvergenceEvidence
+	if runID := strings.TrimSpace(input.ConvergenceWorkflowRunID); runID != "" {
+		changeID := strings.TrimSpace(input.ConvergenceChangeID)
+		fingerprint := strings.TrimSpace(input.ConvergenceEvidenceFingerprint)
+		if changeID == "" || fingerprint == "" {
+			return EnsureConsoleJobResult{}, fmt.Errorf("%w: convergence change and evidence fingerprint are required", ErrWorkflowConflict)
+		}
+		evidence, err := activeConvergenceEvidenceTx(ctx, s.db, runID)
+		if err != nil {
+			return EnsureConsoleJobResult{}, err
+		}
+		if evidence == nil || evidence.TaskID != taskID || evidence.ChangeID != changeID || evidence.Fingerprint != fingerprint {
+			return EnsureConsoleJobResult{}, fmt.Errorf("%w: convergence evidence is no longer active", ErrWorkflowConflict)
+		}
+		convergenceEvidence = evidence
+		requireHeldWorkflowRunID = &runID
+		requireEvidenceFingerprint = &fingerprint
+	}
 	if existing, ok, err := s.liveTaskConsoleJob(ctx, taskID); err != nil {
 		return EnsureConsoleJobResult{}, err
 	} else if ok {
+		if convergenceEvidence != nil && !taskConsoleJobMatchesConvergenceEvidence(existing, *convergenceEvidence) {
+			return EnsureConsoleJobResult{}, fmt.Errorf("%w: active task console targets a different change", ErrWorkflowConflict)
+		}
 		return EnsureConsoleJobResult{Job: existing, Existing: true}, nil
 	}
 	if state, err := s.CurrentTaskConsole(ctx, taskID); err != nil {
 		return EnsureConsoleJobResult{}, err
 	} else if state.Session != nil {
+		if convergenceEvidence != nil && !taskConsoleSessionMatchesConvergenceEvidence(*state.Session, *convergenceEvidence) {
+			return EnsureConsoleJobResult{}, fmt.Errorf("%w: active task console session targets a different change", ErrWorkflowConflict)
+		}
 		return EnsureConsoleJobResult{}, errors.New("task console session is already active")
 	}
 
@@ -682,14 +724,26 @@ func (s *SessionService) EnsureTaskConsoleJob(ctx context.Context, input EnsureT
 	if base == "" {
 		base = defaultAuthorBase
 	}
-	change, ok, err := s.ReadyUnmergedChangeForTask(ctx, task.ID)
-	if err != nil {
-		return EnsureConsoleJobResult{}, err
-	}
-	if !ok {
-		change, err = s.ensureChange(ctx, task.ID, taskBranch(task.ID), base)
+	var change Change
+	if convergenceEvidence != nil {
+		change, err = s.GetChange(ctx, convergenceEvidence.ChangeID)
 		if err != nil {
 			return EnsureConsoleJobResult{}, err
+		}
+		if change.TaskID != task.ID || change.Branch != convergenceEvidence.SourceBranch || change.Base != convergenceEvidence.TargetBaseBranch || change.HeadSHA != convergenceEvidence.SourceHeadSHA {
+			return EnsureConsoleJobResult{}, fmt.Errorf("%w: convergence change projection no longer matches the evidence", ErrWorkflowConflict)
+		}
+	} else {
+		var ok bool
+		change, ok, err = s.ReadyUnmergedChangeForTask(ctx, task.ID)
+		if err != nil {
+			return EnsureConsoleJobResult{}, err
+		}
+		if !ok {
+			change, err = s.ensureChange(ctx, task.ID, taskBranch(task.ID), base)
+			if err != nil {
+				return EnsureConsoleJobResult{}, err
+			}
 		}
 	}
 	if err := validateBranchLike("branch", change.Branch); err != nil {
@@ -719,25 +773,51 @@ func (s *SessionService) EnsureTaskConsoleJob(ctx context.Context, input EnsureT
 		"console_scope":   "task_recovery",
 		"session_purpose": "task_console",
 	}
+	if convergenceEvidence != nil {
+		payload["convergence_evidence_fingerprint"] = convergenceEvidence.Fingerprint
+		payload["convergence_workflow_run_id"] = convergenceEvidence.WorkflowRunID
+		payload["convergence_source_head_sha"] = convergenceEvidence.SourceHeadSHA
+	}
 	stampProjectPayload(payload, s.project)
 
 	job, err := s.workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		TaskID:         &task.ID,
-		ChangeID:       &change.ID,
-		Role:           flowworker.RoleConsole,
-		CapacityBucket: flowworker.BucketPersistentAgent,
-		Priority:       input.Priority,
-		Requires:       consoleHarnessRequirements(harness),
-		Payload:        payload,
+		TaskID:                                 &task.ID,
+		ChangeID:                               &change.ID,
+		WorkflowRunID:                          requireHeldWorkflowRunID,
+		RequireHeldWorkflowRunID:               requireHeldWorkflowRunID,
+		RequireHeldWorkflowEvidenceFingerprint: requireEvidenceFingerprint,
+		Role:                                   flowworker.RoleConsole,
+		CapacityBucket:                         flowworker.BucketPersistentAgent,
+		Priority:                               input.Priority,
+		Requires:                               consoleHarnessRequirements(harness),
+		Payload:                                payload,
 	})
 	if err != nil {
 		if existing, ok, lookupErr := s.liveTaskConsoleJob(ctx, task.ID); lookupErr == nil && ok {
-			return EnsureConsoleJobResult{Job: existing, Existing: true}, nil
+			if convergenceEvidence == nil || taskConsoleJobMatchesConvergenceEvidence(existing, *convergenceEvidence) {
+				return EnsureConsoleJobResult{Job: existing, Existing: true}, nil
+			}
 		}
 		return EnsureConsoleJobResult{}, err
 	}
 
 	return EnsureConsoleJobResult{Job: job}, nil
+}
+
+func taskConsoleJobMatchesConvergenceEvidence(job flowworker.Job, evidence ConvergenceEvidence) bool {
+	return job.ChangeID != nil && *job.ChangeID == evidence.ChangeID &&
+		job.WorkflowRunID != nil && *job.WorkflowRunID == evidence.WorkflowRunID &&
+		strings.TrimSpace(fmt.Sprint(job.Payload["change_id"])) == evidence.ChangeID &&
+		strings.TrimSpace(fmt.Sprint(job.Payload["branch"])) == evidence.SourceBranch &&
+		strings.TrimSpace(fmt.Sprint(job.Payload["base"])) == evidence.TargetBaseBranch &&
+		strings.TrimSpace(fmt.Sprint(job.Payload["convergence_workflow_run_id"])) == evidence.WorkflowRunID &&
+		strings.TrimSpace(fmt.Sprint(job.Payload["convergence_evidence_fingerprint"])) == evidence.Fingerprint &&
+		strings.TrimSpace(fmt.Sprint(job.Payload["convergence_source_head_sha"])) == evidence.SourceHeadSHA
+}
+
+func taskConsoleSessionMatchesConvergenceEvidence(session Session, evidence ConvergenceEvidence) bool {
+	return session.ChangeID == evidence.ChangeID && session.WorkflowRunID == evidence.WorkflowRunID &&
+		session.Branch == evidence.SourceBranch && session.Base == evidence.TargetBaseBranch
 }
 
 func (s *SessionService) ReconcileCrashedAuthorSessions(ctx context.Context) (int, error) {
@@ -912,8 +992,8 @@ JOIN leases l ON l.id = s.lease_id
 WHERE s.role = ?
 	AND s.runtime_state IN (?, ?, ?)
 	AND (
-		j.state IN (?, ?, ?, ?)
-		OR l.released_at IS NOT NULL
+		j.state IN (?, ?, ?)
+		OR (j.state != ? AND l.released_at IS NOT NULL)
 		OR l.expires_at <= ?
 	)
 ORDER BY s.updated_at`,
@@ -2185,7 +2265,17 @@ func (s *SessionService) MarkPersistentSessionExited(ctx context.Context, input 
 		return Session{}, errors.New("lease does not belong to session")
 	}
 	if session.Role == flowworker.RoleConsole {
-		return Session{}, errors.New("console sessions are released through console release")
+		if session.RuntimeState != SessionStarting && session.RuntimeState != SessionWorking && session.RuntimeState != SessionWaiting {
+			return session, nil
+		}
+		var jobState string
+		if err := s.db.QueryRowContext(ctx, `SELECT state FROM jobs WHERE id = ?`, session.JobID).Scan(&jobState); err != nil {
+			return Session{}, err
+		}
+		if jobState != string(flowworker.JobCanceled) {
+			return Session{}, errors.New("console sessions are released through console release")
+		}
+		return s.markConsoleSessionExited(ctx, session)
 	}
 	if session.RuntimeState != SessionStarting && session.RuntimeState != SessionWorking && session.RuntimeState != SessionWaiting {
 		return session, nil
@@ -2230,6 +2320,139 @@ WHERE id = ?
 	}
 
 	return s.GetSession(ctx, sessionID)
+}
+
+// markConsoleSessionExited is the worker acknowledgement for a stopped or
+// naturally exited console process. Task consoles project the exact exchange
+// branch tip before the session fence is cleared.
+func (s *SessionService) markConsoleSessionExited(ctx context.Context, session Session) (Session, error) {
+	if s.gitWriteProjectionFence == nil {
+		return s.markConsoleSessionExitedFenced(ctx, session)
+	}
+	var result Session
+	err := s.gitWriteProjectionFence(func() error {
+		var err error
+		result, err = s.markConsoleSessionExitedFenced(ctx, session)
+		return err
+	})
+	return result, err
+}
+
+func (s *SessionService) markConsoleSessionExitedFenced(ctx context.Context, session Session) (Session, error) {
+	if session.RuntimeState != SessionStarting && session.RuntimeState != SessionWorking && session.RuntimeState != SessionWaiting {
+		if err := s.revokeSessionTokenHash(ctx, session.TokenHash); err != nil {
+			return Session{}, err
+		}
+		return session, nil
+	}
+	projectedHead := ""
+	if session.TaskID != "" && session.ChangeID != "" && strings.TrimSpace(s.project.ExchangePath) != "" {
+		tip, exists, err := flowgit.BranchTip(ctx, s.project.ExchangePath, session.Branch)
+		if err != nil {
+			return Session{}, fmt.Errorf("resolve exited task console branch: %w", err)
+		}
+		if !exists {
+			return Session{}, fmt.Errorf("exited task console branch %s does not exist", session.Branch)
+		}
+		if exists, err := flowgit.CommitExists(ctx, s.project.ExchangePath, tip); err != nil {
+			return Session{}, fmt.Errorf("verify exited task console head: %w", err)
+		} else if !exists {
+			return Session{}, fmt.Errorf("exited task console head %s is not a commit", tip)
+		}
+		projectedHead = tip
+	}
+
+	nowText := formatTime(s.now().UTC())
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return Session{}, err
+	}
+	defer tx.Rollback()
+
+	// Re-read all liveness fences after taking SQLite's write lock. Force-done
+	// can race a delayed worker exit acknowledgement; once it wins, this path
+	// must not restore a task change projection from the stale session.
+	current, err := scanSession(tx.QueryRowContext(ctx, sessionSelectSQL+`
+WHERE id = ?`, session.ID))
+	if err != nil {
+		return Session{}, err
+	}
+	if current.LeaseID != session.LeaseID || current.JobID != session.JobID || current.ChangeID != session.ChangeID || current.Branch != session.Branch {
+		return Session{}, fmt.Errorf("%w: task console identity changed", ErrWorkflowConflict)
+	}
+	if current.RuntimeState != SessionStarting && current.RuntimeState != SessionWorking && current.RuntimeState != SessionWaiting {
+		tx.Rollback()
+		if err := s.revokeSessionTokenHash(ctx, current.TokenHash); err != nil {
+			return Session{}, err
+		}
+		return current, nil
+	}
+	if current.TaskID != "" {
+		var taskLive int
+		if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+	SELECT 1 FROM tasks
+	WHERE id = ? AND done_at IS NULL
+)`, current.TaskID).Scan(&taskLive); err != nil {
+			return Session{}, fmt.Errorf("verify exited console task: %w", err)
+		}
+		if taskLive == 0 {
+			if _, err := tx.ExecContext(ctx, `
+UPDATE sessions SET runtime_state = ?, updated_at = ?, finished_at = COALESCE(finished_at, ?)
+WHERE id = ? AND runtime_state IN (?, ?, ?)`, string(SessionAbandoned), nowText, nowText,
+				current.ID, string(SessionStarting), string(SessionWorking), string(SessionWaiting)); err != nil {
+				return Session{}, fmt.Errorf("abandon terminal task console session: %w", err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return Session{}, err
+			}
+			if err := s.revokeSessionTokenHash(ctx, current.TokenHash); err != nil {
+				return Session{}, err
+			}
+			return s.GetSession(ctx, current.ID)
+		}
+	}
+	var jobState string
+	var releasedAt sql.NullString
+	if err := tx.QueryRowContext(ctx, `
+SELECT j.state, l.released_at
+FROM jobs j
+JOIN leases l ON l.id = ? AND l.job_id = j.id
+WHERE j.id = ?`, current.LeaseID, current.JobID).Scan(&jobState, &releasedAt); err != nil {
+		return Session{}, fmt.Errorf("verify stopped console runtime: %w", err)
+	}
+	if jobState != string(flowworker.JobCanceled) || !releasedAt.Valid {
+		return Session{}, fmt.Errorf("%w: task console runtime is still live", ErrWorkflowConflict)
+	}
+	if projectedHead != "" {
+		result, err := tx.ExecContext(ctx, `
+UPDATE changes SET head_sha = ?, updated_at = ?
+WHERE id = ? AND task_id = ? AND branch = ?`, projectedHead, nowText,
+			current.ChangeID, current.TaskID, current.Branch)
+		if err != nil {
+			return Session{}, fmt.Errorf("project repaired task console head: %w", err)
+		}
+		if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+			return Session{}, fmt.Errorf("%w: task console change projection changed", ErrWorkflowConflict)
+		}
+	}
+	result, err := tx.ExecContext(ctx, `
+UPDATE sessions SET runtime_state = ?, updated_at = ?, finished_at = COALESCE(finished_at, ?)
+WHERE id = ? AND runtime_state IN (?, ?, ?)`, string(SessionFinished), nowText, nowText,
+		current.ID, string(SessionStarting), string(SessionWorking), string(SessionWaiting))
+	if err != nil {
+		return Session{}, fmt.Errorf("acknowledge console process exit: %w", err)
+	}
+	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+		return Session{}, fmt.Errorf("%w: task console runtime changed", ErrWorkflowConflict)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Session{}, err
+	}
+	if err := s.revokeSessionTokenHash(ctx, current.TokenHash); err != nil {
+		return Session{}, err
+	}
+	return s.GetSession(ctx, current.ID)
 }
 
 func (s *SessionService) CurrentConsole(ctx context.Context) (ConsoleState, error) {
@@ -2315,7 +2538,7 @@ func (s *SessionService) ReleaseConsole(ctx context.Context) (ConsoleState, erro
 		return ConsoleState{}, err
 	}
 	if state.Session != nil {
-		if _, err := s.finishConsoleSession(ctx, state.Session.ID); err != nil {
+		if _, err := s.finishConsoleSession(ctx, state.Session.ID, false); err != nil {
 			return ConsoleState{}, err
 		}
 		return s.CurrentConsole(ctx)
@@ -2327,6 +2550,36 @@ func (s *SessionService) ReleaseConsole(ctx context.Context) (ConsoleState, erro
 		return s.CurrentConsole(ctx)
 	}
 
+	return ConsoleState{}, nil
+}
+
+// StopConvergenceRepairConsole requests termination but deliberately leaves a
+// running repair session active until the worker acknowledges process exit.
+// Final convergence dispositions use that active row as a durable fence.
+func (s *SessionService) StopConvergenceRepairConsole(ctx context.Context, taskID string) (ConsoleState, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return ConsoleState{}, errors.New("task id is required")
+	}
+	if _, err := s.ReconcileCrashedConsoleSessions(ctx); err != nil {
+		return ConsoleState{}, err
+	}
+	state, err := s.CurrentTaskConsole(ctx, taskID)
+	if err != nil {
+		return ConsoleState{}, err
+	}
+	if state.Session != nil {
+		if _, err := s.finishConsoleSession(ctx, state.Session.ID, true); err != nil {
+			return ConsoleState{}, err
+		}
+		return s.CurrentTaskConsole(ctx, taskID)
+	}
+	if state.Job != nil {
+		if err := s.cancelConsoleJob(ctx, state.Job.ID); err != nil {
+			return ConsoleState{}, err
+		}
+		return s.CurrentTaskConsole(ctx, taskID)
+	}
 	return ConsoleState{}, nil
 }
 
@@ -2343,7 +2596,7 @@ func (s *SessionService) ReleaseTaskConsole(ctx context.Context, taskID string) 
 		return ConsoleState{}, err
 	}
 	if state.Session != nil {
-		if _, err := s.finishConsoleSession(ctx, state.Session.ID); err != nil {
+		if _, err := s.finishConsoleSession(ctx, state.Session.ID, false); err != nil {
 			return ConsoleState{}, err
 		}
 		return s.CurrentTaskConsole(ctx, taskID)
@@ -2358,7 +2611,7 @@ func (s *SessionService) ReleaseTaskConsole(ctx context.Context, taskID string) 
 	return ConsoleState{}, nil
 }
 
-func (s *SessionService) finishConsoleSession(ctx context.Context, sessionID string) (Session, error) {
+func (s *SessionService) finishConsoleSession(ctx context.Context, sessionID string, awaitProcessExit bool) (Session, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return Session{}, errors.New("session id is required")
@@ -2401,11 +2654,18 @@ WHERE j.id = ?`,
 		if err != nil {
 			return Session{}, err
 		}
+		if awaitProcessExit && jobState == string(flowworker.JobCanceled) && releasedAt.Valid {
+			return session, nil
+		}
 		if jobState != string(flowworker.JobRunning) || releasedAt.Valid || !now.Before(expiresAt) {
 			return Session{}, errors.New("console session lease is not live")
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if awaitProcessExit {
+		if err := s.revokeSessionTokenHash(ctx, session.TokenHash); err != nil {
+			return Session{}, fmt.Errorf("revoke repair console token before stop: %w", err)
+		}
+	} else if _, err := tx.ExecContext(ctx, `
 UPDATE sessions
 SET runtime_state = ?,
 	updated_at = ?,
@@ -2427,13 +2687,17 @@ WHERE id = ?`,
 	); err != nil {
 		return Session{}, fmt.Errorf("release console lease: %w", err)
 	}
+	jobFinalState := flowworker.JobFinished
+	if awaitProcessExit {
+		jobFinalState = flowworker.JobCanceled
+	}
 	result, err := tx.ExecContext(ctx, `
 UPDATE jobs
 SET state = ?,
 	updated_at = ?
 WHERE id = ?
 	AND state IN (?, ?, ?)`,
-		string(flowworker.JobFinished),
+		string(jobFinalState),
 		nowText,
 		session.JobID,
 		string(flowworker.JobClaimed),
@@ -2453,8 +2717,10 @@ WHERE id = ?
 	if err := tx.Commit(); err != nil {
 		return Session{}, fmt.Errorf("commit release console session transaction: %w", err)
 	}
-	if err := s.revokeSessionTokenHash(ctx, session.TokenHash); err != nil {
-		slog.Warn("revoke console token", "session_id", sessionID, "error", err)
+	if !awaitProcessExit {
+		if err := s.revokeSessionTokenHash(ctx, session.TokenHash); err != nil {
+			slog.Warn("revoke console token", "session_id", sessionID, "error", err)
+		}
 	}
 
 	return s.GetSession(ctx, sessionID)
@@ -2482,22 +2748,44 @@ func (s *SessionService) RevokeWorkflowRunSessionTokens(ctx context.Context, wor
 	if workflowRunID == "" || s.credentials == nil {
 		return nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT token_hash FROM sessions WHERE workflow_run_id = ?`, workflowRunID)
+	return s.revokeSessionTokensForQuery(ctx, "workflow", `
+SELECT token_hash
+FROM sessions
+WHERE workflow_run_id = ?
+	OR task_id = (SELECT task_id FROM workflow_runs WHERE id = ?)`, workflowRunID, workflowRunID)
+}
+
+// RevokeTaskSessionTokens invalidates every credential minted for task-scoped
+// runtime, including recovery consoles that were started before any workflow
+// run existed.
+func (s *SessionService) RevokeTaskSessionTokens(ctx context.Context, taskID string) error {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" || s.credentials == nil {
+		return nil
+	}
+	return s.revokeSessionTokensForQuery(ctx, "task", `
+SELECT token_hash
+FROM sessions
+WHERE task_id = ?`, taskID)
+}
+
+func (s *SessionService) revokeSessionTokensForQuery(ctx context.Context, label string, query string, args ...any) error {
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return fmt.Errorf("list workflow session tokens: %w", err)
+		return fmt.Errorf("list %s session tokens: %w", label, err)
 	}
 	var hashes []string
 	for rows.Next() {
 		var hash string
 		if err := rows.Scan(&hash); err != nil {
 			rows.Close()
-			return fmt.Errorf("scan workflow session token: %w", err)
+			return fmt.Errorf("scan %s session token: %w", label, err)
 		}
 		hashes = append(hashes, hash)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return fmt.Errorf("iterate workflow session tokens: %w", err)
+		return fmt.Errorf("iterate %s session tokens: %w", label, err)
 	}
 	if err := rows.Close(); err != nil {
 		return err
@@ -2625,6 +2913,33 @@ func (s *SessionService) GetSession(ctx context.Context, sessionID string) (Sess
 WHERE id = ?`, strings.TrimSpace(sessionID))
 
 	return scanSession(row)
+}
+
+// SessionAllowsGitWrites is a defense-in-depth fence for session credentials:
+// a token can write only while its process still has a live runtime, running
+// job, and unexpired unreleased lease. This remains authoritative if best-effort
+// revocation in the global credential store fails after project-state cleanup.
+func (s *SessionService) SessionAllowsGitWrites(ctx context.Context, sessionID string) (bool, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false, nil
+	}
+	var allowed int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS (
+	SELECT 1
+	FROM sessions AS s
+	JOIN jobs AS j ON j.id = s.job_id
+	JOIN leases AS l ON l.id = s.lease_id
+	WHERE s.id = ?
+		AND s.runtime_state IN ('starting', 'working', 'waiting')
+		AND j.state = 'running'
+		AND l.released_at IS NULL
+		AND l.expires_at > ?
+)`, sessionID, formatTime(s.now().UTC())).Scan(&allowed); err != nil {
+		return false, fmt.Errorf("check session git write liveness: %w", err)
+	}
+	return allowed != 0, nil
 }
 
 func (s *SessionService) LatestSessionForJob(ctx context.Context, jobID string) (Session, bool, error) {

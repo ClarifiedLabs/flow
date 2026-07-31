@@ -133,7 +133,31 @@ func TestConvergenceHoldShowsAsBlockedOnTheBoardAndSidebar(t *testing.T) {
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
 		nil, http.StatusOK, nil)
 
-	if _, _, err := fixture.Bundle.WorkflowRuns.HoldForConvergence(context.Background(), created.Task.ID, 8, 420, 160, 5, 500); err != nil {
+	run, active, err := fixture.Bundle.WorkflowRuns.ActiveForTask(context.Background(), created.Task.ID)
+	if err != nil || !active {
+		t.Fatalf("active workflow run = %+v active=%t err=%v", run, active, err)
+	}
+	nodeRunID := run.CurrentNodeRunID
+	if nodeRunID == "" {
+		nodeRun, _, err := fixture.Bundle.WorkflowRuns.EnsureCurrentNode(context.Background(), run.ID)
+		if err != nil {
+			t.Fatalf("ensure current convergence node: %v", err)
+		}
+		nodeRunID = nodeRun.ID
+	}
+	if _, err := fixture.DB.ExecContext(context.Background(), `
+INSERT INTO changes (id, task_id, workflow_run_id, branch, base, head_sha, created_at, updated_at)
+VALUES ('ch-board-convergence', ?, ?, ?, 'main', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+	'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, created.Task.ID, run.ID, "task/"+created.Task.ID); err != nil {
+		t.Fatalf("insert convergence change projection: %v", err)
+	}
+	if _, _, err := fixture.Bundle.WorkflowRuns.HoldForConvergence(context.Background(), coordinator.ConvergenceEvidence{
+		WorkflowRunID: run.ID, NodeRunID: nodeRunID, ChangeID: "ch-board-convergence", TaskID: created.Task.ID,
+		SourceBranch: "task/" + created.Task.ID, SourceHeadSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		TargetBaseBranch: "main", TargetBaseTipSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		MergeBaseSHA: "cccccccccccccccccccccccccccccccccccccccc", DiffDigest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		Files: 8, Additions: 420, Deletions: 160, MaxFiles: 5, MaxLines: 500,
+	}); err != nil {
 		t.Fatalf("hold for convergence: %v", err)
 	}
 
@@ -156,6 +180,29 @@ func TestConvergenceHoldShowsAsBlockedOnTheBoardAndSidebar(t *testing.T) {
 	want := uiSidebarBoardSummary{InProgress: 0, Blocked: 1}
 	if sidebar.Board != want {
 		t.Fatalf("sidebar board counts = %+v, want %+v", sidebar.Board, want)
+	}
+
+	var taskDetail taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks/"+created.Task.ID,
+		nil, http.StatusOK, &taskDetail)
+	if taskDetail.Detail == nil || taskDetail.Detail.ConvergenceEvidence == nil || taskDetail.Detail.ConvergenceEvidence.WorkflowRunID != run.ID {
+		t.Fatalf("task detail convergence evidence = %+v, want typed run %s evidence", taskDetail.Detail, run.ID)
+	}
+	var workflowDetail workflowDetailResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks/"+created.Task.ID+"/workflow",
+		nil, http.StatusOK, &workflowDetail)
+	if workflowDetail.Detail.ConvergenceEvidence == nil || workflowDetail.Detail.ConvergenceEvidence.Fingerprint == "" {
+		t.Fatalf("workflow convergence evidence = %+v, want fingerprint", workflowDetail.Detail.ConvergenceEvidence)
+	}
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/release",
+		workflowReleaseRequest{Edge: string(coordinator.ReleaseResume)}, http.StatusConflict, nil)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/convergence",
+		workflowConvergenceRequest{Disposition: coordinator.ConvergenceRepairBranch, ExpectedEvidenceFingerprint: "stale-reviewed-fingerprint"}, http.StatusConflict, nil)
+	var resolved coordinator.ConvergenceReviewResult
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/convergence",
+		workflowConvergenceRequest{Disposition: coordinator.ConvergenceRepairBranch, Note: "reduce the patch", ExpectedEvidenceFingerprint: workflowDetail.Detail.ConvergenceEvidence.Fingerprint}, http.StatusOK, &resolved)
+	if !resolved.Run.Held() || resolved.Evidence.Fingerprint == "" {
+		t.Fatalf("resolved convergence review = %+v, want repair disposition to preserve the typed hold", resolved)
 	}
 }
 

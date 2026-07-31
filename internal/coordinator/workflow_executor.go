@@ -534,7 +534,7 @@ func (e *WorkflowExecutor) holdOversizedChangeForConvergence(ctx context.Context
 	if err != nil {
 		return false, fmt.Errorf("load review artifact for convergence check: %w", err)
 	}
-	changeID, err := changeIDFromArtifact(artifact)
+	changeID, pinnedHeadSHA, err := changeIdentityFromArtifact(artifact)
 	if err != nil {
 		return false, err
 	}
@@ -545,29 +545,145 @@ func (e *WorkflowExecutor) holdOversizedChangeForConvergence(ctx context.Context
 	if strings.TrimSpace(change.HeadSHA) == "" {
 		return false, nil
 	}
-	stats, err := flowgit.ChangedFileStats(
-		ctx,
-		exchangePath,
-		"refs/heads/"+change.Base,
-		change.HeadSHA,
-	)
-	if err != nil {
-		return false, fmt.Errorf("measure review scope: %w", err)
+	if pinnedHeadSHA == "" {
+		return false, errors.New("change artifact has no pinned head_sha")
 	}
-	lines := stats.Additions + stats.Deletions
-	if !reviewScopeExceeded(len(stats.Files), lines, e.reviewScopeFileLimit, e.reviewScopeLineLimit) {
+	if pinnedHeadSHA != strings.TrimSpace(change.HeadSHA) {
+		return false, fmt.Errorf("%w: change head moved from pinned %s to %s", ErrWorkflowConflict, pinnedHeadSHA, change.HeadSHA)
+	}
+	evidence, err := e.convergenceEvidenceForChange(ctx, run, nodeRun, change)
+	if err != nil {
+		return false, err
+	}
+	if !reviewScopeExceeded(evidence.Files, evidence.Additions+evidence.Deletions, e.reviewScopeFileLimit, e.reviewScopeLineLimit) {
 		return false, nil
 	}
-	_, held, err := e.runs.HoldForConvergence(
-		ctx,
-		run.TaskID,
-		len(stats.Files),
-		stats.Additions,
-		stats.Deletions,
-		e.reviewScopeFileLimit,
-		e.reviewScopeLineLimit,
-	)
+	_, held, err := e.runs.HoldForConvergence(ctx, evidence)
 	return held, err
+}
+
+// WithConvergenceEvidenceRefsLocked verifies and locks the exact source and
+// target refs represented by evidence while fn records a final disposition.
+// The lock is a no-op Git reference transaction, so competing pushes cannot
+// invalidate the decision between the live-ref refresh and the SQLite commit.
+func (e *WorkflowExecutor) WithConvergenceEvidenceRefsLocked(ctx context.Context, evidence ConvergenceEvidence, fn func(context.Context) error) error {
+	if strings.TrimSpace(e.project.ExchangePath) == "" {
+		return errors.New("project exchange path is not configured")
+	}
+	return flowgit.WithLockedRefs(ctx, e.project.ExchangePath, map[string]string{
+		"refs/heads/" + evidence.SourceBranch:     evidence.SourceHeadSHA,
+		"refs/heads/" + evidence.TargetBaseBranch: evidence.TargetBaseTipSHA,
+	}, fn)
+}
+
+// RefreshConvergenceEvidence revalidates the exact Git observation before a
+// final disposition. If repair_branch changed the source head, it adopts a new
+// immutable artifact/evidence pair before the owner resolves the hold.
+func (e *WorkflowExecutor) RefreshConvergenceEvidence(ctx context.Context, taskID string) (ConvergenceEvidence, error) {
+	run, active, err := e.runs.ActiveForTask(ctx, taskID)
+	if err != nil {
+		return ConvergenceEvidence{}, err
+	}
+	if !active || !run.Held() {
+		return ConvergenceEvidence{}, ErrWorkflowNotHeld
+	}
+	current, err := e.runs.ActiveConvergenceEvidenceForTask(ctx, taskID)
+	if err != nil {
+		return ConvergenceEvidence{}, err
+	}
+	if current == nil {
+		return ConvergenceEvidence{}, fmt.Errorf("%w: workflow has no active convergence review", ErrWorkflowConflict)
+	}
+	nodeRun, found, err := e.runs.GetNodeRun(ctx, run.CurrentNodeRunID)
+	if err != nil {
+		return ConvergenceEvidence{}, err
+	}
+	if !found {
+		return ConvergenceEvidence{}, ErrWorkflowRunNotFound
+	}
+	change, err := e.sessions.GetChange(ctx, current.ChangeID)
+	if err != nil {
+		return ConvergenceEvidence{}, err
+	}
+	refreshed, err := e.convergenceEvidenceForChange(ctx, run, nodeRun, change)
+	if err != nil {
+		return ConvergenceEvidence{}, err
+	}
+	if refreshed.SourceHeadSHA == current.SourceHeadSHA &&
+		refreshed.TargetBaseTipSHA == current.TargetBaseTipSHA &&
+		refreshed.MergeBaseSHA == current.MergeBaseSHA &&
+		refreshed.DiffDigest == current.DiffDigest {
+		return *current, nil
+	}
+	return e.runs.RefreshConvergenceEvidence(ctx, refreshed)
+}
+
+func (e *WorkflowExecutor) convergenceEvidenceForChange(ctx context.Context, run WorkflowRun, nodeRun WorkflowNodeRun, change Change) (ConvergenceEvidence, error) {
+	exchangePath := strings.TrimSpace(e.project.ExchangePath)
+	if exchangePath == "" {
+		return ConvergenceEvidence{}, errors.New("project exchange path is required for convergence evidence")
+	}
+	sourceHeadSHA := strings.TrimSpace(change.HeadSHA)
+	if sourceHeadSHA == "" {
+		return ConvergenceEvidence{}, errors.New("review source change has no head")
+	}
+	sourceExists, err := flowgit.CommitExists(ctx, exchangePath, sourceHeadSHA)
+	if err != nil {
+		return ConvergenceEvidence{}, fmt.Errorf("verify review source head: %w", err)
+	}
+	if !sourceExists {
+		return ConvergenceEvidence{}, fmt.Errorf("review source head %s does not exist in the exchange", sourceHeadSHA)
+	}
+	sourceTipSHA, exists, err := flowgit.BranchTip(ctx, exchangePath, change.Branch)
+	if err != nil {
+		return ConvergenceEvidence{}, fmt.Errorf("resolve review source branch: %w", err)
+	}
+	if !exists {
+		return ConvergenceEvidence{}, fmt.Errorf("review source branch %s does not exist", change.Branch)
+	}
+	if sourceTipSHA != sourceHeadSHA {
+		return ConvergenceEvidence{}, fmt.Errorf("%w: review source branch %s moved from projected %s to %s", ErrWorkflowConflict, change.Branch, sourceHeadSHA, sourceTipSHA)
+	}
+	baseTipSHA, exists, err := flowgit.BranchTip(ctx, exchangePath, change.Base)
+	if err != nil {
+		return ConvergenceEvidence{}, fmt.Errorf("resolve review target base: %w", err)
+	}
+	if !exists {
+		return ConvergenceEvidence{}, fmt.Errorf("review target base branch %s does not exist", change.Base)
+	}
+	mergeBaseSHA, err := flowgit.MergeBase(ctx, exchangePath, baseTipSHA, sourceHeadSHA)
+	if err != nil {
+		return ConvergenceEvidence{}, fmt.Errorf("resolve review merge base: %w", err)
+	}
+	for _, sha := range []string{sourceHeadSHA, baseTipSHA, mergeBaseSHA} {
+		ref := "refs/flow/convergence/objects/" + sha
+		if err := flowgit.CreateOrVerifyRef(ctx, exchangePath, ref, sha); err != nil {
+			return ConvergenceEvidence{}, fmt.Errorf("retain convergence commit %s: %w", sha, err)
+		}
+	}
+	diffDigest, err := flowgit.CanonicalDiffDigest(ctx, exchangePath, mergeBaseSHA, sourceHeadSHA)
+	if err != nil {
+		return ConvergenceEvidence{}, fmt.Errorf("fingerprint review change: %w", err)
+	}
+	stats, err := flowgit.ChangedFileStatsBounded(ctx, exchangePath, mergeBaseSHA, sourceHeadSHA, convergencePayloadFileLimit)
+	if err != nil {
+		return ConvergenceEvidence{}, fmt.Errorf("measure review scope: %w", err)
+	}
+	changedFiles := make([]ConvergenceFile, 0, len(stats.Files))
+	for _, file := range stats.Files {
+		changedFiles = append(changedFiles, ConvergenceFile{
+			Path: file.Path, Additions: file.Additions, Deletions: file.Deletions, Binary: file.Binary,
+		})
+	}
+	return ConvergenceEvidence{
+		WorkflowRunID: run.ID, NodeRunID: nodeRun.ID, ChangeID: change.ID, TaskID: run.TaskID,
+		SourceBranch: change.Branch, SourceHeadSHA: sourceHeadSHA,
+		TargetBaseBranch: change.Base, TargetBaseTipSHA: baseTipSHA, MergeBaseSHA: mergeBaseSHA,
+		Files: stats.FileCount, Additions: stats.Additions, Deletions: stats.Deletions,
+		ChangedFiles: changedFiles, DiffDigest: diffDigest,
+		ReviewCyclesUsed: run.ReviewCyclesUsed, ReviewCycleBudget: run.ReviewCycleBudget,
+		MaxFiles: e.reviewScopeFileLimit, MaxLines: e.reviewScopeLineLimit,
+	}, nil
 }
 
 func reviewScopeExceeded(files, lines, maxFiles, maxLines int) bool {
@@ -831,18 +947,25 @@ func (e *WorkflowExecutor) reportWorkflowMergeConflict(
 }
 
 func changeIDFromArtifact(artifact WorkflowArtifact) (string, error) {
+	changeID, _, err := changeIdentityFromArtifact(artifact)
+	return changeID, err
+}
+
+func changeIdentityFromArtifact(artifact WorkflowArtifact) (string, string, error) {
 	if artifact.Kind != ArtifactChange {
-		return "", errors.New("node requires a change artifact")
+		return "", "", errors.New("node requires a change artifact")
 	}
 	var payload struct {
 		ChangeID string `json:"change_id"`
+		HeadSHA  string `json:"head_sha"`
 	}
 	if err := json.Unmarshal(artifact.Payload, &payload); err != nil {
-		return "", err
+		return "", "", err
 	}
 	payload.ChangeID = strings.TrimSpace(payload.ChangeID)
+	payload.HeadSHA = strings.TrimSpace(payload.HeadSHA)
 	if payload.ChangeID == "" {
-		return "", errors.New("change artifact has no change_id")
+		return "", "", errors.New("change artifact has no change_id")
 	}
-	return payload.ChangeID, nil
+	return payload.ChangeID, payload.HeadSHA, nil
 }

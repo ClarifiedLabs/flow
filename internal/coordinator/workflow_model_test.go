@@ -4,8 +4,10 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
+	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
 func newWorkflowModelServices(t *testing.T) (*FlowService, *TaskService, *WorkflowRunService) {
@@ -18,6 +20,65 @@ func newWorkflowModelServices(t *testing.T) (*FlowService, *TaskService, *Workfl
 	flows := NewFlowService(store.DB())
 	tasks := NewTaskService(store.DB(), "p-test")
 	return flows, tasks, NewWorkflowRunService(store.DB(), flows, tasks)
+}
+
+func TestForceDoneCleansTaskScopedConsoleWithoutWorkflowRun(t *testing.T) {
+	ctx := context.Background()
+	_, tasks, runs := newWorkflowModelServices(t)
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Unscheduled task with console"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	workers := flowworker.NewService(runs.db)
+	job, err := workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
+		TaskID: &task.ID, Role: flowworker.RoleConsole, CapacityBucket: flowworker.BucketPersistentAgent,
+	})
+	if err != nil {
+		t.Fatalf("enqueue task console: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := runs.db.ExecContext(ctx, `UPDATE jobs SET state = 'claimed', updated_at = ? WHERE id = ?`, formatTime(now), job.ID); err != nil {
+		t.Fatalf("claim task console: %v", err)
+	}
+	const leaseID = "l-force-done-task-console"
+	if _, err := runs.db.ExecContext(ctx, `
+INSERT INTO leases (id, job_id, worker_id, capacity_bucket, leased_at, expires_at)
+VALUES (?, ?, 'w-force-done', 'persistent_agent', ?, ?)`, leaseID, job.ID,
+		formatTime(now), formatTime(now.Add(time.Minute))); err != nil {
+		t.Fatalf("lease task console: %v", err)
+	}
+	if _, err := workers.MarkJobRunning(ctx, leaseID); err != nil {
+		t.Fatalf("start task console: %v", err)
+	}
+	const sessionID = "s-force-done-task-console"
+	if _, err := runs.db.ExecContext(ctx, `
+INSERT INTO sessions (
+	id, task_id, job_id, lease_id, worker_id, role, workspace_mode, runtime_state,
+	branch, base, harness, token_hash, created_at, updated_at
+) VALUES (?, ?, ?, ?, 'w-force-done', 'console', 'change', 'working',
+	'task/force-done', 'main', 'shell', 'force-done-token-hash', ?, ?)`,
+		sessionID, task.ID, job.ID, leaseID, formatTime(now), formatTime(now)); err != nil {
+		t.Fatalf("insert task console session: %v", err)
+	}
+
+	if _, err := runs.ForceDone(ctx, task.ID, ResolutionCancelled, "operator cancellation", ActorHuman); err != nil {
+		t.Fatalf("force done task: %v", err)
+	}
+	canceledJob, err := workers.GetJob(ctx, job.ID)
+	if err != nil || canceledJob.State != flowworker.JobCanceled {
+		t.Fatalf("task console job after force done = %+v err=%v, want canceled", canceledJob, err)
+	}
+	releasedLease, err := workers.GetLease(ctx, leaseID)
+	if err != nil || releasedLease.ReleasedAt == nil {
+		t.Fatalf("task console lease after force done = %+v err=%v, want released", releasedLease, err)
+	}
+	var runtimeState string
+	if err := runs.db.QueryRowContext(ctx, `SELECT runtime_state FROM sessions WHERE id = ?`, sessionID).Scan(&runtimeState); err != nil {
+		t.Fatalf("load task console session: %v", err)
+	}
+	if runtimeState != string(SessionAbandoned) {
+		t.Fatalf("task console session state after force done = %q, want abandoned", runtimeState)
+	}
 }
 
 func TestWorkflowModelHumanGateCanUseCustomOutcomeAndComplete(t *testing.T) {

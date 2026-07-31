@@ -21,6 +21,31 @@ func putFakeGitOnPath(t *testing.T, script string) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+func TestChangedFileStatsBoundedRetainsDeterministicSubsetOfLargeOutput(t *testing.T) {
+	putFakeGitOnPath(t, `#!/bin/sh
+set -eu
+i=5000
+while [ "$i" -gt 0 ]; do
+  printf '1\t2\tfile-%05d.txt\n' "$i"
+  i=$((i - 1))
+done
+`)
+
+	stats, err := ChangedFileStatsBounded(context.Background(), "exchange.git", "base", "head", 100)
+	if err != nil {
+		t.Fatalf("collect bounded changed-file stats: %v", err)
+	}
+	if stats.FileCount != 5000 || stats.Additions != 5000 || stats.Deletions != 10000 {
+		t.Fatalf("aggregate stats = %+v, want exact counts for 5000 files", stats)
+	}
+	if len(stats.Files) != 100 {
+		t.Fatalf("retained files = %d, want 100", len(stats.Files))
+	}
+	if stats.Files[0].Path != "file-00001.txt" || stats.Files[99].Path != "file-00100.txt" {
+		t.Fatalf("retained range = %q..%q, want deterministic lexical prefix", stats.Files[0].Path, stats.Files[99].Path)
+	}
+}
+
 func TestRunGitTimesOutOnHang(t *testing.T) {
 	putFakeGitOnPath(t, "#!/bin/sh\nexec sleep 60\n")
 

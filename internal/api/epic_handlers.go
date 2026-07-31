@@ -228,4 +228,3 @@ func epicCriticalPath(memberIDs []string, blockedBy map[string][]string) []strin
 	}
 	return best
 }
-

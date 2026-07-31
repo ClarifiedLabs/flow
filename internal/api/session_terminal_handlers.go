@@ -287,6 +287,8 @@ func (s *projectServer) handleSessionPath(w http.ResponseWriter, r *http.Request
 	case "status":
 		s.handleSessionStatus(w, r, sessionID, principal)
 	case "ready":
+		unlockSessionGitWrites := s.drainGitWrites()
+		defer unlockSessionGitWrites()
 		currentSession, err := s.sessions.GetSession(r.Context(), sessionID)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "ready_session_failed", err.Error())
@@ -850,7 +852,6 @@ func (s *projectServer) applySessionStateSignal(w http.ResponseWriter, r *http.R
 	s.touchAgentActivity(r.Context(), sessionID)
 	writeJSON(w, http.StatusOK, sessionResponse{Session: updated})
 }
-
 
 // touchAgentActivity records agent-level liveness best-effort: a failure to
 // stamp last_agent_activity_at is logged and swallowed so it never fails the

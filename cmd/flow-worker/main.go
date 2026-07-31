@@ -556,6 +556,14 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 		if isLeaseNotRenewable(heartbeatErr) &&
 			persistentSession &&
 			persistentSessionFinalized(context.Background(), client, running.Job, *claim.Lease, running.Session) {
+			if running.Job.Role == flowworker.RoleConsole {
+				if err := retryTransientOperation("acknowledge stopped console process exit", stdout, func() error {
+					return reportPersistentSessionProcessExit(context.Background(), client, running.Session, *claim.Lease, result.ExitCode)
+				}); err != nil {
+					return true, jobFailure(fmt.Errorf("acknowledge stopped console process exit: %w", err))
+				}
+				fmt.Fprintf(stdout, "console process exit acknowledged: %s\n", running.Session.ID)
+			}
 			cleanupFinalized = true
 			slog.Debug("flow-worker persistent session finalized while lease heartbeat was active", "job_id", running.Job.ID, "session_id", running.Session.ID, "lease_id", claim.Lease.ID)
 			fmt.Fprintf(stdout, "persistent session finalized: %s lease=%s\n", running.Session.ID, claim.Lease.ID)
@@ -584,12 +592,10 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 	finalState := finalStateForCheckReport(result, reportedCheckVerdict, checkErr, staleCheckResult)
 
 	if persistentSession {
-		// A console session always releases its lease through /v2/console
-		// regardless of how the worker step ended. Routing a failed console run
-		// through the generic process-exit path below would both leak the lease
-		// (that path rejects the console role) and mask the real error with the
-		// process-exit failure, so handle every console exit here and surface the
-		// underlying error after releasing.
+		// A console session normally releases its lease through /v2/console.
+		// When an owner has already stopped the console, that route is unavailable
+		// because the session token is revoked; in that case the worker must send
+		// the process-exit acknowledgement that clears the coordinator's fence.
 		if running.Job.Role == flowworker.RoleConsole {
 			releaseErr := retryTransientOperation("release console", stdout, func() error {
 				return releaseConsoleSession(cfg, running.SessionToken)
@@ -597,7 +603,16 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 			heartbeatErr := leaseHeartbeat.Stop()
 			if releaseErr != nil {
 				if isInvalidBearerToken(releaseErr) && persistentSessionFinalized(context.Background(), client, running.Job, *claim.Lease, running.Session) {
-					fmt.Fprintf(stdout, "console release skipped: session already finalized\n")
+					exitErr := retryTransientOperation("acknowledge stopped console process exit", stdout, func() error {
+						return reportPersistentSessionProcessExit(context.Background(), client, running.Session, *claim.Lease, result.ExitCode)
+					})
+					if exitErr != nil {
+						if heartbeatErr != nil {
+							return true, jobFailure(fmt.Errorf("lease heartbeat: %v; acknowledge stopped console process exit: %w", heartbeatErr, exitErr))
+						}
+						return true, jobFailure(fmt.Errorf("acknowledge stopped console process exit: %w", exitErr))
+					}
+					fmt.Fprintf(stdout, "console process exit acknowledged: %s\n", running.Session.ID)
 				} else {
 					if heartbeatErr != nil {
 						return true, jobFailure(fmt.Errorf("lease heartbeat: %v; release console: %w", heartbeatErr, releaseErr))
