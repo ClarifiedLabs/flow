@@ -16,6 +16,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/ClarifiedLabs/flow/internal/api"
+	"github.com/ClarifiedLabs/flow/internal/blob"
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
@@ -316,6 +317,67 @@ func newServeTestRegistry(t *testing.T) (*api.Registry, coordinator.Project) {
 	}
 
 	return registry, project
+}
+
+func TestHistoryReconciliationRemovesOnlyUnreferencedTemporariesAndReportsPublishedOrphans(t *testing.T) {
+	ctx := context.Background()
+	registry, _ := newServeTestRegistry(t)
+	store := registry.HistoryBlobStore()
+
+	abandoned, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := abandoned.Write([]byte("temporary")); err != nil {
+		t.Fatal(err)
+	}
+	abandonedTemporary, err := abandoned.Complete(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	published, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := published.Write([]byte("orphan")); err != nil {
+		t.Fatal(err)
+	}
+	publishedTemporary, err := published.Complete(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := blob.NewKey("history/reconciliation-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Publish(ctx, publishedTemporary, key); err != nil {
+		t.Fatal(err)
+	}
+
+	registryMetrics := metrics.New()
+	historyMetrics := metrics.RegisterHistoryStorage(registryMetrics, "local")
+	policy := config.ResolvedHistoryReconciliation{
+		Interval: time.Minute, TemporaryGrace: time.Hour, OrphanGrace: time.Hour, BatchSize: 100,
+	}
+	result, err := reconcileHistoryStorage(ctx, registry, store, policy, historyMetrics, time.Now().UTC().Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("reconcile history storage: %v", err)
+	}
+	if len(result.RemovedTemporaryIDs) != 1 || result.RemovedTemporaryIDs[0] != abandonedTemporary.ID || len(result.Orphans) != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	if _, err := store.Head(ctx, key); err != nil {
+		t.Fatalf("reported orphan was deleted: %v", err)
+	}
+	if _, err := store.Resume(ctx, abandonedTemporary.ID); !errors.Is(err, blob.ErrNotFound) {
+		t.Fatalf("abandoned temporary still exists: %v", err)
+	}
+	var exposition bytes.Buffer
+	registryMetrics.Render(&exposition)
+	if !strings.Contains(exposition.String(), "flow_history_reconciliation_orphans 1") {
+		t.Fatalf("metrics do not report orphan:\n%s", exposition.String())
+	}
 }
 
 func TestTickProjectsTicksEveryProject(t *testing.T) {

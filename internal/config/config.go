@@ -18,17 +18,18 @@ import (
 )
 
 type CoordinatorConfig struct {
-	DataDir                    string               `json:"data_dir" yaml:"data_dir"`
-	ListenAddr                 string               `json:"listen_addr" yaml:"listen_addr"`
-	AuthorEntrypoint           map[string]any       `json:"author_entrypoint" yaml:"author_entrypoint"`
-	AuthorEntrypointConfigured bool                 `json:"-" yaml:"-"`
-	DefaultAgent               DefaultAgentConfig   `json:"default_agent" yaml:"default_agent"`
-	Deadlines                  DeadlineConfig       `json:"deadlines" yaml:"deadlines"`
-	Limits                     LimitConfig          `json:"limits" yaml:"limits"`
-	Workers                    CoordinatorWorkers   `json:"workers" yaml:"workers"`
-	HarnessArgs                []string             `json:"harness_args" yaml:"harness_args"`
-	Git                        CoordinatorGitConfig `json:"git" yaml:"git"`
-	Metrics                    metrics.Config       `json:"metrics" yaml:"metrics"`
+	DataDir                    string                   `json:"data_dir" yaml:"data_dir"`
+	ListenAddr                 string                   `json:"listen_addr" yaml:"listen_addr"`
+	AuthorEntrypoint           map[string]any           `json:"author_entrypoint" yaml:"author_entrypoint"`
+	AuthorEntrypointConfigured bool                     `json:"-" yaml:"-"`
+	DefaultAgent               DefaultAgentConfig       `json:"default_agent" yaml:"default_agent"`
+	Deadlines                  DeadlineConfig           `json:"deadlines" yaml:"deadlines"`
+	Limits                     LimitConfig              `json:"limits" yaml:"limits"`
+	Workers                    CoordinatorWorkers       `json:"workers" yaml:"workers"`
+	HarnessArgs                []string                 `json:"harness_args" yaml:"harness_args"`
+	Git                        CoordinatorGitConfig     `json:"git" yaml:"git"`
+	Metrics                    metrics.Config           `json:"metrics" yaml:"metrics"`
+	History                    CoordinatorHistoryConfig `json:"history" yaml:"history"`
 }
 
 // DefaultAgentConfig configures the coordinator's fallback agent: the harness
@@ -207,17 +208,18 @@ type ClientConfig struct {
 }
 
 type WorkerConfig struct {
-	WorkerID       string            `json:"worker_id" yaml:"worker_id"`
-	CoordinatorURL string            `json:"coordinator_url" yaml:"coordinator_url"`
-	Token          string            `json:"token" yaml:"token"`
-	WorkDir        string            `json:"work_dir" yaml:"work_dir"`
-	Labels         map[string]string `json:"labels" yaml:"labels"`
-	Taints         []scheduler.Taint `json:"taints" yaml:"taints"`
-	Capacity       WorkerCapacity    `json:"capacity" yaml:"capacity"`
-	Cleanup        WorkerCleanup     `json:"cleanup" yaml:"cleanup"`
-	Tmux           WorkerTmuxConfig  `json:"tmux" yaml:"tmux"`
-	Git            WorkerGitConfig   `json:"git" yaml:"git"`
-	Metrics        metrics.Config    `json:"metrics" yaml:"metrics"`
+	WorkerID       string              `json:"worker_id" yaml:"worker_id"`
+	CoordinatorURL string              `json:"coordinator_url" yaml:"coordinator_url"`
+	Token          string              `json:"token" yaml:"token"`
+	WorkDir        string              `json:"work_dir" yaml:"work_dir"`
+	Labels         map[string]string   `json:"labels" yaml:"labels"`
+	Taints         []scheduler.Taint   `json:"taints" yaml:"taints"`
+	Capacity       WorkerCapacity      `json:"capacity" yaml:"capacity"`
+	Cleanup        WorkerCleanup       `json:"cleanup" yaml:"cleanup"`
+	Tmux           WorkerTmuxConfig    `json:"tmux" yaml:"tmux"`
+	Git            WorkerGitConfig     `json:"git" yaml:"git"`
+	Metrics        metrics.Config      `json:"metrics" yaml:"metrics"`
+	History        WorkerHistoryConfig `json:"history" yaml:"history"`
 }
 
 type WorkerCapacity struct {
@@ -436,6 +438,7 @@ func LoadCoordinator(path string) (CoordinatorConfig, error) {
 	cfg.HarnessArgs = fileCfg.HarnessArgs
 	cfg.DefaultAgent = fileCfg.DefaultAgent
 	cfg.Metrics = fileCfg.Metrics
+	cfg.History = fileCfg.History
 	if strings.TrimSpace(fileCfg.Git.CommitName) != "" {
 		cfg.Git.CommitName = strings.TrimSpace(fileCfg.Git.CommitName)
 	}
@@ -761,6 +764,7 @@ func LoadWorker(path string) (WorkerConfig, error) {
 		cfg.Tmux.SocketPath = fileCfg.Tmux.SocketPath
 	}
 	cfg.Metrics = fileCfg.Metrics
+	cfg.History = fileCfg.History
 
 	return normalizeWorker(cfg)
 }
@@ -893,6 +897,9 @@ func normalizeCoordinator(cfg CoordinatorConfig) (CoordinatorConfig, error) {
 	if err := validateCommitIdentity(cfg.Git.CommitName, cfg.Git.CommitEmail, "coordinator"); err != nil {
 		return CoordinatorConfig{}, err
 	}
+	if _, err := cfg.History.Resolve(cfg.DataDir); err != nil {
+		return CoordinatorConfig{}, err
+	}
 
 	cfg.DataDir = cleanRequiredPath(cfg.DataDir)
 	cfg.ListenAddr = strings.TrimSpace(cfg.ListenAddr)
@@ -925,6 +932,9 @@ func normalizeWorker(cfg WorkerConfig) (WorkerConfig, error) {
 		return WorkerConfig{}, err
 	}
 	if err := validateCommitIdentity(cfg.Git.CommitName, cfg.Git.CommitEmail, "worker"); err != nil {
+		return WorkerConfig{}, err
+	}
+	if _, err := cfg.History.Resolve(cfg.WorkDir); err != nil {
 		return WorkerConfig{}, err
 	}
 

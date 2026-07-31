@@ -23,6 +23,7 @@ import (
 
 	"github.com/ClarifiedLabs/flow/internal/api"
 	"github.com/ClarifiedLabs/flow/internal/api/contract"
+	"github.com/ClarifiedLabs/flow/internal/blob"
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
@@ -203,7 +204,17 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
-	slog.Debug("flow-server serve configuration loaded", "addr", cfg.ListenAddr, "database", cfg.GlobalDatabasePath(), "data_dir", cfg.DataDir)
+	historyPolicy, err := cfg.History.Resolve(cfg.DataDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve history configuration: %v\n", err)
+		return 1
+	}
+	historyStore, err := blob.Open(context.Background(), historyBlobFactoryConfig(historyPolicy.Blob))
+	if err != nil {
+		fmt.Fprintf(stderr, "open history blob store: %v\n", err)
+		return 1
+	}
+	slog.Debug("flow-server serve configuration loaded", "addr", cfg.ListenAddr, "database", cfg.GlobalDatabasePath(), "data_dir", cfg.DataDir, "history_backend", historyPolicy.Blob.Backend)
 
 	ownerTokenFileDisplay := "inline"
 	if ownerToken == "" {
@@ -263,6 +274,7 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	registry, err := api.NewRegistry(api.RegistryOptions{
 		DataDir:                    cfg.DataDir,
 		Global:                     globalStore,
+		HistoryBlobStore:           historyStore,
 		AuthorEntrypoint:           cfg.AuthorEntrypoint,
 		AuthorEntrypointConfigured: cfg.AuthorEntrypointConfigured,
 		HarnessArgs:                cfg.HarnessArgs,
@@ -342,6 +354,7 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "owner_token_file: %s\n", ownerTokenFileDisplay)
 	fmt.Fprintf(stdout, "hook_token_file: %s\n", hookTokenFileDisplay)
 	fmt.Fprintf(stdout, "client_config_file: %s\n", clientConfigPath)
+	fmt.Fprintf(stdout, "history_blob_backend: %s\n", historyPolicy.Blob.Backend)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -359,6 +372,7 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		completed: telemetryRegistry.Counter("flow_jobs_completed_total", "Jobs released to the finished state."),
 	}
 	queueDepth := telemetryRegistry.Gauge("flow_queue_depth", "Jobs by state across every project database.")
+	historyMetrics := metrics.RegisterHistoryStorage(telemetryRegistry, historyPolicy.Blob.Backend)
 	updateQueueDepthGauge(ctx, registry.All(), queueDepth)
 	telemetrySettings := metrics.Resolve(cfg.Metrics, config.DefaultTelemetryListen, metrics.Overrides{
 		Disable:    noMetrics,
@@ -390,6 +404,11 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		defer close(tickerDone)
 		runLifecycleTicker(ctx, registry, stderr, queueDepth)
 	}()
+	historyReconcileDone := make(chan struct{})
+	go func() {
+		defer close(historyReconcileDone)
+		runHistoryReconciliation(ctx, registry, historyStore, historyPolicy.Reconciliation, historyMetrics)
+	}()
 
 	srv := &http.Server{Addr: cfg.ListenAddr, Handler: instrumentAPIHandler(server, counters)}
 	shutdownDone := make(chan struct{})
@@ -409,12 +428,79 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	// closes run, so no handler touches a closed database.
 	<-shutdownDone
 	<-tickerDone
+	<-historyReconcileDone
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		fmt.Fprintf(stderr, "serve: %v\n", serveErr)
 		return 1
 	}
 
 	return 0
+}
+
+func historyBlobFactoryConfig(config config.ResolvedHistoryBlob) blob.FactoryConfig {
+	encryption := blob.S3EncryptionAES256
+	if config.S3.Encryption == configpkgHistorySSEKMS() {
+		encryption = blob.S3EncryptionKMS
+	}
+	return blob.FactoryConfig{
+		Backend: config.Backend, LocalPath: config.LocalPath, MaxRangeBytes: config.MaxRangeBytes,
+		S3: blob.FactoryS3Config{
+			Region: config.S3.Region, Bucket: config.S3.Bucket, Prefix: config.S3.Prefix,
+			EndpointURL: config.S3.Endpoint, PathStyle: config.S3.PathStyle, AllowHTTP: config.S3.AllowHTTP,
+			Encryption: encryption, KMSKeyID: config.S3.KMSKeyID, BucketKey: config.S3.BucketKey,
+		},
+	}
+}
+
+// Kept as a tiny helper so the similarly named function parameter above cannot
+// shadow the imported config package constant.
+func configpkgHistorySSEKMS() string { return config.HistorySSEKMS }
+
+func runHistoryReconciliation(ctx context.Context, registry *api.Registry, store blob.Store, policy config.ResolvedHistoryReconciliation, metricSet metrics.HistoryStorage) {
+	reconcile := func() {
+		if _, err := reconcileHistoryStorage(ctx, registry, store, policy, metricSet, time.Now().UTC()); err != nil && ctx.Err() == nil {
+			metricSet.ObserveFailure()
+			slog.Warn("history blob reconciliation failed", "error", err)
+		}
+	}
+	reconcile()
+	ticker := time.NewTicker(policy.Interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			reconcile()
+		}
+	}
+}
+
+func reconcileHistoryStorage(ctx context.Context, registry *api.Registry, store blob.Store, policy config.ResolvedHistoryReconciliation, metricSet metrics.HistoryStorage, now time.Time) (blob.ReconcileResult, error) {
+	request, err := registry.HistoryBlobMetadata(ctx)
+	if err != nil {
+		return blob.ReconcileResult{}, err
+	}
+	request.Before = now.Add(-policy.TemporaryGrace)
+	request.Limit = policy.BatchSize
+	result, err := store.Reconcile(ctx, request)
+	if err != nil {
+		return blob.ReconcileResult{}, err
+	}
+	agedOrphans := 0
+	orphanCutoff := now.Add(-policy.OrphanGrace)
+	for _, orphan := range result.Orphans {
+		if orphan.Modified.Before(orphanCutoff) {
+			agedOrphans++
+		}
+	}
+	metricSet.ObserveSuccess(len(result.RemovedTemporaryIDs), len(result.AbortedMultipartIDs), agedOrphans, result.Truncated, now)
+	if agedOrphans > 0 {
+		// Keys and storage locations are deliberately omitted. Published objects are
+		// report-only and require a future explicitly authorized retention workflow.
+		slog.Warn("history reconciliation reported unreferenced published blobs", "count", agedOrphans)
+	}
+	return result, nil
 }
 
 // lifecycleTickConcurrency bounds how many projects tick in parallel per tick so
@@ -591,6 +677,9 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "data_dir: %s\n", cfg.DataDir)
 	fmt.Fprintf(stdout, "database_path: %s\n", cfg.GlobalDatabasePath())
 	fmt.Fprintf(stdout, "listen_addr: %s\n", cfg.ListenAddr)
+	history, _ := cfg.History.Resolve(cfg.DataDir)
+	fmt.Fprintf(stdout, "history_blob_backend: %s\n", history.Blob.Backend)
+	fmt.Fprintf(stdout, "history_reconciliation_interval: %s\n", history.Reconciliation.Interval)
 	fmt.Fprintf(stdout, "protocol: %s\n", contract.ProtocolVersion)
 	return 0
 }

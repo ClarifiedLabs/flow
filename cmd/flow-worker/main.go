@@ -116,12 +116,21 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "capacity_persistent_agent: %d\n", cfg.Capacity.PersistentAgent)
 	fmt.Fprintf(stdout, "capacity_ephemeral: %d\n", cfg.Capacity.Ephemeral)
 	cleanup, _ := cfg.Cleanup.Resolve()
+	history, _ := cfg.History.Resolve(cfg.WorkDir)
 	fmt.Fprintf(stdout, "cleanup_interval: %s\n", cleanup.Interval)
 	fmt.Fprintf(stdout, "cleanup_orphan_grace: %s\n", cleanup.OrphanGrace)
 	fmt.Fprintf(stdout, "cleanup_min_free_bytes: %d\n", cleanup.MinFreeBytes)
 	fmt.Fprintf(stdout, "cleanup_resume_free_bytes: %d\n", cleanup.ResumeFreeBytes)
 	fmt.Fprintf(stdout, "cleanup_min_free_percent: %g\n", cleanup.MinFreePercent)
 	fmt.Fprintf(stdout, "cleanup_resume_free_percent: %g\n", cleanup.ResumeFreePercent)
+	fmt.Fprintf(stdout, "history_transcript_segment_bytes: %d\n", history.Transcript.SegmentBytes)
+	fmt.Fprintf(stdout, "history_transcript_flush_interval: %s\n", history.Transcript.FlushInterval)
+	fmt.Fprintf(stdout, "history_archive_max_stored_bytes: %d\n", history.Archive.MaxStoredBytes)
+	fmt.Fprintf(stdout, "history_outbox_path: %s\n", history.OutboxPath)
+	fmt.Fprintf(stdout, "history_outbox_replay_interval: %s\n", history.ReplayInterval)
+	fmt.Fprintf(stdout, "history_mandatory_final_capture: %t\n", history.MandatoryFinal)
+	fmt.Fprintf(stdout, "history_stop_transcript_wakeup: %t\n", history.StopWakeup)
+	fmt.Fprintf(stdout, "history_live_checkpoints: %t\n", history.LiveCheckpoints.Enabled)
 	return 0
 }
 
@@ -182,6 +191,11 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	cleanupPolicy, err := cfg.Cleanup.Resolve()
 	if err != nil {
 		fmt.Fprintf(stderr, "resolve worker cleanup policy: %v\n", err)
+		return 1
+	}
+	historyPolicy, err := cfg.History.Resolve(cfg.WorkDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve worker history policy: %v\n", err)
 		return 1
 	}
 	if strings.TrimSpace(cfg.WorkerID) == "" {
@@ -254,6 +268,13 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		"work_dir", cfg.WorkDir,
 		"capacity_persistent_agent", cfg.Capacity.PersistentAgent,
 		"capacity_ephemeral", cfg.Capacity.Ephemeral,
+		"history_transcript_segment_bytes", historyPolicy.Transcript.SegmentBytes,
+		"history_transcript_flush_interval", historyPolicy.Transcript.FlushInterval,
+		"history_archive_max_stored_bytes", historyPolicy.Archive.MaxStoredBytes,
+		"history_outbox_replay_interval", historyPolicy.ReplayInterval,
+		"history_mandatory_final_capture", historyPolicy.MandatoryFinal,
+		"history_stop_transcript_wakeup", historyPolicy.StopWakeup,
+		"history_live_checkpoints", historyPolicy.LiveCheckpoints.Enabled,
 	)
 
 	client, err := newWorkerClient(cfg)

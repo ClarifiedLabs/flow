@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ClarifiedLabs/flow/internal/blob"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
@@ -43,6 +44,7 @@ type ProjectBundle struct {
 	Idempotency       *coordinator.IdempotencyService
 	GitEventConsumer  *coordinator.GitEventConsumer
 	Queue             *worker.Service
+	HistoryCaptures   *coordinator.HistoryCaptureService
 }
 
 type RegistryOptions struct {
@@ -52,6 +54,10 @@ type RegistryOptions struct {
 	// Global is the coordinator-wide database (projects registry, workers,
 	// tokens, web sessions).
 	Global *flowdb.Store
+	// HistoryBlobStore is shared by every project history service. When nil the
+	// registry creates a private local store under <DataDir>/history/blobs. A
+	// supplied store remains caller-owned; the registry never closes it.
+	HistoryBlobStore blob.Store
 
 	AuthorEntrypoint           map[string]any
 	AuthorEntrypointConfigured bool
@@ -93,6 +99,8 @@ type Registry struct {
 	reviewScopeFileLimit       int
 	reviewScopeLineLimit       int
 	commitIdentity             flowgit.CommitIdentity
+	historyBlobs               blob.Store
+	historyBlobsOwned          bool
 
 	mu       sync.RWMutex
 	bundles  map[string]*ProjectBundle
@@ -127,6 +135,15 @@ func NewRegistry(opts RegistryOptions) (*Registry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("default agent: %w", err)
 	}
+	historyBlobs := opts.HistoryBlobStore
+	historyBlobsOwned := false
+	if historyBlobs == nil {
+		historyBlobs, err = blob.NewLocal(filepath.Join(opts.DataDir, "history", "blobs"), blob.LocalOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("open registry history blob store: %w", err)
+		}
+		historyBlobsOwned = true
+	}
 
 	registry := &Registry{
 		dataDir:                    opts.DataDir,
@@ -145,6 +162,8 @@ func NewRegistry(opts RegistryOptions) (*Registry, error) {
 		reviewScopeFileLimit:       opts.ReviewScopeFileLimit,
 		reviewScopeLineLimit:       opts.ReviewScopeLineLimit,
 		commitIdentity:             opts.CommitIdentity,
+		historyBlobs:               historyBlobs,
+		historyBlobsOwned:          historyBlobsOwned,
 		bundles:                    map[string]*ProjectBundle{},
 	}
 	if err := registry.globalAgentDefs.SeedDefaults(context.Background()); err != nil {
@@ -214,6 +233,8 @@ func (r *Registry) WebSessions() *coordinator.WebSessionService        { return 
 func (r *Registry) GlobalIdempotency() *coordinator.IdempotencyService { return r.idempotency }
 func (r *Registry) HarnessArgs() []string                              { return r.harnessArgs }
 func (r *Registry) DefaultAgent() flowharness.AgentSelection           { return r.defaultAgent }
+func (r *Registry) HistoryBlobStore() blob.Store                       { return r.historyBlobs }
+func (r *Registry) OwnsHistoryBlobStore() bool                         { return r.historyBlobsOwned }
 
 // OpenAll opens a bundle for every project in the global registry.
 func (r *Registry) OpenAll(ctx context.Context) error {
@@ -350,6 +371,7 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 		Idempotency:       coordinator.NewIdempotencyService(db),
 		GitEventConsumer:  coordinator.NewGitEventConsumer(db, project),
 		Queue:             queue,
+		HistoryCaptures:   coordinator.NewHistoryCaptureService(db, r.historyBlobs),
 	}
 	r.bundles[project.ID] = bundle
 	keepStore = true
@@ -520,6 +542,58 @@ func (r *Registry) DeleteGlobalAgentDef(ctx context.Context, id string) error {
 		r.beforeGlobalAgentDefDelete()
 	}
 	return r.globalAgentDefs.Delete(ctx, id)
+}
+
+// HistoryBlobMetadata returns the complete relational protection set used by
+// blob reconciliation. Pending publications protect both their temporary upload
+// and destination key; every committed artifact remains referenced, including
+// superseded checkpoints, until a future explicitly authorized retention
+// transaction removes that reference.
+func (r *Registry) HistoryBlobMetadata(ctx context.Context) (blob.ReconcileRequest, error) {
+	request := blob.ReconcileRequest{
+		LiveTemporaryIDs: map[string]struct{}{},
+		ReferencedKeys:   map[blob.Key]struct{}{},
+		PendingKeys:      map[blob.Key]struct{}{},
+	}
+	for _, bundle := range r.All() {
+		rows, err := bundle.Store.DB().QueryContext(ctx, `
+SELECT temporary_upload_id, blob_key, publication_state
+FROM history_artifacts`)
+		if err != nil {
+			return blob.ReconcileRequest{}, fmt.Errorf("read project %s history blob metadata: %w", bundle.Project.ID, err)
+		}
+		for rows.Next() {
+			var temporaryID, keyText, state string
+			if err := rows.Scan(&temporaryID, &keyText, &state); err != nil {
+				rows.Close()
+				return blob.ReconcileRequest{}, fmt.Errorf("scan project %s history blob metadata: %w", bundle.Project.ID, err)
+			}
+			key, err := blob.ParseKey(keyText)
+			if err != nil {
+				rows.Close()
+				return blob.ReconcileRequest{}, fmt.Errorf("project %s has invalid history blob key: %w", bundle.Project.ID, err)
+			}
+			switch coordinator.HistoryPublicationState(state) {
+			case coordinator.HistoryPublicationPending:
+				request.PendingKeys[key] = struct{}{}
+				if temporaryID != "" {
+					request.LiveTemporaryIDs[temporaryID] = struct{}{}
+				}
+			case coordinator.HistoryPublicationCommitted:
+				request.ReferencedKeys[key] = struct{}{}
+			default:
+				rows.Close()
+				return blob.ReconcileRequest{}, fmt.Errorf("project %s has invalid history publication state %q", bundle.Project.ID, state)
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return blob.ReconcileRequest{}, fmt.Errorf("close project %s history metadata rows: %w", bundle.Project.ID, err)
+		}
+		if err := rows.Err(); err != nil {
+			return blob.ReconcileRequest{}, fmt.Errorf("read project %s history blob metadata: %w", bundle.Project.ID, err)
+		}
+	}
+	return request, nil
 }
 
 func (r *Registry) Close() error {
