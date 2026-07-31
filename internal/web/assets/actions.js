@@ -164,6 +164,13 @@ export const ACTIONS = {
     return `${dataset.workflowHold} is held by you — the workflow will not advance`;
   },
 
+  async convergenceRequest(app, element, dataset) {
+    const taskID = dataset.convergenceRequest;
+    await apiPost(workflowPath(dataset, taskID, "/workflow/convergence/request"), {});
+    await app.refresh();
+    return `Convergence review started for ${taskID}`;
+  },
+
   async workflowTakeOver(app, element, dataset) {
     const taskID = dataset.workflowTakeOver;
     await apiPost(workflowPath(dataset, taskID, "/workflow/hold"), {});
@@ -656,6 +663,7 @@ const PENDING_LABELS = {
   workflowRetry: "Retrying",
   workflowSkip: "Skipping step",
   workflowHold: "Holding",
+  convergenceRequest: "Starting scope review",
   workflowTakeOver: "Taking over",
   workflowRelease: "Releasing",
   convergenceDecision: "Resolving convergence review",

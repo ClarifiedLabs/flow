@@ -37,6 +37,24 @@ function railQuietMeta(model) {
 function renderCurrentStep(model) {
   if (!model.stepCount) return "";
   if (model.held) {
+    if (model.convergenceEvidence) {
+      return `
+        <div class="current" data-phase="triage">
+          <span class="caption">Convergence review</span>
+          <strong>Scope decision required at ${escapeHTML(model.stepName)}</strong>
+          <span class="current-meta">system-enforced hold · use the review panel to continue</span>
+        </div>
+      `;
+    }
+    if (model.systemHeld) {
+      return `
+        <div class="current" data-phase="triage">
+          <span class="caption">Convergence review</span>
+          <strong>Review state is refreshing at ${escapeHTML(model.stepName)}</strong>
+          <span class="current-meta">system-enforced hold · reload to restore review controls</span>
+        </div>
+      `;
+    }
     const session = value(model.taskConsole || {}, "session", "Session");
     return `
       <div class="current" data-phase="triage">
@@ -67,15 +85,20 @@ function renderCurrentStep(model) {
 // different set, because the only useful thing to do with a held run is decide
 // how to give it back.
 function renderRunControls(model, projectAttr) {
-  if (!model.runID) return "";
+  if (!model.runID || model.convergenceEvidence || model.systemHeld) return "";
   const id = escapeAttr(model.id);
+  const reviewScope = model.canRequestConvergence
+    ? `<button class="button secondary" data-convergence-request="${id}"${projectAttr}>Review scope</button>`
+    : "";
   const controls = model.held
     ? `
       <button class="button" data-workflow-release="${id}" data-edge="resume"${projectAttr}>Resume</button>
+      ${reviewScope}
       <button class="button secondary" data-workflow-reset="${id}"${projectAttr}>Reset</button>
     `
     : `
       <button class="button secondary" data-workflow-hold="${id}"${projectAttr}>Pause</button>
+      ${reviewScope}
       <button class="button" data-workflow-take-over="${id}"${projectAttr}>Take over</button>
       <button class="button secondary" data-workflow-skip="${id}" data-workflow-skip-node="${escapeAttr(model.nodeRunID)}"${projectAttr}>Skip step</button>
       <button class="button secondary" data-workflow-reset="${id}"${projectAttr}>Reset</button>

@@ -553,6 +553,25 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 		if !requireMethod(w, r, http.MethodPost) || !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
 			return
 		}
+		if len(parts) > 1 {
+			if len(parts) != 2 || parts[1] != "request" {
+				writeError(w, http.StatusNotFound, "not_found", "resource not found")
+				return
+			}
+			if s.workflowExecutor == nil {
+				writeError(w, http.StatusServiceUnavailable, "workflows_unavailable", "workflow executor is not configured")
+				return
+			}
+			unlockGitWrites := s.drainGitWrites()
+			defer unlockGitWrites()
+			run, err := s.workflowExecutor.RequestConvergenceReview(r.Context(), taskID, workflowActor(principal))
+			if err != nil {
+				writeWorkflowError(w, err, "request_convergence_review_failed")
+				return
+			}
+			writeJSON(w, http.StatusOK, workflowRunResponse{Run: run})
+			return
+		}
 		s.handleConvergenceDisposition(w, r, principal, taskID)
 	case "release":
 		if !requireMethod(w, r, http.MethodPost) || !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {

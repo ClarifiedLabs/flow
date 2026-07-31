@@ -69,7 +69,14 @@ func installConvergenceProjection(t *testing.T, runs *WorkflowRunService, eviden
 	now := formatTime(time.Now().UTC())
 	if _, err := runs.db.ExecContext(ctx, `
 INSERT INTO changes (id, task_id, workflow_run_id, branch, base, head_sha, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, evidence.ChangeID, evidence.TaskID, evidence.WorkflowRunID,
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	task_id = excluded.task_id,
+	workflow_run_id = excluded.workflow_run_id,
+	branch = excluded.branch,
+	base = excluded.base,
+	head_sha = excluded.head_sha,
+	updated_at = excluded.updated_at`, evidence.ChangeID, evidence.TaskID, evidence.WorkflowRunID,
 		evidence.SourceBranch, evidence.TargetBaseBranch, evidence.SourceHeadSHA, now, now); err != nil {
 		t.Fatalf("insert convergence change projection: %v", err)
 	}
@@ -267,6 +274,63 @@ func TestConvergenceHoldIsRequestedOnlyOncePerRun(t *testing.T) {
 	}
 }
 
+func TestManualConvergenceReviewConvertsAHoldAndCanBeRequestedAgain(t *testing.T) {
+	ctx := context.Background()
+	flows, tasks, runs := newWorkflowModelServices(t)
+	task, run, nodeRun := newHoldFlow(t, flows, tasks, runs)
+	evidence := convergenceEvidenceFixture(task, run, nodeRun)
+	installConvergenceProjection(t, runs, evidence)
+
+	if _, err := runs.Hold(ctx, task.ID, ActorHuman); err != nil {
+		t.Fatalf("create generic hold: %v", err)
+	}
+	held, created, err := runs.RequestConvergenceReview(ctx, evidence, ActorHuman)
+	if err != nil {
+		t.Fatalf("convert to manual convergence review: %v", err)
+	}
+	if !created || !held.Held() || held.HeldBy != string(ActorSystem) {
+		t.Fatalf("manual convergence hold = %+v created=%t, want system-enforced typed hold", held, created)
+	}
+	if _, replayed, err := runs.RequestConvergenceReview(ctx, evidence, ActorHuman); err != nil || replayed {
+		t.Fatalf("duplicate active manual review created=%t err=%v, want no-op", replayed, err)
+	}
+
+	active, err := runs.ActiveConvergenceEvidenceForTask(ctx, task.ID)
+	if err != nil || active == nil {
+		t.Fatalf("load manual convergence evidence: evidence=%+v err=%v", active, err)
+	}
+	if _, err := runs.ResolveConvergenceReview(ctx, ResolveConvergenceReviewInput{
+		TaskID: task.ID, Disposition: ConvergenceAcceptScope, Actor: ActorHuman,
+		ExpectedEvidenceFingerprint: active.Fingerprint,
+	}); err != nil {
+		t.Fatalf("accept manual convergence review: %v", err)
+	}
+
+	held, created, err = runs.RequestConvergenceReview(ctx, evidence, ActorHuman)
+	if err != nil {
+		t.Fatalf("request a later manual convergence review: %v", err)
+	}
+	if !created || !held.Held() {
+		t.Fatalf("later manual convergence hold = %+v created=%t, want a new hold", held, created)
+	}
+	transitions, err := runs.ListTransitionsForTask(ctx, task.ID, 50)
+	if err != nil {
+		t.Fatalf("list manual convergence transitions: %v", err)
+	}
+	requested := 0
+	for _, transition := range transitions {
+		if transition.EventKind == "workflow_convergence_review_requested" {
+			requested++
+			if transition.Actor != string(ActorHuman) {
+				t.Fatalf("manual convergence transition actor = %q, want human", transition.Actor)
+			}
+		}
+	}
+	if requested != 2 {
+		t.Fatalf("manual convergence requests = %d, want 2", requested)
+	}
+}
+
 func TestConvergenceRepairKeepsEvidenceActiveAndCancelClosesTask(t *testing.T) {
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
@@ -449,7 +513,7 @@ func TestConvergenceFileEvidenceIsBoundedAndEscaped(t *testing.T) {
 		t.Fatalf("payload file evidence = %d bytes, limit %d", len(encoded), convergencePayloadByteLimit)
 	}
 
-	message := convergenceHoldMessage(len(files), 10_150, 0, 10, 500, files)
+	message := convergenceHoldMessage(len(files), 10_150, 0, 10, 500, files, true)
 	for _, want := range []string{`a\x60b\n\u202ec`, "(path truncated)", "131 more changed files omitted"} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("convergence message missing %q:\n%s", want, message)
@@ -464,8 +528,10 @@ func TestConvergenceHoldCountsAsBlockedOnTheBoard(t *testing.T) {
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	task, run, nodeRun := newHoldFlow(t, flows, tasks, runs)
+	evidence := convergenceEvidenceFixture(task, run, nodeRun)
+	installConvergenceProjection(t, runs, evidence)
 
-	if _, _, err := runs.HoldForConvergence(ctx, convergenceEvidenceFixture(task, run, nodeRun)); err != nil {
+	if _, _, err := runs.HoldForConvergence(ctx, evidence); err != nil {
 		t.Fatalf("hold for convergence: %v", err)
 	}
 

@@ -394,7 +394,10 @@ Review convergence is bounded by coordinator limits. By default, Flow pauses a
 task for an owner decision before automated review when its change exceeds 10
 files or 500 added/deleted lines, and again after 2 review-to-author cycles.
 The owner can split or re-scope the work, or release the hold to continue; an
-oversized change is held only once per workflow run.
+oversized change is held only once per workflow run. Once a workflow has a
+pinned change artifact, the owner can also start the same flow at any time with
+**Review scope** in the task's run controls, even when the automatic size limit
+has not been exceeded.
 
 ```yaml
 limits:

@@ -123,13 +123,27 @@ func TestHoldEndpointStopsTheRunAndShowsOnTheBoard(t *testing.T) {
 		workflowReleaseRequest{Edge: string(coordinator.ReleaseResume)}, http.StatusConflict, nil)
 }
 
-func TestConvergenceHoldShowsAsBlockedOnTheBoardAndSidebar(t *testing.T) {
+func TestManualConvergenceHoldShowsAsBlockedOnTheBoardAndSidebar(t *testing.T) {
 	fixture := newTestFixture(t)
-	flow := newBoardFixtureFlow(t, fixture, "board convergence hold")
+	makeExchangeHooksInert(t, fixture.Project.ExchangePath)
+	seedAPIMain(t, fixture.Project.ExchangePath)
 
+	const branch = "task/manual-convergence"
+	clonePath := filepath.Join(t.TempDir(), "manual-convergence")
+	runAPIGit(t, "", "clone", fixture.Project.ExchangePath, clonePath)
+	runAPIGit(t, clonePath, "config", "user.name", "Flow Test")
+	runAPIGit(t, clonePath, "config", "user.email", "flow-test@example.com")
+	runAPIGit(t, clonePath, "checkout", "-b", branch, "origin/main")
+	writeAPIFile(t, clonePath, "scope.txt", "small manual review\n")
+	runAPIGit(t, clonePath, "add", "scope.txt")
+	runAPIGit(t, clonePath, "commit", "-m", "small scoped change")
+	headSHA := apiGitOutput(t, clonePath, "rev-parse", "HEAD")
+	runAPIGit(t, clonePath, "push", "origin", "HEAD:refs/heads/"+branch)
+
+	flow := newBoardFixtureFlow(t, fixture, "board manual convergence hold")
 	var created taskResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
-		createTaskRequest{Title: "Oversized change", FlowID: flow.ID}, http.StatusCreated, &created)
+		createTaskRequest{Title: "Manually reviewed change", FlowID: flow.ID}, http.StatusCreated, &created)
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
 		nil, http.StatusOK, nil)
 
@@ -145,20 +159,42 @@ func TestConvergenceHoldShowsAsBlockedOnTheBoardAndSidebar(t *testing.T) {
 		}
 		nodeRunID = nodeRun.ID
 	}
+	const changeID = "ch-board-convergence"
+	const artifactID = "wa-board-convergence"
 	if _, err := fixture.DB.ExecContext(context.Background(), `
 INSERT INTO changes (id, task_id, workflow_run_id, branch, base, head_sha, created_at, updated_at)
-VALUES ('ch-board-convergence', ?, ?, ?, 'main', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-	'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, created.Task.ID, run.ID, "task/"+created.Task.ID); err != nil {
+VALUES (?, ?, ?, ?, 'main', ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		changeID, created.Task.ID, run.ID, branch, headSHA); err != nil {
 		t.Fatalf("insert convergence change projection: %v", err)
 	}
-	if _, _, err := fixture.Bundle.WorkflowRuns.HoldForConvergence(context.Background(), coordinator.ConvergenceEvidence{
-		WorkflowRunID: run.ID, NodeRunID: nodeRunID, ChangeID: "ch-board-convergence", TaskID: created.Task.ID,
-		SourceBranch: "task/" + created.Task.ID, SourceHeadSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		TargetBaseBranch: "main", TargetBaseTipSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		MergeBaseSHA: "cccccccccccccccccccccccccccccccccccccccc", DiffDigest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-		Files: 8, Additions: 420, Deletions: 160, MaxFiles: 5, MaxLines: 500,
-	}); err != nil {
-		t.Fatalf("hold for convergence: %v", err)
+	if _, err := fixture.DB.ExecContext(context.Background(), `
+INSERT INTO workflow_artifacts (
+	id, workflow_run_id, node_run_id, creator_key, kind, summary_markdown,
+	payload_json, payload_sha256, client_key, created_at
+) VALUES (?, ?, ?, 'test-owner', 'change', 'Small change', ?, 'digest', 'manual-convergence',
+	'2026-01-01T00:00:00Z')`, artifactID, run.ID, nodeRunID,
+		fmt.Sprintf(`{"change_id":%q,"head_sha":%q}`, changeID, headSHA)); err != nil {
+		t.Fatalf("insert convergence artifact: %v", err)
+	}
+	if _, err := fixture.DB.ExecContext(context.Background(), `
+UPDATE workflow_runs SET current_artifact_id = ? WHERE id = ?;
+UPDATE workflow_node_runs SET input_artifact_id = ? WHERE id = ?`,
+		artifactID, run.ID, artifactID, nodeRunID); err != nil {
+		t.Fatalf("project convergence artifact: %v", err)
+	}
+
+	requestPath := "/v2/tasks/" + created.Task.ID + "/workflow/convergence/request"
+	var held workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, requestPath,
+		map[string]any{}, http.StatusOK, &held)
+	if !held.Run.Held() || held.Run.HeldBy != string(coordinator.ActorSystem) {
+		t.Fatalf("manual convergence hold = %+v, want system-enforced typed hold", held.Run)
+	}
+	var replay workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, requestPath,
+		map[string]any{}, http.StatusOK, &replay)
+	if replay.Run.ID != held.Run.ID || !replay.Run.Held() {
+		t.Fatalf("replayed manual convergence hold = %+v, want held run %s", replay.Run, held.Run.ID)
 	}
 
 	board := fetchProjectBoard(t, fixture)
@@ -193,6 +229,9 @@ VALUES ('ch-board-convergence', ?, ?, ?, 'main', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 		nil, http.StatusOK, &workflowDetail)
 	if workflowDetail.Detail.ConvergenceEvidence == nil || workflowDetail.Detail.ConvergenceEvidence.Fingerprint == "" {
 		t.Fatalf("workflow convergence evidence = %+v, want fingerprint", workflowDetail.Detail.ConvergenceEvidence)
+	}
+	if evidence := workflowDetail.Detail.ConvergenceEvidence; evidence.Files > coordinator.DefaultReviewScopeFileLimit || evidence.Additions+evidence.Deletions > coordinator.DefaultReviewScopeLineLimit {
+		t.Fatalf("manual convergence evidence = %+v, want a below-threshold change", evidence)
 	}
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/release",
 		workflowReleaseRequest{Edge: string(coordinator.ReleaseResume)}, http.StatusConflict, nil)

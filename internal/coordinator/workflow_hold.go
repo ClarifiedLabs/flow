@@ -66,6 +66,30 @@ func (s *WorkflowRunService) HoldForConvergence(
 	ctx context.Context,
 	evidence ConvergenceEvidence,
 ) (WorkflowRun, bool, error) {
+	return s.requestConvergenceReview(ctx, evidence, ActorSystem, true)
+}
+
+// RequestConvergenceReview creates the same typed hold at an owner's request,
+// without requiring the automatic size threshold to have been exceeded. Unlike
+// the automatic guard, a later manual request is allowed after an earlier
+// convergence review was resolved.
+func (s *WorkflowRunService) RequestConvergenceReview(
+	ctx context.Context,
+	evidence ConvergenceEvidence,
+	actor Actor,
+) (WorkflowRun, bool, error) {
+	if actor == "" {
+		actor = ActorHuman
+	}
+	return s.requestConvergenceReview(ctx, evidence, actor, false)
+}
+
+func (s *WorkflowRunService) requestConvergenceReview(
+	ctx context.Context,
+	evidence ConvergenceEvidence,
+	actor Actor,
+	automatic bool,
+) (WorkflowRun, bool, error) {
 	tx, err := sqlitex.BeginImmediate(ctx, s.db)
 	if err != nil {
 		return WorkflowRun{}, false, err
@@ -88,7 +112,7 @@ WHERE workflow_run_id = ? AND event_kind = 'workflow_convergence_review_requeste
 	).Scan(&prior); err != nil {
 		return WorkflowRun{}, false, err
 	}
-	if prior > 0 || run.Held() {
+	if automatic && (prior > 0 || run.Held()) {
 		return run, false, nil
 	}
 
@@ -100,9 +124,27 @@ WHERE workflow_run_id = ? AND event_kind = 'workflow_convergence_review_requeste
 	if run.CurrentNodeRunID != evidence.NodeRunID {
 		return WorkflowRun{}, false, fmt.Errorf("%w: convergence evidence node run is not active", ErrWorkflowConflict)
 	}
+	if err := validateConvergenceProjectionTx(ctx, tx, run, evidence); err != nil {
+		return WorkflowRun{}, false, err
+	}
+	if !automatic {
+		active, err := activeConvergenceEvidenceTx(ctx, tx, run.ID)
+		if err != nil {
+			return WorkflowRun{}, false, err
+		}
+		if active != nil {
+			if active.Fingerprint == evidence.Fingerprint {
+				return run, false, nil
+			}
+			return WorkflowRun{}, false, fmt.Errorf("%w: workflow already has a different active convergence review", ErrWorkflowConflict)
+		}
+	}
+	// A typed convergence hold remains system-enforced even when a human
+	// requested it. The transition and status actor retain who initiated it.
 	if _, err := tx.ExecContext(ctx, `
-UPDATE workflow_runs SET held_at = ?, held_by = ?, version = version + 1
-WHERE id = ? AND held_at IS NULL`,
+UPDATE workflow_runs
+SET held_at = COALESCE(held_at, ?), held_by = ?, version = version + 1
+WHERE id = ?`,
 		sqlitex.FormatTime(now), string(ActorSystem), run.ID,
 	); err != nil {
 		return WorkflowRun{}, false, err
@@ -114,19 +156,19 @@ WHERE id = ? AND held_at IS NULL`,
 	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
 		TaskID: run.TaskID, WorkflowRunID: run.ID, FromNodeKey: run.CurrentNodeKey,
 		ToNodeKey: run.CurrentNodeKey, EventKind: "workflow_convergence_review_requested",
-		PayloadJSON: string(payload), Actor: string(ActorSystem), CreatedAt: now,
+		PayloadJSON: string(payload), Actor: string(actor), CreatedAt: now,
 	}); err != nil {
 		return WorkflowRun{}, false, err
 	}
 	message := convergenceHoldMessage(
 		evidence.Files, evidence.Additions, evidence.Deletions,
-		evidence.MaxFiles, evidence.MaxLines, evidence.ChangedFiles,
+		evidence.MaxFiles, evidence.MaxLines, evidence.ChangedFiles, automatic,
 	)
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO status_log (task_id, actor, message, kind, created_at)
 VALUES (?, ?, ?, ?, ?)`,
 		run.TaskID,
-		string(ActorSystem),
+		string(actor),
 		message,
 		StatusKindPlan,
 		sqlitex.FormatTime(now),
@@ -140,18 +182,31 @@ VALUES (?, ?, ?, ?, ?)`,
 	return held, true, err
 }
 
-func convergenceHoldMessage(files int, additions int, deletions int, maxFiles int, maxLines int, changedFiles []ConvergenceFile) string {
+func convergenceHoldMessage(files int, additions int, deletions int, maxFiles int, maxLines int, changedFiles []ConvergenceFile, automatic bool) string {
 	var message strings.Builder
-	fmt.Fprintf(
-		&message,
-		"Convergence review required before automated review: this change touches %d files and %d lines (+%d/-%d; automatic threshold: %d files or %d lines).",
-		files,
-		additions+deletions,
-		additions,
-		deletions,
-		maxFiles,
-		maxLines,
-	)
+	if automatic {
+		fmt.Fprintf(
+			&message,
+			"Convergence review required before automated review: this change touches %d files and %d lines (+%d/-%d; automatic threshold: %d files or %d lines).",
+			files,
+			additions+deletions,
+			additions,
+			deletions,
+			maxFiles,
+			maxLines,
+		)
+	} else {
+		fmt.Fprintf(
+			&message,
+			"Convergence review requested manually: this change touches %d files and %d lines (+%d/-%d; automatic threshold: %d files or %d lines).",
+			files,
+			additions+deletions,
+			additions,
+			deletions,
+			maxFiles,
+			maxLines,
+		)
+	}
 
 	if len(changedFiles) > 0 {
 		reported := min(len(changedFiles), convergenceMessageFileLimit)

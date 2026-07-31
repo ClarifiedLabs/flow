@@ -41,6 +41,16 @@ type workflowChangeMerger interface {
 
 type workflowNodeHandler func(context.Context, WorkflowRun, WorkflowNodeRun, FlowNodeSnapshot) (bool, error)
 
+type convergenceRefLockContextKey struct{}
+
+type convergenceRefLockState struct {
+	exchangePath  string
+	sourceRef     string
+	sourceHeadSHA string
+	targetRef     string
+	targetTipSHA  string
+}
+
 type workflowExecutionError struct {
 	failure WorkflowExecutionFailure
 	err     error
@@ -558,7 +568,73 @@ func (e *WorkflowExecutor) holdOversizedChangeForConvergence(ctx context.Context
 	if !reviewScopeExceeded(evidence.Files, evidence.Additions+evidence.Deletions, e.reviewScopeFileLimit, e.reviewScopeLineLimit) {
 		return false, nil
 	}
-	_, held, err := e.runs.HoldForConvergence(ctx, evidence)
+	var held bool
+	err = e.WithConvergenceEvidenceRefsLocked(ctx, evidence, func(lockedCtx context.Context) error {
+		_, held, err = e.runs.HoldForConvergence(lockedCtx, evidence)
+		return err
+	})
+	return held, err
+}
+
+// RequestConvergenceReview captures the active change's immutable Git evidence
+// and starts the typed convergence flow without applying the automatic size
+// threshold. A current, pinned change artifact is required so later owner
+// dispositions can revalidate exactly what was reviewed.
+func (e *WorkflowExecutor) RequestConvergenceReview(ctx context.Context, taskID string, actor Actor) (WorkflowRun, error) {
+	run, active, err := e.runs.ActiveForTask(ctx, taskID)
+	if err != nil {
+		return WorkflowRun{}, err
+	}
+	if !active {
+		return WorkflowRun{}, ErrNoActiveWorkflowRun
+	}
+	if run.CurrentNodeRunID == "" {
+		return WorkflowRun{}, fmt.Errorf("%w: workflow has no active node to hold", ErrWorkflowConflict)
+	}
+	if run.CurrentArtifactID == "" {
+		return WorkflowRun{}, fmt.Errorf("%w: workflow has no current change artifact", ErrWorkflowConflict)
+	}
+	nodeRun, found, err := e.runs.GetNodeRun(ctx, run.CurrentNodeRunID)
+	if err != nil {
+		return WorkflowRun{}, err
+	}
+	if !found || nodeRun.WorkflowRunID != run.ID {
+		return WorkflowRun{}, fmt.Errorf("%w: workflow current node changed", ErrWorkflowConflict)
+	}
+	artifact, err := e.artifacts.Get(ctx, run.CurrentArtifactID)
+	if err != nil {
+		return WorkflowRun{}, fmt.Errorf("load current artifact for convergence review: %w", err)
+	}
+	if artifact.WorkflowRunID != run.ID {
+		return WorkflowRun{}, fmt.Errorf("%w: current artifact belongs to another workflow", ErrWorkflowConflict)
+	}
+	changeID, pinnedHeadSHA, err := changeIdentityFromArtifact(artifact)
+	if err != nil {
+		return WorkflowRun{}, err
+	}
+	if pinnedHeadSHA == "" {
+		return WorkflowRun{}, errors.New("change artifact has no pinned head_sha")
+	}
+	change, err := e.sessions.GetChange(ctx, changeID)
+	if err != nil {
+		return WorkflowRun{}, err
+	}
+	if change.TaskID != run.TaskID {
+		return WorkflowRun{}, fmt.Errorf("%w: current change belongs to another task", ErrWorkflowConflict)
+	}
+	if pinnedHeadSHA != strings.TrimSpace(change.HeadSHA) {
+		return WorkflowRun{}, fmt.Errorf("%w: change head moved from pinned %s to %s", ErrWorkflowConflict, pinnedHeadSHA, change.HeadSHA)
+	}
+	evidence, err := e.convergenceEvidenceForChange(ctx, run, nodeRun, change)
+	if err != nil {
+		return WorkflowRun{}, err
+	}
+	var held WorkflowRun
+	err = e.WithConvergenceEvidenceRefsLocked(ctx, evidence, func(lockedCtx context.Context) error {
+		var requestErr error
+		held, _, requestErr = e.runs.RequestConvergenceReview(lockedCtx, evidence, actor)
+		return requestErr
+	})
 	return held, err
 }
 
@@ -570,10 +646,22 @@ func (e *WorkflowExecutor) WithConvergenceEvidenceRefsLocked(ctx context.Context
 	if strings.TrimSpace(e.project.ExchangePath) == "" {
 		return errors.New("project exchange path is not configured")
 	}
+	lockState := convergenceRefLockState{
+		exchangePath:  e.project.ExchangePath,
+		sourceRef:     "refs/heads/" + evidence.SourceBranch,
+		sourceHeadSHA: evidence.SourceHeadSHA,
+		targetRef:     "refs/heads/" + evidence.TargetBaseBranch,
+		targetTipSHA:  evidence.TargetBaseTipSHA,
+	}
+	if active, ok := ctx.Value(convergenceRefLockContextKey{}).(convergenceRefLockState); ok && active == lockState {
+		return fn(ctx)
+	}
 	return flowgit.WithLockedRefs(ctx, e.project.ExchangePath, map[string]string{
-		"refs/heads/" + evidence.SourceBranch:     evidence.SourceHeadSHA,
-		"refs/heads/" + evidence.TargetBaseBranch: evidence.TargetBaseTipSHA,
-	}, fn)
+		lockState.sourceRef: lockState.sourceHeadSHA,
+		lockState.targetRef: lockState.targetTipSHA,
+	}, func(lockedCtx context.Context) error {
+		return fn(context.WithValue(lockedCtx, convergenceRefLockContextKey{}, lockState))
+	})
 }
 
 // RefreshConvergenceEvidence revalidates the exact Git observation before a

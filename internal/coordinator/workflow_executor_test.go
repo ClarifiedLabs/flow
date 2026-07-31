@@ -208,6 +208,12 @@ VALUES (?, ?, ?, ?, 'main', ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 			t.Fatalf("retained convergence ref %s = %q err=%v, want %q", ref, retained, err, sha)
 		}
 	}
+	if err := executor.WithConvergenceEvidenceRefsLocked(ctx, firstEvidence, func(lockedCtx context.Context) error {
+		return executor.WithConvergenceEvidenceRefsLocked(lockedCtx, firstEvidence, func(context.Context) error { return nil })
+	}); err != nil {
+		t.Fatalf("reenter the same convergence ref lock: %v", err)
+	}
+	installConvergenceProjection(t, runs, firstEvidence)
 	if _, _, err := runs.HoldForConvergence(ctx, firstEvidence); err != nil {
 		t.Fatalf("hold initial convergence evidence: %v", err)
 	}

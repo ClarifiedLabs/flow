@@ -15,6 +15,7 @@ const { cardModel, dwellTone, formatDwell, matchesFilter, sortForAttention, wait
 const { nowCardModel, runRows, tabBadges, isOutdatedAnchor, reviewModel, taskModel } = await import("./task-model.js");
 const { reconcile } = await import("./elements/base.js");
 const { renderTaskCard } = await import("./elements/task-card.js");
+const { renderTaskRail } = await import("./elements/task-rail.js");
 const { renderAttentionStrip } = await import("./elements/attention-strip.js");
 const { renderBoardTable } = await import("./elements/board-table.js");
 const { renderStepRail } = await import("./elements/step-rail.js");
@@ -458,6 +459,19 @@ test("a resting card keeps its secondary controls out of the way", () => {
   assert.match(html, /class="actions on-hover"/);
 });
 
+test("task run controls offer a manual scope review for a pinned change", () => {
+  const html = renderTaskRail({
+    id: "t-0001",
+    runID: "wr-0001",
+    canRequestConvergence: true,
+  });
+  assert.match(html, /data-convergence-request="t-0001"/);
+  assert.match(html, />Review scope</);
+
+  const withoutChange = renderTaskRail({ id: "t-0001", runID: "wr-0001" });
+  assert.ok(!withoutChange.includes("data-convergence-request"));
+});
+
 test("the step rail draws one segment per node, not a fixed six", () => {
   const html = renderStepRail({ stepIndex: 2, stepCount: 4, stepName: "checks", phase: "authoring" });
   assert.equal((html.match(/<i data-seg=/g) || []).length, 4);
@@ -768,7 +782,75 @@ test("held_by system alone does not masquerade as typed convergence evidence", (
   assert.doesNotMatch(html, /data-convergence-decision/);
 });
 
-test("task model projects typed convergence evidence from task detail", () => {
+test("task rail sends typed convergence holds to their dedicated review panel", () => {
+  const html = renderTaskRail({
+    id: "t-0043",
+    runID: "wr-0043",
+    held: true,
+    stepCount: 3,
+    stepName: "review",
+    convergenceEvidence: { schema_version: 1, fingerprint: "sha256:evidence" },
+  });
+  assert.match(html, /Scope decision required at review/);
+  assert.match(html, /use the review panel to continue/);
+  assert.doesNotMatch(html, /data-workflow-release/);
+  assert.doesNotMatch(html, /data-workflow-reset/);
+});
+
+test("task rail suppresses invalid controls while typed evidence is temporarily unavailable", () => {
+  const html = renderTaskRail({
+    id: "t-0043",
+    runID: "wr-0043",
+    held: true,
+    heldBy: "system",
+    systemHeld: true,
+    canRequestConvergence: true,
+    stepCount: 3,
+    stepName: "review",
+  });
+  assert.match(html, /Review state is refreshing at review/);
+  assert.doesNotMatch(html, /data-convergence-request/);
+  assert.doesNotMatch(html, /data-workflow-release/);
+  assert.doesNotMatch(html, /data-workflow-reset/);
+});
+
+test("task model projects exact manual convergence eligibility and typed evidence", () => {
+  const eligible = taskModel({
+    task: { id: "t-0042", title: "Scoped change" },
+    task_detail: { changes: [{ id: "ch-1", head_sha: "abc123" }] },
+  }, {
+    detail: { run: { id: "wr-0042", current_artifact_id: "wa-1", snapshot: { nodes: [] } } },
+    artifacts: [{ id: "wa-1", kind: "change", payload: { change_id: "ch-1", head_sha: "abc123" } }],
+  });
+  assert.equal(eligible.canRequestConvergence, true);
+
+  const stale = taskModel({
+    task: { id: "t-0042", title: "Scoped change" },
+    task_detail: { changes: [{ id: "ch-1", head_sha: "new-head" }] },
+  }, {
+    detail: { run: { id: "wr-0042", current_artifact_id: "wa-1", snapshot: { nodes: [] } } },
+    artifacts: [{ id: "wa-1", kind: "change", payload: { change_id: "ch-1", head_sha: "abc123" } }],
+  });
+  assert.equal(stale.canRequestConvergence, false);
+
+  const systemHeld = taskModel({
+    task: { id: "t-0042", title: "Scoped change" },
+    task_detail: { changes: [{ id: "ch-1", head_sha: "abc123" }] },
+  }, {
+    detail: {
+      run: {
+        id: "wr-0042",
+        current_artifact_id: "wa-1",
+        held_at: "2026-07-31T17:00:00Z",
+        held_by: "system",
+        snapshot: { nodes: [] },
+      },
+    },
+    artifacts: [{ id: "wa-1", kind: "change", payload: { change_id: "ch-1", head_sha: "abc123" } }],
+  });
+  assert.equal(systemHeld.systemHeld, true);
+  assert.equal(systemHeld.canRequestConvergence, false);
+
   const evidence = { schema_version: 1, fingerprint: "sha256:evidence" };
   const model = taskModel({
     task: { id: "t-0043", title: "Oversized" },

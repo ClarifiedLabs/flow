@@ -218,6 +218,7 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
   const wait = value(workflow, "open_wait", "OpenWait");
   const held = Boolean(value(run, "held_at", "HeldAt"));
   const heldBy = String(value(run, "held_by", "HeldBy") || "");
+  const systemHeld = held && heldBy === "system";
   const convergenceEvidence =
     value(workflow, "convergence_evidence", "ConvergenceEvidence") ||
     value(detail, "convergence_evidence", "ConvergenceEvidence") ||
@@ -228,6 +229,28 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
   const checks = value(detail, "checks", "Checks") || [];
   const threads = value(data, "threads", "Threads") || [];
   const artifacts = value(workflowData || {}, "artifacts", "Artifacts") || [];
+  const changes = value(detail, "changes", "Changes") || [];
+  const currentArtifactID = String(value(run, "current_artifact_id", "CurrentArtifactID") || "");
+  const currentArtifact = artifacts.find((candidate) => String(value(candidate, "id", "ID")) === currentArtifactID) || null;
+  let currentArtifactPayload = value(currentArtifact || {}, "payload", "Payload");
+  if (typeof currentArtifactPayload === "string") {
+    try {
+      currentArtifactPayload = JSON.parse(currentArtifactPayload);
+    } catch {
+      currentArtifactPayload = null;
+    }
+  }
+  const currentChangeID = String(value(currentArtifactPayload || {}, "change_id", "ChangeID") || "");
+  const currentChange = changes.find((candidate) => String(value(candidate, "id", "ID")) === currentChangeID) || null;
+  const canRequestConvergence = Boolean(
+    !convergenceEvidence &&
+      !systemHeld &&
+      currentArtifactID &&
+      String(value(currentArtifact || {}, "kind", "Kind")) === "change" &&
+      currentChange &&
+      String(value(currentArtifactPayload || {}, "head_sha", "HeadSHA")) &&
+      String(value(currentArtifactPayload || {}, "head_sha", "HeadSHA")) === String(value(currentChange, "head_sha", "HeadSHA") || ""),
+  );
   const statusLog = value(data, "status_log", "StatusLog") || [];
   const review = reviewModel({
     wait,
@@ -240,7 +263,7 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
 
   const stepName = value(currentNode, "name", "Name") || currentNodeKey.replaceAll("_", " ");
   const activity = held
-    ? convergenceEvidence
+    ? convergenceEvidence || systemHeld
       ? "Held for convergence review"
       : "Held by you"
     : workflowActivityLabel(stepName, value(currentNode, "kind", "Kind")) || "Working";
@@ -266,7 +289,9 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
 
     held,
     heldBy,
+    systemHeld,
     convergenceEvidence,
+    canRequestConvergence,
     wait,
     waitKind: waitKindOf(wait),
     activity,
@@ -282,7 +307,7 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
     checksSatisfied: checks.filter((check) => value(check, "verdict", "Verdict") === "satisfied").length,
     threads,
     openThreads: threads.filter((thread) => value(thread, "state", "State") === "open").length,
-    change: value(detail, "ready_change", "ReadyChange") || (value(detail, "changes", "Changes") || [])[0],
+    change: value(detail, "ready_change", "ReadyChange") || changes[0],
     activeSession: value(detail, "active_session", "ActiveSession"),
     terminalAvailable: Boolean(value(detail, "terminal_available", "TerminalAvailable")),
     terminalJobID: value(detail, "terminal_job_id", "TerminalJobID"),

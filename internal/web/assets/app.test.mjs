@@ -1026,6 +1026,29 @@ function statusApp() {
   };
 }
 
+test("manual scope review requests a typed convergence hold", async () => {
+  await scriptContext();
+  const app = statusApp();
+  const calls = [];
+  globalThis.fetch = (path, options) => {
+    calls.push({ path, options });
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  };
+  const button = new ActionButton({
+    convergenceRequest: "t-0043",
+    project: "p-alpha",
+  });
+
+  assert.equal(await handleAction(app, { target: button, preventDefault() {} }), true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/ui/api/v2/projects/p-alpha/tasks/t-0043/workflow/convergence/request");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {});
+  assert.deepEqual(app.statuses, [
+    "Starting scope review t-0043\u2026",
+    "Convergence review started for t-0043",
+  ]);
+});
+
 test("a convergence decision posts an explicit disposition instead of a workflow edge", async () => {
   await scriptContext();
   const app = statusApp();
