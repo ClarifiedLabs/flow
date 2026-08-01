@@ -2,7 +2,7 @@
 // done-view and board-done config) plus pure path -> route / poll-config
 // parsing.
 
-import { BOARD_DONE_COUNTS, BOARD_DONE_STORAGE_KEY, BOARD_DONE_WINDOWS, BOARD_VIEWS, BOARD_VIEW_STORAGE_KEY, DIAGRAM_MODES, DIAGRAM_MODE_STORAGE_KEY, BOARD_POLL_MS, CHANGE_POLL_MS, DIAGNOSTICS_POLL_MS, DIFF_MODES, DIFF_MODE_STORAGE_KEY, DONE_DENSITIES, DONE_DENSITY_STORAGE_KEY, DONE_OUTCOMES, DONE_OUTCOME_STORAGE_KEY, MAX_POLL_BACKOFF_MS, PROJECT_STORAGE_KEY, TASKS_PROJECT_STORAGE_KEY, TASKS_QUERY_STORAGE_KEY, TASKS_STATE_STORAGE_KEY, TASKS_STATES, THEME_PREFERENCES, THEME_STORAGE_KEY } from "./config.js";
+import { BOARD_DONE_COUNTS, BOARD_DONE_STORAGE_KEY, BOARD_DONE_WINDOWS, BOARD_VIEWS, BOARD_VIEW_STORAGE_KEY, DIAGRAM_MODES, DIAGRAM_MODE_STORAGE_KEY, BOARD_POLL_MS, CHANGE_POLL_MS, DIAGNOSTICS_POLL_MS, DIFF_MODES, DIFF_MODE_STORAGE_KEY, DONE_DENSITIES, DONE_DENSITY_STORAGE_KEY, DONE_OUTCOMES, DONE_OUTCOME_STORAGE_KEY, MAX_POLL_BACKOFF_MS, PROJECT_STORAGE_KEY, TASKS_ALL_STATE, TASKS_PROJECT_STORAGE_KEY, TASKS_QUERY_STORAGE_KEY, TASKS_STATE_STORAGE_KEY, TASKS_STATES, THEME_PREFERENCES, THEME_STORAGE_KEY } from "./config.js";
 
 export function readSelectedProjects() {
   try {
@@ -141,19 +141,28 @@ export function writeDoneOutcome(outcome) {
 }
 
 // The Tasks view's chips, in-view project filter and search text are working
-// preferences too, so they persist the same way the Done outcome does.
+// preferences too, so they persist the same way the Done outcome does. The
+// state chips combine, so the selection is a set of lifecycle states stored as
+// a JSON array; the legacy single values ("all" or one state key) still load.
 export function readTasksState() {
+  const all = new Set(TASKS_STATES);
   try {
     const raw = window.localStorage?.getItem(TASKS_STATE_STORAGE_KEY);
-    return TASKS_STATES.has(raw) ? raw : "all";
+    if (!raw) return all;
+    if (raw === TASKS_ALL_STATE) return all;
+    if (TASKS_STATES.has(raw)) return new Set([raw]);
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return new Set(parsed.filter((key) => TASKS_STATES.has(key)));
+    return all;
   } catch {
-    return "all";
+    return all;
   }
 }
 
 export function writeTasksState(state) {
   try {
-    if (TASKS_STATES.has(state)) window.localStorage?.setItem(TASKS_STATE_STORAGE_KEY, state);
+    const keys = [...(state || [])].filter((key) => TASKS_STATES.has(key));
+    window.localStorage?.setItem(TASKS_STATE_STORAGE_KEY, JSON.stringify(keys));
   } catch {
     // Persistence is best-effort.
   }

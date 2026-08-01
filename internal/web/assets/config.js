@@ -90,7 +90,11 @@ export const TASK_TABS = [
 
 export const DONE_OUTCOMES = new Set(["all", "completed", "merged", "rejected", "abandoned", "cancelled", "failed"]);
 
-export const TASKS_STATES = new Set(["all", "unscheduled", "scheduled", "in_progress", "done"]);
+// TASKS_STATES are the selectable lifecycle filters in the Tasks view; they
+// combine, and TASKS_ALL_STATE is the convenience chip that selects or clears
+// every one of them at once (it is not itself a stored selection).
+export const TASKS_ALL_STATE = "all";
+export const TASKS_STATES = new Set(["unscheduled", "scheduled", "in_progress", "done"]);
 
 export const THEME_PREFERENCES = new Set(["system", "light", "dark"]);
 

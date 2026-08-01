@@ -1,11 +1,13 @@
 // Tasks view: a flat, filterable list of tasks across every visible project.
-// Lifecycle-state chips, an in-view project filter (composing with the topbar
-// project picker) and a title/body search all narrow the aggregate /v2/tasks
-// read; checkboxes select rows for bulk actions (priority, flow, schedule,
-// reset, retry) that fan out client-side over the existing per-task endpoints
-// — the /ui/api proxy wraps each call in the same idempotency handling as the
-// one-off buttons. The view does not poll, so the selection and the search box
-// are never clobbered mid-edit; refresh is the topbar's manual button.
+// Lifecycle-state chips combine (Unscheduled, Scheduled, In Progress and Done
+// can be selected together; "All" selects or clears all four at once), and an
+// in-view project filter (composing with the topbar project picker) and a
+// title/body search all narrow the aggregate /v2/tasks read; checkboxes select
+// rows for bulk actions (priority, flow, schedule, reset, retry) that fan out
+// client-side over the existing per-task endpoints — the /ui/api proxy wraps
+// each call in the same idempotency handling as the one-off buttons. The view
+// does not poll, so the selection and the search box are never clobbered
+// mid-edit; refresh is the topbar's manual button.
 
 import { apiGet, apiPatch, apiPost, taskAPIBase, taskHref } from "./api.js";
 import { phaseKey, renderPhaseBadge } from "./board.js";
@@ -13,7 +15,9 @@ import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
 import { readTasksProject, readTasksQuery, readTasksState, writeTasksProject, writeTasksQuery, writeTasksState } from "./storage.js";
 
-// TASKS_STATE_FILTERS are the lifecycle chips; "all" is the whole list.
+// TASKS_STATE_FILTERS are the lifecycle chips. The four state chips combine
+// (the server ORs repeatable state params); "all" is a shortcut that selects
+// every state at once, and selecting no states matches no tasks.
 export const TASKS_STATE_FILTERS = [
   ["all", "All"],
   ["unscheduled", "Unscheduled"],
@@ -22,13 +26,22 @@ export const TASKS_STATE_FILTERS = [
   ["done", "Done"],
 ];
 
+// TASKS_SELECTABLE_STATES are the four filterable lifecycle states: everything
+// in TASKS_STATE_FILTERS except the "all" shortcut.
+const TASKS_SELECTABLE_STATES = TASKS_STATE_FILTERS.slice(1).map(([key]) => key);
+
 export async function renderTasksView(app, context) {
   if (!app.tasksState) app.tasksState = readTasksState();
   if (app.tasksProject === undefined) app.tasksProject = readTasksProject();
   if (app.tasksQuery === undefined) app.tasksQuery = readTasksQuery();
   if (!app.tasksSelected) app.tasksSelected = new Set();
-  const data = await apiGet("/v2/tasks" + tasksQueryView(app, app.tasksState, { q: app.tasksQuery }));
-  if (context && !app.isActiveLoad(context)) return false;
+  // An empty state selection matches no tasks, so there is nothing to fetch;
+  // every other combination maps to repeatable state params on /v2/tasks.
+  let data = null;
+  if (app.tasksState.size > 0) {
+    data = await apiGet("/v2/tasks" + tasksQueryView(app, app.tasksState, { q: app.tasksQuery }));
+    if (context && !app.isActiveLoad(context)) return false;
+  }
   app.setTitle("Tasks");
   app.tasksProjectBadge = (app.projects || []).length > 1;
   app.tasksList = value(data, "tasks", "Tasks") || [];
@@ -55,16 +68,21 @@ export async function renderTasksView(app, context) {
 }
 
 // tasksQueryView builds the aggregate /v2/tasks query: repeatable project from
-// the topbar selection, the lifecycle state chip, and any extras (q). When the
-// in-view project filter is set it narrows the fetch to exactly that project
-// instead — repeatable project params are a union server-side, so sending both
-// it and the topbar selection would list the task set twice.
+// the topbar selection, one state param per selected lifecycle chip (the
+// server ORs them), and any extras (q). The view short-circuits an empty state
+// selection before this is called, because the server reads an absent state
+// filter as "no filtering" rather than "match nothing". When the in-view
+// project filter is set it narrows the fetch to exactly that project instead —
+// repeatable project params are a union server-side, so sending both it and
+// the topbar selection would list the task set twice.
 export function tasksQueryView(app, state, extra = {}) {
   const params = new URLSearchParams();
   const own = String(app.tasksProject || "").trim();
   const projects = own ? [own] : app.selectedProjectIDs();
   for (const id of projects) params.append("project", id);
-  if (state && state !== "all") params.set("state", state);
+  for (const key of TASKS_SELECTABLE_STATES) {
+    if (state && state.has(key)) params.append("state", key);
+  }
   for (const [key, val] of Object.entries(extra)) {
     if (val !== undefined && val !== null && String(val).trim() !== "") params.set(key, val);
   }
@@ -73,9 +91,11 @@ export function tasksQueryView(app, state, extra = {}) {
 }
 
 export function renderTasksControlsView(app) {
-  const chips = TASKS_STATE_FILTERS.map(([key, label]) =>
-    `<button class="chip${app.tasksState === key ? " active" : ""}" data-tasks-state="${escapeAttr(key)}"${app.tasksState === key ? ' aria-pressed="true"' : ""}>${escapeHTML(label)}</button>`
-  ).join("");
+  const states = app.tasksState || new Set();
+  const chips = TASKS_STATE_FILTERS.map(([key, label]) => {
+    const active = key === "all" ? states.size === TASKS_SELECTABLE_STATES.length : states.has(key);
+    return `<button class="chip${active ? " active" : ""}" data-tasks-state="${escapeAttr(key)}"${active ? ' aria-pressed="true"' : ""}>${escapeHTML(label)}</button>`;
+  }).join("");
   const projectOptions = [`<option value="">All projects</option>`]
     .concat((app.projects || []).map((project) => {
       const id = String(value(project, "id", "ID"));
@@ -178,13 +198,25 @@ export function bulkFlowOptionsView(app) {
   return `<option value="" selected disabled>${escapeHTML(hint)}</option>${options}`;
 }
 
+// toggleTasksState is the chip click model: a state chip flips its membership
+// in the selection; the "all" chip selects every state when any is missing and
+// clears all of them when all are already selected.
+export function toggleTasksState(state, key) {
+  const next = new Set(state);
+  if (key === "all") {
+    return next.size === TASKS_SELECTABLE_STATES.length ? new Set() : new Set(TASKS_SELECTABLE_STATES);
+  }
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  return next;
+}
+
 export function bindTasksControlsView(app) {
   const view = app.querySelector(".tasks-view");
   if (!view) return;
   view.querySelectorAll("[data-tasks-state]").forEach((button) => {
     button.addEventListener("click", () => {
-      if (app.tasksState === button.dataset.tasksState) return;
-      app.tasksState = button.dataset.tasksState;
+      app.tasksState = toggleTasksState(app.tasksState, button.dataset.tasksState);
       writeTasksState(app.tasksState);
       app.load();
     });

@@ -13,11 +13,12 @@ const {
   bulkFlowOptionsView,
   taskBulkPathView,
   applyTasksBulkAction,
+  toggleTasksState,
 } = await import("./tasks-view.js");
 
 function fakeApp(overrides = {}) {
   return {
-    tasksState: "all",
+    tasksState: new Set(["unscheduled", "scheduled", "in_progress", "done"]),
     tasksProject: "",
     tasksQuery: "",
     tasksSelected: new Set(),
@@ -31,25 +32,34 @@ function fakeApp(overrides = {}) {
   };
 }
 
-test("tasksQueryView composes project, state and search params", () => {
+test("tasksQueryView composes project, repeatable state and search params", () => {
   const app = fakeApp({ selectedProjectIDs: () => ["p-a", "p-b"] });
-  assert.equal(tasksQueryView(app, "all"), "?project=p-a&project=p-b");
-  assert.equal(tasksQueryView(app, "unscheduled"), "?project=p-a&project=p-b&state=unscheduled");
-  assert.equal(tasksQueryView(app, "in_progress", { q: "flaky" }), "?project=p-a&project=p-b&state=in_progress&q=flaky");
+  const all = new Set(["unscheduled", "scheduled", "in_progress", "done"]);
+  assert.equal(
+    tasksQueryView(app, all),
+    "?project=p-a&project=p-b&state=unscheduled&state=scheduled&state=in_progress&state=done",
+  );
+  assert.equal(tasksQueryView(app, new Set(["unscheduled"])), "?project=p-a&project=p-b&state=unscheduled");
+  assert.equal(tasksQueryView(app, new Set(["scheduled", "done"])), "?project=p-a&project=p-b&state=scheduled&state=done");
+  assert.equal(tasksQueryView(app, new Set(["in_progress"]), { q: "flaky" }), "?project=p-a&project=p-b&state=in_progress&q=flaky");
 
-  // No topbar selection and an "all" chip mean the unfiltered aggregate list.
-  assert.equal(tasksQueryView(fakeApp(), "all"), "");
-  assert.equal(tasksQueryView(fakeApp(), "all", { q: "   " }), "");
+  // No topbar selection and every state selected mean the aggregate list.
+  assert.equal(tasksQueryView(fakeApp(), all), "?state=unscheduled&state=scheduled&state=in_progress&state=done");
+  assert.equal(tasksQueryView(fakeApp(), all, { q: "   " }), "?state=unscheduled&state=scheduled&state=in_progress&state=done");
+
+  // An empty selection adds no state params (the view itself skips the fetch
+  // in that case, because the server treats absent states as no filter).
+  assert.equal(tasksQueryView(app, new Set()), "?project=p-a&project=p-b");
 
   // The in-view project filter narrows the fetch instead of unioning with the
   // topbar selection (repeatable project params would list its tasks twice).
   const narrowed = fakeApp({ tasksProject: "p-b", selectedProjectIDs: () => ["p-a", "p-b"] });
-  assert.equal(tasksQueryView(narrowed, "done"), "?project=p-b&state=done");
+  assert.equal(tasksQueryView(narrowed, new Set(["done"])), "?project=p-b&state=done");
 });
 
 test("renderTasksControlsView paints chips, the project dropdown and the search box", () => {
   const app = fakeApp({
-    tasksState: "scheduled",
+    tasksState: new Set(["scheduled", "done"]),
     tasksProject: "p-1",
     tasksQuery: "flaky",
     projects: [
@@ -63,10 +73,31 @@ test("renderTasksControlsView paints chips, the project dropdown and the search 
     assert.match(html, new RegExp(`data-tasks-state="${key}"`));
   }
   assert.match(html, /class="chip active" data-tasks-state="scheduled" aria-pressed="true"/);
+  assert.match(html, /class="chip active" data-tasks-state="done" aria-pressed="true"/);
+  assert.doesNotMatch(html, /data-tasks-state="all"[^>]*aria-pressed="true"/);
+  assert.doesNotMatch(html, /data-tasks-state="unscheduled"[^>]*aria-pressed="true"/);
+  assert.doesNotMatch(html, /data-tasks-state="in_progress"[^>]*aria-pressed="true"/);
   assert.match(html, /<option value="">All projects<\/option>/);
   assert.match(html, /<option value="p-1" selected>flow<\/option>/);
   assert.match(html, /<option value="p-2">site<\/option>/);
   assert.match(html, /data-tasks-search[^>]*value="flaky"/);
+});
+
+test("renderTasksControlsView lights All when every state is selected", () => {
+  const app = fakeApp({ tasksState: new Set(["unscheduled", "scheduled", "in_progress", "done"]) });
+  const html = renderTasksControlsView(app);
+  assert.match(html, /class="chip active" data-tasks-state="all" aria-pressed="true"/);
+  assert.equal((html.match(/aria-pressed="true"/g) || []).length, 5, "All plus all four state chips are pressed");
+});
+
+test("toggleTasksState flips one state chip and All selects or clears every state", () => {
+  const all = new Set(["unscheduled", "scheduled", "in_progress", "done"]);
+  assert.deepEqual(toggleTasksState(all, "done"), new Set(["unscheduled", "scheduled", "in_progress"]));
+  assert.deepEqual(toggleTasksState(new Set(["unscheduled"]), "scheduled"), new Set(["unscheduled", "scheduled"]));
+  assert.deepEqual(toggleTasksState(new Set(), "unscheduled"), new Set(["unscheduled"]));
+  assert.deepEqual(toggleTasksState(new Set(), "all"), all);
+  assert.deepEqual(toggleTasksState(all, "all"), new Set());
+  assert.deepEqual(toggleTasksState(new Set(["done"]), "all"), all);
 });
 
 test("renderTaskRowView falls back to unscheduled for a null state and escapes the title", () => {
