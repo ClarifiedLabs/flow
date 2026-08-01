@@ -18,6 +18,7 @@ const { renderTaskCard } = await import("./elements/task-card.js");
 const { renderTaskRail } = await import("./elements/task-rail.js");
 const { renderAttentionStrip } = await import("./elements/attention-strip.js");
 const { renderBoardTable } = await import("./elements/board-table.js");
+const { boardEntries } = await import("./elements/board.js");
 const { renderStepRail } = await import("./elements/step-rail.js");
 const { renderRunList } = await import("./elements/run-list.js");
 const { renderRunSpine } = await import("./elements/run-spine.js");
@@ -158,14 +159,17 @@ test("attention sorts first, then longest-waiting", () => {
   );
 });
 
-test("board filters partition the tasks they claim to", () => {
-  const running = cardModel(entry());
-  const waiting = cardModel(entry({ card: { wait: { kind: "human_gate" } } }));
-  const queued = cardModel(entry({ task: { state: "scheduled" } }));
+test("board filters mirror the lane split they bucket by", () => {
+  const working = cardModel(entry({ laneState: "working" }));
+  const waiting = cardModel(entry({ laneState: "blocked", card: { wait: { kind: "human_gate" } } }));
+  const queued = cardModel(entry({ task: { state: "scheduled" }, laneState: "scheduled" }));
   assert.ok(matchesFilter(waiting, "attention"));
-  assert.ok(!matchesFilter(waiting, "running"));
-  assert.ok(matchesFilter(running, "running"));
+  assert.ok(matchesFilter(waiting, "waiting"));
+  assert.ok(!matchesFilter(waiting, "working"));
+  assert.ok(matchesFilter(working, "working"));
+  assert.ok(!matchesFilter(working, "waiting"));
   assert.ok(matchesFilter(queued, "queued"));
+  assert.ok(!matchesFilter(queued, "waiting"));
 });
 
 test("a task parked in the queue reads as awaiting a worker, not working", () => {
@@ -186,7 +190,11 @@ test("a task parked in the queue reads as awaiting a worker, not working", () =>
   assert.equal(model.dwellLabel, model.dwell);
   assert.doesNotMatch(model.dwellLabel, /stalled|waiting/);
   assert.equal(model.running, false);
-  assert.ok(!matchesFilter(model, "running"), "nobody is working on it");
+  // The lane split deliberately keeps awaiting-worker in Working — a worker is
+  // expected imminently — so the Working chip matches it, and the card's amber
+  // "Awaiting worker" line still names the real stall.
+  assert.ok(matchesFilter(model, "working"), "awaiting-worker rides with Working");
+  assert.ok(!matchesFilter(model, "waiting"), "it is not idle");
   assert.ok(!matchesFilter(model, "queued"), "Queued still means lifecycle scheduled only");
   assert.ok(matchesFilter(model, "all"), "it stays visible on the board");
 });
@@ -258,23 +266,29 @@ test("a parked task that is otherwise ready to merge keeps the await presentatio
   assert.equal(claimed.needsYou, true);
 });
 
-test("the table hides an awaiting-worker row from Running but keeps it under all", () => {
+test("the table's Working chip carries awaiting-worker rows and Waiting carries idle ones", () => {
   const parked = cardModel(entry({ task: { id: "t-parked" }, laneState: "awaiting_worker" }));
-  const working = cardModel(entry({ task: { id: "t-working" } }));
-  const all = renderBoardTable([parked, working], "all");
+  const idle = cardModel(entry({ task: { id: "t-idle" }, laneState: "blocked", card: { wait: { kind: "human_gate" } } }));
+  const working = cardModel(entry({ task: { id: "t-working" }, laneState: "working" }));
+  const all = renderBoardTable([parked, idle, working], "all");
   assert.match(all, /t-parked/);
   assert.match(all, /Awaiting worker/);
   assert.match(all, /rail-label is-idle">in progress</, "the step rail must not pretend work is happening");
-  const running = renderBoardTable([parked, working], "running");
-  assert.ok(!running.includes("t-parked"));
-  assert.match(running, /t-working/);
+  const workingView = renderBoardTable([parked, idle, working], "working");
+  assert.ok(workingView.includes("t-parked"), "awaiting-worker rows stay with Working, matching their lane");
+  assert.ok(workingView.includes("t-working"));
+  assert.ok(!workingView.includes("t-idle"));
+  const waitingView = renderBoardTable([parked, idle, working], "waiting");
+  assert.ok(waitingView.includes("t-idle"), "a blocked row matches Waiting, matching its lane");
+  assert.ok(!waitingView.includes("t-parked"));
+  assert.ok(!waitingView.includes("t-working"));
 });
 
 test("a lane card for a queued-for-worker task wears the await tone and names the wait", async () => {
   const root = globalThis.document.body;
   const lane = mountElement(root, "flow-lane", {
-    key: "in_progress",
-    label: "In Progress",
+    key: "working",
+    label: "Working",
     cards: [cardModel(entry({ laneState: "awaiting_worker" }))],
   });
   await flush();
@@ -284,6 +298,83 @@ test("a lane card for a queued-for-worker task wears the await tone and names th
   assert.match(card.innerHTML, /Awaiting worker/);
   assert.ok(!card.innerHTML.includes('class="step"'), "no rail while the job sits unclaimed");
   lane.remove();
+});
+
+// --- lane split -------------------------------------------------------------
+
+function boardPayload(tasks, laneStates) {
+  return {
+    boards: [{
+      project_id: "p-1",
+      project_name: "flow",
+      // The server marshals coordinator.Board without json tags, so the wire
+      // keys are the PascalCase Go field names; the fixture must match them or
+      // the lane split tests would pin a shape /v2/board never emits.
+      board: {
+        Scheduled: [{ id: "t-sched", title: "Scheduled task", state: "scheduled" }],
+        InProgress: tasks,
+      },
+      task_cards: Object.fromEntries(tasks.map((task) => [task.id, { dwell_since: new Date().toISOString() }])),
+      lane_states: laneStates,
+    }],
+  };
+}
+
+test("boardEntries buckets every in-progress task into exactly one lane", () => {
+  const entries = boardEntries(boardPayload(
+    [
+      { id: "t-work", title: "Executing", state: "in_progress" },
+      { id: "t-parked", title: "Awaiting worker", state: "in_progress" },
+      { id: "t-wait", title: "Blocked", state: "in_progress" },
+      { id: "t-held", title: "Held", state: "in_progress" },
+    ],
+    {
+      "t-work": "working",
+      "t-parked": "awaiting_worker",
+      "t-wait": "blocked",
+      "t-held": "held",
+    },
+  ));
+  const byLane = (lane) => entries.filter((entry) => entry.lane === lane).map((entry) => entry.task.id);
+  assert.deepEqual(byLane("scheduled"), ["t-sched"]);
+  assert.deepEqual(byLane("working"), ["t-work", "t-parked"], "awaiting-worker rides with Working");
+  assert.deepEqual(byLane("waiting"), ["t-wait", "t-held"]);
+  // Exactly one lane per task: the two InProgress lanes must not duplicate.
+  assert.deepEqual(entries.map((entry) => entry.task.id).sort(), ["t-held", "t-parked", "t-sched", "t-wait", "t-work"]);
+});
+
+test("lane headers count the Working and Waiting cards", async () => {
+  const root = globalThis.document.body;
+  const entries = boardEntries(boardPayload(
+    [
+      { id: "t-work", title: "Executing", state: "in_progress" },
+      { id: "t-parked", title: "Awaiting worker", state: "in_progress" },
+      { id: "t-wait", title: "Blocked", state: "in_progress" },
+    ],
+    { "t-work": "working", "t-parked": "awaiting_worker", "t-wait": "blocked" },
+  ));
+  const board = mountElement(root, "flow-board", { entries });
+  await flush();
+  const lanes = board.querySelectorAll("flow-lane");
+  assert.equal(lanes.length, 3, "scheduled, working, waiting");
+  const header = (lane) => [...lanes].find((node) => node.getAttribute("data-lane") === lane).innerHTML;
+  assert.match(header("scheduled"), /Scheduled · 1/);
+  assert.match(header("working"), /Working · 2/);
+  assert.match(header("waiting"), /Waiting · 1/);
+  board.remove();
+});
+
+test("an idle split lane says No active work or Nothing waiting", async () => {
+  const root = globalThis.document.body;
+  const entries = boardEntries(boardPayload([], {}));
+  const board = mountElement(root, "flow-board", { entries });
+  await flush();
+  const lanes = board.querySelectorAll("flow-lane");
+  const working = [...lanes].find((node) => node.getAttribute("data-lane") === "working");
+  const waiting = [...lanes].find((node) => node.getAttribute("data-lane") === "waiting");
+  assert.match(working.innerHTML, /No active work/);
+  assert.match(waiting.innerHTML, /Nothing waiting/);
+  board.remove();
 });
 
 // --- waiting on blockers ----------------------------------------------------

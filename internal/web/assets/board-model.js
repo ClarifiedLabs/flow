@@ -120,6 +120,23 @@ export function isReadyToMerge(entry) {
   );
 }
 
+// activityGroupOf buckets an in-progress entry into one of the board's two
+// in-progress lanes, Working or Waiting. Working is "actively executing":
+// lane_state working, and awaiting_worker. Awaiting-worker deliberately stays
+// in Working — a worker is expected imminently, the card already flags the
+// stall in amber, and the lane and table filters share this mapping so the two
+// views cannot disagree. Every other in-progress sub-state (blocked, held,
+// ready_to_merge, changes_requested, in_review, triage, …) is idle: nothing is
+// executing it, so it waits. Non-in-progress states (scheduled, unscheduled)
+// are not part of the split and return "".
+export function activityGroupOf(entry) {
+  const laneState = entry.laneState || "";
+  if (laneState === "working" || laneState === "awaiting_worker") return "working";
+  // A missing lane state on an in-progress task cannot be proven to be
+  // working, so it waits rather than vanishing from the board.
+  return value(entry.task, "state", "State") === "in_progress" ? "waiting" : "";
+}
+
 // cardModel is the single projection every board surface renders from. Doing
 // this once means the lane card, the table row and the attention strip cannot
 // disagree about what state a task is in.
@@ -134,8 +151,9 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
   const waitKind = waitKindOf(wait);
   // Queued for a worker: the task is in progress but its job sits unclaimed
   // in the queue. The board must not pretend anyone is working on it, so this
-  // one fact drives the phase tone, the activity line, the dwell thresholds
-  // and the Running filter all at once.
+  // one fact drives the phase tone, the activity line and the dwell thresholds
+  // all at once. The lane split still groups it with Working — a worker is
+  // expected imminently — but its card wears the amber await presentation.
   const queuedForWorker = entry.laneState === "awaiting_worker";
   // A task parked in the queue may independently satisfy the ready-to-merge
   // heuristic, but it is not actionable until a worker claims it: hold back the
@@ -206,6 +224,10 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
     projectName: showProject ? entry.project?.name || "" : "",
     lifecycleState,
     laneState: entry.laneState || "",
+    // The lane the entry belongs to when it is in progress; the lanes bucket
+    // by this and the table's Working/Waiting chips filter by it, so a row can
+    // never disagree with the lane it renders in.
+    activityGroup: activityGroupOf(entry),
     queuedForWorker,
     phase: phaseSlug(phaseState),
     held,
@@ -376,10 +398,17 @@ export function compareBoardCards(models, { key = "number", dir } = {}) {
 }
 
 // BOARD_FILTERS are the table view's chips. `all` is implicit in the design's
-// "Needs you / Running / Queued" set; unscheduled work lives in the Tasks view.
+// "Needs you / Working / Waiting / Queued" set; unscheduled work lives in the
+// Tasks view. The chips mirror the lanes: Working and Waiting filter by the
+// same activityGroupOf classification the lanes bucket by, so the table cannot
+// disagree with the lanes about where a task sits, and Queued matches the
+// Scheduled lane. Awaiting-worker tasks ride with Working in both views — a
+// worker is expected imminently, and the card's amber "Awaiting worker" line
+// still names the real stall.
 export const BOARD_FILTERS = [
   ["attention", "Needs you"],
-  ["running", "Running"],
+  ["working", "Working"],
+  ["waiting", "Waiting"],
   ["queued", "Queued"],
 ];
 
@@ -387,10 +416,9 @@ export function matchesFilter(model, filter) {
   switch (filter) {
     case "attention":
       return model.needsYou;
-    case "running":
-      // Queued-for-worker tasks are in progress on paper but nobody is
-      // working on them, so they do not count as running.
-      return model.lifecycleState === "in_progress" && !model.needsYou && !model.queuedForWorker;
+    case "working":
+    case "waiting":
+      return model.activityGroup === filter;
     case "queued":
       return model.lifecycleState === "scheduled";
     default:

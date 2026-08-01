@@ -2,7 +2,7 @@
 // the lanes and the table render the same models so they cannot disagree about
 // what state a task is in.
 
-import { cardModel } from "../board-model.js";
+import { activityGroupOf, cardModel } from "../board-model.js";
 import { laneTasks } from "../board.js";
 import { LANES } from "../config.js";
 import { value } from "../normalize.js";
@@ -11,6 +11,13 @@ import { define, FlowElement, mount, reconcile } from "./base.js";
 import "./attention-strip.js";
 import "./board-table.js";
 import "./lane.js";
+
+// The split in-progress lanes get their own empty copy so an idle board reads
+// as "No active work" / "Nothing waiting" rather than "No tasks" twice over.
+const LANE_EMPTY_LABELS = {
+  working: "No active work",
+  waiting: "Nothing waiting",
+};
 
 // boardEntries flattens the aggregate per-project board payload into the flat
 // list of entries the card projection expects.
@@ -29,14 +36,19 @@ export function boardEntries(data, { showProject = false } = {}) {
     for (const [key, , field] of LANES) {
       for (const task of laneTasks(board, key, field)) {
         const taskID = value(task, "id", "ID");
-        entries.push({
+        const entry = {
           lane: key,
           task,
           card: cards[taskID] || {},
           laneState: laneStates[taskID] || "",
           blocked: blockedIDs.has(taskID),
           project,
-        });
+        };
+        // Working and Waiting are two presentations of the same InProgress
+        // list: activityGroupOf decides which one owns the task, so each
+        // in-progress task lands in exactly one lane.
+        if ((key === "working" || key === "waiting") && activityGroupOf(entry) !== key) continue;
+        entries.push(entry);
       }
     }
   }
@@ -78,6 +90,7 @@ export class FlowBoard extends FlowElement {
     const lanes = LANES.map(([key, label]) => ({
       key,
       label,
+      emptyLabel: LANE_EMPTY_LABELS[key],
       cards: entries.filter((entry) => entry.lane === key).map((entry) => entry.model),
     }));
     reconcile(surface, lanes, { tag: "flow-lane", key: (lane) => lane.key });

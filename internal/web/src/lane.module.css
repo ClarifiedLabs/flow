@@ -32,8 +32,13 @@ h2 {
   --lane-accent: var(--ph-upnext);
 }
 
-:host([data-lane="in_progress"]) {
+:host([data-lane="working"]) {
   --lane-accent: var(--ph-authoring);
+}
+
+:host([data-lane="waiting"]) {
+  /* Amber await tone, the same token the attention strip uses. */
+  --lane-accent: var(--ph-await);
 }
 
 .cards {

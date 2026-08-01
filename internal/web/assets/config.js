@@ -4,10 +4,17 @@
 // layout, etc.) live with their owning module, not here.
 
 // LANES are the board's live columns. Unscheduled work is no longer a board
-// lane; it lives in the Tasks view (/ui/tasks).
+// lane; it lives in the Tasks view (/ui/tasks). In-progress work is split into
+// two lanes — Working (actively executing) and Waiting (idle) — that both read
+// the board's InProgress list; boardEntries buckets each task into exactly one
+// of them via activityGroupOf. The third element of each triple is the JSON
+// field name laneTasks reads off the board payload: coordinator.Board has no
+// json tags, so /v2/board emits the Go field names verbatim ("Scheduled",
+// "InProgress").
 export const LANES = [
   ["scheduled", "Scheduled", "Scheduled"],
-  ["in_progress", "In Progress", "InProgress"],
+  ["working", "Working", "InProgress"],
+  ["waiting", "Waiting", "InProgress"],
 ];
 
 export const NAV = [

@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const { cardModel, compareBoardCards, lastActivityMs, taskNumber } = await import("./board-model.js");
+const { activityGroupOf, cardModel, compareBoardCards, lastActivityMs, taskNumber } = await import("./board-model.js");
 
 function model(overrides = {}) {
   const { task = {}, card = {}, ...rest } = overrides;
@@ -18,6 +18,27 @@ function model(overrides = {}) {
     ...rest,
   });
 }
+
+// --- activityGroupOf --------------------------------------------------------
+
+test("activityGroupOf puts every in-progress lane state in exactly one lane", () => {
+  const inProgress = { task: { state: "in_progress" } };
+  assert.equal(activityGroupOf({ ...inProgress, laneState: "working" }), "working");
+  assert.equal(activityGroupOf({ ...inProgress, laneState: "awaiting_worker" }), "working");
+  for (const state of ["blocked", "held", "ready_to_merge", "changes_requested", "in_review", "triage", "in_progress"]) {
+    assert.equal(activityGroupOf({ ...inProgress, laneState: state }), "waiting", state);
+  }
+});
+
+test("activityGroupOf leaves non-in-progress states out of the split", () => {
+  for (const state of ["scheduled", "unscheduled", "up_next", "backlog", ""]) {
+    assert.equal(activityGroupOf({ task: { state: "scheduled" }, laneState: state }), "", state);
+  }
+});
+
+test("activityGroupOf waits on an in-progress task with no derived state rather than dropping it", () => {
+  assert.equal(activityGroupOf({ task: { state: "in_progress" }, laneState: "" }), "waiting");
+});
 
 // --- taskNumber -------------------------------------------------------------
 
