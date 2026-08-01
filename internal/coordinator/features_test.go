@@ -577,6 +577,57 @@ WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`, blockerID,
 	}
 }
 
+// TestRebaseOnMainRestrictBlockedTo locks the task-bound console rebase
+// confinement at relation-creation time: when RebaseOnMain is told to restrict
+// its blocker links to one task, a conflicted rebase links exactly that task
+// even when the feature holds other non-done tasks. This closes the TOCTOU
+// race of an API-side pre-read: a feature task created concurrently with the
+// rebase can never receive a rebase_task blocks relation.
+func TestRebaseOnMainRestrictBlockedTo(t *testing.T) {
+	ctx := context.Background()
+	env := newFeatureTestEnv(t)
+	feature := setupConflictedFeature(t, env)
+
+	boundTask, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "bound task", FeatureID: &feature.ID})
+	if err != nil {
+		t.Fatalf("create bound task: %v", err)
+	}
+	extraTask, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "extra task", FeatureID: &feature.ID})
+	if err != nil {
+		t.Fatalf("create extra task: %v", err)
+	}
+
+	// The bound-task console passes exactly its bound task as the restriction.
+	result, err := env.features.RebaseOnMain(ctx, feature.ID, boundTask.ID)
+	if err != nil {
+		t.Fatalf("restricted rebase: %v", err)
+	}
+	if result.Kind != RebaseTaskCreated || result.RebaseTaskID == "" {
+		t.Fatalf("rebase result = %+v, want rebase_task_created", result)
+	}
+	rebaseTask, err := env.tasks.GetTask(ctx, result.RebaseTaskID)
+	if err != nil {
+		t.Fatalf("load rebase task: %v", err)
+	}
+
+	assertBlocked := func(taskID string, want bool) {
+		t.Helper()
+		var count int
+		if err := env.fixture.store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM task_relations
+WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`, rebaseTask.ID, taskID).Scan(&count); err != nil {
+			t.Fatalf("count relations: %v", err)
+		}
+		if (count == 1) != want {
+			t.Fatalf("rebase task blocks %s = %v, want %v", taskID, count == 1, want)
+		}
+	}
+	// The bound task is linked; the concurrently-open extra task is not, so no
+	// relation exists whose endpoints are both unrelated to the bound task.
+	assertBlocked(boundTask.ID, true)
+	assertBlocked(extraTask.ID, false)
+}
+
 // produceRebasedHead simulates the rebase agent: it rebases the feature
 // branch onto main in a clone (favoring the feature side on conflicts),
 // pushes the result to the rebase task's branch, and returns the new head.

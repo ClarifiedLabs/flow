@@ -2515,6 +2515,216 @@ func TestCreateTaskWithRelationsSessionShorthandAPI(t *testing.T) {
 		}, http.StatusForbidden, nil)
 }
 
+func TestCreateTaskWithRelationsTaskBoundConsoleAPI(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	bound, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Bound console task"})
+	if err != nil {
+		t.Fatalf("create bound task: %v", err)
+	}
+	unrelatedSource, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Unrelated source task"})
+	if err != nil {
+		t.Fatalf("create unrelated source task: %v", err)
+	}
+	unrelatedTarget, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Unrelated target task"})
+	if err != nil {
+		t.Fatalf("create unrelated target task: %v", err)
+	}
+	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
+		Token:        "bound-console-token",
+		Scope:        coordinator.TokenScopeConsole,
+		Subject:      "c-bound-relations",
+		ProjectID:    &fixture.Project.ID,
+		SourceTaskID: &bound.ID,
+	}); err != nil {
+		t.Fatalf("store bound console token: %v", err)
+	}
+
+	// A task-bound console may create a task related to its bound task: the new
+	// task as source (blank source) or, via the documented target_is_new_task
+	// opt-in, the bound task as source with the new task as target.
+	var blocked taskResponse
+	doJSONRequestAs(t, fixture.Server, "bound-console-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Bound console blocker",
+			Relations: []relationRequest{
+				{SourceTaskID: "", TargetTaskID: bound.ID, Kind: string(coordinator.RelationBlocks)},
+			},
+		}, http.StatusCreated, &blocked)
+	relations, err := fixture.Tasks.RelationsForTask(ctx, bound.ID)
+	if err != nil {
+		t.Fatalf("relations for bound task: %v", err)
+	}
+	if len(relations) != 1 || relations[0].SourceTaskID != blocked.Task.ID || relations[0].TargetTaskID != bound.ID || relations[0].Kind != coordinator.RelationBlocks {
+		t.Fatalf("bound task relations = %+v, want one relation %s blocks %s", relations, blocked.Task.ID, bound.ID)
+	}
+
+	var child taskResponse
+	doJSONRequestAs(t, fixture.Server, "bound-console-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Bound console child",
+			Relations: []relationRequest{
+				{SourceTaskID: bound.ID, TargetTaskID: "", Kind: string(coordinator.RelationParentOf), TargetIsNewTask: true},
+			},
+		}, http.StatusCreated, &child)
+	relations, err = fixture.Tasks.RelationsForTask(ctx, bound.ID)
+	if err != nil {
+		t.Fatalf("relations for bound task after child create: %v", err)
+	}
+	if len(relations) != 2 || relations[1].SourceTaskID != bound.ID || relations[1].TargetTaskID != child.Task.ID || relations[1].Kind != coordinator.RelationParentOf {
+		t.Fatalf("bound task relations = %+v, want one parent_of relation %s parent_of %s", relations, bound.ID, child.Task.ID)
+	}
+
+	// A named source unrelated to the bound task is rejected, with or without a
+	// named target.
+	doJSONRequestAs(t, fixture.Server, "bound-console-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Unrelated source relation",
+			Relations: []relationRequest{
+				{SourceTaskID: unrelatedSource.ID, TargetTaskID: "", Kind: string(coordinator.RelationBlocks), TargetIsNewTask: true},
+			},
+		}, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "bound-console-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Unrelated source and bound target",
+			Relations: []relationRequest{
+				{SourceTaskID: unrelatedSource.ID, TargetTaskID: bound.ID, Kind: string(coordinator.RelationBlocks)},
+			},
+		}, http.StatusForbidden, nil)
+
+	// A named target unrelated to the bound task is rejected, with or without a
+	// named source.
+	doJSONRequestAs(t, fixture.Server, "bound-console-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Unrelated target relation",
+			Relations: []relationRequest{
+				{SourceTaskID: "", TargetTaskID: unrelatedTarget.ID, Kind: string(coordinator.RelationBlocks)},
+			},
+		}, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "bound-console-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Bound source and unrelated target",
+			Relations: []relationRequest{
+				{SourceTaskID: bound.ID, TargetTaskID: unrelatedTarget.ID, Kind: string(coordinator.RelationParentOf)},
+			},
+		}, http.StatusForbidden, nil)
+
+	// Both endpoints unrelated is rejected even though the endpoints exist.
+	doJSONRequestAs(t, fixture.Server, "bound-console-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Both unrelated endpoints",
+			Relations: []relationRequest{
+				{SourceTaskID: unrelatedSource.ID, TargetTaskID: unrelatedTarget.ID, Kind: string(coordinator.RelationBlocks)},
+			},
+		}, http.StatusForbidden, nil)
+}
+
+func TestTaskBoundConsoleRelationsEndpointScope(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	bound, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Bound console task"})
+	if err != nil {
+		t.Fatalf("create bound task: %v", err)
+	}
+	unrelatedSource, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Unrelated source task"})
+	if err != nil {
+		t.Fatalf("create unrelated source task: %v", err)
+	}
+	unrelatedTarget, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Unrelated target task"})
+	if err != nil {
+		t.Fatalf("create unrelated target task: %v", err)
+	}
+	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
+		Token:        "bound-console-token",
+		Scope:        coordinator.TokenScopeConsole,
+		Subject:      "c-bound-links",
+		ProjectID:    &fixture.Project.ID,
+		SourceTaskID: &bound.ID,
+	}); err != nil {
+		t.Fatalf("store bound console token: %v", err)
+	}
+
+	// Linking the bound task to another task is allowed: the relation involves
+	// the bound task as its source.
+	doJSONRequestAs(t, fixture.Server, "bound-console-token", http.MethodPost, "/v2/tasks/"+bound.ID+"/relations", relationRequest{
+		TargetTaskID: unrelatedTarget.ID,
+		Kind:         string(coordinator.RelationBlocks),
+	}, http.StatusNoContent, nil)
+	relations, err := fixture.Tasks.RelationsForTask(ctx, bound.ID)
+	if err != nil {
+		t.Fatalf("relations for bound task: %v", err)
+	}
+	if len(relations) != 1 || relations[0].SourceTaskID != bound.ID || relations[0].TargetTaskID != unrelatedTarget.ID {
+		t.Fatalf("bound task relations = %+v, want one relation %s blocks %s", relations, bound.ID, unrelatedTarget.ID)
+	}
+
+	// A relation naming an unrelated task as source with the bound task as
+	// target also involves the bound task and stays allowed.
+	doJSONRequestAs(t, fixture.Server, "bound-console-token", http.MethodPost, "/v2/tasks/"+bound.ID+"/relations", relationRequest{
+		SourceTaskID: unrelatedSource.ID,
+		TargetTaskID: bound.ID,
+		Kind:         string(coordinator.RelationRelatedTo),
+	}, http.StatusNoContent, nil)
+
+	// Deleting a relation that involves the bound task is allowed.
+	doJSONRequestAs(t, fixture.Server, "bound-console-token", http.MethodDelete, "/v2/tasks/"+bound.ID+"/relations", relationRequest{
+		TargetTaskID: unrelatedTarget.ID,
+		Kind:         string(coordinator.RelationBlocks),
+	}, http.StatusNoContent, nil)
+
+	// A link or unlink whose resolved endpoints are both unrelated to the bound
+	// task is rejected even though the path task is the bound task.
+	doJSONRequestAs(t, fixture.Server, "bound-console-token", http.MethodPost, "/v2/tasks/"+bound.ID+"/relations", relationRequest{
+		SourceTaskID: unrelatedSource.ID,
+		TargetTaskID: unrelatedTarget.ID,
+		Kind:         string(coordinator.RelationBlocks),
+	}, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "bound-console-token", http.MethodDelete, "/v2/tasks/"+bound.ID+"/relations", relationRequest{
+		SourceTaskID: unrelatedSource.ID,
+		TargetTaskID: unrelatedTarget.ID,
+		Kind:         string(coordinator.RelationRelatedTo),
+	}, http.StatusForbidden, nil)
+}
+
+func TestCreateTaskWithRelationsUnboundConsoleAPI(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	other, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Project task"})
+	if err != nil {
+		t.Fatalf("create project task: %v", err)
+	}
+	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
+		Token:     "project-console-token",
+		Scope:     coordinator.TokenScopeConsole,
+		Subject:   "c-unbound-relations",
+		ProjectID: &fixture.Project.ID,
+	}); err != nil {
+		t.Fatalf("store project console token: %v", err)
+	}
+
+	// An unbound project console keeps its project-wide behavior: it may create
+	// a task with a relation naming any project task, unrelated to any bound
+	// task (there is none).
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "project-console-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{
+			Title: "Project console task",
+			Relations: []relationRequest{
+				{SourceTaskID: "", TargetTaskID: other.ID, Kind: string(coordinator.RelationBlocks)},
+			},
+		}, http.StatusCreated, &created)
+	relations, err := fixture.Tasks.RelationsForTask(ctx, created.Task.ID)
+	if err != nil {
+		t.Fatalf("relations for created task: %v", err)
+	}
+	if len(relations) != 1 || relations[0].SourceTaskID != created.Task.ID || relations[0].TargetTaskID != other.ID {
+		t.Fatalf("created task relations = %+v, want one relation %s blocks %s", relations, created.Task.ID, other.ID)
+	}
+}
+
 // TestCreateTaskWithParentOfRelationAtomicAPI covers the owner-token new-task
 // child-of path: a create request names an existing parent as the relation
 // source with a blank target flagged target_is_new_task, and the single create

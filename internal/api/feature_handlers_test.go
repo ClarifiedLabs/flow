@@ -259,4 +259,150 @@ func TestSessionCreatedTaskInheritsFeature(t *testing.T) {
 	}
 }
 
+// TestTaskBoundConsoleRebaseScope locks the rebase route into task-bound
+// console confinement: a console credential bound to a task may only rebase a
+// feature that holds the bound task as open work, and a conflicted rebase may
+// link only the bound task as a blocker. The restriction is applied at
+// relation-creation time inside RebaseOnMain, so a feature task created
+// concurrently after any scope pre-read (the TOCTOU window) can never receive
+// a rebase_task blocks relation. Unbound project consoles keep project-wide
+// rebase access.
+func TestTaskBoundConsoleRebaseScope(t *testing.T) {
+	fixture := newTestFixture(t)
+	exchangePath := fixture.Project.ExchangePath
+	makeExchangeHooksInert(t, exchangePath)
+	seedAPIMain(t, exchangePath)
+	ctx := context.Background()
+
+	feature, err := fixture.Bundle.Features.Create(ctx, coordinator.CreateFeatureInput{Title: "bound feature"})
+	if err != nil {
+		t.Fatalf("create bound feature: %v", err)
+	}
+	other, err := fixture.Bundle.Features.Create(ctx, coordinator.CreateFeatureInput{Title: "unrelated feature"})
+	if err != nil {
+		t.Fatalf("create unrelated feature: %v", err)
+	}
+	boundTask, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "bound task", FeatureID: &feature.ID})
+	if err != nil {
+		t.Fatalf("create bound task: %v", err)
+	}
+	rebasesPath := "/v2/projects/" + fixture.Project.ID + "/features"
+
+	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
+		Token:        "task-bound-console-token",
+		Scope:        coordinator.TokenScopeConsole,
+		Subject:      "s-bound-console",
+		ProjectID:    &fixture.Project.ID,
+		SourceTaskID: &boundTask.ID,
+	}); err != nil {
+		t.Fatalf("store task-bound console token: %v", err)
+	}
+	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
+		Token:        "project-console-token",
+		Scope:        coordinator.TokenScopeConsole,
+		Subject:      "s-project-console",
+		ProjectID:    &fixture.Project.ID,
+		SourceTaskID: nil,
+	}); err != nil {
+		t.Fatalf("store project console token: %v", err)
+	}
+
+	// A task-bound console cannot rebase a feature unrelated to its bound task,
+	// and the rejected request creates no rebase or relation rows.
+	doJSONRequestAs(t, fixture.Server, "task-bound-console-token", http.MethodPost,
+		rebasesPath+"/"+other.ID+"/rebase", nil, http.StatusForbidden, nil)
+	var rebaseRows int
+	if err := fixture.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM feature_rebases`).Scan(&rebaseRows); err != nil {
+		t.Fatalf("count rebase rows: %v", err)
+	}
+	if rebaseRows != 0 {
+		t.Fatalf("forbidden rebase created %d rebase rows, want 0", rebaseRows)
+	}
+	var relationRows int
+	if err := fixture.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_relations`).Scan(&relationRows); err != nil {
+		t.Fatalf("count relation rows: %v", err)
+	}
+	if relationRows != 0 {
+		t.Fatalf("forbidden rebase created %d relation rows, want 0", relationRows)
+	}
+
+	// Rebasing the feature that holds the bound task stays allowed.
+	var allowed contract.RebaseFeatureResponse
+	doJSONRequestAs(t, fixture.Server, "task-bound-console-token", http.MethodPost,
+		rebasesPath+"/"+feature.ID+"/rebase", nil, http.StatusOK, &allowed)
+	if allowed.Result.Kind != coordinator.RebaseAlreadyUpToDate {
+		t.Fatalf("bound-console rebase kind = %q, want %q", allowed.Result.Kind, coordinator.RebaseAlreadyUpToDate)
+	}
+
+	// An unbound project console keeps project-wide rebase access.
+	var unbound contract.RebaseFeatureResponse
+	doJSONRequestAs(t, fixture.Server, "project-console-token", http.MethodPost,
+		rebasesPath+"/"+other.ID+"/rebase", nil, http.StatusOK, &unbound)
+	if unbound.Result.Kind != coordinator.RebaseAlreadyUpToDate {
+		t.Fatalf("project-console rebase kind = %q, want %q", unbound.Result.Kind, coordinator.RebaseAlreadyUpToDate)
+	}
+
+	// The bound feature now holds a second open task. The rebase confinement
+	// must hold at relation-creation time, not via a racy pre-read: this task
+	// stands in for one created concurrently after any API-side scope check.
+	// The conflicted rebase may proceed, but its rebase task may link only the
+	// bound task — never this unrelated open task.
+	extra, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "extra task", FeatureID: &feature.ID})
+	if err != nil {
+		t.Fatalf("create extra task: %v", err)
+	}
+	clonePath := filepath.Join(t.TempDir(), "feature-clone")
+	runAPIGit(t, "", "clone", exchangePath, clonePath)
+	runAPIGit(t, clonePath, "config", "user.name", "Flow Test")
+	runAPIGit(t, clonePath, "config", "user.email", "flow-test@example.com")
+	runAPIGit(t, clonePath, "checkout", "-B", feature.Branch, "origin/"+feature.Branch)
+	writeAPIFile(t, clonePath, "conflict.txt", "feature version")
+	runAPIGit(t, clonePath, "add", "conflict.txt")
+	runAPIGit(t, clonePath, "commit", "-m", "feature work")
+	runAPIGit(t, clonePath, "push", "origin", "HEAD:refs/heads/"+feature.Branch)
+	advanceAPIMain(t, exchangePath, "conflict.txt", "main version")
+
+	countRows := func(table string) int {
+		t.Helper()
+		var n int
+		if err := fixture.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table).Scan(&n); err != nil {
+			t.Fatalf("count %s rows: %v", table, err)
+		}
+		return n
+	}
+	relationsBefore := countRows("task_relations")
+	var conflicted contract.RebaseFeatureResponse
+	doJSONRequestAs(t, fixture.Server, "task-bound-console-token", http.MethodPost,
+		rebasesPath+"/"+feature.ID+"/rebase", nil, http.StatusOK, &conflicted)
+	if conflicted.Result.Kind != coordinator.RebaseTaskCreated || conflicted.Result.RebaseTaskID == "" {
+		t.Fatalf("bound-console conflicted rebase = %+v, want %q", conflicted.Result, coordinator.RebaseTaskCreated)
+	}
+	if got := countRows("task_relations"); got != relationsBefore+1 {
+		t.Fatalf("conflicted rebase created %d relation rows, want exactly 1", got-relationsBefore)
+	}
+
+	// The only relation the conflicted rebase may insert involves the bound
+	// task as its target; the concurrently-open extra task must never be
+	// linked, so no created relation has both endpoints unrelated to the bound
+	// task.
+	var blockedBound int
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM task_relations WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`,
+		conflicted.Result.RebaseTaskID, boundTask.ID).Scan(&blockedBound); err != nil {
+		t.Fatalf("count bound-task block: %v", err)
+	}
+	if blockedBound != 1 {
+		t.Fatalf("rebase task blocks bound task %d times, want 1", blockedBound)
+	}
+	var blockedExtra int
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM task_relations WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`,
+		conflicted.Result.RebaseTaskID, extra.ID).Scan(&blockedExtra); err != nil {
+		t.Fatalf("count extra-task block: %v", err)
+	}
+	if blockedExtra != 0 {
+		t.Fatalf("rebase task blocks unrelated open extra task %d times, want 0", blockedExtra)
+	}
+}
+
 func stringPtr(value string) *string { return &value }

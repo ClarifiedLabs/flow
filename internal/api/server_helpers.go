@@ -66,9 +66,37 @@ func createTaskInputForPrincipal(request createTaskRequest, principal coordinato
 		if err := constrainSessionRelations(input.Relations, principal.SourceTaskID); err != nil {
 			return coordinator.CreateTaskWithDetailsInput{}, err
 		}
+	} else if principal.Scope == coordinator.TokenScopeConsole {
+		if err := constrainConsoleRelations(input.Relations, principal.SourceTaskID); err != nil {
+			return coordinator.CreateTaskWithDetailsInput{}, err
+		}
 	}
 
 	return input, nil
+}
+
+// constrainConsoleRelations confines create-time relations for task-bound
+// console credentials (task-recovery consoles started from a task's console
+// endpoint). Every named relation endpoint must be the console's bound task;
+// a blank endpoint resolves to the newly created task. Unbound project
+// consoles have no bound task and keep their project-wide relation behavior.
+func constrainConsoleRelations(relations []coordinator.CreateTaskRelationInput, boundTaskID *string) error {
+	if boundTaskID == nil {
+		return nil
+	}
+	bound := strings.TrimSpace(*boundTaskID)
+	for i := range relations {
+		source := strings.TrimSpace(relations[i].SourceTaskID)
+		target := strings.TrimSpace(relations[i].TargetTaskID)
+		if source != "" && source != bound {
+			return errors.New("console-created task relations must relate to the console's bound task")
+		}
+		if target != "" && target != bound {
+			return errors.New("console-created task relations must relate to the console's bound task")
+		}
+	}
+
+	return nil
 }
 
 func constrainSessionRelations(relations []coordinator.CreateTaskRelationInput, sourceTaskID *string) error {
@@ -197,6 +225,21 @@ func checkBoundTaskScope(principal coordinator.Principal, taskID string) error {
 	}
 	if strings.TrimSpace(*principal.SourceTaskID) != strings.TrimSpace(taskID) {
 		return errors.New("session credential cannot operate on a different task")
+	}
+	return nil
+}
+
+// checkBoundTaskRelationScope confines direct relation mutations (link/unlink)
+// for task-bound console credentials: the resolved relation must involve the
+// console's bound task as source or target. Unbound project consoles are
+// unaffected.
+func checkBoundTaskRelationScope(principal coordinator.Principal, sourceTaskID, targetTaskID string) error {
+	if principal.Scope != coordinator.TokenScopeConsole || principal.SourceTaskID == nil {
+		return nil
+	}
+	bound := strings.TrimSpace(*principal.SourceTaskID)
+	if strings.TrimSpace(sourceTaskID) != bound && strings.TrimSpace(targetTaskID) != bound {
+		return errors.New("console credential cannot mutate a relation that does not involve its bound task")
 	}
 	return nil
 }

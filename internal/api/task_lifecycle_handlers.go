@@ -650,6 +650,13 @@ func (s *projectServer) handleTaskRelations(w http.ResponseWriter, r *http.Reque
 	targetTaskID := strings.TrimSpace(request.TargetTaskID)
 	kind := coordinator.RelationKind(request.Kind)
 
+	// A task-bound console may only create or delete relations that involve its
+	// bound task; the request body must not smuggle in unrelated endpoints.
+	if err := checkBoundTaskRelationScope(principal, sourceTaskID, targetTaskID); err != nil {
+		writeError(w, http.StatusForbidden, "forbidden", err.Error())
+		return
+	}
+
 	switch r.Method {
 	case http.MethodPost:
 		actor := coordinator.ActorHuman

@@ -571,7 +571,14 @@ ORDER BY created_at DESC, id DESC`, strings.TrimSpace(featureID))
 // keeps the running row, creates a system rebase task on the feature-rebase
 // flow, links rebase_task blocks every other non-done feature task, and
 // schedules it — the trusted finalize node publishes the result.
-func (s *FeatureService) RebaseOnMain(ctx context.Context, featureRef string) (RebaseStartResult, error) {
+//
+// restrictBlockedTo confines the conflicted path's blocker links to the named
+// tasks: when non-empty, only those tasks (if still non-done) receive a
+// rebase_task blocks relation. Task-bound console credentials pass exactly
+// their bound task, so the blocker set is confined at relation-creation time
+// rather than by a racy pre-read: a feature task created concurrently after
+// any API-side scope check can never be linked.
+func (s *FeatureService) RebaseOnMain(ctx context.Context, featureRef string, restrictBlockedTo ...string) (RebaseStartResult, error) {
 	feature, err := s.Resolve(ctx, featureRef)
 	if err != nil {
 		return RebaseStartResult{}, err
@@ -680,7 +687,7 @@ UPDATE feature_rebases SET task_id = ? WHERE id = ?`, task.ID, rebaseID); err !=
 	if err != nil {
 		return RebaseStartResult{}, err
 	}
-	if err := s.tasks.BlockOnRebase(ctx, task.ID, blocked); err != nil {
+	if err := s.tasks.BlockOnRebase(ctx, task.ID, restrictBlockedTasks(blocked, restrictBlockedTo)); err != nil {
 		return RebaseStartResult{}, fmt.Errorf("block feature tasks on rebase: %w", err)
 	}
 
@@ -851,6 +858,26 @@ WHERE t.id = ? AND fr.state = 'running' AND fr.task_id IS NOT NULL AND fr.task_i
 	}
 
 	return s.tasks.BlockOnRebase(ctx, rebaseTaskID, []string{taskID})
+}
+
+// restrictBlockedTasks filters ids down to the allowed membership set,
+// preserving order. An empty allowed set leaves ids untouched, keeping the
+// default rebase behavior of holding every non-done feature task.
+func restrictBlockedTasks(ids, allowed []string) []string {
+	if len(allowed) == 0 {
+		return ids
+	}
+	set := make(map[string]struct{}, len(allowed))
+	for _, id := range allowed {
+		set[strings.TrimSpace(id)] = struct{}{}
+	}
+	filtered := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := set[strings.TrimSpace(id)]; ok {
+			filtered = append(filtered, id)
+		}
+	}
+	return filtered
 }
 
 // nonDoneFeatureTaskIDs lists the feature's tasks that a running rebase must

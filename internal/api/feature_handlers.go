@@ -69,7 +69,7 @@ func (s *projectServer) handleFeaturesPath(w http.ResponseWriter, r *http.Reques
 		}
 		switch parts[1] {
 		case "rebase":
-			s.handleRebaseFeature(w, r, parts[0])
+			s.handleRebaseFeature(w, r, parts[0], principal)
 		case "land":
 			s.handleLandFeature(w, r, parts[0], principal)
 		case "archive":
@@ -168,13 +168,56 @@ func (s *projectServer) handleEditFeature(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, payload)
 }
 
-func (s *projectServer) handleRebaseFeature(w http.ResponseWriter, r *http.Request, ref string) {
-	result, err := s.features.RebaseOnMain(r.Context(), ref)
+func (s *projectServer) handleRebaseFeature(w http.ResponseWriter, r *http.Request, ref string, principal coordinator.Principal) {
+	restrictBlockedTo, ok := s.checkFeatureRebaseScope(w, r, principal, ref)
+	if !ok {
+		return
+	}
+	result, err := s.features.RebaseOnMain(r.Context(), ref, restrictBlockedTo...)
 	if err != nil {
 		writeFeatureError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, contract.RebaseFeatureResponse{Result: result})
+}
+
+// checkFeatureRebaseScope confines feature rebases for task-bound console
+// credentials to features that contain the console's bound task as open work,
+// and returns the only task such a credential's conflicted rebase may link as
+// a blocker: the bound task itself. The restriction is applied at
+// relation-creation time inside RebaseOnMain, so a feature task created
+// concurrently after this read can never receive a rebase_task blocks link —
+// the relation set is confined by construction rather than by a racy pre-read.
+// Unbound project consoles and owner credentials keep project-wide rebase
+// access.
+func (s *projectServer) checkFeatureRebaseScope(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, featureRef string) (restrictBlockedTo []string, ok bool) {
+	if principal.Scope != coordinator.TokenScopeConsole || principal.SourceTaskID == nil {
+		return nil, true
+	}
+	ctx := r.Context()
+	feature, err := s.features.Resolve(ctx, featureRef)
+	if err != nil {
+		writeFeatureError(w, err)
+		return nil, false
+	}
+	tasks, err := s.features.Tasks(ctx, feature.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load_feature_tasks_failed", err.Error())
+		return nil, false
+	}
+	bound := strings.TrimSpace(*principal.SourceTaskID)
+	boundOpen := false
+	for _, task := range tasks {
+		if task.ID == bound && (task.State == nil || *task.State != coordinator.LifecycleDone) {
+			boundOpen = true
+			break
+		}
+	}
+	if !boundOpen {
+		writeError(w, http.StatusForbidden, "forbidden", "console credential cannot rebase a feature that does not contain its bound task as open work")
+		return nil, false
+	}
+	return []string{bound}, true
 }
 
 func (s *projectServer) handleLandFeature(w http.ResponseWriter, r *http.Request, ref string, principal coordinator.Principal) {
