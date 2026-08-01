@@ -95,6 +95,14 @@ export class FlowTaskDetail extends FlowElement {
   changeError = "";
   changePromise = null;
   changeStale = false;
+  // changeRetry marks a failed change load that a later same-head task poll
+  // should retry. loadChange failure leaves changeData null and changeError
+  // set, so render() cannot mark the cache stale — there is no cached pair to
+  // revalidate — and without this marker paintChange's error branch keeps the
+  // error card until the user clicks Retry or the head changes. A same-key
+  // poll sets it; paintChange clears it when it retries the load, and
+  // resetChangeLoad clears it with the rest of the cache.
+  changeRetry = false;
   // changeAheadKey names the model head the cache was ahead of when it fetched
   // a head the poll has not reported yet (a revalidation or load fetched
   // ahead). While the model still names that exact head, a repaint must not
@@ -148,6 +156,11 @@ export class FlowTaskDetail extends FlowElement {
       // cache, so subsequent same-head polls revalidate normally and a
       // persistent rollback eventually reloads the current head.
       if (this.changeData && !this.changeAheadKey) this.changeStale = true;
+      // A failed load has no pair to revalidate, but the same-key poll still
+      // means the failure may be transient: mark it for a retry on the next
+      // Change-tab paint instead of leaving the error card up until the user
+      // clicks Retry or the head changes.
+      if (this.changeError && !this.changeData) this.changeRetry = true;
     } else {
       this.renderedChangeKey = changeKey;
       // A different task/change/head normally resets the cache. A cache that
@@ -336,6 +349,7 @@ export class FlowTaskDetail extends FlowElement {
     this.changeError = "";
     this.changePromise = null;
     this.changeStale = false;
+    this.changeRetry = false;
     this.changeAheadKey = "";
     this.changeAheadSeen = 0;
     this.changePendingKey = "";
@@ -385,8 +399,17 @@ export class FlowTaskDetail extends FlowElement {
       return;
     }
     if (this.changeError) {
-      this.paintStatic(panel, `change:${key}:error`, `<div class="empty">${escapeHTML(this.changeError)} <button class="button secondary" type="button" data-change-retry>Retry</button></div>`);
-      return;
+      // A later same-head poll marked the failed load for retry: drop the
+      // error and fall through to a fresh loadChange for the same key. The
+      // fetched pair is verified before installing, and a head move between
+      // polls is caught by reconcile above, so the retry cannot mix heads.
+      if (this.changeRetry) {
+        this.changeError = "";
+        this.changeRetry = false;
+      } else {
+        this.paintStatic(panel, `change:${key}:error`, `<div class="empty">${escapeHTML(this.changeError)} <button class="button secondary" type="button" data-change-retry>Retry</button></div>`);
+        return;
+      }
     }
     this.paintStatic(panel, `change:${key}:loading`, `<div class="empty">Loading change</div>`);
     if (!this.changePromise) this.loadChange(id, key);

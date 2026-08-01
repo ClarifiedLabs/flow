@@ -2997,3 +2997,91 @@ test("a load that never verifies shows a retryable error instead of an unverifie
   assert.match(changePanelHTML(detail), /h1\.go/, "the retry renders the verified pair");
   detail.remove();
 });
+
+test("a later same-head poll retries a failed initial change load", async () => {
+  const root = globalThis.document.body;
+  // The first change fetch fails transiently; the server recovers before the
+  // next poll.
+  let fail = true;
+  const calls = [];
+  globalThis.fetch = (path) => {
+    calls.push(String(path));
+    if (path.endsWith("/diff")) {
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(diffResponse("h1", diffFiles("h1"))) });
+    }
+    if (fail) return Promise.reject(new Error("network hiccup"));
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(changeResponse("h1")) });
+  };
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+
+  const panel = detail.querySelector(".panel");
+  assert.match(panel.innerHTML, /network hiccup/, "the failed load shows its error");
+  assert.match(panel.innerHTML, /data-change-retry/, "the error offers a retry");
+  const failed = calls.filter((path) => path.includes("/v2/changes/ch-0001"));
+  assert.deepEqual(failed, ["/ui/api/v2/changes/ch-0001"], "the failed load made one change read and no diff read");
+
+  // The transient failure clears; the next same-head poll retries the load on
+  // its own instead of keeping the error card.
+  fail = false;
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the same-head poll retried the load and rendered the pair");
+  assert.doesNotMatch(panel.innerHTML, /network hiccup/, "the error card is gone");
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(failed.length),
+    ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"],
+    "the retry fetched one fresh change+diff pair",
+  );
+
+  // The recovered pair is an ordinary cached pair: the next same-head poll
+  // revalidates in place instead of loading again.
+  const caughtUp = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(caughtUp),
+    ["/ui/api/v2/changes/ch-0001"],
+    "a recovered same-head poll revalidates the change only",
+  );
+  detail.remove();
+});
+
+test("a later same-head poll retries a load whose diff fetch failed", async () => {
+  const root = globalThis.document.body;
+  // Every diff read of the first load fails transiently; the diff endpoint
+  // recovers before the next poll.
+  let failDiff = true;
+  const calls = [];
+  globalThis.fetch = (path) => {
+    calls.push(String(path));
+    if (path.endsWith("/diff")) {
+      if (failDiff) return Promise.reject(new Error("diff boom"));
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(diffResponse("h1", diffFiles("h1"))) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(changeResponse("h1")) });
+  };
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+
+  const panel = detail.querySelector(".panel");
+  assert.match(panel.innerHTML, /advanced while it was loading/, "a load whose diff never verifies fails with a retryable error");
+  assert.match(panel.innerHTML, /data-change-retry/, "the error offers a retry");
+  const failed = calls.filter((path) => path.includes("/v2/changes/ch-0001"));
+  assert.equal(
+    failed.filter((path) => !path.endsWith("/diff")).length,
+    3,
+    "the failed load retried its bounded number of change reads",
+  );
+
+  // The diff endpoint recovers; the next same-head poll retries the load.
+  failDiff = false;
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the same-head poll retried the load and rendered the pair");
+  assert.doesNotMatch(panel.innerHTML, /advanced while it was loading/, "the error card is gone");
+  detail.remove();
+});
