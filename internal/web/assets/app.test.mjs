@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { actionScope, applyBusyState, gateResponsePending, handleAction, inFlight, pendingStatus } from "./actions.js";
+import { actionScope, applyBusyState, failureMessage, gateResponsePending, handleAction, inFlight, pendingStatus } from "./actions.js";
 import { scheduleConsolePollView, startConsoleView } from "./console-view.js";
 import { handleFormSubmit, formBusyKey } from "./forms.js";
 import { workflowStepCanBeSkipped } from "./task-view.js";
@@ -1682,6 +1682,168 @@ test("a non-Error form rejection still drains the registry and shows a final fai
   assert.deepEqual(app.statuses, ["Saving task\u2026", "Request failed"]);
   assert.equal(submitter.disabled, false, "the submit control is restored");
   assert.equal(inFlight.size, 0, "the in-flight registry drains on a non-Error rejection");
+});
+
+test("failureMessage formats normal rejections and survives hostile proxies", () => {
+  assert.equal(failureMessage(new Error("boom")), "boom");
+  assert.equal(failureMessage(new Error()), "Error");
+  assert.equal(failureMessage("plain failure"), "plain failure");
+  assert.equal(failureMessage(null), "Request failed");
+  assert.equal(failureMessage(undefined), "Request failed");
+
+  // A rejected Proxy whose prototype lookup throws aborts the instanceof
+  // check; one whose message getter throws aborts the message read. Both must
+  // still format to a safe fallback instead of throwing.
+  const noPrototype = new Proxy({}, {
+    getPrototypeOf() {
+      throw new Error("prototype trap");
+    },
+  });
+  assert.equal(failureMessage(noPrototype), "Request failed");
+  const noMessage = new Proxy(new Error("boom"), {
+    get(target, prop) {
+      if (prop === "message") throw new Error("message trap");
+      return Reflect.get(target, prop);
+    },
+  });
+  assert.equal(failureMessage(noMessage), "Request failed");
+
+  // A getter can return a hostile non-string value instead of throwing. The
+  // formatter must coerce inside the guard: returning the raw value would
+  // make the status line's textContent assignment throw on stringification
+  // later, after the key already drained.
+  const hostileValue = new Proxy(new Error("boom"), {
+    get(target, prop) {
+      if (prop === "message") {
+        return {
+          toString() {
+            throw new Error("stringification trap");
+          },
+        };
+      }
+      return Reflect.get(target, prop);
+    },
+  });
+  assert.equal(failureMessage(hostileValue), "Request failed");
+  // A non-string message that stringifies cleanly still renders as text.
+  const stringableValue = new Proxy(new Error("boom"), {
+    get(target, prop) {
+      if (prop === "message") return { toString: () => "stringable message" };
+      return Reflect.get(target, prop);
+    },
+  });
+  assert.equal(failureMessage(stringableValue), "stringable message");
+});
+
+// A promise can reject with a Proxy whose traps throw while the settlement
+// path merely formats it: getPrototypeOf (the instanceof check in
+// failureMessage) or the message getter. Formatting must stay total so
+// settleStatus runs, the key drains, the control is restored, and a safe
+// failure message replaces the pending label.
+test("an action rejection whose prototype lookup throws still drains the registry", async () => {
+  await scriptContext();
+  const app = statusApp();
+  const hostile = new Proxy({}, {
+    getPrototypeOf() {
+      throw new Error("prototype trap");
+    },
+  });
+  globalThis.fetch = () => Promise.reject(hostile);
+  const button = new ActionButton({ workflowSchedule: "t-0001", project: "p-alpha" });
+
+  await handleAction(app, { target: button, preventDefault() {} });
+
+  assert.deepEqual(app.statuses, ["Scheduling t-0001\u2026", "Request failed"]);
+  assert.equal(button.disabled, false, "the control is restored");
+  assert.equal(button.getAttribute("aria-busy"), null);
+  assert.equal(button.classList.contains("is-busy"), false);
+  assert.equal(inFlight.size, 0, "the in-flight registry drains on a hostile rejection");
+});
+
+test("an action rejection whose message getter throws still drains the registry", async () => {
+  await scriptContext();
+  const app = statusApp();
+  const hostile = new Proxy(new Error("boom"), {
+    get(target, prop) {
+      if (prop === "message") throw new Error("message trap");
+      return Reflect.get(target, prop);
+    },
+  });
+  globalThis.fetch = () => Promise.reject(hostile);
+  const button = new ActionButton({ workflowSchedule: "t-0001", project: "p-alpha" });
+
+  await handleAction(app, { target: button, preventDefault() {} });
+
+  assert.deepEqual(app.statuses, ["Scheduling t-0001\u2026", "Request failed"]);
+  assert.equal(button.disabled, false, "the control is restored");
+  assert.equal(button.getAttribute("aria-busy"), null);
+  assert.equal(button.classList.contains("is-busy"), false);
+  assert.equal(inFlight.size, 0, "the in-flight registry drains on a hostile rejection");
+});
+
+test("an action rejection whose message is a hostile non-string still drains the registry", async () => {
+  await scriptContext();
+  const app = statusApp();
+  // The message getter returns a truthy object whose stringification throws:
+  // the old formatter returned that raw value and the status line threw on
+  // textContent assignment. It must coerce inside failureMessage instead.
+  const hostile = new Proxy(new Error("boom"), {
+    get(target, prop) {
+      if (prop === "message") {
+        return {
+          toString() {
+            throw new Error("stringification trap");
+          },
+        };
+      }
+      return Reflect.get(target, prop);
+    },
+  });
+  globalThis.fetch = () => Promise.reject(hostile);
+  const button = new ActionButton({ workflowSchedule: "t-0001", project: "p-alpha" });
+
+  await handleAction(app, { target: button, preventDefault() {} });
+
+  assert.deepEqual(app.statuses, ["Scheduling t-0001\u2026", "Request failed"]);
+  assert.equal(button.disabled, false, "the control is restored");
+  assert.equal(button.getAttribute("aria-busy"), null);
+  assert.equal(button.classList.contains("is-busy"), false);
+  assert.equal(inFlight.size, 0, "the in-flight registry drains on a hostile rejection");
+});
+
+test("a hostile form rejection still drains the registry and shows a safe failure", async () => {
+  await scriptContext();
+  const app = statusApp();
+  const hostile = new Proxy({}, {
+    getPrototypeOf() {
+      throw new Error("prototype trap");
+    },
+  });
+  globalThis.fetch = () => Promise.reject(hostile);
+  const submitter = new ActionButton();
+  const form = {
+    tagName: "FORM",
+    dataset: { project: "p-alpha", taskForm: "t-0001", taskFormMode: "edit" },
+    elements: {
+      priority: { value: "0" },
+      title: { value: "Renamed" },
+      body: { value: "" },
+      flow_id: { value: "" },
+    },
+    reportValidity() {
+      return true;
+    },
+    querySelector(selector) {
+      return selector === '[type="submit"]' ? submitter : null;
+    },
+  };
+
+  const handled = await handleFormSubmit(app, { target: form, preventDefault() {} });
+
+  assert.equal(handled, true);
+  assert.deepEqual(app.statuses, ["Saving task\u2026", "Request failed"]);
+  assert.equal(submitter.disabled, false, "the submit control is restored");
+  assert.equal(inFlight.size, 0, "the in-flight registry drains on a hostile rejection");
 });
 
 // Two distinct mutations may be in flight at once; the shared status line must

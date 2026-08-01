@@ -180,7 +180,9 @@ export const ACTIONS = {
     try {
       await apiPost(taskConsoleAPIPath(dataset.project, taskID), { harness: "shell" });
     } catch (error) {
-      sessionError = error.message || String(error);
+      // failureMessage is total even for a hostile rejection value, so the
+      // session note never aborts the take-over settlement.
+      sessionError = failureMessage(error);
     }
     await app.refresh();
     return sessionError || `Opened an interactive session on ${taskID}`;
@@ -697,11 +699,30 @@ const PENDING_LABELS = {
 // failureMessage renders an arbitrary rejection value as a status-line string.
 // A promise may reject with something that is not an Error (fetch middleware,
 // aborts, or a bare `reject(null)`), so reading `error.message` directly can
-// itself throw. The settlement catch paths must stay total: if formatting the
-// failure threw, settleStatus would never run and the in-flight key would leak,
-// permanently disabling the control after a repaint.
+// itself throw. A rejected Proxy can go further and throw from its
+// getPrototypeOf trap (the instanceof check) or from the message/name getters.
+// The settlement catch paths must stay total: if formatting the failure threw,
+// settleStatus would never run and the in-flight key would leak, permanently
+// disabling the control after a repaint.
 export function failureMessage(error) {
-  if (error instanceof Error) return error.message || error.name || "Failed";
+  // Even the Error branch needs the guard: instanceof walks the rejection's
+  // prototype chain and message/name run its getters, either of which a
+  // hostile rejection can make throw. The getters can also hand back a
+  // non-string value; coercing inside the guard keeps the return value a
+  // string, so the status line's textContent assignment cannot throw on a
+  // value whose stringification is hostile.
+  try {
+    if (error instanceof Error) {
+      const message = error.message;
+      if (message) return String(message);
+      const name = error.name;
+      if (name) return String(name);
+      return "Failed";
+    }
+  } catch {
+    // A hostile rejection value can throw even on instanceof, or its
+    // message/name can resist stringification; fall through.
+  }
   if (error === null || error === undefined) return "Request failed";
   if (typeof error === "string") return error;
   try {

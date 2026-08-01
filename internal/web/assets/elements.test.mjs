@@ -2135,6 +2135,32 @@ test("a non-Error review rejection still drains the registry and shows a final f
   appNode.remove();
 });
 
+// A verdict POST can reject with a Proxy whose traps throw while the
+// settlement path merely formats it; the review submission must still settle
+// the key, restore the control, and show a safe failure message.
+test("a hostile review rejection still drains the registry and shows a safe failure", async () => {
+  const root = globalThis.document.body;
+  const hostile = new Proxy(new Error("boom"), {
+    get(target, prop) {
+      if (prop === "message") throw new Error("message trap");
+      return Reflect.get(target, prop);
+    },
+  });
+  stubReviewFetch(() => Promise.reject(hostile));
+  const { appNode, change, statuses } = mountChange(root, reviewChangeData());
+  await flush();
+
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  await change.handleClick({ target: approve, preventDefault() {} });
+
+  assert.deepEqual(statuses, ["Approving\u2026", "Request failed"]);
+  assert.equal(approve.disabled, false, "the verdict control is restored");
+  assert.equal(approve.getAttribute("aria-busy"), null);
+  assert.equal(inFlight.size, 0, "the in-flight registry drains on a hostile rejection");
+  change.remove();
+  appNode.remove();
+});
+
 // --- Change-tab revalidation lifecycle (flow-task-detail) -------------------
 //
 // A task poll delivers a brand-new model object every interval, so the Change
