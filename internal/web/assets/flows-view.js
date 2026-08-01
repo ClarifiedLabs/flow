@@ -685,12 +685,29 @@ export function flowPayloadFromEditorView(form) {
   };
 }
 
+// cloneFlowName picks an available deterministic copy name. The initial copy
+// keeps the classic "<name> (copy)" suffix; when that name is already taken,
+// an incremented suffix ("<name> (copy 2)", "<name> (copy 3)", ...) is chosen
+// so repeated clones of the same source do not collide with the flow-name
+// uniqueness rule.
+export function cloneFlowName(name, existingNames = []) {
+  const base = name || "flow";
+  const taken = new Set(existingNames);
+  if (!taken.has(`${base} (copy)`)) return `${base} (copy)`;
+  for (let index = 2; ; index++) {
+    const candidate = `${base} (copy ${index})`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
 // cloneFlowView builds a create-flow payload from an existing flow so it can
 // be saved as a new, editable copy: a starting point for a custom version.
 // Node ids/positions and the builtin/default flags are dropped (the server
 // assigns fresh ids; a new flow is never builtin or default), and the name gets
-// a copy suffix that the author can rename before saving.
-export function cloneFlowView(flow) {
+// a copy suffix that the author can rename before saving. When existingNames
+// (the active project's flow names) already contains the initial copy name, an
+// available incremented suffix is used instead.
+export function cloneFlowView(flow, existingNames = []) {
   const name = value(flow, "name", "Name") || "flow";
   const nodes = (value(flow, "nodes", "Nodes") || []).map((node) => ({
     key: value(node, "key", "Key"),
@@ -704,7 +721,7 @@ export function cloneFlowView(flow) {
     to: value(edge, "to", "To"),
   }));
   return {
-    name: name + " (copy)",
+    name: cloneFlowName(name, existingNames),
     description: value(flow, "description", "Description") || "",
     start_node: value(flow, "start_node", "StartNode") || "",
     transition_budget: Number(value(flow, "transition_budget", "TransitionBudget") || 0) || undefined,
@@ -729,7 +746,8 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
       const source = (flows || []).find((flow) => value(flow, "id", "ID") === button.dataset.cloneFlow);
       if (!source) return;
       try {
-        const response = await apiPost(flowsAPIBase(project.id), cloneFlowView(source));
+        const existingNames = (flows || []).map((flow) => value(flow, "name", "Name"));
+        const response = await apiPost(flowsAPIBase(project.id), cloneFlowView(source, existingNames));
         const created = value(response, "flow", "Flow") || response || {};
         state.editingFlowID = value(created, "id", "ID") || "";
         await reload();

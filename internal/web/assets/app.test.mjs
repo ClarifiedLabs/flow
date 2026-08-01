@@ -4974,6 +4974,11 @@ test("cloneFlowView builds a create payload that copies the graph under a new na
   });
 
   assert.equal(payload.name, "coding (copy)");
+  // The initial copy name is reused when it is available, and an incremented
+  // deterministic suffix is chosen when the project already has the copy.
+  assert.equal(context.cloneFlowView({ name: "coding" }, ["coding", "coding (copy)"]).name, "coding (copy 2)");
+  assert.equal(context.cloneFlowView({ name: "coding" }, ["coding", "coding (copy)", "coding (copy 2)"]).name, "coding (copy 3)");
+  assert.equal(context.cloneFlowView({ name: "coding" }, ["coding", "other"]).name, "coding (copy)");
   assert.equal(payload.description, "Ship it");
   assert.equal(payload.start_node, "implement");
   assert.equal(payload.transition_budget, 75);
@@ -5052,6 +5057,65 @@ test("clone flow button posts a copied create payload and opens the new flow edi
   assert.equal(state.editingFlowID, "fl-new");
   assert.equal(reloaded, 1);
   assert.deepEqual(statuses, ["flow cloned; rename and edit your copy"]);
+});
+
+test("clone flow button posts an incremented copy name when the copy already exists", async () => {
+  const context = await scriptContext();
+  const listeners = new Map();
+  const cloneButton = {
+    dataset: { cloneFlow: "fl-1" },
+    addEventListener(event, handler) {
+      listeners.set(event, handler);
+    },
+  };
+  const section = {
+    querySelector() {
+      return null; // no inline editor form open
+    },
+    querySelectorAll(selector) {
+      return selector === "[data-clone-flow]" ? [cloneButton] : [];
+    },
+  };
+  let reloaded = 0;
+  const app = {
+    querySelector(selector) {
+      return selector === "[data-flows-section]" ? section : null;
+    },
+    load() {
+      reloaded += 1;
+    },
+    setStatus() {},
+  };
+
+  const fetchCalls = [];
+  globalThis.fetch = (path, options) => {
+    fetchCalls.push({ path, options });
+    return Promise.resolve({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ flow: { id: "fl-new" } }),
+    });
+  };
+
+  const state = { editingFlowID: "" };
+  // The project already contains the first clone, so the repeated clone must
+  // submit the next available suffix instead of colliding on the name.
+  const flows = [
+    { id: "fl-1", name: "coding", nodes: [], edges: [] },
+    { id: "fl-2", name: "coding (copy)", nodes: [], edges: [] },
+  ];
+  context.bindFlowsSectionView(app, { id: "p-alpha" }, flows, [], state);
+
+  await listeners.get("click")();
+
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/flows");
+  assert.equal(fetchCalls[0].options.method, "POST");
+  const body = JSON.parse(fetchCalls[0].options.body);
+  assert.equal(body.name, "coding (copy 2)");
+  // The created flow still opens in the inline editor.
+  assert.equal(state.editingFlowID, "fl-new");
+  assert.equal(reloaded, 1);
 });
 
 test("flows view renders agent definitions and flow tables for the active project", async () => {
