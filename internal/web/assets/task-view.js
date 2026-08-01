@@ -111,11 +111,19 @@ export function relationKindOptionsView(selectedKind = "") {
 // relationPickerRowView renders one picker row: a kind select, a target task
 // id input, and a remove button. Rows are appended to [data-relation-rows]
 // after render, so the markup here is the initial empty state.
+//
+// DEFAULT_RELATION_KIND is the kind a new row starts on. The picker's rows
+// default to a source-outward kind (related_to): the new task is the relation
+// source, so several default rows with distinct targets submit as ordinary
+// create-payload relations, and the one-parent limit only applies when the
+// user explicitly picks "child of".
+export const DEFAULT_RELATION_KIND = "related_to";
+
 export function relationPickerRowView() {
   return `
     <div class="relation-row" data-relation-row>
       <select name="relation_kind" data-relation-kind>
-        ${relationKindOptionsView()}
+        ${relationKindOptionsView(DEFAULT_RELATION_KIND)}
       </select>
       <input name="relation_target" data-relation-target placeholder="Task id" list="relation-target-tasks">
       <button class="button secondary relation-remove" type="button" data-relation-remove aria-label="Remove relation">&times;</button>

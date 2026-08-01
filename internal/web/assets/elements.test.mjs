@@ -1566,11 +1566,34 @@ test("the relation picker adds and removes rows", () => {
   addButton.click();
   assert.equal(rows.children.length, 3);
   const firstRow = rows.children[0];
-  assert.equal(firstRow.querySelector("[data-relation-kind]").children[0].getAttribute("value"), "parent_of");
   assert.ok(firstRow.querySelector("[data-relation-target]"));
 
   firstRow.querySelector("[data-relation-remove]").click();
   assert.equal(rows.children.length, 2);
+});
+
+test("relation picker rows default to a source-outward kind, initial and added", () => {
+  const app = { projects: [{ id: "p-1", name: "flow" }], tasks: [] };
+  const host = document.createElement("div");
+  host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
+  const form = host.querySelector("[data-task-form]");
+  bindRelationsPickerView(form);
+  const rows = form.querySelector("[data-relation-rows]");
+  const addButton = form.querySelector("[data-relation-add]");
+
+  const kindOf = (row) => {
+    const select = row.querySelector("[data-relation-kind]");
+    return select.children.find((option) => option.getAttribute("selected") !== null).getAttribute("value");
+  };
+  const kinds = (rows) => Array.from(rows.children).map(kindOf);
+
+  // The initial row defaults to the source-outward kind, and every row added
+  // later does too, so several default rows with distinct targets never trip
+  // the one-parent validation.
+  assert.deepEqual(kinds(rows), ["related_to"]);
+  addButton.click();
+  addButton.click();
+  assert.deepEqual(kinds(rows), ["related_to", "related_to", "related_to"]);
 });
 
 test("relationTargetSuggestionsView is project-scoped and title-optional", () => {

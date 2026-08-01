@@ -655,7 +655,10 @@ test("task form renders the relation picker only in create mode", async () => {
   assert.match(createHTML, /data-relation-add/);
   assert.match(createHTML, /<option value="parent_of" >child of<\/option>/);
   assert.match(createHTML, /<option value="blocks" >blocks<\/option>/);
-  assert.match(createHTML, /<option value="related_to" >related to<\/option>/);
+  assert.match(createHTML, /<option value="related_to" selected>related to<\/option>/);
+  // The initial picker row defaults to a source-outward kind, so a fresh
+  // create form never starts on child-of.
+  assert.match(createHTML, /data-relation-kind>[\s\S]*?<option value="related_to" selected>/);
 
   const editHTML = app.renderTaskForm({ title: "T" }, { taskID: "t-alpha-0001", projectID: "p-alpha" });
   assert.doesNotMatch(editHTML, /data-relation-picker/);
@@ -959,6 +962,34 @@ test("new task form rejects more than one child-of row before any request", asyn
   assert.equal(handled, true);
   assert.equal(fetchCalls.length, 0, "no create POST for an invalid child-of set");
   assert.match(status, /one parent/);
+});
+
+test("new task form accepts multiple default-kind rows with distinct targets", async () => {
+  const fetchCalls = [];
+  await scriptContext({}, {
+    history: { pushState() {} },
+    fetch(path, options) {
+      fetchCalls.push({ path, options });
+      return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ task: { id: "t-alpha-0001" } }) });
+    },
+  });
+  // The picker's default kind is source-outward (related_to), so several rows
+  // left on their default with distinct targets are plain create-payload
+  // relations — they must not trip the one-parent child-of validation.
+  const form = createFormWithRelations([
+    relationRow("related_to", "t-alpha-0002"),
+    relationRow("related_to", "t-alpha-0003"),
+  ]);
+  const app = { setStatus() {}, async load() {}, async refresh() {} };
+
+  const handled = await handleFormSubmit(app, { target: form, preventDefault() {} });
+
+  assert.equal(handled, true);
+  assert.equal(fetchCalls.length, 1);
+  assert.deepEqual(JSON.parse(fetchCalls[0].options.body).relations, [
+    { target_task_id: "t-alpha-0002", kind: "related_to" },
+    { target_task_id: "t-alpha-0003", kind: "related_to" },
+  ]);
 });
 // A button with just enough surface for handleAction's synchronous pending
 // state: a dataset, a disabled flag, and attribute/class tracking.
