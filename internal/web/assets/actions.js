@@ -525,7 +525,14 @@ export function actionBusyKey(key, dataset) {
 // comes from data-task, which every per-task form carries, falling back to
 // the attribute's own value for forms like taskForm whose data value already
 // is the task id. The thread reply form's data value is the thread id, not a
-// task id, so it is read directly. formBusyKey lives here, next to the
+// task id, so it is read directly. Attention reply forms go one level deeper:
+// the same task can carry several pending status-log questions, each with its
+// own reply form, so the key also carries the question's data-status-log-id —
+// two replies for different questions on one task may submit concurrently,
+// while a duplicate reply for the same question (including a replacement form
+// a repaint re-rendered) stays suppressed. Like every other part of the key,
+// the status-log id is a data-attribute value, not the DOM node itself, so the
+// identity is stable across re-renders. formBusyKey lives here, next to the
 // registry, so applyBusyState can re-mark a replacement form's busy control
 // without importing forms.js (which already imports this module).
 export function formBusyKey(key, form) {
@@ -536,7 +543,9 @@ export function formBusyKey(key, form) {
     key === "threadReplyForm"
       ? String(dataset.threadReplyForm ?? "")
       : String(dataset.task ?? dataset[key] ?? "");
-  return `form:${key}:${project}:${target}`;
+  const question =
+    key === "attentionReplyForm" ? `:${String(dataset.statusLogId ?? "")}` : "";
+  return `form:${key}:${project}:${target}${question}`;
 }
 
 // formBusyControl picks the live control a pending form submission marks

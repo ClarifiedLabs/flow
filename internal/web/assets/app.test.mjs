@@ -2309,6 +2309,146 @@ test("multi-project create forms for different projects submit concurrently", as
   assert.equal(inFlight.size, 0);
 });
 
+test("attention reply busy keys scope to question, task, and project", () => {
+  const base = { attentionReplyForm: "t-alpha-0001", task: "t-alpha-0001", project: "p-alpha", statusLogId: "7" };
+  const questionA = formBusyKey("attentionReplyForm", { dataset: base });
+  assert.equal(questionA, "form:attentionReplyForm:p-alpha:t-alpha-0001:7");
+  // A different pending question on the same task is a different busy target.
+  assert.notEqual(questionA, formBusyKey("attentionReplyForm", { dataset: { ...base, statusLogId: "9" } }));
+  // Project/task isolation is unchanged for attention replies.
+  assert.notEqual(questionA, formBusyKey("attentionReplyForm", { dataset: { ...base, task: "t-alpha-0002" } }));
+  assert.notEqual(questionA, formBusyKey("attentionReplyForm", { dataset: { ...base, project: "p-beta" } }));
+  // A form without a status-log id still keys on project and task alone, and
+  // other forms' keys are untouched.
+  assert.equal(
+    formBusyKey("attentionReplyForm", { dataset: { attentionReplyForm: "t-alpha-0001", project: "p-alpha" } }),
+    "form:attentionReplyForm:p-alpha:t-alpha-0001:",
+  );
+  assert.equal(formBusyKey("taskForm", { dataset: { taskForm: "t-alpha-0001", project: "p-alpha" } }), "form:taskForm:p-alpha:t-alpha-0001");
+  assert.equal(formBusyKey("threadReplyForm", { dataset: { threadReplyForm: "th-1", project: "p-alpha" } }), "form:threadReplyForm:p-alpha:th-1");
+});
+
+test("attention reply forms for different questions on one task submit concurrently", async () => {
+  await scriptContext({}, {
+    history: { pushState() {} },
+  });
+  const app = statusApp();
+  app.load = async () => {};
+  let requests = 0;
+  const resolvers = [];
+  globalThis.fetch = () => {
+    requests += 1;
+    return new Promise((resolve) => {
+      resolvers.push(() => resolve({ ok: true, json: () => Promise.resolve({}) }));
+    });
+  };
+  // The review panel renders both data-task and the attribute; the attention
+  // panel renders only the attribute with the same value.
+  function replyForm(statusLogID) {
+    const submitButton = new ActionButton({});
+    return {
+      submitButton,
+      form: {
+        tagName: "FORM",
+        dataset: {
+          attentionReplyForm: "t-alpha-0001",
+          task: "t-alpha-0001",
+          project: "p-alpha",
+          statusLogId: String(statusLogID),
+        },
+        elements: { message: { value: `reply ${statusLogID}` } },
+        reportValidity() {
+          return true;
+        },
+        querySelector(selector) {
+          return selector === '[type="submit"]' ? submitButton : null;
+        },
+      },
+    };
+  }
+  const first = replyForm(7);
+  const second = replyForm(9);
+
+  const firstHandled = handleFormSubmit(app, { target: first.form, preventDefault() {} });
+  assert.equal(requests, 1);
+  assert.equal(first.submitButton.disabled, true);
+
+  // The second question is a different status-log target, so its reply is not
+  // suppressed by the in-flight reply to the first.
+  const secondHandled = handleFormSubmit(app, { target: second.form, preventDefault() {} });
+  assert.equal(requests, 2, "a reply to a different question is not blocked by the in-flight reply");
+  assert.equal(second.submitButton.disabled, true);
+
+  resolvers[0]();
+  resolvers[1]();
+  await firstHandled;
+  await secondHandled;
+  assert.equal(inFlight.size, 0);
+});
+
+test("a replacement attention reply form for the same question stays suppressed", async () => {
+  await scriptContext({}, {
+    history: { pushState() {} },
+  });
+  const app = statusApp();
+  app.load = async () => {};
+  let requests = 0;
+  const resolvers = [];
+  globalThis.fetch = () => {
+    requests += 1;
+    return new Promise((resolve) => {
+      resolvers.push(() => resolve({ ok: true, json: () => Promise.resolve({}) }));
+    });
+  };
+  function replyForm() {
+    const submitButton = new ActionButton({});
+    return {
+      submitButton,
+      form: {
+        tagName: "FORM",
+        dataset: {
+          attentionReplyForm: "t-alpha-0001",
+          task: "t-alpha-0001",
+          project: "p-alpha",
+          statusLogId: "7",
+        },
+        elements: { message: { value: "same reply" } },
+        reportValidity() {
+          return true;
+        },
+        querySelector(selector) {
+          return selector === '[type="submit"]' ? submitButton : null;
+        },
+      },
+    };
+  }
+  const first = replyForm();
+  const replacement = replyForm();
+
+  const firstHandled = handleFormSubmit(app, { target: first.form, preventDefault() {} });
+  assert.equal(requests, 1);
+  assert.equal(first.submitButton.disabled, true);
+
+  // A repaint replaces the form node, but the busy identity is derived from
+  // the data attributes, so the replacement still collides with the in-flight
+  // reply to the same status-log question.
+  const duplicateHandled = handleFormSubmit(app, { target: replacement.form, preventDefault() {} });
+  assert.equal(requests, 1, "a replacement form for the same question stays suppressed");
+  assert.equal(replacement.submitButton.disabled, false);
+
+  resolvers[0]();
+  await firstHandled;
+  await duplicateHandled;
+  assert.equal(inFlight.size, 0);
+
+  // Once the first request settles, the replacement can submit.
+  const retryHandled = handleFormSubmit(app, { target: replacement.form, preventDefault() {} });
+  assert.equal(requests, 2, "the replacement submits after the in-flight reply settles");
+  resolvers[1]();
+  await retryHandled;
+  assert.equal(inFlight.size, 0);
+});
+
 test("workflow skip eligibility excludes author and side-effecting steps", () => {
   assert.equal(workflowStepCanBeSkipped("automated_checks"), true);
   assert.equal(workflowStepCanBeSkipped("change_review"), true);
