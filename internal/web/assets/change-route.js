@@ -6,7 +6,8 @@
 // reviewer never saw. A pair only installs once it is verified for one head:
 // the metadata must name a head, and the diff must name that same head. The
 // server's explicit no-diff response (a 200 naming the head with no files when
-// a diff is unavailable) still verifies, so it installs as an empty diff. A
+// a diff is unavailable) mounts with the metadata, and flow-change renders it
+// as an explicit pending state rather than a real diff. A
 // headless change stays explicit: it mounts with an empty diff and no diff
 // fetch. A failed diff fetch, a headless diff, or a diff for another head
 // verifies nothing and is retried (up to three reads); a head that keeps

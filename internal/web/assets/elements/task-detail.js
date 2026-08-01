@@ -150,12 +150,14 @@ export class FlowTaskDetail extends FlowElement {
       // A fresh model for the same task/change/head is a poll or a refresh.
       // The cached change predates it, so the next Change-tab paint
       // revalidates the cache in place rather than serving it forever. A cache
-      // that already fetched ahead of the poll is fresh; leave it alone.
-      // paintChange clears changeAheadKey once the model catches up (or moves
-      // past it), and bounds how long a pre-adoption head may keep the ahead
-      // cache, so subsequent same-head polls revalidate normally and a
-      // persistent rollback eventually reloads the current head.
-      if (this.changeData && !this.changeAheadKey) this.changeStale = true;
+      // that already fetched ahead of the poll is fresh; leave it alone — but
+      // a pair whose diff is still pending must keep revalidating so the diff
+      // retries on every poll, ahead window or not. paintChange clears
+      // changeAheadKey once the model catches up (or moves past it), and bounds
+      // how long a pre-adoption head may keep the ahead cache, so subsequent
+      // same-head polls revalidate normally and a persistent rollback
+      // eventually reloads the current head.
+      if (this.changeData && (!this.changeAheadKey || this.changeDiffPending())) this.changeStale = true;
       // A failed load has no pair to revalidate, but the same-key poll still
       // means the failure may be transient: mark it for a retry on the next
       // Change-tab paint instead of leaving the error card up until the user
@@ -356,6 +358,24 @@ export class FlowTaskDetail extends FlowElement {
     this.changePendingSeen = false;
   }
 
+  // changeDiffPending reports whether the cached pair installed without a
+  // verified diff: the change was headless or /diff was unavailable when the
+  // pair loaded. The diff is retried on every poll until it lands (or the
+  // change moves), and the element renders an explicit no-diff-yet state.
+  changeDiffPending() {
+    return Boolean(this.changeData && !value(this.changeData.diff || {}, "head_sha", "HeadSHA"));
+  }
+
+  // diffUnavailable reports whether a /diff response is not a usable diff: a
+  // failed fetch, or the server's explicit no-diff answer (HTTP 200 naming the
+  // head it would diff, with available:false and an unavailable_reason). An
+  // unavailable response carries no files and the diff may become available
+  // later, so it never verifies a metadata/diff pair: the pair stays pending
+  // and /diff keeps being retried on later polls.
+  diffUnavailable(diff) {
+    return !diff || diff.available === false || Boolean(value(diff, "unavailable_reason", "UnavailableReason"));
+  }
+
   paintChange(model, panel) {
     const change = model.change;
     if (!change) {
@@ -478,39 +498,76 @@ export class FlowTaskDetail extends FlowElement {
   // change can advance between the two GETs, and /diff answers for the head
   // the server then holds — installing that diff under the earlier metadata
   // would show the new head's code under the old head's name, and let a
-  // verdict target code the reviewer never saw. A pair only installs once it
-  // is verified for one head: the metadata must name this change, and the diff
-  // must name the metadata's head. The server's explicit no-diff response (a
-  // 200 with no files when a diff is unavailable) still names that head, so it
-  // installs as an empty diff. A headless or wrong-change metadata response, a
-  // failed diff fetch, or a headless/mismatched diff is retried (up to three
-  // reads); a head that keeps moving — or a response that never verifies —
-  // fails with a retryable error instead of installing an unverified pair.
-  // When the pair lands for a head the poll has not reported yet, the cache key
-  // advances to that head so the poll that does report it finds a matching key
-  // and skips a second reload and its "Loading change" flash.
+  // verdict target code the reviewer never saw. A headed pair only installs
+  // once it is verified for one head: the metadata must name this change, the
+  // diff must name the metadata's head, and the diff must be a real one — the
+  // server's explicit no-diff response (a 200 naming the head with
+  // available:false when a diff is unavailable) carries no files and never
+  // verifies a pair, so it installs as a pending pair instead of an empty
+  // diff.
+  //
+  // Metadata that names no head is not an error: in-progress authoring can
+  // legitimately expose a headless selected change, and retrying cannot
+  // manufacture a head. It installs immediately as a pending pair — metadata
+  // plus an explicit no-diff-yet state — and the next poll that reports a head
+  // resets the cache and loads the verified pair. Likewise, a headed metadata
+  // response whose diff is temporarily unavailable (a failed fetch, a headless
+  // diff, or the change moved again between the two GETs) installs as a
+  // pending pair instead of failing with a misleading "advanced" error: the
+  // next poll's revalidation retries the diff in place, and the diff that did
+  // come back names another head and is never paired with this metadata, so
+  // two heads cannot mix on screen. Only metadata that keeps naming a
+  // different change retries (up to three reads) and then fails with a
+  // retryable error. When the pair lands for a head the poll has not reported
+  // yet, the cache key advances to that head so the poll that does report it
+  // finds a matching key and skips a second reload and its "Loading change"
+  // flash.
   loadChange(id, key) {
     const generation = this.changeGeneration;
     this.changePromise = (async () => {
       try {
         let loaded = null;
-        for (let attempt = 0; attempt < 3 && !loaded; attempt += 1) {
+        let pending = null;
+        for (let attempt = 0; attempt < 3 && !loaded && !pending; attempt += 1) {
           const data = await apiGet(`/v2/changes/${encodeURIComponent(id)}`);
           if (generation !== this.changeGeneration || key !== this.changeKey) return;
           const change = value(data, "change", "Change") || {};
           const changeID = String(value(change, "id", "ID") || "");
           const headSHA = String(value(change, "head_sha", "HeadSHA") || "");
-          // Metadata that does not name this change, or names no head, cannot
-          // anchor a verified pair; skip the diff fetch and retry the read.
-          if (changeID !== id || !headSHA) continue;
+          // Metadata that does not name this change cannot anchor a pair; retry
+          // the read — the selected change may have moved.
+          if (changeID !== id) continue;
+          if (!headSHA) {
+            // A headless change is legitimate mid-authoring: no head exists to
+            // verify a diff against, so render the metadata with an explicit
+            // pending diff instead of retrying into a terminal error. The next
+            // poll that reports a head resets the cache and loads the pair.
+            pending = { data, diff: {}, headSHA: "" };
+            break;
+          }
           const diff = await apiGet(`/v2/changes/${encodeURIComponent(id)}/diff`).catch(() => null);
           if (generation !== this.changeGeneration || key !== this.changeKey) return;
           const diffHead = String(value(diff, "head_sha", "HeadSHA") || "");
-          // Only a verified diff installs: one naming the metadata's head. A
-          // failed fetch, a headless diff, or one for another head verifies
-          // nothing and is retried.
-          if (!diff || diffHead !== headSHA) continue;
-          loaded = { data, diff, headSHA };
+          if (diff && diffHead === headSHA && !this.diffUnavailable(diff)) {
+            // A verified pair: the diff names the metadata's head and is a real
+            // diff, not the server's explicit unavailable response.
+            loaded = { data, diff, headSHA };
+          } else {
+            // The metadata is headed but its diff is not available: a failed
+            // fetch, a headless diff, the change moved again between the two
+            // GETs, or the server's explicit no-diff response. None of those
+            // verifies, so install the metadata with an explicit pending diff;
+            // the next poll's revalidation retries the diff in place. A diff
+            // that did come back names another head and is never paired with
+            // this metadata, so two heads cannot mix on screen.
+            pending = { data, diff: {}, headSHA };
+            break;
+          }
+        }
+        if (pending) {
+          this.changeData = { ...pending.data, diff: pending.diff };
+          if (pending.headSHA && pending.headSHA !== key.split(":").pop()) this.adoptChangeHead(id, pending.headSHA, key);
+          return;
         }
         if (!loaded) throw new Error("The change advanced while it was loading");
         this.changeData = { ...loaded.data, diff: loaded.diff };
@@ -541,13 +598,13 @@ export class FlowTaskDetail extends FlowElement {
   // drops drafts anchored to the old head's lines, and the poll that reports
   // that head finds a matching key, so it neither reloads nor flashes
   // "Loading change". The adoption happens only once the refreshed metadata
-  // names this change at the new head AND the diff verifies against that head
-  // (or names the head on an explicit, successful no-diff response). A
-  // headless or wrong-change metadata response, or a missing, headless, or
-  // mismatched diff, keeps the prior coherent pair in place and the cache
-  // stale, so the next poll retries the revalidation; adopting on metadata
-  // alone would let the matching poll's ahead-key suppression skip the
-  // recovery load and render the new head's metadata under the old head's
+  // names this change at the new head AND the diff verifies against that head.
+  // A headless or wrong-change metadata response, or a missing, headless,
+  // mismatched, or explicitly unavailable diff (the server's HTTP 200
+  // available:false answer), keeps the prior coherent pair in place and the
+  // cache stale, so the next poll retries the revalidation; adopting on
+  // metadata alone would let the matching poll's ahead-key suppression skip
+  // the recovery load and render the new head's metadata under the old head's
   // diff.
   revalidateChange(id, key, head) {
     const generation = this.changeGeneration;
@@ -564,8 +621,21 @@ export class FlowTaskDetail extends FlowElement {
         if (changeID !== id || !fetchedHead) return;
         if (fetchedHead === head) {
           // Same head: refresh the metadata around the cached diff, which was
-          // verified for this head when the pair installed.
-          this.changeData = { ...data, diff: this.changeData?.diff || {} };
+          // verified for this head when the pair installed. A pair that
+          // installed pending (a headless change, or /diff unavailable at load
+          // time) has no verified diff to keep, so retry the diff now — only a
+          // real one naming this head installs; a failed, mismatched, or
+          // explicitly unavailable fetch keeps the pending pair and the cache
+          // stays stale for the next poll.
+          const cachedDiff = this.changeData?.diff || {};
+          if (!value(cachedDiff, "head_sha", "HeadSHA")) {
+            const diff = await apiGet(`/v2/changes/${encodeURIComponent(id)}/diff`).catch(() => null);
+            if (generation !== this.changeGeneration || key !== this.changeKey) return;
+            const diffHead = String(value(diff, "head_sha", "HeadSHA") || "");
+            if (diff && diffHead === head && !this.diffUnavailable(diff)) this.changeData = { ...data, diff };
+            return;
+          }
+          this.changeData = { ...data, diff: cachedDiff };
           return;
         }
         // The metadata reports a newer head, but the diff that proves it is still
@@ -581,19 +651,20 @@ export class FlowTaskDetail extends FlowElement {
         const diff = await apiGet(`/v2/changes/${encodeURIComponent(id)}/diff`).catch(() => null);
         if (generation !== this.changeGeneration || key !== this.changeKey) return;
         const diffHead = String(value(diff, "head_sha", "HeadSHA") || "");
-        // Only adopt a verified pair: a diff naming the metadata's head (the
-        // server's explicit no-diff response still names it). A failed fetch, a
-        // headless diff, or one for yet another head (the change moved again)
-        // keeps the prior pair — still verified for its own head — and leaves
-        // the cache stale for the next poll rather than mixing two heads on
-        // screen. A poll that observed this pending head and then diverged back
-        // to the cached head (a rollback) cleared the marker in paintChange, so
-        // the stale revalidation bails here instead of adopting a head the model
-        // has since left. Either way the pending marker has served its purpose.
+        // Only adopt a verified pair: a real diff naming the metadata's head.
+        // A failed fetch, a headless diff, the server's explicit unavailable
+        // response (which names the head but carries no files), or one for yet
+        // another head (the change moved again) keeps the prior pair — still
+        // verified for its own head — and leaves the cache stale for the next
+        // poll rather than mixing two heads on screen. A poll that observed
+        // this pending head and then diverged back to the cached head (a
+        // rollback) cleared the marker in paintChange, so the stale
+        // revalidation bails here instead of adopting a head the model has
+        // since left. Either way the pending marker has served its purpose.
         if (!this.changePendingKey) return;
         this.changePendingKey = "";
         this.changePendingSeen = false;
-        if (!diff || diffHead !== fetchedHead) return;
+        if (this.diffUnavailable(diff) || diffHead !== fetchedHead) return;
         this.changeData = { ...data, diff };
         this.adoptChangeHead(id, fetchedHead, key);
       } catch {
@@ -612,7 +683,10 @@ export class FlowTaskDetail extends FlowElement {
   // records the pre-adoption model head (key) so a repaint that still carries
   // that exact head keeps the fresh pair instead of resetting it. The ahead
   // window starts fresh here: changeAheadSeen counts the polls that keep naming
-  // the pre-adoption head, so a persistent rollback eventually expires it.
+  // the pre-adoption head, so a persistent rollback eventually expires it. The
+  // adopted pair may still be pending its diff (a load adopted the metadata
+  // before /diff became available); the ahead window protects that pair too,
+  // and the pending diff keeps retrying on every poll.
   adoptChangeHead(id, head, key) {
     const next = `${id}:${head}`;
     if (next === key) return;
@@ -620,7 +694,7 @@ export class FlowTaskDetail extends FlowElement {
     this.renderedChangeKey = changeModelKey({ id: this.data?.id, change: { id, head_sha: head } });
     this.changeAheadKey = key;
     this.changeAheadSeen = 0;
-    // An adopted head is verified, so it is no longer pending.
+    // An adopted head is no longer pending verification.
     this.changePendingKey = "";
     this.changePendingSeen = false;
   }

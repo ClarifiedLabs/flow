@@ -50,6 +50,19 @@ export class FlowChange extends FlowElement {
       this.selected = value(files[0] || {}, "path", "Path") || "";
     }
     const reviewState = value(data, "review_state", "ReviewState");
+    // A diff with no head — or the server's explicit unavailable response
+    // (HTTP 200 naming the head with available:false and an
+    // unavailable_reason) — is a pending pair: the change has no head yet
+    // (authoring in progress) or /diff was unavailable when the pair loaded.
+    // Render the metadata with an explicit no-diff-yet state; the task detail
+    // retries the diff on later polls and swaps this out for the real diff.
+    const pending =
+      !value(diff, "head_sha", "HeadSHA") ||
+      diff.available === false ||
+      Boolean(value(diff, "unavailable_reason", "UnavailableReason"));
+    const pendingNote = value(change, "head_sha", "HeadSHA")
+      ? "The diff is not available yet; it will appear here once it is."
+      : "No diff yet — this change has no head yet.";
 
     return `
       <div class="head">
@@ -64,8 +77,10 @@ export class FlowChange extends FlowElement {
         </div>
       </div>
       <div class="body">
-        <div class="files">${renderFileList(files, { selected: this.selected, threads })}</div>
-        <div class="pane"><flow-diff></flow-diff></div>
+        ${pending
+          ? `<div class="empty" data-change-pending>${escapeHTML(pendingNote)}</div>`
+          : `<div class="files">${renderFileList(files, { selected: this.selected, threads })}</div>
+             <div class="pane"><flow-diff></flow-diff></div>`}
       </div>
       <flow-review-bar></flow-review-bar>
     `;

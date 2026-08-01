@@ -2995,21 +2995,20 @@ test("a revalidation whose diff names yet another head keeps the prior pair unti
   detail.remove();
 });
 
-test("a load that never verifies shows a retryable error instead of an unverified pair", async () => {
+test("a load whose metadata never names the selected change shows a retryable error", async () => {
   const root = globalThis.document.body;
   const calls = scriptedChangeFetch([
-    { change: changeResponse("h1"), diff: diffResponse("h2", diffFiles("h2")) },
+    { change: changeResponse("h1", { changeID: "ch-9999" }) },
   ]);
   const detail = await mountTaskDetail(root, "h1");
   await settleChange(detail);
 
-  // Every attempt's diff names another head, so no pair verifies: the tab shows
-  // a retryable error rather than metadata with a diff verified for another
-  // head.
+  // Every attempt's metadata names another change, so nothing can install: the
+  // tab shows a retryable error rather than another change's metadata.
   const panel = detail.querySelector(".panel");
   assert.match(panel.innerHTML, /advanced while it was loading/, "an unverified load fails with a retryable error");
   assert.match(panel.innerHTML, /data-change-retry/, "the error offers a retry");
-  assert.doesNotMatch(panel.innerHTML, /h2\.go/, "no unverified diff is rendered");
+  assert.doesNotMatch(panel.innerHTML, /ch-9999/, "the other change's metadata is never rendered");
   assert.equal(
     calls.filter((path) => path.endsWith("/v2/changes/ch-0001")).length,
     3,
@@ -3021,6 +3020,169 @@ test("a load that never verifies shows a retryable error instead of an unverifie
   panel.querySelector("[data-change-retry]").dispatchEvent(new TestEvent("click", { bubbles: true }));
   await settleChange(detail);
   assert.match(changePanelHTML(detail), /h1\.go/, "the retry renders the verified pair");
+  detail.remove();
+});
+
+test("a headless selected change renders its metadata with an explicit pending diff", async () => {
+  const root = globalThis.document.body;
+  const calls = scriptedChangeFetch([
+    { change: changeResponse("") },
+  ]);
+  const detail = await mountTaskDetail(root, "");
+  await settleChange(detail);
+
+  // No head exists yet, so no diff can verify: the tab renders the change's
+  // metadata with an explicit pending diff instead of a terminal retry error.
+  const html = changePanelHTML(detail);
+  assert.match(html, /ch-0001/, "the headless change's metadata is rendered");
+  assert.match(html, /t-0001/, "the change's task link is rendered");
+  assert.match(html, /No diff yet/, "the pending diff state is explicit");
+  assert.doesNotMatch(html, /advanced while it was loading/, "a headless change is not a loading error");
+  assert.doesNotMatch(detail.querySelector(".panel").innerHTML, /data-change-retry/, "a headless change does not offer a futile retry");
+  assert.deepEqual(
+    calls.filter((path) => path.endsWith("/v2/changes/ch-0001")),
+    ["/ui/api/v2/changes/ch-0001"],
+    "a headless load fetches metadata once and skips the diff",
+  );
+
+  // Authoring finishes: the next poll reports a head and the cache reloads the
+  // verified pair.
+  scriptedChangeFetch([{ change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) }]);
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "a head appears and the verified pair loads");
+  assert.doesNotMatch(changePanelHTML(detail), /No diff yet/, "the pending state clears once a diff exists");
+  detail.remove();
+});
+
+test("a persistently unavailable diff renders a recoverable pending state instead of claiming the change advanced", async () => {
+  const root = globalThis.document.body;
+  const calls = scriptedChangeFetch([
+    { change: changeResponse("h1"), diff: "fail" },
+  ]);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+
+  // The metadata names a head but /diff keeps failing: the tab renders the
+  // metadata with an explicit pending diff rather than the misleading
+  // "advanced while loading" error, and no diff from any head is shown.
+  const html = changePanelHTML(detail);
+  assert.match(html, /ch-0001/, "the headed metadata is rendered");
+  assert.match(html, /not available yet/, "the unavailable diff is explicit");
+  assert.doesNotMatch(html, /advanced while it was loading/, "an unavailable diff is not a head move");
+  assert.doesNotMatch(detail.querySelector(".panel").innerHTML, /data-change-retry/, "the pending state does not offer a terminal retry");
+  assert.doesNotMatch(html, /h1\.go/, "no diff is rendered while it is unavailable");
+  assert.equal(detail.changeKey, "ch-0001:h1", "the pending pair keeps the model head's key");
+  assert.deepEqual(
+    calls.filter((path) => path.startsWith("/ui/api/v2/changes/ch-0001")),
+    ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"],
+    "the load fetched one metadata+diff attempt before installing the pending pair",
+  );
+
+  // The next poll's revalidation retries the diff; it comes back naming a
+  // different head, which must not install under this metadata.
+  scriptedChangeFetch([{ change: changeResponse("h1"), diff: diffResponse("h2", diffFiles("h2")) }]);
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /not available yet/, "a mismatched diff keeps the pending state");
+  assert.doesNotMatch(changePanelHTML(detail), /h2\.go/, "the other head's diff is never rendered");
+
+  // The diff comes back for the right head on a later poll: the verified pair
+  // replaces the pending state.
+  scriptedChangeFetch([{ change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) }]);
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the recovered diff renders");
+  assert.doesNotMatch(changePanelHTML(detail), /not available yet/, "the pending state clears once the diff lands");
+  detail.remove();
+});
+
+test("a load whose diff the server explicitly reports unavailable installs a recoverable pending pair", async () => {
+  const root = globalThis.document.body;
+  // The API's no-diff answer is HTTP 200 naming the head it would diff, with
+  // available:false and an unavailable_reason. It must not install as a
+  // verified empty diff: the tab renders the pending state and keeps retrying
+  // /diff on later same-head polls until the diff becomes available.
+  const calls = scriptedChangeFetch([
+    { change: changeResponse("h1"), diff: { head_sha: "h1", available: false, unavailable_reason: "diff not captured" } },
+    { change: changeResponse("h1"), diff: { head_sha: "h1", available: false, unavailable_reason: "diff not captured" } },
+    { change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) },
+  ]);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+
+  // The headed metadata installs with an explicit pending diff, not an empty
+  // "verified" diff: the unavailable response named the head, so without the
+  // available:false guard it would have passed the head-equality check.
+  const html = changePanelHTML(detail);
+  assert.match(html, /ch-0001/, "the headed metadata is rendered");
+  assert.match(html, /data-change-pending/, "an explicit unavailable response renders the pending diff state");
+  assert.match(html, /not available yet/, "the unavailable diff is explicit");
+  assert.doesNotMatch(html, /advanced while it was loading/, "an unavailable diff is not a head move");
+  assert.doesNotMatch(detail.querySelector(".panel").innerHTML, /data-change-retry/, "the pending state does not offer a terminal retry");
+  assert.doesNotMatch(html, /h1\.go/, "no diff is rendered while it is unavailable");
+  assert.equal(detail.changeKey, "ch-0001:h1", "the pending pair keeps the model head's key");
+  assert.deepEqual(
+    calls.filter((path) => path.startsWith("/ui/api/v2/changes/ch-0001")),
+    ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"],
+    "the load fetched one metadata+diff attempt before installing the pending pair",
+  );
+
+  // The next same-head poll's revalidation retries the diff; the server still
+  // reports it explicitly unavailable, so the pending pair stays and the diff
+  // is retried again rather than being accepted as an empty verified diff.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /not available yet/, "a still-unavailable diff keeps the pending state");
+  assert.equal(
+    calls.filter((path) => path.endsWith("/diff")).length,
+    2,
+    "the same-head poll retried the explicitly unavailable diff",
+  );
+
+  // The diff becomes available; the same-head poll installs the verified pair
+  // in place.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the recovered diff renders");
+  assert.doesNotMatch(changePanelHTML(detail), /not available yet/, "the pending state clears once the diff lands");
+  detail.remove();
+});
+
+test("a revalidation whose diff the server explicitly reports unavailable keeps the prior pair until a verified one lands", async () => {
+  const root = globalThis.document.body;
+  // The change moves to h2, but /diff answers with the explicit unavailable
+  // response for h2. That must not adopt h2 with an empty "verified" diff:
+  // the h1 pair stays on screen and the next poll retries the revalidation.
+  scriptedChangeFetch([
+    { change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) },
+    { change: changeResponse("h2"), diff: { head_sha: "h2", available: false, unavailable_reason: "diff not captured" } },
+    { change: changeResponse("h2"), diff: diffResponse("h2", diffFiles("h2")) },
+  ]);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the loaded diff is on screen");
+
+  // The moved head's diff is explicitly unavailable: the prior pair stays, no
+  // head is adopted, and no empty "verified" diff renders under h2.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the prior verified pair stays");
+  assert.doesNotMatch(changePanelHTML(detail), /not available yet/, "the cached pair is not replaced by the unavailable response");
+  assert.equal(detail.changeKey, "ch-0001:h1", "no head is adopted from an unavailable diff");
+
+  // The diff becomes available for h2; the next poll adopts the verified pair.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h2\.go/, "the verified h2 pair is adopted once its diff lands");
+  assert.equal(detail.changeKey, "ch-0001:h2", "the cache re-keys to the adopted head");
   detail.remove();
 });
 
@@ -3092,22 +3254,44 @@ test("a later same-head poll retries a load whose diff fetch failed", async () =
   const detail = await mountTaskDetail(root, "h1");
   await settleChange(detail);
 
+  // The metadata names a head but its diff fetch failed: the load installs a
+  // pending pair instead of a terminal "advanced" error, so the same-head poll
+  // can retry the diff in place.
   const panel = detail.querySelector(".panel");
-  assert.match(panel.innerHTML, /advanced while it was loading/, "a load whose diff never verifies fails with a retryable error");
-  assert.match(panel.innerHTML, /data-change-retry/, "the error offers a retry");
+  assert.match(changePanelHTML(detail), /not available yet/, "a load whose diff fetch failed shows the pending diff state");
+  assert.doesNotMatch(panel.innerHTML, /advanced while it was loading/, "an unavailable diff is not a head move");
+  assert.doesNotMatch(panel.innerHTML, /data-change-retry/, "the pending state does not offer a terminal retry");
   const failed = calls.filter((path) => path.includes("/v2/changes/ch-0001"));
-  assert.equal(
-    failed.filter((path) => !path.endsWith("/diff")).length,
-    3,
-    "the failed load retried its bounded number of change reads",
+  assert.deepEqual(
+    failed,
+    ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"],
+    "the failed load made one change read and one diff read",
   );
 
-  // The diff endpoint recovers; the next same-head poll retries the load.
+  // The diff endpoint recovers; the next same-head poll's revalidation retries
+  // the diff and installs the verified pair in place.
   failDiff = false;
   detail.data = taskDetailModel("h1");
   await flush();
   await settleChange(detail);
-  assert.match(changePanelHTML(detail), /h1\.go/, "the same-head poll retried the load and rendered the pair");
-  assert.doesNotMatch(panel.innerHTML, /advanced while it was loading/, "the error card is gone");
+  assert.match(changePanelHTML(detail), /h1\.go/, "the same-head poll retried the diff and rendered the pair");
+  assert.doesNotMatch(changePanelHTML(detail), /not available yet/, "the pending state clears once the diff lands");
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(failed.length),
+    ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"],
+    "the retry revalidated in place with one fresh change+diff pair",
+  );
+
+  // The recovered pair is an ordinary cached pair: the next same-head poll
+  // revalidates the change only.
+  const caughtUp = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(caughtUp),
+    ["/ui/api/v2/changes/ch-0001"],
+    "a recovered same-head poll revalidates the change only",
+  );
   detail.remove();
 });
