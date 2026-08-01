@@ -1827,12 +1827,14 @@ test("a review verdict marks the button busy and names the in-flight submission"
   await flush();
 
   const approve = change.querySelector('[data-review-verdict="approve"]');
+  const bodyInput = change.querySelector("[data-review-body]");
   const pending = change.handleClick({ target: approve, preventDefault() {} });
 
   // Synchronous pending state, before the network resolves.
   assert.equal(approve.disabled, true);
   assert.equal(approve.getAttribute("aria-busy"), "true");
   assert.equal(approve.classList.contains("is-busy"), true);
+  assert.equal(bodyInput.disabled, true, "the overall-comment input is disabled with the verdict");
   assert.deepEqual(statuses, ["Approving\u2026"]);
 
   resolveRequest();
@@ -1840,6 +1842,7 @@ test("a review verdict marks the button busy and names the in-flight submission"
   assert.equal(approve.disabled, false);
   assert.equal(approve.getAttribute("aria-busy"), null);
   assert.equal(approve.classList.contains("is-busy"), false);
+  assert.equal(bodyInput.disabled, false, "the overall-comment input is restored on success");
   assert.deepEqual(statuses, ["Approving\u2026", "Approved"]);
   change.remove();
   appNode.remove();
@@ -1972,8 +1975,10 @@ test("a repaint while a review is in flight keeps the verdict controls suppresse
   await flush();
 
   const approve = change.querySelector('[data-review-verdict="approve"]');
+  const bodyInput = change.querySelector("[data-review-body]");
   const first = change.handleClick({ target: approve, preventDefault() {} });
   assert.equal(approve.disabled, true);
+  assert.equal(bodyInput.disabled, true, "the overall-comment input is disabled synchronously");
 
   // A poll (or any re-render) replaces the review bar's buttons mid-flight.
   change.invalidate();
@@ -1981,12 +1986,15 @@ test("a repaint while a review is in flight keeps the verdict controls suppresse
 
   const repaintedApprove = change.querySelector('[data-review-verdict="approve"]');
   const repaintedRequestChanges = change.querySelector('[data-review-verdict="request_changes"]');
+  const repaintedBodyInput = change.querySelector("[data-review-body]");
   assert.ok(repaintedApprove && repaintedApprove !== approve, "the bar was replaced by the repaint");
   assert.equal(repaintedApprove.hasAttribute("disabled"), true);
   assert.equal(repaintedApprove.getAttribute("aria-busy"), "true");
   assert.equal(repaintedApprove.classList.contains("is-busy"), true);
   assert.equal(repaintedRequestChanges.hasAttribute("disabled"), true);
   assert.equal(repaintedRequestChanges.getAttribute("aria-busy"), null);
+  assert.ok(repaintedBodyInput && repaintedBodyInput !== bodyInput, "the comment input was replaced by the repaint");
+  assert.equal(repaintedBodyInput.hasAttribute("disabled"), true, "the repainted input stays disabled");
 
   resolveRequest();
   await first;
@@ -1994,6 +2002,7 @@ test("a repaint while a review is in flight keeps the verdict controls suppresse
   assert.equal(repaintedApprove.hasAttribute("disabled"), false);
   assert.equal(repaintedApprove.getAttribute("aria-busy"), null);
   assert.equal(repaintedRequestChanges.disabled, false);
+  assert.equal(repaintedBodyInput.disabled, false, "the repainted input is restored on settle");
   assert.equal(inFlight.size, 0);
   change.remove();
   appNode.remove();
@@ -2012,11 +2021,16 @@ test("a failed review keeps the error on the status line and restores the button
   await flush();
 
   const approve = change.querySelector('[data-review-verdict="approve"]');
-  await change.handleClick({ target: approve, preventDefault() {} });
+  const bodyInput = change.querySelector("[data-review-body]");
+  const pending = change.handleClick({ target: approve, preventDefault() {} });
+  assert.equal(approve.disabled, true);
+  assert.equal(bodyInput.disabled, true, "the overall-comment input is disabled while pending");
+  await pending;
 
   assert.deepEqual(statuses, ["Approving\u2026", "change already merged"]);
   assert.equal(approve.disabled, false);
   assert.equal(approve.getAttribute("aria-busy"), null);
+  assert.equal(bodyInput.disabled, false, "the overall-comment input is restored after failure");
   assert.equal(inFlight.size, 0);
   change.remove();
   appNode.remove();

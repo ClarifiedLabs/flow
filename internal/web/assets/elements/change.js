@@ -144,10 +144,11 @@ export class FlowChange extends FlowElement {
   }
 
   // submitReview gets the same pending state as the action buttons: the
-  // verdict button is marked busy synchronously, the status line names the
-  // in-flight submission, and the shared in-flight registry (keyed by change,
-  // not by DOM node) blocks a duplicate verdict while the first is running —
-  // even if a poll re-render replaced the button.
+  // verdict button is marked busy and the overall-comment input is disabled
+  // synchronously, the status line names the in-flight submission, and the
+  // shared in-flight registry (keyed by change, not by DOM node) blocks a
+  // duplicate verdict while the first is running — even if a poll re-render
+  // replaced the button or the input.
   async submitReview(verdict, button) {
     this.captureDrafts();
     const changeID = value(this.data?.change || {}, "id", "ID");
@@ -177,6 +178,12 @@ export class FlowChange extends FlowElement {
     for (const control of this.querySelectorAll("[data-review-verdict]")) {
       if (control !== button) control.disabled = true;
     }
+    // The overall-comment input is not a mutation target, but it reads as part
+    // of the same submission: disable it synchronously too, so a poll or
+    // repaint is not what makes it look pending. Its value stays in the DOM
+    // while disabled, and the restore below hands it back on settle.
+    const bodyInput = this.querySelector("[data-review-body]");
+    if (bodyInput) bodyInput.disabled = true;
     // Restore by re-querying the live DOM rather than the nodes marked above:
     // a repaint (poll, draft change) replaces the bar mid-flight, and whatever
     // is on screen when the submission settles is what must be re-enabled.
