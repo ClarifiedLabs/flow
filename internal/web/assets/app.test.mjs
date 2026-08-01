@@ -3166,12 +3166,15 @@ test("pollDelay applies capped exponential backoff", async () => {
 // status line is stubbed because handleAction writes to it.
 async function settleBurstHarness(pathname = "/ui/board") {
   const timers = [];
+  const cleared = [];
   const context = await scriptContext({
     setTimeout(callback, delay) {
       timers.push({ callback, delay });
       return timers.length;
     },
-    clearTimeout() {},
+    clearTimeout(id) {
+      cleared.push(id);
+    },
   });
   context.window.location.pathname = pathname;
   const app = new context.FlowApp();
@@ -3179,8 +3182,15 @@ async function settleBurstHarness(pathname = "/ui/board") {
   const status = { textContent: "" };
   app.querySelector = (selector) => (selector === ".status" ? status : null);
   let loads = 0;
-  app.load = async () => {
+  app.load = async (options = {}) => {
     loads += 1;
+    // Mirror the real load's burst supersession (see load()): a load that is
+    // not the active burst's own reload cancels the pending settle-burst
+    // timeout and retires the burst identity.
+    if (options.burst !== app.settleBurstID) {
+      app.settleBurstID = (app.settleBurstID || 0) + 1;
+      app.settlePoll.clear();
+    }
     const loadContext = {
       generation: (app.loadGeneration || 0) + 1,
       path: context.window.location.pathname,
@@ -3193,6 +3203,7 @@ async function settleBurstHarness(pathname = "/ui/board") {
     context,
     status,
     timers,
+    cleared,
     loads: () => loads,
     // actionRefresh runs a refresh the way an action handler does: the
     // dispatcher hands the handler an action-scoped app whose refresh carries
@@ -3240,22 +3251,144 @@ test("a successful action arms a bounded settle burst of follow-up reloads", asy
   assert.equal(harness.timers.length, 2, "the burst is bounded");
 });
 
-test("navigating away before the burst fires cancels the pending reloads", async () => {
+test("navigating away before the burst fires cancels the pending settle-burst timeout", async () => {
   const harness = await settleBurstHarness("/ui/board");
   await harness.actionRefresh();
   assert.equal(harness.loads(), 1);
   assert.equal(harness.timers.length, 1);
+  assert.equal(harness.app.settlePoll.timer, 1, "the burst tick is pending before navigation");
 
-  // Opening another route starts a newer load: the generation bumps and the
-  // pathname changes, so the pending burst tick's isActiveLoad guard is stale
-  // before the timer fires.
+  // Opening another route starts a newer load through the same load() the nav
+  // click, popstate, and shortcut handlers call: the pending burst timeout is
+  // cancelled outright — not left live until it fires — and the burst
+  // identity is retired.
   harness.context.window.location.pathname = "/ui/jobs";
   await harness.app.load();
   assert.equal(harness.loads(), 2);
+  assert.deepEqual(harness.cleared, [1], "navigation cancels the pending settle-burst timeout");
+  assert.equal(harness.app.settlePoll.timer, 0, "no settle timer is left armed after navigation");
 
+  // Even if the browser had already queued the cancelled callback, it neither
+  // reloads the new route nor re-arms another tick.
   await harness.fire(0);
-  assert.equal(harness.loads(), 2, "the stale burst tick never reloads the new route");
+  assert.equal(harness.loads(), 2, "the cancelled burst tick never reloads the new route");
   assert.equal(harness.timers.length, 1, "the burst ends instead of arming another tick");
+});
+
+test("disconnect cancels every pending settle-burst timeout", async () => {
+  const harness = await settleBurstHarness();
+  await harness.actionRefresh();
+  assert.equal(harness.timers.length, 1);
+
+  harness.app.disconnectedCallback();
+  assert.deepEqual(harness.cleared, [1], "the pending burst timer is cancelled on disconnect");
+
+  // A callback already queued in the browser when the disconnect landed must
+  // stay inert: it neither reloads nor re-arms after the app went away.
+  harness.timers[0].callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.loads(), 1, "the disconnected burst tick does not reload");
+  assert.equal(harness.timers.length, 1, "the disconnected burst tick re-arms nothing");
+});
+
+test("navigating while a burst tick awaits its reload ends the burst", async () => {
+  const harness = await settleBurstHarness("/ui/board");
+  await harness.actionRefresh();
+  assert.equal(harness.timers.length, 1);
+
+  const gate = deferred();
+  const baseLoad = harness.app.load;
+  let hold = true;
+  harness.app.load = async (options) => {
+    const loadContext = await baseLoad(options);
+    if (hold) {
+      hold = false;
+      await gate.promise;
+    }
+    return loadContext;
+  };
+
+  harness.fire(0);
+  harness.context.window.location.pathname = "/ui/jobs";
+  await harness.app.load();
+  gate.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(harness.timers.length, 1, "the superseded tick arms no timer on the new route");
+  assert.equal(harness.loads(), 3, "the burst adds no reload beyond its own superseded tick");
+});
+
+test("an older burst tick awaiting its reload cannot displace a newer burst's timer", async () => {
+  const harness = await settleBurstHarness();
+  await harness.actionRefresh();
+  assert.equal(harness.timers.length, 1, "the first burst arms its first tick");
+
+  // Hold the first burst's tick in flight so the second action schedules its
+  // burst while the older tick is still awaiting its reload — the race that
+  // used to let the older continuation overwrite settlePoll's timer handle
+  // and orphan the newer burst's timeout.
+  const gate = deferred();
+  const baseLoad = harness.app.load;
+  let hold = true;
+  harness.app.load = async (options) => {
+    const loadContext = await baseLoad(options);
+    if (hold) {
+      hold = false;
+      await gate.promise;
+    }
+    return loadContext;
+  };
+
+  harness.fire(0);
+  await harness.actionRefresh();
+  assert.equal(harness.timers.length, 2, "the newer burst arms its first tick");
+  assert.equal(harness.app.settlePoll.timer, 2, "the newer burst owns the settle timer");
+
+  gate.resolve();
+  // Flush past the microtask queue so the superseded continuation has run.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.app.settlePoll.timer, 2, "the superseded continuation leaves the newer burst's timer owned");
+  assert.equal(harness.timers.length, 2, "the superseded continuation re-arms nothing");
+  assert.equal(harness.loads(), 3, "the superseded continuation reloads nothing");
+
+  await harness.fire(1);
+  assert.equal(harness.loads(), 4, "the newer burst's tick reloads the route");
+  assert.equal(harness.timers.length, 3, "the newer burst continues to its next tick");
+});
+
+test("a second action's burst supersedes the pending ticks of the first", async () => {
+  const harness = await settleBurstHarness();
+  await harness.actionRefresh();
+  assert.equal(harness.timers.length, 1, "the first burst arms its first tick");
+
+  // A second action on the same route arms a new burst: the first burst's
+  // still-pending timer is cancelled rather than left to fire into the newer
+  // burst's ownership.
+  await harness.actionRefresh();
+  assert.deepEqual(harness.cleared, [1], "the superseded burst's pending timer is cancelled");
+  assert.equal(harness.timers.length, 2, "the newer burst arms its own first tick");
+  assert.equal(harness.app.settlePoll.timer, 2, "the newer burst owns the settle timer");
+
+  // Even if the browser had already queued the older burst's callback, it
+  // neither reloads nor re-arms into the newer burst — and its wrapper must
+  // not erase ownership of the newer burst's still-pending timer handle.
+  harness.timers[0].callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.loads(), 2, "the superseded tick does not reload");
+  assert.equal(harness.timers.length, 2, "the superseded tick re-arms nothing");
+  assert.equal(harness.app.settlePoll.timer, 2, "the stale wrapper leaves the newer burst's timer owned");
+
+  // The newer burst's pending timeout stays cancellable: a navigation or a
+  // disconnect clears it outright instead of leaving it live but untracked.
+  await harness.app.load();
+  assert.deepEqual(harness.cleared, [1, 2], "a navigation cancels the newer burst's pending timer");
+  assert.equal(harness.app.settlePoll.timer, 0, "no settle timer remains armed after the navigation");
+
+  // A tick already queued when the navigation landed stays inert as well.
+  harness.timers[1].callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.loads(), 3, "a tick queued before the navigation does not reload after it");
+  assert.equal(harness.timers.length, 2, "the queued tick re-arms nothing");
 });
 
 test("a failed action does not schedule a settle burst", async () => {
@@ -3315,8 +3448,8 @@ test("navigating away during the action's immediate refresh cancels the settle b
   const gate = deferred();
   const baseLoad = harness.app.load;
   let holdLoad = true;
-  harness.app.load = async () => {
-    const loadContext = await baseLoad();
+  harness.app.load = async (options) => {
+    const loadContext = await baseLoad(options);
     if (holdLoad) {
       holdLoad = false;
       await gate.promise;
@@ -3511,6 +3644,64 @@ test("load tracks in-flight invocations and never arms a settle burst itself", a
   // belongs to action-triggered refreshes alone.
   assert.equal(timers.length, 1);
   assert.equal(timers[0].delay, context.DIAGNOSTICS_POLL_MS);
+});
+
+test("a navigation load cancels an armed settle-burst timeout through the real load", async () => {
+  const timers = [];
+  const cleared = [];
+  const jobsResponse = deferred();
+  const title = { textContent: "" };
+  const status = { textContent: "" };
+  const content = { innerHTML: "", dataset: {} };
+  const context = await scriptContext({
+    setTimeout(callback, delay) {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    clearTimeout(id) {
+      cleared.push(id);
+    },
+  }, {
+    fetch(path) {
+      if (path === "/ui/api/v2/projects") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ projects: [] }) });
+      }
+      assert.equal(path, "/ui/api/v2/jobs");
+      return jobsResponse.promise;
+    },
+  });
+  context.window.location.pathname = "/ui/jobs";
+  const app = new context.FlowApp();
+  app.pollingActive = true;
+  app.querySelectorAll = () => [];
+  app.querySelector = (selector) => {
+    if (selector === ".content") return content;
+    if (selector === "h1") return title;
+    if (selector === ".status") return status;
+    return null;
+  };
+
+  // Arm a settle burst the way a successful action's refresh does.
+  app.loadGeneration = 1;
+  app.scheduleSettleBurst({ generation: 1, path: "/ui/jobs" });
+  assert.equal(timers.length, 1, "the burst arms its first tick");
+  assert.equal(app.settlePoll.timer, 1, "the burst owns the pending timer");
+
+  // A navigation load — the same load() the nav click, popstate, and shortcut
+  // handlers call — must cancel that pending timeout, not leave it live until
+  // it fires with only a stale-guard making the callback a no-op.
+  const loadPromise = app.load();
+  jobsResponse.resolve({ ok: true, json: () => Promise.resolve({ jobs: [] }) });
+  await loadPromise;
+  assert.deepEqual(cleared, [1], "the navigation load cancels the pending settle-burst timeout");
+  assert.equal(app.settlePoll.timer, 0, "no settle timer is left armed after the navigation");
+
+  // A callback already queued in the browser when the navigation landed stays
+  // inert: it neither reloads nor re-arms.
+  timers[0].callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(app.loadsInFlight, 0, "the cancelled tick reloads nothing");
+  assert.equal(timers.length, 2, "only the route's regular poll timer remains");
 });
 
 // A console-poll harness: a real FlowApp parked on /ui/console with a

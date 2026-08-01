@@ -118,6 +118,10 @@ export class FlowApp extends HTMLElement {
     this.sidebarPoll = new Poller();
     this.consolePoll = new Poller();
     this.settlePoll = new Poller();
+    // Identity of the active settle burst; each schedule (and each disconnect)
+    // takes a fresh id so superseded bursts can never re-arm timers or claim
+    // ownership of the newer burst's timer (see scheduleSettleBurst).
+    this.settleBurstID = 0;
   }
 
   connectedCallback() {
@@ -141,6 +145,9 @@ export class FlowApp extends HTMLElement {
     this.sidebarStatusPollingActive = false;
     this.loadGeneration = (this.loadGeneration || 0) + 1;
     this.sidebarStatusGeneration = (this.sidebarStatusGeneration || 0) + 1;
+    // A disconnected app owns no settle burst: supersede any burst still in
+    // flight so its ticks cannot re-arm after the app went away.
+    this.settleBurstID = (this.settleBurstID || 0) + 1;
     this.clearPolling();
     this.clearSidebarStatusPolling();
     this.settlePoll.clear();
@@ -553,6 +560,16 @@ export class FlowApp extends HTMLElement {
   async load(options = {}) {
     this.clearPolling();
     stopConsolePollView(this);
+    // Navigation and every other load that is not the active settle burst's
+    // own reload supersedes the burst: its pending timeout is cancelled now —
+    // not left live until it fires — and the identity is retired, so a tick
+    // still awaiting its reload can neither reload nor re-arm. The burst's
+    // own reloads carry their burst identity (see scheduleSettleBurst) and
+    // are exempt.
+    if (options.burst !== this.settleBurstID) {
+      this.settleBurstID = (this.settleBurstID || 0) + 1;
+      this.settlePoll.clear();
+    }
     this.updateActiveNav();
     const path = window.location.pathname;
     if (!options.fromPoll) closeTerminalModalLayers(this);
@@ -643,13 +660,29 @@ export class FlowApp extends HTMLElement {
   // armed. It reuses the load machinery's own guards rather than adding
   // parallel state:
   //
+  // - Each schedule takes a fresh burst identity (settleBurstID). A newer
+  //   burst clears the older burst's pending timer and owns settlePoll from
+  //   then on; a tick of a superseded burst — one still pending, or one that
+  //   was already awaiting its reload when the newer burst was scheduled —
+  //   recognizes the newer owner and neither reloads nor re-arms, so a
+  //   concurrent action can never leave a timeout outside the active burst's
+  //   ownership.
   // - Each tick captures the load generation and path as it is armed — the
   //   first from origin itself — and re-checks them through isActiveLoad when
   //   it fires, so navigating to another route, or any newer load starting
   //   (a poll, a manual refresh, another action), supersedes the pending
   //   tick and ends the burst.
+  // - Every load() that is not a burst's own reload also cancels the pending
+  //   timer outright and retires the identity (see load()), so navigation and
+  //   disconnects never leave a live timeout that is merely guarded into a
+  //   no-op.
   // - A tick that finds a load still in flight skips its own reload, so the
   //   burst never overlaps load() calls; the remaining ticks still fire.
+  // - A tick that does reload hands its own load context to the next tick:
+  //   the next guard is the reload's generation and path, and the tick only
+  //   re-arms when that reload is still the newest load on the route. A
+  //   reload that was superseded while awaiting (navigation, a newer load, a
+  //   disconnect) ends the burst instead of re-arming against the new state.
   //
   // Regular poll scheduling is untouched: the burst's timer lives on its own
   // Poller, and each burst load re-arms the route's usual poll through
@@ -657,22 +690,50 @@ export class FlowApp extends HTMLElement {
   scheduleSettleBurst(origin) {
     if (this.pollingActive === false) return;
     this.settlePoll.clear();
+    // A new burst identity: every schedule supersedes the previous burst, so
+    // an older tick that is still awaiting its reload (or one that fires
+    // late) recognizes that it no longer owns settlePoll.
+    const burst = (this.settleBurstID || 0) + 1;
+    this.settleBurstID = burst;
     const path = origin.path;
     const delays = SETTLE_BURST_DELAYS_MS;
     const armTick = (index, guard = { generation: this.loadGeneration, path }) => {
       if (index >= delays.length) return;
+      if (burst !== this.settleBurstID) return;
       // Delays are absolute offsets from the action's refresh; the one-shot
       // Poller re-arms per tick, so each arm waits out only the delta.
       const offset = index > 0 ? delays[index] - delays[index - 1] : delays[index];
       this.settlePoll.arm(offset, async () => {
+        if (burst !== this.settleBurstID) return;
         if (!this.isActiveLoad(guard)) return;
+        let reloaded;
+        let calledLoad = false;
         try {
-          if (!this.loadsInFlight) await this.load({ fromPoll: true });
+          if (!this.loadsInFlight) {
+            calledLoad = true;
+            reloaded = await this.load({ fromPoll: true, burst });
+          }
         } catch {
           // load() reports its own failures on the status line; a rejection
           // escaping it must not strand the remaining burst ticks.
         }
-        armTick(index + 1);
+        // A superseded burst must not re-arm: if a newer action scheduled its
+        // own burst while this tick was awaiting, settlePoll now belongs to
+        // that burst, and re-arming here would orphan the newer burst's timer.
+        if (burst !== this.settleBurstID) return;
+        if (calledLoad) {
+          // The tick's own load must still be the newest on the route: any
+          // newer load (navigation, a poll, a manual refresh, another action)
+          // or a disconnect while it was awaiting supersedes the burst, which
+          // ends here instead of re-arming against the new state. A tick that
+          // skipped its reload arms against the current state as before.
+          if (this.loadGeneration !== guard.generation + 1) return;
+          if (window.location.pathname !== guard.path) return;
+        }
+        armTick(
+          index + 1,
+          reloaded ? { generation: reloaded.generation, path: reloaded.path } : undefined,
+        );
       });
     };
     armTick(0, { generation: origin.generation, path: origin.path });

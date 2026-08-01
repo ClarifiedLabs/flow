@@ -17,10 +17,15 @@ export class Poller {
   }
 
   arm(delay, callback) {
-    this.timer = window.setTimeout(() => {
-      this.timer = 0;
+    const timer = window.setTimeout(() => {
+      // Only the wrapper that still owns the Poller may clear the handle: a
+      // stale wrapper firing after a newer arm (e.g. a superseded settle-burst
+      // tick) must not erase ownership of the newer pending timeout, or
+      // clear() could no longer cancel it.
+      if (this.timer === timer) this.timer = 0;
       callback();
     }, delay);
+    this.timer = timer;
   }
 
   clear() {
