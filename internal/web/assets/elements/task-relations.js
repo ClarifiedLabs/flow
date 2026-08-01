@@ -12,12 +12,15 @@
 //
 // A blocker's derived state has three outcomes, and the row renders all three
 // distinctly: a confirmed non-done blocker is flagged as blocking, a confirmed
-// done blocker is left alone, and a lifecycle value that is present but
-// malformed — a string outside the lifecycle vocabulary, or not a string at all
-// — is unknown, rendered neutrally rather than as the red confirmed blocking
-// state, so a bad payload is not mistaken for a real obstacle. An absent state
-// (the wire encoding of a valid unscheduled task) stays blocking, matching the
-// server's own read model.
+// done blocker is left alone, and a value we cannot trust is unknown, rendered
+// neutrally rather than as the red confirmed blocking state, so a bad payload
+// is not mistaken for a real obstacle. Presence is part of the contract: the
+// wire encoding of a valid unscheduled task is a *present* empty string (the
+// server's SourceState is a non-pointer LifecycleState), so "" is a confirmed
+// blocker, matching the server's own read model. An absent or null state, a
+// state that is present but outside the lifecycle vocabulary (whitespace, an
+// unknown token), or one that is not a string at all is malformed and renders
+// unknown.
 
 import { taskHref } from "../api.js";
 import { escapeAttr, escapeHTML } from "../html.js";
