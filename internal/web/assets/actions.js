@@ -638,7 +638,11 @@ function suppressGateOutcomes(element) {
 function restoreLiveGateOutcomes(element, nodeRunID) {
   const doc = globalThis.document;
   if (!doc?.querySelectorAll || !nodeRunID) return;
-  for (const control of doc.querySelectorAll(`[data-workflow-respond="${nodeRunID}"]`)) {
+  // Node-run ids are server-provided and may contain quotes or CSS selector
+  // metacharacters, so never interpolate one into a selector: fetch every
+  // outcome control and filter by dataset value instead.
+  for (const control of doc.querySelectorAll("[data-workflow-respond]")) {
+    if (control.dataset?.workflowRespond !== nodeRunID) continue;
     control.disabled = false;
     control.removeAttribute?.("aria-busy");
     control.classList?.remove("is-busy");

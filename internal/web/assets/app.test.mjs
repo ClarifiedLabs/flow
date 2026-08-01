@@ -1296,7 +1296,7 @@ test("a repaint mid-flight leaves no live outcome disabled after a failed settle
   }
   panel.buttons = [liveApprove, liveReject];
   globalThis.document = {
-    querySelectorAll: (selector) => (selector === '[data-workflow-respond="wnr-1"]' ? panel.buttons : []),
+    querySelectorAll: (selector) => (selector === "[data-workflow-respond]" ? panel.buttons : []),
   };
 
   rejectRequest();
@@ -1312,6 +1312,54 @@ test("a repaint mid-flight leaves no live outcome disabled after a failed settle
   }
   assert.equal(gateResponsePending("wnr-1"), false);
   assert.deepEqual(app.statuses, ["Sending feedback wnr-1\u2026", "boom"]);
+  assert.equal(inFlight.size, 0);
+});
+
+test("a gate response settles safely when the node-run id contains selector metacharacters", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let rejectRequest;
+  globalThis.fetch = () =>
+    new Promise((resolve, reject) => {
+      rejectRequest = () => reject(new Error("boom"));
+    });
+  const nodeRunID = 'wnr-1"][data-x]:nth-child(1)';
+  const panel = gatePanel();
+  const approve = new GateButton({ workflowRespond: nodeRunID, task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
+  panel.buttons.push(approve);
+
+  const handled = handleAction(app, { target: approve, preventDefault() {} });
+  assert.equal(approve.disabled, true);
+
+  // A poll repaint swaps in a fresh disabled outcome for the same node run
+  // and one for a different node run; only the exact match may be restored.
+  const liveApprove = new GateButton({ workflowRespond: nodeRunID, task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
+  const otherGate = new GateButton({ workflowRespond: "wnr-2", task: "t-0002", outcome: "approved", project: "p-alpha" }, panel);
+  for (const control of [liveApprove, otherGate]) {
+    control.disabled = true;
+    control.setAttribute("aria-busy", "true");
+    control.classList.add("is-busy");
+  }
+  panel.buttons = [liveApprove, otherGate];
+  // Like a real document, any selector built from the node-run id is invalid
+  // and throws; only the broad control selector is legal.
+  globalThis.document = {
+    querySelectorAll(selector) {
+      if (selector !== "[data-workflow-respond]") throw new Error(`invalid selector: ${selector}`);
+      return panel.buttons;
+    },
+  };
+
+  rejectRequest();
+  assert.equal(await handled, true);
+
+  assert.equal(liveApprove.disabled, false, "the exact match is restored despite the hostile id");
+  assert.equal(liveApprove.getAttribute("aria-busy"), null);
+  assert.equal(liveApprove.classList.contains("is-busy"), false);
+  assert.equal(otherGate.disabled, true, "a different node run's outcome stays suppressed");
+  assert.equal(otherGate.getAttribute("aria-busy"), "true");
+  assert.equal(otherGate.classList.contains("is-busy"), true);
+  assert.equal(gateResponsePending(nodeRunID), false);
   assert.equal(inFlight.size, 0);
 });
 
