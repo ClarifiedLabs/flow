@@ -2628,6 +2628,151 @@ test("a poll that arrives while a moved-head revalidation verifies its diff keep
   detail.remove();
 });
 
+test("repeated polls for a moved head while its revalidation verifies leave no stale bit behind after adoption", async () => {
+  const root = globalThis.document.body;
+  // The revalidation's /diff is deferred so several task polls can report the
+  // new head in the window after the metadata GET returns it but before the
+  // diff verifies. Every poll after the first finds the rendered key already
+  // on the new head; those polls must not mark the cache stale — the in-flight
+  // revalidation already covers that head and adopts it once the diff lands,
+  // and a stale bit set in the window would survive adoption (which clears the
+  // pending marker but not changeStale) and fire an extra same-head metadata
+  // GET.
+  const { calls, release } = deferredDiffFetch([
+    { change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) },
+    { change: changeResponse("h2"), diff: diffResponse("h2", diffFiles("h2")), defer: true },
+  ]);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the loaded diff is on screen");
+  const initial = calls.filter((path) => path.includes("/v2/changes/ch-0001"));
+  assert.deepEqual(initial, ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"], "one change+diff pair on first load");
+
+  // A same-head poll revalidates and discovers h2; its diff is held.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  for (let i = 0; i < 50 && detail.changePendingKey !== "ch-0001:h2"; i++) await flush();
+  assert.equal(detail.changePendingKey, "ch-0001:h2", "the moved head is pending while its diff verifies");
+
+  // Two more polls report the pending head. The first re-keys the rendered
+  // change; the second (and any later) matches it, which used to mark the
+  // cache stale because only the ahead key was excluded.
+  detail.data = taskDetailModel("h2");
+  await flush();
+  assert.equal(detail.changePendingSeen, true, "the first matching poll observes the pending head");
+  assert.equal(detail.changeStale, false, "the first matching poll does not mark the cache stale");
+  detail.data = taskDetailModel("h2");
+  await flush();
+  assert.match(changePanelHTML(detail), /h1\.go/, "the prior pair stays on screen through repeated matching polls");
+  assert.doesNotMatch(changePanelHTML(detail), /Loading change/, "repeated matching polls must not flash the loader");
+  assert.equal(detail.changePendingKey, "ch-0001:h2", "the pending marker survives repeated matching polls");
+  assert.equal(detail.changeKey, "ch-0001:h1", "the cache key is unchanged by repeated matching polls");
+  assert.equal(detail.changeStale, false, "a poll for the pending head must not mark the cache stale");
+
+  // The deferred diff verifies: adoption clears the pending marker, and no
+  // stale bit is left behind to trigger an extra metadata GET.
+  release();
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h2\.go/, "the verified head renders once its diff lands");
+  assert.equal(detail.changeKey, "ch-0001:h2", "the cache re-keys to the verified head");
+  assert.equal(detail.changePendingKey, "", "the pending marker clears once the pair verifies");
+  assert.equal(detail.changeStale, false, "adoption leaves no stale bit behind");
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(initial.length),
+    ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"],
+    "the revalidation's single pair is the only fetch; repeated matching polls added none",
+  );
+
+  // A later ordinary same-head poll revalidates metadata in place as usual.
+  const caughtUp = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+  detail.data = taskDetailModel("h2");
+  await flush();
+  await settleChange(detail);
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(caughtUp),
+    ["/ui/api/v2/changes/ch-0001"],
+    "a caught-up same-head poll revalidates the change only",
+  );
+  detail.remove();
+});
+
+test("a poll for the cached head while a revalidation verifies a different head stays stale and queues the retry after the rejected diff", async () => {
+  const root = globalThis.document.body;
+  // The revalidation's /diff is deferred so an ordinary poll can report the
+  // cached head in the window after the revalidation fetched a different
+  // head's metadata but before its diff verifies. That poll is NOT for the
+  // pending head — the in-flight revalidation does not cover it — so it must
+  // still mark the cache stale. When the diff then fails to verify, the
+  // pending marker clears but the poll's stale bit survives and queues the
+  // documented retry on the next paint; the final script entry serves that
+  // retry with the current head.
+  const { calls, release } = deferredDiffFetch([
+    { change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) },
+    { change: changeResponse("h2"), diff: diffResponse("h3", diffFiles("h3")), defer: true },
+    { change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) },
+  ]);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the loaded diff is on screen");
+  const initial = calls.filter((path) => path.includes("/v2/changes/ch-0001"));
+  assert.deepEqual(initial, ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"], "one change+diff pair on first load");
+
+  // A same-head poll revalidates and discovers h2; its diff is held.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  for (let i = 0; i < 50 && detail.changePendingKey !== "ch-0001:h2"; i++) await flush();
+  assert.equal(detail.changePendingKey, "ch-0001:h2", "the moved head is pending while its diff verifies");
+
+  // The model still reports the cached head h1 in that window. The pending
+  // exemption must not cover this poll: it is not for the pending head, so
+  // the cache is stale for it, and only its stale bit can queue the retry
+  // once the in-flight attempt gives up. No second fetch may start while the
+  // revalidation is already in flight, though.
+  const inFlight = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+  detail.data = taskDetailModel("h1");
+  await flush();
+  assert.match(changePanelHTML(detail), /h1\.go/, "the prior pair stays on screen through the cached-head poll");
+  assert.doesNotMatch(changePanelHTML(detail), /Loading change/, "the cached-head poll must not flash the loader");
+  assert.equal(detail.changePendingKey, "ch-0001:h2", "a poll for the cached head leaves the pending marker alone");
+  assert.equal(detail.changeKey, "ch-0001:h1", "the cache key is unchanged");
+  assert.equal(detail.changeStale, true, "a poll for the cached head marks the cache stale even while a different head is pending");
+  assert.equal(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).length,
+    inFlight,
+    "the cached-head poll queues no fetch while the revalidation is in flight",
+  );
+
+  // The deferred diff comes back for yet another head (h3): it verifies
+  // nothing, so the attempt gives up. The cached-head poll's stale bit
+  // survives the cleared pending marker and queues the documented retry on
+  // the next paint — a metadata-only GET for the current head.
+  release();
+  await settleChange(detail);
+  if (detail.changePromise) await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "a rejected diff keeps the prior coherent pair on screen");
+  assert.doesNotMatch(changePanelHTML(detail), /h2\.go|h3\.go/, "the unverified heads are never rendered — one head only");
+  assert.equal(detail.changePendingKey, "", "the rejected diff clears the pending marker");
+  assert.equal(detail.changeKey, "ch-0001:h1", "the rejected diff does not move the cache key");
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(initial.length),
+    ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff", "/ui/api/v2/changes/ch-0001"],
+    "the cached-head poll's stale bit queues one metadata-only retry after the rejected diff",
+  );
+
+  // The retry refreshed the pair in place; a later same-head poll revalidates
+  // metadata in place as usual.
+  const caughtUp = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(caughtUp),
+    ["/ui/api/v2/changes/ch-0001"],
+    "a caught-up same-head poll revalidates the change only",
+  );
+  detail.remove();
+});
+
 test("a poll that rolls back to the cached head while a moved-head revalidation verifies keeps the current head and drops the stale revalidation", async () => {
   const root = globalThis.document.body;
   // The revalidation's /diff is deferred so the model can report the new head
@@ -2700,21 +2845,106 @@ test("a poll that rolls back to the cached head while a moved-head revalidation 
 
   // The deferred h2 diff finally lands. The stale revalidation must NOT adopt
   // it over the model's current h1 head: the pair stays h1 and the cache key
-  // does not move.
+  // does not move. The rollback left the cache stale, so the invalidated
+  // attempt's next paint queues the documented metadata-only retry for the
+  // current head.
   resolveDiff();
   await settleChange(detail);
+  if (detail.changePromise) await settleChange(detail);
   assert.match(changePanelHTML(detail), /h1\.go/, "the current head stays on screen after the stale diff lands");
   assert.doesNotMatch(changePanelHTML(detail), /h2\.go/, "the rolled-back head is never rendered — one head only");
   assert.equal(detail.changeKey, "ch-0001:h1", "the stale revalidation does not adopt the rolled-back head");
   assert.equal(detail.changeAheadKey, "", "no ahead window opens for the rolled-back head");
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(initial.length),
+    ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff", "/ui/api/v2/changes/ch-0001"],
+    "the rollback's stale bit queues one metadata-only retry after the invalidated attempt",
+  );
 
-  // The cache stayed stale, so the next same-head poll revalidates the current
-  // head in place and confirms it.
+  // The retry refreshed the pair in place; a later same-head poll revalidates
+  // the current head in place and confirms it.
   const caughtUp = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
   detail.data = taskDetailModel("h1");
   await flush();
   await settleChange(detail);
   assert.match(changePanelHTML(detail), /h1\.go/, "the revalidated current head stays rendered");
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(caughtUp),
+    ["/ui/api/v2/changes/ch-0001"],
+    "a caught-up same-head poll revalidates the change only",
+  );
+  detail.remove();
+});
+
+test("a rollback to the cached head after observing the pending head leaves the cache stale so the rejected diff queues the retry", async () => {
+  const root = globalThis.document.body;
+  // The revalidation's /diff is deferred so the model can report the moved head
+  // (observing it) and then roll back to the cached head before that diff
+  // verifies. The rollback clears the observed pending marker, so the in-flight
+  // revalidation can no longer adopt h2 — but the rollback poll is a fresh
+  // model for the cached head that the revalidation does not cover, so it must
+  // leave the cache stale. Without that bit, the failed/mismatched diff would
+  // end the attempt with nothing queued and the documented retry would be lost.
+  // The final script entry serves that retry with the current head.
+  const { calls, release } = deferredDiffFetch([
+    { change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) },
+    { change: changeResponse("h2"), diff: diffResponse("h3", diffFiles("h3")), defer: true },
+    { change: changeResponse("h1"), diff: diffResponse("h1", diffFiles("h1")) },
+  ]);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the loaded diff is on screen");
+  const initial = calls.filter((path) => path.includes("/v2/changes/ch-0001"));
+  assert.deepEqual(initial, ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"], "one change+diff pair on first load");
+
+  // A same-head poll revalidates and discovers h2; its diff is held.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  for (let i = 0; i < 50 && detail.changePendingKey !== "ch-0001:h2"; i += 1) await flush();
+  assert.equal(detail.changePendingKey, "ch-0001:h2", "the moved head is pending while its diff verifies");
+
+  // The model reports h2 (observing the pending head), then rolls back to the
+  // cached h1 before the diff verifies.
+  detail.data = taskDetailModel("h2");
+  await flush();
+  assert.equal(detail.changePendingSeen, true, "the h2 poll observed the pending head");
+  const inFlight = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+  detail.data = taskDetailModel("h1");
+  await flush();
+  assert.match(changePanelHTML(detail), /h1\.go/, "the rollback keeps the current head on screen");
+  assert.doesNotMatch(changePanelHTML(detail), /Loading change/, "the rollback must not flash the loader");
+  assert.equal(detail.changePendingKey, "", "the rollback clears the observed pending marker");
+  assert.equal(detail.changePendingSeen, false, "the rollback clears the pending observation");
+  assert.equal(detail.changeKey, "ch-0001:h1", "the cache key stays on the current head");
+  assert.equal(detail.changeStale, true, "the rollback leaves the cache stale for the invalidated revalidation");
+  assert.equal(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).length,
+    inFlight,
+    "the rollback poll queues no fetch while the revalidation is in flight",
+  );
+
+  // The deferred h2 diff comes back for yet another head (h3): it verifies
+  // nothing, so the invalidated attempt gives up. The rollback's stale bit then
+  // queues the documented metadata-only retry for the current head.
+  release();
+  await settleChange(detail);
+  if (detail.changePromise) await settleChange(detail);
+  assert.match(changePanelHTML(detail), /h1\.go/, "the rejected diff keeps the prior coherent pair on screen");
+  assert.doesNotMatch(changePanelHTML(detail), /h2\.go|h3\.go/, "the unverified heads are never rendered — one head only");
+  assert.equal(detail.changePendingKey, "", "the rejected diff leaves the pending marker clear");
+  assert.equal(detail.changeKey, "ch-0001:h1", "the rejected diff does not move the cache key");
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(initial.length),
+    ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff", "/ui/api/v2/changes/ch-0001"],
+    "the rollback's stale bit queues one metadata-only retry after the rejected diff",
+  );
+
+  // The retry refreshed the pair in place; a later same-head poll revalidates
+  // metadata in place as usual.
+  const caughtUp = calls.filter((path) => path.includes("/v2/changes/ch-0001")).length;
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
   assert.deepEqual(
     calls.filter((path) => path.includes("/v2/changes/ch-0001")).slice(caughtUp),
     ["/ui/api/v2/changes/ch-0001"],

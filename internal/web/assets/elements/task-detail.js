@@ -156,8 +156,19 @@ export class FlowTaskDetail extends FlowElement {
       // changeAheadKey once the model catches up (or moves past it), and bounds
       // how long a pre-adoption head may keep the ahead cache, so subsequent
       // same-head polls revalidate normally and a persistent rollback
-      // eventually reloads the current head.
-      if (this.changeData && (!this.changeAheadKey || this.changeDiffPending())) this.changeStale = true;
+      // eventually reloads the current head. The pending-head exemption
+      // applies only to a poll reporting exactly the head an in-flight
+      // revalidation is verifying (changePendingKey): that revalidation
+      // already covers that head and adopts it the moment its diff verifies,
+      // so marking the cache stale there would only leave a stale bit behind
+      // after adoption and fire an extra same-head metadata GET. A poll for
+      // any other head — the cached head while the revalidation verifies a
+      // different one included — still marks the cache stale: the in-flight
+      // revalidation does not cover it, and if the attempt gives up (failed or
+      // mismatched diff) the poll's stale bit is what queues the documented
+      // retry on the next paint.
+      const pollHead = `${String(value(model.change, "id", "ID") || "")}:${String(value(model.change, "head_sha", "HeadSHA") || "")}`;
+      if (this.changeData && (!this.changeAheadKey || this.changeDiffPending()) && pollHead !== this.changePendingKey) this.changeStale = true;
       // A failed load has no pair to revalidate, but the same-key poll still
       // means the failure may be transient: mark it for a retry on the next
       // Change-tab paint instead of leaving the error card up until the user
@@ -461,12 +472,17 @@ export class FlowTaskDetail extends FlowElement {
       // instead of adopting the head the model has left. The generation is
       // deliberately not bumped: the cached pair is still coherent for this
       // head, so it stays on screen, and the revalidation's finally block still
-      // clears changePromise. The cache stays stale, so the next same-head poll
-      // revalidates the current head. A poll that never reported the pending
+      // clears changePromise. The rollback poll is a fresh model for the cached
+      // head that the in-flight revalidation does not cover, so the cache is
+      // marked stale right here: once the marker clears, only that bit can
+      // queue the metadata-only retry when the invalidated attempt gives up on
+      // a failed or mismatched diff, and a later same-head poll revalidates
+      // the current head in place. A poll that never reported the pending
       // head leaves the marker alone.
       if (this.changePendingKey && this.changePendingSeen) {
         this.changePendingKey = "";
         this.changePendingSeen = false;
+        this.changeStale = true;
       }
       this.changeAheadKey = "";
       this.changeAheadSeen = 0;
