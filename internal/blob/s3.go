@@ -36,6 +36,7 @@ type S3Client interface {
 	HeadObject(context.Context, *s3.HeadObjectInput, ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
 	DeleteObject(context.Context, *s3.DeleteObjectInput, ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
 	ListObjectsV2(context.Context, *s3.ListObjectsV2Input, ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
+	ListObjectVersions(context.Context, *s3.ListObjectVersionsInput, ...func(*s3.Options)) (*s3.ListObjectVersionsOutput, error)
 	ListMultipartUploads(context.Context, *s3.ListMultipartUploadsInput, ...func(*s3.Options)) (*s3.ListMultipartUploadsOutput, error)
 	AbortMultipartUpload(context.Context, *s3.AbortMultipartUploadInput, ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error)
 }
@@ -523,10 +524,12 @@ func (s *S3Store) Abort(ctx context.Context, id string) error {
 }
 
 type s3ReconcileCursor struct {
-	phase                 uint8
-	continuationToken     *string
-	multipartKeyMarker    *string
-	multipartUploadMarker *string
+	phase                   uint8
+	versionKeyMarker        *string
+	versionIDMarker         *string
+	multipartKeyMarker      *string
+	multipartUploadMarker   *string
+	publishedContinuationID *string
 }
 
 func (s *S3Store) Reconcile(ctx context.Context, request ReconcileRequest) (ReconcileResult, error) {
@@ -547,43 +550,64 @@ func (s *S3Store) Reconcile(ctx context.Context, request ReconcileRequest) (Reco
 		switch s.reconcileCursor.phase {
 		case 0:
 			remaining := request.Limit - inspected
-			page, listErr := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			page, listErr := s.client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
 				Bucket: aws.String(s.bucket), Prefix: aws.String(s.temporaryPrefix()),
-				MaxKeys: aws.Int32(int32(remaining)), ContinuationToken: s.reconcileCursor.continuationToken,
+				MaxKeys: aws.Int32(int32(remaining)), KeyMarker: s.reconcileCursor.versionKeyMarker,
+				VersionIdMarker: s.reconcileCursor.versionIDMarker,
 			})
 			if listErr != nil {
-				return result, fmt.Errorf("list S3 temporary uploads: %w", classifyS3Error(listErr))
+				return result, fmt.Errorf("list S3 temporary upload versions: %w", classifyS3Error(listErr))
 			}
-			if len(page.Contents) > remaining {
-				return result, fmt.Errorf("list S3 temporary uploads: server exceeded requested page size")
+			entryCount := len(page.Versions) + len(page.DeleteMarkers)
+			if entryCount > remaining {
+				return result, fmt.Errorf("list S3 temporary upload versions: server exceeded requested page size")
 			}
-			if len(page.Contents) == 0 && aws.ToBool(page.IsTruncated) {
+			if entryCount == 0 && aws.ToBool(page.IsTruncated) {
 				// Count an advancing empty page as one unit of remote work so a
 				// malformed or unusual service cannot create an unbounded loop.
 				inspected++
 			}
-			for _, object := range page.Contents {
+			for _, version := range page.Versions {
 				inspected++
-				id := strings.TrimPrefix(aws.ToString(object.Key), s.temporaryPrefix())
-				if !validUploadID(id) || object.LastModified == nil || !object.LastModified.Before(request.Before) {
+				id := strings.TrimPrefix(aws.ToString(version.Key), s.temporaryPrefix())
+				if !validUploadID(id) || version.LastModified == nil || !version.LastModified.Before(request.Before) {
 					continue
 				}
 				if _, live := request.LiveTemporaryIDs[id]; live {
 					continue
 				}
-				if abortErr := s.Abort(ctx, id); abortErr != nil {
-					return result, abortErr
+				if removeErr := s.removeTemporaryVersion(ctx, version.Key, version.VersionId, false); removeErr != nil {
+					return result, removeErr
+				}
+				result.RemovedTemporaryIDs = append(result.RemovedTemporaryIDs, id)
+			}
+			for _, marker := range page.DeleteMarkers {
+				inspected++
+				id := strings.TrimPrefix(aws.ToString(marker.Key), s.temporaryPrefix())
+				if !validUploadID(id) || marker.LastModified == nil || !marker.LastModified.Before(request.Before) {
+					continue
+				}
+				if _, live := request.LiveTemporaryIDs[id]; live {
+					continue
+				}
+				if removeErr := s.removeTemporaryVersion(ctx, marker.Key, marker.VersionId, true); removeErr != nil {
+					return result, removeErr
 				}
 				result.RemovedTemporaryIDs = append(result.RemovedTemporaryIDs, id)
 			}
 			if aws.ToBool(page.IsTruncated) {
-				next, progressErr := nextS3Token(s.reconcileCursor.continuationToken, page.NextContinuationToken)
+				nextKey, nextVersion, progressErr := nextS3VersionMarkers(
+					s.reconcileCursor.versionKeyMarker, s.reconcileCursor.versionIDMarker,
+					page.NextKeyMarker, page.NextVersionIdMarker,
+				)
 				if progressErr != nil {
-					return result, fmt.Errorf("list S3 temporary uploads: %w", progressErr)
+					return result, fmt.Errorf("list S3 temporary upload versions: %w", progressErr)
 				}
-				s.reconcileCursor.continuationToken = next
+				s.reconcileCursor.versionKeyMarker = nextKey
+				s.reconcileCursor.versionIDMarker = nextVersion
 			} else {
-				s.reconcileCursor.continuationToken = nil
+				s.reconcileCursor.versionKeyMarker = nil
+				s.reconcileCursor.versionIDMarker = nil
 				s.reconcileCursor.phase = 1
 			}
 		case 1:
@@ -637,7 +661,7 @@ func (s *S3Store) Reconcile(ctx context.Context, request ReconcileRequest) (Reco
 			remaining := request.Limit - inspected
 			page, listErr := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 				Bucket: aws.String(s.bucket), Prefix: aws.String(s.objectPrefix()),
-				MaxKeys: aws.Int32(int32(remaining)), ContinuationToken: s.reconcileCursor.continuationToken,
+				MaxKeys: aws.Int32(int32(remaining)), ContinuationToken: s.reconcileCursor.publishedContinuationID,
 			})
 			if listErr != nil {
 				return result, fmt.Errorf("list S3 published blobs: %w", classifyS3Error(listErr))
@@ -668,11 +692,11 @@ func (s *S3Store) Reconcile(ctx context.Context, request ReconcileRequest) (Reco
 				result.Orphans = append(result.Orphans, object)
 			}
 			if aws.ToBool(page.IsTruncated) {
-				next, progressErr := nextS3Token(s.reconcileCursor.continuationToken, page.NextContinuationToken)
+				next, progressErr := nextS3Token(s.reconcileCursor.publishedContinuationID, page.NextContinuationToken)
 				if progressErr != nil {
 					return result, fmt.Errorf("list S3 published blobs: %w", progressErr)
 				}
-				s.reconcileCursor.continuationToken = next
+				s.reconcileCursor.publishedContinuationID = next
 			} else {
 				s.reconcileCursor = s3ReconcileCursor{}
 				result.Truncated = false
@@ -686,12 +710,34 @@ func (s *S3Store) Reconcile(ctx context.Context, request ReconcileRequest) (Reco
 	return result, nil
 }
 
+func (s *S3Store) removeTemporaryVersion(ctx context.Context, key, versionID *string, deleteMarker bool) error {
+	if deleteMarker && aws.ToString(versionID) == "" {
+		return errors.New("delete stale S3 temporary marker: missing version ID")
+	}
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket), Key: key, VersionId: versionID,
+	})
+	if err != nil && !errors.Is(classifyS3Error(err), ErrNotFound) {
+		return fmt.Errorf("delete stale S3 temporary version: %w", classifyS3Error(err))
+	}
+	return nil
+}
+
 func nextS3Token(previous, next *string) (*string, error) {
 	value := aws.ToString(next)
 	if value == "" || value == aws.ToString(previous) {
 		return nil, errors.New("truncated response did not advance continuation token")
 	}
 	return aws.String(value), nil
+}
+
+func nextS3VersionMarkers(previousKey, previousVersion, nextKey, nextVersion *string) (*string, *string, error) {
+	key := aws.ToString(nextKey)
+	version := aws.ToString(nextVersion)
+	if key == "" || (key == aws.ToString(previousKey) && version == aws.ToString(previousVersion)) {
+		return nil, nil, errors.New("truncated response did not advance version markers")
+	}
+	return aws.String(key), aws.String(version), nil
 }
 
 func nextS3MultipartMarkers(previousKey, previousUpload, nextKey, nextUpload *string) (*string, *string, error) {

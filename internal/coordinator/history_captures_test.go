@@ -369,8 +369,46 @@ func (s *publishResponseLossStore) Publish(ctx context.Context, temporary blob.T
 
 type failingPublishStore struct{ blob.Store }
 
+type resumeCountingStore struct {
+	blob.Store
+	mu          sync.Mutex
+	resumeCalls int
+}
+
+func (s *resumeCountingStore) Resume(ctx context.Context, id string) (blob.Temporary, error) {
+	s.mu.Lock()
+	s.resumeCalls++
+	s.mu.Unlock()
+	return s.Store.Resume(ctx, id)
+}
+
+func (s *resumeCountingStore) calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.resumeCalls
+}
+
 func (s failingPublishStore) Publish(context.Context, blob.Temporary, blob.Key) (blob.Object, error) {
 	return blob.Object{}, errors.New("simulated persistent publication failure")
+}
+
+func TestHistoryArtifactPublishAuthenticatesBeforeBlobAccess(t *testing.T) {
+	env := newHistoryCaptureTestEnv(t)
+	ctx := context.Background()
+	counting := &resumeCountingStore{Store: env.blobs}
+	service := NewHistoryCaptureService(env.store.DB(), counting)
+	reserved := reserveHistoryCapture(t, service, baseHistoryReservation())
+	temporary := uploadHistoryBytes(t, service, reserved.Capture.ID, reserved.UploadGrant, []byte("private"))
+	_, err := service.PublishArtifact(ctx, reserved.Capture.ID, "invalid-grant", PublishHistoryArtifactInput{
+		LogicalKey: "harness/final/private", Kind: HistoryArtifactHarnessRoot, Phase: HistoryArtifactFinal,
+		ArchiveID: "private", MediaType: "application/octet-stream", LogicalSize: 7, EntryCount: 1,
+	}, temporary)
+	if !errors.Is(err, ErrHistoryUnauthorized) {
+		t.Fatalf("invalid grant publication err = %v, want unauthorized", err)
+	}
+	if calls := counting.calls(); calls != 0 {
+		t.Fatalf("blob Resume calls before authentication = %d, want 0", calls)
+	}
 }
 
 func TestHistoryArtifactImmutableIdempotencyAndPublicationRecovery(t *testing.T) {
@@ -460,6 +498,42 @@ WHERE capture_id = ? AND reconcile_attempted_at IS NOT NULL`, reserved.Capture.I
 	}
 }
 
+func TestHistoryPendingReconciliationInterleavesDueRetriesAndNewArrivals(t *testing.T) {
+	env := newHistoryCaptureTestEnv(t)
+	ctx := context.Background()
+	service := NewHistoryCaptureService(env.store.DB(), failingPublishStore{Store: env.blobs})
+	reserved := reserveHistoryCapture(t, service, baseHistoryReservation())
+	publishPending := func(key string, value byte) {
+		t.Helper()
+		temporary := uploadHistoryBytes(t, service, reserved.Capture.ID, reserved.UploadGrant, []byte{value})
+		_, err := service.PublishArtifact(ctx, reserved.Capture.ID, reserved.UploadGrant, PublishHistoryArtifactInput{
+			LogicalKey: key, Kind: HistoryArtifactHarnessRoot, Phase: HistoryArtifactFinal,
+			ArchiveID: key, MediaType: "application/octet-stream", LogicalSize: 1, EntryCount: 1,
+		}, temporary)
+		if err == nil {
+			t.Fatalf("publication %s unexpectedly succeeded", key)
+		}
+	}
+	publishPending("harness/final/due-retry-1", 'a')
+	publishPending("harness/final/due-retry-2", 'b')
+	publishPending("harness/final/due-retry-3", 'c')
+	if _, err := env.store.DB().ExecContext(ctx, `
+UPDATE history_artifacts
+SET reconcile_attempted_at = '2020-01-01T00:00:00.000Z'
+WHERE capture_id = ?`, reserved.Capture.ID); err != nil {
+		t.Fatal(err)
+	}
+	publishPending("harness/final/new-arrival", 'd')
+	summary, err := service.ReconcilePendingArtifacts(ctx, reserved.Capture.ID, 2)
+	if err == nil || len(summary.Failures) != 2 {
+		t.Fatalf("reconcile interleaved batch summary=%+v err=%v", summary, err)
+	}
+	if summary.Failures[0].LogicalKey != "harness/final/due-retry-1" || summary.Failures[1].LogicalKey != "harness/final/new-arrival" {
+		t.Fatalf("reconciled keys = %q, %q; want oldest due retry then new arrival",
+			summary.Failures[0].LogicalKey, summary.Failures[1].LogicalKey)
+	}
+}
+
 func TestHistoryPendingPublicationRemainsOutstandingForQuotas(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -532,6 +606,20 @@ func TestHarnessArchiveMemberRegistrationEnforcesDeclaredAndConfiguredLimits(t *
 	}
 	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", []HarnessArchiveMemberInput{member}); err != nil {
 		t.Fatalf("register declared member: %v", err)
+	}
+	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", []HarnessArchiveMemberInput{member}); err != nil {
+		t.Fatalf("exact archive member retry: %v", err)
+	}
+	changed := member
+	changed.Status = "failed"
+	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", []HarnessArchiveMemberInput{changed}); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatalf("changed archive member retry err = %v, want conflict", err)
+	}
+	if _, err := env.store.DB().ExecContext(ctx, `UPDATE harness_archive_members SET status = 'changed' WHERE capture_id = ?`, reserved.Capture.ID); err == nil {
+		t.Fatal("direct archive member update unexpectedly succeeded")
+	}
+	if _, err := env.store.DB().ExecContext(ctx, `DELETE FROM harness_archive_members WHERE capture_id = ?`, reserved.Capture.ID); err == nil {
+		t.Fatal("direct archive member delete unexpectedly succeeded")
 	}
 	second := member
 	second.RelativeMemberPath = "sessions/second.json"

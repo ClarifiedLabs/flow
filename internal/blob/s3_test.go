@@ -33,9 +33,18 @@ type fakeS3Object struct {
 	conditional bool
 }
 
+type fakeS3Version struct {
+	key          string
+	version      string
+	modified     time.Time
+	deleteMarker bool
+}
+
 type fakeS3 struct {
 	mu              sync.Mutex
 	objects         map[string]fakeS3Object
+	versions        []fakeS3Version
+	deletedVersions []string
 	multiparts      []types.MultipartUpload
 	aborted         []string
 	badNextChecksum bool
@@ -119,7 +128,20 @@ func (f *fakeS3) HeadObject(_ context.Context, input *s3.HeadObjectInput, _ ...f
 func (f *fakeS3) DeleteObject(_ context.Context, input *s3.DeleteObjectInput, _ ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.objects, aws.ToString(input.Key))
+	key, versionID := aws.ToString(input.Key), aws.ToString(input.VersionId)
+	if input.VersionId != nil {
+		f.deletedVersions = append(f.deletedVersions, key+"@"+versionID)
+		for index := len(f.versions) - 1; index >= 0; index-- {
+			if f.versions[index].key == key && f.versions[index].version == versionID {
+				f.versions = append(f.versions[:index], f.versions[index+1:]...)
+			}
+		}
+		if object, ok := f.objects[key]; ok && (object.version == versionID || object.version == "" && versionID == "null") {
+			delete(f.objects, key)
+		}
+		return &s3.DeleteObjectOutput{}, nil
+	}
+	delete(f.objects, key)
 	return &s3.DeleteObjectOutput{}, nil
 }
 
@@ -150,6 +172,64 @@ func (f *fakeS3) ListObjectsV2(_ context.Context, input *s3.ListObjectsV2Input, 
 	}
 	if end < len(keys) && end > start {
 		output.NextContinuationToken = aws.String(keys[end-1])
+	}
+	return output, nil
+}
+
+func (f *fakeS3) ListObjectVersions(_ context.Context, input *s3.ListObjectVersionsInput, _ ...func(*s3.Options)) (*s3.ListObjectVersionsOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	type listedVersion struct {
+		key, version string
+		modified     time.Time
+		deleteMarker bool
+	}
+	prefix := aws.ToString(input.Prefix)
+	listed := make([]listedVersion, 0, len(f.objects)+len(f.versions))
+	for key, object := range f.objects {
+		if strings.HasPrefix(key, prefix) {
+			version := object.version
+			if version == "" {
+				version = "null"
+			}
+			listed = append(listed, listedVersion{key: key, version: version, modified: object.modified})
+		}
+	}
+	for _, version := range f.versions {
+		if strings.HasPrefix(version.key, prefix) {
+			listed = append(listed, listedVersion{
+				key: version.key, version: version.version, modified: version.modified, deleteMarker: version.deleteMarker,
+			})
+		}
+	}
+	sort.Slice(listed, func(i, j int) bool {
+		return listed[i].key < listed[j].key || listed[i].key == listed[j].key && listed[i].version < listed[j].version
+	})
+	markerKey, markerVersion := aws.ToString(input.KeyMarker), aws.ToString(input.VersionIdMarker)
+	start := sort.Search(len(listed), func(i int) bool {
+		return listed[i].key > markerKey || listed[i].key == markerKey && listed[i].version > markerVersion
+	})
+	limit := len(listed) - start
+	if input.MaxKeys != nil && limit > int(*input.MaxKeys) {
+		limit = int(*input.MaxKeys)
+	}
+	end := start + limit
+	output := &s3.ListObjectVersionsOutput{IsTruncated: aws.Bool(end < len(listed))}
+	for _, version := range listed[start:end] {
+		if version.deleteMarker {
+			output.DeleteMarkers = append(output.DeleteMarkers, types.DeleteMarkerEntry{
+				Key: aws.String(version.key), VersionId: aws.String(version.version), LastModified: aws.Time(version.modified),
+			})
+		} else {
+			output.Versions = append(output.Versions, types.ObjectVersion{
+				Key: aws.String(version.key), VersionId: aws.String(version.version), LastModified: aws.Time(version.modified),
+			})
+		}
+	}
+	if end < len(listed) && end > start {
+		last := listed[end-1]
+		output.NextKeyMarker = aws.String(last.key)
+		output.NextVersionIdMarker = aws.String(last.version)
 	}
 	return output, nil
 }
@@ -555,6 +635,45 @@ func TestS3ReconcileAdvancesBoundedPagination(t *testing.T) {
 	}
 	if _, err := store.Head(context.Background(), orphan); err != nil {
 		t.Fatalf("published orphan was deleted: %v", err)
+	}
+}
+
+func TestS3ReconcileDeletesStaleTemporaryVersionsAndDeleteMarkers(t *testing.T) {
+	client := newFakeS3()
+	store, err := NewS3(S3Options{Client: client, Bucket: "bucket", Prefix: "tenant"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleID := strings.Repeat("a", 32)
+	liveID := strings.Repeat("b", 32)
+	old := time.Now().Add(-2 * time.Hour)
+	client.versions = []fakeS3Version{
+		{key: "tenant/tmp/" + staleID, version: "stale-object", modified: old},
+		{key: "tenant/tmp/" + staleID, version: "stale-marker", modified: old, deleteMarker: true},
+		{key: "tenant/tmp/" + liveID, version: "live-object", modified: old},
+		{key: "tenant/tmp/" + liveID, version: "live-marker", modified: old, deleteMarker: true},
+	}
+
+	result, err := store.Reconcile(context.Background(), ReconcileRequest{
+		Before: time.Now().Add(-time.Hour), Limit: 16,
+		LiveTemporaryIDs: map[string]struct{}{liveID: {}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Truncated {
+		t.Fatal("version cleanup unexpectedly truncated")
+	}
+	sort.Strings(client.deletedVersions)
+	wantDeleted := []string{
+		"tenant/tmp/" + staleID + "@stale-marker",
+		"tenant/tmp/" + staleID + "@stale-object",
+	}
+	if fmt.Sprint(client.deletedVersions) != fmt.Sprint(wantDeleted) {
+		t.Fatalf("deleted versions = %v, want %v", client.deletedVersions, wantDeleted)
+	}
+	if len(client.versions) != 2 || client.versions[0].key != "tenant/tmp/"+liveID || client.versions[1].key != "tenant/tmp/"+liveID {
+		t.Fatalf("remaining versions = %+v, want only protected live history", client.versions)
 	}
 }
 

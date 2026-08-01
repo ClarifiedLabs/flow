@@ -110,28 +110,28 @@ func TestRegistryWiresProjectIsolatedHistoryServicesAndMetadata(t *testing.T) {
 	reserveAndUploadHistoryArtifact(t, gate, second.HistoryCaptures, secondProject.ID, "job-two-more", true)
 	activeTemporary := reserveAndCompleteHistoryUpload(t, second.HistoryCaptures, secondProject.ID, "job-active")
 
-	_, complete, err := registry.HistoryBlobMetadata(ctx, 1)
+	_, complete, err := registry.HistoryTemporaryProtection(ctx, 1)
 	if err != nil {
-		t.Fatalf("bounded history blob metadata: %v", err)
+		t.Fatalf("bounded history temporary protection: %v", err)
 	}
 	if complete {
-		t.Fatal("history blob metadata with a one-row project allowance should be truncated")
+		t.Fatal("history temporary protection with a one-row project allowance should be truncated")
 	}
-	metadata, complete, err := registry.HistoryBlobMetadata(ctx, 100)
+	protected, complete, err := registry.HistoryTemporaryProtection(ctx, 100)
 	if err != nil {
-		t.Fatalf("history blob metadata: %v", err)
+		t.Fatalf("history temporary protection: %v", err)
 	}
 	if !complete {
-		t.Fatal("history blob metadata snapshot unexpectedly truncated")
+		t.Fatal("history temporary protection unexpectedly truncated")
 	}
-	if _, ok := metadata.LiveTemporaryIDs[pendingTemporary.ID]; !ok {
-		t.Fatalf("pending temporary %s is not protected: %v", pendingTemporary.ID, metadata.LiveTemporaryIDs)
+	if _, ok := protected[pendingTemporary.ID]; !ok {
+		t.Fatalf("pending temporary %s is not protected: %v", pendingTemporary.ID, protected)
 	}
-	if _, ok := metadata.LiveTemporaryIDs[activeTemporary.ID]; !ok {
-		t.Fatalf("active-intent temporary %s is not protected: %v", activeTemporary.ID, metadata.LiveTemporaryIDs)
+	if _, ok := protected[activeTemporary.ID]; !ok {
+		t.Fatalf("active-intent temporary %s is not protected: %v", activeTemporary.ID, protected)
 	}
-	if len(metadata.LiveTemporaryIDs) != 5 || len(metadata.PendingKeys) != 4 || len(metadata.ReferencedKeys) != 0 {
-		t.Fatalf("metadata = live:%d pending:%d referenced:%d", len(metadata.LiveTemporaryIDs), len(metadata.PendingKeys), len(metadata.ReferencedKeys))
+	if len(protected) != 5 {
+		t.Fatalf("protected temporaries = %d, want 5", len(protected))
 	}
 
 	gate.fail = false
@@ -142,15 +142,15 @@ func TestRegistryWiresProjectIsolatedHistoryServicesAndMetadata(t *testing.T) {
 	if summary.Projects != 2 || summary.Examined != 2 || summary.Committed != 2 || summary.Pending != 0 || summary.Failed != 0 {
 		t.Fatalf("bounded per-project reconciliation = %+v", summary)
 	}
-	metadata, complete, err = registry.HistoryBlobMetadata(ctx, 100)
+	protected, complete, err = registry.HistoryTemporaryProtection(ctx, 100)
 	if err != nil {
-		t.Fatalf("history blob metadata after reconciliation: %v", err)
+		t.Fatalf("history temporary protection after reconciliation: %v", err)
 	}
 	if !complete {
-		t.Fatal("history blob metadata snapshot after reconciliation unexpectedly truncated")
+		t.Fatal("history temporary protection after reconciliation unexpectedly truncated")
 	}
-	if _, ok := metadata.LiveTemporaryIDs[activeTemporary.ID]; !ok || len(metadata.LiveTemporaryIDs) != 3 || len(metadata.PendingKeys) != 2 || len(metadata.ReferencedKeys) != 2 {
-		t.Fatalf("metadata after reconciliation = live:%v pending:%d referenced:%d", metadata.LiveTemporaryIDs, len(metadata.PendingKeys), len(metadata.ReferencedKeys))
+	if _, ok := protected[activeTemporary.ID]; !ok || len(protected) != 3 {
+		t.Fatalf("protected temporaries after reconciliation = %v, want three including %s", protected, activeTemporary.ID)
 	}
 	var firstCaptures, secondCaptures int
 	if err := first.Store.DB().QueryRow(`SELECT count(*) FROM history_captures`).Scan(&firstCaptures); err != nil {

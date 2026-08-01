@@ -1106,6 +1106,10 @@ func (s *HistoryCaptureService) PublishArtifact(ctx context.Context, captureID, 
 	if input.Kind == HistoryArtifactManifest {
 		return HistoryArtifact{}, fmt.Errorf("%w: final manifests are coordinator-published", ErrHistoryUnauthorized)
 	}
+	captureID = strings.TrimSpace(captureID)
+	if err := s.AuthenticateUploadGrant(ctx, captureID, grant); err != nil {
+		return HistoryArtifact{}, err
+	}
 	canonical, err := s.blobs.Resume(ctx, temporary.ID)
 	if err != nil {
 		// A lost response can mean the temporary was already consumed. Existing
@@ -1409,29 +1413,60 @@ func (s *HistoryCaptureService) ReconcilePendingArtifacts(ctx context.Context, c
 	if limit < 1 || limit > 500 {
 		return HistoryPendingArtifactReconcileSummary{}, errors.New("pending history artifact reconciliation limit must be between 1 and 500")
 	}
-	query := historyArtifactSelect + ` WHERE publication_state = 'pending'`
-	var args []any
+	retryBefore := sqlitex.FormatTime(s.now().UTC().Add(-time.Minute))
+	query := `
+SELECT id
+FROM (
+    SELECT id, pending_at, reconcile_attempted_at,
+           CASE
+               WHEN reconcile_attempted_at IS NOT NULL AND reconcile_attempted_at <= ? THEN 0
+               WHEN reconcile_attempted_at IS NULL THEN 1
+               ELSE 2
+           END AS retry_class,
+           ROW_NUMBER() OVER (
+               PARTITION BY CASE
+                   WHEN reconcile_attempted_at IS NOT NULL AND reconcile_attempted_at <= ? THEN 0
+                   WHEN reconcile_attempted_at IS NULL THEN 1
+                   ELSE 2
+               END
+               ORDER BY COALESCE(reconcile_attempted_at, pending_at), pending_at, id
+           ) AS class_rank
+    FROM history_artifacts
+    WHERE publication_state = 'pending'`
+	args := []any{retryBefore, retryBefore}
 	if captureID = strings.TrimSpace(captureID); captureID != "" {
 		query += ` AND capture_id = ?`
 		args = append(args, captureID)
 	}
-	query += ` ORDER BY (reconcile_attempted_at IS NOT NULL), reconcile_attempted_at, pending_at, id LIMIT ?`
+	query += `
+)
+ORDER BY CASE WHEN retry_class = 2 THEN 1 ELSE 0 END,
+         class_rank, retry_class, pending_at, id
+LIMIT ?`
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return HistoryPendingArtifactReconcileSummary{}, err
 	}
-	var artifacts []InternalHistoryArtifact
+	var artifactIDs []string
 	for rows.Next() {
-		artifact, scanErr := scanInternalHistoryArtifact(rows)
-		if scanErr != nil {
+		var artifactID string
+		if scanErr := rows.Scan(&artifactID); scanErr != nil {
 			rows.Close()
 			return HistoryPendingArtifactReconcileSummary{}, scanErr
 		}
-		artifacts = append(artifacts, artifact)
+		artifactIDs = append(artifactIDs, artifactID)
 	}
 	if err := rows.Close(); err != nil {
 		return HistoryPendingArtifactReconcileSummary{}, err
+	}
+	artifacts := make([]InternalHistoryArtifact, 0, len(artifactIDs))
+	for _, artifactID := range artifactIDs {
+		artifact, getErr := s.getInternalArtifactByID(ctx, artifactID)
+		if getErr != nil {
+			return HistoryPendingArtifactReconcileSummary{}, getErr
+		}
+		artifacts = append(artifacts, artifact)
 	}
 	summary := HistoryPendingArtifactReconcileSummary{Examined: len(artifacts)}
 	for _, artifact := range artifacts {
@@ -2599,6 +2634,22 @@ ON CONFLICT(artifact_id, relative_member_path) DO NOTHING`, id, capture.ID, arti
 			member.AgentName, member.Status, member.Model, member.HarnessBuild, member.ParseStatus, now)
 		if err != nil {
 			return err
+		}
+		var existing HarnessArchiveMemberInput
+		var existingCaptureID, existingArchiveID string
+		if err := tx.QueryRowContext(ctx, `
+SELECT capture_id, archive_id, native_session_id, native_parent_session_id,
+       relative_member_path, member_kind, agent_name, status, model,
+       harness_build, parse_status
+FROM harness_archive_members
+WHERE artifact_id = ? AND relative_member_path = ?`, artifact.ID, member.RelativeMemberPath).Scan(
+			&existingCaptureID, &existingArchiveID, &existing.NativeSessionID, &existing.NativeParentSessionID,
+			&existing.RelativeMemberPath, &existing.MemberKind, &existing.AgentName, &existing.Status,
+			&existing.Model, &existing.HarnessBuild, &existing.ParseStatus); err != nil {
+			return err
+		}
+		if existingCaptureID != capture.ID || existingArchiveID != artifact.ArchiveID || existing != member {
+			return fmt.Errorf("%w: archive member retry differs", ErrHistoryConflict)
 		}
 	}
 	var registered int64

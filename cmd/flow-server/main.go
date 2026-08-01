@@ -498,23 +498,32 @@ func reconcileHistoryStorage(ctx context.Context, registry *api.Registry, store 
 		pendingLimit = 500
 	}
 	_, pendingErr := registry.ReconcilePendingHistoryArtifacts(ctx, pendingLimit)
-	request, complete, err := registry.HistoryBlobMetadata(ctx, policy.BatchSize)
+	liveTemporaryIDs, complete, err := registry.HistoryTemporaryProtection(ctx, policy.BatchSize)
 	if err != nil {
 		return blob.ReconcileResult{}, errors.Join(pendingErr, err)
 	}
 	if !complete {
-		// A partial reference snapshot is never safe for deletion. Keep this pass
-		// bounded and wait for explicit retention to reduce the protected set.
+		// A partial temporary-protection snapshot is never safe for deletion. This
+		// does not depend on the unbounded retained set of published artifact keys.
 		result := blob.ReconcileResult{Truncated: true}
 		metricSet.ObserveSuccess(0, 0, 0, true, now)
 		return result, pendingErr
 	}
-	request.Before = now.Add(-policy.TemporaryGrace)
-	request.Limit = policy.BatchSize
+	request := blob.ReconcileRequest{
+		Before:           now.Add(-policy.TemporaryGrace),
+		Limit:            policy.BatchSize,
+		LiveTemporaryIDs: liveTemporaryIDs,
+	}
 	result, err := store.Reconcile(ctx, request)
 	if err != nil {
 		return blob.ReconcileResult{}, errors.Join(pendingErr, err)
 	}
+	validatedOrphans, err := registry.RevalidateHistoryBlobOrphans(ctx, result.Orphans)
+	if err != nil {
+		result.Orphans = nil
+		return result, errors.Join(pendingErr, err)
+	}
+	result.Orphans = validatedOrphans
 	agedOrphans := 0
 	orphanCutoff := now.Add(-policy.OrphanGrace)
 	for _, orphan := range result.Orphans {

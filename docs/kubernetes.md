@@ -41,6 +41,22 @@ Readiness semantics:
 | `flow-worker` | the worker has registered with the coordinator |
 | `flow-orchestrator` | the first successful poll of both the coordinator and the Kubernetes API |
 
+## S3 history-storage permissions
+
+When `flow-server` uses the S3 history backend, its workload identity needs the
+usual object read/write permissions plus the version-aware cleanup permissions.
+Grant the bucket-level actions `s3:ListBucket`, `s3:ListBucketVersions`, and
+`s3:ListBucketMultipartUploads`, and grant `s3:GetObject`, `s3:PutObject`,
+`s3:DeleteObject`, `s3:DeleteObjectVersion`, and `s3:AbortMultipartUpload` on the
+configured history prefix. Scope both the bucket condition and object resource
+to that prefix where the IAM provider supports it.
+
+`ListObjectVersions` and `DeleteObjectVersion` are required even when bucket
+versioning is currently disabled. Reconciliation deletes exact stale temporary
+versions and delete markers; it does not fall back to adding delete markers,
+because doing so would retain hidden temporary payloads indefinitely. With SSE-KMS,
+also grant the selected key's encrypt/decrypt/data-key permissions.
+
 ## Ephemeral workers
 
 `flow-worker --ephemeral` keeps long-polling for a claim, runs exactly one

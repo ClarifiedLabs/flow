@@ -585,64 +585,44 @@ func (r *Registry) ReconcilePendingHistoryArtifacts(ctx context.Context, limitPe
 	return result, errors.Join(reconcileErrors...)
 }
 
-// HistoryBlobMetadata returns the complete relational protection set used by
-// blob reconciliation. Active upload intents protect completed temporaries that
-// have not yet been assigned a logical artifact. Pending publications protect
-// both their temporary upload and destination key; every committed artifact
-// remains referenced, including superseded checkpoints, until a future
-// explicitly authorized retention transaction removes that reference.
-func (r *Registry) HistoryBlobMetadata(ctx context.Context, limitPerProject int) (blob.ReconcileRequest, bool, error) {
+// HistoryTemporaryProtection returns the complete relational protection set
+// needed for destructive temporary cleanup. Retained published-object keys are
+// deliberately excluded: backend orphan candidates are report-only and are
+// revalidated exactly with RevalidateHistoryBlobOrphans.
+func (r *Registry) HistoryTemporaryProtection(ctx context.Context, limitPerProject int) (map[string]struct{}, bool, error) {
 	if limitPerProject <= 0 {
-		return blob.ReconcileRequest{}, false, errors.New("history metadata limit per project must be positive")
+		return nil, false, errors.New("history metadata limit per project must be positive")
 	}
-	request := blob.ReconcileRequest{
-		LiveTemporaryIDs: map[string]struct{}{},
-		ReferencedKeys:   map[blob.Key]struct{}{},
-		PendingKeys:      map[blob.Key]struct{}{},
-	}
+	liveTemporaryIDs := map[string]struct{}{}
 	complete := true
 	for _, bundle := range r.All() {
 		rows, err := bundle.Store.DB().QueryContext(ctx, `
-SELECT temporary_upload_id, blob_key, publication_state
-FROM history_artifacts ORDER BY id LIMIT ?`, limitPerProject+1)
+SELECT temporary_upload_id
+FROM history_artifacts
+WHERE publication_state = 'pending' AND temporary_upload_id <> ''
+ORDER BY id LIMIT ?`, limitPerProject+1)
 		if err != nil {
-			return blob.ReconcileRequest{}, false, fmt.Errorf("read project %s history blob metadata: %w", bundle.Project.ID, err)
+			return nil, false, fmt.Errorf("read project %s pending history temporaries: %w", bundle.Project.ID, err)
 		}
 		artifactRows := 0
 		for rows.Next() {
 			artifactRows++
-			var temporaryID, keyText, state string
-			if err := rows.Scan(&temporaryID, &keyText, &state); err != nil {
+			var temporaryID string
+			if err := rows.Scan(&temporaryID); err != nil {
 				rows.Close()
-				return blob.ReconcileRequest{}, false, fmt.Errorf("scan project %s history blob metadata: %w", bundle.Project.ID, err)
+				return nil, false, fmt.Errorf("scan project %s pending history temporary: %w", bundle.Project.ID, err)
 			}
 			if artifactRows > limitPerProject {
 				complete = false
 				continue
 			}
-			key, err := blob.ParseKey(keyText)
-			if err != nil {
-				rows.Close()
-				return blob.ReconcileRequest{}, false, fmt.Errorf("project %s has invalid history blob key: %w", bundle.Project.ID, err)
-			}
-			switch coordinator.HistoryPublicationState(state) {
-			case coordinator.HistoryPublicationPending:
-				request.PendingKeys[key] = struct{}{}
-				if temporaryID != "" {
-					request.LiveTemporaryIDs[temporaryID] = struct{}{}
-				}
-			case coordinator.HistoryPublicationCommitted:
-				request.ReferencedKeys[key] = struct{}{}
-			default:
-				rows.Close()
-				return blob.ReconcileRequest{}, false, fmt.Errorf("project %s has invalid history publication state %q", bundle.Project.ID, state)
-			}
+			liveTemporaryIDs[temporaryID] = struct{}{}
 		}
 		if err := rows.Close(); err != nil {
-			return blob.ReconcileRequest{}, false, fmt.Errorf("close project %s history metadata rows: %w", bundle.Project.ID, err)
+			return nil, false, fmt.Errorf("close project %s pending history temporaries: %w", bundle.Project.ID, err)
 		}
 		if err := rows.Err(); err != nil {
-			return blob.ReconcileRequest{}, false, fmt.Errorf("read project %s history blob metadata: %w", bundle.Project.ID, err)
+			return nil, false, fmt.Errorf("read project %s pending history temporaries: %w", bundle.Project.ID, err)
 		}
 
 		intentRows, err := bundle.Store.DB().QueryContext(ctx, `
@@ -651,7 +631,7 @@ FROM history_upload_intents
 WHERE state = 'active'
 ORDER BY temporary_upload_id LIMIT ?`, limitPerProject+1)
 		if err != nil {
-			return blob.ReconcileRequest{}, false, fmt.Errorf("read project %s active history upload intents: %w", bundle.Project.ID, err)
+			return nil, false, fmt.Errorf("read project %s active history upload intents: %w", bundle.Project.ID, err)
 		}
 		intentCount := 0
 		for intentRows.Next() {
@@ -659,22 +639,48 @@ ORDER BY temporary_upload_id LIMIT ?`, limitPerProject+1)
 			var temporaryID string
 			if err := intentRows.Scan(&temporaryID); err != nil {
 				intentRows.Close()
-				return blob.ReconcileRequest{}, false, fmt.Errorf("scan project %s active history upload intent: %w", bundle.Project.ID, err)
+				return nil, false, fmt.Errorf("scan project %s active history upload intent: %w", bundle.Project.ID, err)
 			}
 			if intentCount > limitPerProject {
 				complete = false
 				continue
 			}
-			request.LiveTemporaryIDs[temporaryID] = struct{}{}
+			liveTemporaryIDs[temporaryID] = struct{}{}
 		}
 		if err := intentRows.Close(); err != nil {
-			return blob.ReconcileRequest{}, false, fmt.Errorf("close project %s active history upload intents: %w", bundle.Project.ID, err)
+			return nil, false, fmt.Errorf("close project %s active history upload intents: %w", bundle.Project.ID, err)
 		}
 		if err := intentRows.Err(); err != nil {
-			return blob.ReconcileRequest{}, false, fmt.Errorf("read project %s active history upload intents: %w", bundle.Project.ID, err)
+			return nil, false, fmt.Errorf("read project %s active history upload intents: %w", bundle.Project.ID, err)
 		}
 	}
-	return request, complete, nil
+	return liveTemporaryIDs, complete, nil
+}
+
+// RevalidateHistoryBlobOrphans filters bounded backend candidates against every
+// project database. Published objects are never deleted by reconciliation, and
+// no candidate may be reported unless all authoritative lookups succeed.
+func (r *Registry) RevalidateHistoryBlobOrphans(ctx context.Context, candidates []blob.Object) ([]blob.Object, error) {
+	validated := make([]blob.Object, 0, len(candidates))
+	bundles := r.All()
+	for _, candidate := range candidates {
+		referenced := false
+		for _, bundle := range bundles {
+			var exists int
+			if err := bundle.Store.DB().QueryRowContext(ctx, `
+SELECT EXISTS(SELECT 1 FROM history_artifacts WHERE blob_key = ?)`, candidate.Key.String()).Scan(&exists); err != nil {
+				return nil, fmt.Errorf("revalidate project %s history blob candidate: %w", bundle.Project.ID, err)
+			}
+			if exists != 0 {
+				referenced = true
+				break
+			}
+		}
+		if !referenced {
+			validated = append(validated, candidate)
+		}
+	}
+	return validated, nil
 }
 
 func (r *Registry) Close() error {

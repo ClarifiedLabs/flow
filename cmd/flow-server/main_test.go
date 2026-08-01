@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -429,6 +430,23 @@ func TestHistoryReconciliationRemovesOnlyUnreferencedTemporariesAndReportsPublis
 	if err != nil {
 		t.Fatalf("complete active history upload: %v", err)
 	}
+	referencedUpload, err := bundle.HistoryCaptures.BeginUpload(ctx, reserved.Capture.ID, reserved.UploadGrant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := referencedUpload.Write([]byte("referenced")); err != nil {
+		t.Fatal(err)
+	}
+	referencedTemporary, err := referencedUpload.Complete(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bundle.HistoryCaptures.PublishArtifact(ctx, reserved.Capture.ID, reserved.UploadGrant, coordinator.PublishHistoryArtifactInput{
+		LogicalKey: "harness/final/referenced", Kind: coordinator.HistoryArtifactHarnessRoot, Phase: coordinator.HistoryArtifactFinal,
+		ArchiveID: "referenced", MediaType: "application/octet-stream", LogicalSize: 10, EntryCount: 1,
+	}, referencedTemporary); err != nil {
+		t.Fatalf("publish referenced history artifact: %v", err)
+	}
 
 	abandoned, err := store.Begin(ctx)
 	if err != nil {
@@ -486,6 +504,66 @@ func TestHistoryReconciliationRemovesOnlyUnreferencedTemporariesAndReportsPublis
 	registryMetrics.Render(&exposition)
 	if !strings.Contains(exposition.String(), "flow_history_reconciliation_orphans 1") {
 		t.Fatalf("metrics do not report orphan:\n%s", exposition.String())
+	}
+}
+
+func TestHistoryReconciliationContinuesCleanupPastRetainedArtifactBatch(t *testing.T) {
+	ctx := context.Background()
+	registry, project := newServeTestRegistry(t)
+	store := registry.HistoryBlobStore()
+	bundle, ok := registry.Bundle(project.ID)
+	if !ok {
+		t.Fatal("project bundle not open")
+	}
+	reserved, err := bundle.HistoryCaptures.Reserve(ctx, coordinator.ReserveHistoryCaptureInput{
+		ProjectID: project.ID, JobID: "retained-history", LeaseID: "lease-retained-history",
+		LeaseAttempt: 1, WorkerID: "worker", Role: "author", ExpectedHarness: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 2; index++ {
+		content := []byte{byte('a' + index)}
+		upload, err := bundle.HistoryCaptures.BeginUpload(ctx, reserved.Capture.ID, reserved.UploadGrant)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := upload.Write(content); err != nil {
+			t.Fatal(err)
+		}
+		temporary, err := upload.Complete(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := bundle.HistoryCaptures.PublishArtifact(ctx, reserved.Capture.ID, reserved.UploadGrant, coordinator.PublishHistoryArtifactInput{
+			LogicalKey: fmt.Sprintf("harness/final/retained-%d", index), Kind: coordinator.HistoryArtifactHarnessRoot,
+			Phase: coordinator.HistoryArtifactFinal, ArchiveID: fmt.Sprintf("retained-%d", index),
+			MediaType: "application/octet-stream", LogicalSize: 1, EntryCount: 1,
+		}, temporary); err != nil {
+			t.Fatal(err)
+		}
+	}
+	abandonedUpload, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := abandonedUpload.Write([]byte("abandoned")); err != nil {
+		t.Fatal(err)
+	}
+	abandoned, err := abandonedUpload.Complete(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metricSet := metrics.RegisterHistoryStorage(metrics.New(), "local")
+	policy := config.ResolvedHistoryReconciliation{
+		Interval: time.Minute, TemporaryGrace: time.Hour, OrphanGrace: time.Hour, BatchSize: 1,
+	}
+	result, err := reconcileHistoryStorage(ctx, registry, store, policy, metricSet, time.Now().UTC().Add(2*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.RemovedTemporaryIDs) != 1 || result.RemovedTemporaryIDs[0] != abandoned.ID {
+		t.Fatalf("cleanup past retained artifact batch = %+v", result)
 	}
 }
 
