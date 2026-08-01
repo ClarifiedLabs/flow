@@ -206,7 +206,10 @@ func WithLockedRefs(ctx context.Context, gitDir string, expected map[string]stri
 		return fail(err)
 	}
 	if err := readOK("prepare: ok"); err != nil {
-		return fail(fmt.Errorf("lock expected git refs: %w: %s", err, strings.TrimSpace(stderr.String())))
+		// Wait for the process and its stderr-copy goroutine before reading the
+		// buffer; preparing the formatted error first races with exec's writer.
+		cause := fail(err)
+		return fmt.Errorf("lock expected git refs: %w: %s", cause, strings.TrimSpace(stderr.String()))
 	}
 	processState.Lock()
 	if err := lockCtx.Err(); err != nil {
