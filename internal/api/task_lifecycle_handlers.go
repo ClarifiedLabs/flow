@@ -80,9 +80,15 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 	}
 
 	taskID := parts[0]
-	if err := checkBoundTaskScope(principal, taskID); err != nil {
-		writeError(w, http.StatusForbidden, "forbidden", err.Error())
-		return
+	// Session credentials may read any task in their project. Project routing
+	// enforces that boundary before dispatch reaches this handler; keep the
+	// tighter source-task check for mutations and task-specific subresources.
+	projectTaskRead := principal.Scope == coordinator.TokenScopeSession && len(parts) == 1 && r.Method == http.MethodGet
+	if !projectTaskRead {
+		if err := checkBoundTaskScope(principal, taskID); err != nil {
+			writeError(w, http.StatusForbidden, "forbidden", err.Error())
+			return
+		}
 	}
 	if len(parts) == 1 {
 		switch r.Method {

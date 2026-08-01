@@ -1785,6 +1785,51 @@ func TestTaskDetailReadModelIsOwnerOnly(t *testing.T) {
 	}
 }
 
+func TestSessionTokenCanReadDifferentTaskOnlyWithinProject(t *testing.T) {
+	server, bundles := newMultiProjectServer(t, "alpha", "beta")
+	ctx := context.Background()
+	projectA := bundles[0]
+	projectB := bundles[1]
+
+	source, err := projectA.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Session source"})
+	if err != nil {
+		t.Fatalf("create source task: %v", err)
+	}
+	target, err := projectA.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{
+		Title: "Earlier related work",
+		Body:  "The active agent needs this task's context.",
+	})
+	if err != nil {
+		t.Fatalf("create target task: %v", err)
+	}
+	foreign, err := projectB.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Foreign task"})
+	if err != nil {
+		t.Fatalf("create foreign task: %v", err)
+	}
+	if err := server.registry.Credentials().EnsureToken(ctx, coordinator.CredentialInput{
+		Token:        "cross-task-session-token",
+		Scope:        coordinator.TokenScopeSession,
+		Subject:      "s-cross-task",
+		ProjectID:    &projectA.Project.ID,
+		SourceTaskID: &source.ID,
+	}); err != nil {
+		t.Fatalf("store session token: %v", err)
+	}
+
+	var response taskResponse
+	path := "/v2/projects/" + projectA.Project.ID + "/tasks/" + target.ID
+	doJSONRequestAs(t, server, "cross-task-session-token", http.MethodGet, path, nil, http.StatusOK, &response)
+	if response.Task.ID != target.ID || response.Task.Title != target.Title || response.Task.Body != target.Body {
+		t.Fatalf("session task response = %+v, want %+v", response.Task, target)
+	}
+	if response.Detail != nil {
+		t.Fatalf("session task response leaked owner detail: %+v", response.Detail)
+	}
+
+	foreignPath := "/v2/projects/" + projectB.Project.ID + "/tasks/" + foreign.ID
+	doJSONRequestAs(t, server, "cross-task-session-token", http.MethodGet, foreignPath, nil, http.StatusForbidden, nil)
+}
+
 func TestPromptContextAdvertisesNestedPlanningWorkflow(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
