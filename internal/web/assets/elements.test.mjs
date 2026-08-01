@@ -402,8 +402,10 @@ test("a card at the blocker limit renders no overflow suffix", () => {
       },
     },
   })));
-  assert.match(html, /<a href="\/ui\/tasks\/t-c"[^>]*>C<\/a><\/p>/);
-  assert.ok(!html.includes("more"), "at the limit means no +N more suffix");
+  const waitingOn = /<p class="waiting-on">[\s\S]*?<\/p>/.exec(html)?.[0];
+  assert.ok(waitingOn, "the card renders a waiting-on line");
+  assert.match(waitingOn, /<a href="\/ui\/tasks\/t-c"[^>]*>C<\/a><\/p>/);
+  assert.ok(!waitingOn.includes("more"), "at the limit means no +N more suffix");
 });
 
 test("the card drops branch, change id and timestamps to the detail page", () => {
