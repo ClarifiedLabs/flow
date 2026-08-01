@@ -344,6 +344,11 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 	workflowRuns := coordinator.NewWorkflowRunServiceWithOptions(db, flows, tasks, coordinator.WorkflowRunServiceOptions{
 		ReviewAuthorCycleLimit: r.reviewAuthorCycleLimit,
 	})
+	// The review submission (ThreadService.SubmitReview) files threads, records
+	// the verdict check, and completes the human gate in one transaction, so
+	// the services it composes are wired back onto it after construction.
+	threads.Checks = checks
+	threads.Runs = workflowRuns
 	features := coordinator.NewFeatureService(db, tasks, project)
 	features.Runs = workflowRuns
 	workflowRuns.Features = features

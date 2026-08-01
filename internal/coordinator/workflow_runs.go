@@ -944,7 +944,7 @@ func requiresPinnedChangeHead(kind NodeKind) bool {
 	}
 }
 
-func verifyPinnedChangeHeadTx(ctx context.Context, tx *sql.Tx, artifactID string) error {
+func verifyPinnedChangeHeadTx(ctx context.Context, tx workflowTx, artifactID string) error {
 	artifactID = strings.TrimSpace(artifactID)
 	if artifactID == "" {
 		return nil
@@ -1022,16 +1022,29 @@ func isAutomatedReviewAuthorCycle(source, target FlowNodeSnapshot, outcome strin
 }
 
 func (s *WorkflowRunService) CompleteNode(ctx context.Context, input CompleteWorkflowNodeInput) (CompleteWorkflowNodeResult, error) {
-	input.NodeRunID = strings.TrimSpace(input.NodeRunID)
-	input.Outcome = strings.TrimSpace(input.Outcome)
-	if input.Actor == "" {
-		input.Actor = ActorSystem
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return CompleteWorkflowNodeResult{}, err
 	}
 	defer tx.Rollback()
+	return s.completeNodeTx(ctx, tx, input, true, tx.Commit)
+}
+
+// completeNodeTx runs the node-completion state machine against tx. When
+// selfCommit is true it commits tx at the state machine's natural completion
+// points and reloads the run (and next node run) before returning, exactly as
+// CompleteNode always has; commit is the function that commits tx. When
+// selfCommit is false it leaves tx open for the caller to commit and returns
+// the in-memory projection of the writes instead of reloading — the atomic
+// review submission completes its human gate this way, inside the same
+// transaction that validated the inspected head and recorded the verdict, and
+// commits that transaction itself.
+func (s *WorkflowRunService) completeNodeTx(ctx context.Context, tx workflowTx, input CompleteWorkflowNodeInput, selfCommit bool, commit func() error) (CompleteWorkflowNodeResult, error) {
+	input.NodeRunID = strings.TrimSpace(input.NodeRunID)
+	input.Outcome = strings.TrimSpace(input.Outcome)
+	if input.Actor == "" {
+		input.Actor = ActorSystem
+	}
 	nodeRun, err := scanWorkflowNodeRun(tx.QueryRowContext(ctx, workflowNodeRunSelect+` WHERE id = ?`, input.NodeRunID))
 	if err != nil {
 		return CompleteWorkflowNodeResult{}, err
@@ -1151,11 +1164,15 @@ UPDATE workflow_runs SET state = ?, version = version + 1 WHERE id = ?`,
 		); err != nil {
 			return CompleteWorkflowNodeResult{}, err
 		}
-		if err := tx.Commit(); err != nil {
-			return CompleteWorkflowNodeResult{}, err
+		run.State = WorkflowRunWaiting
+		if selfCommit {
+			if err := commit(); err != nil {
+				return CompleteWorkflowNodeResult{}, err
+			}
+			waiting, err := s.Get(ctx, run.ID)
+			return CompleteWorkflowNodeResult{Run: waiting}, err
 		}
-		waiting, err := s.Get(ctx, run.ID)
-		return CompleteWorkflowNodeResult{Run: waiting}, err
+		return CompleteWorkflowNodeResult{Run: run}, nil
 	}
 	if skipping {
 		retiredChecks, cancelledJobs, err := retireSkippedWorkflowNodeTx(ctx, tx, run.TaskID, run.ID, nodeRun.ID, sourceNode.Kind, now)
@@ -1242,11 +1259,17 @@ UPDATE workflow_node_runs SET state = ?, started_at = ?, completed_at = ? WHERE 
 		if err := s.completeTerminalTx(ctx, tx, &run, targetNode, "workflow", now); err != nil {
 			return CompleteWorkflowNodeResult{}, err
 		}
-		if err := tx.Commit(); err != nil {
-			return CompleteWorkflowNodeResult{}, err
+		run.State = WorkflowRunCompleted
+		run.CurrentNodeKey = target
+		run.CurrentNodeRunID = ""
+		if selfCommit {
+			if err := commit(); err != nil {
+				return CompleteWorkflowNodeResult{}, err
+			}
+			completed, err := s.Get(ctx, run.ID)
+			return CompleteWorkflowNodeResult{Run: completed, Done: true}, err
 		}
-		completed, err := s.Get(ctx, run.ID)
-		return CompleteWorkflowNodeResult{Run: completed, Done: true}, err
+		return CompleteWorkflowNodeResult{Run: run, Done: true}, nil
 	}
 
 	if used >= run.TransitionBudget {
@@ -1271,11 +1294,20 @@ WHERE id = ?`, string(WorkflowRunWaiting), target, sqlitex.NullableNonEmptyStrin
 		); err != nil {
 			return CompleteWorkflowNodeResult{}, err
 		}
-		if err := tx.Commit(); err != nil {
-			return CompleteWorkflowNodeResult{}, err
+		run.State = WorkflowRunWaiting
+		run.CurrentNodeKey = target
+		run.CurrentNodeRunID = ""
+		run.CurrentArtifactID = artifactID
+		run.TransitionsUsed = used
+		run.ReviewCyclesUsed = reviewCyclesUsed
+		if selfCommit {
+			if err := commit(); err != nil {
+				return CompleteWorkflowNodeResult{}, err
+			}
+			waiting, err := s.Get(ctx, run.ID)
+			return CompleteWorkflowNodeResult{Run: waiting}, err
 		}
-		waiting, err := s.Get(ctx, run.ID)
-		return CompleteWorkflowNodeResult{Run: waiting}, err
+		return CompleteWorkflowNodeResult{Run: run}, nil
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -1304,15 +1336,19 @@ WHERE id = ?`, string(WorkflowRunRunning), target, sqlitex.NullableNonEmptyStrin
 			return CompleteWorkflowNodeResult{}, err
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return CompleteWorkflowNodeResult{}, err
+	run.CurrentNodeRunID = next.ID
+	if selfCommit {
+		if err := commit(); err != nil {
+			return CompleteWorkflowNodeResult{}, err
+		}
+		updated, err := s.Get(ctx, run.ID)
+		if err != nil {
+			return CompleteWorkflowNodeResult{}, err
+		}
+		nextLoaded, _, err := s.GetNodeRun(ctx, next.ID)
+		return CompleteWorkflowNodeResult{Run: updated, Next: &nextLoaded}, err
 	}
-	updated, err := s.Get(ctx, run.ID)
-	if err != nil {
-		return CompleteWorkflowNodeResult{}, err
-	}
-	nextLoaded, _, err := s.GetNodeRun(ctx, next.ID)
-	return CompleteWorkflowNodeResult{Run: updated, Next: &nextLoaded}, err
+	return CompleteWorkflowNodeResult{Run: run, Next: &next}, nil
 }
 
 // SkipExecution resolves a specific execution-failure wait by waiving a failed
@@ -1373,7 +1409,7 @@ func workflowSkipOutcome(kind NodeKind) (string, bool) {
 	}
 }
 
-func retireSkippedWorkflowNodeTx(ctx context.Context, tx *sql.Tx, taskID, workflowRunID, nodeRunID string, kind NodeKind, now time.Time) (int64, int64, error) {
+func retireSkippedWorkflowNodeTx(ctx context.Context, tx workflowTx, taskID, workflowRunID, nodeRunID string, kind NodeKind, now time.Time) (int64, int64, error) {
 	nowText := sqlitex.FormatTime(now)
 	jobResult, err := tx.ExecContext(ctx, `
 UPDATE jobs SET state = 'canceled', updated_at = ?
@@ -1479,6 +1515,50 @@ func (s *WorkflowRunService) Respond(ctx context.Context, taskID, nodeRunID, out
 		Payload:        map[string]any{"feedback": strings.TrimSpace(feedback)},
 		IdempotencyKey: "human:" + nodeRunID + ":" + strings.TrimSpace(outcome),
 	})
+}
+
+// respondToReviewGateTx applies a human review verdict to the task's active
+// workflow run inside the caller's transaction. It mirrors Respond for the
+// review submission path, which must complete the gate in the same
+// transaction as the head validation and the verdict record so a stale review
+// cannot advance a workflow that has moved past the inspected head. A task
+// with no active run, or an active run not waiting on a human gate, is left
+// alone — the review still records its threads and verdict.
+func (s *WorkflowRunService) respondToReviewGateTx(ctx context.Context, tx workflowTx, taskID, verdict, feedback string) error {
+	run, err := scanWorkflowRun(tx.QueryRowContext(ctx, workflowRunSelect+`
+WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, taskID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if run.State != WorkflowRunWaiting || run.CurrentNodeRunID == "" {
+		return nil
+	}
+	node, ok := run.Snapshot.Node(run.CurrentNodeKey)
+	if !ok || node.Kind != NodeHumanGate {
+		return nil
+	}
+	nodeRun, err := scanWorkflowNodeRun(tx.QueryRowContext(ctx, workflowNodeRunSelect+` WHERE id = ?`, run.CurrentNodeRunID))
+	if err != nil {
+		return err
+	}
+	if nodeRun.State != WorkflowNodeSucceeded && (run.State != WorkflowRunWaiting || run.CurrentNodeRunID != nodeRun.ID) {
+		return fmt.Errorf("%w: task is not waiting on that node", ErrWorkflowConflict)
+	}
+	outcome := "changes_requested"
+	if verdict == "approve" {
+		outcome = "approved"
+	}
+	_, err = s.completeNodeTx(ctx, tx, CompleteWorkflowNodeInput{
+		NodeRunID:      nodeRun.ID,
+		Outcome:        outcome,
+		Actor:          ActorHuman,
+		Payload:        map[string]any{"feedback": strings.TrimSpace(feedback)},
+		IdempotencyKey: "human:" + nodeRun.ID + ":" + outcome,
+	}, false, nil)
+	return err
 }
 
 func (s *WorkflowRunService) ExtendBudget(ctx context.Context, taskID string, additional int, actor Actor) (WorkflowRun, error) {
@@ -1915,7 +1995,7 @@ WHERE task_id = ? AND state = 'waiting'`, strings.TrimSpace(taskID)))
 	return true, nil
 }
 
-func (s *WorkflowRunService) completeTerminalTx(ctx context.Context, tx *sql.Tx, run *WorkflowRun, node FlowNodeSnapshot, source string, now time.Time) error {
+func (s *WorkflowRunService) completeTerminalTx(ctx context.Context, tx workflowTx, run *WorkflowRun, node FlowNodeSnapshot, source string, now time.Time) error {
 	if node.Config.Terminal == nil {
 		return fmt.Errorf("terminal node %q has no terminal config", node.Key)
 	}
@@ -1965,7 +2045,7 @@ WHERE task_id = ? AND state = 'running'`, rebaseState, sqlitex.FormatTime(now), 
 	})
 }
 
-func createNodeRunTx(ctx context.Context, tx *sql.Tx, run WorkflowRun, nodeKey string, attempt int, inputArtifactID string, now time.Time) (WorkflowNodeRun, error) {
+func createNodeRunTx(ctx context.Context, tx workflowTx, run WorkflowRun, nodeKey string, attempt int, inputArtifactID string, now time.Time) (WorkflowNodeRun, error) {
 	var visit int
 	if err := tx.QueryRowContext(ctx, `
 SELECT COALESCE(MAX(visit), 0) + 1 FROM workflow_node_runs
@@ -1987,11 +2067,11 @@ INSERT INTO workflow_node_runs (
 		State: WorkflowNodeQueued, InputArtifactID: inputArtifactID, CreatedAt: now}, nil
 }
 
-func enterWaitTx(ctx context.Context, tx *sql.Tx, run *WorkflowRun, nodeRun *WorkflowNodeRun, kind WorkflowWaitKind, message string, actor Actor, now time.Time) error {
+func enterWaitTx(ctx context.Context, tx workflowTx, run *WorkflowRun, nodeRun *WorkflowNodeRun, kind WorkflowWaitKind, message string, actor Actor, now time.Time) error {
 	return enterWaitWithDetailsTx(ctx, tx, run, nodeRun, kind, nil, message, actor, now)
 }
 
-func enterWaitWithDetailsTx(ctx context.Context, tx *sql.Tx, run *WorkflowRun, nodeRun *WorkflowNodeRun, kind WorkflowWaitKind, details any, message string, actor Actor, now time.Time) error {
+func enterWaitWithDetailsTx(ctx context.Context, tx workflowTx, run *WorkflowRun, nodeRun *WorkflowNodeRun, kind WorkflowWaitKind, details any, message string, actor Actor, now time.Time) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE workflow_node_runs SET state = ? WHERE id = ?`, string(WorkflowNodeWaiting), nodeRun.ID); err != nil {
 		return err
 	}
@@ -2024,13 +2104,13 @@ func humanGateWaitMessage(node FlowNodeSnapshot) string {
 	return node.Name
 }
 
-func insertWaitTx(ctx context.Context, tx *sql.Tx, runID, nodeRunID string, kind WorkflowWaitKind, message string, actor Actor, now time.Time) error {
+func insertWaitTx(ctx context.Context, tx workflowTx, runID, nodeRunID string, kind WorkflowWaitKind, message string, actor Actor, now time.Time) error {
 	return insertWaitWithReasonTx(ctx, tx, runID, nodeRunID, kind, "", nil, message, actor, now)
 }
 
 func insertWaitWithReasonTx(
 	ctx context.Context,
-	tx *sql.Tx,
+	tx workflowTx,
 	runID, nodeRunID string,
 	kind WorkflowWaitKind,
 	reason WorkflowWaitReason,
@@ -2066,11 +2146,11 @@ WHERE workflow_run_id = ? AND state = 'open'`, string(actor), sqlitex.FormatTime
 	return err
 }
 
-func openWaitTx(ctx context.Context, tx *sql.Tx, runID string) (WorkflowWait, bool, error) {
+func openWaitTx(ctx context.Context, tx workflowTx, runID string) (WorkflowWait, bool, error) {
 	return scanWorkflowWaitMaybe(tx.QueryRowContext(ctx, workflowWaitSelect+` WHERE workflow_run_id = ? AND state = 'open'`, runID))
 }
 
-func unresolvedBlockerCountTx(ctx context.Context, tx *sql.Tx, taskID string) (int, error) {
+func unresolvedBlockerCountTx(ctx context.Context, tx workflowTx, taskID string) (int, error) {
 	var count int
 	err := tx.QueryRowContext(ctx, `
 SELECT COUNT(*)
@@ -2090,6 +2170,16 @@ type workflowTransitionInput struct {
 
 type workflowTransitionExecer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+// workflowTx is the transactional SQL surface the workflow state machine runs
+// on. CompleteNode opens a real *sql.Tx; the review submission runs the
+// human-gate completion inside its own BEGIN IMMEDIATE transaction so the
+// verdict cannot be separated from the head validation that guards it.
+// *sql.Tx and sqlitex.Tx both satisfy it.
+type workflowTx interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 func insertWorkflowTransitionTx(ctx context.Context, tx workflowTransitionExecer, input workflowTransitionInput) error {

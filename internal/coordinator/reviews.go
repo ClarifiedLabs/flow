@@ -99,6 +99,21 @@ type ReviewContext struct {
 type ThreadService struct {
 	db  *sql.DB
 	now func() time.Time
+
+	// Checks and Runs back the atomic review submission (SubmitReview), which
+	// files threads, records the verdict check, and completes the verdict's
+	// human gate in one transaction. The registry wires them after all
+	// services are constructed; SubmitReview requires Checks for a verdict and
+	// skips the gate when Runs is nil.
+	Checks *CheckService
+	Runs   *WorkflowRunService
+
+	// AfterHeadCheck, when non-nil, runs inside the review transaction right
+	// after the submitted head compares equal to the change's current head and
+	// before any thread or verdict writes. Tests use it to prove that a head
+	// update cannot interleave between the comparison and the writes; it is
+	// nil in production.
+	AfterHeadCheck func() error
 }
 
 func NewThreadService(database *sql.DB) *ThreadService {
@@ -109,6 +124,31 @@ func NewThreadService(database *sql.DB) *ThreadService {
 }
 
 func (s *ThreadService) CreateThread(ctx context.Context, input CreateThreadInput) (ReviewThread, error) {
+	now := s.now().UTC()
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return ReviewThread{}, fmt.Errorf("begin create thread transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	thread, err := createThreadTx(ctx, tx, input, now)
+	if err != nil {
+		return ReviewThread{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ReviewThread{}, fmt.Errorf("commit create thread transaction: %w", err)
+	}
+
+	return s.GetThread(ctx, thread.ID)
+}
+
+// createThreadTx validates and files one review thread inside an open
+// transaction. A duplicate concern (same change, anchor, file, line, and body)
+// collapses to the existing thread, so a retry is a no-op rather than a
+// duplicate thread. CreateThread wraps it in its own transaction; the atomic
+// review submission runs it inside the transaction that also validates the
+// change head and records the verdict.
+func createThreadTx(ctx context.Context, tx reviewThreadTxer, input CreateThreadInput, now time.Time) (ReviewThread, error) {
 	input.ChangeID = strings.TrimSpace(input.ChangeID)
 	input.AnchorCommitSHA = strings.TrimSpace(input.AnchorCommitSHA)
 	input.FilePath = strings.TrimSpace(input.FilePath)
@@ -141,12 +181,6 @@ func (s *ThreadService) CreateThread(ctx context.Context, input CreateThreadInpu
 	if err != nil {
 		return ReviewThread{}, err
 	}
-	now := s.now().UTC()
-	tx, err := sqlitex.BeginImmediate(ctx, s.db)
-	if err != nil {
-		return ReviewThread{}, fmt.Errorf("begin create thread transaction: %w", err)
-	}
-	defer tx.Rollback()
 
 	var taskID string
 	if err := tx.QueryRowContext(ctx, `
@@ -175,8 +209,7 @@ LIMIT 1`,
 	case err == nil:
 		// Identical concern already filed; return it unchanged so the retry is a
 		// no-op rather than a duplicate thread.
-		tx.Rollback()
-		return s.GetThread(ctx, existingID)
+		return scanReviewThread(tx.QueryRowContext(ctx, reviewThreadSelectSQL+` WHERE id = ?`, existingID))
 	case errors.Is(err, sql.ErrNoRows):
 		// No prior thread for this key; fall through to insert.
 	default:
@@ -216,11 +249,166 @@ INSERT INTO review_threads (
 	if _, err := insertReviewComment(ctx, tx, threadID, input.Actor, input.Body, now); err != nil {
 		return ReviewThread{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return ReviewThread{}, fmt.Errorf("commit create thread transaction: %w", err)
+
+	return scanReviewThread(tx.QueryRowContext(ctx, reviewThreadSelectSQL+` WHERE id = ?`, threadID))
+}
+
+// SubmitReviewInput is one human review submission: the change whose diff the
+// reviewer inspected, the head SHA shown with that diff, any inline notes, and
+// the verdict posted with them.
+type SubmitReviewInput struct {
+	ChangeID string
+	HeadSHA  string
+	Verdict  string // approve, request_changes, or comment
+	Body     string
+	// CheckName is the check the verdict reports against (the web UI's human
+	// review check). Required for verdicts; ignored for a bare comment.
+	CheckName string
+	Comments  []SubmitReviewComment
+	Actor     string
+}
+
+// SubmitReviewComment is one inline note drafted against the reviewed diff.
+// Anchor defaults to the inspected head when empty.
+type SubmitReviewComment struct {
+	FilePath string
+	Line     int
+	Anchor   string
+	Context  string
+	Body     string
+}
+
+type SubmitReviewResult struct {
+	Threads []ReviewThread
+	Check   *Check
+}
+
+// ErrReviewHeadMoved refuses a review submission whose expected head no longer
+// matches the change's current head: the reviewer's notes and verdict apply to
+// the code they inspected, not to whatever the change has since advanced to.
+var ErrReviewHeadMoved = errors.New("change head moved since the review was rendered")
+
+// SubmitReview files a human review as one atomic unit. The change's current
+// head is re-read inside the same BEGIN IMMEDIATE transaction that creates the
+// inline threads, records the verdict check, and completes the verdict's
+// workflow gate, so a head update cannot interleave between the comparison and
+// the writes: either this submission commits for the inspected head first and
+// the advance lands after it, or the advance lands first and the whole
+// submission is refused with ErrReviewHeadMoved. A mismatch never leaves
+// partial state behind.
+func (s *ThreadService) SubmitReview(ctx context.Context, input SubmitReviewInput) (SubmitReviewResult, error) {
+	input.ChangeID = strings.TrimSpace(input.ChangeID)
+	input.HeadSHA = strings.TrimSpace(input.HeadSHA)
+	input.Verdict = strings.TrimSpace(input.Verdict)
+	if input.ChangeID == "" {
+		return SubmitReviewResult{}, errors.New("change id is required")
+	}
+	if input.HeadSHA == "" {
+		return SubmitReviewResult{}, errors.New("head sha is required")
+	}
+	if input.Verdict == "" {
+		return SubmitReviewResult{}, errors.New("verdict is required")
+	}
+	input.Actor = normalizeReviewActor(input.Actor)
+	now := s.now().UTC()
+
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return SubmitReviewResult{}, fmt.Errorf("begin review transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// The expected head is re-validated while the write transaction holds the
+	// database connection, so no concurrent head update can land between this
+	// comparison and the thread/verdict writes below.
+	var taskID, currentHead string
+	if err := tx.QueryRowContext(ctx, `
+SELECT task_id, head_sha
+FROM changes
+WHERE id = ?`, input.ChangeID).Scan(&taskID, &currentHead); err != nil {
+		return SubmitReviewResult{}, err
+	}
+	if input.HeadSHA != strings.TrimSpace(currentHead) {
+		return SubmitReviewResult{}, ErrReviewHeadMoved
+	}
+	if s.AfterHeadCheck != nil {
+		if err := s.AfterHeadCheck(); err != nil {
+			return SubmitReviewResult{}, err
+		}
 	}
 
-	return s.GetThread(ctx, threadID)
+	result := SubmitReviewResult{}
+	for _, comment := range input.Comments {
+		anchor := strings.TrimSpace(comment.Anchor)
+		if anchor == "" {
+			// Default to the head the reviewer inspected, which the check above
+			// guarantees is still the change's current head.
+			anchor = input.HeadSHA
+		}
+		thread, err := createThreadTx(ctx, tx, CreateThreadInput{
+			ChangeID:        input.ChangeID,
+			AnchorCommitSHA: anchor,
+			FilePath:        comment.FilePath,
+			Line:            comment.Line,
+			Context:         comment.Context,
+			Body:            comment.Body,
+			Actor:           input.Actor,
+		}, now)
+		if err != nil {
+			return SubmitReviewResult{}, fmt.Errorf("create review thread: %w", err)
+		}
+		result.Threads = append(result.Threads, thread)
+	}
+
+	// A bare comment records the notes without moving the review forward.
+	if input.Verdict != "comment" {
+		if s.Checks == nil {
+			return SubmitReviewResult{}, errors.New("review check service is not configured")
+		}
+		checkVerdict := CheckSatisfied
+		if input.Verdict == "request_changes" {
+			checkVerdict = CheckBlocked
+		}
+		required := true
+		check, err := reportCheckTx(ctx, tx, ReportCheckInput{
+			TaskID:   taskID,
+			Name:     strings.TrimSpace(input.CheckName),
+			Kind:     CheckKindHuman,
+			Required: &required,
+			Verdict:  checkVerdict,
+			Details:  strings.TrimSpace(input.Body),
+			Reporter: input.Actor,
+		}, sqlitex.FormatTime(now))
+		if err != nil {
+			return SubmitReviewResult{}, err
+		}
+		result.Check = &check
+	}
+
+	// A bare comment records the notes without moving the review forward, so
+	// it must not complete the task's human gate: only a verdict (approve or
+	// request_changes) responds to the gate, mirroring the check guard above.
+	if input.Verdict != "comment" && s.Runs != nil {
+		if err := s.Runs.respondToReviewGateTx(ctx, tx, taskID, input.Verdict, input.Body); err != nil {
+			return SubmitReviewResult{}, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return SubmitReviewResult{}, fmt.Errorf("commit review transaction: %w", err)
+	}
+
+	// The response threads carry their comments, like CreateThread's do; the
+	// re-reads run after the commit so they never see the transaction's own
+	// uncommitted state.
+	for i := range result.Threads {
+		loaded, err := s.GetThread(ctx, result.Threads[i].ID)
+		if err != nil {
+			return SubmitReviewResult{}, err
+		}
+		result.Threads[i] = loaded
+	}
+	return result, nil
 }
 
 // hashThreadBody is the deterministic digest backing review-thread idempotency.
@@ -551,6 +739,14 @@ INSERT INTO review_comments (
 
 type queryExecutor interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// reviewThreadTxer is the transactional surface createThreadTx runs on: a real
+// *sql.Tx from CreateThread, or the BEGIN IMMEDIATE transaction held by the
+// atomic review submission.
+type reviewThreadTxer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 const reviewThreadSelectSQL = `

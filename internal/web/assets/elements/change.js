@@ -37,6 +37,32 @@ export class FlowChange extends FlowElement {
   // Pending inline notes live here until the reviewer submits a verdict; that
   // is the difference between a comment box and a review.
   drafts = new Map();
+  // The head the pending drafts were written against. The standalone change
+  // route reuses this element across polls, so drafts outlive re-renders by
+  // design — but only for one head: render() clears them when the displayed
+  // head changes, so notes composed against uninspected code can never ride
+  // along in a submission that names a newer head.
+  _draftHead = "";
+
+  // The head whose code is on screen right now: the diff response names the
+  // head the server rendered (what the reviewer actually saw), and the change
+  // metadata must name the same head (both routes verify the pair before
+  // rendering). Empty when the data names no head at all.
+  get _displayedHead() {
+    return String(value(this.data?.diff || {}, "head_sha", "HeadSHA") || value(this.data?.change || {}, "head_sha", "HeadSHA") || "");
+  }
+
+  // The head whose code is actually painted on screen right now. Setting
+  // `data` only schedules the repaint on a microtask, so the model can advance
+  // to a newer head while the rendered diff and review controls still show the
+  // old one — and _displayedHead would already name the new head. A submission
+  // must bind to what the reviewer saw, so it reads the painted head (the
+  // data-head attribute render() stamped into the markup) and falls back to
+  // the model's head only before the first paint, when nothing is on screen.
+  get _paintedHead() {
+    const node = this.querySelector(".head[data-head]");
+    return node ? node.dataset.head : this._displayedHead;
+  }
   mode = readDiffMode();
 
   render(data) {
@@ -44,6 +70,17 @@ export class FlowChange extends FlowElement {
     const change = value(data, "change", "Change") || {};
     const task = value(data, "task", "Task") || {};
     const diff = data.diff || {};
+    // Drafts are bound to the head they were written against, mirroring the
+    // head submitReview names: the diff head (what the reviewer saw), falling
+    // back to the change metadata head. A re-render that shows a different
+    // head clears the drafts — the reviewer's notes were composed against
+    // code that is no longer on screen, and the server would accept them
+    // against the new head.
+    const headSHA = this._displayedHead;
+    if (headSHA && headSHA !== this._draftHead) {
+      this.drafts.clear();
+      this._draftHead = headSHA;
+    }
     const files = value(diff, "files", "Files") || [];
     const threads = value(data, "threads", "Threads") || [];
     if (!this.selected || !files.some((file) => value(file, "path", "Path") === this.selected)) {
@@ -64,8 +101,15 @@ export class FlowChange extends FlowElement {
       ? "The diff is not available yet; it will appear here once it is."
       : "No diff yet — this change has no head yet.";
 
+    // The full displayed head rides in the markup so the paint identity (the
+    // byte-compared render output in FlowElement.paint) moves whenever the head
+    // does. The visible summary abbreviates the head to 12 characters, so two
+    // heads sharing that prefix with the same file list and diff totals would
+    // otherwise render byte-identical markup and skip the repaint — leaving the
+    // old head's diff on screen while _displayedHead — and the submission —
+    // name the new one.
     return `
-      <div class="head">
+      <div class="head" data-head="${escapeAttr(headSHA)}">
         <span class="change-id">${escapeHTML(value(change, "id", "ID"))}</span>
         <a class="task-link" href="/ui/tasks/${escapeAttr(value(task, "id", "ID"))}" data-link>${escapeHTML(value(task, "id", "ID"))}</a>
         <span class="summary">${escapeHTML(summaryLine(change, diff))}</span>
@@ -207,6 +251,17 @@ export class FlowChange extends FlowElement {
     this.captureDrafts();
     const changeID = value(this.data?.change || {}, "id", "ID");
     if (!changeID) return;
+    // The head whose diff is on screen: the painted head (the data-head
+    // attribute render() stamped into the markup), because a poll can set the
+    // model to a newer head while the repaint is still queued — the rendered
+    // diff and review controls then show the old head, and this submission's
+    // body and drafts were captured from them. Binding to the model's newer
+    // head would let feedback written against the rendered code be accepted as
+    // a review of code the reviewer never saw. The server rejects the
+    // submission with a conflict if the change advanced past the named head,
+    // keeping this review's threads and verdict attached to the code that was
+    // actually inspected.
+    const headSHA = this._paintedHead;
     const comments = [...this.drafts.values()]
       .filter((draft) => draft.body.trim())
       .map((draft) => ({ file_path: draft.path, line: draft.line, body: draft.body.trim() }));
@@ -256,23 +311,40 @@ export class FlowChange extends FlowElement {
     });
     this.app?.setStatus(entry.label);
     try {
-      await apiPost(`/v2/changes/${encodeURIComponent(changeID)}/review`, { verdict, body, comments });
-      this.drafts.clear();
+      await apiPost(`/v2/changes/${encodeURIComponent(changeID)}/review`, { verdict, body, comments, head_sha: headSHA });
+      // The server recorded this review against the head the submission named.
+      // Settlement belongs to that head's display: a poll may have repainted
+      // the change to a newer head while the request was out, and the reviewer
+      // could already be drafting against it — so clear the submitted drafts
+      // only while that head is still on screen.
+      if (this._paintedHead === headSHA) this.drafts.clear();
       // The verdict flow is its own dispatcher (acquireBusy/POST/settleStatus
       // run inline here), so stamp the refresh with the settle-burst
       // provenance token directly instead of going through actionScope.
       await this.app?.refresh({ settle: ACTION_SETTLE });
       // settleStatus keeps a still-pending sibling's label visible instead of
       // showing this verdict's result early.
-      settleStatus(this.app, busyKey, reviewMessage(verdict, comments.length));
+      if (this._paintedHead === headSHA) {
+        settleStatus(this.app, busyKey, reviewMessage(verdict, comments.length));
+      } else {
+        // The review landed for the head the reviewer inspected, but that head
+        // is no longer displayed: drop the pending label without claiming the
+        // newer head's bar — the refresh's data carries the recorded outcome.
+        settleStatus(this.app, busyKey, "");
+      }
     } catch (error) {
       // failureMessage is total, so settleStatus always runs and the key always
       // drains — even for a non-Error rejection such as `reject(null)`.
       settleStatus(this.app, busyKey, failureMessage(error));
       // A repaint during the request replaces the comment input; give the
-      // reviewer their unsubmitted words back alongside the error.
+      // reviewer their unsubmitted words back alongside the error — but only
+      // while the change still displays the head this submission was made
+      // against. A head move re-renders the element (and drops the inline
+      // drafts); restoring the rejected h1 body into the h2 review bar would
+      // let a later submission post feedback on code the reviewer never
+      // inspected, naming the newer head.
       const input = this.querySelector("[data-review-body]");
-      if (input && !input.value) input.value = body;
+      if (this._paintedHead === headSHA && input && !input.value) input.value = body;
     } finally {
       releaseBusy(busyKey);
     }

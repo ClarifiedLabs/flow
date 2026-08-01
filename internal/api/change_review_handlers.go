@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 	"net/http"
@@ -19,8 +18,14 @@ const humanReviewCheckName = "human-review"
 // drafted while reading the diff, plus the overall verdict they are posting
 // with them. Posting the notes and the verdict separately is what made the old
 // single-box review lossy.
+//
+// HeadSHA is the commit the reviewer actually inspected. The submission is
+// rejected with a conflict if the change advanced past it, so inline threads
+// and the verdict stay bound to the code the reviewer saw rather than to a
+// newer head they never looked at.
 type reviewVerdictRequest struct {
 	Verdict  string                `json:"verdict"`
+	HeadSHA  string                `json:"head_sha"`
 	Body     string                `json:"body,omitempty"`
 	Comments []reviewInlineComment `json:"comments,omitempty"`
 }
@@ -56,6 +61,12 @@ func (s *projectServer) handleSubmitReview(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid_verdict", `verdict must be approve, request_changes, or comment`)
 		return
 	}
+	for _, comment := range request.Comments {
+		if strings.TrimSpace(comment.Body) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_comment", "inline comment body is required")
+			return
+		}
+	}
 
 	ctx := r.Context()
 	taskID, err := s.threads.ChangeTaskID(ctx, changeID)
@@ -67,94 +78,50 @@ func (s *projectServer) handleSubmitReview(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "load_change_failed", err.Error())
 		return
 	}
-	change, err := s.sessions.GetChange(ctx, changeID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "load_change_failed", err.Error())
-		return
-	}
 
-	response := reviewVerdictResponse{Verdict: verdict}
+	comments := make([]coordinator.SubmitReviewComment, 0, len(request.Comments))
 	for _, comment := range request.Comments {
-		if strings.TrimSpace(comment.Body) == "" {
-			writeError(w, http.StatusBadRequest, "invalid_comment", "inline comment body is required")
-			return
-		}
-		anchor := strings.TrimSpace(comment.AnchorCommitSHA)
-		if anchor == "" {
-			anchor = change.HeadSHA
-		}
-		thread, err := s.threads.CreateThread(ctx, coordinator.CreateThreadInput{
-			ChangeID:        changeID,
-			AnchorCommitSHA: anchor,
-			FilePath:        comment.FilePath,
-			Line:            comment.Line,
-			Context:         comment.Context,
-			Body:            comment.Body,
-			Actor:           principal.Actor(),
+		comments = append(comments, coordinator.SubmitReviewComment{
+			FilePath: comment.FilePath,
+			Line:     comment.Line,
+			Anchor:   comment.AnchorCommitSHA,
+			Context:  comment.Context,
+			Body:     comment.Body,
 		})
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "create_thread_failed", err.Error())
-			return
-		}
-		response.Threads = append(response.Threads, thread)
 	}
-
-	// A bare comment records the notes without moving the review forward.
-	if verdict == "comment" {
-		writeJSON(w, http.StatusOK, response)
-		return
-	}
-
-	checkVerdict := coordinator.CheckSatisfied
-	if verdict == "request_changes" {
-		checkVerdict = coordinator.CheckBlocked
-	}
-	required := true
-	check, err := s.checks.ReportCheck(ctx, coordinator.ReportCheckInput{
-		TaskID:   taskID,
-		Name:     humanReviewCheckName,
-		Kind:     coordinator.CheckKindHuman,
-		Required: &required,
-		Verdict:  checkVerdict,
-		Details:  strings.TrimSpace(request.Body),
-		Reporter: string(principal.Actor()),
+	result, err := s.threads.SubmitReview(ctx, coordinator.SubmitReviewInput{
+		ChangeID:  changeID,
+		HeadSHA:   request.HeadSHA,
+		Verdict:   verdict,
+		Body:      request.Body,
+		CheckName: humanReviewCheckName,
+		Comments:  comments,
+		Actor:     principal.Actor(),
 	})
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "report_check_failed", err.Error())
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		writeError(w, http.StatusNotFound, "change_not_found", "change not found")
+		return
+	case errors.Is(err, coordinator.ErrReviewHeadMoved):
+		writeError(w, http.StatusConflict, "head_moved", "change head moved since this review was rendered; reload the change and re-review")
+		return
+	case err != nil:
+		writeWorkflowError(w, err, "review_failed")
 		return
 	}
-	response.Check = &check
 
-	if err := s.respondToReviewGate(ctx, taskID, verdict, request.Body); err != nil {
-		writeWorkflowError(w, err, "respond_workflow_failed")
-		return
+	response := reviewVerdictResponse{Verdict: verdict, Threads: result.Threads}
+	if result.Check != nil {
+		response.Check = result.Check
 	}
-	s.advanceWorkflowForTask(w, r, taskID)
+	// A bare comment records notes without moving the review forward, so it
+	// must not nudge the executor either: on a scheduled run (or a running run
+	// without a current node) Advance would start the workflow, enter the
+	// human gate, or dispatch work. Only a verdict responds to the gate.
+	if verdict != "comment" {
+		s.advanceWorkflowForTask(w, r, taskID)
+	}
 	writeJSON(w, http.StatusOK, response)
-}
-
-// respondToReviewGate applies the review verdict to an active human gate. A
-// check report alone cannot move a waiting workflow because the executor needs
-// the gate's explicit outcome before it can continue.
-func (s *projectServer) respondToReviewGate(ctx context.Context, taskID, verdict, feedback string) error {
-	if s.workflowRuns == nil {
-		return nil
-	}
-	run, active, err := s.workflowRuns.ActiveForTask(ctx, taskID)
-	if err != nil || !active || run.State != coordinator.WorkflowRunWaiting || run.CurrentNodeRunID == "" {
-		return err
-	}
-	node, ok := run.Snapshot.Node(run.CurrentNodeKey)
-	if !ok || node.Kind != coordinator.NodeHumanGate {
-		return nil
-	}
-
-	outcome := "changes_requested"
-	if verdict == "approve" {
-		outcome = "approved"
-	}
-	_, err = s.workflowRuns.Respond(ctx, taskID, run.CurrentNodeRunID, outcome, feedback, coordinator.ActorHuman)
-	return err
 }
 
 // advanceWorkflowForTask nudges the executor after a human input so the run

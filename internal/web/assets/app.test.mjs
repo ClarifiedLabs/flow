@@ -123,6 +123,123 @@ test("terminal route embeds owner-authenticated login path", async () => {
   assert.match(content.innerHTML, /Drag to select \(auto-copies\) · Shift\+drag for manual selection/);
 });
 
+test("the change route refuses a diff that names a newer head than the metadata", async () => {
+  const context = await scriptContext({
+    location: { pathname: "/ui/changes/ch-0001" },
+    setTimeout() {},
+    clearTimeout() {},
+  }, {
+    document: inlineDocument(),
+    fetch(path) {
+      if (path === "/ui/api/v2/projects") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ projects: [] }) });
+      }
+      if (path === "/ui/api/v2/changes/ch-0001") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            change: { id: "ch-0001", head_sha: "111111111111" },
+            task: { id: "t-0001" },
+            threads: [],
+            review_state: "in_review",
+          }),
+        });
+      }
+      if (path === "/ui/api/v2/changes/ch-0001/diff") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            change_id: "ch-0001",
+            head_sha: "222222222222",
+            total_files: 1,
+            files: [{ path: "b.go" }],
+          }),
+        });
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+  const app = new context.FlowApp();
+  app.pollingActive = true;
+  const title = { textContent: "" };
+  const status = { textContent: "" };
+  const content = new InlineDOMElement("div");
+  app.querySelector = (selector) => {
+    if (selector === "h1") return title;
+    if (selector === ".status") return status;
+    if (selector === ".content") return content;
+    return { textContent: "" };
+  };
+  app.querySelectorAll = () => [];
+
+  await app.load();
+
+  assert.equal(
+    status.textContent,
+    "The change advanced while it was loading",
+    "a head that moved between the two GETs fails the load with a retryable error",
+  );
+  assert.equal(content.children.length, 0, "no change panel is mounted for an unverified pair");
+});
+
+test("the change route mounts the change once the diff names the metadata head", async () => {
+  const context = await scriptContext({
+    location: { pathname: "/ui/changes/ch-0001" },
+    setTimeout() {},
+    clearTimeout() {},
+  }, {
+    document: inlineDocument(),
+    fetch(path) {
+      if (path === "/ui/api/v2/projects") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ projects: [] }) });
+      }
+      if (path === "/ui/api/v2/changes/ch-0001") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            change: { id: "ch-0001", head_sha: "111111111111" },
+            task: { id: "t-0001" },
+            threads: [],
+            review_state: "in_review",
+          }),
+        });
+      }
+      if (path === "/ui/api/v2/changes/ch-0001/diff") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            change_id: "ch-0001",
+            head_sha: "111111111111",
+            total_files: 1,
+            files: [{ path: "a.go" }],
+          }),
+        });
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+  const app = new context.FlowApp();
+  app.pollingActive = true;
+  const title = { textContent: "" };
+  const status = { textContent: "" };
+  const content = new InlineDOMElement("div");
+  app.querySelector = (selector) => {
+    if (selector === "h1") return title;
+    if (selector === ".status") return status;
+    if (selector === ".content") return content;
+    return { textContent: "" };
+  };
+  app.querySelectorAll = () => [];
+
+  await app.load();
+
+  assert.equal(title.textContent, "Change");
+  assert.equal(status.textContent, "");
+  assert.equal(content.children.length, 1, "a verified pair mounts the change panel");
+  assert.equal(content.children[0].data.change.head_sha, "111111111111");
+  assert.equal(content.children[0].data.diff.head_sha, "111111111111", "the mounted diff is the one the metadata head verifies");
+});
+
 test("console page offers shell harness and posts selected harness", async () => {
   const fetchCalls = [];
   const title = { textContent: "" };

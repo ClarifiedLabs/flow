@@ -1909,7 +1909,7 @@ function stubReviewFetch(handler) {
 test("a review verdict marks the button busy and names the in-flight submission", async () => {
   const root = globalThis.document.body;
   let resolveRequest;
-  stubReviewFetch(
+  const calls = stubReviewFetch(
     () =>
       new Promise((resolve) => {
         resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
@@ -1936,6 +1936,9 @@ test("a review verdict marks the button busy and names the in-flight submission"
   assert.equal(approve.classList.contains("is-busy"), false);
   assert.equal(bodyInput.disabled, false, "the overall-comment input is restored on success");
   assert.deepEqual(statuses, ["Approving\u2026", "Approved"]);
+  const posted = JSON.parse(calls[0].options.body);
+  assert.equal(posted.head_sha, "abc123def456", "the submission carries the head displayed with the diff");
+  assert.equal(posted.verdict, "approve");
   change.remove();
   appNode.remove();
 });
@@ -2096,6 +2099,370 @@ test("a repaint while a review is in flight keeps the verdict controls suppresse
   assert.equal(repaintedRequestChanges.disabled, false);
   assert.equal(repaintedBodyInput.disabled, false, "the repainted input is restored on settle");
   assert.equal(inFlight.size, 0);
+  change.remove();
+  appNode.remove();
+});
+
+test("a review submission binds to the head displayed when the head moves between render and submit", async () => {
+  const root = globalThis.document.body;
+  let resolveRequest;
+  const calls = stubReviewFetch(
+    () =>
+      new Promise((resolve) => {
+        resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+      }),
+  );
+  const { appNode, change } = mountChange(root, reviewChangeData());
+  await flush();
+
+  // The change advances while the reviewer is reading: the element re-renders
+  // with the new head, so the submission must carry the new displayed head.
+  change.data = {
+    ...reviewChangeData(),
+    change: { id: "ch-0001", head_sha: "def456789abc" },
+  };
+  await flush();
+
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  const pending = change.handleClick({ target: approve, preventDefault() {} });
+  const posted = JSON.parse(calls[0].options.body);
+  assert.equal(posted.head_sha, "def456789abc", "the submission carries the head currently displayed");
+
+  resolveRequest();
+  await pending;
+  change.remove();
+  appNode.remove();
+});
+
+test("a submission in the queued-paint window binds to the head still rendered, not the model's newer head", async () => {
+  const root = globalThis.document.body;
+  let resolveRequest;
+  const calls = stubReviewFetch(
+    () =>
+      new Promise((resolve) => {
+        resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+      }),
+  );
+  const { appNode, change } = mountChange(root, reviewChangeData());
+  await flush();
+
+  // The reviewer writes against h1, which is what the DOM renders.
+  const bodyInput = change.querySelector("[data-review-body]");
+  bodyInput.value = "feedback written against h1";
+  change.drafts.set("a.go:1", { path: "a.go", line: 1, body: "note against h1" });
+
+  // The change advances: the model is h2, but the repaint is only queued, so
+  // the DOM still renders h1's diff and review controls. Submitting in this
+  // window must bind to the head actually on screen — the server accepts
+  // feedback against the named head, so naming h2 would let h1 feedback land
+  // on code the reviewer never inspected.
+  change.data = {
+    ...reviewChangeData(),
+    change: { id: "ch-0001", head_sha: "def456789abc" },
+  };
+  assert.equal(change.querySelector(".head").dataset.head, "abc123def456", "the rendered head is still h1 before the queued paint");
+
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  const pending = change.handleClick({ target: approve, preventDefault() {} });
+  const posted = JSON.parse(calls[0].options.body);
+  assert.equal(posted.head_sha, "abc123def456", "the submission names the head rendered on screen, not the model's newer head");
+  assert.equal(posted.body, "feedback written against h1");
+  assert.deepEqual(posted.comments, [{ file_path: "a.go", line: 1, body: "note against h1" }]);
+
+  resolveRequest();
+  await pending;
+  // The queued repaint lands once the submission settles.
+  await flush();
+  assert.equal(change.querySelector(".head").dataset.head, "def456789abc", "the queued repaint shows the new head");
+  change.remove();
+  appNode.remove();
+});
+
+test("a head change between renders drops drafts written against the old head", async () => {
+  const root = globalThis.document.body;
+  let resolveRequest;
+  const calls = stubReviewFetch(
+    () =>
+      new Promise((resolve) => {
+        resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+      }),
+  );
+  const { appNode, change } = mountChange(root, reviewChangeData());
+  await flush();
+
+  // The reviewer drafts an inline note while reading h1's diff.
+  change.drafts.set("a.go:1", { path: "a.go", line: 1, body: "note against h1" });
+  assert.equal(change.drafts.size, 1);
+
+  // The change advances and the standalone change page re-renders with h2.
+  // The element survives the poll (drafts are meant to outlive re-renders), but
+  // notes composed against h1 must not ride along: the server would accept and
+  // anchor them to h2 even though the reviewer never inspected h2.
+  change.data = {
+    ...reviewChangeData(),
+    change: { id: "ch-0001", head_sha: "def456789abc" },
+  };
+  await flush();
+
+  assert.equal(change.drafts.size, 0, "drafts written against the old head are dropped on the head change");
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  const pending = change.handleClick({ target: approve, preventDefault() {} });
+  const posted = JSON.parse(calls[0].options.body);
+  assert.deepEqual(posted.comments, [], "the h2 submission carries no h1 draft notes");
+  assert.equal(posted.head_sha, "def456789abc", "the submission names the newly displayed head");
+
+  resolveRequest();
+  await pending;
+  change.remove();
+  appNode.remove();
+});
+
+test("the submission names the diff head when it differs from the metadata head", async () => {
+  const root = globalThis.document.body;
+  let resolveRequest;
+  const calls = stubReviewFetch(
+    () =>
+      new Promise((resolve) => {
+        resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+      }),
+  );
+  const { appNode, change } = mountChange(root, reviewChangeData());
+  await flush();
+
+  // A route that failed to verify its pair would show one head's metadata
+  // above another head's diff; the submission must still name the head the
+  // reviewer actually saw — the diff's — so the server can refuse it as stale
+  // instead of attaching the review to the metadata head.
+  change.data = {
+    ...reviewChangeData(),
+    change: { id: "ch-0001", head_sha: "abc123def456" },
+    diff: { ...reviewChangeData().diff, head_sha: "def456789abc" },
+  };
+  await flush();
+
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  const pending = change.handleClick({ target: approve, preventDefault() {} });
+  const posted = JSON.parse(calls[0].options.body);
+  assert.equal(posted.head_sha, "def456789abc", "the submission carries the diff head");
+
+  resolveRequest();
+  await pending;
+  change.remove();
+  appNode.remove();
+});
+
+test("a stale-head conflict keeps the drafts and shows the conflict message", async () => {
+  const root = globalThis.document.body;
+  stubReviewFetch(() =>
+    Promise.resolve({
+      ok: false,
+      status: 409,
+      json: () => Promise.resolve({ error: { message: "change head moved; reload and re-review" } }),
+    }),
+  );
+  const { appNode, change, statuses } = mountChange(root, reviewChangeData());
+  await flush();
+
+  change.drafts.set("a.go:1", { path: "a.go", line: 1, body: "note on the inspected head" });
+  const bodyInput = change.querySelector("[data-review-body]");
+  bodyInput.value = "overall feedback";
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  await change.handleClick({ target: approve, preventDefault() {} });
+
+  assert.deepEqual(statuses, ["Approving\u2026", "change head moved; reload and re-review"]);
+  assert.equal(change.drafts.get("a.go:1").body, "note on the inspected head", "the conflict keeps the draft notes");
+  assert.equal(bodyInput.value, "overall feedback", "the conflict keeps the review body");
+  assert.equal(approve.disabled, false);
+  assert.equal(inFlight.size, 0);
+  change.remove();
+  appNode.remove();
+});
+
+test("a delayed conflict for the old head does not restore review text into the new head's bar", async () => {
+  const root = globalThis.document.body;
+  let resolveFirst;
+  let resolveSecond;
+  let calls = 0;
+  const posted = [];
+  const reviewCalls = stubReviewFetch(() => {
+    calls += 1;
+    if (calls === 1) {
+      // The h1 submission hangs while the reviewer's approval is in flight.
+      return new Promise((resolve) => {
+        resolveFirst = () =>
+          resolve({ ok: false, status: 409, json: () => Promise.resolve({ error: { message: "change head moved; reload and re-review" } }) });
+      });
+    }
+    return new Promise((resolve) => {
+      resolveSecond = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+  });
+  const { appNode, change, statuses } = mountChange(root, reviewChangeData());
+  await flush();
+
+  // The reviewer writes an overall review against h1 and submits it.
+  const bodyInput = change.querySelector("[data-review-body]");
+  bodyInput.value = "overall feedback written against h1";
+  change.drafts.set("a.go:1", { path: "a.go", line: 1, body: "note against h1" });
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  const pending = change.handleClick({ target: approve, preventDefault() {} });
+  posted.push(JSON.parse(reviewCalls[reviewCalls.length - 1].options.body));
+  assert.equal(posted[0].head_sha, "abc123def456");
+  assert.equal(posted[0].body, "overall feedback written against h1");
+
+  // While the submission hangs, the change advances: the poll re-renders h2,
+  // which replaces the review bar and drops the h1 drafts.
+  change.data = {
+    ...reviewChangeData(),
+    change: { id: "ch-0001", head_sha: "def456789abc" },
+  };
+  await flush();
+  assert.equal(change.drafts.size, 0, "the h2 repaint drops the h1 drafts");
+  const repaintedInput = change.querySelector("[data-review-body]");
+  assert.equal(repaintedInput.value, "", "the h2 repaint leaves an empty review bar");
+
+  // The delayed 409 for the h1 submission lands after the repaint. It must
+  // not restore the h1 body into the h2 review bar.
+  resolveFirst();
+  await pending;
+  assert.deepEqual(statuses, ["Approving\u2026", "change head moved; reload and re-review"]);
+  assert.equal(change.querySelector("[data-review-body]").value, "", "the rejected h1 body is not restored into the h2 review bar");
+  assert.equal(change.drafts.size, 0, "the rejected h1 drafts stay dropped");
+
+  // A subsequent approval on h2 must post h2 feedback — not the h1 text — and
+  // name the head the reviewer is looking at.
+  const secondApprove = change.querySelector('[data-review-verdict="approve"]');
+  const second = change.handleClick({ target: secondApprove, preventDefault() {} });
+  posted.push(JSON.parse(reviewCalls[reviewCalls.length - 1].options.body));
+  assert.equal(posted[1].head_sha, "def456789abc", "the h2 submission names the displayed head");
+  assert.equal(posted[1].body, "", "the h2 submission carries no h1 review text");
+  assert.deepEqual(posted[1].comments, [], "the h2 submission carries no h1 draft notes");
+
+  resolveSecond();
+  await second;
+  change.remove();
+  appNode.remove();
+});
+
+test("a head move that shares the summary prefix still repaints the diff and binds the submission to the full head", async () => {
+  const root = globalThis.document.body;
+  let resolveRequest;
+  const calls = stubReviewFetch(
+    () =>
+      new Promise((resolve) => {
+        resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+      }),
+  );
+  // Two full SHAs whose 12-character summary prefixes collide, with the same
+  // file list and diff totals: only the full head and the diff content differ.
+  // The paint identity must still move — otherwise the flow-diff child keeps
+  // showing h1's content while _displayedHead — and the submission — name h2.
+  const h1 = "abcdef0123450000000000000000000000000000";
+  const h2 = "abcdef012345ffffffffffffffffffffffffffff";
+  const changeData = (head, marker) => ({
+    change: { id: "ch-0001", head_sha: head },
+    task: { id: "t-0001" },
+    diff: {
+      head_sha: head,
+      total_files: 1,
+      additions: 1,
+      deletions: 0,
+      files: [{ path: "a.go", hunks: [{ header: "@@ -1 +1 @@", lines: [{ kind: "add", new_line: 1, text: marker }] }] }],
+    },
+    threads: [],
+    review_state: "in_review",
+  });
+  const { appNode, change } = mountChange(root, changeData(h1, "old source"));
+  await flush();
+  await flush();
+  assert.match(change.querySelector("flow-diff").innerHTML, /old source/, "h1's diff is on screen");
+
+  change.drafts.set("a.go:1", { path: "a.go", line: 1, body: "note against h1" });
+
+  // The change advances to h2 with the same summary line, file list, and
+  // totals: the panel must repaint anyway so the diff on screen is h2's.
+  change.data = changeData(h2, "new source");
+  await flush();
+  await flush();
+
+  assert.match(change.querySelector("flow-diff").innerHTML, /new source/, "the diff repaints to the newly displayed head");
+  assert.doesNotMatch(change.querySelector("flow-diff").innerHTML, /old source/, "the old head's diff is gone");
+  assert.equal(change.drafts.size, 0, "the head move drops the drafts written against the old head");
+
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  const pending = change.handleClick({ target: approve, preventDefault() {} });
+  const posted = JSON.parse(calls[0].options.body);
+  assert.equal(posted.head_sha, h2, "the submission names the full head whose diff is on screen");
+
+  resolveRequest();
+  await pending;
+  change.remove();
+  appNode.remove();
+});
+
+test("a delayed successful submission for the old head does not clear the new head's drafts or claim its bar", async () => {
+  const root = globalThis.document.body;
+  let resolveFirst;
+  let resolveSecond;
+  let calls = 0;
+  const posted = [];
+  const reviewCalls = stubReviewFetch(() => {
+    calls += 1;
+    if (calls === 1) {
+      // The h1 submission hangs while the reviewer's approval is in flight.
+      return new Promise((resolve) => {
+        resolveFirst = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+      });
+    }
+    return new Promise((resolve) => {
+      resolveSecond = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+  });
+  const { appNode, change, statuses } = mountChange(root, reviewChangeData());
+  await flush();
+
+  // The reviewer writes an overall review against h1 and submits it.
+  const bodyInput = change.querySelector("[data-review-body]");
+  bodyInput.value = "overall feedback written against h1";
+  change.drafts.set("a.go:1", { path: "a.go", line: 1, body: "note against h1" });
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  const pending = change.handleClick({ target: approve, preventDefault() {} });
+  posted.push(JSON.parse(reviewCalls[reviewCalls.length - 1].options.body));
+  assert.equal(posted[0].head_sha, "abc123def456");
+  assert.equal(posted[0].body, "overall feedback written against h1");
+
+  // While the submission hangs, the change advances: the poll re-renders h2,
+  // which replaces the review bar and drops the h1 drafts.
+  change.data = {
+    ...reviewChangeData(),
+    change: { id: "ch-0001", head_sha: "def456789abc" },
+  };
+  await flush();
+  assert.equal(change.drafts.size, 0, "the h2 repaint drops the h1 drafts");
+
+  // The reviewer starts drafting against h2 while the h1 submission is still out.
+  change.drafts.set("a.go:1", { path: "a.go", line: 1, body: "note against h2" });
+
+  // The delayed h1 success lands after the repaint. Its settlement belongs to
+  // the head it named: it must not wipe the h2 drafts, and the success must
+  // not be announced over the h2 bar.
+  resolveFirst();
+  await pending;
+  assert.equal(change.drafts.size, 1, "the h1 settlement leaves the h2 drafts in place");
+  assert.equal(change.drafts.get("a.go:1").body, "note against h2");
+  assert.equal(change.querySelector("[data-review-body]").value, "", "the h2 review bar stays empty");
+  assert.deepEqual(statuses, ["Approving\u2026", ""], "the h1 success is not announced over the h2 bar");
+
+  // A subsequent approval on h2 posts the h2 draft and names h2.
+  const secondApprove = change.querySelector('[data-review-verdict="approve"]');
+  const second = change.handleClick({ target: secondApprove, preventDefault() {} });
+  posted.push(JSON.parse(reviewCalls[reviewCalls.length - 1].options.body));
+  assert.equal(posted[1].head_sha, "def456789abc", "the h2 submission names the displayed head");
+  assert.equal(posted[1].body, "", "the h2 submission carries no h1 review text");
+  assert.deepEqual(posted[1].comments, [{ file_path: "a.go", line: 1, body: "note against h2" }], "the h2 submission carries the h2 draft");
+
+  resolveSecond();
+  await second;
   change.remove();
   appNode.remove();
 });

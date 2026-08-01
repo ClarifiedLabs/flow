@@ -112,8 +112,15 @@ func (s *CheckService) ReportCheck(ctx context.Context, input ReportCheckInput) 
 		return Check{}, err
 	}
 
-	nowText := formatTime(s.now().UTC())
-	row := s.db.QueryRowContext(ctx, `
+	return reportCheckTx(ctx, s.db, input, formatTime(s.now().UTC()))
+}
+
+// reportCheckTx upserts the check row and scans it back. It is shared by
+// ReportCheck and the atomic review submission, which runs it inside its own
+// transaction so the verdict record cannot be separated from the head
+// validation that guards it.
+func reportCheckTx(ctx context.Context, q rowQueryer, input ReportCheckInput, nowText string) (Check, error) {
+	row := q.QueryRowContext(ctx, `
 INSERT INTO checks (
 	task_id,
 	name,
@@ -181,6 +188,12 @@ RETURNING`+checkColumns,
 	}
 
 	return check, nil
+}
+
+// rowQueryer is the read surface reportCheckTx runs on: a *sql.DB from
+// ReportCheck or the transaction held by the atomic review submission.
+type rowQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 // crossCheckReviewThreads overrides a reviewer's satisfied verdict to blocked
