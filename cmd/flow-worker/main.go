@@ -227,10 +227,10 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		Help:    "flow-worker build information.",
 		Version: version.Current().String(),
 	})
-	jobMetrics = &workerJobMetrics{
+	jobMetrics.Store(&workerJobMetrics{
 		claimed:   telemetryRegistry.Counter("flow_jobs_claimed_total", "Jobs claimed by this worker."),
 		completed: telemetryRegistry.Counter("flow_jobs_completed_total", "Jobs released by this worker by final state."),
-	}
+	})
 	maintenanceMetrics := newWorkerMaintenanceMetrics(telemetryRegistry)
 	telemetrySettings := metrics.Resolve(cfg.Metrics, config.DefaultTelemetryListen, metrics.Overrides{
 		Disable:    noMetrics,
@@ -338,15 +338,15 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// workerJobMetrics are the per-worker job counters. The package-level handle
-// is nil-safe so claim paths can count without threading state through every
-// helper, and tests that never start the telemetry endpoint stay unaffected.
+// workerJobMetrics are the per-worker job counters. The package-level atomic
+// handle is nil-safe so claim paths can count without threading state through
+// every helper, and parallel entrypoint tests cannot race with claim loops.
 type workerJobMetrics struct {
 	claimed   *metrics.Counter
 	completed *metrics.Counter
 }
 
-var jobMetrics *workerJobMetrics
+var jobMetrics atomic.Pointer[workerJobMetrics]
 
 func (m *workerJobMetrics) jobClaimed() {
 	if m == nil {
@@ -540,7 +540,7 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 		"bucket", claim.Job.CapacityBucket,
 	)
 	fmt.Fprintf(stdout, "claimed: %s lease=%s\n", claim.Job.ID, claim.Lease.ID)
-	jobMetrics.jobClaimed()
+	jobMetrics.Load().jobClaimed()
 	running, err := client.MarkJobRunning(claim.Lease.ID)
 	if err != nil {
 		return true, jobFailure(fmt.Errorf("mark job running: %w", err))
@@ -707,7 +707,7 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 	slog.Debug("flow-worker lease released", "job_id", released.ID, "state", released.State)
 	fmt.Fprintf(stdout, "released: %s state=%s\n", released.ID, released.State)
 	cleanupFinalized = true
-	jobMetrics.jobCompleted(string(released.State))
+	jobMetrics.Load().jobCompleted(string(released.State))
 	if checkErr != nil && !staleCheckResult {
 		return true, jobFailure(checkErr)
 	}
