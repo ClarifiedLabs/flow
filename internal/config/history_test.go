@@ -51,6 +51,7 @@ func TestCoordinatorHistoryRejectsUnsafeStorageAndRelationships(t *testing.T) {
 		{name: "sse s3 with key", cfg: CoordinatorHistoryConfig{Blob: HistoryBlobConfig{Backend: "s3", S3: HistoryS3Config{Region: "us-east-1", Bucket: "private", Encryption: "sse-s3", KMSKeyID: "secret"}}}, want: "require sse-kms"},
 		{name: "short temporary grace", cfg: CoordinatorHistoryConfig{Reconciliation: HistoryReconciliationConfig{Interval: "1h", TemporaryGrace: "30m"}}, want: "temporary_grace must be >= interval"},
 		{name: "archive relationship", cfg: CoordinatorHistoryConfig{Archive: HistoryArchiveConfig{MaxStoredBytes: "3GiB", MaxLogicalBytes: "2GiB"}}, want: "must not exceed"},
+		{name: "archive path exceeds schema", cfg: CoordinatorHistoryConfig{Archive: HistoryArchiveConfig{MaxPathBytes: 4097}}, want: "outside safe bounds"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
@@ -456,6 +457,102 @@ WHERE capture_id = ? AND reconcile_attempted_at IS NOT NULL`, reserved.Capture.I
 	}
 	if attempted != 2 {
 		t.Fatalf("reconciliation attempted %d distinct pending artifacts, want 2", attempted)
+	}
+}
+
+func TestHistoryPendingPublicationRemainsOutstandingForQuotas(t *testing.T) {
+	tests := []struct {
+		name       string
+		maxUploads int
+		maxBytes   int64
+	}{
+		{name: "count", maxUploads: 1, maxBytes: 10},
+		{name: "bytes", maxUploads: 2, maxBytes: 1},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			env := newHistoryCaptureTestEnv(t)
+			ctx := context.Background()
+			service := NewHistoryCaptureServiceWithOptions(env.store.DB(), failingPublishStore{Store: env.blobs}, HistoryCaptureServiceOptions{
+				MaxOutstandingUploadsPerCapture:     test.maxUploads,
+				MaxOutstandingUploadBytesPerCapture: test.maxBytes,
+			})
+			input := baseHistoryReservation()
+			input.JobID = fmt.Sprintf("job-pending-quota-%d", index)
+			input.LeaseID = fmt.Sprintf("lease-pending-quota-%d", index)
+			input.LeaseAttempt = int64(index + 20)
+			reserved := reserveHistoryCapture(t, service, input)
+			first := uploadHistoryBytes(t, service, reserved.Capture.ID, reserved.UploadGrant, []byte("a"))
+			_, err := service.PublishArtifact(ctx, reserved.Capture.ID, reserved.UploadGrant, PublishHistoryArtifactInput{
+				LogicalKey: "harness/final/pending", Kind: HistoryArtifactHarnessRoot, Phase: HistoryArtifactFinal,
+				ArchiveID: "pending", MediaType: "application/octet-stream", LogicalSize: 1,
+			}, first)
+			if err == nil {
+				t.Fatal("persistent publication failure unexpectedly succeeded")
+			}
+			var intentState, publicationState string
+			if err := env.store.DB().QueryRowContext(ctx, `
+SELECT intent.state, artifact.publication_state
+FROM history_upload_intents intent
+JOIN history_artifacts artifact ON artifact.id = intent.artifact_id
+WHERE intent.temporary_upload_id = ?`, first.ID).Scan(&intentState, &publicationState); err != nil {
+				t.Fatal(err)
+			}
+			if intentState != "consumed" || publicationState != "pending" {
+				t.Fatalf("pending publication state = intent:%q artifact:%q", intentState, publicationState)
+			}
+
+			second, err := service.BeginUpload(ctx, reserved.Capture.ID, reserved.UploadGrant)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := second.Write([]byte("b")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := second.Complete(ctx); !errors.Is(err, ErrHistoryUploadTooLarge) {
+				t.Fatalf("second completed upload err = %v, want outstanding quota", err)
+			}
+		})
+	}
+}
+
+func TestHarnessArchiveMemberRegistrationEnforcesDeclaredAndConfiguredLimits(t *testing.T) {
+	env := newHistoryCaptureTestEnv(t)
+	ctx := context.Background()
+	service := NewHistoryCaptureServiceWithOptions(env.store.DB(), env.blobs, HistoryCaptureServiceOptions{
+		MaxArchiveEntries: 3, MaxArchivePathBytes: 256,
+	})
+	reserved := reserveHistoryCapture(t, service, baseHistoryReservation())
+	publishHistoryBytes(t, service, reserved.Capture.ID, reserved.UploadGrant, PublishHistoryArtifactInput{
+		LogicalKey: "harness/final/indexed", Kind: HistoryArtifactHarnessRoot, Phase: HistoryArtifactFinal,
+		ArchiveID: "indexed", MediaType: "application/octet-stream", LogicalSize: 4, EntryCount: 1,
+	}, []byte("root"))
+	member := HarnessArchiveMemberInput{
+		RelativeMemberPath: "sessions/root.json", MemberKind: "root", Status: "complete", ParseStatus: "parsed",
+	}
+	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", []HarnessArchiveMemberInput{member}); err != nil {
+		t.Fatalf("register declared member: %v", err)
+	}
+	second := member
+	second.RelativeMemberPath = "sessions/second.json"
+	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", []HarnessArchiveMemberInput{second}); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatalf("incremental registration beyond declared count err = %v", err)
+	}
+	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", []HarnessArchiveMemberInput{member, second}); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatalf("bulk registration beyond declared count err = %v", err)
+	}
+	longPath := member
+	longPath.RelativeMemberPath = strings.Repeat("x", 257)
+	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", []HarnessArchiveMemberInput{longPath}); err == nil || !strings.Contains(err.Error(), "member path") {
+		t.Fatalf("overlong configured member path err = %v", err)
+	}
+	var registered int
+	if err := env.store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM harness_archive_members WHERE capture_id = ?`, reserved.Capture.ID).Scan(&registered); err != nil {
+		t.Fatal(err)
+	}
+	if registered != 1 {
+		t.Fatalf("registered archive members = %d, want 1", registered)
 	}
 }
 
@@ -942,6 +1039,46 @@ func TestHistoryTranscriptStrictGzipRawDigestAndServerSeal(t *testing.T) {
 	if err != nil || segment.RawSHA256 != historyDigest(raw) {
 		t.Fatalf("gzip segment=%+v err=%v", segment, err)
 	}
+	clearRawDigestAsLegacy := func() {
+		t.Helper()
+		connection, err := env.store.DB().Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var triggerSQL string
+		if err := connection.QueryRowContext(ctx, `
+SELECT sql FROM sqlite_master
+WHERE type = 'trigger' AND name = 'history_transcript_segments_no_update'`).Scan(&triggerSQL); err != nil {
+			t.Fatalf("read transcript immutability trigger: %v", err)
+		}
+		if _, err := connection.ExecContext(ctx, `DROP TRIGGER history_transcript_segments_no_update`); err != nil {
+			t.Fatalf("drop transcript immutability trigger: %v", err)
+		}
+		if _, err := connection.ExecContext(ctx, `PRAGMA ignore_check_constraints = ON`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := connection.ExecContext(ctx, `
+UPDATE history_transcript_segments SET raw_sha256 = '' WHERE capture_id = ?`, reserved.Capture.ID); err != nil {
+			t.Fatalf("simulate pre-0008 transcript segment: %v", err)
+		}
+		if _, err := connection.ExecContext(ctx, `PRAGMA ignore_check_constraints = OFF`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := connection.ExecContext(ctx, triggerSQL); err != nil {
+			t.Fatalf("restore transcript immutability trigger: %v", err)
+		}
+		if err := connection.Close(); err != nil {
+			t.Fatalf("close legacy transcript setup connection: %v", err)
+		}
+	}
+	clearRawDigestAsLegacy()
+	legacyRetry, err := env.service.RegisterTranscriptSegment(ctx, reserved.Capture.ID, reserved.UploadGrant, RegisterTranscriptSegmentInput{
+		ArtifactLogicalKey: "transcript/gzip", Epoch: 0, Sequence: 0, StartOffset: 0, EndOffset: int64(len(raw)), Encoding: "gzip",
+	})
+	if err != nil || legacyRetry.RawSHA256 != historyDigest(raw) {
+		t.Fatalf("verify legacy segment retry=%+v err=%v", legacyRetry, err)
+	}
+	clearRawDigestAsLegacy()
 	badSeal := TranscriptSeal{FinalEpoch: 0, SegmentCount: 1, LogicalLength: int64(len(raw)), SHA256: historyDigest([]byte("producer lie"))}
 	if err := env.service.SealTranscript(ctx, reserved.Capture.ID, reserved.UploadGrant, badSeal); !errors.Is(err, ErrHistoryIncomplete) {
 		t.Fatalf("producer digest lie err=%v", err)
@@ -950,6 +1087,14 @@ func TestHistoryTranscriptStrictGzipRawDigestAndServerSeal(t *testing.T) {
 	seal.SHA256 = historyDigest(raw)
 	if err := env.service.SealTranscript(ctx, reserved.Capture.ID, reserved.UploadGrant, seal); err != nil {
 		t.Fatalf("server stream seal: %v", err)
+	}
+	var backfilledRawDigest string
+	if err := env.store.DB().QueryRowContext(ctx, `
+SELECT raw_sha256 FROM history_transcript_segments WHERE capture_id = ?`, reserved.Capture.ID).Scan(&backfilledRawDigest); err != nil {
+		t.Fatal(err)
+	}
+	if backfilledRawDigest != historyDigest(raw) {
+		t.Fatalf("sealed legacy segment raw digest = %q", backfilledRawDigest)
 	}
 
 	badInput := input

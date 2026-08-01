@@ -36,10 +36,19 @@ type Local struct {
 	rootDir       *os.File
 	maxRangeBytes int64
 
-	mu            sync.Mutex
-	closed        bool
-	closeErr      error
-	activeUploads map[string]struct{}
+	mu               sync.Mutex
+	closed           bool
+	closeErr         error
+	activeUploads    map[string]struct{}
+	completedUploads map[string]time.Time
+
+	// Reconciliation directory descriptors retain scan position across bounded
+	// passes. reconcileMu serializes both their use and closure.
+	reconcileMu            sync.Mutex
+	reconcileTemporary     *os.File
+	reconcileObjects       *os.File
+	reconcileNamespace     *os.File
+	reconcileNamespaceName string
 }
 
 func NewLocal(root string, options LocalOptions) (*Local, error) {
@@ -92,7 +101,7 @@ func NewLocal(root string, options LocalOptions) (*Local, error) {
 	return &Local{
 		root: layoutPath, temporaryRoot: filepath.Join(layoutPath, localTemporaryName),
 		objectRoot: filepath.Join(layoutPath, localObjectsName), rootDir: layout,
-		maxRangeBytes: maximum, activeUploads: make(map[string]struct{}),
+		maxRangeBytes: maximum, activeUploads: make(map[string]struct{}), completedUploads: make(map[string]time.Time),
 	}, nil
 }
 
@@ -205,12 +214,15 @@ func validatePrivateNode(file *os.File, nodeType uint32, mode uint32) error {
 }
 
 func (s *Local) Close() error {
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return s.closeErr
 	}
 	s.closed = true
+	s.resetReconcileCursors()
 	s.closeErr = s.rootDir.Close()
 	return s.closeErr
 }
@@ -242,6 +254,14 @@ func (s *Local) beginDirectory(id string) (*os.File, error) {
 func (s *Local) finishUpload(id string) {
 	s.mu.Lock()
 	delete(s.activeUploads, id)
+	delete(s.completedUploads, id)
+	s.mu.Unlock()
+}
+
+func (s *Local) completeUpload(id string, completedAt time.Time) {
+	s.mu.Lock()
+	delete(s.activeUploads, id)
+	s.completedUploads[id] = completedAt
 	s.mu.Unlock()
 }
 
@@ -275,7 +295,7 @@ func (s *Local) Begin(ctx context.Context) (Upload, error) {
 		s.finishUpload(id)
 		return nil, fmt.Errorf("fsync local temporary directory: %w", err)
 	}
-	return &localUpload{store: s, id: id, file: file, hash: sha256.New(), createdAt: time.Now().UTC()}, nil
+	return &localUpload{store: s, id: id, file: file, hash: sha256.New()}, nil
 }
 
 type localUpload struct {
@@ -288,7 +308,6 @@ type localUpload struct {
 		Write([]byte) (int, error)
 	}
 	size      int64
-	createdAt time.Time
 	completed bool
 	aborted   bool
 }
@@ -329,6 +348,13 @@ func (u *localUpload) Complete(ctx context.Context) (Temporary, error) {
 		return Temporary{}, ErrUploadClosed
 	}
 	u.completed = true
+	completedAt := time.Now().UTC()
+	timestamp := unix.NsecToTimeval(completedAt.UnixNano())
+	if err := unix.Futimes(int(u.file.Fd()), []unix.Timeval{timestamp, timestamp}); err != nil {
+		_ = u.file.Close()
+		u.store.finishUpload(u.id)
+		return Temporary{}, fmt.Errorf("refresh local temporary upload timestamp: %w", err)
+	}
 	if err := u.file.Sync(); err != nil {
 		_ = u.file.Close()
 		u.store.finishUpload(u.id)
@@ -338,10 +364,10 @@ func (u *localUpload) Complete(ctx context.Context) (Temporary, error) {
 		u.store.finishUpload(u.id)
 		return Temporary{}, fmt.Errorf("close local temporary upload: %w", err)
 	}
-	u.store.finishUpload(u.id)
+	u.store.completeUpload(u.id, completedAt)
 	var digest Digest
 	copy(digest[:], u.hash.Sum(nil))
-	return Temporary{ID: u.id, Digest: digest, Size: u.size, CreatedAt: u.createdAt}, nil
+	return Temporary{ID: u.id, Digest: digest, Size: u.size, CreatedAt: completedAt}, nil
 }
 
 func (u *localUpload) Abort(ctx context.Context) error {
@@ -620,6 +646,7 @@ func (s *Local) Abort(ctx context.Context, id string) error {
 		return ErrStoreClosed
 	}
 	delete(s.activeUploads, id)
+	delete(s.completedUploads, id)
 	temporary, _, err := openPrivateDirectoryAt(s.rootDir, localTemporaryName, false)
 	if err != nil {
 		return fmt.Errorf("open local temporary directory: %w", err)
@@ -634,7 +661,7 @@ func (s *Local) Abort(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *Local) removeReconciledTemporary(ctx context.Context, temporary *os.File, id string) (bool, error) {
+func (s *Local) removeReconciledTemporary(ctx context.Context, temporary *os.File, id string, before time.Time) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -646,24 +673,31 @@ func (s *Local) removeReconciledTemporary(ctx context.Context, temporary *os.Fil
 	if _, active := s.activeUploads[id]; active {
 		return false, nil
 	}
+	if completedAt, completed := s.completedUploads[id]; completed && !completedAt.Before(before) {
+		return false, nil
+	}
 	if err := unix.Unlinkat(int(temporary.Fd()), id, 0); err != nil {
 		if errors.Is(err, unix.ENOENT) {
 			return false, nil
 		}
 		return false, fmt.Errorf("remove local temporary upload: %w", err)
 	}
+	delete(s.completedUploads, id)
 	if err := temporary.Sync(); err != nil {
 		return false, fmt.Errorf("fsync local temporary directory: %w", err)
 	}
 	return true, nil
 }
 
-func readdirBounded(directory *os.File, limit int) ([]os.FileInfo, bool, error) {
+func readDirectoryBatch(directory *os.File, limit int) ([]os.FileInfo, bool, error) {
+	if limit <= 0 {
+		return nil, false, nil
+	}
 	entries, err := directory.Readdir(limit)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, false, err
 	}
-	return entries, len(entries) == limit, nil
+	return entries, errors.Is(err, io.EOF) || len(entries) < limit, nil
 }
 
 func (s *Local) Reconcile(ctx context.Context, request ReconcileRequest) (ReconcileResult, error) {
@@ -671,91 +705,126 @@ func (s *Local) Reconcile(ctx context.Context, request ReconcileRequest) (Reconc
 	if err != nil {
 		return ReconcileResult{}, err
 	}
-	result := ReconcileResult{}
-	examined := 0
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
 
-	temporary, err := s.storeDirectory(localTemporaryName)
-	if err != nil {
-		return result, fmt.Errorf("open local temporary directory: %w", err)
+	result := ReconcileResult{}
+	if s.isClosed() {
+		return result, ErrStoreClosed
 	}
-	entries, exhausted, err := readdirBounded(temporary, request.Limit-examined)
-	if err != nil {
-		_ = temporary.Close()
-		return result, fmt.Errorf("list local temporary uploads: %w", err)
+	if err := ctx.Err(); err != nil {
+		return result, err
 	}
-	examined += len(entries)
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			_ = temporary.Close()
-			return result, err
-		}
-		id := entry.Name()
-		if !entry.Mode().IsRegular() || !validUploadID(id) || !entry.ModTime().Before(request.Before) {
-			continue
-		}
-		if _, live := request.LiveTemporaryIDs[id]; live {
-			continue
-		}
-		removed, removeErr := s.removeReconciledTemporary(ctx, temporary, id)
-		if removeErr != nil {
-			_ = temporary.Close()
-			return result, removeErr
-		}
-		if removed {
-			result.RemovedTemporaryIDs = append(result.RemovedTemporaryIDs, id)
-		}
+	examined := 0
+	fail := func(err error) (ReconcileResult, error) {
+		s.resetReconcileCursors()
+		return result, err
 	}
-	_ = temporary.Close()
-	if exhausted {
+
+	if s.reconcileTemporary == nil {
+		directory, err := s.storeDirectory(localTemporaryName)
+		if err != nil {
+			return fail(fmt.Errorf("open local temporary directory: %w", err))
+		}
+		s.reconcileTemporary = directory
+	}
+	for examined < request.Limit {
+		entries, exhausted, err := readDirectoryBatch(s.reconcileTemporary, request.Limit-examined)
+		if err != nil {
+			return fail(fmt.Errorf("list local temporary uploads: %w", err))
+		}
+		examined += len(entries)
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return fail(err)
+			}
+			id := entry.Name()
+			if !entry.Mode().IsRegular() || !validUploadID(id) || !entry.ModTime().Before(request.Before) {
+				continue
+			}
+			if _, live := request.LiveTemporaryIDs[id]; live {
+				continue
+			}
+			removed, removeErr := s.removeReconciledTemporary(ctx, s.reconcileTemporary, id, request.Before)
+			if removeErr != nil {
+				return fail(removeErr)
+			}
+			if removed {
+				result.RemovedTemporaryIDs = append(result.RemovedTemporaryIDs, id)
+			}
+		}
+		if exhausted {
+			if err := s.reconcileTemporary.Close(); err != nil {
+				return fail(err)
+			}
+			s.reconcileTemporary = nil
+			break
+		}
+		result.Truncated = true
+		return result, nil
+	}
+	if examined >= request.Limit {
 		result.Truncated = true
 		return result, nil
 	}
 
-	objects, err := s.storeDirectory(localObjectsName)
-	if err != nil {
-		return result, fmt.Errorf("open local object root: %w", err)
+	if s.reconcileObjects == nil {
+		directory, err := s.storeDirectory(localObjectsName)
+		if err != nil {
+			return fail(fmt.Errorf("open local object root: %w", err))
+		}
+		s.reconcileObjects = directory
 	}
-	defer objects.Close()
 	for examined < request.Limit {
-		namespaces, _, readErr := readdirBounded(objects, 1)
-		if readErr != nil {
-			return result, fmt.Errorf("list local object namespaces: %w", readErr)
-		}
-		if len(namespaces) == 0 {
-			return result, nil
-		}
-		examined++
-		namespaceEntry := namespaces[0]
-		if err := ctx.Err(); err != nil {
-			return result, err
-		}
-		if !namespaceEntry.IsDir() || !isLowerHex(namespaceEntry.Name(), 32) {
-			continue
-		}
-		if examined == request.Limit {
-			result.Truncated = true
-			return result, nil
+		if s.reconcileNamespace == nil {
+			namespaces, exhausted, readErr := readDirectoryBatch(s.reconcileObjects, 1)
+			if readErr != nil {
+				return fail(fmt.Errorf("list local object namespaces: %w", readErr))
+			}
+			if len(namespaces) == 0 && exhausted {
+				if err := s.reconcileObjects.Close(); err != nil {
+					return fail(err)
+				}
+				s.reconcileObjects = nil
+				return result, nil
+			}
+			examined++
+			namespaceEntry := namespaces[0]
+			if err := ctx.Err(); err != nil {
+				return fail(err)
+			}
+			if !namespaceEntry.IsDir() || !isLowerHex(namespaceEntry.Name(), 32) {
+				if examined >= request.Limit {
+					result.Truncated = true
+					return result, nil
+				}
+				continue
+			}
+			namespace, _, openErr := openPrivateDirectoryAt(s.reconcileObjects, namespaceEntry.Name(), false)
+			if openErr != nil {
+				return fail(fmt.Errorf("open local object namespace: %w", openErr))
+			}
+			s.reconcileNamespace = namespace
+			s.reconcileNamespaceName = namespaceEntry.Name()
+			if examined >= request.Limit {
+				result.Truncated = true
+				return result, nil
+			}
 		}
 
-		namespace, _, openErr := openPrivateDirectoryAt(objects, namespaceEntry.Name(), false)
-		if openErr != nil {
-			return result, fmt.Errorf("open local object namespace: %w", openErr)
-		}
-		files, namespaceExhausted, readErr := readdirBounded(namespace, request.Limit-examined)
+		files, exhausted, readErr := readDirectoryBatch(s.reconcileNamespace, request.Limit-examined)
 		if readErr != nil {
-			_ = namespace.Close()
-			return result, fmt.Errorf("list local object namespace: %w", readErr)
+			return fail(fmt.Errorf("list local object namespace: %w", readErr))
 		}
 		examined += len(files)
 		for _, entry := range files {
 			if err := ctx.Err(); err != nil {
-				_ = namespace.Close()
-				return result, err
+				return fail(err)
 			}
 			if !entry.Mode().IsRegular() || !isLowerHex(entry.Name(), 32) {
 				continue
 			}
-			key, parseErr := ParseKey(namespaceEntry.Name() + "/" + entry.Name())
+			key, parseErr := ParseKey(s.reconcileNamespaceName + "/" + entry.Name())
 			if parseErr != nil {
 				continue
 			}
@@ -765,25 +834,47 @@ func (s *Local) Reconcile(ctx context.Context, request ReconcileRequest) (Reconc
 			if _, ok := request.PendingKeys[key]; ok {
 				continue
 			}
-			file, openErr := openPrivateRegularAt(namespace, entry.Name(), unix.O_RDONLY)
+			file, openErr := openPrivateRegularAt(s.reconcileNamespace, entry.Name(), unix.O_RDONLY)
 			if openErr != nil {
-				_ = namespace.Close()
-				return result, fmt.Errorf("open local published blob: %w", openErr)
+				return fail(fmt.Errorf("open local published blob: %w", openErr))
 			}
 			object, headErr := headLocalFile(ctx, key, file)
 			_ = file.Close()
 			if headErr != nil {
-				_ = namespace.Close()
-				return result, headErr
+				return fail(headErr)
 			}
-			result.Orphans = append(result.Orphans, object)
+			if object.Modified.Before(request.Before) {
+				result.Orphans = append(result.Orphans, object)
+			}
 		}
-		_ = namespace.Close()
-		if namespaceExhausted {
+		if exhausted {
+			if err := s.reconcileNamespace.Close(); err != nil {
+				return fail(err)
+			}
+			s.reconcileNamespace = nil
+			s.reconcileNamespaceName = ""
+		}
+		if examined >= request.Limit {
 			result.Truncated = true
 			return result, nil
 		}
 	}
 	result.Truncated = true
 	return result, nil
+}
+
+func (s *Local) resetReconcileCursors() {
+	if s.reconcileNamespace != nil {
+		_ = s.reconcileNamespace.Close()
+		s.reconcileNamespace = nil
+	}
+	s.reconcileNamespaceName = ""
+	if s.reconcileObjects != nil {
+		_ = s.reconcileObjects.Close()
+		s.reconcileObjects = nil
+	}
+	if s.reconcileTemporary != nil {
+		_ = s.reconcileTemporary.Close()
+		s.reconcileTemporary = nil
+	}
 }

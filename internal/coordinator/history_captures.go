@@ -51,6 +51,7 @@ const (
 	defaultHistoryMaxOutstandingUploadsPerCapture       = 32
 	defaultHistoryMaxArchiveEntries                     = 100000
 	defaultHistoryMaxArchiveLogicalBytes          int64 = 2 << 30
+	defaultHistoryMaxArchivePathBytes                   = 4 << 10
 )
 
 type HistoryCaptureState string
@@ -200,6 +201,7 @@ type HistoryCaptureServiceOptions struct {
 	MaxOutstandingUploadBytesPerCapture int64
 	MaxArchiveEntries                   int
 	MaxArchiveLogicalBytes              int64
+	MaxArchivePathBytes                 int
 }
 
 type HistoryCaptureService struct {
@@ -237,6 +239,12 @@ func NewHistoryCaptureServiceWithOptions(database *sql.DB, blobs blob.Store, opt
 	}
 	if options.MaxArchiveLogicalBytes <= 0 {
 		options.MaxArchiveLogicalBytes = defaultHistoryMaxArchiveLogicalBytes
+	}
+	if options.MaxArchivePathBytes <= 0 {
+		options.MaxArchivePathBytes = defaultHistoryMaxArchivePathBytes
+	}
+	if options.MaxArchivePathBytes > defaultHistoryMaxArchivePathBytes {
+		options.MaxArchivePathBytes = defaultHistoryMaxArchivePathBytes
 	}
 	return &HistoryCaptureService{db: database, blobs: blobs, now: sqlitex.UTCNow, options: options}
 }
@@ -993,8 +1001,12 @@ WHERE temporary_upload_id = ?`, temporary.ID).Scan(&existingCapture, &digest, &s
 	var activeCount int
 	var activeBytes int64
 	if err := tx.QueryRowContext(ctx, `
-SELECT COUNT(*), COALESCE(SUM(stored_size), 0)
-FROM history_upload_intents WHERE capture_id = ? AND state = 'active'`, capture.ID).Scan(&activeCount, &activeBytes); err != nil {
+SELECT COUNT(*), COALESCE(SUM(intent.stored_size), 0)
+FROM history_upload_intents intent
+LEFT JOIN history_artifacts artifact ON artifact.id = intent.artifact_id
+WHERE intent.capture_id = ?
+  AND (intent.state = 'active'
+       OR (intent.state = 'consumed' AND artifact.publication_state = 'pending'))`, capture.ID).Scan(&activeCount, &activeBytes); err != nil {
 		return err
 	}
 	if activeCount >= s.options.MaxOutstandingUploadsPerCapture || temporary.Size > s.options.MaxOutstandingUploadBytesPerCapture-activeBytes {
@@ -1442,56 +1454,6 @@ func (s *HistoryCaptureService) ReconcilePendingArtifacts(ctx context.Context, c
 	return summary, nil
 }
 
-// ReconcileBlobStore is coordinator-internal. Active upload intents and pending
-// artifact temporaries are always live, so a maintenance scan cannot erase a
-// worker outbox upload that has not yet been linked/published.
-func (s *HistoryCaptureService) ReconcileBlobStore(ctx context.Context, before time.Time, limit int) (blob.ReconcileResult, error) {
-	request := blob.ReconcileRequest{
-		Before: before, Limit: limit, LiveTemporaryIDs: map[string]struct{}{},
-		ReferencedKeys: map[blob.Key]struct{}{}, PendingKeys: map[blob.Key]struct{}{},
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT temporary_upload_id FROM history_upload_intents WHERE state = 'active'`)
-	if err != nil {
-		return blob.ReconcileResult{}, err
-	}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return blob.ReconcileResult{}, err
-		}
-		request.LiveTemporaryIDs[id] = struct{}{}
-	}
-	if err := rows.Close(); err != nil {
-		return blob.ReconcileResult{}, err
-	}
-	rows, err = s.db.QueryContext(ctx, `SELECT temporary_upload_id, blob_key, publication_state FROM history_artifacts`)
-	if err != nil {
-		return blob.ReconcileResult{}, err
-	}
-	for rows.Next() {
-		var temporaryID, keyText, state string
-		if err := rows.Scan(&temporaryID, &keyText, &state); err != nil {
-			rows.Close()
-			return blob.ReconcileResult{}, err
-		}
-		key, err := blob.ParseKey(keyText)
-		if err != nil {
-			rows.Close()
-			return blob.ReconcileResult{}, err
-		}
-		request.ReferencedKeys[key] = struct{}{}
-		if state == string(HistoryPublicationPending) {
-			request.LiveTemporaryIDs[temporaryID] = struct{}{}
-			request.PendingKeys[key] = struct{}{}
-		}
-	}
-	if err := rows.Close(); err != nil {
-		return blob.ReconcileResult{}, err
-	}
-	return s.blobs.Reconcile(ctx, request)
-}
-
 func (s *HistoryCaptureService) finishArtifactPublication(ctx context.Context, artifact InternalHistoryArtifact, reconciliation bool) (InternalHistoryArtifact, error) {
 	if artifact.PublicationState == HistoryPublicationCommitted {
 		return artifact, nil
@@ -1808,7 +1770,23 @@ func (s *HistoryCaptureService) RegisterTranscriptSegment(ctx context.Context, c
 	existing, err := getTranscriptSegmentTx(ctx, tx, capture.ID, input.Epoch, input.Sequence)
 	if err == nil {
 		current, artifactErr := getInternalHistoryArtifactTx(ctx, tx, capture.ID, input.ArtifactLogicalKey)
-		if artifactErr == nil && sameTranscriptSegment(existing, input, current) {
+		if artifactErr == nil && sameTranscriptSegment(existing, input, current, rawDigest) {
+			if existing.RawSHA256 == "" {
+				result, updateErr := tx.ExecContext(ctx, `
+UPDATE history_transcript_segments SET raw_sha256 = ?
+WHERE capture_id = ? AND epoch = ? AND sequence = ? AND raw_sha256 = ''`, rawDigest, capture.ID, input.Epoch, input.Sequence)
+				if updateErr != nil {
+					return HistoryTranscriptSegment{}, updateErr
+				}
+				updated, updateErr := result.RowsAffected()
+				if updateErr != nil || updated != 1 {
+					return HistoryTranscriptSegment{}, fmt.Errorf("%w: legacy transcript digest changed during verification", ErrHistoryVersionConflict)
+				}
+				if err := tx.Commit(ctx); err != nil {
+					return HistoryTranscriptSegment{}, err
+				}
+				existing.RawSHA256 = rawDigest
+			}
 			return existing, nil
 		}
 		return HistoryTranscriptSegment{}, fmt.Errorf("%w: transcript epoch/sequence already registered", ErrHistoryConflict)
@@ -1876,8 +1854,8 @@ WHERE capture_id = ? AND state = 'open'`, input.EndOffset, input.Epoch, input.Se
 	return s.getTranscriptSegment(ctx, capture.ID, input.Epoch, input.Sequence)
 }
 
-func sameTranscriptSegment(existing HistoryTranscriptSegment, input RegisterTranscriptSegmentInput, artifact InternalHistoryArtifact) bool {
-	return existing.StartOffset == input.StartOffset && existing.EndOffset == input.EndOffset && existing.Encoding == input.Encoding && existing.ArtifactID == artifact.ID && existing.SHA256 == artifact.SHA256 && existing.RawSHA256 != "" && existing.StoredSize == artifact.StoredSize
+func sameTranscriptSegment(existing HistoryTranscriptSegment, input RegisterTranscriptSegmentInput, artifact InternalHistoryArtifact, rawDigest string) bool {
+	return existing.StartOffset == input.StartOffset && existing.EndOffset == input.EndOffset && existing.Encoding == input.Encoding && existing.ArtifactID == artifact.ID && existing.SHA256 == artifact.SHA256 && (existing.RawSHA256 == "" || existing.RawSHA256 == rawDigest) && existing.StoredSize == artifact.StoredSize
 }
 
 const transcriptSegmentSelect = `
@@ -1989,7 +1967,8 @@ FROM history_transcript_segments WHERE capture_id = ? ORDER BY epoch, sequence`,
 	}
 	streamHash := sha256.New()
 	var streamedLength int64
-	for _, segment := range segments {
+	for index := range segments {
+		segment := &segments[index]
 		artifact, err := s.getInternalArtifactByID(ctx, segment.artifactID)
 		if err != nil {
 			return err
@@ -2000,9 +1979,10 @@ FROM history_transcript_segments WHERE capture_id = ? ORDER BY epoch, sequence`,
 		if err != nil {
 			return err
 		}
-		if rawDigest != segment.rawDigest {
+		if segment.rawDigest != "" && rawDigest != segment.rawDigest {
 			return fmt.Errorf("%w: transcript segment raw digest differs", ErrHistoryConflict)
 		}
+		segment.rawDigest = rawDigest
 		streamedLength += segment.size
 	}
 	computedDigest := hex.EncodeToString(streamHash.Sum(nil))
@@ -2050,6 +2030,17 @@ FROM history_transcript_streams WHERE capture_id = ?`, capture.ID).Scan(&current
 	}
 	if currentSegments != int64(len(segments)) {
 		return fmt.Errorf("%w: transcript changed during seal verification", ErrHistoryVersionConflict)
+	}
+	for _, segment := range segments {
+		result, err := tx.ExecContext(ctx, `
+UPDATE history_transcript_segments SET raw_sha256 = ?
+WHERE capture_id = ? AND epoch = ? AND sequence = ? AND raw_sha256 = ''`, segment.rawDigest, capture.ID, segment.epoch, segment.sequence)
+		if err != nil {
+			return err
+		}
+		if updated, err := result.RowsAffected(); err != nil || updated > 1 {
+			return fmt.Errorf("%w: legacy transcript digest changed during seal verification", ErrHistoryVersionConflict)
+		}
 	}
 	now := sqlitex.FormatTime(s.now().UTC())
 	_, err = tx.ExecContext(ctx, `
@@ -2560,7 +2551,7 @@ type HarnessArchiveMemberInput struct {
 }
 
 func (s *HistoryCaptureService) RegisterHarnessArchiveMembers(ctx context.Context, captureID, grant, artifactLogicalKey string, members []HarnessArchiveMemberInput) error {
-	if len(members) > 100000 {
+	if len(members) > s.options.MaxArchiveEntries {
 		return errors.New("too many Harness archive members")
 	}
 	tx, err := sqlitex.BeginImmediate(ctx, s.db)
@@ -2579,11 +2570,14 @@ func (s *HistoryCaptureService) RegisterHarnessArchiveMembers(ctx context.Contex
 	if artifact.Kind != HistoryArtifactHarnessRoot || artifact.PublicationState != HistoryPublicationCommitted || artifact.ArchiveID == "" {
 		return ErrHistoryConflict
 	}
+	if int64(len(members)) > artifact.EntryCount {
+		return fmt.Errorf("%w: archive index exceeds declared entry count", ErrHistoryConflict)
+	}
 	now := sqlitex.FormatTime(s.now().UTC())
 	seen := make(map[string]struct{}, len(members))
 	for _, member := range members {
 		member = normalizeHarnessMember(member)
-		if err := validateHarnessMember(member); err != nil {
+		if err := validateHarnessMember(member, s.options.MaxArchivePathBytes); err != nil {
 			return err
 		}
 		if _, ok := seen[member.RelativeMemberPath]; ok {
@@ -2607,6 +2601,13 @@ ON CONFLICT(artifact_id, relative_member_path) DO NOTHING`, id, capture.ID, arti
 			return err
 		}
 	}
+	var registered int64
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM harness_archive_members WHERE artifact_id = ?`, artifact.ID).Scan(&registered); err != nil {
+		return err
+	}
+	if registered > artifact.EntryCount || registered > int64(s.options.MaxArchiveEntries) {
+		return fmt.Errorf("%w: registered archive index exceeds declared limits", ErrHistoryConflict)
+	}
 	return tx.Commit(ctx)
 }
 
@@ -2622,8 +2623,8 @@ func normalizeHarnessMember(value HarnessArchiveMemberInput) HarnessArchiveMembe
 	value.ParseStatus = strings.TrimSpace(value.ParseStatus)
 	return value
 }
-func validateHarnessMember(value HarnessArchiveMemberInput) error {
-	if value.RelativeMemberPath == "" || len(value.RelativeMemberPath) > 4096 || strings.HasPrefix(value.RelativeMemberPath, "/") || strings.Contains(value.RelativeMemberPath, "..") {
+func validateHarnessMember(value HarnessArchiveMemberInput, maxPathBytes int) error {
+	if value.RelativeMemberPath == "" || len(value.RelativeMemberPath) > maxPathBytes || strings.HasPrefix(value.RelativeMemberPath, "/") || strings.Contains(value.RelativeMemberPath, "..") {
 		return errors.New("invalid Harness member path")
 	}
 	if value.MemberKind != "root" && value.MemberKind != "delegated_child" {

@@ -284,7 +284,7 @@ func (c HistoryArchiveConfig) resolve() (ResolvedHistoryArchive, error) {
 	if outstandingBytes < stored {
 		return ResolvedHistoryArchive{}, errors.New("history archive max_outstanding_bytes must be >= max_stored_bytes")
 	}
-	if entries < 1 || entries > 1000000 || pathBytes < 256 || pathBytes > 32<<10 || outstandingUploads < 1 || outstandingUploads > 10000 {
+	if entries < 1 || entries > 1000000 || pathBytes < 256 || pathBytes > 4<<10 || outstandingUploads < 1 || outstandingUploads > 10000 {
 		return ResolvedHistoryArchive{}, errors.New("history archive entries/path/outstanding-upload limits are outside safe bounds")
 	}
 	return ResolvedHistoryArchive{

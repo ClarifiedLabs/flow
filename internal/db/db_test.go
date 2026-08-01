@@ -44,14 +44,15 @@ func TestOpenInitializesSQLite(t *testing.T) {
 		"0005_features",
 		"0006_convergence_promotions",
 		"0007_history_captures",
+		"0008_history_capture_hardening",
 	)
 
 	var schemaVersion string
 	if err := store.DB().QueryRowContext(ctx, "SELECT value FROM app_metadata WHERE key = 'schema_version'").Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version metadata: %v", err)
 	}
-	if schemaVersion != "0007_history_captures" {
-		t.Fatalf("schema version = %q, want 0007_history_captures", schemaVersion)
+	if schemaVersion != "0008_history_capture_hardening" {
+		t.Fatalf("schema version = %q, want 0008_history_capture_hardening", schemaVersion)
 	}
 	assertStorageFormat(t, store, "4")
 
@@ -318,6 +319,168 @@ func TestOpenMigrationIsIdempotent(t *testing.T) {
 		"0004_workflow_review_cycles",
 		"0005_features",
 	)
+}
+
+func TestHistoryCaptureHardeningUpgradesRecordedOriginalMigration(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "flow.db")
+	database, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("open pre-migration database: %v", err)
+	}
+	migrationNames := []string{
+		"0001_init",
+		"0002_job_dispatch_keys",
+		"0003_workflow_hold",
+		"0004_workflow_review_cycles",
+		"0005_features",
+		"0006_convergence_promotions",
+		"0007_history_captures",
+	}
+	for _, name := range migrationNames {
+		migration, err := migrationFS.ReadFile("migrations/" + name + ".sql")
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if _, err := database.ExecContext(ctx, string(migration)); err != nil {
+			t.Fatalf("apply %s: %v", name, err)
+		}
+	}
+	if _, err := database.ExecContext(ctx, `
+CREATE TABLE schema_migrations (
+    version TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+)`); err != nil {
+		t.Fatalf("create legacy migration ledger: %v", err)
+	}
+	for _, name := range migrationNames {
+		if _, err := database.ExecContext(ctx, `INSERT INTO schema_migrations (version) VALUES (?)`, name); err != nil {
+			t.Fatalf("record %s: %v", name, err)
+		}
+	}
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO history_captures (
+    id, project_id, job_id, lease_id, lease_attempt, worker_id, task_id,
+    session_id, workflow_run_id, node_run_id, node_visit, stage, role,
+    harness_name, harness_version, state, expected_transcript, expected_harness,
+    upload_grant_hash, reserved_at, updated_at
+) VALUES (
+    'hc-00000000000000000000000000000001', 'project', 'job', 'lease', 1, 'worker', 'task',
+    'session', 'workflow', 'node', 1, 'execution', 'worker',
+    'harness', 'v1', 'reserved', 1, 0,
+    '`+strings.Repeat("a", 64)+`', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+);
+INSERT INTO history_artifacts (
+    id, capture_id, logical_key, kind, phase, checkpoint_generation,
+    media_type, format_version, schema_version, sha256, stored_size,
+    logical_size, entry_count, temporary_upload_id, blob_key,
+    publication_state, pending_at, committed_at, created_at
+) VALUES
+    ('ha-00000000000000000000000000000002', 'hc-00000000000000000000000000000001', 'checkpoint', 'manifest', 'checkpoint', 1,
+     'application/json', 1, 1, '`+strings.Repeat("b", 64)+`', 3, 3, 0, '',
+     '`+strings.Repeat("1", 32)+`/`+strings.Repeat("2", 32)+`', 'committed', '2026-01-01T00:00:00Z',
+     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+    ('ha-00000000000000000000000000000003', 'hc-00000000000000000000000000000001', 'segment', 'transcript_segment', 'final', NULL,
+     'text/plain', 1, 1, '`+strings.Repeat("c", 64)+`', 3, 3, 0, '',
+     '`+strings.Repeat("3", 32)+`/`+strings.Repeat("4", 32)+`', 'committed', '2026-01-01T00:00:00Z',
+     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+INSERT INTO history_transcript_streams (
+    capture_id, state, segment_count, logical_length, last_epoch,
+    last_sequence, created_at, updated_at
+) VALUES ('hc-00000000000000000000000000000001', 'open', 1, 3, 0, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+INSERT INTO history_transcript_segments (
+    capture_id, epoch, sequence, start_offset, end_offset, uncompressed_size,
+    stored_size, sha256, encoding, artifact_id, sealed_at, created_at
+) VALUES (
+    'hc-00000000000000000000000000000001', 0, 0, 0, 3, 3, 3, '`+strings.Repeat("c", 64)+`',
+    'identity', 'ha-00000000000000000000000000000003', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+);`); err != nil {
+		t.Fatalf("seed original history schema: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("close pre-migration database: %v", err)
+	}
+
+	store, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("upgrade original history schema: %v", err)
+	}
+	defer store.Close()
+
+	for table, columns := range map[string][]string{
+		"history_captures":            {"upload_grant_generation", "upload_grant_rotated_at", "zero_harness_root_reason"},
+		"history_artifacts":           {"checkpoint_stream", "reconcile_attempted_at"},
+		"history_transcript_segments": {"raw_sha256"},
+	} {
+		for _, column := range columns {
+			var count int
+			if err := store.DB().QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count); err != nil {
+				t.Fatalf("inspect upgraded %s.%s: %v", table, column, err)
+			}
+			if count != 1 {
+				t.Fatalf("upgraded %s.%s count = %d, want 1", table, column, count)
+			}
+		}
+	}
+	var uploadIntentTables int
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'history_upload_intents'`).Scan(&uploadIntentTables); err != nil {
+		t.Fatalf("inspect upload intents: %v", err)
+	}
+	if uploadIntentTables != 1 {
+		t.Fatalf("history_upload_intents count = %d, want 1", uploadIntentTables)
+	}
+	var checkpointStream, rawDigest string
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT checkpoint_stream FROM history_artifacts WHERE id = 'ha-00000000000000000000000000000002'`).Scan(&checkpointStream); err != nil {
+		t.Fatalf("read backfilled checkpoint stream: %v", err)
+	}
+	if checkpointStream != "legacy-ha-00000000000000000000000000000002" {
+		t.Fatalf("checkpoint stream = %q, want legacy checkpoint stream", checkpointStream)
+	}
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT raw_sha256 FROM history_transcript_segments WHERE artifact_id = 'ha-00000000000000000000000000000003'`).Scan(&rawDigest); err != nil {
+		t.Fatalf("read legacy raw digest: %v", err)
+	}
+	if rawDigest != "" {
+		t.Fatalf("legacy raw digest = %q, want empty pending verification", rawDigest)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO history_artifacts (
+    id, capture_id, logical_key, kind, phase, checkpoint_generation,
+    media_type, format_version, schema_version, sha256, stored_size,
+    logical_size, entry_count, temporary_upload_id, blob_key,
+    publication_state, pending_at, committed_at, created_at
+) VALUES (
+    'ha-00000000000000000000000000000004', 'hc-00000000000000000000000000000001',
+    'segment-2', 'transcript_segment', 'final', NULL, 'text/plain', 1, 1,
+    '`+strings.Repeat("e", 64)+`', 3, 3, 0, '',
+    '`+strings.Repeat("5", 32)+`/`+strings.Repeat("6", 32)+`', 'committed',
+    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+)`); err != nil {
+		t.Fatalf("insert artifact for transcript digest guard: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO history_transcript_segments (
+    capture_id, epoch, sequence, start_offset, end_offset, uncompressed_size,
+    stored_size, sha256, raw_sha256, encoding, artifact_id, sealed_at, created_at
+) VALUES (
+    'hc-00000000000000000000000000000001', 0, 1, 3, 6, 3, 3,
+    '`+strings.Repeat("e", 64)+`', '', 'identity',
+    'ha-00000000000000000000000000000004', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+)`); err == nil || !strings.Contains(err.Error(), "history transcript raw digest is required") {
+		t.Fatalf("new empty raw digest insert error = %v, want transcript digest guard", err)
+	}
+	verifiedDigest := strings.Repeat("d", 64)
+	if _, err := store.DB().ExecContext(ctx, `
+UPDATE history_transcript_segments SET raw_sha256 = ? WHERE artifact_id = 'ha-00000000000000000000000000000003'`, verifiedDigest); err != nil {
+		t.Fatalf("fill verified legacy raw digest: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+UPDATE history_transcript_segments SET raw_sha256 = ? WHERE artifact_id = 'ha-00000000000000000000000000000003'`, strings.Repeat("e", 64)); err == nil {
+		t.Fatal("second legacy raw digest update unexpectedly succeeded")
+	}
 }
 
 func TestReviewCycleMigrationBackfillsExistingWorkflowTransitions(t *testing.T) {

@@ -304,7 +304,7 @@ func TestLocalUploadStateCancellationAndReconciliation(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := store.Reconcile(ctx, ReconcileRequest{
-		Before: old.Add(time.Hour), LiveTemporaryIDs: map[string]struct{}{live.ID: {}},
+		Before: temporary.CreatedAt.Add(time.Hour), LiveTemporaryIDs: map[string]struct{}{live.ID: {}},
 		PendingKeys: map[Key]struct{}{pendingKey: {}},
 	})
 	if err != nil {
@@ -368,15 +368,26 @@ func TestLocalReconcilePreservesActiveUploadOlderThanCutoff(t *testing.T) {
 	if _, err := upload.Write([]byte("-more")); err != nil {
 		t.Fatalf("active upload is no longer writable: %v", err)
 	}
+	handoffCutoff := time.Now().UTC()
 	temporary, err := upload.Complete(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if temporary.CreatedAt.Before(handoffCutoff) {
+		t.Fatalf("completion timestamp = %v, want at or after handoff cutoff %v", temporary.CreatedAt, handoffCutoff)
+	}
+	result, err = store.Reconcile(ctx, ReconcileRequest{Before: handoffCutoff, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.RemovedTemporaryIDs) != 0 {
+		t.Fatalf("freshly completed temporary was removed during intent handoff: %v", result.RemovedTemporaryIDs)
 	}
 
 	if err := os.Chtimes(filepath.Join(store.temporaryRoot, temporary.ID), old, old); err != nil {
 		t.Fatal(err)
 	}
-	result, err = store.Reconcile(ctx, ReconcileRequest{Before: old.Add(time.Hour), Limit: 10})
+	result, err = store.Reconcile(ctx, ReconcileRequest{Before: temporary.CreatedAt.Add(time.Hour), Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,18 +478,28 @@ func TestLocalReconcileBoundsExaminedEntries(t *testing.T) {
 			temporary := completeUpload(t, ctx, store, []byte{byte(i)})
 			live[temporary.ID] = struct{}{}
 		}
+		stale := completeUpload(t, ctx, store, []byte("stale-after-live-prefix"))
 
-		result, err := store.Reconcile(ctx, ReconcileRequest{
-			Before: time.Now().Add(time.Hour), LiveTemporaryIDs: live, Limit: 2,
-		})
-		if err != nil {
-			t.Fatal(err)
+		removed := make(map[string]struct{})
+		for pass := 0; pass < 10; pass++ {
+			result, err := store.Reconcile(ctx, ReconcileRequest{
+				Before: time.Now().Add(time.Hour), LiveTemporaryIDs: live, Limit: 2,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range result.RemovedTemporaryIDs {
+				if _, protected := live[id]; protected {
+					t.Fatalf("live temporary removed on pass %d: %s", pass, id)
+				}
+				removed[id] = struct{}{}
+			}
+			if _, ok := removed[stale.ID]; ok {
+				break
+			}
 		}
-		if !result.Truncated {
-			t.Fatal("Reconcile did not report a scan bounded before all temporary entries")
-		}
-		if len(result.RemovedTemporaryIDs) != 0 {
-			t.Fatalf("live temporaries removed: %v", result.RemovedTemporaryIDs)
+		if _, ok := removed[stale.ID]; !ok {
+			t.Fatalf("bounded reconciliation never advanced past protected prefix to %s", stale.ID)
 		}
 	})
 
@@ -502,17 +523,25 @@ func TestLocalReconcileBoundsExaminedEntries(t *testing.T) {
 			keys = append(keys, key)
 		}
 
-		result, err := store.Reconcile(ctx, ReconcileRequest{
-			Before: time.Now().Add(time.Hour), Limit: 3,
-		})
-		if err != nil {
-			t.Fatal(err)
+		orphans := make(map[Key]struct{})
+		truncated := true
+		for pass := 0; pass < 10 && truncated; pass++ {
+			result, err := store.Reconcile(ctx, ReconcileRequest{
+				Before: time.Now().Add(time.Hour), Limit: 3,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			truncated = result.Truncated
+			for _, orphan := range result.Orphans {
+				orphans[orphan.Key] = struct{}{}
+			}
 		}
-		if !result.Truncated {
-			t.Fatal("Reconcile did not report a scan bounded before all object entries")
+		if truncated {
+			t.Fatal("bounded object reconciliation did not converge")
 		}
-		if len(result.Orphans) != 2 {
-			t.Fatalf("reported orphans = %d, want 2 object entries after examining one namespace", len(result.Orphans))
+		if len(orphans) != len(keys) {
+			t.Fatalf("reported distinct orphans = %d, want %d", len(orphans), len(keys))
 		}
 		for _, key := range keys {
 			if _, err := store.Head(ctx, key); err != nil {

@@ -285,6 +285,7 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 			MaxOutstandingUploadBytesPerCapture: historyPolicy.Archive.MaxOutstandingBytes,
 			MaxArchiveEntries:                   historyPolicy.Archive.MaxEntries,
 			MaxArchiveLogicalBytes:              historyPolicy.Archive.MaxLogicalBytes,
+			MaxArchivePathBytes:                 historyPolicy.Archive.MaxPathBytes,
 		},
 		AuthorEntrypoint:           cfg.AuthorEntrypoint,
 		AuthorEntrypointConfigured: cfg.AuthorEntrypointConfigured,
