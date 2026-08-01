@@ -258,14 +258,22 @@ export class FlowReviewPanel extends FlowElement {
     }
     const stored = new Map(this.#paintedSections.map((section) => [section.key, section.html]));
 
+    // Drop stale wrappers before positioning. Removing them afterwards would
+    // treat a stale section as the successor of an unchanged retained section,
+    // moving that wrapper only because the stale one sat between it and its
+    // desired neighbour (e.g. [gate, comments, live] -> [gate, live] used to
+    // shuffle gate past comments before comments was removed).
+    const desired = new Set(sections.map((section) => section.key));
+    for (const [key, wrapper] of wrappers) {
+      if (!desired.has(key)) wrapper.remove();
+    }
+
     // Walk the desired order back to front, positioning each section just
     // before the one after it. A section whose markup is unchanged is left
     // completely untouched; only changed sections rewrite their interior.
-    const seen = new Set();
     let reference = null;
     for (let index = sections.length - 1; index >= 0; index -= 1) {
       const { key, html } = sections[index];
-      seen.add(key);
       let wrapper = wrappers.get(key);
       if (!wrapper) {
         wrapper = document.createElement("div");
@@ -278,9 +286,6 @@ export class FlowReviewPanel extends FlowElement {
         this.insertBefore(wrapper, reference);
       }
       reference = wrapper;
-    }
-    for (const [key, wrapper] of wrappers) {
-      if (!seen.has(key)) wrapper.remove();
     }
 
     this.#paintedSections = sections.map((section) => ({ key: section.key, html: section.html }));

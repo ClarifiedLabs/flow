@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { flush, installTestDOM, mountElement, TestEvent } from "./test-dom.mjs";
+import { flush, installTestDOM, mountElement, TestEvent, TestNode } from "./test-dom.mjs";
 
 installTestDOM();
 
@@ -1395,6 +1395,49 @@ test("a same-session changed-model repaint keeps the live terminal iframe", asyn
   assert.strictEqual(panel.querySelector("iframe"), firstIframe, "the same iframe node survives the repaint");
   assert.equal(firstIframe.loadCount, 1, "the preserved iframe is never reloaded (browser-observable continuity)");
   assert.equal(calls.length, 1, "terminal access is minted once, not per repaint");
+  panel.remove();
+});
+
+test("removing an intermediate section does not move unchanged retained sections", async () => {
+  const root = globalThis.document.body;
+  stubTerminalTokenFetch(() => "/ui/terminal/login?tok=abc");
+  const panel = mountElement(root, "flow-review-panel", reviewPanelModel("s-0001", { comment: "First comment" }));
+  await settle();
+
+  const gate = panel.querySelector('[data-section="gate"]');
+  const live = panel.querySelector('[data-section="live"]');
+  const firstIframe = panel.querySelector("iframe");
+  assert.ok(gate && live && firstIframe, "the panel mounts gate, comments and live");
+  assert.deepEqual(
+    panel.children.map((child) => child.getAttribute("data-section")),
+    ["gate", "comments", "live"],
+    "the initial order includes the intermediate comments section",
+  );
+
+  // Record every wrapper the reconciler repositions. An unchanged retained
+  // section must not be moved just because its former neighbour is stale.
+  const moved = [];
+  const originalInsertBefore = TestNode.prototype.insertBefore;
+  TestNode.prototype.insertBefore = function (child, reference) {
+    if (child.parentElement === panel) moved.push(child);
+    return originalInsertBefore.call(this, child, reference);
+  };
+  try {
+    // The discussion empties out: [gate, comments, live] -> [gate, live].
+    panel.data = reviewPanelModel("s-0001");
+    await flush();
+  } finally {
+    TestNode.prototype.insertBefore = originalInsertBefore;
+  }
+
+  assert.ok(!moved.includes(gate), "the unchanged gate section must not be repositioned");
+  assert.deepEqual(
+    panel.children.map((child) => child.getAttribute("data-section")),
+    ["gate", "live"],
+    "the retained sections keep their order after the removal",
+  );
+  assert.strictEqual(panel.querySelector("iframe"), firstIframe, "the terminal iframe survives the removal");
+  assert.equal(firstIframe.loadCount, 1, "the preserved iframe is never reloaded");
   panel.remove();
 });
 
