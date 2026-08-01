@@ -511,8 +511,9 @@ test("new task route renders project-scoped blank form with the selected project
   assert.match(content.innerHTML, /<datalist id="relation-target-tasks">/);
   assert.match(content.innerHTML, /<option value="t-alpha-0001" label="First task"><\/option>/);
   assert.match(content.innerHTML, /<option value="t-alpha-0002" label="Second task"><\/option>/);
-  assert.match(content.innerHTML, /<input name="queue_task" type="checkbox" checked>/);
-  assert.match(content.innerHTML, /<button class="button" type="submit">Create<\/button>/);
+  // The 'Queue after creation' checkbox label directly precedes the Create
+  // button inside the .task-form-actions footer (DOM order, not mere presence).
+  assert.match(content.innerHTML, /<div class="form-actions task-form-actions">\s*<label class="check">\s*<input name="queue_task" type="checkbox" checked>\s*<span>Queue after creation<\/span>\s*<\/label>\s*<button class="button" type="submit">Create<\/button>/);
   assert.equal(status.textContent, "");
 });
 
@@ -664,6 +665,9 @@ test("task form renders the relation picker only in create mode", async () => {
   assert.doesNotMatch(editHTML, /data-relation-picker/);
   assert.doesNotMatch(editHTML, /data-relation-add/);
   assert.doesNotMatch(editHTML, /data-relation-row/);
+  // Edit mode has no queue checkbox: a single Save button sits in the footer.
+  assert.doesNotMatch(editHTML, /queue_task/);
+  assert.match(editHTML, /<div class="form-actions task-form-actions">\s*<button class="button" type="submit">Save<\/button>/);
 });
 
 function relationRow(kind, target) {
