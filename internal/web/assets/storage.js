@@ -1,8 +1,7 @@
 // Typed localStorage read/write helpers for UI preferences (projects, theme,
-// done-view and board-done config) plus pure path -> route / poll-config
-// parsing.
+// done-view config) plus pure path -> route / poll-config parsing.
 
-import { BOARD_DONE_COUNTS, BOARD_DONE_STORAGE_KEY, BOARD_DONE_WINDOWS, BOARD_VIEWS, BOARD_VIEW_STORAGE_KEY, DIAGRAM_MODES, DIAGRAM_MODE_STORAGE_KEY, BOARD_POLL_MS, CHANGE_POLL_MS, DIAGNOSTICS_POLL_MS, DIFF_MODES, DIFF_MODE_STORAGE_KEY, DONE_DENSITIES, DONE_DENSITY_STORAGE_KEY, DONE_OUTCOMES, DONE_OUTCOME_STORAGE_KEY, MAX_POLL_BACKOFF_MS, PROJECT_STORAGE_KEY, TASKS_ALL_STATE, TASKS_PROJECT_STORAGE_KEY, TASKS_QUERY_STORAGE_KEY, TASKS_STATE_STORAGE_KEY, TASKS_STATES, THEME_PREFERENCES, THEME_STORAGE_KEY } from "./config.js";
+import { BOARD_VIEWS, BOARD_VIEW_STORAGE_KEY, DIAGRAM_MODES, DIAGRAM_MODE_STORAGE_KEY, BOARD_POLL_MS, CHANGE_POLL_MS, DIAGNOSTICS_POLL_MS, DIFF_MODES, DIFF_MODE_STORAGE_KEY, DONE_DENSITIES, DONE_DENSITY_STORAGE_KEY, DONE_OUTCOMES, DONE_OUTCOME_STORAGE_KEY, MAX_POLL_BACKOFF_MS, PROJECT_STORAGE_KEY, TASKS_ALL_STATE, TASKS_PROJECT_STORAGE_KEY, TASKS_QUERY_STORAGE_KEY, TASKS_STATE_STORAGE_KEY, TASKS_STATES, THEME_PREFERENCES, THEME_STORAGE_KEY } from "./config.js";
 
 export function readSelectedProjects() {
   try {
@@ -24,31 +23,6 @@ export function writeSelectedProjects(ids) {
     }
   } catch (error) {
     // Selection persistence is best-effort.
-  }
-}
-
-export function boardDoneConfig() {
-  const fallback = { mode: "count", count: 20, within: "7d", outcome: "all" };
-  try {
-    const raw = window.localStorage?.getItem(BOARD_DONE_STORAGE_KEY);
-    if (!raw) return fallback;
-    const parsed = JSON.parse(raw) || {};
-    return {
-      mode: parsed.mode === "within" ? "within" : "count",
-      count: BOARD_DONE_COUNTS.includes(parsed.count) ? parsed.count : 20,
-      within: BOARD_DONE_WINDOWS.includes(parsed.within) ? parsed.within : "7d",
-      outcome: DONE_OUTCOMES.has(parsed.outcome) ? parsed.outcome : "all",
-    };
-  } catch {
-    return fallback;
-  }
-}
-
-export function writeBoardDoneConfig(config) {
-  try {
-    window.localStorage?.setItem(BOARD_DONE_STORAGE_KEY, JSON.stringify(config));
-  } catch {
-    // Persistence is best-effort.
   }
 }
 

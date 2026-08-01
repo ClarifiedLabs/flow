@@ -4251,6 +4251,60 @@ test("stale poll load does not repaint task route or rearm board polling", async
   assert.equal(status.textContent, "");
 });
 
+test("board route fetches only /v2/board, not the removed /v2/done lane", async () => {
+  const timers = [];
+  const fetchCalls = [];
+  const title = { textContent: "" };
+  const status = { textContent: "" };
+  const content = new InlineDOMElement("div");
+  const context = await scriptContext({
+    location: { pathname: "/ui/board" },
+    setTimeout(callback, delay) {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    clearTimeout() {},
+  }, {
+    document: inlineDocument(),
+    fetch(path, options) {
+      fetchCalls.push({ path, options });
+      if (path === "/ui/api/v2/projects") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ projects: [] }),
+        });
+      }
+      if (path === "/ui/api/v2/board") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ boards: [] }),
+        });
+      }
+      throw new Error(`board route unexpectedly fetched ${path}`);
+    },
+  });
+  const app = new context.FlowApp();
+  app.pollingActive = true;
+  app.querySelector = (selector) => {
+    if (selector === "h1") return title;
+    if (selector === ".status") return status;
+    if (selector === ".content") return content;
+    return { textContent: "" };
+  };
+  app.querySelectorAll = () => [];
+
+  await app.load();
+
+  // The Done lane is gone, so the board route must not fire the second
+  // /v2/done request that used to feed it.
+  assert.deepEqual(fetchCalls.map((call) => call.path), [
+    "/ui/api/v2/projects",
+    "/ui/api/v2/board",
+  ]);
+  assert.equal(status.textContent, "0 tasks · nothing waiting on you");
+  assert.equal(timers.length, 1);
+});
+
 test("disconnect during pending load prevents polling rearm", async () => {
   const timers = [];
   const jobsResponse = deferred();

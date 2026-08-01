@@ -59,8 +59,6 @@ export const TASKS_PROJECT_STORAGE_KEY = "flow.ui.tasksProject";
 
 export const TASKS_QUERY_STORAGE_KEY = "flow.ui.tasksQuery";
 
-export const BOARD_DONE_STORAGE_KEY = "flow.ui.boardDone.v1";
-
 export const DIFF_MODE_STORAGE_KEY = "flow.ui.diffMode";
 
 export const BOARD_VIEW_STORAGE_KEY = "flow.ui.boardView";
@@ -103,9 +101,5 @@ export const DEFAULT_AGENT_HARNESSES = [];
 export const DEFAULT_CONSOLE_HARNESSES = [
   { name: "shell", display_name: "Shell" },
 ];
-
-export const BOARD_DONE_COUNTS = [10, 20, 50];
-
-export const BOARD_DONE_WINDOWS = ["1d", "7d", "30d"];
 
 export const TASK_TAB_KEYS = new Set(TASK_TABS.map(([key]) => key));

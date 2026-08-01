@@ -36,10 +36,6 @@ h2 {
   --lane-accent: var(--ph-authoring);
 }
 
-:host([data-lane="done"]) {
-  --lane-accent: var(--ph-merged);
-}
-
 .cards {
   display: flex;
   flex-direction: column;

@@ -8,16 +8,6 @@
 import { apiGet } from "./api.js";
 import { boardEntries } from "./elements/board.js";
 import { mount } from "./elements/base.js";
-import { boardDoneConfig } from "./storage.js";
-import { doneQueryView } from "./done-view.js";
-
-// boardDoneQueryView scopes the board's Done preview: either the last N closed
-// tasks or everything closed within a window, filtered by outcome.
-export function boardDoneQueryView(app) {
-  const config = boardDoneConfig();
-  const extra = config.mode === "within" ? { within: config.within } : { limit: config.count };
-  return doneQueryView(app, config.outcome, extra);
-}
 
 // createTaskView is the topbar's New Task action.
 export async function createTaskView(app) {
@@ -26,16 +16,13 @@ export async function createTaskView(app) {
 }
 
 export async function renderBoardRoute(app, context) {
-  const [data, doneData] = await Promise.all([
-    apiGet("/v2/board" + app.projectQuery()),
-    apiGet("/v2/done" + boardDoneQueryView(app)).catch(() => null),
-  ]);
+  const data = await apiGet("/v2/board" + app.projectQuery());
   if (context && !app.isActiveLoad(context)) return false;
 
   app.setTitle("Board");
   const showProject = (app.projects || []).length > 1;
   const entries = boardEntries(data, { showProject });
-  const board = mount(app.querySelector(".content"), "flow-board", { entries, doneData, showProject });
+  const board = mount(app.querySelector(".content"), "flow-board", { entries, showProject });
 
   const attention = entries.filter((entry) => entry.model.needsYou).length;
   app.setStatus(

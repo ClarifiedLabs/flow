@@ -11,8 +11,8 @@ import (
 
 // TestWebUIDoneViewSurfacesClosedWork drives the real UI: the Done page lists
 // closed tasks with their merged change, the outcome filter narrows the list,
-// the density toggle switches to compact rows, the nav badge shows the closed
-// count, and the board grows a Done column.
+// the density toggle switches to compact rows, and the nav badge shows the
+// closed count.
 func TestWebUIDoneViewSurfacesClosedWork(t *testing.T) {
 	browserPath, ok := findBrowserExecutable()
 	if !ok {
@@ -68,18 +68,11 @@ func TestWebUIDoneViewSurfacesClosedWork(t *testing.T) {
 		t.Fatalf("toggle Done density to compact: %v\nbody:\n%s", err, browserBody(t, browserCtx))
 	}
 
-	// The board grows a Done column listing the same terminal tasks.
-	navigateAndWaitForText(t, browserCtx, httpServer.URL+"/ui/board", merged.ID)
-	var hasDoneLane bool
-	if err := chromedp.Run(browserCtx,
-		chromedp.Evaluate(`document.querySelector('flow-lane[data-lane="done"]') !== null`, &hasDoneLane),
-	); err != nil {
-		t.Fatalf("evaluate board Done lane presence: %v", err)
-	}
-	if !hasDoneLane {
-		t.Fatalf("board is missing the Done column\nbody:\n%s", browserBody(t, browserCtx))
-	}
-	assertPageContains(t, browserCtx, abandoned.ID)
+	// The board no longer carries a Done column: closed work lives on the Done
+	// page, so the board must not render closed tasks.
+	navigateAndWaitForText(t, browserCtx, httpServer.URL+"/ui/board", "Board")
+	assertPageNotContains(t, browserCtx, merged.ID)
+	assertPageNotContains(t, browserCtx, abandoned.ID)
 }
 
 // waitForTextGone polls until the page no longer contains text.
