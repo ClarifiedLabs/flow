@@ -104,6 +104,15 @@ func (s *projectServer) buildUITaskCards(ctx context.Context, tasks []coordinato
 					}
 				}
 			}
+			// The "last active" sort needs real session agent activity, not just
+			// the dwell clock: surface the latest session's timestamp per card.
+			latestSessions, err := s.sessions.ListSessionsForTask(ctx, task.ID, 1)
+			if err != nil {
+				return nil, fmt.Errorf("load latest session for %s: %w", task.ID, err)
+			}
+			if len(latestSessions) > 0 {
+				card.LastAgentActivityAt = latestSessions[0].LastAgentActivityAt
+			}
 		}
 		if s.checks != nil {
 			checks, err := s.checks.ListChecks(ctx, task.ID)

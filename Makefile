@@ -26,6 +26,7 @@ test:
 # modules served as-is to the browser; these tests import them directly).
 js-test:
 	node --test internal/web/assets/app.test.mjs
+	node --test internal/web/assets/board-model.test.mjs
 	node --test internal/web/assets/elements.test.mjs
 	node --test internal/web/assets/storage.test.mjs
 	node --test internal/web/assets/task-relations.test.mjs

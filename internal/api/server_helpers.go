@@ -578,6 +578,9 @@ type uiTaskCard struct {
 	// renders the elapsed time as its load-bearing number: a task sitting
 	// somewhere too long is the thing worth noticing.
 	DwellSince *time.Time `json:"dwell_since,omitempty"`
+	// LastAgentActivityAt is the most recent agent activity across the task's
+	// sessions, feeding the board's "last active" sort.
+	LastAgentActivityAt *time.Time `json:"last_agent_activity_at,omitempty"`
 	// StepIndex/StepCount place the current node in the frozen graph ("3/6").
 	// Ordinals, not progress: branching graphs visit nodes out of slice order.
 	StepIndex int `json:"step_index,omitempty"`

@@ -1303,6 +1303,9 @@ func TestBoardIncludesUITaskCardReadModels(t *testing.T) {
 	if _, err := fixture.Status.WriteSessionStatus(context.Background(), started.Session.ID, "Waiting on product decision", "author", coordinator.StatusKindNote); err != nil {
 		t.Fatalf("write status: %v", err)
 	}
+	if err := fixture.Sessions.TouchAgentActivity(context.Background(), started.Session.ID); err != nil {
+		t.Fatalf("touch agent activity: %v", err)
+	}
 	if _, err := fixture.DB.Exec(`
 INSERT INTO handoff_snapshots (
 	change_id,
@@ -1380,6 +1383,14 @@ INSERT INTO handoff_snapshots (
 	}
 	if card.TerminalAvailable {
 		t.Fatal("terminal should not be available before a target is registered")
+	}
+
+	session, err := fixture.Sessions.GetSession(context.Background(), started.Session.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if card.LastAgentActivityAt == nil || session.LastAgentActivityAt == nil || !card.LastAgentActivityAt.Equal(*session.LastAgentActivityAt) {
+		t.Fatalf("last agent activity = %v, want the latest session's %v", card.LastAgentActivityAt, session.LastAgentActivityAt)
 	}
 
 	if _, err := fixture.Sessions.RegisterTerminal(context.Background(), started.Session.ID, "http://127.0.0.1:7777"); err != nil {
@@ -1535,6 +1546,9 @@ func TestBoardCurrentStepToleratesMissingAndMalformedRunData(t *testing.T) {
 	for _, taskID := range []string{unscheduled.ID, missingRun.ID, emptyKey.ID} {
 		if step := board.TaskCards[taskID].CurrentStep; step != nil {
 			t.Fatalf("task %s current step = %+v, want omitted", taskID, step)
+		}
+		if activity := board.TaskCards[taskID].LastAgentActivityAt; activity != nil {
+			t.Fatalf("task %s last agent activity = %v, want omitted (no sessions)", taskID, activity)
 		}
 	}
 	if step := board.TaskCards[unresolved.ID].CurrentStep; step == nil || step.Key != "legacy-node_key" || step.Name != "legacy node key" || step.Kind != "" {

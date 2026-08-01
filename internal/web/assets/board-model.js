@@ -243,6 +243,12 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
     dwell,
     dwellLabel,
     dwellSince,
+    // The raw task timestamp backs the "last activity" sort when the card
+    // carries no dwell clock of its own.
+    updatedAt: value(task, "updated_at", "UpdatedAt"),
+    // LastAgentActivityAt comes from the task's latest session; combined with
+    // dwellSince it feeds the board's most-recent-first "last active" sort.
+    lastAgentActivityAt: value(card, "last_agent_activity_at", "LastAgentActivityAt"),
     dwellTone: dwellTone(dwellKind, dwellSince, now),
     priority: Number(value(task, "priority", "Priority") || 0),
     diffStats: value(card, "diff_stats", "DiffStats"),
@@ -324,6 +330,47 @@ export function sortForAttention(models) {
     const leftMs = Date.parse(left.dwellSince || "") || 0;
     const rightMs = Date.parse(right.dwellSince || "") || 0;
     if (leftMs !== rightMs) return leftMs - rightMs;
+    return String(left.id).localeCompare(String(right.id));
+  });
+}
+
+// taskNumber parses the numeric suffix of a task id (`t-<key>-0042` -> 42),
+// mirroring the server's CAST(substr(id, 3) AS INTEGER) ordering in
+// coordinator ListTasks. Numeric, not string, compare: `t-…-9` sorts before
+// `t-…-42`. Ids without a numeric suffix compare as 0.
+export function taskNumber(id) {
+  const match = String(id || "").match(/(\d+)$/);
+  return match ? Number(match[1]) : 0;
+}
+
+// lastActivityMs is the "last active" sort key: the most recent of the card's
+// dwell clock (when it entered its current state), the latest session's agent
+// activity, and the task's own updated_at as the fallback. Returns a
+// comparable millisecond number (0 when no timestamp is present).
+export function lastActivityMs(model) {
+  let latest = 0;
+  for (const candidate of [model?.dwellSince, model?.lastAgentActivityAt, model?.updatedAt]) {
+    const ms = Date.parse(candidate || "") || 0;
+    if (ms > latest) latest = ms;
+  }
+  return latest;
+}
+
+// compareBoardCards orders card models for the board's lane and table views.
+// key "number" (ascending by default) sorts by task number; key "activity"
+// (descending by default, most recent first) sorts by lastActivityMs. The
+// comparator is stable and breaks ties by task number ascending, then id, so
+// cards never reshuffle between polls when nothing actually changed.
+export function compareBoardCards(models, { key = "number", dir } = {}) {
+  const byActivity = key === "activity";
+  const direction = (dir || (byActivity ? "desc" : "asc")) === "asc" ? 1 : -1;
+  return [...models].sort((left, right) => {
+    const primary = byActivity
+      ? lastActivityMs(left) - lastActivityMs(right)
+      : taskNumber(left.id) - taskNumber(right.id);
+    if (primary !== 0) return direction * primary;
+    const numberTie = taskNumber(left.id) - taskNumber(right.id);
+    if (numberTie !== 0) return numberTie;
     return String(left.id).localeCompare(String(right.id));
   });
 }
