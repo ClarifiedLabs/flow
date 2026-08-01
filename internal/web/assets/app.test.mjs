@@ -5579,3 +5579,177 @@ test("flows view renders the active project name as a project switcher", async (
     "/ui/api/v2/projects/p-beta/flows",
   ]);
 });
+
+// --- change route: metadata/diff head coherence ---------------------------------
+
+let changeRouteModulePromise;
+// change-route.js (like app.js) extends HTMLElement at module scope, so it can
+// only be imported once the test context has installed the global stubs.
+function loadChangeRouteModule() {
+  changeRouteModulePromise = changeRouteModulePromise || import("./change-route.js");
+  return changeRouteModulePromise;
+}
+
+function changeRouteHarness() {
+  const content = new InlineDOMElement("section");
+  const app = {
+    setTitle() {},
+    querySelector(selector) {
+      return selector === ".content" ? content : null;
+    },
+  };
+  return { app, content };
+}
+
+test("change route mounts only a metadata/diff pair naming the same head", async () => {
+  const fetchCalls = [];
+  const context = await scriptContext({}, {
+    document: inlineDocument(),
+    fetch(path) {
+      fetchCalls.push(path);
+      if (path.endsWith("/diff")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ change_id: "ch-0001", head_sha: "abc123", total_files: 2 }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ change: { id: "ch-0001", head_sha: "abc123" } }) });
+    },
+  });
+  const { renderChangeRoute } = await loadChangeRouteModule();
+  const { app, content } = changeRouteHarness();
+
+  assert.equal(await renderChangeRoute(app, "ch-0001", null), true);
+  const mounted = content.children[0].data;
+  assert.equal(mounted.change.head_sha, "abc123");
+  assert.equal(mounted.diff.head_sha, "abc123");
+  assert.deepEqual(fetchCalls, ["/ui/api/v2/changes/ch-0001", "/ui/api/v2/changes/ch-0001/diff"]);
+});
+
+test("change route retries a coherent pair when the head moves between reads", async () => {
+  let metadataCalls = 0;
+  const context = await scriptContext({}, {
+    document: inlineDocument(),
+    fetch(path) {
+      if (path.endsWith("/diff")) {
+        // The change advanced between the metadata read and this diff read:
+        // the diff answers for the head the server now holds, not the one the
+        // metadata named. The pair must be re-read, never mounted mixed.
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ change_id: "ch-0001", head_sha: "new-head", total_files: 1 }),
+        });
+      }
+      metadataCalls += 1;
+      const head = metadataCalls === 1 ? "old-head" : "new-head";
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ change: { id: "ch-0001", head_sha: head } }) });
+    },
+  });
+  const { renderChangeRoute } = await loadChangeRouteModule();
+  const { app, content } = changeRouteHarness();
+
+  assert.equal(await renderChangeRoute(app, "ch-0001", null), true);
+  assert.equal(metadataCalls, 2, "metadata is re-read after the diff answered for the new head");
+  assert.equal(content.children.length, 1, "only the verified pair mounts");
+  const mounted = content.children[0].data;
+  assert.equal(mounted.change.head_sha, "new-head");
+  assert.equal(mounted.diff.head_sha, "new-head");
+});
+
+test("change route never mounts a mixed-head pair when the head keeps moving", async () => {
+  let metadataCalls = 0;
+  const context = await scriptContext({}, {
+    document: inlineDocument(),
+    fetch(path) {
+      if (path.endsWith("/diff")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ change_id: "ch-0001", head_sha: "new-head" }),
+        });
+      }
+      metadataCalls += 1;
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ change: { id: "ch-0001", head_sha: `head-${metadataCalls}` } }) });
+    },
+  });
+  const { renderChangeRoute } = await loadChangeRouteModule();
+  const { app, content } = changeRouteHarness();
+
+  await assert.rejects(renderChangeRoute(app, "ch-0001", null), /advanced while it was loading/);
+  assert.equal(metadataCalls, 3, "three reads are attempted before giving up");
+  assert.equal(content.children.length, 0, "no unverified pair ever mounts");
+});
+
+test("change route retries a failed diff fetch instead of mounting an empty diff", async () => {
+  let diffFailures = 1;
+  const context = await scriptContext({}, {
+    document: inlineDocument(),
+    fetch(path) {
+      if (path.endsWith("/diff")) {
+        if (diffFailures > 0) {
+          diffFailures -= 1;
+          return Promise.reject(new Error("network down"));
+        }
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ change_id: "ch-0001", head_sha: "abc123", total_files: 1 }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ change: { id: "ch-0001", head_sha: "abc123" } }) });
+    },
+  });
+  const { renderChangeRoute } = await loadChangeRouteModule();
+  const { app, content } = changeRouteHarness();
+
+  assert.equal(await renderChangeRoute(app, "ch-0001", null), true);
+  const mounted = content.children[0].data;
+  assert.equal(mounted.change.head_sha, "abc123");
+  assert.equal(mounted.diff.head_sha, "abc123");
+});
+
+test("change route mounts a headless change explicitly with an empty diff and no diff fetch", async () => {
+  const fetchCalls = [];
+  const context = await scriptContext({}, {
+    document: inlineDocument(),
+    fetch(path) {
+      fetchCalls.push(path);
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ change: { id: "ch-0001" } }) });
+    },
+  });
+  const { renderChangeRoute } = await loadChangeRouteModule();
+  const { app, content } = changeRouteHarness();
+
+  assert.equal(await renderChangeRoute(app, "ch-0001", null), true);
+  assert.deepEqual(fetchCalls, ["/ui/api/v2/changes/ch-0001"]);
+  const mounted = content.children[0].data;
+  assert.deepEqual(mounted.diff, {});
+});
+
+test("change route mounts a verified head when the server's diff is explicitly unavailable", async () => {
+  const context = await scriptContext({}, {
+    document: inlineDocument(),
+    fetch(path) {
+      if (path.endsWith("/diff")) {
+        // The server's no-diff response still names the head it would diff, so
+        // it verifies the pair and installs as an empty diff.
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            change_id: "ch-0001",
+            head_sha: "abc123",
+            available: false,
+            unavailable_reason: "diff not captured",
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ change: { id: "ch-0001", head_sha: "abc123" } }) });
+    },
+  });
+  const { renderChangeRoute } = await loadChangeRouteModule();
+  const { app, content } = changeRouteHarness();
+
+  assert.equal(await renderChangeRoute(app, "ch-0001", null), true);
+  const mounted = content.children[0].data;
+  assert.equal(mounted.change.head_sha, "abc123");
+  assert.equal(mounted.diff.head_sha, "abc123");
+  assert.equal(mounted.diff.available, false);
+});
