@@ -3,6 +3,7 @@
 // reader hold a file and a line number in their head while they scroll.
 
 import { formatRelative } from "../format.js";
+import { threadClaimPending } from "../actions.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { renderMarkdown } from "../markdown.js";
 import { value } from "../normalize.js";
@@ -49,13 +50,20 @@ function renderComment(comment) {
 }
 
 // The same verbs the CLI uses, so a thread claimed from the terminal and one
-// claimed from the browser mean the same thing.
+// claimed from the browser mean the same thing. All three buttons post the
+// same claim operation, so they share a single in-flight key: while one claim
+// is pending, every claim button for the thread re-derives its suppression
+// from the shared registry — a poll repaint otherwise rebuilds the row with
+// freshly enabled buttons.
 function renderClaims(id) {
+  const pending = threadClaimPending(id);
+  const classes = ["button", "secondary", pending ? "is-busy" : ""].filter(Boolean).join(" ");
+  const busyAttrs = pending ? ` disabled aria-busy="true"` : "";
   return `
     <div class="claims">
-      <button class="button secondary" data-thread-claim="${escapeAttr(id)}" data-claim-kind="fixed">Claim fixed</button>
-      <button class="button secondary" data-thread-claim="${escapeAttr(id)}" data-claim-kind="not_warranted">Not warranted</button>
-      <button class="button secondary" data-thread-claim="${escapeAttr(id)}" data-claim-kind="superseded">Superseded</button>
+      <button class="${classes}" data-thread-claim="${escapeAttr(id)}" data-claim-kind="fixed"${busyAttrs}>Claim fixed</button>
+      <button class="${classes}" data-thread-claim="${escapeAttr(id)}" data-claim-kind="not_warranted"${busyAttrs}>Not warranted</button>
+      <button class="${classes}" data-thread-claim="${escapeAttr(id)}" data-claim-kind="superseded"${busyAttrs}>Superseded</button>
     </div>
   `;
 }

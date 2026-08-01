@@ -35,11 +35,11 @@ const { renderActivityFeed, activityEntries } = await import("./elements/activit
 const { renderTaskFormView, bindRelationsPickerView, bindTaskFlowControlsView, relationTargetSuggestionsView } = await import("./task-view.js");
 await import("./elements/lane.js");
 await import("./elements/tab-strip.js");
-const { acquireBusy, inFlight, releaseBusy, settleStatus } = await import("./actions.js");
+const { acquireBusy, handleAction, inFlight, releaseBusy, settleStatus } = await import("./actions.js");
 const { handleFormSubmit } = await import("./forms.js");
 await import("./elements/change.js");
 const { renderChangeRoute } = await import("./change-route.js");
-await import("./elements/inline-thread.js");
+const { renderInlineThread } = await import("./elements/inline-thread.js");
 await import("./elements/task-detail.js");
 
 const HOUR = 3600_000;
@@ -2039,11 +2039,11 @@ test("a failed review keeps the error on the status line and restores the button
 
 // --- inline thread reply pending state (buttonless form) --------------------
 
-function inlineThreadData() {
+function inlineThreadData(id = "th-0001") {
   const now = new Date().toISOString();
   return {
     thread: {
-      id: "th-0001",
+      id,
       state: "open",
       created_at: now,
       comments: [{ actor: "reviewer", body: "Please add a test", created_at: now }],
@@ -2114,6 +2114,316 @@ test("an inline thread reply marks its text input busy and suppresses a duplicat
   assert.equal(repaintedInput.getAttribute("aria-busy"), null);
   assert.equal(repaintedInput.classList.contains("is-busy"), false);
   assert.deepEqual(statuses, ["Posting reply\u2026", "Reply posted"]);
+  assert.equal(inFlight.size, 0);
+  thread.remove();
+  appNode.remove();
+});
+
+// --- inline thread claim pending state -------------------------------------
+
+// The render path must suppress the claim row itself while the shared claim
+// key is in flight: a poll repaint rebuilds the row from scratch, and only the
+// registry (not the discarded clicked node) survives to re-suppress the fresh
+// buttons. Different threads keep their own key, so one thread's pending claim
+// never touches another thread's buttons.
+test("claim buttons render disabled while that thread's claim is pending", () => {
+  const data = inlineThreadData();
+  const html = renderInlineThread(data.thread, data.change);
+  assert.match(html, /data-thread-claim="th-0001" data-claim-kind="fixed"/);
+  assert.doesNotMatch(html, /data-thread-claim="th-0001"[^>]*disabled/);
+
+  inFlight.add("threadClaim:th-0001");
+  try {
+    const pendingHtml = renderInlineThread(data.thread, data.change);
+    for (const kind of ["fixed", "not_warranted", "superseded"]) {
+      assert.match(pendingHtml, new RegExp(`data-thread-claim="th-0001" data-claim-kind="${kind}" disabled aria-busy="true"`));
+    }
+    assert.equal((pendingHtml.match(/class="button secondary is-busy"/g) || []).length, 3);
+
+    const otherHtml = renderInlineThread(inlineThreadData("th-0002").thread, data.change);
+    assert.doesNotMatch(otherHtml, /data-thread-claim="th-0002"[^>]*disabled/, "another thread's claims stay enabled");
+  } finally {
+    inFlight.delete("threadClaim:th-0001");
+  }
+});
+
+// The Now card can show claim buttons for the same open thread the Change tab's
+// inline row does. While the thread's claim is pending, the card's controls
+// must render disabled too — an unchanged poll otherwise repaints an
+// apparently actionable second claim surface.
+test("the Now card renders its thread-claim controls disabled while that thread's claim is pending", () => {
+  const card = nowCardModel({
+    wait: null,
+    openThreads: 1,
+    threads: [{ id: "th-0001", state: "open", file_path: "internal/lifecycle/engine.go", line: 212, comments: [] }],
+    change: { head_sha: "abc" },
+  });
+  assert.ok(card, "an open thread produces a Now card");
+  const html = renderNowCard(card, { id: "t-0001", projectID: "p-1" });
+  assert.match(html, /data-thread-claim="th-0001" data-claim-kind="fixed"/);
+  assert.doesNotMatch(html, /data-thread-claim="th-0001"[^>]*disabled/);
+
+  inFlight.add("threadClaim:th-0001");
+  try {
+    const pendingHtml = renderNowCard(card, { id: "t-0001", projectID: "p-1" });
+    for (const kind of ["fixed", "not_warranted"]) {
+      assert.match(pendingHtml, new RegExp(`data-thread-claim="th-0001" data-claim-kind="${kind}" disabled aria-busy="true"`));
+    }
+    assert.equal((pendingHtml.match(/is-busy/g) || []).length, 2, "both card claim buttons carry the is-busy class");
+
+    const other = nowCardModel({
+      wait: null,
+      openThreads: 1,
+      threads: [{ id: "th-0002", state: "open", file_path: "a.go", line: 2, comments: [] }],
+      change: { head_sha: "abc" },
+    });
+    const otherHtml = renderNowCard(other, { id: "t-0001", projectID: "p-1" });
+    assert.doesNotMatch(otherHtml, /data-thread-claim="th-0002"[^>]*disabled/, "another thread's card claims stay enabled");
+  } finally {
+    inFlight.delete("threadClaim:th-0001");
+  }
+});
+
+test("an inline thread claim stays single-flight across a repaint and re-enables on success", async () => {
+  const root = globalThis.document.body;
+  let requests = 0;
+  let resolveRequest;
+  stubReviewFetch(() => {
+    requests += 1;
+    return new Promise((resolve) => {
+      resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+  });
+  const appNode = globalThis.document.createElement("flow-app");
+  const statuses = [];
+  appNode.setStatus = (message) => statuses.push(message);
+  appNode.refresh = () => {};
+  root.appendChild(appNode);
+  const thread = mountElement(appNode, "flow-inline-thread", inlineThreadData());
+  const other = mountElement(appNode, "flow-inline-thread", inlineThreadData("th-0002"));
+  await flush();
+
+  const first = thread.querySelector('[data-thread-claim="th-0001"][data-claim-kind="fixed"]');
+  const pending = handleAction(appNode, { target: first, preventDefault() {} });
+  assert.equal(requests, 1);
+
+  // The clicked claim and its siblings for the same thread are all suppressed
+  // synchronously, before the request resolves.
+  assert.equal(first.disabled, true);
+  assert.equal(first.getAttribute("aria-busy"), "true");
+  assert.equal(first.classList.contains("is-busy"), true);
+  const sibling = thread.querySelector('[data-thread-claim="th-0001"][data-claim-kind="not_warranted"]');
+  assert.equal(sibling.disabled, true, "a sibling claim is suppressed while one is pending");
+  assert.deepEqual(statuses, ["Claiming thread th-0001\u2026"]);
+
+  // A different thread's claims stay enabled while th-0001's POST is pending.
+  const otherButton = other.querySelector('[data-thread-claim="th-0002"][data-claim-kind="fixed"]');
+  assert.equal(otherButton.hasAttribute("disabled"), false);
+
+  // A poll repaint replaces the claim row: the fresh buttons render disabled
+  // because the render path consults the shared registry, and clicking a
+  // replacement issues no duplicate POST.
+  thread.invalidate();
+  await flush();
+  const repainted = thread.querySelector('[data-thread-claim="th-0001"][data-claim-kind="fixed"]');
+  assert.ok(repainted && repainted !== first, "the claim row was replaced by the repaint");
+  assert.equal(repainted.hasAttribute("disabled"), true, "the replacement renders disabled while the claim is pending");
+  assert.equal(repainted.hasAttribute("aria-busy"), true);
+  assert.equal(repainted.classList.contains("is-busy"), true);
+  await handleAction(appNode, { target: repainted, preventDefault() {} });
+  assert.equal(requests, 1, "no duplicate claim while the first is in flight");
+
+  // The repaint replaced the controls whose restores the click captured, so
+  // settlement re-enables whatever is live in the document for this thread.
+  // Route the settle-time restore through the fake document to the live row.
+  const docQuery = globalThis.document.querySelectorAll;
+  globalThis.document.querySelectorAll = (selector) =>
+    selector === "[data-thread-claim]" ? thread.querySelectorAll(selector) : [];
+  try {
+    resolveRequest();
+    await pending;
+  } finally {
+    globalThis.document.querySelectorAll = docQuery;
+  }
+
+  assert.equal(repainted.disabled, false, "the repaint replacement re-enables on success");
+  assert.equal(repainted.getAttribute("aria-busy"), null);
+  assert.equal(repainted.classList.contains("is-busy"), false);
+  assert.deepEqual(statuses, ["Claiming thread th-0001\u2026", "Thread claimed"]);
+  assert.equal(inFlight.size, 0);
+  thread.remove();
+  other.remove();
+  appNode.remove();
+});
+
+test("a failed thread claim leaves no live replacement disabled", async () => {
+  const root = globalThis.document.body;
+  let rejectRequest;
+  stubReviewFetch(() => new Promise((resolve, reject) => {
+    rejectRequest = () => reject(new Error("boom"));
+  }));
+  const appNode = globalThis.document.createElement("flow-app");
+  const statuses = [];
+  appNode.setStatus = (message) => statuses.push(message);
+  appNode.refresh = () => {};
+  root.appendChild(appNode);
+  const thread = mountElement(appNode, "flow-inline-thread", inlineThreadData());
+  await flush();
+
+  const first = thread.querySelector('[data-thread-claim="th-0001"][data-claim-kind="fixed"]');
+  const pending = handleAction(appNode, { target: first, preventDefault() {} });
+
+  // A repaint mid-flight replaces the row with render-time-disabled buttons
+  // that never registered a restore (applyBusyState skips already-busy nodes).
+  thread.invalidate();
+  await flush();
+  const repainted = thread.querySelector('[data-thread-claim="th-0001"][data-claim-kind="fixed"]');
+  assert.ok(repainted && repainted !== first, "the claim row was replaced by the repaint");
+  assert.equal(repainted.hasAttribute("disabled"), true);
+
+  const docQuery = globalThis.document.querySelectorAll;
+  globalThis.document.querySelectorAll = (selector) =>
+    selector === "[data-thread-claim]" ? thread.querySelectorAll(selector) : [];
+  try {
+    rejectRequest();
+    await pending;
+  } finally {
+    globalThis.document.querySelectorAll = docQuery;
+  }
+
+  // Failure issues no refresh, so nothing else repaints the row; the live
+  // replacements must be restored directly, not left busy until a later poll.
+  assert.equal(repainted.disabled, false);
+  assert.equal(repainted.getAttribute("aria-busy"), null);
+  assert.equal(repainted.classList.contains("is-busy"), false);
+  assert.deepEqual(statuses, ["Claiming thread th-0001\u2026", "boom"]);
+  assert.equal(inFlight.size, 0);
+  thread.remove();
+  appNode.remove();
+});
+
+test("an inline claim suppresses the Now-card claim controls across an unchanged poll", async () => {
+  const root = globalThis.document.body;
+  let requests = 0;
+  let resolveRequest;
+  stubReviewFetch(() => {
+    requests += 1;
+    return new Promise((resolve) => {
+      resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+  });
+  const appNode = globalThis.document.createElement("flow-app");
+  const statuses = [];
+  appNode.setStatus = (message) => statuses.push(message);
+  appNode.refresh = () => {};
+  root.appendChild(appNode);
+
+  // The Change tab's inline thread and the Now card show claim controls for
+  // the same open thread at the same time.
+  const thread = mountElement(appNode, "flow-inline-thread", inlineThreadData());
+  const model = {
+    wait: null,
+    openThreads: 1,
+    threads: [{
+      id: "th-0001",
+      state: "open",
+      file_path: "internal/lifecycle/engine.go",
+      line: 212,
+      created_at: new Date().toISOString(),
+      comments: [{ actor: "reviewer", body: "Please add a test" }],
+    }],
+    change: { head_sha: "abc123def456" },
+  };
+  const card = mountElement(appNode, "flow-now-card", { card: nowCardModel(model), model });
+  await flush();
+
+  const cardClaim = card.querySelector('[data-thread-claim="th-0001"][data-claim-kind="fixed"]');
+  assert.ok(cardClaim, "the Now card renders a claim control for the open thread");
+  assert.equal(cardClaim.hasAttribute("disabled"), false);
+
+  const inlineClaim = thread.querySelector('[data-thread-claim="th-0001"][data-claim-kind="fixed"]');
+  const pending = handleAction(appNode, { target: inlineClaim, preventDefault() {} });
+  assert.equal(requests, 1);
+
+  // The card's same-thread claim is suppressed at click time, not just the
+  // clicked row: suppression is document-wide across surfaces.
+  assert.equal(cardClaim.disabled, true);
+  assert.equal(cardClaim.getAttribute("aria-busy"), "true");
+  assert.equal(cardClaim.classList.contains("is-busy"), true);
+
+  // An unchanged poll (identical card payload) must not leave the card's claim
+  // enabled: the render path consults the shared registry, so the repaint
+  // re-emits the card's claims disabled even though the payload didn't change.
+  card.data = { card: nowCardModel(model), model };
+  await flush();
+  const repainted = card.querySelector('[data-thread-claim="th-0001"][data-claim-kind="fixed"]');
+  assert.ok(repainted && repainted !== cardClaim, "the unchanged poll repainted the card's claim control");
+  assert.equal(repainted.hasAttribute("disabled"), true, "the Now-card claim renders disabled while the claim is pending");
+  assert.equal(repainted.getAttribute("aria-busy"), "true");
+  assert.equal(repainted.classList.contains("is-busy"), true);
+
+  resolveRequest();
+  await pending;
+
+  // Settlement restores the live replacement in the card and the inline row.
+  assert.equal(repainted.disabled, false);
+  assert.equal(repainted.getAttribute("aria-busy"), null);
+  assert.equal(repainted.classList.contains("is-busy"), false);
+  assert.deepEqual(statuses, ["Claiming thread th-0001\u2026", "Thread claimed"]);
+  assert.equal(inFlight.size, 0);
+  card.remove();
+  thread.remove();
+  appNode.remove();
+});
+
+test("a thread claim with a selector-hostile id stays single-flight and restores cleanly", async () => {
+  const root = globalThis.document.body;
+  let requests = 0;
+  let rejectRequest;
+  stubReviewFetch(() => {
+    requests += 1;
+    return new Promise((resolve, reject) => {
+      rejectRequest = () => reject(new Error("boom"));
+    });
+  });
+  const appNode = globalThis.document.createElement("flow-app");
+  const statuses = [];
+  appNode.setStatus = (message) => statuses.push(message);
+  appNode.refresh = () => {};
+  root.appendChild(appNode);
+  const threadID = 'th-1"][data-unrelated]';
+  const thread = mountElement(appNode, "flow-inline-thread", inlineThreadData(threadID));
+  await flush();
+
+  const first = thread.querySelector('[data-thread-claim][data-claim-kind="fixed"]');
+  assert.ok(first, "the hostile id still renders a claim control");
+  const pending = handleAction(appNode, { target: first, preventDefault() {} });
+  assert.equal(requests, 1, "the claim POST starts despite the hostile id");
+  assert.equal(first.disabled, true);
+
+  // A repaint mid-flight rebuilds the row. The render path derives suppression
+  // from the registry (a Map key, never a selector), so the replacement
+  // renders disabled even though the id cannot appear in a CSS selector, and
+  // clicking it issues no duplicate POST.
+  thread.invalidate();
+  await flush();
+  const repainted = thread.querySelector('[data-thread-claim][data-claim-kind="fixed"]');
+  assert.ok(repainted && repainted !== first, "the claim row was replaced by the repaint");
+  assert.equal(repainted.hasAttribute("disabled"), true);
+  assert.equal(repainted.hasAttribute("aria-busy"), true);
+  await handleAction(appNode, { target: repainted, preventDefault() {} });
+  assert.equal(requests, 1, "no duplicate claim while the first is in flight");
+
+  rejectRequest();
+  await pending;
+
+  // The settle-time restore scans the document with the broad selector and
+  // matches by dataset value, so the live replacement re-enables despite the
+  // hostile id.
+  assert.equal(repainted.disabled, false, "the live replacement restores after failure");
+  assert.equal(repainted.getAttribute("aria-busy"), null);
+  assert.equal(repainted.classList.contains("is-busy"), false);
+  assert.deepEqual(statuses, [`Claiming thread ${threadID}\u2026`, "boom"]);
   assert.equal(inFlight.size, 0);
   thread.remove();
   appNode.remove();

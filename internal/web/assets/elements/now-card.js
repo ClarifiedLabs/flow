@@ -3,6 +3,7 @@
 // open review thread blocks the merge, and not otherwise — a card that is
 // always there stops being read.
 
+import { threadClaimPending } from "../actions.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { renderMarkdown } from "../markdown.js";
 import { define, FlowElement } from "./base.js";
@@ -41,8 +42,16 @@ function renderNowAction(action, card, model, projectAttr) {
       return `<button class="${classes}" data-workflow-skip="${id}" data-workflow-skip-node="${escapeAttr(model?.nodeRunID || "")}"${projectAttr}>${escapeHTML(action.label)}</button>`;
     case "workflow-budget":
       return `<button class="${classes}" data-workflow-budget="${id}" data-workflow-budget-kind="${escapeAttr(action.budgetKind || "transitions")}"${projectAttr}>${escapeHTML(action.label)}</button>`;
-    case "thread-claim":
-      return `<button class="${classes}" data-thread-claim="${escapeAttr(card.threadID || "")}" data-claim-kind="${escapeAttr(action.kind)}">${escapeHTML(action.label)}</button>`;
+    case "thread-claim": {
+      // The card's claim buttons name the same operation as the inline row's
+      // in the change tab. While that claim is pending, render them disabled
+      // like renderClaims does, so an unchanged poll cannot leave the card's
+      // controls looking actionable until settlement re-enables them.
+      const pending = threadClaimPending(card.threadID || "");
+      const claimClasses = pending ? `${classes} is-busy` : classes;
+      const busyAttrs = pending ? ` disabled aria-busy="true"` : "";
+      return `<button class="${claimClasses}" data-thread-claim="${escapeAttr(card.threadID || "")}" data-claim-kind="${escapeAttr(action.kind)}"${busyAttrs}>${escapeHTML(action.label)}</button>`;
+    }
     case "open-change":
       return `<a class="${classes}" href="/ui/changes/${escapeAttr(model?.change?.id || model?.change?.ID || "")}" data-link>${escapeHTML(action.label)}</a>`;
     case "focus-gate":

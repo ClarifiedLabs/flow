@@ -511,6 +511,13 @@ export function actionBusyKey(key, dataset) {
   if (key === "startConsole" || key === "releaseConsole") {
     return [base, dataset?.project, dataset?.task].map((part) => String(part ?? "")).join(":");
   }
+  // The three claim buttons of a thread all carry the same data-thread-claim
+  // value, so the base key already names the whole thread's claim operation:
+  // one pending claim suppresses every sibling claim for that thread, while a
+  // different thread's claims keep their own key and stay independent.
+  if (key === "threadClaim") {
+    return base;
+  }
   return base;
 }
 
@@ -660,12 +667,73 @@ function restoreLiveGateOutcomes(element, nodeRunID) {
   }
 }
 
+// The three claim buttons of one thread all carry the same data-thread-claim
+// value, so they share a single in-flight key. Marking only the clicked one
+// busy leaves its siblings looking enabled until a repaint; suppress every
+// live same-thread claim control — the inline row's siblings and any Now-card
+// claim for the same open thread — and hand back their restores so the pending
+// state reads consistently across every surface and unwinds on settle.
+function threadClaimControls(element) {
+  const threadID = element.dataset?.threadClaim;
+  const doc = globalThis.document;
+  if (threadID && typeof doc?.querySelectorAll === "function") {
+    // Thread ids are server-provided and may contain quotes or CSS selector
+    // metacharacters, so never interpolate one into a selector: fetch every
+    // claim control and filter by dataset value instead. An interpolated id
+    // that happens to form a valid selector could otherwise suppress another
+    // thread's claims.
+    const all = [...doc.querySelectorAll("[data-thread-claim]")]
+      .filter((control) => control.dataset?.threadClaim === threadID);
+    if (all.length) return all;
+  }
+  const scope = element.closest?.(".claims") ?? element.parentElement;
+  if (!scope?.querySelectorAll) return [];
+  return [...scope.querySelectorAll("[data-thread-claim]")];
+}
+
+function suppressThreadClaims(element) {
+  return threadClaimControls(element)
+    .filter((control) => control !== element)
+    .map((control) => markBusy(control));
+}
+
+// A poll repaint rebuilds a thread's claim row while the claim POST is still
+// in flight, so renderClaims re-emits every claim button disabled and replaces
+// the controls whose restores were captured at click time. Clearing the
+// in-flight key on settle only unwinds those now-detached originals; the live
+// replacements stay disabled until a later poll. Re-enable whatever claim
+// controls are live in the document for this thread now, so a repaint that
+// landed mid-flight cannot strand the claims — on failure in particular, when
+// no refresh follows to rebuild the row.
+function restoreLiveThreadClaims(threadID) {
+  const doc = globalThis.document;
+  if (!doc?.querySelectorAll || !threadID) return;
+  // Thread ids are server-provided and may contain quotes or CSS selector
+  // metacharacters, so never interpolate one into a selector: fetch every
+  // claim control and filter by dataset value instead, so a hostile id cannot
+  // throw out of the settlement path or re-enable another thread's controls.
+  for (const control of doc.querySelectorAll("[data-thread-claim]")) {
+    if (control.dataset?.threadClaim !== threadID) continue;
+    control.disabled = false;
+    control.removeAttribute?.("aria-busy");
+    control.classList?.remove("is-busy");
+  }
+}
+
 // Render-time counterpart to suppressGateOutcomes: a poll repaint rebuilds the
 // gate panel from scratch, so the fresh outcome buttons re-derive their
 // suppression from the shared in-flight registry instead of waiting for the
 // next click.
 export function gateResponsePending(nodeRunID) {
   return inFlight.has(`workflowRespond:${nodeRunID}`);
+}
+
+// Render-time counterpart to suppressThreadClaims: a poll repaint rebuilds a
+// thread's claim row from scratch, so the fresh claim buttons re-derive their
+// suppression from the shared in-flight registry instead of waiting for the
+// next click.
+export function threadClaimPending(threadID) {
+  return inFlight.has(`threadClaim:${threadID}`);
 }
 const PENDING_LABELS = {
   workflowSchedule: "Scheduling",
@@ -775,6 +843,14 @@ export async function handleAction(app, event) {
   if (key === "workflowRespond") {
     for (const restoreSibling of suppressGateOutcomes(element)) entry.restores.add(restoreSibling);
   }
+  // The three claim buttons of a thread share one in-flight key too, so a
+  // sibling claim stays clickable-looking until a repaint even though its
+  // click would be rejected. Suppress every live same-thread claim control
+  // synchronously — the row's siblings and any Now-card claim for the same
+  // open thread — so no claim appears enabled while the shared one is pending.
+  if (key === "threadClaim") {
+    for (const restoreSibling of suppressThreadClaims(element)) entry.restores.add(restoreSibling);
+  }
   app.setStatus?.(entry.label);
   try {
     // The handler runs against the action-scoped app so its own refresh
@@ -796,6 +872,7 @@ export async function handleAction(app, event) {
     // markBusy, so no restore reaches them. Bring the live replacements back
     // now that the key is cleared.
     if (key === "workflowRespond") restoreLiveGateOutcomes(element, element.dataset?.workflowRespond);
+    if (key === "threadClaim") restoreLiveThreadClaims(element.dataset?.threadClaim);
   }
   return true;
 }

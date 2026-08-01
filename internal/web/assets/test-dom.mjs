@@ -268,6 +268,21 @@ function dataKey(name) {
   return name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
 }
 
+// unescapeEntities decodes the character references escapeHTML emits plus the
+// bare apos form, mirroring how a browser's HTML parser decodes attribute
+// values. It only handles the app's own escapes, not arbitrary numeric
+// references.
+function unescapeEntities(value) {
+  return String(value).replace(/&(amp|lt|gt|quot|#39|apos);/g, (match, name) => ({
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    quot: '"',
+    "#39": "'",
+    apos: "'",
+  })[name]);
+}
+
 // matches supports the selector shapes the app actually writes: tag, .class,
 // #id, [attr], [attr="value"], and comma-separated lists of those. Descendant
 // combinators are deliberately unsupported — nothing in the app needs one in a
@@ -337,7 +352,14 @@ function parseHTML(html) {
     for (const attr of attrs.match(/[^\s=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?/g) || []) {
       const eq = attr.indexOf("=");
       if (eq === -1) node.setAttribute(attr.trim(), "");
-      else node.setAttribute(attr.slice(0, eq).trim(), attr.slice(eq + 1).trim().replace(/^["']|["']$/g, ""));
+      else {
+        // A real HTML parser unescapes character references in attribute
+        // values. The render path escapes attribute values (escapeAttr), so an
+        // id containing a quote arrives as &quot;; without unescaping, dataset
+        // would hold the escaped text instead of the raw value and never match
+        // the in-flight registry key or another control's dataset.
+        node.setAttribute(attr.slice(0, eq).trim(), unescapeEntities(attr.slice(eq + 1).trim().replace(/^["']|["']$/g, "")));
+      }
     }
     push(node);
     if (!selfClosing && !VOID_TAGS.has(tag.toLowerCase())) stack.push(node);
@@ -381,6 +403,10 @@ export function installTestDOM() {
     documentElement: new TestNode("html"),
     cookie: "flow_ui_csrf=csrf-token",
     createElement,
+    // The document queries the whole tree, like a real Document. Document-wide
+    // lookups (e.g. restoring every live same-thread claim control on settle)
+    // rely on this delegating to the body root.
+    querySelectorAll: (selector) => documentNode.querySelectorAll(selector),
     addEventListener() {},
     removeEventListener() {},
   };

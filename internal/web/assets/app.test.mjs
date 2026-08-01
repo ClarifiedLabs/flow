@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { actionScope, applyBusyState, failureMessage, gateResponsePending, handleAction, inFlight, pendingStatus } from "./actions.js";
+import { actionScope, applyBusyState, failureMessage, gateResponsePending, handleAction, inFlight, pendingStatus, threadClaimPending } from "./actions.js";
 import { scheduleConsolePollView, startConsoleView } from "./console-view.js";
 import { handleFormSubmit, formBusyKey } from "./forms.js";
 import { workflowStepCanBeSkipped } from "./task-view.js";
@@ -1048,6 +1048,26 @@ function gatePanel() {
   };
 }
 
+// A thread claim button: an ActionButton that also knows its claim row (the
+// .claims container holding the thread's three claim buttons), so handleAction
+// can suppress the whole row when one of them is clicked.
+class ClaimButton extends ActionButton {
+  constructor(dataset, row) {
+    super(dataset);
+    this.parentElement = row;
+  }
+}
+
+// A claim row stub exposing a thread's claim buttons to suppressThreadClaims.
+function claimRow() {
+  return {
+    buttons: [],
+    querySelectorAll(selector) {
+      return selector === "[data-thread-claim]" ? this.buttons : [];
+    },
+  };
+}
+
 function statusApp() {
   const statuses = [];
   return {
@@ -1315,6 +1335,166 @@ test("a repaint mid-flight leaves no live outcome disabled after a failed settle
   assert.equal(inFlight.size, 0);
 });
 
+test("a thread claim stays single-flight across a repaint and re-enables on success", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let requests = 0;
+  const resolvers = [];
+  globalThis.fetch = () => {
+    requests += 1;
+    return new Promise((resolve) => {
+      resolvers.push(() => resolve({ ok: true, json: () => Promise.resolve({}) }));
+    });
+  };
+  const row = claimRow();
+  const fixed = new ClaimButton({ threadClaim: "th-0001", claimKind: "fixed" }, row);
+  const notWarranted = new ClaimButton({ threadClaim: "th-0001", claimKind: "not_warranted" }, row);
+  row.buttons.push(fixed, notWarranted);
+
+  const handled = handleAction(app, { target: fixed, preventDefault() {} });
+  assert.equal(requests, 1);
+
+  // Synchronously, before the request resolves, every claim button for the
+  // thread is suppressed — not just the one that was clicked.
+  assert.equal(fixed.disabled, true);
+  assert.equal(notWarranted.disabled, true);
+  assert.equal(notWarranted.getAttribute("aria-busy"), "true");
+  assert.equal(notWarranted.classList.contains("is-busy"), true);
+
+  // The shared in-flight registry reports the claim as pending — exactly what
+  // the render path consults to re-suppress fresh buttons after a repaint.
+  assert.equal(threadClaimPending("th-0001"), true);
+
+  // A different thread's claims keep their own key and stay actionable.
+  assert.equal(threadClaimPending("th-0002"), false);
+  const other = new ActionButton({ threadClaim: "th-0002", claimKind: "fixed" });
+  const otherHandled = handleAction(app, { target: other, preventDefault() {} });
+  assert.equal(requests, 2, "a different thread's claim is not blocked by the in-flight one");
+
+  // A repaint swaps the row for fresh enabled nodes carrying the same thread;
+  // clicking a replacement while the first request is still in flight must
+  // not issue a third request.
+  const replacement = new ClaimButton({ threadClaim: "th-0001", claimKind: "fixed" }, row);
+  row.buttons = [replacement];
+  applyBusyState({ querySelectorAll: () => [replacement] });
+  assert.equal(replacement.disabled, true, "the repaint re-applies the busy state to the replacement");
+  await handleAction(app, { target: replacement, preventDefault() {} });
+  assert.equal(requests, 2, "no duplicate claim while the first is in flight");
+
+  resolvers[0]();
+  resolvers[1]();
+  await handled;
+  await otherHandled;
+
+  // Settling restores whatever controls are on screen now, and the action is
+  // available again once the registry drains.
+  assert.equal(replacement.disabled, false);
+  assert.equal(replacement.getAttribute("aria-busy"), null);
+  assert.equal(replacement.classList.contains("is-busy"), false);
+  assert.equal(threadClaimPending("th-0001"), false);
+  // th-0001's settlement lands while th-0002's claim is still pending, so
+  // settleStatus keeps the still-pending label on the line instead of showing
+  // the confirmation early; the final settlement shows "Thread claimed".
+  assert.deepEqual(app.statuses, [
+    "Claiming thread th-0001\u2026",
+    "Claiming thread th-0002\u2026",
+    "Claiming thread th-0002\u2026",
+    "Thread claimed",
+  ]);
+  assert.equal(inFlight.size, 0);
+});
+
+test("a repaint mid-flight leaves no live claim disabled after a failed settlement", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let rejectRequest;
+  globalThis.fetch = () =>
+    new Promise((resolve, reject) => {
+      rejectRequest = () => reject(new Error("boom"));
+    });
+  const row = claimRow();
+  const fixed = new ClaimButton({ threadClaim: "th-0001", claimKind: "fixed" }, row);
+  const notWarranted = new ClaimButton({ threadClaim: "th-0001", claimKind: "not_warranted" }, row);
+  row.buttons.push(fixed, notWarranted);
+
+  const handled = handleAction(app, { target: fixed, preventDefault() {} });
+  assert.equal(fixed.disabled, true);
+  assert.equal(notWarranted.disabled, true, "the sibling claim is suppressed while the claim is pending");
+
+  // A poll repaints while the claim is still pending: the render path re-emits
+  // every claim button disabled (the shared key is still in flight) and swaps
+  // them in for the now-detached originals the click captured.
+  const liveFixed = new ClaimButton({ threadClaim: "th-0001", claimKind: "fixed" }, row);
+  const liveNotWarranted = new ClaimButton({ threadClaim: "th-0001", claimKind: "not_warranted" }, row);
+  for (const control of [liveFixed, liveNotWarranted]) {
+    control.disabled = true;
+    control.setAttribute("aria-busy", "true");
+    control.classList.add("is-busy");
+  }
+  row.buttons = [liveFixed, liveNotWarranted];
+  globalThis.document = {
+    cookie: "flow_ui_csrf=csrf-token",
+    querySelectorAll: (selector) => (selector === "[data-thread-claim]" ? row.buttons : []),
+  };
+
+  rejectRequest();
+  assert.equal(await handled, true);
+
+  // Failure clears the shared key but issues no refresh, so nothing else
+  // repaints the row. The live replacement claims must be restored directly —
+  // not left disabled/aria-busy/is-busy until a later poll.
+  for (const control of [liveFixed, liveNotWarranted]) {
+    assert.equal(control.disabled, false);
+    assert.equal(control.getAttribute("aria-busy"), null);
+    assert.equal(control.classList.contains("is-busy"), false);
+  }
+  assert.equal(threadClaimPending("th-0001"), false);
+  assert.deepEqual(app.statuses, ["Claiming thread th-0001\u2026", "boom"]);
+  assert.equal(inFlight.size, 0);
+});
+
+test("a pending claim suppresses same-thread controls outside the clicked row and restores them on failure", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let rejectRequest;
+  globalThis.fetch = () =>
+    new Promise((resolve, reject) => {
+      rejectRequest = () => reject(new Error("boom"));
+    });
+  const row = claimRow();
+  const fixed = new ClaimButton({ threadClaim: "th-0001", claimKind: "fixed" }, row);
+  const notWarranted = new ClaimButton({ threadClaim: "th-0001", claimKind: "not_warranted" }, row);
+  row.buttons.push(fixed, notWarranted);
+  // The Now card carries its own claim controls for the same open thread in a
+  // different surface; they must read as busy too, not just the clicked row.
+  const cardFixed = new ActionButton({ threadClaim: "th-0001", claimKind: "fixed" });
+  const cardNotWarranted = new ActionButton({ threadClaim: "th-0001", claimKind: "not_warranted" });
+  globalThis.document = {
+    cookie: "flow_ui_csrf=csrf-token",
+    querySelectorAll: (selector) =>
+      selector === "[data-thread-claim]" ? [...row.buttons, cardFixed, cardNotWarranted] : [],
+  };
+
+  const handled = handleAction(app, { target: fixed, preventDefault() {} });
+  for (const control of [fixed, notWarranted, cardFixed, cardNotWarranted]) {
+    assert.equal(control.disabled, true);
+    assert.equal(control.getAttribute("aria-busy"), "true");
+    assert.equal(control.classList.contains("is-busy"), true);
+  }
+  assert.equal(threadClaimPending("th-0001"), true);
+
+  rejectRequest();
+  assert.equal(await handled, true);
+  for (const control of [fixed, notWarranted, cardFixed, cardNotWarranted]) {
+    assert.equal(control.disabled, false);
+    assert.equal(control.getAttribute("aria-busy"), null);
+    assert.equal(control.classList.contains("is-busy"), false);
+  }
+  assert.deepEqual(app.statuses, ["Claiming thread th-0001\u2026", "boom"]);
+  assert.equal(threadClaimPending("th-0001"), false);
+  assert.equal(inFlight.size, 0);
+});
+
 test("a gate response settles safely when the node-run id contains selector metacharacters", async () => {
   await scriptContext();
   const app = statusApp();
@@ -1360,6 +1540,107 @@ test("a gate response settles safely when the node-run id contains selector meta
   assert.equal(otherGate.getAttribute("aria-busy"), "true");
   assert.equal(otherGate.classList.contains("is-busy"), true);
   assert.equal(gateResponsePending(nodeRunID), false);
+  assert.equal(inFlight.size, 0);
+});
+
+test("a thread claim stays single-flight when the thread id contains selector metacharacters", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let rejectRequest;
+  globalThis.fetch = () =>
+    new Promise((resolve, reject) => {
+      rejectRequest = () => reject(new Error("boom"));
+    });
+  // Interpolated into a selector this id closes the attribute and opens a
+  // second one, so a naive querySelectorAll throws before the claim POST.
+  const threadID = 'th-1"][data-unrelated]';
+  const row = claimRow();
+  const fixed = new ClaimButton({ threadClaim: threadID, claimKind: "fixed" }, row);
+  const notWarranted = new ClaimButton({ threadClaim: threadID, claimKind: "not_warranted" }, row);
+  row.buttons.push(fixed, notWarranted);
+
+  const handled = handleAction(app, { target: fixed, preventDefault() {} });
+  assert.equal(fixed.disabled, true);
+  assert.equal(notWarranted.disabled, true, "the sibling claim is suppressed despite the hostile id");
+  assert.equal(threadClaimPending(threadID), true);
+
+  // A poll repaint swaps in fresh disabled claims for the same thread and one
+  // for a different thread; only the exact match may be restored. Like a real
+  // document, any selector built from the thread id is invalid and throws;
+  // only the broad control selector is legal.
+  const liveFixed = new ClaimButton({ threadClaim: threadID, claimKind: "fixed" }, row);
+  const liveNotWarranted = new ClaimButton({ threadClaim: threadID, claimKind: "not_warranted" }, row);
+  const other = new ActionButton({ threadClaim: "th-0002", claimKind: "fixed" });
+  for (const control of [liveFixed, liveNotWarranted, other]) {
+    control.disabled = true;
+    control.setAttribute("aria-busy", "true");
+    control.classList.add("is-busy");
+  }
+  row.buttons = [liveFixed, liveNotWarranted];
+  globalThis.document = {
+    cookie: "flow_ui_csrf=csrf-token",
+    querySelectorAll(selector) {
+      if (selector !== "[data-thread-claim]") throw new Error(`invalid selector: ${selector}`);
+      return [...row.buttons, other];
+    },
+  };
+
+  rejectRequest();
+  assert.equal(await handled, true);
+
+  assert.equal(liveFixed.disabled, false, "the exact match is restored despite the hostile id");
+  assert.equal(liveFixed.getAttribute("aria-busy"), null);
+  assert.equal(liveFixed.classList.contains("is-busy"), false);
+  assert.equal(liveNotWarranted.disabled, false);
+  assert.equal(other.disabled, true, "a different thread's claim stays suppressed");
+  assert.equal(other.getAttribute("aria-busy"), "true");
+  assert.equal(other.classList.contains("is-busy"), true);
+  assert.equal(threadClaimPending(threadID), false);
+  assert.deepEqual(app.statuses, [`Claiming thread ${threadID}\u2026`, "boom"]);
+  assert.equal(inFlight.size, 0);
+});
+
+test("a thread id that forms a valid injected selector cannot suppress another thread's claims", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let requests = 0;
+  let resolveRequest;
+  globalThis.fetch = () => {
+    requests += 1;
+    return new Promise((resolve) => {
+      resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+  };
+  // Interpolated into a selector, this id closes the attribute and opens a
+  // second attribute matching any control whose data-thread-claim is "th-1".
+  const threadID = 'th-1"][data-thread-claim="th-0002';
+  const row = claimRow();
+  const fixed = new ClaimButton({ threadClaim: threadID, claimKind: "fixed" }, row);
+  const other = new ActionButton({ threadClaim: "th-1", claimKind: "fixed" });
+  row.buttons.push(fixed, other);
+  globalThis.document = {
+    cookie: "flow_ui_csrf=csrf-token",
+    querySelectorAll: (selector) =>
+      selector === "[data-thread-claim]" ? [...row.buttons, other] : [],
+  };
+
+  const handled = handleAction(app, { target: fixed, preventDefault() {} });
+  assert.equal(requests, 1, "the claim POST starts");
+  assert.equal(fixed.disabled, true);
+  // The old interpolated selector would have matched "th-1" too; the dataset
+  // filter keeps the other thread's claims independently actionable.
+  assert.equal(other.disabled, false, "a different thread's claim is not suppressed");
+  assert.equal(other.getAttribute("aria-busy"), null);
+  assert.equal(other.classList.contains("is-busy"), false);
+  assert.equal(threadClaimPending(threadID), true);
+  assert.equal(threadClaimPending("th-1"), false);
+
+  resolveRequest();
+  assert.equal(await handled, true);
+  assert.equal(other.disabled, false, "a different thread's claim is not re-enabled by the settlement");
+  assert.equal(other.getAttribute("aria-busy"), null);
+  assert.equal(other.classList.contains("is-busy"), false);
+  assert.equal(threadClaimPending(threadID), false);
   assert.equal(inFlight.size, 0);
 });
 
