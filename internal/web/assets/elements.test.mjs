@@ -35,7 +35,7 @@ const { renderActivityFeed, activityEntries } = await import("./elements/activit
 const { renderTaskFormView, bindRelationsPickerView, relationTargetSuggestionsView } = await import("./task-view.js");
 await import("./elements/lane.js");
 await import("./elements/tab-strip.js");
-const { inFlight } = await import("./actions.js");
+const { acquireBusy, inFlight, releaseBusy, settleStatus } = await import("./actions.js");
 const { handleFormSubmit } = await import("./forms.js");
 await import("./elements/change.js");
 await import("./elements/inline-thread.js");
@@ -1673,6 +1673,52 @@ test("a review verdict marks the button busy and names the in-flight submission"
   assert.equal(approve.getAttribute("aria-busy"), null);
   assert.equal(approve.classList.contains("is-busy"), false);
   assert.deepEqual(statuses, ["Approving\u2026", "Approved"]);
+  change.remove();
+  appNode.remove();
+});
+
+test("an empty comment reports 'Nothing to post' when no mutation is pending", async () => {
+  const root = globalThis.document.body;
+  const { appNode, change, statuses } = mountChange(root, reviewChangeData());
+  await flush();
+
+  const comment = change.querySelector('[data-review-verdict="comment"]');
+  await change.handleClick({ target: comment, preventDefault() {} });
+
+  assert.deepEqual(statuses, ["Nothing to post"], "validation stays visible with no mutation pending");
+  assert.equal(inFlight.size, 0, "validation does not register an in-flight key");
+  assert.equal(comment.hasAttribute("disabled"), false, "validation leaves the verdict controls enabled");
+  change.remove();
+  appNode.remove();
+});
+
+test("an empty comment while another mutation is pending keeps that mutation's label", async () => {
+  const root = globalThis.document.body;
+  const { appNode, change, statuses } = mountChange(root, reviewChangeData());
+  await flush();
+
+  // A distinct change-view mutation (a gate response, say) is in flight with
+  // its pending label on the shared status line.
+  const otherKey = "workflowRespond:wnr-1";
+  const entry = acquireBusy(otherKey, "Sending feedback wnr-1\u2026");
+  assert.ok(entry, "the sibling mutation acquired its busy key");
+  try {
+    const comment = change.querySelector('[data-review-verdict="comment"]');
+    await change.handleClick({ target: comment, preventDefault() {} });
+
+    // The validation must not hide the sibling's pending label…
+    assert.equal(statuses.includes("Nothing to post"), false, "validation must not overwrite the pending label");
+    assert.equal(statuses[statuses.length - 1], "Sending feedback wnr-1\u2026", "the pending label stays on the line");
+    assert.equal(inFlight.size, 1, "only the sibling mutation is in flight");
+
+    // …and the sibling's settlement still reports its final result.
+    settleStatus(appNode, otherKey, "Feedback sent");
+    releaseBusy(otherKey);
+    assert.equal(statuses[statuses.length - 1], "Feedback sent", "the settled mutation's result stays visible");
+    assert.equal(inFlight.size, 0);
+  } finally {
+    releaseBusy(otherKey);
+  }
   change.remove();
   appNode.remove();
 });

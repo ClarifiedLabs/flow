@@ -3,7 +3,7 @@
 // inline notes, so neither survives only as long as the next poll.
 
 import { apiPost } from "../api.js";
-import { ACTION_SETTLE, acquireBusy, failureMessage, inFlightEntries, markBusy, releaseBusy, settleStatus } from "../actions.js";
+import { ACTION_SETTLE, acquireBusy, failureMessage, inFlight, inFlightEntries, markBusy, releaseBusy, settleStatus } from "../actions.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { value } from "../normalize.js";
 import { readDiffMode, writeDiffMode } from "../storage.js";
@@ -156,15 +156,20 @@ export class FlowChange extends FlowElement {
       .filter((draft) => draft.body.trim())
       .map((draft) => ({ file_path: draft.path, line: draft.line, body: draft.body.trim() }));
     const body = this.querySelector("flow-review-bar")?.body || "";
+    const busyKey = `review:${changeID}`;
     if (!comments.length && !body && verdict === "comment") {
-      this.app?.setStatus("Nothing to post");
+      // Validation feedback goes through the same shared status arbitration as
+      // every settle: while another mutation is in flight its pending label
+      // stays visible instead of this message hiding it. Validation never
+      // acquires the review key, so a review already in flight keeps its own
+      // label too.
+      if (!inFlight.has(busyKey)) settleStatus(this.app, busyKey, "Nothing to post");
       return;
     }
     // The change — not the individual verdict — is the review's mutation
     // target: every verdict posts to the same review endpoint and reports to
     // the same review gate, so while one verdict is in flight the others are
     // suppressed too, and a contradictory verdict cannot race it.
-    const busyKey = `review:${changeID}`;
     const entry = acquireBusy(busyKey, `${reviewPendingLabel(verdict)}…`);
     if (!entry) return;
     entry.verdict = verdict;
