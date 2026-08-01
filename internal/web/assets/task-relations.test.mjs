@@ -261,27 +261,30 @@ test("a blocked-by row whose state is unknown renders a neutral marker, not the 
 // blockedByRelations builds one blocked-by relation row per lifecycle state, so
 // a test can describe a panel with several blockers without repeating the row
 // shape. source_state is the denormalized lifecycle state the API ships in the
-// relation payload — the only input the unresolved flag needs.
-function blockedByRelations(states) {
+// relation payload — the only input the unresolved flag needs. taskID is the
+// viewed task the rows are relative to; it defaults to TASK_ID.
+function blockedByRelations(states, taskID = TASK_ID) {
   return states.map((state, index) => ({
     source_task_id: `t-blocker-${index}`,
-    target_task_id: TASK_ID,
+    target_task_id: taskID,
     kind: "blocks",
     source_title: `Blocker ${index}`,
     source_state: state,
   }));
 }
 
-function modelWithBlockerRelations(relations) {
+function modelWithBlockerRelations(relations, taskID = TASK_ID) {
   return {
-    id: TASK_ID,
+    id: taskID,
     projectID: "p-1",
-    relationGroups: relationGroups(relations, TASK_ID),
+    relationGroups: relationGroups(relations, taskID),
   };
 }
 
-function modelWithBlockers(states) {
-  return modelWithBlockerRelations(blockedByRelations(states));
+// modelWithBlockers builds a relations model for the supplied viewed task ID, so
+// a test can hand one element instance models for distinct tasks in sequence.
+function modelWithBlockers(states, taskID = TASK_ID) {
+  return modelWithBlockerRelations(blockedByRelations(states, taskID), taskID);
 }
 
 // settle flushes the microtask repaints a data assignment schedules. The panel
@@ -485,16 +488,24 @@ test("navigating the mounted element to another task drops the previous task's b
   // the rail reuses the same element instance for a different task, the old
   // task's unresolved markers must not survive into the new task's view.
   const root = globalThis.document.body;
-  const element = mountElement(root, "flow-task-relations", modelWithBlockers(["in_progress"]));
+  const element = mountElement(root, "flow-task-relations", modelWithBlockers(["in_progress"], "t-task-a"));
   await settle();
-  assert.match(element.innerHTML, /is-unresolved/, "the first task's live blocker starts flagged");
+  assert.equal(element.data.id, "t-task-a", "the mounted view is task A");
+  assert.match(element.innerHTML, /is-unresolved/, "task A's live blocker starts flagged");
 
   // Navigate to a different task whose blockers are all done. Same element
-  // instance, fresh model — as the rail reuses it across tasks.
-  element.data = modelWithBlockers(["done", "done"]);
+  // instance, fresh model — as the rail reuses it across tasks. The second
+  // model is built for a distinct viewed task ID, so this is a true
+  // cross-task navigation, not a same-task refresh.
+  element.data = modelWithBlockers(["done", "done"], "t-task-b");
   await settle();
 
-  assert.doesNotMatch(element.innerHTML, /is-unresolved/, "the previous task's flags do not leak across navigation");
+  assert.equal(element.data.id, "t-task-b", "the mounted view is now task B");
+  // The panel repainted for task B: the add form and the blocked-by rows are
+  // relative to the new task, not the stale task A.
+  assert.match(element.innerHTML, /data-relation-add-form="t-task-b"/, "the add form names task B");
+  assert.match(element.innerHTML, /data-relation-remove="t-blocker-0"[^>]*data-target="t-task-b"/, "the blocked-by rows target task B");
+  assert.doesNotMatch(element.innerHTML, /is-unresolved/, "task A's flags do not leak across navigation");
   assert.equal(element.querySelectorAll('[data-unresolved="true"]').length, 0);
   element.remove();
 });
