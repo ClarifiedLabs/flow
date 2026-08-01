@@ -235,6 +235,7 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
       waitKind,
       queuedForWorker,
       dwellSince,
+      now,
       stepName,
       currentStep,
       lifecycleState,
@@ -290,6 +291,7 @@ function activityLine(card, {
   waitKind,
   queuedForWorker,
   dwellSince,
+  now,
   stepName,
   currentStep,
   lifecycleState,
@@ -306,7 +308,7 @@ function activityLine(card, {
   if (lifecycleState === "unscheduled") return "";
   if (lifecycleState === "scheduled") return "Queued for a worker";
   if (queuedForWorker) {
-    const dwell = formatDwell(dwellSince);
+    const dwell = formatDwell(dwellSince, now);
     return dwell ? `Awaiting worker · ${dwell}` : "Awaiting worker";
   }
   const kind = String(value(currentStep, "kind", "Kind") || "");

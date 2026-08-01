@@ -195,6 +195,18 @@ test("an awaiting-worker card without a dwell clock still names the wait", () =>
   assert.equal(model.activity, "Awaiting worker");
 });
 
+test("an awaiting-worker card dwells on the board clock, not the wall clock", () => {
+  // A fixed model clock far from the real wall clock: the activity line must
+  // use the same `now` as dwell, or the two fields drift apart (here the real
+  // clock would report the queue as days old while the model says 1h).
+  const now = Date.parse("2026-07-29T12:00:00Z");
+  const dwellSince = "2026-07-29T11:00:00Z";
+  const model = cardModel(entry({ laneState: "awaiting_worker", card: { dwell_since: dwellSince } }), { now });
+  assert.equal(model.dwell, "1h");
+  assert.equal(model.activity, "Awaiting worker · 1h");
+  assert.equal(model.activity, `Awaiting worker · ${model.dwell}`);
+});
+
 test("a long queue warms on queue time, not running time", () => {
   const now = Date.now();
   const threeHoursAgo = new Date(now - 3 * HOUR).toISOString();
