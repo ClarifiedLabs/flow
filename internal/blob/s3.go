@@ -576,7 +576,7 @@ func (s *S3Store) Reconcile(ctx context.Context, request ReconcileRequest) (Reco
 				if _, live := request.LiveTemporaryIDs[id]; live {
 					continue
 				}
-				if removeErr := s.removeTemporaryVersion(ctx, version.Key, version.VersionId, false); removeErr != nil {
+				if removeErr := s.removeTemporaryVersion(ctx, version.Key, version.VersionId); removeErr != nil {
 					return result, removeErr
 				}
 				result.RemovedTemporaryIDs = append(result.RemovedTemporaryIDs, id)
@@ -590,7 +590,7 @@ func (s *S3Store) Reconcile(ctx context.Context, request ReconcileRequest) (Reco
 				if _, live := request.LiveTemporaryIDs[id]; live {
 					continue
 				}
-				if removeErr := s.removeTemporaryVersion(ctx, marker.Key, marker.VersionId, true); removeErr != nil {
+				if removeErr := s.removeTemporaryVersion(ctx, marker.Key, marker.VersionId); removeErr != nil {
 					return result, removeErr
 				}
 				result.RemovedTemporaryIDs = append(result.RemovedTemporaryIDs, id)
@@ -710,9 +710,9 @@ func (s *S3Store) Reconcile(ctx context.Context, request ReconcileRequest) (Reco
 	return result, nil
 }
 
-func (s *S3Store) removeTemporaryVersion(ctx context.Context, key, versionID *string, deleteMarker bool) error {
-	if deleteMarker && aws.ToString(versionID) == "" {
-		return errors.New("delete stale S3 temporary marker: missing version ID")
+func (s *S3Store) removeTemporaryVersion(ctx context.Context, key, versionID *string) error {
+	if aws.ToString(versionID) == "" {
+		return errors.New("delete stale S3 temporary version: missing version ID")
 	}
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket), Key: key, VersionId: versionID,

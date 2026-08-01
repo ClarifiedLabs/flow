@@ -434,6 +434,85 @@ INSERT INTO history_capture_expected_artifacts (capture_id, logical_key, kind, c
 	if _, err := database.ExecContext(ctx, string(hardening)); err != nil {
 		t.Fatalf("apply recorded hardening migration: %v", err)
 	}
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO history_captures (
+    id, project_id, job_id, lease_id, lease_attempt, worker_id, role,
+    expected_transcript, expected_harness, state, execution_verdict,
+    execution_error_code, execution_recorded_at, upload_grant_hash,
+    expected_set_declared_at, expected_final_artifact_count,
+    zero_harness_root_reason, version, reserved_at, blocked_at, updated_at
+) VALUES
+    ('hc-00000000000000000000000000000014', 'project', 'job-14', 'lease-14', 1, 'worker', 'worker',
+     0, 1, 'blocked', 'failed', 'startup', '2026-01-01T00:00:00Z', '`+strings.Repeat("5", 64)+`',
+     '2026-01-01T00:00:00Z', 1, 'preserve this audited reason', 9,
+     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z'),
+    ('hc-00000000000000000000000000000015', 'project', 'job-15', 'lease-15', 1, 'worker', 'worker',
+     0, 0, 'blocked', 'failed', 'startup', '2026-01-01T00:00:00Z', '`+strings.Repeat("6", 64)+`',
+     '2026-01-01T00:00:00Z', 1, '', 10,
+     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+    ('hc-00000000000000000000000000000016', 'project', 'job-16', 'lease-16', 1, 'worker', 'worker',
+     0, 1, 'blocked', 'failed', 'startup', '2026-01-01T00:00:00Z', '`+strings.Repeat("7", 64)+`',
+     '2026-01-01T00:00:00Z', 2, '', 11,
+     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+    ('hc-00000000000000000000000000000017', 'project', 'job-17', 'lease-17', 1, 'worker', 'worker',
+     0, 0, 'blocked', 'failed', 'startup', '2026-01-01T00:00:00Z', '`+strings.Repeat("8", 64)+`',
+     '2026-01-01T00:00:00Z', 1, '', 12,
+     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+    ('hc-00000000000000000000000000000018', 'project', 'job-18', 'lease-18', 1, 'worker', 'worker',
+     0, 1, 'blocked', 'failed', 'startup', '2026-01-01T00:00:00Z', '`+strings.Repeat("9", 64)+`',
+     '2026-01-01T00:00:00Z', 2, '', 13,
+     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+INSERT INTO history_capture_expected_artifacts (capture_id, logical_key, kind, created_at) VALUES
+    ('hc-00000000000000000000000000000014', 'manifest/final', 'manifest', '2026-01-01T00:00:00Z'),
+    ('hc-00000000000000000000000000000015', 'manifest/final', 'manifest', '2026-01-01T00:00:00Z'),
+    ('hc-00000000000000000000000000000016', 'manifest/final', 'manifest', '2026-01-01T00:00:00Z'),
+    ('hc-00000000000000000000000000000016', 'harness/root', 'harness_root', '2026-01-01T00:00:00Z'),
+    ('hc-00000000000000000000000000000017', 'manifest/final', 'manifest', '2026-01-01T00:00:00Z'),
+    ('hc-00000000000000000000000000000018', 'manifest/final', 'manifest', '2026-01-01T00:00:00Z'),
+    ('hc-00000000000000000000000000000018', 'harness/root', 'harness_root', '2026-01-01T00:00:00Z');
+INSERT INTO history_artifacts (
+    id, capture_id, logical_key, kind, phase, checkpoint_generation, checkpoint_stream,
+    media_type, format_version, schema_version, sha256, stored_size, logical_size,
+    entry_count, temporary_upload_id, blob_key, publication_state,
+    pending_at, committed_at, created_at
+) VALUES
+    ('ha-00000000000000000000000000000015', 'hc-00000000000000000000000000000015', 'manifest/wrong', 'manifest', 'final', NULL, '',
+     'application/json', 1, 1, '`+strings.Repeat("1", 64)+`', 1, 1, 0, '', '`+strings.Repeat("a", 32)+`/`+strings.Repeat("1", 32)+`',
+     'committed', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+    ('ha-00000000000000000000000000000016', 'hc-00000000000000000000000000000016', 'manifest/final', 'manifest', 'final', NULL, '',
+     'application/json', 1, 1, '`+strings.Repeat("2", 64)+`', 1, 1, 0, '', '`+strings.Repeat("a", 32)+`/`+strings.Repeat("2", 32)+`',
+     'committed', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+    ('ha-00000000000000000000000000000019', 'hc-00000000000000000000000000000016', 'harness/wrong', 'harness_root', 'final', NULL, '',
+     'application/octet-stream', 1, 1, '`+strings.Repeat("3", 64)+`', 1, 1, 1, '', '`+strings.Repeat("a", 32)+`/`+strings.Repeat("3", 32)+`',
+     'committed', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+    ('ha-00000000000000000000000000000017', 'hc-00000000000000000000000000000017', 'manifest/final', 'manifest', 'checkpoint', 1, 'legacy-conflict',
+     'application/json', 1, 1, '`+strings.Repeat("4", 64)+`', 1, 1, 0, '', '`+strings.Repeat("a", 32)+`/`+strings.Repeat("4", 32)+`',
+     'committed', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+    ('ha-00000000000000000000000000000018', 'hc-00000000000000000000000000000018', 'manifest/final', 'manifest', 'final', NULL, '',
+     'application/json', 1, 1, '`+strings.Repeat("5", 64)+`', 1, 1, 0, '', '`+strings.Repeat("a", 32)+`/`+strings.Repeat("5", 32)+`',
+     'committed', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+    ('ha-00000000000000000000000000000020', 'hc-00000000000000000000000000000018', 'harness/root', 'manifest', 'final', NULL, '',
+     'application/json', 1, 1, '`+strings.Repeat("6", 64)+`', 1, 1, 0, '', '`+strings.Repeat("a", 32)+`/`+strings.Repeat("6", 32)+`',
+     'committed', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');`); err != nil {
+		t.Fatalf("seed recorded-hardening declarations: %v", err)
+	}
+	var preservedDeclarationBefore, preservedExpectedBefore string
+	if err := database.QueryRowContext(ctx, `
+SELECT json_object(
+    'state', state, 'declared_at', expected_set_declared_at,
+    'count', expected_final_artifact_count, 'epoch', expected_transcript_epoch,
+    'segments', expected_transcript_segment_count, 'length', expected_transcript_length,
+    'sha256', expected_transcript_sha256, 'reason', zero_harness_root_reason,
+    'version', version, 'updated_at', updated_at
+) FROM history_captures WHERE id = 'hc-00000000000000000000000000000014'`).Scan(&preservedDeclarationBefore); err != nil {
+		t.Fatalf("snapshot valid recorded-hardening declaration: %v", err)
+	}
+	if err := database.QueryRowContext(ctx, `
+SELECT json_object('key', logical_key, 'kind', kind, 'created_at', created_at)
+FROM history_capture_expected_artifacts
+WHERE capture_id = 'hc-00000000000000000000000000000014'`).Scan(&preservedExpectedBefore); err != nil {
+		t.Fatalf("snapshot valid recorded-hardening expected row: %v", err)
+	}
 	if _, err := database.ExecContext(ctx, `INSERT INTO schema_migrations (version) VALUES ('0008_history_capture_hardening')`); err != nil {
 		t.Fatalf("record hardening migration: %v", err)
 	}
@@ -525,13 +604,57 @@ FROM history_captures WHERE id = 'hc-00000000000000000000000000000013'`).Scan(
 		t.Fatalf("valid legacy declaration changed = state:%q declared:%q count:%d version:%d",
 			validState, validDeclaredAt, validCount, validVersion)
 	}
+	var preservedDeclarationAfter, preservedExpectedAfter string
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT json_object(
+    'state', state, 'declared_at', expected_set_declared_at,
+    'count', expected_final_artifact_count, 'epoch', expected_transcript_epoch,
+    'segments', expected_transcript_segment_count, 'length', expected_transcript_length,
+    'sha256', expected_transcript_sha256, 'reason', zero_harness_root_reason,
+    'version', version, 'updated_at', updated_at
+) FROM history_captures WHERE id = 'hc-00000000000000000000000000000014'`).Scan(&preservedDeclarationAfter); err != nil {
+		t.Fatalf("read preserved recorded-hardening declaration: %v", err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT json_object('key', logical_key, 'kind', kind, 'created_at', created_at)
+FROM history_capture_expected_artifacts
+WHERE capture_id = 'hc-00000000000000000000000000000014'`).Scan(&preservedExpectedAfter); err != nil {
+		t.Fatalf("read preserved recorded-hardening expected row: %v", err)
+	}
+	if preservedDeclarationAfter != preservedDeclarationBefore || preservedExpectedAfter != preservedExpectedBefore {
+		t.Fatalf("valid recorded-hardening declaration changed:\n before capture=%s expected=%s\n after capture=%s expected=%s",
+			preservedDeclarationBefore, preservedExpectedBefore, preservedDeclarationAfter, preservedExpectedAfter)
+	}
+	assertTerminalized("hc-00000000000000000000000000000015", 1, 11)
+	assertTerminalized("hc-00000000000000000000000000000016", 2, 12)
+	assertTerminalized("hc-00000000000000000000000000000017", 1, 13)
+	assertTerminalized("hc-00000000000000000000000000000018", 2, 14)
+	var mismatchEvents int
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM history_capture_events
+WHERE capture_id IN (
+    'hc-00000000000000000000000000000015',
+    'hc-00000000000000000000000000000016',
+    'hc-00000000000000000000000000000017',
+    'hc-00000000000000000000000000000018'
+)
+  AND event_kind = 'legacy_expected_set_classified'
+  AND code = 'waive'
+  AND (json_extract(details_json, '$.occupied_expected_mismatches') > 0
+       OR json_extract(details_json, '$.unexpected_final_artifacts') > 0)`).Scan(&mismatchEvents); err != nil {
+		t.Fatalf("read exact-set mismatch audit events: %v", err)
+	}
+	if mismatchEvents != 4 {
+		t.Fatalf("exact-set mismatch audit events = %d, want 4", mismatchEvents)
+	}
 	var classifiedEvents int
 	if err := store.DB().QueryRowContext(ctx, `
 SELECT COUNT(*) FROM history_capture_events WHERE event_kind = 'legacy_expected_set_classified'`).Scan(&classifiedEvents); err != nil {
 		t.Fatal(err)
 	}
-	if classifiedEvents != 3 {
-		t.Fatalf("legacy expected-set classification events = %d, want 3", classifiedEvents)
+	if classifiedEvents != 7 {
+		t.Fatalf("legacy expected-set classification events = %d, want 7", classifiedEvents)
 	}
 	var preservedExpected int
 	if err := store.DB().QueryRowContext(ctx, `

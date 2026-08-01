@@ -13,6 +13,53 @@ BEGIN
     SELECT RAISE(ABORT, 'Harness archive members are retained');
 END;
 
+-- A separate declaration marker makes even an empty archive-member index an
+-- immutable exact set. Existing nonempty indexes are declared at migration time.
+CREATE TABLE harness_archive_member_sets (
+    artifact_id TEXT PRIMARY KEY REFERENCES history_artifacts(id) ON DELETE RESTRICT,
+    capture_id TEXT NOT NULL REFERENCES history_captures(id) ON DELETE RESTRICT,
+    member_count INTEGER NOT NULL CHECK (member_count >= 0),
+    declared_at TEXT NOT NULL
+);
+INSERT INTO harness_archive_member_sets (artifact_id, capture_id, member_count, declared_at)
+SELECT artifact.id, artifact.capture_id, COUNT(member.id), MIN(member.created_at)
+FROM history_artifacts artifact
+JOIN harness_archive_members member ON member.artifact_id = artifact.id
+GROUP BY artifact.id, artifact.capture_id;
+CREATE TRIGGER harness_archive_member_sets_insert_guard
+BEFORE INSERT ON harness_archive_member_sets
+WHEN NEW.capture_id IS NOT (SELECT capture_id FROM history_artifacts WHERE id = NEW.artifact_id)
+    OR NEW.member_count != (SELECT COUNT(*) FROM harness_archive_members WHERE artifact_id = NEW.artifact_id)
+BEGIN
+    SELECT RAISE(ABORT, 'invalid Harness archive member set declaration');
+END;
+CREATE TRIGGER harness_archive_members_insert_guard
+BEFORE INSERT ON harness_archive_members
+WHEN EXISTS (SELECT 1 FROM harness_archive_member_sets declared WHERE declared.artifact_id = NEW.artifact_id)
+BEGIN
+    SELECT RAISE(ABORT, 'Harness archive member sets are immutable');
+END;
+CREATE TRIGGER harness_archive_member_sets_no_update
+BEFORE UPDATE ON harness_archive_member_sets
+BEGIN
+    SELECT RAISE(ABORT, 'Harness archive member sets are immutable');
+END;
+CREATE TRIGGER harness_archive_member_sets_no_delete
+BEFORE DELETE ON harness_archive_member_sets
+BEGIN
+    SELECT RAISE(ABORT, 'Harness archive member sets are retained');
+END;
+
+-- Keep each reconciliation class query index-backed and limit-bounded, both for
+-- project-wide sweeps and capture-scoped repair calls.
+DROP INDEX idx_history_artifacts_pending;
+CREATE INDEX idx_history_artifacts_pending
+    ON history_artifacts(reconcile_attempted_at, pending_at, id)
+    WHERE publication_state = 'pending';
+CREATE INDEX idx_history_artifacts_capture_pending
+    ON history_artifacts(capture_id, reconcile_attempted_at, pending_at, id)
+    WHERE publication_state = 'pending';
+
 CREATE TEMP TABLE history_0009_expected_classification AS
 WITH counts AS (
     SELECT
@@ -21,6 +68,7 @@ WITH counts AS (
         capture.version AS old_version,
         capture.expected_harness,
         capture.execution_verdict,
+        capture.zero_harness_root_reason,
         capture.expected_final_artifact_count AS declared_count,
         (SELECT COUNT(*) FROM history_capture_expected_artifacts expected
          WHERE expected.capture_id = capture.id) AS expected_count,
@@ -31,7 +79,21 @@ WITH counts AS (
         (SELECT COUNT(*) FROM history_artifacts artifact
          WHERE artifact.capture_id = capture.id AND artifact.phase = 'final' AND artifact.kind = 'manifest') AS actual_manifests,
         (SELECT COUNT(*) FROM history_artifacts artifact
-         WHERE artifact.capture_id = capture.id AND artifact.phase = 'final' AND artifact.kind = 'harness_root') AS actual_roots
+         WHERE artifact.capture_id = capture.id AND artifact.phase = 'final' AND artifact.kind = 'harness_root') AS actual_roots,
+        (SELECT COUNT(*)
+         FROM history_capture_expected_artifacts expected
+         JOIN history_artifacts artifact
+           ON artifact.capture_id = expected.capture_id AND artifact.logical_key = expected.logical_key
+         WHERE expected.capture_id = capture.id
+           AND (artifact.kind != expected.kind OR artifact.phase != 'final')) AS occupied_expected_mismatches,
+        (SELECT COUNT(*)
+         FROM history_artifacts artifact
+         LEFT JOIN history_capture_expected_artifacts expected
+           ON expected.capture_id = artifact.capture_id AND expected.logical_key = artifact.logical_key
+         WHERE artifact.capture_id = capture.id
+           AND artifact.phase = 'final'
+           AND artifact.kind IN ('manifest', 'harness_root')
+           AND (expected.capture_id IS NULL OR expected.kind != artifact.kind)) AS unexpected_final_artifacts
     FROM history_captures capture
     WHERE capture.expected_set_declared_at IS NOT NULL
 )
@@ -45,8 +107,13 @@ SELECT
               AND counts.execution_verdict IN ('pending', 'succeeded'))
           OR counts.actual_manifests > 1
           OR (counts.expected_harness = 0 AND counts.actual_roots > 0)
+          OR counts.occupied_expected_mismatches != 0
+          OR counts.unexpected_final_artifacts != 0
+          OR (counts.expected_harness = 0 AND length(trim(counts.zero_harness_root_reason)) != 0)
+          OR (counts.expected_roots != 0 AND length(trim(counts.zero_harness_root_reason)) != 0)
             THEN CASE WHEN counts.old_state IN ('complete', 'waived') THEN 'terminal' ELSE 'waive' END
-        WHEN counts.expected_harness = 1 AND counts.expected_roots = 0 THEN 'reason'
+        WHEN counts.expected_harness = 1 AND counts.expected_roots = 0
+          AND length(trim(counts.zero_harness_root_reason)) = 0 THEN 'reason'
         ELSE 'valid'
     END AS action
 FROM counts;
@@ -68,7 +135,9 @@ SELECT
         'expected_manifests', classification.expected_manifests,
         'expected_roots', classification.expected_roots,
         'actual_manifests', classification.actual_manifests,
-        'actual_roots', classification.actual_roots
+        'actual_roots', classification.actual_roots,
+        'occupied_expected_mismatches', classification.occupied_expected_mismatches,
+        'unexpected_final_artifacts', classification.unexpected_final_artifacts
     ),
     strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 FROM history_0009_expected_classification classification

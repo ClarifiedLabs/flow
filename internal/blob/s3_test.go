@@ -38,6 +38,7 @@ type fakeS3Version struct {
 	version      string
 	modified     time.Time
 	deleteMarker bool
+	nilVersion   bool
 }
 
 type fakeS3 struct {
@@ -183,6 +184,7 @@ func (f *fakeS3) ListObjectVersions(_ context.Context, input *s3.ListObjectVersi
 		key, version string
 		modified     time.Time
 		deleteMarker bool
+		nilVersion   bool
 	}
 	prefix := aws.ToString(input.Prefix)
 	listed := make([]listedVersion, 0, len(f.objects)+len(f.versions))
@@ -198,7 +200,8 @@ func (f *fakeS3) ListObjectVersions(_ context.Context, input *s3.ListObjectVersi
 	for _, version := range f.versions {
 		if strings.HasPrefix(version.key, prefix) {
 			listed = append(listed, listedVersion{
-				key: version.key, version: version.version, modified: version.modified, deleteMarker: version.deleteMarker,
+				key: version.key, version: version.version, modified: version.modified,
+				deleteMarker: version.deleteMarker, nilVersion: version.nilVersion,
 			})
 		}
 	}
@@ -216,13 +219,17 @@ func (f *fakeS3) ListObjectVersions(_ context.Context, input *s3.ListObjectVersi
 	end := start + limit
 	output := &s3.ListObjectVersionsOutput{IsTruncated: aws.Bool(end < len(listed))}
 	for _, version := range listed[start:end] {
+		var versionID *string
+		if !version.nilVersion {
+			versionID = aws.String(version.version)
+		}
 		if version.deleteMarker {
 			output.DeleteMarkers = append(output.DeleteMarkers, types.DeleteMarkerEntry{
-				Key: aws.String(version.key), VersionId: aws.String(version.version), LastModified: aws.Time(version.modified),
+				Key: aws.String(version.key), VersionId: versionID, LastModified: aws.Time(version.modified),
 			})
 		} else {
 			output.Versions = append(output.Versions, types.ObjectVersion{
-				Key: aws.String(version.key), VersionId: aws.String(version.version), LastModified: aws.Time(version.modified),
+				Key: aws.String(version.key), VersionId: versionID, LastModified: aws.Time(version.modified),
 			})
 		}
 	}
@@ -674,6 +681,35 @@ func TestS3ReconcileDeletesStaleTemporaryVersionsAndDeleteMarkers(t *testing.T) 
 	}
 	if len(client.versions) != 2 || client.versions[0].key != "tenant/tmp/"+liveID || client.versions[1].key != "tenant/tmp/"+liveID {
 		t.Fatalf("remaining versions = %+v, want only protected live history", client.versions)
+	}
+}
+
+func TestS3ReconcileRejectsMissingTemporaryObjectVersionID(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		nilVersion bool
+	}{
+		{name: "nil", nilVersion: true},
+		{name: "empty"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := newFakeS3()
+			store, err := NewS3(S3Options{Client: client, Bucket: "bucket", Prefix: "tenant"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.versions = append(client.versions, fakeS3Version{
+				key: "tenant/tmp/" + strings.Repeat("a", 32), modified: time.Now().Add(-2 * time.Hour),
+				nilVersion: test.nilVersion,
+			})
+			_, err = store.Reconcile(context.Background(), ReconcileRequest{Before: time.Now().Add(-time.Hour), Limit: 1})
+			if err == nil || !strings.Contains(err.Error(), "missing version ID") {
+				t.Fatalf("reconcile missing version ID error = %v", err)
+			}
+			if len(client.deletedVersions) != 0 {
+				t.Fatalf("deleted versions = %v, want none", client.deletedVersions)
+			}
+		})
 	}
 }
 

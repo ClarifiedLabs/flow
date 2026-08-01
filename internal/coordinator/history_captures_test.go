@@ -524,13 +524,13 @@ WHERE capture_id = ?`, reserved.Capture.ID); err != nil {
 		t.Fatal(err)
 	}
 	publishPending("harness/final/new-arrival", 'd')
-	summary, err := service.ReconcilePendingArtifacts(ctx, reserved.Capture.ID, 2)
-	if err == nil || len(summary.Failures) != 2 {
-		t.Fatalf("reconcile interleaved batch summary=%+v err=%v", summary, err)
+	first, err := service.ReconcilePendingArtifacts(ctx, reserved.Capture.ID, 1)
+	if err == nil || len(first.Failures) != 1 || first.Failures[0].LogicalKey != "harness/final/due-retry-1" {
+		t.Fatalf("first limit-one reconciliation summary=%+v err=%v, want oldest due retry", first, err)
 	}
-	if summary.Failures[0].LogicalKey != "harness/final/due-retry-1" || summary.Failures[1].LogicalKey != "harness/final/new-arrival" {
-		t.Fatalf("reconciled keys = %q, %q; want oldest due retry then new arrival",
-			summary.Failures[0].LogicalKey, summary.Failures[1].LogicalKey)
+	second, err := service.ReconcilePendingArtifacts(ctx, reserved.Capture.ID, 1)
+	if err == nil || len(second.Failures) != 1 || second.Failures[0].LogicalKey != "harness/final/new-arrival" {
+		t.Fatalf("second limit-one reconciliation summary=%+v err=%v, want new arrival", second, err)
 	}
 }
 
@@ -599,21 +599,35 @@ func TestHarnessArchiveMemberRegistrationEnforcesDeclaredAndConfiguredLimits(t *
 	reserved := reserveHistoryCapture(t, service, baseHistoryReservation())
 	publishHistoryBytes(t, service, reserved.Capture.ID, reserved.UploadGrant, PublishHistoryArtifactInput{
 		LogicalKey: "harness/final/indexed", Kind: HistoryArtifactHarnessRoot, Phase: HistoryArtifactFinal,
-		ArchiveID: "indexed", MediaType: "application/octet-stream", LogicalSize: 4, EntryCount: 1,
+		ArchiveID: "indexed", MediaType: "application/octet-stream", LogicalSize: 4, EntryCount: 3,
 	}, []byte("root"))
 	member := HarnessArchiveMemberInput{
 		RelativeMemberPath: "sessions/root.json", MemberKind: "root", Status: "complete", ParseStatus: "parsed",
 	}
-	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", []HarnessArchiveMemberInput{member}); err != nil {
-		t.Fatalf("register declared member: %v", err)
+	second := member
+	second.RelativeMemberPath = "sessions/second.json"
+	declared := []HarnessArchiveMemberInput{member, second}
+	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", declared); err != nil {
+		t.Fatalf("register declared members: %v", err)
 	}
-	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", []HarnessArchiveMemberInput{member}); err != nil {
+	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", declared); err != nil {
 		t.Fatalf("exact archive member retry: %v", err)
 	}
 	changed := member
 	changed.Status = "failed"
-	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", []HarnessArchiveMemberInput{changed}); !errors.Is(err, ErrHistoryConflict) {
+	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", []HarnessArchiveMemberInput{changed, second}); !errors.Is(err, ErrHistoryConflict) {
 		t.Fatalf("changed archive member retry err = %v, want conflict", err)
+	}
+	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", []HarnessArchiveMemberInput{member}); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatalf("subset archive member retry err = %v, want conflict", err)
+	}
+	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", nil); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatalf("empty archive member retry err = %v, want conflict", err)
+	}
+	third := member
+	third.RelativeMemberPath = "sessions/third.json"
+	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", []HarnessArchiveMemberInput{member, second, third}); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatalf("superset archive member retry err = %v, want conflict", err)
 	}
 	if _, err := env.store.DB().ExecContext(ctx, `UPDATE harness_archive_members SET status = 'changed' WHERE capture_id = ?`, reserved.Capture.ID); err == nil {
 		t.Fatal("direct archive member update unexpectedly succeeded")
@@ -621,26 +635,50 @@ func TestHarnessArchiveMemberRegistrationEnforcesDeclaredAndConfiguredLimits(t *
 	if _, err := env.store.DB().ExecContext(ctx, `DELETE FROM harness_archive_members WHERE capture_id = ?`, reserved.Capture.ID); err == nil {
 		t.Fatal("direct archive member delete unexpectedly succeeded")
 	}
-	second := member
-	second.RelativeMemberPath = "sessions/second.json"
-	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", []HarnessArchiveMemberInput{second}); !errors.Is(err, ErrHistoryConflict) {
-		t.Fatalf("incremental registration beyond declared count err = %v", err)
+	if _, err := env.store.DB().ExecContext(ctx, `UPDATE harness_archive_member_sets SET member_count = 1 WHERE capture_id = ?`, reserved.Capture.ID); err == nil {
+		t.Fatal("direct archive member-set update unexpectedly succeeded")
 	}
-	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", []HarnessArchiveMemberInput{member, second}); !errors.Is(err, ErrHistoryConflict) {
-		t.Fatalf("bulk registration beyond declared count err = %v", err)
+	if _, err := env.store.DB().ExecContext(ctx, `
+INSERT INTO harness_archive_members (
+    id, capture_id, artifact_id, archive_id, relative_member_path,
+    member_kind, parse_status, created_at
+)
+SELECT 'hm-ffffffffffffffffffffffffffffffff', capture_id, id, archive_id,
+       'sessions/late.json', 'delegated_child', 'parsed', ?
+FROM history_artifacts
+WHERE capture_id = ? AND logical_key = 'harness/final/indexed'`, time.Now().UTC().Format(time.RFC3339Nano), reserved.Capture.ID); err == nil {
+		t.Fatal("direct late archive member insert unexpectedly succeeded")
 	}
 	longPath := member
 	longPath.RelativeMemberPath = strings.Repeat("x", 257)
 	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/indexed", []HarnessArchiveMemberInput{longPath}); err == nil || !strings.Contains(err.Error(), "member path") {
 		t.Fatalf("overlong configured member path err = %v", err)
 	}
-	var registered int
+
+	publishHistoryBytes(t, service, reserved.Capture.ID, reserved.UploadGrant, PublishHistoryArtifactInput{
+		LogicalKey: "harness/final/empty-index", Kind: HistoryArtifactHarnessRoot, Phase: HistoryArtifactFinal,
+		ArchiveID: "empty-index", MediaType: "application/octet-stream", LogicalSize: 5, EntryCount: 1,
+	}, []byte("empty"))
+	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/empty-index", nil); err != nil {
+		t.Fatalf("register empty archive member set: %v", err)
+	}
+	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/empty-index", nil); err != nil {
+		t.Fatalf("retry empty archive member set: %v", err)
+	}
+	if err := service.RegisterHarnessArchiveMembers(ctx, reserved.Capture.ID, reserved.UploadGrant, "harness/final/empty-index", []HarnessArchiveMemberInput{member}); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatalf("extend empty archive member set err = %v, want conflict", err)
+	}
+	var registered, declaredSets int
 	if err := env.store.DB().QueryRowContext(ctx, `
 SELECT COUNT(*) FROM harness_archive_members WHERE capture_id = ?`, reserved.Capture.ID).Scan(&registered); err != nil {
 		t.Fatal(err)
 	}
-	if registered != 1 {
-		t.Fatalf("registered archive members = %d, want 1", registered)
+	if err := env.store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM harness_archive_member_sets WHERE capture_id = ?`, reserved.Capture.ID).Scan(&declaredSets); err != nil {
+		t.Fatal(err)
+	}
+	if registered != 2 || declaredSets != 2 {
+		t.Fatalf("registered archive index = members:%d sets:%d, want 2 and 2", registered, declaredSets)
 	}
 }
 

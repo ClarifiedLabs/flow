@@ -16,6 +16,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/blob"
@@ -209,6 +210,9 @@ type HistoryCaptureService struct {
 	blobs   blob.Store
 	now     func() time.Time
 	options HistoryCaptureServiceOptions
+
+	pendingReconcileMu        sync.Mutex
+	pendingReconcileFreshNext bool
 }
 
 func NewHistoryCaptureService(database *sql.DB, blobs blob.Store) *HistoryCaptureService {
@@ -1400,6 +1404,64 @@ type HistoryPendingArtifactReconcileSummary struct {
 	Failures  []HistoryPendingArtifactReconcileFailure
 }
 
+type pendingReconcileClass uint8
+
+const (
+	pendingReconcileDue pendingReconcileClass = iota
+	pendingReconcileFresh
+	pendingReconcileRecent
+)
+
+func (s *HistoryCaptureService) pendingArtifactReconcileCandidates(
+	ctx context.Context,
+	captureID string,
+	retryBefore string,
+	limit int,
+	class pendingReconcileClass,
+) ([]string, error) {
+	query := `SELECT id FROM history_artifacts WHERE publication_state = 'pending'`
+	var args []any
+	switch class {
+	case pendingReconcileDue:
+		query += ` AND reconcile_attempted_at IS NOT NULL AND reconcile_attempted_at <= ?`
+		args = append(args, retryBefore)
+	case pendingReconcileFresh:
+		query += ` AND reconcile_attempted_at IS NULL`
+	case pendingReconcileRecent:
+		query += ` AND reconcile_attempted_at IS NOT NULL AND reconcile_attempted_at > ?`
+		args = append(args, retryBefore)
+	default:
+		return nil, errors.New("invalid pending history reconciliation class")
+	}
+	if captureID != "" {
+		query += ` AND capture_id = ?`
+		args = append(args, captureID)
+	}
+	if class == pendingReconcileFresh {
+		query += ` ORDER BY pending_at, id LIMIT ?`
+	} else {
+		query += ` ORDER BY reconcile_attempted_at, pending_at, id LIMIT ?`
+	}
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0, limit)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 // ReconcilePendingArtifacts is coordinator-internal and deliberately grantless.
 // It is suitable after worker/lease loss because it only acts on persisted,
 // capture-scoped pending rows and verifies immutable object metadata before commit.
@@ -1413,53 +1475,53 @@ func (s *HistoryCaptureService) ReconcilePendingArtifacts(ctx context.Context, c
 	if limit < 1 || limit > 500 {
 		return HistoryPendingArtifactReconcileSummary{}, errors.New("pending history artifact reconciliation limit must be between 1 and 500")
 	}
+
+	// Selection and attempts are serialized per project. Besides avoiding duplicate
+	// concurrent work, this retains an alternating class cursor across limit-one
+	// calls so neither due retries nor new publications can starve the other.
+	s.pendingReconcileMu.Lock()
+	defer s.pendingReconcileMu.Unlock()
+
+	captureID = strings.TrimSpace(captureID)
 	retryBefore := sqlitex.FormatTime(s.now().UTC().Add(-time.Minute))
-	query := `
-SELECT id
-FROM (
-    SELECT id, pending_at, reconcile_attempted_at,
-           CASE
-               WHEN reconcile_attempted_at IS NOT NULL AND reconcile_attempted_at <= ? THEN 0
-               WHEN reconcile_attempted_at IS NULL THEN 1
-               ELSE 2
-           END AS retry_class,
-           ROW_NUMBER() OVER (
-               PARTITION BY CASE
-                   WHEN reconcile_attempted_at IS NOT NULL AND reconcile_attempted_at <= ? THEN 0
-                   WHEN reconcile_attempted_at IS NULL THEN 1
-                   ELSE 2
-               END
-               ORDER BY COALESCE(reconcile_attempted_at, pending_at), pending_at, id
-           ) AS class_rank
-    FROM history_artifacts
-    WHERE publication_state = 'pending'`
-	args := []any{retryBefore, retryBefore}
-	if captureID = strings.TrimSpace(captureID); captureID != "" {
-		query += ` AND capture_id = ?`
-		args = append(args, captureID)
-	}
-	query += `
-)
-ORDER BY CASE WHEN retry_class = 2 THEN 1 ELSE 0 END,
-         class_rank, retry_class, pending_at, id
-LIMIT ?`
-	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	due, err := s.pendingArtifactReconcileCandidates(ctx, captureID, retryBefore, limit, pendingReconcileDue)
 	if err != nil {
 		return HistoryPendingArtifactReconcileSummary{}, err
 	}
-	var artifactIDs []string
-	for rows.Next() {
-		var artifactID string
-		if scanErr := rows.Scan(&artifactID); scanErr != nil {
-			rows.Close()
-			return HistoryPendingArtifactReconcileSummary{}, scanErr
-		}
-		artifactIDs = append(artifactIDs, artifactID)
-	}
-	if err := rows.Close(); err != nil {
+	fresh, err := s.pendingArtifactReconcileCandidates(ctx, captureID, retryBefore, limit, pendingReconcileFresh)
+	if err != nil {
 		return HistoryPendingArtifactReconcileSummary{}, err
 	}
+	recent, err := s.pendingArtifactReconcileCandidates(ctx, captureID, retryBefore, limit, pendingReconcileRecent)
+	if err != nil {
+		return HistoryPendingArtifactReconcileSummary{}, err
+	}
+
+	artifactIDs := make([]string, 0, limit)
+	for len(artifactIDs) < limit && (len(due) > 0 || len(fresh) > 0) {
+		switch {
+		case len(due) > 0 && len(fresh) > 0:
+			if s.pendingReconcileFreshNext {
+				artifactIDs = append(artifactIDs, fresh[0])
+				fresh = fresh[1:]
+			} else {
+				artifactIDs = append(artifactIDs, due[0])
+				due = due[1:]
+			}
+			s.pendingReconcileFreshNext = !s.pendingReconcileFreshNext
+		case len(due) > 0:
+			artifactIDs = append(artifactIDs, due[0])
+			due = due[1:]
+		default:
+			artifactIDs = append(artifactIDs, fresh[0])
+			fresh = fresh[1:]
+		}
+	}
+	for len(artifactIDs) < limit && len(recent) > 0 {
+		artifactIDs = append(artifactIDs, recent[0])
+		recent = recent[1:]
+	}
+
 	artifacts := make([]InternalHistoryArtifact, 0, len(artifactIDs))
 	for _, artifactID := range artifactIDs {
 		artifact, getErr := s.getInternalArtifactByID(ctx, artifactID)
@@ -2608,9 +2670,10 @@ func (s *HistoryCaptureService) RegisterHarnessArchiveMembers(ctx context.Contex
 	if int64(len(members)) > artifact.EntryCount {
 		return fmt.Errorf("%w: archive index exceeds declared entry count", ErrHistoryConflict)
 	}
-	now := sqlitex.FormatTime(s.now().UTC())
+
+	normalized := make([]HarnessArchiveMemberInput, len(members))
 	seen := make(map[string]struct{}, len(members))
-	for _, member := range members {
+	for index, member := range members {
 		member = normalizeHarnessMember(member)
 		if err := validateHarnessMember(member, s.options.MaxArchivePathBytes); err != nil {
 			return err
@@ -2619,6 +2682,76 @@ func (s *HistoryCaptureService) RegisterHarnessArchiveMembers(ctx context.Contex
 			return ErrHistoryConflict
 		}
 		seen[member.RelativeMemberPath] = struct{}{}
+		normalized[index] = member
+	}
+
+	var declaredCaptureID string
+	var declaredCount int
+	err = tx.QueryRowContext(ctx, `
+SELECT capture_id, member_count
+FROM harness_archive_member_sets
+WHERE artifact_id = ?`, artifact.ID).Scan(&declaredCaptureID, &declaredCount)
+	if err == nil {
+		if declaredCaptureID != capture.ID || declaredCount != len(normalized) {
+			return fmt.Errorf("%w: archive member retry differs", ErrHistoryConflict)
+		}
+		rows, queryErr := tx.QueryContext(ctx, `
+SELECT capture_id, archive_id, native_session_id, native_parent_session_id,
+       relative_member_path, member_kind, agent_name, status, model,
+       harness_build, parse_status
+FROM harness_archive_members
+WHERE artifact_id = ?`, artifact.ID)
+		if queryErr != nil {
+			return queryErr
+		}
+		existing := make(map[string]HarnessArchiveMemberInput, declaredCount)
+		for rows.Next() {
+			var member HarnessArchiveMemberInput
+			var existingCaptureID, existingArchiveID string
+			if scanErr := rows.Scan(
+				&existingCaptureID, &existingArchiveID, &member.NativeSessionID, &member.NativeParentSessionID,
+				&member.RelativeMemberPath, &member.MemberKind, &member.AgentName, &member.Status,
+				&member.Model, &member.HarnessBuild, &member.ParseStatus,
+			); scanErr != nil {
+				rows.Close()
+				return scanErr
+			}
+			if existingCaptureID != capture.ID || existingArchiveID != artifact.ArchiveID {
+				rows.Close()
+				return fmt.Errorf("%w: archive member retry differs", ErrHistoryConflict)
+			}
+			existing[member.RelativeMemberPath] = member
+		}
+		if rowsErr := rows.Err(); rowsErr != nil {
+			rows.Close()
+			return rowsErr
+		}
+		if closeErr := rows.Close(); closeErr != nil {
+			return closeErr
+		}
+		if len(existing) != declaredCount {
+			return fmt.Errorf("%w: archive member retry differs", ErrHistoryConflict)
+		}
+		for _, member := range normalized {
+			if actual, ok := existing[member.RelativeMemberPath]; !ok || actual != member {
+				return fmt.Errorf("%w: archive member retry differs", ErrHistoryConflict)
+			}
+		}
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	var existingCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM harness_archive_members WHERE artifact_id = ?`, artifact.ID).Scan(&existingCount); err != nil {
+		return err
+	}
+	if existingCount != 0 {
+		return fmt.Errorf("%w: archive member declaration marker is missing", ErrHistoryConflict)
+	}
+	now := sqlitex.FormatTime(s.now().UTC())
+	for _, member := range normalized {
 		id, err := randomHistoryID("hm")
 		if err != nil {
 			return err
@@ -2628,36 +2761,17 @@ INSERT INTO harness_archive_members (
     id, capture_id, artifact_id, archive_id, native_session_id,
     native_parent_session_id, relative_member_path, member_kind,
     agent_name, status, model, harness_build, parse_status, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(artifact_id, relative_member_path) DO NOTHING`, id, capture.ID, artifact.ID, artifact.ArchiveID,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, capture.ID, artifact.ID, artifact.ArchiveID,
 			member.NativeSessionID, member.NativeParentSessionID, member.RelativeMemberPath, member.MemberKind,
 			member.AgentName, member.Status, member.Model, member.HarnessBuild, member.ParseStatus, now)
 		if err != nil {
 			return err
 		}
-		var existing HarnessArchiveMemberInput
-		var existingCaptureID, existingArchiveID string
-		if err := tx.QueryRowContext(ctx, `
-SELECT capture_id, archive_id, native_session_id, native_parent_session_id,
-       relative_member_path, member_kind, agent_name, status, model,
-       harness_build, parse_status
-FROM harness_archive_members
-WHERE artifact_id = ? AND relative_member_path = ?`, artifact.ID, member.RelativeMemberPath).Scan(
-			&existingCaptureID, &existingArchiveID, &existing.NativeSessionID, &existing.NativeParentSessionID,
-			&existing.RelativeMemberPath, &existing.MemberKind, &existing.AgentName, &existing.Status,
-			&existing.Model, &existing.HarnessBuild, &existing.ParseStatus); err != nil {
-			return err
-		}
-		if existingCaptureID != capture.ID || existingArchiveID != artifact.ArchiveID || existing != member {
-			return fmt.Errorf("%w: archive member retry differs", ErrHistoryConflict)
-		}
 	}
-	var registered int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM harness_archive_members WHERE artifact_id = ?`, artifact.ID).Scan(&registered); err != nil {
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO harness_archive_member_sets (artifact_id, capture_id, member_count, declared_at)
+VALUES (?, ?, ?, ?)`, artifact.ID, capture.ID, len(normalized), now); err != nil {
 		return err
-	}
-	if registered > artifact.EntryCount || registered > int64(s.options.MaxArchiveEntries) {
-		return fmt.Errorf("%w: registered archive index exceeds declared limits", ErrHistoryConflict)
 	}
 	return tx.Commit(ctx)
 }
