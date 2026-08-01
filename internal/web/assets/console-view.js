@@ -139,6 +139,14 @@ export function scheduleConsolePollView(app, projectID, taskID = "", state = {})
       const active = Boolean(data.active || data.Active || job || session);
       const terminalAvailable = Boolean(data.terminal_available || data.TerminalAvailable);
       if (!active || (!hadTerminal && terminalAvailable)) {
+        // Another load (a refresh, navigation, or settle-burst tick) started
+        // while this GET was in flight: skip the redundant reload rather than
+        // overlap it, and re-arm so the transition is still picked up by a
+        // later tick (the in-flight load's own render re-arms the poll too).
+        if (app.loadsInFlight) {
+          scheduleConsolePollView(app, projectID, taskID, { terminalAvailable });
+          return;
+        }
         await app.load({ fromPoll: true });
         return;
       }

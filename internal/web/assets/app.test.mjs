@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { actionScope, applyBusyState, gateResponsePending, handleAction, inFlight, pendingStatus } from "./actions.js";
-import { startConsoleView } from "./console-view.js";
+import { scheduleConsolePollView, startConsoleView } from "./console-view.js";
 import { handleFormSubmit, formBusyKey } from "./forms.js";
 import { workflowStepCanBeSkipped } from "./task-view.js";
 import { renderTranscriptButton } from "./terminal.js";
@@ -3351,6 +3351,131 @@ test("load tracks in-flight invocations and never arms a settle burst itself", a
   assert.equal(timers[0].delay, context.DIAGNOSTICS_POLL_MS);
 });
 
+// A console-poll harness: a real FlowApp parked on /ui/console with a
+// recording setTimeout, a fetch stub that hands each console-state GET a
+// deferred response in call order, and a load() wrapper that counts
+// invocations while delegating to the real load, so the guard under test
+// sees the real loadsInFlight accounting.
+async function consolePollHarness() {
+  const timers = [];
+  const title = { textContent: "" };
+  const status = { textContent: "" };
+  const content = { innerHTML: "", dataset: {} };
+  const responses = [];
+  const context = await scriptContext({
+    location: { pathname: "/ui/console", search: "" },
+    setTimeout(callback, delay) {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    clearTimeout() {},
+  }, {
+    URLSearchParams,
+    fetch() {
+      const response = deferred();
+      responses.push(response);
+      return response.promise;
+    },
+  });
+  const app = new context.FlowApp();
+  app.pollingActive = true;
+  // Replace the real console Poller with a recording stub so the recorded
+  // callback is the poll's own async function (Poller.arm wraps it in a
+  // void-returning timer wrapper) and the test can await it directly.
+  app.consolePoll = {
+    arm(delay, callback) {
+      timers.push({ callback, delay });
+    },
+    clear() {},
+  };
+  app.projects = [{ id: "p-alpha", name: "Alpha" }];
+  app.harnesses = { agents: [], consoles: [{ name: "harness", display_name: "Harness" }] };
+  app.querySelector = (selector) => {
+    if (selector === ".content") return content;
+    if (selector === "h1") return title;
+    if (selector === ".status") return status;
+    return null;
+  };
+  app.querySelectorAll = () => [];
+  let loads = 0;
+  const realLoad = app.load.bind(app);
+  app.load = (options) => {
+    loads += 1;
+    return realLoad(options);
+  };
+  return {
+    app,
+    timers,
+    responses,
+    loads: () => loads,
+    consoleState(active, terminalAvailable) {
+      return {
+        ok: true,
+        json: () => Promise.resolve({ active, terminal_available: terminalAvailable, project_id: "p-alpha" }),
+      };
+    },
+  };
+}
+
+test("a delayed console poll response overlapping another load skips its reload and keeps polling", async () => {
+  const harness = await consolePollHarness();
+  // An active console without a terminal arms the poll.
+  scheduleConsolePollView(harness.app, "p-alpha", "", { terminalAvailable: false });
+  assert.equal(harness.timers.length, 1);
+
+  // The poll fires and its state GET hangs; meanwhile another load starts (a
+  // refresh, navigation, or settle-burst tick) and is still in flight when
+  // the poll's response arrives announcing a terminal.
+  const pollReload = harness.timers[0].callback();
+  const otherLoad = harness.app.load();
+  harness.responses[0].resolve(harness.consoleState(true, true));
+  await pollReload;
+
+  assert.equal(harness.loads(), 1, "the poll response does not start a load while another load is in flight");
+  assert.equal(harness.timers.length, 2, "the skipped poll re-arms instead of stopping");
+
+  // The overlapping load completes; its own render re-arms the poll.
+  await flushAsync();
+  harness.responses[1].resolve(harness.consoleState(true, true));
+  await otherLoad;
+  assert.equal(harness.loads(), 1);
+  assert.equal(harness.timers.length, 3, "the completed load re-arms the console poll");
+
+  // With no load in flight, a later poll response still reloads once: the
+  // console going inactive triggers exactly one load and no further polling.
+  const inactiveReload = harness.timers[2].callback();
+  harness.responses[2].resolve(harness.consoleState(false, false));
+  await flushAsync();
+  harness.responses[3].resolve(harness.consoleState(false, false)); // the reload's own GET
+  await inactiveReload;
+  assert.equal(harness.loads(), 2, "a later poll response reloads once when no load is active");
+  assert.equal(harness.timers.length, 3, "an inactive console schedules no further poll");
+});
+
+test("console poll transitions reload exactly once when no load is in flight", async () => {
+  const harness = await consolePollHarness();
+  scheduleConsolePollView(harness.app, "p-alpha", "", { terminalAvailable: false });
+  assert.equal(harness.timers.length, 1);
+
+  // Terminal availability appearing reloads the console once and re-arms.
+  const terminalPoll = harness.timers[0].callback();
+  harness.responses[0].resolve(harness.consoleState(true, true));
+  await flushAsync();
+  harness.responses[1].resolve(harness.consoleState(true, true)); // the reload's own GET
+  await terminalPoll;
+  assert.equal(harness.loads(), 1, "the terminal-availability transition reloads once");
+  assert.equal(harness.timers.length, 2, "the active console keeps polling");
+
+  // The console going inactive reloads once and stops polling.
+  const inactivePoll = harness.timers[1].callback();
+  harness.responses[2].resolve(harness.consoleState(false, false));
+  await flushAsync();
+  harness.responses[3].resolve(harness.consoleState(false, false)); // the reload's own GET
+  await inactivePoll;
+  assert.equal(harness.loads(), 2, "the inactive-console transition reloads once");
+  assert.equal(harness.timers.length, 2, "an inactive console schedules no further poll");
+});
+
 test("board sidebar status separates blocked tasks in compact lifecycle groups", async () => {
   const context = await scriptContext();
   const html = context.renderNavStatus("/ui/board", {
@@ -4303,6 +4428,12 @@ function deferred() {
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
+}
+
+// flushAsync drains the microtask queue: setImmediate is a macrotask, so every
+// promise continuation queued so far runs before it fires.
+function flushAsync() {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 // --- renderMarkdown: block rendering correctness -------------------------------
