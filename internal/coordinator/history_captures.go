@@ -1,6 +1,8 @@
 package coordinator
 
 import (
+	"bufio"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -10,6 +12,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -28,13 +32,21 @@ var (
 	ErrHistoryIncomplete          = errors.New("history capture is incomplete")
 	ErrHistoryPublicationPending  = errors.New("history artifact publication is pending")
 	ErrHistoryGrantNoLongerUsable = errors.New("history capture upload grant is no longer usable")
+	ErrHistoryUploadTooLarge      = errors.New("history upload exceeds its byte ceiling")
+	ErrHistoryIntentNotActive     = errors.New("history upload intent is not active")
 )
 
 const (
-	maxHistoryCodeLength    = 64
-	maxHistoryMessageLength = 1024
-	maxHistoryActorLength   = 255
-	maxHistoryLogicalKey    = 512
+	maxHistoryCodeLength       = 64
+	maxHistoryMessageLength    = 1024
+	maxHistoryActorLength      = 255
+	maxHistoryLogicalKey       = 512
+	maxHistoryCheckpointStream = 255
+
+	defaultHistoryMaxUploadBytes            int64 = 1 << 30
+	defaultHistoryMaxTranscriptSegmentBytes int64 = 64 << 20
+	defaultHistoryMaxArtifactsPerCapture          = 100000
+	defaultHistoryMaxCheckpointsPerCapture        = 10000
 )
 
 type HistoryCaptureState string
@@ -116,6 +128,7 @@ type HistoryCapture struct {
 	ExpectedTranscriptSegmentCount *int64
 	ExpectedTranscriptLength       *int64
 	ExpectedTranscriptSHA256       string
+	ZeroHarnessRootReason          string
 
 	LastHintAt                        *time.Time
 	CheckpointHintCount               int64
@@ -162,9 +175,10 @@ type ReserveHistoryCaptureInput struct {
 }
 
 type ReserveHistoryCaptureResult struct {
-	Capture     HistoryCapture
-	UploadGrant string // revealed only when Created is true
-	Created     bool
+	Capture      HistoryCapture
+	UploadGrant  string // revealed on creation and exact authenticated retry rotation
+	Created      bool
+	GrantRotated bool
 }
 
 type HistoryCaptureListOptions struct {
@@ -173,14 +187,38 @@ type HistoryCaptureListOptions struct {
 	Limit  int
 }
 
+type HistoryCaptureServiceOptions struct {
+	MaxUploadBytes            int64
+	MaxTranscriptSegmentBytes int64
+	MaxArtifactsPerCapture    int
+	MaxCheckpointsPerCapture  int
+}
+
 type HistoryCaptureService struct {
-	db    *sql.DB
-	blobs blob.Store
-	now   func() time.Time
+	db      *sql.DB
+	blobs   blob.Store
+	now     func() time.Time
+	options HistoryCaptureServiceOptions
 }
 
 func NewHistoryCaptureService(database *sql.DB, blobs blob.Store) *HistoryCaptureService {
-	return &HistoryCaptureService{db: database, blobs: blobs, now: sqlitex.UTCNow}
+	return NewHistoryCaptureServiceWithOptions(database, blobs, HistoryCaptureServiceOptions{})
+}
+
+func NewHistoryCaptureServiceWithOptions(database *sql.DB, blobs blob.Store, options HistoryCaptureServiceOptions) *HistoryCaptureService {
+	if options.MaxUploadBytes == 0 {
+		options.MaxUploadBytes = defaultHistoryMaxUploadBytes
+	}
+	if options.MaxTranscriptSegmentBytes == 0 {
+		options.MaxTranscriptSegmentBytes = defaultHistoryMaxTranscriptSegmentBytes
+	}
+	if options.MaxArtifactsPerCapture == 0 {
+		options.MaxArtifactsPerCapture = defaultHistoryMaxArtifactsPerCapture
+	}
+	if options.MaxCheckpointsPerCapture == 0 {
+		options.MaxCheckpointsPerCapture = defaultHistoryMaxCheckpointsPerCapture
+	}
+	return &HistoryCaptureService{db: database, blobs: blobs, now: sqlitex.UTCNow, options: options}
 }
 
 func (s *HistoryCaptureService) Reserve(ctx context.Context, input ReserveHistoryCaptureInput) (ReserveHistoryCaptureResult, error) {
@@ -211,7 +249,29 @@ func (s *HistoryCaptureService) Reserve(ctx context.Context, input ReserveHistor
 		if !sameReservation(existing, input) {
 			return ReserveHistoryCaptureResult{}, fmt.Errorf("%w: lease attempt attribution differs", ErrHistoryConflict)
 		}
-		return ReserveHistoryCaptureResult{Capture: existing}, nil
+		// SECURITY: the future Reserve route must authenticate both WorkerID and
+		// LeaseID before invoking this exact-attribution retry path. The immediate
+		// transaction serializes concurrent rotations; only the last returned grant
+		// remains usable, and every previous hash is irreversibly replaced.
+		if existing.State == HistoryCaptureComplete || existing.State == HistoryCaptureWaived {
+			return ReserveHistoryCaptureResult{}, ErrHistoryGrantNoLongerUsable
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE history_captures
+SET upload_grant_hash = ?, upload_grant_generation = upload_grant_generation + 1,
+    upload_grant_rotated_at = ?, version = version + 1, updated_at = ?
+WHERE id = ? AND version = ?`, grantHash, nowText, nowText, existing.ID, existing.Version); err != nil {
+			return ReserveHistoryCaptureResult{}, fmt.Errorf("rotate history upload grant: %w", err)
+		}
+		if err := appendHistoryCaptureEvent(ctx, tx, existing.ID, "upload_grant_rotated", string(existing.State), string(existing.State), existing.Version+1,
+			"system", "response_loss_retry", map[string]any{"trusted_worker_id": input.WorkerID, "lease_id": input.LeaseID}, now); err != nil {
+			return ReserveHistoryCaptureResult{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return ReserveHistoryCaptureResult{}, err
+		}
+		rotated, err := s.Get(ctx, existing.ID)
+		return ReserveHistoryCaptureResult{Capture: rotated, UploadGrant: grant, GrantRotated: true}, err
 	}
 	if !errors.Is(err, ErrHistoryCaptureNotFound) {
 		return ReserveHistoryCaptureResult{}, err
@@ -375,7 +435,7 @@ SELECT id, project_id, job_id, lease_id, lease_attempt, worker_id,
        expected_set_declared_at, expected_final_artifact_count,
        expected_transcript_epoch, expected_transcript_segment_count,
        expected_transcript_length, COALESCE(expected_transcript_sha256, ''),
-       last_hint_at, checkpoint_hint_count, checkpoint_coalesced_count,
+       zero_harness_root_reason, last_hint_at, checkpoint_hint_count, checkpoint_coalesced_count,
        checkpoint_dirty_generation, last_checkpoint_attempt_generation,
        last_checkpoint_committed_generation, last_checkpoint_bytes, last_checkpoint_entries,
        error_code, error_message, waiver_reason, version,
@@ -401,7 +461,7 @@ func scanHistoryCapture(row historyRowScanner) (HistoryCapture, error) {
 		&expectedTranscript, &expectedHarness, &state,
 		&verdict, &exitCode, &c.ExecutionErrorCode, &executionAt,
 		&declaredAt, &expectedCount, &expectedEpoch, &expectedSegments, &expectedLength, &c.ExpectedTranscriptSHA256,
-		&lastHint, &c.CheckpointHintCount, &c.CheckpointCoalescedCount,
+		&c.ZeroHarnessRootReason, &lastHint, &c.CheckpointHintCount, &c.CheckpointCoalescedCount,
 		&c.CheckpointDirtyGeneration, &c.LastCheckpointAttemptGeneration,
 		&c.LastCheckpointCommittedGeneration, &c.LastCheckpointBytes, &c.LastCheckpointEntries,
 		&c.ErrorCode, &c.ErrorMessage, &c.WaiverReason, &c.Version,
@@ -497,11 +557,18 @@ func (s *HistoryCaptureService) Transition(ctx context.Context, captureID string
 	if err != nil {
 		return HistoryCapture{}, err
 	}
+	if capture.State == input.To {
+		compatible, compatibilityErr := sameAchievedTransitionTx(ctx, tx, capture, input)
+		if compatibilityErr != nil {
+			return HistoryCapture{}, compatibilityErr
+		}
+		if compatible {
+			return capture, nil
+		}
+		return HistoryCapture{}, fmt.Errorf("%w: achieved transition metadata differs", ErrHistoryConflict)
+	}
 	if capture.Version != input.ExpectedVersion {
 		return HistoryCapture{}, ErrHistoryVersionConflict
-	}
-	if capture.State == input.To {
-		return capture, nil
 	}
 	if !legalHistoryTransition(capture.State, input.To) {
 		return HistoryCapture{}, fmt.Errorf("%w: %s -> %s", ErrHistoryInvalidTransition, capture.State, input.To)
@@ -535,6 +602,28 @@ WHERE id = ? AND version = ?`, timestampColumn, timestampColumn)
 		return HistoryCapture{}, err
 	}
 	return s.Get(ctx, captureID)
+}
+
+func sameAchievedTransitionTx(ctx context.Context, tx *sqlitex.Tx, capture HistoryCapture, input TransitionHistoryCaptureInput) (bool, error) {
+	var actor, code, details string
+	err := tx.QueryRowContext(ctx, `
+SELECT actor, code, details_json
+FROM history_capture_events
+WHERE capture_id = ? AND event_kind = 'state_transition' AND to_state = ?
+ORDER BY capture_version DESC, occurred_at DESC, id DESC LIMIT 1`, capture.ID, string(input.To)).Scan(&actor, &code, &details)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var decoded struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(details), &decoded); err != nil {
+		return false, err
+	}
+	return actor == input.Actor && code == input.ErrorCode && decoded.Message == input.ErrorMessage, nil
 }
 
 func legalHistoryTransition(from, to HistoryCaptureState) bool {
@@ -661,22 +750,55 @@ func (s *HistoryCaptureService) Waive(ctx context.Context, captureID string, exp
 		return HistoryCapture{}, ErrHistoryVersionConflict
 	}
 	now := s.now().UTC()
+	nowText := sqlitex.FormatTime(now)
+	rows, err := tx.QueryContext(ctx, `SELECT temporary_upload_id FROM history_upload_intents WHERE capture_id = ? AND state = 'active'`, capture.ID)
+	if err != nil {
+		return HistoryCapture{}, err
+	}
+	var abandoned []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return HistoryCapture{}, err
+		}
+		abandoned = append(abandoned, id)
+	}
+	if err := rows.Close(); err != nil {
+		return HistoryCapture{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE history_upload_intents
+SET state = 'abandoned', abandoned_at = ?, heartbeat_at = ?
+WHERE capture_id = ? AND state = 'active'`, nowText, nowText, capture.ID); err != nil {
+		return HistoryCapture{}, err
+	}
 	_, err = tx.ExecContext(ctx, `
 UPDATE history_captures
 SET state = 'waived', waived_at = ?, waiver_reason = ?, upload_grant_revoked_at = ?,
     version = version + 1, updated_at = ?
-WHERE id = ? AND version = ?`, sqlitex.FormatTime(now), reason, sqlitex.FormatTime(now), sqlitex.FormatTime(now), capture.ID, expectedVersion)
+WHERE id = ? AND version = ?`, nowText, reason, nowText, nowText, capture.ID, expectedVersion)
 	if err != nil {
 		return HistoryCapture{}, err
 	}
 	if err := appendHistoryCaptureEvent(ctx, tx, capture.ID, "waived", string(capture.State), string(HistoryCaptureWaived), capture.Version+1,
-		actor, "", map[string]any{"reason": reason}, now); err != nil {
+		actor, "", map[string]any{"reason": reason, "abandoned_upload_intents": len(abandoned)}, now); err != nil {
 		return HistoryCapture{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return HistoryCapture{}, err
 	}
-	return s.Get(ctx, capture.ID)
+	waived, err := s.Get(ctx, capture.ID)
+	if err != nil {
+		return HistoryCapture{}, err
+	}
+	var abortErrors []error
+	for _, temporaryID := range abandoned {
+		if err := s.blobs.Abort(ctx, temporaryID); err != nil && !errors.Is(err, blob.ErrNotFound) && !errors.Is(err, blob.ErrUploadAborted) {
+			abortErrors = append(abortErrors, fmt.Errorf("abort waived upload %s: %w", temporaryID, err))
+		}
+	}
+	return waived, errors.Join(abortErrors...)
 }
 
 // HistoryArtifact is safe for authorized API projections. InternalHistoryArtifact
@@ -689,6 +811,7 @@ type HistoryArtifact struct {
 	Phase                  HistoryArtifactPhase
 	CheckpointGeneration   int64
 	CheckpointTrigger      string
+	CheckpointStream       string
 	ArchiveID              string
 	MediaType              string
 	FormatVersion          int
@@ -716,6 +839,7 @@ type PublishHistoryArtifactInput struct {
 	Phase                HistoryArtifactPhase
 	CheckpointGeneration int64
 	CheckpointTrigger    string
+	CheckpointStream     string
 	ArchiveID            string
 	MediaType            string
 	FormatVersion        int
@@ -728,10 +852,159 @@ func (s *HistoryCaptureService) BeginUpload(ctx context.Context, captureID, gran
 	if s.blobs == nil {
 		return nil, errors.New("history blob store is not configured")
 	}
+	captureID = strings.TrimSpace(captureID)
 	if err := s.AuthenticateUploadGrant(ctx, captureID, grant); err != nil {
 		return nil, err
 	}
-	return s.blobs.Begin(ctx)
+	upload, err := s.blobs.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &historyCaptureUpload{Upload: upload, service: s, captureID: captureID, grant: grant, maximum: s.options.MaxUploadBytes}, nil
+}
+
+type historyCaptureUpload struct {
+	blob.Upload
+	service   *HistoryCaptureService
+	captureID string
+	grant     string
+	maximum   int64
+	written   int64
+	failed    error
+}
+
+func (u *historyCaptureUpload) Write(p []byte) (int, error) {
+	if u.failed != nil {
+		return 0, u.failed
+	}
+	remaining := u.maximum - u.written
+	if remaining <= 0 || int64(len(p)) > remaining {
+		u.failed = ErrHistoryUploadTooLarge
+		return 0, u.failed
+	}
+	n, err := u.Upload.Write(p)
+	u.written += int64(n)
+	return n, err
+}
+
+func (u *historyCaptureUpload) Complete(ctx context.Context) (blob.Temporary, error) {
+	if u.failed != nil {
+		_ = u.Upload.Abort(ctx)
+		return blob.Temporary{}, u.failed
+	}
+	temporary, err := u.Upload.Complete(ctx)
+	if err != nil {
+		return blob.Temporary{}, err
+	}
+	if err := u.service.recordUploadIntent(ctx, u.captureID, u.grant, temporary); err != nil {
+		_ = u.service.blobs.Abort(ctx, temporary.ID)
+		return blob.Temporary{}, fmt.Errorf("record completed history upload intent: %w", err)
+	}
+	return temporary, nil
+}
+
+func (s *HistoryCaptureService) recordUploadIntent(ctx context.Context, captureID, grant string, temporary blob.Temporary) error {
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	capture, err := authenticateHistoryGrantTx(ctx, tx, captureID, grant, false)
+	if err != nil {
+		return err
+	}
+	now := sqlitex.FormatTime(s.now().UTC())
+	_, err = tx.ExecContext(ctx, `
+INSERT INTO history_upload_intents (
+    temporary_upload_id, capture_id, sha256, stored_size, state,
+    created_at, heartbeat_at
+) VALUES (?, ?, ?, ?, 'active', ?, ?)
+ON CONFLICT(temporary_upload_id) DO NOTHING`, temporary.ID, capture.ID, temporary.Digest.String(), temporary.Size, now, now)
+	if err != nil {
+		return err
+	}
+	var existingCapture, digest, state string
+	var size int64
+	if err := tx.QueryRowContext(ctx, `
+SELECT capture_id, sha256, stored_size, state FROM history_upload_intents
+WHERE temporary_upload_id = ?`, temporary.ID).Scan(&existingCapture, &digest, &size, &state); err != nil {
+		return err
+	}
+	if existingCapture != capture.ID || digest != temporary.Digest.String() || size != temporary.Size || state != "active" {
+		return fmt.Errorf("%w: temporary upload intent differs", ErrHistoryConflict)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		// Commit errors can be response loss. Re-read without inheriting caller
+		// cancellation before deciding that Complete must abort the temporary.
+		var persistedCapture, persistedDigest, persistedState string
+		var persistedSize int64
+		checkErr := s.db.QueryRowContext(context.WithoutCancel(ctx), `
+SELECT capture_id, sha256, stored_size, state FROM history_upload_intents
+WHERE temporary_upload_id = ?`, temporary.ID).Scan(&persistedCapture, &persistedDigest, &persistedSize, &persistedState)
+		if checkErr == nil && persistedCapture == capture.ID && persistedDigest == temporary.Digest.String() && persistedSize == temporary.Size && persistedState == "active" {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *HistoryCaptureService) HeartbeatUpload(ctx context.Context, captureID, grant, temporaryUploadID string) error {
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	capture, err := authenticateHistoryGrantTx(ctx, tx, strings.TrimSpace(captureID), grant, false)
+	if err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `
+UPDATE history_upload_intents SET heartbeat_at = ?
+WHERE temporary_upload_id = ? AND capture_id = ? AND state = 'active'`, sqlitex.FormatTime(s.now().UTC()), strings.TrimSpace(temporaryUploadID), capture.ID)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrHistoryIntentNotActive
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *HistoryCaptureService) AbandonUpload(ctx context.Context, captureID, grant, temporaryUploadID string) error {
+	temporaryUploadID = strings.TrimSpace(temporaryUploadID)
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	capture, err := authenticateHistoryGrantTx(ctx, tx, strings.TrimSpace(captureID), grant, false)
+	if err != nil {
+		return err
+	}
+	now := sqlitex.FormatTime(s.now().UTC())
+	result, err := tx.ExecContext(ctx, `
+UPDATE history_upload_intents
+SET state = 'abandoned', abandoned_at = ?, heartbeat_at = ?
+WHERE temporary_upload_id = ? AND capture_id = ? AND state = 'active'`, now, now, temporaryUploadID, capture.ID)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		var state string
+		if scanErr := tx.QueryRowContext(ctx, `SELECT state FROM history_upload_intents WHERE temporary_upload_id = ? AND capture_id = ?`, temporaryUploadID, capture.ID).Scan(&state); scanErr != nil || state != "abandoned" {
+			return ErrHistoryIntentNotActive
+		}
+		tx.Rollback()
+	} else if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	// Retry the physical abort even when the durable state was already abandoned;
+	// a prior object-store failure must not make an idempotent retry a no-op.
+	if err := s.blobs.Abort(ctx, temporaryUploadID); err != nil && !errors.Is(err, blob.ErrNotFound) && !errors.Is(err, blob.ErrUploadAborted) {
+		return fmt.Errorf("abort abandoned history upload: %w", err)
+	}
+	return nil
 }
 
 func (s *HistoryCaptureService) PublishArtifact(ctx context.Context, captureID, grant string, input PublishHistoryArtifactInput, temporary blob.Temporary) (HistoryArtifact, error) {
@@ -741,6 +1014,9 @@ func (s *HistoryCaptureService) PublishArtifact(ctx context.Context, captureID, 
 	input = normalizePublishHistoryArtifactInput(input)
 	if err := validatePublishHistoryArtifactInput(input); err != nil {
 		return HistoryArtifact{}, err
+	}
+	if input.Kind == HistoryArtifactManifest {
+		return HistoryArtifact{}, fmt.Errorf("%w: final manifests are coordinator-published", ErrHistoryUnauthorized)
 	}
 	canonical, err := s.blobs.Resume(ctx, temporary.ID)
 	if err != nil {
@@ -765,9 +1041,42 @@ func (s *HistoryCaptureService) PublishArtifact(ctx context.Context, captureID, 
 	return committed.HistoryArtifact, nil
 }
 
+// PublishCanonicalManifest is coordinator-internal. It must only receive bytes
+// generated by the canonical manifest builder; never expose it as an HTTP route
+// that accepts worker or user supplied manifest bytes (Slice 3 validates content).
+func (s *HistoryCaptureService) PublishCanonicalManifest(ctx context.Context, captureID string, input PublishHistoryArtifactInput, temporary blob.Temporary) (HistoryArtifact, error) {
+	if s.blobs == nil {
+		return HistoryArtifact{}, errors.New("history blob store is not configured")
+	}
+	input = normalizePublishHistoryArtifactInput(input)
+	if err := validatePublishHistoryArtifactInput(input); err != nil {
+		return HistoryArtifact{}, err
+	}
+	if input.Kind != HistoryArtifactManifest || input.Phase != HistoryArtifactFinal {
+		return HistoryArtifact{}, fmt.Errorf("%w: canonical publication requires a final manifest", ErrHistoryConflict)
+	}
+	canonical, err := s.blobs.Resume(ctx, temporary.ID)
+	if err != nil {
+		if !errors.Is(err, blob.ErrNotFound) {
+			return HistoryArtifact{}, err
+		}
+		canonical = temporary
+	}
+	if canonical.ID != temporary.ID || canonical.Digest != temporary.Digest || canonical.Size != temporary.Size {
+		return HistoryArtifact{}, fmt.Errorf("%w: temporary upload metadata differs", ErrHistoryConflict)
+	}
+	internal, _, err := s.ensurePendingArtifactInternal(ctx, strings.TrimSpace(captureID), input, canonical)
+	if err != nil {
+		return HistoryArtifact{}, err
+	}
+	committed, err := s.finishArtifactPublication(ctx, internal, false)
+	return committed.HistoryArtifact, err
+}
+
 func normalizePublishHistoryArtifactInput(input PublishHistoryArtifactInput) PublishHistoryArtifactInput {
 	input.LogicalKey = strings.TrimSpace(input.LogicalKey)
 	input.CheckpointTrigger = strings.TrimSpace(input.CheckpointTrigger)
+	input.CheckpointStream = strings.TrimSpace(input.CheckpointStream)
 	input.ArchiveID = strings.TrimSpace(input.ArchiveID)
 	input.MediaType = strings.TrimSpace(input.MediaType)
 	if input.FormatVersion == 0 {
@@ -799,7 +1108,10 @@ func validatePublishHistoryArtifactInput(input PublishHistoryArtifactInput) erro
 		if input.Kind == HistoryArtifactTranscriptSegment {
 			return errors.New("transcript segments cannot be checkpoint artifacts")
 		}
-	} else if input.CheckpointGeneration != 0 || input.CheckpointTrigger != "" {
+		if input.CheckpointStream == "" || len(input.CheckpointStream) > maxHistoryCheckpointStream {
+			return errors.New("checkpoint stream identity is required and must be bounded")
+		}
+	} else if input.CheckpointGeneration != 0 || input.CheckpointTrigger != "" || input.CheckpointStream != "" {
 		return errors.New("final artifacts cannot carry checkpoint metadata")
 	}
 	if input.FormatVersion < 1 || input.SchemaVersion < 1 || input.LogicalSize < 0 || input.EntryCount < 0 {
@@ -812,18 +1124,51 @@ func validatePublishHistoryArtifactInput(input PublishHistoryArtifactInput) erro
 }
 
 func (s *HistoryCaptureService) ensurePendingArtifact(ctx context.Context, captureID, grant string, input PublishHistoryArtifactInput, temporary blob.Temporary) (InternalHistoryArtifact, bool, error) {
+	return s.ensurePendingArtifactAuthorized(ctx, captureID, &grant, input, temporary)
+}
+
+func (s *HistoryCaptureService) ensurePendingArtifactInternal(ctx context.Context, captureID string, input PublishHistoryArtifactInput, temporary blob.Temporary) (InternalHistoryArtifact, bool, error) {
+	return s.ensurePendingArtifactAuthorized(ctx, captureID, nil, input, temporary)
+}
+
+func (s *HistoryCaptureService) ensurePendingArtifactAuthorized(ctx context.Context, captureID string, grant *string, input PublishHistoryArtifactInput, temporary blob.Temporary) (InternalHistoryArtifact, bool, error) {
 	tx, err := sqlitex.BeginImmediate(ctx, s.db)
 	if err != nil {
 		return InternalHistoryArtifact{}, false, err
 	}
 	defer tx.Rollback()
-	capture, err := authenticateHistoryGrantTx(ctx, tx, captureID, grant, false)
+	var capture HistoryCapture
+	if grant != nil {
+		capture, err = authenticateHistoryGrantTx(ctx, tx, captureID, *grant, false)
+	} else {
+		capture, err = getHistoryCaptureTx(ctx, tx, captureID)
+	}
 	if err != nil {
 		return InternalHistoryArtifact{}, false, err
 	}
+	if capture.State == HistoryCaptureComplete || capture.State == HistoryCaptureWaived {
+		return InternalHistoryArtifact{}, false, ErrHistoryGrantNoLongerUsable
+	}
+	var intentState, intentArtifactID string
+	if grant != nil {
+		var intentCapture, intentDigest string
+		var intentSize int64
+		err = tx.QueryRowContext(ctx, `
+SELECT capture_id, sha256, stored_size, state, COALESCE(artifact_id, '')
+FROM history_upload_intents WHERE temporary_upload_id = ?`, temporary.ID).Scan(&intentCapture, &intentDigest, &intentSize, &intentState, &intentArtifactID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return InternalHistoryArtifact{}, false, ErrHistoryIntentNotActive
+		}
+		if err != nil {
+			return InternalHistoryArtifact{}, false, err
+		}
+		if intentCapture != capture.ID || intentDigest != temporary.Digest.String() || intentSize != temporary.Size || (intentState != "active" && intentState != "consumed") {
+			return InternalHistoryArtifact{}, false, fmt.Errorf("%w: temporary upload intent differs", ErrHistoryConflict)
+		}
+	}
 	existing, err := getInternalHistoryArtifactTx(ctx, tx, captureID, input.LogicalKey)
 	if err == nil {
-		if !sameArtifactDeclaration(existing, input, temporary) {
+		if !sameArtifactDeclaration(existing, input, temporary) || grant != nil && (intentState != "consumed" || intentArtifactID != existing.ID) {
 			_ = appendHistoryUploadEvent(ctx, tx, captureID, existing.ID, input.LogicalKey, "conflict", "immutable_metadata", s.now().UTC())
 			_ = tx.Commit(ctx)
 			return InternalHistoryArtifact{}, false, fmt.Errorf("%w: logical key %q already has different metadata", ErrHistoryConflict, input.LogicalKey)
@@ -832,6 +1177,16 @@ func (s *HistoryCaptureService) ensurePendingArtifact(ctx context.Context, captu
 	}
 	if !errors.Is(err, ErrHistoryArtifactNotFound) {
 		return InternalHistoryArtifact{}, false, err
+	}
+	if grant != nil && (intentState != "active" || intentArtifactID != "") {
+		return InternalHistoryArtifact{}, false, ErrHistoryIntentNotActive
+	}
+	var artifactCount, checkpointCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(phase = 'checkpoint'), 0) FROM history_artifacts WHERE capture_id = ?`, captureID).Scan(&artifactCount, &checkpointCount); err != nil {
+		return InternalHistoryArtifact{}, false, err
+	}
+	if artifactCount >= s.options.MaxArtifactsPerCapture || input.Phase == HistoryArtifactCheckpoint && checkpointCount >= s.options.MaxCheckpointsPerCapture {
+		return InternalHistoryArtifact{}, false, fmt.Errorf("%w: history artifact count ceiling reached", ErrHistoryConflict)
 	}
 	artifactID, err := randomHistoryID("ha")
 	if err != nil {
@@ -850,16 +1205,28 @@ func (s *HistoryCaptureService) ensurePendingArtifact(ctx context.Context, captu
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO history_artifacts (
     id, capture_id, logical_key, kind, phase, checkpoint_generation,
-    checkpoint_trigger, archive_id, media_type, format_version, schema_version,
+    checkpoint_trigger, checkpoint_stream, archive_id, media_type, format_version, schema_version,
     sha256, stored_size, logical_size, entry_count, publication_state,
     temporary_upload_id, blob_key, pending_at, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
 		artifactID, captureID, input.LogicalKey, string(input.Kind), string(input.Phase), generation,
-		input.CheckpointTrigger, input.ArchiveID, input.MediaType, input.FormatVersion, input.SchemaVersion,
+		input.CheckpointTrigger, input.CheckpointStream, input.ArchiveID, input.MediaType, input.FormatVersion, input.SchemaVersion,
 		temporary.Digest.String(), temporary.Size, input.LogicalSize, input.EntryCount,
 		temporary.ID, key.String(), nowText, nowText)
 	if err != nil {
 		return InternalHistoryArtifact{}, false, fmt.Errorf("insert pending history artifact: %w", err)
+	}
+	if grant != nil {
+		result, err := tx.ExecContext(ctx, `
+UPDATE history_upload_intents
+SET state = 'consumed', artifact_id = ?, consumed_at = ?, heartbeat_at = ?
+WHERE temporary_upload_id = ? AND capture_id = ? AND state = 'active' AND artifact_id IS NULL`, artifactID, nowText, nowText, temporary.ID, captureID)
+		if err != nil {
+			return InternalHistoryArtifact{}, false, err
+		}
+		if affected, _ := result.RowsAffected(); affected != 1 {
+			return InternalHistoryArtifact{}, false, ErrHistoryIntentNotActive
+		}
 	}
 	if input.Phase == HistoryArtifactCheckpoint {
 		_, err = tx.ExecContext(ctx, `
@@ -883,7 +1250,7 @@ WHERE id = ?`, input.CheckpointGeneration, nowText, captureID)
 func sameArtifactDeclaration(existing InternalHistoryArtifact, input PublishHistoryArtifactInput, temporary blob.Temporary) bool {
 	return existing.SHA256 == temporary.Digest.String() && existing.StoredSize == temporary.Size &&
 		existing.Kind == input.Kind && existing.Phase == input.Phase && existing.CheckpointGeneration == input.CheckpointGeneration &&
-		existing.CheckpointTrigger == input.CheckpointTrigger && existing.ArchiveID == input.ArchiveID && existing.MediaType == input.MediaType &&
+		existing.CheckpointTrigger == input.CheckpointTrigger && existing.CheckpointStream == input.CheckpointStream && existing.ArchiveID == input.ArchiveID && existing.MediaType == input.MediaType &&
 		existing.FormatVersion == input.FormatVersion && existing.SchemaVersion == input.SchemaVersion &&
 		existing.LogicalSize == input.LogicalSize && existing.EntryCount == input.EntryCount
 }
@@ -904,6 +1271,139 @@ func (s *HistoryCaptureService) ReconcileArtifact(ctx context.Context, captureID
 		return HistoryArtifact{}, err
 	}
 	return committed.HistoryArtifact, nil
+}
+
+type HistoryPendingArtifactReconcileFailure struct {
+	ArtifactID string
+	LogicalKey string
+	Err        error
+}
+
+func (f HistoryPendingArtifactReconcileFailure) Error() string {
+	return fmt.Sprintf("reconcile history artifact %s (%s): %v", f.ArtifactID, f.LogicalKey, f.Err)
+}
+func (f HistoryPendingArtifactReconcileFailure) Unwrap() error { return f.Err }
+
+type HistoryPendingArtifactReconcileError struct {
+	Failures []HistoryPendingArtifactReconcileFailure
+}
+
+func (e *HistoryPendingArtifactReconcileError) Error() string {
+	return fmt.Sprintf("%d pending history artifact(s) could not be reconciled", len(e.Failures))
+}
+
+type HistoryPendingArtifactReconcileSummary struct {
+	Examined  int
+	Committed int
+	Pending   int
+	Failures  []HistoryPendingArtifactReconcileFailure
+}
+
+// ReconcilePendingArtifacts is coordinator-internal and deliberately grantless.
+// It is suitable after worker/lease loss because it only acts on persisted,
+// capture-scoped pending rows and verifies immutable object metadata before commit.
+func (s *HistoryCaptureService) ReconcilePendingArtifacts(ctx context.Context, captureID string, limit int) (HistoryPendingArtifactReconcileSummary, error) {
+	if s.blobs == nil {
+		return HistoryPendingArtifactReconcileSummary{}, errors.New("history blob store is not configured")
+	}
+	if limit == 0 {
+		limit = 100
+	}
+	if limit < 1 || limit > 500 {
+		return HistoryPendingArtifactReconcileSummary{}, errors.New("pending history artifact reconciliation limit must be between 1 and 500")
+	}
+	query := historyArtifactSelect + ` WHERE publication_state = 'pending'`
+	var args []any
+	if captureID = strings.TrimSpace(captureID); captureID != "" {
+		query += ` AND capture_id = ?`
+		args = append(args, captureID)
+	}
+	query += ` ORDER BY pending_at, id LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return HistoryPendingArtifactReconcileSummary{}, err
+	}
+	var artifacts []InternalHistoryArtifact
+	for rows.Next() {
+		artifact, scanErr := scanInternalHistoryArtifact(rows)
+		if scanErr != nil {
+			rows.Close()
+			return HistoryPendingArtifactReconcileSummary{}, scanErr
+		}
+		artifacts = append(artifacts, artifact)
+	}
+	if err := rows.Close(); err != nil {
+		return HistoryPendingArtifactReconcileSummary{}, err
+	}
+	summary := HistoryPendingArtifactReconcileSummary{Examined: len(artifacts)}
+	for _, artifact := range artifacts {
+		committed, reconcileErr := s.finishArtifactPublication(ctx, artifact, true)
+		if reconcileErr != nil {
+			failure := HistoryPendingArtifactReconcileFailure{ArtifactID: artifact.ID, LogicalKey: artifact.LogicalKey, Err: reconcileErr}
+			summary.Failures = append(summary.Failures, failure)
+			continue
+		}
+		if committed.PublicationState == HistoryPublicationCommitted {
+			summary.Committed++
+		} else {
+			summary.Pending++
+		}
+	}
+	if len(summary.Failures) != 0 {
+		return summary, &HistoryPendingArtifactReconcileError{Failures: summary.Failures}
+	}
+	return summary, nil
+}
+
+// ReconcileBlobStore is coordinator-internal. Active upload intents and pending
+// artifact temporaries are always live, so a maintenance scan cannot erase a
+// worker outbox upload that has not yet been linked/published.
+func (s *HistoryCaptureService) ReconcileBlobStore(ctx context.Context, before time.Time, limit int) (blob.ReconcileResult, error) {
+	request := blob.ReconcileRequest{
+		Before: before, Limit: limit, LiveTemporaryIDs: map[string]struct{}{},
+		ReferencedKeys: map[blob.Key]struct{}{}, PendingKeys: map[blob.Key]struct{}{},
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT temporary_upload_id FROM history_upload_intents WHERE state = 'active'`)
+	if err != nil {
+		return blob.ReconcileResult{}, err
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return blob.ReconcileResult{}, err
+		}
+		request.LiveTemporaryIDs[id] = struct{}{}
+	}
+	if err := rows.Close(); err != nil {
+		return blob.ReconcileResult{}, err
+	}
+	rows, err = s.db.QueryContext(ctx, `SELECT temporary_upload_id, blob_key, publication_state FROM history_artifacts`)
+	if err != nil {
+		return blob.ReconcileResult{}, err
+	}
+	for rows.Next() {
+		var temporaryID, keyText, state string
+		if err := rows.Scan(&temporaryID, &keyText, &state); err != nil {
+			rows.Close()
+			return blob.ReconcileResult{}, err
+		}
+		key, err := blob.ParseKey(keyText)
+		if err != nil {
+			rows.Close()
+			return blob.ReconcileResult{}, err
+		}
+		request.ReferencedKeys[key] = struct{}{}
+		if state == string(HistoryPublicationPending) {
+			request.LiveTemporaryIDs[temporaryID] = struct{}{}
+			request.PendingKeys[key] = struct{}{}
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return blob.ReconcileResult{}, err
+	}
+	return s.blobs.Reconcile(ctx, request)
 }
 
 func (s *HistoryCaptureService) finishArtifactPublication(ctx context.Context, artifact InternalHistoryArtifact, reconciliation bool) (InternalHistoryArtifact, error) {
@@ -964,9 +1464,9 @@ WHERE id = ? AND publication_state = 'pending'`, nowText, artifact.ID)
 		_, err = tx.ExecContext(ctx, `
 UPDATE history_artifacts
 SET superseded_by_artifact_id = ?, superseded_at = ?
-WHERE capture_id = ? AND phase = 'checkpoint' AND kind = ?
+WHERE capture_id = ? AND phase = 'checkpoint' AND kind = ? AND checkpoint_stream = ?
   AND checkpoint_generation < ? AND publication_state = 'committed'
-  AND superseded_by_artifact_id IS NULL`, artifact.ID, nowText, artifact.CaptureID, string(artifact.Kind), artifact.CheckpointGeneration)
+  AND superseded_by_artifact_id IS NULL`, artifact.ID, nowText, artifact.CaptureID, string(artifact.Kind), artifact.CheckpointStream, artifact.CheckpointGeneration)
 		if err != nil {
 			return InternalHistoryArtifact{}, err
 		}
@@ -1033,7 +1533,7 @@ func (s *HistoryCaptureService) GetArtifact(ctx context.Context, captureID, logi
 
 const historyArtifactSelect = `
 SELECT id, capture_id, logical_key, kind, phase, COALESCE(checkpoint_generation, 0),
-       checkpoint_trigger, archive_id, media_type, format_version, schema_version,
+       checkpoint_trigger, checkpoint_stream, archive_id, media_type, format_version, schema_version,
        sha256, stored_size, logical_size, entry_count, publication_state,
        temporary_upload_id, blob_key, COALESCE(superseded_by_artifact_id, ''),
        pending_at, committed_at, created_at
@@ -1044,7 +1544,7 @@ func scanInternalHistoryArtifact(row historyRowScanner) (InternalHistoryArtifact
 	var kind, phase, publication, key, pendingAt, createdAt string
 	var committedAt sql.NullString
 	if err := row.Scan(&a.ID, &a.CaptureID, &a.LogicalKey, &kind, &phase, &a.CheckpointGeneration,
-		&a.CheckpointTrigger, &a.ArchiveID, &a.MediaType, &a.FormatVersion, &a.SchemaVersion,
+		&a.CheckpointTrigger, &a.CheckpointStream, &a.ArchiveID, &a.MediaType, &a.FormatVersion, &a.SchemaVersion,
 		&a.SHA256, &a.StoredSize, &a.LogicalSize, &a.EntryCount, &publication,
 		&a.TemporaryUploadID, &key, &a.SupersededByArtifactID, &pendingAt, &committedAt, &createdAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1099,9 +1599,62 @@ type HistoryTranscriptSegment struct {
 	UncompressedSize int64
 	StoredSize       int64
 	SHA256           string
+	RawSHA256        string
 	Encoding         string
 	ArtifactID       string
 	SealedAt         time.Time
+}
+
+func (s *HistoryCaptureService) streamTranscriptArtifact(ctx context.Context, artifact InternalHistoryArtifact, encoding string, expectedLogical int64, aggregate hash.Hash) (string, error) {
+	if artifact.StoredSize < 0 || artifact.StoredSize > s.options.MaxTranscriptSegmentBytes || expectedLogical < 0 || expectedLogical > s.options.MaxTranscriptSegmentBytes || artifact.LogicalSize != expectedLogical {
+		return "", fmt.Errorf("%w: transcript segment exceeds its size bound", ErrHistoryConflict)
+	}
+	body, err := s.blobs.Open(ctx, artifact.BlobKey)
+	if err != nil {
+		return "", err
+	}
+	defer body.Close()
+	segmentHash := sha256.New()
+	writer := io.Writer(segmentHash)
+	if aggregate != nil {
+		writer = io.MultiWriter(segmentHash, aggregate)
+	}
+	var decoded int64
+	switch encoding {
+	case "identity":
+		if artifact.StoredSize != expectedLogical {
+			return "", fmt.Errorf("%w: identity transcript sizes differ", ErrHistoryConflict)
+		}
+		decoded, err = io.Copy(writer, io.LimitReader(body, expectedLogical+1))
+	case "gzip":
+		buffered := bufio.NewReader(io.LimitReader(body, artifact.StoredSize+1))
+		reader, gzipErr := gzip.NewReader(buffered)
+		if gzipErr != nil {
+			return "", fmt.Errorf("invalid transcript gzip member: %w", gzipErr)
+		}
+		reader.Multistream(false)
+		decoded, err = io.Copy(writer, io.LimitReader(reader, expectedLogical+1))
+		closeErr := reader.Close()
+		if err == nil {
+			err = closeErr
+		}
+		if err == nil {
+			if _, trailingErr := buffered.ReadByte(); trailingErr == nil {
+				err = errors.New("gzip transcript contains trailing data or another member")
+			} else if !errors.Is(trailingErr, io.EOF) {
+				err = trailingErr
+			}
+		}
+	default:
+		return "", errors.New("unsupported transcript encoding")
+	}
+	if err != nil {
+		return "", err
+	}
+	if decoded != expectedLogical {
+		return "", fmt.Errorf("%w: decoded transcript size is %d, expected %d", ErrHistoryConflict, decoded, expectedLogical)
+	}
+	return hex.EncodeToString(segmentHash.Sum(nil)), nil
 }
 
 func (s *HistoryCaptureService) RegisterTranscriptSegment(ctx context.Context, captureID, grant string, input RegisterTranscriptSegmentInput) (HistoryTranscriptSegment, error) {
@@ -1144,6 +1697,10 @@ func (s *HistoryCaptureService) RegisterTranscriptSegment(ctx context.Context, c
 	if artifact.StoredSize < 0 || artifact.LogicalSize != uncompressed {
 		return HistoryTranscriptSegment{}, fmt.Errorf("%w: transcript artifact sizes differ", ErrHistoryConflict)
 	}
+	rawDigest, err := s.streamTranscriptArtifact(ctx, artifact, input.Encoding, uncompressed, nil)
+	if err != nil {
+		return HistoryTranscriptSegment{}, err
+	}
 	var streamState string
 	var count, length int64
 	var lastEpoch, lastSequence sql.NullInt64
@@ -1177,9 +1734,9 @@ FROM history_transcript_streams WHERE capture_id = ?`, capture.ID).Scan(&streamS
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO history_transcript_segments (
     capture_id, epoch, sequence, start_offset, end_offset, uncompressed_size,
-    stored_size, sha256, encoding, artifact_id, sealed_at, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, capture.ID, input.Epoch, input.Sequence,
-		input.StartOffset, input.EndOffset, uncompressed, artifact.StoredSize, artifact.SHA256,
+    stored_size, sha256, raw_sha256, encoding, artifact_id, sealed_at, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, capture.ID, input.Epoch, input.Sequence,
+		input.StartOffset, input.EndOffset, uncompressed, artifact.StoredSize, artifact.SHA256, rawDigest,
 		input.Encoding, artifact.ID, sqlitex.FormatTime(now), sqlitex.FormatTime(now))
 	if err != nil {
 		return HistoryTranscriptSegment{}, fmt.Errorf("register transcript segment: %w", err)
@@ -1198,12 +1755,12 @@ WHERE capture_id = ? AND state = 'open'`, input.EndOffset, input.Epoch, input.Se
 }
 
 func sameTranscriptSegment(existing HistoryTranscriptSegment, input RegisterTranscriptSegmentInput, artifact InternalHistoryArtifact) bool {
-	return existing.StartOffset == input.StartOffset && existing.EndOffset == input.EndOffset && existing.Encoding == input.Encoding && existing.ArtifactID == artifact.ID && existing.SHA256 == artifact.SHA256 && existing.StoredSize == artifact.StoredSize
+	return existing.StartOffset == input.StartOffset && existing.EndOffset == input.EndOffset && existing.Encoding == input.Encoding && existing.ArtifactID == artifact.ID && existing.SHA256 == artifact.SHA256 && existing.RawSHA256 != "" && existing.StoredSize == artifact.StoredSize
 }
 
 const transcriptSegmentSelect = `
 SELECT capture_id, epoch, sequence, start_offset, end_offset, uncompressed_size,
-       stored_size, sha256, encoding, artifact_id, sealed_at
+       stored_size, sha256, raw_sha256, encoding, artifact_id, sealed_at
 FROM history_transcript_segments`
 
 func scanTranscriptSegment(row historyRowScanner) (HistoryTranscriptSegment, error) {
@@ -1211,7 +1768,7 @@ func scanTranscriptSegment(row historyRowScanner) (HistoryTranscriptSegment, err
 	var sealedAt string
 	if err := row.Scan(&segment.CaptureID, &segment.Epoch, &segment.Sequence, &segment.StartOffset,
 		&segment.EndOffset, &segment.UncompressedSize, &segment.StoredSize, &segment.SHA256,
-		&segment.Encoding, &segment.ArtifactID, &sealedAt); err != nil {
+		&segment.RawSHA256, &segment.Encoding, &segment.ArtifactID, &sealedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return HistoryTranscriptSegment{}, ErrHistoryArtifactNotFound
 		}
@@ -1284,11 +1841,53 @@ FROM history_transcript_streams WHERE capture_id = ?`, capture.ID).Scan(&state, 
 	if count != seal.SegmentCount || length != seal.LogicalLength || actualEpoch != seal.FinalEpoch {
 		return fmt.Errorf("%w: transcript seal does not match registered segments", ErrHistoryIncomplete)
 	}
+	rows, err := tx.QueryContext(ctx, `
+SELECT epoch, sequence, uncompressed_size, raw_sha256, encoding, artifact_id
+FROM history_transcript_segments WHERE capture_id = ? ORDER BY epoch, sequence`, capture.ID)
+	if err != nil {
+		return err
+	}
+	type sealedSegment struct {
+		epoch, sequence, size           int64
+		rawDigest, encoding, artifactID string
+	}
+	var segments []sealedSegment
+	for rows.Next() {
+		var segment sealedSegment
+		if err := rows.Scan(&segment.epoch, &segment.sequence, &segment.size, &segment.rawDigest, &segment.encoding, &segment.artifactID); err != nil {
+			rows.Close()
+			return err
+		}
+		segments = append(segments, segment)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	streamHash := sha256.New()
+	var streamedLength int64
+	for _, segment := range segments {
+		artifact, err := getInternalHistoryArtifactByIDTx(ctx, tx, segment.artifactID)
+		if err != nil {
+			return err
+		}
+		rawDigest, err := s.streamTranscriptArtifact(ctx, artifact, segment.encoding, segment.size, streamHash)
+		if err != nil {
+			return err
+		}
+		if rawDigest != segment.rawDigest {
+			return fmt.Errorf("%w: transcript segment raw digest differs", ErrHistoryConflict)
+		}
+		streamedLength += segment.size
+	}
+	computedDigest := hex.EncodeToString(streamHash.Sum(nil))
+	if int64(len(segments)) != count || streamedLength != length || computedDigest != seal.SHA256 {
+		return fmt.Errorf("%w: producer transcript digest does not match server stream", ErrHistoryIncomplete)
+	}
 	now := sqlitex.FormatTime(s.now().UTC())
 	_, err = tx.ExecContext(ctx, `
 UPDATE history_transcript_streams
 SET state = 'sealed', stream_sha256 = ?, sealed_at = ?, updated_at = ?
-WHERE capture_id = ? AND state = 'open'`, seal.SHA256, now, now, capture.ID)
+WHERE capture_id = ? AND state = 'open'`, computedDigest, now, now, capture.ID)
 	if err != nil {
 		return err
 	}
@@ -1301,15 +1900,20 @@ type FinalArtifactExpectation struct {
 }
 
 type DeclareHistoryExpectedSetInput struct {
-	Artifacts       []FinalArtifactExpectation
-	TranscriptSeal  *TranscriptSeal
-	ExpectedVersion int64
-	Actor           string
+	Artifacts             []FinalArtifactExpectation
+	TranscriptSeal        *TranscriptSeal
+	ZeroHarnessRootReason string
+	ExpectedVersion       int64
+	Actor                 string
 }
 
 func (s *HistoryCaptureService) DeclareExpectedSet(ctx context.Context, captureID, grant string, input DeclareHistoryExpectedSetInput) (HistoryCapture, error) {
 	input.Actor = strings.TrimSpace(input.Actor)
+	input.ZeroHarnessRootReason = strings.TrimSpace(input.ZeroHarnessRootReason)
 	if err := validateHistoryBounded(input.Actor, maxHistoryActorLength, "actor", true); err != nil {
+		return HistoryCapture{}, err
+	}
+	if err := validateHistoryBounded(input.ZeroHarnessRootReason, maxHistoryMessageLength, "zero Harness root reason", false); err != nil {
 		return HistoryCapture{}, err
 	}
 	expectations, err := normalizeFinalExpectations(input.Artifacts)
@@ -1326,7 +1930,7 @@ func (s *HistoryCaptureService) DeclareExpectedSet(ctx context.Context, captureI
 		return HistoryCapture{}, err
 	}
 	if capture.ExpectedSetDeclaredAt != nil {
-		matches, compareErr := expectedSetMatchesTx(ctx, tx, capture, expectations, input.TranscriptSeal)
+		matches, compareErr := expectedSetMatchesTx(ctx, tx, capture, expectations, input.TranscriptSeal, input.ZeroHarnessRootReason)
 		if compareErr != nil {
 			return HistoryCapture{}, compareErr
 		}
@@ -1351,14 +1955,28 @@ func (s *HistoryCaptureService) DeclareExpectedSet(ctx context.Context, captureI
 	} else if input.TranscriptSeal != nil {
 		return HistoryCapture{}, fmt.Errorf("%w: capture does not expect a transcript", ErrHistoryConflict)
 	}
-	harnessCount := 0
+	harnessCount, manifestCount := 0, 0
 	for _, expected := range expectations {
-		if expected.Kind == HistoryArtifactHarnessRoot {
+		switch expected.Kind {
+		case HistoryArtifactHarnessRoot:
 			harnessCount++
+		case HistoryArtifactManifest:
+			manifestCount++
 		}
 	}
-	if !capture.ExpectedHarness && harnessCount != 0 {
-		return HistoryCapture{}, fmt.Errorf("%w: capture does not expect Harness roots", ErrHistoryConflict)
+	if manifestCount != 1 {
+		return HistoryCapture{}, fmt.Errorf("%w: exactly one canonical final manifest must be expected", ErrHistoryIncomplete)
+	}
+	if !capture.ExpectedHarness {
+		if harnessCount != 0 || input.ZeroHarnessRootReason != "" {
+			return HistoryCapture{}, fmt.Errorf("%w: capture does not expect Harness roots", ErrHistoryConflict)
+		}
+	} else if harnessCount == 0 {
+		if capture.ExecutionVerdict == HistoryExecutionPending || capture.ExecutionVerdict == HistoryExecutionSucceeded || input.ZeroHarnessRootReason == "" {
+			return HistoryCapture{}, fmt.Errorf("%w: zero Harness roots require a non-success startup verdict and audited reason", ErrHistoryIncomplete)
+		}
+	} else if input.ZeroHarnessRootReason != "" {
+		return HistoryCapture{}, fmt.Errorf("%w: zero-root reason conflicts with declared Harness roots", ErrHistoryConflict)
 	}
 	now := s.now().UTC()
 	nowText := sqlitex.FormatTime(now)
@@ -1381,13 +1999,13 @@ UPDATE history_captures
 SET expected_set_declared_at = ?, expected_final_artifact_count = ?,
     expected_transcript_epoch = ?, expected_transcript_segment_count = ?,
     expected_transcript_length = ?, expected_transcript_sha256 = ?,
-    version = version + 1, updated_at = ?
-WHERE id = ? AND version = ?`, nowText, len(expectations), epoch, segments, length, digest, nowText, capture.ID, input.ExpectedVersion)
+    zero_harness_root_reason = ?, version = version + 1, updated_at = ?
+WHERE id = ? AND version = ?`, nowText, len(expectations), epoch, segments, length, digest, input.ZeroHarnessRootReason, nowText, capture.ID, input.ExpectedVersion)
 	if err != nil {
 		return HistoryCapture{}, err
 	}
 	if err := appendHistoryCaptureEvent(ctx, tx, capture.ID, "expected_set_declared", string(capture.State), string(capture.State), capture.Version+1,
-		input.Actor, "", map[string]any{"artifact_count": len(expectations), "transcript_segments": segments}, now); err != nil {
+		input.Actor, "", map[string]any{"artifact_count": len(expectations), "transcript_segments": segments, "zero_harness_root_reason": input.ZeroHarnessRootReason}, now); err != nil {
 		return HistoryCapture{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1435,7 +2053,7 @@ FROM history_transcript_streams WHERE capture_id = ?`, captureID).Scan(&state, &
 	return nil
 }
 
-func expectedSetMatchesTx(ctx context.Context, tx *sqlitex.Tx, capture HistoryCapture, expected []FinalArtifactExpectation, seal *TranscriptSeal) (bool, error) {
+func expectedSetMatchesTx(ctx context.Context, tx *sqlitex.Tx, capture HistoryCapture, expected []FinalArtifactExpectation, seal *TranscriptSeal, zeroRootReason string) (bool, error) {
 	rows, err := tx.QueryContext(ctx, `
 SELECT logical_key, kind FROM history_capture_expected_artifacts
 WHERE capture_id = ? ORDER BY logical_key`, capture.ID)
@@ -1458,6 +2076,9 @@ WHERE capture_id = ? ORDER BY logical_key`, capture.ID)
 		if actual[index] != expected[index] {
 			return false, nil
 		}
+	}
+	if capture.ZeroHarnessRootReason != zeroRootReason {
+		return false, nil
 	}
 	if capture.ExpectedTranscript {
 		if seal == nil || capture.ExpectedTranscriptSegmentCount == nil || capture.ExpectedTranscriptLength == nil {
@@ -1501,8 +2122,20 @@ func (s *HistoryCaptureService) Complete(ctx context.Context, captureID, grant s
 	if err := verifyCaptureCompletenessTx(ctx, tx, capture); err != nil {
 		return HistoryCapture{}, err
 	}
+	var manifestID string
+	if err := tx.QueryRowContext(ctx, `
+SELECT id FROM history_artifacts
+WHERE capture_id = ? AND kind = 'manifest' AND phase = 'final' AND publication_state = 'committed'`, capture.ID).Scan(&manifestID); err != nil {
+		return HistoryCapture{}, err
+	}
 	now := s.now().UTC()
 	nowText := sqlitex.FormatTime(now)
+	if _, err := tx.ExecContext(ctx, `
+UPDATE history_artifacts
+SET superseded_by_artifact_id = ?, superseded_at = ?
+WHERE capture_id = ? AND phase = 'checkpoint' AND publication_state = 'committed'`, manifestID, nowText, capture.ID); err != nil {
+		return HistoryCapture{}, err
+	}
 	_, err = tx.ExecContext(ctx, `
 UPDATE history_captures
 SET state = 'complete', completed_at = ?, upload_grant_revoked_at = ?,
@@ -1522,6 +2155,47 @@ WHERE id = ? AND version = ?`, nowText, nowText, nowText, capture.ID, expectedVe
 }
 
 func verifyCaptureCompletenessTx(ctx context.Context, tx *sqlitex.Tx, capture HistoryCapture) error {
+	if capture.ExecutionVerdict == HistoryExecutionPending {
+		return fmt.Errorf("%w: execution verdict is still pending", ErrHistoryIncomplete)
+	}
+	var pendingArtifacts, activeIntents int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM history_artifacts WHERE capture_id = ? AND publication_state = 'pending'`, capture.ID).Scan(&pendingArtifacts); err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM history_upload_intents WHERE capture_id = ? AND state = 'active'`, capture.ID).Scan(&activeIntents); err != nil {
+		return err
+	}
+	if pendingArtifacts != 0 || activeIntents != 0 {
+		return fmt.Errorf("%w: capture has %d pending artifacts and %d active upload intents", ErrHistoryPublicationPending, pendingArtifacts, activeIntents)
+	}
+	var expectedManifests, committedManifests, expectedHarnessRoots int
+	if err := tx.QueryRowContext(ctx, `
+SELECT
+  SUM(kind = 'manifest'),
+  SUM(kind = 'harness_root')
+FROM history_capture_expected_artifacts WHERE capture_id = ?`, capture.ID).Scan(&expectedManifests, &expectedHarnessRoots); err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM history_artifacts
+WHERE capture_id = ? AND kind = 'manifest' AND phase = 'final' AND publication_state = 'committed'`, capture.ID).Scan(&committedManifests); err != nil {
+		return err
+	}
+	if expectedManifests != 1 || committedManifests != 1 {
+		return fmt.Errorf("%w: exactly one expected and committed canonical manifest is required", ErrHistoryIncomplete)
+	}
+	if !capture.ExpectedHarness && expectedHarnessRoots != 0 {
+		return fmt.Errorf("%w: capture does not expect Harness roots", ErrHistoryConflict)
+	}
+	if capture.ExpectedHarness && capture.ExecutionVerdict == HistoryExecutionSucceeded && expectedHarnessRoots < 1 {
+		return fmt.Errorf("%w: successful capture requires a final Harness root", ErrHistoryIncomplete)
+	}
+	if capture.ExpectedHarness && expectedHarnessRoots == 0 && (capture.ExecutionVerdict == HistoryExecutionSucceeded || capture.ZeroHarnessRootReason == "") {
+		return fmt.Errorf("%w: zero Harness roots require an audited non-success startup reason", ErrHistoryIncomplete)
+	}
+	if expectedHarnessRoots != 0 && capture.ZeroHarnessRootReason != "" {
+		return fmt.Errorf("%w: zero-root reason conflicts with final Harness roots", ErrHistoryConflict)
+	}
 	var missing int
 	if err := tx.QueryRowContext(ctx, `
 SELECT COUNT(*)
@@ -1579,23 +2253,32 @@ FROM history_transcript_streams WHERE capture_id = ?`, capture.ID).Scan(&state, 
 		if state != "sealed" || count != *capture.ExpectedTranscriptSegmentCount || length != *capture.ExpectedTranscriptLength || actualEpoch != expectedEpoch || digest != capture.ExpectedTranscriptSHA256 {
 			return fmt.Errorf("%w: transcript stream does not match declared seal", ErrHistoryIncomplete)
 		}
-		var uncommittedSegments int
+		var committedArtifacts, registeredSegments, correspondingSegments int
 		if err := tx.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM history_transcript_segments AS segment
-JOIN history_artifacts AS artifact ON artifact.id = segment.artifact_id
-WHERE segment.capture_id = ? AND artifact.publication_state != 'committed'`, capture.ID).Scan(&uncommittedSegments); err != nil {
+SELECT
+  (SELECT COUNT(*) FROM history_artifacts
+   WHERE capture_id = ? AND kind = 'transcript_segment' AND phase = 'final' AND publication_state = 'committed'),
+  (SELECT COUNT(*) FROM history_transcript_segments WHERE capture_id = ?),
+  (SELECT COUNT(*) FROM history_transcript_segments AS segment
+   JOIN history_artifacts AS artifact ON artifact.id = segment.artifact_id
+   WHERE segment.capture_id = ? AND artifact.capture_id = ?
+     AND artifact.kind = 'transcript_segment' AND artifact.phase = 'final'
+     AND artifact.publication_state = 'committed')`, capture.ID, capture.ID, capture.ID, capture.ID).Scan(&committedArtifacts, &registeredSegments, &correspondingSegments); err != nil {
 			return err
 		}
-		if uncommittedSegments != 0 {
-			return fmt.Errorf("%w: transcript has uncommitted segment artifacts", ErrHistoryIncomplete)
+		if committedArtifacts != registeredSegments || registeredSegments != correspondingSegments || int64(registeredSegments) != *capture.ExpectedTranscriptSegmentCount {
+			return fmt.Errorf("%w: transcript artifacts and registered segments are not one-to-one", ErrHistoryIncomplete)
 		}
 	} else {
-		var segments int
+		var segments, artifacts int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM history_transcript_segments WHERE capture_id = ?`, capture.ID).Scan(&segments); err != nil {
 			return err
 		}
-		if segments != 0 {
-			return fmt.Errorf("%w: unexpected transcript segments", ErrHistoryIncomplete)
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM history_artifacts WHERE capture_id = ? AND kind = 'transcript_segment' AND phase = 'final' AND publication_state = 'committed'`, capture.ID).Scan(&artifacts); err != nil {
+			return err
+		}
+		if segments != 0 || artifacts != 0 {
+			return fmt.Errorf("%w: unexpected transcript segments or artifacts", ErrHistoryIncomplete)
 		}
 	}
 	return nil

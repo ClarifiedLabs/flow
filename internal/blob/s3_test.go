@@ -134,14 +134,22 @@ func (f *fakeS3) ListObjectsV2(_ context.Context, input *s3.ListObjectsV2Input, 
 		}
 	}
 	sort.Strings(keys)
-	limit := len(keys)
+	start := sort.SearchStrings(keys, aws.ToString(input.ContinuationToken))
+	if input.ContinuationToken != nil && start < len(keys) && keys[start] == *input.ContinuationToken {
+		start++
+	}
+	limit := len(keys) - start
 	if input.MaxKeys != nil && limit > int(*input.MaxKeys) {
 		limit = int(*input.MaxKeys)
 	}
-	output := &s3.ListObjectsV2Output{IsTruncated: aws.Bool(limit < len(keys))}
-	for _, key := range keys[:limit] {
+	end := start + limit
+	output := &s3.ListObjectsV2Output{IsTruncated: aws.Bool(end < len(keys))}
+	for _, key := range keys[start:end] {
 		object := f.objects[key]
 		output.Contents = append(output.Contents, types.Object{Key: aws.String(key), LastModified: aws.Time(object.modified), Size: aws.Int64(int64(len(object.data)))})
+	}
+	if end < len(keys) && end > start {
+		output.NextContinuationToken = aws.String(keys[end-1])
 	}
 	return output, nil
 }
@@ -149,11 +157,31 @@ func (f *fakeS3) ListObjectsV2(_ context.Context, input *s3.ListObjectsV2Input, 
 func (f *fakeS3) ListMultipartUploads(_ context.Context, input *s3.ListMultipartUploadsInput, _ ...func(*s3.Options)) (*s3.ListMultipartUploadsOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	output := &s3.ListMultipartUploadsOutput{IsTruncated: aws.Bool(false)}
+	uploads := make([]types.MultipartUpload, 0, len(f.multiparts))
 	for _, upload := range f.multiparts {
 		if strings.HasPrefix(aws.ToString(upload.Key), aws.ToString(input.Prefix)) {
-			output.Uploads = append(output.Uploads, upload)
+			uploads = append(uploads, upload)
 		}
+	}
+	sort.Slice(uploads, func(i, j int) bool {
+		leftKey, rightKey := aws.ToString(uploads[i].Key), aws.ToString(uploads[j].Key)
+		return leftKey < rightKey || leftKey == rightKey && aws.ToString(uploads[i].UploadId) < aws.ToString(uploads[j].UploadId)
+	})
+	markerKey, markerUpload := aws.ToString(input.KeyMarker), aws.ToString(input.UploadIdMarker)
+	start := sort.Search(len(uploads), func(i int) bool {
+		key, upload := aws.ToString(uploads[i].Key), aws.ToString(uploads[i].UploadId)
+		return key > markerKey || key == markerKey && upload > markerUpload
+	})
+	limit := len(uploads) - start
+	if input.MaxUploads != nil && limit > int(*input.MaxUploads) {
+		limit = int(*input.MaxUploads)
+	}
+	end := start + limit
+	output := &s3.ListMultipartUploadsOutput{IsTruncated: aws.Bool(end < len(uploads)), Uploads: append([]types.MultipartUpload(nil), uploads[start:end]...)}
+	if end < len(uploads) && end > start {
+		last := uploads[end-1]
+		output.NextKeyMarker = aws.String(aws.ToString(last.Key))
+		output.NextUploadIdMarker = aws.String(aws.ToString(last.UploadId))
 	}
 	return output, nil
 }
@@ -161,7 +189,14 @@ func (f *fakeS3) ListMultipartUploads(_ context.Context, input *s3.ListMultipart
 func (f *fakeS3) AbortMultipartUpload(_ context.Context, input *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.aborted = append(f.aborted, aws.ToString(input.UploadId))
+	id := aws.ToString(input.UploadId)
+	f.aborted = append(f.aborted, id)
+	for index, upload := range f.multiparts {
+		if aws.ToString(upload.UploadId) == id && aws.ToString(upload.Key) == aws.ToString(input.Key) {
+			f.multiparts = append(f.multiparts[:index], f.multiparts[index+1:]...)
+			break
+		}
+	}
 	return &s3.AbortMultipartUploadOutput{}, nil
 }
 
@@ -177,6 +212,58 @@ func (r *contextReader) Read(p []byte) (int, error) {
 	default:
 		return r.reader.Read(p)
 	}
+}
+
+type stalledPutS3 struct {
+	*fakeS3
+	started chan struct{}
+	exited  chan struct{}
+}
+
+func (f *stalledPutS3) PutObject(ctx context.Context, _ *s3.PutObjectInput, _ ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+	close(f.started)
+	<-ctx.Done()
+	close(f.exited)
+	return nil, ctx.Err()
+}
+
+type lateCommitS3 struct {
+	*fakeS3
+	started chan struct{}
+	events  []string
+}
+
+func (f *lateCommitS3) PutObject(ctx context.Context, input *s3.PutObjectInput, _ ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+	close(f.started)
+	<-ctx.Done()
+	f.mu.Lock()
+	f.objects[aws.ToString(input.Key)] = fakeS3Object{modified: time.Now().UTC()}
+	f.events = append(f.events, "put-exit")
+	f.mu.Unlock()
+	return &s3.PutObjectOutput{}, nil
+}
+
+func (f *lateCommitS3) DeleteObject(_ context.Context, input *s3.DeleteObjectInput, _ ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, "delete")
+	delete(f.objects, aws.ToString(input.Key))
+	return &s3.DeleteObjectOutput{}, nil
+}
+
+type emptyPageS3 struct {
+	*fakeS3
+	mu    sync.Mutex
+	calls int
+}
+
+func (f *emptyPageS3) ListObjectsV2(_ context.Context, _ *s3.ListObjectsV2Input, _ ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	return &s3.ListObjectsV2Output{
+		IsTruncated: aws.Bool(true), NextContinuationToken: aws.String(fmt.Sprintf("empty-%d", f.calls)),
+	}, nil
 }
 
 func TestS3ConfigurationRequiresTLSAndEncryption(t *testing.T) {
@@ -261,6 +348,74 @@ func TestS3StreamingLifecycleRangeAndImmutablePublish(t *testing.T) {
 	}
 }
 
+func TestS3AbortReleasesBlockedWrite(t *testing.T) {
+	client := &stalledPutS3{fakeS3: newFakeS3(), started: make(chan struct{}), exited: make(chan struct{})}
+	store, err := NewS3(S3Options{Client: client, Bucket: "bucket"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upload, err := store.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-client.started
+	writeDone := make(chan error, 1)
+	go func() {
+		_, writeErr := upload.Write([]byte("blocked"))
+		writeDone <- writeErr
+	}()
+	select {
+	case err := <-writeDone:
+		t.Fatalf("Write returned before Abort: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := upload.Abort(ctx); err != nil {
+		t.Fatalf("Abort() = %v", err)
+	}
+	select {
+	case err := <-writeDone:
+		if err == nil {
+			t.Fatal("blocked Write unexpectedly succeeded")
+		}
+	case <-ctx.Done():
+		t.Fatal("blocked Write was not released")
+	}
+	select {
+	case <-client.exited:
+	default:
+		t.Fatal("Abort returned before PutObject exited")
+	}
+}
+
+func TestS3AbortDeletesOnlyAfterLatePutExit(t *testing.T) {
+	client := &lateCommitS3{fakeS3: newFakeS3(), started: make(chan struct{})}
+	store, err := NewS3(S3Options{Client: client, Bucket: "bucket"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upload, err := store.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-client.started
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := upload.Abort(ctx); err != nil {
+		t.Fatal(err)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if strings.Join(client.events, ",") != "put-exit,delete" {
+		t.Fatalf("operation order = %v, want PUT exit before delete", client.events)
+	}
+	if len(client.objects) != 0 {
+		t.Fatalf("late PUT recreated temporary object: %v", client.objects)
+	}
+}
+
 func TestS3AbortWaitsForStreamingPut(t *testing.T) {
 	client := newFakeS3()
 	store, err := NewS3(S3Options{Client: client, Bucket: "bucket"})
@@ -328,6 +483,99 @@ func TestS3ChecksumFailureAndReconciliation(t *testing.T) {
 	}
 	if _, ok := client.objects[store.temporaryKey(liveID)]; !ok {
 		t.Fatal("live temporary was removed")
+	}
+}
+
+func TestS3ReconcileAdvancesBoundedPagination(t *testing.T) {
+	client := newFakeS3()
+	store, err := NewS3(S3Options{Client: client, Bucket: "bucket", Prefix: "flow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	recent := time.Now().UTC()
+	before := old.Add(time.Hour)
+	liveID := strings.Repeat("a", 32)
+	recentID := strings.Repeat("b", 32)
+	staleID := strings.Repeat("c", 32)
+	for id, modified := range map[string]time.Time{liveID: old, recentID: recent, staleID: old} {
+		client.objects[store.temporaryKey(id)] = fakeS3Object{data: []byte(id), modified: modified}
+	}
+	client.multiparts = []types.MultipartUpload{
+		{Key: aws.String(store.temporaryKey(liveID)), UploadId: aws.String("multipart-live"), Initiated: aws.Time(old)},
+		{Key: aws.String(store.temporaryKey(recentID)), UploadId: aws.String("multipart-recent"), Initiated: aws.Time(recent)},
+		{Key: aws.String(store.temporaryKey(staleID)), UploadId: aws.String("multipart-stale"), Initiated: aws.Time(old)},
+	}
+	referenced, _ := ParseKey(strings.Repeat("0", 32) + "/" + strings.Repeat("0", 32))
+	pending, _ := ParseKey(strings.Repeat("1", 32) + "/" + strings.Repeat("1", 32))
+	orphan, _ := ParseKey(strings.Repeat("2", 32) + "/" + strings.Repeat("2", 32))
+	for _, key := range []Key{referenced, pending, orphan} {
+		data := []byte(key.String())
+		digest := Digest(sha256.Sum256(data))
+		client.objects[store.objectKey(key)] = fakeS3Object{
+			data: data, modified: old, checksum: base64.StdEncoding.EncodeToString(digest[:]),
+			metadata: map[string]string{digestMetadataKey: digest.String()},
+		}
+	}
+
+	request := ReconcileRequest{
+		Before: before, Limit: 2, LiveTemporaryIDs: map[string]struct{}{liveID: {}},
+		ReferencedKeys: map[Key]struct{}{referenced: {}}, PendingKeys: map[Key]struct{}{pending: {}},
+	}
+	var removed, aborted []string
+	var orphans []Object
+	calls := 0
+	for {
+		calls++
+		result, reconcileErr := store.Reconcile(context.Background(), request)
+		if reconcileErr != nil {
+			t.Fatal(reconcileErr)
+		}
+		removed = append(removed, result.RemovedTemporaryIDs...)
+		aborted = append(aborted, result.AbortedMultipartIDs...)
+		orphans = append(orphans, result.Orphans...)
+		if !result.Truncated {
+			break
+		}
+		if calls > 8 {
+			t.Fatal("bounded reconciliation did not finish")
+		}
+	}
+	if strings.Join(removed, ",") != staleID {
+		t.Fatalf("removed temporaries = %v", removed)
+	}
+	if strings.Join(aborted, ",") != "multipart-stale" {
+		t.Fatalf("aborted multiparts = %v", aborted)
+	}
+	if len(orphans) != 1 || orphans[0].Key != orphan {
+		t.Fatalf("orphans = %+v", orphans)
+	}
+	if calls < 5 {
+		t.Fatalf("reconciliation used %d calls, want multiple bounded pages", calls)
+	}
+	if _, err := store.Head(context.Background(), orphan); err != nil {
+		t.Fatalf("published orphan was deleted: %v", err)
+	}
+}
+
+func TestS3ReconcileBoundsAdvancingEmptyPages(t *testing.T) {
+	client := &emptyPageS3{fakeS3: newFakeS3()}
+	store, err := NewS3(S3Options{Client: client, Bucket: "bucket"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.Reconcile(context.Background(), ReconcileRequest{Before: time.Now(), Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Truncated {
+		t.Fatal("empty truncated pages should leave reconciliation truncated")
+	}
+	client.mu.Lock()
+	calls := client.calls
+	client.mu.Unlock()
+	if calls != 3 {
+		t.Fatalf("ListObjectsV2 calls = %d, want bounded 3", calls)
 	}
 }
 

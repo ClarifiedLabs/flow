@@ -272,9 +272,14 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	}
 
 	registry, err := api.NewRegistry(api.RegistryOptions{
-		DataDir:                    cfg.DataDir,
-		Global:                     globalStore,
-		HistoryBlobStore:           historyStore,
+		DataDir:          cfg.DataDir,
+		Global:           globalStore,
+		HistoryBlobStore: historyStore,
+		HistoryCaptureServiceOptions: coordinator.HistoryCaptureServiceOptions{
+			MaxUploadBytes:            historyPolicy.Archive.MaxStoredBytes,
+			MaxTranscriptSegmentBytes: historyPolicy.Transcript.SegmentBytes,
+			MaxArtifactsPerCapture:    historyPolicy.Archive.MaxEntries,
+		},
 		AuthorEntrypoint:           cfg.AuthorEntrypoint,
 		AuthorEntrypointConfigured: cfg.AuthorEntrypointConfigured,
 		HarnessArgs:                cfg.HarnessArgs,
@@ -477,6 +482,17 @@ func runHistoryReconciliation(ctx context.Context, registry *api.Registry, store
 }
 
 func reconcileHistoryStorage(ctx context.Context, registry *api.Registry, store blob.Store, policy config.ResolvedHistoryReconciliation, metricSet metrics.HistoryStorage, now time.Time) (blob.ReconcileResult, error) {
+	// Each project receives an independent allowance. Recover durable pending
+	// publications before taking the relational protection snapshot used for
+	// destructive temporary cleanup. Pending publication does blocking object
+	// verification, so keep its per-project pass smaller than the backend scan.
+	pendingLimit := policy.BatchSize
+	if pendingLimit > 500 {
+		pendingLimit = 500
+	}
+	if _, err := registry.ReconcilePendingHistoryArtifacts(ctx, pendingLimit); err != nil {
+		return blob.ReconcileResult{}, err
+	}
 	request, err := registry.HistoryBlobMetadata(ctx)
 	if err != nil {
 		return blob.ReconcileResult{}, err

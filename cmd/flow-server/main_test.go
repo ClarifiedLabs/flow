@@ -321,8 +321,30 @@ func newServeTestRegistry(t *testing.T) (*api.Registry, coordinator.Project) {
 
 func TestHistoryReconciliationRemovesOnlyUnreferencedTemporariesAndReportsPublishedOrphans(t *testing.T) {
 	ctx := context.Background()
-	registry, _ := newServeTestRegistry(t)
+	registry, project := newServeTestRegistry(t)
 	store := registry.HistoryBlobStore()
+	bundle, ok := registry.Bundle(project.ID)
+	if !ok {
+		t.Fatal("project bundle not open")
+	}
+	reserved, err := bundle.HistoryCaptures.Reserve(ctx, coordinator.ReserveHistoryCaptureInput{
+		ProjectID: project.ID, JobID: "active-history-upload", LeaseID: "lease-active-history-upload",
+		LeaseAttempt: 1, WorkerID: "worker", Role: "author", ExpectedHarness: true,
+	})
+	if err != nil {
+		t.Fatalf("reserve history capture: %v", err)
+	}
+	active, err := bundle.HistoryCaptures.BeginUpload(ctx, reserved.Capture.ID, reserved.UploadGrant)
+	if err != nil {
+		t.Fatalf("begin active history upload: %v", err)
+	}
+	if _, err := active.Write([]byte("active")); err != nil {
+		t.Fatalf("write active history upload: %v", err)
+	}
+	activeTemporary, err := active.Complete(ctx)
+	if err != nil {
+		t.Fatalf("complete active history upload: %v", err)
+	}
 
 	abandoned, err := store.Begin(ctx)
 	if err != nil {
@@ -372,6 +394,9 @@ func TestHistoryReconciliationRemovesOnlyUnreferencedTemporariesAndReportsPublis
 	}
 	if _, err := store.Resume(ctx, abandonedTemporary.ID); !errors.Is(err, blob.ErrNotFound) {
 		t.Fatalf("abandoned temporary still exists: %v", err)
+	}
+	if _, err := store.Resume(ctx, activeTemporary.ID); err != nil {
+		t.Fatalf("active-intent temporary was removed: %v", err)
 	}
 	var exposition bytes.Buffer
 	registryMetrics.Render(&exposition)

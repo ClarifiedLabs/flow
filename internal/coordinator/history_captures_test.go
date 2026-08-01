@@ -1,6 +1,8 @@
 package coordinator
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -87,6 +89,39 @@ func publishHistoryBytes(t *testing.T, service *HistoryCaptureService, captureID
 	return artifact
 }
 
+func publishCanonicalManifestBytes(t *testing.T, service *HistoryCaptureService, captureID string, input PublishHistoryArtifactInput, content []byte) HistoryArtifact {
+	t.Helper()
+	upload, err := service.blobs.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upload.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	temporary, err := upload.Complete(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := service.PublishCanonicalManifest(context.Background(), captureID, input, temporary)
+	if err != nil {
+		t.Fatalf("publish canonical manifest: %v", err)
+	}
+	return artifact
+}
+
+func gzipHistoryBytes(t *testing.T, content []byte) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	writer := gzip.NewWriter(&output)
+	if _, err := writer.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return output.Bytes()
+}
+
 func historyDigest(content []byte) string {
 	digest := sha256.Sum256(content)
 	return stringHex(digest[:])
@@ -167,9 +202,9 @@ func TestHistoryCaptureConcurrentReservationIsIdempotentAndGrantIsHashOnly(t *te
 			t.Fatalf("concurrent reservation: %v", err)
 		}
 	}
-	created := 0
+	created, rotated := 0, 0
 	captureID := ""
-	grant := ""
+	var grants []string
 	for result := range results {
 		if captureID == "" {
 			captureID = result.Capture.ID
@@ -178,29 +213,46 @@ func TestHistoryCaptureConcurrentReservationIsIdempotentAndGrantIsHashOnly(t *te
 		}
 		if result.Created {
 			created++
-			grant = result.UploadGrant
-		} else if result.UploadGrant != "" {
-			t.Fatal("idempotent reservation revealed raw grant")
+		} else if result.GrantRotated {
+			rotated++
 		}
+		if result.UploadGrant == "" {
+			t.Fatal("reservation retry did not reissue a grant")
+		}
+		grants = append(grants, result.UploadGrant)
 	}
-	if created != 1 || grant == "" {
-		t.Fatalf("created reservations=%d grant=%q, want one nonempty grant", created, grant)
+	if created != 1 || rotated != callers-1 {
+		t.Fatalf("created=%d rotated=%d, want 1/%d", created, rotated, callers-1)
 	}
 
 	var storedHash string
 	if err := env.store.DB().QueryRowContext(ctx, `SELECT upload_grant_hash FROM history_captures WHERE id = ?`, captureID).Scan(&storedHash); err != nil {
 		t.Fatal(err)
 	}
-	if storedHash == grant || storedHash != hashHistoryGrant(grant) || strings.Contains(storedHash, grant) {
-		t.Fatalf("stored grant value = %q, raw grant was persisted or hash differs", storedHash)
+	current := ""
+	for _, grant := range grants {
+		if storedHash == hashHistoryGrant(grant) {
+			current = grant
+			continue
+		}
+		if err := env.service.AuthenticateUploadGrant(ctx, captureID, grant); !errors.Is(err, ErrHistoryUnauthorized) {
+			t.Fatalf("superseded grant err=%v, want unauthorized", err)
+		}
 	}
-	if err := env.service.AuthenticateUploadGrant(ctx, captureID, grant); err != nil {
-		t.Fatalf("authenticate correct grant: %v", err)
+	if current == "" || storedHash == current || strings.Contains(storedHash, current) {
+		t.Fatalf("stored grant value = %q, no current hashed grant", storedHash)
+	}
+	if err := env.service.AuthenticateUploadGrant(ctx, captureID, current); err != nil {
+		t.Fatalf("authenticate current grant: %v", err)
+	}
+	var rotations int
+	if err := env.store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM history_capture_events WHERE capture_id = ? AND event_kind = 'upload_grant_rotated'`, captureID).Scan(&rotations); err != nil || rotations != callers-1 {
+		t.Fatalf("rotation events=%d err=%v", rotations, err)
 	}
 	if err := env.service.AuthenticateUploadGrant(ctx, captureID, "wrong"); !errors.Is(err, ErrHistoryUnauthorized) {
 		t.Fatalf("wrong grant err=%v, want unauthorized", err)
 	}
-	if err := env.service.AuthenticateUploadGrant(ctx, "hc-00000000000000000000000000000000", grant); !errors.Is(err, ErrHistoryUnauthorized) {
+	if err := env.service.AuthenticateUploadGrant(ctx, "hc-00000000000000000000000000000000", current); !errors.Is(err, ErrHistoryUnauthorized) {
 		t.Fatalf("unknown capture err=%v, want same unauthorized result", err)
 	}
 
@@ -245,6 +297,12 @@ func TestHistoryCaptureTransitionsVersionsAndExecutionVerdictAreIndependent(t *t
 	}
 	if blocked.ExecutionVerdict != HistoryExecutionSucceeded || blocked.State != HistoryCaptureBlocked {
 		t.Fatalf("blocked capture = %+v, successful verdict was changed", blocked)
+	}
+	if retry, err := env.service.MarkBlocked(ctx, verdict.ID, verdict.Version, "worker", "store_down", "history storage unavailable"); err != nil || retry.Version != blocked.Version {
+		t.Fatalf("same transition response-loss retry=%+v err=%v", retry, err)
+	}
+	if _, err := env.service.MarkBlocked(ctx, verdict.ID, verdict.Version, "worker", "store_down", "different"); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatalf("conflicting achieved transition err=%v, want conflict", err)
 	}
 	if _, err := env.service.RecordExecutionVerdict(ctx, blocked.ID, RecordHistoryExecutionVerdictInput{
 		Verdict: HistoryExecutionFailed, ExpectedVersion: blocked.Version, Actor: "worker",
@@ -315,7 +373,14 @@ func TestHistoryArtifactImmutableIdempotencyAndPublicationRecovery(t *testing.T)
 	if err != nil || pending.PublicationState != HistoryPublicationPending {
 		t.Fatalf("artifact after response loss = %+v err=%v, want relational pending", pending, err)
 	}
-	recovered, err := lossyService.ReconcileArtifact(ctx, reserved.Capture.ID, reserved.UploadGrant, lossInput.LogicalKey)
+	if _, err := lossyService.MarkLost(ctx, reserved.Capture.ID, reserved.Capture.Version, "watchdog", "worker_lost", "worker disappeared"); err != nil {
+		t.Fatalf("mark worker lost: %v", err)
+	}
+	summary, err := lossyService.ReconcilePendingArtifacts(ctx, reserved.Capture.ID, 10)
+	if err != nil || summary.Examined != 1 || summary.Committed != 1 {
+		t.Fatalf("grantless reconciliation summary=%+v err=%v", summary, err)
+	}
+	recovered, err := lossyService.GetArtifact(ctx, reserved.Capture.ID, lossInput.LogicalKey)
 	if err != nil || recovered.PublicationState != HistoryPublicationCommitted || recovered.SHA256 != historyDigest(lossContent) {
 		t.Fatalf("reconciled artifact = %+v err=%v", recovered, err)
 	}
@@ -367,7 +432,10 @@ func TestHistoryTranscriptOrderingSealAndExactExpectedCompletion(t *testing.T) {
 		t.Fatalf("seal transcript: %v", err)
 	}
 
-	expected := []FinalArtifactExpectation{{LogicalKey: "harness/final/root-1", Kind: HistoryArtifactHarnessRoot}}
+	expected := []FinalArtifactExpectation{
+		{LogicalKey: "harness/final/root-1", Kind: HistoryArtifactHarnessRoot},
+		{LogicalKey: "manifest/final", Kind: HistoryArtifactManifest},
+	}
 	capture, err = env.service.DeclareExpectedSet(ctx, capture.ID, reserved.UploadGrant, DeclareHistoryExpectedSetInput{
 		Artifacts: expected, TranscriptSeal: &seal, ExpectedVersion: capture.Version, Actor: "worker",
 	})
@@ -383,11 +451,22 @@ func TestHistoryTranscriptOrderingSealAndExactExpectedCompletion(t *testing.T) {
 		LogicalKey: "harness/final/root-1", Kind: HistoryArtifactHarnessRoot, Phase: HistoryArtifactFinal,
 		ArchiveID: "root-1", MediaType: "application/gzip", LogicalSize: 4, EntryCount: 1,
 	}, []byte("root"))
+	publishCanonicalManifestBytes(t, env.service, capture.ID, PublishHistoryArtifactInput{
+		LogicalKey: "manifest/final", Kind: HistoryArtifactManifest, Phase: HistoryArtifactFinal,
+		MediaType: "application/json", LogicalSize: 2,
+	}, []byte("{}"))
+	exitCode := 0
+	capture, err = env.service.RecordExecutionVerdict(ctx, capture.ID, RecordHistoryExecutionVerdictInput{
+		Verdict: HistoryExecutionSucceeded, ExitCode: &exitCode, ExpectedVersion: capture.Version, Actor: "worker",
+	})
+	if err != nil {
+		t.Fatalf("record succeeded verdict: %v", err)
+	}
 	completed, err := env.service.Complete(ctx, capture.ID, reserved.UploadGrant, capture.Version, "worker")
 	if err != nil {
 		t.Fatalf("complete exact capture: %v", err)
 	}
-	if completed.State != HistoryCaptureComplete || completed.ExecutionVerdict != HistoryExecutionPending {
+	if completed.State != HistoryCaptureComplete || completed.ExecutionVerdict != HistoryExecutionSucceeded {
 		t.Fatalf("completed capture = %+v", completed)
 	}
 	if err := env.service.AuthenticateUploadGrant(ctx, capture.ID, reserved.UploadGrant); !errors.Is(err, ErrHistoryGrantNoLongerUsable) {
@@ -429,19 +508,28 @@ func TestHistoryCheckpointHintsCoalesceAndCheckpointArtifactsNeverCompleteFinalS
 		return PublishHistoryArtifactInput{
 			LogicalKey: "harness/checkpoint/root-1/" + string(rune('0'+generation)),
 			Kind:       HistoryArtifactHarnessRoot, Phase: HistoryArtifactCheckpoint,
-			CheckpointGeneration: generation, CheckpointTrigger: "Stop", ArchiveID: "root-1",
+			CheckpointGeneration: generation, CheckpointTrigger: "Stop", CheckpointStream: "root-1", ArchiveID: "root-1",
 			MediaType: "application/gzip", LogicalSize: generation, EntryCount: 1,
 		}
 	}
 	first := publishHistoryBytes(t, env.service, capture.ID, reserved.UploadGrant, checkpointInput(1), []byte("one"))
+	otherInput := checkpointInput(2)
+	otherInput.LogicalKey, otherInput.CheckpointStream, otherInput.ArchiveID = "harness/checkpoint/root-2/2", "root-2", "root-2"
+	other := publishHistoryBytes(t, env.service, capture.ID, reserved.UploadGrant, otherInput, []byte("other"))
 	second := publishHistoryBytes(t, env.service, capture.ID, reserved.UploadGrant, checkpointInput(2), []byte("two"))
 	var supersededBy string
 	if err := env.store.DB().QueryRowContext(ctx, `SELECT COALESCE(superseded_by_artifact_id, '') FROM history_artifacts WHERE id = ?`, first.ID).Scan(&supersededBy); err != nil || supersededBy != second.ID {
 		t.Fatalf("checkpoint 1 superseded_by=%q err=%v, want %q", supersededBy, err, second.ID)
 	}
+	if err := env.store.DB().QueryRowContext(ctx, `SELECT COALESCE(superseded_by_artifact_id, '') FROM history_artifacts WHERE id = ?`, other.ID).Scan(&supersededBy); err != nil || supersededBy != "" {
+		t.Fatalf("interleaved root checkpoint was incorrectly superseded: %q err=%v", supersededBy, err)
+	}
 
 	capture, err = env.service.DeclareExpectedSet(ctx, capture.ID, reserved.UploadGrant, DeclareHistoryExpectedSetInput{
-		Artifacts:       []FinalArtifactExpectation{{LogicalKey: "harness/final/root-1", Kind: HistoryArtifactHarnessRoot}},
+		Artifacts: []FinalArtifactExpectation{
+			{LogicalKey: "harness/final/root-1", Kind: HistoryArtifactHarnessRoot},
+			{LogicalKey: "manifest/final", Kind: HistoryArtifactManifest},
+		},
 		ExpectedVersion: capture.Version, Actor: "worker",
 	})
 	if err != nil {
@@ -456,12 +544,28 @@ func TestHistoryCheckpointHintsCoalesceAndCheckpointArtifactsNeverCompleteFinalS
 		LogicalKey: "harness/final/root-1", Kind: HistoryArtifactHarnessRoot, Phase: HistoryArtifactFinal,
 		ArchiveID: "root-1", MediaType: "application/gzip", LogicalSize: 5, EntryCount: 1,
 	}, []byte("final"))
+	manifest := publishCanonicalManifestBytes(t, env.service, capture.ID, PublishHistoryArtifactInput{
+		LogicalKey: "manifest/final", Kind: HistoryArtifactManifest, Phase: HistoryArtifactFinal,
+		MediaType: "application/json", LogicalSize: 2,
+	}, []byte("{}"))
+	exitCode := 0
+	capture, err = env.service.RecordExecutionVerdict(ctx, capture.ID, RecordHistoryExecutionVerdictInput{
+		Verdict: HistoryExecutionSucceeded, ExitCode: &exitCode, ExpectedVersion: capture.Version, Actor: "worker",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	completed, err := env.service.Complete(ctx, capture.ID, reserved.UploadGrant, capture.Version, "worker")
 	if err != nil || completed.State != HistoryCaptureComplete {
 		t.Fatalf("complete after final root capture=%+v err=%v", completed, err)
 	}
 	if completed.LastCheckpointCommittedGeneration != 2 {
 		t.Fatalf("last checkpoint generation=%d, want 2", completed.LastCheckpointCommittedGeneration)
+	}
+	for _, checkpointID := range []string{first.ID, other.ID, second.ID} {
+		if err := env.store.DB().QueryRowContext(ctx, `SELECT superseded_by_artifact_id FROM history_artifacts WHERE id = ?`, checkpointID).Scan(&supersededBy); err != nil || supersededBy != manifest.ID {
+			t.Fatalf("checkpoint %s final supersession=%q err=%v", checkpointID, supersededBy, err)
+		}
 	}
 }
 
@@ -520,6 +624,190 @@ func TestHistoryCaptureEventsAreAppendOnlyAndLossWaiverAreAudited(t *testing.T) 
 	}
 	if _, err := env.store.DB().ExecContext(ctx, `DELETE FROM history_upload_events WHERE id = ?`, uploadEventID); err == nil || !strings.Contains(err.Error(), "append-only") {
 		t.Fatalf("upload event delete err=%v, want append-only rejection", err)
+	}
+}
+
+func TestHistoryUploadIntentLifecycleLossWaiverAndCeilings(t *testing.T) {
+	env := newHistoryCaptureTestEnv(t)
+	ctx := context.Background()
+	input := baseHistoryReservation()
+	input.ExpectedTranscript, input.ExpectedHarness = false, false
+	reserved := reserveHistoryCapture(t, env.service, input)
+	temporary := uploadHistoryBytes(t, env.service, reserved.Capture.ID, reserved.UploadGrant, []byte("outbox"))
+	if err := env.service.HeartbeatUpload(ctx, reserved.Capture.ID, reserved.UploadGrant, temporary.ID); err != nil {
+		t.Fatalf("heartbeat active upload: %v", err)
+	}
+	lost, err := env.service.MarkLost(ctx, reserved.Capture.ID, reserved.Capture.Version, "watchdog", "worker_lost", "gone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state string
+	if err := env.store.DB().QueryRowContext(ctx, `SELECT state FROM history_upload_intents WHERE temporary_upload_id = ?`, temporary.ID).Scan(&state); err != nil || state != "active" {
+		t.Fatalf("lost intent state=%q err=%v, want active", state, err)
+	}
+	if _, err := env.blobs.Resume(ctx, temporary.ID); err != nil {
+		t.Fatalf("lost upload was not preserved: %v", err)
+	}
+	waived, err := env.service.Waive(ctx, lost.ID, lost.Version, "owner", "explicitly discard outbox")
+	if err != nil || waived.State != HistoryCaptureWaived {
+		t.Fatalf("waive capture=%+v err=%v", waived, err)
+	}
+	if err := env.store.DB().QueryRowContext(ctx, `SELECT state FROM history_upload_intents WHERE temporary_upload_id = ?`, temporary.ID).Scan(&state); err != nil || state != "abandoned" {
+		t.Fatalf("waived intent state=%q err=%v", state, err)
+	}
+	if _, err := env.blobs.Resume(ctx, temporary.ID); !errors.Is(err, blob.ErrNotFound) && !errors.Is(err, blob.ErrUploadAborted) {
+		t.Fatalf("waived temporary still resumable: %v", err)
+	}
+
+	limitedInput := input
+	limitedInput.JobID, limitedInput.LeaseID, limitedInput.LeaseAttempt = "job-limit", "lease-limit", 9
+	limited := NewHistoryCaptureServiceWithOptions(env.store.DB(), env.blobs, HistoryCaptureServiceOptions{
+		MaxUploadBytes: 3, MaxTranscriptSegmentBytes: 3, MaxArtifactsPerCapture: 1, MaxCheckpointsPerCapture: 1,
+	})
+	limitedReservation := reserveHistoryCapture(t, limited, limitedInput)
+	upload, err := limited.BeginUpload(ctx, limitedReservation.Capture.ID, limitedReservation.UploadGrant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upload.Write([]byte("four")); !errors.Is(err, ErrHistoryUploadTooLarge) {
+		t.Fatalf("oversized upload err=%v", err)
+	}
+	if _, err := upload.Complete(ctx); !errors.Is(err, ErrHistoryUploadTooLarge) {
+		t.Fatalf("complete oversized upload err=%v", err)
+	}
+	checkpoint := PublishHistoryArtifactInput{
+		LogicalKey: "checkpoint/one", Kind: HistoryArtifactHarnessRoot, Phase: HistoryArtifactCheckpoint,
+		CheckpointGeneration: 1, CheckpointStream: "root", MediaType: "application/octet-stream", LogicalSize: 3,
+	}
+	publishHistoryBytes(t, limited, limitedReservation.Capture.ID, limitedReservation.UploadGrant, checkpoint, []byte("one"))
+	secondTemporary := uploadHistoryBytes(t, limited, limitedReservation.Capture.ID, limitedReservation.UploadGrant, []byte("two"))
+	checkpoint.LogicalKey, checkpoint.CheckpointGeneration = "checkpoint/two", 2
+	if _, err := limited.PublishArtifact(ctx, limitedReservation.Capture.ID, limitedReservation.UploadGrant, checkpoint, secondTemporary); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatalf("artifact/checkpoint ceiling err=%v", err)
+	}
+}
+
+func TestHistoryTranscriptStrictGzipRawDigestAndServerSeal(t *testing.T) {
+	env := newHistoryCaptureTestEnv(t)
+	ctx := context.Background()
+	input := baseHistoryReservation()
+	input.ExpectedHarness = false
+	reserved := reserveHistoryCapture(t, env.service, input)
+	raw := []byte("raw transcript")
+	compressed := gzipHistoryBytes(t, raw)
+	publishHistoryBytes(t, env.service, reserved.Capture.ID, reserved.UploadGrant, PublishHistoryArtifactInput{
+		LogicalKey: "transcript/gzip", Kind: HistoryArtifactTranscriptSegment, Phase: HistoryArtifactFinal,
+		MediaType: "application/gzip", LogicalSize: int64(len(raw)),
+	}, compressed)
+	segment, err := env.service.RegisterTranscriptSegment(ctx, reserved.Capture.ID, reserved.UploadGrant, RegisterTranscriptSegmentInput{
+		ArtifactLogicalKey: "transcript/gzip", Epoch: 0, Sequence: 0, StartOffset: 0, EndOffset: int64(len(raw)), Encoding: "gzip",
+	})
+	if err != nil || segment.RawSHA256 != historyDigest(raw) {
+		t.Fatalf("gzip segment=%+v err=%v", segment, err)
+	}
+	badSeal := TranscriptSeal{FinalEpoch: 0, SegmentCount: 1, LogicalLength: int64(len(raw)), SHA256: historyDigest([]byte("producer lie"))}
+	if err := env.service.SealTranscript(ctx, reserved.Capture.ID, reserved.UploadGrant, badSeal); !errors.Is(err, ErrHistoryIncomplete) {
+		t.Fatalf("producer digest lie err=%v", err)
+	}
+	seal := badSeal
+	seal.SHA256 = historyDigest(raw)
+	if err := env.service.SealTranscript(ctx, reserved.Capture.ID, reserved.UploadGrant, seal); err != nil {
+		t.Fatalf("server stream seal: %v", err)
+	}
+
+	badInput := input
+	badInput.JobID, badInput.LeaseID, badInput.LeaseAttempt = "job-gzip-bad", "lease-gzip-bad", 10
+	bad := reserveHistoryCapture(t, env.service, badInput)
+	withTrailing := append(gzipHistoryBytes(t, []byte("a")), gzipHistoryBytes(t, []byte("b"))...)
+	publishHistoryBytes(t, env.service, bad.Capture.ID, bad.UploadGrant, PublishHistoryArtifactInput{
+		LogicalKey: "transcript/multi", Kind: HistoryArtifactTranscriptSegment, Phase: HistoryArtifactFinal,
+		MediaType: "application/gzip", LogicalSize: 1,
+	}, withTrailing)
+	if _, err := env.service.RegisterTranscriptSegment(ctx, bad.Capture.ID, bad.UploadGrant, RegisterTranscriptSegmentInput{
+		ArtifactLogicalKey: "transcript/multi", Epoch: 0, Sequence: 0, StartOffset: 0, EndOffset: 1, Encoding: "gzip",
+	}); err == nil || !strings.Contains(err.Error(), "trailing") {
+		t.Fatalf("multi-member gzip err=%v", err)
+	}
+
+	emptyInput := input
+	emptyInput.JobID, emptyInput.LeaseID, emptyInput.LeaseAttempt = "job-empty", "lease-empty", 11
+	empty := reserveHistoryCapture(t, env.service, emptyInput)
+	emptySeal := TranscriptSeal{FinalEpoch: -1, SHA256: historyDigest(nil)}
+	if err := env.service.SealTranscript(ctx, empty.Capture.ID, empty.UploadGrant, emptySeal); err != nil {
+		t.Fatalf("seal canonical empty transcript: %v", err)
+	}
+}
+
+func TestHistoryCompletionManifestVerdictZeroRootsAndActiveIntent(t *testing.T) {
+	env := newHistoryCaptureTestEnv(t)
+	ctx := context.Background()
+	input := baseHistoryReservation()
+	input.ExpectedTranscript = false
+	reserved := reserveHistoryCapture(t, env.service, input)
+	capture := transitionHistory(t, env.service, reserved.Capture, HistoryCaptureRunning)
+	capture, err := env.service.RecordExecutionVerdict(ctx, capture.ID, RecordHistoryExecutionVerdictInput{
+		Verdict: HistoryExecutionFailed, ErrorCode: "startup", ExpectedVersion: capture.Version, Actor: "worker",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture = transitionHistory(t, env.service, capture, HistoryCaptureQuiescing)
+	capture, err = env.service.DeclareExpectedSet(ctx, capture.ID, reserved.UploadGrant, DeclareHistoryExpectedSetInput{
+		Artifacts:             []FinalArtifactExpectation{{LogicalKey: "manifest/final", Kind: HistoryArtifactManifest}},
+		ZeroHarnessRootReason: "Harness failed before creating its session root", ExpectedVersion: capture.Version, Actor: "worker",
+	})
+	if err != nil {
+		t.Fatalf("declare audited zero-root startup failure: %v", err)
+	}
+	workerTemporary := uploadHistoryBytes(t, env.service, capture.ID, reserved.UploadGrant, []byte("{}"))
+	if _, err := env.service.PublishArtifact(ctx, capture.ID, reserved.UploadGrant, PublishHistoryArtifactInput{
+		LogicalKey: "manifest/final", Kind: HistoryArtifactManifest, Phase: HistoryArtifactFinal,
+		MediaType: "application/json", LogicalSize: 2,
+	}, workerTemporary); !errors.Is(err, ErrHistoryUnauthorized) {
+		t.Fatalf("worker manifest publication err=%v", err)
+	}
+	if err := env.service.AbandonUpload(ctx, capture.ID, reserved.UploadGrant, workerTemporary.ID); err != nil {
+		t.Fatalf("abandon rejected worker manifest temporary: %v", err)
+	}
+	publishCanonicalManifestBytes(t, env.service, capture.ID, PublishHistoryArtifactInput{
+		LogicalKey: "manifest/final", Kind: HistoryArtifactManifest, Phase: HistoryArtifactFinal,
+		MediaType: "application/json", LogicalSize: 2,
+	}, []byte("{}"))
+	capture = transitionHistory(t, env.service, capture, HistoryCaptureSealed)
+	capture = transitionHistory(t, env.service, capture, HistoryCaptureUploading)
+	active := uploadHistoryBytes(t, env.service, capture.ID, reserved.UploadGrant, []byte("outbox"))
+	if _, err := env.service.Complete(ctx, capture.ID, reserved.UploadGrant, capture.Version, "worker"); !errors.Is(err, ErrHistoryPublicationPending) {
+		t.Fatalf("complete with active intent err=%v", err)
+	}
+	if err := env.service.AbandonUpload(ctx, capture.ID, reserved.UploadGrant, active.ID); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := env.service.Complete(ctx, capture.ID, reserved.UploadGrant, capture.Version, "worker")
+	if err != nil || completed.State != HistoryCaptureComplete || completed.ZeroHarnessRootReason == "" {
+		t.Fatalf("zero-root completion=%+v err=%v", completed, err)
+	}
+
+	pendingInput := input
+	pendingInput.ExpectedHarness = false
+	pendingInput.JobID, pendingInput.LeaseID, pendingInput.LeaseAttempt = "job-pending", "lease-pending", 12
+	pending := reserveHistoryCapture(t, env.service, pendingInput)
+	pendingCapture := transitionHistory(t, env.service, pending.Capture, HistoryCaptureRunning)
+	pendingCapture = transitionHistory(t, env.service, pendingCapture, HistoryCaptureQuiescing)
+	pendingCapture, err = env.service.DeclareExpectedSet(ctx, pendingCapture.ID, pending.UploadGrant, DeclareHistoryExpectedSetInput{
+		Artifacts:       []FinalArtifactExpectation{{LogicalKey: "manifest/final", Kind: HistoryArtifactManifest}},
+		ExpectedVersion: pendingCapture.Version, Actor: "worker",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishCanonicalManifestBytes(t, env.service, pendingCapture.ID, PublishHistoryArtifactInput{
+		LogicalKey: "manifest/final", Kind: HistoryArtifactManifest, Phase: HistoryArtifactFinal,
+		MediaType: "application/json", LogicalSize: 2,
+	}, []byte("{}"))
+	pendingCapture = transitionHistory(t, env.service, pendingCapture, HistoryCaptureSealed)
+	pendingCapture = transitionHistory(t, env.service, pendingCapture, HistoryCaptureUploading)
+	if _, err := env.service.Complete(ctx, pendingCapture.ID, pending.UploadGrant, pendingCapture.Version, "worker"); !errors.Is(err, ErrHistoryIncomplete) {
+		t.Fatalf("pending-verdict completion err=%v", err)
 	}
 }
 

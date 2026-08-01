@@ -40,7 +40,7 @@ func TestLocalLifecycleRangesAndImmutability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, directory := range []string{root, filepath.Join(root, "tmp"), filepath.Join(root, "objects")} {
+	for _, directory := range []string{store.root, store.temporaryRoot, store.objectRoot} {
 		info, err := os.Stat(directory)
 		if err != nil {
 			t.Fatal(err)
@@ -116,6 +116,155 @@ func TestLocalLifecycleRangesAndImmutability(t *testing.T) {
 	}
 	if err := store.Abort(ctx, different.ID); err != nil {
 		t.Fatalf("Abort should be idempotent: %v", err)
+	}
+}
+
+func TestLocalPreservesCallerRootModeAndRejectsUnsafeLayout(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "caller-owned")
+	if err := os.Mkdir(parent, 0o751); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o751); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewLocal(parent, LocalOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o751 {
+		t.Fatalf("caller-owned root mode = %o, want unchanged 751", info.Mode().Perm())
+	}
+	for _, path := range []string{store.root, store.temporaryRoot, store.objectRoot} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != privateDirectoryMode {
+			t.Fatalf("store directory %s mode = %o, want 700", path, info.Mode().Perm())
+		}
+	}
+
+	unsafeRoot := filepath.Join(t.TempDir(), "unsafe")
+	if err := os.Mkdir(unsafeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unsafeLayout := filepath.Join(unsafeRoot, localLayoutName)
+	if err := os.Mkdir(unsafeLayout, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unsafeLayout, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewLocal(unsafeRoot, LocalOptions{}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("NewLocal(unsafe layout) error = %v, want ErrInvalidConfig", err)
+	}
+	info, err = os.Stat(unsafeLayout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("unsafe layout was chmodded to %o", info.Mode().Perm())
+	}
+}
+
+func TestLocalRejectsSymlinkedRootLayoutAndChildren(t *testing.T) {
+	outside := t.TempDir()
+	t.Run("configured root", func(t *testing.T) {
+		base := t.TempDir()
+		root := filepath.Join(base, "root")
+		if err := os.Symlink(outside, root); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewLocal(root, LocalOptions{}); err == nil {
+			t.Fatal("NewLocal accepted a symlinked configured root")
+		}
+	})
+	for _, node := range []string{localLayoutName, localTemporaryName, localObjectsName} {
+		t.Run(node, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, localLayoutName)
+			if node == localLayoutName {
+				if err := os.Symlink(outside, path); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Mkdir(path, privateDirectoryMode); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(path, node)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := NewLocal(root, LocalOptions{}); err == nil {
+				t.Fatalf("NewLocal accepted symlinked %s node", node)
+			}
+		})
+	}
+}
+
+func TestLocalNamespaceSwapCannotEscape(t *testing.T) {
+	store, err := NewLocal(t.TempDir(), LocalOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	key, _ := ParseKey("0123456789abcdef0123456789abcdef/0123456789abcdef0123456789abcdef")
+	temporary := completeUpload(t, ctx, store, []byte("inside"))
+	if _, err := store.Publish(ctx, temporary, key); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := store.Open(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	namespacePath := filepath.Join(store.objectRoot, "0123456789abcdef0123456789abcdef")
+	movedPath := namespacePath + ".moved"
+	outside := t.TempDir()
+	if err := os.Rename(namespacePath, movedPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, namespacePath); err != nil {
+		t.Fatal(err)
+	}
+	got, readErr := io.ReadAll(reader)
+	_ = reader.Close()
+	if readErr != nil || string(got) != "inside" {
+		t.Fatalf("already-open anchored object = %q, %v", got, readErr)
+	}
+	if _, err := store.Head(ctx, key); err == nil {
+		t.Fatal("Head followed a swapped namespace symlink")
+	}
+
+	secondKey, _ := ParseKey("0123456789abcdef0123456789abcdef/fedcba9876543210fedcba9876543210")
+	second := completeUpload(t, ctx, store, []byte("must-not-escape"))
+	if _, err := store.Publish(ctx, second, secondKey); err == nil {
+		t.Fatal("Publish followed a swapped namespace symlink")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "fedcba9876543210fedcba9876543210")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Publish wrote outside store: %v", err)
+	}
+}
+
+func TestLocalRejectsSymlinkedNamespace(t *testing.T) {
+	store, err := NewLocal(t.TempDir(), LocalOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, _ := ParseKey("abcdef0123456789abcdef0123456789/abcdef0123456789abcdef0123456789")
+	if err := os.Symlink(t.TempDir(), filepath.Join(store.objectRoot, "abcdef0123456789abcdef0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	temporary := completeUpload(t, context.Background(), store, []byte("data"))
+	if _, err := store.Publish(context.Background(), temporary, key); err == nil {
+		t.Fatal("Publish accepted a symlinked namespace")
+	}
+	if _, err := store.Open(context.Background(), key); err == nil {
+		t.Fatal("Open accepted a symlinked namespace")
 	}
 }
 

@@ -36,6 +36,9 @@ CREATE TABLE history_captures (
     upload_grant_hash TEXT NOT NULL UNIQUE
         CHECK (length(upload_grant_hash) = 64
             AND upload_grant_hash NOT GLOB '*[^0-9a-f]*'),
+    upload_grant_generation INTEGER NOT NULL DEFAULT 1
+        CHECK (upload_grant_generation >= 1),
+    upload_grant_rotated_at TEXT,
     upload_grant_revoked_at TEXT,
 
     expected_set_declared_at TEXT,
@@ -70,6 +73,7 @@ CREATE TABLE history_captures (
     error_code TEXT NOT NULL DEFAULT '' CHECK (length(error_code) <= 64),
     error_message TEXT NOT NULL DEFAULT '' CHECK (length(error_message) <= 1024),
     waiver_reason TEXT NOT NULL DEFAULT '' CHECK (length(waiver_reason) <= 1024),
+    zero_harness_root_reason TEXT NOT NULL DEFAULT '' CHECK (length(zero_harness_root_reason) <= 1024),
     version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
     reserved_at TEXT NOT NULL,
     running_at TEXT,
@@ -136,9 +140,36 @@ WHEN NEW.id IS NOT OLD.id
     OR NEW.harness_version IS NOT OLD.harness_version
     OR NEW.expected_transcript IS NOT OLD.expected_transcript
     OR NEW.expected_harness IS NOT OLD.expected_harness
-    OR NEW.upload_grant_hash IS NOT OLD.upload_grant_hash
 BEGIN
     SELECT RAISE(ABORT, 'history capture attribution is immutable');
+END;
+
+-- Upload grants may rotate only as one atomic generation step. The service
+-- authenticates the producer identity before issuing this update; this trigger
+-- prevents accidental hash replacement that omits the durable audit metadata.
+CREATE TRIGGER history_captures_grant_rotation_guard
+BEFORE UPDATE ON history_captures
+WHEN NEW.upload_grant_hash IS NOT OLD.upload_grant_hash
+    AND NOT (
+        OLD.upload_grant_revoked_at IS NULL
+        AND NEW.upload_grant_revoked_at IS NULL
+        AND NEW.upload_grant_generation = OLD.upload_grant_generation + 1
+        AND NEW.upload_grant_rotated_at IS NOT NULL
+        AND NEW.upload_grant_rotated_at IS NOT OLD.upload_grant_rotated_at
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'invalid history upload grant rotation');
+END;
+
+CREATE TRIGGER history_captures_grant_generation_guard
+BEFORE UPDATE ON history_captures
+WHEN NEW.upload_grant_hash IS OLD.upload_grant_hash
+    AND (
+        NEW.upload_grant_generation IS NOT OLD.upload_grant_generation
+        OR NEW.upload_grant_rotated_at IS NOT OLD.upload_grant_rotated_at
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'history upload grant generation requires rotation');
 END;
 
 CREATE TRIGGER history_captures_no_delete
@@ -176,6 +207,7 @@ CREATE TABLE history_artifacts (
     kind TEXT NOT NULL CHECK (kind IN ('transcript_segment', 'harness_root', 'manifest')),
     phase TEXT NOT NULL CHECK (phase IN ('checkpoint', 'final')),
     checkpoint_generation INTEGER,
+    checkpoint_stream TEXT NOT NULL DEFAULT '' CHECK (length(checkpoint_stream) <= 255),
     checkpoint_trigger TEXT NOT NULL DEFAULT '' CHECK (length(checkpoint_trigger) <= 64),
     archive_id TEXT NOT NULL DEFAULT '' CHECK (length(archive_id) <= 255),
     media_type TEXT NOT NULL CHECK (length(trim(media_type)) BETWEEN 1 AND 255),
@@ -197,6 +229,8 @@ CREATE TABLE history_artifacts (
     UNIQUE (capture_id, logical_key),
     CHECK ((phase = 'checkpoint') = (checkpoint_generation IS NOT NULL)),
     CHECK (checkpoint_generation IS NULL OR checkpoint_generation > 0),
+    CHECK ((phase = 'checkpoint' AND length(trim(checkpoint_stream)) > 0)
+        OR (phase = 'final' AND checkpoint_stream = '')),
     CHECK (phase = 'checkpoint' OR checkpoint_trigger = ''),
     CHECK (kind != 'transcript_segment' OR (phase = 'final' AND checkpoint_generation IS NULL)),
     CHECK ((publication_state = 'committed') = (committed_at IS NOT NULL)),
@@ -207,10 +241,39 @@ CREATE TABLE history_artifacts (
 
 CREATE INDEX idx_history_artifacts_capture_kind
     ON history_artifacts(capture_id, phase, kind, checkpoint_generation, logical_key);
+CREATE INDEX idx_history_artifacts_checkpoint_stream_generation
+    ON history_artifacts(capture_id, kind, checkpoint_stream, checkpoint_generation)
+    WHERE phase = 'checkpoint';
 CREATE INDEX idx_history_artifacts_pending
     ON history_artifacts(publication_state, pending_at);
 CREATE INDEX idx_history_artifacts_temporary
     ON history_artifacts(temporary_upload_id) WHERE publication_state = 'pending';
+
+CREATE TRIGGER history_artifacts_immutable_metadata
+BEFORE UPDATE ON history_artifacts
+WHEN NEW.id IS NOT OLD.id
+    OR NEW.capture_id IS NOT OLD.capture_id
+    OR NEW.logical_key IS NOT OLD.logical_key
+    OR NEW.kind IS NOT OLD.kind
+    OR NEW.phase IS NOT OLD.phase
+    OR NEW.checkpoint_generation IS NOT OLD.checkpoint_generation
+    OR NEW.checkpoint_stream IS NOT OLD.checkpoint_stream
+    OR NEW.checkpoint_trigger IS NOT OLD.checkpoint_trigger
+    OR NEW.archive_id IS NOT OLD.archive_id
+    OR NEW.media_type IS NOT OLD.media_type
+    OR NEW.format_version IS NOT OLD.format_version
+    OR NEW.schema_version IS NOT OLD.schema_version
+    OR NEW.sha256 IS NOT OLD.sha256
+    OR NEW.stored_size IS NOT OLD.stored_size
+    OR NEW.logical_size IS NOT OLD.logical_size
+    OR NEW.entry_count IS NOT OLD.entry_count
+    OR NEW.temporary_upload_id IS NOT OLD.temporary_upload_id
+    OR NEW.blob_key IS NOT OLD.blob_key
+    OR NEW.pending_at IS NOT OLD.pending_at
+    OR NEW.created_at IS NOT OLD.created_at
+BEGIN
+    SELECT RAISE(ABORT, 'history artifact metadata is immutable');
+END;
 
 CREATE TRIGGER history_artifacts_no_delete
 BEFORE DELETE ON history_artifacts
@@ -247,6 +310,7 @@ CREATE TABLE history_transcript_segments (
     uncompressed_size INTEGER NOT NULL CHECK (uncompressed_size > 0),
     stored_size INTEGER NOT NULL CHECK (stored_size >= 0),
     sha256 TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+    raw_sha256 TEXT NOT NULL CHECK (length(raw_sha256) = 64 AND raw_sha256 NOT GLOB '*[^0-9a-f]*'),
     encoding TEXT NOT NULL CHECK (encoding IN ('identity', 'gzip')),
     artifact_id TEXT NOT NULL UNIQUE REFERENCES history_artifacts(id) ON DELETE RESTRICT,
     sealed_at TEXT NOT NULL,
@@ -311,6 +375,67 @@ CREATE TABLE harness_archive_members (
 CREATE INDEX idx_harness_archive_members_native_session
     ON harness_archive_members(capture_id, native_session_id)
     WHERE native_session_id <> '';
+
+-- Completed private uploads are registered before they leave the service. This
+-- keeps active/outboxed temporaries in the reconciliation protection set even
+-- before an artifact publication row exists.
+CREATE TABLE history_upload_intents (
+    temporary_upload_id TEXT PRIMARY KEY
+        CHECK (length(temporary_upload_id) = 32
+            AND temporary_upload_id NOT GLOB '*[^0-9a-f]*'),
+    capture_id TEXT NOT NULL REFERENCES history_captures(id) ON DELETE RESTRICT,
+    sha256 TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+    stored_size INTEGER NOT NULL CHECK (stored_size >= 0),
+    state TEXT NOT NULL CHECK (state IN ('active', 'consumed', 'abandoned')),
+    artifact_id TEXT UNIQUE REFERENCES history_artifacts(id) ON DELETE RESTRICT,
+    created_at TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL,
+    consumed_at TEXT,
+    abandoned_at TEXT,
+    CHECK (
+        (state = 'active' AND artifact_id IS NULL AND consumed_at IS NULL AND abandoned_at IS NULL)
+        OR (state = 'consumed' AND artifact_id IS NOT NULL AND consumed_at IS NOT NULL AND abandoned_at IS NULL)
+        OR (state = 'abandoned' AND artifact_id IS NULL AND consumed_at IS NULL AND abandoned_at IS NOT NULL)
+    )
+);
+
+CREATE INDEX idx_history_upload_intents_capture_state
+    ON history_upload_intents(capture_id, state, heartbeat_at);
+CREATE INDEX idx_history_upload_intents_active_heartbeat
+    ON history_upload_intents(heartbeat_at) WHERE state = 'active';
+
+CREATE TRIGGER history_upload_intents_update_guard
+BEFORE UPDATE ON history_upload_intents
+WHEN NEW.temporary_upload_id IS NOT OLD.temporary_upload_id
+    OR NEW.capture_id IS NOT OLD.capture_id
+    OR NEW.sha256 IS NOT OLD.sha256
+    OR NEW.stored_size IS NOT OLD.stored_size
+    OR NEW.created_at IS NOT OLD.created_at
+    OR OLD.state != 'active'
+    OR NOT (
+        (NEW.state = 'active'
+            AND NEW.artifact_id IS NULL
+            AND NEW.consumed_at IS NULL
+            AND NEW.abandoned_at IS NULL
+            AND NEW.heartbeat_at >= OLD.heartbeat_at)
+        OR (NEW.state = 'consumed'
+            AND NEW.artifact_id IS NOT NULL
+            AND NEW.consumed_at IS NOT NULL
+            AND NEW.abandoned_at IS NULL)
+        OR (NEW.state = 'abandoned'
+            AND NEW.artifact_id IS NULL
+            AND NEW.consumed_at IS NULL
+            AND NEW.abandoned_at IS NOT NULL)
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'invalid history upload intent transition');
+END;
+
+CREATE TRIGGER history_upload_intents_no_delete
+BEFORE DELETE ON history_upload_intents
+BEGIN
+    SELECT RAISE(ABORT, 'history upload intents are retained');
+END;
 
 -- One aggregate per capture/source event absorbs abusive hook bursts. Counts and
 -- the capture projection retain useful observability without one row per hint.

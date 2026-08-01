@@ -58,6 +58,9 @@ type RegistryOptions struct {
 	// registry creates a private local store under <DataDir>/history/blobs. A
 	// supplied store remains caller-owned; the registry never closes it.
 	HistoryBlobStore blob.Store
+	// HistoryCaptureServiceOptions applies the resolved coordinator limits to
+	// every per-project capture service opened by this registry.
+	HistoryCaptureServiceOptions coordinator.HistoryCaptureServiceOptions
 
 	AuthorEntrypoint           map[string]any
 	AuthorEntrypointConfigured bool
@@ -101,6 +104,7 @@ type Registry struct {
 	commitIdentity             flowgit.CommitIdentity
 	historyBlobs               blob.Store
 	historyBlobsOwned          bool
+	historyCaptureOptions      coordinator.HistoryCaptureServiceOptions
 
 	mu       sync.RWMutex
 	bundles  map[string]*ProjectBundle
@@ -164,6 +168,7 @@ func NewRegistry(opts RegistryOptions) (*Registry, error) {
 		commitIdentity:             opts.CommitIdentity,
 		historyBlobs:               historyBlobs,
 		historyBlobsOwned:          historyBlobsOwned,
+		historyCaptureOptions:      opts.HistoryCaptureServiceOptions,
 		bundles:                    map[string]*ProjectBundle{},
 	}
 	if err := registry.globalAgentDefs.SeedDefaults(context.Background()); err != nil {
@@ -371,7 +376,7 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 		Idempotency:       coordinator.NewIdempotencyService(db),
 		GitEventConsumer:  coordinator.NewGitEventConsumer(db, project),
 		Queue:             queue,
-		HistoryCaptures:   coordinator.NewHistoryCaptureService(db, r.historyBlobs),
+		HistoryCaptures:   coordinator.NewHistoryCaptureServiceWithOptions(db, r.historyBlobs, r.historyCaptureOptions),
 	}
 	r.bundles[project.ID] = bundle
 	keepStore = true
@@ -544,11 +549,43 @@ func (r *Registry) DeleteGlobalAgentDef(ctx context.Context, id string) error {
 	return r.globalAgentDefs.Delete(ctx, id)
 }
 
+type HistoryArtifactReconcileResult struct {
+	Projects  int
+	Examined  int
+	Committed int
+	Pending   int
+	Failed    int
+}
+
+// ReconcilePendingHistoryArtifacts retries a separately bounded amount of
+// coordinator-authorized publication work in every project. A broken project is
+// reported after the remaining projects receive their own allowance.
+func (r *Registry) ReconcilePendingHistoryArtifacts(ctx context.Context, limitPerProject int) (HistoryArtifactReconcileResult, error) {
+	if limitPerProject <= 0 {
+		return HistoryArtifactReconcileResult{}, errors.New("history reconcile limit per project must be positive")
+	}
+	result := HistoryArtifactReconcileResult{}
+	var reconcileErrors []error
+	for _, bundle := range r.All() {
+		result.Projects++
+		projectResult, err := bundle.HistoryCaptures.ReconcilePendingArtifacts(ctx, "", limitPerProject)
+		result.Examined += projectResult.Examined
+		result.Committed += projectResult.Committed
+		result.Pending += projectResult.Pending
+		result.Failed += len(projectResult.Failures)
+		if err != nil {
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("reconcile project %s pending history artifacts: %w", bundle.Project.ID, err))
+		}
+	}
+	return result, errors.Join(reconcileErrors...)
+}
+
 // HistoryBlobMetadata returns the complete relational protection set used by
-// blob reconciliation. Pending publications protect both their temporary upload
-// and destination key; every committed artifact remains referenced, including
-// superseded checkpoints, until a future explicitly authorized retention
-// transaction removes that reference.
+// blob reconciliation. Active upload intents protect completed temporaries that
+// have not yet been assigned a logical artifact. Pending publications protect
+// both their temporary upload and destination key; every committed artifact
+// remains referenced, including superseded checkpoints, until a future
+// explicitly authorized retention transaction removes that reference.
 func (r *Registry) HistoryBlobMetadata(ctx context.Context) (blob.ReconcileRequest, error) {
 	request := blob.ReconcileRequest{
 		LiveTemporaryIDs: map[string]struct{}{},
@@ -591,6 +628,28 @@ FROM history_artifacts`)
 		}
 		if err := rows.Err(); err != nil {
 			return blob.ReconcileRequest{}, fmt.Errorf("read project %s history blob metadata: %w", bundle.Project.ID, err)
+		}
+
+		intentRows, err := bundle.Store.DB().QueryContext(ctx, `
+SELECT temporary_upload_id
+FROM history_upload_intents
+WHERE state = 'active'`)
+		if err != nil {
+			return blob.ReconcileRequest{}, fmt.Errorf("read project %s active history upload intents: %w", bundle.Project.ID, err)
+		}
+		for intentRows.Next() {
+			var temporaryID string
+			if err := intentRows.Scan(&temporaryID); err != nil {
+				intentRows.Close()
+				return blob.ReconcileRequest{}, fmt.Errorf("scan project %s active history upload intent: %w", bundle.Project.ID, err)
+			}
+			request.LiveTemporaryIDs[temporaryID] = struct{}{}
+		}
+		if err := intentRows.Close(); err != nil {
+			return blob.ReconcileRequest{}, fmt.Errorf("close project %s active history upload intents: %w", bundle.Project.ID, err)
+		}
+		if err := intentRows.Err(); err != nil {
+			return blob.ReconcileRequest{}, fmt.Errorf("read project %s active history upload intents: %w", bundle.Project.ID, err)
 		}
 	}
 	return request, nil

@@ -82,14 +82,39 @@ func TestRegistryWiresProjectIsolatedHistoryServicesAndMetadata(t *testing.T) {
 	}
 
 	pendingTemporary := reserveAndUploadHistoryArtifact(t, gate, first.HistoryCaptures, firstProject.ID, "job-one", true)
-	reserveAndUploadHistoryArtifact(t, gate, second.HistoryCaptures, secondProject.ID, "job-two", false)
+	reserveAndUploadHistoryArtifact(t, gate, first.HistoryCaptures, firstProject.ID, "job-one-more", true)
+	reserveAndUploadHistoryArtifact(t, gate, second.HistoryCaptures, secondProject.ID, "job-two", true)
+	reserveAndUploadHistoryArtifact(t, gate, second.HistoryCaptures, secondProject.ID, "job-two-more", true)
+	activeTemporary := reserveAndCompleteHistoryUpload(t, second.HistoryCaptures, secondProject.ID, "job-active")
 
 	metadata, err := registry.HistoryBlobMetadata(ctx)
 	if err != nil {
 		t.Fatalf("history blob metadata: %v", err)
 	}
-	if _, ok := metadata.LiveTemporaryIDs[pendingTemporary.ID]; !ok || len(metadata.PendingKeys) != 1 || len(metadata.ReferencedKeys) != 1 {
-		t.Fatalf("metadata = live:%v pending:%d referenced:%d", metadata.LiveTemporaryIDs, len(metadata.PendingKeys), len(metadata.ReferencedKeys))
+	if _, ok := metadata.LiveTemporaryIDs[pendingTemporary.ID]; !ok {
+		t.Fatalf("pending temporary %s is not protected: %v", pendingTemporary.ID, metadata.LiveTemporaryIDs)
+	}
+	if _, ok := metadata.LiveTemporaryIDs[activeTemporary.ID]; !ok {
+		t.Fatalf("active-intent temporary %s is not protected: %v", activeTemporary.ID, metadata.LiveTemporaryIDs)
+	}
+	if len(metadata.LiveTemporaryIDs) != 5 || len(metadata.PendingKeys) != 4 || len(metadata.ReferencedKeys) != 0 {
+		t.Fatalf("metadata = live:%d pending:%d referenced:%d", len(metadata.LiveTemporaryIDs), len(metadata.PendingKeys), len(metadata.ReferencedKeys))
+	}
+
+	gate.fail = false
+	summary, err := registry.ReconcilePendingHistoryArtifacts(ctx, 1)
+	if err != nil {
+		t.Fatalf("reconcile pending history artifacts: %v", err)
+	}
+	if summary.Projects != 2 || summary.Examined != 2 || summary.Committed != 2 || summary.Pending != 0 || summary.Failed != 0 {
+		t.Fatalf("bounded per-project reconciliation = %+v", summary)
+	}
+	metadata, err = registry.HistoryBlobMetadata(ctx)
+	if err != nil {
+		t.Fatalf("history blob metadata after reconciliation: %v", err)
+	}
+	if _, ok := metadata.LiveTemporaryIDs[activeTemporary.ID]; !ok || len(metadata.LiveTemporaryIDs) != 3 || len(metadata.PendingKeys) != 2 || len(metadata.ReferencedKeys) != 2 {
+		t.Fatalf("metadata after reconciliation = live:%v pending:%d referenced:%d", metadata.LiveTemporaryIDs, len(metadata.PendingKeys), len(metadata.ReferencedKeys))
 	}
 	var firstCaptures, secondCaptures int
 	if err := first.Store.DB().QueryRow(`SELECT count(*) FROM history_captures`).Scan(&firstCaptures); err != nil {
@@ -98,9 +123,33 @@ func TestRegistryWiresProjectIsolatedHistoryServicesAndMetadata(t *testing.T) {
 	if err := second.Store.DB().QueryRow(`SELECT count(*) FROM history_captures`).Scan(&secondCaptures); err != nil {
 		t.Fatal(err)
 	}
-	if firstCaptures != 1 || secondCaptures != 1 {
-		t.Fatalf("capture counts = %d/%d, want isolated 1/1", firstCaptures, secondCaptures)
+	if firstCaptures != 2 || secondCaptures != 3 {
+		t.Fatalf("capture counts = %d/%d, want isolated 2/3", firstCaptures, secondCaptures)
 	}
+}
+
+func reserveAndCompleteHistoryUpload(t *testing.T, service *coordinator.HistoryCaptureService, projectID, jobID string) blob.Temporary {
+	t.Helper()
+	ctx := context.Background()
+	reserved, err := service.Reserve(ctx, coordinator.ReserveHistoryCaptureInput{
+		ProjectID: projectID, JobID: jobID, LeaseID: "lease-" + jobID, LeaseAttempt: 1,
+		WorkerID: "worker", Role: "author", ExpectedHarness: true,
+	})
+	if err != nil {
+		t.Fatalf("reserve history capture: %v", err)
+	}
+	upload, err := service.BeginUpload(ctx, reserved.Capture.ID, reserved.UploadGrant)
+	if err != nil {
+		t.Fatalf("begin history upload: %v", err)
+	}
+	if _, err := upload.Write([]byte(jobID)); err != nil {
+		t.Fatalf("write history upload: %v", err)
+	}
+	temporary, err := upload.Complete(ctx)
+	if err != nil {
+		t.Fatalf("complete history upload: %v", err)
+	}
+	return temporary
 }
 
 func reserveAndUploadHistoryArtifact(t *testing.T, gate *publicationGateStore, service *coordinator.HistoryCaptureService, projectID, jobID string, fail bool) blob.Temporary {
@@ -113,6 +162,8 @@ func reserveAndUploadHistoryArtifact(t *testing.T, gate *publicationGateStore, s
 	if err != nil {
 		t.Fatalf("reserve history capture: %v", err)
 	}
+	// Keep the reservation grant so this helper can exercise publication after
+	// reserveAndCompleteHistoryUpload's shared upload path.
 	upload, err := service.BeginUpload(ctx, reserved.Capture.ID, reserved.UploadGrant)
 	if err != nil {
 		t.Fatalf("begin history upload: %v", err)
