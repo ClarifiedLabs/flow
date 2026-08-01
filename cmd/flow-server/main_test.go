@@ -24,6 +24,24 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/metrics"
 )
 
+func TestHistoryBlobFactoryConfigOpensDefaultLocalStore(t *testing.T) {
+	history, err := (config.CoordinatorHistoryConfig{}).Resolve(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve default history config: %v", err)
+	}
+
+	store, err := blob.Open(context.Background(), historyBlobFactoryConfig(history.Blob))
+	if err != nil {
+		t.Fatalf("open default local history store: %v", err)
+	}
+	if closer, ok := store.(blob.Closer); ok {
+		t.Cleanup(func() { _ = closer.Close() })
+	}
+	if _, ok := store.(*blob.Local); !ok {
+		t.Fatalf("store type = %T, want *blob.Local", store)
+	}
+}
+
 func TestLogLevelFlagEnablesDebugLogging(t *testing.T) {
 	t.Setenv("LOG_LEVEL", "")
 

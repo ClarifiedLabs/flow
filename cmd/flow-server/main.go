@@ -449,24 +449,23 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func historyBlobFactoryConfig(config config.ResolvedHistoryBlob) blob.FactoryConfig {
-	encryption := blob.S3EncryptionAES256
-	if config.S3.Encryption == configpkgHistorySSEKMS() {
+func historyBlobFactoryConfig(resolved config.ResolvedHistoryBlob) blob.FactoryConfig {
+	var encryption blob.S3Encryption
+	switch resolved.S3.Encryption {
+	case config.HistorySSES3:
+		encryption = blob.S3EncryptionAES256
+	case config.HistorySSEKMS:
 		encryption = blob.S3EncryptionKMS
 	}
 	return blob.FactoryConfig{
-		Backend: config.Backend, LocalPath: config.LocalPath, MaxRangeBytes: config.MaxRangeBytes,
+		Backend: resolved.Backend, LocalPath: resolved.LocalPath, MaxRangeBytes: resolved.MaxRangeBytes,
 		S3: blob.FactoryS3Config{
-			Region: config.S3.Region, Bucket: config.S3.Bucket, Prefix: config.S3.Prefix,
-			EndpointURL: config.S3.Endpoint, PathStyle: config.S3.PathStyle, AllowHTTP: config.S3.AllowHTTP,
-			Encryption: encryption, KMSKeyID: config.S3.KMSKeyID, BucketKey: config.S3.BucketKey,
+			Region: resolved.S3.Region, Bucket: resolved.S3.Bucket, Prefix: resolved.S3.Prefix,
+			EndpointURL: resolved.S3.Endpoint, PathStyle: resolved.S3.PathStyle, AllowHTTP: resolved.S3.AllowHTTP,
+			Encryption: encryption, KMSKeyID: resolved.S3.KMSKeyID, BucketKey: resolved.S3.BucketKey,
 		},
 	}
 }
-
-// Kept as a tiny helper so the similarly named function parameter above cannot
-// shadow the imported config package constant.
-func configpkgHistorySSEKMS() string { return config.HistorySSEKMS }
 
 func runHistoryReconciliation(ctx context.Context, registry *api.Registry, store blob.Store, policy config.ResolvedHistoryReconciliation, metricSet metrics.HistoryStorage) {
 	reconcile := func() {
