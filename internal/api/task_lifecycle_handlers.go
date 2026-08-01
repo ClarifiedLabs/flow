@@ -653,7 +653,7 @@ func (s *projectServer) handleTaskRelations(w http.ResponseWriter, r *http.Reque
 	switch r.Method {
 	case http.MethodPost:
 		actor := coordinator.ActorHuman
-		if principal.Scope == coordinator.TokenScopeConsole {
+		if principal.Scope == coordinator.TokenScopeSession {
 			actor = coordinator.ActorAgent
 		}
 		if err := s.tasks.LinkTasks(r.Context(), sourceTaskID, targetTaskID, kind, actor); err != nil {

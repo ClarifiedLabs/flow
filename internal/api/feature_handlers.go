@@ -115,7 +115,7 @@ func (s *projectServer) handleCreateFeature(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	actor := coordinator.ActorHuman
-	if principal.Scope == coordinator.TokenScopeConsole || principal.Scope == coordinator.TokenScopeSession {
+	if principal.Scope == coordinator.TokenScopeSession {
 		actor = coordinator.ActorAgent
 	}
 	feature, err := s.features.Create(r.Context(), coordinator.CreateFeatureInput{
@@ -179,7 +179,7 @@ func (s *projectServer) handleRebaseFeature(w http.ResponseWriter, r *http.Reque
 
 func (s *projectServer) handleLandFeature(w http.ResponseWriter, r *http.Request, ref string, principal coordinator.Principal) {
 	actor := coordinator.ActorHuman
-	if principal.Scope == coordinator.TokenScopeConsole || principal.Scope == coordinator.TokenScopeSession {
+	if principal.Scope == coordinator.TokenScopeSession {
 		actor = coordinator.ActorAgent
 	}
 	feature, err := s.features.Land(r.Context(), ref, actor)

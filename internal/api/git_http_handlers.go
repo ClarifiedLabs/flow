@@ -118,9 +118,8 @@ func authorizeGitHTTPPrincipal(principal coordinator.Principal, projectID string
 	case coordinator.TokenScopeSession:
 		return nil
 	case coordinator.TokenScopeConsole:
-		if !write {
-			return nil
-		}
+		// Console sessions are owner-equivalent and may push as well as fetch.
+		return nil
 	}
 
 	return errors.New("credential is not allowed to access git exchanges")

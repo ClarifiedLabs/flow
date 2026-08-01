@@ -474,20 +474,20 @@ func (s *projectServer) handleChecksPath(w http.ResponseWriter, r *http.Request,
 
 	switch {
 	case len(parts) == 0 && r.Method == http.MethodGet:
-		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker) {
-			writeError(w, http.StatusForbidden, "forbidden", "check read requires owner, session, or worker token")
+		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker, coordinator.TokenScopeConsole) {
+			writeError(w, http.StatusForbidden, "forbidden", "check read requires owner, session, worker, or console token")
 			return
 		}
 		s.handleListChecks(w, r, taskID)
 	case len(parts) == 1 && r.Method == http.MethodGet:
-		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker) {
-			writeError(w, http.StatusForbidden, "forbidden", "check read requires owner, session, or worker token")
+		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker, coordinator.TokenScopeConsole) {
+			writeError(w, http.StatusForbidden, "forbidden", "check read requires owner, session, worker, or console token")
 			return
 		}
 		s.handleGetCheck(w, r, taskID, parts[0])
 	case len(parts) == 1 && r.Method == http.MethodPost:
-		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker) {
-			writeError(w, http.StatusForbidden, "forbidden", "check reporting requires owner, session, or worker token")
+		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker, coordinator.TokenScopeConsole) {
+			writeError(w, http.StatusForbidden, "forbidden", "check reporting requires owner, session, worker, or console token")
 			return
 		}
 		s.handleReportCheck(w, r, principal, taskID, parts[0])
@@ -729,7 +729,8 @@ func workerRoleAllowed(role worker.JobRole, allowed []worker.JobRole) bool {
 
 func (s *projectServer) checkReportScope(r *http.Request, taskID string, checkName string, request reportCheckRequest, principal coordinator.Principal) error {
 	switch principal.Scope {
-	case coordinator.TokenScopeOwner:
+	case coordinator.TokenScopeOwner, coordinator.TokenScopeConsole:
+		// Console sessions are owner-equivalent and may report checks directly.
 		return nil
 	case coordinator.TokenScopeSession:
 		if principal.SourceTaskID == nil || strings.TrimSpace(*principal.SourceTaskID) != strings.TrimSpace(taskID) {
@@ -805,7 +806,7 @@ func (s *projectServer) checkReportScope(r *http.Request, taskID string, checkNa
 		}
 		return nil
 	default:
-		return errors.New("check reporting requires owner, session, or worker token")
+		return errors.New("check reporting requires owner, session, worker, or console token")
 	}
 }
 

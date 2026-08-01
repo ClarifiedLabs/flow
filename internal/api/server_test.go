@@ -2324,7 +2324,9 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/tasks", createTaskRequest{
 		Title: "Console-created task",
 	}, http.StatusCreated, &created)
-	if created.Task.CreatedBy != coordinator.ActorAgent || created.Task.CreatedBySessionID == nil || *created.Task.CreatedBySessionID != sessionID {
+	// The console is human-operated: the task is attributed to the human while
+	// still stamped with the originating console session id.
+	if created.Task.CreatedBy != coordinator.ActorHuman || created.Task.CreatedBySessionID == nil || *created.Task.CreatedBySessionID != sessionID {
 		t.Fatalf("console-created task audit = %+v", created.Task)
 	}
 	title := "Console-edited task"
@@ -2334,13 +2336,15 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule", scheduleTaskRequest{
 		State: string(coordinator.ScheduleUpNext),
 	}, http.StatusOK, nil)
+	// Console sessions are owner-equivalent: check reporting and the owner-only
+	// job/worker listings are all permitted.
 	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/tasks/"+created.Task.ID+"/checks/unit", reportCheckRequest{
 		Kind:    string(coordinator.CheckKindCI),
 		Verdict: string(coordinator.CheckSatisfied),
-	}, http.StatusForbidden, nil)
+	}, http.StatusOK, nil)
 	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/tasks/"+created.Task.ID+"/merge", map[string]string{}, http.StatusNotFound, nil)
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodGet, "/v2/jobs", nil, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodGet, "/v2/workers", nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodGet, "/v2/jobs", nil, http.StatusOK, nil)
+	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodGet, "/v2/workers", nil, http.StatusOK, nil)
 
 	var blocker taskResponse
 	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodPost, "/v2/tasks", createTaskRequest{
@@ -2354,8 +2358,8 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("relations for console task: %v", err)
 	}
-	if len(relations) != 1 || relations[0].CreatedBy != coordinator.ActorAgent {
-		t.Fatalf("relations = %+v, want one agent-created relation", relations)
+	if len(relations) != 1 || relations[0].CreatedBy != coordinator.ActorHuman {
+		t.Fatalf("relations = %+v, want one human-created relation", relations)
 	}
 	doJSONRequestAs(t, fixture.Server, consoleToken, http.MethodDelete, "/v2/tasks/"+blocker.Task.ID+"/relations", relationRequest{
 		TargetTaskID: created.Task.ID,

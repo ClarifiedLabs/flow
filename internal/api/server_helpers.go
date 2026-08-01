@@ -39,7 +39,9 @@ func createTaskInputForPrincipal(request createTaskRequest, principal coordinato
 		scheduleState = coordinator.ScheduleBacklog
 		triageState = coordinator.TriageAccepted
 	} else if principal.Scope == coordinator.TokenScopeConsole {
-		actor = coordinator.ActorAgent
+		// The console is human-operated: attribute to the human while keeping
+		// the console session id for traceability.
+		actor = coordinator.ActorHuman
 		createdBySessionID = &principal.Subject
 	}
 
@@ -134,6 +136,11 @@ func relationInputs(relations []relationRequest, actor coordinator.Actor) []coor
 func scopeAllowed(principal coordinator.Principal, allowed ...coordinator.TokenScope) bool {
 	for _, scope := range allowed {
 		if principal.Scope == scope {
+			return true
+		}
+		// A console session runs with owner-equivalent authority: any gate that
+		// admits the owner also admits a console principal.
+		if scope == coordinator.TokenScopeOwner && principal.Scope == coordinator.TokenScopeConsole {
 			return true
 		}
 	}
