@@ -289,6 +289,11 @@ func TestInstrumentAPIHandlerPreservesWebSocketUpgrade(t *testing.T) {
 // resolve implicitly, exactly as a fresh single-project deployment behaves.
 func newServeTestRegistry(t *testing.T) (*api.Registry, coordinator.Project) {
 	t.Helper()
+	return newServeTestRegistryWithHistoryStore(t, nil)
+}
+
+func newServeTestRegistryWithHistoryStore(t *testing.T, historyStore blob.Store) (*api.Registry, coordinator.Project) {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skipf("git is not installed")
 	}
@@ -303,7 +308,7 @@ func newServeTestRegistry(t *testing.T) (*api.Registry, coordinator.Project) {
 		_ = global.Close()
 	})
 
-	registry, err := api.NewRegistry(api.RegistryOptions{DataDir: dataDir, Global: global})
+	registry, err := api.NewRegistry(api.RegistryOptions{DataDir: dataDir, Global: global, HistoryBlobStore: historyStore})
 	if err != nil {
 		t.Fatalf("new registry: %v", err)
 	}
@@ -317,6 +322,85 @@ func newServeTestRegistry(t *testing.T) (*api.Registry, coordinator.Project) {
 	}
 
 	return registry, project
+}
+
+type reconcileDespitePublicationFailureStore struct {
+	blob.Store
+	reconcileCalls int
+}
+
+func (s *reconcileDespitePublicationFailureStore) Publish(context.Context, blob.Temporary, blob.Key) (blob.Object, error) {
+	return blob.Object{}, errors.New("simulated publication outage")
+}
+
+func (s *reconcileDespitePublicationFailureStore) Reconcile(ctx context.Context, request blob.ReconcileRequest) (blob.ReconcileResult, error) {
+	s.reconcileCalls++
+	return s.Store.Reconcile(ctx, request)
+}
+
+func TestHistoryReconciliationContinuesBackendCleanupAfterPublicationFailure(t *testing.T) {
+	ctx := context.Background()
+	local, err := blob.NewLocal(filepath.Join(t.TempDir(), "blobs"), blob.LocalOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = local.Close() })
+	store := &reconcileDespitePublicationFailureStore{Store: local}
+	registry, project := newServeTestRegistryWithHistoryStore(t, store)
+	bundle, ok := registry.Bundle(project.ID)
+	if !ok {
+		t.Fatal("project bundle not open")
+	}
+	reserved, err := bundle.HistoryCaptures.Reserve(ctx, coordinator.ReserveHistoryCaptureInput{
+		ProjectID: project.ID, JobID: "pending-publication", LeaseID: "lease-pending-publication",
+		LeaseAttempt: 1, WorkerID: "worker", Role: "author", ExpectedHarness: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upload, err := bundle.HistoryCaptures.BeginUpload(ctx, reserved.Capture.ID, reserved.UploadGrant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upload.Write([]byte("pending")); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := upload.Complete(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bundle.HistoryCaptures.PublishArtifact(ctx, reserved.Capture.ID, reserved.UploadGrant, coordinator.PublishHistoryArtifactInput{
+		LogicalKey: "harness/final/pending", Kind: coordinator.HistoryArtifactHarnessRoot, Phase: coordinator.HistoryArtifactFinal,
+		ArchiveID: "pending", MediaType: "application/octet-stream", LogicalSize: 7, EntryCount: 1,
+	}, pending); err == nil {
+		t.Fatal("publication unexpectedly succeeded")
+	}
+	abandonedUpload, err := local.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := abandonedUpload.Write([]byte("abandoned")); err != nil {
+		t.Fatal(err)
+	}
+	abandoned, err := abandonedUpload.Complete(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metricSet := metrics.RegisterHistoryStorage(metrics.New(), "local")
+	policy := config.ResolvedHistoryReconciliation{Interval: time.Minute, TemporaryGrace: time.Hour, OrphanGrace: time.Hour, BatchSize: 100}
+	result, reconcileErr := reconcileHistoryStorage(ctx, registry, store, policy, metricSet, time.Now().UTC().Add(2*time.Hour))
+	if reconcileErr == nil {
+		t.Fatal("publication failure was not reported")
+	}
+	if store.reconcileCalls != 1 {
+		t.Fatalf("backend reconciliation calls = %d, want 1", store.reconcileCalls)
+	}
+	if len(result.RemovedTemporaryIDs) != 1 || result.RemovedTemporaryIDs[0] != abandoned.ID {
+		t.Fatalf("backend cleanup result = %+v", result)
+	}
+	if _, err := local.Resume(ctx, pending.ID); err != nil {
+		t.Fatalf("pending publication temporary was not protected: %v", err)
+	}
 }
 
 func TestHistoryReconciliationRemovesOnlyUnreferencedTemporariesAndReportsPublishedOrphans(t *testing.T) {

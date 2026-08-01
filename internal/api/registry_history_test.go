@@ -45,8 +45,18 @@ func TestRegistryHistoryStoreDefaultsAndExternalOwnership(t *testing.T) {
 	if defaultRegistry.HistoryBlobStore() == nil || !defaultRegistry.OwnsHistoryBlobStore() {
 		t.Fatalf("default history store = %T owned=%t", defaultRegistry.HistoryBlobStore(), defaultRegistry.OwnsHistoryBlobStore())
 	}
-	if _, err := defaultRegistry.HistoryBlobStore().Begin(context.Background()); err != nil {
+	upload, err := defaultRegistry.HistoryBlobStore().Begin(context.Background())
+	if err != nil {
 		t.Fatalf("default history store beneath %s is unusable: %v", dataDir, err)
+	}
+	if err := upload.Abort(context.Background()); err != nil {
+		t.Fatalf("abort default store probe: %v", err)
+	}
+	if err := defaultRegistry.Close(); err != nil {
+		t.Fatalf("close default registry: %v", err)
+	}
+	if _, err := defaultRegistry.HistoryBlobStore().Begin(context.Background()); !errors.Is(err, blob.ErrStoreClosed) {
+		t.Fatalf("owned history store remains open after registry close: %v", err)
 	}
 
 	external, err := blob.NewLocal(filepath.Join(t.TempDir(), "external"), blob.LocalOptions{})
@@ -56,6 +66,19 @@ func TestRegistryHistoryStoreDefaultsAndExternalOwnership(t *testing.T) {
 	externalRegistry, _ := newHistoryRegistry(t, external)
 	if externalRegistry.HistoryBlobStore() != external || externalRegistry.OwnsHistoryBlobStore() {
 		t.Fatalf("external store identity/ownership = %T/%t", externalRegistry.HistoryBlobStore(), externalRegistry.OwnsHistoryBlobStore())
+	}
+	if err := externalRegistry.Close(); err != nil {
+		t.Fatalf("close external-store registry: %v", err)
+	}
+	externalUpload, err := external.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("registry closed caller-owned history store: %v", err)
+	}
+	if err := externalUpload.Abort(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := external.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -87,9 +110,19 @@ func TestRegistryWiresProjectIsolatedHistoryServicesAndMetadata(t *testing.T) {
 	reserveAndUploadHistoryArtifact(t, gate, second.HistoryCaptures, secondProject.ID, "job-two-more", true)
 	activeTemporary := reserveAndCompleteHistoryUpload(t, second.HistoryCaptures, secondProject.ID, "job-active")
 
-	metadata, err := registry.HistoryBlobMetadata(ctx)
+	_, complete, err := registry.HistoryBlobMetadata(ctx, 1)
+	if err != nil {
+		t.Fatalf("bounded history blob metadata: %v", err)
+	}
+	if complete {
+		t.Fatal("history blob metadata with a one-row project allowance should be truncated")
+	}
+	metadata, complete, err := registry.HistoryBlobMetadata(ctx, 100)
 	if err != nil {
 		t.Fatalf("history blob metadata: %v", err)
+	}
+	if !complete {
+		t.Fatal("history blob metadata snapshot unexpectedly truncated")
 	}
 	if _, ok := metadata.LiveTemporaryIDs[pendingTemporary.ID]; !ok {
 		t.Fatalf("pending temporary %s is not protected: %v", pendingTemporary.ID, metadata.LiveTemporaryIDs)
@@ -109,9 +142,12 @@ func TestRegistryWiresProjectIsolatedHistoryServicesAndMetadata(t *testing.T) {
 	if summary.Projects != 2 || summary.Examined != 2 || summary.Committed != 2 || summary.Pending != 0 || summary.Failed != 0 {
 		t.Fatalf("bounded per-project reconciliation = %+v", summary)
 	}
-	metadata, err = registry.HistoryBlobMetadata(ctx)
+	metadata, complete, err = registry.HistoryBlobMetadata(ctx, 100)
 	if err != nil {
 		t.Fatalf("history blob metadata after reconciliation: %v", err)
+	}
+	if !complete {
+		t.Fatal("history blob metadata snapshot after reconciliation unexpectedly truncated")
 	}
 	if _, ok := metadata.LiveTemporaryIDs[activeTemporary.ID]; !ok || len(metadata.LiveTemporaryIDs) != 3 || len(metadata.PendingKeys) != 2 || len(metadata.ReferencedKeys) != 2 {
 		t.Fatalf("metadata after reconciliation = live:%v pending:%d referenced:%d", metadata.LiveTemporaryIDs, len(metadata.PendingKeys), len(metadata.ReferencedKeys))

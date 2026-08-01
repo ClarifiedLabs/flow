@@ -35,6 +35,11 @@ type Local struct {
 	objectRoot    string
 	rootDir       *os.File
 	maxRangeBytes int64
+
+	mu            sync.Mutex
+	closed        bool
+	closeErr      error
+	activeUploads map[string]struct{}
 }
 
 func NewLocal(root string, options LocalOptions) (*Local, error) {
@@ -87,7 +92,7 @@ func NewLocal(root string, options LocalOptions) (*Local, error) {
 	return &Local{
 		root: layoutPath, temporaryRoot: filepath.Join(layoutPath, localTemporaryName),
 		objectRoot: filepath.Join(layoutPath, localObjectsName), rootDir: layout,
-		maxRangeBytes: maximum,
+		maxRangeBytes: maximum, activeUploads: make(map[string]struct{}),
 	}, nil
 }
 
@@ -199,9 +204,51 @@ func validatePrivateNode(file *os.File, nodeType uint32, mode uint32) error {
 	return nil
 }
 
+func (s *Local) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return s.closeErr
+	}
+	s.closed = true
+	s.closeErr = s.rootDir.Close()
+	return s.closeErr
+}
+
 func (s *Local) storeDirectory(name string) (*os.File, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrStoreClosed
+	}
 	directory, _, err := openPrivateDirectoryAt(s.rootDir, name, false)
 	return directory, err
+}
+
+func (s *Local) beginDirectory(id string) (*os.File, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrStoreClosed
+	}
+	directory, _, err := openPrivateDirectoryAt(s.rootDir, localTemporaryName, false)
+	if err != nil {
+		return nil, err
+	}
+	s.activeUploads[id] = struct{}{}
+	return directory, nil
+}
+
+func (s *Local) finishUpload(id string) {
+	s.mu.Lock()
+	delete(s.activeUploads, id)
+	s.mu.Unlock()
+}
+
+func (s *Local) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
 }
 
 func (s *Local) Begin(ctx context.Context) (Upload, error) {
@@ -212,18 +259,20 @@ func (s *Local) Begin(ctx context.Context) (Upload, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate temporary upload ID: %w", err)
 	}
-	temporary, err := s.storeDirectory(localTemporaryName)
+	temporary, err := s.beginDirectory(id)
 	if err != nil {
 		return nil, fmt.Errorf("open local temporary directory: %w", err)
 	}
 	defer temporary.Close()
 	file, err := openPrivateRegularAt(temporary, id, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL)
 	if err != nil {
+		s.finishUpload(id)
 		return nil, fmt.Errorf("create local temporary upload: %w", err)
 	}
 	if err := temporary.Sync(); err != nil {
 		_ = file.Close()
 		_ = unix.Unlinkat(int(temporary.Fd()), id, 0)
+		s.finishUpload(id)
 		return nil, fmt.Errorf("fsync local temporary directory: %w", err)
 	}
 	return &localUpload{store: s, id: id, file: file, hash: sha256.New(), createdAt: time.Now().UTC()}, nil
@@ -247,6 +296,9 @@ type localUpload struct {
 func (u *localUpload) Write(p []byte) (int, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.store.isClosed() {
+		return 0, ErrStoreClosed
+	}
 	if u.aborted {
 		return 0, ErrUploadAborted
 	}
@@ -264,6 +316,9 @@ func (u *localUpload) Write(p []byte) (int, error) {
 func (u *localUpload) Complete(ctx context.Context) (Temporary, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.store.isClosed() {
+		return Temporary{}, ErrStoreClosed
+	}
 	if err := ctx.Err(); err != nil {
 		return Temporary{}, err
 	}
@@ -276,11 +331,14 @@ func (u *localUpload) Complete(ctx context.Context) (Temporary, error) {
 	u.completed = true
 	if err := u.file.Sync(); err != nil {
 		_ = u.file.Close()
+		u.store.finishUpload(u.id)
 		return Temporary{}, fmt.Errorf("fsync local temporary upload: %w", err)
 	}
 	if err := u.file.Close(); err != nil {
+		u.store.finishUpload(u.id)
 		return Temporary{}, fmt.Errorf("close local temporary upload: %w", err)
 	}
+	u.store.finishUpload(u.id)
 	var digest Digest
 	copy(digest[:], u.hash.Sum(nil))
 	return Temporary{ID: u.id, Digest: digest, Size: u.size, CreatedAt: u.createdAt}, nil
@@ -296,6 +354,7 @@ func (u *localUpload) Abort(ctx context.Context) error {
 	if !u.completed {
 		_ = u.file.Close()
 	}
+	u.store.finishUpload(u.id)
 	return u.store.Abort(ctx, u.id)
 }
 
@@ -555,7 +614,13 @@ func (s *Local) Abort(ctx context.Context, id string) error {
 	if !validUploadID(id) {
 		return ErrInvalidUpload
 	}
-	temporary, err := s.storeDirectory(localTemporaryName)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrStoreClosed
+	}
+	delete(s.activeUploads, id)
+	temporary, _, err := openPrivateDirectoryAt(s.rootDir, localTemporaryName, false)
 	if err != nil {
 		return fmt.Errorf("open local temporary directory: %w", err)
 	}
@@ -569,27 +634,59 @@ func (s *Local) Abort(ctx context.Context, id string) error {
 	return nil
 }
 
+func (s *Local) removeReconciledTemporary(ctx context.Context, temporary *os.File, id string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false, ErrStoreClosed
+	}
+	if _, active := s.activeUploads[id]; active {
+		return false, nil
+	}
+	if err := unix.Unlinkat(int(temporary.Fd()), id, 0); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, fmt.Errorf("remove local temporary upload: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		return false, fmt.Errorf("fsync local temporary directory: %w", err)
+	}
+	return true, nil
+}
+
+func readdirBounded(directory *os.File, limit int) ([]os.FileInfo, bool, error) {
+	entries, err := directory.Readdir(limit)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, false, err
+	}
+	return entries, len(entries) == limit, nil
+}
+
 func (s *Local) Reconcile(ctx context.Context, request ReconcileRequest) (ReconcileResult, error) {
 	request, err := normalizeReconcileRequest(request)
 	if err != nil {
 		return ReconcileResult{}, err
 	}
 	result := ReconcileResult{}
+	examined := 0
+
 	temporary, err := s.storeDirectory(localTemporaryName)
 	if err != nil {
 		return result, fmt.Errorf("open local temporary directory: %w", err)
 	}
-	entries, err := temporary.Readdir(-1)
-	_ = temporary.Close()
+	entries, exhausted, err := readdirBounded(temporary, request.Limit-examined)
 	if err != nil {
+		_ = temporary.Close()
 		return result, fmt.Errorf("list local temporary uploads: %w", err)
 	}
+	examined += len(entries)
 	for _, entry := range entries {
-		if len(result.RemovedTemporaryIDs)+len(result.Orphans) >= request.Limit {
-			result.Truncated = true
-			return result, nil
-		}
 		if err := ctx.Err(); err != nil {
+			_ = temporary.Close()
 			return result, err
 		}
 		id := entry.Name()
@@ -599,46 +696,61 @@ func (s *Local) Reconcile(ctx context.Context, request ReconcileRequest) (Reconc
 		if _, live := request.LiveTemporaryIDs[id]; live {
 			continue
 		}
-		if err := s.Abort(ctx, id); err != nil {
-			return result, err
+		removed, removeErr := s.removeReconciledTemporary(ctx, temporary, id)
+		if removeErr != nil {
+			_ = temporary.Close()
+			return result, removeErr
 		}
-		result.RemovedTemporaryIDs = append(result.RemovedTemporaryIDs, id)
+		if removed {
+			result.RemovedTemporaryIDs = append(result.RemovedTemporaryIDs, id)
+		}
+	}
+	_ = temporary.Close()
+	if exhausted {
+		result.Truncated = true
+		return result, nil
 	}
 
 	objects, err := s.storeDirectory(localObjectsName)
 	if err != nil {
 		return result, fmt.Errorf("open local object root: %w", err)
 	}
-	namespaces, err := objects.Readdir(-1)
-	if err != nil {
-		_ = objects.Close()
-		return result, fmt.Errorf("list local object namespaces: %w", err)
-	}
-	for _, namespaceEntry := range namespaces {
+	defer objects.Close()
+	for examined < request.Limit {
+		namespaces, _, readErr := readdirBounded(objects, 1)
+		if readErr != nil {
+			return result, fmt.Errorf("list local object namespaces: %w", readErr)
+		}
+		if len(namespaces) == 0 {
+			return result, nil
+		}
+		examined++
+		namespaceEntry := namespaces[0]
 		if err := ctx.Err(); err != nil {
-			_ = objects.Close()
 			return result, err
 		}
 		if !namespaceEntry.IsDir() || !isLowerHex(namespaceEntry.Name(), 32) {
 			continue
 		}
+		if examined == request.Limit {
+			result.Truncated = true
+			return result, nil
+		}
+
 		namespace, _, openErr := openPrivateDirectoryAt(objects, namespaceEntry.Name(), false)
 		if openErr != nil {
-			_ = objects.Close()
 			return result, fmt.Errorf("open local object namespace: %w", openErr)
 		}
-		files, readErr := namespace.Readdir(-1)
+		files, namespaceExhausted, readErr := readdirBounded(namespace, request.Limit-examined)
 		if readErr != nil {
 			_ = namespace.Close()
-			_ = objects.Close()
 			return result, fmt.Errorf("list local object namespace: %w", readErr)
 		}
+		examined += len(files)
 		for _, entry := range files {
-			if len(result.RemovedTemporaryIDs)+len(result.Orphans) >= request.Limit {
-				result.Truncated = true
+			if err := ctx.Err(); err != nil {
 				_ = namespace.Close()
-				_ = objects.Close()
-				return result, nil
+				return result, err
 			}
 			if !entry.Mode().IsRegular() || !isLowerHex(entry.Name(), 32) {
 				continue
@@ -656,20 +768,22 @@ func (s *Local) Reconcile(ctx context.Context, request ReconcileRequest) (Reconc
 			file, openErr := openPrivateRegularAt(namespace, entry.Name(), unix.O_RDONLY)
 			if openErr != nil {
 				_ = namespace.Close()
-				_ = objects.Close()
 				return result, fmt.Errorf("open local published blob: %w", openErr)
 			}
 			object, headErr := headLocalFile(ctx, key, file)
 			_ = file.Close()
 			if headErr != nil {
 				_ = namespace.Close()
-				_ = objects.Close()
 				return result, headErr
 			}
 			result.Orphans = append(result.Orphans, object)
 		}
 		_ = namespace.Close()
+		if namespaceExhausted {
+			result.Truncated = true
+			return result, nil
+		}
 	}
-	_ = objects.Close()
+	result.Truncated = true
 	return result, nil
 }

@@ -214,6 +214,9 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "open history blob store: %v\n", err)
 		return 1
 	}
+	if closer, ok := historyStore.(blob.Closer); ok {
+		defer closer.Close()
+	}
 	slog.Debug("flow-server serve configuration loaded", "addr", cfg.ListenAddr, "database", cfg.GlobalDatabasePath(), "data_dir", cfg.DataDir, "history_backend", historyPolicy.Blob.Backend)
 
 	ownerTokenFileDisplay := "inline"
@@ -276,9 +279,12 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		Global:           globalStore,
 		HistoryBlobStore: historyStore,
 		HistoryCaptureServiceOptions: coordinator.HistoryCaptureServiceOptions{
-			MaxUploadBytes:            historyPolicy.Archive.MaxStoredBytes,
-			MaxTranscriptSegmentBytes: historyPolicy.Transcript.SegmentBytes,
-			MaxArtifactsPerCapture:    historyPolicy.Archive.MaxEntries,
+			MaxUploadBytes:                      historyPolicy.Archive.MaxStoredBytes,
+			MaxTranscriptSegmentBytes:           historyPolicy.Transcript.SegmentBytes,
+			MaxOutstandingUploadsPerCapture:     historyPolicy.Archive.MaxOutstandingUploads,
+			MaxOutstandingUploadBytesPerCapture: historyPolicy.Archive.MaxOutstandingBytes,
+			MaxArchiveEntries:                   historyPolicy.Archive.MaxEntries,
+			MaxArchiveLogicalBytes:              historyPolicy.Archive.MaxLogicalBytes,
 		},
 		AuthorEntrypoint:           cfg.AuthorEntrypoint,
 		AuthorEntrypointConfigured: cfg.AuthorEntrypointConfigured,
@@ -490,18 +496,23 @@ func reconcileHistoryStorage(ctx context.Context, registry *api.Registry, store 
 	if pendingLimit > 500 {
 		pendingLimit = 500
 	}
-	if _, err := registry.ReconcilePendingHistoryArtifacts(ctx, pendingLimit); err != nil {
-		return blob.ReconcileResult{}, err
-	}
-	request, err := registry.HistoryBlobMetadata(ctx)
+	_, pendingErr := registry.ReconcilePendingHistoryArtifacts(ctx, pendingLimit)
+	request, complete, err := registry.HistoryBlobMetadata(ctx, policy.BatchSize)
 	if err != nil {
-		return blob.ReconcileResult{}, err
+		return blob.ReconcileResult{}, errors.Join(pendingErr, err)
+	}
+	if !complete {
+		// A partial reference snapshot is never safe for deletion. Keep this pass
+		// bounded and wait for explicit retention to reduce the protected set.
+		result := blob.ReconcileResult{Truncated: true}
+		metricSet.ObserveSuccess(0, 0, 0, true, now)
+		return result, pendingErr
 	}
 	request.Before = now.Add(-policy.TemporaryGrace)
 	request.Limit = policy.BatchSize
 	result, err := store.Reconcile(ctx, request)
 	if err != nil {
-		return blob.ReconcileResult{}, err
+		return blob.ReconcileResult{}, errors.Join(pendingErr, err)
 	}
 	agedOrphans := 0
 	orphanCutoff := now.Add(-policy.OrphanGrace)
@@ -516,7 +527,7 @@ func reconcileHistoryStorage(ctx context.Context, registry *api.Registry, store 
 		// report-only and require a future explicitly authorized retention workflow.
 		slog.Warn("history reconciliation reported unreferenced published blobs", "count", agedOrphans)
 	}
-	return result, nil
+	return result, pendingErr
 }
 
 // lifecycleTickConcurrency bounds how many projects tick in parallel per tick so

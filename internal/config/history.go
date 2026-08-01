@@ -58,11 +58,13 @@ type HistoryTranscriptConfig struct {
 }
 
 type HistoryArchiveConfig struct {
-	MaxStoredBytes  string `json:"max_stored_bytes" yaml:"max_stored_bytes"`
-	MaxLogicalBytes string `json:"max_logical_bytes" yaml:"max_logical_bytes"`
-	MaxFileBytes    string `json:"max_file_bytes" yaml:"max_file_bytes"`
-	MaxEntries      int    `json:"max_entries" yaml:"max_entries"`
-	MaxPathBytes    int    `json:"max_path_bytes" yaml:"max_path_bytes"`
+	MaxStoredBytes        string `json:"max_stored_bytes" yaml:"max_stored_bytes"`
+	MaxLogicalBytes       string `json:"max_logical_bytes" yaml:"max_logical_bytes"`
+	MaxFileBytes          string `json:"max_file_bytes" yaml:"max_file_bytes"`
+	MaxEntries            int    `json:"max_entries" yaml:"max_entries"`
+	MaxPathBytes          int    `json:"max_path_bytes" yaml:"max_path_bytes"`
+	MaxOutstandingBytes   string `json:"max_outstanding_bytes" yaml:"max_outstanding_bytes"`
+	MaxOutstandingUploads int    `json:"max_outstanding_uploads" yaml:"max_outstanding_uploads"`
 }
 
 type ResolvedCoordinatorHistory struct {
@@ -96,8 +98,8 @@ type ResolvedHistoryTranscript struct {
 }
 
 type ResolvedHistoryArchive struct {
-	MaxStoredBytes, MaxLogicalBytes, MaxFileBytes int64
-	MaxEntries, MaxPathBytes                      int
+	MaxStoredBytes, MaxLogicalBytes, MaxFileBytes, MaxOutstandingBytes int64
+	MaxEntries, MaxPathBytes, MaxOutstandingUploads                    int
 }
 
 func (c CoordinatorHistoryConfig) Resolve(dataDir string) (ResolvedCoordinatorHistory, error) {
@@ -268,13 +270,28 @@ func (c HistoryArchiveConfig) resolve() (ResolvedHistoryArchive, error) {
 	if pathBytes == 0 {
 		pathBytes = 4 << 10
 	}
+	outstandingBytes, err := resolveHistoryBytes(c.MaxOutstandingBytes, 2<<30, "history.archive.max_outstanding_bytes")
+	if err != nil {
+		return ResolvedHistoryArchive{}, err
+	}
+	outstandingUploads := c.MaxOutstandingUploads
+	if outstandingUploads == 0 {
+		outstandingUploads = 32
+	}
 	if file > logical || stored > logical {
 		return ResolvedHistoryArchive{}, errors.New("history archive stored and per-file limits must not exceed the logical-byte limit")
 	}
-	if entries < 1 || entries > 1000000 || pathBytes < 256 || pathBytes > 32<<10 {
-		return ResolvedHistoryArchive{}, errors.New("history archive entries/path limits are outside safe bounds")
+	if outstandingBytes < stored {
+		return ResolvedHistoryArchive{}, errors.New("history archive max_outstanding_bytes must be >= max_stored_bytes")
 	}
-	return ResolvedHistoryArchive{MaxStoredBytes: stored, MaxLogicalBytes: logical, MaxFileBytes: file, MaxEntries: entries, MaxPathBytes: pathBytes}, nil
+	if entries < 1 || entries > 1000000 || pathBytes < 256 || pathBytes > 32<<10 || outstandingUploads < 1 || outstandingUploads > 10000 {
+		return ResolvedHistoryArchive{}, errors.New("history archive entries/path/outstanding-upload limits are outside safe bounds")
+	}
+	return ResolvedHistoryArchive{
+		MaxStoredBytes: stored, MaxLogicalBytes: logical, MaxFileBytes: file,
+		MaxEntries: entries, MaxPathBytes: pathBytes,
+		MaxOutstandingBytes: outstandingBytes, MaxOutstandingUploads: outstandingUploads,
+	}, nil
 }
 
 // WorkerHistoryConfig is parsed and held by flow-worker in Slice 1. Capture

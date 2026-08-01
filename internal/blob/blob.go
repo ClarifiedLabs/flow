@@ -33,6 +33,7 @@ var (
 	ErrInvalidUpload    = errors.New("invalid temporary upload")
 	ErrUploadClosed     = errors.New("temporary upload is closed")
 	ErrUploadAborted    = errors.New("temporary upload is aborted")
+	ErrStoreClosed      = errors.New("blob store is closed")
 	ErrChecksumMismatch = errors.New("blob checksum mismatch")
 	ErrInsecureEndpoint = errors.New("insecure object-store endpoint")
 	ErrInvalidConfig    = errors.New("invalid blob-store configuration")
@@ -164,6 +165,12 @@ type Store interface {
 	OpenRange(context.Context, Key, ByteRange) (RangeReader, error)
 	Abort(context.Context, string) error
 	Reconcile(context.Context, ReconcileRequest) (ReconcileResult, error)
+}
+
+// Closer is implemented by stores that retain resources requiring explicit
+// release. Callers may type-assert it without requiring every backend to close.
+type Closer interface {
+	Close() error
 }
 
 // ReconcileRequest carries coordinator metadata into a conservative bounded

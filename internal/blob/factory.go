@@ -32,9 +32,8 @@ type FactoryS3Config struct {
 	KMSKeyID                            string
 }
 
-// Open constructs a blob store. Stores returned by the current local and S3
-// backends own no background goroutines or open long-lived handles and therefore
-// need no Close call.
+// Open constructs a blob store. Callers should close stores implementing Closer;
+// backends without retained resources need not implement it.
 func Open(ctx context.Context, config FactoryConfig) (Store, error) {
 	switch strings.ToLower(strings.TrimSpace(config.Backend)) {
 	case BackendLocal:

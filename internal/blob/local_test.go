@@ -334,6 +334,194 @@ func TestLocalUploadStateCancellationAndReconciliation(t *testing.T) {
 	reader.Close()
 }
 
+func TestLocalReconcilePreservesActiveUploadOlderThanCutoff(t *testing.T) {
+	store, err := NewLocal(t.TempDir(), LocalOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	upload, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := upload.(*localUpload)
+	if _, err := upload.Write([]byte("still-open")); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(filepath.Join(store.temporaryRoot, local.id), old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := store.Reconcile(ctx, ReconcileRequest{Before: old.Add(time.Hour), Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.RemovedTemporaryIDs) != 0 {
+		t.Fatalf("active temporary was removed: %v", result.RemovedTemporaryIDs)
+	}
+	if _, err := os.Stat(filepath.Join(store.temporaryRoot, local.id)); err != nil {
+		t.Fatalf("active temporary no longer exists: %v", err)
+	}
+	if _, err := upload.Write([]byte("-more")); err != nil {
+		t.Fatalf("active upload is no longer writable: %v", err)
+	}
+	temporary, err := upload.Complete(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Chtimes(filepath.Join(store.temporaryRoot, temporary.ID), old, old); err != nil {
+		t.Fatal(err)
+	}
+	result, err = store.Reconcile(ctx, ReconcileRequest{Before: old.Add(time.Hour), Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.RemovedTemporaryIDs) != 1 || result.RemovedTemporaryIDs[0] != temporary.ID {
+		t.Fatalf("completed temporary removal = %v, want %s", result.RemovedTemporaryIDs, temporary.ID)
+	}
+}
+
+func TestLocalCloseIsIdempotentAndRejectsOperations(t *testing.T) {
+	store, err := NewLocal(t.TempDir(), LocalOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var _ Closer = store
+
+	ctx := context.Background()
+	objectKey, _ := NewKey("close-object")
+	objectTemporary := completeUpload(t, ctx, store, []byte("published"))
+	if _, err := store.Publish(ctx, objectTemporary, objectKey); err != nil {
+		t.Fatal(err)
+	}
+	unpublished := completeUpload(t, ctx, store, []byte("unpublished"))
+	active, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := store.Open(ctx, objectKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("second Close() = %v", err)
+	}
+	if _, err := store.rootDir.Stat(); err == nil {
+		t.Fatal("root directory descriptor remains open after Close")
+	}
+	got, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil || string(got) != "published" {
+		t.Fatalf("reader opened before Close = %q, %v", got, err)
+	}
+
+	checks := []struct {
+		name string
+		call func() error
+	}{
+		{name: "Begin", call: func() error { _, err := store.Begin(ctx); return err }},
+		{name: "Resume", call: func() error { _, err := store.Resume(ctx, unpublished.ID); return err }},
+		{name: "Publish", call: func() error { _, err := store.Publish(ctx, unpublished, objectKey); return err }},
+		{name: "Head", call: func() error { _, err := store.Head(ctx, objectKey); return err }},
+		{name: "Open", call: func() error { _, err := store.Open(ctx, objectKey); return err }},
+		{name: "OpenRange", call: func() error {
+			_, err := store.OpenRange(ctx, objectKey, ByteRange{Length: 1})
+			return err
+		}},
+		{name: "Abort", call: func() error { return store.Abort(ctx, unpublished.ID) }},
+		{name: "Reconcile", call: func() error {
+			_, err := store.Reconcile(ctx, ReconcileRequest{Before: time.Now(), Limit: 1})
+			return err
+		}},
+		{name: "Upload.Write", call: func() error { _, err := active.Write([]byte("x")); return err }},
+		{name: "Upload.Complete", call: func() error { _, err := active.Complete(ctx); return err }},
+		{name: "Upload.Abort", call: func() error { return active.Abort(ctx) }},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			if err := check.call(); !errors.Is(err, ErrStoreClosed) {
+				t.Fatalf("error = %v, want ErrStoreClosed", err)
+			}
+		})
+	}
+}
+
+func TestLocalReconcileBoundsExaminedEntries(t *testing.T) {
+	t.Run("temporaries", func(t *testing.T) {
+		store, err := NewLocal(t.TempDir(), LocalOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		ctx := context.Background()
+		live := make(map[string]struct{})
+		for i := 0; i < 4; i++ {
+			temporary := completeUpload(t, ctx, store, []byte{byte(i)})
+			live[temporary.ID] = struct{}{}
+		}
+
+		result, err := store.Reconcile(ctx, ReconcileRequest{
+			Before: time.Now().Add(time.Hour), LiveTemporaryIDs: live, Limit: 2,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Truncated {
+			t.Fatal("Reconcile did not report a scan bounded before all temporary entries")
+		}
+		if len(result.RemovedTemporaryIDs) != 0 {
+			t.Fatalf("live temporaries removed: %v", result.RemovedTemporaryIDs)
+		}
+	})
+
+	t.Run("published objects", func(t *testing.T) {
+		store, err := NewLocal(t.TempDir(), LocalOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		ctx := context.Background()
+		keys := make([]Key, 0, 4)
+		for i := 0; i < 4; i++ {
+			key, err := NewKey("bounded-object-namespace")
+			if err != nil {
+				t.Fatal(err)
+			}
+			temporary := completeUpload(t, ctx, store, []byte{byte(i)})
+			if _, err := store.Publish(ctx, temporary, key); err != nil {
+				t.Fatal(err)
+			}
+			keys = append(keys, key)
+		}
+
+		result, err := store.Reconcile(ctx, ReconcileRequest{
+			Before: time.Now().Add(time.Hour), Limit: 3,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Truncated {
+			t.Fatal("Reconcile did not report a scan bounded before all object entries")
+		}
+		if len(result.Orphans) != 2 {
+			t.Fatalf("reported orphans = %d, want 2 object entries after examining one namespace", len(result.Orphans))
+		}
+		for _, key := range keys {
+			if _, err := store.Head(ctx, key); err != nil {
+				t.Fatalf("reconciliation deleted published object %s: %v", key, err)
+			}
+		}
+	})
+}
+
 func completeUpload(t *testing.T, ctx context.Context, store Store, content []byte) Temporary {
 	t.Helper()
 	upload, err := store.Begin(ctx)

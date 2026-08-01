@@ -172,6 +172,11 @@ func NewRegistry(opts RegistryOptions) (*Registry, error) {
 		bundles:                    map[string]*ProjectBundle{},
 	}
 	if err := registry.globalAgentDefs.SeedDefaults(context.Background()); err != nil {
+		if historyBlobsOwned {
+			if closer, ok := historyBlobs.(blob.Closer); ok {
+				_ = closer.Close()
+			}
+		}
 		return nil, fmt.Errorf("seed global agent definitions: %w", err)
 	}
 	return registry, nil
@@ -586,29 +591,39 @@ func (r *Registry) ReconcilePendingHistoryArtifacts(ctx context.Context, limitPe
 // both their temporary upload and destination key; every committed artifact
 // remains referenced, including superseded checkpoints, until a future
 // explicitly authorized retention transaction removes that reference.
-func (r *Registry) HistoryBlobMetadata(ctx context.Context) (blob.ReconcileRequest, error) {
+func (r *Registry) HistoryBlobMetadata(ctx context.Context, limitPerProject int) (blob.ReconcileRequest, bool, error) {
+	if limitPerProject <= 0 {
+		return blob.ReconcileRequest{}, false, errors.New("history metadata limit per project must be positive")
+	}
 	request := blob.ReconcileRequest{
 		LiveTemporaryIDs: map[string]struct{}{},
 		ReferencedKeys:   map[blob.Key]struct{}{},
 		PendingKeys:      map[blob.Key]struct{}{},
 	}
+	complete := true
 	for _, bundle := range r.All() {
 		rows, err := bundle.Store.DB().QueryContext(ctx, `
 SELECT temporary_upload_id, blob_key, publication_state
-FROM history_artifacts`)
+FROM history_artifacts ORDER BY id LIMIT ?`, limitPerProject+1)
 		if err != nil {
-			return blob.ReconcileRequest{}, fmt.Errorf("read project %s history blob metadata: %w", bundle.Project.ID, err)
+			return blob.ReconcileRequest{}, false, fmt.Errorf("read project %s history blob metadata: %w", bundle.Project.ID, err)
 		}
+		artifactRows := 0
 		for rows.Next() {
+			artifactRows++
 			var temporaryID, keyText, state string
 			if err := rows.Scan(&temporaryID, &keyText, &state); err != nil {
 				rows.Close()
-				return blob.ReconcileRequest{}, fmt.Errorf("scan project %s history blob metadata: %w", bundle.Project.ID, err)
+				return blob.ReconcileRequest{}, false, fmt.Errorf("scan project %s history blob metadata: %w", bundle.Project.ID, err)
+			}
+			if artifactRows > limitPerProject {
+				complete = false
+				continue
 			}
 			key, err := blob.ParseKey(keyText)
 			if err != nil {
 				rows.Close()
-				return blob.ReconcileRequest{}, fmt.Errorf("project %s has invalid history blob key: %w", bundle.Project.ID, err)
+				return blob.ReconcileRequest{}, false, fmt.Errorf("project %s has invalid history blob key: %w", bundle.Project.ID, err)
 			}
 			switch coordinator.HistoryPublicationState(state) {
 			case coordinator.HistoryPublicationPending:
@@ -620,39 +635,46 @@ FROM history_artifacts`)
 				request.ReferencedKeys[key] = struct{}{}
 			default:
 				rows.Close()
-				return blob.ReconcileRequest{}, fmt.Errorf("project %s has invalid history publication state %q", bundle.Project.ID, state)
+				return blob.ReconcileRequest{}, false, fmt.Errorf("project %s has invalid history publication state %q", bundle.Project.ID, state)
 			}
 		}
 		if err := rows.Close(); err != nil {
-			return blob.ReconcileRequest{}, fmt.Errorf("close project %s history metadata rows: %w", bundle.Project.ID, err)
+			return blob.ReconcileRequest{}, false, fmt.Errorf("close project %s history metadata rows: %w", bundle.Project.ID, err)
 		}
 		if err := rows.Err(); err != nil {
-			return blob.ReconcileRequest{}, fmt.Errorf("read project %s history blob metadata: %w", bundle.Project.ID, err)
+			return blob.ReconcileRequest{}, false, fmt.Errorf("read project %s history blob metadata: %w", bundle.Project.ID, err)
 		}
 
 		intentRows, err := bundle.Store.DB().QueryContext(ctx, `
 SELECT temporary_upload_id
 FROM history_upload_intents
-WHERE state = 'active'`)
+WHERE state = 'active'
+ORDER BY temporary_upload_id LIMIT ?`, limitPerProject+1)
 		if err != nil {
-			return blob.ReconcileRequest{}, fmt.Errorf("read project %s active history upload intents: %w", bundle.Project.ID, err)
+			return blob.ReconcileRequest{}, false, fmt.Errorf("read project %s active history upload intents: %w", bundle.Project.ID, err)
 		}
+		intentCount := 0
 		for intentRows.Next() {
+			intentCount++
 			var temporaryID string
 			if err := intentRows.Scan(&temporaryID); err != nil {
 				intentRows.Close()
-				return blob.ReconcileRequest{}, fmt.Errorf("scan project %s active history upload intent: %w", bundle.Project.ID, err)
+				return blob.ReconcileRequest{}, false, fmt.Errorf("scan project %s active history upload intent: %w", bundle.Project.ID, err)
+			}
+			if intentCount > limitPerProject {
+				complete = false
+				continue
 			}
 			request.LiveTemporaryIDs[temporaryID] = struct{}{}
 		}
 		if err := intentRows.Close(); err != nil {
-			return blob.ReconcileRequest{}, fmt.Errorf("close project %s active history upload intents: %w", bundle.Project.ID, err)
+			return blob.ReconcileRequest{}, false, fmt.Errorf("close project %s active history upload intents: %w", bundle.Project.ID, err)
 		}
 		if err := intentRows.Err(); err != nil {
-			return blob.ReconcileRequest{}, fmt.Errorf("read project %s active history upload intents: %w", bundle.Project.ID, err)
+			return blob.ReconcileRequest{}, false, fmt.Errorf("read project %s active history upload intents: %w", bundle.Project.ID, err)
 		}
 	}
-	return request, nil
+	return request, complete, nil
 }
 
 func (r *Registry) Close() error {
@@ -665,6 +687,13 @@ func (r *Registry) Close() error {
 			joined = errors.Join(joined, fmt.Errorf("close project %s database: %w", id, err))
 		}
 		delete(r.bundles, id)
+	}
+	if r.historyBlobsOwned {
+		if closer, ok := r.historyBlobs.(blob.Closer); ok {
+			if err := closer.Close(); err != nil {
+				joined = errors.Join(joined, fmt.Errorf("close owned history blob store: %w", err))
+			}
+		}
 	}
 
 	return joined

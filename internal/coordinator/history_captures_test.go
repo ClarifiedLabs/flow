@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/blob"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
@@ -34,6 +35,7 @@ func newHistoryCaptureTestEnv(t *testing.T) *historyCaptureTestEnv {
 	if err != nil {
 		t.Fatalf("open local blob store: %v", err)
 	}
+	t.Cleanup(func() { _ = blobs.Close() })
 	return &historyCaptureTestEnv{store: store, blobs: blobs, service: NewHistoryCaptureService(store.DB(), blobs)}
 }
 
@@ -91,7 +93,7 @@ func publishHistoryBytes(t *testing.T, service *HistoryCaptureService, captureID
 
 func publishCanonicalManifestBytes(t *testing.T, service *HistoryCaptureService, captureID string, input PublishHistoryArtifactInput, content []byte) HistoryArtifact {
 	t.Helper()
-	upload, err := service.blobs.Begin(context.Background())
+	upload, err := service.BeginCoordinatorUpload(context.Background(), captureID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,6 +319,39 @@ type publishResponseLossStore struct {
 	failOnce bool
 }
 
+type blockingOpenStore struct {
+	blob.Store
+	mu      sync.Mutex
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingOpenStore) blockNextOpen() (<-chan struct{}, chan<- struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.entered = make(chan struct{})
+	s.release = make(chan struct{})
+	return s.entered, s.release
+}
+
+func (s *blockingOpenStore) Open(ctx context.Context, key blob.Key) (io.ReadCloser, error) {
+	s.mu.Lock()
+	entered, release := s.entered, s.release
+	if entered != nil {
+		s.entered, s.release = nil, nil
+	}
+	s.mu.Unlock()
+	if entered != nil {
+		close(entered)
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return s.Store.Open(ctx, key)
+}
+
 func (s *publishResponseLossStore) Publish(ctx context.Context, temporary blob.Temporary, key blob.Key) (blob.Object, error) {
 	object, err := s.Store.Publish(ctx, temporary, key)
 	if err != nil {
@@ -329,6 +364,12 @@ func (s *publishResponseLossStore) Publish(ctx context.Context, temporary blob.T
 		return blob.Object{}, errors.New("simulated response loss after immutable publish")
 	}
 	return object, nil
+}
+
+type failingPublishStore struct{ blob.Store }
+
+func (s failingPublishStore) Publish(context.Context, blob.Temporary, blob.Key) (blob.Object, error) {
+	return blob.Object{}, errors.New("simulated persistent publication failure")
 }
 
 func TestHistoryArtifactImmutableIdempotencyAndPublicationRecovery(t *testing.T) {
@@ -383,6 +424,38 @@ func TestHistoryArtifactImmutableIdempotencyAndPublicationRecovery(t *testing.T)
 	recovered, err := lossyService.GetArtifact(ctx, reserved.Capture.ID, lossInput.LogicalKey)
 	if err != nil || recovered.PublicationState != HistoryPublicationCommitted || recovered.SHA256 != historyDigest(lossContent) {
 		t.Fatalf("reconciled artifact = %+v err=%v", recovered, err)
+	}
+}
+
+func TestHistoryPendingReconciliationRotatesFailuresForFairness(t *testing.T) {
+	env := newHistoryCaptureTestEnv(t)
+	ctx := context.Background()
+	service := NewHistoryCaptureService(env.store.DB(), failingPublishStore{Store: env.blobs})
+	reserved := reserveHistoryCapture(t, service, baseHistoryReservation())
+	for index, key := range []string{"harness/final/one", "harness/final/two", "harness/final/three"} {
+		temporary := uploadHistoryBytes(t, service, reserved.Capture.ID, reserved.UploadGrant, []byte{byte('a' + index)})
+		_, err := service.PublishArtifact(ctx, reserved.Capture.ID, reserved.UploadGrant, PublishHistoryArtifactInput{
+			LogicalKey: key, Kind: HistoryArtifactHarnessRoot, Phase: HistoryArtifactFinal,
+			ArchiveID: key, MediaType: "application/octet-stream", LogicalSize: 1, EntryCount: 1,
+		}, temporary)
+		if err == nil {
+			t.Fatalf("publication %s unexpectedly succeeded", key)
+		}
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		summary, err := service.ReconcilePendingArtifacts(ctx, reserved.Capture.ID, 1)
+		if err == nil || summary.Examined != 1 || len(summary.Failures) != 1 {
+			t.Fatalf("reconcile attempt %d summary=%+v err=%v", attempt, summary, err)
+		}
+	}
+	var attempted int
+	if err := env.store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM history_artifacts
+WHERE capture_id = ? AND reconcile_attempted_at IS NOT NULL`, reserved.Capture.ID).Scan(&attempted); err != nil {
+		t.Fatal(err)
+	}
+	if attempted != 2 {
+		t.Fatalf("reconciliation attempted %d distinct pending artifacts, want 2", attempted)
 	}
 }
 
@@ -475,6 +548,68 @@ func TestHistoryTranscriptOrderingSealAndExactExpectedCompletion(t *testing.T) {
 	if again, err := env.service.Complete(ctx, capture.ID, reserved.UploadGrant, completed.Version-1, "worker"); err != nil || again.State != HistoryCaptureComplete {
 		t.Fatalf("idempotent completion after grant revocation capture=%+v err=%v", again, err)
 	}
+}
+
+func TestHistoryTranscriptBlobReadsDoNotHoldProjectWriteReservation(t *testing.T) {
+	env := newHistoryCaptureTestEnv(t)
+	ctx := context.Background()
+	reserved := reserveHistoryCapture(t, env.service, baseHistoryReservation())
+	content := []byte("slow transcript")
+	publishHistoryBytes(t, env.service, reserved.Capture.ID, reserved.UploadGrant, PublishHistoryArtifactInput{
+		LogicalKey: "transcript/slow", Kind: HistoryArtifactTranscriptSegment, Phase: HistoryArtifactFinal,
+		MediaType: "application/octet-stream", LogicalSize: int64(len(content)),
+	}, content)
+
+	blocking := &blockingOpenStore{Store: env.blobs}
+	service := NewHistoryCaptureService(env.store.DB(), blocking)
+	assertWriteProceeds := func(name string, operation func() error) {
+		t.Helper()
+		entered, release := blocking.blockNextOpen()
+		done := make(chan error, 1)
+		go func() { done <- operation() }()
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s did not reach blob read", name)
+		}
+		writeDone := make(chan error, 1)
+		go func() {
+			input := baseHistoryReservation()
+			input.JobID, input.LeaseID, input.LeaseAttempt = "job-write-"+name, "lease-write-"+name, 20
+			_, err := env.service.Reserve(ctx, input)
+			writeDone <- err
+		}()
+		var writeErr error
+		writeTimedOut := false
+		select {
+		case writeErr = <-writeDone:
+		case <-time.After(time.Second):
+			writeTimedOut = true
+		}
+		close(release)
+		if writeTimedOut {
+			t.Fatalf("unrelated project write blocked by %s blob read", name)
+		}
+		if writeErr != nil {
+			t.Fatalf("unrelated project write during %s: %v", name, writeErr)
+		}
+		if err := <-done; err != nil {
+			t.Fatalf("%s after release: %v", name, err)
+		}
+	}
+
+	assertWriteProceeds("register", func() error {
+		_, err := service.RegisterTranscriptSegment(ctx, reserved.Capture.ID, reserved.UploadGrant, RegisterTranscriptSegmentInput{
+			ArtifactLogicalKey: "transcript/slow", Epoch: 0, Sequence: 0,
+			StartOffset: 0, EndOffset: int64(len(content)), Encoding: "identity",
+		})
+		return err
+	})
+	assertWriteProceeds("seal", func() error {
+		return service.SealTranscript(ctx, reserved.Capture.ID, reserved.UploadGrant, TranscriptSeal{
+			FinalEpoch: 0, SegmentCount: 1, LogicalLength: int64(len(content)), SHA256: historyDigest(content),
+		})
+	})
 }
 
 func TestHistoryCheckpointHintsCoalesceAndCheckpointArtifactsNeverCompleteFinalSet(t *testing.T) {
@@ -627,6 +762,66 @@ func TestHistoryCaptureEventsAreAppendOnlyAndLossWaiverAreAudited(t *testing.T) 
 	}
 }
 
+func TestHistorySQLiteGuardsRejectLifecycleAndTerminalMetadataCorruption(t *testing.T) {
+	env := newHistoryCaptureTestEnv(t)
+	ctx := context.Background()
+	input := baseHistoryReservation()
+	input.ExpectedTranscript, input.ExpectedHarness = false, false
+	reserved := reserveHistoryCapture(t, env.service, input)
+	captureID := reserved.Capture.ID
+	now := "2026-07-31T12:00:00Z"
+
+	for name, statement := range map[string]string{
+		"state jump":       `UPDATE history_captures SET state = 'complete', completed_at = '` + now + `', upload_grant_revoked_at = '` + now + `', version = version + 1 WHERE id = '` + captureID + `'`,
+		"version jump":     `UPDATE history_captures SET version = version + 2 WHERE id = '` + captureID + `'`,
+		"future timestamp": `UPDATE history_captures SET sealed_at = '` + now + `' WHERE id = '` + captureID + `'`,
+	} {
+		if _, err := env.store.DB().ExecContext(ctx, statement); err == nil {
+			t.Fatalf("SQLite guard accepted %s", name)
+		}
+	}
+	if _, err := env.store.DB().ExecContext(ctx, `
+UPDATE history_captures
+SET expected_set_declared_at = ?, expected_final_artifact_count = 0,
+    version = version + 1, updated_at = ?
+WHERE id = ?`, now, now, captureID); err != nil {
+		t.Fatalf("declare expected-set projection directly: %v", err)
+	}
+	if _, err := env.store.DB().ExecContext(ctx, `
+UPDATE history_captures
+SET expected_final_artifact_count = 1, version = version + 1, updated_at = ?
+WHERE id = ?`, now, captureID); err == nil {
+		t.Fatal("SQLite guard accepted expected-set mutation after declaration")
+	}
+	capture, err := env.service.Get(ctx, captureID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture, err = env.service.RecordExecutionVerdict(ctx, captureID, RecordHistoryExecutionVerdictInput{
+		Verdict: HistoryExecutionFailed, ErrorCode: "failed", ExpectedVersion: capture.Version, Actor: "worker",
+	})
+	if err != nil {
+		t.Fatalf("record execution verdict: %v", err)
+	}
+	if _, err := env.store.DB().ExecContext(ctx, `
+UPDATE history_captures
+SET execution_error_code = 'rewritten', version = version + 1, updated_at = ?
+WHERE id = ?`, now, captureID); err == nil {
+		t.Fatal("SQLite guard accepted terminal execution verdict rewrite")
+	}
+
+	artifact := publishHistoryBytes(t, env.service, captureID, reserved.UploadGrant, PublishHistoryArtifactInput{
+		LogicalKey: "harness/final/guard", Kind: HistoryArtifactHarnessRoot, Phase: HistoryArtifactFinal,
+		ArchiveID: "guard", MediaType: "application/octet-stream", LogicalSize: 1, EntryCount: 1,
+	}, []byte("x"))
+	if _, err := env.store.DB().ExecContext(ctx, `
+UPDATE history_artifacts
+SET publication_state = 'pending', committed_at = NULL
+WHERE id = ?`, artifact.ID); err == nil {
+		t.Fatal("SQLite guard accepted committed-to-pending artifact transition")
+	}
+}
+
 func TestHistoryUploadIntentLifecycleLossWaiverAndCeilings(t *testing.T) {
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
@@ -663,6 +858,8 @@ func TestHistoryUploadIntentLifecycleLossWaiverAndCeilings(t *testing.T) {
 	limitedInput.JobID, limitedInput.LeaseID, limitedInput.LeaseAttempt = "job-limit", "lease-limit", 9
 	limited := NewHistoryCaptureServiceWithOptions(env.store.DB(), env.blobs, HistoryCaptureServiceOptions{
 		MaxUploadBytes: 3, MaxTranscriptSegmentBytes: 3, MaxArtifactsPerCapture: 1, MaxCheckpointsPerCapture: 1,
+		MaxOutstandingUploadsPerCapture: 1, MaxOutstandingUploadBytesPerCapture: 3,
+		MaxArchiveEntries: 1, MaxArchiveLogicalBytes: 3,
 	})
 	limitedReservation := reserveHistoryCapture(t, limited, limitedInput)
 	upload, err := limited.BeginUpload(ctx, limitedReservation.Capture.ID, limitedReservation.UploadGrant)
@@ -675,6 +872,31 @@ func TestHistoryUploadIntentLifecycleLossWaiverAndCeilings(t *testing.T) {
 	if _, err := upload.Complete(ctx); !errors.Is(err, ErrHistoryUploadTooLarge) {
 		t.Fatalf("complete oversized upload err=%v", err)
 	}
+	outstanding := uploadHistoryBytes(t, limited, limitedReservation.Capture.ID, limitedReservation.UploadGrant, []byte("one"))
+	secondUpload, err := limited.BeginUpload(ctx, limitedReservation.Capture.ID, limitedReservation.UploadGrant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := secondUpload.Write([]byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := secondUpload.Complete(ctx); !errors.Is(err, ErrHistoryUploadTooLarge) {
+		t.Fatalf("outstanding upload count/bytes err=%v, want quota error", err)
+	}
+	if err := limited.AbandonUpload(ctx, limitedReservation.Capture.ID, limitedReservation.UploadGrant, outstanding.ID); err != nil {
+		t.Fatal(err)
+	}
+	archiveTooLarge := PublishHistoryArtifactInput{
+		LogicalKey: "checkpoint/archive-too-large", Kind: HistoryArtifactHarnessRoot, Phase: HistoryArtifactCheckpoint,
+		CheckpointGeneration: 1, CheckpointStream: "large", MediaType: "application/octet-stream", LogicalSize: 3, EntryCount: 2,
+	}
+	archiveTemporary := uploadHistoryBytes(t, limited, limitedReservation.Capture.ID, limitedReservation.UploadGrant, []byte("one"))
+	if _, err := limited.PublishArtifact(ctx, limitedReservation.Capture.ID, limitedReservation.UploadGrant, archiveTooLarge, archiveTemporary); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatalf("archive entry ceiling err=%v", err)
+	}
+	if err := limited.AbandonUpload(ctx, limitedReservation.Capture.ID, limitedReservation.UploadGrant, archiveTemporary.ID); err != nil {
+		t.Fatal(err)
+	}
 	checkpoint := PublishHistoryArtifactInput{
 		LogicalKey: "checkpoint/one", Kind: HistoryArtifactHarnessRoot, Phase: HistoryArtifactCheckpoint,
 		CheckpointGeneration: 1, CheckpointStream: "root", MediaType: "application/octet-stream", LogicalSize: 3,
@@ -684,6 +906,21 @@ func TestHistoryUploadIntentLifecycleLossWaiverAndCeilings(t *testing.T) {
 	checkpoint.LogicalKey, checkpoint.CheckpointGeneration = "checkpoint/two", 2
 	if _, err := limited.PublishArtifact(ctx, limitedReservation.Capture.ID, limitedReservation.UploadGrant, checkpoint, secondTemporary); !errors.Is(err, ErrHistoryConflict) {
 		t.Fatalf("artifact/checkpoint ceiling err=%v", err)
+	}
+
+	orderingInput := input
+	orderingInput.JobID, orderingInput.LeaseID, orderingInput.LeaseAttempt = "job-order", "lease-order", 10
+	ordering := NewHistoryCaptureServiceWithOptions(env.store.DB(), env.blobs, HistoryCaptureServiceOptions{
+		MaxUploadBytes: 3, MaxArtifactsPerCapture: 10, MaxCheckpointsPerCapture: 10,
+	})
+	orderingReservation := reserveHistoryCapture(t, ordering, orderingInput)
+	orderedCheckpoint := checkpoint
+	orderedCheckpoint.LogicalKey, orderedCheckpoint.CheckpointGeneration = "checkpoint/two-first", 2
+	publishHistoryBytes(t, ordering, orderingReservation.Capture.ID, orderingReservation.UploadGrant, orderedCheckpoint, []byte("two"))
+	orderedCheckpoint.LogicalKey, orderedCheckpoint.CheckpointGeneration = "checkpoint/one-late", 1
+	late := uploadHistoryBytes(t, ordering, orderingReservation.Capture.ID, orderingReservation.UploadGrant, []byte("one"))
+	if _, err := ordering.PublishArtifact(ctx, orderingReservation.Capture.ID, orderingReservation.UploadGrant, orderedCheckpoint, late); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatalf("non-increasing checkpoint generation err=%v", err)
 	}
 }
 

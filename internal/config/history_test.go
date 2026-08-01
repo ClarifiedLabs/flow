@@ -22,7 +22,7 @@ func TestHistoryConfigurationDefaults(t *testing.T) {
 	if coordinator.Transcript.SegmentBytes != 4<<20 || coordinator.Transcript.FlushInterval != 30*time.Second {
 		t.Fatalf("default transcript = %+v", coordinator.Transcript)
 	}
-	if coordinator.Archive.MaxStoredBytes != 512<<20 || coordinator.Archive.MaxLogicalBytes != 2<<30 || coordinator.Archive.MaxFileBytes != 1<<30 || coordinator.Archive.MaxEntries != 100000 || coordinator.Archive.MaxPathBytes != 4<<10 {
+	if coordinator.Archive.MaxStoredBytes != 512<<20 || coordinator.Archive.MaxLogicalBytes != 2<<30 || coordinator.Archive.MaxFileBytes != 1<<30 || coordinator.Archive.MaxEntries != 100000 || coordinator.Archive.MaxPathBytes != 4<<10 || coordinator.Archive.MaxOutstandingBytes != 2<<30 || coordinator.Archive.MaxOutstandingUploads != 32 {
 		t.Fatalf("default archive = %+v", coordinator.Archive)
 	}
 
