@@ -200,6 +200,143 @@ func TestCountClosedTasksCountsOnlyClosed(t *testing.T) {
 	}
 }
 
+func TestCountClosedTasksByWindowCumulativeBucketsAtBoundaries(t *testing.T) {
+	ctx := context.Background()
+	service, clock := newClosedTaskFixture(t)
+	base := *clock
+
+	// Completed tasks at every boundary: exactly at the edge, one second
+	// inside, and one second outside.
+	finishTask(t, service, clock, "completed inside 15m", base.Add(-15*time.Minute+time.Second), ResolutionCompleted)
+	finishTask(t, service, clock, "completed exact 15m", base.Add(-15*time.Minute), ResolutionCompleted)
+	finishTask(t, service, clock, "completed outside 15m", base.Add(-15*time.Minute-time.Second), ResolutionCompleted)
+	finishTask(t, service, clock, "completed outside 30m", base.Add(-30*time.Minute-time.Second), ResolutionCompleted)
+	finishTask(t, service, clock, "completed outside 1h", base.Add(-time.Hour-time.Second), ResolutionCompleted)
+	finishTask(t, service, clock, "completed exact 24h", base.Add(-24*time.Hour), ResolutionCompleted)
+	finishTask(t, service, clock, "completed outside 24h", base.Add(-24*time.Hour-time.Second), ResolutionCompleted)
+	// Merged is a successful outcome and counts like completed.
+	finishTask(t, service, clock, "merged inside 15m", base.Add(-10*time.Minute), ResolutionMerged)
+	// Unsuccessful resolutions never count.
+	finishTask(t, service, clock, "rejected", base.Add(-5*time.Minute), ResolutionRejected)
+	finishTask(t, service, clock, "abandoned", base.Add(-5*time.Minute), ResolutionAbandoned)
+	finishTask(t, service, clock, "cancelled", base.Add(-5*time.Minute), ResolutionCancelled)
+	finishTask(t, service, clock, "failed", base.Add(-5*time.Minute), ResolutionFailed)
+	*clock = base // restore the fixed now for the window math
+
+	windows := []time.Duration{15 * time.Minute, 30 * time.Minute, time.Hour, 24 * time.Hour}
+	counts, err := service.CountClosedTasksByWindow(ctx, windows, []DoneResolution{ResolutionCompleted, ResolutionMerged})
+	if err != nil {
+		t.Fatalf("count closed tasks by window: %v", err)
+	}
+
+	want := map[time.Duration]int{
+		15 * time.Minute: 3, // inside + exact 15m + merged at 10m
+		30 * time.Minute: 4, // + outside 15m
+		time.Hour:        5, // + outside 30m
+		24 * time.Hour:   7, // + outside 1h + exact 24h (outside 24h never counts)
+	}
+	if len(counts) != len(windows) {
+		t.Fatalf("bucket count = %d, want %d", len(counts), len(windows))
+	}
+	for i, window := range windows {
+		if counts[i].Window != window {
+			t.Fatalf("bucket %d window = %s, want %s", i, counts[i].Window, window)
+		}
+		if counts[i].Count != want[window] {
+			t.Fatalf("bucket %s count = %d, want %d", window, counts[i].Count, want[window])
+		}
+	}
+
+	// The per-outcome breakdown is cumulative too: 2 completed (inside 15m +
+	// exact 15m) and 1 merged inside the 15m window.
+	byOutcome := counts[0].ByOutcome
+	if byOutcome[ResolutionCompleted] != 2 || byOutcome[ResolutionMerged] != 1 {
+		t.Fatalf("15m by outcome = %+v, want completed 2 merged 1", byOutcome)
+	}
+	if _, ok := byOutcome[ResolutionRejected]; ok {
+		t.Fatalf("15m by outcome includes rejected: %+v", byOutcome)
+	}
+}
+
+func TestCountClosedTasksByWindowUsesOneClockSnapshot(t *testing.T) {
+	ctx := context.Background()
+	service, clock := newClosedTaskFixture(t)
+	base := *clock
+
+	// A completion exactly at now-15m must count in the 15m bucket even when
+	// the injected clock moves forward during the request. Pre-fix, the SQL
+	// lower bound came from an earlier s.now() snapshot than the in-memory
+	// bucket cutoffs, so this task passed the query but was skipped as Before
+	// the later cutoff.
+	finishTask(t, service, clock, "completed exact 15m", base.Add(-15*time.Minute), ResolutionCompleted)
+
+	// The clock stays at base for the first read (the SQL bound) and then jumps
+	// 10s forward for every later read (the bucket cutoffs): with two snapshots
+	// the boundary task falls out of the 15m bucket, with one it does not.
+	reads := 0
+	service.now = func() time.Time {
+		reads++
+		if reads == 1 {
+			return base
+		}
+		return base.Add(10 * time.Second)
+	}
+
+	counts, err := service.CountClosedTasksByWindow(ctx, []time.Duration{15 * time.Minute, time.Hour}, []DoneResolution{ResolutionCompleted})
+	if err != nil {
+		t.Fatalf("count closed tasks by window: %v", err)
+	}
+	if counts[0].Count != 1 {
+		t.Fatalf("15m count = %d, want 1 (task at exactly now-15m must count under one stable now)", counts[0].Count)
+	}
+	if counts[1].Count != 1 {
+		t.Fatalf("1h count = %d, want 1", counts[1].Count)
+	}
+}
+
+func TestCountClosedTasksByWindowExcludesOpenAndNullDoneAt(t *testing.T) {
+	ctx := context.Background()
+	service, clock := newClosedTaskFixture(t)
+	base := *clock
+
+	finishTask(t, service, clock, "completed", base.Add(-time.Minute), ResolutionCompleted)
+
+	// Open tasks have a NULL done_at and a non-done lifecycle (the schema CHECK
+	// ties lifecycle_state = 'done' to a non-NULL done_at/done_resolution, so
+	// those invariants cannot drift apart); they must never count.
+	createTasks(t, service, "open one", "open two")
+
+	*clock = base
+	counts, err := service.CountClosedTasksByWindow(ctx, []time.Duration{time.Hour}, []DoneResolution{ResolutionCompleted})
+	if err != nil {
+		t.Fatalf("count closed tasks by window: %v", err)
+	}
+	if len(counts) != 1 || counts[0].Count != 1 {
+		t.Fatalf("counts = %+v, want exactly one (only the properly finished task)", counts)
+	}
+}
+
+func TestCountClosedTasksByWindowValidatesWindowsAndOutcomes(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newClosedTaskFixture(t)
+
+	if _, err := service.CountClosedTasksByWindow(ctx, nil, []DoneResolution{ResolutionCompleted}); err == nil {
+		t.Fatal("nil windows accepted, want error")
+	}
+	if _, err := service.CountClosedTasksByWindow(ctx, []time.Duration{0}, []DoneResolution{ResolutionCompleted}); err == nil {
+		t.Fatal("zero window accepted, want error")
+	}
+	if _, err := service.CountClosedTasksByWindow(ctx, []time.Duration{-time.Minute}, []DoneResolution{ResolutionCompleted}); err == nil {
+		t.Fatal("negative window accepted, want error")
+	}
+	if _, err := service.CountClosedTasksByWindow(ctx, []time.Duration{time.Hour}, nil); err == nil {
+		t.Fatal("nil outcomes accepted, want error")
+	}
+	if _, err := service.CountClosedTasksByWindow(ctx, []time.Duration{time.Hour}, []DoneResolution{"bogus"}); err == nil {
+		t.Fatal("unknown outcome accepted, want error")
+	}
+}
+
 func taskIDs(tasks []Task) []string {
 	ids := make([]string, len(tasks))
 	for i, task := range tasks {

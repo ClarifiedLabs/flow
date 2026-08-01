@@ -417,5 +417,17 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
+	if r.URL.Path == "/v2/stats/completions" {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
+			writeError(w, http.StatusForbidden, "forbidden", "completion stats read requires owner, session, or console token")
+			return
+		}
+		s.handleCompletionStatsAggregate(w, r, principal)
+		return
+	}
+
 	writeError(w, http.StatusNotFound, "not_found", "resource not found")
 }

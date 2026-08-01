@@ -878,6 +878,18 @@ func (s *projectServer) doneResponseForProject(ctx context.Context, principal co
 	return response, nil
 }
 
+// completionStatsForProject computes the per-window successful-completion
+// counts for one project using the standard /v2/stats/completions windows and
+// outcomes. It shares the grouped query with the aggregate handler, so both
+// paths see identical numbers.
+func (s *projectServer) completionStatsForProject(ctx context.Context) ([]coordinator.ClosedTaskWindowCount, error) {
+	windows := make([]time.Duration, len(completionStatWindows))
+	for i, window := range completionStatWindows {
+		windows[i] = window.duration
+	}
+	return s.tasks.CountClosedTasksByWindow(ctx, windows, successfulDoneOutcomes)
+}
+
 // buildUIDoneCards loads the merged change (if any) and tags for each closed
 // task. Work is bounded by the caller's page size.
 func (s *projectServer) buildUIDoneCards(ctx context.Context, tasks []coordinator.Task) (map[string]uiDoneCard, error) {

@@ -618,6 +618,111 @@ WHERE lifecycle_state = ?`, string(LifecycleDone)).Scan(&count); err != nil {
 	return count, nil
 }
 
+// ClosedTaskWindowCount is one cumulative time window of successful task
+// completions: Count is the total and ByOutcome splits it by resolution.
+type ClosedTaskWindowCount struct {
+	Window    time.Duration
+	Count     int
+	ByOutcome map[DoneResolution]int
+}
+
+// CountClosedTasksByWindow counts tasks closed with one of the given outcomes
+// within each window. Windows are cumulative: a task closed at now-10m counts
+// toward every window of 15m or larger, and a task closed exactly at a window
+// edge counts in that window. It is a single grouped query over done_at /
+// done_resolution bounded by the largest window, so the unbounded closed-task
+// history is never loaded. Windows must be positive and outcomes must be known
+// resolutions.
+func (s *TaskService) CountClosedTasksByWindow(ctx context.Context, windows []time.Duration, outcomes []DoneResolution) ([]ClosedTaskWindowCount, error) {
+	if len(windows) == 0 {
+		return nil, errors.New("count closed tasks by window: at least one window is required")
+	}
+	if len(outcomes) == 0 {
+		return nil, errors.New("count closed tasks by window: at least one outcome is required")
+	}
+
+	maxWindow := time.Duration(0)
+	for _, window := range windows {
+		if window <= 0 {
+			return nil, fmt.Errorf("count closed tasks by window: invalid window %s: must be positive", window)
+		}
+		if window > maxWindow {
+			maxWindow = window
+		}
+	}
+
+	resolutions := make([]any, 0, len(outcomes))
+	seen := make(map[DoneResolution]bool, len(outcomes))
+	for _, outcome := range outcomes {
+		if err := validateDoneResolution(outcome); err != nil {
+			return nil, fmt.Errorf("count closed tasks by window: %w", err)
+		}
+		if seen[outcome] {
+			continue
+		}
+		seen[outcome] = true
+		resolutions = append(resolutions, string(outcome))
+	}
+
+	// Capture one timestamp for the SQL lower bound and every in-memory bucket
+	// cutoff so a single request has one stable definition of now. Using two
+	// snapshots would let a completion at exactly the first now-maxWindow edge
+	// pass the SQL filter yet fall before a later bucket cutoff.
+	now := s.now().UTC()
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(resolutions)), ",")
+	args := []any{string(LifecycleDone), formatTime(now.Add(-maxWindow))}
+	args = append(args, resolutions...)
+	rows, err := s.db.QueryContext(ctx, `
+SELECT done_at, done_resolution, COUNT(*)
+FROM tasks
+WHERE lifecycle_state = ? AND done_at IS NOT NULL AND done_at >= ?
+	AND done_resolution IN (`+placeholders+`)
+GROUP BY done_at, done_resolution`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("count closed tasks by window: %w", err)
+	}
+	defer rows.Close()
+
+	type group struct {
+		closedAt time.Time
+		outcome  DoneResolution
+		count    int
+	}
+	var groups []group
+	for rows.Next() {
+		var closedAt string
+		var outcome string
+		var count int
+		if err := rows.Scan(&closedAt, &outcome, &count); err != nil {
+			return nil, fmt.Errorf("count closed tasks by window: %w", err)
+		}
+		at, err := sqlitex.ParseTime(closedAt)
+		if err != nil {
+			return nil, fmt.Errorf("count closed tasks by window: parse done_at %q: %w", closedAt, err)
+		}
+		groups = append(groups, group{closedAt: at, outcome: DoneResolution(outcome), count: count})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("count closed tasks by window: %w", err)
+	}
+
+	counts := make([]ClosedTaskWindowCount, len(windows))
+	for i, window := range windows {
+		cutoff := now.Add(-window)
+		bucket := ClosedTaskWindowCount{Window: window, ByOutcome: make(map[DoneResolution]int, len(seen))}
+		for _, g := range groups {
+			if g.closedAt.Before(cutoff) {
+				continue
+			}
+			bucket.Count += g.count
+			bucket.ByOutcome[g.outcome] += g.count
+		}
+		counts[i] = bucket
+	}
+	return counts, nil
+}
+
 func (s *TaskService) EditTask(ctx context.Context, id string, input EditTaskInput) (Task, error) {
 	current, err := s.GetTask(ctx, id)
 	if err != nil {

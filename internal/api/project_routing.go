@@ -581,6 +581,91 @@ func (s *Server) handleDoneAggregate(w http.ResponseWriter, r *http.Request, pri
 	writeJSON(w, http.StatusOK, response)
 }
 
+// completionStatWindow pairs a cumulative throughput window with its exact
+// response label for /v2/stats/completions, in ascending order.
+type completionStatWindow struct {
+	duration time.Duration
+	label    string
+}
+
+var completionStatWindows = []completionStatWindow{
+	{15 * time.Minute, "15m"},
+	{30 * time.Minute, "30m"},
+	{time.Hour, "1h"},
+	{2 * time.Hour, "2h"},
+	{4 * time.Hour, "4h"},
+	{6 * time.Hour, "6h"},
+	{12 * time.Hour, "12h"},
+	{24 * time.Hour, "24h"},
+}
+
+// successfulDoneOutcomes are the terminal resolutions that count as a
+// successful completion for the throughput stats; they mirror the
+// DONE_OUTCOMES vocabulary in internal/coordinator/flow_graph.go and
+// internal/web/assets/config.js.
+var successfulDoneOutcomes = []coordinator.DoneResolution{
+	coordinator.ResolutionCompleted,
+	coordinator.ResolutionMerged,
+}
+
+// completionStatBucket is one cumulative window of successful completions.
+type completionStatBucket struct {
+	Window string `json:"window"`
+	Count  int    `json:"count"`
+}
+
+// completionStatsResponse is the /v2/stats/completions payload: ascending
+// cumulative buckets plus a per-outcome breakdown for the same windows.
+type completionStatsResponse struct {
+	Buckets   []completionStatBucket    `json:"buckets"`
+	ByOutcome map[string]map[string]int `json:"by_outcome"`
+}
+
+// handleCompletionStatsAggregate sums successful completions across the
+// visible projects. Like /v2/done it fans out per project bundle and adds the
+// counts, but it returns only aggregate counts (no card detail), so any read
+// scope may see it.
+func (s *Server) handleCompletionStatsAggregate(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
+	bundles, ok := s.projectFilterBundles(w, r, principal)
+	if !ok {
+		return
+	}
+
+	response := completionStatsResponse{
+		Buckets:   make([]completionStatBucket, len(completionStatWindows)),
+		ByOutcome: make(map[string]map[string]int, len(completionStatWindows)),
+	}
+	for i, window := range completionStatWindows {
+		response.Buckets[i] = completionStatBucket{Window: window.label}
+		outcomeCounts := make(map[string]int, len(successfulDoneOutcomes))
+		for _, outcome := range successfulDoneOutcomes {
+			outcomeCounts[string(outcome)] = 0
+		}
+		response.ByOutcome[window.label] = outcomeCounts
+	}
+
+	for _, bundle := range bundles {
+		ps := s.forBundle(bundle)
+		counts, err := ps.completionStatsForProject(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "completion_stats_failed", err.Error())
+			return
+		}
+		if len(counts) != len(completionStatWindows) {
+			writeError(w, http.StatusInternalServerError, "completion_stats_failed", "unexpected window count")
+			return
+		}
+		for i, window := range completionStatWindows {
+			response.Buckets[i].Count += counts[i].Count
+			for _, outcome := range successfulDoneOutcomes {
+				response.ByOutcome[window.label][string(outcome)] += counts[i].ByOutcome[outcome]
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, response)
+}
+
 // closedTaskQueryFromRequest parses the /v2/done query string into a bounded
 // ClosedTaskQuery (limit, keyset cursor, time window, outcome filter).
 func closedTaskQueryFromRequest(r *http.Request) (coordinator.ClosedTaskQuery, error) {
