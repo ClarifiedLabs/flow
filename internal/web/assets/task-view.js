@@ -271,12 +271,12 @@ export function renderTaskFormView(app, task, options = {}) {
         <input name="attachments" type="file" multiple>
       </label>` : ""}
       ${mode === "create" ? relationsPickerView(app, defaultProject) : ""}
-      ${mode === "create" ? `
-      <label class="check wide">
-        <input name="queue_task" type="checkbox" checked>
-        <span>Queue after creation</span>
-      </label>` : ""}
-      <div class="form-actions">
+      <div class="form-actions task-form-actions">
+        ${mode === "create" ? `
+        <label class="check">
+          <input name="queue_task" type="checkbox" checked>
+          <span>Queue after creation</span>
+        </label>` : ""}
         <button class="button" type="submit">${escapeHTML(submitLabel)}</button>
       </div>
     </form>

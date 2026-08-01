@@ -2338,6 +2338,14 @@ tbody tr:nth-child(even).agent-def-prompt-row td {
   justify-content: flex-end;
 }
 
+/* Stack the create-form's queue checkbox directly above the submit button,
+   both right-aligned, so the checkbox is not missed before hitting Create. */
+.task-form-actions {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+
 .console-actions {
   align-items: center;
   flex-wrap: wrap;
