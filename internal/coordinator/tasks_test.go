@@ -597,14 +597,23 @@ func TestCreateTaskWithParentRelationAtomically(t *testing.T) {
 	}
 
 	// A child-of link that cannot be applied (the named parent does not exist)
-	// must fail the whole create rather than commit a parentless task.
-	if _, err := service.CreateTaskWithDetails(ctx, CreateTaskWithDetailsInput{
+	// must fail the whole create rather than commit a parentless task, and the
+	// failure must say the chosen parent cannot be used instead of leaking the
+	// raw foreign-key constraint text.
+	_, err = service.CreateTaskWithDetails(ctx, CreateTaskWithDetailsInput{
 		Task: CreateTaskInput{Title: "Orphan task"},
 		Relations: []CreateTaskRelationInput{
 			{SourceTaskID: "t-test-missing", Kind: RelationParentOf, BlankTargetIsNewTask: true},
 		},
-	}); err == nil {
+	})
+	if err == nil {
 		t.Fatal("create with a nonexistent parent relation succeeded")
+	}
+	if !strings.Contains(err.Error(), "the selected parent cannot be used") {
+		t.Fatalf("nonexistent parent error = %q, want a clear parent-unavailable message", err)
+	}
+	if strings.Contains(err.Error(), "FOREIGN KEY") {
+		t.Fatalf("nonexistent parent error exposes raw SQLite text: %q", err)
 	}
 
 	after, err := service.ListTasks(ctx, TaskFilter{})

@@ -932,10 +932,42 @@ VALUES (?, ?, ?, ?, ?)`,
 		string(actor),
 		nowText,
 	); err != nil {
+		if isForeignKeyViolation(err) {
+			return relationFKError(ctx, tx, sourceTaskID, targetTaskID, kind, err)
+		}
 		return fmt.Errorf("link tasks: %w", err)
 	}
 
 	return nil
+}
+
+// relationFKError translates a task_relations foreign-key failure into a
+// message a user can act on. The insert references a task id that does not
+// exist in this project's database (a stale or cross-project id), so instead
+// of surfacing SQLite's raw "FOREIGN KEY constraint failed" text we say which
+// side is unavailable. For a parent_of relation the source is the parent: the
+// new-task child-of form relies on this to tell the user the chosen parent
+// cannot be used, while the transaction rollback still guarantees that the
+// failed create commits no task.
+func relationFKError(ctx context.Context, tx *sql.Tx, sourceTaskID, targetTaskID string, kind RelationKind, fkErr error) error {
+	sourceErr := taskExistsInTx(ctx, tx, sourceTaskID)
+	targetErr := taskExistsInTx(ctx, tx, targetTaskID)
+	switch {
+	case sourceErr != nil && !errors.Is(sourceErr, sql.ErrNoRows):
+		return fmt.Errorf("link tasks: %w", fkErr)
+	case targetErr != nil && !errors.Is(targetErr, sql.ErrNoRows):
+		return fmt.Errorf("link tasks: %w", fkErr)
+	case sourceErr != nil && kind == RelationParentOf:
+		return fmt.Errorf("the selected parent cannot be used: task %s does not exist or is not accessible", sourceTaskID)
+	case targetErr != nil && kind == RelationParentOf:
+		return fmt.Errorf("the selected child cannot be used: task %s does not exist", targetTaskID)
+	case sourceErr != nil:
+		return fmt.Errorf("task relation references a task that does not exist: %s", sourceTaskID)
+	case targetErr != nil:
+		return fmt.Errorf("task relation references a task that does not exist: %s", targetTaskID)
+	default:
+		return fmt.Errorf("link tasks: %w", fkErr)
+	}
 }
 
 func (s *TaskService) UnlinkTasks(ctx context.Context, sourceTaskID, targetTaskID string, kind RelationKind) error {

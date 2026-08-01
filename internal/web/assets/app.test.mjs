@@ -783,10 +783,13 @@ test("a failed atomic child-of create leaves the form in place for a retry", asy
     },
     fetch(path, options) {
       fetchCalls.push({ path, options });
+      // The server maps a missing/inaccessible parent to this message instead
+      // of surfacing the raw SQLite foreign-key text; the form must show the
+      // translated message on the status line.
       return Promise.resolve({
         ok: false,
         status: 400,
-        json: () => Promise.resolve({ error: { message: "task relation would create a cycle" } }),
+        json: () => Promise.resolve({ error: { message: "the selected parent cannot be used: task t-alpha-9999 does not exist or is not accessible" } }),
         text: () => Promise.resolve(""),
       });
     },
@@ -815,7 +818,8 @@ test("a failed atomic child-of create leaves the form in place for a retry", asy
   assert.equal(fetchCalls.length, 1);
   assert.equal(pushedPath, "");
   assert.equal(loads, 0);
-  assert.match(statuses.at(-1), /task relation would create a cycle/);
+  assert.match(statuses.at(-1), /the selected parent cannot be used/);
+  assert.doesNotMatch(statuses.at(-1), /FOREIGN KEY/);
 });
 
 

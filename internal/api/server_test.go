@@ -2556,14 +2556,23 @@ func TestCreateTaskWithParentOfRelationAtomicAPI(t *testing.T) {
 
 	// A child-of link that cannot be applied (the named parent does not exist)
 	// must fail the whole create: nothing is committed, so resubmitting the form
-	// creates exactly one task rather than a duplicate plus an orphan.
+	// creates exactly one task rather than a duplicate plus an orphan. The error
+	// must say the chosen parent cannot be used, not expose the raw foreign-key
+	// constraint text.
+	var parentErr errorResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
 		createTaskRequest{
 			Title: "Orphan task",
 			Relations: []relationRequest{
 				{SourceTaskID: "t-missing", TargetTaskID: "", Kind: string(coordinator.RelationParentOf), TargetIsNewTask: true},
 			},
-		}, http.StatusBadRequest, nil)
+		}, http.StatusBadRequest, &parentErr)
+	if !strings.Contains(parentErr.Error.Message, "the selected parent cannot be used") {
+		t.Fatalf("nonexistent parent error = %q, want a clear parent-unavailable message", parentErr.Error.Message)
+	}
+	if strings.Contains(parentErr.Error.Message, "FOREIGN KEY") {
+		t.Fatalf("nonexistent parent error exposes raw SQLite text: %q", parentErr.Error.Message)
+	}
 	if got := countTasks(); got != before+1 {
 		t.Fatalf("task count after failed create = %d, want %d (failed create must not commit)", got, before+1)
 	}
