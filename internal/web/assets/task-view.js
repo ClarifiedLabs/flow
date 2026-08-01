@@ -89,11 +89,11 @@ export function featureSelectOptionsView(app, projectID, selectedFeatureID) {
 // RELATION_KIND_OPTIONS lists the relation kinds the create picker offers,
 // labelled from the new task's perspective. "child of X" means the new task
 // becomes X's child. parent_of stores source = parent, so a child-of row must
-// make the new task the relation *target*; the create payload cannot express
-// that for owner tokens (a blank target is rejected), so such rows are applied
-// after creation via the link endpoint (X parent_of new-task). blocks and
-// related_to store source = the new task, so they go straight into the create
-// payload as {target_task_id, kind}.
+// make the new task the relation *target*; it is sent with target_is_new_task
+// set and a blank target (X parent_of new-task), which the server resolves to
+// the new task inside the create transaction. blocks and related_to store
+// source = the new task, so they go straight into the create payload as
+// {target_task_id, kind}.
 export const RELATION_KIND_OPTIONS = [
   { kind: "parent_of", label: "child of" },
   { kind: "blocks", label: "blocks" },

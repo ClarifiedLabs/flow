@@ -170,15 +170,14 @@ export const FORMS = {
 // them by direction. blocks/related_to rows make the new task the source, so
 // they become `relations` payload entries ({target_task_id, kind}; the server
 // defaults the source to the new task). parent_of ("child of") rows make the
-// new task the *target*, so they are returned separately and applied after
-// creation via the link endpoint. Rows with a blank target are dropped so they
-// can never produce a 400; a duplicate (kind, target) pair is rejected
-// outright. At most one child-of row is accepted: a task has exactly one
-// parent, and because child-of links are applied after the create POST has
-// committed, a second distinct child-of row would leave a partially related
-// task instead of failing the submission — so it is rejected before any
-// request goes out. Returns {create, childOf}, or an Error describing the
-// first problem.
+// new task the *target*, so taskForm maps them to `relations` entries with
+// target_is_new_task set and a blank target; the server resolves that to the
+// new task inside the single create transaction, keeping the child-of link
+// atomic with the create. Rows with a blank target are dropped so they can
+// never produce a 400; a duplicate (kind, target) pair is rejected outright.
+// At most one child-of row is accepted, because a task has exactly one parent;
+// a second distinct child-of row is rejected before any request goes out.
+// Returns {create, childOf}, or an Error describing the first problem.
 export function collectRelationRows(form) {
   const rows = typeof form.querySelectorAll === "function"
     ? form.querySelectorAll("[data-relation-row]")

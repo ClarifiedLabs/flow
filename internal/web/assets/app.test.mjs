@@ -946,9 +946,7 @@ test("new task form rejects more than one child-of row before any request", asyn
     },
   });
   // Two distinct child-of targets are not duplicates, but a task can have only
-  // one parent. The second link would fail after the create POST committed,
-  // leaving a partially related task, so the submission must be rejected
-  // before any request goes out.
+  // one parent, so the submission must be rejected before any request goes out.
   const form = createFormWithRelations([
     relationRow("parent_of", "t-alpha-0008"),
     relationRow("parent_of", "t-alpha-0009"),
