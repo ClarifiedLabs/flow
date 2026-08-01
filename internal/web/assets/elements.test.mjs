@@ -32,7 +32,7 @@ const { renderFeature } = await import("./elements/feature.js");
 const { renderNowCard } = await import("./elements/now-card.js");
 const { renderReviewPanel } = await import("./elements/review-panel.js");
 const { renderActivityFeed, activityEntries } = await import("./elements/activity-feed.js");
-const { renderTaskFormView, bindRelationsPickerView, relationTargetSuggestionsView } = await import("./task-view.js");
+const { renderTaskFormView, bindRelationsPickerView, bindTaskFlowControlsView, relationTargetSuggestionsView } = await import("./task-view.js");
 await import("./elements/lane.js");
 await import("./elements/tab-strip.js");
 const { acquireBusy, inFlight, releaseBusy, settleStatus } = await import("./actions.js");
@@ -1676,6 +1676,108 @@ test("a failed suggestion reload leaves the picker in manual-entry mode", async 
   await flush();
   assert.equal(form.querySelector("#relation-target-tasks").children.length, 0);
   assert.ok(form.querySelector("[data-relation-target]"), "the manual target input remains");
+});
+
+test("changing the create form project reloads the flow selector with that project's flows and default", async () => {
+  const app = {
+    projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }],
+    flowsByProject: new Map([[ "p-1", { flows: [{ id: "fl-1", name: "One flow" }], defaultFlowID: "fl-1" } ]]),
+    featuresByProject: new Map([[ "p-1", [] ]]),
+  };
+  const ensuredFlows = [];
+  app.ensureFlows = async (projectID) => {
+    ensuredFlows.push(projectID);
+    if (projectID === "p-2") app.flowsByProject.set("p-2", { flows: [{ id: "fl-9", name: "Beta flow" }, { id: "fl-8", name: "Gamma flow" }], defaultFlowID: "fl-8" });
+    return app.flowsByProject.get(projectID);
+  };
+  app.ensureFeatures = async (projectID) => {
+    if (projectID === "p-2") app.featuresByProject.set("p-2", [{ feature: { id: "ft-9", title: "Beta feature", status: "open" } }]);
+    return app.featuresByProject.get(projectID) || [];
+  };
+  const host = document.createElement("div");
+  host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
+  const form = host.querySelector("[data-task-form]");
+  bindRelationsPickerView(form, app);
+  bindTaskFlowControlsView(app, form);
+  const projectSelect = form.querySelector('[name="project"]');
+  projectSelect.value = "p-2";
+  projectSelect.dispatchEvent(new TestEvent("change"));
+  await flush();
+  await flush();
+  assert.deepEqual(ensuredFlows, ["p-2"]);
+  const options = form.querySelector('[name="flow_id"]').children;
+  assert.deepEqual(options.map((option) => option.getAttribute("value")), ["fl-9", "fl-8"]);
+  assert.equal(options[1].hasAttribute("selected"), true, "the new project's default flow is selected");
+  assert.equal(options[0].hasAttribute("selected"), false, "the new project's non-default flow is not selected");
+  const featureOptions = form.querySelector('[name="feature_id"]').children;
+  assert.deepEqual(featureOptions.map((option) => option.getAttribute("value")), ["", "ft-9"], "the feature picker follows the project too");
+  const relationOptions = form.querySelector("#relation-target-tasks").children;
+  assert.equal(relationOptions.length, 0, "p-2 has no cached tasks, so suggestions stay empty");
+});
+
+test("rapid project switches cannot repaint the flow select or relation suggestions with stale-project data", async () => {
+  let resolveP2Flows;
+  let resolveP2Tasks;
+  const p2FlowsGate = new Promise((resolve) => { resolveP2Flows = resolve; });
+  const p2TasksGate = new Promise((resolve) => { resolveP2Tasks = resolve; });
+  const app = {
+    projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }, { id: "p-3", name: "three" }],
+    flowsByProject: new Map([[ "p-1", { flows: [{ id: "fl-1", name: "One flow" }], defaultFlowID: "fl-1" } ]]),
+    tasksByProject: new Map([[ "p-1", [{ id: "t-1", title: "One task" }] ]]),
+  };
+  app.ensureFlows = (projectID) => {
+    if (projectID === "p-2") {
+      return p2FlowsGate.then(() => {
+        const cache = { flows: [{ id: "fl-2", name: "Two flow" }], defaultFlowID: "fl-2" };
+        app.flowsByProject.set("p-2", cache);
+        return cache;
+      });
+    }
+    if (projectID === "p-3") {
+      const cache = { flows: [{ id: "fl-3", name: "Three flow" }], defaultFlowID: "fl-3" };
+      app.flowsByProject.set("p-3", cache);
+      return Promise.resolve(cache);
+    }
+    return Promise.resolve(app.flowsByProject.get(projectID));
+  };
+  app.ensureTasks = (projectID) => {
+    if (projectID === "p-2") {
+      return p2TasksGate.then(() => {
+        const tasks = [{ id: "t-2", title: "Two task" }];
+        app.tasksByProject.set("p-2", tasks);
+        return tasks;
+      });
+    }
+    if (projectID === "p-3") {
+      const tasks = [{ id: "t-3", title: "Three task" }];
+      app.tasksByProject.set("p-3", tasks);
+      return Promise.resolve(tasks);
+    }
+    return Promise.resolve(app.tasksByProject.get(projectID));
+  };
+  const host = document.createElement("div");
+  host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
+  const form = host.querySelector("[data-task-form]");
+  bindRelationsPickerView(form, app);
+  bindTaskFlowControlsView(app, form);
+  const projectSelect = form.querySelector('[name="project"]');
+  const flowSelect = form.querySelector('[name="flow_id"]');
+  const datalist = form.querySelector("#relation-target-tasks");
+  projectSelect.value = "p-2";
+  projectSelect.dispatchEvent(new TestEvent("change"));
+  projectSelect.value = "p-3";
+  projectSelect.dispatchEvent(new TestEvent("change"));
+  await flush();
+  await flush();
+  assert.deepEqual(flowSelect.children.map((option) => option.getAttribute("value")), ["fl-3"], "the newest project's flows are shown");
+  assert.deepEqual(datalist.children.map((option) => option.getAttribute("value")), ["t-3"], "the newest project's tasks are suggested");
+  // The p-2 loads land late: neither control may repaint with p-2's data.
+  resolveP2Flows();
+  resolveP2Tasks();
+  await flush();
+  await flush();
+  assert.deepEqual(flowSelect.children.map((option) => option.getAttribute("value")), ["fl-3"], "the stale flow load does not repaint");
+  assert.deepEqual(datalist.children.map((option) => option.getAttribute("value")), ["t-3"], "the stale task load does not repaint");
 });
 // --- review verdict pending state (flow-change / submitReview) --------------
 

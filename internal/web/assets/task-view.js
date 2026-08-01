@@ -31,7 +31,9 @@ export async function renderNewTaskView(app, context) {
       ${renderTaskFormView(app, { priority: 0 }, { mode: "create", submitLabel: "Create" })}
     </section>
   `;
-  bindRelationsPickerView(content.querySelector?.("[data-task-form]"), app);
+  const form = content.querySelector?.("[data-task-form]");
+  bindRelationsPickerView(form, app);
+  bindTaskFlowControlsView(app, form);
   return true;
 }
 
@@ -314,7 +316,8 @@ export function renderFlowSummaryLineView(app, task, flow, projectID) {
 
 // bindTaskFlowControlsView refreshes the flow selector when the create form's
 // project select changes: it fetches (and caches) that project's flows, then
-// re-renders the flow <option>s for the newly chosen project.
+// re-renders the flow <option>s for the newly chosen project. The feature
+// picker follows the same project so it stays in sync too.
 export function bindTaskFlowControlsView(app, form) {
   const projectSelect = form?.elements?.project;
   const flowSelect = form?.elements?.flow_id;
@@ -325,6 +328,10 @@ export function bindTaskFlowControlsView(app, form) {
       await app.ensureFlows(projectID);
       if (typeof app.ensureFeatures === "function") await app.ensureFeatures(projectID);
     }
+    // A rapid project switch could resolve out of order; only repaint when
+    // this load is still for the selected project so the flow (and feature)
+    // options never disagree with the project select.
+    if (String(projectSelect.value || "").trim() !== projectID) return;
     flowSelect.innerHTML = flowSelectOptionsView(app, projectID, "");
     const featureSelect = form.elements.feature_id;
     if (featureSelect) featureSelect.innerHTML = featureSelectOptionsView(app, projectID, "");
