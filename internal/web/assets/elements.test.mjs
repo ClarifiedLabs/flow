@@ -13,7 +13,7 @@ installTestDOM();
 const { cardModel, dwellTone, formatDwell, matchesFilter, sortForAttention, waitActionLabel, waitReasonText, waitingOnBlockers, waitingOnOmitted } =
   await import("./board-model.js");
 const { nowCardModel, runRows, tabBadges, isOutdatedAnchor, reviewModel, taskModel } = await import("./task-model.js");
-const { reconcile } = await import("./elements/base.js");
+const { mount, reconcile } = await import("./elements/base.js");
 const { renderTaskCard } = await import("./elements/task-card.js");
 const { renderTaskRail } = await import("./elements/task-rail.js");
 const { renderAttentionStrip } = await import("./elements/attention-strip.js");
@@ -38,6 +38,7 @@ await import("./elements/tab-strip.js");
 const { acquireBusy, inFlight, releaseBusy, settleStatus } = await import("./actions.js");
 const { handleFormSubmit } = await import("./forms.js");
 await import("./elements/change.js");
+const { renderChangeRoute } = await import("./change-route.js");
 await import("./elements/inline-thread.js");
 await import("./elements/task-detail.js");
 
@@ -2206,7 +2207,7 @@ function stubChangeFetch(state) {
     return Promise.resolve({
       ok: true,
       status: 200,
-      json: () => Promise.resolve({ change: { id: "ch-0001", head_sha: head }, task: { id: "t-0001" }, threads: [], review_state: "in_review" }),
+      json: () => Promise.resolve({ change: { id: "ch-0001", head_sha: head }, task: { id: "t-0001" }, threads: [], review_state: state.reviewState ?? "in_review" }),
     });
   };
   return calls;
@@ -2253,6 +2254,256 @@ test("a same-head task poll revalidates in place without a reload or a loading f
   assert.match(changePanelHTML(detail), /h1\.go/, "the change stays rendered");
   assert.doesNotMatch(changePanelHTML(detail), /Loading change/, "no loading flash on a same-head poll");
   detail.remove();
+});
+
+test("a same-head metadata refresh that changes markup keeps an unblurred inline draft", async () => {
+  const root = globalThis.document.body;
+  const state = { head: "h1", files: diffFiles("h1") };
+  stubChangeFetch(state);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /in review/, "the initial metadata renders the review-state badge");
+
+  // Open an inline draft and type into it without blurring: the keystrokes
+  // live only in the DOM until the next capture, so a repaint that replaces
+  // the editor would discard them.
+  const change = detail.querySelector("flow-change");
+  change.handleClick({ target: change.querySelector("[data-comment-line]"), preventDefault() {} });
+  await flush();
+  const textarea = change.querySelector("[data-draft-body]");
+  assert.ok(textarea, "the draft editor is on screen");
+  textarea.value = "unblurred note";
+  assert.equal(change.drafts.get("h1.go:1").body, "", "the keystrokes have not been captured yet");
+
+  // The refreshed metadata changes the rendered markup (a review-state flip),
+  // so the revalidation's same-head repaint rewrites the element's DOM.
+  state.reviewState = "changes_requested";
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+
+  assert.match(changePanelHTML(detail), /changes requested/, "the refreshed review state rendered");
+  const fresh = detail.querySelector("flow-change").querySelector("[data-draft-body]");
+  assert.notEqual(fresh, textarea, "the markup-changing repaint replaced the draft editor");
+  assert.match(fresh.textContent, /unblurred note/, "the unblurred draft text survives the repaint");
+  assert.equal(detail.querySelector("flow-change").drafts.get("h1.go:1").body, "unblurred note", "the live value is captured into the drafts map");
+  detail.remove();
+});
+
+test("a standalone route head move drops an unblurred draft instead of retaining it", async () => {
+  // renderChangeRoute() mounts into the content container, reusing the
+  // existing flow-change element, so a route refresh from h1 to a genuine
+  // later head lands on the same instance. Old-head drafts must drop there
+  // too: a head move is not a same-head metadata revalidation, so an
+  // unblurred h1 textarea must not be captured into the h2 diff or review.
+  const root = globalThis.document.body;
+  const appNode = globalThis.document.createElement("flow-app");
+  const content = globalThis.document.createElement("div");
+  appNode.appendChild(content);
+  root.appendChild(appNode);
+
+  const change = mount(content, "flow-change", changeDetailResponse("h1", diffFiles("h1")));
+  await flush();
+  assert.match(change.innerHTML, /h1\.go/, "the h1 diff renders");
+
+  // Open an inline draft and type into it without blurring, as on the
+  // task-detail same-head path.
+  change.handleClick({ target: change.querySelector("[data-comment-line]"), preventDefault() {} });
+  await flush();
+  const textarea = change.querySelector("[data-draft-body]");
+  assert.ok(textarea, "the draft editor is on screen");
+  textarea.value = "old-head note";
+  assert.equal(change.drafts.get("h1.go:1").body, "", "the keystrokes have not been captured yet");
+
+  // A route refresh to a genuine later head reuses the same element (mount).
+  const reused = mount(content, "flow-change", changeDetailResponse("h2", diffFiles("h2")));
+  await flush();
+
+  assert.equal(reused, change, "mount reuses the flow-change element on the standalone route");
+  assert.match(change.innerHTML, /h2\.go/, "the new head's diff renders");
+  assert.doesNotMatch(change.innerHTML, /h1\.go/, "the old head's diff is gone");
+  assert.equal(change.drafts.size, 0, "the head move dropped the old-head draft");
+  assert.equal(change.querySelector("[data-draft-body]"), null, "no draft editor survives into the new head");
+  assert.equal(change.querySelector("flow-review-bar").data.pendingCount, 0, "the review bar counts no carried-over draft");
+  change.remove();
+  appNode.remove();
+});
+
+test("a PascalCase Change payload head move drops an unblurred draft instead of retaining it", async () => {
+  // render()/afterPaint() accept the PascalCase `Change` shape via value(), so
+  // the paint key must too: a key derived only from the lowercase `change` form
+  // is "" for this payload, which used to send every repaint — including a
+  // genuine head move — down the same-key capture path.
+  const root = globalThis.document.body;
+  const appNode = globalThis.document.createElement("flow-app");
+  const content = globalThis.document.createElement("div");
+  appNode.appendChild(content);
+  root.appendChild(appNode);
+
+  const change = mount(content, "flow-change", {
+    Change: { id: "ch-0001", HeadSHA: "h1" },
+    diff: { head_sha: "h1", files: diffFiles("h1") },
+    threads: [],
+    review_state: "in_review",
+  });
+  await flush();
+  assert.match(change.innerHTML, /h1\.go/, "the PascalCase-shaped h1 diff renders");
+
+  change.handleClick({ target: change.querySelector("[data-comment-line]"), preventDefault() {} });
+  await flush();
+  const textarea = change.querySelector("[data-draft-body]");
+  assert.ok(textarea, "the draft editor is on screen");
+  textarea.value = "old-head note";
+
+  mount(content, "flow-change", {
+    Change: { id: "ch-0001", HeadSHA: "h2" },
+    diff: { head_sha: "h2", files: diffFiles("h2") },
+    threads: [],
+    review_state: "in_review",
+  });
+  await flush();
+
+  assert.match(change.innerHTML, /h2\.go/, "the new head's diff renders");
+  assert.equal(change.drafts.size, 0, "the head move dropped the old-head draft");
+  assert.equal(change.querySelector("[data-draft-body]"), null, "no draft editor survives into the new head");
+  change.remove();
+  appNode.remove();
+});
+
+test("a headless change response drops an unblurred draft instead of retaining it", async () => {
+  // A response that names no head is not the change the drafts were anchored
+  // to: the empty paint key must clear drafts rather than capture them.
+  const root = globalThis.document.body;
+  const appNode = globalThis.document.createElement("flow-app");
+  const content = globalThis.document.createElement("div");
+  appNode.appendChild(content);
+  root.appendChild(appNode);
+
+  const change = mount(content, "flow-change", changeDetailResponse("h1", diffFiles("h1")));
+  await flush();
+  change.handleClick({ target: change.querySelector("[data-comment-line]"), preventDefault() {} });
+  await flush();
+  const textarea = change.querySelector("[data-draft-body]");
+  assert.ok(textarea, "the draft editor is on screen");
+  textarea.value = "old-head note";
+
+  mount(content, "flow-change", { change: { id: "ch-0001" }, task: { id: "t-0001" }, threads: [], review_state: "in_review" });
+  await flush();
+
+  assert.equal(change.drafts.size, 0, "the headless response dropped the old-head draft");
+  assert.equal(change.querySelector("[data-draft-body]"), null, "no draft editor survives into the headless response");
+  assert.equal(change.querySelector("flow-review-bar").data.pendingCount, 0, "the review bar counts no carried-over draft");
+  change.remove();
+  appNode.remove();
+});
+
+test("a head move that renders byte-identical markup still clears the draft editor and pending count", async () => {
+  // The head summary abbreviates the SHA to 12 characters, so a moved head
+  // sharing that prefix renders the same flow-change innerHTML. FlowElement
+  // skips the write for identical HTML, so the paint key change must force it
+  // or the old draft editor and review-bar count stay mounted in the DOM.
+  const root = globalThis.document.body;
+  const appNode = globalThis.document.createElement("flow-app");
+  const content = globalThis.document.createElement("div");
+  appNode.appendChild(content);
+  root.appendChild(appNode);
+  const h1 = "aaaaaaaaaaaa11111111111111111111111111111111";
+  const h2 = "aaaaaaaaaaaa22222222222222222222222222222222";
+  const files = diffFiles("same");
+
+  const change = mount(content, "flow-change", changeDetailResponse(h1, files));
+  await flush();
+  change.handleClick({ target: change.querySelector("[data-comment-line]"), preventDefault() {} });
+  await flush();
+  const textarea = change.querySelector("[data-draft-body]");
+  assert.ok(textarea, "the draft editor is on screen");
+  textarea.value = "old-head note";
+  assert.equal(change.drafts.get("same.go:1").body, "", "the keystrokes have not been captured yet");
+
+  mount(content, "flow-change", changeDetailResponse(h2, files));
+  await flush();
+
+  assert.equal(change.drafts.size, 0, "the head move dropped the old-head draft");
+  assert.equal(change.querySelector("[data-draft-body]"), null, "the forced write removed the draft editor");
+  assert.equal(change.querySelector("flow-review-bar").data.pendingCount, 0, "the review bar counts no carried-over draft");
+  change.remove();
+  appNode.remove();
+});
+
+test("the standalone change route retries a metadata/diff pair until it is verified for one head", async () => {
+  // The change advanced between the two GETs: the metadata names h1 while
+  // /diff answers for h2. Mounting that pair would show h2's code under h1's
+  // metadata — and a same-key repaint would carry an h1 draft onto the h2
+  // diff. The route must retry to a coherent pair instead.
+  const root = globalThis.document.body;
+  const appNode = globalThis.document.createElement("flow-app");
+  const content = globalThis.document.createElement("div");
+  appNode.appendChild(content);
+  root.appendChild(appNode);
+
+  const script = [
+    { change: changeResponse("h1"), diff: diffResponse("h2", diffFiles("h2")) },
+    { change: changeResponse("h2"), diff: diffResponse("h2", diffFiles("h2")) },
+  ];
+  const calls = [];
+  let index = 0;
+  globalThis.fetch = (path) => {
+    calls.push(String(path));
+    if (path.endsWith("/diff")) {
+      // The diff pairs with the change fetch that preceded it (index already
+      // advanced past it).
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(script[Math.max(0, index - 1)].diff) });
+    }
+    const step = script[Math.min(index, script.length - 1)];
+    index += 1;
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(step.change) });
+  };
+
+  const rendered = await renderChangeRoute({ setTitle() {}, querySelector: () => content }, "ch-0001");
+  assert.equal(rendered, true, "the route mounts once the pair verifies");
+  const change = content.querySelector("flow-change");
+  assert.ok(change, "a verified pair mounts");
+  assert.match(change.innerHTML, /h2\.go/, "the retried pair renders the diff the metadata now names");
+  assert.deepEqual(
+    calls.filter((path) => path.includes("/v2/changes/ch-0001")),
+    [
+      "/ui/api/v2/changes/ch-0001",
+      "/ui/api/v2/changes/ch-0001/diff",
+      "/ui/api/v2/changes/ch-0001",
+      "/ui/api/v2/changes/ch-0001/diff",
+    ],
+    "the mismatched pair is retried as a fresh read",
+  );
+  change.remove();
+  appNode.remove();
+});
+
+test("the standalone change route refuses to mount a pair whose diff never names its metadata head", async () => {
+  // Metadata stays on h1 while /diff keeps answering for h2: after the
+  // retries the route fails instead of mounting the unverified pair, which
+  // would carry the h1 same-key capture onto the h2 diff.
+  const root = globalThis.document.body;
+  const appNode = globalThis.document.createElement("flow-app");
+  const content = globalThis.document.createElement("div");
+  appNode.appendChild(content);
+  root.appendChild(appNode);
+
+  const calls = [];
+  globalThis.fetch = (path) => {
+    calls.push(String(path));
+    if (path.endsWith("/diff")) {
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(diffResponse("h2", diffFiles("h2"))) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(changeResponse("h1")) });
+  };
+
+  await assert.rejects(
+    renderChangeRoute({ setTitle() {}, querySelector: () => content }, "ch-0001"),
+    /advanced while it was loading/,
+  );
+  assert.equal(content.querySelector("flow-change"), null, "no unverified pair is mounted");
+  assert.equal(calls.filter((path) => path.includes("/v2/changes/ch-0001")).length, 6, "all three attempts read a fresh pair");
+  appNode.remove();
 });
 
 test("a revalidation head move re-keys the cache so the matching poll does not reload or flash", async () => {

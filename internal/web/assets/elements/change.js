@@ -149,6 +149,45 @@ export class FlowChange extends FlowElement {
     queueMicrotask(() => this.querySelector(`[data-draft="${cssEscape(key)}"] textarea`)?.focus());
   }
 
+  // The change key (id:head) this element last painted. Drafts are anchored
+  // to the rendered change's files and lines, so the key separates the two
+  // repaint kinds that land on this same element:
+  //   - the same key: a data-driven repaint (a metadata revalidation that
+  //     flips the review state or a thread badge) replaces the draft editors,
+  //     so the live textarea values must be read back into the drafts map
+  //     before the write;
+  //   - a different (or vanished) key: a genuine move. The standalone
+  //     /ui/changes/:id route reuses this element via mount(), so the old
+  //     head's drafts are dropped instead of captured (task-detail rebuilds
+  //     the element on a head move, which has the same effect from a fresh
+  //     drafts map). A response that names no head is not the change the
+  //     drafts were anchored to, so it clears too.
+  #paintedKey = "";
+
+  paint() {
+    // The key must read the same shape render() and afterPaint() accept: the
+    // payload can spell the change either `change` or `Change`, and a key
+    // derived only from the lowercase form would be "" for a PascalCase
+    // payload — turning every repaint, including a genuine head move, into a
+    // same-key capture.
+    const change = value(this.data || {}, "change", "Change") || {};
+    const id = value(change, "id", "ID") || "";
+    const head = value(change, "head_sha", "HeadSHA") || "";
+    const key = id && head ? `${id}:${head}` : "";
+    if (key !== this.#paintedKey) {
+      this.drafts.clear();
+      // FlowElement skips the write when the rendered HTML is unchanged, and
+      // the head summary abbreviates the SHA, so a moved head can render
+      // byte-identical markup. Force the write so the clear lands and a stale
+      // draft editor or review-bar count cannot stay mounted in the DOM.
+      this.invalidate();
+    } else {
+      this.captureDrafts();
+    }
+    super.paint();
+    this.#paintedKey = key;
+  }
+
   // Drafts live in the DOM between repaints, so read them back before any
   // re-render that would otherwise discard what was typed.
   captureDrafts() {
