@@ -115,6 +115,9 @@ func (s *projectServer) handleSubmitReview(w http.ResponseWriter, r *http.Reques
 	case errors.Is(err, coordinator.ErrReviewHeadMoved):
 		writeError(w, http.StatusConflict, "head_moved", "change head moved since this review was rendered; reload the change and re-review")
 		return
+	case errors.Is(err, coordinator.ErrReviewAnchorMismatch):
+		writeError(w, http.StatusBadRequest, "invalid_comment_anchor", "inline comment anchor must match the inspected head; reload the change and re-review")
+		return
 	case err != nil:
 		writeWorkflowError(w, err, "review_failed")
 		return

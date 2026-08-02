@@ -209,6 +209,58 @@ func TestCreateThreadIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestSubmitReviewClampsCommentAnchorsToInspectedHead guards the inline-thread
+// anchor invariant: an empty per-comment anchor defaults to the validated
+// inspected head, an anchor equal to it is preserved, and a non-empty anchor
+// naming a different commit refuses the whole submission with nothing filed.
+func TestSubmitReviewClampsCommentAnchorsToInspectedHead(t *testing.T) {
+	store, threads, change := newThreadServiceFixture(t)
+	ctx := context.Background()
+	const headSHA = "1111111111111111111111111111111111111111"
+
+	result, err := threads.SubmitReview(ctx, SubmitReviewInput{
+		ChangeID: change.ID,
+		HeadSHA:  headSHA,
+		Verdict:  "comment",
+		Comments: []SubmitReviewComment{
+			{FilePath: "a.go", Line: 1, Body: "defaulted anchor"},
+			{FilePath: "b.go", Line: 2, Anchor: headSHA, Body: "explicit anchor"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("submit review: %v", err)
+	}
+	if len(result.Threads) != 2 {
+		t.Fatalf("threads = %+v, want 2", result.Threads)
+	}
+	for i, thread := range result.Threads {
+		if thread.AnchorCommitSHA != headSHA {
+			t.Fatalf("thread %d anchor = %q, want the inspected head %q", i, thread.AnchorCommitSHA, headSHA)
+		}
+	}
+
+	// A non-empty anchor naming a different commit is a hand-crafted request:
+	// the whole submission must be refused and no thread filed.
+	if _, err := threads.SubmitReview(ctx, SubmitReviewInput{
+		ChangeID: change.ID,
+		HeadSHA:  headSHA,
+		Verdict:  "comment",
+		Comments: []SubmitReviewComment{
+			{FilePath: "c.go", Line: 3, Anchor: "2222222222222222222222222222222222222222", Body: "stale anchor"},
+		},
+	}); !errors.Is(err, ErrReviewAnchorMismatch) {
+		t.Fatalf("mismatched anchor err = %v, want ErrReviewAnchorMismatch", err)
+	}
+
+	var threadCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM review_threads WHERE change_id = ?`, change.ID).Scan(&threadCount); err != nil {
+		t.Fatalf("count threads: %v", err)
+	}
+	if threadCount != 2 {
+		t.Fatalf("thread count = %d, want 2 (mismatched submission must not file threads)", threadCount)
+	}
+}
+
 func TestCertifyTwiceIsBenignNoOp(t *testing.T) {
 	// The worker applies verifier decisions from the verdict file and tolerates a
 	// thread_not_found on re-apply. The coordinator surfaces that as sql.ErrNoRows

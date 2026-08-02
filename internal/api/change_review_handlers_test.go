@@ -325,6 +325,75 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 	}
 }
 
+// TestSubmitReviewMismatchedCommentAnchorRejected guards the review-integrity
+// invariant against a hand-crafted request: the submission's head validates
+// against the change's current head, but a per-comment anchor that names a
+// different commit must be refused with a clear 400 rather than binding the
+// thread to an arbitrary or older commit. The web client never sends a
+// per-comment anchor, so this is API-surface hardening.
+func TestSubmitReviewMismatchedCommentAnchorRejected(t *testing.T) {
+	fixture := newTestFixture(t)
+	flow := newBoardFixtureFlow(t, fixture, "change review mismatched anchor")
+
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{Title: "Mismatched anchor review", FlowID: flow.ID}, http.StatusCreated, &created)
+	var scheduled workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
+		nil, http.StatusOK, &scheduled)
+
+	const (
+		changeID  = "ch-change-review-mismatched-anchor"
+		headSHA   = "1111111111111111111111111111111111111111"
+		timestamp = "2026-01-01T00:00:00.000000000Z"
+	)
+	if _, err := fixture.DB.ExecContext(context.Background(), `
+INSERT INTO changes (id, task_id, branch, base, head_sha, created_at, updated_at, ready_at)
+VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-review-mismatched-anchor",
+		headSHA, timestamp, timestamp, timestamp); err != nil {
+		t.Fatalf("insert change: %v", err)
+	}
+
+	// The submission validates against the inspected head, but the comment
+	// names a different commit: the server must refuse the whole review with a
+	// clear 400 instead of honoring the arbitrary anchor.
+	var rejected errorResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+		reviewVerdictRequest{
+			Verdict:  "approve",
+			HeadSHA:  headSHA,
+			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 1, AnchorCommitSHA: "2222222222222222222222222222222222222222", Body: "comment on older code"}},
+		}, http.StatusBadRequest, &rejected)
+	if rejected.Error.Code != "invalid_comment_anchor" {
+		t.Fatalf("rejection code = %q, want invalid_comment_anchor", rejected.Error.Code)
+	}
+
+	var threadCount int
+	if err := fixture.DB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM review_threads WHERE change_id = ?`, changeID).Scan(&threadCount); err != nil {
+		t.Fatalf("count threads: %v", err)
+	}
+	if threadCount != 0 {
+		t.Fatalf("mismatched-anchor review created %d threads, want 0", threadCount)
+	}
+	var checkCount int
+	if err := fixture.DB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM checks WHERE task_id = ? AND name = ?`, created.Task.ID, humanReviewCheckName).Scan(&checkCount); err != nil {
+		t.Fatalf("count checks: %v", err)
+	}
+	if checkCount != 0 {
+		t.Fatalf("mismatched-anchor review recorded %d human-review checks, want 0", checkCount)
+	}
+
+	run, err := fixture.Bundle.WorkflowRuns.Get(context.Background(), scheduled.Run.ID)
+	if err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	if run.State != coordinator.WorkflowRunWaiting {
+		t.Fatalf("workflow state = %q, want still waiting after a refused mismatched-anchor review", run.State)
+	}
+}
+
 func TestSubmitReviewHeadUpdateCannotInterleave(t *testing.T) {
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "change review head race")

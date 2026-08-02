@@ -288,6 +288,13 @@ type SubmitReviewResult struct {
 // the code they inspected, not to whatever the change has since advanced to.
 var ErrReviewHeadMoved = errors.New("change head moved since the review was rendered")
 
+// ErrReviewAnchorMismatch refuses a review submission whose inline-comment
+// anchor names a commit other than the inspected head. The web client never
+// sends a per-comment anchor (an empty anchor defaults to the inspected head
+// below), so a non-empty mismatched anchor is a hand-crafted request trying to
+// bind a thread to an arbitrary or older commit.
+var ErrReviewAnchorMismatch = errors.New("inline comment anchor must match the inspected head")
+
 // SubmitReview files a human review as one atomic unit. The change's current
 // head is re-read inside the same BEGIN IMMEDIATE transaction that creates the
 // inline threads, records the verdict check, and completes the verdict's
@@ -334,6 +341,16 @@ WHERE id = ?`, input.ChangeID).Scan(&taskID, &currentHead); err != nil {
 	if s.AfterHeadCheck != nil {
 		if err := s.AfterHeadCheck(); err != nil {
 			return SubmitReviewResult{}, err
+		}
+	}
+
+	// An inline comment's anchor, when non-empty, must be the commit the
+	// reviewer inspected. The web client never sends one, so a mismatched
+	// anchor is a hand-crafted request trying to bind a thread to an arbitrary
+	// commit; refuse the whole submission before any thread is filed.
+	for _, comment := range input.Comments {
+		if anchor := strings.TrimSpace(comment.Anchor); anchor != "" && anchor != input.HeadSHA {
+			return SubmitReviewResult{}, fmt.Errorf("%w: anchor %q does not match inspected head %q", ErrReviewAnchorMismatch, anchor, input.HeadSHA)
 		}
 	}
 
