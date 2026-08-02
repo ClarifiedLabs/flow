@@ -62,7 +62,43 @@ services:
       - flow-worker-data:/flow/work
       - flow-worker-docker:/home/flow/.local/share/docker
 
+  flow-worker-2:
+    build:
+      context: .
+      target: flow-worker
+      args:
+        FLOW_UID: ${FLOW_UID:-1000}
+        FLOW_GID: ${FLOW_GID:-1000}
+    image: flow-worker:local
+    privileged: true
+    command:
+      - flow-worker
+      - -c
+      - /etc/flow/flow-worker.yaml
+    environment:
+      FLOW_WORKER_ID: compose-2
+      FLOW_WORKER_JOIN_TOKEN: ${FLOW_WORKER_JOIN_TOKEN:?Set FLOW_WORKER_JOIN_TOKEN in .env}
+      FLOW_WORKER_COORDINATOR_URL: ${FLOW_WORKER_COORDINATOR_URL:-http://flow-server:8421}
+      FLOW_WORKER_WORK_DIR: /flow/work
+      FLOW_WORKER_DOCKERD: ${FLOW_WORKER_DOCKERD:-auto}
+      FLOW_WORKER_DOCKERD_ARGS: ${FLOW_WORKER_DOCKERD_ARGS:-}
+      FLOW_WORKER_GIT_COMMIT_NAME: ${FLOW_WORKER_GIT_COMMIT_NAME}
+      FLOW_WORKER_GIT_COMMIT_EMAIL: ${FLOW_WORKER_GIT_COMMIT_EMAIL}
+      HARNESS_MODEL_PROXY_URL: ${HARNESS_MODEL_PROXY_URL}
+      HARNESS_MODEL_PROXY_API_KEY: ${HARNESS_MODEL_PROXY_API_KEY}
+    depends_on:
+      flow-server:
+        condition: service_healthy
+    tmpfs:
+      - /run/user/${FLOW_UID:-1000}:uid=${FLOW_UID:-1000},gid=${FLOW_GID:-1000},mode=700
+    volumes:
+      - ./docker/flow-worker.yaml:/etc/flow/flow-worker.yaml:ro
+      - flow-worker-2-data:/flow/work
+      - flow-worker-2-docker:/home/flow/.local/share/docker
+
 volumes:
   flow-data:
   flow-worker-data:
   flow-worker-docker:
+  flow-worker-2-data:
+  flow-worker-2-docker:
