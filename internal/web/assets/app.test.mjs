@@ -7002,6 +7002,85 @@ test("change route never mounts a mixed-head pair when the head keeps moving", a
   assert.equal(content.children.length, 0, "no unverified pair ever mounts");
 });
 
+test("change route reports a persistently failing diff fetch as unavailable, not a head move", async () => {
+  let diffCalls = 0;
+  const context = await scriptContext({}, {
+    document: inlineDocument(),
+    fetch(path) {
+      if (path.endsWith("/diff")) {
+        diffCalls += 1;
+        return Promise.reject(new Error("network down"));
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ change: { id: "ch-0001", head_sha: "abc123" } }) });
+    },
+  });
+  const { renderChangeRoute } = await loadChangeRouteModule();
+  const { app, content } = changeRouteHarness();
+
+  await assert.rejects(renderChangeRoute(app, "ch-0001", null), (error) => {
+    assert.match(error.message, /diff is not available/, "a failed diff fetch reports the diff as unavailable");
+    assert.doesNotMatch(error.message, /advanced while it was loading/, "a stable head is not reported as a head move");
+    return true;
+  });
+  assert.equal(diffCalls, 3, "three diff reads are attempted before giving up");
+  assert.equal(content.children.length, 0, "no unverified pair ever mounts");
+});
+
+test("change route reports a persistently headless diff as unavailable, not a head move", async () => {
+  const context = await scriptContext({}, {
+    document: inlineDocument(),
+    fetch(path) {
+      if (path.endsWith("/diff")) {
+        // The server answered but its diff names no head, so it cannot verify
+        // the pair: that is an unavailable diff, not a moved head.
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ change_id: "ch-0001" }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ change: { id: "ch-0001", head_sha: "abc123" } }) });
+    },
+  });
+  const { renderChangeRoute } = await loadChangeRouteModule();
+  const { app, content } = changeRouteHarness();
+
+  await assert.rejects(renderChangeRoute(app, "ch-0001", null), (error) => {
+    assert.match(error.message, /diff is not available/, "a headless diff reports the diff as unavailable");
+    assert.doesNotMatch(error.message, /advanced while it was loading/, "a stable head is not reported as a head move");
+    return true;
+  });
+  assert.equal(content.children.length, 0, "no unverified pair ever mounts");
+});
+
+test("change route reports the last unverified read's cause, not an earlier diff failure", async () => {
+  let metadataCalls = 0;
+  let diffCalls = 0;
+  const context = await scriptContext({}, {
+    document: inlineDocument(),
+    fetch(path) {
+      if (path.endsWith("/diff")) {
+        diffCalls += 1;
+        return Promise.reject(new Error("network down"));
+      }
+      metadataCalls += 1;
+      // The first read is this change; the later reads answer for another
+      // change, so the retries end on the mismatch path, not on the failed
+      // diff. The terminal message must name the mismatch, not the earlier
+      // diff outage.
+      const id = metadataCalls === 1 ? "ch-0001" : "ch-9999";
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ change: { id, head_sha: "abc123" } }) });
+    },
+  });
+  const { renderChangeRoute } = await loadChangeRouteModule();
+  const { app, content } = changeRouteHarness();
+
+  await assert.rejects(renderChangeRoute(app, "ch-0001", null), (error) => {
+    assert.match(error.message, /advanced while it was loading/, "a mismatch that ends the retries reports the head-move error");
+    assert.doesNotMatch(error.message, /diff is not available/, "an earlier failed diff does not leak into the terminal cause");
+    return true;
+  });
+  assert.equal(diffCalls, 1, "only the first attempt reaches the diff fetch");
+  assert.equal(metadataCalls, 3, "three reads are attempted before giving up");
+  assert.equal(content.children.length, 0, "no unverified pair ever mounts");
+});
+
 test("change route retries a failed diff fetch instead of mounting an empty diff", async () => {
   let diffFailures = 1;
   const context = await scriptContext({}, {
