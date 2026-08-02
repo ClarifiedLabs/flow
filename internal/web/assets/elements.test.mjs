@@ -1657,6 +1657,25 @@ test("a session transition never exposes a prior session's terminal credential",
   panel.remove();
 });
 
+test("a hostile terminal-token rejection leaves a safe visible error on the review panel", async () => {
+  const root = globalThis.document.body;
+  // The terminal-token POST rejects with a Proxy whose prototype lookup
+  // throws: the mint catch must format it without throwing, or terminalError
+  // would never be set and the panel would show nothing.
+  globalThis.fetch = () => Promise.reject(new Proxy({}, {
+    getPrototypeOf() {
+      throw new Error("prototype trap");
+    },
+  }));
+  const panel = mountElement(root, "flow-review-panel", reviewPanelModel("s-0001"));
+  await settle();
+
+  assert.equal(panel.terminalError, "Request failed", "the mint failure formats to a safe fallback");
+  assert.match(collectText(panel), /Request failed/, "the safe failure message is visible on the panel");
+  assert.match(collectText(panel), /Retry/, "the terminal error offers a retry");
+  panel.remove();
+});
+
 test("the Answer action targets the review tab, never the empty checks tab", () => {
   const model = {
     wait: { kind: "human_gate", message: "Review the proposed implementation tasks." },

@@ -7,6 +7,7 @@ import { renderHarnessOptions } from "./harness-models.js";
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
 import { terminalSelectionHint } from "./terminal.js";
+import { failureMessage } from "./actions.js";
 
 export async function renderConsoleView(app, context) {
   app.setTitle("Console");
@@ -153,7 +154,7 @@ export function scheduleConsolePollView(app, projectID, taskID = "", state = {})
       scheduleConsolePollView(app, projectID, taskID, { terminalAvailable });
     } catch (error) {
       if (!isCurrentConsoleTargetView(app, projectID, taskID)) return;
-      app.setStatus(`console refresh failed: ${error.message || String(error)}`);
+      app.setStatus(`console refresh failed: ${failureMessage(error)}`);
       scheduleConsolePollView(app, projectID, taskID, { terminalAvailable: hadTerminal });
     }
   });

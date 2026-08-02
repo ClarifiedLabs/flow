@@ -5,6 +5,7 @@ import { apiGetText, apiPost } from "./api.js";
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
 import { closeInlineTerminal, inlineTerminalMount, registerInlineTerminalDisclosure, renderTerminalPopOutButton, renderTerminalSurface, resetInlineTerminalDisclosure, terminalMount, terminalSelectionHint } from "./terminal.js";
+import { failureMessage } from "./actions.js";
 
 export async function renderTerminalView(app, sessionID, context) {
   app.setTitle("Terminal");
@@ -73,7 +74,7 @@ export async function openInlineTerminalView(app, button, kind, id) {
     );
     app.setStatus("");
   } catch (error) {
-    const message = error.message || String(error);
+    const message = failureMessage(error);
     target.mount.innerHTML = renderTerminalSurface(target.presentation, kind, terminalID, `<div class="empty">${escapeHTML(message)}</div>`);
     app.setStatus(message);
   }
@@ -106,7 +107,7 @@ export async function showTranscriptView(app, button, kind, id) {
     mount.innerHTML = `<pre class="transcript-view">${escapeHTML(text)}</pre>`;
     app.setStatus("");
   } catch (error) {
-    const message = error.message || String(error);
+    const message = failureMessage(error);
     mount.innerHTML = `<div class="empty">${escapeHTML(message)}</div>`;
     app.setStatus(message);
   }

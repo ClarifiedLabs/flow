@@ -10,7 +10,7 @@
 // [data-gate-panel], so this element never wires its own listeners for them.
 
 import { apiPost } from "../api.js";
-import { gateResponsePending } from "../actions.js";
+import { failureMessage, gateResponsePending } from "../actions.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { renderMarkdown } from "../markdown.js";
 import { value } from "../normalize.js";
@@ -359,7 +359,7 @@ export class FlowReviewPanel extends FlowElement {
         this.terminalLoginPath = String(loginPath);
       } catch (error) {
         if (generation !== this.terminalGeneration || key !== this.terminalKey) return;
-        this.terminalError = error.message || String(error);
+        this.terminalError = failureMessage(error);
       } finally {
         if (generation !== this.terminalGeneration || key !== this.terminalKey) return;
         this.terminalPromise = null;

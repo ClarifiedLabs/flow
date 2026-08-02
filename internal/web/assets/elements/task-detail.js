@@ -7,6 +7,7 @@
 // tab that remembers where you were.
 
 import { apiGet, apiPost } from "../api.js";
+import { failureMessage } from "../actions.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { renderMarkdown } from "../markdown.js";
 import { value } from "../normalize.js";
@@ -602,7 +603,7 @@ export class FlowTaskDetail extends FlowElement {
         if (loaded.headSHA !== key.split(":").pop()) this.adoptChangeHead(id, loaded.headSHA, key);
       } catch (error) {
         if (generation !== this.changeGeneration || key !== this.changeKey) return;
-        this.changeError = error.message || String(error);
+        this.changeError = failureMessage(error);
       } finally {
         if (generation !== this.changeGeneration) return;
         this.changePromise = null;
@@ -775,7 +776,7 @@ export class FlowTaskDetail extends FlowElement {
         this.terminalLoginPath = String(loginPath);
       } catch (error) {
         if (generation !== this.terminalGeneration || key !== this.terminalKey) return;
-        this.terminalError = error.message || String(error);
+        this.terminalError = failureMessage(error);
       } finally {
         if (generation !== this.terminalGeneration || key !== this.terminalKey) return;
         this.terminalPromise = null;

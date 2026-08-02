@@ -10,6 +10,7 @@ import { apiGetText } from "../api.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { renderMarkdown } from "../markdown.js";
 import { value } from "../normalize.js";
+import { failureMessage } from "../actions.js";
 import { define, FlowElement } from "./base.js";
 
 export function renderCheckList(model) {
@@ -123,7 +124,7 @@ export class FlowCheckList extends FlowElement {
       const text = await apiGetText(`/v2/jobs/${encodeURIComponent(job)}/transcript`);
       panel.innerHTML = renderTranscript(text);
     } catch (error) {
-      panel.innerHTML = renderTranscript(error.message || String(error));
+      panel.innerHTML = renderTranscript(failureMessage(error));
     }
   }
 }

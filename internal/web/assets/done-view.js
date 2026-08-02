@@ -10,6 +10,7 @@ import { formatDate } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
 import { readDoneDensity, readDoneOutcome, writeDoneDensity, writeDoneOutcome } from "./storage.js";
+import { failureMessage } from "./actions.js";
 
 export async function renderDoneView(app, context) {
   if (!app.doneOutcome) app.doneOutcome = readDoneOutcome();
@@ -181,6 +182,6 @@ export async function loadMoreDoneView(app) {
     for (const page of pages) appendDoneDataView(app, page);
     renderDoneListView(app);
   } catch (error) {
-    app.setStatus(error.message || String(error));
+    app.setStatus(failureMessage(error));
   }
 }

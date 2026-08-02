@@ -8,6 +8,7 @@ import { HARNESS_REASONING_UNAVAILABLE, findHarnessModel, harnessModels, harness
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
 import { renderWorkflowGraph } from "./workflow-graph.js";
+import { failureMessage } from "./actions.js";
 
 export async function renderFlowsView(app, context) {
   app.setTitle("Flows");
@@ -352,7 +353,7 @@ function bindAgentDefsCatalogView(app, agentOptions, state, options) {
         state[options.editingKey] = "";
         await reload();
       } catch (error) {
-        app.setStatus(error.message || String(error));
+        app.setStatus(failureMessage(error));
       }
     });
   });
@@ -410,7 +411,7 @@ function bindAgentDefsCatalogView(app, agentOptions, state, options) {
       await reload();
       app.setStatus(defID ? "agent definition saved" : "agent definition created");
     } catch (error) {
-      app.setStatus(error.message || String(error));
+      app.setStatus(failureMessage(error));
     }
   });
 }
@@ -753,7 +754,7 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
         await reload();
         app.setStatus("flow cloned; rename and edit your copy");
       } catch (error) {
-        app.setStatus(error.message || String(error));
+        app.setStatus(failureMessage(error));
       }
     });
   });
@@ -764,7 +765,7 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
         await reload();
         app.setStatus("default flow updated");
       } catch (error) {
-        app.setStatus(error.message || String(error));
+        app.setStatus(failureMessage(error));
       }
     });
   });
@@ -776,7 +777,7 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
         state.editingFlowID = "";
         await reload();
       } catch (error) {
-        app.setStatus(error.message || String(error));
+        app.setStatus(failureMessage(error));
       }
     });
   });
@@ -858,7 +859,7 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
     try {
       payload = flowPayloadFromEditorView(form);
     } catch (error) {
-      app.setStatus(`Invalid node configuration JSON: ${error.message || error}`);
+      app.setStatus(`Invalid node configuration JSON: ${failureMessage(error)}`);
       return;
     }
     if (!payload.name) {
@@ -876,7 +877,7 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
       await reload();
       app.setStatus(flowID ? "flow saved" : "flow created");
     } catch (error) {
-      app.setStatus(error.message || String(error));
+      app.setStatus(failureMessage(error));
     }
   });
 }

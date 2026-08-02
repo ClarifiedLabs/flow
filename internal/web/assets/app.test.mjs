@@ -2213,6 +2213,43 @@ test("an action rejection whose message is a hostile non-string still drains the
   assert.equal(inFlight.size, 0, "the in-flight registry drains on a hostile rejection");
 });
 
+test("a hostile data-load rejection still leaves a safe status message", async () => {
+  const status = { textContent: "" };
+  const context = await scriptContext({
+    location: { pathname: "/ui/done" },
+    setTimeout() {},
+    clearTimeout() {},
+  }, {
+    fetch(path) {
+      if (path === "/ui/api/v2/projects") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ projects: [] }) });
+      }
+      // The done list GET rejects with a Proxy whose prototype lookup throws:
+      // the load catch must format it without throwing, or the status line
+      // would never report the failure.
+      return Promise.reject(new Proxy({}, {
+        getPrototypeOf() {
+          throw new Error("prototype trap");
+        },
+      }));
+    },
+  });
+  const app = new context.FlowApp();
+  app.pollingActive = true;
+  app.querySelector = (selector) => {
+    if (selector === "h1") return { textContent: "" };
+    if (selector === ".status") return status;
+    if (selector === ".content") return new InlineDOMElement("div");
+    return { textContent: "" };
+  };
+  app.querySelectorAll = () => [];
+
+  await app.load();
+
+  assert.equal(status.textContent, "Request failed", "the hostile rejection formats to a safe fallback");
+  assert.equal(app.pollFailures, 1, "the load failure is recorded as a poll failure");
+});
+
 test("a hostile form rejection still drains the registry and shows a safe failure", async () => {
   await scriptContext();
   const app = statusApp();
@@ -4108,10 +4145,10 @@ test("a navigation load cancels an armed settle-burst timeout through the real l
 
 // A console-poll harness: a real FlowApp parked on /ui/console with a
 // recording setTimeout, a fetch stub that hands each console-state GET a
-// deferred response in call order, and a load() wrapper that counts
-// invocations while delegating to the real load, so the guard under test
-// sees the real loadsInFlight accounting.
-async function consolePollHarness() {
+// deferred response in call order (or rejects every GET with rejectWith when
+// given), and a load() wrapper that counts invocations while delegating to the
+// real load, so the guard under test sees the real loadsInFlight accounting.
+async function consolePollHarness(rejectWith) {
   const timers = [];
   const title = { textContent: "" };
   const status = { textContent: "" };
@@ -4127,6 +4164,7 @@ async function consolePollHarness() {
   }, {
     URLSearchParams,
     fetch() {
+      if (rejectWith !== undefined) return Promise.reject(rejectWith);
       const response = deferred();
       responses.push(response);
       return response.promise;
@@ -4162,6 +4200,7 @@ async function consolePollHarness() {
     app,
     timers,
     responses,
+    status,
     loads: () => loads,
     consoleState(active, terminalAvailable) {
       return {
@@ -4229,6 +4268,24 @@ test("console poll transitions reload exactly once when no load is in flight", a
   await inactivePoll;
   assert.equal(harness.loads(), 2, "the inactive-console transition reloads once");
   assert.equal(harness.timers.length, 2, "an inactive console schedules no further poll");
+});
+
+test("a hostile console refresh rejection still reports a safe status and keeps polling", async () => {
+  // The console state GET rejects with a Proxy whose prototype lookup throws:
+  // the poll catch must format it without throwing, or the "console refresh
+  // failed" status and the re-arm would never run.
+  const harness = await consolePollHarness(new Proxy({}, {
+    getPrototypeOf() {
+      throw new Error("prototype trap");
+    },
+  }));
+  scheduleConsolePollView(harness.app, "p-alpha", "", { terminalAvailable: false });
+  assert.equal(harness.timers.length, 1);
+
+  await harness.timers[0].callback();
+
+  assert.equal(harness.status.textContent, "console refresh failed: Request failed");
+  assert.equal(harness.timers.length, 2, "the failed console refresh re-arms the poll");
 });
 
 test("board sidebar status separates blocked tasks in compact lifecycle groups", async () => {

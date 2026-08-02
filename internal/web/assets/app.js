@@ -21,7 +21,7 @@ import { renderTaskRoute } from "./task-route.js";
 import { renderChangeRoute } from "./change-route.js";
 import { renderEpicRoute } from "./epic-route.js";
 import { renderFeaturesRoute, renderFeatureRoute } from "./features-route.js";
-import { ACTION_SETTLE, applyBusyState, handleAction, pendingStatus } from "./actions.js";
+import { ACTION_SETTLE, applyBusyState, failureMessage, handleAction, pendingStatus } from "./actions.js";
 import { handleFormSubmit } from "./forms.js";
 import { renderNewTaskView, renderTaskFormView, bindTaskFlowControlsView } from "./task-view.js";
 import { renderFlowsView } from "./flows-view.js";
@@ -605,7 +605,7 @@ export class FlowApp extends HTMLElement {
       }
     } catch (error) {
       if (!this.isActiveLoad(context)) return;
-      this.setStatus(error.message || String(error));
+      this.setStatus(failureMessage(error));
       this.pollFailures = options.fromPoll ? this.pollFailures + 1 : 1;
       this.setPollState("error", this.pollFailures > 1 ? `retry ${this.pollFailures}` : "error");
       this.schedulePolling(path);
