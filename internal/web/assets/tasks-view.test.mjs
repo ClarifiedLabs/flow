@@ -214,6 +214,58 @@ test("applyTasksBulkAction fans out, reports failures and keeps failed tasks sel
   assert.match(statuses.at(-1), /t-bad: conflict/);
 });
 
+test("applyTasksBulkAction survives hostile rejection proxies and still reports the bulk status", async () => {
+  globalThis.document = { cookie: "" };
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    if (url.includes("t-throws")) {
+      // A rejected Proxy whose message getter throws: the unguarded
+      // `${result.reason?.message || result.reason}` read would make the
+      // template literal itself throw inside the forEach, aborting the
+      // status report before setStatus ran. failureMessage stays total.
+      return Promise.reject(new Proxy(new Error("boom"), {
+        get(target, prop) {
+          if (prop === "message") throw new Error("message trap");
+          return Reflect.get(target, prop);
+        },
+      }));
+    }
+    if (url.includes("t-noproto")) {
+      // A rejected Proxy whose prototype lookup throws: even the instanceof
+      // check inside failureMessage is guarded.
+      return Promise.reject(new Proxy({}, {
+        getPrototypeOf() {
+          throw new Error("prototype trap");
+        },
+      }));
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  const statuses = [];
+  const app = fakeApp({
+    tasksSelected: new Set(["t-ok", "t-throws", "t-noproto"]),
+    tasksList: [
+      { ID: "t-ok", project_id: "p-1" },
+      { ID: "t-throws", project_id: "p-1" },
+      { ID: "t-noproto", project_id: "p-1" },
+    ],
+    setStatus: (message) => statuses.push(message),
+  });
+
+  await applyTasksBulkAction(app, "priority", { querySelector: () => ({ value: "3" }) });
+
+  assert.equal(calls.length, 3);
+  assert.deepEqual(
+    [...app.tasksSelected].sort(),
+    ["t-noproto", "t-throws"],
+    "both hostile-rejected tasks stay selected",
+  );
+  assert.match(statuses.at(-1), /priority: 1 updated, 2 failed/);
+  assert.match(statuses.at(-1), /t-throws: Request failed/);
+  assert.match(statuses.at(-1), /t-noproto: Request failed/);
+});
+
 test("applyTasksBulkAction maps schedule, reset and retry onto the per-task endpoints", async () => {
   globalThis.document = { cookie: "" };
   const calls = [];

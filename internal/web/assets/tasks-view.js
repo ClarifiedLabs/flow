@@ -9,6 +9,7 @@
 // does not poll, so the selection and the search box are never clobbered
 // mid-edit; refresh is the topbar's manual button.
 
+import { failureMessage } from "./actions.js";
 import { apiGet, apiPatch, apiPost, taskAPIBase, taskHref } from "./api.js";
 import { phaseKey, renderPhaseBadge } from "./board.js";
 import { escapeAttr, escapeHTML } from "./html.js";
@@ -306,7 +307,9 @@ export function bindTasksControlsView(app) {
 
 // applyTasksBulkAction fans one bulk action out over the selected tasks via
 // the existing per-task endpoints, then refreshes the list and reports
-// per-task failures. Succeeded tasks leave the selection; failed ones stay
+// per-task failures. Rejected reasons render through failureMessage, so a
+// hostile rejection value (a Proxy whose message getter throws) cannot abort
+// the status report. Succeeded tasks leave the selection; failed ones stay
 // selected so they can be fixed up and retried.
 export async function applyTasksBulkAction(app, action, view) {
   const selected = app.tasksSelected || new Set();
@@ -350,7 +353,7 @@ export async function applyTasksBulkAction(app, action, view) {
   results.forEach((result, index) => {
     const id = String(value(tasks[index], "id", "ID"));
     if (result.status === "rejected") {
-      failed.push(`${id}: ${result.reason?.message || result.reason}`);
+      failed.push(`${id}: ${failureMessage(result.reason)}`);
     } else {
       selected.delete(id);
     }
