@@ -1397,6 +1397,24 @@ func TestWaitForTmuxKeepsUnsealedFlowCheckLive(t *testing.T) {
 	}
 }
 
+// TestTmuxSessionExistsAbortedProbePresumesAlive is the regression for the CI
+// flake in TestWaitForTmuxKeepsUnsealedFlowCheckLive: under CPU contention a
+// has-session probe spawned with the caller's short deadline was killed before
+// tmux answered (signal: killed), and tmuxSessionExists misread the aborted
+// probe as a dead session, making waitForTmux return a spurious "exited before
+// running flow complete" error instead of the deadline. A probe that never
+// reaches tmux says nothing about the session, so it must presume the session
+// is alive; the next probe confirms a genuinely dead session (tmux exit 1).
+func TestTmuxSessionExistsAbortedProbePresumesAlive(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// The context is already canceled, so exec.CommandContext aborts the probe
+	// before tmux is even spawned (context.Canceled, not a tmux verdict).
+	if !tmuxSessionExists(ctx, config.WorkerConfig{}, "j-any-session") {
+		t.Fatal("an aborted liveness probe must presume the session is alive")
+	}
+}
+
 // TestWaitForTmuxReportsContextDeadlineWhenProbeIsCutShort pins the behavior
 // behind a CI flake in TestWaitForTmuxKeepsUnsealedFlowCheckLive: a has-session
 // probe running under an expired context is killed before it can answer, so the

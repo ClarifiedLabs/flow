@@ -41,7 +41,7 @@ await import("./elements/board.js");
 await import("./elements/tab-strip.js");
 const { acquireBusy, handleAction, inFlight, releaseBusy, settleStatus } = await import("./actions.js");
 const { handleFormSubmit } = await import("./forms.js");
-await import("./elements/change.js");
+const { diffUnavailable } = await import("./elements/change.js");
 const { renderChangeRoute } = await import("./change-route.js");
 const { renderInlineThread } = await import("./elements/inline-thread.js");
 await import("./elements/task-detail.js");
@@ -4965,6 +4965,26 @@ test("a headed unavailable diff renders the server's reason instead of a bare em
   assert.doesNotMatch(html, /<flow-diff>/, "no diff pane renders");
   change.remove();
   appNode.remove();
+});
+
+test("a reason-less unavailable diff still renders the explicit pending state on the standalone route", async () => {
+  const root = globalThis.document.body;
+  // The server always pairs available:false with an unavailable_reason, but a
+  // reason-less {head_sha, available:false} response must classify identically
+  // on the standalone route and the task-detail route (both share the
+  // diffUnavailable predicate): pending, with the generic no-diff-yet note —
+  // there is no reason to surface — never a bare empty file list.
+  assert.equal(diffUnavailable({ head_sha: "h1", available: false }), true, "available:false alone marks a diff unavailable");
+  assert.equal(diffUnavailable({ head_sha: "h1", available: false, unavailable_reason: "merge service is not configured" }), true, "a reasoned unavailable diff stays unavailable");
+  assert.equal(diffUnavailable({ head_sha: "h1", available: true, files: [], total_files: 0, additions: 0, deletions: 0 }), false, "an available empty diff is usable");
+  assert.equal(diffUnavailable(null), true, "a failed fetch is unavailable");
+  const { appNode, change } = mountChange(root, { ...changeResponse("h1"), diff: { head_sha: "h1", available: false } });
+  await flush();
+  const html = change.innerHTML;
+  assert.match(html, /data-change-pending/, "a reason-less available:false response renders the pending state");
+  assert.match(html, /The diff is not available yet; it will appear here once it is\./, "the pending note falls back to the generic message");
+  assert.doesNotMatch(html, /class="files"/, "no bare empty file list renders");
+  assert.doesNotMatch(html, /<flow-diff>/, "no diff pane renders");
 });
 
 test("a hostile unavailable_reason renders as escaped text, not an injected element", async () => {

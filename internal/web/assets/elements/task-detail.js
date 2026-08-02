@@ -17,7 +17,7 @@ import { renderTerminalPopOutButton, terminalSelectionHint } from "../terminal.j
 import { TASK_TAB_KEYS } from "../config.js";
 import { define, FlowElement, mount } from "./base.js";
 import "./activity-feed.js";
-import "./change.js";
+import { diffUnavailable } from "./change.js";
 import "./check-list.js";
 import "./held-panel.js";
 import "./now-card.js";
@@ -390,18 +390,15 @@ export class FlowTaskDetail extends FlowElement {
   // the element renders an explicit no-diff-yet state.
   changeDiffPending() {
     const diff = this.changeData?.diff || {};
-    return Boolean(this.changeData && (!value(diff, "head_sha", "HeadSHA") || this.diffUnavailable(diff)));
+    return Boolean(this.changeData && (!value(diff, "head_sha", "HeadSHA") || diffUnavailable(diff)));
   }
 
-  // diffUnavailable reports whether a /diff response is not a usable diff: a
+  // diffUnavailable is the shared ./change.js predicate (imported above): a
   // failed fetch, or the server's explicit no-diff answer (HTTP 200 naming the
   // head it would diff, with available:false and an unavailable_reason). An
   // unavailable response carries no files and the diff may become available
   // later, so it never verifies a metadata/diff pair: the pair stays pending
   // and /diff keeps being retried on later polls.
-  diffUnavailable(diff) {
-    return !diff || diff.available === false || Boolean(value(diff, "unavailable_reason", "UnavailableReason"));
-  }
 
   paintChange(model, panel) {
     const change = model.change;
@@ -580,7 +577,7 @@ export class FlowTaskDetail extends FlowElement {
           const diff = await apiGet(`/v2/changes/${encodeURIComponent(id)}/diff`).catch(() => null);
           if (generation !== this.changeGeneration || key !== this.changeKey) return;
           const diffHead = String(value(diff, "head_sha", "HeadSHA") || "");
-          if (diff && diffHead === headSHA && !this.diffUnavailable(diff)) {
+          if (diff && diffHead === headSHA && !diffUnavailable(diff)) {
             // A verified pair: the diff names the metadata's head and is a real
             // diff, not the server's explicit unavailable response.
             loaded = { data, diff, headSHA };
@@ -668,11 +665,11 @@ export class FlowTaskDetail extends FlowElement {
           // explicitly unavailable fetch keeps the pending pair and the cache
           // stays stale for the next poll.
           const cachedDiff = this.changeData?.diff || {};
-          if (!value(cachedDiff, "head_sha", "HeadSHA") || this.diffUnavailable(cachedDiff)) {
+          if (!value(cachedDiff, "head_sha", "HeadSHA") || diffUnavailable(cachedDiff)) {
             const diff = await apiGet(`/v2/changes/${encodeURIComponent(id)}/diff`).catch(() => null);
             if (generation !== this.changeGeneration || key !== this.changeKey) return;
             const diffHead = String(value(diff, "head_sha", "HeadSHA") || "");
-            if (diff && diffHead === head && !this.diffUnavailable(diff)) this.changeData = { ...data, diff };
+            if (diff && diffHead === head && !diffUnavailable(diff)) this.changeData = { ...data, diff };
             return;
           }
           this.changeData = { ...data, diff: cachedDiff };
@@ -704,7 +701,7 @@ export class FlowTaskDetail extends FlowElement {
         if (!this.changePendingKey) return;
         this.changePendingKey = "";
         this.changePendingSeen = false;
-        if (this.diffUnavailable(diff) || diffHead !== fetchedHead) return;
+        if (diffUnavailable(diff) || diffHead !== fetchedHead) return;
         this.changeData = { ...data, diff };
         this.adoptChangeHead(id, fetchedHead, key);
       } catch {

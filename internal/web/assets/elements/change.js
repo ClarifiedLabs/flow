@@ -32,6 +32,15 @@ export function renderFileList(files, { selected, threads = [] }) {
     .join("");
 }
 
+// diffUnavailable reports whether a /diff response is not a usable diff: a
+// failed fetch (null), or the server's explicit no-diff answer (HTTP 200
+// naming the head it would diff, with available:false and an
+// unavailable_reason). Shared with the task detail's change tab so both
+// routes classify every /diff response shape identically.
+export function diffUnavailable(diff) {
+  return !diff || diff.available === false || Boolean(value(diff, "unavailable_reason", "UnavailableReason"));
+}
+
 export class FlowChange extends FlowElement {
   selected = "";
   // Pending inline notes live here until the reviewer submits a verdict; that
@@ -97,10 +106,7 @@ export class FlowChange extends FlowElement {
     // compute the diff (e.g. "merge service is not configured"): surface it
     // so the empty state explains itself instead of reading as a change with
     // no files.
-    const pending =
-      !value(diff, "head_sha", "HeadSHA") ||
-      diff.available === false ||
-      Boolean(value(diff, "unavailable_reason", "UnavailableReason"));
+    const pending = !value(diff, "head_sha", "HeadSHA") || diffUnavailable(diff);
     const unavailableReason = value(diff, "unavailable_reason", "UnavailableReason");
     const pendingNote = unavailableReason && value(diff, "head_sha", "HeadSHA")
       ? `The diff is not available: ${unavailableReason}`

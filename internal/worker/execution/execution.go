@@ -1689,7 +1689,21 @@ func startTranscriptCapture(ctx context.Context, input tmuxInput) {
 
 func tmuxSessionExists(ctx context.Context, cfg config.WorkerConfig, sessionName string) bool {
 	err := tmuxCommandContext(ctx, cfg, "has-session", "-t", sessionName).Run()
-	return err == nil
+	if err == nil {
+		return true
+	}
+	// tmux's has-session exits 1 when the session (or its server) is gone.
+	// Any other probe failure says nothing about the session — most importantly
+	// a probe aborted because the caller's context expired or was canceled,
+	// which kills the tmux client before it can answer. Presume the session is
+	// still alive rather than killing a live check on an inconclusive probe:
+	// waitForTmux reports the context error itself on the deadline path, and a
+	// genuinely dead session is confirmed by the next probe (exit 1).
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false
+	}
+	return true
 }
 
 func tmuxPaneDead(ctx context.Context, cfg config.WorkerConfig, sessionName string) bool {
