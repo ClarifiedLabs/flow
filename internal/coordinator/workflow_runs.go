@@ -1245,6 +1245,14 @@ WHERE id = ?`, string(WorkflowNodeSucceeded), sqlitex.NullableNonEmptyString(art
 		reviewCyclesUsed++
 	}
 	if targetNode.Kind == NodeTerminal {
+		// The terminal edge is not exclusive to the public CompleteNode: the
+		// review marker transaction also completes the gate through this state
+		// machine (SubmitReview's respondToReviewGateTx), and when the gate's
+		// selected outcome edges to a terminal node this branch runs inside that
+		// same transaction via completeTerminalTx. That is safe because the
+		// terminal completion commits atomically with the marker, the run is
+		// reloaded after commit, and the executor's Advance guards
+		// (waiting/completed/held/gate/terminal) prevent any double-advance.
 		terminalRun, err := createNodeRunTx(ctx, tx, run, targetNode.Key, 1, artifactID, now)
 		if err != nil {
 			return CompleteWorkflowNodeResult{}, err
