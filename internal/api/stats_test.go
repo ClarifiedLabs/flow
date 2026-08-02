@@ -117,6 +117,49 @@ func TestCompletionStatsSumsAcrossProjectsAndNarrowsByProjectFilter(t *testing.T
 	}
 }
 
+func TestCompletionStatsSessionTokenCannotReadOtherProject(t *testing.T) {
+	server, bundles := newMultiProjectServer(t, "alpha", "beta")
+	alpha, beta := bundles[0], bundles[1]
+	now := time.Now().UTC()
+
+	finishCompletedTask(t, alpha, "alpha one", coordinator.ResolutionCompleted, now.Add(-time.Minute))
+	finishCompletedTask(t, beta, "beta one", coordinator.ResolutionCompleted, now.Add(-time.Minute))
+	finishCompletedTask(t, beta, "beta two", coordinator.ResolutionCompleted, now.Add(-5*time.Minute))
+
+	ctx := context.Background()
+	if err := server.registry.Credentials().EnsureToken(ctx, coordinator.CredentialInput{
+		Token:     "alpha-session-token",
+		Scope:     coordinator.TokenScopeSession,
+		Subject:   "s-alpha",
+		ProjectID: &alpha.Project.ID,
+	}); err != nil {
+		t.Fatalf("store alpha session token: %v", err)
+	}
+
+	// A project-bound token asking for another project's completions is denied.
+	doJSONRequestAs(t, server, "alpha-session-token", http.MethodGet,
+		"/v2/stats/completions?project="+beta.Project.ID, nil, http.StatusForbidden, nil)
+
+	// The same token still reads its own project and never sees beta's counts,
+	// whether it asks for its project explicitly or reads the aggregate.
+	var alphaScoped completionStatsResponse
+	doJSONRequestAs(t, server, "alpha-session-token", http.MethodGet,
+		"/v2/stats/completions?project="+alpha.Project.ID, nil, http.StatusOK, &alphaScoped)
+	if got := completionBucketCount(t, alphaScoped, "24h"); got != 1 {
+		t.Fatalf("session alpha bucket 24h count = %d, want 1 (alpha only)", got)
+	}
+	if byOutcome := alphaScoped.ByOutcome["24h"]; byOutcome["completed"] != 1 {
+		t.Fatalf("session alpha 24h by outcome = %+v, want completed 1", byOutcome)
+	}
+
+	var alphaAggregate completionStatsResponse
+	doJSONRequestAs(t, server, "alpha-session-token", http.MethodGet,
+		"/v2/stats/completions", nil, http.StatusOK, &alphaAggregate)
+	if got := completionBucketCount(t, alphaAggregate, "24h"); got != 1 {
+		t.Fatalf("session aggregate bucket 24h count = %d, want 1 (beta hidden)", got)
+	}
+}
+
 func TestCompletionStatsUpdatesWhenTaskTransitionsToDoneAndIsReadScoped(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
