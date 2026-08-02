@@ -50,8 +50,9 @@ export function writeBoardView(view) {
 // the view toggle does. The stored shape is validated on read; an unset or
 // corrupt value falls back to the default { key: "number", dir: "asc" }.
 // readBoardSortChoice distinguishes the two: null means no preference was
-// stored, and the board then keeps the server's order (the default is a
-// no-op on today's project-grouped payload) until the user picks a sort.
+// stored, and the board then keeps the server's order in the lanes while the
+// table falls back to its attention grouping (sortForAttention) until the
+// operator picks a sort.
 export function readBoardSortChoice() {
   try {
     const raw = window.localStorage?.getItem(BOARD_SORT_STORAGE_KEY);

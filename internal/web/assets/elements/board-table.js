@@ -9,7 +9,7 @@ import { LIFECYCLE_SCHEDULED, LIFECYCLE_UNSCHEDULED } from "../lifecycle.js";
 import { renderStepRail } from "./step-rail.js";
 import { define, FlowElement } from "./base.js";
 
-export function renderBoardTable(models, filter = "all", sort) {
+export function renderBoardTable(models, filter = "all", sort, sortExplicit = false) {
   const counts = Object.fromEntries(
     BOARD_FILTERS.map(([key]) => [key, models.filter((model) => matchesFilter(model, key)).length]),
   );
@@ -25,6 +25,15 @@ export function renderBoardTable(models, filter = "all", sort) {
   const activityActive = sort?.key === "activity";
   const dir = sort?.dir === "desc" ? "descending" : "ascending";
   const arrow = (active) => (active ? (sort?.dir === "desc" ? " \u2193" : " \u2191") : "");
+  // The note names the effective order. Once the operator has picked a sort
+  // (sortExplicit) the board applies that comparator directly, so the note
+  // says the key and direction. Until then the board falls back to the
+  // classic attention grouping (sortForAttention), so the note keeps the
+  // honest "attention, then dwell" text — and no surface claims that fixed
+  // order while an explicit sort is active.
+  const note = sortExplicit
+    ? `sort: ${sort?.key === "activity" ? "last active" : "task #"} ${sort?.dir === "desc" ? "desc" : "asc"}`
+    : "sort: attention, then dwell";
   return `
     <div class="chips" role="group" aria-label="Filter tasks">
       ${BOARD_FILTERS.map(
@@ -34,6 +43,7 @@ export function renderBoardTable(models, filter = "all", sort) {
         }>${escapeHTML(label)}<span class="chip-count">${counts[key]}</span></button>`,
       ).join("")}
       <span class="spacer"></span>
+      <span class="sort-note">${escapeHTML(note)}</span>
     </div>
     <div class="table-wrap">
       <table>
@@ -100,10 +110,14 @@ export class FlowBoardTable extends FlowElement {
   // Mirrors readBoardSort's validated default; the board overwrites this with
   // the shared sort state before the table is visible.
   sort = { key: "number", dir: "asc" };
+  // Mirrors readBoardSortChoice: whether the operator has picked a sort. The
+  // board overwrites this too; until then the table renders the honest
+  // attention-fallback note.
+  sortExplicit = false;
 
   render(models) {
     if (!models) return "";
-    return renderBoardTable(models, this.filter, this.sort);
+    return renderBoardTable(models, this.filter, this.sort, this.sortExplicit);
   }
 
   handleClick(event) {

@@ -2,7 +2,7 @@
 // the lanes and the table render the same models so they cannot disagree about
 // what state a task is in.
 
-import { activityGroupOf, cardModel, compareBoardCards } from "../board-model.js";
+import { activityGroupOf, cardModel, compareBoardCards, sortForAttention } from "../board-model.js";
 import { laneTasks } from "../board.js";
 import { BOARD_SORT_DIRS, BOARD_SORT_KEYS, LANES } from "../config.js";
 import { value } from "../normalize.js";
@@ -64,8 +64,10 @@ export class FlowBoard extends FlowElement {
   // table headers display. The default is NOT a comparator sort: the server
   // sends the aggregate board project-grouped and does not order keyed ids
   // by trailing task number, so a global number sort would reorder today's
-  // payload. Until the user picks a sort (sortExplicit), the entries keep
-  // the server's order — the default is a true no-op.
+  // payload. Until the operator picks a sort (sortExplicit) the lanes keep
+  // the server's order; the table falls back to its classic attention
+  // grouping instead (see forward()) — the split keeps each surface honest
+  // without expanding the sort feature.
   sort = readBoardSort();
   sortExplicit = readBoardSortChoice() !== null;
 
@@ -113,6 +115,7 @@ export class FlowBoard extends FlowElement {
         const attention = this.querySelector("flow-attention-strip");
         if (attention) attention.data = models.filter((model) => model.needsYou);
         table.sort = this.sort;
+        table.sortExplicit = this.sortExplicit;
         table.data = models;
         return;
       }
@@ -124,8 +127,8 @@ export class FlowBoard extends FlowElement {
   // An explicit sort applies cross-project — the aggregate board is one flat
   // list. Without an explicit choice the entries keep the server's order:
   // the server sends the board project-grouped (its ListTasks ordering does
-  // not sort keyed ids by trailing task number), so the displayed default is
-  // a no-op on today's payload.
+  // not sort keyed ids by trailing task number), so the lanes show a true
+  // no-op on today's payload and only the table falls back to attention.
   sortedModels() {
     return this.sortedEntries().map((entry) => entry.model);
   }
@@ -173,8 +176,17 @@ export class FlowBoard extends FlowElement {
     const surface = this.querySelector(".surface");
     if (!surface) return;
     if (this.view === "table") {
-      const table = mount(surface, "flow-board-table", models);
-      if (table) table.sort = this.sort;
+      // Attention grouping rule: an explicit operator sort applies directly;
+      // sortForAttention is only the default-state fallback. The lanes are
+      // server-ordered by default, so the dense table — whose pre-sort
+      // behaviour was attention-first — keeps that honest grouping until the
+      // operator picks a sort, and the table's note says which one is live.
+      const tableModels = this.sortExplicit ? models : sortForAttention(models);
+      const table = mount(surface, "flow-board-table", tableModels);
+      if (table) {
+        table.sort = this.sort;
+        table.sortExplicit = this.sortExplicit;
+      }
       return;
     }
     this.paintLanes(surface, entries);

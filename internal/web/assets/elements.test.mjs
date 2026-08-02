@@ -639,17 +639,39 @@ test("the table marks attention rows and offers quiet actions elsewhere", () => 
 
 test("the table headers carry the sort key and reflect its direction", () => {
   const model = cardModel(entry({ task: { id: "t-0001" } }));
-  const byNumber = renderBoardTable([model], "all", { key: "number", dir: "asc" });
+  const byNumber = renderBoardTable([model], "all", { key: "number", dir: "asc" }, true);
   assert.match(byNumber, /<th aria-sort="ascending">/);
   assert.match(byNumber, /data-board-sort-key="number"/);
   assert.match(byNumber, /data-board-sort-key="activity"/);
   assert.match(byNumber, />Task ↑</);
   assert.match(byNumber, />Dwell</, "the dwell column keeps its name while number sorts");
-  const byActivity = renderBoardTable([model], "all", { key: "activity", dir: "desc" });
+  const byActivity = renderBoardTable([model], "all", { key: "activity", dir: "desc" }, true);
   assert.match(byActivity, /<th class="col-dwell" aria-sort="descending">/);
   assert.match(byActivity, />Last active ↓</, "the dwell column is relabelled while activity sorts");
   const byDefault = renderBoardTable([model], "all", { key: "number", dir: "asc" });
-  assert.doesNotMatch(byDefault, /sort: attention, then dwell/, "the static sort note is gone");
+  assert.match(byDefault, /sort: attention, then dwell/, "the unset default names the attention fallback");
+  assert.doesNotMatch(byDefault, /sort: task #|sort: last active/, "the default does not claim a key sort");
+  assert.doesNotMatch(byActivity, /sort: attention, then dwell/, "an explicit sort never claims the fixed attention order");
+});
+
+test("the table sort note names the effective key and direction", () => {
+  const model = cardModel(entry({ task: { id: "t-0001" } }));
+  assert.match(
+    renderBoardTable([model], "all", { key: "number", dir: "asc" }, true),
+    /sort: task # asc/,
+  );
+  assert.match(
+    renderBoardTable([model], "all", { key: "number", dir: "desc" }, true),
+    /sort: task # desc/,
+  );
+  assert.match(
+    renderBoardTable([model], "all", { key: "activity", dir: "asc" }, true),
+    /sort: last active asc/,
+  );
+  assert.match(
+    renderBoardTable([model], "all", { key: "activity", dir: "desc" }, true),
+    /sort: last active desc/,
+  );
 });
 
 test("the table renders the now column as markdown", () => {
@@ -678,7 +700,8 @@ function sortEntry(id, lane, dwellSince, project = { id: "p-alpha", name: "Alpha
 function sortBoardEntries(dwellAgoMs = HOUR) {
   const now = Date.now();
   // The fixture arrives in the server's order — ascending task number per
-  // lane — which the unset default keeps untouched (a no-op).
+  // lane — which the unset default keeps untouched in the lanes (a no-op);
+  // the table's attention fallback reads the same cards oldest-dwell-first.
   return [
     sortEntry("t-0001", "scheduled", new Date(now - dwellAgoMs).toISOString()),
     sortEntry("t-0002", "scheduled", new Date(now - 2 * dwellAgoMs).toISOString()),
@@ -854,11 +877,12 @@ test("the table view consumes the same sort and its headers set it back", async 
     [...board.querySelector("tbody").children].map((row) => row.querySelector(".id").textContent);
   assert.deepEqual(
     rowIDs(),
-    ["t-0001", "t-0002", "t-0003", "t-0004", "t-0005", "t-0006"],
-    "the table opens on the default Task number ascending sort",
+    ["t-0006", "t-0005", "t-0004", "t-0003", "t-0002", "t-0001"],
+    "the table opens on the attention fallback (oldest dwell first)",
   );
 
   let table = board.querySelector("flow-board-table");
+  assert.match(table.innerHTML, /sort: attention, then dwell/, "the unset default names the attention fallback");
   assert.match(table.innerHTML, /<th aria-sort="ascending">/, "the Task column shows the active direction");
   assert.match(table.innerHTML, />Task ↑</);
   assert.match(table.innerHTML, />Dwell</, "the dwell column keeps its name while number sorts");
@@ -868,6 +892,7 @@ test("the table view consumes the same sort and its headers set it back", async 
   assert.deepEqual(readBoardSort(), { key: "activity", dir: "asc" });
   table = board.querySelector("flow-board-table");
   assert.match(table.innerHTML, />\s*Last active/, "the dwell header is relabelled while activity sorts");
+  assert.match(table.innerHTML, /sort: last active asc/, "the note names the chosen key and direction");
 
   board.querySelector('[data-board-view="lanes"]').click();
   await flush();
@@ -919,40 +944,41 @@ test("a table header sort keeps the active filter", async () => {
 
   chip.click();
   await flush();
-  assert.deepEqual(rowIDs(), ["t-0001", "t-0002"], "the queued filter selects the scheduled tasks in the active default order");
+  assert.deepEqual(rowIDs(), ["t-0002", "t-0001"], "the queued filter selects the scheduled tasks in the attention fallback order (oldest dwell first)");
 
   board.querySelector('[data-board-sort-key="activity"]').click();
   await flush();
-  assert.deepEqual(rowIDs(), ["t-0002", "t-0001"], "sorting reorders within the selected scope");
+  assert.deepEqual(rowIDs(), ["t-0002", "t-0001"], "the explicit activity sort keeps the same oldest-first order here");
   const chipAfter = board.querySelector('[data-board-filter="queued"]');
   assert.equal(chipAfter.getAttribute("aria-pressed"), "true", "the filter chip stays active after sorting");
   board.remove();
 });
 
-test("an unset or corrupt sort keeps the server's project-grouped order in both views", async () => {
+test("an unset or corrupt sort keeps the lanes' server order and the table's attention fallback", async () => {
   window.localStorage.removeItem(BOARD_SORT_STORAGE_KEY);
   window.localStorage.removeItem(BOARD_VIEW_STORAGE_KEY);
   const root = globalThis.document.body;
   // The server sends the aggregate board project by project (Alpha before
   // Beta), and its ListTasks ordering does not sort keyed ids by trailing
   // task number. A global number sort would move t-beta-0002 ahead of
-  // t-alpha-0003; the unset default must be a no-op instead, reproducing the
-  // payload exactly — while the control and the table headers still display
-  // the default Task number ascending state.
+  // t-alpha-0003; the unset default keeps the lanes on that payload exactly
+  // — while the table falls back to its attention grouping (oldest dwell
+  // first: t-beta-0002, t-alpha-0001, t-alpha-0003) and the control and the
+  // table headers still display the default Task number ascending state.
   const now = Date.now();
   const alpha = { id: "p-alpha", name: "Alpha" };
   const beta = { id: "p-beta", name: "Beta" };
   const grouped = [
-    sortEntry("t-alpha-0001", "scheduled", new Date(now - HOUR).toISOString(), alpha),
-    sortEntry("t-alpha-0003", "scheduled", new Date(now - 3 * HOUR).toISOString(), alpha),
-    sortEntry("t-beta-0002", "scheduled", new Date(now - 2 * HOUR).toISOString(), beta),
+    sortEntry("t-alpha-0001", "scheduled", new Date(now - 2 * HOUR).toISOString(), alpha),
+    sortEntry("t-alpha-0003", "scheduled", new Date(now - HOUR).toISOString(), alpha),
+    sortEntry("t-beta-0002", "scheduled", new Date(now - 3 * HOUR).toISOString(), beta),
   ];
   const board = mountElement(root, "flow-board", { entries: grouped });
   await flush();
   assert.deepEqual(
     laneIDs(board, "scheduled"),
     ["t-alpha-0001", "t-alpha-0003", "t-beta-0002"],
-    "the lanes keep the server's project-grouped order — the default is a no-op",
+    "the lanes keep the server's project-grouped order — the default is a no-op there",
   );
   const control = board.querySelector("flow-board-sort");
   assert.match(control.innerHTML, />\s*Task number\s*</, "the control still displays the default key");
@@ -963,8 +989,13 @@ test("an unset or corrupt sort keeps the server's project-grouped order in both 
     [...board.querySelector("tbody").children].map((row) => row.querySelector(".id").textContent);
   assert.deepEqual(
     rowIDs(),
-    ["t-alpha-0001", "t-alpha-0003", "t-beta-0002"],
-    "the table keeps the same server order",
+    ["t-beta-0002", "t-alpha-0001", "t-alpha-0003"],
+    "the table falls back to the attention grouping (oldest dwell first) instead",
+  );
+  assert.match(
+    board.querySelector("flow-board-table").innerHTML,
+    /sort: attention, then dwell/,
+    "and the note names that fallback rather than a key sort",
   );
   assert.match(
     board.querySelector("flow-board-table").innerHTML,
@@ -973,7 +1004,7 @@ test("an unset or corrupt sort keeps the server's project-grouped order in both 
   );
   board.remove();
 
-  // A corrupt stored value is treated as unset: the same no-op default applies.
+  // A corrupt stored value is treated as unset: the same default applies.
   window.localStorage.setItem(BOARD_SORT_STORAGE_KEY, "{not json");
   window.localStorage.removeItem(BOARD_VIEW_STORAGE_KEY);
   const corrupt = mountElement(root, "flow-board", { entries: grouped });
@@ -981,7 +1012,7 @@ test("an unset or corrupt sort keeps the server's project-grouped order in both 
   assert.deepEqual(
     laneIDs(corrupt, "scheduled"),
     ["t-alpha-0001", "t-alpha-0003", "t-beta-0002"],
-    "a corrupt preference falls back to the no-op default",
+    "a corrupt preference falls back to the no-op default in the lanes",
   );
   corrupt.remove();
   window.localStorage.removeItem(BOARD_SORT_STORAGE_KEY);
@@ -995,24 +1026,25 @@ test("a user sort is cross-project, persists, and survives a reload", async () =
   const alpha = { id: "p-alpha", name: "Alpha" };
   const beta = { id: "p-beta", name: "Beta" };
   const grouped = [
-    sortEntry("t-alpha-0001", "scheduled", new Date(now - HOUR).toISOString(), alpha),
-    sortEntry("t-alpha-0003", "scheduled", new Date(now - 3 * HOUR).toISOString(), alpha),
-    sortEntry("t-beta-0002", "scheduled", new Date(now - 2 * HOUR).toISOString(), beta),
+    sortEntry("t-alpha-0001", "scheduled", new Date(now - 2 * HOUR).toISOString(), alpha),
+    sortEntry("t-alpha-0003", "scheduled", new Date(now - HOUR).toISOString(), alpha),
+    sortEntry("t-beta-0002", "scheduled", new Date(now - 3 * HOUR).toISOString(), beta),
   ];
   const board = mountElement(root, "flow-board", { entries: grouped });
   await flush();
 
-  // The board opens with the unset default, which is a no-op: the table
-  // shows the server's project-grouped order. Clicking the Task header is an
-  // explicit user sort, so it applies cross-project from then on.
+  // The board opens with the unset default: the lanes stay on the server's
+  // project-grouped order and the table falls back to attention. Clicking the
+  // Task header is an explicit user sort, so it applies cross-project from
+  // then on.
   board.querySelector('[data-board-view="table"]').click();
   await flush();
   const rowIDs = () =>
     [...board.querySelector("tbody").children].map((row) => row.querySelector(".id").textContent);
   assert.deepEqual(
     rowIDs(),
-    ["t-alpha-0001", "t-alpha-0003", "t-beta-0002"],
-    "the table opens in the server's project-grouped order (no-op default)",
+    ["t-beta-0002", "t-alpha-0001", "t-alpha-0003"],
+    "the table opens on the attention fallback (oldest dwell first)",
   );
   board.querySelector('[data-board-sort-key="number"]').click();
   await flush();
@@ -1022,6 +1054,11 @@ test("a user sort is cross-project, persists, and survives a reload", async () =
     "clicking the Task header reverses the direction cross-project",
   );
   assert.deepEqual(readBoardSort(), { key: "number", dir: "desc" }, "the reversal is persisted");
+  assert.match(
+    board.querySelector("flow-board-table").innerHTML,
+    /sort: task # desc/,
+    "the note switches to the explicit key and direction",
+  );
 
   board.querySelector('[data-board-view="lanes"]').click();
   await flush();

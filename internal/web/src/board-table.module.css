@@ -47,6 +47,11 @@
   flex: 1;
 }
 
+.sort-note {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
 /* The sortable headers are real buttons so they are keyboard reachable; they
    inherit the column header's look and only add the affordance. */
 .th-sort {

@@ -356,9 +356,10 @@ function activityLine(card, {
   return workflowActivityLabel(stepName, kind) || "Working";
 }
 
-// sortForAttention orders the board's table and the epic's member list:
-// whatever needs a human first, oldest wait at the top, then everything else
-// by how long it has been sitting.
+// sortForAttention is the board table's default-state fallback: while no
+// explicit sort is chosen, whatever needs a human comes first, oldest wait at
+// the top, then everything else by how long it has been sitting. Once the
+// operator picks a sort, compareBoardCards applies directly instead.
 export function sortForAttention(models) {
   return [...models].sort((left, right) => {
     if (left.needsYou !== right.needsYou) return left.needsYou ? -1 : 1;
