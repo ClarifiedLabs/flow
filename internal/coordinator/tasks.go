@@ -512,12 +512,13 @@ JOIN tags t ON t.id = it.tag_id`
 	if len(predicates) > 0 {
 		query += "\nWHERE " + strings.Join(predicates, " AND ")
 	}
-	// CAST(substr(i.id, 3) AS INTEGER) yields a numeric key only for ids of
-	// a bare `t-<number>` shape. For canonical keyed ids
-	// (`t-<key>-NNNN`, see formatTaskID) the substring starts with the key,
-	// so the cast does not yield the trailing-suffix number (typically 0)
-	// and server list order is not numeric for keyed ids; the board applies
-	// its own trailing-suffix numeric sort on top.
+	// CAST(substr(i.id, 3) AS INTEGER) orders legacy `t-<number>` ids
+	// numerically. For canonical keyed ids (`t-<key>-NNNN`, see formatTaskID)
+	// it does not parse the trailing task number: it casts the leading digits
+	// of the substring after `t-` (the key itself when the key starts with a
+	// digit, otherwise 0), so server list order is not numeric by task number
+	// for keyed ids; the board applies its own trailing-suffix numeric sort
+	// on top.
 	query += "\nGROUP BY i.id\nORDER BY CAST(substr(i.id, 3) AS INTEGER)"
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
