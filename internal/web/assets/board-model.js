@@ -356,10 +356,13 @@ export function sortForAttention(models) {
   });
 }
 
-// taskNumber parses the numeric suffix of a task id (`t-<key>-0042` -> 42),
-// mirroring the server's CAST(substr(id, 3) AS INTEGER) ordering in
-// coordinator ListTasks. Numeric, not string, compare: `t-…-9` sorts before
-// `t-…-42`. Ids without a numeric suffix compare as 0.
+// taskNumber parses the trailing numeric suffix of a task id
+// (`t-<key>-0042` -> 42) for the board's numeric sort, per the board spec.
+// Numeric, not string, compare: `t-…-9` sorts before `t-…-42`. Ids without
+// a numeric suffix compare as 0. This is not a mirror of coordinator
+// ListTasks ordering: its CAST(substr(id, 3) AS INTEGER) ORDER BY does not
+// yield the trailing-suffix number (typically 0) for keyed ids, so server
+// list order is not numeric for them.
 export function taskNumber(id) {
   const match = String(id || "").match(/(\d+)$/);
   return match ? Number(match[1]) : 0;
