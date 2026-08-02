@@ -2,6 +2,7 @@
 // into one model, hand to <flow-task-detail>.
 
 import { apiGet, taskAPIBase } from "./api.js";
+import { failureMessage } from "./actions.js";
 import { mount } from "./elements/base.js";
 import { taskModel } from "./task-model.js";
 import { value } from "./normalize.js";
@@ -17,10 +18,13 @@ export async function renderTaskRoute(app, id, context, projectID = "") {
   const changeID = value(change || {}, "id", "ID");
 
   // The Now card needs to know whether an open review thread blocks the merge,
-  // which lives with the change rather than with the task.
-  const [workflowData, threadData] = await Promise.all([
+  // which lives with the change rather than with the task. The findings tab
+  // reads the per-task findings registry, fetched alongside so the tab paints
+  // from the model instead of loading on open.
+  const [workflowData, threadData, findingsData] = await Promise.all([
     apiGet(`${taskAPIBase(resolvedProject)}/${encodeURIComponent(id)}/workflow`).catch(() => null),
     changeID ? apiGet(`/v2/changes/${encodeURIComponent(changeID)}/threads`).catch(() => null) : Promise.resolve(null),
+    apiGet(`${taskAPIBase(resolvedProject)}/${encodeURIComponent(id)}/findings`).catch((error) => ({ error: failureMessage(error) })),
   ]);
   if (context && !app.isActiveLoad(context)) return false;
 
@@ -28,7 +32,11 @@ export async function renderTaskRoute(app, id, context, projectID = "") {
   app.setTitle(projectName ? `Task · ${projectName}` : "Task");
 
   const model = taskModel(
-    { ...data, threads: value(threadData || {}, "threads", "Threads") || [] },
+    {
+      ...data,
+      threads: value(threadData || {}, "threads", "Threads") || [],
+      findings: findingsData,
+    },
     workflowData,
   );
   mount(app.querySelector(".content"), "flow-task-detail", model);

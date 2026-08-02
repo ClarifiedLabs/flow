@@ -309,6 +309,10 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
 
     checks,
     checksSatisfied: checks.filter((check) => value(check, "verdict", "Verdict") === "satisfied").length,
+    // findings is the task's review findings registry read model (the
+    // TaskFindingsResponse the task route fetches alongside the workflow), or
+    // null when the read failed or was not attached.
+    findings: value(data, "findings", "Findings") || null,
     threads,
     openThreads: threads.filter((thread) => value(thread, "state", "State") === "open").length,
     change: value(detail, "ready_change", "ReadyChange") || changes[0],
@@ -541,6 +545,8 @@ export function tabBadges(model) {
     const ok = model.checksSatisfied === model.checks.length;
     badges.checks = { text: `${model.checksSatisfied}/${model.checks.length}`, tone: ok ? "ok" : "danger" };
   }
+  const unresolvedFindings = Number(value(model.findings?.summary, "unresolved", "Unresolved") || 0);
+  if (unresolvedFindings > 0) badges.findings = { text: String(unresolvedFindings), tone: "warn" };
   const activity = model.transitions.length + model.statusLog.length;
   if (activity) badges.activity = { text: String(activity), tone: "idle" };
   if (model.terminalAvailable) badges.terminal = { live: true };

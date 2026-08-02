@@ -41,6 +41,7 @@ var cssModules = []struct{ Name, Scope string }{
 	{"run-list.module.css", "flow-run-list"},
 	{"workflow-graph.module.css", "flow-workflow-graph"},
 	{"check-list.module.css", "flow-check-list"},
+	{"findings-list.module.css", "flow-findings-list"},
 	{"activity-feed.module.css", "flow-activity-feed"},
 	{"change.module.css", "flow-change"},
 	{"diff.module.css", "flow-diff"},

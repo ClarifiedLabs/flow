@@ -19,6 +19,7 @@ import { define, FlowElement, mount } from "./base.js";
 import "./activity-feed.js";
 import { diffUnavailable } from "./change.js";
 import "./check-list.js";
+import "./findings-list.js";
 import "./held-panel.js";
 import "./now-card.js";
 import "./review-panel.js";
@@ -314,6 +315,9 @@ export class FlowTaskDetail extends FlowElement {
         break;
       case "checks":
         mount(panel, "flow-check-list", model);
+        break;
+      case "findings":
+        mount(panel, "flow-findings-list", model);
         break;
       case "activity":
         mount(panel, "flow-activity-feed", model);

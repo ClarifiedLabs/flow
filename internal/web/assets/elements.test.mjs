@@ -26,6 +26,7 @@ const { renderRunList } = await import("./elements/run-list.js");
 const { renderRunSpine } = await import("./elements/run-spine.js");
 const { renderWorkflowGraph, graphCounts } = await import("./elements/workflow-graph.js");
 const { renderCheckList } = await import("./elements/check-list.js");
+const { renderFindings } = await import("./elements/findings-list.js");
 const { renderHeldPanel, HAND_BACK_EDGES } = await import("./elements/held-panel.js");
 const { renderDiffFile } = await import("./elements/diff.js");
 const { renderReviewBar } = await import("./elements/review-bar.js");
@@ -38,7 +39,7 @@ const { renderActivityFeed, activityEntries } = await import("./elements/activit
 const { renderTaskFormView, bindRelationsPickerView, bindTaskFlowControlsView, relationTargetSuggestionsView } = await import("./task-view.js");
 await import("./elements/lane.js");
 await import("./elements/board.js");
-await import("./elements/tab-strip.js");
+const { renderTabStrip } = await import("./elements/tab-strip.js");
 const { acquireBusy, handleAction, inFlight, releaseBusy, settleStatus } = await import("./actions.js");
 const { handleFormSubmit } = await import("./forms.js");
 const { diffUnavailable } = await import("./elements/change.js");
@@ -912,6 +913,134 @@ test("satisfied check rows still show the duration next to block details", () =>
   });
   assert.match(html, /<div class="md"><p>go test \.\/...<\/p><\/div>/);
   assert.match(html, /<span class="duration">3m 0s<\/span>/);
+});
+
+// --- findings registry ------------------------------------------------------
+
+function findingsRegistry(overrides = {}) {
+  const { findings = [], follow_ups = [], summary = {} } = overrides;
+  return { findings, follow_ups, summary };
+}
+
+test("the findings view renders one row per finding with resolution labels and summary counts", () => {
+  const html = renderFindings({
+    projectID: "p-1",
+    findings: findingsRegistry({
+      findings: [
+        { id: "th-1", change_id: "ch-1", file_path: "src/a.go", line: 12, state: "claimed", claim_kind: "fixed", claimed_by: "alice", finding: "**leak** on line 12" },
+        { id: "th-2", change_id: "ch-1", file_path: "src/b.go", line: 3, state: "claimed", claim_kind: "not_warranted", claimed_by: "bob", finding: "style nit" },
+        { id: "th-3", change_id: "ch-2", file_path: "src/c.go", line: 0, state: "certified", certified_by: "carol", finding: "handled elsewhere" },
+        { id: "th-4", change_id: "ch-2", file_path: "", line: 0, state: "open", finding: "still open" },
+      ],
+      summary: { resolved_fixed: 1, resolved_not_warranted: 1, certified: 1, unresolved: 1 },
+    }),
+  });
+  // One row per finding, in registry order.
+  assert.match(html, /data-finding="th-1"/);
+  assert.match(html, /data-finding="th-2"/);
+  assert.match(html, /data-finding="th-3"/);
+  assert.match(html, /data-finding="th-4"/);
+  assert.ok(html.indexOf('data-finding="th-1"') < html.indexOf('data-finding="th-2"'));
+  // Resolution labels: claim kind + actor, certified-by, unresolved.
+  assert.match(html, /fixed by alice/);
+  assert.match(html, /not warranted by bob/);
+  assert.match(html, /certified by carol/);
+  assert.match(html, />unresolved<\/span>/);
+  // State badges.
+  assert.match(html, /data-state="claimed"/);
+  assert.match(html, /data-state="certified"/);
+  assert.match(html, /data-state="open"/);
+  // File:line anchor into the change, when present.
+  assert.match(html, /<a class="anchor" href="\/ui\/changes\/ch-1" data-link>src\/a.go:12<\/a>/);
+  // Finding bodies render as block markdown.
+  assert.match(html, /<strong>leak<\/strong>/);
+  // The summary line carries a count per resolution bucket, zeroes included.
+  assert.match(html, /data-bucket="resolved_fixed">fixed 1<\/span>/);
+  assert.match(html, /data-bucket="resolved_not_warranted">not warranted 1<\/span>/);
+  assert.match(html, /data-bucket="resolved_superseded">superseded 0<\/span>/);
+  assert.match(html, /data-bucket="certified">certified 1<\/span>/);
+  assert.match(html, /data-bucket="unresolved">unresolved 1<\/span>/);
+  assert.match(html, /data-bucket="deferred_to_task">deferred 0<\/span>/);
+});
+
+test("deferred follow-up findings render links to their target tasks", () => {
+  const html = renderFindings({
+    projectID: "p-1",
+    findings: findingsRegistry({
+      findings: [{ id: "th-1", state: "open", finding: "still open" }],
+      follow_ups: [
+        { action: "create_task", check_name: "review-aggregator", target_task_id: "t-0099", target_task_title: "Handle lint fallout" },
+      ],
+      summary: { unresolved: 1, deferred_to_task: 1 },
+    }),
+  });
+  assert.match(html, /deferred to/);
+  assert.match(html, /href="\/ui\/tasks\/t-0099" data-link/);
+  assert.match(html, /Handle lint fallout/);
+  assert.match(html, /t-0099/);
+  // The follow-ups section only appears when something was deferred.
+  assert.match(html, /<h4>Follow-ups<\/h4>/);
+  const noDeferrals = renderFindings({
+    findings: findingsRegistry({ findings: [{ id: "th-1", state: "open", finding: "x" }], summary: { unresolved: 1 } }),
+  });
+  assert.doesNotMatch(noDeferrals, /Follow-ups/);
+});
+
+test("an empty findings registry renders the empty state, not an error", () => {
+  assert.match(renderFindings({ findings: findingsRegistry() }), /No review findings recorded/);
+  // A task with zero changes carries no registry at all.
+  assert.match(renderFindings({}), /No review findings recorded/);
+  assert.match(renderFindings(null), /No review findings recorded/);
+  // A failed read is its own state, not a false "nothing found".
+  assert.match(renderFindings({ findings: { error: "findings load failed" } }), /Findings unavailable/);
+});
+
+test("finding bodies render as block markdown and escape raw HTML", () => {
+  const html = renderFindings({
+    findings: findingsRegistry({
+      findings: [{ id: "th-1", state: "open", finding: "First line\n\n<script>alert(1)</script> **bold**" }],
+      summary: { unresolved: 1 },
+    }),
+  });
+  assert.match(html, /<div class="md">/);
+  assert.ok(!html.includes("<script>"), "raw HTML in a finding body must be neutralized");
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /<strong>bold<\/strong>/);
+});
+
+test("the findings element keeps its instance across a poll repaint", async () => {
+  const root = globalThis.document.body;
+  const registry = () => findingsRegistry({
+    findings: [{ id: "th-1", state: "open", finding: "body" }],
+    summary: { unresolved: 1 },
+  });
+  const element = mountElement(root, "flow-findings-list", { projectID: "p-1", findings: registry() });
+  await flush();
+  assert.match(element.innerHTML, /data-finding="th-1"/);
+  // A poll delivers a brand-new model for the same task; the element instance
+  // survives and repaints in place instead of being rebuilt.
+  const before = element;
+  element.data = { projectID: "p-1", findings: registry() };
+  await flush();
+  assert.strictEqual(element, before);
+  assert.match(element.innerHTML, /data-finding="th-1"/);
+  element.remove();
+});
+
+test("the findings tab sits next to checks and tab badges count unresolved findings", () => {
+  const strip = renderTabStrip("checks", { findings: { text: "2", tone: "warn" } });
+  assert.ok(strip.indexOf('data-tab="checks"') < strip.indexOf('data-tab="findings"'));
+  assert.match(strip, /data-tab="findings">\s*Findings/);
+
+  const model = taskModel({
+    task: { id: "t-1", title: "T" },
+    task_detail: {},
+    findings: { findings: [], follow_ups: [], summary: { unresolved: 2 } },
+  });
+  assert.equal(tabBadges(model).findings.text, "2");
+  assert.equal(tabBadges(model).findings.tone, "warn");
+  const clean = taskModel({ task: { id: "t-1", title: "T" }, task_detail: {} });
+  assert.equal(tabBadges(clean).findings, undefined);
 });
 
 test("handing back names every edge the executor can take", () => {

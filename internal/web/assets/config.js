@@ -84,12 +84,13 @@ export const DIAGRAM_MODES = new Set(["run", "graph"]);
 
 // TASK_TABS is the task detail work surface. Order is the reading order of the
 // page: what needs you, what is happening, then the change, then the evidence,
-// then the log.
+// then the findings registry, then the log.
 export const TASK_TABS = [
   ["review", "Review"],
   ["overview", "Overview"],
   ["change", "Change"],
   ["checks", "Checks"],
+  ["findings", "Findings"],
   ["activity", "Activity"],
   ["terminal", "Terminal"],
   ["detail", "Detail"],
