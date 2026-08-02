@@ -4038,6 +4038,49 @@ test("a successful console release performs its reload and arms the settle burst
   assert.equal(harness.timers.length, 2, "the burst is bounded");
 });
 
+test("an older burst tick awaiting its real reload cannot displace a newer burst's timer", async () => {
+  const harness = await consoleActionHarness();
+  const startButton = new ActionButton({ startConsole: "", project: "p-alpha", task: "" });
+
+  await handleAction(harness.app, { target: startButton, preventDefault() {} });
+  assert.equal(harness.timers.length, 1, "the first burst arms its first tick");
+
+  // Hold the first burst's tick in flight so a second action schedules its
+  // burst while the older tick is still awaiting its reload — the race that
+  // used to let the older continuation overwrite settlePoll's timer handle
+  // and orphan the newer burst's timeout. The wrapper only delays handing
+  // the completed load's context back, so the tick's reload itself runs
+  // through the real FlowApp.load() and its supersede/clear block, and the
+  // second action's load goes through the same real path.
+  const gate = deferred();
+  const baseLoad = harness.app.load.bind(harness.app);
+  let hold = true;
+  harness.app.load = async (options) => {
+    const loadContext = await baseLoad(options);
+    if (hold) {
+      hold = false;
+      await gate.promise;
+    }
+    return loadContext;
+  };
+
+  harness.fire(0);
+  await handleAction(harness.app, { target: startButton, preventDefault() {} });
+  assert.equal(harness.timers.length, 2, "the newer burst arms its first tick");
+  assert.equal(harness.app.settlePoll.timer, 2, "the newer burst owns the settle timer");
+
+  gate.resolve();
+  // Flush past the microtask queue so the superseded continuation has run.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.app.settlePoll.timer, 2, "the superseded continuation leaves the newer burst's timer owned");
+  assert.equal(harness.timers.length, 2, "the superseded continuation re-arms nothing");
+  assert.equal(harness.consoleGets(), 3, "the superseded continuation reloads nothing");
+
+  await harness.fire(1);
+  assert.equal(harness.consoleGets(), 4, "the newer burst's tick reloads the console view");
+  assert.equal(harness.timers.length, 3, "the newer burst continues to its next tick");
+});
+
 test("load tracks in-flight invocations and never arms a settle burst itself", async () => {
   const timers = [];
   const jobsResponse = deferred();
