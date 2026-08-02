@@ -3106,6 +3106,52 @@ test("a same-head metadata refresh that changes markup keeps an unblurred inline
   detail.remove();
 });
 
+test("a no-op same-head refresh keeps an unblurred draft for a later markup-changing repaint", async () => {
+  const root = globalThis.document.body;
+  const state = { head: "h1", files: diffFiles("h1") };
+  stubChangeFetch(state);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+  assert.match(changePanelHTML(detail), /in review/, "the initial metadata renders the review-state badge");
+
+  // Open an inline draft and type into it without blurring: the keystrokes
+  // live only in the DOM until the next capture, so a repaint that replaces
+  // the editor would discard them.
+  const change = detail.querySelector("flow-change");
+  change.handleClick({ target: change.querySelector("[data-comment-line]"), preventDefault() {} });
+  await flush();
+  const textarea = change.querySelector("[data-draft-body]");
+  assert.ok(textarea, "the draft editor is on screen");
+  textarea.value = "unblurred note";
+  assert.equal(change.drafts.get("h1.go:1").body, "", "the keystrokes have not been captured yet");
+
+  // A poll delivers identical metadata (same head, same review state): the
+  // revalidation repaints byte-identical markup, so FlowElement skips the DOM
+  // write. The same-key paint must still read the live textarea back into the
+  // drafts map — otherwise the next markup-changing repaint rebuilds the
+  // editor from an empty draft and loses what was typed.
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+
+  assert.equal(change.querySelector("[data-draft-body]"), textarea, "the byte-identical repaint did not replace the editor");
+  assert.equal(change.drafts.get("h1.go:1").body, "unblurred note", "the no-op paint captured the live textarea value");
+
+  // A later metadata refresh changes the rendered markup (a review-state
+  // flip), so its same-head repaint rewrites the element's DOM from the map.
+  state.reviewState = "changes_requested";
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+
+  assert.match(changePanelHTML(detail), /changes requested/, "the refreshed review state rendered");
+  const fresh = detail.querySelector("flow-change").querySelector("[data-draft-body]");
+  assert.notEqual(fresh, textarea, "the markup-changing repaint replaced the draft editor");
+  assert.match(fresh.textContent, /unblurred note/, "the unblurred draft text survives the no-op repaint and the rebuild");
+  assert.equal(detail.querySelector("flow-change").drafts.get("h1.go:1").body, "unblurred note", "the drafts map keeps the captured value");
+  detail.remove();
+});
+
 test("a standalone route head move drops an unblurred draft instead of retaining it", async () => {
   // renderChangeRoute() mounts into the content container, reusing the
   // existing flow-change element, so a route refresh from h1 to a genuine
