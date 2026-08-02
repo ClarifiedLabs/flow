@@ -738,12 +738,6 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
   if (!section) return;
   const reload = () => app.load();
 
-  section.querySelectorAll("[data-edit-flow]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.editingFlowID = button.dataset.editFlow || "";
-      reload();
-    });
-  });
   // Clone clicks are single-flighted across rebinds: the bind-time flow list
   // stays stale until reload() re-fetches and re-binds the section, so two
   // rapid clicks would otherwise compute the same "<name> (copy)" suffix and
@@ -753,6 +747,12 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
   // manual refresh, an edit-triggered reload) cannot mint a fresh guard
   // around the same stale list; the re-bind disables its buttons until the
   // pending clone settles and its reload re-binds against the updated list.
+  section.querySelectorAll("[data-edit-flow]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.editingFlowID = button.dataset.editFlow || "";
+      reload();
+    });
+  });
   section.querySelectorAll("[data-clone-flow]").forEach((button) => {
     // A re-bind during an in-flight clone must not present an enabled button
     // that looks clickable; the guard stays set until the clone's reload.
