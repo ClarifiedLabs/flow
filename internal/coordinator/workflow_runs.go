@@ -1544,9 +1544,6 @@ WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, taskID))
 	if err != nil {
 		return err
 	}
-	if nodeRun.State != WorkflowNodeSucceeded && (run.State != WorkflowRunWaiting || run.CurrentNodeRunID != nodeRun.ID) {
-		return fmt.Errorf("%w: task is not waiting on that node", ErrWorkflowConflict)
-	}
 	outcome := "changes_requested"
 	if verdict == "approve" {
 		outcome = "approved"
