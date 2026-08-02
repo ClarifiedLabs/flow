@@ -587,3 +587,90 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 		t.Fatalf("workflow state = %q, want still waiting after an aborted review", run.State)
 	}
 }
+
+// TestSubmitReviewResponseCarriesTransactionCheck pins the response-fidelity
+// invariant from the t-flow-0073 advisory: the submit-review response must
+// carry the exact check row the gate decision transaction upserted, not a
+// post-commit reload that a concurrent report for the same check name could
+// overwrite. SubmitReview captures the row reportCheckTx returns inside its
+// own transaction and handleSubmitReview never re-reads the check, so the
+// response is a snapshot of that upsert: it matches the committed row field
+// for field, and a later report that overwrites the row does not change what
+// the response already carries.
+func TestSubmitReviewResponseCarriesTransactionCheck(t *testing.T) {
+	fixture := newTestFixture(t)
+	flow := newBoardFixtureFlow(t, fixture, "change review check fidelity")
+
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{Title: "Check fidelity review", FlowID: flow.ID}, http.StatusCreated, &created)
+	var scheduled workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
+		nil, http.StatusOK, &scheduled)
+
+	const (
+		changeID  = "ch-change-review-check-fidelity"
+		headSHA   = "1111111111111111111111111111111111111111"
+		timestamp = "2026-01-01T00:00:00.000000000Z"
+	)
+	if _, err := fixture.DB.ExecContext(context.Background(), `
+INSERT INTO changes (id, task_id, branch, base, head_sha, created_at, updated_at, ready_at)
+VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-review-check-fidelity",
+		headSHA, timestamp, timestamp, timestamp); err != nil {
+		t.Fatalf("insert change: %v", err)
+	}
+
+	const body = "this verdict was written inside the gate decision transaction"
+	var review reviewVerdictResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+		reviewVerdictRequest{Verdict: "approve", HeadSHA: headSHA, Body: body}, http.StatusOK, &review)
+	if review.Check == nil {
+		t.Fatal("review check = nil, want the transaction-upserted check in the response")
+	}
+
+	// The response carries the exact row the decision transaction upserted: it
+	// matches the committed row field for field (a post-commit reload could
+	// diverge if a concurrent report landed in the gap between commit and read).
+	committed, err := fixture.Checks.GetCheck(context.Background(), created.Task.ID, humanReviewCheckName)
+	if err != nil {
+		t.Fatalf("load committed check: %v", err)
+	}
+	if review.Check.ID != committed.ID || review.Check.TaskID != committed.TaskID ||
+		review.Check.Name != committed.Name || review.Check.Kind != committed.Kind ||
+		review.Check.Required != committed.Required || review.Check.Verdict != committed.Verdict ||
+		review.Check.Details != committed.Details || review.Check.Reporter != committed.Reporter ||
+		review.Check.ExitCode != nil || committed.ExitCode != nil ||
+		review.Check.SourceJobID != nil || committed.SourceJobID != nil ||
+		!review.Check.CreatedAt.Equal(committed.CreatedAt) || !review.Check.UpdatedAt.Equal(committed.UpdatedAt) {
+		t.Fatalf("response check = %+v, committed check = %+v, want the exact row the transaction upserted", review.Check, committed)
+	}
+	if review.Check.Details != body {
+		t.Fatalf("response check details = %q, want the submitted verdict body %q", review.Check.Details, body)
+	}
+
+	// A concurrent report that commits after the decision overwrites the row;
+	// the response still carries the transaction's own snapshot, proving the
+	// check was not reloaded after the commit.
+	required := true
+	if _, err := fixture.Checks.ReportCheck(context.Background(), coordinator.ReportCheckInput{
+		TaskID:   created.Task.ID,
+		Name:     humanReviewCheckName,
+		Kind:     coordinator.CheckKindHuman,
+		Required: &required,
+		Verdict:  coordinator.CheckSatisfied,
+		Details:  "a later report overwrote the row",
+		Reporter: "later-report",
+	}); err != nil {
+		t.Fatalf("report later check: %v", err)
+	}
+	if review.Check.Details != body {
+		t.Fatalf("response check details = %q, want the transaction's %q after the row was overwritten", review.Check.Details, body)
+	}
+	after, err := fixture.Checks.GetCheck(context.Background(), created.Task.ID, humanReviewCheckName)
+	if err != nil {
+		t.Fatalf("load overwritten check: %v", err)
+	}
+	if after.Details != "a later report overwrote the row" {
+		t.Fatalf("committed details after later report = %q, want the later report's row", after.Details)
+	}
+}
