@@ -70,16 +70,23 @@ type Feature struct {
 // compare-and-swap expectation. TaskID is empty for clean instant rebases,
 // which never create a system rebase task.
 type FeatureRebase struct {
-	ID            string      `json:"id"`
-	FeatureID     string      `json:"feature_id"`
-	TaskID        string      `json:"task_id,omitempty"`
-	OldTipSHA     string      `json:"old_tip_sha"`
-	TargetBase    string      `json:"target_base"`
-	TargetBaseSHA string      `json:"target_base_sha"`
-	NewTipSHA     string      `json:"new_tip_sha,omitempty"`
-	State         RebaseState `json:"state"`
-	CreatedAt     time.Time   `json:"created_at"`
-	CompletedAt   *time.Time  `json:"completed_at,omitempty"`
+	ID        string `json:"id"`
+	FeatureID string `json:"feature_id"`
+	TaskID    string `json:"task_id,omitempty"`
+	// RestrictBlockedTo records a task-bound console's blocker confinement:
+	// when non-empty, the rebase task may link only the comma-joined task ids
+	// as blockers. It is persisted so the schedule-time gate (EnsureRebaseBlock)
+	// consults it while the row runs, not just during the initial sweep. The
+	// value legacyBlockRestriction marks a row that predates migration 0010:
+	// it has no initiator provenance, so the gate links nothing new for it.
+	RestrictBlockedTo string      `json:"restrict_blocked_to,omitempty"`
+	OldTipSHA         string      `json:"old_tip_sha"`
+	TargetBase        string      `json:"target_base"`
+	TargetBaseSHA     string      `json:"target_base_sha"`
+	NewTipSHA         string      `json:"new_tip_sha,omitempty"`
+	State             RebaseState `json:"state"`
+	CreatedAt         time.Time   `json:"created_at"`
+	CompletedAt       *time.Time  `json:"completed_at,omitempty"`
 }
 
 // FeatureBranchState is the live divergence of a feature branch against the
@@ -516,7 +523,8 @@ SELECT
 	new_tip_sha,
 	state,
 	created_at,
-	completed_at
+	completed_at,
+	restrict_blocked_to
 FROM feature_rebases
 WHERE feature_id = ? AND state = 'running'`, strings.TrimSpace(featureID)))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -541,7 +549,8 @@ SELECT
 	new_tip_sha,
 	state,
 	created_at,
-	completed_at
+	completed_at,
+	restrict_blocked_to
 FROM feature_rebases
 WHERE feature_id = ?
 ORDER BY created_at DESC, id DESC`, strings.TrimSpace(featureID))
@@ -579,9 +588,11 @@ ORDER BY created_at DESC, id DESC`, strings.TrimSpace(featureID))
 // restrictBlockedTo confines the conflicted path's blocker links to the named
 // tasks: when non-empty, only those tasks (if still non-done) receive a
 // rebase_task blocks relation. Task-bound console credentials pass exactly
-// their bound task, so the blocker set is confined at relation-creation time
-// rather than by a racy pre-read: a feature task created concurrently after
-// any API-side scope check can never be linked.
+// their bound task. The restriction is persisted on the running feature_rebases
+// row and consulted by the schedule-time gate (EnsureRebaseBlock) for tasks
+// created or reopened while the rebase runs, so the blocker set is confined
+// for the row's whole lifetime rather than by a racy pre-read: a feature task
+// created concurrently after any API-side scope check can never be linked.
 func (s *FeatureService) RebaseOnMain(ctx context.Context, feature Feature, restrictBlockedTo ...string) (RebaseStartResult, error) {
 	if feature.Status != FeatureOpen {
 		return RebaseStartResult{}, ErrFeatureClosed
@@ -631,7 +642,7 @@ func (s *FeatureService) RebaseOnMain(ctx context.Context, feature Feature, rest
 
 	// The durable record comes first: if the process crashes mid-rebase the
 	// next request reconciles the row against the exchange ref.
-	rebaseID, err := s.insertRebaseRow(ctx, feature.ID, "", featureTip, base, baseTip)
+	rebaseID, err := s.insertRebaseRow(ctx, feature.ID, "", featureTip, base, baseTip, restrictBlockedToKey(restrictBlockedTo))
 	if err != nil {
 		return RebaseStartResult{}, err
 	}
@@ -825,9 +836,9 @@ UPDATE feature_rebases SET state = ?, completed_at = ? WHERE id = ? AND state = 
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO feature_rebases (
 	id, feature_id, task_id, old_tip_sha, target_base, target_base_sha,
-	new_tip_sha, state, created_at
-) VALUES (?, ?, ?, ?, ?, ?, '', 'running', ?)`,
-		id, rebase.FeatureID, rebase.TaskID, currentTip, rebase.TargetBase, baseTip, now); err != nil {
+	new_tip_sha, state, created_at, restrict_blocked_to
+) VALUES (?, ?, ?, ?, ?, ?, '', 'running', ?, ?)`,
+		id, rebase.FeatureID, rebase.TaskID, currentTip, rebase.TargetBase, baseTip, now, rebase.RestrictBlockedTo); err != nil {
 		return fmt.Errorf("open redo rebase row: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -840,21 +851,32 @@ INSERT INTO feature_rebases (
 // EnsureRebaseBlock links a running rebase's task as a blocker of taskID when
 // taskID belongs to the rebased feature. WorkflowRunService calls it before
 // scheduling a task so tasks created or reopened mid-rebase are held at the
-// dependency gate like the rest of the feature.
+// dependency gate like the rest of the feature. A restriction persisted on the
+// running row (a task-bound console's confinement) applies here too: when the
+// row names allowed blocker targets, taskID is linked only if it is one of
+// them, so a sibling of the bound task is never linked by the schedule path.
 func (s *FeatureService) EnsureRebaseBlock(ctx context.Context, taskID string) error {
 	taskID = strings.TrimSpace(taskID)
-	var rebaseTaskID string
+	var rebaseTaskID, restriction string
 	err := s.db.QueryRowContext(ctx, `
-SELECT fr.task_id
+SELECT fr.task_id, fr.restrict_blocked_to
 FROM feature_rebases fr
 JOIN tasks t ON t.feature_id = fr.feature_id
 WHERE t.id = ? AND fr.state = 'running' AND fr.task_id IS NOT NULL AND fr.task_id != ?`,
-		taskID, taskID).Scan(&rebaseTaskID)
+		taskID, taskID).Scan(&rebaseTaskID, &restriction)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("load running rebase for task: %w", err)
+	}
+	if !restrictionAllows(restriction, taskID) {
+		// The running rebase is confined: a task-bound console started it and
+		// may link only its bound task, or the row predates migration 0010 and
+		// carries the legacy sentinel (no provenance, so nothing new is
+		// linked). Either way this task is out of scope and must not receive a
+		// rebase_task blocks relation whose endpoints exclude the bound task.
+		return nil
 	}
 
 	return s.tasks.BlockOnRebase(ctx, rebaseTaskID, []string{taskID})
@@ -878,6 +900,57 @@ func restrictBlockedTasks(ids, allowed []string) []string {
 		}
 	}
 	return filtered
+}
+
+// restrictBlockedToKey serializes a blocker restriction for persistence on the
+// feature_rebases row as a comma-joined list of task ids. An empty key means
+// the rebase gates the whole feature (owner and unbound project-console
+// rebases).
+func restrictBlockedToKey(allowed []string) string {
+	seen := make(map[string]struct{}, len(allowed))
+	var ids []string
+	for _, id := range allowed {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return strings.Join(ids, ",")
+}
+
+// legacyBlockRestriction is stamped by migration 0010 onto feature_rebases
+// rows that were already present when the blocker confinement was introduced.
+// Those rows have no initiator provenance — a task-bound console's live rebase
+// is indistinguishable from an owner or unbound-console rebase — so the
+// upgrade conservatively restricts every legacy row to nothing: the
+// schedule-time gate (EnsureRebaseBlock) links no new tasks for them. This
+// keeps the confinement guarantee (no blocker relation whose endpoints exclude
+// the bound task) for a legacy task-bound rebase; a legacy owner rebase simply
+// stops acquiring new blockers after the upgrade.
+const legacyBlockRestriction = "legacy"
+
+// restrictionAllows reports whether a persisted rebase restriction permits
+// linking taskID as a blocker target. An empty restriction (no confinement)
+// allows every task; the legacy sentinel allows none.
+func restrictionAllows(restriction, taskID string) bool {
+	restriction = strings.TrimSpace(restriction)
+	switch restriction {
+	case "":
+		return true
+	case legacyBlockRestriction:
+		return false
+	}
+	for _, id := range strings.Split(restriction, ",") {
+		if strings.TrimSpace(id) == taskID {
+			return true
+		}
+	}
+	return false
 }
 
 // nonDoneFeatureTaskIDs lists the feature's tasks that a running rebase must
@@ -906,7 +979,7 @@ SELECT id FROM tasks WHERE feature_id = ? AND (lifecycle_state IS NULL OR lifecy
 	return ids, nil
 }
 
-func (s *FeatureService) insertRebaseRow(ctx context.Context, featureID, taskID, oldTip, targetBase, targetBaseSHA string) (string, error) {
+func (s *FeatureService) insertRebaseRow(ctx context.Context, featureID, taskID, oldTip, targetBase, targetBaseSHA, restrictBlockedTo string) (string, error) {
 	tx, err := sqlitex.BeginImmediate(ctx, s.db)
 	if err != nil {
 		return "", err
@@ -919,10 +992,10 @@ func (s *FeatureService) insertRebaseRow(ctx context.Context, featureID, taskID,
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO feature_rebases (
 	id, feature_id, task_id, old_tip_sha, target_base, target_base_sha,
-	new_tip_sha, state, created_at
-) VALUES (?, ?, ?, ?, ?, ?, '', 'running', ?)`,
+	new_tip_sha, state, created_at, restrict_blocked_to
+) VALUES (?, ?, ?, ?, ?, ?, '', 'running', ?, ?)`,
 		id, featureID, sqlitex.NullableNonEmptyString(taskID), oldTip, targetBase, targetBaseSHA,
-		formatTime(s.now().UTC())); err != nil {
+		formatTime(s.now().UTC()), restrictBlockedTo); err != nil {
 		return "", fmt.Errorf("insert rebase row: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1051,6 +1124,7 @@ func scanFeatureRebase(row featureScanner) (FeatureRebase, error) {
 		&state,
 		&createdAt,
 		&completedAt,
+		&rebase.RestrictBlockedTo,
 	)
 	if err != nil {
 		return FeatureRebase{}, err

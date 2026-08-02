@@ -262,10 +262,12 @@ func TestSessionCreatedTaskInheritsFeature(t *testing.T) {
 // TestTaskBoundConsoleRebaseScope locks the rebase route into task-bound
 // console confinement: a console credential bound to a task may only rebase a
 // feature that holds the bound task as open work, and a conflicted rebase may
-// link only the bound task as a blocker. The restriction is applied at
-// relation-creation time inside RebaseOnMain, so a feature task created
-// concurrently after any scope pre-read (the TOCTOU window) can never receive
-// a rebase_task blocks relation. Unbound project consoles keep project-wide
+// link only the bound task as a blocker. The restriction is persisted on the
+// running feature_rebases row and applied at relation-creation time inside
+// RebaseOnMain and by the schedule-time gate, so a feature task created or
+// reopened concurrently — before or after any scope pre-read (the TOCTOU
+// window), or while the rebase row is running — can never receive a
+// rebase_task blocks relation. Unbound project consoles keep project-wide
 // rebase access.
 func TestTaskBoundConsoleRebaseScope(t *testing.T) {
 	fixture := newTestFixture(t)
@@ -402,6 +404,40 @@ func TestTaskBoundConsoleRebaseScope(t *testing.T) {
 	}
 	if blockedExtra != 0 {
 		t.Fatalf("rebase task blocks unrelated open extra task %d times, want 0", blockedExtra)
+	}
+
+	// The lifecycle path: while the running rebase row stays open, a sibling
+	// created after the rebase started and then scheduled must not receive a
+	// rebase_task blocks link either. WorkflowRunService.ScheduleAs consults the
+	// restriction persisted on the running row (via EnsureRebaseBlock), so the
+	// confinement holds for the row's whole lifetime — the exact task_relations
+	// set stays the single (rebase task blocks bound task) row.
+	late, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "late sibling", FeatureID: &feature.ID})
+	if err != nil {
+		t.Fatalf("create late sibling: %v", err)
+	}
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost,
+		"/v2/tasks/"+late.ID+"/schedule", nil, http.StatusOK, nil)
+	if got := countRows("task_relations"); got != relationsBefore+1 {
+		t.Fatalf("scheduling a late sibling mid-rebase left %d relation rows, want exactly 1", got-relationsBefore)
+	}
+	var blockedLate int
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM task_relations WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`,
+		conflicted.Result.RebaseTaskID, late.ID).Scan(&blockedLate); err != nil {
+		t.Fatalf("count late-sibling block: %v", err)
+	}
+	if blockedLate != 0 {
+		t.Fatalf("rebase task blocks late sibling %d times, want 0", blockedLate)
+	}
+	var blockedBoundAfter int
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM task_relations WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`,
+		conflicted.Result.RebaseTaskID, boundTask.ID).Scan(&blockedBoundAfter); err != nil {
+		t.Fatalf("count bound-task block after schedule: %v", err)
+	}
+	if blockedBoundAfter != 1 {
+		t.Fatalf("rebase task blocks bound task %d times after schedule, want exactly 1", blockedBoundAfter)
 	}
 }
 

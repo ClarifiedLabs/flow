@@ -190,13 +190,14 @@ func (s *projectServer) handleRebaseFeature(w http.ResponseWriter, r *http.Reque
 // checkFeatureRebaseScope confines feature rebases for task-bound console
 // credentials to features that contain the console's bound task as open work,
 // and returns the only task such a credential's conflicted rebase may link as
-// a blocker: the bound task itself. The restriction is applied at
-// relation-creation time inside RebaseOnMain, so a feature task created
-// concurrently after this read can never receive a rebase_task blocks link —
-// the relation set is confined by construction rather than by a racy pre-read.
-// Unbound project consoles and owner credentials keep project-wide rebase
-// access. The caller resolves the feature ref once and passes the value here,
-// so the console rebase path performs a single feature lookup.
+// a blocker: the bound task itself. The restriction is persisted on the running
+// feature_rebases row and applied at relation-creation time inside
+// RebaseOnMain and by the schedule-time gate (EnsureRebaseBlock), so a feature
+// task created or reopened concurrently — before or after the rebase starts —
+// can never receive a rebase_task blocks link whose endpoints exclude the
+// bound task. Unbound project consoles and owner credentials keep project-wide
+// rebase access. The caller resolves the feature ref once and passes the value
+// here, so the console rebase path performs a single feature lookup.
 func (s *projectServer) checkFeatureRebaseScope(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, feature coordinator.Feature) (restrictBlockedTo []string, ok bool) {
 	if principal.Scope != coordinator.TokenScopeConsole || principal.SourceTaskID == nil {
 		return nil, true

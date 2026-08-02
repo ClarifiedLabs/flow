@@ -213,7 +213,19 @@ works on an ordinary task branch under its session `AllowedRef` confinement;
 only the coordinator rewrites the shared feature ref, compare-and-swapped in
 `finalize_rebase`. On creation the rebase task blocks the feature's non-done
 tasks through ordinary `blocks` relations, so nothing starts from the stale
-tip; unblocking follows the existing `has_active_blockers` semantics. The
+tip; unblocking follows the existing `has_active_blockers` semantics. Console
+credentials bound to a single task may rebase only a feature whose open work
+includes that task, and their conflicted rebases confine the rebase task's
+blocker links to the bound task itself. The restriction is recorded on the
+running `feature_rebases` row and applied both when the rebase starts and by
+the schedule-time gate (`EnsureRebaseBlock`) for tasks created or reopened
+while the rebase runs, so a sibling feature task is never linked whether it
+existed at rebase start or appears mid-rebase. Rows that predate migration
+0010 carry no initiator provenance, so the upgrade stamps them with a legacy
+sentinel and the schedule-time gate links nothing new for them; a legacy owner
+rebase simply stops acquiring new blockers after the upgrade. Owner and
+unbound project-console
+credentials keep the full project-wide gate. The
 bundled `flow-rebase-author` and `flow-rebase-verifier` skills carry the role
 instructions; the verifier proves the delta between the old feature tip and the
 rebased head is exactly the base branch's incoming changes.

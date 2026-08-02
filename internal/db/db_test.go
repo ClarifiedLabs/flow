@@ -45,14 +45,16 @@ func TestOpenInitializesSQLite(t *testing.T) {
 		"0006_convergence_promotions",
 		"0007_history_captures",
 		"0008_history_capture_hardening",
+		"0009_history_capture_legacy_backfill",
+		"0010_feature_rebase_block_restriction",
 	)
 
 	var schemaVersion string
 	if err := store.DB().QueryRowContext(ctx, "SELECT value FROM app_metadata WHERE key = 'schema_version'").Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version metadata: %v", err)
 	}
-	if schemaVersion != "0009_history_capture_legacy_backfill" {
-		t.Fatalf("schema version = %q, want 0009_history_capture_legacy_backfill", schemaVersion)
+	if schemaVersion != "0010_feature_rebase_block_restriction" {
+		t.Fatalf("schema version = %q, want 0010_feature_rebase_block_restriction", schemaVersion)
 	}
 	assertStorageFormat(t, store, "4")
 
@@ -856,6 +858,116 @@ SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('flow_nodes
 	}
 	if scratchTables != 0 {
 		t.Fatalf("rebuild scratch tables remain: %d", scratchTables)
+	}
+}
+
+// TestFeatureRebaseBlockRestrictionUpgradeStampsLegacyRows simulates an
+// upgrade from a pre-0010 database. feature_rebases rows that were already
+// present when migration 0010 introduced the blocker confinement have no
+// initiator provenance — a task-bound console's live rebase is
+// indistinguishable from an owner or unbound-console rebase — so the migration
+// stamps them with the legacy sentinel and the schedule-time gate
+// (EnsureRebaseBlock) links nothing new for them. Rows inserted after the
+// migration keep the empty default, so owner and unbound project-console
+// rebases stay unrestricted.
+func TestFeatureRebaseBlockRestrictionUpgradeStampsLegacyRows(t *testing.T) {
+	ctx := context.Background()
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "flow.db"))
+	if err != nil {
+		t.Fatalf("open pre-migration database: %v", err)
+	}
+	defer database.Close()
+	for _, name := range []string{
+		"0001_init",
+		"0002_job_dispatch_keys",
+		"0003_workflow_hold",
+		"0004_workflow_review_cycles",
+		"0005_features",
+		"0006_convergence_promotions",
+		"0007_history_captures",
+		"0008_history_capture_hardening",
+		"0009_history_capture_legacy_backfill",
+	} {
+		migration, err := migrationFS.ReadFile("migrations/" + name + ".sql")
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if _, err := database.ExecContext(ctx, string(migration)); err != nil {
+			t.Fatalf("apply %s: %v", name, err)
+		}
+	}
+
+	// Seed a pre-0010 database: two features, each with a rebase task, and on
+	// f-legacy a running and a finalized rebase row (the schema has no
+	// restrict_blocked_to column yet).
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO features (id, title, branch, created_by, created_at, updated_at)
+VALUES
+	('f-legacy', 'legacy feature', 'feature/legacy', 'human', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+	('f-post', 'post-upgrade feature', 'feature/post', 'human', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+INSERT INTO tasks (id, title, created_by, created_at, updated_at, feature_id)
+VALUES
+	('t-legacy-rebase', 'legacy rebase task', 'system', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'f-legacy'),
+	('t-post-rebase', 'post-upgrade rebase task', 'system', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'f-post');
+INSERT INTO feature_rebases (
+	id, feature_id, task_id, old_tip_sha, target_base, target_base_sha,
+	new_tip_sha, state, created_at
+) VALUES
+	('fr-legacy-running', 'f-legacy', 't-legacy-rebase', 'old', 'main', 'base', '', 'running', '2026-01-01T00:00:00Z'),
+	('fr-legacy-finalized', 'f-legacy', 't-legacy-rebase', 'old', 'main', 'base', 'new', 'finalized', '2026-01-01T00:00:00Z');
+`); err != nil {
+		t.Fatalf("seed pre-0010 rows: %v", err)
+	}
+
+	migration, err := migrationFS.ReadFile("migrations/0010_feature_rebase_block_restriction.sql")
+	if err != nil {
+		t.Fatalf("read restriction migration: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, string(migration)); err != nil {
+		t.Fatalf("apply restriction migration: %v", err)
+	}
+
+	// Every pre-existing row is stamped with the legacy sentinel, whether it
+	// is still running or already closed.
+	for _, id := range []string{"fr-legacy-running", "fr-legacy-finalized"} {
+		var stamped string
+		if err := database.QueryRowContext(ctx,
+			`SELECT restrict_blocked_to FROM feature_rebases WHERE id = ?`, id).Scan(&stamped); err != nil {
+			t.Fatalf("read %s restriction: %v", id, err)
+		}
+		if stamped != "legacy" {
+			t.Fatalf("%s restrict_blocked_to = %q, want legacy sentinel", id, stamped)
+		}
+	}
+
+	// A row inserted after the migration keeps the '' default, so owner and
+	// unbound project-console rebases remain unrestricted.
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO feature_rebases (
+	id, feature_id, task_id, old_tip_sha, target_base, target_base_sha,
+	new_tip_sha, state, created_at
+) VALUES (
+	'fr-post-upgrade', 'f-post', 't-post-rebase', 'old', 'main', 'base', '', 'running', '2026-01-01T00:00:00Z'
+);
+`); err != nil {
+		t.Fatalf("insert post-upgrade row: %v", err)
+	}
+	var fresh string
+	if err := database.QueryRowContext(ctx,
+		`SELECT restrict_blocked_to FROM feature_rebases WHERE id = 'fr-post-upgrade'`).Scan(&fresh); err != nil {
+		t.Fatalf("read post-upgrade restriction: %v", err)
+	}
+	if fresh != "" {
+		t.Fatalf("post-upgrade restrict_blocked_to = %q, want empty (unrestricted)", fresh)
+	}
+
+	var version string
+	if err := database.QueryRowContext(ctx,
+		`SELECT value FROM app_metadata WHERE key = 'schema_version'`).Scan(&version); err != nil {
+		t.Fatalf("read schema version: %v", err)
+	}
+	if version != "0010_feature_rebase_block_restriction" {
+		t.Fatalf("schema_version = %q, want 0010_feature_rebase_block_restriction", version)
 	}
 }
 
