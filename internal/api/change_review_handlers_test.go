@@ -325,6 +325,99 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 	}
 }
 
+// TestSubmitReviewGateConflictPersistsNothing guards the atomic review
+// submission against a gate that rejects the verdict: when a contradictory or
+// late decision arrives (the gate already recorded the opposite outcome while
+// the run still appears to wait on it), the submission must 409 with the
+// workflow_conflict error code without persisting the inline threads or the
+// human-review check. The error-code assertion keeps the test pinned to the
+// gate-conflict path: the stale-head path also maps to 409, so a future
+// refactor that failed this submission with head_moved before any gate check
+// would otherwise pass vacuously. Before the review became one transaction the
+// handler filed threads first and only then answered the gate, so a rejected
+// verdict left orphaned threads beside a decision that was never recorded.
+func TestSubmitReviewGateConflictPersistsNothing(t *testing.T) {
+	fixture := newTestFixture(t)
+	flow := newBoardFixtureFlow(t, fixture, "change review gate conflict")
+
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{Title: "Contradictory review from change view", FlowID: flow.ID}, http.StatusCreated, &created)
+	var scheduled workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
+		nil, http.StatusOK, &scheduled)
+
+	const (
+		changeID  = "ch-change-review-gate-conflict"
+		headSHA   = "1111111111111111111111111111111111111111"
+		timestamp = "2026-01-01T00:00:00.000000000Z"
+	)
+	if _, err := fixture.DB.ExecContext(context.Background(), `
+INSERT INTO changes (id, task_id, branch, base, head_sha, created_at, updated_at, ready_at)
+VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-review-gate-conflict",
+		headSHA, timestamp, timestamp, timestamp); err != nil {
+		t.Fatalf("insert change: %v", err)
+	}
+
+	// The workflow is waiting at the human gate, but the gate has already
+	// recorded the opposite decision (approved) — the state a contradictory or
+	// late review finds when it arrives after the decision was made but while
+	// the run still appears to wait on it. The submission must be refused with
+	// workflow_conflict (not the head_moved 409) without leaving its threads or
+	// verdict check behind.
+	if _, err := fixture.DB.ExecContext(context.Background(), `
+UPDATE workflow_node_runs SET state = ?, outcome = ?, completed_at = ? WHERE id = ?`,
+		string(coordinator.WorkflowNodeSucceeded), "approved", timestamp, scheduled.Run.CurrentNodeRunID); err != nil {
+		t.Fatalf("record contradictory gate decision: %v", err)
+	}
+
+	var resp errorResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+		reviewVerdictRequest{
+			Verdict:  "request_changes",
+			HeadSHA:  headSHA,
+			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "inline note on a contradictory review"}},
+		}, http.StatusConflict, &resp)
+	if resp.Error.Code != "workflow_conflict" {
+		t.Fatalf("error code = %q, want workflow_conflict", resp.Error.Code)
+	}
+
+	var threadCount int
+	if err := fixture.DB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM review_threads WHERE change_id = ?`, changeID).Scan(&threadCount); err != nil {
+		t.Fatalf("count threads: %v", err)
+	}
+	if threadCount != 0 {
+		t.Fatalf("gate-rejected review created %d threads, want 0", threadCount)
+	}
+	var checkCount int
+	if err := fixture.DB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM checks WHERE task_id = ? AND name = ?`, created.Task.ID, humanReviewCheckName).Scan(&checkCount); err != nil {
+		t.Fatalf("count checks: %v", err)
+	}
+	if checkCount != 0 {
+		t.Fatalf("gate-rejected review recorded %d human-review checks, want 0", checkCount)
+	}
+
+	// The contradictory decision stands: the gate keeps its recorded outcome
+	// and the run stays waiting on it.
+	var gateOutcome string
+	if err := fixture.DB.QueryRowContext(context.Background(),
+		`SELECT outcome FROM workflow_node_runs WHERE id = ?`, scheduled.Run.CurrentNodeRunID).Scan(&gateOutcome); err != nil {
+		t.Fatalf("load gate outcome: %v", err)
+	}
+	if gateOutcome != "approved" {
+		t.Fatalf("gate outcome = %q, want the recorded approved decision to stand", gateOutcome)
+	}
+	run, err := fixture.Bundle.WorkflowRuns.Get(context.Background(), scheduled.Run.ID)
+	if err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	if run.State != coordinator.WorkflowRunWaiting {
+		t.Fatalf("workflow state = %q, want still waiting after a refused contradictory review", run.State)
+	}
+}
+
 // TestSubmitReviewMismatchedCommentAnchorRejected guards the review-integrity
 // invariant against a hand-crafted request: the submission's head validates
 // against the change's current head, but a per-comment anchor that names a
