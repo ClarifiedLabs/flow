@@ -1414,6 +1414,98 @@ INSERT INTO handoff_snapshots (
 	}
 }
 
+func TestBoardLastAgentActivityAtSelectsMostRecentlyUpdatedSession(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	first := startAuthorSessionForStatusTest(t, fixture, "Latest session activity task")
+	if _, err := fixture.Sessions.UpdateSessionState(ctx, first.Session.ID, coordinator.SessionWaiting); err != nil {
+		t.Fatalf("mark first session waiting: %v", err)
+	}
+	if err := fixture.Sessions.TouchAgentActivity(ctx, first.Session.ID); err != nil {
+		t.Fatalf("touch first session activity: %v", err)
+	}
+	// Finish the first session's job and lease; only one live author job is
+	// allowed per task, so a second session for the same task needs the first
+	// job out of the live states before it can be enqueued.
+	if _, err := fixture.Sessions.ReadyAuthorSession(ctx, first.Session.ID); err != nil {
+		t.Fatalf("ready first session: %v", err)
+	}
+
+	// Start a second author session for the same task. Its updated_at is
+	// strictly newer than the first session's, so the card's
+	// ListSessionsForTask(task, 1) -> ORDER BY updated_at DESC LIMIT 1
+	// selection must surface this session's LastAgentActivityAt, not the
+	// first session's.
+	const secondWorkerID = "w-latest-activity"
+	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
+		ID:                      secondWorkerID,
+		CapacityPersistentAgent: 1,
+	}); err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	secondJob, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
+		TaskID:         &first.Session.TaskID,
+		ChangeID:       &first.Change.ID,
+		Role:           flowworker.RoleAuthor,
+		CapacityBucket: flowworker.BucketPersistentAgent,
+		Payload: map[string]any{
+			"workspace_mode": coordinator.WorkspaceChange,
+			"branch":         first.Change.Branch,
+			"base":           first.Change.Base,
+		},
+	})
+	if err != nil {
+		t.Fatalf("enqueue second author job: %v", err)
+	}
+	claimed := claimSpecificJob(t, fixture, secondWorkerID, secondJob.ID, []flowworker.CapacityBucket{flowworker.BucketPersistentAgent})
+	if _, err := fixture.Workers.MarkJobRunning(ctx, claimed.Lease.ID); err != nil {
+		t.Fatalf("mark second job running: %v", err)
+	}
+	second, err := fixture.Sessions.StartAuthorSession(ctx, coordinator.StartAuthorSessionInput{
+		JobID:    secondJob.ID,
+		LeaseID:  claimed.Lease.ID,
+		WorkerID: secondWorkerID,
+	})
+	if err != nil {
+		t.Fatalf("start second session: %v", err)
+	}
+	if second.Session.TaskID != first.Session.TaskID {
+		t.Fatalf("second session task = %s, want %s", second.Session.TaskID, first.Session.TaskID)
+	}
+	if err := fixture.Sessions.TouchAgentActivity(ctx, second.Session.ID); err != nil {
+		t.Fatalf("touch second session activity: %v", err)
+	}
+
+	firstSession, err := fixture.Sessions.GetSession(ctx, first.Session.ID)
+	if err != nil {
+		t.Fatalf("get first session: %v", err)
+	}
+	secondSession, err := fixture.Sessions.GetSession(ctx, second.Session.ID)
+	if err != nil {
+		t.Fatalf("get second session: %v", err)
+	}
+	if firstSession.LastAgentActivityAt == nil || secondSession.LastAgentActivityAt == nil {
+		t.Fatalf("agent activity = %v / %v, want both stamped", firstSession.LastAgentActivityAt, secondSession.LastAgentActivityAt)
+	}
+	if !secondSession.UpdatedAt.After(firstSession.UpdatedAt) {
+		t.Fatalf("second session updated_at = %v, want after first's %v", secondSession.UpdatedAt, firstSession.UpdatedAt)
+	}
+	if secondSession.LastAgentActivityAt.Equal(*firstSession.LastAgentActivityAt) {
+		t.Fatalf("second session activity = %v, want distinct from first's %v", secondSession.LastAgentActivityAt, firstSession.LastAgentActivityAt)
+	}
+
+	var board boardResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
+	card, ok := board.TaskCards[first.Session.TaskID]
+	if !ok {
+		t.Fatalf("task cards = %+v, missing %s", board.TaskCards, first.Session.TaskID)
+	}
+	if card.LastAgentActivityAt == nil || !card.LastAgentActivityAt.Equal(*secondSession.LastAgentActivityAt) {
+		t.Fatalf("last agent activity = %v, want the most recently updated session's %v", card.LastAgentActivityAt, secondSession.LastAgentActivityAt)
+	}
+}
+
 func TestBoardCurrentStepUsesFrozenWorkflowSnapshot(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
