@@ -448,16 +448,13 @@ func prepareWorktree(ctx context.Context, cfg config.WorkerConfig, job Job, payl
 // the clone and never appears in the committed diff, mirroring Flow's pattern
 // of keeping artifacts out of the change (see verdictFilePath).
 //
-// The patterns are scoped narrowly: only the materialized-image directory
-// (.flow/attachments) is excluded, NOT the whole .flow/ tree. .flow/ is a
-// shared Flow namespace that also holds paths authors are expected to commit
-// — .flow/checks/*.yaml check definitions (read from the task branch HEAD by
-// checkConfigPrefix in internal/coordinator/check_config.go) and .flow/session
-// (a real committed path whose presence on the base branch is guarded in
-// internal/git/hooks.go). Excluding all of .flow/ would silently drop those
-// from a `git add -A` commit, defeating the check-config workflow.
+// The patterns are scoped narrowly to generated attachments and reserved
+// session state, NOT the whole .flow/ tree. Authors must still be able to commit
+// .flow/checks/*.yaml definitions (read from the task branch HEAD by
+// checkConfigPrefix in internal/coordinator/check_config.go).
 var flowWorktreeExcludePatterns = []string{
 	".flow/attachments/",
+	".flow/session/",
 }
 
 // excludeFlowArtifactsFromWorktree appends the Flow session artifact patterns to

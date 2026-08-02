@@ -6,6 +6,8 @@
 *.db-wal
 .DS_Store
 coverage.out
+/.flow/session/
+/SUMMARY.md
 /flow
 /flow-server
 /flow-worker

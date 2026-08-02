@@ -30,6 +30,7 @@ func TestBuildAuthorPromptInvokesRoleSkill(t *testing.T) {
 		"Branch: task/t-test-0001",
 		"git commit",
 		"flow complete",
+		"--summary-file .flow/session/SUMMARY.md",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, rendered)
@@ -45,6 +46,25 @@ func TestBuildAuthorPromptInvokesRoleSkill(t *testing.T) {
 	}
 	if strings.Contains(rendered, ".handoff.md") {
 		t.Fatalf("author prompt still references the dropped .handoff.md file:\n%s", rendered)
+	}
+}
+
+func TestBuildHandoffPromptUsesSessionArtifactPath(t *testing.T) {
+	rendered, err := Build(Input{
+		Role:         RoleAuthor,
+		TaskID:       "t-handoff-0001",
+		ArtifactKind: "handoff",
+	})
+	if err != nil {
+		t.Fatalf("build prompt: %v", err)
+	}
+	for _, want := range []string{
+		"Create .flow/session",
+		"--summary-file .flow/session/SUMMARY.md",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("handoff prompt missing %q:\n%s", want, rendered)
+		}
 	}
 }
 
@@ -68,6 +88,8 @@ func TestBuildTaskSetWorkflowSelectionGuidance(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Task-set Workflow Selection:",
+		"--summary-file .flow/session/SUMMARY.md",
+		"--output-file .flow/session/TASK_SET.json",
 		"Maximum generated tasks: 25",
 		"Default workflow: coding (fl-coding)",
 		"Omit flow_id to use the default workflow.",

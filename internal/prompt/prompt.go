@@ -451,17 +451,17 @@ func roleInstructions(role string, input Input) []string {
 		case "task_set":
 			return []string{
 				"Produce the requested task plan as a schema-version-1 task-set JSON document. This base workspace is read-only with respect to the exchange; do not create commits or push branches.",
-				"Write a concise Markdown summary into SUMMARY.md and the task-set JSON into TASK_SET.json, then run flow submit --summary-file SUMMARY.md --output-file TASK_SET.json. flow submit hands the plan to the human reviewer and blocks for the verdict: revise and resubmit when changes are requested, stop when the review is final. If the node has no downstream human gate, finalize with flow complete --summary-file SUMMARY.md --output-file TASK_SET.json instead.",
+				"Create .flow/session, write a concise Markdown summary into .flow/session/SUMMARY.md and the task-set JSON into .flow/session/TASK_SET.json, then run flow submit --summary-file .flow/session/SUMMARY.md --output-file .flow/session/TASK_SET.json. flow submit hands the plan to the human reviewer and blocks for the verdict: revise and resubmit when changes are requested, stop when the review is final. If the node has no downstream human gate, finalize with flow complete --summary-file .flow/session/SUMMARY.md --output-file .flow/session/TASK_SET.json instead.",
 			}
 		case "handoff":
 			return []string{
 				"Complete the requested work and write a concise Markdown handoff. Do not create a Git change unless the node instructions explicitly require one.",
-				"Finalize with flow complete --summary-file SUMMARY.md.",
+				"Create .flow/session, write the handoff to .flow/session/SUMMARY.md, and finalize with flow complete --summary-file .flow/session/SUMMARY.md.",
 			}
 		}
 		return []string{
 			"Implement the requested change in this worktree on branch ${FLOW_BRANCH:-the checked-out branch}.",
-			"Finalize with two actions: (1) git commit your work with a conventional-commit message; (2) write a concise Markdown summary and run flow complete --summary-file SUMMARY.md. flow complete pushes the run branch and submits the change artifact.",
+			"Finalize with two actions: (1) git commit your work with a conventional-commit message; (2) create .flow/session, write a concise Markdown summary to .flow/session/SUMMARY.md, and run flow complete --summary-file .flow/session/SUMMARY.md. flow complete pushes the run branch and submits the change artifact.",
 		}
 	case RoleReviewer:
 		if input.ReviewDiscovery {

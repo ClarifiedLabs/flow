@@ -19,8 +19,8 @@
 
 4. Finalize with three actions:
    - `git commit` your work with a conventional-commit message.
-   - Write a concise Markdown summary of the change and verification results.
-   - Run `flow complete --summary-file SUMMARY.md`. It pushes the run-specific branch, creates the typed change artifact, and advances the active workflow node.
+   - Create `.flow/session/` and write a concise Markdown summary of the change and verification results to `.flow/session/SUMMARY.md`.
+   - Run `flow complete --summary-file .flow/session/SUMMARY.md`. It pushes the run-specific branch, creates the typed change artifact, and advances the active workflow node.
    - A useful summary looks like:
 
      ```

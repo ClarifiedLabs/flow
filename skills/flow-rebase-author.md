@@ -30,6 +30,6 @@ the feature's content plus exactly the base branch's incoming changes.
 
 4. Finalize with three actions:
    - Make sure the rebase is committed (a completed rebase leaves nothing uncommitted).
-   - Write a concise Markdown summary of the conflicts and how each was resolved.
-   - Run `flow complete --summary-file SUMMARY.md`. It pushes the task branch, creates the typed change artifact, and advances the active workflow node.
+   - Create `.flow/session/` and write a concise Markdown summary of the conflicts and how each was resolved to `.flow/session/SUMMARY.md`.
+   - Run `flow complete --summary-file .flow/session/SUMMARY.md`. It pushes the task branch, creates the typed change artifact, and advances the active workflow node.
    - Never push to `refs/heads/feature/*` yourself; the coordinator publishes the feature ref after verification and human approval.

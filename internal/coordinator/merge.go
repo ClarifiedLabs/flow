@@ -227,6 +227,15 @@ func (s *MergeService) mergeApprovedChange(ctx context.Context, task Task, chang
 		}
 		return MergeResult{}, err
 	}
+	if errors.Is(err, flowgit.ErrMergeContainsIgnoredPaths) {
+		// Ignore-policy validation runs before the merge commit and push, so this
+		// deterministic rejection cannot have advanced the base. Do not leave a
+		// recovery intent for an operation that never reached the remote.
+		if delErr := s.deleteMergeIntent(ctx, intent.ID); delErr != nil {
+			return MergeResult{}, errors.Join(err, delErr)
+		}
+		return MergeResult{}, err
+	}
 	if err != nil {
 		// The push may or may not have landed (e.g. a timeout mid-push). Leave
 		// the intent open: the recovery pass completes it if the base advanced

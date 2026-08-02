@@ -98,21 +98,22 @@ func TestPrepareWorktreeExcludesFlowArtifacts(t *testing.T) {
 		t.Fatalf("prepare worktree: %v", err)
 	}
 
-	// The info/exclude file is written and contains the narrow .flow/attachments/
-	// pattern. Crucially it must NOT contain the broad .flow/ pattern, which would
-	// also exclude .flow/checks and .flow/session (committable Flow artifacts).
+	// The info/exclude file contains the narrow generated-artifact paths, not the
+	// broad .flow/ namespace because .flow/checks remains committable.
 	excludePath := filepath.Join(worktree, ".git", "info", "exclude")
 	data, err := os.ReadFile(excludePath)
 	if err != nil {
 		t.Fatalf("read exclude file: %v", err)
 	}
-	if !strings.Contains(string(data), ".flow/attachments/") {
-		t.Fatalf("exclude file missing .flow/attachments/ pattern:\n%s", string(data))
+	for _, pattern := range []string{".flow/attachments/", ".flow/session/"} {
+		if !strings.Contains(string(data), pattern) {
+			t.Fatalf("exclude file missing %s pattern:\n%s", pattern, string(data))
+		}
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == ".flow/" || strings.HasPrefix(line, ".flow/ ") {
-			t.Fatalf("exclude file must not contain a broad .flow/ pattern (would exclude .flow/checks and .flow/session):\n%s", string(data))
+			t.Fatalf("exclude file must not contain a broad .flow/ pattern (would exclude .flow/checks):\n%s", string(data))
 		}
 	}
 
@@ -125,8 +126,7 @@ func TestPrepareWorktreeExcludesFlowArtifacts(t *testing.T) {
 		t.Fatalf("write image: %v", err)
 	}
 
-	// A check definition and a session file under .flow/ — both real committed
-	// Flow paths — must remain stageable by `git add -A`.
+	// Check definitions remain stageable; generated session files do not.
 	if err := os.MkdirAll(filepath.Join(worktree, ".flow", "checks"), 0o700); err != nil {
 		t.Fatalf("mkdir checks: %v", err)
 	}
@@ -151,13 +151,11 @@ func TestPrepareWorktreeExcludesFlowArtifacts(t *testing.T) {
 		}
 	}
 	// `git diff --cached --name-only` reports paths relative to the worktree root,
-	// so compare against the worktree-relative form of each path. The binary image
-	// must NOT be staged; the check definition and session file MUST be staged so
-	// the check-config workflow survives a blanket `git add -A`.
+	// so compare against the worktree-relative form of each path.
 	for absPath, mustNotStage := range map[string]bool{
 		imagePath:   true,
 		checkPath:   false,
-		sessionPath: false,
+		sessionPath: true,
 	} {
 		relPath, err := filepath.Rel(worktree, absPath)
 		if err != nil {
@@ -188,8 +186,10 @@ func TestExcludeFlowArtifactsFromWorktreeIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read exclude: %v", err)
 	}
-	if got := strings.Count(string(first), ".flow/attachments/"); got != 1 {
-		t.Fatalf("expected one .flow/attachments/ pattern after first write, got %d:\n%s", got, string(first))
+	for _, pattern := range flowWorktreeExcludePatterns {
+		if got := strings.Count(string(first), pattern); got != 1 {
+			t.Fatalf("expected one %s pattern after first write, got %d:\n%s", pattern, got, string(first))
+		}
 	}
 
 	// Second write must not duplicate the pattern.
@@ -198,8 +198,10 @@ func TestExcludeFlowArtifactsFromWorktreeIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read exclude: %v", err)
 	}
-	if got := strings.Count(string(second), ".flow/attachments/"); got != 1 {
-		t.Fatalf("expected one .flow/attachments/ pattern after second write, got %d:\n%s", got, string(second))
+	for _, pattern := range flowWorktreeExcludePatterns {
+		if got := strings.Count(string(second), pattern); got != 1 {
+			t.Fatalf("expected one %s pattern after second write, got %d:\n%s", pattern, got, string(second))
+		}
 	}
 	if string(first) != string(second) {
 		t.Fatalf("exclude file changed on repeated write:\nfirst: %s\nsecond: %s", string(first), string(second))

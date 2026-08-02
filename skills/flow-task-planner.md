@@ -8,11 +8,11 @@ For every proposed task, include a focused title and a nonblank Markdown body co
 
 Omit `flow_id` to use the advertised default workflow. Set an explicit advertised workflow ID only when the child task's immediate deliverable calls for an override. Use the default implementation workflow when work is bounded enough to implement directly. Select a planning workflow when unresolved decisions, investigation, architecture, or decomposition must produce another human-reviewed plan before implementation can be scoped responsibly. A nested planning task must name those unresolved questions, relevant constraints, expected decisions, and the plan output needed to make later work implementable. Do not use planning merely to defer well-specified implementation, do not guess workflow IDs, and do not copy the source task's workflow as a fallback.
 
-Write a readable Markdown summary and a schema-version-1 JSON task-set manifest within the limits in the session prompt.
+Create `.flow/session/`, then write a readable Markdown summary to `.flow/session/SUMMARY.md` and a schema-version-1 JSON task-set manifest to `.flow/session/TASK_SET.json` within the limits in the session prompt.
 
 ## Review loop
 
-Submit both with `flow submit --summary-file SUMMARY.md --output-file TASK_SET.json`. `flow submit` hands the plan to the human reviewer and blocks until they respond. You stay in this session the whole time: the reviewer can see the plan, comment on it, and talk to you directly while you wait.
+Submit both with `flow submit --summary-file .flow/session/SUMMARY.md --output-file .flow/session/TASK_SET.json`. `flow submit` hands the plan to the human reviewer and blocks until they respond. You stay in this session the whole time: the reviewer can see the plan, comment on it, and talk to you directly while you wait.
 
 - `REVIEW: approved` or `REVIEW: rejected` — the review is final. Stop; do not call `flow complete` and do not start implementing.
 - `REVIEW: changes requested` — the reviewer's feedback follows the verdict. Revise the summary and manifest accordingly and submit again with `flow submit`. Repeat until the plan is approved or rejected.

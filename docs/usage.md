@@ -254,7 +254,8 @@ flow fetch-prompt
 flow status "Working on implementation"
 flow status --kind blocker "Stuck: API contract is ambiguous"
 git commit -m "feat: implement the change"
-flow complete --summary-file SUMMARY.md
+mkdir -p .flow/session
+flow complete --summary-file .flow/session/SUMMARY.md
 flow session event working|waiting
 ```
 
@@ -266,8 +267,13 @@ routine notes apart from things that need a human. Valid kinds are `note`,
 `flow complete` validates the active node contract and submits its typed
 artifact. For a change node it resolves and pushes the run-specific branch and
 pins the artifact to HEAD. Task-planning nodes also pass
-`--output-file TASK_SET.json`; handoff nodes need only the Markdown summary.
-The command is idempotent for the active node run.
+`--output-file .flow/session/TASK_SET.json`; handoff nodes need only the Markdown
+summary. Flow-generated summaries and manifests belong under `.flow/session/`,
+which worker worktrees add to `.git/info/exclude`, omit from review diffs, and
+protect from landing on the base branch. Squash merges also reject newly added
+files matched by the repository's
+committed `.gitignore`, so project-specific generated state cannot be landed by
+an older task branch. The command is idempotent for the active node run.
 
 Flow-owned reviewer, discovery, aggregation, and verifier jobs use the same
 command without flags. They run as interactive check terminals: write the
