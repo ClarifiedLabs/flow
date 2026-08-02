@@ -6304,6 +6304,13 @@ test("cloneFlowView builds a create payload that copies the graph under a new na
   assert.equal(context.cloneFlowView({ name: "coding" }, ["coding", "coding (copy)"]).name, "coding (copy 2)");
   assert.equal(context.cloneFlowView({ name: "coding" }, ["coding", "coding (copy)", "coding (copy 2)"]).name, "coding (copy 3)");
   assert.equal(context.cloneFlowView({ name: "coding" }, ["coding", "other"]).name, "coding (copy)");
+  // Existing-name matching is exact/case-sensitive, mirroring the server's
+  // flows.name UNIQUE collation (SQLite default BINARY, no NOCASE): a
+  // case-variant name does not occupy the copy slot.
+  assert.equal(context.cloneFlowName("coding", ["CODING (copy)"]), "coding (copy)");
+  assert.equal(context.cloneFlowName("coding", ["coding", "Coding (copy)"]), "coding (copy)");
+  assert.equal(context.cloneFlowName("coding", ["coding (copy)"]), "coding (copy 2)");
+  assert.equal(context.cloneFlowView({ name: "coding" }, ["coding", "CODING (copy)"]).name, "coding (copy)");
   assert.equal(payload.description, "Ship it");
   assert.equal(payload.start_node, "implement");
   assert.equal(payload.transition_budget, 75);
@@ -6348,16 +6355,6 @@ test("clone flow button posts a copied create payload and opens the new flow edi
     },
   };
 
-  const fetchCalls = [];
-  globalThis.fetch = (path, options) => {
-    fetchCalls.push({ path, options });
-    return Promise.resolve({
-      ok: true,
-      status: 201,
-      json: () => Promise.resolve({ flow: { id: "fl-new" } }),
-    });
-  };
-
   const state = { editingFlowID: "" };
   const flows = [{
     id: "fl-1",
@@ -6366,15 +6363,35 @@ test("clone flow button posts a copied create payload and opens the new flow edi
     nodes: [{ id: "fn-1", key: "implement", name: "Implement", kind: "agent", position: 0, config: { agent: { agent_def_id: "ad-author" } } }],
     edges: [{ from: "implement", outcome: "done", to: "review" }],
   }];
+
+  const fetchCalls = [];
+  globalThis.fetch = (path, options) => {
+    fetchCalls.push({ path, options });
+    if (options.method === "GET") {
+      // The click-time list re-read returns the same project list, so the
+      // first clone still picks the plain "(copy)" name.
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ flows }) });
+    }
+    return Promise.resolve({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ flow: { id: "fl-new" } }),
+    });
+  };
+
   context.bindFlowsSectionView(app, { id: "p-alpha" }, flows, [], state);
 
   assert.ok(listeners.has("click"), "clone button binds a click handler");
   await listeners.get("click")();
 
-  assert.equal(fetchCalls.length, 1);
+  // The handler re-reads the current flow list before posting the clone.
+  assert.equal(fetchCalls.length, 2);
   assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/flows");
-  assert.equal(fetchCalls[0].options.method, "POST");
-  const body = JSON.parse(fetchCalls[0].options.body);
+  assert.equal(fetchCalls[0].options.method, "GET");
+  const post = fetchCalls.find((call) => call.options.method === "POST");
+  assert.equal(post.path, "/ui/api/v2/projects/p-alpha/flows");
+  assert.equal(post.options.method, "POST");
+  const body = JSON.parse(post.options.body);
   assert.equal(body.name, "coding (copy)");
   assert.deepEqual(body.nodes, [{ key: "implement", name: "Implement", kind: "agent", config: { agent: { agent_def_id: "ad-author" } } }]);
   assert.deepEqual(body.edges, [{ from: "implement", outcome: "done", to: "review" }]);
@@ -6412,9 +6429,340 @@ test("clone flow button posts an incremented copy name when the copy already exi
     setStatus() {},
   };
 
+  const state = { editingFlowID: "" };
+  // The project already contains the first clone, so the repeated clone must
+  // submit the next available suffix instead of colliding on the name.
+  const flows = [
+    { id: "fl-1", name: "coding", nodes: [], edges: [] },
+    { id: "fl-2", name: "coding (copy)", nodes: [], edges: [] },
+  ];
+
   const fetchCalls = [];
   globalThis.fetch = (path, options) => {
     fetchCalls.push({ path, options });
+    if (options.method === "GET") {
+      // The click-time list re-read matches the bind-time list here.
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ flows }) });
+    }
+    return Promise.resolve({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ flow: { id: "fl-new" } }),
+    });
+  };
+
+  context.bindFlowsSectionView(app, { id: "p-alpha" }, flows, [], state);
+
+  await listeners.get("click")();
+
+  const post = fetchCalls.find((call) => call.options.method === "POST");
+  assert.equal(post.path, "/ui/api/v2/projects/p-alpha/flows");
+  assert.equal(post.options.method, "POST");
+  const body = JSON.parse(post.options.body);
+  assert.equal(body.name, "coding (copy 2)");
+  // The created flow still opens in the inline editor.
+  assert.equal(state.editingFlowID, "fl-new");
+  assert.equal(reloaded, 1);
+});
+
+test("rapid clone clicks are single-flighted and re-read the current flow list at click time", async () => {
+  const context = await scriptContext();
+  const listeners = new Map();
+  const cloneButton = {
+    dataset: { cloneFlow: "fl-1" },
+    addEventListener(event, handler) {
+      listeners.set(event, handler);
+    },
+  };
+  const section = {
+    querySelector() {
+      return null; // no inline editor form open
+    },
+    querySelectorAll(selector) {
+      return selector === "[data-clone-flow]" ? [cloneButton] : [];
+    },
+  };
+  let reloaded = 0;
+  const statuses = [];
+  const app = {
+    querySelector(selector) {
+      return selector === "[data-flows-section]" ? section : null;
+    },
+    load() {
+      reloaded += 1;
+    },
+    setStatus(message) {
+      statuses.push(message);
+    },
+  };
+
+  // The server-side list grows as clones land; the bind-time closure list does
+  // not (it is only refreshed when reload() re-binds the section).
+  let currentFlows = [{ id: "fl-1", name: "coding", nodes: [], edges: [] }];
+  const fetchCalls = [];
+  let firstPostHeld = true;
+  let releaseFirstPost;
+  globalThis.fetch = (path, options) => {
+    fetchCalls.push({ path, options });
+    if (options.method === "GET") {
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ flows: currentFlows }) });
+    }
+    if (firstPostHeld) {
+      firstPostHeld = false;
+      return new Promise((resolve) => {
+        releaseFirstPost = () => resolve({ ok: true, status: 201, json: () => Promise.resolve({ flow: { id: "fl-new" } }) });
+      });
+    }
+    return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ flow: { id: "fl-new-2" } }) });
+  };
+
+  const state = { editingFlowID: "" };
+  const flows = [{ id: "fl-1", name: "coding", nodes: [], edges: [] }];
+  context.bindFlowsSectionView(app, { id: "p-alpha" }, flows, [], state);
+
+  const handler = listeners.get("click");
+  // Two clicks land before the first clone's reload settles.
+  const first = handler();
+  handler();
+
+  // The duplicate click is single-flighted: only the first click re-read the
+  // list, and no second POST was submitted while the first was in flight.
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0].options.method, "GET");
+  await flushAsync();
+  const posts = fetchCalls.filter((call) => call.options.method === "POST");
+  assert.equal(posts.length, 1);
+  assert.equal(JSON.parse(posts[0].options.body).name, "coding (copy)");
+
+  // The server has created the clone, but this section has not re-bound yet.
+  currentFlows = [
+    { id: "fl-1", name: "coding", nodes: [], edges: [] },
+    { id: "fl-new", name: "coding (copy)", nodes: [], edges: [] },
+  ];
+  releaseFirstPost();
+  await first;
+  assert.equal(state.editingFlowID, "fl-new");
+  assert.equal(reloaded, 1);
+  assert.deepEqual(statuses, ["flow cloned; rename and edit your copy"]);
+
+  // A later click re-reads the current list instead of the stale bind-time
+  // closure, so the next clone picks the incremented suffix.
+  await handler();
+  const allPosts = fetchCalls.filter((call) => call.options.method === "POST");
+  assert.equal(allPosts.length, 2);
+  assert.equal(JSON.parse(allPosts[1].options.body).name, "coding (copy 2)");
+  assert.equal(reloaded, 2);
+});
+
+test("clone clicks stay single-flighted across a section rebind while the first clone is pending", async () => {
+  const context = await scriptContext();
+  const makeCloneButton = () => {
+    const listeners = new Map();
+    return {
+      dataset: { cloneFlow: "fl-1" },
+      addEventListener(event, handler) {
+        listeners.set(event, handler);
+      },
+      listeners,
+    };
+  };
+  // The first bind and the re-bind see different button elements, exactly as
+  // a re-render replaces the section's DOM while the first clone is pending.
+  const firstButton = makeCloneButton();
+  const secondButton = makeCloneButton();
+  let currentButton = firstButton;
+  const section = {
+    querySelector() {
+      return null; // no inline editor form open
+    },
+    querySelectorAll(selector) {
+      return selector === "[data-clone-flow]" ? [currentButton] : [];
+    },
+  };
+  let reloaded = 0;
+  const statuses = [];
+  const project = { id: "p-alpha" };
+  const app = {
+    querySelector(selector) {
+      return selector === "[data-flows-section]" ? section : null;
+    },
+    load() {
+      reloaded += 1;
+    },
+    setStatus(message) {
+      statuses.push(message);
+    },
+  };
+
+  // The server-side list grows as clones land; the section's bind-time list
+  // does not (it is only refreshed when reload() re-binds the section). The
+  // re-bind below therefore sees the same stale list as the first bind.
+  let serverFlows = [{ id: "fl-1", name: "coding", nodes: [], edges: [] }];
+  const staleBindTimeFlows = [{ id: "fl-1", name: "coding", nodes: [], edges: [] }];
+  const fetchCalls = [];
+  let firstPostHeld = true;
+  let releaseFirstPost;
+  globalThis.fetch = (path, options) => {
+    fetchCalls.push({ path, options });
+    if (options.method === "GET") {
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ flows: serverFlows }) });
+    }
+    if (firstPostHeld) {
+      firstPostHeld = false;
+      return new Promise((resolve) => {
+        releaseFirstPost = () => resolve({ ok: true, status: 201, json: () => Promise.resolve({ flow: { id: "fl-new" } }) });
+      });
+    }
+    return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ flow: { id: "fl-new-2" } }) });
+  };
+
+  const state = { editingFlowID: "" };
+  context.bindFlowsSectionView(app, project, staleBindTimeFlows, [], state);
+
+  // First clone click: the click-time re-read finds no copy yet, and the POST
+  // is held pending while the flows section re-binds.
+  const firstClone = firstButton.listeners.get("click")();
+  await flushAsync();
+  const posts = () => fetchCalls.filter((call) => call.options.method === "POST");
+  assert.equal(posts().length, 1);
+  assert.equal(JSON.parse(posts()[0].options.body).name, "coding (copy)");
+
+  // A manual refresh / edit-triggered reload re-binds the flows section while
+  // the first clone's POST is still pending, around the same stale server
+  // list. The shared in-flight guard survives the re-bind: the fresh button
+  // is bound disabled...
+  currentButton = secondButton;
+  context.bindFlowsSectionView(app, project, staleBindTimeFlows, [], state);
+  assert.equal(secondButton.disabled, true);
+
+  // ...and a click on it is single-flighted: no second "<name> (copy)" POST
+  // is submitted while the first clone is still pending.
+  await secondButton.listeners.get("click")();
+  assert.equal(posts().length, 1);
+
+  // The pending clone lands; the server list grows to include the copy.
+  serverFlows = [
+    { id: "fl-1", name: "coding", nodes: [], edges: [] },
+    { id: "fl-new", name: "coding (copy)", nodes: [], edges: [] },
+  ];
+  releaseFirstPost();
+  await firstClone;
+  assert.equal(state.editingFlowID, "fl-new");
+  assert.equal(reloaded, 1);
+  assert.deepEqual(statuses, ["flow cloned; rename and edit your copy"]);
+  // The settled clone re-enables the live (re-bound) button.
+  assert.equal(secondButton.disabled, false);
+
+  // A later click on the re-bound button re-reads the current list and picks
+  // the incremented suffix instead of colliding with the just-created flow.
+  await secondButton.listeners.get("click")();
+  const allPosts = fetchCalls.filter((call) => call.options.method === "POST");
+  assert.equal(allPosts.length, 2);
+  assert.equal(JSON.parse(allPosts[1].options.body).name, "coding (copy 2)");
+  assert.equal(reloaded, 2);
+});
+
+test("clone flow button surfaces a server-side name collision without partial mutation", async () => {
+  const context = await scriptContext();
+  const listeners = new Map();
+  const cloneButton = {
+    dataset: { cloneFlow: "fl-1" },
+    addEventListener(event, handler) {
+      listeners.set(event, handler);
+    },
+  };
+  const section = {
+    querySelector() {
+      return null; // no inline editor form open
+    },
+    querySelectorAll(selector) {
+      return selector === "[data-clone-flow]" ? [cloneButton] : [];
+    },
+  };
+  let reloaded = 0;
+  const statuses = [];
+  const app = {
+    querySelector(selector) {
+      return selector === "[data-flows-section]" ? section : null;
+    },
+    load() {
+      reloaded += 1;
+    },
+    setStatus(message) {
+      statuses.push(message);
+    },
+  };
+
+  const flows = [{ id: "fl-1", name: "coding", nodes: [], edges: [] }];
+  const fetchCalls = [];
+  globalThis.fetch = (path, options) => {
+    fetchCalls.push({ path, options });
+    if (options.method === "GET") {
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ flows }) });
+    }
+    return Promise.resolve({
+      ok: false,
+      status: 409,
+      json: () => Promise.resolve({ error: { message: "a flow with this name already exists" } }),
+    });
+  };
+
+  const state = { editingFlowID: "" };
+  context.bindFlowsSectionView(app, { id: "p-alpha" }, flows, [], state);
+
+  await listeners.get("click")();
+
+  // The collision is surfaced, and nothing was mutated or reloaded.
+  assert.deepEqual(statuses, ["a flow with this name already exists"]);
+  assert.equal(state.editingFlowID, "");
+  assert.equal(reloaded, 0);
+  assert.equal(fetchCalls.filter((call) => call.options.method === "POST").length, 1);
+});
+
+test("clone flow button falls back to the bind-time names when the click-time re-read rejects", async () => {
+  const context = await scriptContext();
+  const listeners = new Map();
+  const cloneButton = {
+    dataset: { cloneFlow: "fl-1" },
+    addEventListener(event, handler) {
+      listeners.set(event, handler);
+    },
+  };
+  const section = {
+    querySelector() {
+      return null; // no inline editor form open
+    },
+    querySelectorAll(selector) {
+      return selector === "[data-clone-flow]" ? [cloneButton] : [];
+    },
+  };
+  let reloaded = 0;
+  const statuses = [];
+  const app = {
+    querySelector(selector) {
+      return selector === "[data-flows-section]" ? section : null;
+    },
+    load() {
+      reloaded += 1;
+    },
+    setStatus(message) {
+      statuses.push(message);
+    },
+  };
+
+  // The bind-time list already contains the first copy; the click-time re-read
+  // rejects, so the handler must fall back to these bind-time names and still
+  // submit the clone with the next available suffix.
+  const flows = [
+    { id: "fl-1", name: "coding", nodes: [], edges: [] },
+    { id: "fl-2", name: "coding (copy)", nodes: [], edges: [] },
+  ];
+  const fetchCalls = [];
+  globalThis.fetch = (path, options) => {
+    fetchCalls.push({ path, options });
+    if (options.method === "GET") {
+      return Promise.reject(new Error("flows list unavailable"));
+    }
     return Promise.resolve({
       ok: true,
       status: 201,
@@ -6423,24 +6771,26 @@ test("clone flow button posts an incremented copy name when the copy already exi
   };
 
   const state = { editingFlowID: "" };
-  // The project already contains the first clone, so the repeated clone must
-  // submit the next available suffix instead of colliding on the name.
-  const flows = [
-    { id: "fl-1", name: "coding", nodes: [], edges: [] },
-    { id: "fl-2", name: "coding (copy)", nodes: [], edges: [] },
-  ];
   context.bindFlowsSectionView(app, { id: "p-alpha" }, flows, [], state);
 
   await listeners.get("click")();
 
-  assert.equal(fetchCalls.length, 1);
-  assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/flows");
-  assert.equal(fetchCalls[0].options.method, "POST");
-  const body = JSON.parse(fetchCalls[0].options.body);
+  // The click-time re-read was attempted and rejected, and the clone still
+  // posted: the fallback kept the bind-time names, so the copy suffix comes
+  // from that list ("coding (copy)" is already taken) rather than an empty
+  // re-read result.
+  assert.equal(fetchCalls.length, 2);
+  assert.equal(fetchCalls[0].options.method, "GET");
+  const post = fetchCalls.find((call) => call.options.method === "POST");
+  assert.equal(post.options.method, "POST");
+  const body = JSON.parse(post.options.body);
   assert.equal(body.name, "coding (copy 2)");
-  // The created flow still opens in the inline editor.
+  // The clone proceeds exactly like a successful re-read.
   assert.equal(state.editingFlowID, "fl-new");
   assert.equal(reloaded, 1);
+  assert.deepEqual(statuses, ["flow cloned; rename and edit your copy"]);
+  // The settled clone re-enables the button.
+  assert.equal(cloneButton.disabled, false);
 });
 
 test("flows view renders agent definitions and flow tables for the active project", async () => {

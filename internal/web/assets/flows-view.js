@@ -60,7 +60,7 @@ export async function renderFlowsView(app, context) {
 }
 
 export function flowsViewState(app) {
-  if (!app.flowsView) app.flowsView = { editingDefID: "", editingGlobalDefID: "", editingFlowID: "" };
+  if (!app.flowsView) app.flowsView = { editingDefID: "", editingGlobalDefID: "", editingFlowID: "", cloneInFlight: false };
   if (app.flowsView.editingGlobalDefID === undefined) app.flowsView.editingGlobalDefID = "";
   return app.flowsView;
 }
@@ -690,7 +690,9 @@ export function flowPayloadFromEditorView(form) {
 // keeps the classic "<name> (copy)" suffix; when that name is already taken,
 // an incremented suffix ("<name> (copy 2)", "<name> (copy 3)", ...) is chosen
 // so repeated clones of the same source do not collide with the flow-name
-// uniqueness rule.
+// uniqueness rule. Existing-name matching is exact (case-sensitive), mirroring
+// the server's flows.name UNIQUE collation (SQLite default BINARY, no NOCASE),
+// so a case-variant like "Coding (copy)" does not occupy "coding (copy)".
 export function cloneFlowName(name, existingNames = []) {
   const base = name || "flow";
   const taken = new Set(existingNames);
@@ -742,12 +744,38 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
       reload();
     });
   });
+  // Clone clicks are single-flighted across rebinds: the bind-time flow list
+  // stays stale until reload() re-fetches and re-binds the section, so two
+  // rapid clicks would otherwise compute the same "<name> (copy)" suffix and
+  // the second POST would collide with the server's flows.name uniqueness
+  // rule. The in-flight guard lives on the shared view state (app.flowsView)
+  // instead of in this closure, so a re-bind while a clone is pending (a
+  // manual refresh, an edit-triggered reload) cannot mint a fresh guard
+  // around the same stale list; the re-bind disables its buttons until the
+  // pending clone settles and its reload re-binds against the updated list.
   section.querySelectorAll("[data-clone-flow]").forEach((button) => {
+    // A re-bind during an in-flight clone must not present an enabled button
+    // that looks clickable; the guard stays set until the clone's reload.
+    button.disabled = !!state.cloneInFlight;
     button.addEventListener("click", async () => {
+      if (state.cloneInFlight) return;
       const source = (flows || []).find((flow) => value(flow, "id", "ID") === button.dataset.cloneFlow);
       if (!source) return;
+      state.cloneInFlight = true;
+      button.disabled = true;
       try {
-        const existingNames = (flows || []).map((flow) => value(flow, "name", "Name"));
+        // Re-read the active project's flows at click time so the copy name
+        // reflects flows created since this section was bound. If the re-read
+        // fails, fall back to the bind-time list: the server still guards
+        // uniqueness and rejects a collision with a surfaced error and no
+        // partial mutation.
+        let existingNames = (flows || []).map((flow) => value(flow, "name", "Name"));
+        try {
+          const data = await apiGet(flowsAPIBase(project.id));
+          existingNames = (data.flows || data.Flows || []).map((flow) => value(flow, "name", "Name"));
+        } catch {
+          // Keep the bind-time names.
+        }
         const response = await apiPost(flowsAPIBase(project.id), cloneFlowView(source, existingNames));
         const created = value(response, "flow", "Flow") || response || {};
         state.editingFlowID = value(created, "id", "ID") || "";
@@ -755,6 +783,18 @@ export function bindFlowsSectionView(app, project, flows, agentDefs, state) {
         app.setStatus("flow cloned; rename and edit your copy");
       } catch (error) {
         app.setStatus(failureMessage(error));
+      } finally {
+        state.cloneInFlight = false;
+        // Re-enable whatever clone buttons are live now: when the section
+        // re-bound while the clone was pending, the fresh buttons were bound
+        // disabled and only this finally (after the post-clone reload) can
+        // release them; when no re-bind happened, this is the clicked button.
+        const liveSection = app.querySelector("[data-flows-section]");
+        if (liveSection) {
+          liveSection.querySelectorAll("[data-clone-flow]").forEach((liveButton) => {
+            liveButton.disabled = false;
+          });
+        }
       }
     });
   });
