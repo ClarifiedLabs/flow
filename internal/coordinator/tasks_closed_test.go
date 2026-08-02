@@ -292,6 +292,12 @@ func TestCountClosedTasksByWindowUsesOneClockSnapshot(t *testing.T) {
 	if counts[1].Count != 1 {
 		t.Fatalf("1h count = %d, want 1", counts[1].Count)
 	}
+
+	// The whole point of the fix is one stable snapshot: the SQL lower bound
+	// and every in-memory bucket cutoff must come from a single s.now() read.
+	if reads != 1 {
+		t.Fatalf("s.now() reads = %d, want exactly 1: the query bound and every bucket cutoff must share one snapshot", reads)
+	}
 }
 
 func TestCountClosedTasksByWindowExcludesOpenAndNullDoneAt(t *testing.T) {
