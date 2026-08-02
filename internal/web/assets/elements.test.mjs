@@ -2068,6 +2068,8 @@ test("the review model reads the interactive gate from the wait details", () => 
   assert.equal(review.gate.interactive, true);
   assert.deepEqual(review.gate.outcomes, ["approved", "changes_requested", "rejected"]);
   assert.equal(review.gate.artifactID, "wa-1");
+  assert.equal(review.gate.nodeRunID, "wnr-1");
+  assert.equal(review.gate.waitID, "ww-1", "the gate carries the immutable review round wait id");
   assert.equal(review.gate.changeGate, false);
   assert.equal(review.artifact.manifest.tasks.length, 2);
   assert.equal(review.session, null, "no live session without an active waiting session");
@@ -2102,6 +2104,7 @@ test("the review panel renders the gate, the plan, and one button per outcome", 
   assert.match(html, /Write task plan/);
   assert.match(html, /Review the proposed implementation tasks/);
   assert.match(html, /data-workflow-respond="wnr-1"/);
+  assert.match(html, /data-review-wait="ww-1"/);
   assert.match(html, /data-task="t-0001"/);
   assert.match(html, /data-outcome="approved"/);
   assert.match(html, /data-outcome="changes_requested"/);

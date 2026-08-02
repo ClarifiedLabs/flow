@@ -1500,6 +1500,80 @@ test("answering a gate suppresses every sibling outcome until the response settl
   assert.equal(inFlight.size, 0);
 });
 
+test("answering a gate posts the rendered review round wait id", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let requestBody = null;
+  globalThis.fetch = (path, options) => {
+    requestBody = JSON.parse(options.body);
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  };
+  const panel = gatePanel();
+  const approve = new GateButton({ workflowRespond: "wnr-1", reviewWait: "ww-1", task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
+  panel.buttons.push(approve);
+
+  const handled = handleAction(app, { target: approve, preventDefault() {} });
+  assert.equal(await handled, true);
+
+  // The response carries the wait id of the round that was rendered, so a
+  // stale panel cannot decide a later round reopened on the same node run.
+  assert.deepEqual(requestBody, {
+    node_run_id: "wnr-1",
+    review_wait_id: "ww-1",
+    outcome: "approved",
+    feedback: "",
+  });
+});
+
+test("approving a card posts the review round wait id the card observed", async () => {
+  await scriptContext();
+  let refreshed = false;
+  const app = {
+    setStatus() {},
+    async refresh() {
+      refreshed = true;
+    },
+  };
+  const calls = [];
+  globalThis.fetch = (path, options) => {
+    calls.push({ path, options });
+    if (options?.method === "GET") {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          detail: {
+            run: { current_node_run_id: "wnr-1", current_node_key: "plan" },
+            open_wait: {
+              id: "ww-1",
+              node_run_id: "wnr-1",
+              kind: "human_gate",
+              details: { interactive: true, outcomes: ["approved", "changes_requested", "rejected"] },
+            },
+          },
+        }),
+      });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  };
+  const button = new ActionButton({ cardApprove: "t-0001", project: "p-alpha" });
+
+  const handled = handleAction(app, { target: button, preventDefault() {} });
+  assert.equal(await handled, true);
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].path, "/ui/api/v2/projects/p-alpha/tasks/t-0001/workflow");
+  assert.equal(calls[1].path, "/ui/api/v2/projects/p-alpha/tasks/t-0001/workflow/respond");
+  // The approval carries the wait id of the round the card's detail fetch
+  // observed, so a stale card click cannot decide a later round reopened on
+  // the same node run before the POST lands.
+  assert.deepEqual(JSON.parse(calls[1].options.body), {
+    node_run_id: "wnr-1",
+    review_wait_id: "ww-1",
+    outcome: "approved",
+  });
+  assert.equal(refreshed, true);
+});
+
 test("a failed gate response restores every suppressed sibling outcome", async () => {
   await scriptContext();
   const app = statusApp();

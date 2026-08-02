@@ -206,3 +206,62 @@ func TestSubmitReviewRejectsWrongCredentialsAndState(t *testing.T) {
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/respond",
 		workflowRespondRequest{NodeRunID: nodeRunID, Outcome: "approved"}, http.StatusConflict, nil)
 }
+
+func TestRespondReviewRejectsStaleRoundBinding(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	flow := newReviewFixtureFlow(t, fixture, "review wait round binding")
+
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{Title: "Bound plan", FlowID: flow.ID}, http.StatusCreated, &created)
+	var scheduled workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
+		nil, http.StatusOK, &scheduled)
+	nodeRunID := scheduled.Run.CurrentNodeRunID
+	if _, err := fixture.Bundle.WorkflowRuns.MarkNodeRunning(ctx, nodeRunID); err != nil {
+		t.Fatalf("mark plan node running: %v", err)
+	}
+
+	// Round one opens an interactive wait on the agent node run.
+	artifactID := submitPlanArtifact(t, fixture, created.Task.ID, nodeRunID, "v1", "First draft")
+	var roundOne workflowSubmitReviewResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/submit-review",
+		workflowSubmitReviewRequest{NodeRunID: nodeRunID, ArtifactID: artifactID}, http.StatusCreated, &roundOne)
+
+	// A response bound to the open round's wait id is accepted.
+	var revised coordinator.CompleteWorkflowNodeResult
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/respond",
+		workflowRespondRequest{NodeRunID: nodeRunID, Outcome: "changes_requested", Feedback: "revise the draft", ReviewWaitID: roundOne.Wait.ID},
+		http.StatusOK, &revised)
+
+	// The agent resubmits: round two reopens a fresh wait on the same node run.
+	revisedArtifactID := submitPlanArtifact(t, fixture, created.Task.ID, nodeRunID, "v2", "Second draft")
+	var roundTwo workflowSubmitReviewResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/submit-review",
+		workflowSubmitReviewRequest{NodeRunID: nodeRunID, ArtifactID: revisedArtifactID}, http.StatusCreated, &roundTwo)
+	if roundTwo.Wait.ID == roundOne.Wait.ID {
+		t.Fatalf("round two wait id = %q, want a fresh wait per review round", roundTwo.Wait.ID)
+	}
+
+	// The stale round-one response — bound to round one's wait id — is rejected
+	// with 409 and cannot decide round two; a foreign binding is rejected too.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/respond",
+		workflowRespondRequest{NodeRunID: nodeRunID, Outcome: "approved", Feedback: "stale verdict", ReviewWaitID: roundOne.Wait.ID},
+		http.StatusConflict, nil)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/respond",
+		workflowRespondRequest{NodeRunID: nodeRunID, Outcome: "approved", ReviewWaitID: "ww-foreign"},
+		http.StatusConflict, nil)
+
+	// Round two stays actionable: a response that omits the binding (the CLI
+	// RespondWorkflow legacy shape) keeps node-run routing — the handler passes
+	// the empty id through untouched instead of rebinding it to the wait it
+	// observes — and decides the open round.
+	var approved coordinator.CompleteWorkflowNodeResult
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/respond",
+		workflowRespondRequest{NodeRunID: nodeRunID, Outcome: "approved", Feedback: "looks good"},
+		http.StatusOK, &approved)
+	if !approved.Done || approved.Run.State != coordinator.WorkflowRunCompleted {
+		t.Fatalf("round two run = %+v, want completed", approved.Run)
+	}
+}

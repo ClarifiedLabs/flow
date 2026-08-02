@@ -130,6 +130,7 @@ export function reviewModel({ wait, currentNode, run, artifacts, statusLog, acti
     const artifact = artifacts.find((candidate) => String(value(candidate, "id", "ID")) === artifactID) || null;
     gate = {
       nodeRunID: String(value(wait, "node_run_id", "NodeRunID") || ""),
+      waitID: String(value(wait, "id", "ID") || ""),
       heading: String(value(currentNode, "name", "Name") || "Review"),
       instructions:
         String(details.instructions || value(gateConfig, "instructions", "Instructions") || value(wait, "message", "Message") || ""),

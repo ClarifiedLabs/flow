@@ -87,7 +87,7 @@ export function renderWorkflowHumanGatePanel(workflowData, taskID, projectID) {
   const gateConfig = value(config, "human_gate", "HumanGate") || {};
   const outcomes = value(gateConfig, "outcomes", "Outcomes") || [];
   const nodeRunID = value(wait, "node_run_id", "NodeRunID");
-  return `<section class="human-attention-panel" data-gate-node-run="${escapeAttr(nodeRunID)}"><div><h3>${escapeHTML(value(currentNode, "name", "Name") || "Human action required")}</h3><p>${escapeHTML(value(gateConfig, "instructions", "Instructions") || value(wait, "message", "Message") || "Choose the next workflow outcome.")}</p><textarea data-workflow-feedback rows="3" placeholder="Optional feedback for the next node"></textarea></div><div class="actions">${renderGateOutcomeButtons(outcomes, { nodeRunID, taskID, projectAttr: projectButtonAttr(projectID) })}</div></section>`;
+  return `<section class="human-attention-panel" data-gate-node-run="${escapeAttr(nodeRunID)}"><div><h3>${escapeHTML(value(currentNode, "name", "Name") || "Human action required")}</h3><p>${escapeHTML(value(gateConfig, "instructions", "Instructions") || value(wait, "message", "Message") || "Choose the next workflow outcome.")}</p><textarea data-workflow-feedback rows="3" placeholder="Optional feedback for the next node"></textarea></div><div class="actions">${renderGateOutcomeButtons(outcomes, { nodeRunID, waitID: String(value(wait, "id", "ID") || ""), taskID, projectAttr: projectButtonAttr(projectID) })}</div></section>`;
 }
 
 

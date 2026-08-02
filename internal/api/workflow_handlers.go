@@ -25,6 +25,15 @@ type workflowRespondRequest struct {
 	NodeRunID string `json:"node_run_id"`
 	Outcome   string `json:"outcome"`
 	Feedback  string `json:"feedback,omitempty"`
+	// ReviewWaitID, when the open wait is a human gate, names the exact review
+	// round (the immutable wait id) this response answers. An interactive
+	// changes_requested round reopens a fresh wait on the same agent node run,
+	// so a response bound to an earlier round must not resolve the later one.
+	// The handler checks a non-empty binding against the wait it observes and
+	// RespondReview re-asserts it inside the per-task review lock. An empty id
+	// keeps the legacy node-run routing (the CLI RespondWorkflow shape): it is
+	// passed through untouched, never filled from the handler's own read.
+	ReviewWaitID string `json:"review_wait_id,omitempty"`
 }
 
 type workflowBudgetRequest struct {
@@ -348,7 +357,23 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 			wait.Kind == coordinator.WorkflowWaitHumanGate &&
 			strings.TrimSpace(wait.NodeRunID) == strings.TrimSpace(request.NodeRunID) &&
 			coordinator.ParseReviewWaitDetails(wait.Details).Interactive {
-			review, err := s.workflowRuns.RespondReview(r.Context(), taskID, request.NodeRunID, request.Outcome, request.Feedback, coordinator.ActorHuman)
+			// The response must name the review round it answers when the caller
+			// observed one: the wait id is the immutable round identity, so a
+			// response bound to an earlier changes_requested round cannot resolve
+			// a later wait reopened on the same node run. An explicit binding is
+			// checked against the wait observed here and re-asserted inside
+			// RespondReview's transaction under the per-task review lock, closing
+			// the window between this read and the lock. Callers that omit the
+			// binding (the CLI RespondWorkflow legacy shape) keep node-run
+			// routing: the empty id is passed through untouched instead of being
+			// filled from this read, so a response composed against an earlier
+			// round cannot be rebound to a wait it never observed.
+			reviewWaitID := strings.TrimSpace(request.ReviewWaitID)
+			if reviewWaitID != "" && reviewWaitID != strings.TrimSpace(wait.ID) {
+				writeWorkflowError(w, fmt.Errorf("%w: task is not waiting on that review round", coordinator.ErrWorkflowConflict), "respond_workflow_failed")
+				return
+			}
+			review, err := s.workflowRuns.RespondReview(r.Context(), taskID, request.NodeRunID, reviewWaitID, request.Outcome, request.Feedback, coordinator.ActorHuman)
 			if err != nil {
 				writeWorkflowError(w, err, "respond_workflow_failed")
 				return

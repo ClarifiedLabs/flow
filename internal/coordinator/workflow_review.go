@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // A review wait is a human_gate wait raised by an agent node itself, before it
@@ -244,6 +245,60 @@ ORDER BY created_at DESC, rowid DESC LIMIT 1`, run.ID, nodeRun.NodeKey).Scan(&pa
 	}, nil
 }
 
+// reviewLockEntry is one task's per-task review lock. refs counts the
+// acquirers that currently hold or are queued for the entry mutex, so the
+// entry is only removed from reviewLocks once nobody references it: a queued
+// acquirer increments refs before it blocks, so it can never wake onto an
+// entry that was dropped and replaced by a second mutex.
+type reviewLockEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// reviewLock returns a release func for the per-task human review lock. The
+// whole RespondReview — the wait-id validation inside the transaction, the
+// marker transaction, and the terminal CompleteNode calls — runs under it, so
+// a concurrent decision cannot resolve the validated wait and reopen a fresh
+// round on the same node run in the gap between the validation and the
+// completion.
+func (s *WorkflowRunService) reviewLock(taskID string) func() {
+	s.reviewLocksMu.Lock()
+	if s.reviewLocks == nil {
+		s.reviewLocks = make(map[string]*reviewLockEntry)
+	}
+	entry, ok := s.reviewLocks[taskID]
+	if !ok {
+		entry = &reviewLockEntry{}
+		s.reviewLocks[taskID] = entry
+	}
+	entry.refs++
+	s.reviewLocksMu.Unlock()
+
+	if s.reviewLockAcquireGate != nil {
+		s.reviewLockAcquireGate()
+	}
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		if s.reviewLockCleanupGate != nil {
+			s.reviewLockCleanupGate()
+		}
+		// Drop the entry only when no acquirer — the releasing holder or any
+		// queued waiter — still references it, so the map does not grow with
+		// every task the service ever reviews. Counting references instead of
+		// probing the mutex keeps the per-task serialization intact: TryLock
+		// can win the lock before an already queued acquirer wakes, and
+		// deleting then lets a later request build a second mutex while the
+		// queued request still holds the first.
+		s.reviewLocksMu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(s.reviewLocks, taskID)
+		}
+		s.reviewLocksMu.Unlock()
+	}
+}
+
 // RespondReview applies the human's verdict to an interactive review wait.
 // An outcome whose gate edge loops back to the submitting node (convention:
 // "changes_requested") resolves the wait and hands the same node run — and
@@ -251,8 +306,23 @@ ORDER BY created_at DESC, rowid DESC LIMIT 1`, run.ID, nodeRun.NodeKey).Scan(&pa
 // other outcome completes the agent node with the reviewed artifact and
 // answers the downstream gate, so the run flows on exactly as if the review
 // had happened at the gate node itself.
-func (s *WorkflowRunService) RespondReview(ctx context.Context, taskID, nodeRunID, outcome, feedback string, actor Actor) (RespondReviewResult, error) {
+//
+// expectedWaitID, when non-empty, is the wait id the caller observed for the
+// review round this response answers. It is re-asserted against the wait read
+// inside the transaction: an interactive changes_requested round reopens a
+// fresh wait on the SAME agent node run, so a response bound to an earlier
+// round must not decide the later round's artifact. Callers that predate the
+// binding (direct coordinator callers) leave it empty and keep the node-run
+// routing.
+//
+// The whole decision runs under the per-task human review lock, so the
+// validated wait id stays authoritative through the marker transaction and
+// the terminal CompleteNode calls: a concurrent decision cannot resolve the
+// round and reopen a fresh wait in between.
+func (s *WorkflowRunService) RespondReview(ctx context.Context, taskID, nodeRunID, expectedWaitID, outcome, feedback string, actor Actor) (RespondReviewResult, error) {
+	taskID = strings.TrimSpace(taskID)
 	nodeRunID = strings.TrimSpace(nodeRunID)
+	expectedWaitID = strings.TrimSpace(expectedWaitID)
 	outcome = strings.TrimSpace(outcome)
 	feedback = strings.TrimSpace(feedback)
 	if outcome == "" {
@@ -261,6 +331,12 @@ func (s *WorkflowRunService) RespondReview(ctx context.Context, taskID, nodeRunI
 	if actor == "" {
 		actor = ActorHuman
 	}
+	if s.reviewLockGate != nil {
+		s.reviewLockGate()
+	}
+	unlock := s.reviewLock(taskID)
+	defer unlock()
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return RespondReviewResult{}, err
@@ -284,6 +360,15 @@ func (s *WorkflowRunService) RespondReview(ctx context.Context, taskID, nodeRunI
 	}
 	if !waiting || wait.Kind != WorkflowWaitHumanGate || wait.NodeRunID != nodeRun.ID {
 		return RespondReviewResult{}, fmt.Errorf("%w: task is not waiting on that node", ErrWorkflowConflict)
+	}
+	// The response must answer the review round it was bound to, not just any
+	// wait on the node run: a changes_requested round reopens a fresh wait on
+	// the same node run, so a stale round-N response that raced a concurrent
+	// decision would otherwise pass the node-run check and decide round N+1
+	// with round N's verdict. An empty binding (legacy callers) keeps the
+	// node-run routing.
+	if expectedWaitID != "" && expectedWaitID != wait.ID {
+		return RespondReviewResult{}, fmt.Errorf("%w: task is not waiting on that review round", ErrWorkflowConflict)
 	}
 	details := ParseReviewWaitDetails(wait.Details)
 	if !details.Interactive {
@@ -364,6 +449,9 @@ SELECT COUNT(*) FROM workflow_transitions WHERE workflow_run_id = ? AND idempote
 	}
 	if err := tx.Commit(); err != nil {
 		return RespondReviewResult{}, err
+	}
+	if s.reviewTerminalGate != nil {
+		s.reviewTerminalGate()
 	}
 
 	// Terminal verdict: complete the agent node with the reviewed artifact,

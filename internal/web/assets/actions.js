@@ -106,8 +106,13 @@ export const ACTIONS = {
     const feedback = String(
       element.closest("[data-gate-panel]")?.querySelector("[data-workflow-feedback]")?.value || "",
     ).trim();
+    // review_wait_id binds the response to the review round that was rendered:
+    // an interactive changes_requested round reopens a fresh wait on the same
+    // node run, so a response posted from a stale panel must not resolve the
+    // newer round. The server re-asserts the binding under the review lock.
     await apiPost(workflowPath(dataset, dataset.task, "/workflow/respond"), {
       node_run_id: dataset.workflowRespond,
+      review_wait_id: dataset.reviewWait || "",
       outcome: dataset.outcome || "",
       feedback,
     });
@@ -248,7 +253,16 @@ export const ACTIONS = {
     const nodeRunID = detail?.detail?.run?.current_node_run_id || detail?.detail?.open_wait?.node_run_id || "";
     const outcome = firstGateOutcome(detail);
     if (!nodeRunID || !outcome) return `${taskID} has no open gate to approve`;
-    await apiPost(workflowPath(dataset, taskID, "/workflow/respond"), { node_run_id: nodeRunID, outcome });
+    await apiPost(workflowPath(dataset, taskID, "/workflow/respond"), {
+      node_run_id: nodeRunID,
+      // review_wait_id binds the card approval to the review round this
+      // detail fetch observed: another reviewer may resolve that round and
+      // reopen a fresh wait on the same node run before the POST lands, and
+      // the server then rejects the stale approval instead of deciding the
+      // newer round.
+      review_wait_id: detail?.detail?.open_wait?.id || "",
+      outcome,
+    });
     await app.refresh();
     return "Approved";
   },

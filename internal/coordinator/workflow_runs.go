@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/sqlitex"
@@ -192,6 +193,41 @@ type WorkflowRunService struct {
 	tasks                  *TaskService
 	reviewAuthorCycleLimit int
 	now                    func() time.Time
+
+	// reviewLocksMu guards reviewLocks. Interactive review decisions on one
+	// task are serialised end to end: a response's wait-id validation, its
+	// marker transaction, and its terminal completions must not interleave
+	// with a concurrent decision that resolves the validated wait and reopens
+	// a fresh round on the same node run.
+	reviewLocksMu sync.Mutex
+	reviewLocks   map[string]*reviewLockEntry
+
+	// reviewLockGate is a test seam: when set, RespondReview invokes it just
+	// before taking the per-task review lock. Race tests use it to hold a
+	// stale response at the pre-lock point while a concurrent decision
+	// resolves the round and reopens a fresh wait.
+	reviewLockGate func()
+
+	// reviewLockAcquireGate is a test seam: when set, reviewLock invokes it
+	// after the task's lock entry is looked up (and, with the reference-counted
+	// cleanup, referenced) but before blocking on the entry mutex. The
+	// lock-cleanup race test uses it to hold a queued acquirer at the exact
+	// pre-block point while the holder's cleanup decides whether to drop the
+	// entry.
+	reviewLockAcquireGate func()
+
+	// reviewLockCleanupGate is a test seam: when set, the reviewLock release
+	// func invokes it after unlocking the entry mutex and before dropping the
+	// entry reference. The lock-cleanup race test uses it to hold the cleanup
+	// while a queued acquirer and a third acquirer arrive.
+	reviewLockCleanupGate func()
+
+	// reviewTerminalGate is a test seam: when set, RespondReview invokes it
+	// right after the marker transaction commits on the terminal path, before
+	// the CompleteNode calls. Race tests use it to hold a terminal verdict in
+	// the gap a concurrent decision could otherwise resolve the round and
+	// reopen a fresh wait in.
+	reviewTerminalGate func()
 
 	// Features gates task scheduling on a running feature rebase. It is wired
 	// through the project bundle and stays nil in tests that construct the
