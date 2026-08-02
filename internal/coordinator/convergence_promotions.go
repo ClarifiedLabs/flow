@@ -257,6 +257,10 @@ SELECT
 	}
 
 	featureTitle := source.Title
+	// The planning body carries the promotion lineage as readable context: the
+	// planner is told which source task grew past convergence and how to read its
+	// history before proposing the follow-on graph.
+	planningBody := promotedPlanningBody(input.TaskID, source.Body)
 	var titleTaken int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM features WHERE title_norm = lower(trim(?))`, featureTitle).Scan(&titleTaken); err != nil {
 		return convergencePromotion{}, err
@@ -288,7 +292,7 @@ INSERT INTO tasks (
 	source_task_id, source_change_id, created_at, updated_at
 )
 SELECT ?, ?, ?, priority, ?, ?, ?, id, ?, ?, ?
-FROM tasks WHERE id = ?`, planningTaskID, source.Title, source.Body,
+FROM tasks WHERE id = ?`, planningTaskID, source.Title, planningBody,
 		planningFlowID, featureID, string(input.Actor), evidence.ChangeID,
 		nowText, nowText, input.TaskID); err != nil {
 		return convergencePromotion{}, fmt.Errorf("insert promoted planning task row: %w", err)
@@ -308,7 +312,7 @@ INSERT INTO convergence_promotions (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)`,
 		input.TaskID, run.ID, evidence.Fingerprint, string(evidenceJSON),
 		featureID, planningTaskID, featureTitle, source.Body,
-		planningFlowID, source.Title, source.Body, string(input.Actor), input.Note,
+		planningFlowID, source.Title, planningBody, string(input.Actor), input.Note,
 		nowText, nowText); err != nil {
 		return convergencePromotion{}, fmt.Errorf("prepare convergence promotion: %w", err)
 	}
@@ -339,6 +343,27 @@ INSERT INTO convergence_promotions (
 		return convergencePromotion{}, errors.New("prepared convergence promotion is missing")
 	}
 	return promotion, nil
+}
+
+// promotedPlanningBody prefixes the copied source-task body with the lineage a
+// convergence-promoted planner needs: which source task's implementation grew
+// past convergence, why it is being decomposed, and how to read that history
+// before proposing the follow-on graph. The source body follows verbatim so no
+// original requirement is lost.
+func promotedPlanningBody(sourceTaskID, sourceBody string) string {
+	showCmd := "flow task show " + sourceTaskID
+	workflowCmd := "flow task workflow " + sourceTaskID
+	relationsCmd := "flow task relations " + sourceTaskID
+	preamble := fmt.Sprintf("## Promotion lineage\n\n"+
+		"This task was promoted from a convergence review of task **%s**. That task's implementation grew large enough to require decomposition into a clean-base follow-on plan.\n\n"+
+		"Before proposing tasks, inspect the source task's history to understand why it grew so large and address those causes in the new plan. Run:\n\n"+
+		"    %s\n\n"+
+		"This returns the source task's title, body, and status log (review rounds, blocked checks, retries, and owner notes). For its workflow transitions, review artifacts, and relations, run `%s` and `%s`.",
+		sourceTaskID, showCmd, workflowCmd, relationsCmd)
+	if strings.TrimSpace(sourceBody) == "" {
+		return preamble
+	}
+	return preamble + "\n\n---\n\n" + sourceBody
 }
 
 func (e *WorkflowExecutor) resumeConvergencePromotion(ctx context.Context, promotion convergencePromotion) (ConvergenceReviewResult, error) {

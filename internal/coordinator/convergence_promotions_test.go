@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
@@ -100,6 +101,35 @@ func promoteInput(taskID string, evidence ConvergenceEvidence) ResolveConvergenc
 	}
 }
 
+func TestPromotedPlanningBody(t *testing.T) {
+	t.Run("prepends lineage and inspection commands to the source body", func(t *testing.T) {
+		body := promotedPlanningBody("t-src-1", "Implement the thing.")
+		for _, want := range []string{
+			"task **t-src-1**",
+			"flow task show t-src-1",
+			"flow task workflow t-src-1",
+			"flow task relations t-src-1",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("body missing %q:\n%s", want, body)
+			}
+		}
+		if !strings.HasSuffix(body, "Implement the thing.") {
+			t.Errorf("body does not preserve the source body verbatim:\n%s", body)
+		}
+	})
+
+	t.Run("omits the separator and trailing body when the source body is blank", func(t *testing.T) {
+		body := promotedPlanningBody("t-src-2", "   ")
+		if !strings.Contains(body, "flow task show t-src-2") {
+			t.Errorf("body missing inspection command:\n%s", body)
+		}
+		if strings.Contains(body, "---") {
+			t.Errorf("blank source body should not add a separator:\n%s", body)
+		}
+	})
+}
+
 func TestPromoteConvergenceReviewCreatesCleanBasePlanningWorkflow(t *testing.T) {
 	ctx := context.Background()
 	env, executor, _ := newPromotionTestEnv(t)
@@ -157,6 +187,18 @@ func TestPromoteConvergenceReviewCreatesCleanBasePlanningWorkflow(t *testing.T) 
 	if planningTask.SourceChangeID == nil || *planningTask.SourceChangeID != evidence.ChangeID {
 		t.Fatalf("planning task source_change_id = %v, want %s", planningTask.SourceChangeID, evidence.ChangeID)
 	}
+	// The planning body names the source task and tells the planner how to read
+	// its history, then carries the original body verbatim.
+	for _, want := range []string{
+		"task **" + task.ID + "**",
+		"flow task show " + task.ID,
+		"flow task workflow " + task.ID,
+		"flow task relations " + task.ID,
+	} {
+		if !strings.Contains(planningTask.Body, want) {
+			t.Errorf("planning body missing %q:\n%s", want, planningTask.Body)
+		}
+	}
 	if planningTask.State == nil || *planningTask.State != LifecycleScheduled {
 		t.Fatalf("planning task state = %v, want scheduled", planningTask.State)
 	}
@@ -168,6 +210,9 @@ func TestPromoteConvergenceReviewCreatesCleanBasePlanningWorkflow(t *testing.T) 
 	sourceTask, err := env.tasks.GetTask(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("load source task: %v", err)
+	}
+	if sourceTask.Body != "" && !strings.HasSuffix(planningTask.Body, sourceTask.Body) {
+		t.Errorf("planning body does not end with the source body verbatim.\nsource:\n%s\nplanning:\n%s", sourceTask.Body, planningTask.Body)
 	}
 	if sourceTask.State == nil || *sourceTask.State != LifecycleDone {
 		t.Fatalf("source task state = %v, want done", sourceTask.State)
@@ -436,8 +481,13 @@ UPDATE tasks SET body = 'the oversized source body' WHERE id = ?`, task.ID); err
 	if err != nil {
 		t.Fatalf("promote convergence review: %v", err)
 	}
-	if result.PlanningTask.Body != "the oversized source body" {
-		t.Fatalf("planning task body = %q, want the source body copied", result.PlanningTask.Body)
+	// The promotion lineage preamble is prepended; the source body is preserved
+	// verbatim after it.
+	if !strings.Contains(result.PlanningTask.Body, "flow task show "+task.ID) {
+		t.Fatalf("planning task body missing promotion lineage:\n%s", result.PlanningTask.Body)
+	}
+	if !strings.HasSuffix(result.PlanningTask.Body, "the oversized source body") {
+		t.Fatalf("planning task body = %q, want the source body preserved verbatim", result.PlanningTask.Body)
 	}
 	tags, err := env.tasks.TagsForTask(ctx, result.PlanningTask.ID)
 	if err != nil {

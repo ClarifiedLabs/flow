@@ -80,10 +80,14 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 	}
 
 	taskID := parts[0]
-	// Session credentials may read any task in their project. Project routing
-	// enforces that boundary before dispatch reaches this handler; keep the
-	// tighter source-task check for mutations and task-specific subresources.
-	projectTaskRead := principal.Scope == coordinator.TokenScopeSession && len(parts) == 1 && r.Method == http.MethodGet
+	// Session credentials may read any task in their project — including the
+	// read-only workflow and relations subresources — so a convergence-promoted
+	// planner can inspect the source task's history. Project routing enforces
+	// that boundary before dispatch reaches this handler; keep the tighter
+	// source-task check for mutations and the remaining task-specific
+	// subresources.
+	projectTaskRead := principal.Scope == coordinator.TokenScopeSession && r.Method == http.MethodGet &&
+		(len(parts) == 1 || (len(parts) == 2 && (parts[1] == "workflow" || parts[1] == "relations")))
 	if !projectTaskRead {
 		if err := checkBoundTaskScope(principal, taskID); err != nil {
 			writeError(w, http.StatusForbidden, "forbidden", err.Error())
@@ -148,7 +152,15 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 	}
 
 	if len(parts) == 2 && parts[1] == "relations" {
-		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
+		if r.Method == http.MethodGet {
+			// Reads are open to session credentials too, matching the cross-task
+			// history access granted above; mutations still require owner or
+			// console below.
+			if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
+				writeError(w, http.StatusForbidden, "forbidden", "relation read requires an owner, session, or console token")
+				return
+			}
+		} else if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
 			writeError(w, http.StatusForbidden, "forbidden", "relation operations require owner or console token")
 			return
 		}

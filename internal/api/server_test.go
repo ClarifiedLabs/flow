@@ -1844,6 +1844,39 @@ func TestSessionTokenCanReadDifferentTaskOnlyWithinProject(t *testing.T) {
 	doJSONRequestAs(t, server, "cross-task-session-token", http.MethodGet, foreignPath, nil, http.StatusForbidden, nil)
 }
 
+func TestSessionTokenCanReadDifferentTaskWorkflowAndRelations(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	// The session token is bound to the source task (the promoted planner), but
+	// must read a different in-project task's workflow history and relations.
+	source, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Promoted planner"})
+	if err != nil {
+		t.Fatalf("create source task: %v", err)
+	}
+	target, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Oversized source task"})
+	if err != nil {
+		t.Fatalf("create target task: %v", err)
+	}
+	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
+		Token: "planner-history-token", Scope: coordinator.TokenScopeSession, Subject: "s-history",
+		ProjectID: &fixture.Project.ID, SourceTaskID: &source.ID,
+	}); err != nil {
+		t.Fatalf("store session token: %v", err)
+	}
+
+	var workflow map[string]any
+	doJSONRequestAs(t, fixture.Server, "planner-history-token", http.MethodGet, "/v2/tasks/"+target.ID+"/workflow", nil, http.StatusOK, &workflow)
+
+	var relations contract.TaskRelationsResponse
+	doJSONRequestAs(t, fixture.Server, "planner-history-token", http.MethodGet, "/v2/tasks/"+target.ID+"/relations", nil, http.StatusOK, &relations)
+
+	// Mutations remain bound to the session's own task: linking the target task
+	// from this session credential is still forbidden.
+	doJSONRequestAs(t, fixture.Server, "planner-history-token", http.MethodPost, "/v2/tasks/"+target.ID+"/relations",
+		relationRequest{TargetTaskID: source.ID, Kind: string(coordinator.RelationBlocks)}, http.StatusForbidden, nil)
+}
+
 func TestPromptContextAdvertisesNestedPlanningWorkflow(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
