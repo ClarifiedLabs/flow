@@ -17,6 +17,7 @@ const { mount, reconcile } = await import("./elements/base.js");
 const { renderTaskCard } = await import("./elements/task-card.js");
 const { renderTaskRail } = await import("./elements/task-rail.js");
 const { renderAttentionStrip } = await import("./elements/attention-strip.js");
+const { renderThroughputStrip } = await import("./elements/throughput-strip.js");
 const { renderBoardTable } = await import("./elements/board-table.js");
 const { boardEntries } = await import("./elements/board.js");
 const { renderStepRail } = await import("./elements/step-rail.js");
@@ -35,6 +36,7 @@ const { renderReviewPanel } = await import("./elements/review-panel.js");
 const { renderActivityFeed, activityEntries } = await import("./elements/activity-feed.js");
 const { renderTaskFormView, bindRelationsPickerView, bindTaskFlowControlsView, relationTargetSuggestionsView } = await import("./task-view.js");
 await import("./elements/lane.js");
+await import("./elements/board.js");
 await import("./elements/tab-strip.js");
 const { acquireBusy, handleAction, inFlight, releaseBusy, settleStatus } = await import("./actions.js");
 const { handleFormSubmit } = await import("./forms.js");
@@ -1183,6 +1185,89 @@ test("an epic member note dwells on the render clock, not the wall clock", () =>
 });
 
 // --- element lifecycle -----------------------------------------------------
+
+test("the throughput strip renders all eight buckets in ascending window order", () => {
+  const html = renderThroughputStrip({
+    buckets: [
+      { window: "15m", count: 3 },
+      { window: "30m", count: 8 },
+      { window: "1h", count: 11 },
+      { window: "2h", count: 17 },
+      { window: "4h", count: 23 },
+      { window: "6h", count: 28 },
+      { window: "12h", count: 35 },
+      { window: "24h", count: 40 },
+    ],
+  });
+
+  // Windows in ascending order, each with its cumulative count.
+  const windows = [...html.matchAll(/<span class="window">([^<]+)<\/span>/g)].map((match) => match[1]);
+  assert.deepEqual(windows, ["15m", "30m", "1h", "2h", "4h", "6h", "12h", "24h"]);
+  const counts = [...html.matchAll(/<span class="count">([^<]+)<\/span>/g)].map((match) => match[1]);
+  assert.deepEqual(counts, ["3", "8", "11", "17", "23", "28", "35", "40"]);
+
+  // Leading success marker plus a trailing link to the completed work.
+  assert.match(html, /<span class="mark"[^>]*>✓<\/span>/);
+  assert.match(html, /<span class="label">Done<\/span>/);
+  assert.match(html, /href="\/ui\/tasks\?state=done"/);
+});
+
+test("null or absent stats render an empty (hidden) throughput strip", () => {
+  assert.equal(renderThroughputStrip(null), "");
+  assert.equal(renderThroughputStrip(undefined), "");
+  assert.equal(renderThroughputStrip({}), "");
+  assert.equal(renderThroughputStrip({ buckets: [] }), "");
+});
+
+test("the throughput strip element hides itself while stats are null", async () => {
+  const root = globalThis.document.body;
+  const strip = mountElement(root, "flow-throughput-strip", null);
+  await flush();
+
+  assert.equal(strip.hasAttribute("hidden"), true);
+  assert.equal(strip.innerHTML, "");
+
+  // A poll hands the existing element fresh data: the instance survives, so
+  // a chip under the pointer keeps its hover and focus.
+  const first = strip;
+  strip.data = { buckets: [{ window: "1h", count: 11 }] };
+  await flush();
+  assert.equal(first, strip);
+  assert.equal(strip.hasAttribute("hidden"), false);
+  assert.match(strip.innerHTML, />11<\/span>/);
+  assert.match(strip.innerHTML, />1h<\/span>/);
+  strip.remove();
+});
+
+test("the board feeds the throughput strip fresh stats on every poll", async () => {
+  const root = globalThis.document.body;
+  const board = mountElement(root, "flow-board", {
+    entries: [],
+    showProject: false,
+    stats: { buckets: [{ window: "15m", count: 3 }] },
+  });
+  await flush();
+
+  const strip = board.querySelector("flow-throughput-strip");
+  assert.ok(strip, "the board renders the throughput strip between the attention strip and the surface");
+  assert.equal(strip.hasAttribute("hidden"), false);
+  assert.match(strip.innerHTML, />3<\/span>/);
+  assert.match(strip.innerHTML, />15m<\/span>/);
+
+  // A poll sets fresh data on the same board element: the strip keeps its
+  // instance — so a chip under the pointer keeps its hover and focus — and
+  // picks up the new counts.
+  board.data = {
+    entries: [],
+    showProject: false,
+    stats: { buckets: [{ window: "15m", count: 3 }, { window: "30m", count: 8 }] },
+  };
+  await flush();
+  assert.equal(board.querySelector("flow-throughput-strip"), strip, "a poll must not re-create the strip");
+  assert.match(strip.innerHTML, />8<\/span>/);
+  assert.match(strip.innerHTML, />30m<\/span>/);
+  board.remove();
+});
 
 test("reconcile keeps the element for a surviving key so its state outlives a poll", async () => {
   const root = globalThis.document.body;

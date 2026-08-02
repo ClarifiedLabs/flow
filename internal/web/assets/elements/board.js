@@ -11,6 +11,7 @@ import { define, FlowElement, mount, reconcile } from "./base.js";
 import "./attention-strip.js";
 import "./board-table.js";
 import "./lane.js";
+import "./throughput-strip.js";
 
 // The split in-progress lanes get their own empty copy so an idle board reads
 // as "No active work" / "Nothing waiting" rather than "No tasks" twice over.
@@ -63,15 +64,34 @@ export class FlowBoard extends FlowElement {
     this.setAttribute("data-view", this.view);
     return `
       <flow-attention-strip></flow-attention-strip>
+      <flow-throughput-strip></flow-throughput-strip>
       <div class="surface"></div>
     `;
   }
 
+  // The base paint skips the write — and with it afterPaint — when the board
+  // markup is unchanged, but a poll that only changed the numbers leaves that
+  // markup identical while the strips and the lanes still need the fresh
+  // data. Forward on every paint attempt, not just on writes (same pattern as
+  // the task rail); the strips and lanes are fed in place, so their instances
+  // — and the hover and focus on them — survive the poll.
+  paint() {
+    super.paint();
+    this.syncChildren();
+  }
+
   afterPaint() {
+    this.syncChildren();
+  }
+
+  syncChildren() {
     const entries = this.data?.entries || [];
     const models = entries.map((entry) => entry.model);
     const attention = this.querySelector("flow-attention-strip");
     if (attention) attention.data = models.filter((model) => model.needsYou);
+
+    const throughput = this.querySelector("flow-throughput-strip");
+    if (throughput) throughput.data = this.data?.stats;
 
     const surface = this.querySelector(".surface");
     if (!surface) return;

@@ -4425,7 +4425,7 @@ test("stale poll load does not repaint task route or rearm board polling", async
   assert.equal(status.textContent, "");
 });
 
-test("board route fetches only /v2/board, not the removed /v2/done lane", async () => {
+test("board route fetches the completion stats, not the removed /v2/done lane", async () => {
   const timers = [];
   const fetchCalls = [];
   const title = { textContent: "" };
@@ -4454,6 +4454,14 @@ test("board route fetches only /v2/board, not the removed /v2/done lane", async 
           json: () => Promise.resolve({ boards: [] }),
         });
       }
+      if (path === "/ui/api/v2/stats/completions") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            buckets: [{ window: "15m", count: 3 }, { window: "24h", count: 40 }],
+          }),
+        });
+      }
       throw new Error(`board route unexpectedly fetched ${path}`);
     },
   });
@@ -4470,11 +4478,67 @@ test("board route fetches only /v2/board, not the removed /v2/done lane", async 
   await app.load();
 
   // The Done lane is gone, so the board route must not fire the second
-  // /v2/done request that used to feed it.
+  // /v2/done request that used to feed it; the completion stats feed the
+  // throughput strip instead, and their payload reaches the board element.
   assert.deepEqual(fetchCalls.map((call) => call.path), [
     "/ui/api/v2/projects",
     "/ui/api/v2/board",
+    "/ui/api/v2/stats/completions",
   ]);
+  assert.deepEqual(content.children[0].data.stats, {
+    buckets: [{ window: "15m", count: 3 }, { window: "24h", count: 40 }],
+  });
+  assert.equal(status.textContent, "0 tasks · nothing waiting on you");
+  assert.equal(timers.length, 1);
+});
+
+test("board route tolerates a completion stats failure", async () => {
+  const timers = [];
+  const status = { textContent: "" };
+  const content = new InlineDOMElement("div");
+  const context = await scriptContext({
+    location: { pathname: "/ui/board" },
+    setTimeout(callback, delay) {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    clearTimeout() {},
+  }, {
+    document: inlineDocument(),
+    fetch(path) {
+      if (path === "/ui/api/v2/projects") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ projects: [] }),
+        });
+      }
+      if (path === "/ui/api/v2/board") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ boards: [] }),
+        });
+      }
+      if (path === "/ui/api/v2/stats/completions") {
+        return Promise.reject(new Error("stats down"));
+      }
+      throw new Error(`board route unexpectedly fetched ${path}`);
+    },
+  });
+  const app = new context.FlowApp();
+  app.pollingActive = true;
+  app.querySelector = (selector) => {
+    if (selector === "h1") return { textContent: "" };
+    if (selector === ".status") return status;
+    if (selector === ".content") return content;
+    return { textContent: "" };
+  };
+  app.querySelectorAll = () => [];
+
+  await app.load();
+
+  // A stats failure degrades to null, like the old done fetch: the board
+  // still mounts and the strip stays silent.
+  assert.equal(content.children[0].data.stats, null);
   assert.equal(status.textContent, "0 tasks · nothing waiting on you");
   assert.equal(timers.length, 1);
 });

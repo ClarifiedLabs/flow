@@ -1,0 +1,83 @@
+:host {
+  display: block;
+}
+
+:host([hidden]) {
+  display: none;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 7px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-left: 2px solid var(--ph-merged);
+  border-radius: var(--radius);
+}
+
+.mark {
+  font-size: var(--text-quiet);
+  font-weight: 600;
+  color: var(--ph-merged);
+}
+
+.label {
+  font-size: var(--text-meta);
+  font-weight: 600;
+  letter-spacing: var(--track-section);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* The strip is a scan, not a read: each chip is one cumulative window, and a
+   chip is a link to the completed work it counts. */
+.chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--ph-merged-bg);
+  font-size: var(--text-nano);
+  color: var(--ink-2);
+  white-space: nowrap;
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+
+.chip:hover {
+  color: var(--accent);
+}
+
+.count {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ph-merged);
+}
+
+.sep {
+  opacity: 0.7;
+}
+
+.window {
+  font-size: var(--text-nano);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.all {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+  white-space: nowrap;
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+
+.all:hover {
+  color: var(--accent);
+}

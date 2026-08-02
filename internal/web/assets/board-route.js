@@ -15,14 +15,21 @@ export async function createTaskView(app) {
   await app.load();
 }
 
+// renderBoardRoute fetches the board plus the completion stats that feed the
+// throughput strip. The stats are a pure-renderer input: a failure there is
+// not worth taking the board down, so it degrades to null and the strip stays
+// silent, exactly as the removed /v2/done fetch used to.
 export async function renderBoardRoute(app, context) {
-  const data = await apiGet("/v2/board" + app.projectQuery());
+  const [data, stats] = await Promise.all([
+    apiGet("/v2/board" + app.projectQuery()),
+    apiGet("/v2/stats/completions" + app.projectQuery()).catch(() => null),
+  ]);
   if (context && !app.isActiveLoad(context)) return false;
 
   app.setTitle("Board");
   const showProject = (app.projects || []).length > 1;
   const entries = boardEntries(data, { showProject });
-  const board = mount(app.querySelector(".content"), "flow-board", { entries, showProject });
+  const board = mount(app.querySelector(".content"), "flow-board", { entries, showProject, stats });
 
   const attention = entries.filter((entry) => entry.model.needsYou).length;
   app.setStatus(
