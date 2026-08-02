@@ -25,6 +25,7 @@ var cssModules = []struct{ Name, Scope string }{
 	{"tokens.module.css", ""},
 	{"base.module.css", "flow-app"},
 	{"board.module.css", "flow-board"},
+	{"board-sort.module.css", "flow-board-sort"},
 	{"attention-strip.module.css", "flow-attention-strip"},
 	{"throughput-strip.module.css", "flow-throughput-strip"},
 	{"lane.module.css", "flow-lane"},

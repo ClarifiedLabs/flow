@@ -47,9 +47,27 @@
   flex: 1;
 }
 
-.sort-note {
-  font-size: var(--text-quiet);
-  color: var(--muted);
+/* The sortable headers are real buttons so they are keyboard reachable; they
+   inherit the column header's look and only add the affordance. */
+.th-sort {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  font-weight: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.th-sort:hover {
+  color: var(--ink);
+}
+
+th[aria-sort] .th-sort {
+  color: var(--accent);
 }
 
 /* Scroll horizontally rather than wrap: a wrapped dense table is unreadable,

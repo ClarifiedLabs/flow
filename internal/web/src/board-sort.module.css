@@ -1,0 +1,55 @@
+:host {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The active key reads as a chip so the control matches the view toggle next
+   to it; the direction arrow is its own square button, equally keyboard
+   reachable. */
+.sort-key {
+  appearance: none;
+  font: inherit;
+  font-size: var(--text-ui);
+  font-weight: 600;
+  padding: 4px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+
+.sort-key:hover {
+  border-color: var(--line-2);
+  color: var(--ink);
+}
+
+.sort-key.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.sort-dir {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: var(--text-body);
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+
+.sort-dir:hover {
+  border-color: var(--line-2);
+  color: var(--ink);
+}

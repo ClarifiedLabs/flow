@@ -2,13 +2,14 @@
 // the lanes and the table render the same models so they cannot disagree about
 // what state a task is in.
 
-import { activityGroupOf, cardModel } from "../board-model.js";
+import { activityGroupOf, cardModel, compareBoardCards } from "../board-model.js";
 import { laneTasks } from "../board.js";
-import { LANES } from "../config.js";
+import { BOARD_SORT_DIRS, BOARD_SORT_KEYS, LANES } from "../config.js";
 import { value } from "../normalize.js";
-import { readBoardView, writeBoardView } from "../storage.js";
+import { readBoardSort, readBoardSortChoice, readBoardView, writeBoardSort, writeBoardView } from "../storage.js";
 import { define, FlowElement, mount, reconcile } from "./base.js";
 import "./attention-strip.js";
+import "./board-sort.js";
 import "./board-table.js";
 import "./lane.js";
 import "./throughput-strip.js";
@@ -58,45 +59,122 @@ export function boardEntries(data, { showProject = false } = {}) {
 
 export class FlowBoard extends FlowElement {
   view = readBoardView();
+  // readBoardSort always returns a validated sort: the stored preference, or
+  // the default { key: "number", dir: "asc" }, which the control and the
+  // table headers display. The default is NOT a comparator sort: the server
+  // sends the aggregate board project-grouped and does not order keyed ids
+  // by trailing task number, so a global number sort would reorder today's
+  // payload. Until the user picks a sort (sortExplicit), the entries keep
+  // the server's order — the default is a true no-op.
+  sort = readBoardSort();
+  sortExplicit = readBoardSortChoice() !== null;
 
   render(data) {
     if (!data) return `<div class="empty">Loading board</div>`;
     this.setAttribute("data-view", this.view);
     return `
+      <div class="board-header">
+        <div class="view-toggle" role="group" aria-label="Board view">
+          <button type="button" class="chip${this.view === "lanes" ? " active" : ""}" data-board-view="lanes" aria-pressed="${this.view === "lanes"}">Lanes</button>
+          <button type="button" class="chip${this.view === "table" ? " active" : ""}" data-board-view="table" aria-pressed="${this.view === "table"}">Table</button>
+        </div>
+        <flow-board-sort></flow-board-sort>
+      </div>
       <flow-attention-strip></flow-attention-strip>
       <flow-throughput-strip></flow-throughput-strip>
       <div class="surface"></div>
     `;
   }
 
-  // The base paint skips the write — and with it afterPaint — when the board
-  // markup is unchanged, but a poll that only changed the numbers leaves that
-  // markup identical while the strips and the lanes still need the fresh
-  // data. Forward on every paint attempt, not just on writes (same pattern as
-  // the task rail); the strips and lanes are fed in place, so their instances
-  // — and the hover and focus on them — survive the poll.
+  bind() {
+    // The sort control and the table headers only report intent; the board
+    // owns the sort state, applies it to both views, and persists it.
+    this.addEventListener("board-sort-change", (event) => {
+      const detail = event.detail || {};
+      const key = BOARD_SORT_KEYS.has(detail.key) ? detail.key : this.sort.key;
+      const dir = BOARD_SORT_DIRS.has(detail.dir) ? detail.dir : this.sort.dir;
+      if (key === this.sort.key && dir === this.sort.dir) return;
+      this.sort = { key, dir };
+      // Any control or table-header operation is an explicit sort: from here
+      // on the comparator applies cross-project, even if the choice lands on
+      // the default key and direction.
+      this.sortExplicit = true;
+      writeBoardSort(this.sort);
+      const surface = this.querySelector(".surface");
+      const table = surface && surface.querySelector("flow-board-table");
+      if (table) {
+        // Re-sort the mounted table in place: rebuilding the surface would
+        // discard the table's own filter state, and an active filter chip
+        // must survive a header sort. The table renders the models in the
+        // order it is handed, so pass it the freshly sorted list.
+        const models = this.sortedModels();
+        const sortControl = this.querySelector("flow-board-sort");
+        if (sortControl) sortControl.data = this.sort;
+        const attention = this.querySelector("flow-attention-strip");
+        if (attention) attention.data = models.filter((model) => model.needsYou);
+        table.sort = this.sort;
+        table.data = models;
+        return;
+      }
+      this.invalidate();
+    });
+  }
+
+  // The models both views render, in the order the current sort asks for.
+  // An explicit sort applies cross-project — the aggregate board is one flat
+  // list. Without an explicit choice the entries keep the server's order:
+  // the server sends the board project-grouped (its ListTasks ordering does
+  // not sort keyed ids by trailing task number), so the displayed default is
+  // a no-op on today's payload.
+  sortedModels() {
+    return this.sortedEntries().map((entry) => entry.model);
+  }
+
+  sortedEntries() {
+    const entries = this.data?.entries || [];
+    if (!this.sortExplicit) return entries;
+    const { key = "number", dir = "asc" } = this.sort || {};
+    // compareBoardCards sorts the card models; map the sorted order back to
+    // the entries so the lanes can group them.
+    const entryByID = new Map(entries.map((entry) => [entry.model.id, entry]));
+    return compareBoardCards(
+      entries.map((entry) => entry.model),
+      { key, dir },
+    )
+      .map((model) => entryByID.get(model.id))
+      .filter(Boolean);
+  }
+
+  // The board header never changes with the data, so the base paint skips the
+  // write — and with it afterPaint — on every poll, leaving the mounted lanes
+  // and table on the old models. Forward the fresh, sorted models on every
+  // paint attempt, not just on writes, so a poll re-sorts and refreshes both
+  // views in place.
   paint() {
     super.paint();
-    this.syncChildren();
+    this.forward();
   }
 
   afterPaint() {
-    this.syncChildren();
+    this.forward();
   }
 
-  syncChildren() {
-    const entries = this.data?.entries || [];
+  forward() {
+    const entries = this.sortedEntries();
     const models = entries.map((entry) => entry.model);
     const attention = this.querySelector("flow-attention-strip");
     if (attention) attention.data = models.filter((model) => model.needsYou);
 
+    const sortControl = this.querySelector("flow-board-sort");
+    if (sortControl) sortControl.data = this.sort;
     const throughput = this.querySelector("flow-throughput-strip");
     if (throughput) throughput.data = this.data?.stats;
 
     const surface = this.querySelector(".surface");
     if (!surface) return;
     if (this.view === "table") {
-      mount(surface, "flow-board-table", models);
+      const table = mount(surface, "flow-board-table", models);
+      if (table) table.sort = this.sort;
       return;
     }
     this.paintLanes(surface, entries);
@@ -114,6 +192,13 @@ export class FlowBoard extends FlowElement {
       cards: entries.filter((entry) => entry.lane === key).map((entry) => entry.model),
     }));
     reconcile(surface, lanes, { tag: "flow-lane", key: (lane) => lane.key });
+  }
+
+  handleClick(event) {
+    const view = event.target.closest?.("[data-board-view]");
+    if (!view) return;
+    event.preventDefault();
+    this.toggleView(view.dataset.boardView);
   }
 
   // toggleView is bound to the topbar control and to `v`. The choice persists,

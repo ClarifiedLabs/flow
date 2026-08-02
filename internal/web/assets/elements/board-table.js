@@ -2,18 +2,29 @@
 // layout, so the view stays useful once the board stops fitting on a screen.
 
 import { taskHref } from "../api.js";
-import { BOARD_FILTERS, matchesFilter, sortForAttention } from "../board-model.js";
+import { BOARD_FILTERS, matchesFilter } from "../board-model.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { renderMarkdown } from "../markdown.js";
 import { LIFECYCLE_SCHEDULED, LIFECYCLE_UNSCHEDULED } from "../lifecycle.js";
 import { renderStepRail } from "./step-rail.js";
 import { define, FlowElement } from "./base.js";
 
-export function renderBoardTable(models, filter = "all") {
+export function renderBoardTable(models, filter = "all", sort) {
   const counts = Object.fromEntries(
     BOARD_FILTERS.map(([key]) => [key, models.filter((model) => matchesFilter(model, key)).length]),
   );
-  const rows = sortForAttention(models.filter((model) => matchesFilter(model, filter)));
+  const rows = models.filter((model) => matchesFilter(model, filter));
+  // The board hands the table its sorted models; the headers say which key
+  // that is and let the reader reverse it, sharing the header control's
+  // state. The active column carries aria-sort and an arrow, and the dwell
+  // column is relabelled "Last active" while the activity key is active —
+  // and the cell then renders the same most-recent-of-all-signals timestamp
+  // the sort compares, so a row labelled recently active never shows an
+  // unrelated older dwell clock.
+  const numberActive = sort?.key === "number";
+  const activityActive = sort?.key === "activity";
+  const dir = sort?.dir === "desc" ? "descending" : "ascending";
+  const arrow = (active) => (active ? (sort?.dir === "desc" ? " \u2193" : " \u2191") : "");
   return `
     <div class="chips" role="group" aria-label="Filter tasks">
       ${BOARD_FILTERS.map(
@@ -23,28 +34,31 @@ export function renderBoardTable(models, filter = "all") {
         }>${escapeHTML(label)}<span class="chip-count">${counts[key]}</span></button>`,
       ).join("")}
       <span class="spacer"></span>
-      <span class="sort-note">sort: attention, then dwell</span>
     </div>
     <div class="table-wrap">
       <table>
         <thead>
           <tr>
-            <th>Task</th>
+            <th${numberActive ? ` aria-sort="${dir}"` : ""}>
+              <button type="button" class="th-sort" data-board-sort-key="number" aria-label="Sort by task number">Task${arrow(numberActive)}</button>
+            </th>
             <th class="col-step">Step</th>
             <th>Happening now</th>
-            <th class="col-dwell">Dwell</th>
+            <th class="col-dwell"${activityActive ? ` aria-sort="${dir}"` : ""}>
+              <button type="button" class="th-sort" data-board-sort-key="activity" aria-label="Sort by last active">${activityActive ? "Last active" : "Dwell"}${arrow(activityActive)}</button>
+            </th>
             <th class="col-action">Action</th>
           </tr>
         </thead>
         <tbody>
-          ${rows.length ? rows.map(renderRow).join("") : `<tr><td colspan="5" class="empty">No tasks</td></tr>`}
+          ${rows.length ? rows.map((model) => renderRow(model, activityActive)).join("") : `<tr><td colspan="5" class="empty">No tasks</td></tr>`}
         </tbody>
       </table>
     </div>
   `;
 }
 
-function renderRow(model) {
+function renderRow(model, activityActive) {
   const projectAttr = model.projectID ? ` data-project="${escapeAttr(model.projectID)}"` : "";
   const href = escapeAttr(taskHref(model.projectID, model.id));
   return `
@@ -55,7 +69,7 @@ function renderRow(model) {
       </td>
       <td class="col-step">${model.running ? renderStepRail(model) : `<span class="rail-label is-idle">${escapeHTML(model.lifecycleState.replace("_", " "))}</span>`}</td>
       <td class="col-now">${renderMarkdown(model.activity)}</td>
-      <td class="col-dwell" data-tone="${escapeAttr(model.dwellTone)}">${escapeHTML(model.dwell)}</td>
+      <td class="col-dwell" data-tone="${escapeAttr(activityActive ? model.lastActiveTone : model.dwellTone)}">${escapeHTML(activityActive ? model.lastActive : model.dwell)}</td>
       <td class="col-action">${renderRowAction(model, href, projectAttr)}</td>
     </tr>
   `;
@@ -83,13 +97,27 @@ function renderRowAction(model, href, projectAttr) {
 
 export class FlowBoardTable extends FlowElement {
   filter = "all";
+  // Mirrors readBoardSort's validated default; the board overwrites this with
+  // the shared sort state before the table is visible.
+  sort = { key: "number", dir: "asc" };
 
   render(models) {
     if (!models) return "";
-    return renderBoardTable(models, this.filter);
+    return renderBoardTable(models, this.filter, this.sort);
   }
 
   handleClick(event) {
+    const header = event.target.closest?.("[data-board-sort-key]");
+    if (header) {
+      // A header click sets its key, or reverses the direction when it is
+      // already the active key; the board owns the shared sort state and
+      // persists every change.
+      event.preventDefault();
+      const key = header.dataset.boardSortKey;
+      const dir = this.sort?.key === key && this.sort?.dir === "asc" ? "desc" : "asc";
+      this.dispatchEvent(new CustomEvent("board-sort-change", { detail: { key, dir }, bubbles: true }));
+      return;
+    }
     const chip = event.target.closest?.("[data-board-filter]");
     if (!chip) return;
     const next = chip.dataset.boardFilter;

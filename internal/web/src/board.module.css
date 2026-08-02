@@ -5,6 +5,18 @@
   min-width: 0;
 }
 
+.board-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.view-toggle {
+  display: inline-flex;
+  gap: 6px;
+}
+
 .surface {
   min-width: 0;
 }

@@ -75,6 +75,8 @@ export const DIFF_MODE_STORAGE_KEY = "flow.ui.diffMode";
 // key is no longer read and may linger harmlessly in old browsers.
 export const BOARD_VIEW_STORAGE_KEY = "flow.ui.boardView";
 
+export const BOARD_SORT_STORAGE_KEY = "flow.ui.boardSort";
+
 export const DIAGRAM_MODE_STORAGE_KEY = "flow.ui.diagramMode";
 
 export const DONE_DENSITIES = new Set(["extended", "compact"]);
@@ -82,6 +84,10 @@ export const DONE_DENSITIES = new Set(["extended", "compact"]);
 export const DIFF_MODES = new Set(["unified", "split"]);
 
 export const BOARD_VIEWS = new Set(["lanes", "table"]);
+
+export const BOARD_SORT_KEYS = new Set(["number", "activity"]);
+
+export const BOARD_SORT_DIRS = new Set(["asc", "desc"]);
 
 export const DIAGRAM_MODES = new Set(["run", "graph"]);
 

@@ -205,6 +205,16 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
 
   const dwellSince = value(card, "dwell_since", "DwellSince") || value(task, "updated_at", "UpdatedAt");
   const dwell = formatDwell(dwellSince, now);
+  // The task's raw updated_at and the latest session's agent activity back
+  // the "last active" sort key. The table's relabelled column renders the
+  // same most-recent-of-all-signals timestamp it sorts by, so a card sorted
+  // (and labelled) as recently active cannot display an unrelated older
+  // dwell clock.
+  const updatedAt = value(task, "updated_at", "UpdatedAt");
+  const lastAgentActivityAt = value(card, "last_agent_activity_at", "LastAgentActivityAt");
+  const lastActiveMs = lastActivityMs({ dwellSince, lastAgentActivityAt, updatedAt });
+  const lastActive = formatDwell(lastActiveMs, now);
+  const lastActiveTone = dwellTone(dwellKind, lastActiveMs, now);
 
   // A scheduled task that cannot start says what it is waiting on. The read
   // model already drops resolved blockers, so anything left in the summary is
@@ -266,12 +276,14 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
     dwell,
     dwellLabel,
     dwellSince,
-    // The raw task timestamp backs the "last activity" sort when the card
-    // carries no dwell clock of its own.
-    updatedAt: value(task, "updated_at", "UpdatedAt"),
-    // LastAgentActivityAt comes from the task's latest session; combined with
-    // dwellSince it feeds the board's most-recent-first "last active" sort.
-    lastAgentActivityAt: value(card, "last_agent_activity_at", "LastAgentActivityAt"),
+    updatedAt,
+    lastAgentActivityAt,
+    // The "last active" presentation: the same most-recent-of-all-signals
+    // timestamp the activity sort compares, so the table's relabelled column
+    // shows what it sorts by (value and tone included).
+    lastActiveMs,
+    lastActive,
+    lastActiveTone,
     dwellTone: dwellTone(dwellKind, dwellSince, now),
     priority: Number(value(task, "priority", "Priority") || 0),
     diffStats: value(card, "diff_stats", "DiffStats"),

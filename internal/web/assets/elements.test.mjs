@@ -12,6 +12,10 @@ installTestDOM();
 
 const { cardModel, dwellTone, formatDwell, matchesFilter, sortForAttention, waitActionLabel, waitReasonText, waitingOnBlockers, waitingOnOmitted } =
   await import("./board-model.js");
+const { compareBoardCards, lastActivityMs } = await import("./board-model.js");
+const { readBoardSort, writeBoardSort } = await import("./storage.js");
+const { BOARD_SORT_STORAGE_KEY, BOARD_VIEW_STORAGE_KEY } = await import("./config.js");
+const { renderBoardSort } = await import("./elements/board-sort.js");
 const { nowCardModel, runRows, tabBadges, isOutdatedAnchor, reviewModel, taskModel } = await import("./task-model.js");
 const { mount, reconcile } = await import("./elements/base.js");
 const { renderTaskCard } = await import("./elements/task-card.js");
@@ -39,6 +43,7 @@ const { renderActivityFeed, activityEntries } = await import("./elements/activit
 const { renderTaskFormView, bindRelationsPickerView, bindTaskFlowControlsView, relationTargetSuggestionsView } = await import("./task-view.js");
 await import("./elements/lane.js");
 await import("./elements/board.js");
+await import("./elements/board-sort.js");
 const { renderTabStrip } = await import("./elements/tab-strip.js");
 const { acquireBusy, handleAction, inFlight, releaseBusy, settleStatus } = await import("./actions.js");
 const { handleFormSubmit } = await import("./forms.js");
@@ -630,7 +635,21 @@ test("the table marks attention rows and offers quiet actions elsewhere", () => 
   const html = renderBoardTable(models, "all");
   assert.match(html, /data-needs-you/);
   assert.match(html, /class="quiet-action"/);
-  assert.match(html, /sort: attention, then dwell/);
+});
+
+test("the table headers carry the sort key and reflect its direction", () => {
+  const model = cardModel(entry({ task: { id: "t-0001" } }));
+  const byNumber = renderBoardTable([model], "all", { key: "number", dir: "asc" });
+  assert.match(byNumber, /<th aria-sort="ascending">/);
+  assert.match(byNumber, /data-board-sort-key="number"/);
+  assert.match(byNumber, /data-board-sort-key="activity"/);
+  assert.match(byNumber, />Task ↑</);
+  assert.match(byNumber, />Dwell</, "the dwell column keeps its name while number sorts");
+  const byActivity = renderBoardTable([model], "all", { key: "activity", dir: "desc" });
+  assert.match(byActivity, /<th class="col-dwell" aria-sort="descending">/);
+  assert.match(byActivity, />Last active ↓</, "the dwell column is relabelled while activity sorts");
+  const byDefault = renderBoardTable([model], "all", { key: "number", dir: "asc" });
+  assert.doesNotMatch(byDefault, /sort: attention, then dwell/, "the static sort note is gone");
 });
 
 test("the table renders the now column as markdown", () => {
@@ -640,6 +659,456 @@ test("the table renders the now column as markdown", () => {
   const html = renderBoardTable([model], "all");
   assert.match(html, /<td class="col-now"><div class="md">/);
   assert.match(html, /<strong>line 42<\/strong>/);
+});
+
+// --- board sort -------------------------------------------------------------
+
+function sortEntry(id, lane, dwellSince, project = { id: "p-alpha", name: "Alpha" }) {
+  const entryData = {
+    lane,
+    task: { id, title: id, state: lane === "scheduled" ? "scheduled" : "in_progress" },
+    card: { dwell_since: dwellSince },
+    laneState: lane === "scheduled" ? "scheduled" : lane === "working" ? "working" : "blocked",
+    blocked: false,
+    project,
+  };
+  return { ...entryData, model: cardModel(entryData) };
+}
+
+function sortBoardEntries(dwellAgoMs = HOUR) {
+  const now = Date.now();
+  // The fixture arrives in the server's order — ascending task number per
+  // lane — which the unset default keeps untouched (a no-op).
+  return [
+    sortEntry("t-0001", "scheduled", new Date(now - dwellAgoMs).toISOString()),
+    sortEntry("t-0002", "scheduled", new Date(now - 2 * dwellAgoMs).toISOString()),
+    sortEntry("t-0003", "working", new Date(now - 3 * dwellAgoMs).toISOString()),
+    sortEntry("t-0004", "working", new Date(now - 4 * dwellAgoMs).toISOString()),
+    sortEntry("t-0005", "waiting", new Date(now - 5 * dwellAgoMs).toISOString()),
+    sortEntry("t-0006", "waiting", new Date(now - 6 * dwellAgoMs).toISOString()),
+  ];
+}
+
+function lane(board, key) {
+  // reconcile keys lanes via dataset.key, which is a plain property in the
+  // test DOM rather than a data-* attribute.
+  return [...board.querySelectorAll("flow-lane")].find((laneElement) => laneElement.dataset.key === key);
+}
+
+function laneIDs(board, key) {
+  return lane(board, key).data.cards.map((model) => model.id);
+}
+
+test("compareBoardCards orders by last active and breaks ties by number", () => {
+  const now = Date.now();
+  const older = cardModel(entry({ task: { id: "t-0002" }, card: { dwell_since: new Date(now - 2 * HOUR).toISOString() } }));
+  const newer = cardModel(entry({ task: { id: "t-0001" }, card: { dwell_since: new Date(now - HOUR).toISOString() } }));
+  assert.equal(lastActivityMs(newer), now - HOUR);
+  assert.deepEqual(
+    compareBoardCards([older, newer], { key: "activity", dir: "asc" }).map((model) => model.id),
+    ["t-0002", "t-0001"],
+    "oldest activity sorts first ascending",
+  );
+  assert.deepEqual(
+    compareBoardCards([older, newer], { key: "activity", dir: "desc" }).map((model) => model.id),
+    ["t-0001", "t-0002"],
+    "newest activity sorts first descending",
+  );
+  const tie = cardModel(entry({ task: { id: "t-0003" }, card: { dwell_since: new Date(now - HOUR).toISOString() } }));
+  // Ties break by ascending task number in both directions: descending must
+  // reorder by the key only, and equal keys keep t-0001 ahead of t-0003.
+  assert.deepEqual(
+    compareBoardCards([tie, newer], { key: "activity", dir: "desc" }).map((model) => model.id),
+    ["t-0001", "t-0003"],
+    "equal activity keeps the ascending-number tie-break when descending (t-0001 leads)",
+  );
+  assert.deepEqual(
+    compareBoardCards([newer, tie], { key: "activity", dir: "asc" }).map((model) => model.id),
+    ["t-0001", "t-0003"],
+    "ascending breaks the same tie by ascending number",
+  );
+});
+
+test("last active is the most recent of dwell, agent activity, and updated_at", () => {
+  const now = Date.now();
+  // A card the agent is actively working carries a newer last_agent_activity_at
+  // than its dwell clock; it must sort as newer than a card with only an
+  // older dwell clock.
+  const working = cardModel(
+    entry({
+      task: { id: "t-0002" },
+      card: {
+        dwell_since: new Date(now - 2 * HOUR).toISOString(),
+        last_agent_activity_at: new Date(now - 5 * 60_000).toISOString(),
+      },
+    }),
+  );
+  const idle = cardModel(entry({ task: { id: "t-0001" }, card: { dwell_since: new Date(now - HOUR).toISOString() } }));
+  assert.equal(working.lastAgentActivityAt, new Date(now - 5 * 60_000).toISOString(), "cardModel projects the card's last agent activity");
+  assert.equal(lastActivityMs(working), now - 5 * 60_000, "agent activity wins over the dwell clock");
+  assert.deepEqual(
+    compareBoardCards([working, idle], { key: "activity", dir: "desc" }).map((model) => model.id),
+    ["t-0002", "t-0001"],
+    "a card with newer agent activity sorts ahead of a card with an older dwell clock",
+  );
+  assert.deepEqual(
+    compareBoardCards([working, idle], { key: "activity", dir: "asc" }).map((model) => model.id),
+    ["t-0001", "t-0002"],
+    "the same card sorts behind when ascending",
+  );
+
+  // A card with no dwell clock at all falls back to its task's updated_at
+  // instead of comparing as 0, and a merely touched task outranks a stale one.
+  const touched = cardModel(
+    entry({
+      task: { id: "t-0004", updated_at: new Date(now - 10 * 60_000).toISOString() },
+      card: { dwell_since: "" },
+    }),
+  );
+  const stale = cardModel(entry({ task: { id: "t-0003" }, card: { dwell_since: new Date(now - 3 * HOUR).toISOString() } }));
+  assert.equal(touched.updatedAt, new Date(now - 10 * 60_000).toISOString(), "cardModel projects the task's updated_at");
+  assert.equal(lastActivityMs(touched), now - 10 * 60_000, "a card without a dwell clock still has a last-active time");
+  assert.deepEqual(
+    compareBoardCards([touched, stale], { key: "activity", dir: "desc" }).map((model) => model.id),
+    ["t-0004", "t-0003"],
+    "a card with only a newer updated_at sorts ahead of an older dwell clock",
+  );
+  assert.equal(lastActivityMs({ id: "t-0005" }), 0, "a model with no timestamps at all compares as 0");
+});
+
+test("the sort control shows the active key highlighted with its direction", () => {
+  const byDefault = renderBoardSort();
+  assert.match(byDefault, />\s*Task number\s*</, "the default sort is Task number");
+  assert.match(byDefault, />↑</);
+  const byNumber = renderBoardSort({ key: "number", dir: "asc" });
+  assert.match(byNumber, /data-board-sort-key/);
+  assert.match(byNumber, /aria-pressed="true"/);
+  assert.match(byNumber, />\s*Task number\s*</);
+  assert.match(byNumber, />↑</);
+  assert.match(byNumber, /currently ascending/);
+  const byActivity = renderBoardSort({ key: "activity", dir: "desc" });
+  assert.match(byActivity, />\s*Last active\s*</);
+  assert.match(byActivity, />↓</);
+  assert.match(byActivity, /currently descending/);
+});
+
+test("the sort control cycles keys and toggles direction through real buttons", async () => {
+  const root = globalThis.document.body;
+  const control = mountElement(root, "flow-board-sort", { key: "number", dir: "asc" });
+  await flush();
+  const changes = [];
+  control.addEventListener("board-sort-change", (event) => changes.push(event.detail));
+  control.querySelector("[data-board-sort-key]").click();
+  control.querySelector("[data-board-sort-dir]").click();
+  assert.deepEqual(changes, [{ key: "activity" }, { dir: "desc" }]);
+  control.remove();
+});
+
+test("the board sort control reorders both live lanes and persists", async () => {
+  window.localStorage.removeItem(BOARD_SORT_STORAGE_KEY);
+  const root = globalThis.document.body;
+  const board = mountElement(root, "flow-board", { entries: sortBoardEntries() });
+  await flush();
+
+  assert.deepEqual(laneIDs(board, "scheduled"), ["t-0001", "t-0002"], "the unset default is a no-op: the lanes keep the server's order");
+  assert.deepEqual(laneIDs(board, "working"), ["t-0003", "t-0004"]);
+  assert.deepEqual(laneIDs(board, "waiting"), ["t-0005", "t-0006"]);
+  const control = board.querySelector("flow-board-sort");
+  assert.match(control.innerHTML, />\s*Task number\s*</, "the control shows the active default key");
+  assert.match(control.innerHTML, />↑</, "with the ascending direction");
+
+  control.querySelector("[data-board-sort-key]").click();
+  await flush();
+  assert.deepEqual(laneIDs(board, "scheduled"), ["t-0002", "t-0001"], "activity asc puts the oldest first");
+  assert.deepEqual(laneIDs(board, "working"), ["t-0004", "t-0003"]);
+  assert.deepEqual(laneIDs(board, "waiting"), ["t-0006", "t-0005"]);
+  assert.deepEqual(readBoardSort(), { key: "activity", dir: "asc" }, "the click persisted");
+
+  board.querySelector("flow-board-sort").querySelector("[data-board-sort-dir]").click();
+  await flush();
+  assert.deepEqual(laneIDs(board, "scheduled"), ["t-0001", "t-0002"], "activity desc puts the newest first");
+  assert.deepEqual(readBoardSort(), { key: "activity", dir: "desc" });
+  board.remove();
+});
+
+test("a fresh board loads the persisted sort", async () => {
+  writeBoardSort({ key: "activity", dir: "desc" });
+  const root = globalThis.document.body;
+  const board = mountElement(root, "flow-board", { entries: sortBoardEntries() });
+  await flush();
+  assert.deepEqual(laneIDs(board, "scheduled"), ["t-0001", "t-0002"], "activity desc loads across a reload");
+  board.remove();
+  window.localStorage.removeItem(BOARD_SORT_STORAGE_KEY);
+});
+
+test("the table view consumes the same sort and its headers set it back", async () => {
+  window.localStorage.removeItem(BOARD_SORT_STORAGE_KEY);
+  const root = globalThis.document.body;
+  const board = mountElement(root, "flow-board", { entries: sortBoardEntries() });
+  await flush();
+
+  board.querySelector('[data-board-view="table"]').click();
+  await flush();
+  const rowIDs = () =>
+    [...board.querySelector("tbody").children].map((row) => row.querySelector(".id").textContent);
+  assert.deepEqual(
+    rowIDs(),
+    ["t-0001", "t-0002", "t-0003", "t-0004", "t-0005", "t-0006"],
+    "the table opens on the default Task number ascending sort",
+  );
+
+  let table = board.querySelector("flow-board-table");
+  assert.match(table.innerHTML, /<th aria-sort="ascending">/, "the Task column shows the active direction");
+  assert.match(table.innerHTML, />Task ↑</);
+  assert.match(table.innerHTML, />Dwell</, "the dwell column keeps its name while number sorts");
+  table.querySelector('[data-board-sort-key="activity"]').click();
+  await flush();
+  assert.deepEqual(rowIDs(), ["t-0006", "t-0005", "t-0004", "t-0003", "t-0002", "t-0001"], "the table header sets the shared sort, oldest activity first");
+  assert.deepEqual(readBoardSort(), { key: "activity", dir: "asc" });
+  table = board.querySelector("flow-board-table");
+  assert.match(table.innerHTML, />\s*Last active/, "the dwell header is relabelled while activity sorts");
+
+  board.querySelector('[data-board-view="lanes"]').click();
+  await flush();
+  assert.deepEqual(laneIDs(board, "scheduled"), ["t-0002", "t-0001"], "the lanes pick up the table-chosen sort");
+  board.remove();
+});
+
+test("the table's Last active column shows the timestamp it sorts by, not the dwell clock", () => {
+  const now = Date.now();
+  // This card's dwell clock is old, but its agent activity is fresh: the
+  // activity sort ranks it by the fresh timestamp, so under the relabelled
+  // "Last active" header the cell must show the fresh elapsed time — never
+  // the unrelated older dwell duration.
+  const active = cardModel(
+    entry({
+      task: { id: "t-0002" },
+      card: {
+        dwell_since: new Date(now - 2 * HOUR).toISOString(),
+        last_agent_activity_at: new Date(now - 5 * 60_000).toISOString(),
+      },
+    }),
+  );
+  const quiet = cardModel(entry({ task: { id: "t-0001" }, card: { dwell_since: new Date(now - HOUR).toISOString() } }));
+  assert.equal(active.lastActiveMs, now - 5 * 60_000, "lastActiveMs is the most recent of all signals");
+  assert.equal(active.lastActive, "5m", "the projected Last active value derives from that timestamp");
+  assert.equal(active.dwell, "2h", "the dwell clock itself stays the older value");
+
+  const byActivity = renderBoardTable([active, quiet], "all", { key: "activity", dir: "desc" });
+  assert.match(byActivity, />Last active/, "the header is relabelled while activity sorts");
+  assert.match(byActivity, /<td class="col-dwell"[^>]*>5m<\/td>/, "the cell shows the sort timestamp (5m), not the dwell clock (2h)");
+  assert.doesNotMatch(byActivity, />2h<\/td>/, "the unrelated dwell duration is not shown under Last active");
+
+  const byNumber = renderBoardTable([active, quiet], "all", { key: "number", dir: "asc" });
+  assert.match(byNumber, />Dwell</, "the column keeps its Dwell name while number sorts");
+  assert.match(byNumber, />2h<\/td>/, "and the cell shows the dwell clock as before");
+});
+
+test("a table header sort keeps the active filter", async () => {
+  window.localStorage.removeItem(BOARD_SORT_STORAGE_KEY);
+  const root = globalThis.document.body;
+  const board = mountElement(root, "flow-board", { entries: sortBoardEntries() });
+  await flush();
+
+  board.querySelector('[data-board-view="table"]').click();
+  await flush();
+  const rowIDs = () =>
+    [...board.querySelector("tbody").children].map((row) => row.querySelector(".id").textContent);
+  const chip = board.querySelector('[data-board-filter="queued"]');
+
+  chip.click();
+  await flush();
+  assert.deepEqual(rowIDs(), ["t-0001", "t-0002"], "the queued filter selects the scheduled tasks in the active default order");
+
+  board.querySelector('[data-board-sort-key="activity"]').click();
+  await flush();
+  assert.deepEqual(rowIDs(), ["t-0002", "t-0001"], "sorting reorders within the selected scope");
+  const chipAfter = board.querySelector('[data-board-filter="queued"]');
+  assert.equal(chipAfter.getAttribute("aria-pressed"), "true", "the filter chip stays active after sorting");
+  board.remove();
+});
+
+test("an unset or corrupt sort keeps the server's project-grouped order in both views", async () => {
+  window.localStorage.removeItem(BOARD_SORT_STORAGE_KEY);
+  window.localStorage.removeItem(BOARD_VIEW_STORAGE_KEY);
+  const root = globalThis.document.body;
+  // The server sends the aggregate board project by project (Alpha before
+  // Beta), and its ListTasks ordering does not sort keyed ids by trailing
+  // task number. A global number sort would move t-beta-0002 ahead of
+  // t-alpha-0003; the unset default must be a no-op instead, reproducing the
+  // payload exactly — while the control and the table headers still display
+  // the default Task number ascending state.
+  const now = Date.now();
+  const alpha = { id: "p-alpha", name: "Alpha" };
+  const beta = { id: "p-beta", name: "Beta" };
+  const grouped = [
+    sortEntry("t-alpha-0001", "scheduled", new Date(now - HOUR).toISOString(), alpha),
+    sortEntry("t-alpha-0003", "scheduled", new Date(now - 3 * HOUR).toISOString(), alpha),
+    sortEntry("t-beta-0002", "scheduled", new Date(now - 2 * HOUR).toISOString(), beta),
+  ];
+  const board = mountElement(root, "flow-board", { entries: grouped });
+  await flush();
+  assert.deepEqual(
+    laneIDs(board, "scheduled"),
+    ["t-alpha-0001", "t-alpha-0003", "t-beta-0002"],
+    "the lanes keep the server's project-grouped order — the default is a no-op",
+  );
+  const control = board.querySelector("flow-board-sort");
+  assert.match(control.innerHTML, />\s*Task number\s*</, "the control still displays the default key");
+  assert.match(control.innerHTML, />↑</, "and the ascending direction");
+  board.querySelector('[data-board-view="table"]').click();
+  await flush();
+  const rowIDs = () =>
+    [...board.querySelector("tbody").children].map((row) => row.querySelector(".id").textContent);
+  assert.deepEqual(
+    rowIDs(),
+    ["t-alpha-0001", "t-alpha-0003", "t-beta-0002"],
+    "the table keeps the same server order",
+  );
+  assert.match(
+    board.querySelector("flow-board-table").innerHTML,
+    /<th aria-sort="ascending">/,
+    "the Task column still shows the default direction",
+  );
+  board.remove();
+
+  // A corrupt stored value is treated as unset: the same no-op default applies.
+  window.localStorage.setItem(BOARD_SORT_STORAGE_KEY, "{not json");
+  window.localStorage.removeItem(BOARD_VIEW_STORAGE_KEY);
+  const corrupt = mountElement(root, "flow-board", { entries: grouped });
+  await flush();
+  assert.deepEqual(
+    laneIDs(corrupt, "scheduled"),
+    ["t-alpha-0001", "t-alpha-0003", "t-beta-0002"],
+    "a corrupt preference falls back to the no-op default",
+  );
+  corrupt.remove();
+  window.localStorage.removeItem(BOARD_SORT_STORAGE_KEY);
+});
+
+test("a user sort is cross-project, persists, and survives a reload", async () => {
+  window.localStorage.removeItem(BOARD_SORT_STORAGE_KEY);
+  window.localStorage.removeItem(BOARD_VIEW_STORAGE_KEY);
+  const root = globalThis.document.body;
+  const now = Date.now();
+  const alpha = { id: "p-alpha", name: "Alpha" };
+  const beta = { id: "p-beta", name: "Beta" };
+  const grouped = [
+    sortEntry("t-alpha-0001", "scheduled", new Date(now - HOUR).toISOString(), alpha),
+    sortEntry("t-alpha-0003", "scheduled", new Date(now - 3 * HOUR).toISOString(), alpha),
+    sortEntry("t-beta-0002", "scheduled", new Date(now - 2 * HOUR).toISOString(), beta),
+  ];
+  const board = mountElement(root, "flow-board", { entries: grouped });
+  await flush();
+
+  // The board opens with the unset default, which is a no-op: the table
+  // shows the server's project-grouped order. Clicking the Task header is an
+  // explicit user sort, so it applies cross-project from then on.
+  board.querySelector('[data-board-view="table"]').click();
+  await flush();
+  const rowIDs = () =>
+    [...board.querySelector("tbody").children].map((row) => row.querySelector(".id").textContent);
+  assert.deepEqual(
+    rowIDs(),
+    ["t-alpha-0001", "t-alpha-0003", "t-beta-0002"],
+    "the table opens in the server's project-grouped order (no-op default)",
+  );
+  board.querySelector('[data-board-sort-key="number"]').click();
+  await flush();
+  assert.deepEqual(
+    rowIDs(),
+    ["t-alpha-0003", "t-beta-0002", "t-alpha-0001"],
+    "clicking the Task header reverses the direction cross-project",
+  );
+  assert.deepEqual(readBoardSort(), { key: "number", dir: "desc" }, "the reversal is persisted");
+
+  board.querySelector('[data-board-view="lanes"]').click();
+  await flush();
+  assert.deepEqual(
+    laneIDs(board, "scheduled"),
+    ["t-alpha-0003", "t-beta-0002", "t-alpha-0001"],
+    "the lanes apply the same cross-project sort",
+  );
+  board.remove();
+
+  // Reload: the persisted sort still applies cross-project.
+  const reloaded = mountElement(root, "flow-board", { entries: grouped });
+  await flush();
+  assert.deepEqual(
+    laneIDs(reloaded, "scheduled"),
+    ["t-alpha-0003", "t-beta-0002", "t-alpha-0001"],
+    "the persisted sort survives a reload and stays cross-project",
+  );
+
+  // An explicit sort keeps applying cross-project even when it lands back on
+  // the default key and direction: once the user has picked a sort, ascending
+  // number is a comparator sort — unlike the unset no-op default.
+  reloaded.querySelector('[data-board-view="table"]').click();
+  await flush();
+  const reloadedRows = () =>
+    [...reloaded.querySelector("tbody").children].map((row) => row.querySelector(".id").textContent);
+  reloaded.querySelector('[data-board-sort-key="number"]').click();
+  await flush();
+  assert.deepEqual(
+    reloadedRows(),
+    ["t-alpha-0001", "t-beta-0002", "t-alpha-0003"],
+    "an explicit ascending number sort reorders cross-project",
+  );
+  assert.deepEqual(readBoardSort(), { key: "number", dir: "asc" }, "the explicit ascending choice is persisted");
+  reloaded.remove();
+  window.localStorage.removeItem(BOARD_SORT_STORAGE_KEY);
+});
+
+test("a poll that replaces board data refreshes the mounted lanes and the table", async () => {
+  window.localStorage.removeItem(BOARD_SORT_STORAGE_KEY);
+  window.localStorage.removeItem(BOARD_VIEW_STORAGE_KEY);
+  const root = globalThis.document.body;
+  const board = mountElement(root, "flow-board", { entries: sortBoardEntries() });
+  await flush();
+
+  // Activate Last active so the poll has a sort to apply to both views.
+  board.querySelector("flow-board-sort").querySelector("[data-board-sort-key]").click();
+  await flush();
+  const cardIDs = (key) =>
+    [...lane(board, key).querySelectorAll("flow-task-card")].map((card) => card.data.id);
+  assert.deepEqual(cardIDs("scheduled"), ["t-0002", "t-0001"], "activity asc puts the oldest first");
+
+  // The route only replaces board.data on a poll; the header markup never
+  // changes, so the base paint skips the write. The mounted lanes must still
+  // re-sort and refresh their cards: t-0001's activity ages past t-0002's.
+  const now = Date.now();
+  const aged = sortBoardEntries();
+  aged[0] = sortEntry("t-0001", "scheduled", new Date(now - 3 * HOUR).toISOString());
+  board.data = { entries: aged };
+  await flush();
+  assert.deepEqual(
+    cardIDs("scheduled"),
+    ["t-0001", "t-0002"],
+    "a poll re-applies the sort to the mounted lanes without any interaction",
+  );
+
+  // Same poll with the table mounted: opening the table on the polled data,
+  // then replacing the data again, must reorder the rows in place.
+  board.querySelector('[data-board-view="table"]').click();
+  await flush();
+  const rowIDs = () =>
+    [...board.querySelector("tbody").children].map((row) => row.querySelector(".id").textContent);
+  assert.deepEqual(
+    rowIDs(),
+    ["t-0006", "t-0005", "t-0004", "t-0001", "t-0003", "t-0002"],
+    "the table opens on the polled, sorted data",
+  );
+
+  const refreshed = sortBoardEntries();
+  refreshed[0] = sortEntry("t-0001", "scheduled", new Date(now - HOUR).toISOString());
+  board.data = { entries: refreshed };
+  await flush();
+  assert.deepEqual(
+    rowIDs(),
+    ["t-0006", "t-0005", "t-0004", "t-0003", "t-0002", "t-0001"],
+    "a poll re-applies the sort to the mounted table without any interaction",
+  );
+  board.remove();
 });
 
 // --- task detail -----------------------------------------------------------

@@ -1,7 +1,7 @@
 // Typed localStorage read/write helpers for UI preferences (projects, theme,
 // done-view config) plus pure path -> route / poll-config parsing.
 
-import { BOARD_VIEWS, BOARD_VIEW_STORAGE_KEY, DIAGRAM_MODES, DIAGRAM_MODE_STORAGE_KEY, BOARD_POLL_MS, CHANGE_POLL_MS, DIAGNOSTICS_POLL_MS, DIFF_MODES, DIFF_MODE_STORAGE_KEY, DONE_DENSITIES, DONE_DENSITY_STORAGE_KEY, DONE_OUTCOMES, DONE_OUTCOME_STORAGE_KEY, MAX_POLL_BACKOFF_MS, PROJECT_STORAGE_KEY, TASKS_ALL_STATE, TASKS_PROJECT_STORAGE_KEY, TASKS_QUERY_STORAGE_KEY, TASKS_STATE_STORAGE_KEY, TASKS_STATES, THEME_PREFERENCES, THEME_STORAGE_KEY } from "./config.js";
+import { BOARD_SORT_DIRS, BOARD_SORT_KEYS, BOARD_SORT_STORAGE_KEY, BOARD_VIEWS, BOARD_VIEW_STORAGE_KEY, DIAGRAM_MODES, DIAGRAM_MODE_STORAGE_KEY, BOARD_POLL_MS, CHANGE_POLL_MS, DIAGNOSTICS_POLL_MS, DIFF_MODES, DIFF_MODE_STORAGE_KEY, DONE_DENSITIES, DONE_DENSITY_STORAGE_KEY, DONE_OUTCOMES, DONE_OUTCOME_STORAGE_KEY, MAX_POLL_BACKOFF_MS, PROJECT_STORAGE_KEY, TASKS_ALL_STATE, TASKS_PROJECT_STORAGE_KEY, TASKS_QUERY_STORAGE_KEY, TASKS_STATE_STORAGE_KEY, TASKS_STATES, THEME_PREFERENCES, THEME_STORAGE_KEY } from "./config.js";
 
 export function readSelectedProjects() {
   try {
@@ -41,6 +41,39 @@ export function readBoardView() {
 export function writeBoardView(view) {
   try {
     window.localStorage?.setItem(BOARD_VIEW_STORAGE_KEY, view);
+  } catch {
+    // Persistence is best-effort.
+  }
+}
+
+// The board sort is shared by both board views, so the choice persists like
+// the view toggle does. The stored shape is validated on read; an unset or
+// corrupt value falls back to the default { key: "number", dir: "asc" }.
+// readBoardSortChoice distinguishes the two: null means no preference was
+// stored, and the board then keeps the server's order (the default is a
+// no-op on today's project-grouped payload) until the user picks a sort.
+export function readBoardSortChoice() {
+  try {
+    const raw = window.localStorage?.getItem(BOARD_SORT_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) || {};
+      if (BOARD_SORT_KEYS.has(parsed.key) && BOARD_SORT_DIRS.has(parsed.dir)) {
+        return { key: parsed.key, dir: parsed.dir };
+      }
+    }
+  } catch {
+    // Fall through to the validated default.
+  }
+  return null;
+}
+
+export function readBoardSort() {
+  return readBoardSortChoice() || { key: "number", dir: "asc" };
+}
+
+export function writeBoardSort(sort) {
+  try {
+    window.localStorage?.setItem(BOARD_SORT_STORAGE_KEY, JSON.stringify(sort));
   } catch {
     // Persistence is best-effort.
   }

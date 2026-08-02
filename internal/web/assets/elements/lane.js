@@ -17,7 +17,20 @@ export class FlowLane extends FlowElement {
     `;
   }
 
+  // The lane markup never includes the cards — they are reconciled into the
+  // cards container — so the base paint skips the write (and with it
+  // afterPaint) when a poll only changed the card models. Reconcile on every
+  // paint attempt so fresh models reach the mounted cards.
+  paint() {
+    super.paint();
+    this.reconcileCards();
+  }
+
   afterPaint() {
+    this.reconcileCards();
+  }
+
+  reconcileCards() {
     const lane = this.data;
     if (!lane?.cards?.length) return;
     reconcile(this.querySelector(".cards"), lane.cards, {
