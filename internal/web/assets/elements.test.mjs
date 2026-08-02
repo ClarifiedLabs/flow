@@ -20,6 +20,7 @@ const { renderAttentionStrip } = await import("./elements/attention-strip.js");
 const { renderThroughputStrip } = await import("./elements/throughput-strip.js");
 const { renderBoardTable } = await import("./elements/board-table.js");
 const { boardEntries } = await import("./elements/board.js");
+const { LANES } = await import("./config.js");
 const { renderStepRail } = await import("./elements/step-rail.js");
 const { renderRunList } = await import("./elements/run-list.js");
 const { renderRunSpine } = await import("./elements/run-spine.js");
@@ -321,6 +322,19 @@ function boardPayload(tasks, laneStates) {
     }],
   };
 }
+
+test("LANES wire keys match the /v2/board PascalCase lane keys", () => {
+  // coordinator.Board marshals without json tags, so /v2/board emits the Go
+  // field names verbatim and laneTasks reads each lane's list by the exact
+  // third element of the LANES triple. If these drift (t-flow-0136 renamed
+  // them to snake_case) every lane renders empty against the served payload
+  // while fixture-built tests stay green. The coordinator test
+  // TestBoardWireKeysPinTheBoardLaneContract pins the same keys Go-side.
+  assert.deepEqual(
+    LANES.map(([, , field]) => field),
+    ["Scheduled", "InProgress", "InProgress"],
+  );
+});
 
 test("boardEntries buckets every in-progress task into exactly one lane", () => {
   const entries = boardEntries(boardPayload(

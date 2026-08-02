@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"io"
 	"path/filepath"
 	"slices"
@@ -835,6 +836,40 @@ func TestBoardResultDerivesAwaitingWorkerFromLiveJobState(t *testing.T) {
 				t.Fatalf("lane state = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestBoardWireKeysPinTheBoardLaneContract pins the /v2/board wire shape:
+// config.js LANES reads each board list by the exact JSON key encoding/json
+// emits for Board. Board has no json tags, so the keys are the verbatim Go
+// field names ("Unscheduled", "Scheduled", "InProgress") — a rename or
+// snake_case tag would silently empty the board UI while fixture-based JS
+// tests stay green (see t-flow-0136). The JS suite pins LANES to these keys.
+func TestBoardWireKeysPinTheBoardLaneContract(t *testing.T) {
+	board := Board{
+		Unscheduled:    []Task{{ID: "t-unscheduled"}},
+		Scheduled:      []Task{{ID: "t-scheduled"}},
+		InProgress:     []Task{{ID: "t-in-progress"}},
+		Backlog:        []Task{{ID: "t-backlog"}},
+		UpNext:         []Task{{ID: "t-up-next"}},
+		NeedsAttention: []Task{{ID: "t-needs-attention"}},
+	}
+	raw, err := json.Marshal(board)
+	if err != nil {
+		t.Fatalf("marshal board: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal board json: %v", err)
+	}
+	want := []string{"InProgress", "Scheduled", "Unscheduled"}
+	got := make([]string, 0, len(decoded))
+	for key := range decoded {
+		got = append(got, key)
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("board json keys = %v, want %v", got, want)
 	}
 }
 
