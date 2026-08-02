@@ -52,6 +52,11 @@ export class FlowChange extends FlowElement {
   // head changes, so notes composed against uninspected code can never ride
   // along in a submission that names a newer head.
   _draftHead = "";
+  // The unsubmitted overall comment. It lives in the review bar's input
+  // between repaints, but the input is not a [data-draft] node, so
+  // captureDrafts cannot see it — captureReviewBody reads it back into this
+  // field before any repaint, and the re-rendered bar restores it.
+  _reviewBody = "";
 
   // The head whose code is on screen right now: the diff response names the
   // head the server rendered (what the reviewer actually saw), and the change
@@ -158,7 +163,7 @@ export class FlowChange extends FlowElement {
       };
     }
     const bar = this.querySelector("flow-review-bar");
-    if (bar) bar.data = { pendingCount: this.drafts.size };
+    if (bar) bar.data = { pendingCount: this.drafts.size, body: this._reviewBody };
   }
 
   async handleClick(event) {
@@ -206,9 +211,9 @@ export class FlowChange extends FlowElement {
     queueMicrotask(() => this.querySelector(`[data-draft="${cssEscape(key)}"] textarea`)?.focus());
   }
 
-  // The change key (id:head) this element last painted. Drafts are anchored
-  // to the rendered change's files and lines, so the key separates the two
-  // repaint kinds that land on this same element:
+  // The change key (id:displayed-head) this element last painted. Drafts are
+  // anchored to the rendered change's files and lines, so the key separates
+  // the two repaint kinds that land on this same element:
   //   - the same key: a data-driven repaint (a metadata revalidation that
   //     flips the review state or a thread badge) replaces the draft editors,
   //     so the live textarea values must be read back into the drafts map
@@ -229,10 +234,22 @@ export class FlowChange extends FlowElement {
     // same-key capture.
     const change = value(this.data || {}, "change", "Change") || {};
     const id = value(change, "id", "ID") || "";
-    const head = value(change, "head_sha", "HeadSHA") || "";
+    // The head side of the key is the *displayed* head — the diff response's
+    // own head_sha when the diff names one, falling back to the change
+    // metadata's — the same head render() anchors the drafts to and
+    // submitReview() posts against. The two GETs are not atomic: the metadata
+    // can lag (or lead) the diff. Keying on the metadata head alone would
+    // treat a diff-head move under unchanged metadata as a same-key repaint
+    // and capture the old head's overall comment into the new head's bar;
+    // keying on the displayed head moves the key exactly when the code on
+    // screen changes.
+    const head = this._displayedHead;
     const key = id && head ? `${id}:${head}` : "";
     if (key !== this.#paintedKey) {
       this.drafts.clear();
+      // The overall comment is anchored to the same displayed head as the
+      // inline drafts: a moved head must not carry it into the new head's bar.
+      this._reviewBody = "";
       // FlowElement skips the write when the rendered HTML is unchanged, and
       // the head summary abbreviates the SHA, so a moved head can render
       // byte-identical markup. Force the write so the clear lands and a stale
@@ -240,6 +257,10 @@ export class FlowChange extends FlowElement {
       this.invalidate();
     } else {
       this.captureDrafts();
+      // The overall-comment input is not a [data-draft] node, so the inline
+      // capture cannot see it; read its live value back the same way before
+      // the write replaces the bar.
+      this.captureReviewBody();
     }
     super.paint();
     this.#paintedKey = key;
@@ -252,6 +273,14 @@ export class FlowChange extends FlowElement {
       const draft = this.drafts.get(node.dataset.draft);
       if (draft) draft.body = String(node.querySelector("[data-draft-body]")?.value || "");
     }
+  }
+
+  // The overall-comment input is not a [data-draft] node, so captureDrafts
+  // leaves it alone. Read its live value back before any same-head repaint
+  // that would replace the review bar and discard what was typed.
+  captureReviewBody() {
+    const input = this.querySelector("[data-review-body]");
+    this._reviewBody = input ? String(input.value || "") : "";
   }
 
   // submitReview gets the same pending state as the action buttons: the
@@ -336,7 +365,15 @@ export class FlowChange extends FlowElement {
       // the change to a newer head while the request was out, and the reviewer
       // could already be drafting against it — so clear the submitted drafts
       // only while that head is still on screen.
-      if (this._paintedHead === headSHA) this.drafts.clear();
+      if (this._paintedHead === headSHA) {
+        this.drafts.clear();
+        // The submitted body is consumed: drop the captured draft and the
+        // live input value, or the refresh's same-key repaint would capture
+        // the submitted text back into the fresh bar.
+        this._reviewBody = "";
+        const input = this.querySelector("[data-review-body]");
+        if (input) input.value = "";
+      }
       // The verdict flow is its own dispatcher (acquireBusy/POST/settleStatus
       // run inline here), so stamp the refresh with the settle-burst
       // provenance token directly instead of going through actionScope.

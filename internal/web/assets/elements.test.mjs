@@ -2413,6 +2413,46 @@ test("a review verdict marks the button busy and names the in-flight submission"
   appNode.remove();
 });
 
+test("a successful same-head submission clears the submitted overall comment from the fresh review bar", async () => {
+  const root = globalThis.document.body;
+  let resolveRequest;
+  const calls = stubReviewFetch(
+    () =>
+      new Promise((resolve) => {
+        resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+      }),
+  );
+  const { appNode, change, statuses } = mountChange(root, reviewChangeData());
+  await flush();
+
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  const bodyInput = change.querySelector("[data-review-body]");
+  bodyInput.value = "overall feedback";
+  // The settle refresh repaints the change with fresh data for the same head,
+  // the way a poll would in production. The review bar is replaced, and the
+  // same-key repaint must not capture the consumed text back into the fresh
+  // input.
+  appNode.refresh = async () => {
+    change.data = { ...reviewChangeData(), review_state: "approved" };
+    await flush();
+  };
+
+  const pending = change.handleClick({ target: approve, preventDefault() {} });
+  const posted = JSON.parse(calls[0].options.body);
+  assert.equal(posted.body, "overall feedback", "the submission carries the typed overall comment");
+
+  resolveRequest();
+  await pending;
+  await flush();
+
+  const repaintedInput = change.querySelector("[data-review-body]");
+  assert.ok(repaintedInput && repaintedInput !== bodyInput, "the settle refresh replaced the comment input");
+  assert.equal(repaintedInput.value, "", "the submitted overall comment does not reappear in the fresh review bar");
+  assert.deepEqual(statuses, ["Approving\u2026", "Approved"]);
+  change.remove();
+  appNode.remove();
+});
+
 test("an empty comment reports 'Nothing to post' when no mutation is pending", async () => {
   const root = globalThis.document.body;
   const { appNode, change, statuses } = mountChange(root, reviewChangeData());
@@ -2569,6 +2609,54 @@ test("a repaint while a review is in flight keeps the verdict controls suppresse
   assert.equal(repaintedRequestChanges.disabled, false);
   assert.equal(repaintedBodyInput.disabled, false, "the repainted input is restored on settle");
   assert.equal(inFlight.size, 0);
+  change.remove();
+  appNode.remove();
+});
+
+test("an unsubmitted overall comment survives a same-head repaint of the review bar", async () => {
+  const root = globalThis.document.body;
+  const { appNode, change } = mountChange(root, reviewChangeData());
+  await flush();
+
+  const bodyInput = change.querySelector("[data-review-body]");
+  bodyInput.value = "still typing the overall comment";
+
+  // A poll or same-head metadata revalidation repaints the change while the
+  // reviewer is still typing, outside any submission. The inline drafts map
+  // cannot see the overall-comment input, so the live value must be captured
+  // before the write and restored into the fresh bar.
+  change.data = { ...reviewChangeData(), review_state: "changes_requested" };
+  await flush();
+
+  const repaintedInput = change.querySelector("[data-review-body]");
+  assert.ok(repaintedInput && repaintedInput !== bodyInput, "the repaint replaced the comment input");
+  assert.equal(repaintedInput.value, "still typing the overall comment", "the unsubmitted overall comment survives the repaint");
+  change.remove();
+  appNode.remove();
+});
+
+test("a diff-head move under unchanged metadata drops the old head's overall comment", async () => {
+  const root = globalThis.document.body;
+  const { appNode, change } = mountChange(root, reviewChangeData());
+  await flush();
+
+  const bodyInput = change.querySelector("[data-review-body]");
+  bodyInput.value = "overall feedback against h1";
+
+  // The change and diff GETs are not atomic: the diff advances to a new head
+  // while the metadata still names the old one. The element re-renders with
+  // the diff's head — what the reviewer now sees — and the old head's comment
+  // must not ride into the new head's bar, where a later submission would
+  // post it against code the reviewer never inspected.
+  change.data = {
+    ...reviewChangeData(),
+    diff: { ...reviewChangeData().diff, head_sha: "def456789abc" },
+  };
+  await flush();
+
+  const repaintedInput = change.querySelector("[data-review-body]");
+  assert.ok(repaintedInput && repaintedInput !== bodyInput, "the repaint replaced the comment input");
+  assert.equal(repaintedInput.value, "", "the old head's overall comment does not ride into the new head's bar");
   change.remove();
   appNode.remove();
 });
@@ -3645,6 +3733,32 @@ test("a same-head metadata refresh that changes markup keeps an unblurred inline
   assert.notEqual(fresh, textarea, "the markup-changing repaint replaced the draft editor");
   assert.match(fresh.textContent, /unblurred note/, "the unblurred draft text survives the repaint");
   assert.equal(detail.querySelector("flow-change").drafts.get("h1.go:1").body, "unblurred note", "the live value is captured into the drafts map");
+  detail.remove();
+});
+
+test("a same-head metadata refresh that changes markup keeps an unsubmitted overall comment", async () => {
+  const root = globalThis.document.body;
+  const state = { head: "h1", files: diffFiles("h1") };
+  stubChangeFetch(state);
+  const detail = await mountTaskDetail(root, "h1");
+  await settleChange(detail);
+
+  const change = detail.querySelector("flow-change");
+  const bodyInput = change.querySelector("[data-review-body]");
+  bodyInput.value = "overall comment still being written";
+
+  // The refreshed metadata changes the rendered markup (a review-state flip),
+  // so the revalidation's same-head repaint rewrites the review bar — and must
+  // restore the unsubmitted overall comment into the fresh input.
+  state.reviewState = "changes_requested";
+  detail.data = taskDetailModel("h1");
+  await flush();
+  await settleChange(detail);
+
+  assert.match(changePanelHTML(detail), /changes requested/, "the refreshed review state rendered");
+  const fresh = detail.querySelector("flow-change").querySelector("[data-review-body]");
+  assert.notEqual(fresh, bodyInput, "the markup-changing repaint replaced the comment input");
+  assert.equal(fresh.value, "overall comment still being written", "the unsubmitted overall comment survives the revalidation");
   detail.remove();
 });
 

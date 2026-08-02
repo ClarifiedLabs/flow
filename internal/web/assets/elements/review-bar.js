@@ -5,7 +5,7 @@
 import { escapeAttr, escapeHTML } from "../html.js";
 import { define, FlowElement } from "./base.js";
 
-export function renderReviewBar(pendingCount, busyVerdict = "") {
+export function renderReviewBar(pendingCount, busyVerdict = "", body = "") {
   const placeholder = pendingCount
     ? `Overall comment — ${pendingCount} pending inline note${pendingCount === 1 ? "" : "s"} will be posted with this`
     : "Overall comment";
@@ -21,7 +21,7 @@ export function renderReviewBar(pendingCount, busyVerdict = "") {
   };
   return `
     <span class="caption">Finish review</span>
-    <input name="body" type="text" data-review-body placeholder="${escapeAttr(placeholder)}" autocomplete="off"${busyVerdict ? " disabled" : ""} />
+    <input name="body" type="text" data-review-body value="${escapeAttr(body)}" placeholder="${escapeAttr(placeholder)}" autocomplete="off"${busyVerdict ? " disabled" : ""} />
     ${verdictButton("comment", "Comment")}
     ${verdictButton("request_changes", "Request changes")}
     ${verdictButton("approve", "Approve", { primary: true })}
@@ -33,7 +33,15 @@ export class FlowReviewBar extends FlowElement {
     // The busy verdict comes from the owning change at render time: the
     // in-flight registry lives outside the DOM, so a repaint (poll, draft
     // change) reproduces the suppression instead of losing it.
-    return renderReviewBar(payload?.pendingCount || 0, this.closest?.("flow-change")?.reviewBusyVerdict || "");
+    return renderReviewBar(payload?.pendingCount || 0, this.closest?.("flow-change")?.reviewBusyVerdict || "", payload?.body || "");
+  }
+
+  afterPaint() {
+    // A real browser derives the input's value from the value attribute; the
+    // test DOM does not, so stamp the property as well — the restored body
+    // must read back the same way in both.
+    const input = this.querySelector("[data-review-body]");
+    if (input) input.value = String(this.data?.body || "");
   }
 
   get body() {
