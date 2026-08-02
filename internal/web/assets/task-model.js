@@ -350,23 +350,34 @@ export const RELATION_GROUPS = [
   { key: "related", label: "Related" },
 ];
 
+// The lifecycle vocabulary below mirrors the server's task lifecycle
+// (LifecycleState in internal/coordinator/tasks.go) and is the single source of
+// truth for the task-relations verdict. "" is the wire encoding of a valid
+// unscheduled task: the relation payload's SourceState is a non-pointer
+// LifecycleState, so an unscheduled blocker ships a *present* empty state and —
+// like the server's blocked-by read model, which clears a blocker only once it
+// is done — is a confirmed blocker. Every other member of LIFECYCLE_UNFINISHED
+// is a non-done lifecycle state the server serializes. The Go parity test
+// TestTaskRelationsLifecycleParity (internal/web) parses these exports and
+// fails if they drift from the Go constants — enumerated exhaustively in
+// coordinator.AllLifecycleStates — so adding a server lifecycle state cannot
+// silently leave this allowlist stale.
+export const LIFECYCLE_UNFINISHED = new Set(["", "scheduled", "in_progress"]);
+
+export const LIFECYCLE_DONE = "done";
+
 // blockerVerdict reads the denormalized lifecycle state a relation payload ships
 // for the blocker side and reduces it to the tri-state the relations row renders:
 // true is a confirmed unfinished blocker, false a confirmed done one, and null an
-// unknown one. Field presence is preserved on purpose: the wire encoding of a
-// valid unscheduled task is a *present* empty state (the server's SourceState is
-// a non-pointer LifecycleState), so only that — or a present scheduled /
-// in_progress state — is a confirmed blocker, matching the server's blocked-by
-// read model, which clears a blocker only once it is done. A missing or null
-// state is a malformed payload the read model never emits, and a state that is
-// present but outside the lifecycle vocabulary (whitespace, an unknown token)
-// or not a string at all is one we cannot trust — both render unknown rather
-// than being read as a confirmed non-done blocker.
+// unknown one. A missing or null state is a malformed payload the read model
+// never emits, and a state that is present but outside the lifecycle vocabulary
+// (whitespace, an unknown token) or not a string at all is one we cannot trust —
+// both render unknown rather than being read as a confirmed non-done blocker.
 export function blockerVerdict(relation) {
   const state = relation == null ? undefined : relation["source_state"] ?? relation["SourceState"];
-  if (state === "done") return false;
+  if (state === LIFECYCLE_DONE) return false;
   if (typeof state !== "string") return null; // absent, null, or not a string: malformed.
-  if (state === "" || state === "scheduled" || state === "in_progress") return true;
+  if (LIFECYCLE_UNFINISHED.has(state)) return true;
   return null; // any other string is outside the lifecycle vocabulary.
 }
 

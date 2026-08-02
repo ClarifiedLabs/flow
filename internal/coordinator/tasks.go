@@ -45,6 +45,25 @@ const (
 	LifecycleDone       LifecycleState = "done"
 )
 
+// AllLifecycleStates enumerates every LifecycleState constant in declaration
+// order. It is the server's exhaustive lifecycle vocabulary: the task-relations
+// parity test (internal/web/task_relations_parity_test.go) iterates it to prove
+// the client's verdict covers every state the server serializes, so a newly
+// added non-done state fails the build until the client allowlist catches up.
+// TestAllLifecycleStatesExhaustive (internal/coordinator) parses every
+// LifecycleState constant in this package with go/parser — no matter which
+// file or declaration form, including derived values like
+// `LifecycleScheduled + "_paused"`, whose inferred type is LifecycleState,
+// and constants typed or converted through a type alias of LifecycleState —
+// and fails if a constant is added without being listed here, so it is the
+// drift guard that keeps this enumeration and the LifecycleState const block
+// in lockstep.
+var AllLifecycleStates = [...]LifecycleState{
+	LifecycleScheduled,
+	LifecycleInProgress,
+	LifecycleDone,
+}
+
 type InProgressSubstate string
 
 const (

@@ -9,7 +9,7 @@ import { flush, installTestDOM, mountElement } from "./test-dom.mjs";
 
 installTestDOM();
 
-const { relationGroups, RELATION_GROUPS, taskModel, blockerVerdict } = await import("./task-model.js");
+const { relationGroups, RELATION_GROUPS, taskModel, blockerVerdict, LIFECYCLE_UNFINISHED, LIFECYCLE_DONE } = await import("./task-model.js");
 const { renderTaskRelations, RELATION_KIND_OPTIONS } = await import("./elements/task-relations.js");
 const { handleFormSubmit } = await import("./forms.js");
 const { handleAction, inFlight } = await import("./actions.js");
@@ -381,6 +381,16 @@ test("blockerVerdict renders a malformed lifecycle value unknown, not blocking",
   assert.equal(blockerVerdict({ source_state: "DONE" }), null);
   assert.equal(blockerVerdict({ source_state: {} }), null);
   assert.equal(blockerVerdict({ SourceState: "bogus" }), null);
+});
+
+test("blockerVerdict agrees with the exported lifecycle vocabulary", () => {
+  // The vocabulary is the anchor the Go parity test checks against the server's
+  // constants; the verdict must treat every unfinished member as a confirmed
+  // blocker and the done state as finished.
+  for (const state of LIFECYCLE_UNFINISHED) {
+    assert.equal(blockerVerdict({ source_state: state }), true, `vocabulary state ${JSON.stringify(state)} must confirm a blocker`);
+  }
+  assert.equal(blockerVerdict({ source_state: LIFECYCLE_DONE }), false, "the done state must clear a blocker");
 });
 
 test("a blocked-by row with a malformed state renders unknown, not the blocking flag", async () => {
