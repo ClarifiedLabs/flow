@@ -71,6 +71,18 @@ export function changeModelKey(model) {
     .join(":");
 }
 
+// changeHeadKey builds the canonical 2-part `${id}:${head}` key that names a
+// change at a head. Every construction site (poll-head comparison in render,
+// paintChange's model key, reconcileChangeHead's model key, revalidateChange's
+// pending marker, and adoptChangeHead's re-key) must produce the exact same
+// string so the poll-head equality comparison stays in sync with the pending
+// marker; a one-off separator, ordering, or coercion change at any site would
+// silently desynchronize them with no compile- or test-time signal. All sites
+// route through this helper so the format can only drift in one place.
+export function changeHeadKey(id, head) {
+  return `${String(id || "")}:${String(head || "")}`;
+}
+
 // CHANGE_AHEAD_LAG_POLLS bounds how many polls may keep naming the
 // pre-adoption head before the ahead-cache exemption expires. A revalidation
 // or load can fetch a head the poll has not reported yet; the exemption keeps
@@ -167,7 +179,7 @@ export class FlowTaskDetail extends FlowElement {
       // revalidation does not cover it, and if the attempt gives up (failed or
       // mismatched diff) the poll's stale bit is what queues the documented
       // retry on the next paint.
-      const pollHead = `${String(value(model.change, "id", "ID") || "")}:${String(value(model.change, "head_sha", "HeadSHA") || "")}`;
+      const pollHead = changeHeadKey(value(model.change, "id", "ID"), value(model.change, "head_sha", "HeadSHA"));
       if (this.changeData && (!this.changeAheadKey || this.changeDiffPending()) && pollHead !== this.changePendingKey) this.changeStale = true;
       // A failed load has no pair to revalidate, but the same-key poll still
       // means the failure may be transient: mark it for a retry on the next
@@ -395,7 +407,7 @@ export class FlowTaskDetail extends FlowElement {
     }
     const id = String(value(change, "id", "ID") || "");
     const head = String(value(change, "head_sha", "HeadSHA") || "");
-    const modelKey = `${id}:${head}`;
+    const modelKey = changeHeadKey(id, head);
     // Reconcile the cached pair against the model head before deciding whether
     // to keep it. This is shared with render(), which runs it for polls that
     // arrive while another tab is open, so a moved-head revalidation that is
@@ -463,7 +475,7 @@ export class FlowTaskDetail extends FlowElement {
     if (!change) return false;
     const id = String(value(change, "id", "ID") || "");
     if (!id) return false;
-    const modelKey = `${id}:${String(value(change, "head_sha", "HeadSHA") || "")}`;
+    const modelKey = changeHeadKey(id, value(change, "head_sha", "HeadSHA"));
     if (modelKey === this.changeKey) {
       // The model has caught up to the cached head. If a moved-head
       // revalidation is still verifying a different head that a poll already
@@ -662,7 +674,7 @@ export class FlowTaskDetail extends FlowElement {
         // generation). The marker carries no data, so an unverified head is never
         // rendered; it clears below the moment the pair verifies (adoptChangeHead
         // takes over) or the attempt gives up.
-        this.changePendingKey = `${id}:${fetchedHead}`;
+        this.changePendingKey = changeHeadKey(id, fetchedHead);
         this.changePendingSeen = false;
         const diff = await apiGet(`/v2/changes/${encodeURIComponent(id)}/diff`).catch(() => null);
         if (generation !== this.changeGeneration || key !== this.changeKey) return;
@@ -704,7 +716,7 @@ export class FlowTaskDetail extends FlowElement {
   // before /diff became available); the ahead window protects that pair too,
   // and the pending diff keeps retrying on every poll.
   adoptChangeHead(id, head, key) {
-    const next = `${id}:${head}`;
+    const next = changeHeadKey(id, head);
     if (next === key) return;
     this.changeKey = next;
     this.renderedChangeKey = changeModelKey({ id: this.data?.id, change: { id, head_sha: head } });
