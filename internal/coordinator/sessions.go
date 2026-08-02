@@ -2980,6 +2980,62 @@ LIMIT ?`, taskID, limit)
 	return scanRows(rows, scanSession)
 }
 
+// LatestSessionForTasks returns the latest session per task in a single grouped
+// query, keyed by task ID. It matches ListSessionsForTask(ctx, taskID, 1)
+// exactly: the latest session is the one that would come first under
+// ORDER BY updated_at DESC, created_at DESC, id DESC (the fixed-width
+// timestamp text and the '|' separator make the concatenated sort key order
+// identical to that ordering, and id is unique, so each task maps to at most
+// one row). Tasks without sessions are absent from the result. It exists so
+// board-style read models can load the "last active" timestamp for many tasks
+// without an N+1 query.
+func (s *SessionService) LatestSessionForTasks(ctx context.Context, taskIDs []string) (map[string]Session, error) {
+	result := make(map[string]Session, len(taskIDs))
+	if len(taskIDs) == 0 {
+		return result, nil
+	}
+
+	ids := make([]string, 0, len(taskIDs))
+	seen := make(map[string]bool, len(taskIDs))
+	for _, id := range taskIDs {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" || seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		ids = append(ids, trimmed)
+	}
+	if len(ids) == 0 {
+		return result, nil
+	}
+
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+
+	rows, err := s.db.QueryContext(ctx, sessionSelectSQL+`
+JOIN (
+	SELECT task_id AS tid, MAX(updated_at || '|' || created_at || '|' || id) AS sort_key
+	FROM sessions
+	WHERE `+inPredicate("task_id", len(ids))+`
+	GROUP BY tid
+) latest ON latest.tid = sessions.task_id
+WHERE `+inPredicate("sessions.task_id", len(ids))+`
+	AND (sessions.updated_at || '|' || sessions.created_at || '|' || sessions.id) = latest.sort_key`, append(args, args...)...)
+	if err != nil {
+		return nil, fmt.Errorf("list latest task sessions: %w", err)
+	}
+	latest, err := scanRows(rows, scanSession)
+	if err != nil {
+		return nil, err
+	}
+	for _, session := range latest {
+		result[session.TaskID] = session
+	}
+	return result, nil
+}
+
 func (s *SessionService) ActiveAuthorSessionForTask(ctx context.Context, taskID string) (Session, bool, error) {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {

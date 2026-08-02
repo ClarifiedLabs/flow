@@ -939,3 +939,105 @@ func TestMarkPersistentSessionExitedRejectsConsoleRole(t *testing.T) {
 		t.Fatal("console lease released by rejected process-exit call")
 	}
 }
+
+// TestLatestSessionForTasks pins the batched latest-session lookup's semantics:
+// each task maps to the session that ListSessionsForTask(ctx, taskID, 1) would
+// return (updated_at, then created_at, then id, all descending), and tasks
+// without sessions are absent from the result.
+func TestLatestSessionForTasks(t *testing.T) {
+	ctx := context.Background()
+	fixture := newSessionServiceFixture(t)
+
+	withSessions, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Latest session with sessions"})
+	if err != nil {
+		t.Fatalf("create task with sessions: %v", err)
+	}
+	single, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Latest session single"})
+	if err != nil {
+		t.Fatalf("create single-session task: %v", err)
+	}
+	empty, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Latest session empty"})
+	if err != nil {
+		t.Fatalf("create empty task: %v", err)
+	}
+
+	insertSession := func(t *testing.T, id string, taskID string, createdAt, updatedAt time.Time, activity *time.Time) {
+		t.Helper()
+		now := formatTime(time.Now().UTC())
+		jobID := "j-" + id
+		leaseID := "l-" + id
+		if _, err := fixture.store.DB().ExecContext(ctx, `
+INSERT INTO jobs (id, task_id, role, state, capacity_bucket, created_at, updated_at)
+VALUES (?, ?, 'author', 'finished', 'persistent_agent', ?, ?)`,
+			jobID, taskID, now, now); err != nil {
+			t.Fatalf("insert job for session %s: %v", id, err)
+		}
+		if _, err := fixture.store.DB().ExecContext(ctx, `
+INSERT INTO leases (id, job_id, worker_id, capacity_bucket, leased_at, expires_at)
+VALUES (?, ?, 'w-test', 'persistent_agent', ?, ?)`,
+			leaseID, jobID, now, now); err != nil {
+			t.Fatalf("insert lease for session %s: %v", id, err)
+		}
+		var activityText any
+		if activity != nil {
+			activityText = formatTime(*activity)
+		}
+		if _, err := fixture.store.DB().ExecContext(ctx, `
+INSERT INTO sessions (
+	id, task_id, job_id, lease_id, worker_id, role, workspace_mode, runtime_state,
+	branch, base, harness, token_hash, created_at, updated_at, last_agent_activity_at
+) VALUES (?, ?, ?, ?, 'w-test', 'author', 'change', 'finished',
+	'task/latest', 'main', 'harness', ?, ?, ?, ?)`,
+			id, taskID, jobID, leaseID, "tok-"+id,
+			formatTime(createdAt), formatTime(updatedAt), activityText); err != nil {
+			t.Fatalf("insert session %s: %v", id, err)
+		}
+	}
+
+	ten := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
+	eleven := time.Date(2026, 1, 2, 11, 0, 0, 0, time.UTC)
+	noon := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	one := time.Date(2026, 1, 2, 13, 0, 0, 0, time.UTC)
+
+	// s-1 loses on updated_at; s-2 loses on created_at (same updated_at as
+	// s-3); s-3/s-4/s-5 tie on updated_at and created_at, so id DESC decides,
+	// and s-5 carries the newest activity of the tied trio.
+	insertSession(t, "s-1", withSessions.ID, ten, eleven, &ten)
+	insertSession(t, "s-2", withSessions.ID, ten, noon, &eleven)
+	insertSession(t, "s-3", withSessions.ID, eleven, noon, &noon)
+	insertSession(t, "s-4", withSessions.ID, eleven, noon, &one)
+	insertSession(t, "s-5", withSessions.ID, eleven, noon, pointerTime(one.Add(time.Minute)))
+	insertSession(t, "s-single", single.ID, one, one, &one)
+
+	latest, err := fixture.sessions.LatestSessionForTasks(ctx, []string{withSessions.ID, single.ID, empty.ID})
+	if err != nil {
+		t.Fatalf("latest sessions for tasks: %v", err)
+	}
+	if len(latest) != 2 {
+		t.Fatalf("latest sessions = %+v, want exactly the two tasks with sessions", latest)
+	}
+	if got := latest[withSessions.ID]; got.ID != "s-5" || got.LastAgentActivityAt == nil || !got.LastAgentActivityAt.Equal(one.Add(time.Minute)) {
+		t.Fatalf("latest session for %s = %+v, want s-5 with activity %v", withSessions.ID, got, one.Add(time.Minute))
+	}
+	if got := latest[single.ID]; got.ID != "s-single" || got.LastAgentActivityAt == nil || !got.LastAgentActivityAt.Equal(one) {
+		t.Fatalf("latest session for %s = %+v, want s-single with activity %v", single.ID, got, one)
+	}
+	if _, ok := latest[empty.ID]; ok {
+		t.Fatalf("latest sessions contains %s, want absent (no sessions)", empty.ID)
+	}
+
+	// The batched lookup must agree with the per-task reader it replaces.
+	for taskID, want := range map[string]string{withSessions.ID: "s-5", single.ID: "s-single"} {
+		got, err := fixture.sessions.ListSessionsForTask(ctx, taskID, 1)
+		if err != nil {
+			t.Fatalf("list sessions for %s: %v", taskID, err)
+		}
+		if len(got) != 1 || got[0].ID != want {
+			t.Fatalf("ListSessionsForTask(%s) = %+v, want [%s]", taskID, got, want)
+		}
+	}
+}
+
+func pointerTime(value time.Time) *time.Time {
+	return &value
+}

@@ -34,6 +34,17 @@ func (s *projectServer) buildUITaskCards(ctx context.Context, tasks []coordinato
 		return nil, fmt.Errorf("load task relations: %w", err)
 	}
 
+	// The "last active" sort needs real session agent activity, not just the
+	// dwell clock: surface the latest session's timestamp per card. Load all of
+	// them in one grouped query alongside the other batched per-task reads.
+	var latestSessionsByTask map[string]coordinator.Session
+	if s.sessions != nil {
+		latestSessionsByTask, err = s.sessions.LatestSessionForTasks(ctx, taskIDs)
+		if err != nil {
+			return nil, fmt.Errorf("load latest sessions: %w", err)
+		}
+	}
+
 	for _, task := range tasks {
 		card := uiTaskCard{TaskID: task.ID}
 		tags, err := s.tasks.TagsForTask(ctx, task.ID)
@@ -106,12 +117,8 @@ func (s *projectServer) buildUITaskCards(ctx context.Context, tasks []coordinato
 			}
 			// The "last active" sort needs real session agent activity, not just
 			// the dwell clock: surface the latest session's timestamp per card.
-			latestSessions, err := s.sessions.ListSessionsForTask(ctx, task.ID, 1)
-			if err != nil {
-				return nil, fmt.Errorf("load latest session for %s: %w", task.ID, err)
-			}
-			if len(latestSessions) > 0 {
-				card.LastAgentActivityAt = latestSessions[0].LastAgentActivityAt
+			if latest, ok := latestSessionsByTask[task.ID]; ok {
+				card.LastAgentActivityAt = latest.LastAgentActivityAt
 			}
 		}
 		if s.checks != nil {

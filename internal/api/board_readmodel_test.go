@@ -15,6 +15,7 @@ import (
 
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
+	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
@@ -808,5 +809,90 @@ func TestBoardCardsLoadRelationsWithConstantQueries(t *testing.T) {
 	}
 	if many != one {
 		t.Fatalf("relation queries grew with card count: 1 task = %d, 6 tasks = %d", one, many)
+	}
+}
+
+// TestBoardCardsLoadLatestSessionsWithConstantQueries asserts the read model
+// does not regress to a per-task latest-session query: building cards for any
+// number of tasks loads the latest sessions in a single batched query.
+func TestBoardCardsLoadLatestSessionsWithConstantQueries(t *testing.T) {
+	ctx := context.Background()
+
+	build := func(taskCount int) int {
+		db, recorder := openCountingDB(t)
+		tasks := coordinator.NewTaskService(db, "p-test")
+		sessions := coordinator.NewSessionService(db, tasks, flowworker.NewService(db))
+		taskIDs := make([]string, 0, taskCount)
+		for i := 0; i < taskCount; i++ {
+			task, err := tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: fmt.Sprintf("Task %d", i)})
+			if err != nil {
+				t.Fatalf("create task %d: %v", i, err)
+			}
+			taskIDs = append(taskIDs, task.ID)
+		}
+		// Give every task one finished session so the batched lookup has rows to
+		// return. Finished sessions never match the active-session reads, so the
+		// only per-card session work left is the latest-session batch.
+		now := time.Now().UTC()
+		for i, taskID := range taskIDs {
+			jobID := fmt.Sprintf("j-session-%d", i)
+			leaseID := fmt.Sprintf("l-session-%d", i)
+			if _, err := db.ExecContext(ctx, `
+INSERT INTO jobs (id, task_id, role, state, capacity_bucket, created_at, updated_at)
+VALUES (?, ?, 'author', 'finished', 'persistent_agent', ?, ?)`,
+				jobID, taskID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+				t.Fatalf("insert session job %d: %v", i, err)
+			}
+			if _, err := db.ExecContext(ctx, `
+INSERT INTO leases (id, job_id, worker_id, capacity_bucket, leased_at, expires_at)
+VALUES (?, ?, 'w-test', 'persistent_agent', ?, ?)`,
+				leaseID, jobID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+				t.Fatalf("insert session lease %d: %v", i, err)
+			}
+			if _, err := db.ExecContext(ctx, `
+INSERT INTO sessions (
+	id, task_id, job_id, lease_id, worker_id, role, workspace_mode, runtime_state,
+	branch, base, harness, token_hash, created_at, updated_at, last_agent_activity_at
+) VALUES (?, ?, ?, ?, 'w-test', 'author', 'change', 'finished',
+	'task/latest', 'main', 'harness', ?, ?, ?, ?)`,
+				fmt.Sprintf("s-session-%d", i), taskID, jobID, leaseID, fmt.Sprintf("tok-%d", i),
+				now.Add(-time.Hour).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+				t.Fatalf("insert session %d: %v", i, err)
+			}
+		}
+
+		all, err := tasks.ListTasks(ctx, coordinator.TaskFilter{})
+		if err != nil {
+			t.Fatalf("list tasks: %v", err)
+		}
+
+		server := &projectServer{tasks: tasks, sessions: sessions}
+		// Only count what building the cards does; task and session creation
+		// above touch the same tables and would drown the signal.
+		recorder.reset()
+		cards, err := server.buildUITaskCards(ctx, all)
+		if err != nil {
+			t.Fatalf("build cards: %v", err)
+		}
+		if len(cards) != taskCount {
+			t.Fatalf("built %d cards, want %d", len(cards), taskCount)
+		}
+		// Sanity: every card still carries its session's activity, so the
+		// counting run exercised the same code path the board serves.
+		for _, taskID := range taskIDs {
+			if cards[taskID].LastAgentActivityAt == nil {
+				t.Fatalf("card %s last agent activity = nil, want the session's timestamp", taskID)
+			}
+		}
+		return recorder.countMatching("MAX(updated_at")
+	}
+
+	one := build(1)
+	many := build(6)
+	if one != 1 {
+		t.Fatalf("latest-session queries for 1 task = %d, want a single batched query", one)
+	}
+	if many != one {
+		t.Fatalf("latest-session queries grew with card count: 1 task = %d, 6 tasks = %d", one, many)
 	}
 }
