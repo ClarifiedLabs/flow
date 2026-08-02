@@ -572,6 +572,15 @@ export class FlowApp extends HTMLElement {
     }
     this.updateActiveNav();
     const path = window.location.pathname;
+    // Leaving the tasks route drops the retained lifecycle filter (and the
+    // deep-link marker), so the next visit re-seeds it from ?state= params or
+    // the persisted filter instead of carrying a stale selection across routes
+    // — the throughput strip's /ui/tasks?state=done link must win over a
+    // filter kept from a previous Tasks visit (see renderTasksView).
+    if (path !== "/ui/tasks") {
+      this.tasksState = undefined;
+      this.tasksStateSearch = undefined;
+    }
     if (!options.fromPoll) closeTerminalModalLayers(this);
     const content = this.querySelector(".content");
     if (content && content.dataset) {

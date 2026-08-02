@@ -524,6 +524,127 @@ test("toggling the theme inside the panel does not close the dropdown", async ()
   assert.equal(harness.navMenu.open, true);
 });
 
+test("tasks route ?state=done deep link pre-filters over the stored selection", async () => {
+  const fetchCalls = [];
+  const title = { textContent: "" };
+  const status = { textContent: "" };
+  const content = { innerHTML: "" };
+  const context = await scriptContext({
+    location: { pathname: "/ui/tasks", search: "?state=done" },
+    localStorage: {
+      getItem(key) {
+        if (key === "flow.ui.tasksState") return JSON.stringify(["scheduled"]);
+        return null;
+      },
+      setItem() {},
+      removeItem() {},
+    },
+  }, {
+    fetch(path) {
+      fetchCalls.push(path);
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ tasks: [] }) });
+    },
+  });
+  const app = new context.FlowApp();
+  app.projects = [];
+  app.querySelector = (selector) => {
+    if (selector === "h1") return title;
+    if (selector === ".status") return status;
+    if (selector === ".content") return content;
+    return null;
+  };
+  app.querySelectorAll = () => [];
+
+  const ok = await context.renderTasksView(app);
+
+  assert.equal(ok, true);
+  assert.deepEqual([...app.tasksState], ["done"], "deep link wins over the stored scheduled filter");
+  assert.deepEqual(fetchCalls, ["/ui/api/v2/tasks?state=done"]);
+});
+
+test("tasks route ignores an invalid ?state= deep link and keeps the stored filter", async () => {
+  const fetchCalls = [];
+  const title = { textContent: "" };
+  const status = { textContent: "" };
+  const content = { innerHTML: "" };
+  const context = await scriptContext({
+    location: { pathname: "/ui/tasks", search: "?state=bogus&state=also-bogus" },
+    localStorage: {
+      getItem(key) {
+        if (key === "flow.ui.tasksState") return JSON.stringify(["in_progress"]);
+        return null;
+      },
+      setItem() {},
+      removeItem() {},
+    },
+  }, {
+    fetch(path) {
+      fetchCalls.push(path);
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ tasks: [] }) });
+    },
+  });
+  const app = new context.FlowApp();
+  app.projects = [];
+  app.querySelector = (selector) => {
+    if (selector === "h1") return title;
+    if (selector === ".status") return status;
+    if (selector === ".content") return content;
+    return null;
+  };
+  app.querySelectorAll = () => [];
+
+  const ok = await context.renderTasksView(app);
+
+  assert.equal(ok, true);
+  assert.deepEqual([...app.tasksState], ["in_progress"], "unknown state values fall back to the stored filter");
+  assert.deepEqual(fetchCalls, ["/ui/api/v2/tasks?state=in_progress"]);
+});
+
+test("tasks ?state= deep link re-seeds after an in-app navigation from a prior visit", async () => {
+  const fetchCalls = [];
+  const context = await scriptContext({
+    location: { pathname: "/ui/tasks", search: "?state=done" },
+    localStorage: {
+      getItem(key) {
+        if (key === "flow.ui.tasksState") return JSON.stringify(["scheduled"]);
+        return null;
+      },
+      setItem() {},
+      removeItem() {},
+    },
+  }, {
+    fetch(path) {
+      fetchCalls.push(path);
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ tasks: [] }) });
+    },
+  });
+  const app = new context.FlowApp();
+  app.projects = [];
+  app.querySelector = (selector) => {
+    if (selector === "h1") return { textContent: "" };
+    if (selector === ".status") return { textContent: "" };
+    if (selector === ".content") return { innerHTML: "" };
+    if (selector === ".statusbar") return null;
+    return null;
+  };
+  app.querySelectorAll = () => [];
+
+  // First visit: the retained scheduled filter applies (no state params).
+  context.window.location.search = "";
+  const first = await context.renderTasksView(app);
+  assert.equal(first, true);
+  assert.deepEqual([...app.tasksState], ["scheduled"], "no deep link keeps the persisted filter");
+
+  // The throughput-strip data-link navigation reuses the same FlowApp and
+  // reloads the route with ?state=done: the deep link must replace the
+  // retained filter instead of being ignored.
+  context.window.location.search = "?state=done";
+  const second = await context.renderTasksView(app);
+  assert.equal(second, true);
+  assert.deepEqual([...app.tasksState], ["done"], "in-app navigation to the deep link re-seeds the filter");
+  assert.deepEqual(fetchCalls, ["/ui/api/v2/tasks?state=scheduled", "/ui/api/v2/tasks?state=done"]);
+});
+
 // Legacy Harness budget/toggle reasoning flags are no longer valid with
 // harness v0.0.19. The form treats them as managed stale selection args so a
 // later save does not keep emitting them.

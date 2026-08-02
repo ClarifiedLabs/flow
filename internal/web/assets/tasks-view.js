@@ -30,8 +30,31 @@ export const TASKS_STATE_FILTERS = [
 // in TASKS_STATE_FILTERS except the "all" shortcut.
 const TASKS_SELECTABLE_STATES = TASKS_STATE_FILTERS.slice(1).map(([key]) => key);
 
+// tasksStateFromLocation seeds the lifecycle filter from ?state= deep-link
+// params (the board's throughput strip links /ui/tasks?state=done, for
+// example). Only selectable lifecycle states are honored and valid values
+// combine like chip clicks; when none of the params name a selectable state,
+// the caller falls back to the persisted filter instead of an empty selection.
+function tasksStateFromLocation() {
+  const params = new URLSearchParams(window.location.search);
+  const states = new Set(params.getAll("state").filter((key) => TASKS_SELECTABLE_STATES.includes(key)));
+  return states.size > 0 ? states : null;
+}
+
 export async function renderTasksView(app, context) {
-  if (!app.tasksState) app.tasksState = readTasksState();
+  // Seed the lifecycle filter from ?state= deep-link params whenever the URL
+  // changed since the last render (or the app is fresh). A navigation to
+  // /ui/tasks?state=done — including the in-app data-link navigation from the
+  // board's throughput strip, which reuses this FlowApp — must win over a
+  // filter retained from a previous visit; load() clears the retained filter
+  // on leaving /ui/tasks so every arrival re-seeds. A re-render under an
+  // unchanged URL (a chip click reloads through the same load()) keeps the
+  // in-view selection instead of clobbering it back to the deep link.
+  const search = window.location.search;
+  if (!app.tasksState || app.tasksStateSearch !== search) {
+    app.tasksState = tasksStateFromLocation() || readTasksState();
+    app.tasksStateSearch = search;
+  }
   if (app.tasksProject === undefined) app.tasksProject = readTasksProject();
   if (app.tasksQuery === undefined) app.tasksQuery = readTasksQuery();
   if (!app.tasksSelected) app.tasksSelected = new Set();
