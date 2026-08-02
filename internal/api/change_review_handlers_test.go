@@ -3,9 +3,13 @@ package api
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/ClarifiedLabs/flow/internal/api/contract"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
 )
@@ -221,7 +225,7 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 	}
 
 	// An omitted or empty head_sha is rejected up front with a stable
-	// 400 head_sha_required response, before any thread or verdict check can be
+	// 400 invalid_request response, before any thread or verdict check can be
 	// created. Both the omitted field and a whitespace-only value must fail the
 	// same way (the coordinator trims the submitted head, so a whitespace-only
 	// head can never match either).
@@ -233,11 +237,11 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 				HeadSHA:  submittedHead,
 				Comments: []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "comment on inspected code"}},
 			}, http.StatusBadRequest, &resp)
-		if resp.Error.Code != "head_sha_required" {
-			t.Fatalf("empty head (%q): error code = %q, want head_sha_required", submittedHead, resp.Error.Code)
+		if resp.Error.Code != "invalid_request" {
+			t.Fatalf("empty head (%q): error code = %q, want invalid_request", submittedHead, resp.Error.Code)
 		}
-		if resp.Error.Message != "head sha is required" {
-			t.Fatalf("empty head (%q): error message = %q, want %q", submittedHead, resp.Error.Message, "head sha is required")
+		if resp.Error.Message != "head_sha is required" {
+			t.Fatalf("empty head (%q): error message = %q, want %q", submittedHead, resp.Error.Message, "head_sha is required")
 		}
 
 		var threadCount int
@@ -291,13 +295,19 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 	}
 
 	// The reviewer inspected headSHA, but the change advanced before the
-	// submission landed: the server must refuse the whole review.
+	// submission landed: the server must refuse the whole review with a genuine
+	// head mismatch conflict (as opposed to the 400 invalid_request a missing
+	// head_sha gets).
+	var conflict errorResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
 		reviewVerdictRequest{
 			Verdict:  "approve",
 			HeadSHA:  "2222222222222222222222222222222222222222",
 			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "comment on inspected code"}},
-		}, http.StatusConflict, nil)
+		}, http.StatusConflict, &conflict)
+	if conflict.Error.Code != "head_moved" {
+		t.Fatalf("stale-head conflict code = %q, want head_moved", conflict.Error.Code)
+	}
 
 	var threadCount int
 	if err := fixture.DB.QueryRowContext(context.Background(),
@@ -585,6 +595,114 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 	}
 	if run.State != coordinator.WorkflowRunWaiting {
 		t.Fatalf("workflow state = %q, want still waiting after an aborted review", run.State)
+	}
+}
+
+// doRawJSONRequestAs sends a raw JSON body — e.g. one that omits a field the
+// request struct cannot omit when encoded — and asserts the response status.
+func doRawJSONRequestAs(t *testing.T, server *Server, token string, method string, path string, body string, wantStatus int, target any) {
+	t.Helper()
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set(protocolHeader, contract.ProtocolVersion)
+	request.Header.Set("Content-Type", "application/json")
+	server.ServeHTTP(response, request)
+	if response.Code != wantStatus {
+		t.Fatalf("%s %s status = %d, want %d; body: %s", method, path, response.Code, wantStatus, response.Body.String())
+	}
+	if target != nil {
+		if err := json.NewDecoder(response.Body).Decode(target); err != nil {
+			t.Fatalf("decode %s %s response: %v", method, path, err)
+		}
+	}
+}
+
+// TestSubmitReviewMissingHeadSHABadRequest guards the fail-closed distinction
+// between a malformed request and a moved head: a review submission without a
+// head_sha must be rejected with 400 invalid_request (nothing moved), not
+// with the 409 head_moved conflict that a genuine mismatch gets, and must
+// create nothing either way.
+func TestSubmitReviewMissingHeadSHABadRequest(t *testing.T) {
+	fixture := newTestFixture(t)
+	flow := newBoardFixtureFlow(t, fixture, "change review missing head")
+
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{Title: "Review without head from change view", FlowID: flow.ID}, http.StatusCreated, &created)
+	var scheduled workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
+		nil, http.StatusOK, &scheduled)
+
+	const (
+		changeID  = "ch-change-review-missing-head"
+		headSHA   = "1111111111111111111111111111111111111111"
+		timestamp = "2026-01-01T00:00:00.000000000Z"
+	)
+	if _, err := fixture.DB.ExecContext(context.Background(), `
+INSERT INTO changes (id, task_id, branch, base, head_sha, created_at, updated_at, ready_at)
+VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-review-missing-head",
+		headSHA, timestamp, timestamp, timestamp); err != nil {
+		t.Fatalf("insert change: %v", err)
+	}
+
+	// A request that simply omits the field (or sends blank whitespace) is
+	// malformed: 400 invalid_request with a head-sha-required message, never
+	// the misleading 409 head_moved.
+	for _, missing := range []string{"", "   "} {
+		var bad errorResponse
+		doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+			reviewVerdictRequest{
+				Verdict:  "approve",
+				HeadSHA:  missing,
+				Comments: []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "comment on inspected code"}},
+			}, http.StatusBadRequest, &bad)
+		if bad.Error.Code != "invalid_request" {
+			t.Fatalf("missing head_sha %q error code = %q, want invalid_request", missing, bad.Error.Code)
+		}
+		if bad.Error.Message != "head_sha is required" {
+			t.Fatalf("missing head_sha %q error message = %q, want %q", missing, bad.Error.Message, "head_sha is required")
+		}
+	}
+
+	// The struct form above always serializes head_sha: even when the field is
+	// empty it encodes as "head_sha":"" because the tag has no omitempty, so
+	// the truly omitted-field payload must be sent as raw JSON without the key.
+	// It must be refused exactly like the empty/whitespace values.
+	var omitted errorResponse
+	doRawJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+		`{"verdict":"approve","comments":[{"file_path":"a.go","line":1,"body":"comment on inspected code"}]}`,
+		http.StatusBadRequest, &omitted)
+	if omitted.Error.Code != "invalid_request" {
+		t.Fatalf("omitted head_sha error code = %q, want invalid_request", omitted.Error.Code)
+	}
+	if omitted.Error.Message != "head_sha is required" {
+		t.Fatalf("omitted head_sha error message = %q, want %q", omitted.Error.Message, "head_sha is required")
+	}
+
+	var threadCount int
+	if err := fixture.DB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM review_threads WHERE change_id = ?`, changeID).Scan(&threadCount); err != nil {
+		t.Fatalf("count threads: %v", err)
+	}
+	if threadCount != 0 {
+		t.Fatalf("missing-head review created %d threads, want 0", threadCount)
+	}
+	var checkCount int
+	if err := fixture.DB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM checks WHERE task_id = ? AND name = ?`, created.Task.ID, humanReviewCheckName).Scan(&checkCount); err != nil {
+		t.Fatalf("count checks: %v", err)
+	}
+	if checkCount != 0 {
+		t.Fatalf("missing-head review recorded %d human-review checks, want 0", checkCount)
+	}
+
+	run, err := fixture.Bundle.WorkflowRuns.Get(context.Background(), scheduled.Run.ID)
+	if err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	if run.State != coordinator.WorkflowRunWaiting {
+		t.Fatalf("workflow state = %q, want still waiting after a refused missing-head review", run.State)
 	}
 }
 
