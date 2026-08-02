@@ -306,9 +306,9 @@ export class FlowApp extends HTMLElement {
   // refresh() — the Console view's start and release helpers reload with
   // app.load() — carry the same token stamped on that load by the action
   // scope, and load() applies the same gate (see maybeArmSettleBurst). An
-  // ordinary refresh or load — a manual one, a poll, navigation, the board's
-  // Done filter — carries no token and stays the single load it always was,
-  // even when an unrelated action happens to be in flight.
+  // ordinary refresh or load — a manual one, a poll, navigation — carries no
+  // token and stays the single load it always was, even when an unrelated
+  // action happens to be in flight.
   async refresh(options = {}) {
     const context = await this.load();
     this.maybeArmSettleBurst(options, context);
@@ -776,9 +776,6 @@ export class FlowApp extends HTMLElement {
     const trigger = typeof this.querySelector === "function" ? this.querySelector(".nav-trigger") : null;
     if (trigger) trigger.innerHTML = renderNavTrigger(path, this.sidebarStatus);
   }
-
-  // refreshBoardDoneLane re-fetches and replaces only the board's Done column,
-  // leaving the four active lanes (and the board poll) untouched.
 
   createTask() {
     return createTaskView(this);

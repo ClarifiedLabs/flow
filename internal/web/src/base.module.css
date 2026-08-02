@@ -369,52 +369,9 @@
   gap: 16px;
 }
 
-.lane {
-  min-width: 0;
-}
-
-.lane h2 {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
-  color: var(--ink-2);
-  margin: 0 0 10px;
-  padding-bottom: 7px;
-  border-bottom: 2px solid var(--ph, var(--line-2));
-}
-
-.lane h2::before {
-  content: "▸";
-  color: var(--ph, var(--muted));
-}
-
-.lane[data-lane="backlog"] {
-  --ph: var(--ph-backlog);
-}
-
-.lane[data-lane="up_next"] {
-  --ph: var(--ph-upnext);
-}
-
-.lane[data-lane="in_progress"] {
-  --ph: var(--ph-authoring);
-}
-
-.lane[data-lane="needs_attention"] {
-  --ph: var(--ph-await);
-}
-
 .cards {
   display: grid;
   gap: 8px;
-}
-
-.lane[data-lane="done"] {
-  --ph: var(--ph-merged);
 }
 
 .done-view {
@@ -621,33 +578,6 @@
 .tasks-row-meta {
   color: var(--ink-2);
   font-size: 0.75rem;
-}
-
-.board-done-controls {
-  display: grid;
-  gap: 6px;
-  margin-bottom: 10px;
-}
-
-.board-done-filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.board-done-controls .chip {
-  padding: 2px 8px;
-  font-size: 0.6875rem;
-}
-
-.board-done-scope {
-  font: inherit;
-  font-size: 0.75rem;
-  padding: 3px 6px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--panel);
-  color: var(--ink);
 }
 
 .card {

@@ -124,7 +124,7 @@ The version-2 task API exposes schedule, workflow detail, artifact creation, age
 
 ## UI
 
-The board has Unscheduled, Scheduled, In Progress, and Done lanes. In Progress cards show Working or Blocked. Task detail shows the frozen run, current node, node-visit history, budget use, and human-gate outcomes.
+The board shows only scheduled work, in Scheduled, Working, and Waiting lanes; unscheduled work lives in the Tasks view, and closed work is reachable through the Tasks view's Done filter and the Done page. Working cards label a queued or claimed worker job as awaiting worker; Waiting covers work parked at a human gate, in review, held, or blocked. Task detail shows the frozen run, current node, node-visit history, budget use, and human-gate outcomes.
 
 The flow editor uses node cards, strict per-kind JSON configuration, transition selectors, start-node and budget controls, and a read-only graph preview. Server validation remains authoritative.
 

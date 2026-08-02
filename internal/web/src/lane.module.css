@@ -24,10 +24,6 @@ h2 {
   color: var(--line-2);
 }
 
-:host([data-lane="unscheduled"]) {
-  --lane-accent: var(--ph-backlog);
-}
-
 :host([data-lane="scheduled"]) {
   --lane-accent: var(--ph-upnext);
 }

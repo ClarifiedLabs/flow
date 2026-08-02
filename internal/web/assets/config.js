@@ -68,6 +68,8 @@ export const TASKS_QUERY_STORAGE_KEY = "flow.ui.tasksQuery";
 
 export const DIFF_MODE_STORAGE_KEY = "flow.ui.diffMode";
 
+// The board's old Done lane stored its scope under flow.ui.boardDone.v1; the
+// key is no longer read and may linger harmlessly in old browsers.
 export const BOARD_VIEW_STORAGE_KEY = "flow.ui.boardView";
 
 export const DIAGRAM_MODE_STORAGE_KEY = "flow.ui.diagramMode";

@@ -21,8 +21,16 @@ The web UI setup is:
 exchanges that bootstrap token for an HttpOnly session cookie, so the long-lived
 owner token is not placed in JavaScript.
 
-The board shows every project's live tasks as cards in Scheduled and In
-Progress lanes. An in-progress task whose workflow is parked on a worker job that is queued or claimed — but not yet running — is labeled **awaiting worker** rather than **working**, so a stalled dispatch is visible at a glance. A sticky top bar frames every
+The board shows every project's live tasks as cards in three lanes:
+**Scheduled** (queued for its first worker job), **Working** (actively
+executing — including tasks whose worker job is queued or claimed but not yet
+running, labeled **awaiting worker** so a stalled dispatch is visible at a
+glance), and **Waiting** (idle: parked at a human gate or in review, held, or
+blocked). A throughput strip above the lanes tallies successful completions in
+cumulative windows from 15m up to 24h; closed work lives in the Tasks view's
+Done filter (`/ui/tasks?state=done`) and on the Done page (`/ui/done`), which
+lists every closed task with its outcome and merged change. A sticky top bar
+frames every
 page: primary navigation lives in the dropdown on the left, whose trigger
 shows the current page label alongside compact board lane chips (scheduled,
 in progress, blocked). The panel lists every destination — Board, Tasks,

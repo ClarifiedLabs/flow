@@ -704,21 +704,20 @@ A human wait is a `wait_reason` overlay on the sub-state, not a sub-state of
 its own. Current wait reasons include `phase_approval` (a work phase's handoff
 awaits gate approval), `question`, `manual_merge`, and `blocked`.
 
-Second, the sub-state coarsens into one of four lanes, grouped by who acts
-next:
+Second, the sub-state coarsens into one of the board's three lanes, grouped by
+who acts next:
 
 | Lane | Sub-states | Meaning |
 | --- | --- | --- |
-| `backlog` | `backlog`, `triage` | undecided or unscheduled |
-| `up_next` | `up_next` | waiting for an agent to pick it up |
-| `in_progress` | `in_progress`, `in_review`, `changes_requested` | automation is working |
-| `needs_attention` | wait reasons, `ready_to_merge`, blocked overlay | waiting on a human |
+| `scheduled` | `up_next` | waiting for an agent to pick it up |
+| `working` | `in_progress` (executing or awaiting worker) | automation is working |
+| `waiting` | `in_review`, `changes_requested`, wait reasons, `ready_to_merge`, blocked overlay | waiting on a human or the next step |
 
 The sub-state is surfaced as a pill on task cards, alongside a flow-phase
 pill (`plan 1/2`, with awaiting-approval styling at a gate) when the task has
 a flow cursor; `blocked` is a derived overlay (unresolved `blocks` relations)
-rendered as a warning pill and routed to `needs_attention`, never a lane of
-its own.
+rendered as a warning pill and grouped under the `waiting` lane, never a lane
+of its own.
 
 Review state is also derived:
 
@@ -768,14 +767,14 @@ transition, providing a durable, auditable coordinate and the timeline view.
 13. The author fixes the branch, pushes, and calls `flow ready` again.
 14. Flow reruns required critique checks for the new HEAD.
 15. If `auto_merge=true`, coordinator merges automatically.
-16. If `auto_merge=false`, the board shows the task in `needs_attention` with
+16. If `auto_merge=false`, the board shows the task in the waiting lane with
     a `ready_to_merge` pill until the human clicks merge.
 17. Merge sets `merged_at`, sets the task `schedule_state=closed`, and removes
     the task from the board.
 
-Agent-discovered tasks enter the backlog lane with a `triage` sub-state pill
-instead of the normal backlog. The human can accept, edit, tag, relate,
-schedule, or reject them.
+Agent-discovered tasks enter the backlog as unscheduled work with a `triage`
+sub-state pill instead of the normal backlog. The human can accept, edit, tag,
+relate, schedule, or reject them.
 
 ### Lifecycle Engine
 
@@ -795,8 +794,8 @@ merged_closed  rejected_closed  abandoned
 `phase` is a projection of the existing state mechanisms (schedule/triage
 columns, the review-state view, change ready/merged latches, active author
 sessions, and the flow cursor). It is recomputed by the same precedence the
-board sub-states use, so each phase maps deterministically into one of the four
-board lanes. `blocked` remains a derived overlay and is never stored.
+board sub-states use, so each phase maps deterministically into one of the
+board's lanes. `blocked` remains a derived overlay and is never stored.
 
 `working` is a container phase: the entire user-composed work pipeline runs
 inside it, and the task's position within the pipeline lives on the flow
