@@ -7148,10 +7148,12 @@ test("change route reports a persistently failing diff fetch as unavailable, not
 });
 
 test("change route reports a persistently headless diff as unavailable, not a head move", async () => {
+  let diffCalls = 0;
   const context = await scriptContext({}, {
     document: inlineDocument(),
     fetch(path) {
       if (path.endsWith("/diff")) {
+        diffCalls += 1;
         // The server answered but its diff names no head, so it cannot verify
         // the pair: that is an unavailable diff, not a moved head.
         return Promise.resolve({ ok: true, json: () => Promise.resolve({ change_id: "ch-0001" }) });
@@ -7167,6 +7169,7 @@ test("change route reports a persistently headless diff as unavailable, not a he
     assert.doesNotMatch(error.message, /advanced while it was loading/, "a stable head is not reported as a head move");
     return true;
   });
+  assert.equal(diffCalls, 3, "three diff reads are attempted before giving up");
   assert.equal(content.children.length, 0, "no unverified pair ever mounts");
 });
 
