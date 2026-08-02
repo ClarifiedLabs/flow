@@ -214,6 +214,18 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
+	if len(parts) == 2 && parts[1] == "findings" {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
+			writeError(w, http.StatusForbidden, "forbidden", "findings read requires an owner, session, or console token")
+			return
+		}
+		s.handleTaskFindings(w, r, taskID)
+		return
+	}
+
 	if len(parts) != 2 || r.Method != http.MethodPost {
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 		return
@@ -243,6 +255,32 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 	}
+}
+
+// handleTaskFindings serves the task's review findings registry: every
+// review thread across the task's changes, every deferred follow-up action,
+// and resolution-bucket counts. Unknown tasks were already rejected by task
+// routing; the sql.ErrNoRows mapping is kept for direct-service callers.
+func (s *projectServer) handleTaskFindings(w http.ResponseWriter, r *http.Request, taskID string) {
+	if s.threads == nil {
+		writeError(w, http.StatusInternalServerError, "findings_unavailable", "thread service is not configured")
+		return
+	}
+	registry, err := s.threads.TaskFindingsRegistry(r.Context(), taskID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "task_not_found", "task not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "findings_load_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, contract.TaskFindingsResponse{
+		TaskID:    registry.TaskID,
+		Findings:  registry.Findings,
+		FollowUps: registry.FollowUps,
+		Summary:   registry.Summary,
+	})
 }
 
 // promptContextResponse carries the per-phase prompt material fetch-prompt
