@@ -25,7 +25,7 @@ export async function renderChangeRoute(app, id, context) {
     const change = value(data, "change", "Change") || {};
     // Metadata that does not name this change cannot anchor a pair; retry the
     // read — the selected change may have moved.
-    if (value(change, "id", "ID") !== id) continue;
+    if (String(value(change, "id", "ID") || "") !== id) continue;
     const headSHA = String(value(change, "head_sha", "HeadSHA") || "");
     // Metadata that names no head cannot anchor a verified pair, but the
     // change itself is still real: mount it with an explicit empty diff and
