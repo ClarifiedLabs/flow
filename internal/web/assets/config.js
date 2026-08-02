@@ -3,6 +3,8 @@
 // Feature-specific constants (theme/terminal icons, harness flags, lifecycle
 // layout, etc.) live with their owning module, not here.
 
+import { LIFECYCLE_SCHEDULED, LIFECYCLE_STATES } from "./lifecycle.js";
+
 // LANES are the board's live columns. Unscheduled work is no longer a board
 // lane; it lives in the Tasks view (/ui/tasks). In-progress work is split into
 // two lanes — Working (actively executing) and Waiting (idle) — that both read
@@ -10,9 +12,10 @@
 // of them via activityGroupOf. The third element of each triple is the JSON
 // field name laneTasks reads off the board payload: coordinator.Board has no
 // json tags, so /v2/board emits the Go field names verbatim ("Scheduled",
-// "InProgress").
+// "InProgress"). The scheduled lane key is the shared lifecycle state so a new
+// server state cannot silently leave the lane vocabulary stale.
 export const LANES = [
-  ["scheduled", "Scheduled", "Scheduled"],
+  [LIFECYCLE_SCHEDULED, "Scheduled", "Scheduled"],
   ["working", "Working", "InProgress"],
   ["waiting", "Waiting", "InProgress"],
 ];
@@ -100,9 +103,11 @@ export const DONE_OUTCOMES = new Set(["all", "completed", "merged", "rejected", 
 
 // TASKS_STATES are the selectable lifecycle filters in the Tasks view; they
 // combine, and TASKS_ALL_STATE is the convenience chip that selects or clears
-// every one of them at once (it is not itself a stored selection).
+// every one of them at once (it is not itself a stored selection). The set is
+// the shared lifecycle vocabulary, so a new server state shows up here the
+// moment lifecycle.js catches up with the server constants.
 export const TASKS_ALL_STATE = "all";
-export const TASKS_STATES = new Set(["unscheduled", "scheduled", "in_progress", "done"]);
+export const TASKS_STATES = new Set(LIFECYCLE_STATES);
 
 export const THEME_PREFERENCES = new Set(["system", "light", "dark"]);
 

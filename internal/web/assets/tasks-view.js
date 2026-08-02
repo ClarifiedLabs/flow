@@ -13,18 +13,21 @@ import { failureMessage } from "./actions.js";
 import { apiGet, apiPatch, apiPost, taskAPIBase, taskHref } from "./api.js";
 import { phaseKey, renderPhaseBadge } from "./board.js";
 import { escapeAttr, escapeHTML } from "./html.js";
+import { LIFECYCLE_DONE, LIFECYCLE_IN_PROGRESS, LIFECYCLE_SCHEDULED, LIFECYCLE_UNSCHEDULED, lifecycleStateOf } from "./lifecycle.js";
 import { value } from "./normalize.js";
 import { readTasksProject, readTasksQuery, readTasksState, writeTasksProject, writeTasksQuery, writeTasksState } from "./storage.js";
 
 // TASKS_STATE_FILTERS are the lifecycle chips. The four state chips combine
 // (the server ORs repeatable state params); "all" is a shortcut that selects
-// every state at once, and selecting no states matches no tasks.
+// every state at once, and selecting no states matches no tasks. The state
+// keys come from the shared lifecycle vocabulary so a new server state cannot
+// silently skip the filter chips.
 export const TASKS_STATE_FILTERS = [
   ["all", "All"],
-  ["unscheduled", "Unscheduled"],
-  ["scheduled", "Scheduled"],
-  ["in_progress", "In Progress"],
-  ["done", "Done"],
+  [LIFECYCLE_UNSCHEDULED, "Unscheduled"],
+  [LIFECYCLE_SCHEDULED, "Scheduled"],
+  [LIFECYCLE_IN_PROGRESS, "In Progress"],
+  [LIFECYCLE_DONE, "Done"],
 ];
 
 // TASKS_SELECTABLE_STATES are the four filterable lifecycle states: everything
@@ -159,8 +162,9 @@ export function renderTasksListView(app) {
 export function renderTaskRowView(app, task) {
   const id = String(value(task, "id", "ID"));
   const title = String(value(task, "title", "Title"));
-  // Task.state is null for unscheduled work.
-  const state = String(value(task, "state", "State") || "unscheduled");
+  // Task.state is null for unscheduled work; lifecycleStateOf normalizes both
+  // an absent state and any out-of-vocabulary state onto the shared vocabulary.
+  const state = lifecycleStateOf(task);
   const projectID = String(value(task, "project_id", "ProjectID"));
   const projectName = String(value(task, "project_name", "ProjectName"));
   const flowID = String(value(task, "flow_id", "FlowID"));

@@ -3,6 +3,7 @@
 
 import { value } from "./normalize.js";
 import { phaseKey, workflowActivityLabel } from "./board.js";
+import { LIFECYCLE_IN_PROGRESS, LIFECYCLE_SCHEDULED, LIFECYCLE_UNSCHEDULED, lifecycleStateOf } from "./lifecycle.js";
 
 // Dwell thresholds, in minutes. Past warn a task reads amber, past stall it
 // reads red. Queued work is allowed to sit longer than running work before it
@@ -134,7 +135,7 @@ export function activityGroupOf(entry) {
   if (laneState === "working" || laneState === "awaiting_worker") return "working";
   // A missing lane state on an in-progress task cannot be proven to be
   // working, so it waits rather than vanishing from the board.
-  return value(entry.task, "state", "State") === "in_progress" ? "waiting" : "";
+  return lifecycleStateOf(entry.task) === LIFECYCLE_IN_PROGRESS ? "waiting" : "";
 }
 
 // cardModel is the single projection every board surface renders from. Doing
@@ -144,7 +145,7 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
   const task = entry.task || {};
   const card = entry.card || {};
   const wait = value(card, "wait", "Wait");
-  const lifecycleState = value(task, "state", "State") || "unscheduled";
+  const lifecycleState = lifecycleStateOf(task);
   const held = Boolean(value(card, "held", "Held")) || entry.laneState === "held";
   const heldBy = String(value(card, "held_by", "HeldBy") || "");
   const convergenceHold = held && heldBy === "system";
@@ -197,8 +198,8 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
   // it gets the generous queued dwell thresholds, not the running ones.
   let dwellKind = "running";
   if (queuedForWorker) dwellKind = "queued";
-  else if (lifecycleState === "unscheduled") dwellKind = "unscheduled";
-  else if (lifecycleState === "scheduled") dwellKind = "queued";
+  else if (lifecycleState === LIFECYCLE_UNSCHEDULED) dwellKind = "unscheduled";
+  else if (lifecycleState === LIFECYCLE_SCHEDULED) dwellKind = "queued";
   else if (waitKind === "failed" || waitKind === "budget") dwellKind = "failed";
   else if (waitKind) dwellKind = "waiting";
 
@@ -249,8 +250,8 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
     stepIndex,
     stepCount,
     stepName,
-    scheduled: lifecycleState !== "unscheduled",
-    running: Boolean(stepCount) && lifecycleState === "in_progress" && !queuedForWorker,
+    scheduled: lifecycleState !== LIFECYCLE_UNSCHEDULED,
+    running: Boolean(stepCount) && lifecycleState === LIFECYCLE_IN_PROGRESS && !queuedForWorker,
     activity: activityLine(card, {
       held,
       convergenceHold,
@@ -290,7 +291,7 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
 // its blockers, and an unscheduled one has not been asked to start yet. Each
 // entry keeps the blocker's id and title so the card can link to it.
 export function waitingOnBlockers(card, lifecycleState) {
-  if (String(lifecycleState || "") !== "scheduled") return [];
+  if (lifecycleState !== LIFECYCLE_SCHEDULED) return [];
   const blockers = value(card, "blockers", "Blockers") || {};
   const tasks = value(blockers, "tasks", "Tasks") || [];
   return tasks
@@ -306,7 +307,7 @@ export function waitingOnBlockers(card, lifecycleState) {
 // reader knows titles were omitted rather than guessing the list is complete.
 // It mirrors waitingOnBlockers: only scheduled work carries it.
 export function waitingOnOmitted(card, lifecycleState) {
-  if (String(lifecycleState || "") !== "scheduled") return 0;
+  if (lifecycleState !== LIFECYCLE_SCHEDULED) return 0;
   const blockers = value(card, "blockers", "Blockers") || {};
   return Number(value(blockers, "omitted", "Omitted") || 0);
 }
@@ -333,8 +334,8 @@ function activityLine(card, {
   const message = String(value(wait, "message", "Message") || "").trim();
   if (waitKind === "failed" || waitKind === "budget") return message || "Workflow step failed";
   if (waitKind === "gate" || waitKind === "question") return message || "Waiting for a human decision";
-  if (lifecycleState === "unscheduled") return "";
-  if (lifecycleState === "scheduled") return "Queued for a worker";
+  if (lifecycleState === LIFECYCLE_UNSCHEDULED) return "";
+  if (lifecycleState === LIFECYCLE_SCHEDULED) return "Queued for a worker";
   if (queuedForWorker) {
     const dwell = formatDwell(dwellSince, now);
     return dwell ? `Awaiting worker · ${dwell}` : "Awaiting worker";
@@ -424,7 +425,7 @@ export function matchesFilter(model, filter) {
     case "waiting":
       return model.activityGroup === filter;
     case "queued":
-      return model.lifecycleState === "scheduled";
+      return model.lifecycleState === LIFECYCLE_SCHEDULED;
     default:
       return true;
   }

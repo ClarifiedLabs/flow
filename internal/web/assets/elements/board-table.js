@@ -5,6 +5,7 @@ import { taskHref } from "../api.js";
 import { BOARD_FILTERS, matchesFilter, sortForAttention } from "../board-model.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { renderMarkdown } from "../markdown.js";
+import { LIFECYCLE_SCHEDULED, LIFECYCLE_UNSCHEDULED } from "../lifecycle.js";
 import { renderStepRail } from "./step-rail.js";
 import { define, FlowElement } from "./base.js";
 
@@ -71,10 +72,10 @@ function renderRowAction(model, href, projectAttr) {
       ? `<button class="button" data-attention-merge="${escapeAttr(model.id)}"${projectAttr}>Merge</button>`
       : `<a class="button" href="${href}" data-link>${escapeHTML(model.actionLabel)}</a>`;
   }
-  if (model.lifecycleState === "unscheduled") {
+  if (model.lifecycleState === LIFECYCLE_UNSCHEDULED) {
     return `<button class="quiet-action" data-workflow-schedule="${escapeAttr(model.id)}"${projectAttr}>schedule</button>`;
   }
-  if (model.lifecycleState === "scheduled") {
+  if (model.lifecycleState === LIFECYCLE_SCHEDULED) {
     return `<button class="quiet-action" data-workflow-reset="${escapeAttr(model.id)}"${projectAttr}>reset</button>`;
   }
   return `<a class="quiet-action" href="${href}" data-link>watch</a>`;

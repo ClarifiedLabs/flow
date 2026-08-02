@@ -3,6 +3,7 @@
 // counts, and the theme-switcher icon/option assets.
 
 import { escapeAttr, escapeHTML } from "./html.js";
+import { LIFECYCLE_DONE, LIFECYCLE_IN_PROGRESS, LIFECYCLE_SCHEDULED, LIFECYCLE_UNSCHEDULED } from "./lifecycle.js";
 import { value } from "./normalize.js";
 import { NAV } from "./config.js";
 
@@ -39,12 +40,16 @@ export function renderNavStatus(href, status) {
   if (!status) return "";
   if (href === "/ui/board") {
     const board = value(status, "board", "Board") || {};
+    // The lane-count keys are the /v2/sidebar wire fields for the lifecycle
+    // lanes; they come from the shared vocabulary so a new server state cannot
+    // silently leave the nav badges stale. "blocked" is a board lane, not a
+    // lifecycle state, so it stays a literal.
     const groups = [
       ["queued", [
-        ["scheduled", "Scheduled", "scheduled"],
+        [LIFECYCLE_SCHEDULED, "Scheduled", "scheduled"],
       ]],
       ["active", [
-        ["in_progress", "InProgress", "in progress"],
+        [LIFECYCLE_IN_PROGRESS, "InProgress", "in progress"],
         ["blocked", "Blocked", "blocked"],
       ]],
     ];
@@ -63,11 +68,11 @@ export function renderNavStatus(href, status) {
   if (href === "/ui/triage") return renderNavCount(value(status, "triage", "Triage"), "triage items");
   if (href === "/ui/tasks") {
     const board = value(status, "board", "Board") || {};
-    return renderNavCount(value(board, "unscheduled", "Unscheduled"), "unscheduled tasks");
+    return renderNavCount(value(board, LIFECYCLE_UNSCHEDULED, "Unscheduled"), "unscheduled tasks");
   }
   if (href === "/ui/feedback") return renderNavCount(value(status, "feedback", "Feedback"), "needs attention items");
   if (href === "/ui/merge") return renderNavCount(value(status, "merge", "Merge"), "merge items");
-  if (href === "/ui/done") return renderNavCount(value(status, "done", "Done"), "done items");
+  if (href === "/ui/done") return renderNavCount(value(status, LIFECYCLE_DONE, "Done"), "done items");
   if (href === "/ui/workers") {
     const workers = value(status, "workers", "Workers") || {};
     const inUse = Number(value(workers, "in_use", "InUse") || 0);

@@ -6,6 +6,7 @@
 import { taskHref } from "../api.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { renderMarkdown } from "../markdown.js";
+import { LIFECYCLE_UNSCHEDULED } from "../lifecycle.js";
 import { renderStepRail } from "./step-rail.js";
 import { define, FlowElement } from "./base.js";
 
@@ -102,7 +103,7 @@ function renderCardActions(model, projectAttr) {
       </div>
     `;
   }
-  if (model.lifecycleState === "unscheduled") {
+  if (model.lifecycleState === LIFECYCLE_UNSCHEDULED) {
     return `<div class="actions"><button class="button" data-workflow-schedule="${id}"${projectAttr}>Schedule</button></div>`;
   }
   if (model.readyToMerge) {

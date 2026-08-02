@@ -3,6 +3,7 @@
 
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
+import { LIFECYCLE_DONE, LIFECYCLE_IN_PROGRESS, LIFECYCLE_SCHEDULED, LIFECYCLE_UNSCHEDULED } from "./lifecycle.js";
 
 export function doneClosedAtMs(task) {
   const ms = Date.parse(value(task, "done_at", "DoneAt"));
@@ -38,16 +39,19 @@ export function laneTasks(board, key, field) {
 }
 
 // phaseKey maps lifecycle, schedule, and lane states onto the design system's
-// phase color slugs (the [data-phase] attribute values in app.module.css).
+// phase color slugs (the [data-phase] attribute values in app.module.css). The
+// lifecycle cases come from the shared vocabulary (lifecycle.js); the JS parity
+// tests require a non-empty mapping for every LIFECYCLE_STATES member, so a new
+// server state fails loudly instead of silently rendering as backlog.
 export function phaseKey(state) {
   switch (String(state || "")) {
-    case "unscheduled":
+    case LIFECYCLE_UNSCHEDULED:
       return "backlog";
-    case "scheduled":
+    case LIFECYCLE_SCHEDULED:
       return "up_next";
     case "working":
       return "authoring";
-    case "done":
+    case LIFECYCLE_DONE:
     case "completed":
     case "cancelled":
     case "failed":
@@ -61,7 +65,7 @@ export function phaseKey(state) {
     case "planning":
       return "planning";
     case "authoring":
-    case "in_progress":
+    case LIFECYCLE_IN_PROGRESS:
       return "authoring";
     case "needs_attention":
     case "changes_requested":

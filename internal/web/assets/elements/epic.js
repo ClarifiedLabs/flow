@@ -6,10 +6,15 @@ import { taskHref } from "../api.js";
 import { formatDwell } from "../board-model.js";
 import { phaseKey } from "../board.js";
 import { escapeAttr, escapeHTML } from "../html.js";
+import { LIFECYCLE_IN_PROGRESS, LIFECYCLE_SCHEDULED, LIFECYCLE_UNSCHEDULED, lifecycleStateOf } from "../lifecycle.js";
 import { value } from "../normalize.js";
 import { define, FlowElement } from "./base.js";
 
-// memberState reduces a member to the one word the rollup groups by.
+// memberState reduces a member to the one word the rollup groups by. The
+// lifecycle-derived buckets read the member's state through the shared
+// vocabulary (lifecycleStateOf), so a state the server has not shipped the
+// vocabulary for fails closed into the unscheduled bucket instead of landing
+// in a wrong working/queued group.
 export function memberState(member) {
   if (value(member, "needs_you", "NeedsYou")) return "needs you";
   const resolution = String(value(member, "resolution", "Resolution") || "");
@@ -17,10 +22,10 @@ export function memberState(member) {
   if (resolution) return resolution;
   if (value(member, "held", "Held")) return "held";
   if ((value(member, "blocked_by", "BlockedBy") || []).length) return "blocked";
-  const state = String(value(member, "state", "State") || "unscheduled");
-  if (state === "in_progress") return "working";
-  if (state === "scheduled") return "queued";
-  return "unscheduled";
+  const state = lifecycleStateOf(member);
+  if (state === LIFECYCLE_IN_PROGRESS) return "working";
+  if (state === LIFECYCLE_SCHEDULED) return "queued";
+  return LIFECYCLE_UNSCHEDULED;
 }
 
 const STATE_PHASE = {
@@ -30,7 +35,7 @@ const STATE_PHASE = {
   blocked: "blocked",
   working: "authoring",
   queued: "up_next",
-  unscheduled: "backlog",
+  [LIFECYCLE_UNSCHEDULED]: "backlog",
   completed: "merged",
   ready: "approved",
 };
