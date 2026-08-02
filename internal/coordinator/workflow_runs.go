@@ -1086,6 +1086,26 @@ WHERE workflow_run_id = ? AND event_kind = 'node_skipped' AND idempotency_key = 
 				return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: failed workflow step is no longer active", ErrWorkflowConflict)
 			}
 		}
+		// Same-outcome replay of a decision another call already committed: the
+		// snapshot scanned above was taken inside this transaction, so for a
+		// retry that raced the original commit it can still show the run
+		// waiting even though the committed decision completed it. End the
+		// transaction and reload the committed run so Result.Run and Done
+		// describe the state the caller observes (a terminal verdict must
+		// report Done even though this call wrote nothing).
+		if selfCommit {
+			if err := commit(); err != nil {
+				return CompleteWorkflowNodeResult{}, err
+			}
+			latest, err := s.Get(ctx, run.ID)
+			if err != nil {
+				return CompleteWorkflowNodeResult{}, err
+			}
+			return CompleteWorkflowNodeResult{Run: latest, Done: latest.State == WorkflowRunCompleted, Replayed: true}, nil
+		}
+		// Non-self-committing callers (the atomic review-submission path) own
+		// the transaction and cannot reload it here; Result.Run is the
+		// transaction's snapshot of the committed decision.
 		return CompleteWorkflowNodeResult{Run: run, Done: run.State == WorkflowRunCompleted, Replayed: true}, nil
 	}
 	if nodeRun.State != WorkflowNodeRunning && nodeRun.State != WorkflowNodeWaiting && nodeRun.State != WorkflowNodeQueued {

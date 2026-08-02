@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 )
 
 // reviewFlowFixture builds the planning shape: an agent node that produces a
@@ -284,6 +287,220 @@ func TestRespondReviewRejectedEndsRejected(t *testing.T) {
 	}
 	if completed.DoneResolution == nil || *completed.DoneResolution != ResolutionRejected {
 		t.Fatalf("task = %+v, want rejected", completed)
+	}
+}
+
+// TestRespondReplayReportsCommittedRunState pins the same-outcome replay
+// contract: retrying a terminal verdict replays the recorded decision, and the
+// replay result's Run and Done must describe the committed state (the run
+// completed) rather than the pre-decision snapshot (which would still show the
+// run waiting). This is the non-interactive sibling of the RespondReview
+// replay path; both answer their gate through CompleteNode.
+func TestRespondReplayReportsCommittedRunState(t *testing.T) {
+	ctx := context.Background()
+	flows, tasks, runs := newWorkflowModelServices(t)
+	artifacts := NewWorkflowArtifactService(flows.db, tasks)
+	flow := reviewFlowFixture(t, ctx, flows)
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Plan me", FlowID: flow.ID})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	run, err := runs.Schedule(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	nodeRun := startPlanNode(t, ctx, runs, run.ID)
+	artifact := createPlanArtifact(t, ctx, artifacts, run, nodeRun, "", "v1", "Ship it")
+
+	// Advance the agent node into the human gate, then answer the gate with a
+	// terminal verdict — the same shape RespondReview uses for an approval.
+	advanced, err := runs.CompleteNode(ctx, CompleteWorkflowNodeInput{
+		NodeRunID: nodeRun.ID, Outcome: "completed", ArtifactID: artifact.ID, Actor: ActorSystem,
+	})
+	if err != nil || advanced.Next == nil || advanced.Next.NodeKey != "review" {
+		t.Fatalf("advance to review gate = %+v err=%v", advanced, err)
+	}
+	decided, err := runs.Respond(ctx, task.ID, advanced.Next.ID, "approved", "looks good", ActorHuman)
+	if err != nil || !decided.Done || decided.Run.State != WorkflowRunCompleted {
+		t.Fatalf("gate decision = %+v err=%v, want completed run", decided, err)
+	}
+
+	// A same-outcome retry replays the recorded decision; its metadata must
+	// reflect the committed state, not the pre-decision snapshot.
+	replayed, err := runs.Respond(ctx, task.ID, advanced.Next.ID, "approved", "looks good", ActorHuman)
+	if err != nil {
+		t.Fatalf("replayed gate decision: %v", err)
+	}
+	if !replayed.Replayed || !replayed.Done || replayed.Run.State != WorkflowRunCompleted {
+		t.Fatalf("replayed gate decision = %+v, want a completed replay", replayed)
+	}
+}
+
+// TestCompleteNodeReplayWithStaleSnapshotReportsCommittedRun pins the fix for
+// the same-outcome replay path: a replay transaction whose snapshot predates
+// the original terminal decision must still report the committed run. The
+// replay branch of completeNodeTx — the shared state machine RespondReview's
+// terminal verdict flows through via CompleteNode — returns the run scanned
+// inside its transaction; when that transaction observed the run before the
+// decision committed, the pre-fix code returned the stale waiting snapshot
+// with Done=false even though the committed decision completed the run. This
+// test builds exactly that interleaving: it pins a real read transaction to
+// the pre-terminal snapshot (agent node run already committed succeeded, run
+// still waiting at the gate), commits the terminal gate decision from a
+// second connection to the same database file, and only then runs the replay
+// from the stale transaction. The replay must reload the committed run and
+// report Done=true.
+func TestCompleteNodeReplayWithStaleSnapshotReportsCommittedRun(t *testing.T) {
+	ctx := context.Background()
+
+	// A second handle on the same database file provides the connection that
+	// commits the original decision while the replay transaction stays open
+	// (each store pool is a single connection; WAL allows a concurrent reader
+	// and writer).
+	path := filepath.Join(t.TempDir(), "flow.db")
+	store1, err := flowdb.Open(ctx, path)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = store1.Close() })
+	store2, err := flowdb.Open(ctx, path)
+	if err != nil {
+		t.Fatalf("open second database handle: %v", err)
+	}
+	t.Cleanup(func() { _ = store2.Close() })
+
+	flows := NewFlowService(store1.DB())
+	tasks := NewTaskService(store1.DB(), "p-test")
+	runs := NewWorkflowRunService(store1.DB(), flows, tasks)
+	artifacts := NewWorkflowArtifactService(store1.DB(), tasks)
+	flow := reviewFlowFixture(t, ctx, flows)
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Plan me", FlowID: flow.ID})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	run, err := runs.Schedule(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	nodeRun := startPlanNode(t, ctx, runs, run.ID)
+	artifact := createPlanArtifact(t, ctx, artifacts, run, nodeRun, "", "v1", "Ship it")
+
+	// Advance the agent node into the human gate: the agent node run is
+	// committed succeeded and the run waits at the gate — the pre-terminal
+	// state a concurrent replay transaction may observe.
+	advanced, err := runs.CompleteNode(ctx, CompleteWorkflowNodeInput{
+		NodeRunID: nodeRun.ID, Outcome: "completed", ArtifactID: artifact.ID, Actor: ActorSystem,
+	})
+	if err != nil || advanced.Next == nil || advanced.Next.NodeKey != "review" {
+		t.Fatalf("advance to review gate = %+v err=%v", advanced, err)
+	}
+	if advanced.Run.State != WorkflowRunWaiting {
+		t.Fatalf("run before the decision = %+v, want waiting at the gate", advanced.Run)
+	}
+
+	// Open the replay transaction and pin it to the pre-terminal snapshot
+	// before the terminal decision commits. From this snapshot the agent node
+	// run is already succeeded (committed above) but the run is still waiting
+	// at the gate — the exact stale state the replay branch can observe.
+	replayTx, err := store1.DB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin replay transaction: %v", err)
+	}
+	defer replayTx.Rollback()
+	var snapshotState string
+	if err := replayTx.QueryRowContext(ctx, `SELECT state FROM workflow_runs WHERE id = ?`, run.ID).Scan(&snapshotState); err != nil {
+		t.Fatalf("pin replay snapshot: %v", err)
+	}
+	if snapshotState != string(WorkflowRunWaiting) {
+		t.Fatalf("replay snapshot state = %q, want waiting", snapshotState)
+	}
+
+	// The original terminal decision commits on the second connection while
+	// the replay transaction is still open.
+	runs2 := NewWorkflowRunService(store2.DB(), flows, tasks)
+	decided, err := runs2.Respond(ctx, task.ID, advanced.Next.ID, "approved", "looks good", ActorHuman)
+	if err != nil || !decided.Done || decided.Run.State != WorkflowRunCompleted {
+		t.Fatalf("gate decision = %+v err=%v, want completed run", decided, err)
+	}
+
+	// The replay transaction still observes the pre-terminal snapshot even
+	// though the decision committed.
+	var staleState string
+	if err := replayTx.QueryRowContext(ctx, `SELECT state FROM workflow_runs WHERE id = ?`, run.ID).Scan(&staleState); err != nil {
+		t.Fatalf("re-read replay snapshot: %v", err)
+	}
+	if staleState != string(WorkflowRunWaiting) {
+		t.Fatalf("replay snapshot after decision = %q, want the stale waiting state", staleState)
+	}
+
+	// The retry from the stale transaction replays the recorded agent-node
+	// decision. Its transaction still sees the run waiting, so the replay must
+	// reload the committed run: Done must be true and Result.Run completed.
+	replayed, err := runs.completeNodeTx(ctx, replayTx, CompleteWorkflowNodeInput{
+		NodeRunID: nodeRun.ID, Outcome: "completed", ArtifactID: artifact.ID, Actor: ActorSystem,
+	}, true, replayTx.Commit)
+	if err != nil {
+		t.Fatalf("stale-snapshot replay: %v", err)
+	}
+	if !replayed.Replayed || !replayed.Done || replayed.Run.State != WorkflowRunCompleted {
+		t.Fatalf("stale-snapshot replay = %+v, want a completed replay reporting the committed run", replayed)
+	}
+}
+
+// TestRespondReviewRetryReusesRecordedOutcome pins the recorded-outcome
+// contract for the interactive review path: a round's verdict is durable, and
+// a retry of a decided round — same outcome or contradictory — is rejected
+// instead of re-deciding the gate, so the recorded gate outcome always
+// stands. (The replay of a recorded outcome itself lives in the shared
+// CompleteNode idempotency path, covered by TestRespondReplayReportsCommittedRunState
+// and TestCompleteNodeReplayWithStaleSnapshotReportsCommittedRun.)
+func TestRespondReviewRetryReusesRecordedOutcome(t *testing.T) {
+	ctx := context.Background()
+	flows, tasks, runs := newWorkflowModelServices(t)
+	artifacts := NewWorkflowArtifactService(flows.db, tasks)
+	flow := reviewFlowFixture(t, ctx, flows)
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Plan me", FlowID: flow.ID})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	run, err := runs.Schedule(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	nodeRun := startPlanNode(t, ctx, runs, run.ID)
+	artifact := createPlanArtifact(t, ctx, artifacts, run, nodeRun, "", "v1", "Ship it")
+	if _, err := runs.SubmitForReview(ctx, SubmitForReviewInput{NodeRunID: nodeRun.ID, ArtifactID: artifact.ID}); err != nil {
+		t.Fatalf("submit for review: %v", err)
+	}
+
+	result, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, "approved", "looks good", ActorHuman)
+	if err != nil {
+		t.Fatalf("respond review: %v", err)
+	}
+	if !result.Result.Done || result.Result.Run.State != WorkflowRunCompleted {
+		t.Fatalf("run = %+v, want completed", result.Result.Run)
+	}
+
+	// A same-outcome retry of the decided round is rejected instead of
+	// re-deciding the gate; the recorded outcome stands either way.
+	if _, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, "approved", "looks good", ActorHuman); !errors.Is(err, ErrWorkflowConflict) {
+		t.Fatalf("same-outcome retry err = %v, want conflict", err)
+	}
+	if _, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, "rejected", "changed my mind", ActorHuman); !errors.Is(err, ErrWorkflowConflict) {
+		t.Fatalf("contradictory retry err = %v, want conflict", err)
+	}
+	detail, err := runs.Detail(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("load run detail: %v", err)
+	}
+	var gateVisit *WorkflowNodeRun
+	for i := range detail.NodeRuns {
+		if detail.NodeRuns[i].NodeKey == "review" {
+			gateVisit = &detail.NodeRuns[i]
+		}
+	}
+	if gateVisit == nil || gateVisit.State != WorkflowNodeSucceeded || gateVisit.Outcome != "approved" {
+		t.Fatalf("gate visit after retries = %+v, want the recorded approved", gateVisit)
 	}
 }
 
