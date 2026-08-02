@@ -971,6 +971,60 @@ func TestJSTemplateInterpolationRegex(t *testing.T) {
 	}
 }
 
+func TestJSTemplateNestedInterpolationDoesNotDesync(t *testing.T) {
+	// task-model.js renders a repeat visit with a template literal nested inside
+	// a ${...} interpolation — `... ${visit > 1 ? ` · ×${visit - 1}` : ""}`. A
+	// tokenizer that advances to the next backtick without tracking
+	// interpolations stops at the nested template's opening backtick and lexes
+	// the nested template's contents as real code: the trailing ` : ""}` is then
+	// read as a template that swallows the text between the interpolation and
+	// the outer closing backtick, and a quoted string or the second lifecycle
+	// export that follows the template is read from a desynced token stream. The
+	// scanner must skip the interpolation as a unit — nested templates included
+	// — so a string literal and a second lifecycle export after the
+	// nested-template expression are still extracted exactly.
+	//
+	// The desync turns the nested template's contents into code, so when those
+	// contents quote an export declaration the fake anchor is selected ahead of
+	// the real one: a nested template that quotes
+	// `export const LIFECYCLE_UNFINISHED = new Set(["paused"]);` would make the
+	// extractor report ["paused"] — a vocabulary the runtime Set does not have —
+	// while the fixed scanner consumes the nested template whole and reads the
+	// real declaration.
+	source := "const label = `↺ looped back to ${name}${visit > 1 ? ` · ×${visit - 1}` : \"\"}`;\n" +
+		`const suffix = "after the template";` + "\n" +
+		`export const LIFECYCLE_UNFINISHED = new Set(["", "scheduled", "in_progress"]);` + "\n" +
+		`export const LIFECYCLE_DONE = "done";`
+	members, err := jsExportedSetMembers(source, "LIFECYCLE_UNFINISHED")
+	if err != nil {
+		t.Fatalf("jsExportedSetMembers: %v", err)
+	}
+	if want := []string{"", "scheduled", "in_progress"}; !slicesEqual(members, want) {
+		t.Errorf("jsExportedSetMembers = %q, want %q (tokens after a nested-template interpolation must not leak into the Set)", members, want)
+	}
+	done, err := jsExportedString(source, "LIFECYCLE_DONE")
+	if err != nil {
+		t.Fatalf("jsExportedString: %v", err)
+	}
+	if done != "done" {
+		t.Errorf("jsExportedString = %q, want %q", done, "done")
+	}
+
+	// The nested template's contents are template text, not code: a fake export
+	// quoted inside the nested template must not be picked as the anchor ahead
+	// of the real declaration that follows it.
+	quoted := "const label = `↺ ${visit > 1 ? `export const LIFECYCLE_UNFINISHED = new Set([\"paused\"]);` : \"\"}`;\n" +
+		`export const LIFECYCLE_UNFINISHED = new Set(["", "scheduled", "in_progress"]);` + "\n" +
+		`export const LIFECYCLE_DONE = "done";`
+	members, err = jsExportedSetMembers(quoted, "LIFECYCLE_UNFINISHED")
+	if err != nil {
+		t.Fatalf("jsExportedSetMembers (nested template quoting the export): %v", err)
+	}
+	if want := []string{"", "scheduled", "in_progress"}; !slicesEqual(members, want) {
+		t.Errorf("jsExportedSetMembers = %q, want %q (a nested template's contents must never contribute Set members)", members, want)
+	}
+}
+
 func TestJSDivisionIsNotARegex(t *testing.T) {
 	// Division must still lex as punctuation: after a numeric literal a / is
 	// division, so `4 / 2 / 1` must not be read as an unterminated regex or

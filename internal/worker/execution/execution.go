@@ -1549,6 +1549,13 @@ func waitForTmux(ctx context.Context, cfg config.WorkerConfig, sessionName strin
 			nextMessageAt = now.Add(persistentReconcilePollInterval)
 		}
 		if !tmuxSessionExists(ctx, cfg, sessionName) {
+			if ctx.Err() != nil {
+				// The probe was cut short by the caller's context, so the
+				// session state is unknown. Report the context error like the
+				// select below instead of falsely declaring the session exited.
+				killTmuxSession(cfg, sessionName)
+				return ctx.Err()
+			}
 			if completion != nil {
 				return errors.New("Flow-owned agent check exited before running flow complete")
 			}

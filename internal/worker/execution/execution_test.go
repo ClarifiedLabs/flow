@@ -1397,6 +1397,45 @@ func TestWaitForTmuxKeepsUnsealedFlowCheckLive(t *testing.T) {
 	}
 }
 
+// TestWaitForTmuxReportsContextDeadlineWhenProbeIsCutShort pins the behavior
+// behind a CI flake in TestWaitForTmuxKeepsUnsealedFlowCheckLive: a has-session
+// probe running under an expired context is killed before it can answer, so the
+// session state is unknown. waitForTmux must report the context error (like its
+// own ctx.Done branch) instead of claiming the live check exited without sealing.
+func TestWaitForTmuxReportsContextDeadlineWhenProbeIsCutShort(t *testing.T) {
+	requireTool(t, "tmux")
+	workDir := t.TempDir()
+	cfg := workerConfigWithTmux(t, workDir, "file:///tmp/exchange.git")
+	jobID := "j-live-expired-probe"
+	jobCfg, err := tmuxConfigForJob(cfg, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionName := sessionNameForJob(jobID)
+	tmuxRun(t, jobCfg, "new-session", "-d", "-s", sessionName, "sleep 60")
+	t.Cleanup(func() { cleanupTmuxServer(jobCfg) })
+	input := tmuxInput{
+		Config: jobCfg,
+		Job:    Job{ID: jobID, Role: RoleReviewer},
+		Payload: JobPayload{
+			CheckName:          "review",
+			CompletionProtocol: checkverdict.CompletionProtocol,
+			CompletionMode:     string(checkverdict.ModeReview),
+		},
+		CompletionCapture: &checkCompletionCapture{},
+	}
+	watcher, err := newCheckCompletionWatcher(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	err = waitForTmux(ctx, jobCfg, sessionName, filepath.Join(workDir, "unused-exit"), nil, nil, nil, watcher)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waitForTmux() error = %v, want context deadline when the session probe is cut short", err)
+	}
+}
+
 func TestRunJobFlowAgentCheckRejectsProcessExitWithoutSeal(t *testing.T) {
 	requireTool(t, "git")
 	requireTool(t, "tmux")
