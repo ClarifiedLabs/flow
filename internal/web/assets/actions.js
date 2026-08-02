@@ -498,7 +498,11 @@ export function actionKeyFor(element) {
 // act on the (project, task) console pair — the attribute carries the task,
 // which is empty for a project console — so the busy identity adds both from
 // the dataset: the project console and a task console of the same project
-// (or the same task id in two projects) must not suppress each other.
+// (or the same task id in two projects) must not suppress each other. The
+// three claim buttons of a thread all carry the same data-thread-claim value,
+// so the base key already names the whole thread's claim operation: one
+// pending claim suppresses every sibling claim for that thread, while a
+// different thread's claims keep their own key and stay independent.
 export function actionBusyKey(key, dataset) {
   const base = `${key}:${String(dataset?.[key] ?? "")}`;
   if (key === "humanReviewApprove") {
@@ -510,13 +514,6 @@ export function actionBusyKey(key, dataset) {
   }
   if (key === "startConsole" || key === "releaseConsole") {
     return [base, dataset?.project, dataset?.task].map((part) => String(part ?? "")).join(":");
-  }
-  // The three claim buttons of a thread all carry the same data-thread-claim
-  // value, so the base key already names the whole thread's claim operation:
-  // one pending claim suppresses every sibling claim for that thread, while a
-  // different thread's claims keep their own key and stay independent.
-  if (key === "threadClaim") {
-    return base;
   }
   return base;
 }
