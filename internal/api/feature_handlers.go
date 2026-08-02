@@ -169,11 +169,17 @@ func (s *projectServer) handleEditFeature(w http.ResponseWriter, r *http.Request
 }
 
 func (s *projectServer) handleRebaseFeature(w http.ResponseWriter, r *http.Request, ref string, principal coordinator.Principal) {
-	restrictBlockedTo, ok := s.checkFeatureRebaseScope(w, r, principal, ref)
+	ctx := r.Context()
+	feature, err := s.features.Resolve(ctx, ref)
+	if err != nil {
+		writeFeatureError(w, err)
+		return
+	}
+	restrictBlockedTo, ok := s.checkFeatureRebaseScope(w, r, principal, feature)
 	if !ok {
 		return
 	}
-	result, err := s.features.RebaseOnMain(r.Context(), ref, restrictBlockedTo...)
+	result, err := s.features.RebaseOnMain(ctx, feature, restrictBlockedTo...)
 	if err != nil {
 		writeFeatureError(w, err)
 		return
@@ -189,17 +195,13 @@ func (s *projectServer) handleRebaseFeature(w http.ResponseWriter, r *http.Reque
 // concurrently after this read can never receive a rebase_task blocks link —
 // the relation set is confined by construction rather than by a racy pre-read.
 // Unbound project consoles and owner credentials keep project-wide rebase
-// access.
-func (s *projectServer) checkFeatureRebaseScope(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, featureRef string) (restrictBlockedTo []string, ok bool) {
+// access. The caller resolves the feature ref once and passes the value here,
+// so the console rebase path performs a single feature lookup.
+func (s *projectServer) checkFeatureRebaseScope(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, feature coordinator.Feature) (restrictBlockedTo []string, ok bool) {
 	if principal.Scope != coordinator.TokenScopeConsole || principal.SourceTaskID == nil {
 		return nil, true
 	}
 	ctx := r.Context()
-	feature, err := s.features.Resolve(ctx, featureRef)
-	if err != nil {
-		writeFeatureError(w, err)
-		return nil, false
-	}
 	tasks, err := s.features.Tasks(ctx, feature.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "load_feature_tasks_failed", err.Error())

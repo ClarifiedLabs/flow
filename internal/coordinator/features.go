@@ -572,17 +572,17 @@ ORDER BY created_at DESC, id DESC`, strings.TrimSpace(featureID))
 // flow, links rebase_task blocks every other non-done feature task, and
 // schedules it — the trusted finalize node publishes the result.
 //
+// The feature must already be resolved: callers that only hold a ref look it
+// up once and pass the value, so the console rebase path never resolves the
+// same ref twice.
+//
 // restrictBlockedTo confines the conflicted path's blocker links to the named
 // tasks: when non-empty, only those tasks (if still non-done) receive a
 // rebase_task blocks relation. Task-bound console credentials pass exactly
 // their bound task, so the blocker set is confined at relation-creation time
 // rather than by a racy pre-read: a feature task created concurrently after
 // any API-side scope check can never be linked.
-func (s *FeatureService) RebaseOnMain(ctx context.Context, featureRef string, restrictBlockedTo ...string) (RebaseStartResult, error) {
-	feature, err := s.Resolve(ctx, featureRef)
-	if err != nil {
-		return RebaseStartResult{}, err
-	}
+func (s *FeatureService) RebaseOnMain(ctx context.Context, feature Feature, restrictBlockedTo ...string) (RebaseStartResult, error) {
 	if feature.Status != FeatureOpen {
 		return RebaseStartResult{}, ErrFeatureClosed
 	}

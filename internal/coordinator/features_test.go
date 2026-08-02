@@ -405,7 +405,7 @@ func TestRebaseOnMainCleanThenUpToDate(t *testing.T) {
 	oldTip := env.branchTip(t, feature.Branch)
 	env.advanceMain(t, "main-only.txt", "main work\n", "main commit")
 
-	result, err := env.features.RebaseOnMain(ctx, feature.ID)
+	result, err := env.features.RebaseOnMain(ctx, feature)
 	if err != nil {
 		t.Fatalf("rebase: %v", err)
 	}
@@ -440,7 +440,7 @@ func TestRebaseOnMainCleanThenUpToDate(t *testing.T) {
 		t.Fatalf("rebases = %+v, want one finalized clean row", rebases)
 	}
 
-	again, err := env.features.RebaseOnMain(ctx, feature.ID)
+	again, err := env.features.RebaseOnMain(ctx, feature)
 	if err != nil {
 		t.Fatalf("second rebase: %v", err)
 	}
@@ -471,7 +471,7 @@ func TestRebaseOnMainConflictCreatesBlockingTask(t *testing.T) {
 		t.Fatalf("create task C: %v", err)
 	}
 
-	result, err := env.features.RebaseOnMain(ctx, feature.ID)
+	result, err := env.features.RebaseOnMain(ctx, feature)
 	if err != nil {
 		t.Fatalf("rebase: %v", err)
 	}
@@ -520,7 +520,7 @@ WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`, blockerID,
 	assertBlockedBy(rebaseTask.ID, rebaseTask.ID, false)
 
 	// A second rebase refuses while one runs.
-	if _, err := env.features.RebaseOnMain(ctx, feature.ID); !errors.Is(err, ErrFeatureRebaseRunning) {
+	if _, err := env.features.RebaseOnMain(ctx, feature); !errors.Is(err, ErrFeatureRebaseRunning) {
 		t.Fatalf("second rebase error = %v, want ErrFeatureRebaseRunning", err)
 	}
 
@@ -598,7 +598,7 @@ func TestRebaseOnMainRestrictBlockedTo(t *testing.T) {
 	}
 
 	// The bound-task console passes exactly its bound task as the restriction.
-	result, err := env.features.RebaseOnMain(ctx, feature.ID, boundTask.ID)
+	result, err := env.features.RebaseOnMain(ctx, feature, boundTask.ID)
 	if err != nil {
 		t.Fatalf("restricted rebase: %v", err)
 	}
@@ -655,7 +655,7 @@ func TestFinalizeRebasePublishesAndStales(t *testing.T) {
 	env := newFeatureTestEnv(t)
 	feature := setupConflictedFeature(t, env)
 
-	result, err := env.features.RebaseOnMain(ctx, feature.ID)
+	result, err := env.features.RebaseOnMain(ctx, feature)
 	if err != nil || result.Kind != RebaseTaskCreated {
 		t.Fatalf("rebase = %+v, %v, want rebase task", result, err)
 	}
@@ -698,7 +698,7 @@ func TestFinalizeRebaseStaleWhenBranchMoves(t *testing.T) {
 	env := newFeatureTestEnv(t)
 	feature := setupConflictedFeature(t, env)
 
-	result, err := env.features.RebaseOnMain(ctx, feature.ID)
+	result, err := env.features.RebaseOnMain(ctx, feature)
 	if err != nil || result.Kind != RebaseTaskCreated {
 		t.Fatalf("rebase = %+v, %v, want rebase task", result, err)
 	}
@@ -757,7 +757,7 @@ func TestEnsureRebaseBlockToleratesDuplicates(t *testing.T) {
 	env := newFeatureTestEnv(t)
 	feature := setupConflictedFeature(t, env)
 
-	result, err := env.features.RebaseOnMain(ctx, feature.ID)
+	result, err := env.features.RebaseOnMain(ctx, feature)
 	if err != nil || result.Kind != RebaseTaskCreated {
 		t.Fatalf("rebase = %+v, %v", result, err)
 	}
@@ -916,7 +916,7 @@ func TestExecutorFinalizeRebaseNode(t *testing.T) {
 	env := newFeatureTestEnv(t)
 	feature := setupConflictedFeature(t, env)
 
-	result, err := env.features.RebaseOnMain(ctx, feature.ID)
+	result, err := env.features.RebaseOnMain(ctx, feature)
 	if err != nil || result.Kind != RebaseTaskCreated {
 		t.Fatalf("rebase = %+v, %v", result, err)
 	}
@@ -1129,7 +1129,7 @@ func TestLandRefusesRunningRebase(t *testing.T) {
 	env := newFeatureTestEnv(t)
 	feature := setupConflictedFeature(t, env)
 
-	result, err := env.features.RebaseOnMain(ctx, feature.ID)
+	result, err := env.features.RebaseOnMain(ctx, feature)
 	if err != nil || result.Kind != RebaseTaskCreated {
 		t.Fatalf("rebase = %+v, %v", result, err)
 	}
