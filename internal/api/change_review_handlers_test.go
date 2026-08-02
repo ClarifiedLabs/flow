@@ -197,6 +197,76 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 	}
 }
 
+func TestSubmitReviewEmptyHeadRejected(t *testing.T) {
+	fixture := newTestFixture(t)
+	flow := newBoardFixtureFlow(t, fixture, "change review empty head")
+
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{Title: "Empty-head review from change view", FlowID: flow.ID}, http.StatusCreated, &created)
+	var scheduled workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
+		nil, http.StatusOK, &scheduled)
+
+	const (
+		changeID  = "ch-change-review-empty-head"
+		headSHA   = "1111111111111111111111111111111111111111"
+		timestamp = "2026-01-01T00:00:00.000000000Z"
+	)
+	if _, err := fixture.DB.ExecContext(context.Background(), `
+INSERT INTO changes (id, task_id, branch, base, head_sha, created_at, updated_at, ready_at)
+VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-review-empty-head",
+		headSHA, timestamp, timestamp, timestamp); err != nil {
+		t.Fatalf("insert change: %v", err)
+	}
+
+	// An omitted or empty head_sha is rejected up front with a stable
+	// 400 head_sha_required response, before any thread or verdict check can be
+	// created. Both the omitted field and a whitespace-only value must fail the
+	// same way (the coordinator trims the submitted head, so a whitespace-only
+	// head can never match either).
+	for _, submittedHead := range []string{"", "   "} {
+		var resp errorResponse
+		doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+			reviewVerdictRequest{
+				Verdict:  "approve",
+				HeadSHA:  submittedHead,
+				Comments: []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "comment on inspected code"}},
+			}, http.StatusBadRequest, &resp)
+		if resp.Error.Code != "head_sha_required" {
+			t.Fatalf("empty head (%q): error code = %q, want head_sha_required", submittedHead, resp.Error.Code)
+		}
+		if resp.Error.Message != "head sha is required" {
+			t.Fatalf("empty head (%q): error message = %q, want %q", submittedHead, resp.Error.Message, "head sha is required")
+		}
+
+		var threadCount int
+		if err := fixture.DB.QueryRowContext(context.Background(),
+			`SELECT COUNT(*) FROM review_threads WHERE change_id = ?`, changeID).Scan(&threadCount); err != nil {
+			t.Fatalf("count threads: %v", err)
+		}
+		if threadCount != 0 {
+			t.Fatalf("empty-head review created %d threads, want 0", threadCount)
+		}
+		var checkCount int
+		if err := fixture.DB.QueryRowContext(context.Background(),
+			`SELECT COUNT(*) FROM checks WHERE task_id = ? AND name = ?`, created.Task.ID, humanReviewCheckName).Scan(&checkCount); err != nil {
+			t.Fatalf("count checks: %v", err)
+		}
+		if checkCount != 0 {
+			t.Fatalf("empty-head review recorded %d human-review checks, want 0", checkCount)
+		}
+	}
+
+	run, err := fixture.Bundle.WorkflowRuns.Get(context.Background(), scheduled.Run.ID)
+	if err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	if run.State != coordinator.WorkflowRunWaiting {
+		t.Fatalf("workflow state = %q, want still waiting after a refused empty-head review", run.State)
+	}
+}
+
 func TestSubmitReviewStaleHeadConflicts(t *testing.T) {
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "change review stale head")

@@ -19,8 +19,10 @@ const humanReviewCheckName = "human-review"
 // with them. Posting the notes and the verdict separately is what made the old
 // single-box review lossy.
 //
-// HeadSHA is the commit the reviewer actually inspected. The submission is
-// rejected with a conflict if the change advanced past it, so inline threads
+// HeadSHA is the commit the reviewer actually inspected. An omitted or empty
+// head is rejected up front with 400 head_sha_required before any thread or
+// verdict can be created; a submission whose head advanced past the change's
+// current head is rejected with a 409 head_moved conflict, so inline threads
 // and the verdict stay bound to the code the reviewer saw rather than to a
 // newer head they never looked at.
 type reviewVerdictRequest struct {
@@ -66,6 +68,14 @@ func (s *projectServer) handleSubmitReview(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusBadRequest, "invalid_comment", "inline comment body is required")
 			return
 		}
+	}
+	// An omitted or empty head_sha can never match the change's current head, so
+	// it is rejected explicitly instead of falling through to the head-moved
+	// comparison. Keeping this validation here (before SubmitReview) pins the
+	// fail-closed rejection to a stable 400 head_sha_required response.
+	if strings.TrimSpace(request.HeadSHA) == "" {
+		writeError(w, http.StatusBadRequest, "head_sha_required", "head sha is required")
+		return
 	}
 
 	ctx := r.Context()
