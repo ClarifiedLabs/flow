@@ -29,25 +29,25 @@ function renderCheckRow(check, model) {
   const exitCode = value(check, "exit_code", "ExitCode");
   const failed = verdict === "blocked" || verdict === "errored";
   const details = String(value(check, "details", "Details") || "");
-  const meta = [jobID, exitCode != null ? `exit ${exitCode}` : ""].filter(Boolean).join(" · ");
-  const detail = [
-    details ? renderMarkdown(details, { inline: true }) : "",
-    escapeHTML(meta),
-  ].filter(Boolean).join(" · ");
+  const meta = [jobID, exitCode != null && exitCode !== "" ? `exit ${exitCode}` : ""].filter(Boolean).join(" · ");
   const projectAttr = model?.projectID ? ` data-project="${escapeAttr(model.projectID)}"` : "";
 
   return `
     <div class="row" data-check="${escapeAttr(name)}" data-verdict="${escapeAttr(verdict)}"${failed ? " data-failed" : ""}>
       <span class="dot"></span>
       <span class="name">${escapeHTML(name)}</span>
-      <span class="detail">${detail}</span>
-      <span class="spacer"></span>
+      <div class="detail">
+        ${details ? renderMarkdown(details) : ""}
+        ${meta ? `<span class="meta">${escapeHTML(meta)}</span>` : ""}
+      </div>
       ${
         failed
           ? `
-        <button class="button secondary" data-transcript-toggle="${escapeAttr(name)}" data-job="${escapeAttr(jobID)}">Transcript ▾</button>
-        <button class="button secondary" data-workflow-retry="${escapeAttr(model?.id || "")}"${projectAttr}>Retry</button>
-        <button class="button secondary" data-workflow-skip="${escapeAttr(model?.id || "")}" data-workflow-skip-node="${escapeAttr(model?.nodeRunID || "")}"${projectAttr}>Skip</button>
+        <span class="actions">
+          <button class="button secondary" data-transcript-toggle="${escapeAttr(name)}" data-job="${escapeAttr(jobID)}">Transcript ▾</button>
+          <button class="button secondary" data-workflow-retry="${escapeAttr(model?.id || "")}"${projectAttr}>Retry</button>
+          <button class="button secondary" data-workflow-skip="${escapeAttr(model?.id || "")}" data-workflow-skip-node="${escapeAttr(model?.nodeRunID || "")}"${projectAttr}>Skip</button>
+        </span>
       `
           : `<span class="duration">${escapeHTML(checkDuration(check))}</span>`
       }

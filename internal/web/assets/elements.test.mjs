@@ -866,14 +866,52 @@ test("a failed check row carries the disclosure, retry and skip", () => {
   assert.match(html, /Skip/);
 });
 
-test("the check list renders details as markdown but keeps job id and exit code escaped", () => {
+test("the check list renders details as block markdown but keeps job id and exit code escaped", () => {
   const html = renderCheckList({
     id: "t-0042",
     checks: [
       { name: "reviewer", verdict: "blocked", details: "**Overall**: needs work", source_job_id: "j-<_1", exit_code: 1 },
     ],
   });
-  assert.match(html, /<span class="detail"><strong>Overall<\/strong>: needs work · j-&lt;_1 · exit 1<\/span>/);
+  assert.match(html, /<div class="detail">\s*<div class="md"><p><strong>Overall<\/strong>: needs work<\/p><\/div>\s*<span class="meta">j-&lt;_1 · exit 1<\/span>\s*<\/div>/);
+});
+
+test("multi-paragraph check details render as block markdown, not one collapsed line", () => {
+  const html = renderCheckList({
+    id: "t-0042",
+    checks: [
+      {
+        name: "reviewer",
+        verdict: "blocked",
+        details:
+          "**Overall**: needs work\n\nPlease fix the escaping in renderCheckRow before merging.\n\n- fix the escaping in renderCheckRow\n- add a regression test",
+        source_job_id: "j-0912",
+        exit_code: 1,
+      },
+    ],
+  });
+  const detail = html.match(/<div class="detail">([\s\S]*?)<\/div>\s*<span class="actions">/);
+  assert.ok(detail, "the detail column wraps the block markdown");
+  assert.match(detail[1], /<div class="md"><p><strong>Overall<\/strong>: needs work<\/p>/);
+  assert.match(detail[1], /<p>Please fix the escaping in renderCheckRow before merging\.<\/p>/);
+  assert.match(detail[1], /<ul>\s*<li>fix the escaping in renderCheckRow<\/li>\s*<li>add a regression test<\/li>\s*<\/ul>/);
+  assert.doesNotMatch(detail[1], /needs work Please fix the escaping/);
+  assert.doesNotMatch(detail[1], /needs work · fix the escaping/);
+  assert.match(detail[1], /<span class="meta">j-0912 · exit 1<\/span>/);
+  assert.match(html, /data-transcript-toggle="reviewer"/);
+  assert.match(html, /Retry/);
+  assert.match(html, /Skip/);
+});
+
+test("satisfied check rows still show the duration next to block details", () => {
+  const html = renderCheckList({
+    id: "t-0042",
+    checks: [
+      { name: "unit", verdict: "satisfied", details: "go test ./...", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:03:00Z" },
+    ],
+  });
+  assert.match(html, /<div class="md"><p>go test \.\/...<\/p><\/div>/);
+  assert.match(html, /<span class="duration">3m 0s<\/span>/);
 });
 
 test("handing back names every edge the executor can take", () => {

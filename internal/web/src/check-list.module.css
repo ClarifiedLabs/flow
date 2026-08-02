@@ -9,9 +9,9 @@
 }
 
 .row {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
   align-items: center;
-  flex-wrap: wrap;
   gap: 6px 9px;
   padding: 9px 11px;
   border-top: 1px solid var(--line);
@@ -55,8 +55,43 @@
   color: var(--muted);
 }
 
-.spacer {
-  flex: 1;
+/* The detail column holds a full block-markdown render (the `.md` container)
+   with the job/exit metadata as plain escaped text on its own line underneath.
+   The 1fr grid column gives the markdown a width to wrap inside, so a long
+   reviewer-notes blob folds into paragraphs and lists instead of shoving the
+   Transcript/Retry/Skip buttons aside. `min-width: 0` lets the block shrink
+   below its longest line, and the base `.md` first/last-child margin rules
+   keep a short single-line detail from stretching the row. */
+.detail {
+  min-width: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  max-width: none;
+}
+
+.detail .md {
+  min-width: 0;
+}
+
+.detail .meta {
+  display: block;
+  font-size: var(--text-quiet);
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+/* The shared base `.actions` rule (scoped to `flow-app`) also matches this
+   light-DOM wrapper and would push the controls down with `margin-top: 10px`;
+   reset every property it contributes so failed rows with short details stay
+   compact and the Transcript/Retry/Skip controls stay on the row's line. */
+.actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 0;
 }
 
 /* The transcript is the immediate next sibling of the row that owns it. That
