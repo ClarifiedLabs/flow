@@ -2,75 +2,36 @@
 
 ## Current Goal
 
-Serialize review submission against a concurrent change-head advance (t-flow-0085):
-make the head read and the thread/check writes of `handleSubmitReview` atomic so a
-concurrent head advance cannot anchor threads or a verdict to a head that is stale
-at write time, while preserving the 409 `head_moved` fail-closed behavior and
-matching-head behavior.
+Restore rendering of headless changes (no `head_sha` recorded yet) on the standalone `/ui/changes/:id` route in `renderChangeRoute`, while keeping the retryable coherent-pair error when a named head disagrees with the diff head. Reconcile with the superseded task t-flow-0093 by folding its requested headless-mount coverage into this work.
 
 ## Completed Work
 
-The requested change is **already implemented in the base** (`main` @ `1cc5710`):
-the t-flow-0064 change's final form included the coordinator-side atomic fix
-(commit `417d424` "fix(api): atomically bind review submissions to the displayed
-change head"), and that merge landed before this task's branch was cut. No further
-code change was needed; this node verified the behavior end to end.
+This fix round integrated `origin/main` into `task/t-flow-0107/run-1` per the coordinator's auto-merge remediation, resolved the empty-change situation, and re-submitted.
 
-Mechanism already in place:
-
-- `internal/api/change_review_handlers.go` no longer does the `GetChange`-then-write
-  shape described in the task. It delegates the whole submission to
-  `ThreadService.SubmitReview` and maps `coordinator.ErrReviewHeadMoved` to
-  409 `head_moved` (nothing written on mismatch).
-- `internal/coordinator/reviews.go` `SubmitReview` re-reads `changes.head_sha`
-  **inside** the same `BEGIN IMMEDIATE` transaction (`sqlitex.BeginImmediate`) that
-  creates the inline threads (`createThreadTx`), reports the `human-review` check
-  (`reportCheckTx`), and completes the verdict's workflow gate
-  (`respondToReviewGateTx`), then commits. A concurrent head advance can therefore
-  never interleave between the comparison and the writes: either the submission
-  commits for the inspected head first, or the advance lands first and the whole
-  submission is refused with `ErrReviewHeadMoved` (409, no partial state).
-- Production DB busy timeout is 5000 ms (`internal/db/db.go`), so a concurrent
-  advance waits for the review transaction rather than failing mid-flight.
+- **Production behavior is already correct on `main`.** `renderChangeRoute` (`internal/web/assets/change-route.js`) distinguishes 'no head recorded yet' from 'head moved between the two GETs': metadata naming no `head_sha` mounts as-is with an explicit empty diff (`{ ...data, diff: {} }`, lines 30-37), skips the `/diff` fetch entirely, and returns `true` — no throw, no poll-retry loop. A change that DOES name a head still requires a verified pair: a diff whose `head_sha` disagrees with the metadata head is retried and then fails with `The change advanced while it was loading` (lines 39-50). The headless branch was restored on `main` by the t-flow-0074 merge; the regression described in the task body never landed on `main`.
+- **The previous round's test is already on `main`.** The prior session folded t-flow-0093's requested coverage into `internal/web/assets/elements.test.mjs` ("the standalone change route mounts a headless change as-is with no diff fetch"). Before this fix round, t-flow-0093 itself merged to `main` (`e9363d9`) with the identical 33-line test, so the auto-merge of this change reported `squash merge has no included changes`.
+- **Remediation.** Merged `origin/main` into the branch (`e4c78d6`, clean — the duplicate test auto-merged with no conflicts), leaving the branch identical to `main` (`git diff origin/main HEAD` is empty). Per the t-flow-0085 precedent for base-already-implemented changes (its merge carried only `SUMMARY.md`), this round's committed deliverable is the change summary itself, giving the squash merge an included change.
 
 ## Remaining Work
 
-None. All four acceptance criteria are satisfied by the existing implementation and
-covered by existing focused API tests.
+None. All acceptance criteria are satisfied by `main` and covered by its tests; this change records the reconciliation and verification.
 
 ## Tests Run and Results
 
-- `go test ./internal/api -run 'TestSubmitReview' -count=1 -v` — PASS (6/6)
-  - `TestSubmitReviewHeadUpdateCannotInterleave`: the focused concurrent-advance
-    test. `AfterHeadCheck` fires inside the review transaction right after the head
-    comparison; a racing `UPDATE changes SET head_sha` over a second connection with
-    `busy_timeout 0` must fail immediately (SQLITE_BUSY). Asserts no threads/checks
-    are created, the head is unchanged, and the run stays waiting.
-  - `TestSubmitReviewStaleHeadConflicts`: genuine inspect-then-submit mismatch
-    returns 409 and creates nothing.
-  - `TestSubmitReviewApprovalAdvancesHumanGate`,
-    `TestSubmitReviewCommentLeavesHumanGateWaiting`,
-    `TestSubmitReviewCommentDoesNotStartScheduledRun`: matching-head comment and
-    verdict behavior preserved.
-  - `TestSubmitReviewRejectsWrongCredentialsAndState`.
-- `go test ./internal/api -count=1` — PASS
-- `go test ./internal/coordinator -count=1` — PASS
+- `node --test internal/web/assets/app.test.mjs internal/web/assets/elements.test.mjs` — pass (375/375), the acceptance-criteria files. Includes the headless-mount test (`elements.test.mjs:3277`, main:3732; no `/diff` fetch asserted), the unit headless coverage (`app.test.mjs:6518`), and the head-mismatch retry coverage (`app.test.mjs:126/:6438/:6468`).
+- `node --test internal/web/assets/*.test.mjs` — pass, full assets suite (427/427 as of the prior round; re-ran after the `origin/main` integration).
 
 ## Failed Approaches
 
-None.
+None. One investigation note: the task body's premise (route throws on headless changes) matches the t-flow-0064 review head `417d424b`, not current `main` — the regression never landed because t-flow-0074 merged first and t-flow-0064's squash merge did not touch `change-route.js`.
 
 ## Important Files and Commands
 
-- `internal/coordinator/reviews.go` — `SubmitReview` (atomic transaction, head
-  re-check at lines 321-333, `AfterHeadCheck` test seam at 334-338).
-- `internal/api/change_review_handlers.go` — `handleSubmitReview` (409 `head_moved`
-  mapping at lines 105-107).
-- `internal/api/change_review_handlers_test.go` — race/stale/matching-head tests.
-- Commands: `go test ./internal/api -run TestSubmitReview -count=1 -v`;
-  `go test ./internal/api -count=1`; `go test ./internal/coordinator -count=1`.
+- `internal/web/assets/change-route.js` — headless branch at lines 30-37; verified-pair head-equality check at line 45 (already correct on `main`).
+- `internal/web/assets/elements.test.mjs` — headless-mount test at line 3277 (identical copy at main:3732 via the t-flow-0093 merge).
+- `internal/web/assets/app.test.mjs` — unit headless coverage at line 6518; mismatch/retry coverage at lines 126, 6438, 6468.
+- Commands: `node --test internal/web/assets/app.test.mjs internal/web/assets/elements.test.mjs`, `node --test internal/web/assets/*.test.mjs`.
 
 ## Next Recommended Action
 
-Close the node: the change requested by t-flow-0085 landed with ch-flow-0064
-(commit `417d424`) and is verified by the passing focused API tests.
+`flow complete --summary-file SUMMARY.md`; the auto-merge should now succeed with `SUMMARY.md` as the included change.
