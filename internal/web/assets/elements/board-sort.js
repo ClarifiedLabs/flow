@@ -26,8 +26,8 @@ export function renderBoardSort(sort) {
   const key = BOARD_SORT_KEYS.has(sort?.key) ? sort.key : "number";
   const dir = BOARD_SORT_DIRS.has(sort?.dir) ? sort.dir : "asc";
   return `
-    <button type="button" class="sort-key active" data-board-sort-key aria-pressed="true"
-      aria-label="Sort by ${escapeAttr(BOARD_SORT_KEY_LABELS[key])}. Click to sort by ${escapeAttr(BOARD_SORT_KEY_LABELS[NEXT_BOARD_SORT_KEY[key]])}">
+    <button type="button" class="sort-key active" data-board-sort-key
+      aria-label="Currently sorting by ${escapeAttr(BOARD_SORT_KEY_LABELS[key])}. Click to sort by ${escapeAttr(BOARD_SORT_KEY_LABELS[NEXT_BOARD_SORT_KEY[key]])}">
       ${escapeHTML(BOARD_SORT_KEY_LABELS[key])}
     </button>
     <button type="button" class="sort-dir" data-board-sort-dir

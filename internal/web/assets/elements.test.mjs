@@ -782,7 +782,8 @@ test("the sort control shows the active key highlighted with its direction", () 
   assert.match(byDefault, />↑</);
   const byNumber = renderBoardSort({ key: "number", dir: "asc" });
   assert.match(byNumber, /data-board-sort-key/);
-  assert.match(byNumber, /aria-pressed="true"/);
+  assert.doesNotMatch(byNumber, /aria-pressed/, "the key button is not a pressed toggle: clicking it replaces it with the other key");
+  assert.match(byNumber, /Currently sorting by Task number/, "the label states the active key");
   assert.match(byNumber, />\s*Task number\s*</);
   assert.match(byNumber, />↑</);
   assert.match(byNumber, /currently ascending/);
