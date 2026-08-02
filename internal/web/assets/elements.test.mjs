@@ -3009,6 +3009,81 @@ test("a failed thread claim leaves no live replacement disabled", async () => {
   appNode.remove();
 });
 
+test("a thread claim whose id contains selector metacharacters still suppresses and re-enables across a repaint", async () => {
+  const root = globalThis.document.body;
+  let requests = 0;
+  let resolveRequest;
+  stubReviewFetch(() => {
+    requests += 1;
+    return new Promise((resolve) => {
+      resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+  });
+  const appNode = globalThis.document.createElement("flow-app");
+  const statuses = [];
+  appNode.setStatus = (message) => statuses.push(message);
+  appNode.refresh = () => {};
+  root.appendChild(appNode);
+  // Interpolated into a selector this id closes the attribute and opens a
+  // second one matching any control whose data-thread-claim is "th-0002";
+  // escapeAttr keeps it a plain dataset value in the real DOM instead.
+  const threadID = 'th-1"][data-thread-claim="th-0002';
+  const thread = mountElement(appNode, "flow-inline-thread", inlineThreadData(threadID));
+  const other = mountElement(appNode, "flow-inline-thread", inlineThreadData("th-0002"));
+  await flush();
+
+  const fixed = [...thread.querySelectorAll("[data-thread-claim]")]
+    .find((button) => button.dataset?.claimKind === "fixed");
+  assert.ok(fixed, "the hostile id survives escapeAttr rendering");
+  assert.equal(fixed.dataset.threadClaim, threadID);
+
+  const pending = handleAction(appNode, { target: fixed, preventDefault() {} });
+  assert.equal(requests, 1);
+  assert.equal(fixed.disabled, true);
+  assert.equal(fixed.classList.contains("is-busy"), true);
+  for (const button of thread.querySelectorAll("[data-thread-claim]")) {
+    assert.equal(button.disabled, true, "every same-thread claim is suppressed despite the hostile id");
+  }
+  const otherFixed = [...other.querySelectorAll("[data-thread-claim]")]
+    .find((button) => button.dataset?.claimKind === "fixed");
+  assert.equal(otherFixed.hasAttribute("disabled"), false, "a different thread's claim is not suppressed by an injected selector");
+  assert.equal(inFlight.has(`threadClaim:${threadID}`), true);
+
+  // A poll repaint replaces the claim row: the fresh buttons render disabled
+  // because the render path consults the shared registry, and settlement must
+  // restore the live replacement for this thread only.
+  thread.invalidate();
+  await flush();
+  const repainted = [...thread.querySelectorAll("[data-thread-claim]")]
+    .find((button) => button.dataset?.claimKind === "fixed");
+  assert.ok(repainted && repainted !== fixed, "the claim row was replaced by the repaint");
+  assert.equal(repainted.hasAttribute("disabled"), true, "the replacement renders disabled while the claim is pending");
+  assert.equal(repainted.hasAttribute("aria-busy"), true);
+
+  // Route the settle-time restore through the fake document to the live row:
+  // any selector built from the thread id must be rejected, only the broad
+  // control selector is legal.
+  const docQuery = globalThis.document.querySelectorAll;
+  globalThis.document.querySelectorAll = (selector) =>
+    selector === "[data-thread-claim]" ? thread.querySelectorAll(selector) : [];
+  try {
+    resolveRequest();
+    await pending;
+  } finally {
+    globalThis.document.querySelectorAll = docQuery;
+  }
+
+  assert.equal(repainted.disabled, false, "the repaint replacement re-enables on success despite the hostile id");
+  assert.equal(repainted.getAttribute("aria-busy"), null);
+  assert.equal(repainted.classList.contains("is-busy"), false);
+  assert.equal(otherFixed.hasAttribute("disabled"), false, "a different thread's claim stays enabled after settlement");
+  assert.deepEqual(statuses, [`Claiming thread ${threadID}\u2026`, "Thread claimed"]);
+  assert.equal(inFlight.size, 0);
+  thread.remove();
+  other.remove();
+  appNode.remove();
+});
+
 test("an inline claim suppresses the Now-card claim controls across an unchanged poll", async () => {
   const root = globalThis.document.body;
   let requests = 0;
