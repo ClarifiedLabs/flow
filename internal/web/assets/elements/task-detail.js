@@ -384,10 +384,13 @@ export class FlowTaskDetail extends FlowElement {
 
   // changeDiffPending reports whether the cached pair installed without a
   // verified diff: the change was headless or /diff was unavailable when the
-  // pair loaded. The diff is retried on every poll until it lands (or the
-  // change moves), and the element renders an explicit no-diff-yet state.
+  // pair loaded (the cached diff is then empty or the server's explicit
+  // unavailable response, which names the head but carries no files). The
+  // diff is retried on every poll until it lands (or the change moves), and
+  // the element renders an explicit no-diff-yet state.
   changeDiffPending() {
-    return Boolean(this.changeData && !value(this.changeData.diff || {}, "head_sha", "HeadSHA"));
+    const diff = this.changeData?.diff || {};
+    return Boolean(this.changeData && (!value(diff, "head_sha", "HeadSHA") || this.diffUnavailable(diff)));
   }
 
   // diffUnavailable reports whether a /diff response is not a usable diff: a
@@ -581,14 +584,22 @@ export class FlowTaskDetail extends FlowElement {
             // A verified pair: the diff names the metadata's head and is a real
             // diff, not the server's explicit unavailable response.
             loaded = { data, diff, headSHA };
+          } else if (diff && diffHead === headSHA) {
+            // The server's explicit no-diff answer: HTTP 200 naming the head
+            // with available:false and an unavailable_reason. It verifies
+            // nothing, but it carries the reason, so install it as the pending
+            // diff — flow-change surfaces why no diff is shown — and the next
+            // poll's revalidation retries the diff in place.
+            pending = { data, diff, headSHA };
+            break;
           } else {
-            // The metadata is headed but its diff is not available: a failed
-            // fetch, a headless diff, the change moved again between the two
-            // GETs, or the server's explicit no-diff response. None of those
-            // verifies, so install the metadata with an explicit pending diff;
-            // the next poll's revalidation retries the diff in place. A diff
-            // that did come back names another head and is never paired with
-            // this metadata, so two heads cannot mix on screen.
+            // The metadata is headed but its diff did not come back usable: a
+            // failed fetch, a headless diff, or the change moved again between
+            // the two GETs. None of those verifies, so install the metadata
+            // with an explicit pending diff; the next poll's revalidation
+            // retries the diff in place. A diff that did come back names
+            // another head and is never paired with this metadata, so two
+            // heads cannot mix on screen.
             pending = { data, diff: {}, headSHA };
             break;
           }
@@ -657,7 +668,7 @@ export class FlowTaskDetail extends FlowElement {
           // explicitly unavailable fetch keeps the pending pair and the cache
           // stays stale for the next poll.
           const cachedDiff = this.changeData?.diff || {};
-          if (!value(cachedDiff, "head_sha", "HeadSHA")) {
+          if (!value(cachedDiff, "head_sha", "HeadSHA") || this.diffUnavailable(cachedDiff)) {
             const diff = await apiGet(`/v2/changes/${encodeURIComponent(id)}/diff`).catch(() => null);
             if (generation !== this.changeGeneration || key !== this.changeKey) return;
             const diffHead = String(value(diff, "head_sha", "HeadSHA") || "");

@@ -93,13 +93,20 @@ export class FlowChange extends FlowElement {
     // (authoring in progress) or /diff was unavailable when the pair loaded.
     // Render the metadata with an explicit no-diff-yet state; the task detail
     // retries the diff on later polls and swaps this out for the real diff.
+    // A headed unavailable response names the reason the server could not
+    // compute the diff (e.g. "merge service is not configured"): surface it
+    // so the empty state explains itself instead of reading as a change with
+    // no files.
     const pending =
       !value(diff, "head_sha", "HeadSHA") ||
       diff.available === false ||
       Boolean(value(diff, "unavailable_reason", "UnavailableReason"));
-    const pendingNote = value(change, "head_sha", "HeadSHA")
-      ? "The diff is not available yet; it will appear here once it is."
-      : "No diff yet — this change has no head yet.";
+    const unavailableReason = value(diff, "unavailable_reason", "UnavailableReason");
+    const pendingNote = unavailableReason && value(diff, "head_sha", "HeadSHA")
+      ? `The diff is not available: ${unavailableReason}`
+      : value(change, "head_sha", "HeadSHA")
+        ? "The diff is not available yet; it will appear here once it is."
+        : "No diff yet — this change has no head yet.";
 
     // The full displayed head rides in the markup so the paint identity (the
     // byte-compared render output in FlowElement.paint) moves whenever the head

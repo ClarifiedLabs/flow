@@ -4772,7 +4772,8 @@ test("a load whose diff the server explicitly reports unavailable installs a rec
   const html = changePanelHTML(detail);
   assert.match(html, /ch-0001/, "the headed metadata is rendered");
   assert.match(html, /data-change-pending/, "an explicit unavailable response renders the pending diff state");
-  assert.match(html, /not available yet/, "the unavailable diff is explicit");
+  assert.match(html, /The diff is not available: diff not captured/, "the empty state surfaces the server's unavailable_reason");
+  assert.doesNotMatch(html, /class="files"/, "no bare empty file list renders for an unavailable diff");
   assert.doesNotMatch(html, /advanced while it was loading/, "an unavailable diff is not a head move");
   assert.doesNotMatch(detail.querySelector(".panel").innerHTML, /data-change-retry/, "the pending state does not offer a terminal retry");
   assert.doesNotMatch(html, /h1\.go/, "no diff is rendered while it is unavailable");
@@ -4789,7 +4790,7 @@ test("a load whose diff the server explicitly reports unavailable installs a rec
   detail.data = taskDetailModel("h1");
   await flush();
   await settleChange(detail);
-  assert.match(changePanelHTML(detail), /not available yet/, "a still-unavailable diff keeps the pending state");
+  assert.match(changePanelHTML(detail), /The diff is not available: diff not captured/, "a still-unavailable diff keeps the pending state with its reason");
   assert.equal(
     calls.filter((path) => path.endsWith("/diff")).length,
     2,
@@ -4802,8 +4803,50 @@ test("a load whose diff the server explicitly reports unavailable installs a rec
   await flush();
   await settleChange(detail);
   assert.match(changePanelHTML(detail), /h1\.go/, "the recovered diff renders");
-  assert.doesNotMatch(changePanelHTML(detail), /not available yet/, "the pending state clears once the diff lands");
+  assert.doesNotMatch(changePanelHTML(detail), /diff not captured/, "the pending state clears once the diff lands");
   detail.remove();
+});
+
+test("a headed unavailable diff renders the server's reason instead of a bare empty file list", async () => {
+  const root = globalThis.document.body;
+  // The standalone change route mounts the raw /diff answer, so flow-change
+  // itself must surface an explicit unavailable response (HTTP 200 naming the
+  // head with available:false and an unavailable_reason) as a reasoned empty
+  // state — not a bare empty file list that reads as "no files".
+  const { appNode, change } = mountChange(root, {
+    change: changeResponse("h1"),
+    task: { id: "t-0001" },
+    threads: [],
+    review_state: "in_review",
+    diff: { head_sha: "h1", available: false, unavailable_reason: "merge service is not configured" },
+  });
+  await flush();
+  const html = change.innerHTML;
+  assert.match(html, /data-change-pending/, "an explicit unavailable response renders the pending empty state");
+  assert.match(html, /The diff is not available: merge service is not configured/, "the empty state includes the server's reason");
+  assert.doesNotMatch(html, /class="files"/, "no bare empty file list renders");
+  assert.doesNotMatch(html, /<flow-diff>/, "no diff pane renders");
+  change.remove();
+  appNode.remove();
+});
+
+test("a genuinely empty but available diff still renders the normal empty file list", async () => {
+  const root = globalThis.document.body;
+  const { appNode, change } = mountChange(root, {
+    change: changeResponse("h1"),
+    task: { id: "t-0001" },
+    threads: [],
+    review_state: "in_review",
+    diff: { head_sha: "h1", available: true, files: [], total_files: 0, additions: 0, deletions: 0 },
+  });
+  await flush();
+  const html = change.innerHTML;
+  assert.doesNotMatch(html, /data-change-pending/, "an available empty diff is not a pending state");
+  assert.doesNotMatch(html, /not available/, "no unavailable note renders");
+  assert.match(html, /class="files"/, "the file list container renders");
+  assert.match(html, /<flow-diff>/, "the diff pane renders");
+  change.remove();
+  appNode.remove();
 });
 
 test("a revalidation whose diff the server explicitly reports unavailable keeps the prior pair until a verified one lands", async () => {
