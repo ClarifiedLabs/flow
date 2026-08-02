@@ -118,7 +118,12 @@ export function renderTasksListView(app) {
   if (!list) return;
   const tasks = app.tasksList || [];
   if (!tasks.length) {
-    list.innerHTML = `<div class="empty">No tasks</div>`;
+    // An empty state selection matches no tasks by design; call that out so it
+    // is not mistaken for a filter that matched nothing.
+    const noStates = !app.tasksState || app.tasksState.size === 0;
+    list.innerHTML = noStates
+      ? `<div class="empty">No states selected — pick All or a state chip to show tasks</div>`
+      : `<div class="empty">No tasks</div>`;
     return;
   }
   list.innerHTML = `

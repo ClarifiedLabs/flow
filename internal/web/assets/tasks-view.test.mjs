@@ -9,6 +9,7 @@ const {
   TASKS_STATE_FILTERS,
   tasksQueryView,
   renderTasksControlsView,
+  renderTasksListView,
   renderTaskRowView,
   bulkFlowOptionsView,
   taskBulkPathView,
@@ -81,6 +82,33 @@ test("renderTasksControlsView paints chips, the project dropdown and the search 
   assert.match(html, /<option value="p-1" selected>flow<\/option>/);
   assert.match(html, /<option value="p-2">site<\/option>/);
   assert.match(html, /data-tasks-search[^>]*value="flaky"/);
+});
+
+test("renderTasksListView hints at the state chips when none are selected", () => {
+  const list = { innerHTML: "" };
+  const app = fakeApp({ tasksState: new Set(), tasksList: [] });
+  app.querySelector = (selector) => (selector === ".tasks-list" ? list : null);
+  renderTasksListView(app);
+  assert.match(list.innerHTML, /No states selected/);
+  assert.match(list.innerHTML, /pick All or a state chip/);
+});
+
+test("renderTasksListView keeps the plain empty rendering for a selection that matches nothing", () => {
+  const list = { innerHTML: "" };
+  const app = fakeApp({ tasksState: new Set(["done"]), tasksList: [] });
+  app.querySelector = (selector) => (selector === ".tasks-list" ? list : null);
+  renderTasksListView(app);
+  assert.equal(list.innerHTML, `<div class="empty">No tasks</div>`);
+  assert.doesNotMatch(list.innerHTML, /No states selected/);
+});
+
+test("renderTasksListView paints rows for a non-empty list", () => {
+  const list = { innerHTML: "" };
+  const app = fakeApp({ tasksState: new Set(["done"]), tasksList: [{ ID: "t-1", Title: "Shipped", State: "done" }] });
+  app.querySelector = (selector) => (selector === ".tasks-list" ? list : null);
+  renderTasksListView(app);
+  assert.match(list.innerHTML, /data-task-row="t-1"/);
+  assert.doesNotMatch(list.innerHTML, /class="empty"/);
 });
 
 test("renderTasksControlsView lights All when every state is selected", () => {
