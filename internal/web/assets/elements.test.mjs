@@ -2299,6 +2299,46 @@ test("the submission names the diff head when it differs from the metadata head"
   appNode.remove();
 });
 
+test("a submission in the queued-paint window binds to the rendered diff head when the diff response names a newer head", async () => {
+  const root = globalThis.document.body;
+  let resolveRequest;
+  const calls = stubReviewFetch(
+    () =>
+      new Promise((resolve) => {
+        resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
+      }),
+  );
+  const { appNode, change } = mountChange(root, reviewChangeData());
+  await flush();
+
+  // The head moves between the metadata and diff fetches: the model's diff
+  // response already names h2, but the repaint is only queued, so the DOM
+  // still renders h1's diff. The submission must bind to the head of the diff
+  // currently rendered — h1 — not the newer diff head the model just
+  // received; the server refuses h1 as stale instead of accepting h2-bound
+  // feedback for a diff the reviewer never saw.
+  change.data = {
+    ...reviewChangeData(),
+    change: { id: "ch-0001", head_sha: "abc123def456" },
+    diff: { ...reviewChangeData().diff, head_sha: "def456789abc" },
+  };
+  assert.equal(change.querySelector(".head").dataset.head, "abc123def456", "the rendered diff head is still h1 before the queued paint");
+
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  const pending = change.handleClick({ target: approve, preventDefault() {} });
+  const posted = JSON.parse(calls[0].options.body);
+  assert.equal(posted.head_sha, "abc123def456", "the submission names the diff currently rendered, not the model's newer diff head");
+
+  resolveRequest();
+  await pending;
+  // The queued repaint lands once the submission settles, showing the newer
+  // diff head the metadata/diff race delivered.
+  await flush();
+  assert.equal(change.querySelector(".head").dataset.head, "def456789abc", "the queued repaint shows the newer diff head");
+  change.remove();
+  appNode.remove();
+});
+
 test("a stale-head conflict keeps the drafts and shows the conflict message", async () => {
   const root = globalThis.document.body;
   stubReviewFetch(() =>

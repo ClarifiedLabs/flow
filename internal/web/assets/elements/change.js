@@ -251,16 +251,22 @@ export class FlowChange extends FlowElement {
     this.captureDrafts();
     const changeID = value(this.data?.change || {}, "id", "ID");
     if (!changeID) return;
-    // The head whose diff is on screen: the painted head (the data-head
-    // attribute render() stamped into the markup), because a poll can set the
-    // model to a newer head while the repaint is still queued — the rendered
-    // diff and review controls then show the old head, and this submission's
-    // body and drafts were captured from them. Binding to the model's newer
-    // head would let feedback written against the rendered code be accepted as
-    // a review of code the reviewer never saw. The server rejects the
-    // submission with a conflict if the change advanced past the named head,
-    // keeping this review's threads and verdict attached to the code that was
-    // actually inspected.
+    // The head whose diff is on screen. render() stamps the data-head
+    // attribute from the displayed head — the diff response's own head_sha
+    // when the diff names one (the head the server rendered, what the
+    // reviewer actually saw), falling back to the change metadata's head when
+    // no diff is rendered. The two GETs are not atomic, so the metadata head
+    // can be older than the diff on screen; binding to it would post a
+    // head_sha the rendered diff does not match. The painted stamp is read
+    // rather than the model because a poll can set the model to a newer head
+    // while the repaint is still queued — the rendered diff and review
+    // controls then show the old head, and this submission's body and drafts
+    // were captured from them. Binding to the model's newer head would let
+    // feedback written against the rendered code be accepted as a review of
+    // code the reviewer never saw. The server rejects the submission with a
+    // conflict if the change advanced past the named head, keeping this
+    // review's threads and verdict attached to the code that was actually
+    // inspected.
     const headSHA = this._paintedHead;
     const comments = [...this.drafts.values()]
       .filter((draft) => draft.body.trim())
