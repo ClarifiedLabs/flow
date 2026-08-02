@@ -3408,6 +3408,39 @@ test("the standalone change route refuses to mount a pair whose diff never names
   appNode.remove();
 });
 
+test("the standalone change route mounts a headless change as-is with no diff fetch", async () => {
+  // Metadata that names no head cannot anchor a verified pair, but the change
+  // is still real: the route mounts it as-is with an explicit empty diff
+  // instead of fetching /diff or retrying into the "advanced" error. The
+  // element-level headless handling is covered above; this exercises the
+  // route's own branch, including that no /diff request is issued.
+  const root = globalThis.document.body;
+  const appNode = globalThis.document.createElement("flow-app");
+  const content = globalThis.document.createElement("div");
+  appNode.appendChild(content);
+  root.appendChild(appNode);
+
+  const calls = [];
+  globalThis.fetch = (path) => {
+    calls.push(String(path));
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(changeResponse("")) });
+  };
+
+  const rendered = await renderChangeRoute({ setTitle() {}, querySelector: () => content }, "ch-0001");
+  assert.equal(rendered, true, "the route resolves rather than throwing on a headless change");
+  const change = content.querySelector("flow-change");
+  assert.ok(change, "the headless change's metadata mounts as flow-change");
+  assert.equal(change.data.change.id, "ch-0001", "the metadata mounts as-is");
+  assert.deepEqual(change.data.diff, {}, "the headless change mounts with an explicit empty diff");
+  assert.deepEqual(
+    calls,
+    ["/ui/api/v2/changes/ch-0001"],
+    "a headless change fetches metadata only — no /diff request",
+  );
+  change.remove();
+  appNode.remove();
+});
+
 test("a revalidation head move re-keys the cache so the matching poll does not reload or flash", async () => {
   const root = globalThis.document.body;
   const state = { head: "h1", files: diffFiles("h1") };
