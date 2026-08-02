@@ -1818,6 +1818,28 @@ test("a failed suggestion reload leaves the picker in manual-entry mode", async 
   assert.ok(form.querySelector("[data-relation-target]"), "the manual target input remains");
 });
 
+test("a rejected suggestion reload leaves the picker in manual-entry mode without an unhandled rejection", async () => {
+  const app = {
+    projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }],
+    tasksByProject: new Map([["p-1", [{ id: "t-1", title: "Alpha" }]]]),
+  };
+  app.ensureTasks = async (projectID) => {
+    if (projectID === "p-2") throw new Error("tasks fetch failed");
+    return app.tasksByProject.get(projectID) || [];
+  };
+  const host = document.createElement("div");
+  host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
+  const form = host.querySelector("[data-task-form]");
+  bindRelationsPickerView(form, app);
+  const projectSelect = form.querySelector('[name="project"]');
+  projectSelect.value = "p-2";
+  projectSelect.dispatchEvent(new TestEvent("change"));
+  await flush();
+  await flush();
+  assert.equal(form.querySelector("#relation-target-tasks").children.length, 0, "the prior project's suggestions are not kept");
+  assert.ok(form.querySelector("[data-relation-target]"), "the manual target input remains");
+});
+
 test("changing the create form project reloads the flow selector with that project's flows and default", async () => {
   const app = {
     projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }],
@@ -1918,6 +1940,118 @@ test("rapid project switches cannot repaint the flow select or relation suggesti
   await flush();
   assert.deepEqual(flowSelect.children.map((option) => option.getAttribute("value")), ["fl-3"], "the stale flow load does not repaint");
   assert.deepEqual(datalist.children.map((option) => option.getAttribute("value")), ["t-3"], "the stale task load does not repaint");
+});
+
+test("a rejected flow reload leaves the flow and feature selects on the explicit defaults", async () => {
+  const app = {
+    projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }],
+    flowsByProject: new Map([[ "p-1", { flows: [{ id: "fl-1", name: "One flow" }], defaultFlowID: "fl-1" } ]]),
+    featuresByProject: new Map([[ "p-1", [{ feature: { id: "ft-1", title: "One feature", status: "open" } }] ]]),
+  };
+  app.ensureFlows = async (projectID) => {
+    if (projectID === "p-2") throw new Error("flows fetch failed");
+    return app.flowsByProject.get(projectID);
+  };
+  app.ensureFeatures = async (projectID) => {
+    if (projectID === "p-2") throw new Error("features fetch failed");
+    return app.featuresByProject.get(projectID) || [];
+  };
+  const host = document.createElement("div");
+  host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
+  const form = host.querySelector("[data-task-form]");
+  bindTaskFlowControlsView(app, form);
+  const projectSelect = form.querySelector('[name="project"]');
+  projectSelect.value = "p-2";
+  projectSelect.dispatchEvent(new TestEvent("change"));
+  await flush();
+  await flush();
+  const flowOptions = form.querySelector('[name="flow_id"]').children;
+  assert.equal(flowOptions.length, 1, "the flow select falls back to the project-default option");
+  assert.equal(flowOptions[0].getAttribute("value"), "");
+  const featureOptions = form.querySelector('[name="feature_id"]').children;
+  assert.deepEqual(featureOptions.map((option) => option.getAttribute("value")), [""], "the feature picker falls back to no feature");
+});
+
+test("a rejected feature reload alone leaves the feature picker on the explicit default", async () => {
+  const app = {
+    projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }],
+    flowsByProject: new Map([[ "p-1", { flows: [{ id: "fl-1", name: "One flow" }], defaultFlowID: "fl-1" } ]]),
+    featuresByProject: new Map([[ "p-1", [{ feature: { id: "ft-1", title: "One feature", status: "open" } }] ]]),
+  };
+  app.ensureFlows = async (projectID) => {
+    if (projectID === "p-2") app.flowsByProject.set("p-2", { flows: [{ id: "fl-9", name: "Beta flow" }], defaultFlowID: "fl-9" });
+    return app.flowsByProject.get(projectID);
+  };
+  app.ensureFeatures = async (projectID) => {
+    if (projectID === "p-2") throw new Error("features fetch failed");
+    return app.featuresByProject.get(projectID) || [];
+  };
+  const host = document.createElement("div");
+  host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
+  const form = host.querySelector("[data-task-form]");
+  bindTaskFlowControlsView(app, form);
+  const projectSelect = form.querySelector('[name="project"]');
+  projectSelect.value = "p-2";
+  projectSelect.dispatchEvent(new TestEvent("change"));
+  await flush();
+  await flush();
+  const flowOptions = form.querySelector('[name="flow_id"]').children;
+  assert.deepEqual(flowOptions.map((option) => option.getAttribute("value")), ["fl-9"], "the flow select still shows the new project's flows");
+  const featureOptions = form.querySelector('[name="feature_id"]').children;
+  assert.deepEqual(featureOptions.map((option) => option.getAttribute("value")), [""], "the feature picker falls back to no feature");
+});
+
+test("a rejected load during rapid switches never repaints with the stale project's state", async () => {
+  let rejectP2Flows;
+  let rejectP2Tasks;
+  const p2FlowsGate = new Promise((resolve, reject) => { rejectP2Flows = reject; });
+  const p2TasksGate = new Promise((resolve, reject) => { rejectP2Tasks = reject; });
+  const app = {
+    projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }, { id: "p-3", name: "three" }],
+    flowsByProject: new Map([[ "p-1", { flows: [{ id: "fl-1", name: "One flow" }], defaultFlowID: "fl-1" } ]]),
+    tasksByProject: new Map([[ "p-1", [{ id: "t-1", title: "One task" }] ]]),
+  };
+  app.ensureFlows = (projectID) => {
+    if (projectID === "p-2") return p2FlowsGate;
+    if (projectID === "p-3") {
+      const cache = { flows: [{ id: "fl-3", name: "Three flow" }], defaultFlowID: "fl-3" };
+      app.flowsByProject.set("p-3", cache);
+      return Promise.resolve(cache);
+    }
+    return Promise.resolve(app.flowsByProject.get(projectID));
+  };
+  app.ensureTasks = (projectID) => {
+    if (projectID === "p-2") return p2TasksGate;
+    if (projectID === "p-3") {
+      const tasks = [{ id: "t-3", title: "Three task" }];
+      app.tasksByProject.set("p-3", tasks);
+      return Promise.resolve(tasks);
+    }
+    return Promise.resolve(app.tasksByProject.get(projectID));
+  };
+  const host = document.createElement("div");
+  host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
+  const form = host.querySelector("[data-task-form]");
+  bindRelationsPickerView(form, app);
+  bindTaskFlowControlsView(app, form);
+  const projectSelect = form.querySelector('[name="project"]');
+  const flowSelect = form.querySelector('[name="flow_id"]');
+  const datalist = form.querySelector("#relation-target-tasks");
+  projectSelect.value = "p-2";
+  projectSelect.dispatchEvent(new TestEvent("change"));
+  projectSelect.value = "p-3";
+  projectSelect.dispatchEvent(new TestEvent("change"));
+  await flush();
+  await flush();
+  assert.deepEqual(flowSelect.children.map((option) => option.getAttribute("value")), ["fl-3"], "the newest project's flows are shown");
+  assert.deepEqual(datalist.children.map((option) => option.getAttribute("value")), ["t-3"], "the newest project's tasks are suggested");
+  // The p-2 loads reject late: neither control may repaint with p-2's state.
+  rejectP2Flows(new Error("flows fetch failed"));
+  rejectP2Tasks(new Error("tasks fetch failed"));
+  await flush();
+  await flush();
+  assert.deepEqual(flowSelect.children.map((option) => option.getAttribute("value")), ["fl-3"], "the stale rejected flow load does not repaint");
+  assert.deepEqual(datalist.children.map((option) => option.getAttribute("value")), ["t-3"], "the stale rejected task load does not repaint");
 });
 // --- review verdict pending state (flow-change / submitReview) --------------
 

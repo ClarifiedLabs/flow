@@ -204,7 +204,14 @@ export function bindRelationsPickerView(form, app) {
   if (app && projectSelect && typeof app.ensureTasks === "function" && typeof projectSelect.addEventListener === "function") {
     projectSelect.addEventListener("change", async () => {
       const projectID = String(projectSelect.value || "").trim();
-      await app.ensureTasks(projectID);
+      try {
+        await app.ensureTasks(projectID);
+      } catch {
+        // Best-effort refresh: a rejected load must not reject the listener
+        // or leave the prior project's suggestions painted as current; the
+        // repaint below reads the (empty) cache and falls back to manual
+        // entry.
+      }
       // A rapid project switch could resolve out of order; only repaint when
       // this load is still for the selected project so the suggestions never
       // disagree with the project select.
@@ -317,16 +324,25 @@ export function renderFlowSummaryLineView(app, task, flow, projectID) {
 // bindTaskFlowControlsView refreshes the flow selector when the create form's
 // project select changes: it fetches (and caches) that project's flows, then
 // re-renders the flow <option>s for the newly chosen project. The feature
-// picker follows the same project so it stays in sync too.
+// picker follows the same project so it stays in sync too. The refresh is
+// best-effort: a rejected load leaves both controls on their explicit default
+// options (project default / no feature) instead of the prior project's.
 export function bindTaskFlowControlsView(app, form) {
   const projectSelect = form?.elements?.project;
   const flowSelect = form?.elements?.flow_id;
   if (!projectSelect || !flowSelect || typeof projectSelect.addEventListener !== "function") return;
   projectSelect.addEventListener("change", async () => {
     const projectID = String(projectSelect.value || "").trim();
-    if (projectID) {
-      await app.ensureFlows(projectID);
-      if (typeof app.ensureFeatures === "function") await app.ensureFeatures(projectID);
+    try {
+      if (projectID) {
+        await app.ensureFlows(projectID);
+        if (typeof app.ensureFeatures === "function") await app.ensureFeatures(projectID);
+      }
+    } catch {
+      // Best-effort refresh: a rejected load must not reject the listener or
+      // leave the prior project's options painted as current; the repaint
+      // below then renders the new project's (empty) cache as the explicit
+      // default options.
     }
     // A rapid project switch could resolve out of order; only repaint when
     // this load is still for the selected project so the flow (and feature)
