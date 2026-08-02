@@ -4929,6 +4929,34 @@ test("a headed unavailable diff renders the server's reason instead of a bare em
   appNode.remove();
 });
 
+test("a hostile unavailable_reason renders as escaped text, not an injected element", async () => {
+  const root = globalThis.document.body;
+  // The reason is server-controlled text (it can carry err.Error() from
+  // exchangePathForChange), so markup inside it must render inert: the empty
+  // state shows the escaped text and parses no element from the reason.
+  const hostile = "<img src=x onerror=alert(1)>";
+  const { appNode, change } = mountChange(root, {
+    change: changeResponse("h1"),
+    task: { id: "t-0001" },
+    threads: [],
+    review_state: "in_review",
+    diff: { head_sha: "h1", available: false, unavailable_reason: hostile },
+  });
+  await flush();
+  const html = change.innerHTML;
+  assert.match(html, /data-change-pending/, "an explicit unavailable response renders the pending empty state");
+  assert.match(html, /The diff is not available: &lt;img src=x onerror=alert\(1\)&gt;/, "the hostile reason is HTML-escaped in the empty state");
+  assert.doesNotMatch(html, /<img/, "no raw img tag appears in the rendered markup");
+  assert.equal(change.querySelector("img"), null, "no img element is parsed from the reason");
+  assert.equal(
+    change.querySelector(".empty")?.textContent,
+    "The diff is not available: &lt;img src=x onerror=alert(1)&gt;",
+    "the empty state's text node carries the escaped reason (no element is parsed from it)",
+  );
+  change.remove();
+  appNode.remove();
+});
+
 test("a genuinely empty but available diff still renders the normal empty file list", async () => {
   const root = globalThis.document.body;
   const { appNode, change } = mountChange(root, {
