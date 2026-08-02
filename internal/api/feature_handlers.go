@@ -188,16 +188,19 @@ func (s *projectServer) handleRebaseFeature(w http.ResponseWriter, r *http.Reque
 }
 
 // checkFeatureRebaseScope confines feature rebases for task-bound console
-// credentials to features that contain the console's bound task as open work,
-// and returns the only task such a credential's conflicted rebase may link as
-// a blocker: the bound task itself. The restriction is persisted on the running
-// feature_rebases row and applied at relation-creation time inside
-// RebaseOnMain and by the schedule-time gate (EnsureRebaseBlock), so a feature
-// task created or reopened concurrently — before or after the rebase starts —
-// can never receive a rebase_task blocks link whose endpoints exclude the
-// bound task. Unbound project consoles and owner credentials keep project-wide
-// rebase access. The caller resolves the feature ref once and passes the value
-// here, so the console rebase path performs a single feature lookup.
+// credentials to features whose only non-done task is the console's bound
+// task, and returns the only task such a credential's conflicted rebase may
+// link as a blocker: the bound task itself. This pre-read is a fast-fail 403
+// gate; RebaseOnMain re-checks the same sole-open-task invariant under the
+// database write lock before creating any rows, so a feature task created
+// concurrently by another principal either rejects the rebase (403
+// ErrFeatureRebaseForbidden) or lands after the decision and stays unlinked by
+// the relation-time confinement and the schedule-time gate. The restriction is
+// persisted on the running feature_rebases row, so the confinement holds for
+// the rebase's whole lifetime. Unbound project consoles and owner credentials
+// keep project-wide rebase access. The caller resolves the feature ref once
+// and passes the value here, so the console rebase path performs a single
+// feature lookup.
 func (s *projectServer) checkFeatureRebaseScope(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, feature coordinator.Feature) (restrictBlockedTo []string, ok bool) {
 	if principal.Scope != coordinator.TokenScopeConsole || principal.SourceTaskID == nil {
 		return nil, true
@@ -209,15 +212,14 @@ func (s *projectServer) checkFeatureRebaseScope(w http.ResponseWriter, r *http.R
 		return nil, false
 	}
 	bound := strings.TrimSpace(*principal.SourceTaskID)
-	boundOpen := false
+	var nonDone []string
 	for _, task := range tasks {
-		if task.ID == bound && (task.State == nil || *task.State != coordinator.LifecycleDone) {
-			boundOpen = true
-			break
+		if task.State == nil || *task.State != coordinator.LifecycleDone {
+			nonDone = append(nonDone, task.ID)
 		}
 	}
-	if !boundOpen {
-		writeError(w, http.StatusForbidden, "forbidden", "console credential cannot rebase a feature that does not contain its bound task as open work")
+	if len(nonDone) != 1 || nonDone[0] != bound {
+		writeError(w, http.StatusForbidden, "forbidden", "console credential may rebase only a feature whose only non-done task is its bound task")
 		return nil, false
 	}
 	return []string{bound}, true
@@ -323,6 +325,8 @@ func writeFeatureError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "feature_closed", err.Error())
 	case errors.Is(err, coordinator.ErrFeatureRebaseRunning):
 		writeError(w, http.StatusConflict, "rebase_running", err.Error())
+	case errors.Is(err, coordinator.ErrFeatureRebaseForbidden):
+		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 	case errors.As(err, &active):
 		writeError(w, http.StatusConflict, "feature_has_active_tasks", err.Error())
 	default:

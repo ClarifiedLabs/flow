@@ -586,18 +586,50 @@ WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`, blockerID,
 func TestRebaseOnMainRestrictBlockedTo(t *testing.T) {
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
-	feature := setupConflictedFeature(t, env)
 
-	boundTask, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "bound task", FeatureID: &feature.ID})
+	countRows := func(table string) int {
+		t.Helper()
+		var n int
+		if err := env.fixture.store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table).Scan(&n); err != nil {
+			t.Fatalf("count %s rows: %v", table, err)
+		}
+		return n
+	}
+
+	// A feature holding another non-done task rejects the restricted rebase at
+	// decision time, before any rebase or relation row exists.
+	featureWithExtra := setupConflictedFeature(t, env)
+	boundTask, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "bound task", FeatureID: &featureWithExtra.ID})
 	if err != nil {
 		t.Fatalf("create bound task: %v", err)
 	}
-	extraTask, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "extra task", FeatureID: &feature.ID})
-	if err != nil {
+	if _, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "extra task", FeatureID: &featureWithExtra.ID}); err != nil {
 		t.Fatalf("create extra task: %v", err)
 	}
+	if _, err := env.features.RebaseOnMain(ctx, featureWithExtra, boundTask.ID); !errors.Is(err, ErrFeatureRebaseForbidden) {
+		t.Fatalf("restricted rebase error = %v, want ErrFeatureRebaseForbidden", err)
+	}
+	if got := countRows("feature_rebases"); got != 0 {
+		t.Fatalf("forbidden rebase created %d rebase rows, want 0", got)
+	}
+	if got := countRows("task_relations"); got != 0 {
+		t.Fatalf("forbidden rebase created %d relation rows, want 0", got)
+	}
 
-	// The bound-task console passes exactly its bound task as the restriction.
+	// A feature whose only non-done task is the bound task still rebases, and
+	// the conflicted rebase links exactly the bound task.
+	feature, err := env.features.Create(ctx, CreateFeatureInput{Title: "payments sole"})
+	if err != nil {
+		t.Fatalf("create feature: %v", err)
+	}
+	clone := env.cloneExchange(t)
+	commitOnBranch(t, clone, feature.Branch, "conflict.txt", "sole feature version\n", "sole feature work")
+	env.advanceMain(t, "conflict.txt", "sole main version\n", "sole conflicting main work")
+
+	boundTask, err = env.tasks.CreateTask(ctx, CreateTaskInput{Title: "bound task", FeatureID: &feature.ID})
+	if err != nil {
+		t.Fatalf("create bound task: %v", err)
+	}
 	result, err := env.features.RebaseOnMain(ctx, feature, boundTask.ID)
 	if err != nil {
 		t.Fatalf("restricted rebase: %v", err)
@@ -605,11 +637,25 @@ func TestRebaseOnMainRestrictBlockedTo(t *testing.T) {
 	if result.Kind != RebaseTaskCreated || result.RebaseTaskID == "" {
 		t.Fatalf("rebase result = %+v, want rebase_task_created", result)
 	}
+	if got := countRows("feature_rebases"); got != 1 {
+		t.Fatalf("allowed rebase created %d rebase rows, want 1", got)
+	}
+	// The task-bound confinement is persisted on the rebase row so the
+	// scheduling gate can enforce it for the rebase's whole lifetime.
+	running, found, err := env.features.RunningRebase(ctx, feature.ID)
+	if err != nil || !found {
+		t.Fatalf("running rebase = %+v, %v, %v", running, found, err)
+	}
+	if running.RestrictBlockedTo != boundTask.ID {
+		t.Fatalf("running rebase restriction = %q, want %q", running.RestrictBlockedTo, boundTask.ID)
+	}
+	if got := countRows("task_relations"); got != 1 {
+		t.Fatalf("allowed rebase created %d relation rows, want exactly 1", got)
+	}
 	rebaseTask, err := env.tasks.GetTask(ctx, result.RebaseTaskID)
 	if err != nil {
 		t.Fatalf("load rebase task: %v", err)
 	}
-
 	assertBlocked := func(taskID string, want bool) {
 		t.Helper()
 		var count int
@@ -622,10 +668,132 @@ WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`, rebaseTask
 			t.Fatalf("rebase task blocks %s = %v, want %v", taskID, count == 1, want)
 		}
 	}
-	// The bound task is linked; the concurrently-open extra task is not, so no
-	// relation exists whose endpoints are both unrelated to the bound task.
 	assertBlocked(boundTask.ID, true)
-	assertBlocked(extraTask.ID, false)
+}
+
+// TestRebaseOnMainConcurrentTaskAddStaysUnlinked exercises the review's
+// guard-to-inner-read window deterministically: a feature task created by
+// another principal after the restricted rebase's atomic scope decision (and
+// after its running row is persisted) but before the conflicted path's
+// non-done-task snapshot. The task commits in time to enter the initial
+// relation sweep — without the relation-time restriction filter it would be
+// linked — and the filter confines the sweep to the bound task, so no relation
+// exists whose endpoints are both unrelated to the bound task.
+func TestRebaseOnMainConcurrentTaskAddStaysUnlinked(t *testing.T) {
+	ctx := context.Background()
+	env := newFeatureTestEnv(t)
+	feature := setupConflictedFeature(t, env)
+
+	boundTask, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "bound task", FeatureID: &feature.ID})
+	if err != nil {
+		t.Fatalf("create bound task: %v", err)
+	}
+
+	var concurrentTaskID string
+	env.features.RebaseOnMainTestHook = func(phase RebaseOnMainTestPhase) {
+		if phase != RebaseOnMainAfterReservation {
+			return
+		}
+		concurrent, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "concurrent task", FeatureID: &feature.ID})
+		if err != nil {
+			t.Errorf("create concurrent task: %v", err)
+			return
+		}
+		concurrentTaskID = concurrent.ID
+	}
+	t.Cleanup(func() { env.features.RebaseOnMainTestHook = nil })
+
+	result, err := env.features.RebaseOnMain(ctx, feature, boundTask.ID)
+	if err != nil {
+		t.Fatalf("restricted rebase: %v", err)
+	}
+	if result.Kind != RebaseTaskCreated || result.RebaseTaskID == "" {
+		t.Fatalf("rebase result = %+v, want rebase_task_created", result)
+	}
+	if concurrentTaskID == "" {
+		t.Fatal("rebase hook did not run")
+	}
+
+	var relations int
+	if err := env.fixture.store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM task_relations
+WHERE kind = 'blocks' AND source_task_id = ?`, result.RebaseTaskID).Scan(&relations); err != nil {
+		t.Fatalf("count relations: %v", err)
+	}
+	if relations != 1 {
+		t.Fatalf("rebase task created %d block relations, want exactly 1", relations)
+	}
+	var blockedBound, blockedConcurrent int
+	if err := env.fixture.store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM task_relations
+WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`, result.RebaseTaskID, boundTask.ID).Scan(&blockedBound); err != nil {
+		t.Fatalf("count bound relations: %v", err)
+	}
+	if err := env.fixture.store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM task_relations
+WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`, result.RebaseTaskID, concurrentTaskID).Scan(&blockedConcurrent); err != nil {
+		t.Fatalf("count concurrent relations: %v", err)
+	}
+	if blockedBound != 1 {
+		t.Fatalf("rebase task blocks bound task = %d, want 1", blockedBound)
+	}
+	if blockedConcurrent != 0 {
+		t.Fatalf("rebase task blocks concurrently added task = %d, want 0", blockedConcurrent)
+	}
+}
+
+// TestRebaseOnMainTaskAddBeforeDecisionRejectsRebase covers the raced 403
+// path: a feature task added by another principal after the API-side scope
+// pre-read but before the locked scope decision commits in time to be seen by
+// the decision, so the restricted rebase is rejected with
+// ErrFeatureRebaseForbidden before any rebase or relation row exists.
+func TestRebaseOnMainTaskAddBeforeDecisionRejectsRebase(t *testing.T) {
+	ctx := context.Background()
+	env := newFeatureTestEnv(t)
+	feature := setupConflictedFeature(t, env)
+
+	boundTask, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "bound task", FeatureID: &feature.ID})
+	if err != nil {
+		t.Fatalf("create bound task: %v", err)
+	}
+
+	var concurrentTaskID string
+	env.features.RebaseOnMainTestHook = func(phase RebaseOnMainTestPhase) {
+		if phase != RebaseOnMainBeforeScopeCheck {
+			return
+		}
+		concurrent, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "concurrent task", FeatureID: &feature.ID})
+		if err != nil {
+			t.Errorf("create concurrent task: %v", err)
+			return
+		}
+		concurrentTaskID = concurrent.ID
+	}
+	t.Cleanup(func() { env.features.RebaseOnMainTestHook = nil })
+
+	result, err := env.features.RebaseOnMain(ctx, feature, boundTask.ID)
+	if !errors.Is(err, ErrFeatureRebaseForbidden) {
+		t.Fatalf("restricted rebase error = %v, want ErrFeatureRebaseForbidden", err)
+	}
+	if result.Kind != RebaseStartKind("") {
+		t.Fatalf("rebase result = %+v, want empty result on forbidden", result)
+	}
+	if concurrentTaskID == "" {
+		t.Fatal("rebase hook did not run")
+	}
+	var rebaseRows, relationRows int
+	if err := env.fixture.store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM feature_rebases`).Scan(&rebaseRows); err != nil {
+		t.Fatalf("count rebase rows: %v", err)
+	}
+	if err := env.fixture.store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM task_relations`).Scan(&relationRows); err != nil {
+		t.Fatalf("count relation rows: %v", err)
+	}
+	if rebaseRows != 0 {
+		t.Fatalf("forbidden rebase created %d rebase rows, want 0", rebaseRows)
+	}
+	if relationRows != 0 {
+		t.Fatalf("forbidden rebase created %d relation rows, want 0", relationRows)
+	}
 }
 
 // TestRebaseBlockRestrictionHoldsAtScheduleTime locks the task-bound console
@@ -910,6 +1078,86 @@ func TestFinalizeRebaseStaleWhenBranchMoves(t *testing.T) {
 	}
 	if tip := env.branchTip(t, feature.Branch); tip != head2 {
 		t.Fatalf("feature tip = %s, want redo head %s", tip, head2)
+	}
+}
+
+// TestRestrictedRebaseRedoKeepsConfinement locks the stale-redo path for a
+// task-bound rebase: when the feature branch moves mid-rebase and finalizing
+// opens a redo row, the restriction is carried onto the redo row, so the
+// schedule-time gate keeps linking nothing new for other tasks and keeps the
+// bound task's link across the redo.
+func TestRestrictedRebaseRedoKeepsConfinement(t *testing.T) {
+	ctx := context.Background()
+	env := newFeatureTestEnv(t)
+	feature := setupConflictedFeature(t, env)
+
+	boundTask, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "bound task", FeatureID: &feature.ID})
+	if err != nil {
+		t.Fatalf("create bound task: %v", err)
+	}
+
+	result, err := env.features.RebaseOnMain(ctx, feature, boundTask.ID)
+	if err != nil || result.Kind != RebaseTaskCreated {
+		t.Fatalf("rebase = %+v, %v, want rebase task", result, err)
+	}
+	// A task added mid-rebase (the concurrent-add window) stays outside the
+	// confinement: the gate links nothing new for it, across the redo.
+	otherTask, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "other task", FeatureID: &feature.ID})
+	if err != nil {
+		t.Fatalf("create other task: %v", err)
+	}
+	taskBranch := "task/" + result.RebaseTaskID + "/run-1"
+	head := produceRebasedHead(t, env, feature, taskBranch)
+
+	// A task merges into the feature branch mid-rebase: the tip moves, so
+	// finalizing opens a redo row against the moved tip.
+	clone := env.cloneExchange(t)
+	movedTip := commitOnBranch(t, clone, feature.Branch, "merged-task.txt", "merged work\n", "task merge")
+
+	change := Change{ID: "ch-rebase", TaskID: result.RebaseTaskID, Branch: taskBranch, Base: feature.Branch, HeadSHA: head}
+	outcome, err := env.features.FinalizeRebase(ctx, feature.ID, result.RebaseTaskID, change)
+	if err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	if outcome != "stale" {
+		t.Fatalf("finalize outcome = %q, want stale", outcome)
+	}
+	if tip := env.branchTip(t, feature.Branch); tip != movedTip {
+		t.Fatalf("feature tip = %s, want untouched moved tip %s", tip, movedTip)
+	}
+
+	// The redo row carries the restriction forward.
+	running, found, err := env.features.RunningRebase(ctx, feature.ID)
+	if err != nil || !found {
+		t.Fatalf("redo row = %+v, %v, %v", running, found, err)
+	}
+	if running.RestrictBlockedTo != boundTask.ID {
+		t.Fatalf("redo row restriction = %q, want %q", running.RestrictBlockedTo, boundTask.ID)
+	}
+	countBlockedBy := func(rebaseTaskID, taskID string) int {
+		t.Helper()
+		var count int
+		if err := env.fixture.store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM task_relations
+WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`, rebaseTaskID, taskID).Scan(&count); err != nil {
+			t.Fatalf("count relations: %v", err)
+		}
+		return count
+	}
+	// The gate links nothing new for the mid-rebase sibling (no error: the
+	// shipped design silently omits out-of-scope links) and keeps the bound
+	// task's link.
+	if err := env.features.EnsureRebaseBlock(ctx, otherTask.ID); err != nil {
+		t.Fatalf("ensure other-task block: %v", err)
+	}
+	if got := countBlockedBy(result.RebaseTaskID, otherTask.ID); got != 0 {
+		t.Fatalf("rebase task blocks other task %d times, want 0", got)
+	}
+	if err := env.features.EnsureRebaseBlock(ctx, boundTask.ID); err != nil {
+		t.Fatalf("ensure bound-task block: %v", err)
+	}
+	if got := countBlockedBy(result.RebaseTaskID, boundTask.ID); got != 1 {
+		t.Fatalf("rebase task blocks bound task %d times, want exactly 1", got)
 	}
 }
 

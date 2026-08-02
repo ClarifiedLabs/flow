@@ -18,6 +18,12 @@ var (
 	ErrFeatureClosed        = errors.New("feature is landed or archived")
 	ErrFeatureRebaseRunning = errors.New("feature rebase already running")
 	ErrNoOpenRebase         = errors.New("no running rebase for feature")
+	// ErrFeatureRebaseForbidden rejects a restricted rebase (task-bound
+	// console) whose sole-open-task invariant no longer holds: the feature's
+	// non-done tasks must be exactly the allowed set. It is raised under the
+	// database write lock before any rebase or relation row exists, so a task
+	// added concurrently by another principal rejects the rebase atomically.
+	ErrFeatureRebaseForbidden = errors.New("feature rebase forbidden: the feature's only non-done task must be the bound task")
 )
 
 type FeatureStatus string
@@ -117,6 +123,32 @@ type EditFeatureInput struct {
 	Body  *string
 }
 
+// RebaseOnMainTestPhase identifies a point inside RebaseOnMain at which the
+// test hook runs. Test-only.
+//
+// The two phases bracket the reviewed guard-to-inner-read window: a feature
+// task added by another principal either commits before the locked scope
+// decision (RebaseOnMainBeforeScopeCheck) and rejects the rebase with
+// ErrFeatureRebaseForbidden, or it commits after the decision but before the
+// conflicted path's non-done-task snapshot (RebaseOnMainAfterReservation), so
+// it enters the initial relation sweep and only the relation-time restriction
+// filter keeps it unlinked.
+type RebaseOnMainTestPhase int
+
+const (
+	// RebaseOnMainBeforeScopeCheck runs after the Git preflight and before
+	// the locked scope decision, when no database transaction is open. A
+	// feature task created here commits before the decision, so the rebase is
+	// rejected with ErrFeatureRebaseForbidden (the raced 403 path).
+	RebaseOnMainBeforeScopeCheck RebaseOnMainTestPhase = iota
+
+	// RebaseOnMainAfterReservation runs after the running rebase row is
+	// persisted (its transaction committed) and before the rebase is executed.
+	// A feature task created here commits before the conflicted path's
+	// non-done-task snapshot, so it enters the initial relation sweep.
+	RebaseOnMainAfterReservation
+)
+
 type FeatureService struct {
 	db      *sql.DB
 	tasks   *TaskService
@@ -127,6 +159,12 @@ type FeatureService struct {
 	// wired through the project bundle; a nil Runs leaves the task unscheduled
 	// (tests schedule it explicitly).
 	Runs *WorkflowRunService
+
+	// RebaseOnMainTestHook, when set, runs at the named phase inside
+	// RebaseOnMain so tests can inject a feature-task creation by another
+	// principal at exactly the reviewed interleavings. Test-only; nil in
+	// production.
+	RebaseOnMainTestHook func(phase RebaseOnMainTestPhase)
 }
 
 func NewFeatureService(database *sql.DB, tasks *TaskService, project Project) *FeatureService {
@@ -593,6 +631,17 @@ ORDER BY created_at DESC, id DESC`, strings.TrimSpace(featureID))
 // created or reopened while the rebase runs, so the blocker set is confined
 // for the row's whole lifetime rather than by a racy pre-read: a feature task
 // created concurrently after any API-side scope check can never be linked.
+//
+// For a restricted rebase the sole-open-task invariant is additionally
+// re-checked under the database write lock after the Git preflight and before
+// any rebase or relation row exists (checkRebaseScopeLocked), and that
+// transaction stays open only across the scope check and the row insert, so
+// the confinement decision is atomic with the relation-inserting rebase: a
+// feature task added by another principal either lands before the check (the
+// rebase is rejected with ErrFeatureRebaseForbidden) or after it (the task
+// never receives a rebase_task blocks relation, because the blocker set is
+// confined at relation-creation time and the schedule-time gate consults the
+// persisted restriction).
 func (s *FeatureService) RebaseOnMain(ctx context.Context, feature Feature, restrictBlockedTo ...string) (RebaseStartResult, error) {
 	if feature.Status != FeatureOpen {
 		return RebaseStartResult{}, ErrFeatureClosed
@@ -617,6 +666,11 @@ func (s *FeatureService) RebaseOnMain(ctx context.Context, feature Feature, rest
 		return RebaseStartResult{}, ErrFeatureRebaseRunning
 	}
 
+	// Preflight runs before the write reservation: resolving the base and
+	// feature tips and measuring divergence only touches the exchange remote,
+	// so holding the per-project database's single connection through them
+	// would stall every read and write for the project, including an
+	// already-up-to-date rebase that writes nothing.
 	base := s.baseBranch()
 	baseTip, ok, err := flowgit.BranchTip(ctx, exchangePath, base)
 	if err != nil {
@@ -640,11 +694,40 @@ func (s *FeatureService) RebaseOnMain(ctx context.Context, feature Feature, rest
 		return RebaseStartResult{Kind: RebaseAlreadyUpToDate, Feature: feature, NewTipSHA: featureTip}, nil
 	}
 
-	// The durable record comes first: if the process crashes mid-rebase the
-	// next request reconciles the row against the exchange ref.
-	rebaseID, err := s.insertRebaseRow(ctx, feature.ID, "", featureTip, base, baseTip, restrictBlockedToKey(restrictBlockedTo))
+	if s.RebaseOnMainTestHook != nil {
+		s.RebaseOnMainTestHook(RebaseOnMainBeforeScopeCheck)
+	}
+
+	// A restricted rebase (task-bound console) re-checks its scope under the
+	// database write lock, after the preflight and before any rebase row or
+	// relation exists, so the decision is atomic with concurrent task creation
+	// by other principals. The transaction stays open only across the scope
+	// check and the row insert: insertRebaseRow reuses it, so the decision and
+	// the persisted confinement commit atomically — there is no window in which
+	// a task added by another principal is neither rejected nor covered by a
+	// persisted restriction. The transaction is rolled back if any later step
+	// fails. This only affects the restricted path: owner and unbound
+	// project-console rebases take the nil-transaction path.
+	scopeTx, err := s.checkRebaseScopeLocked(ctx, feature.ID, restrictBlockedTo)
 	if err != nil {
 		return RebaseStartResult{}, err
+	}
+	if scopeTx != nil {
+		defer scopeTx.Rollback()
+	}
+
+	// The durable record comes first: if the process crashes mid-rebase the
+	// next request reconciles the row against the exchange ref. For a restricted
+	// rebase the row is inserted inside the write transaction opened by
+	// checkRebaseScopeLocked, so the confinement decision and the persisted
+	// restriction commit atomically.
+	rebaseID, err := s.insertRebaseRow(ctx, scopeTx, feature.ID, "", featureTip, base, baseTip, restrictBlockedToKey(restrictBlockedTo))
+	if err != nil {
+		return RebaseStartResult{}, err
+	}
+
+	if s.RebaseOnMainTestHook != nil {
+		s.RebaseOnMainTestHook(RebaseOnMainAfterReservation)
 	}
 
 	result, err := flowgit.RebaseOnto(ctx, flowgit.RebaseOntoInput{
@@ -953,12 +1036,19 @@ func restrictionAllows(restriction, taskID string) bool {
 	return false
 }
 
+// nonDoneFeatureTasksQuery lists a feature's tasks that a running rebase must
+// hold: everything not done. Done blockers are resolved by definition, so they
+// neither need nor get a link. checkRebaseScopeLocked runs the same query
+// inside its write-locked transaction so the decision and the relation-time
+// filter use the same notion of "non-done".
+const nonDoneFeatureTasksQuery = `
+SELECT id FROM tasks WHERE feature_id = ? AND (lifecycle_state IS NULL OR lifecycle_state != 'done')`
+
 // nonDoneFeatureTaskIDs lists the feature's tasks that a running rebase must
 // hold: everything not done. Done blockers are resolved by definition, so
 // they neither need nor get a link.
 func (s *FeatureService) nonDoneFeatureTaskIDs(ctx context.Context, featureID string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `
-SELECT id FROM tasks WHERE feature_id = ? AND (lifecycle_state IS NULL OR lifecycle_state != 'done')`, featureID)
+	rows, err := s.db.QueryContext(ctx, nonDoneFeatureTasksQuery, featureID)
 	if err != nil {
 		return nil, fmt.Errorf("list feature tasks: %w", err)
 	}
@@ -979,12 +1069,94 @@ SELECT id FROM tasks WHERE feature_id = ? AND (lifecycle_state IS NULL OR lifecy
 	return ids, nil
 }
 
-func (s *FeatureService) insertRebaseRow(ctx context.Context, featureID, taskID, oldTip, targetBase, targetBaseSHA, restrictBlockedTo string) (string, error) {
+// checkRebaseScopeLocked enforces the sole-open-task invariant for a restricted
+// rebase (task-bound console) under the database write lock: the feature's
+// non-done tasks must be exactly the allowed set. An empty allowed set is
+// unrestricted and returns a nil transaction. The caller runs the Git preflight
+// before acquiring the lock, and the immediate transaction is held only across
+// this scope check and the row insert: the caller passes the transaction to
+// insertRebaseRow, so the confinement decision and the durable restricted row
+// commit atomically — there is no pre-persistence window in which a task added
+// by another principal is neither rejected nor covered by a persisted
+// restriction.
+func (s *FeatureService) checkRebaseScopeLocked(ctx context.Context, featureID string, allowed []string) (*sqlitex.Tx, error) {
+	if len(allowed) == 0 {
+		return nil, nil
+	}
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, id := range allowed {
+		allowedSet[strings.TrimSpace(id)] = struct{}{}
+	}
+
 	tx, err := sqlitex.BeginImmediate(ctx, s.db)
 	if err != nil {
-		return "", err
+		return nil, err
+	}
+
+	rows, err := tx.QueryContext(ctx, nonDoneFeatureTasksQuery, featureID)
+	if err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("list feature tasks: %w", err)
+	}
+	defer rows.Close()
+
+	found := make(map[string]struct{})
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			tx.Rollback()
+			return nil, err
+		}
+		found[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("iterate feature tasks: %w", err)
+	}
+
+	if len(found) != len(allowedSet) {
+		tx.Rollback()
+		return nil, ErrFeatureRebaseForbidden
+	}
+	for id := range found {
+		if _, ok := allowedSet[id]; !ok {
+			tx.Rollback()
+			return nil, ErrFeatureRebaseForbidden
+		}
+	}
+
+	return tx, nil
+}
+
+// insertRebaseRow persists the running rebase row inside tx. tx is the open
+// write transaction returned by checkRebaseScopeLocked for a restricted rebase
+// (nil for an unrestricted one), so a restricted rebase's confinement decision
+// and its persisted restrict_blocked_to row commit atomically; a concurrent
+// task creation either lost the write lock to this transaction or lands after
+// the restricted row is visible and is refused by the schedule-time gate.
+func (s *FeatureService) insertRebaseRow(ctx context.Context, tx *sqlitex.Tx, featureID, taskID, oldTip, targetBase, targetBaseSHA, restrictBlockedTo string) (string, error) {
+	if tx == nil {
+		var err error
+		tx, err = sqlitex.BeginImmediate(ctx, s.db)
+		if err != nil {
+			return "", err
+		}
 	}
 	defer tx.Rollback()
+
+	// Re-check for a running rebase inside the write reservation: the caller's
+	// RunningRebase pre-read happens before the Git preflight, so a concurrent
+	// rebase request can have persisted its own row while the remote was being
+	// probed. Refuse cleanly instead of tripping the one-running-row partial
+	// unique index (which would surface as a 500).
+	var running int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM feature_rebases WHERE feature_id = ? AND state = 'running'`, featureID).Scan(&running); err != nil {
+		return "", fmt.Errorf("check running rebase: %w", err)
+	}
+	if running != 0 {
+		return "", ErrFeatureRebaseRunning
+	}
+
 	id, err := s.allocateRebaseID(ctx, tx)
 	if err != nil {
 		return "", err
