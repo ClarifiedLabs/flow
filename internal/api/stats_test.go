@@ -2,7 +2,10 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +34,46 @@ func finishCompletedTask(t *testing.T, bundle *ProjectBundle, title string, reso
 	}
 	setTaskDoneAtForTest(t, bundle.Store.DB(), task.ID, sqlitex.FormatTime(doneAt))
 	return task
+}
+
+// TestCompletionStatsInternalErrorReturnsSanitizedMessage forces a store
+// failure and verifies the client sees only the generic 5xx message while the
+// error code is preserved, so raw SQLite/driver detail never crosses the trust
+// boundary.
+func TestCompletionStatsInternalErrorReturnsSanitizedMessage(t *testing.T) {
+	fixture := newTestFixture(t)
+	// Closing the project database makes every store query fail with a raw
+	// driver error ("sql: database is closed").
+	if err := fixture.DB.Close(); err != nil {
+		t.Fatalf("close project database: %v", err)
+	}
+
+	response := httptest.NewRecorder()
+	request := authorizedRequest(http.MethodGet, "/v2/stats/completions", nil)
+	fixture.Server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body: %s", response.Code, http.StatusInternalServerError, response.Body.String())
+	}
+	body := response.Body.String()
+	if strings.Contains(body, "sql:") || strings.Contains(body, "database is closed") {
+		t.Fatalf("response leaks internal error detail: %s", body)
+	}
+	var resp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if resp.Error.Code != "completion_stats_failed" {
+		t.Fatalf("error code = %q, want completion_stats_failed", resp.Error.Code)
+	}
+	if resp.Error.Message != "internal server error" {
+		t.Fatalf("error message = %q, want sanitized %q", resp.Error.Message, "internal server error")
+	}
 }
 
 func completionBucketCount(t *testing.T, resp completionStatsResponse, label string) int {

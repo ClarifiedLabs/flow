@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -860,6 +861,15 @@ func writeError(w http.ResponseWriter, status int, code string, message string) 
 			Message: message,
 		},
 	})
+}
+
+// writeInternalError logs the full internal error server-side and writes a
+// generic client-facing 5xx response, so raw store/SQLite error detail never
+// crosses the trust boundary. The error code is preserved so clients can still
+// classify the failure.
+func writeInternalError(w http.ResponseWriter, r *http.Request, code string, err error) {
+	slog.ErrorContext(r.Context(), "internal error handling request", "code", code, "error", err)
+	writeError(w, http.StatusInternalServerError, code, "internal server error")
 }
 
 type responseCapture struct {

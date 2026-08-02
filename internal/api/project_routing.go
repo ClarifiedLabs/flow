@@ -87,13 +87,13 @@ func collectJobsAndLeases(w http.ResponseWriter, r *http.Request, bundles []*Pro
 	for _, bundle := range bundles {
 		bundleJobs, err := bundle.Queue.ListJobs(r.Context())
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "list_jobs_failed", err.Error())
+			writeInternalError(w, r, "list_jobs_failed", err)
 			return nil, nil, false
 		}
 		jobs = append(jobs, bundleJobs...)
 		bundleLeases, err := bundle.Queue.ListLeases(r.Context())
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "list_leases_failed", err.Error())
+			writeInternalError(w, r, "list_leases_failed", err)
 			return nil, nil, false
 		}
 		leases = append(leases, bundleLeases...)
@@ -508,7 +508,7 @@ func (s *Server) handleListTasksAggregate(w http.ResponseWriter, r *http.Request
 	for _, bundle := range bundles {
 		tasks, err := bundle.Tasks.ListTasks(r.Context(), filter)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "list_tasks_failed", err.Error())
+			writeInternalError(w, r, "list_tasks_failed", err)
 			return
 		}
 		for _, task := range tasks {
@@ -534,7 +534,7 @@ func (s *Server) handleBoardAggregate(w http.ResponseWriter, r *http.Request, pr
 		ps := s.forBundle(bundle)
 		board, err := ps.boardResponseForProject(r.Context(), principal)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "board_failed", err.Error())
+			writeInternalError(w, r, "board_failed", err)
 			return
 		}
 		response.Boards = append(response.Boards, projectBoardResponse{
@@ -568,7 +568,7 @@ func (s *Server) handleDoneAggregate(w http.ResponseWriter, r *http.Request, pri
 		ps := s.forBundle(bundle)
 		done, err := ps.doneResponseForProject(r.Context(), principal, query)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "done_failed", err.Error())
+			writeInternalError(w, r, "done_failed", err)
 			return
 		}
 		response.Done = append(response.Done, projectDoneResponse{
@@ -648,7 +648,7 @@ func (s *Server) handleCompletionStatsAggregate(w http.ResponseWriter, r *http.R
 		ps := s.forBundle(bundle)
 		counts, err := ps.completionStatsForProject(r.Context())
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "completion_stats_failed", err.Error())
+			writeInternalError(w, r, "completion_stats_failed", err)
 			return
 		}
 		if len(counts) != len(completionStatWindows) {
@@ -748,14 +748,14 @@ func (s *Server) handleSidebar(w http.ResponseWriter, r *http.Request, principal
 	for _, bundle := range taskBundles {
 		result, err := bundle.Tasks.BoardResult(r.Context())
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "sidebar_failed", err.Error())
+			writeInternalError(w, r, "sidebar_failed", err)
 			return
 		}
 		addSidebarBoardCounts(&response, result)
 
 		closed, err := bundle.Tasks.CountClosedTasks(r.Context())
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "sidebar_failed", err.Error())
+			writeInternalError(w, r, "sidebar_failed", err)
 			return
 		}
 		response.Done += closed
@@ -763,7 +763,7 @@ func (s *Server) handleSidebar(w http.ResponseWriter, r *http.Request, principal
 
 	workers, err := s.registry.Directory().ListWorkers(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "list_workers_failed", err.Error())
+		writeInternalError(w, r, "list_workers_failed", err)
 		return
 	}
 
