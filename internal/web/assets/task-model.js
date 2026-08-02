@@ -300,6 +300,10 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
     stepCount: nodes.length,
     stepKind: value(currentNode, "kind", "Kind"),
     dwell: formatDwell(value(wait, "created_at", "CreatedAt") || value(task, "updated_at", "UpdatedAt"), now),
+    // The clock the model was built with. Every elapsed-time field on the page
+    // — dwell above and the Now card's review-thread age — derives from this
+    // one `now`, so a fixed model clock cannot drift between them.
+    now,
     budgetUsed: Number(value(run, "transitions_used", "TransitionsUsed") || 0),
     budgetTotal: Number(value(run, "transition_budget", "TransitionBudget") || 0),
 
@@ -453,7 +457,11 @@ export function nowCardModel(model) {
     return {
       tone: "warn",
       heading: `Now · ${model.openThreads} review thread${model.openThreads === 1 ? "" : "s"} block the merge`,
-      age: formatDwell(value(thread, "created_at", "CreatedAt")),
+      // The thread age uses the model's clock: it is the same elapsed-time
+      // rendering as dwell, so the two must not drift under a fixed clock.
+      // Models built without a clock (bare test payloads) fall back to the
+      // wall clock, matching the pre-clock behavior.
+      age: formatDwell(value(thread, "created_at", "CreatedAt"), model.now ?? Date.now()),
       actor: value(thread, "actor", "Actor") || "review",
       locus: `${value(thread, "file_path", "FilePath")}:${value(thread, "line", "Line")}`,
       threadID: value(thread, "id", "ID"),

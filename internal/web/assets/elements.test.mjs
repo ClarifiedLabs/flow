@@ -757,6 +757,35 @@ test("graph counts fold per-edge tallies into per-node visits", () => {
   assert.equal(takenEdges.get("a|ok|b"), 2);
 });
 
+test("the Now card's review-thread age dwells on the task model clock, not the wall clock", () => {
+  // A fixed model clock far from the real wall clock: the Now card's thread
+  // age must use the same `now` as the rest of the model, or the two drift
+  // apart (here the real clock would report the thread as days old while the
+  // model says 1h).
+  const now = Date.parse("2026-07-29T12:00:00Z");
+  const model = taskModel(
+    {
+      task: { id: "t-0001", title: "Fix the thing" },
+      task_detail: {},
+      threads: [
+        {
+          id: "th-0021",
+          state: "open",
+          created_at: "2026-07-29T11:00:00Z",
+          file_path: "internal/lifecycle/engine.go",
+          line: 212,
+          comments: [{ body: "Pausing for the operator leaves the lease live." }],
+        },
+      ],
+    },
+    null,
+    { now },
+  );
+  const card = nowCardModel(model);
+  assert.equal(card.heading, "Now · 1 review thread block the merge");
+  assert.equal(card.age, "1h", "thread age must use the model clock");
+});
+
 test("the Now card renders for an open wait and stays away otherwise", () => {
   const base = { activity: "Reviewing the change", stepName: "review", dwell: "12m", threads: [], openThreads: 0 };
   assert.equal(nowCardModel({ ...base, wait: null }), null);
@@ -1132,6 +1161,25 @@ test("the epic rollup bar and its legend are built from one grouping", () => {
   assert.match(html, /data-merged/);
   assert.match(html, /implement 1\/6/);
   assert.match(html, /Critical path/);
+});
+
+test("an epic member note dwells on the render clock, not the wall clock", () => {
+  // The epic surface has no injected model clock; renderEpic captures one
+  // clock for the whole render. A fixed clock far from the real wall clock
+  // must drive the member note (the real clock would report the dwell as days
+  // old while the render says 1h).
+  const now = Date.parse("2026-07-29T12:00:00Z");
+  const html = renderEpic(
+    {
+      epic: { id: "t-0030", title: "Lifecycle hardening" },
+      members: [
+        { id: "t-0039", title: "A", needs_you: true, dwell_since: "2026-07-29T11:00:00Z" },
+        { id: "t-0036", title: "B", resolution: "merged" },
+      ],
+    },
+    now,
+  );
+  assert.match(html, /needs you 1h/);
 });
 
 // --- element lifecycle -----------------------------------------------------

@@ -39,7 +39,11 @@ function statePhase(state) {
   return STATE_PHASE[state] || phaseKey(state) || "backlog";
 }
 
-export function renderEpic(data) {
+// The epic surface has no injected model clock — the route mounts the raw
+// payload — so the wall clock is captured once per render and shared by every
+// member's dwell note: one render, one clock, and a fixed clock can be injected
+// for tests.
+export function renderEpic(data, now = Date.now()) {
   if (!data) return "";
   const epic = value(data, "epic", "Epic") || {};
   const members = value(data, "members", "Members") || [];
@@ -83,13 +87,13 @@ export function renderEpic(data) {
       </p>
     </div>
     <div class="members">
-      ${members.map((member) => renderMember(member, projectID)).join("")}
+      ${members.map((member) => renderMember(member, projectID, now)).join("")}
     </div>
     ${renderCriticalPath(criticalPath, members, projectID)}
   `;
 }
 
-function renderMember(member, projectID) {
+function renderMember(member, projectID, now) {
   const state = memberState(member);
   const id = value(member, "id", "ID");
   const blockedBy = value(member, "blocked_by", "BlockedBy") || [];
@@ -98,7 +102,7 @@ function renderMember(member, projectID) {
   const needsYou = Boolean(value(member, "needs_you", "NeedsYou"));
 
   let note = state;
-  if (needsYou) note = `needs you ${formatDwell(value(member, "dwell_since", "DwellSince"))}`;
+  if (needsYou) note = `needs you ${formatDwell(value(member, "dwell_since", "DwellSince"), now)}`;
   else if (blockedBy.length) note = `blocked by ${blockedBy.map((blocker) => shortID(blocker)).join(", ")}`;
   else if (stepCount) note = `${value(member, "step_name", "StepName") || "step"} ${stepIndex}/${stepCount}`;
 
