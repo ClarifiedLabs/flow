@@ -335,6 +335,112 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 	}
 }
 
+// TestSubmitReviewLateForDecidedGatePersistsNothing guards the atomic review
+// submission against a gate that rejects the verdict: a verdict that lands
+// after the task's human gate already recorded a real decision — the run
+// answered the gate and moved on, so no gate is waiting for the new verdict —
+// is late and contradictory. The submission must 409 without persisting its
+// inline threads or overwriting the recorded human-review check. The prior
+// decision is made through the real review endpoint (not by flipping node
+// state), so the run advances exactly as it does in production: once the
+// first approval commits, the run is completed and respondToReviewGateTx
+// finds no open gate, which used to let the late verdict commit its threads
+// and check beside the decision it contradicts.
+func TestSubmitReviewLateForDecidedGatePersistsNothing(t *testing.T) {
+	fixture := newTestFixture(t)
+	flow := newBoardFixtureFlow(t, fixture, "change review gate conflict")
+
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{Title: "Contradictory review from change view", FlowID: flow.ID}, http.StatusCreated, &created)
+	var scheduled workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
+		nil, http.StatusOK, &scheduled)
+
+	const (
+		changeID  = "ch-change-review-gate-conflict"
+		headSHA   = "1111111111111111111111111111111111111111"
+		timestamp = "2026-01-01T00:00:00.000000000Z"
+	)
+	if _, err := fixture.DB.ExecContext(context.Background(), `
+INSERT INTO changes (id, task_id, branch, base, head_sha, created_at, updated_at, ready_at)
+VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-review-gate-conflict",
+		headSHA, timestamp, timestamp, timestamp); err != nil {
+		t.Fatalf("insert change: %v", err)
+	}
+
+	// A first reviewer approves: the inline thread and the human-review check
+	// are filed, the gate records the approved decision, and the run completes
+	// — the real state a later verdict finds when it arrives after the gate
+	// was already answered.
+	var first reviewVerdictResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+		reviewVerdictRequest{
+			Verdict:  "approve",
+			HeadSHA:  headSHA,
+			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "looks good"}},
+		}, http.StatusOK, &first)
+	if first.Check == nil || first.Check.Verdict != coordinator.CheckSatisfied {
+		t.Fatalf("first review check = %+v, want satisfied", first.Check)
+	}
+
+	// A second, late reviewer requests changes after the gate already recorded
+	// the approved decision: the verdict contradicts the decision the run moved
+	// on from, so the submission must be refused wholesale with 409.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+		reviewVerdictRequest{
+			Verdict:  "request_changes",
+			HeadSHA:  headSHA,
+			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 2, Body: "inline note on a contradictory review"}},
+		}, http.StatusConflict, nil)
+
+	// The refused verdict persisted nothing: only the first review's thread
+	// exists, and the human-review check still records the approved decision
+	// instead of being overwritten with the blocked request_changes verdict.
+	var threadCount int
+	if err := fixture.DB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM review_threads WHERE change_id = ?`, changeID).Scan(&threadCount); err != nil {
+		t.Fatalf("count threads: %v", err)
+	}
+	if threadCount != 1 {
+		t.Fatalf("late review left %d threads, want only the first review's thread", threadCount)
+	}
+	var checkCount int
+	if err := fixture.DB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM checks WHERE task_id = ? AND name = ?`, created.Task.ID, humanReviewCheckName).Scan(&checkCount); err != nil {
+		t.Fatalf("count checks: %v", err)
+	}
+	if checkCount != 1 {
+		t.Fatalf("late review left %d human-review checks, want only the first review's check", checkCount)
+	}
+	var checkVerdict string
+	if err := fixture.DB.QueryRowContext(context.Background(),
+		`SELECT verdict FROM checks WHERE task_id = ? AND name = ?`, created.Task.ID, humanReviewCheckName).Scan(&checkVerdict); err != nil {
+		t.Fatalf("load check verdict: %v", err)
+	}
+	if checkVerdict != string(coordinator.CheckSatisfied) {
+		t.Fatalf("check verdict = %q, want the recorded approved decision to stand", checkVerdict)
+	}
+
+	// The recorded decision stands: the gate keeps its approved outcome and the
+	// run stays completed rather than being moved by the refused verdict.
+	var gateOutcome string
+	if err := fixture.DB.QueryRowContext(context.Background(),
+		`SELECT outcome FROM workflow_node_runs WHERE id = ?`, scheduled.Run.CurrentNodeRunID).Scan(&gateOutcome); err != nil {
+		t.Fatalf("load gate outcome: %v", err)
+	}
+	if gateOutcome != "approved" {
+		t.Fatalf("gate outcome = %q, want the recorded approved decision to stand", gateOutcome)
+	}
+	run, err := fixture.Bundle.WorkflowRuns.Get(context.Background(), scheduled.Run.ID)
+	if err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	if run.State != coordinator.WorkflowRunCompleted {
+		t.Fatalf("workflow state = %q, want completed after the refused late review", run.State)
+	}
+}
+
 // TestSubmitReviewGateConflictPersistsNothing guards the atomic review
 // submission against a gate that rejects the verdict: when a contradictory or
 // late decision arrives (the gate already recorded the opposite outcome while
@@ -425,6 +531,123 @@ UPDATE workflow_node_runs SET state = ?, outcome = ?, completed_at = ? WHERE id 
 	}
 	if run.State != coordinator.WorkflowRunWaiting {
 		t.Fatalf("workflow state = %q, want still waiting after a refused contradictory review", run.State)
+	}
+}
+
+// TestSubmitReviewLateAfterFinalGatePassedPersistsNothing pins the passed-
+// final-gate case: the flow is gate -> work -> terminal, so approving the gate
+// records the flow's only decision and moves the run to the work phase, which
+// is active but has no reachable future or revisited human gate. A late
+// request_changes verdict arriving there must be refused with 409 and persist
+// no inline thread and no check — the run is still active, which used to make
+// humanGateDecidedTx treat every active run as still holding a valid gate
+// ahead and let the contradictory verdict commit beside the decision it
+// contradicts.
+func TestSubmitReviewLateAfterFinalGatePassedPersistsNothing(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	flow := newFinalGateFixtureFlow(t, fixture, "change review passed final gate")
+
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{Title: "Late review after the final gate", FlowID: flow.ID}, http.StatusCreated, &created)
+	var scheduled workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
+		nil, http.StatusOK, &scheduled)
+
+	const (
+		changeID  = "ch-change-review-passed-final-gate"
+		headSHA   = "1111111111111111111111111111111111111111"
+		timestamp = "2026-01-01T00:00:00.000000000Z"
+	)
+	if _, err := fixture.DB.ExecContext(ctx, `
+INSERT INTO changes (id, task_id, branch, base, head_sha, created_at, updated_at, ready_at)
+VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-review-passed-final-gate",
+		headSHA, timestamp, timestamp, timestamp); err != nil {
+		t.Fatalf("insert change: %v", err)
+	}
+
+	// A first reviewer approves: the thread and the satisfied check are filed,
+	// the gate records the approved decision, and the run advances past its
+	// only gate to the work phase — still active, but with no gate left ahead.
+	var first reviewVerdictResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+		reviewVerdictRequest{
+			Verdict:  "approve",
+			HeadSHA:  headSHA,
+			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "final gate approved"}},
+		}, http.StatusOK, &first)
+	if first.Check == nil || first.Check.Verdict != coordinator.CheckSatisfied {
+		t.Fatalf("first review check = %+v, want satisfied", first.Check)
+	}
+	run, err := fixture.Bundle.WorkflowRuns.Get(ctx, scheduled.Run.ID)
+	if err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	if run.State != coordinator.WorkflowRunRunning || run.CurrentNodeKey != "work" {
+		t.Fatalf("workflow = state %q at %q, want the run active at work after the approval", run.State, run.CurrentNodeKey)
+	}
+	gateNodeRunID := scheduled.Run.CurrentNodeRunID
+	if gateNodeRunID == "" {
+		t.Fatalf("scheduled run = %+v, want a current gate node run", scheduled.Run)
+	}
+
+	// A late reviewer requests changes while the run works toward the terminal:
+	// the gate already recorded the only decision this flow will ever record,
+	// so the verdict is contradictory and the submission must be refused
+	// wholesale with 409, leaving no thread and no check behind.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+		reviewVerdictRequest{
+			Verdict:  "request_changes",
+			HeadSHA:  headSHA,
+			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 2, Body: "inline note contradicting the approved gate"}},
+		}, http.StatusConflict, nil)
+
+	// The refused verdict persisted nothing: only the first review's thread
+	// exists, and the human-review check still records the approved decision
+	// instead of being overwritten with the blocked request_changes verdict.
+	var threadCount int
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM review_threads WHERE change_id = ?`, changeID).Scan(&threadCount); err != nil {
+		t.Fatalf("count threads: %v", err)
+	}
+	if threadCount != 1 {
+		t.Fatalf("late review left %d threads, want only the first review's thread", threadCount)
+	}
+	var checkCount int
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM checks WHERE task_id = ? AND name = ?`, created.Task.ID, humanReviewCheckName).Scan(&checkCount); err != nil {
+		t.Fatalf("count checks: %v", err)
+	}
+	if checkCount != 1 {
+		t.Fatalf("late review left %d human-review checks, want only the first review's check", checkCount)
+	}
+	var checkVerdict string
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT verdict FROM checks WHERE task_id = ? AND name = ?`, created.Task.ID, humanReviewCheckName).Scan(&checkVerdict); err != nil {
+		t.Fatalf("load check verdict: %v", err)
+	}
+	if checkVerdict != string(coordinator.CheckSatisfied) {
+		t.Fatalf("check verdict = %q, want the recorded approved decision to stand", checkVerdict)
+	}
+
+	// The recorded decision and the run both stand: the gate keeps its approved
+	// outcome and the run stays active at work rather than being moved by the
+	// refused verdict.
+	var gateOutcome string
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT outcome FROM workflow_node_runs WHERE id = ?`, gateNodeRunID).Scan(&gateOutcome); err != nil {
+		t.Fatalf("load gate outcome: %v", err)
+	}
+	if gateOutcome != "approved" {
+		t.Fatalf("gate outcome = %q, want the recorded approved decision to stand", gateOutcome)
+	}
+	run, err = fixture.Bundle.WorkflowRuns.Get(ctx, scheduled.Run.ID)
+	if err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	if run.State != coordinator.WorkflowRunRunning || run.CurrentNodeKey != "work" {
+		t.Fatalf("workflow = state %q at %q, want the run untouched at work", run.State, run.CurrentNodeKey)
 	}
 }
 
@@ -703,6 +926,336 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 	}
 	if run.State != coordinator.WorkflowRunWaiting {
 		t.Fatalf("workflow state = %q, want still waiting after a refused missing-head review", run.State)
+	}
+}
+
+// TestSubmitReviewMultiGatePreservesWaitingGateVerdict pins the gate-scoped
+// conflict check: a workflow with two human gates reaches its second gate
+// while the first gate's decision is already recorded. A verdict for the
+// second gate is not late — it is the gate the run is currently waiting on —
+// so it must succeed, file its threads and check, and answer that gate,
+// despite the earlier decision on the first gate. Before the fix,
+// humanGateDecidedTx treated any succeeded human-gate node run in the latest
+// run as a prior decision and refused the second-gate verdict with 409,
+// dropping its threads and check even though the relevant gate had not been
+// reached yet.
+func TestSubmitReviewMultiGatePreservesWaitingGateVerdict(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	flow := newMultiGateFixtureFlow(t, fixture, "multi-gate change review")
+
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{Title: "Multi-gate review from change view", FlowID: flow.ID}, http.StatusCreated, &created)
+	var scheduled workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
+		nil, http.StatusOK, &scheduled)
+
+	const (
+		changeID  = "ch-change-review-multi-gate"
+		headSHA   = "1111111111111111111111111111111111111111"
+		timestamp = "2026-01-01T00:00:00.000000000Z"
+	)
+	if _, err := fixture.DB.ExecContext(ctx, `
+INSERT INTO changes (id, task_id, branch, base, head_sha, created_at, updated_at, ready_at)
+VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-review-multi-gate",
+		headSHA, timestamp, timestamp, timestamp); err != nil {
+		t.Fatalf("insert change: %v", err)
+	}
+
+	// First gate: a real approval records a decision on gate1 and moves the run
+	// to the work2 phase between the two gates.
+	var first reviewVerdictResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+		reviewVerdictRequest{
+			Verdict:  "approve",
+			HeadSHA:  headSHA,
+			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "first gate looks good"}},
+		}, http.StatusOK, &first)
+	if first.Check == nil || first.Check.Verdict != coordinator.CheckSatisfied {
+		t.Fatalf("first review check = %+v, want satisfied", first.Check)
+	}
+
+	run, err := fixture.Bundle.WorkflowRuns.Get(ctx, scheduled.Run.ID)
+	if err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	if run.State != coordinator.WorkflowRunRunning || run.CurrentNodeKey != "work2" {
+		t.Fatalf("workflow = state %q at %q, want running at work2 after the first approval", run.State, run.CurrentNodeKey)
+	}
+	work2NodeRunID := run.CurrentNodeRunID
+	if work2NodeRunID == "" {
+		t.Fatalf("work2 has no open node run: %+v", run)
+	}
+
+	// A verdict while the run is working toward the second gate must not be
+	// refused just because gate1's decision is recorded: gate2 has not been
+	// reached, so the verdict files its threads and check and leaves the run
+	// where it is. Before the fix, humanGateDecidedTx counted gate1's decision
+	// and rejected this verdict with 409, dropping its threads and check even
+	// though the relevant gate was still ahead.
+	var second reviewVerdictResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+		reviewVerdictRequest{
+			Verdict:  "request_changes",
+			HeadSHA:  headSHA,
+			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 2, Body: "notes for the second gate"}},
+		}, http.StatusOK, &second)
+	if second.Check == nil || second.Check.Verdict != coordinator.CheckBlocked {
+		t.Fatalf("second review check = %+v, want blocked for request_changes", second.Check)
+	}
+	run, err = fixture.Bundle.WorkflowRuns.Get(ctx, scheduled.Run.ID)
+	if err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	if run.State != coordinator.WorkflowRunRunning || run.CurrentNodeKey != "work2" {
+		t.Fatalf("workflow = state %q at %q, want the run untouched at work2", run.State, run.CurrentNodeKey)
+	}
+
+	// The run reaches gate2; a verdict for the waiting second gate is answered
+	// and completes the run.
+	if _, err := fixture.Bundle.WorkflowRuns.MarkNodeRunning(ctx, work2NodeRunID); err != nil {
+		t.Fatalf("mark work2 node running: %v", err)
+	}
+	artifactID := submitHandoffArtifact(t, fixture, created.Task.ID, work2NodeRunID, "work2-v1", "Revised for second review")
+	completeAgentNode(t, fixture, created.Task.ID, work2NodeRunID, artifactID)
+	run, err = fixture.Bundle.WorkflowRuns.Get(ctx, scheduled.Run.ID)
+	if err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	if run.State != coordinator.WorkflowRunWaiting || run.CurrentNodeKey != "gate2" {
+		t.Fatalf("workflow = state %q at %q, want waiting at gate2 after work2", run.State, run.CurrentNodeKey)
+	}
+	var third reviewVerdictResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+		reviewVerdictRequest{
+			Verdict:  "approve",
+			HeadSHA:  headSHA,
+			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 3, Body: "second gate approved"}},
+		}, http.StatusOK, &third)
+	run, err = fixture.Bundle.WorkflowRuns.Get(ctx, scheduled.Run.ID)
+	if err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	if run.State != coordinator.WorkflowRunCompleted {
+		t.Fatalf("workflow state = %q, want completed after the second approval", run.State)
+	}
+
+	// The run is finished now, so a further verdict is late and refused.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+		reviewVerdictRequest{
+			Verdict:  "request_changes",
+			HeadSHA:  headSHA,
+			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 4, Body: "late contradiction"}},
+		}, http.StatusConflict, nil)
+
+	// The two successful verdicts' threads survive and the refused verdict left
+	// none: three threads total. The human-review check is a single per-task
+	// row whose verdict reflects the last successful verdict, and both gates
+	// keep their recorded decisions.
+	var threadCount int
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM review_threads WHERE change_id = ?`, changeID).Scan(&threadCount); err != nil {
+		t.Fatalf("count threads: %v", err)
+	}
+	if threadCount != 3 {
+		t.Fatalf("multi-gate reviews left %d threads, want 3 (the late verdict must leave none)", threadCount)
+	}
+	var checkCount int
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM checks WHERE task_id = ? AND name = ?`, created.Task.ID, humanReviewCheckName).Scan(&checkCount); err != nil {
+		t.Fatalf("count checks: %v", err)
+	}
+	if checkCount != 1 {
+		t.Fatalf("multi-gate reviews left %d human-review checks, want the single per-task check", checkCount)
+	}
+	var checkVerdict string
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT verdict FROM checks WHERE task_id = ? AND name = ?`, created.Task.ID, humanReviewCheckName).Scan(&checkVerdict); err != nil {
+		t.Fatalf("load check verdict: %v", err)
+	}
+	if checkVerdict != string(coordinator.CheckSatisfied) {
+		t.Fatalf("check verdict = %q, want satisfied after the final approval", checkVerdict)
+	}
+	var gate1Outcome, gate2Outcome string
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT outcome FROM workflow_node_runs WHERE workflow_run_id = ? AND node_key = 'gate1' AND state = ?`,
+		scheduled.Run.ID, string(coordinator.WorkflowNodeSucceeded)).Scan(&gate1Outcome); err != nil {
+		t.Fatalf("load gate1 outcome: %v", err)
+	}
+	if gate1Outcome != "approved" {
+		t.Fatalf("gate1 outcome = %q, want approved", gate1Outcome)
+	}
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT outcome FROM workflow_node_runs WHERE workflow_run_id = ? AND node_key = 'gate2' AND state = ?`,
+		scheduled.Run.ID, string(coordinator.WorkflowNodeSucceeded)).Scan(&gate2Outcome); err != nil {
+		t.Fatalf("load gate2 outcome: %v", err)
+	}
+	if gate2Outcome != "approved" {
+		t.Fatalf("gate2 outcome = %q, want approved", gate2Outcome)
+	}
+}
+
+// TestSubmitReviewRevisitAfterChangesRequestedPreservesVerdict pins the
+// gate-scoped conflict check across a changes_requested loop: after a real
+// revision cycle the run revisits the same human gate and waits there again.
+// A verdict for that revisited gate is not late even though an earlier visit
+// of the same gate recorded a decision; it must succeed, file its threads and
+// check, and answer the gate. Before the fix, humanGateDecidedTx counted any
+// succeeded human-gate node run in the latest run as a prior decision and
+// refused the revisited-gate verdict with 409, dropping its threads and check
+// even though the relevant visit was still open.
+func TestSubmitReviewRevisitAfterChangesRequestedPreservesVerdict(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	flow := newRevisitFixtureFlow(t, fixture, "change review revisit")
+
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{Title: "Revisited gate review from change view", FlowID: flow.ID}, http.StatusCreated, &created)
+	var scheduled workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
+		nil, http.StatusOK, &scheduled)
+
+	const (
+		changeID  = "ch-change-review-revisit"
+		headSHA   = "1111111111111111111111111111111111111111"
+		timestamp = "2026-01-01T00:00:00.000000000Z"
+	)
+	if _, err := fixture.DB.ExecContext(ctx, `
+INSERT INTO changes (id, task_id, branch, base, head_sha, created_at, updated_at, ready_at)
+VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-review-revisit",
+		headSHA, timestamp, timestamp, timestamp); err != nil {
+		t.Fatalf("insert change: %v", err)
+	}
+
+	// First visit: request changes records a decision on the gate and sends the
+	// run back through the rework phase toward the same gate again.
+	var first reviewVerdictResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+		reviewVerdictRequest{
+			Verdict:  "request_changes",
+			HeadSHA:  headSHA,
+			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "revise this"}},
+		}, http.StatusOK, &first)
+	if first.Check == nil || first.Check.Verdict != coordinator.CheckBlocked {
+		t.Fatalf("first review check = %+v, want blocked for request_changes", first.Check)
+	}
+
+	run, err := fixture.Bundle.WorkflowRuns.Get(ctx, scheduled.Run.ID)
+	if err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	if run.State != coordinator.WorkflowRunRunning || run.CurrentNodeKey != "rework" {
+		t.Fatalf("workflow = state %q at %q, want running at rework after changes_requested", run.State, run.CurrentNodeKey)
+	}
+	reworkNodeRunID := run.CurrentNodeRunID
+	if reworkNodeRunID == "" {
+		t.Fatalf("rework has no open node run: %+v", run)
+	}
+
+	// A verdict for the new revision while the run is back in the rework phase
+	// must not be refused just because the earlier visit of the same gate is
+	// decided: the revisited gate has not been reached yet. Before the fix,
+	// humanGateDecidedTx counted the earlier visit's decision and rejected this
+	// verdict with 409, dropping its threads and check.
+	var second reviewVerdictResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+		reviewVerdictRequest{
+			Verdict:  "approve",
+			HeadSHA:  headSHA,
+			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 2, Body: "approved on revision"}},
+		}, http.StatusOK, &second)
+	if second.Check == nil || second.Check.Verdict != coordinator.CheckSatisfied {
+		t.Fatalf("second review check = %+v, want satisfied", second.Check)
+	}
+	run, err = fixture.Bundle.WorkflowRuns.Get(ctx, scheduled.Run.ID)
+	if err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	if run.State != coordinator.WorkflowRunRunning || run.CurrentNodeKey != "rework" {
+		t.Fatalf("workflow = state %q at %q, want the run untouched at rework", run.State, run.CurrentNodeKey)
+	}
+
+	// The revision lands and the run revisits the gate; the new visit is
+	// answered and completes the run.
+	if _, err := fixture.Bundle.WorkflowRuns.MarkNodeRunning(ctx, reworkNodeRunID); err != nil {
+		t.Fatalf("mark rework node running: %v", err)
+	}
+	artifactID := submitHandoffArtifact(t, fixture, created.Task.ID, reworkNodeRunID, "rework-v1", "Revised draft")
+	completeAgentNode(t, fixture, created.Task.ID, reworkNodeRunID, artifactID)
+	run, err = fixture.Bundle.WorkflowRuns.Get(ctx, scheduled.Run.ID)
+	if err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	if run.State != coordinator.WorkflowRunWaiting || run.CurrentNodeKey != "gate" || run.CurrentNodeRunID == scheduled.Run.CurrentNodeRunID {
+		t.Fatalf("workflow = %+v, want a fresh visit waiting at the revisited gate", run)
+	}
+	revisitNodeRunID := run.CurrentNodeRunID
+	var third reviewVerdictResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+		reviewVerdictRequest{
+			Verdict:  "approve",
+			HeadSHA:  headSHA,
+			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 3, Body: "final approval"}},
+		}, http.StatusOK, &third)
+	run, err = fixture.Bundle.WorkflowRuns.Get(ctx, scheduled.Run.ID)
+	if err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	if run.State != coordinator.WorkflowRunCompleted {
+		t.Fatalf("workflow state = %q, want completed after the revisited approval", run.State)
+	}
+
+	// The finished run's decisions are stale: a further verdict is refused.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
+		reviewVerdictRequest{
+			Verdict:  "request_changes",
+			HeadSHA:  headSHA,
+			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 4, Body: "late contradiction"}},
+		}, http.StatusConflict, nil)
+
+	// Three threads total (the refused verdict left none), the single per-task
+	// human-review check reflects the last successful verdict, and both visits
+	// keep their recorded decisions.
+	var threadCount int
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM review_threads WHERE change_id = ?`, changeID).Scan(&threadCount); err != nil {
+		t.Fatalf("count threads: %v", err)
+	}
+	if threadCount != 3 {
+		t.Fatalf("revisit reviews left %d threads, want 3 (the late verdict must leave none)", threadCount)
+	}
+	var checkCount int
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM checks WHERE task_id = ? AND name = ?`, created.Task.ID, humanReviewCheckName).Scan(&checkCount); err != nil {
+		t.Fatalf("count checks: %v", err)
+	}
+	if checkCount != 1 {
+		t.Fatalf("revisit reviews left %d human-review checks, want the single per-task check", checkCount)
+	}
+	var checkVerdict string
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT verdict FROM checks WHERE task_id = ? AND name = ?`, created.Task.ID, humanReviewCheckName).Scan(&checkVerdict); err != nil {
+		t.Fatalf("load check verdict: %v", err)
+	}
+	if checkVerdict != string(coordinator.CheckSatisfied) {
+		t.Fatalf("check verdict = %q, want satisfied after the final approval", checkVerdict)
+	}
+	var visit1Outcome, visit2Outcome string
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT outcome FROM workflow_node_runs WHERE id = ?`, scheduled.Run.CurrentNodeRunID).Scan(&visit1Outcome); err != nil {
+		t.Fatalf("load first-visit outcome: %v", err)
+	}
+	if visit1Outcome != "changes_requested" {
+		t.Fatalf("first visit outcome = %q, want changes_requested", visit1Outcome)
+	}
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT outcome FROM workflow_node_runs WHERE id = ?`, revisitNodeRunID).Scan(&visit2Outcome); err != nil {
+		t.Fatalf("load revisited outcome: %v", err)
+	}
+	if visit2Outcome != "approved" {
+		t.Fatalf("revisited outcome = %q, want approved", visit2Outcome)
 	}
 }
 

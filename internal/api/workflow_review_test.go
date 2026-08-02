@@ -41,6 +41,132 @@ func newReviewFixtureFlow(t *testing.T, fixture testFixture, name string) coordi
 	return flow
 }
 
+// newMultiGateFixtureFlow builds a two-gate change shape with an author phase
+// between the gates: gate1 -> work2 -> gate2 -> done. Approving gate1 records
+// a decision on it and moves the run to the work2 phase, so a verdict arriving
+// while the run is working toward gate2 must still succeed — the second gate
+// has not been reached, even though gate1's decision is already recorded.
+func newMultiGateFixtureFlow(t *testing.T, fixture testFixture, name string) coordinator.Flow {
+	t.Helper()
+	ctx := context.Background()
+	planner, err := fixture.Registry.GlobalAgentDefs().GetByName(ctx, "task-planner")
+	if err != nil {
+		t.Fatalf("resolve task-planner agent def: %v", err)
+	}
+	flow, err := fixture.Bundle.Flows.Create(ctx, coordinator.FlowInput{
+		Name:      name,
+		StartNode: "gate1",
+		Nodes: []coordinator.FlowNodeInput{
+			{Key: "gate1", Name: "First approval", Kind: coordinator.NodeHumanGate, Config: coordinator.FlowNodeConfig{HumanGate: &coordinator.HumanGateNodeConfig{Instructions: "First review.", Outcomes: []string{"approved", "rejected"}}}},
+			{Key: "work2", Name: "Revise for second review", Kind: coordinator.NodeAgent, Config: coordinator.FlowNodeConfig{Agent: &coordinator.AgentNodeConfig{AgentDefID: planner.ID, Workspace: coordinator.WorkspaceBase, Artifact: coordinator.ArtifactHandoff}}},
+			{Key: "gate2", Name: "Second approval", Kind: coordinator.NodeHumanGate, Config: coordinator.FlowNodeConfig{HumanGate: &coordinator.HumanGateNodeConfig{Instructions: "Second review.", Outcomes: []string{"approved", "changes_requested"}}}},
+			{Key: "done", Name: "Done", Kind: coordinator.NodeTerminal, Config: coordinator.FlowNodeConfig{Terminal: &coordinator.TerminalNodeConfig{Resolution: coordinator.ResolutionCompleted}}},
+			{Key: "dropped", Name: "Dropped", Kind: coordinator.NodeTerminal, Config: coordinator.FlowNodeConfig{Terminal: &coordinator.TerminalNodeConfig{Resolution: coordinator.ResolutionCancelled}}},
+		},
+		Edges: []coordinator.FlowEdgeInput{
+			{From: "gate1", Outcome: "approved", To: "work2"},
+			{From: "gate1", Outcome: "rejected", To: "dropped"},
+			{From: "work2", Outcome: "completed", To: "gate2"},
+			{From: "gate2", Outcome: "approved", To: "done"},
+			{From: "gate2", Outcome: "changes_requested", To: "done"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create multi-gate flow: %v", err)
+	}
+	return flow
+}
+
+// newRevisitFixtureFlow builds a changes_requested loop: the human gate's
+// changes_requested outcome sends the run back through a rework phase and then
+// into the same gate again. A verdict for the revisited gate is not late even
+// though an earlier visit of the same gate already recorded a decision.
+func newRevisitFixtureFlow(t *testing.T, fixture testFixture, name string) coordinator.Flow {
+	t.Helper()
+	ctx := context.Background()
+	planner, err := fixture.Registry.GlobalAgentDefs().GetByName(ctx, "task-planner")
+	if err != nil {
+		t.Fatalf("resolve task-planner agent def: %v", err)
+	}
+	flow, err := fixture.Bundle.Flows.Create(ctx, coordinator.FlowInput{
+		Name:      name,
+		StartNode: "gate",
+		Nodes: []coordinator.FlowNodeInput{
+			{Key: "gate", Name: "Review", Kind: coordinator.NodeHumanGate, Config: coordinator.FlowNodeConfig{HumanGate: &coordinator.HumanGateNodeConfig{Instructions: "Review the change.", Outcomes: []string{"approved", "changes_requested", "rejected"}}}},
+			{Key: "rework", Name: "Revise", Kind: coordinator.NodeAgent, Config: coordinator.FlowNodeConfig{Agent: &coordinator.AgentNodeConfig{AgentDefID: planner.ID, Workspace: coordinator.WorkspaceBase, Artifact: coordinator.ArtifactHandoff}}},
+			{Key: "done", Name: "Done", Kind: coordinator.NodeTerminal, Config: coordinator.FlowNodeConfig{Terminal: &coordinator.TerminalNodeConfig{Resolution: coordinator.ResolutionCompleted}}},
+			{Key: "rejected", Name: "Rejected", Kind: coordinator.NodeTerminal, Config: coordinator.FlowNodeConfig{Terminal: &coordinator.TerminalNodeConfig{Resolution: coordinator.ResolutionRejected}}},
+		},
+		Edges: []coordinator.FlowEdgeInput{
+			{From: "gate", Outcome: "approved", To: "done"},
+			{From: "gate", Outcome: "changes_requested", To: "rework"},
+			{From: "gate", Outcome: "rejected", To: "rejected"},
+			{From: "rework", Outcome: "completed", To: "gate"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create revisit flow: %v", err)
+	}
+	return flow
+}
+
+// newFinalGateFixtureFlow builds the passed-final-gate shape: one human gate
+// followed by an agent phase and then the terminal. Approving the gate records
+// the flow's only decision and moves the run to the work phase, so a verdict
+// arriving while the run is working has no reachable future or revisited human
+// gate to belong to: it contradicts the recorded decision and must be refused.
+func newFinalGateFixtureFlow(t *testing.T, fixture testFixture, name string) coordinator.Flow {
+	t.Helper()
+	ctx := context.Background()
+	planner, err := fixture.Registry.GlobalAgentDefs().GetByName(ctx, "task-planner")
+	if err != nil {
+		t.Fatalf("resolve task-planner agent def: %v", err)
+	}
+	flow, err := fixture.Bundle.Flows.Create(ctx, coordinator.FlowInput{
+		Name:      name,
+		StartNode: "gate",
+		Nodes: []coordinator.FlowNodeInput{
+			{Key: "gate", Name: "Review", Kind: coordinator.NodeHumanGate, Config: coordinator.FlowNodeConfig{HumanGate: &coordinator.HumanGateNodeConfig{Instructions: "Review the change.", Outcomes: []string{"approved", "rejected"}}}},
+			{Key: "work", Name: "Revise", Kind: coordinator.NodeAgent, Config: coordinator.FlowNodeConfig{Agent: &coordinator.AgentNodeConfig{AgentDefID: planner.ID, Workspace: coordinator.WorkspaceBase, Artifact: coordinator.ArtifactHandoff}}},
+			{Key: "done", Name: "Done", Kind: coordinator.NodeTerminal, Config: coordinator.FlowNodeConfig{Terminal: &coordinator.TerminalNodeConfig{Resolution: coordinator.ResolutionCompleted}}},
+			{Key: "rejected", Name: "Rejected", Kind: coordinator.NodeTerminal, Config: coordinator.FlowNodeConfig{Terminal: &coordinator.TerminalNodeConfig{Resolution: coordinator.ResolutionRejected}}},
+		},
+		Edges: []coordinator.FlowEdgeInput{
+			{From: "gate", Outcome: "approved", To: "work"},
+			{From: "gate", Outcome: "rejected", To: "rejected"},
+			{From: "work", Outcome: "completed", To: "done"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create final-gate flow: %v", err)
+	}
+	return flow
+}
+
+// submitHandoffArtifact files a handoff artifact for the node run, the way an
+// agent hands its draft to the workflow, and returns the artifact id.
+func submitHandoffArtifact(t *testing.T, fixture testFixture, taskID, nodeRunID, clientKey, summary string) string {
+	t.Helper()
+	var artifact workflowArtifactResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+taskID+"/workflow/artifacts",
+		map[string]any{
+			"node_run_id":      nodeRunID,
+			"kind":             string(coordinator.ArtifactHandoff),
+			"summary_markdown": summary,
+			"payload":          json.RawMessage(`{"note":"draft"}`),
+			"client_key":       clientKey,
+		}, http.StatusCreated, &artifact)
+	return artifact.Artifact.ID
+}
+
+// completeAgentNode completes the active agent node run with the given
+// artifact, advancing the run to its next node.
+func completeAgentNode(t *testing.T, fixture testFixture, taskID, nodeRunID, artifactID string) {
+	t.Helper()
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+taskID+"/workflow/complete",
+		workflowCompleteRequest{NodeRunID: nodeRunID, ArtifactID: artifactID}, http.StatusOK, nil)
+}
+
 func submitPlanArtifact(t *testing.T, fixture testFixture, taskID, nodeRunID, clientKey, title string) string {
 	t.Helper()
 	payload, err := json.Marshal(coordinator.TaskSetManifest{

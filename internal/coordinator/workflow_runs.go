@@ -1585,41 +1585,160 @@ func (s *WorkflowRunService) Respond(ctx context.Context, taskID, nodeRunID, out
 // workflow run inside the caller's transaction. It mirrors Respond for the
 // review submission path, which must complete the gate in the same
 // transaction as the head validation and the verdict record so a stale review
-// cannot advance a workflow that has moved past the inspected head. A task
-// with no active run, or an active run not waiting on a human gate, is left
-// alone — the review still records its threads and verdict.
+// cannot advance a workflow that has moved past the inspected head.
+//
+// A verdict that lands after the task's workflow already recorded a
+// human-gate decision — the run answered its gate and moved on, or completed
+// — is late and contradictory, so it is refused with ErrWorkflowConflict and
+// the whole submission rolls back: no inline threads and no verdict check
+// survive beside the decision they contradict. A task with no run, or a run
+// that has not yet reached its human gate, is left alone — the review still
+// records its threads and verdict.
 func (s *WorkflowRunService) respondToReviewGateTx(ctx context.Context, tx workflowTx, taskID, verdict, feedback string) error {
 	run, err := scanWorkflowRun(tx.QueryRowContext(ctx, workflowRunSelect+`
 WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, taskID))
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	// An open gate answers the verdict: the run is waiting on a human gate, so
+	// the verdict completes it in this transaction.
+	if err == nil && run.State == WorkflowRunWaiting && run.CurrentNodeRunID != "" {
+		node, ok := run.Snapshot.Node(run.CurrentNodeKey)
+		if ok && node.Kind == NodeHumanGate {
+			nodeRun, err := scanWorkflowNodeRun(tx.QueryRowContext(ctx, workflowNodeRunSelect+` WHERE id = ?`, run.CurrentNodeRunID))
+			if err != nil {
+				return err
+			}
+			outcome := "changes_requested"
+			if verdict == "approve" {
+				outcome = "approved"
+			}
+			_, err = s.completeNodeTx(ctx, tx, CompleteWorkflowNodeInput{
+				NodeRunID:      nodeRun.ID,
+				Outcome:        outcome,
+				Actor:          ActorHuman,
+				Payload:        map[string]any{"feedback": strings.TrimSpace(feedback)},
+				IdempotencyKey: "human:" + nodeRun.ID + ":" + outcome,
+			}, false, nil)
+			return err
+		}
+	}
+
+	// No open gate to answer. If the task's latest workflow run already
+	// recorded a human-gate decision and no gate is left open or reachable for
+	// this verdict — the run is finished, or it passed its last gate and is
+	// still active with no future or revisited gate ahead — the verdict is late
+	// and contradicts the decision the run moved on with, so the submission
+	// must be refused rather than persisted beside it. A verdict that still has
+	// a gate to belong to (an active run on its way to a second gate, or back
+	// at a revisited gate) records its threads and check as today; a workflow
+	// without a human gate, or a run that never reached its gate, records no
+	// decision either.
+	decided, err := s.humanGateDecidedTx(ctx, tx, taskID)
+	if err != nil {
+		return err
+	}
+	if decided {
+		return fmt.Errorf("%w: task is no longer waiting on a human gate; a decision was already recorded", ErrWorkflowConflict)
+	}
+	return nil
+}
+
+// humanGateDecidedTx reports whether the task's latest workflow run already
+// recorded a human-gate decision that a new verdict would contradict: a gate
+// node run in that run succeeded with an outcome, and no gate is left open or
+// reachable for the new verdict to belong to. A verdict arriving then is late
+// and would file its inline threads and overwrite the human-review check
+// beside the decision it contradicts.
+//
+// A finished run (completed or cancelled) holds every decision it recorded:
+// any succeeded gate with an outcome makes a later verdict stale. An active
+// run (still scheduled, running, or waiting) keeps its verdicts valid while
+// any human gate is still reachable from where the run is — a waiting run at
+// a gate answers the verdict through the open-gate path in
+// respondToReviewGateTx, and a run on its way to a second human gate later in
+// the flow (or back at a revisited gate after a changes_requested loop) has a
+// gate ahead that the fresh review belongs to. But once an active run has
+// passed its last gate — a decided gate advanced the run to a non-gate node
+// with no reachable future or revisited human gate — its recorded decision is
+// just as stale as a finished run's, and a late verdict must be refused the
+// same way. A workflow without a human gate, or a run that never reached its
+// gate, records no decision and leaves verdicts free to file their threads
+// and check.
+func (s *WorkflowRunService) humanGateDecidedTx(ctx context.Context, tx workflowTx, taskID string) (bool, error) {
+	run, err := scanWorkflowRun(tx.QueryRowContext(ctx, workflowRunSelect+`
+WHERE task_id = ? ORDER BY run_sequence DESC, id DESC LIMIT 1`, taskID))
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
-	if run.State != WorkflowRunWaiting || run.CurrentNodeRunID == "" {
-		return nil
+	var gateKeys []string
+	for _, node := range run.Snapshot.Nodes {
+		if node.Kind == NodeHumanGate {
+			gateKeys = append(gateKeys, node.Key)
+		}
 	}
-	node, ok := run.Snapshot.Node(run.CurrentNodeKey)
-	if !ok || node.Kind != NodeHumanGate {
-		return nil
+	if len(gateKeys) == 0 {
+		return false, nil
 	}
-	nodeRun, err := scanWorkflowNodeRun(tx.QueryRowContext(ctx, workflowNodeRunSelect+` WHERE id = ?`, run.CurrentNodeRunID))
-	if err != nil {
-		return err
+	if run.State != WorkflowRunCompleted && run.State != WorkflowRunCancelled {
+		// The run is still active. Its recorded decisions are only stale once
+		// the run has passed its last human gate: if a gate is reachable from
+		// the run's current node, a fresh verdict still belongs to a gate that
+		// has not been reached and must file its threads and check.
+		if snapshotReachesHumanGate(run.Snapshot, run.CurrentNodeKey, gateKeys) {
+			return false, nil
+		}
 	}
-	outcome := "changes_requested"
-	if verdict == "approve" {
-		outcome = "approved"
+	placeholders := make([]string, 0, len(gateKeys))
+	args := make([]any, 0, len(gateKeys)+2)
+	args = append(args, run.ID)
+	for _, key := range gateKeys {
+		args = append(args, key)
+		placeholders = append(placeholders, "?")
 	}
-	_, err = s.completeNodeTx(ctx, tx, CompleteWorkflowNodeInput{
-		NodeRunID:      nodeRun.ID,
-		Outcome:        outcome,
-		Actor:          ActorHuman,
-		Payload:        map[string]any{"feedback": strings.TrimSpace(feedback)},
-		IdempotencyKey: "human:" + nodeRun.ID + ":" + outcome,
-	}, false, nil)
-	return err
+	args = append(args, string(WorkflowNodeSucceeded))
+	var decided int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM workflow_node_runs
+WHERE workflow_run_id = ? AND node_key IN (`+strings.Join(placeholders, ",")+`) AND state = ? AND outcome != ''`, args...).Scan(&decided); err != nil {
+		return false, err
+	}
+	return decided > 0, nil
+}
+
+// snapshotReachesHumanGate reports whether any of the given gate keys is
+// reachable from the node at `from` along the snapshot's edges. The current
+// node itself counts: a run parked at its gate still has that gate open to a
+// verdict. Cycles (a changes_requested loop back to the same gate) terminate
+// through the seen set.
+func snapshotReachesHumanGate(snapshot FlowSnapshot, from string, gateKeys []string) bool {
+	gateSet := make(map[string]struct{}, len(gateKeys))
+	for _, key := range gateKeys {
+		gateSet[key] = struct{}{}
+	}
+	edges := make(map[string][]string, len(snapshot.Edges))
+	for _, edge := range snapshot.Edges {
+		edges[edge.From] = append(edges[edge.From], edge.To)
+	}
+	seen := make(map[string]struct{})
+	queue := []string{from}
+	for len(queue) > 0 {
+		key := queue[0]
+		queue = queue[1:]
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		if _, ok := gateSet[key]; ok {
+			return true
+		}
+		queue = append(queue, edges[key]...)
+	}
+	return false
 }
 
 func (s *WorkflowRunService) ExtendBudget(ctx context.Context, taskID string, additional int, actor Actor) (WorkflowRun, error) {
