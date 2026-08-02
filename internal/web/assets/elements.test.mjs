@@ -2078,7 +2078,10 @@ function reviewChangeData() {
   return {
     change: { id: "ch-0001", head_sha: "abc123def456" },
     task: { id: "t-0001" },
+    // The diff names the head it was rendered for, matching the change
+    // metadata head — the production shape both routes supply.
     diff: {
+      head_sha: "abc123def456",
       files: [{ path: "a.go", hunks: [{ header: "@@ -1 +1 @@", lines: [{ kind: "add", new_line: 1, text: "x" }] }] }],
     },
     threads: [],
@@ -2321,6 +2324,7 @@ test("a review submission binds to the head displayed when the head moves betwee
   change.data = {
     ...reviewChangeData(),
     change: { id: "ch-0001", head_sha: "def456789abc" },
+    diff: { ...reviewChangeData().diff, head_sha: "def456789abc" },
   };
   await flush();
 
@@ -2360,6 +2364,7 @@ test("a submission in the queued-paint window binds to the head still rendered, 
   change.data = {
     ...reviewChangeData(),
     change: { id: "ch-0001", head_sha: "def456789abc" },
+    diff: { ...reviewChangeData().diff, head_sha: "def456789abc" },
   };
   assert.equal(change.querySelector(".head").dataset.head, "abc123def456", "the rendered head is still h1 before the queued paint");
 
@@ -2402,6 +2407,7 @@ test("a head change between renders drops drafts written against the old head", 
   change.data = {
     ...reviewChangeData(),
     change: { id: "ch-0001", head_sha: "def456789abc" },
+    diff: { ...reviewChangeData().diff, head_sha: "def456789abc" },
   };
   await flush();
 
@@ -2556,6 +2562,7 @@ test("a delayed conflict for the old head does not restore review text into the 
   change.data = {
     ...reviewChangeData(),
     change: { id: "ch-0001", head_sha: "def456789abc" },
+    diff: { ...reviewChangeData().diff, head_sha: "def456789abc" },
   };
   await flush();
   assert.equal(change.drafts.size, 0, "the h2 repaint drops the h1 drafts");
@@ -2677,6 +2684,7 @@ test("a delayed successful submission for the old head does not clear the new he
   change.data = {
     ...reviewChangeData(),
     change: { id: "ch-0001", head_sha: "def456789abc" },
+    diff: { ...reviewChangeData().diff, head_sha: "def456789abc" },
   };
   await flush();
   assert.equal(change.drafts.size, 0, "the h2 repaint drops the h1 drafts");
