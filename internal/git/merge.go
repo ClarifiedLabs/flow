@@ -13,6 +13,7 @@ var (
 	ErrNoMergeChanges            = errors.New("squash merge has no included changes")
 	ErrMergeConflict             = errors.New("squash merge conflict")
 	ErrHeadMismatch              = errors.New("task branch head does not match expected head")
+	ErrBaseMismatch              = errors.New("merge base does not match expected head")
 	ErrMergeContainsIgnoredPaths = errors.New("squash merge contains newly added ignored paths")
 )
 
@@ -38,6 +39,7 @@ type SquashMergeInput struct {
 	BaseBranch       string
 	Branch           string
 	ExpectedHeadSHA  string
+	ExpectedBaseSHA  string
 	Message          string
 	// CommitName and CommitEmail set the merge commit's author/committer
 	// identity. When empty, DefaultMergeCommitName/DefaultMergeCommitEmail are
@@ -117,6 +119,9 @@ func squashMergeToBase(ctx context.Context, input SquashMergeInput, push bool) (
 	previousBaseSHA, err := gitOutput(ctx, worktree, nil, "rev-parse", "HEAD")
 	if err != nil {
 		return SquashMergeResult{}, fmt.Errorf("read base sha: %w", err)
+	}
+	if expected := strings.TrimSpace(input.ExpectedBaseSHA); expected != "" && previousBaseSHA != expected {
+		return SquashMergeResult{}, fmt.Errorf("%w: %s, expected %s", ErrBaseMismatch, previousBaseSHA, expected)
 	}
 	headSHA, err := gitOutput(ctx, worktree, nil, "rev-parse", "origin/"+input.Branch)
 	if err != nil {

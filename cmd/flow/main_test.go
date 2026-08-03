@@ -717,7 +717,7 @@ func TestTaskRelationsCommandListsRelations(t *testing.T) {
 		t.Fatalf("task relations exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	got := strings.TrimSpace(stdout.String())
-	want := source.ID + "\tblocks\t" + target.ID + "\n" + target.ID + "\trelated_to\t" + source.ID
+	want := source.ID + "\tblocks\t" + target.ID + "\n" + source.ID + "\trelated_to\t" + target.ID
 	if got != want {
 		t.Fatalf("relations output = %q, want %q", got, want)
 	}

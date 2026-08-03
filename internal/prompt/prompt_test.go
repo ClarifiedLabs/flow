@@ -90,9 +90,10 @@ func TestBuildTaskSetWorkflowSelectionGuidance(t *testing.T) {
 		"Task-set Workflow Selection:",
 		"--summary-file .flow/session/SUMMARY.md",
 		"--output-file .flow/session/TASK_SET.json",
-		"Maximum generated tasks: 25",
+		"Maximum generated items: 25",
+		`"kind":"task|epic|feature"`,
 		"Default workflow: coding (fl-coding)",
-		"Omit flow_id to use the default workflow.",
+		"Omit flow_id on task items to use the default workflow.",
 		"- planning (fl-planning): Create a narrower human-reviewed task graph.",
 		"Select a planning workflow explicitly",
 		"The source task's workflow is neither automatically correct nor automatically forbidden.",
@@ -115,7 +116,7 @@ func TestBuildTaskSetWorkflowSelectionDisablesOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build prompt: %v", err)
 	}
-	if !strings.Contains(rendered, "Per-task workflow overrides are not allowed. Omit flow_id from every task.") {
+	if !strings.Contains(rendered, "Per-task workflow overrides are not allowed. Omit flow_id from every task item.") {
 		t.Fatalf("task-set prompt missing disabled override guidance:\n%s", rendered)
 	}
 	if strings.Contains(rendered, "Choose the workflow from the child task's immediate deliverable") {

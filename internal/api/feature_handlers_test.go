@@ -325,11 +325,11 @@ func TestTaskBoundConsoleRebaseScope(t *testing.T) {
 		t.Fatalf("forbidden rebase created %d rebase rows, want 0", rebaseRows)
 	}
 	var relationRows int
-	if err := fixture.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_relations`).Scan(&relationRows); err != nil {
+	if err := fixture.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_item_relations WHERE kind = 'blocks'`).Scan(&relationRows); err != nil {
 		t.Fatalf("count relation rows: %v", err)
 	}
 	if relationRows != 0 {
-		t.Fatalf("forbidden rebase created %d relation rows, want 0", relationRows)
+		t.Fatalf("forbidden rebase created %d blocker rows, want 0", relationRows)
 	}
 
 	// Rebasing the feature that holds the bound task stays allowed.
@@ -423,8 +423,8 @@ func TestTaskBoundConsoleRebaseScope(t *testing.T) {
 	if concurrentTaskID == "" {
 		t.Fatal("rebase confinement hook did not run")
 	}
-	if got := countRows("task_relations"); got != 1 {
-		t.Fatalf("conflicted rebase created %d relation rows, want exactly 1", got)
+	if got := countRows("work_item_relations WHERE kind = 'blocks'"); got != 1 {
+		t.Fatalf("conflicted rebase created %d blocker rows, want exactly 1", got)
 	}
 
 	// The only relation the conflicted rebase may insert involves the bound
@@ -432,7 +432,7 @@ func TestTaskBoundConsoleRebaseScope(t *testing.T) {
 	// no created relation has both endpoints unrelated to the bound task.
 	var blockedBound, blockedConcurrent int
 	if err := fixture.DB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM task_relations WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`,
+		`SELECT COUNT(*) FROM work_item_relations WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`,
 		conflicted.Result.RebaseTaskID, boundTask.ID).Scan(&blockedBound); err != nil {
 		t.Fatalf("count bound-task block: %v", err)
 	}
@@ -440,7 +440,7 @@ func TestTaskBoundConsoleRebaseScope(t *testing.T) {
 		t.Fatalf("rebase task blocks bound task %d times, want 1", blockedBound)
 	}
 	if err := fixture.DB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM task_relations WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`,
+		`SELECT COUNT(*) FROM work_item_relations WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`,
 		conflicted.Result.RebaseTaskID, concurrentTaskID).Scan(&blockedConcurrent); err != nil {
 		t.Fatalf("count concurrent-task block: %v", err)
 	}
@@ -475,14 +475,14 @@ func TestTaskBoundConsoleRebaseScope(t *testing.T) {
 		t.Fatalf("create extra task: %v", err)
 	}
 	rebasesBefore := countRows("feature_rebases")
-	relationsBefore := countRows("task_relations")
+	relationsBefore := countRows("work_item_relations WHERE kind = 'blocks'")
 	doJSONRequestAs(t, fixture.Server, "task-bound-console-token", http.MethodPost,
 		rebasesPath+"/"+feature.ID+"/rebase", nil, http.StatusForbidden, nil)
 	if got := countRows("feature_rebases"); got != rebasesBefore {
 		t.Fatalf("forbidden rebase created %d rebase rows, want 0", got-rebasesBefore)
 	}
-	if got := countRows("task_relations"); got != relationsBefore {
-		t.Fatalf("forbidden rebase created %d relation rows, want 0", got-relationsBefore)
+	if got := countRows("work_item_relations WHERE kind = 'blocks'"); got != relationsBefore {
+		t.Fatalf("forbidden rebase created %d blocker rows, want 0", got-relationsBefore)
 	}
 
 	// Scenario B — the raced 403 path: another principal adds a task after the
@@ -530,7 +530,7 @@ func TestTaskBoundConsoleRebaseScope(t *testing.T) {
 	t.Cleanup(func() { fixture.Bundle.Features.RebaseOnMainTestHook = nil })
 
 	racedRebasesBefore := countRows("feature_rebases")
-	racedRelationsBefore := countRows("task_relations")
+	racedRelationsBefore := countRows("work_item_relations WHERE kind = 'blocks'")
 	doJSONRequestAs(t, fixture.Server, "task-bound-raced-token", http.MethodPost,
 		rebasesPath+"/"+raced.ID+"/rebase", nil, http.StatusForbidden, nil)
 	if !racedHookRan {
@@ -539,8 +539,8 @@ func TestTaskBoundConsoleRebaseScope(t *testing.T) {
 	if got := countRows("feature_rebases"); got != racedRebasesBefore {
 		t.Fatalf("raced rebase created %d rebase rows, want 0", got-racedRebasesBefore)
 	}
-	if got := countRows("task_relations"); got != racedRelationsBefore {
-		t.Fatalf("raced rebase created %d relation rows, want 0", got-racedRelationsBefore)
+	if got := countRows("work_item_relations WHERE kind = 'blocks'"); got != racedRelationsBefore {
+		t.Fatalf("raced rebase created %d blocker rows, want 0", got-racedRelationsBefore)
 	}
 }
 

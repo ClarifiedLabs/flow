@@ -35,6 +35,16 @@ func (s *projectServer) handleFeaturesPath(w http.ResponseWriter, r *http.Reques
 		return requireScope(w, principal, "owner or console token is required",
 			coordinator.TokenScopeOwner, coordinator.TokenScopeConsole)
 	}
+	requireContainerWrite := func() bool {
+		if !requireWrite() {
+			return false
+		}
+		if principal.Scope == coordinator.TokenScopeConsole && principal.SourceTaskID != nil {
+			writeError(w, http.StatusForbidden, "forbidden", "task-bound console cannot create, edit, land, or archive containers")
+			return false
+		}
+		return true
+	}
 
 	switch {
 	case len(parts) == 0:
@@ -44,7 +54,7 @@ func (s *projectServer) handleFeaturesPath(w http.ResponseWriter, r *http.Reques
 				s.handleListFeatures(w, r)
 			}
 		case http.MethodPost:
-			if requireWrite() {
+			if requireContainerWrite() {
 				s.handleCreateFeature(w, r, principal)
 			}
 		default:
@@ -57,7 +67,7 @@ func (s *projectServer) handleFeaturesPath(w http.ResponseWriter, r *http.Reques
 				s.handleGetFeature(w, r, parts[0])
 			}
 		case http.MethodPatch:
-			if requireWrite() {
+			if requireContainerWrite() {
 				s.handleEditFeature(w, r, parts[0])
 			}
 		default:
@@ -71,9 +81,15 @@ func (s *projectServer) handleFeaturesPath(w http.ResponseWriter, r *http.Reques
 		case "rebase":
 			s.handleRebaseFeature(w, r, parts[0], principal)
 		case "land":
-			s.handleLandFeature(w, r, parts[0], principal)
+			if requireContainerWrite() {
+				s.handleLandFeature(w, r, parts[0], principal)
+			}
 		case "archive":
-			s.handleArchiveFeature(w, r, parts[0])
+			if requireContainerWrite() {
+				s.handleArchiveFeature(w, r, parts[0])
+			}
+		case "start":
+			s.handleStartContainer(w, r, parts[0], principal)
 		default:
 			writeError(w, http.StatusNotFound, "not_found", "unknown features route")
 		}
@@ -119,7 +135,7 @@ func (s *projectServer) handleCreateFeature(w http.ResponseWriter, r *http.Reque
 		actor = coordinator.ActorAgent
 	}
 	feature, err := s.features.Create(r.Context(), coordinator.CreateFeatureInput{
-		Title: request.Title, Body: request.Body, CreatedBy: actor,
+		Title: request.Title, Body: request.Body, ParentItemID: request.ParentItemID, CreatedBy: actor,
 	})
 	if err != nil {
 		writeFeatureError(w, err)
@@ -260,7 +276,7 @@ func (s *projectServer) handleArchiveFeature(w http.ResponseWriter, r *http.Requ
 // featureSummary is the list-view payload: row + counts + live divergence.
 func (s *projectServer) featureSummary(ctx context.Context, feature coordinator.Feature) (contract.FeatureResponse, error) {
 	payload := contract.FeatureResponse{Feature: feature}
-	tasks, err := s.features.Tasks(ctx, feature.ID)
+	tasks, err := s.features.TreeTasks(ctx, feature.ID)
 	if err != nil {
 		return contract.FeatureResponse{}, err
 	}
@@ -270,6 +286,25 @@ func (s *projectServer) featureSummary(ctx context.Context, feature coordinator.
 	}
 	if running, found, err := s.features.RunningRebase(ctx, feature.ID); err == nil && found {
 		payload.RunningRebase = &running
+	}
+	if s.workItems != nil {
+		item, err := s.workItems.Get(ctx, feature.ID)
+		if err != nil {
+			return contract.FeatureResponse{}, err
+		}
+		payload.Item = &item
+		payload.Parent, err = s.workItems.Parent(ctx, feature.ID)
+		if err != nil {
+			return contract.FeatureResponse{}, err
+		}
+		payload.Children, err = s.workItems.Children(ctx, feature.ID)
+		if err != nil {
+			return contract.FeatureResponse{}, err
+		}
+		payload.Blockers, err = s.workItems.EffectiveBlockers(ctx, feature.ID, true)
+		if err != nil {
+			return contract.FeatureResponse{}, err
+		}
 	}
 	return payload, nil
 }
@@ -284,7 +319,7 @@ func (s *projectServer) featureDetail(ctx context.Context, ref string) (contract
 	if err != nil {
 		return contract.FeatureResponse{}, err
 	}
-	tasks, err := s.features.Tasks(ctx, feature.ID)
+	tasks, err := s.features.TreeTasks(ctx, feature.ID)
 	if err != nil {
 		return contract.FeatureResponse{}, err
 	}
@@ -323,6 +358,10 @@ func writeFeatureError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "feature_title_taken", err.Error())
 	case errors.Is(err, coordinator.ErrFeatureClosed):
 		writeError(w, http.StatusConflict, "feature_closed", err.Error())
+	case errors.Is(err, coordinator.ErrWorkItemBlocked):
+		writeError(w, http.StatusConflict, "work_item_blocked", err.Error())
+	case errors.Is(err, coordinator.ErrWorkItemMoveConflict), errors.Is(err, coordinator.ErrWorkItemParentClosed), errors.Is(err, coordinator.ErrWorkItemCycle):
+		writeError(w, http.StatusConflict, "work_item_conflict", err.Error())
 	case errors.Is(err, coordinator.ErrFeatureRebaseRunning):
 		writeError(w, http.StatusConflict, "rebase_running", err.Error())
 	case errors.Is(err, coordinator.ErrFeatureRebaseForbidden):

@@ -1237,8 +1237,13 @@ func createTask(t *testing.T, store *flowdb.Store) testTask {
 	t.Helper()
 
 	ctx := context.Background()
+	tx, err := store.DB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin task transaction: %v", err)
+	}
+	defer tx.Rollback()
 	var nextNumber int64
-	if err := store.DB().QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, `
 UPDATE id_allocators
 SET next_number = next_number + 1
 WHERE name = 'task'
@@ -1247,7 +1252,10 @@ RETURNING next_number - 1`).Scan(&nextNumber); err != nil {
 	}
 	id := fmt.Sprintf("t-test-%04d", nextNumber)
 	now := formatTime(time.Now().UTC())
-	if _, err := store.DB().ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `INSERT INTO work_items (id, kind, created_at) VALUES (?, 'task', ?)`, id, now); err != nil {
+		t.Fatalf("insert task work item: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
 INSERT INTO tasks (
 	id,
 	title,
@@ -1262,6 +1270,9 @@ INSERT INTO tasks (
 		now,
 	); err != nil {
 		t.Fatalf("insert task: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit task: %v", err)
 	}
 
 	return testTask{ID: id}

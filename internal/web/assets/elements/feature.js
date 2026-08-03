@@ -4,7 +4,7 @@
 // this page only reports and triggers them.
 
 import { FlowElement } from "./base.js";
-import { featureHref, taskHref } from "../api.js";
+import { epicHref, featureHref, taskHref } from "../api.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { value } from "../normalize.js";
 import { formatDate, formatRelative, shortSHA } from "../format.js";
@@ -55,6 +55,8 @@ export function renderFeature(data) {
   const running = value(data, "running_rebase", "RunningRebase");
   const tasks = value(data, "tasks", "Tasks") || [];
   const rebases = value(data, "rebases", "Rebases") || [];
+  const children = value(data, "children", "Children") || [];
+  const blockers = value(data, "blockers", "Blockers") || [];
 
   const id = value(feature, "id", "ID");
   const title = value(feature, "title", "Title") || id;
@@ -64,6 +66,8 @@ export function renderFeature(data) {
   const open = status === "open";
   const landedAt = value(feature, "landed_at", "LandedAt");
   const landSHA = value(feature, "land_sha", "LandSHA");
+  const integrationID = value(feature, "integration_feature_id", "IntegrationFeatureID") || "";
+  const targetLabel = integrationID || "project base";
   const divergence = featureDivergenceLabel(branchState);
   const behind = Number(branchState?.behind || 0);
 
@@ -78,6 +82,7 @@ export function renderFeature(data) {
         </div>
         <div class="legend">
           <span class="legend-item"><span class="mono">${escapeHTML(branch)}</span></span>
+          <span class="legend-item">branches from / lands into ${escapeHTML(targetLabel)}</span>
           <span class="legend-item">${escapeHTML(featureCountsLabel(counts))}</span>
           ${divergence ? `<span class="legend-item" ${behind ? "data-behind" : ""}>${escapeHTML(divergence)}</span>` : ""}
           ${landedAt ? `<span class="legend-item">landed ${escapeHTML(formatDate(landedAt))}${landSHA ? ` at ${escapeHTML(shortSHA(landSHA))}` : ""}</span>` : ""}
@@ -90,8 +95,9 @@ export function renderFeature(data) {
           </p>` : ""}
         ${open ? `
           <div class="actions">
-            <button type="button" class="secondary" data-feature-rebase="${escapeAttr(id)}" data-project="${escapeAttr(projectID)}">Rebase onto main</button>
-            <button type="button" data-feature-land="${escapeAttr(id)}" data-project="${escapeAttr(projectID)}">Land into main</button>
+            <button type="button" data-feature-start="${escapeAttr(id)}" data-project="${escapeAttr(projectID)}">Start descendant tasks</button>
+            <button type="button" class="secondary" data-feature-rebase="${escapeAttr(id)}" data-project="${escapeAttr(projectID)}">Rebase onto ${escapeHTML(targetLabel)}</button>
+            <button type="button" data-feature-land="${escapeAttr(id)}" data-project="${escapeAttr(projectID)}">Land into ${escapeHTML(targetLabel)}</button>
             <button type="button" class="secondary danger" data-feature-archive="${escapeAttr(id)}" data-project="${escapeAttr(projectID)}">Archive</button>
           </div>` : ""}
       </div>
@@ -107,6 +113,16 @@ export function renderFeature(data) {
         <h3>Tasks</h3>
         ${tasks.length ? tasks.map(taskRow).join("") : `<p class="empty">No tasks assigned yet.</p>`}
       </div>
+      ${children.length ? `<div class="members"><h3>Child containers</h3>${children.map((child) => {
+        const childID = value(child, "id", "ID");
+        const kind = value(child, "kind", "Kind");
+        const href = kind === "feature" ? featureHref(projectID, childID) : kind === "epic" ? epicHref(projectID, childID) : taskHref(projectID, childID);
+        return `<a class="member" href="${escapeAttr(href)}" data-link><span class="member-id">${escapeHTML(childID)}</span><span class="member-title">${escapeHTML(value(child, "title", "Title"))}</span><span class="member-note">${escapeHTML(kind)}</span></a>`;
+      }).join("")}</div>` : ""}
+      ${blockers.some((blocker) => !value(blocker, "resolved", "Resolved")) ? `<div class="members"><h3>Blocked by</h3>${blockers.filter((blocker) => !value(blocker, "resolved", "Resolved")).map((blocker) => {
+        const item = value(blocker, "item", "Item") || {};
+        return `<div class="member"><span class="member-id">${escapeHTML(value(item, "id", "ID"))}</span><span class="member-title">${escapeHTML(value(item, "title", "Title"))}</span></div>`;
+      }).join("")}</div>` : ""}
       ${rebases.length ? `
         <div class="members">
           <h3>Rebases</h3>

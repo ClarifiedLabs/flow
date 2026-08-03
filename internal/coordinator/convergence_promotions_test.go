@@ -240,15 +240,28 @@ FROM convergence_promotions WHERE source_task_id = ?`, task.ID).Scan(&rows, &sta
 		t.Fatalf("promotion record rows=%d state=%q planning_run=%q completed_at=%q", rows, state, planningRunID, completedAt)
 	}
 
-	// The parent relation records the supersession.
-	var relationCount int
+	// The promoted feature owns the planning task; the source task keeps
+	// lineage as a symmetric related_to edge rather than becoming a container.
+	var relationCount, lineageCount int
 	if err := env.fixture.store.DB().QueryRowContext(ctx, `
-SELECT COUNT(*) FROM task_relations
-WHERE source_task_id = ? AND target_task_id = ? AND kind = ?`, task.ID, planningTask.ID, string(RelationParentOf)).Scan(&relationCount); err != nil {
+SELECT COUNT(*) FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = ?`, result.Feature.ID, planningTask.ID, string(RelationParentOf)).Scan(&relationCount); err != nil {
 		t.Fatalf("read promotion relation: %v", err)
 	}
 	if relationCount != 1 {
 		t.Fatalf("parent_of relations = %d, want 1", relationCount)
+	}
+	left, right := task.ID, result.Feature.ID
+	if right < left {
+		left, right = right, left
+	}
+	if err := env.fixture.store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = ?`, left, right, string(RelationRelatedTo)).Scan(&lineageCount); err != nil {
+		t.Fatalf("read promotion lineage: %v", err)
+	}
+	if lineageCount != 1 {
+		t.Fatalf("related_to relations = %d, want 1", lineageCount)
 	}
 
 	// The resolution transition carries the promotion identity.

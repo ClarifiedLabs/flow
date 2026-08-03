@@ -775,6 +775,8 @@ func workflowActor(principal coordinator.Principal) coordinator.Actor {
 
 func writeWorkflowError(w http.ResponseWriter, err error, code string) {
 	switch {
+	case errors.Is(err, coordinator.ErrWorkItemNotSchedulable):
+		writeError(w, http.StatusConflict, "work_item_not_schedulable", err.Error())
 	case errors.Is(err, coordinator.ErrWorkflowRunNotFound), errors.Is(err, coordinator.ErrNoActiveWorkflowRun), errors.Is(err, coordinator.ErrWorkflowArtifactNotFound):
 		writeError(w, http.StatusNotFound, code, err.Error())
 	case errors.Is(err, coordinator.ErrWorkflowConflict):

@@ -3,7 +3,7 @@
 // dispatches. Same reason as the click table: forms live inside elements that
 // replace their own innerHTML.
 
-import { apiPatch, apiPost, featuresAPIBase, taskAPIBase, taskHref } from "./api.js";
+import { apiPatch, apiPost, epicsAPIBase, featuresAPIBase, taskAPIBase, taskHref } from "./api.js";
 import { value } from "./normalize.js";
 import { uploadTaskAttachment } from "./task.js";
 import {
@@ -107,10 +107,41 @@ export const FORMS = {
       await app.refresh();
       return "Feature updated";
     }
-    await apiPost(featuresAPIBase(projectID), { title, body });
+    const parentItemID = String(form.elements.parent_item_id?.value || "").trim();
+    await apiPost(featuresAPIBase(projectID), {
+      title,
+      body,
+      ...(parentItemID ? { parent_item_id: parentItemID } : {}),
+    });
     app.featuresByProject?.delete(projectID);
     await app.refresh();
     return "Feature created";
+  },
+
+  async epicForm(app, form) {
+    const epicID = String(form.dataset.epicForm || "").trim();
+    const projectID = String(form.dataset.project || "").trim();
+    if (!projectID) return "Project is required";
+    const title = String(form.elements.title?.value || "").trim();
+    if (!title) return "Epic title is required";
+    const priority = Number(form.elements.priority?.value || 0);
+    if (!Number.isInteger(priority) || priority < 0) return "Priority must be a non-negative whole number";
+    const payload = {
+      title,
+      body: String(form.elements.body?.value || ""),
+      priority,
+      completion_policy: String(form.elements.completion_policy?.value || "all_children"),
+    };
+    if (epicID) {
+      await apiPatch(`${epicsAPIBase(projectID)}/${encodeURIComponent(epicID)}`, payload);
+      await app.refresh();
+      return "Epic updated";
+    }
+    const parentItemID = String(form.elements.parent_item_id?.value || "").trim();
+    if (parentItemID) payload.parent_item_id = parentItemID;
+    await apiPost(epicsAPIBase(projectID), payload);
+    await app.refresh();
+    return "Epic created";
   },
 
   async attachmentForm(app, form) {
@@ -209,6 +240,7 @@ export function collectRelationRows(form) {
 const FORM_PENDING_LABELS = {
   taskForm: "Saving task",
   featureForm: "Saving feature",
+  epicForm: "Saving epic",
   attachmentForm: "Uploading attachment",
   attentionReplyForm: "Sending reply",
   threadReplyForm: "Posting reply",

@@ -1,0 +1,98 @@
+:host {
+  display: block;
+  max-width: 1000px;
+}
+
+.detail {
+  display: grid;
+  gap: 14px;
+}
+
+.head {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+
+.title-row,
+.feature-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.title-row h2 {
+  margin: 0;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.count,
+.legend,
+.empty,
+.feature-id,
+.feature-counts,
+.feature-divergence,
+.feature-rebasing {
+  color: var(--muted);
+  font-size: var(--text-quiet);
+}
+
+.feature-create {
+  display: grid;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+
+.members,
+.members ul {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.members ul {
+  border-left: 1px solid var(--line);
+  margin: 6px 0 0 18px;
+  padding-left: 14px;
+}
+
+.feature-row {
+  background: var(--panel-2);
+  border-radius: var(--radius);
+  min-width: 0;
+  padding: 8px 10px;
+}
+
+.feature-title {
+  color: var(--ink-2);
+  min-width: 0;
+  overflow: hidden;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feature-title:hover {
+  color: var(--ink);
+}
+
+.feature-status {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: var(--text-meta);
+  padding: 1px 7px;
+}
+
+.feature-rebasing {
+  color: var(--ph-await);
+}

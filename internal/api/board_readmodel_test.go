@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClarifiedLabs/flow/internal/api/contract"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
@@ -312,61 +313,50 @@ func TestWorkflowDetailResolvesNodeNamesAndEdgeCounts(t *testing.T) {
 	}
 }
 
-func TestEpicRollupReportsMembersAndCriticalPath(t *testing.T) {
+func TestFirstClassEpicReportsTypedChildrenAndBlockers(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	flow := newBoardFixtureFlow(t, fixture, "epic rollup")
 
-	var epic taskResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
-		createTaskRequest{Title: "Lifecycle hardening", FlowID: flow.ID}, http.StatusCreated, &epic)
+	epic, err := fixture.Bundle.Epics.Create(ctx, coordinator.CreateEpicInput{Title: "Lifecycle hardening", CreatedBy: coordinator.ActorHuman})
+	if err != nil {
+		t.Fatalf("create epic: %v", err)
+	}
 
 	ids := make([]string, 0, 3)
 	for _, title := range []string{"First", "Second", "Third"} {
-		var member taskResponse
-		doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
-			createTaskRequest{Title: title, FlowID: flow.ID}, http.StatusCreated, &member)
-		if err := fixture.Bundle.Tasks.LinkTasks(ctx, epic.Task.ID, member.Task.ID,
-			coordinator.RelationParentOf, coordinator.ActorHuman); err != nil {
-			t.Fatalf("link epic member: %v", err)
+		member, err := fixture.Bundle.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: title, FlowID: flow.ID, ParentItemID: epic.ID})
+		if err != nil {
+			t.Fatalf("create epic member: %v", err)
 		}
-		ids = append(ids, member.Task.ID)
+		ids = append(ids, member.ID)
 	}
 
 	// First blocks Second blocks Third: a three-long chain the footer should
 	// surface as the critical path.
 	for i := 0; i+1 < len(ids); i++ {
-		if err := fixture.Bundle.Tasks.LinkTasks(ctx, ids[i], ids[i+1],
+		if err := fixture.Bundle.WorkItems.Link(ctx, ids[i], ids[i+1],
 			coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
 			t.Fatalf("link blocker: %v", err)
 		}
 	}
 
-	var response epicResponse
-	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks/"+epic.Task.ID+"/epic",
+	var response contract.EpicResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet,
+		"/v2/projects/"+fixture.Project.ID+"/epics/"+epic.ID,
 		nil, http.StatusOK, &response)
 
-	if response.TotalCount != 3 || len(response.Members) != 3 {
+	if len(response.Children) != 3 {
 		t.Fatalf("epic = %+v, want 3 members", response)
 	}
-	if response.Epic.Title != "Lifecycle hardening" {
+	if response.Epic.Title != "Lifecycle hardening" || response.Item.Kind != coordinator.WorkItemEpic {
 		t.Fatalf("epic title = %q", response.Epic.Title)
 	}
-	if len(response.CriticalPath) != 3 {
-		t.Fatalf("critical path = %v, want the full three-task chain", response.CriticalPath)
-	}
-	if response.CriticalPath[0] != ids[0] || response.CriticalPath[2] != ids[2] {
-		t.Fatalf("critical path = %v, want %v in dependency order", response.CriticalPath, ids)
-	}
-
-	var third *epicMember
-	for i := range response.Members {
-		if response.Members[i].ID == ids[2] {
-			third = &response.Members[i]
-		}
-	}
-	if third == nil || len(third.BlockedBy) != 1 || third.BlockedBy[0] != ids[1] {
-		t.Fatalf("third member = %+v, want blocked by %s", third, ids[1])
+	var third contract.WorkItemResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet,
+		"/v2/projects/"+fixture.Project.ID+"/work-items/"+ids[2], nil, http.StatusOK, &third)
+	if len(third.Blockers) != 1 || third.Blockers[0].Item.ID != ids[1] || third.Blockers[0].Resolved {
+		t.Fatalf("third blockers = %+v, want unresolved %s", third.Blockers, ids[1])
 	}
 }
 
@@ -785,7 +775,7 @@ func TestBoardCardsLoadRelationsWithConstantQueries(t *testing.T) {
 
 		server := &projectServer{tasks: tasks}
 		// Only count what building the cards does; task creation and linking
-		// above touch task_relations too and would drown the signal.
+		// above touch work_item_relations too and would drown the signal.
 		recorder.reset()
 		cards, err := server.buildUITaskCards(ctx, all)
 		if err != nil {
@@ -799,7 +789,7 @@ func TestBoardCardsLoadRelationsWithConstantQueries(t *testing.T) {
 		if taskCount > 1 && cards[all[1].ID].Blockers.Count != 1 {
 			t.Fatalf("card blockers = %+v, want the live blocker", cards[all[1].ID].Blockers)
 		}
-		return recorder.countMatching("task_relations")
+		return recorder.countMatching("work_item_relations")
 	}
 
 	one := build(1)

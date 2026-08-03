@@ -441,8 +441,8 @@ test("nav trigger gains board lane chips once sidebar status lands", async () =>
   assert.deepEqual(fetchCalls, ["/ui/api/v2/sidebar"]);
   assert.match(harness.trigger.innerHTML, /class="nav-board-group"/);
   assert.match(harness.trigger.innerHTML, /data-board-lane="blocked" title="1 blocked task">1<\/span>/);
-  // The panel keeps the eight nav destinations with the board badge markup.
-  assert.equal(harness.nav.links.length, 8);
+  // The panel keeps every configured nav destination with the board badge markup.
+  assert.equal(harness.nav.links.length, harness.context.NAV.length);
   assert.match(harness.nav.innerHTML, /class="nav-board-group"/);
 });
 

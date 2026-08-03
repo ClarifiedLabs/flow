@@ -8,7 +8,7 @@ INSERT INTO app_metadata (key, value, updated_at)
 VALUES ('schema_version', '0001_init', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 INSERT INTO app_metadata (key, value, updated_at)
-VALUES ('storage_format', '4', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+VALUES ('storage_format', '5', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 CREATE TABLE id_allocators (
 	name TEXT PRIMARY KEY,
@@ -16,7 +16,7 @@ CREATE TABLE id_allocators (
 );
 
 INSERT INTO id_allocators (name, next_number)
-VALUES ('task', 1), ('task_attachment', 1);
+VALUES ('task', 1), ('epic', 1), ('task_attachment', 1);
 
 CREATE TABLE agent_defs (
 	id TEXT PRIMARY KEY,
@@ -68,8 +68,21 @@ CREATE TABLE flow_edges (
 	FOREIGN KEY (flow_id, to_node_key) REFERENCES flow_nodes(flow_id, node_key) ON DELETE CASCADE
 );
 
-CREATE TABLE tasks (
+CREATE TABLE work_items (
 	id TEXT PRIMARY KEY,
+	kind TEXT NOT NULL CHECK (kind IN ('task', 'epic', 'feature')),
+	created_at TEXT NOT NULL
+);
+
+CREATE TRIGGER work_items_kind_is_immutable
+BEFORE UPDATE OF kind ON work_items
+WHEN NEW.kind != OLD.kind
+BEGIN
+	SELECT RAISE(ABORT, 'work item kind is immutable');
+END;
+
+CREATE TABLE tasks (
+	id TEXT PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE,
 	title TEXT NOT NULL CHECK (length(trim(title)) > 0),
 	body TEXT NOT NULL DEFAULT '',
 	priority INTEGER NOT NULL DEFAULT 0 CHECK (priority >= 0),
@@ -86,6 +99,37 @@ CREATE TABLE tasks (
 	CHECK ((lifecycle_state = 'done') = (done_resolution IS NOT NULL AND done_at IS NOT NULL)),
 	CHECK (lifecycle_state = 'done' OR (done_resolution IS NULL AND done_at IS NULL))
 );
+
+CREATE TRIGGER tasks_require_task_work_item
+BEFORE INSERT ON tasks
+WHEN COALESCE((SELECT kind FROM work_items WHERE id = NEW.id), '') != 'task'
+BEGIN
+	SELECT RAISE(ABORT, 'task requires matching task work item');
+END;
+
+CREATE TABLE epics (
+	id TEXT PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE,
+	title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+	body TEXT NOT NULL DEFAULT '',
+	priority INTEGER NOT NULL DEFAULT 0 CHECK (priority >= 0),
+	status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'completed', 'archived')),
+	completion_policy TEXT NOT NULL DEFAULT 'all_children' CHECK (completion_policy IN ('all_children', 'manual')),
+	completed_automatically INTEGER NOT NULL DEFAULT 0 CHECK (completed_automatically IN (0, 1)),
+	created_by TEXT NOT NULL CHECK (created_by IN ('human', 'agent', 'system')),
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	completed_at TEXT,
+	archived_at TEXT,
+	CHECK (status != 'completed' OR completed_at IS NOT NULL),
+	CHECK (status != 'archived' OR archived_at IS NOT NULL)
+);
+
+CREATE TRIGGER epics_require_epic_work_item
+BEFORE INSERT ON epics
+WHEN COALESCE((SELECT kind FROM work_items WHERE id = NEW.id), '') != 'epic'
+BEGIN
+	SELECT RAISE(ABORT, 'epic requires matching epic work item');
+END;
 
 CREATE TABLE workflow_runs (
 	id TEXT PRIMARY KEY,
@@ -107,6 +151,13 @@ CREATE TABLE workflow_runs (
 	completion_source TEXT NOT NULL DEFAULT '',
 	UNIQUE (task_id, run_sequence)
 );
+
+CREATE TRIGGER workflow_runs_require_task_work_item
+BEFORE INSERT ON workflow_runs
+WHEN COALESCE((SELECT kind FROM work_items WHERE id = NEW.task_id), '') != 'task'
+BEGIN
+	SELECT RAISE(ABORT, 'workflow run requires task work item');
+END;
 
 CREATE UNIQUE INDEX idx_workflow_runs_one_active
 	ON workflow_runs(task_id)
@@ -152,8 +203,11 @@ CREATE TABLE workflow_artifacts (
 CREATE TABLE workflow_materializations (
 	artifact_id TEXT PRIMARY KEY REFERENCES workflow_artifacts(id) ON DELETE RESTRICT,
 	workflow_run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE RESTRICT,
-	result_json TEXT NOT NULL CHECK (json_valid(result_json)),
-	created_at TEXT NOT NULL
+	state TEXT NOT NULL DEFAULT 'prepared' CHECK (state IN ('prepared', 'completed')),
+	result_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(result_json)),
+	last_error TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
 );
 
 CREATE TABLE workflow_waits (
@@ -194,14 +248,15 @@ CREATE UNIQUE INDEX idx_workflow_transitions_idempotency
 	ON workflow_transitions(workflow_run_id, idempotency_key)
 	WHERE idempotency_key IS NOT NULL;
 
-CREATE TABLE task_relations (
-	source_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-	target_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+CREATE TABLE work_item_relations (
+	source_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+	target_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
 	kind TEXT NOT NULL CHECK (kind IN ('parent_of', 'blocks', 'related_to')),
 	created_by TEXT NOT NULL CHECK (created_by IN ('human', 'agent', 'system')),
 	created_at TEXT NOT NULL,
-	PRIMARY KEY (source_task_id, target_task_id, kind),
-	CHECK (source_task_id != target_task_id)
+	PRIMARY KEY (source_item_id, target_item_id, kind),
+	CHECK (source_item_id != target_item_id),
+	CHECK (kind != 'related_to' OR source_item_id < target_item_id)
 );
 
 CREATE TABLE tags (
@@ -507,8 +562,9 @@ CREATE INDEX idx_tasks_flow_id ON tasks(flow_id);
 CREATE INDEX idx_tasks_lifecycle_state ON tasks(lifecycle_state, updated_at);
 CREATE INDEX idx_tasks_done_at ON tasks(done_at DESC, id DESC) WHERE lifecycle_state = 'done';
 CREATE INDEX idx_tasks_source_task_id ON tasks(source_task_id);
-CREATE INDEX idx_task_relations_target ON task_relations(target_task_id, kind);
-CREATE UNIQUE INDEX idx_task_relations_one_parent ON task_relations(target_task_id) WHERE kind = 'parent_of';
+CREATE INDEX idx_work_item_relations_source ON work_item_relations(source_item_id, kind);
+CREATE INDEX idx_work_item_relations_target ON work_item_relations(target_item_id, kind);
+CREATE UNIQUE INDEX idx_work_item_relations_one_parent ON work_item_relations(target_item_id) WHERE kind = 'parent_of';
 CREATE INDEX idx_task_tags_tag_id ON task_tags(tag_id);
 CREATE INDEX idx_git_events_ref ON git_events(ref, observed_at);
 CREATE INDEX idx_jobs_queue ON jobs(state, capacity_bucket, priority DESC, created_at);

@@ -89,6 +89,7 @@ export function renderFeatures(data) {
       <form class="feature-create" data-feature-form="" data-project="${escapeAttr(projectID)}">
         <input name="title" placeholder="Feature title" required aria-label="Feature title">
         <textarea name="body" rows="2" placeholder="What this feature is (optional)" aria-label="Feature body"></textarea>
+        <input name="parent_item_id" placeholder="Parent epic or feature ID (optional)" aria-label="Parent work item ID">
         <div>
           <button type="submit">Create feature</button>
         </div>

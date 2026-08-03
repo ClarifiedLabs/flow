@@ -11,7 +11,7 @@ import (
 // view, change ready/merged latches, and active author sessions).
 //
 // blocked is deliberately NOT a phase: it remains a derived overlay computed
-// live from task_relations, so a blocked task still carries its underlying
+// live from work_item_relations, so a blocked task still carries its underlying
 // phase (backlog/up_next/critique/...) and the block is layered on at read time.
 type Phase string
 

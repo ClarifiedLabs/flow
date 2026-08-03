@@ -191,17 +191,6 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
-	if len(parts) == 2 && parts[1] == "epic" {
-		if !requireMethod(w, r, http.MethodGet) {
-			return
-		}
-		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
-			return
-		}
-		s.handleGetEpic(w, r, taskID)
-		return
-	}
-
 	if len(parts) == 2 && parts[1] == "transitions" {
 		if !requireMethod(w, r, http.MethodGet) {
 			return

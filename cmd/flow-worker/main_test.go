@@ -1280,7 +1280,7 @@ capacity:
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"worker_id: w-local", "protocol: 4", "labels: 3", "capacity_persistent_agent: 1"} {
+	for _, want := range []string{"worker_id: w-local", "protocol: 5", "labels: 3", "capacity_persistent_agent: 1"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("config output missing %q:\n%s", want, output)
 		}
@@ -1786,7 +1786,7 @@ capacity:
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"worker_id: w-local", "protocol: 4", "labels: 3", "capacity_persistent_agent: 1"} {
+	for _, want := range []string{"worker_id: w-local", "protocol: 5", "labels: 3", "capacity_persistent_agent: 1"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("config output missing %q:\n%s", want, output)
 		}

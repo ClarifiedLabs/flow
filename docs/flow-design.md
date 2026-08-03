@@ -393,6 +393,41 @@ through the coordinator API. The coordinator may later export task snapshots for
 backup or public documentation, but generated exports are not the source of
 truth and workers do not create task files.
 
+## Work Item Model
+
+Every project work item has a stable identity and exactly one kind:
+
+```text
+work_items(id, kind, created_at)  # kind: task | epic | feature
+```
+
+Tasks are executable workflow units. Epics and features are containers and can
+never receive a workflow run. Epics aggregate organizational work; features add
+a long-lived Git branch. The generic work-item API exposes normalized state and
+capabilities so callers do not infer epic or feature behavior from task fields.
+
+The organizational hierarchy and dependency graph share one relation table:
+
+```text
+work_item_relations(source_item_id, target_item_id, kind, created_by, created_at)
+```
+
+- `parent_of P -> C` organizes `C` below the epic or feature `P`. An item has at
+  most one parent.
+- `blocks A -> B` requires `A` to become terminal before `B` can proceed.
+- `related_to` is symmetric and stored in canonical ID order.
+
+Containment contributes the completion dependency `C -> P`. New parent and
+blocker edges are checked against this combined graph, preventing a container
+from blocking a child that it also needs to finish. Incoming blockers on an
+ancestor are effective for every descendant.
+
+Planning artifacts use task-set schema v1 with a mixed `items` array. Each item
+declares `kind` and may name a `parent_key`; dependencies may cross kinds. The
+materializer creates one root epic related to the executable planning task and
+durably records every generated ID so retries resume instead of duplicating Git
+branches or database rows.
+
 ## Task Model
 
 Tasks are coordinator-owned database records. IDs are allocated in one SQLite
@@ -431,35 +466,31 @@ task changes `triage_state` to `accepted`; rejecting it changes
 `triage_state` to `rejected` and `schedule_state` to `closed`.
 Only accepted tasks can be scheduled or enqueue author jobs.
 
-### Task Relationships
+### Work Item Relationships
 
-Task relationships are rows, not columns:
+Work-item relationships are rows, not columns:
 
 ```text
-task_relations(source_task_id, target_task_id, kind, created_by, created_at)
+work_item_relations(source_item_id, target_item_id, kind, created_by, created_at)
 ```
 
 Supported relation kinds for the MVP:
 
-- `parent_of`: `source` is the parent; `target` is the child.
-- `blocks`: `source` must be resolved before `target` can start.
+- `parent_of`: `source` is an epic or feature parent; `target` is its child.
+- `blocks`: `source` must be terminal before `target` can proceed.
 - `related_to`: loose non-scheduling relationship.
 
 Rules:
 
 - No self-relations.
 - Duplicate `(source, target, kind)` rows are rejected.
-- `parent_of` is acyclic.
+- `parent_of` and `blocks` are acyclic as one combined dependency graph.
 - A child can have at most one direct parent.
-- `blocks` is acyclic.
 
-Parent/child relationships are organizational. They do not automatically close a
-parent when all children close, and they do not block scheduling unless an
-explicit `blocks` relation also exists.
-
-Blocking relationships affect scheduling. An task with any unresolved blocker
-does not enqueue a new author session and derives to the `blocked` board lane
-when it is otherwise idle.
+Parent/child relationships are organizational, but direct child state drives
+epic aggregate completion. Blocking relationships gate execution. A task may be
+scheduled while blocked; its run remains at the dependency gate until every
+effective blocker is terminal.
 
 ### Task Tags
 
@@ -659,7 +690,7 @@ The database holds the local operational state:
 - `task_flow_cursor`: the task's frozen flow snapshot and phase position.
 - `task_phase_handoffs`: per-phase completion artifacts (specs, plans, the
   final handoff), shown at gates and injected into later phases' prompts.
-- `task_relations`: parent/child, blocker, and related task links.
+- `work_item_relations`: parent/child, blocker, and related task links.
 - `tags`: tag definitions.
 - `task_tags`: many-to-many task tags.
 - `sessions`: worker engagements and runtime state.

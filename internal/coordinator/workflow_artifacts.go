@@ -44,13 +44,24 @@ type CreateWorkflowArtifactInput struct {
 }
 
 type WorkflowArtifactService struct {
-	db    *sql.DB
-	tasks *TaskService
-	now   func() time.Time
+	db       *sql.DB
+	tasks    *TaskService
+	items    *WorkItemService
+	epics    *EpicService
+	Features *FeatureService
+	now      func() time.Time
 }
 
 func NewWorkflowArtifactService(db *sql.DB, tasks *TaskService) *WorkflowArtifactService {
-	return &WorkflowArtifactService{db: db, tasks: tasks, now: sqlitex.UTCNow}
+	projectID := ""
+	if tasks != nil {
+		projectID = tasks.projectID
+	}
+	items := NewWorkItemService(db, projectID)
+	return &WorkflowArtifactService{
+		db: db, tasks: tasks, items: items,
+		epics: NewEpicService(db, projectID, items), now: sqlitex.UTCNow,
+	}
 }
 
 func (s *WorkflowArtifactService) Create(ctx context.Context, input CreateWorkflowArtifactInput) (WorkflowArtifact, bool, error) {
@@ -327,17 +338,20 @@ func scanWorkflowArtifactMaybe(scanner taskScanner) (WorkflowArtifact, bool, err
 
 type TaskSetManifest struct {
 	SchemaVersion int                 `json:"schema_version"`
-	Tasks         []TaskSetItem       `json:"tasks"`
+	Items         []TaskSetItem       `json:"items"`
 	Dependencies  []TaskSetDependency `json:"dependencies,omitempty"`
 }
 
 type TaskSetItem struct {
-	Key      string   `json:"key"`
-	Title    string   `json:"title"`
-	Body     string   `json:"body"`
-	Priority int      `json:"priority,omitempty"`
-	TagSlugs []string `json:"tag_slugs,omitempty"`
-	FlowID   string   `json:"flow_id,omitempty"`
+	Key              string               `json:"key"`
+	Kind             WorkItemKind         `json:"kind"`
+	ParentKey        string               `json:"parent_key,omitempty"`
+	Title            string               `json:"title"`
+	Body             string               `json:"body"`
+	Priority         int                  `json:"priority,omitempty"`
+	TagSlugs         []string             `json:"tag_slugs,omitempty"`
+	FlowID           string               `json:"flow_id,omitempty"`
+	CompletionPolicy EpicCompletionPolicy `json:"completion_policy,omitempty"`
 }
 
 type TaskSetDependency struct {
@@ -346,7 +360,9 @@ type TaskSetDependency struct {
 }
 
 type MaterializeTaskSetResult struct {
-	TaskIDs map[string]string `json:"task_ids"`
+	RootEpicID string            `json:"root_epic_id"`
+	ItemIDs    map[string]string `json:"item_ids"`
+	TaskIDs    map[string]string `json:"task_ids,omitempty"`
 }
 
 func (s *WorkflowArtifactService) MaterializeTaskSet(ctx context.Context, artifactID string, config MaterializeTaskSetNodeConfig) (MaterializeTaskSetResult, bool, error) {
@@ -354,7 +370,7 @@ func (s *WorkflowArtifactService) MaterializeTaskSet(ctx context.Context, artifa
 	if artifactID == "" {
 		return MaterializeTaskSetResult{}, false, errors.New("artifact id is required")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
 	if err != nil {
 		return MaterializeTaskSetResult{}, false, err
 	}
@@ -377,88 +393,358 @@ func (s *WorkflowArtifactService) MaterializeTaskSet(ctx context.Context, artifa
 	if err := validateTaskSetWorkflowSelectionTx(ctx, tx, manifest, config); err != nil {
 		return MaterializeTaskSetResult{}, false, err
 	}
-	var existingJSON string
-	if err := tx.QueryRowContext(ctx, `SELECT result_json FROM workflow_materializations WHERE artifact_id = ?`, artifactID).Scan(&existingJSON); err == nil {
-		var existing MaterializeTaskSetResult
-		if err := json.Unmarshal([]byte(existingJSON), &existing); err != nil {
+	var sourceTaskID, sourceTitle string
+	var sourceFeatureID sql.NullString
+	if err := tx.QueryRowContext(ctx, `
+SELECT t.id, t.title, t.feature_id
+FROM workflow_runs wr JOIN tasks t ON t.id = wr.task_id
+WHERE wr.id = ?`, artifact.WorkflowRunID).Scan(&sourceTaskID, &sourceTitle, &sourceFeatureID); err != nil {
+		return MaterializeTaskSetResult{}, false, err
+	}
+	result := newMaterializeTaskSetResult()
+	replayed := false
+	var materializationState, resultJSON string
+	err = tx.QueryRowContext(ctx, `
+SELECT state, result_json FROM workflow_materializations WHERE artifact_id = ?`, artifactID).Scan(&materializationState, &resultJSON)
+	if err == nil {
+		replayed = true
+		if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
 			return MaterializeTaskSetResult{}, false, err
 		}
-		return existing, true, nil
+		normalizeMaterializeTaskSetResult(&result)
+		if materializationState == "completed" {
+			return result, true, nil
+		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return MaterializeTaskSetResult{}, false, err
-	}
-	var sourceTaskID string
-	if err := tx.QueryRowContext(ctx, `SELECT task_id FROM workflow_runs WHERE id = ?`, artifact.WorkflowRunID).Scan(&sourceTaskID); err != nil {
-		return MaterializeTaskSetResult{}, false, err
-	}
-	// Materialized children inherit the source (planner) task's feature so the
-	// whole planned set lands on the same feature branch.
-	var sourceFeatureID any
-	if err := tx.QueryRowContext(ctx, `SELECT feature_id FROM tasks WHERE id = ?`, sourceTaskID).Scan(&sourceFeatureID); err != nil {
-		return MaterializeTaskSetResult{}, false, err
-	}
-	defaultFlowID := config.DefaultChildFlowID
-
-	now := s.now().UTC()
-	nowText := sqlitex.FormatTime(now)
-	result := MaterializeTaskSetResult{TaskIDs: make(map[string]string, len(manifest.Tasks))}
-	for _, item := range manifest.Tasks {
-		flowID := strings.TrimSpace(item.FlowID)
-		if flowID == "" {
-			flowID = defaultFlowID
-		}
-		id, err := s.tasks.allocateTaskID(ctx, tx)
-		if err != nil {
+	} else {
+		nowText := sqlitex.FormatTime(s.now().UTC())
+		resultJSON, _ := json.Marshal(result)
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO workflow_materializations (
+	artifact_id, workflow_run_id, state, result_json, created_at, updated_at
+) VALUES (?, ?, 'prepared', ?, ?, ?)`, artifact.ID, artifact.WorkflowRunID, string(resultJSON), nowText, nowText); err != nil {
 			return MaterializeTaskSetResult{}, false, err
 		}
-		createdBy := ActorSystem
-		var sessionID any
-		if artifact.SessionID != "" {
-			createdBy = ActorAgent
-			sessionID = artifact.SessionID
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return MaterializeTaskSetResult{}, false, err
+	}
+
+	if result.RootEpicID == "" {
+		tx, err = sqlitex.BeginImmediate(ctx, s.db)
+		if err != nil {
+			return MaterializeTaskSetResult{}, replayed, err
+		}
+		defer tx.Rollback()
+		if err := loadMaterializationResultTx(ctx, tx, artifactID, &result); err != nil {
+			return MaterializeTaskSetResult{}, replayed, err
+		}
+		if result.RootEpicID == "" {
+			id, err := s.epics.allocateID(ctx, tx)
+			if err != nil {
+				return MaterializeTaskSetResult{}, replayed, err
+			}
+			now := s.now().UTC()
+			nowText := sqlitex.FormatTime(now)
+			if err := insertWorkItem(ctx, tx, id, WorkItemEpic, nowText); err != nil {
+				return MaterializeTaskSetResult{}, replayed, err
+			}
+			if _, err := tx.ExecContext(ctx, `
+INSERT INTO epics (
+	id, title, body, priority, status, completion_policy, completed_automatically,
+	created_by, created_at, updated_at
+) VALUES (?, ?, ?, 0, 'open', 'all_children', 0, 'system', ?, ?)`,
+				id, "Plan: "+sourceTitle, artifact.SummaryMarkdown, nowText, nowText); err != nil {
+				return MaterializeTaskSetResult{}, replayed, err
+			}
+			if sourceFeatureID.Valid {
+				if err := s.items.linkTx(ctx, tx, sourceFeatureID.String, id, RelationParentOf, ActorSystem); err != nil {
+					return MaterializeTaskSetResult{}, replayed, err
+				}
+			}
+			if err := s.items.linkTx(ctx, tx, sourceTaskID, id, RelationRelatedTo, ActorSystem); err != nil {
+				return MaterializeTaskSetResult{}, replayed, err
+			}
+			result.RootEpicID = id
+			if err := reconcileEpicAncestorsTx(ctx, tx, []string{id}, now); err != nil {
+				return MaterializeTaskSetResult{}, replayed, err
+			}
+			if err := storeMaterializationResultTx(ctx, tx, artifactID, result, "prepared", ""); err != nil {
+				return MaterializeTaskSetResult{}, replayed, err
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return MaterializeTaskSetResult{}, replayed, err
+		}
+	}
+
+	remaining := len(manifest.Items) - len(result.ItemIDs)
+	for remaining > 0 {
+		progress := false
+		for _, item := range manifest.Items {
+			if result.ItemIDs[item.Key] != "" {
+				continue
+			}
+			parentID := result.RootEpicID
+			if item.ParentKey != "" {
+				parentID = result.ItemIDs[item.ParentKey]
+				if parentID == "" {
+					continue
+				}
+			}
+			var id string
+			if item.Kind == WorkItemFeature {
+				if s.Features == nil {
+					return MaterializeTaskSetResult{}, replayed, errors.New("feature service is required to materialize feature items")
+				}
+				feature, err := s.Features.Create(ctx, CreateFeatureInput{
+					Title: item.Title, Body: item.Body, ParentItemID: parentID,
+					OperationKey: "materialization:" + artifactID + ":" + item.Key, CreatedBy: ActorSystem,
+				})
+				if err != nil {
+					_ = s.storeMaterializationError(ctx, artifactID, err)
+					return MaterializeTaskSetResult{}, replayed, err
+				}
+				id = feature.ID
+				if err := s.persistMaterializedItem(ctx, artifactID, item, id, &result); err != nil {
+					return MaterializeTaskSetResult{}, replayed, err
+				}
+			} else {
+				id, err = s.materializeDatabaseItem(ctx, artifact, config, item, parentID, sourceTaskID, artifactID, &result)
+				if err != nil {
+					_ = s.storeMaterializationError(ctx, artifactID, err)
+					return MaterializeTaskSetResult{}, replayed, err
+				}
+			}
+			result.ItemIDs[item.Key] = id
+			if item.Kind == WorkItemTask {
+				result.TaskIDs[item.Key] = id
+			}
+			remaining--
+			progress = true
+		}
+		if !progress {
+			return MaterializeTaskSetResult{}, replayed, errors.New("task-set hierarchy could not be materialized")
+		}
+	}
+
+	tx, err = sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return MaterializeTaskSetResult{}, replayed, err
+	}
+	defer tx.Rollback()
+	if err := loadMaterializationResultTx(ctx, tx, artifactID, &result); err != nil {
+		return MaterializeTaskSetResult{}, replayed, err
+	}
+	for _, dependency := range manifest.Dependencies {
+		sourceID, targetID := result.ItemIDs[dependency.Blocker], result.ItemIDs[dependency.Blocked]
+		var exists int
+		if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS(SELECT 1 FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks')`, sourceID, targetID).Scan(&exists); err != nil {
+			return MaterializeTaskSetResult{}, replayed, err
+		}
+		if exists == 0 {
+			if err := s.items.linkTx(ctx, tx, sourceID, targetID, RelationBlocks, ActorSystem); err != nil {
+				return MaterializeTaskSetResult{}, replayed, err
+			}
+		}
+	}
+	if err := reconcileEpicAncestorsTx(ctx, tx, append([]string{result.RootEpicID}, mapValues(result.ItemIDs)...), s.now().UTC()); err != nil {
+		return MaterializeTaskSetResult{}, replayed, err
+	}
+	if err := storeMaterializationResultTx(ctx, tx, artifactID, result, "completed", ""); err != nil {
+		return MaterializeTaskSetResult{}, replayed, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return MaterializeTaskSetResult{}, replayed, err
+	}
+	return result, replayed, nil
+}
+
+func newMaterializeTaskSetResult() MaterializeTaskSetResult {
+	return MaterializeTaskSetResult{ItemIDs: map[string]string{}, TaskIDs: map[string]string{}}
+}
+
+func normalizeMaterializeTaskSetResult(result *MaterializeTaskSetResult) {
+	if result.ItemIDs == nil {
+		result.ItemIDs = map[string]string{}
+	}
+	if result.TaskIDs == nil {
+		result.TaskIDs = map[string]string{}
+	}
+	for key, id := range result.TaskIDs {
+		if result.ItemIDs[key] == "" {
+			result.ItemIDs[key] = id
+		}
+	}
+}
+
+func loadMaterializationResultTx(ctx context.Context, q workItemRelationQuerier, artifactID string, result *MaterializeTaskSetResult) error {
+	var raw string
+	if err := q.QueryRowContext(ctx, `SELECT result_json FROM workflow_materializations WHERE artifact_id = ?`, artifactID).Scan(&raw); err != nil {
+		return err
+	}
+	if err := json.Unmarshal([]byte(raw), result); err != nil {
+		return err
+	}
+	normalizeMaterializeTaskSetResult(result)
+	return nil
+}
+
+func storeMaterializationResultTx(ctx context.Context, q workItemRelationQuerier, artifactID string, result MaterializeTaskSetResult, state, lastError string) error {
+	normalizeMaterializeTaskSetResult(&result)
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	_, err = q.ExecContext(ctx, `
+UPDATE workflow_materializations
+SET state = ?, result_json = ?, last_error = ?, updated_at = ?
+WHERE artifact_id = ?`, state, string(raw), lastError, sqlitex.FormatTime(sqlitex.UTCNow()), artifactID)
+	return err
+}
+
+func (s *WorkflowArtifactService) storeMaterializationError(ctx context.Context, artifactID string, cause error) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE workflow_materializations SET last_error = ?, updated_at = ? WHERE artifact_id = ?`,
+		cause.Error(), sqlitex.FormatTime(s.now().UTC()), artifactID)
+	return err
+}
+
+func (s *WorkflowArtifactService) persistMaterializedItem(ctx context.Context, artifactID string, item TaskSetItem, id string, result *MaterializeTaskSetResult) error {
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := loadMaterializationResultTx(ctx, tx, artifactID, result); err != nil {
+		return err
+	}
+	if existing := result.ItemIDs[item.Key]; existing != "" && existing != id {
+		return fmt.Errorf("materialized item %q changed id from %s to %s", item.Key, existing, id)
+	}
+	result.ItemIDs[item.Key] = id
+	if item.Kind == WorkItemTask {
+		result.TaskIDs[item.Key] = id
+	}
+	if err := storeMaterializationResultTx(ctx, tx, artifactID, *result, "prepared", ""); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *WorkflowArtifactService) materializeDatabaseItem(
+	ctx context.Context,
+	artifact WorkflowArtifact,
+	config MaterializeTaskSetNodeConfig,
+	item TaskSetItem,
+	parentID string,
+	sourceTaskID string,
+	artifactID string,
+	result *MaterializeTaskSetResult,
+) (string, error) {
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	if err := loadMaterializationResultTx(ctx, tx, artifactID, result); err != nil {
+		return "", err
+	}
+	if id := result.ItemIDs[item.Key]; id != "" {
+		return id, tx.Commit(ctx)
+	}
+	now := s.now().UTC()
+	nowText := sqlitex.FormatTime(now)
+	createdBy := ActorSystem
+	var sessionID any
+	if artifact.SessionID != "" {
+		createdBy = ActorAgent
+		sessionID = artifact.SessionID
+	}
+	var id string
+	switch item.Kind {
+	case WorkItemTask:
+		id, err = s.tasks.allocateTaskID(ctx, tx)
+		if err != nil {
+			return "", err
+		}
+		flowID := strings.TrimSpace(item.FlowID)
+		if flowID == "" {
+			flowID = config.DefaultChildFlowID
+		}
+		featureID, err := nearestFeatureFromParentTx(ctx, tx, parentID)
+		if err != nil {
+			return "", err
+		}
+		if err := insertWorkItem(ctx, tx, id, WorkItemTask, nowText); err != nil {
+			return "", err
 		}
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO tasks (
 	id, title, body, priority, flow_id, feature_id, created_by, created_by_session_id,
 	source_task_id, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.Title, item.Body,
-			item.Priority, flowID, sourceFeatureID, string(createdBy), sessionID, sourceTaskID, nowText, nowText); err != nil {
-			return MaterializeTaskSetResult{}, false, fmt.Errorf("create generated task %q: %w", item.Key, err)
-		}
-		if err := linkTasksInTx(ctx, tx, sourceTaskID, id, RelationParentOf, ActorSystem, nowText); err != nil {
-			return MaterializeTaskSetResult{}, false, err
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.Title, item.Body, item.Priority,
+			flowID, sqlitex.NullableNonEmptyString(featureID), string(createdBy), sessionID, sourceTaskID, nowText, nowText); err != nil {
+			return "", fmt.Errorf("create generated task %q: %w", item.Key, err)
 		}
 		for _, slug := range item.TagSlugs {
 			tagID, err := upsertTagInTx(ctx, tx, CreateTagInput{Slug: slug, Name: slug, CreatedBy: ActorSystem}, nowText)
 			if err != nil {
-				return MaterializeTaskSetResult{}, false, err
+				return "", err
 			}
 			if _, err := tx.ExecContext(ctx, `
 INSERT INTO task_tags (task_id, tag_id, created_by, created_at) VALUES (?, ?, ?, ?)`,
 				id, tagID, string(ActorSystem), nowText); err != nil {
-				return MaterializeTaskSetResult{}, false, err
+				return "", err
 			}
 		}
+	case WorkItemEpic:
+		id, err = s.epics.allocateID(ctx, tx)
+		if err != nil {
+			return "", err
+		}
+		if err := insertWorkItem(ctx, tx, id, WorkItemEpic, nowText); err != nil {
+			return "", err
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO epics (
+	id, title, body, priority, status, completion_policy, completed_automatically,
+	created_by, created_at, updated_at
+) VALUES (?, ?, ?, ?, 'open', ?, 0, ?, ?, ?)`, id, item.Title, item.Body, item.Priority,
+			string(item.CompletionPolicy), string(createdBy), nowText, nowText); err != nil {
+			return "", err
+		}
+	default:
+		return "", fmt.Errorf("%s item requires external materialization", item.Kind)
+	}
+	if err := s.items.linkTx(ctx, tx, parentID, id, RelationParentOf, ActorSystem); err != nil {
+		return "", err
+	}
+	if err := reconcileEpicAncestorsTx(ctx, tx, []string{id}, now); err != nil {
+		return "", err
+	}
+	result.ItemIDs[item.Key] = id
+	if item.Kind == WorkItemTask {
 		result.TaskIDs[item.Key] = id
 	}
-	for _, dependency := range manifest.Dependencies {
-		if err := linkTasksInTx(ctx, tx, result.TaskIDs[dependency.Blocker], result.TaskIDs[dependency.Blocked], RelationBlocks, ActorSystem, nowText); err != nil {
-			return MaterializeTaskSetResult{}, false, err
-		}
+	if err := storeMaterializationResultTx(ctx, tx, artifactID, *result, "prepared", ""); err != nil {
+		return "", err
 	}
-	resultJSON, err := json.Marshal(result)
-	if err != nil {
-		return MaterializeTaskSetResult{}, false, err
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
 	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO workflow_materializations (artifact_id, workflow_run_id, result_json, created_at)
-VALUES (?, ?, ?, ?)`, artifact.ID, artifact.WorkflowRunID, string(resultJSON), nowText); err != nil {
-		return MaterializeTaskSetResult{}, false, err
+	return id, nil
+}
+
+func mapValues(values map[string]string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, value)
 	}
-	if err := tx.Commit(); err != nil {
-		return MaterializeTaskSetResult{}, false, err
-	}
-	return result, false, nil
+	return result
 }
 
 func DecodeTaskSetManifest(raw []byte) (TaskSetManifest, error) {
@@ -477,54 +763,89 @@ func DecodeTaskSetManifest(raw []byte) (TaskSetManifest, error) {
 	if manifest.SchemaVersion != 1 {
 		return TaskSetManifest{}, errors.New("task-set schema_version must be 1")
 	}
-	if len(manifest.Tasks) == 0 {
-		return TaskSetManifest{}, errors.New("task-set requires at least one task")
+	if len(manifest.Items) == 0 {
+		return TaskSetManifest{}, errors.New("task-set requires at least one item")
 	}
 	if len(manifest.Dependencies) > 200 {
 		return TaskSetManifest{}, errors.New("task-set may contain at most 200 dependencies")
 	}
 	seen := map[string]bool{}
-	for i := range manifest.Tasks {
-		item := &manifest.Tasks[i]
+	kinds := make(map[string]WorkItemKind, len(manifest.Items))
+	for i := range manifest.Items {
+		item := &manifest.Items[i]
 		item.Key = strings.TrimSpace(item.Key)
+		item.ParentKey = strings.TrimSpace(item.ParentKey)
 		item.Title = strings.TrimSpace(item.Title)
 		item.FlowID = strings.TrimSpace(item.FlowID)
+		if item.Kind != WorkItemTask && item.Kind != WorkItemEpic && item.Kind != WorkItemFeature {
+			return TaskSetManifest{}, fmt.Errorf("item %q has invalid kind %q", item.Key, item.Kind)
+		}
 		if !flowNodeKeyPattern.MatchString(item.Key) {
-			return TaskSetManifest{}, fmt.Errorf("task %d key %q is invalid", i+1, item.Key)
+			return TaskSetManifest{}, fmt.Errorf("item %d key %q is invalid", i+1, item.Key)
 		}
 		if seen[item.Key] {
-			return TaskSetManifest{}, fmt.Errorf("duplicate task key %q", item.Key)
+			return TaskSetManifest{}, fmt.Errorf("duplicate item key %q", item.Key)
 		}
 		seen[item.Key] = true
+		kinds[item.Key] = item.Kind
 		if item.Title == "" || strings.TrimSpace(item.Body) == "" {
-			return TaskSetManifest{}, fmt.Errorf("task %q requires title and body", item.Key)
+			return TaskSetManifest{}, fmt.Errorf("item %q requires title and body", item.Key)
 		}
 		if item.Priority < 0 {
-			return TaskSetManifest{}, fmt.Errorf("task %q priority must be non-negative", item.Key)
+			return TaskSetManifest{}, fmt.Errorf("item %q priority must be non-negative", item.Key)
+		}
+		if item.Kind != WorkItemTask && (item.FlowID != "" || len(item.TagSlugs) != 0) {
+			return TaskSetManifest{}, fmt.Errorf("%s %q cannot set task flow or tags", item.Kind, item.Key)
+		}
+		if item.Kind == WorkItemFeature && item.Priority != 0 {
+			return TaskSetManifest{}, fmt.Errorf("feature %q cannot set priority", item.Key)
+		}
+		if item.Kind == WorkItemEpic {
+			if item.CompletionPolicy == "" {
+				item.CompletionPolicy = EpicAllChildren
+			}
+			if item.CompletionPolicy != EpicAllChildren && item.CompletionPolicy != EpicManual {
+				return TaskSetManifest{}, fmt.Errorf("epic %q has invalid completion policy", item.Key)
+			}
+		} else if item.CompletionPolicy != "" {
+			return TaskSetManifest{}, fmt.Errorf("%s %q cannot set completion policy", item.Kind, item.Key)
 		}
 		seenTags := map[string]bool{}
 		for j := range item.TagSlugs {
 			item.TagSlugs[j] = strings.TrimSpace(item.TagSlugs[j])
 			if item.TagSlugs[j] == "" {
-				return TaskSetManifest{}, fmt.Errorf("task %q contains an empty tag slug", item.Key)
+				return TaskSetManifest{}, fmt.Errorf("item %q contains an empty tag slug", item.Key)
 			}
 			if seenTags[item.TagSlugs[j]] {
-				return TaskSetManifest{}, fmt.Errorf("task %q repeats tag slug %q", item.Key, item.TagSlugs[j])
+				return TaskSetManifest{}, fmt.Errorf("item %q repeats tag slug %q", item.Key, item.TagSlugs[j])
 			}
 			seenTags[item.TagSlugs[j]] = true
 		}
 	}
 	dependencyEdges := map[string][]string{}
+	for _, item := range manifest.Items {
+		if item.ParentKey == "" {
+			continue
+		}
+		parentKind, ok := kinds[item.ParentKey]
+		if !ok {
+			return TaskSetManifest{}, fmt.Errorf("item %q parent_key references unknown item %q", item.Key, item.ParentKey)
+		}
+		if parentKind != WorkItemEpic && parentKind != WorkItemFeature {
+			return TaskSetManifest{}, fmt.Errorf("item %q parent %q cannot contain children", item.Key, item.ParentKey)
+		}
+		dependencyEdges[item.Key] = append(dependencyEdges[item.Key], item.ParentKey)
+	}
 	seenDependencies := map[string]bool{}
 	for i := range manifest.Dependencies {
 		dependency := &manifest.Dependencies[i]
 		dependency.Blocker = strings.TrimSpace(dependency.Blocker)
 		dependency.Blocked = strings.TrimSpace(dependency.Blocked)
 		if !seen[dependency.Blocker] || !seen[dependency.Blocked] {
-			return TaskSetManifest{}, fmt.Errorf("dependency %q -> %q references an unknown task", dependency.Blocker, dependency.Blocked)
+			return TaskSetManifest{}, fmt.Errorf("dependency %q -> %q references an unknown item", dependency.Blocker, dependency.Blocked)
 		}
 		if dependency.Blocker == dependency.Blocked {
-			return TaskSetManifest{}, fmt.Errorf("task %q cannot block itself", dependency.Blocker)
+			return TaskSetManifest{}, fmt.Errorf("item %q cannot block itself", dependency.Blocker)
 		}
 		edgeKey := dependency.Blocker + "\x00" + dependency.Blocked
 		if seenDependencies[edgeKey] {
@@ -555,7 +876,7 @@ func DecodeTaskSetManifest(raw []byte) (TaskSetManifest, error) {
 	}
 	for key := range seen {
 		if visit(key) {
-			return TaskSetManifest{}, errors.New("task-set dependencies must be acyclic")
+			return TaskSetManifest{}, errors.New("task-set containment and dependencies must be acyclic")
 		}
 	}
 	return manifest, nil

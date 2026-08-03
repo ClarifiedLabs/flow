@@ -69,6 +69,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runTask(args[1:], stdout, stderr)
 	case "feature":
 		return runFeature(args[1:], stdout, stderr)
+	case "epic":
+		return runEpic(args[1:], stdout, stderr)
+	case "work-item":
+		return runWorkItem(args[1:], stdout, stderr)
 	case "board":
 		return runBoard(args[1:], stdout, stderr)
 	case "checks":
@@ -118,6 +122,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 func runDoctor(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 0 && args[0] == "work-items" {
+		parsed, code := parseAPICommand(args[1:], stderr, "doctor work-items", 0, "doctor work-items does not accept positional arguments")
+		if code != 0 {
+			return code
+		}
+		report, err := parsed.client.DoctorWorkItems()
+		if err != nil {
+			fmt.Fprintf(stderr, "check work items: %v\n", err)
+			return 1
+		}
+		if report.Healthy {
+			fmt.Fprintln(stdout, "work-items: ok")
+			return 0
+		}
+		for _, issue := range report.Issues {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\n", issue.Code, issue.ItemID, issue.Message)
+		}
+		return 1
+	}
 	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
@@ -481,8 +504,10 @@ func runTaskCreate(args []string, stdout, stderr io.Writer) int {
 	flags.IntVar(&priority, "priority", 0, "task priority")
 	var flowRef string
 	var featureRef string
+	var parentItemID string
 	flags.StringVar(&flowRef, "flow", "", "workflow (id or name) used when the task is scheduled")
 	flags.StringVar(&featureRef, "feature", "", "feature (id or title) the task is assigned to")
+	flags.StringVar(&parentItemID, "parent", "", "organizational parent epic or feature id")
 	flags.Var(&attachmentFiles, "file", "file to attach to the initial task prompt (repeatable)")
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -495,9 +520,7 @@ func runTaskCreate(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	input := flowclient.CreateTaskInput{
-		Title:    title,
-		Body:     body,
-		Priority: priority,
+		Title: title, Body: body, Priority: priority, ParentItemID: parentItemID,
 	}
 	if strings.TrimSpace(flowRef) != "" {
 		flowID, err := resolveFlowRef(client, flowRef)
@@ -793,6 +816,8 @@ func runFeature(args []string, stdout, stderr io.Writer) int {
 		return runFeatureLand(args[1:], stdout, stderr)
 	case "archive":
 		return runFeatureArchive(args[1:], stdout, stderr)
+	case "start":
+		return runFeatureStart(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown feature command: %s\n\n", args[0])
 		printFeatureUsage(stderr)
@@ -807,8 +832,10 @@ func runFeatureCreate(args []string, stdout, stderr io.Writer) int {
 
 	var title string
 	var body string
+	var parentItemID string
 	flags.StringVar(&title, "title", "", "feature title")
 	flags.StringVar(&body, "body", "", "feature body")
+	flags.StringVar(&parentItemID, "parent", "", "organizational parent epic or feature id")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -823,7 +850,7 @@ func runFeatureCreate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
-	feature, err := client.CreateFeature(flowclient.CreateFeatureInput{Title: title, Body: body})
+	feature, err := client.CreateFeature(flowclient.CreateFeatureInput{Title: title, Body: body, ParentItemID: parentItemID})
 	if err != nil {
 		fmt.Fprintf(stderr, "create feature: %v\n", err)
 		return 1
@@ -965,6 +992,246 @@ func runFeatureArchive(args []string, stdout, stderr io.Writer) int {
 	}
 	printFeatureLine(stdout, feature.Feature)
 	return 0
+}
+
+func runFeatureStart(args []string, stdout, stderr io.Writer) int {
+	parsed, featureRef, code := parseScopedTaskAPICommand(args, stderr, "feature start", 1, "usage: flow feature start [flags] FEATURE_ID")
+	if code != 0 {
+		return code
+	}
+	result, err := parsed.client.StartFeature(featureRef)
+	if err != nil {
+		fmt.Fprintf(stderr, "start feature: %v\n", err)
+		return 1
+	}
+	printContainerStart(stdout, result)
+	return 0
+}
+
+func runEpic(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		printEpicUsage(stderr)
+		return 2
+	}
+	switch args[0] {
+	case "create":
+		return runEpicCreate(args[1:], stdout, stderr)
+	case "list":
+		return runEpicList(args[1:], stdout, stderr)
+	case "show":
+		return runEpicShow(args[1:], stdout, stderr)
+	case "edit":
+		return runEpicEdit(args[1:], stdout, stderr)
+	case "start", "complete", "reopen", "archive":
+		return runEpicAction(args[0], args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "unknown epic command: %s\n\n", args[0])
+		printEpicUsage(stderr)
+		return 2
+	}
+}
+
+func runEpicCreate(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("epic create", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	var title, body, policy, parent string
+	var priority int
+	flags.StringVar(&title, "title", "", "epic title")
+	flags.StringVar(&body, "body", "", "epic body")
+	flags.IntVar(&priority, "priority", 0, "epic priority")
+	flags.StringVar(&policy, "completion-policy", string(coordinator.EpicAllChildren), "all_children or manual")
+	flags.StringVar(&parent, "parent", "", "organizational parent epic or feature id")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if strings.TrimSpace(title) == "" {
+		fmt.Fprintln(stderr, "--title is required")
+		return 2
+	}
+	applySessionEnvironment(apiFlags, nil)
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return 1
+	}
+	response, err := client.CreateEpic(contract.CreateEpicRequest{
+		Title: title, Body: body, Priority: priority, CompletionPolicy: policy, ParentItemID: parent,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "create epic: %v\n", err)
+		return 1
+	}
+	printEpicLine(stdout, response.Epic)
+	return 0
+}
+
+func runEpicList(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("epic list", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	var status string
+	flags.StringVar(&status, "status", "", "open, completed, archived, or all")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	applySessionEnvironment(apiFlags, nil)
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return 1
+	}
+	epics, err := client.ListEpics(status)
+	if err != nil {
+		fmt.Fprintf(stderr, "list epics: %v\n", err)
+		return 1
+	}
+	for _, epic := range epics {
+		printEpicLine(stdout, epic.Epic)
+	}
+	return 0
+}
+
+func runEpicShow(args []string, stdout, stderr io.Writer) int {
+	parsed, id, code := parseScopedTaskAPICommand(args, stderr, "epic show", 1, "usage: flow epic show [flags] EPIC_ID")
+	if code != 0 {
+		return code
+	}
+	response, err := parsed.client.GetEpic(id)
+	if err != nil {
+		fmt.Fprintf(stderr, "show epic: %v\n", err)
+		return 1
+	}
+	printEpicDetail(stdout, response)
+	return 0
+}
+
+func runEpicEdit(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("epic edit", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	var title, body, policy string
+	var priority int
+	flags.StringVar(&title, "title", "", "new title")
+	flags.StringVar(&body, "body", "", "new body")
+	flags.StringVar(&policy, "completion-policy", "", "all_children or manual")
+	flags.IntVar(&priority, "priority", -1, "new priority")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(stderr, "usage: flow epic edit [flags] EPIC_ID")
+		return 2
+	}
+	applySessionEnvironment(apiFlags, nil)
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return 1
+	}
+	client, id := scopeClientForRef(client, flags.Arg(0))
+	input := contract.EditEpicRequest{}
+	if title != "" {
+		input.Title = &title
+	}
+	if body != "" {
+		input.Body = &body
+	}
+	if policy != "" {
+		input.CompletionPolicy = &policy
+	}
+	if priority >= 0 {
+		input.Priority = &priority
+	}
+	response, err := client.UpdateEpic(id, input)
+	if err != nil {
+		fmt.Fprintf(stderr, "edit epic: %v\n", err)
+		return 1
+	}
+	printEpicLine(stdout, response.Epic)
+	return 0
+}
+
+func runEpicAction(action string, args []string, stdout, stderr io.Writer) int {
+	parsed, id, code := parseScopedTaskAPICommand(args, stderr, "epic "+action, 1, "usage: flow epic "+action+" [flags] EPIC_ID")
+	if code != 0 {
+		return code
+	}
+	if action == "start" {
+		result, err := parsed.client.StartEpic(id)
+		if err != nil {
+			fmt.Fprintf(stderr, "start epic: %v\n", err)
+			return 1
+		}
+		printContainerStart(stdout, result)
+		return 0
+	}
+	var response contract.EpicResponse
+	var err error
+	switch action {
+	case "complete":
+		response, err = parsed.client.CompleteEpic(id)
+	case "reopen":
+		response, err = parsed.client.ReopenEpic(id)
+	case "archive":
+		response, err = parsed.client.ArchiveEpic(id)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "%s epic: %v\n", action, err)
+		return 1
+	}
+	printEpicLine(stdout, response.Epic)
+	return 0
+}
+
+func runWorkItem(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		printWorkItemUsage(stderr)
+		return 2
+	}
+	switch args[0] {
+	case "show", "tree", "relations":
+		parsed, id, code := parseScopedTaskAPICommand(args[1:], stderr, "work-item "+args[0], 1, "usage: flow work-item "+args[0]+" [flags] ITEM_ID")
+		if code != 0 {
+			return code
+		}
+		if args[0] == "relations" {
+			relations, err := parsed.client.GetWorkItemRelations(id)
+			if err != nil {
+				fmt.Fprintf(stderr, "list work-item relations: %v\n", err)
+				return 1
+			}
+			printWorkItemRelations(stdout, id, relations)
+			return 0
+		}
+		response, err := parsed.client.GetWorkItem(id, args[0] == "tree")
+		if err != nil {
+			fmt.Fprintf(stderr, "%s work item: %v\n", args[0], err)
+			return 1
+		}
+		printWorkItemResponse(stdout, response, 0)
+		return 0
+	case "link", "unlink":
+		parsed, sourceID, targetID, kind, code := parseTaskRelationCommand(args[1:], stderr, "work-item "+args[0])
+		if code != 0 {
+			return code
+		}
+		var err error
+		if args[0] == "link" {
+			err = parsed.client.LinkWorkItems(sourceID, kind, targetID)
+		} else {
+			err = parsed.client.UnlinkWorkItems(sourceID, kind, targetID)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "%s work items: %v\n", args[0], err)
+			return 1
+		}
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown work-item command: %s\n\n", args[0])
+		printWorkItemUsage(stderr)
+		return 2
+	}
 }
 
 func runTaskSchedule(args []string, stdout, stderr io.Writer) int {
@@ -3215,7 +3482,8 @@ func printUsage(out io.Writer) {
   flow [--log-level LEVEL] COMMAND
   flow init [--repo PATH] [--name NAME] [--base BRANCH]
   flow doctor [--db PATH] [--config PATH]
-  flow task create --title TITLE [--flow FLOW] [--feature FEATURE] [--file PATH]
+  flow doctor work-items [--project PROJECT] [API flags]
+	  flow task create --title TITLE [--flow FLOW] [--feature FEATURE] [--parent ITEM_ID] [--file PATH]
   flow task attach TASK_ID --file PATH [--stage initial|author|reviewer|verifier]
   flow task list [--state unscheduled,scheduled,in_progress,done]
   flow task show [--project PROJECT] TASK_ID
@@ -3226,9 +3494,11 @@ func printUsage(out io.Writer) {
   flow task respond TASK_ID --node-run NODE_RUN_ID --outcome OUTCOME [--feedback TEXT]
   flow task budget TASK_ID --additional N
   flow task done TASK_ID [--resolution RESOLUTION]
-  flow feature create --title TITLE [--body BODY]
+	  flow feature create --title TITLE [--body BODY] [--parent ITEM_ID]
   flow feature list [--status open|landed|archived|all]
-  flow feature show|edit|rebase|land|archive FEATURE_ID
+	  flow feature show|edit|rebase|land|archive|start FEATURE_ID
+	  flow epic create|list|show|edit|start|complete|reopen|archive
+	  flow work-item show|tree|link|unlink|relations
   flow board
   flow checks TASK_ID
   flow transitions TASK_ID
@@ -3261,7 +3531,7 @@ API override flags on owner commands:
 
 func printTaskUsage(out io.Writer) {
 	fmt.Fprint(out, `Usage:
-  flow task create --title TITLE [--flow FLOW] [--feature FEATURE] [--file PATH]
+	  flow task create --title TITLE [--flow FLOW] [--feature FEATURE] [--parent ITEM_ID] [--file PATH]
   flow task attach [flags] TASK_ID
   flow task list
   flow task show [flags] TASK_ID
@@ -3284,19 +3554,43 @@ func printTaskUsage(out io.Writer) {
 
 func printFeatureUsage(out io.Writer) {
 	fmt.Fprint(out, `Usage:
-  flow feature create --title TITLE [--body BODY]
+  flow feature create --title TITLE [--body BODY] [--parent ITEM_ID]
   flow feature list [--status open|landed|archived|all]
   flow feature show [flags] FEATURE_ID
   flow feature edit [flags] FEATURE_ID
   flow feature rebase [flags] FEATURE_ID
   flow feature land [flags] FEATURE_ID
   flow feature archive [flags] FEATURE_ID
+  flow feature start [flags] FEATURE_ID
 
 A feature groups a set of tasks behind one long-lived feature branch in the
 project's exchange remote. Tasks assigned to a feature merge back into the
 feature branch; rebase pulls the base branch into it and land squash-merges
 the feature into the base branch. Archive is the only delete; the branch is
 retained for audit.
+`)
+}
+
+func printEpicUsage(out io.Writer) {
+	fmt.Fprint(out, `Usage:
+  flow epic create --title TITLE [--body BODY] [--priority N] [--completion-policy all_children|manual] [--parent ITEM_ID]
+  flow epic list [--status open|completed|archived|all]
+  flow epic show [flags] EPIC_ID
+  flow epic edit [flags] EPIC_ID
+  flow epic start [flags] EPIC_ID
+  flow epic complete [flags] EPIC_ID
+  flow epic reopen [flags] EPIC_ID
+  flow epic archive [flags] EPIC_ID
+`)
+}
+
+func printWorkItemUsage(out io.Writer) {
+	fmt.Fprint(out, `Usage:
+  flow work-item show [flags] ITEM_ID
+  flow work-item tree [flags] ITEM_ID
+  flow work-item link [flags] SOURCE_ID blocks|parent_of|related_to TARGET_ID
+  flow work-item unlink [flags] SOURCE_ID blocks|parent_of|related_to TARGET_ID
+  flow work-item relations [flags] ITEM_ID
 `)
 }
 
@@ -3552,7 +3846,7 @@ func scopeClientForRef(client *flowclient.Client, ref string) (*flowclient.Clien
 	if projectRef != "" {
 		return client.WithProject(projectRef), id
 	}
-	if embeddedProject, ok := coordinator.ProjectIDFromTaskID(id); ok {
+	if embeddedProject, ok := coordinator.ProjectIDFromWorkItemID(id); ok {
 		return client.WithProject(embeddedProject), id
 	}
 
@@ -3717,6 +4011,51 @@ func printFeatureDetail(out io.Writer, detail contract.FeatureResponse) {
 	}
 	if strings.TrimSpace(feature.Body) != "" {
 		fmt.Fprintf(out, "\n%s\n", feature.Body)
+	}
+}
+
+func printEpicLine(out io.Writer, epic coordinator.Epic) {
+	fmt.Fprintf(out, "%s\t%s\t%s\n", epic.ID, epic.Status, epic.Title)
+}
+
+func printEpicDetail(out io.Writer, detail contract.EpicResponse) {
+	printEpicLine(out, detail.Epic)
+	fmt.Fprintf(out, "completion policy\t%s\n", detail.Epic.CompletionPolicy)
+	fmt.Fprintf(out, "children\t%d\n", len(detail.Children))
+	if strings.TrimSpace(detail.Epic.Body) != "" {
+		fmt.Fprintf(out, "\n%s\n", detail.Epic.Body)
+	}
+}
+
+func printContainerStart(out io.Writer, result coordinator.ContainerStartResult) {
+	for _, task := range result.Tasks {
+		fmt.Fprintf(out, "%s\t%s", task.TaskID, task.Status)
+		if task.RunID != "" {
+			fmt.Fprintf(out, "\t%s", task.RunID)
+		}
+		if task.Error != "" {
+			fmt.Fprintf(out, "\t%s", task.Error)
+		}
+		fmt.Fprintln(out)
+	}
+}
+
+func printWorkItemResponse(out io.Writer, response contract.WorkItemResponse, depth int) {
+	indent := strings.Repeat("  ", depth)
+	fmt.Fprintf(out, "%s%s\t%s\t%s\t%s\n", indent, response.Item.ID, response.Item.Kind, response.Item.State.Status, response.Item.Title)
+	for _, child := range response.Children {
+		printWorkItemResponse(out, child, depth+1)
+	}
+}
+
+func printWorkItemRelations(out io.Writer, itemID string, relations []coordinator.WorkItemRelation) {
+	if len(relations) == 0 {
+		fmt.Fprintf(out, "%s has no relations\n", itemID)
+		return
+	}
+	for _, relation := range relations {
+		fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\n",
+			relation.Source.ID, relation.Source.Kind, relation.Kind, relation.Target.ID, relation.Target.Kind)
 	}
 }
 

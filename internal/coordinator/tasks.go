@@ -47,7 +47,7 @@ const (
 
 // AllLifecycleStates enumerates every LifecycleState constant in declaration
 // order. It is the server's exhaustive lifecycle vocabulary: the task-relations
-// parity test (internal/web/task_relations_parity_test.go) iterates it to prove
+// parity test (internal/web/work_item_relations_parity_test.go) iterates it to prove
 // the client's verdict covers every state the server serializes, so a newly
 // added non-done state fails the build until the client allowlist catches up.
 // TestAllLifecycleStatesExhaustive (internal/coordinator) parses every
@@ -152,8 +152,9 @@ type CreateTaskInput struct {
 	RequiresHumanReview *bool
 	AutoMerge           *bool
 	FlowID              string
-	// FeatureID assigns the task to a feature at creation; the feature must
-	// exist and be open. Nil means no feature.
+	ParentItemID        string
+	// FeatureID is a compatibility spelling for ParentItemID when the parent is
+	// a feature. feature_id itself is a derived, read-only cache.
 	FeatureID          *string
 	CreatedBy          Actor
 	CreatedBySessionID *string
@@ -344,14 +345,50 @@ func (s *TaskService) CreateTaskWithDetails(ctx context.Context, input CreateTas
 		return Task{}, err
 	}
 
+	parentItemID := strings.TrimSpace(taskInput.ParentItemID)
 	if taskInput.FeatureID != nil {
-		if err := featureOpenForAssignmentTx(ctx, tx, *taskInput.FeatureID); err != nil {
+		featureID := strings.TrimSpace(*taskInput.FeatureID)
+		if err := featureOpenForAssignmentTx(ctx, tx, featureID); err != nil {
 			return Task{}, err
+		}
+		if parentItemID == "" {
+			parentItemID = featureID
+		}
+	}
+	if parentItemID != "" {
+		parentKind, err := workItemKindTx(ctx, tx, parentItemID)
+		if err != nil {
+			return Task{}, err
+		}
+		if parentKind != WorkItemEpic && parentKind != WorkItemFeature {
+			return Task{}, fmt.Errorf("%w: %s items cannot contain tasks", ErrWorkItemMoveConflict, parentKind)
+		}
+		open, err := workItemContainerOpenTx(ctx, tx, parentItemID, parentKind)
+		if err != nil {
+			return Task{}, err
+		}
+		if !open {
+			return Task{}, ErrWorkItemParentClosed
+		}
+		inheritedFeatureID, err := nearestFeatureFromParentTx(ctx, tx, parentItemID)
+		if err != nil {
+			return Task{}, err
+		}
+		if taskInput.FeatureID != nil && strings.TrimSpace(*taskInput.FeatureID) != inheritedFeatureID {
+			return Task{}, errors.New("task feature_id must match its nearest feature ancestor")
+		}
+		if inheritedFeatureID != "" {
+			taskInput.FeatureID = &inheritedFeatureID
+		} else {
+			taskInput.FeatureID = nil
 		}
 	}
 
 	now := s.now().UTC()
 	nowText := formatTime(now)
+	if err := insertWorkItem(ctx, tx, id, WorkItemTask, nowText); err != nil {
+		return Task{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO tasks (
 	id,
@@ -381,6 +418,13 @@ INSERT INTO tasks (
 		nowText,
 	); err != nil {
 		return Task{}, fmt.Errorf("insert task: %w", err)
+	}
+	if parentItemID != "" {
+		items := NewWorkItemService(s.db, s.projectID)
+		items.now = s.now
+		if err := items.linkTx(ctx, tx, parentItemID, id, RelationParentOf, taskInput.CreatedBy); err != nil {
+			return Task{}, err
+		}
 	}
 
 	for _, tagInput := range input.Tags {
@@ -417,6 +461,9 @@ VALUES (?, ?, ?, ?)`,
 		if err := linkTasksInTx(ctx, tx, sourceTaskID, targetTaskID, relationInput.Kind, defaultActor(relationInput.CreatedBy, taskInput.CreatedBy), nowText); err != nil {
 			return Task{}, err
 		}
+	}
+	if err := reconcileEpicAncestorsTx(ctx, tx, []string{id}, now); err != nil {
+		return Task{}, err
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -779,7 +826,19 @@ func (s *TaskService) EditTask(ctx context.Context, id string, input EditTaskInp
 		if err != nil {
 			return Task{}, err
 		}
-		current.FeatureID = featureID
+		parentID := ""
+		if featureID != nil {
+			parentID = *featureID
+		}
+		items := NewWorkItemService(s.db, s.projectID)
+		items.now = s.now
+		if err := items.Move(ctx, current.ID, parentID, ActorHuman); err != nil {
+			return Task{}, err
+		}
+		current, err = s.GetTask(ctx, id)
+		if err != nil {
+			return Task{}, err
+		}
 	}
 
 	if _, err := s.db.ExecContext(ctx, `
@@ -789,14 +848,12 @@ SET
 	body = ?,
 	priority = ?,
 	flow_id = ?,
-	feature_id = ?,
 	updated_at = ?
 WHERE id = ?`,
 		current.Title,
 		current.Body,
 		current.Priority,
 		sqlitex.NullableNonEmptyString(current.FlowID),
-		nullableStringValue(current.FeatureID),
 		formatTime(s.now().UTC()),
 		id,
 	); err != nil {
@@ -915,7 +972,7 @@ VALUES (?, ?, ?, ?)`,
 	return nil
 }
 
-func upsertTagInTx(ctx context.Context, tx *sql.Tx, input CreateTagInput, nowText string) (int64, error) {
+func upsertTagInTx(ctx context.Context, tx workItemRelationQuerier, input CreateTagInput, nowText string) (int64, error) {
 	input, err := normalizeCreateTagInput(input)
 	if err != nil {
 		return 0, err
@@ -977,7 +1034,7 @@ func (s *TaskService) BlockOnRebase(ctx context.Context, rebaseTaskID string, ta
 		if err != nil {
 			return err
 		}
-		cycle, err := relationPathExists(ctx, tx, RelationBlocks, taskID, rebaseTaskID)
+		cycle, err := workItemDependencyPathExists(ctx, tx, taskID, rebaseTaskID)
 		if err != nil {
 			tx.Rollback()
 			return err
@@ -987,7 +1044,7 @@ func (s *TaskService) BlockOnRebase(ctx context.Context, rebaseTaskID string, ta
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT OR IGNORE INTO task_relations (source_task_id, target_task_id, kind, created_by, created_at)
+INSERT OR IGNORE INTO work_item_relations (source_item_id, target_item_id, kind, created_by, created_at)
 VALUES (?, ?, ?, ?, ?)`,
 			rebaseTaskID, taskID, string(RelationBlocks), string(ActorSystem), nowText); err != nil {
 			tx.Rollback()
@@ -1009,6 +1066,9 @@ func (s *TaskService) LinkTasks(ctx context.Context, sourceTaskID, targetTaskID 
 	defer tx.Rollback()
 
 	if err := linkTasksInTx(ctx, tx, sourceTaskID, targetTaskID, kind, actor, formatTime(s.now().UTC())); err != nil {
+		return err
+	}
+	if err := reconcileEpicAncestorsTx(ctx, tx, []string{sourceTaskID, targetTaskID}, s.now().UTC()); err != nil {
 		return err
 	}
 
@@ -1034,6 +1094,15 @@ func linkTasksInTx(ctx context.Context, tx *sql.Tx, sourceTaskID, targetTaskID s
 	if err := validateActor(actor); err != nil {
 		return err
 	}
+	if err := taskExistsInTx(ctx, tx, sourceTaskID); err != nil {
+		if kind == RelationParentOf && errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("the selected parent cannot be used: task %s does not exist or is not accessible", sourceTaskID)
+		}
+		return fmt.Errorf("task relation references a task that does not exist: %s", sourceTaskID)
+	}
+	if err := taskExistsInTx(ctx, tx, targetTaskID); err != nil {
+		return fmt.Errorf("task relation references a task that does not exist: %s", targetTaskID)
+	}
 
 	if kind == RelationParentOf {
 		hasParent, err := taskHasParent(ctx, tx, targetTaskID)
@@ -1045,17 +1114,24 @@ func linkTasksInTx(ctx context.Context, tx *sql.Tx, sourceTaskID, targetTaskID s
 		}
 	}
 	if kind == RelationParentOf || kind == RelationBlocks {
-		cycle, err := relationPathExists(ctx, tx, kind, targetTaskID, sourceTaskID)
+		fromID, toID := sourceTaskID, targetTaskID
+		if kind == RelationParentOf {
+			fromID, toID = targetTaskID, sourceTaskID
+		}
+		cycle, err := workItemDependencyPathExists(ctx, tx, toID, fromID)
 		if err != nil {
 			return err
 		}
 		if cycle {
-			return fmt.Errorf("%s relation would create a cycle", kind)
+			return fmt.Errorf("%s relation would create a dependency cycle", kind)
 		}
+	}
+	if kind == RelationRelatedTo && targetTaskID < sourceTaskID {
+		sourceTaskID, targetTaskID = targetTaskID, sourceTaskID
 	}
 
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO task_relations (source_task_id, target_task_id, kind, created_by, created_at)
+INSERT INTO work_item_relations (source_item_id, target_item_id, kind, created_by, created_at)
 VALUES (?, ?, ?, ?, ?)`,
 		sourceTaskID,
 		targetTaskID,
@@ -1072,7 +1148,7 @@ VALUES (?, ?, ?, ?, ?)`,
 	return nil
 }
 
-// relationFKError translates a task_relations foreign-key failure into a
+// relationFKError translates a work_item_relations foreign-key failure into a
 // message a user can act on. The insert references a task id that does not
 // exist in this project's database (a stale or cross-project id), so instead
 // of surfacing SQLite's raw "FOREIGN KEY constraint failed" text we say which
@@ -1105,25 +1181,35 @@ func (s *TaskService) UnlinkTasks(ctx context.Context, sourceTaskID, targetTaskI
 	if err := validateRelationKind(kind); err != nil {
 		return err
 	}
+	if kind == RelationRelatedTo && targetTaskID < sourceTaskID {
+		sourceTaskID, targetTaskID = targetTaskID, sourceTaskID
+	}
 
-	if _, err := s.db.ExecContext(ctx, `
-DELETE FROM task_relations
-WHERE source_task_id = ? AND target_task_id = ? AND kind = ?`,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin unlink task transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = ?`,
 		sourceTaskID,
 		targetTaskID,
 		string(kind),
 	); err != nil {
 		return fmt.Errorf("unlink tasks: %w", err)
 	}
-
-	return nil
+	if err := reconcileEpicAncestorsTx(ctx, tx, []string{sourceTaskID, targetTaskID}, s.now().UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *TaskService) RelationsForTask(ctx context.Context, taskID string) ([]TaskRelation, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT
-	r.source_task_id,
-	r.target_task_id,
+	r.source_item_id,
+	r.target_item_id,
 	r.kind,
 	s.title,
 	t.title,
@@ -1133,11 +1219,11 @@ SELECT
 	s.updated_at,
 	r.created_by,
 	r.created_at
-FROM task_relations r
-JOIN tasks s ON s.id = r.source_task_id
-JOIN tasks t ON t.id = r.target_task_id
-WHERE r.source_task_id = ? OR r.target_task_id = ?
-ORDER BY r.created_at, r.source_task_id, r.target_task_id, r.kind`, taskID, taskID)
+FROM work_item_relations r
+JOIN tasks s ON s.id = r.source_item_id
+JOIN tasks t ON t.id = r.target_item_id
+WHERE r.source_item_id = ? OR r.target_item_id = ?
+ORDER BY r.created_at, r.source_item_id, r.target_item_id, r.kind`, taskID, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("list task relations: %w", err)
 	}
@@ -1189,8 +1275,8 @@ func (s *TaskService) RelationsForTasks(ctx context.Context, taskIDs []string) (
 
 	rows, err := s.db.QueryContext(ctx, `
 SELECT
-	r.source_task_id,
-	r.target_task_id,
+	r.source_item_id,
+	r.target_item_id,
 	r.kind,
 	s.title,
 	t.title,
@@ -1200,11 +1286,11 @@ SELECT
 	s.updated_at,
 	r.created_by,
 	r.created_at
-FROM task_relations r
-JOIN tasks s ON s.id = r.source_task_id
-JOIN tasks t ON t.id = r.target_task_id
-WHERE `+inPredicate("r.source_task_id", len(ids))+` OR `+inPredicate("r.target_task_id", len(ids))+`
-ORDER BY r.created_at, r.source_task_id, r.target_task_id, r.kind`, append(args, args...)...)
+FROM work_item_relations r
+JOIN tasks s ON s.id = r.source_item_id
+JOIN tasks t ON t.id = r.target_item_id
+WHERE `+inPredicate("r.source_item_id", len(ids))+` OR `+inPredicate("r.target_item_id", len(ids))+`
+ORDER BY r.created_at, r.source_item_id, r.target_item_id, r.kind`, append(args, args...)...)
 	if err != nil {
 		return nil, fmt.Errorf("list task relations: %w", err)
 	}
@@ -1408,10 +1494,10 @@ func (s *TaskService) taskIsBlocked(ctx context.Context, taskID string) (bool, e
 	var count int
 	if err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(*)
-FROM task_relations r
-JOIN tasks blocker ON blocker.id = r.source_task_id
+FROM work_item_relations r
+JOIN tasks blocker ON blocker.id = r.source_item_id
 	WHERE r.kind = ?
-		AND r.target_task_id = ?
+		AND r.target_item_id = ?
 		AND (blocker.lifecycle_state IS NULL OR blocker.lifecycle_state != ?)`,
 		string(RelationBlocks),
 		taskID,
@@ -1470,10 +1556,20 @@ SELECT
 	blocker.lifecycle_state,
 	blocker.done_resolution,
 	blocker.done_at
-FROM task_relations r
-JOIN tasks blocker ON blocker.id = r.source_task_id
+FROM work_item_relations r
+JOIN tasks blocker ON blocker.id = r.source_item_id
 	WHERE r.kind = ?
-		AND r.target_task_id = ?
+		AND r.target_item_id IN (
+			WITH RECURSIVE ancestors(id) AS (
+				VALUES (?)
+				UNION ALL
+				SELECT parent.source_item_id
+				FROM ancestors
+				JOIN work_item_relations parent
+					ON parent.target_item_id = ancestors.id AND parent.kind = 'parent_of'
+			)
+			SELECT id FROM ancestors
+		)
 		AND (blocker.lifecycle_state IS NULL OR blocker.lifecycle_state != ?)
 ORDER BY blocker.priority DESC, blocker.updated_at DESC, blocker.id`,
 		string(RelationBlocks),
@@ -1500,7 +1596,9 @@ ORDER BY blocker.priority DESC, blocker.updated_at DESC, blocker.id`,
 	return blockers, nil
 }
 
-func (s *TaskService) allocateTaskID(ctx context.Context, tx *sql.Tx) (string, error) {
+func (s *TaskService) allocateTaskID(ctx context.Context, tx interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) (string, error) {
 	var nextNumber int64
 	if err := tx.QueryRowContext(ctx, `
 UPDATE id_allocators
@@ -1672,8 +1770,8 @@ func taskHasParent(ctx context.Context, tx *sql.Tx, taskID string) (bool, error)
 	var count int
 	if err := tx.QueryRowContext(ctx, `
 SELECT COUNT(*)
-FROM task_relations
-WHERE target_task_id = ? AND kind = ?`, taskID, string(RelationParentOf)).Scan(&count); err != nil {
+FROM work_item_relations
+WHERE target_item_id = ? AND kind = ?`, taskID, string(RelationParentOf)).Scan(&count); err != nil {
 		return false, fmt.Errorf("check task parent: %w", err)
 	}
 
@@ -1684,15 +1782,15 @@ func relationPathExists(ctx context.Context, tx *sql.Tx, kind RelationKind, star
 	var exists int
 	if err := tx.QueryRowContext(ctx, `
 WITH RECURSIVE reachable(task_id) AS (
-	SELECT target_task_id
-	FROM task_relations
-	WHERE source_task_id = ? AND kind = ?
+	SELECT target_item_id
+	FROM work_item_relations
+	WHERE source_item_id = ? AND kind = ?
 
 	UNION
 
-	SELECT r.target_task_id
-	FROM task_relations r
-	JOIN reachable ON reachable.task_id = r.source_task_id
+	SELECT r.target_item_id
+	FROM work_item_relations r
+	JOIN reachable ON reachable.task_id = r.source_item_id
 	WHERE r.kind = ?
 )
 SELECT EXISTS(SELECT 1 FROM reachable WHERE task_id = ?)`,

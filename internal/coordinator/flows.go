@@ -392,7 +392,7 @@ SELECT
 	(SELECT COUNT(*)
 	 FROM workflow_artifacts artifact
 	 JOIN workflow_runs wr ON wr.id = artifact.workflow_run_id,
-	      json_each(artifact.payload_json, '$.tasks') task
+	      json_each(artifact.payload_json, '$.items') task
 	 WHERE artifact.kind = 'task_set'
 	   AND wr.state IN ('scheduled', 'running', 'waiting')
 	   AND trim(COALESCE(json_extract(task.value, '$.flow_id'), '')) = ?)`, id, id, id, id, id, id).Scan(&references); err != nil {

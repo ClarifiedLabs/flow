@@ -95,12 +95,16 @@ func (s *TaskService) ApplyReviewFollowUp(ctx context.Context, input ApplyReview
 	}
 
 	nowText := formatTime(s.now().UTC())
+	relatedSourceID, relatedTargetID := normalized.SourceTaskID, target.ID
+	if relatedTargetID < relatedSourceID {
+		relatedSourceID, relatedTargetID = relatedTargetID, relatedSourceID
+	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT OR IGNORE INTO task_relations (
-	source_task_id, target_task_id, kind, created_by, created_at
+INSERT OR IGNORE INTO work_item_relations (
+	source_item_id, target_item_id, kind, created_by, created_at
 ) VALUES (?, ?, ?, ?, ?)`,
-		normalized.SourceTaskID,
-		target.ID,
+		relatedSourceID,
+		relatedTargetID,
 		string(RelationRelatedTo),
 		string(ActorSystem),
 		nowText,
@@ -154,6 +158,9 @@ func (s *TaskService) createReviewFollowUpTaskInTx(ctx context.Context, tx *sql.
 		return Task{}, err
 	}
 	nowText := formatTime(s.now().UTC())
+	if err := insertWorkItem(ctx, tx, id, WorkItemTask, nowText); err != nil {
+		return Task{}, err
+	}
 	// Follow-up tasks inherit the source task's feature so fix work stays on
 	// the same feature branch.
 	var sourceFeatureID any

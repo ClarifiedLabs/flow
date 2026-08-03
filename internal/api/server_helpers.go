@@ -54,6 +54,7 @@ func createTaskInputForPrincipal(request createTaskRequest, principal coordinato
 			ScheduleState:      scheduleState,
 			TriageState:        triageState,
 			FlowID:             request.FlowID,
+			ParentItemID:       request.ParentItemID,
 			FeatureID:          request.FeatureID,
 			CreatedBy:          actor,
 			CreatedBySessionID: createdBySessionID,
@@ -361,6 +362,7 @@ type createTaskRequest struct {
 	Body               string            `json:"body"`
 	Priority           int               `json:"priority"`
 	FlowID             string            `json:"flow_id"`
+	ParentItemID       string            `json:"parent_item_id"`
 	FeatureID          *string           `json:"feature_id"`
 	ScheduleState      string            `json:"-"`
 	TriageState        string            `json:"-"`

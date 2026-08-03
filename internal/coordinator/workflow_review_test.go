@@ -61,7 +61,7 @@ func createPlanArtifact(t *testing.T, ctx context.Context, artifacts *WorkflowAr
 	t.Helper()
 	payload, err := json.Marshal(TaskSetManifest{
 		SchemaVersion: 1,
-		Tasks:         []TaskSetItem{{Key: "one", Title: title, Body: "do the thing"}},
+		Items:         []TaskSetItem{{Key: "one", Kind: WorkItemTask, Title: title, Body: "do the thing"}},
 	})
 	if err != nil {
 		t.Fatalf("encode manifest: %v", err)

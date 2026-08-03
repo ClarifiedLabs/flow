@@ -2055,7 +2055,7 @@ WHERE flow_id = ? AND kind = 'materialize_task_set'`, planning.ID); err != nil {
 	}
 	payload, err := json.Marshal(coordinator.TaskSetManifest{
 		SchemaVersion: 1,
-		Tasks:         []coordinator.TaskSetItem{{Key: "nested-plan", Title: "Nested plan", Body: "Plan the nested work.", FlowID: planning.ID}},
+		Items:         []coordinator.TaskSetItem{{Key: "nested-plan", Kind: coordinator.WorkItemTask, Title: "Nested plan", Body: "Plan the nested work.", FlowID: planning.ID}},
 	})
 	if err != nil {
 		t.Fatalf("marshal task set: %v", err)

@@ -99,6 +99,9 @@ func (s *projectServer) drainGitWrites() func() {
 type projectServer struct {
 	*Server
 	project           coordinator.Project
+	workItems         *coordinator.WorkItemService
+	epics             *coordinator.EpicService
+	containers        *coordinator.ContainerService
 	tasks             *coordinator.TaskService
 	features          *coordinator.FeatureService
 	checks            *coordinator.CheckService
@@ -132,6 +135,9 @@ func (s *Server) forBundle(bundle *ProjectBundle) *projectServer {
 	return &projectServer{
 		Server:            s,
 		project:           bundle.Project,
+		workItems:         bundle.WorkItems,
+		epics:             bundle.Epics,
+		containers:        bundle.Containers,
 		tasks:             bundle.Tasks,
 		features:          bundle.Features,
 		checks:            bundle.Checks,

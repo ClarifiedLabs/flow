@@ -112,8 +112,14 @@ Most users can stay in the web UI:
   Tasks assigned to a feature merge back into the feature branch instead of
   the base branch; the feature branch can be rebased onto the base branch on
   demand (agent-assisted on conflicts) and eventually landed as one squash
-  merge. The CLI mirrors the page: `flow feature create|list|show|edit|rebase|land|archive`
-  and `flow task create --feature FEATURE`.
+  merge. Features can nest: a child branches from, rebases onto, and lands into
+  its nearest parent feature. The CLI mirrors the page:
+  `flow feature create|list|show|edit|start|rebase|land|archive`.
+- **Epics** are first-class non-executable containers with automatic or manual
+  completion. Use `flow epic create|list|show|edit|start|complete|reopen|archive`
+  and `flow work-item tree|link|unlink|relations` to manage the unified
+  task/epic/feature hierarchy. `flow doctor work-items` validates registry,
+  hierarchy, blocker-cycle, feature-scope, and subtype consistency.
 
 Flow derives readable IDs from the project name: `--name "My Project"` creates
 project `p-my-project`, and its tasks are `t-my-project-0001`,

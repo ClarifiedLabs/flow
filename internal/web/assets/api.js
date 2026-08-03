@@ -153,6 +153,27 @@ export function featureHref(projectID, ref) {
     : `/ui/features/${encodeURIComponent(feature)}`;
 }
 
+export function epicsAPIBase(projectID) {
+  const id = String(projectID || "").trim();
+  if (!id) throw new Error("project id is required");
+  return `/v2/projects/${encodeURIComponent(id)}/epics`;
+}
+
+export function workItemsAPIBase(projectID) {
+  const id = String(projectID || "").trim();
+  if (!id) throw new Error("project id is required");
+  return `/v2/projects/${encodeURIComponent(id)}/work-items`;
+}
+
+export function epicHref(projectID, ref) {
+  const epic = String(ref || "").trim();
+  const id = String(projectID || "").trim();
+  if (!epic) return "#";
+  return id
+    ? `/ui/projects/${encodeURIComponent(id)}/epics/${encodeURIComponent(epic)}`
+    : `/ui/epics/${encodeURIComponent(epic)}`;
+}
+
 export function attachmentHref(projectID, taskID, attachmentID) {
   return `${API_PREFIX}${taskAPIBase(projectID)}/${encodeURIComponent(taskID)}/attachments/${encodeURIComponent(attachmentID)}`;
 }

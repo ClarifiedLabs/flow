@@ -203,6 +203,133 @@ func (c *Client) ArchiveFeature(id string) (contract.FeatureResponse, error) {
 	return response, nil
 }
 
+func (c *Client) StartFeature(id string) (coordinator.ContainerStartResult, error) {
+	var response coordinator.ContainerStartResult
+	if err := c.do(http.MethodPost, c.projectPath("/features/"+url.PathEscape(id)+"/start"), map[string]any{}, nil, &response); err != nil {
+		return coordinator.ContainerStartResult{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) CreateEpic(input contract.CreateEpicRequest) (contract.EpicResponse, error) {
+	var response contract.EpicResponse
+	if err := c.do(http.MethodPost, c.projectPath("/epics"), input, nil, &response); err != nil {
+		return contract.EpicResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) ListEpics(status string) ([]contract.EpicResponse, error) {
+	query := url.Values{}
+	if strings.TrimSpace(status) != "" {
+		query.Set("status", status)
+	}
+	var response contract.EpicsResponse
+	if err := c.do(http.MethodGet, c.projectPath("/epics"), nil, query, &response); err != nil {
+		return nil, err
+	}
+	return response.Epics, nil
+}
+
+func (c *Client) GetEpic(id string) (contract.EpicResponse, error) {
+	var response contract.EpicResponse
+	if err := c.do(http.MethodGet, c.projectPath("/epics/"+url.PathEscape(id)), nil, nil, &response); err != nil {
+		return contract.EpicResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) UpdateEpic(id string, input contract.EditEpicRequest) (contract.EpicResponse, error) {
+	var response contract.EpicResponse
+	if err := c.do(http.MethodPatch, c.projectPath("/epics/"+url.PathEscape(id)), input, nil, &response); err != nil {
+		return contract.EpicResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) epicAction(id, action string) (contract.EpicResponse, error) {
+	var response contract.EpicResponse
+	if err := c.do(http.MethodPost, c.projectPath("/epics/"+url.PathEscape(id)+"/"+action), map[string]any{}, nil, &response); err != nil {
+		return contract.EpicResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) StartEpic(id string) (coordinator.ContainerStartResult, error) {
+	var response coordinator.ContainerStartResult
+	if err := c.do(http.MethodPost, c.projectPath("/epics/"+url.PathEscape(id)+"/start"), map[string]any{}, nil, &response); err != nil {
+		return coordinator.ContainerStartResult{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) CompleteEpic(id string) (contract.EpicResponse, error) {
+	return c.epicAction(id, "complete")
+}
+
+func (c *Client) ReopenEpic(id string) (contract.EpicResponse, error) {
+	return c.epicAction(id, "reopen")
+}
+
+func (c *Client) ArchiveEpic(id string) (contract.EpicResponse, error) {
+	return c.epicAction(id, "archive")
+}
+
+func (c *Client) ListWorkItems(query url.Values) ([]coordinator.WorkItemSummary, error) {
+	var response contract.WorkItemsResponse
+	if err := c.do(http.MethodGet, c.projectPath("/work-items"), nil, query, &response); err != nil {
+		return nil, err
+	}
+	return response.Items, nil
+}
+
+func (c *Client) DoctorWorkItems() (coordinator.WorkItemConsistencyReport, error) {
+	var report coordinator.WorkItemConsistencyReport
+	err := c.do(http.MethodGet, c.projectPath("/work-items/doctor"), nil, nil, &report)
+	return report, err
+}
+
+func (c *Client) GetWorkItem(id string, tree bool) (contract.WorkItemResponse, error) {
+	path := c.projectPath("/work-items/" + url.PathEscape(id))
+	if tree {
+		path += "/tree"
+	}
+	var response contract.WorkItemResponse
+	if err := c.do(http.MethodGet, path, nil, nil, &response); err != nil {
+		return contract.WorkItemResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) GetWorkItemRelations(id string) ([]coordinator.WorkItemRelation, error) {
+	var response struct {
+		Relations []coordinator.WorkItemRelation `json:"relations"`
+	}
+	if err := c.do(http.MethodGet, c.projectPath("/work-items/"+url.PathEscape(id)+"/relations"), nil, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Relations, nil
+}
+
+func (c *Client) LinkWorkItems(sourceID string, kind coordinator.RelationKind, targetID string) error {
+	request := contract.WorkItemRelationRequest{SourceItemID: sourceID, TargetItemID: targetID, Kind: string(kind)}
+	return c.do(http.MethodPost, c.projectPath("/work-items/"+url.PathEscape(sourceID)+"/relations"), request, nil, nil)
+}
+
+func (c *Client) UnlinkWorkItems(sourceID string, kind coordinator.RelationKind, targetID string) error {
+	request := contract.WorkItemRelationRequest{SourceItemID: sourceID, TargetItemID: targetID, Kind: string(kind)}
+	return c.do(http.MethodDelete, c.projectPath("/work-items/"+url.PathEscape(sourceID)+"/relations"), request, nil, nil)
+}
+
+func (c *Client) MoveWorkItem(id, parentID string) (contract.WorkItemResponse, error) {
+	var response contract.WorkItemResponse
+	request := contract.MoveWorkItemRequest{ParentItemID: parentID}
+	if err := c.do(http.MethodPatch, c.projectPath("/work-items/"+url.PathEscape(id)+"/parent"), request, nil, &response); err != nil {
+		return contract.WorkItemResponse{}, err
+	}
+	return response, nil
+}
+
 // ListAgentDefs returns the project's effective agent definition catalog,
 // including inherited global definitions not overridden by name.
 func (c *Client) ListAgentDefs() ([]coordinator.AgentDef, error) {
@@ -1737,11 +1864,12 @@ func durationSeconds(duration time.Duration) int {
 }
 
 type CreateTaskInput struct {
-	Title     string `json:"title"`
-	Body      string `json:"body"`
-	Priority  int    `json:"priority"`
-	FlowID    string `json:"flow_id,omitempty"`
-	FeatureID string `json:"feature_id,omitempty"`
+	Title        string `json:"title"`
+	Body         string `json:"body"`
+	Priority     int    `json:"priority"`
+	FlowID       string `json:"flow_id,omitempty"`
+	FeatureID    string `json:"feature_id,omitempty"`
+	ParentItemID string `json:"parent_item_id,omitempty"`
 }
 
 type EditTaskInput struct {
@@ -1753,8 +1881,9 @@ type EditTaskInput struct {
 }
 
 type CreateFeatureInput struct {
-	Title string `json:"title"`
-	Body  string `json:"body"`
+	Title        string `json:"title"`
+	Body         string `json:"body"`
+	ParentItemID string `json:"parent_item_id,omitempty"`
 }
 
 type UpdateFeatureInput struct {

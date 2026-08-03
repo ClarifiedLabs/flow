@@ -21,6 +21,7 @@ import { renderTaskRoute } from "./task-route.js";
 import { renderChangeRoute } from "./change-route.js";
 import { renderEpicRoute } from "./epic-route.js";
 import { renderFeaturesRoute, renderFeatureRoute } from "./features-route.js";
+import { renderWorkItemsRoute } from "./work-items-route.js";
 import { ACTION_SETTLE, applyBusyState, failureMessage, handleAction, pendingStatus } from "./actions.js";
 import { handleFormSubmit } from "./forms.js";
 import { renderNewTaskView, renderTaskFormView, bindTaskFlowControlsView } from "./task-view.js";
@@ -48,6 +49,8 @@ export * from "./task.js";
 export * from "./poller.js";
 export * from "./flows-view.js";
 export * from "./tasks-view.js";
+export * from "./work-items-route.js";
+export * from "./elements/work-items.js";
 export * from "./workflow-graph.js";
 
 // Client-side route table consumed by load(). Each entry's match(path) returns a
@@ -56,6 +59,28 @@ export * from "./workflow-graph.js";
 // the catch-all last. render() receives the app instance, the load context and
 // the matched params.
 const ROUTES = [
+  {
+    match: (p) => {
+      const m = p.match(/^\/ui\/projects\/([^/]+)\/work-items$/);
+      return m && { project: decodeURIComponent(m[1]) };
+    },
+    render: (app, ctx, p) => renderWorkItemsRoute(app, ctx, p.project),
+  },
+  { match: (p) => p === "/ui/work-items", render: (app, ctx) => renderWorkItemsRoute(app, ctx, "") },
+  {
+    match: (p) => {
+      const m = p.match(/^\/ui\/projects\/([^/]+)\/epics\/([^/]+)$/);
+      return m && { project: decodeURIComponent(m[1]), epic: decodeURIComponent(m[2]) };
+    },
+    render: (app, ctx, p) => renderEpicRoute(app, p.epic, ctx, p.project),
+  },
+  {
+    match: (p) => {
+      const m = p.match(/^\/ui\/epics\/([^/]+)$/);
+      return m && { epic: decodeURIComponent(m[1]) };
+    },
+    render: (app, ctx, p) => renderEpicRoute(app, p.epic, ctx, ""),
+  },
   {
     match: (p) => {
       const m = p.match(/^\/ui\/projects\/([^/]+)\/features\/([^/]+)$/);
@@ -92,13 +117,6 @@ const ROUTES = [
       return m && { project: decodeURIComponent(m[1]), task: decodeURIComponent(m[2]) };
     },
     render: (app, ctx, p) => renderTaskRoute(app, p.task, ctx, p.project),
-  },
-  {
-    match: (p) => {
-      const m = p.match(/^\/ui\/tasks\/([^/]+)\/epic$/);
-      return m && { task: decodeURIComponent(m[1]) };
-    },
-    render: (app, ctx, p) => renderEpicRoute(app, p.task, ctx),
   },
   { match: (p) => p.startsWith("/ui/changes/") && { id: p.split("/").pop() }, render: (app, ctx, p) => renderChangeRoute(app, p.id, ctx) },
   { match: (p) => p === "/ui/console", render: (app, ctx) => app.renderConsole(ctx) },

@@ -210,23 +210,44 @@ The coordinator drains those events into SQLite and uses them to update change
 heads, stale checks, and review-thread trailer claims. `flow reconcile` remains a
 manual recovery path when git and SQLite drift.
 
-## Features
+## Work items, epics, and features
 
-A **feature** is a project-owned task group with its own long-lived exchange
-branch `feature/f-<project-key>-<number>` (migration `0005_features.sql`; code in
-`internal/coordinator/features.go`). The nullable `tasks.feature_id` column
-records membership; it is orthogonal to `task_relations` and tags. A task's
-feature can change only until the task has a change row or is in progress, so a
-change's base never moves mid-flight. Session-created child tasks and
-planner-materialized tasks inherit their source task's feature.
+Tasks, epics, and features share a project-local identity in `work_items` and a
+single typed graph in `work_item_relations`. Subtype tables own their state and
+metadata: tasks are executable, epics are non-executable aggregate containers,
+and features are non-executable containers that own Git branches. A `parent_of`
+edge gives an item at most one organizational parent; `blocks` and `related_to`
+may connect any work-item kinds. Blockers attached to a container are effective
+for all of its descendants.
+
+An epic with the `all_children` policy completes once it has at least one direct
+child, every direct child is terminal, and it has no unresolved effective
+blocker. Reopening a child reopens automatically completed ancestors. Manual
+epics require an explicit completion and are never silently reopened. Starting
+an epic or feature schedules all of its unscheduled descendant tasks; blocked
+tasks are scheduled and wait at the workflow dependency gate.
+
+A **feature** has a long-lived exchange branch
+`feature/f-<project-key>-<number>` (schema in `0005_features.sql`; code in
+`internal/coordinator/features.go`). `tasks.feature_id` is a validated cache of
+the nearest feature ancestor, used by existing branch-aware task and merge
+queries. Parent mutations refresh that cache transactionally and are rejected
+if they would change the base of a task with workflow or Git state.
 
 Feature tasks treat the feature branch as their protected base: they branch off
 its tip and (squash-)merge back into it via the same base-generic
 `MergeService` used for the project base branch. A task merged into its feature
 branch still resolves `merged`; landing is a separate event.
 
+Nested features persist their integration target at creation. A root feature is
+created from the project base branch; a nested feature is created from the
+nearest parent feature tip, rebases onto that branch, and lands back into it.
+The recorded target is immutable, including when a feature is organized below
+an intervening epic. Parent feature operations require nested descendants to be
+landed or archived first.
+
 `POST /v2/projects/{id}/features/{feature_id}/rebase` rebases the feature
-branch onto the project's base branch. A clean rebase updates the shared ref
+branch onto its recorded integration target. A clean rebase updates the shared ref
 immediately; a conflicted rebase creates a system-owned **rebase task** assigned
 to the feature that runs the built-in `feature-rebase` flow (agent → automated
 checks → verifier → human gate → trusted `finalize_rebase` node). The agent
@@ -251,7 +272,7 @@ bundled `flow-rebase-author` and `flow-rebase-verifier` skills carry the role
 instructions; the verifier proves the delta between the old feature tip and the
 rebased head is exactly the base branch's incoming changes.
 
-`.../land` squash-merges the feature branch into the base branch and marks the
+`.../land` squash-merges the feature branch into its integration target and marks the
 feature `landed`, healing on a no-op after a crash between the ref update and
 the row update. `.../archive` marks the feature `archived`; the branch is
 retained for audit.

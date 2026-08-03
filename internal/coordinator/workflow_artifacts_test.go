@@ -37,8 +37,9 @@ func TestDecodeTaskSetManifestRequiresBody(t *testing.T) {
 	const body = "\n## Scope\n\nImplement the body-only task contract.\n\n- Preserve Markdown.\n"
 	manifest, err := DecodeTaskSetManifest([]byte(`{
 		"schema_version": 1,
-		"tasks": [{
+		"items": [{
 			"key": "body-contract",
+			"kind": "task",
 			"title": "Body contract",
 			"body": "\n## Scope\n\nImplement the body-only task contract.\n\n- Preserve Markdown.\n"
 		}]
@@ -46,8 +47,8 @@ func TestDecodeTaskSetManifestRequiresBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode valid manifest: %v", err)
 	}
-	if len(manifest.Tasks) != 1 || manifest.Tasks[0].Body != body {
-		t.Fatalf("decoded tasks = %+v, want preserved body %q", manifest.Tasks, body)
+	if len(manifest.Items) != 1 || manifest.Items[0].Body != body {
+		t.Fatalf("decoded items = %+v, want preserved body %q", manifest.Items, body)
 	}
 
 	for _, test := range []struct {
@@ -56,11 +57,11 @@ func TestDecodeTaskSetManifestRequiresBody(t *testing.T) {
 	}{
 		{
 			name: "missing",
-			raw:  `{"schema_version":1,"tasks":[{"key":"missing-body","title":"Missing body"}]}`,
+			raw:  `{"schema_version":1,"items":[{"key":"missing-body","kind":"task","title":"Missing body"}]}`,
 		},
 		{
 			name: "whitespace",
-			raw:  `{"schema_version":1,"tasks":[{"key":"blank-body","title":"Blank body","body":" \n\t "}]}`,
+			raw:  `{"schema_version":1,"items":[{"key":"blank-body","kind":"task","title":"Blank body","body":" \n\t "}]}`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -90,17 +91,17 @@ func TestValidateTaskSetWorkflowSelectionAllowsExplicitDefaultWithoutOverrides(t
 	coding, _ := flows.GetByName(ctx, "coding")
 	planning, _ := flows.GetByName(ctx, "planning")
 
-	manifest := TaskSetManifest{Tasks: []TaskSetItem{{Key: "explicit-default", FlowID: coding.ID}}}
+	manifest := TaskSetManifest{Items: []TaskSetItem{{Key: "explicit-default", Kind: WorkItemTask, FlowID: coding.ID}}}
 	config := MaterializeTaskSetNodeConfig{DefaultChildFlowID: coding.ID, AllowChildFlowOverride: false, MaxItems: 25}
 	if err := validateTaskSetWorkflowSelectionTx(ctx, store.DB(), manifest, config); err != nil {
 		t.Fatalf("validate explicit default: %v", err)
 	}
-	manifest.Tasks[0] = TaskSetItem{Key: "planning-override", FlowID: planning.ID}
+	manifest.Items[0] = TaskSetItem{Key: "planning-override", Kind: WorkItemTask, FlowID: planning.ID}
 	if err := validateTaskSetWorkflowSelectionTx(ctx, store.DB(), manifest, config); err == nil || !strings.Contains(err.Error(), "may not override default child flow") {
 		t.Fatalf("validate disabled planning override error = %v, want override rejection", err)
 	}
 	config.DefaultChildFlowID = planning.ID
-	manifest.Tasks[0] = TaskSetItem{Key: "planning-default"}
+	manifest.Items[0] = TaskSetItem{Key: "planning-default", Kind: WorkItemTask}
 	if err := validateTaskSetWorkflowSelectionTx(ctx, store.DB(), manifest, config); err != nil {
 		t.Fatalf("validate planning default: %v", err)
 	}
@@ -186,16 +187,16 @@ INSERT INTO workflow_node_runs (
 	const generatedBody = "\n## Scope and requirements\n\nImplement the generated task.\n\n- Keep this Markdown unchanged.\n"
 	payload, err := json.Marshal(TaskSetManifest{
 		SchemaVersion: 1,
-		Tasks: []TaskSetItem{
+		Items: []TaskSetItem{
 			{
-				Key:      "generated-task",
+				Key: "generated-task", Kind: WorkItemTask,
 				Title:    "Generated task",
 				Body:     generatedBody,
 				Priority: 7,
 				TagSlugs: []string{"generated"},
 			},
 			{
-				Key:    "narrower-plan",
+				Key: "narrower-plan", Kind: WorkItemTask,
 				Title:  "Plan the unresolved architecture",
 				Body:   "Decide the unresolved architecture and produce a narrower reviewed task graph.",
 				FlowID: planning.ID,
@@ -224,7 +225,7 @@ INSERT INTO workflow_node_runs (
 
 	invalidPayload, err := json.Marshal(TaskSetManifest{
 		SchemaVersion: 1,
-		Tasks:         []TaskSetItem{{Key: "unknown-flow", Title: "Unknown flow", Body: "This must fail before review.", FlowID: "fl-unknown"}},
+		Items:         []TaskSetItem{{Key: "unknown-flow", Kind: WorkItemTask, Title: "Unknown flow", Body: "This must fail before review.", FlowID: "fl-unknown"}},
 	})
 	if err != nil {
 		t.Fatalf("marshal invalid task-set payload: %v", err)
@@ -248,8 +249,9 @@ INSERT INTO workflow_node_runs (
 	// validation saw.
 	specializedPayload := []byte(fmt.Sprintf(`{
 		"schema_version": 1,
-		"TASKS": [{
+		"ITEMS": [{
 			"key": "specialized",
+			"kind": "task",
 			"title": "Specialized work",
 			"body": "Run the specialized workflow.",
 			"FLOW_ID": %q
@@ -278,7 +280,7 @@ INSERT INTO workflow_node_runs (
 	}
 	concurrentPayload, err := json.Marshal(TaskSetManifest{
 		SchemaVersion: 1,
-		Tasks:         []TaskSetItem{{Key: "concurrent", Title: "Concurrent work", Body: "Run concurrently selected work.", FlowID: concurrent.ID}},
+		Items:         []TaskSetItem{{Key: "concurrent", Kind: WorkItemTask, Title: "Concurrent work", Body: "Run concurrently selected work.", FlowID: concurrent.ID}},
 	})
 	if err != nil {
 		t.Fatalf("marshal concurrent task set: %v", err)
@@ -356,12 +358,14 @@ INSERT INTO workflow_node_runs (
 		t.Fatalf("nested planning source task = %v, want %s", planned.SourceTaskID, source.ID)
 	}
 
-	relations, err := tasks.RelationsForTask(ctx, generated.ID)
-	if err != nil {
-		t.Fatalf("list generated task relations: %v", err)
+	var parentID string
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT source_item_id FROM work_item_relations
+WHERE target_item_id = ? AND kind = 'parent_of'`, generated.ID).Scan(&parentID); err != nil {
+		t.Fatalf("load generated task parent: %v", err)
 	}
-	if len(relations) != 1 || relations[0].SourceTaskID != source.ID || relations[0].TargetTaskID != generated.ID || relations[0].Kind != RelationParentOf {
-		t.Fatalf("generated task relations = %+v", relations)
+	if parentID != result.RootEpicID {
+		t.Fatalf("generated task parent = %q, want root epic %q", parentID, result.RootEpicID)
 	}
 	tags, err := tasks.TagsForTask(ctx, generated.ID)
 	if err != nil {

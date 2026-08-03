@@ -171,7 +171,7 @@ func submitPlanArtifact(t *testing.T, fixture testFixture, taskID, nodeRunID, cl
 	t.Helper()
 	payload, err := json.Marshal(coordinator.TaskSetManifest{
 		SchemaVersion: 1,
-		Tasks:         []coordinator.TaskSetItem{{Key: "one", Title: title, Body: "do the thing"}},
+		Items:         []coordinator.TaskSetItem{{Key: "one", Kind: coordinator.WorkItemTask, Title: title, Body: "do the thing"}},
 	})
 	if err != nil {
 		t.Fatalf("encode manifest: %v", err)

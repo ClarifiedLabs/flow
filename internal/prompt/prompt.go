@@ -215,9 +215,14 @@ func taskSetWorkflowInstructions(contract TaskSetWorkflowContract) []string {
 		}
 	}
 	lines := []string{
-		fmt.Sprintf("Maximum generated tasks: %d", contract.MaxItems),
+		"Task-set schema v1 uses one mixed work-item graph:",
+		`{"schema_version":1,"items":[{"key":"stable-key","kind":"task|epic|feature","parent_key":"optional-container-key","title":"...","body":"...","priority":0,"tag_slugs":[],"flow_id":"optional-task-flow","completion_policy":"all_children|manual"}],"dependencies":[{"blocker":"item-key","blocked":"item-key"}]}`,
+		"Every item needs a unique stable key, kind, title, and non-empty body. Only epic and feature items may be parents.",
+		"flow_id and tag_slugs apply only to tasks; completion_policy applies only to epics; feature priority must be zero.",
+		"Dependencies may cross kinds. The combined containment and dependency graph must be acyclic.",
+		fmt.Sprintf("Maximum generated items: %d", contract.MaxItems),
 		fmt.Sprintf("Default workflow: %s (%s)", defaultName, valueOrUnknown(contract.DefaultChildFlowID)),
-		"Omit flow_id to use the default workflow.",
+		"Omit flow_id on task items to use the default workflow.",
 	}
 	if contract.AllowChildFlowOverride {
 		lines = append(lines,
@@ -243,7 +248,7 @@ func taskSetWorkflowInstructions(contract TaskSetWorkflowContract) []string {
 			"The source task's workflow is neither automatically correct nor automatically forbidden. Do not copy it as a fallback; choose an advertised workflow based on the child deliverable.",
 		)
 	} else {
-		lines = append(lines, "Per-task workflow overrides are not allowed. Omit flow_id from every task.")
+		lines = append(lines, "Per-task workflow overrides are not allowed. Omit flow_id from every task item.")
 	}
 	return lines
 }

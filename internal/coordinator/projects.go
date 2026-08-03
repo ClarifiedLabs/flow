@@ -153,6 +153,40 @@ func ProjectIDFromFeatureID(featureID string) (string, bool) {
 	return projectID, true
 }
 
+// ProjectIDFromWorkItemID returns the project encoded in a canonical task,
+// epic, or feature ID.
+func ProjectIDFromWorkItemID(itemID string) (string, bool) {
+	itemID = strings.TrimSpace(itemID)
+	if strings.HasPrefix(itemID, "t-") {
+		return ProjectIDFromTaskID(itemID)
+	}
+	if strings.HasPrefix(itemID, "f-") {
+		return ProjectIDFromFeatureID(itemID)
+	}
+	if !strings.HasPrefix(itemID, "e-") {
+		return "", false
+	}
+	rest := strings.TrimPrefix(itemID, "e-")
+	separator := strings.LastIndexByte(rest, '-')
+	if separator <= 0 {
+		return "", false
+	}
+	key, sequence := rest[:separator], rest[separator+1:]
+	if len(sequence) < 4 {
+		return "", false
+	}
+	for _, r := range sequence {
+		if r < '0' || r > '9' {
+			return "", false
+		}
+	}
+	projectID := "p-" + key
+	if _, err := projectKeyFromID(projectID); err != nil {
+		return "", false
+	}
+	return projectID, true
+}
+
 // ProjectService manages the projects registry in the coordinator's global
 // database.
 type ProjectService struct {

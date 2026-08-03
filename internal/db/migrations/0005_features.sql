@@ -5,18 +5,47 @@
 -- the finalize node's compare-and-swap record.
 
 CREATE TABLE features (
-	id TEXT PRIMARY KEY,
+	id TEXT PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE,
 	title TEXT NOT NULL CHECK (length(trim(title)) > 0),
 	-- title_norm keeps feature titles unique per project, case-insensitively.
 	title_norm TEXT GENERATED ALWAYS AS (lower(trim(title))) VIRTUAL UNIQUE,
 	body TEXT NOT NULL DEFAULT '',
 	branch TEXT NOT NULL UNIQUE,
 	status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'landed', 'archived')),
+	integration_feature_id TEXT REFERENCES features(id) ON DELETE RESTRICT,
+	created_from_sha TEXT NOT NULL DEFAULT '',
 	created_by TEXT NOT NULL CHECK (created_by IN ('human', 'agent', 'system')),
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
 	landed_at TEXT,
-	land_sha TEXT NOT NULL DEFAULT ''
+	land_sha TEXT NOT NULL DEFAULT '',
+	land_target_feature_id TEXT REFERENCES features(id) ON DELETE RESTRICT,
+	land_target_branch TEXT NOT NULL DEFAULT '',
+	land_target_sha TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TRIGGER features_require_feature_work_item
+BEFORE INSERT ON features
+WHEN COALESCE((SELECT kind FROM work_items WHERE id = NEW.id), '') != 'feature'
+BEGIN
+	SELECT RAISE(ABORT, 'feature requires matching feature work item');
+END;
+
+CREATE TABLE feature_creation_intents (
+	id TEXT PRIMARY KEY,
+	operation_key TEXT NOT NULL UNIQUE,
+	parent_item_id TEXT REFERENCES work_items(id) ON DELETE RESTRICT,
+	integration_feature_id TEXT REFERENCES features(id) ON DELETE RESTRICT,
+	title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+	body TEXT NOT NULL DEFAULT '',
+	branch TEXT NOT NULL UNIQUE,
+	target_branch TEXT NOT NULL,
+	target_sha TEXT NOT NULL,
+	created_by TEXT NOT NULL CHECK (created_by IN ('human', 'agent', 'system')),
+	state TEXT NOT NULL DEFAULT 'prepared' CHECK (state IN ('prepared', 'ref_created', 'completed')),
+	last_error TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
 );
 
 -- task_id is NULL for clean instant rebases, which never create a system
@@ -29,6 +58,7 @@ CREATE TABLE feature_rebases (
 	old_tip_sha TEXT NOT NULL,
 	target_base TEXT NOT NULL,
 	target_base_sha TEXT NOT NULL,
+	target_feature_id TEXT REFERENCES features(id) ON DELETE RESTRICT,
 	new_tip_sha TEXT NOT NULL DEFAULT '',
 	state TEXT NOT NULL CHECK (state IN ('running', 'finalized', 'stale', 'failed', 'cancelled')),
 	created_at TEXT NOT NULL,

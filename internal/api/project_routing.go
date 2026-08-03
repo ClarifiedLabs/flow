@@ -299,6 +299,12 @@ func (s *Server) handleProjectScopedPath(w http.ResponseWriter, r *http.Request,
 	case sub == "features" || strings.HasPrefix(sub, "features/"):
 		ps.handleFeaturesPath(w, requestWithPath(r, "/v2/"+sub), principal)
 		return
+	case sub == "epics" || strings.HasPrefix(sub, "epics/"):
+		ps.handleEpicsPath(w, requestWithPath(r, "/v2/"+sub), principal)
+		return
+	case sub == "work-items" || strings.HasPrefix(sub, "work-items/"):
+		ps.handleWorkItemsPath(w, requestWithPath(r, "/v2/"+sub), principal)
+		return
 	case sub == "flows" || strings.HasPrefix(sub, "flows/"):
 		ps.handleFlowsPath(w, requestWithPath(r, "/v2/"+sub), principal)
 	case sub == "board":

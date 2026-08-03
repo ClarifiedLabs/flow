@@ -16,7 +16,7 @@
 // repaint re-applies disabled/aria-busy/is-busy and the status-line message to
 // whatever replacement control it swapped in.
 
-import { apiDelete, apiGet, apiPatch, apiPost, featuresAPIBase, taskAPIBase, taskConsoleAPIPath } from "./api.js";
+import { apiDelete, apiGet, apiPatch, apiPost, epicsAPIBase, featuresAPIBase, taskAPIBase, taskConsoleAPIPath } from "./api.js";
 import { releaseConsoleView, startConsoleView } from "./console-view.js";
 import { parseWaitDetails } from "./task-model.js";
 
@@ -42,8 +42,8 @@ export const ACTIONS = {
   },
 
   // Feature actions mutate the shared feature branch: rebase moves it onto
-  // the base tip (a conflict creates a rebase task that blocks the feature's
-  // other tasks), land squash-merges it into the base, archive closes the
+  // the integration target (a conflict creates a rebase task that blocks the
+  // feature's other tasks), land squash-merges it into that target, archive closes the
   // feature without landing. All three invalidate the features cache.
   async featureRebase(app, element, dataset) {
     const result = await apiPost(
@@ -60,7 +60,7 @@ export const ACTIONS = {
   },
 
   async featureLand(app, element, dataset) {
-    if (!window.confirm("Squash-merge the feature branch into the base branch and mark the feature landed?")) return CANCELLED;
+    if (!window.confirm("Squash-merge the feature branch into its integration target and mark the feature landed?")) return CANCELLED;
     await apiPost(
       `${featuresAPIBase(dataset.project)}/${encodeURIComponent(dataset.featureLand)}/land`, {},
     );
@@ -77,6 +77,37 @@ export const ACTIONS = {
     app.featuresByProject?.delete(dataset.project);
     await app.refresh();
     return "Feature archived";
+  },
+
+  async featureStart(app, element, dataset) {
+    await apiPost(`${featuresAPIBase(dataset.project)}/${encodeURIComponent(dataset.featureStart)}/start`, {});
+    await app.refresh();
+    return "Feature tasks scheduled";
+  },
+
+  async epicStart(app, element, dataset) {
+    await apiPost(`${epicsAPIBase(dataset.project)}/${encodeURIComponent(dataset.epicStart)}/start`, {});
+    await app.refresh();
+    return "Epic tasks scheduled";
+  },
+
+  async epicComplete(app, element, dataset) {
+    await apiPost(`${epicsAPIBase(dataset.project)}/${encodeURIComponent(dataset.epicComplete)}/complete`, {});
+    await app.refresh();
+    return "Epic completed";
+  },
+
+  async epicReopen(app, element, dataset) {
+    await apiPost(`${epicsAPIBase(dataset.project)}/${encodeURIComponent(dataset.epicReopen)}/reopen`, {});
+    await app.refresh();
+    return "Epic reopened";
+  },
+
+  async epicArchive(app, element, dataset) {
+    if (!window.confirm("Archive this epic?")) return CANCELLED;
+    await apiPost(`${epicsAPIBase(dataset.project)}/${encodeURIComponent(dataset.epicArchive)}/archive`, {});
+    await app.refresh();
+    return "Epic archived";
   },
 
   async workflowReset(app, element, dataset) {

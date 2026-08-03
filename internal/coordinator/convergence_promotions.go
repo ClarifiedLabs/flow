@@ -227,9 +227,6 @@ SELECT
 	if err != nil {
 		return convergencePromotion{}, err
 	}
-	if source.FeatureID != nil {
-		return convergencePromotion{}, fmt.Errorf("%w: task is already assigned to a feature", ErrWorkflowConflict)
-	}
 	// Feature and planning ids are allocated and persisted in the same
 	// transaction as the durable intent, so a failed or retried request can
 	// never mint different ids for the same task.
@@ -274,6 +271,12 @@ SELECT
 	}
 	now := e.runs.now().UTC()
 	nowText := formatTime(now)
+	if err := insertWorkItem(ctx, tx, featureID, WorkItemFeature, nowText); err != nil {
+		return convergencePromotion{}, err
+	}
+	if err := insertWorkItem(ctx, tx, planningTaskID, WorkItemTask, nowText); err != nil {
+		return convergencePromotion{}, err
+	}
 	// The feature and planning task rows are inserted with the durable intent so
 	// the promotion's foreign keys resolve immediately; the planner task is
 	// created in the open state and the feature as open. Neither is visible to
@@ -281,9 +284,11 @@ SELECT
 	// exact same rows are reused by every retry.
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO features (
-	id, title, body, branch, status, created_by, created_at, updated_at
-) VALUES (?, ?, ?, ?, 'open', ?, ?, ?)`, featureID, featureTitle, source.Body,
-		"feature/"+featureID, string(input.Actor), nowText, nowText); err != nil {
+	id, title, body, branch, status, integration_feature_id, created_from_sha,
+	created_by, created_at, updated_at
+) VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)`, featureID, featureTitle, source.Body,
+		"feature/"+featureID, nullableStringValue(source.FeatureID), evidence.TargetBaseTipSHA,
+		string(input.Actor), nowText, nowText); err != nil {
 		return convergencePromotion{}, fmt.Errorf("insert promoted feature row: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -431,15 +436,21 @@ func (e *WorkflowExecutor) materializeConvergencePromotion(ctx context.Context, 
 
 	now := e.runs.now().UTC()
 	nowText := formatTime(now)
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO work_items (id, kind, created_at) VALUES (?, 'feature', ?), (?, 'task', ?)`,
+		current.FeatureID, nowText, current.PlanningTaskID, nowText); err != nil {
+		return convergencePromotion{}, fmt.Errorf("restore promoted work-item identities: %w", err)
+	}
 	// The feature and planning task rows were created with the durable intent;
 	// these inserts are no-ops on replay (unique constraints), which is what
 	// makes the materialized step idempotent.
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO features (
-	id, title, body, branch, status, created_by, created_at, updated_at
-) VALUES (?, ?, ?, ?, 'open', ?, ?, ?)`,
+	id, title, body, branch, status, integration_feature_id, created_from_sha,
+	created_by, created_at, updated_at
+) VALUES (?, ?, ?, ?, 'open', (SELECT feature_id FROM tasks WHERE id = ?), ?, ?, ?, ?)`,
 		current.FeatureID, current.FeatureTitle,
-		current.FeatureBody, "feature/"+current.FeatureID, string(current.Actor), nowText, nowText); err != nil {
+		current.FeatureBody, "feature/"+current.FeatureID, current.SourceTaskID,
+		current.Evidence.TargetBaseTipSHA, string(current.Actor), nowText, nowText); err != nil {
 		if strings.Contains(err.Error(), "features.title_norm") {
 			return convergencePromotion{}, ErrFeatureTitleTaken
 		}
@@ -467,8 +478,22 @@ SELECT ?, tag_id, ?, ? FROM task_tags WHERE task_id = ?`, current.PlanningTaskID
 		string(current.Actor), nowText, current.SourceTaskID); err != nil {
 		return convergencePromotion{}, fmt.Errorf("copy promotion task tags: %w", err)
 	}
-	if err := linkTasksInTx(ctx, tx, current.SourceTaskID, current.PlanningTaskID, RelationParentOf, current.Actor, nowText); err != nil {
+	items := NewWorkItemService(e.db, e.project.ID)
+	items.now = e.runs.now
+	var sourceFeatureID sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT feature_id FROM tasks WHERE id = ?`, current.SourceTaskID).Scan(&sourceFeatureID); err != nil {
+		return convergencePromotion{}, err
+	}
+	if sourceFeatureID.Valid {
+		if err := items.linkTx(ctx, tx, sourceFeatureID.String, current.FeatureID, RelationParentOf, current.Actor); err != nil {
+			return convergencePromotion{}, fmt.Errorf("link promoted nested feature: %w", err)
+		}
+	}
+	if err := items.linkTx(ctx, tx, current.FeatureID, current.PlanningTaskID, RelationParentOf, current.Actor); err != nil {
 		return convergencePromotion{}, fmt.Errorf("link promoted planning task: %w", err)
+	}
+	if err := items.linkTx(ctx, tx, current.SourceTaskID, current.FeatureID, RelationRelatedTo, current.Actor); err != nil {
+		return convergencePromotion{}, fmt.Errorf("relate promotion source task: %w", err)
 	}
 	resolutionPayload, err := json.Marshal(convergenceResolutionPayload{
 		Disposition: ConvergencePromote, EvidenceFingerprint: current.EvidenceFingerprint,
@@ -486,6 +511,9 @@ SELECT ?, tag_id, ?, ? FROM task_tags WHERE task_id = ?`, current.PlanningTaskID
 		return convergencePromotion{}, err
 	}
 	if _, err := forceDoneTaskTx(ctx, tx, current.SourceTaskID, ResolutionCancelled, current.Note, current.Actor, now); err != nil {
+		return convergencePromotion{}, err
+	}
+	if err := reconcileEpicAncestorsTx(ctx, tx, []string{current.FeatureID, current.PlanningTaskID, current.SourceTaskID}, now); err != nil {
 		return convergencePromotion{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `

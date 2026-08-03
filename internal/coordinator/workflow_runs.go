@@ -256,8 +256,8 @@ func NewWorkflowRunServiceWithOptions(db *sql.DB, flows *FlowService, tasks *Tas
 }
 
 // Schedule freezes the selected flow and creates a new run. The task remains
-// Scheduled until its first node actually starts; unresolved task blockers
-// suppress node creation but not scheduling.
+// Scheduled until its first node actually starts; unresolved effective
+// work-item blockers suppress node creation but not scheduling.
 func (s *WorkflowRunService) Schedule(ctx context.Context, taskID string) (WorkflowRun, error) {
 	return s.ScheduleAs(ctx, taskID, ActorHuman)
 }
@@ -269,6 +269,16 @@ func (s *WorkflowRunService) ScheduleAs(ctx context.Context, taskID string, acto
 	}
 	if actor == "" {
 		actor = ActorSystem
+	}
+	kind, err := workItemKindTx(ctx, s.db, taskID)
+	if err != nil {
+		if errors.Is(err, ErrWorkItemNotFound) {
+			return WorkflowRun{}, sql.ErrNoRows
+		}
+		return WorkflowRun{}, err
+	}
+	if kind != WorkItemTask {
+		return WorkflowRun{}, fmt.Errorf("%w: %s %s", ErrWorkItemNotSchedulable, kind, taskID)
 	}
 	task, err := s.tasks.GetTask(ctx, taskID)
 	if err != nil {
@@ -349,6 +359,20 @@ WHERE id = ?`, string(LifecycleScheduled), sqlitex.FormatTime(now), taskID); err
 
 func (s *WorkflowRunService) Get(ctx context.Context, runID string) (WorkflowRun, error) {
 	return scanWorkflowRun(s.db.QueryRowContext(ctx, workflowRunSelect+` WHERE id = ?`, runID))
+}
+
+func (s *WorkflowRunService) requireTaskWorkItem(ctx context.Context, itemID string) error {
+	kind, err := workItemKindTx(ctx, s.db, itemID)
+	if err != nil {
+		if errors.Is(err, ErrWorkItemNotFound) {
+			return sql.ErrNoRows
+		}
+		return err
+	}
+	if kind != WorkItemTask {
+		return fmt.Errorf("%w: %s %s", ErrWorkItemNotSchedulable, kind, itemID)
+	}
+	return nil
 }
 
 func (s *WorkflowRunService) ActiveForTask(ctx context.Context, taskID string) (WorkflowRun, bool, error) {
@@ -1804,6 +1828,9 @@ UPDATE workflow_node_runs SET state = ? WHERE id = ? AND state = ?`,
 }
 
 func (s *WorkflowRunService) Reset(ctx context.Context, taskID string, actor Actor) (WorkflowRun, error) {
+	if err := s.requireTaskWorkItem(ctx, taskID); err != nil {
+		return WorkflowRun{}, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return WorkflowRun{}, err
@@ -1880,6 +1907,9 @@ UPDATE tasks SET lifecycle_state = NULL, done_resolution = NULL, done_at = NULL,
 }
 
 func (s *WorkflowRunService) ForceDone(ctx context.Context, taskID string, resolution DoneResolution, note string, actor Actor) (Task, error) {
+	if err := s.requireTaskWorkItem(ctx, taskID); err != nil {
+		return Task{}, err
+	}
 	if err := validateDoneResolution(resolution); err != nil {
 		return Task{}, err
 	}
@@ -1980,6 +2010,9 @@ WHERE task_id = ? AND state = 'running'`, rebaseState, sqlitex.FormatTime(now), 
 	}); err != nil {
 		return Task{}, err
 	}
+	if err := reconcileEpicAncestorsTx(ctx, tx, []string{taskID}, now); err != nil {
+		return Task{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Task{}, err
 	}
@@ -2008,12 +2041,22 @@ WHERE task_id = ?
 }
 
 func (s *WorkflowRunService) Reopen(ctx context.Context, taskID string, actor Actor) (Task, error) {
+	if err := s.requireTaskWorkItem(ctx, taskID); err != nil {
+		return Task{}, err
+	}
 	now := s.now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Task{}, err
 	}
 	defer tx.Rollback()
+	blockedByAncestor, err := hasManuallyCompletedAncestorTx(ctx, tx, taskID)
+	if err != nil {
+		return Task{}, err
+	}
+	if blockedByAncestor {
+		return Task{}, ErrWorkItemParentClosed
+	}
 	var previousResolution string
 	if err := tx.QueryRowContext(ctx, `SELECT done_resolution FROM tasks WHERE id = ? AND lifecycle_state = ?`,
 		taskID, string(LifecycleDone)).Scan(&previousResolution); err != nil {
@@ -2037,6 +2080,9 @@ WHERE id = ? AND lifecycle_state = ?`, sqlitex.FormatTime(now), taskID, string(L
 		TaskID: taskID, FromTaskState: string(LifecycleDone), EventKind: "task_reopened",
 		PayloadJSON: string(payload), Actor: string(actor), CreatedAt: now,
 	}); err != nil {
+		return Task{}, err
+	}
+	if err := reconcileEpicAncestorsTx(ctx, tx, []string{taskID}, now); err != nil {
 		return Task{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -2217,12 +2263,15 @@ UPDATE feature_rebases SET state = ?, completed_at = ?
 WHERE task_id = ? AND state = 'running'`, rebaseState, sqlitex.FormatTime(now), run.TaskID); err != nil {
 		return fmt.Errorf("close rebase row for terminal task: %w", err)
 	}
-	return insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
+	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
 		TaskID: run.TaskID, WorkflowRunID: run.ID, FromTaskState: string(LifecycleInProgress),
 		ToTaskState: string(LifecycleDone), FromNodeKey: run.CurrentNodeKey, ToNodeKey: node.Key,
 		EventKind: "workflow_completed", PayloadJSON: fmt.Sprintf(`{"resolution":%q}`, resolution),
 		Actor: string(ActorSystem), CreatedAt: now,
-	})
+	}); err != nil {
+		return err
+	}
+	return reconcileEpicAncestorsTx(ctx, tx, []string{run.TaskID}, now)
 }
 
 func createNodeRunTx(ctx context.Context, tx workflowTx, run WorkflowRun, nodeKey string, attempt int, inputArtifactID string, now time.Time) (WorkflowNodeRun, error) {
@@ -2331,14 +2380,7 @@ func openWaitTx(ctx context.Context, tx workflowTx, runID string) (WorkflowWait,
 }
 
 func unresolvedBlockerCountTx(ctx context.Context, tx workflowTx, taskID string) (int, error) {
-	var count int
-	err := tx.QueryRowContext(ctx, `
-SELECT COUNT(*)
-FROM task_relations r
-JOIN tasks blocker ON blocker.id = r.source_task_id
-WHERE r.kind = ? AND r.target_task_id = ?
-	AND COALESCE(blocker.lifecycle_state, '') != ?`, string(RelationBlocks), taskID, string(LifecycleDone)).Scan(&count)
-	return count, err
+	return effectiveUnresolvedBlockerCountTx(ctx, tx, taskID)
 }
 
 type workflowTransitionInput struct {
@@ -2359,6 +2401,7 @@ type workflowTransitionExecer interface {
 // *sql.Tx and sqlitex.Tx both satisfy it.
 type workflowTx interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 

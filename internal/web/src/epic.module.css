@@ -93,6 +93,21 @@
   color: var(--ph-await);
 }
 
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.feature-edit {
+  display: grid;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+
 .members {
   display: flex;
   flex-direction: column;

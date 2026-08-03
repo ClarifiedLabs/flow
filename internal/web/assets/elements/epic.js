@@ -2,7 +2,7 @@
 // segmented bar for the shape of it, member rows for the detail, and the
 // dependency chain that is actually gating the whole thing.
 
-import { taskHref } from "../api.js";
+import { epicHref, featureHref, taskHref } from "../api.js";
 import { formatDwell } from "../board-model.js";
 import { phaseKey } from "../board.js";
 import { escapeAttr, escapeHTML } from "../html.js";
@@ -50,6 +50,7 @@ function statePhase(state) {
 // for tests.
 export function renderEpic(data, now = Date.now()) {
   if (!data) return "";
+  if (value(data, "item", "Item")) return renderFirstClassEpic(data);
   const epic = value(data, "epic", "Epic") || {};
   const members = value(data, "members", "Members") || [];
   const total = Number(value(data, "total_count", "TotalCount") || members.length);
@@ -96,6 +97,59 @@ export function renderEpic(data, now = Date.now()) {
     </div>
     ${renderCriticalPath(criticalPath, members, projectID)}
   `;
+}
+
+function workItemHref(projectID, item) {
+  const id = value(item, "id", "ID");
+  switch (value(item, "kind", "Kind")) {
+    case "feature": return featureHref(projectID, id);
+    case "epic": return epicHref(projectID, id);
+    default: return taskHref(projectID, id);
+  }
+}
+
+function renderFirstClassEpic(data) {
+  const epic = value(data, "epic", "Epic") || {};
+  const children = value(data, "children", "Children") || [];
+  const blockers = value(data, "blockers", "Blockers") || [];
+  const projectID = String(data.projectID || "");
+  const id = value(epic, "id", "ID");
+  const status = value(epic, "status", "Status") || "open";
+  const policy = value(epic, "completion_policy", "CompletionPolicy") || "all_children";
+  const unresolved = blockers.filter((blocker) => !value(blocker, "resolved", "Resolved"));
+  return `
+    <section class="detail">
+      <div class="head">
+        <div class="title-row">
+          <span class="epic-id">${escapeHTML(id)}</span>
+          <h2>${escapeHTML(value(epic, "title", "Title"))}</h2>
+          <span class="spacer"></span>
+          <span class="feature-status" data-status="${escapeAttr(status)}">${escapeHTML(status)}</span>
+        </div>
+        <p class="legend">${children.length} direct child${children.length === 1 ? "" : "ren"} · ${escapeHTML(policy.replace(/_/g, " "))}${unresolved.length ? ` · ${unresolved.length} blocked` : ""}</p>
+        ${value(epic, "body", "Body") ? `<p>${escapeHTML(value(epic, "body", "Body"))}</p>` : ""}
+        ${status !== "archived" ? `<div class="actions">
+          ${status === "open" ? `<button type="button" data-epic-start="${escapeAttr(id)}" data-project="${escapeAttr(projectID)}">Start descendant tasks</button>
+          <button type="button" class="secondary" data-epic-complete="${escapeAttr(id)}" data-project="${escapeAttr(projectID)}">Complete</button>` : `<button type="button" data-epic-reopen="${escapeAttr(id)}" data-project="${escapeAttr(projectID)}">Reopen</button>`}
+          <button type="button" class="secondary danger" data-epic-archive="${escapeAttr(id)}" data-project="${escapeAttr(projectID)}">Archive</button>
+        </div>` : ""}
+      </div>
+      ${status !== "archived" ? `<form class="feature-edit" data-epic-form="${escapeAttr(id)}" data-project="${escapeAttr(projectID)}">
+        <input name="title" value="${escapeAttr(value(epic, "title", "Title"))}" required aria-label="Epic title">
+        <textarea name="body" rows="2" aria-label="Epic body">${escapeHTML(value(epic, "body", "Body"))}</textarea>
+        <input name="priority" type="number" min="0" value="${escapeAttr(value(epic, "priority", "Priority") || 0)}" aria-label="Epic priority">
+        <select name="completion_policy" aria-label="Epic completion policy">
+          <option value="all_children"${policy === "all_children" ? " selected" : ""}>Complete with all children</option>
+          <option value="manual"${policy === "manual" ? " selected" : ""}>Manual completion</option>
+        </select>
+        <div><button type="submit" class="secondary">Save</button></div>
+      </form>` : ""}
+      ${unresolved.length ? `<div class="members"><h3>Blocked by</h3>${unresolved.map((blocker) => {
+        const blockerItem = value(blocker, "item", "Item") || {};
+        return `<a class="member" href="${escapeAttr(workItemHref(projectID, blockerItem))}" data-link><span class="member-id">${escapeHTML(value(blockerItem, "id", "ID"))}</span><span class="member-title">${escapeHTML(value(blockerItem, "title", "Title"))}</span></a>`;
+      }).join("")}</div>` : ""}
+      <div class="members"><h3>Children</h3>${children.length ? children.map((child) => `<a class="member" href="${escapeAttr(workItemHref(projectID, child))}" data-link><span class="member-id">${escapeHTML(value(child, "id", "ID"))}</span><span class="member-title">${escapeHTML(value(child, "title", "Title"))}</span><span class="member-note">${escapeHTML(value(child, "state", "State")?.status || value(child, "kind", "Kind"))}</span></a>`).join("") : `<p class="empty">No children yet.</p>`}</div>
+    </section>`;
 }
 
 function renderMember(member, projectID, now) {

@@ -41,6 +41,9 @@ type RebaseOntoInput struct {
 	// ExpectedOldSHA is the branch head the rebase must start from; a
 	// mismatch means the branch moved after the rebase was planned.
 	ExpectedOldSHA string
+	// ExpectedOntoSHA pins the integration target resolved by the caller. It is
+	// optional for general callers and required by feature rebases.
+	ExpectedOntoSHA string
 	// CommitName and CommitEmail set the replayed commits' committer identity.
 	// When empty, DefaultMergeCommitName/DefaultMergeCommitEmail are used.
 	CommitName  string
@@ -62,6 +65,7 @@ func RebaseOnto(ctx context.Context, input RebaseOntoInput) (RebaseOntoResult, e
 	input.Branch = strings.TrimSpace(input.Branch)
 	input.Onto = strings.TrimSpace(input.Onto)
 	input.ExpectedOldSHA = strings.TrimSpace(input.ExpectedOldSHA)
+	input.ExpectedOntoSHA = strings.TrimSpace(input.ExpectedOntoSHA)
 	if input.ExchangePath == "" {
 		return RebaseOntoResult{}, errors.New("exchange repo path is required")
 	}
@@ -104,6 +108,13 @@ func RebaseOnto(ctx context.Context, input RebaseOntoInput) (RebaseOntoResult, e
 	}
 	if previousSHA != input.ExpectedOldSHA {
 		return RebaseOntoResult{}, fmt.Errorf("%w: branch head is %s", ErrHeadMismatch, previousSHA)
+	}
+	ontoSHA, err := gitOutput(ctx, worktree, nil, "rev-parse", "origin/"+input.Onto)
+	if err != nil {
+		return RebaseOntoResult{}, fmt.Errorf("resolve onto branch head: %w", err)
+	}
+	if input.ExpectedOntoSHA != "" && ontoSHA != input.ExpectedOntoSHA {
+		return RebaseOntoResult{}, fmt.Errorf("%w: %s, expected %s", ErrBaseMismatch, ontoSHA, input.ExpectedOntoSHA)
 	}
 
 	if err := gitRun(ctx, worktree, nil, "-c", "core.editor=true", "rebase", "origin/"+input.Onto); err != nil {

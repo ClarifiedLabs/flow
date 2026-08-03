@@ -506,8 +506,8 @@ func TestRebaseOnMainConflictCreatesBlockingTask(t *testing.T) {
 		t.Helper()
 		var count int
 		if err := env.fixture.store.DB().QueryRowContext(ctx, `
-SELECT COUNT(*) FROM task_relations
-WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`, blockerID, taskID).Scan(&count); err != nil {
+SELECT COUNT(*) FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, blockerID, taskID).Scan(&count); err != nil {
 			t.Fatalf("count relations: %v", err)
 		}
 		if (count == 1) != want {
@@ -612,8 +612,8 @@ func TestRebaseOnMainRestrictBlockedTo(t *testing.T) {
 	if got := countRows("feature_rebases"); got != 0 {
 		t.Fatalf("forbidden rebase created %d rebase rows, want 0", got)
 	}
-	if got := countRows("task_relations"); got != 0 {
-		t.Fatalf("forbidden rebase created %d relation rows, want 0", got)
+	if got := countRows("work_item_relations WHERE kind = 'blocks'"); got != 0 {
+		t.Fatalf("forbidden rebase created %d blocker rows, want 0", got)
 	}
 
 	// A feature whose only non-done task is the bound task still rebases, and
@@ -649,8 +649,8 @@ func TestRebaseOnMainRestrictBlockedTo(t *testing.T) {
 	if running.RestrictBlockedTo != boundTask.ID {
 		t.Fatalf("running rebase restriction = %q, want %q", running.RestrictBlockedTo, boundTask.ID)
 	}
-	if got := countRows("task_relations"); got != 1 {
-		t.Fatalf("allowed rebase created %d relation rows, want exactly 1", got)
+	if got := countRows("work_item_relations WHERE kind = 'blocks'"); got != 1 {
+		t.Fatalf("allowed rebase created %d blocker rows, want exactly 1", got)
 	}
 	rebaseTask, err := env.tasks.GetTask(ctx, result.RebaseTaskID)
 	if err != nil {
@@ -660,8 +660,8 @@ func TestRebaseOnMainRestrictBlockedTo(t *testing.T) {
 		t.Helper()
 		var count int
 		if err := env.fixture.store.DB().QueryRowContext(ctx, `
-SELECT COUNT(*) FROM task_relations
-WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`, rebaseTask.ID, taskID).Scan(&count); err != nil {
+SELECT COUNT(*) FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, rebaseTask.ID, taskID).Scan(&count); err != nil {
 			t.Fatalf("count relations: %v", err)
 		}
 		if (count == 1) != want {
@@ -716,8 +716,8 @@ func TestRebaseOnMainConcurrentTaskAddStaysUnlinked(t *testing.T) {
 
 	var relations int
 	if err := env.fixture.store.DB().QueryRowContext(ctx, `
-SELECT COUNT(*) FROM task_relations
-WHERE kind = 'blocks' AND source_task_id = ?`, result.RebaseTaskID).Scan(&relations); err != nil {
+SELECT COUNT(*) FROM work_item_relations
+WHERE kind = 'blocks' AND source_item_id = ?`, result.RebaseTaskID).Scan(&relations); err != nil {
 		t.Fatalf("count relations: %v", err)
 	}
 	if relations != 1 {
@@ -725,13 +725,13 @@ WHERE kind = 'blocks' AND source_task_id = ?`, result.RebaseTaskID).Scan(&relati
 	}
 	var blockedBound, blockedConcurrent int
 	if err := env.fixture.store.DB().QueryRowContext(ctx, `
-SELECT COUNT(*) FROM task_relations
-WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`, result.RebaseTaskID, boundTask.ID).Scan(&blockedBound); err != nil {
+SELECT COUNT(*) FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, result.RebaseTaskID, boundTask.ID).Scan(&blockedBound); err != nil {
 		t.Fatalf("count bound relations: %v", err)
 	}
 	if err := env.fixture.store.DB().QueryRowContext(ctx, `
-SELECT COUNT(*) FROM task_relations
-WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`, result.RebaseTaskID, concurrentTaskID).Scan(&blockedConcurrent); err != nil {
+SELECT COUNT(*) FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, result.RebaseTaskID, concurrentTaskID).Scan(&blockedConcurrent); err != nil {
 		t.Fatalf("count concurrent relations: %v", err)
 	}
 	if blockedBound != 1 {
@@ -785,14 +785,14 @@ func TestRebaseOnMainTaskAddBeforeDecisionRejectsRebase(t *testing.T) {
 	if err := env.fixture.store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM feature_rebases`).Scan(&rebaseRows); err != nil {
 		t.Fatalf("count rebase rows: %v", err)
 	}
-	if err := env.fixture.store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM task_relations`).Scan(&relationRows); err != nil {
+	if err := env.fixture.store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM work_item_relations WHERE kind = 'blocks'`).Scan(&relationRows); err != nil {
 		t.Fatalf("count relation rows: %v", err)
 	}
 	if rebaseRows != 0 {
 		t.Fatalf("forbidden rebase created %d rebase rows, want 0", rebaseRows)
 	}
 	if relationRows != 0 {
-		t.Fatalf("forbidden rebase created %d relation rows, want 0", relationRows)
+		t.Fatalf("forbidden rebase created %d blocker rows, want 0", relationRows)
 	}
 }
 
@@ -836,8 +836,8 @@ func TestRebaseBlockRestrictionHoldsAtScheduleTime(t *testing.T) {
 		t.Helper()
 		var count int
 		if err := env.fixture.store.DB().QueryRowContext(ctx, `
-SELECT COUNT(*) FROM task_relations
-WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`, rebaseTaskID, taskID).Scan(&count); err != nil {
+SELECT COUNT(*) FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, rebaseTaskID, taskID).Scan(&count); err != nil {
 			t.Fatalf("count relations: %v", err)
 		}
 		return count
@@ -933,8 +933,8 @@ INSERT INTO feature_rebases (
 		t.Helper()
 		var count int
 		if err := env.fixture.store.DB().QueryRowContext(ctx, `
-SELECT COUNT(*) FROM task_relations
-WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`, rebaseTaskID, taskID).Scan(&count); err != nil {
+SELECT COUNT(*) FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, rebaseTaskID, taskID).Scan(&count); err != nil {
 			t.Fatalf("count relations: %v", err)
 		}
 		return count
@@ -1138,8 +1138,8 @@ func TestRestrictedRebaseRedoKeepsConfinement(t *testing.T) {
 		t.Helper()
 		var count int
 		if err := env.fixture.store.DB().QueryRowContext(ctx, `
-SELECT COUNT(*) FROM task_relations
-WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`, rebaseTaskID, taskID).Scan(&count); err != nil {
+SELECT COUNT(*) FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, rebaseTaskID, taskID).Scan(&count); err != nil {
 			t.Fatalf("count relations: %v", err)
 		}
 		return count
@@ -1181,8 +1181,8 @@ func TestEnsureRebaseBlockToleratesDuplicates(t *testing.T) {
 	}
 	var count int
 	if err := env.fixture.store.DB().QueryRowContext(ctx, `
-SELECT COUNT(*) FROM task_relations
-WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`,
+SELECT COUNT(*) FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`,
 		result.RebaseTaskID, task.ID).Scan(&count); err != nil {
 		t.Fatalf("count relations: %v", err)
 	}
@@ -1194,8 +1194,8 @@ WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`,
 		t.Fatalf("ensure self block: %v", err)
 	}
 	if err := env.fixture.store.DB().QueryRowContext(ctx, `
-SELECT COUNT(*) FROM task_relations
-WHERE source_task_id = ? AND target_task_id = ? AND kind = 'blocks'`,
+SELECT COUNT(*) FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`,
 		result.RebaseTaskID, result.RebaseTaskID).Scan(&count); err != nil {
 		t.Fatalf("count self relations: %v", err)
 	}

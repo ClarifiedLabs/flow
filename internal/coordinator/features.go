@@ -59,16 +59,21 @@ const (
 // assigned to a feature branch off and merge back into Branch instead of the
 // project base branch.
 type Feature struct {
-	ID        string        `json:"id"`
-	Title     string        `json:"title"`
-	Body      string        `json:"body"`
-	Branch    string        `json:"branch"`
-	Status    FeatureStatus `json:"status"`
-	CreatedBy Actor         `json:"created_by"`
-	CreatedAt time.Time     `json:"created_at"`
-	UpdatedAt time.Time     `json:"updated_at"`
-	LandedAt  *time.Time    `json:"landed_at,omitempty"`
-	LandSHA   string        `json:"land_sha,omitempty"`
+	ID                   string        `json:"id"`
+	Title                string        `json:"title"`
+	Body                 string        `json:"body"`
+	Branch               string        `json:"branch"`
+	Status               FeatureStatus `json:"status"`
+	IntegrationFeatureID *string       `json:"integration_feature_id,omitempty"`
+	CreatedFromSHA       string        `json:"created_from_sha"`
+	CreatedBy            Actor         `json:"created_by"`
+	CreatedAt            time.Time     `json:"created_at"`
+	UpdatedAt            time.Time     `json:"updated_at"`
+	LandedAt             *time.Time    `json:"landed_at,omitempty"`
+	LandSHA              string        `json:"land_sha,omitempty"`
+	LandTargetFeatureID  *string       `json:"land_target_feature_id,omitempty"`
+	LandTargetBranch     string        `json:"land_target_branch,omitempty"`
+	LandTargetSHA        string        `json:"land_target_sha,omitempty"`
 }
 
 // FeatureRebase is the durable record of one rebase of a feature branch onto
@@ -89,6 +94,7 @@ type FeatureRebase struct {
 	OldTipSHA         string      `json:"old_tip_sha"`
 	TargetBase        string      `json:"target_base"`
 	TargetBaseSHA     string      `json:"target_base_sha"`
+	TargetFeatureID   *string     `json:"target_feature_id,omitempty"`
 	NewTipSHA         string      `json:"new_tip_sha,omitempty"`
 	State             RebaseState `json:"state"`
 	CreatedAt         time.Time   `json:"created_at"`
@@ -113,9 +119,11 @@ type RebaseStartResult struct {
 }
 
 type CreateFeatureInput struct {
-	Title     string
-	Body      string
-	CreatedBy Actor
+	Title        string
+	Body         string
+	ParentItemID string
+	OperationKey string
+	CreatedBy    Actor
 }
 
 type EditFeatureInput struct {
@@ -152,6 +160,7 @@ const (
 type FeatureService struct {
 	db      *sql.DB
 	tasks   *TaskService
+	items   *WorkItemService
 	project Project
 	now     func() time.Time
 
@@ -171,7 +180,10 @@ func NewFeatureService(database *sql.DB, tasks *TaskService, project Project) *F
 	if tasks == nil {
 		tasks = NewTaskService(database, project.ID)
 	}
-	return &FeatureService{db: database, tasks: tasks, project: project, now: sqlitex.UTCNow}
+	return &FeatureService{
+		db: database, tasks: tasks, items: NewWorkItemService(database, project.ID),
+		project: project, now: sqlitex.UTCNow,
+	}
 }
 
 // Create allocates the feature id, seeds its branch from the base-branch tip,
@@ -190,45 +202,182 @@ func (s *FeatureService) Create(ctx context.Context, input CreateFeatureInput) (
 	if exchangePath == "" {
 		return Feature{}, errors.New("project exchange remote is required for feature branches")
 	}
-	base := s.baseBranch()
-	baseTip, ok, err := flowgit.BranchTip(ctx, exchangePath, base)
+	parentItemID := strings.TrimSpace(input.ParentItemID)
+	integrationFeatureID, err := nearestFeatureFromParentTx(ctx, s.db, parentItemID)
 	if err != nil {
-		return Feature{}, fmt.Errorf("resolve base branch tip: %w", err)
+		return Feature{}, err
+	}
+	if parentItemID != "" {
+		parentKind, err := workItemKindTx(ctx, s.db, parentItemID)
+		if err != nil {
+			return Feature{}, err
+		}
+		if parentKind != WorkItemEpic && parentKind != WorkItemFeature {
+			return Feature{}, fmt.Errorf("%w: %s items cannot contain features", ErrWorkItemMoveConflict, parentKind)
+		}
+		open, err := workItemContainerOpenTx(ctx, s.db, parentItemID, parentKind)
+		if err != nil {
+			return Feature{}, err
+		}
+		if !open {
+			return Feature{}, ErrWorkItemParentClosed
+		}
+	}
+	targetBranch := s.baseBranch()
+	if integrationFeatureID != "" {
+		if err := s.db.QueryRowContext(ctx, `SELECT branch FROM features WHERE id = ? AND status = 'open'`, integrationFeatureID).Scan(&targetBranch); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return Feature{}, ErrFeatureClosed
+			}
+			return Feature{}, err
+		}
+	}
+	targetTip, ok, err := flowgit.BranchTip(ctx, exchangePath, targetBranch)
+	if err != nil {
+		return Feature{}, fmt.Errorf("resolve integration target tip: %w", err)
 	}
 	if !ok {
-		return Feature{}, fmt.Errorf("base branch %q not found in exchange remote", base)
+		return Feature{}, fmt.Errorf("integration target branch %q not found in exchange remote", targetBranch)
 	}
 
+	operationKey := strings.TrimSpace(input.OperationKey)
+	if operationKey == "" {
+		// A failed Git ref write leaves a prepared intent by design. An ordinary
+		// create retry has no caller-supplied operation key, so recover the one
+		// matching the exact request instead of making its reserved title
+		// permanently uncreatable.
+		err = s.db.QueryRowContext(ctx, `
+SELECT operation_key FROM feature_creation_intents
+WHERE state != 'completed'
+	AND lower(trim(title)) = lower(trim(?))
+	AND body = ?
+	AND COALESCE(parent_item_id, '') = ?
+ORDER BY created_at LIMIT 1`, title, strings.TrimSpace(input.Body), parentItemID).Scan(&operationKey)
+		if errors.Is(err, sql.ErrNoRows) {
+			operationKey, err = randomPrefixedID("fci")
+		}
+		if err != nil {
+			return Feature{}, err
+		}
+	}
 	tx, err := sqlitex.BeginImmediate(ctx, s.db)
 	if err != nil {
 		return Feature{}, err
 	}
 	defer tx.Rollback()
 
-	id, err := s.allocateFeatureID(ctx, tx)
+	now := s.now().UTC()
+	var id, branch, intentState, storedTitle, storedBody, storedParent, storedIntegration, storedTargetBranch, storedTargetSHA string
+	err = tx.QueryRowContext(ctx, `
+SELECT id, branch, state, title, body, COALESCE(parent_item_id, ''),
+	COALESCE(integration_feature_id, ''), target_branch, target_sha
+FROM feature_creation_intents WHERE operation_key = ?`, operationKey).Scan(
+		&id, &branch, &intentState, &storedTitle, &storedBody, &storedParent,
+		&storedIntegration, &storedTargetBranch, &storedTargetSHA,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		var titleExists int
+		if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS(SELECT 1 FROM features WHERE title_norm = lower(trim(?)))
+	OR EXISTS(SELECT 1 FROM feature_creation_intents WHERE lower(trim(title)) = lower(trim(?)))`, title, title).Scan(&titleExists); err != nil {
+			return Feature{}, err
+		}
+		if titleExists != 0 {
+			return Feature{}, ErrFeatureTitleTaken
+		}
+		id, err = s.allocateFeatureID(ctx, tx)
+		if err != nil {
+			return Feature{}, err
+		}
+		branch = "feature/" + id
+		intentState = "prepared"
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO feature_creation_intents (
+	id, operation_key, parent_item_id, integration_feature_id, title, body,
+	branch, target_branch, target_sha, created_by, state, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)`,
+			id, operationKey, sqlitex.NullableNonEmptyString(parentItemID), sqlitex.NullableNonEmptyString(integrationFeatureID),
+			title, strings.TrimSpace(input.Body), branch, targetBranch, targetTip, string(actor), formatTime(now), formatTime(now)); err != nil {
+			if strings.Contains(err.Error(), "title") {
+				return Feature{}, ErrFeatureTitleTaken
+			}
+			return Feature{}, fmt.Errorf("prepare feature creation: %w", err)
+		}
+		storedTitle, storedBody, storedParent = title, strings.TrimSpace(input.Body), parentItemID
+		storedIntegration, storedTargetBranch, storedTargetSHA = integrationFeatureID, targetBranch, targetTip
+	} else if err != nil {
+		return Feature{}, err
+	} else if storedTitle != title || storedBody != strings.TrimSpace(input.Body) || storedParent != parentItemID {
+		return Feature{}, errors.New("feature creation operation key was already used with different input")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Feature{}, fmt.Errorf("commit feature creation intent: %w", err)
+	}
+	if intentState == "completed" {
+		return s.Get(ctx, id)
+	}
+
+	currentTip, exists, err := flowgit.BranchTip(ctx, exchangePath, branch)
 	if err != nil {
 		return Feature{}, err
 	}
-	branch := "feature/" + id
-	now := s.now().UTC()
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO features (
-	id, title, body, branch, status, created_by, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, title, strings.TrimSpace(input.Body), branch,
-		string(FeatureOpen), string(actor), formatTime(now), formatTime(now)); err != nil {
-		if strings.Contains(err.Error(), "features.title_norm") {
-			return Feature{}, ErrFeatureTitleTaken
-		}
-		return Feature{}, fmt.Errorf("insert feature: %w", err)
+	if exists && currentTip != storedTargetSHA {
+		return Feature{}, fmt.Errorf("feature branch %q already exists at unexpected tip %s", branch, currentTip)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Feature{}, fmt.Errorf("commit feature: %w", err)
+	if !exists {
+		if err := flowgit.UpdateRef(ctx, exchangePath, "refs/heads/"+branch, storedTargetSHA); err != nil {
+			_, _ = s.db.ExecContext(ctx, `UPDATE feature_creation_intents SET last_error = ?, updated_at = ? WHERE id = ?`, err.Error(), formatTime(s.now().UTC()), id)
+			return Feature{}, fmt.Errorf("seed feature branch: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE feature_creation_intents SET state = 'ref_created', last_error = '', updated_at = ? WHERE id = ?`, formatTime(s.now().UTC()), id); err != nil {
+		return Feature{}, err
 	}
 
-	if err := flowgit.UpdateRef(ctx, exchangePath, "refs/heads/"+branch, baseTip); err != nil {
-		_, _ = s.db.ExecContext(ctx, `DELETE FROM features WHERE id = ?`, id)
-		return Feature{}, fmt.Errorf("seed feature branch: %w", err)
+	tx, err = sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return Feature{}, err
+	}
+	defer tx.Rollback()
+	var featureExists int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM features WHERE id = ?)`, id).Scan(&featureExists); err != nil {
+		return Feature{}, err
+	}
+	if featureExists == 0 {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO work_items (id, kind, created_at) VALUES (?, 'feature', ?)`, id, formatTime(now)); err != nil {
+			return Feature{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO features (
+	id, title, body, branch, status, integration_feature_id, created_from_sha,
+	created_by, created_at, updated_at
+) VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)`, id, storedTitle, storedBody, branch,
+			sqlitex.NullableNonEmptyString(storedIntegration), storedTargetSHA, string(actor), formatTime(now), formatTime(now)); err != nil {
+			if strings.Contains(err.Error(), "features.title_norm") {
+				return Feature{}, ErrFeatureTitleTaken
+			}
+			return Feature{}, fmt.Errorf("insert feature: %w", err)
+		}
+	}
+	if storedParent != "" {
+		var relationExists int
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM work_item_relations WHERE source_item_id = ? AND target_item_id = ? AND kind = 'parent_of')`, storedParent, id).Scan(&relationExists); err != nil {
+			return Feature{}, err
+		}
+		if relationExists == 0 {
+			if err := s.items.linkTx(ctx, tx, storedParent, id, RelationParentOf, actor); err != nil {
+				return Feature{}, err
+			}
+		}
+	}
+	if err := reconcileEpicAncestorsTx(ctx, tx, []string{id}, s.now().UTC()); err != nil {
+		return Feature{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE feature_creation_intents SET state = 'completed', last_error = '', updated_at = ? WHERE id = ?`, formatTime(s.now().UTC()), id); err != nil {
+		return Feature{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Feature{}, err
 	}
 
 	return s.Get(ctx, id)
@@ -273,11 +422,16 @@ SELECT
 	body,
 	branch,
 	status,
+	integration_feature_id,
+	created_from_sha,
 	created_by,
 	created_at,
 	updated_at,
 	landed_at,
-	land_sha`
+	land_sha,
+	land_target_feature_id,
+	land_target_branch,
+	land_target_sha`
 
 // List returns features ordered by title. A non-empty status filters in SQL.
 func (s *FeatureService) List(ctx context.Context, status FeatureStatus) ([]Feature, error) {
@@ -384,6 +538,9 @@ func (s *FeatureService) Land(ctx context.Context, featureRef string, actor Acto
 	if feature.Status != FeatureOpen {
 		return Feature{}, ErrFeatureClosed
 	}
+	if err := requireNoEffectiveBlockersTx(ctx, s.db, feature.ID); err != nil {
+		return Feature{}, err
+	}
 	if err := s.requireIdle(ctx, feature.ID); err != nil {
 		return Feature{}, err
 	}
@@ -391,7 +548,10 @@ func (s *FeatureService) Land(ctx context.Context, featureRef string, actor Acto
 	if exchangePath == "" {
 		return Feature{}, errors.New("project exchange remote is required for feature branches")
 	}
-	base := s.baseBranch()
+	target, err := s.integrationTarget(ctx, feature)
+	if err != nil {
+		return Feature{}, err
+	}
 	tip, ok, err := flowgit.BranchTip(ctx, exchangePath, feature.Branch)
 	if err != nil {
 		return Feature{}, fmt.Errorf("resolve feature branch tip: %w", err)
@@ -402,39 +562,57 @@ func (s *FeatureService) Land(ctx context.Context, featureRef string, actor Acto
 
 	result, err := flowgit.SquashMergeToBase(ctx, flowgit.SquashMergeInput{
 		ExchangeRepoPath: exchangePath,
-		BaseBranch:       base,
+		BaseBranch:       target.Branch,
 		Branch:           feature.Branch,
 		ExpectedHeadSHA:  tip,
+		ExpectedBaseSHA:  target.TipSHA,
 		Message:          fmt.Sprintf("%s: %s", feature.ID, feature.Title),
 	})
 	landSHA := ""
+	landTargetSHA := target.TipSHA
 	switch {
 	case err == nil:
 		landSHA = result.MergeSHA
+		landTargetSHA = result.PreviousBaseSHA
 	case errors.Is(err, flowgit.ErrNoMergeChanges):
-		baseTip, found, tipErr := flowgit.BranchTip(ctx, exchangePath, base)
+		baseTip, found, tipErr := flowgit.BranchTip(ctx, exchangePath, target.Branch)
 		if tipErr != nil {
 			return Feature{}, fmt.Errorf("resolve base branch tip: %w", tipErr)
 		}
 		if !found {
-			return Feature{}, fmt.Errorf("base branch %q not found in exchange remote", base)
+			return Feature{}, fmt.Errorf("integration target branch %q not found in exchange remote", target.Branch)
 		}
 		landSHA = baseTip
+		landTargetSHA = baseTip
 	default:
 		var conflict *flowgit.MergeConflictError
 		if errors.As(err, &conflict) {
-			return Feature{}, fmt.Errorf("feature branch conflicts with %s; rebase it first: %w", base, err)
+			return Feature{}, fmt.Errorf("feature branch conflicts with %s; rebase it first: %w", target.Branch, err)
 		}
 		return Feature{}, fmt.Errorf("land feature branch: %w", err)
 	}
 
-	now := formatTime(s.now().UTC())
-	if _, err := s.db.ExecContext(ctx, `
+	nowTime := s.now().UTC()
+	now := formatTime(nowTime)
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return Feature{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
 UPDATE features
-SET status = ?, landed_at = ?, land_sha = ?, updated_at = ?
+SET status = ?, landed_at = ?, land_sha = ?, land_target_feature_id = ?,
+	land_target_branch = ?, land_target_sha = ?, updated_at = ?
 WHERE id = ? AND status = 'open'`,
-		string(FeatureLanded), now, landSHA, now, feature.ID); err != nil {
+		string(FeatureLanded), now, landSHA, sqlitex.NullableNonEmptyString(target.FeatureID),
+		target.Branch, landTargetSHA, now, feature.ID); err != nil {
 		return Feature{}, fmt.Errorf("stamp feature landed: %w", err)
+	}
+	if err := reconcileEpicAncestorsTx(ctx, tx, []string{feature.ID}, nowTime); err != nil {
+		return Feature{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Feature{}, err
 	}
 	return s.Get(ctx, feature.ID)
 }
@@ -450,13 +628,28 @@ func (s *FeatureService) Archive(ctx context.Context, featureRef string) (Featur
 	if feature.Status == FeatureArchived {
 		return feature, nil
 	}
+	if err := requireNoEffectiveBlockersTx(ctx, s.db, feature.ID); err != nil {
+		return Feature{}, err
+	}
 	if err := s.requireIdle(ctx, feature.ID); err != nil {
 		return Feature{}, err
 	}
-	if _, err := s.db.ExecContext(ctx, `
+	now := s.now().UTC()
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return Feature{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
 UPDATE features SET status = ?, updated_at = ? WHERE id = ? AND status != ?`,
-		string(FeatureArchived), formatTime(s.now().UTC()), feature.ID, string(FeatureArchived)); err != nil {
+		string(FeatureArchived), formatTime(now), feature.ID, string(FeatureArchived)); err != nil {
 		return Feature{}, fmt.Errorf("archive feature: %w", err)
+	}
+	if err := reconcileEpicAncestorsTx(ctx, tx, []string{feature.ID}, now); err != nil {
+		return Feature{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Feature{}, err
 	}
 	return s.Get(ctx, feature.ID)
 }
@@ -487,6 +680,56 @@ ORDER BY i.created_at, i.id`, strings.TrimSpace(featureID))
 	return tasks, nil
 }
 
+// TreeTasks returns the flattened, deduplicated task membership of a feature:
+// explicit organizational descendants plus tasks cached to this feature or a
+// nested descendant feature. It is the canonical container read; Tasks stays
+// as the direct-membership primitive used by rebase confinement.
+func (s *FeatureService) TreeTasks(ctx context.Context, featureID string) ([]Task, error) {
+	rows, err := s.db.QueryContext(ctx, `
+WITH RECURSIVE descendants(id) AS (
+	VALUES (?)
+	UNION
+	SELECT r.target_item_id FROM descendants
+	JOIN work_item_relations r ON r.source_item_id = descendants.id AND r.kind = 'parent_of'
+), feature_descendants(id) AS (
+	SELECT d.id FROM descendants d JOIN work_items wi ON wi.id = d.id AND wi.kind = 'feature'
+)
+SELECT id FROM (
+	SELECT t.id FROM tasks t JOIN descendants d ON d.id = t.id
+	UNION
+	SELECT t.id FROM tasks t JOIN feature_descendants f ON f.id = t.feature_id
+)
+ORDER BY id`, strings.TrimSpace(featureID))
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := make([]any, len(ids))
+	for i := range ids {
+		args[i] = ids[i]
+	}
+	taskRows, err := s.db.QueryContext(ctx, "SELECT"+taskSelectColumns+`
+FROM tasks i WHERE `+inPredicate("i.id", len(ids))+` ORDER BY i.created_at, i.id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanRows(taskRows, scanTask)
+}
+
 // requireIdle enforces the land/archive precondition: no running rebase and
 // no non-done tasks. A rebase task is itself a non-done feature task, so it
 // appears among the offenders naturally; a taskless running row (the clean
@@ -501,6 +744,11 @@ func (s *FeatureService) requireIdle(ctx context.Context, featureID string) erro
 	} else if found && running.TaskID == "" {
 		offenders = append([]string{"rebase in progress"}, offenders...)
 	}
+	openChildren, err := s.openIntegrationDescendants(ctx, featureID)
+	if err != nil {
+		return err
+	}
+	offenders = append(offenders, openChildren...)
 	if len(offenders) > 0 {
 		return &ErrFeatureActive{Offenders: offenders}
 	}
@@ -519,13 +767,9 @@ func (s *FeatureService) BranchState(ctx context.Context, featureID string) (Fea
 	if exchangePath == "" {
 		return FeatureBranchState{}, errors.New("project exchange remote is required for feature branches")
 	}
-	base := s.baseBranch()
-	baseTip, ok, err := flowgit.BranchTip(ctx, exchangePath, base)
+	target, err := s.integrationTarget(ctx, feature)
 	if err != nil {
-		return FeatureBranchState{}, fmt.Errorf("resolve base branch tip: %w", err)
-	}
-	if !ok {
-		return FeatureBranchState{}, fmt.Errorf("base branch %q not found in exchange remote", base)
+		return FeatureBranchState{}, err
 	}
 	featureTip, ok, err := flowgit.BranchTip(ctx, exchangePath, feature.Branch)
 	if err != nil {
@@ -534,13 +778,13 @@ func (s *FeatureService) BranchState(ctx context.Context, featureID string) (Fea
 	if !ok {
 		return FeatureBranchState{}, fmt.Errorf("feature branch %q not found in exchange remote", feature.Branch)
 	}
-	ahead, behind, err := flowgit.RefDivergence(ctx, exchangePath, base, feature.Branch)
+	ahead, behind, err := flowgit.RefDivergence(ctx, exchangePath, target.Branch, feature.Branch)
 	if err != nil {
 		return FeatureBranchState{}, err
 	}
 
 	return FeatureBranchState{
-		BaseTipSHA:    baseTip,
+		BaseTipSHA:    target.TipSHA,
 		FeatureTipSHA: featureTip,
 		Ahead:         ahead,
 		Behind:        behind,
@@ -558,6 +802,7 @@ SELECT
 	old_tip_sha,
 	target_base,
 	target_base_sha,
+	target_feature_id,
 	new_tip_sha,
 	state,
 	created_at,
@@ -584,6 +829,7 @@ SELECT
 	old_tip_sha,
 	target_base,
 	target_base_sha,
+	target_feature_id,
 	new_tip_sha,
 	state,
 	created_at,
@@ -646,9 +892,15 @@ func (s *FeatureService) RebaseOnMain(ctx context.Context, feature Feature, rest
 	if feature.Status != FeatureOpen {
 		return RebaseStartResult{}, ErrFeatureClosed
 	}
+	if err := requireNoEffectiveBlockersTx(ctx, s.db, feature.ID); err != nil {
+		return RebaseStartResult{}, err
+	}
 	exchangePath := strings.TrimSpace(s.project.ExchangePath)
 	if exchangePath == "" {
 		return RebaseStartResult{}, errors.New("project exchange remote is required for feature branches")
+	}
+	if err := s.requireNoOpenIntegrationDescendants(ctx, feature.ID); err != nil {
+		return RebaseStartResult{}, err
 	}
 
 	if running, found, err := s.RunningRebase(ctx, feature.ID); err != nil {
@@ -671,14 +923,11 @@ func (s *FeatureService) RebaseOnMain(ctx context.Context, feature Feature, rest
 	// so holding the per-project database's single connection through them
 	// would stall every read and write for the project, including an
 	// already-up-to-date rebase that writes nothing.
-	base := s.baseBranch()
-	baseTip, ok, err := flowgit.BranchTip(ctx, exchangePath, base)
+	target, err := s.integrationTarget(ctx, feature)
 	if err != nil {
-		return RebaseStartResult{}, fmt.Errorf("resolve base branch tip: %w", err)
+		return RebaseStartResult{}, err
 	}
-	if !ok {
-		return RebaseStartResult{}, fmt.Errorf("base branch %q not found in exchange remote", base)
-	}
+	base, baseTip := target.Branch, target.TipSHA
 	featureTip, ok, err := flowgit.BranchTip(ctx, exchangePath, feature.Branch)
 	if err != nil {
 		return RebaseStartResult{}, fmt.Errorf("resolve feature branch tip: %w", err)
@@ -721,7 +970,7 @@ func (s *FeatureService) RebaseOnMain(ctx context.Context, feature Feature, rest
 	// rebase the row is inserted inside the write transaction opened by
 	// checkRebaseScopeLocked, so the confinement decision and the persisted
 	// restriction commit atomically.
-	rebaseID, err := s.insertRebaseRow(ctx, scopeTx, feature.ID, "", featureTip, base, baseTip, restrictBlockedToKey(restrictBlockedTo))
+	rebaseID, err := s.insertRebaseRow(ctx, scopeTx, feature.ID, "", featureTip, base, baseTip, target.FeatureID, restrictBlockedToKey(restrictBlockedTo))
 	if err != nil {
 		return RebaseStartResult{}, err
 	}
@@ -731,10 +980,11 @@ func (s *FeatureService) RebaseOnMain(ctx context.Context, feature Feature, rest
 	}
 
 	result, err := flowgit.RebaseOnto(ctx, flowgit.RebaseOntoInput{
-		ExchangePath:   exchangePath,
-		Branch:         feature.Branch,
-		Onto:           base,
-		ExpectedOldSHA: featureTip,
+		ExchangePath:    exchangePath,
+		Branch:          feature.Branch,
+		Onto:            base,
+		ExpectedOldSHA:  featureTip,
+		ExpectedOntoSHA: baseTip,
 	})
 	if err == nil {
 		if err := s.stampRebaseDone(ctx, rebaseID, RebaseFinalized, result.HeadSHA); err != nil {
@@ -792,6 +1042,17 @@ UPDATE feature_rebases SET task_id = ? WHERE id = ?`, task.ID, rebaseID); err !=
 	}
 
 	return RebaseStartResult{Kind: RebaseTaskCreated, Feature: feature, RebaseTaskID: task.ID}, nil
+}
+
+func requireNoEffectiveBlockersTx(ctx context.Context, q workItemRelationQuerier, itemID string) error {
+	count, err := effectiveUnresolvedBlockerCountTx(ctx, q, itemID)
+	if err != nil {
+		return err
+	}
+	if count != 0 {
+		return fmt.Errorf("%w: %s has %d unresolved blocker(s)", ErrWorkItemBlocked, itemID, count)
+	}
+	return nil
 }
 
 // flowIDByName resolves the seeded feature-rebase flow.
@@ -919,9 +1180,10 @@ UPDATE feature_rebases SET state = ?, completed_at = ? WHERE id = ? AND state = 
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO feature_rebases (
 	id, feature_id, task_id, old_tip_sha, target_base, target_base_sha,
-	new_tip_sha, state, created_at, restrict_blocked_to
-) VALUES (?, ?, ?, ?, ?, ?, '', 'running', ?, ?)`,
-		id, rebase.FeatureID, rebase.TaskID, currentTip, rebase.TargetBase, baseTip, now, rebase.RestrictBlockedTo); err != nil {
+	target_feature_id, new_tip_sha, state, created_at, restrict_blocked_to
+) VALUES (?, ?, ?, ?, ?, ?, ?, '', 'running', ?, ?)`,
+		id, rebase.FeatureID, rebase.TaskID, currentTip, rebase.TargetBase, baseTip,
+		nullableStringValue(rebase.TargetFeatureID), now, rebase.RestrictBlockedTo); err != nil {
 		return fmt.Errorf("open redo rebase row: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1134,7 +1396,7 @@ func (s *FeatureService) checkRebaseScopeLocked(ctx context.Context, featureID s
 // and its persisted restrict_blocked_to row commit atomically; a concurrent
 // task creation either lost the write lock to this transaction or lands after
 // the restricted row is visible and is refused by the schedule-time gate.
-func (s *FeatureService) insertRebaseRow(ctx context.Context, tx *sqlitex.Tx, featureID, taskID, oldTip, targetBase, targetBaseSHA, restrictBlockedTo string) (string, error) {
+func (s *FeatureService) insertRebaseRow(ctx context.Context, tx *sqlitex.Tx, featureID, taskID, oldTip, targetBase, targetBaseSHA, targetFeatureID, restrictBlockedTo string) (string, error) {
 	if tx == nil {
 		var err error
 		tx, err = sqlitex.BeginImmediate(ctx, s.db)
@@ -1164,10 +1426,10 @@ func (s *FeatureService) insertRebaseRow(ctx context.Context, tx *sqlitex.Tx, fe
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO feature_rebases (
 	id, feature_id, task_id, old_tip_sha, target_base, target_base_sha,
-	new_tip_sha, state, created_at, restrict_blocked_to
-) VALUES (?, ?, ?, ?, ?, ?, '', 'running', ?, ?)`,
+	target_feature_id, new_tip_sha, state, created_at, restrict_blocked_to
+) VALUES (?, ?, ?, ?, ?, ?, ?, '', 'running', ?, ?)`,
 		id, featureID, sqlitex.NullableNonEmptyString(taskID), oldTip, targetBase, targetBaseSHA,
-		formatTime(s.now().UTC()), restrictBlockedTo); err != nil {
+		sqlitex.NullableNonEmptyString(targetFeatureID), formatTime(s.now().UTC()), restrictBlockedTo); err != nil {
 		return "", fmt.Errorf("insert rebase row: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1198,6 +1460,70 @@ func (s *FeatureService) baseBranch() string {
 		base = "main"
 	}
 	return base
+}
+
+type featureIntegrationTarget struct {
+	FeatureID string
+	Branch    string
+	TipSHA    string
+}
+
+func (s *FeatureService) integrationTarget(ctx context.Context, feature Feature) (featureIntegrationTarget, error) {
+	target := featureIntegrationTarget{Branch: s.baseBranch()}
+	if feature.IntegrationFeatureID != nil {
+		target.FeatureID = strings.TrimSpace(*feature.IntegrationFeatureID)
+		var status string
+		if err := s.db.QueryRowContext(ctx, `SELECT branch, status FROM features WHERE id = ?`, target.FeatureID).Scan(&target.Branch, &status); err != nil {
+			return featureIntegrationTarget{}, err
+		}
+		if status == string(FeatureArchived) {
+			return featureIntegrationTarget{}, fmt.Errorf("integration target feature %s is archived", target.FeatureID)
+		}
+	}
+	tip, found, err := flowgit.BranchTip(ctx, strings.TrimSpace(s.project.ExchangePath), target.Branch)
+	if err != nil {
+		return featureIntegrationTarget{}, fmt.Errorf("resolve integration target tip: %w", err)
+	}
+	if !found {
+		return featureIntegrationTarget{}, fmt.Errorf("integration target branch %q not found in exchange remote", target.Branch)
+	}
+	target.TipSHA = tip
+	return target, nil
+}
+
+func (s *FeatureService) openIntegrationDescendants(ctx context.Context, featureID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+WITH RECURSIVE descendants(id) AS (
+	SELECT id FROM features WHERE integration_feature_id = ?
+	UNION ALL
+	SELECT f.id FROM features f JOIN descendants d ON f.integration_feature_id = d.id
+)
+SELECT d.id FROM descendants d JOIN features f ON f.id = d.id
+WHERE f.status = 'open' ORDER BY d.id`, strings.TrimSpace(featureID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, "child feature "+id)
+	}
+	return ids, rows.Err()
+}
+
+func (s *FeatureService) requireNoOpenIntegrationDescendants(ctx context.Context, featureID string) error {
+	children, err := s.openIntegrationDescendants(ctx, featureID)
+	if err != nil {
+		return err
+	}
+	if len(children) != 0 {
+		return &ErrFeatureActive{Offenders: children}
+	}
+	return nil
 }
 
 // allocateFeatureID mirrors allocateTaskID: per-project, gapless under the
@@ -1242,23 +1568,30 @@ func scanFeature(row featureScanner) (Feature, error) {
 	var feature Feature
 	var status, createdBy string
 	var createdAt, updatedAt string
-	var landedAt sql.NullString
+	var integrationFeatureID, landedAt, landTargetFeatureID sql.NullString
 	err := row.Scan(
 		&feature.ID,
 		&feature.Title,
 		&feature.Body,
 		&feature.Branch,
 		&status,
+		&integrationFeatureID,
+		&feature.CreatedFromSHA,
 		&createdBy,
 		&createdAt,
 		&updatedAt,
 		&landedAt,
 		&feature.LandSHA,
+		&landTargetFeatureID,
+		&feature.LandTargetBranch,
+		&feature.LandTargetSHA,
 	)
 	if err != nil {
 		return Feature{}, err
 	}
 	feature.Status = FeatureStatus(status)
+	feature.IntegrationFeatureID = nullableStringPointer(integrationFeatureID)
+	feature.LandTargetFeatureID = nullableStringPointer(landTargetFeatureID)
 	feature.CreatedBy = Actor(createdBy)
 	parsedCreatedAt, err := parseTime(createdAt)
 	if err != nil {
@@ -1284,7 +1617,7 @@ func scanFeatureRebase(row featureScanner) (FeatureRebase, error) {
 	var rebase FeatureRebase
 	var state string
 	var createdAt string
-	var completedAt sql.NullString
+	var targetFeatureID, completedAt sql.NullString
 	err := row.Scan(
 		&rebase.ID,
 		&rebase.FeatureID,
@@ -1292,6 +1625,7 @@ func scanFeatureRebase(row featureScanner) (FeatureRebase, error) {
 		&rebase.OldTipSHA,
 		&rebase.TargetBase,
 		&rebase.TargetBaseSHA,
+		&targetFeatureID,
 		&rebase.NewTipSHA,
 		&state,
 		&createdAt,
@@ -1302,6 +1636,7 @@ func scanFeatureRebase(row featureScanner) (FeatureRebase, error) {
 		return FeatureRebase{}, err
 	}
 	rebase.State = RebaseState(state)
+	rebase.TargetFeatureID = nullableStringPointer(targetFeatureID)
 	parsedCreatedAt, err := parseTime(createdAt)
 	if err != nil {
 		return FeatureRebase{}, fmt.Errorf("parse rebase created_at: %w", err)

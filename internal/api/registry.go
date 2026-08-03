@@ -24,6 +24,9 @@ import (
 type ProjectBundle struct {
 	Project           coordinator.Project
 	Store             *flowdb.Store
+	WorkItems         *coordinator.WorkItemService
+	Epics             *coordinator.EpicService
+	Containers        *coordinator.ContainerService
 	Tasks             *coordinator.TaskService
 	Features          *coordinator.FeatureService
 	AgentDefs         *coordinator.AgentDefService
@@ -308,6 +311,8 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 	}()
 
 	db := store.DB()
+	workItems := coordinator.NewWorkItemService(db, project.ID)
+	epics := coordinator.NewEpicService(db, project.ID, workItems)
 	tasks := coordinator.NewTaskService(db, project.ID)
 	agentDefs := coordinator.NewInheritedAgentDefService(db, r.globalAgentDefs)
 	flows := coordinator.NewFlowServiceWithAgentDefs(db, agentDefs)
@@ -344,6 +349,7 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 	workflowRuns := coordinator.NewWorkflowRunServiceWithOptions(db, flows, tasks, coordinator.WorkflowRunServiceOptions{
 		ReviewAuthorCycleLimit: r.reviewAuthorCycleLimit,
 	})
+	containers := coordinator.NewContainerService(db, workItems, workflowRuns)
 	// The review submission (ThreadService.SubmitReview) files threads, records
 	// the verdict check, and completes the human gate in one transaction, so
 	// the services it composes are wired back onto it after construction.
@@ -353,6 +359,7 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 	features.Runs = workflowRuns
 	workflowRuns.Features = features
 	workflowArtifacts := coordinator.NewWorkflowArtifactService(db, tasks)
+	workflowArtifacts.Features = features
 	workflowExecutor := coordinator.NewWorkflowExecutor(coordinator.WorkflowExecutorOptions{
 		Database: db, Runs: workflowRuns, Artifacts: workflowArtifacts, Tasks: tasks,
 		Features: features,
@@ -366,6 +373,9 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 	bundle := &ProjectBundle{
 		Project:           project,
 		Store:             store,
+		WorkItems:         workItems,
+		Epics:             epics,
+		Containers:        containers,
 		Tasks:             tasks,
 		Features:          features,
 		AgentDefs:         agentDefs,

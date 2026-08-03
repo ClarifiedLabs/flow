@@ -57,7 +57,7 @@ func TestOpenInitializesSQLite(t *testing.T) {
 	if schemaVersion != "0011_worker_assignments" {
 		t.Fatalf("schema version = %q, want 0011_worker_assignments", schemaVersion)
 	}
-	assertStorageFormat(t, store, "4")
+	assertStorageFormat(t, store, "5")
 
 	var dispatchDefault string
 	if err := store.DB().QueryRowContext(ctx, `
@@ -747,6 +747,8 @@ func TestReviewCycleMigrationBackfillsExistingWorkflowTransitions(t *testing.T) 
 		}
 	}
 	if _, err := database.ExecContext(ctx, `
+INSERT INTO work_items (id, kind, created_at)
+VALUES ('t-existing', 'task', '2026-01-01T00:00:00Z');
 INSERT INTO tasks (id, title, created_by, created_at, updated_at)
 VALUES ('t-existing', 'Existing loop', 'human', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
 INSERT INTO workflow_runs (
@@ -902,6 +904,12 @@ func TestFeatureRebaseBlockRestrictionUpgradeStampsLegacyRows(t *testing.T) {
 	// f-legacy a running and a finalized rebase row (the schema has no
 	// restrict_blocked_to column yet).
 	if _, err := database.ExecContext(ctx, `
+INSERT INTO work_items (id, kind, created_at)
+VALUES
+	('f-legacy', 'feature', '2026-01-01T00:00:00Z'),
+	('f-post', 'feature', '2026-01-01T00:00:00Z'),
+	('t-legacy-rebase', 'task', '2026-01-01T00:00:00Z'),
+	('t-post-rebase', 'task', '2026-01-01T00:00:00Z');
 INSERT INTO features (id, title, branch, created_by, created_at, updated_at)
 VALUES
 	('f-legacy', 'legacy feature', 'feature/legacy', 'human', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),

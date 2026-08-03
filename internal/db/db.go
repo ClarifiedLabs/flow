@@ -30,7 +30,7 @@ type Store struct {
 
 // Open opens a per-project database and applies the per-project migration set.
 func Open(ctx context.Context, path string) (*Store, error) {
-	return openWith(ctx, "sqlite3", path, migrationFS, "migrations/*.sql", "4")
+	return openWith(ctx, "sqlite3", path, migrationFS, "migrations/*.sql", "5")
 }
 
 // OpenGlobal opens the coordinator-wide database (projects registry, workers,
@@ -43,7 +43,7 @@ func OpenGlobal(ctx context.Context, path string) (*Store, error) {
 // the per-project migration set. Tests use it to wrap the real driver, for
 // example to count the queries a read model issues.
 func OpenWithDriver(ctx context.Context, driverName, path string) (*Store, error) {
-	return openWith(ctx, driverName, path, migrationFS, "migrations/*.sql", "4")
+	return openWith(ctx, driverName, path, migrationFS, "migrations/*.sql", "5")
 }
 
 func openWith(ctx context.Context, driverName, path string, migrations embed.FS, glob string, expectedStorageFormat string) (*Store, error) {

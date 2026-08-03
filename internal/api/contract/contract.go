@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	ProtocolVersion   = "4"
+	ProtocolVersion   = "5"
 	ProtocolHeader    = "Flow-Protocol-Version"
 	IdempotencyHeader = "Idempotency-Key"
 	AuthScheme        = "Bearer "
@@ -77,6 +77,53 @@ type TaskRelationRequest struct {
 	// transaction, so a child-of link cannot partially succeed. The link and
 	// unlink endpoints ignore it.
 	TargetIsNewTask bool `json:"target_is_new_task,omitempty"`
+}
+
+type CreateEpicRequest struct {
+	Title            string `json:"title"`
+	Body             string `json:"body,omitempty"`
+	Priority         int    `json:"priority,omitempty"`
+	CompletionPolicy string `json:"completion_policy,omitempty"`
+	ParentItemID     string `json:"parent_item_id,omitempty"`
+}
+
+type EditEpicRequest struct {
+	Title            *string `json:"title,omitempty"`
+	Body             *string `json:"body,omitempty"`
+	Priority         *int    `json:"priority,omitempty"`
+	CompletionPolicy *string `json:"completion_policy,omitempty"`
+}
+
+type WorkItemRelationRequest struct {
+	SourceItemID string `json:"source_item_id"`
+	TargetItemID string `json:"target_item_id"`
+	Kind         string `json:"kind"`
+}
+
+type MoveWorkItemRequest struct {
+	ParentItemID string `json:"parent_item_id"`
+}
+
+type WorkItemResponse struct {
+	Item      coordinator.WorkItemSummary    `json:"item"`
+	Relations []coordinator.WorkItemRelation `json:"relations,omitempty"`
+	Blockers  []coordinator.WorkItemBlocker  `json:"blockers,omitempty"`
+	Children  []WorkItemResponse             `json:"children,omitempty"`
+}
+
+type WorkItemsResponse struct {
+	Items []coordinator.WorkItemSummary `json:"items"`
+}
+
+type EpicResponse struct {
+	Epic     coordinator.Epic              `json:"epic"`
+	Item     coordinator.WorkItemSummary   `json:"item"`
+	Children []coordinator.WorkItemSummary `json:"children,omitempty"`
+	Blockers []coordinator.WorkItemBlocker `json:"blockers,omitempty"`
+}
+
+type EpicsResponse struct {
+	Epics []EpicResponse `json:"epics"`
 }
 
 type ReviewFollowUpFinding struct {
@@ -323,8 +370,9 @@ type TasksResponse struct {
 // CreateFeatureRequest creates a feature: a project-child task group with its
 // own long-lived branch in the exchange.
 type CreateFeatureRequest struct {
-	Title string `json:"title"`
-	Body  string `json:"body"`
+	Title        string `json:"title"`
+	Body         string `json:"body"`
+	ParentItemID string `json:"parent_item_id,omitempty"`
 }
 
 // UpdateFeatureRequest edits feature metadata; nil fields are left unchanged.
@@ -346,6 +394,10 @@ type FeatureTaskCounts struct {
 // rebase history.
 type FeatureResponse struct {
 	Feature       coordinator.Feature             `json:"feature"`
+	Item          *coordinator.WorkItemSummary    `json:"item,omitempty"`
+	Parent        *coordinator.WorkItemSummary    `json:"parent,omitempty"`
+	Children      []coordinator.WorkItemSummary   `json:"children,omitempty"`
+	Blockers      []coordinator.WorkItemBlocker   `json:"blockers,omitempty"`
 	Counts        FeatureTaskCounts               `json:"counts"`
 	BranchState   *coordinator.FeatureBranchState `json:"branch_state,omitempty"`
 	RunningRebase *coordinator.FeatureRebase      `json:"running_rebase,omitempty"`

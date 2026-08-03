@@ -155,18 +155,22 @@ func normalizedTaskSetMaterializerConfig(config MaterializeTaskSetNodeConfig) Ma
 
 func validateTaskSetWorkflowSelectionTx(ctx context.Context, tx queryer, manifest TaskSetManifest, config MaterializeTaskSetNodeConfig) error {
 	config = normalizedTaskSetMaterializerConfig(config)
+	items := manifest.Items
 	if config.DefaultChildFlowID == "" {
 		return errors.New("materialization requires a default child flow")
 	}
-	if len(manifest.Tasks) > config.MaxItems {
-		return fmt.Errorf("task-set contains %d tasks; maximum is %d", len(manifest.Tasks), config.MaxItems)
+	if len(items) > config.MaxItems {
+		return fmt.Errorf("task-set contains %d items; maximum is %d", len(items), config.MaxItems)
 	}
 	if err := requireFlowTx(ctx, tx, config.DefaultChildFlowID); err != nil {
 		return fmt.Errorf("default child flow: %w", err)
 	}
 
 	validated := map[string]bool{config.DefaultChildFlowID: true}
-	for _, item := range manifest.Tasks {
+	for _, item := range items {
+		if item.Kind != "" && item.Kind != WorkItemTask {
+			continue
+		}
 		flowID := strings.TrimSpace(item.FlowID)
 		if flowID == "" {
 			flowID = config.DefaultChildFlowID

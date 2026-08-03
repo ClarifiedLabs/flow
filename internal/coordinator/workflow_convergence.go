@@ -478,6 +478,7 @@ UPDATE workflow_runs SET held_at = NULL, held_by = '', version = version + 1 WHE
 
 type convergenceMutationTx interface {
 	workflowTransitionExecer
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
@@ -598,6 +599,9 @@ WHERE task_id = ? AND state = 'running'`, rebaseState, sqlitex.FormatTime(now), 
 		ToTaskState: string(LifecycleDone), EventKind: "owner_done", PayloadJSON: string(payload),
 		Actor: string(actor), CreatedAt: now,
 	}); err != nil {
+		return Task{}, err
+	}
+	if err := reconcileEpicAncestorsTx(ctx, tx, []string{taskID}, now); err != nil {
 		return Task{}, err
 	}
 	return scanTask(tx.QueryRowContext(ctx, "SELECT"+taskSelectColumns+"\nFROM tasks i WHERE i.id = ?", taskID))

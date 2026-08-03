@@ -306,9 +306,9 @@ SELECT
 	r.created_at
 FROM review_follow_up_actions f
 JOIN tasks t ON t.id = f.task_id
-LEFT JOIN task_relations r
-	ON r.source_task_id = f.source_task_id
-	AND r.target_task_id = f.task_id
+LEFT JOIN work_item_relations r
+	ON r.source_item_id = f.source_task_id
+	AND r.target_item_id = f.task_id
 	AND r.kind = ?`
 
 func scanTaskReviewFollowUp(scanner taskScanner) (TaskReviewFollowUp, error) {
