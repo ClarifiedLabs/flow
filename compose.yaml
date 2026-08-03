@@ -29,7 +29,10 @@ services:
       timeout: 3s
       retries: 12
 
+  # Static long-running workers are a compatibility path. New local deployments
+  # should use the assignment-backed kind recipe instead.
   flow-worker:
+    profiles: ["legacy-workers"]
     build:
       context: .
       target: flow-worker
@@ -63,6 +66,7 @@ services:
       - flow-worker-docker:/home/flow/.local/share/docker
 
   flow-worker-2:
+    profiles: ["legacy-workers"]
     build:
       context: .
       target: flow-worker

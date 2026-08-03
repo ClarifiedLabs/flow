@@ -198,6 +198,7 @@ jobs:
           - flow
           - flow-server
           - flow-worker
+          - flow-orchestrator
         target:
           - name: macos-arm64
             os_label: macos-26
@@ -292,6 +293,16 @@ jobs:
             command: flow-worker
             os_label: ubuntu-24.04-arm
             goarch: arm64
+          - image: flow-orchestrator
+            target: flow-orchestrator
+            command: flow-orchestrator
+            os_label: ubuntu-24.04
+            goarch: amd64
+          - image: flow-orchestrator
+            target: flow-orchestrator
+            command: flow-orchestrator
+            os_label: ubuntu-24.04-arm
+            goarch: arm64
     steps:
       - name: Checkout
         uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
@@ -363,6 +374,14 @@ jobs:
             target: flow-worker
             os_label: ubuntu-24.04-arm
             goarch: arm64
+          - image: flow-orchestrator
+            target: flow-orchestrator
+            os_label: ubuntu-24.04
+            goarch: amd64
+          - image: flow-orchestrator
+            target: flow-orchestrator
+            os_label: ubuntu-24.04-arm
+            goarch: arm64
     steps:
       - name: Checkout
         uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
@@ -431,6 +450,7 @@ jobs:
         image:
           - flow-server
           - flow-worker
+          - flow-orchestrator
     steps:
       - name: Log in to GHCR
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
@@ -668,7 +688,7 @@ jobs:
           for bottle_json in "${bottle_jsons[@]}"; do
             brew bottle --merge --write --no-commit "$bottle_json"
           done
-          git diff -- Formula/flow.rb Formula/flow-server.rb Formula/flow-worker.rb Formula/flow-full.rb
+          git diff -- Formula/flow.rb Formula/flow-server.rb Formula/flow-worker.rb Formula/flow-orchestrator.rb Formula/flow-full.rb
           echo "Dry run only: would update ClarifiedLabs/homebrew-tap for ${TAG}"
 
   homebrew-publish:
@@ -754,7 +774,7 @@ jobs:
           cd homebrew-tap
           git config user.name "${{ steps.tap-token.outputs.app-slug }}[bot]"
           git config user.email "${{ steps.tap-token.outputs.app-slug }}[bot]@users.noreply.github.com"
-          git add Formula/flow.rb Formula/flow-server.rb Formula/flow-worker.rb Formula/flow-full.rb
+          git add Formula/flow.rb Formula/flow-server.rb Formula/flow-worker.rb Formula/flow-orchestrator.rb Formula/flow-full.rb
           if git diff --cached --quiet; then
             echo "No Homebrew formula changes"
           else

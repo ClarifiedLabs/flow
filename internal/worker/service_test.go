@@ -346,7 +346,7 @@ func TestConcurrentKeyedEnqueueDeduplicatesLiveJobsAndReusesTerminalKey(t *testi
 	}
 }
 
-func TestCapacityBucketsAreIndependent(t *testing.T) {
+func TestWorkerCannotClaimAcrossCapacityBucketsWhileLeaseIsLive(t *testing.T) {
 	ctx := context.Background()
 	store, directory, service := newWorkerService(t)
 	task := createTask(t, store)
@@ -395,8 +395,11 @@ func TestCapacityBucketsAreIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim ephemeral: %v", err)
 	}
-	if !ok || claimedEphemeral.Job.ID != ephemeral.ID {
-		t.Fatalf("ephemeral claim = %+v ok=%v, want %s", claimedEphemeral, ok, ephemeral.ID)
+	if ok {
+		t.Fatalf("ephemeral claim = %+v, want blocked while persistent lease %s is live", claimedEphemeral, claimedPersistent.Lease.ID)
+	}
+	if queued, err := service.GetJob(ctx, ephemeral.ID); err != nil || queued.State != JobQueued {
+		t.Fatalf("ephemeral job after blocked claim = %+v err=%v, want queued", queued, err)
 	}
 }
 
@@ -765,11 +768,14 @@ func TestCoordinatorRestartLeaseProtectionDoesNotReviveTerminalOrShortenLiveLeas
 
 	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
-	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID:                "w-local",
-		CapacityEphemeral: 3,
-	}); err != nil {
-		t.Fatalf("register worker: %v", err)
+	workerIDs := []string{"w-long", "w-terminal", "w-released"}
+	for _, workerID := range workerIDs {
+		if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
+			ID:                workerID,
+			CapacityEphemeral: 1,
+		}); err != nil {
+			t.Fatalf("register worker %s: %v", workerID, err)
+		}
 	}
 
 	var leases []Lease
@@ -782,7 +788,7 @@ func TestCoordinatorRestartLeaseProtectionDoesNotReviveTerminalOrShortenLiveLeas
 			t.Fatalf("enqueue job %d: %v", priority, err)
 		}
 		claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
-			WorkerID:      "w-local",
+			WorkerID:      workerIDs[priority],
 			Buckets:       []CapacityBucket{BucketEphemeral},
 			LeaseDuration: duration,
 		})
@@ -1212,6 +1218,7 @@ func newWorkerService(t *testing.T) (*flowdb.Store, *Directory, *Service) {
 		_ = global.Close()
 	})
 
+	ensureWorkerAssignmentsTable(t, store.DB())
 	return store, NewDirectory(global.DB()), NewService(store.DB())
 }
 

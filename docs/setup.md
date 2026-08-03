@@ -15,24 +15,25 @@ For a source-built local setup:
 
 ## Local Binaries
 
-Build the three commands and put them on `PATH`:
+Build the four commands and put them on `PATH`:
 
 ```sh
 make build
 export PATH="$PWD/bin:$PATH"
 ```
 
-Create private owner and worker join tokens. The owner token authorizes
-human/admin CLI calls and web UI bootstrap. The server accepts the reusable
-worker join token from workers and tasks each joined worker its own worker
-token.
+Create private owner and orchestrator tokens. The owner token authorizes
+human/admin CLI calls and web UI bootstrap. The orchestrator token authorizes
+only durable assignment reservation and reconciliation for the provider IDs
+bound to it. A worker join token is needed only for static service-mode workers,
+not assignment workers.
 
 ```sh
 mkdir -p .flow-local
 openssl rand -hex 32 > .flow-local/owner.token
-openssl rand -hex 32 > .flow-local/worker-join.token
+openssl rand -hex 32 > .flow-local/orchestrator.token
 chmod 600 .flow-local/owner.token
-chmod 600 .flow-local/worker-join.token
+chmod 600 .flow-local/orchestrator.token
 ```
 
 Start the coordinator in terminal 1:
@@ -40,7 +41,8 @@ Start the coordinator in terminal 1:
 ```sh
 flow-server serve \
   --owner-token-file .flow-local/owner.token \
-  --worker-join-token-file .flow-local/worker-join.token
+  --orchestrator-token-file .flow-local/orchestrator.token \
+  --orchestrator-provider-ids local-darwin
 ```
 
 On startup `flow-server serve` opens the local Flow data dir
@@ -57,26 +59,43 @@ hook_token_file: /path/to/flow/hook.token
 client_config_file: /path/to/config/flow/config.yaml
 ```
 
-Token files must be mode `0600`; do not commit them. The worker config is
-supplied separately. From a source checkout, use `examples/flow-worker.yaml` as
-the local starting point. Package installs also include these examples under
-their package share directory.
+Token files must be mode `0600`; do not commit them. Start the local Darwin
+assignment provider in terminal 2 with a private orchestrator config:
 
-Start the global worker in terminal 2:
-
-```sh
-# Use /usr/share/flow/examples/flow-worker.yaml for Linux packages,
-# "$(brew --prefix flow-worker)/share/flow-worker/examples/flow-worker.yaml" for Homebrew,
-# or examples/flow-worker.yaml from a source checkout.
-cp examples/flow-worker.yaml .flow-local/worker.yaml
-FLOW_WORKER_JOIN_TOKEN="$(tr -d '\r\n' < .flow-local/worker-join.token)" \
-  flow-worker -c .flow-local/worker.yaml
+```yaml
+# .flow-local/orchestrator.yaml
+coordinator_url: http://127.0.0.1:8421
+poll_interval: 5s
+retry_base: 1s
+retry_max: 1m
+profiles:
+  - name: local-macos
+    provider: darwin
+    provider_id: local
+    max_concurrency: 5
+    startup_timeout: 2m
+    accepts: [persistent_agent, ephemeral]
+    labels:
+      os: macos
+      local: "true"
+    darwin:
+      binary: flow-worker
+      state_dir: .flow-local/orchestrator
+      work_dir: .flow-local/orchestrator-work
 ```
 
-The example worker config has worker id `w-local`, five persistent-agent slots,
-five ephemeral slots, and no long-lived worker token. On startup `flow-worker`
-uses `FLOW_WORKER_JOIN_TOKEN` to join the server, receives a scoped worker
-token, clears the join token from its environment, and registers itself.
+```sh
+FLOW_ORCHESTRATOR_TOKEN="$(tr -d '\r\n' < .flow-local/orchestrator.token)" \
+  flow-orchestrator -c .flow-local/orchestrator.yaml
+```
+
+The coordinator durably reserves one exact queued job per assignment. The
+orchestrator then starts one `flow-worker --one-shot` Darwin child with a direct,
+assignment-specific worker token. It stores private worker config, PID, status,
+and logs under `state_dir`, allowing restart inspection and cleanup. Preserve
+that directory while assignments are open and keep it mode 0700. Darwin workers
+share the orchestrator's macOS account, so use this provider only for mutually
+trusted local work; use Kubernetes when jobs require a workload security boundary.
 
 Onboard a repository in terminal 3 while the server is running:
 
@@ -154,12 +173,14 @@ Compose bind-mounts the repository's `docker/flow-worker.yaml` read-only at
 capacity without modifying the image's example configuration. For example:
 
 ```yaml
-capacity:
-  persistent_agent: 3 # concurrent author, reviewer, verifier, and console jobs
-  ephemeral: 8        # concurrent CI/check jobs
+accepts:
+  - persistent_agent # author, reviewer, verifier, and console jobs
+  - ephemeral        # CI/check jobs
 ```
 
-Restart the worker after editing its configuration; a rebuild is not required:
+Acceptance selects workload buckets, not concurrency: each worker identity can
+hold only one live lease total. Restart the worker after editing its
+configuration; a rebuild is not required:
 
 ```sh
 docker compose up -d --force-recreate flow-worker
@@ -254,9 +275,12 @@ credential; replacing the token file or `--owner-token` value and restarting the
 coordinator rotates the owner credential and revokes previous live owner
 tokens.
 
-## Worker Setup
+## Static Worker Setup
 
-One worker can serve every project. Start from the example config and pass a
+The assignment orchestrator is the canonical dynamic worker path. A static
+service-mode worker remains available for Docker Compose, remote machines, and
+manual operation. It can serve every project. Create a reusable worker join
+token, add it to `flow-server serve`, start from the example config, and pass the
 join token through the environment:
 
 ```sh
@@ -268,40 +292,39 @@ Each job claim identifies its project. The worker resolves that project's Git
 exchange as `<coordinator_url>/git/projects/<project-id>/exchange.git`, clones
 it into its `work_dir`, checks out the per-job branch, and runs the job in tmux.
 
-The example `worker.yaml` configures one local worker and deliberately omits the
-long-lived worker token:
+The canonical `worker.yaml` form declares accepted workload buckets and
+intentionally omits the worker token:
 
 ```yaml
 worker_id: w-local
 coordinator_url: http://127.0.0.1:8421
 labels:
   local: "true"
-capacity:
-  persistent_agent: 5
-  ephemeral: 5
+accepts: [persistent_agent, ephemeral]
 ```
 
 At registration time, `flow-worker` probes its environment and advertises agent
 harness capabilities as labels:
 
 - `agent.harness.harness: "true"` when `harness --check-model-proxy` passes.
-- `capacity.persistent_agent` controls concurrent author, reviewer, verifier,
-  and console agent jobs.
-- `capacity.ephemeral` controls concurrent CI/check jobs.
+- `persistent_agent` accepts author, reviewer, verifier, and console agent jobs.
+- `ephemeral` accepts CI/check jobs. It is a workload bucket, not a lifecycle
+  flag.
 
-Capacity is the concurrency limit for this configured worker. A single
-`flow-worker` process starts one internal claim loop per configured slot, so
-`persistent_agent: 1` and `ephemeral: 2` can run up to three jobs at the same
-time across all projects. Persistent slots are shared rather than reserved by
-role or project: every child of a multi-agent review/verification node competes
-for the same slots as authors, consoles, and children from other projects. A
-multi-agent barrier may consequently wait for capacity even though its graph
-node is already active. Use separate configs with distinct `worker_id` values
-when you want separate labels, capacity, credentials, hosts, or work
-directories.
+One worker identity can hold one live lease total, regardless of how many
+buckets it accepts. Concurrency comes from separate worker identities (normally
+separate durable assignments), not capacity magnitudes or internal claim loops.
+Legacy positive `capacity.persistent_agent` and `capacity.ephemeral` values are
+accepted for compatibility but normalized to 1; values above 1 emit a warning
+and do not increase concurrency. Do not configure both `accepts` and `capacity`.
 
-Edit the YAML to change labels, capacity, `coordinator_url`, `work_dir`, or
-terminal settings. Keep the join token private; it can be reused to start more
+Multi-agent children therefore compete for independently provisioned workers,
+and a barrier may wait even though its graph node is active. Use separate static
+configs with distinct `worker_id` values when you need concurrent static workers
+or different labels, credentials, hosts, or work directories.
+
+Edit the YAML to change labels, accepted buckets, `coordinator_url`, `work_dir`,
+or terminal settings. Keep the join token private; it can be reused to start more
 workers, but anyone with it can mint a worker token for a configured worker id.
 Use a distinct `worker_id` for each concurrent worker; joining with an existing
 `worker_id` rotates that worker's previous token.

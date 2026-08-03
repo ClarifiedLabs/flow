@@ -68,7 +68,7 @@ fi
 
 payload="${work_dir}/payload"
 mkdir -p "${payload}/usr/local/bin" "${payload}/usr/local/share/flow/examples"
-for name in flow flow-server flow-worker; do
+for name in flow flow-server flow-worker flow-orchestrator; do
 	install -m 0755 "${stage_dir}/${name}" "${payload}/usr/local/bin/${name}"
 	if [[ "$signing_mode" == "signed" ]]; then
 		codesign --force --timestamp --options runtime --sign "$app_identity" "${payload}/usr/local/bin/${name}"

@@ -8,24 +8,8 @@ kind: Namespace
 metadata:
   name: flow
 ---
-# Generate real values before applying, e.g.:
-#   kubectl -n flow create secret generic flow-tokens \
-#     --from-literal=owner="$(openssl rand -hex 32)" \
-#     --from-literal=hook="$(openssl rand -hex 32)" \
-#     --from-literal=worker-join="$(openssl rand -hex 32)" \
-#     --from-literal=orchestrator="$(openssl rand -hex 32)"
-apiVersion: v1
-kind: Secret
-metadata:
-  name: flow-tokens
-  namespace: flow
-type: Opaque
-stringData:
-  owner: CHANGE_ME_owner_token
-  hook: CHANGE_ME_hook_token
-  worker-join: CHANGE_ME_worker_join_token
-  orchestrator: CHANGE_ME_orchestrator_token
----
+# Create the flow-tokens Secret out of band before applying this manifest. Never
+# commit live credentials or placeholder credentials to the normal apply path.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -90,6 +74,8 @@ spec:
       containers:
         - name: flow-server
           image: ghcr.io/clarifiedlabs/flow-server:latest
+          command:
+            - flow-server
           args:
             - serve
             - --config
@@ -98,10 +84,15 @@ spec:
             - /etc/flow/tokens/owner
             - --hook-token-file
             - /etc/flow/tokens/hook
+            # Required only while optional static workers use the join endpoint;
+            # assignment-created Jobs authenticate with direct worker tokens.
             - --worker-join-token-file
             - /etc/flow/tokens/worker-join
             - --orchestrator-token-file
             - /etc/flow/tokens/orchestrator
+            - --orchestrator-provider-ids
+            # Retain retired IDs here until all of their durable assignments are cleaned.
+            - in-cluster
             - --no-write-client-config
           ports:
             - name: api

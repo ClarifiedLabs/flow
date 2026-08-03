@@ -3,9 +3,8 @@ coordinator_url: http://flow-server:8421
 work_dir: /flow/work
 labels:
   local: "true"
-capacity:
-  persistent_agent: 10
-  ephemeral: 10
+# Bucket acceptance is boolean; this compatibility worker claims sequentially.
+accepts: [persistent_agent, ephemeral]
 cleanup:
   interval: 5m
   orphan_grace: 1h

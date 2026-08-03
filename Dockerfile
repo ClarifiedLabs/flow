@@ -59,6 +59,22 @@ EXPOSE 8421 8422
 USER flow
 CMD ["flow-server", "serve", "--config", "/usr/share/flow/examples/docker/flow-server.yaml"]
 
+FROM flow-server AS flow-orchestrator
+
+ARG VERSION
+ARG COMMIT
+ARG DATE
+
+LABEL org.opencontainers.image.source="https://github.com/ClarifiedLabs/flow" \
+      org.opencontainers.image.title="Flow Orchestrator" \
+      org.opencontainers.image.description="Durable assignment reconciler for one-job workers" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.created="${DATE}" \
+      org.opencontainers.image.licenses="MIT"
+
+CMD ["flow-orchestrator"]
+
 FROM flow-server AS flow-worker
 
 ARG VERSION
@@ -260,21 +276,3 @@ EXPOSE 8422
 USER flow
 ENTRYPOINT ["tini", "-g", "--", "flow-worker-entrypoint"]
 CMD ["flow-worker", "-c", "/usr/share/flow/examples/docker/flow-worker.yaml"]
-
-FROM flow-server AS flow-orchestrator
-
-ARG VERSION
-ARG COMMIT
-ARG DATE
-
-LABEL org.opencontainers.image.source="https://github.com/ClarifiedLabs/flow" \
-      org.opencontainers.image.title="Flow Orchestrator" \
-      org.opencontainers.image.description="Flow worker autoscaler: scales the worker Kubernetes Deployment from the coordinator queue depth" \
-      org.opencontainers.image.version="${VERSION}" \
-      org.opencontainers.image.revision="${COMMIT}" \
-      org.opencontainers.image.created="${DATE}" \
-      org.opencontainers.image.licenses="MIT"
-
-EXPOSE 8422
-USER flow
-CMD ["flow-orchestrator"]

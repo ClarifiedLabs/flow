@@ -10,8 +10,10 @@ under `/ui/*` on the same coordinator address.
 
 The web UI setup is:
 
-1. Start `flow-server serve` with an owner token and worker join token.
-2. Start `flow-worker` with a worker config and `FLOW_WORKER_JOIN_TOKEN`.
+1. Start `flow-server serve` with owner and orchestrator tokens.
+2. Start `flow-orchestrator` with a Kubernetes or Darwin assignment profile.
+   For a deliberately static worker, start `flow-worker` with a worker config
+   and `FLOW_WORKER_JOIN_TOKEN` instead.
 3. Onboard at least one repository with `flow init`.
 4. Run `flow ui` from a registered repository, or run
    `flow ui --server URL --token TOKEN`.
@@ -313,10 +315,11 @@ flow thread reopen THREAD_ID
 
 ## Multi-Agent Nodes and Check Configuration
 
-Repo-versioned CI configuration lives in `.flow/checks/*.yaml`. CI jobs use
-ephemeral capacity. Review and verification agents are selected by their graph
-nodes and use persistent agent capacity, so workers need the
-`agent.harness.harness: "true"` label.
+Repo-versioned CI configuration lives in `.flow/checks/*.yaml`. CI jobs use the
+`ephemeral` workload bucket. Review and verification agents are selected by
+their graph nodes and use the `persistent_agent` bucket, so workers need the
+`agent.harness.harness: "true"` label. Bucket names express accepted workload,
+not worker process lifetime or multi-job capacity.
 
 An `automated_checks` node runs the repository CI definitions. A
 `change_review` or `verify_change` node is a multi-agent node: it fans out one
@@ -345,9 +348,9 @@ should not set both names.
 
 Each node visit receives distinct check identities, so a loop back through
 review or verification executes every configured child again. All of those
-children share workers' `persistent_agent` capacity with author and other agent
+children share the `persistent_agent` worker class with author and other agent
 jobs; the barrier can therefore wait while another project or node uses the
-available slots.
+available one-job workers.
 
 Set `requires` labels on CI definitions to match workers that can run the
 entrypoint. Review and verifier instructions belong in agent definitions, not
@@ -413,6 +416,32 @@ The underlying API routes are:
   scope.
 
 A failed upload is logged to the job's stdout and never fails the job.
+
+## Assignment operations
+
+Dynamic workers are backed by coordinator-owned assignments in each job's
+project database. The orchestrator recovers all existing assignments before it
+reserves new work, then creates exactly one Kubernetes Job plus private Secret
+or one Darwin child for each new assignment. The child runs
+`flow-worker --one-shot` with a direct assignment-worker credential; it never
+needs a join token.
+
+Worker configs use `accepts: [persistent_agent, ephemeral]`. Legacy positive
+capacity values only mean that the bucket is accepted and normalize to 1. One
+worker identity can hold one live lease total. Use more assignments, not larger
+capacity numbers, for concurrency.
+
+After an orchestrator restart, preserve and reuse profile names, provider IDs,
+Kubernetes namespaces, and Darwin state directories. Readiness stays false until
+a complete recovery-first cycle succeeds. Closed assignments remain pending
+cleanup until their provider resource is deleted, worker credentials are
+revoked, the worker-directory row is removed, and cleanup is recorded. Claimed
+work remains governed by lease expiry and job recovery even if its provider
+resource disappears.
+
+All binary telemetry endpoints (`/readyz`, `/livez`, and `/metrics`) are
+unauthenticated. Keep them loopback-only by default or cluster-internal in
+Kubernetes; never expose them through a public Ingress or LoadBalancer.
 
 ## Notes
 

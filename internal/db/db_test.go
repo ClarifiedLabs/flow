@@ -47,14 +47,15 @@ func TestOpenInitializesSQLite(t *testing.T) {
 		"0008_history_capture_hardening",
 		"0009_history_capture_legacy_backfill",
 		"0010_feature_rebase_block_restriction",
+		"0011_worker_assignments",
 	)
 
 	var schemaVersion string
 	if err := store.DB().QueryRowContext(ctx, "SELECT value FROM app_metadata WHERE key = 'schema_version'").Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version metadata: %v", err)
 	}
-	if schemaVersion != "0010_feature_rebase_block_restriction" {
-		t.Fatalf("schema version = %q, want 0010_feature_rebase_block_restriction", schemaVersion)
+	if schemaVersion != "0011_worker_assignments" {
+		t.Fatalf("schema version = %q, want 0011_worker_assignments", schemaVersion)
 	}
 	assertStorageFormat(t, store, "4")
 
@@ -104,7 +105,7 @@ SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'feature_id'`).Scan
 	}
 
 	assertTables(t, store,
-		[]string{"tasks", "workflow_runs", "workflow_node_runs", "workflow_artifacts", "workflow_waits", "workflow_transitions", "jobs", "leases", "sessions", "changes", "features", "feature_rebases"},
+		[]string{"tasks", "workflow_runs", "workflow_node_runs", "workflow_artifacts", "workflow_waits", "workflow_transitions", "jobs", "leases", "worker_assignments", "sessions", "changes", "features", "feature_rebases"},
 		[]string{"projects", "workers", "tokens", "web_sessions", "web_bootstrap_tokens", "workflow_state", "transitions", "task_flow_cursor", "task_phase_handoffs", "flow_nodes_new", "flow_edges_backup"},
 	)
 }

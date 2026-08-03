@@ -1142,7 +1142,7 @@ func TestWorkerAndJobDiagnosticsUseAPI(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("workers exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "w-local\tregistered\tpersistent_agent=1\tephemeral=2\tlabels=agent.harness.harness=true,local=true") {
+	if !strings.Contains(stdout.String(), "w-local\tregistered\tpersistent_agent=1\tephemeral=1\tlabels=agent.harness.harness=true,local=true") {
 		t.Fatalf("workers output = %q", stdout.String())
 	}
 

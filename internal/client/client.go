@@ -991,7 +991,89 @@ func (c *Client) verifyThread(threadID string, action string, body string, lease
 	return response.Thread, nil
 }
 
+func (c *Client) ReserveProvisionerAssignment(ctx context.Context, input ReserveProvisionerAssignmentInput) (ReserveProvisionerAssignmentResult, error) {
+	request := contract.ReserveProvisionerAssignmentRequest{
+		ProviderID: input.ProviderID, ProviderRequestID: input.ProviderRequestID,
+		ProfileName: input.ProfileName, ProviderType: input.ProviderType, ProviderOptions: input.ProviderOptions, MaxConcurrency: input.MaxConcurrency,
+		AllowedRoles: input.AllowedRoles, AllowedBuckets: input.AllowedBuckets,
+		Labels: input.Labels, Taints: input.Taints, HarnessModels: input.HarnessModels,
+		RequiredSelector:      input.RequiredSelector,
+		StartupTimeoutSeconds: durationSeconds(input.StartupTimeout),
+		WaitSeconds:           durationSeconds(input.Wait),
+	}
+	var response contract.ReserveProvisionerAssignmentResponse
+	if err := c.doContext(ctx, http.MethodPost, "/v2/provisioner/assignments/reserve", request, nil, &response); err != nil {
+		return ReserveProvisionerAssignmentResult{}, err
+	}
+	return ReserveProvisionerAssignmentResult(response), nil
+}
+
+func (c *Client) ListProvisionerAssignments(ctx context.Context, filter ProvisionerAssignmentFilter) ([]ProvisionerAssignment, error) {
+	query := url.Values{}
+	query.Set("project_id", strings.TrimSpace(filter.ProjectID))
+	query.Set("provider_id", strings.TrimSpace(filter.ProviderID))
+	query.Set("profile_name", strings.TrimSpace(filter.ProfileName))
+	query.Set("provider_request_id", strings.TrimSpace(filter.ProviderRequestID))
+	query.Set("worker_id", strings.TrimSpace(filter.WorkerID))
+	query.Set("job_id", strings.TrimSpace(filter.JobID))
+	for _, state := range filter.States {
+		query.Add("state", string(state))
+	}
+	if filter.OpenOnly {
+		query.Set("open_only", "true")
+	}
+	if filter.NeedsCleanup {
+		query.Set("needs_cleanup", "true")
+	}
+	var response contract.ProvisionerAssignmentsResponse
+	if err := c.doContext(ctx, http.MethodGet, "/v2/provisioner/assignments", nil, query, &response); err != nil {
+		return nil, err
+	}
+	return response.Assignments, nil
+}
+
+func (c *Client) RecordProvisionerAssignmentAttempt(ctx context.Context, assignmentID string, input RecordProvisionerAssignmentAttemptInput) (ProvisionerAssignment, error) {
+	var response contract.ProvisionerAssignmentResponse
+	request := contract.RecordProvisionerAssignmentAttemptRequest{ProviderError: input.ProviderError, NextRetryAt: input.NextRetryAt}
+	path := "/v2/provisioner/assignments/" + url.PathEscape(strings.TrimSpace(assignmentID)) + "/attempt"
+	if err := c.doContext(ctx, http.MethodPost, path, request, nil, &response); err != nil {
+		return ProvisionerAssignment{}, err
+	}
+	return response.Assignment, nil
+}
+
+func (c *Client) AbandonProvisionerAssignment(ctx context.Context, assignmentID, providerError string) (ProvisionerAssignment, error) {
+	var response contract.ProvisionerAssignmentResponse
+	path := "/v2/provisioner/assignments/" + url.PathEscape(strings.TrimSpace(assignmentID)) + "/abandon"
+	if err := c.doContext(ctx, http.MethodPost, path, contract.AbandonProvisionerAssignmentRequest{ProviderError: providerError}, nil, &response); err != nil {
+		return ProvisionerAssignment{}, err
+	}
+	return response.Assignment, nil
+}
+
+func (c *Client) RevokeProvisionerAssignmentCredentials(ctx context.Context, assignmentID string) (ProvisionerAssignment, error) {
+	var response contract.ProvisionerAssignmentResponse
+	path := "/v2/provisioner/assignments/" + url.PathEscape(strings.TrimSpace(assignmentID)) + "/revoked"
+	if err := c.doContext(ctx, http.MethodPost, path, nil, nil, &response); err != nil {
+		return ProvisionerAssignment{}, err
+	}
+	return response.Assignment, nil
+}
+
+func (c *Client) MarkProvisionerAssignmentCleaned(ctx context.Context, assignmentID string) (ProvisionerAssignment, error) {
+	var response contract.ProvisionerAssignmentResponse
+	path := "/v2/provisioner/assignments/" + url.PathEscape(strings.TrimSpace(assignmentID)) + "/cleaned"
+	if err := c.doContext(ctx, http.MethodPost, path, nil, nil, &response); err != nil {
+		return ProvisionerAssignment{}, err
+	}
+	return response.Assignment, nil
+}
+
 func (c *Client) RegisterWorker(input RegisterWorkerInput) (flowworker.Worker, error) {
+	return c.RegisterWorkerContext(context.Background(), input)
+}
+
+func (c *Client) RegisterWorkerContext(ctx context.Context, input RegisterWorkerInput) (flowworker.Worker, error) {
 	var response workerResponse
 	request := registerWorkerRequest{
 		ID:                      input.ID,
@@ -1002,7 +1084,7 @@ func (c *Client) RegisterWorker(input RegisterWorkerInput) (flowworker.Worker, e
 		CapacityEphemeral:       input.CapacityEphemeral,
 		HeartbeatTTLSeconds:     durationSeconds(input.HeartbeatTTL),
 	}
-	if err := c.do(http.MethodPost, "/v2/workers/register", request, nil, &response); err != nil {
+	if err := c.doContext(ctx, http.MethodPost, "/v2/workers/register", request, nil, &response); err != nil {
 		return flowworker.Worker{}, err
 	}
 
@@ -1023,12 +1105,16 @@ func (c *Client) JoinWorker(input JoinWorkerInput) (JoinWorkerResult, error) {
 }
 
 func (c *Client) HeartbeatWorker(input HeartbeatWorkerInput) (flowworker.Worker, error) {
+	return c.HeartbeatWorkerContext(context.Background(), input)
+}
+
+func (c *Client) HeartbeatWorkerContext(ctx context.Context, input HeartbeatWorkerInput) (flowworker.Worker, error) {
 	var response workerResponse
 	request := heartbeatWorkerRequest{
 		WorkerID:            input.WorkerID,
 		HeartbeatTTLSeconds: durationSeconds(input.HeartbeatTTL),
 	}
-	if err := c.do(http.MethodPost, "/v2/workers/heartbeat", request, nil, &response); err != nil {
+	if err := c.doContext(ctx, http.MethodPost, "/v2/workers/heartbeat", request, nil, &response); err != nil {
 		return flowworker.Worker{}, err
 	}
 
@@ -1045,6 +1131,10 @@ func (c *Client) ListWorkerReapJobs() ([]flowworker.Job, error) {
 }
 
 func (c *Client) ClaimJob(input ClaimJobInput) (ClaimJobResult, error) {
+	return c.ClaimJobContext(context.Background(), input)
+}
+
+func (c *Client) ClaimJobContext(ctx context.Context, input ClaimJobInput) (ClaimJobResult, error) {
 	var response claimJobResponse
 	request := claimJobRequest{
 		WorkerID:             input.WorkerID,
@@ -1052,7 +1142,7 @@ func (c *Client) ClaimJob(input ClaimJobInput) (ClaimJobResult, error) {
 		LeaseDurationSeconds: durationSeconds(input.LeaseDuration),
 		WaitSeconds:          durationSeconds(input.Wait),
 	}
-	if err := c.do(http.MethodPost, "/v2/workers/claim", request, nil, &response); err != nil {
+	if err := c.doContext(ctx, http.MethodPost, "/v2/workers/claim", request, nil, &response); err != nil {
 		return ClaimJobResult{}, err
 	}
 
@@ -1163,7 +1253,7 @@ type QueueStats struct {
 	ByBucket         map[string]int `json:"by_bucket"`
 }
 
-// GetQueueStats fetches the queue depth the flow-orchestrator scales on.
+// GetQueueStats fetches aggregate diagnostic queue telemetry.
 func (c *Client) GetQueueStats() (QueueStats, error) {
 	var response QueueStats
 	if err := c.do(http.MethodGet, "/v2/queue/stats", nil, nil, &response); err != nil {
@@ -1694,6 +1784,44 @@ type ApplyReviewFollowUpInput = contract.ApplyReviewFollowUpRequest
 type ApplyReviewFollowUpResult struct {
 	Task        coordinator.Task
 	Disposition string
+}
+
+type ProvisionerAssignment = contract.ProvisionerAssignment
+
+type ReserveProvisionerAssignmentInput struct {
+	ProviderID        string
+	ProviderRequestID string
+	ProfileName       string
+	ProviderType      string
+	ProviderOptions   map[string]string
+	MaxConcurrency    int
+	AllowedRoles      []flowworker.JobRole
+	AllowedBuckets    []flowworker.CapacityBucket
+	Labels            map[string]string
+	Taints            []scheduler.Taint
+	HarnessModels     []flowharness.Model
+	RequiredSelector  map[string]string
+	StartupTimeout    time.Duration
+	Wait              time.Duration
+}
+
+type ReserveProvisionerAssignmentResult contract.ReserveProvisionerAssignmentResponse
+
+type ProvisionerAssignmentFilter struct {
+	ProjectID         string
+	ProviderID        string
+	ProfileName       string
+	ProviderRequestID string
+	WorkerID          string
+	JobID             string
+	States            []flowworker.AssignmentState
+	OpenOnly          bool
+	NeedsCleanup      bool
+}
+
+type RecordProvisionerAssignmentAttemptInput struct {
+	ProviderError string
+	NextRetryAt   *time.Time
 }
 
 type RegisterWorkerInput struct {

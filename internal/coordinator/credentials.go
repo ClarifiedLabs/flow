@@ -22,9 +22,12 @@ const (
 	TokenScopeSession TokenScope = "session"
 	TokenScopeConsole TokenScope = "console"
 	TokenScopeHook    TokenScope = "hook"
-	// TokenScopeOrchestrator authorizes only GET /v2/queue/stats: the
-	// read-only queue depth the flow-orchestrator needs for autoscaling.
+	// TokenScopeOrchestrator is the legacy diagnostic queue-telemetry scope.
+	// It intentionally does not gain assignment mutation authority.
 	TokenScopeOrchestrator TokenScope = "orchestrator"
+	// TokenScopeProvisioner authorizes assignment operations only for the
+	// comma-separated provider IDs in its subject.
+	TokenScopeProvisioner TokenScope = "provisioner"
 )
 
 var ErrInvalidCredential = errors.New("invalid bearer token")
@@ -116,6 +119,16 @@ func (s *CredentialService) ReplaceSubjectToken(ctx context.Context, input Crede
 // ReplaceSubjectCredential revokes every live token for the credential
 // scope/subject and stores the supplied token as the active replacement.
 func (s *CredentialService) ReplaceSubjectCredential(ctx context.Context, input CredentialInput) error {
+	return s.replaceCredential(ctx, input, true)
+}
+
+// ReplaceScopeCredential atomically replaces every credential in a singleton
+// scope, even when the replacement's authorization subject changed.
+func (s *CredentialService) ReplaceScopeCredential(ctx context.Context, input CredentialInput) error {
+	return s.replaceCredential(ctx, input, false)
+}
+
+func (s *CredentialService) replaceCredential(ctx context.Context, input CredentialInput, subjectScoped bool) error {
 	input, err := normalizeCredentialInput(input)
 	if err != nil {
 		return err
@@ -128,15 +141,18 @@ func (s *CredentialService) ReplaceSubjectCredential(ctx context.Context, input 
 	defer tx.Rollback()
 
 	now := formatTime(s.now().UTC())
-	if _, err := tx.ExecContext(ctx, `
+	if subjectScoped {
+		_, err = tx.ExecContext(ctx, `
 UPDATE tokens
 SET revoked_at = COALESCE(revoked_at, ?)
-WHERE scope = ?
-	AND subject = ?`,
-		now,
-		string(input.Scope),
-		input.Subject,
-	); err != nil {
+WHERE scope = ? AND subject = ?`, now, string(input.Scope), input.Subject)
+	} else {
+		_, err = tx.ExecContext(ctx, `
+UPDATE tokens
+SET revoked_at = COALESCE(revoked_at, ?)
+WHERE scope = ?`, now, string(input.Scope))
+	}
+	if err != nil {
 		return fmt.Errorf("revoke previous credentials: %w", err)
 	}
 
@@ -284,6 +300,45 @@ WHERE token_hash = ?`,
 	return nil
 }
 
+// RevokeScopeCredentials idempotently revokes every live credential in scope.
+func (s *CredentialService) RevokeScopeCredentials(ctx context.Context, scope TokenScope) error {
+	switch scope {
+	case TokenScopeOwner, TokenScopeWorker, TokenScopeSession, TokenScopeConsole, TokenScopeHook, TokenScopeOrchestrator, TokenScopeProvisioner:
+	default:
+		return fmt.Errorf("invalid credential scope: %s", scope)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE tokens
+SET revoked_at = COALESCE(revoked_at, ?)
+WHERE scope = ?`, formatTime(s.now().UTC()), string(scope)); err != nil {
+		return fmt.Errorf("revoke scope credentials: %w", err)
+	}
+	return nil
+}
+
+// RevokeSubjectCredentials idempotently revokes every live credential for one
+// scope and subject. Assignment cleanup uses it to fence late worker processes
+// even when a reserve response was lost and more than one token was rotated.
+func (s *CredentialService) RevokeSubjectCredentials(ctx context.Context, scope TokenScope, subject string) error {
+	subject = strings.TrimSpace(subject)
+	if subject == "" {
+		return errors.New("credential subject is required")
+	}
+	switch scope {
+	case TokenScopeOwner, TokenScopeWorker, TokenScopeSession, TokenScopeConsole, TokenScopeHook, TokenScopeOrchestrator, TokenScopeProvisioner:
+	default:
+		return fmt.Errorf("invalid credential scope: %s", scope)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE tokens
+SET revoked_at = COALESCE(revoked_at, ?)
+WHERE scope = ? AND subject = ?`,
+		formatTime(s.now().UTC()), string(scope), subject); err != nil {
+		return fmt.Errorf("revoke subject credentials: %w", err)
+	}
+	return nil
+}
+
 func HashToken(token string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
 	return hex.EncodeToString(sum[:])
@@ -307,6 +362,10 @@ func normalizeCredentialInput(input CredentialInput) (CredentialInput, error) {
 	case TokenScopeOrchestrator:
 		if input.Subject == "" {
 			input.Subject = "orchestrator"
+		}
+	case TokenScopeProvisioner:
+		if input.Subject == "" {
+			return CredentialInput{}, errors.New("provisioner credential subject requires at least one provider id")
 		}
 	case TokenScopeSession, TokenScopeConsole:
 		if input.Subject == "" {

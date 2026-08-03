@@ -3,19 +3,25 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ClarifiedLabs/flow/internal/api/contract"
+	flowclient "github.com/ClarifiedLabs/flow/internal/client"
 	"github.com/ClarifiedLabs/flow/internal/config"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
-// ephemeralTestSetup registers an ephemeral-capable worker and returns the
+// oneShotTestSetup registers an ephemeral-capable worker and returns the
 // fixture, config, and timings wired to a test coordinator.
-func ephemeralTestSetup(t *testing.T) (workerTestFixture, config.WorkerConfig, workerTimings) {
+func oneShotTestSetup(t *testing.T) (workerTestFixture, config.WorkerConfig, workerTimings) {
 	t.Helper()
 	requireWorkerTool(t, "git")
 	requireWorkerTool(t, "tmux")
@@ -74,9 +80,9 @@ func enqueueEphemeralTestJob(t *testing.T, fixture workerTestFixture, script str
 	return job
 }
 
-func TestRunWorkerEphemeralRunsOneJobAndExits(t *testing.T) {
+func TestRunWorkerOneShotRunsOneJobAndExits(t *testing.T) {
 	t.Parallel()
-	fixture, cfg, timings := ephemeralTestSetup(t)
+	fixture, cfg, timings := oneShotTestSetup(t)
 
 	out := filepath.Join(t.TempDir(), "done.out")
 	script := writeWorkerScript(t, `#!/bin/sh
@@ -89,8 +95,8 @@ printf ephemeral-ok > "$1"
 		t.Fatalf("create worker client: %v", err)
 	}
 	var stdout bytes.Buffer
-	if err := runWorkerEphemeral(client, cfg, timings, nil, &stdout); err != nil {
-		t.Fatalf("runWorkerEphemeral() error = %v; stdout:\n%s", err, stdout.String())
+	if err := runWorkerOneShot(context.Background(), client, cfg, timings, nil, &stdout); err != nil {
+		t.Fatalf("runWorkerOneShot() error = %v; stdout:\n%s", err, stdout.String())
 	}
 
 	finished, err := fixture.Queue.GetJob(context.Background(), job.ID)
@@ -106,9 +112,9 @@ printf ephemeral-ok > "$1"
 	}
 }
 
-func TestRunWorkerEphemeralWaitsForClaim(t *testing.T) {
+func TestRunWorkerOneShotWaitsForClaim(t *testing.T) {
 	t.Parallel()
-	fixture, cfg, timings := ephemeralTestSetup(t)
+	fixture, cfg, timings := oneShotTestSetup(t)
 
 	client, err := newWorkerClient(cfg)
 	if err != nil {
@@ -117,10 +123,10 @@ func TestRunWorkerEphemeralWaitsForClaim(t *testing.T) {
 	var stdout bytes.Buffer
 	done := make(chan error, 1)
 	go func() {
-		done <- runWorkerEphemeral(client, cfg, timings, nil, &stdout)
+		done <- runWorkerOneShot(context.Background(), client, cfg, timings, nil, &stdout)
 	}()
 
-	// Enqueue only after the worker is already polling: the ephemeral worker
+	// Enqueue only after the worker is already polling: the one-shot worker
 	// must keep long-polling instead of exiting when the queue is empty.
 	time.Sleep(300 * time.Millisecond)
 	out := filepath.Join(t.TempDir(), "late.out")
@@ -132,10 +138,10 @@ printf late-ok > "$1"
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("runWorkerEphemeral() error = %v; stdout:\n%s", err, stdout.String())
+			t.Fatalf("runWorkerOneShot() error = %v; stdout:\n%s", err, stdout.String())
 		}
 	case <-time.After(30 * time.Second):
-		t.Fatalf("ephemeral worker did not exit after one job; stdout:\n%s", stdout.String())
+		t.Fatalf("one-shot worker did not exit after one job; stdout:\n%s", stdout.String())
 	}
 
 	finished, err := fixture.Queue.GetJob(context.Background(), job.ID)
@@ -147,9 +153,9 @@ printf late-ok > "$1"
 	}
 }
 
-func TestRunWorkerEphemeralExitsZeroAfterJobError(t *testing.T) {
+func TestRunWorkerOneShotExitsZeroAfterJobError(t *testing.T) {
 	t.Parallel()
-	fixture, cfg, timings := ephemeralTestSetup(t)
+	fixture, cfg, timings := oneShotTestSetup(t)
 
 	// The entrypoint never runs because the base exchange ref is missing: a
 	// job-scoped failure the worker reports to the coordinator.
@@ -176,27 +182,86 @@ func TestRunWorkerEphemeralExitsZeroAfterJobError(t *testing.T) {
 	var stdout bytes.Buffer
 	done := make(chan error, 1)
 	go func() {
-		done <- runWorkerEphemeral(client, cfg, timings, nil, &stdout)
+		done <- runWorkerOneShot(context.Background(), client, cfg, timings, nil, &stdout)
 	}()
 
 	waitForWorkerJobState(t, fixture, job.ID, flowworker.JobFailed, 30*time.Second)
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("runWorkerEphemeral() error = %v, want nil after job error; stdout:\n%s", err, stdout.String())
+			t.Fatalf("runWorkerOneShot() error = %v, want nil after job error; stdout:\n%s", err, stdout.String())
 		}
 	case <-time.After(30 * time.Second):
-		t.Fatalf("ephemeral worker did not exit after job error; stdout:\n%s", stdout.String())
+		t.Fatalf("one-shot worker did not exit after job error; stdout:\n%s", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "job error:") {
 		t.Fatalf("stdout missing job error:\n%s", stdout.String())
 	}
 }
 
-func TestRunWorkerRejectsOnceAndEphemeral(t *testing.T) {
+func TestRunWorkerOneShotCancelsLongPollPromptly(t *testing.T) {
+	t.Parallel()
+	claimStarted := make(chan struct{})
+	releaseClaim := make(chan struct{})
+	defer close(releaseClaim)
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/workers/heartbeat":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(contract.WorkerResponse{Worker: flowworker.Worker{ID: "w-cancel"}})
+		case "/v2/workers/claim":
+			close(claimStarted)
+			select {
+			case <-r.Context().Done():
+			case <-releaseClaim:
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(coordinator.Close)
+	client, err := flowclient.New(config.ClientConfig{ServerURL: coordinator.URL, Token: "worker-token"})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runWorkerOneShot(ctx, client, config.WorkerConfig{WorkerID: "w-cancel"}, workerTimings{
+			ClaimWait: 30 * time.Second, LeaseDuration: time.Minute, HeartbeatTTL: time.Minute,
+		}, nil, io.Discard)
+	}()
+	select {
+	case <-claimStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("one-shot claim did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("runWorkerOneShot cancellation error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("one-shot worker did not cancel its long poll promptly")
+	}
+}
+
+func TestRunWorkerRejectsOnceAndOneShot(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
-	if code := runWorker([]string{"--once", "--ephemeral"}, &stdout, &stderr); code != 2 {
-		t.Fatalf("runWorker(--once --ephemeral) exit = %d, want 2; stderr: %s", code, stderr.String())
+	if code := runWorker([]string{"--once", "--one-shot"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("runWorker(--once --one-shot) exit = %d, want 2; stderr: %s", code, stderr.String())
+	}
+}
+
+func TestRunWorkerRejectsRemovedEphemeralFlag(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	if code := runWorker([]string{"--ephemeral"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("runWorker(--ephemeral) exit = %d, want 2; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "flag provided but not defined: -ephemeral") {
+		t.Fatalf("runWorker(--ephemeral) stderr = %q, want normal unknown-flag error", stderr.String())
 	}
 }

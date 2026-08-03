@@ -66,9 +66,15 @@ func ClaimAcrossProjects(ctx context.Context, directory *Directory, queues []Pro
 		used.Ephemeral += queueUsed.Ephemeral
 	}
 
+	// A worker can hold one live lease total across all projects and buckets.
+	// Registry.claimMu serializes this aggregate check with the eventual claim.
+	if used.PersistentAgent+used.Ephemeral > 0 {
+		return ProjectClaim{}, false, nil
+	}
+
 	var buckets []CapacityBucket
 	for _, bucket := range input.Buckets {
-		if worker.capacityFor(bucket) > usedFor(used, bucket) {
+		if worker.capacityFor(bucket) > 0 {
 			buckets = append(buckets, bucket)
 		}
 	}
@@ -96,17 +102,6 @@ func ClaimAcrossProjects(ctx context.Context, directory *Directory, queues []Pro
 	}
 
 	return ProjectClaim{}, false, nil
-}
-
-func usedFor(used scheduler.Capacity, bucket CapacityBucket) int {
-	switch bucket {
-	case BucketPersistentAgent:
-		return used.PersistentAgent
-	case BucketEphemeral:
-		return used.Ephemeral
-	default:
-		return 0
-	}
 }
 
 type queueOrder struct {

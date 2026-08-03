@@ -1,10 +1,11 @@
-// flow-orchestrator polls the flow coordinator's queue depth and scales the
-// worker Kubernetes Deployment, maintaining a standby pool of ephemeral
-// workers ready for job assignments.
+// flow-orchestrator reconciles durable coordinator assignments into exactly one
+// one-shot worker resource per Flow job.
 package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/metrics"
 	"github.com/ClarifiedLabs/flow/internal/orchestrator"
 	"github.com/ClarifiedLabs/flow/internal/version"
+	"github.com/ClarifiedLabs/flow/internal/worker"
 )
 
 func main() {
@@ -87,37 +89,38 @@ func runOrchestrator(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "resolve orchestrator config: %v\n", err)
 		return 1
 	}
+	profiles, providers, err := buildProfilesAndProviders(resolved)
+	if err != nil {
+		fmt.Fprintf(stderr, "configure assignment providers: %v\n", err)
+		return 1
+	}
+	coordinatorClient := orchestrator.NewCoordinatorClient(resolved.CoordinatorURL, resolved.Token, nil)
 
 	telemetryRegistry := metrics.NewWithBuildInfo(metrics.BuildInfo{
 		Name:    "flow_orchestrator_build_info",
 		Help:    "flow-orchestrator build information.",
 		Version: version.Current().String(),
 	})
-	controller := orchestrator.NewController(orchestrator.Options{
-		Stats:           orchestrator.NewCoordinatorPoller(cfg.CoordinatorURL, cfg.Token, nil),
-		MinReplicas:     cfg.MinReplicas,
-		MaxReplicas:     cfg.MaxReplicas,
-		DesiredReplicas: cfg.DesiredReplicas,
-		PollInterval:    resolved.PollInterval,
-		ScaleDownIdle:   resolved.ScaleDownIdle,
-		Metrics: orchestrator.Metrics{
-			QueueDepth:            telemetryRegistry.Gauge("flow_queue_depth", "Jobs queued across every project database."),
-			WorkerReplicasDesired: telemetryRegistry.Gauge("flow_worker_replicas_desired", "Spec replicas of the worker Deployment."),
-			ScaleOperations:       telemetryRegistry.Counter("flow_orchestrator_scale_operations_total", "Deployment scale operations by direction."),
-			PollErrors:            telemetryRegistry.Counter("flow_orchestrator_poll_errors_total", "Skipped cycles by failing source (coordinator or k8s)."),
-		},
+	reconciler, err := orchestrator.NewReconciler(orchestrator.ReconcilerOptions{
+		Coordinator: coordinatorClient, CoordinatorURL: resolved.CoordinatorURL,
+		Profiles: profiles, Providers: providers, ProviderFactory: providerFromProfile,
+		PollInterval: resolved.PollInterval, RetryBase: resolved.RetryBase, RetryMax: resolved.RetryMax,
+		Metrics: orchestrator.NewMetrics(telemetryRegistry),
 	})
+	if err != nil {
+		fmt.Fprintf(stderr, "create assignment reconciler: %v\n", err)
+		return 1
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-
-	telemetrySettings := metrics.Resolve(cfg.Metrics, config.DefaultTelemetryListen, metrics.Overrides{
+	telemetrySettings := metrics.Resolve(resolved.Metrics, config.DefaultTelemetryListen, metrics.Overrides{
 		Disable:    noMetrics,
 		DisableSet: noMetrics,
 		Listen:     metricsListen,
 		ListenSet:  strings.TrimSpace(metricsListen) != "",
 	})
-	telemetry, err := metrics.StartEndpoint(ctx, slog.Default(), metrics.Mux(telemetryRegistry, controller.Ready), telemetrySettings)
+	telemetry, err := metrics.StartEndpoint(ctx, slog.Default(), metrics.Mux(telemetryRegistry, reconciler.Ready), telemetrySettings)
 	if err != nil {
 		fmt.Fprintf(stderr, "start telemetry endpoint: %v\n", err)
 		return 1
@@ -128,29 +131,99 @@ func runOrchestrator(args []string, stdout, stderr io.Writer) int {
 		_ = telemetry.Shutdown(shutdownCtx)
 	}()
 
-	scaler, err := orchestrator.NewInClusterK8sScaler(cfg.Namespace, cfg.Deployment)
-	if err != nil {
-		fmt.Fprintf(stderr, "configure kubernetes client: %v\n", err)
-		return 1
-	}
-	controller.SetScaler(scaler)
-
-	fmt.Fprintf(stdout, "orchestrator: scaling deployment %s/%s (min=%d desired=%d max=%d) from %s every %s\n",
-		cfg.Namespace, cfg.Deployment, cfg.MinReplicas, cfg.DesiredReplicas, cfg.MaxReplicas, cfg.CoordinatorURL, resolved.PollInterval)
-	return runController(ctx, controller)
-}
-
-func runController(ctx context.Context, controller *orchestrator.Controller) int {
-	if err := controller.Run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "orchestrator: %v\n", err)
+	fmt.Fprintf(stdout, "orchestrator: reconciling %d assignment profile(s) from %s every %s\n",
+		len(profiles), resolved.CoordinatorURL, resolved.PollInterval)
+	if err := reconciler.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Fprintf(stderr, "run assignment reconciler: %v\n", err)
 		return 1
 	}
 	return 0
 }
 
+func buildProfilesAndProviders(cfg config.ResolvedOrchestrator) ([]orchestrator.Profile, map[string]orchestrator.Provider, error) {
+	profiles := make([]orchestrator.Profile, 0, len(cfg.Profiles))
+	providers := make(map[string]orchestrator.Provider, len(cfg.Profiles))
+	for _, configured := range cfg.Profiles {
+		providerKey := configured.ProviderID + "/" + configured.Name
+		profile := orchestrator.Profile{
+			ProviderID: configured.ProviderID, ProfileName: configured.Name,
+			MaxConcurrency: configured.MaxConcurrency, Labels: configured.Labels,
+			Taints: configured.Taints, HarnessModels: configured.HarnessModels,
+			RequiredSelector: configured.RequiredSelector, StartupTimeout: configured.StartupTimeout,
+			Provider: providerKey, ProviderType: configured.Provider, ProviderOptions: make(map[string]string),
+		}
+		for _, role := range configured.AllowedRoles {
+			profile.AllowedRoles = append(profile.AllowedRoles, worker.JobRole(role))
+		}
+		for _, bucket := range configured.Accepts {
+			profile.AllowedBuckets = append(profile.AllowedBuckets, worker.CapacityBucket(bucket))
+		}
+
+		switch configured.Provider {
+		case "kubernetes":
+			if configured.Kubernetes == nil {
+				return nil, nil, fmt.Errorf("profile %s: kubernetes configuration is missing", configured.Name)
+			}
+			options := configured.Kubernetes
+			profile.ProviderOptions = map[string]string{
+				"namespace": options.Namespace, "image": options.Image, "service_account": options.ServiceAccount,
+				"work_dir": options.WorkDir, "worker_args": encodeStringSlice(options.WorkerArgs),
+				"image_pull_policy": options.ImagePullPolicy,
+			}
+		case "darwin":
+			if configured.Darwin == nil {
+				return nil, nil, fmt.Errorf("profile %s: darwin configuration is missing", configured.Name)
+			}
+			options := configured.Darwin
+			profile.ProviderOptions = map[string]string{
+				"state_dir": options.StateDir, "executable": options.Binary, "work_dir": options.WorkDir,
+				"worker_args": encodeStringSlice(options.WorkerArgs),
+			}
+		default:
+			return nil, nil, fmt.Errorf("unsupported provider %q", configured.Provider)
+		}
+		provider, err := providerFromProfile(profile)
+		if err != nil {
+			return nil, nil, fmt.Errorf("profile %s (%s): %w", configured.Name, configured.Provider, err)
+		}
+		providers[providerKey] = provider
+		profiles = append(profiles, profile)
+	}
+	return profiles, providers, nil
+}
+
+func providerFromProfile(profile orchestrator.Profile) (orchestrator.Provider, error) {
+	var workerArgs []string
+	if raw := strings.TrimSpace(profile.ProviderOptions["worker_args"]); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &workerArgs); err != nil {
+			return nil, fmt.Errorf("decode persisted worker args: %w", err)
+		}
+	}
+	switch profile.ProviderType {
+	case "kubernetes":
+		return orchestrator.NewInClusterKubernetesProvider(orchestrator.KubernetesProviderOptions{
+			Namespace: profile.ProviderOptions["namespace"], Image: profile.ProviderOptions["image"],
+			ServiceAccount: profile.ProviderOptions["service_account"], WorkDir: profile.ProviderOptions["work_dir"],
+			WorkerArgs: workerArgs, ImagePullPolicy: profile.ProviderOptions["image_pull_policy"],
+		})
+	case "darwin":
+		return orchestrator.NewDarwinProcessProvider(orchestrator.DarwinProcessProviderOptions{
+			StateDir: profile.ProviderOptions["state_dir"], Executable: profile.ProviderOptions["executable"],
+			WorkDir: profile.ProviderOptions["work_dir"], WorkerArgs: workerArgs,
+		})
+	default:
+		return nil, fmt.Errorf("unsupported persisted provider type %q", profile.ProviderType)
+	}
+}
+
+func encodeStringSlice(values []string) string {
+	data, _ := json.Marshal(values)
+	return string(data)
+}
+
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, `flow-orchestrator scales the worker Kubernetes Deployment from the
-coordinator's queue depth, maintaining a standby pool of ephemeral workers.
+	fmt.Fprintln(w, `flow-orchestrator reconciles durable coordinator assignments into exactly one
+one-shot worker resource per Flow job.
 
 Usage:
   flow-orchestrator [flags]
@@ -161,13 +234,11 @@ Flags:
       --no-metrics        disable the telemetry endpoint
       --metrics-listen    telemetry endpoint listen address (default 127.0.0.1:8422)
 
-Environment:
+Provider profiles are file-only. Environment:
   FLOW_ORCHESTRATOR_TOKEN            orchestrator-scoped bearer token (required)
   FLOW_ORCHESTRATOR_COORDINATOR_URL  coordinator base URL
-  FLOW_ORCHESTRATOR_NAMESPACE        worker Deployment namespace
-  FLOW_ORCHESTRATOR_DEPLOYMENT       worker Deployment name
-  FLOW_ORCHESTRATOR_MIN_REPLICAS     standby pool floor (default 0)
-  FLOW_ORCHESTRATOR_MAX_REPLICAS     scale-out ceiling (default 10)
-  FLOW_ORCHESTRATOR_DESIRED_REPLICAS standby pool size (default 1)
+  FLOW_ORCHESTRATOR_POLL_INTERVAL    reconciliation interval
+  FLOW_ORCHESTRATOR_RETRY_BASE       initial provider retry delay
+  FLOW_ORCHESTRATOR_RETRY_MAX        maximum provider retry delay
   KUBERNETES_SERVICE_HOST/PORT       Kubernetes API address (in-cluster)`)
 }

@@ -24,3 +24,4 @@ build_one() {
 build_one flow ./cmd/flow
 build_one flow-server ./cmd/flow-server
 build_one flow-worker ./cmd/flow-worker
+build_one flow-orchestrator ./cmd/flow-orchestrator

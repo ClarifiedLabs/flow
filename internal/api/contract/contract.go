@@ -139,6 +139,56 @@ type ClaimJobRequest struct {
 	WaitSeconds          int                     `json:"wait_seconds"`
 }
 
+// ReserveProvisionerAssignmentRequest describes the immutable virtual-worker
+// profile used to select and reserve one exact queued job. MaxConcurrency is
+// enforced for ProviderID/ProfileName across every open project database.
+type ReserveProvisionerAssignmentRequest struct {
+	ProviderID            string                  `json:"provider_id"`
+	ProviderRequestID     string                  `json:"provider_request_id"`
+	ProfileName           string                  `json:"profile_name"`
+	ProviderType          string                  `json:"provider_type"`
+	ProviderOptions       map[string]string       `json:"provider_options,omitempty"`
+	MaxConcurrency        int                     `json:"max_concurrency"`
+	AllowedRoles          []worker.JobRole        `json:"allowed_roles,omitempty"`
+	AllowedBuckets        []worker.CapacityBucket `json:"allowed_buckets,omitempty"`
+	Labels                map[string]string       `json:"labels,omitempty"`
+	Taints                []scheduler.Taint       `json:"taints,omitempty"`
+	HarnessModels         []flowharness.Model     `json:"harness_models,omitempty"`
+	RequiredSelector      map[string]string       `json:"required_selector,omitempty"`
+	StartupTimeoutSeconds int                     `json:"startup_timeout_seconds"`
+	WaitSeconds           int                     `json:"wait_seconds,omitempty"`
+}
+
+// ProvisionerAssignment includes project identity because assignment rows are
+// project-local. Assignment carries the complete durable lifecycle snapshot.
+type ProvisionerAssignment struct {
+	Project    Project           `json:"project"`
+	Assignment worker.Assignment `json:"assignment"`
+}
+
+type ReserveProvisionerAssignmentResponse struct {
+	Reserved    bool                   `json:"reserved"`
+	Assignment  *ProvisionerAssignment `json:"assignment,omitempty"`
+	WorkerToken string                 `json:"worker_token,omitempty"`
+}
+
+type ProvisionerAssignmentsResponse struct {
+	Assignments []ProvisionerAssignment `json:"assignments"`
+}
+
+type AbandonProvisionerAssignmentRequest struct {
+	ProviderError string `json:"provider_error"`
+}
+
+type RecordProvisionerAssignmentAttemptRequest struct {
+	ProviderError string     `json:"provider_error,omitempty"`
+	NextRetryAt   *time.Time `json:"next_retry_at,omitempty"`
+}
+
+type ProvisionerAssignmentResponse struct {
+	Assignment ProvisionerAssignment `json:"assignment"`
+}
+
 type RenewLeaseRequest struct {
 	LeaseID              string `json:"lease_id"`
 	LeaseDurationSeconds int    `json:"lease_duration_seconds"`

@@ -263,6 +263,27 @@ func TestServeRejectsConflictingOwnerTokenFlags(t *testing.T) {
 	}
 }
 
+func TestServeRequiresProviderBindingForOrchestratorToken(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runServe([]string{"--orchestrator-token", "orchestrator-token"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--orchestrator-provider-ids") {
+		t.Fatalf("stderr = %q, want provider binding error", stderr.String())
+	}
+}
+
+func TestNormalizeProviderIDSubject(t *testing.T) {
+	got, err := normalizeProviderIDSubject(" darwin-host ,in-cluster,darwin-host ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "darwin-host,in-cluster" {
+		t.Fatalf("normalizeProviderIDSubject() = %q", got)
+	}
+}
+
 func TestInstrumentAPIHandlerPreservesWebSocketUpgrade(t *testing.T) {
 	registry := metrics.New()
 	counters := telemetryCounters{

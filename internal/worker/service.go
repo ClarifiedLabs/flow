@@ -545,6 +545,9 @@ WHERE state = ?
 	)`, string(JobCanceled), formatTime(now), string(JobQueued)); err != nil {
 		return ClaimedJob{}, false, fmt.Errorf("cancel stale queued jobs: %w", err)
 	}
+	if err := closeTerminalAssignmentsTx(ctx, tx, now); err != nil {
+		return ClaimedJob{}, false, err
+	}
 
 	candidates, err := queuedJobCandidates(ctx, tx, buckets)
 	if err != nil {
@@ -764,6 +767,9 @@ SET state = ?, updated_at = ?
 WHERE id = ?`, string(finalState), formatTime(now), lease.JobID); err != nil {
 		return Job{}, fmt.Errorf("finish leased job: %w", err)
 	}
+	if err := closeAssignmentsForJobTx(ctx, tx, lease.JobID, string(finalState), now); err != nil {
+		return Job{}, err
+	}
 
 	job, err := getJobTx(ctx, tx, lease.JobID)
 	if err != nil {
@@ -845,6 +851,9 @@ SET state = ?, updated_at = ?
 WHERE id = ?`, string(JobCanceled), now, jobID); err != nil {
 			return nil, fmt.Errorf("cancel job: %w", err)
 		}
+		if err := closeAssignmentsForJobTx(ctx, tx, jobID, string(JobCanceled), s.now().UTC()); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -911,6 +920,9 @@ WHERE id = ? AND state IN (?, ?)`,
 			string(JobRunning),
 		); err != nil {
 			return 0, fmt.Errorf("mark expired job crashed: %w", err)
+		}
+		if err := closeAssignmentsForJobTx(ctx, tx, jobID, string(JobCrashed), now); err != nil {
+			return 0, err
 		}
 	}
 
@@ -1050,7 +1062,11 @@ func (s *Service) OldestQueuedAt(ctx context.Context, buckets []CapacityBucket) 
 SELECT MIN(created_at)
 FROM jobs
 WHERE state = ?
-	AND capacity_bucket IN (`+strings.Join(placeholders, ", ")+`)`, args...).Scan(&createdAt); err != nil {
+	AND capacity_bucket IN (`+strings.Join(placeholders, ", ")+`)
+	AND NOT EXISTS (
+		SELECT 1 FROM worker_assignments AS assignment
+		WHERE assignment.job_id = jobs.id AND assignment.state IN ('pending', 'claimed')
+	)`, args...).Scan(&createdAt); err != nil {
 		return nil, fmt.Errorf("read oldest queued job: %w", err)
 	}
 	if !createdAt.Valid || strings.TrimSpace(createdAt.String) == "" {
@@ -1132,6 +1148,10 @@ func queuedJobsQuery(buckets []CapacityBucket) (string, []any) {
 	return jobSelectSQL + `
 WHERE state = 'queued'
 	AND capacity_bucket IN (` + strings.Join(placeholders, ", ") + `)
+	AND NOT EXISTS (
+		SELECT 1 FROM worker_assignments AS assignment
+		WHERE assignment.job_id = jobs.id AND assignment.state IN ('pending', 'claimed')
+	)
 ORDER BY priority DESC, created_at ASC, id ASC
 `, args
 }

@@ -17,9 +17,10 @@ can execute jobs across all registered projects.
 brew install clarifiedlabs/tap/flow-full
 ```
 
-`flow-full` installs the CLI, server, and worker. Role-specific formulae are also
-available: `clarifiedlabs/tap/flow`, `clarifiedlabs/tap/flow-server`, and
-`clarifiedlabs/tap/flow-worker`.
+`flow-full` installs the CLI, server, worker, and assignment orchestrator.
+Role-specific formulae are also available: `clarifiedlabs/tap/flow`,
+`clarifiedlabs/tap/flow-server`, `clarifiedlabs/tap/flow-worker`, and
+`clarifiedlabs/tap/flow-orchestrator`.
 
 ### Linux packages
 
@@ -28,17 +29,18 @@ Download the `.deb` or `.rpm` for the current release from
 
 ### Docker
 
-Flow publishes separate server and worker images:
+Flow publishes separate server, worker, and orchestrator images:
 
 ```sh
 docker pull ghcr.io/clarifiedlabs/flow-server:latest
 docker pull ghcr.io/clarifiedlabs/flow-worker:latest
+docker pull ghcr.io/clarifiedlabs/flow-orchestrator:latest
 ```
 
-For Docker Compose and container auth details, see
-[Detailed setup](docs/setup.md#docker-compose). For Kubernetes (telemetry
-probes, ephemeral workers, and the `flow-orchestrator` autoscaler), see
-[docs/kubernetes.md](docs/kubernetes.md).
+Docker Compose provides explicit `legacy-workers` for compatibility; new local
+stacks should use the complete kind recipe. See [Detailed setup](docs/setup.md)
+and [Kubernetes operations](docs/kubernetes.md) for assignment-created one-shot
+worker Jobs, private credentials, probes, and recovery.
 
 ## Quickstart
 
@@ -134,9 +136,11 @@ flow merge t-my-project-0001
 
 - `flow-server` owns the HTTP API, web UI, global worker registry, per-project
   service bundles, lifecycle engine, and git exchange hooks.
-- `flow-worker` joins with a reusable worker join token, receives a scoped worker
-  token, advertises harness labels/capacity, claims jobs, clones the task branch
-  from the exchange remote, and runs the job in tmux.
+- `flow-orchestrator` reserves durable assignments and creates exactly one
+  one-shot worker runtime for each selected job.
+- Managed `flow-worker` processes receive direct assignment-scoped credentials,
+  exact-claim that job, clone its task branch, run it in tmux, and exit. Reusable
+  join credentials remain available for compatibility workers.
 - `flow` is the human and in-session CLI for project onboarding, task commands,
   prompts, handoffs, terminal attach, review threads, and merge.
 

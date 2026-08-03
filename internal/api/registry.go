@@ -515,13 +515,7 @@ func (r *Registry) ExtendActiveLeaseDeadlines(ctx context.Context, deadline time
 func (r *Registry) Claim(ctx context.Context, input worker.ClaimInput) (worker.ProjectClaim, bool, error) {
 	r.claimMu.Lock()
 	defer r.claimMu.Unlock()
-
-	queues := make([]worker.ProjectQueue, 0)
-	for _, bundle := range r.All() {
-		queues = append(queues, worker.ProjectQueue{ProjectID: bundle.Project.ID, Queue: bundle.Queue})
-	}
-
-	return worker.ClaimAcrossProjects(ctx, r.directory, queues, input)
+	return r.claimWorkerLocked(ctx, input)
 }
 
 // DeleteGlobalAgentDef removes a global definition only when no project flow

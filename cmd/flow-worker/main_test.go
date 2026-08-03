@@ -803,105 +803,61 @@ func TestLeaseHeartbeatCancelsJobAfterAuthoritativeLeaseLoss(t *testing.T) {
 	}
 }
 
-func TestWorkerCapacityStartsConcurrentClaimLoops(t *testing.T) {
+func TestWorkerLegacyCapacityMagnitudeRunsOneSequentialClaim(t *testing.T) {
 	t.Parallel()
 	requireWorkerTool(t, "git")
 	requireWorkerTool(t, "tmux")
 	ctx := context.Background()
 	fixture := newWorkerTestFixture(t)
-	scriptPath := writeWorkerScript(t, `#!/bin/sh
-sleep 3
-`)
-	firstJob, err := fixture.Queue.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		Role:           flowworker.RoleCI,
-		CapacityBucket: flowworker.BucketEphemeral,
-		Priority:       10,
-		Payload: map[string]any{
-			"entrypoint": map[string]any{
-				"argv":  []string{scriptPath},
-				"shell": false,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("enqueue first job: %v", err)
+	scriptPath := writeWorkerScript(t, "#!/bin/sh\nexit 0\n")
+	enqueue := func(priority int) flowworker.Job {
+		job, err := fixture.Queue.EnqueueJob(ctx, flowworker.EnqueueJobInput{
+			Role:           flowworker.RoleCI,
+			CapacityBucket: flowworker.BucketEphemeral,
+			Priority:       priority,
+			Payload: map[string]any{"entrypoint": map[string]any{
+				"argv": []string{scriptPath}, "shell": false,
+			}},
+		})
+		if err != nil {
+			t.Fatalf("enqueue job: %v", err)
+		}
+		return job
 	}
-	secondJob, err := fixture.Queue.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		Role:           flowworker.RoleCI,
-		CapacityBucket: flowworker.BucketEphemeral,
-		Priority:       9,
-		Payload: map[string]any{
-			"entrypoint": map[string]any{
-				"argv":  []string{scriptPath},
-				"shell": false,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("enqueue second job: %v", err)
-	}
+	firstJob := enqueue(10)
+	secondJob := enqueue(9)
 
-	server := fixture.Server
-	httpServer := httptest.NewServer(server)
+	httpServer := httptest.NewServer(fixture.Server)
 	t.Cleanup(httpServer.Close)
-
 	toolYAML, _ := workerToolConfigYAML(t)
 	configPath := writeWorkerConfig(t, t.TempDir(), workerConfigOptions{
 		coordinatorURL: httpServer.URL,
 		capacityBucket: "ephemeral",
-		capacityCount:  2,
+		capacityCount:  7,
 		toolYAML:       toolYAML,
 	})
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	done := make(chan int, 1)
-	go func() {
-		done <- run([]string{"-c", configPath, "--once", "--claim-wait", "0s", "--lease", "30s"}, &stdout, &stderr)
-	}()
-
-	deadline := time.After(30 * time.Second)
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		first, err := fixture.Queue.GetJob(ctx, firstJob.ID)
-		if err != nil {
-			t.Fatalf("get first job: %v", err)
-		}
-		second, err := fixture.Queue.GetJob(ctx, secondJob.ID)
-		if err != nil {
-			t.Fatalf("get second job: %v", err)
-		}
-		if first.State == flowworker.JobRunning && second.State == flowworker.JobRunning {
-			break
-		}
-
-		select {
-		case <-deadline:
-			t.Fatalf("jobs did not run concurrently: first=%s second=%s", first.State, second.State)
-		case <-ticker.C:
-		}
+	var stdout, stderr bytes.Buffer
+	if exitCode := run([]string{"-c", configPath, "--once", "--claim-wait", "0s", "--lease", "30s"}, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("exitCode = %d, stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
 	}
-
-	select {
-	case exitCode := <-done:
-		if exitCode != 0 {
-			t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatalf("worker did not finish; stdout=%q stderr=%q", stdout.String(), stderr.String())
-	}
-
 	first, err := fixture.Queue.GetJob(ctx, firstJob.ID)
 	if err != nil {
-		t.Fatalf("get finished first job: %v", err)
+		t.Fatalf("get first job: %v", err)
 	}
 	second, err := fixture.Queue.GetJob(ctx, secondJob.ID)
 	if err != nil {
-		t.Fatalf("get finished second job: %v", err)
+		t.Fatalf("get second job: %v", err)
 	}
-	if first.State != flowworker.JobFinished || second.State != flowworker.JobFinished {
-		t.Fatalf("job states = %s, %s; want both finished", first.State, second.State)
+	if first.State != flowworker.JobFinished || second.State != flowworker.JobQueued {
+		t.Fatalf("job states = %s, %s; want finished, queued", first.State, second.State)
+	}
+	registered, err := fixture.Directory.GetWorker(ctx, "w-local")
+	if err != nil {
+		t.Fatalf("get registered worker: %v", err)
+	}
+	if registered.CapacityEphemeral != 1 {
+		t.Fatalf("registered ephemeral acceptance = %d, want 1", registered.CapacityEphemeral)
 	}
 }
 
@@ -1324,7 +1280,7 @@ capacity:
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"worker_id: w-local", "protocol: 4", "labels: 1", "capacity_persistent_agent: 1"} {
+	for _, want := range []string{"worker_id: w-local", "protocol: 4", "labels: 3", "capacity_persistent_agent: 1"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("config output missing %q:\n%s", want, output)
 		}
@@ -1579,7 +1535,7 @@ printf next-ok > "$1"
 	var stdout bytes.Buffer
 	loopDone := make(chan error, 1)
 	go func() {
-		loopDone <- runWorkerLoop(client, cfg, timings, maintenance, false, &stdout)
+		loopDone <- runWorkerLoop(context.Background(), client, cfg, timings, maintenance, false, &stdout)
 	}()
 
 	waitForWorkerJobState(t, fixture, failingJob.ID, flowworker.JobFailed, 30*time.Second)
@@ -1830,7 +1786,7 @@ capacity:
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"worker_id: w-local", "protocol: 4", "labels: 1", "capacity_persistent_agent: 1"} {
+	for _, want := range []string{"worker_id: w-local", "protocol: 4", "labels: 3", "capacity_persistent_agent: 1"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("config output missing %q:\n%s", want, output)
 		}

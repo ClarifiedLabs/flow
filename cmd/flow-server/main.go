@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,6 +94,7 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	var workerJoinTokenFile string
 	var orchestratorToken string
 	var orchestratorTokenFile string
+	var orchestratorProviderIDs string
 	var noMetrics bool
 	var metricsListen string
 	var clientConfigPathFlag string
@@ -108,8 +110,9 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&hookTokenFile, "hook-token-file", "", "mode-0600 file containing the hook bearer token")
 	flags.StringVar(&workerJoinToken, "worker-join-token", "", "worker join bearer token")
 	flags.StringVar(&workerJoinTokenFile, "worker-join-token-file", "", "mode-0600 file containing the worker join bearer token")
-	flags.StringVar(&orchestratorToken, "orchestrator-token", "", "orchestrator bearer token (authorizes only GET /v2/queue/stats; not generated when unset)")
+	flags.StringVar(&orchestratorToken, "orchestrator-token", "", "orchestrator bearer token (authorizes assignment provisioning and queue telemetry; not generated when unset)")
 	flags.StringVar(&orchestratorTokenFile, "orchestrator-token-file", "", "mode-0600 file containing the orchestrator bearer token")
+	flags.StringVar(&orchestratorProviderIDs, "orchestrator-provider-ids", "", "comma-separated provider IDs authorized for the orchestrator token")
 	flags.BoolVar(&noMetrics, "no-metrics", false, "disable the telemetry endpoint (/readyz, /livez, /metrics)")
 	flags.StringVar(&metricsListen, "metrics-listen", "", "telemetry endpoint listen address")
 	flags.StringVar(&clientConfigPathFlag, "client-config", "", "client config path to write for local CLI discovery")
@@ -193,6 +196,9 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	if strings.TrimSpace(orchestratorToken) == "" {
 		orchestratorToken = strings.TrimSpace(os.Getenv("FLOW_ORCHESTRATOR_TOKEN"))
 	}
+	if strings.TrimSpace(orchestratorProviderIDs) == "" {
+		orchestratorProviderIDs = strings.TrimSpace(os.Getenv("FLOW_ORCHESTRATOR_PROVIDER_IDS"))
+	}
 	if strings.TrimSpace(orchestratorTokenFile) != "" {
 		if strings.TrimSpace(orchestratorToken) != "" {
 			fmt.Fprintln(stderr, "--orchestrator-token and --orchestrator-token-file cannot be used together")
@@ -203,6 +209,19 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "read orchestrator token: %v\n", err)
 			return 1
 		}
+	}
+	orchestratorProviderIDs, err = normalizeProviderIDSubject(orchestratorProviderIDs)
+	if err != nil {
+		fmt.Fprintf(stderr, "orchestrator provider ids: %v\n", err)
+		return 2
+	}
+	if orchestratorToken != "" && orchestratorProviderIDs == "" {
+		fmt.Fprintln(stderr, "--orchestrator-provider-ids or FLOW_ORCHESTRATOR_PROVIDER_IDS is required with an orchestrator token")
+		return 2
+	}
+	if orchestratorToken == "" && orchestratorProviderIDs != "" {
+		fmt.Fprintln(stderr, "orchestrator provider ids require an orchestrator token")
+		return 2
 	}
 	historyPolicy, err := cfg.History.Resolve(cfg.DataDir)
 	if err != nil {
@@ -321,17 +340,24 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if orchestratorToken != "" {
-		if err := credentials.ReplaceSubjectCredential(context.Background(), coordinator.CredentialInput{
+		if err := credentials.ReplaceScopeCredential(context.Background(), coordinator.CredentialInput{
 			Token: orchestratorToken,
-			Scope: coordinator.TokenScopeOrchestrator,
+			Scope: coordinator.TokenScopeProvisioner, Subject: orchestratorProviderIDs,
 		}); err != nil {
 			fmt.Fprintf(stderr, "store orchestrator token: %v\n", err)
 			return 1
 		}
+	} else if err := credentials.RevokeScopeCredentials(context.Background(), coordinator.TokenScopeProvisioner); err != nil {
+		fmt.Fprintf(stderr, "revoke disabled orchestrator credentials: %v\n", err)
+		return 1
 	}
 
 	if err := registry.OpenAll(context.Background()); err != nil {
 		fmt.Fprintf(stderr, "open projects: %v\n", err)
+		return 1
+	}
+	if _, err := registry.ExpirePendingProvisionerAssignments(context.Background()); err != nil {
+		fmt.Fprintf(stderr, "expire pending worker assignments: %v\n", err)
 		return 1
 	}
 
@@ -552,6 +578,12 @@ func runLifecycleTicker(ctx context.Context, registry *api.Registry, stderr io.W
 			return
 		case <-ticker.C:
 			slog.Debug("lifecycle ticker tick")
+			if expired, err := registry.ExpirePendingProvisionerAssignments(ctx); err != nil && ctx.Err() == nil {
+				slog.Debug("assignment expiry failed", "error", err)
+				fmt.Fprintf(stderr, "assignment expiry: %v\n", err)
+			} else if expired > 0 {
+				slog.Info("expired pending worker assignments", "count", expired)
+			}
 			tickProjects(ctx, registry.All(), stderr)
 			updateQueueDepthGauge(ctx, registry.All(), queueDepth)
 		}
@@ -766,6 +798,27 @@ func runGitHook(args []string, stdout, stderr io.Writer) int {
 	}
 
 	return 0
+}
+
+func normalizeProviderIDSubject(raw string) (string, error) {
+	seen := make(map[string]struct{})
+	var providerIDs []string
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if strings.ContainsAny(value, "\r\n") {
+			return "", errors.New("provider IDs must not contain newlines")
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		providerIDs = append(providerIDs, value)
+	}
+	sort.Strings(providerIDs)
+	return strings.Join(providerIDs, ","), nil
 }
 
 func printUsage(out io.Writer) {

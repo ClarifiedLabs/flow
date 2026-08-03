@@ -11,10 +11,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/api/contract"
@@ -113,6 +115,11 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "work_dir: %s\n", cfg.WorkDir)
 	fmt.Fprintf(stdout, "protocol: %s\n", contract.ProtocolVersion)
 	fmt.Fprintf(stdout, "labels: %d\n", len(cfg.Labels))
+	acceptedBuckets := make([]string, len(cfg.Accepts))
+	for i, bucket := range cfg.Accepts {
+		acceptedBuckets[i] = string(bucket)
+	}
+	fmt.Fprintf(stdout, "accepts: %s\n", strings.Join(acceptedBuckets, ","))
 	fmt.Fprintf(stdout, "capacity_persistent_agent: %d\n", cfg.Capacity.PersistentAgent)
 	fmt.Fprintf(stdout, "capacity_ephemeral: %d\n", cfg.Capacity.Ephemeral)
 	cleanup, _ := cfg.Cleanup.Resolve()
@@ -141,7 +148,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	var configPath string
 	var registerOnly bool
 	var once bool
-	var ephemeral bool
+	var oneShot bool
 	var noMetrics bool
 	var metricsListen string
 	var claimWait time.Duration
@@ -153,7 +160,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&configPath, "config", "", "worker config path")
 	flags.BoolVar(&registerOnly, "register-only", false, "register and heartbeat without claiming jobs")
 	flags.BoolVar(&once, "once", false, "run at most one claim attempt")
-	flags.BoolVar(&ephemeral, "ephemeral", false, "keep long-polling until one job is claimed, run it, then exit")
+	flags.BoolVar(&oneShot, "one-shot", false, "keep long-polling until one job is claimed, run it, then exit")
 	flags.BoolVar(&noMetrics, "no-metrics", false, "disable the telemetry endpoint (/readyz, /livez, /metrics)")
 	flags.StringVar(&metricsListen, "metrics-listen", "", "telemetry endpoint listen address")
 	flags.DurationVar(&claimWait, "claim-wait", 30*time.Second, "claim long-poll duration")
@@ -168,8 +175,8 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "flow-worker does not accept positional arguments")
 		return 2
 	}
-	if once && ephemeral {
-		fmt.Fprintln(stderr, "--once and --ephemeral cannot be used together")
+	if once && oneShot {
+		fmt.Fprintln(stderr, "--once and --one-shot cannot be used together")
 		return 2
 	}
 
@@ -241,7 +248,9 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	ready := func() bool {
 		return registeredReady.Load() && diskReady.Load()
 	}
-	telemetry, err := metrics.StartEndpoint(context.Background(), slog.Default(), metrics.Mux(telemetryRegistry, ready), telemetrySettings)
+	executionCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	telemetry, err := metrics.StartEndpoint(executionCtx, slog.Default(), metrics.Mux(telemetryRegistry, ready), telemetrySettings)
 	if err != nil {
 		fmt.Fprintf(stderr, "start telemetry endpoint: %v\n", err)
 		return 1
@@ -254,7 +263,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 
 	jobRegistry := executionJobRegistry{}
 	controlClient := terminalbridge.NewControlClient(cfg.CoordinatorURL, cfg.WorkerID, cfg.Token, jobRegistry)
-	controlCtx, controlCancel := context.WithCancel(context.Background())
+	controlCtx, controlCancel := context.WithCancel(executionCtx)
 	defer controlCancel()
 	go func() {
 		if err := controlClient.Run(controlCtx); err != nil && !errors.Is(err, context.Canceled) {
@@ -283,15 +292,18 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	maintenance := newWorkerMaintenance(cfg, cleanupPolicy, client, maintenanceMetrics, &diskReady)
-	registered, err := registerWorkerWithRetry(client, cfg, heartbeatTTL, stderr)
+	registered, err := registerWorkerWithRetry(executionCtx, client, cfg, heartbeatTTL, stderr)
 	if err != nil {
+		if executionCtx.Err() != nil {
+			return 0
+		}
 		fmt.Fprintf(stderr, "register worker: %v\n", err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "registered: %s\n", registered.ID)
 	if registerOnly {
 		registeredReady.Store(true)
-		heartbeat, err := client.HeartbeatWorker(flowclient.HeartbeatWorkerInput{
+		heartbeat, err := client.HeartbeatWorkerContext(executionCtx, flowclient.HeartbeatWorkerInput{
 			WorkerID:     cfg.WorkerID,
 			HeartbeatTTL: heartbeatTTL,
 		})
@@ -306,7 +318,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 
 	maintenance.Maintain(true, stderr)
 	registeredReady.Store(true)
-	maintenanceCtx, maintenanceCancel := context.WithCancel(context.Background())
+	maintenanceCtx, maintenanceCancel := context.WithCancel(executionCtx)
 	maintenanceDone := make(chan struct{})
 	go func() {
 		defer close(maintenanceDone)
@@ -324,14 +336,15 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	}
 	runOutput := &lockedWriter{writer: stdout}
 	var runErr error
-	if ephemeral {
-		runErr = runWorkerEphemeral(client, cfg, timings, maintenance, runOutput)
-	} else if slots := workerSlotCount(cfg); slots == 1 {
-		runErr = runWorkerLoop(client, cfg, timings, maintenance, once, runOutput)
+	if oneShot {
+		runErr = runWorkerOneShot(executionCtx, client, cfg, timings, maintenance, runOutput)
 	} else {
-		runErr = runWorkerSlots(cfg, timings, maintenance, slots, once, runOutput)
+		runErr = runWorkerLoop(executionCtx, client, cfg, timings, maintenance, once, runOutput)
 	}
 	if runErr != nil {
+		if executionCtx.Err() != nil {
+			return 0
+		}
 		fmt.Fprintf(stderr, "%v\n", runErr)
 		return 1
 	}
@@ -362,20 +375,21 @@ func (m *workerJobMetrics) jobCompleted(result string) {
 	m.completed.Inc(map[string]string{"result": result})
 }
 
-// runWorkerEphemeral keeps long-polling until a job is claimed, runs exactly
+// runWorkerOneShot keeps long-polling until a job is claimed, runs exactly
 // that one job, then returns. A job-scoped failure has already been reported
 // to the coordinator (release, check verdict, or discarded-on-lease-loss), so
-// it is not a process failure: the worker exits 0 either way and the kubelet
-// restarts the container for the next assignment.
-func runWorkerEphemeral(client *flowclient.Client, cfg config.WorkerConfig, timings workerTimings, maintenance *workerMaintenance, stdout io.Writer) error {
+// it is not a process failure: the worker exits 0 either way.
+func runWorkerOneShot(ctx context.Context, client *flowclient.Client, cfg config.WorkerConfig, timings workerTimings, maintenance *workerMaintenance, stdout io.Writer) error {
 	for {
-		slog.Debug("flow-worker ephemeral claim attempt", "worker_id", cfg.WorkerID)
-		claimed, err := runWorkerOnce(client, cfg, timings, maintenance, stdout)
+		slog.Debug("flow-worker one-shot claim attempt", "worker_id", cfg.WorkerID)
+		claimed, err := runWorkerOnce(ctx, client, cfg, timings, maintenance, stdout)
 		if err != nil {
 			if flowclient.IsRetryableError(err) {
 				slog.Debug("flow-worker transient worker error", "worker_id", cfg.WorkerID, "error", err)
 				fmt.Fprintf(stdout, "worker transient error: %v; retrying in %s\n", err, transientWorkerRetryDelay)
-				time.Sleep(transientWorkerRetryDelay)
+				if err := waitWorkerContext(ctx, transientWorkerRetryDelay); err != nil {
+					return err
+				}
 				continue
 			}
 			var jobErr *jobError
@@ -389,7 +403,9 @@ func runWorkerEphemeral(client *flowclient.Client, cfg config.WorkerConfig, timi
 			return nil
 		}
 		if timings.ClaimWait <= 0 {
-			time.Sleep(time.Second)
+			if err := waitWorkerContext(ctx, time.Second); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -417,66 +433,28 @@ func (w *lockedWriter) Write(p []byte) (int, error) {
 	return w.writer.Write(p)
 }
 
-func workerSlotCount(cfg config.WorkerConfig) int {
-	slots := cfg.Capacity.PersistentAgent + cfg.Capacity.Ephemeral
-	if slots < 1 {
-		return 1
-	}
-
-	return slots
-}
-
-func runWorkerSlots(cfg config.WorkerConfig, timings workerTimings, maintenance *workerMaintenance, slots int, once bool, stdout io.Writer) error {
-	if once {
-		errs := make(chan error, slots)
-		var wg sync.WaitGroup
-		for range slots {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				client, err := newWorkerClient(cfg)
-				if err != nil {
-					errs <- fmt.Errorf("create client: %w", err)
-					return
-				}
-				errs <- runWorkerLoop(client, cfg, timings, maintenance, true, stdout)
-			}()
-		}
-		wg.Wait()
-		close(errs)
-		for err := range errs {
-			if err != nil {
-				return err
-			}
-		}
+func waitWorkerContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case <-timer.C:
 		return nil
 	}
-
-	errs := make(chan error, slots)
-	for range slots {
-		go func() {
-			client, err := newWorkerClient(cfg)
-			if err != nil {
-				errs <- fmt.Errorf("create client: %w", err)
-				return
-			}
-			if err := runWorkerLoop(client, cfg, timings, maintenance, false, stdout); err != nil {
-				errs <- err
-			}
-		}()
-	}
-	return <-errs
 }
 
-func runWorkerLoop(client *flowclient.Client, cfg config.WorkerConfig, timings workerTimings, maintenance *workerMaintenance, once bool, stdout io.Writer) error {
+func runWorkerLoop(ctx context.Context, client *flowclient.Client, cfg config.WorkerConfig, timings workerTimings, maintenance *workerMaintenance, once bool, stdout io.Writer) error {
 	for {
 		slog.Debug("flow-worker claim loop iteration", "worker_id", cfg.WorkerID, "once", once)
-		claimed, err := runWorkerOnce(client, cfg, timings, maintenance, stdout)
+		claimed, err := runWorkerOnce(ctx, client, cfg, timings, maintenance, stdout)
 		if err != nil {
 			if flowclient.IsRetryableError(err) {
 				slog.Debug("flow-worker transient worker error", "worker_id", cfg.WorkerID, "error", err)
 				fmt.Fprintf(stdout, "worker transient error: %v; retrying in %s\n", err, transientWorkerRetryDelay)
-				time.Sleep(transientWorkerRetryDelay)
+				if err := waitWorkerContext(ctx, transientWorkerRetryDelay); err != nil {
+					return err
+				}
 				continue
 			}
 			var jobErr *jobError
@@ -491,14 +469,16 @@ func runWorkerLoop(client *flowclient.Client, cfg config.WorkerConfig, timings w
 			return nil
 		}
 		if !claimed && timings.ClaimWait <= 0 {
-			time.Sleep(time.Second)
+			if err := waitWorkerContext(ctx, time.Second); err != nil {
+				return err
+			}
 		}
 	}
 }
 
-func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings workerTimings, maintenance *workerMaintenance, stdout io.Writer) (bool, error) {
+func runWorkerOnce(ctx context.Context, client *flowclient.Client, cfg config.WorkerConfig, timings workerTimings, maintenance *workerMaintenance, stdout io.Writer) (bool, error) {
 	slog.Debug("flow-worker heartbeat worker", "worker_id", cfg.WorkerID, "heartbeat_ttl", timings.HeartbeatTTL)
-	heartbeat, err := client.HeartbeatWorker(flowclient.HeartbeatWorkerInput{
+	heartbeat, err := client.HeartbeatWorkerContext(ctx, flowclient.HeartbeatWorkerInput{
 		WorkerID:     cfg.WorkerID,
 		HeartbeatTTL: timings.HeartbeatTTL,
 	})
@@ -512,7 +492,7 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 	}
 
 	slog.Debug("flow-worker claim job", "worker_id", cfg.WorkerID, "claim_wait", timings.ClaimWait, "lease_duration", timings.LeaseDuration)
-	claim, err := client.ClaimJob(flowclient.ClaimJobInput{
+	claim, err := client.ClaimJobContext(ctx, flowclient.ClaimJobInput{
 		WorkerID:      cfg.WorkerID,
 		Buckets:       []flowworker.CapacityBucket{flowworker.BucketPersistentAgent, flowworker.BucketEphemeral},
 		LeaseDuration: timings.LeaseDuration,
@@ -553,7 +533,7 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 		running.Job.Payload = map[string]any{}
 	}
 	running.Job.Payload["project_id"] = claim.ProjectID
-	jobCtx, cancelJob := context.WithCancelCause(context.Background())
+	jobCtx, cancelJob := context.WithCancelCause(ctx)
 	defer cancelJob(nil)
 	leaseHeartbeat := startLeaseHeartbeat(client, cfg, *claim.Lease, timings, stdout, cancelJob)
 	result := workerexec.RunJob(jobCtx, workerexec.RunInput{
@@ -564,6 +544,12 @@ func runWorkerOnce(client *flowclient.Client, cfg config.WorkerConfig, timings w
 		Session:      running.Session,
 		SessionToken: running.SessionToken,
 	})
+	if ctx.Err() != nil {
+		// Host or pod shutdown is not a user-code result. Stop renewing and leave
+		// the lease live so coordinator crash-expiry remains authoritative.
+		_ = leaseHeartbeat.Stop()
+		return true, context.Cause(ctx)
+	}
 	cleanupFinalized := false
 	defer func() {
 		if cleanupFinalized {
@@ -760,13 +746,13 @@ func reportPersistentSessionProcessExit(ctx context.Context, client *flowclient.
 	return err
 }
 
-func registerWorkerWithRetry(client *flowclient.Client, cfg config.WorkerConfig, heartbeatTTL time.Duration, stderr io.Writer) (flowworker.Worker, error) {
+func registerWorkerWithRetry(ctx context.Context, client *flowclient.Client, cfg config.WorkerConfig, heartbeatTTL time.Duration, stderr io.Writer) (flowworker.Worker, error) {
 	labels, harnessAvailability := registrationLabelsWithAvailability(cfg.Labels)
 	logAgentHarnessAvailability(harnessAvailability)
 	harnessModels := registrationHarnessModels(labels)
 	for {
 		slog.Debug("flow-worker register worker", "worker_id", cfg.WorkerID, "heartbeat_ttl", heartbeatTTL)
-		registered, err := client.RegisterWorker(flowclient.RegisterWorkerInput{
+		registered, err := client.RegisterWorkerContext(ctx, flowclient.RegisterWorkerInput{
 			ID:                      cfg.WorkerID,
 			Labels:                  labels,
 			Taints:                  cfg.Taints,
@@ -783,7 +769,9 @@ func registerWorkerWithRetry(client *flowclient.Client, cfg config.WorkerConfig,
 		}
 		slog.Debug("flow-worker register worker transient error", "worker_id", cfg.WorkerID, "error", err)
 		fmt.Fprintf(stderr, "register worker transient error: %v; retrying in %s\n", err, transientWorkerRetryDelay)
-		time.Sleep(transientWorkerRetryDelay)
+		if err := waitWorkerContext(ctx, transientWorkerRetryDelay); err != nil {
+			return flowworker.Worker{}, err
+		}
 	}
 }
 
@@ -1623,10 +1611,10 @@ func loadWorkerConfig(configPath string) (config.WorkerConfig, string, error) {
 func printUsage(out io.Writer) {
 	fmt.Fprint(out, `Usage:
   flow-worker [--log-level LEVEL] COMMAND
-  flow-worker [--once]
+  flow-worker [--once | --one-shot]
   flow-worker --register-only
-  flow-worker run [--once]
-  flow-worker -c PATH [--once]
+  flow-worker run [--once | --one-shot]
+  flow-worker -c PATH [--once | --one-shot]
   flow-worker config [-c PATH]
   flow-worker --version
 

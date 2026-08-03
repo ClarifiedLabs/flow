@@ -147,34 +147,34 @@ func TestUnsupportedTaintEffectsAreRejected(t *testing.T) {
 	}
 }
 
-func TestCapacityBucketsAreIndependent(t *testing.T) {
+func TestCapacityAcceptsBucketsButAllowsOneLiveLeaseTotal(t *testing.T) {
 	capacity := Capacity{
 		PersistentAgent: 1,
-		Ephemeral:       2,
+		Ephemeral:       9,
 	}
 
-	hasRoom, err := capacity.HasRoom(CapacityPersistentAgent, Capacity{PersistentAgent: 1})
+	hasRoom, err := capacity.HasRoom(CapacityEphemeral, Capacity{})
 	if err != nil {
-		t.Fatalf("check persistent capacity: %v", err)
+		t.Fatalf("check accepted ephemeral capacity: %v", err)
 	}
-	if hasRoom {
-		t.Fatal("persistent_agent bucket had room after persistent slot was consumed")
+	if !hasRoom {
+		t.Fatal("positive ephemeral capacity did not accept the bucket")
 	}
 
 	hasRoom, err = capacity.HasRoom(CapacityEphemeral, Capacity{PersistentAgent: 1})
 	if err != nil {
-		t.Fatalf("check ephemeral capacity: %v", err)
-	}
-	if !hasRoom {
-		t.Fatal("ephemeral bucket was consumed by persistent_agent usage")
-	}
-
-	hasRoom, err = capacity.HasRoom(CapacityEphemeral, Capacity{Ephemeral: 2})
-	if err != nil {
-		t.Fatalf("check full ephemeral capacity: %v", err)
+		t.Fatalf("check cross-bucket live lease: %v", err)
 	}
 	if hasRoom {
-		t.Fatal("ephemeral bucket had room after ephemeral slots were consumed")
+		t.Fatal("ephemeral bucket had room while a persistent_agent lease was live")
+	}
+
+	hasRoom, err = (Capacity{PersistentAgent: 1}).HasRoom(CapacityEphemeral, Capacity{})
+	if err != nil {
+		t.Fatalf("check rejected bucket: %v", err)
+	}
+	if hasRoom {
+		t.Fatal("zero ephemeral capacity accepted the bucket")
 	}
 
 	if _, err := ParseCapacityBucket("gpu"); err == nil {

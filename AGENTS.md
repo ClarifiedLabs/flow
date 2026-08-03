@@ -5,7 +5,7 @@
 
 ## Kubernetes and telemetry
 
-- Every flow binary serves an unauthenticated telemetry port (default `127.0.0.1:8422`) with `/readyz`, `/livez`, and `/metrics` (stdlib-only Prometheus exposition from `internal/metrics`). Keep it cluster-internal. See `docs/kubernetes.md` and `k8s/` for the reference deployment (`flow-server`, ephemeral `flow-worker --ephemeral`, and the `flow-orchestrator` Deployment autoscaler).
+- Every flow binary serves an unauthenticated telemetry port (default `127.0.0.1:8422`) with `/readyz`, `/livez`, and `/metrics` (stdlib-only Prometheus exposition from `internal/metrics`). Keep it cluster-internal. See `docs/kubernetes.md` and `k8s/` for the reference deployment (`flow-server`, assignment-created `flow-worker --one-shot` Jobs, and the recovery-first `flow-orchestrator` Deployment).
 
 ## Test Isolation
 

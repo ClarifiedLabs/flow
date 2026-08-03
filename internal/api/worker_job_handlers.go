@@ -129,8 +129,8 @@ func (s *Server) handleWorkersDiagnostics(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// queueStatsResponse reports the aggregate job queue depth across every
-// project database: exactly the signal the flow-orchestrator scales on.
+// queueStatsResponse reports aggregate queue telemetry across every project
+// database. Provisioning is driven by durable assignments, not this snapshot.
 type queueStatsResponse struct {
 	Queued           int            `json:"queued"`
 	ClaimedOrRunning int            `json:"claimed_or_running"`
@@ -144,7 +144,7 @@ func (s *Server) handleQueueStats(w http.ResponseWriter, r *http.Request, princi
 	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
-	if !requireScope(w, principal, "owner or orchestrator token is required", coordinator.TokenScopeOwner, coordinator.TokenScopeOrchestrator) {
+	if !requireScope(w, principal, "owner or orchestrator token is required", coordinator.TokenScopeOwner, coordinator.TokenScopeOrchestrator, coordinator.TokenScopeProvisioner) {
 		return
 	}
 
@@ -184,7 +184,7 @@ func (s *Server) handleRegisterWorker(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
-	registered, err := s.registry.Directory().RegisterWorker(r.Context(), worker.RegisterWorkerInput{
+	registered, err := s.registry.RegisterWorker(r.Context(), worker.RegisterWorkerInput{
 		ID:                      workerID,
 		Labels:                  request.Labels,
 		Taints:                  request.Taints,
@@ -194,7 +194,11 @@ func (s *Server) handleRegisterWorker(w http.ResponseWriter, r *http.Request, pr
 		HeartbeatTTL:            heartbeatTTL,
 	})
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "register_worker_failed", err.Error())
+		if errors.Is(err, worker.ErrAssignmentConflict) {
+			writeError(w, http.StatusConflict, "register_worker_failed", err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, "register_worker_failed", err.Error())
+		}
 		return
 	}
 
@@ -294,7 +298,11 @@ func (s *Server) handleClaimWorkerJob(w http.ResponseWriter, r *http.Request, pr
 			return
 		}
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "claim_job_failed", err.Error())
+			if errors.Is(err, worker.ErrAssignmentConflict) {
+				writeError(w, http.StatusConflict, "claim_job_failed", err.Error())
+			} else {
+				writeError(w, http.StatusBadRequest, "claim_job_failed", err.Error())
+			}
 			return
 		}
 		if ok {

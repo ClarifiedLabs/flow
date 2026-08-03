@@ -9,6 +9,15 @@ architecture, start with [architecture.md](architecture.md); when this historica
 design narrative and current docs disagree, the current architecture/setup/usage
 docs are authoritative.
 
+The current worker model differs materially from early pool terminology below.
+The coordinator stores project-local durable assignments, and
+`flow-orchestrator` recovers them before reserving new work. Each assignment gets
+one Kubernetes Job plus Secret or one Darwin child running
+`flow-worker --one-shot`. A worker accepts workload buckets but can hold only one
+live lease total; legacy positive capacity magnitudes normalize to 1. Treat
+references to hot slots or pools as historical rationale, not Deployment
+lifecycle guidance.
+
 This document turns the design draft into an implementation-ready design. It
 also records the details that needed to be decided before development could
 begin.
@@ -67,9 +76,10 @@ missing or internally ambiguous. These decisions resolve the blockers:
    remote, named `flow` by default, that workers clone/fetch/push from.
    Existing remotes such as `origin` are left for the user to push manually.
 
-With those decisions made, there are no blocking product-design questions before
-beginning development. Later choices, such as cloud autoscaling and automated
-downstream mirror pushes, are intentionally outside the first build.
+With those decisions made, there were no blocking product-design questions
+before development. Automated downstream mirror pushes remain outside the first
+build; current assignment provisioning is documented in the authoritative
+architecture and deployment guides.
 
 ## Goals
 
@@ -957,9 +967,9 @@ taints:
   - key: lifetime
     value: persistent
     effect: NoSchedule
-capacity:
-  persistent_agent: 1
-  ephemeral: 2
+accepts:
+  - persistent_agent
+  - ephemeral
 ```
 
 Jobs carry selectors and tolerations:
@@ -1008,8 +1018,10 @@ Admission-only taints are supported. `NoExecute` is not supported because Flow
 must not evict hot agent sessions.
 
 Capacity buckets are explicit. Persistent author/reviewer/verifier agent jobs
-consume `persistent_agent` capacity. Ephemeral CI/check jobs consume
-`ephemeral` capacity. Ephemeral jobs can use worker capacity greater than one.
+use the `persistent_agent` bucket. CI/check jobs use the `ephemeral` bucket;
+*ephemeral* is workload terminology, not a worker lifecycle mode. Canonical
+worker configuration lists accepted buckets. Legacy positive capacity values
+normalize to 1, and one worker identity can hold only one live lease total.
 
 ## Worker Job Contract
 
@@ -1144,19 +1156,28 @@ flow-server git-hook post-receive
 `flow-server` is installed on the coordinator host and in the exchange remote's
 hook environment. It should not be installed in agent session PATHs.
 
-### `flow-worker`
+### `flow-worker` and `flow-orchestrator`
 
-`flow-worker` owns worker authority:
+`flow-worker` owns worker authority. Assignment workers run:
 
 ```text
-flow-worker -c worker.yaml
+flow-worker -c worker.yaml --one-shot
 ```
 
-It registers the worker, claims jobs, holds the worker-scoped credential,
-prepares git worktrees, starts tmux sessions, injects only the session token
-into the job environment, supervises heartbeats, and releases leases.
+It registers the worker, claims its assignment-bound job, holds the
+worker-scoped credential, prepares the git worktree, starts tmux, injects only
+the session token into the job environment, supervises heartbeats, and releases
+the lease. The one-shot lifecycle exits after one reported job outcome and is
+signal-aware; lease recovery remains authoritative if interruption prevents a
+terminal report.
 
-The three binaries share protocol types and version metadata. The protocol
+`flow-orchestrator` uses an orchestrator-scoped credential to reconcile durable
+assignments. It creates one Kubernetes Job/private Secret or Darwin child per
+assignment, passes a direct worker credential, revokes that credential through
+assignment abandonment/cleanup, and performs recovery and cleanup before new
+reservation.
+
+The four binaries share protocol types and version metadata. The protocol
 version is compiled into each binary rather than configured by users.
 Coordinator, worker, and client requests still use `Flow-Protocol-Version`;
 startup should fail clearly when binary versions are incompatible.
@@ -1609,7 +1630,12 @@ Credential scopes:
 
 - Owner token: human UI/CLI. Can create/edit/schedule/close/merge/reconcile
   tasks and changes.
-- Worker token: supervisor only. Can register, claim, heartbeat, and release.
+- Worker token: one worker identity only. Can register, claim, heartbeat, and
+  release; assignment credentials are issued directly and revoked on
+  abandonment/cleanup.
+- Orchestrator token: assignment reservation, provider-attempt, abandonment, and
+  cleanup operations for explicitly bound provider IDs only; it is not owner
+  authority.
 - Session token: exported to agent shell. Can act on its session/change, read
   tasks, and create triage/backlog tasks with provenance.
 - Hook token: exchange remote hooks only. Can post git ref-update events.
@@ -1659,10 +1685,12 @@ append-only `transitions` log is the durable lifecycle audit trail: every task
 phase change records the triggering event, guard result, from/to phase, actor,
 and time, and backs the per-task lifecycle timeline.
 
-Metrics to expose later:
+Useful metrics include:
 
-- queued jobs by scheduling class
-- hot slots in `working` and `waiting`
+- queued jobs by scheduling class (diagnostic, not a replica-count signal)
+- active durable assignments by provider, profile, and state
+- assignment reserve, launch, cleanup, and reconciliation errors
+- one-job workers in `working` and `waiting`
 - time spent waiting by `wait_reason`
 - review backlog size
 - check pass/fail counts

@@ -31,6 +31,7 @@ func newClaimFixture(t *testing.T, projectIDs ...string) claimFixture {
 			t.Fatalf("open project db %s: %v", projectID, err)
 		}
 		t.Cleanup(func() { _ = store.Close() })
+		ensureWorkerAssignmentsTable(t, store.DB())
 		fixture.queues = append(fixture.queues, ProjectQueue{
 			ProjectID: projectID,
 			Queue:     NewService(store.DB()),
@@ -99,6 +100,10 @@ func TestClaimAcrossProjectsPrefersOldestQueuedJob(t *testing.T) {
 		t.Fatalf("first claim = %s/%s, want p-aaaa/%s", first.ProjectID, first.Job.ID, older.ID)
 	}
 
+	if _, err := fixture.queues[0].Queue.ReleaseLease(context.Background(), first.Lease.ID, JobFinished); err != nil {
+		t.Fatalf("release first claim: %v", err)
+	}
+
 	second, ok := fixture.claim(t)
 	if !ok {
 		t.Fatal("second claim should succeed")
@@ -108,9 +113,9 @@ func TestClaimAcrossProjectsPrefersOldestQueuedJob(t *testing.T) {
 	}
 }
 
-func TestClaimAcrossProjectsAggregatesCapacityAcrossDatabases(t *testing.T) {
+func TestClaimAcrossProjectsAllowsOneLiveLeaseAcrossDatabasesAndBuckets(t *testing.T) {
 	fixture := newClaimFixture(t, "p-aaaa", "p-bbbb")
-	fixture.registerWorker(t, 0, 1)
+	fixture.registerWorker(t, 1, 7)
 
 	fixture.enqueueCI(t, 0)
 	fixture.enqueueCI(t, 1)
@@ -119,9 +124,9 @@ func TestClaimAcrossProjectsAggregatesCapacityAcrossDatabases(t *testing.T) {
 		t.Fatal("first claim should succeed")
 	}
 
-	// The single ephemeral slot is occupied by a lease in project A's
-	// database; project B's queued job must not be claimable even though
-	// project B's database holds no leases.
+	// A live lease in project A occupies the worker globally. Project B's
+	// queued job must not be claimable even though the worker registered a
+	// legacy magnitude greater than one and project B holds no lease.
 	if claim, ok := fixture.claim(t); ok {
 		t.Fatalf("second claim should be capacity-blocked, got %s/%s", claim.ProjectID, claim.Job.ID)
 	}

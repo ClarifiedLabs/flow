@@ -19,6 +19,13 @@ func TestQueueStatsScopeAndCounts(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("store orchestrator token: %v", err)
 	}
+	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
+		Token:   "provisioner-token",
+		Scope:   coordinator.TokenScopeProvisioner,
+		Subject: "test-provider",
+	}); err != nil {
+		t.Fatalf("store provisioner token: %v", err)
+	}
 
 	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Queue stats task"})
 	if err != nil {
@@ -36,7 +43,7 @@ func TestQueueStatsScopeAndCounts(t *testing.T) {
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/queue/stats", nil, http.StatusForbidden, nil)
 	doJSONRequestAs(t, fixture.Server, "hook-token", http.MethodGet, "/v2/queue/stats", nil, http.StatusForbidden, nil)
 
-	for _, token := range []string{"orchestrator-token", "owner-token"} {
+	for _, token := range []string{"orchestrator-token", "provisioner-token", "owner-token"} {
 		var stats queueStatsResponse
 		doJSONRequestAs(t, fixture.Server, token, http.MethodGet, "/v2/queue/stats", nil, http.StatusOK, &stats)
 		if stats.Queued != 1 {

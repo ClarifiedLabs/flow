@@ -136,6 +136,69 @@ func TestReplaceSubjectTokenRevokesPreviousWorkerToken(t *testing.T) {
 	}
 }
 
+func TestRevokeSubjectCredentialsIsIdempotentAndScoped(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newCredentialServiceForTest(t)
+	for _, input := range []CredentialInput{
+		{Token: "worker-token-1", Scope: TokenScopeWorker, Subject: "w-assigned"},
+		{Token: "worker-token-2", Scope: TokenScopeWorker, Subject: "w-assigned"},
+		{Token: "other-worker-token", Scope: TokenScopeWorker, Subject: "w-other"},
+		{Token: "orchestrator-token", Scope: TokenScopeOrchestrator, Subject: "w-assigned"},
+	} {
+		if err := service.EnsureToken(ctx, input); err != nil {
+			t.Fatalf("ensure token: %v", err)
+		}
+	}
+	if err := service.RevokeSubjectCredentials(ctx, TokenScopeWorker, "w-assigned"); err != nil {
+		t.Fatalf("revoke worker subject: %v", err)
+	}
+	if err := service.RevokeSubjectCredentials(ctx, TokenScopeWorker, "w-assigned"); err != nil {
+		t.Fatalf("repeat worker subject revocation: %v", err)
+	}
+	for _, token := range []string{"worker-token-1", "worker-token-2"} {
+		if _, err := service.Authenticate(ctx, token); err != ErrInvalidCredential {
+			t.Fatalf("Authenticate(%s) err = %v, want ErrInvalidCredential", token, err)
+		}
+	}
+	for _, token := range []string{"other-worker-token", "orchestrator-token"} {
+		if _, err := service.Authenticate(ctx, token); err != nil {
+			t.Fatalf("Authenticate preserved %s: %v", token, err)
+		}
+	}
+}
+
+func TestReplaceScopeCredentialRevokesChangedSubjectAndCanBeDisabled(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newCredentialServiceForTest(t)
+
+	if err := service.ReplaceScopeCredential(ctx, CredentialInput{
+		Token: "provisioner-token-1", Scope: TokenScopeProvisioner, Subject: "in-cluster",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReplaceScopeCredential(ctx, CredentialInput{
+		Token: "provisioner-token-2", Scope: TokenScopeProvisioner, Subject: "in-cluster,macos",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Authenticate(ctx, "provisioner-token-1"); err != ErrInvalidCredential {
+		t.Fatalf("old provisioner token authenticate err = %v, want ErrInvalidCredential", err)
+	}
+	principal, err := service.Authenticate(ctx, "provisioner-token-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if principal.Scope != TokenScopeProvisioner || principal.Subject != "in-cluster,macos" {
+		t.Fatalf("replacement principal = %+v", principal)
+	}
+	if err := service.RevokeScopeCredentials(ctx, TokenScopeProvisioner); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Authenticate(ctx, "provisioner-token-2"); err != ErrInvalidCredential {
+		t.Fatalf("disabled provisioner token authenticate err = %v, want ErrInvalidCredential", err)
+	}
+}
+
 func TestReplaceSubjectCredentialUsesSuppliedToken(t *testing.T) {
 	ctx := context.Background()
 	service, _ := newCredentialServiceForTest(t)

@@ -21,6 +21,7 @@ mkdir -p "${pkgroot}/DEBIAN" "${pkgroot}/usr/bin" "${pkgroot}/usr/share/doc/flow
 install -m 0755 "${stage_dir}/flow" "${pkgroot}/usr/bin/flow"
 install -m 0755 "${stage_dir}/flow-server" "${pkgroot}/usr/bin/flow-server"
 install -m 0755 "${stage_dir}/flow-worker" "${pkgroot}/usr/bin/flow-worker"
+install -m 0755 "${stage_dir}/flow-orchestrator" "${pkgroot}/usr/bin/flow-orchestrator"
 install -m 0644 README.md "${pkgroot}/usr/share/doc/flow/README.md"
 install -m 0644 LICENSE "${pkgroot}/usr/share/doc/flow/LICENSE"
 install -m 0644 docs/*.md "${pkgroot}/usr/share/doc/flow/docs/"

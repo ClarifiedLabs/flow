@@ -12,10 +12,12 @@ Flow ships three Go commands from one module:
 | --- | --- |
 | `flow` | Human and in-session CLI. It registers projects, drives task/workflow commands, fetches prompts, submits typed artifacts, and attaches to terminals. |
 | `flow-server` | Coordinator daemon. It serves the HTTP API, browser UI, Git HTTP exchange endpoints, web/terminal proxy routes, project registry, workflow executor, scheduler entrypoints, and exchange git hooks. |
-| `flow-worker` | Worker supervisor. It joins the coordinator, advertises capacity and harness labels, claims jobs across projects, clones exchange branches, runs jobs in tmux, heartbeats leases, uploads transcripts, and reports results. |
+| `flow-worker` | Job executor. It registers, claims its eligible or assignment-bound job, clones exchange branches, runs jobs in tmux, heartbeats its lease, uploads transcripts, and reports results. |
+| `flow-orchestrator` | Durable assignment reconciler. It reserves exact queued jobs and creates one Kubernetes Job/Secret or Darwin child process per assignment. |
 
-A single `flow-server` can serve many projects. A single `flow-worker` can run
-jobs for any registered project, subject to labels, taints, and capacity.
+A single `flow-server` can serve many projects. Static service-mode workers can
+still claim eligible jobs across projects. Provisioned workers instead have a
+stable assignment identity and execute one assignment with `--one-shot`.
 
 ## Data layout
 
@@ -30,7 +32,7 @@ The coordinator data directory defaults to
   hook.token                        # fallback hook token, mode 0600
   projects/
     <project-id>/
-      flow.db                       # task/session/check/review state
+      flow.db                       # task/session/check/review/job/assignment state
       exchange.git/                 # private bare git exchange remote
         flow-spool/post-receive.jsonl
       transcripts/
@@ -38,8 +40,9 @@ The coordinator data directory defaults to
 ```
 
 Global state lives in `global.db`; project state is intentionally isolated in one
-SQLite database per project. Because no database transaction spans projects, the
-API registry serializes job claims while checking a worker's aggregate live
+SQLite database per project. Jobs, leases, and durable provisioner assignments
+live with their owning project. Because no database transaction spans projects,
+the API registry serializes reservations and claims and checks a worker's live
 leases across all project databases.
 
 Workers keep their own `work_dir` from `flow-worker.yaml` and clone per-job
@@ -121,39 +124,52 @@ Blocked. Reset cancels run-owned jobs, leases, sessions, and the active node and
 returns the task to Unscheduled. Terminal nodes derive Done; a merged terminal
 additionally proves the run owns a merged change.
 
-## Worker scheduling and execution
+## Worker scheduling, assignment, and execution
 
-Workers register globally in `global.db` with:
+Workers register globally in `global.db` with labels (including discovered
+harness capabilities), taints, accepted workload buckets, heartbeat expiry, and
+optional harness model catalogs. The canonical worker config field is `accepts`:
 
-- labels such as `agent.harness.harness=true`;
-- taints;
-- `persistent_agent` and `ephemeral` capacity;
-- heartbeat expiry;
-- optional harness model catalogs.
-
-Project databases hold jobs and leases. `flow-worker` long-polls the coordinator
-for work. The coordinator orders project queues by their oldest queued eligible
-job and claims only when the worker has remaining aggregate capacity in the
-requested capacity bucket.
-
-At coordinator startup, active lease deadlines are extended through the
-configured worker reconnect grace before recovery starts. A worker keeps its
-local tmux job running and retries transient renewal failures while the
-coordinator is unavailable. The original lease remains exclusive during the
-grace window; if its worker does not reconnect, ordinary expiry and crash
-recovery resume when the window closes.
-
-Capacity buckets have different purposes:
-
-- `persistent_agent`: author, reviewer, verifier, and console agent sessions.
+- `persistent_agent`: author, reviewer, verifier, and console agent sessions;
 - `ephemeral`: CI/check commands.
 
-Capacity is shared across every project and role eligible for a worker; it is
-not reserved per workflow node. In particular, each child job inside a
-multi-agent review or verification fan-out consumes one `persistent_agent`
-slot and competes with authors, consoles, and other multi-agent children.
+The word *ephemeral* remains a workload-bucket name; it does not select a worker
+process lifecycle. For protocol compatibility, positive legacy capacity values
+are normalized to acceptance value 1, and magnitudes greater than one are
+ignored. One worker identity may hold only one live lease total, even when it
+accepts both buckets.
 
-For each claimed job, the worker:
+Project databases hold jobs, leases, and provisioner assignments. A reservation
+selects one exact eligible queued job across projects and durably records its
+job/worker/provider/profile identity, role and bucket, scheduling snapshot,
+startup deadline, retry state, and cleanup state in that project's database.
+The assignment-aware claim path permits that worker to claim only its bound job.
+
+`flow-orchestrator` performs recovery before new reservation on every cycle. It
+inspects each open assignment's provider resource, relaunches a missing pending
+resource only when its durable descriptor still matches a locally approved
+profile, abandons unapproved, permanently failed, or startup-expired pending
+assignments, and deletes resources for closed assignments. Only then does it
+reserve new work up to each profile's `max_concurrency`. A Kubernetes provider
+creates one Job and one private worker-config Secret per assignment; the Darwin
+provider creates one child process and durable private state directory. Both run
+`flow-worker --one-shot` with a direct worker credential returned by the
+reservation API.
+
+Assignment closure fences the worker credential. Successful cleanup also removes
+the global worker-directory row and records `cleaned_at`; provider deletion and
+coordinator cleanup are retryable reconciliation steps. Once an assignment is
+claimed, ordinary lease/job recovery is authoritative—provider failure alone
+must not requeue it.
+
+At coordinator startup, active lease deadlines are extended through the
+configured worker reconnect grace before recovery starts. A still-running
+worker keeps its local tmux job running and retries transient renewal failures
+while the coordinator is unavailable. The original lease remains exclusive
+during the grace window; if its worker does not reconnect, ordinary expiry and
+crash recovery resume when the window closes.
+
+For its one claimed job, the worker:
 
 1. Clones or fetches the project's exchange remote into its work directory.
 2. Checks out the job's task branch.
@@ -164,8 +180,13 @@ For each claimed job, the worker:
 7. Heartbeats the lease and reports session/check/job events.
 8. Uploads the tail of the transcript when the job finishes.
 
-The worker clears `FLOW_WORKER_JOIN_TOKEN` after it obtains a scoped worker token,
-so normal job environments do not inherit the reusable join secret.
+`--one-shot` long-polls until that claim, runs exactly one job, and exits after a
+reported job-scoped failure as well as success. `SIGINT`/`SIGTERM` cancel worker
+registration retries, long polling, maintenance, job supervision, and telemetry;
+an interrupted unreported job remains subject to lease expiry and recovery.
+Static workers that join with `FLOW_WORKER_JOIN_TOKEN` clear it after receiving a
+scoped token. Orchestrated assignment workers instead receive a direct token and
+never need the reusable join secret.
 
 ## Git exchange and hooks
 
@@ -312,10 +333,16 @@ web UI or CLI.
 Flow uses bearer tokens for API clients and short-lived cookies for the web UI:
 
 - **Owner token**: human/admin CLI calls and web UI bootstrap.
-- **Worker join token**: reusable secret a worker presents once to mint its
-  scoped worker token.
+- **Worker join token**: reusable secret a static worker presents once to mint
+  its scoped worker token.
 - **Worker token**: scoped token for worker heartbeat, job claim/report, and
-  transcript upload.
+  transcript upload. Assignment workers receive it directly from reservation;
+  abandonment and cleanup revoke credentials for that assignment worker ID.
+- **Orchestrator token**: provisioner-assignment reservation, recovery, and
+  cleanup calls for its bound provider IDs; it has no general owner authority.
+  Retired provider IDs stay bound as explicit recovery tombstones until their
+  durable assignments are cleaned, even after their final scheduling profile is
+  removed.
 - **Session/console tokens**: scoped tokens injected into agent sessions.
 - **Hook token**: exchange hook/coordinator integration.
 - **Web session cookie + CSRF cookie/header**: browser UI authentication after a
@@ -348,14 +375,15 @@ terminal state, and flow state are authoritative on the server.
 
 | Area | Packages/files |
 | --- | --- |
-| Commands | `cmd/flow`, `cmd/flow-server`, `cmd/flow-worker` |
+| Commands | `cmd/flow`, `cmd/flow-server`, `cmd/flow-worker`, `cmd/flow-orchestrator` |
 | HTTP API and project registry | `internal/api` |
 | API request/response contract aliases | `internal/api/contract` |
 | CLI client plumbing | `internal/client` |
 | Configuration loading and defaults | `internal/config` |
 | Domain services | `internal/coordinator` |
 | SQLite schema/migrations | `internal/db`, `internal/sqlitex` |
-| Worker directory, queues, claims, leases | `internal/worker` |
+| Worker directory, queues, assignments, claims, leases | `internal/worker` |
+| Assignment reconciliation and Kubernetes/Darwin providers | `internal/orchestrator` |
 | Worker checkout/tmux/entrypoint execution | `internal/worker/execution` |
 | Git exchange, hooks, refs, merge helpers | `internal/git` |
 | Harness definitions, hooks, model serialization | `internal/harness` |

@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -482,6 +483,13 @@ func TestLoadWorkerDefaultsLabels(t *testing.T) {
 	if cfg.Labels == nil {
 		t.Fatal("Labels is nil")
 	}
+	expectedOS := runtime.GOOS
+	if expectedOS == "darwin" {
+		expectedOS = "macos"
+	}
+	if cfg.Labels["os"] != expectedOS || cfg.Labels["arch"] != runtime.GOARCH {
+		t.Fatalf("platform labels = %#v, want os=%s arch=%s", cfg.Labels, expectedOS, runtime.GOARCH)
+	}
 	if cfg.CoordinatorURL == "" {
 		t.Fatal("CoordinatorURL is empty")
 	}
@@ -533,8 +541,11 @@ git:
 	if cfg.Labels["local"] != "true" || cfg.Labels["agent.harness.harness"] != "true" {
 		t.Fatalf("Labels = %#v", cfg.Labels)
 	}
-	if cfg.Capacity.PersistentAgent != 1 || cfg.Capacity.Ephemeral != 2 {
-		t.Fatalf("Capacity = %+v", cfg.Capacity)
+	if cfg.Capacity.PersistentAgent != 1 || cfg.Capacity.Ephemeral != 1 {
+		t.Fatalf("normalized Capacity = %+v", cfg.Capacity)
+	}
+	if len(cfg.Accepts) != 2 || cfg.Accepts[0] != "persistent_agent" || cfg.Accepts[1] != "ephemeral" {
+		t.Fatalf("Accepts = %+v", cfg.Accepts)
 	}
 	cleanup, err := cfg.Cleanup.Resolve()
 	if err != nil {
@@ -560,6 +571,51 @@ git:
 	}
 	if strings.Contains(cfg.WorkDir, "~") {
 		t.Fatalf("WorkDir was not expanded: %q", cfg.WorkDir)
+	}
+}
+
+func TestLoadWorkerCanonicalAcceptsAndRejectsLegacyConflict(t *testing.T) {
+	dir := t.TempDir()
+	canonicalPath := filepath.Join(dir, "canonical.yaml")
+	if err := os.WriteFile(canonicalPath, []byte(`coordinator_url: http://127.0.0.1:8421
+work_dir: /tmp/worker
+accepts: [ephemeral]
+`), 0o600); err != nil {
+		t.Fatalf("write canonical worker config: %v", err)
+	}
+	cfg, err := LoadWorker(canonicalPath)
+	if err != nil {
+		t.Fatalf("load canonical worker config: %v", err)
+	}
+	if len(cfg.Accepts) != 1 || cfg.Accepts[0] != "ephemeral" || cfg.Capacity.PersistentAgent != 0 || cfg.Capacity.Ephemeral != 1 {
+		t.Fatalf("canonical acceptance = accepts=%+v capacity=%+v", cfg.Accepts, cfg.Capacity)
+	}
+
+	conflictPath := filepath.Join(dir, "conflict.yaml")
+	if err := os.WriteFile(conflictPath, []byte(`coordinator_url: http://127.0.0.1:8421
+work_dir: /tmp/worker
+accepts: [persistent_agent]
+capacity:
+  ephemeral: 1
+`), 0o600); err != nil {
+		t.Fatalf("write conflicting worker config: %v", err)
+	}
+	if _, err := LoadWorker(conflictPath); err == nil || !strings.Contains(err.Error(), "cannot both be configured") {
+		t.Fatalf("LoadWorker conflict error = %v", err)
+	}
+}
+
+func TestLoadWorkerRejectsConflictingDetectedPlatformLabel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.yaml")
+	if err := os.WriteFile(path, []byte(`coordinator_url: http://127.0.0.1:8421
+work_dir: /tmp/worker
+labels:
+  arch: definitely-not-this-architecture
+`), 0o600); err != nil {
+		t.Fatalf("write worker config: %v", err)
+	}
+	if _, err := LoadWorker(path); err == nil || !strings.Contains(err.Error(), "conflicts with detected platform") {
+		t.Fatalf("LoadWorker platform conflict error = %v", err)
 	}
 }
 
@@ -670,8 +726,11 @@ func TestApplyWorkerEnvOverrides(t *testing.T) {
 	if strings.Contains(cfg.WorkDir, "~") {
 		t.Fatalf("WorkDir was not expanded: %q", cfg.WorkDir)
 	}
-	if cfg.Capacity.PersistentAgent != 3 || cfg.Capacity.Ephemeral != 4 {
-		t.Fatalf("Capacity = %+v", cfg.Capacity)
+	if cfg.Capacity.PersistentAgent != 1 || cfg.Capacity.Ephemeral != 1 {
+		t.Fatalf("normalized Capacity = %+v", cfg.Capacity)
+	}
+	if len(cfg.Accepts) != 2 {
+		t.Fatalf("Accepts = %+v", cfg.Accepts)
 	}
 	if cfg.Tmux.SocketPath != "/tmp/tmux.sock" {
 		t.Fatalf("Tmux = %+v", cfg.Tmux)

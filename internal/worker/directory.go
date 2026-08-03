@@ -34,6 +34,8 @@ func (d *Directory) RegisterWorker(ctx context.Context, input RegisterWorkerInpu
 	if input.CapacityPersistentAgent < 0 || input.CapacityEphemeral < 0 {
 		return Worker{}, errors.New("worker capacity cannot be negative")
 	}
+	input.CapacityPersistentAgent = normalizeAcceptance(input.CapacityPersistentAgent)
+	input.CapacityEphemeral = normalizeAcceptance(input.CapacityEphemeral)
 	labels, err := normalizeLabelsJSON(input.Labels)
 	if err != nil {
 		return Worker{}, err
@@ -95,6 +97,13 @@ ON CONFLICT(id) DO UPDATE SET
 	return d.GetWorker(ctx, input.ID)
 }
 
+func normalizeAcceptance(capacity int) int {
+	if capacity > 0 {
+		return 1
+	}
+	return 0
+}
+
 func (d *Directory) HeartbeatWorker(ctx context.Context, workerID string, ttl time.Duration) (Worker, error) {
 	now := d.now().UTC()
 	var expiresAt *time.Time
@@ -127,6 +136,20 @@ WHERE id = ?`,
 	}
 
 	return d.GetWorker(ctx, workerID)
+}
+
+// DeleteWorker removes transient directory state after a managed assignment's
+// provider resources and credentials have been cleaned. Project-local
+// assignment and lease rows retain their textual worker history.
+func (d *Directory) DeleteWorker(ctx context.Context, workerID string) error {
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return errors.New("worker id is required")
+	}
+	if _, err := d.db.ExecContext(ctx, `DELETE FROM workers WHERE id = ?`, workerID); err != nil {
+		return fmt.Errorf("delete worker: %w", err)
+	}
+	return nil
 }
 
 func (d *Directory) GetWorker(ctx context.Context, workerID string) (Worker, error) {

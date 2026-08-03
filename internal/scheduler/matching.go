@@ -256,22 +256,24 @@ func (b CapacityBucket) Valid() bool {
 }
 
 func (c Capacity) Available(bucket CapacityBucket, used Capacity) (int, error) {
-	total, err := c.value(bucket)
+	accepted, err := c.value(bucket)
 	if err != nil {
 		return 0, err
 	}
-	consumed, err := used.value(bucket)
-	if err != nil {
-		return 0, err
-	}
-	if total < 0 {
+	if c.PersistentAgent < 0 || c.Ephemeral < 0 {
 		return 0, errors.New("capacity cannot be negative")
 	}
-	if consumed < 0 {
+	if used.PersistentAgent < 0 || used.Ephemeral < 0 {
 		return 0, errors.New("used capacity cannot be negative")
 	}
 
-	return total - consumed, nil
+	// Capacity magnitudes are retained on the wire for v4 compatibility, but a
+	// positive value now means only that the worker accepts the bucket. A worker
+	// may hold one live lease total, irrespective of bucket.
+	if accepted <= 0 || used.PersistentAgent+used.Ephemeral > 0 {
+		return 0, nil
+	}
+	return 1, nil
 }
 
 func (c Capacity) HasRoom(bucket CapacityBucket, used Capacity) (bool, error) {

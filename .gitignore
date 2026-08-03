@@ -7,8 +7,10 @@
 .DS_Store
 coverage.out
 /.flow/session/
+/.flow-kind/
 /SUMMARY.md
 /flow
 /flow-server
 /flow-worker
+/flow-orchestrator
 SUMMARY.md

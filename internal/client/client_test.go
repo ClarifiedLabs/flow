@@ -8,9 +8,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/ClarifiedLabs/flow/internal/api/contract"
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
+	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
 func newClientForTest(t *testing.T, handler http.Handler) *Client {
@@ -58,6 +61,79 @@ func TestListTaskAttachments(t *testing.T) {
 		if got[i].ID != attachment.ID || got[i].Filename != attachment.Filename || got[i].ContentType != attachment.ContentType {
 			t.Fatalf("attachment %d = %+v, want %+v", i, got[i], attachment)
 		}
+	}
+}
+
+func TestProvisionerAssignmentClient(t *testing.T) {
+	t.Parallel()
+	assignment := contract.ProvisionerAssignment{
+		Project:    contract.Project{ID: "p-client", Name: "Client Project"},
+		Assignment: flowworker.Assignment{ID: "a/client", WorkerID: "w-client", State: flowworker.AssignmentPending},
+	}
+	nextRetry := time.Date(2026, 8, 2, 18, 0, 0, 0, time.UTC)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v2/provisioner/assignments/reserve", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.Header.Get(contract.ProtocolHeader) != contract.ProtocolVersion {
+			t.Fatalf("reserve request method/header = %s/%q", r.Method, r.Header.Get(contract.ProtocolHeader))
+		}
+		var request contract.ReserveProvisionerAssignmentRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode reserve: %v", err)
+		}
+		if request.ProviderRequestID != "request-client" || request.StartupTimeoutSeconds != 45 || request.WaitSeconds != 2 {
+			t.Fatalf("reserve request = %+v", request)
+		}
+		writeJSON(t, w, http.StatusOK, contract.ReserveProvisionerAssignmentResponse{Reserved: true, Assignment: &assignment, WorkerToken: "direct-worker-token"})
+	})
+	mux.HandleFunc("/v2/provisioner/assignments", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Query().Get("provider_id") != "kubernetes" || r.URL.Query().Get("state") != "pending" || r.URL.Query().Get("open_only") != "true" {
+			t.Fatalf("list request = %s %s", r.Method, r.URL.String())
+		}
+		writeJSON(t, w, http.StatusOK, contract.ProvisionerAssignmentsResponse{Assignments: []contract.ProvisionerAssignment{assignment}})
+	})
+	mux.HandleFunc("/v2/provisioner/assignments/a%2Fclient/attempt", func(w http.ResponseWriter, r *http.Request) {
+		var request contract.RecordProvisionerAssignmentAttemptRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode attempt: %v", err)
+		}
+		if request.ProviderError != "warming" || request.NextRetryAt == nil || !request.NextRetryAt.Equal(nextRetry) {
+			t.Fatalf("attempt request = %+v", request)
+		}
+		writeJSON(t, w, http.StatusOK, contract.ProvisionerAssignmentResponse{Assignment: assignment})
+	})
+	mux.HandleFunc("/v2/provisioner/assignments/a%2Fclient/abandon", func(w http.ResponseWriter, r *http.Request) {
+		var request contract.AbandonProvisionerAssignmentRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.ProviderError != "launch failed" {
+			t.Fatalf("abandon request = %+v, err=%v", request, err)
+		}
+		writeJSON(t, w, http.StatusOK, contract.ProvisionerAssignmentResponse{Assignment: assignment})
+	})
+	mux.HandleFunc("/v2/provisioner/assignments/a%2Fclient/cleaned", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusOK, contract.ProvisionerAssignmentResponse{Assignment: assignment})
+	})
+	client := newClientForTest(t, mux)
+
+	reserved, err := client.ReserveProvisionerAssignment(context.Background(), ReserveProvisionerAssignmentInput{
+		ProviderID: "kubernetes", ProviderRequestID: "request-client", ProfileName: "linux",
+		MaxConcurrency: 3, StartupTimeout: 45 * time.Second, Wait: 2 * time.Second,
+	})
+	if err != nil || !reserved.Reserved || reserved.Assignment == nil || reserved.WorkerToken != "direct-worker-token" {
+		t.Fatalf("reserve result = %+v, err=%v", reserved, err)
+	}
+	listed, err := client.ListProvisionerAssignments(context.Background(), ProvisionerAssignmentFilter{
+		ProviderID: "kubernetes", States: []flowworker.AssignmentState{flowworker.AssignmentPending}, OpenOnly: true,
+	})
+	if err != nil || len(listed) != 1 || listed[0].Assignment.ID != assignment.Assignment.ID {
+		t.Fatalf("list result = %+v, err=%v", listed, err)
+	}
+	if _, err := client.RecordProvisionerAssignmentAttempt(context.Background(), assignment.Assignment.ID, RecordProvisionerAssignmentAttemptInput{ProviderError: "warming", NextRetryAt: &nextRetry}); err != nil {
+		t.Fatalf("record attempt: %v", err)
+	}
+	if _, err := client.AbandonProvisionerAssignment(context.Background(), assignment.Assignment.ID, "launch failed"); err != nil {
+		t.Fatalf("abandon: %v", err)
+	}
+	if _, err := client.MarkProvisionerAssignmentCleaned(context.Background(), assignment.Assignment.ID); err != nil {
+		t.Fatalf("mark cleaned: %v", err)
 	}
 }
 

@@ -1,29 +1,44 @@
-# flow-orchestrator configuration: poll the coordinator's queue depth and
-# scale the worker Kubernetes Deployment, maintaining a standby pool of
-# ephemeral workers up and ready for a job assignment.
-coordinator_url: http://127.0.0.1:8421
-
-# Kubernetes target (the reference manifests in k8s/ use these values).
-namespace: flow
-deployment: flow-worker
-
-# Standby pool and scale-out bounds.
-min_replicas: 0
-max_replicas: 10
-desired_replicas: 1
-
-# target = clamp(max(desired_replicas, queued), min_replicas, max_replicas).
-# Scale up immediately; scale down only after the queue has been empty for
-# scaledown_idle. The orchestrator never scales while blind: an unreachable
-# coordinator or Kubernetes API skips the cycle and counts a poll error.
+# flow-orchestrator reserves durable coordinator assignments and creates one
+# signal-aware, one-shot worker runtime for each exact job. It recovers existing
+# assignments and provider resources before reserving new work.
+coordinator_url: http://flow-server:8421
 poll_interval: 5s
-scaledown_idle: 2m
+retry_base: 2s
+retry_max: 1m
 
-# Telemetry endpoint (/readyz, /livez, /metrics). Unauthenticated; in
-# Kubernetes set ":8422" and keep it cluster-internal.
+# Supply a dedicated orchestrator-scoped bearer token with
+# FLOW_ORCHESTRATOR_TOKEN instead of storing it in this file.
+profiles:
+  - name: linux-default
+    provider: kubernetes
+    provider_id: in-cluster
+    max_concurrency: 10
+    accepts: [persistent_agent, ephemeral]
+    labels:
+      os: linux
+    startup_timeout: 5m
+    kubernetes:
+      namespace: flow
+      image: ghcr.io/clarifiedlabs/flow-worker:latest
+      image_pull_policy: Always
+      work_dir: /flow/work
+
+# Run a separate flow-orchestrator process on a macOS host for native Darwin
+# work. Do not enable this profile in the in-cluster Linux Deployment.
+#  - name: macos-default
+#    provider: darwin
+#    provider_id: macos-host-1
+#    max_concurrency: 2
+#    accepts: [persistent_agent, ephemeral]
+#    labels:
+#      os: macos
+#    startup_timeout: 5m
+#    darwin:
+#      binary: /usr/local/bin/flow-worker
+#      state_dir: ~/.local/share/flow/orchestrator/assignments
+#      work_dir: ~/.local/share/flow/workers/assignments
+
+# Telemetry is unauthenticated. In Kubernetes, bind on the pod interface but
+# expose it only to cluster-internal probes and Prometheus.
 metrics:
-  listen: 127.0.0.1:8422
-
-# The orchestrator-scoped bearer token (authorizes only GET /v2/queue/stats)
-# usually comes from FLOW_ORCHESTRATOR_TOKEN instead of the config file.
-# token: ...
+  listen: ":8422"

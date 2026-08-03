@@ -28,6 +28,9 @@ write_binary_formula() {
 			examples_install='    (pkgshare/"examples").install "examples/flow-worker.yaml"
     (pkgshare/"examples/docker").install "examples/docker/flow-worker.yaml"'
 			;;
+		flow-orchestrator)
+			examples_install='    (pkgshare/"examples").install "examples/flow-orchestrator.yaml"'
+			;;
 	esac
 
 	cat >"${formula_dir}/${formula}.rb" <<FORMULA
@@ -60,6 +63,7 @@ FORMULA
 write_binary_formula flow Flow "CLI for local task-driven agent work" flow ./cmd/flow
 write_binary_formula flow-server FlowServer "Coordinator server for task-driven agent work" flow-server ./cmd/flow-server
 write_binary_formula flow-worker FlowWorker "Worker supervisor for task-driven agent work" flow-worker ./cmd/flow-worker
+write_binary_formula flow-orchestrator FlowOrchestrator "Durable assignment orchestrator for task-driven agent work" flow-orchestrator ./cmd/flow-orchestrator
 
 cat >"${formula_dir}/flow-full.rb" <<FORMULA
 class FlowFull < Formula
@@ -73,6 +77,7 @@ class FlowFull < Formula
   depends_on "clarifiedlabs/tap/flow"
   depends_on "clarifiedlabs/tap/flow-server"
   depends_on "clarifiedlabs/tap/flow-worker"
+  depends_on "clarifiedlabs/tap/flow-orchestrator"
 
   def install
     pkgshare.install "README.md"
@@ -82,10 +87,12 @@ class FlowFull < Formula
     flow_bin = Formula["clarifiedlabs/tap/flow"].bin/"flow"
     server_bin = Formula["clarifiedlabs/tap/flow-server"].bin/"flow-server"
     worker_bin = Formula["clarifiedlabs/tap/flow-worker"].bin/"flow-worker"
+    orchestrator_bin = Formula["clarifiedlabs/tap/flow-orchestrator"].bin/"flow-orchestrator"
 
     assert_match "flow v#{version}", shell_output("#{flow_bin} --version")
     assert_match "flow-server v#{version}", shell_output("#{server_bin} --version")
     assert_match "flow-worker v#{version}", shell_output("#{worker_bin} --version")
+    assert_match "flow-orchestrator v#{version}", shell_output("#{orchestrator_bin} --version")
   end
 end
 FORMULA

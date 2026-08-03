@@ -59,6 +59,7 @@ mkdir -p %{buildroot}/usr/share/licenses/flow
 install -m 0755 "${stage_dir}/flow" %{buildroot}/usr/bin/flow
 install -m 0755 "${stage_dir}/flow-server" %{buildroot}/usr/bin/flow-server
 install -m 0755 "${stage_dir}/flow-worker" %{buildroot}/usr/bin/flow-worker
+install -m 0755 "${stage_dir}/flow-orchestrator" %{buildroot}/usr/bin/flow-orchestrator
 install -m 0644 "${readme_path}" %{buildroot}/usr/share/doc/flow/README.md
 install -m 0644 "${docs_path}"/*.md %{buildroot}/usr/share/doc/flow/docs/
 cp -R "${examples_path}"/. %{buildroot}/usr/share/flow/examples/
@@ -68,6 +69,7 @@ install -m 0644 "${license_path}" %{buildroot}/usr/share/licenses/flow/LICENSE
 /usr/bin/flow
 /usr/bin/flow-server
 /usr/bin/flow-worker
+/usr/bin/flow-orchestrator
 %doc /usr/share/doc/flow/README.md
 %doc /usr/share/doc/flow/docs/*.md
 /usr/share/flow/examples

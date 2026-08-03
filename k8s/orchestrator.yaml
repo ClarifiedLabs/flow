@@ -1,24 +1,83 @@
-# flow-orchestrator: polls GET /v2/queue/stats on the coordinator with a
-# dedicated orchestrator-scoped token (the only endpoint that token can reach)
-# and scales the flow-worker Deployment via the apps/v1 deployments/scale
-# subresource.
+# flow-orchestrator reconciles durable coordinator assignments into one
+# batch/v1 Job and one private Secret per assignment. There is no standby worker
+# Deployment to scale.
+#
+# Apply after k8s/server.yaml:
+#   kubectl apply -f k8s/orchestrator.yaml
+#
+# Before applying a release, pin both image fields below to the desired release
+# tag or digest. The worker image is profile configuration because the
+# orchestrator injects it into every assignment-created Job.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: flow-orchestrator
   namespace: flow
 ---
-# Least privilege: read and write only the scale subresource of Deployments in
-# this namespace.
+# Assignment workers do not call the Kubernetes API. Keeping this account
+# separate from the orchestrator prevents generated Jobs from inheriting its
+# provisioning permissions or even an API token.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flow-worker
+  namespace: flow
+automountServiceAccountToken: false
+---
+# Provider profiles are file-only configuration. Store and mount the file as a
+# Secret even though the coordinator credential remains in flow-tokens. The
+# mounted file is group-readable only by the pod's flow group (GID 1000).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: flow-orchestrator-config
+  namespace: flow
+type: Opaque
+stringData:
+  flow-orchestrator.yaml: |
+    coordinator_url: http://flow-server:8421
+    poll_interval: 5s
+    retry_base: 1s
+    retry_max: 1m
+
+    profiles:
+      - name: linux
+        provider: kubernetes
+        provider_id: in-cluster
+        # This limits open durable assignments; it is not a replica target.
+        max_concurrency: 10
+        startup_timeout: 2m
+        allowed_roles: [author, reviewer, verifier, ci, console]
+        accepts: [persistent_agent, ephemeral]
+        labels:
+          os: linux
+        kubernetes:
+          namespace: flow
+          # Release-configurable image used by generated worker Jobs.
+          image: ghcr.io/clarifiedlabs/flow-worker:latest
+          service_account: flow-worker
+          work_dir: /var/lib/flow-worker
+          image_pull_policy: IfNotPresent
+
+    metrics:
+      listen: ":8422"
+---
+# Least privilege for the provider's exact REST calls in this namespace:
+# POST/GET/DELETE Jobs and POST/GET/PUT/DELETE Secrets. Secret reads are used
+# only to verify assignment ownership before replacement or deletion; response
+# bodies and direct assignment credentials are never logged.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: flow-orchestrator
   namespace: flow
 rules:
-  - apiGroups: ["apps"]
-    resources: ["deployments/scale"]
-    verbs: ["get", "update", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "update", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -50,41 +109,62 @@ spec:
         app: flow-orchestrator
     spec:
       serviceAccountName: flow-orchestrator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: flow-orchestrator
+          # Pin with the worker image above when deploying a release.
           image: ghcr.io/clarifiedlabs/flow-orchestrator:latest
+          command:
+            - flow-orchestrator
           args:
-            - --metrics-listen
-            - :8422
+            - --config
+            - /etc/flow/flow-orchestrator.yaml
           env:
+            # The orchestrator-scoped coordinator token is sourced from a
+            # Secret, never written into the Deployment or profile file.
             - name: FLOW_ORCHESTRATOR_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: flow-tokens
                   key: orchestrator
-            - name: FLOW_ORCHESTRATOR_COORDINATOR_URL
-              value: http://flow-server:8421
-            - name: FLOW_ORCHESTRATOR_NAMESPACE
-              value: flow
-            - name: FLOW_ORCHESTRATOR_DEPLOYMENT
-              value: flow-worker
-            # Standby pool: workers up and ready for a job assignment.
-            - name: FLOW_ORCHESTRATOR_MIN_REPLICAS
-              value: "0"
-            - name: FLOW_ORCHESTRATOR_DESIRED_REPLICAS
-              value: "1"
-            - name: FLOW_ORCHESTRATOR_MAX_REPLICAS
-              value: "10"
           ports:
+            # Unauthenticated telemetry is pod/cluster-internal only. Do not
+            # expose this port through an Ingress or LoadBalancer.
             - name: telemetry
               containerPort: 8422
-          # Ready after the first successful poll of both the coordinator and
-          # the Kubernetes API.
+          # Ready only after one complete recovery-first reconciliation cycle
+          # succeeds against both the coordinator and Kubernetes API.
           readinessProbe:
             httpGet:
               path: /readyz
               port: telemetry
+          # Liveness reports process health and does not depend on upstreams.
           livenessProbe:
             httpGet:
               path: /livez
               port: telemetry
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/flow/flow-orchestrator.yaml
+              subPath: flow-orchestrator.yaml
+              readOnly: true
+      volumes:
+        - name: config
+          secret:
+            secretName: flow-orchestrator-config
+            # 0440 plus fsGroup keeps the profile private and readable by the
+            # non-root flow process.
+            defaultMode: 0440
+            items:
+              - key: flow-orchestrator.yaml
+                path: flow-orchestrator.yaml
