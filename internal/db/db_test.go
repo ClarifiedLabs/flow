@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -35,14 +36,14 @@ func TestOpenInitializesSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_init")
+	assertAppliedMigrations(t, migrations, "0001_init", "0002_full_fidelity_history")
 
 	var schemaVersion string
 	if err := store.DB().QueryRowContext(ctx, "SELECT value FROM app_metadata WHERE key = 'schema_version'").Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version metadata: %v", err)
 	}
-	if schemaVersion != "0001_init" {
-		t.Fatalf("schema version = %q, want 0001_init", schemaVersion)
+	if schemaVersion != "0002_full_fidelity_history" {
+		t.Fatalf("schema version = %q, want 0002_full_fidelity_history", schemaVersion)
 	}
 	assertStorageFormat(t, store, "6")
 
@@ -129,7 +130,7 @@ SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'feature_id'`).Scan
 	}
 
 	assertTables(t, store,
-		[]string{"tasks", "workflow_runs", "workflow_node_runs", "workflow_artifacts", "workflow_waits", "workflow_transitions", "jobs", "leases", "worker_assignments", "sessions", "changes", "features", "feature_rebases"},
+		[]string{"tasks", "workflow_runs", "workflow_node_runs", "workflow_artifacts", "workflow_waits", "workflow_transitions", "jobs", "leases", "worker_assignments", "sessions", "changes", "features", "feature_rebases", "history_workspace_summaries", "history_resumes"},
 		[]string{"projects", "workers", "tokens", "web_sessions", "web_bootstrap_tokens", "workflow_state", "transitions", "task_flow_cursor", "task_phase_handoffs", "flow_nodes_new", "flow_edges_backup"},
 	)
 }
@@ -335,6 +336,106 @@ func assertTables(t *testing.T, store *Store, want []string, absent []string) {
 	}
 }
 
+func TestFullFidelityHistoryMigrationPreservesExistingRows(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "flow.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := migrationFS.ReadFile("migrations/0001_init.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, string(initial)); err != nil {
+		t.Fatalf("apply initial schema: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `
+CREATE TABLE schema_migrations (
+    version TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+INSERT INTO schema_migrations (version) VALUES ('0001_init');
+INSERT INTO history_captures (
+    id, project_id, job_id, lease_id, lease_attempt, worker_id, role,
+    expected_transcript, expected_harness, upload_grant_hash, reserved_at, updated_at
+) VALUES (
+    'hc-00000000000000000000000000000001', 'project-1', 'job-1', 'lease-1', 1, 'worker-1', 'author',
+    0, 1, ?, '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z'
+);
+INSERT INTO history_capture_expected_artifacts (capture_id, logical_key, kind, created_at)
+VALUES ('hc-00000000000000000000000000000001', 'harness/final/root', 'harness_root', '2026-08-01T00:00:00Z');
+INSERT INTO history_artifacts (
+    id, capture_id, logical_key, kind, phase, archive_id, media_type,
+    sha256, stored_size, logical_size, entry_count, publication_state,
+    blob_key, pending_at, committed_at, created_at
+) VALUES (
+    'ha-00000000000000000000000000000001', 'hc-00000000000000000000000000000001',
+    'harness/final/root', 'harness_root', 'final', 'root', 'application/x-tar',
+    ?, 1, 1, 1, 'committed', ?, '2026-08-01T00:00:00Z',
+    '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z'
+);
+INSERT INTO harness_archive_members (
+    id, capture_id, artifact_id, archive_id, native_session_id,
+    relative_member_path, member_kind, parse_status, created_at
+) VALUES (
+    'hm-00000000000000000000000000000001', 'hc-00000000000000000000000000000001',
+    'ha-00000000000000000000000000000001', 'root', 'native-root',
+    'sessions/native-root', 'root', 'parsed', '2026-08-01T00:00:00Z'
+);
+INSERT INTO harness_archive_member_sets (artifact_id, capture_id, member_count, declared_at)
+VALUES ('ha-00000000000000000000000000000001', 'hc-00000000000000000000000000000001', 1, '2026-08-01T00:00:00Z');`,
+		strings.Repeat("0", 64), strings.Repeat("1", 64), strings.Repeat("b", 65)); err != nil {
+		t.Fatalf("seed current history schema: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("migrate current history schema: %v", err)
+	}
+	defer store.Close()
+
+	var artifactKind, nativeSession string
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT artifact.kind, member.native_session_id
+FROM history_artifacts artifact
+JOIN harness_archive_members member ON member.artifact_id = artifact.id
+WHERE artifact.id = 'ha-00000000000000000000000000000001'`).Scan(&artifactKind, &nativeSession); err != nil {
+		t.Fatalf("read preserved history rows: %v", err)
+	}
+	if artifactKind != "harness_root" || nativeSession != "native-root" {
+		t.Fatalf("preserved artifact kind/session = %q/%q", artifactKind, nativeSession)
+	}
+	var workspaceAllowed int
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT instr(sql, 'workspace_snapshot') FROM sqlite_master
+WHERE type = 'table' AND name = 'history_artifacts'`).Scan(&workspaceAllowed); err != nil {
+		t.Fatal(err)
+	}
+	if workspaceAllowed == 0 {
+		t.Fatal("migrated artifact kind constraint does not include workspace_snapshot")
+	}
+	rows, err := store.DB().QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		var table, parent string
+		var rowID, foreignKeyID int64
+		if err := rows.Scan(&table, &rowID, &parent, &foreignKeyID); err != nil {
+			t.Fatal(err)
+		}
+		t.Fatalf("foreign key violation after migration: table=%s row=%d parent=%s fk=%d", table, rowID, parent, foreignKeyID)
+	}
+}
+
 func TestOpenMigrationIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "flow.db")
@@ -357,7 +458,7 @@ func TestOpenMigrationIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_init")
+	assertAppliedMigrations(t, migrations, "0001_init", "0002_full_fidelity_history")
 }
 
 func assertAppliedMigrations(t *testing.T, got []string, want ...string) {

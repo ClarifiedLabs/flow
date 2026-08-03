@@ -307,6 +307,8 @@ func (s *Server) handleProjectScopedPath(w http.ResponseWriter, r *http.Request,
 		return
 	case sub == "flows" || strings.HasPrefix(sub, "flows/"):
 		ps.handleFlowsPath(w, requestWithPath(r, "/v2/"+sub), principal)
+	case sub == "history/captures" || strings.HasPrefix(sub, "history/captures/"):
+		ps.handleHistoryPath(w, requestWithPath(r, "/v2/"+sub), principal)
 	case sub == "board":
 		if !requireMethod(w, r, http.MethodGet) {
 			return

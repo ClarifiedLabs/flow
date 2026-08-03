@@ -30,6 +30,55 @@ func newClientForTest(t *testing.T, handler http.Handler) *Client {
 	return client
 }
 
+func TestHistoryClientListsAndPublishesWithTypedContracts(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v2/projects/p-history/history/captures", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Query().Get("job_id") != "job-1" || r.URL.Query().Get("limit") != "25" {
+			t.Fatalf("history list request = %s %s", r.Method, r.URL.String())
+		}
+		writeJSON(t, w, http.StatusOK, contract.HistoryCapturesResponse{
+			Captures: []contract.HistoryCapture{{ID: "hc-1", JobID: "job-1"}}, SnapshotUntil: "2026-08-03T00:00:00Z",
+		})
+	})
+	mux.HandleFunc("/v2/history/captures/hc-1/uploads", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Flow-History-Upload-Grant") != "grant-1" || r.Header.Get(contract.ProtocolHeader) != contract.ProtocolVersion {
+			t.Fatalf("history upload headers = %v", r.Header)
+		}
+		body := new(bytes.Buffer)
+		if _, err := body.ReadFrom(r.Body); err != nil || body.String() != "history bytes" {
+			t.Fatalf("history upload body = %q err=%v", body.String(), err)
+		}
+		writeJSON(t, w, http.StatusCreated, contract.HistoryUploadResponse{TemporaryUploadID: "temporary-1", SHA256: "digest-1", StoredSize: 13})
+	})
+	mux.HandleFunc("/v2/history/captures/hc-1/artifacts", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Flow-History-Upload-Grant") != "grant-1" {
+			t.Fatalf("history publication grant = %q", r.Header.Get("Flow-History-Upload-Grant"))
+		}
+		var input contract.PublishHistoryArtifactRequest
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input.TemporaryUploadID != "temporary-1" || input.LogicalKey != "workspace/final" {
+			t.Fatalf("history publication input = %+v err=%v", input, err)
+		}
+		writeJSON(t, w, http.StatusCreated, contract.HistoryArtifact{ID: "artifact-1", SHA256: "digest-1", PublicationState: "committed"})
+	})
+	client := newClientForTest(t, mux).WithProject("p-history")
+
+	listed, err := client.ListHistoryCaptures(context.Background(), HistoryCaptureFilter{JobIDs: []string{"job-1"}, Limit: 25})
+	if err != nil || len(listed.Captures) != 1 || listed.Captures[0].ID != "hc-1" {
+		t.Fatalf("list history = %+v err=%v", listed, err)
+	}
+	upload, err := client.UploadHistoryArtifactBytes(context.Background(), "hc-1", "grant-1", bytes.NewBufferString("history bytes"))
+	if err != nil || upload.TemporaryUploadID != "temporary-1" {
+		t.Fatalf("upload history = %+v err=%v", upload, err)
+	}
+	artifact, err := client.PublishHistoryArtifact(context.Background(), "hc-1", "grant-1", contract.PublishHistoryArtifactRequest{
+		TemporaryUploadID: upload.TemporaryUploadID, LogicalKey: "workspace/final",
+	})
+	if err != nil || artifact.ID != "artifact-1" {
+		t.Fatalf("publish history = %+v err=%v", artifact, err)
+	}
+}
+
 func TestListTaskAttachments(t *testing.T) {
 	t.Parallel()
 	want := []coordinator.TaskAttachment{

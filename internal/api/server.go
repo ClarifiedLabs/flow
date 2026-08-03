@@ -119,6 +119,7 @@ type projectServer struct {
 	checkConfigs      *coordinator.CheckConfigService
 	merges            *coordinator.MergeService
 	gitEvents         *coordinator.GitEventService
+	history           *coordinator.HistoryCaptureService
 	workers           *worker.Service
 }
 
@@ -155,6 +156,7 @@ func (s *Server) forBundle(bundle *ProjectBundle) *projectServer {
 		checkConfigs:      bundle.CheckConfigs,
 		merges:            bundle.Merges,
 		gitEvents:         bundle.GitEvents,
+		history:           bundle.HistoryCaptures,
 		workers:           bundle.Queue,
 	}
 }
@@ -261,6 +263,20 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 
 	if r.URL.Path == "/v2/sidebar" {
 		s.handleSidebar(w, r, principal)
+		return
+	}
+
+	if r.URL.Path == "/v2/history/captures" || strings.HasPrefix(r.URL.Path, "/v2/history/captures/") {
+		if principal.Scope == coordinator.TokenScopeWorker {
+			s.handleWorkerHistoryPath(w, r, principal)
+			return
+		}
+		ps, err := s.implicitProjectServer(principal)
+		if err != nil {
+			writeProjectResolveError(w, err)
+			return
+		}
+		ps.handleHistoryPath(w, requestWithPath(r, r.URL.Path), principal)
 		return
 	}
 

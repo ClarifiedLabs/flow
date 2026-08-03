@@ -175,6 +175,20 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 	}
 	sort.Strings(files)
 
+	// SQLite's documented table-rebuild procedure requires foreign-key
+	// enforcement to be disabled before the migration transaction begins. The
+	// controlled migrations may then replace CHECK-constrained parent tables.
+	// A full foreign_key_check below is the gate before any migration commits.
+	if _, err := s.db.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+		return fmt.Errorf("disable foreign keys for migrations: %w", err)
+	}
+	foreignKeysDisabled := true
+	defer func() {
+		if foreignKeysDisabled {
+			_, _ = s.db.ExecContext(context.WithoutCancel(ctx), "PRAGMA foreign_keys = ON")
+		}
+	}()
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin migration transaction: %w", err)
@@ -203,9 +217,36 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		}
 	}
 
+	violations, err := tx.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		return fmt.Errorf("check migrated foreign keys: %w", err)
+	}
+	if violations.Next() {
+		var table, parent string
+		var rowID any
+		var foreignKeyID int64
+		if err := violations.Scan(&table, &rowID, &parent, &foreignKeyID); err != nil {
+			_ = violations.Close()
+			return fmt.Errorf("scan migrated foreign key violation: %w", err)
+		}
+		_ = violations.Close()
+		return fmt.Errorf("migration left foreign key violation: table %s row %v parent %s constraint %d", table, rowID, parent, foreignKeyID)
+	}
+	if err := violations.Err(); err != nil {
+		_ = violations.Close()
+		return fmt.Errorf("iterate migrated foreign key violations: %w", err)
+	}
+	if err := violations.Close(); err != nil {
+		return fmt.Errorf("close migrated foreign key check: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migrations: %w", err)
 	}
+	if _, err := s.db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+		return fmt.Errorf("restore foreign keys after migrations: %w", err)
+	}
+	foreignKeysDisabled = false
 
 	return nil
 }

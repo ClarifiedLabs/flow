@@ -170,6 +170,7 @@ func reserveAndCompleteHistoryUpload(t *testing.T, service *coordinator.HistoryC
 	reserved, err := service.Reserve(ctx, coordinator.ReserveHistoryCaptureInput{
 		ProjectID: projectID, JobID: jobID, LeaseID: "lease-" + jobID, LeaseAttempt: 1,
 		WorkerID: "worker", Role: "author", ExpectedHarness: true,
+			HarnessName: "harness", HarnessVersion: "0.4.5", HarnessSchemaVersion: 5,
 	})
 	if err != nil {
 		t.Fatalf("reserve history capture: %v", err)
@@ -194,6 +195,7 @@ func reserveAndUploadHistoryArtifact(t *testing.T, gate *publicationGateStore, s
 	reserved, err := service.Reserve(ctx, coordinator.ReserveHistoryCaptureInput{
 		ProjectID: projectID, JobID: jobID, LeaseID: "lease-" + jobID, LeaseAttempt: 1,
 		WorkerID: "worker", Role: "author", ExpectedHarness: true,
+			HarnessName: "harness", HarnessVersion: "0.4.5", HarnessSchemaVersion: 5,
 	})
 	if err != nil {
 		t.Fatalf("reserve history capture: %v", err)

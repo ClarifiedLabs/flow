@@ -84,6 +84,7 @@ type HistoryArtifactKind string
 const (
 	HistoryArtifactTranscriptSegment HistoryArtifactKind = "transcript_segment"
 	HistoryArtifactHarnessRoot       HistoryArtifactKind = "harness_root"
+	HistoryArtifactWorkspaceSnapshot HistoryArtifactKind = "workspace_snapshot"
 	HistoryArtifactManifest          HistoryArtifactKind = "manifest"
 )
 
@@ -104,21 +105,26 @@ const (
 // HistoryCapture is safe for authorized metadata projections. It deliberately
 // contains neither the upload-grant hash nor any blob key/temporary upload ID.
 type HistoryCapture struct {
-	ID             string
-	ProjectID      string
-	JobID          string
-	LeaseID        string
-	LeaseAttempt   int64
-	WorkerID       string
-	TaskID         string
-	SessionID      string
-	WorkflowRunID  string
-	NodeRunID      string
-	NodeVisit      int64
-	Stage          string
-	Role           string
-	HarnessName    string
-	HarnessVersion string
+	ID                   string
+	ProjectID            string
+	JobID                string
+	LeaseID              string
+	LeaseAttempt         int64
+	WorkerID             string
+	TaskID               string
+	ChangeID             string
+	SessionID            string
+	WorkflowRunID        string
+	NodeRunID            string
+	NodeVisit            int64
+	Stage                string
+	Role                 string
+	HarnessName          string
+	HarnessVersion       string
+	HarnessSchemaVersion int
+
+	ResumedFromCaptureID        string
+	ResumedFromHarnessSessionID string
 
 	ExpectedTranscript  bool
 	ExpectedHarness     bool
@@ -162,22 +168,26 @@ type HistoryCapture struct {
 }
 
 type ReserveHistoryCaptureInput struct {
-	ProjectID          string
-	JobID              string
-	LeaseID            string
-	LeaseAttempt       int64
-	WorkerID           string
-	TaskID             string
-	SessionID          string
-	WorkflowRunID      string
-	NodeRunID          string
-	NodeVisit          int64
-	Stage              string
-	Role               string
-	HarnessName        string
-	HarnessVersion     string
-	ExpectedTranscript bool
-	ExpectedHarness    bool
+	ProjectID                   string
+	JobID                       string
+	LeaseID                     string
+	LeaseAttempt                int64
+	WorkerID                    string
+	TaskID                      string
+	ChangeID                    string
+	SessionID                   string
+	WorkflowRunID               string
+	NodeRunID                   string
+	NodeVisit                   int64
+	Stage                       string
+	Role                        string
+	HarnessName                 string
+	HarnessVersion              string
+	HarnessSchemaVersion        int
+	ResumedFromCaptureID        string
+	ResumedFromHarnessSessionID string
+	ExpectedTranscript          bool
+	ExpectedHarness             bool
 }
 
 type ReserveHistoryCaptureResult struct {
@@ -188,9 +198,19 @@ type ReserveHistoryCaptureResult struct {
 }
 
 type HistoryCaptureListOptions struct {
-	TaskID string
-	JobID  string
-	Limit  int
+	TaskIDs    []string
+	JobIDs     []string
+	SessionIDs []string
+	CaptureIDs []string
+	States     []HistoryCaptureState
+	Resumable  *bool
+	Since      *time.Time
+	Until      *time.Time
+	BeforeTime *time.Time
+	BeforeID   string
+	TaskID     string // Deprecated single-value compatibility filter.
+	JobID      string // Deprecated single-value compatibility filter.
+	Limit      int
 }
 
 type HistoryCaptureServiceOptions struct {
@@ -332,14 +352,16 @@ WHERE id = ? AND version = ?`, grantHash, nowText, nowText, existing.ID, existin
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO history_captures (
     id, project_id, job_id, lease_id, lease_attempt, worker_id,
-    task_id, session_id, workflow_run_id, node_run_id, node_visit,
-    stage, role, harness_name, harness_version,
+    task_id, change_id, session_id, workflow_run_id, node_run_id, node_visit,
+    stage, role, harness_name, harness_version, harness_schema_version,
+    resumed_from_capture_id, resumed_from_harness_session_id,
     expected_transcript, expected_harness, upload_grant_hash,
     reserved_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		captureID, input.ProjectID, input.JobID, input.LeaseID, input.LeaseAttempt, input.WorkerID,
-		input.TaskID, input.SessionID, input.WorkflowRunID, input.NodeRunID, nodeVisit,
-		input.Stage, input.Role, input.HarnessName, input.HarnessVersion,
+		input.TaskID, input.ChangeID, input.SessionID, input.WorkflowRunID, input.NodeRunID, nodeVisit,
+		input.Stage, input.Role, input.HarnessName, input.HarnessVersion, input.HarnessSchemaVersion,
+		nullableHistoryString(input.ResumedFromCaptureID), input.ResumedFromHarnessSessionID,
 		boolToInt(input.ExpectedTranscript), boolToInt(input.ExpectedHarness), grantHash,
 		nowText, nowText)
 	if err != nil {
@@ -374,6 +396,7 @@ func normalizeReserveHistoryCaptureInput(input ReserveHistoryCaptureInput) Reser
 	input.LeaseID = strings.TrimSpace(input.LeaseID)
 	input.WorkerID = strings.TrimSpace(input.WorkerID)
 	input.TaskID = strings.TrimSpace(input.TaskID)
+	input.ChangeID = strings.TrimSpace(input.ChangeID)
 	input.SessionID = strings.TrimSpace(input.SessionID)
 	input.WorkflowRunID = strings.TrimSpace(input.WorkflowRunID)
 	input.NodeRunID = strings.TrimSpace(input.NodeRunID)
@@ -381,6 +404,8 @@ func normalizeReserveHistoryCaptureInput(input ReserveHistoryCaptureInput) Reser
 	input.Role = strings.TrimSpace(input.Role)
 	input.HarnessName = strings.TrimSpace(input.HarnessName)
 	input.HarnessVersion = strings.TrimSpace(input.HarnessVersion)
+	input.ResumedFromCaptureID = strings.TrimSpace(input.ResumedFromCaptureID)
+	input.ResumedFromHarnessSessionID = strings.TrimSpace(input.ResumedFromHarnessSessionID)
 	return input
 }
 
@@ -399,7 +424,19 @@ func validateReserveHistoryCaptureInput(input ReserveHistoryCaptureInput) error 
 	if input.NodeVisit < 0 {
 		return errors.New("node visit cannot be negative")
 	}
-	if len(input.Role) > 64 || len(input.Stage) > 128 || len(input.ProjectID) > 255 || len(input.JobID) > 255 || len(input.LeaseID) > 255 || len(input.WorkerID) > 255 {
+	if input.ExpectedHarness {
+		if input.HarnessName == "" || input.HarnessVersion == "" || input.HarnessSchemaVersion < 1 {
+			return errors.New("Harness captures require name, exact build, and positive schema version")
+		}
+	} else if input.HarnessName != "" || input.HarnessVersion != "" || input.HarnessSchemaVersion != 0 {
+		return errors.New("non-Harness captures cannot declare Harness build metadata")
+	}
+	if (input.ResumedFromCaptureID == "") != (input.ResumedFromHarnessSessionID == "") {
+		return errors.New("resume lineage requires both source capture and native session ids")
+	}
+	if len(input.Role) > 64 || len(input.Stage) > 128 || len(input.ProjectID) > 255 || len(input.JobID) > 255 || len(input.LeaseID) > 255 || len(input.WorkerID) > 255 ||
+		len(input.TaskID) > 255 || len(input.ChangeID) > 255 || len(input.SessionID) > 255 || len(input.WorkflowRunID) > 255 || len(input.NodeRunID) > 255 ||
+		len(input.HarnessName) > 128 || len(input.HarnessVersion) > 128 || len(input.ResumedFromCaptureID) > 255 || len(input.ResumedFromHarnessSessionID) > 255 {
 		return errors.New("history capture attribution exceeds its storage bound")
 	}
 	return nil
@@ -407,10 +444,11 @@ func validateReserveHistoryCaptureInput(input ReserveHistoryCaptureInput) error 
 
 func sameReservation(c HistoryCapture, input ReserveHistoryCaptureInput) bool {
 	return c.ProjectID == input.ProjectID && c.JobID == input.JobID && c.LeaseID == input.LeaseID &&
-		c.LeaseAttempt == input.LeaseAttempt && c.WorkerID == input.WorkerID && c.TaskID == input.TaskID &&
+		c.LeaseAttempt == input.LeaseAttempt && c.WorkerID == input.WorkerID && c.TaskID == input.TaskID && c.ChangeID == input.ChangeID &&
 		c.SessionID == input.SessionID && c.WorkflowRunID == input.WorkflowRunID && c.NodeRunID == input.NodeRunID &&
 		c.NodeVisit == input.NodeVisit && c.Stage == input.Stage && c.Role == input.Role &&
-		c.HarnessName == input.HarnessName && c.HarnessVersion == input.HarnessVersion &&
+		c.HarnessName == input.HarnessName && c.HarnessVersion == input.HarnessVersion && c.HarnessSchemaVersion == input.HarnessSchemaVersion &&
+		c.ResumedFromCaptureID == input.ResumedFromCaptureID && c.ResumedFromHarnessSessionID == input.ResumedFromHarnessSessionID &&
 		c.ExpectedTranscript == input.ExpectedTranscript && c.ExpectedHarness == input.ExpectedHarness
 }
 
@@ -443,27 +481,21 @@ func (s *HistoryCaptureService) List(ctx context.Context, options HistoryCapture
 	if limit == 0 {
 		limit = 100
 	}
-	if limit < 1 || limit > 500 {
-		return nil, errors.New("history capture list limit must be between 1 and 500")
+	if limit < 1 || limit > 501 {
+		return nil, errors.New("history capture list limit must be between 1 and 501")
 	}
-	query := historyCaptureSelect + ` WHERE 1 = 1`
-	var args []any
-	if taskID := strings.TrimSpace(options.TaskID); taskID != "" {
-		query += ` AND task_id = ?`
-		args = append(args, taskID)
+	where, args, err := buildHistoryCaptureFilter(options, true)
+	if err != nil {
+		return nil, err
 	}
-	if jobID := strings.TrimSpace(options.JobID); jobID != "" {
-		query += ` AND job_id = ?`
-		args = append(args, jobID)
-	}
-	query += ` ORDER BY reserved_at DESC, id DESC LIMIT ?`
+	query := historyCaptureSelect + where + ` ORDER BY reserved_at DESC, id DESC LIMIT ?`
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list history captures: %w", err)
 	}
 	defer rows.Close()
-	var captures []HistoryCapture
+	captures := make([]HistoryCapture, 0, limit)
 	for rows.Next() {
 		capture, err := scanHistoryCapture(rows)
 		if err != nil {
@@ -474,10 +506,103 @@ func (s *HistoryCaptureService) List(ctx context.Context, options HistoryCapture
 	return captures, rows.Err()
 }
 
+type HistoryCaptureAvailability struct {
+	Total     int
+	Complete  int
+	Resumable int
+	Blocked   int
+	Lost      int
+	Waived    int
+}
+
+func (s *HistoryCaptureService) CountAvailability(ctx context.Context, options HistoryCaptureListOptions) (HistoryCaptureAvailability, error) {
+	where, args, err := buildHistoryCaptureFilter(options, false)
+	if err != nil {
+		return HistoryCaptureAvailability{}, err
+	}
+	var value HistoryCaptureAvailability
+	err = s.db.QueryRowContext(ctx, `
+SELECT COUNT(*),
+       COALESCE(SUM(state = 'complete'), 0),
+       COALESCE(SUM(state = 'complete' AND expected_harness = 1), 0),
+       COALESCE(SUM(state = 'blocked'), 0),
+       COALESCE(SUM(state = 'lost'), 0),
+       COALESCE(SUM(state = 'waived'), 0)
+FROM history_captures`+where, args...).Scan(
+		&value.Total, &value.Complete, &value.Resumable, &value.Blocked, &value.Lost, &value.Waived,
+	)
+	return value, err
+}
+
+func buildHistoryCaptureFilter(options HistoryCaptureListOptions, includeKeyset bool) (string, []any, error) {
+	if options.Since != nil && options.Until != nil && !options.Until.After(*options.Since) {
+		return "", nil, errors.New("history capture until must be after since")
+	}
+	query := ` WHERE 1 = 1`
+	var args []any
+	appendStrings := func(column string, values []string) {
+		clean := make([]string, 0, len(values))
+		for _, value := range values {
+			if value = strings.TrimSpace(value); value != "" {
+				clean = append(clean, value)
+			}
+		}
+		if len(clean) == 0 {
+			return
+		}
+		query += ` AND ` + column + ` IN (` + strings.TrimRight(strings.Repeat("?,", len(clean)), ",") + `)`
+		for _, value := range clean {
+			args = append(args, value)
+		}
+	}
+	taskIDs := append([]string{}, options.TaskIDs...)
+	jobIDs := append([]string{}, options.JobIDs...)
+	if options.TaskID != "" {
+		taskIDs = append(taskIDs, options.TaskID)
+	}
+	if options.JobID != "" {
+		jobIDs = append(jobIDs, options.JobID)
+	}
+	appendStrings("task_id", taskIDs)
+	appendStrings("job_id", jobIDs)
+	appendStrings("session_id", options.SessionIDs)
+	appendStrings("id", options.CaptureIDs)
+	stateValues := make([]string, len(options.States))
+	for index, state := range options.States {
+		stateValues[index] = string(state)
+	}
+	appendStrings("state", stateValues)
+	if options.Resumable != nil {
+		if *options.Resumable {
+			query += ` AND expected_harness = 1 AND state = 'complete'`
+		} else {
+			query += ` AND NOT (expected_harness = 1 AND state = 'complete')`
+		}
+	}
+	if options.Since != nil {
+		query += ` AND reserved_at >= ?`
+		args = append(args, sqlitex.FormatTime(options.Since.UTC()))
+	}
+	if options.Until != nil {
+		query += ` AND reserved_at < ?`
+		args = append(args, sqlitex.FormatTime(options.Until.UTC()))
+	}
+	if includeKeyset && options.BeforeTime != nil {
+		if strings.TrimSpace(options.BeforeID) == "" {
+			return "", nil, errors.New("history capture keyset requires an id")
+		}
+		query += ` AND (reserved_at < ? OR (reserved_at = ? AND id < ?))`
+		formatted := sqlitex.FormatTime(options.BeforeTime.UTC())
+		args = append(args, formatted, formatted, strings.TrimSpace(options.BeforeID))
+	}
+	return query, args, nil
+}
+
 const historyCaptureSelect = `
 SELECT id, project_id, job_id, lease_id, lease_attempt, worker_id,
-       task_id, session_id, workflow_run_id, node_run_id, COALESCE(node_visit, 0),
-       stage, role, harness_name, harness_version,
+       task_id, change_id, session_id, workflow_run_id, node_run_id, COALESCE(node_visit, 0),
+       stage, role, harness_name, harness_version, harness_schema_version,
+       COALESCE(resumed_from_capture_id, ''), resumed_from_harness_session_id,
        expected_transcript, expected_harness, state,
        execution_verdict, execution_exit_code, execution_error_code, execution_recorded_at,
        expected_set_declared_at, expected_final_artifact_count,
@@ -504,8 +629,9 @@ func scanHistoryCapture(row historyRowScanner) (HistoryCapture, error) {
 	var runningAt, quiescingAt, sealedAt, uploadingAt, completedAt, blockedAt, lostAt, waivedAt sql.NullString
 	if err := row.Scan(
 		&c.ID, &c.ProjectID, &c.JobID, &c.LeaseID, &c.LeaseAttempt, &c.WorkerID,
-		&c.TaskID, &c.SessionID, &c.WorkflowRunID, &c.NodeRunID, &c.NodeVisit,
-		&c.Stage, &c.Role, &c.HarnessName, &c.HarnessVersion,
+		&c.TaskID, &c.ChangeID, &c.SessionID, &c.WorkflowRunID, &c.NodeRunID, &c.NodeVisit,
+		&c.Stage, &c.Role, &c.HarnessName, &c.HarnessVersion, &c.HarnessSchemaVersion,
+		&c.ResumedFromCaptureID, &c.ResumedFromHarnessSessionID,
 		&expectedTranscript, &expectedHarness, &state,
 		&verdict, &exitCode, &c.ExecutionErrorCode, &executionAt,
 		&declaredAt, &expectedCount, &expectedEpoch, &expectedSegments, &expectedLength, &c.ExpectedTranscriptSHA256,
@@ -555,6 +681,13 @@ func scanHistoryCapture(row historyRowScanner) (HistoryCapture, error) {
 		}
 	}
 	return c, nil
+}
+
+func nullableHistoryString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func nullableInt64Pointer(value sql.NullInt64) *int64 {
@@ -1099,6 +1232,17 @@ WHERE temporary_upload_id = ? AND capture_id = ? AND state = 'active'`, now, now
 	return nil
 }
 
+func (s *HistoryCaptureService) PublishTemporaryArtifact(ctx context.Context, captureID, grant, temporaryUploadID string, input PublishHistoryArtifactInput) (HistoryArtifact, error) {
+	if s.blobs == nil {
+		return HistoryArtifact{}, errors.New("history blob store is not configured")
+	}
+	temporary, err := s.blobs.Resume(ctx, strings.TrimSpace(temporaryUploadID))
+	if err != nil {
+		return HistoryArtifact{}, err
+	}
+	return s.PublishArtifact(ctx, captureID, grant, input, temporary)
+}
+
 func (s *HistoryCaptureService) PublishArtifact(ctx context.Context, captureID, grant string, input PublishHistoryArtifactInput, temporary blob.Temporary) (HistoryArtifact, error) {
 	if s.blobs == nil {
 		return HistoryArtifact{}, errors.New("history blob store is not configured")
@@ -1191,7 +1335,7 @@ func validatePublishHistoryArtifactInput(input PublishHistoryArtifactInput) erro
 	if input.MediaType == "" || len(input.MediaType) > 255 {
 		return errors.New("history artifact media type is required and must be bounded")
 	}
-	if input.Kind != HistoryArtifactTranscriptSegment && input.Kind != HistoryArtifactHarnessRoot && input.Kind != HistoryArtifactManifest {
+	if input.Kind != HistoryArtifactTranscriptSegment && input.Kind != HistoryArtifactHarnessRoot && input.Kind != HistoryArtifactWorkspaceSnapshot && input.Kind != HistoryArtifactManifest {
 		return errors.New("invalid history artifact kind")
 	}
 	if input.Phase != HistoryArtifactCheckpoint && input.Phase != HistoryArtifactFinal {
@@ -1274,8 +1418,9 @@ FROM history_upload_intents WHERE temporary_upload_id = ?`, temporary.ID).Scan(&
 	if intentState != "active" || intentArtifactID != "" {
 		return InternalHistoryArtifact{}, false, ErrHistoryIntentNotActive
 	}
-	if input.Kind == HistoryArtifactHarnessRoot && (input.EntryCount > int64(s.options.MaxArchiveEntries) || input.LogicalSize > s.options.MaxArchiveLogicalBytes) {
-		return InternalHistoryArtifact{}, false, fmt.Errorf("%w: Harness archive metadata exceeds its configured ceiling", ErrHistoryConflict)
+	if (input.Kind == HistoryArtifactHarnessRoot || input.Kind == HistoryArtifactWorkspaceSnapshot) &&
+		(input.EntryCount > int64(s.options.MaxArchiveEntries) || input.LogicalSize > s.options.MaxArchiveLogicalBytes) {
+		return InternalHistoryArtifact{}, false, fmt.Errorf("%w: archive metadata exceeds its configured ceiling", ErrHistoryConflict)
 	}
 	var artifactCount, checkpointCount int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(phase = 'checkpoint'), 0) FROM history_artifacts WHERE capture_id = ?`, captureID).Scan(&artifactCount, &checkpointCount); err != nil {
@@ -1685,6 +1830,66 @@ func (s *HistoryCaptureService) getInternalArtifactByID(ctx context.Context, art
 func (s *HistoryCaptureService) GetArtifact(ctx context.Context, captureID, logicalKey string) (HistoryArtifact, error) {
 	artifact, err := s.getInternalArtifact(ctx, strings.TrimSpace(captureID), strings.TrimSpace(logicalKey))
 	return artifact.HistoryArtifact, err
+}
+
+func (s *HistoryCaptureService) GetArtifactByID(ctx context.Context, captureID, artifactID string) (HistoryArtifact, error) {
+	artifact, err := s.getInternalArtifactByID(ctx, strings.TrimSpace(artifactID))
+	if err != nil {
+		return HistoryArtifact{}, err
+	}
+	if artifact.CaptureID != strings.TrimSpace(captureID) {
+		return HistoryArtifact{}, ErrHistoryArtifactNotFound
+	}
+	return artifact.HistoryArtifact, nil
+}
+
+func (s *HistoryCaptureService) ListArtifacts(ctx context.Context, captureID string) ([]HistoryArtifact, error) {
+	rows, err := s.db.QueryContext(ctx, historyArtifactSelect+`
+WHERE capture_id = ?
+ORDER BY CASE phase WHEN 'final' THEN 0 ELSE 1 END, kind, logical_key`, strings.TrimSpace(captureID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	artifacts := make([]HistoryArtifact, 0)
+	for rows.Next() {
+		artifact, scanErr := scanInternalHistoryArtifact(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		artifacts = append(artifacts, artifact.HistoryArtifact)
+	}
+	return artifacts, rows.Err()
+}
+
+func (s *HistoryCaptureService) OpenArtifact(ctx context.Context, captureID, artifactID string) (HistoryArtifact, io.ReadCloser, error) {
+	artifact, err := s.getInternalArtifactByID(ctx, strings.TrimSpace(artifactID))
+	if err != nil || artifact.CaptureID != strings.TrimSpace(captureID) {
+		if err == nil {
+			err = ErrHistoryArtifactNotFound
+		}
+		return HistoryArtifact{}, nil, err
+	}
+	if artifact.PublicationState != HistoryPublicationCommitted {
+		return HistoryArtifact{}, nil, ErrHistoryPublicationPending
+	}
+	body, err := s.blobs.Open(ctx, artifact.BlobKey)
+	return artifact.HistoryArtifact, body, err
+}
+
+func (s *HistoryCaptureService) OpenArtifactRange(ctx context.Context, captureID, artifactID string, byteRange blob.ByteRange) (HistoryArtifact, blob.RangeReader, error) {
+	artifact, err := s.getInternalArtifactByID(ctx, strings.TrimSpace(artifactID))
+	if err != nil || artifact.CaptureID != strings.TrimSpace(captureID) {
+		if err == nil {
+			err = ErrHistoryArtifactNotFound
+		}
+		return HistoryArtifact{}, blob.RangeReader{}, err
+	}
+	if artifact.PublicationState != HistoryPublicationCommitted {
+		return HistoryArtifact{}, blob.RangeReader{}, ErrHistoryPublicationPending
+	}
+	reader, err := s.blobs.OpenRange(ctx, artifact.BlobKey, byteRange)
+	return artifact.HistoryArtifact, reader, err
 }
 
 const historyArtifactSelect = `
@@ -2156,20 +2361,15 @@ type FinalArtifactExpectation struct {
 }
 
 type DeclareHistoryExpectedSetInput struct {
-	Artifacts             []FinalArtifactExpectation
-	TranscriptSeal        *TranscriptSeal
-	ZeroHarnessRootReason string
-	ExpectedVersion       int64
-	Actor                 string
+	Artifacts       []FinalArtifactExpectation
+	TranscriptSeal  *TranscriptSeal
+	ExpectedVersion int64
+	Actor           string
 }
 
 func (s *HistoryCaptureService) DeclareExpectedSet(ctx context.Context, captureID, grant string, input DeclareHistoryExpectedSetInput) (HistoryCapture, error) {
 	input.Actor = strings.TrimSpace(input.Actor)
-	input.ZeroHarnessRootReason = strings.TrimSpace(input.ZeroHarnessRootReason)
 	if err := validateHistoryBounded(input.Actor, maxHistoryActorLength, "actor", true); err != nil {
-		return HistoryCapture{}, err
-	}
-	if err := validateHistoryBounded(input.ZeroHarnessRootReason, maxHistoryMessageLength, "zero Harness root reason", false); err != nil {
 		return HistoryCapture{}, err
 	}
 	expectations, err := normalizeFinalExpectations(input.Artifacts)
@@ -2186,7 +2386,7 @@ func (s *HistoryCaptureService) DeclareExpectedSet(ctx context.Context, captureI
 		return HistoryCapture{}, err
 	}
 	if capture.ExpectedSetDeclaredAt != nil {
-		matches, compareErr := expectedSetMatchesTx(ctx, tx, capture, expectations, input.TranscriptSeal, input.ZeroHarnessRootReason)
+		matches, compareErr := expectedSetMatchesTx(ctx, tx, capture, expectations, input.TranscriptSeal)
 		if compareErr != nil {
 			return HistoryCapture{}, compareErr
 		}
@@ -2211,11 +2411,13 @@ func (s *HistoryCaptureService) DeclareExpectedSet(ctx context.Context, captureI
 	} else if input.TranscriptSeal != nil {
 		return HistoryCapture{}, fmt.Errorf("%w: capture does not expect a transcript", ErrHistoryConflict)
 	}
-	harnessCount, manifestCount := 0, 0
+	harnessCount, workspaceCount, manifestCount := 0, 0, 0
 	for _, expected := range expectations {
 		switch expected.Kind {
 		case HistoryArtifactHarnessRoot:
 			harnessCount++
+		case HistoryArtifactWorkspaceSnapshot:
+			workspaceCount++
 		case HistoryArtifactManifest:
 			manifestCount++
 		}
@@ -2223,16 +2425,14 @@ func (s *HistoryCaptureService) DeclareExpectedSet(ctx context.Context, captureI
 	if manifestCount != 1 {
 		return HistoryCapture{}, fmt.Errorf("%w: exactly one canonical final manifest must be expected", ErrHistoryIncomplete)
 	}
-	if !capture.ExpectedHarness {
-		if harnessCount != 0 || input.ZeroHarnessRootReason != "" {
-			return HistoryCapture{}, fmt.Errorf("%w: capture does not expect Harness roots", ErrHistoryConflict)
-		}
-	} else if harnessCount == 0 {
-		if capture.ExecutionVerdict == HistoryExecutionPending || capture.ExecutionVerdict == HistoryExecutionSucceeded || input.ZeroHarnessRootReason == "" {
-			return HistoryCapture{}, fmt.Errorf("%w: zero Harness roots require a non-success startup verdict and audited reason", ErrHistoryIncomplete)
-		}
-	} else if input.ZeroHarnessRootReason != "" {
-		return HistoryCapture{}, fmt.Errorf("%w: zero-root reason conflicts with declared Harness roots", ErrHistoryConflict)
+	if workspaceCount != 1 {
+		return HistoryCapture{}, fmt.Errorf("%w: exactly one final workspace snapshot must be expected", ErrHistoryIncomplete)
+	}
+	if capture.ExpectedHarness && harnessCount != 1 {
+		return HistoryCapture{}, fmt.Errorf("%w: Harness captures require exactly one final native session-tree archive", ErrHistoryIncomplete)
+	}
+	if !capture.ExpectedHarness && harnessCount != 0 {
+		return HistoryCapture{}, fmt.Errorf("%w: capture does not expect a Harness archive", ErrHistoryConflict)
 	}
 	now := s.now().UTC()
 	nowText := sqlitex.FormatTime(now)
@@ -2255,13 +2455,13 @@ UPDATE history_captures
 SET expected_set_declared_at = ?, expected_final_artifact_count = ?,
     expected_transcript_epoch = ?, expected_transcript_segment_count = ?,
     expected_transcript_length = ?, expected_transcript_sha256 = ?,
-    zero_harness_root_reason = ?, version = version + 1, updated_at = ?
-WHERE id = ? AND version = ?`, nowText, len(expectations), epoch, segments, length, digest, input.ZeroHarnessRootReason, nowText, capture.ID, input.ExpectedVersion)
+    version = version + 1, updated_at = ?
+WHERE id = ? AND version = ?`, nowText, len(expectations), epoch, segments, length, digest, nowText, capture.ID, input.ExpectedVersion)
 	if err != nil {
 		return HistoryCapture{}, err
 	}
 	if err := appendHistoryCaptureEvent(ctx, tx, capture.ID, "expected_set_declared", string(capture.State), string(capture.State), capture.Version+1,
-		input.Actor, "", map[string]any{"artifact_count": len(expectations), "transcript_segments": segments, "zero_harness_root_reason": input.ZeroHarnessRootReason}, now); err != nil {
+		input.Actor, "", map[string]any{"artifact_count": len(expectations), "transcript_segments": segments}, now); err != nil {
 		return HistoryCapture{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -2278,8 +2478,8 @@ func normalizeFinalExpectations(values []FinalArtifactExpectation) ([]FinalArtif
 		if result[index].LogicalKey == "" || len(result[index].LogicalKey) > maxHistoryLogicalKey {
 			return nil, errors.New("final artifact logical key is required and must be bounded")
 		}
-		if result[index].Kind != HistoryArtifactHarnessRoot && result[index].Kind != HistoryArtifactManifest {
-			return nil, errors.New("only final Harness roots and manifests belong in the declared expected set")
+		if result[index].Kind != HistoryArtifactHarnessRoot && result[index].Kind != HistoryArtifactWorkspaceSnapshot && result[index].Kind != HistoryArtifactManifest {
+			return nil, errors.New("only final Harness, workspace, and manifest artifacts belong in the declared expected set")
 		}
 		if _, ok := seen[result[index].LogicalKey]; ok {
 			return nil, errors.New("duplicate final artifact logical key")
@@ -2309,7 +2509,7 @@ FROM history_transcript_streams WHERE capture_id = ?`, captureID).Scan(&state, &
 	return nil
 }
 
-func expectedSetMatchesTx(ctx context.Context, tx *sqlitex.Tx, capture HistoryCapture, expected []FinalArtifactExpectation, seal *TranscriptSeal, zeroRootReason string) (bool, error) {
+func expectedSetMatchesTx(ctx context.Context, tx *sqlitex.Tx, capture HistoryCapture, expected []FinalArtifactExpectation, seal *TranscriptSeal) (bool, error) {
 	rows, err := tx.QueryContext(ctx, `
 SELECT logical_key, kind FROM history_capture_expected_artifacts
 WHERE capture_id = ? ORDER BY logical_key`, capture.ID)
@@ -2332,9 +2532,6 @@ WHERE capture_id = ? ORDER BY logical_key`, capture.ID)
 		if actual[index] != expected[index] {
 			return false, nil
 		}
-	}
-	if capture.ZeroHarnessRootReason != zeroRootReason {
-		return false, nil
 	}
 	if capture.ExpectedTranscript {
 		if seal == nil || capture.ExpectedTranscriptSegmentCount == nil || capture.ExpectedTranscriptLength == nil {
@@ -2414,6 +2611,9 @@ func verifyCaptureCompletenessTx(ctx context.Context, tx *sqlitex.Tx, capture Hi
 	if capture.ExecutionVerdict == HistoryExecutionPending {
 		return fmt.Errorf("%w: execution verdict is still pending", ErrHistoryIncomplete)
 	}
+	if !capture.ExpectedTranscript {
+		return fmt.Errorf("%w: every completed capture requires a transcript stream", ErrHistoryIncomplete)
+	}
 	var pendingArtifacts, activeIntents int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM history_artifacts WHERE capture_id = ? AND publication_state = 'pending'`, capture.ID).Scan(&pendingArtifacts); err != nil {
 		return err
@@ -2424,33 +2624,73 @@ func verifyCaptureCompletenessTx(ctx context.Context, tx *sqlitex.Tx, capture Hi
 	if pendingArtifacts != 0 || activeIntents != 0 {
 		return fmt.Errorf("%w: capture has %d pending artifacts and %d active upload intents", ErrHistoryPublicationPending, pendingArtifacts, activeIntents)
 	}
-	var expectedManifests, committedManifests, expectedHarnessRoots int
+	var expectedManifests, expectedHarnessRoots, expectedWorkspaces int
+	var committedManifests, committedHarnessRoots, committedWorkspaces, workspaceSummaries int
 	if err := tx.QueryRowContext(ctx, `
 SELECT
-  SUM(kind = 'manifest'),
-  SUM(kind = 'harness_root')
-FROM history_capture_expected_artifacts WHERE capture_id = ?`, capture.ID).Scan(&expectedManifests, &expectedHarnessRoots); err != nil {
+  COALESCE(SUM(kind = 'manifest'), 0),
+  COALESCE(SUM(kind = 'harness_root'), 0),
+  COALESCE(SUM(kind = 'workspace_snapshot'), 0)
+FROM history_capture_expected_artifacts WHERE capture_id = ?`, capture.ID).Scan(&expectedManifests, &expectedHarnessRoots, &expectedWorkspaces); err != nil {
 		return err
 	}
 	if err := tx.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM history_artifacts
-WHERE capture_id = ? AND kind = 'manifest' AND phase = 'final' AND publication_state = 'committed'`, capture.ID).Scan(&committedManifests); err != nil {
+SELECT
+  COALESCE(SUM(kind = 'manifest'), 0),
+  COALESCE(SUM(kind = 'harness_root'), 0),
+  COALESCE(SUM(kind = 'workspace_snapshot'), 0)
+FROM history_artifacts
+WHERE capture_id = ? AND phase = 'final' AND publication_state = 'committed'`, capture.ID).Scan(&committedManifests, &committedHarnessRoots, &committedWorkspaces); err != nil {
 		return err
 	}
 	if expectedManifests != 1 || committedManifests != 1 {
 		return fmt.Errorf("%w: exactly one expected and committed canonical manifest is required", ErrHistoryIncomplete)
 	}
-	if !capture.ExpectedHarness && expectedHarnessRoots != 0 {
-		return fmt.Errorf("%w: capture does not expect Harness roots", ErrHistoryConflict)
+	if expectedWorkspaces != 1 || committedWorkspaces != 1 {
+		return fmt.Errorf("%w: exactly one expected and committed final workspace snapshot is required", ErrHistoryIncomplete)
 	}
-	if capture.ExpectedHarness && capture.ExecutionVerdict == HistoryExecutionSucceeded && expectedHarnessRoots < 1 {
-		return fmt.Errorf("%w: successful capture requires a final Harness root", ErrHistoryIncomplete)
+	if capture.ExpectedHarness && (expectedHarnessRoots != 1 || committedHarnessRoots != 1) {
+		return fmt.Errorf("%w: Harness captures require exactly one expected and committed final native session-tree archive", ErrHistoryIncomplete)
 	}
-	if capture.ExpectedHarness && expectedHarnessRoots == 0 && (capture.ExecutionVerdict == HistoryExecutionSucceeded || capture.ZeroHarnessRootReason == "") {
-		return fmt.Errorf("%w: zero Harness roots require an audited non-success startup reason", ErrHistoryIncomplete)
+	if !capture.ExpectedHarness && (expectedHarnessRoots != 0 || committedHarnessRoots != 0) {
+		return fmt.Errorf("%w: non-Harness captures cannot contain a final native session-tree archive", ErrHistoryConflict)
 	}
-	if expectedHarnessRoots != 0 && capture.ZeroHarnessRootReason != "" {
-		return fmt.Errorf("%w: zero-root reason conflicts with final Harness roots", ErrHistoryConflict)
+	if capture.ExpectedHarness {
+		var indexedArchives, indexedMembers, rootMembers, invalidMembers int
+		if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(DISTINCT member_set.artifact_id), COUNT(member.id),
+       COALESCE(SUM(member.member_kind = 'root'), 0),
+       COALESCE(SUM(
+           member.native_session_id = '' OR member.parse_status != 'parsed'
+           OR member.harness_build != ?
+           OR (member.member_kind = 'root' AND member.native_parent_session_id != '')
+           OR (member.member_kind = 'delegated_child' AND (
+               member.native_parent_session_id = '' OR NOT EXISTS (
+                   SELECT 1 FROM harness_archive_members AS parent
+                   WHERE parent.artifact_id = member.artifact_id
+                     AND parent.native_session_id = member.native_parent_session_id
+               )
+           ))
+       ), 0)
+FROM history_artifacts AS artifact
+LEFT JOIN harness_archive_member_sets AS member_set ON member_set.artifact_id = artifact.id
+LEFT JOIN harness_archive_members AS member ON member.artifact_id = artifact.id
+WHERE artifact.capture_id = ? AND artifact.kind = 'harness_root'
+  AND artifact.phase = 'final' AND artifact.publication_state = 'committed'`, capture.HarnessVersion, capture.ID).
+			Scan(&indexedArchives, &indexedMembers, &rootMembers, &invalidMembers); err != nil {
+			return err
+		}
+		if indexedArchives != 1 || indexedMembers < 1 || rootMembers != 1 || invalidMembers != 0 {
+			return fmt.Errorf("%w: native Harness archive requires one fully parsed, build-matched rooted member tree", ErrHistoryIncomplete)
+		}
+	}
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM history_workspace_summaries
+WHERE capture_id = ? AND validation_status = 'valid'`, capture.ID).Scan(&workspaceSummaries); err != nil {
+		return err
+	}
+	if workspaceSummaries != 1 {
+		return fmt.Errorf("%w: final workspace snapshot requires one valid immutable summary", ErrHistoryIncomplete)
 	}
 	var missing int
 	if err := tx.QueryRowContext(ctx, `
@@ -2635,6 +2875,138 @@ FROM history_checkpoint_hints WHERE capture_id = ? AND source_event = ?`, captur
 	return value, err
 }
 
+type HistoryWorkspaceSummary struct {
+	ArtifactID           string
+	CaptureID            string
+	ArchiveSchemaVersion int
+	Branch               string
+	Detached             bool
+	BaseRef              string
+	BaseCommit           string
+	HeadCommit           string
+	StagedCount          int64
+	UnstagedCount        int64
+	UntrackedCount       int64
+	InventoryDigest      string
+	ValidationStatus     string
+	CreatedAt            time.Time
+}
+
+type RegisterHistoryWorkspaceSummaryInput struct {
+	ArtifactLogicalKey   string
+	ArchiveSchemaVersion int
+	Branch               string
+	Detached             bool
+	BaseRef              string
+	BaseCommit           string
+	HeadCommit           string
+	StagedCount          int64
+	UnstagedCount        int64
+	UntrackedCount       int64
+	InventoryDigest      string
+	ValidationStatus     string
+}
+
+func (s *HistoryCaptureService) RegisterWorkspaceSummary(ctx context.Context, captureID, grant string, input RegisterHistoryWorkspaceSummaryInput) (HistoryWorkspaceSummary, error) {
+	input.ArtifactLogicalKey = strings.TrimSpace(input.ArtifactLogicalKey)
+	input.Branch = strings.TrimSpace(input.Branch)
+	input.BaseRef = strings.TrimSpace(input.BaseRef)
+	input.BaseCommit = strings.TrimSpace(input.BaseCommit)
+	input.HeadCommit = strings.TrimSpace(input.HeadCommit)
+	input.InventoryDigest = strings.TrimSpace(input.InventoryDigest)
+	input.ValidationStatus = strings.TrimSpace(input.ValidationStatus)
+	if input.ArtifactLogicalKey == "" || len(input.ArtifactLogicalKey) > maxHistoryLogicalKey || input.ArchiveSchemaVersion < 1 ||
+		len(input.Branch) > 1024 || len(input.BaseRef) > 1024 || len(input.BaseCommit) > 64 || input.HeadCommit == "" || len(input.HeadCommit) > 64 ||
+		input.StagedCount < 0 || input.UnstagedCount < 0 || input.UntrackedCount < 0 || len(input.InventoryDigest) != 64 || !isLowerHexHistory(input.InventoryDigest) {
+		return HistoryWorkspaceSummary{}, errors.New("invalid workspace summary")
+	}
+	switch input.ValidationStatus {
+	case "valid", "invalid", "unsupported":
+	default:
+		return HistoryWorkspaceSummary{}, errors.New("invalid workspace summary validation status")
+	}
+
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return HistoryWorkspaceSummary{}, err
+	}
+	defer tx.Rollback()
+	capture, err := authenticateHistoryGrantTx(ctx, tx, strings.TrimSpace(captureID), grant, false)
+	if err != nil {
+		return HistoryWorkspaceSummary{}, err
+	}
+	artifact, err := getInternalHistoryArtifactTx(ctx, tx, capture.ID, input.ArtifactLogicalKey)
+	if err != nil {
+		return HistoryWorkspaceSummary{}, err
+	}
+	if artifact.Kind != HistoryArtifactWorkspaceSnapshot || artifact.Phase != HistoryArtifactFinal || artifact.PublicationState != HistoryPublicationCommitted {
+		return HistoryWorkspaceSummary{}, fmt.Errorf("%w: workspace summary requires a committed final workspace artifact", ErrHistoryConflict)
+	}
+	if existing, getErr := getHistoryWorkspaceSummaryTx(ctx, tx, artifact.ID); getErr == nil {
+		if sameHistoryWorkspaceSummary(existing, input) {
+			return existing, nil
+		}
+		return HistoryWorkspaceSummary{}, fmt.Errorf("%w: workspace summary retry differs", ErrHistoryConflict)
+	} else if !errors.Is(getErr, sql.ErrNoRows) {
+		return HistoryWorkspaceSummary{}, getErr
+	}
+	now := sqlitex.FormatTime(s.now().UTC())
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO history_workspace_summaries (
+    artifact_id, capture_id, archive_schema_version, branch, detached,
+    base_ref, base_commit, head_commit, staged_count, unstaged_count,
+    untracked_count, inventory_digest, validation_status, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		artifact.ID, capture.ID, input.ArchiveSchemaVersion, input.Branch, boolToInt(input.Detached),
+		input.BaseRef, input.BaseCommit, input.HeadCommit, input.StagedCount, input.UnstagedCount,
+		input.UntrackedCount, input.InventoryDigest, input.ValidationStatus, now); err != nil {
+		return HistoryWorkspaceSummary{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return HistoryWorkspaceSummary{}, err
+	}
+	return s.GetWorkspaceSummary(ctx, artifact.ID)
+}
+
+func (s *HistoryCaptureService) GetWorkspaceSummary(ctx context.Context, artifactID string) (HistoryWorkspaceSummary, error) {
+	return scanHistoryWorkspaceSummary(s.db.QueryRowContext(ctx, historyWorkspaceSummarySelect+` WHERE artifact_id = ?`, strings.TrimSpace(artifactID)))
+}
+
+const historyWorkspaceSummarySelect = `
+SELECT artifact_id, capture_id, archive_schema_version, branch, detached,
+       base_ref, base_commit, head_commit, staged_count, unstaged_count,
+       untracked_count, inventory_digest, validation_status, created_at
+FROM history_workspace_summaries`
+
+func getHistoryWorkspaceSummaryTx(ctx context.Context, tx *sqlitex.Tx, artifactID string) (HistoryWorkspaceSummary, error) {
+	return scanHistoryWorkspaceSummary(tx.QueryRowContext(ctx, historyWorkspaceSummarySelect+` WHERE artifact_id = ?`, artifactID))
+}
+
+func scanHistoryWorkspaceSummary(row historyRowScanner) (HistoryWorkspaceSummary, error) {
+	var value HistoryWorkspaceSummary
+	var detached int
+	var created string
+	if err := row.Scan(&value.ArtifactID, &value.CaptureID, &value.ArchiveSchemaVersion, &value.Branch, &detached,
+		&value.BaseRef, &value.BaseCommit, &value.HeadCommit, &value.StagedCount, &value.UnstagedCount,
+		&value.UntrackedCount, &value.InventoryDigest, &value.ValidationStatus, &created); err != nil {
+		return HistoryWorkspaceSummary{}, err
+	}
+	value.Detached = detached != 0
+	parsed, err := sqlitex.ParseTime(created)
+	if err != nil {
+		return HistoryWorkspaceSummary{}, err
+	}
+	value.CreatedAt = parsed
+	return value, nil
+}
+
+func sameHistoryWorkspaceSummary(existing HistoryWorkspaceSummary, input RegisterHistoryWorkspaceSummaryInput) bool {
+	return existing.ArchiveSchemaVersion == input.ArchiveSchemaVersion && existing.Branch == input.Branch && existing.Detached == input.Detached &&
+		existing.BaseRef == input.BaseRef && existing.BaseCommit == input.BaseCommit && existing.HeadCommit == input.HeadCommit &&
+		existing.StagedCount == input.StagedCount && existing.UnstagedCount == input.UnstagedCount && existing.UntrackedCount == input.UntrackedCount &&
+		existing.InventoryDigest == input.InventoryDigest && existing.ValidationStatus == input.ValidationStatus
+}
+
 type HarnessArchiveMemberInput struct {
 	NativeSessionID       string
 	NativeParentSessionID string
@@ -2645,6 +3017,39 @@ type HarnessArchiveMemberInput struct {
 	Model                 string
 	HarnessBuild          string
 	ParseStatus           string
+}
+
+type HarnessArchiveMember struct {
+	ArtifactID string
+	ArchiveID  string
+	HarnessArchiveMemberInput
+}
+
+func (s *HistoryCaptureService) ListHarnessArchiveMembers(ctx context.Context, captureID string) ([]HarnessArchiveMember, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT artifact_id, archive_id, native_session_id, native_parent_session_id,
+       relative_member_path, member_kind, agent_name, status, model,
+       harness_build, parse_status
+FROM harness_archive_members
+WHERE capture_id = ?
+ORDER BY archive_id, relative_member_path`, strings.TrimSpace(captureID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	members := make([]HarnessArchiveMember, 0)
+	for rows.Next() {
+		var member HarnessArchiveMember
+		if err := rows.Scan(
+			&member.ArtifactID, &member.ArchiveID, &member.NativeSessionID, &member.NativeParentSessionID,
+			&member.RelativeMemberPath, &member.MemberKind, &member.AgentName, &member.Status,
+			&member.Model, &member.HarnessBuild, &member.ParseStatus,
+		); err != nil {
+			return nil, err
+		}
+		members = append(members, member)
+	}
+	return members, rows.Err()
 }
 
 func (s *HistoryCaptureService) RegisterHarnessArchiveMembers(ctx context.Context, captureID, grant, artifactLogicalKey string, members []HarnessArchiveMemberInput) error {

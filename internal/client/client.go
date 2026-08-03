@@ -1624,6 +1624,226 @@ func (c *Client) GetHandoff(changeID string, leaseID string) (PutHandoffResult, 
 	}, response.Content, true, nil
 }
 
+type HistoryCaptureFilter struct {
+	TaskIDs    []string
+	JobIDs     []string
+	SessionIDs []string
+	CaptureIDs []string
+	States     []string
+	Since      *time.Time
+	Until      *time.Time
+	Resumable  *bool
+	Limit      int
+	Cursor     string
+}
+
+func (c *Client) ListHistoryCaptures(ctx context.Context, filter HistoryCaptureFilter) (contract.HistoryCapturesResponse, error) {
+	query := url.Values{}
+	for _, value := range filter.TaskIDs {
+		query.Add("task_id", value)
+	}
+	for _, value := range filter.JobIDs {
+		query.Add("job_id", value)
+	}
+	for _, value := range filter.SessionIDs {
+		query.Add("session_id", value)
+	}
+	for _, value := range filter.CaptureIDs {
+		query.Add("capture_id", value)
+	}
+	for _, value := range filter.States {
+		query.Add("state", value)
+	}
+	if filter.Since != nil {
+		query.Set("since", filter.Since.UTC().Format(time.RFC3339Nano))
+	}
+	if filter.Until != nil {
+		query.Set("until", filter.Until.UTC().Format(time.RFC3339Nano))
+	}
+	if filter.Resumable != nil {
+		query.Set("resumable", strconv.FormatBool(*filter.Resumable))
+	}
+	if filter.Limit != 0 {
+		query.Set("limit", strconv.Itoa(filter.Limit))
+	}
+	if filter.Cursor != "" {
+		query.Set("cursor", filter.Cursor)
+	}
+	var response contract.HistoryCapturesResponse
+	if err := c.doContext(ctx, http.MethodGet, c.projectPath("/history/captures"), nil, query, &response); err != nil {
+		return contract.HistoryCapturesResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) GetHistoryCapture(ctx context.Context, captureID string) (contract.HistoryCaptureResponse, error) {
+	var response contract.HistoryCaptureResponse
+	path := c.projectPath("/history/captures/" + url.PathEscape(captureID))
+	if err := c.doContext(ctx, http.MethodGet, path, nil, nil, &response); err != nil {
+		return contract.HistoryCaptureResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) DownloadHistoryArtifact(ctx context.Context, captureID, artifactID string, dst io.Writer) error {
+	path := c.projectPath("/history/captures/" + url.PathEscape(captureID) + "/artifacts/" + url.PathEscape(artifactID) + "/content")
+	return c.downloadHistoryContent(ctx, path, dst)
+}
+
+func (c *Client) DownloadHistoryManifest(ctx context.Context, captureID string, dst io.Writer) error {
+	path := c.projectPath("/history/captures/" + url.PathEscape(captureID) + "/manifest")
+	return c.downloadHistoryContent(ctx, path, dst)
+}
+
+func (c *Client) ReserveHistoryCapture(ctx context.Context, input contract.ReserveHistoryCaptureRequest) (contract.ReserveHistoryCaptureResponse, error) {
+	var response contract.ReserveHistoryCaptureResponse
+	if err := c.doContext(ctx, http.MethodPost, "/v2/history/captures", input, nil, &response); err != nil {
+		return contract.ReserveHistoryCaptureResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) UploadHistoryArtifactBytes(ctx context.Context, captureID, grant string, source io.Reader) (contract.HistoryUploadResponse, error) {
+	if source == nil {
+		return contract.HistoryUploadResponse{}, errors.New("history upload source is required")
+	}
+	path := "/v2/history/captures/" + url.PathEscape(captureID) + "/uploads"
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, source)
+	if err != nil {
+		return contract.HistoryUploadResponse{}, err
+	}
+	request.Header.Set(protocolHeader, contract.ProtocolVersion)
+	request.Header.Set("Content-Type", "application/octet-stream")
+	request.Header.Set("Flow-History-Upload-Grant", grant)
+	if c.token != "" {
+		request.Header.Set("Authorization", authScheme+c.token)
+	}
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return contract.HistoryUploadResponse{}, err
+	}
+	defer response.Body.Close()
+	if err := statusError(response); err != nil {
+		return contract.HistoryUploadResponse{}, err
+	}
+	var result contract.HistoryUploadResponse
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return contract.HistoryUploadResponse{}, err
+	}
+	return result, nil
+}
+
+func (c *Client) PublishHistoryArtifact(ctx context.Context, captureID, grant string, input contract.PublishHistoryArtifactRequest) (contract.HistoryArtifact, error) {
+	var response contract.HistoryArtifact
+	err := c.doHistoryWorkerJSON(ctx, captureID, "artifacts", grant, input, &response)
+	return response, err
+}
+
+func (c *Client) RegisterHistoryTranscriptSegment(ctx context.Context, captureID, grant string, input contract.RegisterHistoryTranscriptSegmentRequest) error {
+	return c.doHistoryWorkerJSON(ctx, captureID, "transcript-segments", grant, input, nil)
+}
+
+func (c *Client) SealHistoryTranscript(ctx context.Context, captureID, grant string, input contract.HistoryTranscriptSeal) error {
+	return c.doHistoryWorkerJSON(ctx, captureID, "transcript-seal", grant, input, nil)
+}
+
+func (c *Client) DeclareHistoryExpectedSet(ctx context.Context, captureID, grant string, input contract.DeclareHistoryExpectedSetRequest) (contract.HistoryCapture, error) {
+	var response contract.HistoryCapture
+	err := c.doHistoryWorkerJSON(ctx, captureID, "expected-set", grant, input, &response)
+	return response, err
+}
+
+func (c *Client) RegisterHistoryWorkspaceSummary(ctx context.Context, captureID, grant string, input contract.RegisterHistoryWorkspaceSummaryRequest) (contract.HistoryWorkspaceSummary, error) {
+	var response contract.HistoryWorkspaceSummary
+	err := c.doHistoryWorkerJSON(ctx, captureID, "workspace-summary", grant, input, &response)
+	return response, err
+}
+
+func (c *Client) RegisterHistoryHarnessMembers(ctx context.Context, captureID, grant string, input contract.RegisterHistoryHarnessMembersRequest) error {
+	return c.doHistoryWorkerJSON(ctx, captureID, "harness-members", grant, input, nil)
+}
+
+func (c *Client) RecordHistoryExecutionVerdict(ctx context.Context, captureID, grant string, input contract.RecordHistoryExecutionVerdictRequest) (contract.HistoryCapture, error) {
+	var response contract.HistoryCapture
+	err := c.doHistoryWorkerJSON(ctx, captureID, "verdict", grant, input, &response)
+	return response, err
+}
+
+func (c *Client) TransitionHistoryCapture(ctx context.Context, captureID, grant string, input contract.TransitionHistoryCaptureRequest) (contract.HistoryCapture, error) {
+	var response contract.HistoryCapture
+	err := c.doHistoryWorkerJSON(ctx, captureID, "transition", grant, input, &response)
+	return response, err
+}
+
+func (c *Client) GenerateHistoryManifest(ctx context.Context, captureID, grant string) (contract.HistoryArtifact, error) {
+	var response contract.HistoryArtifact
+	err := c.doHistoryWorkerJSON(ctx, captureID, "manifest", grant, map[string]any{}, &response)
+	return response, err
+}
+
+func (c *Client) CompleteHistoryCapture(ctx context.Context, captureID, grant string, expectedVersion int64) (contract.HistoryCapture, error) {
+	var response contract.HistoryCapture
+	err := c.doHistoryWorkerJSON(ctx, captureID, "complete", grant, contract.CompleteHistoryCaptureRequest{ExpectedVersion: expectedVersion}, &response)
+	return response, err
+}
+
+func (c *Client) doHistoryWorkerJSON(ctx context.Context, captureID, operation, grant string, body, target any) error {
+	var encoded bytes.Buffer
+	if body != nil {
+		if err := json.NewEncoder(&encoded).Encode(body); err != nil {
+			return err
+		}
+	}
+	path := "/v2/history/captures/" + url.PathEscape(captureID) + "/" + operation
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, &encoded)
+	if err != nil {
+		return err
+	}
+	request.Header.Set(protocolHeader, contract.ProtocolVersion)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Flow-History-Upload-Grant", grant)
+	if c.token != "" {
+		request.Header.Set("Authorization", authScheme+c.token)
+	}
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if err := statusError(response); err != nil {
+		return err
+	}
+	if target == nil {
+		_, err = io.Copy(io.Discard, response.Body)
+		return err
+	}
+	return json.NewDecoder(response.Body).Decode(target)
+}
+
+func (c *Client) downloadHistoryContent(ctx context.Context, path string, dst io.Writer) error {
+	if dst == nil {
+		return errors.New("history download destination is required")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set(protocolHeader, contract.ProtocolVersion)
+	if c.token != "" {
+		request.Header.Set("Authorization", authScheme+c.token)
+	}
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if err := statusError(response); err != nil {
+		return err
+	}
+	_, err = io.Copy(dst, response.Body)
+	return err
+}
+
 // UploadSessionTranscript PUTs raw transcript bytes for an author session. The
 // caller (the worker) supplies the trailing bytes of the tmux transcript log.
 func (c *Client) UploadSessionTranscript(ctx context.Context, sessionID string, r io.Reader) error {

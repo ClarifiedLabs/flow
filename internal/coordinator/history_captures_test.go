@@ -45,7 +45,7 @@ func baseHistoryReservation() ReserveHistoryCaptureInput {
 		ProjectID: "p-history", JobID: "job-1", LeaseID: "lease-1", LeaseAttempt: 1,
 		WorkerID: "worker-1", TaskID: "t-1", SessionID: "session-1",
 		WorkflowRunID: "wr-1", NodeRunID: "wnr-1", NodeVisit: 1,
-		Stage: "implement", Role: "author", HarnessName: "harness", HarnessVersion: "0.4.3",
+		Stage: "implement", Role: "author", HarnessName: "harness", HarnessVersion: "0.4.5", HarnessSchemaVersion: 5,
 		ExpectedTranscript: true, ExpectedHarness: true,
 	}
 }
@@ -108,6 +108,33 @@ func publishCanonicalManifestBytes(t *testing.T, service *HistoryCaptureService,
 	artifact, err := service.PublishCanonicalManifest(context.Background(), captureID, input, temporary)
 	if err != nil {
 		t.Fatalf("publish canonical manifest: %v", err)
+	}
+	return artifact
+}
+
+func registerHarnessRoot(t *testing.T, service *HistoryCaptureService, captureID, grant, logicalKey string) {
+	t.Helper()
+	if err := service.RegisterHarnessArchiveMembers(context.Background(), captureID, grant, logicalKey, []HarnessArchiveMemberInput{{
+		NativeSessionID: "native-root", RelativeMemberPath: "state.json", MemberKind: "root",
+		HarnessBuild: "0.4.5", ParseStatus: "parsed",
+	}}); err != nil {
+		t.Fatalf("register Harness root member: %v", err)
+	}
+}
+
+func publishWorkspaceSummary(t *testing.T, service *HistoryCaptureService, captureID, grant string) HistoryArtifact {
+	t.Helper()
+	content := []byte("deterministic-workspace")
+	artifact := publishHistoryBytes(t, service, captureID, grant, PublishHistoryArtifactInput{
+		LogicalKey: "workspace/final", Kind: HistoryArtifactWorkspaceSnapshot, Phase: HistoryArtifactFinal,
+		ArchiveID: "workspace", MediaType: "application/x-tar", LogicalSize: int64(len(content)), EntryCount: 1,
+	}, content)
+	if _, err := service.RegisterWorkspaceSummary(context.Background(), captureID, grant, RegisterHistoryWorkspaceSummaryInput{
+		ArtifactLogicalKey: "workspace/final", ArchiveSchemaVersion: 1,
+		Branch: "feature/history", BaseRef: "main", BaseCommit: strings.Repeat("a", 40), HeadCommit: strings.Repeat("b", 40),
+		StagedCount: 1, InventoryDigest: historyDigest([]byte("inventory")), ValidationStatus: "valid",
+	}); err != nil {
+		t.Fatalf("register workspace summary: %v", err)
 	}
 	return artifact
 }
@@ -730,6 +757,7 @@ func TestHistoryTranscriptOrderingSealAndExactExpectedCompletion(t *testing.T) {
 
 	expected := []FinalArtifactExpectation{
 		{LogicalKey: "harness/final/root-1", Kind: HistoryArtifactHarnessRoot},
+		{LogicalKey: "workspace/final", Kind: HistoryArtifactWorkspaceSnapshot},
 		{LogicalKey: "manifest/final", Kind: HistoryArtifactManifest},
 	}
 	capture, err = env.service.DeclareExpectedSet(ctx, capture.ID, reserved.UploadGrant, DeclareHistoryExpectedSetInput{
@@ -747,6 +775,7 @@ func TestHistoryTranscriptOrderingSealAndExactExpectedCompletion(t *testing.T) {
 		LogicalKey: "harness/final/root-1", Kind: HistoryArtifactHarnessRoot, Phase: HistoryArtifactFinal,
 		ArchiveID: "root-1", MediaType: "application/gzip", LogicalSize: 4, EntryCount: 1,
 	}, []byte("root"))
+	publishWorkspaceSummary(t, env.service, capture.ID, reserved.UploadGrant)
 	publishCanonicalManifestBytes(t, env.service, capture.ID, PublishHistoryArtifactInput{
 		LogicalKey: "manifest/final", Kind: HistoryArtifactManifest, Phase: HistoryArtifactFinal,
 		MediaType: "application/json", LogicalSize: 2,
@@ -758,6 +787,10 @@ func TestHistoryTranscriptOrderingSealAndExactExpectedCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record succeeded verdict: %v", err)
 	}
+	if _, err := env.service.Complete(ctx, capture.ID, reserved.UploadGrant, capture.Version, "worker"); !errors.Is(err, ErrHistoryIncomplete) {
+		t.Fatalf("complete without native member index err=%v, want incomplete", err)
+	}
+	registerHarnessRoot(t, env.service, capture.ID, reserved.UploadGrant, "harness/final/root-1")
 	completed, err := env.service.Complete(ctx, capture.ID, reserved.UploadGrant, capture.Version, "worker")
 	if err != nil {
 		t.Fatalf("complete exact capture: %v", err)
@@ -839,7 +872,7 @@ func TestHistoryCheckpointHintsCoalesceAndCheckpointArtifactsNeverCompleteFinalS
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	input := baseHistoryReservation()
-	input.ExpectedTranscript = false
+	input.ExpectedTranscript = true
 	input.ExpectedHarness = true
 	reserved := reserveHistoryCapture(t, env.service, input)
 	capture := transitionHistory(t, env.service, reserved.Capture, HistoryCaptureRunning)
@@ -883,12 +916,17 @@ func TestHistoryCheckpointHintsCoalesceAndCheckpointArtifactsNeverCompleteFinalS
 		t.Fatalf("interleaved root checkpoint was incorrectly superseded: %q err=%v", supersededBy, err)
 	}
 
+	emptySeal := TranscriptSeal{FinalEpoch: -1, SHA256: historyDigest(nil)}
+	if err := env.service.SealTranscript(ctx, capture.ID, reserved.UploadGrant, emptySeal); err != nil {
+		t.Fatalf("seal empty transcript: %v", err)
+	}
 	capture, err = env.service.DeclareExpectedSet(ctx, capture.ID, reserved.UploadGrant, DeclareHistoryExpectedSetInput{
 		Artifacts: []FinalArtifactExpectation{
 			{LogicalKey: "harness/final/root-1", Kind: HistoryArtifactHarnessRoot},
+			{LogicalKey: "workspace/final", Kind: HistoryArtifactWorkspaceSnapshot},
 			{LogicalKey: "manifest/final", Kind: HistoryArtifactManifest},
 		},
-		ExpectedVersion: capture.Version, Actor: "worker",
+		TranscriptSeal: &emptySeal, ExpectedVersion: capture.Version, Actor: "worker",
 	})
 	if err != nil {
 		t.Fatalf("declare final set: %v", err)
@@ -902,6 +940,8 @@ func TestHistoryCheckpointHintsCoalesceAndCheckpointArtifactsNeverCompleteFinalS
 		LogicalKey: "harness/final/root-1", Kind: HistoryArtifactHarnessRoot, Phase: HistoryArtifactFinal,
 		ArchiveID: "root-1", MediaType: "application/gzip", LogicalSize: 5, EntryCount: 1,
 	}, []byte("final"))
+	registerHarnessRoot(t, env.service, capture.ID, reserved.UploadGrant, "harness/final/root-1")
+	publishWorkspaceSummary(t, env.service, capture.ID, reserved.UploadGrant)
 	manifest := publishCanonicalManifestBytes(t, env.service, capture.ID, PublishHistoryArtifactInput{
 		LogicalKey: "manifest/final", Kind: HistoryArtifactManifest, Phase: HistoryArtifactFinal,
 		MediaType: "application/json", LogicalSize: 2,
@@ -933,6 +973,7 @@ func TestHistoryCaptureEventsAreAppendOnlyAndLossWaiverAreAudited(t *testing.T) 
 	input := baseHistoryReservation()
 	input.ExpectedTranscript = false
 	input.ExpectedHarness = false
+	input.HarnessName, input.HarnessVersion, input.HarnessSchemaVersion = "", "", 0
 	lostReservation := reserveHistoryCapture(t, env.service, input)
 	lost, err := env.service.MarkLost(ctx, lostReservation.Capture.ID, lostReservation.Capture.Version, "watchdog", "node_lost", "worker node disappeared")
 	if err != nil || lost.State != HistoryCaptureLost {
@@ -990,6 +1031,7 @@ func TestHistorySQLiteGuardsRejectLifecycleAndTerminalMetadataCorruption(t *test
 	ctx := context.Background()
 	input := baseHistoryReservation()
 	input.ExpectedTranscript, input.ExpectedHarness = false, false
+	input.HarnessName, input.HarnessVersion, input.HarnessSchemaVersion = "", "", 0
 	reserved := reserveHistoryCapture(t, env.service, input)
 	captureID := reserved.Capture.ID
 	now := "2026-07-31T12:00:00Z"
@@ -1050,6 +1092,7 @@ func TestHistoryUploadIntentLifecycleLossWaiverAndCeilings(t *testing.T) {
 	ctx := context.Background()
 	input := baseHistoryReservation()
 	input.ExpectedTranscript, input.ExpectedHarness = false, false
+	input.HarnessName, input.HarnessVersion, input.HarnessSchemaVersion = "", "", 0
 	reserved := reserveHistoryCapture(t, env.service, input)
 	temporary := uploadHistoryBytes(t, env.service, reserved.Capture.ID, reserved.UploadGrant, []byte("outbox"))
 	if err := env.service.HeartbeatUpload(ctx, reserved.Capture.ID, reserved.UploadGrant, temporary.ID); err != nil {
@@ -1152,6 +1195,7 @@ func TestHistoryTranscriptStrictGzipRawDigestAndServerSeal(t *testing.T) {
 	ctx := context.Background()
 	input := baseHistoryReservation()
 	input.ExpectedHarness = false
+	input.HarnessName, input.HarnessVersion, input.HarnessSchemaVersion = "", "", 0
 	reserved := reserveHistoryCapture(t, env.service, input)
 	raw := []byte("raw transcript")
 	compressed := gzipHistoryBytes(t, raw)
@@ -1246,26 +1290,64 @@ SELECT raw_sha256 FROM history_transcript_segments WHERE capture_id = ?`, reserv
 	}
 }
 
-func TestHistoryCompletionManifestVerdictZeroRootsAndActiveIntent(t *testing.T) {
+func TestHistoryCompletionRequiresNativeRootWorkspaceManifestVerdictAndNoActiveIntent(t *testing.T) {
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
+
+	// A failed Harness launch is not a transcript-only success path: without a
+	// native session tree the capture remains incomplete and must be blocked/lost.
+	harnessInput := baseHistoryReservation()
+	harness := reserveHistoryCapture(t, env.service, harnessInput)
+	harnessCapture := transitionHistory(t, env.service, harness.Capture, HistoryCaptureRunning)
+	harnessCapture, err := env.service.RecordExecutionVerdict(ctx, harnessCapture.ID, RecordHistoryExecutionVerdictInput{
+		Verdict: HistoryExecutionFailed, ErrorCode: "startup", ExpectedVersion: harnessCapture.Version, Actor: "worker",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harnessCapture = transitionHistory(t, env.service, harnessCapture, HistoryCaptureQuiescing)
+	emptySeal := TranscriptSeal{FinalEpoch: -1, SHA256: historyDigest(nil)}
+	if err := env.service.SealTranscript(ctx, harnessCapture.ID, harness.UploadGrant, emptySeal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.service.DeclareExpectedSet(ctx, harnessCapture.ID, harness.UploadGrant, DeclareHistoryExpectedSetInput{
+		Artifacts: []FinalArtifactExpectation{
+			{LogicalKey: "workspace/final", Kind: HistoryArtifactWorkspaceSnapshot},
+			{LogicalKey: "manifest/final", Kind: HistoryArtifactManifest},
+		},
+		TranscriptSeal: &emptySeal, ExpectedVersion: harnessCapture.Version, Actor: "worker",
+	}); !errors.Is(err, ErrHistoryIncomplete) {
+		t.Fatalf("Harness expected set without native root err=%v, want incomplete", err)
+	}
+
+	// An explicit non-Harness shell capture legitimately has no native archive,
+	// but still requires workspace, canonical manifest, and execution metadata.
 	input := baseHistoryReservation()
-	input.ExpectedTranscript = false
+	input.JobID, input.LeaseID, input.LeaseAttempt = "job-shell", "lease-shell", 2
+	input.ExpectedTranscript = true
+	input.ExpectedHarness = false
+	input.HarnessName, input.HarnessVersion, input.HarnessSchemaVersion = "", "", 0
 	reserved := reserveHistoryCapture(t, env.service, input)
 	capture := transitionHistory(t, env.service, reserved.Capture, HistoryCaptureRunning)
-	capture, err := env.service.RecordExecutionVerdict(ctx, capture.ID, RecordHistoryExecutionVerdictInput{
-		Verdict: HistoryExecutionFailed, ErrorCode: "startup", ExpectedVersion: capture.Version, Actor: "worker",
+	capture, err = env.service.RecordExecutionVerdict(ctx, capture.ID, RecordHistoryExecutionVerdictInput{
+		Verdict: HistoryExecutionFailed, ErrorCode: "shell_exit", ExpectedVersion: capture.Version, Actor: "worker",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	capture = transitionHistory(t, env.service, capture, HistoryCaptureQuiescing)
+	if err := env.service.SealTranscript(ctx, capture.ID, reserved.UploadGrant, emptySeal); err != nil {
+		t.Fatal(err)
+	}
 	capture, err = env.service.DeclareExpectedSet(ctx, capture.ID, reserved.UploadGrant, DeclareHistoryExpectedSetInput{
-		Artifacts:             []FinalArtifactExpectation{{LogicalKey: "manifest/final", Kind: HistoryArtifactManifest}},
-		ZeroHarnessRootReason: "Harness failed before creating its session root", ExpectedVersion: capture.Version, Actor: "worker",
+		Artifacts: []FinalArtifactExpectation{
+			{LogicalKey: "workspace/final", Kind: HistoryArtifactWorkspaceSnapshot},
+			{LogicalKey: "manifest/final", Kind: HistoryArtifactManifest},
+		},
+		TranscriptSeal: &emptySeal, ExpectedVersion: capture.Version, Actor: "worker",
 	})
 	if err != nil {
-		t.Fatalf("declare audited zero-root startup failure: %v", err)
+		t.Fatalf("declare non-Harness final set: %v", err)
 	}
 	workerTemporary := uploadHistoryBytes(t, env.service, capture.ID, reserved.UploadGrant, []byte("{}"))
 	if _, err := env.service.PublishArtifact(ctx, capture.ID, reserved.UploadGrant, PublishHistoryArtifactInput{
@@ -1277,6 +1359,7 @@ func TestHistoryCompletionManifestVerdictZeroRootsAndActiveIntent(t *testing.T) 
 	if err := env.service.AbandonUpload(ctx, capture.ID, reserved.UploadGrant, workerTemporary.ID); err != nil {
 		t.Fatalf("abandon rejected worker manifest temporary: %v", err)
 	}
+	publishWorkspaceSummary(t, env.service, capture.ID, reserved.UploadGrant)
 	publishCanonicalManifestBytes(t, env.service, capture.ID, PublishHistoryArtifactInput{
 		LogicalKey: "manifest/final", Kind: HistoryArtifactManifest, Phase: HistoryArtifactFinal,
 		MediaType: "application/json", LogicalSize: 2,
@@ -1291,23 +1374,29 @@ func TestHistoryCompletionManifestVerdictZeroRootsAndActiveIntent(t *testing.T) 
 		t.Fatal(err)
 	}
 	completed, err := env.service.Complete(ctx, capture.ID, reserved.UploadGrant, capture.Version, "worker")
-	if err != nil || completed.State != HistoryCaptureComplete || completed.ZeroHarnessRootReason == "" {
-		t.Fatalf("zero-root completion=%+v err=%v", completed, err)
+	if err != nil || completed.State != HistoryCaptureComplete || completed.ExecutionVerdict != HistoryExecutionFailed {
+		t.Fatalf("non-Harness completion=%+v err=%v", completed, err)
 	}
 
 	pendingInput := input
-	pendingInput.ExpectedHarness = false
 	pendingInput.JobID, pendingInput.LeaseID, pendingInput.LeaseAttempt = "job-pending", "lease-pending", 12
 	pending := reserveHistoryCapture(t, env.service, pendingInput)
 	pendingCapture := transitionHistory(t, env.service, pending.Capture, HistoryCaptureRunning)
 	pendingCapture = transitionHistory(t, env.service, pendingCapture, HistoryCaptureQuiescing)
+	if err := env.service.SealTranscript(ctx, pendingCapture.ID, pending.UploadGrant, emptySeal); err != nil {
+		t.Fatal(err)
+	}
 	pendingCapture, err = env.service.DeclareExpectedSet(ctx, pendingCapture.ID, pending.UploadGrant, DeclareHistoryExpectedSetInput{
-		Artifacts:       []FinalArtifactExpectation{{LogicalKey: "manifest/final", Kind: HistoryArtifactManifest}},
-		ExpectedVersion: pendingCapture.Version, Actor: "worker",
+		Artifacts: []FinalArtifactExpectation{
+			{LogicalKey: "workspace/final", Kind: HistoryArtifactWorkspaceSnapshot},
+			{LogicalKey: "manifest/final", Kind: HistoryArtifactManifest},
+		},
+		TranscriptSeal: &emptySeal, ExpectedVersion: pendingCapture.Version, Actor: "worker",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	publishWorkspaceSummary(t, env.service, pendingCapture.ID, pending.UploadGrant)
 	publishCanonicalManifestBytes(t, env.service, pendingCapture.ID, PublishHistoryArtifactInput{
 		LogicalKey: "manifest/final", Kind: HistoryArtifactManifest, Phase: HistoryArtifactFinal,
 		MediaType: "application/json", LogicalSize: 2,
