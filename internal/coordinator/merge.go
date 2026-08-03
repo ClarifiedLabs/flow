@@ -384,7 +384,7 @@ func (s *MergeService) recoverMergeIntent(ctx context.Context, intent mergeInten
 	return true, nil
 }
 
-// mergeIntent mirrors a merge_intents row (see migration 0017).
+// mergeIntent mirrors the merge_intents table in the project schema baseline.
 type mergeIntent struct {
 	ID              string
 	TaskID          string

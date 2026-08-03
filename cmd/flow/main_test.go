@@ -228,7 +228,7 @@ func TestDoctorInitializesDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertMigrationsInclude(t, migrations, "0001_global_init")
+	assertMigrationsEqual(t, migrations, "0001_global_init")
 }
 
 func TestFetchPromptUsesWorkerRoleEnvironment(t *testing.T) {
@@ -1258,16 +1258,15 @@ func flowTestGitOutput(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(output))
 }
 
-func assertMigrationsInclude(t *testing.T, got []string, want ...string) {
+func assertMigrationsEqual(t *testing.T, got []string, want ...string) {
 	t.Helper()
 
-	seen := map[string]bool{}
-	for _, migration := range got {
-		seen[migration] = true
+	if len(got) != len(want) {
+		t.Fatalf("migrations = %v, want %v", got, want)
 	}
-	for _, migration := range want {
-		if !seen[migration] {
-			t.Fatalf("migrations = %v, missing %s", got, migration)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("migrations = %v, want %v", got, want)
 		}
 	}
 }

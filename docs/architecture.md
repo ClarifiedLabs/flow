@@ -228,7 +228,8 @@ an epic or feature schedules all of its unscheduled descendant tasks; blocked
 tasks are scheduled and wait at the workflow dependency gate.
 
 A **feature** has a long-lived exchange branch
-`feature/f-<project-key>-<number>` (schema in `0005_features.sql`; code in
+`feature/f-<project-key>-<number>` (schema in
+`internal/db/migrations/0001_init.sql`; code in
 `internal/coordinator/features.go`). `tasks.feature_id` is a validated cache of
 the nearest feature ancestor, used by existing branch-aware task and merge
 queries. Parent mutations refresh that cache transactionally and are rejected
@@ -262,11 +263,7 @@ blocker links to the bound task itself. The restriction is recorded on the
 running `feature_rebases` row and applied both when the rebase starts and by
 the schedule-time gate (`EnsureRebaseBlock`) for tasks created or reopened
 while the rebase runs, so a sibling feature task is never linked whether it
-existed at rebase start or appears mid-rebase. Rows that predate migration
-0010 carry no initiator provenance, so the upgrade stamps them with a legacy
-sentinel and the schedule-time gate links nothing new for them; a legacy owner
-rebase simply stops acquiring new blockers after the upgrade. Owner and
-unbound project-console
+existed at rebase start or appears mid-rebase. Owner and unbound project-console
 credentials keep the full project-wide gate. The
 bundled `flow-rebase-author` and `flow-rebase-verifier` skills carry the role
 instructions; the verifier proves the delta between the old feature tip and the

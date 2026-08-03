@@ -869,9 +869,7 @@ WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, rebaseTask
 
 // TestRestrictionAllows locks the persisted-restriction predicate: an empty
 // restriction allows every task (owner and unbound project-console rebases),
-// the legacy sentinel stamped by migration 0010 onto pre-existing rows allows
-// none (no initiator provenance, so nothing new is linked), and a comma-joined
-// list allows exactly its members.
+// and a comma-joined list allows exactly its members.
 func TestRestrictionAllows(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -881,8 +879,6 @@ func TestRestrictionAllows(t *testing.T) {
 	}{
 		{"empty allows any task", "", "t-any", true},
 		{"empty allows the bound task", "", "t-bound", true},
-		{"legacy sentinel allows nothing", legacyBlockRestriction, "t-any", false},
-		{"legacy sentinel allows nothing for the bound task", legacyBlockRestriction, "t-bound", false},
 		{"list allows its member", "t-a,t-b", "t-b", true},
 		{"list rejects a non-member", "t-a,t-b", "t-c", false},
 		{"list tolerates surrounding whitespace", " t-a , t-b ", "t-a", true},
@@ -893,67 +889,6 @@ func TestRestrictionAllows(t *testing.T) {
 				t.Fatalf("restrictionAllows(%q, %q) = %v, want %v", tc.restriction, tc.taskID, got, tc.want)
 			}
 		})
-	}
-}
-
-// TestLegacyRunningRebaseLinksNoNewBlockers locks the upgrade handling for
-// rows that predate migration 0010. Such rows carry no initiator provenance —
-// a task-bound console's live rebase is indistinguishable from an owner or
-// unbound-console rebase — so the migration stamps them with the legacy
-// sentinel and the schedule-time gate links nothing new for them: the only
-// conservative choice that keeps the confinement guarantee (no blocker
-// relation whose endpoints exclude the bound task) for a legacy task-bound
-// rebase. A legacy owner rebase simply stops acquiring new blockers.
-func TestLegacyRunningRebaseLinksNoNewBlockers(t *testing.T) {
-	ctx := context.Background()
-	env := newFeatureTestEnv(t)
-	feature, err := env.features.Create(ctx, CreateFeatureInput{Title: "legacy feature"})
-	if err != nil {
-		t.Fatalf("create feature: %v", err)
-	}
-
-	// A pre-0010 running row: the rebase task is a same-feature task standing
-	// in for the system rebase task, and restrict_blocked_to carries the value
-	// migration 0010 stamps onto rows that existed before the upgrade.
-	rebaseTask, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "legacy rebase task", FeatureID: &feature.ID})
-	if err != nil {
-		t.Fatalf("create legacy rebase task: %v", err)
-	}
-	if _, err := env.fixture.store.DB().ExecContext(ctx, `
-INSERT INTO feature_rebases (
-	id, feature_id, task_id, old_tip_sha, target_base, target_base_sha,
-	new_tip_sha, state, created_at, restrict_blocked_to
-) VALUES (?, ?, ?, ?, ?, ?, '', 'running', ?, ?)`,
-		"fr-legacy-00000000000000000000000000000001", feature.ID, rebaseTask.ID,
-		"old-tip", "main", "base-tip", "2026-01-01T00:00:00Z", legacyBlockRestriction); err != nil {
-		t.Fatalf("seed legacy running rebase row: %v", err)
-	}
-
-	countBlockedBy := func(rebaseTaskID, taskID string) int {
-		t.Helper()
-		var count int
-		if err := env.fixture.store.DB().QueryRowContext(ctx, `
-SELECT COUNT(*) FROM work_item_relations
-WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, rebaseTaskID, taskID).Scan(&count); err != nil {
-			t.Fatalf("count relations: %v", err)
-		}
-		return count
-	}
-
-	// A sibling created after the upgrade and then scheduled — the exact
-	// lifecycle path the verifier flags — must not receive a rebase_task
-	// blocks relation: the legacy row has no provenance, so the gate links
-	// nothing rather than risk a relation whose endpoints exclude the bound
-	// task.
-	sibling, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "post-upgrade sibling", FeatureID: &feature.ID})
-	if err != nil {
-		t.Fatalf("create sibling: %v", err)
-	}
-	if _, err := env.runs.ScheduleAs(ctx, sibling.ID, ActorHuman); err != nil {
-		t.Fatalf("schedule sibling: %v", err)
-	}
-	if got := countBlockedBy(rebaseTask.ID, sibling.ID); got != 0 {
-		t.Fatalf("legacy rebase task blocks sibling %d times, want 0", got)
 	}
 }
 

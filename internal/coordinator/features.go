@@ -86,11 +86,9 @@ type FeatureRebase struct {
 	FeatureID string `json:"feature_id"`
 	TaskID    string `json:"task_id,omitempty"`
 	// RestrictBlockedTo records a task-bound console's blocker confinement:
-	// when non-empty, the rebase task may link only the comma-joined task ids
+	// when non-empty, the rebase task may link only the comma-joined task IDs
 	// as blockers. It is persisted so the schedule-time gate (EnsureRebaseBlock)
-	// consults it while the row runs, not just during the initial sweep. The
-	// value legacyBlockRestriction marks a row that predates migration 0010:
-	// it has no initiator provenance, so the gate links nothing new for it.
+	// consults it while the row runs, not just during the initial sweep.
 	RestrictBlockedTo string      `json:"restrict_blocked_to,omitempty"`
 	OldTipSHA         string      `json:"old_tip_sha"`
 	TargetBase        string      `json:"target_base"`
@@ -1381,10 +1379,9 @@ WHERE t.id = ? AND fr.state = 'running' AND fr.task_id IS NOT NULL AND fr.task_i
 	}
 	if !restrictionAllows(restriction, taskID) {
 		// The running rebase is confined: a task-bound console started it and
-		// may link only its bound task, or the row predates migration 0010 and
-		// carries the legacy sentinel (no provenance, so nothing new is
-		// linked). Either way this task is out of scope and must not receive a
-		// rebase_task blocks relation whose endpoints exclude the bound task.
+		// may link only its bound task. This task is out of scope and must not
+		// receive a rebase_task blocks relation whose endpoints exclude the
+		// bound task.
 		return nil
 	}
 
@@ -1432,27 +1429,13 @@ func restrictBlockedToKey(allowed []string) string {
 	return strings.Join(ids, ",")
 }
 
-// legacyBlockRestriction is stamped by migration 0010 onto feature_rebases
-// rows that were already present when the blocker confinement was introduced.
-// Those rows have no initiator provenance — a task-bound console's live rebase
-// is indistinguishable from an owner or unbound-console rebase — so the
-// upgrade conservatively restricts every legacy row to nothing: the
-// schedule-time gate (EnsureRebaseBlock) links no new tasks for them. This
-// keeps the confinement guarantee (no blocker relation whose endpoints exclude
-// the bound task) for a legacy task-bound rebase; a legacy owner rebase simply
-// stops acquiring new blockers after the upgrade.
-const legacyBlockRestriction = "legacy"
-
 // restrictionAllows reports whether a persisted rebase restriction permits
 // linking taskID as a blocker target. An empty restriction (no confinement)
-// allows every task; the legacy sentinel allows none.
+// allows every task.
 func restrictionAllows(restriction, taskID string) bool {
 	restriction = strings.TrimSpace(restriction)
-	switch restriction {
-	case "":
+	if restriction == "" {
 		return true
-	case legacyBlockRestriction:
-		return false
 	}
 	for _, id := range strings.Split(restriction, ",") {
 		if strings.TrimSpace(id) == taskID {

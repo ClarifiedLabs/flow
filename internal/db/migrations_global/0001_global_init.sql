@@ -1,3 +1,5 @@
+-- Coordinator-global database launch schema.
+
 CREATE TABLE app_metadata (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL,
@@ -5,10 +7,9 @@ CREATE TABLE app_metadata (
 );
 
 INSERT INTO app_metadata (key, value, updated_at)
-VALUES ('schema_version', '0001_global_init', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
-
-INSERT INTO app_metadata (key, value, updated_at)
-VALUES ('storage_format', '4', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+VALUES
+	('schema_version', '0001_global_init', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+	('storage_format', '5', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 CREATE TABLE projects (
 	id TEXT PRIMARY KEY,
@@ -37,14 +38,22 @@ CREATE TABLE workers (
 	expires_at TEXT
 );
 
--- Tokens are coordinator-wide. Session tokens are bound to the project that
--- minted them via project_id; owner, hook, and worker tokens leave it NULL.
--- source_task_id refers to an task in the bound project's database, so it
--- carries no foreign key here.
+CREATE TABLE agent_defs (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL UNIQUE CHECK (length(trim(name)) > 0),
+	harness TEXT NOT NULL CHECK (harness IN ('harness')),
+	model TEXT NOT NULL DEFAULT '',
+	reasoning_effort TEXT NOT NULL DEFAULT '',
+	prompt TEXT NOT NULL DEFAULT '',
+	builtin INTEGER NOT NULL DEFAULT 0 CHECK (builtin IN (0, 1)),
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+
 CREATE TABLE tokens (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	token_hash TEXT NOT NULL UNIQUE,
-	scope TEXT NOT NULL CHECK (scope IN ('owner', 'worker', 'session', 'console', 'hook')),
+	scope TEXT NOT NULL CHECK (scope IN ('owner', 'worker', 'session', 'console', 'hook', 'orchestrator', 'provisioner')),
 	subject TEXT NOT NULL DEFAULT '',
 	project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
 	source_task_id TEXT,
@@ -53,8 +62,6 @@ CREATE TABLE tokens (
 	created_at TEXT NOT NULL,
 	CHECK (scope NOT IN ('session', 'console') OR project_id IS NOT NULL)
 );
-
-CREATE INDEX idx_tokens_scope_subject ON tokens(scope, subject);
 
 CREATE TABLE web_bootstrap_tokens (
 	token_hash TEXT PRIMARY KEY,
@@ -72,11 +79,6 @@ CREATE TABLE web_sessions (
 	last_seen_at TEXT NOT NULL
 );
 
-CREATE INDEX idx_web_sessions_expires_at
-ON web_sessions(expires_at);
-
--- Idempotency records for endpoints that are not project-scoped (worker and
--- project management APIs). Project-scoped endpoints use the per-project table.
 CREATE TABLE idempotency_records (
 	principal_key TEXT NOT NULL,
 	idempotency_key TEXT NOT NULL,
@@ -89,5 +91,12 @@ CREATE TABLE idempotency_records (
 	PRIMARY KEY (principal_key, idempotency_key)
 );
 
+-- Named indexes.
+
 CREATE INDEX idx_idempotency_pending
 ON idempotency_records(status_code, created_at);
+
+CREATE INDEX idx_tokens_scope_subject ON tokens(scope, subject);
+
+CREATE INDEX idx_web_sessions_expires_at
+ON web_sessions(expires_at);
