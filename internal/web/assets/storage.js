@@ -1,7 +1,8 @@
 // Typed localStorage read/write helpers for UI preferences (projects, theme,
 // done-view config) plus pure path -> route / poll-config parsing.
 
-import { BOARD_SORT_DIRS, BOARD_SORT_KEYS, BOARD_SORT_STORAGE_KEY, BOARD_VIEWS, BOARD_VIEW_STORAGE_KEY, DIAGRAM_MODES, DIAGRAM_MODE_STORAGE_KEY, BOARD_POLL_MS, CHANGE_POLL_MS, DIAGNOSTICS_POLL_MS, DIFF_MODES, DIFF_MODE_STORAGE_KEY, DONE_DENSITIES, DONE_DENSITY_STORAGE_KEY, DONE_OUTCOMES, DONE_OUTCOME_STORAGE_KEY, MAX_POLL_BACKOFF_MS, PROJECT_STORAGE_KEY, TASKS_ALL_STATE, TASKS_PROJECT_STORAGE_KEY, TASKS_QUERY_STORAGE_KEY, TASKS_STATE_STORAGE_KEY, TASKS_STATES, THEME_PREFERENCES, THEME_STORAGE_KEY } from "./config.js";
+import { BOARD_SORT_DIRS, BOARD_SORT_KEYS, BOARD_SORT_STORAGE_KEY, BOARD_VIEWS, BOARD_VIEW_STORAGE_KEY, DIAGRAM_MODES, DIAGRAM_MODE_STORAGE_KEY, BOARD_POLL_MS, CHANGE_POLL_MS, DIAGNOSTICS_POLL_MS, DIFF_MODES, DIFF_MODE_STORAGE_KEY, DONE_DENSITIES, DONE_DENSITY_STORAGE_KEY, DONE_OUTCOMES, DONE_OUTCOME_STORAGE_KEY, MAX_POLL_BACKOFF_MS, PROJECT_STORAGE_KEY, TASKS_ALL_STATE, TASKS_PROJECT_STORAGE_KEY, TASKS_QUERY_STORAGE_KEY, TASKS_STATE_STORAGE_KEY, TASKS_STATES, TASKS_LIST_VIEWS, TASKS_LIST_VIEW_STORAGE_KEY, WORK_PREFERENCES_STORAGE_KEY, WORK_PROJECT_STORAGE_KEY, THEME_PREFERENCES, THEME_STORAGE_KEY } from "./config.js";
+import { WORK_ITEM_FILTERS, WORK_ITEM_VIEWS } from "./work-item-model.js";
 
 export function readSelectedProjects() {
   try {
@@ -176,6 +177,23 @@ export function writeTasksState(state) {
   }
 }
 
+export function readTasksListView() {
+  try {
+    const raw = window.localStorage?.getItem(TASKS_LIST_VIEW_STORAGE_KEY);
+    return TASKS_LIST_VIEWS.has(raw) ? raw : "flat";
+  } catch {
+    return "flat";
+  }
+}
+
+export function writeTasksListView(view) {
+  try {
+    if (TASKS_LIST_VIEWS.has(view)) window.localStorage?.setItem(TASKS_LIST_VIEW_STORAGE_KEY, view);
+  } catch {
+    // Persistence is best-effort.
+  }
+}
+
 export function readTasksProject() {
   try {
     return String(window.localStorage?.getItem(TASKS_PROJECT_STORAGE_KEY) || "");
@@ -216,6 +234,58 @@ export function writeTasksQuery(query) {
   } catch {
     // Persistence is best-effort.
   }
+}
+
+export function readWorkProject() {
+  try { return String(window.localStorage?.getItem(WORK_PROJECT_STORAGE_KEY) || "").trim(); } catch { return ""; }
+}
+
+export function writeWorkProject(projectID) {
+  try {
+    const id = String(projectID || "").trim();
+    if (id) window.localStorage?.setItem(WORK_PROJECT_STORAGE_KEY, id);
+    else window.localStorage?.removeItem(WORK_PROJECT_STORAGE_KEY);
+  } catch { /* Persistence is best-effort. */ }
+}
+
+export function defaultWorkPreferences() {
+  return { view: "overview", filter: "all", completedCollapsed: true, collapsed: new Set() };
+}
+
+function validPreferenceMap(candidate) {
+  return candidate && typeof candidate === "object" && !Array.isArray(candidate) ? candidate : {};
+}
+
+export function readWorkPreferences(projectID) {
+  const fallback = defaultWorkPreferences();
+  const id = String(projectID || "").trim();
+  if (!id) return fallback;
+  try {
+    const all = validPreferenceMap(JSON.parse(window.localStorage?.getItem(WORK_PREFERENCES_STORAGE_KEY) || "{}"));
+    const raw = validPreferenceMap(Object.prototype.hasOwnProperty.call(all, id) ? all[id] : {});
+    return {
+      view: WORK_ITEM_VIEWS.has(raw.view) ? raw.view : fallback.view,
+      filter: WORK_ITEM_FILTERS.has(raw.filter) ? raw.filter : fallback.filter,
+      completedCollapsed: typeof raw.completedCollapsed === "boolean" ? raw.completedCollapsed : fallback.completedCollapsed,
+      collapsed: new Set(Array.isArray(raw.collapsed) ? raw.collapsed.filter((entry) => typeof entry === "string" && entry.trim()).map((entry) => entry.trim()) : []),
+    };
+  } catch { return fallback; }
+}
+
+export function writeWorkPreferences(projectID, preferences) {
+  const id = String(projectID || "").trim();
+  if (!id) return;
+  try {
+    const parsed = JSON.parse(window.localStorage?.getItem(WORK_PREFERENCES_STORAGE_KEY) || "{}");
+    const all = validPreferenceMap(parsed);
+    all[id] = {
+      view: WORK_ITEM_VIEWS.has(preferences?.view) ? preferences.view : "overview",
+      filter: WORK_ITEM_FILTERS.has(preferences?.filter) ? preferences.filter : "all",
+      completedCollapsed: typeof preferences?.completedCollapsed === "boolean" ? preferences.completedCollapsed : true,
+      collapsed: [...new Set([...(preferences?.collapsed || [])].filter((entry) => typeof entry === "string" && entry.trim()).map((entry) => entry.trim()))],
+    };
+    window.localStorage?.setItem(WORK_PREFERENCES_STORAGE_KEY, JSON.stringify(all));
+  } catch { /* Persistence is best-effort. */ }
 }
 
 export function terminalSessionIDForPath(path) {

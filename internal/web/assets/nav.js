@@ -6,16 +6,14 @@ import { escapeAttr, escapeHTML } from "./html.js";
 import { LIFECYCLE_DONE, LIFECYCLE_IN_PROGRESS, LIFECYCLE_SCHEDULED, LIFECYCLE_UNSCHEDULED } from "./lifecycle.js";
 import { value } from "./normalize.js";
 import { NAV } from "./config.js";
+import { isWorkPath } from "./work-nav.js";
 
 // navTriggerLabel maps a path onto the top-bar trigger's label: the board
-// aliases and the task views (new task, task detail, epic, and the
-// project-scoped task detail) collapse to "board", other nav destinations use
-// their label, and everything else (change detail, terminal) falls back to
-// "menu".
+// aliases collapse to "board"; every planning/list/detail route collapses to
+// the durable "work" destination; everything else uses its nav label or menu.
 export function navTriggerLabel(path) {
   if (path === "/ui" || path === "/ui/" || path === "/ui/board") return "board";
-  if (path.startsWith("/ui/tasks/")) return "board";
-  if (/^\/ui\/projects\/[^/]+\/tasks\/[^/]+/.test(path)) return "board";
+  if (isWorkPath(path)) return "work";
   const match = NAV.find(([href]) => href === path);
   return match ? match[1].toLowerCase() : "menu";
 }
@@ -66,7 +64,7 @@ export function renderNavStatus(href, status) {
     return `<span class="nav-status nav-status-board" title="${escapeAttr(labels.join(", "))}" aria-label="${escapeAttr(labels.join(", "))}">${badges}</span>`;
   }
   if (href === "/ui/triage") return renderNavCount(value(status, "triage", "Triage"), "triage items");
-  if (href === "/ui/tasks") {
+  if (href === "/ui/work-items") {
     const board = value(status, "board", "Board") || {};
     return renderNavCount(value(board, LIFECYCLE_UNSCHEDULED, "Unscheduled"), "unscheduled tasks");
   }

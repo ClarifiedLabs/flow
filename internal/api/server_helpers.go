@@ -61,15 +61,22 @@ func createTaskInputForPrincipal(request createTaskRequest, principal coordinato
 			SourceTaskID:       sourceTaskID,
 			SourceChangeID:     request.SourceChangeID,
 		},
-		Tags:      tagInputs(request.Tags, actor),
-		Relations: relationInputs(request.Relations, actor),
+		Tags:              tagInputs(request.Tags, actor),
+		Relations:         relationInputs(request.Relations, actor),
+		WorkItemRelations: createWorkItemRelationInputs(request.WorkItemRelations, actor),
 	}
 	if principal.Scope == coordinator.TokenScopeSession {
 		if err := constrainSessionRelations(input.Relations, principal.SourceTaskID); err != nil {
 			return coordinator.CreateTaskWithDetailsInput{}, err
 		}
+		if err := constrainCreateWorkItemRelations(input.WorkItemRelations, principal.SourceTaskID, true); err != nil {
+			return coordinator.CreateTaskWithDetailsInput{}, err
+		}
 	} else if principal.Scope == coordinator.TokenScopeConsole {
 		if err := constrainConsoleRelations(input.Relations, principal.SourceTaskID); err != nil {
+			return coordinator.CreateTaskWithDetailsInput{}, err
+		}
+		if err := constrainCreateWorkItemRelations(input.WorkItemRelations, principal.SourceTaskID, false); err != nil {
 			return coordinator.CreateTaskWithDetailsInput{}, err
 		}
 	}
@@ -129,6 +136,25 @@ func constrainSessionRelations(relations []coordinator.CreateTaskRelationInput, 
 	return nil
 }
 
+func constrainCreateWorkItemRelations(relations []coordinator.CreateWorkItemRelationInput, boundTaskID *string, requireBound bool) error {
+	if boundTaskID == nil {
+		if requireBound && len(relations) != 0 {
+			return errors.New("session token is not bound to a source task")
+		}
+		return nil
+	}
+	bound := strings.TrimSpace(*boundTaskID)
+	for _, relation := range relations {
+		if !relation.SourceIsNewItem && strings.TrimSpace(relation.SourceItemID) != bound {
+			return errors.New("create-time work item relations must relate to the credential's bound task")
+		}
+		if !relation.TargetIsNewItem && strings.TrimSpace(relation.TargetItemID) != bound {
+			return errors.New("create-time work item relations must relate to the credential's bound task")
+		}
+	}
+	return nil
+}
+
 func tagInputs(tags []tagRequest, actor coordinator.Actor) []coordinator.CreateTagInput {
 	inputs := make([]coordinator.CreateTagInput, 0, len(tags))
 	for _, tag := range tags {
@@ -160,6 +186,18 @@ func relationInputs(relations []relationRequest, actor coordinator.Actor) []coor
 		})
 	}
 
+	return inputs
+}
+
+func createWorkItemRelationInputs(relations []contract.CreateWorkItemRelationRequest, actor coordinator.Actor) []coordinator.CreateWorkItemRelationInput {
+	inputs := make([]coordinator.CreateWorkItemRelationInput, 0, len(relations))
+	for _, relation := range relations {
+		inputs = append(inputs, coordinator.CreateWorkItemRelationInput{
+			SourceItemID: relation.SourceItemID, TargetItemID: relation.TargetItemID,
+			SourceIsNewItem: relation.SourceIsNewItem, TargetIsNewItem: relation.TargetIsNewItem,
+			Kind: coordinator.RelationKind(relation.Kind), CreatedBy: actor,
+		})
+	}
 	return inputs
 }
 
@@ -358,19 +396,20 @@ func sessionHarnessForJob(job worker.Job, defaultAgentHarness string) string {
 }
 
 type createTaskRequest struct {
-	Title              string            `json:"title"`
-	Body               string            `json:"body"`
-	Priority           int               `json:"priority"`
-	FlowID             string            `json:"flow_id"`
-	ParentItemID       string            `json:"parent_item_id"`
-	FeatureID          *string           `json:"feature_id"`
-	ScheduleState      string            `json:"-"`
-	TriageState        string            `json:"-"`
-	CreatedBySessionID *string           `json:"created_by_session_id"`
-	SourceTaskID       *string           `json:"source_task_id"`
-	SourceChangeID     *string           `json:"source_change_id"`
-	Tags               []tagRequest      `json:"tags"`
-	Relations          []relationRequest `json:"relations"`
+	Title              string                                   `json:"title"`
+	Body               string                                   `json:"body"`
+	Priority           int                                      `json:"priority"`
+	FlowID             string                                   `json:"flow_id"`
+	ParentItemID       string                                   `json:"parent_item_id"`
+	FeatureID          *string                                  `json:"feature_id"`
+	ScheduleState      string                                   `json:"-"`
+	TriageState        string                                   `json:"-"`
+	CreatedBySessionID *string                                  `json:"created_by_session_id"`
+	SourceTaskID       *string                                  `json:"source_task_id"`
+	SourceChangeID     *string                                  `json:"source_change_id"`
+	Tags               []tagRequest                             `json:"tags"`
+	Relations          []relationRequest                        `json:"relations"`
+	WorkItemRelations  []contract.CreateWorkItemRelationRequest `json:"work_item_relations,omitempty"`
 }
 
 type tagRequest struct {
@@ -501,11 +540,19 @@ type sessionMessageResponse = contract.SessionMessageResponse
 
 type boardResponse struct {
 	contract.BoardResponse
-	TaskCards map[string]uiTaskCard `json:"task_cards,omitempty"`
-	// Features lists the project's open features (id + title) so the board can
-	// render a group chip on cards whose task carries feature_id without extra
-	// round trips.
+	TaskCards  map[string]uiTaskCard     `json:"task_cards,omitempty"`
+	Containers []uiBoardContainerSummary `json:"containers,omitempty"`
+	// Features is retained for older board clients. It is populated from the same
+	// canonical work-item summaries as Containers rather than the legacy feature
+	// cache, so both projections agree after hierarchy mutations.
 	Features []featureBoardEntry `json:"features,omitempty"`
+}
+
+type uiBoardContainerSummary struct {
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	Title     string `json:"title"`
+	TaskCount int    `json:"task_count"`
 }
 
 type featureBoardEntry struct {
@@ -562,6 +609,7 @@ type mergeResponse = contract.MergeResponse
 
 type uiTaskCard struct {
 	TaskID                string                         `json:"task_id"`
+	Container             *uiBoardContainerSummary       `json:"container,omitempty"`
 	Tags                  []coordinator.Tag              `json:"tags,omitempty"`
 	Relations             uiRelationSummary              `json:"relations"`
 	CurrentStep           *uiWorkflowStepSummary         `json:"current_step,omitempty"`

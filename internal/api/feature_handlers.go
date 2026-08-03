@@ -135,7 +135,8 @@ func (s *projectServer) handleCreateFeature(w http.ResponseWriter, r *http.Reque
 		actor = coordinator.ActorAgent
 	}
 	feature, err := s.features.Create(r.Context(), coordinator.CreateFeatureInput{
-		Title: request.Title, Body: request.Body, ParentItemID: request.ParentItemID, CreatedBy: actor,
+		Title: request.Title, Body: request.Body, ParentItemID: request.ParentItemID,
+		WorkItemRelations: createWorkItemRelationInputs(request.WorkItemRelations, actor), CreatedBy: actor,
 	})
 	if err != nil {
 		writeFeatureError(w, err)
@@ -354,8 +355,14 @@ func writeFeatureError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, coordinator.ErrFeatureNotFound):
 		writeError(w, http.StatusNotFound, "feature_not_found", err.Error())
+	case errors.Is(err, coordinator.ErrWorkItemNotFound):
+		writeError(w, http.StatusNotFound, "work_item_not_found", err.Error())
 	case errors.Is(err, coordinator.ErrFeatureTitleTaken):
 		writeError(w, http.StatusConflict, "feature_title_taken", err.Error())
+	case errors.Is(err, coordinator.ErrFeatureCreationConflict):
+		writeError(w, http.StatusConflict, "feature_creation_conflict", err.Error())
+	case errors.Is(err, coordinator.ErrWorkItemRelationExists), errors.Is(err, coordinator.ErrWorkItemHasParent):
+		writeError(w, http.StatusConflict, "work_item_conflict", err.Error())
 	case errors.Is(err, coordinator.ErrFeatureClosed):
 		writeError(w, http.StatusConflict, "feature_closed", err.Error())
 	case errors.Is(err, coordinator.ErrWorkItemBlocked):

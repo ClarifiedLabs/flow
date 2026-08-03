@@ -360,6 +360,149 @@ func TestFirstClassEpicReportsTypedChildrenAndBlockers(t *testing.T) {
 	}
 }
 
+func TestWorkItemOverviewFiltersAndContextPreserveLegacyReads(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	openEpic, err := fixture.Bundle.Epics.Create(ctx, coordinator.CreateEpicInput{
+		Title: "Open portfolio", CompletionPolicy: coordinator.EpicManual, CreatedBy: coordinator.ActorHuman,
+	})
+	if err != nil {
+		t.Fatalf("create open epic: %v", err)
+	}
+	child, err := fixture.Bundle.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{
+		Title: "Portfolio task", ParentItemID: openEpic.ID,
+	})
+	if err != nil {
+		t.Fatalf("create child task: %v", err)
+	}
+	completedEpic, err := fixture.Bundle.Epics.Create(ctx, coordinator.CreateEpicInput{
+		Title: "Completed portfolio", CompletionPolicy: coordinator.EpicManual, CreatedBy: coordinator.ActorHuman,
+	})
+	if err != nil {
+		t.Fatalf("create completed epic: %v", err)
+	}
+	if _, err := fixture.Bundle.Epics.Complete(ctx, completedEpic.ID, coordinator.ActorHuman); err != nil {
+		t.Fatalf("complete epic: %v", err)
+	}
+
+	base := "/v2/projects/" + fixture.Project.ID + "/work-items"
+	for _, test := range []struct {
+		name string
+		path string
+		want int
+	}{
+		{name: "omitted returns all", path: base + "/overview", want: 3},
+		{name: "false returns open", path: base + "/overview?terminal=false", want: 2},
+		{name: "true returns terminal", path: base + "/overview?terminal=true", want: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var response contract.WorkItemOverviewResponse
+			doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, test.path, nil, http.StatusOK, &response)
+			if len(response.Items) != test.want {
+				t.Fatalf("overview items = %d, want %d: %+v", len(response.Items), test.want, response.Items)
+			}
+		})
+	}
+
+	var contextResponse contract.WorkItemContextResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet,
+		base+"/"+child.ID+"/context", nil, http.StatusOK, &contextResponse)
+	if contextResponse.Item.ID != child.ID || len(contextResponse.Ancestors) != 1 || contextResponse.Ancestors[0].ID != openEpic.ID {
+		t.Fatalf("context = %+v, want child %s below %s", contextResponse, child.ID, openEpic.ID)
+	}
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet,
+		base+"/missing/context", nil, http.StatusNotFound, nil)
+
+	// The additive read models must not change legacy collection/detail routes.
+	var list contract.WorkItemsResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, base, nil, http.StatusOK, &list)
+	if len(list.Items) != 3 {
+		t.Fatalf("legacy list items = %d, want 3", len(list.Items))
+	}
+	var detail contract.WorkItemResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet,
+		base+"/"+child.ID, nil, http.StatusOK, &detail)
+	if detail.Item.ID != child.ID {
+		t.Fatalf("legacy detail item = %q, want %q", detail.Item.ID, child.ID)
+	}
+}
+
+func TestBoardContainersFollowCanonicalTopLevelHierarchyAndCountTasksOnce(t *testing.T) {
+	fixture := newTestFixture(t)
+	makeExchangeHooksInert(t, fixture.Project.ExchangePath)
+	seedAPIMain(t, fixture.Project.ExchangePath)
+	ctx := context.Background()
+
+	epic, err := fixture.Bundle.Epics.Create(ctx, coordinator.CreateEpicInput{Title: "Launch", CreatedBy: coordinator.ActorHuman})
+	if err != nil {
+		t.Fatalf("create epic: %v", err)
+	}
+	movedEpic, err := fixture.Bundle.Epics.Create(ctx, coordinator.CreateEpicInput{Title: "Moved work", CreatedBy: coordinator.ActorHuman})
+	if err != nil {
+		t.Fatalf("create moved epic: %v", err)
+	}
+	feature, err := fixture.Bundle.Features.Create(ctx, coordinator.CreateFeatureInput{
+		Title: "Checkout", ParentItemID: epic.ID, CreatedBy: coordinator.ActorHuman,
+	})
+	if err != nil {
+		t.Fatalf("create nested feature: %v", err)
+	}
+	nested, err := fixture.Bundle.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Nested task", ParentItemID: feature.ID})
+	if err != nil {
+		t.Fatalf("create nested task: %v", err)
+	}
+	direct, err := fixture.Bundle.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Direct epic task", ParentItemID: epic.ID})
+	if err != nil {
+		t.Fatalf("create direct task: %v", err)
+	}
+	standalone, err := fixture.Bundle.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Standalone task"})
+	if err != nil {
+		t.Fatalf("create standalone task: %v", err)
+	}
+
+	assertBoard := func(wantNestedContainer string, wantCounts map[string]int) {
+		t.Helper()
+		board := fetchProjectBoard(t, fixture)
+		if got := board.TaskCards[nested.ID].Container; got == nil || got.ID != wantNestedContainer {
+			t.Fatalf("nested task container = %+v, want %s", got, wantNestedContainer)
+		}
+		if got := board.TaskCards[direct.ID].Container; got == nil || got.ID != epic.ID {
+			t.Fatalf("direct task container = %+v, want epic %s", got, epic.ID)
+		}
+		if got := board.TaskCards[standalone.ID].Container; got == nil || got.Kind != "standalone" {
+			t.Fatalf("standalone task container = %+v, want standalone", got)
+		}
+
+		gotCounts := make(map[string]int, len(board.Containers))
+		total := 0
+		for _, container := range board.Containers {
+			if _, duplicate := gotCounts[container.ID]; duplicate {
+				t.Fatalf("duplicate board container %s: %+v", container.ID, board.Containers)
+			}
+			gotCounts[container.ID] = container.TaskCount
+			total += container.TaskCount
+		}
+		if total != 3 {
+			t.Fatalf("container task count total = %d, want exactly 3: %+v", total, board.Containers)
+		}
+		if len(gotCounts) != len(wantCounts) {
+			t.Fatalf("container counts = %+v, want %+v", gotCounts, wantCounts)
+		}
+		for id, want := range wantCounts {
+			if gotCounts[id] != want {
+				t.Fatalf("container %s count = %d, want %d: %+v", id, gotCounts[id], want, board.Containers)
+			}
+		}
+	}
+
+	assertBoard(epic.ID, map[string]int{epic.ID: 2, standaloneBoardContainerID: 1})
+	if _, err := fixture.Bundle.WorkItems.MoveMany(ctx, []string{nested.ID}, movedEpic.ID, coordinator.ActorHuman); err != nil {
+		t.Fatalf("move nested task: %v", err)
+	}
+	assertBoard(movedEpic.ID, map[string]int{epic.ID: 1, movedEpic.ID: 1, standaloneBoardContainerID: 1})
+}
+
 func TestBoardExposesAwaitingWorkerLaneState(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()

@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -37,6 +38,26 @@ type WorkItemBlocker struct {
 	Resolved bool            `json:"resolved"`
 }
 
+// CreateWorkItemRelationInput describes a relation involving an item whose ID
+// is allocated by the surrounding create transaction. Exactly one endpoint is
+// marked as new; that endpoint's ID must be blank and the other must name an
+// existing work item in this project.
+type CreateWorkItemRelationInput struct {
+	SourceItemID    string
+	TargetItemID    string
+	SourceIsNewItem bool
+	TargetIsNewItem bool
+	Kind            RelationKind
+	CreatedBy       Actor
+}
+
+type preparedCreateWorkItemRelations struct {
+	Relations          []CreateWorkItemRelationInput
+	ParentItemID       string
+	parentCreatedBy    Actor
+	parentFromRelation bool
+}
+
 type workItemRelationQuerier interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
@@ -68,6 +89,260 @@ func (s *WorkItemService) Link(ctx context.Context, sourceID, targetID string, k
 		return fmt.Errorf("commit link work items: %w", err)
 	}
 	return nil
+}
+
+// normalizeCreateRelations validates and canonicalizes the request-only part of
+// a create relation set without consulting mutable work-item rows. The JSON is
+// stable across relation ordering and harmless whitespace differences, making
+// it suitable as durable feature-creation intent identity.
+func normalizeCreateRelations(declaredParentID string, inputs []CreateWorkItemRelationInput, fallbackActor Actor) (preparedCreateWorkItemRelations, string, error) {
+	plan := preparedCreateWorkItemRelations{
+		ParentItemID: strings.TrimSpace(declaredParentID),
+		Relations:    make([]CreateWorkItemRelationInput, 0, len(inputs)),
+	}
+	seen := make(map[string]struct{}, len(inputs))
+	for _, input := range inputs {
+		input.SourceItemID = strings.TrimSpace(input.SourceItemID)
+		input.TargetItemID = strings.TrimSpace(input.TargetItemID)
+		if input.SourceIsNewItem == input.TargetIsNewItem {
+			return preparedCreateWorkItemRelations{}, "", errors.New("work item create relation must mark exactly one endpoint as the new item")
+		}
+		if input.SourceIsNewItem {
+			if input.SourceItemID != "" {
+				return preparedCreateWorkItemRelations{}, "", errors.New("work item create relation source_item_id must be blank when source_is_new_item is true")
+			}
+			if input.TargetItemID == "" {
+				return preparedCreateWorkItemRelations{}, "", errors.New("work item create relation target_item_id is required")
+			}
+		} else {
+			if input.TargetItemID != "" {
+				return preparedCreateWorkItemRelations{}, "", errors.New("work item create relation target_item_id must be blank when target_is_new_item is true")
+			}
+			if input.SourceItemID == "" {
+				return preparedCreateWorkItemRelations{}, "", errors.New("work item create relation source_item_id is required")
+			}
+		}
+		if err := validateRelationKind(input.Kind); err != nil {
+			return preparedCreateWorkItemRelations{}, "", err
+		}
+		input.CreatedBy = defaultActor(input.CreatedBy, fallbackActor)
+		if err := validateActor(input.CreatedBy); err != nil {
+			return preparedCreateWorkItemRelations{}, "", err
+		}
+		if input.Kind == RelationParentOf && input.TargetIsNewItem {
+			if plan.ParentItemID != "" {
+				if plan.parentFromRelation {
+					return preparedCreateWorkItemRelations{}, "", errors.New("work item create request declares more than one parent")
+				}
+				return preparedCreateWorkItemRelations{}, "", errors.New("work item create request declares a parent in both parent_item_id and work_item_relations")
+			}
+			plan.ParentItemID = input.SourceItemID
+			plan.parentCreatedBy = input.CreatedBy
+			plan.parentFromRelation = true
+		}
+
+		keySource, keyTarget := input.SourceItemID, input.TargetItemID
+		if input.SourceIsNewItem {
+			keySource = "<new>"
+		} else {
+			keyTarget = "<new>"
+		}
+		if input.Kind == RelationRelatedTo && keyTarget < keySource {
+			keySource, keyTarget = keyTarget, keySource
+		}
+		key := string(input.Kind) + "\x00" + keySource + "\x00" + keyTarget
+		if _, ok := seen[key]; ok {
+			return preparedCreateWorkItemRelations{}, "", ErrWorkItemRelationExists
+		}
+		seen[key] = struct{}{}
+		plan.Relations = append(plan.Relations, input)
+	}
+
+	payloadRelations := append([]CreateWorkItemRelationInput(nil), plan.Relations...)
+	for i := range payloadRelations {
+		if payloadRelations[i].Kind == RelationRelatedTo && payloadRelations[i].TargetIsNewItem {
+			payloadRelations[i].SourceItemID, payloadRelations[i].TargetItemID = "", payloadRelations[i].SourceItemID
+			payloadRelations[i].SourceIsNewItem, payloadRelations[i].TargetIsNewItem = true, false
+		}
+	}
+	sort.Slice(payloadRelations, func(i, j int) bool {
+		left, _ := json.Marshal(payloadRelations[i])
+		right, _ := json.Marshal(payloadRelations[j])
+		return string(left) < string(right)
+	})
+	payload, err := json.Marshal(payloadRelations)
+	if err != nil {
+		return preparedCreateWorkItemRelations{}, "", fmt.Errorf("encode create relation payload: %w", err)
+	}
+	return plan, string(payload), nil
+}
+
+func decodeCreateRelationPayload(payload string) ([]CreateWorkItemRelationInput, error) {
+	var relations []CreateWorkItemRelationInput
+	if err := json.Unmarshal([]byte(payload), &relations); err != nil {
+		return nil, fmt.Errorf("decode create relation payload: %w", err)
+	}
+	if relations == nil {
+		relations = []CreateWorkItemRelationInput{}
+	}
+	return relations, nil
+}
+
+// prepareCreateRelations validates the complete generic relation set before a
+// subtype starts inserting rows. linkTx remains authoritative inside the
+// eventual write transaction; this preflight additionally prevents feature Git
+// side effects for requests that are already invalid.
+func (s *WorkItemService) prepareCreateRelations(ctx context.Context, q workItemRelationQuerier, newKind WorkItemKind, declaredParentID string, inputs []CreateWorkItemRelationInput, fallbackActor Actor) (preparedCreateWorkItemRelations, error) {
+	plan, _, err := normalizeCreateRelations(declaredParentID, inputs, fallbackActor)
+	if err != nil {
+		return preparedCreateWorkItemRelations{}, err
+	}
+	var incoming, outgoing []string
+
+	for _, input := range plan.Relations {
+		existingID := input.SourceItemID
+		sourceKind := newKind
+		if input.SourceIsNewItem {
+			existingID = input.TargetItemID
+		} else {
+			var err error
+			sourceKind, err = workItemKindTx(ctx, q, input.SourceItemID)
+			if err != nil {
+				return preparedCreateWorkItemRelations{}, fmt.Errorf("source: %w", err)
+			}
+		}
+		targetKind := newKind
+		if input.TargetIsNewItem {
+			// sourceKind was loaded above.
+		} else {
+			var err error
+			targetKind, err = workItemKindTx(ctx, q, input.TargetItemID)
+			if err != nil {
+				return preparedCreateWorkItemRelations{}, fmt.Errorf("target: %w", err)
+			}
+		}
+		existingKind := sourceKind
+		if input.SourceIsNewItem {
+			existingKind = targetKind
+		}
+		if err := requireWorkItemRelationMutableTx(ctx, q, existingID, existingKind); err != nil {
+			return preparedCreateWorkItemRelations{}, err
+		}
+
+		if input.Kind == RelationParentOf {
+			if sourceKind != WorkItemEpic && sourceKind != WorkItemFeature {
+				return preparedCreateWorkItemRelations{}, fmt.Errorf("%w: %s items cannot contain children", ErrWorkItemMoveConflict, sourceKind)
+			}
+			if !input.SourceIsNewItem {
+				open, err := createRelationParentOpenTx(ctx, q, input.SourceItemID, sourceKind)
+				if err != nil {
+					return preparedCreateWorkItemRelations{}, err
+				}
+				if !open {
+					return preparedCreateWorkItemRelations{}, ErrWorkItemParentClosed
+				}
+			}
+			if !input.TargetIsNewItem {
+				var count int
+				if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_item_relations WHERE target_item_id = ? AND kind = 'parent_of'`, input.TargetItemID).Scan(&count); err != nil {
+					return preparedCreateWorkItemRelations{}, err
+				}
+				if count != 0 {
+					return preparedCreateWorkItemRelations{}, ErrWorkItemHasParent
+				}
+			}
+		}
+
+		if input.Kind == RelationBlocks || input.Kind == RelationParentOf {
+			newToExisting := input.SourceIsNewItem
+			if input.Kind == RelationParentOf {
+				newToExisting = input.TargetIsNewItem
+			}
+			if newToExisting {
+				outgoing = append(outgoing, existingID)
+			} else {
+				incoming = append(incoming, existingID)
+			}
+		}
+	}
+
+	if plan.ParentItemID != "" && !plan.parentFromRelation {
+		outgoing = append(outgoing, plan.ParentItemID)
+	}
+	for _, fromNew := range outgoing {
+		for _, toNew := range incoming {
+			cycle := fromNew == toNew
+			if !cycle {
+				var err error
+				cycle, err = workItemDependencyPathExists(ctx, q, fromNew, toNew)
+				if err != nil {
+					return preparedCreateWorkItemRelations{}, err
+				}
+			}
+			if cycle {
+				return preparedCreateWorkItemRelations{}, ErrWorkItemCycle
+			}
+		}
+	}
+	return plan, nil
+}
+
+func createRelationParentOpenTx(ctx context.Context, q workItemRelationQuerier, id string, kind WorkItemKind) (bool, error) {
+	if kind != WorkItemEpic {
+		return workItemContainerOpenTx(ctx, q, id, kind)
+	}
+	var status string
+	var automatic int
+	if err := q.QueryRowContext(ctx, `SELECT status, completed_automatically FROM epics WHERE id = ?`, id).Scan(&status, &automatic); err != nil {
+		return false, err
+	}
+	return status == string(EpicOpen) || (status == string(EpicCompleted) && automatic != 0), nil
+}
+
+func resolveCreateRelation(newID string, input CreateWorkItemRelationInput) (string, string) {
+	if input.SourceIsNewItem {
+		return newID, input.TargetItemID
+	}
+	return input.SourceItemID, newID
+}
+
+// linkCreateRelationsTx inserts the already-prepared generic relations. A
+// parent_of relation targeting the new item is skipped because each create path
+// inserts the effective ParentItemID first, preserving legacy parent/cache
+// behavior while storing that generic declaration exactly once.
+func (s *WorkItemService) linkCreateRelationsTx(ctx context.Context, tx workItemRelationQuerier, newID string, plan preparedCreateWorkItemRelations, actor Actor) ([]string, error) {
+	touched := []string{newID}
+	parentTargets := make(map[string]struct{})
+	if plan.ParentItemID != "" {
+		parentActor := actor
+		if plan.parentFromRelation {
+			parentActor = plan.parentCreatedBy
+		}
+		if err := s.linkTx(ctx, tx, plan.ParentItemID, newID, RelationParentOf, parentActor); err != nil {
+			return nil, err
+		}
+		parentTargets[newID] = struct{}{}
+		touched = append(touched, plan.ParentItemID)
+	}
+	for _, input := range plan.Relations {
+		if input.Kind == RelationParentOf && input.TargetIsNewItem {
+			continue
+		}
+		sourceID, targetID := resolveCreateRelation(newID, input)
+		if err := s.linkTx(ctx, tx, sourceID, targetID, input.Kind, input.CreatedBy); err != nil {
+			return nil, err
+		}
+		if input.Kind == RelationParentOf {
+			parentTargets[targetID] = struct{}{}
+		}
+		touched = append(touched, sourceID, targetID)
+	}
+	for targetID := range parentTargets {
+		if err := s.syncSubtreeFeatureCachesTx(ctx, tx, targetID, s.now().UTC()); err != nil {
+			return nil, err
+		}
+	}
+	return touched, nil
 }
 
 func (s *WorkItemService) linkTx(ctx context.Context, tx workItemRelationQuerier, sourceID, targetID string, kind RelationKind, actor Actor) error {

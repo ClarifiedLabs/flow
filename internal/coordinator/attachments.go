@@ -389,7 +389,7 @@ func formatTaskAttachmentID(number int) string {
 	return fmt.Sprintf("att-%04d", number)
 }
 
-func taskExistsInTx(ctx context.Context, tx *sql.Tx, taskID string) error {
+func taskExistsInTx(ctx context.Context, tx workItemRelationQuerier, taskID string) error {
 	var exists int
 	if err := tx.QueryRowContext(ctx, "SELECT 1 FROM tasks WHERE id = ?", taskID).Scan(&exists); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

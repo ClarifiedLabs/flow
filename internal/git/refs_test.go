@@ -301,11 +301,13 @@ func TestImmutableEvidenceGitHelpers(t *testing.T) {
 	}
 
 	ref := "refs/flow/promotions/pr-test/source"
-	if err := CreateOrVerifyRef(ctx, exchangePath, ref, headSHA); err != nil {
-		t.Fatalf("create immutable ref: %v", err)
+	created, err := CreateOrVerifyRefOwned(ctx, exchangePath, ref, headSHA)
+	if err != nil || !created {
+		t.Fatalf("create immutable ref = created %v, err %v; want true, nil", created, err)
 	}
-	if err := CreateOrVerifyRef(ctx, exchangePath, ref, headSHA); err != nil {
-		t.Fatalf("verify immutable ref replay: %v", err)
+	created, err = CreateOrVerifyRefOwned(ctx, exchangePath, ref, headSHA)
+	if err != nil || created {
+		t.Fatalf("verify immutable ref replay = created %v, err %v; want false, nil", created, err)
 	}
 	if err := CreateOrVerifyRef(ctx, exchangePath, ref, baseSHA); err == nil || !strings.Contains(err.Error(), "already points to") {
 		t.Fatalf("repoint immutable ref error = %v, want mismatch", err)
@@ -315,6 +317,40 @@ func TestImmutableEvidenceGitHelpers(t *testing.T) {
 	runRefsGit(t, "", "--git-dir", exchangePath, "symbolic-ref", symbolicRef, "refs/heads/main")
 	if err := CreateOrVerifyRef(ctx, exchangePath, symbolicRef, baseSHA); err == nil {
 		t.Fatal("symbolic immutable ref unexpectedly verified")
+	}
+}
+
+func TestDeleteRefIfMatchesUsesExpectedTipCAS(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	repoPath := filepath.Join(root, "repo")
+	exchangePath := filepath.Join(root, "exchange.git")
+	runRefsGit(t, "", "-c", "init.defaultBranch=main", "init", repoPath)
+	runRefsGit(t, repoPath, "config", "user.name", "Flow Test")
+	runRefsGit(t, repoPath, "config", "user.email", "flow-test@example.com")
+	writeRefsFile(t, repoPath, "file.txt", "first\n")
+	runRefsGit(t, repoPath, "add", "file.txt")
+	runRefsGit(t, repoPath, "commit", "-m", "first")
+	first := refsGitOutput(t, repoPath, "rev-parse", "HEAD")
+	writeRefsFile(t, repoPath, "file.txt", "second\n")
+	runRefsGit(t, repoPath, "commit", "-am", "second")
+	second := refsGitOutput(t, repoPath, "rev-parse", "HEAD")
+	runRefsGit(t, "", "init", "--bare", exchangePath)
+	runRefsGit(t, repoPath, "push", exchangePath, first+":refs/heads/cleanup")
+	runRefsGit(t, repoPath, "push", exchangePath, second+":refs/heads/other")
+
+	if err := DeleteRefIfMatches(ctx, exchangePath, "refs/heads/cleanup", second); err == nil {
+		t.Fatal("delete with unexpected tip succeeded")
+	}
+	if tip, exists, err := BranchTip(ctx, exchangePath, "cleanup"); err != nil || !exists || tip != first {
+		t.Fatalf("ref after rejected delete = %q exists=%v err=%v, want %q", tip, exists, err, first)
+	}
+	if err := DeleteRefIfMatches(ctx, exchangePath, "refs/heads/cleanup", first); err != nil {
+		t.Fatalf("delete expected ref: %v", err)
+	}
+	if tip, exists, err := BranchTip(ctx, exchangePath, "cleanup"); err != nil || exists {
+		t.Fatalf("ref after expected delete = %q exists=%v err=%v", tip, exists, err)
 	}
 }
 

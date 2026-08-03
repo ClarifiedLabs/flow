@@ -84,14 +84,19 @@ export async function apiFetch(path, options) {
   const response = await fetch(`${API_PREFIX}${path}`, { credentials: "include", ...options });
   if (!response.ok) {
     let message = `Request failed: ${response.status}`;
+    let details = null;
     try {
-      const body = await response.json();
-      message = body.error?.message || body.Error?.Message || message;
+      details = await response.json();
+      message = details.error?.message || details.Error?.Message || message;
     } catch {
       const text = await response.text();
       message = text || message;
     }
-    throw new Error(message);
+    const error = new Error(message);
+    const body = details?.error || details?.Error || {};
+    error.code = body.code || body.Code || "";
+    error.issues = body.issues || body.Issues || [];
+    throw error;
   }
   // Some mutating endpoints (task relation add/remove) answer 204 with no body;
   // parsing that as JSON would throw after the request already succeeded.
@@ -131,9 +136,40 @@ export function globalAgentDefsAPIBase() {
   return "/v2/global/agent-defs";
 }
 
-export function taskHref(projectID, taskID) {
+export function withWorkNavigation(href, navigation = {}) {
+  if (!href || href === "#") return href || "#";
+  const source = navigation && typeof navigation === "object" ? navigation : {};
+  const contextValue = source.context || source.contextID || "";
+  const returnValue = source.returnTo || source.return || "";
+  // Navigation state is URL text. Refuse objects instead of stringifying them
+  // into a visible and unusable ?context=[object+Object] deep link.
+  const context = typeof contextValue === "string" ? contextValue.trim() : "";
+  const returnTo = typeof returnValue === "string" ? returnValue.trim() : "";
+  if (!context && !returnTo) return href;
+  const [path, hash = ""] = String(href).split("#", 2);
+  const [pathname, search = ""] = path.split("?", 2);
+  const params = new URLSearchParams(search);
+  if (context) params.set("context", context);
+  if (returnTo) params.set("return", returnTo);
+  const query = params.toString();
+  return `${pathname}${query ? `?${query}` : ""}${hash ? `#${hash}` : ""}`;
+}
+
+export function taskHref(projectID, taskID, navigation = {}) {
   const task = String(taskID || "").trim();
-  return task ? `/ui/tasks/${encodeURIComponent(task)}` : "#";
+  return task ? withWorkNavigation(`/ui/tasks/${encodeURIComponent(task)}`, navigation) : "#";
+}
+
+// projectTaskHref is deliberately separate from taskHref: taskHref is a legacy,
+// globally-resolvable deep link used throughout the execution UI, while planning
+// surfaces must retain the active project when task IDs are ambiguous.
+export function projectTaskHref(projectID, taskID, navigation = {}) {
+  const task = String(taskID || "").trim();
+  const project = String(projectID || "").trim();
+  if (!task) return "#";
+  return project
+    ? withWorkNavigation(`/ui/projects/${encodeURIComponent(project)}/tasks/${encodeURIComponent(task)}`, navigation)
+    : taskHref("", task, navigation);
 }
 
 // featuresAPIBase is the project-scoped features endpoint; features never
@@ -144,13 +180,13 @@ export function featuresAPIBase(projectID) {
   return `/v2/projects/${encodeURIComponent(id)}/features`;
 }
 
-export function featureHref(projectID, ref) {
+export function featureHref(projectID, ref, navigation = {}) {
   const feature = String(ref || "").trim();
   const id = String(projectID || "").trim();
   if (!feature) return "#";
-  return id
+  return withWorkNavigation(id
     ? `/ui/projects/${encodeURIComponent(id)}/features/${encodeURIComponent(feature)}`
-    : `/ui/features/${encodeURIComponent(feature)}`;
+    : `/ui/features/${encodeURIComponent(feature)}`, navigation);
 }
 
 export function epicsAPIBase(projectID) {
@@ -165,13 +201,38 @@ export function workItemsAPIBase(projectID) {
   return `/v2/projects/${encodeURIComponent(id)}/work-items`;
 }
 
-export function epicHref(projectID, ref) {
+export function workItemAPIPath(projectID, itemID, suffix = "") {
+  return `${workItemsAPIBase(projectID)}/${encodeURIComponent(itemID)}${suffix}`;
+}
+
+export function workItemParentsAPIPath(projectID) {
+  return `${workItemsAPIBase(projectID)}/parents`;
+}
+
+export function workItemsOverviewAPIPath(projectID) {
+  return `${workItemsAPIBase(projectID)}/overview?terminal=false`;
+}
+
+export function workItemContextAPIPath(projectID, itemID) {
+  return workItemAPIPath(projectID, itemID, "/context");
+}
+
+export function workItemHref(projectID, item, navigation = {}) {
+  const id = value(item || {}, "id", "ID");
+  switch (value(item || {}, "kind", "Kind")) {
+    case "epic": return epicHref(projectID, id, navigation);
+    case "feature": return featureHref(projectID, id, navigation);
+    default: return projectTaskHref(projectID, id, navigation);
+  }
+}
+
+export function epicHref(projectID, ref, navigation = {}) {
   const epic = String(ref || "").trim();
   const id = String(projectID || "").trim();
   if (!epic) return "#";
-  return id
+  return withWorkNavigation(id
     ? `/ui/projects/${encodeURIComponent(id)}/epics/${encodeURIComponent(epic)}`
-    : `/ui/epics/${encodeURIComponent(epic)}`;
+    : `/ui/epics/${encodeURIComponent(epic)}`, navigation);
 }
 
 export function attachmentHref(projectID, taskID, attachmentID) {

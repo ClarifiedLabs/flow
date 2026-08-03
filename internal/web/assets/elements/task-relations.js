@@ -22,9 +22,10 @@
 // unknown token), or one that is not a string at all is malformed and renders
 // unknown.
 
-import { taskHref } from "../api.js";
+import { taskHref, workItemHref } from "../api.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { RELATION_GROUPS } from "../task-model.js";
+import { groupWorkItemRelations, WORK_ITEM_RELATION_GROUPS, workItemID } from "../work-item-model.js";
 import { define, FlowElement } from "./base.js";
 
 // RELATION_KIND_OPTIONS is what the add-relation selector offers. The verb reads
@@ -38,18 +39,20 @@ export const RELATION_KIND_OPTIONS = [
 
 export function renderTaskRelations(model) {
   if (!model) return "";
-  const groups = model.relationGroups || {};
-  const total = RELATION_GROUPS.reduce((sum, group) => sum + (groups[group.key]?.length || 0), 0);
+  const generic = Boolean(model.genericRelations);
+  const groupDefinitions = generic ? WORK_ITEM_RELATION_GROUPS.filter(({ key }) => !["parent", "children"].includes(key)) : RELATION_GROUPS;
+  const groups = model.relationGroups || (generic ? groupWorkItemRelations(model.relations || [], model.id) : {});
+  const total = groupDefinitions.reduce((sum, group) => sum + (groups[group.key]?.length || 0), 0);
 
   return `
     <div class="relations">
-      <span class="caption">Relations</span>
+      <span class="caption">${generic ? "Dependencies" : "Relations"}</span>
       ${
         total === 0
-          ? `<p class="rel-empty">No relations yet</p>`
-          : RELATION_GROUPS.map((group) => renderGroup(group, groups[group.key] || [], model)).join("")
+          ? `<p class="rel-empty">No ${generic ? "dependencies" : "relations"} yet</p>`
+          : groupDefinitions.map((group) => renderGroup(group, groups[group.key] || [], model)).join("")
       }
-      ${renderAddForm(model.id || "", model.projectID || "")}
+      ${renderAddForm(model.id || "", model.projectID || "", generic)}
     </div>
   `;
 }
@@ -69,37 +72,42 @@ function renderGroup(group, items, model) {
 function renderRelationRow(item, groupKey, model) {
   const taskID = model.id || "";
   const projectID = model.projectID || "";
+  const generic = Boolean(model.genericRelations);
+  const other = item.item || {};
+  const otherID = generic ? workItemID(other) : item.taskID;
+  const otherTitle = generic ? (other.title || other.Title || otherID) : item.title;
   // Only a blocker that has not finished is worth flagging: a done blocker is
   // history, not an obstacle. A blocker whose state could not be confirmed is
   // unknown — it may well be blocking, but saying so for certain would be a
   // lie, so it gets the neutral unknown marker instead of the red flag.
   const isBlocker = groupKey === "blockedBy";
-  const unresolved = isBlocker && item.unresolved === true;
-  const unknown = isBlocker && item.unresolved === null;
+  const unresolved = isBlocker && (generic ? !item.resolved : item.unresolved === true);
+  const unknown = !generic && isBlocker && item.unresolved === null;
   const rowClass = unresolved ? " is-unresolved" : unknown ? " is-unknown" : "";
-  const source = item.direction === "source" ? taskID : item.taskID;
-  const target = item.direction === "source" ? item.taskID : taskID;
+  const source = generic ? item.sourceID : (item.direction === "source" ? taskID : otherID);
+  const target = generic ? item.targetID : (item.direction === "source" ? otherID : taskID);
   return `
     <li class="rel-row${rowClass}"${unresolved ? ` data-unresolved="true"` : ""}>
-      <a class="rel-link" href="${escapeAttr(taskHref(projectID, item.taskID))}" data-link>
-        <span class="rel-title">${escapeHTML(item.title)}</span>
-        <span class="rel-id">${escapeHTML(item.taskID)}</span>
+      <a class="rel-link" href="${escapeAttr(generic ? workItemHref(projectID, other, model.navigation) : taskHref(projectID, otherID, model.navigation))}" data-link>
+        <span class="rel-title">${escapeHTML(otherTitle)}</span>
+        <span class="rel-id">${escapeHTML(otherID)}</span>
       </a>
       ${unresolved ? `<span class="rel-flag">blocking</span>` : unknown ? `<span class="rel-flag rel-flag-unknown">unknown</span>` : ""}
-      <button class="rel-remove" type="button" aria-label="${escapeAttr(`Remove relation to ${item.title}`)}"
-        data-relation-remove="${escapeAttr(source)}" data-project="${escapeAttr(projectID)}"
-        data-kind="${escapeAttr(item.kind)}" data-target="${escapeAttr(target)}">×</button>
+      <button class="rel-remove" type="button" aria-label="${escapeAttr(`Remove relation to ${otherTitle}`)}"
+        ${generic ? `data-work-item-relation-remove="${escapeAttr(taskID)}" data-source="${escapeAttr(source)}"` : `data-relation-remove="${escapeAttr(source)}"`}
+        data-project="${escapeAttr(projectID)}" data-kind="${escapeAttr(item.kind)}" data-target="${escapeAttr(target)}">×</button>
     </li>
   `;
 }
 
-function renderAddForm(taskID, projectID) {
+function renderAddForm(taskID, projectID, generic = false) {
+  const options = generic ? RELATION_KIND_OPTIONS.filter(([kind]) => kind !== "parent_of") : RELATION_KIND_OPTIONS;
   return `
-    <form class="rel-add" data-relation-add-form="${escapeAttr(taskID)}" data-project="${escapeAttr(projectID)}">
+    <form class="rel-add" ${generic ? "data-work-item-relation-add-form" : "data-relation-add-form"}="${escapeAttr(taskID)}" data-project="${escapeAttr(projectID)}">
       <select name="kind" aria-label="Relation kind">
-        ${RELATION_KIND_OPTIONS.map(([kind, label]) => `<option value="${escapeAttr(kind)}">${escapeHTML(label)}</option>`).join("")}
+        ${options.map(([kind, label]) => `<option value="${escapeAttr(kind)}">${escapeHTML(label)}</option>`).join("")}
       </select>
-      <input name="target_task_id" type="text" placeholder="Task ID" aria-label="Target task ID" required />
+      <input name="${generic ? "target_item_id" : "target_task_id"}" type="text" placeholder="${generic ? "Work item ID" : "Task ID"}" aria-label="Target ${generic ? "work item" : "task"} ID" required />
       <button class="button secondary" type="submit">Link</button>
     </form>
   `;

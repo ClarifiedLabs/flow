@@ -2,13 +2,14 @@
 // segmented bar for the shape of it, member rows for the detail, and the
 // dependency chain that is actually gating the whole thing.
 
-import { epicHref, featureHref, taskHref } from "../api.js";
+import { epicHref, projectTaskHref, taskHref, workItemHref as genericWorkItemHref } from "../api.js";
 import { formatDwell } from "../board-model.js";
 import { phaseKey } from "../board.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { LIFECYCLE_IN_PROGRESS, LIFECYCLE_SCHEDULED, LIFECYCLE_UNSCHEDULED, lifecycleStateOf } from "../lifecycle.js";
 import { value } from "../normalize.js";
 import { define, FlowElement } from "./base.js";
+import { renderWorkItemContext } from "../work-item-detail.js";
 
 // memberState reduces a member to the one word the rollup groups by. The
 // lifecycle-derived buckets read the member's state through the shared
@@ -57,6 +58,13 @@ export function renderEpic(data, now = Date.now()) {
   const merged = Number(value(data, "merged_count", "MergedCount") || 0);
   const criticalPath = value(data, "critical_path", "CriticalPath") || [];
   const projectID = data.projectID || "";
+  const epicID = value(epic, "id", "ID");
+  // Old epic payloads still represent a real navigation context when mounted by
+  // the epic route. Pure legacy callers with no currentHref keep their original
+  // globally-resolvable task URLs.
+  const childNavigation = data.currentHref
+    ? { context: epicID, returnTo: data.currentHref }
+    : {};
 
   // Group once and reuse for both the bar and its legend, so the two can never
   // disagree about the counts.
@@ -93,19 +101,14 @@ export function renderEpic(data, now = Date.now()) {
       </p>
     </div>
     <div class="members">
-      ${members.map((member) => renderMember(member, projectID, now)).join("")}
+      ${members.map((member) => renderMember(member, projectID, now, childNavigation)).join("")}
     </div>
-    ${renderCriticalPath(criticalPath, members, projectID)}
+    ${renderCriticalPath(criticalPath, members, projectID, childNavigation)}
   `;
 }
 
-function workItemHref(projectID, item) {
-  const id = value(item, "id", "ID");
-  switch (value(item, "kind", "Kind")) {
-    case "feature": return featureHref(projectID, id);
-    case "epic": return epicHref(projectID, id);
-    default: return taskHref(projectID, id);
-  }
+function workItemHref(projectID, item, navigation = {}) {
+  return genericWorkItemHref(projectID, item, navigation);
 }
 
 function renderFirstClassEpic(data) {
@@ -114,6 +117,7 @@ function renderFirstClassEpic(data) {
   const blockers = value(data, "blockers", "Blockers") || [];
   const projectID = String(data.projectID || "");
   const id = value(epic, "id", "ID");
+  const childNavigation = { context: id, returnTo: data.currentHref || epicHref(projectID, id, data.navigation) };
   const status = value(epic, "status", "Status") || "open";
   const policy = value(epic, "completion_policy", "CompletionPolicy") || "all_children";
   const unresolved = blockers.filter((blocker) => !value(blocker, "resolved", "Resolved"));
@@ -144,15 +148,16 @@ function renderFirstClassEpic(data) {
         </select>
         <div><button type="submit" class="secondary">Save</button></div>
       </form>` : ""}
-      ${unresolved.length ? `<div class="members"><h3>Blocked by</h3>${unresolved.map((blocker) => {
+      ${data.hierarchy ? renderWorkItemContext({ projectID, item: value(data.hierarchy, "item", "Item") || value(data, "item", "Item"), items: data.workItems || [], ancestors: value(data.hierarchy, "ancestors", "Ancestors"), relations: value(data.hierarchy, "relations", "Relations") || [], blockers: value(data.hierarchy, "blockers", "Blockers") || [], rollup: value(data.hierarchy, "rollup", "Rollup"), attentionCount: Number(value(data.hierarchy, "attention_count", "AttentionCount") || 0), navigation: data.navigation, currentHref: data.currentHref }) : ""}
+      ${!data.hierarchy && unresolved.length ? `<div class="members"><h3>Blocked by</h3>${unresolved.map((blocker) => {
         const blockerItem = value(blocker, "item", "Item") || {};
-        return `<a class="member" href="${escapeAttr(workItemHref(projectID, blockerItem))}" data-link><span class="member-id">${escapeHTML(value(blockerItem, "id", "ID"))}</span><span class="member-title">${escapeHTML(value(blockerItem, "title", "Title"))}</span></a>`;
+        return `<a class="member" href="${escapeAttr(workItemHref(projectID, blockerItem, data.navigation))}" data-link><span class="member-id">${escapeHTML(value(blockerItem, "id", "ID"))}</span><span class="member-title">${escapeHTML(value(blockerItem, "title", "Title"))}</span></a>`;
       }).join("")}</div>` : ""}
-      <div class="members"><h3>Children</h3>${children.length ? children.map((child) => `<a class="member" href="${escapeAttr(workItemHref(projectID, child))}" data-link><span class="member-id">${escapeHTML(value(child, "id", "ID"))}</span><span class="member-title">${escapeHTML(value(child, "title", "Title"))}</span><span class="member-note">${escapeHTML(value(child, "state", "State")?.status || value(child, "kind", "Kind"))}</span></a>`).join("") : `<p class="empty">No children yet.</p>`}</div>
+      ${!data.hierarchy ? `<div class="members"><h3>Children</h3>${children.length ? children.map((child) => `<a class="member" href="${escapeAttr(workItemHref(projectID, child, childNavigation))}" data-link><span class="member-id">${escapeHTML(value(child, "id", "ID"))}</span><span class="member-title">${escapeHTML(value(child, "title", "Title"))}</span><span class="member-note">${escapeHTML(value(child, "state", "State")?.status || value(child, "kind", "Kind"))}</span></a>`).join("") : `<p class="empty">No children yet.</p>`}</div>` : ""}
     </section>`;
 }
 
-function renderMember(member, projectID, now) {
+function renderMember(member, projectID, now, navigation = {}) {
   const state = memberState(member);
   const id = value(member, "id", "ID");
   const blockedBy = value(member, "blocked_by", "BlockedBy") || [];
@@ -166,7 +171,7 @@ function renderMember(member, projectID, now) {
   else if (stepCount) note = `${value(member, "step_name", "StepName") || "step"} ${stepIndex}/${stepCount}`;
 
   return `
-    <a class="member" href="${escapeAttr(taskHref(projectID, id))}" data-link
+    <a class="member" href="${escapeAttr(navigation.context ? projectTaskHref(projectID, id, navigation) : taskHref(projectID, id))}" data-link
        data-phase="${escapeAttr(statePhase(state))}"
        ${needsYou ? "data-needs-you" : ""}
        ${state === "merged" ? "data-merged" : ""}>
@@ -178,13 +183,13 @@ function renderMember(member, projectID, now) {
   `;
 }
 
-function renderCriticalPath(path, members, projectID) {
+function renderCriticalPath(path, members, projectID, navigation = {}) {
   if (!path.length) return "";
   const byID = new Map(members.map((member) => [value(member, "id", "ID"), member]));
   const chain = path
     .map((id) => {
       const phase = statePhase(memberState(byID.get(id) || {}));
-      return `<a href="${escapeAttr(taskHref(projectID, id))}" data-link data-phase="${escapeAttr(phase)}">${escapeHTML(shortID(id))}</a>`;
+      return `<a href="${escapeAttr(navigation.context ? projectTaskHref(projectID, id, navigation) : taskHref(projectID, id))}" data-link data-phase="${escapeAttr(phase)}">${escapeHTML(shortID(id))}</a>`;
     })
     .join('<span class="arrow">→</span>');
   return `

@@ -197,7 +197,20 @@ SELECT
 	END,
 	COALESCE(t.created_at, e.created_at, f.created_at),
 	COALESCE(t.updated_at, e.updated_at, f.updated_at),
-	COALESCE(t.feature_id, ''),
+	COALESCE((
+		WITH RECURSIVE feature_ancestors(id, depth) AS (
+			SELECT wi.id, 0
+			UNION ALL
+			SELECT r.source_item_id, feature_ancestors.depth + 1
+			FROM feature_ancestors
+			JOIN work_item_relations r ON r.target_item_id = feature_ancestors.id AND r.kind = 'parent_of'
+		)
+		SELECT feature_ancestors.id
+		FROM feature_ancestors
+		JOIN work_items fwi ON fwi.id = feature_ancestors.id AND fwi.kind = 'feature'
+		ORDER BY feature_ancestors.depth
+		LIMIT 1
+	), ''),
 	COALESCE((
 		WITH RECURSIVE ancestors(id) AS (
 			VALUES (wi.id)
@@ -264,14 +277,6 @@ WHERE `+inPredicate("wi.id", len(ids)), args...)
 		if !ok {
 			continue
 		}
-		featureID, err := s.EffectiveFeatureID(ctx, item.ID)
-		if err != nil {
-			return nil, err
-		}
-		if item.Kind == WorkItemTask && item.EffectiveFeatureID != featureID {
-			return nil, fmt.Errorf("task %s feature cache %q does not match hierarchy %q", item.ID, item.EffectiveFeatureID, featureID)
-		}
-		item.EffectiveFeatureID = featureID
 		result = append(result, item)
 	}
 	return result, nil

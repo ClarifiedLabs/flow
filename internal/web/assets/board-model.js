@@ -228,11 +228,20 @@ export function cardModel(entry, { now = Date.now(), showProject = false } = {})
   if (dwellKind === "failed" && dwell) dwellLabel = `stalled ${dwell}`;
   else if (dwellKind === "waiting" && dwell) dwellLabel = `waiting ${dwell}`;
 
+  const containerData = value(card, "container", "Container") || {};
+  const container = value(containerData, "id", "ID") ? {
+    id: value(containerData, "id", "ID"),
+    kind: value(containerData, "kind", "Kind"),
+    title: value(containerData, "title", "Title"),
+    taskCount: Number(value(containerData, "task_count", "TaskCount") || 0),
+  } : null;
+
   return {
     id: value(task, "id", "ID"),
     title: value(task, "title", "Title"),
     projectID: entry.project?.id || "",
     projectName: showProject ? entry.project?.name || "" : "",
+    container,
     lifecycleState,
     laneState: entry.laneState || "",
     // The lane the entry belongs to when it is in progress; the lanes bucket

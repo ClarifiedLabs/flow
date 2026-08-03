@@ -859,13 +859,18 @@ func (s *projectServer) boardResponseForProject(ctx context.Context, principal c
 		},
 	}
 
-	if s.features != nil {
-		features, err := s.features.List(ctx, coordinator.FeatureOpen)
+	tasks := boardTasks(result.Board)
+	containersByTask := map[string]uiBoardContainerSummary{}
+	if s.workItems != nil {
+		items, err := s.workItems.List(ctx)
 		if err != nil {
 			return boardResponse{}, err
 		}
-		for _, feature := range features {
-			response.Features = append(response.Features, featureBoardEntry{ID: feature.ID, Title: feature.Title})
+		containersByTask, response.Containers = boardContainerSummaries(items, tasks)
+		for _, item := range items {
+			if item.Kind == coordinator.WorkItemFeature && !item.State.Terminal {
+				response.Features = append(response.Features, featureBoardEntry{ID: item.ID, Title: item.Title})
+			}
 		}
 	}
 
@@ -873,13 +878,81 @@ func (s *projectServer) boardResponseForProject(ctx context.Context, principal c
 		return response, nil
 	}
 
-	cards, err := s.buildUITaskCards(ctx, boardTasks(result.Board))
+	cards, err := s.buildUITaskCards(ctx, tasks)
 	if err != nil {
 		return boardResponse{}, err
 	}
 
+	for taskID, container := range containersByTask {
+		card, ok := cards[taskID]
+		if !ok {
+			continue
+		}
+		containerCopy := container
+		card.Container = &containerCopy
+		cards[taskID] = card
+	}
 	response.TaskCards = cards
 	return response, nil
+}
+
+const standaloneBoardContainerID = "standalone"
+
+// boardContainerSummaries projects each board task through the canonical
+// parent_item_id chain to its true top-level container. Task IDs are de-duplicated
+// before counting, so a board lane overlap or malformed hierarchy cannot inflate
+// a group's count.
+func boardContainerSummaries(items []coordinator.WorkItemSummary, tasks []coordinator.Task) (map[string]uiBoardContainerSummary, []uiBoardContainerSummary) {
+	byID := make(map[string]coordinator.WorkItemSummary, len(items))
+	for _, item := range items {
+		byID[item.ID] = item
+	}
+
+	keysByTask := make(map[string]string, len(tasks))
+	groups := make(map[string]uiBoardContainerSummary)
+	order := make([]string, 0)
+	seenTasks := make(map[string]bool, len(tasks))
+	for _, task := range tasks {
+		if seenTasks[task.ID] {
+			continue
+		}
+		seenTasks[task.ID] = true
+
+		container := uiBoardContainerSummary{ID: standaloneBoardContainerID, Kind: "standalone", Title: "Standalone"}
+		currentID := task.ID
+		seenItems := map[string]bool{}
+		for currentID != "" && !seenItems[currentID] {
+			seenItems[currentID] = true
+			item, ok := byID[currentID]
+			if !ok {
+				break
+			}
+			if item.Kind != coordinator.WorkItemTask {
+				container = uiBoardContainerSummary{ID: item.ID, Kind: string(item.Kind), Title: item.Title}
+			}
+			currentID = item.ParentItemID
+		}
+
+		key := container.Kind + "\x00" + container.ID
+		group, exists := groups[key]
+		if !exists {
+			group = container
+			order = append(order, key)
+		}
+		group.TaskCount++
+		groups[key] = group
+		keysByTask[task.ID] = key
+	}
+
+	byTask := make(map[string]uiBoardContainerSummary, len(keysByTask))
+	for taskID, key := range keysByTask {
+		byTask[taskID] = groups[key]
+	}
+	result := make([]uiBoardContainerSummary, 0, len(order))
+	for _, key := range order {
+		result = append(result, groups[key])
+	}
+	return byTask, result
 }
 
 // doneResponseForProject builds the terminal-task read model for one project.

@@ -80,11 +80,12 @@ type TaskRelationRequest struct {
 }
 
 type CreateEpicRequest struct {
-	Title            string `json:"title"`
-	Body             string `json:"body,omitempty"`
-	Priority         int    `json:"priority,omitempty"`
-	CompletionPolicy string `json:"completion_policy,omitempty"`
-	ParentItemID     string `json:"parent_item_id,omitempty"`
+	Title             string                          `json:"title"`
+	Body              string                          `json:"body,omitempty"`
+	Priority          int                             `json:"priority,omitempty"`
+	CompletionPolicy  string                          `json:"completion_policy,omitempty"`
+	ParentItemID      string                          `json:"parent_item_id,omitempty"`
+	WorkItemRelations []CreateWorkItemRelationRequest `json:"work_item_relations,omitempty"`
 }
 
 type EditEpicRequest struct {
@@ -100,8 +101,27 @@ type WorkItemRelationRequest struct {
 	Kind         string `json:"kind"`
 }
 
+// CreateWorkItemRelationRequest relates an existing item to the item being
+// created. Exactly one endpoint must be marked new, and that endpoint ID blank.
+type CreateWorkItemRelationRequest struct {
+	SourceItemID    string `json:"source_item_id,omitempty"`
+	TargetItemID    string `json:"target_item_id,omitempty"`
+	SourceIsNewItem bool   `json:"source_is_new_item,omitempty"`
+	TargetIsNewItem bool   `json:"target_is_new_item,omitempty"`
+	Kind            string `json:"kind"`
+}
+
 type MoveWorkItemRequest struct {
 	ParentItemID string `json:"parent_item_id"`
+}
+
+type MoveWorkItemsRequest struct {
+	ItemIDs      []string `json:"item_ids"`
+	ParentItemID string   `json:"parent_item_id"`
+}
+
+type MoveWorkItemsResponse struct {
+	Items []coordinator.WorkItemSummary `json:"items"`
 }
 
 type WorkItemResponse struct {
@@ -113,6 +133,63 @@ type WorkItemResponse struct {
 
 type WorkItemsResponse struct {
 	Items []coordinator.WorkItemSummary `json:"items"`
+}
+
+// ActionReadiness gives clients a stable machine reason and useful operator
+// copy whenever an action is not currently available.
+type ActionReadiness struct {
+	Allowed    bool   `json:"allowed"`
+	ReasonCode string `json:"reason_code,omitempty"`
+	DenialText string `json:"denial_text,omitempty"`
+}
+
+type WorkItemActionReadiness struct {
+	Start    *ActionReadiness `json:"start,omitempty"`
+	Complete *ActionReadiness `json:"complete,omitempty"`
+	Rebase   *ActionReadiness `json:"rebase,omitempty"`
+	Land     *ActionReadiness `json:"land,omitempty"`
+}
+
+type WorkItemRollup struct {
+	DirectChildren  coordinator.WorkItemDirectChildren  `json:"direct_children"`
+	DescendantTasks coordinator.WorkItemDescendantTasks `json:"descendant_tasks"`
+}
+
+// FeatureOverview is live feature state. GitAvailable is always explicit so
+// zero ahead/behind values are never mistaken for a successful Git read.
+type FeatureOverview struct {
+	Branch               string                     `json:"branch"`
+	IntegrationTarget    string                     `json:"integration_target"`
+	Ahead                int                        `json:"ahead"`
+	Behind               int                        `json:"behind"`
+	GitAvailable         bool                       `json:"git_available"`
+	GitUnavailableReason string                     `json:"git_unavailable_reason,omitempty"`
+	RunningRebase        *coordinator.FeatureRebase `json:"running_rebase,omitempty"`
+}
+
+type WorkItemOverviewEntry struct {
+	Item                coordinator.WorkItemSummary `json:"item"`
+	Rollup              WorkItemRollup              `json:"rollup"`
+	AttentionCount      int                         `json:"attention_count"`
+	CriticalPathTaskIDs []string                    `json:"critical_path_task_ids,omitempty"`
+	Feature             *FeatureOverview            `json:"feature,omitempty"`
+	Actions             WorkItemActionReadiness     `json:"actions"`
+}
+
+type WorkItemOverviewResponse struct {
+	Items []WorkItemOverviewEntry `json:"items"`
+}
+
+type WorkItemContextResponse struct {
+	Item           coordinator.WorkItemSummary    `json:"item"`
+	Ancestors      []coordinator.WorkItemSummary  `json:"ancestors"`
+	Children       []coordinator.WorkItemSummary  `json:"children"`
+	Blockers       []coordinator.WorkItemBlocker  `json:"blockers"`
+	Relations      []coordinator.WorkItemRelation `json:"relations"`
+	Rollup         WorkItemRollup                 `json:"rollup"`
+	AttentionCount int                            `json:"attention_count"`
+	Feature        *FeatureOverview               `json:"feature,omitempty"`
+	Actions        WorkItemActionReadiness        `json:"actions"`
 }
 
 type EpicResponse struct {
@@ -370,9 +447,10 @@ type TasksResponse struct {
 // CreateFeatureRequest creates a feature: a project-child task group with its
 // own long-lived branch in the exchange.
 type CreateFeatureRequest struct {
-	Title        string `json:"title"`
-	Body         string `json:"body"`
-	ParentItemID string `json:"parent_item_id,omitempty"`
+	Title             string                          `json:"title"`
+	Body              string                          `json:"body"`
+	ParentItemID      string                          `json:"parent_item_id,omitempty"`
+	WorkItemRelations []CreateWorkItemRelationRequest `json:"work_item_relations,omitempty"`
 }
 
 // UpdateFeatureRequest edits feature metadata; nil fields are left unchanged.
@@ -609,6 +687,7 @@ type ErrorResponse struct {
 }
 
 type ErrorBody struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    string                          `json:"code"`
+	Message string                          `json:"message"`
+	Issues  []coordinator.WorkItemMoveIssue `json:"issues,omitempty"`
 }

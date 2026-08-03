@@ -3,7 +3,7 @@
 // card. Actions leave the resting card except where the card is asking the
 // reader for something.
 
-import { taskHref } from "../api.js";
+import { taskHref, workItemHref } from "../api.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { renderMarkdown } from "../markdown.js";
 import { LIFECYCLE_UNSCHEDULED } from "../lifecycle.js";
@@ -55,8 +55,17 @@ function renderQuietMeta(model) {
   const deletions = Number(model.diffStats?.deletions ?? model.diffStats?.Deletions ?? 0);
   const total = Number(model.checks?.total ?? model.checks?.Total ?? 0);
   const satisfied = Number(model.checks?.satisfied ?? model.checks?.Satisfied ?? 0);
+  const container = model.container || null;
+  const containerLabel = container
+    ? `${container.title || container.id} · ${container.taskCount} task${container.taskCount === 1 ? "" : "s"}`
+    : "";
+  const containerSummary = !containerLabel ? ""
+    : container.kind === "standalone"
+      ? `<span class="container">${escapeHTML(containerLabel)}</span>`
+      : `<a class="container" href="${escapeAttr(workItemHref(model.projectID, container))}" data-link>${escapeHTML(containerLabel)}</a>`;
   const parts = [
     model.projectName ? `<span class="project">${escapeHTML(model.projectName)}</span>` : "",
+    containerSummary,
     `p${model.priority}`,
     additions || deletions ? `+${additions} −${deletions}` : "",
     total ? `checks ${satisfied}/${total}` : "",

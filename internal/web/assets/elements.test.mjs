@@ -478,6 +478,16 @@ test("the card shows the title alone; the id moved to the meta row", () => {
   assert.ok(!/title"[^>]*>t-0001 ·/.test(html), "the id must not be prefixed onto the title again");
 });
 
+test("a board card renders its canonical top-level container and exact group count", () => {
+  const model = cardModel(entry({
+    card: { container: { id: "e-0001", kind: "epic", title: "Launch", task_count: 2 } },
+  }));
+  assert.deepEqual(model.container, { id: "e-0001", kind: "epic", title: "Launch", taskCount: 2 });
+  const html = renderTaskCard(model);
+  assert.match(html, /href="\/ui\/projects\/p-1\/epics\/e-0001"/);
+  assert.match(html, />Launch · 2 tasks<\/a>/);
+});
+
 test("a scheduled card with a blocker names what it is waiting on and links to it", () => {
   const html = renderTaskCard(cardModel(entry({
     task: { state: "scheduled" },
@@ -1820,7 +1830,7 @@ test("feature detail renders actions for an open feature and none once landed", 
   assert.match(open, /data-feature-land="f-alpha-0001" data-project="p-alpha"/);
   assert.match(open, /data-feature-archive="f-alpha-0001" data-project="p-alpha"/);
   assert.match(open, /Rebase in progress/);
-  assert.match(open, /href="\/ui\/tasks\/t-alpha-0009"/);
+  assert.match(open, /href="\/ui\/projects\/p-alpha\/tasks\/t-alpha-0009\?context=f-alpha-0001&amp;return=%2Fui%2Fprojects%2Fp-alpha%2Ffeatures%2Ff-alpha-0001"/);
   assert.match(open, /done \(merged\)/);
   assert.match(open, /data-feature-form="f-alpha-0001" data-project="p-alpha"/);
 
@@ -1851,6 +1861,19 @@ test("the epic rollup bar and its legend are built from one grouping", () => {
   assert.match(html, /data-merged/);
   assert.match(html, /implement 1\/6/);
   assert.match(html, /Critical path/);
+});
+
+test("legacy epic member and critical-path task links preserve epic context when route-mounted", () => {
+  const html = renderEpic({
+    projectID: "p-alpha",
+    currentHref: "/ui/projects/p-alpha/epics/e-1?return=%2Fui%2Fprojects%2Fp-alpha%2Fwork-items",
+    epic: { id: "e-1", title: "Legacy epic" },
+    members: [{ id: "t-1", title: "Member" }],
+    critical_path: ["t-1"],
+  });
+  const expected = /href="\/ui\/projects\/p-alpha\/tasks\/t-1\?context=e-1&amp;return=%2Fui%2Fprojects%2Fp-alpha%2Fepics%2Fe-1%3Freturn%3D%252Fui%252Fprojects%252Fp-alpha%252Fwork-items"/g;
+  assert.equal((html.match(expected) || []).length, 2);
+  assert.doesNotMatch(html, /href="\/ui\/tasks\/t-1"/);
 });
 
 test("an epic member note dwells on the render clock, not the wall clock", () => {
@@ -2532,8 +2555,12 @@ test("relation picker rows default to a source-outward kind, initial and added",
 });
 
 test("relationTargetSuggestionsView is project-scoped and title-optional", () => {
-  const app = { tasksByProject: new Map([["p-1", [{ id: "t-1", title: "Alpha" }]]]) };
-  assert.equal(relationTargetSuggestionsView(app, "p-1"), `<option value="t-1" label="Alpha"></option>`);
+  const app = { workItemsByProject: new Map([["p-1", [
+    { id: "t-1", kind: "task", title: "Alpha" },
+    { id: "e-1", kind: "epic", title: "Plan" },
+    { id: "f-1", kind: "feature", title: "Ship" },
+  ]]]) };
+  assert.equal(relationTargetSuggestionsView(app, "p-1"), `<option value="t-1" label="task · Alpha"></option><option value="e-1" label="epic · Plan"></option><option value="f-1" label="feature · Ship"></option>`);
   assert.equal(relationTargetSuggestionsView(app, "p-2"), "");
   assert.equal(relationTargetSuggestionsView({}, "p-1"), "");
 });
@@ -2541,20 +2568,17 @@ test("relationTargetSuggestionsView is project-scoped and title-optional", () =>
 test("the relation picker suggests the selected project's cached tasks", () => {
   const app = {
     projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }],
-    tasksByProject: new Map([
-      ["p-1", [{ id: "t-1", title: "Alpha" }, { id: "t-2", title: "" }]],
-      ["p-2", [{ id: "t-9", title: "Other project" }]],
+    workItemsByProject: new Map([
+      ["p-1", [{ id: "t-1", kind: "task", title: "Alpha" }, { id: "e-2", kind: "epic", title: "Plan" }, { id: "f-2", kind: "feature", title: "Ship" }]],
+      ["p-2", [{ id: "t-9", kind: "task", title: "Other project" }]],
     ]),
   };
   const host = document.createElement("div");
   host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
-  const options = host.querySelector("#relation-target-tasks").children;
-  assert.equal(options.length, 2);
-  assert.equal(options[0].getAttribute("value"), "t-1");
-  assert.equal(options[0].getAttribute("label"), "Alpha");
-  // A task without a title still suggests its id, with no label attribute.
-  assert.equal(options[1].getAttribute("value"), "t-2");
-  assert.equal(options[1].getAttribute("label"), null);
+  const options = host.querySelector("#relation-target-work-items").children;
+  assert.equal(options.length, 3);
+  assert.deepEqual(options.map((option) => option.getAttribute("value")), ["t-1", "e-2", "f-2"]);
+  assert.deepEqual(options.map((option) => option.getAttribute("label")), ["task · Alpha", "epic · Plan", "feature · Ship"]);
   // Suggestions stay scoped to the selected project, not the whole cache.
   assert.ok(!options.some((option) => option.getAttribute("value") === "t-9"));
 });
@@ -2563,7 +2587,7 @@ test("the relation picker falls back to manual entry with an empty task cache", 
   const app = { projects: [{ id: "p-1", name: "one" }] };
   const host = document.createElement("div");
   host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
-  assert.equal(host.querySelector("#relation-target-tasks").children.length, 0);
+  assert.equal(host.querySelector("#relation-target-work-items").children.length, 0);
   // The free-text target input is still present, so an id can be typed by hand.
   assert.ok(host.querySelector("[data-relation-target]"));
 });
@@ -2571,75 +2595,84 @@ test("the relation picker falls back to manual entry with an empty task cache", 
 test("changing the create form project reloads the relation target suggestions", async () => {
   const app = {
     projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }],
-    tasksByProject: new Map([["p-1", [{ id: "t-1", title: "Alpha" }]]]),
+    flowsByProject: new Map(),
+    workItemsByProject: new Map([["p-1", [{ id: "t-1", kind: "task", title: "Alpha" }]]]),
   };
   const ensured = [];
-  app.ensureTasks = async (projectID) => {
+  app.ensureFlows = async () => {};
+  app.ensureWorkItems = async (projectID) => {
     ensured.push(projectID);
-    if (projectID === "p-2") app.tasksByProject.set("p-2", [{ id: "t-9", title: "Beta" }]);
-    return app.tasksByProject.get(projectID) || [];
+    if (projectID === "p-2") app.workItemsByProject.set("p-2", [{ id: "t-9", kind: "task", title: "Beta" }]);
+    return app.workItemsByProject.get(projectID) || [];
   };
   const host = document.createElement("div");
   host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
   const form = host.querySelector("[data-task-form]");
   bindRelationsPickerView(form, app);
+  bindTaskFlowControlsView(app, form);
   const projectSelect = form.querySelector('[name="project"]');
   projectSelect.value = "p-2";
   projectSelect.dispatchEvent(new TestEvent("change"));
   await flush();
   await flush();
   assert.deepEqual(ensured, ["p-2"]);
-  const options = form.querySelector("#relation-target-tasks").children;
+  const options = form.querySelector("#relation-target-work-items").children;
   assert.deepEqual(options.map((option) => option.getAttribute("value")), ["t-9"]);
-  assert.equal(options[0].getAttribute("label"), "Beta");
+  assert.equal(options[0].getAttribute("label"), "task · Beta");
 });
 
 test("a failed suggestion reload leaves the picker in manual-entry mode", async () => {
   const app = {
     projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }],
-    tasksByProject: new Map([["p-1", [{ id: "t-1", title: "Alpha" }]]]),
+    flowsByProject: new Map(),
+    workItemsByProject: new Map([["p-1", [{ id: "t-1", kind: "task", title: "Alpha" }]]]),
   };
-  app.ensureTasks = async (projectID) => app.tasksByProject.get(projectID) || [];
+  app.ensureFlows = async () => {};
+  app.ensureWorkItems = async (projectID) => app.workItemsByProject.get(projectID) || [];
   const host = document.createElement("div");
   host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
   const form = host.querySelector("[data-task-form]");
   bindRelationsPickerView(form, app);
+  bindTaskFlowControlsView(app, form);
   const projectSelect = form.querySelector('[name="project"]');
   projectSelect.value = "p-2";
   projectSelect.dispatchEvent(new TestEvent("change"));
   await flush();
   await flush();
-  assert.equal(form.querySelector("#relation-target-tasks").children.length, 0);
+  assert.equal(form.querySelector("#relation-target-work-items").children.length, 0);
   assert.ok(form.querySelector("[data-relation-target]"), "the manual target input remains");
 });
 
 test("a rejected suggestion reload leaves the picker in manual-entry mode without an unhandled rejection", async () => {
   const app = {
     projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }],
-    tasksByProject: new Map([["p-1", [{ id: "t-1", title: "Alpha" }]]]),
+    flowsByProject: new Map(),
+    workItemsByProject: new Map([["p-1", [{ id: "t-1", kind: "task", title: "Alpha" }]]]),
   };
-  app.ensureTasks = async (projectID) => {
-    if (projectID === "p-2") throw new Error("tasks fetch failed");
-    return app.tasksByProject.get(projectID) || [];
+  app.ensureFlows = async () => {};
+  app.ensureWorkItems = async (projectID) => {
+    if (projectID === "p-2") throw new Error("work items fetch failed");
+    return app.workItemsByProject.get(projectID) || [];
   };
   const host = document.createElement("div");
   host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
   const form = host.querySelector("[data-task-form]");
   bindRelationsPickerView(form, app);
+  bindTaskFlowControlsView(app, form);
   const projectSelect = form.querySelector('[name="project"]');
   projectSelect.value = "p-2";
   projectSelect.dispatchEvent(new TestEvent("change"));
   await flush();
   await flush();
-  assert.equal(form.querySelector("#relation-target-tasks").children.length, 0, "the prior project's suggestions are not kept");
+  assert.equal(form.querySelector("#relation-target-work-items").children.length, 0, "the prior project's suggestions are not kept");
   assert.ok(form.querySelector("[data-relation-target]"), "the manual target input remains");
 });
 
-test("changing the create form project reloads the flow selector with that project's flows and default", async () => {
+test("changing the create form project reloads the flow selector and parent picker", async () => {
   const app = {
     projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }],
     flowsByProject: new Map([[ "p-1", { flows: [{ id: "fl-1", name: "One flow" }], defaultFlowID: "fl-1" } ]]),
-    featuresByProject: new Map([[ "p-1", [] ]]),
+    workItemsByProject: new Map([[ "p-1", [] ]]),
   };
   const ensuredFlows = [];
   app.ensureFlows = async (projectID) => {
@@ -2647,9 +2680,9 @@ test("changing the create form project reloads the flow selector with that proje
     if (projectID === "p-2") app.flowsByProject.set("p-2", { flows: [{ id: "fl-9", name: "Beta flow" }, { id: "fl-8", name: "Gamma flow" }], defaultFlowID: "fl-8" });
     return app.flowsByProject.get(projectID);
   };
-  app.ensureFeatures = async (projectID) => {
-    if (projectID === "p-2") app.featuresByProject.set("p-2", [{ feature: { id: "ft-9", title: "Beta feature", status: "open" } }]);
-    return app.featuresByProject.get(projectID) || [];
+  app.ensureWorkItems = async (projectID) => {
+    if (projectID === "p-2") app.workItemsByProject.set("p-2", [{ id: "ft-9", kind: "feature", title: "Beta feature", state: { status: "open", terminal: false }, capabilities: { can_contain: true } }]);
+    return app.workItemsByProject.get(projectID) || [];
   };
   const host = document.createElement("div");
   host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
@@ -2666,21 +2699,22 @@ test("changing the create form project reloads the flow selector with that proje
   assert.deepEqual(options.map((option) => option.getAttribute("value")), ["fl-9", "fl-8"]);
   assert.equal(options[1].hasAttribute("selected"), true, "the new project's default flow is selected");
   assert.equal(options[0].hasAttribute("selected"), false, "the new project's non-default flow is not selected");
-  const featureOptions = form.querySelector('[name="feature_id"]').children;
-  assert.deepEqual(featureOptions.map((option) => option.getAttribute("value")), ["", "ft-9"], "the feature picker follows the project too");
-  const relationOptions = form.querySelector("#relation-target-tasks").children;
-  assert.equal(relationOptions.length, 0, "p-2 has no cached tasks, so suggestions stay empty");
+  const parentOptions = form.querySelector("#task-parent-items").children;
+  assert.deepEqual(parentOptions.map((option) => option.getAttribute("value")), ["ft-9"], "the parent picker follows the project too");
+  assert.equal(form.querySelector('[name="feature_id"]'), null, "legacy feature assignment is not editable");
+  const relationOptions = form.querySelector("#relation-target-work-items").children;
+  assert.deepEqual(relationOptions.map((option) => option.getAttribute("value")), ["ft-9"], "relation suggestions follow the project too");
 });
 
 test("rapid project switches cannot repaint the flow select or relation suggestions with stale-project data", async () => {
   let resolveP2Flows;
-  let resolveP2Tasks;
+  let resolveP2Items;
   const p2FlowsGate = new Promise((resolve) => { resolveP2Flows = resolve; });
-  const p2TasksGate = new Promise((resolve) => { resolveP2Tasks = resolve; });
+  const p2ItemsGate = new Promise((resolve) => { resolveP2Items = resolve; });
   const app = {
     projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }, { id: "p-3", name: "three" }],
     flowsByProject: new Map([[ "p-1", { flows: [{ id: "fl-1", name: "One flow" }], defaultFlowID: "fl-1" } ]]),
-    tasksByProject: new Map([[ "p-1", [{ id: "t-1", title: "One task" }] ]]),
+    workItemsByProject: new Map([[ "p-1", [{ id: "t-1", title: "One task" }] ]]),
   };
   app.ensureFlows = (projectID) => {
     if (projectID === "p-2") {
@@ -2697,20 +2731,20 @@ test("rapid project switches cannot repaint the flow select or relation suggesti
     }
     return Promise.resolve(app.flowsByProject.get(projectID));
   };
-  app.ensureTasks = (projectID) => {
+  app.ensureWorkItems = (projectID) => {
     if (projectID === "p-2") {
-      return p2TasksGate.then(() => {
+      return p2ItemsGate.then(() => {
         const tasks = [{ id: "t-2", title: "Two task" }];
-        app.tasksByProject.set("p-2", tasks);
+        app.workItemsByProject.set("p-2", tasks);
         return tasks;
       });
     }
     if (projectID === "p-3") {
       const tasks = [{ id: "t-3", title: "Three task" }];
-      app.tasksByProject.set("p-3", tasks);
+      app.workItemsByProject.set("p-3", tasks);
       return Promise.resolve(tasks);
     }
-    return Promise.resolve(app.tasksByProject.get(projectID));
+    return Promise.resolve(app.workItemsByProject.get(projectID));
   };
   const host = document.createElement("div");
   host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
@@ -2719,7 +2753,7 @@ test("rapid project switches cannot repaint the flow select or relation suggesti
   bindTaskFlowControlsView(app, form);
   const projectSelect = form.querySelector('[name="project"]');
   const flowSelect = form.querySelector('[name="flow_id"]');
-  const datalist = form.querySelector("#relation-target-tasks");
+  const datalist = form.querySelector("#relation-target-work-items");
   projectSelect.value = "p-2";
   projectSelect.dispatchEvent(new TestEvent("change"));
   projectSelect.value = "p-3";
@@ -2727,29 +2761,29 @@ test("rapid project switches cannot repaint the flow select or relation suggesti
   await flush();
   await flush();
   assert.deepEqual(flowSelect.children.map((option) => option.getAttribute("value")), ["fl-3"], "the newest project's flows are shown");
-  assert.deepEqual(datalist.children.map((option) => option.getAttribute("value")), ["t-3"], "the newest project's tasks are suggested");
+  assert.deepEqual(datalist.children.map((option) => option.getAttribute("value")), ["t-3"], "the newest project's work items are suggested");
   // The p-2 loads land late: neither control may repaint with p-2's data.
   resolveP2Flows();
-  resolveP2Tasks();
+  resolveP2Items();
   await flush();
   await flush();
   assert.deepEqual(flowSelect.children.map((option) => option.getAttribute("value")), ["fl-3"], "the stale flow load does not repaint");
-  assert.deepEqual(datalist.children.map((option) => option.getAttribute("value")), ["t-3"], "the stale task load does not repaint");
+  assert.deepEqual(datalist.children.map((option) => option.getAttribute("value")), ["t-3"], "the stale work-item load does not repaint");
 });
 
-test("a rejected flow reload leaves the flow and feature selects on the explicit defaults", async () => {
+test("a rejected flow reload leaves the flow and parent controls on explicit defaults", async () => {
   const app = {
     projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }],
     flowsByProject: new Map([[ "p-1", { flows: [{ id: "fl-1", name: "One flow" }], defaultFlowID: "fl-1" } ]]),
-    featuresByProject: new Map([[ "p-1", [{ feature: { id: "ft-1", title: "One feature", status: "open" } }] ]]),
+    workItemsByProject: new Map([[ "p-1", [] ]]),
   };
   app.ensureFlows = async (projectID) => {
     if (projectID === "p-2") throw new Error("flows fetch failed");
     return app.flowsByProject.get(projectID);
   };
-  app.ensureFeatures = async (projectID) => {
-    if (projectID === "p-2") throw new Error("features fetch failed");
-    return app.featuresByProject.get(projectID) || [];
+  app.ensureWorkItems = async (projectID) => {
+    if (projectID === "p-2") throw new Error("work items fetch failed");
+    return app.workItemsByProject.get(projectID) || [];
   };
   const host = document.createElement("div");
   host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
@@ -2763,23 +2797,23 @@ test("a rejected flow reload leaves the flow and feature selects on the explicit
   const flowOptions = form.querySelector('[name="flow_id"]').children;
   assert.equal(flowOptions.length, 1, "the flow select falls back to the project-default option");
   assert.equal(flowOptions[0].getAttribute("value"), "");
-  const featureOptions = form.querySelector('[name="feature_id"]').children;
-  assert.deepEqual(featureOptions.map((option) => option.getAttribute("value")), [""], "the feature picker falls back to no feature");
+  assert.deepEqual(form.querySelector("#task-parent-items").children, [], "the parent picker falls back to no parent");
+  assert.equal(form.querySelector("[data-inferred-feature]").textContent, "No feature inferred");
 });
 
-test("a rejected feature reload alone leaves the feature picker on the explicit default", async () => {
+test("a rejected work-item reload leaves the parent picker on the explicit default", async () => {
   const app = {
     projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }],
     flowsByProject: new Map([[ "p-1", { flows: [{ id: "fl-1", name: "One flow" }], defaultFlowID: "fl-1" } ]]),
-    featuresByProject: new Map([[ "p-1", [{ feature: { id: "ft-1", title: "One feature", status: "open" } }] ]]),
+    workItemsByProject: new Map([[ "p-1", [] ]]),
   };
   app.ensureFlows = async (projectID) => {
     if (projectID === "p-2") app.flowsByProject.set("p-2", { flows: [{ id: "fl-9", name: "Beta flow" }], defaultFlowID: "fl-9" });
     return app.flowsByProject.get(projectID);
   };
-  app.ensureFeatures = async (projectID) => {
-    if (projectID === "p-2") throw new Error("features fetch failed");
-    return app.featuresByProject.get(projectID) || [];
+  app.ensureWorkItems = async (projectID) => {
+    if (projectID === "p-2") throw new Error("work items fetch failed");
+    return app.workItemsByProject.get(projectID) || [];
   };
   const host = document.createElement("div");
   host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
@@ -2792,19 +2826,17 @@ test("a rejected feature reload alone leaves the feature picker on the explicit 
   await flush();
   const flowOptions = form.querySelector('[name="flow_id"]').children;
   assert.deepEqual(flowOptions.map((option) => option.getAttribute("value")), ["fl-9"], "the flow select still shows the new project's flows");
-  const featureOptions = form.querySelector('[name="feature_id"]').children;
-  assert.deepEqual(featureOptions.map((option) => option.getAttribute("value")), [""], "the feature picker falls back to no feature");
+  assert.deepEqual(form.querySelector("#task-parent-items").children, [], "the parent picker falls back to no parent");
+  assert.equal(form.querySelector("[data-inferred-feature]").textContent, "No feature inferred");
 });
 
 test("a rejected load during rapid switches never repaints with the stale project's state", async () => {
   let rejectP2Flows;
-  let rejectP2Tasks;
   const p2FlowsGate = new Promise((resolve, reject) => { rejectP2Flows = reject; });
-  const p2TasksGate = new Promise((resolve, reject) => { rejectP2Tasks = reject; });
   const app = {
     projects: [{ id: "p-1", name: "one" }, { id: "p-2", name: "two" }, { id: "p-3", name: "three" }],
     flowsByProject: new Map([[ "p-1", { flows: [{ id: "fl-1", name: "One flow" }], defaultFlowID: "fl-1" } ]]),
-    tasksByProject: new Map([[ "p-1", [{ id: "t-1", title: "One task" }] ]]),
+    workItemsByProject: new Map([[ "p-1", [{ id: "t-1", title: "One task" }] ]]),
   };
   app.ensureFlows = (projectID) => {
     if (projectID === "p-2") return p2FlowsGate;
@@ -2815,14 +2847,14 @@ test("a rejected load during rapid switches never repaints with the stale projec
     }
     return Promise.resolve(app.flowsByProject.get(projectID));
   };
-  app.ensureTasks = (projectID) => {
-    if (projectID === "p-2") return p2TasksGate;
+  app.ensureWorkItems = (projectID) => {
+    if (projectID === "p-2") throw new Error("work items fetch failed");
     if (projectID === "p-3") {
       const tasks = [{ id: "t-3", title: "Three task" }];
-      app.tasksByProject.set("p-3", tasks);
+      app.workItemsByProject.set("p-3", tasks);
       return Promise.resolve(tasks);
     }
-    return Promise.resolve(app.tasksByProject.get(projectID));
+    return Promise.resolve(app.workItemsByProject.get(projectID));
   };
   const host = document.createElement("div");
   host.innerHTML = renderTaskFormView(app, { priority: 0 }, { mode: "create", projectID: "p-1", submitLabel: "Create" });
@@ -2831,7 +2863,7 @@ test("a rejected load during rapid switches never repaints with the stale projec
   bindTaskFlowControlsView(app, form);
   const projectSelect = form.querySelector('[name="project"]');
   const flowSelect = form.querySelector('[name="flow_id"]');
-  const datalist = form.querySelector("#relation-target-tasks");
+  const datalist = form.querySelector("#relation-target-work-items");
   projectSelect.value = "p-2";
   projectSelect.dispatchEvent(new TestEvent("change"));
   projectSelect.value = "p-3";
@@ -2839,14 +2871,13 @@ test("a rejected load during rapid switches never repaints with the stale projec
   await flush();
   await flush();
   assert.deepEqual(flowSelect.children.map((option) => option.getAttribute("value")), ["fl-3"], "the newest project's flows are shown");
-  assert.deepEqual(datalist.children.map((option) => option.getAttribute("value")), ["t-3"], "the newest project's tasks are suggested");
-  // The p-2 loads reject late: neither control may repaint with p-2's state.
+  assert.deepEqual(datalist.children.map((option) => option.getAttribute("value")), ["t-3"], "the newest project's work items are suggested");
+  // The p-2 flow load rejects late: no control may repaint with p-2's state.
   rejectP2Flows(new Error("flows fetch failed"));
-  rejectP2Tasks(new Error("tasks fetch failed"));
   await flush();
   await flush();
   assert.deepEqual(flowSelect.children.map((option) => option.getAttribute("value")), ["fl-3"], "the stale rejected flow load does not repaint");
-  assert.deepEqual(datalist.children.map((option) => option.getAttribute("value")), ["t-3"], "the stale rejected task load does not repaint");
+  assert.deepEqual(datalist.children.map((option) => option.getAttribute("value")), ["t-3"], "the stale rejected work-item load does not repaint");
 });
 // --- review verdict pending state (flow-change / submitReview) --------------
 

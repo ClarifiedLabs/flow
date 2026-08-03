@@ -48,12 +48,13 @@ type Epic struct {
 }
 
 type CreateEpicInput struct {
-	Title            string
-	Body             string
-	Priority         int
-	CompletionPolicy EpicCompletionPolicy
-	ParentItemID     string
-	CreatedBy        Actor
+	Title             string
+	Body              string
+	Priority          int
+	CompletionPolicy  EpicCompletionPolicy
+	ParentItemID      string
+	WorkItemRelations []CreateWorkItemRelationInput
+	CreatedBy         Actor
 }
 
 type EditEpicInput struct {
@@ -96,12 +97,15 @@ func (s *EpicService) Create(ctx context.Context, input CreateEpicInput) (Epic, 
 	if err := validateActor(actor); err != nil {
 		return Epic{}, err
 	}
-
 	tx, err := sqlitex.BeginImmediate(ctx, s.db)
 	if err != nil {
 		return Epic{}, err
 	}
 	defer tx.Rollback()
+	createRelationPlan, err := s.items.prepareCreateRelations(ctx, tx, WorkItemEpic, input.ParentItemID, input.WorkItemRelations, actor)
+	if err != nil {
+		return Epic{}, err
+	}
 	id, err := s.allocateID(ctx, tx)
 	if err != nil {
 		return Epic{}, err
@@ -119,12 +123,11 @@ INSERT INTO epics (
 		id, title, input.Body, input.Priority, string(policy), string(actor), nowText, nowText); err != nil {
 		return Epic{}, fmt.Errorf("insert epic: %w", err)
 	}
-	if parentID := strings.TrimSpace(input.ParentItemID); parentID != "" {
-		if err := s.items.linkTx(ctx, tx, parentID, id, RelationParentOf, actor); err != nil {
-			return Epic{}, err
-		}
+	touched, err := s.items.linkCreateRelationsTx(ctx, tx, id, createRelationPlan, actor)
+	if err != nil {
+		return Epic{}, err
 	}
-	if err := reconcileEpicAncestorsTx(ctx, tx, []string{id}, now); err != nil {
+	if err := reconcileEpicAncestorsTx(ctx, tx, touched, now); err != nil {
 		return Epic{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {

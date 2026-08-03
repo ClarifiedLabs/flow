@@ -5,6 +5,8 @@
 import { workflowActivityLabel } from "./board.js";
 import { formatDwell, waitKindOf } from "./board-model.js";
 import { value } from "./normalize.js";
+import { buildWorkItemIndex, groupWorkItemRelations, taskWorkContext, workItemAncestors, workItemID } from "./work-item-model.js";
+import { projectWorkHref, resolveWorkNavigation } from "./work-nav.js";
 
 // nodeState collapses a node run into the four states the run spine draws.
 export function nodeState(nodeRun, currentNodeRunID) {
@@ -212,6 +214,23 @@ export function reviewModel({ wait, currentNode, run, artifacts, statusLog, acti
 export function taskModel(data, workflowData, { now = Date.now() } = {}) {
   const task = value(data, "task", "Task") || {};
   const detail = value(data, "task_detail", "TaskDetail") || {};
+  const generic = value(data, "work_item", "WorkItem");
+  const genericItem = value(generic || {}, "item", "Item") || {};
+  const genericRelations = value(generic || {}, "relations", "Relations") || [];
+  const genericChildren = value(generic || {}, "children", "Children") || [];
+  const workIndex = buildWorkItemIndex({ items: [...(value(data, "work_items", "WorkItems") || []), genericItem] });
+  const boundedAncestors = value(generic || {}, "ancestors", "Ancestors");
+  const ancestors = Array.isArray(boundedAncestors)
+    ? boundedAncestors
+    : workItemAncestors(workIndex, workItemID(genericItem)).reverse();
+  const requestedNavigation = value(data, "navigation", "Navigation") || {};
+  const planningContext = taskWorkContext(workIndex, genericItem, requestedNavigation.context);
+  const navigation = resolveWorkNavigation(
+    requestedNavigation,
+    planningContext.validContextIDs,
+    value(data, "project_id", "ProjectID") || "",
+  );
+  if (!navigation.contextValid) navigation.returnTo = projectWorkHref(value(data, "project_id", "ProjectID") || "");
   const workflow = value(workflowData || {}, "detail", "Detail") || {};
   const run = value(workflow, "run", "Run") || {};
   const snapshot = value(run, "snapshot", "Snapshot") || {};
@@ -325,8 +344,23 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
     statusLog,
     review,
     sessions: value(detail, "sessions", "Sessions") || [],
-    relations: value(detail, "relations", "Relations") || [],
-    relationGroups: relationGroups(value(detail, "relations", "Relations") || [], value(task, "id", "ID")),
+    // Generic context is canonical for planning: it preserves cross-kind
+    // ancestry, blockers and relation endpoint summaries. Legacy task relations
+    // remain the fallback for older servers and API consumers.
+    workItem: genericItem,
+    ancestors,
+    directAncestors: planningContext.directAncestors,
+    effectiveFeaturePath: planningContext.effectiveFeaturePath,
+    contextItem: planningContext.contextItem,
+    navigation,
+    children: genericChildren.map((child) => value(child, "item", "Item") || child),
+    blockers: value(generic || {}, "blockers", "Blockers") || [],
+    relations: generic ? genericRelations : value(detail, "relations", "Relations") || [],
+    relationGroups: generic
+      ? groupWorkItemRelations(genericRelations, workItemID(genericItem) || value(task, "id", "ID"))
+      : relationGroups(value(detail, "relations", "Relations") || [], value(task, "id", "ID")),
+    genericRelations: Boolean(generic),
+    workItems: workIndex.items,
     attachments: value(detail, "attachments", "Attachments") || [],
     epicID: epicParent(value(detail, "relations", "Relations") || [], value(task, "id", "ID")),
   };

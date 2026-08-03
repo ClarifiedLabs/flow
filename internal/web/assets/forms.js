@@ -3,9 +3,10 @@
 // dispatches. Same reason as the click table: forms live inside elements that
 // replace their own innerHTML.
 
-import { apiPatch, apiPost, epicsAPIBase, featuresAPIBase, taskAPIBase, taskHref } from "./api.js";
+import { apiPatch, apiPost, epicsAPIBase, featuresAPIBase, taskAPIBase, taskHref, workItemAPIPath } from "./api.js";
 import { value } from "./normalize.js";
 import { uploadTaskAttachment } from "./task.js";
+import { collectCreateWorkItemRelations } from "./create-relations.js";
 import {
   acquireBusy,
   actionScope,
@@ -35,7 +36,6 @@ export const FORMS = {
     const mode = form.dataset.taskFormMode || "edit";
     const priority = Number(form.elements.priority?.value || 0);
     if (!Number.isInteger(priority)) return "Priority must be a whole number";
-    const featureID = String(form.elements.feature_id?.value || "").trim();
     const payload = {
       title: form.elements.title.value.trim(),
       body: form.elements.body.value,
@@ -44,38 +44,22 @@ export const FORMS = {
     };
     if (!payload.title) return "Task title is required";
     if (mode !== "create") {
-      // Edit sends the tri-state field verbatim: the select always reflects
-      // the current assignment, so "" clears it and a value re-assigns.
-      payload.feature_id = featureID;
       await apiPatch(`${taskAPIBase(form.dataset.project)}/${encodeURIComponent(form.dataset.taskForm)}`, payload);
       await app.refresh();
       return "Task updated";
     }
-    if (featureID) payload.feature_id = featureID;
+    const parentItemID = String(form.elements.parent_item_id?.value || "").trim();
+    if (parentItemID) payload.parent_item_id = parentItemID;
 
     const formProject = form.elements.project ? form.elements.project.value : form.dataset.project || "";
     if (!formProject) return "Project is required";
-    // Relation rows ride in the create payload so the whole create is atomic.
-    // A child-of row makes the new task the relation target (chosen parent
-    // parent_of new task): it is sent with target_is_new_task set and a blank
-    // target, which the server resolves to the new task inside the create
-    // transaction. A parent that cannot be linked fails the whole create, so
-    // nothing is committed, the form stays put, and resubmitting creates exactly
-    // one task instead of a duplicate plus an orphan. There is no second,
-    // post-create link request that could partially succeed.
-    const collected = collectRelationRows(form);
-    if (collected instanceof Error) return collected.message;
-    const relations = [
-      ...collected.create,
-      ...collected.childOf.map((relation) => ({
-        source_task_id: relation.target_task_id,
-        target_task_id: "",
-        kind: relation.kind,
-        target_is_new_task: true,
-      })),
-    ];
-    if (relations.length) payload.relations = relations;
+    // Generic relation rows ride in the original create POST so cross-kind
+    // links are atomic with task creation. Exactly one endpoint is marked new.
+    const relations = collectCreateWorkItemRelations(form, parentItemID);
+    if (relations instanceof Error) return relations.message;
+    if (relations.length) payload.work_item_relations = relations;
     const data = await apiPost(taskAPIBase(formProject), payload);
+    app.workItemsByProject?.delete(formProject);
     const task = data.task || data.Task || {};
     const taskID = value(task, "id", "ID");
     if (!taskID) throw new Error("Created task ID unavailable");
@@ -104,16 +88,22 @@ export const FORMS = {
     if (featureID) {
       await apiPatch(`${featuresAPIBase(projectID)}/${encodeURIComponent(featureID)}`, { title, body });
       app.featuresByProject?.delete(projectID);
+      app.workItemsByProject?.delete(projectID);
       await app.refresh();
       return "Feature updated";
     }
     const parentItemID = String(form.elements.parent_item_id?.value || "").trim();
-    await apiPost(featuresAPIBase(projectID), {
+    const relations = collectCreateWorkItemRelations(form, parentItemID);
+    if (relations instanceof Error) return relations.message;
+    const payload = {
       title,
       body,
       ...(parentItemID ? { parent_item_id: parentItemID } : {}),
-    });
+      ...(relations.length ? { work_item_relations: relations } : {}),
+    };
+    await apiPost(featuresAPIBase(projectID), payload);
     app.featuresByProject?.delete(projectID);
+    app.workItemsByProject?.delete(projectID);
     await app.refresh();
     return "Feature created";
   },
@@ -134,12 +124,17 @@ export const FORMS = {
     };
     if (epicID) {
       await apiPatch(`${epicsAPIBase(projectID)}/${encodeURIComponent(epicID)}`, payload);
+      app.workItemsByProject?.delete(projectID);
       await app.refresh();
       return "Epic updated";
     }
     const parentItemID = String(form.elements.parent_item_id?.value || "").trim();
     if (parentItemID) payload.parent_item_id = parentItemID;
+    const relations = collectCreateWorkItemRelations(form, parentItemID);
+    if (relations instanceof Error) return relations.message;
+    if (relations.length) payload.work_item_relations = relations;
     await apiPost(epicsAPIBase(projectID), payload);
+    app.workItemsByProject?.delete(projectID);
     await app.refresh();
     return "Epic created";
   },
@@ -179,6 +174,33 @@ export const FORMS = {
   // relationAddForm links the viewed task (the relation source) to a target task
   // with the chosen kind. The server defaults the source to the task in the
   // path, so the payload only needs the target and the kind.
+  async moveWorkItemForm(app, form) {
+    const itemID = String(form.dataset.moveWorkItemForm || "").trim();
+    const projectID = String(form.dataset.project || "").trim();
+    await apiPatch(workItemAPIPath(projectID, itemID, "/parent"), {
+      parent_item_id: String(form.elements.parent_item_id?.value || "").trim(),
+    });
+    app.workItemsByProject?.delete(projectID);
+    await app.refresh();
+    return "Work item moved";
+  },
+
+  async workItemRelationAddForm(app, form) {
+    const itemID = String(form.dataset.workItemRelationAddForm || "").trim();
+    const targetID = String(form.elements.target_item_id?.value || "").trim();
+    const kind = String(form.elements.kind?.value || "").trim();
+    if (!targetID) return "Target work item ID is required";
+    const projectID = String(form.dataset.project || "").trim();
+    await apiPost(workItemAPIPath(projectID, itemID, "/relations"), {
+      source_item_id: itemID,
+      target_item_id: targetID,
+      kind,
+    });
+    if (kind === "parent_of") app.workItemsByProject?.delete(projectID);
+    await app.refresh();
+    return "Relation added";
+  },
+
   async relationAddForm(app, form) {
     const taskID = String(form.dataset.relationAddForm || "").trim();
     const kind = String(form.elements.kind?.value || "").trim();
@@ -197,46 +219,6 @@ export const FORMS = {
   },
 };
 
-// collectRelationRows reads the create form's relation picker rows and splits
-// them by direction. blocks/related_to rows make the new task the source, so
-// they become `relations` payload entries ({target_task_id, kind}; the server
-// defaults the source to the new task). parent_of ("child of") rows make the
-// new task the *target*, so taskForm maps them to `relations` entries with
-// target_is_new_task set and a blank target; the server resolves that to the
-// new task inside the single create transaction, keeping the child-of link
-// atomic with the create. Rows with a blank target are dropped so they can
-// never produce a 400; a duplicate (kind, target) pair is rejected outright.
-// At most one child-of row is accepted, because a task has exactly one parent;
-// a second distinct child-of row is rejected before any request goes out.
-// Returns {create, childOf}, or an Error describing the first problem.
-export function collectRelationRows(form) {
-  const rows = typeof form.querySelectorAll === "function"
-    ? form.querySelectorAll("[data-relation-row]")
-    : [];
-  const create = [];
-  const childOf = [];
-  const seen = new Set();
-  for (const row of rows) {
-    const target = String(row.querySelector?.("[data-relation-target]")?.value || "").trim();
-    if (!target) continue;
-    const kind = String(row.querySelector?.("[data-relation-kind]")?.value || "").trim();
-    const key = `${kind}\u0000${target}`;
-    if (seen.has(key)) {
-      return new Error(`Duplicate relation: ${kind || "relation"} ${target}`);
-    }
-    seen.add(key);
-    if (kind === "parent_of") {
-      if (childOf.length) {
-        return new Error("A task can have only one parent; remove the extra child-of rows");
-      }
-      childOf.push({ target_task_id: target, kind });
-    } else {
-      create.push({ target_task_id: target, kind });
-    }
-  }
-  return { create, childOf };
-}
-
 const FORM_PENDING_LABELS = {
   taskForm: "Saving task",
   featureForm: "Saving feature",
@@ -245,6 +227,8 @@ const FORM_PENDING_LABELS = {
   attentionReplyForm: "Sending reply",
   threadReplyForm: "Posting reply",
   relationAddForm: "Adding relation",
+  workItemRelationAddForm: "Adding relation",
+  moveWorkItemForm: "Moving work item",
 };
 
 // handleFormSubmit gives delegated form submissions the same pending state

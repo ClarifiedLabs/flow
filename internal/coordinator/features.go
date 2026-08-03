@@ -13,11 +13,12 @@ import (
 )
 
 var (
-	ErrFeatureNotFound      = errors.New("feature not found")
-	ErrFeatureTitleTaken    = errors.New("a feature with this title already exists")
-	ErrFeatureClosed        = errors.New("feature is landed or archived")
-	ErrFeatureRebaseRunning = errors.New("feature rebase already running")
-	ErrNoOpenRebase         = errors.New("no running rebase for feature")
+	ErrFeatureNotFound         = errors.New("feature not found")
+	ErrFeatureTitleTaken       = errors.New("a feature with this title already exists")
+	ErrFeatureClosed           = errors.New("feature is landed or archived")
+	ErrFeatureRebaseRunning    = errors.New("feature rebase already running")
+	ErrFeatureCreationConflict = errors.New("feature creation intent has different input")
+	ErrNoOpenRebase            = errors.New("no running rebase for feature")
 	// ErrFeatureRebaseForbidden rejects a restricted rebase (task-bound
 	// console) whose sole-open-task invariant no longer holds: the feature's
 	// non-done tasks must be exactly the allowed set. It is raised under the
@@ -119,11 +120,12 @@ type RebaseStartResult struct {
 }
 
 type CreateFeatureInput struct {
-	Title        string
-	Body         string
-	ParentItemID string
-	OperationKey string
-	CreatedBy    Actor
+	Title             string
+	Body              string
+	ParentItemID      string
+	WorkItemRelations []CreateWorkItemRelationInput
+	OperationKey      string
+	CreatedBy         Actor
 }
 
 type EditFeatureInput struct {
@@ -174,6 +176,11 @@ type FeatureService struct {
 	// principal at exactly the reviewed interleavings. Test-only; nil in
 	// production.
 	RebaseOnMainTestHook func(phase RebaseOnMainTestPhase)
+
+	// CreateAfterIntentCommitTestHook runs after the durable intent transaction
+	// commits and before its ref is created. Tests use it to force retry races and
+	// pre-existing same-tip refs. Test-only; nil in production.
+	CreateAfterIntentCommitTestHook func()
 }
 
 func NewFeatureService(database *sql.DB, tasks *TaskService, project Project) *FeatureService {
@@ -194,6 +201,7 @@ func (s *FeatureService) Create(ctx context.Context, input CreateFeatureInput) (
 	if title == "" {
 		return Feature{}, errors.New("feature title is required")
 	}
+	body := strings.TrimSpace(input.Body)
 	actor := defaultActor(input.CreatedBy, ActorHuman)
 	if err := validateActor(actor); err != nil {
 		return Feature{}, err
@@ -202,7 +210,56 @@ func (s *FeatureService) Create(ctx context.Context, input CreateFeatureInput) (
 	if exchangePath == "" {
 		return Feature{}, errors.New("project exchange remote is required for feature branches")
 	}
-	parentItemID := strings.TrimSpace(input.ParentItemID)
+	normalizedPlan, relationPayload, err := normalizeCreateRelations(input.ParentItemID, input.WorkItemRelations, actor)
+	if err != nil {
+		return Feature{}, err
+	}
+	parentItemID := normalizedPlan.ParentItemID
+	operationKey := strings.TrimSpace(input.OperationKey)
+	if operationKey == "" {
+		var pendingPayload string
+		err = s.db.QueryRowContext(ctx, `
+SELECT operation_key, relation_payload_json FROM feature_creation_intents
+WHERE state != 'completed'
+	AND lower(trim(title)) = lower(trim(?))
+	AND body = ?
+	AND COALESCE(parent_item_id, '') = ?
+ORDER BY created_at LIMIT 1`, title, body, parentItemID).Scan(&operationKey, &pendingPayload)
+		if err == nil && pendingPayload != relationPayload {
+			return Feature{}, ErrFeatureCreationConflict
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			operationKey, err = randomPrefixedID("fci")
+		}
+		if err != nil {
+			return Feature{}, err
+		}
+	}
+
+	var priorID, priorState, priorTitle, priorBody, priorParent, priorPayload, priorBranch, priorTargetSHA string
+	err = s.db.QueryRowContext(ctx, `
+SELECT id, state, title, body, COALESCE(parent_item_id, ''), relation_payload_json, branch, target_sha
+FROM feature_creation_intents WHERE operation_key = ?`, operationKey).Scan(
+		&priorID, &priorState, &priorTitle, &priorBody, &priorParent, &priorPayload, &priorBranch, &priorTargetSHA,
+	)
+	if err == nil {
+		if priorTitle != title || priorBody != body || priorParent != parentItemID || priorPayload != relationPayload {
+			return Feature{}, ErrFeatureCreationConflict
+		}
+		if priorState == "completed" {
+			return s.Get(ctx, priorID)
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return Feature{}, err
+	}
+
+	createRelationPlan, err := s.items.prepareCreateRelations(ctx, s.db, WorkItemFeature, input.ParentItemID, input.WorkItemRelations, actor)
+	if err != nil {
+		if priorState == "ref_created" {
+			return Feature{}, s.reconcileFailedCreationIntent(ctx, exchangePath, priorID, priorBranch, priorTargetSHA, err)
+		}
+		return Feature{}, err
+	}
 	integrationFeatureID, err := nearestFeatureFromParentTx(ctx, s.db, parentItemID)
 	if err != nil {
 		return Feature{}, err
@@ -240,40 +297,19 @@ func (s *FeatureService) Create(ctx context.Context, input CreateFeatureInput) (
 		return Feature{}, fmt.Errorf("integration target branch %q not found in exchange remote", targetBranch)
 	}
 
-	operationKey := strings.TrimSpace(input.OperationKey)
-	if operationKey == "" {
-		// A failed Git ref write leaves a prepared intent by design. An ordinary
-		// create retry has no caller-supplied operation key, so recover the one
-		// matching the exact request instead of making its reserved title
-		// permanently uncreatable.
-		err = s.db.QueryRowContext(ctx, `
-SELECT operation_key FROM feature_creation_intents
-WHERE state != 'completed'
-	AND lower(trim(title)) = lower(trim(?))
-	AND body = ?
-	AND COALESCE(parent_item_id, '') = ?
-ORDER BY created_at LIMIT 1`, title, strings.TrimSpace(input.Body), parentItemID).Scan(&operationKey)
-		if errors.Is(err, sql.ErrNoRows) {
-			operationKey, err = randomPrefixedID("fci")
-		}
-		if err != nil {
-			return Feature{}, err
-		}
-	}
 	tx, err := sqlitex.BeginImmediate(ctx, s.db)
 	if err != nil {
 		return Feature{}, err
 	}
 	defer tx.Rollback()
-
 	now := s.now().UTC()
-	var id, branch, intentState, storedTitle, storedBody, storedParent, storedIntegration, storedTargetBranch, storedTargetSHA string
+	var id, branch, intentState, storedTitle, storedBody, storedParent, storedIntegration, storedTargetBranch, storedTargetSHA, storedRelationPayload, storedCreatedBy string
 	err = tx.QueryRowContext(ctx, `
 SELECT id, branch, state, title, body, COALESCE(parent_item_id, ''),
-	COALESCE(integration_feature_id, ''), target_branch, target_sha
+	COALESCE(integration_feature_id, ''), target_branch, target_sha, relation_payload_json, created_by
 FROM feature_creation_intents WHERE operation_key = ?`, operationKey).Scan(
 		&id, &branch, &intentState, &storedTitle, &storedBody, &storedParent,
-		&storedIntegration, &storedTargetBranch, &storedTargetSHA,
+		&storedIntegration, &storedTargetBranch, &storedTargetSHA, &storedRelationPayload, &storedCreatedBy,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		var titleExists int
@@ -294,44 +330,81 @@ SELECT EXISTS(SELECT 1 FROM features WHERE title_norm = lower(trim(?)))
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO feature_creation_intents (
 	id, operation_key, parent_item_id, integration_feature_id, title, body,
-	branch, target_branch, target_sha, created_by, state, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)`,
+	branch, target_branch, target_sha, relation_payload_json, created_by, state, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)`,
 			id, operationKey, sqlitex.NullableNonEmptyString(parentItemID), sqlitex.NullableNonEmptyString(integrationFeatureID),
-			title, strings.TrimSpace(input.Body), branch, targetBranch, targetTip, string(actor), formatTime(now), formatTime(now)); err != nil {
+			title, body, branch, targetBranch, targetTip, relationPayload, string(actor), formatTime(now), formatTime(now)); err != nil {
 			if strings.Contains(err.Error(), "title") {
 				return Feature{}, ErrFeatureTitleTaken
 			}
 			return Feature{}, fmt.Errorf("prepare feature creation: %w", err)
 		}
-		storedTitle, storedBody, storedParent = title, strings.TrimSpace(input.Body), parentItemID
+		storedTitle, storedBody, storedParent = title, body, parentItemID
 		storedIntegration, storedTargetBranch, storedTargetSHA = integrationFeatureID, targetBranch, targetTip
+		storedRelationPayload, storedCreatedBy = relationPayload, string(actor)
 	} else if err != nil {
 		return Feature{}, err
-	} else if storedTitle != title || storedBody != strings.TrimSpace(input.Body) || storedParent != parentItemID {
-		return Feature{}, errors.New("feature creation operation key was already used with different input")
+	} else if storedTitle != title || storedBody != body || storedParent != parentItemID || storedRelationPayload != relationPayload {
+		return Feature{}, ErrFeatureCreationConflict
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Feature{}, fmt.Errorf("commit feature creation intent: %w", err)
+	}
+	if s.CreateAfterIntentCommitTestHook != nil {
+		s.CreateAfterIntentCommitTestHook()
 	}
 	if intentState == "completed" {
 		return s.Get(ctx, id)
 	}
 
-	currentTip, exists, err := flowgit.BranchTip(ctx, exchangePath, branch)
+	// Serialize ref creation with retries for this database. Git's zero-old-value
+	// compare-and-swap distinguishes a ref created by this intent from an
+	// ambiguous pre-existing same-tip ref; ownership and state are committed while
+	// the SQLite write lock still excludes another retry.
+	refTx, err := sqlitex.BeginImmediate(ctx, s.db)
 	if err != nil {
 		return Feature{}, err
 	}
-	if exists && currentTip != storedTargetSHA {
-		return Feature{}, fmt.Errorf("feature branch %q already exists at unexpected tip %s", branch, currentTip)
-	}
-	if !exists {
-		if err := flowgit.UpdateRef(ctx, exchangePath, "refs/heads/"+branch, storedTargetSHA); err != nil {
-			_, _ = s.db.ExecContext(ctx, `UPDATE feature_creation_intents SET last_error = ?, updated_at = ? WHERE id = ?`, err.Error(), formatTime(s.now().UTC()), id)
-			return Feature{}, fmt.Errorf("seed feature branch: %w", err)
-		}
-	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE feature_creation_intents SET state = 'ref_created', last_error = '', updated_at = ? WHERE id = ?`, formatTime(s.now().UTC()), id); err != nil {
+	defer refTx.Rollback()
+	var refState string
+	if err := refTx.QueryRowContext(ctx, `SELECT state FROM feature_creation_intents WHERE id = ?`, id).Scan(&refState); err != nil {
 		return Feature{}, err
+	}
+	if refState == "completed" {
+		refTx.Rollback()
+		return s.Get(ctx, id)
+	}
+	if refState != "prepared" && refState != "ref_created" {
+		return Feature{}, fmt.Errorf("invalid feature creation intent state %q", refState)
+	}
+	refCreatedByIntent, err := flowgit.CreateOrVerifyRefOwned(ctx, exchangePath, "refs/heads/"+branch, storedTargetSHA)
+	if err != nil {
+		if _, updateErr := refTx.ExecContext(ctx, `UPDATE feature_creation_intents SET last_error = ?, updated_at = ? WHERE id = ? AND state != 'completed'`, err.Error(), formatTime(s.now().UTC()), id); updateErr != nil {
+			return Feature{}, fmt.Errorf("seed feature branch: %w (record error: %v)", err, updateErr)
+		}
+		if commitErr := refTx.Commit(ctx); commitErr != nil {
+			return Feature{}, fmt.Errorf("seed feature branch: %w (commit error record: %v)", err, commitErr)
+		}
+		return Feature{}, fmt.Errorf("seed feature branch: %w", err)
+	}
+	result, err := refTx.ExecContext(ctx, `
+UPDATE feature_creation_intents
+SET state = 'ref_created',
+	ref_created_by_intent = CASE WHEN ? THEN TRUE ELSE ref_created_by_intent END,
+	last_error = '', updated_at = ?
+WHERE id = ? AND state IN ('prepared', 'ref_created')`, refCreatedByIntent, formatTime(s.now().UTC()), id)
+	if err != nil {
+		return Feature{}, err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return Feature{}, err
+	}
+	if updated == 0 {
+		return Feature{}, errors.New("feature creation intent disappeared or completed while creating its ref")
+	}
+	if err := refTx.Commit(ctx); err != nil {
+		return Feature{}, fmt.Errorf("commit feature ref ownership: %w", err)
 	}
 
 	tx, err = sqlitex.BeginImmediate(ctx, s.db)
@@ -339,6 +412,37 @@ INSERT INTO feature_creation_intents (
 		return Feature{}, err
 	}
 	defer tx.Rollback()
+	var finalState string
+	if err := tx.QueryRowContext(ctx, `SELECT state FROM feature_creation_intents WHERE id = ?`, id).Scan(&finalState); err != nil {
+		return Feature{}, err
+	}
+	if finalState == "completed" {
+		tx.Rollback()
+		return s.Get(ctx, id)
+	}
+	if finalState != "ref_created" {
+		return Feature{}, fmt.Errorf("invalid feature creation intent state %q before finalization", finalState)
+	}
+	storedRelations, err := decodeCreateRelationPayload(storedRelationPayload)
+	if err != nil {
+		return Feature{}, err
+	}
+	storedDeclaredParent := storedParent
+	for _, relation := range storedRelations {
+		if relation.Kind == RelationParentOf && relation.TargetIsNewItem {
+			storedDeclaredParent = ""
+			break
+		}
+	}
+	createRelationPlan, err = s.items.prepareCreateRelations(ctx, tx, WorkItemFeature, storedDeclaredParent, storedRelations, Actor(storedCreatedBy))
+	if err != nil {
+		tx.Rollback()
+		return Feature{}, s.reconcileFailedCreationIntent(ctx, exchangePath, id, branch, storedTargetSHA, err)
+	}
+	if createRelationPlan.ParentItemID != storedParent {
+		tx.Rollback()
+		return Feature{}, s.reconcileFailedCreationIntent(ctx, exchangePath, id, branch, storedTargetSHA, ErrFeatureCreationConflict)
+	}
 	var featureExists int
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM features WHERE id = ?)`, id).Scan(&featureExists); err != nil {
 		return Feature{}, err
@@ -352,35 +456,95 @@ INSERT INTO features (
 	id, title, body, branch, status, integration_feature_id, created_from_sha,
 	created_by, created_at, updated_at
 ) VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)`, id, storedTitle, storedBody, branch,
-			sqlitex.NullableNonEmptyString(storedIntegration), storedTargetSHA, string(actor), formatTime(now), formatTime(now)); err != nil {
+			sqlitex.NullableNonEmptyString(storedIntegration), storedTargetSHA, storedCreatedBy, formatTime(now), formatTime(now)); err != nil {
 			if strings.Contains(err.Error(), "features.title_norm") {
 				return Feature{}, ErrFeatureTitleTaken
 			}
 			return Feature{}, fmt.Errorf("insert feature: %w", err)
 		}
 	}
-	if storedParent != "" {
+	parentPlan := createRelationPlan
+	parentPlan.ParentItemID = storedParent
+	if featureExists != 0 && storedParent != "" {
 		var relationExists int
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM work_item_relations WHERE source_item_id = ? AND target_item_id = ? AND kind = 'parent_of')`, storedParent, id).Scan(&relationExists); err != nil {
 			return Feature{}, err
 		}
-		if relationExists == 0 {
-			if err := s.items.linkTx(ctx, tx, storedParent, id, RelationParentOf, actor); err != nil {
-				return Feature{}, err
-			}
+		if relationExists != 0 {
+			parentPlan.ParentItemID = ""
 		}
 	}
-	if err := reconcileEpicAncestorsTx(ctx, tx, []string{id}, s.now().UTC()); err != nil {
+	touched, err := s.items.linkCreateRelationsTx(ctx, tx, id, parentPlan, Actor(storedCreatedBy))
+	if err != nil {
 		return Feature{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE feature_creation_intents SET state = 'completed', last_error = '', updated_at = ? WHERE id = ?`, formatTime(s.now().UTC()), id); err != nil {
+	if err := reconcileEpicAncestorsTx(ctx, tx, touched, s.now().UTC()); err != nil {
 		return Feature{}, err
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE feature_creation_intents SET state = 'completed', last_error = '', updated_at = ? WHERE id = ? AND state = 'ref_created'`, formatTime(s.now().UTC()), id)
+	if err != nil {
+		return Feature{}, err
+	}
+	if updated, err = result.RowsAffected(); err != nil {
+		return Feature{}, err
+	}
+	if updated != 1 {
+		return Feature{}, errors.New("feature creation intent changed while finalizing")
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Feature{}, err
 	}
-
 	return s.Get(ctx, id)
+}
+
+func (s *FeatureService) reconcileFailedCreationIntent(ctx context.Context, exchangePath, id, branch, expectedSHA string, cause error) error {
+	// Keep the intent write-locked while inspecting and deleting an owned ref.
+	// Ref creation and ownership persistence use the same database write lock, so
+	// a concurrent retry cannot create or claim the ref while cleanup runs.
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return fmt.Errorf("%w (lock failed feature intent: %v)", cause, err)
+	}
+	defer tx.Rollback()
+	var state string
+	var refCreatedByIntent bool
+	if err := tx.QueryRowContext(ctx, `SELECT state, ref_created_by_intent FROM feature_creation_intents WHERE id = ?`, id).Scan(&state, &refCreatedByIntent); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return cause
+		}
+		return fmt.Errorf("%w (inspect failed feature intent: %v)", cause, err)
+	}
+	if state == "completed" {
+		return fmt.Errorf("%w (feature creation completed concurrently; preserving ref and intent)", cause)
+	}
+	if refCreatedByIntent {
+		currentTip, exists, err := flowgit.BranchTip(ctx, exchangePath, branch)
+		if err != nil {
+			return fmt.Errorf("%w (inspect orphan feature ref: %v)", cause, err)
+		}
+		if exists {
+			if currentTip != expectedSHA {
+				preserveErr := fmt.Errorf("feature branch %q has unexpected tip %s; preserving ref and intent", branch, currentTip)
+				if _, err := tx.ExecContext(ctx, `UPDATE feature_creation_intents SET last_error = ?, updated_at = ? WHERE id = ?`, preserveErr.Error(), formatTime(s.now().UTC()), id); err != nil {
+					return fmt.Errorf("%w (%v; record preservation error: %v)", cause, preserveErr, err)
+				}
+				if err := tx.Commit(ctx); err != nil {
+					return fmt.Errorf("%w (%v; commit preservation error: %v)", cause, preserveErr, err)
+				}
+				return fmt.Errorf("%w (%v)", cause, preserveErr)
+			}
+			if err := flowgit.DeleteRefIfMatches(ctx, exchangePath, "refs/heads/"+branch, expectedSHA); err != nil {
+				return fmt.Errorf("%w (delete orphan feature ref: %v)", cause, err)
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM feature_creation_intents WHERE id = ? AND state != 'completed'`, id); err != nil {
+		return fmt.Errorf("%w (delete failed feature intent: %v)", cause, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("%w (commit failed feature cleanup: %v)", cause, err)
+	}
+	return cause
 }
 
 func (s *FeatureService) Get(ctx context.Context, id string) (Feature, error) {

@@ -256,6 +256,88 @@
   padding-bottom: 64px;
 }
 
+/* Shared local navigation for the three Work list routes. It lives under
+   flow-app so the same markup can be rendered by plain Tasks and by the
+   feature/work-item custom elements. */
+.work-header {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 14px 16px 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.work-heading,
+.work-subnav,
+.work-breadcrumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.work-heading {
+  justify-content: space-between;
+}
+
+.work-heading h2 {
+  margin: 2px 0 0;
+  color: var(--ink);
+  font-size: var(--text-title);
+}
+
+.work-eyebrow,
+.work-project span {
+  display: block;
+  color: var(--muted);
+  font-size: var(--text-meta);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.work-project {
+  display: grid;
+  gap: 4px;
+  min-width: 180px;
+}
+
+.work-subnav {
+  gap: 2px;
+  margin: 0 -16px;
+  padding: 0 16px;
+  border-top: 1px solid var(--line);
+}
+
+.work-subnav a {
+  padding: 9px 12px 8px;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font-size: var(--text-quiet);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.work-subnav a:hover {
+  color: var(--ink);
+}
+
+.work-subnav a[aria-current="page"] {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+}
+
+.work-breadcrumbs {
+  padding-bottom: 10px;
+  color: var(--muted);
+  font-size: var(--text-meta);
+}
+
+.work-breadcrumbs a {
+  color: var(--ink-2);
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -472,6 +554,7 @@
 .tasks-view {
   display: grid;
   gap: 14px;
+  max-width: 1120px;
 }
 
 .tasks-controls {
@@ -483,14 +566,21 @@
 }
 
 .tasks-filters,
-.tasks-tools {
+.tasks-tools,
+.tasks-layout {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   align-items: center;
 }
 
+.tasks-layout {
+  padding-right: 4px;
+  border-right: 1px solid var(--line);
+}
+
 .tasks-project,
+.tasks-root,
 .tasks-search,
 .tasks-bulk-bar select,
 .tasks-bulk-bar input {
@@ -534,9 +624,65 @@
   width: 5.5rem;
 }
 
-.tasks-list {
+.tasks-list,
+.tasks-flat-list {
   display: grid;
   gap: 8px;
+}
+
+.tasks-group {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+.tasks-group-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px 8px;
+  min-width: 0;
+}
+
+.tasks-group-header > a,
+.tasks-group-header > span:not(.tasks-group-kind):not(.tasks-group-id):not(.tasks-group-count) {
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 650;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.tasks-group-header > a:hover {
+  color: var(--accent);
+}
+
+.tasks-group-kind,
+.tasks-group-id,
+.tasks-group-count {
+  color: var(--muted);
+  font-size: 0.6875rem;
+}
+
+.tasks-group-kind {
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tasks-group-count {
+  margin-left: auto;
+}
+
+.tasks-group-list {
+  display: grid;
+  gap: 6px;
 }
 
 .tasks-select-all {
@@ -560,6 +706,27 @@
   padding: 8px 11px;
 }
 
+.tasks-row-breadcrumb {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  max-width: min(32%, 18rem);
+  color: var(--muted);
+  font-size: 0.6875rem;
+  white-space: nowrap;
+}
+
+.tasks-row-breadcrumb a {
+  color: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-decoration: none;
+}
+
+.tasks-row-breadcrumb a:hover {
+  color: var(--accent);
+}
+
 .tasks-row-title {
   flex: 1 1 auto;
   min-width: 0;
@@ -578,6 +745,24 @@
 .tasks-row-meta {
   color: var(--ink-2);
   font-size: 0.75rem;
+}
+
+@media (max-width: 720px) {
+  .tasks-tools,
+  .tasks-project,
+  .tasks-root,
+  .tasks-search {
+    width: 100%;
+  }
+
+  .tasks-layout {
+    width: auto;
+    border-right: 0;
+  }
+
+  .tasks-row-breadcrumb {
+    max-width: calc(100% - 2rem);
+  }
 }
 
 .card {
@@ -1940,9 +2125,9 @@ tr.row-idle {
   accent-color: var(--accent);
 }
 
-/* Relations picker (create mode only): rows of {kind, target task id} that
-   declare the new task's relations up front. */
-.task-form .relation-picker {
+/* Relations picker (create mode only): generic work-item links declared in
+   the original create request. */
+.relation-picker {
   display: grid;
   gap: 8px;
   margin: 0;
@@ -1952,7 +2137,7 @@ tr.row-idle {
   background: var(--panel);
 }
 
-.task-form .relation-picker-label {
+.relation-picker-label {
   color: var(--muted);
   font-size: 0.65625rem;
   font-weight: 600;
@@ -1960,12 +2145,12 @@ tr.row-idle {
   text-transform: uppercase;
 }
 
-.task-form .relation-rows {
+.relation-rows {
   display: grid;
   gap: 8px;
 }
 
-.task-form .relation-row {
+.relation-row {
   display: grid;
   grid-template-columns: minmax(140px, 180px) minmax(200px, 1fr) auto;
   gap: 8px;
@@ -1973,12 +2158,30 @@ tr.row-idle {
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .task-form .relation-row {
+  .relation-row {
     animation: rise 180ms ease both;
   }
 }
 
-.task-form .relation-remove {
+@media (max-width: 720px) {
+  .relation-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .relation-row select,
+  .relation-row input {
+    grid-column: 1 / -1;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .relation-remove {
+    grid-column: 2;
+    justify-self: end;
+  }
+}
+
+.relation-remove {
   width: 32px;
   padding: 6px 0;
   line-height: 1;
@@ -1986,17 +2189,17 @@ tr.row-idle {
   color: var(--muted);
 }
 
-.task-form .relation-remove:hover {
+.relation-remove:hover {
   color: var(--danger);
   border-color: var(--danger);
   filter: none;
 }
 
-.task-form .relation-picker-actions {
+.relation-picker-actions {
   display: flex;
 }
 
-.task-form .relation-picker-actions .button {
+.relation-picker-actions .button {
   padding: 5px 12px;
   font-size: 0.75rem;
 }

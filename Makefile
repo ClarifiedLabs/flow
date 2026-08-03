@@ -27,11 +27,16 @@ test:
 js-test:
 	node --test internal/web/assets/app.test.mjs
 	node --test internal/web/assets/board-model.test.mjs
+	node --test internal/web/assets/create-relations.test.mjs
 	node --test internal/web/assets/elements.test.mjs
 	node --test internal/web/assets/lifecycle.test.mjs
 	node --test internal/web/assets/storage.test.mjs
 	node --test internal/web/assets/task-relations.test.mjs
 	node --test internal/web/assets/tasks-view.test.mjs
+	node --test internal/web/assets/work-context.test.mjs
+	node --test internal/web/assets/work-item-model.test.mjs
+	node --test internal/web/assets/work-items.test.mjs
+	node --test internal/web/assets/work-nav.test.mjs
 	node internal/web/assets/harness_models.test.mjs
 
 release:

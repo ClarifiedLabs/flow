@@ -4,11 +4,12 @@
 // this page only reports and triggers them.
 
 import { FlowElement } from "./base.js";
-import { epicHref, featureHref, taskHref } from "../api.js";
+import { epicHref, featureHref, projectTaskHref, taskHref } from "../api.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { value } from "../normalize.js";
 import { formatDate, formatRelative, shortSHA } from "../format.js";
 import { featureCountsLabel, featureDivergenceLabel } from "./features.js";
+import { renderWorkItemContext } from "../work-item-detail.js";
 
 function taskStateLabel(task) {
   const state = value(task, "state", "State");
@@ -17,19 +18,19 @@ function taskStateLabel(task) {
   return resolution ? `${state} (${resolution})` : String(state).replace(/_/g, " ");
 }
 
-function taskRow(task) {
+function taskRow(task, projectID, navigation = {}) {
   const id = value(task, "id", "ID");
   const title = value(task, "title", "Title") || id;
   const state = taskStateLabel(task);
   return `
-    <a class="member" href="${escapeAttr(taskHref("", id))}" ${state.startsWith("done") ? "data-merged" : ""}>
+    <a class="member" href="${escapeAttr(projectTaskHref(projectID, id, navigation))}" ${state.startsWith("done") ? "data-merged" : ""} data-link>
       <span class="member-id">${escapeHTML(id)}</span>
       <span class="member-title">${escapeHTML(title)}</span>
       <span class="member-note">${escapeHTML(state)}</span>
     </a>`;
 }
 
-function rebaseRow(rebase, projectID) {
+function rebaseRow(rebase, projectID, navigation = {}) {
   const id = value(rebase, "id", "ID");
   const state = value(rebase, "state", "State") || "";
   const taskID = value(rebase, "task_id", "TaskID");
@@ -42,7 +43,7 @@ function rebaseRow(rebase, projectID) {
       <span class="member-title">
         ${escapeHTML(state)}${newTip ? ` · ${escapeHTML(oldTip)} → ${escapeHTML(newTip)}` : ` · from ${escapeHTML(oldTip)}`}
       </span>
-      ${taskID ? `<a class="member-note" href="${escapeAttr(taskHref(projectID, taskID))}">${escapeHTML(taskID)}</a>` : ""}
+      ${taskID ? `<a class="member-note" href="${escapeAttr(projectTaskHref(projectID, taskID, navigation))}" data-link>${escapeHTML(taskID)}</a>` : ""}
       <span class="member-note">${escapeHTML(formatRelative(created))}</span>
     </div>`;
 }
@@ -60,6 +61,7 @@ export function renderFeature(data) {
 
   const id = value(feature, "id", "ID");
   const title = value(feature, "title", "Title") || id;
+  const childNavigation = { context: id, returnTo: data.currentHref || featureHref(projectID, id, data.navigation) };
   const body = value(feature, "body", "Body");
   const status = value(feature, "status", "Status") || "open";
   const branch = value(feature, "branch", "Branch");
@@ -90,7 +92,7 @@ export function renderFeature(data) {
         ${body ? `<p class="feature-body">${escapeHTML(body)}</p>` : ""}
         ${running ? `
           <p class="rebase-banner" role="status">
-            Rebase in progress${value(running, "task_id", "TaskID") ? ` — <a href="${escapeAttr(taskHref(projectID, value(running, "task_id", "TaskID")))}">${escapeHTML(value(running, "task_id", "TaskID"))}</a>` : ""}.
+            Rebase in progress${value(running, "task_id", "TaskID") ? ` — <a href="${escapeAttr(projectTaskHref(projectID, value(running, "task_id", "TaskID"), childNavigation))}" data-link>${escapeHTML(value(running, "task_id", "TaskID"))}</a>` : ""}.
             The feature's other tasks are blocked until it finishes.
           </p>` : ""}
         ${open ? `
@@ -110,13 +112,14 @@ export function renderFeature(data) {
           </div>
         </form>` : ""}
       <div class="members">
-        <h3>Tasks</h3>
-        ${tasks.length ? tasks.map(taskRow).join("") : `<p class="empty">No tasks assigned yet.</p>`}
+        <h3>Used by</h3>
+        ${tasks.length ? tasks.map((task) => taskRow(task, projectID, childNavigation)).join("") : `<p class="empty">No tasks use this feature yet.</p>`}
       </div>
-      ${children.length ? `<div class="members"><h3>Child containers</h3>${children.map((child) => {
+      ${data.hierarchy ? renderWorkItemContext({ projectID, item: value(data.hierarchy, "item", "Item") || value(data, "item", "Item"), items: data.workItems || [], ancestors: value(data.hierarchy, "ancestors", "Ancestors"), relations: value(data.hierarchy, "relations", "Relations") || [], blockers: value(data.hierarchy, "blockers", "Blockers") || [], rollup: value(data.hierarchy, "rollup", "Rollup"), attentionCount: Number(value(data.hierarchy, "attention_count", "AttentionCount") || 0), navigation: data.navigation, currentHref: data.currentHref }) : ""}
+      ${!data.hierarchy && children.length ? `<div class="members"><h3>Child containers</h3>${children.map((child) => {
         const childID = value(child, "id", "ID");
         const kind = value(child, "kind", "Kind");
-        const href = kind === "feature" ? featureHref(projectID, childID) : kind === "epic" ? epicHref(projectID, childID) : taskHref(projectID, childID);
+        const href = kind === "feature" ? featureHref(projectID, childID, childNavigation) : kind === "epic" ? epicHref(projectID, childID, childNavigation) : projectTaskHref(projectID, childID, childNavigation);
         return `<a class="member" href="${escapeAttr(href)}" data-link><span class="member-id">${escapeHTML(childID)}</span><span class="member-title">${escapeHTML(value(child, "title", "Title"))}</span><span class="member-note">${escapeHTML(kind)}</span></a>`;
       }).join("")}</div>` : ""}
       ${blockers.some((blocker) => !value(blocker, "resolved", "Resolved")) ? `<div class="members"><h3>Blocked by</h3>${blockers.filter((blocker) => !value(blocker, "resolved", "Resolved")).map((blocker) => {
@@ -126,7 +129,7 @@ export function renderFeature(data) {
       ${rebases.length ? `
         <div class="members">
           <h3>Rebases</h3>
-          ${rebases.map((rebase) => rebaseRow(rebase, projectID)).join("")}
+          ${rebases.map((rebase) => rebaseRow(rebase, projectID, childNavigation)).join("")}
         </div>` : ""}
     </section>`;
 }

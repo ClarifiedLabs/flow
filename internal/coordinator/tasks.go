@@ -163,9 +163,10 @@ type CreateTaskInput struct {
 }
 
 type CreateTaskWithDetailsInput struct {
-	Task      CreateTaskInput
-	Tags      []CreateTagInput
-	Relations []CreateTaskRelationInput
+	Task              CreateTaskInput
+	Tags              []CreateTagInput
+	Relations         []CreateTaskRelationInput
+	WorkItemRelations []CreateWorkItemRelationInput
 }
 
 type CreateTaskRelationInput struct {
@@ -304,6 +305,8 @@ func (s *TaskService) CreateTaskWithDetails(ctx context.Context, input CreateTas
 			return Task{}, err
 		}
 	}
+	items := NewWorkItemService(s.db, s.projectID)
+	items.now = s.now
 	for i := range input.Relations {
 		if input.Relations[i].CreatedBy == "" {
 			input.Relations[i].CreatedBy = taskInput.CreatedBy
@@ -334,18 +337,22 @@ func (s *TaskService) CreateTaskWithDetails(ctx context.Context, input CreateTas
 			return Task{}, err
 		}
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
 	if err != nil {
 		return Task{}, fmt.Errorf("begin create task transaction: %w", err)
 	}
 	defer tx.Rollback()
 
+	createRelationPlan, err := items.prepareCreateRelations(ctx, tx, WorkItemTask, taskInput.ParentItemID, input.WorkItemRelations, taskInput.CreatedBy)
+	if err != nil {
+		return Task{}, err
+	}
 	id, err := s.allocateTaskID(ctx, tx)
 	if err != nil {
 		return Task{}, err
 	}
 
-	parentItemID := strings.TrimSpace(taskInput.ParentItemID)
+	parentItemID := createRelationPlan.ParentItemID
 	if taskInput.FeatureID != nil {
 		featureID := strings.TrimSpace(*taskInput.FeatureID)
 		if err := featureOpenForAssignmentTx(ctx, tx, featureID); err != nil {
@@ -419,12 +426,13 @@ INSERT INTO tasks (
 	); err != nil {
 		return Task{}, fmt.Errorf("insert task: %w", err)
 	}
-	if parentItemID != "" {
-		items := NewWorkItemService(s.db, s.projectID)
-		items.now = s.now
-		if err := items.linkTx(ctx, tx, parentItemID, id, RelationParentOf, taskInput.CreatedBy); err != nil {
-			return Task{}, err
-		}
+	// Parent insertion remains before legacy task relations so their historical
+	// one-parent behavior and error ordering stay unchanged.
+	parentPlan := createRelationPlan
+	parentPlan.ParentItemID = parentItemID
+	parentPlan.Relations = nil
+	if _, err := items.linkCreateRelationsTx(ctx, tx, id, parentPlan, taskInput.CreatedBy); err != nil {
+		return Task{}, err
 	}
 
 	for _, tagInput := range input.Tags {
@@ -462,11 +470,23 @@ VALUES (?, ?, ?, ?)`,
 			return Task{}, err
 		}
 	}
-	if err := reconcileEpicAncestorsTx(ctx, tx, []string{id}, now); err != nil {
+	remainingPlan := createRelationPlan
+	remainingPlan.ParentItemID = ""
+	remainingPlan.Relations = remainingPlan.Relations[:0]
+	for _, relation := range createRelationPlan.Relations {
+		if relation.Kind != RelationParentOf || !relation.TargetIsNewItem {
+			remainingPlan.Relations = append(remainingPlan.Relations, relation)
+		}
+	}
+	touched, err := items.linkCreateRelationsTx(ctx, tx, id, remainingPlan, taskInput.CreatedBy)
+	if err != nil {
+		return Task{}, err
+	}
+	if err := reconcileEpicAncestorsTx(ctx, tx, touched, now); err != nil {
 		return Task{}, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return Task{}, fmt.Errorf("commit create task: %w", err)
 	}
 
@@ -1079,7 +1099,7 @@ func (s *TaskService) LinkTasks(ctx context.Context, sourceTaskID, targetTaskID 
 	return nil
 }
 
-func linkTasksInTx(ctx context.Context, tx *sql.Tx, sourceTaskID, targetTaskID string, kind RelationKind, actor Actor, nowText string) error {
+func linkTasksInTx(ctx context.Context, tx workItemRelationQuerier, sourceTaskID, targetTaskID string, kind RelationKind, actor Actor, nowText string) error {
 	sourceTaskID = strings.TrimSpace(sourceTaskID)
 	targetTaskID = strings.TrimSpace(targetTaskID)
 	if sourceTaskID == "" || targetTaskID == "" {
@@ -1156,7 +1176,7 @@ VALUES (?, ?, ?, ?, ?)`,
 // new-task child-of form relies on this to tell the user the chosen parent
 // cannot be used, while the transaction rollback still guarantees that the
 // failed create commits no task.
-func relationFKError(ctx context.Context, tx *sql.Tx, sourceTaskID, targetTaskID string, kind RelationKind, fkErr error) error {
+func relationFKError(ctx context.Context, tx workItemRelationQuerier, sourceTaskID, targetTaskID string, kind RelationKind, fkErr error) error {
 	sourceErr := taskExistsInTx(ctx, tx, sourceTaskID)
 	targetErr := taskExistsInTx(ctx, tx, targetTaskID)
 	switch {
@@ -1766,7 +1786,7 @@ func validateTagSlug(slug string) error {
 	return nil
 }
 
-func taskHasParent(ctx context.Context, tx *sql.Tx, taskID string) (bool, error) {
+func taskHasParent(ctx context.Context, tx workItemRelationQuerier, taskID string) (bool, error) {
 	var count int
 	if err := tx.QueryRowContext(ctx, `
 SELECT COUNT(*)
@@ -1917,7 +1937,7 @@ func scanTask(scanner taskScanner) (Task, error) {
 // featureOpenForAssignmentTx confirms the referenced feature exists and is
 // open. Tasks can only join an open feature: a landed or archived feature's
 // branch is frozen.
-func featureOpenForAssignmentTx(ctx context.Context, tx *sql.Tx, featureID string) error {
+func featureOpenForAssignmentTx(ctx context.Context, tx workItemRelationQuerier, featureID string) error {
 	var status string
 	err := tx.QueryRowContext(ctx, `SELECT status FROM features WHERE id = ?`, strings.TrimSpace(featureID)).Scan(&status)
 	if errors.Is(err, sql.ErrNoRows) {

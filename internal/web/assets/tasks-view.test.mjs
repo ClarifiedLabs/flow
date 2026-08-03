@@ -8,6 +8,11 @@ import assert from "node:assert/strict";
 const {
   TASKS_STATE_FILTERS,
   tasksQueryView,
+  tasksRootFromSearch,
+  tasksRootHref,
+  filteredTasksView,
+  taskContainerGroupsView,
+  pruneTasksSelectionView,
   renderTasksControlsView,
   renderTasksListView,
   renderTaskRowView,
@@ -16,14 +21,18 @@ const {
   applyTasksBulkAction,
   toggleTasksState,
 } = await import("./tasks-view.js");
+const { buildWorkItemIndex } = await import("./work-item-model.js");
 
 function fakeApp(overrides = {}) {
   return {
     tasksState: new Set(["unscheduled", "scheduled", "in_progress", "done"]),
     tasksProject: "",
     tasksQuery: "",
+    tasksRoot: "",
+    tasksLayout: "flat",
     tasksSelected: new Set(),
     tasksList: [],
+    tasksWorkIndexes: new Map(),
     tasksProjectBadge: false,
     projects: [],
     selectedProjectIDs: () => [],
@@ -58,6 +67,28 @@ test("tasksQueryView composes project, repeatable state and search params", () =
   assert.equal(tasksQueryView(narrowed, new Set(["done"])), "?project=p-b&state=done");
 });
 
+function hierarchyApp(overrides = {}) {
+  const items = [
+    { id: "e-1", kind: "epic", title: "Launch initiative" },
+    { id: "f-1", kind: "feature", title: "Checkout", parent_item_id: "e-1" },
+    { id: "t-nested", kind: "task", title: "Nested", parent_item_id: "f-1" },
+    { id: "t-standalone", kind: "task", title: "Standalone" },
+    { id: "t-orphan", kind: "task", title: "Orphan", parent_item_id: "missing" },
+  ];
+  const task = (ID, Title) => ({ ID, Title, State: "scheduled", project_id: "p-1" });
+  return fakeApp({
+    projects: [{ id: "p-1", name: "Flow" }],
+    tasksList: [
+      task("t-nested", "Nested"),
+      task("t-standalone", "Standalone"),
+      task("t-orphan", "Orphan"),
+      task("t-missing", "Missing summary"),
+    ],
+    tasksWorkIndexes: new Map([["p-1", buildWorkItemIndex({ items })]]),
+    ...overrides,
+  });
+}
+
 test("renderTasksControlsView paints chips, the project dropdown and the search box", () => {
   const app = fakeApp({
     tasksState: new Set(["scheduled", "done"]),
@@ -82,6 +113,77 @@ test("renderTasksControlsView paints chips, the project dropdown and the search 
   assert.match(html, /<option value="p-1" selected>flow<\/option>/);
   assert.match(html, /<option value="p-2">site<\/option>/);
   assert.match(html, /data-tasks-search[^>]*value="flaky"/);
+});
+
+test("container controls expose a persisted layout toggle and top-level root filter", () => {
+  const app = hierarchyApp({ tasksLayout: "container", tasksRoot: "e-1" });
+  const html = renderTasksControlsView(app);
+  assert.match(html, /data-tasks-layout="flat" aria-pressed="false"/);
+  assert.match(html, /class="chip active" data-tasks-layout="container" aria-pressed="true"/);
+  assert.match(html, /data-tasks-root aria-label="Filter by top-level container"/);
+  assert.match(html, /<option value="e-1" selected>Launch initiative · e-1<\/option>/);
+  assert.match(html, /<option value="standalone">Standalone<\/option>/);
+  assert.match(html, /<option value="unknown">Unknown<\/option>/);
+  assert.doesNotMatch(html, /<option value="f-1"/, "the filter uses top-level rather than nearest containers");
+});
+
+test("root deep links preserve other UI params and never enter the aggregate tasks query", () => {
+  assert.equal(tasksRootFromSearch("?project=p-1&root=%20e-1%20&state=done"), "e-1");
+  assert.equal(
+    tasksRootHref("?project=p-1&state=done&state=scheduled&q=flaky", "e / 1"),
+    "/ui/tasks?project=p-1&state=done&state=scheduled&q=flaky&root=e+%2F+1",
+  );
+  assert.equal(tasksRootHref("?project=p-1&state=done&root=e-1", ""), "/ui/tasks?project=p-1&state=done");
+  const app = fakeApp({ tasksProject: "p-1", tasksRoot: "e-1" });
+  assert.equal(tasksQueryView(app, new Set(["done"]), { q: "flaky" }), "?project=p-1&state=done&q=flaky");
+});
+
+test("root filtering classifies nested, standalone, orphaned and missing-summary tasks", () => {
+  const app = hierarchyApp();
+  assert.deepEqual(taskContainerGroupsView(app).map((group) => [group.id, group.tasks.map((task) => task.ID)]), [
+    ["e-1", ["t-nested"]],
+    ["standalone", ["t-standalone"]],
+    ["unknown", ["t-orphan", "t-missing"]],
+  ]);
+
+  app.tasksRoot = "e-1";
+  assert.deepEqual(filteredTasksView(app).map((task) => task.ID), ["t-nested"]);
+  app.tasksRoot = "unknown";
+  assert.deepEqual(filteredTasksView(app).map((task) => task.ID), ["t-orphan", "t-missing"]);
+});
+
+test("renderTasksListView groups by top-level container with Standalone and Unknown sections", () => {
+  const list = { innerHTML: "" };
+  const app = hierarchyApp({ tasksLayout: "container" });
+  app.querySelector = (selector) => (selector === ".tasks-list" ? list : null);
+  renderTasksListView(app);
+  assert.match(list.innerHTML, /data-tasks-group="e-1"/);
+  assert.match(list.innerHTML, /data-tasks-group="standalone"/);
+  assert.match(list.innerHTML, /data-tasks-group="unknown"/);
+  assert.doesNotMatch(list.innerHTML, /data-tasks-group="f-1"/);
+  assert.equal((list.innerHTML.match(/class="tasks-group-list" role="list"/g) || []).length, 3);
+  assert.equal((list.innerHTML.match(/class="tasks-row" role="listitem"/g) || []).length, 4);
+  assert.equal((list.innerHTML.match(/data-task-row=/g) || []).length, 4);
+});
+
+test("flat rendering keeps aggregate order and adds only the top-level ancestor breadcrumb", () => {
+  const list = { innerHTML: "" };
+  const app = hierarchyApp({ tasksLayout: "flat" });
+  app.querySelector = (selector) => (selector === ".tasks-list" ? list : null);
+  renderTasksListView(app);
+  assert.doesNotMatch(list.innerHTML, /class="tasks-group"/);
+  assert.match(list.innerHTML, /Select all 4 visible<\/label>\s*<div class="tasks-flat-list" role="list">/);
+  assert.equal((list.innerHTML.match(/class="tasks-row" role="listitem"/g) || []).length, 4);
+  assert.ok(list.innerHTML.indexOf('data-task-row="t-nested"') < list.innerHTML.indexOf('data-task-row="t-standalone"'));
+  assert.match(list.innerHTML, /class="tasks-row-breadcrumb"[^>]*>.*Launch initiative.*<\/nav>/s);
+  assert.doesNotMatch(list.innerHTML, />Checkout<\/a><span aria-hidden="true">\/<\/span><\/nav>/, "the nearest feature is not used as the top-level crumb");
+  assert.equal((list.innerHTML.match(/class="tasks-row-breadcrumb"/g) || []).length, 1, "standalone and unknown tasks have no fake ancestor");
+});
+
+test("selection pruning follows the currently visible root scope", () => {
+  const app = hierarchyApp({ tasksRoot: "unknown", tasksSelected: new Set(["t-nested", "t-orphan", "t-missing"]) });
+  pruneTasksSelectionView(app);
+  assert.deepEqual([...app.tasksSelected], ["t-orphan", "t-missing"]);
 });
 
 test("renderTasksListView hints at the state chips when none are selected", () => {
@@ -115,7 +217,7 @@ test("renderTasksControlsView lights All when every state is selected", () => {
   const app = fakeApp({ tasksState: new Set(["unscheduled", "scheduled", "in_progress", "done"]) });
   const html = renderTasksControlsView(app);
   assert.match(html, /class="chip active" data-tasks-state="all" aria-pressed="true"/);
-  assert.equal((html.match(/aria-pressed="true"/g) || []).length, 5, "All plus all four state chips are pressed");
+  assert.equal((html.match(/data-tasks-state="[^"]+"[^>]*aria-pressed="true"/g) || []).length, 5, "All plus all four state chips are pressed");
 });
 
 test("toggleTasksState flips one state chip and All selects or clears every state", () => {

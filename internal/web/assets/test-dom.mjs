@@ -233,6 +233,14 @@ export class TestNode {
     return false;
   }
 
+  focus() {
+    if (globalThis.document) globalThis.document.activeElement = this;
+  }
+
+  blur() {
+    if (globalThis.document?.activeElement === this) globalThis.document.activeElement = null;
+  }
+
   // click() dispatches a bubbling click, which is how the delegated action
   // table is exercised.
   click() {
@@ -401,6 +409,7 @@ export function installTestDOM() {
   globalThis.document = {
     body: documentNode,
     documentElement: new TestNode("html"),
+    activeElement: null,
     cookie: "flow_ui_csrf=csrf-token",
     createElement,
     // The document queries the whole tree, like a real Document. Document-wide

@@ -98,6 +98,61 @@ func UpdateRef(ctx context.Context, exchangeRepoPath, ref, sha string) error {
 // successful only when the existing ref already names expectedSHA; it can
 // never repoint a ref created by an earlier attempt.
 func CreateOrVerifyRef(ctx context.Context, exchangeRepoPath, ref, expectedSHA string) error {
+	_, err := CreateOrVerifyRefOwned(ctx, exchangeRepoPath, ref, expectedSHA)
+	return err
+}
+
+// CreateOrVerifyRefOwned has CreateOrVerifyRef's compare-and-swap semantics and
+// reports whether this call created the previously absent ref. An existing ref
+// at expectedSHA is a successful replay but is not attributed to this caller.
+func CreateOrVerifyRefOwned(ctx context.Context, exchangeRepoPath, ref, expectedSHA string) (bool, error) {
+	ref = strings.TrimSpace(ref)
+	expectedSHA = strings.TrimSpace(expectedSHA)
+	if ref == "" || expectedSHA == "" {
+		return false, errors.New("ref and expected sha are required")
+	}
+	if (len(expectedSHA) != 40 && len(expectedSHA) != 64) || !isHexObjectID(expectedSHA) {
+		return false, errors.New("expected sha must be a full SHA-1 or SHA-256 object id")
+	}
+	if err := gitBareRun(ctx, exchangeRepoPath, nil, "check-ref-format", ref); err != nil {
+		return false, fmt.Errorf("validate ref %s: %w", ref, err)
+	}
+	if exists, err := CommitExists(ctx, exchangeRepoPath, expectedSHA); err != nil {
+		return false, err
+	} else if !exists {
+		return false, fmt.Errorf("expected commit %s does not exist", expectedSHA)
+	}
+
+	if symbolic, err := gitExitCode(ctx, "", exchangeRepoPath, nil, "symbolic-ref", "-q", ref); err != nil {
+		return false, fmt.Errorf("inspect ref %s: %w", ref, err)
+	} else if symbolic == 0 {
+		return false, fmt.Errorf("ref %s is symbolic; immutable refs must be direct", ref)
+	}
+
+	zeroSHA := strings.Repeat("0", len(expectedSHA))
+	createErr := gitBareRun(ctx, exchangeRepoPath, nil, "update-ref", "--no-deref", ref, expectedSHA, zeroSHA)
+	if createErr == nil {
+		return true, nil
+	}
+	if symbolic, err := gitExitCode(ctx, "", exchangeRepoPath, nil, "symbolic-ref", "-q", ref); err != nil {
+		return false, fmt.Errorf("inspect ref %s after create conflict: %w", ref, err)
+	} else if symbolic == 0 {
+		return false, fmt.Errorf("ref %s is symbolic; immutable refs must be direct", ref)
+	}
+
+	actualSHA, resolveErr := gitBareOutput(ctx, exchangeRepoPath, nil, "rev-parse", "--verify", ref)
+	if resolveErr == nil && strings.TrimSpace(actualSHA) == expectedSHA {
+		return false, nil
+	}
+	if resolveErr != nil {
+		return false, fmt.Errorf("create ref %s at %s: %w", ref, expectedSHA, createErr)
+	}
+	return false, fmt.Errorf("ref %s already points to %s, expected %s", ref, strings.TrimSpace(actualSHA), expectedSHA)
+}
+
+// DeleteRefIfMatches removes a direct ref only while it still names expectedSHA.
+// Git's old-value check prevents cleanup from deleting a concurrently moved ref.
+func DeleteRefIfMatches(ctx context.Context, exchangeRepoPath, ref, expectedSHA string) error {
 	ref = strings.TrimSpace(ref)
 	expectedSHA = strings.TrimSpace(expectedSHA)
 	if ref == "" || expectedSHA == "" {
@@ -106,40 +161,10 @@ func CreateOrVerifyRef(ctx context.Context, exchangeRepoPath, ref, expectedSHA s
 	if (len(expectedSHA) != 40 && len(expectedSHA) != 64) || !isHexObjectID(expectedSHA) {
 		return errors.New("expected sha must be a full SHA-1 or SHA-256 object id")
 	}
-	if err := gitBareRun(ctx, exchangeRepoPath, nil, "check-ref-format", ref); err != nil {
-		return fmt.Errorf("validate ref %s: %w", ref, err)
+	if err := gitBareRun(ctx, exchangeRepoPath, nil, "update-ref", "--no-deref", "-d", ref, expectedSHA); err != nil {
+		return fmt.Errorf("delete %s at %s: %w", ref, expectedSHA, err)
 	}
-	if exists, err := CommitExists(ctx, exchangeRepoPath, expectedSHA); err != nil {
-		return err
-	} else if !exists {
-		return fmt.Errorf("expected commit %s does not exist", expectedSHA)
-	}
-
-	if symbolic, err := gitExitCode(ctx, "", exchangeRepoPath, nil, "symbolic-ref", "-q", ref); err != nil {
-		return fmt.Errorf("inspect ref %s: %w", ref, err)
-	} else if symbolic == 0 {
-		return fmt.Errorf("ref %s is symbolic; immutable refs must be direct", ref)
-	}
-
-	zeroSHA := strings.Repeat("0", len(expectedSHA))
-	createErr := gitBareRun(ctx, exchangeRepoPath, nil, "update-ref", "--no-deref", ref, expectedSHA, zeroSHA)
-	if createErr == nil {
-		return nil
-	}
-	if symbolic, err := gitExitCode(ctx, "", exchangeRepoPath, nil, "symbolic-ref", "-q", ref); err != nil {
-		return fmt.Errorf("inspect ref %s after create conflict: %w", ref, err)
-	} else if symbolic == 0 {
-		return fmt.Errorf("ref %s is symbolic; immutable refs must be direct", ref)
-	}
-
-	actualSHA, resolveErr := gitBareOutput(ctx, exchangeRepoPath, nil, "rev-parse", "--verify", ref)
-	if resolveErr == nil && strings.TrimSpace(actualSHA) == expectedSHA {
-		return nil
-	}
-	if resolveErr != nil {
-		return fmt.Errorf("create ref %s at %s: %w", ref, expectedSHA, createErr)
-	}
-	return fmt.Errorf("ref %s already points to %s, expected %s", ref, strings.TrimSpace(actualSHA), expectedSHA)
+	return nil
 }
 
 func isHexObjectID(value string) bool {

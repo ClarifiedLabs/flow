@@ -22,9 +22,7 @@ export const LANES = [
 
 export const NAV = [
   ["/ui/board", "Board"],
-  ["/ui/tasks", "Tasks"],
-  ["/ui/work-items", "Work Items"],
-  ["/ui/features", "Features"],
+  ["/ui/work-items", "Work"],
   ["/ui/console", "Console"],
   ["/ui/done", "Done"],
   ["/ui/flows", "Flows"],
@@ -69,6 +67,10 @@ export const TASKS_STATE_STORAGE_KEY = "flow.ui.tasksState";
 export const TASKS_PROJECT_STORAGE_KEY = "flow.ui.tasksProject";
 
 export const TASKS_QUERY_STORAGE_KEY = "flow.ui.tasksQuery";
+
+export const WORK_PROJECT_STORAGE_KEY = "flow.ui.workProject";
+
+export const WORK_PREFERENCES_STORAGE_KEY = "flow.ui.workPreferences";
 
 export const DIFF_MODE_STORAGE_KEY = "flow.ui.diffMode";
 
@@ -115,6 +117,8 @@ export const DONE_OUTCOMES = new Set(["all", "completed", "merged", "rejected", 
 // moment lifecycle.js catches up with the server constants.
 export const TASKS_ALL_STATE = "all";
 export const TASKS_STATES = new Set(LIFECYCLE_STATES);
+export const TASKS_LIST_VIEWS = new Set(["flat", "container"]);
+export const TASKS_LIST_VIEW_STORAGE_KEY = "flow.ui.tasksListView";
 
 export const THEME_PREFERENCES = new Set(["system", "light", "dark"]);
 

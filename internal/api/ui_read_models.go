@@ -239,6 +239,38 @@ func uiChangeSummaryFromChange(change coordinator.Change) *uiChangeSummary {
 	}
 }
 
+// uiTaskNeedsAttention is the server-side counterpart of board-model.js's
+// needsYou policy. Keeping it beside the card projection lets portfolio reads
+// aggregate the same durable wait/check state as the board.
+func uiTaskNeedsAttention(card uiTaskCard, lane coordinator.LaneState) bool {
+	convergenceHold := card.Held && card.HeldBy == "system"
+	if convergenceHold {
+		return true
+	}
+	if card.Held {
+		return false
+	}
+	readyToMerge := card.StepCount > 0 && card.StepIndex >= card.StepCount-1 &&
+		card.RequiredChecks.Total > 0 && card.RequiredChecks.Satisfied == card.RequiredChecks.Total &&
+		card.Wait == nil && lane != coordinator.LaneStateAwaitingWorker
+	if readyToMerge {
+		return true
+	}
+	if card.Wait == nil {
+		return false
+	}
+	switch card.Wait.Reason {
+	case coordinator.WorkflowWaitReasonTransitionBudgetExhausted, coordinator.WorkflowWaitReasonReviewCycleLimit:
+		return true
+	}
+	switch card.Wait.Kind {
+	case coordinator.WorkflowWaitHumanGate, coordinator.WorkflowWaitOperatorIntervention:
+		return true
+	default:
+		return false
+	}
+}
+
 func uiRequiredCheckSummaryFromChecks(checks []coordinator.Check) uiRequiredCheckSummary {
 	var summary uiRequiredCheckSummary
 	for _, check := range checks {

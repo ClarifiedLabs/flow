@@ -16,7 +16,7 @@
 // repaint re-applies disabled/aria-busy/is-busy and the status-line message to
 // whatever replacement control it swapped in.
 
-import { apiDelete, apiGet, apiPatch, apiPost, epicsAPIBase, featuresAPIBase, taskAPIBase, taskConsoleAPIPath } from "./api.js";
+import { apiDelete, apiGet, apiPatch, apiPost, epicsAPIBase, featuresAPIBase, taskAPIBase, taskConsoleAPIPath, workItemAPIPath } from "./api.js";
 import { releaseConsoleView, startConsoleView } from "./console-view.js";
 import { parseWaitDetails } from "./task-model.js";
 
@@ -367,6 +367,17 @@ export const ACTIONS = {
   // relationRemove unlinks one stored relation row. The button carries the row's
   // source task (the path) and the target/kind (the body), so it removes the
   // exact relation regardless of which side the viewed task sits on.
+  async workItemRelationRemove(app, element, dataset) {
+    await apiDelete(workItemAPIPath(dataset.project, dataset.workItemRelationRemove, "/relations"), {
+      source_item_id: dataset.source,
+      target_item_id: dataset.target,
+      kind: dataset.kind,
+    });
+    if (dataset.kind === "parent_of") app.workItemsByProject?.delete(dataset.project);
+    await app.refresh();
+    return "Relation removed";
+  },
+
   async relationRemove(app, element, dataset) {
     await apiDelete(`${taskAPIBase(dataset.project)}/${encodeURIComponent(dataset.relationRemove)}/relations`, {
       target_task_id: dataset.target,
@@ -804,6 +815,7 @@ const PENDING_LABELS = {
   releaseConsole: "Releasing console",
   threadClaim: "Claiming thread",
   relationRemove: "Removing relation",
+  workItemRelationRemove: "Removing relation",
 };
 
 // failureMessage renders an arbitrary rejection value as a status-line string.

@@ -131,9 +131,9 @@ test("nav lane counts render from the shared vocabulary keys", () => {
   const boardHTML = renderNavStatus("/ui/board", { board });
   assert.match(boardHTML, new RegExp(`data-board-lane="${LIFECYCLE_SCHEDULED}" title="3 scheduled tasks">3`));
   assert.match(boardHTML, new RegExp(`data-board-lane="${LIFECYCLE_IN_PROGRESS}" title="4 in progress tasks">4`));
-  // The board badge reads no unscheduled lane; the Tasks badge does, and both
-  // key off the vocabulary.
+  // The board badge reads no unscheduled lane; the consolidated Work badge
+  // does, and both key off the vocabulary.
   assert.doesNotMatch(boardHTML, new RegExp(`data-board-lane="${LIFECYCLE_UNSCHEDULED}"`));
-  assert.match(renderNavStatus("/ui/tasks", { board }), new RegExp(`title="2 ${LIFECYCLE_UNSCHEDULED} tasks">2`));
+  assert.match(renderNavStatus("/ui/work-items", { board }), new RegExp(`title="2 ${LIFECYCLE_UNSCHEDULED} tasks">2`));
   assert.match(renderNavStatus("/ui/done", { [LIFECYCLE_DONE]: 7 }), new RegExp(`title="7 done items">7`));
 });

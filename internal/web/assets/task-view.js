@@ -2,6 +2,14 @@
 
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
+import { buildWorkItemIndex, workItemDescendants, workItemFeatureID, workItemID, workItemKind, workItemState } from "./work-item-model.js";
+import {
+  bindRelationsPickerView as bindCreateRelationsPickerView,
+  relationsPickerView,
+  refreshRelationsPickerSuggestions,
+} from "./create-relations.js";
+
+export { relationTargetSuggestionsView } from "./create-relations.js";
 
 const SKIPPABLE_WORKFLOW_STEP_KINDS = new Set(["automated_checks", "change_review", "verify_change"]);
 
@@ -11,13 +19,11 @@ export function workflowStepCanBeSkipped(kind) {
 
 export async function renderNewTaskView(app, context) {
   if (context && !app.isActiveLoad(context)) return false;
-  const defaultProject = defaultCreateProject(app, "");
+  const params = new URLSearchParams(window.location.search);
+  const defaultProject = defaultCreateProject(app, params.get("project") || "");
+  const parentItemID = String(params.get("parent") || "").trim();
   if (defaultProject) await app.ensureFlows(defaultProject);
-  if (defaultProject && typeof app.ensureFeatures === "function") await app.ensureFeatures(defaultProject);
-  // Load the default project's tasks too, so the relation picker's target-task
-  // suggestions are populated even on a direct visit with an empty cache. A
-  // failed or empty load just leaves the picker in manual-entry mode.
-  if (defaultProject && typeof app.ensureTasks === "function") await app.ensureTasks(defaultProject);
+  if (defaultProject && typeof app.ensureWorkItems === "function") await app.ensureWorkItems(defaultProject);
   if (context && !app.isActiveLoad(context)) return false;
   app.setTitle("New Task");
   const content = app.querySelector(".content");
@@ -28,7 +34,7 @@ export async function renderNewTaskView(app, context) {
           <h2>New Task</h2>
         </div>
       </div>
-      ${renderTaskFormView(app, { priority: 0 }, { mode: "create", submitLabel: "Create" })}
+      ${renderTaskFormView(app, { priority: 0, parent_item_id: parentItemID }, { mode: "create", submitLabel: "Create", projectID: defaultProject })}
     </section>
   `;
   const form = content.querySelector?.("[data-task-form]");
@@ -88,139 +94,38 @@ export function featureSelectOptionsView(app, projectID, selectedFeatureID) {
   return options.join("");
 }
 
-// RELATION_KIND_OPTIONS lists the relation kinds the create picker offers,
-// labelled from the new task's perspective. "child of X" means the new task
-// becomes X's child. parent_of stores source = parent, so a child-of row must
-// make the new task the relation *target*; it is sent with target_is_new_task
-// set and a blank target (X parent_of new-task), which the server resolves to
-// the new task inside the create transaction. blocks and related_to store
-// source = the new task, so they go straight into the create payload as
-// {target_task_id, kind}.
-export const RELATION_KIND_OPTIONS = [
-  { kind: "parent_of", label: "child of" },
-  { kind: "blocks", label: "blocks" },
-  { kind: "related_to", label: "related to" },
-];
-
-// relationKindOptionsView renders the picker's kind <option>s, optionally
-// preselecting one kind.
-export function relationKindOptionsView(selectedKind = "") {
-  return RELATION_KIND_OPTIONS.map((option) =>
-    `<option value="${escapeAttr(option.kind)}" ${option.kind === selectedKind ? "selected" : ""}>${escapeHTML(option.label)}</option>`,
-  ).join("");
+export function workItemParentOptionsView(app, projectID, selectedParentID = "", movingItemID = "") {
+  const items = (app.workItemsByProject && app.workItemsByProject.get(String(projectID || "").trim())) || [];
+  const index = buildWorkItemIndex({ items });
+  const excluded = new Set([String(movingItemID || ""), ...workItemDescendants(index, movingItemID).map(workItemID)]);
+  const selected = String(selectedParentID || "").trim();
+  return index.items
+    .filter((item) => {
+      const id = workItemID(item);
+      const capabilities = value(item, "capabilities", "Capabilities") || {};
+      const canContain = value(capabilities, "can_contain", "CanContain");
+      return id && !excluded.has(id) && (canContain === true || (canContain == null && workItemKind(item) !== "task")) && (!workItemState(item).terminal || id === selected);
+    })
+    .map((item) => `<option value="${escapeAttr(workItemID(item))}">${escapeHTML(value(item, "title", "Title") || workItemID(item))} · ${escapeHTML(workItemKind(item))}</option>`)
+    .join("");
 }
 
-// relationPickerRowView renders one picker row: a kind select, a target task
-// id input, and a remove button. Rows are appended to [data-relation-rows]
-// after render, so the markup here is the initial empty state.
-//
-// DEFAULT_RELATION_KIND is the kind a new row starts on. The picker's rows
-// default to a source-outward kind (related_to): the new task is the relation
-// source, so several default rows with distinct targets submit as ordinary
-// create-payload relations, and the one-parent limit only applies when the
-// user explicitly picks "child of".
-export const DEFAULT_RELATION_KIND = "related_to";
-
-export function relationPickerRowView() {
-  return `
-    <div class="relation-row" data-relation-row>
-      <select name="relation_kind" data-relation-kind>
-        ${relationKindOptionsView(DEFAULT_RELATION_KIND)}
-      </select>
-      <input name="relation_target" data-relation-target placeholder="Task id" list="relation-target-tasks">
-      <button class="button secondary relation-remove" type="button" data-relation-remove aria-label="Remove relation">&times;</button>
-    </div>
-  `;
+export function inferredFeatureView(app, projectID, parentItemID) {
+  const items = (app.workItemsByProject && app.workItemsByProject.get(String(projectID || "").trim())) || [];
+  const index = buildWorkItemIndex({ items });
+  const parent = index.byID.get(String(parentItemID || "").trim());
+  if (!parent) return "No feature inferred";
+  const featureID = workItemKind(parent) === "feature" ? workItemID(parent) : workItemFeatureID(parent);
+  const feature = index.byID.get(featureID);
+  return featureID ? `Feature: ${value(feature || {}, "title", "Title") || featureID}` : "No feature inferred";
 }
 
-// relationTargetSuggestionsView renders the datalist <option>s offering the
-// selected project's existing tasks as relation targets. The value is the task
-// id (what gets submitted); when a title is present the label shows it so a
-// reader can tell tasks apart. The list is read from the per-project task cache
-// (app.ensureTasks) so it stays project-scoped; a missing cache entry yields no
-// options and the input falls back to manual entry.
-export function relationTargetSuggestionsView(app, projectID) {
-  const id = String(projectID || "").trim();
-  const tasks = (app && app.tasksByProject && app.tasksByProject.get(id)) || [];
-  return tasks.map((task) => {
-    const taskID = value(task, "id", "ID");
-    const title = value(task, "title", "Title");
-    return `<option value="${escapeAttr(taskID)}"${title ? ` label="${escapeAttr(title)}"` : ""}></option>`;
-  }).join("");
+// The task-create page is static, but uses the same delegated row behavior as
+// the repainting work-item elements.
+export function bindRelationsPickerView(form) {
+  bindCreateRelationsPickerView(form);
 }
 
-// relationsPickerView renders the create-mode-only picker: a labelled list of
-// relation rows plus an "Add relation" button, and a datalist of the selected
-// project's existing task ids so the target input can autocomplete. It starts
-// with one row so the picker's shape is visible immediately; a row left with a
-// blank target is dropped on submit.
-export function relationsPickerView(app, projectID) {
-  return `
-      <div class="wide relation-picker" data-relation-picker>
-        <span class="relation-picker-label">Relations</span>
-        <div class="relation-rows" data-relation-rows>${relationPickerRowView()}</div>
-        <div class="relation-picker-actions">
-          <button class="button secondary" type="button" data-relation-add>Add relation</button>
-        </div>
-        <datalist id="relation-target-tasks">${relationTargetSuggestionsView(app, projectID)}</datalist>
-      </div>`;
-}
-
-// bindRelationRowRemove wires a row's remove button to drop the row.
-function bindRelationRowRemove(row) {
-  const removeButton = row.querySelector?.("[data-relation-remove]");
-  if (removeButton && typeof removeButton.addEventListener === "function") {
-    removeButton.addEventListener("click", () => row.remove());
-  }
-}
-
-// bindRelationsPickerView wires the create form's relation picker: the add
-// button appends a row, each row's remove button drops it. Rows are created by
-// parsing relationPickerRowView into a detached container so the markup stays
-// the single source of truth. The new-task page is static (no poll), so these
-// direct listeners are never lost to a repaint.
-//
-// When app is supplied and the form can switch projects, changing the project
-// select reloads that project's task suggestions into the shared datalist, so
-// the target-task autocomplete stays scoped to the chosen project. The refresh
-// is best-effort: a failed or empty load leaves the datalist empty and the
-// input in manual-entry mode.
-export function bindRelationsPickerView(form, app) {
-  if (!form || typeof form.querySelector !== "function") return;
-  const rows = form.querySelector("[data-relation-rows]");
-  const addButton = form.querySelector("[data-relation-add]");
-  if (!rows || !addButton || typeof addButton.addEventListener !== "function") return;
-  for (const row of rows.querySelectorAll?.("[data-relation-row]") || []) bindRelationRowRemove(row);
-  addButton.addEventListener("click", () => {
-    const container = document.createElement("div");
-    container.innerHTML = relationPickerRowView();
-    const row = container.firstElementChild;
-    if (!row) return;
-    bindRelationRowRemove(row);
-    rows.appendChild(row);
-    row.querySelector("[data-relation-target]")?.focus?.();
-  });
-  const projectSelect = form.querySelector('[name="project"]');
-  if (app && projectSelect && typeof app.ensureTasks === "function" && typeof projectSelect.addEventListener === "function") {
-    projectSelect.addEventListener("change", async () => {
-      const projectID = String(projectSelect.value || "").trim();
-      try {
-        await app.ensureTasks(projectID);
-      } catch {
-        // Best-effort refresh: a rejected load must not reject the listener
-        // or leave the prior project's suggestions painted as current; the
-        // repaint below reads the (empty) cache and falls back to manual
-        // entry.
-      }
-      // A rapid project switch could resolve out of order; only repaint when
-      // this load is still for the selected project so the suggestions never
-      // disagree with the project select.
-      if (String(projectSelect.value || "").trim() !== projectID) return;
-      const datalist = form.querySelector("#relation-target-tasks");
-      if (datalist) datalist.innerHTML = relationTargetSuggestionsView(app, projectID);
-    });
-  }
-}
 
 export function renderTaskFormView(app, task, options = {}) {
   const mode = options.mode || "edit";
@@ -245,6 +150,7 @@ export function renderTaskFormView(app, task, options = {}) {
     : "";
   const selectedFlowID = value(task, "flow_id", "FlowID");
   const flowOptions = flowSelectOptionsView(app, defaultProject, selectedFlowID);
+  const selectedParentID = String(value(task, "parent_item_id", "ParentItemID") || "");
   return `
     <form class="task-form" data-task-form="${escapeAttr(taskID)}" data-task-form-mode="${escapeAttr(mode)}"${projectID ? ` data-project="${escapeAttr(projectID)}"` : (mode === "create" && projects.length === 1 ? ` data-project="${escapeAttr(value(projects[0], "id", "ID"))}"` : "")}>
       ${projectField}
@@ -258,12 +164,12 @@ export function renderTaskFormView(app, task, options = {}) {
           ${flowOptions}
         </select>
       </label>
-      <label class="task-field-feature">
-        <span>Feature</span>
-        <select name="feature_id" data-feature-select aria-label="Feature">
-          ${featureSelectOptionsView(app, defaultProject, value(task, "feature_id", "FeatureID"))}
-        </select>
-      </label>
+      ${mode === "create" ? `<label class="task-field-feature">
+        <span>Parent</span>
+        <input name="parent_item_id" data-parent-item-input list="task-parent-items" value="${escapeAttr(selectedParentID)}" placeholder="No parent">
+        <datalist id="task-parent-items">${workItemParentOptionsView(app, defaultProject, selectedParentID)}</datalist>
+        <small data-inferred-feature>${escapeHTML(inferredFeatureView(app, defaultProject, selectedParentID))}</small>
+      </label>` : ""}
       <label class="task-field-title wide">
         <span>Title</span>
         <input name="title" value="${escapeAttr(value(task, "title", "Title"))}" required>
@@ -277,7 +183,7 @@ export function renderTaskFormView(app, task, options = {}) {
         <span>Attachments</span>
         <input name="attachments" type="file" multiple>
       </label>` : ""}
-      ${mode === "create" ? relationsPickerView(app, defaultProject) : ""}
+      ${mode === "create" ? relationsPickerView((app.workItemsByProject && app.workItemsByProject.get(defaultProject)) || []) : ""}
       <div class="form-actions task-form-actions">
         ${mode === "create" ? `
         <label class="check">
@@ -322,11 +228,9 @@ export function renderFlowSummaryLineView(app, task, flow, projectID) {
 
 
 // bindTaskFlowControlsView refreshes the flow selector when the create form's
-// project select changes: it fetches (and caches) that project's flows, then
-// re-renders the flow <option>s for the newly chosen project. The feature
-// picker follows the same project so it stays in sync too. The refresh is
-// best-effort: a rejected load leaves both controls on their explicit default
-// options (project default / no feature) instead of the prior project's.
+// project select changes: it fetches that project's flows and work-item
+// summaries, then repaints the flow, canonical parent, and relation suggestion
+// controls together. A failed load leaves explicit defaults/manual ID entry.
 export function bindTaskFlowControlsView(app, form) {
   const projectSelect = form?.elements?.project;
   const flowSelect = form?.elements?.flow_id;
@@ -336,7 +240,7 @@ export function bindTaskFlowControlsView(app, form) {
     try {
       if (projectID) {
         await app.ensureFlows(projectID);
-        if (typeof app.ensureFeatures === "function") await app.ensureFeatures(projectID);
+        if (typeof app.ensureWorkItems === "function") await app.ensureWorkItems(projectID);
       }
     } catch {
       // Best-effort refresh: a rejected load must not reject the listener or
@@ -349,8 +253,17 @@ export function bindTaskFlowControlsView(app, form) {
     // options never disagree with the project select.
     if (String(projectSelect.value || "").trim() !== projectID) return;
     flowSelect.innerHTML = flowSelectOptionsView(app, projectID, "");
-    const featureSelect = form.elements.feature_id;
-    if (featureSelect) featureSelect.innerHTML = featureSelectOptionsView(app, projectID, "");
+    const parentInput = form.elements.parent_item_id;
+    const datalist = form.querySelector?.("#task-parent-items");
+    if (datalist) datalist.innerHTML = workItemParentOptionsView(app, projectID, parentInput?.value || "");
+    refreshRelationsPickerSuggestions(form, app, projectID);
+    const inferred = form.querySelector?.("[data-inferred-feature]");
+    if (inferred) inferred.textContent = inferredFeatureView(app, projectID, parentInput?.value || "");
+  });
+  const parentInput = form.elements.parent_item_id;
+  if (parentInput && typeof parentInput.addEventListener === "function") parentInput.addEventListener("input", () => {
+    const inferred = form.querySelector?.("[data-inferred-feature]");
+    if (inferred) inferred.textContent = inferredFeatureView(app, projectSelect.value, parentInput.value);
   });
 }
 

@@ -8,6 +8,8 @@ import { featureHref } from "../api.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { value } from "../normalize.js";
 import { formatRelative } from "../format.js";
+import { renderWorkNav } from "../work-nav.js";
+import { handleRelationsPickerClick, relationsPickerView } from "../create-relations.js";
 
 const STATUS_RANK = { open: 0, landed: 1, archived: 2 };
 
@@ -71,17 +73,17 @@ export function renderFeatures(data) {
     return String(value(fa, "title", "Title")).localeCompare(String(value(fb, "title", "Title")));
   });
 
-  const projectName = String(data.projectName || "");
   const latest = entries
     .map((entry) => value(value(entry, "feature", "Feature") || {}, "updated_at", "UpdatedAt"))
     .filter(Boolean)
     .sort()
     .pop();
   return `
+    ${renderWorkNav({ active: "branches", projects: data.projects || [], projectID, search: data.search || "" })}
     <section class="detail">
       <div class="head">
         <div class="title-row">
-          <h2>Features${projectName ? ` · ${escapeHTML(projectName)}` : ""}</h2>
+          <h2>Branches</h2>
           <span class="spacer"></span>
           ${latest ? `<span class="count">updated ${escapeHTML(formatRelative(latest))}</span>` : ""}
         </div>
@@ -90,6 +92,7 @@ export function renderFeatures(data) {
         <input name="title" placeholder="Feature title" required aria-label="Feature title">
         <textarea name="body" rows="2" placeholder="What this feature is (optional)" aria-label="Feature body"></textarea>
         <input name="parent_item_id" placeholder="Parent epic or feature ID (optional)" aria-label="Parent work item ID">
+        ${relationsPickerView(data.workItems || [])}
         <div>
           <button type="submit">Create feature</button>
         </div>
@@ -105,6 +108,10 @@ export function renderFeatures(data) {
 class FlowFeatures extends FlowElement {
   render() {
     return renderFeatures(this.data || {});
+  }
+
+  handleClick(event) {
+    handleRelationsPickerClick(this, event);
   }
 }
 

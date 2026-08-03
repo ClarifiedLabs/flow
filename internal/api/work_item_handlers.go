@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -105,7 +106,8 @@ func (s *projectServer) handleCreateEpic(w http.ResponseWriter, r *http.Request,
 	epic, err := s.epics.Create(r.Context(), coordinator.CreateEpicInput{
 		Title: request.Title, Body: request.Body, Priority: request.Priority,
 		CompletionPolicy: coordinator.EpicCompletionPolicy(request.CompletionPolicy),
-		ParentItemID:     request.ParentItemID, CreatedBy: workflowActor(principal),
+		ParentItemID:     request.ParentItemID, WorkItemRelations: createWorkItemRelationInputs(request.WorkItemRelations, workflowActor(principal)),
+		CreatedBy: workflowActor(principal),
 	})
 	if err != nil {
 		writeWorkItemError(w, err)
@@ -218,18 +220,20 @@ func (s *projectServer) epicResponse(r *http.Request, epic coordinator.Epic) (co
 }
 
 func (s *projectServer) handleWorkItemsPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
-	if s.workItems == nil {
-		writeError(w, http.StatusServiceUnavailable, "work_items_unavailable", "work-item service is not configured")
-		return
-	}
 	parts := splitResourcePath(r.URL.Path, "/v2/work-items")
 	if !requireScope(w, principal, "owner, console, or session token is required",
 		coordinator.TokenScopeOwner, coordinator.TokenScopeConsole, coordinator.TokenScopeSession) {
 		return
 	}
+	if s.workItems == nil {
+		writeError(w, http.StatusServiceUnavailable, "work_items_unavailable", "work-item service is not configured")
+		return
+	}
 	switch {
 	case len(parts) == 0 && r.Method == http.MethodGet:
 		s.handleListWorkItems(w, r)
+	case len(parts) == 1 && parts[0] == "overview" && r.Method == http.MethodGet:
+		s.handleWorkItemOverview(w, r)
 	case len(parts) == 1 && parts[0] == "doctor" && r.Method == http.MethodGet:
 		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
 			return
@@ -242,6 +246,8 @@ func (s *projectServer) handleWorkItemsPath(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusOK, report)
 	case len(parts) == 1 && r.Method == http.MethodGet:
 		s.handleGetWorkItem(w, r, parts[0], false)
+	case len(parts) == 2 && parts[1] == "context" && r.Method == http.MethodGet:
+		s.handleWorkItemContext(w, r, parts[0])
 	case len(parts) == 2 && parts[1] == "tree" && r.Method == http.MethodGet:
 		s.handleGetWorkItem(w, r, parts[0], true)
 	case len(parts) == 2 && parts[1] == "relations" && r.Method == http.MethodGet:
@@ -256,6 +262,11 @@ func (s *projectServer) handleWorkItemsPath(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		s.handleMutateWorkItemRelation(w, r, principal, parts[0])
+	case len(parts) == 1 && parts[0] == "parents" && r.Method == http.MethodPatch:
+		if !requireScope(w, principal, "owner or console token is required", coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
+			return
+		}
+		s.handleMoveWorkItems(w, r, principal)
 	case len(parts) == 2 && parts[1] == "parent" && r.Method == http.MethodPatch:
 		if !requireScope(w, principal, "owner or console token is required", coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
 			return
@@ -277,6 +288,34 @@ func (s *projectServer) handleWorkItemsPath(w http.ResponseWriter, r *http.Reque
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "unknown work-items route")
 	}
+}
+
+func (s *projectServer) handleMoveWorkItems(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
+	var request contract.MoveWorkItemsRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	if principal.Scope == coordinator.TokenScopeConsole && principal.SourceTaskID != nil {
+		boundID := strings.TrimSpace(*principal.SourceTaskID)
+		if len(request.ItemIDs) != 1 || strings.TrimSpace(request.ItemIDs[0]) != boundID {
+			writeError(w, http.StatusForbidden, "forbidden", "task-bound console may move only its bound task in a singleton request")
+			return
+		}
+	}
+	items, err := s.workItems.MoveMany(r.Context(), request.ItemIDs, request.ParentItemID, workflowActor(principal))
+	if err != nil {
+		var validation *coordinator.WorkItemMoveValidationError
+		if errors.As(err, &validation) {
+			writeJSON(w, http.StatusUnprocessableEntity, contract.ErrorResponse{Error: contract.ErrorBody{
+				Code: "work_item_move_invalid", Message: "bulk parent change validation failed", Issues: validation.Issues,
+			}})
+			return
+		}
+		writeWorkItemError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, contract.MoveWorkItemsResponse{Items: items})
 }
 
 func (s *projectServer) handleListWorkItems(w http.ResponseWriter, r *http.Request) {
@@ -323,6 +362,195 @@ func optionalBoolQuery(r *http.Request, name string) (bool, bool, error) {
 		return false, false, errors.New(name + " must be true or false")
 	}
 	return value, true, nil
+}
+
+func (s *projectServer) handleWorkItemOverview(w http.ResponseWriter, r *http.Request) {
+	terminal, terminalSet, err := optionalBoolQuery(r, "terminal")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_filter", err.Error())
+		return
+	}
+	var terminalFilter *bool
+	if terminalSet {
+		terminalFilter = &terminal
+	}
+	aggregates, err := s.workItems.Overview(r.Context(), terminalFilter)
+	if err != nil {
+		writeWorkItemError(w, err)
+		return
+	}
+	items, err := s.composeWorkItemOverview(r.Context(), aggregates)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "work_item_overview_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, contract.WorkItemOverviewResponse{Items: items})
+}
+
+func (s *projectServer) handleWorkItemContext(w http.ResponseWriter, r *http.Request, id string) {
+	contextView, err := s.workItems.Context(r.Context(), id)
+	if err != nil {
+		writeWorkItemError(w, err)
+		return
+	}
+	entries, err := s.composeWorkItemOverview(r.Context(), []coordinator.WorkItemOverview{contextView.Overview})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "work_item_context_failed", err.Error())
+		return
+	}
+	if len(entries) != 1 {
+		writeError(w, http.StatusInternalServerError, "work_item_context_failed", "context composition returned no item")
+		return
+	}
+	entry := entries[0]
+	writeJSON(w, http.StatusOK, contract.WorkItemContextResponse{
+		Item: contextView.Overview.Item, Ancestors: contextView.Ancestors,
+		Children: contextView.Children, Blockers: contextView.Blockers, Relations: contextView.Relations,
+		Rollup: entry.Rollup, AttentionCount: entry.AttentionCount, Feature: entry.Feature, Actions: entry.Actions,
+	})
+}
+
+func (s *projectServer) composeWorkItemOverview(ctx context.Context, aggregates []coordinator.WorkItemOverview) ([]contract.WorkItemOverviewEntry, error) {
+	attention := map[string]bool{}
+	if s.tasks != nil {
+		board, err := s.tasks.BoardResult(ctx)
+		if err != nil {
+			return nil, err
+		}
+		cards, err := s.buildUITaskCards(ctx, boardTasks(board.Board))
+		if err != nil {
+			return nil, err
+		}
+		for taskID, card := range cards {
+			attention[taskID] = uiTaskNeedsAttention(card, board.LaneStates[taskID])
+		}
+	}
+
+	epics := map[string]coordinator.Epic{}
+	if s.epics != nil {
+		listed, err := s.epics.List(ctx, "")
+		if err != nil {
+			return nil, err
+		}
+		for _, epic := range listed {
+			epics[epic.ID] = epic
+		}
+	}
+	features := map[string]coordinator.Feature{}
+	if s.features != nil {
+		listed, err := s.features.List(ctx, "")
+		if err != nil {
+			return nil, err
+		}
+		for _, feature := range listed {
+			features[feature.ID] = feature
+		}
+	}
+
+	result := make([]contract.WorkItemOverviewEntry, 0, len(aggregates))
+	for _, aggregate := range aggregates {
+		entry := contract.WorkItemOverviewEntry{
+			Item:   aggregate.Item,
+			Rollup: contract.WorkItemRollup{DirectChildren: aggregate.Rollup.DirectChildren, DescendantTasks: aggregate.Rollup.DescendantTasks},
+		}
+		for _, taskID := range aggregate.DescendantTaskIDs {
+			if attention[taskID] {
+				entry.AttentionCount++
+			}
+		}
+		entry.Actions.Start = startReadiness(aggregate)
+		if epic, ok := epics[aggregate.Item.ID]; ok {
+			entry.Actions.Complete = completeReadiness(aggregate, epic)
+		}
+		if feature, ok := features[aggregate.Item.ID]; ok {
+			entry.Feature, entry.Actions.Rebase, entry.Actions.Land = s.featureOverview(ctx, aggregate, feature, features)
+		}
+		result = append(result, entry)
+	}
+	return result, nil
+}
+
+func startReadiness(aggregate coordinator.WorkItemOverview) *contract.ActionReadiness {
+	if !aggregate.Item.Capabilities.CanStart {
+		return nil
+	}
+	if aggregate.Item.State.Terminal {
+		return deniedReadiness("item_terminal", "Terminal containers cannot be started.")
+	}
+	return &contract.ActionReadiness{Allowed: true}
+}
+
+func completeReadiness(aggregate coordinator.WorkItemOverview, epic coordinator.Epic) *contract.ActionReadiness {
+	if aggregate.Item.State.Terminal {
+		return deniedReadiness("item_terminal", "This epic is already terminal.")
+	}
+	if aggregate.Item.UnresolvedBlockers > 0 {
+		return deniedReadiness("effective_blockers", "Resolve the epic's effective blockers before completing it.")
+	}
+	children := aggregate.Rollup.DirectChildren
+	if children.Terminal != children.Total {
+		return deniedReadiness("active_direct_children", "All direct children must be terminal before completing this epic.")
+	}
+	if epic.CompletionPolicy == coordinator.EpicAllChildren && children.Total == 0 {
+		return deniedReadiness("no_direct_children", "An all-children epic needs at least one direct child before completion.")
+	}
+	return &contract.ActionReadiness{Allowed: true}
+}
+
+func (s *projectServer) featureOverview(ctx context.Context, aggregate coordinator.WorkItemOverview, feature coordinator.Feature, features map[string]coordinator.Feature) (*contract.FeatureOverview, *contract.ActionReadiness, *contract.ActionReadiness) {
+	target := s.project.BaseBranch
+	if feature.IntegrationFeatureID != nil {
+		if parent, ok := features[*feature.IntegrationFeatureID]; ok {
+			target = parent.Branch
+		} else {
+			target = *feature.IntegrationFeatureID
+		}
+	}
+	view := &contract.FeatureOverview{Branch: feature.Branch, IntegrationTarget: target}
+	running, found, runningErr := s.features.RunningRebase(ctx, feature.ID)
+	if runningErr == nil && found {
+		view.RunningRebase = &running
+	}
+	branchState, gitErr := s.features.BranchState(ctx, feature.ID)
+	if gitErr != nil {
+		view.GitUnavailableReason = gitErr.Error()
+	} else {
+		view.GitAvailable = true
+		view.Ahead, view.Behind = branchState.Ahead, branchState.Behind
+	}
+
+	if feature.Status != coordinator.FeatureOpen {
+		denial := deniedReadiness("feature_closed", "Only open features can be rebased or landed.")
+		return view, denial, denial
+	}
+	if runningErr != nil {
+		denial := deniedReadiness("rebase_state_unavailable", "The running rebase state could not be read.")
+		return view, denial, denial
+	}
+	if found {
+		denial := deniedReadiness("rebase_running", "A feature rebase is already running.")
+		return view, denial, denial
+	}
+	if gitErr != nil {
+		denial := deniedReadiness("git_unavailable", "Git state is unavailable; retry after the exchange is accessible.")
+		return view, denial, denial
+	}
+	rebase := &contract.ActionReadiness{Allowed: true}
+	if aggregate.Item.UnresolvedBlockers > 0 {
+		return view, rebase, deniedReadiness("effective_blockers", "Resolve the feature's effective blockers before landing it.")
+	}
+	rollup := aggregate.Rollup.DescendantTasks
+	if rollup.SuccessfulTerminal+rollup.UnsuccessfulTerminal != rollup.Total {
+		return view, rebase, deniedReadiness("active_descendant_tasks", "All descendant tasks must be terminal before landing this feature.")
+	}
+	if aggregate.Rollup.DirectChildren.Terminal != aggregate.Rollup.DirectChildren.Total {
+		return view, rebase, deniedReadiness("active_direct_children", "All direct child containers must be terminal before landing this feature.")
+	}
+	return view, rebase, &contract.ActionReadiness{Allowed: true}
+}
+
+func deniedReadiness(code, text string) *contract.ActionReadiness {
+	return &contract.ActionReadiness{Allowed: false, ReasonCode: code, DenialText: text}
 }
 
 func (s *projectServer) handleGetWorkItem(w http.ResponseWriter, r *http.Request, id string, tree bool) {

@@ -5,8 +5,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { installTestDOM } from "./test-dom.mjs";
-import { readBoardSort, readBoardSortChoice, readTasksState, writeBoardSort, writeTasksState } from "./storage.js";
-import { BOARD_SORT_STORAGE_KEY } from "./config.js";
+import { readBoardSort, readBoardSortChoice, readTasksListView, readTasksState, readWorkPreferences, readWorkProject, writeBoardSort, writeTasksListView, writeTasksState, writeWorkPreferences, writeWorkProject } from "./storage.js";
+import { BOARD_SORT_STORAGE_KEY, TASKS_LIST_VIEW_STORAGE_KEY, WORK_PREFERENCES_STORAGE_KEY, WORK_PROJECT_STORAGE_KEY } from "./config.js";
 
 installTestDOM();
 
@@ -48,6 +48,46 @@ test("writeTasksState persists the selection as a JSON array", () => {
   assert.equal(window.localStorage.getItem(KEY), "[]");
   writeTasksState(new Set(["bogus", "done"]));
   assert.equal(window.localStorage.getItem(KEY), '["done"]');
+});
+
+test("Tasks list layout storage validates reads and writes", () => {
+  window.localStorage.removeItem(TASKS_LIST_VIEW_STORAGE_KEY);
+  assert.equal(readTasksListView(), "flat");
+  window.localStorage.setItem(TASKS_LIST_VIEW_STORAGE_KEY, "container");
+  assert.equal(readTasksListView(), "container");
+  window.localStorage.setItem(TASKS_LIST_VIEW_STORAGE_KEY, "tree");
+  assert.equal(readTasksListView(), "flat", "a corrupt persisted layout falls back to flat");
+
+  writeTasksListView("container");
+  assert.equal(window.localStorage.getItem(TASKS_LIST_VIEW_STORAGE_KEY), "container");
+  writeTasksListView("tree");
+  assert.equal(window.localStorage.getItem(TASKS_LIST_VIEW_STORAGE_KEY), "container", "an invalid write is ignored");
+  writeTasksListView("flat");
+  assert.equal(readTasksListView(), "flat");
+});
+
+test("Work project storage trims values and clears empty selections", () => {
+  writeWorkProject("  p-alpha  ");
+  assert.equal(readWorkProject(), "p-alpha");
+  writeWorkProject("");
+  assert.equal(window.localStorage.getItem(WORK_PROJECT_STORAGE_KEY), null);
+});
+
+test("Work preferences are validated and isolated per project", () => {
+  window.localStorage.removeItem(WORK_PREFERENCES_STORAGE_KEY);
+  assert.deepEqual(readWorkPreferences("p-a"), { view: "overview", filter: "all", completedCollapsed: true, collapsed: new Set() });
+  writeWorkPreferences("p-a", { view: "tree", filter: "blocked", completedCollapsed: false, collapsed: new Set([" e-1 ", "e-1"]) });
+  writeWorkPreferences("p-b", { view: "overview", filter: "completed", completedCollapsed: true, collapsed: new Set(["f-1"]) });
+  assert.deepEqual(readWorkPreferences("p-a"), { view: "tree", filter: "blocked", completedCollapsed: false, collapsed: new Set(["e-1"]) });
+  assert.deepEqual(readWorkPreferences("p-b").collapsed, new Set(["f-1"]));
+});
+
+test("Work preferences reject corrupt shapes without leaking between projects", () => {
+  window.localStorage.setItem(WORK_PREFERENCES_STORAGE_KEY, JSON.stringify({ "p-a": { view: "bogus", filter: "ready", completedCollapsed: "no", collapsed: ["", 4, "e-1"] } }));
+  assert.deepEqual(readWorkPreferences("p-a"), { view: "overview", filter: "all", completedCollapsed: true, collapsed: new Set(["e-1"]) });
+  window.localStorage.setItem(WORK_PREFERENCES_STORAGE_KEY, "[]");
+  writeWorkPreferences("p-a", { view: "tree", filter: "open", completedCollapsed: false, collapsed: [] });
+  assert.deepEqual(readWorkPreferences("p-a").view, "tree");
 });
 
 test("readBoardSort defaults to Task number ascending", () => {

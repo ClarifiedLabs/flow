@@ -48,16 +48,54 @@ func TestOpenInitializesSQLite(t *testing.T) {
 		"0009_history_capture_legacy_backfill",
 		"0010_feature_rebase_block_restriction",
 		"0011_worker_assignments",
+		"0012_feature_creation_relation_payload",
 	)
 
 	var schemaVersion string
 	if err := store.DB().QueryRowContext(ctx, "SELECT value FROM app_metadata WHERE key = 'schema_version'").Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version metadata: %v", err)
 	}
-	if schemaVersion != "0011_worker_assignments" {
-		t.Fatalf("schema version = %q, want 0011_worker_assignments", schemaVersion)
+	if schemaVersion != "0012_feature_creation_relation_payload" {
+		t.Fatalf("schema version = %q, want 0012_feature_creation_relation_payload", schemaVersion)
 	}
 	assertStorageFormat(t, store, "5")
+
+	var relationPayloadNotNull int
+	var relationPayloadDefault string
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT "notnull", dflt_value
+FROM pragma_table_info('feature_creation_intents')
+WHERE name = 'relation_payload_json'`).Scan(&relationPayloadNotNull, &relationPayloadDefault); err != nil {
+		t.Fatalf("inspect feature creation relation payload: %v", err)
+	}
+	if relationPayloadNotNull != 1 || relationPayloadDefault != "'[]'" {
+		t.Fatalf("relation payload notnull/default = %d/%q, want 1/%q", relationPayloadNotNull, relationPayloadDefault, "'[]'")
+	}
+	var ownershipNotNull int
+	var ownershipDefault string
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT "notnull", dflt_value
+FROM pragma_table_info('feature_creation_intents')
+WHERE name = 'ref_created_by_intent'`).Scan(&ownershipNotNull, &ownershipDefault); err != nil {
+		t.Fatalf("inspect feature ref ownership: %v", err)
+	}
+	if ownershipNotNull != 1 || ownershipDefault != "FALSE" {
+		t.Fatalf("ref ownership notnull/default = %d/%q, want 1/FALSE", ownershipNotNull, ownershipDefault)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO feature_creation_intents (
+	id, operation_key, title, branch, target_branch, target_sha, created_by, created_at, updated_at
+) VALUES ('fci-default', 'default-payload', 'default payload', 'feature/default-payload', 'main', 'abc', 'human', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("insert feature intent with default relation payload: %v", err)
+	}
+	var relationPayload string
+	var refCreatedByIntent bool
+	if err := store.DB().QueryRowContext(ctx, `SELECT relation_payload_json, ref_created_by_intent FROM feature_creation_intents WHERE id = 'fci-default'`).Scan(&relationPayload, &refCreatedByIntent); err != nil {
+		t.Fatalf("read default feature intent durability fields: %v", err)
+	}
+	if relationPayload != "[]" || refCreatedByIntent {
+		t.Fatalf("default feature relation payload/ownership = %q/%v, want []/false", relationPayload, refCreatedByIntent)
+	}
 
 	var dispatchDefault string
 	if err := store.DB().QueryRowContext(ctx, `
@@ -108,6 +146,79 @@ SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'feature_id'`).Scan
 		[]string{"tasks", "workflow_runs", "workflow_node_runs", "workflow_artifacts", "workflow_waits", "workflow_transitions", "jobs", "leases", "worker_assignments", "sessions", "changes", "features", "feature_rebases"},
 		[]string{"projects", "workers", "tokens", "web_sessions", "web_bootstrap_tokens", "workflow_state", "transitions", "task_flow_cursor", "task_phase_handoffs", "flow_nodes_new", "flow_edges_backup"},
 	)
+}
+
+func TestFeatureCreationIntentMigrationBackfillsDurabilityFields(t *testing.T) {
+	ctx := context.Background()
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "flow.db"))
+	if err != nil {
+		t.Fatalf("open pre-0012 database: %v", err)
+	}
+	defer database.Close()
+
+	for _, name := range []string{
+		"0001_init",
+		"0002_job_dispatch_keys",
+		"0003_workflow_hold",
+		"0004_workflow_review_cycles",
+		"0005_features",
+		"0006_convergence_promotions",
+		"0007_history_captures",
+		"0008_history_capture_hardening",
+		"0009_history_capture_legacy_backfill",
+		"0010_feature_rebase_block_restriction",
+		"0011_worker_assignments",
+	} {
+		migration, err := migrationFS.ReadFile("migrations/" + name + ".sql")
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if _, err := database.ExecContext(ctx, string(migration)); err != nil {
+			t.Fatalf("apply %s: %v", name, err)
+		}
+	}
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO feature_creation_intents (
+	id, operation_key, title, branch, target_branch, target_sha, created_by,
+	state, created_at, updated_at
+) VALUES
+	('fci-prepared', 'prepared-operation', 'prepared feature', 'feature/prepared', 'main', 'aaa', 'human', 'prepared', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+	('fci-ref-created', 'ref-operation', 'ref feature', 'feature/ref-created', 'main', 'bbb', 'agent', 'ref_created', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("seed pre-0012 intents: %v", err)
+	}
+	migration, err := migrationFS.ReadFile("migrations/0012_feature_creation_relation_payload.sql")
+	if err != nil {
+		t.Fatalf("read 0012: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, string(migration)); err != nil {
+		t.Fatalf("apply 0012: %v", err)
+	}
+
+	rows, err := database.QueryContext(ctx, `
+SELECT id, relation_payload_json, ref_created_by_intent
+FROM feature_creation_intents ORDER BY id`)
+	if err != nil {
+		t.Fatalf("read backfilled intents: %v", err)
+	}
+	defer rows.Close()
+	seen := 0
+	for rows.Next() {
+		var id, payload string
+		var owned bool
+		if err := rows.Scan(&id, &payload, &owned); err != nil {
+			t.Fatalf("scan backfilled intent: %v", err)
+		}
+		if payload != "[]" || owned {
+			t.Fatalf("backfilled intent %s payload/ownership = %q/%v, want []/false", id, payload, owned)
+		}
+		seen++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate backfilled intents: %v", err)
+	}
+	if seen != 2 {
+		t.Fatalf("backfilled intent count = %d, want 2", seen)
+	}
 }
 
 func TestOpenGlobalInitializesGlobalSchema(t *testing.T) {

@@ -5,9 +5,10 @@
 import { value } from "./normalize.js";
 import { escapeHTML, escapeAttr } from "./html.js";
 import { NAV, SIDEBAR_STATUS_POLL_MS, MAX_POLL_BACKOFF_MS, SETTLE_BURST_DELAYS_MS, DEFAULT_AGENT_HARNESSES, DEFAULT_CONSOLE_HARNESSES } from "./config.js";
-import { apiGet, apiPost, taskConsoleAPIPath, taskAPIBase, taskHref, flowsAPIBase, featuresAPIBase } from "./api.js";
-import { readSelectedProjects, writeSelectedProjects, terminalSessionIDForPath, pollConfigForPath, readThemePreference, writeThemePreference, applyThemePreference } from "./storage.js";
+import { apiGet, apiPost, taskConsoleAPIPath, taskAPIBase, taskHref, flowsAPIBase, featuresAPIBase, workItemsAPIBase } from "./api.js";
+import { readSelectedProjects, writeSelectedProjects, writeWorkProject, terminalSessionIDForPath, pollConfigForPath, readThemePreference, writeThemePreference, applyThemePreference } from "./storage.js";
 import { renderNavLink, renderNavTrigger, THEME_ICONS, THEME_OPTIONS } from "./nav.js";
+import { isWorkPath, workViewHref } from "./work-nav.js";
 import { normalizeHarnessOptions } from "./harness-models.js";
 import { openTerminalWindow, closeTerminalDialog, hideInlineTerminal, closeTerminalModalLayers } from "./terminal.js";
 import { pollDelay, Poller } from "./poller.js";
@@ -50,6 +51,8 @@ export * from "./poller.js";
 export * from "./flows-view.js";
 export * from "./tasks-view.js";
 export * from "./work-items-route.js";
+export * from "./work-item-model.js";
+export * from "./work-nav.js";
 export * from "./elements/work-items.js";
 export * from "./workflow-graph.js";
 
@@ -284,6 +287,15 @@ export class FlowApp extends HTMLElement {
       if (event.defaultPrevented) return;
       await handleFormSubmit(this, event);
     });
+    this.addEventListener("change", (event) => {
+      const picker = event.target?.closest?.("[data-work-project]");
+      if (!picker) return;
+      const projectID = String(picker.value || "").trim();
+      writeWorkProject(projectID);
+      const href = workViewHref(picker.dataset.workView || "overview", projectID, window.location.search);
+      history.pushState({}, "", href);
+      this.load();
+    });
     // The board's view toggle is reachable from the keyboard anywhere on the
     // board, and Escape/b always take you back to it.
     document.addEventListener("keydown", (event) => this.handleShortcut(event));
@@ -495,6 +507,20 @@ export class FlowApp extends HTMLElement {
     }
     this.featuresByProject.set(id, features);
     return features;
+  }
+
+  async ensureWorkItems(projectID, options = {}) {
+    const id = String(projectID || "").trim();
+    if (!id) return [];
+    if (!this.workItemsByProject) this.workItemsByProject = new Map();
+    if (this.workItemsByProject.has(id) && !options.refresh) return this.workItemsByProject.get(id);
+    let items = [];
+    try {
+      const data = await apiGet(workItemsAPIBase(id));
+      items = data.items || data.Items || [];
+    } catch { items = []; }
+    this.workItemsByProject.set(id, items);
+    return items;
   }
 
   // ensureTasks loads (and per-project caches) a project's task list so the
@@ -783,7 +809,7 @@ export class FlowApp extends HTMLElement {
     const path = window.location.pathname;
     this.querySelectorAll(".nav a").forEach((link) => {
       const href = link.getAttribute("href");
-      const active = href === path || (href === "/ui/board" && (path === "/ui" || path === "/ui/"));
+      const active = href === path || (href === "/ui/board" && (path === "/ui" || path === "/ui/")) || (href === "/ui/work-items" && isWorkPath(path));
       if (active) {
         link.setAttribute("aria-current", "page");
       } else {

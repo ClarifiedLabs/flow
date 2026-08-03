@@ -6,6 +6,7 @@
 import { taskHref } from "../api.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { value } from "../normalize.js";
+import { renderAddChildControl, renderBreadcrumb, renderEffectiveFeatureContext, renderMoveControl, renderWorkBackLink } from "../work-item-detail.js";
 import { define, FlowElement } from "./base.js";
 import "./run-spine.js";
 import "./task-relations.js";
@@ -14,6 +15,9 @@ export function renderTaskRail(model) {
   if (!model) return "";
   const projectAttr = model.projectID ? ` data-project="${escapeAttr(model.projectID)}"` : "";
   return `
+    ${renderWorkBackLink(model.navigation)}
+    ${model.workItem ? renderBreadcrumb(model.projectID, model.workItem, model.workItems, model.navigation) : ""}
+    ${model.workItem ? renderEffectiveFeatureContext(model.projectID, model.workItem, model.workItems, model.navigation) : ""}
     <div class="identity">
       <span class="task-id">${escapeHTML(model.id)}</span>
       <h2>${escapeHTML(model.title)}</h2>
@@ -23,6 +27,7 @@ export function renderTaskRail(model) {
     <flow-run-spine></flow-run-spine>
     ${renderRunControls(model, projectAttr)}
     ${renderFacts(model)}
+    ${model.workItem ? `<div class="work-context-actions">${renderAddChildControl(model.projectID, model.workItem, model.workItems)}${renderMoveControl(model.projectID, model.workItem, model.workItems)}</div>` : ""}
     <flow-task-relations></flow-task-relations>
     ${model.epicID ? `<a class="epic" href="${escapeAttr(taskHref(model.projectID, model.epicID))}/epic" data-link><span class="caption">Epic</span>${escapeHTML(model.epicID)}</a>` : ""}
   `;

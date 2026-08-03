@@ -397,16 +397,18 @@ test("nav trigger label tracks the current route", async () => {
   const cases = [
     ["/ui/", "board"],
     ["/ui/board", "board"],
-    ["/ui/tasks", "tasks"],
+    ["/ui/tasks", "work"],
     ["/ui/console", "console"],
     ["/ui/done", "done"],
     ["/ui/flows", "flows"],
     ["/ui/workers", "workers"],
     ["/ui/jobs", "jobs"],
-    ["/ui/tasks/new", "board"],
-    ["/ui/tasks/t-0001", "board"],
-    ["/ui/tasks/t-0001/epic", "board"],
-    ["/ui/projects/p-alpha/tasks/t-0001", "board"],
+    ["/ui/work-items", "work"],
+    ["/ui/features", "work"],
+    ["/ui/tasks/new", "work"],
+    ["/ui/tasks/t-0001", "work"],
+    ["/ui/tasks/t-0001/epic", "work"],
+    ["/ui/projects/p-alpha/tasks/t-0001", "work"],
     ["/ui/changes/ch-0001", "menu"],
     ["/ui/sessions/s-0001/terminal", "menu"],
   ];
@@ -698,13 +700,14 @@ test("new task route renders project-scoped blank form with the selected project
           json: () => Promise.resolve({ features: [] }),
         });
       }
-      if (path === "/ui/api/v2/projects/p-alpha/tasks") {
+      if (path === "/ui/api/v2/projects/p-alpha/work-items") {
         return Promise.resolve({
           ok: true,
           json: () => Promise.resolve({
-            tasks: [
-              { id: "t-alpha-0001", title: "First task" },
-              { id: "t-alpha-0002", title: "Second task" },
+            items: [
+              { id: "t-alpha-0001", kind: "task", title: "First task" },
+              { id: "e-alpha-0001", kind: "epic", title: "First epic" },
+              { id: "f-alpha-0001", kind: "feature", title: "First feature" },
             ],
           }),
         });
@@ -728,8 +731,7 @@ test("new task route renders project-scoped blank form with the selected project
   assert.deepEqual(fetchCalls.map((call) => call.path), [
     "/ui/api/v2/projects",
     "/ui/api/v2/projects/p-alpha/flows",
-    "/ui/api/v2/projects/p-alpha/features?status=all",
-    "/ui/api/v2/projects/p-alpha/tasks",
+    "/ui/api/v2/projects/p-alpha/work-items",
   ]);
   assert.equal(title.textContent, "New Task");
   assert.match(content.innerHTML, /data-task-form-mode="create"/);
@@ -744,18 +746,18 @@ test("new task route renders project-scoped blank form with the selected project
   assert.match(content.innerHTML, /<option value="fl-coding" selected>coding<\/option>/);
   assert.match(content.innerHTML, /<option value="fl-planning" >planning<\/option>/);
   assert.doesNotMatch(content.innerHTML, /\(default\)|Project default/);
-  // The relation picker's target-task datalist is populated from the selected
-  // project's freshly loaded tasks, even though the cache started empty.
-  assert.match(content.innerHTML, /<datalist id="relation-target-tasks">/);
-  assert.match(content.innerHTML, /<option value="t-alpha-0001" label="First task"><\/option>/);
-  assert.match(content.innerHTML, /<option value="t-alpha-0002" label="Second task"><\/option>/);
+  // The relation picker is populated from all project work-item summaries.
+  assert.match(content.innerHTML, /<datalist id="relation-target-work-items">/);
+  assert.match(content.innerHTML, /<option value="t-alpha-0001" label="task · First task"><\/option>/);
+  assert.match(content.innerHTML, /<option value="e-alpha-0001" label="epic · First epic"><\/option>/);
+  assert.match(content.innerHTML, /<option value="f-alpha-0001" label="feature · First feature"><\/option>/);
   // The 'Queue after creation' checkbox label directly precedes the Create
   // button inside the .task-form-actions footer (DOM order, not mere presence).
   assert.match(content.innerHTML, /<div class="form-actions task-form-actions">\s*<label class="check">\s*<input name="queue_task" type="checkbox" checked>\s*<span>Queue after creation<\/span>\s*<\/label>\s*<button class="button" type="submit">Create<\/button>/);
   assert.equal(status.textContent, "");
 });
 
-test("new task route keeps the relation picker in manual-entry mode when task suggestions fail to load", async () => {
+test("new task route keeps the relation picker in manual-entry mode when work-item suggestions fail to load", async () => {
   const fetchCalls = [];
   const title = { textContent: "" };
   const status = { textContent: "" };
@@ -774,7 +776,7 @@ test("new task route keeps the relation picker in manual-entry mode when task su
       if (path === "/ui/api/v2/projects/p-alpha/flows") {
         return Promise.resolve({ ok: true, json: () => Promise.resolve({ flows: [], default_flow_id: "" }) });
       }
-      if (path === "/ui/api/v2/projects/p-alpha/tasks") {
+      if (path === "/ui/api/v2/projects/p-alpha/work-items") {
         return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: { message: "boom" } }) });
       }
       throw new Error(`new task route unexpectedly fetched ${path}`);
@@ -793,11 +795,11 @@ test("new task route keeps the relation picker in manual-entry mode when task su
 
   await app.load();
 
-  // The failed task fetch is swallowed: the route still renders and the picker
-  // simply has no suggestions, leaving the target input free-text.
-  assert.ok(fetchCalls.some((call) => call.path === "/ui/api/v2/projects/p-alpha/tasks"));
+  // The failed work-item fetch is swallowed: the route still renders and the
+  // picker simply has no suggestions, leaving the target input free-text.
+  assert.ok(fetchCalls.some((call) => call.path === "/ui/api/v2/projects/p-alpha/work-items"));
   assert.equal(title.textContent, "New Task");
-  assert.match(content.innerHTML, /<datalist id="relation-target-tasks"><\/datalist>/);
+  assert.match(content.innerHTML, /<datalist id="relation-target-work-items"><\/datalist>/);
   assert.match(content.innerHTML, /data-relation-target/);
   assert.equal(status.textContent, "");
 });
@@ -893,11 +895,12 @@ test("task form renders the relation picker only in create mode", async () => {
   assert.match(createHTML, /data-relation-rows/);
   assert.match(createHTML, /data-relation-add/);
   assert.match(createHTML, /<option value="parent_of" >child of<\/option>/);
+  assert.match(createHTML, /name="parent_item_id"/);
   assert.match(createHTML, /<option value="blocks" >blocks<\/option>/);
   assert.match(createHTML, /<option value="related_to" selected>related to<\/option>/);
-  // The initial picker row defaults to a source-outward kind, so a fresh
-  // create form never starts on child-of.
-  assert.match(createHTML, /data-relation-kind>[\s\S]*?<option value="related_to" selected>/);
+  // Containment keeps its canonical picker; an explicit child-of relation row
+  // is also available and duplicate declarations are rejected on submit.
+  assert.match(createHTML, /data-relation-kind[^>]*>[\s\S]*?<option value="related_to" selected>/);
 
   const editHTML = app.renderTaskForm({ title: "T" }, { taskID: "t-alpha-0001", projectID: "p-alpha" });
   assert.doesNotMatch(editHTML, /data-relation-picker/);
@@ -959,9 +962,9 @@ test("new task form submission includes source-outward relation rows in the payl
 
   assert.equal(handled, true);
   assert.equal(fetchCalls.length, 1, "source-outward rows only need the create call");
-  assert.deepEqual(JSON.parse(fetchCalls[0].options.body).relations, [
-    { target_task_id: "t-alpha-0002", kind: "blocks" },
-    { target_task_id: "t-alpha-0003", kind: "related_to" },
+  assert.deepEqual(JSON.parse(fetchCalls[0].options.body).work_item_relations, [
+    { target_item_id: "t-alpha-0002", source_is_new_item: true, kind: "blocks" },
+    { target_item_id: "t-alpha-0003", source_is_new_item: true, kind: "related_to" },
   ]);
 });
 
@@ -999,14 +1002,14 @@ test("new task form sends a child-of row atomically in the create request", asyn
   assert.equal(handled, true);
   // Both rows ride in the single create request. The child-of row makes the new
   // task the relation target (chosen parent parent_of new task) via
-  // target_is_new_task, so the server applies it in the create transaction. There
+  // target_is_new_item, so the server applies it in the create transaction. There
   // is no second, post-create link call that could partially succeed after the
   // task has already been committed.
   assert.equal(fetchCalls.length, 1);
   assert.equal(fetchCalls[0].path, "/ui/api/v2/projects/p-alpha/tasks");
-  assert.deepEqual(JSON.parse(fetchCalls[0].options.body).relations, [
-    { target_task_id: "t-alpha-0003", kind: "blocks" },
-    { source_task_id: "t-alpha-0001", target_task_id: "", kind: "parent_of", target_is_new_task: true },
+  assert.deepEqual(JSON.parse(fetchCalls[0].options.body).work_item_relations, [
+    { source_item_id: "t-alpha-0001", target_is_new_item: true, kind: "parent_of" },
+    { target_item_id: "t-alpha-0003", source_is_new_item: true, kind: "blocks" },
   ]);
   assert.equal(pushedPath, "/ui/tasks/t-alpha-0002");
   assert.equal(loads, 1);
@@ -1124,8 +1127,8 @@ test("retrying a failed atomic child-of create recovers with one task, one relat
   assert.equal(fetchCalls.length, 2);
   for (const call of fetchCalls) {
     assert.equal(call.path, "/ui/api/v2/projects/p-alpha/tasks");
-    assert.deepEqual(JSON.parse(call.options.body).relations, [
-      { source_task_id: "t-alpha-0001", target_task_id: "", kind: "parent_of", target_is_new_task: true },
+    assert.deepEqual(JSON.parse(call.options.body).work_item_relations, [
+      { source_item_id: "t-alpha-0001", target_is_new_item: true, kind: "parent_of" },
     ]);
   }
   // One successful create → one navigation and one load, to the single created
@@ -1152,13 +1155,13 @@ test("new task form drops relation rows with an empty target and omits the key w
     relationRow("related_to", "t-alpha-0002"),
   ]);
   await handleFormSubmit(app, { target: mixed, preventDefault() {} });
-  assert.deepEqual(JSON.parse(fetchCalls[0].options.body).relations, [
-    { target_task_id: "t-alpha-0002", kind: "related_to" },
+  assert.deepEqual(JSON.parse(fetchCalls[0].options.body).work_item_relations, [
+    { target_item_id: "t-alpha-0002", source_is_new_item: true, kind: "related_to" },
   ]);
 
   const allBlank = createFormWithRelations([relationRow("blocks", "")]);
   await handleFormSubmit(app, { target: allBlank, preventDefault() {} });
-  assert.equal("relations" in JSON.parse(fetchCalls[1].options.body), false);
+  assert.equal("work_item_relations" in JSON.parse(fetchCalls[1].options.body), false);
 });
 
 test("new task form rejects duplicate relation rows before submitting", async () => {
@@ -1232,9 +1235,9 @@ test("new task form accepts multiple default-kind rows with distinct targets", a
 
   assert.equal(handled, true);
   assert.equal(fetchCalls.length, 1);
-  assert.deepEqual(JSON.parse(fetchCalls[0].options.body).relations, [
-    { target_task_id: "t-alpha-0002", kind: "related_to" },
-    { target_task_id: "t-alpha-0003", kind: "related_to" },
+  assert.deepEqual(JSON.parse(fetchCalls[0].options.body).work_item_relations, [
+    { target_item_id: "t-alpha-0002", source_is_new_item: true, kind: "related_to" },
+    { target_item_id: "t-alpha-0003", source_is_new_item: true, kind: "related_to" },
   ]);
 });
 // A button with just enough surface for handleAction's synchronous pending
@@ -1265,6 +1268,53 @@ class ActionButton {
 // A gate outcome button: an ActionButton that also knows its enclosing gate
 // panel and its sibling outcome controls, so handleAction can suppress the
 // whole set when one of them is clicked.
+test("successful containment relation mutations evict hierarchy summaries before refresh", async () => {
+  const calls = [];
+  globalThis.fetch = (path, options) => {
+    calls.push({ path, options });
+    return Promise.resolve({ ok: true, status: 204, text: () => Promise.resolve("") });
+  };
+  const cache = new Map([["p-alpha", [{ id: "stale-container" }]]]);
+  let refreshes = 0;
+  const app = {
+    workItemsByProject: cache,
+    setStatus() {},
+    async refresh() {
+      assert.equal(cache.has("p-alpha"), false, "refresh must not reconcile from stale hierarchy summaries");
+      refreshes += 1;
+      cache.set("p-alpha", [{ id: `fresh-${refreshes}` }]);
+    },
+  };
+  const addForm = {
+    tagName: "FORM",
+    dataset: { workItemRelationAddForm: "e-alpha-0001", project: "p-alpha" },
+    elements: {
+      target_item_id: { value: "t-alpha-0001" },
+      kind: { value: "parent_of" },
+    },
+    querySelector() { return null; },
+    reportValidity() { return true; },
+  };
+
+  assert.equal(await handleFormSubmit(app, { target: addForm, preventDefault() {} }), true);
+  assert.deepEqual(cache.get("p-alpha"), [{ id: "fresh-1" }]);
+
+  const remove = new ActionButton({
+    workItemRelationRemove: "e-alpha-0001",
+    project: "p-alpha",
+    source: "e-alpha-0001",
+    target: "t-alpha-0001",
+    kind: "parent_of",
+  });
+  assert.equal(await handleAction(app, { target: remove, preventDefault() {} }), true);
+  assert.deepEqual(cache.get("p-alpha"), [{ id: "fresh-2" }]);
+  assert.equal(refreshes, 2);
+  assert.deepEqual(calls.map(({ path, options }) => [path, options.method]), [
+    ["/ui/api/v2/projects/p-alpha/work-items/e-alpha-0001/relations", "POST"],
+    ["/ui/api/v2/projects/p-alpha/work-items/e-alpha-0001/relations", "DELETE"],
+  ]);
+});
+
 class GateButton extends ActionButton {
   constructor(dataset, panel) {
     super(dataset);
@@ -4544,9 +4594,9 @@ test("board sidebar status separates blocked tasks in compact lifecycle groups",
   assert.match(html, /aria-label="3 scheduled tasks, 4 in progress tasks, 1 blocked task"/);
 });
 
-test("tasks sidebar status badge shows the unscheduled count", async () => {
+test("Work sidebar status badge shows the unscheduled count", async () => {
   const context = await scriptContext();
-  const html = context.renderNavStatus("/ui/tasks", {
+  const html = context.renderNavStatus("/ui/work-items", {
     board: { unscheduled: 2, scheduled: 3, in_progress: 4, blocked: 1 },
   });
 
