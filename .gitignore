@@ -8,6 +8,7 @@
 coverage.out
 /.flow/session/
 /.flow-kind/
+/.flow-local/
 /SUMMARY.md
 /flow
 /flow-server

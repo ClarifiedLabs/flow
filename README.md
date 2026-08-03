@@ -38,8 +38,9 @@ docker pull ghcr.io/clarifiedlabs/flow-orchestrator:latest
 ```
 
 Docker Compose provides explicit `legacy-workers` for compatibility; new local
-stacks should use the complete kind recipe. See [Detailed setup](docs/setup.md)
-and [Kubernetes operations](docs/kubernetes.md) for assignment-created one-shot
+stacks should use the [Local Kind quickstart](docs/kubernetes.md#local-kind-quickstart).
+See [Detailed setup](docs/setup.md) and
+[Kubernetes operations](docs/kubernetes.md) for assignment-created one-shot
 worker Jobs, private credentials, probes, and recovery.
 
 ## Quickstart
@@ -159,6 +160,7 @@ each project has its own SQLite database plus private bare `exchange.git` remote
 - [Detailed setup](docs/setup.md)
 - [Usage reference](docs/usage.md)
 - [Current architecture](docs/architecture.md)
+- [Kubernetes operations](docs/kubernetes.md)
 - [Development guide](docs/development.md)
 - [Design history](docs/flow-design.md)
 - [Release process](docs/release.md)

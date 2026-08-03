@@ -6,6 +6,62 @@ replica pool: the orchestrator creates one `batch/v1` Job and one private Secret
 for each durable coordinator assignment. The reference manifests live in
 [`k8s/`](../k8s).
 
+## Local Kind quickstart
+
+For development and basic end-to-end testing from a source checkout, the Kind
+helpers build the local Flow images and run the complete assignment-based stack
+in a local cluster. Install `kind`, `kubectl`, Go, and a running Docker-compatible
+runtime (`docker`, `podman`, or `nerdctl`), then run from the repository root:
+
+```sh
+./scripts/kind/up.sh
+```
+
+The script creates or reuses the `flow` Kind cluster, loads locally built
+`flow-server`, `flow-worker`, and `flow-orchestrator` images, and deploys the
+server and orchestrator. It writes generated configuration, private tokens, and
+persistent data under the gitignored `.flow-kind/` directory. The Flow API is
+mapped only to `http://127.0.0.1:8421`; unauthenticated telemetry remains
+cluster-internal.
+
+Use the generated owner client to inspect the cluster:
+
+```sh
+./.flow-kind/bin/flow --config .flow-kind/client.yaml jobs
+kubectl --context kind-flow -n flow get deployments,jobs,pods
+```
+
+With Git installed, run the smoke test to exercise successful execution, startup
+failure, cancellation, and cleanup of assignment-created worker Jobs and Pods:
+
+```sh
+./scripts/kind/smoke.sh
+```
+
+The default cluster name, host API port, and container runtime can be overridden.
+Use the same overrides for `up.sh`, `smoke.sh`, and `down.sh`:
+
+```sh
+FLOW_KIND_CLUSTER=flow-test \
+FLOW_KIND_API_HOST_PORT=9421 \
+FLOW_KIND_RUNTIME=podman \
+./scripts/kind/up.sh
+```
+
+Delete the cluster when finished. Persistent coordinator data is retained by
+default so a later cluster can reuse it; pass `--delete-data` to remove that data
+too:
+
+```sh
+./scripts/kind/down.sh
+./scripts/kind/down.sh --delete-data
+```
+
+This workflow is intended for local testing. For a real cluster, provision
+credentials out of band and use the reference manifests described below.
+
+## Reference manifests
+
 The normal manifest path deliberately contains no credential-bearing `Secret`.
 Create the namespace and tokens out of band, retain the generated values in your
 secret manager, and then apply the control plane:
