@@ -126,11 +126,14 @@ func TestKubernetesProviderExactJobSecretIdentityAndDelete(t *testing.T) {
 	config := string(secret.Data["worker.yaml"])
 	for _, want := range []string{
 		"worker_id: worker_1", "coordinator_url: https://coordinator.example",
-		"token: private-direct-token", "work_dir: /workspace", "accepts:\n    - ephemeral",
+		"token: private-direct-token", "work_dir: /workspace",
 	} {
 		if !strings.Contains(config, want) {
 			t.Errorf("worker config missing %q:\n%s", want, config)
 		}
+	}
+	if strings.Contains(config, "accepts:") {
+		t.Errorf("worker config advertises accepted buckets:\n%s", config)
 	}
 
 	var job kubernetesJob
@@ -152,7 +155,7 @@ func TestKubernetesProviderExactJobSecretIdentityAndDelete(t *testing.T) {
 		pod.SecurityContext.FSGroup == nil || *pod.SecurityContext.FSGroup != 1000 {
 		t.Fatalf("pod spec = %+v", pod)
 	}
-	wantCommand := []string{"flow-worker", "--config", "/var/run/flow/worker.yaml", "--one-shot", "--no-metrics"}
+	wantCommand := []string{"flow-worker", "run", "--one-shot", "--config", "/var/run/flow/worker.yaml", "--no-metrics"}
 	if !reflect.DeepEqual(pod.Containers[0].Command, wantCommand) {
 		t.Fatalf("command = %q, want %q", pod.Containers[0].Command, wantCommand)
 	}

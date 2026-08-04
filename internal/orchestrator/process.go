@@ -229,7 +229,7 @@ func (p *DarwinProcessProvider) Launch(ctx context.Context, request LaunchReques
 		logFile.Close()
 		return Permanent(err)
 	}
-	args := []string{"--config", configPath, "--one-shot", "--no-metrics"}
+	args := []string{"run", "--one-shot", "--config", configPath, "--no-metrics"}
 	args = append(args, workerArgs...)
 	executable, err = executablePath(executable)
 	if err != nil {

@@ -20,7 +20,13 @@ func TestDarwinProcessProviderLaunchRestartInspectAndDelete(t *testing.T) {
 	helper := filepath.Join(root, "flow-worker-helper")
 	script := `#!/bin/sh
 set -eu
-dir=$(dirname "$2")
+config=""
+prev=""
+for arg in "$@"; do
+	if [ "$prev" = "--config" ]; then config="$arg"; break; fi
+	prev="$arg"
+done
+dir=$(dirname "$config")
 printf '%s\n' "$@" > "$dir/observed-args"
 env > "$dir/observed-env"
 trap 'exit 0' TERM INT
@@ -101,7 +107,7 @@ while :; do sleep 1; done
 		t.Fatalf("worker config mode = %o, want 600", info.Mode().Perm())
 	}
 	args, _ := os.ReadFile(filepath.Join(dir, "observed-args"))
-	wantArgs := "--config\n" + configPath + "\n--one-shot\n--no-metrics\n"
+	wantArgs := "run\n--one-shot\n--config\n" + configPath + "\n--no-metrics\n"
 	if string(args) != wantArgs || strings.Contains(string(args), "private-direct-token") {
 		t.Fatalf("child args = %q, want %q", args, wantArgs)
 	}
@@ -219,8 +225,14 @@ func TestDarwinProcessProviderDeletesTerminalDescendantGroup(t *testing.T) {
 	helper := filepath.Join(root, "flow-worker-helper")
 	script := `#!/bin/sh
 set -eu
+config=""
+prev=""
+for arg in "$@"; do
+	if [ "$prev" = "--config" ]; then config="$arg"; break; fi
+	prev="$arg"
+done
 sleep 300 &
-printf '%s\n' "$!" > "$(dirname "$2")/child.pid"
+printf '%s\n' "$!" > "$(dirname "$config")/child.pid"
 exit 0
 `
 	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil {

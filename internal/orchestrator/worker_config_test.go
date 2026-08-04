@@ -20,19 +20,19 @@ func TestGeneratedWorkerConfigUsesCanonicalAcceptanceAndLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "capacity:") {
-		t.Fatalf("generated worker config contains legacy capacity:\n%s", data)
+	// The generated config never advertises capacity or accepted buckets: the
+	// worker's bucket is derived from its assignment server-side.
+	for _, banned := range []string{"capacity:", "accepts:"} {
+		if strings.Contains(string(data), banned) {
+			t.Fatalf("generated worker config contains legacy %q:\n%s", banned, data)
+		}
 	}
 
 	path := filepath.Join(t.TempDir(), "worker.yaml")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := config.LoadWorker(path)
-	if err != nil {
+	if _, err := config.LoadWorker(path); err != nil {
 		t.Fatalf("LoadWorker(generated config): %v\n%s", err, data)
-	}
-	if len(cfg.Accepts) != 1 || string(cfg.Accepts[0]) != string(worker.BucketEphemeral) || cfg.Capacity.Ephemeral != 1 || cfg.Capacity.PersistentAgent != 0 {
-		t.Fatalf("generated acceptance = accepts %v capacity %+v", cfg.Accepts, cfg.Capacity)
 	}
 }

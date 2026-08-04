@@ -169,7 +169,7 @@ func (k *KubernetesProvider) Launch(ctx context.Context, request LaunchRequest) 
 	runAsUser := int64(1000)
 	runAsGroup := int64(1000)
 	fsGroup := int64(1000)
-	command := []string{"flow-worker", "--config", workerConfigMountPath, "--one-shot"}
+	command := []string{"flow-worker", "run", "--one-shot", "--config", workerConfigMountPath}
 	command = append(command, settings.workerArgs...)
 	job := kubernetesJob{
 		APIVersion: "batch/v1", Kind: "Job",
