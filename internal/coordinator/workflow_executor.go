@@ -771,6 +771,7 @@ func (e *WorkflowExecutor) convergenceEvidenceForChange(ctx context.Context, run
 		})
 	}
 	return ConvergenceEvidence{
+		SchemaVersion: ConvergenceEvidenceSchemaVersion,
 		WorkflowRunID: run.ID, NodeRunID: nodeRun.ID, ChangeID: change.ID, TaskID: run.TaskID,
 		SourceBranch: change.Branch, SourceHeadSHA: sourceHeadSHA,
 		TargetBaseBranch: change.Base, TargetBaseTipSHA: baseTipSHA, MergeBaseSHA: mergeBaseSHA,

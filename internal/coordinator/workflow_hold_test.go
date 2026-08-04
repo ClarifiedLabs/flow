@@ -50,6 +50,7 @@ func newHoldFlow(t *testing.T, flows *FlowService, tasks *TaskService, runs *Wor
 
 func convergenceEvidenceFixture(task Task, run WorkflowRun, nodeRun WorkflowNodeRun) ConvergenceEvidence {
 	return ConvergenceEvidence{
+		SchemaVersion: ConvergenceEvidenceSchemaVersion,
 		WorkflowRunID: run.ID, NodeRunID: nodeRun.ID, ChangeID: "ch-convergence-0001", TaskID: task.ID,
 		SourceBranch: "task/" + task.ID, SourceHeadSHA: strings.Repeat("a", 40),
 		TargetBaseBranch: "main", TargetBaseTipSHA: strings.Repeat("b", 40),
