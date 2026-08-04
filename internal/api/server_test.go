@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -135,16 +136,18 @@ func TestHarnessOptionsIncludeModelsAvailableOnEveryLiveHarnessWorker(t *testing
 			Labels: map[string]string{
 				flowharness.AgentHarnessLabel(flowharness.Harness): "true",
 			},
-			HarnessModels: []flowharness.Model{onlyFirst, common},
-			HeartbeatTTL:  time.Minute,
+			HarnessModels:  []flowharness.Model{onlyFirst, common},
+			CapacityBucket: flowworker.BucketPersistentAgent,
+			HeartbeatTTL:   time.Minute,
 		},
 		{
 			ID: "w-harness-b",
 			Labels: map[string]string{
 				flowharness.AgentHarnessLabel(flowharness.Harness): "true",
 			},
-			HarnessModels: []flowharness.Model{common},
-			HeartbeatTTL:  time.Minute,
+			HarnessModels:  []flowharness.Model{common},
+			CapacityBucket: flowworker.BucketPersistentAgent,
+			HeartbeatTTL:   time.Minute,
 		},
 	} {
 		if _, err := server.registry.Directory().RegisterWorker(ctx, input); err != nil {
@@ -2361,6 +2364,7 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 		t.Fatalf("console job task/change = %v/%v, want nil", startedConsole.Job.TaskID, startedConsole.Job.ChangeID)
 	}
 
+	reserveWorkerAssignment(t, fixture, "w-local", startedConsole.Job.ID)
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
 		Labels:              map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		HeartbeatTTLSeconds: 60,
@@ -2957,6 +2961,7 @@ func TestTaskConsoleAPILifecycleAndScope(t *testing.T) {
 		t.Fatalf("current task console = %+v, want job %s", currentTaskConsole, startedConsole.Job.ID)
 	}
 
+	reserveWorkerAssignment(t, fixture, "w-local", startedConsole.Job.ID)
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
 		HeartbeatTTLSeconds: 60,
 	}, http.StatusOK, nil)
@@ -3010,6 +3015,7 @@ func TestConsoleAPIStartsShellHarness(t *testing.T) {
 		t.Fatalf("console entrypoint argv = %#v", entrypoint["argv"])
 	}
 
+	reserveWorkerAssignment(t, fixture, "w-local", startedConsole.Job.ID)
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
 		Labels:              map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		HeartbeatTTLSeconds: 60,
@@ -4656,32 +4662,26 @@ func TestWorkerCheckReportingRejectsNonCISourceJob(t *testing.T) {
 func TestWorkerClaimCanWaitForJob(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID: "w-local",
-	}); err != nil {
+	job, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
+		Role:           flowworker.RoleCI,
+		CapacityBucket: flowworker.BucketEphemeral,
+		Payload:        map[string]any{"blocking": true},
+	})
+	if err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	reserveWorkerAssignment(t, fixture, "w-local", job.ID)
+	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{ID: "w-local"}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 
-	enqueued := make(chan error, 1)
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		_, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-			Role:           flowworker.RoleCI,
-			CapacityBucket: flowworker.BucketEphemeral,
-			Payload:        map[string]any{"blocking": true},
-		})
-		enqueued <- err
-	}()
-
+	// The claim long-poll (WaitSeconds) claims the worker's assigned job.
 	var claim claimJobResponse
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
 		LeaseDurationSeconds: 60,
 		WaitSeconds:          1,
 	}, http.StatusOK, &claim)
-	if err := <-enqueued; err != nil {
-		t.Fatalf("enqueue delayed job: %v", err)
-	}
-	if !claim.Claimed || claim.Job == nil || claim.Job.Role != flowworker.RoleCI || claim.Lease == nil {
+	if !claim.Claimed || claim.Job == nil || claim.Job.ID != job.ID || claim.Lease == nil {
 		t.Fatalf("claim response = %+v", claim)
 	}
 }
@@ -4689,11 +4689,6 @@ func TestWorkerClaimCanWaitForJob(t *testing.T) {
 func TestWorkerClaimSweepsExpiredLeases(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
-	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID: "w-local",
-	}); err != nil {
-		t.Fatalf("register worker: %v", err)
-	}
 	expiredJob, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
 		Role:           flowworker.RoleCI,
 		CapacityBucket: flowworker.BucketEphemeral,
@@ -4736,6 +4731,13 @@ INSERT INTO leases (
 	})
 	if err != nil {
 		t.Fatalf("enqueue queued job: %v", err)
+	}
+	// The claim sweeps w-local's expired lease (crashing expiredJob) and then
+	// claims its assignment for the queued job. Register after reserving so the
+	// worker's directory bucket is derived from the ephemeral assignment.
+	reserveWorkerAssignment(t, fixture, "w-local", queuedJob.ID)
+	if _, err := fixture.Registry.RegisterWorker(ctx, flowworker.RegisterWorkerInput{ID: "w-local"}); err != nil {
+		t.Fatalf("register worker: %v", err)
 	}
 
 	var claim claimJobResponse
@@ -4890,10 +4892,24 @@ func (w testWorkers) ensureWorkerAssignment(ctx context.Context, input *flowwork
 	if err != nil {
 		return false, err
 	}
+	// Match the real scheduler's claim order (priority desc, then oldest
+	// first) so the reserved assignment mirrors what a generic claim took.
+	queued := make([]flowworker.Job, 0, len(jobs))
 	for _, job := range jobs {
-		if job.State != flowworker.JobQueued {
-			continue
+		if job.State == flowworker.JobQueued {
+			queued = append(queued, job)
 		}
+	}
+	sort.SliceStable(queued, func(i, j int) bool {
+		if queued[i].Priority != queued[j].Priority {
+			return queued[i].Priority > queued[j].Priority
+		}
+		if !queued[i].CreatedAt.Equal(queued[j].CreatedAt) {
+			return queued[i].CreatedAt.Before(queued[j].CreatedAt)
+		}
+		return queued[i].ID < queued[j].ID
+	})
+	for _, job := range queued {
 		selector, err := scheduler.NewSelector(job.Selector)
 		if err != nil {
 			return false, err
@@ -5282,6 +5298,7 @@ func TestSessionProcessExitRejectsConsoleSession(t *testing.T) {
 		t.Fatalf("started console response = %+v", startedConsole)
 	}
 
+	reserveWorkerAssignment(t, fixture, "w-local", startedConsole.Job.ID)
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
 		Labels:              map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		HeartbeatTTLSeconds: 60,

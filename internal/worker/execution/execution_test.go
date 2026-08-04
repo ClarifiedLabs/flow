@@ -397,7 +397,7 @@ func TestRunJobRejectsForgedExitFileWhenEntrypointKillsTmuxSession(t *testing.T)
 	// requires targeting the job socket explicitly.
 	entrypoint := writeScript(t, `#!/bin/sh
 printf '0\n' > "$FLOW_WORKER_EXIT_FILE"
-tmux -S `+shellQuote(jobCfg.Tmux.SocketPath)+` kill-session -t "flow-$FLOW_JOB_ID"
+tmux -S `+shellQuote(jobCfg.TmuxSocketPath)+` kill-session -t "flow-$FLOW_JOB_ID"
 exit 7
 `)
 	result := RunJob(ctx, ciRunInput(cfg, jobID, "l-forged-exit-file", []string{entrypoint}, false))
@@ -443,7 +443,7 @@ func TestRunJobIsolatesTmuxKillServerToCurrentJob(t *testing.T) {
 	// The wrapper strips TMUX from the pane, so killing the hosting server
 	// requires targeting the job socket explicitly.
 	entrypoint := writeScript(t, `#!/bin/sh
-tmux -S `+shellQuote(ownCfg.Tmux.SocketPath)+` kill-server
+tmux -S `+shellQuote(ownCfg.TmuxSocketPath)+` kill-server
 exit 7
 `)
 	result := RunJob(ctx, ciRunInput(cfg, "j-kill-server", "l-kill-server", []string{entrypoint}, false))
@@ -861,11 +861,11 @@ func TestTmuxRuntimePathsIgnoreLongTMPDIR(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tmux runtime root: %v", err)
 	}
-	if filepath.Dir(jobCfg.Tmux.SocketPath) != runtimeRoot {
-		t.Fatalf("job socket path = %q, want it directly below %q", jobCfg.Tmux.SocketPath, runtimeRoot)
+	if filepath.Dir(jobCfg.TmuxSocketPath) != runtimeRoot {
+		t.Fatalf("job socket path = %q, want it directly below %q", jobCfg.TmuxSocketPath, runtimeRoot)
 	}
-	if strings.HasPrefix(jobCfg.Tmux.SocketPath, longTempDir) {
-		t.Fatalf("job socket path %q inherited TMPDIR %q", jobCfg.Tmux.SocketPath, longTempDir)
+	if strings.HasPrefix(jobCfg.TmuxSocketPath, longTempDir) {
+		t.Fatalf("job socket path %q inherited TMPDIR %q", jobCfg.TmuxSocketPath, longTempDir)
 	}
 
 	sessionName := sessionNameForJob("j-long-tmpdir")
@@ -884,7 +884,7 @@ func TestTmuxRuntimePathsIgnoreLongTMPDIR(t *testing.T) {
 		t.Fatalf("create agent tmux socket directory: %v", err)
 	}
 	agentCfg := cfg
-	agentCfg.Tmux.SocketPath = agentSocket
+	agentCfg.TmuxSocketPath = agentSocket
 	t.Cleanup(func() { cleanupAgentTmuxServer(cfg, agentTmpDir) })
 	tmuxRun(t, agentCfg, "new-session", "-d", "-s", "flow-agent-long-tmpdir")
 }
@@ -1977,7 +1977,7 @@ func workerConfig(workDir string, coordinatorURL string) config.WorkerConfig {
 func workerConfigWithTmux(t *testing.T, workDir string, coordinatorURL string) config.WorkerConfig {
 	t.Helper()
 	cfg := workerConfig(workDir, coordinatorURL)
-	cfg.Tmux.SocketPath = isolatedTmuxSocket(t)
+	cfg.TmuxSocketPath = isolatedTmuxSocket(t)
 	return cfg
 }
 

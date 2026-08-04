@@ -183,14 +183,15 @@ Happy path:
 ```text
 mkdir -p .flow-local
 openssl rand -hex 32 > .flow-local/owner.token
-openssl rand -hex 32 > .flow-local/worker-join.token
-chmod 600 .flow-local/owner.token
-chmod 600 .flow-local/worker-join.token
+openssl rand -hex 32 > .flow-local/orchestrator.token
+chmod 600 .flow-local/owner.token .flow-local/orchestrator.token
 flow-server serve --data-dir ~/.local/share/flow \
   --owner-token-file .flow-local/owner.token \
-  --worker-join-token-file .flow-local/worker-join.token
-cp examples/flow-worker.yaml .flow-local/worker.yaml
-FLOW_WORKER_JOIN_TOKEN="$(tr -d '\r\n' < .flow-local/worker-join.token)" flow-worker -c .flow-local/worker.yaml
+  --orchestrator-token-file .flow-local/orchestrator.token \
+  --orchestrator-provider-ids local
+# Workers are assignment-created one-shot processes. Run a flow-orchestrator
+# provider (process or Kubernetes); it reserves an assignment per queued job
+# and launches `flow-worker run --one-shot --config <generated>` for each.
 cd /path/to/existing/repo
 git status
 flow init --repo .
@@ -218,11 +219,13 @@ compiled into the `flow` binary for prompt generation.
 9. Leaves all existing remotes, including `origin`, untouched.
 10. Writes a client config so later CLI commands need no `--server`/`--token`.
 
-One global worker config serves every project. `flow-server serve` does not
-create it; operators start from `examples/flow-worker.yaml` or another
-deployment-specific config, and `flow-worker` joins the server with
-`FLOW_WORKER_JOIN_TOKEN` when the config does not contain a worker token.
-Project registration does not create a per-project worker config.
+Workers are assignment-created one-shot processes, not a persistent pool. A
+`flow-orchestrator` provider reserves an exact queued job as a durable
+assignment, mints a short-lived assignment-scoped worker credential, writes a
+generated worker config, and launches `flow-worker run --one-shot` for that one
+assignment. The worker registers against its assignment, claims exactly its
+assigned job, runs it, reports the outcome, and exits. Neither `flow-server
+serve` nor project registration creates a static worker config.
 
 Default behavior is deliberately conservative:
 

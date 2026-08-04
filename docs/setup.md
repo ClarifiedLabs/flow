@@ -1,7 +1,7 @@
 # Setup
 
 This guide covers local binary setup, Docker setup, project onboarding, owner
-tokens, worker configuration, and terminal attach.
+tokens, assignment providers, and terminal attach.
 
 ## Prerequisites
 
@@ -25,8 +25,8 @@ export PATH="$PWD/bin:$PATH"
 Create private owner and orchestrator tokens. The owner token authorizes
 human/admin CLI calls and web UI bootstrap. The orchestrator token authorizes
 only durable assignment reservation and reconciliation for the provider IDs
-bound to it. A worker join token is needed only for static service-mode workers,
-not assignment workers.
+bound to it. Assignment reservation returns a short-lived worker credential for
+the selected job.
 
 ```sh
 mkdir -p .flow-local
@@ -42,7 +42,7 @@ Start the coordinator in terminal 1:
 flow-server serve \
   --owner-token-file .flow-local/owner.token \
   --orchestrator-token-file .flow-local/orchestrator.token \
-  --orchestrator-provider-ids local-darwin
+  --orchestrator-provider-ids local
 ```
 
 On startup `flow-server serve` opens the local Flow data dir
@@ -90,7 +90,8 @@ FLOW_ORCHESTRATOR_TOKEN="$(tr -d '\r\n' < .flow-local/orchestrator.token)" \
 ```
 
 The coordinator durably reserves one exact queued job per assignment. The
-orchestrator then starts one `flow-worker --one-shot` Darwin child with a direct,
+orchestrator then starts one `flow-worker run --one-shot --config PATH` Darwin
+child with a direct,
 assignment-specific worker token. It stores private worker config, PID, status,
 and logs under `state_dir`, allowing restart inspection and cleanup. Preserve
 that directory while assignments are open and keep it mode 0700. Darwin workers
@@ -123,97 +124,26 @@ open "$(tr -d '\r\n' < /tmp/flow-ui-url.txt)"
 
 ## Docker Compose
 
-The Docker setup runs `flow-server` and `flow-worker` as separate non-root
-Debian Trixie-based containers with separate server and worker volumes:
+Docker Compose runs a server-only local control plane as a non-root Debian
+Trixie-based container:
 
 ```sh
 cp .env.example .env
 sed -i.bak \
   -e "s/^FLOW_OWNER_TOKEN=.*/FLOW_OWNER_TOKEN=$(openssl rand -hex 32)/" \
-  -e "s/^FLOW_WORKER_JOIN_TOKEN=.*/FLOW_WORKER_JOIN_TOKEN=$(openssl rand -hex 32)/" \
   .env
 docker compose up -d --build
 ```
 
-The server stores coordinator state in `flow-data`. The worker stores its
-`/flow/work` directory in `flow-worker-data` and its rootless Docker state in
-`flow-worker-docker`; it does not mount the server data volume.
+The server stores coordinator state in `flow-data`. Compose does not run a
+standby worker service. Use the [Local Kind quickstart](kubernetes.md#local-kind-quickstart)
+for a complete server, orchestrator, and assignment-created worker stack, or
+configure a Kubernetes or Darwin orchestrator profile as described below. Every
+selected job receives a separate runtime that executes `flow-worker run
+--one-shot --config PATH`.
 
-The worker treats each `/flow/work/jobs/<job-id>` directory as lease-scoped
-scratch space. After it has reported the result, uploaded the transcript, and
-the coordinator has acknowledged the terminal lease or session transition, the
-worker removes the entire job directory, including its isolated language
-caches and repository checkout. At startup and every five minutes it also
-reconciles leftover directories against coordinator job state. Active and
-nonterminal jobs are preserved; unknown directories receive a one-hour grace
-period before removal.
-
-The same maintenance loop monitors free space on the filesystem containing
-`work_dir`. By default the worker stops claiming jobs below 10% free and resumes
-above 15% free; `/readyz` reports unavailable while claims are paused. Optional
-absolute thresholds can supplement the percentages:
-
-```yaml
-cleanup:
-  interval: 5m
-  orphan_grace: 1h
-  min_free_bytes: 10GiB
-  resume_free_bytes: 20GiB
-  min_free_percent: 10
-  resume_free_percent: 15
-```
-
-Cleanup never prunes an external Docker daemon because it may contain unrelated
-workloads. In Docker Desktop, host-side image and builder caches share the
-underlying VM filesystem with the named volumes; manage those caches through
-Docker Desktop or the host Docker CLI.
-
-Compose bind-mounts the repository's `docker/flow-worker.yaml` read-only at
-`/etc/flow/flow-worker.yaml`. Edit that file to change worker labels or
-capacity without modifying the image's example configuration. For example:
-
-```yaml
-accepts:
-  - persistent_agent # author, reviewer, verifier, and console jobs
-  - ephemeral        # CI/check jobs
-```
-
-Acceptance selects workload buckets, not concurrency: each worker identity can
-hold only one live lease total. Restart the worker after editing its
-configuration; a rebuild is not required:
-
-```sh
-docker compose up -d --force-recreate flow-worker
-```
-
-The `flow-server` image stays minimal. The `flow-worker` image includes the
-`harness` agent CLI, Go, nvm with Node.js LTS, Rust, Temurin JDK,
-LLVM/clang/lld, build tools, Docker CLI/Compose/buildx, rootless
-Docker-in-Docker, age, GnuPG, OpenSSH, Python, GitHub CLI, and common
-build/debug utilities. Each pinned third-party package version and
-architecture-specific SHA256 is declared as a Docker build argument in
-`Dockerfile`.
-
-The worker starts a rootless Docker daemon by default and advertises
-`docker=true` only after `docker info` succeeds. Its `coordinator_url` is the
-internal Compose address, `http://flow-server:8421`. The worker uses that same
-base URL for API requests and project Git exchanges; host-side clients use
-their own configured server URL, normally `http://127.0.0.1:8421`.
-
-Docker-hosted agents authenticate through the Harness model proxy. Set the
-proxy URL (and API key, when your proxy requires one) in `.env`:
-
-```sh
-HARNESS_MODEL_PROXY_URL=http://host.docker.internal:8765
-HARNESS_MODEL_PROXY_API_KEY=your-proxy-key
-```
-
-`compose.yaml` forwards both values into the worker container, and the worker
-scopes them to author, reviewer, verifier, and console jobs, so CI jobs keep
-their hermetic environments. Keep `.env` private; it is ignored by git.
-
-Load the generated owner token from `.env`, then onboard a repository from your
-normal host checkout:
+Load the owner token from `.env`, then onboard a repository from your normal host
+checkout:
 
 ```sh
 set -a
@@ -226,9 +156,8 @@ flow init --server http://127.0.0.1:8421 --token "$FLOW_OWNER_TOKEN"
 
 `flow init` registers a Docker-hosted HTTP Git exchange remote and stores a
 path-scoped Git credential through your configured Git credential helper. If no
-helper is configured, `flow init` prints the `git credential approve` command to
-run after you configure one. The token is not written into the repository's Git
-config.
+helper is configured, it prints the `git credential approve` command to run after
+you configure one. The token is not written into the repository's Git config.
 
 ## What Init Creates
 
@@ -275,63 +204,32 @@ credential; replacing the token file or `--owner-token` value and restarting the
 coordinator rotates the owner credential and revokes previous live owner
 tokens.
 
-## Static Worker Setup
+## Assignment Worker Setup
 
-The assignment orchestrator is the canonical dynamic worker path. A static
-service-mode worker remains available for Docker Compose, remote machines, and
-manual operation. It can serve every project. Create a reusable worker join
-token, add it to `flow-server serve`, start from the example config, and pass the
-join token through the environment:
+`flow-orchestrator` is the only worker creation path. On each recovery-first
+cycle it reconciles existing durable assignments, then reserves eligible queued
+jobs up to each profile's `max_concurrency`. Each reservation binds one exact job
+to a stable worker ID and returns a short-lived worker credential scoped to that
+assignment.
 
-```sh
-FLOW_WORKER_JOIN_TOKEN="$(tr -d '\r\n' < .flow-local/worker-join.token)" \
-  flow-worker -c .flow-local/worker.yaml
-```
-
-Each job claim identifies its project. The worker resolves that project's Git
-exchange as `<coordinator_url>/git/projects/<project-id>/exchange.git`, clones
-it into its `work_dir`, checks out the per-job branch, and runs the job in tmux.
-
-The canonical `worker.yaml` form declares accepted workload buckets and
-intentionally omits the worker token:
-
-```yaml
-worker_id: w-local
-coordinator_url: http://127.0.0.1:8421
-labels:
-  local: "true"
-accepts: [persistent_agent, ephemeral]
-```
-
-At registration time, `flow-worker` probes its environment and advertises agent
-harness capabilities as labels:
-
-- `agent.harness.harness: "true"` when `harness --check-model-proxy` passes.
-- `persistent_agent` accepts author, reviewer, verifier, and console agent jobs.
-- `ephemeral` accepts CI/check jobs. It is a workload bucket, not a lifecycle
-  flag.
-
-One worker identity can hold one live lease total, regardless of how many
-buckets it accepts. Concurrency comes from separate worker identities (normally
-separate durable assignments), not capacity magnitudes or internal claim loops.
-Legacy positive `capacity.persistent_agent` and `capacity.ephemeral` values are
-accepted for compatibility but normalized to 1; values above 1 emit a warning
-and do not increase concurrency. Do not configure both `accepts` and `capacity`.
-
-Multi-agent children therefore compete for independently provisioned workers,
-and a barrier may wait even though its graph node is active. Use separate static
-configs with distinct `worker_id` values when you need concurrent static workers
-or different labels, credentials, hosts, or work directories.
-
-Edit the YAML to change labels, accepted buckets, `coordinator_url`, `work_dir`,
-or terminal settings. Keep the join token private; it can be reused to start more
-workers, but anyone with it can mint a worker token for a configured worker id.
-Use a distinct `worker_id` for each concurrent worker; joining with an existing
-`worker_id` rotates that worker's previous token.
+The provider writes a private assignment config and creates exactly one
+Kubernetes Job or Darwin child process. That runtime executes:
 
 ```sh
-chmod 600 .flow-local/worker-join.token
+flow-worker run --one-shot --config PATH
 ```
+
+The worker authenticates with its assignment credential, exact-claims only the
+bound job, clones the project's exchange branch into its assignment work
+directory, runs the job in tmux, reports the result, and exits. Bare
+`flow-worker` is invalid. Concurrency comes from separate assignments rather
+than multiple claim loops in one process.
+
+Preserve coordinator databases and orchestrator state while assignments are
+open. Reconciliation retries launch and cleanup, revokes the short-lived worker
+credential when the assignment closes, and removes the provider resource. Once
+a worker has claimed, ordinary lease expiry and job recovery remain authoritative
+if the runtime disappears.
 
 The coordinator seeds global built-in `task-planner`, `author`,
 `code-reviewer`, `security-reviewer`, `review-aggregator`, and `verifier` agent
@@ -515,21 +413,16 @@ Set the value to `"0"` to disable restart protection. This policy protects
 workers that remain alive while the coordinator restarts; it does not preserve
 running processes across a worker container or host restart.
 
-## Remote Workers
+## Assignment Worker Networking
 
-For a remote worker, set `coordinator_url` to the Flow server URL that the
-remote machine can reach. The worker uses that one URL for both coordinator API
-requests and the server-hosted Git exchanges. The server does not advertise a
-second exchange base URL.
+Configure each orchestrator provider with a coordinator URL reachable from the
+runtimes it creates. The generated assignment config uses that URL for both API
+requests and server-hosted Git exchanges; the server does not advertise a second
+exchange base URL.
 
-A remote worker does not need its own checkout of your project, but it does need
-a worker config with a unique `worker_id`, a reachable `coordinator_url`, an
-appropriate `work_dir`, and either `FLOW_WORKER_JOIN_TOKEN` or an existing
-worker token in the config.
-
-Terminal attach is required for workers. The worker opens terminal streams
-over its authenticated control WebSocket to the coordinator, so remote workers
-behind NAT work without any inbound listener or reverse tunnel.
+Workers open terminal streams over an authenticated control WebSocket to the
+coordinator, so assignment runtimes need no inbound listener or reverse tunnel.
+Their credentials and work directories are private to the assignment.
 
 ## Web Terminal
 

@@ -6,18 +6,18 @@ narrative, see [flow-design.md](flow-design.md).
 
 ## Process model
 
-Flow ships three Go commands from one module:
+Flow ships four Go commands from one module:
 
 | Command | Role |
 | --- | --- |
 | `flow` | Human and in-session CLI. It registers projects, drives task/workflow commands, fetches prompts, submits typed artifacts, and attaches to terminals. |
 | `flow-server` | Coordinator daemon. It serves the HTTP API, browser UI, Git HTTP exchange endpoints, web/terminal proxy routes, project registry, workflow executor, scheduler entrypoints, and exchange git hooks. |
-| `flow-worker` | Job executor. It registers, claims its eligible or assignment-bound job, clones exchange branches, runs jobs in tmux, heartbeats its lease, uploads transcripts, and reports results. |
+| `flow-worker` | One-shot job executor. It registers with assignment-scoped credentials, exact-claims its bound job, clones exchange branches, runs the job in tmux, heartbeats its lease, uploads transcripts, reports, and exits. |
 | `flow-orchestrator` | Durable assignment reconciler. It reserves exact queued jobs and creates one Kubernetes Job/Secret or Darwin child process per assignment. |
 
-A single `flow-server` can serve many projects. Static service-mode workers can
-still claim eligible jobs across projects. Provisioned workers instead have a
-stable assignment identity and execute one assignment with `--one-shot`.
+A single `flow-server` can serve many projects. Every worker is created for one
+durable assignment and executes it with `flow-worker run --one-shot --config
+PATH`; invoking `flow-worker` without the `run` subcommand is an error.
 
 ## Data layout
 
@@ -45,9 +45,9 @@ live with their owning project. Because no database transaction spans projects,
 the API registry serializes reservations and claims and checks a worker's live
 leases across all project databases.
 
-Workers keep their own `work_dir` from `flow-worker.yaml` and clone per-job
-repositories there. Server data and worker work directories are deliberately
-separate, especially in Docker deployments.
+Each assignment runtime receives a private worker config and an isolated
+`work_dir`, where it clones the assigned job's repository. Server data and worker
+work directories are deliberately separate.
 
 ## Project registration
 
@@ -82,7 +82,6 @@ a separately advertised exchange base URL.
 - `/v2/health` for health checks.
 - Git HTTP exchange routes before normal API auth.
 - `/ui/*` and `/ui/api/*` for the embedded browser UI.
-- `/v2/workers/join` for join-token based worker registration.
 - Owner, worker, session, console, and hook-token authenticated API routes.
 - Project-scoped routes under `/v2/projects/<project-id>/...`.
 
@@ -126,18 +125,10 @@ additionally proves the run owns a merged change.
 
 ## Worker scheduling, assignment, and execution
 
-Workers register globally in `global.db` with labels (including discovered
-harness capabilities), taints, accepted workload buckets, heartbeat expiry, and
-optional harness model catalogs. The canonical worker config field is `accepts`:
-
-- `persistent_agent`: author, reviewer, verifier, and console agent sessions;
-- `ephemeral`: CI/check commands.
-
-The word *ephemeral* remains a workload-bucket name; it does not select a worker
-process lifecycle. For protocol compatibility, positive legacy capacity values
-are normalized to acceptance value 1, and magnitudes greater than one are
-ignored. One worker identity may hold only one live lease total, even when it
-accepts both buckets.
+Orchestrator profiles select queued jobs by role, workload bucket, labels,
+taints, harness models, and required selectors. Profile `accepts` controls which
+workload buckets a provider may reserve; it does not change the
+one-process-per-assignment lifecycle.
 
 Project databases hold jobs, leases, and provisioner assignments. A reservation
 selects one exact eligible queued job across projects and durably records its
@@ -153,8 +144,8 @@ assignments, and deletes resources for closed assignments. Only then does it
 reserve new work up to each profile's `max_concurrency`. A Kubernetes provider
 creates one Job and one private worker-config Secret per assignment; the Darwin
 provider creates one child process and durable private state directory. Both run
-`flow-worker --one-shot` with a direct worker credential returned by the
-reservation API.
+`flow-worker run --one-shot --config PATH` with the private config and direct
+worker credential returned for that assignment.
 
 Assignment closure fences the worker credential. Successful cleanup also removes
 the global worker-directory row and records `cleaned_at`; provider deletion and
@@ -180,13 +171,11 @@ For its one claimed job, the worker:
 7. Heartbeats the lease and reports session/check/job events.
 8. Uploads the tail of the transcript when the job finishes.
 
-`--one-shot` long-polls until that claim, runs exactly one job, and exits after a
-reported job-scoped failure as well as success. `SIGINT`/`SIGTERM` cancel worker
-registration retries, long polling, maintenance, job supervision, and telemetry;
-an interrupted unreported job remains subject to lease expiry and recovery.
-Static workers that join with `FLOW_WORKER_JOIN_TOKEN` clear it after receiving a
-scoped token. Orchestrated assignment workers instead receive a direct token and
-never need the reusable join secret.
+`flow-worker run --one-shot --config PATH` long-polls until the exact claim,
+runs one job, reports its outcome, and exits after job-scoped failure as well as
+success. `SIGINT`/`SIGTERM` cancel registration retries, long polling,
+maintenance, job supervision, and telemetry; an interrupted unreported job
+remains subject to lease expiry and coordinator recovery.
 
 ## Git exchange and hooks
 
@@ -351,11 +340,9 @@ web UI or CLI.
 Flow uses bearer tokens for API clients and short-lived cookies for the web UI:
 
 - **Owner token**: human/admin CLI calls and web UI bootstrap.
-- **Worker join token**: reusable secret a static worker presents once to mint
-  its scoped worker token.
-- **Worker token**: scoped token for worker heartbeat, job claim/report, and
-  transcript upload. Assignment workers receive it directly from reservation;
-  abandonment and cleanup revoke credentials for that assignment worker ID.
+- **Worker token**: short-lived, assignment-scoped token for heartbeat, exact job
+  claim/report, and transcript upload. The reservation returns it directly;
+  assignment abandonment and cleanup revoke it.
 - **Orchestrator token**: provisioner-assignment reservation, recovery, and
   cleanup calls for its bound provider IDs; it has no general owner authority.
   Retired provider IDs stay bound as explicit recovery tombstones until their

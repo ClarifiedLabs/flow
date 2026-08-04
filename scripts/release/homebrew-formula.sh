@@ -25,8 +25,9 @@ write_binary_formula() {
     (pkgshare/"examples/docker").install "examples/docker/flow-server.yaml"'
 			;;
 		flow-worker)
-			examples_install='    (pkgshare/"examples").install "examples/flow-worker.yaml"
-    (pkgshare/"examples/docker").install "examples/docker/flow-worker.yaml"'
+			# Workers are assignment-created one-shot processes launched by an
+			# orchestrator with a generated config; no static example is shipped.
+			examples_install=''
 			;;
 		flow-orchestrator)
 			examples_install='    (pkgshare/"examples").install "examples/flow-orchestrator.yaml"'

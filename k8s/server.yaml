@@ -62,7 +62,7 @@ spec:
             - -c
             - |
               set -eu
-              for name in owner hook worker-join orchestrator; do
+              for name in owner hook orchestrator; do
                 install -m 0600 -o 1000 -g 1000 "/etc/flow/tokens-ro/$name" "/etc/flow/tokens/$name"
               done
           volumeMounts:
@@ -84,10 +84,6 @@ spec:
             - /etc/flow/tokens/owner
             - --hook-token-file
             - /etc/flow/tokens/hook
-            # Required only while optional static workers use the join endpoint;
-            # assignment-created Jobs authenticate with direct worker tokens.
-            - --worker-join-token-file
-            - /etc/flow/tokens/worker-join
             - --orchestrator-token-file
             - /etc/flow/tokens/orchestrator
             - --orchestrator-provider-ids

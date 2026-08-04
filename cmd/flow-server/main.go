@@ -807,7 +807,7 @@ func normalizeProviderIDSubject(raw string) (string, error) {
 func printUsage(out io.Writer) {
 	fmt.Fprint(out, `Usage:
   flow-server [--log-level LEVEL] COMMAND
-  flow-server serve [--data-dir PATH] [--addr HOST:PORT] [--worker-join-token TOKEN | --worker-join-token-file PATH] [--owner-token TOKEN | --owner-token-file PATH] [--hook-token TOKEN | --hook-token-file PATH] [--client-config PATH | --no-write-client-config]
+  flow-server serve [--data-dir PATH] [--addr HOST:PORT] [--owner-token TOKEN | --owner-token-file PATH] [--hook-token TOKEN | --hook-token-file PATH] [--orchestrator-token TOKEN | --orchestrator-token-file PATH] [--orchestrator-provider-ids IDS] [--client-config PATH | --no-write-client-config]
   flow-server config [--config PATH]
   flow-server git-hook pre-receive --repo PATH --base BRANCH
   flow-server git-hook post-receive --repo PATH --base BRANCH

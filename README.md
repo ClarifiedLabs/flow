@@ -6,8 +6,8 @@ jobs in tmux-backed workers, and serves a browser UI for creating, reviewing,
 and merging work.
 
 One `flow-server` can manage many repositories. Each repository becomes a Flow
-project with its own database and exchange remote, while a single `flow-worker`
-can execute jobs across all registered projects.
+project with its own database and exchange remote. `flow-orchestrator` reserves
+queued jobs and creates one short-lived `flow-worker` process for each assignment.
 
 ## Install
 
@@ -37,9 +37,9 @@ docker pull ghcr.io/clarifiedlabs/flow-worker:latest
 docker pull ghcr.io/clarifiedlabs/flow-orchestrator:latest
 ```
 
-Docker Compose provides explicit `legacy-workers` for compatibility; new local
-stacks should use the [Local Kind quickstart](docs/kubernetes.md#local-kind-quickstart).
-See [Detailed setup](docs/setup.md) and
+Docker Compose provides a server-only local control plane. Use the
+[Local Kind quickstart](docs/kubernetes.md#local-kind-quickstart) for a complete
+assignment-based stack. See [Detailed setup](docs/setup.md) and
 [Kubernetes operations](docs/kubernetes.md) for assignment-created one-shot
 worker Jobs, private credentials, probes, and recovery.
 
@@ -48,30 +48,18 @@ worker Jobs, private credentials, probes, and recovery.
 Prerequisites for local package installs are Git, tmux, and the `harness`
 agent CLI on the worker `PATH`.
 
-Start the coordinator:
+Start the coordinator and an assignment provider as described in
+[Detailed setup](docs/setup.md#local-binaries). The provider reserves one exact
+queued job, launches one Kubernetes Job or Darwin process with short-lived
+assignment-scoped credentials, and runs:
 
 ```sh
-mkdir -p .flow-local
-openssl rand -hex 32 > .flow-local/owner.token
-openssl rand -hex 32 > .flow-local/worker-join.token
-chmod 600 .flow-local/owner.token .flow-local/worker-join.token
-
-flow-server serve \
-  --owner-token-file .flow-local/owner.token \
-  --worker-join-token-file .flow-local/worker-join.token
+flow-worker run --one-shot --config PATH
 ```
 
-In another terminal, start a worker from the packaged example config:
-
-```sh
-# Homebrew example:
-# "$(brew --prefix flow-worker)/share/flow-worker/examples/flow-worker.yaml"
-# Linux package example: /usr/share/flow/examples/flow-worker.yaml
-cp /path/to/flow-worker.yaml .flow-local/worker.yaml
-
-FLOW_WORKER_JOIN_TOKEN="$(tr -d '\r\n' < .flow-local/worker-join.token)" \
-  flow-worker -c .flow-local/worker.yaml
-```
+The worker exact-claims its reserved job, reports the result, and exits. The
+orchestrator recovers durable assignments before reserving new work, so preserve
+its state and the coordinator databases across restarts.
 
 Register the git repository you want Flow to manage. The repository must already
 have at least one commit.
@@ -106,7 +94,7 @@ Most users can stay in the web UI:
   review — comments are delivered to it and you can open its terminal — so
   the plan is refined in one conversation instead of fresh runs.
 - **Feedback**, **Merge**, **Workers**, and **Jobs** show human waits, ready
-  merges, worker capacity, and job diagnostics.
+  merges, assignment workers, and job diagnostics.
 - **Flows** configures coordinator-global and project-specific agent definitions,
   plus project work/review flows.
 - **Features** groups a set of tasks behind one long-lived feature branch.
@@ -145,9 +133,9 @@ flow merge t-my-project-0001
   service bundles, lifecycle engine, and git exchange hooks.
 - `flow-orchestrator` reserves durable assignments and creates exactly one
   one-shot worker runtime for each selected job.
-- Managed `flow-worker` processes receive direct assignment-scoped credentials,
-  exact-claim that job, clone its task branch, run it in tmux, and exit. Reusable
-  join credentials remain available for compatibility workers.
+- Managed `flow-worker` processes receive short-lived assignment-scoped
+  credentials, run as `flow-worker run --one-shot --config PATH`, exact-claim the
+  reserved job, clone its task branch, run it in tmux, report, and exit.
 - `flow` is the human and in-session CLI for project onboarding, task commands,
   prompts, handoffs, terminal attach, review threads, and merge.
 

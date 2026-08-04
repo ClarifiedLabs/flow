@@ -11,9 +11,8 @@ under `/ui/*` on the same coordinator address.
 The web UI setup is:
 
 1. Start `flow-server serve` with owner and orchestrator tokens.
-2. Start `flow-orchestrator` with a Kubernetes or Darwin assignment profile.
-   For a deliberately static worker, start `flow-worker` with a worker config
-   and `FLOW_WORKER_JOIN_TOKEN` instead.
+2. Start `flow-orchestrator` with a Kubernetes or Darwin assignment profile. It
+   creates one one-shot worker runtime for each reserved job.
 3. Onboard at least one repository with `flow init`.
 4. Run `flow ui` from a registered repository, or run
    `flow ui --server URL --token TOKEN`.
@@ -37,7 +36,7 @@ page: primary navigation lives in the dropdown on the left, whose trigger
 shows the current page label alongside compact board lane chips (scheduled,
 in progress, blocked). The panel lists every destination — Board, Tasks,
 Console, Done, Flows, Workers, Jobs — with live per-destination badges such as
-the unscheduled-task count, closed-task count, worker slot usage, and active and queued jobs, plus the
+the unscheduled-task count, closed-task count, assignment-worker status, and active and queued jobs, plus the
 theme switcher at the bottom. A project picker appears at the right edge of
 the bar when more than one project is registered and filters the board by
 project. Task IDs embed their normalized project key, so links such as
@@ -317,9 +316,10 @@ flow thread reopen THREAD_ID
 
 Repo-versioned CI configuration lives in `.flow/checks/*.yaml`. CI jobs use the
 `ephemeral` workload bucket. Review and verification agents are selected by
-their graph nodes and use the `persistent_agent` bucket, so workers need the
-`agent.harness.harness: "true"` label. Bucket names express accepted workload,
-not worker process lifetime or multi-job capacity.
+their graph nodes and use the `persistent_agent` bucket. Orchestrator profiles
+must accept the needed buckets and provide the `agent.harness.harness: "true"`
+label for agent work. Bucket names classify jobs; every selected job still gets
+its own one-shot worker process.
 
 An `automated_checks` node runs the repository CI definitions. A
 `change_review` or `verify_change` node is a multi-agent node: it fans out one
@@ -348,9 +348,9 @@ should not set both names.
 
 Each node visit receives distinct check identities, so a loop back through
 review or verification executes every configured child again. All of those
-children share the `persistent_agent` worker class with author and other agent
-jobs; the barrier can therefore wait while another project or node uses the
-available one-job workers.
+children use the `persistent_agent` workload bucket with author and other agent
+jobs; the barrier can therefore wait until the orchestrator can reserve and
+launch another assignment.
 
 Set `requires` labels on CI definitions to match workers that can run the
 entrypoint. Review and verifier instructions belong in agent definitions, not
@@ -419,17 +419,16 @@ A failed upload is logged to the job's stdout and never fails the job.
 
 ## Assignment operations
 
-Dynamic workers are backed by coordinator-owned assignments in each job's
-project database. The orchestrator recovers all existing assignments before it
-reserves new work, then creates exactly one Kubernetes Job plus private Secret
-or one Darwin child for each new assignment. The child runs
-`flow-worker --one-shot` with a direct assignment-worker credential; it never
-needs a join token.
+Assignment workers are backed by coordinator-owned records in each job's project
+database. The orchestrator recovers all existing assignments before it reserves
+new work, then creates exactly one Kubernetes Job plus private Secret or one
+Darwin child for each new assignment. That runtime executes `flow-worker run
+--one-shot --config PATH` with a short-lived assignment-worker credential,
+exact-claims the reserved job, reports its outcome, and exits.
 
-Worker configs use `accepts: [persistent_agent, ephemeral]`. Legacy positive
-capacity values only mean that the bucket is accepted and normalize to 1. One
-worker identity can hold one live lease total. Use more assignments, not larger
-capacity numbers, for concurrency.
+Concurrency comes from independent durable assignments, bounded by the
+orchestrator profile's `max_concurrency`. Worker selection belongs to the
+profile; generated worker configs are private to one assignment.
 
 After an orchestrator restart, preserve and reuse profile names, provider IDs,
 Kubernetes namespaces, and Darwin state directories. Readiness stays false until

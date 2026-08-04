@@ -115,18 +115,6 @@ ensure_tokens() {
   ensure_nonempty_token owner
   ensure_nonempty_token hook
   ensure_nonempty_token orchestrator
-
-  case "${FLOW_KIND_ENABLE_JOIN_TOKEN:-0}" in
-    1|true|TRUE|yes|YES)
-      JOIN_TOKEN_ENABLED=1
-      ensure_nonempty_token worker-join
-      ;;
-    0|false|FALSE|no|NO)
-      JOIN_TOKEN_ENABLED=0
-      rm -f "${TOKEN_DIR}/worker-join"
-      ;;
-    *) fatal "FLOW_KIND_ENABLE_JOIN_TOKEN must be true/false or 1/0" ;;
-  esac
 }
 
 resolve_images() {
@@ -229,13 +217,6 @@ render_manifests() {
   local server_without_secret
   server_without_secret="${GENERATED_DIR}/server-without-secret.yaml"
   strip_flow_tokens_secret "${REPO_ROOT}/k8s/server.yaml" >"${server_without_secret}"
-  if [ "${JOIN_TOKEN_ENABLED}" -eq 0 ]; then
-    sed -E \
-      -e 's/owner hook worker-join orchestrator/owner hook orchestrator/' \
-      -e '/^[[:space:]]*- --worker-join-token-file[[:space:]]*$/,+1d' \
-      "${server_without_secret}" >"${server_without_secret}.tmp"
-    mv "${server_without_secret}.tmp" "${server_without_secret}"
-  fi
 
   grep -E '^[[:space:]]*image:.*flow-server' "${server_without_secret}" >/dev/null ||
     fatal "k8s/server.yaml has no flow-server image to replace"
@@ -283,16 +264,10 @@ EOF
 }
 
 apply_tokens_secret() {
-  local args
-  args=(
-    --from-file=owner="${TOKEN_DIR}/owner"
-    --from-file=hook="${TOKEN_DIR}/hook"
-    --from-file=orchestrator="${TOKEN_DIR}/orchestrator"
-  )
-  if [ "${JOIN_TOKEN_ENABLED}" -eq 1 ]; then
-    args+=(--from-file=worker-join="${TOKEN_DIR}/worker-join")
-  fi
-  kube create secret generic flow-tokens --namespace flow "${args[@]}" \
+  kube create secret generic flow-tokens --namespace flow \
+    --from-file=owner="${TOKEN_DIR}/owner" \
+    --from-file=hook="${TOKEN_DIR}/hook" \
+    --from-file=orchestrator="${TOKEN_DIR}/orchestrator" \
     --dry-run=client -o yaml | kube apply -f -
 }
 

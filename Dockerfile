@@ -275,4 +275,7 @@ VOLUME ["/flow/work", "/home/flow/.local/share/docker"]
 EXPOSE 8422
 USER flow
 ENTRYPOINT ["tini", "-g", "--", "flow-worker-entrypoint"]
-CMD ["flow-worker", "-c", "/usr/share/flow/examples/docker/flow-worker.yaml"]
+# Workers are assignment-created one-shot processes. Orchestrator providers
+# override this command with the generated assignment config; standalone runs
+# mount an assignment-scoped config at /etc/flow/worker.yaml.
+CMD ["flow-worker", "run", "--one-shot", "--config", "/etc/flow/worker.yaml"]
