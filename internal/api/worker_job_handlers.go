@@ -15,54 +15,6 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/worker"
 )
 
-func (s *Server) handleJoinWorker(w http.ResponseWriter, r *http.Request) {
-	if !requireMethod(w, r, http.MethodPost) {
-		return
-	}
-	if strings.TrimSpace(s.workerJoinToken) == "" {
-		writeError(w, http.StatusNotFound, "not_found", "resource not found")
-		return
-	}
-	header := strings.TrimSpace(r.Header.Get("Authorization"))
-	if !strings.HasPrefix(header, authScheme) {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "missing bearer token")
-		return
-	}
-	token := strings.TrimSpace(strings.TrimPrefix(header, authScheme))
-	if token == "" || !tokenMatches(token, s.workerJoinToken) {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "invalid bearer token")
-		return
-	}
-
-	var request joinWorkerRequest
-	if err := decodeJSON(r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
-		return
-	}
-	workerID := strings.TrimSpace(request.WorkerID)
-	if workerID == "" {
-		writeError(w, http.StatusBadRequest, "join_worker_failed", "worker_id is required")
-		return
-	}
-	if s.credentials == nil {
-		writeError(w, http.StatusInternalServerError, "join_worker_failed", "credentials are unavailable")
-		return
-	}
-	workerToken, err := s.credentials.ReplaceSubjectToken(r.Context(), coordinator.CredentialInput{
-		Scope:   coordinator.TokenScopeWorker,
-		Subject: workerID,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "join_worker_failed", err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, joinWorkerResponse{
-		WorkerID: workerID,
-		Token:    workerToken,
-	})
-}
-
 func (s *Server) handleWorkerPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
 	if r.URL.Path == "/v2/workers/reap-jobs" {
 		if !requireMethod(w, r, http.MethodGet) {
@@ -185,13 +137,11 @@ func (s *Server) handleRegisterWorker(w http.ResponseWriter, r *http.Request, pr
 	}
 
 	registered, err := s.registry.RegisterWorker(r.Context(), worker.RegisterWorkerInput{
-		ID:                      workerID,
-		Labels:                  request.Labels,
-		Taints:                  request.Taints,
-		HarnessModels:           request.HarnessModels,
-		CapacityPersistentAgent: request.CapacityPersistentAgent,
-		CapacityEphemeral:       request.CapacityEphemeral,
-		HeartbeatTTL:            heartbeatTTL,
+		ID:            workerID,
+		Labels:        request.Labels,
+		Taints:        request.Taints,
+		HarnessModels: request.HarnessModels,
+		HeartbeatTTL:  heartbeatTTL,
 	})
 	if err != nil {
 		if errors.Is(err, worker.ErrAssignmentConflict) {
@@ -290,7 +240,6 @@ func (s *Server) handleClaimWorkerJob(w http.ResponseWriter, r *http.Request, pr
 		}
 		claimed, ok, err := s.registry.Claim(r.Context(), worker.ClaimInput{
 			WorkerID:      workerID,
-			Buckets:       request.Buckets,
 			LeaseDuration: leaseDuration,
 		})
 		if errors.Is(err, sql.ErrNoRows) {

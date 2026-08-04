@@ -1207,32 +1207,17 @@ func (c *Client) RegisterWorker(input RegisterWorkerInput) (flowworker.Worker, e
 func (c *Client) RegisterWorkerContext(ctx context.Context, input RegisterWorkerInput) (flowworker.Worker, error) {
 	var response workerResponse
 	request := registerWorkerRequest{
-		ID:                      input.ID,
-		Labels:                  input.Labels,
-		Taints:                  input.Taints,
-		HarnessModels:           input.HarnessModels,
-		CapacityPersistentAgent: input.CapacityPersistentAgent,
-		CapacityEphemeral:       input.CapacityEphemeral,
-		HeartbeatTTLSeconds:     durationSeconds(input.HeartbeatTTL),
+		ID:                  input.ID,
+		Labels:              input.Labels,
+		Taints:              input.Taints,
+		HarnessModels:       input.HarnessModels,
+		HeartbeatTTLSeconds: durationSeconds(input.HeartbeatTTL),
 	}
 	if err := c.doContext(ctx, http.MethodPost, "/v2/workers/register", request, nil, &response); err != nil {
 		return flowworker.Worker{}, err
 	}
 
 	return response.Worker, nil
-}
-
-func (c *Client) JoinWorker(input JoinWorkerInput) (JoinWorkerResult, error) {
-	var response joinWorkerResponse
-	request := joinWorkerRequest{WorkerID: input.WorkerID}
-	if err := c.do(http.MethodPost, "/v2/workers/join", request, nil, &response); err != nil {
-		return JoinWorkerResult{}, err
-	}
-
-	return JoinWorkerResult{
-		WorkerID: response.WorkerID,
-		Token:    response.Token,
-	}, nil
 }
 
 func (c *Client) HeartbeatWorker(input HeartbeatWorkerInput) (flowworker.Worker, error) {
@@ -1269,7 +1254,6 @@ func (c *Client) ClaimJobContext(ctx context.Context, input ClaimJobInput) (Clai
 	var response claimJobResponse
 	request := claimJobRequest{
 		WorkerID:             input.WorkerID,
-		Buckets:              input.Buckets,
 		LeaseDurationSeconds: durationSeconds(input.LeaseDuration),
 		WaitSeconds:          durationSeconds(input.Wait),
 	}
@@ -2269,22 +2253,11 @@ type RecordProvisionerAssignmentAttemptInput struct {
 }
 
 type RegisterWorkerInput struct {
-	ID                      string
-	Labels                  map[string]string
-	Taints                  []scheduler.Taint
-	HarnessModels           []flowharness.Model
-	CapacityPersistentAgent int
-	CapacityEphemeral       int
-	HeartbeatTTL            time.Duration
-}
-
-type JoinWorkerInput struct {
-	WorkerID string
-}
-
-type JoinWorkerResult struct {
-	WorkerID string
-	Token    string
+	ID            string
+	Labels        map[string]string
+	Taints        []scheduler.Taint
+	HarnessModels []flowharness.Model
+	HeartbeatTTL  time.Duration
 }
 
 type HeartbeatWorkerInput struct {
@@ -2294,7 +2267,6 @@ type HeartbeatWorkerInput struct {
 
 type ClaimJobInput struct {
 	WorkerID      string
-	Buckets       []flowworker.CapacityBucket
 	LeaseDuration time.Duration
 	Wait          time.Duration
 }
@@ -2452,7 +2424,6 @@ type taskStateRequest = contract.TaskStateRequest
 type triageTaskRequest = contract.TriageTaskRequest
 type taskRelationRequest = contract.TaskRelationRequest
 type registerWorkerRequest = contract.RegisterWorkerRequest
-type joinWorkerRequest = contract.JoinWorkerRequest
 type heartbeatWorkerRequest = contract.HeartbeatWorkerRequest
 type claimJobRequest = contract.ClaimJobRequest
 type renewLeaseRequest = contract.RenewLeaseRequest
@@ -2495,7 +2466,6 @@ type transitionsResponse = contract.TransitionsResponse
 type checksResponse = contract.ChecksResponse
 type reviewRunResponse = contract.ReviewRunResponse
 type workerResponse = contract.WorkerResponse
-type joinWorkerResponse = contract.JoinWorkerResponse
 type workersResponse = contract.WorkersResponse
 type jobResponse = contract.JobResponse
 type jobsResponse = contract.JobsResponse

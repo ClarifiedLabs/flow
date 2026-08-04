@@ -305,7 +305,7 @@ func (r *Registry) RegisterWorker(ctx context.Context, input worker.RegisterWork
 		return worker.Worker{}, err
 	}
 	if !found {
-		return r.directory.RegisterWorker(ctx, input)
+		return worker.Worker{}, fmt.Errorf("%w: worker has no open assignment", worker.ErrAssignmentConflict)
 	}
 	if err := validateAssignedWorkerRegistration(ctx, record, &input); err != nil {
 		return worker.Worker{}, err
@@ -340,24 +340,22 @@ func validateAssignedWorkerRegistration(ctx context.Context, record provisionerA
 	if job.Role != assignment.Role || job.CapacityBucket != assignment.CapacityBucket {
 		return fmt.Errorf("%w: assigned job no longer matches its snapshot", worker.ErrAssignmentConflict)
 	}
-	if assignment.CapacityBucket == worker.BucketPersistentAgent {
-		if input.CapacityPersistentAgent <= 0 {
-			return fmt.Errorf("%w: worker does not accept the assigned capacity bucket", worker.ErrAssignmentConflict)
-		}
-		input.CapacityPersistentAgent, input.CapacityEphemeral = 1, 0
-	} else {
-		if input.CapacityEphemeral <= 0 {
-			return fmt.Errorf("%w: worker does not accept the assigned capacity bucket", worker.ErrAssignmentConflict)
-		}
-		input.CapacityPersistentAgent, input.CapacityEphemeral = 0, 1
-	}
+	// The worker's single bucket is derived from its assignment; clients never
+	// select or advertise buckets.
+	input.CapacityBucket = assignment.CapacityBucket
 	selector, err := scheduler.NewSelector(job.Selector)
 	if err != nil {
 		return err
 	}
+	capacity := scheduler.Capacity{}
+	if assignment.CapacityBucket == worker.BucketPersistentAgent {
+		capacity.PersistentAgent = 1
+	} else {
+		capacity.Ephemeral = 1
+	}
 	eligible, err := scheduler.Eligible(scheduler.Job{Selector: selector, Tolerations: job.Tolerations, CapacityBucket: scheduler.CapacityBucket(job.CapacityBucket)}, scheduler.Worker{
 		Labels: input.Labels, Taints: input.Taints,
-		Capacity: scheduler.Capacity{PersistentAgent: input.CapacityPersistentAgent, Ephemeral: input.CapacityEphemeral},
+		Capacity: capacity,
 	})
 	if err != nil {
 		return err
@@ -392,11 +390,7 @@ func (r *Registry) claimWorkerLocked(ctx context.Context, input worker.ClaimInpu
 		return worker.ProjectClaim{}, false, err
 	}
 	if !assigned {
-		queues := make([]worker.ProjectQueue, 0)
-		for _, bundle := range r.All() {
-			queues = append(queues, worker.ProjectQueue{ProjectID: bundle.Project.ID, Queue: bundle.Queue})
-		}
-		return worker.ClaimAcrossProjects(ctx, r.directory, queues, input)
+		return worker.ProjectClaim{}, false, fmt.Errorf("%w: worker has no open assignment", worker.ErrAssignmentConflict)
 	}
 
 	registered, err := r.directory.GetWorker(ctx, input.WorkerID)

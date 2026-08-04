@@ -36,10 +36,10 @@ import (
 
 const transientWorkerRetryDelay = time.Second
 
-// jobError marks a failure scoped to a single claimed job. The coordinator
-// recovers such jobs through lease expiry and job state, so a service-mode
-// worker logs them and keeps serving instead of exiting and abandoning its
-// other in-flight jobs.
+// jobError marks a failure scoped to a single claimed job. The worker has
+// already reported the outcome to the coordinator (release, check verdict, or
+// discarded-on-lease-loss), so a job-scoped failure exits 0 instead of
+// failing the process.
 type jobError struct{ err error }
 
 func (e *jobError) Error() string { return e.err.Error() }
@@ -67,27 +67,23 @@ func run(args []string, stdout, stderr io.Writer) int {
 	slog.Debug("flow-worker command start", "command", flowlog.CommandName(args))
 
 	if len(args) == 0 {
-		return runWorker(nil, stdout, stderr)
+		fmt.Fprintln(stderr, "flow-worker requires the managed `run --one-shot` command")
+		printUsage(stderr)
+		return 2
 	}
 
 	switch args[0] {
 	case "--version", "version":
 		fmt.Fprintf(stdout, "flow-worker %s\n", version.Current())
 		return 0
-	case "-c", "--config", "run":
-		if args[0] == "run" {
-			return runWorker(args[1:], stdout, stderr)
-		}
-		return runWorker(args, stdout, stderr)
+	case "run":
+		return runWorker(args[1:], stdout, stderr)
 	case "config":
 		return runConfig(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		printUsage(stdout)
 		return 0
 	default:
-		if strings.HasPrefix(args[0], "-") {
-			return runWorker(args, stdout, stderr)
-		}
 		fmt.Fprintf(stderr, "unknown command: %s\n\n", args[0])
 		printUsage(stderr)
 		return 2
@@ -116,13 +112,6 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "work_dir: %s\n", cfg.WorkDir)
 	fmt.Fprintf(stdout, "protocol: %s\n", contract.ProtocolVersion)
 	fmt.Fprintf(stdout, "labels: %d\n", len(cfg.Labels))
-	acceptedBuckets := make([]string, len(cfg.Accepts))
-	for i, bucket := range cfg.Accepts {
-		acceptedBuckets[i] = string(bucket)
-	}
-	fmt.Fprintf(stdout, "accepts: %s\n", strings.Join(acceptedBuckets, ","))
-	fmt.Fprintf(stdout, "capacity_persistent_agent: %d\n", cfg.Capacity.PersistentAgent)
-	fmt.Fprintf(stdout, "capacity_ephemeral: %d\n", cfg.Capacity.Ephemeral)
 	cleanup, _ := cfg.Cleanup.Resolve()
 	history, _ := cfg.History.Resolve(cfg.WorkDir)
 	fmt.Fprintf(stdout, "cleanup_interval: %s\n", cleanup.Interval)
@@ -147,8 +136,6 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 
 	var configPath string
-	var registerOnly bool
-	var once bool
 	var oneShot bool
 	var noMetrics bool
 	var metricsListen string
@@ -159,9 +146,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	var gitCommitEmail string
 	flags.StringVar(&configPath, "c", "", "worker config path")
 	flags.StringVar(&configPath, "config", "", "worker config path")
-	flags.BoolVar(&registerOnly, "register-only", false, "register and heartbeat without claiming jobs")
-	flags.BoolVar(&once, "once", false, "run at most one claim attempt")
-	flags.BoolVar(&oneShot, "one-shot", false, "keep long-polling until one job is claimed, run it, then exit")
+	flags.BoolVar(&oneShot, "one-shot", false, "run the worker's single assignment-created job, then exit (required)")
 	flags.BoolVar(&noMetrics, "no-metrics", false, "disable the telemetry endpoint (/readyz, /livez, /metrics)")
 	flags.StringVar(&metricsListen, "metrics-listen", "", "telemetry endpoint listen address")
 	flags.DurationVar(&claimWait, "claim-wait", 30*time.Second, "claim long-poll duration")
@@ -176,8 +161,8 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "flow-worker does not accept positional arguments")
 		return 2
 	}
-	if once && oneShot {
-		fmt.Fprintln(stderr, "--once and --one-shot cannot be used together")
+	if !oneShot {
+		fmt.Fprintln(stderr, "flow-worker run requires --one-shot: workers are assignment-created one-shot processes")
 		return 2
 	}
 
@@ -211,14 +196,9 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if strings.TrimSpace(cfg.Token) == "" {
-		token, err := joinWorker(cfg)
-		if err != nil {
-			fmt.Fprintf(stderr, "join worker: %v\n", err)
-			return 1
-		}
-		cfg.Token = token
+		fmt.Fprintln(stderr, "worker config token is required: workers authenticate with their assignment-scoped credential")
+		return 1
 	}
-	os.Unsetenv("FLOW_WORKER_JOIN_TOKEN")
 	if err := os.MkdirAll(filepath.Join(cfg.WorkDir, "jobs"), 0o700); err != nil {
 		fmt.Fprintf(stderr, "create worker jobs directory: %v\n", err)
 		return 1
@@ -276,8 +256,6 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		"worker_id", cfg.WorkerID,
 		"coordinator_url", cfg.CoordinatorURL,
 		"work_dir", cfg.WorkDir,
-		"capacity_persistent_agent", cfg.Capacity.PersistentAgent,
-		"capacity_ephemeral", cfg.Capacity.Ephemeral,
 		"history_transcript_segment_bytes", historyPolicy.Transcript.SegmentBytes,
 		"history_transcript_flush_interval", historyPolicy.Transcript.FlushInterval,
 		"history_archive_max_stored_bytes", historyPolicy.Archive.MaxStoredBytes,
@@ -302,20 +280,6 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "registered: %s\n", registered.ID)
-	if registerOnly {
-		registeredReady.Store(true)
-		heartbeat, err := client.HeartbeatWorkerContext(executionCtx, flowclient.HeartbeatWorkerInput{
-			WorkerID:     cfg.WorkerID,
-			HeartbeatTTL: heartbeatTTL,
-		})
-		if err != nil {
-			fmt.Fprintf(stderr, "heartbeat worker: %v\n", err)
-			return 1
-		}
-		fmt.Fprintf(stdout, "heartbeat: %s\n", heartbeat.ID)
-		fmt.Fprintln(stdout, "claim: disabled")
-		return 0
-	}
 
 	historyManager, err := newHistoryCaptureManager(client, cfg, historyPolicy)
 	if err != nil {
@@ -357,12 +321,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		History:       historyManager,
 	}
 	runOutput := &lockedWriter{writer: stdout}
-	var runErr error
-	if oneShot {
-		runErr = runWorkerOneShot(executionCtx, client, cfg, timings, maintenance, runOutput)
-	} else {
-		runErr = runWorkerLoop(executionCtx, client, cfg, timings, maintenance, once, runOutput)
-	}
+	runErr := runWorkerOneShot(executionCtx, client, cfg, timings, maintenance, runOutput)
 	if runErr != nil {
 		if executionCtx.Err() != nil {
 			return 0
@@ -467,38 +426,6 @@ func waitWorkerContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func runWorkerLoop(ctx context.Context, client *flowclient.Client, cfg config.WorkerConfig, timings workerTimings, maintenance *workerMaintenance, once bool, stdout io.Writer) error {
-	for {
-		slog.Debug("flow-worker claim loop iteration", "worker_id", cfg.WorkerID, "once", once)
-		claimed, err := runWorkerOnce(ctx, client, cfg, timings, maintenance, stdout)
-		if err != nil {
-			if flowclient.IsRetryableError(err) {
-				slog.Debug("flow-worker transient worker error", "worker_id", cfg.WorkerID, "error", err)
-				fmt.Fprintf(stdout, "worker transient error: %v; retrying in %s\n", err, transientWorkerRetryDelay)
-				if err := waitWorkerContext(ctx, transientWorkerRetryDelay); err != nil {
-					return err
-				}
-				continue
-			}
-			var jobErr *jobError
-			if !once && errors.As(err, &jobErr) {
-				slog.Debug("flow-worker job error", "worker_id", cfg.WorkerID, "error", err)
-				fmt.Fprintf(stdout, "job error: %v; continuing\n", err)
-				continue
-			}
-			return err
-		}
-		if once {
-			return nil
-		}
-		if !claimed && timings.ClaimWait <= 0 {
-			if err := waitWorkerContext(ctx, time.Second); err != nil {
-				return err
-			}
-		}
-	}
-}
-
 func runWorkerOnce(ctx context.Context, client *flowclient.Client, cfg config.WorkerConfig, timings workerTimings, maintenance *workerMaintenance, stdout io.Writer) (bool, error) {
 	slog.Debug("flow-worker heartbeat worker", "worker_id", cfg.WorkerID, "heartbeat_ttl", timings.HeartbeatTTL)
 	heartbeat, err := client.HeartbeatWorkerContext(ctx, flowclient.HeartbeatWorkerInput{
@@ -521,7 +448,6 @@ func runWorkerOnce(ctx context.Context, client *flowclient.Client, cfg config.Wo
 	slog.Debug("flow-worker claim job", "worker_id", cfg.WorkerID, "claim_wait", timings.ClaimWait, "lease_duration", timings.LeaseDuration)
 	claim, err := client.ClaimJobContext(ctx, flowclient.ClaimJobInput{
 		WorkerID:      cfg.WorkerID,
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketPersistentAgent, flowworker.BucketEphemeral},
 		LeaseDuration: timings.LeaseDuration,
 		Wait:          timings.ClaimWait,
 	})
@@ -946,13 +872,11 @@ func registerWorkerWithRetry(ctx context.Context, client *flowclient.Client, cfg
 	for {
 		slog.Debug("flow-worker register worker", "worker_id", cfg.WorkerID, "heartbeat_ttl", heartbeatTTL)
 		registered, err := client.RegisterWorkerContext(ctx, flowclient.RegisterWorkerInput{
-			ID:                      cfg.WorkerID,
-			Labels:                  labels,
-			Taints:                  cfg.Taints,
-			HarnessModels:           harnessModels,
-			CapacityPersistentAgent: cfg.Capacity.PersistentAgent,
-			CapacityEphemeral:       cfg.Capacity.Ephemeral,
-			HeartbeatTTL:            heartbeatTTL,
+			ID:            cfg.WorkerID,
+			Labels:        labels,
+			Taints:        cfg.Taints,
+			HarnessModels: harnessModels,
+			HeartbeatTTL:  heartbeatTTL,
 		})
 		if err == nil {
 			return registered, nil
@@ -966,31 +890,6 @@ func registerWorkerWithRetry(ctx context.Context, client *flowclient.Client, cfg
 			return flowworker.Worker{}, err
 		}
 	}
-}
-
-func joinWorker(cfg config.WorkerConfig) (string, error) {
-	joinToken := strings.TrimSpace(os.Getenv("FLOW_WORKER_JOIN_TOKEN"))
-	if joinToken == "" {
-		return "", errors.New("worker config token is required or FLOW_WORKER_JOIN_TOKEN must be set")
-	}
-	client, err := flowclient.New(config.ClientConfig{
-		ServerURL: cfg.CoordinatorURL,
-		Token:     joinToken,
-	})
-	if err != nil {
-		return "", err
-	}
-	joined, err := client.JoinWorker(flowclient.JoinWorkerInput{WorkerID: cfg.WorkerID})
-	if err != nil {
-		return "", err
-	}
-	if strings.TrimSpace(joined.WorkerID) != strings.TrimSpace(cfg.WorkerID) {
-		return "", fmt.Errorf("joined worker_id %q, want %q", joined.WorkerID, cfg.WorkerID)
-	}
-	if strings.TrimSpace(joined.Token) == "" {
-		return "", errors.New("join response did not include a worker token")
-	}
-	return strings.TrimSpace(joined.Token), nil
 }
 
 func registrationLabels(configured map[string]string) map[string]string {
@@ -1860,14 +1759,14 @@ func loadWorkerConfig(configPath string) (config.WorkerConfig, string, error) {
 func printUsage(out io.Writer) {
 	fmt.Fprint(out, `Usage:
   flow-worker [--log-level LEVEL] COMMAND
-  flow-worker [--once | --one-shot]
-  flow-worker --register-only
-  flow-worker run [--once | --one-shot]
-  flow-worker -c PATH [--once | --one-shot]
+  flow-worker run --one-shot [-c PATH]
   flow-worker config [-c PATH]
   flow-worker --version
 
 Global flags:
   --log-level LEVEL   structured log level: debug, info, warn, error, or off (overrides LOG_LEVEL)
+
+Workers are assignment-created one-shot processes: they register against
+their assignment, run exactly the assigned job, and exit.
 `)
 }

@@ -728,7 +728,7 @@ func tmuxCommand(cfg config.WorkerConfig, args ...string) *exec.Cmd {
 }
 
 func tmuxCommandArgs(cfg config.WorkerConfig, args ...string) []string {
-	socketPath := strings.TrimSpace(cfg.Tmux.SocketPath)
+	socketPath := strings.TrimSpace(cfg.TmuxSocketPath)
 	if socketPath == "" {
 		return append([]string(nil), args...)
 	}
@@ -766,7 +766,7 @@ func tmuxConfigForJob(cfg config.WorkerConfig, jobID string) (config.WorkerConfi
 	if err != nil {
 		return config.WorkerConfig{}, err
 	}
-	cfg.Tmux.SocketPath = socketPath
+	cfg.TmuxSocketPath = socketPath
 	return cfg, nil
 }
 
@@ -923,7 +923,7 @@ func runEntrypointInTmux(ctx context.Context, input tmuxInput) (int, error) {
 	if reporter != nil || canRegisterJobTerminal(input) {
 		registered := false
 		if reporter != nil {
-			registered = reporter.registerTerminal(input.Config.Tmux.SocketPath) || registered
+			registered = reporter.registerTerminal(input.Config.TmuxSocketPath) || registered
 		}
 		if canRegisterJobTerminal(input) {
 			registered = waitForJobTerminalRegistration(input) || registered
@@ -1733,7 +1733,7 @@ func killTmuxSession(cfg config.WorkerConfig, sessionName string) {
 }
 
 func resetTmuxForJob(cfg config.WorkerConfig, sessionName string) {
-	if strings.TrimSpace(cfg.Tmux.SocketPath) != "" {
+	if strings.TrimSpace(cfg.TmuxSocketPath) != "" {
 		cleanupTmuxServer(cfg)
 		return
 	}
@@ -1741,7 +1741,7 @@ func resetTmuxForJob(cfg config.WorkerConfig, sessionName string) {
 }
 
 func cleanupTmuxForJob(cfg config.WorkerConfig, sessionName string) {
-	if strings.TrimSpace(cfg.Tmux.SocketPath) != "" {
+	if strings.TrimSpace(cfg.TmuxSocketPath) != "" {
 		cleanupTmuxServer(cfg)
 		return
 	}
@@ -1749,7 +1749,7 @@ func cleanupTmuxForJob(cfg config.WorkerConfig, sessionName string) {
 }
 
 func cleanupTmuxServer(cfg config.WorkerConfig) {
-	socketPath := strings.TrimSpace(cfg.Tmux.SocketPath)
+	socketPath := strings.TrimSpace(cfg.TmuxSocketPath)
 	if socketPath == "" {
 		return
 	}
@@ -1768,7 +1768,7 @@ func cleanupAgentTmuxServer(cfg config.WorkerConfig, agentTmuxTmpDir string) {
 	socket := filepath.Join(dir, fmt.Sprintf("tmux-%d", os.Getuid()), "default")
 	if _, err := os.Stat(socket); err == nil {
 		agentCfg := cfg
-		agentCfg.Tmux.SocketPath = socket
+		agentCfg.TmuxSocketPath = socket
 		cleanupTmuxServer(agentCfg)
 	}
 	_ = os.RemoveAll(dir)
@@ -1927,7 +1927,7 @@ func registerJobTerminal(input tmuxInput) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sessionStateReportTimeout)
 	defer cancel()
-	_, err = client.RegisterJobTerminal(ctx, input.Job.ID, input.Lease.ID, input.Config.Tmux.SocketPath)
+	_, err = client.RegisterJobTerminal(ctx, input.Job.ID, input.Lease.ID, input.Config.TmuxSocketPath)
 	return err == nil
 }
 

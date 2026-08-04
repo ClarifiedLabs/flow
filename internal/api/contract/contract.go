@@ -233,22 +233,11 @@ type ApplyReviewFollowUpResponse struct {
 }
 
 type RegisterWorkerRequest struct {
-	ID                      string              `json:"id"`
-	Labels                  map[string]string   `json:"labels"`
-	Taints                  []scheduler.Taint   `json:"taints"`
-	HarnessModels           []flowharness.Model `json:"harness_models,omitempty"`
-	CapacityPersistentAgent int                 `json:"capacity_persistent_agent"`
-	CapacityEphemeral       int                 `json:"capacity_ephemeral"`
-	HeartbeatTTLSeconds     int                 `json:"heartbeat_ttl_seconds"`
-}
-
-type JoinWorkerRequest struct {
-	WorkerID string `json:"worker_id"`
-}
-
-type JoinWorkerResponse struct {
-	WorkerID string `json:"worker_id"`
-	Token    string `json:"token"`
+	ID                  string              `json:"id"`
+	Labels              map[string]string   `json:"labels"`
+	Taints              []scheduler.Taint   `json:"taints"`
+	HarnessModels       []flowharness.Model `json:"harness_models,omitempty"`
+	HeartbeatTTLSeconds int                 `json:"heartbeat_ttl_seconds"`
 }
 
 type HeartbeatWorkerRequest struct {
@@ -257,10 +246,9 @@ type HeartbeatWorkerRequest struct {
 }
 
 type ClaimJobRequest struct {
-	WorkerID             string                  `json:"worker_id"`
-	Buckets              []worker.CapacityBucket `json:"buckets"`
-	LeaseDurationSeconds int                     `json:"lease_duration_seconds"`
-	WaitSeconds          int                     `json:"wait_seconds"`
+	WorkerID             string `json:"worker_id"`
+	LeaseDurationSeconds int    `json:"lease_duration_seconds"`
+	WaitSeconds          int    `json:"wait_seconds"`
 }
 
 // ReserveProvisionerAssignmentRequest describes the immutable virtual-worker

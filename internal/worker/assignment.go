@@ -554,6 +554,13 @@ func (s *Service) ClaimAssignment(ctx context.Context, input ClaimAssignmentInpu
 		return ClaimedJob{}, errors.New("lease duration must be positive")
 	}
 
+	// Stale-queued cleanup commits in its own transaction so it survives a
+	// later claim failure, matching the pre-claim pass the general queue claim
+	// performed.
+	if err := s.CancelStaleQueuedJobs(ctx); err != nil {
+		return ClaimedJob{}, err
+	}
+
 	tx, err := beginImmediate(ctx, s.db)
 	if err != nil {
 		return ClaimedJob{}, fmt.Errorf("begin assignment claim transaction: %w", err)
@@ -734,14 +741,24 @@ func assignmentProfileEligible(job Job, profile assignmentProfile) (bool, error)
 	if !jobRoleAllowed(job.Role, profile.roles) || !capacityBucketAllowed(job.CapacityBucket, profile.buckets) || !selectorContains(job.Selector, profile.required) {
 		return false, nil
 	}
-	worker := Worker{Labels: profile.labels, Taints: profile.taints}
+	selector, err := scheduler.NewSelector(job.Selector)
+	if err != nil {
+		return false, err
+	}
+	// Profile eligibility assumes an unconsumed reservation: one assignment,
+	// one job, one lease.
+	capacity := scheduler.Capacity{}
 	if capacityBucketAllowed(BucketPersistentAgent, profile.buckets) || len(profile.buckets) == 0 {
-		worker.CapacityPersistentAgent = 1
+		capacity.PersistentAgent = 1
 	}
 	if capacityBucketAllowed(BucketEphemeral, profile.buckets) || len(profile.buckets) == 0 {
-		worker.CapacityEphemeral = 1
+		capacity.Ephemeral = 1
 	}
-	return eligibleForWorker(job, worker, scheduler.Capacity{})
+	return scheduler.Eligible(scheduler.Job{
+		Selector:       selector,
+		Tolerations:    job.Tolerations,
+		CapacityBucket: scheduler.CapacityBucket(job.CapacityBucket),
+	}, scheduler.Worker{Labels: profile.labels, Taints: profile.taints, Capacity: capacity})
 }
 
 func workerSatisfiesProfileSnapshot(worker Worker, assignment Assignment) (bool, error) {

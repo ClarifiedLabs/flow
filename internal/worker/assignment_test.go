@@ -10,7 +10,7 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/scheduler"
 )
 
-func TestAssignmentReservationEligibilityAndGenericExclusion(t *testing.T) {
+func TestAssignmentReservationEligibilityAndExclusion(t *testing.T) {
 	ctx := context.Background()
 	_, directory, service := newWorkerService(t)
 	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
@@ -86,24 +86,19 @@ func TestAssignmentReservationEligibilityAndGenericExclusion(t *testing.T) {
 		t.Fatalf("repeat = %+v, want original %+v", repeated, assignment)
 	}
 
-	oldest, err := service.OldestQueuedAt(ctx, []CapacityBucket{BucketEphemeral})
+	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
+		ID:             "w-next",
+		Labels:         map[string]string{"os": "linux", "pool": "trusted"},
+		CapacityBucket: BucketEphemeral,
+	}); err != nil {
+		t.Fatalf("register next worker: %v", err)
+	}
+	claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{WorkerID: "w-next", LeaseDuration: time.Minute})
 	if err != nil {
-		t.Fatalf("oldest queued: %v", err)
-	}
-	if oldest == nil || !oldest.Equal(ineligible.CreatedAt) {
-		// OldestQueuedAt is profile-agnostic: it excludes the reservation but may
-		// still report an otherwise ineligible queued job.
-		t.Fatalf("oldest unassigned = %v, want %v", oldest, ineligible.CreatedAt)
-	}
-	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{ID: "w-generic", Labels: map[string]string{"os": "linux", "pool": "trusted"}, CapacityEphemeral: 1}); err != nil {
-		t.Fatalf("register generic worker: %v", err)
-	}
-	claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{WorkerID: "w-generic", Buckets: []CapacityBucket{BucketEphemeral}, LeaseDuration: time.Minute})
-	if err != nil {
-		t.Fatalf("generic claim: %v", err)
+		t.Fatalf("assignment-backed claim: %v", err)
 	}
 	if !ok || claimed.Job.ID != genericJob.ID {
-		t.Fatalf("generic claim = %s/%v, want unassigned %s", claimed.Job.ID, ok, genericJob.ID)
+		t.Fatalf("assignment-backed claim = %s/%v, want unassigned %s", claimed.Job.ID, ok, genericJob.ID)
 	}
 	stillQueued, _ := service.GetJob(ctx, reservedJob.ID)
 	if stillQueued.State != JobQueued {
@@ -121,7 +116,9 @@ func TestAssignmentExactClaimRetryAndTerminalClosure(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 	assignment := reserveTestAssignment(t, service, job.ID, now, map[string]string{"os": "linux"})
-	worker, err := directory.RegisterWorker(ctx, RegisterWorkerInput{ID: assignment.WorkerID, Labels: map[string]string{"os": "linux"}, CapacityEphemeral: 1})
+	worker, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
+		ID: assignment.WorkerID, Labels: map[string]string{"os": "linux"}, CapacityBucket: BucketEphemeral,
+	})
 	if err != nil {
 		t.Fatalf("register assigned worker: %v", err)
 	}
@@ -208,7 +205,9 @@ func TestAssignmentClaimRejectsWorkerAndCapabilityMismatches(t *testing.T) {
 				t.Fatalf("enqueue: %v", err)
 			}
 			assignment := reserveTestAssignment(t, service, job.ID, now, map[string]string{"os": "linux"})
-			worker, err := directory.RegisterWorker(ctx, RegisterWorkerInput{ID: tc.workerID(assignment), Labels: tc.labels, Taints: tc.taints, CapacityEphemeral: 1})
+			worker, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
+				ID: tc.workerID(assignment), Labels: tc.labels, Taints: tc.taints, CapacityBucket: BucketEphemeral,
+			})
 			if err != nil {
 				t.Fatalf("register worker: %v", err)
 			}
@@ -284,7 +283,7 @@ func TestPendingAssignmentExpiryAndCancellationPreserveQueueSemantics(t *testing
 		t.Fatalf("enqueue direct cancellation job: %v", err)
 	}
 	directAssignment := reserveTestAssignment(t, service, directJob.ID, now, nil)
-	registered, err := directory.RegisterWorker(ctx, RegisterWorkerInput{ID: directAssignment.WorkerID, CapacityEphemeral: 1})
+	registered, err := directory.RegisterWorker(ctx, RegisterWorkerInput{ID: directAssignment.WorkerID, CapacityBucket: BucketEphemeral})
 	if err != nil {
 		t.Fatalf("register direct assignment worker: %v", err)
 	}
@@ -313,7 +312,7 @@ func TestClaimedAssignmentClosesOnLeaseSweep(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 	assignment := reserveTestAssignment(t, service, job.ID, now, nil)
-	worker, err := directory.RegisterWorker(ctx, RegisterWorkerInput{ID: assignment.WorkerID, CapacityEphemeral: 1})
+	worker, err := directory.RegisterWorker(ctx, RegisterWorkerInput{ID: assignment.WorkerID, CapacityBucket: BucketEphemeral})
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}

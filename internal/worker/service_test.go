@@ -22,11 +22,10 @@ func TestWorkerRegisterHeartbeatAndClaimLifecycle(t *testing.T) {
 	task := createTask(t, store)
 
 	registered, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID:                      "w-local",
-		Labels:                  map[string]string{"gpu": "true"},
-		CapacityPersistentAgent: 1,
-		CapacityEphemeral:       1,
-		HeartbeatTTL:            time.Minute,
+		ID:             "w-local",
+		Labels:         map[string]string{"gpu": "true"},
+		CapacityBucket: BucketPersistentAgent,
+		HeartbeatTTL:   time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("register worker: %v", err)
@@ -59,7 +58,6 @@ func TestWorkerRegisterHeartbeatAndClaimLifecycle(t *testing.T) {
 
 	claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
 		WorkerID:      "w-local",
-		Buckets:       []CapacityBucket{BucketPersistentAgent},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {
@@ -128,8 +126,9 @@ func TestRegisterWorkerPersistsHarnessModels(t *testing.T) {
 	minBudget := 1024
 
 	registered, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID:     "w-harness",
-		Labels: map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		ID:             "w-harness",
+		Labels:         map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		CapacityBucket: BucketPersistentAgent,
 		HarnessModels: []flowharness.Model{{
 			ProviderID:  "anthropic",
 			ModelID:     "claude-opus-4-8",
@@ -143,8 +142,7 @@ func TestRegisterWorkerPersistsHarnessModels(t *testing.T) {
 				}},
 			},
 		}},
-		CapacityPersistentAgent: 1,
-		HeartbeatTTL:            time.Minute,
+		HeartbeatTTL: time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("register worker: %v", err)
@@ -160,10 +158,10 @@ func TestRegisterWorkerPersistsHarnessModels(t *testing.T) {
 	}
 
 	updated, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID:                      "w-harness",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
-		CapacityPersistentAgent: 1,
-		HeartbeatTTL:            time.Minute,
+		ID:             "w-harness",
+		Labels:         map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		CapacityBucket: BucketPersistentAgent,
+		HeartbeatTTL:   time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("update worker without models: %v", err)
@@ -173,15 +171,14 @@ func TestRegisterWorkerPersistsHarnessModels(t *testing.T) {
 	}
 }
 
-func TestConcurrentClaimIsAtomic(t *testing.T) {
+func TestConcurrentAssignmentClaimIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	store, directory, service := newWorkerService(t)
 	task := createTask(t, store)
-
-	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID:                      "w-local",
-		CapacityPersistentAgent: 1,
-	}); err != nil {
+	worker, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
+		ID: "w-local", CapacityBucket: BucketPersistentAgent,
+	})
+	if err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 	job, err := service.EnqueueJob(ctx, EnqueueJobInput{
@@ -193,6 +190,7 @@ func TestConcurrentClaimIsAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enqueue job: %v", err)
 	}
+	assignment := reserveJobForWorker(t, service, job, worker.ID)
 
 	const attempts = 20
 	var wg sync.WaitGroup
@@ -202,37 +200,37 @@ func TestConcurrentClaimIsAtomic(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
-				WorkerID:      "w-local",
-				Buckets:       []CapacityBucket{BucketPersistentAgent},
-				LeaseDuration: time.Minute,
+			claimed, err := service.ClaimAssignment(ctx, ClaimAssignmentInput{
+				AssignmentID: assignment.ID, Worker: worker, Used: scheduler.Capacity{}, LeaseDuration: time.Minute,
 			})
 			if err != nil {
 				errs <- err
 				return
 			}
-			if ok {
-				results <- claimed
-			}
+			results <- claimed
 		}()
 	}
 	wg.Wait()
 	close(results)
 	close(errs)
-
 	for err := range errs {
-		t.Fatalf("claim error: %v", err)
+		t.Fatalf("claim assignment: %v", err)
 	}
-
-	var claims []ClaimedJob
+	leaseID := ""
+	claims := 0
 	for claim := range results {
-		claims = append(claims, claim)
+		claims++
+		if claim.Job.ID != job.ID {
+			t.Fatalf("claimed job = %s, want %s", claim.Job.ID, job.ID)
+		}
+		if leaseID == "" {
+			leaseID = claim.Lease.ID
+		} else if claim.Lease.ID != leaseID {
+			t.Fatalf("lease = %s, want idempotent lease %s", claim.Lease.ID, leaseID)
+		}
 	}
-	if len(claims) != 1 {
-		t.Fatalf("claims = %+v, want exactly one claim", claims)
-	}
-	if claims[0].Job.ID != job.ID {
-		t.Fatalf("claimed job = %s, want %s", claims[0].Job.ID, job.ID)
+	if claims != attempts {
+		t.Fatalf("claims = %d, want %d idempotent results", claims, attempts)
 	}
 }
 
@@ -260,14 +258,12 @@ func TestLiveAuthorJobUniqueness(t *testing.T) {
 	}
 
 	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID:                      "w-local",
-		CapacityPersistentAgent: 1,
+		ID: "w-local", CapacityBucket: BucketPersistentAgent,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 	claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
 		WorkerID:      "w-local",
-		Buckets:       []CapacityBucket{BucketPersistentAgent},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {
@@ -359,135 +355,65 @@ func TestConcurrentKeyedEnqueueDeduplicatesLiveJobsAndReusesTerminalKey(t *testi
 	}
 }
 
-func TestWorkerCannotClaimAcrossCapacityBucketsWhileLeaseIsLive(t *testing.T) {
+func TestClaimAssignmentRejectsReportedLiveLeaseAcrossCapacityBuckets(t *testing.T) {
 	ctx := context.Background()
-	store, directory, service := newWorkerService(t)
-	task := createTask(t, store)
-
-	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID:                      "w-local",
-		CapacityPersistentAgent: 1,
-		CapacityEphemeral:       1,
-	}); err != nil {
+	_, directory, service := newWorkerService(t)
+	worker, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
+		ID: "w-local", CapacityBucket: BucketEphemeral,
+	})
+	if err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
-	persistent, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		TaskID:         &task.ID,
-		Role:           RoleAuthor,
-		CapacityBucket: BucketPersistentAgent,
-		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
+	job, err := service.EnqueueJob(ctx, EnqueueJobInput{
+		Role: RoleCI, CapacityBucket: BucketEphemeral, Payload: map[string]any{"blocking": true},
 	})
 	if err != nil {
-		t.Fatalf("enqueue persistent job: %v", err)
+		t.Fatalf("enqueue job: %v", err)
 	}
-	ephemeral, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		Role:           RoleCI,
-		CapacityBucket: BucketEphemeral,
-		Priority:       100,
-		Payload:        map[string]any{"blocking": true},
-	})
-	if err != nil {
-		t.Fatalf("enqueue ephemeral job: %v", err)
-	}
-
-	claimedPersistent, ok, err := claimNext(ctx, directory, service, ClaimInput{
-		WorkerID:      "w-local",
-		Buckets:       []CapacityBucket{BucketPersistentAgent},
+	assignment := reserveJobForWorker(t, service, job, worker.ID)
+	_, err = service.ClaimAssignment(ctx, ClaimAssignmentInput{
+		AssignmentID:  assignment.ID,
+		Worker:        worker,
+		Used:          scheduler.Capacity{PersistentAgent: 1},
 		LeaseDuration: time.Minute,
 	})
-	if err != nil {
-		t.Fatalf("claim persistent: %v", err)
+	if !errors.Is(err, ErrAssignmentConflict) || !strings.Contains(err.Error(), "worker already has a live lease") {
+		t.Fatalf("claim with live lease err = %v, want assignment conflict", err)
 	}
-	if !ok || claimedPersistent.Job.ID != persistent.ID {
-		t.Fatalf("persistent claim = %+v ok=%v, want %s", claimedPersistent, ok, persistent.ID)
-	}
-
-	claimedEphemeral, ok, err := claimNext(ctx, directory, service, ClaimInput{
-		WorkerID:      "w-local",
-		Buckets:       []CapacityBucket{BucketEphemeral},
-		LeaseDuration: time.Minute,
-	})
-	if err != nil {
-		t.Fatalf("claim ephemeral: %v", err)
-	}
-	if ok {
-		t.Fatalf("ephemeral claim = %+v, want blocked while persistent lease %s is live", claimedEphemeral, claimedPersistent.Lease.ID)
-	}
-	if queued, err := service.GetJob(ctx, ephemeral.ID); err != nil || queued.State != JobQueued {
-		t.Fatalf("ephemeral job after blocked claim = %+v err=%v, want queued", queued, err)
+	queued, getErr := service.GetJob(ctx, job.ID)
+	if getErr != nil || queued.State != JobQueued {
+		t.Fatalf("job after rejected claim = %+v err=%v, want queued", queued, getErr)
 	}
 }
 
-func TestWorkerCapacityPreventsOverclaimingSameBucket(t *testing.T) {
+func TestReserveAssignmentRejectsSecondOpenAssignmentForWorker(t *testing.T) {
 	ctx := context.Background()
-	store, directory, service := newWorkerService(t)
-	firstTask := createTask(t, store)
-	secondTask := createTask(t, store)
-
-	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID:                      "w-local",
-		CapacityPersistentAgent: 1,
-	}); err != nil {
-		t.Fatalf("register worker: %v", err)
-	}
-	firstJob, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		TaskID:         &firstTask.ID,
-		Role:           RoleAuthor,
-		CapacityBucket: BucketPersistentAgent,
-		Priority:       10,
-		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
+	_, _, service := newWorkerService(t)
+	first, err := service.EnqueueJob(ctx, EnqueueJobInput{
+		Role: RoleCI, CapacityBucket: BucketEphemeral, Priority: 10, Payload: map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue first job: %v", err)
 	}
-	secondJob, err := service.EnqueueJob(ctx, EnqueueJobInput{
-		TaskID:         &secondTask.ID,
-		Role:           RoleAuthor,
-		CapacityBucket: BucketPersistentAgent,
-		Priority:       1,
-		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
+	second, err := service.EnqueueJob(ctx, EnqueueJobInput{
+		Role: RoleCI, CapacityBucket: BucketEphemeral, Priority: 1, Payload: map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue second job: %v", err)
 	}
-
-	claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
-		WorkerID:      "w-local",
-		Buckets:       []CapacityBucket{BucketPersistentAgent},
-		LeaseDuration: time.Minute,
+	reserveJobForWorker(t, service, first, "w-local")
+	_, err = service.ReserveAssignment(ctx, ReserveAssignmentInput{
+		WorkerID: "w-local", JobID: second.ID,
+		ProviderID: "test-provider", ProfileName: "test-profile", ProviderRequestID: "second-open-assignment",
+		ProviderType: "test", AllowedRoles: []JobRole{second.Role}, AllowedBuckets: []CapacityBucket{second.CapacityBucket},
+		StartupDeadline: service.now().Add(time.Minute),
 	})
-	if err != nil {
-		t.Fatalf("claim first job: %v", err)
+	if !errors.Is(err, ErrAssignmentConflict) {
+		t.Fatalf("reserve second assignment err = %v, want conflict", err)
 	}
-	if !ok || claimed.Job.ID != firstJob.ID {
-		t.Fatalf("claim = %+v ok=%v, want %s", claimed, ok, firstJob.ID)
-	}
-
-	_, ok, err = claimNext(ctx, directory, service, ClaimInput{
-		WorkerID:      "w-local",
-		Buckets:       []CapacityBucket{BucketPersistentAgent},
-		LeaseDuration: time.Minute,
-	})
-	if err != nil {
-		t.Fatalf("claim while full: %v", err)
-	}
-	if ok {
-		t.Fatal("worker claimed second persistent job while capacity was full")
-	}
-
-	if _, err := service.ReleaseLease(ctx, claimed.Lease.ID, JobFinished); err != nil {
-		t.Fatalf("release first job: %v", err)
-	}
-	claimed, ok, err = claimNext(ctx, directory, service, ClaimInput{
-		WorkerID:      "w-local",
-		Buckets:       []CapacityBucket{BucketPersistentAgent},
-		LeaseDuration: time.Minute,
-	})
-	if err != nil {
-		t.Fatalf("claim second job after release: %v", err)
-	}
-	if !ok || claimed.Job.ID != secondJob.ID {
-		t.Fatalf("second claim = %+v ok=%v, want %s", claimed, ok, secondJob.ID)
+	queued, getErr := service.GetJob(ctx, second.ID)
+	if getErr != nil || queued.State != JobQueued {
+		t.Fatalf("second job after rejected reservation = %+v err=%v, want queued", queued, getErr)
 	}
 }
 
@@ -496,9 +422,9 @@ func TestClaimSkipsJobsWithUnmatchedSelectors(t *testing.T) {
 	_, directory, service := newWorkerService(t)
 
 	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID:                      "w-local",
-		Labels:                  map[string]string{"gpu": "true"},
-		CapacityPersistentAgent: 1,
+		ID:             "w-local",
+		Labels:         map[string]string{"gpu": "true"},
+		CapacityBucket: BucketPersistentAgent,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
@@ -525,7 +451,6 @@ func TestClaimSkipsJobsWithUnmatchedSelectors(t *testing.T) {
 
 	claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
 		WorkerID:      "w-local",
-		Buckets:       []CapacityBucket{BucketPersistentAgent},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {
@@ -552,10 +477,10 @@ func TestClaimSkipsTaintedWorkerWithoutExactToleration(t *testing.T) {
 	_, directory, service := newWorkerService(t)
 
 	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID:                      "w-local",
-		Labels:                  map[string]string{"gpu": "true"},
-		Taints:                  []scheduler.Taint{{Key: "lifetime", Value: "persistent", Effect: scheduler.EffectNoSchedule}},
-		CapacityPersistentAgent: 1,
+		ID:             "w-local",
+		Labels:         map[string]string{"gpu": "true"},
+		CapacityBucket: BucketPersistentAgent,
+		Taints:         []scheduler.Taint{{Key: "lifetime", Value: "persistent", Effect: scheduler.EffectNoSchedule}},
 	}); err != nil {
 		t.Fatalf("register tainted worker: %v", err)
 	}
@@ -583,7 +508,6 @@ func TestClaimSkipsTaintedWorkerWithoutExactToleration(t *testing.T) {
 
 	claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
 		WorkerID:      "w-local",
-		Buckets:       []CapacityBucket{BucketPersistentAgent},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {
@@ -611,8 +535,7 @@ func TestExpiredLeaseIsSwept(t *testing.T) {
 	service.now = func() time.Time { return now }
 
 	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID:                      "w-local",
-		CapacityPersistentAgent: 1,
+		ID: "w-local", CapacityBucket: BucketPersistentAgent,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
@@ -627,7 +550,6 @@ func TestExpiredLeaseIsSwept(t *testing.T) {
 	}
 	claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
 		WorkerID:      "w-local",
-		Buckets:       []CapacityBucket{BucketPersistentAgent},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {
@@ -672,8 +594,7 @@ func TestExpiredLeaseCannotBeRenewed(t *testing.T) {
 	now := time.Date(2026, 6, 7, 13, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
 	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID:                      "w-local",
-		CapacityPersistentAgent: 1,
+		ID: "w-local", CapacityBucket: BucketPersistentAgent,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
@@ -687,7 +608,6 @@ func TestExpiredLeaseCannotBeRenewed(t *testing.T) {
 	}
 	claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
 		WorkerID:      "w-local",
-		Buckets:       []CapacityBucket{BucketPersistentAgent},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {
@@ -710,14 +630,14 @@ func TestExpiredLeaseCannotBeReleased(t *testing.T) {
 
 	now := time.Date(2026, 6, 7, 13, 15, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
-	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{ID: "w-local", CapacityPersistentAgent: 1}); err != nil {
+	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{ID: "w-local", CapacityBucket: BucketPersistentAgent}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 	job, err := service.EnqueueJob(ctx, EnqueueJobInput{TaskID: &task.ID, Role: RoleAuthor, CapacityBucket: BucketPersistentAgent, Payload: map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true}})
 	if err != nil {
 		t.Fatalf("enqueue job: %v", err)
 	}
-	claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{WorkerID: "w-local", Buckets: []CapacityBucket{BucketPersistentAgent}, LeaseDuration: time.Minute})
+	claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{WorkerID: "w-local", LeaseDuration: time.Minute})
 	if err != nil || !ok {
 		t.Fatalf("claim job = %+v, ok=%v, err=%v", claimed, ok, err)
 	}
@@ -742,8 +662,7 @@ func TestCoordinatorRestartProtectsExpiredActiveLease(t *testing.T) {
 	now := time.Date(2026, 6, 7, 13, 30, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
 	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID:                "w-local",
-		CapacityEphemeral: 1,
+		ID: "w-local", CapacityBucket: BucketEphemeral,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
@@ -757,7 +676,6 @@ func TestCoordinatorRestartProtectsExpiredActiveLease(t *testing.T) {
 	}
 	claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
 		WorkerID:      "w-local",
-		Buckets:       []CapacityBucket{BucketEphemeral},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {
@@ -827,8 +745,7 @@ func TestCoordinatorRestartLeaseProtectionDoesNotReviveTerminalOrShortenLiveLeas
 	workerIDs := []string{"w-long", "w-terminal", "w-released"}
 	for _, workerID := range workerIDs {
 		if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-			ID:                workerID,
-			CapacityEphemeral: 1,
+			ID: workerID, CapacityBucket: BucketEphemeral,
 		}); err != nil {
 			t.Fatalf("register worker %s: %v", workerID, err)
 		}
@@ -846,7 +763,6 @@ func TestCoordinatorRestartLeaseProtectionDoesNotReviveTerminalOrShortenLiveLeas
 		}
 		claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
 			WorkerID:      workerIDs[priority],
-			Buckets:       []CapacityBucket{BucketEphemeral},
 			LeaseDuration: duration,
 		})
 		if err != nil {
@@ -907,8 +823,7 @@ func TestExpiredLeaseCannotBeMarkedRunning(t *testing.T) {
 	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
 	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID:                      "w-local",
-		CapacityPersistentAgent: 1,
+		ID: "w-local", CapacityBucket: BucketPersistentAgent,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
@@ -922,7 +837,6 @@ func TestExpiredLeaseCannotBeMarkedRunning(t *testing.T) {
 	}
 	claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
 		WorkerID:      "w-local",
-		Buckets:       []CapacityBucket{BucketPersistentAgent},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {
@@ -944,8 +858,7 @@ func TestLiveLeaseUniquenessIsEnforcedAtDatabaseLayer(t *testing.T) {
 	task := createTask(t, store)
 
 	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID:                      "w-local",
-		CapacityPersistentAgent: 2,
+		ID: "w-local", CapacityBucket: BucketPersistentAgent,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
@@ -959,7 +872,6 @@ func TestLiveLeaseUniquenessIsEnforcedAtDatabaseLayer(t *testing.T) {
 	}
 	claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
 		WorkerID:      "w-local",
-		Buckets:       []CapacityBucket{BucketPersistentAgent},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {
@@ -1024,6 +936,7 @@ func TestTerminalTaskRejectsNewJobsAndCancelsQueuedWorkAtClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enqueue pre-terminal job: %v", err)
 	}
+	assignment := reserveJobForWorker(t, service, queued, "w-terminal")
 	now := formatTime(time.Now().UTC())
 	if _, err := store.DB().ExecContext(ctx, `
 UPDATE tasks
@@ -1037,17 +950,16 @@ WHERE id = ?`, now, now, task.ID); err != nil {
 	}); err == nil {
 		t.Fatal("terminal task accepted new non-console job")
 	}
-	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID: "w-terminal", CapacityEphemeral: 1, HeartbeatTTL: time.Minute,
-	}); err != nil {
+	worker, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
+		ID: "w-terminal", CapacityBucket: BucketEphemeral,
+	})
+	if err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
-	if claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
-		WorkerID: "w-terminal", Buckets: []CapacityBucket{BucketEphemeral}, LeaseDuration: time.Minute,
-	}); err != nil {
-		t.Fatalf("claim after task completion: %v", err)
-	} else if ok {
-		t.Fatalf("claimed terminal task job: %+v", claimed.Job)
+	if _, err := service.ClaimAssignment(ctx, ClaimAssignmentInput{
+		AssignmentID: assignment.ID, Worker: worker, Used: scheduler.Capacity{}, LeaseDuration: time.Minute,
+	}); !errors.Is(err, ErrAssignmentConflict) {
+		t.Fatalf("claim after task completion err = %v, want conflict", err)
 	}
 	canceled, err := service.GetJob(ctx, queued.ID)
 	if err != nil {
@@ -1105,23 +1017,23 @@ VALUES (?, ?, 'workflow_convergence_review_requested', ?, 'system', ?)`, task.ID
 	if err != nil {
 		t.Fatalf("enqueue convergence repair: %v", err)
 	}
+	assignment := reserveJobForWorker(t, service, job, "w-repair")
 	if _, err := store.DB().ExecContext(ctx, `
 UPDATE workflow_transitions
 SET payload_json = json_set(payload_json, '$.fingerprint', 'sha256:new')
 WHERE workflow_run_id = ?`, runID); err != nil {
 		t.Fatalf("replace convergence fingerprint: %v", err)
 	}
-	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID: "w-repair", CapacityPersistentAgent: 1, HeartbeatTTL: time.Minute,
-	}); err != nil {
+	worker, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
+		ID: "w-repair", CapacityBucket: BucketPersistentAgent,
+	})
+	if err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
-	if claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
-		WorkerID: "w-repair", Buckets: []CapacityBucket{BucketPersistentAgent}, LeaseDuration: time.Minute,
-	}); err != nil {
-		t.Fatalf("claim stale convergence repair: %v", err)
-	} else if ok {
-		t.Fatalf("claimed stale convergence repair: %+v", claimed.Job)
+	if _, err := service.ClaimAssignment(ctx, ClaimAssignmentInput{
+		AssignmentID: assignment.ID, Worker: worker, Used: scheduler.Capacity{}, LeaseDuration: time.Minute,
+	}); !errors.Is(err, ErrAssignmentConflict) {
+		t.Fatalf("claim stale convergence repair err = %v, want conflict", err)
 	}
 	canceled, err := service.GetJob(ctx, job.ID)
 	if err != nil {
@@ -1143,15 +1055,20 @@ WHERE workflow_run_id = ?`, runID); err != nil {
 	if err != nil {
 		t.Fatalf("enqueue repair before head movement: %v", err)
 	}
+	headAssignment := reserveJobForWorker(t, service, headStaleJob, "w-repair-2")
+	headWorker, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
+		ID: "w-repair-2", CapacityBucket: BucketPersistentAgent,
+	})
+	if err != nil {
+		t.Fatalf("register head-stale worker: %v", err)
+	}
 	if _, err := store.DB().ExecContext(ctx, `UPDATE changes SET head_sha = 'moved-head' WHERE id = ?`, changeID); err != nil {
 		t.Fatalf("move convergence change head: %v", err)
 	}
-	if claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
-		WorkerID: "w-repair", Buckets: []CapacityBucket{BucketPersistentAgent}, LeaseDuration: time.Minute,
-	}); err != nil {
-		t.Fatalf("claim head-stale convergence repair: %v", err)
-	} else if ok {
-		t.Fatalf("claimed head-stale convergence repair: %+v", claimed.Job)
+	if _, err := service.ClaimAssignment(ctx, ClaimAssignmentInput{
+		AssignmentID: headAssignment.ID, Worker: headWorker, Used: scheduler.Capacity{}, LeaseDuration: time.Minute,
+	}); !errors.Is(err, ErrAssignmentConflict) {
+		t.Fatalf("claim head-stale convergence repair err = %v, want conflict", err)
 	}
 	headCanceled, err := service.GetJob(ctx, headStaleJob.ID)
 	if err != nil {
@@ -1191,22 +1108,22 @@ INSERT INTO workflow_node_runs (
 	if err != nil {
 		t.Fatalf("enqueue current workflow node job: %v", err)
 	}
+	assignment := reserveJobForWorker(t, service, job, "w-workflow-fence")
 	if _, err := store.DB().ExecContext(ctx, `
 UPDATE workflow_node_runs SET state = 'succeeded', completed_at = ? WHERE id = ?;
 UPDATE workflow_runs SET current_node_key = '', current_node_run_id = NULL WHERE id = ?`, now, nodeID, runID); err != nil {
 		t.Fatalf("move workflow beyond queued job: %v", err)
 	}
-	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
-		ID: "w-workflow-fence", CapacityPersistentAgent: 1, HeartbeatTTL: time.Minute,
-	}); err != nil {
+	worker, err := directory.RegisterWorker(ctx, RegisterWorkerInput{
+		ID: "w-workflow-fence", CapacityBucket: BucketPersistentAgent,
+	})
+	if err != nil {
 		t.Fatalf("register workflow worker: %v", err)
 	}
-	if claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{
-		WorkerID: "w-workflow-fence", Buckets: []CapacityBucket{BucketPersistentAgent}, LeaseDuration: time.Minute,
-	}); err != nil {
-		t.Fatalf("claim stale workflow job: %v", err)
-	} else if ok {
-		t.Fatalf("claimed stale workflow job %+v", claimed.Job)
+	if _, err := service.ClaimAssignment(ctx, ClaimAssignmentInput{
+		AssignmentID: assignment.ID, Worker: worker, Used: scheduler.Capacity{}, LeaseDuration: time.Minute,
+	}); !errors.Is(err, ErrAssignmentConflict) {
+		t.Fatalf("claim stale workflow job err = %v, want conflict", err)
 	}
 	canceled, err := service.GetJob(ctx, job.ID)
 	if err != nil {
@@ -1289,11 +1206,72 @@ func newWorkerService(t *testing.T) (*flowdb.Store, *Directory, *Service) {
 	return store, NewDirectory(global.DB()), NewService(store.DB())
 }
 
-// claimNext adapts the single-project tests to the cross-project claim entry
-// point with one queue.
+func reserveJobForWorker(t *testing.T, service *Service, job Job, workerID string) Assignment {
+	t.Helper()
+	assignment, err := service.ReserveAssignment(context.Background(), ReserveAssignmentInput{
+		WorkerID:          workerID,
+		JobID:             job.ID,
+		ProviderID:        "test-provider",
+		ProfileName:       "test-profile",
+		ProviderRequestID: "test-reserve-" + workerID + "-" + job.ID,
+		ProviderType:      "test",
+		ProfileLabels:     job.Selector,
+		AllowedRoles:      []JobRole{job.Role},
+		AllowedBuckets:    []CapacityBucket{job.CapacityBucket},
+		RequiredSelector:  job.Selector,
+		StartupDeadline:   service.now().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("reserve assignment: %v", err)
+	}
+	return assignment
+}
+
+// claimNext adapts tests that exercise queue ordering to the assignment-created
+// worker model. It reserves the best eligible queued job before claiming exactly
+// that assignment; there is no unassigned queue fallback.
 func claimNext(ctx context.Context, directory *Directory, service *Service, input ClaimInput) (ClaimedJob, bool, error) {
-	claim, ok, err := ClaimAcrossProjects(ctx, directory, []ProjectQueue{{ProjectID: "p-test", Queue: service}}, input)
-	return ClaimedJob{Job: claim.Job, Lease: claim.Lease}, ok, err
+	worker, err := directory.GetWorker(ctx, input.WorkerID)
+	if err != nil {
+		return ClaimedJob{}, false, err
+	}
+	job, ok, err := service.FindAssignmentCandidate(ctx, AssignmentCandidateFilter{
+		ProfileLabels:        worker.Labels,
+		ProfileTaints:        worker.Taints,
+		ProfileHarnessModels: worker.HarnessModels,
+		AllowedBuckets:       []CapacityBucket{worker.CapacityBucket},
+	})
+	if err != nil || !ok {
+		return ClaimedJob{}, false, err
+	}
+	assignment, err := service.ReserveAssignment(ctx, ReserveAssignmentInput{
+		WorkerID:             input.WorkerID,
+		JobID:                job.ID,
+		ProviderID:           "test-provider",
+		ProfileName:          "test-profile",
+		ProviderRequestID:    "test-claim-" + input.WorkerID + "-" + job.ID,
+		ProviderType:         "test",
+		ProfileLabels:        job.Selector,
+		ProfileTaints:        worker.Taints,
+		ProfileHarnessModels: worker.HarnessModels,
+		AllowedRoles:         []JobRole{job.Role},
+		AllowedBuckets:       []CapacityBucket{job.CapacityBucket},
+		RequiredSelector:     job.Selector,
+		StartupDeadline:      service.now().Add(time.Minute),
+	})
+	if err != nil {
+		return ClaimedJob{}, false, err
+	}
+	claimed, err := service.ClaimAssignment(ctx, ClaimAssignmentInput{
+		AssignmentID:  assignment.ID,
+		Worker:        worker,
+		Used:          scheduler.Capacity{},
+		LeaseDuration: input.LeaseDuration,
+	})
+	if err != nil {
+		return ClaimedJob{}, false, err
+	}
+	return claimed, true, nil
 }
 
 type testTask struct {

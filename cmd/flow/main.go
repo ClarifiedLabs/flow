@@ -4165,11 +4165,10 @@ func printThreadLine(out io.Writer, thread coordinator.ReviewThread) {
 }
 
 func printWorkerLine(out io.Writer, worker flowworker.Worker) {
-	fmt.Fprintf(out, "%s\t%s\tpersistent_agent=%d\tephemeral=%d\tlabels=%s\n",
+	fmt.Fprintf(out, "%s\t%s\tbucket=%s\tlabels=%s\n",
 		worker.ID,
 		worker.Status,
-		worker.CapacityPersistentAgent,
-		worker.CapacityEphemeral,
+		string(worker.CapacityBucket),
 		formatLabels(worker.Labels),
 	)
 }

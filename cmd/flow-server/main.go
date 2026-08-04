@@ -90,8 +90,6 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	var ownerTokenFile string
 	var hookToken string
 	var hookTokenFile string
-	var workerJoinToken string
-	var workerJoinTokenFile string
 	var orchestratorToken string
 	var orchestratorTokenFile string
 	var orchestratorProviderIDs string
@@ -108,8 +106,6 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&ownerTokenFile, "owner-token-file", "", "mode-0600 file containing the owner bearer token")
 	flags.StringVar(&hookToken, "hook-token", "", "hook bearer token")
 	flags.StringVar(&hookTokenFile, "hook-token-file", "", "mode-0600 file containing the hook bearer token")
-	flags.StringVar(&workerJoinToken, "worker-join-token", "", "worker join bearer token")
-	flags.StringVar(&workerJoinTokenFile, "worker-join-token-file", "", "mode-0600 file containing the worker join bearer token")
 	flags.StringVar(&orchestratorToken, "orchestrator-token", "", "orchestrator bearer token (authorizes assignment provisioning and queue telemetry; not generated when unset)")
 	flags.StringVar(&orchestratorTokenFile, "orchestrator-token-file", "", "mode-0600 file containing the orchestrator bearer token")
 	flags.StringVar(&orchestratorProviderIDs, "orchestrator-provider-ids", "", "comma-separated provider IDs authorized for the orchestrator token")
@@ -176,20 +172,6 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		hookToken, hookTokenFile, err = readServeTokenFile(hookTokenFile)
 		if err != nil {
 			fmt.Fprintf(stderr, "read hook token: %v\n", err)
-			return 1
-		}
-	}
-	if strings.TrimSpace(workerJoinToken) == "" {
-		workerJoinToken = strings.TrimSpace(os.Getenv("FLOW_WORKER_JOIN_TOKEN"))
-	}
-	if strings.TrimSpace(workerJoinTokenFile) != "" {
-		if strings.TrimSpace(workerJoinToken) != "" {
-			fmt.Fprintln(stderr, "--worker-join-token and --worker-join-token-file cannot be used together")
-			return 2
-		}
-		workerJoinToken, err = config.ReadTokenFile(workerJoinTokenFile)
-		if err != nil {
-			fmt.Fprintf(stderr, "read worker join token: %v\n", err)
 			return 1
 		}
 	}
@@ -364,10 +346,9 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	}
 
 	server, err := api.NewServer(api.ServerOptions{
-		Registry:        registry,
-		OwnerToken:      ownerToken,
-		HookToken:       hookToken,
-		WorkerJoinToken: workerJoinToken,
+		Registry:   registry,
+		OwnerToken: ownerToken,
+		HookToken:  hookToken,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "create api server: %v\n", err)

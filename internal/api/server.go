@@ -37,9 +37,8 @@ type ServerOptions struct {
 	// bundles. It is required.
 	Registry *Registry
 
-	OwnerToken      string
-	HookToken       string
-	WorkerJoinToken string
+	OwnerToken string
+	HookToken  string
 }
 
 type Server struct {
@@ -50,7 +49,6 @@ type Server struct {
 	gitWriteGates   sync.Map
 	ownerToken      string
 	hookToken       string
-	workerJoinToken string
 }
 
 func NewServer(opts ServerOptions) (*Server, error) {
@@ -64,7 +62,6 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		workerTerminals: coordinator.NewWorkerTerminalService(),
 		ownerToken:      strings.TrimSpace(opts.OwnerToken),
 		hookToken:       strings.TrimSpace(opts.HookToken),
-		workerJoinToken: strings.TrimSpace(opts.WorkerJoinToken),
 	}, nil
 }
 
@@ -186,11 +183,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.serveTerminalBrowserRequest(w, r) {
-		return
-	}
-
-	if r.URL.Path == "/v2/workers/join" {
-		s.handleJoinWorker(w, r)
 		return
 	}
 

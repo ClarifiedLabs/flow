@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -210,27 +209,20 @@ type ClientConfig struct {
 }
 
 type WorkerConfig struct {
-	WorkerID       string                     `json:"worker_id" yaml:"worker_id"`
-	CoordinatorURL string                     `json:"coordinator_url" yaml:"coordinator_url"`
-	Token          string                     `json:"token" yaml:"token"`
-	WorkDir        string                     `json:"work_dir" yaml:"work_dir"`
-	Labels         map[string]string          `json:"labels" yaml:"labels"`
-	Taints         []scheduler.Taint          `json:"taints" yaml:"taints"`
-	Accepts        []scheduler.CapacityBucket `json:"accepts" yaml:"accepts"`
-	Capacity       WorkerCapacity             `json:"capacity" yaml:"capacity"`
-	Cleanup        WorkerCleanup              `json:"cleanup" yaml:"cleanup"`
-	Tmux           WorkerTmuxConfig           `json:"tmux" yaml:"tmux"`
-	Git            WorkerGitConfig            `json:"git" yaml:"git"`
-	Metrics        metrics.Config             `json:"metrics" yaml:"metrics"`
-	History        WorkerHistoryConfig        `json:"history" yaml:"history"`
+	WorkerID       string              `json:"worker_id" yaml:"worker_id"`
+	CoordinatorURL string              `json:"coordinator_url" yaml:"coordinator_url"`
+	Token          string              `json:"token" yaml:"token"`
+	WorkDir        string              `json:"work_dir" yaml:"work_dir"`
+	Labels         map[string]string   `json:"labels" yaml:"labels"`
+	Taints         []scheduler.Taint   `json:"taints" yaml:"taints"`
+	Cleanup        WorkerCleanup       `json:"cleanup" yaml:"cleanup"`
+	Git            WorkerGitConfig     `json:"git" yaml:"git"`
+	Metrics        metrics.Config      `json:"metrics" yaml:"metrics"`
+	History        WorkerHistoryConfig `json:"history" yaml:"history"`
 
-	acceptsConfigured  bool `json:"-" yaml:"-"`
-	capacityConfigured bool `json:"-" yaml:"-"`
-}
-
-type WorkerCapacity struct {
-	PersistentAgent int `json:"persistent_agent" yaml:"persistent_agent"`
-	Ephemeral       int `json:"ephemeral" yaml:"ephemeral"`
+	// TmuxSocketPath is the per-job tmux socket path derived at runtime for a
+	// specific job. It is never user-configurable and never persisted.
+	TmuxSocketPath string `json:"-" yaml:"-"`
 }
 
 // WorkerCleanup configures lifecycle cleanup and disk-pressure admission for a
@@ -370,10 +362,6 @@ type WorkerGitConfig struct {
 	Principal   string `json:"principal" yaml:"principal"`
 	CommitName  string `json:"commit_name" yaml:"commit_name"`
 	CommitEmail string `json:"commit_email" yaml:"commit_email"`
-}
-
-type WorkerTmuxConfig struct {
-	SocketPath string `json:"socket_path" yaml:"socket_path"`
 }
 
 func DefaultDataDir() (string, error) {
@@ -728,20 +716,10 @@ func LoadWorker(path string) (WorkerConfig, error) {
 		return normalizeWorker(cfg)
 	}
 
-	acceptsConfigured, capacityConfigured, err := workerAcceptanceFieldPresence(path)
-	if err != nil {
-		return WorkerConfig{}, err
-	}
-	if acceptsConfigured && capacityConfigured {
-		return WorkerConfig{}, errors.New("worker accepts and capacity cannot both be configured")
-	}
-
 	var fileCfg WorkerConfig
 	if err := loadConfig(path, &fileCfg); err != nil {
 		return WorkerConfig{}, err
 	}
-	cfg.acceptsConfigured = acceptsConfigured
-	cfg.capacityConfigured = capacityConfigured
 	if fileCfg.WorkerID != "" {
 		cfg.WorkerID = fileCfg.WorkerID
 	}
@@ -760,12 +738,6 @@ func LoadWorker(path string) (WorkerConfig, error) {
 	if fileCfg.Taints != nil {
 		cfg.Taints = fileCfg.Taints
 	}
-	if acceptsConfigured {
-		cfg.Accepts = append([]scheduler.CapacityBucket(nil), fileCfg.Accepts...)
-	}
-	if capacityConfigured {
-		cfg.Capacity = fileCfg.Capacity
-	}
 	cfg.Cleanup = fileCfg.Cleanup
 	if fileCfg.Git.Principal != "" {
 		cfg.Git.Principal = fileCfg.Git.Principal
@@ -775,9 +747,6 @@ func LoadWorker(path string) (WorkerConfig, error) {
 	}
 	if strings.TrimSpace(fileCfg.Git.CommitEmail) != "" {
 		cfg.Git.CommitEmail = strings.TrimSpace(fileCfg.Git.CommitEmail)
-	}
-	if fileCfg.Tmux.SocketPath != "" {
-		cfg.Tmux.SocketPath = fileCfg.Tmux.SocketPath
 	}
 	cfg.Metrics = fileCfg.Metrics
 	cfg.History = fileCfg.History
@@ -803,41 +772,6 @@ func ApplyWorkerEnvOverrides(cfg WorkerConfig, getenv func(string) string) (Work
 	}
 	if value := strings.TrimSpace(getenv("FLOW_WORKER_WORK_DIR")); value != "" {
 		cfg.WorkDir = value
-	}
-	if value := strings.TrimSpace(getenv("FLOW_WORKER_ACCEPTS")); value != "" {
-		if cfg.capacityConfigured {
-			return WorkerConfig{}, errors.New("FLOW_WORKER_ACCEPTS conflicts with worker capacity")
-		}
-		cfg.acceptsConfigured = true
-		cfg.Accepts = cfg.Accepts[:0]
-		for _, bucket := range strings.Split(value, ",") {
-			cfg.Accepts = append(cfg.Accepts, scheduler.CapacityBucket(strings.TrimSpace(bucket)))
-		}
-	}
-	if value := strings.TrimSpace(getenv("FLOW_WORKER_CAPACITY_PERSISTENT_AGENT")); value != "" {
-		capacity, err := strconv.Atoi(value)
-		if err != nil {
-			return WorkerConfig{}, fmt.Errorf("FLOW_WORKER_CAPACITY_PERSISTENT_AGENT must be an integer: %w", err)
-		}
-		if cfg.acceptsConfigured {
-			return WorkerConfig{}, errors.New("FLOW_WORKER_CAPACITY_PERSISTENT_AGENT conflicts with worker accepts")
-		}
-		cfg.capacityConfigured = true
-		cfg.Capacity.PersistentAgent = capacity
-	}
-	if value := strings.TrimSpace(getenv("FLOW_WORKER_CAPACITY_EPHEMERAL")); value != "" {
-		capacity, err := strconv.Atoi(value)
-		if err != nil {
-			return WorkerConfig{}, fmt.Errorf("FLOW_WORKER_CAPACITY_EPHEMERAL must be an integer: %w", err)
-		}
-		if cfg.acceptsConfigured {
-			return WorkerConfig{}, errors.New("FLOW_WORKER_CAPACITY_EPHEMERAL conflicts with worker accepts")
-		}
-		cfg.capacityConfigured = true
-		cfg.Capacity.Ephemeral = capacity
-	}
-	if value := strings.TrimSpace(getenv("FLOW_WORKER_TMUX_SOCKET_PATH")); value != "" {
-		cfg.Tmux.SocketPath = value
 	}
 	if value := strings.TrimSpace(getenv("FLOW_WORKER_GIT_PRINCIPAL")); value != "" {
 		cfg.Git.Principal = value
@@ -942,13 +876,6 @@ func normalizeCoordinator(cfg CoordinatorConfig) (CoordinatorConfig, error) {
 }
 
 func normalizeWorker(cfg WorkerConfig) (WorkerConfig, error) {
-	if !cfg.acceptsConfigured && !cfg.capacityConfigured {
-		cfg.acceptsConfigured = cfg.Accepts != nil
-		cfg.capacityConfigured = cfg.Capacity.PersistentAgent != 0 || cfg.Capacity.Ephemeral != 0
-	}
-	if cfg.acceptsConfigured && cfg.capacityConfigured {
-		return WorkerConfig{}, errors.New("worker accepts and capacity cannot both be configured")
-	}
 	if strings.TrimSpace(cfg.CoordinatorURL) == "" {
 		return WorkerConfig{}, errors.New("worker coordinator_url is required")
 	}
@@ -981,12 +908,6 @@ func normalizeWorker(cfg WorkerConfig) (WorkerConfig, error) {
 			return WorkerConfig{}, err
 		}
 	}
-	if cfg.Capacity.PersistentAgent < 0 || cfg.Capacity.Ephemeral < 0 {
-		return WorkerConfig{}, errors.New("worker capacity cannot be negative")
-	}
-	if err := normalizeWorkerAcceptance(&cfg); err != nil {
-		return WorkerConfig{}, err
-	}
 	if _, err := cfg.Cleanup.Resolve(); err != nil {
 		return WorkerConfig{}, err
 	}
@@ -998,86 +919,7 @@ func normalizeWorker(cfg WorkerConfig) (WorkerConfig, error) {
 	}
 
 	cfg.WorkDir = cleanRequiredPath(cfg.WorkDir)
-	cfg.Tmux.SocketPath = cleanOptionalPath(cfg.Tmux.SocketPath)
 	return cfg, nil
-}
-
-func normalizeWorkerAcceptance(cfg *WorkerConfig) error {
-	if cfg.acceptsConfigured {
-		cfg.Capacity = WorkerCapacity{}
-		seen := make(map[scheduler.CapacityBucket]struct{}, len(cfg.Accepts))
-		for i, raw := range cfg.Accepts {
-			bucket, err := scheduler.ParseCapacityBucket(string(raw))
-			if err != nil {
-				return fmt.Errorf("worker accepts: %w", err)
-			}
-			if _, ok := seen[bucket]; ok {
-				return fmt.Errorf("worker accepts contains duplicate bucket %s", bucket)
-			}
-			seen[bucket] = struct{}{}
-			cfg.Accepts[i] = bucket
-			switch bucket {
-			case scheduler.CapacityPersistentAgent:
-				cfg.Capacity.PersistentAgent = 1
-			case scheduler.CapacityEphemeral:
-				cfg.Capacity.Ephemeral = 1
-			}
-		}
-		return nil
-	}
-
-	legacy := cfg.Capacity
-	if legacy.PersistentAgent > 1 || legacy.Ephemeral > 1 {
-		slog.Warn("worker capacity magnitudes are ignored; use accepts instead",
-			"capacity_persistent_agent", legacy.PersistentAgent,
-			"capacity_ephemeral", legacy.Ephemeral,
-		)
-	}
-	cfg.Accepts = cfg.Accepts[:0]
-	cfg.Capacity = WorkerCapacity{}
-	if legacy.PersistentAgent > 0 {
-		cfg.Accepts = append(cfg.Accepts, scheduler.CapacityPersistentAgent)
-		cfg.Capacity.PersistentAgent = 1
-	}
-	if legacy.Ephemeral > 0 {
-		cfg.Accepts = append(cfg.Accepts, scheduler.CapacityEphemeral)
-		cfg.Capacity.Ephemeral = 1
-	}
-	return nil
-}
-
-func workerAcceptanceFieldPresence(path string) (accepts bool, capacity bool, err error) {
-	data, err := os.ReadFile(cleanRequiredPath(path))
-	if err != nil {
-		return false, false, fmt.Errorf("read config %q: %w", path, err)
-	}
-	if strings.EqualFold(filepath.Ext(path), ".yaml") || strings.EqualFold(filepath.Ext(path), ".yml") {
-		var document yaml.Node
-		if err := yaml.Unmarshal(data, &document); err != nil {
-			return false, false, fmt.Errorf("decode config %q: %w", path, err)
-		}
-		if len(document.Content) == 0 || len(document.Content[0].Content)%2 != 0 {
-			return false, false, nil
-		}
-		fields := document.Content[0].Content
-		for i := 0; i < len(fields); i += 2 {
-			switch fields[i].Value {
-			case "accepts":
-				accepts = true
-			case "capacity":
-				capacity = true
-			}
-		}
-		return accepts, capacity, nil
-	}
-
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return false, false, fmt.Errorf("decode config %q: %w", path, err)
-	}
-	_, accepts = fields["accepts"]
-	_, capacity = fields["capacity"]
-	return accepts, capacity, nil
 }
 
 func validateAuthorEntrypoint(entrypoint map[string]any) error {

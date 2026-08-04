@@ -31,11 +31,9 @@ func (d *Directory) RegisterWorker(ctx context.Context, input RegisterWorkerInpu
 	if input.ID == "" {
 		return Worker{}, errors.New("worker id is required")
 	}
-	if input.CapacityPersistentAgent < 0 || input.CapacityEphemeral < 0 {
-		return Worker{}, errors.New("worker capacity cannot be negative")
+	if err := validateCapacityBucket(input.CapacityBucket); err != nil {
+		return Worker{}, fmt.Errorf("worker capacity bucket: %w", err)
 	}
-	input.CapacityPersistentAgent = normalizeAcceptance(input.CapacityPersistentAgent)
-	input.CapacityEphemeral = normalizeAcceptance(input.CapacityEphemeral)
 	labels, err := normalizeLabelsJSON(input.Labels)
 	if err != nil {
 		return Worker{}, err
@@ -62,20 +60,18 @@ INSERT INTO workers (
 	labels_json,
 	taints_json,
 	harness_models_json,
-	capacity_persistent_agent,
-	capacity_ephemeral,
+	capacity_bucket,
 	status,
 	created_at,
 	updated_at,
 	last_heartbeat_at,
 	expires_at
-) VALUES (?, ?, ?, ?, ?, ?, 'registered', ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, 'registered', ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	labels_json = excluded.labels_json,
 	taints_json = excluded.taints_json,
 	harness_models_json = excluded.harness_models_json,
-	capacity_persistent_agent = excluded.capacity_persistent_agent,
-	capacity_ephemeral = excluded.capacity_ephemeral,
+	capacity_bucket = excluded.capacity_bucket,
 	status = 'registered',
 	updated_at = excluded.updated_at,
 	last_heartbeat_at = excluded.last_heartbeat_at,
@@ -84,8 +80,7 @@ ON CONFLICT(id) DO UPDATE SET
 		labels,
 		taints,
 		harnessModels,
-		input.CapacityPersistentAgent,
-		input.CapacityEphemeral,
+		string(input.CapacityBucket),
 		formatTime(now),
 		formatTime(now),
 		formatTime(now),
@@ -95,13 +90,6 @@ ON CONFLICT(id) DO UPDATE SET
 	}
 
 	return d.GetWorker(ctx, input.ID)
-}
-
-func normalizeAcceptance(capacity int) int {
-	if capacity > 0 {
-		return 1
-	}
-	return 0
 }
 
 func (d *Directory) HeartbeatWorker(ctx context.Context, workerID string, ttl time.Duration) (Worker, error) {
@@ -159,8 +147,7 @@ SELECT
 	labels_json,
 	taints_json,
 	harness_models_json,
-	capacity_persistent_agent,
-	capacity_ephemeral,
+	capacity_bucket,
 	status,
 	created_at,
 	updated_at,
@@ -179,8 +166,7 @@ SELECT
 	labels_json,
 	taints_json,
 	harness_models_json,
-	capacity_persistent_agent,
-	capacity_ephemeral,
+	capacity_bucket,
 	status,
 	created_at,
 	updated_at,

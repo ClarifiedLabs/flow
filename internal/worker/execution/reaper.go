@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/config"
-	"github.com/ClarifiedLabs/flow/internal/terminal"
 )
 
 // flowSessionPrefix is the prefix shared by every tmux session name produced by
@@ -25,18 +24,16 @@ const flowSessionPrefix = "flow-"
 const tmuxReapCommandTimeout = 5 * time.Second
 
 type reapOptions struct {
-	tmux    config.WorkerTmuxConfig
 	workDir string
 }
 
 // ReapOption customizes ReapOrphanedSessions.
 type ReapOption func(*reapOptions)
 
-// WithWorkerConfig reaps both legacy shared-socket sessions and current
-// per-job tmux servers for a worker.
+// WithWorkerConfig reaps per-job tmux servers left behind under the worker
+// work directory.
 func WithWorkerConfig(cfg config.WorkerConfig) ReapOption {
 	return func(options *reapOptions) {
-		options.tmux = cfg.Tmux
 		options.workDir = cfg.WorkDir
 	}
 }
@@ -88,44 +85,6 @@ func ReapOrphanedSessions(ctx context.Context, jobs []Job, opts ...ReapOption) (
 		}
 	}
 
-	count, err := reapSharedTmuxSessions(ctx, options.tmux, jobs)
-	killed += count
-	if err != nil {
-		errs = append(errs, err)
-	}
-
-	return killed, errors.Join(errs...)
-}
-
-func reapSharedTmuxSessions(ctx context.Context, tmux config.WorkerTmuxConfig, jobs []Job) (int, error) {
-	tmuxConfig := config.WorkerConfig{Tmux: tmux}
-
-	jobBySession := make(map[string]Job, len(jobs))
-	for _, job := range jobs {
-		jobBySession[terminal.TmuxSessionNameForJob(job.ID)] = job
-	}
-
-	sessions, err := listFlowTmuxSessions(ctx, tmuxConfig)
-	if err != nil {
-		return 0, err
-	}
-
-	killed := 0
-	var errs []error
-	for _, session := range sessions {
-		job, known := jobBySession[session]
-		if known && !IsTerminalJobState(job.State) {
-			// Live job (queued/claimed/running): leave its session alone.
-			continue
-		}
-		// Either the job is terminal, or no job owns this session anymore.
-		if err := killFlowTmuxSession(ctx, tmuxConfig, session); err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		killed++
-	}
-
 	return killed, errors.Join(errs...)
 }
 
@@ -169,7 +128,7 @@ func reapPerJobTmuxServers(ctx context.Context, workDir string, jobs []Job) (int
 			continue
 		}
 		if len(sessions) == 0 {
-			_ = os.Remove(strings.TrimSpace(jobCfg.Tmux.SocketPath))
+			_ = os.Remove(strings.TrimSpace(jobCfg.TmuxSocketPath))
 			continue
 		}
 		if err := killTmuxServer(ctx, jobCfg); err != nil {
@@ -244,15 +203,15 @@ func killTmuxServer(ctx context.Context, cfg config.WorkerConfig) error {
 
 	if output, err := tmuxCommandContext(cmdCtx, cfg, "kill-server").CombinedOutput(); err != nil {
 		if cmdCtx.Err() != nil {
-			return fmt.Errorf("kill tmux server %q: %w", cfg.Tmux.SocketPath, cmdCtx.Err())
+			return fmt.Errorf("kill tmux server %q: %w", cfg.TmuxSocketPath, cmdCtx.Err())
 		}
 		details := strings.TrimSpace(string(output))
 		if details != "" {
-			return fmt.Errorf("kill tmux server %q: %s: %w", cfg.Tmux.SocketPath, details, err)
+			return fmt.Errorf("kill tmux server %q: %s: %w", cfg.TmuxSocketPath, details, err)
 		}
-		return fmt.Errorf("kill tmux server %q: %w", cfg.Tmux.SocketPath, err)
+		return fmt.Errorf("kill tmux server %q: %w", cfg.TmuxSocketPath, err)
 	}
-	_ = os.Remove(strings.TrimSpace(cfg.Tmux.SocketPath))
+	_ = os.Remove(strings.TrimSpace(cfg.TmuxSocketPath))
 
 	return nil
 }

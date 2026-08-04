@@ -808,9 +808,9 @@ func addSidebarBoardCounts(response *sidebarResponse, result coordinator.BoardRe
 
 func uiSidebarWorkerSummaryFromLeases(workers []worker.Worker, leases []worker.Lease, now time.Time) uiSidebarWorkerSummary {
 	summary := uiSidebarWorkerSummary{}
-	for _, registeredWorker := range workers {
-		summary.Capacity += registeredWorker.CapacityPersistentAgent + registeredWorker.CapacityEphemeral
-	}
+	// Every worker is a one-shot process holding one assignment-derived bucket,
+	// so registered workers equal concurrent job slots.
+	summary.Capacity = len(workers)
 	diagnostics := uiWorkerDiagnosticsFromLeases(workers, leases, now)
 	for _, diagnostic := range diagnostics {
 		summary.InUse += diagnostic.LiveJobs

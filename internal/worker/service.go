@@ -46,17 +46,19 @@ const (
 )
 
 type Worker struct {
-	ID                      string              `json:"id"`
-	Labels                  map[string]string   `json:"labels"`
-	Taints                  []scheduler.Taint   `json:"taints"`
-	HarnessModels           []flowharness.Model `json:"harness_models,omitempty"`
-	CapacityPersistentAgent int                 `json:"capacity_persistent_agent"`
-	CapacityEphemeral       int                 `json:"capacity_ephemeral"`
-	Status                  string              `json:"status"`
-	CreatedAt               time.Time           `json:"created_at"`
-	UpdatedAt               time.Time           `json:"updated_at"`
-	LastHeartbeatAt         *time.Time          `json:"last_heartbeat_at"`
-	ExpiresAt               *time.Time          `json:"expires_at"`
+	ID            string              `json:"id"`
+	Labels        map[string]string   `json:"labels"`
+	Taints        []scheduler.Taint   `json:"taints"`
+	HarnessModels []flowharness.Model `json:"harness_models,omitempty"`
+	// CapacityBucket is the worker's singular assignment-derived bucket. Workers
+	// are one-shot processes created for one assignment; they never advertise or
+	// select buckets themselves.
+	CapacityBucket  CapacityBucket `json:"capacity_bucket"`
+	Status          string         `json:"status"`
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
+	LastHeartbeatAt *time.Time     `json:"last_heartbeat_at"`
+	ExpiresAt       *time.Time     `json:"expires_at"`
 }
 
 type Job struct {
@@ -94,13 +96,12 @@ type ClaimedJob struct {
 }
 
 type RegisterWorkerInput struct {
-	ID                      string
-	Labels                  map[string]string
-	Taints                  []scheduler.Taint
-	HarnessModels           []flowharness.Model
-	CapacityPersistentAgent int
-	CapacityEphemeral       int
-	HeartbeatTTL            time.Duration
+	ID             string
+	Labels         map[string]string
+	Taints         []scheduler.Taint
+	HarnessModels  []flowharness.Model
+	CapacityBucket CapacityBucket
+	HeartbeatTTL   time.Duration
 }
 
 type EnqueueJobInput struct {
@@ -123,7 +124,6 @@ type EnqueueJobInput struct {
 
 type ClaimInput struct {
 	WorkerID      string
-	Buckets       []CapacityBucket
 	LeaseDuration time.Duration
 }
 
@@ -479,19 +479,11 @@ WHERE id = ?`, change).Scan(&changeTaskID); err != nil {
 	return nil
 }
 
-// claimQueuedJob claims the next eligible queued job in this project's
-// database for the given worker. Capacity has already been checked against
-// the aggregate of live leases across all projects by ClaimAcrossProjects;
-// the worker row and aggregate used capacity are passed in because the
-// workers table lives in the coordinator's global database.
-func (s *Service) claimQueuedJob(ctx context.Context, worker Worker, buckets []CapacityBucket, used scheduler.Capacity, leaseDuration time.Duration) (ClaimedJob, bool, error) {
-	tx, err := beginImmediate(ctx, s.db)
-	if err != nil {
-		return ClaimedJob{}, false, fmt.Errorf("begin claim transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	now := s.now().UTC()
+// cancelStaleQueuedJobsTx cancels queued jobs whose task, workflow run,
+// workflow node run, or held convergence precondition is no longer active, so
+// stale work never waits for a lease to claim it. It also closes assignments
+// bound to terminal jobs.
+func cancelStaleQueuedJobsTx(ctx context.Context, tx txExecutor, now time.Time) error {
 	if _, err := tx.ExecContext(ctx, `
 UPDATE jobs
 SET state = ?, updated_at = ?
@@ -546,90 +538,9 @@ WHERE state = ?
 			)
 		)
 	)`, string(JobCanceled), formatTime(now), string(JobQueued)); err != nil {
-		return ClaimedJob{}, false, fmt.Errorf("cancel stale queued jobs: %w", err)
+		return fmt.Errorf("cancel stale queued jobs: %w", err)
 	}
-	if err := closeTerminalAssignmentsTx(ctx, tx, now); err != nil {
-		return ClaimedJob{}, false, err
-	}
-
-	candidates, err := queuedJobCandidates(ctx, tx, buckets)
-	if err != nil {
-		return ClaimedJob{}, false, err
-	}
-	var selected Job
-	for _, candidate := range candidates {
-		eligible, err := eligibleForWorker(candidate, worker, used)
-		if err != nil {
-			return ClaimedJob{}, false, err
-		}
-		if eligible {
-			selected = candidate
-			break
-		}
-	}
-	if selected.ID == "" {
-		if err := tx.Commit(ctx); err != nil {
-			return ClaimedJob{}, false, fmt.Errorf("commit stale queued job cleanup: %w", err)
-		}
-		return ClaimedJob{}, false, nil
-	}
-
-	result, err := tx.ExecContext(ctx, `
-UPDATE jobs
-SET state = ?, updated_at = ?
-WHERE id = ? AND state = ?`,
-		string(JobClaimed),
-		formatTime(now),
-		selected.ID,
-		string(JobQueued),
-	)
-	if err != nil {
-		return ClaimedJob{}, false, fmt.Errorf("claim job: %w", err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return ClaimedJob{}, false, fmt.Errorf("read claim rows affected: %w", err)
-	}
-	if rows == 0 {
-		return ClaimedJob{}, false, nil
-	}
-
-	job, err := getJobTx(ctx, tx, selected.ID)
-	if err != nil {
-		return ClaimedJob{}, false, err
-	}
-	leaseID, err := randomID("l")
-	if err != nil {
-		return ClaimedJob{}, false, err
-	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO leases (
-	id,
-	job_id,
-	worker_id,
-	capacity_bucket,
-	leased_at,
-	expires_at
-) VALUES (?, ?, ?, ?, ?, ?)`,
-		leaseID,
-		job.ID,
-		worker.ID,
-		string(job.CapacityBucket),
-		formatTime(now),
-		formatTime(now.Add(leaseDuration)),
-	); err != nil {
-		return ClaimedJob{}, false, fmt.Errorf("create lease: %w", err)
-	}
-	lease, err := getLeaseTx(ctx, tx, leaseID)
-	if err != nil {
-		return ClaimedJob{}, false, err
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return ClaimedJob{}, false, fmt.Errorf("commit claim transaction: %w", err)
-	}
-
-	return ClaimedJob{Job: job, Lease: lease}, true, nil
+	return closeTerminalAssignmentsTx(ctx, tx, now)
 }
 
 func (s *Service) MarkJobRunning(ctx context.Context, leaseID string) (Job, error) {
@@ -1048,50 +959,10 @@ WHERE id = ?`, leaseID)
 }
 
 // UsedCapacity reports the worker's live leases in this project's database,
-// grouped by capacity bucket. ClaimAcrossProjects sums it over every project
-// to enforce the worker's global capacity.
+// grouped by capacity bucket. The registry sums it over every project to
+// enforce the one-live-lease rule for one-shot workers.
 func (s *Service) UsedCapacity(ctx context.Context, workerID string) (scheduler.Capacity, error) {
 	return usedCapacity(ctx, s.db, strings.TrimSpace(workerID))
-}
-
-// OldestQueuedAt returns the creation time of the oldest queued job in the
-// given buckets, or nil when no job is queued. ClaimAcrossProjects uses it to
-// order project queues fairly.
-func (s *Service) OldestQueuedAt(ctx context.Context, buckets []CapacityBucket) (*time.Time, error) {
-	if len(buckets) == 0 {
-		return nil, nil
-	}
-
-	placeholders := make([]string, len(buckets))
-	args := make([]any, 0, len(buckets)+1)
-	args = append(args, string(JobQueued))
-	for i, bucket := range buckets {
-		placeholders[i] = "?"
-		args = append(args, string(bucket))
-	}
-
-	var createdAt sql.NullString
-	if err := s.db.QueryRowContext(ctx, `
-SELECT MIN(created_at)
-FROM jobs
-WHERE state = ?
-	AND capacity_bucket IN (`+strings.Join(placeholders, ", ")+`)
-	AND NOT EXISTS (
-		SELECT 1 FROM worker_assignments AS assignment
-		WHERE assignment.job_id = jobs.id AND assignment.state IN ('pending', 'claimed')
-	)`, args...).Scan(&createdAt); err != nil {
-		return nil, fmt.Errorf("read oldest queued job: %w", err)
-	}
-	if !createdAt.Valid || strings.TrimSpace(createdAt.String) == "" {
-		return nil, nil
-	}
-
-	oldest, err := parseTime(createdAt.String)
-	if err != nil {
-		return nil, err
-	}
-
-	return &oldest, nil
 }
 
 func usedCapacity(ctx context.Context, tx txExecutor, workerID string) (scheduler.Capacity, error) {
@@ -1183,22 +1054,39 @@ func eligibleForWorker(job Job, worker Worker, used scheduler.Capacity) (bool, e
 		Labels: worker.Labels,
 		Taints: worker.Taints,
 		Capacity: scheduler.Capacity{
-			PersistentAgent: worker.CapacityPersistentAgent,
-			Ephemeral:       worker.CapacityEphemeral,
+			PersistentAgent: boolToInt(worker.CapacityBucket == BucketPersistentAgent),
+			Ephemeral:       boolToInt(worker.CapacityBucket == BucketEphemeral),
 		},
 		Used: used,
 	})
 }
 
-func (w Worker) capacityFor(bucket CapacityBucket) int {
-	switch bucket {
-	case BucketPersistentAgent:
-		return w.CapacityPersistentAgent
-	case BucketEphemeral:
-		return w.CapacityEphemeral
-	default:
-		return 0
+func boolToInt(value bool) int {
+	if value {
+		return 1
 	}
+	return 0
+}
+
+// CancelStaleQueuedJobs cancels queued jobs whose task, workflow run,
+// workflow node run, or held convergence precondition is no longer active and
+// closes assignments bound to terminal jobs. It commits unconditionally so
+// cleanup survives a later claim failure, matching the pre-claim pass the
+// general queue claim performed.
+func (s *Service) CancelStaleQueuedJobs(ctx context.Context) error {
+	tx, err := beginImmediate(ctx, s.db)
+	if err != nil {
+		return fmt.Errorf("begin stale job cancellation transaction: %w", err)
+	}
+	defer tx.Rollback()
+	now := s.now().UTC()
+	if err := cancelStaleQueuedJobsTx(ctx, tx, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit stale job cancellation: %w", err)
+	}
+	return nil
 }
 
 type scanner interface {
@@ -1210,6 +1098,7 @@ func scanWorker(row scanner) (Worker, error) {
 	var labelsJSON string
 	var taintsJSON string
 	var harnessModelsJSON string
+	var capacityBucket string
 	var createdAt string
 	var updatedAt string
 	var lastHeartbeatAt sql.NullString
@@ -1219,8 +1108,7 @@ func scanWorker(row scanner) (Worker, error) {
 		&labelsJSON,
 		&taintsJSON,
 		&harnessModelsJSON,
-		&worker.CapacityPersistentAgent,
-		&worker.CapacityEphemeral,
+		&capacityBucket,
 		&worker.Status,
 		&createdAt,
 		&updatedAt,
@@ -1229,6 +1117,10 @@ func scanWorker(row scanner) (Worker, error) {
 	); err != nil {
 		return Worker{}, fmt.Errorf("scan worker: %w", err)
 	}
+	if err := validateCapacityBucket(CapacityBucket(capacityBucket)); err != nil {
+		return Worker{}, fmt.Errorf("worker %s capacity bucket: %w", worker.ID, err)
+	}
+	worker.CapacityBucket = CapacityBucket(capacityBucket)
 
 	labels, err := decodeStringMap(labelsJSON)
 	if err != nil {

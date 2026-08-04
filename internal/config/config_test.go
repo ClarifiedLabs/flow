@@ -507,9 +507,6 @@ work_dir: ~/flow/workers/local
 labels:
   local: "true"
   agent.harness.harness: "true"
-capacity:
-  persistent_agent: 1
-  ephemeral: 2
 cleanup:
   interval: 2m
   orphan_grace: 30m
@@ -517,8 +514,6 @@ cleanup:
   resume_free_bytes: 4GiB
   min_free_percent: 8
   resume_free_percent: 12
-tmux:
-  socket_path: /tmp/flow-test-tmux.sock
 git:
   principal: worker:w-local
   commit_name: Flow Bot
@@ -541,12 +536,6 @@ git:
 	if cfg.Labels["local"] != "true" || cfg.Labels["agent.harness.harness"] != "true" {
 		t.Fatalf("Labels = %#v", cfg.Labels)
 	}
-	if cfg.Capacity.PersistentAgent != 1 || cfg.Capacity.Ephemeral != 1 {
-		t.Fatalf("normalized Capacity = %+v", cfg.Capacity)
-	}
-	if len(cfg.Accepts) != 2 || cfg.Accepts[0] != "persistent_agent" || cfg.Accepts[1] != "ephemeral" {
-		t.Fatalf("Accepts = %+v", cfg.Accepts)
-	}
 	cleanup, err := cfg.Cleanup.Resolve()
 	if err != nil {
 		t.Fatalf("resolve cleanup: %v", err)
@@ -560,9 +549,6 @@ git:
 	if cleanup.MinFreePercent != 8 || cleanup.ResumeFreePercent != 12 {
 		t.Fatalf("cleanup percentage thresholds = %+v", cleanup)
 	}
-	if cfg.Tmux.SocketPath != "/tmp/flow-test-tmux.sock" {
-		t.Fatalf("Tmux = %+v", cfg.Tmux)
-	}
 	if cfg.Git.Principal != "worker:w-local" {
 		t.Fatalf("Git.Principal = %q", cfg.Git.Principal)
 	}
@@ -571,37 +557,6 @@ git:
 	}
 	if strings.Contains(cfg.WorkDir, "~") {
 		t.Fatalf("WorkDir was not expanded: %q", cfg.WorkDir)
-	}
-}
-
-func TestLoadWorkerCanonicalAcceptsAndRejectsLegacyConflict(t *testing.T) {
-	dir := t.TempDir()
-	canonicalPath := filepath.Join(dir, "canonical.yaml")
-	if err := os.WriteFile(canonicalPath, []byte(`coordinator_url: http://127.0.0.1:8421
-work_dir: /tmp/worker
-accepts: [ephemeral]
-`), 0o600); err != nil {
-		t.Fatalf("write canonical worker config: %v", err)
-	}
-	cfg, err := LoadWorker(canonicalPath)
-	if err != nil {
-		t.Fatalf("load canonical worker config: %v", err)
-	}
-	if len(cfg.Accepts) != 1 || cfg.Accepts[0] != "ephemeral" || cfg.Capacity.PersistentAgent != 0 || cfg.Capacity.Ephemeral != 1 {
-		t.Fatalf("canonical acceptance = accepts=%+v capacity=%+v", cfg.Accepts, cfg.Capacity)
-	}
-
-	conflictPath := filepath.Join(dir, "conflict.yaml")
-	if err := os.WriteFile(conflictPath, []byte(`coordinator_url: http://127.0.0.1:8421
-work_dir: /tmp/worker
-accepts: [persistent_agent]
-capacity:
-  ephemeral: 1
-`), 0o600); err != nil {
-		t.Fatalf("write conflicting worker config: %v", err)
-	}
-	if _, err := LoadWorker(conflictPath); err == nil || !strings.Contains(err.Error(), "cannot both be configured") {
-		t.Fatalf("LoadWorker conflict error = %v", err)
 	}
 }
 
@@ -702,16 +657,13 @@ func TestApplyWorkerEnvOverrides(t *testing.T) {
 	}
 	getenv := func(key string) string {
 		values := map[string]string{
-			"FLOW_WORKER_ID":                        "w-env",
-			"FLOW_WORKER_COORDINATOR_URL":           "http://flow-server:8421",
-			"FLOW_WORKER_TOKEN":                     "worker-env-token",
-			"FLOW_WORKER_WORK_DIR":                  "~/flow-worker",
-			"FLOW_WORKER_CAPACITY_PERSISTENT_AGENT": "3",
-			"FLOW_WORKER_CAPACITY_EPHEMERAL":        "4",
-			"FLOW_WORKER_TMUX_SOCKET_PATH":          "/tmp/tmux.sock",
-			"FLOW_WORKER_GIT_PRINCIPAL":             "worker:w-env",
-			"FLOW_WORKER_GIT_COMMIT_NAME":           "Flow Bot",
-			"FLOW_WORKER_GIT_COMMIT_EMAIL":          "flow-bot@example.com",
+			"FLOW_WORKER_ID":               "w-env",
+			"FLOW_WORKER_COORDINATOR_URL":  "http://flow-server:8421",
+			"FLOW_WORKER_TOKEN":            "worker-env-token",
+			"FLOW_WORKER_WORK_DIR":         "~/flow-worker",
+			"FLOW_WORKER_GIT_PRINCIPAL":    "worker:w-env",
+			"FLOW_WORKER_GIT_COMMIT_NAME":  "Flow Bot",
+			"FLOW_WORKER_GIT_COMMIT_EMAIL": "flow-bot@example.com",
 		}
 		return values[key]
 	}
@@ -726,37 +678,11 @@ func TestApplyWorkerEnvOverrides(t *testing.T) {
 	if strings.Contains(cfg.WorkDir, "~") {
 		t.Fatalf("WorkDir was not expanded: %q", cfg.WorkDir)
 	}
-	if cfg.Capacity.PersistentAgent != 1 || cfg.Capacity.Ephemeral != 1 {
-		t.Fatalf("normalized Capacity = %+v", cfg.Capacity)
-	}
-	if len(cfg.Accepts) != 2 {
-		t.Fatalf("Accepts = %+v", cfg.Accepts)
-	}
-	if cfg.Tmux.SocketPath != "/tmp/tmux.sock" {
-		t.Fatalf("Tmux = %+v", cfg.Tmux)
-	}
 	if cfg.Git.Principal != "worker:w-env" {
 		t.Fatalf("Git = %+v", cfg.Git)
 	}
 	if cfg.Git.CommitName != "Flow Bot" || cfg.Git.CommitEmail != "flow-bot@example.com" {
 		t.Fatalf("Git commit identity = %+v", cfg.Git)
-	}
-}
-
-func TestApplyWorkerEnvOverridesRejectsInvalidCapacity(t *testing.T) {
-	cfg, err := LoadWorker("")
-	if err != nil {
-		t.Fatalf("load default worker: %v", err)
-	}
-
-	_, err = ApplyWorkerEnvOverrides(cfg, func(key string) string {
-		if key == "FLOW_WORKER_CAPACITY_EPHEMERAL" {
-			return "many"
-		}
-		return ""
-	})
-	if err == nil {
-		t.Fatal("ApplyWorkerEnvOverrides accepted invalid capacity")
 	}
 }
 
