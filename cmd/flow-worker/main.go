@@ -30,6 +30,7 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/version"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 	workerexec "github.com/ClarifiedLabs/flow/internal/worker/execution"
+	"github.com/ClarifiedLabs/flow/internal/worker/historycapture"
 	"github.com/ClarifiedLabs/flow/internal/worker/terminalbridge"
 )
 
@@ -316,6 +317,26 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
+	historyManager, err := newHistoryCaptureManager(client, cfg, historyPolicy)
+	if err != nil {
+		fmt.Fprintf(stderr, "open worker history outbox: %v\n", err)
+		return 1
+	}
+	maintenance.protectedJobs = historyManager.ProtectedJobIDs
+	if err := historyManager.Replay(executionCtx); err != nil && executionCtx.Err() == nil {
+		slog.Warn("initial worker history outbox replay failed; claims paused", "error", err)
+	}
+	historyCtx, historyCancel := context.WithCancel(executionCtx)
+	historyDone := make(chan struct{})
+	go func() {
+		defer close(historyDone)
+		historyManager.Run(historyCtx)
+	}()
+	defer func() {
+		historyCancel()
+		<-historyDone
+	}()
+
 	maintenance.Maintain(true, stderr)
 	registeredReady.Store(true)
 	maintenanceCtx, maintenanceCancel := context.WithCancel(executionCtx)
@@ -333,6 +354,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		ClaimWait:     claimWait,
 		LeaseDuration: leaseDuration,
 		HeartbeatTTL:  heartbeatTTL,
+		History:       historyManager,
 	}
 	runOutput := &lockedWriter{writer: stdout}
 	var runErr error
@@ -414,6 +436,7 @@ type workerTimings struct {
 	ClaimWait     time.Duration
 	LeaseDuration time.Duration
 	HeartbeatTTL  time.Duration
+	History       *historyCaptureManager
 }
 
 type executionJobRegistry struct{}
@@ -490,6 +513,10 @@ func runWorkerOnce(ctx context.Context, client *flowclient.Client, cfg config.Wo
 		slog.Debug("flow-worker claim paused by disk pressure", "worker_id", cfg.WorkerID)
 		return false, nil
 	}
+	if timings.History != nil && !timings.History.CanClaim() {
+		slog.Debug("flow-worker claim paused by pending history outbox", "worker_id", cfg.WorkerID)
+		return false, nil
+	}
 
 	slog.Debug("flow-worker claim job", "worker_id", cfg.WorkerID, "claim_wait", timings.ClaimWait, "lease_duration", timings.LeaseDuration)
 	claim, err := client.ClaimJobContext(ctx, flowclient.ClaimJobInput{
@@ -536,18 +563,128 @@ func runWorkerOnce(ctx context.Context, client *flowclient.Client, cfg config.Wo
 	jobCtx, cancelJob := context.WithCancelCause(ctx)
 	defer cancelJob(nil)
 	leaseHeartbeat := startLeaseHeartbeat(client, cfg, *claim.Lease, timings, stdout, cancelJob)
+	sensitiveValues := make([][]byte, 0, 3)
+	for _, value := range []string{cfg.Token, running.SessionToken} {
+		if value = strings.TrimSpace(value); value != "" {
+			sensitiveValues = append(sensitiveValues, []byte(value))
+		}
+	}
+	if payload, decodeErr := workerexec.DecodePayload(running.Job.Payload); decodeErr == nil && payload.Entrypoint != nil {
+		if value := strings.TrimSpace(payload.Entrypoint.Env["HARNESS_MODEL_PROXY_API_KEY"]); value != "" {
+			sensitiveValues = append(sensitiveValues, []byte(value))
+		}
+	}
+	var captureID string
+	var beforeExecution func(workerexec.ExecutionPreparation) error
+	if timings.History != nil {
+		beforeExecution = func(preparation workerexec.ExecutionPreparation) error {
+			var err error
+			captureID, err = timings.History.Reserve(jobCtx, running.Job, *claim.Lease, running.Session, preparation, sensitiveValues)
+			return err
+		}
+	}
 	result := workerexec.RunJob(jobCtx, workerexec.RunInput{
-		Config:       cfg,
-		Job:          running.Job,
-		Lease:        *claim.Lease,
-		ProjectID:    claim.ProjectID,
-		Session:      running.Session,
-		SessionToken: running.SessionToken,
+		Config:          cfg,
+		Job:             running.Job,
+		Lease:           *claim.Lease,
+		ProjectID:       claim.ProjectID,
+		Session:         running.Session,
+		SessionToken:    running.SessionToken,
+		BeforeExecution: beforeExecution,
 	})
+	if timings.History != nil {
+		defer func() { timings.History.deactivate(captureID) }()
+	}
+	captureInterrupted := historyCaptureWasInterrupted(ctx.Err(), jobCtx.Err(), leaseHeartbeat.Err())
+	var reportedCheckVerdict coordinator.CheckVerdict
+	var checkErr error
+	var staleCheckResult bool
+	finalState := result.FinalState
+	if !captureInterrupted {
+		// Persist the tmux transcript before check reporting can advance lifecycle
+		// state. Worker job uploads authenticate with the still-live lease; failures
+		// remain best effort because the mandatory capture stores the same source.
+		uploadTranscript(jobCtx, client, cfg, *claim.Job, *claim.Lease, running.Session, running.SessionToken, result, stdout)
+		captureInterrupted = historyCaptureWasInterrupted(ctx.Err(), jobCtx.Err(), leaseHeartbeat.Err())
+	}
+	if !captureInterrupted {
+		checkCtx, checkCancel := context.WithTimeout(jobCtx, historyShutdownBudget)
+		checkErr = retryTransientOperationContext(checkCtx, "report check", stdout, func() error {
+			var err error
+			reportedCheckVerdict, err = reportCheckIfNeeded(checkCtx, client, *claim.Job, *claim.Lease, result, stdout)
+			return err
+		})
+		checkCancel()
+		staleCheckResult = isStaleSourceJobHeadReport(checkErr)
+		if staleCheckResult {
+			fmt.Fprintf(stdout, "check: %s stale source head; result discarded\n", strings.TrimSpace(result.Payload.CheckName))
+		}
+		captureInterrupted = historyCaptureWasInterrupted(ctx.Err(), jobCtx.Err(), leaseHeartbeat.Err())
+		if !captureInterrupted {
+			finalState = finalStateForCheckReport(result, reportedCheckVerdict, checkErr, staleCheckResult)
+		}
+	}
+	terminal := historyTerminalAction(running.Job, running.Session, running.SessionToken, result.ExitCode, finalState)
+	if captureInterrupted {
+		terminal = nil
+	}
+	if timings.History != nil {
+		// Final capture uses its upload grant rather than the expiring job lease.
+		// Detach it so lease loss or host cancellation records a crashed attempt
+		// instead of aborting the evidence needed for recovery.
+		captureCtx, captureCancel := context.WithTimeout(context.Background(), historyShutdownBudget)
+		if captureID == "" {
+			preparation := result.HistoryPreparation
+			if result.Worktree != "" {
+				preparation.Worktree = result.Worktree
+			}
+			if result.TranscriptPath != "" {
+				preparation.TranscriptPath = result.TranscriptPath
+			}
+			captureID, err = timings.History.Reserve(captureCtx, running.Job, *claim.Lease, running.Session, preparation, sensitiveValues)
+		}
+		if err == nil {
+			err = timings.History.Finalize(captureCtx, captureID, result, captureInterrupted, terminal, sensitiveValues, stdout)
+		}
+		captureCancel()
+		if err != nil {
+			heartbeatErr := leaseHeartbeat.Stop()
+			if historyCaptureWasInterrupted(ctx.Err(), jobCtx.Err(), heartbeatErr) {
+				discardCtx, discardCancel := context.WithTimeout(context.Background(), historyShutdownBudget)
+				discardErr := timings.History.discardTerminal(discardCtx, captureID)
+				discardCancel()
+				if discardErr != nil {
+					return true, fmt.Errorf("publish mandatory final history capture: %w; discard stale terminal action: %v", err, discardErr)
+				}
+			}
+			// Publication is worker durability, not an already-reported job failure.
+			// A one-shot pod must restart and replay rather than exit successfully.
+			return true, fmt.Errorf("publish mandatory final history capture: %w", err)
+		}
+		// The detached capture may finish after host cancellation or authoritative
+		// lease loss. Check again before any live lifecycle operation can consume
+		// the terminal checkpoint; replay skips this capture while it is active.
+		if historyCaptureWasInterrupted(ctx.Err(), jobCtx.Err(), leaseHeartbeat.Err()) {
+			discardCtx, discardCancel := context.WithTimeout(context.Background(), historyShutdownBudget)
+			discardErr := timings.History.discardTerminal(discardCtx, captureID)
+			discardCancel()
+			if discardErr != nil {
+				return true, fmt.Errorf("discard stale terminal action after final history capture: %w", discardErr)
+			}
+		}
+		fmt.Fprintf(stdout, "history: %s state=complete\n", captureID)
+	}
 	if ctx.Err() != nil {
 		// Host or pod shutdown is not a user-code result. Stop renewing and leave
-		// the lease live so coordinator crash-expiry remains authoritative.
+		// the lease live so coordinator crash-expiry remains authoritative. Remove
+		// any terminal action captured just before the cancellation became visible.
 		_ = leaseHeartbeat.Stop()
+		discardCtx, discardCancel := context.WithTimeout(context.Background(), historyShutdownBudget)
+		discardErr := timings.History.discardTerminal(discardCtx, captureID)
+		discardCancel()
+		if discardErr != nil {
+			return true, fmt.Errorf("host interrupted: %v; discard stale history terminal action: %w", context.Cause(ctx), discardErr)
+		}
 		return true, context.Cause(ctx)
 	}
 	cleanupFinalized := false
@@ -560,67 +697,80 @@ func runWorkerOnce(ctx context.Context, client *flowclient.Client, cfg config.Wo
 	slog.Debug("flow-worker job completed", "job_id", claim.Job.ID, "session", result.Session, "exit_code", result.ExitCode, "final_state", result.FinalState, "error", result.Err)
 	if heartbeatErr := leaseHeartbeat.Err(); heartbeatErr != nil {
 		_ = leaseHeartbeat.Stop()
-		if isLeaseNotRenewable(heartbeatErr) &&
-			persistentSession &&
-			persistentSessionFinalized(context.Background(), client, running.Job, *claim.Lease, running.Session) {
-			if running.Job.Role == flowworker.RoleConsole {
-				if err := retryTransientOperation("acknowledge stopped console process exit", stdout, func() error {
-					return reportPersistentSessionProcessExit(context.Background(), client, running.Session, *claim.Lease, result.ExitCode)
-				}); err != nil {
-					return true, jobFailure(fmt.Errorf("acknowledge stopped console process exit: %w", err))
+		if isLeaseNotRenewable(heartbeatErr) && persistentSession {
+			alreadyFinalized, finalizeErr := acknowledgeStoppedPersistentSession(client, running.Job, *claim.Lease, running.Session, result.ExitCode, stdout)
+			if finalizeErr != nil {
+				discarded, discardErr := discardHistoryTerminalAfterInterruption(timings.History, captureID, ctx, jobCtx, heartbeatErr)
+				if discardErr != nil {
+					return true, jobFailure(fmt.Errorf("acknowledge stopped console process exit: %v; discard stale history terminal action: %w", finalizeErr, discardErr))
 				}
-				fmt.Fprintf(stdout, "console process exit acknowledged: %s\n", running.Session.ID)
+				if !discarded {
+					timings.History.deactivate(captureID)
+				}
+				return true, jobFailure(fmt.Errorf("acknowledge stopped console process exit: %w", finalizeErr))
 			}
-			cleanupFinalized = true
-			slog.Debug("flow-worker persistent session finalized while lease heartbeat was active", "job_id", running.Job.ID, "session_id", running.Session.ID, "lease_id", claim.Lease.ID)
-			fmt.Fprintf(stdout, "persistent session finalized: %s lease=%s\n", running.Session.ID, claim.Lease.ID)
-			return true, nil
+			if alreadyFinalized {
+				if running.Job.Role == flowworker.RoleConsole {
+					fmt.Fprintf(stdout, "console process exit acknowledged: %s\n", running.Session.ID)
+				}
+				if err := timings.History.acknowledgeTerminal(context.Background(), captureID); err != nil {
+					timings.History.deactivate(captureID)
+					return true, jobFailure(fmt.Errorf("acknowledge history terminal lifecycle: %w", err))
+				}
+				cleanupFinalized = true
+				slog.Debug("flow-worker persistent session finalized while lease heartbeat was active", "job_id", running.Job.ID, "session_id", running.Session.ID, "lease_id", claim.Lease.ID)
+				fmt.Fprintf(stdout, "persistent session finalized: %s lease=%s\n", running.Session.ID, claim.Lease.ID)
+				return true, nil
+			}
+		}
+		if _, err := discardHistoryTerminalAfterInterruption(timings.History, captureID, ctx, jobCtx, heartbeatErr); err != nil {
+			return true, jobFailure(fmt.Errorf("lease heartbeat: %v; discard stale history terminal action: %w", heartbeatErr, err))
 		}
 		slog.Debug("flow-worker discarded job result after authoritative lease loss", "job_id", claim.Job.ID, "lease_id", claim.Lease.ID, "error", heartbeatErr)
 		fmt.Fprintf(stdout, "lease lost: %s; discarded local result\n", claim.Lease.ID)
 		return true, jobFailure(fmt.Errorf("lease heartbeat: %w", heartbeatErr))
 	}
-	var reportedCheckVerdict coordinator.CheckVerdict
-	checkErr := retryTransientOperation("report check", stdout, func() error {
-		var err error
-		reportedCheckVerdict, err = reportCheckIfNeeded(client, *claim.Job, *claim.Lease, result, stdout)
-		return err
-	})
-	staleCheckResult := isStaleSourceJobHeadReport(checkErr)
-	if staleCheckResult {
-		fmt.Fprintf(stdout, "check: %s stale source head; result discarded\n", strings.TrimSpace(result.Payload.CheckName))
-	}
-
-	// Persist the tmux transcript before the lease is released (worker jobs
-	// authenticate the upload with the still-live lease). Upload failures are
-	// logged and never fail the job.
-	uploadTranscript(client, cfg, *claim.Job, *claim.Lease, running.Session, running.SessionToken, result, stdout)
-
-	finalState := finalStateForCheckReport(result, reportedCheckVerdict, checkErr, staleCheckResult)
-
 	if persistentSession {
 		// A console session normally releases its lease through /v2/console.
 		// When an owner has already stopped the console, that route is unavailable
 		// because the session token is revoked; in that case the worker must send
 		// the process-exit acknowledgement that clears the coordinator's fence.
 		if running.Job.Role == flowworker.RoleConsole {
-			releaseErr := retryTransientOperation("release console", stdout, func() error {
-				return releaseConsoleSession(cfg, running.SessionToken)
+			releaseCtx, releaseCancel := context.WithTimeout(jobCtx, historyShutdownBudget)
+			releaseErr := retryTransientOperationContext(releaseCtx, "release console", stdout, func() error {
+				return releaseConsoleSession(releaseCtx, cfg, running.SessionToken)
 			})
+			releaseCancel()
 			heartbeatErr := leaseHeartbeat.Stop()
 			if releaseErr != nil {
-				if isInvalidBearerToken(releaseErr) && persistentSessionFinalized(context.Background(), client, running.Job, *claim.Lease, running.Session) {
-					exitErr := retryTransientOperation("acknowledge stopped console process exit", stdout, func() error {
-						return reportPersistentSessionProcessExit(context.Background(), client, running.Session, *claim.Lease, result.ExitCode)
-					})
-					if exitErr != nil {
-						if heartbeatErr != nil {
-							return true, jobFailure(fmt.Errorf("lease heartbeat: %v; acknowledge stopped console process exit: %w", heartbeatErr, exitErr))
-						}
-						return true, jobFailure(fmt.Errorf("acknowledge stopped console process exit: %w", exitErr))
+				alreadyFinalized := false
+				var finalizeErr error
+				if isInvalidBearerToken(releaseErr) {
+					alreadyFinalized, finalizeErr = acknowledgeStoppedPersistentSession(client, running.Job, *claim.Lease, running.Session, result.ExitCode, stdout)
+				}
+				if finalizeErr != nil {
+					discarded, discardErr := discardHistoryTerminalAfterInterruption(timings.History, captureID, ctx, jobCtx, heartbeatErr)
+					if discardErr != nil {
+						return true, jobFailure(fmt.Errorf("acknowledge stopped console process exit: %v; discard stale history terminal action: %w", finalizeErr, discardErr))
 					}
+					if !discarded {
+						timings.History.deactivate(captureID)
+					}
+					if heartbeatErr != nil {
+						return true, jobFailure(fmt.Errorf("lease heartbeat: %v; acknowledge stopped console process exit: %w", heartbeatErr, finalizeErr))
+					}
+					return true, jobFailure(fmt.Errorf("acknowledge stopped console process exit: %w", finalizeErr))
+				}
+				if alreadyFinalized {
 					fmt.Fprintf(stdout, "console process exit acknowledged: %s\n", running.Session.ID)
 				} else {
+					discarded, discardErr := discardHistoryTerminalAfterInterruption(timings.History, captureID, ctx, jobCtx, heartbeatErr)
+					if discardErr != nil {
+						return true, jobFailure(fmt.Errorf("release console: %v; discard stale history terminal action: %w", releaseErr, discardErr))
+					}
+					if !discarded {
+						timings.History.deactivate(captureID)
+					}
 					if heartbeatErr != nil {
 						return true, jobFailure(fmt.Errorf("lease heartbeat: %v; release console: %w", heartbeatErr, releaseErr))
 					}
@@ -629,6 +779,10 @@ func runWorkerOnce(ctx context.Context, client *flowclient.Client, cfg config.Wo
 			} else {
 				slog.Debug("flow-worker console session released", "job_id", running.Job.ID, "session_id", running.Session.ID, "lease_id", claim.Lease.ID, "error", result.Err)
 				fmt.Fprintf(stdout, "released: %s state=%s\n", running.Job.ID, flowworker.JobFinished)
+			}
+			if err := timings.History.acknowledgeTerminal(context.Background(), captureID); err != nil {
+				timings.History.deactivate(captureID)
+				return true, jobFailure(fmt.Errorf("acknowledge history terminal lifecycle: %w", err))
 			}
 			cleanupFinalized = true
 			if heartbeatErr != nil && !isLeaseNotRenewable(heartbeatErr) {
@@ -643,13 +797,15 @@ func runWorkerOnce(ctx context.Context, client *flowclient.Client, cfg config.Wo
 			return true, nil
 		}
 
-		alreadyFinalized := persistentSessionFinalized(context.Background(), client, running.Job, *claim.Lease, running.Session)
+		processExitCtx, processExitCancel := context.WithTimeout(jobCtx, historyShutdownBudget)
+		alreadyFinalized := persistentSessionFinalized(processExitCtx, client, running.Job, *claim.Lease, running.Session)
 		var processExitErr error
 		if !alreadyFinalized {
-			processExitErr = retryTransientOperation("report persistent session process exit", stdout, func() error {
-				return reportPersistentSessionProcessExit(context.Background(), client, running.Session, *claim.Lease, result.ExitCode)
+			processExitErr = retryTransientOperationContext(processExitCtx, "report persistent session process exit", stdout, func() error {
+				return reportPersistentSessionProcessExit(processExitCtx, client, running.Session, *claim.Lease, result.ExitCode)
 			})
 		}
+		processExitCancel()
 		heartbeatErr := leaseHeartbeat.Stop()
 		if alreadyFinalized {
 			slog.Debug("flow-worker persistent session finalized by coordinator", "job_id", running.Job.ID, "session_id", running.Session.ID, "lease_id", claim.Lease.ID, "role", running.Job.Role)
@@ -659,7 +815,18 @@ func runWorkerOnce(ctx context.Context, client *flowclient.Client, cfg config.Wo
 			fmt.Fprintf(stdout, "persistent session exited: %s lease=%s\n", running.Session.ID, claim.Lease.ID)
 		}
 		if processExitErr != nil {
+			discarded, discardErr := discardHistoryTerminalAfterInterruption(timings.History, captureID, ctx, jobCtx, heartbeatErr)
+			if discardErr != nil {
+				return true, jobFailure(fmt.Errorf("report persistent session process exit: %v; discard stale history terminal action: %w", processExitErr, discardErr))
+			}
+			if !discarded {
+				timings.History.deactivate(captureID)
+			}
 			return true, jobFailure(fmt.Errorf("report persistent session process exit: %w", processExitErr))
+		}
+		if err := timings.History.acknowledgeTerminal(context.Background(), captureID); err != nil {
+			timings.History.deactivate(captureID)
+			return true, jobFailure(fmt.Errorf("acknowledge history terminal lifecycle: %w", err))
 		}
 		cleanupFinalized = true
 		if heartbeatErr != nil && !isLeaseNotRenewable(heartbeatErr) {
@@ -675,16 +842,25 @@ func runWorkerOnce(ctx context.Context, client *flowclient.Client, cfg config.Wo
 	}
 
 	var released flowworker.Job
-	releaseErr := retryTransientOperation("release lease", stdout, func() error {
+	releaseCtx, releaseCancel := context.WithTimeout(jobCtx, historyShutdownBudget)
+	releaseErr := retryTransientOperationContext(releaseCtx, "release lease", stdout, func() error {
 		var err error
-		released, err = client.ReleaseLease(flowclient.ReleaseLeaseInput{
+		released, err = client.ReleaseLeaseContext(releaseCtx, flowclient.ReleaseLeaseInput{
 			LeaseID:    claim.Lease.ID,
 			FinalState: finalState,
 		})
 		return err
 	})
+	releaseCancel()
 	heartbeatErr := leaseHeartbeat.Stop()
 	if releaseErr != nil {
+		discarded, discardErr := discardHistoryTerminalAfterInterruption(timings.History, captureID, ctx, jobCtx, heartbeatErr)
+		if discardErr != nil {
+			return true, jobFailure(fmt.Errorf("release lease: %v; discard stale history terminal action: %w", releaseErr, discardErr))
+		}
+		if !discarded {
+			timings.History.deactivate(captureID)
+		}
 		if heartbeatErr != nil {
 			return true, jobFailure(fmt.Errorf("lease heartbeat: %v; release lease: %w", heartbeatErr, releaseErr))
 		}
@@ -692,6 +868,10 @@ func runWorkerOnce(ctx context.Context, client *flowclient.Client, cfg config.Wo
 	}
 	slog.Debug("flow-worker lease released", "job_id", released.ID, "state", released.State)
 	fmt.Fprintf(stdout, "released: %s state=%s\n", released.ID, released.State)
+	if err := timings.History.acknowledgeTerminal(context.Background(), captureID); err != nil {
+		timings.History.deactivate(captureID)
+		return true, jobFailure(fmt.Errorf("acknowledge history terminal lifecycle: %w", err))
+	}
 	cleanupFinalized = true
 	jobMetrics.Load().jobCompleted(string(released.State))
 	if checkErr != nil && !staleCheckResult {
@@ -704,6 +884,19 @@ func runWorkerOnce(ctx context.Context, client *flowclient.Client, cfg config.Wo
 		return true, jobFailure(fmt.Errorf("run job: %w", result.Err))
 	}
 	return true, nil
+}
+
+func historyTerminalAction(job flowworker.Job, session *coordinator.Session, sessionToken string, exitCode int, finalState flowworker.JobState) *historycapture.TerminalAction {
+	if session == nil {
+		return &historycapture.TerminalAction{Kind: historycapture.TerminalReleaseLease, FinalState: string(finalState)}
+	}
+	if job.Role == flowworker.RoleConsole {
+		return &historycapture.TerminalAction{
+			Kind: historycapture.TerminalConsoleExit, SessionID: session.ID,
+			SessionToken: sessionToken, ExitCode: exitCode,
+		}
+	}
+	return &historycapture.TerminalAction{Kind: historycapture.TerminalSessionExit, SessionID: session.ID, ExitCode: exitCode}
 }
 
 func finalStateForCheckReport(result workerexec.RunResult, verdict coordinator.CheckVerdict, reportErr error, stale bool) flowworker.JobState {
@@ -719,7 +912,7 @@ func finalStateForCheckReport(result workerexec.RunResult, verdict coordinator.C
 	}
 }
 
-func releaseConsoleSession(cfg config.WorkerConfig, sessionToken string) error {
+func releaseConsoleSession(ctx context.Context, cfg config.WorkerConfig, sessionToken string) error {
 	sessionToken = strings.TrimSpace(sessionToken)
 	if sessionToken == "" {
 		return errors.New("console session token is required")
@@ -731,7 +924,7 @@ func releaseConsoleSession(cfg config.WorkerConfig, sessionToken string) error {
 	if err != nil {
 		return fmt.Errorf("create console client: %w", err)
 	}
-	return client.ReleaseConsole(context.Background())
+	return client.ReleaseConsole(ctx)
 }
 
 func reportPersistentSessionProcessExit(ctx context.Context, client *flowclient.Client, session *coordinator.Session, lease flowworker.Lease, exitCode int) error {
@@ -882,18 +1075,33 @@ func registrationHarnessModels(labels map[string]string) []flowharness.Model {
 }
 
 func retryTransientOperation(action string, stdout io.Writer, fn func() error) error {
+	return retryTransientOperationContext(context.Background(), action, stdout, fn)
+}
+
+func retryTransientOperationContext(ctx context.Context, action string, stdout io.Writer, fn func() error) error {
 	for {
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
 		err := fn()
 		if err == nil || !flowclient.IsRetryableError(err) {
 			return err
 		}
 		slog.Debug("flow-worker transient operation error", "action", action, "error", err)
 		fmt.Fprintf(stdout, "%s transient error: %v; retrying in %s\n", action, err, transientWorkerRetryDelay)
-		time.Sleep(transientWorkerRetryDelay)
+		timer := time.NewTimer(transientWorkerRetryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return context.Cause(ctx)
+		case <-timer.C:
+		}
 	}
 }
 
-func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease flowworker.Lease, result workerexec.RunResult, stdout io.Writer) (coordinator.CheckVerdict, error) {
+func reportCheckIfNeeded(ctx context.Context, client *flowclient.Client, job flowworker.Job, lease flowworker.Lease, result workerexec.RunResult, stdout io.Writer) (coordinator.CheckVerdict, error) {
 	checkName := strings.TrimSpace(result.Payload.CheckName)
 	if checkName == "" || job.TaskID == nil {
 		slog.Debug("flow-worker skipping check report", "job_id", job.ID, "reason", "missing check name or task")
@@ -998,6 +1206,7 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 	if haveVerdict {
 		var err error
 		followUpResults, followUpFailures, err = applyVerdictActions(
+			ctx,
 			client,
 			kind,
 			blocking && !reviewDiscovery,
@@ -1022,7 +1231,7 @@ func reportCheckIfNeeded(client *flowclient.Client, job flowworker.Job, lease fl
 	}
 	details = appendFollowUpActionFailures(details, followUpFailures)
 
-	check, err := client.ReportCheck(*job.TaskID, checkName, flowclient.ReportCheckInput{
+	check, err := client.ReportCheckContext(ctx, *job.TaskID, checkName, flowclient.ReportCheckInput{
 		Kind:        kind,
 		Required:    &blocking,
 		Verdict:     verdict,
@@ -1058,6 +1267,7 @@ type reviewFollowUpResult struct {
 }
 
 func applyVerdictActions(
+	ctx context.Context,
 	client *flowclient.Client,
 	kind coordinator.CheckKind,
 	blocking bool,
@@ -1086,7 +1296,7 @@ func applyVerdictActions(
 			}
 			introduced := comment.IntroducedByChange != nil && *comment.IntroducedByChange
 			var applied flowclient.ApplyReviewFollowUpResult
-			err := retryTransientOperation("apply review follow-up", stdout, func() error {
+			err := retryTransientOperationContext(ctx, "apply review follow-up", stdout, func() error {
 				var err error
 				applied, err = client.ApplyReviewFollowUp(sourceTaskID, flowclient.ApplyReviewFollowUpInput{
 					LeaseID: leaseID,
@@ -1132,7 +1342,7 @@ func applyVerdictActions(
 				if !comment.BlocksApproval() || changeID == "" {
 					continue
 				}
-				err := retryTransientOperation("file verdict comment", stdout, func() error {
+				err := retryTransientOperationContext(ctx, "file verdict comment", stdout, func() error {
 					_, err := client.CreateThread(changeID, flowclient.CreateThreadInput{
 						AnchorCommitSHA: comment.SHA,
 						FilePath:        comment.File,
@@ -1155,7 +1365,7 @@ func applyVerdictActions(
 			break
 		}
 		for _, decision := range report.Threads {
-			err := retryTransientOperation("apply verdict thread decision", stdout, func() error {
+			err := retryTransientOperationContext(ctx, "apply verdict thread decision", stdout, func() error {
 				if decision.Decision == "reopen" {
 					_, err := client.ReopenThread(decision.ID, decision.Body, leaseID)
 					return err
@@ -1303,7 +1513,7 @@ const transcriptTailBytes = 10 << 20 // 10 MiB
 // token; check jobs PUT to their job route with the worker token and the
 // still-live lease. Any failure is logged to job stdout and never fails the
 // job.
-func uploadTranscript(client *flowclient.Client, cfg config.WorkerConfig, job flowworker.Job, lease flowworker.Lease, session *coordinator.Session, sessionToken string, result workerexec.RunResult, stdout io.Writer) {
+func uploadTranscript(ctx context.Context, client *flowclient.Client, cfg config.WorkerConfig, job flowworker.Job, lease flowworker.Lease, session *coordinator.Session, sessionToken string, result workerexec.RunResult, stdout io.Writer) {
 	path := strings.TrimSpace(result.TranscriptPath)
 	if path == "" {
 		return
@@ -1322,7 +1532,6 @@ func uploadTranscript(client *flowclient.Client, cfg config.WorkerConfig, job fl
 		return
 	}
 
-	ctx := context.Background()
 	if session != nil && strings.TrimSpace(sessionToken) != "" {
 		sessionClient, err := flowclient.New(config.ClientConfig{
 			ServerURL: cfg.CoordinatorURL,
@@ -1362,6 +1571,23 @@ func isInvalidBearerToken(err error) bool {
 	return statusErr.StatusCode == http.StatusUnauthorized &&
 		statusErr.Code == "unauthorized" &&
 		strings.Contains(statusErr.Message, "invalid bearer token")
+}
+
+func acknowledgeStoppedPersistentSession(client *flowclient.Client, job flowworker.Job, lease flowworker.Lease, session *coordinator.Session, exitCode int, stdout io.Writer) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), historyShutdownBudget)
+	defer cancel()
+	if !persistentSessionFinalized(ctx, client, job, lease, session) {
+		return false, nil
+	}
+	if job.Role != flowworker.RoleConsole {
+		return true, nil
+	}
+	if err := retryTransientOperationContext(ctx, "acknowledge stopped console process exit", stdout, func() error {
+		return reportPersistentSessionProcessExit(ctx, client, session, lease, exitCode)
+	}); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 func persistentSessionFinalized(ctx context.Context, client *flowclient.Client, job flowworker.Job, lease flowworker.Lease, session *coordinator.Session) bool {
@@ -1553,6 +1779,20 @@ func startLeaseHeartbeat(
 	}()
 
 	return heartbeat
+}
+
+func historyCaptureWasInterrupted(parentErr, jobErr, heartbeatErr error) bool {
+	return parentErr != nil || jobErr != nil || heartbeatErr != nil
+}
+
+func discardHistoryTerminalAfterInterruption(manager *historyCaptureManager, captureID string, parentCtx, jobCtx context.Context, heartbeatErr error) (bool, error) {
+	if !historyCaptureWasInterrupted(parentCtx.Err(), jobCtx.Err(), heartbeatErr) {
+		return false, nil
+	}
+	discardCtx, discardCancel := context.WithTimeout(context.Background(), historyShutdownBudget)
+	err := manager.discardTerminal(discardCtx, captureID)
+	discardCancel()
+	return true, err
 }
 
 func isLeaseNotRenewable(err error) bool {

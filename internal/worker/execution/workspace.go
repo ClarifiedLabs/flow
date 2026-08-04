@@ -44,6 +44,12 @@ func CleanupFinalizedJob(workDir string, jobID string) (bool, error) {
 //
 // Callers must not invoke this after a failed coordinator list operation.
 func ReapOrphanedJobWorkspaces(workDir string, jobs []Job, orphanGrace time.Duration, now time.Time) (WorkspaceCleanupResult, error) {
+	return ReapOrphanedJobWorkspacesExcept(workDir, jobs, nil, orphanGrace, now)
+}
+
+// ReapOrphanedJobWorkspacesExcept additionally preserves jobs whose history
+// outbox still references their source workspace.
+func ReapOrphanedJobWorkspacesExcept(workDir string, jobs []Job, protected map[string]struct{}, orphanGrace time.Duration, now time.Time) (WorkspaceCleanupResult, error) {
 	jobRoot, err := validatedJobWorkspaceRoot(workDir)
 	if err != nil {
 		return WorkspaceCleanupResult{}, err
@@ -66,6 +72,10 @@ func ReapOrphanedJobWorkspaces(workDir string, jobs []Job, orphanGrace time.Dura
 	for _, entry := range entries {
 		jobID := entry.Name()
 		if IsActiveJob(jobID) {
+			result.Remaining++
+			continue
+		}
+		if _, keep := protected[jobID]; keep {
 			result.Remaining++
 			continue
 		}

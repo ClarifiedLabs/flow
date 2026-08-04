@@ -1024,6 +1024,10 @@ func (c *Client) GetCheck(taskID string, name string) (CheckResult, error) {
 }
 
 func (c *Client) ReportCheck(taskID string, name string, input ReportCheckInput) (CheckResult, error) {
+	return c.ReportCheckContext(context.Background(), taskID, name, input)
+}
+
+func (c *Client) ReportCheckContext(ctx context.Context, taskID string, name string, input ReportCheckInput) (CheckResult, error) {
 	var response checkResponse
 	request := reportCheckRequest{
 		Kind:        string(input.Kind),
@@ -1035,7 +1039,7 @@ func (c *Client) ReportCheck(taskID string, name string, input ReportCheckInput)
 		LeaseID:     input.LeaseID,
 		Reporter:    input.Reporter,
 	}
-	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/checks/"+url.PathEscape(name), request, nil, &response); err != nil {
+	if err := c.doContext(ctx, http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/checks/"+url.PathEscape(name), request, nil, &response); err != nil {
 		return CheckResult{}, err
 	}
 
@@ -1324,12 +1328,16 @@ func (c *Client) MarkJobRunning(leaseID string) (MarkJobRunningResult, error) {
 }
 
 func (c *Client) ReleaseLease(input ReleaseLeaseInput) (flowworker.Job, error) {
+	return c.ReleaseLeaseContext(context.Background(), input)
+}
+
+func (c *Client) ReleaseLeaseContext(ctx context.Context, input ReleaseLeaseInput) (flowworker.Job, error) {
 	var response jobResponse
 	request := releaseLeaseRequest{
 		LeaseID:    input.LeaseID,
 		FinalState: string(input.FinalState),
 	}
-	if err := c.do(http.MethodPost, "/v2/workers/release", request, nil, &response); err != nil {
+	if err := c.doContext(ctx, http.MethodPost, "/v2/workers/release", request, nil, &response); err != nil {
 		return flowworker.Job{}, err
 	}
 
@@ -1494,6 +1502,9 @@ func (c *Client) CreateSessionTerminalAccess(sessionID string) (coordinator.Sess
 
 	return response.Access, nil
 }
+
+// ProjectRef returns the configured project id or name used for project-scoped routes.
+func (c *Client) ProjectRef() string { return c.projectID }
 
 func (c *Client) URLForPath(path string) string {
 	if strings.TrimSpace(path) == "" {
@@ -1685,6 +1696,33 @@ func (c *Client) GetHistoryCapture(ctx context.Context, captureID string) (contr
 	return response, nil
 }
 
+func (c *Client) ListHistoryCaptureEvents(ctx context.Context, captureID string) (contract.HistoryCaptureEventsResponse, error) {
+	var response contract.HistoryCaptureEventsResponse
+	path := c.projectPath("/history/captures/" + url.PathEscape(captureID) + "/events")
+	if err := c.doContext(ctx, http.MethodGet, path, nil, nil, &response); err != nil {
+		return contract.HistoryCaptureEventsResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) WaiveHistoryCapture(ctx context.Context, captureID string, input contract.WaiveHistoryCaptureRequest) (contract.HistoryCapture, error) {
+	var response contract.HistoryCapture
+	path := c.projectPath("/history/captures/" + url.PathEscape(captureID) + "/waive")
+	if err := c.doContext(ctx, http.MethodPost, path, input, nil, &response); err != nil {
+		return contract.HistoryCapture{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) RevokeHistoryUploadGrant(ctx context.Context, captureID string, input contract.RevokeHistoryUploadGrantRequest) (contract.HistoryCapture, error) {
+	var response contract.HistoryCapture
+	path := c.projectPath("/history/captures/" + url.PathEscape(captureID) + "/upload-grant/revoke")
+	if err := c.doContext(ctx, http.MethodPost, path, input, nil, &response); err != nil {
+		return contract.HistoryCapture{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) DownloadHistoryArtifact(ctx context.Context, captureID, artifactID string, dst io.Writer) error {
 	path := c.projectPath("/history/captures/" + url.PathEscape(captureID) + "/artifacts/" + url.PathEscape(artifactID) + "/content")
 	return c.downloadHistoryContent(ctx, path, dst)
@@ -1693,6 +1731,44 @@ func (c *Client) DownloadHistoryArtifact(ctx context.Context, captureID, artifac
 func (c *Client) DownloadHistoryManifest(ctx context.Context, captureID string, dst io.Writer) error {
 	path := c.projectPath("/history/captures/" + url.PathEscape(captureID) + "/manifest")
 	return c.downloadHistoryContent(ctx, path, dst)
+}
+
+func (c *Client) ResumeHistoryCapture(ctx context.Context, captureID string, input contract.ResumeHistoryCaptureRequest) (contract.ResumeHistoryCaptureResponse, error) {
+	var response contract.ResumeHistoryCaptureResponse
+	path := c.projectPath("/history/captures/" + url.PathEscape(captureID) + "/resume")
+	if err := c.doContext(ctx, http.MethodPost, path, input, nil, &response); err != nil {
+		return contract.ResumeHistoryCaptureResponse{}, err
+	}
+	return response, nil
+}
+
+// DownloadHistoryResumeArtifact downloads one coordinator-selected source
+// artifact while proving the caller still owns the active resume lease.
+func (c *Client) DownloadHistoryResumeArtifact(ctx context.Context, captureID, artifactID, jobID, leaseID string, dst io.Writer) error {
+	if dst == nil {
+		return errors.New("history resume destination is required")
+	}
+	path := "/v2/history/captures/" + url.PathEscape(captureID) + "/artifacts/" + url.PathEscape(artifactID) + "/resume-content"
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set(protocolHeader, contract.ProtocolVersion)
+	request.Header.Set("Flow-History-Resume-Job", strings.TrimSpace(jobID))
+	request.Header.Set("Flow-History-Resume-Lease", strings.TrimSpace(leaseID))
+	if c.token != "" {
+		request.Header.Set("Authorization", authScheme+c.token)
+	}
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if err := statusError(response); err != nil {
+		return err
+	}
+	_, err = io.Copy(dst, response.Body)
+	return err
 }
 
 func (c *Client) ReserveHistoryCapture(ctx context.Context, input contract.ReserveHistoryCaptureRequest) (contract.ReserveHistoryCaptureResponse, error) {
@@ -1731,6 +1807,25 @@ func (c *Client) UploadHistoryArtifactBytes(ctx context.Context, captureID, gran
 		return contract.HistoryUploadResponse{}, err
 	}
 	return result, nil
+}
+
+func (c *Client) AbandonHistoryArtifactUpload(ctx context.Context, captureID, grant, temporaryUploadID string) error {
+	path := "/v2/history/captures/" + url.PathEscape(captureID) + "/uploads/" + url.PathEscape(temporaryUploadID)
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+path, nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set(protocolHeader, contract.ProtocolVersion)
+	request.Header.Set("Flow-History-Upload-Grant", grant)
+	if c.token != "" {
+		request.Header.Set("Authorization", authScheme+c.token)
+	}
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	return statusError(response)
 }
 
 func (c *Client) PublishHistoryArtifact(ctx context.Context, captureID, grant string, input contract.PublishHistoryArtifactRequest) (contract.HistoryArtifact, error) {

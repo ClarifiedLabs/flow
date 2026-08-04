@@ -239,6 +239,34 @@ Assignment-centric orchestrator metrics are:
 Coordinator `flow_queue_depth{state}` remains useful queue telemetry, but it is
 not a worker provisioning signal.
 
+## History durability for assignment workers
+
+`flow-server` stores its SQLite databases and the default local history blob
+backend beneath `/var/lib/flow`, which the reference Deployment mounts from the
+`flow-server-data` PVC. Preserve the database and blobs together; choosing S3 for
+history blobs does not remove the database durability requirement.
+
+Mandatory history capture also has a worker-side durability requirement. An
+assignment worker keeps active job sources beneath its configured `work_dir` and
+keeps the replayable history outbox outside `work_dir/jobs` (by default at
+`<work_dir>/history-outbox`). Both must survive a worker process or Pod restart
+until the coordinator acknowledges final publication. The outbox alone cannot
+reconstruct a workspace or Harness source directory that has disappeared.
+
+The current Kubernetes provider profile sets `work_dir: /var/lib/flow-worker`,
+but generated one-shot Jobs do not mount a PVC or another durable volume and the
+profile schema has no volume-mount option. Their writable Pod filesystem therefore
+does **not** preserve pending history across Pod deletion/replacement. S3 protects
+only bytes already uploaded to the coordinator. Do not claim cross-Pod full-fidelity
+history durability from the reference manifests until provider-managed durable
+worker storage is implemented; avoid deleting a worker Pod with a pending capture
+and treat such loss as evidence loss requiring recovery or an explicit owner
+waiver. Static workers can meet the same invariant by placing both `work_dir/jobs`
+and `history.outbox.path` on appropriately sized durable private storage.
+
+See [Full-fidelity execution history](history.md) for capture boundaries, outbox
+sizing, recovery, authorization, and waiver consequences.
+
 ## Operational recovery and cleanup
 
 - Keep every retired `provider_id` in the coordinator's

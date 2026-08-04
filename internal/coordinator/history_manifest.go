@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/ClarifiedLabs/flow/internal/sqlitex"
 )
 
 const historyManifestSchemaVersion = 1
@@ -51,6 +53,7 @@ type canonicalHistoryManifestArtifact struct {
 	Phase                HistoryArtifactPhase `json:"phase"`
 	CheckpointGeneration int64                `json:"checkpoint_generation,omitempty"`
 	CheckpointStream     string               `json:"checkpoint_stream,omitempty"`
+	CheckpointTrigger    string               `json:"checkpoint_trigger,omitempty"`
 	ArchiveID            string               `json:"archive_id,omitempty"`
 	MediaType            string               `json:"media_type"`
 	FormatVersion        int                  `json:"format_version"`
@@ -110,6 +113,27 @@ func (s *HistoryCaptureService) GenerateCanonicalManifest(ctx context.Context, c
 	} else if !errors.Is(getErr, ErrHistoryArtifactNotFound) {
 		return HistoryArtifact{}, getErr
 	}
+	if capture.ExpectedSetDeclaredAt == nil {
+		return HistoryArtifact{}, fmt.Errorf("%w: final expected set is not declared", ErrHistoryIncomplete)
+	}
+	readinessTx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return HistoryArtifact{}, err
+	}
+	if err := verifyCaptureCompletenessTx(ctx, readinessTx, capture, false); err != nil {
+		readinessTx.Rollback()
+		return HistoryArtifact{}, err
+	}
+	if _, err := readinessTx.ExecContext(ctx, `
+INSERT INTO history_manifest_locks (capture_id, created_at)
+VALUES (?, ?)
+ON CONFLICT(capture_id) DO NOTHING`, capture.ID, sqlitex.FormatTime(s.now().UTC())); err != nil {
+		readinessTx.Rollback()
+		return HistoryArtifact{}, err
+	}
+	if err := readinessTx.Commit(ctx); err != nil {
+		return HistoryArtifact{}, err
+	}
 
 	artifacts, err := s.ListArtifacts(ctx, capture.ID)
 	if err != nil {
@@ -156,7 +180,7 @@ func (s *HistoryCaptureService) GenerateCanonicalManifest(ctx context.Context, c
 		manifest.Artifacts = append(manifest.Artifacts, canonicalHistoryManifestArtifact{
 			LogicalKey: artifact.LogicalKey, Kind: artifact.Kind, Phase: artifact.Phase,
 			CheckpointGeneration: artifact.CheckpointGeneration, CheckpointStream: artifact.CheckpointStream,
-			ArchiveID: artifact.ArchiveID, MediaType: artifact.MediaType,
+			CheckpointTrigger: artifact.CheckpointTrigger, ArchiveID: artifact.ArchiveID, MediaType: artifact.MediaType,
 			FormatVersion: artifact.FormatVersion, SchemaVersion: artifact.SchemaVersion,
 			SHA256: artifact.SHA256, StoredSize: artifact.StoredSize, LogicalSize: artifact.LogicalSize,
 			EntryCount: artifact.EntryCount,
@@ -195,12 +219,16 @@ func (s *HistoryCaptureService) GenerateCanonicalManifest(ctx context.Context, c
 		return HistoryArtifact{}, err
 	}
 	if _, err := upload.Write(body); err != nil {
-		_ = upload.Abort(context.WithoutCancel(ctx))
+		cleanupCtx, cleanupCancel := detachedHistoryUploadCleanupContext(ctx)
+		_ = upload.Abort(cleanupCtx)
+		cleanupCancel()
 		return HistoryArtifact{}, err
 	}
 	temporary, err := upload.Complete(ctx)
 	if err != nil {
-		_ = upload.Abort(context.WithoutCancel(ctx))
+		cleanupCtx, cleanupCancel := detachedHistoryUploadCleanupContext(ctx)
+		_ = upload.Abort(cleanupCtx)
+		cleanupCancel()
 		return HistoryArtifact{}, err
 	}
 	return s.PublishCanonicalManifest(ctx, capture.ID, PublishHistoryArtifactInput{

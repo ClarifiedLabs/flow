@@ -29,6 +29,7 @@ type workerTestFixture struct {
 	Checks      *coordinator.CheckService
 	Sessions    *coordinator.SessionService
 	Queue       *flowworker.Service
+	History     *coordinator.HistoryCaptureService
 	// DB is the project bundle's database, for tests that assert directly on
 	// rows the worker writes (jobs, leases, and sessions).
 	DB *sql.DB
@@ -103,6 +104,7 @@ func newWorkerTestFixture(t *testing.T) workerTestFixture {
 		Checks:      bundle.Checks,
 		Sessions:    bundle.Sessions,
 		Queue:       bundle.Queue,
+		History:     bundle.HistoryCaptures,
 		DB:          bundle.Store.DB(),
 	}
 }

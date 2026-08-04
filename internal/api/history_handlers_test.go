@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -60,6 +61,43 @@ func TestHistoryOwnerAPIListsPaginatesFiltersAndDoesNotLeakInternals(t *testing.
 
 	doJSONRequest(t, fixture.Server, http.MethodGet, basePath+"?unknown=true", nil, http.StatusBadRequest, nil)
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, basePath, nil, http.StatusForbidden, nil)
+}
+
+func TestHistoryOwnerAPIEventsWaiveAndRevoke(t *testing.T) {
+	fixture := newTestFixture(t)
+	reserved := reserveAPIHistoryCapture(t, fixture, "history-owner-actions")
+	basePath := "/v2/projects/" + fixture.Project.ID + "/history/captures/" + reserved.Capture.ID
+
+	var events contract.HistoryCaptureEventsResponse
+	doJSONRequest(t, fixture.Server, http.MethodGet, basePath+"/events", nil, http.StatusOK, &events)
+	if len(events.Events) != 1 || events.Events[0].EventKind != "reserved" || !json.Valid(events.Events[0].Details) {
+		t.Fatalf("initial events = %+v", events.Events)
+	}
+	var revoked contract.HistoryCapture
+	doJSONRequest(t, fixture.Server, http.MethodPost, basePath+"/upload-grant/revoke", contract.RevokeHistoryUploadGrantRequest{
+		ExpectedVersion: reserved.Capture.Version, Reason: "operator revoked worker publication",
+	}, http.StatusOK, &revoked)
+	if revoked.ID != reserved.Capture.ID || revoked.State != string(reserved.Capture.State) || revoked.Version != reserved.Capture.Version+1 {
+		t.Fatalf("revoked capture = %+v", revoked)
+	}
+	if err := fixture.Bundle.HistoryCaptures.AuthenticateUploadGrant(context.Background(), reserved.Capture.ID, reserved.UploadGrant); !errors.Is(err, coordinator.ErrHistoryGrantNoLongerUsable) {
+		t.Fatalf("revoked upload grant err = %v", err)
+	}
+	doJSONRequest(t, fixture.Server, http.MethodGet, basePath+"/events", nil, http.StatusOK, &events)
+	if len(events.Events) != 2 || events.Events[1].EventKind != "upload_grant_revoked" || !strings.Contains(string(events.Events[1].Details), "operator revoked") {
+		t.Fatalf("revocation events = %+v", events.Events)
+	}
+
+	waiveReserved := reserveAPIHistoryCapture(t, fixture, "history-owner-waive")
+	waivePath := "/v2/projects/" + fixture.Project.ID + "/history/captures/" + waiveReserved.Capture.ID
+	var waived contract.HistoryCapture
+	doJSONRequest(t, fixture.Server, http.MethodPost, waivePath+"/waive", contract.WaiveHistoryCaptureRequest{
+		ExpectedVersion: waiveReserved.Capture.Version, Reason: "source workspace irrecoverable",
+	}, http.StatusOK, &waived)
+	if waived.State != string(coordinator.HistoryCaptureWaived) || waived.WaiverReason != "source workspace irrecoverable" {
+		t.Fatalf("waived capture = %+v", waived)
+	}
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, basePath+"/events", nil, http.StatusForbidden, nil)
 }
 
 func TestHistoryOwnerAPIDetailAndArtifactRangeStreaming(t *testing.T) {
@@ -131,6 +169,67 @@ func TestHistoryManifestEndpointStreamsCoordinatorPublishedBytes(t *testing.T) {
 	}
 }
 
+func TestHistoryResumeAPIIsIdempotentAndArtifactsRequireSelectedActiveLease(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	source, harnessArtifact, unselectedArtifact := seedAPIHistoryResumeSource(t, fixture)
+	resumePath := "/v2/projects/" + fixture.Project.ID + "/history/captures/" + source.ID + "/resume"
+
+	var created contract.ResumeHistoryCaptureResponse
+	doJSONRequest(t, fixture.Server, http.MethodPost, resumePath, contract.ResumeHistoryCaptureRequest{
+		NativeSessionID: "native-child", IdempotencyKey: "resume-api-once",
+	}, http.StatusCreated, &created)
+	if !created.Created || created.SourceCaptureID != source.ID || created.SourceNativeSessionID != "native-child" ||
+		created.RequiredHarnessBuild != "0.4.5" || created.RequiredHarnessSchema != 5 || created.JobID == "" {
+		t.Fatalf("created resume = %+v", created)
+	}
+	var replayed contract.ResumeHistoryCaptureResponse
+	doJSONRequest(t, fixture.Server, http.MethodPost, resumePath, contract.ResumeHistoryCaptureRequest{
+		NativeSessionID: "native-child", IdempotencyKey: "resume-api-once",
+	}, http.StatusOK, &replayed)
+	if replayed.Created || replayed.ID != created.ID || replayed.JobID != created.JobID {
+		t.Fatalf("idempotent resume = %+v, want IDs from %+v", replayed, created)
+	}
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, resumePath,
+		contract.ResumeHistoryCaptureRequest{IdempotencyKey: "worker-denied"}, http.StatusForbidden, nil)
+
+	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
+		ID: "w-local", Labels: map[string]string{"agent.harness.harness": "true"},
+		CapacityPersistentAgent: 1, HeartbeatTTL: time.Minute,
+	}); err != nil {
+		t.Fatalf("register resume worker: %v", err)
+	}
+	claim, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
+		WorkerID: "w-local", Buckets: []flowworker.CapacityBucket{flowworker.BucketPersistentAgent}, LeaseDuration: time.Minute,
+	})
+	if err != nil || !ok || claim.Job.ID != created.JobID {
+		t.Fatalf("claim resume job = %+v ok=%t err=%v", claim, ok, err)
+	}
+	artifactPath := "/v2/history/captures/" + source.ID + "/artifacts/" + harnessArtifact.ID + "/resume-content"
+	requestArtifact := func(path, jobID, leaseID string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Authorization", "Bearer worker-token")
+		request.Header.Set(protocolHeader, contract.ProtocolVersion)
+		request.Header.Set(historyResumeJobHeader, jobID)
+		request.Header.Set(historyResumeLeaseHeader, leaseID)
+		recorder := httptest.NewRecorder()
+		fixture.Server.ServeHTTP(recorder, request)
+		return recorder
+	}
+	allowed := requestArtifact(artifactPath, claim.Job.ID, claim.Lease.ID)
+	if allowed.Code != http.StatusOK || allowed.Body.String() != "harness" {
+		t.Fatalf("selected resume artifact = %d %q", allowed.Code, allowed.Body.String())
+	}
+	unselectedPath := "/v2/history/captures/" + source.ID + "/artifacts/" + unselectedArtifact.ID + "/resume-content"
+	if denied := requestArtifact(unselectedPath, claim.Job.ID, claim.Lease.ID); denied.Code != http.StatusForbidden {
+		t.Fatalf("unselected artifact status = %d body=%s", denied.Code, denied.Body.String())
+	}
+	if denied := requestArtifact(artifactPath, claim.Job.ID, "wrong-lease"); denied.Code != http.StatusForbidden {
+		t.Fatalf("wrong lease status = %d body=%s", denied.Code, denied.Body.String())
+	}
+}
+
 func TestWorkerHistoryAPIReservesFromLeaseAndPublishesWithCapability(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
@@ -179,6 +278,17 @@ func TestWorkerHistoryAPIReservesFromLeaseAndPublishesWithCapability(t *testing.
 	if err := json.NewDecoder(recorder.Body).Decode(&upload); err != nil {
 		t.Fatalf("decode upload: %v", err)
 	}
+
+	abandonedUpload := uploadAPIHistoryBytes(t, fixture, coordinator.ReserveHistoryCaptureResult{
+		Capture: coordinator.HistoryCapture{ID: reserved.Capture.ID}, UploadGrant: reserved.UploadGrant,
+	}, "abandon-me")
+	abandonPath := uploadPath + "/" + abandonedUpload.TemporaryUploadID
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodDelete, abandonPath, nil,
+		http.StatusNoContent, nil, historyUploadGrantHeader, reserved.UploadGrant)
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodDelete, abandonPath, nil,
+		http.StatusNoContent, nil, historyUploadGrantHeader, reserved.UploadGrant)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodDelete, abandonPath, nil,
+		http.StatusNotFound, nil, historyUploadGrantHeader, reserved.UploadGrant)
 
 	var artifact contract.HistoryArtifact
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost,
@@ -283,6 +393,114 @@ func TestWorkerHistoryAPIPublishesCompleteNonHarnessCaptureIdempotently(t *testi
 		t.Fatalf("completion retry changed result: first=%+v retry=%+v", completed, retried)
 	}
 }
+
+func seedAPIHistoryResumeSource(t *testing.T, fixture testFixture) (coordinator.HistoryCapture, coordinator.HistoryArtifact, coordinator.HistoryArtifact) {
+	t.Helper()
+	ctx := context.Background()
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Resume API source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		changeID = "ch-history-resume-api"
+		head     = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := fixture.DB.ExecContext(ctx, `
+INSERT INTO changes (id, task_id, branch, base, head_sha, created_at, updated_at)
+VALUES (?, ?, 'task/history-resume-api', 'main', ?, ?, ?)`, changeID, task.ID, head, now, now); err != nil {
+		t.Fatalf("insert resume source change: %v", err)
+	}
+	job, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
+		TaskID: &task.ID, ChangeID: historyTestStringPointer(changeID), Role: flowworker.RoleAuthor,
+		CapacityBucket: flowworker.BucketPersistentAgent,
+		Payload: map[string]any{
+			"branch": "task/history-resume-api", "base": "main", "head_sha": head,
+			"entrypoint": map[string]any{"argv": []any{"harness"}, "harness": "harness"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("enqueue resume source job: %v", err)
+	}
+	reserved, err := fixture.Bundle.HistoryCaptures.Reserve(ctx, coordinator.ReserveHistoryCaptureInput{
+		ProjectID: fixture.Project.ID, JobID: job.ID, LeaseID: "lease-history-resume-api", LeaseAttempt: 1,
+		WorkerID: "w-local", TaskID: task.ID, ChangeID: changeID, Role: string(flowworker.RoleAuthor),
+		HarnessName: "harness", HarnessVersion: "0.4.5", HarnessSchemaVersion: 5,
+		ExpectedTranscript: true, ExpectedHarness: true,
+	})
+	if err != nil {
+		t.Fatalf("reserve resume source history: %v", err)
+	}
+	capture := reserved.Capture
+	transition := func(to coordinator.HistoryCaptureState) {
+		t.Helper()
+		capture, err = fixture.Bundle.HistoryCaptures.Transition(ctx, capture.ID, coordinator.TransitionHistoryCaptureInput{
+			To: to, ExpectedVersion: capture.Version, Actor: "worker:w-local",
+		})
+		if err != nil {
+			t.Fatalf("transition resume source to %s: %v", to, err)
+		}
+	}
+	transition(coordinator.HistoryCaptureRunning)
+	harnessArtifact := publishAPIHistoryArtifact(t, fixture, reserved, coordinator.PublishHistoryArtifactInput{
+		LogicalKey: "harness/final/root", Kind: coordinator.HistoryArtifactHarnessRoot, Phase: coordinator.HistoryArtifactFinal,
+		ArchiveID: "native-root", MediaType: "application/x-tar", LogicalSize: 7, EntryCount: 2,
+	}, []byte("harness"), false)
+	if err := fixture.Bundle.HistoryCaptures.RegisterHarnessArchiveMembers(ctx, capture.ID, reserved.UploadGrant, "harness/final/root", []coordinator.HarnessArchiveMemberInput{
+		{NativeSessionID: "native-root", RelativeMemberPath: "state.json", MemberKind: "root", HarnessBuild: "0.4.5", ParseStatus: "parsed"},
+		{NativeSessionID: "native-child", NativeParentSessionID: "native-root", RelativeMemberPath: "children/native-child/state.json", MemberKind: "delegated_child", HarnessBuild: "0.4.5", ParseStatus: "parsed"},
+	}); err != nil {
+		t.Fatalf("register resume Harness members: %v", err)
+	}
+	publishAPIHistoryArtifact(t, fixture, reserved, coordinator.PublishHistoryArtifactInput{
+		LogicalKey: "workspace/final", Kind: coordinator.HistoryArtifactWorkspaceSnapshot, Phase: coordinator.HistoryArtifactFinal,
+		ArchiveID: "workspace", MediaType: "application/x-tar", LogicalSize: 9, EntryCount: 1,
+	}, []byte("workspace"), false)
+	if _, err := fixture.Bundle.HistoryCaptures.RegisterWorkspaceSummary(ctx, capture.ID, reserved.UploadGrant, coordinator.RegisterHistoryWorkspaceSummaryInput{
+		ArtifactLogicalKey: "workspace/final", ArchiveSchemaVersion: 1, Branch: "task/history-resume-api", BaseRef: "main",
+		BaseCommit: head, HeadCommit: head, InventoryDigest: strings.Repeat("c", 64), ValidationStatus: "valid",
+	}); err != nil {
+		t.Fatalf("register resume workspace summary: %v", err)
+	}
+	manifestArtifact := publishAPIHistoryArtifact(t, fixture, reserved, coordinator.PublishHistoryArtifactInput{
+		LogicalKey: "manifest/final", Kind: coordinator.HistoryArtifactManifest, Phase: coordinator.HistoryArtifactFinal,
+		MediaType: "application/json", LogicalSize: 2,
+	}, []byte("{}"), true)
+	exitCode := 0
+	capture, err = fixture.Bundle.HistoryCaptures.RecordExecutionVerdict(ctx, capture.ID, coordinator.RecordHistoryExecutionVerdictInput{
+		Verdict: coordinator.HistoryExecutionSucceeded, ExitCode: &exitCode, ExpectedVersion: capture.Version, Actor: "worker:w-local",
+	})
+	if err != nil {
+		t.Fatalf("record resume source verdict: %v", err)
+	}
+	transition(coordinator.HistoryCaptureQuiescing)
+	seal := coordinator.TranscriptSeal{FinalEpoch: -1, SHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+	if err := fixture.Bundle.HistoryCaptures.SealTranscript(ctx, capture.ID, reserved.UploadGrant, seal); err != nil {
+		t.Fatalf("seal resume source transcript: %v", err)
+	}
+	capture, err = fixture.Bundle.HistoryCaptures.DeclareExpectedSet(ctx, capture.ID, reserved.UploadGrant, coordinator.DeclareHistoryExpectedSetInput{
+		Artifacts: []coordinator.FinalArtifactExpectation{
+			{LogicalKey: "harness/final/root", Kind: coordinator.HistoryArtifactHarnessRoot},
+			{LogicalKey: "workspace/final", Kind: coordinator.HistoryArtifactWorkspaceSnapshot},
+			{LogicalKey: "manifest/final", Kind: coordinator.HistoryArtifactManifest},
+		}, TranscriptSeal: &seal, ExpectedVersion: capture.Version, Actor: "worker:w-local",
+	})
+	if err != nil {
+		t.Fatalf("declare resume source expected set: %v", err)
+	}
+	transition(coordinator.HistoryCaptureSealed)
+	transition(coordinator.HistoryCaptureUploading)
+	capture, err = fixture.Bundle.HistoryCaptures.Complete(ctx, capture.ID, reserved.UploadGrant, capture.Version, "worker:w-local")
+	if err != nil {
+		t.Fatalf("complete resume source: %v", err)
+	}
+	if _, err := fixture.Workers.CancelLiveJobsForTask(ctx, task.ID, flowworker.RoleAuthor); err != nil {
+		t.Fatalf("cancel source job: %v", err)
+	}
+	return capture, harnessArtifact, manifestArtifact
+}
+
+func historyTestStringPointer(value string) *string { return &value }
 
 func uploadAPIHistoryBytes(t *testing.T, fixture testFixture, reserved coordinator.ReserveHistoryCaptureResult, content string) contract.HistoryUploadResponse {
 	t.Helper()

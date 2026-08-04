@@ -44,7 +44,7 @@ func TestDefaultAuthorEntrypointUsesHarness(t *testing.T) {
 		t.Fatalf("harness default entrypoint: %v", err)
 	}
 	argv := entrypoint["argv"].([]string)
-	if len(argv) != 1 || !contains(argv[0], `harness --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`) || !contains(argv[0], "--harness harness") {
+	if len(argv) != 1 || !contains(argv[0], `harness --session "$FLOW_HARNESS_SESSION" --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`) || !contains(argv[0], "--harness harness") {
 		t.Fatalf("harness argv = %#v", entrypoint["argv"])
 	}
 	if entrypoint["harness"] != Harness {
@@ -58,7 +58,7 @@ func TestDefaultConsoleEntrypointsWithoutPrompt(t *testing.T) {
 		t.Fatalf("harness default console entrypoint: %v", err)
 	}
 	harnessArgv := harnessEntrypoint["argv"].([]string)
-	if len(harnessArgv) != 1 || !contains(harnessArgv[0], `harness --hooks "$FLOW_HARNESS_HOOKS"`) {
+	if len(harnessArgv) != 1 || !contains(harnessArgv[0], `harness --session "$FLOW_HARNESS_SESSION" --hooks "$FLOW_HARNESS_HOOKS"`) {
 		t.Fatalf("harness console argv = %#v", harnessEntrypoint["argv"])
 	}
 	assertNoConsolePrompt(t, harnessArgv[0])
@@ -99,7 +99,7 @@ func TestDefaultEntrypointsAppendHarnessArgs(t *testing.T) {
 		t.Fatalf("harness console entrypoint with args: %v", err)
 	}
 	consoleCommand := console["argv"].([]string)[0]
-	if !strings.Contains(consoleCommand, `harness --hooks "$FLOW_HARNESS_HOOKS" '--model' 'anthropic:claude-sonnet-4-6'`) {
+	if !strings.Contains(consoleCommand, `harness --session "$FLOW_HARNESS_SESSION" --hooks "$FLOW_HARNESS_HOOKS" '--model' 'anthropic:claude-sonnet-4-6'`) {
 		t.Fatalf("harness console command did not append args:\n%s", consoleCommand)
 	}
 	assertNoConsolePrompt(t, consoleCommand)
@@ -109,6 +109,8 @@ func TestNormalizeArgsRejectsManagedFlags(t *testing.T) {
 	tests := [][]string{
 		{"--hooks", "/tmp/hooks.json"},
 		{"--hooks=/tmp/hooks.json"},
+		{"--session", "/tmp/session"},
+		{"--session=/tmp/session"},
 		{"-p", "prompt"},
 		{"--prompt", "prompt"},
 		{"-i", "prompt"},
@@ -233,8 +235,8 @@ func TestDefaultHarnessHookedCommandConfiguresHooks(t *testing.T) {
 	for _, want := range []string{
 		"flow fetch-prompt --harness harness",
 		`[ -n "${FLOW_HARNESS_HOOKS:-}" ]`,
-		`harness --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`,
-		`harness -i "$prompt"`,
+		`harness --session "$FLOW_HARNESS_SESSION" --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`,
+		`harness --session "$FLOW_HARNESS_SESSION" -i "$prompt"`,
 	} {
 		if !strings.Contains(command, want) {
 			t.Fatalf("default harness command missing %q:\n%s", want, command)
@@ -246,7 +248,7 @@ func TestDefaultHarnessConsoleCommandConfiguresHooksWithoutPrompt(t *testing.T) 
 	command := DefaultHarnessConsoleCommandWithArgs(nil)
 	for _, want := range []string{
 		`[ -n "${FLOW_HARNESS_HOOKS:-}" ]`,
-		`harness --hooks "$FLOW_HARNESS_HOOKS"`,
+		`harness --session "$FLOW_HARNESS_SESSION" --hooks "$FLOW_HARNESS_HOOKS"`,
 	} {
 		if !strings.Contains(command, want) {
 			t.Fatalf("default harness console command missing %q:\n%s", want, command)
@@ -259,7 +261,7 @@ func TestDefaultHarnessPrintCommandIsNonInteractive(t *testing.T) {
 	command := DefaultHarnessPrintCommandWithArgs(nil)
 	for _, want := range []string{
 		"flow fetch-prompt --harness harness",
-		`harness -p "$prompt"`,
+		`harness --session "$FLOW_HARNESS_SESSION" -p "$prompt"`,
 	} {
 		if !strings.Contains(command, want) {
 			t.Fatalf("print command missing %q:\n%s", want, command)
@@ -275,7 +277,7 @@ func TestDefaultAgentCheckCommandUsesSelectedHarness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("default harness check command: %v", err)
 	}
-	for _, want := range []string{"flow fetch-prompt --harness harness", "harness '--model' 'fast' -i \"$prompt\""} {
+	for _, want := range []string{"flow fetch-prompt --harness harness", "harness --session \"$FLOW_HARNESS_SESSION\" '--model' 'fast' -i \"$prompt\""} {
 		if !strings.Contains(command, want) {
 			t.Fatalf("harness check command missing %q:\n%s", want, command)
 		}
@@ -291,7 +293,7 @@ func TestDetectEntrypointHarnessUsesRegistry(t *testing.T) {
 		want string
 	}{
 		{argv: nil, want: Harness},
-		{argv: []string{`harness --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`}, want: Harness},
+		{argv: []string{`harness --session "$FLOW_HARNESS_SESSION" --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`}, want: Harness},
 		{argv: []string{"custom-agent"}, want: Agents},
 	}
 	for _, test := range tests {

@@ -138,8 +138,26 @@ type JobPayload struct {
 	// ProjectID and ProjectName identify the owning project. The coordinator
 	// stamps them on every payload so one worker serves all projects and derives
 	// each exchange URL from its own coordinator URL.
-	ProjectID   string `json:"project_id,omitempty"`
-	ProjectName string `json:"project_name,omitempty"`
+	ProjectID     string                `json:"project_id,omitempty"`
+	ProjectName   string                `json:"project_name,omitempty"`
+	HistoryResume *HistoryResumePayload `json:"history_resume,omitempty"`
+}
+
+// HistoryResumePayload is coordinator-stamped restore metadata. Workers never
+// accept archive locations, digests, lineage, or compatibility values from an
+// owner request directly.
+type HistoryResumePayload struct {
+	ID                           string `json:"id"`
+	SourceCaptureID              string `json:"source_capture_id"`
+	NativeSessionID              string `json:"native_session_id"`
+	SessionRelativeDir           string `json:"session_relative_dir,omitempty"`
+	HarnessArtifactID            string `json:"harness_artifact_id"`
+	HarnessSHA256                string `json:"harness_sha256"`
+	WorkspaceArtifactID          string `json:"workspace_artifact_id"`
+	WorkspaceSHA256              string `json:"workspace_sha256"`
+	RequiredHeadCommit           string `json:"required_head_commit"`
+	RequiredHarnessBuild         string `json:"required_harness_build"`
+	RequiredHarnessSchemaVersion int    `json:"required_harness_schema_version"`
 }
 
 func effectiveExchangeURL(payload JobPayload, cfg config.WorkerConfig) (string, error) {
@@ -147,12 +165,22 @@ func effectiveExchangeURL(payload JobPayload, cfg config.WorkerConfig) (string, 
 }
 
 type RunInput struct {
-	Config       config.WorkerConfig
-	Job          Job
-	Lease        Lease
-	ProjectID    string
-	Session      *coordinator.Session
-	SessionToken string
+	Config          config.WorkerConfig
+	Job             Job
+	Lease           Lease
+	ProjectID       string
+	Session         *coordinator.Session
+	SessionToken    string
+	BeforeExecution func(ExecutionPreparation) error
+}
+
+// ExecutionPreparation identifies immutable, attempt-scoped capture sources.
+// The callback runs after worktree preparation but before user code starts.
+type ExecutionPreparation struct {
+	Worktree          string
+	TranscriptPath    string
+	HarnessName       string
+	NativeSessionRoot string
 }
 
 type RunResult struct {
@@ -172,8 +200,9 @@ type RunResult struct {
 	// TranscriptPath is the local file the worker piped tmux pane output to.
 	// Empty when transcript capture could not be started. The caller uploads
 	// its tail to the coordinator after the job completes.
-	TranscriptPath string
-	Err            error
+	TranscriptPath     string
+	HistoryPreparation ExecutionPreparation
+	Err                error
 }
 
 var (
@@ -225,8 +254,57 @@ func RunJob(ctx context.Context, input RunInput) RunResult {
 	if err := validateEntrypoint(*payload.Entrypoint); err != nil {
 		return failedResult(input, payload, err)
 	}
+	if payload.HistoryResume != nil {
+		if err := validateHistoryResumePayload(*payload.HistoryResume); err != nil {
+			return failedResult(input, payload, err)
+		}
+		if strings.TrimSpace(payload.HeadSHA) != payload.HistoryResume.RequiredHeadCommit {
+			return failedResult(input, payload, errors.New("history resume job head does not match its restore precondition"))
+		}
+	}
 	if _, err := effectiveExchangeURL(payload, input.Config); err != nil {
 		return failedResult(input, payload, fmt.Errorf("derive project exchange url: %w", err))
+	}
+
+	entrypoint := *payload.Entrypoint
+	harnessName := ""
+	if usesManagedNativeHarnessSession(tmuxInput{Payload: payload, Entrypoint: entrypoint}) {
+		harnessName = flowharness.Harness
+	}
+	attemptDirectory := historyAttemptDir(input.Config.WorkDir, input.Job.ID, input.Lease.ID)
+	nativeSessionRoot := ""
+	if harnessName != "" {
+		nativeSessionRoot = filepath.Join(attemptDirectory, "harness-session")
+	}
+	historyPreparation := ExecutionPreparation{
+		Worktree:          HistoryWorktreePath(input.Config.WorkDir, input.Job.ID),
+		TranscriptPath:    filepath.Join(attemptDirectory, "transcript.log"),
+		HarnessName:       harnessName,
+		NativeSessionRoot: nativeSessionRoot,
+	}
+	if payload.HistoryResume != nil && harnessName == "" {
+		return failedResult(input, payload, errors.New("history resume requires the managed native Harness entrypoint"))
+	}
+	if payload.HistoryResume != nil {
+		if err := validateResumeHarnessCompatibility(ctx, *payload.HistoryResume); err != nil {
+			return failedResult(input, payload, fmt.Errorf("validate history resume compatibility: %w", err))
+		}
+	}
+	if input.BeforeExecution != nil {
+		if err := input.BeforeExecution(historyPreparation); err != nil {
+			return failedResult(input, payload, fmt.Errorf("prepare history capture: %w", err))
+		}
+	}
+	if err := os.MkdirAll(attemptDirectory, 0o700); err != nil {
+		return failedResult(input, payload, fmt.Errorf("create history attempt directory: %w", err))
+	}
+	var resumeArchives historyResumeArchives
+	if payload.HistoryResume != nil {
+		resumeArchives, err = prepareHistoryResumeArchives(ctx, input, *payload.HistoryResume, attemptDirectory)
+		if err != nil {
+			return failedResult(input, payload, fmt.Errorf("preflight history resume: %w", err))
+		}
+		defer resumeArchives.cleanup()
 	}
 
 	worktree, err := prepareWorktree(ctx, input.Config, input.Job, payload, sessionIDForRun(input, payload), input.SessionToken)
@@ -234,6 +312,11 @@ func RunJob(ctx context.Context, input RunInput) RunResult {
 		return failedResult(input, payload, err)
 	}
 	slog.Debug("worker worktree prepared", "job_id", input.Job.ID, "worktree", worktree, "branch", payload.Branch, "base", payload.Base)
+	if payload.HistoryResume != nil {
+		if err := restoreHistoryResume(ctx, *payload.HistoryResume, resumeArchives, worktree, nativeSessionRoot); err != nil {
+			return failedResult(input, payload, fmt.Errorf("restore history resume: %w", err))
+		}
+	}
 
 	if err := materializeImageAttachments(ctx, input, payload, worktree); err != nil {
 		slog.Warn("worker image attachment materialization failed", "job_id", input.Job.ID, "error", err)
@@ -250,10 +333,12 @@ func RunJob(ctx context.Context, input RunInput) RunResult {
 	if err != nil {
 		return failedResult(input, payload, err)
 	}
-	transcriptFile := filepath.Join(jobDirectory, "transcript.log")
-	_ = os.Remove(transcriptFile)
+	transcriptFile := historyPreparation.TranscriptPath
+	if err := os.WriteFile(transcriptFile, nil, 0o600); err != nil {
+		return failedResult(input, payload, fmt.Errorf("initialize history transcript: %w", err))
+	}
 
-	entrypoint := *payload.Entrypoint
+	historyPreparation.Worktree = worktree
 	hookConfigValue, hookConfigEnvVar, err := prepareHookConfig(tmuxInput{
 		Config:       input.Config,
 		Job:          input.Job,
@@ -290,15 +375,16 @@ func RunJob(ctx context.Context, input RunInput) RunResult {
 		CompletionCapture: completionCapture,
 	})
 	result := RunResult{
-		FinalState:      stateForExit(exitCode, err),
-		ExitCode:        exitCode,
-		Session:         sessionName,
-		Worktree:        worktree,
-		Payload:         payload,
-		VerdictFilePath: verdictFilePath(input.Config.WorkDir, input.Job.ID),
-		VerdictReport:   completionCapture.report,
-		TranscriptPath:  transcriptFile,
-		Err:             err,
+		FinalState:         stateForExit(exitCode, err),
+		ExitCode:           exitCode,
+		Session:            sessionName,
+		Worktree:           worktree,
+		Payload:            payload,
+		VerdictFilePath:    verdictFilePath(input.Config.WorkDir, input.Job.ID),
+		VerdictReport:      completionCapture.report,
+		TranscriptPath:     transcriptFile,
+		HistoryPreparation: historyPreparation,
+		Err:                err,
 	}
 	slog.Debug("worker job finish", "job_id", input.Job.ID, "session", sessionName, "exit_code", exitCode, "final_state", result.FinalState, "error", err)
 	return result
@@ -322,14 +408,24 @@ func DecodePayload(payload map[string]any) (JobPayload, error) {
 }
 
 func failedResult(input RunInput, payload JobPayload, err error) RunResult {
+	preparation := ExecutionPreparation{
+		Worktree:       HistoryWorktreePath(input.Config.WorkDir, input.Job.ID),
+		TranscriptPath: filepath.Join(historyAttemptDir(input.Config.WorkDir, input.Job.ID, input.Lease.ID), "transcript.log"),
+	}
+	if payload.Entrypoint != nil && usesManagedNativeHarnessSession(tmuxInput{Payload: payload, Entrypoint: *payload.Entrypoint}) {
+		preparation.HarnessName = flowharness.Harness
+		preparation.NativeSessionRoot = filepath.Join(historyAttemptDir(input.Config.WorkDir, input.Job.ID, input.Lease.ID), "harness-session")
+	}
 	return RunResult{
-		FinalState:      JobFailed,
-		ExitCode:        -1,
-		Session:         sessionNameForJob(input.Job.ID),
-		Worktree:        filepath.Join(jobDir(input.Config.WorkDir, input.Job.ID), "repo"),
-		Payload:         payload,
-		VerdictFilePath: verdictFilePath(input.Config.WorkDir, input.Job.ID),
-		Err:             err,
+		FinalState:         JobFailed,
+		ExitCode:           -1,
+		Session:            sessionNameForJob(input.Job.ID),
+		Worktree:           preparation.Worktree,
+		Payload:            payload,
+		TranscriptPath:     preparation.TranscriptPath,
+		HistoryPreparation: preparation,
+		VerdictFilePath:    verdictFilePath(input.Config.WorkDir, input.Job.ID),
+		Err:                err,
 	}
 }
 
@@ -1056,6 +1152,13 @@ func workerEnv(input tmuxInput) map[string]string {
 	if strings.TrimSpace(input.TranscriptFile) != "" {
 		reserved["FLOW_TRANSCRIPT_FILE"] = strings.TrimSpace(input.TranscriptFile)
 	}
+	if usesManagedNativeHarnessSession(input) {
+		nativeSessionPath := filepath.Join(historyAttemptDir(input.Config.WorkDir, input.Job.ID, input.Lease.ID), "harness-session")
+		if input.Payload.HistoryResume != nil && input.Payload.HistoryResume.SessionRelativeDir != "" {
+			nativeSessionPath = filepath.Join(nativeSessionPath, filepath.FromSlash(input.Payload.HistoryResume.SessionRelativeDir))
+		}
+		reserved["FLOW_HARNESS_SESSION"] = nativeSessionPath
+	}
 	if input.Job.TaskID != nil {
 		reserved["FLOW_TASK_ID"] = *input.Job.TaskID
 	}
@@ -1309,6 +1412,13 @@ func workerGitAuthEnv(input tmuxInput) map[string]string {
 // stored harness (the entrypoint's stamped harness, then the coordinator's
 // agent_harness / console_harness payload fields) and only falls back to the
 // argv heuristic for unmanaged entrypoints that carry no stored harness.
+func usesManagedNativeHarnessSession(input tmuxInput) bool {
+	if resolveHarness(input) != flowharness.Harness || !input.Entrypoint.Shell || len(input.Entrypoint.Argv) != 1 {
+		return false
+	}
+	return strings.Contains(input.Entrypoint.Argv[0], `harness --session "$FLOW_HARNESS_SESSION"`)
+}
+
 func resolveHarness(input tmuxInput) string {
 	if harness := flowharness.NormalizeName(input.Entrypoint.Harness); harness != "" {
 		return harness
@@ -2333,6 +2443,31 @@ func stateForExit(exitCode int, err error) JobState {
 
 func jobDir(workDir string, jobID string) string {
 	return filepath.Join(workDir, "jobs", jobID)
+}
+
+// HistoryAttemptDir is the Flow-owned, lease-scoped root for local capture
+// sources. Hashing the lease ID prevents path traversal and keeps retries apart.
+func HistoryAttemptDir(workDir, jobID, leaseID string) string {
+	digest := sha256.Sum256([]byte(leaseID))
+	return filepath.Join(jobDir(workDir, jobID), "history", hex.EncodeToString(digest[:16]))
+}
+
+func historyAttemptDir(workDir, jobID, leaseID string) string {
+	return HistoryAttemptDir(workDir, jobID, leaseID)
+}
+
+// HistoryWorktreePath returns the Flow-owned worktree for one job.
+func HistoryWorktreePath(workDir, jobID string) string {
+	return filepath.Join(jobDir(workDir, jobID), "repo")
+}
+
+// QuiesceJobHistorySources terminates Flow-owned tmux servers left by a crashed
+// worker before startup recovery snapshots their files.
+func QuiesceJobHistorySources(cfg config.WorkerConfig, jobID string) {
+	resetTmuxForJob(cfg, sessionNameForJob(jobID))
+	if dir, err := agentTmuxTmpDirForJob(cfg, jobID); err == nil {
+		cleanupAgentTmuxServer(cfg, dir)
+	}
 }
 
 // verdictFilePath is the path a check job writes its structured verdict to,

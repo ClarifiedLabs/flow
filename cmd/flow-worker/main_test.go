@@ -80,6 +80,24 @@ func TestIsLeaseNotRenewableMatchesWrappedRenewFailure(t *testing.T) {
 	}
 }
 
+func TestRetryTransientOperationContextStopsAfterLeaseCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	leaseLost := errors.New("lease lost")
+	calls := 0
+	started := time.Now()
+	err := retryTransientOperationContext(ctx, "test operation", io.Discard, func() error {
+		calls++
+		cancel(leaseLost)
+		return &flowclient.HTTPStatusError{StatusCode: http.StatusServiceUnavailable, Code: "temporarily_unavailable"}
+	})
+	if !errors.Is(err, leaseLost) || calls != 1 {
+		t.Fatalf("retry result err=%v calls=%d, want lease cancellation after one call", err, calls)
+	}
+	if elapsed := time.Since(started); elapsed >= transientWorkerRetryDelay {
+		t.Fatalf("canceled retry waited %s", elapsed)
+	}
+}
+
 func TestIsStaleSourceJobHeadReportMatchesWrappedForbidden(t *testing.T) {
 	err := fmt.Errorf("report check: %w", &flowclient.HTTPStatusError{
 		StatusCode: http.StatusForbidden,
@@ -126,7 +144,7 @@ func TestAdvisoryVerdictFindingsStayInCheckDetailsWithoutThreadActions(t *testin
 		}
 	}
 	var stdout bytes.Buffer
-	_, _, _ = applyVerdictActions(nil, coordinator.CheckKindReviewer, false, false, "", flowworker.Lease{}, workerexec.RunResult{}, report, &stdout)
+	_, _, _ = applyVerdictActions(context.Background(), nil, coordinator.CheckKindReviewer, false, false, "", flowworker.Lease{}, workerexec.RunResult{}, report, &stdout)
 	if !strings.Contains(stdout.String(), "retained 2 advisory finding(s)") || !strings.Contains(stdout.String(), "no review threads changed") {
 		t.Fatalf("advisory action output = %q", stdout.String())
 	}
@@ -148,6 +166,7 @@ func TestReviewDiscoveryKeepsBlockingPolicyButSuppressesThreadActions(t *testing
 		Severity: "high", IntroducedByChange: boolPtr(true), Requirement: "authorize requests",
 	}}}
 	if _, _, err := applyVerdictActions(
+		context.Background(),
 		nil,
 		coordinator.CheckKindReviewer,
 		checkJobBlocksApproval(job) && !reviewDiscoveryJob(job),
@@ -198,6 +217,7 @@ func TestBlockingReviewerOnlyCountsTaskCausedUniqueHighSeverityFindings(t *testi
 		t.Fatalf("blocking finding leaked into non-blocking follow-ups: %q", details)
 	}
 	if _, _, err := applyVerdictActions(
+		context.Background(),
 		nil,
 		coordinator.CheckKindReviewer,
 		true,
@@ -258,7 +278,7 @@ func TestReviewerHarnessFailureReportsErroredInsteadOfBlocked(t *testing.T) {
 		VerdictFilePath: filepath.Join(t.TempDir(), workerexec.VerdictFileName),
 	}
 	var stdout bytes.Buffer
-	verdict, err := reportCheckIfNeeded(client, job, flowworker.Lease{ID: "l-review"}, result, &stdout)
+	verdict, err := reportCheckIfNeeded(context.Background(), client, job, flowworker.Lease{ID: "l-review"}, result, &stdout)
 	if err == nil {
 		t.Fatal("report check error = nil, want worker job failure after errored report")
 	}
@@ -375,7 +395,7 @@ func TestAdvisoryReviewAggregationAppliesTaskActionBeforeReportingVerdict(t *tes
 		VerdictReport:   &sealedReport,
 	}
 	var stdout bytes.Buffer
-	verdict, err := reportCheckIfNeeded(client, job, flowworker.Lease{ID: "l-review"}, result, &stdout)
+	verdict, err := reportCheckIfNeeded(context.Background(), client, job, flowworker.Lease{ID: "l-review"}, result, &stdout)
 	if err != nil || verdict != coordinator.CheckSatisfied {
 		t.Fatalf("reportCheckIfNeeded verdict=%s err=%v stdout=%q", verdict, err, stdout.String())
 	}
@@ -481,7 +501,7 @@ func TestReviewAggregationFollowUpRejectionDegradesToCheckDetails(t *testing.T) 
 		VerdictReport: &report,
 	}
 	var stdout bytes.Buffer
-	verdict, err := reportCheckIfNeeded(client, job, flowworker.Lease{ID: "l-review"}, result, &stdout)
+	verdict, err := reportCheckIfNeeded(context.Background(), client, job, flowworker.Lease{ID: "l-review"}, result, &stdout)
 	if err != nil || verdict != coordinator.CheckSatisfied {
 		t.Fatalf("reportCheckIfNeeded verdict=%s err=%v stdout=%q", verdict, err, stdout.String())
 	}
@@ -514,7 +534,7 @@ func TestNonAggregationReviewerTaskActionDegradesToDetails(t *testing.T) {
 		TaskAction: &workerexec.ReviewTaskActionReport{Action: "create_task", Title: "Follow up on auth hardening"},
 	}}}
 	var stdout bytes.Buffer
-	results, failures, err := applyVerdictActions(nil, coordinator.CheckKindReviewer, false, false, "", flowworker.Lease{}, workerexec.RunResult{}, report, &stdout)
+	results, failures, err := applyVerdictActions(context.Background(), nil, coordinator.CheckKindReviewer, false, false, "", flowworker.Lease{}, workerexec.RunResult{}, report, &stdout)
 	if err != nil {
 		t.Fatalf("applyVerdictActions error = %v, want nil", err)
 	}
@@ -1280,7 +1300,7 @@ capacity:
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"worker_id: w-local", "protocol: 5", "labels: 3", "capacity_persistent_agent: 1"} {
+	for _, want := range []string{"worker_id: w-local", "protocol: 6", "labels: 3", "capacity_persistent_agent: 1"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("config output missing %q:\n%s", want, output)
 		}
@@ -1786,7 +1806,7 @@ capacity:
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"worker_id: w-local", "protocol: 5", "labels: 3", "capacity_persistent_agent: 1"} {
+	for _, want := range []string{"worker_id: w-local", "protocol: 6", "labels: 3", "capacity_persistent_agent: 1"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("config output missing %q:\n%s", want, output)
 		}
@@ -1843,7 +1863,7 @@ func TestWorkerConsoleRunErrorReleasesSessionAndSurfacesError(t *testing.T) {
 	}
 	output := stdout.String()
 	if !strings.Contains(output, "released: "+ensured.Job.ID+" state=finished") {
-		t.Fatalf("worker output missing console release:\n%s", output)
+		t.Fatalf("worker output missing console release:\n%s\nstderr:\n%s", output, stderr.String())
 	}
 	// The console branch must surface the real run error, never the masked
 	// process-exit error from the generic persistent-session path.

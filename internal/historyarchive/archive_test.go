@@ -107,6 +107,65 @@ func TestHarnessCaptureRejectsUnsupportedUnsafeAndSensitiveInputs(t *testing.T) 
 	})
 }
 
+func TestHarnessArchiveRejectsSensitiveFilesystemMetadata(t *testing.T) {
+	tests := []struct {
+		name      string
+		sensitive string
+		populate  func(*testing.T, string)
+	}{
+		{
+			name:      "filename",
+			sensitive: "HARNESS-CREDENTIAL",
+			populate: func(t *testing.T, root string) {
+				writeTestFile(t, filepath.Join(root, "artifacts", "prefix-HARNESS-CREDENTIAL.log"), nil, 0600)
+			},
+		},
+		{
+			name:      "member path spanning components",
+			sensitive: "member-HARNESS-CREDENTIAL/state.json",
+			populate: func(t *testing.T, root string) {
+				writeTestFile(t, filepath.Join(root, "children", "member-HARNESS-CREDENTIAL", "state.json"), stateJSON("child", "explore"), 0600)
+			},
+		},
+		{
+			name:      "symlink target",
+			sensitive: "targets/HARNESS-CREDENTIAL",
+			populate: func(t *testing.T, root string) {
+				if err := os.Symlink("targets/HARNESS-CREDENTIAL", filepath.Join(root, "latest")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:      "decoded member field",
+			sensitive: "HARNESS-CREDENTIAL",
+			populate: func(t *testing.T, root string) {
+				writeTestFile(t, filepath.Join(root, "state.json"), []byte(`{"version":5,"id":"root","provider":"p:m","model":"p:m","agent":"HARNESS\u002dCREDENTIAL","build":{"version":"v0.4.5"}}`), 0600)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTestFile(t, filepath.Join(root, "state.json"), stateJSON("root", "author"), 0600)
+			test.populate(t, root)
+
+			var archive bytes.Buffer
+			_, _, err := WriteHarness(context.Background(), &archive, root, HarnessOptions{
+				Limits:          testLimits(),
+				HarnessBuild:    "v0.4.5",
+				SensitiveValues: [][]byte{[]byte(test.sensitive)},
+			})
+			if !errors.Is(err, ErrSensitiveContent) {
+				t.Fatalf("error=%v", err)
+			}
+			if archive.Len() != 0 {
+				t.Fatalf("wrote %d archive bytes before rejecting sensitive metadata", archive.Len())
+			}
+		})
+	}
+}
+
 func TestValidatePathAndLinksAdversarial(t *testing.T) {
 	for _, name := range []string{"../x", "a/../x", "/abs", `a\\b`, "C:/x", "a//b", "a/./b", ".git/config", "nul\x00x"} {
 		err := ValidatePath(name, 100)

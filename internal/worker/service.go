@@ -743,10 +743,20 @@ func (s *Service) ReleaseLease(ctx context.Context, leaseID string, finalState J
 		return Job{}, err
 	}
 	if lease.ReleasedAt != nil {
-		return Job{}, errors.New("lease is already released")
+		job, getErr := getJobTx(ctx, tx, lease.JobID)
+		if getErr != nil {
+			return Job{}, getErr
+		}
+		if job.State == finalState {
+			return job, nil
+		}
+		return Job{}, errors.New("lease is already released with a different final state")
 	}
 
 	now := s.now().UTC()
+	if !lease.ExpiresAt.After(now) {
+		return Job{}, errors.New("lease is expired")
+	}
 	result, err := tx.ExecContext(ctx, `
 UPDATE leases
 SET released_at = ?

@@ -45,7 +45,8 @@ type Digest [sha256.Size]byte
 
 func (d Digest) String() string { return hex.EncodeToString(d[:]) }
 
-func parseDigest(value string) (Digest, error) {
+// ParseDigest validates and decodes a lowercase SHA-256 digest.
+func ParseDigest(value string) (Digest, error) {
 	var digest Digest
 	decoded, err := hex.DecodeString(value)
 	if err != nil || len(decoded) != len(digest) {
@@ -54,6 +55,8 @@ func parseDigest(value string) (Digest, error) {
 	copy(digest[:], decoded)
 	return digest, nil
 }
+
+func parseDigest(value string) (Digest, error) { return ParseDigest(value) }
 
 // Key is an opaque, path-safe, scope-derived object identifier. Its two fixed
 // hexadecimal components prevent caller-controlled path traversal.

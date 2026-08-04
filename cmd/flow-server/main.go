@@ -298,6 +298,8 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		Global:           globalStore,
 		HistoryBlobStore: historyStore,
 		HistoryCaptureServiceOptions: coordinator.HistoryCaptureServiceOptions{
+			MaxRetainedCaptures:                 historyPolicy.Retention.MaxCaptures,
+			MaxRetainedArtifactBytes:            historyPolicy.Retention.MaxStoredBytes,
 			MaxUploadBytes:                      historyPolicy.Archive.MaxStoredBytes,
 			MaxTranscriptSegmentBytes:           historyPolicy.Transcript.SegmentBytes,
 			MaxOutstandingUploadsPerCapture:     historyPolicy.Archive.MaxOutstandingUploads,

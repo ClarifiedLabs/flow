@@ -1,5 +1,7 @@
 package contract
 
+import "encoding/json"
+
 // HistoryCapture is the owner-visible immutable attribution and mutable capture
 // state projection. It intentionally contains no upload grant, blob key,
 // temporary upload identifier, or internal filesystem path.
@@ -127,15 +129,48 @@ type HistoryManifestResponse struct {
 	Workspace     *HistoryWorkspaceSummary `json:"workspace_summary,omitempty"`
 }
 
+type HistoryCaptureEvent struct {
+	ID             string          `json:"id"`
+	CaptureID      string          `json:"capture_id"`
+	EventKind      string          `json:"event_kind"`
+	FromState      string          `json:"from_state,omitempty"`
+	ToState        string          `json:"to_state,omitempty"`
+	CaptureVersion int64           `json:"capture_version"`
+	Actor          string          `json:"actor"`
+	Code           string          `json:"code,omitempty"`
+	Details        json.RawMessage `json:"details"`
+	OccurredAt     string          `json:"occurred_at"`
+}
+
+type HistoryCaptureEventsResponse struct {
+	Events []HistoryCaptureEvent `json:"events"`
+}
+
+type WaiveHistoryCaptureRequest struct {
+	ExpectedVersion int64  `json:"expected_version"`
+	Reason          string `json:"reason"`
+}
+
+type RevokeHistoryUploadGrantRequest struct {
+	ExpectedVersion int64  `json:"expected_version"`
+	Reason          string `json:"reason"`
+}
+
 type ResumeHistoryCaptureRequest struct {
 	NativeSessionID string `json:"native_session_id,omitempty"`
 	IdempotencyKey  string `json:"idempotency_key"`
 }
 
 type ResumeHistoryCaptureResponse struct {
-	SourceCaptureID string `json:"source_capture_id"`
-	JobID           string `json:"job_id"`
-	State           string `json:"state"`
+	ID                    string `json:"id"`
+	SourceCaptureID       string `json:"source_capture_id"`
+	SourceNativeSessionID string `json:"source_native_session_id"`
+	JobID                 string `json:"job_id"`
+	State                 string `json:"state"`
+	RequiredHeadCommit    string `json:"required_head_commit"`
+	RequiredHarnessBuild  string `json:"required_harness_build"`
+	RequiredHarnessSchema int    `json:"required_harness_schema_version"`
+	Created               bool   `json:"created"`
 }
 
 // Worker history publication contracts use the worker credential for identity

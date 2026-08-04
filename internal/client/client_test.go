@@ -51,6 +51,12 @@ func TestHistoryClientListsAndPublishesWithTypedContracts(t *testing.T) {
 		}
 		writeJSON(t, w, http.StatusCreated, contract.HistoryUploadResponse{TemporaryUploadID: "temporary-1", SHA256: "digest-1", StoredSize: 13})
 	})
+	mux.HandleFunc("/v2/history/captures/hc-1/uploads/temporary-1", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.Header.Get("Flow-History-Upload-Grant") != "grant-1" || r.Header.Get(contract.ProtocolHeader) != contract.ProtocolVersion {
+			t.Fatalf("history upload abandon request = %s headers=%v", r.Method, r.Header)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.HandleFunc("/v2/history/captures/hc-1/artifacts", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Flow-History-Upload-Grant") != "grant-1" {
 			t.Fatalf("history publication grant = %q", r.Header.Get("Flow-History-Upload-Grant"))
@@ -70,6 +76,9 @@ func TestHistoryClientListsAndPublishesWithTypedContracts(t *testing.T) {
 	upload, err := client.UploadHistoryArtifactBytes(context.Background(), "hc-1", "grant-1", bytes.NewBufferString("history bytes"))
 	if err != nil || upload.TemporaryUploadID != "temporary-1" {
 		t.Fatalf("upload history = %+v err=%v", upload, err)
+	}
+	if err := client.AbandonHistoryArtifactUpload(context.Background(), "hc-1", "grant-1", upload.TemporaryUploadID); err != nil {
+		t.Fatalf("abandon history upload: %v", err)
 	}
 	artifact, err := client.PublishHistoryArtifact(context.Background(), "hc-1", "grant-1", contract.PublishHistoryArtifactRequest{
 		TemporaryUploadID: upload.TemporaryUploadID, LogicalKey: "workspace/final",

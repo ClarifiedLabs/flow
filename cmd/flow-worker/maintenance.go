@@ -65,12 +65,13 @@ type workerMaintenance struct {
 	metrics   *workerMaintenanceMetrics
 	diskReady *atomic.Bool
 
-	mu        sync.Mutex
-	pressure  atomic.Bool
-	lastSweep time.Time
-	now       func() time.Time
-	probe     func(string) (workerDiskSpace, error)
-	sweep     func(io.Writer)
+	mu            sync.Mutex
+	pressure      atomic.Bool
+	lastSweep     time.Time
+	now           func() time.Time
+	probe         func(string) (workerDiskSpace, error)
+	sweep         func(io.Writer)
+	protectedJobs func() (map[string]struct{}, error)
 }
 
 func newWorkerMaintenance(
@@ -177,6 +178,18 @@ func (m *workerMaintenance) CleanupFinalized(jobID string) {
 }
 
 func (m *workerMaintenance) sweepWorkerState(report io.Writer) {
+	protected := map[string]struct{}{}
+	if m.protectedJobs != nil {
+		var err error
+		protected, err = m.protectedJobs()
+		if err != nil {
+			m.recordError("list_history")
+			if report != nil {
+				fmt.Fprintf(report, "protect pending history workspaces: %v\n", err)
+			}
+			return
+		}
+	}
 	jobs, err := m.client.ListWorkerReapJobs()
 	if err != nil {
 		m.recordError("list_jobs")
@@ -202,9 +215,10 @@ func (m *workerMaintenance) sweepWorkerState(report io.Writer) {
 		return
 	}
 
-	result, cleanupErr := workerexec.ReapOrphanedJobWorkspaces(
+	result, cleanupErr := workerexec.ReapOrphanedJobWorkspacesExcept(
 		m.cfg.WorkDir,
 		jobs,
+		protected,
 		m.policy.OrphanGrace,
 		m.now().UTC(),
 	)

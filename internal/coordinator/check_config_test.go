@@ -29,7 +29,7 @@ func TestDefaultAgentChecksUseSelectedHarnessAndArgs(t *testing.T) {
 			t.Fatalf("%s entrypoint = %+v", definition.Name, definition.Entrypoint)
 		}
 		command := definition.Entrypoint.Argv[0]
-		for _, want := range []string{"flow fetch-prompt --harness harness", "harness '--model' 'anthropic:claude-sonnet-4-6' -i \"$prompt\""} {
+		for _, want := range []string{"flow fetch-prompt --harness harness", "harness --session \"$FLOW_HARNESS_SESSION\" '--model' 'anthropic:claude-sonnet-4-6' -i \"$prompt\""} {
 			if !strings.Contains(command, want) {
 				t.Fatalf("%s default command missing %q:\n%s", definition.Name, want, command)
 			}

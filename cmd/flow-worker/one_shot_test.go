@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,6 +17,8 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/api/contract"
 	flowclient "github.com/ClarifiedLabs/flow/internal/client"
 	"github.com/ClarifiedLabs/flow/internal/config"
+	"github.com/ClarifiedLabs/flow/internal/coordinator"
+	"github.com/ClarifiedLabs/flow/internal/historyarchive"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
@@ -109,6 +112,117 @@ printf ephemeral-ok > "$1"
 	waitForWorkerFile(t, out, 30*time.Second)
 	if !strings.Contains(stdout.String(), "claimed: "+job.ID) {
 		t.Fatalf("stdout missing claim:\n%s", stdout.String())
+	}
+}
+
+func TestRunWorkerOneShotPublishesMandatoryFinalHistoryBeforeRelease(t *testing.T) {
+	fixture, cfg, timings := oneShotTestSetup(t)
+	job := enqueueEphemeralTestJob(t, fixture, writeWorkerScript(t, "#!/bin/sh\nprintf history-ok\n"))
+
+	client, err := newWorkerClient(cfg)
+	if err != nil {
+		t.Fatalf("create worker client: %v", err)
+	}
+	policy, err := cfg.History.Resolve(cfg.WorkDir)
+	if err != nil {
+		t.Fatalf("resolve history policy: %v", err)
+	}
+	manager, err := newHistoryCaptureManager(client, cfg, policy)
+	if err != nil {
+		t.Fatalf("new history capture manager: %v", err)
+	}
+	if err := manager.Replay(context.Background()); err != nil {
+		t.Fatalf("initial history replay: %v", err)
+	}
+	timings.History = manager
+
+	var stdout bytes.Buffer
+	if err := runWorkerOneShot(context.Background(), client, cfg, timings, nil, &stdout); err != nil {
+		t.Fatalf("runWorkerOneShot() error = %v; stdout:\n%s", err, stdout.String())
+	}
+	captures, err := fixture.History.List(context.Background(), coordinator.HistoryCaptureListOptions{JobIDs: []string{job.ID}})
+	if err != nil {
+		t.Fatalf("list history captures: %v", err)
+	}
+	if len(captures) != 1 || captures[0].State != coordinator.HistoryCaptureComplete || captures[0].ExecutionVerdict != coordinator.HistoryExecutionSucceeded {
+		t.Fatalf("captures = %+v; stdout:\n%s", captures, stdout.String())
+	}
+	artifacts, err := fixture.History.ListArtifacts(context.Background(), captures[0].ID)
+	if err != nil {
+		t.Fatalf("list history artifacts: %v", err)
+	}
+	var logicalKeys []string
+	for _, artifact := range artifacts {
+		logicalKeys = append(logicalKeys, artifact.LogicalKey)
+	}
+	if strings.Join(logicalKeys, ",") != "manifest/final,transcript/000000000000,workspace/final" {
+		t.Fatalf("artifact logical keys = %v", logicalKeys)
+	}
+	if !strings.Contains(stdout.String(), "history: "+captures[0].ID+" state=complete") {
+		t.Fatalf("stdout missing complete history capture:\n%s", stdout.String())
+	}
+}
+
+func TestRunWorkerOneShotRejectsJobSpecificModelProxyCredentialFromHistory(t *testing.T) {
+	fixture, cfg, timings := oneShotTestSetup(t)
+	const credential = "job-specific-model-proxy-secret"
+	job, err := fixture.Queue.EnqueueJob(context.Background(), flowworker.EnqueueJobInput{
+		Role:           flowworker.RoleCI,
+		CapacityBucket: flowworker.BucketEphemeral,
+		Payload: map[string]any{
+			"base":   "main",
+			"branch": "main",
+			"entrypoint": map[string]any{
+				"argv":  []string{writeWorkerScript(t, "#!/bin/sh\nprintf '%s' \"$HARNESS_MODEL_PROXY_API_KEY\"\n")},
+				"shell": false,
+				"env": map[string]string{
+					"HARNESS_MODEL_PROXY_API_KEY": credential,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	client, err := newWorkerClient(cfg)
+	if err != nil {
+		t.Fatalf("create worker client: %v", err)
+	}
+	policy, err := cfg.History.Resolve(cfg.WorkDir)
+	if err != nil {
+		t.Fatalf("resolve history policy: %v", err)
+	}
+	manager, err := newHistoryCaptureManager(client, cfg, policy)
+	if err != nil {
+		t.Fatalf("new history capture manager: %v", err)
+	}
+	if err := manager.Replay(context.Background()); err != nil {
+		t.Fatalf("initial history replay: %v", err)
+	}
+	timings.History = manager
+
+	var stdout bytes.Buffer
+	err = runWorkerOneShot(context.Background(), client, cfg, timings, nil, &stdout)
+	if !errors.Is(err, historyarchive.ErrSensitiveContent) {
+		t.Fatalf("runWorkerOneShot() error = %v, want sensitive archive rejection; stdout:\n%s", err, stdout.String())
+	}
+	current, getErr := fixture.Queue.GetJob(context.Background(), job.ID)
+	if getErr != nil {
+		t.Fatalf("get job: %v", getErr)
+	}
+	if flowworker.IsTerminalJobState(current.State) {
+		t.Fatalf("job state = %q after mandatory capture rejection, want active for recovery", current.State)
+	}
+	entries, readErr := filepath.Glob(filepath.Join(policy.OutboxPath, "*", "state.json"))
+	if readErr != nil || len(entries) != 1 {
+		t.Fatalf("outbox state files = %v, err=%v", entries, readErr)
+	}
+	state, readErr := os.ReadFile(entries[0])
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if bytes.Contains(state, []byte(credential)) {
+		t.Fatal("job-specific model proxy credential persisted in plaintext outbox state")
 	}
 }
 

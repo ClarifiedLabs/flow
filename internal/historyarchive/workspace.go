@@ -24,9 +24,11 @@ type WorkspaceOptions struct {
 }
 
 type gitRunner struct {
-	ctx       context.Context
-	repo, git string
-	max       int64
+	ctx            context.Context
+	repo, git, dir string
+	max            int64
+	env            []string
+	global         []string
 }
 
 func (g gitRunner) run(args ...string) ([]byte, error) { return g.runInput(nil, false, args...) }
@@ -42,9 +44,15 @@ func (g gitRunner) optional(args ...string) ([]byte, bool, error) {
 	return nil, false, err
 }
 func (g gitRunner) runInput(input []byte, allowExit bool, args ...string) ([]byte, error) {
-	argv := append([]string{"-C", g.repo}, args...)
+	argv := make([]string, 0, len(g.global)+len(args)+2)
+	if g.repo != "" {
+		argv = append(argv, "-C", g.repo)
+	}
+	argv = append(argv, g.global...)
+	argv = append(argv, args...)
 	cmd := exec.CommandContext(g.ctx, g.git, argv...)
-	cmd.Env = append(os.Environ(), "LC_ALL=C", "GIT_CONFIG_NOSYSTEM=1")
+	cmd.Dir = g.dir
+	cmd.Env = append(os.Environ(), append([]string{"LC_ALL=C", "GIT_CONFIG_NOSYSTEM=1"}, g.env...)...)
 	cmd.Stdin = bytes.NewReader(input)
 	stdout := &boundedBuffer{remain: g.max}
 	stderr := &boundedBuffer{remain: 64 << 10}
@@ -54,9 +62,6 @@ func (g gitRunner) runInput(input []byte, allowExit bool, args ...string) ([]byt
 	if err != nil {
 		if errors.Is(stdout.err, ErrLimitExceeded) {
 			return nil, stdout.err
-		}
-		if allowExit {
-			return nil, err
 		}
 		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.buf.String()))
 	}
@@ -129,6 +134,10 @@ func WriteWorkspace(ctx context.Context, dst io.Writer, repo string, options Wor
 	if ok {
 		repoFormat = strings.TrimSpace(string(repoFormatBytes))
 	}
+	objectFormat := strings.TrimSpace(string(objectBytes))
+	if err := scanSensitiveStrings(options.SensitiveValues, branch, objectFormat, repoFormat); err != nil {
+		return Artifact{}, WorkspaceManifest{}, err
+	}
 	staged, err := runner.run("diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "HEAD", "--")
 	if err != nil {
 		return Artifact{}, WorkspaceManifest{}, err
@@ -159,12 +168,23 @@ func WriteWorkspace(ctx context.Context, dst io.Writer, repo string, options Wor
 	if err != nil {
 		return Artifact{}, WorkspaceManifest{}, err
 	}
+	if err := scanSensitiveStrings(options.SensitiveValues, append(append([]string{}, stagedPaths...), unstagedPaths...)...); err != nil {
+		return Artifact{}, WorkspaceManifest{}, err
+	}
 	indexRaw, err := runner.run("ls-files", "--stage", "-z")
 	if err != nil {
 		return Artifact{}, WorkspaceManifest{}, err
 	}
 	index, err := parseIndex(indexRaw, limits)
 	if err != nil {
+		return Artifact{}, WorkspaceManifest{}, err
+	}
+	for _, entry := range index {
+		if err := scanSensitiveStrings(options.SensitiveValues, entry.Path); err != nil {
+			return Artifact{}, WorkspaceManifest{}, err
+		}
+	}
+	if err := scanModifiedTrackedFiles(repo, runner, index, stagedPaths, unstagedPaths, limits, options.SensitiveValues); err != nil {
 		return Artifact{}, WorkspaceManifest{}, err
 	}
 	untrackedRaw, err := runner.run("ls-files", "--others", "--exclude-standard", "-z")
@@ -192,6 +212,9 @@ func WriteWorkspace(ctx context.Context, dst io.Writer, repo string, options Wor
 		if isGitMetadataPath(name) || deniedFlowPath(name) {
 			continue
 		}
+		if err := scanSensitiveStrings(options.SensitiveValues, name); err != nil {
+			return Artifact{}, WorkspaceManifest{}, err
+		}
 		if err := noSymlinkParents(repo, name); err != nil {
 			return Artifact{}, WorkspaceManifest{}, err
 		}
@@ -209,6 +232,9 @@ func WriteWorkspace(ctx context.Context, dst io.Writer, repo string, options Wor
 			}
 			target = filepath.ToSlash(target)
 			if err := ValidateLink(name, target, limits.MaxPathBytes); err != nil {
+				return Artifact{}, WorkspaceManifest{}, err
+			}
+			if err := scanSensitiveStrings(options.SensitiveValues, target); err != nil {
 				return Artifact{}, WorkspaceManifest{}, err
 			}
 			files = append(files, File{Path: name, Type: FileSymlink, Mode: 0600, LinkTarget: target})
@@ -245,7 +271,7 @@ func WriteWorkspace(ctx context.Context, dst io.Writer, repo string, options Wor
 	addBytesBlob(blobs, stagedPatch.Blob, staged)
 	addBytesBlob(blobs, unstagedPatch.Blob, unstaged)
 	inventory := inventoryDigest(head, indexRaw, stagedNames, unstagedNames, files)
-	manifest := WorkspaceManifest{Format: "flow-workspace-archive", FormatVersion: WorkspaceFormatVersion, SchemaVersion: WorkspaceSchemaVersion, HeadCommit: head, Branch: branch, Detached: !onBranch, BaseRef: options.BaseRef, BaseCommit: base, ObjectFormat: strings.TrimSpace(string(objectBytes)), RepositoryFormat: repoFormat, Staged: stagedPatch, Unstaged: unstagedPatch, StagedPaths: stagedPaths, UnstagedPaths: unstagedPaths, Index: index, Untracked: files, InventoryDigest: inventory}
+	manifest := WorkspaceManifest{Format: "flow-workspace-archive", FormatVersion: WorkspaceFormatVersion, SchemaVersion: WorkspaceSchemaVersion, HeadCommit: head, Branch: branch, Detached: !onBranch, BaseRef: options.BaseRef, BaseCommit: base, ObjectFormat: objectFormat, RepositoryFormat: repoFormat, Staged: stagedPatch, Unstaged: unstagedPatch, StagedPaths: stagedPaths, UnstagedPaths: unstagedPaths, Index: index, Untracked: files, InventoryDigest: inventory}
 	if err := validateWorkspaceManifest(&manifest, limits); err != nil {
 		return Artifact{}, WorkspaceManifest{}, err
 	}
@@ -279,6 +305,89 @@ func scanSensitive(data []byte, values [][]byte) error {
 	}
 	return nil
 }
+
+func scanSensitiveStrings(values [][]byte, metadata ...string) error {
+	for _, value := range metadata {
+		if err := scanSensitive([]byte(value), values); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func scanModifiedTrackedFiles(repo string, runner gitRunner, index []IndexEntry, stagedPaths, unstagedPaths []string, limits Limits, sensitiveValues [][]byte) error {
+	modified := make(map[string]struct{}, len(stagedPaths)+len(unstagedPaths))
+	for _, name := range stagedPaths {
+		modified[name] = struct{}{}
+	}
+	for _, name := range unstagedPaths {
+		modified[name] = struct{}{}
+	}
+	if len(modified) == 0 || len(sensitiveValues) == 0 {
+		return nil
+	}
+
+	objectRunner := runner
+	objectRunner.max = limits.MaxFileBytes
+	for _, entry := range index {
+		if entry.Stage != 0 {
+			continue
+		}
+		if _, ok := modified[entry.Path]; !ok {
+			continue
+		}
+		switch entry.Mode {
+		case "100644", "100755", "120000":
+			data, err := objectRunner.run("cat-file", "blob", entry.Object)
+			if err != nil {
+				return err
+			}
+			if err := scanSensitive(data, sensitiveValues); err != nil {
+				return err
+			}
+		}
+	}
+
+	root, err := os.OpenRoot(repo)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	for name := range modified {
+		info, err := root.Lstat(filepath.FromSlash(name))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := root.Readlink(filepath.FromSlash(name))
+			if err != nil {
+				return err
+			}
+			if err := scanSensitiveStrings(sensitiveValues, filepath.ToSlash(target)); err != nil {
+				return err
+			}
+			continue
+		}
+		if info.IsDir() {
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%w: special modified file %q", ErrUnsafePath, name)
+		}
+		tempPath, _, err := spoolRegular(root, name, info, limits.MaxFileBytes, sensitiveValues)
+		if err != nil {
+			return err
+		}
+		if err := os.Remove(tempPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func parseNULPaths(data []byte, l Limits) ([]string, error) {
 	if len(data) == 0 {
 		return nil, nil

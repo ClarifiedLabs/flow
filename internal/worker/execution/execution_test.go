@@ -127,8 +127,8 @@ func TestRunJobCapturesTmuxTranscript(t *testing.T) {
 	if result.TranscriptPath == "" {
 		t.Fatalf("result did not report a transcript path")
 	}
-	if result.TranscriptPath != filepath.Join(jobDir(workDir, job.ID), "transcript.log") {
-		t.Fatalf("transcript path = %q, want job-dir transcript.log", result.TranscriptPath)
+	if result.TranscriptPath != filepath.Join(historyAttemptDir(workDir, job.ID, "l-transcript"), "transcript.log") {
+		t.Fatalf("transcript path = %q, want attempt-scoped transcript.log", result.TranscriptPath)
 	}
 
 	contents, err := os.ReadFile(result.TranscriptPath)
@@ -1148,6 +1148,44 @@ func TestPrepareHookConfigSkipsHarnessesAndJobsWithoutManagedHooks(t *testing.T)
 			}
 			if path != "" || envVar != "" {
 				t.Fatalf("path/envVar = %q/%q, want empty", path, envVar)
+			}
+		})
+	}
+}
+
+func TestManagedNativeHarnessSessionRequiresFlowEntrypoint(t *testing.T) {
+	tests := []struct {
+		name       string
+		entrypoint Entrypoint
+		want       bool
+	}{
+		{
+			name: "flow managed default",
+			entrypoint: Entrypoint{
+				Argv:    []string{`prompt=$(cat); harness --session "$FLOW_HARNESS_SESSION" "$prompt"`},
+				Shell:   true,
+				Harness: flowharness.Harness,
+			},
+			want: true,
+		},
+		{
+			name:       "custom direct invocation",
+			entrypoint: Entrypoint{Argv: []string{"harness", "--custom"}, Harness: flowharness.Harness},
+		},
+		{
+			name:       "custom shell",
+			entrypoint: Entrypoint{Argv: []string{"harness --custom"}, Shell: true, Harness: flowharness.Harness},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := tmuxInput{Payload: JobPayload{AgentHarness: flowharness.Harness}, Entrypoint: tt.entrypoint}
+			if got := usesManagedNativeHarnessSession(input); got != tt.want {
+				t.Fatalf("usesManagedNativeHarnessSession() = %t, want %t", got, tt.want)
+			}
+			env := workerEnv(input)
+			if _, ok := env["FLOW_HARNESS_SESSION"]; ok != tt.want {
+				t.Fatalf("FLOW_HARNESS_SESSION present = %t, want %t", ok, tt.want)
 			}
 		})
 	}

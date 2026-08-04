@@ -178,6 +178,65 @@ func transitionHistory(t *testing.T, service *HistoryCaptureService, capture His
 	return updated
 }
 
+func TestHistoryStorageCapacityCeilingsPreserveIdempotentRetries(t *testing.T) {
+	env := newHistoryCaptureTestEnv(t)
+	env.service = NewHistoryCaptureServiceWithOptions(env.store.DB(), env.blobs, HistoryCaptureServiceOptions{
+		MaxRetainedCaptures:      1,
+		MaxRetainedArtifactBytes: 3,
+	})
+	ctx := context.Background()
+
+	reservation := baseHistoryReservation()
+	reserved := reserveHistoryCapture(t, env.service, reservation)
+	retried, err := env.service.Reserve(ctx, reservation)
+	if err != nil || retried.Capture.ID != reserved.Capture.ID || !retried.GrantRotated {
+		t.Fatalf("idempotent reservation retry = %+v, %v", retried, err)
+	}
+	reserved.UploadGrant = retried.UploadGrant
+	second := reservation
+	second.JobID, second.LeaseID, second.SessionID = "job-2", "lease-2", "session-2"
+	if _, err := env.service.Reserve(ctx, second); !errors.Is(err, ErrHistoryStorageCapacity) {
+		t.Fatalf("second reservation error = %v, want storage capacity", err)
+	}
+
+	content := []byte("abc")
+	input := PublishHistoryArtifactInput{
+		LogicalKey: "workspace/checkpoint/1", Kind: HistoryArtifactWorkspaceSnapshot, Phase: HistoryArtifactCheckpoint,
+		CheckpointGeneration: 1, CheckpointStream: "workspace", ArchiveID: "workspace-1",
+		MediaType: "application/x-tar", FormatVersion: 1, SchemaVersion: 1, LogicalSize: int64(len(content)), EntryCount: 1,
+	}
+	firstTemporary := uploadHistoryBytes(t, env.service, reserved.Capture.ID, reserved.UploadGrant, content)
+	first, err := env.service.PublishArtifact(ctx, reserved.Capture.ID, reserved.UploadGrant, input, firstTemporary)
+	if err != nil {
+		t.Fatalf("publish first artifact: %v", err)
+	}
+	if retry, err := env.service.PublishArtifact(ctx, reserved.Capture.ID, reserved.UploadGrant, input, firstTemporary); err != nil || retry.ID != first.ID {
+		t.Fatalf("idempotent publication retry = %+v, %v", retry, err)
+	}
+	overCapacityUpload, err := env.service.BeginUpload(ctx, reserved.Capture.ID, reserved.UploadGrant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := overCapacityUpload.Write([]byte("d")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := overCapacityUpload.Complete(ctx); !errors.Is(err, ErrHistoryStorageCapacity) {
+		t.Fatalf("completed upload over retained byte ceiling error = %v, want storage capacity", err)
+	}
+
+	// A configuration reduction can leave a formerly valid active intent over the
+	// new ceiling. Publication still fails closed without consuming that intent.
+	permissive := NewHistoryCaptureServiceWithOptions(env.store.DB(), env.blobs, HistoryCaptureServiceOptions{
+		MaxRetainedCaptures: 1, MaxRetainedArtifactBytes: 4,
+	})
+	secondInput := input
+	secondInput.LogicalKey, secondInput.ArchiveID, secondInput.CheckpointGeneration = "workspace/checkpoint/2", "workspace-2", 2
+	secondTemporary := uploadHistoryBytes(t, permissive, reserved.Capture.ID, reserved.UploadGrant, []byte("d"))
+	if _, err := env.service.PublishArtifact(ctx, reserved.Capture.ID, reserved.UploadGrant, secondInput, secondTemporary); !errors.Is(err, ErrHistoryStorageCapacity) {
+		t.Fatalf("publication over reduced retained byte ceiling error = %v, want storage capacity", err)
+	}
+}
+
 func TestHistoryCaptureMigrationSchemaAndImmutableAttribution(t *testing.T) {
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
@@ -480,16 +539,9 @@ func TestHistoryArtifactImmutableIdempotencyAndPublicationRecovery(t *testing.T)
 	if err != nil || pending.PublicationState != HistoryPublicationPending {
 		t.Fatalf("artifact after response loss = %+v err=%v, want relational pending", pending, err)
 	}
-	if _, err := lossyService.MarkLost(ctx, reserved.Capture.ID, reserved.Capture.Version, "watchdog", "worker_lost", "worker disappeared"); err != nil {
-		t.Fatalf("mark worker lost: %v", err)
-	}
-	summary, err := lossyService.ReconcilePendingArtifacts(ctx, reserved.Capture.ID, 10)
-	if err != nil || summary.Examined != 1 || summary.Committed != 1 {
-		t.Fatalf("grantless reconciliation summary=%+v err=%v", summary, err)
-	}
-	recovered, err := lossyService.GetArtifact(ctx, reserved.Capture.ID, lossInput.LogicalKey)
+	recovered, err := lossyService.PublishTemporaryArtifact(ctx, reserved.Capture.ID, reserved.UploadGrant, lossTemporary.ID, lossInput)
 	if err != nil || recovered.PublicationState != HistoryPublicationCommitted || recovered.SHA256 != historyDigest(lossContent) {
-		t.Fatalf("reconciled artifact = %+v err=%v", recovered, err)
+		t.Fatalf("ID-only response-loss retry artifact = %+v err=%v", recovered, err)
 	}
 }
 
@@ -967,6 +1019,55 @@ func TestHistoryCheckpointHintsCoalesceAndCheckpointArtifactsNeverCompleteFinalS
 	}
 }
 
+func TestHistoryUploadGrantRevocationIsDurableAuditedAndIdempotent(t *testing.T) {
+	env := newHistoryCaptureTestEnv(t)
+	ctx := context.Background()
+	input := baseHistoryReservation()
+	input.ExpectedTranscript = false
+	input.ExpectedHarness = false
+	input.HarnessName, input.HarnessVersion, input.HarnessSchemaVersion = "", "", 0
+	reserved := reserveHistoryCapture(t, env.service, input)
+	upload, err := env.service.BeginUpload(ctx, reserved.Capture.ID, reserved.UploadGrant)
+	if err != nil {
+		t.Fatalf("begin upload: %v", err)
+	}
+	temporary, err := upload.Complete(ctx)
+	if err != nil {
+		t.Fatalf("complete upload: %v", err)
+	}
+	temporaryID := temporary.ID
+
+	revoked, err := env.service.RevokeUploadGrant(ctx, reserved.Capture.ID, reserved.Capture.Version, "owner:test", "operator stopped publication")
+	if err != nil {
+		t.Fatalf("revoke upload grant: %v", err)
+	}
+	if revoked.State != reserved.Capture.State || revoked.Version != reserved.Capture.Version+1 {
+		t.Fatalf("revoked capture = %+v", revoked)
+	}
+	if err := env.service.AuthenticateUploadGrant(ctx, revoked.ID, reserved.UploadGrant); !errors.Is(err, ErrHistoryGrantNoLongerUsable) {
+		t.Fatalf("revoked grant err = %v, want unusable", err)
+	}
+	var intentState string
+	if err := env.store.DB().QueryRowContext(ctx, `SELECT state FROM history_upload_intents WHERE temporary_upload_id = ?`, temporaryID).Scan(&intentState); err != nil || intentState != "abandoned" {
+		t.Fatalf("upload intent state = %q err=%v, want abandoned", intentState, err)
+	}
+	events, err := env.service.ListEvents(ctx, revoked.ID)
+	if err != nil || len(events) != 2 || events[1].EventKind != "upload_grant_revoked" || !strings.Contains(events[1].DetailsJSON, "operator stopped publication") {
+		t.Fatalf("revocation events = %+v err=%v", events, err)
+	}
+
+	retry, err := env.service.RevokeUploadGrant(ctx, revoked.ID, reserved.Capture.Version, "owner:test", "operator stopped publication")
+	if err != nil || retry.Version != revoked.Version {
+		t.Fatalf("exact revoke retry = %+v err=%v", retry, err)
+	}
+	if _, err := env.service.RevokeUploadGrant(ctx, revoked.ID, revoked.Version, "owner:test", "different reason"); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatalf("changed revoke retry err = %v, want conflict", err)
+	}
+	if _, err := env.store.DB().ExecContext(ctx, `UPDATE history_captures SET upload_grant_revoke_reason = 'tampered' WHERE id = ?`, revoked.ID); err == nil || !strings.Contains(err.Error(), "lifecycle") {
+		t.Fatalf("revoke reason update err=%v, want lifecycle rejection", err)
+	}
+}
+
 func TestHistoryCaptureEventsAreAppendOnlyAndLossWaiverAreAudited(t *testing.T) {
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
@@ -1084,6 +1185,41 @@ UPDATE history_artifacts
 SET publication_state = 'pending', committed_at = NULL
 WHERE id = ?`, artifact.ID); err == nil {
 		t.Fatal("SQLite guard accepted committed-to-pending artifact transition")
+	}
+}
+
+func TestHistoryPublicationAbandonsOlderDuplicateResponseLossUpload(t *testing.T) {
+	env := newHistoryCaptureTestEnv(t)
+	ctx := context.Background()
+	input := baseHistoryReservation()
+	input.JobID, input.LeaseID = "job-upload-response-loss", "lease-upload-response-loss"
+	input.ExpectedHarness = false
+	input.HarnessName, input.HarnessVersion, input.HarnessSchemaVersion = "", "", 0
+	reserved := reserveHistoryCapture(t, env.service, input)
+	content := []byte("same durable bytes")
+	orphan := uploadHistoryBytes(t, env.service, reserved.Capture.ID, reserved.UploadGrant, content)
+	retry := uploadHistoryBytes(t, env.service, reserved.Capture.ID, reserved.UploadGrant, content)
+
+	artifact, err := env.service.PublishArtifact(ctx, reserved.Capture.ID, reserved.UploadGrant, PublishHistoryArtifactInput{
+		LogicalKey: "workspace/final", Kind: HistoryArtifactWorkspaceSnapshot, Phase: HistoryArtifactFinal,
+		MediaType: "application/x-tar", FormatVersion: 1, SchemaVersion: 1,
+		LogicalSize: int64(len(content)), EntryCount: 1,
+	}, retry)
+	if err != nil || artifact.PublicationState != HistoryPublicationCommitted {
+		t.Fatalf("publish response-loss retry artifact = %+v err=%v", artifact, err)
+	}
+	var orphanState, retryState string
+	if err := env.store.DB().QueryRowContext(ctx, `SELECT state FROM history_upload_intents WHERE temporary_upload_id = ?`, orphan.ID).Scan(&orphanState); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.store.DB().QueryRowContext(ctx, `SELECT state FROM history_upload_intents WHERE temporary_upload_id = ?`, retry.ID).Scan(&retryState); err != nil {
+		t.Fatal(err)
+	}
+	if orphanState != "abandoned" || retryState != "consumed" {
+		t.Fatalf("upload states orphan=%q retry=%q, want abandoned/consumed", orphanState, retryState)
+	}
+	if _, err := env.blobs.Resume(ctx, orphan.ID); !errors.Is(err, blob.ErrNotFound) && !errors.Is(err, blob.ErrUploadAborted) {
+		t.Fatalf("redundant response-loss upload remains resumable: %v", err)
 	}
 }
 

@@ -138,7 +138,7 @@ func TestConsoleSessionLifecycle(t *testing.T) {
 		t.Fatalf("console entrypoint argv = %#v", entrypoint["argv"])
 	}
 	command, ok := argv[0].(string)
-	if !ok || !strings.Contains(command, `harness --hooks "$FLOW_HARNESS_HOOKS"`) {
+	if !ok || !strings.Contains(command, `harness --session "$FLOW_HARNESS_SESSION" --hooks "$FLOW_HARNESS_HOOKS"`) {
 		t.Fatalf("console command = %#v", entrypoint["argv"])
 	}
 	for _, unexpected := range []string{"flow fetch-prompt", `"$prompt"`, "flow-console"} {
@@ -547,7 +547,7 @@ func TestEnsureAuthorJobUsesConfiguredDefaultAgent(t *testing.T) {
 		t.Fatalf("entrypoint argv = %#v", entrypoint["argv"])
 	}
 	command, _ := argv[0].(string)
-	if !strings.Contains(command, `harness --hooks "$FLOW_HARNESS_HOOKS"`) {
+	if !strings.Contains(command, `harness --session "$FLOW_HARNESS_SESSION" --hooks "$FLOW_HARNESS_HOOKS"`) {
 		t.Fatalf("entrypoint command does not launch harness:\n%s", command)
 	}
 	// The configured default model/effort tokens precede the manual

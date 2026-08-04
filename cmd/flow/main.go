@@ -83,6 +83,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runWorkers(args[1:], stdout, stderr)
 	case "jobs":
 		return runJobs(args[1:], stdout, stderr)
+	case "history":
+		return runHistory(args[1:], stdout, stderr)
 	case "attach":
 		return runAttach(args[1:], stdout, stderr)
 	case "session":
@@ -3504,6 +3506,9 @@ func printUsage(out io.Writer) {
   flow transitions TASK_ID
   flow workers
   flow jobs
+  flow history list [--since RFC3339] [--until RFC3339] [--format table|json]
+  flow history export --output DIR (--all | SELECTORS) [--allow-incomplete]
+  flow history resume CAPTURE_ID [--native-session ID] [--idempotency-key KEY]
   flow ui
   flow attach [--job] SESSION_ID|JOB_ID
   flow session event working|waiting

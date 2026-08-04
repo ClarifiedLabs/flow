@@ -66,6 +66,26 @@ func (s *projectServer) handleHistoryPath(w http.ResponseWriter, r *http.Request
 			return
 		}
 		s.handleGetHistoryManifest(w, r, captureID)
+	case len(parts) == 2 && parts[1] == "events":
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		s.handleListHistoryEvents(w, r, captureID)
+	case len(parts) == 2 && parts[1] == "waive":
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		s.handleWaiveHistoryCapture(w, r, captureID, principal)
+	case len(parts) == 3 && parts[1] == "upload-grant" && parts[2] == "revoke":
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		s.handleRevokeHistoryUploadGrant(w, r, captureID, principal)
+	case len(parts) == 2 && parts[1] == "resume":
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		s.handleResumeHistoryCapture(w, r, captureID, principal)
 	case len(parts) == 4 && parts[1] == "artifacts" && parts[3] == "content":
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method is not allowed")
@@ -96,9 +116,11 @@ func (s *projectServer) handleListHistoryCaptures(w http.ResponseWriter, r *http
 			return
 		}
 	}
-	if len(query["task_id"])+len(query["job_id"])+len(query["session_id"])+len(query["capture_id"])+len(query["state"]) > 100 {
-		writeError(w, http.StatusBadRequest, "invalid_history_filter", "too many repeated history filters")
-		return
+	for _, key := range []string{"task_id", "job_id", "session_id", "capture_id", "state"} {
+		if len(query[key]) > 50 {
+			writeError(w, http.StatusBadRequest, "invalid_history_filter", key+" may be specified at most 50 times")
+			return
+		}
 	}
 
 	limit := historyListDefaultLimit
@@ -310,6 +332,105 @@ func (s *projectServer) handleGetHistoryCapture(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, response)
 }
 
+func (s *projectServer) handleListHistoryEvents(w http.ResponseWriter, r *http.Request, captureID string) {
+	if _, err := s.history.Get(r.Context(), captureID); err != nil {
+		writeHistoryError(w, err)
+		return
+	}
+	events, err := s.history.ListEvents(r.Context(), captureID)
+	if err != nil {
+		writeHistoryError(w, err)
+		return
+	}
+	response := contract.HistoryCaptureEventsResponse{Events: make([]contract.HistoryCaptureEvent, 0, len(events))}
+	for _, event := range events {
+		details := json.RawMessage(event.DetailsJSON)
+		if !json.Valid(details) {
+			writeError(w, http.StatusInternalServerError, "history_event_invalid", "history event details are invalid")
+			return
+		}
+		response.Events = append(response.Events, contract.HistoryCaptureEvent{
+			ID: event.ID, CaptureID: event.CaptureID, EventKind: event.EventKind,
+			FromState: event.FromState, ToState: event.ToState, CaptureVersion: event.CaptureVersion,
+			Actor: event.Actor, Code: event.Code, Details: details,
+			OccurredAt: event.OccurredAt.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *projectServer) handleWaiveHistoryCapture(w http.ResponseWriter, r *http.Request, captureID string, principal coordinator.Principal) {
+	var input contract.WaiveHistoryCaptureRequest
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_history_waiver", err.Error())
+		return
+	}
+	capture, err := s.history.Waive(r.Context(), captureID, input.ExpectedVersion, historyOwnerActor(principal), input.Reason)
+	if err != nil {
+		writeHistoryError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, projectHistoryCapture(capture))
+}
+
+func (s *projectServer) handleRevokeHistoryUploadGrant(w http.ResponseWriter, r *http.Request, captureID string, principal coordinator.Principal) {
+	var input contract.RevokeHistoryUploadGrantRequest
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_history_revoke", err.Error())
+		return
+	}
+	capture, err := s.history.RevokeUploadGrant(r.Context(), captureID, input.ExpectedVersion, historyOwnerActor(principal), input.Reason)
+	if err != nil {
+		writeHistoryError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, projectHistoryCapture(capture))
+}
+
+func historyOwnerActor(principal coordinator.Principal) string {
+	subject := strings.TrimSpace(principal.Subject)
+	if subject == "" {
+		return "owner"
+	}
+	return "owner:" + subject
+}
+
+func (s *projectServer) handleResumeHistoryCapture(w http.ResponseWriter, r *http.Request, captureID string, principal coordinator.Principal) {
+	capture, err := s.history.Get(r.Context(), captureID)
+	if err != nil {
+		writeHistoryError(w, err)
+		return
+	}
+	var input contract.ResumeHistoryCaptureRequest
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_history_resume", err.Error())
+		return
+	}
+	resume, created, err := s.history.CreateResume(r.Context(), s.workers, s.project, coordinator.CreateHistoryResumeInput{
+		SourceCaptureID: capture.ID,
+		NativeSessionID: input.NativeSessionID,
+		IdempotencyKey:  input.IdempotencyKey,
+		RequestedBy:     principal.Subject,
+	})
+	if err != nil {
+		writeHistoryError(w, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, contract.ResumeHistoryCaptureResponse{
+		ID: resume.ID, SourceCaptureID: resume.SourceCaptureID,
+		SourceNativeSessionID: resume.SourceNativeSessionID,
+		JobID:                 resume.JobID, State: resume.State,
+		RequiredHeadCommit:    resume.RequiredHeadCommit,
+		RequiredHarnessBuild:  resume.RequiredHarnessBuild,
+		RequiredHarnessSchema: resume.RequiredHarnessSchema,
+		Created:               created,
+	})
+}
+
 func (s *projectServer) handleGetHistoryManifest(w http.ResponseWriter, r *http.Request, captureID string) {
 	if _, err := s.history.Get(r.Context(), captureID); err != nil {
 		writeHistoryError(w, err)
@@ -350,7 +471,7 @@ func (s *projectServer) serveHistoryArtifactContent(w http.ResponseWriter, r *ht
 	w.Header().Set("Content-Type", artifact.MediaType)
 	w.Header().Set("ETag", `"`+artifact.SHA256+`"`)
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, artifact.ID))
 
 	byteRange, partial, err := parseHistoryRange(r.Header.Get("Range"), artifact.StoredSize)
@@ -448,7 +569,7 @@ func projectHistoryCapture(c coordinator.HistoryCapture) contract.HistoryCapture
 		State: string(c.State), ExecutionVerdict: string(c.ExecutionVerdict),
 		ExecutionExitCode: c.ExecutionExitCode, ExecutionErrorCode: c.ExecutionErrorCode,
 		ErrorCode: c.ErrorCode, ErrorMessage: c.ErrorMessage, WaiverReason: c.WaiverReason,
-		Version: c.Version, Resumable: c.State == coordinator.HistoryCaptureComplete && c.ExpectedHarness,
+		Version: c.Version, Resumable: c.Resumable,
 		ReservedAt: c.ReservedAt.UTC().Format(time.RFC3339Nano), UpdatedAt: c.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
 	if c.CompletedAt != nil {
@@ -505,6 +626,8 @@ func writeHistoryError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "invalid_history_transition", err.Error())
 	case errors.Is(err, coordinator.ErrHistoryUploadTooLarge):
 		writeError(w, http.StatusRequestEntityTooLarge, "history_upload_too_large", err.Error())
+	case errors.Is(err, coordinator.ErrHistoryStorageCapacity):
+		writeError(w, http.StatusInsufficientStorage, "history_storage_capacity", err.Error())
 	case errors.Is(err, blob.ErrNotFound), errors.Is(err, blob.ErrInvalidUpload):
 		writeError(w, http.StatusConflict, "history_upload_not_found", "history temporary upload is unavailable")
 	default:

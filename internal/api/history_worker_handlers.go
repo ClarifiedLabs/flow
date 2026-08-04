@@ -13,7 +13,11 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 )
 
-const historyUploadGrantHeader = "Flow-History-Upload-Grant"
+const (
+	historyUploadGrantHeader = "Flow-History-Upload-Grant"
+	historyResumeJobHeader   = "Flow-History-Resume-Job"
+	historyResumeLeaseHeader = "Flow-History-Resume-Lease"
+)
 
 func (s *Server) handleWorkerHistoryPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
 	if !requireScope(w, principal, "worker token is required", coordinator.TokenScopeWorker) {
@@ -28,7 +32,11 @@ func (s *Server) handleWorkerHistoryPath(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	parts := strings.Split(rest, "/")
-	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+	if len(parts) == 4 && parts[1] == "artifacts" && parts[3] == "resume-content" {
+		s.handleWorkerHistoryResumeArtifact(w, r, principal, strings.TrimSpace(parts[0]), strings.TrimSpace(parts[2]))
+		return
+	}
+	if (len(parts) != 2 && len(parts) != 3) || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 		return
 	}
@@ -43,6 +51,14 @@ func (s *Server) handleWorkerHistoryPath(w http.ResponseWriter, r *http.Request,
 	grant := strings.TrimSpace(r.Header.Get(historyUploadGrantHeader))
 	if grant == "" {
 		writeError(w, http.StatusUnauthorized, "history_grant_required", "history upload grant is required")
+		return
+	}
+	if len(parts) == 3 {
+		if parts[1] == "uploads" && strings.TrimSpace(parts[2]) != "" {
+			project.handleWorkerHistoryUploadAbandon(w, r, capture.ID, grant, strings.TrimSpace(parts[2]))
+			return
+		}
+		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 		return
 	}
 	switch parts[1] {
@@ -71,6 +87,45 @@ func (s *Server) handleWorkerHistoryPath(w http.ResponseWriter, r *http.Request,
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 	}
+}
+
+func (s *Server) handleWorkerHistoryResumeArtifact(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, captureID, artifactID string) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method is not allowed")
+		return
+	}
+	if captureID == "" || artifactID == "" {
+		writeError(w, http.StatusNotFound, "history_artifact_not_found", "history artifact not found")
+		return
+	}
+	project, capture, ok := s.bundleForHistoryCapture(w, r, principal, captureID)
+	if !ok {
+		return
+	}
+	jobID := strings.TrimSpace(r.Header.Get(historyResumeJobHeader))
+	leaseID := strings.TrimSpace(r.Header.Get(historyResumeLeaseHeader))
+	if jobID == "" || leaseID == "" {
+		writeError(w, http.StatusUnauthorized, "history_resume_lease_required", "resume job and lease are required")
+		return
+	}
+	lease, err := project.workers.GetLease(r.Context(), leaseID)
+	if err != nil || lease.JobID != jobID || lease.WorkerID != strings.TrimSpace(principal.Subject) ||
+		lease.ReleasedAt != nil || !lease.ExpiresAt.After(time.Now().UTC()) {
+		writeError(w, http.StatusForbidden, "history_resume_lease_forbidden", "an active matching resume lease is required")
+		return
+	}
+	resume, err := project.history.ResumeLineageForJob(r.Context(), jobID)
+	if err != nil || resume.SourceCaptureID != capture.ID ||
+		(artifactID != resume.HarnessArtifactID && artifactID != resume.WorkspaceArtifactID) {
+		writeError(w, http.StatusForbidden, "history_resume_artifact_forbidden", "artifact is not part of the claimed resume")
+		return
+	}
+	artifact, err := project.history.GetArtifactByID(r.Context(), capture.ID, artifactID)
+	if err != nil {
+		writeHistoryError(w, err)
+		return
+	}
+	project.serveHistoryArtifactContent(w, r, capture.ID, artifact)
 }
 
 func (s *Server) bundleForHistoryCapture(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, captureID string) (*projectServer, coordinator.HistoryCapture, bool) {
@@ -118,6 +173,27 @@ func (s *Server) handleWorkerReserveHistoryCapture(w http.ResponseWriter, r *htt
 		writeHistoryError(w, err)
 		return
 	}
+	var resumedFromCaptureID, resumedFromNativeSessionID string
+	resume, err := project.history.ResumeLineageForJob(r.Context(), job.ID)
+	if err == nil {
+		resumedFromCaptureID = resume.SourceCaptureID
+		resumedFromNativeSessionID = resume.SourceNativeSessionID
+		sourceCapture, sourceErr := project.history.Get(r.Context(), resume.SourceCaptureID)
+		if sourceErr != nil {
+			writeHistoryError(w, sourceErr)
+			return
+		}
+		if !input.ExpectedTranscript || !input.ExpectedHarness ||
+			strings.TrimSpace(input.HarnessName) != sourceCapture.HarnessName ||
+			strings.TrimSpace(input.HarnessVersion) != resume.RequiredHarnessBuild ||
+			input.HarnessSchemaVersion != resume.RequiredHarnessSchema {
+			writeError(w, http.StatusConflict, "history_resume_mismatch", "resume history requirements do not match coordinator metadata")
+			return
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		writeHistoryError(w, err)
+		return
+	}
 	reserve := coordinator.ReserveHistoryCaptureInput{
 		ProjectID: project.project.ID, JobID: job.ID, LeaseID: lease.ID, LeaseAttempt: leaseAttempt,
 		WorkerID: lease.WorkerID, TaskID: historyStringPointer(job.TaskID), ChangeID: historyStringPointer(job.ChangeID),
@@ -125,7 +201,7 @@ func (s *Server) handleWorkerReserveHistoryCapture(w http.ResponseWriter, r *htt
 		SessionID: historyPayloadString(job.Payload, "session_id"), Stage: historyPayloadString(job.Payload, "stage"),
 		Role: string(job.Role), NodeVisit: input.NodeVisit, HarnessName: input.HarnessName,
 		HarnessVersion: input.HarnessVersion, HarnessSchemaVersion: input.HarnessSchemaVersion,
-		ResumedFromCaptureID: input.ResumedFromCaptureID, ResumedFromHarnessSessionID: input.ResumedFromHarnessSessionID,
+		ResumedFromCaptureID: resumedFromCaptureID, ResumedFromHarnessSessionID: resumedFromNativeSessionID,
 		ExpectedTranscript: input.ExpectedTranscript, ExpectedHarness: input.ExpectedHarness,
 	}
 	result, err := project.history.Reserve(r.Context(), reserve)
@@ -181,6 +257,17 @@ func (s *projectServer) handleWorkerHistoryUpload(w http.ResponseWriter, r *http
 	writeJSON(w, http.StatusCreated, contract.HistoryUploadResponse{
 		TemporaryUploadID: temporary.ID, SHA256: temporary.Digest.String(), StoredSize: temporary.Size,
 	})
+}
+
+func (s *projectServer) handleWorkerHistoryUploadAbandon(w http.ResponseWriter, r *http.Request, captureID, grant, temporaryUploadID string) {
+	if !requireMethod(w, r, http.MethodDelete) {
+		return
+	}
+	if err := s.history.AbandonUpload(r.Context(), captureID, grant, temporaryUploadID); err != nil {
+		writeHistoryError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *projectServer) handleWorkerHistoryArtifact(w http.ResponseWriter, r *http.Request, capture coordinator.HistoryCapture, grant string) {

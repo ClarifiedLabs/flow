@@ -36,14 +36,14 @@ func TestOpenInitializesSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_init", "0002_full_fidelity_history")
+	assertAppliedMigrations(t, migrations, "0001_init", "0002_full_fidelity_history", "0003_history_resume_durability")
 
 	var schemaVersion string
 	if err := store.DB().QueryRowContext(ctx, "SELECT value FROM app_metadata WHERE key = 'schema_version'").Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version metadata: %v", err)
 	}
-	if schemaVersion != "0002_full_fidelity_history" {
-		t.Fatalf("schema version = %q, want 0002_full_fidelity_history", schemaVersion)
+	if schemaVersion != "0003_history_resume_durability" {
+		t.Fatalf("schema version = %q, want 0003_history_resume_durability", schemaVersion)
 	}
 	assertStorageFormat(t, store, "6")
 
@@ -436,6 +436,129 @@ WHERE type = 'table' AND name = 'history_artifacts'`).Scan(&workspaceAllowed); e
 	}
 }
 
+func TestHistoryResumeDurabilityMigrationUpgradesPublishedHistorySchema(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "flow.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"0001_init.sql", "0002_full_fidelity_history.sql"} {
+		content, readErr := migrationFS.ReadFile("migrations/" + name)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if _, execErr := raw.ExecContext(ctx, string(content)); execErr != nil {
+			t.Fatalf("apply %s: %v", name, execErr)
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `
+INSERT INTO history_captures (
+    id, project_id, job_id, lease_id, lease_attempt, worker_id, role,
+    expected_transcript, expected_harness, upload_grant_hash, reserved_at, updated_at
+) VALUES (
+    'hc-00000000000000000000000000000003', 'project-3', 'job-3', 'lease-3', 1, 'worker-3', 'author',
+    0, 0, ?, '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z'
+);
+INSERT INTO history_artifacts (
+    id, capture_id, logical_key, kind, phase, media_type, format_version, schema_version,
+    sha256, stored_size, logical_size, entry_count, publication_state, blob_key,
+    pending_at, committed_at, created_at
+) VALUES (
+    'ha-00000000000000000000000000000003', 'hc-00000000000000000000000000000003',
+    'manifest/final', 'manifest', 'final', 'application/json', 1, 1,
+    ?, 1, 1, 1, 'committed', ?,
+    '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z'
+);`, strings.Repeat("0", 64), strings.Repeat("1", 64), strings.Repeat("c", 65)); err != nil {
+		t.Fatalf("seed published manifest: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `
+CREATE TABLE schema_migrations (
+    version TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+INSERT INTO schema_migrations (version) VALUES ('0001_init'), ('0002_full_fidelity_history');`); err != nil {
+		t.Fatalf("record published migrations: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("upgrade published history schema: %v", err)
+	}
+	defer store.Close()
+	for _, check := range []struct {
+		kind string
+		name string
+	}{
+		{kind: "table", name: "history_manifest_locks"},
+		{kind: "index", name: "idx_history_resumes_idempotency"},
+		{kind: "trigger", name: "trg_history_resumes_job_state"},
+		{kind: "trigger", name: "trg_history_resumes_immutable_lineage"},
+	} {
+		var count int
+		if err := store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM sqlite_master WHERE type = ? AND name = ?`, check.kind, check.name).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("%s %s count = %d, want 1", check.kind, check.name, count)
+		}
+	}
+	columns, err := store.DB().QueryContext(ctx, "PRAGMA table_info(history_resumes)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer columns.Close()
+	seen := map[string]bool{}
+	for columns.Next() {
+		var cid, notNull, primaryKey int
+		var name, dataType string
+		var defaultValue any
+		if err := columns.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		seen[name] = true
+	}
+	if err := columns.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !seen["source_native_session_id"] || !seen["requested_native_session_id"] || seen["source_root_session_id"] {
+		t.Fatalf("history resume columns = %v", seen)
+	}
+	var revokeColumn int
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM pragma_table_info('history_captures') WHERE name = 'upload_grant_revoke_reason'`).Scan(&revokeColumn); err != nil {
+		t.Fatal(err)
+	}
+	if revokeColumn != 1 {
+		t.Fatalf("upload grant revoke column count = %d, want 1", revokeColumn)
+	}
+	var manifestLock int
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM history_manifest_locks WHERE capture_id = 'hc-00000000000000000000000000000003'`).Scan(&manifestLock); err != nil {
+		t.Fatal(err)
+	}
+	if manifestLock != 1 {
+		t.Fatalf("backfilled manifest lock count = %d, want 1", manifestLock)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO history_artifacts (
+    id, capture_id, logical_key, kind, phase, media_type, format_version, schema_version,
+    sha256, stored_size, logical_size, entry_count, publication_state, blob_key,
+    pending_at, committed_at, created_at
+) VALUES (
+    'ha-00000000000000000000000000000004', 'hc-00000000000000000000000000000003',
+    'workspace/final', 'workspace_snapshot', 'final', 'application/x-tar', 1, 1,
+    ?, 1, 1, 1, 'committed', ?,
+    '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z'
+)`, strings.Repeat("2", 64), strings.Repeat("d", 65)); err == nil || !strings.Contains(err.Error(), "inventory is frozen") {
+		t.Fatalf("post-upgrade inventory mutation error = %v", err)
+	}
+}
+
 func TestOpenMigrationIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "flow.db")
@@ -458,7 +581,7 @@ func TestOpenMigrationIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_init", "0002_full_fidelity_history")
+	assertAppliedMigrations(t, migrations, "0001_init", "0002_full_fidelity_history", "0003_history_resume_durability")
 }
 
 func assertAppliedMigrations(t *testing.T, got []string, want ...string) {

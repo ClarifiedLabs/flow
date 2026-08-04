@@ -119,6 +119,9 @@ func WriteHarness(ctx context.Context, dst io.Writer, root string, options Harne
 		if d.IsDir() {
 			return nil
 		}
+		if err := scanSensitiveStrings(options.SensitiveValues, name); err != nil {
+			return err
+		}
 		if len(files) >= limits.MaxEntries {
 			return fmt.Errorf("%w: Harness entries", ErrLimitExceeded)
 		}
@@ -129,6 +132,9 @@ func WriteHarness(ctx context.Context, dst io.Writer, root string, options Harne
 			}
 			target = filepath.ToSlash(target)
 			if err := ValidateLink(name, target, limits.MaxPathBytes); err != nil {
+				return err
+			}
+			if err := scanSensitiveStrings(options.SensitiveValues, target); err != nil {
 				return err
 			}
 			files = append(files, File{Path: name, Type: FileSymlink, Mode: 0600, LinkTarget: target})
@@ -174,7 +180,7 @@ func WriteHarness(ctx context.Context, dst io.Writer, root string, options Harne
 		return Artifact{}, HarnessManifest{}, err
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
-	members, err := parseHarnessMembers(spooled, files, limits)
+	members, err := parseHarnessMembers(spooled, files, limits, options.SensitiveValues)
 	if err != nil {
 		return Artifact{}, HarnessManifest{}, err
 	}
@@ -210,7 +216,7 @@ func WriteHarness(ctx context.Context, dst io.Writer, root string, options Harne
 	return artifact, manifest, err
 }
 
-func parseHarnessMembers(spooled map[string]string, files []File, limits Limits) ([]HarnessMember, error) {
+func parseHarnessMembers(spooled map[string]string, files []File, limits Limits, sensitiveValues [][]byte) ([]HarnessMember, error) {
 	regular := map[string]bool{}
 	for _, f := range files {
 		if f.Type == FileRegular {
@@ -251,6 +257,9 @@ func parseHarnessMembers(spooled map[string]string, files []File, limits Limits)
 		if err != nil {
 			return nil, err
 		}
+		if err := scanSensitiveStrings(sensitiveValues, member.NativeSessionID, member.AgentName, member.Model, member.HarnessBuild); err != nil {
+			return nil, err
+		}
 		if ids[member.NativeSessionID] {
 			return nil, fmt.Errorf("%w: duplicate native session ID", ErrInvalidArchive)
 		}
@@ -274,6 +283,9 @@ func parseHarnessMembers(spooled map[string]string, files []File, limits Limits)
 			if data, err := os.ReadFile(spooled[metaPath]); err == nil && json.Unmarshal(data, &meta) == nil {
 				member.Status = meta.Status
 			}
+		}
+		if err := scanSensitiveStrings(sensitiveValues, member.RelativeMemberPath, member.NativeParentSessionID, member.Status); err != nil {
+			return nil, err
 		}
 		idsByDir[dir] = member.NativeSessionID
 		members = append(members, member)

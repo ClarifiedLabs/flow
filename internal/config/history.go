@@ -18,10 +18,12 @@ const (
 )
 
 // CoordinatorHistoryConfig configures durable history storage and the bounded
-// metadata-driven reconciliation pass. Committed history has no normal TTL.
+// metadata-driven reconciliation pass. Committed history has no normal TTL and
+// is retained within the configured per-project capacity ceilings.
 type CoordinatorHistoryConfig struct {
 	Blob           HistoryBlobConfig           `json:"blob" yaml:"blob"`
 	Reconciliation HistoryReconciliationConfig `json:"reconciliation" yaml:"reconciliation"`
+	Retention      HistoryRetentionConfig      `json:"retention" yaml:"retention"`
 	Transcript     HistoryTranscriptConfig     `json:"transcript" yaml:"transcript"`
 	Archive        HistoryArchiveConfig        `json:"archive" yaml:"archive"`
 }
@@ -52,6 +54,11 @@ type HistoryReconciliationConfig struct {
 	BatchSize      int    `json:"batch_size" yaml:"batch_size"`
 }
 
+type HistoryRetentionConfig struct {
+	MaxCaptures    int    `json:"max_captures" yaml:"max_captures"`
+	MaxStoredBytes string `json:"max_stored_bytes" yaml:"max_stored_bytes"`
+}
+
 type HistoryTranscriptConfig struct {
 	SegmentBytes  string `json:"segment_bytes" yaml:"segment_bytes"`
 	FlushInterval string `json:"flush_interval" yaml:"flush_interval"`
@@ -70,6 +77,7 @@ type HistoryArchiveConfig struct {
 type ResolvedCoordinatorHistory struct {
 	Blob           ResolvedHistoryBlob
 	Reconciliation ResolvedHistoryReconciliation
+	Retention      ResolvedHistoryRetention
 	Transcript     ResolvedHistoryTranscript
 	Archive        ResolvedHistoryArchive
 }
@@ -90,6 +98,11 @@ type ResolvedHistoryS3 struct {
 type ResolvedHistoryReconciliation struct {
 	Interval, TemporaryGrace, OrphanGrace time.Duration
 	BatchSize                             int
+}
+
+type ResolvedHistoryRetention struct {
+	MaxCaptures    int
+	MaxStoredBytes int64
 }
 
 type ResolvedHistoryTranscript struct {
@@ -119,7 +132,14 @@ func (c CoordinatorHistoryConfig) Resolve(dataDir string) (ResolvedCoordinatorHi
 	if err != nil {
 		return ResolvedCoordinatorHistory{}, err
 	}
-	return ResolvedCoordinatorHistory{Blob: blobConfig, Reconciliation: reconciliation, Transcript: transcript, Archive: archive}, nil
+	retention, err := c.Retention.resolve()
+	if err != nil {
+		return ResolvedCoordinatorHistory{}, err
+	}
+	if retention.MaxStoredBytes < archive.MaxStoredBytes {
+		return ResolvedCoordinatorHistory{}, errors.New("coordinator history.retention.max_stored_bytes must be >= archive.max_stored_bytes")
+	}
+	return ResolvedCoordinatorHistory{Blob: blobConfig, Reconciliation: reconciliation, Retention: retention, Transcript: transcript, Archive: archive}, nil
 }
 
 func (c HistoryBlobConfig) resolve(dataDir string) (ResolvedHistoryBlob, error) {
@@ -229,6 +249,21 @@ func (c HistoryReconciliationConfig) resolve() (ResolvedHistoryReconciliation, e
 		return ResolvedHistoryReconciliation{}, errors.New("coordinator history.reconciliation.batch_size must be between 1 and 10000")
 	}
 	return ResolvedHistoryReconciliation{Interval: interval, TemporaryGrace: temporaryGrace, OrphanGrace: orphanGrace, BatchSize: batch}, nil
+}
+
+func (c HistoryRetentionConfig) resolve() (ResolvedHistoryRetention, error) {
+	maxCaptures := c.MaxCaptures
+	if maxCaptures == 0 {
+		maxCaptures = 100000
+	}
+	if maxCaptures < 1 || maxCaptures > 10000000 {
+		return ResolvedHistoryRetention{}, errors.New("coordinator history.retention.max_captures must be between 1 and 10000000")
+	}
+	maxStoredBytes, err := resolveHistoryBytes(c.MaxStoredBytes, 1<<40, "coordinator history.retention.max_stored_bytes")
+	if err != nil {
+		return ResolvedHistoryRetention{}, err
+	}
+	return ResolvedHistoryRetention{MaxCaptures: maxCaptures, MaxStoredBytes: maxStoredBytes}, nil
 }
 
 func (c HistoryTranscriptConfig) resolve() (ResolvedHistoryTranscript, error) {

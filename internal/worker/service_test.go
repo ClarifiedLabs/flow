@@ -104,6 +104,13 @@ func TestWorkerRegisterHeartbeatAndClaimLifecycle(t *testing.T) {
 	if finished.State != JobFinished {
 		t.Fatalf("finished.State = %q, want finished", finished.State)
 	}
+	replayed, err := service.ReleaseLease(ctx, claimed.Lease.ID, JobFinished)
+	if err != nil || replayed.ID != finished.ID || replayed.State != JobFinished {
+		t.Fatalf("idempotent release = %+v, err=%v", replayed, err)
+	}
+	if _, err := service.ReleaseLease(ctx, claimed.Lease.ID, JobFailed); err == nil || !strings.Contains(err.Error(), "different final state") {
+		t.Fatalf("conflicting release error = %v", err)
+	}
 
 	released, err := service.GetLease(ctx, claimed.Lease.ID)
 	if err != nil {
@@ -677,6 +684,38 @@ func TestExpiredLeaseCannotBeRenewed(t *testing.T) {
 	service.now = func() time.Time { return now.Add(2 * time.Minute) }
 	if _, err := service.RenewLease(ctx, claimed.Lease.ID, time.Minute); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("renew expired lease err = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestExpiredLeaseCannotBeReleased(t *testing.T) {
+	ctx := context.Background()
+	store, directory, service := newWorkerService(t)
+	task := createTask(t, store)
+
+	now := time.Date(2026, 6, 7, 13, 15, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{ID: "w-local", CapacityPersistentAgent: 1}); err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	job, err := service.EnqueueJob(ctx, EnqueueJobInput{TaskID: &task.ID, Role: RoleAuthor, CapacityBucket: BucketPersistentAgent})
+	if err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	claimed, ok, err := claimNext(ctx, directory, service, ClaimInput{WorkerID: "w-local", Buckets: []CapacityBucket{BucketPersistentAgent}, LeaseDuration: time.Minute})
+	if err != nil || !ok {
+		t.Fatalf("claim job = %+v, ok=%v, err=%v", claimed, ok, err)
+	}
+
+	service.now = func() time.Time { return now.Add(2 * time.Minute) }
+	if _, err := service.ReleaseLease(ctx, claimed.Lease.ID, JobFinished); err == nil || !strings.Contains(err.Error(), "lease is expired") {
+		t.Fatalf("release expired lease err = %v, want expired rejection", err)
+	}
+	unchanged, err := service.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.State != JobClaimed {
+		t.Fatalf("job state after stale release = %q, want claimed", unchanged.State)
 	}
 }
 

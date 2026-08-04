@@ -19,6 +19,9 @@ func TestHistoryConfigurationDefaults(t *testing.T) {
 	if coordinator.Blob.MaxRangeBytes != 8<<20 || coordinator.Reconciliation.Interval != 15*time.Minute || coordinator.Reconciliation.TemporaryGrace != 24*time.Hour || coordinator.Reconciliation.OrphanGrace != 7*24*time.Hour {
 		t.Fatalf("default coordinator history = %+v", coordinator)
 	}
+	if coordinator.Retention.MaxCaptures != 100000 || coordinator.Retention.MaxStoredBytes != 1<<40 {
+		t.Fatalf("default retention = %+v", coordinator.Retention)
+	}
 	if coordinator.Transcript.SegmentBytes != 4<<20 || coordinator.Transcript.FlushInterval != 30*time.Second {
 		t.Fatalf("default transcript = %+v", coordinator.Transcript)
 	}
@@ -52,6 +55,8 @@ func TestCoordinatorHistoryRejectsUnsafeStorageAndRelationships(t *testing.T) {
 		{name: "short temporary grace", cfg: CoordinatorHistoryConfig{Reconciliation: HistoryReconciliationConfig{Interval: "1h", TemporaryGrace: "30m"}}, want: "temporary_grace must be >= interval"},
 		{name: "archive relationship", cfg: CoordinatorHistoryConfig{Archive: HistoryArchiveConfig{MaxStoredBytes: "3GiB", MaxLogicalBytes: "2GiB"}}, want: "must not exceed"},
 		{name: "archive path exceeds schema", cfg: CoordinatorHistoryConfig{Archive: HistoryArchiveConfig{MaxPathBytes: 4097}}, want: "outside safe bounds"},
+		{name: "capture ceiling", cfg: CoordinatorHistoryConfig{Retention: HistoryRetentionConfig{MaxCaptures: -1}}, want: "max_captures must be between"},
+		{name: "retained bytes below one artifact", cfg: CoordinatorHistoryConfig{Retention: HistoryRetentionConfig{MaxStoredBytes: "1MiB"}}, want: "must be >= archive.max_stored_bytes"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

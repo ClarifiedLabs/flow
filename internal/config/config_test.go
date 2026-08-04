@@ -316,7 +316,7 @@ default_agent:
 	if !ok || len(argv) != 1 {
 		t.Fatalf("author entrypoint argv = %#v", cfg.AuthorEntrypoint["argv"])
 	}
-	for _, token := range []string{"harness --hooks", "'--model' 'anthropic:claude-sonnet-4-6'", "'--reasoning' 'high'"} {
+	for _, token := range []string{`harness --session "$FLOW_HARNESS_SESSION"`, `--hooks "$FLOW_HARNESS_HOOKS"`, "'--model' 'anthropic:claude-sonnet-4-6'", "'--reasoning' 'high'"} {
 		if !strings.Contains(argv[0], token) {
 			t.Fatalf("author entrypoint command missing %q:\n%s", token, argv[0])
 		}
@@ -458,7 +458,7 @@ func TestDefaultAuthorEntrypointUsesHarnessHooks(t *testing.T) {
 	if !strings.Contains(argv[0], "flow fetch-prompt --harness harness") {
 		t.Fatalf("default command does not fetch a prompt: %q", argv[0])
 	}
-	if !strings.Contains(argv[0], `harness --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`) {
+	if !strings.Contains(argv[0], `harness --session "$FLOW_HARNESS_SESSION" --hooks "$FLOW_HARNESS_HOOKS" -i "$prompt"`) {
 		t.Fatalf("default command does not configure harness native hooks: %q", argv[0])
 	}
 }

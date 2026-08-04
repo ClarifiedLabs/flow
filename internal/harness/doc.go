@@ -159,7 +159,7 @@ var definitions = map[string]Definition{
 		RequireExecutable: true,
 		UsabilityCheck:    []string{"--check-model-proxy"},
 		HookState:         mapHarnessNativeHook,
-		ManagedFlags:      []string{"--hooks", "-p", "--prompt", "-i", "--initial-prompt"},
+		ManagedFlags:      []string{"--hooks", "--session", "-p", "--prompt", "-i", "--initial-prompt"},
 		HookEvents: []HookEvent{
 			{Name: "SessionStart"},
 			{Name: "UserPromptSubmit"},
@@ -281,6 +281,24 @@ func availableDefinitions() []Definition {
 		}
 	}
 	return defs
+}
+
+// BuildVersion returns the exact native build identifier Harness writes into
+// session state. Capture reservation uses this value for build-matched indexing.
+func BuildVersion(ctx context.Context, name string) (string, error) {
+	definition, ok := Lookup(name)
+	if !ok || definition.Executable == "" {
+		return "", fmt.Errorf("unsupported harness %q", name)
+	}
+	output, err := exec.CommandContext(ctx, definition.Executable, "--version").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("inspect %s build: %w", definition.Name, err)
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) != 2 || NormalizeName(fields[0]) != definition.Name || !strings.HasPrefix(fields[1], "v") || len(fields[1]) > 255 {
+		return "", fmt.Errorf("inspect %s build: invalid version output %q", definition.Name, strings.TrimSpace(string(output)))
+	}
+	return fields[1], nil
 }
 
 func shellDefinition() Definition {
@@ -421,9 +439,9 @@ func DefaultHarnessHookedCommandWithArgs(args []string) string {
 code=$?
 if [ "$code" -eq 0 ]; then
   if [ -n "${FLOW_HARNESS_HOOKS:-}" ]; then
-    harness --hooks "$FLOW_HARNESS_HOOKS"` + renderOptionalShellArgs(args) + ` -i "$prompt"
+    harness --session "$FLOW_HARNESS_SESSION" --hooks "$FLOW_HARNESS_HOOKS"` + renderOptionalShellArgs(args) + ` -i "$prompt"
   else
-    harness` + renderOptionalShellArgs(args) + ` -i "$prompt"
+    harness --session "$FLOW_HARNESS_SESSION"` + renderOptionalShellArgs(args) + ` -i "$prompt"
   fi
   code=$?
 fi
@@ -432,9 +450,9 @@ exit "$code"`
 
 func DefaultHarnessConsoleCommandWithArgs(args []string) string {
 	return `if [ -n "${FLOW_HARNESS_HOOKS:-}" ]; then
-  harness --hooks "$FLOW_HARNESS_HOOKS"` + renderOptionalShellArgs(args) + `
+  harness --session "$FLOW_HARNESS_SESSION" --hooks "$FLOW_HARNESS_HOOKS"` + renderOptionalShellArgs(args) + `
 else
-  harness` + renderOptionalShellArgs(args) + `
+  harness --session "$FLOW_HARNESS_SESSION"` + renderOptionalShellArgs(args) + `
 fi
 code=$?
 exit "$code"`
@@ -444,7 +462,7 @@ func DefaultHarnessPrintCommandWithArgs(args []string) string {
 	return `prompt="$(flow fetch-prompt --harness harness)"
 code=$?
 if [ "$code" -eq 0 ]; then
-  harness` + renderOptionalShellArgs(args) + ` -p "$prompt"
+  harness --session "$FLOW_HARNESS_SESSION"` + renderOptionalShellArgs(args) + ` -p "$prompt"
   code=$?
 fi
 exit "$code"`
@@ -454,7 +472,7 @@ func DefaultHarnessInteractiveCheckCommandWithArgs(args []string) string {
 	return `prompt="$(flow fetch-prompt --harness harness)"
 code=$?
 if [ "$code" -eq 0 ]; then
-  harness` + renderOptionalShellArgs(args) + ` -i "$prompt"
+  harness --session "$FLOW_HARNESS_SESSION"` + renderOptionalShellArgs(args) + ` -i "$prompt"
   code=$?
 fi
 exit "$code"`
