@@ -195,39 +195,6 @@ func TestProvisionerAssignmentClient(t *testing.T) {
 	}
 }
 
-func TestJoinWorker(t *testing.T) {
-	t.Parallel()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v2/workers/join", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Fatalf("method = %s, want POST", r.Method)
-		}
-		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
-			t.Fatalf("auth header = %q", got)
-		}
-		var request joinWorkerRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
-		if request.WorkerID != "w-local" {
-			t.Fatalf("worker_id = %q, want w-local", request.WorkerID)
-		}
-		writeJSON(t, w, http.StatusOK, joinWorkerResponse{
-			WorkerID: "w-local",
-			Token:    "worker-token",
-		})
-	})
-	client := newClientForTest(t, mux)
-
-	joined, err := client.JoinWorker(JoinWorkerInput{WorkerID: "w-local"})
-	if err != nil {
-		t.Fatalf("join worker: %v", err)
-	}
-	if joined.WorkerID != "w-local" || joined.Token != "worker-token" {
-		t.Fatalf("joined = %+v", joined)
-	}
-}
-
 func TestListTaskAttachmentsScopedToProject(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()

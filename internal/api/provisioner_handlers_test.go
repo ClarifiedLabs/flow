@@ -18,7 +18,6 @@ import (
 func TestProvisionerAssignmentsAuthorization(t *testing.T) {
 	fixture := newTestFixture(t)
 	mintTestCredential(t, fixture.Registry, "orchestrator-token", coordinator.TokenScopeProvisioner, "test-provider")
-	mintTestCredential(t, fixture.Registry, "legacy-orchestrator-token", coordinator.TokenScopeOrchestrator, "orchestrator")
 	mintTestCredential(t, fixture.Registry, "provisioner-worker-token", coordinator.TokenScopeWorker, "w-provisioner-auth")
 
 	request := httptest.NewRequest(http.MethodGet, provisionerAssignmentsPath, nil)
@@ -30,7 +29,6 @@ func TestProvisionerAssignmentsAuthorization(t *testing.T) {
 	}
 
 	doJSONRequestAs(t, fixture.Server, "provisioner-worker-token", http.MethodGet, provisionerAssignmentsPath, nil, http.StatusForbidden, nil)
-	doJSONRequestAs(t, fixture.Server, "legacy-orchestrator-token", http.MethodGet, provisionerAssignmentsPath+"?provider_id=orchestrator", nil, http.StatusForbidden, nil)
 	doJSONRequestAs(t, fixture.Server, "orchestrator-token", http.MethodGet, provisionerAssignmentsPath, nil, http.StatusOK, &contract.ProvisionerAssignmentsResponse{})
 	doJSONRequestAs(t, fixture.Server, "orchestrator-token", http.MethodGet, provisionerAssignmentsPath+"?provider_id=test-provider", nil, http.StatusOK, &contract.ProvisionerAssignmentsResponse{})
 	doJSONRequestAs(t, fixture.Server, "orchestrator-token", http.MethodGet, provisionerAssignmentsPath+"?provider_id=foreign-provider", nil, http.StatusForbidden, nil)
@@ -175,25 +173,22 @@ func TestAssignedWorkerRegistrationAndClaimAreExactAndExcludeGenericWorkers(t *t
 	}
 
 	doJSONRequestAs(t, fixture.Server, reserved.WorkerToken, http.MethodPost, "/v2/workers/register", contract.RegisterWorkerRequest{
-		Labels: map[string]string{"wrong": "profile"}, CapacityEphemeral: 1,
+		Labels: map[string]string{"wrong": "profile"},
 	}, http.StatusConflict, nil)
 	doJSONRequestAs(t, fixture.Server, reserved.WorkerToken, http.MethodPost, "/v2/workers/register", contract.RegisterWorkerRequest{
-		Labels: map[string]string{"pool": "managed", "discovered": "true"}, CapacityPersistentAgent: 1, CapacityEphemeral: 1,
+		Labels: map[string]string{"pool": "managed", "discovered": "true"},
 	}, http.StatusOK, nil)
-	doJSONRequestAs(t, fixture.Server, "generic-worker-token", http.MethodPost, "/v2/workers/register", contract.RegisterWorkerRequest{CapacityEphemeral: 1}, http.StatusOK, nil)
-
-	var genericClaim claimJobResponse
-	doJSONRequestAs(t, fixture.Server, "generic-worker-token", http.MethodPost, "/v2/workers/claim", contract.ClaimJobRequest{
-		Buckets: []worker.CapacityBucket{worker.BucketEphemeral}, LeaseDurationSeconds: 60,
-	}, http.StatusOK, &genericClaim)
-	if !genericClaim.Claimed || genericClaim.Job == nil || genericClaim.Job.ID != genericJob.ID {
-		t.Fatalf("generic claim = %+v, want unassigned job %s", genericClaim, genericJob.ID)
+	// Workers without an open assignment cannot register or claim: there is no
+	// static worker admission and no general queue fallback.
+	doJSONRequestAs(t, fixture.Server, "generic-worker-token", http.MethodPost, "/v2/workers/register", contract.RegisterWorkerRequest{}, http.StatusConflict, nil)
+	doJSONRequestAs(t, fixture.Server, "generic-worker-token", http.MethodPost, "/v2/workers/claim", contract.ClaimJobRequest{LeaseDurationSeconds: 60}, http.StatusConflict, nil)
+	generic, err := fixture.Bundle.Queue.GetJob(ctx, genericJob.ID)
+	if err != nil || generic.State != worker.JobQueued {
+		t.Fatalf("generic job = %+v, err=%v; unassigned workers must not claim it", generic, err)
 	}
 
 	var assignedClaim claimJobResponse
-	doJSONRequestAs(t, fixture.Server, reserved.WorkerToken, http.MethodPost, "/v2/workers/claim", contract.ClaimJobRequest{
-		Buckets: []worker.CapacityBucket{worker.BucketPersistentAgent}, LeaseDurationSeconds: 60,
-	}, http.StatusOK, &assignedClaim)
+	doJSONRequestAs(t, fixture.Server, reserved.WorkerToken, http.MethodPost, "/v2/workers/claim", contract.ClaimJobRequest{LeaseDurationSeconds: 60}, http.StatusOK, &assignedClaim)
 	if !assignedClaim.Claimed || assignedClaim.Job == nil || assignedClaim.Job.ID != assignedJob.ID {
 		t.Fatalf("assigned claim = %+v, want exact job %s", assignedClaim, assignedJob.ID)
 	}
@@ -219,14 +214,12 @@ func TestAssignedWorkerClaimNeverFallsBackWhenExactJobIsUnavailable(t *testing.T
 	if reserved.Assignment == nil || reserved.Assignment.Assignment.JobID != assignedJob.ID {
 		t.Fatalf("reserved = %+v, want job %s", reserved, assignedJob.ID)
 	}
-	doJSONRequestAs(t, fixture.Server, reserved.WorkerToken, http.MethodPost, "/v2/workers/register", contract.RegisterWorkerRequest{CapacityEphemeral: 1}, http.StatusOK, nil)
+	doJSONRequestAs(t, fixture.Server, reserved.WorkerToken, http.MethodPost, "/v2/workers/register", contract.RegisterWorkerRequest{}, http.StatusOK, nil)
 	if _, err := fixture.DB.ExecContext(ctx, `UPDATE jobs SET state = ? WHERE id = ?`, string(worker.JobCanceled), assignedJob.ID); err != nil {
 		t.Fatalf("make assigned job unavailable: %v", err)
 	}
 
-	doJSONRequestAs(t, fixture.Server, reserved.WorkerToken, http.MethodPost, "/v2/workers/claim", contract.ClaimJobRequest{
-		Buckets: []worker.CapacityBucket{worker.BucketEphemeral}, LeaseDurationSeconds: 60,
-	}, http.StatusConflict, nil)
+	doJSONRequestAs(t, fixture.Server, reserved.WorkerToken, http.MethodPost, "/v2/workers/claim", contract.ClaimJobRequest{LeaseDurationSeconds: 60}, http.StatusConflict, nil)
 	fallback, err := fixture.Bundle.Queue.GetJob(ctx, fallbackJob.ID)
 	if err != nil || fallback.State != worker.JobQueued {
 		t.Fatalf("fallback job = %+v, err=%v; assigned worker must not claim it", fallback, err)
@@ -248,7 +241,7 @@ func TestProvisionerAbandonPreservesQueueAndCleanupRevokesAndRemovesWorker(t *te
 	var reserved contract.ReserveProvisionerAssignmentResponse
 	doJSONRequest(t, fixture.Server, http.MethodPost, provisionerAssignmentsPath+"/reserve", reserveTestProvisionerRequest("abandon-request", 1), http.StatusOK, &reserved)
 	assignment := reserved.Assignment.Assignment
-	doJSONRequestAs(t, fixture.Server, reserved.WorkerToken, http.MethodPost, "/v2/workers/register", contract.RegisterWorkerRequest{CapacityEphemeral: 1}, http.StatusOK, nil)
+	doJSONRequestAs(t, fixture.Server, reserved.WorkerToken, http.MethodPost, "/v2/workers/register", contract.RegisterWorkerRequest{}, http.StatusOK, nil)
 
 	nextRetry := time.Now().UTC().Add(time.Minute).Truncate(time.Millisecond)
 	var attempted contract.ProvisionerAssignmentResponse

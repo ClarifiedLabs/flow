@@ -195,12 +195,11 @@ func TestHistoryResumeAPIIsIdempotentAndArtifactsRequireSelectedActiveLease(t *t
 
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID: "w-local", Labels: map[string]string{"agent.harness.harness": "true"},
-		CapacityPersistentAgent: 1, HeartbeatTTL: time.Minute,
 	}); err != nil {
 		t.Fatalf("register resume worker: %v", err)
 	}
 	claim, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
-		WorkerID: "w-local", Buckets: []flowworker.CapacityBucket{flowworker.BucketPersistentAgent}, LeaseDuration: time.Minute,
+		WorkerID: "w-local", LeaseDuration: time.Minute,
 	})
 	if err != nil || !ok || claim.Job.ID != created.JobID {
 		t.Fatalf("claim resume job = %+v ok=%t err=%v", claim, ok, err)
@@ -234,8 +233,7 @@ func TestWorkerHistoryAPIReservesFromLeaseAndPublishesWithCapability(t *testing.
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID: "w-local", CapacityEphemeral: 1, HeartbeatTTL: time.Minute,
-	}); err != nil {
+		ID: "w-local",	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 	job, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
@@ -246,8 +244,7 @@ func TestWorkerHistoryAPIReservesFromLeaseAndPublishesWithCapability(t *testing.
 		t.Fatalf("enqueue job: %v", err)
 	}
 	claim, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
-		WorkerID: "w-local", Buckets: []flowworker.CapacityBucket{flowworker.BucketEphemeral},
-		LeaseDuration: time.Minute,
+		WorkerID: "w-local",		LeaseDuration: time.Minute,
 	})
 	if err != nil || !ok {
 		t.Fatalf("claim job: ok=%v err=%v", ok, err)

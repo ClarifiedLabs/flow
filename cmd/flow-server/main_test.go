@@ -394,7 +394,7 @@ func TestHistoryReconciliationContinuesBackendCleanupAfterPublicationFailure(t *
 	reserved, err := bundle.HistoryCaptures.Reserve(ctx, coordinator.ReserveHistoryCaptureInput{
 		ProjectID: project.ID, JobID: "pending-publication", LeaseID: "lease-pending-publication",
 		LeaseAttempt: 1, WorkerID: "worker", Role: "author", ExpectedHarness: true,
-			HarnessName: "harness", HarnessVersion: "0.4.5", HarnessSchemaVersion: 5,
+		HarnessName: "harness", HarnessVersion: "0.4.5", HarnessSchemaVersion: 5,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -455,7 +455,7 @@ func TestHistoryReconciliationRemovesOnlyUnreferencedTemporariesAndReportsPublis
 	reserved, err := bundle.HistoryCaptures.Reserve(ctx, coordinator.ReserveHistoryCaptureInput{
 		ProjectID: project.ID, JobID: "active-history-upload", LeaseID: "lease-active-history-upload",
 		LeaseAttempt: 1, WorkerID: "worker", Role: "author", ExpectedHarness: true,
-			HarnessName: "harness", HarnessVersion: "0.4.5", HarnessSchemaVersion: 5,
+		HarnessName: "harness", HarnessVersion: "0.4.5", HarnessSchemaVersion: 5,
 	})
 	if err != nil {
 		t.Fatalf("reserve history capture: %v", err)
@@ -559,7 +559,7 @@ func TestHistoryReconciliationContinuesCleanupPastRetainedArtifactBatch(t *testi
 	reserved, err := bundle.HistoryCaptures.Reserve(ctx, coordinator.ReserveHistoryCaptureInput{
 		ProjectID: project.ID, JobID: "retained-history", LeaseID: "lease-retained-history",
 		LeaseAttempt: 1, WorkerID: "worker", Role: "author", ExpectedHarness: true,
-			HarnessName: "harness", HarnessVersion: "0.4.5", HarnessSchemaVersion: 5,
+		HarnessName: "harness", HarnessVersion: "0.4.5", HarnessSchemaVersion: 5,
 	})
 	if err != nil {
 		t.Fatal(err)

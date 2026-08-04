@@ -25,6 +25,7 @@ import (
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
+	"github.com/ClarifiedLabs/flow/internal/scheduler"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
@@ -75,8 +76,8 @@ func TestHarnessOptionsUseLiveWorkerHarnessLabels(t *testing.T) {
 		Labels: map[string]string{
 			flowharness.AgentHarnessLabel(flowharness.Harness): "true",
 		},
-		CapacityPersistentAgent: 1,
-		HeartbeatTTL:            time.Minute,
+		CapacityBucket: flowworker.BucketPersistentAgent,
+		HeartbeatTTL:   time.Minute,
 	}); err != nil {
 		t.Fatalf("register harness worker: %v", err)
 	}
@@ -134,18 +135,16 @@ func TestHarnessOptionsIncludeModelsAvailableOnEveryLiveHarnessWorker(t *testing
 			Labels: map[string]string{
 				flowharness.AgentHarnessLabel(flowharness.Harness): "true",
 			},
-			HarnessModels:           []flowharness.Model{onlyFirst, common},
-			CapacityPersistentAgent: 1,
-			HeartbeatTTL:            time.Minute,
+			HarnessModels: []flowharness.Model{onlyFirst, common},
+			HeartbeatTTL:  time.Minute,
 		},
 		{
 			ID: "w-harness-b",
 			Labels: map[string]string{
 				flowharness.AgentHarnessLabel(flowharness.Harness): "true",
 			},
-			HarnessModels:           []flowharness.Model{common},
-			CapacityPersistentAgent: 1,
-			HeartbeatTTL:            time.Minute,
+			HarnessModels: []flowharness.Model{common},
+			HeartbeatTTL:  time.Minute,
 		},
 	} {
 		if _, err := server.registry.Directory().RegisterWorker(ctx, input); err != nil {
@@ -185,11 +184,11 @@ func TestHarnessOptionsExcludeExpiredWorkers(t *testing.T) {
 		Harness:     flowharness.Harness,
 	}
 	if _, err := server.registry.Directory().RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-live-harness",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
-		HarnessModels:           []flowharness.Model{liveModel},
-		CapacityPersistentAgent: 1,
-		HeartbeatTTL:            time.Minute,
+		ID:             "w-live-harness",
+		Labels:         map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		HarnessModels:  []flowharness.Model{liveModel},
+		CapacityBucket: flowworker.BucketPersistentAgent,
+		HeartbeatTTL:   time.Minute,
 	}); err != nil {
 		t.Fatalf("register live harness worker: %v", err)
 	}
@@ -200,11 +199,11 @@ func TestHarnessOptionsExcludeExpiredWorkers(t *testing.T) {
 		Harness:     flowharness.Harness,
 	}
 	if _, err := server.registry.Directory().RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-expired-harness",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
-		HarnessModels:           []flowharness.Model{expiredModel},
-		CapacityPersistentAgent: 1,
-		HeartbeatTTL:            time.Minute,
+		ID:             "w-expired-harness",
+		Labels:         map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		HarnessModels:  []flowharness.Model{expiredModel},
+		CapacityBucket: flowworker.BucketPersistentAgent,
+		HeartbeatTTL:   time.Minute,
 	}); err != nil {
 		t.Fatalf("register expired harness worker: %v", err)
 	}
@@ -262,10 +261,10 @@ func TestHarnessOptionsIncludeDefaultArgs(t *testing.T) {
 	}
 
 	if _, err := registry.Directory().RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-harness",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
-		CapacityPersistentAgent: 1,
-		HeartbeatTTL:            time.Minute,
+		ID:             "w-harness",
+		Labels:         map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		CapacityBucket: flowworker.BucketPersistentAgent,
+		HeartbeatTTL:   time.Minute,
 	}); err != nil {
 		t.Fatalf("register harness worker: %v", err)
 	}
@@ -1444,8 +1443,7 @@ func TestBoardLastAgentActivityAtSelectsMostRecentlyUpdatedSession(t *testing.T)
 	// first session's.
 	const secondWorkerID = "w-latest-activity"
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      secondWorkerID,
-		CapacityPersistentAgent: 1,
+		ID: secondWorkerID,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
@@ -1664,8 +1662,7 @@ func TestBoardSupportsActiveBaseWorkspaceSessionWithoutChange(t *testing.T) {
 	}
 	const workerID = "w-base-workspace"
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      workerID,
-		CapacityPersistentAgent: 1,
+		ID: workerID,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
@@ -2257,11 +2254,13 @@ func TestWorkerHTTPLifecycleAndJobDiagnostics(t *testing.T) {
 		t.Fatalf("show job = %+v, want %s", show.Job, enqueue.Job.ID)
 	}
 
+	// Workers are assignment-created: reserve the assignment binding w-local to
+	// this queued job before it registers and claims.
+	reserveWorkerAssignment(t, fixture, "w-local", enqueue.Job.ID)
 	var registered workerResponse
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
-		CapacityPersistentAgent: 1,
-		HeartbeatTTLSeconds:     60,
+		Labels:              map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		HeartbeatTTLSeconds: 60,
 	}, http.StatusOK, &registered)
 	if registered.Worker.ID != "w-local" || registered.Worker.LastHeartbeatAt == nil || registered.Worker.ExpiresAt == nil {
 		t.Fatalf("registered worker = %+v", registered.Worker)
@@ -2288,7 +2287,6 @@ func TestWorkerHTTPLifecycleAndJobDiagnostics(t *testing.T) {
 
 	var claim claimJobResponse
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
-		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDurationSeconds: 60,
 	}, http.StatusOK, &claim)
 	if !claim.Claimed || claim.Job == nil || claim.Lease == nil {
@@ -2349,66 +2347,6 @@ func TestWorkerHTTPLifecycleAndJobDiagnostics(t *testing.T) {
 	}
 }
 
-func TestWorkerJoinTokenCreatesAndRotatesWorkerCredential(t *testing.T) {
-	fixture := newTestFixture(t)
-	server, err := NewServer(ServerOptions{
-		Registry:        fixture.Registry,
-		OwnerToken:      "owner-token",
-		HookToken:       "hook-token",
-		WorkerJoinToken: "join-token",
-	})
-	if err != nil {
-		t.Fatalf("new server: %v", err)
-	}
-
-	doJSONRequestAs(t, server, "join-token", http.MethodPost, "/v2/workers/join", joinWorkerRequest{
-		WorkerID: "w-local",
-	}, http.StatusOK, nil)
-	if _, err := fixture.Credentials.Authenticate(context.Background(), "worker-token"); err != coordinator.ErrInvalidCredential {
-		t.Fatalf("old worker-token authenticate err = %v, want ErrInvalidCredential", err)
-	}
-
-	var joined joinWorkerResponse
-	doJSONRequestAs(t, server, "join-token", http.MethodPost, "/v2/workers/join", joinWorkerRequest{
-		WorkerID: "w-remote",
-	}, http.StatusOK, &joined)
-	if joined.WorkerID != "w-remote" || strings.TrimSpace(joined.Token) == "" {
-		t.Fatalf("joined = %+v, want worker token for w-remote", joined)
-	}
-	principal, err := fixture.Credentials.Authenticate(context.Background(), joined.Token)
-	if err != nil {
-		t.Fatalf("authenticate joined token: %v", err)
-	}
-	if principal.Scope != coordinator.TokenScopeWorker || principal.Subject != "w-remote" {
-		t.Fatalf("principal = %+v, want worker w-remote", principal)
-	}
-}
-
-func TestWorkerJoinDisabledWithoutJoinToken(t *testing.T) {
-	fixture := newTestFixture(t)
-
-	doJSONRequestAs(t, fixture.Server, "join-token", http.MethodPost, "/v2/workers/join", joinWorkerRequest{
-		WorkerID: "w-local",
-	}, http.StatusNotFound, nil)
-}
-
-func TestWorkerJoinRejectsInvalidJoinToken(t *testing.T) {
-	fixture := newTestFixture(t)
-	server, err := NewServer(ServerOptions{
-		Registry:        fixture.Registry,
-		OwnerToken:      "owner-token",
-		HookToken:       "hook-token",
-		WorkerJoinToken: "join-token",
-	})
-	if err != nil {
-		t.Fatalf("new server: %v", err)
-	}
-
-	doJSONRequestAs(t, server, "wrong-token", http.MethodPost, "/v2/workers/join", joinWorkerRequest{
-		WorkerID: "w-local",
-	}, http.StatusUnauthorized, nil)
-}
-
 func TestConsoleAPILifecycleAndScope(t *testing.T) {
 	fixture := newTestFixture(t)
 
@@ -2424,13 +2362,11 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 	}
 
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
-		CapacityPersistentAgent: 1,
-		HeartbeatTTLSeconds:     60,
+		Labels:              map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		HeartbeatTTLSeconds: 60,
 	}, http.StatusOK, nil)
 	var claim claimJobResponse
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
-		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDurationSeconds: 60,
 	}, http.StatusOK, &claim)
 	if !claim.Claimed || claim.Job == nil || claim.Job.ID != startedConsole.Job.ID {
@@ -3022,12 +2958,10 @@ func TestTaskConsoleAPILifecycleAndScope(t *testing.T) {
 	}
 
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
-		CapacityPersistentAgent: 1,
-		HeartbeatTTLSeconds:     60,
+		HeartbeatTTLSeconds: 60,
 	}, http.StatusOK, nil)
 	var claim claimJobResponse
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
-		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDurationSeconds: 60,
 	}, http.StatusOK, &claim)
 	if !claim.Claimed || claim.Job == nil || claim.Job.ID != startedConsole.Job.ID {
@@ -3077,13 +3011,11 @@ func TestConsoleAPIStartsShellHarness(t *testing.T) {
 	}
 
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
-		CapacityPersistentAgent: 1,
-		HeartbeatTTLSeconds:     60,
+		Labels:              map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		HeartbeatTTLSeconds: 60,
 	}, http.StatusOK, nil)
 	var claim claimJobResponse
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
-		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDurationSeconds: 60,
 	}, http.StatusOK, &claim)
 	if !claim.Claimed || claim.Job == nil || claim.Job.ID != startedConsole.Job.ID {
@@ -3142,15 +3074,13 @@ func TestDiagnosticsDistinguishExpiredUnreleasedLeases(t *testing.T) {
 		Payload:        map[string]any{"blocking": true},
 	}, http.StatusCreated, &enqueue)
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-local",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
-		CapacityPersistentAgent: 1,
+		ID:     "w-local",
+		Labels: map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 	var claim claimJobResponse
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
-		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDurationSeconds: 60,
 	}, http.StatusOK, &claim)
 	if !claim.Claimed || claim.Lease == nil {
@@ -3247,15 +3177,13 @@ func startRunningAuthorSession(t *testing.T, fixture testFixture, taskID string)
 		t.Fatalf("jobs after schedule = %+v", jobs)
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-local",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
-		CapacityPersistentAgent: 1,
+		ID:     "w-local",
+		Labels: map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 	var claim claimJobResponse
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
-		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDurationSeconds: 60,
 	}, http.StatusOK, &claim)
 	if !claim.Claimed || claim.Job == nil || claim.Lease == nil {
@@ -3582,14 +3510,14 @@ func TestWorkerReportedConsoleExitWaitsForAdmittedGitWriter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure console job: %v", err)
 	}
-	if _, err := fixture.Registry.Directory().RegisterWorker(ctx, flowworker.RegisterWorkerInput{
+	reserveWorkerAssignment(t, fixture, "w-console-exit-fence", ensured.Job.ID)
+	if _, err := fixture.Registry.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID: "w-console-exit-fence", Labels: map[string]string{flowharness.AgentHarnessLabel("shell"): "true"},
-		CapacityPersistentAgent: 1, HeartbeatTTL: time.Minute,
 	}); err != nil {
 		t.Fatalf("register console worker: %v", err)
 	}
 	claimed, ok, err := fixture.Registry.Claim(ctx, flowworker.ClaimInput{
-		WorkerID: "w-console-exit-fence", Buckets: []flowworker.CapacityBucket{flowworker.BucketPersistentAgent}, LeaseDuration: time.Minute,
+		WorkerID: "w-console-exit-fence", LeaseDuration: time.Minute,
 	})
 	if err != nil || !ok || claimed.Job.ID != ensured.Job.ID {
 		t.Fatalf("claim console job: claim=%+v ok=%t err=%v", claimed, ok, err)
@@ -3785,8 +3713,7 @@ func TestWorkerCheckReportRejectsSourceJobFromStaleHead(t *testing.T) {
 		t.Fatalf("update change head: %v", err)
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                "w-ci",
-		CapacityEphemeral: 1,
+		ID: "w-ci",
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
@@ -3805,7 +3732,6 @@ func TestWorkerCheckReportRejectsSourceJobFromStaleHead(t *testing.T) {
 	}
 	claimed, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
 		WorkerID:      "w-ci",
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketEphemeral},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {
@@ -3913,8 +3839,7 @@ func TestWorkerCheckReportRejectsSourceJobMissingCheckMetadata(t *testing.T) {
 		t.Fatalf("update change head: %v", err)
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                "w-ci-metadata",
-		CapacityEphemeral: 1,
+		ID: "w-ci-metadata",
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
@@ -3930,7 +3855,6 @@ func TestWorkerCheckReportRejectsSourceJobMissingCheckMetadata(t *testing.T) {
 	}
 	claimed, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
 		WorkerID:      "w-ci-metadata",
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketEphemeral},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {
@@ -4191,9 +4115,8 @@ func startAuthorSessionForStatusTestWithWorker(t *testing.T, fixture testFixture
 		t.Fatal("workflow did not enqueue an author job")
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      workerID,
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
-		CapacityPersistentAgent: 1,
+		ID:     workerID,
+		Labels: map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
@@ -4250,9 +4173,8 @@ func startLiveWorkerJobForTask(t *testing.T, fixture testFixture, token string, 
 		t.Fatalf("store worker token: %v", err)
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      workerID,
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true", "worker_id": workerID},
-		CapacityPersistentAgent: 1,
+		ID:     workerID,
+		Labels: map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true", "worker_id": workerID},
 	}); err != nil {
 		t.Fatalf("register worker %s: %v", workerID, err)
 	}
@@ -4269,7 +4191,6 @@ func startLiveWorkerJobForTask(t *testing.T, fixture testFixture, token string, 
 	}
 	claimed, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
 		WorkerID:      workerID,
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {
@@ -4391,10 +4312,8 @@ func startLiveCheckJobForTask(t *testing.T, fixture testFixture, token string, w
 		t.Fatalf("store worker token: %v", err)
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      workerID,
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true", "worker_id": workerID},
-		CapacityPersistentAgent: 1,
-		CapacityEphemeral:       1,
+		ID:     workerID,
+		Labels: map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true", "worker_id": workerID},
 	}); err != nil {
 		t.Fatalf("register worker %s: %v", workerID, err)
 	}
@@ -4416,7 +4335,6 @@ func startLiveCheckJobForTask(t *testing.T, fixture testFixture, token string, w
 	}
 	claimed, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
 		WorkerID:      workerID,
-		Buckets:       []flowworker.CapacityBucket{bucket},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {
@@ -4437,10 +4355,10 @@ func startLiveCheckJobForTask(t *testing.T, fixture testFixture, token string, w
 func claimSpecificJob(t *testing.T, fixture testFixture, workerID string, jobID string, buckets []flowworker.CapacityBucket) flowworker.ClaimedJob {
 	t.Helper()
 	ctx := context.Background()
+	reserveWorkerAssignment(t, fixture, workerID, jobID)
 	for attempt := 0; attempt < 20; attempt++ {
 		claimed, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
 			WorkerID:      workerID,
-			Buckets:       buckets,
 			LeaseDuration: time.Minute,
 		})
 		if err != nil {
@@ -4556,12 +4474,10 @@ func TestWorkerEndpointsRequireWorkerScopeAndLeaseOwnership(t *testing.T) {
 	}
 
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
-		ID:                      "w-local",
-		CapacityPersistentAgent: 1,
+		ID: "w-local",
 	}, http.StatusForbidden, nil)
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
-		ID:                      "w-other",
-		CapacityPersistentAgent: 1,
+		ID: "w-other",
 	}, http.StatusForbidden, nil)
 
 	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Lease ownership task"})
@@ -4569,8 +4485,7 @@ func TestWorkerEndpointsRequireWorkerScopeAndLeaseOwnership(t *testing.T) {
 		t.Fatalf("create task: %v", err)
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-local",
-		CapacityPersistentAgent: 1,
+		ID: "w-local",
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
@@ -4643,8 +4558,7 @@ func TestWorkerCheckReportingRejectsExpiredLease(t *testing.T) {
 		t.Fatalf("create task: %v", err)
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                "w-local",
-		CapacityEphemeral: 1,
+		ID: "w-local",
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
@@ -4659,7 +4573,6 @@ func TestWorkerCheckReportingRejectsExpiredLease(t *testing.T) {
 	}
 	claimed, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
 		WorkerID:      "w-local",
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketEphemeral},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {
@@ -4705,8 +4618,7 @@ func TestWorkerCheckReportingRejectsNonCISourceJob(t *testing.T) {
 		t.Fatalf("create task: %v", err)
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-local",
-		CapacityPersistentAgent: 1,
+		ID: "w-local",
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
@@ -4721,7 +4633,6 @@ func TestWorkerCheckReportingRejectsNonCISourceJob(t *testing.T) {
 	}
 	claimed, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
 		WorkerID:      "w-local",
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {
@@ -4746,8 +4657,7 @@ func TestWorkerClaimCanWaitForJob(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                "w-local",
-		CapacityEphemeral: 1,
+		ID: "w-local",
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
@@ -4765,7 +4675,6 @@ func TestWorkerClaimCanWaitForJob(t *testing.T) {
 
 	var claim claimJobResponse
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
-		Buckets:              []flowworker.CapacityBucket{flowworker.BucketEphemeral},
 		LeaseDurationSeconds: 60,
 		WaitSeconds:          1,
 	}, http.StatusOK, &claim)
@@ -4781,8 +4690,7 @@ func TestWorkerClaimSweepsExpiredLeases(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                "w-local",
-		CapacityEphemeral: 1,
+		ID: "w-local",
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
@@ -4832,7 +4740,6 @@ INSERT INTO leases (
 
 	var claim claimJobResponse
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
-		Buckets:              []flowworker.CapacityBucket{flowworker.BucketEphemeral},
 		LeaseDurationSeconds: 60,
 	}, http.StatusOK, &claim)
 	if !claim.Claimed || claim.Job == nil || claim.Job.ID != queuedJob.ID {
@@ -4912,19 +4819,130 @@ func reopenTestRegistry(t *testing.T, dataDir string) (*Registry, []*ProjectBund
 	return registry, registry.All(), global
 }
 
+// reserveWorkerAssignment reserves an open assignment binding workerID to the
+// specific queued job, mirroring what a provisioner does for a real worker.
+// It is idempotent: a worker that already holds an open assignment keeps it.
+func reserveWorkerAssignment(t *testing.T, fixture testFixture, workerID, jobID string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, bundle := range fixture.Registry.All() {
+		if _, found, err := bundle.Queue.FindAssignmentByWorker(ctx, workerID); err != nil {
+			t.Fatalf("find worker assignment: %v", err)
+		} else if found {
+			return
+		}
+	}
+	job, err := fixture.Workers.Service.GetJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("get job for assignment: %v", err)
+	}
+	if _, err := fixture.Workers.Service.ReserveAssignment(ctx, flowworker.ReserveAssignmentInput{
+		JobID: jobID, WorkerID: strings.TrimSpace(workerID), ProviderID: "test-provider", ProfileName: "test-profile", ProviderType: "test",
+		ProviderRequestID: "test-request-" + jobID + "-" + strings.TrimSpace(workerID),
+		ProfileLabels:     job.Selector,
+		AllowedRoles:      []flowworker.JobRole{job.Role},
+		AllowedBuckets:    []flowworker.CapacityBucket{job.CapacityBucket},
+		RequiredSelector:  job.Selector,
+		StartupDeadline:   time.Now().UTC().Add(10 * time.Minute),
+	}); err != nil {
+		t.Fatalf("reserve worker assignment: %v", err)
+	}
+}
+
 // testWorkers wraps a project's queue service with the worker-directory and
-// cross-project claim operations the registry now owns, so existing tests can
-// keep calling RegisterWorker/ClaimNextJob on the fixture's "Workers".
+// assignment claim operations the registry owns. Because workers are now
+// assignment-created one-shot processes, RegisterWorker transparently reserves
+// an assignment for the next eligible queued job (idempotent for recovery
+// re-registrations) and derives the worker's single bucket from it.
 type testWorkers struct {
 	*flowworker.Service
 	registry *Registry
 }
 
 func (w testWorkers) RegisterWorker(ctx context.Context, input flowworker.RegisterWorkerInput) (flowworker.Worker, error) {
+	assigned, err := w.ensureWorkerAssignment(ctx, &input)
+	if err != nil {
+		return flowworker.Worker{}, err
+	}
+	if assigned {
+		return w.registry.RegisterWorker(ctx, input)
+	}
+	// Some tests register before enqueuing their job. Use the low-level
+	// directory with one singular bucket; ClaimNextJob later reserves the exact
+	// assignment and re-registers to derive the actual bucket.
+	if input.CapacityBucket == "" {
+		input.CapacityBucket = flowworker.BucketPersistentAgent
+	}
 	return w.registry.Directory().RegisterWorker(ctx, input)
 }
 
+func (w testWorkers) ensureWorkerAssignment(ctx context.Context, input *flowworker.RegisterWorkerInput) (bool, error) {
+	for _, bundle := range w.registry.All() {
+		if assignment, found, err := bundle.Queue.FindAssignmentByWorker(ctx, input.ID); err != nil {
+			return false, err
+		} else if found {
+			input.CapacityBucket = assignment.CapacityBucket
+			return true, nil
+		}
+	}
+
+	jobs, err := w.Service.ListJobs(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, job := range jobs {
+		if job.State != flowworker.JobQueued {
+			continue
+		}
+		selector, err := scheduler.NewSelector(job.Selector)
+		if err != nil {
+			return false, err
+		}
+		capacity := scheduler.Capacity{}
+		if job.CapacityBucket == flowworker.BucketPersistentAgent {
+			capacity.PersistentAgent = 1
+		} else {
+			capacity.Ephemeral = 1
+		}
+		eligible, err := scheduler.Eligible(scheduler.Job{Selector: selector, Tolerations: job.Tolerations, CapacityBucket: scheduler.CapacityBucket(job.CapacityBucket)}, scheduler.Worker{Labels: input.Labels, Taints: input.Taints, Capacity: capacity})
+		if err != nil || !eligible {
+			continue
+		}
+		assignment, err := w.Service.ReserveAssignment(ctx, flowworker.ReserveAssignmentInput{
+			JobID: job.ID, WorkerID: strings.TrimSpace(input.ID), ProviderID: "test-provider", ProfileName: "test-profile", ProviderType: "test",
+			ProviderRequestID: "test-request-" + job.ID + "-" + strings.TrimSpace(input.ID),
+			ProfileLabels:     job.Selector,
+			ProfileTaints:     input.Taints,
+			AllowedRoles:      []flowworker.JobRole{job.Role},
+			AllowedBuckets:    []flowworker.CapacityBucket{job.CapacityBucket},
+			RequiredSelector:  job.Selector,
+			StartupDeadline:   time.Now().UTC().Add(10 * time.Minute),
+		})
+		if err != nil {
+			return false, err
+		}
+		input.CapacityBucket = assignment.CapacityBucket
+		return true, nil
+	}
+	return false, nil
+}
+
 func (w testWorkers) ClaimNextJob(ctx context.Context, input flowworker.ClaimInput) (flowworker.ClaimedJob, bool, error) {
+	registered, err := w.registry.Directory().GetWorker(ctx, input.WorkerID)
+	if err != nil {
+		return flowworker.ClaimedJob{}, false, err
+	}
+	registration := flowworker.RegisterWorkerInput{
+		ID: registered.ID, Labels: registered.Labels, Taints: registered.Taints,
+		HarnessModels: registered.HarnessModels,
+	}
+	assigned, err := w.ensureWorkerAssignment(ctx, &registration)
+	if err != nil || !assigned {
+		return flowworker.ClaimedJob{}, false, err
+	}
+	if _, err := w.registry.RegisterWorker(ctx, registration); err != nil {
+		return flowworker.ClaimedJob{}, false, err
+	}
 	claim, ok, err := w.registry.Claim(ctx, input)
 	if err != nil || !ok {
 		return flowworker.ClaimedJob{}, ok, err
@@ -5265,13 +5283,11 @@ func TestSessionProcessExitRejectsConsoleSession(t *testing.T) {
 	}
 
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
-		CapacityPersistentAgent: 1,
-		HeartbeatTTLSeconds:     60,
+		Labels:              map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		HeartbeatTTLSeconds: 60,
 	}, http.StatusOK, nil)
 	var claim claimJobResponse
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
-		Buckets:              []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDurationSeconds: 60,
 	}, http.StatusOK, &claim)
 	if !claim.Claimed || claim.Job == nil || claim.Job.ID != startedConsole.Job.ID {
@@ -5561,12 +5577,11 @@ func TestWorkflowFailedStepCanBeSkippedByOwner(t *testing.T) {
 		t.Fatalf("store skip reviewer token: %v", err)
 	}
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID: "w-skip-reviewer", Labels: map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"}, CapacityPersistentAgent: 1,
-	}); err != nil {
+		ID: "w-skip-reviewer", Labels: map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"}}); err != nil {
 		t.Fatalf("register skip reviewer: %v", err)
 	}
 	claimed, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
-		WorkerID: "w-skip-reviewer", Buckets: []flowworker.CapacityBucket{flowworker.BucketPersistentAgent}, LeaseDuration: time.Minute,
+		WorkerID: "w-skip-reviewer", LeaseDuration: time.Minute,
 	})
 	if err != nil || !ok {
 		jobs, listErr := fixture.Workers.ListJobs(ctx)

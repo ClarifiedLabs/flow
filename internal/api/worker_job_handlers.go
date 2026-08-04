@@ -81,44 +81,6 @@ func (s *Server) handleWorkersDiagnostics(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// queueStatsResponse reports aggregate queue telemetry across every project
-// database. Provisioning is driven by durable assignments, not this snapshot.
-type queueStatsResponse struct {
-	Queued           int            `json:"queued"`
-	ClaimedOrRunning int            `json:"claimed_or_running"`
-	ByBucket         map[string]int `json:"by_bucket"`
-}
-
-// handleQueueStats serves GET /v2/queue/stats. It is the one endpoint the
-// dedicated orchestrator-scoped token can reach; the owner token retains
-// access for debugging and CLI use.
-func (s *Server) handleQueueStats(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
-	if !requireMethod(w, r, http.MethodGet) {
-		return
-	}
-	if !requireScope(w, principal, "owner or orchestrator token is required", coordinator.TokenScopeOwner, coordinator.TokenScopeOrchestrator, coordinator.TokenScopeProvisioner) {
-		return
-	}
-
-	jobs, _, ok := collectJobsAndLeases(w, r, s.registry.All())
-	if !ok {
-		return
-	}
-
-	response := queueStatsResponse{ByBucket: map[string]int{}}
-	for _, job := range jobs {
-		switch job.State {
-		case worker.JobQueued:
-			response.Queued++
-			response.ByBucket[string(job.CapacityBucket)]++
-		case worker.JobClaimed, worker.JobRunning:
-			response.ClaimedOrRunning++
-		}
-	}
-
-	writeJSON(w, http.StatusOK, response)
-}
-
 func (s *Server) handleRegisterWorker(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
 	var request registerWorkerRequest
 	if err := decodeJSON(r, &request); err != nil {

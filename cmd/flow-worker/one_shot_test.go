@@ -22,22 +22,14 @@ import (
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
-// oneShotTestSetup registers an ephemeral-capable worker and returns the
-// fixture, config, and timings wired to a test coordinator.
+// oneShotTestSetup returns a fixture, assignment-authenticated config, and
+// timings wired to a test coordinator. The CLI registers the worker itself.
 func oneShotTestSetup(t *testing.T) (workerTestFixture, config.WorkerConfig, workerTimings) {
 	t.Helper()
 	requireWorkerTool(t, "git")
 	requireWorkerTool(t, "tmux")
 
-	ctx := context.Background()
 	fixture := newWorkerTestFixture(t)
-	if _, err := fixture.Directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                "w-local",
-		CapacityEphemeral: 1,
-		HeartbeatTTL:      time.Minute,
-	}); err != nil {
-		t.Fatalf("register worker: %v", err)
-	}
 
 	coordinatorServer := httptest.NewServer(fixture.Server)
 	t.Cleanup(coordinatorServer.Close)
@@ -47,9 +39,6 @@ func oneShotTestSetup(t *testing.T) (workerTestFixture, config.WorkerConfig, wor
 		CoordinatorURL: coordinatorServer.URL,
 		Token:          "worker-token",
 		WorkDir:        t.TempDir(),
-		Tmux: config.WorkerTmuxConfig{
-			SocketPath: isolatedWorkerTmuxSocket(t),
-		},
 		Git: config.WorkerGitConfig{
 			Principal: "worker:w-local",
 		},
@@ -91,6 +80,7 @@ func TestRunWorkerOneShotRunsOneJobAndExits(t *testing.T) {
 printf ephemeral-ok > "$1"
 `)
 	job := enqueueEphemeralTestJob(t, fixture, script, out)
+	registerAssignedWorker(t, fixture, job, cfg.WorkerID, nil)
 
 	client, err := newWorkerClient(cfg)
 	if err != nil {
@@ -117,6 +107,7 @@ printf ephemeral-ok > "$1"
 func TestRunWorkerOneShotPublishesMandatoryFinalHistoryBeforeRelease(t *testing.T) {
 	fixture, cfg, timings := oneShotTestSetup(t)
 	job := enqueueEphemeralTestJob(t, fixture, writeWorkerScript(t, "#!/bin/sh\nprintf history-ok\n"))
+	registerAssignedWorker(t, fixture, job, cfg.WorkerID, nil)
 
 	client, err := newWorkerClient(cfg)
 	if err != nil {
@@ -182,6 +173,7 @@ func TestRunWorkerOneShotRejectsJobSpecificModelProxyCredentialFromHistory(t *te
 	if err != nil {
 		t.Fatalf("enqueue job: %v", err)
 	}
+	registerAssignedWorker(t, fixture, job, cfg.WorkerID, nil)
 	client, err := newWorkerClient(cfg)
 	if err != nil {
 		t.Fatalf("create worker client: %v", err)
@@ -224,47 +216,6 @@ func TestRunWorkerOneShotRejectsJobSpecificModelProxyCredentialFromHistory(t *te
 	}
 }
 
-func TestRunWorkerOneShotWaitsForClaim(t *testing.T) {
-	t.Parallel()
-	fixture, cfg, timings := oneShotTestSetup(t)
-
-	client, err := newWorkerClient(cfg)
-	if err != nil {
-		t.Fatalf("create worker client: %v", err)
-	}
-	var stdout bytes.Buffer
-	done := make(chan error, 1)
-	go func() {
-		done <- runWorkerOneShot(context.Background(), client, cfg, timings, nil, &stdout)
-	}()
-
-	// Enqueue only after the worker is already polling: the one-shot worker
-	// must keep long-polling instead of exiting when the queue is empty.
-	time.Sleep(300 * time.Millisecond)
-	out := filepath.Join(t.TempDir(), "late.out")
-	script := writeWorkerScript(t, `#!/bin/sh
-printf late-ok > "$1"
-`)
-	job := enqueueEphemeralTestJob(t, fixture, script, out)
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("runWorkerOneShot() error = %v; stdout:\n%s", err, stdout.String())
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatalf("one-shot worker did not exit after one job; stdout:\n%s", stdout.String())
-	}
-
-	finished, err := fixture.Queue.GetJob(context.Background(), job.ID)
-	if err != nil {
-		t.Fatalf("get job: %v", err)
-	}
-	if finished.State != flowworker.JobFinished {
-		t.Fatalf("job state = %q, want finished", finished.State)
-	}
-}
-
 func TestRunWorkerOneShotExitsZeroAfterJobError(t *testing.T) {
 	t.Parallel()
 	fixture, cfg, timings := oneShotTestSetup(t)
@@ -285,6 +236,7 @@ func TestRunWorkerOneShotExitsZeroAfterJobError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enqueue failing job: %v", err)
 	}
+	registerAssignedWorker(t, fixture, job, cfg.WorkerID, nil)
 
 	client, err := newWorkerClient(cfg)
 	if err != nil {
@@ -358,11 +310,14 @@ func TestRunWorkerOneShotCancelsLongPollPromptly(t *testing.T) {
 	}
 }
 
-func TestRunWorkerRejectsOnceAndOneShot(t *testing.T) {
+func TestRunWorkerRequiresOneShot(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
-	if code := runWorker([]string{"--once", "--one-shot"}, &stdout, &stderr); code != 2 {
-		t.Fatalf("runWorker(--once --one-shot) exit = %d, want 2; stderr: %s", code, stderr.String())
+	if code := runWorker(nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("runWorker() exit = %d, want 2; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "requires --one-shot") {
+		t.Fatalf("runWorker() stderr = %q, want one-shot requirement", stderr.String())
 	}
 }
 

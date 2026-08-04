@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/api"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
@@ -113,6 +114,45 @@ func newWorkerTestFixture(t *testing.T) workerTestFixture {
 // the same path the coordinator's claim endpoint uses.
 func (f workerTestFixture) claimNext(ctx context.Context, input flowworker.ClaimInput) (flowworker.ProjectClaim, bool, error) {
 	return f.Registry.Claim(ctx, input)
+}
+
+// reserveWorkerAssignment reserves an open assignment binding the worker to the
+// job. Tests that call runWorkerOneShot directly (bypassing runWorker's
+// registration) pass register=true so the directory has the worker row that
+// heartbeat/claim require.
+func reserveWorkerAssignment(t *testing.T, fixture workerTestFixture, job flowworker.Job, workerID string) {
+	t.Helper()
+	if _, err := fixture.Queue.ReserveAssignment(context.Background(), flowworker.ReserveAssignmentInput{
+		JobID:             job.ID,
+		WorkerID:          workerID,
+		ProviderID:        "test",
+		ProfileName:       "test",
+		ProviderRequestID: "req-" + job.ID,
+		ProviderType:      "test",
+		ProfileLabels:     job.Selector,
+		AllowedRoles:      []flowworker.JobRole{job.Role},
+		AllowedBuckets:    []flowworker.CapacityBucket{job.CapacityBucket},
+		RequiredSelector:  job.Selector,
+		StartupDeadline:   time.Now().Add(10 * time.Minute),
+	}); err != nil {
+		t.Fatalf("reserve worker assignment: %v", err)
+	}
+}
+
+// registerAssignedWorker reserves an assignment and registers the worker
+// through the registry, mirroring what runWorker does before it enters the
+// one-shot loop. Tests that invoke runWorkerOneShot directly need this so the
+// worker's directory row exists for heartbeat/claim.
+func registerAssignedWorker(t *testing.T, fixture workerTestFixture, job flowworker.Job, workerID string, labels map[string]string) {
+	t.Helper()
+	reserveWorkerAssignment(t, fixture, job, workerID)
+	if _, err := fixture.Registry.RegisterWorker(context.Background(), flowworker.RegisterWorkerInput{
+		ID:           workerID,
+		Labels:       labels,
+		HeartbeatTTL: time.Minute,
+	}); err != nil {
+		t.Fatalf("register assigned worker: %v", err)
+	}
 }
 
 // neutralizeExchangeHooks overwrites the bare exchange's git hooks with no-op

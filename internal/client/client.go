@@ -1364,24 +1364,6 @@ func (c *Client) ListJobs() ([]flowworker.Job, error) {
 	return response.Jobs, nil
 }
 
-// QueueStats is the aggregate job queue depth across every project database,
-// as served by GET /v2/queue/stats (owner or orchestrator scope).
-type QueueStats struct {
-	Queued           int            `json:"queued"`
-	ClaimedOrRunning int            `json:"claimed_or_running"`
-	ByBucket         map[string]int `json:"by_bucket"`
-}
-
-// GetQueueStats fetches aggregate diagnostic queue telemetry.
-func (c *Client) GetQueueStats() (QueueStats, error) {
-	var response QueueStats
-	if err := c.do(http.MethodGet, "/v2/queue/stats", nil, nil, &response); err != nil {
-		return QueueStats{}, err
-	}
-
-	return response, nil
-}
-
 func (c *Client) EnqueueJob(input EnqueueJobInput) (flowworker.Job, error) {
 	var response jobResponse
 	request := enqueueJobRequest{

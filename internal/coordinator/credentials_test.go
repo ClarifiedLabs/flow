@@ -143,7 +143,7 @@ func TestRevokeSubjectCredentialsIsIdempotentAndScoped(t *testing.T) {
 		{Token: "worker-token-1", Scope: TokenScopeWorker, Subject: "w-assigned"},
 		{Token: "worker-token-2", Scope: TokenScopeWorker, Subject: "w-assigned"},
 		{Token: "other-worker-token", Scope: TokenScopeWorker, Subject: "w-other"},
-		{Token: "orchestrator-token", Scope: TokenScopeOrchestrator, Subject: "w-assigned"},
+		{Token: "provisioner-token", Scope: TokenScopeProvisioner, Subject: "provider-x"},
 	} {
 		if err := service.EnsureToken(ctx, input); err != nil {
 			t.Fatalf("ensure token: %v", err)
@@ -160,7 +160,7 @@ func TestRevokeSubjectCredentialsIsIdempotentAndScoped(t *testing.T) {
 			t.Fatalf("Authenticate(%s) err = %v, want ErrInvalidCredential", token, err)
 		}
 	}
-	for _, token := range []string{"other-worker-token", "orchestrator-token"} {
+	for _, token := range []string{"other-worker-token", "provisioner-token"} {
 		if _, err := service.Authenticate(ctx, token); err != nil {
 			t.Fatalf("Authenticate preserved %s: %v", token, err)
 		}

@@ -1107,10 +1107,8 @@ func TestWorkerAndJobDiagnosticsUseAPI(t *testing.T) {
 		t.Fatalf("create task: %v", err)
 	}
 	if _, err := fixture.Directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-local",
-		Labels:                  map[string]string{"agent.harness.harness": "true", "local": "true"},
-		CapacityPersistentAgent: 1,
-		CapacityEphemeral:       2,
+		ID:     "w-local",
+		Labels: map[string]string{"agent.harness.harness": "true", "local": "true"},
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}

@@ -22,9 +22,6 @@ const (
 	TokenScopeSession TokenScope = "session"
 	TokenScopeConsole TokenScope = "console"
 	TokenScopeHook    TokenScope = "hook"
-	// TokenScopeOrchestrator is the legacy diagnostic queue-telemetry scope.
-	// It intentionally does not gain assignment mutation authority.
-	TokenScopeOrchestrator TokenScope = "orchestrator"
 	// TokenScopeProvisioner authorizes assignment operations only for the
 	// comma-separated provider IDs in its subject.
 	TokenScopeProvisioner TokenScope = "provisioner"
@@ -303,7 +300,7 @@ WHERE token_hash = ?`,
 // RevokeScopeCredentials idempotently revokes every live credential in scope.
 func (s *CredentialService) RevokeScopeCredentials(ctx context.Context, scope TokenScope) error {
 	switch scope {
-	case TokenScopeOwner, TokenScopeWorker, TokenScopeSession, TokenScopeConsole, TokenScopeHook, TokenScopeOrchestrator, TokenScopeProvisioner:
+	case TokenScopeOwner, TokenScopeWorker, TokenScopeSession, TokenScopeConsole, TokenScopeHook, TokenScopeProvisioner:
 	default:
 		return fmt.Errorf("invalid credential scope: %s", scope)
 	}
@@ -325,7 +322,7 @@ func (s *CredentialService) RevokeSubjectCredentials(ctx context.Context, scope 
 		return errors.New("credential subject is required")
 	}
 	switch scope {
-	case TokenScopeOwner, TokenScopeWorker, TokenScopeSession, TokenScopeConsole, TokenScopeHook, TokenScopeOrchestrator, TokenScopeProvisioner:
+	case TokenScopeOwner, TokenScopeWorker, TokenScopeSession, TokenScopeConsole, TokenScopeHook, TokenScopeProvisioner:
 	default:
 		return fmt.Errorf("invalid credential scope: %s", scope)
 	}
@@ -358,10 +355,6 @@ func normalizeCredentialInput(input CredentialInput) (CredentialInput, error) {
 	case TokenScopeHook:
 		if input.Subject == "" {
 			input.Subject = "hook"
-		}
-	case TokenScopeOrchestrator:
-		if input.Subject == "" {
-			input.Subject = "orchestrator"
 		}
 	case TokenScopeProvisioner:
 		if input.Subject == "" {

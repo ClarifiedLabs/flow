@@ -143,13 +143,11 @@ func activateBrowserConsoleSession(t *testing.T, fixture testFixture) coordinato
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                      workerID,
 		Labels:                  map[string]string{"agent.harness.harness": "true"},
-		CapacityPersistentAgent: 1,
 	}); err != nil {
 		t.Fatalf("register console worker: %v", err)
 	}
 	claimed, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
 		WorkerID:      workerID,
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {

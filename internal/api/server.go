@@ -277,11 +277,6 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
-	if r.URL.Path == "/v2/queue/stats" {
-		s.handleQueueStats(w, r, principal)
-		return
-	}
-
 	if r.URL.Path == provisionerAssignmentsPath || strings.HasPrefix(r.URL.Path, provisionerAssignmentsPath+"/") {
 		s.handleProvisionerAssignmentsPath(w, r, principal)
 		return

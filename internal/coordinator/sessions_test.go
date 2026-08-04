@@ -155,15 +155,14 @@ func TestConsoleSessionLifecycle(t *testing.T) {
 	}
 
 	if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-local",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
-		CapacityPersistentAgent: 1,
+		ID:             "w-local",
+		Labels:         map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		CapacityBucket: flowworker.BucketPersistentAgent,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 	claimed, ok, err := fixture.claimNext(ctx, flowworker.ClaimInput{
 		WorkerID:      "w-local",
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {
@@ -334,11 +333,16 @@ INSERT INTO workflow_node_runs (
 		t.Fatalf("insert workflow node run: %v", err)
 	}
 
-	if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-local",
-		CapacityPersistentAgent: 1,
-	}); err != nil {
-		t.Fatalf("register worker: %v", err)
+	// Workers are one-shot: worker_assignments.worker_id is globally unique, so
+	// each claim uses a fresh worker id.
+	registerWorker := func(workerID string) {
+		t.Helper()
+		if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
+			ID:             workerID,
+			CapacityBucket: flowworker.BucketPersistentAgent,
+		}); err != nil {
+			t.Fatalf("register worker %s: %v", workerID, err)
+		}
 	}
 	enqueueWorkflowAuthor := func(attempt int) flowworker.Job {
 		t.Helper()
@@ -360,11 +364,11 @@ INSERT INTO workflow_node_runs (
 		}
 		return job
 	}
-	startWorkflowAuthor := func(job flowworker.Job) StartAuthorSessionResult {
+	startWorkflowAuthor := func(job flowworker.Job, workerID string) StartAuthorSessionResult {
 		t.Helper()
+		registerWorker(workerID)
 		claimed, ok, err := fixture.claimNext(ctx, flowworker.ClaimInput{
-			WorkerID:      "w-local",
-			Buckets:       []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
+			WorkerID:      workerID,
 			LeaseDuration: time.Minute,
 		})
 		if err != nil {
@@ -379,7 +383,7 @@ INSERT INTO workflow_node_runs (
 		started, err := sessions.StartAuthorSession(ctx, StartAuthorSessionInput{
 			JobID:    job.ID,
 			LeaseID:  claimed.Lease.ID,
-			WorkerID: "w-local",
+			WorkerID: workerID,
 			Harness:  flowharness.Harness,
 		})
 		if err != nil {
@@ -389,7 +393,7 @@ INSERT INTO workflow_node_runs (
 	}
 
 	firstJob := enqueueWorkflowAuthor(1)
-	first := startWorkflowAuthor(firstJob)
+	first := startWorkflowAuthor(firstJob, "w-local")
 	if _, err := sessions.UpdateSessionState(ctx, first.Session.ID, SessionWorking); err != nil {
 		t.Fatalf("mark first workflow session working: %v", err)
 	}
@@ -425,7 +429,7 @@ UPDATE leases SET expires_at = ? WHERE id = ?`,
 	}
 
 	replacementJob := enqueueWorkflowAuthor(2)
-	replacement := startWorkflowAuthor(replacementJob)
+	replacement := startWorkflowAuthor(replacementJob, "w-local-2")
 	if replacement.Session.ID == first.Session.ID ||
 		replacement.Session.WorkflowRunID != workflowRunID ||
 		replacement.Session.NodeRunID != nodeRunID {
@@ -443,15 +447,14 @@ func TestReconcileCrashedConsoleSessionDoesNotReenqueue(t *testing.T) {
 		t.Fatalf("ensure console job: %v", err)
 	}
 	if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-local",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
-		CapacityPersistentAgent: 1,
+		ID:             "w-local",
+		Labels:         map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		CapacityBucket: flowworker.BucketPersistentAgent,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 	claimed, ok, err := fixture.claimNext(ctx, flowworker.ClaimInput{
 		WorkerID:      "w-local",
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {
@@ -721,11 +724,43 @@ func entrypointCommandForTest(t *testing.T, payload map[string]any) string {
 	return command
 }
 
-// claimNext adapts the single-project session tests to the cross-project claim
-// entry point with one queue.
+// claimNext adapts the single-project session tests to the assignment-created
+// worker model: it reserves an assignment binding the worker to the next
+// eligible queued job, then claims that exact assignment.
 func (f sessionFixture) claimNext(ctx context.Context, input flowworker.ClaimInput) (flowworker.ClaimedJob, bool, error) {
-	claim, ok, err := flowworker.ClaimAcrossProjects(ctx, f.directory, []flowworker.ProjectQueue{{ProjectID: f.project.ID, Queue: f.workers}}, input)
-	return flowworker.ClaimedJob{Job: claim.Job, Lease: claim.Lease}, ok, err
+	workerRow, err := f.directory.GetWorker(ctx, input.WorkerID)
+	if err != nil {
+		return flowworker.ClaimedJob{}, false, err
+	}
+	jobs, err := f.workers.ListJobs(ctx)
+	if err != nil {
+		return flowworker.ClaimedJob{}, false, err
+	}
+	for _, job := range jobs {
+		if job.State != flowworker.JobQueued {
+			continue
+		}
+		assignment, err := f.workers.ReserveAssignment(ctx, flowworker.ReserveAssignmentInput{
+			JobID: job.ID, WorkerID: input.WorkerID, ProviderID: "test-provider", ProfileName: "test-profile", ProviderType: "test",
+			ProviderRequestID: "test-request-" + job.ID + "-" + input.WorkerID,
+			ProfileLabels:     job.Selector,
+			AllowedRoles:      []flowworker.JobRole{job.Role},
+			AllowedBuckets:    []flowworker.CapacityBucket{job.CapacityBucket},
+			RequiredSelector:  job.Selector,
+			StartupDeadline:   time.Now().UTC().Add(10 * time.Minute),
+		})
+		if err != nil {
+			continue
+		}
+		claimed, err := f.workers.ClaimAssignment(ctx, flowworker.ClaimAssignmentInput{
+			AssignmentID: assignment.ID, Worker: workerRow, LeaseDuration: input.LeaseDuration,
+		})
+		if err != nil {
+			return flowworker.ClaimedJob{}, false, err
+		}
+		return claimed, true, nil
+	}
+	return flowworker.ClaimedJob{}, false, nil
 }
 
 func countRows(database *sql.DB, table string) (int, error) {
@@ -748,15 +783,15 @@ func TestTaskSessionRevocationAndGitWriteLivenessFence(t *testing.T) {
 		t.Fatalf("ensure task console: %v", err)
 	}
 	if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-task-console",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
-		CapacityPersistentAgent: 1,
-		HeartbeatTTL:            time.Minute,
+		ID:             "w-task-console",
+		Labels:         map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		HeartbeatTTL:   time.Minute,
+		CapacityBucket: flowworker.BucketPersistentAgent,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 	claimed, ok, err := fixture.claimNext(ctx, flowworker.ClaimInput{
-		WorkerID: "w-task-console", Buckets: []flowworker.CapacityBucket{flowworker.BucketPersistentAgent}, LeaseDuration: time.Minute,
+		WorkerID: "w-task-console", LeaseDuration: time.Minute,
 	})
 	if err != nil || !ok || claimed.Job.ID != ensured.Job.ID {
 		t.Fatalf("claim task console: claim=%+v ok=%t err=%v", claimed.Job, ok, err)
@@ -802,12 +837,12 @@ func TestLateTaskConsoleExitDoesNotRestoreTerminalTaskChange(t *testing.T) {
 	}
 	if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID: "w-late-console", Labels: map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
-		CapacityPersistentAgent: 1, HeartbeatTTL: time.Minute,
+		CapacityBucket: flowworker.BucketPersistentAgent,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 	claimed, ok, err := fixture.claimNext(ctx, flowworker.ClaimInput{
-		WorkerID: "w-late-console", Buckets: []flowworker.CapacityBucket{flowworker.BucketPersistentAgent}, LeaseDuration: time.Minute,
+		WorkerID: "w-late-console", LeaseDuration: time.Minute,
 	})
 	if err != nil || !ok || claimed.Job.ID != ensured.Job.ID {
 		t.Fatalf("claim task console: claim=%+v ok=%t err=%v", claimed.Job, ok, err)
@@ -884,15 +919,14 @@ func TestMarkPersistentSessionExitedRejectsConsoleRole(t *testing.T) {
 		t.Fatalf("ensure console job: %v", err)
 	}
 	if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                      "w-local",
-		Labels:                  map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
-		CapacityPersistentAgent: 1,
+		ID:             "w-local",
+		Labels:         map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		CapacityBucket: flowworker.BucketPersistentAgent,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 	claimed, ok, err := fixture.claimNext(ctx, flowworker.ClaimInput{
 		WorkerID:      "w-local",
-		Buckets:       []flowworker.CapacityBucket{flowworker.BucketPersistentAgent},
 		LeaseDuration: time.Minute,
 	})
 	if err != nil {

@@ -10,8 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/http/httputil"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ClarifiedLabs/flow/internal/api"
 	"github.com/ClarifiedLabs/flow/internal/checkverdict"
 	flowclient "github.com/ClarifiedLabs/flow/internal/client"
 	"github.com/ClarifiedLabs/flow/internal/config"
@@ -583,43 +580,6 @@ func TestLogLevelFlagEnablesDebugLogging(t *testing.T) {
 	}
 }
 
-func TestWorkerJoinsWhenConfigOmitsToken(t *testing.T) {
-	fixture := newWorkerTestFixture(t)
-	server, err := api.NewServer(api.ServerOptions{
-		Registry:        fixture.Registry,
-		OwnerToken:      "owner-token",
-		HookToken:       "hook-token",
-		WorkerJoinToken: "join-token",
-	})
-	if err != nil {
-		t.Fatalf("new server: %v", err)
-	}
-	httpServer := httptest.NewServer(server)
-	t.Cleanup(httpServer.Close)
-	toolYAML, _ := workerToolConfigYAML(t)
-	configPath := writeWorkerConfig(t, t.TempDir(), workerConfigOptions{
-		coordinatorURL: httpServer.URL,
-		capacityBucket: "ephemeral",
-		capacityCount:  1,
-		toolYAML:       toolYAML,
-		omitToken:      true,
-	})
-	t.Setenv("FLOW_WORKER_JOIN_TOKEN", "join-token")
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	exitCode := run([]string{"-c", configPath, "--register-only", "--heartbeat-ttl=1s"}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("exitCode = %d, stderr = %q, stdout = %q", exitCode, stderr.String(), stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "registered: w-local") || !strings.Contains(stdout.String(), "claim: disabled") {
-		t.Fatalf("stdout = %q", stdout.String())
-	}
-	if value := os.Getenv("FLOW_WORKER_JOIN_TOKEN"); value != "" {
-		t.Fatalf("FLOW_WORKER_JOIN_TOKEN remained set as %q", value)
-	}
-}
-
 func TestReadySessionHelperProcess(t *testing.T) {
 	if os.Getenv("WORKER_READY_HELPER") != "1" {
 		return
@@ -648,7 +608,23 @@ func TestReadySessionHelperProcess(t *testing.T) {
 
 func TestWorkerRetriesTransientCoordinatorHeartbeatBeforeClaim(t *testing.T) {
 	t.Parallel()
+	requireWorkerTool(t, "git")
+	requireWorkerTool(t, "tmux")
 	fixture := newWorkerTestFixture(t)
+	job, err := fixture.Queue.EnqueueJob(context.Background(), flowworker.EnqueueJobInput{
+		Role:           flowworker.RoleCI,
+		CapacityBucket: flowworker.BucketEphemeral,
+		Payload: map[string]any{
+			"base":       "main",
+			"branch":     "main",
+			"blocking":   true,
+			"entrypoint": map[string]any{"argv": []string{"/bin/true"}, "shell": false},
+		},
+	})
+	if err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	reserveWorkerAssignment(t, fixture, job, "w-local")
 	server := fixture.Server
 	var heartbeatAttempts atomic.Int32
 	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -662,22 +638,16 @@ func TestWorkerRetriesTransientCoordinatorHeartbeatBeforeClaim(t *testing.T) {
 	}))
 	t.Cleanup(httpServer.Close)
 
-	toolYAML, _ := workerToolConfigYAML(t)
-	configPath := writeWorkerConfig(t, t.TempDir(), workerConfigOptions{
-		coordinatorURL: httpServer.URL,
-		capacityBucket: "ephemeral",
-		capacityCount:  1,
-		toolYAML:       toolYAML,
-	})
+	configPath := writeWorkerConfig(t, t.TempDir(), workerConfigOptions{coordinatorURL: httpServer.URL})
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"-c", configPath, "--once", "--claim-wait", "0s"}, &stdout, &stderr)
+	exitCode := run([]string{"run", "--one-shot", "-c", configPath, "--claim-wait", "0s"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"worker transient error: heartbeat worker: restart: coordinator restarting", "claimed: none"} {
+	for _, want := range []string{"worker transient error: heartbeat worker: restart: coordinator restarting", "claimed: " + job.ID} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("worker output missing %q:\n%s", want, output)
 		}
@@ -711,6 +681,7 @@ printf renew-ok > "$1"
 	if err != nil {
 		t.Fatalf("enqueue job: %v", err)
 	}
+	reserveWorkerAssignment(t, fixture, job, "w-local")
 	server := fixture.Server
 	var renewAttempts atomic.Int32
 	var protectOnce sync.Once
@@ -736,17 +707,11 @@ printf renew-ok > "$1"
 	}))
 	t.Cleanup(httpServer.Close)
 
-	toolYAML, _ := workerToolConfigYAML(t)
-	configPath := writeWorkerConfig(t, t.TempDir(), workerConfigOptions{
-		coordinatorURL: httpServer.URL,
-		capacityBucket: "ephemeral",
-		capacityCount:  1,
-		toolYAML:       toolYAML,
-	})
+	configPath := writeWorkerConfig(t, t.TempDir(), workerConfigOptions{coordinatorURL: httpServer.URL})
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"-c", configPath, "--once", "--claim-wait", "0s", "--lease", "3s", "--heartbeat-ttl", "2s"}, &stdout, &stderr)
+	exitCode := run([]string{"run", "--one-shot", "-c", configPath, "--claim-wait", "0s", "--lease", "3s", "--heartbeat-ttl", "2s"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("exitCode = %d, stderr = %q\nstdout = %s", exitCode, stderr.String(), stdout.String())
 	}
@@ -822,64 +787,6 @@ func TestLeaseHeartbeatCancelsJobAfterAuthoritativeLeaseLoss(t *testing.T) {
 	}
 }
 
-func TestWorkerLegacyCapacityMagnitudeRunsOneSequentialClaim(t *testing.T) {
-	t.Parallel()
-	requireWorkerTool(t, "git")
-	requireWorkerTool(t, "tmux")
-	ctx := context.Background()
-	fixture := newWorkerTestFixture(t)
-	scriptPath := writeWorkerScript(t, "#!/bin/sh\nexit 0\n")
-	enqueue := func(priority int) flowworker.Job {
-		job, err := fixture.Queue.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-			Role:           flowworker.RoleCI,
-			CapacityBucket: flowworker.BucketEphemeral,
-			Priority:       priority,
-			Payload: map[string]any{"entrypoint": map[string]any{
-				"argv": []string{scriptPath}, "shell": false,
-			}, "blocking": true},
-		})
-		if err != nil {
-			t.Fatalf("enqueue job: %v", err)
-		}
-		return job
-	}
-	firstJob := enqueue(10)
-	secondJob := enqueue(9)
-
-	httpServer := httptest.NewServer(fixture.Server)
-	t.Cleanup(httpServer.Close)
-	toolYAML, _ := workerToolConfigYAML(t)
-	configPath := writeWorkerConfig(t, t.TempDir(), workerConfigOptions{
-		coordinatorURL: httpServer.URL,
-		capacityBucket: "ephemeral",
-		capacityCount:  7,
-		toolYAML:       toolYAML,
-	})
-
-	var stdout, stderr bytes.Buffer
-	if exitCode := run([]string{"-c", configPath, "--once", "--claim-wait", "0s", "--lease", "30s"}, &stdout, &stderr); exitCode != 0 {
-		t.Fatalf("exitCode = %d, stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
-	}
-	first, err := fixture.Queue.GetJob(ctx, firstJob.ID)
-	if err != nil {
-		t.Fatalf("get first job: %v", err)
-	}
-	second, err := fixture.Queue.GetJob(ctx, secondJob.ID)
-	if err != nil {
-		t.Fatalf("get second job: %v", err)
-	}
-	if first.State != flowworker.JobFinished || second.State != flowworker.JobQueued {
-		t.Fatalf("job states = %s, %s; want finished, queued", first.State, second.State)
-	}
-	registered, err := fixture.Directory.GetWorker(ctx, "w-local")
-	if err != nil {
-		t.Fatalf("get registered worker: %v", err)
-	}
-	if registered.CapacityEphemeral != 1 {
-		t.Fatalf("registered ephemeral acceptance = %d, want 1", registered.CapacityEphemeral)
-	}
-}
-
 func TestWorkerConsoleCleanExitReleasesSession(t *testing.T) {
 	t.Parallel()
 	requireWorkerTool(t, "git")
@@ -901,24 +808,21 @@ printf console-exit > "$1"
 	if err != nil {
 		t.Fatalf("ensure console job: %v", err)
 	}
+	reserveWorkerAssignment(t, fixture, ensured.Job, "w-local")
 
 	server := fixture.Server
 	httpServer := httptest.NewServer(server)
 	t.Cleanup(httpServer.Close)
 
-	toolYAML, _ := workerToolConfigYAML(t)
 	configPath := writeWorkerConfig(t, t.TempDir(), workerConfigOptions{
 		coordinatorURL:    httpServer.URL,
 		agentHarnessLabel: true,
-		capacityBucket:    "persistent_agent",
-		capacityCount:     1,
-		toolYAML:          toolYAML,
 		principal:         true,
 	})
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"-c", configPath, "--once", "--claim-wait", "0s", "--lease", "30s"}, &stdout, &stderr)
+	exitCode := run([]string{"run", "--one-shot", "-c", configPath, "--claim-wait", "0s", "--lease", "30s"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
@@ -989,6 +893,7 @@ func TestWorkerStoppedTaskConsoleReportsProcessExit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure task console job: %v", err)
 	}
+	reserveWorkerAssignment(t, fixture, ensured.Job, "w-local")
 	startedPath := filepath.Join(t.TempDir(), "console-started")
 	stopPath := filepath.Join(t.TempDir(), "console-stop")
 	scriptPath := writeWorkerScript(t, `#!/bin/sh
@@ -1012,11 +917,8 @@ while [ ! -f "$2" ]; do sleep 0.1; done
 
 	httpServer := httptest.NewServer(fixture.Server)
 	t.Cleanup(httpServer.Close)
-	toolYAML, _ := workerToolConfigYAML(t)
 	configPath := writeWorkerConfig(t, t.TempDir(), workerConfigOptions{
-		coordinatorURL: httpServer.URL, agentHarnessLabel: true,
-		capacityBucket: "persistent_agent", capacityCount: 1,
-		toolYAML: toolYAML, principal: true,
+		coordinatorURL: httpServer.URL, agentHarnessLabel: true, principal: true,
 	})
 
 	type runResult struct {
@@ -1028,7 +930,7 @@ while [ ! -f "$2" ]; do sleep 0.1; done
 	go func() {
 		var stdout bytes.Buffer
 		var stderr bytes.Buffer
-		exitCode := run([]string{"-c", configPath, "--once", "--claim-wait", "0s", "--lease", "3s"}, &stdout, &stderr)
+		exitCode := run([]string{"run", "--one-shot", "-c", configPath, "--claim-wait", "0s", "--lease", "3s"}, &stdout, &stderr)
 		done <- runResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String()}
 	}()
 
@@ -1091,23 +993,20 @@ exit 42
 	if err != nil {
 		t.Fatalf("ensure console job: %v", err)
 	}
+	reserveWorkerAssignment(t, fixture, ensured.Job, "w-local")
 
 	httpServer := httptest.NewServer(fixture.Server)
 	t.Cleanup(httpServer.Close)
 
-	toolYAML, _ := workerToolConfigYAML(t)
 	configPath := writeWorkerConfig(t, t.TempDir(), workerConfigOptions{
 		coordinatorURL:    httpServer.URL,
 		agentHarnessLabel: true,
-		capacityBucket:    "persistent_agent",
-		capacityCount:     1,
-		toolYAML:          toolYAML,
 		principal:         true,
 	})
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"-c", configPath, "--once", "--claim-wait", "0s", "--lease", "30s"}, &stdout, &stderr)
+	exitCode := run([]string{"run", "--one-shot", "-c", configPath, "--claim-wait", "0s", "--lease", "30s"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
@@ -1161,110 +1060,36 @@ exit 42
 	}
 }
 
-func TestWorkerRegisterOnlyDoesNotClaimJobs(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	fixture := newWorkerTestFixture(t)
-	job, err := fixture.Queue.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		Role:           flowworker.RoleCI,
-		CapacityBucket: flowworker.BucketEphemeral,
-		Payload:        map[string]any{"blocking": true},
-	})
-	if err != nil {
-		t.Fatalf("enqueue job: %v", err)
-	}
-
-	server := fixture.Server
-	httpServer := httptest.NewServer(server)
-	t.Cleanup(httpServer.Close)
-
-	toolYAML, _ := workerToolConfigYAML(t)
-	configPath := filepath.Join(t.TempDir(), "worker.yaml")
-	if err := os.WriteFile(configPath, []byte(`worker_id: w-local
-coordinator_url: `+httpServer.URL+`
-token: worker-token
-work_dir: `+filepath.ToSlash(t.TempDir())+`
-capacity:
-  ephemeral: 1
-`+toolYAML+`
-`), 0o600); err != nil {
-		t.Fatalf("write worker config: %v", err)
-	}
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	exitCode := run([]string{"-c", configPath, "--register-only", "--once"}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "claim: disabled") {
-		t.Fatalf("worker output = %q", stdout.String())
-	}
-
-	stillQueued, err := fixture.Queue.GetJob(ctx, job.ID)
-	if err != nil {
-		t.Fatalf("get job: %v", err)
-	}
-	if stillQueued.State != flowworker.JobQueued {
-		t.Fatalf("job state = %q, want queued", stillQueued.State)
-	}
-}
-
 func TestWorkerUsesDiscoveredWorkerConfig(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	ctx := context.Background()
-	fixture := newWorkerTestFixture(t)
-	job, err := fixture.Queue.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		Role:           flowworker.RoleCI,
-		CapacityBucket: flowworker.BucketEphemeral,
-		Payload:        map[string]any{"blocking": true},
-	})
-	if err != nil {
-		t.Fatalf("enqueue job: %v", err)
-	}
-
-	server := fixture.Server
-	httpServer := httptest.NewServer(server)
-	t.Cleanup(httpServer.Close)
-
 	dataDir := t.TempDir()
 	configPath, err := config.DefaultClientConfigPath()
 	if err != nil {
 		t.Fatalf("default client config path: %v", err)
 	}
 	if err := config.WriteClientConfig(configPath, config.ClientConfig{
-		ServerURL: httpServer.URL,
+		ServerURL: "http://127.0.0.1:8421",
 		DataDir:   dataDir,
 	}); err != nil {
 		t.Fatalf("write client config: %v", err)
 	}
 	workerConfigPath := config.DefaultWorkerConfigPath(dataDir)
 	if err := os.WriteFile(workerConfigPath, []byte(`worker_id: w-local
-coordinator_url: `+httpServer.URL+`
+coordinator_url: http://127.0.0.1:8421
 token: worker-token
 work_dir: `+filepath.ToSlash(t.TempDir())+`
-capacity:
-  ephemeral: 1
 `), 0o600); err != nil {
 		t.Fatalf("write worker config: %v", err)
 	}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"--register-only"}, &stdout, &stderr)
+	exitCode := run([]string{"config"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "claim: disabled") {
-		t.Fatalf("worker output = %q", stdout.String())
-	}
-
-	stillQueued, err := fixture.Queue.GetJob(ctx, job.ID)
-	if err != nil {
-		t.Fatalf("get job: %v", err)
-	}
-	if stillQueued.State != flowworker.JobQueued {
-		t.Fatalf("job state = %q, want queued", stillQueued.State)
+	if !strings.Contains(stdout.String(), "worker_id: w-local") {
+		t.Fatalf("worker config output = %q", stdout.String())
 	}
 }
 
@@ -1288,8 +1113,6 @@ token: worker-token
 work_dir: /tmp/worker
 labels:
   local: "true"
-capacity:
-  persistent_agent: 1
 `), 0o600); err != nil {
 		t.Fatalf("write worker config: %v", err)
 	}
@@ -1301,7 +1124,7 @@ capacity:
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"worker_id: w-local", "protocol: 6", "labels: 3", "capacity_persistent_agent: 1"} {
+	for _, want := range []string{"worker_id: w-local", "protocol: 6", "labels: 3"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("config output missing %q:\n%s", want, output)
 		}
@@ -1419,6 +1242,23 @@ func TestRegistrationHarnessModelsFallsBackWhenCatalogFails(t *testing.T) {
 func TestWorkerStartupReaperUsesWorkerToken(t *testing.T) {
 	putFakeEmptyTmuxOnPath(t)
 	fixture := newWorkerTestFixture(t)
+	// The one-shot worker must claim a job to exit. Use a missing base ref so
+	// execution fails fast at git (before any tmux work), letting the worker
+	// report the job error and exit 0 while the startup reaper assertion holds.
+	job, err := fixture.Queue.EnqueueJob(context.Background(), flowworker.EnqueueJobInput{
+		Role:           flowworker.RoleCI,
+		CapacityBucket: flowworker.BucketEphemeral,
+		Payload: map[string]any{
+			"base":       "missing-base",
+			"branch":     "missing-base",
+			"blocking":   true,
+			"entrypoint": map[string]any{"argv": []string{"/bin/true"}, "shell": false},
+		},
+	})
+	if err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	reserveWorkerAssignment(t, fixture, job, "w-local")
 	server := fixture.Server
 	httpServer := httptest.NewServer(server)
 	t.Cleanup(httpServer.Close)
@@ -1428,15 +1268,13 @@ func TestWorkerStartupReaperUsesWorkerToken(t *testing.T) {
 coordinator_url: `+httpServer.URL+`
 token: worker-token
 work_dir: `+filepath.ToSlash(t.TempDir())+`
-capacity:
-  ephemeral: 1
 `), 0o600); err != nil {
 		t.Fatalf("write worker config: %v", err)
 	}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"-c", configPath, "--once", "--claim-wait", "0s"}, &stdout, &stderr)
+	exitCode := run([]string{"run", "--one-shot", "-c", configPath, "--claim-wait", "0s"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
@@ -1446,147 +1284,6 @@ capacity:
 	if !strings.Contains(stderr.String(), "reaped orphaned tmux sessions: 0") {
 		t.Fatalf("stderr = %q, want startup reaper summary", stderr.String())
 	}
-}
-
-// TestRunWorkerLoopContinuesAfterJobError is the regression for one failed job
-// taking down the whole worker process (and abandoning its sibling jobs): in
-// service mode a job-scoped failure must be logged and survived, leaving the
-// loop free to claim and finish the next job.
-func TestRunWorkerLoopContinuesAfterJobError(t *testing.T) {
-	t.Parallel()
-	requireWorkerTool(t, "git")
-	requireWorkerTool(t, "tmux")
-	ctx := context.Background()
-	fixture := newWorkerTestFixture(t)
-	if _, err := fixture.Directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID:                "w-local",
-		CapacityEphemeral: 1,
-		HeartbeatTTL:      time.Minute,
-	}); err != nil {
-		t.Fatalf("register worker: %v", err)
-	}
-
-	failingJob, err := fixture.Queue.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		Role:           flowworker.RoleCI,
-		CapacityBucket: flowworker.BucketEphemeral,
-		Priority:       2,
-		Payload: map[string]any{
-			"base":   "missing-base",
-			"branch": "missing-base",
-			"entrypoint": map[string]any{
-				"argv":  []string{"true"},
-				"shell": false,
-			}, "blocking": true},
-	})
-	if err != nil {
-		t.Fatalf("enqueue failing job: %v", err)
-	}
-
-	nextOut := filepath.Join(t.TempDir(), "next.out")
-	nextScript := writeWorkerScript(t, `#!/bin/sh
-printf next-ok > "$1"
-`)
-	nextJob, err := fixture.Queue.EnqueueJob(ctx, flowworker.EnqueueJobInput{
-		Role:           flowworker.RoleCI,
-		CapacityBucket: flowworker.BucketEphemeral,
-		Priority:       1,
-		Payload: map[string]any{
-			"base":   "main",
-			"branch": "main",
-			"entrypoint": map[string]any{
-				"argv":  []string{nextScript, nextOut},
-				"shell": false,
-			}, "blocking": true},
-	})
-	if err != nil {
-		t.Fatalf("enqueue next job: %v", err)
-	}
-
-	coordinatorServer := httptest.NewServer(fixture.Server)
-	t.Cleanup(coordinatorServer.Close)
-	target, err := url.Parse(coordinatorServer.URL)
-	if err != nil {
-		t.Fatalf("parse coordinator url: %v", err)
-	}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	// The gate ends the otherwise endless service loop: once closed, the next
-	// pre-claim heartbeat fails non-retryably and runWorkerLoop returns.
-	var gateClosed atomic.Bool
-	gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if gateClosed.Load() {
-			http.Error(w, "test gate closed", http.StatusForbidden)
-			return
-		}
-		proxy.ServeHTTP(w, r)
-	}))
-	t.Cleanup(gate.Close)
-
-	cfg := config.WorkerConfig{
-		WorkerID:       "w-local",
-		CoordinatorURL: gate.URL,
-		Token:          "worker-token",
-		WorkDir:        t.TempDir(),
-		Tmux: config.WorkerTmuxConfig{
-			SocketPath: isolatedWorkerTmuxSocket(t),
-		},
-		Git: config.WorkerGitConfig{
-			Principal: "worker:w-local",
-		},
-	}
-	client, err := newWorkerClient(cfg)
-	if err != nil {
-		t.Fatalf("create worker client: %v", err)
-	}
-	var diskReady atomic.Bool
-	diskReady.Store(true)
-	maintenance := newWorkerMaintenance(cfg, config.ResolvedWorkerCleanup{
-		Interval:          time.Hour,
-		OrphanGrace:       time.Hour,
-		MinFreePercent:    0.0001,
-		ResumeFreePercent: 0.0002,
-	}, client, nil, &diskReady)
-	timings := workerTimings{
-		ClaimWait:     0,
-		LeaseDuration: 30 * time.Second,
-		HeartbeatTTL:  30 * time.Second,
-	}
-
-	var stdout bytes.Buffer
-	loopDone := make(chan error, 1)
-	go func() {
-		loopDone <- runWorkerLoop(context.Background(), client, cfg, timings, maintenance, false, &stdout)
-	}()
-
-	waitForWorkerJobState(t, fixture, failingJob.ID, flowworker.JobFailed, 30*time.Second)
-	waitForWorkerJobState(t, fixture, nextJob.ID, flowworker.JobFinished, 30*time.Second)
-	waitForWorkerFile(t, nextOut, 30*time.Second)
-	gateClosed.Store(true)
-
-	var loopErr error
-	select {
-	case loopErr = <-loopDone:
-	case <-time.After(15 * time.Second):
-		t.Fatalf("worker loop did not stop after gate closed; stdout:\n%s", stdout.String())
-	}
-	if loopErr == nil {
-		t.Fatal("worker loop returned nil, want gate error")
-	}
-	var jobErr *jobError
-	if errors.As(loopErr, &jobErr) {
-		t.Fatalf("worker loop exited on job-scoped error %v; should have continued", loopErr)
-	}
-	output := stdout.String()
-	if !strings.Contains(output, "job error:") || !strings.Contains(output, "continuing") {
-		t.Fatalf("stdout missing job error continuation:\n%s", output)
-	}
-	finishedNext, err := fixture.Queue.GetJob(ctx, nextJob.ID)
-	if err != nil {
-		t.Fatalf("get next job: %v", err)
-	}
-	if finishedNext.State != flowworker.JobFinished {
-		t.Fatalf("next job state = %q, want finished", finishedNext.State)
-	}
-	waitForWorkerPathAbsent(t, filepath.Join(cfg.WorkDir, "jobs", nextJob.ID), 15*time.Second)
 }
 
 func waitForWorkerJobState(t *testing.T, fixture workerTestFixture, jobID string, want flowworker.JobState, timeout time.Duration) {
@@ -1676,58 +1373,25 @@ func waitForWorkerPathAbsent(t *testing.T, path string, timeout time.Duration) {
 	t.Fatalf("path still exists after %s: %s", timeout, path)
 }
 
-func isolatedWorkerTmuxSocket(t *testing.T) string {
-	t.Helper()
-	tmuxTmp, err := os.MkdirTemp("/tmp", "flow-worker-tmux-")
-	if err != nil {
-		t.Fatalf("create tmux dir: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.RemoveAll(tmuxTmp)
-	})
-	return filepath.Join(tmuxTmp, "tmux.sock")
-}
-
-func workerTmuxSessionExists(socketPath string, sessionName string) bool {
-	args := []string{"has-session", "-t", sessionName}
-	if strings.TrimSpace(socketPath) != "" {
-		args = append([]string{"-S", socketPath}, args...)
-	}
-	return exec.Command("tmux", args...).Run() == nil
-}
-
-// workerConfigOptions describes the per-test variations of the worker
-// worker.yaml fixture assembled by writeWorkerConfig. The constant fields
-// (worker_id, token, and dynamic work_dir) are shared across
-// every call site; only the fields below differ.
+// workerConfigOptions describes the per-test variations of worker.yaml.
 type workerConfigOptions struct {
-	coordinatorURL    string // coordinator_url value (e.g. httpServer.URL)
-	agentHarnessLabel bool   // include labels: { agent.harness.harness: "true" }
-	capacityBucket    string // capacity bucket key (e.g. "ephemeral")
-	capacityCount     int    // capacity bucket count
-	toolYAML          string // tool/terminal/tmux config fragment
-	principal         bool   // include git.principal: worker:w-local
-	omitToken         bool   // leave token empty so the worker joins at startup
+	coordinatorURL    string
+	agentHarnessLabel bool
+	principal         bool
 }
 
 // writeWorkerConfig writes a worker worker.yaml into dir from opts and returns
-// the config path. It assembles the shared constant fragments plus the varying
-// capacity bucket, labels, and git fields used across the worker tests.
+// the config path.
 func writeWorkerConfig(t *testing.T, dir string, opts workerConfigOptions) string {
 	t.Helper()
 	var b strings.Builder
 	b.WriteString("worker_id: w-local\n")
 	b.WriteString("coordinator_url: " + opts.coordinatorURL + "\n")
-	if !opts.omitToken {
-		b.WriteString("token: worker-token\n")
-	}
+	b.WriteString("token: worker-token\n")
 	b.WriteString("work_dir: " + filepath.ToSlash(t.TempDir()) + "\n")
 	if opts.agentHarnessLabel {
 		b.WriteString("labels:\n  agent.harness.harness: \"true\"\n")
 	}
-	b.WriteString("capacity:\n")
-	b.WriteString(fmt.Sprintf("  %s: %d\n", opts.capacityBucket, opts.capacityCount))
-	b.WriteString(opts.toolYAML)
 	if opts.principal {
 		b.WriteString("git:\n")
 		b.WriteString("  principal: worker:w-local\n")
@@ -1737,14 +1401,6 @@ func writeWorkerConfig(t *testing.T, dir string, opts workerConfigOptions) strin
 		t.Fatalf("write worker config: %v", err)
 	}
 	return configPath
-}
-
-func workerToolConfigYAML(t *testing.T) (string, string) {
-	t.Helper()
-	socketPath := isolatedWorkerTmuxSocket(t)
-	return `tmux:
-  socket_path: ` + filepath.ToSlash(socketPath) + `
-`, socketPath
 }
 
 func putFakeEmptyTmuxOnPath(t *testing.T) {
@@ -1792,8 +1448,6 @@ coordinator_url: http://127.0.0.1:8421
 work_dir: /tmp/worker
 labels:
   local: "true"
-capacity:
-  persistent_agent: 1
 `), 0o600); err != nil {
 		t.Fatalf("write worker config: %v", err)
 	}
@@ -1805,7 +1459,7 @@ capacity:
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"worker_id: w-local", "protocol: 6", "labels: 3", "capacity_persistent_agent: 1"} {
+	for _, want := range []string{"worker_id: w-local", "protocol: 6", "labels: 3"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("config output missing %q:\n%s", want, output)
 		}
@@ -1839,26 +1493,24 @@ func TestWorkerConsoleRunErrorReleasesSessionAndSurfacesError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure console job: %v", err)
 	}
+	reserveWorkerAssignment(t, fixture, ensured.Job, "w-local")
 
 	httpServer := httptest.NewServer(fixture.Server)
 	t.Cleanup(httpServer.Close)
 
-	toolYAML, _ := workerToolConfigYAML(t)
 	configPath := writeWorkerConfig(t, t.TempDir(), workerConfigOptions{
 		coordinatorURL:    httpServer.URL,
 		agentHarnessLabel: true,
-		capacityBucket:    "persistent_agent",
-		capacityCount:     1,
-		toolYAML:          toolYAML,
 		principal:         true,
 	})
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run([]string{"-c", configPath, "--once", "--claim-wait", "0s", "--lease", "30s"}, &stdout, &stderr)
-	// The job fails, so the worker exits non-zero and reports the error on stderr.
-	if exitCode != 1 {
-		t.Fatalf("exitCode = %d, want 1; stdout = %q, stderr = %q", exitCode, stdout.String(), stderr.String())
+	exitCode := run([]string{"run", "--one-shot", "-c", configPath, "--claim-wait", "0s", "--lease", "30s"}, &stdout, &stderr)
+	// The assignment was claimed, so a job-scoped failure is reported and the
+	// one-shot worker still exits successfully.
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0; stdout = %q, stderr = %q", exitCode, stdout.String(), stderr.String())
 	}
 	output := stdout.String()
 	if !strings.Contains(output, "released: "+ensured.Job.ID+" state=finished") {
@@ -1870,8 +1522,8 @@ func TestWorkerConsoleRunErrorReleasesSessionAndSurfacesError(t *testing.T) {
 		strings.Contains(stderr.String(), "report persistent session process exit") {
 		t.Fatalf("console run error masked by process-exit path:\nstdout=%s\nstderr=%s", output, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "run job:") {
-		t.Fatalf("worker stderr missing real run error: %q", stderr.String())
+	if !strings.Contains(output, "job error:") || !strings.Contains(output, "run job:") {
+		t.Fatalf("worker output missing real run error: %q", output)
 	}
 
 	session, ok, err := fixture.Sessions.LatestSessionForJob(ctx, ensured.Job.ID)
