@@ -119,11 +119,11 @@ func TestIsStaleSourceJobHeadReportMatchesWrappedForbidden(t *testing.T) {
 
 func TestAdvisoryVerdictFindingsStayInCheckDetailsWithoutThreadActions(t *testing.T) {
 	job := flowworker.Job{Payload: map[string]any{"blocking": false}}
-	if checkJobBlocksApproval(job) {
-		t.Fatal("advisory job was treated as blocking")
+	if blocking, err := checkJobBlockingValue(job); err != nil || blocking {
+		t.Fatalf("advisory job blocking = %t, %v; want false, nil", blocking, err)
 	}
-	if !checkJobBlocksApproval(flowworker.Job{Payload: map[string]any{}}) {
-		t.Fatal("legacy job without blocking marker must default to blocking")
+	if _, err := checkJobBlockingValue(flowworker.Job{Payload: map[string]any{}}); err == nil {
+		t.Fatal("job without blocking marker must be rejected, not defaulted")
 	}
 	report := workerexec.VerdictReport{
 		Verdict: "blocked",
@@ -155,8 +155,8 @@ func TestReviewDiscoveryKeepsBlockingPolicyButSuppressesThreadActions(t *testing
 		"blocking":         true,
 		"review_discovery": true,
 	}}
-	if !checkJobBlocksApproval(job) {
-		t.Fatal("blocking discovery source lost its error policy")
+	if blocking, err := checkJobBlockingValue(job); err != nil || !blocking {
+		t.Fatalf("blocking discovery source blocking = %t, %v; want true, nil", blocking, err)
 	}
 	if !reviewDiscoveryJob(job) {
 		t.Fatal("review discovery marker was not recognized")
@@ -169,7 +169,7 @@ func TestReviewDiscoveryKeepsBlockingPolicyButSuppressesThreadActions(t *testing
 		context.Background(),
 		nil,
 		coordinator.CheckKindReviewer,
-		checkJobBlocksApproval(job) && !reviewDiscoveryJob(job),
+		false,
 		false,
 		"",
 		flowworker.Lease{},
@@ -706,8 +706,7 @@ printf renew-ok > "$1"
 			"entrypoint": map[string]any{
 				"argv":  []string{scriptPath, outPath},
 				"shell": false,
-			},
-		},
+			}, "blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue job: %v", err)
@@ -837,7 +836,7 @@ func TestWorkerLegacyCapacityMagnitudeRunsOneSequentialClaim(t *testing.T) {
 			Priority:       priority,
 			Payload: map[string]any{"entrypoint": map[string]any{
 				"argv": []string{scriptPath}, "shell": false,
-			}},
+			}, "blocking": true},
 		})
 		if err != nil {
 			t.Fatalf("enqueue job: %v", err)
@@ -1169,6 +1168,7 @@ func TestWorkerRegisterOnlyDoesNotClaimJobs(t *testing.T) {
 	job, err := fixture.Queue.EnqueueJob(ctx, flowworker.EnqueueJobInput{
 		Role:           flowworker.RoleCI,
 		CapacityBucket: flowworker.BucketEphemeral,
+		Payload:        map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue job: %v", err)
@@ -1217,6 +1217,7 @@ func TestWorkerUsesDiscoveredWorkerConfig(t *testing.T) {
 	job, err := fixture.Queue.EnqueueJob(ctx, flowworker.EnqueueJobInput{
 		Role:           flowworker.RoleCI,
 		CapacityBucket: flowworker.BucketEphemeral,
+		Payload:        map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue job: %v", err)
@@ -1475,8 +1476,7 @@ func TestRunWorkerLoopContinuesAfterJobError(t *testing.T) {
 			"entrypoint": map[string]any{
 				"argv":  []string{"true"},
 				"shell": false,
-			},
-		},
+			}, "blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue failing job: %v", err)
@@ -1496,8 +1496,7 @@ printf next-ok > "$1"
 			"entrypoint": map[string]any{
 				"argv":  []string{nextScript, nextOut},
 				"shell": false,
-			},
-		},
+			}, "blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue next job: %v", err)

@@ -34,8 +34,7 @@ func TestCreateHistoryResumeDerivesImmutableLineageAndIsIdempotent(t *testing.T)
 			"entrypoint": map[string]any{
 				"argv":  []any{`prompt=$(cat); exec harness --session "$FLOW_HARNESS_SESSION" "$prompt"`},
 				"shell": true, "harness": "harness",
-			},
-		},
+			}, "agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	})
 	if err != nil {
 		t.Fatal(err)

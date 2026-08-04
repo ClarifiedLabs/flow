@@ -383,6 +383,7 @@ func TestConvergenceRepairKeepsEvidenceActiveAndCancelClosesTask(t *testing.T) {
 	workers := flowworker.NewService(runs.db)
 	consoleJob, err := workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
 		TaskID: &task.ID, Role: flowworker.RoleConsole, CapacityBucket: flowworker.BucketPersistentAgent,
+		Payload: map[string]any{"console_harness": "harness"},
 	})
 	if err != nil {
 		t.Fatalf("enqueue repair console job: %v", err)
@@ -400,6 +401,7 @@ UPDATE jobs SET state = 'finished' WHERE id = ?`, consoleJob.ID); err != nil {
 	}
 	cleanupJob, err := workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
 		TaskID: &task.ID, Role: flowworker.RoleCI, CapacityBucket: flowworker.BucketEphemeral,
+		Payload: map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue task-scoped cleanup job: %v", err)
@@ -442,6 +444,7 @@ UPDATE jobs SET state = 'finished' WHERE id = ?`, consoleJob.ID); err != nil {
 	}
 	if _, err := workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
 		TaskID: &task.ID, Role: flowworker.RoleConsole, CapacityBucket: flowworker.BucketPersistentAgent,
+		Payload: map[string]any{"console_harness": "harness"},
 	}); err == nil {
 		t.Fatal("terminal convergence task accepted a new console job")
 	}

@@ -684,7 +684,11 @@ func (s *projectServer) checkWorkerThreadLease(ctx context.Context, principal co
 	if !workerRoleAllowed(job.Role, allowedRoles) {
 		return errors.New("worker job role cannot perform this thread operation")
 	}
-	if !jobBlocksApproval(job) {
+	blocks, err := jobBlocksApproval(job)
+	if err != nil {
+		return err
+	}
+	if !blocks {
 		return errors.New("advisory and discovery check jobs cannot mutate review threads")
 	}
 	if job.TaskID == nil || strings.TrimSpace(*job.TaskID) != taskID {
@@ -697,24 +701,26 @@ func (s *projectServer) checkWorkerThreadLease(ctx context.Context, principal co
 	return nil
 }
 
-func jobBlockingValue(job worker.Job) (bool, bool) {
-	value, present := job.Payload["blocking"]
-	if !present {
-		return true, false
-	}
-	blocking, ok := value.(bool)
+// jobBlockingValue reads the stamped blocking value. Every review/check job
+// carries an explicit Boolean; an absent or wrong-typed value marks the job
+// corrupt instead of defaulting to blocking.
+func jobBlockingValue(job worker.Job) (bool, error) {
+	blocking, ok := job.Payload["blocking"].(bool)
 	if !ok {
-		return true, true
+		return false, fmt.Errorf("check job %s payload is missing boolean blocking", job.ID)
 	}
-	return blocking, true
+	return blocking, nil
 }
 
-func jobBlocksApproval(job worker.Job) bool {
+func jobBlocksApproval(job worker.Job) (bool, error) {
 	if discovery, _ := job.Payload["review_discovery"].(bool); discovery {
-		return false
+		return false, nil
 	}
-	blocking, stamped := jobBlockingValue(job)
-	return !stamped || blocking
+	blocking, err := jobBlockingValue(job)
+	if err != nil {
+		return false, err
+	}
+	return blocking, nil
 }
 
 func workerRoleAllowed(role worker.JobRole, allowed []worker.JobRole) bool {
@@ -796,12 +802,11 @@ func (s *projectServer) checkReportScope(r *http.Request, taskID string, checkNa
 		if err := s.checkSourceJobHead(r.Context(), job); err != nil {
 			return err
 		}
-		stampedBlocking, stamped := jobBlockingValue(job)
-		if request.Required == nil {
-			if stamped {
-				return errors.New("worker check required value does not match source job blocking mode")
-			}
-		} else if *request.Required != stampedBlocking {
+		stampedBlocking, err := jobBlockingValue(job)
+		if err != nil {
+			return err
+		}
+		if request.Required == nil || *request.Required != stampedBlocking {
 			return errors.New("worker check required value does not match source job blocking mode")
 		}
 		return nil

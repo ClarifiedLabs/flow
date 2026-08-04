@@ -18,21 +18,24 @@ func TestAssignmentReservationEligibilityAndGenericExclusion(t *testing.T) {
 
 	ineligible, err := service.EnqueueJob(ctx, EnqueueJobInput{
 		Role: RoleCI, CapacityBucket: BucketEphemeral, Priority: 30,
-		RunsOn: map[string]string{"os": "darwin", "pool": "trusted"},
+		RunsOn:  map[string]string{"os": "darwin", "pool": "trusted"},
+		Payload: map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue ineligible: %v", err)
 	}
 	reservedJob, err := service.EnqueueJob(ctx, EnqueueJobInput{
 		Role: RoleCI, CapacityBucket: BucketEphemeral, Priority: 20,
-		RunsOn: map[string]string{"os": "linux", "pool": "trusted"},
+		RunsOn:  map[string]string{"os": "linux", "pool": "trusted"},
+		Payload: map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue reserved: %v", err)
 	}
 	genericJob, err := service.EnqueueJob(ctx, EnqueueJobInput{
 		Role: RoleCI, CapacityBucket: BucketEphemeral, Priority: 10,
-		RunsOn: map[string]string{"os": "linux", "pool": "trusted"},
+		RunsOn:  map[string]string{"os": "linux", "pool": "trusted"},
+		Payload: map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue generic: %v", err)
@@ -113,7 +116,7 @@ func TestAssignmentExactClaimRetryAndTerminalClosure(t *testing.T) {
 	_, directory, service := newWorkerService(t)
 	now := time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
-	job, err := service.EnqueueJob(ctx, EnqueueJobInput{Role: RoleCI, CapacityBucket: BucketEphemeral, RunsOn: map[string]string{"os": "linux"}})
+	job, err := service.EnqueueJob(ctx, EnqueueJobInput{Role: RoleCI, CapacityBucket: BucketEphemeral, RunsOn: map[string]string{"os": "linux"}, Payload: map[string]any{"blocking": true}})
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
@@ -200,7 +203,7 @@ func TestAssignmentClaimRejectsWorkerAndCapabilityMismatches(t *testing.T) {
 		{name: "actual taint eligibility", workerID: func(a Assignment) string { return a.WorkerID }, labels: map[string]string{"os": "linux"}, taints: []scheduler.Taint{{Key: "dedicated", Value: "other", Effect: scheduler.EffectNoSchedule}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			job, err := service.EnqueueJob(ctx, EnqueueJobInput{Role: RoleCI, CapacityBucket: BucketEphemeral, RunsOn: map[string]string{"os": "linux"}})
+			job, err := service.EnqueueJob(ctx, EnqueueJobInput{Role: RoleCI, CapacityBucket: BucketEphemeral, RunsOn: map[string]string{"os": "linux"}, Payload: map[string]any{"blocking": true}})
 			if err != nil {
 				t.Fatalf("enqueue: %v", err)
 			}
@@ -229,7 +232,7 @@ func TestPendingAssignmentExpiryAndCancellationPreserveQueueSemantics(t *testing
 	store, directory, service := newWorkerService(t)
 	now := time.Date(2026, 8, 2, 15, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
-	job, err := service.EnqueueJob(ctx, EnqueueJobInput{Role: RoleCI, CapacityBucket: BucketEphemeral})
+	job, err := service.EnqueueJob(ctx, EnqueueJobInput{Role: RoleCI, CapacityBucket: BucketEphemeral, Payload: map[string]any{"blocking": true}})
 	if err != nil {
 		t.Fatalf("enqueue expiry job: %v", err)
 	}
@@ -253,7 +256,7 @@ func TestPendingAssignmentExpiryAndCancellationPreserveQueueSemantics(t *testing
 
 	service.now = func() time.Time { return now }
 	task := createTask(t, store)
-	cancelJob, err := service.EnqueueJob(ctx, EnqueueJobInput{TaskID: &task.ID, Role: RoleAuthor, CapacityBucket: BucketPersistentAgent})
+	cancelJob, err := service.EnqueueJob(ctx, EnqueueJobInput{TaskID: &task.ID, Role: RoleAuthor, CapacityBucket: BucketPersistentAgent, Payload: map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true}})
 	if err != nil {
 		t.Fatalf("enqueue cancellation job: %v", err)
 	}
@@ -276,7 +279,7 @@ func TestPendingAssignmentExpiryAndCancellationPreserveQueueSemantics(t *testing
 	// Owner force-done and workflow cancellation paths update jobs directly rather
 	// than calling CancelLiveJobsForTask. The schema must still close a claimed
 	// assignment so the provisioner can revoke its credential and delete it.
-	directJob, err := service.EnqueueJob(ctx, EnqueueJobInput{TaskID: &task.ID, Role: RoleCI, CapacityBucket: BucketEphemeral})
+	directJob, err := service.EnqueueJob(ctx, EnqueueJobInput{TaskID: &task.ID, Role: RoleCI, CapacityBucket: BucketEphemeral, Payload: map[string]any{"blocking": true}})
 	if err != nil {
 		t.Fatalf("enqueue direct cancellation job: %v", err)
 	}
@@ -305,7 +308,7 @@ func TestClaimedAssignmentClosesOnLeaseSweep(t *testing.T) {
 	_, directory, service := newWorkerService(t)
 	now := time.Date(2026, 8, 2, 16, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
-	job, err := service.EnqueueJob(ctx, EnqueueJobInput{Role: RoleCI, CapacityBucket: BucketEphemeral})
+	job, err := service.EnqueueJob(ctx, EnqueueJobInput{Role: RoleCI, CapacityBucket: BucketEphemeral, Payload: map[string]any{"blocking": true}})
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}

@@ -535,9 +535,9 @@ INSERT INTO workflow_node_runs (
 	if _, err := fixture.DB.ExecContext(ctx, `
 INSERT INTO jobs (
 	id, task_id, workflow_run_id, node_run_id, role, state, capacity_bucket,
-	created_at, updated_at
+	payload_json, created_at, updated_at
 ) VALUES ('j-await', ?, 'wr-await', 'nr-await', 'author', 'queued',
-	'persistent_agent', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, taskID); err != nil {
+	'persistent_agent', '{"agent_harness":"harness","phase_index":0,"final_phase":true}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, taskID); err != nil {
 		t.Fatalf("insert job: %v", err)
 	}
 
@@ -971,8 +971,8 @@ func TestBoardCardsLoadLatestSessionsWithConstantQueries(t *testing.T) {
 			jobID := fmt.Sprintf("j-session-%d", i)
 			leaseID := fmt.Sprintf("l-session-%d", i)
 			if _, err := db.ExecContext(ctx, `
-INSERT INTO jobs (id, task_id, role, state, capacity_bucket, created_at, updated_at)
-VALUES (?, ?, 'author', 'finished', 'persistent_agent', ?, ?)`,
+INSERT INTO jobs (id, task_id, role, state, capacity_bucket, payload_json, created_at, updated_at)
+VALUES (?, ?, 'author', 'finished', 'persistent_agent', '{"agent_harness":"harness","phase_index":0,"final_phase":true}', ?, ?)`,
 				jobID, taskID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 				t.Fatalf("insert session job %d: %v", i, err)
 			}

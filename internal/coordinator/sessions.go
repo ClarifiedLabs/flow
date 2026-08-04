@@ -487,7 +487,7 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 		return EnsureAuthorJobResult{}, err
 	} else if ok {
 		existingChangeID := stringPointerValue(existing.ChangeID)
-		if existingChangeID == "" || !authorJobMatches(existing, existingChangeID, branch, base, jobHarness, phaseCtx.phaseIndex, s.defaultAgent.Harness) {
+		if existingChangeID == "" || !authorJobMatches(existing, existingChangeID, branch, base, jobHarness, phaseCtx.phaseIndex) {
 			return EnsureAuthorJobResult{}, errors.New("live author job has incompatible change or branch")
 		}
 		change, err := s.GetChange(ctx, existingChangeID)
@@ -560,7 +560,7 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 		Payload:        payload,
 	})
 	if err != nil {
-		if existing, ok, lookupErr := s.workers.LiveAuthorJobForTask(ctx, task.ID); lookupErr == nil && ok && authorJobMatches(existing, change.ID, branch, base, jobHarness, phaseCtx.phaseIndex, s.defaultAgent.Harness) {
+		if existing, ok, lookupErr := s.workers.LiveAuthorJobForTask(ctx, task.ID); lookupErr == nil && ok && authorJobMatches(existing, change.ID, branch, base, jobHarness, phaseCtx.phaseIndex) {
 			return EnsureAuthorJobResult{Job: existing, Change: change, Existing: true}, nil
 		}
 		return EnsureAuthorJobResult{}, err
@@ -1111,13 +1111,16 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 	}
 	crashedHarness := payloadString(job.Payload, "agent_harness")
 	if crashedHarness == "" {
-		crashedHarness = s.defaultAgent.Harness
+		return false, fmt.Errorf("crashed author job %s payload is missing agent_harness", job.ID)
 	}
-	crashedPhaseIndex := payloadPhaseIndex(job.Payload)
+	crashedPhaseIndex, err := flowworker.PayloadPhaseIndex(job.Payload)
+	if err != nil {
+		return false, fmt.Errorf("crashed author job %s payload: %w", job.ID, err)
+	}
 	if existing, ok, err := s.workers.LiveAuthorJobForTask(ctx, task.ID); err != nil {
 		return false, err
 	} else if ok {
-		if authorJobMatches(existing, change.ID, session.Branch, session.Base, crashedHarness, crashedPhaseIndex, s.defaultAgent.Harness) {
+		if authorJobMatches(existing, change.ID, session.Branch, session.Base, crashedHarness, crashedPhaseIndex) {
 			return false, nil
 		}
 		return false, errors.New("live author job has incompatible change or branch")
@@ -1165,19 +1168,10 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 			payload["review_cycle_instructions"] = strings.TrimSpace(budget.LastInstructions)
 		}
 	}
-	// The crashed job's payload carries its entrypoint; the relaunch re-runs
-	// the same author attempt with the same agent.
+	// The crashed job's payload carries its complete entrypoint and harness:
+	// the relaunch re-runs the same author attempt with the same agent.
 	if _, ok := payload["entrypoint"]; !ok {
-		phaseCtx := workPhaseContext{finalPhase: true}
-		entrypoint, injectInitialPrompt, err := s.authorEntrypointPayload(phaseCtx)
-		if err != nil {
-			return false, err
-		}
-		payload["entrypoint"] = entrypoint
-		payload["inject_initial_prompt"] = injectInitialPrompt
-		payload["prompt_harness"] = s.workPhaseHarness(phaseCtx)
-		payload["agent_harness"] = s.workPhaseHarness(phaseCtx)
-		stampWorkPhasePayload(payload, phaseCtx)
+		return false, fmt.Errorf("crashed author job %s payload is missing entrypoint", job.ID)
 	}
 	payload["change_id"] = change.ID
 	payload["branch"] = session.Branch
@@ -1366,8 +1360,14 @@ WHERE task_id = ?
 			continue
 		}
 		// Restart budgets are per work phase: a crash in phase 2 must not
-		// inherit phase 1's spent attempts.
-		if payloadPhaseIndex(payload) == phaseIndex {
+		// inherit phase 1's spent attempts. A payload without a valid phase
+		// index is corrupt and is reported rather than silently rephased.
+		crashedPhase, err := flowworker.PayloadPhaseIndex(payload)
+		if err != nil {
+			slog.Warn("skip corrupt crashed author payload", "task_id", taskID, "change_id", changeID, "error", err)
+			continue
+		}
+		if crashedPhase == phaseIndex {
 			attempts++
 		}
 	}
@@ -3721,39 +3721,22 @@ func scanSession(scanner taskScanner) (Session, error) {
 	return session, nil
 }
 
-func authorJobMatches(job flowworker.Job, changeID string, branch string, base string, agentHarness string, phaseIndex int, defaultHarness string) bool {
+func authorJobMatches(job flowworker.Job, changeID string, branch string, base string, agentHarness string, phaseIndex int) bool {
 	jobHarness := payloadString(job.Payload, "agent_harness")
 	if jobHarness == "" {
-		jobHarness = defaultHarness
+		// A payload without its stamped harness is corrupt and never matches.
+		return false
 	}
 	agentHarness = flowharness.NormalizeName(agentHarness)
-	if agentHarness == "" {
-		agentHarness = defaultHarness
+	jobPhaseIndex, err := flowworker.PayloadPhaseIndex(job.Payload)
+	if err != nil {
+		return false
 	}
 	return stringPointerValue(job.ChangeID) == changeID &&
 		payloadString(job.Payload, "branch") == branch &&
 		payloadString(job.Payload, "base") == base &&
 		jobHarness == agentHarness &&
-		payloadPhaseIndex(job.Payload) == phaseIndex
-}
-
-// payloadPhaseIndex reads the job's work-phase index (0 when absent: the
-// implicit single phase). JSON round-trips numbers as float64.
-func payloadPhaseIndex(payload map[string]any) int {
-	value, ok := payload["phase_index"]
-	if !ok || value == nil {
-		return 0
-	}
-	switch typed := value.(type) {
-	case int:
-		return typed
-	case int64:
-		return int(typed)
-	case float64:
-		return int(typed)
-	default:
-		return 0
-	}
+		jobPhaseIndex == phaseIndex
 }
 
 func stringPointerValue(value *string) string {

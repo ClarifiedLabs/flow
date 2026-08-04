@@ -143,6 +143,9 @@ func (s *Service) EnqueueJob(ctx context.Context, input EnqueueJobInput) (Job, e
 	if err := validateJobRole(input.Role); err != nil {
 		return Job{}, err
 	}
+	if err := validateJobPayload(input.Role, input.Payload); err != nil {
+		return Job{}, err
+	}
 	if input.Role == RoleAuthor && (input.TaskID == nil || strings.TrimSpace(*input.TaskID) == "") {
 		return Job{}, errors.New("author jobs require task id")
 	}
@@ -1304,6 +1307,9 @@ func scanJob(row scanner) (Job, error) {
 	if err != nil {
 		return Job{}, err
 	}
+	if err := validateJobPayload(JobRole(role), payload); err != nil {
+		return Job{}, fmt.Errorf("job %s: %w", job.ID, err)
+	}
 	selector, err := decodeStringMap(selectorJSON)
 	if err != nil {
 		return Job{}, err
@@ -1335,6 +1341,68 @@ func scanJob(row scanner) (Job, error) {
 	job.CreatedAt = parsedCreatedAt
 	job.UpdatedAt = parsedUpdatedAt
 	return job, nil
+}
+
+// validateJobPayload enforces the complete-payload contract: producers stamp
+// every key a consumer needs, so consumers never reconstruct missing values.
+// An absent or wrong-typed key marks the job corrupt instead of silently
+// changing behavior. False and zero are valid explicit values.
+func validateJobPayload(role JobRole, payload map[string]any) error {
+	switch role {
+	case RoleAuthor:
+		harness, ok := payload["agent_harness"].(string)
+		if !ok || strings.TrimSpace(harness) == "" {
+			return errors.New("author job payload requires a nonblank agent_harness")
+		}
+		if err := flowharness.ValidateAgentName(harness); err != nil {
+			return fmt.Errorf("author job payload: %w", err)
+		}
+		if _, err := PayloadPhaseIndex(payload); err != nil {
+			return fmt.Errorf("author job payload: %w", err)
+		}
+	case RoleConsole:
+		harness, ok := payload["console_harness"].(string)
+		if !ok || strings.TrimSpace(harness) == "" {
+			return errors.New("console job payload requires a nonblank console_harness")
+		}
+		if err := flowharness.ValidateConsoleName(harness); err != nil {
+			return fmt.Errorf("console job payload: %w", err)
+		}
+	case RoleReviewer, RoleVerifier, RoleCI:
+		if _, ok := payload["blocking"].(bool); !ok {
+			return errors.New("check job payload requires an explicit boolean blocking")
+		}
+	}
+	return nil
+}
+
+// PayloadPhaseIndex reads the explicitly stamped phase index,
+// distinguishing a valid zero from an absent or wrong-typed key. JSON
+// round-trips numbers as float64.
+func PayloadPhaseIndex(payload map[string]any) (int, error) {
+	value, ok := payload["phase_index"]
+	if !ok || value == nil {
+		return 0, errors.New("phase_index is required")
+	}
+	switch typed := value.(type) {
+	case int:
+		if typed < 0 {
+			return 0, errors.New("phase_index must be >= 0")
+		}
+		return typed, nil
+	case int64:
+		if typed < 0 {
+			return 0, errors.New("phase_index must be >= 0")
+		}
+		return int(typed), nil
+	case float64:
+		if typed < 0 || typed != float64(int(typed)) {
+			return 0, errors.New("phase_index must be a non-negative integer")
+		}
+		return int(typed), nil
+	default:
+		return 0, fmt.Errorf("phase_index must be an integer, got %T", value)
+	}
 }
 
 func scanLease(row scanner) (Lease, error) {

@@ -1119,6 +1119,7 @@ func TestWorkerAndJobDiagnosticsUseAPI(t *testing.T) {
 		Role:           flowworker.RoleAuthor,
 		CapacityBucket: flowworker.BucketPersistentAgent,
 		Priority:       7,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue job: %v", err)

@@ -1185,7 +1185,10 @@ func reportCheckIfNeeded(ctx context.Context, client *flowclient.Client, job flo
 		client = client.WithProject(projectID)
 	}
 
-	blocking := checkJobBlocksApproval(job)
+	blocking, err := checkJobBlockingValue(job)
+	if err != nil {
+		return coordinator.CheckErrored, fmt.Errorf("check job payload: %w", err)
+	}
 	reviewDiscovery := reviewDiscoveryJob(job)
 	if haveVerdict && kind == coordinator.CheckKindReviewer && blocking && !reviewDiscovery {
 		blockingFindings := blockingReviewFindings(verdictReport)
@@ -1413,9 +1416,15 @@ func appendFollowUpActionFailures(details string, failures []string) string {
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
-func checkJobBlocksApproval(job flowworker.Job) bool {
+// checkJobBlockingValue reads the stamped blocking value. Every review/check
+// job carries an explicit Boolean; an absent or wrong-typed value marks the
+// job corrupt instead of defaulting to blocking.
+func checkJobBlockingValue(job flowworker.Job) (bool, error) {
 	blocking, ok := job.Payload["blocking"].(bool)
-	return !ok || blocking
+	if !ok {
+		return false, fmt.Errorf("job %s payload is missing boolean blocking", job.ID)
+	}
+	return blocking, nil
 }
 
 func reviewDiscoveryJob(job flowworker.Job) bool {

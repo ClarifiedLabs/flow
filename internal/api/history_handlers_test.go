@@ -240,7 +240,7 @@ func TestWorkerHistoryAPIReservesFromLeaseAndPublishesWithCapability(t *testing.
 	}
 	job, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
 		Role: flowworker.RoleCI, CapacityBucket: flowworker.BucketEphemeral,
-		Payload: map[string]any{"stage": "verify"},
+		Payload: map[string]any{"stage": "verify", "blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue job: %v", err)
@@ -416,8 +416,7 @@ VALUES (?, ?, 'task/history-resume-api', 'main', ?, ?, ?)`, changeID, task.ID, h
 		CapacityBucket: flowworker.BucketPersistentAgent,
 		Payload: map[string]any{
 			"branch": "task/history-resume-api", "base": "main", "head_sha": head,
-			"entrypoint": map[string]any{"argv": []any{"harness"}, "harness": "harness"},
-		},
+			"entrypoint": map[string]any{"argv": []any{"harness"}, "harness": "harness"}, "agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue resume source job: %v", err)

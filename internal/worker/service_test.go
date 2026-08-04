@@ -48,6 +48,7 @@ func TestWorkerRegisterHeartbeatAndClaimLifecycle(t *testing.T) {
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
 		Priority:       10,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue job: %v", err)
@@ -187,6 +188,7 @@ func TestConcurrentClaimIsAtomic(t *testing.T) {
 		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue job: %v", err)
@@ -243,6 +245,7 @@ func TestLiveAuthorJobUniqueness(t *testing.T) {
 		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue first author job: %v", err)
@@ -251,6 +254,7 @@ func TestLiveAuthorJobUniqueness(t *testing.T) {
 		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	}); err == nil {
 		t.Fatal("duplicate live author job was accepted")
 	}
@@ -276,6 +280,7 @@ func TestLiveAuthorJobUniqueness(t *testing.T) {
 		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	}); err == nil {
 		t.Fatal("duplicate claimed author job was accepted")
 	}
@@ -286,6 +291,7 @@ func TestLiveAuthorJobUniqueness(t *testing.T) {
 		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	}); err != nil {
 		t.Fatalf("enqueue author after terminal state: %v", err)
 	}
@@ -299,7 +305,7 @@ func TestConcurrentKeyedEnqueueDeduplicatesLiveJobsAndReusesTerminalKey(t *testi
 		TaskID:         &task.ID,
 		Role:           RoleCI,
 		CapacityBucket: BucketEphemeral,
-		Payload:        map[string]any{"check_name": "security.node.nr-1"},
+		Payload:        map[string]any{"check_name": "security.node.nr-1", "blocking": true},
 	}
 
 	const attempts = 32
@@ -369,6 +375,7 @@ func TestWorkerCannotClaimAcrossCapacityBucketsWhileLeaseIsLive(t *testing.T) {
 		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue persistent job: %v", err)
@@ -377,6 +384,7 @@ func TestWorkerCannotClaimAcrossCapacityBucketsWhileLeaseIsLive(t *testing.T) {
 		Role:           RoleCI,
 		CapacityBucket: BucketEphemeral,
 		Priority:       100,
+		Payload:        map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue ephemeral job: %v", err)
@@ -427,6 +435,7 @@ func TestWorkerCapacityPreventsOverclaimingSameBucket(t *testing.T) {
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
 		Priority:       10,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue first job: %v", err)
@@ -436,6 +445,7 @@ func TestWorkerCapacityPreventsOverclaimingSameBucket(t *testing.T) {
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
 		Priority:       1,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue second job: %v", err)
@@ -497,6 +507,7 @@ func TestClaimSkipsJobsWithUnmatchedSelectors(t *testing.T) {
 		CapacityBucket: BucketPersistentAgent,
 		Priority:       100,
 		Requires:       []string{"gpu", "docker"},
+		Payload:        map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue unmatched selector job: %v", err)
@@ -506,6 +517,7 @@ func TestClaimSkipsJobsWithUnmatchedSelectors(t *testing.T) {
 		CapacityBucket: BucketPersistentAgent,
 		Priority:       1,
 		Requires:       []string{"gpu"},
+		Payload:        map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue matched selector job: %v", err)
@@ -552,6 +564,7 @@ func TestClaimSkipsTaintedWorkerWithoutExactToleration(t *testing.T) {
 		CapacityBucket: BucketPersistentAgent,
 		Priority:       100,
 		Requires:       []string{"gpu"},
+		Payload:        map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue untolerated job: %v", err)
@@ -562,6 +575,7 @@ func TestClaimSkipsTaintedWorkerWithoutExactToleration(t *testing.T) {
 		Priority:       1,
 		Requires:       []string{"gpu"},
 		Tolerations:    []scheduler.Toleration{{Key: "lifetime", Value: "persistent", Effect: scheduler.EffectNoSchedule}},
+		Payload:        map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue tolerated job: %v", err)
@@ -606,6 +620,7 @@ func TestExpiredLeaseIsSwept(t *testing.T) {
 		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue job: %v", err)
@@ -666,6 +681,7 @@ func TestExpiredLeaseCannotBeRenewed(t *testing.T) {
 		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	}); err != nil {
 		t.Fatalf("enqueue job: %v", err)
 	}
@@ -697,7 +713,7 @@ func TestExpiredLeaseCannotBeReleased(t *testing.T) {
 	if _, err := directory.RegisterWorker(ctx, RegisterWorkerInput{ID: "w-local", CapacityPersistentAgent: 1}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
-	job, err := service.EnqueueJob(ctx, EnqueueJobInput{TaskID: &task.ID, Role: RoleAuthor, CapacityBucket: BucketPersistentAgent})
+	job, err := service.EnqueueJob(ctx, EnqueueJobInput{TaskID: &task.ID, Role: RoleAuthor, CapacityBucket: BucketPersistentAgent, Payload: map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true}})
 	if err != nil {
 		t.Fatalf("enqueue job: %v", err)
 	}
@@ -734,6 +750,7 @@ func TestCoordinatorRestartProtectsExpiredActiveLease(t *testing.T) {
 	job, err := service.EnqueueJob(ctx, EnqueueJobInput{
 		Role:           RoleCI,
 		CapacityBucket: BucketEphemeral,
+		Payload:        map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue job: %v", err)
@@ -823,6 +840,7 @@ func TestCoordinatorRestartLeaseProtectionDoesNotReviveTerminalOrShortenLiveLeas
 			Role:           RoleCI,
 			CapacityBucket: BucketEphemeral,
 			Priority:       priority,
+			Payload:        map[string]any{"blocking": true},
 		}); err != nil {
 			t.Fatalf("enqueue job %d: %v", priority, err)
 		}
@@ -898,6 +916,7 @@ func TestExpiredLeaseCannotBeMarkedRunning(t *testing.T) {
 		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	}); err != nil {
 		t.Fatalf("enqueue job: %v", err)
 	}
@@ -934,6 +953,7 @@ func TestLiveLeaseUniquenessIsEnforcedAtDatabaseLayer(t *testing.T) {
 		TaskID:         &task.ID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	}); err != nil {
 		t.Fatalf("enqueue job: %v", err)
 	}
@@ -981,6 +1001,7 @@ func TestInvalidWorkerInputsAreRejected(t *testing.T) {
 	if _, err := service.EnqueueJob(ctx, EnqueueJobInput{
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	}); err == nil {
 		t.Fatal("author job without task was accepted")
 	}
@@ -998,6 +1019,7 @@ func TestTerminalTaskRejectsNewJobsAndCancelsQueuedWorkAtClaim(t *testing.T) {
 	task := createTask(t, store)
 	queued, err := service.EnqueueJob(ctx, EnqueueJobInput{
 		TaskID: &task.ID, Role: RoleReviewer, CapacityBucket: BucketEphemeral,
+		Payload: map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue pre-terminal job: %v", err)
@@ -1011,6 +1033,7 @@ WHERE id = ?`, now, now, task.ID); err != nil {
 	}
 	if _, err := service.EnqueueJob(ctx, EnqueueJobInput{
 		TaskID: &task.ID, Role: RoleCI, CapacityBucket: BucketEphemeral,
+		Payload: map[string]any{"blocking": true},
 	}); err == nil {
 		t.Fatal("terminal task accepted new non-console job")
 	}
@@ -1069,7 +1092,7 @@ VALUES (?, ?, 'workflow_convergence_review_requested', ?, 'system', ?)`, task.ID
 		TaskID: &task.ID, ChangeID: &changeIDValue, WorkflowRunID: &runIDValue,
 		RequireHeldWorkflowRunID: &runIDValue, RequireHeldWorkflowEvidenceFingerprint: &fingerprintValue,
 		Role: RoleConsole, CapacityBucket: BucketPersistentAgent,
-		Payload: map[string]any{"convergence_evidence_fingerprint": "spoofed-fingerprint", "convergence_source_head_sha": "head"},
+		Payload: map[string]any{"convergence_evidence_fingerprint": "spoofed-fingerprint", "convergence_source_head_sha": "head", "console_harness": "harness"},
 	}); err == nil {
 		t.Fatal("enqueue accepted a payload fingerprint that disagrees with its held-evidence precondition")
 	}
@@ -1077,7 +1100,7 @@ VALUES (?, ?, 'workflow_convergence_review_requested', ?, 'system', ?)`, task.ID
 		TaskID: &task.ID, ChangeID: &changeIDValue, WorkflowRunID: &runIDValue,
 		RequireHeldWorkflowRunID: &runIDValue, RequireHeldWorkflowEvidenceFingerprint: &fingerprintValue,
 		Role: RoleConsole, CapacityBucket: BucketPersistentAgent,
-		Payload: map[string]any{"convergence_source_head_sha": "head"},
+		Payload: map[string]any{"convergence_source_head_sha": "head", "console_harness": "harness"},
 	})
 	if err != nil {
 		t.Fatalf("enqueue convergence repair: %v", err)
@@ -1115,7 +1138,7 @@ WHERE workflow_run_id = ?`, runID); err != nil {
 		TaskID: &task.ID, ChangeID: &changeIDValue, WorkflowRunID: &runIDValue,
 		RequireHeldWorkflowRunID: &runIDValue, RequireHeldWorkflowEvidenceFingerprint: &fingerprintValue,
 		Role: RoleConsole, CapacityBucket: BucketPersistentAgent,
-		Payload: map[string]any{"convergence_source_head_sha": "head"},
+		Payload: map[string]any{"convergence_source_head_sha": "head", "console_harness": "harness"},
 	})
 	if err != nil {
 		t.Fatalf("enqueue repair before head movement: %v", err)
@@ -1163,6 +1186,7 @@ INSERT INTO workflow_node_runs (
 	job, err := service.EnqueueJob(ctx, EnqueueJobInput{
 		TaskID: &task.ID, WorkflowRunID: &runIDValue, NodeRunID: &nodeIDValue,
 		Role: RoleReviewer, CapacityBucket: BucketPersistentAgent,
+		Payload: map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue current workflow node job: %v", err)
@@ -1194,6 +1218,7 @@ UPDATE workflow_runs SET current_node_key = '', current_node_run_id = NULL WHERE
 	if _, err := service.EnqueueJob(ctx, EnqueueJobInput{
 		TaskID: &task.ID, WorkflowRunID: &runIDValue, NodeRunID: &nodeIDValue,
 		Role: RoleReviewer, CapacityBucket: BucketPersistentAgent,
+		Payload: map[string]any{"blocking": true},
 	}); err == nil {
 		t.Fatal("enqueue accepted a noncurrent completed workflow node")
 	}
@@ -1204,6 +1229,7 @@ UPDATE workflow_runs SET state = 'completed', completed_at = ? WHERE id = ?`, no
 	if _, err := service.EnqueueJob(ctx, EnqueueJobInput{
 		TaskID: &task.ID, WorkflowRunID: &runIDValue,
 		Role: RoleReviewer, CapacityBucket: BucketPersistentAgent,
+		Payload: map[string]any{"blocking": true},
 	}); err == nil {
 		t.Fatal("enqueue accepted a completed workflow run")
 	}
@@ -1221,6 +1247,7 @@ func TestEnqueueJobRejectsChangeTaskMismatch(t *testing.T) {
 		ChangeID:       &changeID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	}); err == nil || !strings.Contains(err.Error(), "does not belong") {
 		t.Fatalf("enqueue mismatched change err = %v, want mismatch error", err)
 	}
@@ -1229,6 +1256,7 @@ func TestEnqueueJobRejectsChangeTaskMismatch(t *testing.T) {
 		ChangeID:       &changeID,
 		Role:           RoleAuthor,
 		CapacityBucket: BucketPersistentAgent,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue matched change: %v", err)
@@ -1342,4 +1370,152 @@ INSERT INTO changes (
 	}
 
 	return id
+}
+
+// TestEnqueueJobPayloadContract verifies the complete-payload contract: each
+// job role must carry its required stamped keys, and explicit false/zero
+// values are accepted while absent or wrong-typed values are rejected.
+func TestEnqueueJobPayloadContract(t *testing.T) {
+	ctx := context.Background()
+	store, _, service := newWorkerService(t)
+	task := createTask(t, store)
+
+	for _, tc := range []struct {
+		name    string
+		input   EnqueueJobInput
+		wantErr bool
+	}{
+		{
+			name:    "author job missing payload",
+			input:   EnqueueJobInput{TaskID: &task.ID, Role: RoleAuthor, CapacityBucket: BucketPersistentAgent},
+			wantErr: true,
+		},
+		{
+			name: "author job missing agent_harness",
+			input: EnqueueJobInput{TaskID: &task.ID, Role: RoleAuthor, CapacityBucket: BucketPersistentAgent,
+				Payload: map[string]any{"phase_index": 0, "final_phase": true}},
+			wantErr: true,
+		},
+		{
+			name: "author job blank agent_harness",
+			input: EnqueueJobInput{TaskID: &task.ID, Role: RoleAuthor, CapacityBucket: BucketPersistentAgent,
+				Payload: map[string]any{"agent_harness": "  ", "phase_index": 0, "final_phase": true}},
+			wantErr: true,
+		},
+		{
+			name: "author job missing phase_index",
+			input: EnqueueJobInput{TaskID: &task.ID, Role: RoleAuthor, CapacityBucket: BucketPersistentAgent,
+				Payload: map[string]any{"agent_harness": flowharness.Harness, "final_phase": true}},
+			wantErr: true,
+		},
+		{
+			name: "author job negative phase_index",
+			input: EnqueueJobInput{TaskID: &task.ID, Role: RoleAuthor, CapacityBucket: BucketPersistentAgent,
+				Payload: map[string]any{"agent_harness": flowharness.Harness, "phase_index": -1, "final_phase": true}},
+			wantErr: true,
+		},
+		{
+			name: "author job wrong-typed phase_index",
+			input: EnqueueJobInput{TaskID: &task.ID, Role: RoleAuthor, CapacityBucket: BucketPersistentAgent,
+				Payload: map[string]any{"agent_harness": flowharness.Harness, "phase_index": "0", "final_phase": true}},
+			wantErr: true,
+		},
+		{
+			name: "author job stamped zero phase",
+			input: EnqueueJobInput{TaskID: &task.ID, Role: RoleAuthor, CapacityBucket: BucketPersistentAgent,
+				Payload: map[string]any{"agent_harness": flowharness.Harness, "phase_index": 0, "final_phase": true}},
+		},
+		{
+			name:    "console job missing console_harness",
+			input:   EnqueueJobInput{Role: RoleConsole, CapacityBucket: BucketPersistentAgent},
+			wantErr: true,
+		},
+		{
+			name: "console job stamped harness",
+			input: EnqueueJobInput{Role: RoleConsole, CapacityBucket: BucketPersistentAgent,
+				Payload: map[string]any{"console_harness": flowharness.Harness}},
+		},
+		{
+			name:    "ci job missing blocking",
+			input:   EnqueueJobInput{Role: RoleCI, CapacityBucket: BucketEphemeral},
+			wantErr: true,
+		},
+		{
+			name: "ci job wrong-typed blocking",
+			input: EnqueueJobInput{Role: RoleCI, CapacityBucket: BucketEphemeral,
+				Payload: map[string]any{"blocking": "true"}},
+			wantErr: true,
+		},
+		{
+			name: "reviewer job advisory false is valid",
+			input: EnqueueJobInput{Role: RoleReviewer, CapacityBucket: BucketPersistentAgent,
+				Payload: map[string]any{"blocking": false}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := service.EnqueueJob(ctx, tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("enqueue accepted %+v", tc.input.Payload)
+				}
+			} else if err != nil {
+				t.Fatalf("enqueue rejected valid payload %+v: %v", tc.input.Payload, err)
+			}
+		})
+	}
+}
+
+// TestPayloadPhaseIndexDistinguishesPresenceFromValue proves zero is a valid
+// stamped value while absent, null, and wrong-typed keys fail.
+func TestPayloadPhaseIndexDistinguishesPresenceFromValue(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload map[string]any
+		want    int
+		wantErr bool
+	}{
+		{name: "explicit zero", payload: map[string]any{"phase_index": 0}, want: 0},
+		{name: "positive", payload: map[string]any{"phase_index": 3}, want: 3},
+		{name: "json number", payload: map[string]any{"phase_index": float64(2)}, want: 2},
+		{name: "absent", payload: map[string]any{}, wantErr: true},
+		{name: "null", payload: map[string]any{"phase_index": nil}, wantErr: true},
+		{name: "string", payload: map[string]any{"phase_index": "0"}, wantErr: true},
+		{name: "negative", payload: map[string]any{"phase_index": -1}, wantErr: true},
+		{name: "fractional", payload: map[string]any{"phase_index": 1.5}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := PayloadPhaseIndex(tc.payload)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("PayloadPhaseIndex(%#v) = %d, want error", tc.payload, got)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("PayloadPhaseIndex(%#v) = %d, %v; want %d", tc.payload, got, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestCorruptPersistedPayloadFailsDecode proves a malformed persisted job
+// payload fails at the scan boundary instead of changing behavior.
+func TestCorruptPersistedPayloadFailsDecode(t *testing.T) {
+	ctx := context.Background()
+	store, _, service := newWorkerService(t)
+	task := createTask(t, store)
+	now := formatTime(time.Now().UTC())
+
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO jobs (id, task_id, role, state, capacity_bucket, payload_json, created_at, updated_at)
+VALUES ('j-corrupt', ?, 'author', 'queued', 'persistent_agent', '{"final_phase":true}', ?, ?)`, task.ID, now, now); err != nil {
+		t.Fatalf("insert corrupt job: %v", err)
+	}
+
+	if _, err := service.GetJob(ctx, "j-corrupt"); err == nil || !strings.Contains(err.Error(), "agent_harness") {
+		t.Fatalf("GetJob corrupt payload err = %v, want agent_harness corruption error", err)
+	}
+	if _, err := service.ListJobs(ctx); err == nil || !strings.Contains(err.Error(), "agent_harness") {
+		t.Fatalf("ListJobs corrupt payload err = %v, want agent_harness corruption error", err)
+	}
 }

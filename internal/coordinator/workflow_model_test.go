@@ -32,6 +32,7 @@ func TestForceDoneCleansTaskScopedConsoleWithoutWorkflowRun(t *testing.T) {
 	workers := flowworker.NewService(runs.db)
 	job, err := workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
 		TaskID: &task.ID, Role: flowworker.RoleConsole, CapacityBucket: flowworker.BucketPersistentAgent,
+		Payload: map[string]any{"console_harness": "harness"},
 	})
 	if err != nil {
 		t.Fatalf("enqueue task console: %v", err)

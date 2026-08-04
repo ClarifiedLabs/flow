@@ -36,7 +36,7 @@ func TestQueueStatsScopeAndCounts(t *testing.T) {
 		TaskID:         &task.ID,
 		Role:           string(flowworker.RoleCI),
 		CapacityBucket: string(flowworker.BucketEphemeral),
-		Payload:        map[string]any{"entrypoint": "make test"},
+		Payload:        map[string]any{"entrypoint": "make test", "blocking": true},
 	}, http.StatusCreated, &enqueue)
 
 	// Worker and hook tokens are not authorized for queue stats.

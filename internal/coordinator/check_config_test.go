@@ -171,8 +171,7 @@ VALUES (?, ?, ?, 'main', 'head-1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z
 		CapacityBucket: flowworker.BucketEphemeral,
 		Payload: map[string]any{
 			"check_name": "unit",
-			"head_sha":   "head-1",
-		},
+			"head_sha":   "head-1", "blocking": true},
 	}); err != nil {
 		t.Fatalf("enqueue job: %v", err)
 	}

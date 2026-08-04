@@ -351,6 +351,10 @@ LIMIT 1`,
 		"workspace_mode": node.Config.Agent.Workspace, "artifact_kind": node.Config.Agent.Artifact,
 		"agent": node.Config.Agent.Agent, "role_instructions": node.Config.Agent.Agent.Prompt,
 		"branch": branch, "base": base, "project_id": e.project.ID, "project_name": e.project.Name,
+		// Complete payload contract: author jobs carry their stamped harness and
+		// explicit phase coordinates. Workflow agent nodes are single-phase author
+		// jobs; the graph, not an integer cursor, drives sequencing.
+		"agent_harness": harness, "phase_index": 0, "final_phase": true,
 	}
 	if node.Config.Agent.Workspace == WorkspaceChange && run.ReviewCyclesUsed > 0 {
 		payload["review_cycle_number"] = run.ReviewCyclesUsed

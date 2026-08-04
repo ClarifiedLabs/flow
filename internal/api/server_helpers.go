@@ -376,23 +376,31 @@ func payloadString(payload map[string]any, key string) string {
 	}
 }
 
-func sessionHarnessForJob(job worker.Job, defaultAgentHarness string) string {
+// sessionHarnessForJob reads the harness stamped into the job payload.
+// Producers must stamp a complete payload; an absent, empty, or wrong-typed
+// value is corrupt job data, not a fallback to the configured default.
+func sessionHarnessForJob(job worker.Job) (string, error) {
 	if job.Role == worker.RoleConsole {
-		consoleHarness := flowharness.NormalizeName(payloadString(job.Payload, "console_harness"))
-		if err := flowharness.ValidateConsoleName(consoleHarness); err == nil && consoleHarness != "" {
-			return consoleHarness
+		consoleHarness, ok := job.Payload["console_harness"].(string)
+		if !ok || strings.TrimSpace(consoleHarness) == "" {
+			return "", fmt.Errorf("console job %s payload is missing console_harness", job.ID)
 		}
-		return flowharness.DefaultConsoleName()
+		consoleHarness = flowharness.NormalizeName(consoleHarness)
+		if err := flowharness.ValidateConsoleName(consoleHarness); err != nil {
+			return "", fmt.Errorf("console job %s payload: %w", job.ID, err)
+		}
+		return consoleHarness, nil
 	}
 
-	agentHarness := flowharness.NormalizeName(payloadString(job.Payload, "agent_harness"))
-	if _, ok := flowharness.Lookup(agentHarness); ok {
-		return agentHarness
+	agentHarness, ok := job.Payload["agent_harness"].(string)
+	if !ok || strings.TrimSpace(agentHarness) == "" {
+		return "", fmt.Errorf("job %s payload is missing agent_harness", job.ID)
 	}
-	if fallback := flowharness.NormalizeName(defaultAgentHarness); fallback != "" {
-		return fallback
+	agentHarness = flowharness.NormalizeName(agentHarness)
+	if _, ok := flowharness.Lookup(agentHarness); !ok {
+		return "", fmt.Errorf("job %s payload: unsupported agent harness %q", job.ID, agentHarness)
 	}
-	return flowharness.DefaultAgentName()
+	return agentHarness, nil
 }
 
 type createTaskRequest struct {

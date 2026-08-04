@@ -346,22 +346,27 @@ func TestNewRegistryRejectsInvalidDefaultAgent(t *testing.T) {
 	}
 }
 
-func TestSessionHarnessForJobFallsBackToConfiguredDefault(t *testing.T) {
+func TestSessionHarnessForJobRequiresStampedPayload(t *testing.T) {
 	changeID := "ch-test-0001"
-	legacy := flowworker.Job{Role: flowworker.RoleAuthor, ChangeID: &changeID, Payload: map[string]any{}}
-	if got := sessionHarnessForJob(legacy, flowharness.Agents); got != flowharness.Agents {
-		t.Fatalf("sessionHarnessForJob legacy payload = %q, want %q", got, flowharness.Agents)
+	legacy := flowworker.Job{ID: "j-legacy", Role: flowworker.RoleAuthor, ChangeID: &changeID, Payload: map[string]any{}}
+	if _, err := sessionHarnessForJob(legacy); err == nil {
+		t.Fatal("sessionHarnessForJob accepted a payload missing agent_harness")
 	}
-	if got := sessionHarnessForJob(legacy, ""); got != flowharness.DefaultAgentName() {
-		t.Fatalf("sessionHarnessForJob empty default = %q, want %q", got, flowharness.DefaultAgentName())
+	stamped := flowworker.Job{ID: "j-stamped", Role: flowworker.RoleAuthor, ChangeID: &changeID, Payload: map[string]any{"agent_harness": "harness"}}
+	if got, err := sessionHarnessForJob(stamped); err != nil || got != flowharness.Harness {
+		t.Fatalf("sessionHarnessForJob stamped payload = %q, %v; want harness", got, err)
 	}
-	stamped := flowworker.Job{Role: flowworker.RoleAuthor, ChangeID: &changeID, Payload: map[string]any{"agent_harness": "harness"}}
-	if got := sessionHarnessForJob(stamped, flowharness.Agents); got != flowharness.Harness {
-		t.Fatalf("sessionHarnessForJob stamped payload = %q, want harness", got)
+	unknown := flowworker.Job{ID: "j-unknown", Role: flowworker.RoleAuthor, ChangeID: &changeID, Payload: map[string]any{"agent_harness": "bogus"}}
+	if _, err := sessionHarnessForJob(unknown); err == nil {
+		t.Fatal("sessionHarnessForJob accepted an unsupported agent harness")
 	}
-	console := flowworker.Job{Role: flowworker.RoleConsole, Payload: map[string]any{}}
-	if got := sessionHarnessForJob(console, flowharness.Agents); got != flowharness.DefaultConsoleName() {
-		t.Fatalf("sessionHarnessForJob console = %q, want %q", got, flowharness.DefaultConsoleName())
+	console := flowworker.Job{ID: "j-console", Role: flowworker.RoleConsole, Payload: map[string]any{}}
+	if _, err := sessionHarnessForJob(console); err == nil {
+		t.Fatal("sessionHarnessForJob accepted a console payload missing console_harness")
+	}
+	stampedConsole := flowworker.Job{ID: "j-console-shell", Role: flowworker.RoleConsole, Payload: map[string]any{"console_harness": "shell"}}
+	if got, err := sessionHarnessForJob(stampedConsole); err != nil || got != flowharness.Shell {
+		t.Fatalf("sessionHarnessForJob stamped console = %q, %v; want shell", got, err)
 	}
 }
 
@@ -1452,8 +1457,7 @@ func TestBoardLastAgentActivityAtSelectsMostRecentlyUpdatedSession(t *testing.T)
 		Payload: map[string]any{
 			"workspace_mode": coordinator.WorkspaceChange,
 			"branch":         first.Change.Branch,
-			"base":           first.Change.Base,
-		},
+			"base":           first.Change.Base, "agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue second author job: %v", err)
@@ -1672,8 +1676,7 @@ func TestBoardSupportsActiveBaseWorkspaceSessionWithoutChange(t *testing.T) {
 		Payload: map[string]any{
 			"workspace_mode": coordinator.WorkspaceBase,
 			"branch":         "main",
-			"base":           "main",
-		},
+			"base":           "main", "agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue base-workspace job: %v", err)
@@ -2226,7 +2229,7 @@ func TestWorkerHTTPLifecycleAndJobDiagnostics(t *testing.T) {
 		Role:           string(flowworker.RoleCI),
 		CapacityBucket: string(flowworker.BucketPersistentAgent),
 		Priority:       5,
-		Payload:        map[string]any{"entrypoint": "make test"},
+		Payload:        map[string]any{"entrypoint": "make test", "blocking": true},
 	}, http.StatusCreated, &enqueue)
 	if enqueue.Job.State != flowworker.JobQueued || enqueue.Job.TaskID == nil || *enqueue.Job.TaskID != task.ID {
 		t.Fatalf("enqueued job = %+v", enqueue.Job)
@@ -3136,6 +3139,7 @@ func TestDiagnosticsDistinguishExpiredUnreleasedLeases(t *testing.T) {
 		TaskID:         &task.ID,
 		Role:           string(flowworker.RoleCI),
 		CapacityBucket: string(flowworker.BucketPersistentAgent),
+		Payload:        map[string]any{"blocking": true},
 	}, http.StatusCreated, &enqueue)
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:                      "w-local",
@@ -3188,11 +3192,13 @@ func TestJobsListAggregateOrdersByUpdatedAndStampsProject(t *testing.T) {
 	doJSONRequestAs(t, server, "owner-token", http.MethodPost, "/v2/jobs?project="+projectA.ID, enqueueJobRequest{
 		Role:           string(flowworker.RoleCI),
 		CapacityBucket: string(flowworker.BucketEphemeral),
+		Payload:        map[string]any{"blocking": true},
 	}, http.StatusCreated, &jobA)
 	var jobB jobResponse
 	doJSONRequestAs(t, server, "owner-token", http.MethodPost, "/v2/jobs?project="+projectB.ID, enqueueJobRequest{
 		Role:           string(flowworker.RoleCI),
 		CapacityBucket: string(flowworker.BucketEphemeral),
+		Payload:        map[string]any{"blocking": true},
 	}, http.StatusCreated, &jobB)
 
 	// Force distinct updated_at timestamps: project B's job is the most recently
@@ -3792,8 +3798,7 @@ func TestWorkerCheckReportRejectsSourceJobFromStaleHead(t *testing.T) {
 		Payload: map[string]any{
 			"check_name": "unit",
 			"change_id":  started.Change.ID,
-			"head_sha":   "head-1",
-		},
+			"head_sha":   "head-1", "blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue stale job: %v", err)
@@ -3845,6 +3850,7 @@ func TestWorkerCheckReportRejectsHeadAdvancedAfterScopeValidation(t *testing.T) 
 	leaseID := claimed.Lease.ID
 	request := reportCheckRequest{
 		Kind:        string(coordinator.CheckKindCI),
+		Required:    boolPointer(true),
 		SourceJobID: &sourceJobID,
 		LeaseID:     &leaseID,
 		ExitCode:    intPointer(0),
@@ -3917,6 +3923,7 @@ func TestWorkerCheckReportRejectsSourceJobMissingCheckMetadata(t *testing.T) {
 		ChangeID:       &started.Change.ID,
 		Role:           flowworker.RoleCI,
 		CapacityBucket: flowworker.BucketEphemeral,
+		Payload:        map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue job without metadata: %v", err)
@@ -3967,6 +3974,7 @@ func TestWorkerReviewerJobCanReportReviewerCheck(t *testing.T) {
 	var response checkResponse
 	doJSONRequestAs(t, fixture.Server, "reviewer-token", http.MethodPost, "/v2/tasks/"+started.Session.TaskID+"/checks/reviewer", reportCheckRequest{
 		Kind:        string(coordinator.CheckKindReviewer),
+		Required:    boolPointer(true),
 		Verdict:     string(coordinator.CheckSatisfied),
 		SourceJobID: &sourceJobID,
 		LeaseID:     &leaseID,
@@ -4254,6 +4262,7 @@ func startLiveWorkerJobForTask(t *testing.T, fixture testFixture, token string, 
 		Role:           role,
 		CapacityBucket: flowworker.BucketPersistentAgent,
 		RunsOn:         map[string]string{"worker_id": workerID},
+		Payload:        map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue %s job: %v", role, err)
@@ -4399,6 +4408,7 @@ func startLiveCheckJobForTask(t *testing.T, fixture testFixture, token string, w
 			"check_name": checkName,
 			"change_id":  changeID,
 			"head_sha":   headSHA,
+			"blocking":   true,
 		},
 	})
 	if err != nil {
@@ -4451,6 +4461,10 @@ func claimSpecificJob(t *testing.T, fixture testFixture, workerID string, jobID 
 }
 
 func intPointer(value int) *int {
+	return &value
+}
+
+func boolPointer(value bool) *bool {
 	return &value
 }
 
@@ -4564,6 +4578,7 @@ func TestWorkerEndpointsRequireWorkerScopeAndLeaseOwnership(t *testing.T) {
 		TaskID:         &task.ID,
 		Role:           flowworker.RoleAuthor,
 		CapacityBucket: flowworker.BucketPersistentAgent,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	}); err != nil {
 		t.Fatalf("enqueue job: %v", err)
 	}
@@ -4600,6 +4615,7 @@ func TestJobEnqueueIdempotencyReplaysCreatedJob(t *testing.T) {
 		Role:           string(flowworker.RoleCI),
 		CapacityBucket: string(flowworker.BucketEphemeral),
 		Priority:       3,
+		Payload:        map[string]any{"blocking": true},
 	}
 
 	var first jobResponse
@@ -4636,6 +4652,7 @@ func TestWorkerCheckReportingRejectsExpiredLease(t *testing.T) {
 		TaskID:         &task.ID,
 		Role:           flowworker.RoleCI,
 		CapacityBucket: flowworker.BucketEphemeral,
+		Payload:        map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue check job: %v", err)
@@ -4697,6 +4714,7 @@ func TestWorkerCheckReportingRejectsNonCISourceJob(t *testing.T) {
 		TaskID:         &task.ID,
 		Role:           flowworker.RoleAuthor,
 		CapacityBucket: flowworker.BucketPersistentAgent,
+		Payload:        map[string]any{"agent_harness": "harness", "phase_index": 0, "final_phase": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue author job: %v", err)
@@ -4740,6 +4758,7 @@ func TestWorkerClaimCanWaitForJob(t *testing.T) {
 		_, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
 			Role:           flowworker.RoleCI,
 			CapacityBucket: flowworker.BucketEphemeral,
+			Payload:        map[string]any{"blocking": true},
 		})
 		enqueued <- err
 	}()
@@ -4771,6 +4790,7 @@ func TestWorkerClaimSweepsExpiredLeases(t *testing.T) {
 		Role:           flowworker.RoleCI,
 		CapacityBucket: flowworker.BucketEphemeral,
 		Priority:       100,
+		Payload:        map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue expired job: %v", err)
@@ -4804,6 +4824,7 @@ INSERT INTO leases (
 		Role:           flowworker.RoleCI,
 		CapacityBucket: flowworker.BucketEphemeral,
 		Priority:       1,
+		Payload:        map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue queued job: %v", err)

@@ -74,8 +74,7 @@ func enqueueEphemeralTestJob(t *testing.T, fixture workerTestFixture, script str
 			"entrypoint": map[string]any{
 				"argv":  append([]string{script}, args...),
 				"shell": false,
-			},
-		},
+			}, "blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue job: %v", err)
@@ -178,8 +177,7 @@ func TestRunWorkerOneShotRejectsJobSpecificModelProxyCredentialFromHistory(t *te
 				"env": map[string]string{
 					"HARNESS_MODEL_PROXY_API_KEY": credential,
 				},
-			},
-		},
+			}, "blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue job: %v", err)
@@ -282,8 +280,7 @@ func TestRunWorkerOneShotExitsZeroAfterJobError(t *testing.T) {
 			"entrypoint": map[string]any{
 				"argv":  []string{"true"},
 				"shell": false,
-			},
-		},
+			}, "blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue failing job: %v", err)

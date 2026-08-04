@@ -238,7 +238,7 @@ VALUES (?, ?, ?, 'task/other-change', 'main', ?, '2026-01-01T00:00:02Z', '2026-0
 	wrongConsole, err := workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
 		TaskID: &task.ID, ChangeID: &otherChangeID, Role: flowworker.RoleConsole,
 		CapacityBucket: flowworker.BucketPersistentAgent,
-		Payload:        map[string]any{"change_id": otherChangeID, "branch": "task/other-change", "base": "main"},
+		Payload:        map[string]any{"change_id": otherChangeID, "branch": "task/other-change", "base": "main", "console_harness": "harness"},
 	})
 	if err != nil {
 		t.Fatalf("queue unrelated task console: %v", err)
@@ -259,6 +259,7 @@ VALUES (?, ?, ?, 'task/other-change', 'main', ?, '2026-01-01T00:00:02Z', '2026-0
 		TaskID: &task.ID, ChangeID: &convergenceChangeID, RequireHeldWorkflowRunID: &run.ID,
 		RequireHeldWorkflowEvidenceFingerprint: &staleFingerprint, Role: flowworker.RoleConsole,
 		CapacityBucket: flowworker.BucketPersistentAgent,
+		Payload:        map[string]any{"console_harness": "harness"},
 	}); err == nil {
 		t.Fatal("atomic convergence enqueue accepted a stale evidence fingerprint")
 	}
@@ -1299,6 +1300,7 @@ UPDATE changes SET head_sha = 'head-moved' WHERE workflow_run_id = ?`, fixture.r
 		}
 		consoleJob, err := fixture.workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
 			TaskID: &fixture.task.ID, Role: flowworker.RoleConsole, CapacityBucket: flowworker.BucketPersistentAgent,
+			Payload: map[string]any{"console_harness": "harness"},
 		})
 		if err != nil {
 			t.Fatalf("enqueue task console before reset: %v", err)

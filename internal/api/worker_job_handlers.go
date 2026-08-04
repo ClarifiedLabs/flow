@@ -455,11 +455,16 @@ func (s *Server) handleMarkJobRunning(w http.ResponseWriter, r *http.Request, pr
 
 	response := jobResponse{Job: job, ProjectID: ps.project.ID}
 	if job.Role == worker.RoleAuthor {
+		harness, err := sessionHarnessForJob(job)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "start_session_failed", err.Error())
+			return
+		}
 		sessionResult, err := ps.sessions.StartAuthorSession(r.Context(), coordinator.StartAuthorSessionInput{
 			JobID:    job.ID,
 			LeaseID:  leaseID,
 			WorkerID: strings.TrimSpace(principal.Subject),
-			Harness:  sessionHarnessForJob(job, s.registry.DefaultAgent().Harness),
+			Harness:  harness,
 		})
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "start_session_failed", err.Error())
@@ -469,11 +474,16 @@ func (s *Server) handleMarkJobRunning(w http.ResponseWriter, r *http.Request, pr
 		response.Change = &sessionResult.Change
 		response.SessionToken = sessionResult.Token
 	} else if job.Role == worker.RoleConsole {
+		harness, err := sessionHarnessForJob(job)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "start_session_failed", err.Error())
+			return
+		}
 		sessionResult, err := ps.sessions.StartConsoleSession(r.Context(), coordinator.StartConsoleSessionInput{
 			JobID:    job.ID,
 			LeaseID:  leaseID,
 			WorkerID: strings.TrimSpace(principal.Subject),
-			Harness:  sessionHarnessForJob(job, s.registry.DefaultAgent().Harness),
+			Harness:  harness,
 		})
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "start_session_failed", err.Error())

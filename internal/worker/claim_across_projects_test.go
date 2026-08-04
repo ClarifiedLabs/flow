@@ -61,6 +61,7 @@ func (f claimFixture) enqueueCI(t *testing.T, projectIndex int) Job {
 	job, err := f.queues[projectIndex].Queue.EnqueueJob(context.Background(), EnqueueJobInput{
 		Role:           RoleCI,
 		CapacityBucket: BucketEphemeral,
+		Payload:        map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue ci job in project %d: %v", projectIndex, err)

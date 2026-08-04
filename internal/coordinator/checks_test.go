@@ -300,6 +300,7 @@ func TestReportCheckRejectsSourceJobForDifferentTask(t *testing.T) {
 		TaskID:         &other.ID,
 		Role:           flowworker.RoleCI,
 		CapacityBucket: flowworker.BucketEphemeral,
+		Payload:        map[string]any{"blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue source job: %v", err)
@@ -323,7 +324,7 @@ func TestWorkerCheckReportRejectsLeaseReleasedBeforeAtomicWrite(t *testing.T) {
 	workers := flowworker.NewService(store.DB())
 	job, err := workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
 		TaskID: &task.ID, ChangeID: &change.ID, Role: flowworker.RoleCI, CapacityBucket: flowworker.BucketEphemeral,
-		Payload: map[string]any{"check_name": "unit", "change_id": change.ID, "head_sha": change.HeadSHA},
+		Payload: map[string]any{"check_name": "unit", "change_id": change.ID, "head_sha": change.HeadSHA, "blocking": true},
 	})
 	if err != nil {
 		t.Fatalf("enqueue check job: %v", err)

@@ -353,8 +353,7 @@ INSERT INTO workflow_node_runs (
 			Payload: map[string]any{
 				"base":           "main",
 				"workspace_mode": string(WorkspaceBase),
-				"node_attempt":   attempt,
-			},
+				"node_attempt":   attempt, "agent_harness": "harness", "phase_index": 0, "final_phase": true},
 		})
 		if err != nil {
 			t.Fatalf("enqueue workflow author attempt %d: %v", attempt, err)
@@ -600,28 +599,27 @@ func TestEnsureAuthorJobExplicitEntrypointOverridesDefaultAgent(t *testing.T) {
 	}
 }
 
-func TestAuthorJobMatchesUsesConfiguredDefaultHarness(t *testing.T) {
+func TestAuthorJobMatchesRequiresStampedPayload(t *testing.T) {
 	changeID := "ch-test-0001"
-	legacyPayload := map[string]any{"branch": "task/t-1", "base": "main"}
-	harnessPayload := map[string]any{"branch": "task/t-1", "base": "main", "agent_harness": "harness"}
+	stamped := map[string]any{"branch": "task/t-1", "base": "main", "agent_harness": "harness", "phase_index": 0, "final_phase": true}
 
 	for _, tc := range []struct {
-		name           string
-		payload        map[string]any
-		agentHarness   string
-		defaultHarness string
-		want           bool
+		name         string
+		payload      map[string]any
+		agentHarness string
+		phaseIndex   int
+		want         bool
 	}{
-		// A legacy payload without agent_harness matches the configured default.
-		{name: "legacy payload matches configured default", payload: legacyPayload, agentHarness: "", defaultHarness: "harness", want: true},
-		{name: "legacy payload matches agents default", payload: legacyPayload, agentHarness: "agents", defaultHarness: "agents", want: true},
-		{name: "legacy payload rejected for other harness", payload: legacyPayload, agentHarness: "harness", defaultHarness: "agents", want: false},
-		{name: "stamped payload matches configured default", payload: harnessPayload, agentHarness: "", defaultHarness: "harness", want: true},
-		{name: "stamped payload rejected against agents default", payload: harnessPayload, agentHarness: "", defaultHarness: "agents", want: false},
+		{name: "stamped payload matches", payload: stamped, agentHarness: "harness", phaseIndex: 0, want: true},
+		{name: "stamped payload rejected for other harness", payload: stamped, agentHarness: "agents", phaseIndex: 0, want: false},
+		{name: "stamped payload rejected for other phase", payload: stamped, agentHarness: "harness", phaseIndex: 1, want: false},
+		// A corrupt payload (absent agent_harness or phase_index) never matches.
+		{name: "missing agent_harness never matches", payload: map[string]any{"branch": "task/t-1", "base": "main", "phase_index": 0}, agentHarness: "", phaseIndex: 0, want: false},
+		{name: "missing phase_index never matches", payload: map[string]any{"branch": "task/t-1", "base": "main", "agent_harness": "harness"}, agentHarness: "harness", phaseIndex: 0, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			job := flowworker.Job{ChangeID: &changeID, Payload: tc.payload}
-			if got := authorJobMatches(job, changeID, "task/t-1", "main", tc.agentHarness, 0, tc.defaultHarness); got != tc.want {
+			if got := authorJobMatches(job, changeID, "task/t-1", "main", tc.agentHarness, tc.phaseIndex); got != tc.want {
 				t.Fatalf("authorJobMatches = %t, want %t", got, tc.want)
 			}
 		})
