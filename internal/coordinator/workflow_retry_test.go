@@ -144,6 +144,23 @@ INSERT INTO workflow_artifacts (
 }
 
 func retryTestSnapshot(current FlowNodeSnapshot) FlowSnapshot {
+	edges := []FlowEdge{{From: "completed-progress", Outcome: "completed", To: current.Key}}
+	switch current.Kind {
+	case NodeAgent:
+		edges = append(edges, FlowEdge{From: current.Key, Outcome: "completed", To: "done"})
+	case NodeChangeReview:
+		edges = append(edges,
+			FlowEdge{From: current.Key, Outcome: "approved", To: "done"},
+			FlowEdge{From: current.Key, Outcome: "changes_requested", To: "completed-progress"},
+		)
+	case NodeVerifyChange:
+		edges = append(edges,
+			FlowEdge{From: current.Key, Outcome: "passed", To: "done"},
+			FlowEdge{From: current.Key, Outcome: "changes_requested", To: "completed-progress"},
+		)
+	default:
+		panic("retry test snapshot has unsupported current node kind " + string(current.Kind))
+	}
 	return FlowSnapshot{
 		FlowID: "fl-runtime-refresh", FlowName: "Frozen workflow", StartNode: "completed-progress", TransitionBudget: 17,
 		Nodes: []FlowNodeSnapshot{
@@ -157,10 +174,7 @@ func retryTestSnapshot(current FlowNodeSnapshot) FlowSnapshot {
 			current,
 			{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeSnapshotConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
 		},
-		Edges: []FlowEdge{
-			{From: "completed-progress", Outcome: "completed", To: current.Key},
-			{From: current.Key, Outcome: "completed", To: "done"},
-		},
+		Edges: edges,
 	}
 }
 
@@ -378,7 +392,8 @@ func TestRetryExecutionRuntimeRefreshFailureIsAtomic(t *testing.T) {
 		invalidAgent AgentDefSnapshot
 		wantError    string
 	}{
-		{name: "missing snapshot id", invalidAgent: AgentDefSnapshot{Name: "Missing id", Harness: "harness", Prompt: "Frozen."}, wantError: "has no id"},
+		// A missing frozen ID is rejected while decoding the persisted snapshot;
+		// refresh only needs to prove its own lookup failure is atomic.
 		{name: "unresolvable snapshot id", invalidAgent: AgentDefSnapshot{ID: "ad-does-not-exist", Name: "Missing definition", Harness: "harness", Prompt: "Frozen."}, wantError: "agent definition not found"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

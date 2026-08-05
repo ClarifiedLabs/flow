@@ -374,16 +374,18 @@ func TestParallelReviewGraphUsesCanonicalBlockingAndFreezesSnapshot(t *testing.T
 	}
 }
 
-func TestReviewAgentLegacyRequiredCompatibilityAndValidation(t *testing.T) {
-	legacy, err := decodeNodeConfig(`{"change_review":{"agents":[{"agent_def_id":"ad-code","required":true},{"agent_def_id":"ad-security","required":false}]}}`)
+func TestReviewAgentUsesBlockingOnlyAndRejectsRequired(t *testing.T) {
+	// blocking is the only accepted spelling; an omitted blocking defaults to
+	// blocking, and false is advisory.
+	cfg, err := decodeNodeConfig(`{"change_review":{"agents":[{"agent_def_id":"ad-code"},{"agent_def_id":"ad-security","blocking":false}]}}`)
 	if err != nil {
-		t.Fatalf("decode legacy review config: %v", err)
+		t.Fatalf("decode review config: %v", err)
 	}
-	agents := legacy.ChangeReview.Agents
+	agents := cfg.ChangeReview.Agents
 	if len(agents) != 2 || agents[0].Blocking == nil || !*agents[0].Blocking || agents[1].Blocking == nil || *agents[1].Blocking {
-		t.Fatalf("legacy review agents = %+v", agents)
+		t.Fatalf("review agents = %+v", agents)
 	}
-	canonical, err := encodeNodeConfig(legacy)
+	canonical, err := encodeNodeConfig(cfg)
 	if err != nil {
 		t.Fatalf("encode canonical review config: %v", err)
 	}
@@ -391,12 +393,21 @@ func TestReviewAgentLegacyRequiredCompatibilityAndValidation(t *testing.T) {
 		t.Fatalf("canonical review config = %s", canonical)
 	}
 
-	verify, err := decodeNodeConfig(`{"verify_change":{"agents":[{"agent_def_id":"ad-verifier","required":false}]}}`)
-	if err != nil || verify.VerifyChange.Agents[0].Blocking == nil || *verify.VerifyChange.Agents[0].Blocking {
-		t.Fatalf("legacy verify config = %+v err=%v", verify, err)
+	// The removed `required` alias is rejected as an unknown field, not
+	// silently accepted.
+	if _, err := decodeNodeConfig(`{"change_review":{"agents":[{"agent_def_id":"ad-code","required":true}]}}`); err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("required-alias error = %v, want rejection of unknown field", err)
 	}
-	if _, err := decodeNodeConfig(`{"change_review":{"agents":[{"agent_def_id":"ad-code","blocking":true,"required":true}]}}`); err == nil || !strings.Contains(err.Error(), "both blocking") {
-		t.Fatalf("both-fields error = %v", err)
+	if _, err := decodeNodeConfig(`{"verify_change":{"agents":[{"agent_def_id":"ad-verifier","required":false}]}}`); err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("verify required-alias error = %v, want rejection", err)
+	}
+	for _, raw := range []string{
+		`{"change_review":{"agents":[{"agent_def_id":"ad-code","blocking":null}],"aggregator_agent_def_id":"ad-aggregate"}}`,
+		`{"verify_change":{"agents":[{"agent_def_id":"ad-verifier","blocking":null}]}}`,
+	} {
+		if _, err := decodeNodeConfig(raw); err == nil || !strings.Contains(err.Error(), "blocking") {
+			t.Fatalf("null blocking config %s error = %v, want rejection", raw, err)
+		}
 	}
 
 	if _, err := normalizeReviewAgents("review", nil); err == nil || !strings.Contains(err.Error(), "at least one agent") {
@@ -411,13 +422,8 @@ func TestReviewAgentLegacyRequiredCompatibilityAndValidation(t *testing.T) {
 		t.Fatalf("missing aggregator error = %v", err)
 	}
 
-	var snapshotAgent SnapshotReviewAgent
-	if err := json.Unmarshal([]byte(`{"required":false,"agent":{"name":"legacy","harness":"harness"}}`), &snapshotAgent); err != nil {
-		t.Fatalf("decode legacy snapshot agent: %v", err)
-	}
-	if snapshotAgent.Blocking {
-		t.Fatalf("legacy snapshot agent = %+v, want advisory", snapshotAgent)
-	}
+	// Snapshots serialize an explicit Boolean blocking and round-trip it.
+	snapshotAgent := SnapshotReviewAgent{Blocking: false, Agent: AgentDefSnapshot{Name: "advisory", Harness: "harness"}}
 	snapshotJSON, err := json.Marshal(snapshotAgent)
 	if err != nil {
 		t.Fatalf("marshal snapshot agent: %v", err)
@@ -425,8 +431,58 @@ func TestReviewAgentLegacyRequiredCompatibilityAndValidation(t *testing.T) {
 	if strings.Contains(string(snapshotJSON), `"required"`) || !strings.Contains(string(snapshotJSON), `"blocking":false`) {
 		t.Fatalf("canonical snapshot JSON = %s", snapshotJSON)
 	}
-	if err := json.Unmarshal([]byte(`{"blocking":false,"required":false,"agent":{"name":"bad","harness":"harness"}}`), &snapshotAgent); err == nil || !strings.Contains(err.Error(), "both blocking") {
-		t.Fatalf("snapshot both-fields error = %v", err)
+	var roundTrip SnapshotReviewAgent
+	if err := json.Unmarshal(snapshotJSON, &roundTrip); err != nil || roundTrip.Blocking {
+		t.Fatalf("snapshot round-trip = %+v err=%v", roundTrip, err)
+	}
+	// Persisted snapshots do not inherit the live graph's omitted-blocking
+	// default. Legacy required-only snapshots must fail closed rather than
+	// silently turning a reviewer advisory.
+	for _, raw := range []string{
+		`{"agent":{"name":"advisory","harness":"harness"},"required":true}`,
+		`{"agent":{"name":"advisory","harness":"harness"}}`,
+		`{"agent":{"name":"advisory","harness":"harness"},"blocking":null}`,
+	} {
+		var legacy SnapshotReviewAgent
+		if err := json.Unmarshal([]byte(raw), &legacy); err == nil {
+			t.Fatalf("legacy snapshot %s decoded as %+v, want strict rejection", raw, legacy)
+		}
+	}
+}
+
+func TestDecodeFlowSnapshotRejectsLegacyFieldsUnknownNestedFieldsAndInvalidGraph(t *testing.T) {
+	valid := `{"flow_id":"fl-current","flow_name":"current graph","start_node":"done","transition_budget":1,"nodes":[{"key":"done","name":"Done","kind":"terminal","config":{"terminal":{"resolution":"completed"}}}],"edges":[]}`
+	if _, err := decodeFlowSnapshot([]byte(valid)); err != nil {
+		t.Fatalf("decode valid current snapshot: %v", err)
+	}
+	// Frozen agent payloads are self-contained: decoding a persisted run must
+	// not consult the current agent catalog (the id deliberately need not exist).
+	frozenAgent := `{"flow_id":"fl-frozen","flow_name":"frozen graph","start_node":"author","transition_budget":5,"nodes":[{"key":"author","name":"Author","kind":"agent","config":{"agent":{"agent":{"id":"ad-deleted","name":"Deleted live agent","harness":"harness","prompt":"Frozen prompt"},"workspace":"base","artifact":"handoff"}}},{"key":"done","name":"Done","kind":"terminal","config":{"terminal":{"resolution":"completed"}}}],"edges":[{"from":"author","outcome":"completed","to":"done"}]}`
+	decoded, err := decodeFlowSnapshot([]byte(frozenAgent))
+	if err != nil || decoded.Nodes[0].Config.Agent == nil || decoded.Nodes[0].Config.Agent.Agent.ID != "ad-deleted" {
+		t.Fatalf("decode frozen agent snapshot = %+v err=%v, want self-contained frozen agent", decoded, err)
+	}
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{name: "retired ordered phases", raw: `{"flow_id":"fl-current","flow_name":"current graph","start_node":"done","transition_budget":1,"nodes":[{"key":"done","name":"Done","kind":"terminal","config":{"terminal":{"resolution":"completed"}}}],"edges":[],"phases":[]}`},
+		{name: "retired top-level review agents", raw: `{"flow_id":"fl-current","flow_name":"current graph","start_node":"done","transition_budget":1,"nodes":[{"key":"done","name":"Done","kind":"terminal","config":{"terminal":{"resolution":"completed"}}}],"edges":[],"review_agents":[]}`},
+		{name: "retired fix agent", raw: `{"flow_id":"fl-current","flow_name":"current graph","start_node":"done","transition_budget":1,"nodes":[{"key":"done","name":"Done","kind":"terminal","config":{"terminal":{"resolution":"completed"}}}],"edges":[],"fix_agent_def_id":"ad-fix"}`},
+		{name: "unknown nested node config", raw: `{"flow_id":"fl-current","flow_name":"current graph","start_node":"done","transition_budget":1,"nodes":[{"key":"done","name":"Done","kind":"terminal","config":{"terminal":{"resolution":"completed","legacy":true}}}],"edges":[]}`},
+		{name: "noncanonical graph value", raw: `{"flow_id":"fl-current","flow_name":"current graph","start_node":" done ","transition_budget":1,"nodes":[{"key":"done","name":"Done","kind":"terminal","config":{"terminal":{"resolution":"completed"}}}],"edges":[]}`},
+		{name: "missing flow identity", raw: strings.Replace(valid, `"flow_id":"fl-current"`, `"flow_id":""`, 1)},
+		{name: "missing frozen agent id", raw: strings.Replace(frozenAgent, `"id":"ad-deleted",`, "", 1)},
+		{name: "noncanonical frozen agent", raw: strings.Replace(frozenAgent, `"harness":"harness"`, `"harness":" harness "`, 1)},
+		{name: "multiple JSON values", raw: valid + `{}`},
+		{name: "invalid graph shape", raw: `{"flow_id":"fl-current","flow_name":"current graph","start_node":"missing","transition_budget":1,"nodes":[{"key":"done","name":"Done","kind":"terminal","config":{"terminal":{"resolution":"completed"}}}],"edges":[]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := decodeFlowSnapshot([]byte(tc.raw)); err == nil {
+				t.Fatalf("decodeFlowSnapshot(%s) succeeded, want rejection", tc.raw)
+			}
+		})
 	}
 }
 

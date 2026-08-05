@@ -760,6 +760,41 @@ func createTasks(t *testing.T, service *TaskService, titles ...string) []Task {
 	return tasks
 }
 
+// testWorkflowSnapshotJSON returns a complete frozen graph for direct-SQL
+// workflow fixtures. Persisted runs must never use the retired empty snapshot
+// placeholder, even when a test exercises only a read-model field.
+func testWorkflowSnapshotJSON(t *testing.T, nodeKey string) string {
+	t.Helper()
+	snapshot := FlowSnapshot{
+		FlowID:           "fl-test-fixture",
+		FlowName:         "test fixture",
+		StartNode:        nodeKey,
+		TransitionBudget: 10,
+		Nodes: []FlowNodeSnapshot{
+			{
+				Key:  nodeKey,
+				Name: "Current test node",
+				Kind: NodeAgent,
+				Config: FlowNodeSnapshotConfig{Agent: &AgentNodeSnapshotConfig{
+					Agent:     AgentDefSnapshot{ID: "ad-test-fixture", Name: "Test agent", Harness: "harness", Prompt: "Complete the current test node."},
+					Workspace: WorkspaceBase,
+					Artifact:  ArtifactHandoff,
+				}},
+			},
+			{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeSnapshotConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+		},
+		Edges: []FlowEdge{{From: nodeKey, Outcome: "completed", To: "done"}},
+	}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("marshal workflow fixture snapshot: %v", err)
+	}
+	if _, err := decodeFlowSnapshot(raw); err != nil {
+		t.Fatalf("validate workflow fixture snapshot: %v", err)
+	}
+	return string(raw)
+}
+
 // seedActiveWorkflowRun inserts an active workflow run parked on the given
 // node, mirroring the shape the executor leaves an agent node in while its
 // author job is outstanding.
@@ -770,8 +805,8 @@ func seedActiveWorkflowRun(t *testing.T, database *sql.DB, taskID, runID, nodeKe
 INSERT INTO workflow_runs (
 	id, task_id, run_sequence, flow_snapshot_json, state, current_node_key,
 	current_node_run_id, transition_budget, created_at, started_at
-) VALUES (?, ?, 1, '{}', 'running', ?, ?, 10, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		runID, taskID, nodeKey, nodeRunID); err != nil {
+) VALUES (?, ?, 1, ?, 'running', ?, ?, 10, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		runID, taskID, testWorkflowSnapshotJSON(t, nodeKey), nodeKey, nodeRunID); err != nil {
 		t.Fatalf("insert workflow run: %v", err)
 	}
 	if _, err := database.ExecContext(ctx, `
@@ -890,8 +925,8 @@ func TestBoardResultAwaitingWorkerUsesCurrentVisitNotStaleAttempt(t *testing.T) 
 INSERT INTO workflow_runs (
 	id, task_id, run_sequence, flow_snapshot_json, state, current_node_key,
 	current_node_run_id, transition_budget, created_at, started_at
-) VALUES ('wr-revisit', ?, 1, '{}', 'running', 'author', 'nr-visit-2', 10,
-	'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, task.ID); err != nil {
+) VALUES ('wr-revisit', ?, 1, ?, 'running', 'author', 'nr-visit-2', 10,
+	'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, task.ID, testWorkflowSnapshotJSON(t, "author")); err != nil {
 		t.Fatalf("insert workflow run: %v", err)
 	}
 	// Visit 1 was retried (attempt 2) and then completed; it has no live job.

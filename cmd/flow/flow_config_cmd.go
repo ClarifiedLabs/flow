@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -407,79 +408,6 @@ func runFlowsSetDefault(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// runPhase applies human gate decisions on an task's paused work phase.
-func runPhase(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: flow phase {approve TASK_ID|request-changes TASK_ID --feedback TEXT}")
-		return 2
-	}
-	switch args[0] {
-	case "approve":
-		return runPhaseApprove(args[1:], stdout, stderr)
-	case "request-changes":
-		return runPhaseRequestChanges(args[1:], stdout, stderr)
-	default:
-		fmt.Fprintf(stderr, "unknown phase subcommand: %s\n", args[0])
-		return 2
-	}
-}
-
-func runPhaseApprove(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("phase approve", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	apiFlags := addAPIFlags(flags)
-	if err := flags.Parse(args); err != nil {
-		return 2
-	}
-	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "task id is required")
-		return 2
-	}
-	client, err := newAPIClient(apiFlags)
-	if err != nil {
-		fmt.Fprintf(stderr, "create client: %v\n", err)
-		return 1
-	}
-	task, err := client.ApproveWorkPhase(flags.Arg(0))
-	if err != nil {
-		fmt.Fprintf(stderr, "approve phase: %v\n", err)
-		return 1
-	}
-	printTaskLine(stdout, task)
-	return 0
-}
-
-func runPhaseRequestChanges(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("phase request-changes", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	apiFlags := addAPIFlags(flags)
-	var feedback string
-	flags.StringVar(&feedback, "feedback", "", "request-changes feedback injected into the re-run phase's prompt")
-	if err := flags.Parse(args); err != nil {
-		return 2
-	}
-	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "task id is required")
-		return 2
-	}
-	if strings.TrimSpace(feedback) == "" {
-		fmt.Fprintln(stderr, "--feedback is required")
-		return 2
-	}
-	client, err := newAPIClient(apiFlags)
-	if err != nil {
-		fmt.Fprintf(stderr, "create client: %v\n", err)
-		return 1
-	}
-	task, err := client.RequestWorkPhaseChanges(flags.Arg(0), feedback)
-	if err != nil {
-		fmt.Fprintf(stderr, "request changes: %v\n", err)
-		return 1
-	}
-	printTaskLine(stdout, task)
-	return 0
-}
-
 // resolveFlowRef accepts a flow id ("fl-...") or a flow name and returns the id.
 func resolveFlowRef(client *flowclient.Client, ref string) (string, error) {
 	ref = strings.TrimSpace(ref)
@@ -518,7 +446,8 @@ func resolveFeatureRef(client *flowclient.Client, ref string) (string, error) {
 }
 
 // decodeConfigFile reads a YAML or JSON config document (path "-" = stdin)
-// into target. YAML is normalized through JSON so the struct json tags apply.
+// into target. YAML is normalized through JSON so the struct JSON tags apply,
+// then decoded strictly: removed workflow fields must not be silently dropped.
 func decodeConfigFile(path string, target any) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -542,5 +471,16 @@ func decodeConfigFile(path string, target any) error {
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(normalized, target)
+	decoder := json.NewDecoder(bytes.NewReader(normalized))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("config must contain exactly one JSON value")
+		}
+		return err
+	}
+	return nil
 }

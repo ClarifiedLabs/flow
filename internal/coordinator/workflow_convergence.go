@@ -83,9 +83,8 @@ type convergenceResolutionPayload struct {
 }
 
 func normalizeConvergenceEvidence(run WorkflowRun, evidence ConvergenceEvidence, now time.Time) (ConvergenceEvidence, error) {
-	if evidence.SchemaVersion == 0 {
-		evidence.SchemaVersion = ConvergenceEvidenceSchemaVersion
-	}
+	// Every producer stamps SchemaVersion explicitly; an absent or unknown
+	// version is corrupt/unsupported data, never silently promoted.
 	if evidence.SchemaVersion != ConvergenceEvidenceSchemaVersion {
 		return ConvergenceEvidence{}, fmt.Errorf("unsupported convergence evidence schema version %d", evidence.SchemaVersion)
 	}
@@ -163,10 +162,12 @@ func ActiveConvergenceEvidence(transitions []WorkflowTransition) (*ConvergenceEv
 			if err := json.Unmarshal(transition.Payload, &evidence); err != nil {
 				return nil, fmt.Errorf("decode convergence evidence: %w", err)
 			}
-			// Legacy aggregate payloads predate typed evidence. Do not infer a
-			// convergence decision from held_by or from an unversioned payload.
+			// The newest request governs the hold. An unversioned or
+			// unknown-version payload is corrupt/unsupported data: fail closed
+			// rather than reporting "no active evidence" or scanning backward to
+			// resurrect an earlier request.
 			if evidence.SchemaVersion != ConvergenceEvidenceSchemaVersion {
-				return nil, nil
+				return nil, fmt.Errorf("unsupported convergence evidence schema version %d", evidence.SchemaVersion)
 			}
 			return &evidence, nil
 		}

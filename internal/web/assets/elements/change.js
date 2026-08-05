@@ -310,6 +310,11 @@ export class FlowChange extends FlowElement {
     // review's threads and verdict attached to the code that was actually
     // inspected.
     const headSHA = this._paintedHead;
+    const openWait = value(this.data || {}, "open_wait", "OpenWait") || {};
+    const openWaitKind = String(value(openWait, "kind", "Kind") || "");
+    const nodeRunID = String(value(openWait, "node_run_id", "NodeRunID") || "").trim();
+    const reviewWaitID = String(value(openWait, "id", "ID") || "").trim();
+    const observedGate = openWaitKind === "human_gate" && nodeRunID && reviewWaitID;
     const comments = [...this.drafts.values()]
       .filter((draft) => draft.body.trim())
       .map((draft) => ({ file_path: draft.path, line: draft.line, body: draft.body.trim() }));
@@ -359,7 +364,13 @@ export class FlowChange extends FlowElement {
     });
     this.app?.setStatus(entry.label);
     try {
-      await apiPost(`/v2/changes/${encodeURIComponent(changeID)}/review`, { verdict, body, comments, head_sha: headSHA });
+      await apiPost(`/v2/changes/${encodeURIComponent(changeID)}/review`, {
+        verdict,
+        body,
+        comments,
+        head_sha: headSHA,
+        ...(verdict !== "comment" && observedGate ? { node_run_id: nodeRunID, review_wait_id: reviewWaitID } : {}),
+      });
       // The server recorded this review against the head the submission named.
       // Settlement belongs to that head's display: a poll may have repainted
       // the change to a newer head while the request was out, and the reviewer

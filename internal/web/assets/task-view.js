@@ -196,37 +196,6 @@ export function renderTaskFormView(app, task, options = {}) {
   `;
 }
 
-// renderFlowSummaryLineView describes the task's flow as a one-line summary:
-// the flow name plus its phase chain (e.g. "spec(gate) -> implement", each
-// phase optionally annotated with its agent). It prefers the live flow status
-// (data.flow, which carries the frozen phases + agent names); when the task is
-// not yet scheduled it falls back to the selected/default flow name from the
-// per-project flow cache.
-export function renderFlowSummaryLineView(app, task, flow, projectID) {
-  const phases = value(flow, "phases", "Phases") || [];
-  if (flow && phases.length) {
-    const flowName = value(flow, "flow_name", "FlowName");
-    const chain = phases.map((phase) => {
-      const name = value(phase, "name", "Name");
-      const gate = value(phase, "gate", "Gate") === "human" ? "(gate)" : "";
-      const agentName = value(phase, "agent_name", "AgentName");
-      return `${escapeHTML(name)}${gate}${agentName ? ` · ${escapeHTML(agentName)}` : ""}`;
-    }).join(" -> ");
-    return `Flow <strong>${escapeHTML(flowName || "")}</strong> · ${chain}`;
-  }
-  const flowID = String(value(task, "flow_id", "FlowID") || "").trim();
-  const cache = (app.flowsByProject && app.flowsByProject.get(String(projectID || "").trim())) || { flows: [], defaultFlowID: "" };
-  const targetID = flowID || cache.defaultFlowID;
-  const match = (cache.flows || []).find((candidate) => value(candidate, "id", "ID") === targetID);
-  if (match) {
-    const name = value(match, "name", "Name") || value(match, "id", "ID");
-    const isDefault = value(match, "id", "ID") === cache.defaultFlowID;
-    return `Flow <strong>${escapeHTML(name)}</strong>${!flowID && isDefault ? " (default)" : ""}`;
-  }
-  return `<span class="muted">No flow</span>`;
-}
-
-
 // bindTaskFlowControlsView refreshes the flow selector when the create form's
 // project select changes: it fetches that project's flows and work-item
 // summaries, then repaints the flow, canonical parent, and relation suggestion
@@ -265,17 +234,4 @@ export function bindTaskFlowControlsView(app, form) {
     const inferred = form.querySelector?.("[data-inferred-feature]");
     if (inferred) inferred.textContent = inferredFeatureView(app, projectSelect.value, parentInput.value);
   });
-}
-
-// flowHeaderMeta condenses the live flow status into the task header's meta
-// line: "<flow name> · <phase> <n>/<count>" (1-based). Empty when there is no
-// flow cursor yet.
-export function flowHeaderMeta(flow) {
-  if (!flow) return "";
-  const flowName = value(flow, "flow_name", "FlowName");
-  const phaseName = value(flow, "phase_name", "PhaseName");
-  const phaseCount = Number(value(flow, "phase_count", "PhaseCount") || 0);
-  const phaseIndex = Number(value(flow, "phase_index", "PhaseIndex") || 0);
-  const phasePart = phaseName && phaseCount ? `${phaseName} ${phaseIndex + 1}/${phaseCount}` : phaseName;
-  return [flowName, phasePart].filter(Boolean).join(" · ");
 }

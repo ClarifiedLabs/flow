@@ -134,6 +134,8 @@ export const ACTIONS = {
   },
 
   async workflowRespond(app, element, dataset) {
+    const reviewWaitID = String(dataset.reviewWait || "").trim();
+    if (!reviewWaitID) return "This review wait is no longer actionable";
     const feedback = String(
       element.closest("[data-gate-panel]")?.querySelector("[data-workflow-feedback]")?.value || "",
     ).trim();
@@ -143,7 +145,7 @@ export const ACTIONS = {
     // newer round. The server re-asserts the binding under the review lock.
     await apiPost(workflowPath(dataset, dataset.task, "/workflow/respond"), {
       node_run_id: dataset.workflowRespond,
-      review_wait_id: dataset.reviewWait || "",
+      review_wait_id: reviewWaitID,
       outcome: dataset.outcome || "",
       feedback,
     });
@@ -281,9 +283,11 @@ export const ACTIONS = {
   async cardApprove(app, element, dataset) {
     const taskID = dataset.cardApprove;
     const detail = await apiGet(workflowPath(dataset, taskID, "/workflow")).catch(() => null);
-    const nodeRunID = detail?.detail?.run?.current_node_run_id || detail?.detail?.open_wait?.node_run_id || "";
+    const wait = detail?.detail?.open_wait;
+    const nodeRunID = String(wait?.node_run_id || "").trim();
+    const reviewWaitID = String(wait?.id || "").trim();
     const outcome = firstGateOutcome(detail);
-    if (!nodeRunID || !outcome) return `${taskID} has no open gate to approve`;
+    if (!nodeRunID || !reviewWaitID || !outcome) return `${taskID} has no actionable open gate to approve`;
     await apiPost(workflowPath(dataset, taskID, "/workflow/respond"), {
       node_run_id: nodeRunID,
       // review_wait_id binds the card approval to the review round this
@@ -291,7 +295,7 @@ export const ACTIONS = {
       // reopen a fresh wait on the same node run before the POST lands, and
       // the server then rejects the stale approval instead of deciding the
       // newer round.
-      review_wait_id: detail?.detail?.open_wait?.id || "",
+      review_wait_id: reviewWaitID,
       outcome,
     });
     await app.refresh();
@@ -402,14 +406,9 @@ function releaseMessage(taskID, edge) {
 }
 
 function firstGateOutcome(detail) {
-  // Interactive review waits carry the gate's outcomes with them — the
-  // current node is the agent node then, so its own config has none.
-  const fromWait = parseWaitDetails(detail?.detail?.open_wait).outcomes?.[0];
-  if (fromWait) return fromWait;
-  const snapshot = detail?.detail?.run?.snapshot || {};
-  const key = detail?.detail?.run?.current_node_key || "";
-  const node = (snapshot.nodes || []).find((candidate) => candidate.key === key);
-  return node?.config?.human_gate?.outcomes?.[0] || "";
+  // The frozen wait is authoritative. Do not reconstruct outcomes from the
+  // current graph: a malformed or legacy wait is not actionable.
+  return parseWaitDetails(detail?.detail?.open_wait)?.outcomes?.[0] || "";
 }
 
 async function resolveReadyChange(projectID, taskID) {

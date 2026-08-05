@@ -136,8 +136,8 @@ FROM workflow_node_runs nr WHERE nr.id = ?`, input.NodeRunID).Scan(&runID, &node
 	if err := tx.QueryRowContext(ctx, `SELECT flow_snapshot_json FROM workflow_runs WHERE id = ?`, runID).Scan(&snapshotJSON); err != nil {
 		return WorkflowArtifact{}, false, err
 	}
-	var snapshot FlowSnapshot
-	if err := json.Unmarshal([]byte(snapshotJSON), &snapshot); err != nil {
+	snapshot, err := decodeFlowSnapshot([]byte(snapshotJSON))
+	if err != nil {
 		return WorkflowArtifact{}, false, fmt.Errorf("decode workflow snapshot: %w", err)
 	}
 	node, ok := snapshot.Node(nodeKey)

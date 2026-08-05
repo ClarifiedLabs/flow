@@ -14,6 +14,24 @@ import (
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
 )
 
+// reviewGateRequest binds a change-review verdict to the exact persisted human
+// gate the test observed. Production callers receive the same fields from the
+// change read model's open_wait; tests must not preserve the old node-only
+// response path by fabricating a verdict without them.
+func reviewGateRequest(t *testing.T, fixture testFixture, taskID string, request reviewVerdictRequest) reviewVerdictRequest {
+	t.Helper()
+	wait, waiting, err := fixture.Bundle.WorkflowRuns.OpenWait(context.Background(), taskID)
+	if err != nil {
+		t.Fatalf("load open review wait: %v", err)
+	}
+	if !waiting || wait.Kind != coordinator.WorkflowWaitHumanGate || wait.ID == "" || wait.NodeRunID == "" {
+		t.Fatalf("open review wait = %+v waiting=%t, want a persisted human gate", wait, waiting)
+	}
+	request.NodeRunID = wait.NodeRunID
+	request.ReviewWaitID = wait.ID
+	return request
+}
+
 func TestSubmitReviewApprovalAdvancesHumanGate(t *testing.T) {
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "change review approval")
@@ -38,11 +56,11 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 
 	var review reviewVerdictResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
-		reviewVerdictRequest{
+		reviewGateRequest(t, fixture, created.Task.ID, reviewVerdictRequest{
 			Verdict:  "approve",
 			HeadSHA:  "1111111111111111111111111111111111111111",
 			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "looks good"}},
-		}, http.StatusOK, &review)
+		}), http.StatusOK, &review)
 	if review.Check == nil || review.Check.Verdict != coordinator.CheckSatisfied {
 		t.Fatalf("review check = %+v, want satisfied", review.Check)
 	}
@@ -63,6 +81,95 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 	}
 	if gate.State != coordinator.WorkflowNodeSucceeded || gate.Outcome != "approved" {
 		t.Fatalf("human gate = %+v, want succeeded with approved outcome", gate)
+	}
+}
+
+func TestSubmitReviewRequiresExactPersistedReviewWait(t *testing.T) {
+	fixture := newTestFixture(t)
+	flow := newBoardFixtureFlow(t, fixture, "change review exact wait")
+
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{Title: "Exact review wait from change view", FlowID: flow.ID}, http.StatusCreated, &created)
+	var scheduled workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
+		nil, http.StatusOK, &scheduled)
+
+	const (
+		changeID  = "ch-change-review-exact-wait"
+		headSHA   = "1111111111111111111111111111111111111111"
+		timestamp = "2026-01-01T00:00:00.000000000Z"
+	)
+	if _, err := fixture.DB.ExecContext(context.Background(), `
+INSERT INTO changes (id, task_id, branch, base, head_sha, created_at, updated_at, ready_at)
+VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-review-exact-wait",
+		headSHA, timestamp, timestamp, timestamp); err != nil {
+		t.Fatalf("insert change: %v", err)
+	}
+
+	var change changeResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/changes/"+changeID,
+		nil, http.StatusOK, &change)
+	if change.OpenWait == nil || change.OpenWait.Kind != coordinator.WorkflowWaitHumanGate || change.OpenWait.ID == "" || change.OpenWait.NodeRunID == "" {
+		t.Fatalf("change open wait = %+v, want the persisted human gate identity", change.OpenWait)
+	}
+	wait := *change.OpenWait
+	path := "/v2/changes/" + changeID + "/review"
+	assertNoVerdictWrites := func() {
+		t.Helper()
+		var threads, checks int
+		if err := fixture.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM review_threads WHERE change_id = ?`, changeID).Scan(&threads); err != nil {
+			t.Fatalf("count review threads: %v", err)
+		}
+		if err := fixture.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM checks WHERE task_id = ? AND name = ?`, created.Task.ID, humanReviewCheckName).Scan(&checks); err != nil {
+			t.Fatalf("count review checks: %v", err)
+		}
+		if threads != 0 || checks != 0 {
+			t.Fatalf("rejected verdict persisted threads=%d checks=%d, want neither", threads, checks)
+		}
+		current, currentWaiting, currentErr := fixture.Bundle.WorkflowRuns.OpenWait(context.Background(), created.Task.ID)
+		if currentErr != nil || !currentWaiting || current.ID != wait.ID || current.NodeRunID != wait.NodeRunID {
+			t.Fatalf("review wait after rejected verdict = %+v waiting=%t err=%v, want unchanged %+v", current, currentWaiting, currentErr, wait)
+		}
+	}
+
+	for _, reviewWaitID := range []string{"", "   "} {
+		var response errorResponse
+		doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, path, reviewVerdictRequest{
+			Verdict:      "approve",
+			HeadSHA:      headSHA,
+			NodeRunID:    wait.NodeRunID,
+			ReviewWaitID: reviewWaitID,
+			Comments:     []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "looks good"}},
+		}, http.StatusBadRequest, &response)
+		if response.Error.Code != "review_wait_id_required" {
+			t.Fatalf("missing review wait ID error = %+v, want review_wait_id_required", response.Error)
+		}
+		assertNoVerdictWrites()
+	}
+
+	var stale errorResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, path, reviewVerdictRequest{
+		Verdict:      "approve",
+		HeadSHA:      headSHA,
+		NodeRunID:    wait.NodeRunID,
+		ReviewWaitID: "rw-stale",
+		Comments:     []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "looks good"}},
+	}, http.StatusConflict, &stale)
+	if stale.Error.Code != "workflow_conflict" {
+		t.Fatalf("stale review wait error = %+v, want workflow_conflict", stale.Error)
+	}
+	assertNoVerdictWrites()
+
+	var approved reviewVerdictResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, path,
+		reviewGateRequest(t, fixture, created.Task.ID, reviewVerdictRequest{
+			Verdict:  "approve",
+			HeadSHA:  headSHA,
+			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "looks good"}},
+		}), http.StatusOK, &approved)
+	if approved.Check == nil || approved.Check.Verdict != coordinator.CheckSatisfied {
+		t.Fatalf("approved review check = %+v, want satisfied", approved.Check)
 	}
 }
 
@@ -375,11 +482,11 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 	// was already answered.
 	var first reviewVerdictResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
-		reviewVerdictRequest{
+		reviewGateRequest(t, fixture, created.Task.ID, reviewVerdictRequest{
 			Verdict:  "approve",
 			HeadSHA:  headSHA,
 			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "looks good"}},
-		}, http.StatusOK, &first)
+		}), http.StatusOK, &first)
 	if first.Check == nil || first.Check.Verdict != coordinator.CheckSatisfied {
 		t.Fatalf("first review check = %+v, want satisfied", first.Check)
 	}
@@ -489,11 +596,11 @@ UPDATE workflow_node_runs SET state = ?, outcome = ?, completed_at = ? WHERE id 
 
 	var resp errorResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
-		reviewVerdictRequest{
+		reviewGateRequest(t, fixture, created.Task.ID, reviewVerdictRequest{
 			Verdict:  "request_changes",
 			HeadSHA:  headSHA,
 			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "inline note on a contradictory review"}},
-		}, http.StatusConflict, &resp)
+		}), http.StatusConflict, &resp)
 	if resp.Error.Code != "workflow_conflict" {
 		t.Fatalf("error code = %q, want workflow_conflict", resp.Error.Code)
 	}
@@ -572,11 +679,11 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 	// only gate to the work phase — still active, but with no gate left ahead.
 	var first reviewVerdictResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
-		reviewVerdictRequest{
+		reviewGateRequest(t, fixture, created.Task.ID, reviewVerdictRequest{
 			Verdict:  "approve",
 			HeadSHA:  headSHA,
 			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "final gate approved"}},
-		}, http.StatusOK, &first)
+		}), http.StatusOK, &first)
 	if first.Check == nil || first.Check.Verdict != coordinator.CheckSatisfied {
 		t.Fatalf("first review check = %+v, want satisfied", first.Check)
 	}
@@ -967,11 +1074,11 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 	// to the work2 phase between the two gates.
 	var first reviewVerdictResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
-		reviewVerdictRequest{
+		reviewGateRequest(t, fixture, created.Task.ID, reviewVerdictRequest{
 			Verdict:  "approve",
 			HeadSHA:  headSHA,
 			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "first gate looks good"}},
-		}, http.StatusOK, &first)
+		}), http.StatusOK, &first)
 	if first.Check == nil || first.Check.Verdict != coordinator.CheckSatisfied {
 		t.Fatalf("first review check = %+v, want satisfied", first.Check)
 	}
@@ -1028,11 +1135,11 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 	}
 	var third reviewVerdictResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
-		reviewVerdictRequest{
+		reviewGateRequest(t, fixture, created.Task.ID, reviewVerdictRequest{
 			Verdict:  "approve",
 			HeadSHA:  headSHA,
 			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 3, Body: "second gate approved"}},
-		}, http.StatusOK, &third)
+		}), http.StatusOK, &third)
 	run, err = fixture.Bundle.WorkflowRuns.Get(ctx, scheduled.Run.ID)
 	if err != nil {
 		t.Fatalf("load workflow run: %v", err)
@@ -1133,11 +1240,11 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 	// run back through the rework phase toward the same gate again.
 	var first reviewVerdictResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
-		reviewVerdictRequest{
+		reviewGateRequest(t, fixture, created.Task.ID, reviewVerdictRequest{
 			Verdict:  "request_changes",
 			HeadSHA:  headSHA,
 			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 1, Body: "revise this"}},
-		}, http.StatusOK, &first)
+		}), http.StatusOK, &first)
 	if first.Check == nil || first.Check.Verdict != coordinator.CheckBlocked {
 		t.Fatalf("first review check = %+v, want blocked for request_changes", first.Check)
 	}
@@ -1194,11 +1301,11 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 	revisitNodeRunID := run.CurrentNodeRunID
 	var third reviewVerdictResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
-		reviewVerdictRequest{
+		reviewGateRequest(t, fixture, created.Task.ID, reviewVerdictRequest{
 			Verdict:  "approve",
 			HeadSHA:  headSHA,
 			Comments: []reviewInlineComment{{FilePath: "a.go", Line: 3, Body: "final approval"}},
-		}, http.StatusOK, &third)
+		}), http.StatusOK, &third)
 	run, err = fixture.Bundle.WorkflowRuns.Get(ctx, scheduled.Run.ID)
 	if err != nil {
 		t.Fatalf("load workflow run: %v", err)
@@ -1294,7 +1401,7 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 	const body = "this verdict was written inside the gate decision transaction"
 	var review reviewVerdictResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/changes/"+changeID+"/review",
-		reviewVerdictRequest{Verdict: "approve", HeadSHA: headSHA, Body: body}, http.StatusOK, &review)
+		reviewGateRequest(t, fixture, created.Task.ID, reviewVerdictRequest{Verdict: "approve", HeadSHA: headSHA, Body: body}), http.StatusOK, &review)
 	if review.Check == nil {
 		t.Fatal("review check = nil, want the transaction-upserted check in the response")
 	}

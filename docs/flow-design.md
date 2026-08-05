@@ -9,18 +9,23 @@ architecture, start with [architecture.md](architecture.md); when this historica
 design narrative and current docs disagree, the current architecture/setup/usage
 docs are authoritative.
 
-The current worker model differs materially from early pool terminology below.
-The coordinator stores project-local durable assignments, and
-`flow-orchestrator` recovers them before reserving new work. Each assignment gets
-one Kubernetes Job plus Secret or one Darwin child running
-`flow-worker --one-shot`. A worker accepts workload buckets but can hold only one
-live lease total; legacy positive capacity magnitudes normalize to 1. Treat
-references to hot slots or pools as historical rationale, not Deployment
-lifecycle guidance.
+**Scope boundary:** apart from the current-worker update immediately below and
+[Current Graph Workflow Contract](#current-graph-workflow-contract), this file is
+an archived pre-implementation design draft. Its old commands, schemas, phase
+pipelines, cursors, worker pools, and human-gate descriptions are historical
+rationale only, not supported runtime behavior or compatibility promises.
 
-This document turns the design draft into an implementation-ready design. It
-also records the details that needed to be decided before development could
-begin.
+The current worker model is assignment-created and one-shot. The coordinator
+stores project-local durable assignments, and `flow-orchestrator` recovers them
+before reserving new work. Each assignment starts one Kubernetes Job plus Secret
+or one Darwin child running `flow-worker run --one-shot --config PATH`; that
+worker can claim only its assigned job and exits after it. There are no static
+worker configurations, reusable generic queue claims, or worker capacity/accept
+configuration.
+
+The retained material below records the decisions and alternatives considered
+before implementation; it is historical background, not an implementation-ready
+specification.
 
 ## Pre-Development Decisions
 
@@ -543,7 +548,7 @@ creation goes through the API. Workers that are offline from the coordinator
 cannot create coordinator-backed tasks; they should note the discovery locally
 and create the task when the coordinator is reachable.
 
-## Flows and Agent Definitions
+## Current Graph Workflow Contract
 
 The work pipeline — what used to be the hardcoded planning → authoring
 progression — is user-composable, per project, stored in the project database,
@@ -560,56 +565,56 @@ Agent definition: a reusable agent configuration.
   Markdown body, prior handoffs, review state) is still appended by `flow
   fetch-prompt`.
 
-Flow: an ordered work pipeline plus its review configuration.
+Flow: a directed graph that describes one workflow run.
 
-- `phases`: an ordered list of work phases. Each phase names itself (e.g.
-  `spec`), references an agent definition, and declares an exit `gate`:
-  - `auto`: the next phase's job is enqueued immediately when the phase
-    completes.
-  - `human`: the flow pauses; a human reviews the phase's handoff in the UI and
-    either approves (advance) or requests changes (the same phase re-runs with
-    the feedback injected into its prompt).
-- `review_agents`: which agent reviewers (critique) and verifiers (acceptance)
-  run once the final phase publishes the change. Repo `.flow/checks/*.yaml`
-  CI checks always merge in; an empty review set deliberately runs repo checks
-  alone.
-- `fix_agent_def_id`: optional agent for review fix rounds; the default is the
-  final work phase's agent.
+- `start_node` names the first node. `nodes` give each node a stable `key`,
+  display name, kind, and a strict kind-specific configuration. `edges` route a
+  declared node outcome to the next node.
+- Node kinds cover agent work, automated checks, change review, human gates,
+  verification, task-set materialization, merge/finalize actions, and terminal
+  resolutions. An agent node references one agent definition and declares its
+  workspace and artifact kind.
+- Change-review and verify-change nodes carry their reviewers directly. Each
+  reviewer is `{agent_def_id, blocking}`; `blocking` is the only accepted
+  review-policy field. A live definition may omit it, which means blocking;
+  frozen snapshots always contain an explicit Boolean.
+- A human-gate node declares its instructions and named outcomes. Its outgoing
+  edges, rather than an implicit next phase or rework rule, define every allowed
+  continuation.
 
-Each project seeds built-in configuration on first open so a fresh project
-works with zero setup: agent defs `planner`, `author`, `reviewer`, and
-`verifier` (prompts copied from the embedded skills, default harness), plus two
-flows — `direct` (`implement` only; the project default) and `planned`
-(human-gated `plan`, then `implement`). These reproduce the old fixed behavior
-and are ordinary rows the user can edit or replace.
+Definitions are decoded strictly. Retired ordered-flow fields such as
+`phases`, `review_agents`, and `fix_agent_def_id`, as well as unknown nested
+configuration, are rejected instead of being translated. Projects seed useful
+ordinary graph rows and agent definitions, which users may edit or replace.
 
-Snapshot semantics: when an task's work starts (its first author job is
-ensured), the coordinator freezes the resolved flow — phases with full
-agent-def copies, review set, and fix agent — into a per-task flow cursor
-(`task_flow_cursor.flow_snapshot_json`). Editing or deleting a flow never
-changes an in-flight task; unscheduled tasks resolve the live flow when they
-start, and a deleted flow falls back to the project default. Referenced agent
-definitions cannot be deleted while a flow uses them; the default flow cannot
-be deleted.
+Snapshot semantics: scheduling creates a `workflow_runs` row with a complete
+self-contained graph snapshot in `flow_snapshot_json`. Agent references are
+resolved to canonical frozen agent copies at that moment. Later edits or
+removal of catalog rows cannot change an existing run, and a persisted snapshot
+is never repaired from live configuration. Loading a run strictly validates the
+whole snapshot, including graph shape, canonical identities, runtime agent
+fields, and explicit review-agent policy.
 
-Phase execution model:
+Graph execution model:
 
-- Every phase runs as a fresh author-role job/session (phases may use different
-  harnesses, so sessions never continue across phases). The job payload carries
-  the phase coordinates (`phase_name`, `phase_index`, `final_phase`,
-  `gate_feedback`) and an entrypoint built from the phase agent's harness and
-  model selection.
-- `flow ready` is the single completion signal for every phase. Each phase
-  submits a handoff; the engine copies it into a per-phase store
-  (`task_phase_handoffs`) and injects completed phases' handoffs into later
-  phases' prompts. Only the final phase's `flow ready` publishes the change
-  into review; intermediate handoffs are the phase's artifact (a spec, a plan)
-  and only need to be non-empty, while the final phase's handoff must follow
-  the Flow Handoff template.
-- Prompt material is resolved server-side: sessions call
-  `GET /tasks/{id}/prompt-context` (with `?check=<name>` for review checks) to
-  receive the frozen agent prompt, gate feedback, and prior-phase handoffs, so
-  prompts always reflect the snapshot the task is actually running.
+- Each node visit has a durable `workflow_node_runs` row. The executor advances
+  only along the snapshot edge for the node's recorded outcome; there is no
+  implicit phase order or fixed review tail.
+- Agent nodes run as fresh assignment-created jobs and publish the artifact
+  their node requires. Prompt context is resolved from the frozen node and
+  completed graph artifacts, so it remains tied to the run rather than the
+  current catalog.
+- A human gate creates an immutable wait record containing its persisted gate
+  key, artifact, and outcomes. A response must identify that exact
+  `review_wait_id` and the current `node_run_id`; it cannot be routed by a live
+  graph lookup or a node key alone.
+
+> **Historical boundary:** Everything from this point to the end of this file
+> describes the superseded phase/cursor/pool design. In particular, references to
+> `flow_phases`, `flow_review_agents`, `task_flow_cursor`, ordered phases,
+> reusable workers, old gate commands, or synthesized live workflow state are not
+> current interfaces. Use the graph contract above and the authoritative current
+> documentation instead.
 
 ## Identity and Naming
 

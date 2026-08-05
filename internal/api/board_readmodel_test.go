@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -247,24 +248,64 @@ UPDATE workflow_node_runs SET input_artifact_id = ? WHERE id = ?`,
 	}
 }
 
-func TestReleaseSkipToMergeClosesTheRun(t *testing.T) {
+func TestReleaseMergeRequiresMergedTerminal(t *testing.T) {
 	fixture := newTestFixture(t)
-	flow := newBoardFixtureFlow(t, fixture, "board skip to merge")
+	ctx := context.Background()
+	planner, err := fixture.Registry.GlobalAgentDefs().GetByName(ctx, "task-planner")
+	if err != nil {
+		t.Fatalf("resolve task-planner agent definition: %v", err)
+	}
+	// Merge release is only an operator hand-back to an explicit merged
+	// terminal. A held human gate must instead be resumed and answered through
+	// its bound review wait.
+	flow, err := fixture.Bundle.Flows.Create(ctx, coordinator.FlowInput{
+		Name: "board release merge terminal", StartNode: "work",
+		Nodes: []coordinator.FlowNodeInput{
+			{Key: "work", Name: "Work", Kind: coordinator.NodeAgent, Config: coordinator.FlowNodeConfig{Agent: &coordinator.AgentNodeConfig{AgentDefID: planner.ID, Workspace: coordinator.WorkspaceBase, Artifact: coordinator.ArtifactHandoff}}},
+			{Key: "done", Name: "Done", Kind: coordinator.NodeTerminal, Config: coordinator.FlowNodeConfig{Terminal: &coordinator.TerminalNodeConfig{Resolution: coordinator.ResolutionCompleted}}},
+		},
+		Edges: []coordinator.FlowEdgeInput{{From: "work", Outcome: "completed", To: "done"}},
+	})
+	if err != nil {
+		t.Fatalf("create non-human release-merge flow: %v", err)
+	}
 
 	var created taskResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
 		createTaskRequest{Title: "Handed back", FlowID: flow.ID}, http.StatusCreated, &created)
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
 		nil, http.StatusOK, nil)
+	var held workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/hold",
+		nil, http.StatusOK, &held)
+
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/release",
+		workflowReleaseRequest{Edge: string(coordinator.ReleaseMerge)}, http.StatusConflict, nil)
+	run, err := fixture.Bundle.WorkflowRuns.Get(ctx, held.Run.ID)
+	if err != nil {
+		t.Fatalf("load held run: %v", err)
+	}
+	if !run.Held() {
+		t.Fatalf("failed merge release changed hold: %+v", run)
+	}
+}
+
+func TestReleaseSkipToMergeCannotResolveHeldHumanGate(t *testing.T) {
+	fixture := newTestFixture(t)
+	flow := newBoardFixtureFlow(t, fixture, "board human skip to merge")
+
+	var created taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{Title: "Awaiting review", FlowID: flow.ID}, http.StatusCreated, &created)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
+		nil, http.StatusOK, nil)
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/hold",
 		nil, http.StatusOK, nil)
 
-	var released coordinator.CompleteWorkflowNodeResult
+	// A release request has no review-round identities, so it cannot select a
+	// human-gate outcome (or bypass the gate by jumping to the terminal).
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/release",
-		workflowReleaseRequest{Edge: string(coordinator.ReleaseMerge)}, http.StatusOK, &released)
-	if !released.Done {
-		t.Fatalf("released run = %+v, want the run completed at its terminal", released.Run)
-	}
+		workflowReleaseRequest{Edge: string(coordinator.ReleaseMerge)}, http.StatusConflict, nil)
 }
 
 func TestWorkflowDetailResolvesNodeNamesAndEdgeCounts(t *testing.T) {
@@ -277,8 +318,12 @@ func TestWorkflowDetailResolvesNodeNamesAndEdgeCounts(t *testing.T) {
 	var scheduled workflowRunResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/schedule",
 		nil, http.StatusOK, &scheduled)
+	wait, waiting, err := fixture.Bundle.WorkflowRuns.OpenWait(context.Background(), created.Task.ID)
+	if err != nil || !waiting {
+		t.Fatalf("open workflow wait = %+v waiting=%t err=%v", wait, waiting, err)
+	}
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/respond",
-		workflowRespondRequest{NodeRunID: scheduled.Run.CurrentNodeRunID, Outcome: "approved"}, http.StatusOK, nil)
+		workflowRespondRequest{NodeRunID: scheduled.Run.CurrentNodeRunID, ReviewWaitID: wait.ID, Outcome: "approved"}, http.StatusOK, nil)
 
 	var detail workflowDetailResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks/"+created.Task.ID+"/workflow",
@@ -514,6 +559,20 @@ func TestBoardExposesAwaitingWorkerLaneState(t *testing.T) {
 
 	// Park the task in progress on an active agent node whose author job is
 	// queued: the board must say awaiting_worker, not working.
+	snapshotJSON, err := json.Marshal(coordinator.FlowSnapshot{
+		FlowID: "fl-await", FlowName: "await worker", StartNode: "author", TransitionBudget: 10,
+		Nodes: []coordinator.FlowNodeSnapshot{
+			{Key: "author", Name: "Author", Kind: coordinator.NodeAgent, Config: coordinator.FlowNodeSnapshotConfig{Agent: &coordinator.AgentNodeSnapshotConfig{
+				Agent:     coordinator.AgentDefSnapshot{ID: "ad-await", Name: "author", Harness: "harness", Prompt: "Work."},
+				Workspace: coordinator.WorkspaceBase, Artifact: coordinator.ArtifactHandoff,
+			}}},
+			{Key: "done", Name: "Done", Kind: coordinator.NodeTerminal, Config: coordinator.FlowNodeSnapshotConfig{Terminal: &coordinator.TerminalNodeConfig{Resolution: coordinator.ResolutionCompleted}}},
+		},
+		Edges: []coordinator.FlowEdge{{From: "author", Outcome: "completed", To: "done"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal awaiting-worker snapshot: %v", err)
+	}
 	if _, err := fixture.DB.ExecContext(ctx, `UPDATE tasks SET lifecycle_state = 'in_progress' WHERE id = ?`, taskID); err != nil {
 		t.Fatalf("mark task in progress: %v", err)
 	}
@@ -521,8 +580,8 @@ func TestBoardExposesAwaitingWorkerLaneState(t *testing.T) {
 INSERT INTO workflow_runs (
 	id, task_id, run_sequence, flow_snapshot_json, state, current_node_key,
 	current_node_run_id, transition_budget, created_at, started_at
-) VALUES ('wr-await', ?, 1, '{}', 'running', 'author', 'nr-await', 10,
-	'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, taskID); err != nil {
+) VALUES ('wr-await', ?, 1, ?, 'running', 'author', 'nr-await', 10,
+	'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, taskID, string(snapshotJSON)); err != nil {
 		t.Fatalf("insert workflow run: %v", err)
 	}
 	if _, err := fixture.DB.ExecContext(ctx, `

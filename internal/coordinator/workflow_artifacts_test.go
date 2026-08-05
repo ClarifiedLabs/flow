@@ -72,6 +72,44 @@ func TestDecodeTaskSetManifestRequiresBody(t *testing.T) {
 	}
 }
 
+func TestCreateWorkflowArtifactRejectsMalformedPersistedSnapshot(t *testing.T) {
+	ctx := context.Background()
+	store, tasks := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Artifact snapshot strictness", Body: "Reject malformed workflow snapshots."})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	const (
+		runID     = "wr-artifact-snapshot-strict"
+		nodeRunID = "wnr-artifact-snapshot-strict"
+		createdAt = "2026-01-01T00:00:00.000Z"
+	)
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO workflow_runs (
+	id, task_id, run_sequence, flow_snapshot_json, state,
+	current_node_key, current_node_run_id, transition_budget, created_at, started_at
+) VALUES (?, ?, 1, '{}', ?, 'write-plan', ?, 1, ?, ?)`,
+		runID, task.ID, string(WorkflowRunRunning), nodeRunID, createdAt, createdAt); err != nil {
+		t.Fatalf("insert malformed workflow run: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO workflow_node_runs (
+	id, workflow_run_id, node_key, visit, attempt, state, created_at, started_at
+) VALUES (?, ?, 'write-plan', 1, 1, ?, ?, ?)`,
+		nodeRunID, runID, string(WorkflowNodeRunning), createdAt, createdAt); err != nil {
+		t.Fatalf("insert workflow node run: %v", err)
+	}
+
+	artifacts := NewWorkflowArtifactService(store.DB(), tasks)
+	if _, _, err := artifacts.Create(ctx, CreateWorkflowArtifactInput{
+		WorkflowRunID: runID, NodeRunID: nodeRunID, CreatorKey: "test:strict-snapshot",
+		Kind: ArtifactHandoff, SummaryMarkdown: "Attempt to write against malformed snapshot.", ClientKey: "strict-snapshot-1",
+	}); err == nil || !strings.Contains(err.Error(), "decode workflow snapshot") {
+		t.Fatalf("create artifact error = %v, want strict workflow snapshot decode failure", err)
+	}
+}
+
 func TestValidateTaskSetWorkflowSelectionAllowsExplicitDefaultWithoutOverrides(t *testing.T) {
 	ctx := context.Background()
 	store, _ := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))

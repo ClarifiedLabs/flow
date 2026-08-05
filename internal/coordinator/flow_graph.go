@@ -1,6 +1,7 @@
 package coordinator
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -72,39 +73,41 @@ type ReviewAgentConfig struct {
 	Blocking   *bool  `json:"blocking,omitempty"`
 }
 
-// UnmarshalJSON accepts the deprecated required field while keeping blocking as
-// the only marshaled representation. Specifying both is rejected so legacy and
-// canonical inputs can never have ambiguous precedence.
+// UnmarshalJSON decodes a review agent from the current graph vocabulary only:
+// {agent_def_id, blocking}. The removed `required` alias (and any other
+// unknown field) is rejected rather than silently ignored. An omitted
+// `blocking` defaults to blocking, the canonical live-config default.
 func (c *ReviewAgentConfig) UnmarshalJSON(data []byte) error {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return err
-	}
-	_, hasBlocking := fields["blocking"]
-	_, hasRequired := fields["required"]
-	if hasBlocking && hasRequired {
-		return errors.New("review agent cannot specify both blocking and deprecated required")
-	}
-
 	var decoded struct {
-		AgentDefID string `json:"agent_def_id"`
-		Blocking   *bool  `json:"blocking"`
-		Required   *bool  `json:"required"`
+		AgentDefID string          `json:"agent_def_id"`
+		Blocking   json.RawMessage `json:"blocking"`
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&decoded); err != nil {
 		return err
 	}
-	c.AgentDefID = decoded.AgentDefID
-	c.Blocking = decoded.Blocking
-	if hasRequired {
-		c.Blocking = decoded.Required
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("review agent must contain exactly one JSON value")
+		}
+		return err
 	}
-	if c.Blocking == nil {
+
+	c.AgentDefID = decoded.AgentDefID
+	if len(decoded.Blocking) == 0 {
 		blocking := true
 		c.Blocking = &blocking
+		return nil
 	}
+	if bytes.Equal(bytes.TrimSpace(decoded.Blocking), []byte("null")) {
+		return errors.New("review agent blocking must be a boolean, not null")
+	}
+	var blocking bool
+	if err := json.Unmarshal(decoded.Blocking, &blocking); err != nil {
+		return fmt.Errorf("review agent blocking must be a boolean: %w", err)
+	}
+	c.Blocking = &blocking
 	return nil
 }
 
@@ -182,6 +185,37 @@ type SnapshotReviewAgent struct {
 	Agent    AgentDefSnapshot `json:"agent"`
 }
 
+// UnmarshalJSON accepts only the current frozen review-agent shape. Unlike a
+// live graph configuration, a snapshot must carry an explicit blocking value:
+// silently treating a persisted legacy `required`-only value as false would
+// change a blocking reviewer into an advisory one when a run is resumed.
+func (c *SnapshotReviewAgent) UnmarshalJSON(data []byte) error {
+	var decoded struct {
+		Blocking *bool             `json:"blocking"`
+		Agent    *AgentDefSnapshot `json:"agent"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("snapshot review agent must contain exactly one JSON value")
+		}
+		return err
+	}
+	if decoded.Blocking == nil {
+		return errors.New("snapshot review agent blocking is required")
+	}
+	if decoded.Agent == nil {
+		return errors.New("snapshot review agent is required")
+	}
+	c.Blocking = *decoded.Blocking
+	c.Agent = *decoded.Agent
+	return nil
+}
+
 // ReviewAggregationBlocksApproval reports whether any discovery reviewer may
 // contribute a blocking finding to the final aggregate decision.
 func ReviewAggregationBlocksApproval(agents []SnapshotReviewAgent) bool {
@@ -193,39 +227,9 @@ func ReviewAggregationBlocksApproval(agents []SnapshotReviewAgent) bool {
 	return false
 }
 
-// UnmarshalJSON keeps already-scheduled workflow snapshots readable after the
-// workflow-facing field was renamed from required to blocking.
-func (a *SnapshotReviewAgent) UnmarshalJSON(data []byte) error {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return err
-	}
-	_, hasBlocking := fields["blocking"]
-	_, hasRequired := fields["required"]
-	if hasBlocking && hasRequired {
-		return errors.New("snapshot review agent cannot specify both blocking and deprecated required")
-	}
-
-	var decoded struct {
-		Blocking *bool            `json:"blocking"`
-		Required *bool            `json:"required"`
-		Agent    AgentDefSnapshot `json:"agent"`
-	}
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&decoded); err != nil {
-		return err
-	}
-	a.Blocking = true
-	if hasBlocking && decoded.Blocking != nil {
-		a.Blocking = *decoded.Blocking
-	}
-	if hasRequired && decoded.Required != nil {
-		a.Blocking = *decoded.Required
-	}
-	a.Agent = decoded.Agent
-	return nil
-}
+// Snapshots always serialize an explicit Boolean blocking. A snapshot that
+// predates the field (only the removed `required` alias) fails strict decode on
+// load, so no alias decoding or silent advisory fallback remains.
 
 type FlowNodeSnapshotConfig struct {
 	Agent              *AgentNodeSnapshotConfig        `json:"agent,omitempty"`
@@ -283,15 +287,16 @@ func (s FlowSnapshot) NodeIndex(key string) (int, bool) {
 	return 0, false
 }
 
-// TerminalNodeKey returns the key of the first terminal node, which is where
-// "skip to merge" hands a held run back to the executor.
-func (s FlowSnapshot) TerminalNodeKey() (string, bool) {
+// TerminalForResolution returns the frozen terminal with the requested
+// resolution. Operator merge release must select an explicit merged terminal;
+// declaration order must never turn that operation into another resolution.
+func (s FlowSnapshot) TerminalForResolution(resolution DoneResolution) (FlowNodeSnapshot, bool) {
 	for _, node := range s.Nodes {
-		if node.Kind == NodeTerminal {
-			return node.Key, true
+		if node.Kind == NodeTerminal && node.Config.Terminal != nil && node.Config.Terminal.Resolution == resolution {
+			return node, true
 		}
 	}
-	return "", false
+	return FlowNodeSnapshot{}, false
 }
 
 func (s FlowSnapshot) Target(from, outcome string) (string, bool) {
@@ -301,6 +306,200 @@ func (s FlowSnapshot) Target(from, outcome string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// decodeFlowSnapshot accepts one current graph snapshot only. Workflow runs are
+// durable authority, so permissive JSON decoding here would allow a stale
+// ordered-flow field or an unknown nested configuration to silently alter a
+// resumed run. Decode every level strictly and then re-run the graph-shape
+// validation against the frozen node configuration.
+func decodeFlowSnapshot(data []byte) (FlowSnapshot, error) {
+	var snapshot FlowSnapshot
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&snapshot); err != nil {
+		return FlowSnapshot{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return FlowSnapshot{}, errors.New("workflow snapshot must contain exactly one JSON value")
+		}
+		return FlowSnapshot{}, err
+	}
+	if err := validateFlowSnapshot(snapshot); err != nil {
+		return FlowSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+// validateFlowSnapshot translates frozen agent copies to their graph contracts
+// and uses the same structural validation as a live flow. It intentionally does
+// not resolve any live agent definitions: a snapshot must remain independent of
+// later catalog edits.
+func validateFlowSnapshot(snapshot FlowSnapshot) error {
+	if err := requireCanonicalSnapshotValue("flow_id", snapshot.FlowID); err != nil {
+		return err
+	}
+	if err := requireCanonicalSnapshotValue("flow_name", snapshot.FlowName); err != nil {
+		return err
+	}
+	if snapshot.TransitionBudget < 1 || snapshot.TransitionBudget > MaxFlowTransitionBudget {
+		return fmt.Errorf("snapshot transition budget must be between 1 and %d", MaxFlowTransitionBudget)
+	}
+	input := FlowInput{
+		StartNode:        snapshot.StartNode,
+		TransitionBudget: snapshot.TransitionBudget,
+		Edges:            append([]FlowEdgeInput(nil), snapshot.Edges...),
+	}
+	for _, node := range snapshot.Nodes {
+		config, err := snapshotNodeConfigToInput(node.Config)
+		if err != nil {
+			return fmt.Errorf("snapshot node %q: %w", node.Key, err)
+		}
+		input.Nodes = append(input.Nodes, FlowNodeInput{
+			Key: node.Key, Name: node.Name, Kind: node.Kind, Config: config,
+		})
+	}
+	normalized, err := normalizeGraphInput(input)
+	if err != nil {
+		return fmt.Errorf("invalid workflow snapshot graph: %w", err)
+	}
+	// A frozen snapshot is durable authority, not a permissive input format.
+	// Accepting values that only become valid after trimming/defaulting would
+	// leave the persisted snapshot different from the graph we validated (and
+	// can make resumed routing depend on unvalidated raw keys). Snapshot writers
+	// already persist canonical graph values, so reject any noncanonical shape.
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("encode workflow snapshot graph for validation: %w", err)
+	}
+	canonical, err := json.Marshal(normalized)
+	if err != nil {
+		return fmt.Errorf("encode normalized workflow snapshot graph: %w", err)
+	}
+	if !bytes.Equal(encoded, canonical) {
+		return errors.New("workflow snapshot graph must use canonical values")
+	}
+	return nil
+}
+
+// requireCanonicalSnapshotValue rejects omitted and whitespace-normalizable
+// persisted identifiers. Snapshot writers always store the canonical value, and
+// accepting a different raw value would validate one graph while executing
+// another.
+func requireCanonicalSnapshotValue(field string, value string) error {
+	canonical := strings.TrimSpace(value)
+	if canonical == "" {
+		return fmt.Errorf("workflow snapshot %s is required", field)
+	}
+	if value != canonical {
+		return fmt.Errorf("workflow snapshot %s must use canonical values", field)
+	}
+	return nil
+}
+
+// frozenAgentID validates the complete self-contained agent contract carried by
+// a snapshot. It intentionally does not resolve the ID through the current
+// agent catalog: a persisted run remains executable after that catalog entry is
+// changed or removed.
+func frozenAgentID(agent AgentDefSnapshot) (string, error) {
+	if err := requireCanonicalSnapshotValue("agent id", agent.ID); err != nil {
+		return "", err
+	}
+	normalized, err := normalizeAgentDefInput(AgentDefInput{
+		Name:            agent.Name,
+		Harness:         agent.Harness,
+		Model:           agent.Model,
+		ReasoningEffort: agent.ReasoningEffort,
+		Prompt:          agent.Prompt,
+	})
+	if err != nil {
+		return "", fmt.Errorf("invalid frozen agent %q: %w", agent.ID, err)
+	}
+	canonical := AgentDefSnapshot{
+		ID:              agent.ID,
+		Name:            normalized.Name,
+		Harness:         normalized.Harness,
+		Model:           normalized.Model,
+		ReasoningEffort: normalized.ReasoningEffort,
+		Prompt:          normalized.Prompt,
+	}
+	if agent != canonical {
+		return "", fmt.Errorf("frozen agent %q must use canonical values", agent.ID)
+	}
+	return agent.ID, nil
+}
+
+func snapshotNodeConfigToInput(config FlowNodeSnapshotConfig) (FlowNodeConfig, error) {
+	out := FlowNodeConfig{}
+	if config.Agent != nil {
+		agentID, err := frozenAgentID(config.Agent.Agent)
+		if err != nil {
+			return FlowNodeConfig{}, err
+		}
+		out.Agent = &AgentNodeConfig{
+			AgentDefID: agentID,
+			Workspace:  config.Agent.Workspace,
+			Artifact:   config.Agent.Artifact,
+		}
+	}
+	if config.AutomatedChecks != nil {
+		out.AutomatedChecks = &AutomatedChecksNodeConfig{}
+	}
+	if config.ChangeReview != nil {
+		aggregatorID, err := frozenAgentID(config.ChangeReview.Aggregator)
+		if err != nil {
+			return FlowNodeConfig{}, fmt.Errorf("change-review aggregator: %w", err)
+		}
+		changeReview := &ChangeReviewNodeConfig{AggregatorAgentDefID: aggregatorID}
+		for index, reviewAgent := range config.ChangeReview.Agents {
+			agentID, err := frozenAgentID(reviewAgent.Agent)
+			if err != nil {
+				return FlowNodeConfig{}, fmt.Errorf("change-review agent %d: %w", index+1, err)
+			}
+			blocking := reviewAgent.Blocking
+			changeReview.Agents = append(changeReview.Agents, ReviewAgentConfig{
+				AgentDefID: agentID,
+				Blocking:   &blocking,
+			})
+		}
+		out.ChangeReview = changeReview
+	}
+	if config.HumanGate != nil {
+		humanGate := *config.HumanGate
+		humanGate.Outcomes = append([]string(nil), config.HumanGate.Outcomes...)
+		out.HumanGate = &humanGate
+	}
+	if config.VerifyChange != nil {
+		verifyChange := &VerifyChangeNodeConfig{}
+		for index, reviewAgent := range config.VerifyChange.Agents {
+			agentID, err := frozenAgentID(reviewAgent.Agent)
+			if err != nil {
+				return FlowNodeConfig{}, fmt.Errorf("verify-change agent %d: %w", index+1, err)
+			}
+			blocking := reviewAgent.Blocking
+			verifyChange.Agents = append(verifyChange.Agents, ReviewAgentConfig{
+				AgentDefID: agentID,
+				Blocking:   &blocking,
+			})
+		}
+		out.VerifyChange = verifyChange
+	}
+	if config.MaterializeTaskSet != nil {
+		materialize := *config.MaterializeTaskSet
+		out.MaterializeTaskSet = &materialize
+	}
+	if config.MergeChange != nil {
+		out.MergeChange = &MergeChangeNodeConfig{}
+	}
+	if config.FinalizeRebase != nil {
+		out.FinalizeRebase = &FinalizeRebaseNodeConfig{}
+	}
+	if config.Terminal != nil {
+		terminal := *config.Terminal
+		out.Terminal = &terminal
+	}
+	return out, nil
 }
 
 func normalizeGraphInput(input FlowInput) (FlowInput, error) {

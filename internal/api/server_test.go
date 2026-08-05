@@ -1586,7 +1586,7 @@ func TestBoardCurrentStepUsesFrozenWorkflowSnapshot(t *testing.T) {
 	assertCurrentStep(coordinator.LaneStateAwaitingWorker)
 }
 
-func TestBoardCurrentStepToleratesMissingAndMalformedRunData(t *testing.T) {
+func TestBoardCurrentStepToleratesMissingAndUnresolvedRunData(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -1624,20 +1624,6 @@ func TestBoardCurrentStepToleratesMissingAndMalformedRunData(t *testing.T) {
 		t.Fatalf("set unresolved current node key: %v", err)
 	}
 
-	emptyName, emptyNameRun := scheduleTask("Empty snapshot node name")
-	for i := range emptyNameRun.Snapshot.Nodes {
-		if emptyNameRun.Snapshot.Nodes[i].Key == emptyNameRun.CurrentNodeKey {
-			emptyNameRun.Snapshot.Nodes[i].Name = ""
-		}
-	}
-	snapshotJSON, err := json.Marshal(emptyNameRun.Snapshot)
-	if err != nil {
-		t.Fatalf("encode malformed snapshot: %v", err)
-	}
-	if _, err := fixture.DB.ExecContext(ctx, `UPDATE workflow_runs SET flow_snapshot_json = ? WHERE id = ?`, string(snapshotJSON), emptyNameRun.ID); err != nil {
-		t.Fatalf("empty snapshot node name: %v", err)
-	}
-
 	var board boardResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, fixture.boardPath(), nil, http.StatusOK, &board)
 	for _, taskID := range []string{unscheduled.ID, missingRun.ID, emptyKey.ID} {
@@ -1650,9 +1636,6 @@ func TestBoardCurrentStepToleratesMissingAndMalformedRunData(t *testing.T) {
 	}
 	if step := board.TaskCards[unresolved.ID].CurrentStep; step == nil || step.Key != "legacy-node_key" || step.Name != "legacy node key" || step.Kind != "" {
 		t.Fatalf("unresolved current step = %+v, want readable stable-key fallback", step)
-	}
-	if step := board.TaskCards[emptyName.ID].CurrentStep; step == nil || step.Key != "implement" || step.Name != "implement" || step.Kind != coordinator.NodeAgent {
-		t.Fatalf("empty-name current step = %+v, want key fallback with resolved kind", step)
 	}
 }
 

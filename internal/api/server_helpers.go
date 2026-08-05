@@ -509,32 +509,6 @@ type taskResponse struct {
 	ProjectName string                       `json:"project_name,omitempty"`
 	StatusLog   []coordinator.StatusLogEntry `json:"status_log,omitempty"`
 	Detail      *uiTaskDetail                `json:"task_detail,omitempty"`
-	Flow        *taskFlowStatus              `json:"flow,omitempty"`
-}
-
-// taskFlowStatus is the task's position within its frozen flow snapshot:
-// the ordered phases, the cursor index/state, and — when paused at a human
-// gate — the pending handoff awaiting review.
-type taskFlowStatus struct {
-	FlowID         string          `json:"flow_id,omitempty"`
-	FlowName       string          `json:"flow_name,omitempty"`
-	PhaseName      string          `json:"phase_name,omitempty"`
-	PhaseIndex     int             `json:"phase_index"`
-	PhaseCount     int             `json:"phase_count"`
-	PhaseState     string          `json:"phase_state,omitempty"`
-	Gate           string          `json:"gate,omitempty"`
-	GateFeedback   string          `json:"gate_feedback,omitempty"`
-	PendingHandoff string          `json:"pending_handoff,omitempty"`
-	Phases         []taskFlowPhase `json:"phases,omitempty"`
-}
-
-type taskFlowPhase struct {
-	Name            string `json:"name"`
-	Gate            string `json:"gate"`
-	AgentName       string `json:"agent_name,omitempty"`
-	AgentHarness    string `json:"agent_harness,omitempty"`
-	Model           string `json:"model,omitempty"`
-	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 type tasksResponse = contract.TasksResponse
@@ -591,6 +565,7 @@ type changeResponse struct {
 	ProjectID          string                     `json:"project_id,omitempty"`
 	ProjectName        string                     `json:"project_name,omitempty"`
 	Task               coordinator.Task           `json:"task"`
+	OpenWait           *coordinator.WorkflowWait  `json:"open_wait,omitempty"`
 	Checks             []coordinator.Check        `json:"checks,omitempty"`
 	ReviewState        coordinator.ReviewState    `json:"review_state,omitempty"`
 	RequiredChecks     uiRequiredCheckSummary     `json:"required_checks"`

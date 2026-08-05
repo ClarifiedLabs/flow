@@ -579,36 +579,169 @@ func TestManualHoldDoesNotCountAsBlockedOnTheBoard(t *testing.T) {
 	}
 }
 
-func TestReleaseSatisfyTakesTheSuccessEdgeWithoutAnArtifact(t *testing.T) {
+func TestReleaseCannotResolveHeldHumanGateWithoutReviewRound(t *testing.T) {
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
-	task, _, _ := newHoldFlow(t, flows, tasks, runs)
+	task, run, nodeRun := newHoldFlow(t, flows, tasks, runs)
+	wait, waiting, err := runs.OpenWait(ctx, task.ID)
+	if err != nil || !waiting {
+		t.Fatalf("open human gate = %+v waiting=%t err=%v", wait, waiting, err)
+	}
 
 	if _, err := runs.Hold(ctx, task.ID, ActorHuman); err != nil {
 		t.Fatalf("hold run: %v", err)
 	}
-	result, err := runs.Release(ctx, ReleaseWorkflowInput{TaskID: task.ID, Edge: ReleaseSatisfy, Actor: ActorHuman})
-	if err != nil {
-		t.Fatalf("release satisfy: %v", err)
+	for _, edge := range []ReleaseEdge{ReleaseSatisfy, ReleaseSubmit, ReleaseMerge} {
+		if _, err := runs.Release(ctx, ReleaseWorkflowInput{TaskID: task.ID, Edge: edge, Actor: ActorHuman}); !errors.Is(err, ErrWorkflowConflict) {
+			t.Fatalf("release %q err = %v, want workflow conflict", edge, err)
+		}
+		held, err := runs.Get(ctx, run.ID)
+		if err != nil || !held.Held() {
+			t.Fatalf("release %q changed hold: run=%+v err=%v", edge, held, err)
+		}
+		open, stillWaiting, err := runs.OpenWait(ctx, task.ID)
+		if err != nil || !stillWaiting || open.ID != wait.ID || open.NodeRunID != nodeRun.ID {
+			t.Fatalf("release %q changed human wait: wait=%+v waiting=%t err=%v", edge, open, stillWaiting, err)
+		}
 	}
-	// "approved" is the gate's first configured outcome, so satisfy routes to
-	// the done terminal rather than the dropped one.
+
+	// Resuming preserves the same immutable wait. The gate can then advance only
+	// through the ordinary response path bound to both persisted identities.
+	if _, err := runs.Release(ctx, ReleaseWorkflowInput{TaskID: task.ID, Edge: ReleaseResume, Actor: ActorHuman}); err != nil {
+		t.Fatalf("resume held human gate: %v", err)
+	}
+	result, err := runs.Respond(ctx, task.ID, nodeRun.ID, wait.ID, "approved", "", ActorHuman)
+	if err != nil {
+		t.Fatalf("respond to resumed human gate: %v", err)
+	}
 	if !result.Done {
-		t.Fatalf("run state = %q, want the run completed through the success edge", result.Run.State)
-	}
-	reloaded, err := tasks.GetTask(ctx, task.ID)
-	if err != nil {
-		t.Fatalf("reload task: %v", err)
-	}
-	if reloaded.DoneResolution == nil || *reloaded.DoneResolution != ResolutionCompleted {
-		t.Fatalf("resolution = %v, want completed", reloaded.DoneResolution)
+		t.Fatalf("run state = %q, want completed through the bound human-gate response", result.Run.State)
 	}
 }
 
-func TestReleaseMergeJumpsToTheTerminalNode(t *testing.T) {
+func TestReleaseActionsRollBackHoldWhenInteractiveReviewWaitExists(t *testing.T) {
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
-	task, _, _ := newHoldFlow(t, flows, tasks, runs)
+	artifacts := NewWorkflowArtifactService(flows.db, tasks)
+	flow := reviewFlowFixture(t, ctx, flows)
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Held reviewed plan", FlowID: flow.ID})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	run, err := runs.Schedule(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	nodeRun := startPlanNode(t, ctx, runs, run.ID)
+	artifact := createPlanArtifact(t, ctx, artifacts, run, nodeRun, "", "v1", "Draft")
+	wait, err := runs.SubmitForReview(ctx, SubmitForReviewInput{NodeRunID: nodeRun.ID, ArtifactID: artifact.ID})
+	if err != nil {
+		t.Fatalf("submit interactive review: %v", err)
+	}
+	if _, err := runs.Hold(ctx, task.ID, ActorHuman); err != nil {
+		t.Fatalf("hold reviewed run: %v", err)
+	}
+
+	for _, edge := range []ReleaseEdge{ReleaseSubmit, ReleaseMerge} {
+		if _, err := runs.Release(ctx, ReleaseWorkflowInput{
+			TaskID: task.ID, Edge: edge, ArtifactID: artifact.ID, Actor: ActorHuman,
+		}); !errors.Is(err, ErrWorkflowConflict) {
+			t.Fatalf("release %q through interactive wait err = %v, want workflow conflict", edge, err)
+		}
+		held, err := runs.Get(ctx, run.ID)
+		if err != nil || !held.Held() {
+			t.Fatalf("release %q changed held run = %+v err=%v", edge, held, err)
+		}
+		open, waiting, err := runs.OpenWait(ctx, task.ID)
+		if err != nil || !waiting || open.ID != wait.ID || open.NodeRunID != nodeRun.ID {
+			t.Fatalf("release %q changed interactive wait = %+v waiting=%t err=%v", edge, open, waiting, err)
+		}
+	}
+	transitions, err := runs.ListTransitionsForTask(ctx, task.ID, 50)
+	if err != nil {
+		t.Fatalf("list transitions: %v", err)
+	}
+	for _, transition := range transitions {
+		if transition.EventKind == "workflow_hold_released" {
+			t.Fatalf("release through interactive wait recorded a hold release despite rollback: %+v", transition)
+		}
+	}
+}
+
+func TestReleaseFailsClosedForHumanGateWithoutAnOpenWait(t *testing.T) {
+	ctx := context.Background()
+	flows, tasks, runs := newWorkflowModelServices(t)
+	task, run, _ := newHoldFlow(t, flows, tasks, runs)
+	wait, waiting, err := runs.OpenWait(ctx, task.ID)
+	if err != nil || !waiting {
+		t.Fatalf("open human gate = %+v waiting=%t err=%v", wait, waiting, err)
+	}
+	// Simulate a corrupt/legacy persisted record. The current node is still a
+	// human gate, so a generic release must not clear the hold and hand it to an
+	// unbound completion path.
+	if _, err := runs.db.ExecContext(ctx, `UPDATE workflow_waits SET state = 'resolved' WHERE id = ?`, wait.ID); err != nil {
+		t.Fatalf("hide human gate wait: %v", err)
+	}
+	if _, err := runs.Hold(ctx, task.ID, ActorHuman); err != nil {
+		t.Fatalf("hold run: %v", err)
+	}
+	for _, edge := range []ReleaseEdge{ReleaseSatisfy, ReleaseSubmit, ReleaseMerge} {
+		if _, err := runs.Release(ctx, ReleaseWorkflowInput{TaskID: task.ID, Edge: edge, Actor: ActorHuman}); !errors.Is(err, ErrWorkflowConflict) {
+			t.Fatalf("release %q with corrupt human gate err = %v, want workflow conflict", edge, err)
+		}
+		held, err := runs.Get(ctx, run.ID)
+		if err != nil || !held.Held() {
+			t.Fatalf("corrupt human-gate release %q changed hold: run=%+v err=%v", edge, held, err)
+		}
+	}
+}
+
+func TestReleaseMergeJumpsToMergedTerminalRegardlessOfDeclarationOrder(t *testing.T) {
+	ctx := context.Background()
+	flows, tasks, runs := newWorkflowModelServices(t)
+	agent, err := NewAgentDefService(flows.db).Create(ctx, AgentDefInput{
+		Name: "hold fixture agent", Harness: "harness", Prompt: "Wait for an operator release.",
+	})
+	if err != nil {
+		t.Fatalf("create hold fixture agent: %v", err)
+	}
+	flow, err := flows.Create(ctx, FlowInput{
+		Name: "non-human hold fixture", StartNode: "work", TransitionBudget: 5,
+		Nodes: []FlowNodeInput{
+			{Key: "work", Name: "Work", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: agent.ID, Workspace: WorkspaceChange, Artifact: ArtifactChange}}},
+			// Keep a non-merged terminal first to prove merge release does not
+			// select a terminal by declaration order.
+			{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+			{Key: "merge", Name: "Merge", Kind: NodeMergeChange, Config: FlowNodeConfig{MergeChange: &MergeChangeNodeConfig{}}},
+			{Key: "merged", Name: "Merged", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionMerged}}},
+		},
+		Edges: []FlowEdgeInput{
+			{From: "work", Outcome: "completed", To: "merge"},
+			{From: "merge", Outcome: "conflict", To: "done"},
+			{From: "merge", Outcome: "merged", To: "merged"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create non-human hold flow: %v", err)
+	}
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Held checks", FlowID: flow.ID})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	run, err := runs.Schedule(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	if _, _, err := runs.EnsureCurrentNode(ctx, run.ID); err != nil {
+		t.Fatalf("enter work node: %v", err)
+	}
+	mergedAt := formatTime(time.Now().UTC())
+	if _, err := runs.db.ExecContext(ctx, `
+INSERT INTO changes (id, task_id, workflow_run_id, branch, base, head_sha, created_at, updated_at, merged_at)
+VALUES ('ch-release-merge', ?, ?, 'task/release-merge', 'main', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', ?, ?, ?)`,
+		task.ID, run.ID, mergedAt, mergedAt, mergedAt); err != nil {
+		t.Fatalf("record merged change: %v", err)
+	}
 
 	if _, err := runs.Hold(ctx, task.ID, ActorHuman); err != nil {
 		t.Fatalf("hold run: %v", err)
@@ -618,14 +751,14 @@ func TestReleaseMergeJumpsToTheTerminalNode(t *testing.T) {
 		t.Fatalf("release merge: %v", err)
 	}
 	if !result.Done {
-		t.Fatalf("run state = %q, want completed", result.Run.State)
+		t.Fatalf("run state = %q, want completed at its merged terminal", result.Run.State)
 	}
-	// The gate's wait must not outlive the jump, or the task stays blocked
-	// forever on a node the run already left.
-	if _, waiting, err := runs.OpenWait(ctx, task.ID); err != nil {
-		t.Fatalf("read open wait: %v", err)
-	} else if waiting {
-		t.Fatal("jumping to the terminal should resolve the open wait")
+	completedTask, err := tasks.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("get completed task: %v", err)
+	}
+	if completedTask.DoneResolution == nil || *completedTask.DoneResolution != ResolutionMerged {
+		t.Fatalf("done resolution = %v, want %q", completedTask.DoneResolution, ResolutionMerged)
 	}
 	transitions, err := runs.ListTransitionsForTask(ctx, task.ID, 50)
 	if err != nil {
@@ -633,7 +766,7 @@ func TestReleaseMergeJumpsToTheTerminalNode(t *testing.T) {
 	}
 	var jumped bool
 	for _, transition := range transitions {
-		if transition.EventKind == "node_jumped" && transition.ToNodeKey == "done" {
+		if transition.EventKind == "node_jumped" && transition.ToNodeKey == "merged" {
 			jumped = true
 		}
 	}

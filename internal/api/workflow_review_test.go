@@ -215,9 +215,23 @@ func TestInteractivePlanReviewLifecycle(t *testing.T) {
 	if submitted.Wait.Kind != coordinator.WorkflowWaitHumanGate || submitted.Wait.NodeRunID != nodeRunID {
 		t.Fatalf("review wait = %+v, want human gate on the plan node", submitted.Wait)
 	}
-	details := coordinator.ParseReviewWaitDetails(submitted.Wait.Details)
+	details, err := coordinator.ParseReviewWaitDetails(submitted.Wait.Details)
+	if err != nil {
+		t.Fatalf("parse review wait details: %v", err)
+	}
 	if !details.Interactive || details.ArtifactID != artifactID || len(details.Outcomes) != 3 {
 		t.Fatalf("wait details = %+v, want interactive review contract", details)
+	}
+
+	// An ordinary agent completion has no review-round capability and must not
+	// consume an interactive wait, even when it presents the reviewed artifact.
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/complete",
+		workflowCompleteRequest{NodeRunID: nodeRunID, ArtifactID: artifactID}, http.StatusConflict, nil)
+	var afterRejectedComplete workflowDetailResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks/"+created.Task.ID+"/workflow",
+		nil, http.StatusOK, &afterRejectedComplete)
+	if afterRejectedComplete.Detail.OpenWait == nil || afterRejectedComplete.Detail.OpenWait.ID != submitted.Wait.ID || afterRejectedComplete.Detail.OpenWait.NodeRunID != nodeRunID {
+		t.Fatalf("interactive wait after ordinary complete = %+v, want original wait %q", afterRejectedComplete.Detail.OpenWait, submitted.Wait.ID)
 	}
 
 	var detail workflowDetailResponse
@@ -258,13 +272,13 @@ func TestInteractivePlanReviewLifecycle(t *testing.T) {
 
 	// An outcome the gate does not offer is rejected without consuming the wait.
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/respond",
-		workflowRespondRequest{NodeRunID: nodeRunID, Outcome: "ship_it"}, http.StatusConflict, nil)
+		workflowRespondRequest{NodeRunID: nodeRunID, ReviewWaitID: submitted.Wait.ID, Outcome: "ship_it"}, http.StatusConflict, nil)
 
 	// Changes requested resumes the same node run — the agent revises in its
 	// session and submits a new draft.
 	var revised coordinator.CompleteWorkflowNodeResult
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/respond",
-		workflowRespondRequest{NodeRunID: nodeRunID, Outcome: "changes_requested", Feedback: "split the storage task"},
+		workflowRespondRequest{NodeRunID: nodeRunID, ReviewWaitID: submitted.Wait.ID, Outcome: "changes_requested", Feedback: "split the storage task"},
 		http.StatusOK, &revised)
 	if revised.Run.State != coordinator.WorkflowRunRunning || revised.Run.CurrentNodeRunID != nodeRunID {
 		t.Fatalf("run after revise = %+v, want running on the same node", revised.Run)
@@ -284,7 +298,7 @@ func TestInteractivePlanReviewLifecycle(t *testing.T) {
 	// gate, and lands the run at its terminal in one motion.
 	var approved coordinator.CompleteWorkflowNodeResult
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/respond",
-		workflowRespondRequest{NodeRunID: nodeRunID, Outcome: "approved", Feedback: "looks good"}, http.StatusOK, &approved)
+		workflowRespondRequest{NodeRunID: nodeRunID, ReviewWaitID: submitted.Wait.ID, Outcome: "approved", Feedback: "looks good"}, http.StatusOK, &approved)
 	if !approved.Done || approved.Run.State != coordinator.WorkflowRunCompleted {
 		t.Fatalf("approved run = %+v, want completed", approved.Run)
 	}
@@ -330,7 +344,7 @@ func TestSubmitReviewRejectsWrongCredentialsAndState(t *testing.T) {
 		workflowCommentRequest{Message: "hi"}, http.StatusForbidden, nil)
 	// A node that is not waiting cannot be answered through the review path.
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/respond",
-		workflowRespondRequest{NodeRunID: nodeRunID, Outcome: "approved"}, http.StatusConflict, nil)
+		workflowRespondRequest{NodeRunID: nodeRunID, ReviewWaitID: "ww-not-open", Outcome: "approved"}, http.StatusConflict, nil)
 }
 
 func TestRespondReviewRejectsStaleRoundBinding(t *testing.T) {
@@ -379,13 +393,15 @@ func TestRespondReviewRejectsStaleRoundBinding(t *testing.T) {
 		workflowRespondRequest{NodeRunID: nodeRunID, Outcome: "approved", ReviewWaitID: "ww-foreign"},
 		http.StatusConflict, nil)
 
-	// Round two stays actionable: a response that omits the binding (the CLI
-	// RespondWorkflow legacy shape) keeps node-run routing — the handler passes
-	// the empty id through untouched instead of rebinding it to the wait it
-	// observes — and decides the open round.
-	var approved coordinator.CompleteWorkflowNodeResult
+	// A node-only response is rejected rather than rebound to the current wait.
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/respond",
 		workflowRespondRequest{NodeRunID: nodeRunID, Outcome: "approved", Feedback: "looks good"},
+		http.StatusBadRequest, nil)
+
+	// Round two remains actionable only through its own immutable wait id.
+	var approved coordinator.CompleteWorkflowNodeResult
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/respond",
+		workflowRespondRequest{NodeRunID: nodeRunID, Outcome: "approved", Feedback: "looks good", ReviewWaitID: roundTwo.Wait.ID},
 		http.StatusOK, &approved)
 	if !approved.Done || approved.Run.State != coordinator.WorkflowRunCompleted {
 		t.Fatalf("round two run = %+v, want completed", approved.Run)

@@ -48,7 +48,8 @@ function projectAttrOf(model) {
 function renderGate(model, review) {
   const gate = review.gate;
   const projectAttr = projectAttrOf(model);
-  const outcomes = gate.outcomes.length ? gate.outcomes : ["approved", "changes_requested"];
+  const outcomes = Array.isArray(gate.outcomes) ? gate.outcomes : [];
+  const actionable = Boolean(gate.nodeRunID && gate.waitID && outcomes.length);
   const changeID = String(value(model?.change || {}, "id", "ID") || "");
   return `
     <section class="gate" data-gate-panel data-gate-node-run="${escapeAttr(gate.nodeRunID)}">
@@ -60,13 +61,17 @@ function renderGate(model, review) {
       ${gate.changeGate ? renderChangePointer(changeID) : review.artifact ? renderArtifact(review.artifact, false) : ""}
       <textarea data-workflow-feedback rows="4" placeholder="Feedback — recorded with your decision, and delivered to the agent when it is still in its session"></textarea>
       <div class="actions">
-        ${renderGateOutcomeButtons(outcomes, {
-          nodeRunID: gate.nodeRunID,
-          waitID: gate.waitID,
-          taskID: model.id,
-          projectAttr,
-          secondaryFrom: 1,
-        })}
+        ${
+          actionable
+            ? renderGateOutcomeButtons(outcomes, {
+                nodeRunID: gate.nodeRunID,
+                waitID: gate.waitID,
+                taskID: model.id,
+                projectAttr,
+                secondaryFrom: 1,
+              })
+            : `<p class="note">This review wait is incomplete and cannot be answered.</p>`
+        }
         <button class="button secondary" data-gate-comment="${escapeAttr(model.id)}"${projectAttr}>Comment only</button>
       </div>
     </section>
@@ -80,16 +85,17 @@ function renderGate(model, review) {
 // repaint rebuilds the panel while a response for this node run is still in
 // flight, so the fresh button re-derives its suppressed state from the shared
 // in-flight registry instead of flashing enabled until the next click.
-function renderGateOutcomeButton(outcome, { nodeRunID, waitID = "", taskID, projectAttr = "", secondary = false, pending = false } = {}) {
+function renderGateOutcomeButton(outcome, { nodeRunID, waitID, taskID, projectAttr = "", secondary = false, pending = false } = {}) {
+  if (!nodeRunID || !waitID) return "";
   const classes = ["button", secondary ? "secondary" : "", pending ? "is-busy" : ""].filter(Boolean).join(" ");
   const busyAttrs = pending ? ` disabled aria-busy="true"` : "";
-  const waitAttr = waitID ? ` data-review-wait="${escapeAttr(waitID)}"` : "";
-  return `<button class="${classes}" data-workflow-respond="${escapeAttr(nodeRunID)}"${waitAttr} data-task="${escapeAttr(taskID)}" data-outcome="${escapeAttr(outcome)}"${projectAttr}${busyAttrs}>${escapeHTML(String(outcome).replaceAll("_", " "))}</button>`;
+  return `<button class="${classes}" data-workflow-respond="${escapeAttr(nodeRunID)}" data-review-wait="${escapeAttr(waitID)}" data-task="${escapeAttr(taskID)}" data-outcome="${escapeAttr(outcome)}"${projectAttr}${busyAttrs}>${escapeHTML(String(outcome).replaceAll("_", " "))}</button>`;
 }
 
 // renderGateOutcomeButtons renders one control per outcome; while the shared
 // gate response is pending every outcome is suppressed together.
-export function renderGateOutcomeButtons(outcomes, { nodeRunID, waitID = "", taskID, projectAttr = "", secondaryFrom = null } = {}) {
+export function renderGateOutcomeButtons(outcomes, { nodeRunID, waitID, taskID, projectAttr = "", secondaryFrom = null } = {}) {
+  if (!nodeRunID || !waitID) return "";
   const pending = gateResponsePending(nodeRunID);
   return (Array.isArray(outcomes) ? outcomes : [])
     .map((outcome, index) =>

@@ -2135,7 +2135,27 @@ test("the review model reads the interactive gate from the wait details", () => 
   assert.equal(review.session, null, "no live session without an active waiting session");
 });
 
-test("the review model falls back to the gate node config for classic waits", () => {
+test("the review model rejects frozen details with unknown fields", () => {
+  const review = reviewModel(
+    reviewFixture({
+      wait: {
+        id: "ww-unknown",
+        kind: "human_gate",
+        node_run_id: "wnr-unknown",
+        details: {
+          instructions: "Review the change",
+          outcomes: ["approved", "changes_requested"],
+          interactive: false,
+          gate_node_key: "review",
+          legacy_required: true,
+        },
+      },
+    }),
+  );
+  assert.equal(review.gate, null, "unknown frozen-detail fields make the wait non-actionable");
+});
+
+test("the review model does not reconstruct an incomplete classic wait from the graph", () => {
   const review = reviewModel(
     reviewFixture({
       wait: { kind: "human_gate", node_run_id: "wnr-9", message: "Review the change" },
@@ -2146,9 +2166,7 @@ test("the review model falls back to the gate node config for classic waits", ()
       },
     }),
   );
-  assert.equal(review.gate.interactive, false);
-  assert.equal(review.gate.instructions, "Gate instructions");
-  assert.deepEqual(review.gate.outcomes, ["approved", "rejected"]);
+  assert.equal(review.gate, null);
 });
 
 test("a change artifact marks the gate as a change gate", () => {
@@ -2161,7 +2179,6 @@ test("a change artifact marks the gate as a change gate", () => {
 test("the review panel renders the gate, the plan, and one button per outcome", () => {
   const model = { id: "t-0001", projectID: "p-1", review: reviewModel(reviewFixture()) };
   const html = renderReviewPanel(model);
-  assert.match(html, /Write task plan/);
   assert.match(html, /Review the proposed implementation tasks/);
   assert.match(html, /data-workflow-respond="wnr-1"/);
   assert.match(html, /data-review-wait="ww-1"/);
@@ -2219,6 +2236,9 @@ test("the review panel renders gate instructions as markdown", () => {
           details: {
             instructions: "Check the **plan** and visit https://example.com",
             outcomes: ["approved"],
+            artifact_id: "wa-1",
+            interactive: true,
+            gate_node_key: "review",
           },
         },
       }),
@@ -2950,6 +2970,29 @@ test("a review verdict marks the button busy and names the in-flight submission"
   const posted = JSON.parse(calls[0].options.body);
   assert.equal(posted.head_sha, "abc123def456", "the submission carries the head displayed with the diff");
   assert.equal(posted.verdict, "approve");
+  change.remove();
+  appNode.remove();
+});
+
+test("a change-review verdict carries the exact observed human-gate identity", async () => {
+  const root = globalThis.document.body;
+  const calls = stubReviewFetch(() => Promise.resolve({ ok: true, json: () => Promise.resolve({}) }));
+  const data = reviewChangeData();
+  data.open_wait = { id: "ww-7", kind: "human_gate", node_run_id: "wnr-7" };
+  const { appNode, change } = mountChange(root, data);
+  await flush();
+
+  const approve = change.querySelector('[data-review-verdict="approve"]');
+  await change.handleClick({ target: approve, preventDefault() {} });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    verdict: "approve",
+    body: "",
+    comments: [],
+    head_sha: "abc123def456",
+    node_run_id: "wnr-7",
+    review_wait_id: "ww-7",
+  });
   change.remove();
   appNode.remove();
 });

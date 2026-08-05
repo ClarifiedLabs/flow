@@ -321,8 +321,8 @@ func TestReconcileCrashedWorkflowAuthorSessionAllowsReplacement(t *testing.T) {
 INSERT INTO workflow_runs (
 	id, task_id, run_sequence, flow_snapshot_json, state, current_node_key,
 	current_node_run_id, transition_budget, created_at, started_at
-) VALUES (?, ?, 1, '{}', 'running', 'author', ?, 10, ?, ?)`,
-		workflowRunID, task.ID, nodeRunID, formatTime(time.Now().UTC()), formatTime(time.Now().UTC())); err != nil {
+) VALUES (?, ?, 1, ?, 'running', 'author', ?, 10, ?, ?)`,
+		workflowRunID, task.ID, testWorkflowSnapshotJSON(t, "author"), nodeRunID, formatTime(time.Now().UTC()), formatTime(time.Now().UTC())); err != nil {
 		t.Fatalf("insert workflow run: %v", err)
 	}
 	if _, err := fixture.store.DB().ExecContext(ctx, `

@@ -1516,9 +1516,9 @@ test("answering a gate suppresses every sibling outcome until the response settl
       resolveRequest = () => resolve({ ok: true, json: () => Promise.resolve({}) });
     });
   const panel = gatePanel();
-  const approve = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
-  const revise = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "changes_requested", project: "p-alpha" }, panel);
-  const reject = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "rejected", project: "p-alpha" }, panel);
+  const approve = new GateButton({ workflowRespond: "wnr-1", reviewWait: "ww-1", task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
+  const revise = new GateButton({ workflowRespond: "wnr-1", reviewWait: "ww-1", task: "t-0001", outcome: "changes_requested", project: "p-alpha" }, panel);
+  const reject = new GateButton({ workflowRespond: "wnr-1", reviewWait: "ww-1", task: "t-0001", outcome: "rejected", project: "p-alpha" }, panel);
   panel.buttons.push(approve, revise, reject);
 
   const handled = handleAction(app, { target: approve, preventDefault() {} });
@@ -1575,6 +1575,24 @@ test("answering a gate posts the rendered review round wait id", async () => {
   });
 });
 
+test("an incomplete gate has no actionable response without a review wait id", async () => {
+  await scriptContext();
+  const app = statusApp();
+  let fetches = 0;
+  globalThis.fetch = () => {
+    fetches += 1;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  };
+  const panel = gatePanel();
+  const approve = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
+  panel.buttons.push(approve);
+
+  assert.equal(await handleAction(app, { target: approve, preventDefault() {} }), true);
+  assert.equal(fetches, 0);
+  assert.deepEqual(app.statuses, ["Sending feedback wnr-1…", "This review wait is no longer actionable"]);
+  assert.equal(approve.disabled, false);
+});
+
 test("approving a card posts the review round wait id the card observed", async () => {
   await scriptContext();
   let refreshed = false;
@@ -1597,7 +1615,7 @@ test("approving a card posts the review round wait id the card observed", async 
               id: "ww-1",
               node_run_id: "wnr-1",
               kind: "human_gate",
-              details: { interactive: true, outcomes: ["approved", "changes_requested", "rejected"] },
+              details: { interactive: true, gate_node_key: "review", artifact_id: "a-1", outcomes: ["approved", "changes_requested", "rejected"] },
             },
           },
         }),
@@ -1633,8 +1651,8 @@ test("a failed gate response restores every suppressed sibling outcome", async (
       rejectRequest = () => reject(new Error("boom"));
     });
   const panel = gatePanel();
-  const approve = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
-  const reject = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "rejected", project: "p-alpha" }, panel);
+  const approve = new GateButton({ workflowRespond: "wnr-1", reviewWait: "ww-1", task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
+  const reject = new GateButton({ workflowRespond: "wnr-1", reviewWait: "ww-1", task: "t-0001", outcome: "rejected", project: "p-alpha" }, panel);
   panel.buttons.push(approve, reject);
 
   const handled = handleAction(app, { target: approve, preventDefault() {} });
@@ -1662,8 +1680,8 @@ test("a repaint mid-flight leaves no live outcome disabled after a failed settle
       rejectRequest = () => reject(new Error("boom"));
     });
   const panel = gatePanel();
-  const approve = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
-  const reject = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "rejected", project: "p-alpha" }, panel);
+  const approve = new GateButton({ workflowRespond: "wnr-1", reviewWait: "ww-1", task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
+  const reject = new GateButton({ workflowRespond: "wnr-1", reviewWait: "ww-1", task: "t-0001", outcome: "rejected", project: "p-alpha" }, panel);
   panel.buttons.push(approve, reject);
 
   const handled = handleAction(app, { target: approve, preventDefault() {} });
@@ -1673,8 +1691,8 @@ test("a repaint mid-flight leaves no live outcome disabled after a failed settle
   // A poll repaints while the response is still pending: the render path
   // re-emits every outcome disabled (the shared key is still in flight) and
   // swaps them in for the now-detached originals the click captured.
-  const liveApprove = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
-  const liveReject = new GateButton({ workflowRespond: "wnr-1", task: "t-0001", outcome: "rejected", project: "p-alpha" }, panel);
+  const liveApprove = new GateButton({ workflowRespond: "wnr-1", reviewWait: "ww-1", task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
+  const liveReject = new GateButton({ workflowRespond: "wnr-1", reviewWait: "ww-1", task: "t-0001", outcome: "rejected", project: "p-alpha" }, panel);
   for (const control of [liveApprove, liveReject]) {
     control.disabled = true;
     control.setAttribute("aria-busy", "true");
@@ -1871,7 +1889,7 @@ test("a gate response settles safely when the node-run id contains selector meta
     });
   const nodeRunID = 'wnr-1"][data-x]:nth-child(1)';
   const panel = gatePanel();
-  const approve = new GateButton({ workflowRespond: nodeRunID, task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
+  const approve = new GateButton({ workflowRespond: nodeRunID, reviewWait: "ww-1", task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
   panel.buttons.push(approve);
 
   const handled = handleAction(app, { target: approve, preventDefault() {} });
@@ -1879,8 +1897,8 @@ test("a gate response settles safely when the node-run id contains selector meta
 
   // A poll repaint swaps in a fresh disabled outcome for the same node run
   // and one for a different node run; only the exact match may be restored.
-  const liveApprove = new GateButton({ workflowRespond: nodeRunID, task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
-  const otherGate = new GateButton({ workflowRespond: "wnr-2", task: "t-0002", outcome: "approved", project: "p-alpha" }, panel);
+  const liveApprove = new GateButton({ workflowRespond: nodeRunID, reviewWait: "ww-1", task: "t-0001", outcome: "approved", project: "p-alpha" }, panel);
+  const otherGate = new GateButton({ workflowRespond: "wnr-2", reviewWait: "ww-2", task: "t-0002", outcome: "approved", project: "p-alpha" }, panel);
   for (const control of [liveApprove, otherGate]) {
     control.disabled = true;
     control.setAttribute("aria-busy", "true");
@@ -6091,9 +6109,9 @@ test("parallel review editors render ordered structured rows without generic JSO
   assert.match(html, /title="Remove agent"/);
   assert.doesNotMatch(html, /name="node_config"|Strict node configuration JSON/);
 
-  const legacy = context.renderReviewAgentRowView({ agent_def_id: "ad-security", required: false }, agentDefs);
-  assert.doesNotMatch(legacy, /name="review_agent_blocking" checked/);
-  assert.equal(context.reviewAgentBlockingView({ required: true }), true);
+  const noncanonical = context.renderReviewAgentRowView({ agent_def_id: "ad-security", required: false }, agentDefs);
+  assert.match(noncanonical, /name="review_agent_blocking" checked/);
+  assert.equal(context.reviewAgentBlockingView({ required: false }), true, "required alias is ignored");
 
   const verifyHTML = context.renderNodeCardView({
     kind: "verify_change",
@@ -6294,7 +6312,7 @@ function fakeFlowRow(fields) {
       if (!match) return null;
       const name = match[1];
       if (!(name in fields)) return null;
-      if (name === "review_agent_blocking" || name === "review_required") {
+      if (name === "review_agent_blocking") {
         return typeof fields[name] === "object" ? fields[name] : { checked: fields[name] };
       }
       return { value: fields[name] };
@@ -6457,8 +6475,8 @@ test("parallel review payload preserves agent order and emits canonical blocking
         node_name: "Review",
         node_kind: "change_review",
         review_agents: [
-          { review_agent_def_id: "ad-code", review_agent_blocking: true, review_required: false },
-          { review_agent_def_id: "ad-security", review_agent_blocking: false, review_required: true },
+          { review_agent_def_id: "ad-code", review_agent_blocking: true },
+          { review_agent_def_id: "ad-security", review_agent_blocking: false },
         ],
         review_aggregator_agent_def_id: "ad-aggregator",
       },

@@ -680,6 +680,9 @@ func scanConvergencePromotion(row convergencePromotionScanner) (convergencePromo
 	if err := json.Unmarshal([]byte(evidenceJSON), &promotion.Evidence); err != nil {
 		return convergencePromotion{}, false, fmt.Errorf("decode convergence promotion evidence: %w", err)
 	}
+	if promotion.Evidence.SchemaVersion != ConvergenceEvidenceSchemaVersion {
+		return convergencePromotion{}, false, fmt.Errorf("unsupported convergence evidence schema version %d", promotion.Evidence.SchemaVersion)
+	}
 	promotion.Actor = Actor(actor)
 	promotion.CreatedAt, err = parseTime(createdAt)
 	if err != nil {

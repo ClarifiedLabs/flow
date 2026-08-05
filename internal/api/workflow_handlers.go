@@ -25,15 +25,10 @@ type workflowRespondRequest struct {
 	NodeRunID string `json:"node_run_id"`
 	Outcome   string `json:"outcome"`
 	Feedback  string `json:"feedback,omitempty"`
-	// ReviewWaitID, when the open wait is a human gate, names the exact review
-	// round (the immutable wait id) this response answers. An interactive
-	// changes_requested round reopens a fresh wait on the same agent node run,
-	// so a response bound to an earlier round must not resolve the later one.
-	// The handler checks a non-empty binding against the wait it observes and
-	// RespondReview re-asserts it inside the per-task review lock. An empty id
-	// keeps the legacy node-run routing (the CLI RespondWorkflow shape): it is
-	// passed through untouched, never filled from the handler's own read.
-	ReviewWaitID string `json:"review_wait_id,omitempty"`
+	// ReviewWaitID names the exact immutable human-gate review round this
+	// response answers. NodeRunID remains an additional assertion, not a routing
+	// fallback: a later round can otherwise be opened for related work.
+	ReviewWaitID string `json:"review_wait_id"`
 }
 
 type workflowBudgetRequest struct {
@@ -85,7 +80,9 @@ type workflowCommentResponse struct {
 // workflowReleaseRequest hands a held run back to the executor. Edge names
 // which way out the operator is taking: resume (leave it where it is), submit
 // (an artifact they produced), satisfy (done, no artifact), merge (jump to the
-// terminal). ArtifactID is required by submit and ignored otherwise.
+// terminal). ArtifactID is required by submit and ignored otherwise. A held
+// human gate may only be resumed; its outcome must be sent through workflow
+// respond with the exact node_run_id and review_wait_id.
 type workflowReleaseRequest struct {
 	Edge       string `json:"edge"`
 	ArtifactID string `json:"artifact_id,omitempty"`
@@ -352,28 +349,35 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 			return
 		}
+		request.NodeRunID = strings.TrimSpace(request.NodeRunID)
+		request.ReviewWaitID = strings.TrimSpace(request.ReviewWaitID)
+		request.Outcome = strings.TrimSpace(request.Outcome)
+		if request.NodeRunID == "" || request.ReviewWaitID == "" || request.Outcome == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request", "node_run_id, review_wait_id, and outcome are required")
+			return
+		}
+		wait, waiting, err := s.workflowRuns.OpenWait(r.Context(), taskID)
+		if err != nil {
+			writeWorkflowError(w, err, "respond_workflow_failed")
+			return
+		}
+		if !waiting || wait.Kind != coordinator.WorkflowWaitHumanGate || wait.NodeRunID != request.NodeRunID {
+			writeWorkflowError(w, fmt.Errorf("%w: task is not waiting on that node", coordinator.ErrWorkflowConflict), "respond_workflow_failed")
+			return
+		}
+		if wait.ID != request.ReviewWaitID {
+			writeWorkflowError(w, fmt.Errorf("%w: task is not waiting on that review round", coordinator.ErrWorkflowConflict), "respond_workflow_failed")
+			return
+		}
+		details, err := coordinator.ParseReviewWaitDetails(wait.Details)
+		if err != nil {
+			writeWorkflowError(w, err, "respond_workflow_failed")
+			return
+		}
+
 		var result coordinator.CompleteWorkflowNodeResult
-		if wait, waiting, waitErr := s.workflowRuns.OpenWait(r.Context(), taskID); waitErr == nil && waiting &&
-			wait.Kind == coordinator.WorkflowWaitHumanGate &&
-			strings.TrimSpace(wait.NodeRunID) == strings.TrimSpace(request.NodeRunID) &&
-			coordinator.ParseReviewWaitDetails(wait.Details).Interactive {
-			// The response must name the review round it answers when the caller
-			// observed one: the wait id is the immutable round identity, so a
-			// response bound to an earlier changes_requested round cannot resolve
-			// a later wait reopened on the same node run. An explicit binding is
-			// checked against the wait observed here and re-asserted inside
-			// RespondReview's transaction under the per-task review lock, closing
-			// the window between this read and the lock. Callers that omit the
-			// binding (the CLI RespondWorkflow legacy shape) keep node-run
-			// routing: the empty id is passed through untouched instead of being
-			// filled from this read, so a response composed against an earlier
-			// round cannot be rebound to a wait it never observed.
-			reviewWaitID := strings.TrimSpace(request.ReviewWaitID)
-			if reviewWaitID != "" && reviewWaitID != strings.TrimSpace(wait.ID) {
-				writeWorkflowError(w, fmt.Errorf("%w: task is not waiting on that review round", coordinator.ErrWorkflowConflict), "respond_workflow_failed")
-				return
-			}
-			review, err := s.workflowRuns.RespondReview(r.Context(), taskID, request.NodeRunID, reviewWaitID, request.Outcome, request.Feedback, coordinator.ActorHuman)
+		if details.Interactive {
+			review, err := s.workflowRuns.RespondReview(r.Context(), taskID, request.NodeRunID, request.ReviewWaitID, request.Outcome, request.Feedback, coordinator.ActorHuman)
 			if err != nil {
 				writeWorkflowError(w, err, "respond_workflow_failed")
 				return
@@ -384,12 +388,11 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 			// own session through the idempotent complete endpoint afterwards.
 			result = review.Result
 		} else {
-			legacy, err := s.workflowRuns.Respond(r.Context(), taskID, request.NodeRunID, request.Outcome, request.Feedback, coordinator.ActorHuman)
+			result, err = s.workflowRuns.Respond(r.Context(), taskID, request.NodeRunID, request.ReviewWaitID, request.Outcome, request.Feedback, coordinator.ActorHuman)
 			if err != nil {
 				writeWorkflowError(w, err, "respond_workflow_failed")
 				return
 			}
-			result = legacy
 		}
 		if s.workflowExecutor != nil && !result.Done {
 			if err := s.workflowExecutor.Advance(r.Context(), result.Run.ID); err != nil {
@@ -775,6 +778,8 @@ func workflowActor(principal coordinator.Principal) coordinator.Actor {
 
 func writeWorkflowError(w http.ResponseWriter, err error, code string) {
 	switch {
+	case errors.Is(err, coordinator.ErrReviewWaitIDRequired):
+		writeError(w, http.StatusBadRequest, "review_wait_id_required", err.Error())
 	case errors.Is(err, coordinator.ErrWorkItemNotSchedulable):
 		writeError(w, http.StatusConflict, "work_item_not_schedulable", err.Error())
 	case errors.Is(err, coordinator.ErrWorkflowRunNotFound), errors.Is(err, coordinator.ErrNoActiveWorkflowRun), errors.Is(err, coordinator.ErrWorkflowArtifactNotFound):

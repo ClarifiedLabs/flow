@@ -223,10 +223,9 @@ type WorkflowRunService struct {
 	reviewLockCleanupGate func()
 
 	// reviewTerminalGate is a test seam: when set, RespondReview invokes it
-	// right after the marker transaction commits on the terminal path, before
-	// the CompleteNode calls. Race tests use it to hold a terminal verdict in
-	// the gap a concurrent decision could otherwise resolve the round and
-	// reopen a fresh wait in.
+	// after atomically advancing the reviewed agent to its derived gate but
+	// before consuming that gate in the same transaction. Race tests use it to
+	// prove a concurrent decision cannot observe the intermediate gate.
 	reviewTerminalGate func()
 
 	// Features gates task scheduling on a running feature rebase. It is wired
@@ -459,6 +458,11 @@ func (s *WorkflowRunService) Detail(ctx context.Context, runID string) (Workflow
 WHERE workflow_run_id = ? AND state = 'open'`, run.ID)); err != nil {
 		return WorkflowRunDetail{}, err
 	} else if ok {
+		if wait.Kind == WorkflowWaitHumanGate {
+			if _, err := ParseReviewWaitDetails(wait.Details); err != nil {
+				return WorkflowRunDetail{}, fmt.Errorf("decode human-gate wait %q: %w", wait.ID, err)
+			}
+		}
 		detail.OpenWait = &wait
 		detail.Substate = InProgressBlocked
 	} else if run.State == WorkflowRunRunning {
@@ -577,7 +581,10 @@ UPDATE workflow_runs SET current_node_run_id = ?, version = version + 1 WHERE id
 		return WorkflowNodeRun{}, false, err
 	}
 	if node.Kind == NodeHumanGate {
-		details := humanGateWaitDetails(node, run.CurrentArtifactID)
+		details, err := humanGateWaitDetails(node, run.CurrentArtifactID, false)
+		if err != nil {
+			return WorkflowNodeRun{}, false, err
+		}
 		if err := enterWaitWithDetailsTx(ctx, tx, &run, &nodeRun, WorkflowWaitHumanGate, details, humanGateWaitMessage(node), ActorSystem, s.now().UTC()); err != nil {
 			return WorkflowNodeRun{}, false, err
 		}
@@ -1060,6 +1067,11 @@ type CompleteWorkflowNodeInput struct {
 	// has done the work by hand and is asserting the node is done. Set only by
 	// the ReleaseSatisfy hand-back.
 	OperatorSatisfied bool
+
+	// humanGateWaitID is an internal capability issued only after the caller has
+	// transactionally bound a human-gate response to its exact persisted wait and
+	// node run. Public completion paths cannot manufacture it.
+	humanGateWaitID string
 }
 
 type CompleteWorkflowNodeResult struct {
@@ -1173,6 +1185,28 @@ WHERE workflow_run_id = ? AND event_kind = 'node_skipped' AND idempotency_key = 
 	}
 	if run.CurrentNodeRunID != nodeRun.ID {
 		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: node run is not active", ErrWorkflowConflict)
+	}
+	// A human-gate wait is a review round, not a generic node pause. Only the
+	// internal response paths below may complete its node, and they must carry the
+	// exact wait identity they validated in this same transaction. In particular,
+	// an agent parked on an interactive review cannot bypass it through /complete
+	// or a release hand-back. A completed-node replay returned above is harmless:
+	// it writes nothing and must retain normal idempotency semantics.
+	wait, waiting, err := openWaitTx(ctx, tx, run.ID)
+	if err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	if sourceNode.Kind == NodeHumanGate || (waiting && wait.Kind == WorkflowWaitHumanGate) {
+		if !waiting || wait.Kind != WorkflowWaitHumanGate ||
+			strings.TrimSpace(input.humanGateWaitID) == "" || input.humanGateWaitID != wait.ID || wait.NodeRunID != nodeRun.ID {
+			return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: human-gate completion requires its exact review_wait_id and node_run_id", ErrWorkflowConflict)
+		}
+	}
+	// ReleaseSatisfy is an operator hand-back for non-human nodes. A missing wait
+	// on a waiting run is corrupt persisted state and must fail closed rather than
+	// let the hand-back consume an unknown review round.
+	if input.OperatorSatisfied && !waiting && run.State == WorkflowRunWaiting {
+		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: operator satisfaction cannot resolve a workflow waiting without its persisted wait", ErrWorkflowConflict)
 	}
 	if skipping {
 		wait, waiting, err := openWaitTx(ctx, tx, run.ID)
@@ -1419,7 +1453,10 @@ WHERE id = ?`, string(WorkflowRunRunning), target, sqlitex.NullableNonEmptyStrin
 		return CompleteWorkflowNodeResult{}, err
 	}
 	if targetNode.Kind == NodeHumanGate {
-		details := humanGateWaitDetails(targetNode, artifactID)
+		details, err := humanGateWaitDetails(targetNode, artifactID, false)
+		if err != nil {
+			return CompleteWorkflowNodeResult{}, err
+		}
 		if err := enterWaitWithDetailsTx(ctx, tx, &run, &next, WorkflowWaitHumanGate, details, humanGateWaitMessage(targetNode), ActorSystem, now); err != nil {
 			return CompleteWorkflowNodeResult{}, err
 		}
@@ -1576,33 +1613,120 @@ func workflowSkipCheckKind(kind NodeKind) (CheckKind, bool) {
 	}
 }
 
-func (s *WorkflowRunService) Respond(ctx context.Context, taskID, nodeRunID, outcome, feedback string, actor Actor) (CompleteWorkflowNodeResult, error) {
-	nodeRun, ok, err := s.GetNodeRun(ctx, strings.TrimSpace(nodeRunID))
+// Respond applies a verdict to an ordinary human gate. expectedWaitID is
+// mandatory: a node run is not a review-round identity because a revisited
+// gate (and an interactive revision) can open a later wait for related work.
+// The wait is re-read and compared inside this immediate transaction before
+// the state machine resolves it.
+func (s *WorkflowRunService) Respond(ctx context.Context, taskID, nodeRunID, expectedWaitID, outcome, feedback string, actor Actor) (CompleteWorkflowNodeResult, error) {
+	taskID = strings.TrimSpace(taskID)
+	nodeRunID = strings.TrimSpace(nodeRunID)
+	expectedWaitID = strings.TrimSpace(expectedWaitID)
+	outcome = strings.TrimSpace(outcome)
+	feedback = strings.TrimSpace(feedback)
+	if taskID == "" {
+		return CompleteWorkflowNodeResult{}, errors.New("task id is required")
+	}
+	if nodeRunID == "" {
+		return CompleteWorkflowNodeResult{}, errors.New("node run id is required")
+	}
+	if expectedWaitID == "" {
+		return CompleteWorkflowNodeResult{}, ErrReviewWaitIDRequired
+	}
+	if outcome == "" {
+		return CompleteWorkflowNodeResult{}, errors.New("review outcome is required")
+	}
+	if actor == "" {
+		actor = ActorHuman
+	}
+
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
 	if err != nil {
 		return CompleteWorkflowNodeResult{}, err
 	}
-	if !ok {
-		return CompleteWorkflowNodeResult{}, ErrWorkflowRunNotFound
-	}
-	run, err := s.Get(ctx, nodeRun.WorkflowRunID)
+	defer tx.Rollback()
+
+	nodeRun, err := scanWorkflowNodeRun(tx.QueryRowContext(ctx, workflowNodeRunSelect+` WHERE id = ?`, nodeRunID))
 	if err != nil {
 		return CompleteWorkflowNodeResult{}, err
 	}
-	if run.TaskID != strings.TrimSpace(taskID) {
+	run, err := scanWorkflowRun(tx.QueryRowContext(ctx, workflowRunSelect+` WHERE id = ?`, nodeRun.WorkflowRunID))
+	if err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	if run.TaskID != taskID {
 		return CompleteWorkflowNodeResult{}, ErrWorkflowRunNotFound
 	}
-	if nodeRun.State != WorkflowNodeSucceeded && (run.State != WorkflowRunWaiting || run.CurrentNodeRunID != nodeRun.ID) {
-		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: task is not waiting on that node", ErrWorkflowConflict)
+	wait, waiting, err := openWaitTx(ctx, tx, run.ID)
+	if err != nil {
+		return CompleteWorkflowNodeResult{}, err
 	}
-	node, ok := run.Snapshot.Node(nodeRun.NodeKey)
-	if !ok || node.Kind != NodeHumanGate {
-		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: active node is not a human gate", ErrWorkflowConflict)
+	if waiting {
+		if run.State != WorkflowRunWaiting || run.CurrentNodeRunID != nodeRun.ID ||
+			wait.Kind != WorkflowWaitHumanGate || wait.NodeRunID != nodeRun.ID {
+			return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: task is not waiting on that node", ErrWorkflowConflict)
+		}
+		if wait.ID != expectedWaitID {
+			return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: task is not waiting on that review round", ErrWorkflowConflict)
+		}
+	} else {
+		// A transport retry may replay the exact resolved wait, but it can never
+		// bind an old verdict to a later open wait. If there is a later wait the
+		// branch above rejects its different id before this resolved lookup.
+		if nodeRun.State != WorkflowNodeSucceeded {
+			return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: task is not waiting on that node", ErrWorkflowConflict)
+		}
+		var found bool
+		wait, found, err = scanWorkflowWaitMaybe(tx.QueryRowContext(ctx, workflowWaitSelect+` WHERE id = ?`, expectedWaitID))
+		if err != nil {
+			return CompleteWorkflowNodeResult{}, err
+		}
+		if !found || wait.WorkflowRunID != run.ID || wait.Kind != WorkflowWaitHumanGate || wait.NodeRunID != nodeRun.ID {
+			return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: task is not waiting on that review round", ErrWorkflowConflict)
+		}
 	}
-	return s.CompleteNode(ctx, CompleteWorkflowNodeInput{
-		NodeRunID: nodeRunID, Outcome: outcome, Actor: actor,
-		Payload:        map[string]any{"feedback": strings.TrimSpace(feedback)},
-		IdempotencyKey: "human:" + nodeRunID + ":" + strings.TrimSpace(outcome),
-	})
+	details, err := ParseReviewWaitDetails(wait.Details)
+	if err != nil {
+		return CompleteWorkflowNodeResult{}, fmt.Errorf("decode review wait %q: %w", wait.ID, err)
+	}
+	if details.Interactive {
+		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: wait requires interactive review response", ErrWorkflowConflict)
+	}
+	if details.GateNodeKey != nodeRun.NodeKey {
+		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: review wait does not belong to that human gate", ErrWorkflowConflict)
+	}
+	offered := false
+	for _, candidate := range details.Outcomes {
+		if candidate == outcome {
+			offered = true
+			break
+		}
+	}
+	if !offered {
+		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: outcome %q is not offered by this review gate", ErrWorkflowConflict, outcome)
+	}
+
+	result, err := s.completeNodeTx(ctx, tx, CompleteWorkflowNodeInput{
+		NodeRunID:       nodeRun.ID,
+		Outcome:         outcome,
+		Actor:           actor,
+		Payload:         map[string]any{"feedback": feedback},
+		IdempotencyKey:  "human:" + wait.ID + ":" + outcome,
+		humanGateWaitID: wait.ID,
+	}, false, nil)
+	if err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	latest, err := s.Get(ctx, run.ID)
+	if err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	result.Run = latest
+	result.Done = latest.State == WorkflowRunCompleted
+	return result, nil
 }
 
 // respondToReviewGateTx applies a human review verdict to the task's active
@@ -1618,34 +1742,77 @@ func (s *WorkflowRunService) Respond(ctx context.Context, taskID, nodeRunID, out
 // survive beside the decision they contradict. A task with no run, or a run
 // that has not yet reached its human gate, is left alone — the review still
 // records its threads and verdict.
-func (s *WorkflowRunService) respondToReviewGateTx(ctx context.Context, tx workflowTx, taskID, verdict, feedback string) error {
+func (s *WorkflowRunService) respondToReviewGateTx(ctx context.Context, tx workflowTx, taskID, expectedNodeRunID, expectedWaitID, verdict, feedback string) error {
+	expectedNodeRunID = strings.TrimSpace(expectedNodeRunID)
+	expectedWaitID = strings.TrimSpace(expectedWaitID)
 	run, err := scanWorkflowRun(tx.QueryRowContext(ctx, workflowRunSelect+`
 WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, taskID))
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	// An open gate answers the verdict: the run is waiting on a human gate, so
-	// the verdict completes it in this transaction.
+	// An open gate answers the verdict only when the caller supplies the exact
+	// persisted review-round id and node-run assertion it observed. A change
+	// review can outlive a changes_requested loop, which reopens a new wait on
+	// the same gate node; resolving by node alone would decide that newer round.
 	if err == nil && run.State == WorkflowRunWaiting && run.CurrentNodeRunID != "" {
-		node, ok := run.Snapshot.Node(run.CurrentNodeKey)
-		if ok && node.Kind == NodeHumanGate {
-			nodeRun, err := scanWorkflowNodeRun(tx.QueryRowContext(ctx, workflowNodeRunSelect+` WHERE id = ?`, run.CurrentNodeRunID))
-			if err != nil {
-				return err
+		nodeRun, nodeErr := scanWorkflowNodeRun(tx.QueryRowContext(ctx, workflowNodeRunSelect+` WHERE id = ?`, run.CurrentNodeRunID))
+		if nodeErr != nil {
+			return nodeErr
+		}
+		wait, waiting, waitErr := openWaitTx(ctx, tx, run.ID)
+		if waitErr != nil {
+			return waitErr
+		}
+		if waiting && wait.Kind == WorkflowWaitHumanGate && wait.NodeRunID == nodeRun.ID {
+			if expectedWaitID == "" {
+				return ErrReviewWaitIDRequired
+			}
+			if expectedNodeRunID == "" || expectedNodeRunID != nodeRun.ID {
+				return fmt.Errorf("%w: task is not waiting on that node", ErrWorkflowConflict)
+			}
+			if expectedWaitID != wait.ID {
+				return fmt.Errorf("%w: task is not waiting on that review round", ErrWorkflowConflict)
+			}
+			details, parseErr := ParseReviewWaitDetails(wait.Details)
+			if parseErr != nil {
+				return fmt.Errorf("decode review wait %q: %w", wait.ID, parseErr)
+			}
+			if details.Interactive || details.GateNodeKey != nodeRun.NodeKey {
+				return fmt.Errorf("%w: review wait does not belong to the current ordinary human gate", ErrWorkflowConflict)
 			}
 			outcome := "changes_requested"
 			if verdict == "approve" {
 				outcome = "approved"
 			}
+			offered := false
+			for _, candidate := range details.Outcomes {
+				if candidate == outcome {
+					offered = true
+					break
+				}
+			}
+			if !offered {
+				return fmt.Errorf("%w: outcome %q is not offered by this review gate", ErrWorkflowConflict, outcome)
+			}
 			_, err = s.completeNodeTx(ctx, tx, CompleteWorkflowNodeInput{
-				NodeRunID:      nodeRun.ID,
-				Outcome:        outcome,
-				Actor:          ActorHuman,
-				Payload:        map[string]any{"feedback": strings.TrimSpace(feedback)},
-				IdempotencyKey: "human:" + nodeRun.ID + ":" + outcome,
+				NodeRunID:       nodeRun.ID,
+				Outcome:         outcome,
+				Actor:           ActorHuman,
+				Payload:         map[string]any{"feedback": strings.TrimSpace(feedback)},
+				IdempotencyKey:  "human:" + wait.ID + ":" + outcome,
+				humanGateWaitID: wait.ID,
 			}, false, nil)
 			return err
 		}
+	}
+
+	// A supplied binding means the caller observed a specific review round. If
+	// that round is no longer the active ordinary gate, never persist the verdict
+	// as an unbound review: it could otherwise appear to belong to a later round
+	// or to a run that has already moved on. Calls with no binding still record
+	// normal pre-gate review findings.
+	if expectedNodeRunID != "" || expectedWaitID != "" {
+		return fmt.Errorf("%w: task is not waiting on that bound review round", ErrWorkflowConflict)
 	}
 
 	// No open gate to answer. If the task's latest workflow run already
@@ -2096,8 +2263,17 @@ func (s *WorkflowRunService) OpenWait(ctx context.Context, taskID string) (Workf
 	if err != nil || !ok {
 		return WorkflowWait{}, false, err
 	}
-	return scanWorkflowWaitMaybe(s.db.QueryRowContext(ctx, workflowWaitSelect+`
+	wait, waiting, err := scanWorkflowWaitMaybe(s.db.QueryRowContext(ctx, workflowWaitSelect+`
 WHERE workflow_run_id = ? AND state = 'open'`, run.ID))
+	if err != nil || !waiting {
+		return wait, waiting, err
+	}
+	if wait.Kind == WorkflowWaitHumanGate {
+		if _, err := ParseReviewWaitDetails(wait.Details); err != nil {
+			return WorkflowWait{}, false, fmt.Errorf("decode human-gate wait %q: %w", wait.ID, err)
+		}
+	}
+	return wait, true, nil
 }
 
 func (s *WorkflowRunService) Substate(ctx context.Context, taskID string) (InProgressSubstate, *WorkflowWait, error) {
@@ -2301,6 +2477,15 @@ func enterWaitTx(ctx context.Context, tx workflowTx, run *WorkflowRun, nodeRun *
 }
 
 func enterWaitWithDetailsTx(ctx context.Context, tx workflowTx, run *WorkflowRun, nodeRun *WorkflowNodeRun, kind WorkflowWaitKind, details any, message string, actor Actor, now time.Time) error {
+	if kind == WorkflowWaitHumanGate {
+		encoded, err := json.Marshal(details)
+		if err != nil {
+			return fmt.Errorf("encode human-gate wait details: %w", err)
+		}
+		if _, err := ParseReviewWaitDetails(encoded); err != nil {
+			return fmt.Errorf("construct human-gate wait details: %w", err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE workflow_node_runs SET state = ? WHERE id = ?`, string(WorkflowNodeWaiting), nodeRun.ID); err != nil {
 		return err
 	}
@@ -2440,14 +2625,15 @@ func scanWorkflowRun(scanner taskScanner) (WorkflowRun, error) {
 		&completedAt, &cancelledAt, &run.CompletionSource, &heldAt, &run.HeldBy); err != nil {
 		return WorkflowRun{}, err
 	}
-	if err := json.Unmarshal([]byte(snapshotJSON), &run.Snapshot); err != nil {
+	snapshot, err := decodeFlowSnapshot([]byte(snapshotJSON))
+	if err != nil {
 		return WorkflowRun{}, fmt.Errorf("decode workflow snapshot: %w", err)
 	}
+	run.Snapshot = snapshot
 	run.State = WorkflowRunState(state)
 	run.FlowID = flowID.String
 	run.CurrentNodeRunID = nodeRunID.String
 	run.CurrentArtifactID = artifactID.String
-	var err error
 	if run.CreatedAt, err = sqlitex.ParseTime(createdAt); err != nil {
 		return WorkflowRun{}, err
 	}

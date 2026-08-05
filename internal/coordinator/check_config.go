@@ -172,16 +172,16 @@ func (s *CheckConfigService) reviewChecksForTask(ctx context.Context, suite Chec
 	return withDefaultAgentChecks(suite, s.defaultAgent, s.harnessArgs)
 }
 
-// withFlowSnapshotReviewChecks appends the flow's frozen review set — one
+// withFlowReviewChecks appends a graph review node's frozen review agents — one
 // agent check per reviewer (critique) / verifier (acceptance) — to the
-// repo-configured suite. Unlike the legacy synthesized defaults, a flow whose
-// review set is empty deliberately runs the repo checks alone.
-func withFlowSnapshotReviewChecks(suite CheckSuite, snapshot FlowSnapshot, args []string) (CheckSuite, error) {
+// repo-configured suite. A review node with no agents deliberately runs the
+// repo checks alone.
+func withFlowReviewChecks(suite CheckSuite, reviewAgents []FlowReviewAgentSnapshot, args []string) (CheckSuite, error) {
 	usedNames := map[string]bool{}
 	for _, definition := range suite.Definitions {
 		usedNames[definition.Name] = true
 	}
-	for _, reviewAgent := range snapshot.ReviewAgents {
+	for _, reviewAgent := range reviewAgents {
 		kind := CheckKindReviewer
 		phase := CheckPhaseCritique
 		if reviewAgent.Role == FlowReviewRoleVerifier {
@@ -1021,13 +1021,13 @@ func (s *CheckConfigService) ScheduleWorkflowNodeChecks(ctx context.Context, tas
 		} else if err := validateReviewDiscoveryAgents(agents); err != nil {
 			return nil, err
 		}
-		snapshot := FlowSnapshot{}
+		reviewAgents := make([]FlowReviewAgentSnapshot, 0, len(agents))
 		for _, agent := range agents {
-			snapshot.ReviewAgents = append(snapshot.ReviewAgents, FlowReviewAgentSnapshot{
+			reviewAgents = append(reviewAgents, FlowReviewAgentSnapshot{
 				Role: role, Blocking: agent.Blocking, Agent: agent.Agent,
 			})
 		}
-		suite, err := withFlowSnapshotReviewChecks(CheckSuite{}, snapshot, s.harnessArgs)
+		suite, err := withFlowReviewChecks(CheckSuite{}, reviewAgents, s.harnessArgs)
 		if err != nil {
 			return nil, err
 		}
@@ -1164,12 +1164,12 @@ func (s *CheckConfigService) ScheduleWorkflowReviewAggregation(
 	}
 	blocksApproval := ReviewAggregationBlocksApproval(agents)
 
-	snapshot := FlowSnapshot{ReviewAgents: []FlowReviewAgentSnapshot{{
+	reviewAgents := []FlowReviewAgentSnapshot{{
 		Role:     FlowReviewRoleReviewer,
 		Blocking: blocksApproval,
 		Agent:    aggregator,
-	}}}
-	suite, err := withFlowSnapshotReviewChecks(CheckSuite{}, snapshot, s.harnessArgs)
+	}}
+	suite, err := withFlowReviewChecks(CheckSuite{}, reviewAgents, s.harnessArgs)
 	if err != nil {
 		return "", err
 	}

@@ -100,20 +100,35 @@ function loopBackLabel(nodeRuns, index, nodes) {
   return `↺ looped back to ${value(target, "name", "Name") || nextKey}${visit > 1 ? ` · ×${visit - 1}` : ""}`;
 }
 
-// parseWaitDetails decodes workflow_waits.details. Interactive review waits
-// carry the gate's instructions/outcomes/artifact with them; classic gate
-// waits get the same fields from the executor, and legacy rows fall back to
-// the current node's gate config.
+// parseWaitDetails accepts only the complete immutable human-gate contract.
+// A missing or malformed payload is deliberately not reconstructed from the
+// current graph: it is not safe to answer a wait whose frozen details are gone.
 export function parseWaitDetails(wait) {
   let details = value(wait || {}, "details", "Details");
   if (typeof details === "string") {
     try {
       details = JSON.parse(details);
     } catch {
-      details = null;
+      return null;
     }
   }
-  return details || {};
+  if (!details || typeof details !== "object" || Array.isArray(details)) return null;
+  const allowed = new Set(["instructions", "outcomes", "artifact_id", "interactive", "gate_node_key"]);
+  if (Object.keys(details).some((key) => !allowed.has(key))) return null;
+  if (typeof details.interactive !== "boolean") return null;
+  const gateNodeKey = String(details.gate_node_key || "").trim();
+  if (!gateNodeKey || !Array.isArray(details.outcomes) || details.outcomes.length === 0) return null;
+  const outcomes = details.outcomes.map((outcome) => String(outcome || "").trim());
+  if (outcomes.some((outcome) => !outcome) || new Set(outcomes).size !== outcomes.length) return null;
+  const artifactID = String(details.artifact_id || "").trim();
+  if (details.interactive && !artifactID) return null;
+  return {
+    instructions: typeof details.instructions === "string" ? details.instructions : "",
+    outcomes,
+    artifact_id: artifactID,
+    interactive: details.interactive,
+    gate_node_key: gateNodeKey,
+  };
 }
 
 // reviewModel is the Review tab's projection: the open human gate or agent
@@ -123,24 +138,25 @@ export function parseWaitDetails(wait) {
 export function reviewModel({ wait, currentNode, run, artifacts, statusLog, activeSession }) {
   const waitKind = String(value(wait, "kind", "Kind") || "");
   const details = parseWaitDetails(wait);
-  const gateConfig = value(value(currentNode || {}, "config", "Config") || {}, "human_gate", "HumanGate") || {};
 
   let gate = null;
-  if (waitKind === "human_gate") {
-    const outcomes = details.outcomes?.length ? details.outcomes : value(gateConfig, "outcomes", "Outcomes") || [];
-    const artifactID = String(details.artifact_id || value(run, "current_artifact_id", "CurrentArtifactID") || "");
+  if (waitKind === "human_gate" && details) {
+    const artifactID = details.artifact_id;
     const artifact = artifacts.find((candidate) => String(value(candidate, "id", "ID")) === artifactID) || null;
-    gate = {
-      nodeRunID: String(value(wait, "node_run_id", "NodeRunID") || ""),
-      waitID: String(value(wait, "id", "ID") || ""),
-      heading: String(value(currentNode, "name", "Name") || "Review"),
-      instructions:
-        String(details.instructions || value(gateConfig, "instructions", "Instructions") || value(wait, "message", "Message") || ""),
-      outcomes: Array.isArray(outcomes) ? outcomes : [],
-      interactive: Boolean(details.interactive),
-      artifactID,
-      changeGate: String(value(artifact || {}, "kind", "Kind")) === "change",
-    };
+    const nodeRunID = String(value(wait, "node_run_id", "NodeRunID") || "").trim();
+    const waitID = String(value(wait, "id", "ID") || "").trim();
+    if (nodeRunID && waitID) {
+      gate = {
+        nodeRunID,
+        waitID,
+        heading: String(value(wait, "message", "Message") || "Review"),
+        instructions: details.instructions || String(value(wait, "message", "Message") || ""),
+        outcomes: details.outcomes,
+        interactive: details.interactive,
+        artifactID,
+        changeGate: String(value(artifact || {}, "kind", "Kind")) === "change",
+      };
+    }
   }
 
   let question = null;

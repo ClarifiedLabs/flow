@@ -16,6 +16,11 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/scheduler"
 )
 
+// testReviewWorkflowSnapshotJSON is a complete immutable graph used by
+// direct-SQL workflow fixtures. Tests must not retain the retired empty
+// snapshot placeholder.
+const testReviewWorkflowSnapshotJSON = `{"flow_id":"fl-worker-fixture","flow_name":"worker fixture","start_node":"review","transition_budget":10,"nodes":[{"key":"review","name":"Review","kind":"agent","config":{"agent":{"agent":{"id":"ad-worker-fixture","name":"Worker fixture agent","harness":"harness","prompt":"Complete the worker fixture node."},"workspace":"base","artifact":"handoff"}}},{"key":"done","name":"Done","kind":"terminal","config":{"terminal":{"resolution":"completed"}}}],"edges":[{"from":"review","outcome":"completed","to":"done"}]}`
+
 func TestWorkerRegisterHeartbeatAndClaimLifecycle(t *testing.T) {
 	ctx := context.Background()
 	store, directory, service := newWorkerService(t)
@@ -982,7 +987,7 @@ func TestClaimCancelsRepairJobWhenConvergenceFingerprintChanges(t *testing.T) {
 INSERT INTO workflow_runs (
 	id, task_id, run_sequence, flow_snapshot_json, state, current_node_key,
 	transition_budget, created_at, held_at, held_by
-) VALUES (?, ?, 1, '{}', 'running', 'review', 10, ?, ?, 'system')`, runID, task.ID, now, now); err != nil {
+) VALUES (?, ?, 1, ?, 'running', 'review', 10, ?, ?, 'system')`, runID, task.ID, testReviewWorkflowSnapshotJSON, now, now); err != nil {
 		t.Fatalf("insert held workflow: %v", err)
 	}
 	if _, err := store.DB().ExecContext(ctx, `
@@ -1092,11 +1097,11 @@ func TestWorkflowJobEnqueueAndClaimRequireCurrentActiveNode(t *testing.T) {
 INSERT INTO workflow_runs (
 	id, task_id, run_sequence, flow_snapshot_json, state, current_node_key,
 	current_node_run_id, transition_budget, created_at, started_at
-) VALUES (?, ?, 1, '{}', 'running', 'review', ?, 10, ?, ?);
+) VALUES (?, ?, 1, ?, 'running', 'review', ?, 10, ?, ?);
 INSERT INTO workflow_node_runs (
 	id, workflow_run_id, node_key, visit, attempt, state, created_at, started_at
 ) VALUES (?, ?, 'review', 1, 1, 'running', ?, ?)`,
-		runID, task.ID, nodeID, now, now, nodeID, runID, now, now); err != nil {
+		runID, task.ID, testReviewWorkflowSnapshotJSON, nodeID, now, now, nodeID, runID, now, now); err != nil {
 		t.Fatalf("insert active workflow node: %v", err)
 	}
 	runIDValue, nodeIDValue := runID, nodeID

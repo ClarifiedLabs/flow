@@ -334,60 +334,50 @@ func (s *WorkflowRunService) Release(ctx context.Context, input ReleaseWorkflowI
 		input.Actor = ActorHuman
 	}
 	taskID := strings.TrimSpace(input.TaskID)
-
-	run, nodeRun, err := s.clearHold(ctx, taskID, input.Actor, input.Edge)
-	if err != nil {
-		return CompleteWorkflowNodeResult{}, err
-	}
-	if input.Edge == ReleaseResume {
-		return CompleteWorkflowNodeResult{Run: run}, nil
-	}
-	if input.Edge == ReleaseMerge {
-		return s.jumpToTerminal(ctx, run, input.Actor)
-	}
-	if nodeRun == nil {
-		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: run has no active node to hand back", ErrWorkflowConflict)
-	}
-
-	node, ok := run.Snapshot.Node(nodeRun.NodeKey)
-	if !ok {
-		return CompleteWorkflowNodeResult{}, fmt.Errorf("snapshot node %q not found", nodeRun.NodeKey)
-	}
-	outcome, ok := workflowSuccessOutcome(node)
-	if !ok {
-		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: node kind %q has no success edge to take", ErrWorkflowConflict, node.Kind)
-	}
-
-	completion := CompleteWorkflowNodeInput{
-		NodeRunID: nodeRun.ID,
-		Outcome:   outcome,
-		Actor:     input.Actor,
-		Payload:   map[string]any{"released_edge": string(input.Edge)},
-	}
 	switch input.Edge {
-	case ReleaseSubmit:
-		completion.ArtifactID = strings.TrimSpace(input.ArtifactID)
-		if completion.ArtifactID == "" {
-			return CompleteWorkflowNodeResult{}, errors.New("submit requires an artifact")
-		}
-	case ReleaseSatisfy:
-		// No artifact: the operator asserts the node is done, so waive the
-		// agent-node artifact contract and carry the run's current artifact.
-		completion.OperatorSatisfied = true
+	case ReleaseResume, ReleaseSubmit, ReleaseSatisfy, ReleaseMerge:
 	default:
 		return CompleteWorkflowNodeResult{}, fmt.Errorf("unknown release edge %q", input.Edge)
 	}
-	return s.CompleteNode(ctx, completion)
+	switch input.Edge {
+	case ReleaseResume:
+		run, _, err := s.clearHold(ctx, taskID, input.Actor, input.Edge)
+		if err != nil {
+			return CompleteWorkflowNodeResult{}, err
+		}
+		return CompleteWorkflowNodeResult{Run: run}, nil
+	case ReleaseMerge:
+		return s.releaseMerge(ctx, taskID, input.Actor)
+	case ReleaseSubmit, ReleaseSatisfy:
+		return s.releaseComplete(ctx, input)
+	default:
+		panic("validated release edge reached unexpected dispatch")
+	}
 }
 
-// clearHold drops the hold and returns the run plus its active node run, if any.
+// clearHold drops a resume hold in its own transaction. Edges that also change
+// a node use releaseComplete or releaseMerge so the hold release cannot commit
+// separately from the node transition.
 func (s *WorkflowRunService) clearHold(ctx context.Context, taskID string, actor Actor, edge ReleaseEdge) (WorkflowRun, *WorkflowNodeRun, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return WorkflowRun{}, nil, err
 	}
 	defer tx.Rollback()
+	run, nodeRun, err := s.releaseHoldTx(ctx, tx, taskID, actor, edge)
+	if err != nil {
+		return WorkflowRun{}, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return WorkflowRun{}, nil, err
+	}
+	return run, nodeRun, nil
+}
 
+// releaseHoldTx validates and records a hold hand-back without committing it.
+// Callers that take an edge must retain this transaction through that edge so a
+// human wait cannot appear after the hold release and before node completion.
+func (s *WorkflowRunService) releaseHoldTx(ctx context.Context, tx workflowTx, taskID string, actor Actor, edge ReleaseEdge) (WorkflowRun, *WorkflowNodeRun, error) {
 	run, err := scanWorkflowRun(tx.QueryRowContext(ctx, workflowRunSelect+`
 WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, taskID))
 	if err != nil {
@@ -405,6 +395,24 @@ WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, taskID))
 	}
 	if convergenceEvidence != nil {
 		return WorkflowRun{}, nil, fmt.Errorf("%w: convergence hold requires an explicit disposition", ErrWorkflowConflict)
+	}
+	// Releasing a hold may resume a human gate, but it may not choose that
+	// gate's outcome. A release request has no review-round identity; allowing
+	// submit, satisfy, or merge here would let a stale operator action resolve
+	// whichever human gate happens to be open. Resume leaves the persisted wait
+	// intact so the caller must use Respond with its node-run and review-wait IDs.
+	if edge != ReleaseResume {
+		wait, waiting, err := openWaitTx(ctx, tx, run.ID)
+		if err != nil {
+			return WorkflowRun{}, nil, err
+		}
+		if !waiting && run.State == WorkflowRunWaiting {
+			return WorkflowRun{}, nil, fmt.Errorf("%w: release edge %q cannot resolve a workflow waiting without its persisted wait", ErrWorkflowConflict, edge)
+		}
+		currentNode, currentNodeKnown := run.Snapshot.Node(run.CurrentNodeKey)
+		if (waiting && wait.Kind == WorkflowWaitHumanGate) || (currentNodeKnown && currentNode.Kind == NodeHumanGate) {
+			return WorkflowRun{}, nil, fmt.Errorf("%w: release edge %q cannot resolve a human gate; resume it and respond with node_run_id and review_wait_id", ErrWorkflowConflict, edge)
+		}
 	}
 
 	now := s.now().UTC()
@@ -430,33 +438,146 @@ UPDATE workflow_runs SET held_at = NULL, held_by = '', version = version + 1 WHE
 			nodeRun = &active
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return WorkflowRun{}, nil, err
-	}
 	run.HeldAt = nil
 	run.HeldBy = ""
 	return run, nodeRun, nil
 }
 
-// jumpToTerminal abandons the remaining nodes and closes the run at its
-// terminal node, which is how "skip to merge" ends a hand-back.
-func (s *WorkflowRunService) jumpToTerminal(ctx context.Context, run WorkflowRun, actor Actor) (CompleteWorkflowNodeResult, error) {
-	terminalKey, ok := run.Snapshot.TerminalNodeKey()
-	if !ok {
-		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: flow has no terminal node", ErrWorkflowConflict)
-	}
-	terminalNode, ok := run.Snapshot.Node(terminalKey)
-	if !ok {
-		return CompleteWorkflowNodeResult{}, fmt.Errorf("terminal node %q not found", terminalKey)
-	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
+// releaseComplete hands a held non-human node back along submit or satisfy in
+// one immediate transaction. The human-wait check, hold-release audit row, and
+// node transition therefore either all commit together or all roll back.
+func (s *WorkflowRunService) releaseComplete(ctx context.Context, input ReleaseWorkflowInput) (CompleteWorkflowNodeResult, error) {
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
 	if err != nil {
 		return CompleteWorkflowNodeResult{}, err
 	}
 	defer tx.Rollback()
 
+	run, nodeRun, err := s.releaseHoldTx(ctx, tx, strings.TrimSpace(input.TaskID), input.Actor, input.Edge)
+	if err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	if nodeRun == nil {
+		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: run has no active node to hand back", ErrWorkflowConflict)
+	}
+	// Validate the held state before checking submit's payload. A generic release
+	// of a human gate must consistently report the routing conflict (and never
+	// expose whether an unrelated artifact was supplied).
+	if input.Edge == ReleaseSubmit && strings.TrimSpace(input.ArtifactID) == "" {
+		return CompleteWorkflowNodeResult{}, errors.New("submit requires an artifact")
+	}
+	node, ok := run.Snapshot.Node(nodeRun.NodeKey)
+	if !ok {
+		return CompleteWorkflowNodeResult{}, fmt.Errorf("snapshot node %q not found", nodeRun.NodeKey)
+	}
+	outcome, ok := workflowSuccessOutcome(node)
+	if !ok {
+		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: node kind %q has no success edge to take", ErrWorkflowConflict, node.Kind)
+	}
+	completion := CompleteWorkflowNodeInput{
+		NodeRunID: nodeRun.ID,
+		Outcome:   outcome,
+		Actor:     input.Actor,
+		Payload:   map[string]any{"released_edge": string(input.Edge)},
+	}
+	switch input.Edge {
+	case ReleaseSubmit:
+		completion.ArtifactID = strings.TrimSpace(input.ArtifactID)
+	case ReleaseSatisfy:
+		// No artifact: the operator asserts the node is done, so waive the
+		// agent-node artifact contract and carry the run's current artifact.
+		completion.OperatorSatisfied = true
+	default:
+		return CompleteWorkflowNodeResult{}, fmt.Errorf("unknown release edge %q", input.Edge)
+	}
+	result, err := s.completeNodeTx(ctx, tx, completion, false, nil)
+	if err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	latest, err := s.Get(ctx, run.ID)
+	if err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	result.Run = latest
+	result.Done = latest.State == WorkflowRunCompleted
+	return result, nil
+}
+
+// releaseMerge clears a held run and jumps to its terminal node in one
+// BEGIN IMMEDIATE transaction. In particular, a concurrently submitted
+// interactive review either commits before this transaction (and preserves the
+// hold by making the merge conflict) or loses to the completed terminal jump;
+// there is no committed hold-release state between those outcomes.
+func (s *WorkflowRunService) releaseMerge(ctx context.Context, taskID string, actor Actor) (CompleteWorkflowNodeResult, error) {
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	defer tx.Rollback()
+
+	run, err := scanWorkflowRun(tx.QueryRowContext(ctx, workflowRunSelect+`
+WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, taskID))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return CompleteWorkflowNodeResult{}, ErrWorkflowRunNotFound
+		}
+		return CompleteWorkflowNodeResult{}, err
+	}
+	if !run.Held() {
+		return CompleteWorkflowNodeResult{}, ErrWorkflowNotHeld
+	}
+	convergenceEvidence, err := activeConvergenceEvidenceTx(ctx, tx, run.ID)
+	if err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	if convergenceEvidence != nil {
+		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: convergence hold requires an explicit disposition", ErrWorkflowConflict)
+	}
+	wait, waiting, err := openWaitTx(ctx, tx, run.ID)
+	if err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	currentNode, currentNodeKnown := run.Snapshot.Node(run.CurrentNodeKey)
+	if (waiting && wait.Kind == WorkflowWaitHumanGate) ||
+		(!waiting && run.State == WorkflowRunWaiting) ||
+		(currentNodeKnown && currentNode.Kind == NodeHumanGate) {
+		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: release merge cannot resolve a human gate or a workflow waiting without its persisted wait; resume it and respond with node_run_id and review_wait_id", ErrWorkflowConflict)
+	}
+	terminalNode, ok := run.Snapshot.TerminalForResolution(ResolutionMerged)
+	if !ok {
+		return CompleteWorkflowNodeResult{}, fmt.Errorf("%w: flow has no merged terminal node", ErrWorkflowConflict)
+	}
+
 	now := s.now().UTC()
+	if _, err := tx.ExecContext(ctx, `
+UPDATE workflow_runs SET held_at = NULL, held_by = '', version = version + 1 WHERE id = ?`, run.ID); err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
+		TaskID: run.TaskID, WorkflowRunID: run.ID, FromNodeKey: run.CurrentNodeKey,
+		ToNodeKey: run.CurrentNodeKey, Outcome: string(ReleaseMerge),
+		EventKind: "workflow_hold_released", Actor: string(actor), CreatedAt: now,
+	}); err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	run.HeldAt = nil
+	run.HeldBy = ""
+	if err := s.jumpToTerminalTx(ctx, tx, &run, terminalNode, actor, now); err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return CompleteWorkflowNodeResult{}, err
+	}
+	completed, err := s.Get(ctx, run.ID)
+	return CompleteWorkflowNodeResult{Run: completed, Done: true}, err
+}
+
+// jumpToTerminalTx abandons the remaining nodes and closes the run at terminal
+// while its caller owns the hold-release transaction.
+func (s *WorkflowRunService) jumpToTerminalTx(ctx context.Context, tx workflowTx, run *WorkflowRun, terminalNode FlowNodeSnapshot, actor Actor, now time.Time) error {
 	fromNodeKey := run.CurrentNodeKey
 
 	// Retire whatever the run was in the middle of before closing it out.
@@ -464,47 +585,42 @@ func (s *WorkflowRunService) jumpToTerminal(ctx context.Context, run WorkflowRun
 UPDATE workflow_node_runs SET state = ?, completed_at = ?
 WHERE workflow_run_id = ? AND state IN ('queued', 'running', 'waiting')`,
 		string(WorkflowNodeCancelled), sqlitex.FormatTime(now), run.ID); err != nil {
-		return CompleteWorkflowNodeResult{}, err
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE jobs SET state = 'canceled', updated_at = ?
 WHERE workflow_run_id = ? AND state IN ('queued', 'claimed', 'running')`,
 		sqlitex.FormatTime(now), run.ID); err != nil {
-		return CompleteWorkflowNodeResult{}, err
+		return err
 	}
 	if err := resolveOpenWaitTx(ctx, tx, run.ID, actor, now); err != nil {
-		return CompleteWorkflowNodeResult{}, err
+		return err
 	}
 
-	terminalRun, err := createNodeRunTx(ctx, tx, run, terminalKey, 1, run.CurrentArtifactID, now)
+	terminalRun, err := createNodeRunTx(ctx, tx, *run, terminalNode.Key, 1, run.CurrentArtifactID, now)
 	if err != nil {
-		return CompleteWorkflowNodeResult{}, err
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE workflow_node_runs SET state = ?, started_at = ?, completed_at = ? WHERE id = ?`,
 		string(WorkflowNodeSucceeded), sqlitex.FormatTime(now), sqlitex.FormatTime(now), terminalRun.ID); err != nil {
-		return CompleteWorkflowNodeResult{}, err
+		return err
 	}
 	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
 		TaskID: run.TaskID, WorkflowRunID: run.ID, FromTaskState: string(LifecycleInProgress),
-		ToTaskState: string(LifecycleInProgress), FromNodeKey: fromNodeKey, ToNodeKey: terminalKey,
+		ToTaskState: string(LifecycleInProgress), FromNodeKey: fromNodeKey, ToNodeKey: terminalNode.Key,
 		Outcome: string(ReleaseMerge), EventKind: "node_jumped", Actor: string(actor), CreatedAt: now,
 	}); err != nil {
-		return CompleteWorkflowNodeResult{}, err
+		return err
 	}
-	if err := s.completeTerminalTx(ctx, tx, &run, terminalNode, "operator", now); err != nil {
-		return CompleteWorkflowNodeResult{}, err
+	if err := s.completeTerminalTx(ctx, tx, run, terminalNode, "operator", now); err != nil {
+		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return CompleteWorkflowNodeResult{}, err
-	}
-	completed, err := s.Get(ctx, run.ID)
-	return CompleteWorkflowNodeResult{Run: completed, Done: true}, err
+	return nil
 }
 
-// workflowSuccessOutcome names the edge a node takes when it succeeds. Human
-// gates declare their own vocabulary, so the first configured outcome is the
-// affirmative one by convention.
+// workflowSuccessOutcome names the edge a non-human node takes when an
+// operator hands it back as satisfied.
 func workflowSuccessOutcome(node FlowNodeSnapshot) (string, bool) {
 	switch node.Kind {
 	case NodeAgent, NodeMaterializeTaskSet:
@@ -517,10 +633,6 @@ func workflowSuccessOutcome(node FlowNodeSnapshot) (string, bool) {
 		return "merged", true
 	case NodeFinalizeRebase:
 		return "finalized", true
-	case NodeHumanGate:
-		if node.Config.HumanGate != nil && len(node.Config.HumanGate.Outcomes) > 0 {
-			return node.Config.HumanGate.Outcomes[0], true
-		}
 	}
 	return "", false
 }

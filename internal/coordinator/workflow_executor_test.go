@@ -42,18 +42,23 @@ func newReviewBarrierFixture(t *testing.T, agents []SnapshotReviewAgent) *review
 		t.Fatalf("create task: %v", err)
 	}
 	snapshot := FlowSnapshot{
-		FlowName: "review barrier", StartNode: "review", TransitionBudget: 50,
+		FlowID: "fl-review-barrier", FlowName: "review barrier", StartNode: "author", TransitionBudget: 50,
 		Nodes: []FlowNodeSnapshot{
+			{Key: "author", Name: "Author", Kind: NodeAgent, Config: FlowNodeSnapshotConfig{Agent: &AgentNodeSnapshotConfig{
+				Agent: AgentDefSnapshot{ID: "ad-review-author", Name: "author", Harness: "harness", Prompt: "Implement the change."},
+				Workspace: WorkspaceChange, Artifact: ArtifactChange,
+			}}},
 			{Key: "review", Name: "Review", Kind: NodeChangeReview, Config: FlowNodeSnapshotConfig{ChangeReview: &ChangeReviewNodeSnapshotConfig{
 				Agents: agents,
 				Aggregator: AgentDefSnapshot{
-					Name: "review-aggregator", Harness: "harness", Model: "openai:gpt-5-mini", Prompt: "Synthesize review reports.",
+					ID: "ad-review-aggregator", Name: "review-aggregator", Harness: "harness", Model: "openai:gpt-5-mini", Prompt: "Synthesize review reports.",
 				},
 			}}},
 			{Key: "approved", Name: "Approved", Kind: NodeTerminal, Config: FlowNodeSnapshotConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
 			{Key: "changes", Name: "Changes requested", Kind: NodeTerminal, Config: FlowNodeSnapshotConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionFailed}}},
 		},
 		Edges: []FlowEdge{
+			{From: "author", Outcome: "completed", To: "review"},
 			{From: "review", Outcome: "approved", To: "approved"},
 			{From: "review", Outcome: "changes_requested", To: "changes"},
 		},
@@ -135,8 +140,8 @@ INSERT INTO workflow_artifacts (
 
 func barrierAgents(secondBlocking bool) []SnapshotReviewAgent {
 	return []SnapshotReviewAgent{
-		{Blocking: true, Agent: AgentDefSnapshot{Name: "code-review", Harness: "harness", Prompt: "Review correctness."}},
-		{Blocking: secondBlocking, Agent: AgentDefSnapshot{Name: "security-review", Harness: "harness", Prompt: "Review security."}},
+		{Blocking: true, Agent: AgentDefSnapshot{ID: "ad-code-review", Name: "code-review", Harness: "harness", Prompt: "Review correctness."}},
+		{Blocking: secondBlocking, Agent: AgentDefSnapshot{ID: "ad-security-review", Name: "security-review", Harness: "harness", Prompt: "Review security."}},
 	}
 }
 
@@ -493,16 +498,21 @@ func TestWorkflowExecutorMergeConflictReportsBlockedCheckForImplementor(t *testi
 		t.Fatalf("create task: %v", err)
 	}
 	snapshot := FlowSnapshot{
-		FlowName: "merge conflict", StartNode: "merge", TransitionBudget: 10,
+		FlowID: "fl-merge-conflict", FlowName: "merge conflict", StartNode: "implement", TransitionBudget: 10,
 		Nodes: []FlowNodeSnapshot{
-			{Key: "merge", Name: "Merge", Kind: NodeMergeChange, Config: FlowNodeSnapshotConfig{MergeChange: &MergeChangeNodeConfig{}}},
 			{Key: "implement", Name: "Implement", Kind: NodeAgent, Config: FlowNodeSnapshotConfig{Agent: &AgentNodeSnapshotConfig{
 				Workspace: WorkspaceChange,
 				Artifact:  ArtifactChange,
-				Agent:     AgentDefSnapshot{Name: "author", Harness: "harness", Prompt: "Implement the task."},
+				Agent:     AgentDefSnapshot{ID: "ad-merge-author", Name: "author", Harness: "harness", Prompt: "Implement the task."},
 			}}},
+			{Key: "merge", Name: "Merge", Kind: NodeMergeChange, Config: FlowNodeSnapshotConfig{MergeChange: &MergeChangeNodeConfig{}}},
+			{Key: "merged", Name: "Merged", Kind: NodeTerminal, Config: FlowNodeSnapshotConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionMerged}}},
 		},
-		Edges: []FlowEdge{{From: "merge", Outcome: "conflict", To: "implement"}},
+		Edges: []FlowEdge{
+			{From: "implement", Outcome: "completed", To: "merge"},
+			{From: "merge", Outcome: "merged", To: "merged"},
+			{From: "merge", Outcome: "conflict", To: "implement"},
+		},
 	}
 	snapshotJSON, err := json.Marshal(snapshot)
 	if err != nil {
@@ -672,15 +682,19 @@ func TestWorkflowExecutorConcurrentChangeWorkspaceUsesOneChange(t *testing.T) {
 	const runID = "wr-concurrent-change"
 	const nodeID = "nr-concurrent-change"
 	snapshotJSON, err := json.Marshal(FlowSnapshot{
-		FlowName: "concurrent change", StartNode: "implement", TransitionBudget: 10,
-		Nodes: []FlowNodeSnapshot{{
-			Key: "implement", Name: "Implement", Kind: NodeAgent,
-			Config: FlowNodeSnapshotConfig{Agent: &AgentNodeSnapshotConfig{
-				Agent:     AgentDefSnapshot{Name: "author", Harness: "harness", Prompt: "Implement the task."},
-				Workspace: WorkspaceChange,
-				Artifact:  ArtifactChange,
-			}},
-		}},
+		FlowID: "fl-concurrent-change", FlowName: "concurrent change", StartNode: "implement", TransitionBudget: 10,
+		Nodes: []FlowNodeSnapshot{
+			{
+				Key: "implement", Name: "Implement", Kind: NodeAgent,
+				Config: FlowNodeSnapshotConfig{Agent: &AgentNodeSnapshotConfig{
+					Agent:     AgentDefSnapshot{ID: "ad-concurrent-author", Name: "author", Harness: "harness", Prompt: "Implement the task."},
+					Workspace: WorkspaceChange,
+					Artifact:  ArtifactChange,
+				}},
+			},
+			{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeSnapshotConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+		},
+		Edges: []FlowEdge{{From: "implement", Outcome: "completed", To: "done"}},
 	})
 	if err != nil {
 		t.Fatalf("marshal workflow snapshot: %v", err)

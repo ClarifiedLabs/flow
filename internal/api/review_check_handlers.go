@@ -128,6 +128,18 @@ func (s *projectServer) handleGetChange(w http.ResponseWriter, r *http.Request, 
 		requiredChecks = uiRequiredCheckSummaryFromChecks(checks)
 	}
 
+	var openWait *coordinator.WorkflowWait
+	if s.workflowRuns != nil {
+		wait, waiting, waitErr := s.workflowRuns.OpenWait(r.Context(), change.TaskID)
+		if waitErr != nil {
+			writeWorkflowError(w, waitErr, "get_change_workflow_failed")
+			return
+		}
+		if waiting {
+			openWait = &wait
+		}
+	}
+
 	var threads []coordinator.ReviewThread
 	if s.threads != nil {
 		threads, err = s.threads.ListThreadsForChange(r.Context(), change.ID)
@@ -148,6 +160,7 @@ func (s *projectServer) handleGetChange(w http.ResponseWriter, r *http.Request, 
 		ProjectID:          s.project.ID,
 		ProjectName:        s.project.Name,
 		Task:               task,
+		OpenWait:           openWait,
 		Checks:             checks,
 		ReviewState:        reviewState,
 		RequiredChecks:     requiredChecks,

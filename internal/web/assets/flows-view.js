@@ -456,14 +456,6 @@ export function renderFlowsSectionView(flows, agentDefs, defaultFlowID, state) {
   `;
 }
 
-export function renderFlowPhaseChainView(phases) {
-  return (phases || []).map((phase) => {
-    const name = value(phase, "name", "Name");
-    const gate = value(phase, "gate", "Gate") === "human" ? "(gate)" : "";
-    return `${escapeHTML(name)}${gate}`;
-  }).join(" -> ");
-}
-
 export function renderFlowGraphSummaryView(flow) {
   const start = value(flow, "start_node", "StartNode");
   const edges = value(flow, "edges", "Edges") || [];
@@ -519,13 +511,10 @@ function reviewAggregatorAgentDefIDFromNodeView(node, kind) {
   return value(reviewConfigFromNodeView(node, kind), "aggregator_agent_def_id", "AggregatorAgentDefID") || "";
 }
 
-// Saved legacy entries may still contain required. Treat it only as an input
-// alias; structured editor payloads always use the canonical blocking field.
+// Review-agent configuration uses the canonical blocking field. Omission is
+// the graph default (blocking); noncanonical aliases are deliberately ignored.
 export function reviewAgentBlockingView(agent = {}) {
   if (agent.blocking !== undefined && agent.blocking !== null) return Boolean(agent.blocking);
-  if (agent.Blocking !== undefined && agent.Blocking !== null) return Boolean(agent.Blocking);
-  if (agent.required !== undefined && agent.required !== null) return Boolean(agent.required);
-  if (agent.Required !== undefined && agent.Required !== null) return Boolean(agent.Required);
   return true;
 }
 

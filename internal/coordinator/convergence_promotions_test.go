@@ -369,6 +369,54 @@ func TestPromoteConvergenceReviewRejectsStaleEvidence(t *testing.T) {
 	}
 }
 
+func TestLoadConvergencePromotionRejectsUnversionedEvidence(t *testing.T) {
+	ctx := context.Background()
+	env, executor, _ := newPromotionTestEnv(t)
+	task, evidence := holdRealConvergenceReview(t, env, executor)
+
+	if _, err := executor.prepareConvergencePromotion(ctx, promoteInput(task.ID, evidence), evidence); err != nil {
+		t.Fatalf("prepare promotion intent: %v", err)
+	}
+	// Simulate a legacy persisted row. A promotion loader must fail closed rather
+	// than treating zero/unversioned evidence as the current schema.
+	evidence.SchemaVersion = 0
+	raw, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatalf("marshal unversioned evidence: %v", err)
+	}
+	if _, err := env.fixture.store.DB().ExecContext(ctx,
+		`UPDATE convergence_promotions SET evidence_json = ? WHERE source_task_id = ?`, string(raw), task.ID); err != nil {
+		t.Fatalf("replace promotion evidence: %v", err)
+	}
+
+	if _, found, err := executor.loadConvergencePromotion(ctx, task.ID); err == nil || found || !strings.Contains(err.Error(), "unsupported convergence evidence schema version 0") {
+		t.Fatalf("load unversioned promotion = found=%t err=%v, want unsupported-schema error", found, err)
+	}
+}
+
+func TestActiveConvergenceEvidenceRejectsUnsupportedPersistedSchemaVersion(t *testing.T) {
+	ctx := context.Background()
+	env, executor, _ := newPromotionTestEnv(t)
+	task, evidence := holdRealConvergenceReview(t, env, executor)
+
+	evidence.SchemaVersion = ConvergenceEvidenceSchemaVersion + 1
+	raw, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatalf("marshal unsupported evidence: %v", err)
+	}
+	if _, err := env.fixture.store.DB().ExecContext(ctx, `
+UPDATE workflow_transitions
+SET payload_json = ?
+WHERE workflow_run_id = ? AND event_kind = 'workflow_convergence_review_requested'`, string(raw), evidence.WorkflowRunID); err != nil {
+		t.Fatalf("replace active convergence evidence: %v", err)
+	}
+
+	active, err := env.runs.ActiveConvergenceEvidenceForTask(ctx, task.ID)
+	if active != nil || err == nil || !strings.Contains(err.Error(), "unsupported convergence evidence schema version") {
+		t.Fatalf("load unsupported active evidence = %+v err=%v, want unsupported-schema error", active, err)
+	}
+}
+
 func TestResumeConvergencePromotionsRepairsInterruptedIntent(t *testing.T) {
 	ctx := context.Background()
 	env, executor, _ := newPromotionTestEnv(t)

@@ -1274,12 +1274,20 @@ func TestExecutorFinalizeRebaseNode(t *testing.T) {
 	// Craft the run at the finalize node: the rebase agent has completed and
 	// its change artifact feeds finalize.
 	snapshot := FlowSnapshot{
-		FlowName: FeatureRebaseFlowName, StartNode: "finalize", TransitionBudget: 50,
+		FlowID: "fl-feature-rebase", FlowName: FeatureRebaseFlowName, StartNode: "rebase", TransitionBudget: 50,
 		Nodes: []FlowNodeSnapshot{
+			{Key: "rebase", Name: "Rebase", Kind: NodeAgent, Config: FlowNodeSnapshotConfig{Agent: &AgentNodeSnapshotConfig{
+				Agent: AgentDefSnapshot{ID: "ad-feature-rebase", Name: "rebase agent", Harness: "harness", Prompt: "Rebase the feature."},
+				Workspace: WorkspaceChange, Artifact: ArtifactChange,
+			}}},
 			{Key: "finalize", Name: "Finalize", Kind: NodeFinalizeRebase, Config: FlowNodeSnapshotConfig{FinalizeRebase: &FinalizeRebaseNodeConfig{}}},
 			{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeSnapshotConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
 		},
-		Edges: []FlowEdge{{From: "finalize", Outcome: "finalized", To: "done"}},
+		Edges: []FlowEdge{
+			{From: "rebase", Outcome: "completed", To: "finalize"},
+			{From: "finalize", Outcome: "finalized", To: "done"},
+			{From: "finalize", Outcome: "stale", To: "rebase"},
+		},
 	}
 	snapshotJSON, err := json.Marshal(snapshot)
 	if err != nil {

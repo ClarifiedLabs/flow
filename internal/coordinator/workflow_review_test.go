@@ -82,6 +82,77 @@ func createPlanArtifact(t *testing.T, ctx context.Context, artifacts *WorkflowAr
 	return artifact
 }
 
+// independentWorkflowRunService opens a second SQLite connection to the same
+// fixture database. It intentionally has no shared in-memory review lock, which
+// makes it suitable for asserting what another coordinator process can observe.
+func independentWorkflowRunService(t *testing.T, ctx context.Context, runs *WorkflowRunService) *WorkflowRunService {
+	t.Helper()
+	var sequence int
+	var name, path string
+	if err := runs.db.QueryRowContext(ctx, `PRAGMA database_list`).Scan(&sequence, &name, &path); err != nil {
+		t.Fatalf("locate workflow database: %v", err)
+	}
+	if path == "" {
+		t.Fatal("workflow fixture database has no file path")
+	}
+	store, err := flowdb.Open(ctx, path)
+	if err != nil {
+		t.Fatalf("open independent workflow database: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	flows := NewFlowService(store.DB())
+	tasks := NewTaskService(store.DB(), "p-test")
+	return NewWorkflowRunService(store.DB(), flows, tasks)
+}
+
+func TestParseReviewWaitDetailsRejectsIncompleteOrMalformedRecords(t *testing.T) {
+	validOrdinary := `{"instructions":"Read the plan","outcomes":["approved","changes_requested"],"interactive":false,"gate_node_key":"review"}`
+	validInteractive := `{"instructions":"Read the plan","outcomes":["approved"],"artifact_id":"wa-1","interactive":true,"gate_node_key":"review"}`
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{name: "valid ordinary gate", raw: validOrdinary},
+		{name: "valid interactive review", raw: validInteractive},
+		{name: "empty", raw: "", wantErr: true},
+		{name: "empty object", raw: `{}`, wantErr: true},
+		{name: "malformed JSON", raw: `{"interactive":`, wantErr: true},
+		{name: "unknown field", raw: `{"outcomes":["approved"],"interactive":false,"gate_node_key":"review","legacy":true}`, wantErr: true},
+		{name: "trailing value", raw: validOrdinary + ` {}`, wantErr: true},
+		{name: "missing interactive", raw: `{"outcomes":["approved"],"gate_node_key":"review"}`, wantErr: true},
+		{name: "missing gate key", raw: `{"outcomes":["approved"],"interactive":false}`, wantErr: true},
+		{name: "blank gate key", raw: `{"outcomes":["approved"],"interactive":false,"gate_node_key":" "}`, wantErr: true},
+		{name: "noncanonical gate key", raw: `{"outcomes":["approved"],"interactive":false,"gate_node_key":" review"}`, wantErr: true},
+		{name: "missing outcomes", raw: `{"interactive":false,"gate_node_key":"review"}`, wantErr: true},
+		{name: "empty outcomes", raw: `{"outcomes":[],"interactive":false,"gate_node_key":"review"}`, wantErr: true},
+		{name: "blank outcome", raw: `{"outcomes":[" "],"interactive":false,"gate_node_key":"review"}`, wantErr: true},
+		{name: "noncanonical outcome", raw: `{"outcomes":[" approved"],"interactive":false,"gate_node_key":"review"}`, wantErr: true},
+		{name: "duplicate outcomes", raw: `{"outcomes":["approved","approved"],"interactive":false,"gate_node_key":"review"}`, wantErr: true},
+		{name: "noncanonical instructions", raw: `{"instructions":" Read the plan","outcomes":["approved"],"interactive":false,"gate_node_key":"review"}`, wantErr: true},
+		{name: "interactive missing artifact", raw: `{"outcomes":["approved"],"interactive":true,"gate_node_key":"review"}`, wantErr: true},
+		{name: "interactive blank artifact", raw: `{"outcomes":["approved"],"artifact_id":" ","interactive":true,"gate_node_key":"review"}`, wantErr: true},
+		{name: "interactive noncanonical artifact", raw: `{"outcomes":["approved"],"artifact_id":" wa-1 ","interactive":true,"gate_node_key":"review"}`, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			details, err := ParseReviewWaitDetails(json.RawMessage(tc.raw))
+			if tc.wantErr {
+				if !errors.Is(err, ErrInvalidReviewWaitDetails) {
+					t.Fatalf("ParseReviewWaitDetails(%q) err = %v, want invalid-details error", tc.raw, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseReviewWaitDetails(%q): %v", tc.raw, err)
+			}
+			if details.GateNodeKey != "review" || len(details.Outcomes) == 0 {
+				t.Fatalf("details = %+v, want complete frozen contract", details)
+			}
+		})
+	}
+}
+
 func TestSubmitForReviewParksAgentNodeOnInteractiveGate(t *testing.T) {
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
@@ -105,7 +176,10 @@ func TestSubmitForReviewParksAgentNodeOnInteractiveGate(t *testing.T) {
 	if wait.Kind != WorkflowWaitHumanGate || wait.NodeRunID != nodeRun.ID {
 		t.Fatalf("review wait = %+v, want human gate on the plan node", wait)
 	}
-	details := ParseReviewWaitDetails(wait.Details)
+	details, err := ParseReviewWaitDetails(wait.Details)
+	if err != nil {
+		t.Fatalf("parse review wait details: %v", err)
+	}
 	if !details.Interactive || details.ArtifactID != artifact.ID || details.GateNodeKey != "review" {
 		t.Fatalf("wait details = %+v", details)
 	}
@@ -131,6 +205,71 @@ func TestSubmitForReviewParksAgentNodeOnInteractiveGate(t *testing.T) {
 	}
 }
 
+func TestCompleteNodeCannotConsumeInteractiveReviewWait(t *testing.T) {
+	ctx := context.Background()
+	flows, tasks, runs := newWorkflowModelServices(t)
+	artifacts := NewWorkflowArtifactService(flows.db, tasks)
+	flow := reviewFlowFixture(t, ctx, flows)
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Plan me", FlowID: flow.ID})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	run, err := runs.Schedule(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	nodeRun := startPlanNode(t, ctx, runs, run.ID)
+	artifact := createPlanArtifact(t, ctx, artifacts, run, nodeRun, "", "v1", "First draft")
+	wait, err := runs.SubmitForReview(ctx, SubmitForReviewInput{NodeRunID: nodeRun.ID, ArtifactID: artifact.ID})
+	if err != nil {
+		t.Fatalf("submit for review: %v", err)
+	}
+
+	if _, err := runs.CompleteNode(ctx, CompleteWorkflowNodeInput{
+		NodeRunID: nodeRun.ID, Outcome: "completed", ArtifactID: artifact.ID, Actor: ActorAgent,
+	}); !errors.Is(err, ErrWorkflowConflict) {
+		t.Fatalf("ordinary completion during interactive review err = %v, want workflow conflict", err)
+	}
+	open, waiting, err := runs.OpenWait(ctx, task.ID)
+	if err != nil || !waiting || open.ID != wait.ID || open.NodeRunID != nodeRun.ID {
+		t.Fatalf("interactive wait after ordinary completion = %+v waiting=%t err=%v, want original wait", open, waiting, err)
+	}
+	latestNode, ok, err := runs.GetNodeRun(ctx, nodeRun.ID)
+	if err != nil || !ok || latestNode.State != WorkflowNodeWaiting {
+		t.Fatalf("node after ordinary completion = %+v found=%t err=%v, want waiting", latestNode, ok, err)
+	}
+}
+
+func TestCompleteNodeFailsClosedForHumanGateWithoutAnOpenWait(t *testing.T) {
+	ctx := context.Background()
+	flows, tasks, runs := newWorkflowModelServices(t)
+	task, run, nodeRun := newHoldFlow(t, flows, tasks, runs)
+	wait, waiting, err := runs.OpenWait(ctx, task.ID)
+	if err != nil || !waiting {
+		t.Fatalf("open human gate = %+v waiting=%t err=%v", wait, waiting, err)
+	}
+
+	// A corrupt legacy row must not turn a generic completion into a way to
+	// choose a human-gate outcome. Only Respond can carry the internal
+	// capability produced by validating the persisted review round.
+	if _, err := runs.db.ExecContext(ctx, `UPDATE workflow_waits SET state = 'resolved' WHERE id = ?`, wait.ID); err != nil {
+		t.Fatalf("hide human gate wait: %v", err)
+	}
+	if _, err := runs.CompleteNode(ctx, CompleteWorkflowNodeInput{
+		NodeRunID: nodeRun.ID, Outcome: "approved", Actor: ActorAgent,
+	}); !errors.Is(err, ErrWorkflowConflict) {
+		t.Fatalf("ordinary completion without human wait err = %v, want workflow conflict", err)
+	}
+	latestRun, err := runs.Get(ctx, run.ID)
+	if err != nil || latestRun.CurrentNodeRunID != nodeRun.ID || latestRun.State != WorkflowRunWaiting {
+		t.Fatalf("run after rejected ordinary completion = %+v err=%v", latestRun, err)
+	}
+	latestNode, found, err := runs.GetNodeRun(ctx, nodeRun.ID)
+	if err != nil || !found || latestNode.State != WorkflowNodeWaiting {
+		t.Fatalf("node after rejected ordinary completion = %+v found=%t err=%v", latestNode, found, err)
+	}
+}
+
 func TestRespondReviewChangesRequestedResumesSameSession(t *testing.T) {
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
@@ -146,11 +285,12 @@ func TestRespondReviewChangesRequestedResumesSameSession(t *testing.T) {
 	}
 	nodeRun := startPlanNode(t, ctx, runs, run.ID)
 	artifact := createPlanArtifact(t, ctx, artifacts, run, nodeRun, "", "v1", "First draft")
-	if _, err := runs.SubmitForReview(ctx, SubmitForReviewInput{NodeRunID: nodeRun.ID, ArtifactID: artifact.ID}); err != nil {
+	reviewWait, err := runs.SubmitForReview(ctx, SubmitForReviewInput{NodeRunID: nodeRun.ID, ArtifactID: artifact.ID})
+	if err != nil {
 		t.Fatalf("submit for review: %v", err)
 	}
 
-	result, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, "", "changes_requested", "split the storage task", ActorHuman)
+	result, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, reviewWait.ID, "changes_requested", "split the storage task", ActorHuman)
 	if err != nil {
 		t.Fatalf("respond review: %v", err)
 	}
@@ -206,11 +346,12 @@ func TestRespondReviewApprovedCompletesNodeAndAnswersGate(t *testing.T) {
 	}
 	nodeRun := startPlanNode(t, ctx, runs, run.ID)
 	artifact := createPlanArtifact(t, ctx, artifacts, run, nodeRun, "", "v1", "Ship it")
-	if _, err := runs.SubmitForReview(ctx, SubmitForReviewInput{NodeRunID: nodeRun.ID, ArtifactID: artifact.ID}); err != nil {
+	reviewWait, err := runs.SubmitForReview(ctx, SubmitForReviewInput{NodeRunID: nodeRun.ID, ArtifactID: artifact.ID})
+	if err != nil {
 		t.Fatalf("submit for review: %v", err)
 	}
 
-	result, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, "", "approved", "looks good", ActorHuman)
+	result, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, reviewWait.ID, "approved", "looks good", ActorHuman)
 	if err != nil {
 		t.Fatalf("respond review: %v", err)
 	}
@@ -276,10 +417,11 @@ func TestRespondReviewRejectedEndsRejected(t *testing.T) {
 	}
 	nodeRun := startPlanNode(t, ctx, runs, run.ID)
 	artifact := createPlanArtifact(t, ctx, artifacts, run, nodeRun, "", "v1", "Nope")
-	if _, err := runs.SubmitForReview(ctx, SubmitForReviewInput{NodeRunID: nodeRun.ID, ArtifactID: artifact.ID}); err != nil {
+	reviewWait, err := runs.SubmitForReview(ctx, SubmitForReviewInput{NodeRunID: nodeRun.ID, ArtifactID: artifact.ID})
+	if err != nil {
 		t.Fatalf("submit for review: %v", err)
 	}
-	if _, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, "", "rejected", "not worth it", ActorHuman); err != nil {
+	if _, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, reviewWait.ID, "rejected", "not worth it", ActorHuman); err != nil {
 		t.Fatalf("respond review: %v", err)
 	}
 	completed, err := tasks.GetTask(ctx, task.ID)
@@ -321,14 +463,18 @@ func TestRespondReplayReportsCommittedRunState(t *testing.T) {
 	if err != nil || advanced.Next == nil || advanced.Next.NodeKey != "review" {
 		t.Fatalf("advance to review gate = %+v err=%v", advanced, err)
 	}
-	decided, err := runs.Respond(ctx, task.ID, advanced.Next.ID, "approved", "looks good", ActorHuman)
+	wait, waiting, err := runs.OpenWait(ctx, task.ID)
+	if err != nil || !waiting || wait.ID == "" {
+		t.Fatalf("open review wait = %+v waiting=%t err=%v", wait, waiting, err)
+	}
+	decided, err := runs.Respond(ctx, task.ID, advanced.Next.ID, wait.ID, "approved", "looks good", ActorHuman)
 	if err != nil || !decided.Done || decided.Run.State != WorkflowRunCompleted {
 		t.Fatalf("gate decision = %+v err=%v, want completed run", decided, err)
 	}
 
 	// A same-outcome retry replays the recorded decision; its metadata must
 	// reflect the committed state, not the pre-decision snapshot.
-	replayed, err := runs.Respond(ctx, task.ID, advanced.Next.ID, "approved", "looks good", ActorHuman)
+	replayed, err := runs.Respond(ctx, task.ID, advanced.Next.ID, wait.ID, "approved", "looks good", ActorHuman)
 	if err != nil {
 		t.Fatalf("replayed gate decision: %v", err)
 	}
@@ -398,6 +544,10 @@ func TestCompleteNodeReplayWithStaleSnapshotReportsCommittedRun(t *testing.T) {
 	if advanced.Run.State != WorkflowRunWaiting {
 		t.Fatalf("run before the decision = %+v, want waiting at the gate", advanced.Run)
 	}
+	wait, waiting, err := runs.OpenWait(ctx, task.ID)
+	if err != nil || !waiting || wait.ID == "" {
+		t.Fatalf("open review wait = %+v waiting=%t err=%v", wait, waiting, err)
+	}
 
 	// Open the replay transaction and pin it to the pre-terminal snapshot
 	// before the terminal decision commits. From this snapshot the agent node
@@ -419,7 +569,7 @@ func TestCompleteNodeReplayWithStaleSnapshotReportsCommittedRun(t *testing.T) {
 	// The original terminal decision commits on the second connection while
 	// the replay transaction is still open.
 	runs2 := NewWorkflowRunService(store2.DB(), flows, tasks)
-	decided, err := runs2.Respond(ctx, task.ID, advanced.Next.ID, "approved", "looks good", ActorHuman)
+	decided, err := runs2.Respond(ctx, task.ID, advanced.Next.ID, wait.ID, "approved", "looks good", ActorHuman)
 	if err != nil || !decided.Done || decided.Run.State != WorkflowRunCompleted {
 		t.Fatalf("gate decision = %+v err=%v, want completed run", decided, err)
 	}
@@ -470,11 +620,12 @@ func TestRespondReviewRetryReusesRecordedOutcome(t *testing.T) {
 	}
 	nodeRun := startPlanNode(t, ctx, runs, run.ID)
 	artifact := createPlanArtifact(t, ctx, artifacts, run, nodeRun, "", "v1", "Ship it")
-	if _, err := runs.SubmitForReview(ctx, SubmitForReviewInput{NodeRunID: nodeRun.ID, ArtifactID: artifact.ID}); err != nil {
+	reviewWait, err := runs.SubmitForReview(ctx, SubmitForReviewInput{NodeRunID: nodeRun.ID, ArtifactID: artifact.ID})
+	if err != nil {
 		t.Fatalf("submit for review: %v", err)
 	}
 
-	result, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, "", "approved", "looks good", ActorHuman)
+	result, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, reviewWait.ID, "approved", "looks good", ActorHuman)
 	if err != nil {
 		t.Fatalf("respond review: %v", err)
 	}
@@ -484,10 +635,10 @@ func TestRespondReviewRetryReusesRecordedOutcome(t *testing.T) {
 
 	// A same-outcome retry of the decided round is rejected instead of
 	// re-deciding the gate; the recorded outcome stands either way.
-	if _, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, "", "approved", "looks good", ActorHuman); !errors.Is(err, ErrWorkflowConflict) {
+	if _, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, reviewWait.ID, "approved", "looks good", ActorHuman); !errors.Is(err, ErrWorkflowConflict) {
 		t.Fatalf("same-outcome retry err = %v, want conflict", err)
 	}
-	if _, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, "", "rejected", "changed my mind", ActorHuman); !errors.Is(err, ErrWorkflowConflict) {
+	if _, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, reviewWait.ID, "rejected", "changed my mind", ActorHuman); !errors.Is(err, ErrWorkflowConflict) {
 		t.Fatalf("contradictory retry err = %v, want conflict", err)
 	}
 	detail, err := runs.Detail(ctx, run.ID)
@@ -530,8 +681,8 @@ func TestSubmitForReviewValidatesContract(t *testing.T) {
 	if _, err := runs.SubmitForReview(ctx, SubmitForReviewInput{NodeRunID: "wnr-missing", ArtifactID: artifact.ID}); err == nil {
 		t.Fatal("missing node run should fail")
 	}
-	if _, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, "", "approved", "", ActorHuman); !errors.Is(err, ErrWorkflowConflict) {
-		t.Fatalf("respond without a wait err = %v, want conflict", err)
+	if _, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, "", "approved", "", ActorHuman); !errors.Is(err, ErrReviewWaitIDRequired) {
+		t.Fatalf("respond without a wait id err = %v, want required-id error", err)
 	}
 }
 
@@ -587,10 +738,11 @@ func TestRespondReviewRejectsUnofferedOutcome(t *testing.T) {
 	}
 	nodeRun := startPlanNode(t, ctx, runs, run.ID)
 	artifact := createPlanArtifact(t, ctx, artifacts, run, nodeRun, "", "v1", "Draft")
-	if _, err := runs.SubmitForReview(ctx, SubmitForReviewInput{NodeRunID: nodeRun.ID, ArtifactID: artifact.ID}); err != nil {
+	reviewWait, err := runs.SubmitForReview(ctx, SubmitForReviewInput{NodeRunID: nodeRun.ID, ArtifactID: artifact.ID})
+	if err != nil {
 		t.Fatalf("submit for review: %v", err)
 	}
-	if _, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, "", "ship_it", "", ActorHuman); !errors.Is(err, ErrWorkflowConflict) {
+	if _, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, reviewWait.ID, "ship_it", "", ActorHuman); !errors.Is(err, ErrWorkflowConflict) {
 		t.Fatalf("unoffered outcome err = %v, want conflict", err)
 	}
 	// The wait is still open: a bad verdict must not consume the review.
@@ -734,11 +886,11 @@ func TestRespondReviewStaleRoundRacesConcurrentReopen(t *testing.T) {
 }
 
 // TestRespondReviewTerminalVerdictSerializesWithConcurrentReopen parks a
-// terminal (approved) verdict in the gap between its marker transaction and
-// its terminal CompleteNode calls and proves a concurrent changes_requested
-// decision cannot resolve the validated round and reopen a fresh wait in that
-// gap: the per-task review lock serialises the whole RespondReview, and the
-// delayed decision is rejected once the round is already decided.
+// terminal (approved) verdict after the agent advanced to its derived ordinary
+// gate, while the original transaction and review lock remain held. A
+// concurrent changes_requested decision must not observe or resolve that
+// intermediate gate; after the one transaction commits it is rejected because
+// the original round is already decided.
 func TestRespondReviewTerminalVerdictSerializesWithConcurrentReopen(t *testing.T) {
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
@@ -759,9 +911,10 @@ func TestRespondReviewTerminalVerdictSerializesWithConcurrentReopen(t *testing.T
 		t.Fatalf("submit round one: %v", err)
 	}
 
-	// Park the terminal verdict after its marker transaction commits, exactly
-	// where a concurrent decision could resolve round one and reopen round two
-	// before the verdict's CompleteNode calls run.
+	// Park the terminal verdict after it has created the derived ordinary gate
+	// inside the same transaction, before that gate is consumed. The concurrent
+	// request below must remain behind the per-task lock and cannot observe a
+	// separately committed intermediate gate.
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	runs.reviewTerminalGate = func() {
@@ -813,6 +966,92 @@ func TestRespondReviewTerminalVerdictSerializesWithConcurrentReopen(t *testing.T
 // still references it — dropping it and handing the third acquirer a second,
 // fresh mutex would let the queued request and the third request run their
 // review decisions concurrently for the same task.
+// TestRespondReviewTerminalVerdictHidesDerivedGateFromIndependentConnection
+// verifies the transaction boundary rather than the process-local review lock:
+// a second coordinator connection sees only the committed interactive wait and
+// cannot route an ordinary response while terminal completion is paused.
+func TestRespondReviewTerminalVerdictHidesDerivedGateFromIndependentConnection(t *testing.T) {
+	ctx := context.Background()
+	flows, tasks, runs := newWorkflowModelServices(t)
+	artifacts := NewWorkflowArtifactService(flows.db, tasks)
+	flow := reviewFlowFixture(t, ctx, flows)
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Plan me", FlowID: flow.ID})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	run, err := runs.Schedule(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	nodeRun := startPlanNode(t, ctx, runs, run.ID)
+	draft := createPlanArtifact(t, ctx, artifacts, run, nodeRun, "", "v1", "First draft")
+	round, err := runs.SubmitForReview(ctx, SubmitForReviewInput{NodeRunID: nodeRun.ID, ArtifactID: draft.ID})
+	if err != nil {
+		t.Fatalf("submit review: %v", err)
+	}
+	independent := independentWorkflowRunService(t, ctx, runs)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	runs.reviewTerminalGate = func() {
+		close(entered)
+		<-release
+	}
+	t.Cleanup(func() { runs.reviewTerminalGate = nil })
+	terminalDone := make(chan error, 1)
+	go func() {
+		_, err := runs.RespondReview(ctx, task.ID, nodeRun.ID, round.ID, "approved", "looks good", ActorHuman)
+		terminalDone <- err
+	}()
+	<-entered
+
+	// The derived ordinary gate has been created and consumed inside the writer's
+	// uncommitted transaction. An unrelated coordinator sees the original
+	// interactive wait instead, so it cannot respond to a derived gate.
+	observed, waiting, err := independent.OpenWait(ctx, task.ID)
+	if err != nil || !waiting || observed.ID != round.ID || observed.NodeRunID != nodeRun.ID {
+		t.Fatalf("independent open wait = %+v waiting=%t err=%v, want original interactive wait", observed, waiting, err)
+	}
+	details, err := ParseReviewWaitDetails(observed.Details)
+	if err != nil || !details.Interactive {
+		t.Fatalf("independent wait details = %+v err=%v, want interactive original wait", details, err)
+	}
+
+	// This is the routing helper used by change-review verdict submission. On the
+	// independent connection it sees the original interactive wait and rejects it
+	// rather than treating it as an ordinary gate.
+	tx, err := independent.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin independent change-review transaction: %v", err)
+	}
+	err = independent.respondToReviewGateTx(ctx, tx, task.ID, nodeRun.ID, round.ID, "approve", "late verdict")
+	_ = tx.Rollback()
+	if !errors.Is(err, ErrWorkflowConflict) {
+		t.Fatalf("independent change-review route err = %v, want workflow conflict", err)
+	}
+
+	// An ordinary Respond is likewise unable to acquire a write transaction while
+	// the terminal decision is in flight. Once it commits, the old interactive
+	// wait is resolved and the response fails its immutable-gate assertions.
+	responded := make(chan error, 1)
+	go func() {
+		_, err := independent.Respond(ctx, task.ID, nodeRun.ID, round.ID, "approved", "late verdict", ActorHuman)
+		responded <- err
+	}()
+	select {
+	case err := <-responded:
+		t.Fatalf("independent ordinary response returned before terminal commit: %v", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+	close(release)
+	if err := <-terminalDone; err != nil {
+		t.Fatalf("terminal interactive review: %v", err)
+	}
+	if err := <-responded; !errors.Is(err, ErrWorkflowConflict) {
+		t.Fatalf("independent ordinary response after terminal commit err = %v, want workflow conflict", err)
+	}
+}
+
 func TestReviewLockQueuedWaiterAndThirdAcquirerDuringCleanup(t *testing.T) {
 	_, _, runs := newWorkflowModelServices(t)
 	taskID := "t-lock-cleanup-race"

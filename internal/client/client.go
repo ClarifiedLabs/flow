@@ -449,24 +449,6 @@ func (c *Client) SetDefaultFlow(id string) (coordinator.Flow, error) {
 	return response.Flow, nil
 }
 
-// ApproveWorkPhase approves an task's gate-paused work phase.
-func (c *Client) ApproveWorkPhase(taskID string) (coordinator.Task, error) {
-	var response taskResponse
-	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/phase/approve", map[string]string{}, nil, &response); err != nil {
-		return coordinator.Task{}, err
-	}
-	return response.Task, nil
-}
-
-// RequestWorkPhaseChanges sends a gate-paused work phase back to rework.
-func (c *Client) RequestWorkPhaseChanges(taskID string, feedback string) (coordinator.Task, error) {
-	var response taskResponse
-	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/phase/request-changes", map[string]string{"feedback": feedback}, nil, &response); err != nil {
-		return coordinator.Task{}, err
-	}
-	return response.Task, nil
-}
-
 // PromptContext is the coordinator-resolved per-phase prompt material: the
 // current work phase's role instructions, human gate feedback, and completed
 // prior-phase handoffs.
@@ -594,9 +576,15 @@ func (c *Client) GetReviewStatus(taskID, nodeRunID string) (coordinator.ReviewSt
 	return response, nil
 }
 
-func (c *Client) RespondWorkflow(taskID, nodeRunID, outcome, feedback string) (coordinator.CompleteWorkflowNodeResult, error) {
+// RespondWorkflow answers the exact human-gate wait observed by the caller.
+// reviewWaitID is mandatory; nodeRunID is retained as an additional assertion.
+func (c *Client) RespondWorkflow(taskID, nodeRunID, reviewWaitID, outcome, feedback string) (coordinator.CompleteWorkflowNodeResult, error) {
+	reviewWaitID = strings.TrimSpace(reviewWaitID)
+	if reviewWaitID == "" {
+		return coordinator.CompleteWorkflowNodeResult{}, errors.New("review wait id is required")
+	}
 	var response coordinator.CompleteWorkflowNodeResult
-	request := map[string]string{"node_run_id": nodeRunID, "outcome": outcome, "feedback": feedback}
+	request := map[string]string{"node_run_id": nodeRunID, "review_wait_id": reviewWaitID, "outcome": outcome, "feedback": feedback}
 	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/workflow/respond", request, nil, &response); err != nil {
 		return coordinator.CompleteWorkflowNodeResult{}, err
 	}

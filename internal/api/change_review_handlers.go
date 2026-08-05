@@ -26,10 +26,12 @@ const humanReviewCheckName = "human-review"
 // and the verdict stay bound to the code the reviewer saw rather than to a
 // newer head they never looked at.
 type reviewVerdictRequest struct {
-	Verdict  string                `json:"verdict"`
-	HeadSHA  string                `json:"head_sha"`
-	Body     string                `json:"body,omitempty"`
-	Comments []reviewInlineComment `json:"comments,omitempty"`
+	Verdict      string                `json:"verdict"`
+	HeadSHA      string                `json:"head_sha"`
+	NodeRunID    string                `json:"node_run_id,omitempty"`
+	ReviewWaitID string                `json:"review_wait_id,omitempty"`
+	Body         string                `json:"body,omitempty"`
+	Comments     []reviewInlineComment `json:"comments,omitempty"`
 }
 
 type reviewInlineComment struct {
@@ -100,13 +102,15 @@ func (s *projectServer) handleSubmitReview(w http.ResponseWriter, r *http.Reques
 		})
 	}
 	result, err := s.threads.SubmitReview(ctx, coordinator.SubmitReviewInput{
-		ChangeID:  changeID,
-		HeadSHA:   request.HeadSHA,
-		Verdict:   verdict,
-		Body:      request.Body,
-		CheckName: humanReviewCheckName,
-		Comments:  comments,
-		Actor:     principal.Actor(),
+		ChangeID:     changeID,
+		HeadSHA:      request.HeadSHA,
+		Verdict:      verdict,
+		NodeRunID:    request.NodeRunID,
+		ReviewWaitID: request.ReviewWaitID,
+		Body:         request.Body,
+		CheckName:    humanReviewCheckName,
+		Comments:     comments,
+		Actor:        principal.Actor(),
 	})
 	switch {
 	case errors.Is(err, sql.ErrNoRows):

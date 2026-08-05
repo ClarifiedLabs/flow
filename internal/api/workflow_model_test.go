@@ -51,7 +51,7 @@ func TestWorkflowModelV2HumanGateLifecycle(t *testing.T) {
 
 	var completed coordinator.CompleteWorkflowNodeResult
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+created.Task.ID+"/workflow/respond",
-		workflowRespondRequest{NodeRunID: scheduled.Run.CurrentNodeRunID, Outcome: "ship"}, http.StatusOK, &completed)
+		workflowRespondRequest{NodeRunID: scheduled.Run.CurrentNodeRunID, ReviewWaitID: detail.Detail.OpenWait.ID, Outcome: "ship"}, http.StatusOK, &completed)
 	if !completed.Done || completed.Run.State != coordinator.WorkflowRunCompleted {
 		t.Fatalf("completed workflow = %+v", completed)
 	}

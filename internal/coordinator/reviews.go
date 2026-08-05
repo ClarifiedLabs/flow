@@ -260,7 +260,12 @@ type SubmitReviewInput struct {
 	ChangeID string
 	HeadSHA  string
 	Verdict  string // approve, request_changes, or comment
-	Body     string
+	// NodeRunID and ReviewWaitID bind a verdict that resolves an open human
+	// gate to the exact persisted review round observed by the caller. They are
+	// optional only for a review that records a check while no gate is open.
+	NodeRunID    string
+	ReviewWaitID string
+	Body         string
 	// CheckName is the check the verdict reports against (the web UI's human
 	// review check). Required for verdicts; ignored for a bare comment.
 	CheckName string
@@ -307,6 +312,8 @@ func (s *ThreadService) SubmitReview(ctx context.Context, input SubmitReviewInpu
 	input.ChangeID = strings.TrimSpace(input.ChangeID)
 	input.HeadSHA = strings.TrimSpace(input.HeadSHA)
 	input.Verdict = strings.TrimSpace(input.Verdict)
+	input.NodeRunID = strings.TrimSpace(input.NodeRunID)
+	input.ReviewWaitID = strings.TrimSpace(input.ReviewWaitID)
 	if input.ChangeID == "" {
 		return SubmitReviewResult{}, errors.New("change id is required")
 	}
@@ -406,7 +413,7 @@ WHERE id = ?`, input.ChangeID).Scan(&taskID, &currentHead); err != nil {
 	// it must not complete the task's human gate: only a verdict (approve or
 	// request_changes) responds to the gate, mirroring the check guard above.
 	if input.Verdict != "comment" && s.Runs != nil {
-		if err := s.Runs.respondToReviewGateTx(ctx, tx, taskID, input.Verdict, input.Body); err != nil {
+		if err := s.Runs.respondToReviewGateTx(ctx, tx, taskID, input.NodeRunID, input.ReviewWaitID, input.Verdict, input.Body); err != nil {
 			return SubmitReviewResult{}, err
 		}
 	}

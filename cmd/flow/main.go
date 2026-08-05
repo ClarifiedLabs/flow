@@ -1348,16 +1348,18 @@ func runTaskRespond(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
 	var nodeRunID string
+	var reviewWaitID string
 	var outcome string
 	var feedback string
 	flags.StringVar(&nodeRunID, "node-run", "", "waiting node run id")
+	flags.StringVar(&reviewWaitID, "review-wait", "", "exact open human-gate wait id")
 	flags.StringVar(&outcome, "outcome", "", "human-gate outcome")
 	flags.StringVar(&feedback, "feedback", "", "feedback for the next node")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
-	if flags.NArg() != 1 || strings.TrimSpace(nodeRunID) == "" || strings.TrimSpace(outcome) == "" {
-		fmt.Fprintln(stderr, "usage: flow task respond [flags] TASK_ID --node-run NODE_RUN_ID --outcome OUTCOME [--feedback TEXT]")
+	if flags.NArg() != 1 || strings.TrimSpace(nodeRunID) == "" || strings.TrimSpace(reviewWaitID) == "" || strings.TrimSpace(outcome) == "" {
+		fmt.Fprintln(stderr, "usage: flow task respond [flags] TASK_ID --node-run NODE_RUN_ID --review-wait REVIEW_WAIT_ID --outcome OUTCOME [--feedback TEXT]")
 		return 2
 	}
 	client, err := newAPIClient(apiFlags)
@@ -1366,7 +1368,7 @@ func runTaskRespond(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	client, taskRef := scopeClientForRef(client, flags.Arg(0))
-	result, err := client.RespondWorkflow(taskRef, nodeRunID, outcome, feedback)
+	result, err := client.RespondWorkflow(taskRef, nodeRunID, reviewWaitID, outcome, feedback)
 	if err != nil {
 		fmt.Fprintf(stderr, "respond to workflow: %v\n", err)
 		return 1
@@ -2232,9 +2234,9 @@ func enrichPromptTaskContext(input *flowprompt.Input, apiFlags *apiFlagValues) e
 	input.TaskTitle = task.Title
 	input.TaskBody = task.Body
 	input.HumanAttentionContext = humanAttentionPromptContext(statusLog)
-	// Resolve the flow prompt context: for authors, the current phase's role
-	// instructions (from the frozen agent-def snapshot), human gate feedback,
-	// and the completed prior phases' handoffs; for reviewer/verifier check
+	// Resolve the flow prompt context: for authors, the current graph node's
+	// role instructions (from the frozen agent-def snapshot), human gate feedback,
+	// and the completed preceding-node handoffs; for reviewer/verifier check
 	// jobs, the review agent def running under this check name. Best-effort: a
 	// fetch failure falls back to the embedded role skill without stripping
 	// the prompt.
@@ -2242,9 +2244,9 @@ func enrichPromptTaskContext(input *flowprompt.Input, apiFlags *apiFlagValues) e
 	if role := promptInputRole(*input); role == flowprompt.RoleReviewer || role == flowprompt.RoleVerifier {
 		checkName = strings.TrimSpace(input.CheckName)
 	}
-	var priorPhaseHandoffs string
+	var priorNodeHandoffs string
 	if promptContext, err := client.GetPromptContext(taskID, checkName); err != nil {
-		slog.Debug("skip flow phase prompt context", "task_id", taskID, "error", err)
+		slog.Debug("skip flow node prompt context", "task_id", taskID, "error", err)
 	} else {
 		input.RoleInstructionsOverride = promptContext.RoleInstructions
 		if promptInputRole(*input) == flowprompt.RoleAuthor {
@@ -2258,9 +2260,9 @@ func enrichPromptTaskContext(input *flowprompt.Input, apiFlags *apiFlagValues) e
 			}
 			input.TaskSetWorkflow = taskSetWorkflowPromptContract(promptContext.TaskSetWorkflow)
 		}
-		priorPhaseHandoffs = renderPriorPhaseHandoffs(promptContext.PriorHandoffs)
+		priorNodeHandoffs = renderPriorNodeHandoffs(promptContext.PriorHandoffs)
 	}
-	input.PriorHandoff = priorPhaseHandoffs
+	input.PriorHandoff = priorNodeHandoffs
 	if promptInputRole(*input) == flowprompt.RoleAuthor {
 		if err := enrichPromptAuthorReviewContext(input, client); err != nil {
 			return err
@@ -2290,9 +2292,9 @@ func taskSetWorkflowPromptContract(contract *coordinator.TaskSetWorkflowContract
 	return result
 }
 
-// renderPriorPhaseHandoffs formats the completed work phases' handoffs as
-// labeled sections for prompt injection.
-func renderPriorPhaseHandoffs(handoffs []flowclient.PromptPhaseHandoff) string {
+// renderPriorNodeHandoffs formats completed graph-node handoffs as labeled
+// sections for prompt injection.
+func renderPriorNodeHandoffs(handoffs []flowclient.PromptPhaseHandoff) string {
 	var sections []string
 	for _, handoff := range handoffs {
 		content := strings.TrimSpace(handoff.Content)
@@ -2301,27 +2303,27 @@ func renderPriorPhaseHandoffs(handoffs []flowclient.PromptPhaseHandoff) string {
 		}
 		label := strings.TrimSpace(handoff.PhaseName)
 		if label == "" {
-			label = "previous phase"
+			label = "previous node"
 		}
-		sections = append(sections, fmt.Sprintf("### Handoff from %s phase\n\n%s", label, content))
+		sections = append(sections, fmt.Sprintf("### Handoff from %s node\n\n%s", label, content))
 	}
 	return strings.Join(sections, "\n\n")
 }
 
-// combinePriorHandoffs merges the per-phase handoffs with the change-scoped
+// combinePriorHandoffs merges preceding-node handoffs with the change-scoped
 // handoff snapshot (the most recent session's handoff, which fix rounds
-// overwrite). The change handoff is skipped when a phase section already
-// carries the identical content.
-func combinePriorHandoffs(phaseHandoffs string, changeHandoff string) string {
+// overwrite). The change handoff is skipped when a node section already carries
+// the identical content.
+func combinePriorHandoffs(nodeHandoffs string, changeHandoff string) string {
 	changeHandoff = strings.TrimSpace(changeHandoff)
-	phaseHandoffs = strings.TrimSpace(phaseHandoffs)
-	if phaseHandoffs == "" {
+	nodeHandoffs = strings.TrimSpace(nodeHandoffs)
+	if nodeHandoffs == "" {
 		return changeHandoff
 	}
-	if changeHandoff == "" || strings.Contains(phaseHandoffs, changeHandoff) {
-		return phaseHandoffs
+	if changeHandoff == "" || strings.Contains(nodeHandoffs, changeHandoff) {
+		return nodeHandoffs
 	}
-	return phaseHandoffs + "\n\n### Handoff from the previous session\n\n" + changeHandoff
+	return nodeHandoffs + "\n\n### Handoff from the previous session\n\n" + changeHandoff
 }
 
 // enrichPromptReviewerCheckContext resolves coordinator-stamped reviewer modes
@@ -3493,7 +3495,7 @@ func printUsage(out io.Writer) {
   flow task reply TASK_ID MESSAGE
   flow task schedule TASK_ID
   flow task reset|reopen|retry|workflow TASK_ID
-  flow task respond TASK_ID --node-run NODE_RUN_ID --outcome OUTCOME [--feedback TEXT]
+  flow task respond TASK_ID --node-run NODE_RUN_ID --review-wait REVIEW_WAIT_ID --outcome OUTCOME [--feedback TEXT]
   flow task budget TASK_ID --additional N
   flow task done TASK_ID [--resolution RESOLUTION]
 	  flow feature create --title TITLE [--body BODY] [--parent ITEM_ID]
@@ -3548,7 +3550,7 @@ func printTaskUsage(out io.Writer) {
   flow task done [flags] TASK_ID [--resolution completed|rejected|abandoned|cancelled|failed]
   flow task reopen [flags] TASK_ID
   flow task workflow [flags] TASK_ID
-  flow task respond [flags] TASK_ID --node-run NODE_RUN_ID --outcome OUTCOME
+  flow task respond [flags] TASK_ID --node-run NODE_RUN_ID --review-wait REVIEW_WAIT_ID --outcome OUTCOME
   flow task budget [flags] TASK_ID --additional N
   flow task retry [flags] TASK_ID
   flow task link [flags] SOURCE_ID blocks|parent_of|related_to TARGET_ID

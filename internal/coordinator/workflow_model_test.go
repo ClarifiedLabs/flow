@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -133,7 +134,11 @@ func TestWorkflowModelHumanGateCanUseCustomOutcomeAndComplete(t *testing.T) {
 		t.Fatalf("substate = %q wait=%+v, want Blocked on active node", state, wait)
 	}
 
-	result, err := runs.Respond(ctx, task.ID, nodeRun.ID, "ship_it", "release approved", ActorHuman)
+	if _, err := runs.Respond(ctx, task.ID, nodeRun.ID, "", "ship_it", "release approved", ActorHuman); !errors.Is(err, ErrReviewWaitIDRequired) {
+		t.Fatalf("respond without review wait ID err = %v, want %v", err, ErrReviewWaitIDRequired)
+	}
+
+	result, err := runs.Respond(ctx, task.ID, nodeRun.ID, wait.ID, "ship_it", "release approved", ActorHuman)
 	if err != nil {
 		t.Fatalf("respond to human gate: %v", err)
 	}

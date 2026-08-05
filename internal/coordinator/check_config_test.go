@@ -249,12 +249,12 @@ VALUES (?, ?, ?, ?, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 INSERT INTO workflow_runs (
 	id, task_id, run_sequence, flow_snapshot_json, state, current_node_key,
 	current_node_run_id, transition_budget, created_at, started_at
-) VALUES ('wr-parallel', ?, 1, '{}', 'running', 'review', 'nr-parallel', 50,
+) VALUES ('wr-parallel', ?, 1, ?, 'running', 'review', 'nr-parallel', 50,
 	'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
 INSERT INTO workflow_node_runs (
 	id, workflow_run_id, node_key, visit, attempt, state, created_at, started_at
 ) VALUES ('nr-parallel', 'wr-parallel', 'review', 1, 1, 'running',
-	'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, task.ID); err != nil {
+	'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, task.ID, testWorkflowSnapshotJSON(t, "review")); err != nil {
 		t.Fatalf("insert workflow ownership: %v", err)
 	}
 	agents := []SnapshotReviewAgent{

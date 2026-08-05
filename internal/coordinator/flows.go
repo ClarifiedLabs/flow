@@ -21,15 +21,6 @@ var (
 
 const defaultFlowMetadataKey = "default_flow_id"
 
-// FlowGate is a work phase's exit policy: auto-advance to the next phase, or
-// pause for human approval of the phase's handoff.
-type FlowGate string
-
-const (
-	FlowGateAuto  FlowGate = "auto"
-	FlowGateHuman FlowGate = "human"
-)
-
 // FlowReviewRole says which review round a flow review agent joins: reviewers
 // run in critique, verifiers in acceptance.
 type FlowReviewRole string
@@ -42,60 +33,26 @@ const (
 // Flow is a project-owned trusted workflow graph. Tasks freeze a resolved
 // FlowSnapshot when they are scheduled.
 type Flow struct {
-	ID               string            `json:"id"`
-	Name             string            `json:"name"`
-	Description      string            `json:"description,omitempty"`
-	StartNode        string            `json:"start_node,omitempty"`
-	TransitionBudget int               `json:"transition_budget,omitempty"`
-	Nodes            []FlowNode        `json:"nodes,omitempty"`
-	Edges            []FlowEdge        `json:"edges,omitempty"`
-	FixAgentDefID    string            `json:"-"`
-	Builtin          bool              `json:"builtin"`
-	Default          bool              `json:"default"`
-	Phases           []FlowPhase       `json:"-"`
-	ReviewAgents     []FlowReviewAgent `json:"-"`
-	CreatedAt        time.Time         `json:"created_at"`
-	UpdatedAt        time.Time         `json:"updated_at"`
-}
-
-type FlowPhase struct {
-	ID         string   `json:"id"`
-	Position   int      `json:"position"`
-	Name       string   `json:"name"`
-	AgentDefID string   `json:"agent_def_id"`
-	Gate       FlowGate `json:"gate"`
-}
-
-type FlowReviewAgent struct {
-	ID         string         `json:"id"`
-	Role       FlowReviewRole `json:"role"`
-	AgentDefID string         `json:"agent_def_id"`
-	Position   int            `json:"position"`
-	Required   bool           `json:"required"`
-}
-
-type FlowPhaseInput struct {
-	Name       string   `json:"name"`
-	AgentDefID string   `json:"agent_def_id"`
-	Gate       FlowGate `json:"gate"`
-}
-
-type FlowReviewAgentInput struct {
-	Role       FlowReviewRole `json:"role"`
-	AgentDefID string         `json:"agent_def_id"`
-	Required   *bool          `json:"required,omitempty"`
+	ID               string     `json:"id"`
+	Name             string     `json:"name"`
+	Description      string     `json:"description,omitempty"`
+	StartNode        string     `json:"start_node,omitempty"`
+	TransitionBudget int        `json:"transition_budget,omitempty"`
+	Nodes            []FlowNode `json:"nodes,omitempty"`
+	Edges            []FlowEdge `json:"edges,omitempty"`
+	Builtin          bool       `json:"builtin"`
+	Default          bool       `json:"default"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 type FlowInput struct {
-	Name             string                 `json:"name"`
-	Description      string                 `json:"description"`
-	StartNode        string                 `json:"start_node,omitempty"`
-	TransitionBudget int                    `json:"transition_budget,omitempty"`
-	Nodes            []FlowNodeInput        `json:"nodes,omitempty"`
-	Edges            []FlowEdgeInput        `json:"edges,omitempty"`
-	FixAgentDefID    string                 `json:"-"`
-	Phases           []FlowPhaseInput       `json:"-"`
-	ReviewAgents     []FlowReviewAgentInput `json:"-"`
+	Name             string          `json:"name"`
+	Description      string          `json:"description"`
+	StartNode        string          `json:"start_node,omitempty"`
+	TransitionBudget int             `json:"transition_budget,omitempty"`
+	Nodes            []FlowNodeInput `json:"nodes,omitempty"`
+	Edges            []FlowEdgeInput `json:"edges,omitempty"`
 }
 
 // AgentDefSnapshot is the frozen copy of an agent definition carried in a
@@ -116,12 +73,8 @@ func (a AgentDefSnapshot) ModelSelectionArgs() ([]string, error) {
 	return flowharness.SerializeModelSelection(a.Harness, a.Model, a.ReasoningEffort)
 }
 
-type FlowPhaseSnapshot struct {
-	Name  string           `json:"name"`
-	Gate  FlowGate         `json:"gate"`
-	Agent AgentDefSnapshot `json:"agent"`
-}
-
+// FlowReviewAgentSnapshot is a frozen review agent carried by a graph review
+// node, consumed by check synthesis.
 type FlowReviewAgentSnapshot struct {
 	Role     FlowReviewRole   `json:"role"`
 	Blocking bool             `json:"blocking"`
@@ -131,35 +84,12 @@ type FlowReviewAgentSnapshot struct {
 // FlowSnapshot is the fully resolved graph a workflow run executes. Agent
 // definitions are frozen into node configs when the task is scheduled.
 type FlowSnapshot struct {
-	FlowID           string                    `json:"flow_id"`
-	FlowName         string                    `json:"flow_name"`
-	StartNode        string                    `json:"start_node,omitempty"`
-	TransitionBudget int                       `json:"transition_budget,omitempty"`
-	Nodes            []FlowNodeSnapshot        `json:"nodes,omitempty"`
-	Edges            []FlowEdge                `json:"edges,omitempty"`
-	Phases           []FlowPhaseSnapshot       `json:"-"`
-	ReviewAgents     []FlowReviewAgentSnapshot `json:"-"`
-	FixAgent         *AgentDefSnapshot         `json:"-"`
-}
-
-// FixAgentOrLastPhase returns the flow's designated fix-cycle agent, falling
-// back to the final work phase's agent.
-func (s FlowSnapshot) FixAgentOrLastPhase() (AgentDefSnapshot, error) {
-	if s.FixAgent != nil {
-		return *s.FixAgent, nil
-	}
-	if len(s.Phases) == 0 {
-		return AgentDefSnapshot{}, errors.New("flow snapshot has no phases")
-	}
-	return s.Phases[len(s.Phases)-1].Agent, nil
-}
-
-// PhaseAt returns the work phase at index, or false when index is out of range.
-func (s FlowSnapshot) PhaseAt(index int) (FlowPhaseSnapshot, bool) {
-	if index < 0 || index >= len(s.Phases) {
-		return FlowPhaseSnapshot{}, false
-	}
-	return s.Phases[index], true
+	FlowID           string             `json:"flow_id"`
+	FlowName         string             `json:"flow_name"`
+	StartNode        string             `json:"start_node,omitempty"`
+	TransitionBudget int                `json:"transition_budget,omitempty"`
+	Nodes            []FlowNodeSnapshot `json:"nodes,omitempty"`
+	Edges            []FlowEdge         `json:"edges,omitempty"`
 }
 
 // FlowService manages the per-project flow catalog and the project default.
@@ -183,10 +113,6 @@ func normalizeFlowInput(input FlowInput) (FlowInput, error) {
 		return FlowInput{}, errors.New("flow name is required")
 	}
 	input.Description = strings.TrimSpace(input.Description)
-	input.FixAgentDefID = strings.TrimSpace(input.FixAgentDefID)
-	if len(input.Phases) > 0 || len(input.ReviewAgents) > 0 || input.FixAgentDefID != "" {
-		return FlowInput{}, errors.New("ordered phases and legacy review configuration are not supported")
-	}
 	if len(input.Nodes) == 0 && strings.TrimSpace(input.StartNode) == "" {
 		return FlowInput{}, errors.New("flow requires a graph definition")
 	}
@@ -467,8 +393,6 @@ FROM flows f WHERE `+where+` ORDER BY f.name`, args...)
 		if flow.UpdatedAt, err = sqlitex.ParseTime(updatedAt); err != nil {
 			return nil, fmt.Errorf("parse flow updated_at: %w", err)
 		}
-		flow.Phases = []FlowPhase{}
-		flow.ReviewAgents = []FlowReviewAgent{}
 		flow.Nodes = []FlowNode{}
 		flow.Edges = []FlowEdge{}
 		index[flow.ID] = len(flows)
@@ -578,7 +502,7 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.upd
 }
 
 // ResolveSnapshot freezes the flow (default flow when flowID is empty) into a
-// FlowSnapshot: phases and review agents joined with full agent-def copies.
+// FlowSnapshot: graph nodes and review agents joined with full agent-def copies.
 func (s *FlowService) ResolveSnapshot(ctx context.Context, flowID string) (FlowSnapshot, error) {
 	flowID = strings.TrimSpace(flowID)
 	if flowID == "" {
