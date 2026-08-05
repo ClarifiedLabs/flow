@@ -166,6 +166,9 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusServiceUnavailable, "workflows_unavailable", "workflow services are not configured")
 		return
 	}
+	if r.Method == http.MethodGet && !s.requireProjectReadAccess(w, r, principal) {
+		return
+	}
 	if len(parts) == 0 {
 		if !requireMethod(w, r, http.MethodGet) {
 			return
@@ -434,10 +437,6 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusCreated, workflowSubmitReviewResponse{Wait: wait})
 	case "review":
 		if !requireMethod(w, r, http.MethodGet) {
-			return
-		}
-		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession) {
-			writeError(w, http.StatusForbidden, "forbidden", "review status requires an owner or session token")
 			return
 		}
 		nodeRunID := strings.TrimSpace(r.URL.Query().Get("node_run_id"))

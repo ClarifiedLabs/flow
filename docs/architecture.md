@@ -294,13 +294,28 @@ The workflow still has only that one active graph node: child jobs are internal
 work, not graph-node concurrency. Its barrier awaits every blocking and
 advisory child before evaluating the transition.
 
-For `change_review`, the parallel children are side-effect-free discovery
-reviewers. After their barrier closes, one coordinator-owned aggregation job
-uses the node's dedicated frozen aggregator runtime and prompt, deduplicates the
-candidate findings, and becomes the only reviewer allowed to create threads or
-choose `changes_requested`. Whether that final decision may block is still
-derived from the discovery agents' blocking policy. `verify_change` continues
-to evaluate its children directly.
+For `change_review`, the parallel children are non-mutating discovery reviewers:
+they do not create or change threads, tasks, checks, or workflow state. Each child
+writes a structured verdict, and its worker validates that verdict against the
+lease-bound job and source check before persisting it as the source check result.
+Discovery therefore persists reports even though it does not mutate review or
+workflow state. After the barrier closes, one coordinator-owned aggregation job
+receives those persisted source check results under **Candidate Reports**, uses
+the node's dedicated frozen aggregator runtime and prompt, and deduplicates them.
+The final aggregator is distinct from both discovery and a standalone reviewer:
+it emits the one aggregate verdict, then the worker/coordinator alone creates
+eligible threads, applies declared follow-up task actions, and chooses
+`changes_requested`. Whether that final decision may block is still derived from
+the discovery agents' blocking policy. A standalone reviewer likewise emits one
+verdict for the worker to apply, without directly mutating project state.
+`verify_change` continues to evaluate its children directly; verifiers declare
+thread decisions in verdicts and the worker applies them.
+
+Every reviewer and verifier mode compares the checked-out change to
+`origin/${FLOW_BASE:-main}`. Flow guarantees that remote-tracking base ref is
+present in the worker checkout; a local branch named by `FLOW_BASE` is not part
+of the checkout contract. These generated guardrails are appended even when an
+agent definition supplies custom role instructions.
 
 Blocking is the default when an entry omits the flag. A candidate from an
 advisory reviewer remains visible but cannot become a blocking aggregate
@@ -349,20 +364,56 @@ Flow uses bearer tokens for API clients and short-lived cookies for the web UI:
 - **Worker token**: short-lived, capacity-slot credential. Before binding it is
   limited to registration, heartbeat, claim-wait, and control. After binding it
   is limited to the exact project/assignment for claim/report and uploads;
-  assignment abandonment and cleanup revoke it.
+  a worker that owns an unexpired, unreleased lease for a claimed/running job
+  also has read-only task-facing context in that lease's project. Assignment
+  abandonment and cleanup revoke both capabilities.
 - **Orchestrator token**: capacity-slot provisioning, assignment binding,
   recovery, and cleanup calls for its bound provider IDs; it has no general
   owner authority.
   Retired provider IDs stay bound as explicit recovery tombstones until their
   durable assignments are cleaned, even after their final scheduling profile is
   removed.
-- **Session/console tokens**: scoped tokens injected into agent sessions.
+- **Session/console tokens**: scoped tokens injected into agent sessions. For
+  reviewer and verifier checks, the project is the read boundary: task records,
+  lifecycle transition/status history, and review threads/comments are available
+  as read-only context, including records outside the current task when useful.
+  This does not grant direct mutation authority. Agents declare comments, follow-up task actions,
+  thread decisions, and outcomes only in the verdict file; the lease-bound
+  worker/coordinator validates and applies allowed writes. Task-bound author or
+  console capabilities remain separately constrained by their role.
 - **Hook token**: exchange hook/coordinator integration.
 - **Web session cookie + CSRF cookie/header**: browser UI authentication after a
   one-time `flow ui` bootstrap URL.
 
 Token files must be private (`0600`) when read from disk. HTTP Git remotes use
 bearer credentials stored through Git's credential helper when available.
+
+### Project task-facing read boundary
+
+Task-facing project context includes the project task list; task body and status;
+checks and review state; workflow state, history, and read-only artifacts;
+lifecycle transitions and findings; relations; attachment list/download; prompt
+context; change detail/diff; and review-thread/comment lists. An owner may read
+this context in every project. A project-bound session or console may read it in
+its own project, and a worker may read it in any project where it currently owns
+an unexpired, unreleased lease for a claimed/running job. The lease need not be
+for the requested task, and a direct worker can therefore have separate access
+to multiple projects. Hook and provisioner credentials have no task-facing read
+access. Each request checks the current lease; this association is not cached on
+the credential.
+
+Project-readable task-facing history is an authorization boundary, not per-task
+privacy: task bodies, lifecycle transition/status text, and review discussion may
+be disclosed to any principal meeting that project-read policy. Operators should
+not put secrets in those fields and should separate projects when that visibility
+is too broad. This does **not** include full-fidelity history captures, raw
+transcripts, terminal access, session messages, upload grants, resume artifacts,
+or other execution evidence. Those remain private, potentially secret-bearing
+operational surfaces as documented in [`docs/history.md`](history.md), and worker
+operations on them require the exact target lease for the job/session rather than
+merely a task-facing project-read lease. That lease is normally live; the narrow
+canceled-console exit-fence recovery path still requires the worker that owned
+that exact lease.
 
 ## Web UI
 

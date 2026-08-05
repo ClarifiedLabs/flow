@@ -125,6 +125,118 @@ func TestWorkerRegisterHeartbeatAndClaimLifecycle(t *testing.T) {
 	}
 }
 
+func TestServiceHasLiveLeaseForWorker(t *testing.T) {
+	fixedNow := time.Date(2026, time.August, 5, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name          string
+		jobState      JobState
+		leaseWorkerID string
+		queryWorkerID string
+		expiresAt     time.Time
+		released      bool
+		want          bool
+	}{
+		{
+			name:          "live matching claimed job",
+			jobState:      JobClaimed,
+			leaseWorkerID: "w-target",
+			queryWorkerID: "  w-target\t",
+			expiresAt:     fixedNow.Add(time.Minute),
+			want:          true,
+		},
+		{
+			name:          "live matching running job",
+			jobState:      JobRunning,
+			leaseWorkerID: "w-target",
+			queryWorkerID: "w-target",
+			expiresAt:     fixedNow.Add(time.Minute),
+			want:          true,
+		},
+		{
+			name:          "other worker",
+			jobState:      JobClaimed,
+			leaseWorkerID: "w-other",
+			queryWorkerID: "w-target",
+			expiresAt:     fixedNow.Add(time.Minute),
+		},
+		{
+			name:          "released",
+			jobState:      JobClaimed,
+			leaseWorkerID: "w-target",
+			queryWorkerID: "w-target",
+			expiresAt:     fixedNow.Add(time.Minute),
+			released:      true,
+		},
+		{
+			name:          "expired unswept",
+			jobState:      JobRunning,
+			leaseWorkerID: "w-target",
+			queryWorkerID: "w-target",
+			expiresAt:     fixedNow.Add(-time.Second),
+		},
+		{
+			name:          "exact expiry",
+			jobState:      JobRunning,
+			leaseWorkerID: "w-target",
+			queryWorkerID: "w-target",
+			expiresAt:     fixedNow,
+		},
+		{
+			name:          "terminal job inconsistency",
+			jobState:      JobFinished,
+			leaseWorkerID: "w-target",
+			queryWorkerID: "w-target",
+			expiresAt:     fixedNow.Add(time.Minute),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, _, service := newWorkerService(t)
+			service.now = func() time.Time { return fixedNow }
+
+			job, err := service.EnqueueJob(ctx, EnqueueJobInput{
+				Role:           RoleCI,
+				CapacityBucket: BucketEphemeral,
+				Payload:        map[string]any{"blocking": true},
+			})
+			if err != nil {
+				t.Fatalf("enqueue job: %v", err)
+			}
+			if _, err := store.DB().ExecContext(ctx, `UPDATE jobs SET state = ? WHERE id = ?`, string(tt.jobState), job.ID); err != nil {
+				t.Fatalf("set job state: %v", err)
+			}
+
+			var releasedAt any
+			if tt.released {
+				releasedAt = formatTime(fixedNow.Add(-time.Second))
+			}
+			if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO leases (id, job_id, worker_id, capacity_bucket, leased_at, expires_at, released_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				"l-test",
+				job.ID,
+				tt.leaseWorkerID,
+				string(BucketEphemeral),
+				formatTime(fixedNow.Add(-time.Minute)),
+				formatTime(tt.expiresAt),
+				releasedAt,
+			); err != nil {
+				t.Fatalf("insert lease: %v", err)
+			}
+
+			got, err := service.HasLiveLeaseForWorker(ctx, tt.queryWorkerID)
+			if err != nil {
+				t.Fatalf("HasLiveLeaseForWorker: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("HasLiveLeaseForWorker(%q) = %v, want %v", tt.queryWorkerID, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRegisterWorkerPersistsHarnessModels(t *testing.T) {
 	ctx := context.Background()
 	_, directory, _ := newWorkerService(t)

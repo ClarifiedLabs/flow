@@ -824,6 +824,63 @@ func (s *projectServer) checkLeaseOwner(r *http.Request, principal coordinator.P
 	return nil
 }
 
+// checkSessionWorkerLease confines private session control to the worker that
+// currently owns the session's live job lease. A project-level task read lease
+// intentionally does not grant this operational capability. Console process-exit
+// recovery is the narrow exception: after its lease is canceled, a console's
+// exit fence may be acknowledged by the worker that owned that exact session
+// lease. The session service still verifies the supplied session lease.
+func (s *projectServer) checkSessionWorkerLease(r *http.Request, principal coordinator.Principal, sessionID, leaseID string, allowConsoleExitRecovery bool) error {
+	session, err := s.sessions.GetSession(r.Context(), sessionID)
+	if err != nil {
+		return err
+	}
+	if allowConsoleExitRecovery && session.Role == worker.RoleConsole {
+		lease, err := s.workers.GetLease(r.Context(), strings.TrimSpace(leaseID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return sql.ErrNoRows
+		}
+		if err != nil {
+			return err
+		}
+		if lease.WorkerID != strings.TrimSpace(principal.Subject) || session.LeaseID != lease.ID || session.JobID != lease.JobID {
+			return errWorkerLeaseForbidden
+		}
+		job, err := s.workers.GetJob(r.Context(), session.JobID)
+		if err != nil {
+			return err
+		}
+		if job.State == worker.JobCanceled {
+			return nil
+		}
+	}
+	if err := s.projectSweepExpiredLeases(r.Context()); err != nil {
+		return err
+	}
+	lease, err := s.workers.GetLease(r.Context(), strings.TrimSpace(leaseID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return sql.ErrNoRows
+	}
+	if err != nil {
+		return err
+	}
+	if lease.WorkerID != strings.TrimSpace(principal.Subject) || lease.ReleasedAt != nil || !lease.ExpiresAt.After(time.Now().UTC()) {
+		return errWorkerLeaseForbidden
+	}
+	if session.LeaseID != lease.ID || session.JobID != lease.JobID {
+		return errWorkerLeaseForbidden
+	}
+	job, err := s.workers.GetJob(r.Context(), lease.JobID)
+	if err != nil {
+		return err
+	}
+	if job.State != worker.JobClaimed && job.State != worker.JobRunning {
+		return errWorkerLeaseForbidden
+	}
+
+	return nil
+}
+
 // sweepExpiredLeases sweeps every project's leases and crashed author
 // sessions; claim and diagnostics paths call it before reading queue state.
 func (s *Server) sweepExpiredLeases(ctx context.Context) error {

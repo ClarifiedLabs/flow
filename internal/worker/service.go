@@ -919,6 +919,31 @@ ORDER BY released_at IS NOT NULL, leased_at DESC, id DESC`)
 	return leases, nil
 }
 
+// HasLiveLeaseForWorker reports whether the worker has an unreleased,
+// unexpired lease whose job is still claimed or running.
+func (s *Service) HasLiveLeaseForWorker(ctx context.Context, workerID string) (bool, error) {
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS (
+	SELECT 1
+	FROM leases AS l
+	JOIN jobs AS j ON j.id = l.job_id
+	WHERE l.worker_id = ?
+		AND l.released_at IS NULL
+		AND l.expires_at > ?
+		AND j.state IN (?, ?)
+	LIMIT 1
+)`,
+		strings.TrimSpace(workerID),
+		formatTime(s.now().UTC()),
+		string(JobClaimed),
+		string(JobRunning),
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check live lease for worker: %w", err)
+	}
+	return exists, nil
+}
+
 func (s *Service) liveLeaseJobID(ctx context.Context, leaseID string) (string, error) {
 	var jobID string
 	if err := s.db.QueryRowContext(ctx, `

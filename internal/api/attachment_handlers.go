@@ -19,8 +19,7 @@ func (s *projectServer) handleTaskAttachmentsPath(w http.ResponseWriter, r *http
 	if len(parts) == 0 {
 		switch r.Method {
 		case http.MethodGet:
-			if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker) {
-				writeError(w, http.StatusForbidden, "forbidden", "attachment read requires owner, session, or worker token")
+			if !s.requireProjectReadAccess(w, r, principal) {
 				return
 			}
 			s.handleListTaskAttachments(w, r, taskID)
@@ -41,8 +40,7 @@ func (s *projectServer) handleTaskAttachmentsPath(w http.ResponseWriter, r *http
 	}
 
 	if len(parts) == 1 && r.Method == http.MethodGet {
-		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker) {
-			writeError(w, http.StatusForbidden, "forbidden", "attachment read requires owner, session, or worker token")
+		if !s.requireProjectReadAccess(w, r, principal) {
 			return
 		}
 		s.handleDownloadTaskAttachment(w, r, taskID, parts[0])

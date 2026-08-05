@@ -199,6 +199,149 @@ cat README.md > "$1"
 	}
 }
 
+func TestPrepareWorktreeUsesFreshRemoteBaseWithoutLocalBase(t *testing.T) {
+	t.Parallel()
+	requireTool(t, "git")
+	ctx := context.Background()
+	seed, remote := createSeedGitRemote(t)
+	base := "release/fresh"
+	branch := "task/fresh-base"
+	gitRun(t, seed, "branch", base)
+	gitRun(t, seed, "push", remote, base+":"+base)
+	wantHead := gitOutput(t, seed, "rev-parse", base)
+	cfg := workerConfig(t.TempDir(), serveExchangeRemote(t, remote))
+
+	worktree, err := prepareWorktree(ctx, cfg, Job{ID: "j-fresh-remote-base", Role: RoleCI}, JobPayload{
+		ProjectID: "p-test",
+		Base:      base,
+		Branch:    branch,
+	}, "", "")
+	if err != nil {
+		t.Fatalf("prepare worktree: %v", err)
+	}
+	if got := gitOutput(t, worktree, "rev-parse", "HEAD"); got != wantHead {
+		t.Fatalf("worktree HEAD = %s, want remote base %s", got, wantHead)
+	}
+	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+base)
+	cmd.Dir = worktree
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("local base refs/heads/%s unexpectedly exists", base)
+	}
+}
+
+func TestPrepareWorktreeSupportsSlashFeatureBase(t *testing.T) {
+	t.Parallel()
+	requireTool(t, "git")
+	ctx := context.Background()
+	seed, remote := createSeedGitRemote(t)
+	base := "feature/platform/v2"
+	branch := "task/slash-feature-base"
+	gitRun(t, seed, "branch", base)
+	gitRun(t, seed, "push", remote, base+":"+base)
+	wantHead := gitOutput(t, seed, "rev-parse", base)
+	cfg := workerConfig(t.TempDir(), serveExchangeRemote(t, remote))
+
+	worktree, err := prepareWorktree(ctx, cfg, Job{ID: "j-slash-feature-base", Role: RoleCI}, JobPayload{
+		ProjectID: "p-test",
+		Base:      base,
+		Branch:    branch,
+	}, "", "")
+	if err != nil {
+		t.Fatalf("prepare worktree: %v", err)
+	}
+	if got := gitOutput(t, worktree, "rev-parse", "HEAD"); got != wantHead {
+		t.Fatalf("worktree HEAD = %s, want slash feature base %s", got, wantHead)
+	}
+	if got := gitOutput(t, worktree, "rev-parse", "refs/remotes/origin/"+base+"^{commit}"); got != wantHead {
+		t.Fatalf("remote-tracking base = %s, want %s", got, wantHead)
+	}
+}
+
+func TestPrepareWorktreeRefreshesRemoteBaseInReusedWorktree(t *testing.T) {
+	t.Parallel()
+	requireTool(t, "git")
+	ctx := context.Background()
+	seed, remote := createSeedGitRemote(t)
+	cfg := workerConfig(t.TempDir(), serveExchangeRemote(t, remote))
+	job := Job{ID: "j-reused-remote-base", Role: RoleCI}
+	payload := JobPayload{ProjectID: "p-test", Base: "main", Branch: "main"}
+
+	worktree, err := prepareWorktree(ctx, cfg, job, payload, "", "")
+	if err != nil {
+		t.Fatalf("prepare initial worktree: %v", err)
+	}
+	initialHead := gitOutput(t, worktree, "rev-parse", "HEAD")
+
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("advanced remote base\n"), 0o644); err != nil {
+		t.Fatalf("advance remote base: %v", err)
+	}
+	gitRun(t, seed, "add", "README.md")
+	gitRun(t, seed, "commit", "-m", "test: advance remote base")
+	gitRun(t, seed, "push", remote, "main:main")
+	wantHead := gitOutput(t, seed, "rev-parse", "main")
+	if wantHead == initialHead {
+		t.Fatal("remote base did not advance")
+	}
+
+	worktree, err = prepareWorktree(ctx, cfg, job, payload, "", "")
+	if err != nil {
+		t.Fatalf("prepare reused worktree: %v", err)
+	}
+	if got := gitOutput(t, worktree, "rev-parse", "HEAD"); got != wantHead {
+		t.Fatalf("reused worktree HEAD = %s, want advanced remote base %s", got, wantHead)
+	}
+}
+
+func TestPrepareWorktreeRejectsMissingRemoteBaseDespiteTaskAndStaleLocalBase(t *testing.T) {
+	t.Parallel()
+	requireTool(t, "git")
+	ctx := context.Background()
+	seed, remote := createSeedGitRemote(t)
+	taskBranch := "task/existing"
+	gitRun(t, seed, "checkout", "-b", taskBranch)
+	if err := os.WriteFile(filepath.Join(seed, "task.txt"), []byte("task branch\n"), 0o644); err != nil {
+		t.Fatalf("write task file: %v", err)
+	}
+	gitRun(t, seed, "add", "task.txt")
+	gitRun(t, seed, "commit", "-m", "test: add task branch")
+	gitRun(t, seed, "push", remote, taskBranch+":"+taskBranch)
+	taskHead := gitOutput(t, seed, "rev-parse", "HEAD")
+	gitRun(t, seed, "checkout", "main")
+
+	cfg := workerConfig(t.TempDir(), serveExchangeRemote(t, remote))
+	job := Job{ID: "j-missing-remote-base", Role: RoleCI}
+	worktree, err := prepareWorktree(ctx, cfg, job, JobPayload{
+		ProjectID: "p-test",
+		Base:      "main",
+		Branch:    "main",
+	}, "", "")
+	if err != nil {
+		t.Fatalf("prepare initial worktree: %v", err)
+	}
+	staleBase := gitOutput(t, worktree, "rev-parse", "refs/heads/main^{commit}")
+
+	gitRun(t, seed, "push", remote, ":refs/heads/main")
+	_, err = prepareWorktree(ctx, cfg, job, JobPayload{
+		ProjectID: "p-test",
+		Base:      "main",
+		Branch:    taskBranch,
+		HeadSHA:   taskHead,
+	}, "", "")
+	if err == nil {
+		t.Fatal("prepare worktree succeeded without remote-tracking base")
+	}
+	wantError := `remote-tracking base "refs/remotes/origin/main" is missing or does not resolve to a commit after fetch`
+	if !strings.Contains(err.Error(), wantError) {
+		t.Fatalf("prepare worktree error = %q, want %q", err, wantError)
+	}
+	if got := gitOutput(t, worktree, "rev-parse", "refs/heads/main^{commit}"); got != staleBase {
+		t.Fatalf("stale local base = %s, want %s", got, staleBase)
+	}
+	if got := gitOutput(t, worktree, "rev-parse", "refs/remotes/origin/"+taskBranch+"^{commit}"); got != taskHead {
+		t.Fatalf("remote task head = %s, want %s", got, taskHead)
+	}
+}
+
 func TestRunJobRunsWhenRepositorySkillsAreMissing(t *testing.T) {
 	requireTool(t, "git")
 	requireTool(t, "tmux")

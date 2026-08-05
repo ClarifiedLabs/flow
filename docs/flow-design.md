@@ -603,6 +603,40 @@ Graph execution model:
   key, artifact, and outcomes. A response must identify that exact
   `review_wait_id` and the current `node_run_id`; it cannot be routed by a live
   graph lookup or a node key alone.
+- Reviewer and verifier checkouts compare the change to
+  `origin/${FLOW_BASE:-main}` in every mode. Flow guarantees that remote-tracking
+  base ref; it does not promise a local branch named by `FLOW_BASE`. The generated
+  contract remains in the prompt when a frozen agent definition replaces the
+  embedded role skill with custom instructions.
+
+`change_review` uses a non-mutating discovery/aggregation protocol. A discovery
+agent may read project task, lifecycle transition/status history, and thread/comment
+context, but it may not directly mutate tasks, threads, checks, or workflow state. It writes only its
+verdict; the worker validates that report against the lease-bound source check
+and persists it as that source check's result. Persistence is intentional and
+does not make discovery a thread/workflow mutation. Once the source barrier
+closes, the final aggregator receives those persisted results as **Candidate
+Reports** and writes one aggregate verdict. The aggregator is distinct from a
+standalone reviewer, which reviews directly without Candidate Reports, but
+neither mutates project state itself: only the worker/coordinator applies eligible
+thread comments, declared follow-up task actions, thread decisions, and workflow
+outcomes. `verify_change` uses the same verdict-only write boundary for verifier
+thread decisions.
+
+Reviewer and verifier context reads are project-scoped rather than task-private.
+The same task-facing boundary applies to an owner, a project-bound session or
+console, and a worker with a current live lease in the project. It includes task
+body/status, checks/review state, workflow state/read-only artifacts, lifecycle
+transition/status text (including human or agent text), findings, relations,
+attachments, prompt context, change detail/diff, and review discussion. It is
+read-only context, not mutation authority. Operators should not store secrets
+there and should use separate projects when that visibility would be inappropriate.
+Full-fidelity history captures, raw transcripts, terminal access, session messages,
+upload grants, resume artifacts, and other execution evidence remain private,
+potentially secret-bearing surfaces; their worker operations require the exact
+target lease rather than any project-read lease. That lease is normally live; a
+canceled console's exit-fence recovery remains limited to the worker that owned
+that exact lease. See [`docs/history.md`](history.md).
 
 > **Historical boundary:** Everything from this point to the end of this file
 > describes the superseded phase/cursor/pool design. In particular, references to

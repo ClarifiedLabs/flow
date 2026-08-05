@@ -25,7 +25,7 @@ func (s *projectServer) handleChangePath(w http.ResponseWriter, r *http.Request,
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
-		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+		if !s.requireProjectReadAccess(w, r, principal) {
 			return
 		}
 		s.handleGetChange(w, r, parts[0])
@@ -38,7 +38,7 @@ func (s *projectServer) handleChangePath(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusNotFound, "not_found", "resource not found")
 			return
 		}
-		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+		if !s.requireProjectReadAccess(w, r, principal) {
 			return
 		}
 		s.handleGetChangeDiff(w, r, parts[0])
@@ -60,11 +60,10 @@ func (s *projectServer) handleChangePath(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusNotFound, "not_found", "resource not found")
 			return
 		}
-		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker) {
-			writeError(w, http.StatusForbidden, "forbidden", "thread read requires owner, session, or worker token")
+		if !s.requireProjectReadAccess(w, r, principal) {
 			return
 		}
-		s.handleListThreads(w, r, principal, parts[0])
+		s.handleListThreads(w, r, parts[0])
 	case "review":
 		if len(parts) != 2 || !requireMethod(w, r, http.MethodPost) {
 			return
@@ -330,22 +329,18 @@ func (s *projectServer) handleCreateThread(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusCreated, threadResponse{Thread: thread})
 }
 
-func (s *projectServer) handleListThreads(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, changeID string) {
+func (s *projectServer) handleListThreads(w http.ResponseWriter, r *http.Request, changeID string) {
 	if s.threads == nil {
 		writeError(w, http.StatusInternalServerError, "threads_unavailable", "thread service is not configured")
 		return
 	}
-	taskID, err := s.threads.ChangeTaskID(r.Context(), changeID)
+	_, err := s.threads.ChangeTaskID(r.Context(), changeID)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "change_not_found", "change not found")
 		return
 	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "load_change_failed", err.Error())
-		return
-	}
-	if err := s.checkThreadChangeAccess(r, principal, taskID, changeID, r.URL.Query().Get("lease_id"), true, worker.RoleReviewer, worker.RoleVerifier); err != nil {
-		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 		return
 	}
 	threads, err := s.threads.ListThreadsForChange(r.Context(), changeID)
@@ -487,14 +482,12 @@ func (s *projectServer) handleChecksPath(w http.ResponseWriter, r *http.Request,
 
 	switch {
 	case len(parts) == 0 && r.Method == http.MethodGet:
-		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker, coordinator.TokenScopeConsole) {
-			writeError(w, http.StatusForbidden, "forbidden", "check read requires owner, session, worker, or console token")
+		if !s.requireProjectReadAccess(w, r, principal) {
 			return
 		}
 		s.handleListChecks(w, r, taskID)
 	case len(parts) == 1 && r.Method == http.MethodGet:
-		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker, coordinator.TokenScopeConsole) {
-			writeError(w, http.StatusForbidden, "forbidden", "check read requires owner, session, worker, or console token")
+		if !s.requireProjectReadAccess(w, r, principal) {
 			return
 		}
 		s.handleGetCheck(w, r, taskID, parts[0])

@@ -255,7 +255,11 @@ func TestBuildReviewerPromptUsesReviewerVerdictInstructions(t *testing.T) {
 		"Flow role instructions (flow-reviewer):",
 		"# Flow Reviewer",
 		"Check: reviewer",
-		"Use flow comment",
+		"Flow project context is readable for this check",
+		"read-only task, lifecycle transition/status history, and review-thread/comment data",
+		"`origin/${FLOW_BASE:-main}`",
+		"does not promise a local base branch",
+		"standalone reviewer, not a parallel discovery source or final aggregator",
 		"Classify every comments[] finding in $FLOW_VERDICT_FILE",
 		"introduced_by_change",
 		"only source of a reviewer outcome",
@@ -342,9 +346,10 @@ func TestBuildReviewerPromptIncludesParallelDiscoveryGuidance(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Parallel Review Discovery:",
-		"parallel discovery reviewer",
-		"Do not call flow comment",
-		"only the aggregation job",
+		"parallel discovery reviewer, not a standalone or final aggregation reviewer",
+		"lease-bound source check",
+		"persists it as that source check's result",
+		"Candidate Report",
 		"complete set",
 	} {
 		if !strings.Contains(rendered, want) {
@@ -366,7 +371,9 @@ func TestBuildReviewerPromptIncludesAggregationReports(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Parallel Review Aggregation:",
-		"final aggregation step",
+		"final aggregation reviewer",
+		"distinct from both source discovery reviewers and a standalone reviewer",
+		"persisted, worker-validated source check results",
 		"Combine duplicate symptoms",
 		"advisory source",
 		"task_action",
@@ -380,6 +387,71 @@ func TestBuildReviewerPromptIncludesAggregationReports(t *testing.T) {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("aggregation prompt missing %q:\n%s", want, rendered)
 		}
+	}
+}
+
+func TestBuildReviewAndVerifierGuardrailsSurviveRoleOverride(t *testing.T) {
+	tests := []struct {
+		name  string
+		input Input
+		want  string
+	}{
+		{
+			name: "standalone-reviewer",
+			input: Input{
+				Role: RoleReviewer,
+			},
+			want: "standalone reviewer, not a parallel discovery source or final aggregator",
+		},
+		{
+			name: "discovery-reviewer",
+			input: Input{
+				Role:            RoleReviewer,
+				ReviewDiscovery: true,
+			},
+			want: "lease-bound source check result",
+		},
+		{
+			name: "aggregation-reviewer",
+			input: Input{
+				Role:                     RoleReviewer,
+				ReviewAggregationContext: "persisted source result",
+			},
+			want: "final aggregation reviewer, not a discovery or standalone reviewer",
+		},
+		{
+			name: "verifier",
+			input: Input{
+				Role: RoleVerifier,
+			},
+			want: "the worker applies each decision",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.input.RoleInstructionsOverride = "Custom role focus with no built-in guardrails."
+			rendered, err := Build(tt.input)
+			if err != nil {
+				t.Fatalf("build prompt: %v", err)
+			}
+			for _, want := range []string{
+				"Custom role focus with no built-in guardrails.",
+				"Flow project context is readable for this check",
+				"read-only task, lifecycle transition/status history, and review-thread/comment data",
+				"Compare the checked-out change to `origin/${FLOW_BASE:-main}`.",
+				"Flow guarantees that remote-tracking base ref is present in this checkout",
+				"does not promise a local base branch",
+				"Do not directly mutate files, Git state, tasks, lifecycle history, review threads/comments, checks, or workflow state.",
+				tt.want,
+			} {
+				if !strings.Contains(rendered, want) {
+					t.Fatalf("prompt missing %q:\n%s", want, rendered)
+				}
+			}
+			if strings.Contains(rendered, "# Flow Reviewer") || strings.Contains(rendered, "# Flow Verifier") {
+				t.Fatalf("custom prompt unexpectedly retained embedded role skill:\n%s", rendered)
+			}
+		})
 	}
 }
 
@@ -431,9 +503,11 @@ func TestBuildVerifierPromptUsesVerifierThreadInstructions(t *testing.T) {
 	for _, want := range []string{
 		"Flow role instructions (flow-verifier):",
 		"# Flow Verifier",
-		"flow thread certify",
-		"flow thread reopen --body",
+		"Flow project context is readable for this check",
+		"`origin/${FLOW_BASE:-main}`",
+		"does not promise a local base branch",
 		"threads[] entries in $FLOW_VERDICT_FILE",
+		"the worker applies each decision",
 		"only source of a verifier outcome",
 		"pauses the workflow for human retry",
 	} {

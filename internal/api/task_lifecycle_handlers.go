@@ -72,6 +72,26 @@ func (s *projectServer) handleListTasks(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, tasksResponse{Tasks: tasks})
 }
 
+// isProjectTaskReadPath identifies the intentionally project-readable task
+// surface. Console, terminal, and other operational endpoints are omitted so
+// their task-binding and owner checks remain unchanged.
+func isProjectTaskReadPath(method string, parts []string) bool {
+	if method != http.MethodGet || len(parts) == 0 {
+		return false
+	}
+	if len(parts) == 1 {
+		return true
+	}
+	switch parts[1] {
+	case "checks", "attachments", "workflow":
+		return true
+	case "relations", "prompt-context", "transitions", "findings":
+		return len(parts) == 2
+	default:
+		return false
+	}
+}
+
 func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v2/tasks/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
@@ -80,15 +100,10 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 	}
 
 	taskID := parts[0]
-	// Session credentials may read any task in their project — including the
-	// read-only workflow and relations subresources — so a convergence-promoted
-	// planner can inspect the source task's history. Project routing enforces
-	// that boundary before dispatch reaches this handler; keep the tighter
-	// source-task check for mutations and the remaining task-specific
-	// subresources.
-	projectTaskRead := principal.Scope == coordinator.TokenScopeSession && r.Method == http.MethodGet &&
-		(len(parts) == 1 || (len(parts) == 2 && (parts[1] == "workflow" || parts[1] == "relations")))
-	if !projectTaskRead {
+	// Task-facing GET routes are project reads. Every other route remains a
+	// mutation or a private operational surface and therefore keeps the tighter
+	// source-task boundary where applicable.
+	if !isProjectTaskReadPath(r.Method, parts) {
 		if err := checkBoundTaskScope(principal, taskID); err != nil {
 			writeError(w, http.StatusForbidden, "forbidden", err.Error())
 			return
@@ -97,8 +112,7 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 	if len(parts) == 1 {
 		switch r.Method {
 		case http.MethodGet:
-			if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker, coordinator.TokenScopeConsole) {
-				writeError(w, http.StatusForbidden, "forbidden", "task read requires owner, session, worker, or console token")
+			if !s.requireProjectReadAccess(w, r, principal) {
 				return
 			}
 			s.handleGetTask(w, r, principal, taskID)
@@ -124,7 +138,7 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 	}
 
 	if len(parts) >= 2 && parts[1] == "workflow" {
-		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
+		if r.Method != http.MethodGet && !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
 			writeError(w, http.StatusForbidden, "forbidden", "workflow access requires an owner, session, or console token")
 			return
 		}
@@ -153,11 +167,7 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 
 	if len(parts) == 2 && parts[1] == "relations" {
 		if r.Method == http.MethodGet {
-			// Reads are open to session credentials too, matching the cross-task
-			// history access granted above; mutations still require owner or
-			// console below.
-			if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
-				writeError(w, http.StatusForbidden, "forbidden", "relation read requires an owner, session, or console token")
+			if !s.requireProjectReadAccess(w, r, principal) {
 				return
 			}
 		} else if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeConsole) {
@@ -183,8 +193,7 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
-		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeWorker) {
-			writeError(w, http.StatusForbidden, "forbidden", "prompt context requires owner, session, or worker token")
+		if !s.requireProjectReadAccess(w, r, principal) {
 			return
 		}
 		s.handlePromptContext(w, r, principal, taskID)
@@ -195,8 +204,7 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
-		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession) {
-			writeError(w, http.StatusForbidden, "forbidden", "transition history requires owner or session token")
+		if !s.requireProjectReadAccess(w, r, principal) {
 			return
 		}
 		s.handleListTransitions(w, r, taskID)
@@ -207,8 +215,7 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
-		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
-			writeError(w, http.StatusForbidden, "forbidden", "findings read requires an owner, session, or console token")
+		if !s.requireProjectReadAccess(w, r, principal) {
 			return
 		}
 		s.handleTaskFindings(w, r, taskID)

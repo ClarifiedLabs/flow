@@ -648,7 +648,7 @@ func TestFetchPromptUsesWorkerRoleEnvironment(t *testing.T) {
 		"Task: t-demo-0001",
 		"Change: ch-1",
 		"Check: reviewer",
-		"Use flow comment",
+		"Write a valid structured verdict to $FLOW_VERDICT_FILE",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("fetch-prompt output missing %q:\n%s", want, output)
@@ -869,7 +869,7 @@ func TestFetchPromptUsesEmbeddedVerifierInstructions(t *testing.T) {
 	for _, want := range []string{
 		"Flow role instructions (flow-verifier):",
 		"# Flow Verifier",
-		"flow thread certify",
+		"Record certify/reopen decisions as threads[] entries in $FLOW_VERDICT_FILE",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("fetch-prompt output missing %q:\n%s", want, stdout.String())

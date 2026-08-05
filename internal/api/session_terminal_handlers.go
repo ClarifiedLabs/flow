@@ -243,11 +243,11 @@ func (s *projectServer) handleSessionPath(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if len(parts) == 2 && r.Method == http.MethodGet {
-			s.handleSessionMessages(w, r, sessionID)
+			s.handleSessionMessages(w, r, sessionID, principal)
 			return
 		}
 		if len(parts) == 4 && parts[3] == "delivered" && r.Method == http.MethodPost {
-			s.handleSessionMessageDelivered(w, r, sessionID, parts[2])
+			s.handleSessionMessageDelivered(w, r, sessionID, parts[2], principal)
 			return
 		}
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
@@ -264,7 +264,7 @@ func (s *projectServer) handleSessionPath(w http.ResponseWriter, r *http.Request
 		if !requireScope(w, principal, "worker token is required", coordinator.TokenScopeWorker) {
 			return
 		}
-		s.handleSessionProcessExit(w, r, sessionID)
+		s.handleSessionProcessExit(w, r, sessionID, principal)
 		return
 	}
 	if len(parts) != 2 {
@@ -907,10 +907,14 @@ func (s *projectServer) handleSessionStatus(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, statusResponse{Status: entry})
 }
 
-func (s *projectServer) handleSessionProcessExit(w http.ResponseWriter, r *http.Request, sessionID string) {
+func (s *projectServer) handleSessionProcessExit(w http.ResponseWriter, r *http.Request, sessionID string, principal coordinator.Principal) {
 	var request sessionProcessExitRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	if err := s.checkSessionWorkerLease(r, principal, sessionID, request.LeaseID, true); err != nil {
+		writeLeaseAuthError(w, err)
 		return
 	}
 	session, err := s.sessions.MarkPersistentSessionExited(r.Context(), coordinator.MarkPersistentSessionExitedInput{
@@ -937,7 +941,12 @@ func (s *projectServer) handleSessionProcessExit(w http.ResponseWriter, r *http.
 	writeJSON(w, http.StatusOK, sessionResponse{Session: session})
 }
 
-func (s *projectServer) handleSessionMessages(w http.ResponseWriter, r *http.Request, sessionID string) {
+func (s *projectServer) handleSessionMessages(w http.ResponseWriter, r *http.Request, sessionID string, principal coordinator.Principal) {
+	leaseID := strings.TrimSpace(r.URL.Query().Get("lease_id"))
+	if err := s.checkSessionWorkerLease(r, principal, sessionID, leaseID, false); err != nil {
+		writeLeaseAuthError(w, err)
+		return
+	}
 	limit := 0
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
@@ -949,7 +958,7 @@ func (s *projectServer) handleSessionMessages(w http.ResponseWriter, r *http.Req
 	}
 	messages, err := s.sessions.ListPendingSessionMessages(r.Context(), coordinator.ListPendingSessionMessagesInput{
 		SessionID: sessionID,
-		LeaseID:   r.URL.Query().Get("lease_id"),
+		LeaseID:   leaseID,
 		Limit:     limit,
 	})
 	if err != nil {
@@ -960,10 +969,14 @@ func (s *projectServer) handleSessionMessages(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, sessionMessagesResponse{Messages: messages})
 }
 
-func (s *projectServer) handleSessionMessageDelivered(w http.ResponseWriter, r *http.Request, sessionID string, messageID string) {
+func (s *projectServer) handleSessionMessageDelivered(w http.ResponseWriter, r *http.Request, sessionID string, messageID string, principal coordinator.Principal) {
 	var request sessionMessageDeliveredRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	if err := s.checkSessionWorkerLease(r, principal, sessionID, request.LeaseID, false); err != nil {
+		writeLeaseAuthError(w, err)
 		return
 	}
 	message, err := s.sessions.MarkSessionMessageDelivered(r.Context(), coordinator.MarkSessionMessageDeliveredInput{

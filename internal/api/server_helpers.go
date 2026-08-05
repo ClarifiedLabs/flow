@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -232,6 +233,49 @@ func requireScope(w http.ResponseWriter, principal coordinator.Principal, messag
 
 	writeError(w, http.StatusForbidden, "forbidden", message)
 	return false
+}
+
+var errProjectReadForbidden = errors.New("task-facing project read is not permitted")
+
+// checkProjectReadAccess authorizes the deliberately narrow task-facing read
+// surface. SourceTaskID remains a write boundary; reads instead use the
+// project association. A worker proves that association with a currently live
+// lease in this project's queue, rather than a client-supplied lease id.
+func (s *projectServer) checkProjectReadAccess(ctx context.Context, principal coordinator.Principal) error {
+	switch principal.Scope {
+	case coordinator.TokenScopeOwner:
+		return nil
+	case coordinator.TokenScopeSession, coordinator.TokenScopeConsole:
+		if principal.ProjectID != nil && strings.TrimSpace(*principal.ProjectID) != "" &&
+			strings.TrimSpace(*principal.ProjectID) == strings.TrimSpace(s.project.ID) {
+			return nil
+		}
+	case coordinator.TokenScopeWorker:
+		if s.workers == nil {
+			return errors.New("worker service is not configured")
+		}
+		live, err := s.workers.HasLiveLeaseForWorker(ctx, principal.Subject)
+		if err != nil {
+			return fmt.Errorf("check worker project lease: %w", err)
+		}
+		if live {
+			return nil
+		}
+	}
+
+	return errProjectReadForbidden
+}
+
+func (s *projectServer) requireProjectReadAccess(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) bool {
+	if err := s.checkProjectReadAccess(r.Context(), principal); err != nil {
+		if errors.Is(err, errProjectReadForbidden) {
+			writeError(w, http.StatusForbidden, "forbidden", err.Error())
+		} else {
+			writeInternalError(w, r, "project_read_authorization_failed", err)
+		}
+		return false
+	}
+	return true
 }
 
 func checkSessionScope(principal coordinator.Principal, sessionID string) error {

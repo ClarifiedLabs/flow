@@ -504,10 +504,15 @@ func prepareWorktree(ctx context.Context, cfg config.WorkerConfig, job Job, payl
 		return "", err
 	}
 
-	source := "origin/" + base
+	baseRef := "refs/remotes/origin/" + base
+	if err := git(ctx, repoDir, cfg, "rev-parse", "--verify", "--quiet", baseRef+"^{commit}"); err != nil {
+		return "", fmt.Errorf("remote-tracking base %q is missing or does not resolve to a commit after fetch", baseRef)
+	}
+
+	source := baseRef
 	branchExists := remoteRefExists(ctx, repoDir, cfg, branch)
 	if branchExists {
-		source = "origin/" + branch
+		source = "refs/remotes/origin/" + branch
 	}
 	slog.Debug("worker checkout branch", "job_id", job.ID, "branch", branch, "source", source)
 	if err := git(ctx, repoDir, cfg, "checkout", "-B", branch, source); err != nil {

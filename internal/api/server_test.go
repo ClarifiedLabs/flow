@@ -1999,6 +1999,7 @@ func TestPromptContextAdvertisesNestedPlanningWorkflow(t *testing.T) {
 		t.Fatalf("available workflow options = %+v", contract.AvailableFlows)
 	}
 
+	startLiveWorkerJobForTask(t, fixture, "worker-token", "w-local", task.ID, "", flowworker.RoleCI)
 	var workerResponse promptContextResponse
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/tasks/"+task.ID+"/prompt-context", nil, http.StatusOK, &workerResponse)
 	if workerResponse.TaskSetWorkflow != nil {
@@ -2056,7 +2057,7 @@ WHERE flow_id = ? AND kind = 'materialize_task_set'`, planning.ID); err != nil {
 	}
 }
 
-func TestWorkerTokenCanReadTask(t *testing.T) {
+func TestWorkerTaskReadsRequireLiveProjectLease(t *testing.T) {
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -2067,6 +2068,107 @@ func TestWorkerTokenCanReadTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
+	other, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Project-local related work"})
+	if err != nil {
+		t.Fatalf("create other task: %v", err)
+	}
+
+	// A worker token alone does not grant project reads.
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/tasks/"+task.ID, nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/projects/"+fixture.Project.ID+"/tasks", nil, http.StatusForbidden, nil)
+
+	claimed := startLiveWorkerJobForTask(t, fixture, "worker-token", "w-local", task.ID, "", flowworker.RoleCI)
+	for _, path := range []string{
+		"/v2/tasks/" + task.ID,
+		"/v2/tasks/" + other.ID,
+		"/v2/projects/" + fixture.Project.ID + "/tasks",
+		"/v2/tasks/" + other.ID + "/checks",
+		"/v2/tasks/" + other.ID + "/attachments",
+		"/v2/tasks/" + other.ID + "/workflow",
+		"/v2/tasks/" + other.ID + "/relations",
+		"/v2/tasks/" + other.ID + "/prompt-context",
+		"/v2/tasks/" + other.ID + "/transitions",
+		"/v2/tasks/" + other.ID + "/findings",
+	} {
+		doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, path, nil, http.StatusOK, nil)
+	}
+	// The aggregate endpoint remains intentionally unavailable to workers.
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/tasks", nil, http.StatusForbidden, nil)
+
+	// Change and thread routes resolve their project through a change ID rather
+	// than a task ID. Project-scoped read access must apply there as well,
+	// including when the caller's bound task is different from the change task.
+	started := startAuthorSessionForStatusTestWithWorker(t, fixture, "Change route project read", "w-change-author")
+	for _, credential := range []coordinator.CredentialInput{
+		{
+			Token:        "cross-task-session-token",
+			Scope:        coordinator.TokenScopeSession,
+			Subject:      "s-cross-task-reader",
+			ProjectID:    &fixture.Project.ID,
+			SourceTaskID: &other.ID,
+		},
+		{
+			Token:        "cross-task-console-token",
+			Scope:        coordinator.TokenScopeConsole,
+			Subject:      "s-cross-task-console",
+			ProjectID:    &fixture.Project.ID,
+			SourceTaskID: &other.ID,
+		},
+	} {
+		if err := fixture.Credentials.EnsureToken(ctx, credential); err != nil {
+			t.Fatalf("store %s credential: %v", credential.Scope, err)
+		}
+	}
+	for _, token := range []string{"worker-token", "cross-task-session-token", "cross-task-console-token"} {
+		for _, path := range []string{
+			"/v2/changes/" + started.Change.ID,
+			"/v2/changes/" + started.Change.ID + "/diff",
+			"/v2/changes/" + started.Change.ID + "/threads",
+		} {
+			doJSONRequestAs(t, fixture.Server, token, http.MethodGet, path, nil, http.StatusOK, nil)
+		}
+	}
+	doJSONRequestAs(t, fixture.Server, "hook-token", http.MethodGet, "/v2/changes/"+started.Change.ID, nil, http.StatusForbidden, nil)
+	mintTestCredential(t, fixture.Registry, "project-read-provisioner-token", coordinator.TokenScopeProvisioner, "test-provider")
+	doJSONRequestAs(t, fixture.Server, "project-read-provisioner-token", http.MethodGet, "/v2/changes/"+started.Change.ID, nil, http.StatusForbidden, nil)
+
+	// Project task-facing reads deliberately exclude raw execution evidence and
+	// terminal access, even for a worker with a live lease or a project-bound
+	// session credential. (A console retains its separately established,
+	// owner-equivalent operational authority.)
+	for _, token := range []string{"worker-token", "cross-task-session-token"} {
+		doJSONRequestAs(t, fixture.Server, token, http.MethodGet, "/v2/projects/"+fixture.Project.ID+"/history/captures", nil, http.StatusForbidden, nil)
+		doJSONRequestAs(t, fixture.Server, token, http.MethodGet, "/v2/sessions/"+started.Session.ID+"/transcript", nil, http.StatusForbidden, nil)
+		doJSONRequestAs(t, fixture.Server, token, http.MethodGet, "/v2/sessions/"+started.Session.ID+"/terminal", nil, http.StatusForbidden, nil)
+	}
+
+	// A live lease elsewhere in the project permits task-facing reads only. It
+	// must not disclose or operate a different worker's private session, even if
+	// the caller knows that session's lease ID.
+	message, err := fixture.Sessions.EnqueueSessionMessage(ctx, coordinator.EnqueueSessionMessageInput{
+		SessionID: started.Session.ID, Actor: "human", Body: "Keep this private to the session worker.",
+	})
+	if err != nil {
+		t.Fatalf("enqueue private session message: %v", err)
+	}
+	privateSessionPath := "/v2/sessions/" + started.Session.ID
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, privateSessionPath+"/messages?lease_id="+started.Session.LeaseID, nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, privateSessionPath+"/messages/"+message.ID+"/delivered", sessionMessageDeliveredRequest{LeaseID: started.Session.LeaseID}, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, privateSessionPath+"/process-exit", sessionProcessExitRequest{LeaseID: started.Session.LeaseID, ExitCode: 1}, http.StatusForbidden, nil)
+	stillPending, err := fixture.Sessions.GetSessionMessage(ctx, message.ID)
+	if err != nil {
+		t.Fatalf("get private session message: %v", err)
+	}
+	if stillPending.State != coordinator.SessionMessagePending || stillPending.DeliveredAt != nil {
+		t.Fatalf("private session message = %+v, want pending and undelivered", stillPending)
+	}
+	stillRunning, err := fixture.Sessions.GetSession(ctx, started.Session.ID)
+	if err != nil {
+		t.Fatalf("get private session: %v", err)
+	}
+	if stillRunning.RuntimeState != started.Session.RuntimeState {
+		t.Fatalf("private session runtime state = %q, want unchanged %q", stillRunning.RuntimeState, started.Session.RuntimeState)
+	}
 
 	var worker taskResponse
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/tasks/"+task.ID, nil, http.StatusOK, &worker)
@@ -2076,6 +2178,81 @@ func TestWorkerTokenCanReadTask(t *testing.T) {
 	if worker.Detail != nil {
 		t.Fatalf("worker task response leaked owner detail: %+v", worker.Detail)
 	}
+
+	if _, err := fixture.Workers.ReleaseLease(ctx, claimed.Lease.ID, flowworker.JobFinished); err != nil {
+		t.Fatalf("release worker lease: %v", err)
+	}
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/tasks/"+task.ID, nil, http.StatusForbidden, nil)
+}
+
+func TestWorkerTaskReadsRequireLeaseInRequestedProject(t *testing.T) {
+	server, bundles := newMultiProjectServer(t, "alpha", "beta")
+	ctx := context.Background()
+	alpha, beta := bundles[0], bundles[1]
+
+	alphaTask, err := alpha.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Alpha task"})
+	if err != nil {
+		t.Fatalf("create alpha task: %v", err)
+	}
+	betaTask, err := beta.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Beta task"})
+	if err != nil {
+		t.Fatalf("create beta task: %v", err)
+	}
+	if err := server.registry.Credentials().EnsureToken(ctx, coordinator.CredentialInput{
+		Token: "multi-project-worker-token", Scope: coordinator.TokenScopeWorker, Subject: "w-multi-project",
+	}); err != nil {
+		t.Fatalf("store worker credential: %v", err)
+	}
+
+	alphaPath := "/v2/tasks/" + alphaTask.ID
+	betaPath := "/v2/tasks/" + betaTask.ID
+	for _, path := range []string{alphaPath, betaPath} {
+		doJSONRequestAs(t, server, "multi-project-worker-token", http.MethodGet, path, nil, http.StatusForbidden, nil)
+	}
+
+	insertLiveLease := func(bundle *ProjectBundle, taskID, leaseID string) {
+		t.Helper()
+		job, enqueueErr := bundle.Queue.EnqueueJob(ctx, flowworker.EnqueueJobInput{
+			TaskID:         &taskID,
+			Role:           flowworker.RoleCI,
+			CapacityBucket: flowworker.BucketEphemeral,
+			Payload:        map[string]any{"blocking": true},
+		})
+		if enqueueErr != nil {
+			t.Fatalf("enqueue %s job: %v", bundle.Project.ID, enqueueErr)
+		}
+		now := time.Now().UTC()
+		if _, updateErr := bundle.Store.DB().ExecContext(ctx, `UPDATE jobs SET state = ? WHERE id = ?`, string(flowworker.JobRunning), job.ID); updateErr != nil {
+			t.Fatalf("mark %s job running: %v", bundle.Project.ID, updateErr)
+		}
+		if _, insertErr := bundle.Store.DB().ExecContext(ctx, `
+INSERT INTO leases (id, job_id, worker_id, capacity_bucket, leased_at, expires_at)
+VALUES (?, ?, ?, ?, ?, ?)`,
+			leaseID, job.ID, "w-multi-project", string(flowworker.BucketEphemeral),
+			now.Format(time.RFC3339Nano), now.Add(time.Minute).Format(time.RFC3339Nano),
+		); insertErr != nil {
+			t.Fatalf("insert %s live lease: %v", bundle.Project.ID, insertErr)
+		}
+	}
+
+	insertLiveLease(alpha, alphaTask.ID, "l-multi-project-alpha")
+	doJSONRequestAs(t, server, "multi-project-worker-token", http.MethodGet, alphaPath, nil, http.StatusOK, nil)
+	doJSONRequestAs(t, server, "multi-project-worker-token", http.MethodGet, "/v2/projects/"+alpha.Project.ID+"/tasks", nil, http.StatusOK, nil)
+	doJSONRequestAs(t, server, "multi-project-worker-token", http.MethodGet, betaPath, nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, server, "multi-project-worker-token", http.MethodGet, "/v2/projects/"+beta.Project.ID+"/tasks", nil, http.StatusForbidden, nil)
+
+	// A second live lease gives this direct worker access to the second project
+	// without making either lease a global authorization grant.
+	insertLiveLease(beta, betaTask.ID, "l-multi-project-beta")
+	for _, path := range []string{alphaPath, betaPath, "/v2/projects/" + alpha.Project.ID + "/tasks", "/v2/projects/" + beta.Project.ID + "/tasks"} {
+		doJSONRequestAs(t, server, "multi-project-worker-token", http.MethodGet, path, nil, http.StatusOK, nil)
+	}
+
+	if _, err := alpha.Store.DB().ExecContext(ctx, `UPDATE leases SET released_at = ? WHERE id = ?`, time.Now().UTC().Format(time.RFC3339Nano), "l-multi-project-alpha"); err != nil {
+		t.Fatalf("release alpha lease: %v", err)
+	}
+	doJSONRequestAs(t, server, "multi-project-worker-token", http.MethodGet, alphaPath, nil, http.StatusForbidden, nil)
+	doJSONRequestAs(t, server, "multi-project-worker-token", http.MethodGet, betaPath, nil, http.StatusOK, nil)
 }
 
 func TestHookTokenCanPostGitEvents(t *testing.T) {
@@ -2970,7 +3147,10 @@ func TestTaskConsoleAPILifecycleAndScope(t *testing.T) {
 		t.Fatalf("task console principal = %+v", principal)
 	}
 	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodGet, "/v2/tasks/"+task.ID, nil, http.StatusOK, nil)
-	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodGet, "/v2/tasks/"+other.ID, nil, http.StatusForbidden, nil)
+	// A task-bound console may orient itself on any task-facing state in its
+	// project, but console/terminal access itself remains task-bound.
+	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodGet, "/v2/tasks/"+other.ID, nil, http.StatusOK, nil)
+	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodGet, "/v2/tasks/"+other.ID+"/console", nil, http.StatusForbidden, nil)
 
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodDelete, "/v2/tasks/"+task.ID+"/console", nil, http.StatusOK, nil)
 	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodGet, "/v2/tasks/"+task.ID, nil, http.StatusUnauthorized, nil)
@@ -5318,6 +5498,65 @@ func TestSessionProcessExitRejectsConsoleSession(t *testing.T) {
 	}
 	if session.RuntimeState == coordinator.SessionCrashed {
 		t.Fatalf("console session = %+v, want unchanged (not crashed)", session)
+	}
+}
+
+func TestCanceledConsoleProcessExitRequiresSessionWorker(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	var startedConsole consoleResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/console", consoleRequest{
+		Harness: "harness",
+	}, http.StatusCreated, &startedConsole)
+	if startedConsole.Job == nil {
+		t.Fatalf("started console response = %+v", startedConsole)
+	}
+
+	reserveWorkerAssignment(t, fixture, "w-local", startedConsole.Job.ID)
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/register", registerWorkerRequest{
+		Labels:              map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		HeartbeatTTLSeconds: 60,
+	}, http.StatusOK, nil)
+	var claim claimJobResponse
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/claim", claimJobRequest{
+		LeaseDurationSeconds: 60,
+	}, http.StatusOK, &claim)
+	if !claim.Claimed || claim.Job == nil || claim.Job.ID != startedConsole.Job.ID {
+		t.Fatalf("claim console = %+v, want job %s", claim, startedConsole.Job.ID)
+	}
+	var running jobResponse
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/workers/running", markJobRunningRequest{
+		LeaseID: claim.Lease.ID,
+	}, http.StatusOK, &running)
+	if running.Session == nil || running.Session.Role != flowworker.RoleConsole {
+		t.Fatalf("running console = %+v", running)
+	}
+	if _, err := fixture.Workers.ReleaseLease(ctx, claim.Lease.ID, flowworker.JobCanceled); err != nil {
+		t.Fatalf("cancel console lease: %v", err)
+	}
+	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
+		Token: "other-console-worker-token", Scope: coordinator.TokenScopeWorker, Subject: "w-other",
+	}); err != nil {
+		t.Fatalf("store other worker token: %v", err)
+	}
+
+	// A canceled console needs an exit acknowledgement after its lease is no
+	// longer live, but only the worker that owned the session lease can submit it.
+	exitPath := "/v2/sessions/" + running.Session.ID + "/process-exit"
+	doJSONRequestAs(t, fixture.Server, "other-console-worker-token", http.MethodPost, exitPath, sessionProcessExitRequest{
+		LeaseID: claim.Lease.ID, ExitCode: 0,
+	}, http.StatusForbidden, nil)
+	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, exitPath, sessionProcessExitRequest{
+		LeaseID: claim.Lease.ID, ExitCode: 0,
+	}, http.StatusOK, nil)
+
+	finished, err := fixture.Sessions.GetSession(ctx, running.Session.ID)
+	if err != nil {
+		t.Fatalf("get console session: %v", err)
+	}
+	if finished.RuntimeState != coordinator.SessionFinished || finished.FinishedAt == nil {
+		t.Fatalf("console session = %+v, want finished", finished)
 	}
 }
 

@@ -278,8 +278,7 @@ func (s *Server) handleProjectScopedPath(w http.ResponseWriter, r *http.Request,
 	case sub == "tasks":
 		switch r.Method {
 		case http.MethodGet:
-			if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
-				writeError(w, http.StatusForbidden, "forbidden", "task read requires owner, session, or console token")
+			if !ps.requireProjectReadAccess(w, r, principal) {
 				return
 			}
 			ps.handleListTasks(w, requestWithPath(r, "/v2/tasks"))
