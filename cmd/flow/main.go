@@ -42,6 +42,43 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
+type globalOptions struct {
+	configPath string
+	configSet  bool
+}
+
+func parseGlobalOptions(args []string) (globalOptions, []string, error) {
+	options := globalOptions{}
+	for len(args) > 0 {
+		arg := args[0]
+		switch {
+		case arg == "--config":
+			if len(args) == 1 || args[1] == "--" || strings.HasPrefix(args[1], "-") {
+				return globalOptions{}, nil, errors.New("--config requires a value")
+			}
+			options.configPath = args[1]
+			options.configSet = true
+			args = args[2:]
+		case strings.HasPrefix(arg, "--config="):
+			options.configPath = strings.TrimPrefix(arg, "--config=")
+			options.configSet = true
+			args = args[1:]
+		default:
+			return options, args, nil
+		}
+	}
+	return options, args, nil
+}
+
+func (options globalOptions) withConfig(args []string) []string {
+	if !options.configSet {
+		return args
+	}
+	configuredArgs := make([]string, 0, len(args)+2)
+	configuredArgs = append(configuredArgs, "--config", options.configPath)
+	return append(configuredArgs, args...)
+}
+
 func run(args []string, stdout, stderr io.Writer) int {
 	configuredArgs, restoreLogging, err := flowlog.Configure(args, stderr, os.Getenv)
 	if err != nil {
@@ -49,7 +86,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	defer restoreLogging()
-	args = configuredArgs
+
+	options, args, err := parseGlobalOptions(configuredArgs)
+	if err != nil {
+		fmt.Fprintf(stderr, "parse global options: %v\n", err)
+		return 2
+	}
 	slog.Debug("flow command start", "command", flowlog.CommandName(args))
 
 	if len(args) == 0 {
@@ -62,57 +104,57 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "flow %s\n", version.Current())
 		return 0
 	case "init":
-		return runInit(args[1:], stdout, stderr)
+		return runInit(options.withConfig(args[1:]), stdout, stderr)
 	case "doctor":
-		return runDoctor(args[1:], stdout, stderr)
+		return runDoctorWithGlobalOptions(args[1:], options, stdout, stderr)
 	case "task":
-		return runTask(args[1:], stdout, stderr)
+		return runTaskWithGlobalOptions(args[1:], options, stdout, stderr)
 	case "feature":
-		return runFeature(args[1:], stdout, stderr)
+		return runFeatureWithGlobalOptions(args[1:], options, stdout, stderr)
 	case "epic":
-		return runEpic(args[1:], stdout, stderr)
+		return runEpicWithGlobalOptions(args[1:], options, stdout, stderr)
 	case "work-item":
-		return runWorkItem(args[1:], stdout, stderr)
+		return runWorkItemWithGlobalOptions(args[1:], options, stdout, stderr)
 	case "board":
-		return runBoard(args[1:], stdout, stderr)
+		return runBoard(options.withConfig(args[1:]), stdout, stderr)
 	case "checks":
-		return runChecks(args[1:], stdout, stderr)
+		return runChecks(options.withConfig(args[1:]), stdout, stderr)
 	case "transitions":
-		return runTransitions(args[1:], stdout, stderr)
+		return runTransitions(options.withConfig(args[1:]), stdout, stderr)
 	case "workers":
-		return runWorkers(args[1:], stdout, stderr)
+		return runWorkers(options.withConfig(args[1:]), stdout, stderr)
 	case "jobs":
-		return runJobs(args[1:], stdout, stderr)
+		return runJobs(options.withConfig(args[1:]), stdout, stderr)
 	case "history":
-		return runHistory(args[1:], stdout, stderr)
+		return runHistoryWithGlobalOptions(args[1:], options, stdout, stderr)
 	case "attach":
-		return runAttach(args[1:], stdout, stderr)
+		return runAttach(options.withConfig(args[1:]), stdout, stderr)
 	case "session":
-		return runSession(args[1:], stdout, stderr)
+		return runSessionWithGlobalOptions(args[1:], options, stdout, stderr)
 	case "hook":
-		return runHook(args[1:], stdout, stderr)
+		return runHookWithGlobalOptions(args[1:], options, stdout, stderr)
 	case "fetch-prompt":
-		return runFetchPrompt(args[1:], stdout, stderr)
+		return runFetchPrompt(options.withConfig(args[1:]), stdout, stderr)
 	case "comment":
-		return runComment(args[1:], stdout, stderr)
+		return runComment(options.withConfig(args[1:]), stdout, stderr)
 	case "thread":
-		return runThread(args[1:], stdout, stderr)
+		return runThreadWithGlobalOptions(args[1:], options, stdout, stderr)
 	case "status":
-		return runStatus(args[1:], stdout, stderr)
+		return runStatus(options.withConfig(args[1:]), stdout, stderr)
 	case "ask":
-		return runAsk(args[1:], stdout, stderr)
+		return runAsk(options.withConfig(args[1:]), stdout, stderr)
 	case "complete":
-		return runComplete(args[1:], stdout, stderr)
+		return runCompleteWithGlobalOptions(args[1:], options, stdout, stderr)
 	case "submit":
-		return runSubmit(args[1:], stdout, stderr)
+		return runSubmit(options.withConfig(args[1:]), stdout, stderr)
 	case "flows":
-		return runFlows(args[1:], stdout, stderr)
+		return runFlowsWithGlobalOptions(args[1:], options, stdout, stderr)
 	case "agent-defs":
-		return runAgentDefs(args[1:], stdout, stderr)
+		return runAgentDefsWithGlobalOptions(args[1:], options, stdout, stderr)
 	case "ui":
-		return runUI(args[1:], stdout, stderr)
+		return runUI(options.withConfig(args[1:]), stdout, stderr)
 	case "reconcile":
-		return runReconcile(args[1:], stdout, stderr)
+		return runReconcile(options.withConfig(args[1:]), stdout, stderr)
 	case "-h", "--help", "help":
 		printUsage(stdout)
 		return 0
@@ -124,8 +166,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 func runDoctor(args []string, stdout, stderr io.Writer) int {
+	return runDoctorWithGlobalOptions(args, globalOptions{}, stdout, stderr)
+}
+
+func runDoctorWithGlobalOptions(args []string, options globalOptions, stdout, stderr io.Writer) int {
 	if len(args) != 0 && args[0] == "work-items" {
-		parsed, code := parseAPICommand(args[1:], stderr, "doctor work-items", 0, "doctor work-items does not accept positional arguments")
+		parsed, code := parseAPICommand(options.withConfig(args[1:]), stderr, "doctor work-items", 0, "doctor work-items does not accept positional arguments")
 		if code != 0 {
 			return code
 		}
@@ -151,7 +197,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&dbPath, "db", "", "coordinator global SQLite database path to initialize")
 	flags.StringVar(&clientConfigPath, "config", "", "client config JSON path")
 
-	if err := flags.Parse(args); err != nil {
+	if err := flags.Parse(options.withConfig(args)); err != nil {
 		return 2
 	}
 
@@ -445,6 +491,10 @@ func currentBranch(repoRoot string) (string, error) {
 }
 
 func runTask(args []string, stdout, stderr io.Writer) int {
+	return runTaskWithGlobalOptions(args, globalOptions{}, stdout, stderr)
+}
+
+func runTaskWithGlobalOptions(args []string, options globalOptions, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		printTaskUsage(stderr)
 		return 2
@@ -452,39 +502,39 @@ func runTask(args []string, stdout, stderr io.Writer) int {
 
 	switch args[0] {
 	case "create":
-		return runTaskCreate(args[1:], stdout, stderr)
+		return runTaskCreate(options.withConfig(args[1:]), stdout, stderr)
 	case "attach":
-		return runTaskAttach(args[1:], stdout, stderr)
+		return runTaskAttach(options.withConfig(args[1:]), stdout, stderr)
 	case "list":
-		return runTaskList(args[1:], stdout, stderr)
+		return runTaskList(options.withConfig(args[1:]), stdout, stderr)
 	case "show":
-		return runTaskShow(args[1:], stdout, stderr)
+		return runTaskShow(options.withConfig(args[1:]), stdout, stderr)
 	case "edit":
-		return runTaskEdit(args[1:], stdout, stderr)
+		return runTaskEdit(options.withConfig(args[1:]), stdout, stderr)
 	case "schedule":
-		return runTaskSchedule(args[1:], stdout, stderr)
+		return runTaskSchedule(options.withConfig(args[1:]), stdout, stderr)
 	case "reset":
-		return runTaskReset(args[1:], stdout, stderr)
+		return runTaskReset(options.withConfig(args[1:]), stdout, stderr)
 	case "done":
-		return runTaskDone(args[1:], stdout, stderr)
+		return runTaskDone(options.withConfig(args[1:]), stdout, stderr)
 	case "reopen":
-		return runTaskReopen(args[1:], stdout, stderr)
+		return runTaskReopen(options.withConfig(args[1:]), stdout, stderr)
 	case "workflow":
-		return runTaskWorkflow(args[1:], stdout, stderr)
+		return runTaskWorkflow(options.withConfig(args[1:]), stdout, stderr)
 	case "respond":
-		return runTaskRespond(args[1:], stdout, stderr)
+		return runTaskRespond(options.withConfig(args[1:]), stdout, stderr)
 	case "budget":
-		return runTaskBudget(args[1:], stdout, stderr)
+		return runTaskBudget(options.withConfig(args[1:]), stdout, stderr)
 	case "retry":
-		return runTaskRetry(args[1:], stdout, stderr)
+		return runTaskRetry(options.withConfig(args[1:]), stdout, stderr)
 	case "link":
-		return runTaskLink(args[1:], stdout, stderr)
+		return runTaskLink(options.withConfig(args[1:]), stdout, stderr)
 	case "unlink":
-		return runTaskUnlink(args[1:], stdout, stderr)
+		return runTaskUnlink(options.withConfig(args[1:]), stdout, stderr)
 	case "relations":
-		return runTaskRelations(args[1:], stdout, stderr)
+		return runTaskRelations(options.withConfig(args[1:]), stdout, stderr)
 	case "reply":
-		return runTaskReply(args[1:], stdout, stderr)
+		return runTaskReply(options.withConfig(args[1:]), stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown task command: %s\n\n", args[0])
 		printTaskUsage(stderr)
@@ -798,6 +848,10 @@ func runTaskEdit(args []string, stdout, stderr io.Writer) int {
 }
 
 func runFeature(args []string, stdout, stderr io.Writer) int {
+	return runFeatureWithGlobalOptions(args, globalOptions{}, stdout, stderr)
+}
+
+func runFeatureWithGlobalOptions(args []string, options globalOptions, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		printFeatureUsage(stderr)
 		return 2
@@ -805,21 +859,21 @@ func runFeature(args []string, stdout, stderr io.Writer) int {
 
 	switch args[0] {
 	case "create":
-		return runFeatureCreate(args[1:], stdout, stderr)
+		return runFeatureCreate(options.withConfig(args[1:]), stdout, stderr)
 	case "list":
-		return runFeatureList(args[1:], stdout, stderr)
+		return runFeatureList(options.withConfig(args[1:]), stdout, stderr)
 	case "show":
-		return runFeatureShow(args[1:], stdout, stderr)
+		return runFeatureShow(options.withConfig(args[1:]), stdout, stderr)
 	case "edit":
-		return runFeatureEdit(args[1:], stdout, stderr)
+		return runFeatureEdit(options.withConfig(args[1:]), stdout, stderr)
 	case "rebase":
-		return runFeatureRebase(args[1:], stdout, stderr)
+		return runFeatureRebase(options.withConfig(args[1:]), stdout, stderr)
 	case "land":
-		return runFeatureLand(args[1:], stdout, stderr)
+		return runFeatureLand(options.withConfig(args[1:]), stdout, stderr)
 	case "archive":
-		return runFeatureArchive(args[1:], stdout, stderr)
+		return runFeatureArchive(options.withConfig(args[1:]), stdout, stderr)
 	case "start":
-		return runFeatureStart(args[1:], stdout, stderr)
+		return runFeatureStart(options.withConfig(args[1:]), stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown feature command: %s\n\n", args[0])
 		printFeatureUsage(stderr)
@@ -1011,21 +1065,25 @@ func runFeatureStart(args []string, stdout, stderr io.Writer) int {
 }
 
 func runEpic(args []string, stdout, stderr io.Writer) int {
+	return runEpicWithGlobalOptions(args, globalOptions{}, stdout, stderr)
+}
+
+func runEpicWithGlobalOptions(args []string, options globalOptions, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		printEpicUsage(stderr)
 		return 2
 	}
 	switch args[0] {
 	case "create":
-		return runEpicCreate(args[1:], stdout, stderr)
+		return runEpicCreate(options.withConfig(args[1:]), stdout, stderr)
 	case "list":
-		return runEpicList(args[1:], stdout, stderr)
+		return runEpicList(options.withConfig(args[1:]), stdout, stderr)
 	case "show":
-		return runEpicShow(args[1:], stdout, stderr)
+		return runEpicShow(options.withConfig(args[1:]), stdout, stderr)
 	case "edit":
-		return runEpicEdit(args[1:], stdout, stderr)
+		return runEpicEdit(options.withConfig(args[1:]), stdout, stderr)
 	case "start", "complete", "reopen", "archive":
-		return runEpicAction(args[0], args[1:], stdout, stderr)
+		return runEpicAction(args[0], options.withConfig(args[1:]), stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown epic command: %s\n\n", args[0])
 		printEpicUsage(stderr)
@@ -1187,13 +1245,17 @@ func runEpicAction(action string, args []string, stdout, stderr io.Writer) int {
 }
 
 func runWorkItem(args []string, stdout, stderr io.Writer) int {
+	return runWorkItemWithGlobalOptions(args, globalOptions{}, stdout, stderr)
+}
+
+func runWorkItemWithGlobalOptions(args []string, options globalOptions, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		printWorkItemUsage(stderr)
 		return 2
 	}
 	switch args[0] {
 	case "show", "tree", "relations":
-		parsed, id, code := parseScopedTaskAPICommand(args[1:], stderr, "work-item "+args[0], 1, "usage: flow work-item "+args[0]+" [flags] ITEM_ID")
+		parsed, id, code := parseScopedTaskAPICommand(options.withConfig(args[1:]), stderr, "work-item "+args[0], 1, "usage: flow work-item "+args[0]+" [flags] ITEM_ID")
 		if code != 0 {
 			return code
 		}
@@ -1214,7 +1276,7 @@ func runWorkItem(args []string, stdout, stderr io.Writer) int {
 		printWorkItemResponse(stdout, response, 0)
 		return 0
 	case "link", "unlink":
-		parsed, sourceID, targetID, kind, code := parseTaskRelationCommand(args[1:], stderr, "work-item "+args[0])
+		parsed, sourceID, targetID, kind, code := parseTaskRelationCommand(options.withConfig(args[1:]), stderr, "work-item "+args[0])
 		if code != 0 {
 			return code
 		}
@@ -1776,6 +1838,10 @@ func runAttach(args []string, stdout, stderr io.Writer) int {
 }
 
 func runSession(args []string, stdout, stderr io.Writer) int {
+	return runSessionWithGlobalOptions(args, globalOptions{}, stdout, stderr)
+}
+
+func runSessionWithGlobalOptions(args []string, options globalOptions, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		printSessionUsage(stderr)
 		return 2
@@ -1783,7 +1849,7 @@ func runSession(args []string, stdout, stderr io.Writer) int {
 
 	switch args[0] {
 	case "event":
-		return runSessionEvent(args[1:], stdout, stderr)
+		return runSessionEvent(options.withConfig(args[1:]), stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown session command: %s\n\n", args[0])
 		printSessionUsage(stderr)
@@ -1835,6 +1901,10 @@ func runSessionEvent(args []string, stdout, stderr io.Writer) int {
 }
 
 func runHook(args []string, stdout, stderr io.Writer) int {
+	return runHookWithGlobalOptions(args, globalOptions{}, stdout, stderr)
+}
+
+func runHookWithGlobalOptions(args []string, options globalOptions, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		printHookUsage(stderr)
 		return 2
@@ -1845,14 +1915,14 @@ func runHook(args []string, stdout, stderr io.Writer) int {
 		if len(args) > 1 {
 			switch args[1] {
 			case "ingest":
-				return runHookIngest(args[0], args[2:], stdout, stderr)
+				return runHookIngest(args[0], options.withConfig(args[2:]), stdout, stderr)
 			case "prepush":
-				return runHookPrepush(args[0], args[2:], stdout, stderr)
+				return runHookPrepush(args[0], options.withConfig(args[2:]), stdout, stderr)
 			case "commit-msg":
-				return runHookCommitMsg(args[0], args[2:], stdout, stderr)
+				return runHookCommitMsg(args[0], options.withConfig(args[2:]), stdout, stderr)
 			}
 		}
-		return runHookEvent(args[0], args[1:], stdout, stderr)
+		return runHookEvent(args[0], options.withConfig(args[1:]), stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown hook tool: %s\n\n", args[0])
 		printHookUsage(stderr)
@@ -2543,21 +2613,25 @@ func runComment(args []string, stdout, stderr io.Writer) int {
 }
 
 func runThread(args []string, stdout, stderr io.Writer) int {
+	return runThreadWithGlobalOptions(args, globalOptions{}, stdout, stderr)
+}
+
+func runThreadWithGlobalOptions(args []string, options globalOptions, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		printThreadUsage(stderr)
 		return 2
 	}
 	switch args[0] {
 	case "list":
-		return runThreadList(args[1:], stdout, stderr)
+		return runThreadList(options.withConfig(args[1:]), stdout, stderr)
 	case "reply":
-		return runThreadReply(args[1:], stdout, stderr)
+		return runThreadReply(options.withConfig(args[1:]), stdout, stderr)
 	case "claim":
-		return runThreadClaim(args[1:], stdout, stderr)
+		return runThreadClaim(options.withConfig(args[1:]), stdout, stderr)
 	case "certify":
-		return runThreadVerify("certify", args[1:], stdout, stderr)
+		return runThreadVerify("certify", options.withConfig(args[1:]), stdout, stderr)
 	case "reopen":
-		return runThreadVerify("reopen", args[1:], stdout, stderr)
+		return runThreadVerify("reopen", options.withConfig(args[1:]), stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown thread command: %s\n\n", args[0])
 		printThreadUsage(stderr)
@@ -3084,6 +3158,13 @@ func uploadReadyTranscriptBestEffort(client *flowclient.Client, sessionID string
 	}
 }
 
+func runCompleteWithGlobalOptions(args []string, options globalOptions, stdout, stderr io.Writer) int {
+	if strings.TrimSpace(os.Getenv("FLOW_COMPLETION_PROTOCOL")) == checkverdict.CompletionProtocol {
+		return runComplete(args, stdout, stderr)
+	}
+	return runComplete(options.withConfig(args), stdout, stderr)
+}
+
 func runComplete(args []string, stdout, stderr io.Writer) int {
 	if strings.TrimSpace(os.Getenv("FLOW_COMPLETION_PROTOCOL")) == checkverdict.CompletionProtocol {
 		return runCheckComplete(args, stdout, stderr)
@@ -3483,7 +3564,7 @@ func runReconcile(args []string, stdout, stderr io.Writer) int {
 
 func printUsage(out io.Writer) {
 	fmt.Fprint(out, `Usage:
-  flow [--log-level LEVEL] COMMAND
+  flow [--log-level LEVEL] [--config PATH] COMMAND
   flow init [--repo PATH] [--name NAME] [--base BRANCH]
   flow doctor [--db PATH] [--config PATH]
   flow doctor work-items [--project PROJECT] [API flags]
@@ -3527,9 +3608,9 @@ func printUsage(out io.Writer) {
 
 Global flags:
   --log-level LEVEL   structured log level: debug, info, warn, error, or off (overrides LOG_LEVEL)
+  --config PATH       client config path for owner commands (also accepted on those commands for compatibility)
 
 API override flags on owner commands:
-  --config PATH       client config path (default: $XDG_CONFIG_HOME/flow/config.yaml)
   --server URL        coordinator server URL
   --token TOKEN       bearer token
   --project PROJECT   project id or name

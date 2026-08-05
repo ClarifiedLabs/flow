@@ -41,6 +41,403 @@ func withStdin(t *testing.T, content string, fn func()) {
 	fn()
 }
 
+func writeTestClientConfig(t *testing.T, serverURL, token string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "client.yaml")
+	if err := config.WriteClientConfig(path, config.ClientConfig{ServerURL: serverURL, Token: token}); err != nil {
+		t.Fatalf("write client config: %v", err)
+	}
+	return path
+}
+
+func TestParseGlobalOptions(t *testing.T) {
+	tests := []struct {
+		name          string
+		args          []string
+		wantOptions   globalOptions
+		wantRemaining []string
+		wantErr       bool
+	}{
+		{
+			name:          "no global options",
+			args:          []string{"jobs", "--config", "leaf.yaml"},
+			wantRemaining: []string{"jobs", "--config", "leaf.yaml"},
+		},
+		{
+			name:          "separate value",
+			args:          []string{"--config", "client.yaml", "jobs"},
+			wantOptions:   globalOptions{configPath: "client.yaml", configSet: true},
+			wantRemaining: []string{"jobs"},
+		},
+		{
+			name:          "equals value",
+			args:          []string{"--config=client.yaml", "jobs"},
+			wantOptions:   globalOptions{configPath: "client.yaml", configSet: true},
+			wantRemaining: []string{"jobs"},
+		},
+		{
+			name:          "equals value beginning dash",
+			args:          []string{"--config=-client.yaml", "jobs"},
+			wantOptions:   globalOptions{configPath: "-client.yaml", configSet: true},
+			wantRemaining: []string{"jobs"},
+		},
+		{
+			name:          "explicit empty value",
+			args:          []string{"--config=", "jobs"},
+			wantOptions:   globalOptions{configSet: true},
+			wantRemaining: []string{"jobs"},
+		},
+		{
+			name:          "last repeated value wins",
+			args:          []string{"--config", "first.yaml", "--config=last.yaml", "jobs"},
+			wantOptions:   globalOptions{configPath: "last.yaml", configSet: true},
+			wantRemaining: []string{"jobs"},
+		},
+		{
+			name:          "stop at command",
+			args:          []string{"task", "--config", "client.yaml", "list"},
+			wantRemaining: []string{"task", "--config", "client.yaml", "list"},
+		},
+		{
+			name:          "leave sentinel untouched",
+			args:          []string{"--config", "client.yaml", "--", "jobs"},
+			wantOptions:   globalOptions{configPath: "client.yaml", configSet: true},
+			wantRemaining: []string{"--", "jobs"},
+		},
+		{
+			name:          "sentinel prevents recognition",
+			args:          []string{"--", "--config", "client.yaml", "jobs"},
+			wantRemaining: []string{"--", "--config", "client.yaml", "jobs"},
+		},
+		{
+			name:    "missing value",
+			args:    []string{"--config"},
+			wantErr: true,
+		},
+		{
+			name:    "sentinel is not a value",
+			args:    []string{"--config", "--", "jobs"},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotOptions, gotRemaining, err := parseGlobalOptions(tc.args)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "--config requires a value") {
+					t.Fatalf("parseGlobalOptions(%q) error = %v, want missing-value error", tc.args, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseGlobalOptions(%q): %v", tc.args, err)
+			}
+			if gotOptions != tc.wantOptions {
+				t.Fatalf("options = %#v, want %#v", gotOptions, tc.wantOptions)
+			}
+			if len(gotRemaining) != len(tc.wantRemaining) {
+				t.Fatalf("remaining = %q, want %q", gotRemaining, tc.wantRemaining)
+			}
+			for i, want := range tc.wantRemaining {
+				if gotRemaining[i] != want {
+					t.Fatalf("remaining = %q, want %q", gotRemaining, tc.wantRemaining)
+				}
+			}
+		})
+	}
+}
+
+func TestGlobalConfigRoutesJobs(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v2/jobs" {
+			t.Errorf("request = %s %s, want GET /v2/jobs", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer config-token" {
+			t.Errorf("authorization = %q, want config token", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"jobs":[]}`)
+	}))
+	t.Cleanup(server.Close)
+
+	configPath := writeTestClientConfig(t, server.URL, "config-token")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--config", configPath, "jobs"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run global jobs = %d, stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "unknown command: --config") {
+		t.Fatalf("global config was dispatched as a command: %q", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("jobs stdout = %q, want empty jobs list", stdout.String())
+	}
+}
+
+func TestGlobalConfigAcceptsEqualsAndUsesLastLeadingValue(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	lastCalls := make(chan struct{}, 2)
+	firstServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("first global config server received %s %s", r.Method, r.URL.Path)
+		http.Error(w, "unexpected server", http.StatusInternalServerError)
+	}))
+	t.Cleanup(firstServer.Close)
+	lastServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v2/jobs" {
+			t.Errorf("request = %s %s, want GET /v2/jobs", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer last-token" {
+			t.Errorf("authorization = %q, want last token", r.Header.Get("Authorization"))
+		}
+		lastCalls <- struct{}{}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"jobs":[]}`)
+	}))
+	t.Cleanup(lastServer.Close)
+
+	firstConfig := writeTestClientConfig(t, firstServer.URL, "first-token")
+	lastConfig := writeTestClientConfig(t, lastServer.URL, "last-token")
+	for _, args := range [][]string{
+		{"--config=" + lastConfig, "jobs"},
+		{"--config", firstConfig, "--config", lastConfig, "jobs"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := run(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("run %q = %d, stderr = %q", args, code, stderr.String())
+		}
+	}
+	for range 2 {
+		select {
+		case <-lastCalls:
+		default:
+			t.Fatal("last global config server did not receive every request")
+		}
+	}
+}
+
+func TestGlobalConfigCommandLocalOverrideWins(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	localCalls := make(chan struct{}, 2)
+	globalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("global config server received %s %s despite local override", r.Method, r.URL.Path)
+		http.Error(w, "unexpected server", http.StatusInternalServerError)
+	}))
+	t.Cleanup(globalServer.Close)
+	localServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v2/jobs" {
+			t.Errorf("request = %s %s, want GET /v2/jobs", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer local-token" {
+			t.Errorf("authorization = %q, want local token", r.Header.Get("Authorization"))
+		}
+		localCalls <- struct{}{}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"jobs":[]}`)
+	}))
+	t.Cleanup(localServer.Close)
+
+	globalConfig := writeTestClientConfig(t, globalServer.URL, "global-token")
+	localConfig := writeTestClientConfig(t, localServer.URL, "local-token")
+	for _, args := range [][]string{
+		{"--config", globalConfig, "jobs", "--config", localConfig},
+		{"jobs", "--config", localConfig},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := run(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("run %q = %d, stderr = %q", args, code, stderr.String())
+		}
+	}
+	for range 2 {
+		select {
+		case <-localCalls:
+		default:
+			t.Fatal("local config server did not receive every request")
+		}
+	}
+}
+
+func TestGlobalConfigExplicitEmptyUsesDefaultConfig(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v2/jobs" {
+			t.Errorf("request = %s %s, want GET /v2/jobs", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer default-token" {
+			t.Errorf("authorization = %q, want default token", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"jobs":[]}`)
+	}))
+	t.Cleanup(server.Close)
+
+	defaultPath, err := config.DefaultClientConfigPath()
+	if err != nil {
+		t.Fatalf("default client config path: %v", err)
+	}
+	if err := config.WriteClientConfig(defaultPath, config.ClientConfig{ServerURL: server.URL, Token: "default-token"}); err != nil {
+		t.Fatalf("write default client config: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--config=", "jobs"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run global empty config = %d, stderr = %q", code, stderr.String())
+	}
+}
+
+func TestGlobalConfigReachesNestedAndExternalRouters(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	calls := make(chan string, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer nested-token" {
+			t.Errorf("authorization = %q, want nested token", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v2/projects/p-global/tasks/t-global-0001":
+			if r.Method != http.MethodGet {
+				t.Errorf("task request method = %s, want GET", r.Method)
+			}
+			_, _ = io.WriteString(w, `{"task":{"ID":"t-global-0001","Title":"Global task","state":"in_progress"}}`)
+		case "/v2/history/captures":
+			if r.Method != http.MethodGet {
+				t.Errorf("history request method = %s, want GET", r.Method)
+			}
+			_, _ = io.WriteString(w, `{"captures":[]}`)
+		case "/v2/flows":
+			if r.Method != http.MethodGet {
+				t.Errorf("flows request method = %s, want GET", r.Method)
+			}
+			_, _ = io.WriteString(w, `{"flows":[]}`)
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		calls <- r.URL.Path
+	}))
+	t.Cleanup(server.Close)
+
+	configPath := writeTestClientConfig(t, server.URL, "nested-token")
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "nested task", args: []string{"--config", configPath, "task", "show", "t-global-0001"}},
+		{name: "external history", args: []string{"--config", configPath, "history", "list"}},
+		{name: "external flows", args: []string{"--config", configPath, "flows", "list"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, &stdout, &stderr); code != 0 {
+				t.Fatalf("run %q = %d, stderr = %q", tc.args, code, stderr.String())
+			}
+			if tc.name == "nested task" && !strings.Contains(stdout.String(), "t-global-0001\tin_progress\t\tGlobal task") {
+				t.Fatalf("task output = %q", stdout.String())
+			}
+		})
+	}
+
+	wantPaths := map[string]bool{
+		"/v2/projects/p-global/tasks/t-global-0001": true,
+		"/v2/history/captures":                      true,
+		"/v2/flows":                                 true,
+	}
+	for i := 0; i < 3; i++ {
+		select {
+		case path := <-calls:
+			delete(wantPaths, path)
+		default:
+			t.Fatal("configured server did not receive every nested or external request")
+		}
+	}
+	if len(wantPaths) != 0 {
+		t.Fatalf("configured server missed paths: %v", wantPaths)
+	}
+}
+
+func TestGlobalConfigCoexistsWithLogLevel(t *testing.T) {
+	t.Setenv("LOG_LEVEL", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v2/jobs" {
+			t.Errorf("request = %s %s, want GET /v2/jobs", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"jobs":[]}`)
+	}))
+	t.Cleanup(server.Close)
+
+	configPath := writeTestClientConfig(t, server.URL, "log-token")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--log-level", "debug", "--config", configPath, "jobs"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run global config with debug logging = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "flow command start") || !strings.Contains(stderr.String(), "command=jobs") {
+		t.Fatalf("debug log does not name jobs command: %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "command=--config") {
+		t.Fatalf("debug log named global option instead of command: %q", stderr.String())
+	}
+}
+
+func TestGlobalConfigInformationalCommandsDoNotLoadConfig(t *testing.T) {
+	missingConfig := filepath.Join(t.TempDir(), "missing.yaml")
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "help", args: []string{"--config", missingConfig, "--help"}},
+		{name: "version", args: []string{"--config=" + missingConfig, "version"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, &stdout, &stderr); code != 0 {
+				t.Fatalf("run %q = %d, stderr = %q", tc.args, code, stderr.String())
+			}
+			if strings.Contains(stderr.String(), "load client config") {
+				t.Fatalf("informational command loaded config: %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestGlobalConfigMissingValueFails(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--config"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("run missing global config value = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "--config requires a value") {
+		t.Fatalf("missing-value error = %q", stderr.String())
+	}
+}
+
+func TestGlobalConfigUnknownCommandNamesCommand(t *testing.T) {
+	missingConfig := filepath.Join(t.TempDir(), "missing.yaml")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--config", missingConfig, "not-a-command"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("run unknown command with global config = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "unknown command: not-a-command") {
+		t.Fatalf("unknown-command error = %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "unknown command: --config") {
+		t.Fatalf("global config was dispatched as a command: %q", stderr.String())
+	}
+}
+
 func TestLogLevelFlagEnablesDebugLogging(t *testing.T) {
 	t.Setenv("LOG_LEVEL", "")
 
@@ -1427,26 +1824,34 @@ func gitHTTPTestConfig(t *testing.T, repoPath string, key string) string {
 	return strings.TrimSpace(string(output))
 }
 
-// Every owner command registers the same API override flags through
-// addAPIFlags, so the shared block in the usage text has to list all of them.
-// Omitting one reads as "this command does not take it" — which is how you end
-// up pointing a mutating command at whichever coordinator the default config
-// happens to name.
-func TestUsageListsEveryAPIOverrideFlag(t *testing.T) {
+// --config is available in the root prefix and remains available on owner
+// commands for compatibility. The other API overrides remain command-local.
+func TestUsageDocumentsGlobalAndAPIOverrideFlags(t *testing.T) {
 	var usage bytes.Buffer
 	printUsage(&usage)
 
-	const heading = "API override flags on owner commands:"
-	_, block, found := strings.Cut(usage.String(), heading)
+	const globalHeading = "Global flags:"
+	const apiHeading = "API override flags on owner commands:"
+	_, afterGlobal, found := strings.Cut(usage.String(), globalHeading)
 	if !found {
-		t.Fatalf("usage text has no %q section:\n%s", heading, usage.String())
+		t.Fatalf("usage text has no %q section:\n%s", globalHeading, usage.String())
+	}
+	globalBlock, apiBlock, found := strings.Cut(afterGlobal, apiHeading)
+	if !found {
+		t.Fatalf("usage text has no %q section:\n%s", apiHeading, usage.String())
+	}
+	if !strings.Contains(globalBlock, "--config ") {
+		t.Fatalf("the global flag block does not document --config:\n%s", globalBlock)
 	}
 
 	registered := flag.NewFlagSet("probe", flag.ContinueOnError)
 	addAPIFlags(registered)
 	registered.VisitAll(func(f *flag.Flag) {
-		if !strings.Contains(block, "--"+f.Name+" ") {
-			t.Fatalf("the shared flag block does not document --%s:\n%s", f.Name, block)
+		if f.Name == "config" {
+			return
+		}
+		if !strings.Contains(apiBlock, "--"+f.Name+" ") {
+			t.Fatalf("the API override block does not document --%s:\n%s", f.Name, apiBlock)
 		}
 	})
 }

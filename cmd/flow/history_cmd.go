@@ -37,17 +37,21 @@ var historyCaptureStates = map[string]bool{
 }
 
 func runHistory(args []string, stdout, stderr io.Writer) int {
+	return runHistoryWithGlobalOptions(args, globalOptions{}, stdout, stderr)
+}
+
+func runHistoryWithGlobalOptions(args []string, options globalOptions, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "usage: flow history {list|export|resume} [flags]")
 		return 2
 	}
 	switch args[0] {
 	case "list":
-		return runHistoryList(args[1:], stdout, stderr)
+		return runHistoryList(options.withConfig(args[1:]), stdout, stderr)
 	case "export":
-		return runHistoryExport(args[1:], stdout, stderr)
+		return runHistoryExport(options.withConfig(args[1:]), stdout, stderr)
 	case "resume":
-		return runHistoryResume(args[1:], stdout, stderr)
+		return runHistoryResume(options.withConfig(args[1:]), stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown history subcommand: %s\n", args[0])
 		return 2

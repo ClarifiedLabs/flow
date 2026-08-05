@@ -82,3 +82,19 @@ func TestRunCompleteCheckRejectsAuthorFlagsAndIncompleteContext(t *testing.T) {
 		t.Fatalf("runComplete(incomplete) = %d stderr=%q", code, stderr.String())
 	}
 }
+
+func TestGlobalConfigDoesNotBecomeCheckCompletionArgument(t *testing.T) {
+	verdictPath, completionPath := configureCheckCompletion(t, checkverdict.ModeReview)
+	if err := os.WriteFile(verdictPath, []byte(`{"verdict":"satisfied","reason":"ready"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	missingConfig := filepath.Join(t.TempDir(), "missing.yaml")
+	if code := run([]string{"--config", missingConfig, "complete"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run(global config check completion) = %d, stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(completionPath); err != nil {
+		t.Fatalf("completion seal was not written: %v", err)
+	}
+}

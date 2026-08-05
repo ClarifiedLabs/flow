@@ -19,19 +19,23 @@ import (
 // Project catalogs inherit coordinator-global definitions and may override them
 // by name.
 func runAgentDefs(args []string, stdout, stderr io.Writer) int {
+	return runAgentDefsWithGlobalOptions(args, globalOptions{}, stdout, stderr)
+}
+
+func runAgentDefsWithGlobalOptions(args []string, options globalOptions, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "usage: flow agent-defs {list|create -f FILE|edit -f FILE ID|rm ID} [--global]")
 		return 2
 	}
 	switch args[0] {
 	case "list":
-		return runAgentDefsList(args[1:], stdout, stderr)
+		return runAgentDefsList(options.withConfig(args[1:]), stdout, stderr)
 	case "create":
-		return runAgentDefsCreate(args[1:], stdout, stderr)
+		return runAgentDefsCreate(options.withConfig(args[1:]), stdout, stderr)
 	case "edit":
-		return runAgentDefsEdit(args[1:], stdout, stderr)
+		return runAgentDefsEdit(options.withConfig(args[1:]), stdout, stderr)
 	case "rm":
-		return runAgentDefsRemove(args[1:], stdout, stderr)
+		return runAgentDefsRemove(options.withConfig(args[1:]), stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown agent-defs subcommand: %s\n", args[0])
 		return 2
@@ -211,21 +215,25 @@ func runAgentDefsRemove(args []string, stdout, stderr io.Writer) int {
 
 // runFlows manages the project's trusted workflow graph catalog.
 func runFlows(args []string, stdout, stderr io.Writer) int {
+	return runFlowsWithGlobalOptions(args, globalOptions{}, stdout, stderr)
+}
+
+func runFlowsWithGlobalOptions(args []string, options globalOptions, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "usage: flow flows {list|create -f FILE|edit ID -f FILE|rm ID|set-default ID_OR_NAME}")
 		return 2
 	}
 	switch args[0] {
 	case "list":
-		return runFlowsList(args[1:], stdout, stderr)
+		return runFlowsList(options.withConfig(args[1:]), stdout, stderr)
 	case "create":
-		return runFlowsCreate(args[1:], stdout, stderr)
+		return runFlowsCreate(options.withConfig(args[1:]), stdout, stderr)
 	case "edit":
-		return runFlowsEdit(args[1:], stdout, stderr)
+		return runFlowsEdit(options.withConfig(args[1:]), stdout, stderr)
 	case "rm":
-		return runFlowsRemove(args[1:], stdout, stderr)
+		return runFlowsRemove(options.withConfig(args[1:]), stdout, stderr)
 	case "set-default":
-		return runFlowsSetDefault(args[1:], stdout, stderr)
+		return runFlowsSetDefault(options.withConfig(args[1:]), stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown flows subcommand: %s\n", args[0])
 		return 2
