@@ -556,7 +556,6 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 		Role:           flowworker.RoleAuthor,
 		CapacityBucket: flowworker.BucketPersistentAgent,
 		Priority:       priority,
-		Requires:       authorHarnessRequirements(jobHarness),
 		Payload:        payload,
 	})
 	if err != nil {
@@ -659,7 +658,6 @@ func (s *SessionService) EnsureConsoleJob(ctx context.Context, input EnsureConso
 		Role:           flowworker.RoleConsole,
 		CapacityBucket: flowworker.BucketPersistentAgent,
 		Priority:       input.Priority,
-		Requires:       consoleHarnessRequirements(harness),
 		Payload:        payload,
 	})
 	if err != nil {
@@ -789,7 +787,6 @@ func (s *SessionService) EnsureTaskConsoleJob(ctx context.Context, input EnsureT
 		Role:                                   flowworker.RoleConsole,
 		CapacityBucket:                         flowworker.BucketPersistentAgent,
 		Priority:                               input.Priority,
-		Requires:                               consoleHarnessRequirements(harness),
 		Payload:                                payload,
 	})
 	if err != nil {
@@ -1186,7 +1183,6 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 		Role:           flowworker.RoleAuthor,
 		CapacityBucket: flowworker.BucketPersistentAgent,
 		Priority:       job.Priority,
-		Requires:       authorHarnessRequirements(crashedHarness),
 		Payload:        payload,
 	})
 	if err != nil {
@@ -1428,17 +1424,6 @@ WHERE task_id = ?
 		return 0, fmt.Errorf("read resolved crash restart rows: %w", err)
 	}
 	return rows, nil
-}
-
-func authorHarnessRequirements(harness string) []string {
-	return []string{flowharness.AgentHarnessLabel(harness)}
-}
-
-func consoleHarnessRequirements(harness string) []string {
-	if flowharness.NormalizeName(harness) == flowharness.Shell {
-		return nil
-	}
-	return []string{flowharness.AgentHarnessLabel(harness)}
 }
 
 // authorEntrypointPayload builds the agent launch entrypoint for an author

@@ -96,8 +96,10 @@ func TestKubernetesProviderExactJobSecretIdentityAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	profile := testProfile()
+	profile.ProviderOptions["harness_model_proxy_secret_name"] = "flow-harness-model-proxy"
 	request := LaunchRequest{
-		Identity: identity, Assignment: assignment, Profile: testProfile(),
+		Identity: identity, Assignment: assignment, Profile: profile,
 		CoordinatorURL: "https://coordinator.example", WorkerToken: "private-direct-token",
 	}
 	if err := provider.Launch(context.Background(), request); err != nil {
@@ -135,6 +137,9 @@ func TestKubernetesProviderExactJobSecretIdentityAndDelete(t *testing.T) {
 	if strings.Contains(config, "accepts:") {
 		t.Errorf("worker config advertises accepted buckets:\n%s", config)
 	}
+	if strings.Contains(config, "HARNESS_MODEL_PROXY") {
+		t.Errorf("worker assignment Secret must not contain model proxy credentials:\n%s", config)
+	}
 
 	var job kubernetesJob
 	if err := json.Unmarshal(created[jobPath], &job); err != nil {
@@ -160,6 +165,13 @@ func TestKubernetesProviderExactJobSecretIdentityAndDelete(t *testing.T) {
 		t.Fatalf("command = %q, want %q", pod.Containers[0].Command, wantCommand)
 	}
 	container := pod.Containers[0]
+	wantEnv := []kubernetesEnvVar{
+		{Name: "HARNESS_MODEL_PROXY_URL", ValueFrom: kubernetesEnvVarSource{SecretKeyRef: kubernetesSecretKeySelector{Name: "flow-harness-model-proxy", Key: "HARNESS_MODEL_PROXY_URL"}}},
+		{Name: "HARNESS_MODEL_PROXY_API_KEY", ValueFrom: kubernetesEnvVarSource{SecretKeyRef: kubernetesSecretKeySelector{Name: "flow-harness-model-proxy", Key: "HARNESS_MODEL_PROXY_API_KEY"}}},
+	}
+	if !reflect.DeepEqual(container.Env, wantEnv) {
+		t.Fatalf("worker env = %#v, want %#v", container.Env, wantEnv)
+	}
 	if container.Image != "registry.example/flow-worker:v1" || container.ImagePullPolicy != "Always" ||
 		len(container.VolumeMounts) != 2 || container.VolumeMounts[1].MountPath != "/workspace" ||
 		len(pod.Volumes) != 2 || pod.Volumes[0].Secret.SecretName != secretName || *pod.Volumes[0].Secret.DefaultMode != 0o400 || pod.Volumes[1].EmptyDir == nil {
@@ -200,6 +212,12 @@ func TestKubernetesProviderExactJobSecretIdentityAndDelete(t *testing.T) {
 	}
 	if !reflect.DeepEqual(deleted, wantDeletes) {
 		t.Fatalf("deleted paths = %v, want %v", deleted, wantDeletes)
+	}
+}
+
+func TestHarnessModelProxyEnvironmentRequiresConfiguredSecret(t *testing.T) {
+	if got := harnessModelProxyEnvironment(""); got != nil {
+		t.Fatalf("empty model proxy Secret env = %#v, want nil", got)
 	}
 }
 

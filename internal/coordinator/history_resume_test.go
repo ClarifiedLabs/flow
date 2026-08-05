@@ -150,6 +150,9 @@ END;`); err != nil {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(job.Selector) != 0 {
+		t.Fatalf("history resume selector = %#v, want no scheduling requirements", job.Selector)
+	}
 	raw, ok := job.Payload["history_resume"].(map[string]any)
 	if !ok {
 		t.Fatalf("history resume payload = %#v", job.Payload["history_resume"])

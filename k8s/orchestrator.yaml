@@ -58,6 +58,8 @@ stringData:
           service_account: flow-worker
           work_dir: /var/lib/flow-worker
           image_pull_policy: IfNotPresent
+          # Provision this Secret out of band; Kind creates it from local env vars.
+          harness_model_proxy_secret_name: flow-harness-model-proxy
 
     metrics:
       listen: ":8422"

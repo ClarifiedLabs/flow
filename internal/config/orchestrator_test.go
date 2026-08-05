@@ -58,6 +58,7 @@ profiles:
       work_dir: /workspace/worker
       worker_args: [" --no-metrics ", "--metrics-listen=:9000"]
       image_pull_policy: always
+      harness_model_proxy_secret_name: " flow-harness-model-proxy "
 metrics:
   enabled: false
   listen: ":8422"
@@ -84,7 +85,7 @@ metrics:
 	if !reflect.DeepEqual(profile.Taints, []scheduler.Taint{wantTaint}) {
 		t.Fatalf("normalized taints = %+v", profile.Taints)
 	}
-	if profile.Kubernetes == nil || profile.Kubernetes.Namespace != "workers" || profile.Kubernetes.Image != "registry.example/flow-worker:v2" || profile.Kubernetes.ImagePullPolicy != "Always" {
+	if profile.Kubernetes == nil || profile.Kubernetes.Namespace != "workers" || profile.Kubernetes.Image != "registry.example/flow-worker:v2" || profile.Kubernetes.ImagePullPolicy != "Always" || profile.Kubernetes.HarnessModelProxySecretName != "flow-harness-model-proxy" {
 		t.Fatalf("Kubernetes = %+v", profile.Kubernetes)
 	}
 	if !reflect.DeepEqual(profile.Kubernetes.WorkerArgs, []string{"--no-metrics", "--metrics-listen=:9000"}) {
@@ -105,7 +106,7 @@ metrics:
 	if got.StartupTimeout != 3*time.Minute || !reflect.DeepEqual(got.Accepts, []scheduler.CapacityBucket{scheduler.CapacityPersistentAgent, scheduler.CapacityEphemeral}) {
 		t.Fatalf("resolved profile = %+v", got)
 	}
-	if got.Kubernetes == nil || got.Darwin != nil || got.Kubernetes.ServiceAccount != "worker-sa" || got.Kubernetes.WorkDir != "/workspace/worker" {
+	if got.Kubernetes == nil || got.Darwin != nil || got.Kubernetes.ServiceAccount != "worker-sa" || got.Kubernetes.WorkDir != "/workspace/worker" || got.Kubernetes.HarnessModelProxySecretName != "flow-harness-model-proxy" {
 		t.Fatalf("resolved providers = kubernetes=%+v darwin=%+v", got.Kubernetes, got.Darwin)
 	}
 }
@@ -264,6 +265,7 @@ func TestOrchestratorValidation(t *testing.T) {
 		{"kubernetes mismatch", func(c *OrchestratorConfig) { c.Profiles[0].Darwin = &OrchestratorDarwinConfig{} }, "cannot use darwin"},
 		{"kubernetes image required", func(c *OrchestratorConfig) { c.Profiles[0].Kubernetes.Image = "" }, "image is required"},
 		{"pull policy invalid", func(c *OrchestratorConfig) { c.Profiles[0].Kubernetes.ImagePullPolicy = "Sometimes" }, "invalid image_pull_policy"},
+		{"model proxy Secret name invalid", func(c *OrchestratorConfig) { c.Profiles[0].Kubernetes.HarnessModelProxySecretName = "not valid" }, "harness_model_proxy_secret_name"},
 		{"kubernetes os conflict", func(c *OrchestratorConfig) { c.Profiles[0].Labels = map[string]string{"os": "macos"} }, "conflicts with kubernetes"},
 		{"darwin config required", func(c *OrchestratorConfig) { c.Profiles[0].Provider = "darwin"; c.Profiles[0].Kubernetes = nil }, "requires darwin configuration"},
 		{"darwin mismatch", func(c *OrchestratorConfig) {

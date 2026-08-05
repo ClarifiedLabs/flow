@@ -17,9 +17,10 @@ log "building the local owner CLI"
 go build -o "${BIN_DIR}/flow" "${REPO_ROOT}/cmd/flow"
 chmod 700 "${BIN_DIR}/flow"
 
-log "applying server resources and private flow-tokens Secret"
+log "applying server resources and private Secrets"
 kube create namespace flow --dry-run=client -o yaml | kube apply -f -
 apply_tokens_secret
+apply_harness_model_proxy_secret
 kube apply -f "${GENERATED_DIR}/server.yaml"
 kube apply -f "${GENERATED_DIR}/flow-server-host.yaml"
 kube -n flow rollout restart deployment/flow-server

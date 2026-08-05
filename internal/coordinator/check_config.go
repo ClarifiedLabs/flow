@@ -211,7 +211,6 @@ func withFlowReviewChecks(suite CheckSuite, reviewAgents []FlowReviewAgentSnapsh
 				Argv:  []string{command},
 				Shell: true,
 			},
-			Requires:         []string{flowharness.AgentHarnessLabel(harness)},
 			roleInstructions: reviewAgent.Agent.Prompt,
 			flowAgent:        true,
 		})
@@ -629,7 +628,6 @@ func defaultAgentCheckDefinition(name string, kind CheckKind, sel flowharness.Ag
 			Argv:  []string{command},
 			Shell: true,
 		},
-		Requires:  []string{flowharness.AgentHarnessLabel(sel.Harness)},
 		flowAgent: true,
 	}, nil
 }

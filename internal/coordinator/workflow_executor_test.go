@@ -773,6 +773,15 @@ SELECT COUNT(*) FROM jobs WHERE node_run_id = ? AND role = 'author'`, nodeID).Sc
 	if authorJobs != 1 {
 		t.Fatalf("workflow author jobs = %d, want 1", authorJobs)
 	}
+	jobs, err := fixture.workers.ListJobs(ctx)
+	if err != nil {
+		t.Fatalf("list workflow jobs: %v", err)
+	}
+	for _, job := range jobs {
+		if job.NodeRunID != nil && *job.NodeRunID == nodeID && len(job.Selector) != 0 {
+			t.Fatalf("workflow author selector = %#v, want no scheduling requirements", job.Selector)
+		}
+	}
 }
 
 func TestWorkflowExecutorParallelReviewAggregationBarrier(t *testing.T) {

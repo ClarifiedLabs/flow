@@ -61,12 +61,13 @@ type OrchestratorProfileConfig struct {
 
 // OrchestratorKubernetesConfig configures Kubernetes Job workers for a profile.
 type OrchestratorKubernetesConfig struct {
-	Namespace       string   `json:"namespace" yaml:"namespace"`
-	Image           string   `json:"image" yaml:"image"`
-	ServiceAccount  string   `json:"service_account" yaml:"service_account"`
-	WorkDir         string   `json:"work_dir" yaml:"work_dir"`
-	WorkerArgs      []string `json:"worker_args" yaml:"worker_args"`
-	ImagePullPolicy string   `json:"image_pull_policy" yaml:"image_pull_policy"`
+	Namespace                   string   `json:"namespace" yaml:"namespace"`
+	Image                       string   `json:"image" yaml:"image"`
+	ServiceAccount              string   `json:"service_account" yaml:"service_account"`
+	WorkDir                     string   `json:"work_dir" yaml:"work_dir"`
+	WorkerArgs                  []string `json:"worker_args" yaml:"worker_args"`
+	ImagePullPolicy             string   `json:"image_pull_policy" yaml:"image_pull_policy"`
+	HarnessModelProxySecretName string   `json:"harness_model_proxy_secret_name" yaml:"harness_model_proxy_secret_name"`
 }
 
 // OrchestratorDarwinConfig configures local Darwin process workers for a profile.
@@ -107,12 +108,13 @@ type ResolvedOrchestratorProfile struct {
 
 // ResolvedOrchestratorKubernetesConfig is a default-applied Kubernetes profile.
 type ResolvedOrchestratorKubernetesConfig struct {
-	Namespace       string
-	Image           string
-	ServiceAccount  string
-	WorkDir         string
-	WorkerArgs      []string
-	ImagePullPolicy string
+	Namespace                   string
+	Image                       string
+	ServiceAccount              string
+	WorkDir                     string
+	WorkerArgs                  []string
+	ImagePullPolicy             string
+	HarnessModelProxySecretName string
 }
 
 // ResolvedOrchestratorDarwinConfig is a default-applied Darwin profile.
@@ -228,6 +230,7 @@ func (c OrchestratorConfig) Resolve() (ResolvedOrchestrator, error) {
 				Namespace: profile.Kubernetes.Namespace, Image: profile.Kubernetes.Image,
 				ServiceAccount: profile.Kubernetes.ServiceAccount, WorkDir: profile.Kubernetes.WorkDir,
 				WorkerArgs: append([]string(nil), profile.Kubernetes.WorkerArgs...), ImagePullPolicy: profile.Kubernetes.ImagePullPolicy,
+				HarnessModelProxySecretName: profile.Kubernetes.HarnessModelProxySecretName,
 			}
 		}
 		if profile.Darwin != nil {
@@ -446,6 +449,10 @@ func normalizeKubernetesConfig(cfg OrchestratorKubernetesConfig) (OrchestratorKu
 		cfg.WorkDir = cleanRequiredPath(cfg.WorkDir)
 	}
 	cfg.WorkerArgs = normalizeWorkerArgs(cfg.WorkerArgs)
+	cfg.HarnessModelProxySecretName = strings.TrimSpace(cfg.HarnessModelProxySecretName)
+	if cfg.HarnessModelProxySecretName != "" && !validKubernetesSecretName(cfg.HarnessModelProxySecretName) {
+		return OrchestratorKubernetesConfig{}, errors.New("harness_model_proxy_secret_name must be a DNS-1123 subdomain")
+	}
 	policy := strings.ToLower(strings.TrimSpace(cfg.ImagePullPolicy))
 	switch policy {
 	case "":
@@ -460,6 +467,27 @@ func normalizeKubernetesConfig(cfg OrchestratorKubernetesConfig) (OrchestratorKu
 		return OrchestratorKubernetesConfig{}, fmt.Errorf("invalid image_pull_policy %q", cfg.ImagePullPolicy)
 	}
 	return cfg, nil
+}
+
+func validKubernetesSecretName(value string) bool {
+	if len(value) == 0 || len(value) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if len(label) == 0 || len(label) > 63 || !isKubernetesDNS1123AlphaNumeric(label[0]) || !isKubernetesDNS1123AlphaNumeric(label[len(label)-1]) {
+			return false
+		}
+		for i := 1; i < len(label)-1; i++ {
+			if !isKubernetesDNS1123AlphaNumeric(label[i]) && label[i] != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isKubernetesDNS1123AlphaNumeric(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= '0' && value <= '9'
 }
 
 func normalizeDarwinConfig(cfg OrchestratorDarwinConfig) (OrchestratorDarwinConfig, error) {

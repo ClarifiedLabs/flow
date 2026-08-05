@@ -22,6 +22,8 @@ profiles:
       image: ghcr.io/clarifiedlabs/flow-worker:latest
       image_pull_policy: Always
       work_dir: /flow/work
+      # Provision this Secret out of band; it supplies worker proxy credentials.
+      harness_model_proxy_secret_name: flow-harness-model-proxy
 
 # Run a separate flow-orchestrator process on a macOS host for native Darwin
 # work. Do not enable this profile in the in-cluster Linux Deployment.

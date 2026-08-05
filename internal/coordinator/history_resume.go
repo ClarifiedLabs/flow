@@ -195,7 +195,7 @@ func (s *HistoryCaptureService) CreateResume(ctx context.Context, queue *flowwor
 	dispatchDigest := sha256.Sum256([]byte(source.ID + "\x00" + input.RequestedBy + "\x00" + input.IdempotencyKey))
 	dispatchKey := "history-resume:" + hex.EncodeToString(dispatchDigest[:])
 	jobID := "j-" + hex.EncodeToString(dispatchDigest[:8])
-	compiledSelector, err := scheduler.CompileSelector(scheduler.SelectorInput{Requires: authorHarnessRequirements(source.HarnessName)})
+	compiledSelector, err := scheduler.CompileSelector(scheduler.SelectorInput{})
 	if err != nil {
 		return HistoryResume{}, false, fmt.Errorf("compile history resume selector: %w", err)
 	}

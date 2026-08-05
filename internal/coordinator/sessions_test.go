@@ -126,8 +126,8 @@ func TestConsoleSessionLifecycle(t *testing.T) {
 	if payloadString(ensured.Job.Payload, "console_harness") != flowharness.Harness || payloadString(ensured.Job.Payload, "session_purpose") != "console" {
 		t.Fatalf("console payload = %+v", ensured.Job.Payload)
 	}
-	if got := ensured.Job.Selector[flowharness.AgentHarnessLabel(flowharness.Harness)]; got != "true" {
-		t.Fatalf("console selector = %#v, want harness harness requirement", ensured.Job.Selector)
+	if got := ensured.Job.Selector; len(got) != 0 {
+		t.Fatalf("console selector = %#v, want no scheduling requirements", ensured.Job.Selector)
 	}
 	entrypoint, ok := ensured.Job.Payload["entrypoint"].(map[string]any)
 	if !ok {
@@ -156,7 +156,6 @@ func TestConsoleSessionLifecycle(t *testing.T) {
 
 	if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:             "w-local",
-		Labels:         map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		CapacityBucket: flowworker.BucketPersistentAgent,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
@@ -448,7 +447,6 @@ func TestReconcileCrashedConsoleSessionDoesNotReenqueue(t *testing.T) {
 	}
 	if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:             "w-local",
-		Labels:         map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		CapacityBucket: flowworker.BucketPersistentAgent,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
@@ -537,8 +535,8 @@ func TestEnsureAuthorJobUsesConfiguredDefaultAgent(t *testing.T) {
 	if got := payloadString(payload, "prompt_harness"); got != flowharness.Harness {
 		t.Fatalf("prompt_harness = %q, want harness", got)
 	}
-	if got := ensured.Job.Selector[flowharness.AgentHarnessLabel(flowharness.Harness)]; got != "true" {
-		t.Fatalf("selector = %#v, want harness harness requirement", ensured.Job.Selector)
+	if got := ensured.Job.Selector; len(got) != 0 {
+		t.Fatalf("selector = %#v, want no scheduling requirements", ensured.Job.Selector)
 	}
 	entrypoint, ok := payload["entrypoint"].(map[string]any)
 	if !ok {
@@ -784,7 +782,6 @@ func TestTaskSessionRevocationAndGitWriteLivenessFence(t *testing.T) {
 	}
 	if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:             "w-task-console",
-		Labels:         map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		HeartbeatTTL:   time.Minute,
 		CapacityBucket: flowworker.BucketPersistentAgent,
 	}); err != nil {
@@ -836,7 +833,7 @@ func TestLateTaskConsoleExitDoesNotRestoreTerminalTaskChange(t *testing.T) {
 		t.Fatalf("ensure task console: %v", err)
 	}
 	if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID: "w-late-console", Labels: map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
+		ID:             "w-late-console",
 		CapacityBucket: flowworker.BucketPersistentAgent,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)
@@ -920,7 +917,6 @@ func TestMarkPersistentSessionExitedRejectsConsoleRole(t *testing.T) {
 	}
 	if _, err := fixture.directory.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
 		ID:             "w-local",
-		Labels:         map[string]string{flowharness.AgentHarnessLabel(flowharness.Harness): "true"},
 		CapacityBucket: flowworker.BucketPersistentAgent,
 	}); err != nil {
 		t.Fatalf("register worker: %v", err)

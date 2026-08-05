@@ -14,8 +14,18 @@ in a local cluster. Install `kind`, `kubectl`, Go, and a running Docker-compatib
 runtime (`docker`, `podman`, or `nerdctl`), then run from the repository root:
 
 ```sh
+export HARNESS_MODEL_PROXY_URL=http://your-local-model-proxy:8080
+export HARNESS_MODEL_PROXY_API_KEY="$(cat /path/to/local/model-proxy-api-key)"
 ./scripts/kind/up.sh
 ```
+
+The proxy URL must be reachable from Kind worker Pods. `up.sh` creates or updates
+`flow-harness-model-proxy` in the `flow` namespace from those two environment
+variables. It retains them only in the private, gitignored `.flow-kind/tokens`
+directory and in the cluster Secret; it does not write either value to a tracked
+manifest or generated Flow configuration. This is profile-wide: every
+assignment-created worker Job for the configured profile receives the two
+variables, and the proxy must enforce its local-network security model.
 
 The script creates or reuses the `flow` Kind cluster, loads locally built
 `flow-server`, `flow-worker`, and `flow-orchestrator` images, and deploys the
@@ -64,7 +74,10 @@ credentials out of band and use the reference manifests described below.
 
 The normal manifest path deliberately contains no credential-bearing `Secret`.
 Create the namespace and tokens out of band, retain the generated values in your
-secret manager, and then apply the control plane:
+secret manager, and then apply the control plane. The referenced
+`flow-harness-model-proxy` Secret must contain `HARNESS_MODEL_PROXY_URL` and
+`HARNESS_MODEL_PROXY_API_KEY` keys; provision it from your secret manager rather
+than adding its data to these manifests:
 
 ```sh
 kubectl create namespace flow --dry-run=client -o yaml | kubectl apply -f -

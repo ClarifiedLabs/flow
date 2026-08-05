@@ -168,7 +168,8 @@ func buildProfilesAndProviders(cfg config.ResolvedOrchestrator) ([]orchestrator.
 			profile.ProviderOptions = map[string]string{
 				"namespace": options.Namespace, "image": options.Image, "service_account": options.ServiceAccount,
 				"work_dir": options.WorkDir, "worker_args": encodeStringSlice(options.WorkerArgs),
-				"image_pull_policy": options.ImagePullPolicy,
+				"image_pull_policy":               options.ImagePullPolicy,
+				"harness_model_proxy_secret_name": options.HarnessModelProxySecretName,
 			}
 		case "darwin":
 			if configured.Darwin == nil {

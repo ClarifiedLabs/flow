@@ -37,8 +37,8 @@ func TestDefaultAgentChecksUseSelectedHarnessAndArgs(t *testing.T) {
 		if !definition.flowAgent {
 			t.Fatalf("%s is not marked as a Flow-owned agent check", definition.Name)
 		}
-		if got := definition.Requires; len(got) != 1 || got[0] != flowharness.AgentHarnessLabel(flowharness.Harness) {
-			t.Fatalf("%s requires = %#v, want harness harness label", definition.Name, got)
+		if got := definition.Requires; len(got) != 0 {
+			t.Fatalf("%s requires = %#v, want no scheduling requirements", definition.Name, got)
 		}
 	}
 }
@@ -69,8 +69,8 @@ func TestDefaultAgentChecksUseConfiguredDefaultModel(t *testing.T) {
 		if defaultIdx > manualIdx {
 			t.Fatalf("%s default model tokens must precede harness_args:\n%s", definition.Name, command)
 		}
-		if got := definition.Requires; len(got) != 1 || got[0] != flowharness.AgentHarnessLabel(flowharness.Harness) {
-			t.Fatalf("%s requires = %#v, want harness harness label", definition.Name, got)
+		if got := definition.Requires; len(got) != 0 {
+			t.Fatalf("%s requires = %#v, want no scheduling requirements", definition.Name, got)
 		}
 	}
 }

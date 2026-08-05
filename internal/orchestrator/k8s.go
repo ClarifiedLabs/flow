@@ -187,6 +187,7 @@ func (k *KubernetesProvider) Launch(ctx context.Context, request LaunchRequest) 
 	}
 	job.Spec.Template.Spec.Containers = []kubernetesContainer{{
 		Name: "worker", Image: settings.image, ImagePullPolicy: settings.imagePullPolicy, Command: command,
+		Env: harnessModelProxyEnvironment(settings.harnessModelProxySecretName),
 		VolumeMounts: []kubernetesVolumeMount{
 			{Name: "worker-config", MountPath: "/var/run/flow", ReadOnly: true},
 			{Name: "worker-work", MountPath: settings.workDir},
@@ -286,6 +287,7 @@ func (k *KubernetesProvider) Delete(ctx context.Context, identity AssignmentIden
 
 type kubernetesSettings struct {
 	namespace, image, serviceAccount, workDir, imagePullPolicy string
+	harnessModelProxySecretName                                string
 	workerArgs                                                 []string
 }
 
@@ -293,7 +295,9 @@ func (k *KubernetesProvider) settings(profile Profile) (kubernetesSettings, erro
 	settings := kubernetesSettings{
 		namespace: option(profile, "namespace", k.namespace), image: option(profile, "image", k.image),
 		serviceAccount: option(profile, "service_account", k.serviceAccount), workDir: option(profile, "work_dir", k.workDir),
-		imagePullPolicy: option(profile, "image_pull_policy", k.imagePullPolicy), workerArgs: append([]string(nil), k.workerArgs...),
+		imagePullPolicy:             option(profile, "image_pull_policy", k.imagePullPolicy),
+		harnessModelProxySecretName: strings.TrimSpace(profile.ProviderOptions["harness_model_proxy_secret_name"]),
+		workerArgs:                  append([]string(nil), k.workerArgs...),
 	}
 	if raw := strings.TrimSpace(profile.ProviderOptions["worker_args"]); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &settings.workerArgs); err != nil {
@@ -313,6 +317,16 @@ func (k *KubernetesProvider) settings(profile Profile) (kubernetesSettings, erro
 		return settings, err
 	}
 	return settings, nil
+}
+
+func harnessModelProxyEnvironment(secretName string) []kubernetesEnvVar {
+	if secretName == "" {
+		return nil
+	}
+	return []kubernetesEnvVar{
+		{Name: "HARNESS_MODEL_PROXY_URL", ValueFrom: kubernetesEnvVarSource{SecretKeyRef: kubernetesSecretKeySelector{Name: secretName, Key: "HARNESS_MODEL_PROXY_URL"}}},
+		{Name: "HARNESS_MODEL_PROXY_API_KEY", ValueFrom: kubernetesEnvVarSource{SecretKeyRef: kubernetesSecretKeySelector{Name: secretName, Key: "HARNESS_MODEL_PROXY_API_KEY"}}},
+	}
 }
 
 func (k *KubernetesProvider) namespaceFor(identity AssignmentIdentity) string {
@@ -582,7 +596,19 @@ type kubernetesContainer struct {
 	Image           string                  `json:"image"`
 	ImagePullPolicy string                  `json:"imagePullPolicy,omitempty"`
 	Command         []string                `json:"command"`
+	Env             []kubernetesEnvVar      `json:"env,omitempty"`
 	VolumeMounts    []kubernetesVolumeMount `json:"volumeMounts"`
+}
+type kubernetesEnvVar struct {
+	Name      string                 `json:"name"`
+	ValueFrom kubernetesEnvVarSource `json:"valueFrom"`
+}
+type kubernetesEnvVarSource struct {
+	SecretKeyRef kubernetesSecretKeySelector `json:"secretKeyRef"`
+}
+type kubernetesSecretKeySelector struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
 }
 type kubernetesPodSecurityContext struct {
 	RunAsNonRoot   *bool                    `json:"runAsNonRoot"`

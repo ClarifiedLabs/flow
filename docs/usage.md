@@ -317,9 +317,9 @@ flow thread reopen THREAD_ID
 Repo-versioned CI configuration lives in `.flow/checks/*.yaml`. CI jobs use the
 `ephemeral` workload bucket. Review and verification agents are selected by
 their graph nodes and use the `persistent_agent` bucket. Orchestrator profiles
-must accept the needed buckets and provide the `agent.harness.harness: "true"`
-label for agent work. Bucket names classify jobs; every selected job still gets
-its own one-shot worker process.
+must accept the needed buckets; agent jobs assume the Harness executable is
+available on those workers. Bucket names classify jobs; every selected job still
+gets its own one-shot worker process.
 
 An `automated_checks` node runs the repository CI definitions. A
 `change_review` or `verify_change` node is a multi-agent node: it fans out one
@@ -371,9 +371,6 @@ requires: []
 `flow-worker` sets `FLOW_WORKER_HARNESS` from an agent job's entrypoint. Use
 `flow fetch-prompt --harness harness|agents` only when overriding that
 automatic selection.
-
-Bare requirements such as `requires: ["agent.harness.harness"]` mean
-`agent.harness.harness=true` and match worker labels by exact key/value.
 
 ## Web UI Routes
 

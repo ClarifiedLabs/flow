@@ -8,6 +8,8 @@ REPO_ROOT="$(CDPATH='' cd -- "${SCRIPT_DIR}/../.." && pwd)"
 STATE_DIR="${REPO_ROOT}/.flow-kind"
 DATA_DIR="${STATE_DIR}/data"
 TOKEN_DIR="${STATE_DIR}/tokens"
+MODEL_PROXY_URL_FILE="${TOKEN_DIR}/harness-model-proxy-url"
+MODEL_PROXY_API_KEY_FILE="${TOKEN_DIR}/harness-model-proxy-api-key"
 BIN_DIR="${STATE_DIR}/bin"
 GENERATED_DIR="${STATE_DIR}/generated"
 CLUSTER_NAME="${FLOW_KIND_CLUSTER:-flow}"
@@ -268,6 +270,19 @@ apply_tokens_secret() {
     --from-file=owner="${TOKEN_DIR}/owner" \
     --from-file=hook="${TOKEN_DIR}/hook" \
     --from-file=orchestrator="${TOKEN_DIR}/orchestrator" \
+    --dry-run=client -o yaml | kube apply -f -
+}
+
+apply_harness_model_proxy_secret() {
+  if [ -z "${HARNESS_MODEL_PROXY_URL:-}" ] || [ -z "${HARNESS_MODEL_PROXY_API_KEY:-}" ]; then
+    fatal "HARNESS_MODEL_PROXY_URL and HARNESS_MODEL_PROXY_API_KEY must be set before running up.sh"
+  fi
+  printf '%s' "${HARNESS_MODEL_PROXY_URL}" >"${MODEL_PROXY_URL_FILE}"
+  printf '%s' "${HARNESS_MODEL_PROXY_API_KEY}" >"${MODEL_PROXY_API_KEY_FILE}"
+  chmod 600 "${MODEL_PROXY_URL_FILE}" "${MODEL_PROXY_API_KEY_FILE}"
+  kube create secret generic flow-harness-model-proxy --namespace flow \
+    --from-file=HARNESS_MODEL_PROXY_URL="${MODEL_PROXY_URL_FILE}" \
+    --from-file=HARNESS_MODEL_PROXY_API_KEY="${MODEL_PROXY_API_KEY_FILE}" \
     --dry-run=client -o yaml | kube apply -f -
 }
 
