@@ -21,6 +21,9 @@ data:
     listen_addr: :8421
     metrics:
       listen: ":8422"
+    default_agent:
+      model: openai-codex:gpt-5.6-sol
+      reasoning_effort: high
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
