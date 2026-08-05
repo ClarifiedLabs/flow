@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	ProtocolVersion   = "6"
+	ProtocolVersion   = "7"
 	ProtocolHeader    = "Flow-Protocol-Version"
 	IdempotencyHeader = "Idempotency-Key"
 	AuthScheme        = "Bearer "

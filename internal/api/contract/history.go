@@ -168,7 +168,7 @@ type ResumeHistoryCaptureResponse struct {
 	JobID                 string `json:"job_id"`
 	State                 string `json:"state"`
 	RequiredHeadCommit    string `json:"required_head_commit"`
-	RequiredHarnessBuild  string `json:"required_harness_build"`
+	SourceHarnessBuild    string `json:"source_harness_build"`
 	RequiredHarnessSchema int    `json:"required_harness_schema_version"`
 	Created               bool   `json:"created"`
 }

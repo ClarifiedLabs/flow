@@ -185,7 +185,6 @@ func (s *Server) handleWorkerReserveHistoryCapture(w http.ResponseWriter, r *htt
 		}
 		if !input.ExpectedTranscript || !input.ExpectedHarness ||
 			strings.TrimSpace(input.HarnessName) != sourceCapture.HarnessName ||
-			strings.TrimSpace(input.HarnessVersion) != resume.RequiredHarnessBuild ||
 			input.HarnessSchemaVersion != resume.RequiredHarnessSchema {
 			writeError(w, http.StatusConflict, "history_resume_mismatch", "resume history requirements do not match coordinator metadata")
 			return

@@ -45,7 +45,7 @@ func baseHistoryReservation() ReserveHistoryCaptureInput {
 		ProjectID: "p-history", JobID: "job-1", LeaseID: "lease-1", LeaseAttempt: 1,
 		WorkerID: "worker-1", TaskID: "t-1", SessionID: "session-1",
 		WorkflowRunID: "wr-1", NodeRunID: "wnr-1", NodeVisit: 1,
-		Stage: "implement", Role: "author", HarnessName: "harness", HarnessVersion: "0.4.5", HarnessSchemaVersion: 5,
+		Stage: "implement", Role: "author", HarnessName: "harness", HarnessSchemaVersion: 5,
 		ExpectedTranscript: true, ExpectedHarness: true,
 	}
 }

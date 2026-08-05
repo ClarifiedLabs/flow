@@ -156,7 +156,7 @@ type HistoryResumePayload struct {
 	WorkspaceArtifactID          string `json:"workspace_artifact_id"`
 	WorkspaceSHA256              string `json:"workspace_sha256"`
 	RequiredHeadCommit           string `json:"required_head_commit"`
-	RequiredHarnessBuild         string `json:"required_harness_build"`
+	SourceHarnessBuild           string `json:"source_harness_build"`
 	RequiredHarnessSchemaVersion int    `json:"required_harness_schema_version"`
 }
 
@@ -284,11 +284,6 @@ func RunJob(ctx context.Context, input RunInput) RunResult {
 	}
 	if payload.HistoryResume != nil && harnessName == "" {
 		return failedResult(input, payload, errors.New("history resume requires the managed native Harness entrypoint"))
-	}
-	if payload.HistoryResume != nil {
-		if err := validateResumeHarnessCompatibility(ctx, *payload.HistoryResume); err != nil {
-			return failedResult(input, payload, fmt.Errorf("validate history resume compatibility: %w", err))
-		}
 	}
 	if input.BeforeExecution != nil {
 		if err := input.BeforeExecution(historyPreparation); err != nil {

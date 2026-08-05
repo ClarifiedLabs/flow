@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -30,6 +31,69 @@ func TestHistoryCaptureWasInterruptedIncludesLeaseFailure(t *testing.T) {
 	}
 	if !historyCaptureWasInterrupted(nil, nil, errors.New("lease expired")) {
 		t.Fatal("lease heartbeat failure was not classified as interrupted")
+	}
+}
+
+func TestHistoryCaptureReserveDoesNotInspectHarnessExecutableVersion(t *testing.T) {
+	ctx := context.Background()
+	binDir := t.TempDir()
+	invoked := filepath.Join(binDir, "version-invoked")
+	harnessPath := filepath.Join(binDir, "harness")
+	if err := os.WriteFile(harnessPath, []byte("#!/bin/sh\nprintf invoked > \""+invoked+"\"\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	capture := contract.HistoryCapture{
+		ID: "capture-versionless", ProjectID: "project-1", JobID: "job-1", LeaseID: "lease-1", LeaseAttempt: 1,
+		WorkerID: "worker-1", Role: "author", HarnessName: "harness", HarnessSchemaVersion: historyarchive.SupportedHarnessNativeSchema,
+		ExpectedTranscript: true, ExpectedHarness: true, State: "reserved", ExecutionVerdict: "pending",
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v2/history/captures":
+			var request contract.ReserveHistoryCaptureRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode reservation: %v", err)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if request.HarnessVersion != "" || request.HarnessName != "harness" || !request.ExpectedHarness {
+				t.Errorf("reservation Harness metadata = %+v", request)
+			}
+			_ = json.NewEncoder(w).Encode(contract.ReserveHistoryCaptureResponse{Capture: capture, UploadGrant: "upload-grant", Created: true})
+		case "/v2/history/captures/capture-versionless/transition":
+			capture.State, capture.Version = "running", 1
+			_ = json.NewEncoder(w).Encode(capture)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client, err := flowclient.New(config.ClientConfig{ServerURL: server.URL, Token: "worker-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	outbox, err := historycapture.New(historycapture.Options{
+		Dir: filepath.Join(workDir, "outbox"), SegmentBytes: 4, ArchiveLimits: historyarchive.DefaultLimits(),
+		MaxOutstandingBytes: 64 << 20, MaxOutstandingEntries: 10, SensitiveDataKey: []byte("worker-token"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := &historyCaptureManager{outbox: outbox, client: client, cfg: config.WorkerConfig{WorkDir: workDir}, active: map[string]struct{}{}}
+	attemptDir := workerexec.HistoryAttemptDir(workDir, "job-1", "lease-1")
+	_, err = manager.Reserve(ctx, flowworker.Job{ID: "job-1", Role: flowworker.RoleAuthor}, flowworker.Lease{ID: "lease-1", JobID: "job-1", WorkerID: "worker-1"}, nil, workerexec.ExecutionPreparation{
+		Worktree: workerexec.HistoryWorktreePath(workDir, "job-1"), TranscriptPath: filepath.Join(attemptDir, "transcript.log"),
+		HarnessName: "harness", NativeSessionRoot: filepath.Join(attemptDir, "harness-session"),
+	}, nil)
+	if err != nil {
+		t.Fatalf("reserve history capture: %v", err)
+	}
+	if _, err := os.Stat(invoked); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Harness version executable was invoked: %v", err)
 	}
 }
 

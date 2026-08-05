@@ -445,8 +445,11 @@ func validateReserveHistoryCaptureInput(input ReserveHistoryCaptureInput) error 
 		return errors.New("node visit cannot be negative")
 	}
 	if input.ExpectedHarness {
-		if input.HarnessName == "" || input.HarnessVersion == "" || input.HarnessSchemaVersion < 1 {
-			return errors.New("Harness captures require name, exact build, and positive schema version")
+		if input.HarnessName == "" || input.HarnessSchemaVersion < 1 {
+			return errors.New("Harness captures require name and positive schema version")
+		}
+		if input.HarnessVersion != "" {
+			return errors.New("Harness capture build is observed from archived native state")
 		}
 	} else if input.HarnessName != "" || input.HarnessVersion != "" || input.HarnessSchemaVersion != 0 {
 		return errors.New("non-Harness captures cannot declare Harness build metadata")
@@ -463,11 +466,12 @@ func validateReserveHistoryCaptureInput(input ReserveHistoryCaptureInput) error 
 }
 
 func sameReservation(c HistoryCapture, input ReserveHistoryCaptureInput) bool {
+	harnessVersionMatches := c.HarnessVersion == input.HarnessVersion || input.ExpectedHarness && input.HarnessVersion == ""
 	return c.ProjectID == input.ProjectID && c.JobID == input.JobID && c.LeaseID == input.LeaseID &&
 		c.LeaseAttempt == input.LeaseAttempt && c.WorkerID == input.WorkerID && c.TaskID == input.TaskID && c.ChangeID == input.ChangeID &&
 		c.SessionID == input.SessionID && c.WorkflowRunID == input.WorkflowRunID && c.NodeRunID == input.NodeRunID &&
 		c.NodeVisit == input.NodeVisit && c.Stage == input.Stage && c.Role == input.Role &&
-		c.HarnessName == input.HarnessName && c.HarnessVersion == input.HarnessVersion && c.HarnessSchemaVersion == input.HarnessSchemaVersion &&
+		c.HarnessName == input.HarnessName && harnessVersionMatches && c.HarnessSchemaVersion == input.HarnessSchemaVersion &&
 		c.ResumedFromCaptureID == input.ResumedFromCaptureID && c.ResumedFromHarnessSessionID == input.ResumedFromHarnessSessionID &&
 		c.ExpectedTranscript == input.ExpectedTranscript && c.ExpectedHarness == input.ExpectedHarness
 }
@@ -625,7 +629,6 @@ const historyResumeEligibleSQL = `(
 	state = 'complete'
 	AND expected_harness = 1
 	AND harness_name <> ''
-	AND harness_version <> ''
 	AND harness_schema_version > 0
 	AND task_id <> ''
 	AND change_id <> ''
@@ -649,7 +652,7 @@ const historyResumeEligibleSQL = `(
 		  AND harness_artifact.publication_state = 'committed'
 		  AND member.parse_status = 'parsed'
 		  AND member.native_session_id <> ''
-		  AND member.harness_build = history_captures.harness_version
+		  AND member.harness_build <> ''
 	)
 	AND EXISTS (
 		SELECT 1
@@ -683,7 +686,17 @@ const historyResumeEligibleSQL = `(
 const historyCaptureSelect = `
 SELECT id, project_id, job_id, lease_id, lease_attempt, worker_id,
        task_id, change_id, session_id, workflow_run_id, node_run_id, COALESCE(node_visit, 0),
-       stage, role, harness_name, harness_version, harness_schema_version,
+		stage, role, harness_name,
+		COALESCE(NULLIF(harness_version, ''), (
+			SELECT member.harness_build
+			FROM harness_archive_members AS member
+			WHERE member.capture_id = history_captures.id
+			  AND member.member_kind = 'root'
+			  AND member.parse_status = 'parsed'
+			  AND member.harness_build <> ''
+			ORDER BY member.id
+			LIMIT 1
+		), ''), harness_schema_version,
        COALESCE(resumed_from_capture_id, ''), resumed_from_harness_session_id,
        expected_transcript, expected_harness, state,
        execution_verdict, execution_exit_code, execution_error_code, execution_recorded_at,
@@ -3087,13 +3100,14 @@ WHERE capture_id = ? AND phase = 'final' AND publication_state = 'committed'`, c
 		return fmt.Errorf("%w: non-Harness captures cannot contain a final native session-tree archive", ErrHistoryConflict)
 	}
 	if capture.ExpectedHarness {
-		var indexedArchives, indexedMembers, rootMembers, invalidMembers int
+		var indexedArchives, indexedMembers, rootMembers, observedBuilds, invalidMembers int
 		if err := tx.QueryRowContext(ctx, `
 SELECT COUNT(DISTINCT member_set.artifact_id), COUNT(member.id),
        COALESCE(SUM(member.member_kind = 'root'), 0),
+	   COUNT(DISTINCT NULLIF(member.harness_build, '')),
        COALESCE(SUM(
            member.native_session_id = '' OR member.parse_status != 'parsed'
-           OR member.harness_build != ?
+		   OR member.harness_build = ''
            OR (member.member_kind = 'root' AND member.native_parent_session_id != '')
            OR (member.member_kind = 'delegated_child' AND (
                member.native_parent_session_id = '' OR NOT EXISTS (
@@ -3107,12 +3121,12 @@ FROM history_artifacts AS artifact
 LEFT JOIN harness_archive_member_sets AS member_set ON member_set.artifact_id = artifact.id
 LEFT JOIN harness_archive_members AS member ON member.artifact_id = artifact.id
 WHERE artifact.capture_id = ? AND artifact.kind = 'harness_root'
-  AND artifact.phase = 'final' AND artifact.publication_state = 'committed'`, capture.HarnessVersion, capture.ID).
-			Scan(&indexedArchives, &indexedMembers, &rootMembers, &invalidMembers); err != nil {
+  AND artifact.phase = 'final' AND artifact.publication_state = 'committed'`, capture.ID).
+			Scan(&indexedArchives, &indexedMembers, &rootMembers, &observedBuilds, &invalidMembers); err != nil {
 			return err
 		}
-		if indexedArchives != 1 || indexedMembers < 1 || rootMembers != 1 || invalidMembers != 0 {
-			return fmt.Errorf("%w: native Harness archive requires one fully parsed, build-matched rooted member tree", ErrHistoryIncomplete)
+		if indexedArchives != 1 || indexedMembers < 1 || rootMembers != 1 || observedBuilds != 1 || invalidMembers != 0 {
+			return fmt.Errorf("%w: native Harness archive requires one fully parsed, single-build rooted member tree", ErrHistoryIncomplete)
 		}
 	}
 	if err := tx.QueryRowContext(ctx, `

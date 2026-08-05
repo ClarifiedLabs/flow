@@ -200,14 +200,8 @@ func (m *historyCaptureManager) Reserve(ctx context.Context, job flowworker.Job,
 	m.lifecycleMu.Lock()
 	defer m.lifecycleMu.Unlock()
 	harnessName := strings.TrimSpace(prep.HarnessName)
-	harnessVersion := ""
 	harnessSchema := 0
 	if harnessName != "" && harnessName != flowharness.Agents && harnessName != flowharness.Shell {
-		var err error
-		harnessVersion, err = flowharness.BuildVersion(ctx, harnessName)
-		if err != nil {
-			return "", err
-		}
 		harnessSchema = historyarchive.SupportedHarnessNativeSchema
 	} else {
 		harnessName = ""
@@ -216,7 +210,6 @@ func (m *historyCaptureManager) Reserve(ctx context.Context, job flowworker.Job,
 		JobID:                job.ID,
 		LeaseID:              lease.ID,
 		HarnessName:          harnessName,
-		HarnessVersion:       harnessVersion,
 		HarnessSchemaVersion: harnessSchema,
 		ExpectedTranscript:   true,
 		ExpectedHarness:      harnessName != "",

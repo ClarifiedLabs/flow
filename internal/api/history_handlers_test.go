@@ -180,7 +180,7 @@ func TestHistoryResumeAPIIsIdempotentAndArtifactsRequireSelectedActiveLease(t *t
 		NativeSessionID: "native-child", IdempotencyKey: "resume-api-once",
 	}, http.StatusCreated, &created)
 	if !created.Created || created.SourceCaptureID != source.ID || created.SourceNativeSessionID != "native-child" ||
-		created.RequiredHarnessBuild != "0.4.5" || created.RequiredHarnessSchema != 5 || created.JobID == "" {
+		created.SourceHarnessBuild != "0.4.5" || created.RequiredHarnessSchema != 5 || created.JobID == "" {
 		t.Fatalf("created resume = %+v", created)
 	}
 	var replayed contract.ResumeHistoryCaptureResponse
@@ -233,7 +233,7 @@ func TestWorkerHistoryAPIReservesFromLeaseAndPublishesWithCapability(t *testing.
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
-		ID: "w-local",	}); err != nil {
+		ID: "w-local"}); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 	job, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
@@ -244,7 +244,7 @@ func TestWorkerHistoryAPIReservesFromLeaseAndPublishesWithCapability(t *testing.
 		t.Fatalf("enqueue job: %v", err)
 	}
 	claim, ok, err := fixture.Workers.ClaimNextJob(ctx, flowworker.ClaimInput{
-		WorkerID: "w-local",		LeaseDuration: time.Minute,
+		WorkerID: "w-local", LeaseDuration: time.Minute,
 	})
 	if err != nil || !ok {
 		t.Fatalf("claim job: ok=%v err=%v", ok, err)
@@ -421,7 +421,7 @@ VALUES (?, ?, 'task/history-resume-api', 'main', ?, ?, ?)`, changeID, task.ID, h
 	reserved, err := fixture.Bundle.HistoryCaptures.Reserve(ctx, coordinator.ReserveHistoryCaptureInput{
 		ProjectID: fixture.Project.ID, JobID: job.ID, LeaseID: "lease-history-resume-api", LeaseAttempt: 1,
 		WorkerID: "w-local", TaskID: task.ID, ChangeID: changeID, Role: string(flowworker.RoleAuthor),
-		HarnessName: "harness", HarnessVersion: "0.4.5", HarnessSchemaVersion: 5,
+		HarnessName: "harness", HarnessSchemaVersion: 5,
 		ExpectedTranscript: true, ExpectedHarness: true,
 	})
 	if err != nil {

@@ -175,7 +175,7 @@ overrides. If `--idempotency-key` is omitted, the CLI generates a fresh random k
 operators retrying an uncertain request should explicitly reuse the same key.
 Changing the selected native session on such a retry is a conflict.
 
-## Exact resume policy
+## Validated resume policy
 
 Resume is deliberately exact rather than a best-effort import. The owner selects
 a completed, resumable native Harness capture and optionally one already indexed
@@ -187,7 +187,8 @@ coordinator, not the caller, derives and durably records:
   archive, with their artifact IDs and SHA-256 values;
 - the source task/change target, source managed entrypoint, branch/base, current
   change head, and required captured workspace HEAD;
-- the exact Harness build string and Harness native schema version; and
+- the source Harness build string as provenance and the required Harness native
+  schema version; and
 - the queued author job and its selector.
 
 Creation fails if the source is not complete native Harness history, the member
@@ -199,15 +200,14 @@ initial prompt.
 Before mutating its checkout, the selected worker downloads both archives through
 the active-lease authorization described above, enforces byte ceilings, verifies
 the coordinator-pinned SHA-256 values, and fully inspects both archives. The
-installed Harness build must equal the captured build byte-for-byte, and the
-required native schema must equal the worker's single supported schema (currently
-schema 5). Flow performs no build compatibility guess and no schema migration.
-It restores the exact selected session and workspace state, then the new capture
-records `resumed_from_capture_id` and `resumed_from_harness_session_id` from the
-coordinator's durable resume row.
-
-This policy intentionally makes upgrades visible: keep workers with the exact old
-Harness build available while captures from that build may need resume.
+required native schema must equal the worker's supported schema (currently
+schema 5), but the installed Harness build may differ from the source build.
+This deliberately permits a newer Harness to recover state produced by an older
+buggy build without treating executable identity as serialization compatibility.
+Flow performs no schema migration. It restores the selected session and workspace
+state, then the new capture records `resumed_from_capture_id` and
+`resumed_from_harness_session_id`; its member index records the build that
+continued the session, preserving both sides of the upgrade as provenance.
 
 ## Blocked, lost, and waived captures
 

@@ -534,7 +534,7 @@ func (o *Outbox) stageHarness(ctx context.Context, entryDir string, entry *Entry
 	if err != nil {
 		return artifactRecord{}, nil, err
 	}
-	artifact, _, writeErr := historyarchive.WriteHarness(ctx, file, entry.Sources.NativeSessionRoot, historyarchive.HarnessOptions{Limits: limits, HarnessBuild: entry.Capture.HarnessVersion, RootSessionID: entry.Sources.NativeSessionID, SensitiveValues: sensitiveValues})
+	artifact, _, writeErr := historyarchive.WriteHarness(ctx, file, entry.Sources.NativeSessionRoot, historyarchive.HarnessOptions{Limits: limits, RootSessionID: entry.Sources.NativeSessionID, SensitiveValues: sensitiveValues})
 	if writeErr == nil {
 		writeErr = file.Sync()
 	}
@@ -554,7 +554,7 @@ func (o *Outbox) stageHarness(ctx context.Context, entryDir string, entry *Entry
 		return artifactRecord{}, nil, err
 	}
 	manifest := inspection.Harness
-	if manifest.HarnessBuild != entry.Capture.HarnessVersion ||
+	if strings.TrimSpace(manifest.HarnessBuild) == "" ||
 		(entry.Sources.NativeSessionID != "" && manifest.RootSessionID != entry.Sources.NativeSessionID) || len(manifest.Members) == 0 {
 		_ = os.Remove(path)
 		return artifactRecord{}, nil, fmt.Errorf("%w: Harness archive identity differs", ErrInvalidOutbox)
@@ -562,7 +562,7 @@ func (o *Outbox) stageHarness(ctx context.Context, entryDir string, entry *Entry
 	members := make([]contract.HistoryHarnessMemberInput, 0, len(manifest.Members))
 	roots := 0
 	for _, member := range manifest.Members {
-		if member.ParseStatus != "parsed" || member.HarnessBuild != entry.Capture.HarnessVersion || member.NativeSessionID == "" {
+		if member.ParseStatus != "parsed" || member.HarnessBuild != manifest.HarnessBuild || member.NativeSessionID == "" {
 			_ = os.Remove(path)
 			return artifactRecord{}, nil, fmt.Errorf("%w: Harness member is not parsed and build-matched", ErrInvalidOutbox)
 		}
@@ -577,6 +577,11 @@ func (o *Outbox) stageHarness(ctx context.Context, entryDir string, entry *Entry
 			RelativeMemberPath: member.RelativeMemberPath, MemberKind: member.MemberKind, AgentName: member.AgentName, Status: member.Status,
 			Model: member.Model, HarnessBuild: member.HarnessBuild, ParseStatus: member.ParseStatus})
 	}
+	// Harness build is observed from the immutable native state, not predicted
+	// by invoking the executable before the session exists. Keep it in the local
+	// capture projection as provenance; the coordinator derives the same value
+	// from the registered member index.
+	entry.Capture.HarnessVersion = manifest.HarnessBuild
 	entry.Sources.NativeSessionID = manifest.RootSessionID
 	if roots != 1 {
 		_ = os.Remove(path)

@@ -22,7 +22,7 @@ func TestValidateHistoryResumePayloadRejectsUnsafeOrIncompleteCoordinates(t *tes
 		NativeSessionID: "native-child", SessionRelativeDir: "children/native-child",
 		HarnessArtifactID: "ha-harness", HarnessSHA256: strings.Repeat("a", 64),
 		WorkspaceArtifactID: "ha-workspace", WorkspaceSHA256: strings.Repeat("b", 64),
-		RequiredHeadCommit: strings.Repeat("c", 40), RequiredHarnessBuild: "0.4.5",
+		RequiredHeadCommit: strings.Repeat("c", 40), SourceHarnessBuild: "0.4.5",
 		RequiredHarnessSchemaVersion: 5,
 	}
 	if err := validateHistoryResumePayload(valid); err != nil {
@@ -108,7 +108,7 @@ func TestHistoryResumePreflightAndRestoreSelectedNativeSession(t *testing.T) {
 		ID: "hr-resume", SourceCaptureID: "hc-source", NativeSessionID: "native-child",
 		SessionRelativeDir: "children/native-child", HarnessArtifactID: "ha-harness", HarnessSHA256: harnessArtifact.SHA256,
 		WorkspaceArtifactID: "ha-workspace", WorkspaceSHA256: workspaceArtifact.SHA256,
-		RequiredHeadCommit: workspaceManifest.HeadCommit, RequiredHarnessBuild: "0.4.5",
+		RequiredHeadCommit: workspaceManifest.HeadCommit, SourceHarnessBuild: "0.4.5",
 		RequiredHarnessSchemaVersion: historyarchive.SupportedHarnessNativeSchema,
 	}
 	archives, err := prepareHistoryResumeArchives(ctx, input, resume, historyAttemptDir(cfg.WorkDir, input.Job.ID, input.Lease.ID))

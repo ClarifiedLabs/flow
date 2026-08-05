@@ -1,5 +1,5 @@
 // Package historycapture implements the durable worker-side history outbox and
-// the protocol-6 history publisher.
+// the protocol-7 history publisher.
 package historycapture
 
 import (
@@ -71,7 +71,7 @@ func OptionsFromConfig(dir string, transcript config.ResolvedHistoryTranscript, 
 	}
 }
 
-// Client is exactly the protocol-6 worker history surface used by Publisher.
+// Client is exactly the protocol-7 worker history surface used by Publisher.
 // *client.Client satisfies this interface.
 type Client interface {
 	UploadHistoryArtifactBytes(context.Context, string, string, io.Reader) (contract.HistoryUploadResponse, error)

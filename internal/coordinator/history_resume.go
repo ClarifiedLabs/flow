@@ -32,7 +32,7 @@ type HistoryResume struct {
 	TargetChangeID           string
 	JobID                    string
 	RequiredHeadCommit       string
-	RequiredHarnessBuild     string
+	SourceHarnessBuild       string
 	RequiredHarnessSchema    int
 	State                    string
 	RequestedBy              string
@@ -188,7 +188,7 @@ func (s *HistoryCaptureService) CreateResume(ctx context.Context, queue *flowwor
 		"workspace_artifact_id":           workspaceArtifact.ID,
 		"workspace_sha256":                workspaceArtifact.SHA256,
 		"required_head_commit":            workspace.HeadCommit,
-		"required_harness_build":          source.HarnessVersion,
+		"source_harness_build":            source.HarnessVersion,
 		"required_harness_schema_version": source.HarnessSchemaVersion,
 	}
 	stampProjectPayload(payload, project)
@@ -302,7 +302,7 @@ func scanHistoryResume(row historyRowScanner) (HistoryResume, error) {
 	if err := row.Scan(&value.ID, &value.SourceCaptureID, &value.SourceNativeSessionID,
 		&value.RequestedNativeSessionID, &value.HarnessArtifactID, &value.HarnessSHA256, &value.WorkspaceArtifactID,
 		&value.WorkspaceSHA256, &value.TargetTaskID, &value.TargetChangeID, &value.JobID,
-		&value.RequiredHeadCommit, &value.RequiredHarnessBuild, &value.RequiredHarnessSchema,
+		&value.RequiredHeadCommit, &value.SourceHarnessBuild, &value.RequiredHarnessSchema,
 		&value.State, &value.RequestedBy, &value.IdempotencyKey, &created, &updated); err != nil {
 		return HistoryResume{}, err
 	}

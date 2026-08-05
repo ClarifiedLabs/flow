@@ -14,7 +14,6 @@ import (
 
 	flowclient "github.com/ClarifiedLabs/flow/internal/client"
 	"github.com/ClarifiedLabs/flow/internal/config"
-	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	"github.com/ClarifiedLabs/flow/internal/historyarchive"
 )
 
@@ -23,7 +22,7 @@ func validateHistoryResumePayload(value HistoryResumePayload) error {
 		"resume id": value.ID, "source capture id": value.SourceCaptureID,
 		"native session id": value.NativeSessionID, "Harness artifact id": value.HarnessArtifactID,
 		"workspace artifact id": value.WorkspaceArtifactID, "required head commit": value.RequiredHeadCommit,
-		"required Harness build": value.RequiredHarnessBuild,
+		"source Harness build": value.SourceHarnessBuild,
 	} {
 		if strings.TrimSpace(field) == "" {
 			return fmt.Errorf("history resume %s is required", name)
@@ -51,17 +50,6 @@ func validateHistoryResumePayload(value HistoryResumePayload) error {
 	return nil
 }
 
-func validateResumeHarnessCompatibility(ctx context.Context, resume HistoryResumePayload) error {
-	installedBuild, err := flowharness.BuildVersion(ctx, flowharness.Harness)
-	if err != nil {
-		return err
-	}
-	if installedBuild != resume.RequiredHarnessBuild {
-		return fmt.Errorf("Harness build mismatch: worker has %q, resume requires %q", installedBuild, resume.RequiredHarnessBuild)
-	}
-	return nil
-}
-
 type historyResumeArchives struct {
 	harnessPath   string
 	workspacePath string
@@ -76,7 +64,7 @@ func (a historyResumeArchives) cleanup() {
 // validates both immutable archives before prepareWorktree can mutate the job
 // checkout. The later restore repeats archive validation while extracting.
 func prepareHistoryResumeArchives(ctx context.Context, input RunInput, resume HistoryResumePayload, attemptDirectory string) (historyResumeArchives, error) {
-	if resume.RequiredHeadCommit != strings.TrimSpace(resume.RequiredHeadCommit) || resume.RequiredHarnessBuild != strings.TrimSpace(resume.RequiredHarnessBuild) {
+	if resume.RequiredHeadCommit != strings.TrimSpace(resume.RequiredHeadCommit) || resume.SourceHarnessBuild != strings.TrimSpace(resume.SourceHarnessBuild) {
 		return historyResumeArchives{}, errors.New("history resume compatibility values are not canonical")
 	}
 	client, err := flowclient.New(config.ClientConfig{ServerURL: input.Config.CoordinatorURL, Token: input.Config.Token})
@@ -131,8 +119,8 @@ func inspectResumeArchive(ctx context.Context, archivePath string, limits histor
 }
 
 func validateResumeHarnessInspection(inspection historyarchive.Inspection, resume HistoryResumePayload) error {
-	if inspection.Harness == nil || inspection.Harness.HarnessBuild != resume.RequiredHarnessBuild {
-		return errors.New("history resume Harness archive metadata does not match the required build")
+	if inspection.Harness == nil || inspection.Harness.HarnessBuild != resume.SourceHarnessBuild {
+		return errors.New("history resume Harness archive metadata does not match the source build")
 	}
 	memberMatches := 0
 	for _, member := range inspection.Harness.Members {
@@ -143,7 +131,7 @@ func validateResumeHarnessInspection(inspection historyarchive.Inspection, resum
 		if relativeDir == "." {
 			relativeDir = ""
 		}
-		if member.ParseStatus != "parsed" || member.HarnessBuild != resume.RequiredHarnessBuild ||
+		if member.ParseStatus != "parsed" || member.HarnessBuild != resume.SourceHarnessBuild ||
 			member.NativeSchemaVersion != resume.RequiredHarnessSchemaVersion || relativeDir != resume.SessionRelativeDir {
 			return errors.New("history resume native session metadata does not match the coordinator selection")
 		}

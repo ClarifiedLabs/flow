@@ -59,6 +59,10 @@ func TestCreateHistoryResumeDerivesImmutableLineageAndIsIdempotent(t *testing.T)
 	}); err != nil {
 		t.Fatal(err)
 	}
+	observed, err := env.service.Get(ctx, capture.ID)
+	if err != nil || observed.HarnessVersion != "0.4.5" {
+		t.Fatalf("observed source Harness build = %q, err=%v", observed.HarnessVersion, err)
+	}
 	workspaceArtifact := publishWorkspaceSummary(t, env.service, capture.ID, reserved.UploadGrant)
 	publishCanonicalManifestBytes(t, env.service, capture.ID, PublishHistoryArtifactInput{
 		LogicalKey: "manifest/final", Kind: HistoryArtifactManifest, Phase: HistoryArtifactFinal,
@@ -142,7 +146,7 @@ END;`); err != nil {
 		t.Fatalf("create resume: %v", err)
 	}
 	if !created || resume.SourceNativeSessionID != "native-child" || resume.HarnessArtifactID != harnessArtifact.ID ||
-		resume.WorkspaceArtifactID != workspaceArtifact.ID || resume.RequiredHeadCommit != head || resume.RequiredHarnessBuild != "0.4.5" ||
+		resume.WorkspaceArtifactID != workspaceArtifact.ID || resume.RequiredHeadCommit != head || resume.SourceHarnessBuild != "0.4.5" ||
 		resume.RequiredHarnessSchema != 5 || resume.State != "queued" {
 		t.Fatalf("resume = %+v, created=%t", resume, created)
 	}
@@ -161,7 +165,7 @@ END;`); err != nil {
 		"id": resume.ID, "source_capture_id": capture.ID, "native_session_id": "native-child",
 		"session_relative_dir": "children/native-child", "harness_artifact_id": harnessArtifact.ID,
 		"workspace_artifact_id": workspaceArtifact.ID, "required_head_commit": head,
-		"required_harness_build": "0.4.5",
+		"source_harness_build": "0.4.5",
 	} {
 		if got := raw[key]; got != want {
 			t.Fatalf("history_resume[%q] = %#v, want %q", key, got, want)

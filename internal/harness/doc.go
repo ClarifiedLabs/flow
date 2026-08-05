@@ -283,24 +283,6 @@ func availableDefinitions() []Definition {
 	return defs
 }
 
-// BuildVersion returns the exact native build identifier Harness writes into
-// session state. Capture reservation uses this value for build-matched indexing.
-func BuildVersion(ctx context.Context, name string) (string, error) {
-	definition, ok := Lookup(name)
-	if !ok || definition.Executable == "" {
-		return "", fmt.Errorf("unsupported harness %q", name)
-	}
-	output, err := exec.CommandContext(ctx, definition.Executable, "--version").CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("inspect %s build: %w", definition.Name, err)
-	}
-	fields := strings.Fields(string(output))
-	if len(fields) != 2 || NormalizeName(fields[0]) != definition.Name || !strings.HasPrefix(fields[1], "v") || len(fields[1]) > 255 {
-		return "", fmt.Errorf("inspect %s build: invalid version output %q", definition.Name, strings.TrimSpace(string(output)))
-	}
-	return fields[1], nil
-}
-
 func shellDefinition() Definition {
 	return Definition{
 		Name:        Shell,

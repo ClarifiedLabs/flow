@@ -59,7 +59,7 @@ func (o *Outbox) recordVerdictLocked(ctx context.Context, client Client, entry *
 	return o.saveLocked(ctx, entry)
 }
 
-// Publish replays one staged capture through protocol 6. Every acknowledged
+// Publish replays one staged capture through protocol 7. Every acknowledged
 // remote operation is durably checkpointed before the next operation begins.
 func (o *Outbox) Publish(ctx context.Context, client Client, captureID string) error {
 	if client == nil {

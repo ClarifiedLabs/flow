@@ -1124,7 +1124,7 @@ labels:
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"worker_id: w-local", "protocol: 6", "labels: 3"} {
+	for _, want := range []string{"worker_id: w-local", "protocol: 7", "labels: 3"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("config output missing %q:\n%s", want, output)
 		}
@@ -1459,7 +1459,7 @@ labels:
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"worker_id: w-local", "protocol: 6", "labels: 3"} {
+	for _, want := range []string{"worker_id: w-local", "protocol: 7", "labels: 3"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("config output missing %q:\n%s", want, output)
 		}

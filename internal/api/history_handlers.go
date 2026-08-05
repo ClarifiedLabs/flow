@@ -425,7 +425,7 @@ func (s *projectServer) handleResumeHistoryCapture(w http.ResponseWriter, r *htt
 		SourceNativeSessionID: resume.SourceNativeSessionID,
 		JobID:                 resume.JobID, State: resume.State,
 		RequiredHeadCommit:    resume.RequiredHeadCommit,
-		RequiredHarnessBuild:  resume.RequiredHarnessBuild,
+		SourceHarnessBuild:    resume.SourceHarnessBuild,
 		RequiredHarnessSchema: resume.RequiredHarnessSchema,
 		Created:               created,
 	})
