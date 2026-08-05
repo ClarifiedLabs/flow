@@ -91,7 +91,7 @@ func runOrchestrator(args []string, stdout, stderr io.Writer) int {
 	}
 	profiles, providers, err := buildProfilesAndProviders(resolved)
 	if err != nil {
-		fmt.Fprintf(stderr, "configure assignment providers: %v\n", err)
+		fmt.Fprintf(stderr, "configure capacity providers: %v\n", err)
 		return 1
 	}
 	coordinatorClient := orchestrator.NewCoordinatorClient(resolved.CoordinatorURL, resolved.Token, nil)
@@ -108,7 +108,7 @@ func runOrchestrator(args []string, stdout, stderr io.Writer) int {
 		Metrics: orchestrator.NewMetrics(telemetryRegistry),
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "create assignment reconciler: %v\n", err)
+		fmt.Fprintf(stderr, "create capacity reconciler: %v\n", err)
 		return 1
 	}
 
@@ -131,10 +131,10 @@ func runOrchestrator(args []string, stdout, stderr io.Writer) int {
 		_ = telemetry.Shutdown(shutdownCtx)
 	}()
 
-	fmt.Fprintf(stdout, "orchestrator: reconciling %d assignment profile(s) from %s every %s\n",
+	fmt.Fprintf(stdout, "orchestrator: reconciling %d capacity profile(s) from %s every %s\n",
 		len(profiles), resolved.CoordinatorURL, resolved.PollInterval)
 	if err := reconciler.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		fmt.Fprintf(stderr, "run assignment reconciler: %v\n", err)
+		fmt.Fprintf(stderr, "run capacity reconciler: %v\n", err)
 		return 1
 	}
 	return 0
@@ -147,7 +147,7 @@ func buildProfilesAndProviders(cfg config.ResolvedOrchestrator) ([]orchestrator.
 		providerKey := configured.ProviderID + "/" + configured.Name
 		profile := orchestrator.Profile{
 			ProviderID: configured.ProviderID, ProfileName: configured.Name,
-			MaxConcurrency: configured.MaxConcurrency, Labels: configured.Labels,
+			MaxConcurrency: configured.MaxConcurrency, IdleCapacity: configured.IdleCapacity, Labels: configured.Labels,
 			Taints: configured.Taints, HarnessModels: configured.HarnessModels,
 			RequiredSelector: configured.RequiredSelector, StartupTimeout: configured.StartupTimeout,
 			Provider: providerKey, ProviderType: configured.Provider, ProviderOptions: make(map[string]string),

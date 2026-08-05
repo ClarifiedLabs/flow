@@ -61,6 +61,14 @@ type Worker struct {
 	ExpiresAt       *time.Time     `json:"expires_at"`
 }
 
+// HarnessRequirement is the runtime capability a job needs. Reasoning effort
+// is intentionally absent: Harness presents one portable reasoning interface
+// for every model and reasoning never participates in worker scheduling.
+type HarnessRequirement struct {
+	Harness string `json:"harness"`
+	Model   string `json:"model,omitempty"`
+}
+
 type Job struct {
 	ID             string                 `json:"id"`
 	TaskID         *string                `json:"task_id"`
@@ -72,6 +80,7 @@ type Job struct {
 	CapacityBucket CapacityBucket         `json:"capacity_bucket"`
 	Priority       int                    `json:"priority"`
 	Selector       map[string]string      `json:"selector"`
+	Harness        HarnessRequirement     `json:"harness_requirement,omitempty"`
 	Tolerations    []scheduler.Toleration `json:"tolerations"`
 	Payload        map[string]any         `json:"payload"`
 	TranscriptPath string                 `json:"transcript_path,omitempty"`
@@ -117,6 +126,7 @@ type EnqueueJobInput struct {
 	RunsOn                                 map[string]string
 	Requires                               []string
 	Size                                   string
+	Harness                                HarnessRequirement
 	Tolerations                            []scheduler.Toleration
 	Payload                                map[string]any
 	dispatchKey                            string
@@ -190,6 +200,16 @@ func (s *Service) EnqueueJob(ctx context.Context, input EnqueueJobInput) (Job, e
 	if err := validateCapacityBucket(input.CapacityBucket); err != nil {
 		return Job{}, err
 	}
+	input.Harness.Harness = strings.ToLower(strings.TrimSpace(input.Harness.Harness))
+	input.Harness.Model = strings.TrimSpace(input.Harness.Model)
+	if input.Harness.Model != "" && input.Harness.Harness == "" {
+		return Job{}, errors.New("required model requires a harness")
+	}
+	if input.Harness.Harness != "" {
+		if err := flowharness.ValidateAgentName(input.Harness.Harness); err != nil {
+			return Job{}, fmt.Errorf("job harness requirement: %w", err)
+		}
+	}
 	selector, err := scheduler.CompileSelector(scheduler.SelectorInput{
 		RunsOn:   input.RunsOn,
 		Requires: input.Requires,
@@ -198,7 +218,15 @@ func (s *Service) EnqueueJob(ctx context.Context, input EnqueueJobInput) (Job, e
 	if err != nil {
 		return Job{}, err
 	}
-	selectorJSON, err := encodeStringMap(selector.Requirements())
+	requirements := selector.Requirements()
+	if input.Harness.Harness != "" {
+		key := flowharness.AgentHarnessLabel(input.Harness.Harness)
+		if current, exists := requirements[key]; exists && current != "true" {
+			return Job{}, fmt.Errorf("job selector conflicts with harness requirement %s", input.Harness.Harness)
+		}
+		requirements[key] = "true"
+	}
+	selectorJSON, err := encodeStringMap(requirements)
 	if err != nil {
 		return Job{}, err
 	}
@@ -228,13 +256,15 @@ INSERT INTO jobs (
 	capacity_bucket,
 	priority,
 	selector_json,
+	required_harness,
+	required_model,
 	tolerations_json,
 	payload_json,
 	dispatch_key,
 	created_at,
 	updated_at
 )
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 WHERE (
 	? IS NULL OR EXISTS (
 		SELECT 1 FROM workflow_runs AS wr
@@ -301,6 +331,8 @@ WHERE (
 		string(input.CapacityBucket),
 		input.Priority,
 		selectorJSON,
+		input.Harness.Harness,
+		input.Harness.Model,
 		tolerationsJSON,
 		payload,
 		input.dispatchKey,
@@ -923,6 +955,8 @@ SELECT
 	capacity_bucket,
 	priority,
 	selector_json,
+	required_harness,
+	required_model,
 	tolerations_json,
 	payload_json,
 	transcript_path,
@@ -1046,6 +1080,8 @@ func eligibleForWorker(job Job, worker Worker, used scheduler.Capacity) (bool, e
 		return false, err
 	}
 
+	persistent := worker.CapacityBucket == BucketPersistentAgent || (worker.CapacityBucket == "" && job.CapacityBucket == BucketPersistentAgent)
+	ephemeral := worker.CapacityBucket == BucketEphemeral || (worker.CapacityBucket == "" && job.CapacityBucket == BucketEphemeral)
 	return scheduler.Eligible(scheduler.Job{
 		Selector:       selector,
 		Tolerations:    job.Tolerations,
@@ -1054,8 +1090,8 @@ func eligibleForWorker(job Job, worker Worker, used scheduler.Capacity) (bool, e
 		Labels: worker.Labels,
 		Taints: worker.Taints,
 		Capacity: scheduler.Capacity{
-			PersistentAgent: boolToInt(worker.CapacityBucket == BucketPersistentAgent),
-			Ephemeral:       boolToInt(worker.CapacityBucket == BucketEphemeral),
+			PersistentAgent: boolToInt(persistent),
+			Ephemeral:       boolToInt(ephemeral),
 		},
 		Used: used,
 	})
@@ -1117,8 +1153,10 @@ func scanWorker(row scanner) (Worker, error) {
 	); err != nil {
 		return Worker{}, fmt.Errorf("scan worker: %w", err)
 	}
-	if err := validateCapacityBucket(CapacityBucket(capacityBucket)); err != nil {
-		return Worker{}, fmt.Errorf("worker %s capacity bucket: %w", worker.ID, err)
+	if capacityBucket != "" {
+		if err := validateCapacityBucket(CapacityBucket(capacityBucket)); err != nil {
+			return Worker{}, fmt.Errorf("worker %s capacity bucket: %w", worker.ID, err)
+		}
 	}
 	worker.CapacityBucket = CapacityBucket(capacityBucket)
 
@@ -1170,6 +1208,8 @@ func scanJob(row scanner) (Job, error) {
 	var state string
 	var bucket string
 	var selectorJSON string
+	var requiredHarness string
+	var requiredModel string
 	var tolerationsJSON string
 	var payloadJSON string
 	var transcriptPath string
@@ -1186,6 +1226,8 @@ func scanJob(row scanner) (Job, error) {
 		&bucket,
 		&job.Priority,
 		&selectorJSON,
+		&requiredHarness,
+		&requiredModel,
 		&tolerationsJSON,
 		&payloadJSON,
 		&transcriptPath,
@@ -1227,6 +1269,7 @@ func scanJob(row scanner) (Job, error) {
 	job.State = JobState(state)
 	job.CapacityBucket = CapacityBucket(bucket)
 	job.Selector = selector
+	job.Harness = HarnessRequirement{Harness: requiredHarness, Model: requiredModel}
 	job.Tolerations = tolerations
 	job.Payload = payload
 	job.TranscriptPath = transcriptPath

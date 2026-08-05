@@ -1,5 +1,5 @@
-// Package orchestrator reconciles durable coordinator assignments with
-// assignment-scoped worker resources.
+// Package orchestrator reconciles durable coordinator capacity slots with
+// one-shot worker resources and project-local assignments.
 package orchestrator
 
 import (
@@ -22,7 +22,7 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/worker"
 )
 
-// ProviderStatus is the observed state of one assignment-scoped resource.
+// ProviderStatus is the observed state of one one-shot provider resource.
 type ProviderStatus string
 
 const (
@@ -55,14 +55,48 @@ func IdentityOf(value contract.ProvisionerAssignment) AssignmentIdentity {
 	}
 }
 
+func IdentityOfSlot(slot worker.CapacitySlot) AssignmentIdentity {
+	return AssignmentIdentity{
+		AssignmentID: slot.ID, WorkerID: slot.WorkerID, ProviderID: slot.ProviderID,
+		ProfileName: slot.ProfileName, ProviderRequestID: slot.ProviderRequestID,
+		ProviderType: slot.ProviderType, ProviderOptions: slot.ProviderOptions,
+	}
+}
+
 // LaunchRequest contains everything a provider needs to start one direct,
 // assignment-bound worker. WorkerToken must only be written to private config.
 type LaunchRequest struct {
 	Identity       AssignmentIdentity
 	Assignment     contract.ProvisionerAssignment
+	Slot           *worker.CapacitySlot
 	Profile        Profile
 	CoordinatorURL string
 	WorkerToken    string
+}
+
+func (p Profile) capacitySlotRequest(requestID string) contract.CreateProvisionerCapacitySlotRequest {
+	seconds := int(p.StartupTimeout / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	return contract.CreateProvisionerCapacitySlotRequest{
+		ProviderID: p.ProviderID, ProviderRequestID: requestID,
+		ProfileName: p.ProfileName, ProviderType: p.ProviderType,
+		ProviderOptions: p.ProviderOptions, MaxInstances: p.MaxConcurrency + p.IdleCapacity,
+		AllowedRoles: p.AllowedRoles, AllowedBuckets: p.AllowedBuckets,
+		Labels: p.Labels, Taints: p.Taints, HarnessModels: p.HarnessModels,
+		RequiredSelector: p.RequiredSelector, StartupTimeoutSeconds: seconds,
+	}
+}
+
+func (p Profile) capacityDemandRequest() contract.ProvisionerCapacityDemandRequest {
+	return contract.ProvisionerCapacityDemandRequest{
+		ProviderID: p.ProviderID, ProfileName: p.ProfileName,
+		MaxConcurrency: p.MaxConcurrency, IdleCapacity: p.IdleCapacity,
+		AllowedRoles: p.AllowedRoles, AllowedBuckets: p.AllowedBuckets,
+		Labels: p.Labels, Taints: p.Taints, HarnessModels: p.HarnessModels,
+		RequiredSelector: p.RequiredSelector,
+	}
 }
 
 // Provider manages exactly one resource per stable assignment identity.
@@ -99,6 +133,7 @@ type Profile struct {
 	ProviderID       string
 	ProfileName      string
 	MaxConcurrency   int
+	IdleCapacity     int
 	AllowedRoles     []worker.JobRole
 	AllowedBuckets   []worker.CapacityBucket
 	Labels           map[string]string
@@ -228,6 +263,9 @@ func NewReconciler(options ReconcilerOptions) (*Reconciler, error) {
 		if profile.MaxConcurrency <= 0 || profile.StartupTimeout <= 0 {
 			return nil, fmt.Errorf("profile %s/%s requires positive max concurrency and startup timeout", profile.ProviderID, profile.ProfileName)
 		}
+		if profile.IdleCapacity < 0 {
+			return nil, fmt.Errorf("profile %s/%s requires non-negative idle capacity", profile.ProviderID, profile.ProfileName)
+		}
 		if options.Providers[profile.Provider] == nil {
 			return nil, fmt.Errorf("profile %s/%s selects unconfigured provider %q", profile.ProviderID, profile.ProfileName, profile.Provider)
 		}
@@ -291,6 +329,9 @@ func (r *Reconciler) runCycle(ctx context.Context) {
 func (r *Reconciler) Reconcile(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if capacity, ok := r.coordinator.(CapacityCoordinator); ok {
+		return r.reconcileCapacity(ctx, capacity)
 	}
 	assignments, err := r.coordinator.ListAssignments(ctx, r.providerIDs)
 	if err != nil {
@@ -643,10 +684,22 @@ func profileMatchesAssignment(profile Profile, assignment worker.Assignment) boo
 		equalStringMaps(profile.ProviderOptions, assignment.ProviderOptions) &&
 		equalStringMaps(profile.Labels, assignment.ProfileLabels) &&
 		equalEmptySlices(profile.Taints, assignment.ProfileTaints) &&
-		equalEmptySlices(profile.HarnessModels, assignment.ProfileHarnessModels) &&
+		equalHarnessModels(profile.HarnessModels, assignment.ProfileHarnessModels) &&
 		equalEmptySlices(profile.AllowedRoles, assignment.AllowedRoles) &&
 		equalEmptySlices(profile.AllowedBuckets, assignment.AllowedBuckets) &&
 		equalStringMaps(profile.RequiredSelector, assignment.RequiredSelector)
+}
+
+func equalHarnessModels(left, right []flowharness.Model) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for _, expected := range left {
+		if !worker.HarnessModelAvailable(right, expected.Harness, expected.QualifiedID) {
+			return false
+		}
+	}
+	return true
 }
 
 func equalStringMaps(left, right map[string]string) bool {

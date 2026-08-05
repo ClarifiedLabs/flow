@@ -38,6 +38,7 @@ profiles:
   - name: " linux-large "
     provider: KUBERNETES
     max_concurrency: 7
+    idle_capacity: 2
     allowed_roles: [AUTHOR, reviewer]
     accepts: [PERSISTENT_AGENT, ephemeral]
     labels:
@@ -74,6 +75,9 @@ metrics:
 	profile := cfg.Profiles[0]
 	if profile.Name != "linux-large" || profile.Provider != "kubernetes" || profile.ProviderID != "kubernetes" {
 		t.Fatalf("profile identity = %+v", profile)
+	}
+	if profile.IdleCapacity != 2 {
+		t.Fatalf("idle capacity = %d, want 2", profile.IdleCapacity)
 	}
 	if !reflect.DeepEqual(profile.AllowedRoles, []string{"author", "reviewer"}) || !reflect.DeepEqual(profile.Accepts, []string{"persistent_agent", "ephemeral"}) {
 		t.Fatalf("profile eligibility = roles=%v accepts=%v", profile.AllowedRoles, profile.Accepts)
@@ -250,6 +254,7 @@ func TestOrchestratorValidation(t *testing.T) {
 		{"duplicate name", func(c *OrchestratorConfig) { c.Profiles = append(c.Profiles, c.Profiles[0]) }, "duplicated"},
 		{"provider invalid", func(c *OrchestratorConfig) { c.Profiles[0].Provider = "docker" }, "invalid provider"},
 		{"concurrency positive", func(c *OrchestratorConfig) { c.Profiles[0].MaxConcurrency = 0 }, "max_concurrency"},
+		{"idle capacity non-negative", func(c *OrchestratorConfig) { c.Profiles[0].IdleCapacity = -1 }, "idle_capacity"},
 		{"startup positive", func(c *OrchestratorConfig) { c.Profiles[0].StartupTimeout = "0s" }, "startup_timeout must be greater"},
 		{"role invalid", func(c *OrchestratorConfig) { c.Profiles[0].AllowedRoles = []string{"owner"} }, "invalid allowed role"},
 		{"role duplicate normalized", func(c *OrchestratorConfig) { c.Profiles[0].AllowedRoles = []string{"author", " AUTHOR "} }, "duplicate role"},

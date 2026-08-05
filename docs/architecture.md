@@ -12,11 +12,11 @@ Flow ships four Go commands from one module:
 | --- | --- |
 | `flow` | Human and in-session CLI. It registers projects, drives task/workflow commands, fetches prompts, submits typed artifacts, and attaches to terminals. |
 | `flow-server` | Coordinator daemon. It serves the HTTP API, browser UI, Git HTTP exchange endpoints, web/terminal proxy routes, project registry, workflow executor, scheduler entrypoints, and exchange git hooks. |
-| `flow-worker` | One-shot job executor. It registers with assignment-scoped credentials, exact-claims its bound job, clones exchange branches, runs the job in tmux, heartbeats its lease, uploads transcripts, reports, and exits. |
-| `flow-orchestrator` | Durable assignment reconciler. It reserves exact queued jobs and creates one Kubernetes Job/Secret or Darwin child process per assignment. |
+| `flow-worker` | One-shot job executor. It registers a capacity slot with a direct credential, may wait unbound as idle capacity, exact-claims its eventual job, runs it, reports, and exits. |
+| `flow-orchestrator` | Durable capacity reconciler. It recovers slots, verifies capabilities, binds jobs, and creates one Kubernetes Job/Secret or Darwin child per slot. |
 
-A single `flow-server` can serve many projects. Every worker is created for one
-durable assignment and executes it with `flow-worker run --one-shot --config
+A single `flow-server` can serve many projects. Every worker is one durable slot
+that binds at most once and executes with `flow-worker run --one-shot --config
 PATH`; invoking `flow-worker` without the `run` subcommand is an error.
 
 ## Data layout
@@ -127,25 +127,31 @@ additionally proves the run owns a merged change.
 
 Orchestrator profiles select queued jobs by role, workload bucket, labels,
 taints, harness models, and required selectors. Profile `accepts` controls which
-workload buckets a provider may reserve; it does not change the
-one-process-per-assignment lifecycle.
+workload buckets a provider may accept; it does not change the one-process-per-
+slot lifecycle.
 
-Project databases hold jobs, leases, and provisioner assignments. A reservation
-selects one exact eligible queued job across projects and durably records its
-job/worker/provider/profile identity, role and bucket, scheduling snapshot,
-startup deadline, retry state, and cleanup state in that project's database.
-The assignment-aware claim path permits that worker to claim only its bound job.
+The global database holds capacity slots and runtime worker capabilities.
+Project databases hold jobs, leases, and the authoritative assignment created
+when a ready slot binds. Cross-database binding commits the project assignment
+first; recovery repairs the global slot by stable worker ID after a crash. The
+assignment-aware claim path permits that worker to claim only its bound job.
 
-`flow-orchestrator` performs recovery before new reservation on every cycle. It
-inspects each open assignment's provider resource, relaunches a missing pending
-resource only when its durable descriptor still matches a locally approved
-profile, abandons unapproved, permanently failed, or startup-expired pending
-assignments, and deletes resources for closed assignments. Only then does it
-reserve new work up to each profile's `max_concurrency`. A Kubernetes provider
-creates one Job and one private worker-config Secret per assignment; the Darwin
-provider creates one child process and durable private state directory. Both run
+`flow-orchestrator` performs recovery, provider health checks, ready-slot
+binding, demand calculation, and provisioning in that order. Desired instances
+are `min(max_concurrency, active assignments + eligible queued jobs) +
+idle_capacity`; pending slots count toward the target and surplus unbound slots
+drain. A Kubernetes provider creates one Job and private Secret per slot; the
+Darwin provider creates one child process and durable private state directory.
+Both run
 `flow-worker run --one-shot --config PATH` with the private config and direct
-worker credential returned for that assignment.
+worker credential returned for that slot.
+
+Harness availability is runtime-derived at registration and refreshed before
+claim. Job requirements contain a Harness name and optional exact qualified
+model ID; reasoning support is intentionally absent. Binding invalidates the
+idle report, so a successful post-bind capability report is mandatory before
+lease creation. Capability loss at this boundary requeues infrastructure work
+without starting or consuming a task/workflow attempt.
 
 Assignment closure fences the worker credential. Successful cleanup also removes
 the global worker-directory row and records `cleaned_at`; provider deletion and
@@ -340,11 +346,13 @@ web UI or CLI.
 Flow uses bearer tokens for API clients and short-lived cookies for the web UI:
 
 - **Owner token**: human/admin CLI calls and web UI bootstrap.
-- **Worker token**: short-lived, assignment-scoped token for heartbeat, exact job
-  claim/report, and transcript upload. The reservation returns it directly;
+- **Worker token**: short-lived, capacity-slot credential. Before binding it is
+  limited to registration, heartbeat, claim-wait, and control. After binding it
+  is limited to the exact project/assignment for claim/report and uploads;
   assignment abandonment and cleanup revoke it.
-- **Orchestrator token**: provisioner-assignment reservation, recovery, and
-  cleanup calls for its bound provider IDs; it has no general owner authority.
+- **Orchestrator token**: capacity-slot provisioning, assignment binding,
+  recovery, and cleanup calls for its bound provider IDs; it has no general
+  owner authority.
   Retired provider IDs stay bound as explicit recovery tombstones until their
   durable assignments are cleaned, even after their final scheduling profile is
   removed.

@@ -146,7 +146,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	var gitCommitEmail string
 	flags.StringVar(&configPath, "c", "", "worker config path")
 	flags.StringVar(&configPath, "config", "", "worker config path")
-	flags.BoolVar(&oneShot, "one-shot", false, "run the worker's single assignment-created job, then exit (required)")
+	flags.BoolVar(&oneShot, "one-shot", false, "wait for and run the capacity slot's single bound job, then exit (required)")
 	flags.BoolVar(&noMetrics, "no-metrics", false, "disable the telemetry endpoint (/readyz, /livez, /metrics)")
 	flags.StringVar(&metricsListen, "metrics-listen", "", "telemetry endpoint listen address")
 	flags.DurationVar(&claimWait, "claim-wait", 30*time.Second, "claim long-poll duration")
@@ -162,7 +162,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if !oneShot {
-		fmt.Fprintln(stderr, "flow-worker run requires --one-shot: workers are assignment-created one-shot processes")
+		fmt.Fprintln(stderr, "flow-worker run requires --one-shot: capacity workers bind at most once")
 		return 2
 	}
 
@@ -196,7 +196,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if strings.TrimSpace(cfg.Token) == "" {
-		fmt.Fprintln(stderr, "worker config token is required: workers authenticate with their assignment-scoped credential")
+		fmt.Fprintln(stderr, "worker config token is required: workers authenticate with their capacity-slot credential")
 		return 1
 	}
 	if err := os.MkdirAll(filepath.Join(cfg.WorkDir, "jobs"), 0o700); err != nil {
@@ -446,10 +446,17 @@ func runWorkerOnce(ctx context.Context, client *flowclient.Client, cfg config.Wo
 	}
 
 	slog.Debug("flow-worker claim job", "worker_id", cfg.WorkerID, "claim_wait", timings.ClaimWait, "lease_duration", timings.LeaseDuration)
+	labels, _ := registrationLabelsWithAvailability(cfg.Labels)
+	harnessModels := registrationHarnessModels(labels)
 	claim, err := client.ClaimJobContext(ctx, flowclient.ClaimJobInput{
-		WorkerID:      cfg.WorkerID,
-		LeaseDuration: timings.LeaseDuration,
-		Wait:          timings.ClaimWait,
+		WorkerID:             cfg.WorkerID,
+		LeaseDuration:        timings.LeaseDuration,
+		Wait:                 timings.ClaimWait,
+		CapabilitiesReported: true,
+		Labels:               labels,
+		Taints:               cfg.Taints,
+		HarnessModels:        harnessModels,
+		HeartbeatTTL:         timings.HeartbeatTTL,
 	})
 	if err != nil {
 		return false, fmt.Errorf("claim job: %w", err)
@@ -900,7 +907,8 @@ func registrationLabels(configured map[string]string) map[string]string {
 func registrationLabelsWithAvailability(configured map[string]string) (map[string]string, []flowharness.Availability) {
 	labels := make(map[string]string, len(configured)+4)
 	for key, value := range configured {
-		if strings.TrimSpace(strings.ToLower(key)) == "agent" {
+		normalizedKey := strings.TrimSpace(strings.ToLower(key))
+		if normalizedKey == "agent" || strings.HasPrefix(normalizedKey, "agent.harness.") {
 			continue
 		}
 		labels[key] = value
@@ -1766,7 +1774,7 @@ func printUsage(out io.Writer) {
 Global flags:
   --log-level LEVEL   structured log level: debug, info, warn, error, or off (overrides LOG_LEVEL)
 
-Workers are assignment-created one-shot processes: they register against
-their assignment, run exactly the assigned job, and exit.
+Workers are one-shot capacity slots: they register runtime capabilities, may
+wait unbound, run exactly one eventual assignment, and exit.
 `)
 }

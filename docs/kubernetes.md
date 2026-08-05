@@ -1,15 +1,16 @@
 # Kubernetes deployment
 
 Flow's Kubernetes control plane runs `flow-server` (the coordinator) and
-`flow-orchestrator` as Deployments. Workers are not a Deployment or a warm
-replica pool: the orchestrator creates one `batch/v1` Job and one private Secret
-for each durable coordinator assignment. The reference manifests live in
+`flow-orchestrator` as Deployments. Workers are one-shot capacity slots, not a
+reusable Deployment: a slot may be launched and verified before job binding,
+but it binds at most once. The orchestrator creates one `batch/v1` Job and one
+private Secret for each durable slot. The reference manifests live in
 [`k8s/`](../k8s).
 
 ## Local Kind quickstart
 
 For development and basic end-to-end testing from a source checkout, the Kind
-helpers build the local Flow images and run the complete assignment-based stack
+helpers build the local Flow images and run the complete capacity-slot stack
 in a local cluster. Install `kind`, `kubectl`, Go, and a running Docker-compatible
 runtime (`docker`, `podman`, or `nerdctl`), then run from the repository root:
 
@@ -24,7 +25,7 @@ The proxy URL must be reachable from Kind worker Pods. `up.sh` creates or update
 variables. It retains them only in the private, gitignored `.flow-kind/tokens`
 directory and in the cluster Secret; it does not write either value to a tracked
 manifest or generated Flow configuration. This is profile-wide: every
-assignment-created worker Job for the configured profile receives the two
+capacity-slot Job for the configured profile receives the two
 variables, and the proxy must enforce its local-network security model.
 
 The script creates or reuses the `flow` Kind cluster, loads locally built
@@ -42,7 +43,7 @@ kubectl --context kind-flow -n flow get deployments,jobs,pods
 ```
 
 With Git installed, run the smoke test to exercise successful execution, startup
-failure, cancellation, and cleanup of assignment-created worker Jobs and Pods:
+failure, cancellation, idle capacity, and cleanup of one-shot worker Jobs and Pods:
 
 ```sh
 ./scripts/kind/smoke.sh
@@ -97,31 +98,29 @@ kubectl apply -f k8s/orchestrator.yaml
 ```
 
 The orchestrator credential has provisioner scope and is bound by
-`--orchestrator-provider-ids`. Each reservation returns a separate short-lived
-worker credential scoped to its assignment.
+`--orchestrator-provider-ids`. Each capacity slot receives a separate direct
+worker credential before job binding.
 
 ## Durable assignment model
 
-Assignments are coordinator-owned records stored in the selected job's
-project-local SQLite database. Reservation atomically binds one exact queued job
-to a stable assignment, worker identity, provider/profile identity, scheduling
-snapshot, and startup deadline. The assignment remains the source of truth if
-the orchestrator or Kubernetes API restarts.
+Capacity slots and runtime worker capabilities are coordinator-global records.
+Once a ready slot is selected, its project-local assignment becomes the
+authoritative job binding. Binding commits the project assignment first; crash
+recovery repairs the global slot by stable worker ID.
 
 Each reconciliation cycle is recovery-first:
 
-1. List durable assignments across projects.
-2. Inspect resources for open assignments and delete resources for closed,
-   not-yet-cleaned assignments.
-3. Recover missing pending resources only when their persisted provider and
+1. List durable capacity slots and assignments.
+2. Inspect open slot resources and delete closed, not-yet-cleaned resources.
+3. Recover missing resources only when their persisted provider and
    scheduling descriptor still matches a locally configured profile, and subject
    to their durable retry time and startup deadline. A missing resource for a
    removed or changed profile is abandoned rather than launched from untrusted
    persisted settings. A transient launch failure is retried with bounded
-   backoff; a permanent failure or expired startup deadline abandons the pending
-   assignment.
-4. Only after recovery, reserve additional eligible jobs up to each profile's
-   `max_concurrency` and launch their resources.
+   backoff. An expired startup deadline closes the slot; a failed Harness/model
+   promise opens the profile circuit and leaves one automatically retrying probe.
+4. Bind verified ready slots, calculate demand, and provision the active target
+   plus each profile's `idle_capacity`.
 
 A worker that has claimed its assignment is governed by the ordinary lease and
 job recovery lifecycle; provider failure does not itself put claimed work back
@@ -149,11 +148,13 @@ profiles:
     provider: kubernetes
     provider_id: in-cluster
     max_concurrency: 10
+    idle_capacity: 2
     startup_timeout: 2m
     allowed_roles: [author, reviewer, verifier, ci, console]
     accepts: [persistent_agent, ephemeral]
     labels:
       os: linux
+      agent.harness.harness: "true"
     kubernetes:
       namespace: flow
       image: ghcr.io/clarifiedlabs/flow-worker:latest
@@ -165,17 +166,20 @@ metrics:
   listen: :8422
 ```
 
-`max_concurrency` bounds open assignments for that provider/profile; it is not a
-standby replica count. Profiles select candidates by role, workload bucket,
+`max_concurrency` bounds active assignments. `idle_capacity` is additional
+verified standby capacity, so the hard instance cap is their sum. The target is
+`min(max_concurrency, active assignments + eligible queued jobs) + idle_capacity`.
+Profiles select candidates by role, workload bucket,
 labels, taints, harness models, and `required_selector`. An omitted `accepts`
 defaults to the `ephemeral` workload bucket. The bucket names retain their job
 semantics: `persistent_agent` is used by author/reviewer/verifier/console work,
 while `ephemeral` is used by CI/check work. They do not imply process reuse.
 
-For each reservation, the coordinator returns a direct worker credential scoped
-to the assignment's stable worker ID. The orchestrator writes that token and the
-private assignment configuration to a mode-0400 `worker.yaml` in the assignment
-Secret. The Job mounts the Secret read-only and runs:
+For each slot, the coordinator returns a direct credential scoped to its stable
+worker ID. Before binding, it can only register, heartbeat, claim-wait, and use
+its control channel; project, git, history, terminal, and job data are denied.
+The orchestrator writes that token and private slot configuration to a mode-0400
+`worker.yaml` in the slot Secret. The Job mounts it read-only and runs:
 
 ```text
 flow-worker run --one-shot --config /var/run/flow/worker.yaml
@@ -183,13 +187,24 @@ flow-worker run --one-shot --config /var/run/flow/worker.yaml
 
 The Job uses `restartPolicy: Never` and `backoffLimit: 0`; retries are owned by
 the durable orchestrator reconciliation, not by kubelet/container restarts. Job
-and Secret names are deterministic from assignment identity, making launch and
+and Secret names are deterministic from slot identity, making launch and
 cleanup safe to retry. Keep the generated Secret private: it contains the direct
 worker bearer token.
 
+Profiles are independent provider configurations and may use different images,
+service accounts, pull policies, and Harness model-proxy Secrets. Configured
+`agent.harness.*` labels are treated as requirements, not facts: the worker
+removes them from static labels, probes Harness, and reports its live model
+catalog. An explicit job model must appear by qualified ID in that catalog.
+Reasoning level is never checked because Harness standardizes reasoning levels.
+
+If a probe cannot satisfy its profile's Harness/model promise, bulk launches
+for that profile pause and one probe retries with backoff. Orchestrator
+`/readyz` returns 503 while that circuit is open; other profiles continue.
+
 The orchestrator credential is distinct from the owner token. Its scope is
-`provisioner`: it can reserve/list assignments and record launch, abandon, and
-cleanup transitions for bound provider IDs, but has no general task, flow, or
+`provisioner`: it can reconcile slots and assignments for bound provider IDs,
+but has no general task, flow, or
 owner authority. Kubernetes RBAC should likewise be namespace-scoped to the Job and
 Secret operations required by the provider. The worker Job's ServiceAccount is
 separate and does not need permission to create workers or read other assignment
@@ -206,9 +221,9 @@ supervision, and telemetry through the worker's shared context; signal
 cancellation also exits zero. If interruption prevents a terminal report, lease
 expiry and coordinator recovery remain authoritative.
 
-Every worker identity belongs to one assignment and can claim only its bound
-job. Concurrency comes from independent assignments and Jobs, bounded by the
-orchestrator profile's `max_concurrency`.
+Every worker identity belongs to one slot. It may wait unbound, binds at most
+once, and can claim only that assignment's job. Active work is bounded by
+`max_concurrency`; `idle_capacity` is additional one-shot standby capacity.
 
 ## Telemetry endpoints
 
@@ -231,7 +246,7 @@ Readiness semantics:
 | --- | --- |
 | `flow-server` | the global SQLite database answers a ping |
 | `flow-worker` | the worker has registered and claims are not paused by disk pressure |
-| `flow-orchestrator` | one complete recovery-and-reservation cycle has succeeded |
+| `flow-orchestrator` | one complete recovery, binding, and capacity cycle has succeeded |
 
 Assignment-centric orchestrator metrics are:
 
@@ -246,7 +261,7 @@ Assignment-centric orchestrator metrics are:
 Coordinator `flow_queue_depth{state}` remains useful queue telemetry, but it is
 not a worker provisioning signal.
 
-## History durability for assignment workers
+## History durability for capacity workers
 
 `flow-server` stores its SQLite databases and the default local history blob
 backend beneath `/var/lib/flow`, which the reference Deployment mounts from the
@@ -254,7 +269,7 @@ backend beneath `/var/lib/flow`, which the reference Deployment mounts from the
 history blobs does not remove the database durability requirement.
 
 Mandatory history capture also has a worker-side durability requirement. An
-assignment worker keeps active job sources beneath its configured `work_dir` and
+capacity worker keeps active job sources beneath its configured `work_dir` and
 keeps the replayable history outbox outside `work_dir/jobs` (by default at
 `<work_dir>/history-outbox`). Both must survive a worker process or Pod restart
 until the coordinator acknowledges final publication. The outbox alone cannot
@@ -303,12 +318,12 @@ sizing, recovery, authorization, and waiver consequences.
 ## Darwin provider
 
 For local macOS operation, a `provider: darwin` profile creates one
-`flow-worker run --one-shot --config PATH` child process per assignment instead
+`flow-worker run --one-shot --config PATH` child process per capacity slot instead
 of Kubernetes resources. The provider stores a private worker config, PID,
 status, and log in a
-stable assignment directory beneath `darwin.state_dir`; its work directory is
-assignment-specific. On cleanup it terminates the process group when necessary.
-Successful assignment directories are removed; failed logs and work products are
+stable slot directory beneath `darwin.state_dir`; its work directory is
+slot-specific. On cleanup it terminates the process group when necessary.
+Successful slot directories are removed; failed logs and work products are
 retained for diagnosis after the private worker config and process-identity files
 are deleted. Keep `state_dir` on durable local storage and mode 0700 so restart
 inspection and credential cleanup remain possible. The provider rejects symlinked,

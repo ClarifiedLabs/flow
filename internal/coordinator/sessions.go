@@ -555,6 +555,7 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 		ChangeID:       &change.ID,
 		Role:           flowworker.RoleAuthor,
 		CapacityBucket: flowworker.BucketPersistentAgent,
+		Harness:        flowworker.HarnessRequirement{Harness: jobHarness, Model: s.defaultAgent.Model},
 		Priority:       priority,
 		Payload:        payload,
 	})
@@ -657,6 +658,7 @@ func (s *SessionService) EnsureConsoleJob(ctx context.Context, input EnsureConso
 	job, err := s.workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
 		Role:           flowworker.RoleConsole,
 		CapacityBucket: flowworker.BucketPersistentAgent,
+		Harness:        consoleHarnessRequirement(harness),
 		Priority:       input.Priority,
 		Payload:        payload,
 	})
@@ -786,6 +788,7 @@ func (s *SessionService) EnsureTaskConsoleJob(ctx context.Context, input EnsureT
 		RequireHeldWorkflowEvidenceFingerprint: requireEvidenceFingerprint,
 		Role:                                   flowworker.RoleConsole,
 		CapacityBucket:                         flowworker.BucketPersistentAgent,
+		Harness:                                consoleHarnessRequirement(harness),
 		Priority:                               input.Priority,
 		Payload:                                payload,
 	})
@@ -1182,6 +1185,7 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 		ChangeID:       &change.ID,
 		Role:           flowworker.RoleAuthor,
 		CapacityBucket: flowworker.BucketPersistentAgent,
+		Harness:        job.Harness,
 		Priority:       job.Priority,
 		Payload:        payload,
 	})
@@ -1190,6 +1194,14 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 	}
 
 	return true, nil
+}
+
+func consoleHarnessRequirement(name string) flowworker.HarnessRequirement {
+	name = flowharness.NormalizeName(name)
+	if flowharness.ValidateAgentName(name) == nil {
+		return flowworker.HarnessRequirement{Harness: name}
+	}
+	return flowworker.HarnessRequirement{}
 }
 
 // completionReviewDispatchedKey marks a crashed author job that has already been

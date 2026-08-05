@@ -191,6 +191,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", err.Error())
 		return
 	}
+	if err := s.authorizeCapacityWorkerRequest(r.Context(), r, principal); err != nil {
+		writeError(w, http.StatusForbidden, "forbidden", err.Error())
+		return
+	}
 
 	if s.shouldUseIdempotency(r, principal) {
 		s.serveIdempotent(w, r, principal)
@@ -279,6 +283,11 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 
 	if r.URL.Path == provisionerAssignmentsPath || strings.HasPrefix(r.URL.Path, provisionerAssignmentsPath+"/") {
 		s.handleProvisionerAssignmentsPath(w, r, principal)
+		return
+	}
+
+	if r.URL.Path == provisionerCapacityDemandPath || r.URL.Path == provisionerCapacitySlotsPath || strings.HasPrefix(r.URL.Path, provisionerCapacitySlotsPath+"/") {
+		s.handleProvisionerCapacityPath(w, r, principal)
 		return
 	}
 

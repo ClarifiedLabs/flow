@@ -31,8 +31,10 @@ func (d *Directory) RegisterWorker(ctx context.Context, input RegisterWorkerInpu
 	if input.ID == "" {
 		return Worker{}, errors.New("worker id is required")
 	}
-	if err := validateCapacityBucket(input.CapacityBucket); err != nil {
-		return Worker{}, fmt.Errorf("worker capacity bucket: %w", err)
+	if input.CapacityBucket != "" {
+		if err := validateCapacityBucket(input.CapacityBucket); err != nil {
+			return Worker{}, fmt.Errorf("worker capacity bucket: %w", err)
+		}
 	}
 	labels, err := normalizeLabelsJSON(input.Labels)
 	if err != nil {

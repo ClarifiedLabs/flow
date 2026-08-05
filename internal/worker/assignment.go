@@ -31,6 +31,7 @@ const (
 // worker and one job. Profile fields are immutable scheduling snapshots.
 type Assignment struct {
 	ID                   string              `json:"id"`
+	CapacitySlotID       string              `json:"capacity_slot_id"`
 	WorkerID             string              `json:"worker_id"`
 	JobID                string              `json:"job_id"`
 	ProviderID           string              `json:"provider_id"`
@@ -76,6 +77,7 @@ type AssignmentCandidateFilter struct {
 // read from the job so callers cannot persist a contradictory snapshot.
 type ReserveAssignmentInput struct {
 	ID                   string
+	CapacitySlotID       string
 	WorkerID             string
 	JobID                string
 	ProviderID           string
@@ -140,6 +142,13 @@ type assignmentProfile struct {
 // FindAssignmentCandidate returns the first eligible, unassigned queued job in
 // normal queue order (priority descending, then oldest first).
 func (s *Service) FindAssignmentCandidate(ctx context.Context, filter AssignmentCandidateFilter) (Job, bool, error) {
+	return s.FindAssignmentCandidateForWorker(ctx, filter, nil)
+}
+
+// FindAssignmentCandidateForWorker additionally checks runtime-derived Harness
+// and explicit model availability. A nil worker performs profile-only demand
+// matching; a non-nil worker is used at the binding boundary.
+func (s *Service) FindAssignmentCandidateForWorker(ctx context.Context, filter AssignmentCandidateFilter, actual *Worker) (Job, bool, error) {
 	profile, err := normalizeAssignmentProfile(filter.ProfileLabels, filter.ProfileTaints, filter.ProfileHarnessModels, filter.AllowedRoles, filter.AllowedBuckets, filter.RequiredSelector)
 	if err != nil {
 		return Job{}, false, err
@@ -165,10 +174,55 @@ func (s *Service) FindAssignmentCandidate(ctx context.Context, filter Assignment
 			return Job{}, false, err
 		}
 		if eligible {
+			if actual != nil && !WorkerMeetsHarnessRequirement(*actual, job.Harness) {
+				continue
+			}
 			return job, true, nil
 		}
 	}
 	return Job{}, false, nil
+}
+
+func WorkerMeetsHarnessRequirement(actual Worker, required HarnessRequirement) bool {
+	harnessName := strings.ToLower(strings.TrimSpace(required.Harness))
+	if harnessName == "" {
+		return true
+	}
+	if actual.Labels[flowharness.AgentHarnessLabel(harnessName)] != "true" {
+		return false
+	}
+	if strings.TrimSpace(required.Model) == "" {
+		return true
+	}
+	return HarnessModelAvailable(actual.HarnessModels, harnessName, required.Model)
+}
+
+// CountAssignmentCandidates reports eligible unassigned queue demand for a
+// profile. It intentionally does not inspect reasoning metadata.
+func (s *Service) CountAssignmentCandidates(ctx context.Context, filter AssignmentCandidateFilter) (int, error) {
+	profile, err := normalizeAssignmentProfile(filter.ProfileLabels, filter.ProfileTaints, filter.ProfileHarnessModels, filter.AllowedRoles, filter.AllowedBuckets, filter.RequiredSelector)
+	if err != nil {
+		return 0, err
+	}
+	buckets := profile.buckets
+	if len(buckets) == 0 {
+		buckets = []CapacityBucket{BucketPersistentAgent, BucketEphemeral}
+	}
+	candidates, err := queuedJobCandidates(ctx, s.db, buckets)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, job := range candidates {
+		eligible, err := assignmentProfileEligible(job, profile)
+		if err != nil {
+			return 0, err
+		}
+		if eligible {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // ReserveAssignment atomically reserves a specified still-eligible queued job
@@ -198,6 +252,11 @@ func (s *Service) ReserveAssignment(ctx context.Context, input ReserveAssignment
 		if err != nil {
 			return Assignment{}, err
 		}
+	}
+	if strings.TrimSpace(input.CapacitySlotID) == "" {
+		// Direct service callers use a synthetic slot identity. Production
+		// provisioner bindings always pass the global slot id explicitly.
+		input.CapacitySlotID = input.ID
 	}
 	if strings.TrimSpace(input.WorkerID) == "" {
 		input.WorkerID, err = randomID("w-prov")
@@ -264,12 +323,12 @@ func (s *Service) ReserveAssignment(ctx context.Context, input ReserveAssignment
 	now := s.now().UTC()
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO worker_assignments (
-	id, worker_id, job_id, provider_id, profile_name, provider_request_id,
+	id, capacity_slot_id, worker_id, job_id, provider_id, profile_name, provider_request_id,
 	provider_type, provider_options_json, state, role, capacity_bucket, profile_labels_json, profile_taints_json,
 	profile_harness_models_json, allowed_roles_json, allowed_buckets_json,
 	required_selector_json, startup_deadline, retry_count, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-		strings.TrimSpace(input.ID), strings.TrimSpace(input.WorkerID), job.ID,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+		strings.TrimSpace(input.ID), strings.TrimSpace(input.CapacitySlotID), strings.TrimSpace(input.WorkerID), job.ID,
 		input.ProviderID, input.ProfileName, input.ProviderRequestID, input.ProviderType, providerOptionsJSON,
 		string(job.Role), string(job.CapacityBucket), labelsJSON, taintsJSON,
 		modelsJSON, rolesJSON, bucketsJSON, requiredJSON,
@@ -791,20 +850,8 @@ func workerSatisfiesProfileSnapshot(worker Worker, assignment Assignment) (bool,
 			return false, nil
 		}
 	}
-	actualModelsJSON, err := encodeHarnessModels(worker.HarnessModels)
-	if err != nil {
-		return false, err
-	}
-	actualModels, _ := decodeHarnessModels(actualModelsJSON)
 	for _, expected := range assignment.ProfileHarnessModels {
-		found := false
-		for _, actual := range actualModels {
-			if reflect.DeepEqual(actual, expected) {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !HarnessModelAvailable(worker.HarnessModels, expected.Harness, expected.QualifiedID) {
 			return false, nil
 		}
 	}
@@ -875,7 +922,7 @@ WHERE state IN ('pending', 'claimed') AND EXISTS (
 }
 
 const assignmentSelectSQL = `
-SELECT id, worker_id, job_id, provider_id, profile_name, provider_request_id,
+SELECT id, capacity_slot_id, worker_id, job_id, provider_id, profile_name, provider_request_id,
 	provider_type, provider_options_json, state, role, capacity_bucket, profile_labels_json, profile_taints_json,
 	profile_harness_models_json, allowed_roles_json, allowed_buckets_json,
 	required_selector_json, startup_deadline, retry_count, next_retry_at,
@@ -902,7 +949,7 @@ func scanAssignment(row scanner) (Assignment, error) {
 	var startupDeadline, createdAt, updatedAt string
 	var nextRetryAt, lastAttemptAt, closedAt, credentialsRevokedAt, cleanedAt sql.NullString
 	var closeReason, lastProviderError, claimedLeaseID sql.NullString
-	if err := row.Scan(&assignment.ID, &assignment.WorkerID, &assignment.JobID, &assignment.ProviderID,
+	if err := row.Scan(&assignment.ID, &assignment.CapacitySlotID, &assignment.WorkerID, &assignment.JobID, &assignment.ProviderID,
 		&assignment.ProfileName, &assignment.ProviderRequestID, &assignment.ProviderType, &providerOptionsJSON, &state, &role, &bucket,
 		&labelsJSON, &taintsJSON, &modelsJSON, &rolesJSON, &bucketsJSON, &requiredJSON,
 		&startupDeadline, &assignment.RetryCount, &nextRetryAt, &lastAttemptAt, &createdAt,

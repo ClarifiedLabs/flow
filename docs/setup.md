@@ -1,7 +1,7 @@
 # Setup
 
 This guide covers local binary setup, Docker setup, project onboarding, owner
-tokens, assignment providers, and terminal attach.
+tokens, capacity providers, and terminal attach.
 
 ## Prerequisites
 
@@ -24,9 +24,9 @@ export PATH="$PWD/bin:$PATH"
 
 Create private owner and orchestrator tokens. The owner token authorizes
 human/admin CLI calls and web UI bootstrap. The orchestrator token authorizes
-only durable assignment reservation and reconciliation for the provider IDs
-bound to it. Assignment reservation returns a short-lived worker credential for
-the selected job.
+only durable capacity-slot and assignment reconciliation for the provider IDs
+bound to it. Slot creation returns a direct worker credential before any job is
+selected.
 
 ```sh
 mkdir -p .flow-local
@@ -60,7 +60,7 @@ client_config_file: /path/to/config/flow/config.yaml
 ```
 
 Token files must be mode `0600`; do not commit them. Start the local Darwin
-assignment provider in terminal 2 with a private orchestrator config:
+capacity provider in terminal 2 with a private orchestrator config:
 
 ```yaml
 # .flow-local/orchestrator.yaml
@@ -73,6 +73,7 @@ profiles:
     provider: darwin
     provider_id: local
     max_concurrency: 5
+    idle_capacity: 1
     startup_timeout: 2m
     accepts: [persistent_agent, ephemeral]
     labels:
@@ -89,12 +90,12 @@ FLOW_ORCHESTRATOR_TOKEN="$(tr -d '\r\n' < .flow-local/orchestrator.token)" \
   flow-orchestrator -c .flow-local/orchestrator.yaml
 ```
 
-The coordinator durably reserves one exact queued job per assignment. The
-orchestrator then starts one `flow-worker run --one-shot --config PATH` Darwin
-child with a direct,
-assignment-specific worker token. It stores private worker config, PID, status,
-and logs under `state_dir`, allowing restart inspection and cleanup. Preserve
-that directory while assignments are open and keep it mode 0700. Darwin workers
+The orchestrator starts one `flow-worker run --one-shot --config PATH` Darwin
+child per durable capacity slot. A slot may wait ready and unbound according to
+`idle_capacity`; once bound, it can claim only that exact job and is never
+reused. The provider stores private worker config, PID, status, and logs under
+`state_dir`, allowing restart inspection and cleanup. Preserve that directory
+while slots are open and keep it mode 0700. Darwin workers
 share the orchestrator's macOS account, so use this provider only for mutually
 trusted local work; use Kubernetes when jobs require a workload security boundary.
 
@@ -137,7 +138,7 @@ docker compose up -d --build
 
 The server stores coordinator state in `flow-data`. Compose does not run a
 standby worker service. Use the [Local Kind quickstart](kubernetes.md#local-kind-quickstart)
-for a complete server, orchestrator, and assignment-created worker stack, or
+for a complete server, orchestrator, and one-shot capacity worker stack, or
 configure a Kubernetes or Darwin orchestrator profile as described below. Every
 selected job receives a separate runtime that executes `flow-worker run
 --one-shot --config PATH`.
@@ -204,32 +205,35 @@ credential; replacing the token file or `--owner-token` value and restarting the
 coordinator rotates the owner credential and revokes previous live owner
 tokens.
 
-## Assignment Worker Setup
+## Capacity Worker Setup
 
 `flow-orchestrator` is the only worker creation path. On each recovery-first
-cycle it reconciles existing durable assignments, then reserves eligible queued
-jobs up to each profile's `max_concurrency`. Each reservation binds one exact job
-to a stable worker ID and returns a short-lived worker credential scoped to that
-assignment.
+cycle it reconciles durable capacity slots and assignments, binds verified ready
+slots to eligible queued jobs, and provisions the desired capacity for each
+profile. The target is `min(max_concurrency, active assignments + eligible
+queued jobs) + idle_capacity`; the hard process limit is `max_concurrency +
+idle_capacity`.
 
-The provider writes a private assignment config and creates exactly one
-Kubernetes Job or Darwin child process. That runtime executes:
+The provider writes a private slot config and creates exactly one Kubernetes
+Job or Darwin child process. That runtime executes:
 
 ```sh
 flow-worker run --one-shot --config PATH
 ```
 
-The worker authenticates with its assignment credential, exact-claims only the
-bound job, clones the project's exchange branch into its assignment work
-directory, runs the job in tmux, reports the result, and exits. Bare
-`flow-worker` is invalid. Concurrency comes from separate assignments rather
-than multiple claim loops in one process.
+The worker authenticates with its slot credential, reports live Harness and
+model capabilities, and may wait ready but unbound as idle capacity. After a
+single binding it reports capabilities again, exact-claims only that job,
+clones the project's exchange branch into its work directory, runs the job in
+tmux, reports the result, and exits. Bare `flow-worker` is invalid. Reasoning
+metadata does not participate in readiness or scheduling.
 
-Preserve coordinator databases and orchestrator state while assignments are
-open. Reconciliation retries launch and cleanup, revokes the short-lived worker
-credential when the assignment closes, and removes the provider resource. Once
-a worker has claimed, ordinary lease expiry and job recovery remain authoritative
-if the runtime disappears.
+Preserve coordinator databases and orchestrator state while slots or assignments
+are open. Reconciliation retries launch and cleanup, revokes the direct worker
+credential when the slot closes, and removes the provider resource. Capability
+loss before claim closes the pending assignment without consuming a workflow
+attempt; once claimed, ordinary lease expiry and job recovery remain
+authoritative if the runtime disappears.
 
 The coordinator seeds global built-in `task-planner`, `author`,
 `code-reviewer`, `security-reviewer`, `review-aggregator`, and `verifier` agent

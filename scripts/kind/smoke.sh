@@ -24,8 +24,8 @@ kube cluster-info >/dev/null || fatal "kubectl cannot reach context '${KUBE_CONT
 
 kube -n flow wait --for=condition=available deployment/flow-server deployment/flow-orchestrator --timeout="${SMOKE_TIMEOUT}s"
 "${FLOW_BIN}" jobs --config "${CLIENT_CONFIG}" >/dev/null || fatal "host API 127.0.0.1:${API_HOST_PORT} is unavailable"
-assert_no_worker_resources
-log "idle invariant: zero flow-worker Jobs and Pods"
+wait_for_worker_resource_count 1
+log "idle invariant: one verified linux-agent capacity slot"
 
 mkdir -p "${SMOKE_ROOT}" "${SMOKE_REPO}"
 chmod 700 "${SMOKE_ROOT}" "${SMOKE_REPO}"
@@ -136,10 +136,7 @@ wait_for_one_worker_job() {
   local deadline output count
   deadline=$(( $(date +%s) + SMOKE_TIMEOUT ))
   while [ "$(date +%s)" -lt "${deadline}" ]; do
-    # The dedicated smoke namespace must contain exactly one Job of any kind.
-    # Counting all Jobs avoids hiding a malformed assignment label behind the
-    # very selector whose contract this scenario is meant to exercise.
-    output="$(kube -n flow get jobs -o name 2>/dev/null || true)"
+    output="$(kube -n flow get jobs -l flow.clarifiedlabs.com/profile-name=linux-ci -o name 2>/dev/null || true)"
     count="$(printf '%s\n' "${output}" | awk 'NF { n++ } END { print n+0 }')"
     if [ "${count}" -gt 1 ]; then
       fatal "expected exactly one assignment Job, observed ${count}"
@@ -177,8 +174,8 @@ wait_for_cleanup() {
   local deadline jobs pods
   deadline=$(( $(date +%s) + SMOKE_TIMEOUT ))
   while [ "$(date +%s)" -lt "${deadline}" ]; do
-    jobs="$(worker_resource_count jobs)"
-    pods="$(worker_resource_count pods)"
+	jobs="$(kube -n flow get jobs -l flow.clarifiedlabs.com/profile-name=linux-ci -o name 2>/dev/null | awk 'NF { n++ } END { print n+0 }')"
+	pods="$(kube -n flow get pods -l flow.clarifiedlabs.com/profile-name=linux-ci -o name 2>/dev/null | awk 'NF { n++ } END { print n+0 }')"
     if [ "${jobs}" -eq 0 ] && [ "${pods}" -eq 0 ]; then
       return 0
     fi
@@ -213,6 +210,6 @@ wait_for_flow_state "${cancel_id}" running
 "${FLOW_BIN}" task "done" --config "${CLIENT_CONFIG}" --project "${PROJECT_ID}" --resolution cancelled --note 'kind smoke cancellation' "${task_id}" >/dev/null
 wait_for_flow_state "${cancel_id}" canceled
 wait_for_cleanup
-assert_no_worker_resources
+assert_worker_resource_count 1
 kube -n flow wait --for=condition=available deployment/flow-server deployment/flow-orchestrator --timeout="${SMOKE_TIMEOUT}s"
-log "PASS: assignment success, cleanup, startup failure, and cancellation invariants hold"
+log "PASS: idle capacity, one-shot success, cleanup, startup failure, and cancellation invariants hold"

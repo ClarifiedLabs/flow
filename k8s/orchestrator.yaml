@@ -1,13 +1,13 @@
-# flow-orchestrator reconciles durable coordinator assignments into one
-# batch/v1 Job and one private Secret per assignment. There is no standby worker
-# Deployment to scale.
+# flow-orchestrator reconciles durable one-shot capacity slots into one
+# batch/v1 Job and one private Secret per slot. Idle slots are controlled by
+# each profile's idle_capacity; there is no reusable worker Deployment.
 #
 # Apply after k8s/server.yaml:
 #   kubectl apply -f k8s/orchestrator.yaml
 #
 # Before applying a release, pin both image fields below to the desired release
 # tag or digest. The worker image is profile configuration because the
-# orchestrator injects it into every assignment-created Job.
+# orchestrator injects it into every slot Job for that profile.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -41,16 +41,19 @@ stringData:
     retry_max: 1m
 
     profiles:
-      - name: linux
+      - name: linux-agent
         provider: kubernetes
         provider_id: in-cluster
-        # This limits open durable assignments; it is not a replica target.
+        # Active work is capped separately from the verified warm slots below.
         max_concurrency: 10
+        idle_capacity: 1
         startup_timeout: 2m
-        allowed_roles: [author, reviewer, verifier, ci, console]
-        accepts: [persistent_agent, ephemeral]
+        allowed_roles: [author, reviewer, verifier, console]
+        accepts: [persistent_agent]
         labels:
           os: linux
+          # Reserved capability labels are verified by the launched worker.
+          agent.harness.harness: "true"
         kubernetes:
           namespace: flow
           # Release-configurable image used by generated worker Jobs.
@@ -60,6 +63,25 @@ stringData:
           image_pull_policy: IfNotPresent
           # Provision this Secret out of band; Kind creates it from local env vars.
           harness_model_proxy_secret_name: flow-harness-model-proxy
+
+      # Profiles are independent and may use a leaner image and different
+      # credentials for jobs that do not require Harness.
+      - name: linux-ci
+        provider: kubernetes
+        provider_id: in-cluster
+        max_concurrency: 10
+        idle_capacity: 0
+        startup_timeout: 2m
+        allowed_roles: [ci]
+        accepts: [ephemeral]
+        labels:
+          os: linux
+        kubernetes:
+          namespace: flow
+          image: ghcr.io/clarifiedlabs/flow-worker:latest
+          service_account: flow-worker
+          work_dir: /var/lib/flow-worker
+          image_pull_policy: IfNotPresent
 
     metrics:
       listen: ":8422"

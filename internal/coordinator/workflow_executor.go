@@ -365,6 +365,7 @@ LIMIT 1`,
 		flowworker.EnqueueJobInput{
 			TaskID: &taskID, ChangeID: changeID, WorkflowRunID: &run.ID, NodeRunID: &nodeRun.ID,
 			Role: flowworker.RoleAuthor, CapacityBucket: flowworker.BucketPersistentAgent,
+			Harness:  flowworker.HarnessRequirement{Harness: harness, Model: node.Config.Agent.Agent.Model},
 			Priority: 0, Payload: payload,
 		})
 	return false, err

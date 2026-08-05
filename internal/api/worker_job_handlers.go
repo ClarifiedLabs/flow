@@ -106,7 +106,7 @@ func (s *Server) handleRegisterWorker(w http.ResponseWriter, r *http.Request, pr
 		HeartbeatTTL:  heartbeatTTL,
 	})
 	if err != nil {
-		if errors.Is(err, worker.ErrAssignmentConflict) {
+		if errors.Is(err, worker.ErrAssignmentConflict) || errors.Is(err, worker.ErrCapacitySlotConflict) {
 			writeError(w, http.StatusConflict, "register_worker_failed", err.Error())
 		} else {
 			writeError(w, http.StatusBadRequest, "register_worker_failed", err.Error())
@@ -118,8 +118,30 @@ func (s *Server) handleRegisterWorker(w http.ResponseWriter, r *http.Request, pr
 }
 
 func (s *Server) handleWorkerReapJobs(w http.ResponseWriter, r *http.Request, principal coordinator.Principal) {
-	if _, err := workerIDForPrincipal("", principal); err != nil {
+	workerID, err := workerIDForPrincipal("", principal)
+	if err != nil {
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
+		return
+	}
+	if slot, slotErr := s.registry.CapacitySlots().FindByWorker(r.Context(), workerID); slotErr == nil {
+		response := []reapJob{}
+		if slot.State == worker.CapacitySlotBound && slot.AssignmentID != nil {
+			record, recordErr := s.registry.GetProvisionerAssignment(r.Context(), *slot.AssignmentID)
+			if recordErr != nil {
+				writeError(w, http.StatusInternalServerError, "list_jobs_failed", recordErr.Error())
+				return
+			}
+			job, jobErr := record.bundle.Queue.GetJob(r.Context(), record.Assignment.JobID)
+			if jobErr != nil {
+				writeError(w, http.StatusInternalServerError, "list_jobs_failed", jobErr.Error())
+				return
+			}
+			response = append(response, reapJob{ID: job.ID, State: job.State})
+		}
+		writeJSON(w, http.StatusOK, reapJobsResponse{Jobs: response})
+		return
+	} else if !errors.Is(slotErr, sql.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "list_jobs_failed", slotErr.Error())
 		return
 	}
 
@@ -192,6 +214,24 @@ func (s *Server) handleClaimWorkerJob(w http.ResponseWriter, r *http.Request, pr
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_wait", err.Error())
 		return
+	}
+	if request.CapabilitiesReported {
+		heartbeatTTL, ttlErr := nonNegativeSeconds(request.HeartbeatTTLSeconds, "heartbeat_ttl_seconds")
+		if ttlErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid_heartbeat_ttl", ttlErr.Error())
+			return
+		}
+		if _, registerErr := s.registry.RegisterWorker(r.Context(), worker.RegisterWorkerInput{
+			ID: workerID, Labels: request.Labels, Taints: request.Taints,
+			HarnessModels: request.HarnessModels, HeartbeatTTL: heartbeatTTL,
+		}); registerErr != nil {
+			if errors.Is(registerErr, worker.ErrAssignmentConflict) || errors.Is(registerErr, worker.ErrCapacitySlotConflict) {
+				writeError(w, http.StatusConflict, "worker_capability_refresh_failed", registerErr.Error())
+			} else {
+				writeError(w, http.StatusBadRequest, "worker_capability_refresh_failed", registerErr.Error())
+			}
+			return
+		}
 	}
 
 	deadline := time.Now().UTC().Add(waitDuration)
@@ -657,6 +697,7 @@ func (s *projectServer) handleEnqueueJob(w http.ResponseWriter, r *http.Request)
 		RunsOn:         request.RunsOn,
 		Requires:       request.Requires,
 		Size:           request.Size,
+		Harness:        request.Harness,
 		Tolerations:    request.Tolerations,
 		Payload:        payload,
 	})

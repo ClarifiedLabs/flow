@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
+	"github.com/ClarifiedLabs/flow/internal/worker"
 )
 
 func (s *Server) serveGitHTTPRequest(w http.ResponseWriter, r *http.Request) bool {
@@ -51,6 +53,17 @@ func (s *Server) serveGitHTTPRequest(w http.ResponseWriter, r *http.Request) boo
 	if err := authorizeGitHTTPPrincipal(principal, projectID, writeRequest); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return true
+	}
+	if principal.Scope == coordinator.TokenScopeWorker {
+		slot, slotErr := s.registry.CapacitySlots().FindByWorker(r.Context(), principal.Subject)
+		if slotErr == nil && (slot.State != worker.CapacitySlotBound || slot.ProjectID == nil || strings.TrimSpace(*slot.ProjectID) != strings.TrimSpace(projectID)) {
+			http.Error(w, "capacity worker credential is not bound to this project", http.StatusForbidden)
+			return true
+		}
+		if slotErr != nil && !errors.Is(slotErr, sql.ErrNoRows) {
+			http.Error(w, "capacity worker authorization failed", http.StatusForbidden)
+			return true
+		}
 	}
 	allowedRef := ""
 	if principal.Scope == coordinator.TokenScopeSession && writeRequest {

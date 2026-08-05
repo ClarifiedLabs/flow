@@ -95,6 +95,7 @@ type Registry struct {
 	globalAgentDefs            *coordinator.AgentDefService
 	credentials                *coordinator.CredentialService
 	directory                  *worker.Directory
+	capacitySlots              *worker.CapacitySlots
 	webSessions                *coordinator.WebSessionService
 	idempotency                *coordinator.IdempotencyService
 	authorEntrypoint           map[string]any
@@ -159,6 +160,7 @@ func NewRegistry(opts RegistryOptions) (*Registry, error) {
 		globalAgentDefs:            coordinator.NewGlobalAgentDefServiceWithOptions(opts.Global.DB(), coordinator.AgentDefServiceOptions{DefaultAgent: defaultAgent}),
 		credentials:                coordinator.NewCredentialService(opts.Global.DB()),
 		directory:                  worker.NewDirectory(opts.Global.DB()),
+		capacitySlots:              worker.NewCapacitySlots(opts.Global.DB()),
 		webSessions:                coordinator.NewWebSessionService(opts.Global.DB()),
 		idempotency:                coordinator.NewIdempotencyService(opts.Global.DB()),
 		authorEntrypoint:           opts.AuthorEntrypoint,
@@ -242,6 +244,7 @@ func (r *Registry) Projects() *coordinator.ProjectService              { return 
 func (r *Registry) GlobalAgentDefs() AgentDefCatalog                   { return globalAgentDefCatalog{registry: r} }
 func (r *Registry) Credentials() *coordinator.CredentialService        { return r.credentials }
 func (r *Registry) Directory() *worker.Directory                       { return r.directory }
+func (r *Registry) CapacitySlots() *worker.CapacitySlots               { return r.capacitySlots }
 func (r *Registry) WebSessions() *coordinator.WebSessionService        { return r.webSessions }
 func (r *Registry) GlobalIdempotency() *coordinator.IdempotencyService { return r.idempotency }
 func (r *Registry) HarnessArgs() []string                              { return r.harnessArgs }

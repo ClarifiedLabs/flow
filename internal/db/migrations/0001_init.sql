@@ -12,7 +12,7 @@ CREATE TABLE app_metadata (
 INSERT INTO app_metadata (key, value, updated_at)
 VALUES
 	('schema_version', '0001_init', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-	('storage_format', '6', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+	('storage_format', '7', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 CREATE TABLE id_allocators (
 	name TEXT PRIMARY KEY,
@@ -293,6 +293,8 @@ CREATE TABLE jobs (
 	capacity_bucket TEXT NOT NULL CHECK (capacity_bucket IN ('persistent_agent', 'ephemeral')),
 	priority INTEGER NOT NULL DEFAULT 0,
 	selector_json TEXT NOT NULL DEFAULT '{}',
+	required_harness TEXT NOT NULL DEFAULT '',
+	required_model TEXT NOT NULL DEFAULT '',
 	tolerations_json TEXT NOT NULL DEFAULT '[]',
 	payload_json TEXT NOT NULL DEFAULT '{}',
 	transcript_path TEXT NOT NULL DEFAULT '',
@@ -445,6 +447,7 @@ CREATE TABLE job_terminal_access_tokens (
 
 CREATE TABLE worker_assignments (
 	id TEXT PRIMARY KEY,
+	capacity_slot_id TEXT NOT NULL CHECK (length(trim(capacity_slot_id)) > 0),
 	worker_id TEXT NOT NULL UNIQUE CHECK (length(trim(worker_id)) > 0),
 	job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
 	provider_id TEXT NOT NULL CHECK (length(trim(provider_id)) > 0),
@@ -474,6 +477,7 @@ CREATE TABLE worker_assignments (
 	credentials_revoked_at TEXT,
 	cleaned_at TEXT,
 	UNIQUE (provider_id, provider_request_id),
+	UNIQUE (capacity_slot_id),
 	CHECK ((state = 'claimed') = (claimed_lease_id IS NOT NULL) OR state = 'closed'),
 	CHECK ((state = 'closed') = (closed_at IS NOT NULL))
 );

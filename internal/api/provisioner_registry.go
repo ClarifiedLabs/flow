@@ -300,6 +300,59 @@ func (r *Registry) CleanProvisionerAssignment(ctx context.Context, assignmentID 
 func (r *Registry) RegisterWorker(ctx context.Context, input worker.RegisterWorkerInput) (worker.Worker, error) {
 	r.claimMu.Lock()
 	defer r.claimMu.Unlock()
+	slot, slotErr := r.capacitySlots.FindByWorker(ctx, input.ID)
+	if slotErr == nil {
+		if slot.State == worker.CapacitySlotClosed {
+			return worker.Worker{}, fmt.Errorf("%w: capacity slot is closed", worker.ErrCapacitySlotConflict)
+		}
+		if slot.State == worker.CapacitySlotBound {
+			record, found, err := r.findAssignmentByWorkerLocked(ctx, input.ID)
+			if err != nil {
+				return worker.Worker{}, err
+			}
+			if !found || record.Assignment.CapacitySlotID != slot.ID {
+				return worker.Worker{}, fmt.Errorf("%w: bound capacity slot has no matching assignment", worker.ErrCapacitySlotConflict)
+			}
+			if err := validateAssignedWorkerRegistration(ctx, record, &input); err != nil {
+				if record.Assignment.State == worker.AssignmentPending {
+					if revokeErr := r.credentials.RevokeSubjectCredentials(ctx, coordinator.TokenScopeWorker, input.ID); revokeErr != nil {
+						return worker.Worker{}, errors.Join(err, fmt.Errorf("revoke capability-lost worker credential: %w", revokeErr))
+					}
+					if _, abandonErr := record.bundle.Queue.AbandonAssignment(ctx, worker.AbandonAssignmentInput{AssignmentID: record.Assignment.ID, CloseReason: "capability_lost", ProviderError: err.Error()}); abandonErr != nil {
+						return worker.Worker{}, errors.Join(err, fmt.Errorf("abandon capability-lost assignment: %w", abandonErr))
+					}
+					if _, closeErr := r.capacitySlots.Close(ctx, slot.ID, "capability_lost", err.Error()); closeErr != nil {
+						return worker.Worker{}, errors.Join(err, fmt.Errorf("close capability-lost capacity slot: %w", closeErr))
+					}
+				}
+				return worker.Worker{}, err
+			}
+			registered, err := r.directory.RegisterWorker(ctx, input)
+			if err != nil {
+				return worker.Worker{}, err
+			}
+			if _, err := r.capacitySlots.RefreshBoundCapabilities(ctx, slot.ID); err != nil {
+				return worker.Worker{}, err
+			}
+			return registered, nil
+		}
+		// Idle slot registrations carry no assignment-derived bucket. Persist the
+		// actual report even when it fails the profile promise so the orchestrator
+		// can surface and retry one durable probe.
+		input.CapacityBucket = ""
+		registered, err := r.directory.RegisterWorker(ctx, input)
+		if err != nil {
+			return worker.Worker{}, err
+		}
+		capabilityErr := worker.WorkerSatisfiesSlot(slot, registered)
+		if _, err := r.capacitySlots.RecordCapabilities(ctx, slot.ID, capabilityErr); err != nil {
+			return worker.Worker{}, err
+		}
+		return registered, nil
+	}
+	if !errors.Is(slotErr, sql.ErrNoRows) {
+		return worker.Worker{}, slotErr
+	}
 	record, found, err := r.findAssignmentByWorkerLocked(ctx, input.ID)
 	if err != nil {
 		return worker.Worker{}, err
@@ -340,6 +393,9 @@ func validateAssignedWorkerRegistration(ctx context.Context, record provisionerA
 	if job.Role != assignment.Role || job.CapacityBucket != assignment.CapacityBucket {
 		return fmt.Errorf("%w: assigned job no longer matches its snapshot", worker.ErrAssignmentConflict)
 	}
+	if !worker.WorkerMeetsHarnessRequirement(worker.Worker{Labels: input.Labels, HarnessModels: input.HarnessModels}, job.Harness) {
+		return fmt.Errorf("%w: registered worker no longer satisfies the assigned job Harness/model requirement", worker.ErrAssignmentConflict)
+	}
 	// The worker's single bucket is derived from its assignment; clients never
 	// select or advertise buckets.
 	input.CapacityBucket = assignment.CapacityBucket
@@ -376,12 +432,7 @@ func containsValue[T any](values []T, expected T) bool {
 }
 
 func containsHarnessModel(values []flowharness.Model, expected flowharness.Model) bool {
-	for _, value := range values {
-		if reflect.DeepEqual(value, expected) {
-			return true
-		}
-	}
-	return false
+	return worker.HarnessModelAvailable(values, expected.Harness, expected.QualifiedID)
 }
 
 func (r *Registry) claimWorkerLocked(ctx context.Context, input worker.ClaimInput) (worker.ProjectClaim, bool, error) {
@@ -390,7 +441,23 @@ func (r *Registry) claimWorkerLocked(ctx context.Context, input worker.ClaimInpu
 		return worker.ProjectClaim{}, false, err
 	}
 	if !assigned {
+		slot, slotErr := r.capacitySlots.FindByWorker(ctx, input.WorkerID)
+		if slotErr == nil && slot.State != worker.CapacitySlotClosed {
+			// A verified idle worker long-polls here until the orchestrator binds its
+			// slot. It never falls through to the generic queue.
+			return worker.ProjectClaim{}, false, nil
+		}
+		if slotErr != nil && !errors.Is(slotErr, sql.ErrNoRows) {
+			return worker.ProjectClaim{}, false, slotErr
+		}
 		return worker.ProjectClaim{}, false, fmt.Errorf("%w: worker has no open assignment", worker.ErrAssignmentConflict)
+	}
+	if slot, slotErr := r.capacitySlots.FindByWorker(ctx, input.WorkerID); slotErr == nil && slot.State == worker.CapacitySlotBound {
+		// Binding invalidates the idle report. The worker must submit a fresh
+		// runtime capability report after assignment and before lease creation.
+		if slot.CapabilityCheckedAt == nil || slot.CapabilityCheckedAt.Before(slot.UpdatedAt) {
+			return worker.ProjectClaim{}, false, nil
+		}
 	}
 
 	registered, err := r.directory.GetWorker(ctx, input.WorkerID)

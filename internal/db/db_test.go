@@ -45,7 +45,7 @@ func TestOpenInitializesSQLite(t *testing.T) {
 	if schemaVersion != "0003_history_resume_durability" {
 		t.Fatalf("schema version = %q, want 0003_history_resume_durability", schemaVersion)
 	}
-	assertStorageFormat(t, store, "6")
+	assertStorageFormat(t, store, "7")
 
 	var relationPayloadNotNull int
 	var relationPayloadDefault string
@@ -171,10 +171,10 @@ func TestOpenGlobalInitializesGlobalSchema(t *testing.T) {
 	if schemaVersion != "0001_global_init" {
 		t.Fatalf("schema version = %q, want 0001_global_init", schemaVersion)
 	}
-	assertStorageFormat(t, store, "5")
+	assertStorageFormat(t, store, "6")
 	assertColumnAbsent(t, store, "projects", "exchange_url")
 
-	assertTables(t, store, []string{"app_metadata", "projects", "workers", "tokens", "web_sessions", "web_bootstrap_tokens", "idempotency_records", "agent_defs"}, []string{"tasks", "jobs", "leases", "sessions", "changes"})
+	assertTables(t, store, []string{"app_metadata", "projects", "workers", "capacity_slots", "tokens", "web_sessions", "web_bootstrap_tokens", "idempotency_records", "agent_defs"}, []string{"tasks", "jobs", "leases", "sessions", "changes"})
 }
 
 func TestOpenRejectsPreviousStorageFormat(t *testing.T) {
@@ -183,8 +183,8 @@ func TestOpenRejectsPreviousStorageFormat(t *testing.T) {
 		previousFormat string
 		open           func(context.Context, string) (*Store, error)
 	}{
-		{name: "project", previousFormat: "5", open: Open},
-		{name: "global", previousFormat: "4", open: OpenGlobal},
+		{name: "project", previousFormat: "6", open: Open},
+		{name: "global", previousFormat: "5", open: OpenGlobal},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()

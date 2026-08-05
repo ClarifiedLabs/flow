@@ -13,6 +13,7 @@ import (
 
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
+	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
@@ -45,7 +46,7 @@ func newReviewBarrierFixture(t *testing.T, agents []SnapshotReviewAgent) *review
 		FlowID: "fl-review-barrier", FlowName: "review barrier", StartNode: "author", TransitionBudget: 50,
 		Nodes: []FlowNodeSnapshot{
 			{Key: "author", Name: "Author", Kind: NodeAgent, Config: FlowNodeSnapshotConfig{Agent: &AgentNodeSnapshotConfig{
-				Agent: AgentDefSnapshot{ID: "ad-review-author", Name: "author", Harness: "harness", Prompt: "Implement the change."},
+				Agent:     AgentDefSnapshot{ID: "ad-review-author", Name: "author", Harness: "harness", Prompt: "Implement the change."},
 				Workspace: WorkspaceChange, Artifact: ArtifactChange,
 			}}},
 			{Key: "review", Name: "Review", Kind: NodeChangeReview, Config: FlowNodeSnapshotConfig{ChangeReview: &ChangeReviewNodeSnapshotConfig{
@@ -778,8 +779,8 @@ SELECT COUNT(*) FROM jobs WHERE node_run_id = ? AND role = 'author'`, nodeID).Sc
 		t.Fatalf("list workflow jobs: %v", err)
 	}
 	for _, job := range jobs {
-		if job.NodeRunID != nil && *job.NodeRunID == nodeID && len(job.Selector) != 0 {
-			t.Fatalf("workflow author selector = %#v, want no scheduling requirements", job.Selector)
+		if job.NodeRunID != nil && *job.NodeRunID == nodeID && job.Selector[flowharness.AgentHarnessLabel(flowharness.Harness)] != "true" {
+			t.Fatalf("workflow author selector = %#v, want runtime harness requirement", job.Selector)
 		}
 	}
 }

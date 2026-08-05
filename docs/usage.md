@@ -11,8 +11,9 @@ under `/ui/*` on the same coordinator address.
 The web UI setup is:
 
 1. Start `flow-server serve` with owner and orchestrator tokens.
-2. Start `flow-orchestrator` with a Kubernetes or Darwin assignment profile. It
-   creates one one-shot worker runtime for each reserved job.
+2. Start `flow-orchestrator` with a Kubernetes or Darwin capacity profile. It
+   creates one-shot worker runtimes for active demand plus configured idle
+   capacity.
 3. Onboard at least one repository with `flow init`.
 4. Run `flow ui` from a registered repository, or run
    `flow ui --server URL --token TOKEN`.
@@ -317,9 +318,12 @@ flow thread reopen THREAD_ID
 Repo-versioned CI configuration lives in `.flow/checks/*.yaml`. CI jobs use the
 `ephemeral` workload bucket. Review and verification agents are selected by
 their graph nodes and use the `persistent_agent` bucket. Orchestrator profiles
-must accept the needed buckets; agent jobs assume the Harness executable is
-available on those workers. Bucket names classify jobs; every selected job still
-gets its own one-shot worker process.
+must accept the needed buckets and advertise the required Harness label, for
+example `agent.harness.harness: "true"`. Flow verifies that label from the
+launched worker's executable probe rather than trusting profile configuration.
+An explicit model is verified against the live qualified-ID catalog; reasoning
+level never affects scheduling. Bucket names classify jobs; every selected job
+still gets its own one-shot capacity slot and worker process.
 
 An `automated_checks` node runs the repository CI definitions. A
 `change_review` or `verify_change` node is a multi-agent node: it fans out one
@@ -349,8 +353,8 @@ should not set both names.
 Each node visit receives distinct check identities, so a loop back through
 review or verification executes every configured child again. All of those
 children use the `persistent_agent` workload bucket with author and other agent
-jobs; the barrier can therefore wait until the orchestrator can reserve and
-launch another assignment.
+jobs; the barrier can therefore wait until the orchestrator can bind and launch
+enough capacity for another assignment.
 
 Set `requires` labels on CI definitions to match workers that can run the
 entrypoint. Review and verifier instructions belong in agent definitions, not
@@ -414,18 +418,17 @@ The underlying API routes are:
 
 A failed upload is logged to the job's stdout and never fails the job.
 
-## Assignment operations
+## Capacity and assignment operations
 
-Assignment workers are backed by coordinator-owned records in each job's project
-database. The orchestrator recovers all existing assignments before it reserves
-new work, then creates exactly one Kubernetes Job plus private Secret or one
-Darwin child for each new assignment. That runtime executes `flow-worker run
---one-shot --config PATH` with a short-lived assignment-worker credential,
-exact-claims the reserved job, reports its outcome, and exits.
+Global capacity slots own provider resources and direct worker credentials.
+Ready slots bind once to coordinator-owned assignments in the selected job's
+project database. Kubernetes creates one Job plus private Secret per slot;
+Darwin creates one child and private state directory. The runtime exact-claims
+its bound job, reports, and exits.
 
-Concurrency comes from independent durable assignments, bounded by the
-orchestrator profile's `max_concurrency`. Worker selection belongs to the
-profile; generated worker configs are private to one assignment.
+Active concurrency is bounded by `max_concurrency`; `idle_capacity` adds warm,
+verified slots beyond that active bound. Worker selection belongs to the
+profile, and generated configs are private to one slot.
 
 After an orchestrator restart, preserve and reuse profile names, provider IDs,
 Kubernetes namespaces, and Darwin state directories. Readiness stays false until

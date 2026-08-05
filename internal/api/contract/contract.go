@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	ProtocolVersion   = "7"
+	ProtocolVersion   = "8"
 	ProtocolHeader    = "Flow-Protocol-Version"
 	IdempotencyHeader = "Idempotency-Key"
 	AuthScheme        = "Bearer "
@@ -246,9 +246,14 @@ type HeartbeatWorkerRequest struct {
 }
 
 type ClaimJobRequest struct {
-	WorkerID             string `json:"worker_id"`
-	LeaseDurationSeconds int    `json:"lease_duration_seconds"`
-	WaitSeconds          int    `json:"wait_seconds"`
+	WorkerID             string              `json:"worker_id"`
+	LeaseDurationSeconds int                 `json:"lease_duration_seconds"`
+	WaitSeconds          int                 `json:"wait_seconds"`
+	CapabilitiesReported bool                `json:"capabilities_reported,omitempty"`
+	Labels               map[string]string   `json:"labels,omitempty"`
+	Taints               []scheduler.Taint   `json:"taints,omitempty"`
+	HarnessModels        []flowharness.Model `json:"harness_models,omitempty"`
+	HeartbeatTTLSeconds  int                 `json:"heartbeat_ttl_seconds,omitempty"`
 }
 
 // ReserveProvisionerAssignmentRequest describes the immutable virtual-worker
@@ -269,6 +274,77 @@ type ReserveProvisionerAssignmentRequest struct {
 	RequiredSelector      map[string]string       `json:"required_selector,omitempty"`
 	StartupTimeoutSeconds int                     `json:"startup_timeout_seconds"`
 	WaitSeconds           int                     `json:"wait_seconds,omitempty"`
+}
+
+// CreateProvisionerCapacitySlotRequest creates one durable worker slot without
+// selecting a project job. MaxInstances is the profile's hard active+idle cap.
+type CreateProvisionerCapacitySlotRequest struct {
+	ProviderID            string                  `json:"provider_id"`
+	ProviderRequestID     string                  `json:"provider_request_id"`
+	ProfileName           string                  `json:"profile_name"`
+	ProviderType          string                  `json:"provider_type"`
+	ProviderOptions       map[string]string       `json:"provider_options,omitempty"`
+	MaxInstances          int                     `json:"max_instances"`
+	AllowedRoles          []worker.JobRole        `json:"allowed_roles,omitempty"`
+	AllowedBuckets        []worker.CapacityBucket `json:"allowed_buckets,omitempty"`
+	Labels                map[string]string       `json:"labels,omitempty"`
+	Taints                []scheduler.Taint       `json:"taints,omitempty"`
+	HarnessModels         []flowharness.Model     `json:"harness_models,omitempty"`
+	RequiredSelector      map[string]string       `json:"required_selector,omitempty"`
+	StartupTimeoutSeconds int                     `json:"startup_timeout_seconds"`
+}
+
+type CreateProvisionerCapacitySlotResponse struct {
+	Created     bool                 `json:"created"`
+	Slot        *worker.CapacitySlot `json:"slot,omitempty"`
+	WorkerToken string               `json:"worker_token,omitempty"`
+}
+
+type ProvisionerCapacitySlotsResponse struct {
+	Slots []worker.CapacitySlot `json:"slots"`
+}
+
+type ProvisionerCapacitySlotResponse struct {
+	Slot worker.CapacitySlot `json:"slot"`
+}
+
+type RecordProvisionerCapacitySlotAttemptRequest struct {
+	ProviderError string     `json:"provider_error,omitempty"`
+	NextRetryAt   *time.Time `json:"next_retry_at,omitempty"`
+}
+
+type CloseProvisionerCapacitySlotRequest struct {
+	Reason        string `json:"reason"`
+	ProviderError string `json:"provider_error,omitempty"`
+}
+
+type BindProvisionerCapacitySlotRequest struct {
+	CapabilityTTLSeconds int `json:"capability_ttl_seconds"`
+}
+
+type BindProvisionerCapacitySlotResponse struct {
+	Bound      bool                   `json:"bound"`
+	Slot       worker.CapacitySlot    `json:"slot"`
+	Assignment *ProvisionerAssignment `json:"assignment,omitempty"`
+}
+
+type ProvisionerCapacityDemandRequest struct {
+	ProviderID       string                  `json:"provider_id"`
+	ProfileName      string                  `json:"profile_name"`
+	MaxConcurrency   int                     `json:"max_concurrency"`
+	IdleCapacity     int                     `json:"idle_capacity"`
+	AllowedRoles     []worker.JobRole        `json:"allowed_roles,omitempty"`
+	AllowedBuckets   []worker.CapacityBucket `json:"allowed_buckets,omitempty"`
+	Labels           map[string]string       `json:"labels,omitempty"`
+	Taints           []scheduler.Taint       `json:"taints,omitempty"`
+	HarnessModels    []flowharness.Model     `json:"harness_models,omitempty"`
+	RequiredSelector map[string]string       `json:"required_selector,omitempty"`
+}
+
+type ProvisionerCapacityDemandResponse struct {
+	ActiveAssignments  int `json:"active_assignments"`
+	EligibleQueuedJobs int `json:"eligible_queued_jobs"`
+	DesiredInstances   int `json:"desired_instances"`
 }
 
 // ProvisionerAssignment includes project identity because assignment rows are
@@ -320,16 +396,17 @@ type ReleaseLeaseRequest struct {
 }
 
 type EnqueueJobRequest struct {
-	TaskID         *string                `json:"task_id"`
-	ChangeID       *string                `json:"change_id"`
-	Role           string                 `json:"role"`
-	CapacityBucket string                 `json:"capacity_bucket"`
-	Priority       int                    `json:"priority"`
-	RunsOn         map[string]string      `json:"runs_on"`
-	Requires       []string               `json:"requires"`
-	Size           string                 `json:"size"`
-	Tolerations    []scheduler.Toleration `json:"tolerations"`
-	Payload        map[string]any         `json:"payload"`
+	TaskID         *string                   `json:"task_id"`
+	ChangeID       *string                   `json:"change_id"`
+	Role           string                    `json:"role"`
+	CapacityBucket string                    `json:"capacity_bucket"`
+	Priority       int                       `json:"priority"`
+	RunsOn         map[string]string         `json:"runs_on"`
+	Requires       []string                  `json:"requires"`
+	Size           string                    `json:"size"`
+	Harness        worker.HarnessRequirement `json:"harness_requirement,omitempty"`
+	Tolerations    []scheduler.Toleration    `json:"tolerations"`
+	Payload        map[string]any            `json:"payload"`
 }
 
 type ConsoleRequest struct {

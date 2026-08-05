@@ -60,20 +60,21 @@ type CheckEntrypoint struct {
 }
 
 type CheckDefinition struct {
-	Name              string                 `json:"name" yaml:"name"`
-	Kind              CheckKind              `json:"kind" yaml:"kind"`
-	Phase             CheckPhase             `json:"phase" yaml:"phase"`
-	Required          *bool                  `json:"required" yaml:"required"`
-	Entrypoint        *CheckEntrypoint       `json:"entrypoint" yaml:"entrypoint"`
-	RunsOn            map[string]string      `json:"runs_on" yaml:"runs_on"`
-	Requires          []string               `json:"requires" yaml:"requires"`
-	Size              string                 `json:"size" yaml:"size"`
-	Tolerations       []scheduler.Toleration `json:"tolerations" yaml:"tolerations"`
-	sourcePath        string
-	roleInstructions  string
-	reviewDiscovery   bool
-	reviewAggregation bool
-	flowAgent         bool
+	Name               string                 `json:"name" yaml:"name"`
+	Kind               CheckKind              `json:"kind" yaml:"kind"`
+	Phase              CheckPhase             `json:"phase" yaml:"phase"`
+	Required           *bool                  `json:"required" yaml:"required"`
+	Entrypoint         *CheckEntrypoint       `json:"entrypoint" yaml:"entrypoint"`
+	RunsOn             map[string]string      `json:"runs_on" yaml:"runs_on"`
+	Requires           []string               `json:"requires" yaml:"requires"`
+	Size               string                 `json:"size" yaml:"size"`
+	Tolerations        []scheduler.Toleration `json:"tolerations" yaml:"tolerations"`
+	sourcePath         string
+	roleInstructions   string
+	reviewDiscovery    bool
+	reviewAggregation  bool
+	flowAgent          bool
+	harnessRequirement flowworker.HarnessRequirement
 }
 
 type CheckSuite struct {
@@ -211,8 +212,9 @@ func withFlowReviewChecks(suite CheckSuite, reviewAgents []FlowReviewAgentSnapsh
 				Argv:  []string{command},
 				Shell: true,
 			},
-			roleInstructions: reviewAgent.Agent.Prompt,
-			flowAgent:        true,
+			roleInstructions:   reviewAgent.Agent.Prompt,
+			flowAgent:          true,
+			harnessRequirement: flowworker.HarnessRequirement{Harness: harness, Model: reviewAgent.Agent.Model},
 		})
 		usedNames[name] = true
 	}
@@ -628,7 +630,8 @@ func defaultAgentCheckDefinition(name string, kind CheckKind, sel flowharness.Ag
 			Argv:  []string{command},
 			Shell: true,
 		},
-		flowAgent: true,
+		flowAgent:          true,
+		harnessRequirement: flowworker.HarnessRequirement{Harness: sel.Harness, Model: sel.Model},
 	}, nil
 }
 
@@ -937,6 +940,7 @@ SELECT attempt FROM workflow_node_runs WHERE id = ?`, nodeRunID).Scan(&nodeAttem
 		RunsOn:         definition.RunsOn,
 		Requires:       definition.Requires,
 		Size:           definition.Size,
+		Harness:        definition.harnessRequirement,
 		Tolerations:    definition.Tolerations,
 		Payload:        payload,
 	}

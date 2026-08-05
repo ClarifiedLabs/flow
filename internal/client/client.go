@@ -1244,6 +1244,11 @@ func (c *Client) ClaimJobContext(ctx context.Context, input ClaimJobInput) (Clai
 		WorkerID:             input.WorkerID,
 		LeaseDurationSeconds: durationSeconds(input.LeaseDuration),
 		WaitSeconds:          durationSeconds(input.Wait),
+		CapabilitiesReported: input.CapabilitiesReported,
+		Labels:               input.Labels,
+		Taints:               input.Taints,
+		HarnessModels:        input.HarnessModels,
+		HeartbeatTTLSeconds:  durationSeconds(input.HeartbeatTTL),
 	}
 	if err := c.doContext(ctx, http.MethodPost, "/v2/workers/claim", request, nil, &response); err != nil {
 		return ClaimJobResult{}, err
@@ -1363,6 +1368,7 @@ func (c *Client) EnqueueJob(input EnqueueJobInput) (flowworker.Job, error) {
 		RunsOn:         input.RunsOn,
 		Requires:       input.Requires,
 		Size:           input.Size,
+		Harness:        input.Harness,
 		Tolerations:    input.Tolerations,
 		Payload:        input.Payload,
 	}
@@ -2236,9 +2242,14 @@ type HeartbeatWorkerInput struct {
 }
 
 type ClaimJobInput struct {
-	WorkerID      string
-	LeaseDuration time.Duration
-	Wait          time.Duration
+	WorkerID             string
+	LeaseDuration        time.Duration
+	Wait                 time.Duration
+	CapabilitiesReported bool
+	Labels               map[string]string
+	Taints               []scheduler.Taint
+	HarnessModels        []flowharness.Model
+	HeartbeatTTL         time.Duration
 }
 
 type ClaimJobResult struct {
@@ -2284,6 +2295,7 @@ type EnqueueJobInput struct {
 	RunsOn         map[string]string
 	Requires       []string
 	Size           string
+	Harness        flowworker.HarnessRequirement
 	Tolerations    []scheduler.Toleration
 	Payload        map[string]any
 }

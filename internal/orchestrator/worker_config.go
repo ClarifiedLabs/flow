@@ -8,7 +8,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// generatedWorkerConfig is the assignment-scoped one-shot worker config the
+// generatedWorkerConfig is the capacity-slot-scoped one-shot worker config the
 // provider writes. The worker's capacity bucket is derived from its assignment
 // server-side; the config never advertises capacity or accepted buckets.
 type generatedWorkerConfig struct {
@@ -21,14 +21,21 @@ type generatedWorkerConfig struct {
 }
 
 func generatedWorkerYAML(request LaunchRequest, workDir string) ([]byte, error) {
-	a := request.Assignment.Assignment
+	workerID := request.Assignment.Assignment.WorkerID
+	labels := request.Assignment.Assignment.ProfileLabels
+	taints := request.Assignment.Assignment.ProfileTaints
+	if request.Slot != nil {
+		workerID = request.Slot.WorkerID
+		labels = request.Slot.ProfileLabels
+		taints = request.Slot.ProfileTaints
+	}
 	if strings.TrimSpace(request.CoordinatorURL) == "" || strings.TrimSpace(request.WorkerToken) == "" || strings.TrimSpace(workDir) == "" {
 		return nil, errors.New("coordinator URL, direct worker token, and worker work dir are required")
 	}
 	config := generatedWorkerConfig{
-		WorkerID: a.WorkerID, CoordinatorURL: request.CoordinatorURL,
+		WorkerID: workerID, CoordinatorURL: request.CoordinatorURL,
 		Token: request.WorkerToken, WorkDir: workDir,
-		Labels: a.ProfileLabels, Taints: a.ProfileTaints,
+		Labels: labels, Taints: taints,
 	}
 	return yaml.Marshal(config)
 }

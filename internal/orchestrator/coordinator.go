@@ -12,9 +12,12 @@ import (
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/api/contract"
+	"github.com/ClarifiedLabs/flow/internal/worker"
 )
 
 const assignmentsPath = "/v2/provisioner/assignments"
+const capacitySlotsPath = "/v2/provisioner/capacity-slots"
+const capacityDemandPath = "/v2/provisioner/capacity-demand"
 
 // Coordinator is the typed durable-assignment API used by the Reconciler.
 type Coordinator interface {
@@ -24,6 +27,19 @@ type Coordinator interface {
 	Abandon(context.Context, string, contract.AbandonProvisionerAssignmentRequest) (contract.ProvisionerAssignment, error)
 	Revoke(context.Context, string) (contract.ProvisionerAssignment, error)
 	Cleaned(context.Context, string) (contract.ProvisionerAssignment, error)
+}
+
+// CapacityCoordinator is the slot-first API used by production reconcilers.
+// It is separate so focused assignment tests can keep small fakes.
+type CapacityCoordinator interface {
+	ListCapacitySlots(context.Context, []string) ([]worker.CapacitySlot, error)
+	CreateCapacitySlot(context.Context, contract.CreateProvisionerCapacitySlotRequest) (contract.CreateProvisionerCapacitySlotResponse, error)
+	CapacityDemand(context.Context, contract.ProvisionerCapacityDemandRequest) (contract.ProvisionerCapacityDemandResponse, error)
+	BindCapacitySlot(context.Context, string, contract.BindProvisionerCapacitySlotRequest) (contract.BindProvisionerCapacitySlotResponse, error)
+	RecordCapacitySlotAttempt(context.Context, string, contract.RecordProvisionerCapacitySlotAttemptRequest) (worker.CapacitySlot, error)
+	CloseCapacitySlot(context.Context, string, contract.CloseProvisionerCapacitySlotRequest) (worker.CapacitySlot, error)
+	RevokeCapacitySlot(context.Context, string) (worker.CapacitySlot, error)
+	CleanCapacitySlot(context.Context, string) (worker.CapacitySlot, error)
 }
 
 // APIError describes a non-2xx response from the coordinator.
@@ -88,6 +104,66 @@ func (c *CoordinatorClient) ListAssignments(ctx context.Context, _ []string) ([]
 		}
 	}
 	return assignments, nil
+}
+
+func (c *CoordinatorClient) ListCapacitySlots(ctx context.Context, _ []string) ([]worker.CapacitySlot, error) {
+	var slots []worker.CapacitySlot
+	seen := make(map[string]bool)
+	for _, filter := range []string{"open_only=true", "needs_cleanup=true"} {
+		var response contract.ProvisionerCapacitySlotsResponse
+		if err := c.do(ctx, http.MethodGet, capacitySlotsPath+"?"+filter, nil, &response); err != nil {
+			return nil, err
+		}
+		for _, slot := range response.Slots {
+			if !seen[slot.ID] {
+				slots = append(slots, slot)
+				seen[slot.ID] = true
+			}
+		}
+	}
+	return slots, nil
+}
+
+func (c *CoordinatorClient) CreateCapacitySlot(ctx context.Context, request contract.CreateProvisionerCapacitySlotRequest) (contract.CreateProvisionerCapacitySlotResponse, error) {
+	var response contract.CreateProvisionerCapacitySlotResponse
+	err := c.do(ctx, http.MethodPost, capacitySlotsPath, request, &response)
+	return response, err
+}
+
+func (c *CoordinatorClient) CapacityDemand(ctx context.Context, request contract.ProvisionerCapacityDemandRequest) (contract.ProvisionerCapacityDemandResponse, error) {
+	var response contract.ProvisionerCapacityDemandResponse
+	err := c.do(ctx, http.MethodPost, capacityDemandPath, request, &response)
+	return response, err
+}
+
+func (c *CoordinatorClient) BindCapacitySlot(ctx context.Context, id string, request contract.BindProvisionerCapacitySlotRequest) (contract.BindProvisionerCapacitySlotResponse, error) {
+	var response contract.BindProvisionerCapacitySlotResponse
+	err := c.do(ctx, http.MethodPost, capacitySlotsPath+"/"+url.PathEscape(strings.TrimSpace(id))+"/bind", request, &response)
+	return response, err
+}
+
+func (c *CoordinatorClient) RecordCapacitySlotAttempt(ctx context.Context, id string, request contract.RecordProvisionerCapacitySlotAttemptRequest) (worker.CapacitySlot, error) {
+	var response contract.ProvisionerCapacitySlotResponse
+	err := c.do(ctx, http.MethodPost, capacitySlotsPath+"/"+url.PathEscape(strings.TrimSpace(id))+"/attempt", request, &response)
+	return response.Slot, err
+}
+
+func (c *CoordinatorClient) CloseCapacitySlot(ctx context.Context, id string, request contract.CloseProvisionerCapacitySlotRequest) (worker.CapacitySlot, error) {
+	var response contract.ProvisionerCapacitySlotResponse
+	err := c.do(ctx, http.MethodPost, capacitySlotsPath+"/"+url.PathEscape(strings.TrimSpace(id))+"/close", request, &response)
+	return response.Slot, err
+}
+
+func (c *CoordinatorClient) RevokeCapacitySlot(ctx context.Context, id string) (worker.CapacitySlot, error) {
+	var response contract.ProvisionerCapacitySlotResponse
+	err := c.do(ctx, http.MethodPost, capacitySlotsPath+"/"+url.PathEscape(strings.TrimSpace(id))+"/revoked", struct{}{}, &response)
+	return response.Slot, err
+}
+
+func (c *CoordinatorClient) CleanCapacitySlot(ctx context.Context, id string) (worker.CapacitySlot, error) {
+	var response contract.ProvisionerCapacitySlotResponse
+	err := c.do(ctx, http.MethodPost, capacitySlotsPath+"/"+url.PathEscape(strings.TrimSpace(id))+"/cleaned", struct{}{}, &response)
+	return response.Slot, err
 }
 
 func (c *CoordinatorClient) Reserve(ctx context.Context, request contract.ReserveProvisionerAssignmentRequest) (contract.ReserveProvisionerAssignmentResponse, error) {

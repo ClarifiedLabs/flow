@@ -297,10 +297,26 @@ worker_resource_count() {
   fi
 }
 
-assert_no_worker_resources() {
-  local jobs pods
+assert_worker_resource_count() {
+  local expected jobs pods
+  expected="$1"
   jobs="$(worker_resource_count jobs)"
   pods="$(worker_resource_count pods)"
-  [ "${jobs}" -eq 0 ] && [ "${pods}" -eq 0 ] ||
-    fatal "expected zero idle assignment workers, found ${jobs} Job(s) and ${pods} Pod(s)"
+  [ "${jobs}" -eq "${expected}" ] && [ "${pods}" -eq "${expected}" ] ||
+    fatal "expected ${expected} capacity worker Job(s) and Pod(s), found ${jobs} Job(s) and ${pods} Pod(s)"
+}
+
+wait_for_worker_resource_count() {
+  local expected deadline jobs pods
+  expected="$1"
+  deadline=$(( $(date +%s) + ${SMOKE_TIMEOUT:-180} ))
+  while [ "$(date +%s)" -lt "${deadline}" ]; do
+    jobs="$(worker_resource_count jobs)"
+    pods="$(worker_resource_count pods)"
+    if [ "${jobs}" -eq "${expected}" ] && [ "${pods}" -eq "${expected}" ]; then
+      return 0
+    fi
+    sleep 1
+  done
+  fatal "timed out waiting for ${expected} capacity worker Job(s) and Pod(s)"
 }

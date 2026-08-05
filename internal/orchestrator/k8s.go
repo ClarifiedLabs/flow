@@ -41,7 +41,7 @@ type KubernetesProviderOptions struct {
 	DeletionTimeout time.Duration
 }
 
-// KubernetesProvider creates one Secret and one batch/v1 Job per assignment.
+// KubernetesProvider creates one Secret and one batch/v1 Job per one-shot slot.
 type KubernetesProvider struct {
 	baseURL         string
 	token           string
@@ -540,9 +540,10 @@ func identityHash(identity AssignmentIdentity) string {
 
 func kubernetesIdentityMetadata(identity AssignmentIdentity) (map[string]string, map[string]string) {
 	labels := map[string]string{
-		"app.kubernetes.io/name":            "flow-worker",
-		"app.kubernetes.io/managed-by":      "flow-orchestrator",
-		"flow.clarifiedlabs.com/assignment": identityHash(identity)[:24],
+		"app.kubernetes.io/name":              "flow-worker",
+		"app.kubernetes.io/managed-by":        "flow-orchestrator",
+		"flow.clarifiedlabs.com/assignment":   identityHash(identity)[:24],
+		"flow.clarifiedlabs.com/profile-name": dnsSlug(identity.ProfileName),
 	}
 	annotations := map[string]string{
 		"flow.clarifiedlabs.com/assignment-id":       identity.AssignmentID,

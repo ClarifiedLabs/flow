@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
@@ -154,8 +155,8 @@ END;`); err != nil {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(job.Selector) != 0 {
-		t.Fatalf("history resume selector = %#v, want no scheduling requirements", job.Selector)
+	if job.Selector[flowharness.AgentHarnessLabel(flowharness.Harness)] != "true" {
+		t.Fatalf("history resume selector = %#v, want runtime harness requirement", job.Selector)
 	}
 	raw, ok := job.Payload["history_resume"].(map[string]any)
 	if !ok {

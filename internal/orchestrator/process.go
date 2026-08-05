@@ -20,7 +20,7 @@ import (
 // constructed or used on another operating system.
 var ErrDarwinProcessUnsupported = errors.New("Darwin process provider is unsupported on this operating system")
 
-// DarwinProcessProviderOptions configures assignment-scoped local processes.
+// DarwinProcessProviderOptions configures capacity-slot-scoped local processes.
 type DarwinProcessProviderOptions struct {
 	StateDir     string
 	Executable   string

@@ -12,6 +12,7 @@ import (
 
 	"github.com/ClarifiedLabs/flow/internal/api/contract"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
+	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	"github.com/ClarifiedLabs/flow/internal/worker"
 )
 
@@ -34,6 +35,128 @@ func TestProvisionerAssignmentsAuthorization(t *testing.T) {
 	doJSONRequestAs(t, fixture.Server, "orchestrator-token", http.MethodGet, provisionerAssignmentsPath+"?provider_id=foreign-provider", nil, http.StatusForbidden, nil)
 	doJSONRequestAs(t, fixture.Server, "orchestrator-token", http.MethodPost, provisionerAssignmentsPath+"/reserve", contract.ReserveProvisionerAssignmentRequest{ProviderID: "foreign-provider"}, http.StatusForbidden, nil)
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, provisionerAssignmentsPath, nil, http.StatusOK, &contract.ProvisionerAssignmentsResponse{})
+}
+
+func TestProvisionerCapacitySlotIsIdleUntilVerifiedBoundAndRefreshed(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	job, err := fixture.Bundle.Queue.EnqueueJob(ctx, worker.EnqueueJobInput{
+		Role: worker.RoleCI, CapacityBucket: worker.BucketEphemeral,
+		Payload: map[string]any{"blocking": true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := contract.CreateProvisionerCapacitySlotRequest{
+		ProviderID: "test-provider", ProviderRequestID: "slot-request-1",
+		ProfileName: "linux-ci", ProviderType: "kubernetes", MaxInstances: 3,
+		AllowedRoles: []worker.JobRole{worker.RoleCI}, AllowedBuckets: []worker.CapacityBucket{worker.BucketEphemeral},
+		Labels: map[string]string{"pool": "managed"}, StartupTimeoutSeconds: 120,
+	}
+	var created contract.CreateProvisionerCapacitySlotResponse
+	doJSONRequest(t, fixture.Server, http.MethodPost, provisionerCapacitySlotsPath, request, http.StatusOK, &created)
+	if !created.Created || created.Slot == nil || created.WorkerToken == "" {
+		t.Fatalf("created slot = %+v", created)
+	}
+	doJSONRequestAs(t, fixture.Server, created.WorkerToken, http.MethodPost, "/v2/workers/register", contract.RegisterWorkerRequest{
+		Labels: map[string]string{"pool": "managed"}, HeartbeatTTLSeconds: 60,
+	}, http.StatusOK, nil)
+	ready, err := fixture.Registry.CapacitySlots().Get(ctx, created.Slot.ID)
+	if err != nil || ready.State != worker.CapacitySlotReady {
+		t.Fatalf("ready slot = %+v, %v", ready, err)
+	}
+	// An idle credential can only register, heartbeat, claim-wait, and connect
+	// control; project/job data remains unavailable until binding.
+	doJSONRequestAs(t, fixture.Server, created.WorkerToken, http.MethodGet, "/v2/jobs", nil, http.StatusForbidden, nil)
+
+	var demand contract.ProvisionerCapacityDemandResponse
+	doJSONRequest(t, fixture.Server, http.MethodPost, provisionerCapacityDemandPath, contract.ProvisionerCapacityDemandRequest{
+		ProviderID: "test-provider", ProfileName: "linux-ci", MaxConcurrency: 2, IdleCapacity: 1,
+		AllowedRoles: request.AllowedRoles, AllowedBuckets: request.AllowedBuckets, Labels: request.Labels,
+	}, http.StatusOK, &demand)
+	if demand.ActiveAssignments != 0 || demand.EligibleQueuedJobs != 1 || demand.DesiredInstances != 2 {
+		t.Fatalf("demand = %+v", demand)
+	}
+
+	var bound contract.BindProvisionerCapacitySlotResponse
+	doJSONRequest(t, fixture.Server, http.MethodPost, provisionerCapacitySlotsPath+"/"+created.Slot.ID+"/bind", contract.BindProvisionerCapacitySlotRequest{CapabilityTTLSeconds: 60}, http.StatusOK, &bound)
+	if !bound.Bound || bound.Assignment == nil || bound.Assignment.Assignment.JobID != job.ID {
+		t.Fatalf("bound slot = %+v", bound)
+	}
+	var stale claimJobResponse
+	doJSONRequestAs(t, fixture.Server, created.WorkerToken, http.MethodPost, "/v2/workers/claim", contract.ClaimJobRequest{LeaseDurationSeconds: 60}, http.StatusOK, &stale)
+	if stale.Claimed {
+		t.Fatalf("claim used pre-binding capability report: %+v", stale)
+	}
+	var claimed claimJobResponse
+	doJSONRequestAs(t, fixture.Server, created.WorkerToken, http.MethodPost, "/v2/workers/claim", contract.ClaimJobRequest{
+		LeaseDurationSeconds: 60, CapabilitiesReported: true,
+		Labels: map[string]string{"pool": "managed"}, HeartbeatTTLSeconds: 60,
+	}, http.StatusOK, &claimed)
+	if !claimed.Claimed || claimed.Job == nil || claimed.Job.ID != job.ID {
+		t.Fatalf("post-binding claim = %+v", claimed)
+	}
+}
+
+func TestProvisionerCapacitySlotCapabilityLossBeforeClaimRequeuesJob(t *testing.T) {
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	model := flowharness.Model{
+		Harness: "harness", ProviderID: "openai", ModelID: "gpt-5",
+		QualifiedID: "openai:gpt-5", Reasoning: flowharness.ReasoningInfo{Supported: true},
+	}
+	job, err := fixture.Bundle.Queue.EnqueueJob(ctx, worker.EnqueueJobInput{
+		Role: worker.RoleCI, CapacityBucket: worker.BucketEphemeral,
+		Harness: worker.HarnessRequirement{Harness: "harness", Model: model.QualifiedID},
+		Payload: map[string]any{"blocking": true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := contract.CreateProvisionerCapacitySlotRequest{
+		ProviderID: "test-provider", ProviderRequestID: "slot-capability-loss",
+		ProfileName: "linux-agent", ProviderType: "kubernetes", MaxInstances: 1,
+		AllowedRoles: []worker.JobRole{worker.RoleCI}, AllowedBuckets: []worker.CapacityBucket{worker.BucketEphemeral},
+		Labels: map[string]string{"agent.harness.harness": "true"}, HarnessModels: []flowharness.Model{model},
+		StartupTimeoutSeconds: 120,
+	}
+	var created contract.CreateProvisionerCapacitySlotResponse
+	doJSONRequest(t, fixture.Server, http.MethodPost, provisionerCapacitySlotsPath, request, http.StatusOK, &created)
+	actualModel := model
+	actualModel.Reasoning = flowharness.ReasoningInfo{}
+	doJSONRequestAs(t, fixture.Server, created.WorkerToken, http.MethodPost, "/v2/workers/register", contract.RegisterWorkerRequest{
+		Labels: map[string]string{"agent.harness.harness": "true"}, HarnessModels: []flowharness.Model{actualModel}, HeartbeatTTLSeconds: 60,
+	}, http.StatusOK, nil)
+	var bound contract.BindProvisionerCapacitySlotResponse
+	doJSONRequest(t, fixture.Server, http.MethodPost, provisionerCapacitySlotsPath+"/"+created.Slot.ID+"/bind", contract.BindProvisionerCapacitySlotRequest{CapabilityTTLSeconds: 60}, http.StatusOK, &bound)
+	if !bound.Bound || bound.Assignment == nil {
+		t.Fatalf("bound slot = %+v", bound)
+	}
+	doJSONRequestAs(t, fixture.Server, created.WorkerToken, http.MethodPost, "/v2/workers/claim", contract.ClaimJobRequest{
+		CapabilitiesReported: true, Labels: map[string]string{"agent.harness.harness": "true"}, HeartbeatTTLSeconds: 60,
+		LeaseDurationSeconds: 60,
+	}, http.StatusConflict, nil)
+	slot, err := fixture.Registry.CapacitySlots().Get(ctx, created.Slot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slot.State != worker.CapacitySlotClosed || slot.CloseReason == nil || *slot.CloseReason != "capability_lost" {
+		t.Fatalf("closed slot = %+v", slot)
+	}
+	assignment, err := fixture.Bundle.Queue.GetAssignment(ctx, bound.Assignment.Assignment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignment.State != worker.AssignmentClosed || assignment.CloseReason == nil || *assignment.CloseReason != "capability_lost" {
+		t.Fatalf("closed assignment = %+v", assignment)
+	}
+	requeued, err := fixture.Bundle.Queue.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requeued.State != worker.JobQueued {
+		t.Fatalf("job state = %s, want queued", requeued.State)
+	}
 }
 
 func TestProvisionerAssignmentListUsesTokenProviderBindingsWithoutQueryFilter(t *testing.T) {

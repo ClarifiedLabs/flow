@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	"github.com/ClarifiedLabs/flow/internal/scheduler"
 	"github.com/ClarifiedLabs/flow/internal/sqlitex"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
@@ -195,7 +196,9 @@ func (s *HistoryCaptureService) CreateResume(ctx context.Context, queue *flowwor
 	dispatchDigest := sha256.Sum256([]byte(source.ID + "\x00" + input.RequestedBy + "\x00" + input.IdempotencyKey))
 	dispatchKey := "history-resume:" + hex.EncodeToString(dispatchDigest[:])
 	jobID := "j-" + hex.EncodeToString(dispatchDigest[:8])
-	compiledSelector, err := scheduler.CompileSelector(scheduler.SelectorInput{})
+	compiledSelector, err := scheduler.CompileSelector(scheduler.SelectorInput{RunsOn: map[string]string{
+		flowharness.AgentHarnessLabel(source.HarnessName): "true",
+	}})
 	if err != nil {
 		return HistoryResume{}, false, fmt.Errorf("compile history resume selector: %w", err)
 	}
@@ -227,15 +230,15 @@ WHERE source_capture_id = ? AND requested_by = ? AND idempotency_key = ?`, sourc
 	jobResult, err := tx.ExecContext(ctx, `
 INSERT INTO jobs (
     id, task_id, change_id, role, state, capacity_bucket, priority,
-    selector_json, tolerations_json, payload_json, dispatch_key, created_at, updated_at
+    selector_json, required_harness, required_model, tolerations_json, payload_json, dispatch_key, created_at, updated_at
 )
-SELECT ?, ?, ?, 'author', 'queued', 'persistent_agent', ?, ?, '[]', ?, ?, ?, ?
+SELECT ?, ?, ?, 'author', 'queued', 'persistent_agent', ?, ?, ?, ?, '[]', ?, ?, ?, ?
 WHERE EXISTS (
     SELECT 1
     FROM changes AS c
     JOIN tasks AS t ON t.id = c.task_id
     WHERE c.id = ? AND c.task_id = ? AND c.head_sha = ? AND t.done_at IS NULL
-)`, jobID, source.TaskID, source.ChangeID, sourceJob.Priority, string(selectorJSON), string(payloadJSON),
+)`, jobID, source.TaskID, source.ChangeID, sourceJob.Priority, string(selectorJSON), source.HarnessName, sourceJob.Harness.Model, string(payloadJSON),
 		dispatchKey, nowText, nowText, source.ChangeID, source.TaskID, workspace.HeadCommit)
 	if err != nil {
 		return HistoryResume{}, false, fmt.Errorf("enqueue history resume: %w", err)

@@ -15,13 +15,11 @@ an archived pre-implementation design draft. Its old commands, schemas, phase
 pipelines, cursors, worker pools, and human-gate descriptions are historical
 rationale only, not supported runtime behavior or compatibility promises.
 
-The current worker model is assignment-created and one-shot. The coordinator
-stores project-local durable assignments, and `flow-orchestrator` recovers them
-before reserving new work. Each assignment starts one Kubernetes Job plus Secret
-or one Darwin child running `flow-worker run --one-shot --config PATH`; that
-worker can claim only its assigned job and exits after it. There are no static
-worker configurations, reusable generic queue claims, or worker capacity/accept
-configuration.
+The current worker model uses durable, one-shot capacity slots. The orchestrator
+may keep verified unbound slots according to each profile's `idle_capacity`.
+Binding creates the authoritative project-local assignment; the worker then
+claims only that job and exits after it. There are no static workers or reusable
+generic queue claims.
 
 The retained material below records the decisions and alternatives considered
 before implementation; it is historical background, not an implementation-ready
@@ -194,9 +192,8 @@ flow-server serve --data-dir ~/.local/share/flow \
   --owner-token-file .flow-local/owner.token \
   --orchestrator-token-file .flow-local/orchestrator.token \
   --orchestrator-provider-ids local
-# Workers are assignment-created one-shot processes. Run a flow-orchestrator
-# provider (process or Kubernetes); it reserves an assignment per queued job
-# and launches `flow-worker run --one-shot --config <generated>` for each.
+# Workers are one-shot capacity slots. Run a flow-orchestrator provider
+# (process or Kubernetes); it launches, verifies, and binds slots to jobs.
 cd /path/to/existing/repo
 git status
 flow init --repo .
@@ -224,13 +221,11 @@ compiled into the `flow` binary for prompt generation.
 9. Leaves all existing remotes, including `origin`, untouched.
 10. Writes a client config so later CLI commands need no `--server`/`--token`.
 
-Workers are assignment-created one-shot processes, not a persistent pool. A
-`flow-orchestrator` provider reserves an exact queued job as a durable
-assignment, mints a short-lived assignment-scoped worker credential, writes a
-generated worker config, and launches `flow-worker run --one-shot` for that one
-assignment. The worker registers against its assignment, claims exactly its
-assigned job, runs it, reports the outcome, and exits. Neither `flow-server
-serve` nor project registration creates a static worker config.
+Workers are one-shot capacity slots, not a reusable pool. A
+`flow-orchestrator` provider launches a slot with a direct credential; the slot
+registers runtime-derived capabilities and may wait ready but unbound. Binding
+creates one project assignment, after which the worker claims exactly that job,
+runs it, reports the outcome, and exits.
 
 Default behavior is deliberately conservative:
 
@@ -600,7 +595,7 @@ Graph execution model:
 - Each node visit has a durable `workflow_node_runs` row. The executor advances
   only along the snapshot edge for the node's recorded outcome; there is no
   implicit phase order or fixed review tail.
-- Agent nodes run as fresh assignment-created jobs and publish the artifact
+- Agent nodes run as fresh one-shot capacity jobs and publish the artifact
   their node requires. Prompt context is resolved from the frozen node and
   completed graph artifacts, so it remains tied to the run rather than the
   current catalog.

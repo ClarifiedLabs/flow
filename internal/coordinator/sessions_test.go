@@ -126,8 +126,8 @@ func TestConsoleSessionLifecycle(t *testing.T) {
 	if payloadString(ensured.Job.Payload, "console_harness") != flowharness.Harness || payloadString(ensured.Job.Payload, "session_purpose") != "console" {
 		t.Fatalf("console payload = %+v", ensured.Job.Payload)
 	}
-	if got := ensured.Job.Selector; len(got) != 0 {
-		t.Fatalf("console selector = %#v, want no scheduling requirements", ensured.Job.Selector)
+	if got := ensured.Job.Selector[flowharness.AgentHarnessLabel(flowharness.Harness)]; got != "true" {
+		t.Fatalf("console selector = %#v, want runtime harness requirement", ensured.Job.Selector)
 	}
 	entrypoint, ok := ensured.Job.Payload["entrypoint"].(map[string]any)
 	if !ok {
@@ -535,8 +535,8 @@ func TestEnsureAuthorJobUsesConfiguredDefaultAgent(t *testing.T) {
 	if got := payloadString(payload, "prompt_harness"); got != flowharness.Harness {
 		t.Fatalf("prompt_harness = %q, want harness", got)
 	}
-	if got := ensured.Job.Selector; len(got) != 0 {
-		t.Fatalf("selector = %#v, want no scheduling requirements", ensured.Job.Selector)
+	if got := ensured.Job.Selector[flowharness.AgentHarnessLabel(flowharness.Harness)]; got != "true" {
+		t.Fatalf("selector = %#v, want runtime harness requirement", ensured.Job.Selector)
 	}
 	entrypoint, ok := payload["entrypoint"].(map[string]any)
 	if !ok {
@@ -738,10 +738,18 @@ func (f sessionFixture) claimNext(ctx context.Context, input flowworker.ClaimInp
 		if job.State != flowworker.JobQueued {
 			continue
 		}
+		labels := make(map[string]string, len(workerRow.Labels)+len(job.Selector))
+		for key, value := range workerRow.Labels {
+			labels[key] = value
+		}
+		for key, value := range job.Selector {
+			labels[key] = value
+		}
+		workerRow.Labels = labels
 		assignment, err := f.workers.ReserveAssignment(ctx, flowworker.ReserveAssignmentInput{
 			JobID: job.ID, WorkerID: input.WorkerID, ProviderID: "test-provider", ProfileName: "test-profile", ProviderType: "test",
 			ProviderRequestID: "test-request-" + job.ID + "-" + input.WorkerID,
-			ProfileLabels:     job.Selector,
+			ProfileLabels:     labels,
 			AllowedRoles:      []flowworker.JobRole{job.Role},
 			AllowedBuckets:    []flowworker.CapacityBucket{job.CapacityBucket},
 			RequiredSelector:  job.Selector,

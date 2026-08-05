@@ -48,6 +48,7 @@ type OrchestratorProfileConfig struct {
 	Provider         string                        `json:"provider" yaml:"provider"`
 	ProviderID       string                        `json:"provider_id" yaml:"provider_id"`
 	MaxConcurrency   int                           `json:"max_concurrency" yaml:"max_concurrency"`
+	IdleCapacity     int                           `json:"idle_capacity" yaml:"idle_capacity"`
 	AllowedRoles     []string                      `json:"allowed_roles" yaml:"allowed_roles"`
 	Accepts          []string                      `json:"accepts" yaml:"accepts"`
 	Labels           map[string]string             `json:"labels" yaml:"labels"`
@@ -95,6 +96,7 @@ type ResolvedOrchestratorProfile struct {
 	Provider         string
 	ProviderID       string
 	MaxConcurrency   int
+	IdleCapacity     int
 	AllowedRoles     []string
 	Accepts          []scheduler.CapacityBucket
 	Labels           map[string]string
@@ -217,7 +219,7 @@ func (c OrchestratorConfig) Resolve() (ResolvedOrchestrator, error) {
 	for _, profile := range cfg.Profiles {
 		item := ResolvedOrchestratorProfile{
 			Name: profile.Name, Provider: profile.Provider, ProviderID: profile.ProviderID,
-			MaxConcurrency: profile.MaxConcurrency, AllowedRoles: append([]string(nil), profile.AllowedRoles...),
+			MaxConcurrency: profile.MaxConcurrency, IdleCapacity: profile.IdleCapacity, AllowedRoles: append([]string(nil), profile.AllowedRoles...),
 			Labels: cloneStringMap(profile.Labels), Taints: append([]scheduler.Taint(nil), profile.Taints...),
 			HarnessModels: flowharness.CloneModels(profile.HarnessModels), RequiredSelector: cloneStringMap(profile.RequiredSelector),
 			StartupTimeout: mustParseDuration(profile.StartupTimeout),
@@ -311,6 +313,9 @@ func normalizeOrchestratorProfile(profile OrchestratorProfileConfig) (Orchestrat
 	}
 	if profile.MaxConcurrency <= 0 {
 		return OrchestratorProfileConfig{}, errors.New("max_concurrency must be greater than zero")
+	}
+	if profile.IdleCapacity < 0 {
+		return OrchestratorProfileConfig{}, errors.New("idle_capacity must be non-negative")
 	}
 	if strings.TrimSpace(profile.StartupTimeout) == "" {
 		profile.StartupTimeout = defaultProfileStartupTimeout

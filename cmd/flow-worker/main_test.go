@@ -799,7 +799,7 @@ func TestWorkerConsoleCleanExitReleasesSession(t *testing.T) {
 printf console-exit > "$1"
 `)
 	ensured, err := fixture.Sessions.EnsureConsoleJob(ctx, coordinator.EnsureConsoleJobInput{
-		Harness: "harness",
+		Harness: flowharness.Shell,
 		Entrypoint: map[string]any{
 			"argv":  []string{scriptPath, outPath},
 			"shell": false,
@@ -888,7 +888,7 @@ func TestWorkerStoppedTaskConsoleReportsProcessExit(t *testing.T) {
 	}
 	ensured, err := fixture.Sessions.EnsureTaskConsoleJob(ctx, coordinator.EnsureTaskConsoleJobInput{
 		TaskID:  task.ID,
-		Harness: "harness",
+		Harness: flowharness.Shell,
 	})
 	if err != nil {
 		t.Fatalf("ensure task console job: %v", err)
@@ -984,7 +984,7 @@ printf console-failed > "$1"
 exit 42
 `)
 	ensured, err := fixture.Sessions.EnsureConsoleJob(ctx, coordinator.EnsureConsoleJobInput{
-		Harness: "harness",
+		Harness: flowharness.Shell,
 		Entrypoint: map[string]any{
 			"argv":  []string{scriptPath, outPath},
 			"shell": false,
@@ -1124,7 +1124,7 @@ labels:
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"worker_id: w-local", "protocol: 7", "labels: 3"} {
+	for _, want := range []string{"worker_id: w-local", "protocol: 8", "labels: 3"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("config output missing %q:\n%s", want, output)
 		}
@@ -1169,6 +1169,20 @@ func TestRegistrationLabelsReportHarnessAvailability(t *testing.T) {
 	}
 	if len(availability) != 1 || !statusByName[flowharness.Harness].Available {
 		t.Fatalf("availability = %#v, want only harness available", statusByName)
+	}
+}
+
+func TestRegistrationLabelsCannotConfigureReservedHarnessAvailability(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	labels, _ := registrationLabelsWithAvailability(map[string]string{
+		"agent.harness.harness": "true",
+		"local":                 "true",
+	})
+	if _, exists := labels["agent.harness.harness"]; exists {
+		t.Fatalf("configured reserved Harness label survived runtime detection: %#v", labels)
+	}
+	if labels["local"] != "true" {
+		t.Fatalf("ordinary configured label was lost: %#v", labels)
 	}
 }
 
@@ -1459,7 +1473,7 @@ labels:
 		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"worker_id: w-local", "protocol: 7", "labels: 3"} {
+	for _, want := range []string{"worker_id: w-local", "protocol: 8", "labels: 3"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("config output missing %q:\n%s", want, output)
 		}
@@ -1481,7 +1495,7 @@ func TestWorkerConsoleRunErrorReleasesSessionAndSurfacesError(t *testing.T) {
 	fixture := newWorkerTestFixture(t)
 
 	ensured, err := fixture.Sessions.EnsureConsoleJob(ctx, coordinator.EnsureConsoleJobInput{
-		Harness: "harness",
+		Harness: flowharness.Shell,
 		Entrypoint: map[string]any{
 			"argv":  []string{"/bin/sh", "-c", "true"},
 			"shell": false,
