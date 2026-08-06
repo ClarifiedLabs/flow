@@ -63,6 +63,7 @@ func main() {
 		if taskID != "" && taskID != "-" { task = &taskID }
 		payload := map[string]any{
 			"base": "main", "branch": "main",
+			"blocking": false,
 			"entrypoint": map[string]any{"argv": []string{"/bin/sh", "-c", "printf 'flow-kind smoke success\\n'"}, "shell": false},
 		}
 		switch os.Args[6] {

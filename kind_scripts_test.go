@@ -28,6 +28,16 @@ func TestKindSmokeDisablesInteractiveCredentialHelpers(t *testing.T) {
 	}
 }
 
+func TestKindSmokeCheckJobsDeclareBlockingMode(t *testing.T) {
+	script, err := os.ReadFile("scripts/kind/smoke.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(script), `"blocking": false`) {
+		t.Fatal("kind smoke check jobs must declare a non-blocking execution mode")
+	}
+}
+
 func TestKubernetesReferenceManifestDoesNotPublishCredentials(t *testing.T) {
 	server, err := os.ReadFile("k8s/server.yaml")
 	if err != nil {
