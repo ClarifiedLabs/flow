@@ -15,6 +15,7 @@ import (
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
+	flowmetrics "github.com/ClarifiedLabs/flow/internal/metrics"
 	"github.com/ClarifiedLabs/flow/internal/worker"
 )
 
@@ -82,7 +83,8 @@ type RegistryOptions struct {
 	// CommitIdentity sets the git author/committer identity the coordinator
 	// uses for the commits it creates (the squash-merge commit). The zero value
 	// uses the git package's default identity.
-	CommitIdentity flowgit.CommitIdentity
+	CommitIdentity  flowgit.CommitIdentity
+	WorkflowMetrics *flowmetrics.Workflow
 }
 
 // Registry owns the coordinator's global services and the set of open
@@ -109,6 +111,7 @@ type Registry struct {
 	historyBlobs               blob.Store
 	historyBlobsOwned          bool
 	historyCaptureOptions      coordinator.HistoryCaptureServiceOptions
+	workflowMetrics            *flowmetrics.Workflow
 
 	mu       sync.RWMutex
 	bundles  map[string]*ProjectBundle
@@ -174,6 +177,7 @@ func NewRegistry(opts RegistryOptions) (*Registry, error) {
 		historyBlobs:               historyBlobs,
 		historyBlobsOwned:          historyBlobsOwned,
 		historyCaptureOptions:      opts.HistoryCaptureServiceOptions,
+		workflowMetrics:            opts.WorkflowMetrics,
 		bundles:                    map[string]*ProjectBundle{},
 	}
 	if err := registry.globalAgentDefs.SeedDefaults(context.Background()); err != nil {
@@ -351,6 +355,7 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 	merges.CommitIdentity = r.commitIdentity
 	workflowRuns := coordinator.NewWorkflowRunServiceWithOptions(db, flows, tasks, coordinator.WorkflowRunServiceOptions{
 		ReviewAuthorCycleLimit: r.reviewAuthorCycleLimit,
+		Metrics:                r.workflowMetrics,
 	})
 	containers := coordinator.NewContainerService(db, workItems, workflowRuns)
 	// The review submission (ThreadService.SubmitReview) files threads, records

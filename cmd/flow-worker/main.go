@@ -1092,6 +1092,23 @@ func reportCheckIfNeeded(ctx context.Context, client *flowclient.Client, job flo
 		client = client.WithProject(projectID)
 	}
 
+	decisionRequestRejected := false
+	if haveVerdict && kind == coordinator.CheckKindReviewer && reviewAggregationJob(job) && verdictReport.DecisionRequest != nil {
+		var opened coordinator.RequestReviewScopeDecisionResult
+		err := retryTransientOperationContext(ctx, "request review scope decision", stdout, func() error {
+			var requestErr error
+			opened, requestErr = client.RequestReviewScopeDecision(ctx, *job.TaskID, checkName, lease.ID, job.ID, verdictReport)
+			return requestErr
+		})
+		if err == nil {
+			fmt.Fprintf(stdout, "check: review scope decision requested wait=%s key=%s\n", opened.Wait.ID, verdictReport.DecisionRequest.Key)
+			return coordinator.CheckPending, nil
+		}
+		decisionRequestRejected = true
+		verdict = coordinator.CheckErrored
+		details = "review scope decision request rejected: " + err.Error()
+	}
+
 	blocking, err := checkJobBlockingValue(job)
 	if err != nil {
 		return coordinator.CheckErrored, fmt.Errorf("check job payload: %w", err)
@@ -1113,7 +1130,7 @@ func reportCheckIfNeeded(ctx context.Context, client *flowclient.Client, job flo
 	// coordinator mutation can be bound to the exact source job.
 	var followUpResults map[int]reviewFollowUpResult
 	var followUpFailures []string
-	if haveVerdict {
+	if haveVerdict && !decisionRequestRejected {
 		var err error
 		followUpResults, followUpFailures, err = applyVerdictActions(
 			ctx,

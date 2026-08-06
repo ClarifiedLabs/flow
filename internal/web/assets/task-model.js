@@ -252,6 +252,9 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
   const snapshot = value(run, "snapshot", "Snapshot") || {};
   const nodes = value(snapshot, "nodes", "Nodes") || [];
   const wait = value(workflow, "open_wait", "OpenWait");
+  const scopeDecision = String(value(wait || {}, "kind", "Kind") || "") === "review_scope_decision"
+    ? value(wait || {}, "details", "Details") || null
+    : null;
   const held = Boolean(value(run, "held_at", "HeldAt"));
   const heldBy = String(value(run, "held_by", "HeldBy") || "");
   const systemHeld = held && heldBy === "system";
@@ -327,6 +330,8 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
     heldBy,
     systemHeld,
     convergenceEvidence,
+    scopeDecision,
+    activeRulings: value(workflow, "active_rulings", "ActiveRulings") || [],
     canRequestConvergence,
     wait,
     waitKind: waitKindOf(wait),

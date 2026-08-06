@@ -30,10 +30,15 @@ export async function apiGetText(path) {
   return response.text();
 }
 
-export async function apiPost(path, body) {
+export async function apiPost(path, body, { idempotencyKey = "" } = {}) {
+  const key = String(idempotencyKey || "").trim();
   return apiFetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Flow-CSRF": readCookie("flow_ui_csrf") },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Flow-CSRF": readCookie("flow_ui_csrf"),
+      ...(key ? { "Idempotency-Key": key } : {}),
+    },
     body: JSON.stringify(body),
   });
 }

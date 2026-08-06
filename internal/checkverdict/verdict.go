@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -42,10 +43,11 @@ func ParseMode(value string) (Mode, error) {
 
 // VerdictReport is the structured outcome a reviewer or verifier writes.
 type VerdictReport struct {
-	Verdict  string                 `json:"verdict"`
-	Reason   string                 `json:"reason"`
-	Comments []ReviewCommentReport  `json:"comments,omitempty"`
-	Threads  []ThreadDecisionReport `json:"threads,omitempty"`
+	Verdict         string                 `json:"verdict"`
+	Reason          string                 `json:"reason"`
+	Comments        []ReviewCommentReport  `json:"comments,omitempty"`
+	Threads         []ThreadDecisionReport `json:"threads,omitempty"`
+	DecisionRequest *ReviewDecisionRequest `json:"decision_request,omitempty"`
 }
 
 type ReviewCommentReport struct {
@@ -56,9 +58,20 @@ type ReviewCommentReport struct {
 	Severity           string                  `json:"severity"`
 	IntroducedByChange *bool                   `json:"introduced_by_change"`
 	Requirement        string                  `json:"requirement"`
+	RequirementSource  string                  `json:"requirement_source,omitempty"`
+	FindingBasis       string                  `json:"finding_basis,omitempty"`
+	RemediationScope   string                  `json:"remediation_scope,omitempty"`
+	ScopeRationale     string                  `json:"scope_rationale,omitempty"`
 	DuplicateOf        string                  `json:"duplicate_of,omitempty"`
 	FollowUp           string                  `json:"follow_up,omitempty"`
 	TaskAction         *ReviewTaskActionReport `json:"task_action,omitempty"`
+}
+
+type ReviewDecisionRequest struct {
+	Key            string `json:"key"`
+	Question       string `json:"question"`
+	Rationale      string `json:"rationale"`
+	CommentIndexes []int  `json:"comment_indexes"`
 }
 
 type ReviewTaskActionReport struct {
@@ -109,6 +122,8 @@ const (
 	verdictFileMaxBytes       = 256 * 1024
 	sealFileMaxBytes          = 16 * 1024
 )
+
+var decisionKeyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
 // ReadFile retains the pre-completion behavior for custom process-exit checks:
 // it validates the common schema without imposing a Flow-owned role mode.
@@ -174,17 +189,20 @@ func Validate(data []byte, mode Mode) (VerdictReport, error) {
 	if err := normalizeVerdictThreads(&report); err != nil {
 		return VerdictReport{}, err
 	}
-	if err := validateMode(fields, mode); err != nil {
+	if err := validateMode(fields, &report, mode); err != nil {
 		return VerdictReport{}, err
 	}
 	return report, nil
 }
 
-func validateMode(fields map[string]json.RawMessage, mode Mode) error {
+func validateMode(fields map[string]json.RawMessage, report *VerdictReport, mode Mode) error {
 	switch mode {
 	case "":
 		return nil
 	case ModeReview, ModeReviewDiscovery:
+		if _, present := fields["decision_request"]; present {
+			return fmt.Errorf("verdict file: mode %s forbids decision_request", mode)
+		}
 		if _, present := fields["threads"]; present {
 			return fmt.Errorf("verdict file: mode %s forbids threads", mode)
 		}
@@ -199,16 +217,133 @@ func validateMode(fields map[string]json.RawMessage, mode Mode) error {
 				return fmt.Errorf("verdict file: mode %s forbids comment %d task_action", mode, i)
 			}
 		}
+		return validateReviewScopeMetadata(report, mode)
 	case ModeReviewAggregation:
 		if _, present := fields["threads"]; present {
 			return errors.New("verdict file: mode review_aggregation forbids threads")
 		}
+		if err := validateReviewScopeMetadata(report, mode); err != nil {
+			return err
+		}
+		return validateDecisionRequest(report)
 	case ModeVerify:
 		if _, present := fields["comments"]; present {
 			return errors.New("verdict file: mode verify forbids comments")
 		}
+		if _, present := fields["decision_request"]; present {
+			return errors.New("verdict file: mode verify forbids decision_request")
+		}
 	default:
 		return fmt.Errorf("invalid check completion mode %q", mode)
+	}
+	return nil
+}
+
+func validateReviewScopeMetadata(report *VerdictReport, mode Mode) error {
+	for index := range report.Comments {
+		comment := &report.Comments[index]
+		comment.RequirementSource = strings.ToLower(strings.TrimSpace(comment.RequirementSource))
+		comment.FindingBasis = strings.ToLower(strings.TrimSpace(comment.FindingBasis))
+		comment.RemediationScope = strings.ToLower(strings.TrimSpace(comment.RemediationScope))
+		comment.ScopeRationale = strings.TrimSpace(comment.ScopeRationale)
+		switch comment.RequirementSource {
+		case "explicit", "inferred":
+		default:
+			return fmt.Errorf("verdict file: comment %d has invalid requirement_source %q (want explicit|inferred)", index, comment.RequirementSource)
+		}
+		switch comment.FindingBasis {
+		case "explicit_requirement", "demonstrated_regression", "security_defect", "scope_inference":
+		default:
+			return fmt.Errorf("verdict file: comment %d has invalid finding_basis %q", index, comment.FindingBasis)
+		}
+		switch comment.RemediationScope {
+		case "local", "cross_cutting", "legacy_migration", "unknown":
+		default:
+			return fmt.Errorf("verdict file: comment %d has invalid remediation_scope %q", index, comment.RemediationScope)
+		}
+		if comment.ScopeRationale == "" {
+			return fmt.Errorf("verdict file: comment %d missing scope_rationale", index)
+		}
+		if len([]byte(comment.ScopeRationale)) > verdictReasonMaxBytes {
+			return fmt.Errorf("verdict file: comment %d scope_rationale exceeds %d bytes", index, verdictReasonMaxBytes)
+		}
+		if comment.FindingBasis == "explicit_requirement" && comment.RequirementSource != "explicit" {
+			return fmt.Errorf("verdict file: comment %d explicit_requirement must use explicit requirement_source", index)
+		}
+		if comment.FindingBasis == "scope_inference" && comment.RequirementSource != "inferred" {
+			return fmt.Errorf("verdict file: comment %d scope_inference must use inferred requirement_source", index)
+		}
+	}
+	_ = mode
+	return nil
+}
+
+func requiresScopeDecision(comment ReviewCommentReport) bool {
+	if !comment.BlocksApproval() || comment.RequirementSource != "inferred" || comment.FindingBasis != "scope_inference" {
+		return false
+	}
+	switch comment.RemediationScope {
+	case "cross_cutting", "legacy_migration", "unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateDecisionRequest(report *VerdictReport) error {
+	required := map[int]struct{}{}
+	for index, comment := range report.Comments {
+		if requiresScopeDecision(comment) {
+			required[index] = struct{}{}
+		}
+	}
+	request := report.DecisionRequest
+	if len(required) == 0 {
+		if request != nil {
+			return errors.New("verdict file: decision_request is forbidden without a blocking inferred scope finding")
+		}
+		return nil
+	}
+	if request == nil {
+		return errors.New("verdict file: blocking inferred scope findings require decision_request")
+	}
+	request.Key = strings.TrimSpace(request.Key)
+	request.Question = strings.TrimSpace(request.Question)
+	request.Rationale = strings.TrimSpace(request.Rationale)
+	if !decisionKeyPattern.MatchString(request.Key) {
+		return errors.New("verdict file: decision_request key must match [a-z0-9][a-z0-9._-]{0,127}")
+	}
+	if request.Question == "" || len([]byte(request.Question)) > 1024 {
+		return errors.New("verdict file: decision_request question must be between 1 and 1024 bytes")
+	}
+	if request.Rationale == "" || len([]byte(request.Rationale)) > verdictReasonMaxBytes {
+		return fmt.Errorf("verdict file: decision_request rationale must be between 1 and %d bytes", verdictReasonMaxBytes)
+	}
+	if len(request.CommentIndexes) == 0 || len(request.CommentIndexes) > verdictMaxComments {
+		return fmt.Errorf("verdict file: decision_request must reference between 1 and %d comments", verdictMaxComments)
+	}
+	seen := map[int]struct{}{}
+	for _, index := range request.CommentIndexes {
+		if index < 0 || index >= len(report.Comments) {
+			return fmt.Errorf("verdict file: decision_request comment index %d is out of range", index)
+		}
+		if _, duplicate := seen[index]; duplicate {
+			return fmt.Errorf("verdict file: decision_request comment index %d is duplicated", index)
+		}
+		seen[index] = struct{}{}
+		if _, ok := required[index]; !ok {
+			return fmt.Errorf("verdict file: decision_request comment index %d does not require a scope decision", index)
+		}
+	}
+	for index := range required {
+		if _, ok := seen[index]; !ok {
+			return fmt.Errorf("verdict file: decision_request omits required comment index %d", index)
+		}
+	}
+	for index, comment := range report.Comments {
+		if comment.TaskAction != nil {
+			return fmt.Errorf("verdict file: decision_request report forbids comment %d task_action", index)
+		}
 	}
 	return nil
 }

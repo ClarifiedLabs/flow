@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	flowmetrics "github.com/ClarifiedLabs/flow/internal/metrics"
 	"github.com/ClarifiedLabs/flow/internal/sqlitex"
 )
 
@@ -46,6 +47,7 @@ const (
 	WorkflowWaitHumanGate            WorkflowWaitKind = "human_gate"
 	WorkflowWaitAgentRequest         WorkflowWaitKind = "agent_request"
 	WorkflowWaitOperatorIntervention WorkflowWaitKind = "operator_intervention"
+	WorkflowWaitReviewScopeDecision  WorkflowWaitKind = "review_scope_decision"
 )
 
 type WorkflowWaitReason string
@@ -185,6 +187,7 @@ type WorkflowRunDetail struct {
 	Transitions         []WorkflowTransition `json:"transitions"`
 	TransitionCounts    []WorkflowEdgeCount  `json:"transition_counts,omitempty"`
 	ConvergenceEvidence *ConvergenceEvidence `json:"convergence_evidence,omitempty"`
+	ActiveRulings       []OwnerRuling        `json:"active_rulings,omitempty"`
 }
 
 type WorkflowRunService struct {
@@ -193,6 +196,7 @@ type WorkflowRunService struct {
 	tasks                  *TaskService
 	reviewAuthorCycleLimit int
 	now                    func() time.Time
+	metrics                *flowmetrics.Workflow
 
 	// reviewLocksMu guards reviewLocks. Interactive review decisions on one
 	// task are serialised end to end: a response's wait-id validation, its
@@ -240,6 +244,7 @@ func NewWorkflowRunService(db *sql.DB, flows *FlowService, tasks *TaskService) *
 
 type WorkflowRunServiceOptions struct {
 	ReviewAuthorCycleLimit int
+	Metrics                *flowmetrics.Workflow
 }
 
 func NewWorkflowRunServiceWithOptions(db *sql.DB, flows *FlowService, tasks *TaskService, opts WorkflowRunServiceOptions) *WorkflowRunService {
@@ -251,6 +256,7 @@ func NewWorkflowRunServiceWithOptions(db *sql.DB, flows *FlowService, tasks *Tas
 		db: db, flows: flows, tasks: tasks,
 		reviewAuthorCycleLimit: limit,
 		now:                    sqlitex.UTCNow,
+		metrics:                opts.Metrics,
 	}
 }
 
@@ -463,6 +469,11 @@ WHERE workflow_run_id = ? AND state = 'open'`, run.ID)); err != nil {
 				return WorkflowRunDetail{}, fmt.Errorf("decode human-gate wait %q: %w", wait.ID, err)
 			}
 		}
+		if wait.Kind == WorkflowWaitReviewScopeDecision {
+			if _, err := ParseReviewScopeDecisionWaitDetails(wait.Details); err != nil {
+				return WorkflowRunDetail{}, fmt.Errorf("decode review-scope decision wait %q: %w", wait.ID, err)
+			}
+		}
 		detail.OpenWait = &wait
 		detail.Substate = InProgressBlocked
 	} else if run.State == WorkflowRunRunning {
@@ -495,6 +506,10 @@ FROM workflow_transitions WHERE workflow_run_id = ? ORDER BY seq`, run.ID)
 		detail.Transitions = append(detail.Transitions, transition)
 	}
 	if err := transitionRows.Err(); err != nil {
+		return WorkflowRunDetail{}, err
+	}
+	detail.ActiveRulings, err = ProjectOwnerRulings(detail.Transitions)
+	if err != nil {
 		return WorkflowRunDetail{}, err
 	}
 	detail.ConvergenceEvidence, err = ActiveConvergenceEvidence(detail.Transitions)
@@ -1236,6 +1251,10 @@ WHERE workflow_run_id = ? AND event_kind = 'node_skipped' AND idempotency_key = 
 	now := s.now().UTC()
 	reviewCycle := isAutomatedReviewAuthorCycle(sourceNode, targetNode, input.Outcome)
 	if reviewCycle && run.ReviewCyclesUsed >= run.ReviewCycleBudget {
+		pendingIdempotencyKey := strings.TrimSpace(input.IdempotencyKey)
+		if pendingIdempotencyKey == "" {
+			pendingIdempotencyKey = fmt.Sprintf("review-cycle-resume:%s:%d:%s", nodeRun.ID, nodeRun.Attempt, input.Outcome)
+		}
 		if run.State == WorkflowRunWaiting && nodeRun.State == WorkflowNodeWaiting {
 			wait, waiting, err := openWaitTx(ctx, tx, run.ID)
 			if err != nil {
@@ -1266,8 +1285,11 @@ UPDATE workflow_runs SET state = ?, version = version + 1 WHERE id = ?`,
 			WorkflowWaitOperatorIntervention,
 			WorkflowWaitReasonReviewCycleLimit,
 			map[string]any{
-				"review_cycle_budget": run.ReviewCycleBudget,
-				"review_cycles_used":  run.ReviewCyclesUsed,
+				"review_cycle_budget":     run.ReviewCycleBudget,
+				"review_cycles_used":      run.ReviewCyclesUsed,
+				"pending_outcome":         input.Outcome,
+				"pending_idempotency_key": pendingIdempotencyKey,
+				"pending_payload":         input.Payload,
 			},
 			fmt.Sprintf(
 				"Review-author cycle limit reached after %d automated send-backs",
@@ -1957,6 +1979,7 @@ WHERE task_id = ? AND state = 'waiting'`, taskID))
 		return WorkflowRun{}, fmt.Errorf("%w: workflow is not waiting on an automation budget", ErrWorkflowConflict)
 	}
 	now := s.now().UTC()
+	resolvedByCompletion := false
 	switch wait.Reason {
 	case WorkflowWaitReasonTransitionBudgetExhausted:
 		if run.TransitionBudget+additional > MaxFlowTransitionBudget {
@@ -1968,25 +1991,40 @@ UPDATE workflow_runs SET transition_budget = transition_budget + ?, state = ?, v
 			return WorkflowRun{}, err
 		}
 	case WorkflowWaitReasonReviewCycleLimit:
+		var pending struct {
+			Outcome        string         `json:"pending_outcome"`
+			IdempotencyKey string         `json:"pending_idempotency_key"`
+			Payload        map[string]any `json:"pending_payload"`
+		}
+		if err := json.Unmarshal(wait.Details, &pending); err != nil {
+			return WorkflowRun{}, fmt.Errorf("decode pending review-cycle completion: %w", err)
+		}
+		if strings.TrimSpace(pending.Outcome) == "" || strings.TrimSpace(pending.IdempotencyKey) == "" {
+			return WorkflowRun{}, fmt.Errorf("%w: review-cycle wait has no pending completion", ErrWorkflowConflict)
+		}
 		base := max(run.ReviewCycleBudget, run.ReviewCyclesUsed)
 		if base+additional > MaxFlowTransitionBudget {
 			return WorkflowRun{}, fmt.Errorf("review cycle budget may not exceed %d", MaxFlowTransitionBudget)
 		}
 		if _, err := tx.ExecContext(ctx, `
-UPDATE workflow_runs SET review_cycle_budget = ?, state = ?, version = version + 1 WHERE id = ?`,
-			base+additional, string(WorkflowRunRunning), run.ID); err != nil {
+UPDATE workflow_runs SET review_cycle_budget = ?, version = version + 1 WHERE id = ?`,
+			base+additional, run.ID); err != nil {
 			return WorkflowRun{}, err
 		}
-		if _, err := tx.ExecContext(ctx, `
-UPDATE workflow_node_runs SET state = ? WHERE id = ? AND state = ?`,
-			string(WorkflowNodeRunning), wait.NodeRunID, string(WorkflowNodeWaiting)); err != nil {
+		if _, err := s.completeNodeTx(ctx, tx, CompleteWorkflowNodeInput{
+			NodeRunID: wait.NodeRunID, Outcome: pending.Outcome, Actor: actor,
+			Payload: pending.Payload, IdempotencyKey: pending.IdempotencyKey,
+		}, false, nil); err != nil {
 			return WorkflowRun{}, err
 		}
+		resolvedByCompletion = true
 	default:
 		return WorkflowRun{}, fmt.Errorf("%w: workflow is not waiting on an automation budget", ErrWorkflowConflict)
 	}
-	if err := resolveOpenWaitTx(ctx, tx, run.ID, actor, now); err != nil {
-		return WorkflowRun{}, err
+	if !resolvedByCompletion {
+		if err := resolveOpenWaitTx(ctx, tx, run.ID, actor, now); err != nil {
+			return WorkflowRun{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return WorkflowRun{}, err

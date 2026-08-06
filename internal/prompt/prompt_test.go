@@ -365,6 +365,7 @@ func TestBuildReviewerPromptIncludesAggregationReports(t *testing.T) {
 		ChangeID:                 "ch-aggregate",
 		CheckName:                "review-aggregation",
 		ReviewAggregationContext: "### code-review (blocking source)\nAuthorization is bypassed.",
+		ReviewDiffStatistics:     "Current full diff against origin/main: 8 files, +420/-160.",
 	})
 	if err != nil {
 		t.Fatalf("build prompt: %v", err)
@@ -381,6 +382,8 @@ func TestBuildReviewerPromptIncludesAggregationReports(t *testing.T) {
 		"high-confidence same-root-issue match",
 		"testable completion criteria",
 		"Candidate Reports:",
+		"Review Diff Statistics:",
+		"8 files, +420/-160",
 		"Authorization is bypassed.",
 		"only reviewer result",
 	} {
@@ -522,6 +525,61 @@ func TestBuildRejectsUnsupportedRole(t *testing.T) {
 		if _, err := Build(Input{Role: role}); err == nil {
 			t.Fatalf("Build accepted unsupported role %q", role)
 		}
+	}
+}
+
+func TestBuildIncludesOwnerRulingsForEveryRole(t *testing.T) {
+	wants := map[string]string{
+		RoleAuthor:   "claim not_warranted and cite the ruling ID",
+		RoleReviewer: "discard conflicting candidates",
+		RoleVerifier: "do not reopen a thread solely for a ruled-out requirement",
+	}
+	for _, role := range []string{RoleAuthor, RoleReviewer, RoleVerifier} {
+		t.Run(role, func(t *testing.T) {
+			rendered, err := Build(Input{
+				Role: role, TaskID: "t-ruling-1",
+				OwnerRulings: []OwnerRuling{{ID: "rule-1", Source: "owner", Body: "Keep the implementation within package alpha."}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{
+				"Owner Rulings (active for this workflow run):",
+				"[rule-1; source=owner] Keep the implementation within package alpha.",
+				"only when another ruling explicitly supersedes it",
+				"ask the owner for clarification instead of guessing",
+				wants[role],
+				"do not erase candidate reports or prior review threads",
+			} {
+				if !strings.Contains(rendered, want) {
+					t.Fatalf("%s prompt missing %q:\n%s", role, want, rendered)
+				}
+			}
+		})
+	}
+}
+
+func TestOrdinaryHumanStatusDoesNotBecomeReviewerPolicy(t *testing.T) {
+	reviewer, err := Build(Input{
+		Role: RoleReviewer, TaskID: "t-ruling-chat",
+		HumanAttentionContext: "progress by human: maybe support the old format",
+		OwnerRulings:          []OwnerRuling{{ID: "rule-chat", Source: "owner", Body: "The old format is out of scope."}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(reviewer, "maybe support the old format") {
+		t.Fatalf("reviewer prompt promoted ordinary status into policy:\n%s", reviewer)
+	}
+	if !strings.Contains(reviewer, "The old format is out of scope") {
+		t.Fatalf("reviewer prompt omitted durable ruling:\n%s", reviewer)
+	}
+	author, err := Build(Input{Role: RoleAuthor, TaskID: "t-ruling-chat", HumanAttentionContext: "question by human: is the session live?"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(author, "Recent Human Attention Context:") {
+		t.Fatalf("author prompt lost ordinary chat context:\n%s", author)
 	}
 }
 

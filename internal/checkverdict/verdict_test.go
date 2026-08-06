@@ -12,7 +12,8 @@ func TestValidateEnforcesRoleModes(t *testing.T) {
 	introduced := false
 	comment := ReviewCommentReport{
 		SHA: "abc", File: "main.go", Line: 1, Body: "finding", Severity: "medium",
-		IntroducedByChange: &introduced, Requirement: "correctness",
+		IntroducedByChange: &introduced, Requirement: "correctness", RequirementSource: "explicit",
+		FindingBasis: "explicit_requirement", RemediationScope: "local", ScopeRationale: "localized correctness requirement",
 	}
 	tests := []struct {
 		name    string
@@ -110,6 +111,37 @@ func TestValidateRejectsForbiddenFieldsEvenWhenEmpty(t *testing.T) {
 				t.Fatalf("Validate() error = %v, want containing %q", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidateReviewAggregationScopeDecision(t *testing.T) {
+	introduced := true
+	comment := ReviewCommentReport{
+		SHA: "abc", File: "main.go", Line: 9, Body: "cross-cutting behavior is undefined", Severity: "high",
+		IntroducedByChange: &introduced, Requirement: "inferred consistency invariant", RequirementSource: "inferred",
+		FindingBasis: "scope_inference", RemediationScope: "cross_cutting", ScopeRationale: "the fix changes every caller",
+	}
+	report := VerdictReport{Verdict: "blocked", Reason: "owner scope decision required", Comments: []ReviewCommentReport{comment}}
+	data, _ := json.Marshal(report)
+	if _, err := Validate(data, ModeReviewAggregation); err == nil || !strings.Contains(err.Error(), "require decision_request") {
+		t.Fatalf("missing decision request error = %v", err)
+	}
+	report.DecisionRequest = &ReviewDecisionRequest{
+		Key: "api.consistency", Question: "Should all callers be changed in this task?",
+		Rationale: "The inferred invariant crosses package boundaries.", CommentIndexes: []int{0},
+	}
+	data, _ = json.Marshal(report)
+	validated, err := Validate(data, ModeReviewAggregation)
+	if err != nil || validated.DecisionRequest == nil || validated.DecisionRequest.Key != "api.consistency" {
+		t.Fatalf("validated = %+v, err=%v", validated, err)
+	}
+	if _, err := Validate(data, ModeReview); err == nil || !strings.Contains(err.Error(), "forbids decision_request") {
+		t.Fatalf("standalone decision request error = %v", err)
+	}
+	report.Comments[0].TaskAction = &ReviewTaskActionReport{Action: "create_task", Title: "Follow up", Body: "Do it"}
+	data, _ = json.Marshal(report)
+	if _, err := Validate(data, ModeReviewAggregation); err == nil || !strings.Contains(err.Error(), "task_action") {
+		t.Fatalf("decision request task_action error = %v", err)
 	}
 }
 

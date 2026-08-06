@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/api/contract"
+	"github.com/ClarifiedLabs/flow/internal/checkverdict"
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
@@ -462,6 +463,7 @@ type PromptContext struct {
 	GateFeedback     string                               `json:"gate_feedback,omitempty"`
 	PriorHandoffs    []PromptPhaseHandoff                 `json:"prior_handoffs,omitempty"`
 	TaskSetWorkflow  *coordinator.TaskSetWorkflowContract `json:"task_set_workflow,omitempty"`
+	OwnerRulings     []coordinator.OwnerRuling            `json:"owner_rulings,omitempty"`
 }
 
 type PromptPhaseHandoff struct {
@@ -529,6 +531,48 @@ func (c *Client) GetWorkflow(id string) (WorkflowDetail, error) {
 	var response WorkflowDetail
 	if err := c.do(http.MethodGet, c.tasksPath("/"+url.PathEscape(id))+"/workflow", nil, nil, &response); err != nil {
 		return WorkflowDetail{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) RecordOwnerRuling(taskID, body, supersedesID, idempotencyKey string) (coordinator.RecordOwnerRulingResult, error) {
+	var response coordinator.RecordOwnerRulingResult
+	request := struct {
+		Body         string `json:"body"`
+		SupersedesID string `json:"supersedes_id,omitempty"`
+	}{Body: body, SupersedesID: supersedesID}
+	headers := http.Header{contract.IdempotencyHeader: []string{strings.TrimSpace(idempotencyKey)}}
+	if err := c.doContextWithHeaders(context.Background(), http.MethodPost,
+		c.tasksPath("/"+url.PathEscape(taskID))+"/workflow/rulings", request, nil, headers, &response); err != nil {
+		return coordinator.RecordOwnerRulingResult{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) RequestReviewScopeDecision(ctx context.Context, taskID, checkName, leaseID, sourceJobID string, report checkverdict.VerdictReport) (coordinator.RequestReviewScopeDecisionResult, error) {
+	var response coordinator.RequestReviewScopeDecisionResult
+	request := struct {
+		LeaseID     string                     `json:"lease_id"`
+		SourceJobID string                     `json:"source_job_id"`
+		CheckName   string                     `json:"check_name"`
+		Report      checkverdict.VerdictReport `json:"report"`
+	}{LeaseID: leaseID, SourceJobID: sourceJobID, CheckName: checkName, Report: report}
+	if err := c.doContext(ctx, http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/workflow/review-scope-decisions", request, nil, &response); err != nil {
+		return coordinator.RequestReviewScopeDecisionResult{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) ResolveReviewScopeDecision(taskID, waitID string, choice coordinator.ReviewScopeDecisionChoice, guidance, idempotencyKey string) (coordinator.ResolveReviewScopeDecisionResult, error) {
+	var response coordinator.ResolveReviewScopeDecisionResult
+	request := struct {
+		Choice   coordinator.ReviewScopeDecisionChoice `json:"choice"`
+		Guidance string                                `json:"guidance,omitempty"`
+	}{Choice: choice, Guidance: guidance}
+	headers := http.Header{contract.IdempotencyHeader: []string{strings.TrimSpace(idempotencyKey)}}
+	path := c.tasksPath("/"+url.PathEscape(taskID)) + "/workflow/review-scope-decisions/" + url.PathEscape(waitID) + "/resolve"
+	if err := c.doContextWithHeaders(context.Background(), http.MethodPost, path, request, nil, headers, &response); err != nil {
+		return coordinator.ResolveReviewScopeDecisionResult{}, err
 	}
 	return response, nil
 }
@@ -2039,6 +2083,10 @@ func (c *Client) getText(path string) (string, error) {
 }
 
 func (c *Client) doContext(ctx context.Context, method string, path string, body any, query url.Values, target any) error {
+	return c.doContextWithHeaders(ctx, method, path, body, query, nil, target)
+}
+
+func (c *Client) doContextWithHeaders(ctx context.Context, method string, path string, body any, query url.Values, headers http.Header, target any) error {
 	var requestBody io.Reader
 	if body != nil {
 		var encoded bytes.Buffer
@@ -2062,6 +2110,11 @@ func (c *Client) doContext(ctx context.Context, method string, path string, body
 	}
 	if c.token != "" {
 		request.Header.Set("Authorization", authScheme+c.token)
+	}
+	for name, values := range headers {
+		for _, value := range values {
+			request.Header.Add(name, value)
+		}
 	}
 
 	started := time.Now()

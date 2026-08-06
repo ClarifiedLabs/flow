@@ -125,6 +125,8 @@ flow task show TASK_ID
 flow task edit --title TITLE [--feature FEATURE] TASK_ID
 flow task schedule TASK_ID
 flow task workflow TASK_ID
+flow task guide TASK_ID "OWNER RULING" [--supersedes RULING_ID]
+flow task decide-review TASK_ID WAIT_ID fix_in_task|out_of_scope|defer_follow_up [--guidance TEXT]
 flow task respond TASK_ID --node-run NODE_RUN_ID --outcome OUTCOME --feedback "..."
 flow task retry [--refresh-agent-runtime] TASK_ID
 flow task budget TASK_ID --additional N
@@ -132,6 +134,19 @@ flow task reset TASK_ID
 flow task done TASK_ID --resolution completed
 flow task reopen TASK_ID
 ```
+
+`task guide` records durable guidance on the active workflow run and delivers
+it to every live author, reviewer, and verifier session in that run. Rulings
+remain active together until a later ruling explicitly names one with
+`--supersedes`; they do not use newest-wins semantics. The CLI generates a
+fresh idempotency key unless `--idempotency-key` is supplied.
+
+Final review aggregation may pause on a `review_scope_decision` when a valid
+blocking finding depends on an inferred, broad scope requirement. Use
+`task decide-review` to require the fix in this task, exclude it without
+follow-up work, or retain it only as non-blocking follow-up. If the change head
+moves while the decision is open, Flow invalidates the decision and restarts
+the complete discovery round against the new head.
 
 Features (project-child task groups with their own exchange branch):
 

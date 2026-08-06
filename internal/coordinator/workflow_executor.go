@@ -120,6 +120,10 @@ func NewWorkflowExecutor(opts WorkflowExecutorOptions) *WorkflowExecutor {
 // human wait, a dependency wait, or Done. Repeated calls are idempotent.
 func (e *WorkflowExecutor) Tick(ctx context.Context) error {
 	var errs error
+	restarted, err := e.runs.ReconcileReviewScopeDecisionHeads(ctx)
+	if err != nil {
+		errs = errors.Join(errs, fmt.Errorf("reconcile review scope decision heads: %w", err))
+	}
 	if err := e.ResumeConvergencePromotions(ctx); err != nil {
 		errs = errors.Join(errs, err)
 	}
@@ -132,7 +136,7 @@ ORDER BY created_at, id`)
 	if err != nil {
 		return errors.Join(errs, err)
 	}
-	var ids []string
+	ids := append([]string(nil), restarted...)
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {

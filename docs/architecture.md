@@ -311,6 +311,24 @@ verdict for the worker to apply, without directly mutating project state.
 `verify_change` continues to evaluate its children directly; verifiers declare
 thread decisions in verdicts and the worker applies them.
 
+Every reviewer comment also classifies its requirement source, finding basis,
+remediation breadth, and scope rationale. Explicit requirements, demonstrated
+regressions, and security defects remain ordinary blockers. A final aggregator
+that finds a blocking inferred scope requirement with cross-cutting, legacy-
+migration, or unknown remediation emits one structured decision request for one
+coherent cluster. The worker opens a durable `review_scope_decision` wait before
+filing comments, creating follow-up tasks, or reporting the aggregation check.
+An owner choice becomes a durable ruling and reruns aggregation only; a changed
+head invalidates the wait and reruns full discovery.
+
+Owner rulings are versioned `workflow_owner_ruling_recorded` transitions.
+Active rulings are projected from the complete run history, apply together, and
+are removed only by an explicit replacement's `supersedes_id`. They are included
+in prompt context for every task-bound author, reviewer, and verifier and are
+best-effort broadcast to live same-run agent sessions after the transition
+commits. Task-bound prompt enrichment is fail-closed so an agent never starts
+without the current ruling projection.
+
 Every reviewer and verifier mode compares the checked-out change to
 `origin/${FLOW_BASE:-main}`. Flow guarantees that remote-tracking base ref is
 present in the worker checkout; a local branch named by `FLOW_BASE` is not part

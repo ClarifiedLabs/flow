@@ -17,12 +17,15 @@ export const HAND_BACK_EDGES = [
 ];
 
 export function renderHeldPanel(model) {
-  if (!model?.held) return "";
+  if (!model?.held && !model?.scopeDecision) return "";
   const projectAttr = model.projectID ? ` data-project="${escapeAttr(model.projectID)}"` : "";
   const session = value(model.taskConsole || {}, "session", "Session");
   const sessionID = value(session || {}, "id", "ID");
   const workerID = value(session || {}, "worker_id", "WorkerID");
   const convergenceEvidence = model.convergenceEvidence || null;
+  if (model.scopeDecision) {
+    return renderReviewScopeDecisionPanel(model, model.scopeDecision, projectAttr);
+  }
   if (convergenceEvidence) {
     return renderConvergencePanel(model, convergenceEvidence, projectAttr, sessionID, workerID);
   }
@@ -39,6 +42,39 @@ export function renderHeldPanel(model) {
         const text = edge === "resume" ? `${label} ${model.stepName}` : label;
         return `<button class="button${primary ? "" : " secondary"}" data-workflow-release="${escapeAttr(model.id)}" data-edge="${escapeAttr(edge)}"${projectAttr}>${escapeHTML(text)}</button>`;
       }).join("")}
+    </div>
+  `;
+}
+
+function renderReviewScopeDecisionPanel(model, details, projectAttr) {
+  const request = value(details, "report", "Report")?.decision_request || value(details, "report", "Report")?.DecisionRequest || {};
+  const key = String(value(details, "decision_key", "DecisionKey") || value(request, "key", "Key") || "");
+  const question = String(value(details, "question", "Question") || value(request, "question", "Question") || "Scope decision required");
+  const rationale = String(value(details, "rationale", "Rationale") || value(request, "rationale", "Rationale") || "");
+  const waitID = String(value(model.wait || {}, "id", "ID") || "");
+  const report = value(details, "report", "Report") || {};
+  const comments = value(report, "comments", "Comments") || [];
+  const indexes = value(details, "comment_indexes", "CommentIndexes") || [];
+  return `
+    <div class="head">
+      <span class="badge"><span class="dot"></span>Review scope decision</span>
+      <span class="line">aggregation is paused · decide one scope cluster</span>
+    </div>
+    <div class="evidence-summary">
+      <div><span>Decision key</span><code>${escapeHTML(key)}</code></div>
+      <div><span>Question</span><strong>${escapeHTML(question)}</strong></div>
+    </div>
+    ${rationale ? `<p>${escapeHTML(rationale)}</p>` : ""}
+    ${indexes.length ? `<ul class="evidence-files">${indexes.map((index) => {
+      const finding = comments[Number(index)] || {};
+      return `<li><code>${escapeHTML(String(value(finding, "file", "File") || `comment ${index}`))}</code><span>${escapeHTML(String(value(finding, "body", "Body") || ""))}</span></li>`;
+    }).join("")}</ul>` : ""}
+    <div class="hand-back convergence-actions" data-review-scope-panel>
+      <label class="convergence-note"><span>Owner guidance (optional)</span><textarea rows="2" data-review-scope-guidance placeholder="Add constraints or clarification"></textarea></label>
+      <span class="caption">Decision</span>
+      <button class="button" data-review-scope-decision="${escapeAttr(model.id)}" data-wait-id="${escapeAttr(waitID)}" data-choice="fix_in_task"${projectAttr}>Fix in this task</button>
+      <button class="button secondary" data-review-scope-decision="${escapeAttr(model.id)}" data-wait-id="${escapeAttr(waitID)}" data-choice="out_of_scope"${projectAttr}>Out of scope</button>
+      <button class="button secondary" data-review-scope-decision="${escapeAttr(model.id)}" data-wait-id="${escapeAttr(waitID)}" data-choice="defer_follow_up"${projectAttr}>Defer as follow-up</button>
     </div>
   `;
 }
@@ -77,9 +113,10 @@ function renderConvergencePanel(model, evidence, projectAttr, sessionID, workerI
     }).join("")}${omitted ? `<li class="omitted">${omitted} more changed files retained by digest</li>` : ""}</ul>` : ""}
     ${sessionID ? renderSession(sessionID, workerID) : ""}
     <div class="hand-back convergence-actions" data-convergence-panel>
-      <label class="convergence-note"><span>Decision note (optional)</span><textarea rows="2" data-convergence-note placeholder="Record why this disposition is appropriate"></textarea></label>
+      <label class="convergence-note"><span>Decision note (required to return to author)</span><textarea rows="2" data-convergence-note placeholder="Record why this disposition is appropriate"></textarea></label>
       <span class="caption">Disposition</span>
       <button class="button" data-convergence-decision="${escapeAttr(model.id)}" data-disposition="accept_scope"${fingerprintAttr}${projectAttr}>Continue as-is</button>
+      <button class="button secondary" data-convergence-decision="${escapeAttr(model.id)}" data-disposition="return_to_author"${fingerprintAttr}${projectAttr}>Return to author</button>
       <button class="button secondary" data-convergence-decision="${escapeAttr(model.id)}" data-disposition="repair_branch"${fingerprintAttr}${projectAttr}>Repair branch</button>
       <button class="button secondary" data-convergence-decision="${escapeAttr(model.id)}" data-disposition="promote"${fingerprintAttr}${projectAttr}>Promote to feature</button>
       <button class="button secondary danger" data-convergence-decision="${escapeAttr(model.id)}" data-disposition="cancel"${fingerprintAttr}${projectAttr}>Cancel implementation</button>

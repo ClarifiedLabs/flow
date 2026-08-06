@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ClarifiedLabs/flow/internal/checkverdict"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 )
 
@@ -92,6 +93,23 @@ type workflowConvergenceRequest struct {
 	Disposition                 coordinator.ConvergenceDisposition `json:"disposition"`
 	Note                        string                             `json:"note,omitempty"`
 	ExpectedEvidenceFingerprint string                             `json:"expected_evidence_fingerprint"`
+}
+
+type workflowOwnerRulingRequest struct {
+	Body         string `json:"body"`
+	SupersedesID string `json:"supersedes_id,omitempty"`
+}
+
+type workflowReviewScopeDecisionRequest struct {
+	LeaseID     string                     `json:"lease_id"`
+	SourceJobID string                     `json:"source_job_id"`
+	CheckName   string                     `json:"check_name"`
+	Report      checkverdict.VerdictReport `json:"report"`
+}
+
+type workflowReviewScopeDecisionResolveRequest struct {
+	Choice   coordinator.ReviewScopeDecisionChoice `json:"choice"`
+	Guidance string                                `json:"guidance,omitempty"`
 }
 
 type workflowArtifactResponse struct {
@@ -197,6 +215,96 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 	}
 
 	switch parts[0] {
+	case "review-scope-decisions":
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		if len(parts) == 1 {
+			if !requireScope(w, principal, "worker token is required", coordinator.TokenScopeWorker) {
+				return
+			}
+			var request workflowReviewScopeDecisionRequest
+			if err := decodeJSON(r, &request); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+				return
+			}
+			result, err := s.workflowRuns.RequestReviewScopeDecision(r.Context(), coordinator.RequestReviewScopeDecisionInput{
+				TaskID: taskID, CheckName: request.CheckName, LeaseID: request.LeaseID,
+				SourceJobID: request.SourceJobID, WorkerID: principal.Subject, Report: request.Report,
+			})
+			if err != nil {
+				writeWorkflowError(w, err, "request_review_scope_decision_failed")
+				return
+			}
+			writeJSON(w, http.StatusAccepted, result)
+			return
+		}
+		if len(parts) != 3 || parts[2] != "resolve" {
+			writeError(w, http.StatusNotFound, "not_found", "resource not found")
+			return
+		}
+		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+			return
+		}
+		idempotencyKey := strings.TrimSpace(r.Header.Get(idempotencyHeader))
+		if idempotencyKey == "" || len(idempotencyKey) > 255 {
+			writeError(w, http.StatusBadRequest, "idempotency_key_required", "Idempotency-Key is required and must not exceed 255 characters")
+			return
+		}
+		var request workflowReviewScopeDecisionResolveRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+			return
+		}
+		unlockGitWrites := s.drainGitWrites()
+		defer unlockGitWrites()
+		result, err := s.workflowRuns.ResolveReviewScopeDecision(r.Context(), coordinator.ResolveReviewScopeDecisionInput{
+			TaskID: taskID, WaitID: parts[1], Choice: request.Choice, Guidance: request.Guidance,
+			Actor: workflowActor(principal), IdempotencyKey: idempotencyKey,
+		})
+		if err != nil {
+			writeWorkflowError(w, err, "resolve_review_scope_decision_failed")
+			return
+		}
+		if s.workflowExecutor != nil {
+			if err := s.workflowExecutor.Advance(r.Context(), result.Run.ID); err != nil {
+				writeWorkflowError(w, err, "advance_workflow_failed")
+				return
+			}
+			result.Run, err = s.workflowRuns.Get(r.Context(), result.Run.ID)
+			if err != nil {
+				writeWorkflowError(w, err, "load_workflow_failed")
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, result)
+	case "rulings":
+		if len(parts) != 1 {
+			writeError(w, http.StatusNotFound, "not_found", "resource not found")
+			return
+		}
+		if !requireMethod(w, r, http.MethodPost) || !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+			return
+		}
+		idempotencyKey := strings.TrimSpace(r.Header.Get(idempotencyHeader))
+		if idempotencyKey == "" || len(idempotencyKey) > 255 {
+			writeError(w, http.StatusBadRequest, "idempotency_key_required", "Idempotency-Key is required and must not exceed 255 characters")
+			return
+		}
+		var request workflowOwnerRulingRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+			return
+		}
+		result, err := s.workflowRuns.RecordOwnerRuling(r.Context(), coordinator.RecordOwnerRulingInput{
+			TaskID: taskID, Body: request.Body, SupersedesID: request.SupersedesID,
+			Source: coordinator.OwnerRulingSourceOwner, Actor: workflowActor(principal), IdempotencyKey: idempotencyKey,
+		})
+		if err != nil {
+			writeWorkflowError(w, err, "record_owner_ruling_failed")
+			return
+		}
+		writeJSON(w, http.StatusCreated, result)
 	case "artifacts":
 		if !requireMethod(w, r, http.MethodPost) {
 			return
@@ -696,7 +804,7 @@ func (s *projectServer) handleConvergenceDisposition(w http.ResponseWriter, r *h
 		}
 		err = s.workflowExecutor.WithConvergenceEvidenceRefsLocked(r.Context(), refreshed, func(lockedCtx context.Context) error {
 			result, err = s.workflowRuns.ResolveConvergenceReview(lockedCtx, resolveInput)
-			if err != nil || request.Disposition != coordinator.ConvergenceAcceptScope {
+			if err != nil || (request.Disposition != coordinator.ConvergenceAcceptScope && request.Disposition != coordinator.ConvergenceReturnAuthor) {
 				return err
 			}
 			advanceAttemptedUnderRefLock = true
@@ -732,7 +840,7 @@ func (s *projectServer) handleConvergenceDisposition(w http.ResponseWriter, r *h
 			writeError(w, http.StatusBadRequest, "start_console_failed", err.Error())
 			return
 		}
-	case coordinator.ConvergenceAcceptScope:
+	case coordinator.ConvergenceAcceptScope, coordinator.ConvergenceReturnAuthor:
 		if s.workflowExecutor != nil && !advanceAttemptedUnderRefLock {
 			if err := s.workflowExecutor.Advance(r.Context(), result.Run.ID); err != nil {
 				writeWorkflowError(w, err, "advance_workflow_failed")

@@ -61,6 +61,10 @@ type Input struct {
 	// check results from completed parallel discovery reviewers. The final
 	// reviewer deduplicates them and decides the node.
 	ReviewAggregationContext string
+	// ReviewDiffStatistics summarizes the current full branch diff for the
+	// aggregation reviewer. It is evidence for scope judgment, never an
+	// automatic correctness or scope verdict.
+	ReviewDiffStatistics string
 	// ReviewDiscovery marks one parallel source reviewer whose lease-bound
 	// verdict is persisted for aggregation and therefore must not create threads
 	// or otherwise mutate project state directly.
@@ -68,8 +72,16 @@ type Input struct {
 	// TaskSetWorkflow is the downstream materializer policy and the exact
 	// project workflow choices advertised to a task-planning author.
 	TaskSetWorkflow *TaskSetWorkflowContract
+	OwnerRulings    []OwnerRuling
 	BlockedChecks   []BlockedCheck
 	ReviewThreads   []ReviewThread
+}
+
+type OwnerRuling struct {
+	ID           string
+	Body         string
+	Source       string
+	SupersedesID string
 }
 
 type TaskSetWorkflowContract struct {
@@ -138,6 +150,37 @@ func Build(input Input) (string, error) {
 		"",
 		fmt.Sprintf("You are the %s agent for Flow.", role),
 	}
+	if len(input.OwnerRulings) > 0 {
+		lines = append(lines, "", "Owner Rulings (active for this workflow run):")
+		for _, ruling := range input.OwnerRulings {
+			label := strings.TrimSpace(ruling.ID)
+			if source := strings.TrimSpace(ruling.Source); source != "" {
+				label += "; source=" + source
+			}
+			lines = append(lines, fmt.Sprintf("- [%s] %s", label, strings.TrimSpace(ruling.Body)))
+		}
+		lines = append(lines,
+			"Apply all active rulings together. A ruling is inactive only when another ruling explicitly supersedes it.",
+			"If active rulings conflict or leave the requested scope unclear, ask the owner for clarification instead of guessing.",
+		)
+		switch role {
+		case RoleAuthor:
+			lines = append(lines,
+				"Treat each ruling as authoritative clarification of this run's task scope. Do not implement a review request that conflicts with it.",
+				"For an already-open conflicting review thread, claim not_warranted and cite the ruling ID.",
+			)
+		case RoleReviewer:
+			lines = append(lines,
+				"Do not raise a finding that conflicts with an active ruling.",
+				"As final aggregator, discard conflicting candidates and do not turn them into blocking threads or follow-up tasks unless a ruling explicitly requests follow-up work.",
+			)
+		case RoleVerifier:
+			lines = append(lines,
+				"Evaluate claims using the active rulings and do not reopen a thread solely for a ruled-out requirement.",
+			)
+		}
+		lines = append(lines, "Rulings clarify scope but do not erase candidate reports or prior review threads from the audit trail.")
+	}
 	lines = append(lines, fmt.Sprintf("Task: %s", valueOrUnknown(input.TaskID)))
 	if strings.TrimSpace(input.PhaseName) != "" {
 		lines = append(lines, fmt.Sprintf("Work Phase: %s", strings.TrimSpace(input.PhaseName)))
@@ -182,6 +225,9 @@ func Build(input Input) (string, error) {
 	if role == RoleReviewer && strings.TrimSpace(input.ReviewAggregationContext) != "" {
 		lines = append(lines, "", "Parallel Review Aggregation:")
 		lines = append(lines, reviewAggregationInstructions()...)
+		if strings.TrimSpace(input.ReviewDiffStatistics) != "" {
+			lines = append(lines, "", "Review Diff Statistics:", strings.TrimSpace(input.ReviewDiffStatistics))
+		}
 		lines = append(lines, "", "Candidate Reports:", strings.TrimSpace(input.ReviewAggregationContext))
 	}
 	if role == RoleAuthor && strings.TrimSpace(input.GateFeedback) != "" {
@@ -269,6 +315,9 @@ func reviewAggregationInstructions() []string {
 		"You are the final aggregation reviewer after parallel review discovery, distinct from both source discovery reviewers and a standalone reviewer. Validate and synthesize Candidate Reports; do not start a new open-ended review pass.",
 		"Candidate Reports are the persisted, worker-validated source check results from the lease-bound discovery jobs.",
 		"This mode accepts comments and optional task_action entries, but it forbids threads entries.",
+		"Classify every comment with requirement_source, finding_basis, remediation_scope, and scope_rationale. Explicit requirements, demonstrated regressions, and security defects remain ordinary blockers.",
+		"When a blocking inferred scope_inference requires cross-cutting, legacy-migration, or unknown remediation, emit one decision_request covering exactly one coherent cluster and all comments in that cluster. Omit unrelated ambiguous clusters until a later aggregation round.",
+		"decision_request is {key,question,rationale,comment_indexes}; use a stable lowercase key. The owner choices are fix_in_task, out_of_scope, and defer_follow_up. A report with decision_request must not contain task_action.",
 		"Combine duplicate symptoms that share one root cause and emit at most one anchored comment for each unique task-caused blocker.",
 		"A candidate from an advisory source may remain non-blocking follow-up context but cannot block approval. A blocking-source candidate may block only when it satisfies the critical/high, introduced-by-change, non-duplicate policy.",
 		"For each unique, actionable issue that is safe to defer from this change, declare task_action on its non-blocking comment. Use use_existing_task only for a high-confidence same-root-issue match from Open Task Candidates; otherwise use create_task with a concise title and a self-contained Markdown body covering the problem, review evidence and anchor, why it is out of scope, and testable completion criteria.",
@@ -491,7 +540,7 @@ func roleInstructions(role string, input Input) []string {
 		instructions = append(instructions,
 			"This is a standalone reviewer, not a parallel discovery source or final aggregator. Review the task and current branch.",
 			"First derive the change's correctness and security invariants and review related edge cases together. On later cycles, inspect claimed threads and the delta since the prior reviewed head; a new blocker must be introduced by that delta or directly violate an original task requirement.",
-			"Classify every comments[] finding in $FLOW_VERDICT_FILE as {sha,file,line,body,severity,introduced_by_change,requirement,duplicate_of,follow_up,task_action}. task_action is reserved for the final parallel-review aggregation job and is either {action:\"create_task\",title,body} or {action:\"use_existing_task\",task_id}. Only critical/high findings introduced by this change and not duplicating an existing thread block this task; pre-existing, medium/low, and duplicate findings remain non-blocking follow-up context. For this workflow, high includes a reproducible correctness regression, security flaw, unmet explicit task requirement, or a missing test that leaves such a task-caused bug unprotected; medium/low means the requested behavior remains correct and the finding can safely be separate follow-up work.",
+			"Classify every comments[] finding in $FLOW_VERDICT_FILE as {sha,file,line,body,severity,introduced_by_change,requirement,requirement_source,finding_basis,remediation_scope,scope_rationale,duplicate_of,follow_up,task_action}. requirement_source is explicit|inferred; finding_basis is explicit_requirement|demonstrated_regression|security_defect|scope_inference; remediation_scope is local|cross_cutting|legacy_migration|unknown. task_action is reserved for the final parallel-review aggregation job. Only critical/high findings introduced by this change and not duplicating an existing thread block block this task. Explicit requirements, demonstrated regressions, and security defects remain ordinary blockers; standalone review never emits decision_request.",
 			"This reviewer mode accepts comments but forbids threads and task_action entries.",
 			"Write a valid structured verdict to $FLOW_VERDICT_FILE; it is the only source of a reviewer outcome. The worker applies eligible comments and the outcome.",
 		)

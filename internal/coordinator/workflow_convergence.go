@@ -49,6 +49,7 @@ type ConvergenceDisposition string
 const (
 	ConvergenceAcceptScope  ConvergenceDisposition = "accept_scope"
 	ConvergenceRepairBranch ConvergenceDisposition = "repair_branch"
+	ConvergenceReturnAuthor ConvergenceDisposition = "return_to_author"
 	ConvergencePromote      ConvergenceDisposition = "promote"
 	ConvergenceCancel       ConvergenceDisposition = "cancel"
 )
@@ -71,6 +72,8 @@ type ConvergenceReviewResult struct {
 	Feature      *Feature               `json:"feature,omitempty"`
 	PlanningTask *Task                  `json:"planning_task,omitempty"`
 	PlanningRun  *WorkflowRun           `json:"planning_run,omitempty"`
+	Ruling       *OwnerRuling           `json:"ruling,omitempty"`
+	Delivery     *OwnerRulingDelivery   `json:"delivery,omitempty"`
 }
 
 type convergenceResolutionPayload struct {
@@ -370,7 +373,7 @@ func (s *WorkflowRunService) ResolveConvergenceReview(ctx context.Context, input
 		input.Actor = ActorHuman
 	}
 	switch input.Disposition {
-	case ConvergenceAcceptScope, ConvergenceRepairBranch, ConvergenceCancel:
+	case ConvergenceAcceptScope, ConvergenceRepairBranch, ConvergenceReturnAuthor, ConvergenceCancel:
 	case ConvergencePromote:
 		return ConvergenceReviewResult{}, ErrConvergencePromotionRequired
 	default:
@@ -379,6 +382,9 @@ func (s *WorkflowRunService) ResolveConvergenceReview(ctx context.Context, input
 
 	if input.ExpectedEvidenceFingerprint == "" {
 		return ConvergenceReviewResult{}, fmt.Errorf("%w: reviewed convergence evidence fingerprint is required", ErrWorkflowConflict)
+	}
+	if input.Disposition == ConvergenceReturnAuthor && input.Note == "" {
+		return ConvergenceReviewResult{}, errors.New("return_to_author requires a decision note")
 	}
 
 	tx, err := sqlitex.BeginImmediate(ctx, s.db)
@@ -460,6 +466,53 @@ SELECT
 UPDATE workflow_runs SET held_at = NULL, held_by = '', version = version + 1 WHERE id = ?`, run.ID); err != nil {
 			return ConvergenceReviewResult{}, err
 		}
+	case ConvergenceReturnAuthor:
+		sourceNode, ok := run.Snapshot.Node(run.CurrentNodeKey)
+		if !ok || sourceNode.Kind != NodeChangeReview || run.CurrentNodeRunID != evidence.NodeRunID {
+			return ConvergenceReviewResult{}, fmt.Errorf("%w: return_to_author requires the active change-review node", ErrWorkflowConflict)
+		}
+		targetKey, ok := run.Snapshot.Target(sourceNode.Key, "changes_requested")
+		if !ok {
+			return ConvergenceReviewResult{}, fmt.Errorf("%w: change-review node has no changes_requested edge", ErrWorkflowConflict)
+		}
+		targetNode, ok := run.Snapshot.Node(targetKey)
+		if !ok || targetNode.Kind != NodeAgent || targetNode.Config.Agent == nil || targetNode.Config.Agent.Workspace != WorkspaceChange {
+			return ConvergenceReviewResult{}, fmt.Errorf("%w: changes_requested must target a change-workspace author", ErrWorkflowConflict)
+		}
+		rulingID, err := randomPrefixedID("rule")
+		if err != nil {
+			return ConvergenceReviewResult{}, err
+		}
+		rulingPayload := ownerRulingPayload{
+			SchemaVersion: OwnerRulingSchemaVersion, RulingID: rulingID, Body: input.Note,
+			Source: OwnerRulingSourceConvergenceReturn, NodeRunID: evidence.NodeRunID,
+		}
+		rulingJSON, err := json.Marshal(rulingPayload)
+		if err != nil {
+			return ConvergenceReviewResult{}, err
+		}
+		if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
+			TaskID: run.TaskID, WorkflowRunID: run.ID, FromNodeKey: run.CurrentNodeKey, ToNodeKey: run.CurrentNodeKey,
+			EventKind: OwnerRulingEventKind, PayloadJSON: string(rulingJSON), Actor: string(input.Actor),
+			IdempotencyKey: "ruling:convergence-return:" + evidence.Fingerprint, CreatedAt: now,
+		}); err != nil {
+			return ConvergenceReviewResult{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE workflow_runs SET held_at = NULL, held_by = '', version = version + 1 WHERE id = ?`, run.ID); err != nil {
+			return ConvergenceReviewResult{}, err
+		}
+		completion, err := s.completeNodeTx(ctx, tx, CompleteWorkflowNodeInput{
+			NodeRunID: evidence.NodeRunID, Outcome: "changes_requested", Actor: input.Actor,
+			Payload:        map[string]any{"convergence_return": true, "ruling_id": rulingID},
+			IdempotencyKey: "convergence-return:" + evidence.Fingerprint,
+		}, false, nil)
+		if err != nil {
+			return ConvergenceReviewResult{}, err
+		}
+		result.Run = completion.Run
+		ruling := ownerRulingFromPayload(rulingPayload, run.ID, run.TaskID, string(input.Actor), now)
+		result.Ruling = &ruling
 	case ConvergenceCancel:
 		task, err := forceDoneTaskTx(ctx, tx, input.TaskID, ResolutionCancelled, input.Note, input.Actor, now)
 		if err != nil {
@@ -473,6 +526,11 @@ UPDATE workflow_runs SET held_at = NULL, held_by = '', version = version + 1 WHE
 	result.Run, err = s.Get(ctx, run.ID)
 	if err != nil {
 		return ConvergenceReviewResult{}, err
+	}
+	if result.Ruling != nil {
+		delivery := s.deliverOwnerRuling(ctx, *result.Ruling)
+		result.Delivery = &delivery
+		s.observeOwnerRuling(*result.Ruling, delivery)
 	}
 	return result, nil
 }

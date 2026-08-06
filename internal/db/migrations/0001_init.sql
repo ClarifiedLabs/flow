@@ -237,7 +237,7 @@ CREATE TABLE workflow_waits (
 	id TEXT PRIMARY KEY,
 	workflow_run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
 	node_run_id TEXT REFERENCES workflow_node_runs(id) ON DELETE SET NULL,
-	kind TEXT NOT NULL CHECK (kind IN ('human_gate', 'agent_request', 'operator_intervention')),
+	kind TEXT NOT NULL CHECK (kind IN ('human_gate', 'agent_request', 'operator_intervention', 'review_scope_decision')),
 	reason TEXT NOT NULL DEFAULT '',
 	details_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(details_json)),
 	message TEXT NOT NULL DEFAULT '',
@@ -363,6 +363,8 @@ CREATE TABLE session_messages (
 	status_log_id INTEGER REFERENCES status_log(id) ON DELETE SET NULL,
 	actor TEXT NOT NULL,
 	body TEXT NOT NULL,
+	source_kind TEXT NOT NULL DEFAULT '',
+	source_id TEXT NOT NULL DEFAULT '',
 	state TEXT NOT NULL CHECK (state IN ('pending', 'delivered')),
 	created_at TEXT NOT NULL,
 	delivered_at TEXT,
@@ -1058,6 +1060,10 @@ CREATE UNIQUE INDEX idx_review_threads_idem
 CREATE INDEX idx_review_threads_task_state ON review_threads(task_id, state, created_at);
 
 CREATE INDEX idx_session_messages_pending ON session_messages(session_id, state, created_at);
+
+CREATE UNIQUE INDEX idx_session_messages_source
+	ON session_messages(session_id, source_kind, source_id)
+	WHERE source_id <> '';
 
 CREATE INDEX idx_sessions_change ON sessions(change_id, created_at);
 

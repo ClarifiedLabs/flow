@@ -293,6 +293,7 @@ type promptContextResponse struct {
 	GateFeedback     string                               `json:"gate_feedback,omitempty"`
 	PriorHandoffs    []promptPhaseHandoff                 `json:"prior_handoffs,omitempty"`
 	TaskSetWorkflow  *coordinator.TaskSetWorkflowContract `json:"task_set_workflow,omitempty"`
+	OwnerRulings     []coordinator.OwnerRuling            `json:"owner_rulings,omitempty"`
 }
 
 type promptPhaseHandoff struct {
@@ -336,6 +337,7 @@ func (s *projectServer) handlePromptContext(w http.ResponseWriter, r *http.Reque
 				writeError(w, http.StatusInternalServerError, "prompt_context_failed", err.Error())
 				return
 			}
+			response.OwnerRulings = detail.ActiveRulings
 			node, ok := run.Snapshot.Node(run.CurrentNodeKey)
 			if ok {
 				response.PhaseName = node.Name

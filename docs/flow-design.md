@@ -623,6 +623,29 @@ thread comments, declared follow-up task actions, thread decisions, and workflow
 outcomes. `verify_change` uses the same verdict-only write boundary for verifier
 thread decisions.
 
+Reviewer comments carry four required scope fields: `requirement_source`
+(`explicit|inferred`), `finding_basis` (`explicit_requirement`,
+`demonstrated_regression`, `security_defect`, or `scope_inference`),
+`remediation_scope` (`local`, `cross_cutting`, `legacy_migration`, or
+`unknown`), and a bounded `scope_rationale`. Explicit requirements,
+demonstrated regressions, and security defects remain normal blockers. In final
+aggregation only, a blocking inferred `scope_inference` with broad or unknown
+remediation requires one `decision_request` covering exactly one coherent
+comment cluster. The aggregation check remains pending while the run waits.
+Owner resolution records a ruling and reruns only aggregation on the same head;
+head movement invalidates the wait and queues full discovery on a refreshed
+change artifact. Three accepted decision rounds are allowed per change-review
+node run; repeated active decision keys and a fourth round become ordinary
+errored-check recovery waits.
+
+Durable owner rulings are an orthogonal run input rather than mutable task text.
+All active rulings apply together, and only an explicit `supersedes_id` removes
+one from the active projection. `flow task guide` creates an owner ruling;
+review-scope choices and convergence `return_to_author` create the same typed
+record from their atomic state transitions. Prompt construction includes the
+active projection for authors, reviewers, and verifiers and instructs agents to
+request clarification when active rulings conflict.
+
 Reviewer and verifier context reads are project-scoped rather than task-private.
 The same task-facing boundary applies to an owner, a project-bound session or
 console, and a worker with a current live lease in the project. It includes task

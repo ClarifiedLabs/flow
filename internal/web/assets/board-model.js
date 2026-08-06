@@ -57,6 +57,7 @@ export function waitKindOf(wait) {
   if (kind === "operator_intervention") return "failed";
   if (kind === "human_gate") return "gate";
   if (kind === "agent_request") return "question";
+  if (kind === "review_scope_decision") return "question";
   return "";
 }
 

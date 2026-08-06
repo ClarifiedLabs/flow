@@ -261,6 +261,18 @@ Assignment-centric orchestrator metrics are:
 Coordinator `flow_queue_depth{state}` remains useful queue telemetry, but it is
 not a worker provisioning signal.
 
+Owner-guidance and review-scope workflow metrics are deliberately low
+cardinality:
+
+| Metric | Meaning |
+| --- | --- |
+| `flow_owner_rulings_total{source}` | durable rulings by owner, scope decision, or convergence return |
+| `flow_owner_ruling_deliveries_total{result}` | live-session ruling delivery attempts and `succeeded`, `duplicate`, or `failed` outcomes |
+| `flow_review_scope_decisions_opened_total` | durable scope-decision waits opened |
+| `flow_review_scope_decisions_resolved_total{choice}` | owner resolutions by fixed choice |
+| `flow_review_scope_decision_reruns_total{kind}` | aggregation-only or full-discovery reruns |
+| `flow_review_scope_decision_rejections_total{reason}` | repeated-key or attempt-limit rejections |
+
 ## History durability for capacity workers
 
 `flow-server` stores its SQLite databases and the default local history blob

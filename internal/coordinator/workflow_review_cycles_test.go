@@ -156,11 +156,12 @@ func TestWorkflowReviewAuthorCyclesWaitAtConfiguredLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extend review cycle budget: %v", err)
 	}
-	if extended.State != WorkflowRunRunning || extended.ReviewCycleBudget != DefaultReviewAuthorCycleLimit+2 {
+	if extended.State != WorkflowRunRunning || extended.ReviewCycleBudget != DefaultReviewAuthorCycleLimit+2 ||
+		extended.CurrentNodeKey != "implement" || extended.ReviewCyclesUsed != DefaultReviewAuthorCycleLimit+1 {
 		t.Fatalf("extended run = %+v", extended)
 	}
 	result = complete(blockedReview, "changes_requested")
-	if result.Next == nil || result.Next.NodeKey != "implement" || result.Run.ReviewCyclesUsed != DefaultReviewAuthorCycleLimit+1 {
+	if !result.Replayed || result.Run.CurrentNodeKey != "implement" || result.Run.ReviewCyclesUsed != DefaultReviewAuthorCycleLimit+1 {
 		t.Fatalf("resumed review send-back = %+v", result)
 	}
 }

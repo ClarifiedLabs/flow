@@ -274,6 +274,12 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "resolve default agent: %v\n", err)
 		return 1
 	}
+	telemetryRegistry := metrics.NewWithBuildInfo(metrics.BuildInfo{
+		Name:    "flow_server_build_info",
+		Help:    "flow-server build information.",
+		Version: version.Current().String(),
+	})
+	workflowMetrics := metrics.RegisterWorkflow(telemetryRegistry)
 
 	registry, err := api.NewRegistry(api.RegistryOptions{
 		DataDir:          cfg.DataDir,
@@ -297,6 +303,7 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		ReviewAuthorCycleLimit:     limits.ReviewAuthorCycles,
 		ReviewScopeFileLimit:       limits.ReviewScopeFiles,
 		ReviewScopeLineLimit:       limits.ReviewScopeLines,
+		WorkflowMetrics:            workflowMetrics,
 		CommitIdentity: flowgit.CommitIdentity{
 			Name:  cfg.Git.CommitName,
 			Email: cfg.Git.CommitEmail,
@@ -382,11 +389,6 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 
 	// Telemetry: a single unauthenticated port serving /readyz (global DB
 	// ping), /livez, and /metrics. It must only be exposed inside the cluster.
-	telemetryRegistry := metrics.NewWithBuildInfo(metrics.BuildInfo{
-		Name:    "flow_server_build_info",
-		Help:    "flow-server build information.",
-		Version: version.Current().String(),
-	})
 	counters := telemetryCounters{
 		requests:  telemetryRegistry.Counter("flow_http_requests_total", "HTTP API requests by route and response status."),
 		enqueued:  telemetryRegistry.Counter("flow_jobs_enqueued_total", "Jobs successfully enqueued via POST /v2/jobs."),

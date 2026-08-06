@@ -50,7 +50,7 @@ const { handleFormSubmit } = await import("./forms.js");
 const { diffUnavailable } = await import("./elements/change.js");
 const { renderChangeRoute } = await import("./change-route.js");
 const { renderInlineThread } = await import("./elements/inline-thread.js");
-await import("./elements/task-detail.js");
+const { renderOwnerRulingsPanel } = await import("./elements/task-detail.js");
 
 const HOUR = 3600_000;
 
@@ -1603,11 +1603,29 @@ test("a typed convergence hold renders immutable evidence and explicit dispositi
   assert.match(html, /8 files · \+420\/-160/);
   assert.match(html, /internal\/&lt;unsafe&gt;\.go/);
   assert.match(html, /data-convergence-note/);
-  assert.equal((html.match(/data-evidence-fingerprint="sha256:reviewed-evidence"/g) || []).length, 4);
-  for (const disposition of ["accept_scope", "repair_branch", "promote", "cancel"]) {
+  assert.equal((html.match(/data-evidence-fingerprint="sha256:reviewed-evidence"/g) || []).length, 5);
+  for (const disposition of ["accept_scope", "return_to_author", "repair_branch", "promote", "cancel"]) {
     assert.match(html, new RegExp(`data-disposition="${disposition}"`), `missing disposition ${disposition}`);
   }
   assert.doesNotMatch(html, /data-workflow-release/);
+});
+
+test("task detail renders active owner rulings and a run-scoped replacement form", () => {
+  const html = renderOwnerRulingsPanel({
+    id: "t-guided",
+    projectID: "p-1",
+    runID: "wr-1",
+    runState: "running",
+    activeRulings: [{ ruling_id: "rule-1", source: "review_scope_decision", body: "Keep compatibility work out of this change." }],
+  });
+  assert.match(html, /Owner ruling \/ scope guidance/);
+  assert.match(html, /rule-1/);
+  assert.match(html, /Keep compatibility work out of this change/);
+  assert.match(html, /data-owner-ruling="t-guided"/);
+  assert.match(html, /data-project="p-1"/);
+  assert.match(html, /data-owner-ruling-supersedes/);
+  assert.match(html, /value="rule-1"/);
+  assert.equal(renderOwnerRulingsPanel({ id: "t-unscheduled" }), "");
 });
 
 test("held_by system alone does not masquerade as typed convergence evidence", () => {

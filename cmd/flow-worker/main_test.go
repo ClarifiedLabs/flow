@@ -229,6 +229,73 @@ func TestBlockingReviewerOnlyCountsTaskCausedUniqueHighSeverityFindings(t *testi
 	}
 }
 
+func TestReviewScopeDecisionRequestPausesBeforeActionsOrCheckReport(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		if r.Method != http.MethodPost || r.URL.Path != "/v2/tasks/t-review/workflow/review-scope-decisions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = io.WriteString(w, `{"wait":{"id":"ww-scope","workflow_run_id":"wr-1","node_run_id":"wnr-1","kind":"review_scope_decision","message":"Choose scope","created_by":"agent","created_at":"2026-01-01T00:00:00Z"}}`)
+	}))
+	t.Cleanup(server.Close)
+	client, err := flowclient.New(config.ClientConfig{ServerURL: server.URL, Token: "worker-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID := "t-review"
+	job := flowworker.Job{ID: "j-aggregate", TaskID: &taskID, Role: flowworker.RoleReviewer, CapacityBucket: flowworker.BucketEphemeral,
+		Payload: map[string]any{"blocking": true, "review_aggregation": true}}
+	report := workerexec.VerdictReport{Verdict: "blocked", Reason: "scope", DecisionRequest: &checkverdict.ReviewDecisionRequest{
+		Key: "scope.one", Question: "Fix here?", Rationale: "Cross-cutting.", CommentIndexes: []int{0},
+	}}
+	result := workerexec.RunResult{ExitCode: 0, Payload: workerexec.JobPayload{CheckName: "review-aggregation.node.wnr-1"}, VerdictReport: &report}
+	verdict, err := reportCheckIfNeeded(context.Background(), client, job, flowworker.Lease{ID: "l-1"}, result, io.Discard)
+	if err != nil || verdict != coordinator.CheckPending {
+		t.Fatalf("verdict=%q err=%v", verdict, err)
+	}
+	if len(requests) != 1 || !strings.Contains(requests[0], "review-scope-decisions") {
+		t.Fatalf("requests = %v", requests)
+	}
+}
+
+func TestRejectedReviewScopeDecisionReportsAggregationErrored(t *testing.T) {
+	var decisionCalls, checkCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v2/tasks/t-review/workflow/review-scope-decisions":
+			decisionCalls++
+			w.WriteHeader(http.StatusConflict)
+			_, _ = io.WriteString(w, `{"error":{"code":"workflow_conflict","message":"repeated active review-scope decision key"}}`)
+		case "/v2/tasks/t-review/checks/review-aggregation.node.wnr-1":
+			checkCalls++
+			_, _ = io.WriteString(w, `{"check":{"task_id":"t-review","name":"review-aggregation.node.wnr-1","kind":"reviewer","required":true,"verdict":"errored","details":"rejected"},"review_state":"in_review"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client, err := flowclient.New(config.ClientConfig{ServerURL: server.URL, Token: "worker-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID := "t-review"
+	job := flowworker.Job{ID: "j-aggregate", TaskID: &taskID, Role: flowworker.RoleReviewer, CapacityBucket: flowworker.BucketEphemeral,
+		Payload: map[string]any{"blocking": true, "review_aggregation": true}}
+	report := workerexec.VerdictReport{Verdict: "blocked", Reason: "scope", DecisionRequest: &checkverdict.ReviewDecisionRequest{
+		Key: "scope.one", Question: "Fix here?", Rationale: "Cross-cutting.", CommentIndexes: []int{0},
+	}}
+	result := workerexec.RunResult{ExitCode: 0, Payload: workerexec.JobPayload{CheckName: "review-aggregation.node.wnr-1"}, VerdictReport: &report}
+	verdict, err := reportCheckIfNeeded(context.Background(), client, job, flowworker.Lease{ID: "l-1"}, result, io.Discard)
+	if verdict != coordinator.CheckErrored || err == nil || decisionCalls != 1 || checkCalls != 1 {
+		t.Fatalf("verdict=%q err=%v decision_calls=%d check_calls=%d", verdict, err, decisionCalls, checkCalls)
+	}
+}
+
 func boolPtr(value bool) *bool {
 	return &value
 }

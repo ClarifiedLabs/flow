@@ -28,6 +28,37 @@ import "./tab-strip.js";
 import "./task-rail.js";
 import "./workflow-graph.js";
 
+export function renderOwnerRulingsPanel(model) {
+  if (!model?.runID) return "";
+  const rulings = Array.isArray(model.activeRulings) ? model.activeRulings : [];
+  const recordable = ["scheduled", "running", "waiting"].includes(String(model.runState || ""));
+  const projectAttr = model.projectID ? ` data-project="${escapeAttr(model.projectID)}"` : "";
+  const options = rulings.map((ruling) => {
+    const id = String(value(ruling, "ruling_id", "RulingID") || "");
+    return id ? `<option value="${escapeAttr(id)}">Replace ${escapeHTML(id)}</option>` : "";
+  }).join("");
+  const list = rulings.length
+    ? `<ol class="activity-list">${rulings.map((ruling) => {
+      const id = String(value(ruling, "ruling_id", "RulingID") || "");
+      const source = String(value(ruling, "source", "Source") || "owner");
+      const body = String(value(ruling, "body", "Body") || "");
+      return `<li><div><code>${escapeHTML(id)}</code> <span class="badge">${escapeHTML(source.replaceAll("_", " "))}</span></div><p>${escapeHTML(body)}</p></li>`;
+    }).join("")}</ol>`
+    : `<p class="empty">No active rulings for this run</p>`;
+  return `
+    <section class="section" data-owner-ruling-panel>
+      <h3>Owner ruling / scope guidance</h3>
+      <p class="caption">Durable policy for this workflow run. Every later author, reviewer, and verifier receives it.</p>
+      ${list}
+      ${recordable ? `
+        <label><span>Ruling</span><textarea rows="3" data-owner-ruling-body placeholder="Clarify requirements or task scope"></textarea></label>
+        ${options ? `<label><span>Replacement</span><select data-owner-ruling-supersedes><option value="">Add alongside active rulings</option>${options}</select></label>` : ""}
+        <button class="button" type="button" data-owner-ruling="${escapeAttr(model.id)}"${projectAttr}>Record ruling</button>
+      ` : `<p class="caption">This workflow run is no longer active. Update the task body before scheduling a new run.</p>`}
+    </section>
+  `;
+}
+
 export function taskTerminalTarget(model) {
   if (!model?.terminalAvailable) return null;
   const session = model.activeSession || {};
@@ -810,6 +841,7 @@ export class FlowTaskDetail extends FlowElement {
       <dl class="facts">
         ${rows.map(([label, fact]) => `<div><dt>${escapeHTML(label)}</dt><dd>${escapeHTML(fact)}</dd></div>`).join("")}
       </dl>
+      ${renderOwnerRulingsPanel(model)}
     `;
   }
 }

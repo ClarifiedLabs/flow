@@ -24,6 +24,8 @@ type SessionMessage struct {
 	StatusLogID   *int64              `json:"status_log_id,omitempty"`
 	Actor         string              `json:"actor"`
 	Body          string              `json:"body"`
+	SourceKind    string              `json:"source_kind,omitempty"`
+	SourceID      string              `json:"source_id,omitempty"`
 	State         SessionMessageState `json:"state"`
 	CreatedAt     time.Time           `json:"created_at"`
 	DeliveredAt   *time.Time          `json:"delivered_at,omitempty"`
@@ -35,6 +37,8 @@ type EnqueueSessionMessageInput struct {
 	StatusLogID *int64
 	Actor       string
 	Body        string
+	SourceKind  string
+	SourceID    string
 }
 
 type ListPendingSessionMessagesInput struct {
@@ -79,13 +83,15 @@ func (s *SessionService) EnqueueSessionMessage(ctx context.Context, input Enqueu
 	now := s.now().UTC()
 	nowText := formatTime(now)
 	if _, err := s.db.ExecContext(ctx, `
-INSERT INTO session_messages (id, session_id, status_log_id, actor, body, state, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO session_messages (id, session_id, status_log_id, actor, body, source_kind, source_id, state, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id,
 		sessionID,
 		nullableInt64Value(input.StatusLogID),
 		actor,
 		body,
+		strings.TrimSpace(input.SourceKind),
+		strings.TrimSpace(input.SourceID),
 		string(SessionMessagePending),
 		nowText,
 	); err != nil {
@@ -137,7 +143,7 @@ func (s *SessionService) ListPendingSessionMessages(ctx context.Context, input L
 		limit = 20
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, session_id, status_log_id, actor, body, state, created_at, delivered_at, delivery_error
+SELECT id, session_id, status_log_id, actor, body, source_kind, source_id, state, created_at, delivered_at, delivery_error
 FROM session_messages
 WHERE session_id = ?
 	AND state = ?
@@ -216,7 +222,7 @@ WHERE id = ?
 
 func (s *SessionService) GetSessionMessage(ctx context.Context, id string) (SessionMessage, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, session_id, status_log_id, actor, body, state, created_at, delivered_at, delivery_error
+SELECT id, session_id, status_log_id, actor, body, source_kind, source_id, state, created_at, delivered_at, delivery_error
 FROM session_messages
 WHERE id = ?`, strings.TrimSpace(id))
 
@@ -257,6 +263,8 @@ func scanSessionMessage(row taskScanner) (SessionMessage, error) {
 		&statusLogID,
 		&message.Actor,
 		&message.Body,
+		&message.SourceKind,
+		&message.SourceID,
 		&state,
 		&createdAtText,
 		&deliveredAt,

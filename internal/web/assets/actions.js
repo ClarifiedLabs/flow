@@ -209,6 +209,23 @@ export const ACTIONS = {
     return `Convergence review started for ${taskID}`;
   },
 
+  async ownerRuling(app, element, dataset) {
+    const taskID = dataset.ownerRuling;
+    const panel = element.closest?.("[data-owner-ruling-panel]");
+    const body = String(panel?.querySelector("[data-owner-ruling-body]")?.value || "").trim();
+    const supersedesID = String(panel?.querySelector("[data-owner-ruling-supersedes]")?.value || "").trim();
+    if (!body) throw new Error("Enter owner guidance before recording a ruling");
+    const idempotencyKey = globalThis.crypto?.randomUUID?.() || `owner-ruling-${Date.now()}-${Math.random()}`;
+    const result = await apiPost(
+      workflowPath(dataset, taskID, "/workflow/rulings"),
+      { body, ...(supersedesID ? { supersedes_id: supersedesID } : {}) },
+      { idempotencyKey },
+    );
+    await app.refresh();
+    const rulingID = result?.ruling?.ruling_id || result?.Ruling?.RulingID || "";
+    return rulingID ? `Recorded owner ruling ${rulingID}` : `Recorded owner ruling for ${taskID}`;
+  },
+
   async workflowTakeOver(app, element, dataset) {
     const taskID = dataset.workflowTakeOver;
     await apiPost(workflowPath(dataset, taskID, "/workflow/hold"), {});
@@ -247,6 +264,9 @@ export const ACTIONS = {
     const note = String(
       element.closest?.("[data-convergence-panel]")?.querySelector("[data-convergence-note]")?.value || "",
     ).trim();
+    if (disposition === "return_to_author" && !note) {
+      throw new Error("A decision note is required to return the change to the author");
+    }
     await apiPost(workflowPath(dataset, taskID, "/workflow/convergence"), {
       disposition,
       expected_evidence_fingerprint: dataset.evidenceFingerprint || "",
@@ -258,6 +278,8 @@ export const ACTIONS = {
         return `Continuing ${taskID} as-is`;
       case "repair_branch":
         return `Opened ${taskID} for branch repair`;
+      case "return_to_author":
+        return `Returned ${taskID} to the author`;
       case "promote":
         return `Promoting ${taskID} to a feature`;
       case "cancel":
@@ -265,6 +287,22 @@ export const ACTIONS = {
       default:
         return `Resolved convergence review for ${taskID}`;
     }
+  },
+
+  async reviewScopeDecision(app, element, dataset) {
+    const taskID = dataset.reviewScopeDecision;
+    const waitID = dataset.waitId || "";
+    const guidance = String(
+      element.closest?.("[data-review-scope-panel]")?.querySelector("[data-review-scope-guidance]")?.value || "",
+    ).trim();
+    const idempotencyKey = globalThis.crypto?.randomUUID?.() || `review-decision-${Date.now()}-${Math.random()}`;
+    await apiPost(
+      workflowPath(dataset, taskID, `/workflow/review-scope-decisions/${encodeURIComponent(waitID)}/resolve`),
+      { choice: dataset.choice || "", ...(guidance ? { guidance } : {}) },
+      { idempotencyKey },
+    );
+    await app.refresh();
+    return `Resolved review scope decision for ${taskID}`;
   },
 
   async attentionMerge(app, element, dataset) {
@@ -799,9 +837,11 @@ const PENDING_LABELS = {
   workflowSkip: "Skipping step",
   workflowHold: "Holding",
   convergenceRequest: "Starting scope review",
+  ownerRuling: "Recording owner ruling",
   workflowTakeOver: "Taking over",
   workflowRelease: "Releasing",
   convergenceDecision: "Resolving convergence review",
+  reviewScopeDecision: "Resolving review scope decision",
   attentionMerge: "Merging",
   cardMerge: "Merging",
   cardApprove: "Approving",

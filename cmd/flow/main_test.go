@@ -750,7 +750,7 @@ func TestFetchPromptIncludesTaskSetWorkflowSelection(t *testing.T) {
 	}
 }
 
-func TestFetchPromptContinuesWhenTaskContextFetchFails(t *testing.T) {
+func TestFetchPromptFailsWhenTaskContextFetchFails(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	serverURL := newFlowAPIServer(t)
 
@@ -764,23 +764,40 @@ func TestFetchPromptContinuesWhenTaskContextFetchFails(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exitCode := run([]string{"fetch-prompt", "--harness", "harness"}, &stdout, &stderr)
-	if exitCode != 0 {
-		t.Fatalf("fetch-prompt exitCode = %d, stderr = %q", exitCode, stderr.String())
+	if exitCode == 0 {
+		t.Fatalf("fetch-prompt unexpectedly succeeded, stdout = %q", stdout.String())
 	}
+	if stdout.Len() != 0 {
+		t.Fatalf("fetch-prompt rendered an unenriched prompt: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "fetch task context") {
+		t.Fatalf("fetch-prompt stderr missing fatal enrichment error: %q", stderr.String())
+	}
+}
 
-	output := stdout.String()
-	for _, want := range []string{
-		"Flow role instructions (flow-reviewer):",
-		"# Flow Reviewer",
-		"Task: t-demo-0001",
-		"Check: reviewer",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("fetch-prompt output missing %q:\n%s", want, output)
-		}
+func TestOwnerCommandsAcceptDocumentedTrailingFlags(t *testing.T) {
+	guide := ownerCommandTrailingFlags([]string{"t-1", "Keep it local", "--supersedes", "rule-1"}, 2)
+	wantGuide := []string{"--supersedes", "rule-1", "t-1", "Keep it local"}
+	if strings.Join(guide, "|") != strings.Join(wantGuide, "|") {
+		t.Fatalf("guide args = %v, want %v", guide, wantGuide)
 	}
-	if !strings.Contains(stderr.String(), "continuing without task context") {
-		t.Fatalf("fetch-prompt stderr missing enrichment warning: %q", stderr.String())
+	decision := ownerCommandTrailingFlags([]string{"t-1", "ww-1", "fix_in_task", "--guidance", "Preserve the API"}, 3)
+	wantDecision := []string{"--guidance", "Preserve the API", "t-1", "ww-1", "fix_in_task"}
+	if strings.Join(decision, "|") != strings.Join(wantDecision, "|") {
+		t.Fatalf("decision args = %v, want %v", decision, wantDecision)
+	}
+}
+
+func TestParseGitNumstat(t *testing.T) {
+	files, additions, deletions, binaries, err := parseGitNumstat([]byte("12\t3\tinternal/a.go\n-\t-\tassets/image.png\n4\t0\told.go => new.go\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files != 3 || additions != 16 || deletions != 3 || binaries != 1 {
+		t.Fatalf("numstat = files:%d +%d/-%d binary:%d", files, additions, deletions, binaries)
+	}
+	if _, _, _, _, err := parseGitNumstat([]byte("bad line")); err == nil {
+		t.Fatal("malformed numstat unexpectedly accepted")
 	}
 }
 

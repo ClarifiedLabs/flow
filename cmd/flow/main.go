@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -535,11 +536,119 @@ func runTaskWithGlobalOptions(args []string, options globalOptions, stdout, stde
 		return runTaskRelations(options.withConfig(args[1:]), stdout, stderr)
 	case "reply":
 		return runTaskReply(options.withConfig(args[1:]), stdout, stderr)
+	case "guide":
+		return runTaskGuide(options.withConfig(args[1:]), stdout, stderr)
+	case "decide-review":
+		return runTaskDecideReview(options.withConfig(args[1:]), stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown task command: %s\n\n", args[0])
 		printTaskUsage(stderr)
 		return 2
 	}
+}
+
+func runTaskGuide(args []string, stdout, stderr io.Writer) int {
+	args = ownerCommandTrailingFlags(args, 2)
+	flags := flag.NewFlagSet("task guide", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	var supersedesID string
+	var idempotencyKey string
+	flags.StringVar(&supersedesID, "supersedes", "", "active ruling id this ruling replaces")
+	flags.StringVar(&idempotencyKey, "idempotency-key", "", "request replay key (generated when omitted)")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 2 || strings.TrimSpace(flags.Arg(1)) == "" {
+		fmt.Fprintln(stderr, "usage: flow task guide [flags] TASK_ID MESSAGE [--supersedes RULING_ID] [--idempotency-key KEY]")
+		return 2
+	}
+	if strings.TrimSpace(idempotencyKey) == "" {
+		var random [16]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			fmt.Fprintf(stderr, "generate idempotency key: %v\n", err)
+			return 1
+		}
+		idempotencyKey = "guide-" + hex.EncodeToString(random[:])
+	}
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return 1
+	}
+	client, taskRef := scopeClientForRef(client, flags.Arg(0))
+	result, err := client.RecordOwnerRuling(taskRef, flags.Arg(1), supersedesID, idempotencyKey)
+	if err != nil {
+		fmt.Fprintf(stderr, "record owner ruling: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s\tqueued %d/%d\n", result.Ruling.RulingID, result.Delivery.QueuedSessions, result.Delivery.TargetedSessions)
+	return 0
+}
+
+func runTaskDecideReview(args []string, stdout, stderr io.Writer) int {
+	args = ownerCommandTrailingFlags(args, 3)
+	flags := flag.NewFlagSet("task decide-review", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	var guidance string
+	var idempotencyKey string
+	flags.StringVar(&guidance, "guidance", "", "optional owner guidance appended to the ruling")
+	flags.StringVar(&idempotencyKey, "idempotency-key", "", "request replay key (generated when omitted)")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 3 {
+		fmt.Fprintln(stderr, "usage: flow task decide-review [flags] TASK_ID WAIT_ID fix_in_task|out_of_scope|defer_follow_up")
+		return 2
+	}
+	choice := coordinator.ReviewScopeDecisionChoice(strings.TrimSpace(flags.Arg(2)))
+	if choice != coordinator.ReviewScopeFixInTask && choice != coordinator.ReviewScopeOutOfScope && choice != coordinator.ReviewScopeDeferFollowUp {
+		fmt.Fprintf(stderr, "invalid review decision choice %q\n", choice)
+		return 2
+	}
+	if strings.TrimSpace(idempotencyKey) == "" {
+		var random [16]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			fmt.Fprintf(stderr, "generate idempotency key: %v\n", err)
+			return 1
+		}
+		idempotencyKey = "review-decision-" + hex.EncodeToString(random[:])
+	}
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return 1
+	}
+	client, taskRef := scopeClientForRef(client, flags.Arg(0))
+	result, err := client.ResolveReviewScopeDecision(taskRef, flags.Arg(1), choice, guidance, idempotencyKey)
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve review scope decision: %v\n", err)
+		return 1
+	}
+	rulingID := ""
+	if result.Ruling != nil {
+		rulingID = result.Ruling.RulingID
+	}
+	fmt.Fprintf(stdout, "%s\t%s\t%s\n", result.Result, result.Run.State, rulingID)
+	return 0
+}
+
+// ownerCommandTrailingFlags accepts the documented noun-first form (for
+// example `task guide TASK MESSAGE --supersedes ID`) while retaining the
+// standard flag-first form used by the rest of the CLI. The positional values
+// are opaque and never re-tokenized.
+func ownerCommandTrailingFlags(args []string, positionalCount int) []string {
+	if positionalCount < 1 || len(args) <= positionalCount || strings.HasPrefix(args[0], "-") {
+		return args
+	}
+	for index := 0; index < positionalCount; index++ {
+		if strings.HasPrefix(args[index], "-") {
+			return args
+		}
+	}
+	result := append([]string(nil), args[positionalCount:]...)
+	return append(result, args[:positionalCount]...)
 }
 
 func runTaskCreate(args []string, stdout, stderr io.Writer) int {
@@ -2274,7 +2383,8 @@ func runFetchPrompt(args []string, stdout, stderr io.Writer) int {
 	}
 	applySessionEnvironment(apiFlags, nil)
 	if err := enrichPromptTaskContext(&input, apiFlags); err != nil {
-		fmt.Fprintf(stderr, "fetch prompt: warning: %v; continuing without task context\n", err)
+		fmt.Fprintf(stderr, "fetch prompt: %v\n", err)
+		return 1
 	}
 	rendered, err := flowprompt.Build(input)
 	if err != nil {
@@ -2307,18 +2417,23 @@ func enrichPromptTaskContext(input *flowprompt.Input, apiFlags *apiFlagValues) e
 	// Resolve the flow prompt context: for authors, the current graph node's
 	// role instructions (from the frozen agent-def snapshot), human gate feedback,
 	// and the completed preceding-node handoffs; for reviewer/verifier check
-	// jobs, the review agent def running under this check name. Best-effort: a
-	// fetch failure falls back to the embedded role skill without stripping
-	// the prompt.
+	// jobs, the review agent def running under this check name. Task-bound
+	// context is mandatory so no role can execute without current owner rulings.
 	checkName := ""
 	if role := promptInputRole(*input); role == flowprompt.RoleReviewer || role == flowprompt.RoleVerifier {
 		checkName = strings.TrimSpace(input.CheckName)
 	}
 	var priorNodeHandoffs string
 	if promptContext, err := client.GetPromptContext(taskID, checkName); err != nil {
-		slog.Debug("skip flow node prompt context", "task_id", taskID, "error", err)
+		return fmt.Errorf("fetch workflow prompt context: %w", err)
 	} else {
 		input.RoleInstructionsOverride = promptContext.RoleInstructions
+		input.OwnerRulings = make([]flowprompt.OwnerRuling, 0, len(promptContext.OwnerRulings))
+		for _, ruling := range promptContext.OwnerRulings {
+			input.OwnerRulings = append(input.OwnerRulings, flowprompt.OwnerRuling{
+				ID: ruling.RulingID, Body: ruling.Body, Source: string(ruling.Source), SupersedesID: ruling.SupersedesID,
+			})
+		}
 		if promptInputRole(*input) == flowprompt.RoleAuthor {
 			input.PhaseName = promptContext.PhaseName
 			input.GateFeedback = promptContext.GateFeedback
@@ -2422,7 +2537,63 @@ func enrichPromptReviewerCheckContext(input *flowprompt.Input, client *flowclien
 			details,
 			strings.TrimSpace(coordinator.ReviewAggregationDetailsPrefix),
 		))
+		if statistics, statErr := reviewDiffStatistics(input.Base); statErr != nil {
+			slog.Debug("skip review diff statistics", "task_id", taskID, "check", checkName, "error", statErr)
+		} else {
+			input.ReviewDiffStatistics = statistics
+		}
 	}
+}
+
+func reviewDiffStatistics(base string) (string, error) {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = "main"
+	}
+	output, err := exec.Command("git", "diff", "--numstat", "--find-renames", "origin/"+base+"...HEAD").Output()
+	if err != nil {
+		return "", fmt.Errorf("git diff --numstat: %w", err)
+	}
+	files, additions, deletions, binaries, err := parseGitNumstat(output)
+	if err != nil {
+		return "", err
+	}
+	statistics := fmt.Sprintf("Current full diff against origin/%s: %d files, +%d/-%d", base, files, additions, deletions)
+	if binaries > 0 {
+		statistics += fmt.Sprintf(", %d binary", binaries)
+		if binaries == 1 {
+			statistics += " file"
+		} else {
+			statistics += " files"
+		}
+	}
+	statistics += ". Treat size as evidence for judgment, not automatic proof that the change is wrong."
+	return statistics, nil
+}
+
+func parseGitNumstat(output []byte) (files, additions, deletions, binaries int, err error) {
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.SplitN(line, "\t", 3)
+		if len(fields) != 3 {
+			return 0, 0, 0, 0, fmt.Errorf("invalid git numstat line %q", line)
+		}
+		files++
+		if fields[0] == "-" || fields[1] == "-" {
+			binaries++
+			continue
+		}
+		added, addErr := strconv.Atoi(fields[0])
+		deleted, deleteErr := strconv.Atoi(fields[1])
+		if addErr != nil || deleteErr != nil {
+			return 0, 0, 0, 0, fmt.Errorf("invalid git numstat counts %q", line)
+		}
+		additions += added
+		deletions += deleted
+	}
+	return files, additions, deletions, binaries, nil
 }
 
 func humanAttentionPromptContext(statusLog []coordinator.StatusLogEntry) string {
@@ -3625,7 +3796,9 @@ func printTaskUsage(out io.Writer) {
   flow task show [flags] TASK_ID
   flow task relations [flags] TASK_ID
   flow task edit [flags] TASK_ID
-  flow task reply [flags] TASK_ID [MESSAGE]
+	  flow task reply [flags] TASK_ID [MESSAGE]
+	  flow task guide [flags] TASK_ID MESSAGE [--supersedes RULING_ID]
+	  flow task decide-review [flags] TASK_ID WAIT_ID fix_in_task|out_of_scope|defer_follow_up
   flow task schedule [flags] TASK_ID
   flow task reset [flags] TASK_ID
   flow task done [flags] TASK_ID [--resolution completed|rejected|abandoned|cancelled|failed]

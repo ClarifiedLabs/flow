@@ -60,6 +60,10 @@
            "severity": "critical|high|medium|low",
            "introduced_by_change": true,
            "requirement": "<task requirement or invariant this finding violates>",
+           "requirement_source": "explicit|inferred",
+           "finding_basis": "explicit_requirement|demonstrated_regression|security_defect|scope_inference",
+           "remediation_scope": "local|cross_cutting|legacy_migration|unknown",
+           "scope_rationale": "<why this remediation scope and basis apply>",
            "duplicate_of": "<existing thread id, only when duplicated>",
            "follow_up": "<suggested separate task or next action, when non-blocking>",
            "task_action": {
@@ -72,6 +76,19 @@
        ]
      }
      ```
+
+     The four scope-classification fields are required for every reviewer
+     comment. `explicit_requirement` requires `requirement_source: explicit`;
+     `scope_inference` requires `requirement_source: inferred`. Explicit task
+     requirements, demonstrated regressions, and security defects remain normal
+     blockers regardless of remediation breadth.
+
+     In final aggregation only, a blocking inferred `scope_inference` whose
+     remediation scope is `cross_cutting`, `legacy_migration`, or `unknown`
+     requires one `decision_request` with `{key,question,rationale,comment_indexes}`.
+     Cover exactly one coherent cluster and every requiring comment in that
+     cluster; omit unrelated ambiguous clusters until a later round. A report
+     containing `decision_request` must not contain any `task_action`.
 
      `task_action` is optional and reserved for the final parallel-review
      aggregation job. It declares work for the worker/coordinator to apply; do not
