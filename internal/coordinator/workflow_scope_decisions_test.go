@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,39 +172,55 @@ func (f scopeDecisionFixture) open(t *testing.T) WorkflowWait {
 }
 
 func TestReviewScopeDecisionPausesAndRestartsAggregationOnly(t *testing.T) {
-	f := newScopeDecisionFixture(t)
-	wait := f.open(t)
-	if wait.Kind != WorkflowWaitReviewScopeDecision {
-		t.Fatalf("wait = %+v", wait)
+	tests := []struct {
+		name       string
+		choice     ReviewScopeDecisionChoice
+		rulingText string
+	}{
+		{name: "fix in task", choice: ReviewScopeFixInTask, rulingText: "in scope for this task and are normal blockers"},
+		{name: "out of scope", choice: ReviewScopeOutOfScope, rulingText: "do not file them or create follow-up work"},
+		{name: "defer follow-up", choice: ReviewScopeDeferFollowUp, rulingText: "may only be retained as non-blocking follow-up work"},
 	}
-	details, err := ParseReviewScopeDecisionWaitDetails(wait.Details)
-	if err != nil || details.DecisionKey != "caller.contract" || details.SourceHeadSHA != f.change.HeadSHA {
-		t.Fatalf("details = %+v, err=%v", details, err)
-	}
-	result, err := f.runs.ResolveReviewScopeDecision(context.Background(), ResolveReviewScopeDecisionInput{
-		TaskID: f.task.ID, WaitID: wait.ID, Choice: ReviewScopeFixInTask,
-		Guidance: "Keep the compatibility surface small.", Actor: ActorHuman, IdempotencyKey: "resolve-scope-1",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Result != "resolved" || result.Ruling == nil || result.Ruling.Decision == nil || result.Ruling.Decision.Choice != string(ReviewScopeFixInTask) {
-		t.Fatalf("resolution = %+v", result)
-	}
-	if result.Run.State != WorkflowRunRunning {
-		t.Fatalf("run state = %s", result.Run.State)
-	}
-	var verdict string
-	var sourceJobID *string
-	if err := f.runs.db.QueryRow(`SELECT verdict, source_job_id FROM checks WHERE task_id = ? AND name = ?`, f.task.ID, f.checkName).Scan(&verdict, &sourceJobID); err != nil {
-		t.Fatal(err)
-	}
-	if verdict != string(CheckPending) || sourceJobID != nil {
-		t.Fatalf("aggregation check verdict=%q source=%v", verdict, sourceJobID)
-	}
-	node, ok, err := f.runs.GetNodeRun(context.Background(), f.node.ID)
-	if err != nil || !ok || node.Attempt != 2 || node.State != WorkflowNodeQueued {
-		t.Fatalf("node = %+v, ok=%v, err=%v", node, ok, err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newScopeDecisionFixture(t)
+			wait := f.open(t)
+			if wait.Kind != WorkflowWaitReviewScopeDecision {
+				t.Fatalf("wait = %+v", wait)
+			}
+			details, err := ParseReviewScopeDecisionWaitDetails(wait.Details)
+			if err != nil || details.DecisionKey != "caller.contract" || details.SourceHeadSHA != f.change.HeadSHA {
+				t.Fatalf("details = %+v, err=%v", details, err)
+			}
+			result, err := f.runs.ResolveReviewScopeDecision(context.Background(), ResolveReviewScopeDecisionInput{
+				TaskID: f.task.ID, WaitID: wait.ID, Choice: test.choice,
+				Guidance: "Keep the compatibility surface small.", Actor: ActorHuman, IdempotencyKey: "resolve-scope-" + string(test.choice),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Result != "resolved" || result.Ruling == nil || result.Ruling.Decision == nil || result.Ruling.Decision.Choice != string(test.choice) {
+				t.Fatalf("resolution = %+v", result)
+			}
+			if !strings.Contains(result.Ruling.Body, test.rulingText) || !strings.Contains(result.Ruling.Body, "Keep the compatibility surface small.") {
+				t.Fatalf("ruling body = %q", result.Ruling.Body)
+			}
+			if result.Run.State != WorkflowRunRunning {
+				t.Fatalf("run state = %s", result.Run.State)
+			}
+			var verdict string
+			var sourceJobID *string
+			if err := f.runs.db.QueryRow(`SELECT verdict, source_job_id FROM checks WHERE task_id = ? AND name = ?`, f.task.ID, f.checkName).Scan(&verdict, &sourceJobID); err != nil {
+				t.Fatal(err)
+			}
+			if verdict != string(CheckPending) || sourceJobID != nil {
+				t.Fatalf("aggregation check verdict=%q source=%v", verdict, sourceJobID)
+			}
+			node, ok, err := f.runs.GetNodeRun(context.Background(), f.node.ID)
+			if err != nil || !ok || node.Attempt != 2 || node.State != WorkflowNodeQueued {
+				t.Fatalf("node = %+v, ok=%v, err=%v", node, ok, err)
+			}
+		})
 	}
 }
 
