@@ -194,6 +194,56 @@ func lifecycleJSConsts(t *testing.T) map[string]string {
 	return jsConsts
 }
 
+func TestLifecycleControlTargetsCoverTransitions(t *testing.T) {
+	taskModelSource, err := os.ReadFile(filepath.Join("assets", "task-model.js"))
+	if err != nil {
+		t.Fatalf("read assets/task-model.js: %v", err)
+	}
+	// Extract LIFECYCLE_TARGET_OPTIONS values: { value: "..." } entries.
+	targetRE := regexp.MustCompile(`value:\s*"([^"]+)"`)
+	rawTargets := map[string]bool{}
+	sectionRE := regexp.MustCompile(`(?s)LIFECYCLE_TARGET_OPTIONS\s*=\s*\[([^\]]*)\]`)
+	section := sectionRE.FindStringSubmatch(string(taskModelSource))
+	if section == nil {
+		t.Fatalf("no LIFECYCLE_TARGET_OPTIONS found in assets/task-model.js")
+	}
+	for _, m := range targetRE.FindAllStringSubmatch(section[1], -1) {
+		rawTargets[m[1]] = true
+	}
+	// Bare values may include done:<resolution> form; normalize to the check vocabulary.
+	normalized := map[string]bool{}
+	for target := range rawTargets {
+		normalized[strings.ToLower(strings.TrimSpace(target))] = true
+	}
+	// Every non-derived lifecycle transition target must be reachable from the control.
+	// Derived phases (critique/acceptance/approved/merged_closed/...) remain valid
+	// vocabulary on the server but cannot be set directly; they are allowed to be
+	// present but not required — the check is that no actionable target is missing.
+	required := []string{
+		"backlog", "up_next", "scheduled", "working", "reopen", "retry", "skip", "hold", "resume", "reset", "schedule", "scheduled",
+		"done:completed", "done:rejected", "done:abandoned", "done:cancelled", "done:failed", "triage", "unscheduled",
+	}
+	for _, need := range required {
+		if !normalized[need] {
+			t.Fatalf("lifecycle control missing required target %q (LIFECYCLE_TARGET_OPTIONS=%v)", need, sortedKeys(normalized))
+		}
+	}
+	// Every option must be a valid server lifecycle transition target (or a done:<resolution>).
+	for target := range rawTargets {
+		lc := strings.ToLower(strings.TrimSpace(target))
+		if strings.HasPrefix(lc, "done:") {
+			res := strings.TrimPrefix(lc, "done:")
+			if _, ok := map[string]bool{"completed": true, "rejected": true, "abandoned": true, "cancelled": true, "failed": true, "merged": true}[res]; !ok {
+				t.Fatalf("lifecycle control has unknown done resolution %q", target)
+			}
+			continue
+		}
+		if !coordinator.IsValidLifecycleTarget(lc) {
+			t.Fatalf("lifecycle control target %q is not a valid server lifecycle transition target", target)
+		}
+	}
+}
+
 var (
 	// lifecycleJSConstRE matches `export const LIFECYCLE_X = "value"`.
 	lifecycleJSConstRE = regexp.MustCompile(`export const (LIFECYCLE_[A-Z_]+) = "([^"]+)"`)

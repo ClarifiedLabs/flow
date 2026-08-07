@@ -26,6 +26,7 @@ import "./review-panel.js";
 import "./run-list.js";
 import "./tab-strip.js";
 import "./task-rail.js";
+import "./lifecycle-control.js";
 import "./workflow-graph.js";
 
 export function renderOwnerRulingsPanel(model) {

@@ -555,6 +555,16 @@ type taskResponse struct {
 	Detail      *uiTaskDetail                `json:"task_detail,omitempty"`
 }
 
+// lifecycleTransitionResponse is the unified task lifecycle endpoint response.
+// It mirrors taskResponse so app.refresh() still works, and optionally carries
+// the active run produced or mutated by the transition.
+type lifecycleTransitionResponseAlias struct {
+	Task        coordinator.Task       `json:"task"`
+	ProjectID   string                 `json:"project_id,omitempty"`
+	ProjectName string                 `json:"project_name,omitempty"`
+	Run         *coordinator.WorkflowRun `json:"run,omitempty"`
+}
+
 type tasksResponse = contract.TasksResponse
 type taskAttachmentResponse = contract.TaskAttachmentResponse
 type taskAttachmentsResponse = contract.TaskAttachmentsResponse

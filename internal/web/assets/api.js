@@ -123,6 +123,10 @@ export function taskRelationsAPIPath(projectID, taskID) {
   return `${taskAPIBase(projectID)}/${encodeURIComponent(taskID)}/relations`;
 }
 
+export function lifecycleTransitionPath(projectID, taskID) {
+  return `${taskAPIBase(projectID)}/${encodeURIComponent(taskID)}/lifecycle/transition`;
+}
+
 // flowsAPIBase / agentDefsAPIBase scope the flow-configuration endpoints to a
 // project, mirroring taskAPIBase: an explicit project id yields the
 // project-scoped path, an empty id falls back to the unscoped route that only

@@ -35,6 +35,31 @@ export const CANCELLED = Symbol("cancelled");
 // receive the app (for status and refresh), the element, and its dataset, and
 // return the confirmation message for the status line (or CANCELLED).
 export const ACTIONS = {
+  async lifecycleTransition(app, element, dataset) {
+    const id = String(dataset.lifecycleTransition || "").trim();
+    if (!id) return "Select a task first";
+    const container = element.closest?.("[data-lifecycle-control]") || document.querySelector?.("[data-lifecycle-control]");
+    const select = container?.querySelector?.("[data-lifecycle-target]");
+    const target = String(select?.value || "").trim();
+    if (!target) return CANCELLED;
+    const force = Boolean(container?.querySelector?.("[data-lifecycle-force]")?.checked);
+    const note = String(container?.querySelector?.("[data-lifecycle-note]")?.value || "").trim();
+    const nodeRunID = String(dataset.nodeRunId || "").trim();
+    const confirmText = target.startsWith("done:") || target === "done" || target === "completed" || target === "rejected" || target === "abandoned" || target === "cancelled" || target === "failed"
+      ? `Mark ${id} as ${target.replace(/^done:/, "")} ?`
+      : target === "reset" || target === "backlog" || target === "unscheduled"
+        ? `Reset ${id} to unscheduled?`
+        : target === "reopen"
+          ? `Reopen ${id}?`
+          : `Transition ${id} to ${target}?`;
+    if (!window.confirm(confirmText)) return CANCELLED;
+    const body = { target, ...(note ? { note } : {}), ...(force ? { force: true } : {}), ...(nodeRunID ? { node_run_id: nodeRunID } : {}) };
+    const idempotencyKey = globalThis.crypto?.randomUUID?.() || `lifecycle-${Date.now()}-${Math.random()}`;
+    await apiPost(workflowPath(dataset, id, "/lifecycle/transition"), body, { idempotencyKey });
+    await app.refresh();
+    return `Transitioned ${id} to ${target}`;
+  },
+
   async workflowSchedule(app, element, dataset) {
     await apiPost(workflowPath(dataset, dataset.workflowSchedule, "/schedule"), {});
     await app.refresh();
@@ -826,6 +851,7 @@ export function threadClaimPending(threadID) {
   return inFlight.has(`threadClaim:${threadID}`);
 }
 const PENDING_LABELS = {
+  lifecycleTransition: "Transitioning",
   workflowSchedule: "Scheduling",
   workflowReset: "Resetting",
   workflowDone: "Closing out",

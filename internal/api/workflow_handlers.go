@@ -117,6 +117,342 @@ type workflowArtifactResponse struct {
 	Replayed bool                         `json:"replayed"`
 }
 
+type lifecycleTransitionRequest struct {
+	Target              string                     `json:"target"`
+	Resolution          coordinator.DoneResolution `json:"resolution,omitempty"`
+	Note                string                     `json:"note,omitempty"`
+	Force               bool                       `json:"force,omitempty"`
+	NodeRunID           string                     `json:"node_run_id,omitempty"`
+	RefreshAgentRuntime bool                       `json:"refresh_agent_runtime,omitempty"`
+}
+
+type lifecycleTransitionResponse struct {
+	Task        coordinator.Task       `json:"task"`
+	ProjectID   string                 `json:"project_id,omitempty"`
+	ProjectName string                 `json:"project_name,omitempty"`
+	Run         *coordinator.WorkflowRun `json:"run,omitempty"`
+}
+
+func (s *projectServer) handleLifecycleTransition(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
+	var request lifecycleTransitionRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	rawTarget := strings.TrimSpace(request.Target)
+	if rawTarget == "" {
+		writeError(w, http.StatusBadRequest, "invalid_lifecycle_target", "target is required")
+		return
+	}
+	target := strings.ToLower(rawTarget)
+	resolution := coordinator.DoneResolution(strings.TrimSpace(string(request.Resolution)))
+	note := strings.TrimSpace(request.Note)
+	force := request.Force
+	nodeRunID := strings.TrimSpace(request.NodeRunID)
+
+	// Support done:<resolution> colon form and bare resolution names as targets.
+	if strings.Contains(target, ":") {
+		parts := strings.SplitN(target, ":", 2)
+		prefix := strings.TrimSpace(parts[0])
+		suffix := strings.TrimSpace(parts[1])
+		if prefix == "done" && suffix != "" {
+			resolution = coordinator.DoneResolution(strings.ToLower(suffix))
+			target = "done"
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid_lifecycle_target", "invalid target "+rawTarget+"; allowed: "+strings.Join(coordinator.AllLifecycleTransitionTargets, ", "))
+			return
+		}
+	} else if coordinator.IsValidDoneResolution(coordinator.DoneResolution(target)) && target != "done" && resolution == "" {
+		// Bare resolution like "completed" implies done.
+		resolution = coordinator.DoneResolution(target)
+		target = "done"
+	}
+
+	if !coordinator.IsValidLifecycleTarget(rawTarget) && !coordinator.IsValidLifecycleTarget(target) {
+		// Also check the original target with colon handling already done; if still invalid, reject.
+		if !coordinator.IsValidLifecycleTarget(rawTarget) {
+			writeError(w, http.StatusBadRequest, "invalid_lifecycle_target", "invalid target "+rawTarget+"; allowed: "+strings.Join(coordinator.AllLifecycleTransitionTargets, ", ")+" and done:<resolution>")
+			return
+		}
+	}
+
+	// Helper to return current task/run on forced idempotent path.
+	returnCurrent := func() {
+		task, err := s.tasks.GetTask(r.Context(), taskID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "task_not_found", err.Error())
+			return
+		}
+		resp := lifecycleTransitionResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name}
+		if run, active, err := s.workflowRuns.ActiveForTask(r.Context(), taskID); err == nil && active {
+			resp.Run = &run
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+
+	switch target {
+	case "backlog", "unscheduled", "reset":
+		// Reset to unscheduled. If no active run, it's already unscheduled.
+		run, active, err := s.workflowRuns.ActiveForTask(r.Context(), taskID)
+		if err != nil {
+			writeWorkflowError(w, err, "lifecycle_transition_failed")
+			return
+		}
+		if !active {
+			returnCurrent()
+			return
+		}
+		_ = run
+		unlockGitWrites := s.drainGitWrites()
+		defer unlockGitWrites()
+		resetRun, err := s.workflowRuns.Reset(r.Context(), taskID, workflowActor(principal))
+		if err != nil {
+			if force && errors.Is(err, coordinator.ErrWorkflowConflict) {
+				returnCurrent()
+				return
+			}
+			writeWorkflowError(w, err, "lifecycle_transition_failed")
+			return
+		}
+		if err := s.sessions.RevokeWorkflowRunSessionTokens(r.Context(), resetRun.ID); err != nil {
+			slog.Warn("revoke reset workflow session tokens", "workflow_run_id", resetRun.ID, "error", err)
+		}
+		task, err := s.tasks.GetTask(r.Context(), taskID)
+		if err != nil {
+			writeWorkflowError(w, err, "lifecycle_transition_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, lifecycleTransitionResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name, Run: &resetRun})
+	case "up_next", "scheduled", "triage", "schedule":
+		run, err := s.workflowRuns.ScheduleAs(r.Context(), taskID, workflowActor(principal))
+		if err != nil {
+			if force && errors.Is(err, coordinator.ErrWorkflowConflict) {
+				returnCurrent()
+				return
+			}
+			writeWorkflowError(w, err, "lifecycle_transition_failed")
+			return
+		}
+		if s.workflowExecutor != nil {
+			if err := s.workflowExecutor.Advance(r.Context(), run.ID); err != nil {
+				writeWorkflowError(w, err, "lifecycle_transition_failed")
+				return
+			}
+			if latest, err := s.workflowRuns.Get(r.Context(), run.ID); err == nil {
+				run = latest
+			}
+		}
+		task, err := s.tasks.GetTask(r.Context(), taskID)
+		if err != nil {
+			writeWorkflowError(w, err, "lifecycle_transition_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, lifecycleTransitionResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name, Run: &run})
+	case "working", "in_progress":
+		run, active, err := s.workflowRuns.ActiveForTask(r.Context(), taskID)
+		if err != nil {
+			writeWorkflowError(w, err, "lifecycle_transition_failed")
+			return
+		}
+		if !active {
+			// No active run: schedule as working is just scheduling.
+			run, err := s.workflowRuns.ScheduleAs(r.Context(), taskID, workflowActor(principal))
+			if err != nil {
+				writeWorkflowError(w, err, "lifecycle_transition_failed")
+				return
+			}
+			if s.workflowExecutor != nil {
+				if err := s.workflowExecutor.Advance(r.Context(), run.ID); err != nil {
+					writeWorkflowError(w, err, "lifecycle_transition_failed")
+					return
+				}
+				if latest, err := s.workflowRuns.Get(r.Context(), run.ID); err == nil {
+					run = latest
+				}
+			}
+			task, err := s.tasks.GetTask(r.Context(), taskID)
+			if err != nil {
+				writeWorkflowError(w, err, "lifecycle_transition_failed")
+				return
+			}
+			writeJSON(w, http.StatusOK, lifecycleTransitionResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name, Run: &run})
+			return
+		}
+		if run.Held() {
+			result, err := s.workflowRuns.Release(r.Context(), coordinator.ReleaseWorkflowInput{
+				TaskID: taskID, Edge: coordinator.ReleaseResume, Actor: workflowActor(principal),
+			})
+			if err != nil {
+				if force && errors.Is(err, coordinator.ErrWorkflowConflict) {
+					returnCurrent()
+					return
+				}
+				writeWorkflowError(w, err, "lifecycle_transition_failed")
+				return
+			}
+			if s.workflowExecutor != nil && !result.Done {
+				if err := s.workflowExecutor.Advance(r.Context(), result.Run.ID); err != nil {
+					writeWorkflowError(w, err, "lifecycle_transition_failed")
+					return
+				}
+				if latest, err := s.workflowRuns.Get(r.Context(), result.Run.ID); err == nil {
+					result.Run = latest
+				}
+			}
+			task, err := s.tasks.GetTask(r.Context(), taskID)
+			if err != nil {
+				writeWorkflowError(w, err, "lifecycle_transition_failed")
+				return
+			}
+			writeJSON(w, http.StatusOK, lifecycleTransitionResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name, Run: &result.Run})
+			return
+		}
+		// Already working and not held: idempotent success.
+		task, err := s.tasks.GetTask(r.Context(), taskID)
+		if err != nil {
+			writeWorkflowError(w, err, "lifecycle_transition_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, lifecycleTransitionResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name, Run: &run})
+	case "done":
+		if strings.TrimSpace(string(resolution)) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_lifecycle_target", "resolution is required for done transition")
+			return
+		}
+		if !coordinator.IsValidDoneResolution(resolution) {
+			writeError(w, http.StatusBadRequest, "invalid_lifecycle_target", "unknown resolution "+string(resolution))
+			return
+		}
+		unlockGitWrites := s.drainGitWrites()
+		defer unlockGitWrites()
+		task, err := s.workflowRuns.ForceDone(r.Context(), taskID, resolution, note, workflowActor(principal))
+		if err != nil {
+			if force && errors.Is(err, coordinator.ErrWorkflowConflict) {
+				returnCurrent()
+				return
+			}
+			writeWorkflowError(w, err, "lifecycle_transition_failed")
+			return
+		}
+		if err := s.sessions.RevokeTaskSessionTokens(r.Context(), taskID); err != nil {
+			slog.Warn("revoke completed task session tokens", "task_id", taskID, "error", err)
+		}
+		writeJSON(w, http.StatusOK, lifecycleTransitionResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
+	case "reopen":
+		task, err := s.workflowRuns.Reopen(r.Context(), taskID, workflowActor(principal))
+		if err != nil {
+			if force && errors.Is(err, coordinator.ErrWorkflowConflict) {
+				returnCurrent()
+				return
+			}
+			writeWorkflowError(w, err, "lifecycle_transition_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, lifecycleTransitionResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name})
+	case "retry":
+		run, err := s.workflowRuns.RetryExecution(r.Context(), taskID, workflowActor(principal), request.RefreshAgentRuntime)
+		if err != nil {
+			if force && errors.Is(err, coordinator.ErrWorkflowConflict) {
+				returnCurrent()
+				return
+			}
+			writeWorkflowError(w, err, "lifecycle_transition_failed")
+			return
+		}
+		if s.workflowExecutor != nil {
+			if err := s.workflowExecutor.Advance(r.Context(), run.ID); err != nil {
+				writeWorkflowError(w, err, "lifecycle_transition_failed")
+				return
+			}
+			if latest, err := s.workflowRuns.Get(r.Context(), run.ID); err == nil {
+				run = latest
+			}
+		}
+		task, err := s.tasks.GetTask(r.Context(), taskID)
+		if err != nil {
+			writeWorkflowError(w, err, "lifecycle_transition_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, lifecycleTransitionResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name, Run: &run})
+	case "skip":
+		if nodeRunID == "" {
+			// Try to infer from open wait if possible, to keep the control simple.
+			if wait, waiting, err := s.workflowRuns.OpenWait(r.Context(), taskID); err == nil && waiting {
+				nodeRunID = wait.NodeRunID
+			}
+		}
+		if nodeRunID == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request", "node_run_id is required for skip")
+			return
+		}
+		result, err := s.workflowRuns.SkipExecution(r.Context(), taskID, nodeRunID, workflowActor(principal))
+		if err != nil {
+			writeWorkflowError(w, err, "lifecycle_transition_failed")
+			return
+		}
+		if s.workflowExecutor != nil && !result.Done {
+			if err := s.workflowExecutor.Advance(r.Context(), result.Run.ID); err != nil {
+				writeWorkflowError(w, err, "lifecycle_transition_failed")
+				return
+			}
+			if latest, err := s.workflowRuns.Get(r.Context(), result.Run.ID); err == nil {
+				result.Run = latest
+			}
+		}
+		task, err := s.tasks.GetTask(r.Context(), taskID)
+		if err != nil {
+			writeWorkflowError(w, err, "lifecycle_transition_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, lifecycleTransitionResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name, Run: &result.Run})
+	case "hold", "pause":
+		run, err := s.workflowRuns.Hold(r.Context(), taskID, workflowActor(principal))
+		if err != nil {
+			writeWorkflowError(w, err, "lifecycle_transition_failed")
+			return
+		}
+		task, err := s.tasks.GetTask(r.Context(), taskID)
+		if err != nil {
+			writeWorkflowError(w, err, "lifecycle_transition_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, lifecycleTransitionResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name, Run: &run})
+	case "resume", "release":
+		// resume/release -> release held run
+		result, err := s.workflowRuns.Release(r.Context(), coordinator.ReleaseWorkflowInput{
+			TaskID: taskID, Edge: coordinator.ReleaseResume, Actor: workflowActor(principal),
+		})
+		if err != nil {
+			writeWorkflowError(w, err, "lifecycle_transition_failed")
+			return
+		}
+		if s.workflowExecutor != nil && !result.Done {
+			if err := s.workflowExecutor.Advance(r.Context(), result.Run.ID); err != nil {
+				writeWorkflowError(w, err, "lifecycle_transition_failed")
+				return
+			}
+			if latest, err := s.workflowRuns.Get(r.Context(), result.Run.ID); err == nil {
+				result.Run = latest
+			}
+		}
+		task, err := s.tasks.GetTask(r.Context(), taskID)
+		if err != nil {
+			writeWorkflowError(w, err, "lifecycle_transition_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, lifecycleTransitionResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name, Run: &result.Run})
+	default:
+		// Derived phases that are not directly actionable: critique, acceptance, approved, etc.
+		// They remain valid vocabulary but require the underlying workflow/review to progress.
+		// With force, treat as idempotent no-op; otherwise explain why it cannot be forced.
+		if force {
+			returnCurrent()
+			return
+		}
+		writeError(w, http.StatusConflict, "workflow_conflict", "target "+rawTarget+" is derived and cannot be set directly; advance the workflow through its normal steps")
+	}
+}
+
 func (s *projectServer) handleScheduleWorkflow(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
 	run, err := s.workflowRuns.ScheduleAs(r.Context(), taskID, workflowActor(principal))
 	if err != nil {

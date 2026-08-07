@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"database/sql"
+	"strings"
 )
 
 // Phase is the explicit, authoritative lifecycle coordinate for an task. It is
@@ -30,6 +31,73 @@ const (
 	PhaseRejectedClosed Phase = "rejected_closed"
 	PhaseAbandoned      Phase = "abandoned"
 )
+
+// AllPhases enumerates every Phase constant in declaration order. It is the
+// server's exhaustive phase vocabulary; the parity test and lifecycle control
+// enumerate it to prove the UI covers every phase the server derives.
+var AllPhases = [...]Phase{
+	PhaseBacklog,
+	PhaseTriage,
+	PhaseUpNext,
+	PhaseWorking,
+	PhaseCritique,
+	PhaseAcceptance,
+	PhaseApproved,
+	PhaseMergedClosed,
+	PhaseRejectedClosed,
+	PhaseAbandoned,
+}
+
+// AllLifecycleTransitionTargets is the allowlist for POST
+// /v2/tasks/{id}/lifecycle/transition. It is the union of Phase, LifecycleState,
+// the client-side unscheduled, DoneResolution, and the operational escape hatches
+// (reopen/retry/skip/hold/resume). The handler normalizes to lowercase before
+// checking, and returns 400 invalid_lifecycle_target with this list on mismatch.
+var AllLifecycleTransitionTargets = []string{
+	// Phases
+	string(PhaseBacklog), string(PhaseTriage), string(PhaseUpNext), string(PhaseWorking),
+	string(PhaseCritique), string(PhaseAcceptance), string(PhaseApproved),
+	string(PhaseMergedClosed), string(PhaseRejectedClosed), string(PhaseAbandoned),
+	// LifecycleStates + client derived unscheduled
+	string(LifecycleScheduled), string(LifecycleInProgress), string(LifecycleDone), "unscheduled",
+	// Done resolutions (also accepted as bare targets and as done:<resolution>)
+	string(ResolutionCompleted), string(ResolutionMerged), string(ResolutionRejected),
+	string(ResolutionAbandoned), string(ResolutionCancelled), string(ResolutionFailed),
+	// Operational
+	"reopen", "retry", "skip", "hold", "pause", "resume", "release", "reset", "schedule", "done",
+}
+
+// IsValidLifecycleTarget reports whether target is in the lifecycle transition
+// vocabulary. It normalizes to lowercase and accepts both bare resolutions
+// ("completed") and the done:<resolution> form ("done:completed").
+func IsValidLifecycleTarget(target string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(target))
+	if normalized == "" {
+		return false
+	}
+	if strings.Contains(normalized, ":") {
+		parts := strings.SplitN(normalized, ":", 2)
+		if strings.TrimSpace(parts[0]) == "done" && strings.TrimSpace(parts[1]) != "" {
+			return validateDoneResolution(DoneResolution(strings.TrimSpace(parts[1]))) == nil
+		}
+		return false
+	}
+	// Bare done resolutions are also valid.
+	if validateDoneResolution(DoneResolution(normalized)) == nil {
+		return true
+	}
+	for _, candidate := range AllLifecycleTransitionTargets {
+		if candidate == normalized {
+			return true
+		}
+	}
+	return false
+}
+
+// IsValidDoneResolution reports whether resolution is a known DoneResolution.
+func IsValidDoneResolution(resolution DoneResolution) bool {
+	return validateDoneResolution(resolution) == nil
+}
 
 // PhaseForTask derives the lifecycle phase for an already-loaded task,
 // reusing the same disposition logic as the board projection. For a closed

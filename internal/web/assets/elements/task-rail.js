@@ -10,6 +10,7 @@ import { renderAddChildControl, renderBreadcrumb, renderEffectiveFeatureContext,
 import { define, FlowElement } from "./base.js";
 import "./run-spine.js";
 import "./task-relations.js";
+import { renderLifecycleControl } from "./lifecycle-control.js";
 
 export function renderTaskRail(model) {
   if (!model) return "";
@@ -25,6 +26,7 @@ export function renderTaskRail(model) {
     </div>
     ${renderCurrentStep(model)}
     <flow-run-spine></flow-run-spine>
+    ${renderLifecycleControl(model)}
     ${renderRunControls(model, projectAttr)}
     ${renderFacts(model)}
     ${model.workItem ? `<div class="work-context-actions">${renderAddChildControl(model.projectID, model.workItem, model.workItems)}${renderMoveControl(model.projectID, model.workItem, model.workItems)}</div>` : ""}
@@ -95,18 +97,18 @@ function renderRunControls(model, projectAttr) {
   const reviewScope = model.canRequestConvergence
     ? `<button class="button secondary" data-convergence-request="${id}"${projectAttr}>Review scope</button>`
     : "";
+  // Reset/Retry/Done/Reopen are subsumed by the unified lifecycle control above;
+  // only the convergence/hold-takeover/skip helpers that live in their own panels remain here.
   const controls = model.held
     ? `
       <button class="button" data-workflow-release="${id}" data-edge="resume"${projectAttr}>Resume</button>
       ${reviewScope}
-      <button class="button secondary" data-workflow-reset="${id}"${projectAttr}>Reset</button>
     `
     : `
       <button class="button secondary" data-workflow-hold="${id}"${projectAttr}>Pause</button>
       ${reviewScope}
       <button class="button" data-workflow-take-over="${id}"${projectAttr}>Take over</button>
       <button class="button secondary" data-workflow-skip="${id}" data-workflow-skip-node="${escapeAttr(model.nodeRunID)}"${projectAttr}>Skip step</button>
-      <button class="button secondary" data-workflow-reset="${id}"${projectAttr}>Reset</button>
     `;
   return `<div class="controls"><span class="caption">Run controls</span><div class="control-row">${controls}</div></div>`;
 }

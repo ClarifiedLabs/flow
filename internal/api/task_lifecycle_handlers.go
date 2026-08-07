@@ -137,6 +137,17 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
+	if len(parts) == 3 && parts[1] == "lifecycle" && parts[2] == "transition" {
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		if !requireScope(w, principal, "owner token is required", coordinator.TokenScopeOwner) {
+			return
+		}
+		s.handleLifecycleTransition(w, r, principal, taskID)
+		return
+	}
+
 	if len(parts) >= 2 && parts[1] == "workflow" {
 		if r.Method != http.MethodGet && !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
 			writeError(w, http.StatusForbidden, "forbidden", "workflow access requires an owner, session, or console token")
