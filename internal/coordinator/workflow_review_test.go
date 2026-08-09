@@ -106,6 +106,7 @@ func independentWorkflowRunService(t *testing.T, ctx context.Context, runs *Work
 }
 
 func TestParseReviewWaitDetailsRejectsIncompleteOrMalformedRecords(t *testing.T) {
+	t.Parallel()
 	validOrdinary := `{"instructions":"Read the plan","outcomes":["approved","changes_requested"],"interactive":false,"gate_node_key":"review"}`
 	validInteractive := `{"instructions":"Read the plan","outcomes":["approved"],"artifact_id":"wa-1","interactive":true,"gate_node_key":"review"}`
 	cases := []struct {
@@ -154,6 +155,7 @@ func TestParseReviewWaitDetailsRejectsIncompleteOrMalformedRecords(t *testing.T)
 }
 
 func TestSubmitForReviewParksAgentNodeOnInteractiveGate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	artifacts := NewWorkflowArtifactService(flows.db, tasks)
@@ -206,6 +208,7 @@ func TestSubmitForReviewParksAgentNodeOnInteractiveGate(t *testing.T) {
 }
 
 func TestCompleteNodeCannotConsumeInteractiveReviewWait(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	artifacts := NewWorkflowArtifactService(flows.db, tasks)
@@ -241,6 +244,7 @@ func TestCompleteNodeCannotConsumeInteractiveReviewWait(t *testing.T) {
 }
 
 func TestCompleteNodeFailsClosedForHumanGateWithoutAnOpenWait(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	task, run, nodeRun := newHoldFlow(t, flows, tasks, runs)
@@ -271,6 +275,7 @@ func TestCompleteNodeFailsClosedForHumanGateWithoutAnOpenWait(t *testing.T) {
 }
 
 func TestRespondReviewChangesRequestedResumesSameSession(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	artifacts := NewWorkflowArtifactService(flows.db, tasks)
@@ -332,6 +337,7 @@ func TestRespondReviewChangesRequestedResumesSameSession(t *testing.T) {
 }
 
 func TestRespondReviewApprovedCompletesNodeAndAnswersGate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	artifacts := NewWorkflowArtifactService(flows.db, tasks)
@@ -403,6 +409,7 @@ func TestRespondReviewApprovedCompletesNodeAndAnswersGate(t *testing.T) {
 }
 
 func TestRespondReviewRejectedEndsRejected(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	artifacts := NewWorkflowArtifactService(flows.db, tasks)
@@ -440,6 +447,7 @@ func TestRespondReviewRejectedEndsRejected(t *testing.T) {
 // run waiting). This is the non-interactive sibling of the RespondReview
 // replay path; both answer their gate through CompleteNode.
 func TestRespondReplayReportsCommittedRunState(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	artifacts := NewWorkflowArtifactService(flows.db, tasks)
@@ -498,6 +506,7 @@ func TestRespondReplayReportsCommittedRunState(t *testing.T) {
 // from the stale transaction. The replay must reload the committed run and
 // report Done=true.
 func TestCompleteNodeReplayWithStaleSnapshotReportsCommittedRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	// A second handle on the same database file provides the connection that
@@ -606,6 +615,7 @@ func TestCompleteNodeReplayWithStaleSnapshotReportsCommittedRun(t *testing.T) {
 // CompleteNode idempotency path, covered by TestRespondReplayReportsCommittedRunState
 // and TestCompleteNodeReplayWithStaleSnapshotReportsCommittedRun.)
 func TestRespondReviewRetryReusesRecordedOutcome(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	artifacts := NewWorkflowArtifactService(flows.db, tasks)
@@ -657,6 +667,7 @@ func TestRespondReviewRetryReusesRecordedOutcome(t *testing.T) {
 }
 
 func TestSubmitForReviewValidatesContract(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	artifacts := NewWorkflowArtifactService(flows.db, tasks)
@@ -687,6 +698,7 @@ func TestSubmitForReviewValidatesContract(t *testing.T) {
 }
 
 func TestSubmitForReviewRequiresDownstreamGate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	artifacts := NewWorkflowArtifactService(flows.db, tasks)
@@ -724,6 +736,7 @@ func TestSubmitForReviewRequiresDownstreamGate(t *testing.T) {
 }
 
 func TestRespondReviewRejectsUnofferedOutcome(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	artifacts := NewWorkflowArtifactService(flows.db, tasks)
@@ -752,6 +765,7 @@ func TestRespondReviewRejectsUnofferedOutcome(t *testing.T) {
 }
 
 func TestRespondReviewStaleRoundBindingCannotDecideReopenedWait(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	artifacts := NewWorkflowArtifactService(flows.db, tasks)
@@ -814,6 +828,7 @@ func TestRespondReviewStaleRoundBindingCannotDecideReopenedWait(t *testing.T) {
 }
 
 func TestRespondReviewStaleRoundRacesConcurrentReopen(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	artifacts := NewWorkflowArtifactService(flows.db, tasks)
@@ -892,6 +907,7 @@ func TestRespondReviewStaleRoundRacesConcurrentReopen(t *testing.T) {
 // intermediate gate; after the one transaction commits it is rejected because
 // the original round is already decided.
 func TestRespondReviewTerminalVerdictSerializesWithConcurrentReopen(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	artifacts := NewWorkflowArtifactService(flows.db, tasks)
@@ -971,6 +987,7 @@ func TestRespondReviewTerminalVerdictSerializesWithConcurrentReopen(t *testing.T
 // a second coordinator connection sees only the committed interactive wait and
 // cannot route an ordinary response while terminal completion is paused.
 func TestRespondReviewTerminalVerdictHidesDerivedGateFromIndependentConnection(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	artifacts := NewWorkflowArtifactService(flows.db, tasks)
@@ -1053,6 +1070,7 @@ func TestRespondReviewTerminalVerdictHidesDerivedGateFromIndependentConnection(t
 }
 
 func TestReviewLockQueuedWaiterAndThirdAcquirerDuringCleanup(t *testing.T) {
+	t.Parallel()
 	_, _, runs := newWorkflowModelServices(t)
 	taskID := "t-lock-cleanup-race"
 

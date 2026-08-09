@@ -10,6 +10,7 @@ import (
 )
 
 func TestTaskFindingsRegistryEndpoint(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -168,6 +169,7 @@ func TestTaskFindingsRegistryEndpoint(t *testing.T) {
 }
 
 func TestTaskFindingsRegistryEndpointEmptyTask(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 
 	var created taskResponse

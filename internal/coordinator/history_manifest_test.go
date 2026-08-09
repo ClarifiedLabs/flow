@@ -51,6 +51,7 @@ func (s *manifestResumeBarrierStore) resumeCount() int {
 }
 
 func TestGenerateCanonicalManifestPublishesSanitizedDeterministicInventory(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	input := baseHistoryReservation()
@@ -131,6 +132,7 @@ func TestGenerateCanonicalManifestPublishesSanitizedDeterministicInventory(t *te
 }
 
 func TestGenerateCanonicalManifestConcurrentCallsDoNotStrandUploadIntent(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -15,6 +15,7 @@ import (
 )
 
 func TestEnsureChangeUsesTaskAlignedIncrementingIDs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSessionServiceFixture(t)
 	task, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Friendly change IDs"})
@@ -50,6 +51,7 @@ func TestEnsureChangeUsesTaskAlignedIncrementingIDs(t *testing.T) {
 }
 
 func TestInsertWithTaskChangeIDRecoversConcurrentLogicalChange(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSessionServiceFixture(t)
 	task, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Concurrent friendly change ID"})
@@ -106,6 +108,7 @@ VALUES (?, ?, ?, 'main', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, id, t
 }
 
 func TestConsoleSessionLifecycle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSessionServiceFixture(t)
 	sessions, workers, credentials := fixture.sessions, fixture.workers, fixture.credentials
@@ -248,6 +251,7 @@ func TestConsoleSessionLifecycle(t *testing.T) {
 }
 
 func TestEnsureConsoleJobSupportsShellHarness(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSessionServiceFixture(t)
 
@@ -279,6 +283,7 @@ func TestEnsureConsoleJobSupportsShellHarness(t *testing.T) {
 }
 
 func TestReleaseConsoleCancelsQueuedJob(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSessionServiceFixture(t)
 	sessions, workers := fixture.sessions, fixture.workers
@@ -304,6 +309,7 @@ func TestReleaseConsoleCancelsQueuedJob(t *testing.T) {
 }
 
 func TestReconcileCrashedWorkflowAuthorSessionAllowsReplacement(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSessionServiceFixture(t)
 	sessions, workers, credentials := fixture.sessions, fixture.workers, fixture.credentials
@@ -437,6 +443,7 @@ UPDATE leases SET expires_at = ? WHERE id = ?`,
 }
 
 func TestReconcileCrashedConsoleSessionDoesNotReenqueue(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSessionServiceFixture(t)
 	sessions, workers, credentials := fixture.sessions, fixture.workers, fixture.credentials
@@ -504,6 +511,7 @@ WHERE id = ?`, formatTime(time.Now().UTC().Add(-time.Minute)), claimed.Lease.ID)
 }
 
 func TestEnsureAuthorJobUsesConfiguredDefaultAgent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSessionServiceFixture(t)
 	sessions := NewSessionServiceWithOptions(fixture.store.DB(), fixture.tasks, fixture.workers, SessionServiceOptions{
@@ -563,6 +571,7 @@ func TestEnsureAuthorJobUsesConfiguredDefaultAgent(t *testing.T) {
 }
 
 func TestEnsureAuthorJobExplicitEntrypointOverridesDefaultAgent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSessionServiceFixture(t)
 	sessions := NewSessionServiceWithOptions(fixture.store.DB(), fixture.tasks, fixture.workers, SessionServiceOptions{
@@ -601,6 +610,7 @@ func TestEnsureAuthorJobExplicitEntrypointOverridesDefaultAgent(t *testing.T) {
 }
 
 func TestAuthorJobMatchesRequiresStampedPayload(t *testing.T) {
+	t.Parallel()
 	changeID := "ch-test-0001"
 	stamped := map[string]any{"branch": "task/t-1", "base": "main", "agent_harness": "harness", "phase_index": 0, "final_phase": true}
 
@@ -776,6 +786,7 @@ func countRows(database *sql.DB, table string) (int, error) {
 }
 
 func TestTaskSessionRevocationAndGitWriteLivenessFence(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSessionServiceFixture(t)
 	task, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Task console revocation"})
@@ -828,6 +839,7 @@ func TestTaskSessionRevocationAndGitWriteLivenessFence(t *testing.T) {
 }
 
 func TestLateTaskConsoleExitDoesNotRestoreTerminalTaskChange(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSessionServiceFixture(t)
 	task, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Late task console exit"})
@@ -908,6 +920,7 @@ UPDATE sessions SET runtime_state = 'abandoned' WHERE id = ?`, preservedHead, st
 // startAuthorSessionForFixture drives the schedule->claim->run->start path and
 // returns the live author session so liveness tests can exercise it directly.
 func TestTouchAgentActivityRequiresSessionID(t *testing.T) {
+	t.Parallel()
 	fixture := newSessionServiceFixture(t)
 	if err := fixture.sessions.TouchAgentActivity(context.Background(), "   "); err == nil {
 		t.Fatalf("TouchAgentActivity with blank id err = nil, want error")
@@ -915,6 +928,7 @@ func TestTouchAgentActivityRequiresSessionID(t *testing.T) {
 }
 
 func TestMarkPersistentSessionExitedRejectsConsoleRole(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSessionServiceFixture(t)
 	sessions, workers := fixture.sessions, fixture.workers
@@ -981,6 +995,7 @@ func TestMarkPersistentSessionExitedRejectsConsoleRole(t *testing.T) {
 // return (updated_at, then created_at, then id, all descending), and tasks
 // without sessions are absent from the result.
 func TestLatestSessionForTasks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSessionServiceFixture(t)
 

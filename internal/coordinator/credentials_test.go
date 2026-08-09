@@ -22,6 +22,7 @@ func newCredentialServiceForTest(t *testing.T) (*CredentialService, *flowdb.Stor
 }
 
 func TestEnsureTokenPreservesRevocation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, store := newCredentialServiceForTest(t)
 	if err := service.EnsureToken(ctx, CredentialInput{
@@ -49,6 +50,7 @@ WHERE token_hash = ?`, formatTime(time.Now().UTC()), HashToken("owner-token")); 
 }
 
 func TestSessionTokenCarriesProjectBinding(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, store := newCredentialServiceForTest(t)
 
@@ -90,6 +92,7 @@ VALUES ('p-1234', 'demo', '/tmp/demo', 'main', 'flow', '2026-01-01T00:00:00Z', '
 }
 
 func TestSessionTokenRequiresProjectBinding(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, _ := newCredentialServiceForTest(t)
 
@@ -104,6 +107,7 @@ func TestSessionTokenRequiresProjectBinding(t *testing.T) {
 }
 
 func TestReplaceSubjectTokenRevokesPreviousWorkerToken(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, _ := newCredentialServiceForTest(t)
 
@@ -137,6 +141,7 @@ func TestReplaceSubjectTokenRevokesPreviousWorkerToken(t *testing.T) {
 }
 
 func TestRevokeSubjectCredentialsIsIdempotentAndScoped(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, _ := newCredentialServiceForTest(t)
 	for _, input := range []CredentialInput{
@@ -168,6 +173,7 @@ func TestRevokeSubjectCredentialsIsIdempotentAndScoped(t *testing.T) {
 }
 
 func TestReplaceScopeCredentialRevokesChangedSubjectAndCanBeDisabled(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, _ := newCredentialServiceForTest(t)
 
@@ -200,6 +206,7 @@ func TestReplaceScopeCredentialRevokesChangedSubjectAndCanBeDisabled(t *testing.
 }
 
 func TestReplaceSubjectCredentialUsesSuppliedToken(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, _ := newCredentialServiceForTest(t)
 

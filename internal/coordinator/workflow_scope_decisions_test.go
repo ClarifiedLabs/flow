@@ -172,6 +172,7 @@ func (f scopeDecisionFixture) open(t *testing.T) WorkflowWait {
 }
 
 func TestReviewScopeDecisionPausesAndRestartsAggregationOnly(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		choice     ReviewScopeDecisionChoice
@@ -225,6 +226,7 @@ func TestReviewScopeDecisionPausesAndRestartsAggregationOnly(t *testing.T) {
 }
 
 func TestReviewScopeDecisionStaleHeadRestartsFullDiscoveryWithoutRuling(t *testing.T) {
+	t.Parallel()
 	f := newScopeDecisionFixture(t)
 	wait := f.open(t)
 	if _, err := f.runs.db.Exec(`UPDATE changes SET head_sha = 'head-two' WHERE id = ?`, f.change.ID); err != nil {
@@ -266,6 +268,7 @@ func TestReviewScopeDecisionStaleHeadRestartsFullDiscoveryWithoutRuling(t *testi
 }
 
 func TestConvergenceReturnToAuthorRecordsRulingAndTakesSendBackEdge(t *testing.T) {
+	t.Parallel()
 	f := newScopeDecisionFixture(t)
 	ctx := context.Background()
 	evidence := ConvergenceEvidence{

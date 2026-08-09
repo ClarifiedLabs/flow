@@ -12,6 +12,7 @@ import (
 )
 
 func TestTranscriptStoreRoundTrip(t *testing.T) {
+	t.Parallel()
 	store := NewTranscriptStore(t.TempDir())
 
 	content := "line one\nline two\n"
@@ -38,6 +39,7 @@ func TestTranscriptStoreRoundTrip(t *testing.T) {
 }
 
 func TestTranscriptStoreFilePermissions(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	store := NewTranscriptStore(filepath.Join(dir, "transcripts"))
 
@@ -64,6 +66,7 @@ func TestTranscriptStoreFilePermissions(t *testing.T) {
 }
 
 func TestTranscriptStoreRejectsPathTraversal(t *testing.T) {
+	t.Parallel()
 	store := NewTranscriptStore(t.TempDir())
 
 	badIDs := []string{"../escape", "..", "a/b", "", "with space", "with\x00null", "with;semicolon"}
@@ -78,6 +81,7 @@ func TestTranscriptStoreRejectsPathTraversal(t *testing.T) {
 }
 
 func TestTranscriptStoreTruncatesToLast10MB(t *testing.T) {
+	t.Parallel()
 	store := NewTranscriptStore(t.TempDir())
 
 	// Build content larger than the 10MB cap: a recognizable head that must be
@@ -104,6 +108,7 @@ func TestTranscriptStoreTruncatesToLast10MB(t *testing.T) {
 }
 
 func TestTranscriptStoreOpenMissing(t *testing.T) {
+	t.Parallel()
 	store := NewTranscriptStore(t.TempDir())
 
 	_, err := store.Open("sess-missing")

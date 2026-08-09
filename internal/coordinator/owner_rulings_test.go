@@ -10,6 +10,7 @@ import (
 )
 
 func TestOwnerRulingsProjectReplaceAndReplay(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	agents := NewAgentDefService(flows.db)
@@ -77,6 +78,7 @@ func TestOwnerRulingsProjectReplaceAndReplay(t *testing.T) {
 }
 
 func TestProjectOwnerRulingsFailsClosedOnCorruptTransition(t *testing.T) {
+	t.Parallel()
 	payload, err := json.Marshal(ownerRulingPayload{
 		SchemaVersion: 99, RulingID: "rule-bad", Body: "bad", Source: OwnerRulingSourceOwner,
 	})
@@ -93,6 +95,7 @@ func TestProjectOwnerRulingsFailsClosedOnCorruptTransition(t *testing.T) {
 }
 
 func TestOwnerRulingDeliveryTargetsLiveSameRunAgentsOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	agents := NewAgentDefService(flows.db)

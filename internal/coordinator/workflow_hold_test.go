@@ -98,6 +98,7 @@ UPDATE workflow_node_runs SET input_artifact_id = ? WHERE id = ?`,
 }
 
 func TestHoldStopsTheExecutorAndComposesWithAnOpenWait(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	task, _, nodeRun := newHoldFlow(t, flows, tasks, runs)
@@ -149,6 +150,7 @@ func TestHoldStopsTheExecutorAndComposesWithAnOpenWait(t *testing.T) {
 }
 
 func TestReleaseResumeClearsTheHoldWithoutMovingTheRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	task, _, _ := newHoldFlow(t, flows, tasks, runs)
@@ -172,6 +174,7 @@ func TestReleaseResumeClearsTheHoldWithoutMovingTheRun(t *testing.T) {
 }
 
 func TestConvergenceHoldIsRequestedOnlyOncePerRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	task, run, nodeRun := newHoldFlow(t, flows, tasks, runs)
@@ -276,6 +279,7 @@ func TestConvergenceHoldIsRequestedOnlyOncePerRun(t *testing.T) {
 }
 
 func TestManualConvergenceReviewConvertsAHoldAndCanBeRequestedAgain(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	task, run, nodeRun := newHoldFlow(t, flows, tasks, runs)
@@ -333,6 +337,7 @@ func TestManualConvergenceReviewConvertsAHoldAndCanBeRequestedAgain(t *testing.T
 }
 
 func TestConvergenceRepairKeepsEvidenceActiveAndCancelClosesTask(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	task, run, nodeRun := newHoldFlow(t, flows, tasks, runs)
@@ -452,6 +457,7 @@ UPDATE jobs SET state = 'finished' WHERE id = ?`, consoleJob.ID); err != nil {
 }
 
 func TestRefreshConvergenceEvidenceAllowsBaseOnlyMovementWithoutRepair(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	task, run, nodeRun := newHoldFlow(t, flows, tasks, runs)
@@ -479,6 +485,7 @@ func TestRefreshConvergenceEvidenceAllowsBaseOnlyMovementWithoutRepair(t *testin
 }
 
 func TestConvergenceEvidenceFingerprintIgnoresCaptureTime(t *testing.T) {
+	t.Parallel()
 	evidence := ConvergenceEvidence{SchemaVersion: ConvergenceEvidenceSchemaVersion, WorkflowRunID: "wr-1", DiffDigest: "sha256:content"}
 	evidence.CapturedAt = time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 	first, err := convergenceEvidenceFingerprint(evidence)
@@ -497,6 +504,7 @@ func TestConvergenceEvidenceFingerprintIgnoresCaptureTime(t *testing.T) {
 }
 
 func TestConvergenceFileEvidenceIsBoundedAndEscaped(t *testing.T) {
+	t.Parallel()
 	files := []ConvergenceFile{{
 		Path: "a`b\n\u202ec", Additions: 10_000,
 	}}
@@ -529,6 +537,7 @@ func TestConvergenceFileEvidenceIsBoundedAndEscaped(t *testing.T) {
 }
 
 func TestConvergenceHoldCountsAsBlockedOnTheBoard(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	task, run, nodeRun := newHoldFlow(t, flows, tasks, runs)
@@ -556,6 +565,7 @@ func TestConvergenceHoldCountsAsBlockedOnTheBoard(t *testing.T) {
 }
 
 func TestManualHoldDoesNotCountAsBlockedOnTheBoard(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	task, _, _ := newHoldFlow(t, flows, tasks, runs)
@@ -580,6 +590,7 @@ func TestManualHoldDoesNotCountAsBlockedOnTheBoard(t *testing.T) {
 }
 
 func TestReleaseCannotResolveHeldHumanGateWithoutReviewRound(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	task, run, nodeRun := newHoldFlow(t, flows, tasks, runs)
@@ -620,6 +631,7 @@ func TestReleaseCannotResolveHeldHumanGateWithoutReviewRound(t *testing.T) {
 }
 
 func TestReleaseActionsRollBackHoldWhenInteractiveReviewWaitExists(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	artifacts := NewWorkflowArtifactService(flows.db, tasks)
@@ -669,6 +681,7 @@ func TestReleaseActionsRollBackHoldWhenInteractiveReviewWaitExists(t *testing.T)
 }
 
 func TestReleaseFailsClosedForHumanGateWithoutAnOpenWait(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	task, run, _ := newHoldFlow(t, flows, tasks, runs)
@@ -697,6 +710,7 @@ func TestReleaseFailsClosedForHumanGateWithoutAnOpenWait(t *testing.T) {
 }
 
 func TestReleaseMergeJumpsToMergedTerminalRegardlessOfDeclarationOrder(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	agent, err := NewAgentDefService(flows.db).Create(ctx, AgentDefInput{
@@ -776,6 +790,7 @@ VALUES ('ch-release-merge', ?, ?, 'task/release-merge', 'main', 'aaaaaaaaaaaaaaa
 }
 
 func TestReleaseWithoutAHoldIsRejected(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	task, _, _ := newHoldFlow(t, flows, tasks, runs)
@@ -787,6 +802,7 @@ func TestReleaseWithoutAHoldIsRejected(t *testing.T) {
 }
 
 func TestReleaseSubmitRequiresAnArtifact(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	task, _, _ := newHoldFlow(t, flows, tasks, runs)
@@ -800,6 +816,7 @@ func TestReleaseSubmitRequiresAnArtifact(t *testing.T) {
 }
 
 func TestCardStateReportsStepPositionDwellAndWait(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	task, _, _ := newHoldFlow(t, flows, tasks, runs)

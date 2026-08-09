@@ -147,6 +147,7 @@ func barrierAgents(secondBlocking bool) []SnapshotReviewAgent {
 }
 
 func TestRefreshConvergenceEvidenceAdoptsRepairedBranchHead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newProjectFixture(t)
 	tasks := NewTaskService(fixture.store.DB(), fixture.project.ID)
@@ -418,6 +419,7 @@ VALUES (?, ?, 'w-repair', 'persistent_agent', ?, ?)`, leaseID, console.Job.ID,
 }
 
 func TestReviewScopeThreshold(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		files        int
@@ -486,6 +488,7 @@ func (s workflowMergeConflictStub) MergeChange(context.Context, string) (MergeRe
 }
 
 func TestWorkflowExecutorMergeConflictReportsBlockedCheckForImplementor(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, err := flowdb.Open(ctx, filepath.Join(t.TempDir(), "flow.db"))
 	if err != nil {
@@ -673,6 +676,7 @@ INSERT INTO workflow_artifacts (
 }
 
 func TestWorkflowExecutorConcurrentChangeWorkspaceUsesOneChange(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSessionServiceFixture(t)
 	task, err := fixture.tasks.CreateTask(ctx, CreateTaskInput{Title: "Concurrent change workspace"})
@@ -786,6 +790,7 @@ SELECT COUNT(*) FROM jobs WHERE node_run_id = ? AND role = 'author'`, nodeID).Sc
 }
 
 func TestWorkflowExecutorParallelReviewAggregationBarrier(t *testing.T) {
+	t.Parallel()
 	t.Run("fans out reviewers then queues one aggregate exactly once", func(t *testing.T) {
 		fixture := newReviewBarrierFixture(t, barrierAgents(true))
 		ctx := context.Background()

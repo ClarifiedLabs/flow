@@ -634,6 +634,9 @@ func TestStructuredCheckResultIsAuthoritativeForJobState(t *testing.T) {
 }
 
 func TestLogLevelFlagEnablesDebugLogging(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in -short mode")
+	}
 	t.Setenv("LOG_LEVEL", "")
 
 	var stdout bytes.Buffer
@@ -648,6 +651,9 @@ func TestLogLevelFlagEnablesDebugLogging(t *testing.T) {
 }
 
 func TestReadySessionHelperProcess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in -short mode")
+	}
 	if os.Getenv("WORKER_READY_HELPER") != "1" {
 		return
 	}
@@ -674,6 +680,9 @@ func TestReadySessionHelperProcess(t *testing.T) {
 }
 
 func TestWorkerRetriesTransientCoordinatorHeartbeatBeforeClaim(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in -short mode")
+	}
 	t.Parallel()
 	requireWorkerTool(t, "git")
 	requireWorkerTool(t, "tmux")
@@ -725,6 +734,9 @@ func TestWorkerRetriesTransientCoordinatorHeartbeatBeforeClaim(t *testing.T) {
 }
 
 func TestWorkerLeaseHeartbeatRecoversAfterTransientCoordinatorRenewalFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in -short mode")
+	}
 	t.Parallel()
 	requireWorkerTool(t, "git")
 	requireWorkerTool(t, "tmux")
@@ -808,6 +820,9 @@ printf renew-ok > "$1"
 }
 
 func TestLeaseHeartbeatCancelsJobAfterAuthoritativeLeaseLoss(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in -short mode")
+	}
 	t.Parallel()
 	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -855,6 +870,9 @@ func TestLeaseHeartbeatCancelsJobAfterAuthoritativeLeaseLoss(t *testing.T) {
 }
 
 func TestWorkerConsoleCleanExitReleasesSession(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in -short mode")
+	}
 	t.Parallel()
 	requireWorkerTool(t, "git")
 	requireWorkerTool(t, "tmux")
@@ -944,6 +962,9 @@ printf console-exit > "$1"
 }
 
 func TestWorkerStoppedTaskConsoleReportsProcessExit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in -short mode")
+	}
 	requireWorkerTool(t, "git")
 	requireWorkerTool(t, "tmux")
 	ctx := context.Background()
@@ -1039,6 +1060,9 @@ while [ ! -f "$2" ]; do sleep 0.1; done
 }
 
 func TestWorkerConsoleNonZeroExitReleasesSession(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in -short mode")
+	}
 	t.Parallel()
 	requireWorkerTool(t, "git")
 	requireWorkerTool(t, "tmux")
@@ -1280,6 +1304,9 @@ func TestLogAgentHarnessAvailabilityIncludesDetectedAndMissing(t *testing.T) {
 }
 
 func TestRegistrationHarnessModelsUsesHarnessCatalogWhenAvailable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in -short mode")
+	}
 	toolDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(toolDir, "harness"), []byte(`#!/bin/sh
 if [ "$*" = "--models --format json" ]; then
@@ -1308,6 +1335,9 @@ exit 1
 }
 
 func TestRegistrationHarnessModelsFallsBackWhenCatalogFails(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in -short mode")
+	}
 	toolDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(toolDir, "harness"), []byte("#!/bin/sh\nexit 12\n"), 0o700); err != nil {
 		t.Fatalf("write fake harness: %v", err)
@@ -1321,6 +1351,9 @@ func TestRegistrationHarnessModelsFallsBackWhenCatalogFails(t *testing.T) {
 }
 
 func TestWorkerStartupReaperUsesWorkerToken(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in -short mode")
+	}
 	putFakeEmptyTmuxOnPath(t)
 	fixture := newWorkerTestFixture(t)
 	// The one-shot worker must claim a job to exit. Use a missing base ref so
@@ -1523,6 +1556,9 @@ func requireWorkerTool(t *testing.T, name string) {
 }
 
 func TestWorkerConfigLoadsYAML(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in -short mode")
+	}
 	configPath := filepath.Join(t.TempDir(), "worker.yaml")
 	if err := os.WriteFile(configPath, []byte(`worker_id: w-local
 coordinator_url: http://127.0.0.1:8421
@@ -1555,6 +1591,9 @@ labels:
 // role, leaking the lease and masking the error). The reserved FLOW_* env key
 // makes RunJob fail in validateEntrypoint deterministically before any tmux work.
 func TestWorkerConsoleRunErrorReleasesSessionAndSurfacesError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in -short mode")
+	}
 	t.Parallel()
 	requireWorkerTool(t, "git")
 	requireWorkerTool(t, "tmux")

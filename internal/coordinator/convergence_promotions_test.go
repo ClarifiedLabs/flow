@@ -102,6 +102,7 @@ func promoteInput(taskID string, evidence ConvergenceEvidence) ResolveConvergenc
 }
 
 func TestPromotedPlanningBody(t *testing.T) {
+	t.Parallel()
 	t.Run("prepends lineage and inspection commands to the source body", func(t *testing.T) {
 		body := promotedPlanningBody("t-src-1", "Implement the thing.")
 		for _, want := range []string{
@@ -131,6 +132,7 @@ func TestPromotedPlanningBody(t *testing.T) {
 }
 
 func TestPromoteConvergenceReviewCreatesCleanBasePlanningWorkflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env, executor, _ := newPromotionTestEnv(t)
 	task, evidence := holdRealConvergenceReview(t, env, executor)
@@ -289,6 +291,7 @@ WHERE source_item_id = ? AND target_item_id = ? AND kind = ?`, left, right, stri
 }
 
 func TestPromoteConvergenceReviewReplayIsIdempotent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env, executor, _ := newPromotionTestEnv(t)
 	task, evidence := holdRealConvergenceReview(t, env, executor)
@@ -336,6 +339,7 @@ SELECT COUNT(*) FROM workflow_runs WHERE task_id = ?`, first.PlanningTask.ID).Sc
 }
 
 func TestPromoteConvergenceReviewRejectsStaleEvidence(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env, executor, _ := newPromotionTestEnv(t)
 	task, evidence := holdRealConvergenceReview(t, env, executor)
@@ -370,6 +374,7 @@ func TestPromoteConvergenceReviewRejectsStaleEvidence(t *testing.T) {
 }
 
 func TestLoadConvergencePromotionRejectsUnversionedEvidence(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env, executor, _ := newPromotionTestEnv(t)
 	task, evidence := holdRealConvergenceReview(t, env, executor)
@@ -395,6 +400,7 @@ func TestLoadConvergencePromotionRejectsUnversionedEvidence(t *testing.T) {
 }
 
 func TestActiveConvergenceEvidenceRejectsUnsupportedPersistedSchemaVersion(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env, executor, _ := newPromotionTestEnv(t)
 	task, evidence := holdRealConvergenceReview(t, env, executor)
@@ -418,6 +424,7 @@ WHERE workflow_run_id = ? AND event_kind = 'workflow_convergence_review_requeste
 }
 
 func TestResumeConvergencePromotionsRepairsInterruptedIntent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env, executor, _ := newPromotionTestEnv(t)
 	task, evidence := holdRealConvergenceReview(t, env, executor)
@@ -496,6 +503,7 @@ SELECT COUNT(*) FROM workflow_runs WHERE task_id = ?`, promotion.PlanningTaskID)
 }
 
 func TestPromoteConvergenceReviewRequiresActiveHeldRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env, executor, _ := newPromotionTestEnv(t)
 	task, evidence := holdRealConvergenceReview(t, env, executor)
@@ -521,6 +529,7 @@ func TestPromoteConvergenceReviewRequiresActiveHeldRun(t *testing.T) {
 }
 
 func TestPromoteConvergenceReviewCopiesTagsAndBody(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env, executor, _ := newPromotionTestEnv(t)
 	task, evidence := holdRealConvergenceReview(t, env, executor)

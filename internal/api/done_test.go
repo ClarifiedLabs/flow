@@ -69,6 +69,7 @@ func seedClosedTasks(t *testing.T, fixture testFixture) (merged, rejected, aband
 }
 
 func TestDoneAggregateSurfacesClosedTasksWithOutcomesAndMergedChange(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	merged, rejected, abandoned := seedClosedTasks(t, fixture)
 
@@ -112,6 +113,7 @@ func TestDoneAggregateSurfacesClosedTasksWithOutcomesAndMergedChange(t *testing.
 }
 
 func TestDoneAggregateKeysetPagination(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	merged, rejected, abandoned := seedClosedTasks(t, fixture)
 
@@ -139,6 +141,7 @@ func TestDoneAggregateKeysetPagination(t *testing.T) {
 }
 
 func TestDoneAggregateFiltersByOutcome(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	merged, _, _ := seedClosedTasks(t, fixture)
 
@@ -150,6 +153,7 @@ func TestDoneAggregateFiltersByOutcome(t *testing.T) {
 }
 
 func TestSidebarReportsClosedCount(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	seedClosedTasks(t, fixture)
 
@@ -161,6 +165,7 @@ func TestSidebarReportsClosedCount(t *testing.T) {
 }
 
 func TestSidebarBoardCountsSeparateBlockedFromInProgress(t *testing.T) {
+	t.Parallel()
 	response := sidebarResponse{}
 	addSidebarBoardCounts(&response, coordinator.BoardResult{
 		Board: coordinator.Board{

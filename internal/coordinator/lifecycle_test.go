@@ -591,6 +591,7 @@ func goExpr(expr ast.Expr) string {
 // LifecycleState constants, in both directions. The whole package is scanned
 // as one table, so a constant may reference another in any file.
 func TestAllLifecycleStatesExhaustive(t *testing.T) {
+	t.Parallel()
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("list package files: %v", err)
@@ -646,6 +647,7 @@ func TestAllLifecycleStatesExhaustive(t *testing.T) {
 // be a loud error, never a silent skip.
 
 func TestDeclaredLifecycleStatesRecognizesEveryConstForm(t *testing.T) {
+	t.Parallel()
 	source := `package coordinator
 
 type LifecycleState string
@@ -682,6 +684,7 @@ const LifecycleA, LifecycleB LifecycleState = "a"
 // must be read, not silently skipped, or a future server state could bypass
 // the parity guard and render unknown.
 func TestDeclaredLifecycleStatesEvaluatesConstantExpressions(t *testing.T) {
+	t.Parallel()
 	source := `package coordinator
 
 type LifecycleState string
@@ -720,6 +723,7 @@ const LifecycleDone LifecycleState = "done"
 // other across files, so the exhaustive check must scan the whole package as
 // one table rather than one file at a time.
 func TestDeclaredLifecycleStatesResolvesAcrossFiles(t *testing.T) {
+	t.Parallel()
 	files := map[string]string{
 		"tasks.go": `package coordinator
 
@@ -750,6 +754,7 @@ const LifecyclePaused = LifecycleScheduled + "_paused"
 // a const group — a spec without values repeats the previous spec's type and
 // expression list — must not hide a LifecycleState constant.
 func TestDeclaredLifecycleStatesRepeatsPreviousSpec(t *testing.T) {
+	t.Parallel()
 	source := `package coordinator
 
 type LifecycleState string
@@ -772,6 +777,7 @@ const (
 }
 
 func TestDeclaredLifecycleStatesRejectsOpaqueValues(t *testing.T) {
+	t.Parallel()
 	for _, source := range []string{
 		`package coordinator
 
@@ -875,6 +881,7 @@ const LifecycleA = lifecycleAlias[int](missing.Suffix)
 // recognized, or adding `const LifecycleX (LifecycleState) = "new"` would
 // silently leave AllLifecycleStates stale and the registry bypassed.
 func TestDeclaredLifecycleStatesRecognizesParenthesizedForms(t *testing.T) {
+	t.Parallel()
 	source := `package coordinator
 
 type LifecycleState string
@@ -906,6 +913,7 @@ const LifecycleDone LifecycleState = (LifecycleState)("done")
 // skip it, a future server state could bypass the exhaustive check, and the
 // web parity test would never see it.
 func TestDeclaredLifecycleStatesRecognizesTypeAliases(t *testing.T) {
+	t.Parallel()
 	source := `package coordinator
 
 type LifecycleState string
@@ -945,6 +953,7 @@ const LifecycleNoteDraft LifecycleNote = "draft"
 // are package scope, so an alias used in one file may be declared in another;
 // the package-wide scan must resolve them the same way.
 func TestDeclaredLifecycleStatesResolvesAliasesAcrossFiles(t *testing.T) {
+	t.Parallel()
 	files := map[string]string{
 		"types.go": `package coordinator
 
@@ -979,6 +988,7 @@ const LifecycleReviewing = lifecycleAlias("reviewing")
 // expression) instead of skipping it, or a future server state could bypass
 // the exhaustive check and render unknown.
 func TestDeclaredLifecycleStatesRecognizesGenericTypeAliases(t *testing.T) {
+	t.Parallel()
 	source := `package coordinator
 
 type LifecycleState string
@@ -1021,6 +1031,7 @@ const LifecycleScheduled lifecyclePlain = "scheduled"
 // may be declared in another; the package-wide scan must resolve it the same
 // way.
 func TestDeclaredLifecycleStatesResolvesGenericAliasesAcrossFiles(t *testing.T) {
+	t.Parallel()
 	files := map[string]string{
 		"types.go": `package coordinator
 

@@ -189,6 +189,7 @@ func submitPlanArtifact(t *testing.T, fixture testFixture, taskID, nodeRunID, cl
 }
 
 func TestInteractivePlanReviewLifecycle(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	flow := newReviewFixtureFlow(t, fixture, "interactive plan review")
@@ -318,6 +319,7 @@ func TestInteractivePlanReviewLifecycle(t *testing.T) {
 }
 
 func TestSubmitReviewRejectsWrongCredentialsAndState(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	flow := newReviewFixtureFlow(t, fixture, "review credential checks")
@@ -348,6 +350,7 @@ func TestSubmitReviewRejectsWrongCredentialsAndState(t *testing.T) {
 }
 
 func TestRespondReviewRejectsStaleRoundBinding(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	flow := newReviewFixtureFlow(t, fixture, "review wait round binding")

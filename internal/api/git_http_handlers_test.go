@@ -95,6 +95,7 @@ func TestGitHTTPExchangeAuthAndHooks(t *testing.T) {
 }
 
 func TestGitHTTPExchangeCompressedFetch(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skipf("git is not installed")
 	}
@@ -223,6 +224,7 @@ func assertGitHTTPProtocolV2(t *testing.T, httpServer *httptest.Server, exchange
 }
 
 func TestGitHTTPHookHelper(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("FLOW_GIT_HTTP_HOOK_HELPER") != "1" {
 		return
 	}
@@ -362,6 +364,7 @@ func gitHTTPTestEnvironment(environ []string) []string {
 }
 
 func TestGitHTTPTestEnvironmentRemovesInjectedGitConfig(t *testing.T) {
+	t.Parallel()
 	environ := []string{
 		"PATH=/usr/bin",
 		"GIT_CONFIG_COUNT=1",

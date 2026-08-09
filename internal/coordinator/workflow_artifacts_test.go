@@ -14,6 +14,7 @@ import (
 )
 
 func TestTaskSetMaterializerConfigRejectsConflictingConsumers(t *testing.T) {
+	t.Parallel()
 	snapshot := FlowSnapshot{
 		Nodes: []FlowNodeSnapshot{
 			{Key: "plan", Kind: NodeAgent, Config: FlowNodeSnapshotConfig{Agent: &AgentNodeSnapshotConfig{Artifact: ArtifactTaskSet}}},
@@ -34,6 +35,7 @@ func TestTaskSetMaterializerConfigRejectsConflictingConsumers(t *testing.T) {
 }
 
 func TestDecodeTaskSetManifestRequiresBody(t *testing.T) {
+	t.Parallel()
 	const body = "\n## Scope\n\nImplement the body-only task contract.\n\n- Preserve Markdown.\n"
 	manifest, err := DecodeTaskSetManifest([]byte(`{
 		"schema_version": 1,
@@ -73,6 +75,7 @@ func TestDecodeTaskSetManifestRequiresBody(t *testing.T) {
 }
 
 func TestCreateWorkflowArtifactRejectsMalformedPersistedSnapshot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, tasks := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
 	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Artifact snapshot strictness", Body: "Reject malformed workflow snapshots."})
@@ -111,6 +114,7 @@ INSERT INTO workflow_node_runs (
 }
 
 func TestValidateTaskSetWorkflowSelectionAllowsExplicitDefaultWithoutOverrides(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _ := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
 	globalStore, err := flowdb.OpenGlobal(ctx, filepath.Join(t.TempDir(), "global.db"))
@@ -146,6 +150,7 @@ func TestValidateTaskSetWorkflowSelectionAllowsExplicitDefaultWithoutOverrides(t
 }
 
 func TestMaterializeTaskSetStoresBodyAndTaskMetadata(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, tasks := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
 	globalStore, err := flowdb.OpenGlobal(ctx, filepath.Join(t.TempDir(), "global.db"))

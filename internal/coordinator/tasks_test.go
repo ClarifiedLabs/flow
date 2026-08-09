@@ -17,6 +17,7 @@ import (
 )
 
 func TestCreateTaskAllocatesIDAndPersistsAcrossRestart(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "flow.db")
 	store, service := newTaskService(t, dbPath)
@@ -64,6 +65,7 @@ func TestCreateTaskAllocatesIDAndPersistsAcrossRestart(t *testing.T) {
 }
 
 func TestListTasksSearchMatchesTitleAndBodyCaseInsensitively(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
 	t.Cleanup(func() { _ = store.Close() })
@@ -132,6 +134,7 @@ func TestListTasksSearchMatchesTitleAndBodyCaseInsensitively(t *testing.T) {
 }
 
 func TestApplyReviewFollowUpCreatesOrReusesRelatedOpenTaskIdempotently(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, tasks := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
 	t.Cleanup(func() { _ = store.Close() })
@@ -222,6 +225,7 @@ func TestApplyReviewFollowUpCreatesOrReusesRelatedOpenTaskIdempotently(t *testin
 }
 
 func TestApplyReviewFollowUpRejectsBlockingDuplicateClosedAndSelfTargets(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, tasks := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
 	t.Cleanup(func() { _ = store.Close() })
@@ -279,6 +283,7 @@ WHERE id = ?`, closed.ID); err != nil {
 }
 
 func TestConcurrentTaskCreationAllocatesUniqueIDs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	_, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
 
@@ -332,6 +337,7 @@ func TestConcurrentTaskCreationAllocatesUniqueIDs(t *testing.T) {
 }
 
 func TestTaskAttachmentRoundTrip(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	_, service := newTaskService(t, filepath.Join(dir, "flow.db"))
@@ -382,6 +388,7 @@ func TestTaskAttachmentRoundTrip(t *testing.T) {
 }
 
 func TestTaskAttachmentRejectsInvalidStage(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	_, service := newTaskService(t, filepath.Join(dir, "flow.db"))
@@ -403,6 +410,7 @@ func TestTaskAttachmentRejectsInvalidStage(t *testing.T) {
 }
 
 func TestInvalidTaskMetadataIsRejected(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	_, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
 
@@ -420,6 +428,7 @@ func TestInvalidTaskMetadataIsRejected(t *testing.T) {
 }
 
 func TestTagsCanBeCreatedAppliedQueriedAndRejectDuplicates(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	_, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
 
@@ -474,6 +483,7 @@ func TestTagsCanBeCreatedAppliedQueriedAndRejectDuplicates(t *testing.T) {
 }
 
 func TestTaskRelationsRejectCyclesAndDuplicateParents(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	_, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
 
@@ -531,6 +541,7 @@ func TestTaskRelationsRejectCyclesAndDuplicateParents(t *testing.T) {
 }
 
 func TestRelationsForTaskDenormalizesRelatedTaskTitles(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	_, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
 
@@ -566,6 +577,7 @@ func TestRelationsForTaskDenormalizesRelatedTaskTitles(t *testing.T) {
 // a nonexistent parent, which violates the source foreign key) must roll the
 // whole create back so no parentless task is left behind.
 func TestCreateTaskWithParentRelationAtomically(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	_, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
 
@@ -627,6 +639,7 @@ func TestCreateTaskWithParentRelationAtomically(t *testing.T) {
 }
 
 func TestRelationsForTaskDenormalizesLifecycleState(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	_, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
 
@@ -668,6 +681,7 @@ UPDATE tasks SET lifecycle_state = ?, done_resolution = ?, done_at = ?, updated_
 }
 
 func TestRelationsForTasksBatch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	_, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
 
@@ -839,6 +853,7 @@ UPDATE tasks SET lifecycle_state = 'in_progress' WHERE id = ?`, taskID); err != 
 }
 
 func TestBoardResultDerivesAwaitingWorkerFromLiveJobState(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	cases := []struct {
@@ -881,6 +896,7 @@ func TestBoardResultDerivesAwaitingWorkerFromLiveJobState(t *testing.T) {
 // snake_case tag would silently empty the board UI while fixture-based JS
 // tests stay green (see t-flow-0136). The JS suite pins LANES to these keys.
 func TestBoardWireKeysPinTheBoardLaneContract(t *testing.T) {
+	t.Parallel()
 	board := Board{
 		Unscheduled:    []Task{{ID: "t-unscheduled"}},
 		Scheduled:      []Task{{ID: "t-scheduled"}},
@@ -915,6 +931,7 @@ func TestBoardWireKeysPinTheBoardLaneContract(t *testing.T) {
 // the live job on the current visit (workflow_runs.current_node_run_id), not the
 // stale, higher-attempt earlier visit.
 func TestBoardResultAwaitingWorkerUsesCurrentVisitNotStaleAttempt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
 	task := createTasks(t, service, "revisited node")[0]
@@ -955,6 +972,7 @@ INSERT INTO workflow_node_runs (
 }
 
 func TestBoardResultHeldAndBlockedOutrankAwaitingWorker(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	t.Run("open wait stays blocked with a queued job", func(t *testing.T) {

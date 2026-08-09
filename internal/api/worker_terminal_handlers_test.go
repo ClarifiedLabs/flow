@@ -14,6 +14,7 @@ import (
 )
 
 func TestSessionTerminalStreamUsesRegisteredSocketAndPropagatesWorkerError(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Terminal stream socket task")
 	const socketPath = "/tmp/flow-session-test.sock"

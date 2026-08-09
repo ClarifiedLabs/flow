@@ -9,6 +9,7 @@ import (
 )
 
 func TestOwnerRulingAPIRequiresIdempotencyAndReplaysExactResponse(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	task, err := fixture.Tasks.CreateTask(context.Background(), coordinator.CreateTaskInput{Title: "Guide the active workflow"})
 	if err != nil {

@@ -131,6 +131,7 @@ func stringPtrPtr(value *string) **string {
 }
 
 func TestFeatureServiceCreateSeedsBranchFromBaseTip(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 
@@ -192,6 +193,7 @@ func TestFeatureServiceCreateSeedsBranchFromBaseTip(t *testing.T) {
 }
 
 func TestFeatureServiceListFiltersByStatus(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 
@@ -235,6 +237,7 @@ func TestFeatureServiceListFiltersByStatus(t *testing.T) {
 }
 
 func TestTaskFeatureAssignmentAndEditGuard(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 
@@ -330,6 +333,7 @@ VALUES ('ch-guard', ?, 'task/t-test-0001/run-1', 'main', '2026-01-01T00:00:00Z',
 }
 
 func TestExecutorChangeBaseForTask(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	executor := &WorkflowExecutor{db: env.fixture.store.DB(), project: env.fixture.project}
@@ -392,6 +396,7 @@ func setupConflictedFeature(t *testing.T, env *featureTestEnv) Feature {
 }
 
 func TestRebaseOnMainCleanThenUpToDate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 
@@ -450,6 +455,7 @@ func TestRebaseOnMainCleanThenUpToDate(t *testing.T) {
 }
 
 func TestRebaseOnMainConflictCreatesBlockingTask(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	feature := setupConflictedFeature(t, env)
@@ -584,6 +590,7 @@ WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, blockerID,
 // race of an API-side pre-read: a feature task created concurrently with the
 // rebase can never receive a rebase_task blocks relation.
 func TestRebaseOnMainRestrictBlockedTo(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 
@@ -680,6 +687,7 @@ WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, rebaseTask
 // linked — and the filter confines the sweep to the bound task, so no relation
 // exists whose endpoints are both unrelated to the bound task.
 func TestRebaseOnMainConcurrentTaskAddStaysUnlinked(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	feature := setupConflictedFeature(t, env)
@@ -748,6 +756,7 @@ WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, result.Reb
 // the decision, so the restricted rebase is rejected with
 // ErrFeatureRebaseForbidden before any rebase or relation row exists.
 func TestRebaseOnMainTaskAddBeforeDecisionRejectsRebase(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	feature := setupConflictedFeature(t, env)
@@ -804,6 +813,7 @@ func TestRebaseOnMainTaskAddBeforeDecisionRejectsRebase(t *testing.T) {
 // never receives a rebase_task blocks relation, while the bound task keeps its
 // link (duplicate-tolerant) when it is scheduled mid-rebase.
 func TestRebaseBlockRestrictionHoldsAtScheduleTime(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	feature := setupConflictedFeature(t, env)
@@ -871,6 +881,7 @@ WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, rebaseTask
 // restriction allows every task (owner and unbound project-console rebases),
 // and a comma-joined list allows exactly its members.
 func TestRestrictionAllows(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name        string
 		restriction string
@@ -915,6 +926,7 @@ func produceRebasedHead(t *testing.T, env *featureTestEnv, feature Feature, task
 }
 
 func TestFinalizeRebasePublishesAndStales(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	feature := setupConflictedFeature(t, env)
@@ -958,6 +970,7 @@ func TestFinalizeRebasePublishesAndStales(t *testing.T) {
 }
 
 func TestFinalizeRebaseStaleWhenBranchMoves(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	feature := setupConflictedFeature(t, env)
@@ -1022,6 +1035,7 @@ func TestFinalizeRebaseStaleWhenBranchMoves(t *testing.T) {
 // schedule-time gate keeps linking nothing new for other tasks and keeps the
 // bound task's link across the redo.
 func TestRestrictedRebaseRedoKeepsConfinement(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	feature := setupConflictedFeature(t, env)
@@ -1097,6 +1111,7 @@ WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, rebaseTask
 }
 
 func TestEnsureRebaseBlockToleratesDuplicates(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	feature := setupConflictedFeature(t, env)
@@ -1140,6 +1155,7 @@ WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`,
 }
 
 func TestSeedDefaultsSeedsPerName(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 
@@ -1213,6 +1229,7 @@ func TestSeedDefaultsSeedsPerName(t *testing.T) {
 }
 
 func TestSeedDefaultsPreservesUserFlowsAndFreshDefault(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newProjectFixture(t)
 
@@ -1256,6 +1273,7 @@ func TestSeedDefaultsPreservesUserFlowsAndFreshDefault(t *testing.T) {
 }
 
 func TestExecutorFinalizeRebaseNode(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	feature := setupConflictedFeature(t, env)
@@ -1384,6 +1402,7 @@ UPDATE tasks SET lifecycle_state = 'done', done_resolution = 'completed',
 }
 
 func TestLandFeatureSquashMergesAndStamps(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 
@@ -1435,6 +1454,7 @@ func TestLandFeatureSquashMergesAndStamps(t *testing.T) {
 }
 
 func TestLandEmptyFeatureHeals(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 
@@ -1456,6 +1476,7 @@ func TestLandEmptyFeatureHeals(t *testing.T) {
 }
 
 func TestLandConflictedFeatureTellsOperatorToRebase(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	feature := setupConflictedFeature(t, env)
@@ -1477,6 +1498,7 @@ func TestLandConflictedFeatureTellsOperatorToRebase(t *testing.T) {
 }
 
 func TestLandRefusesRunningRebase(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	feature := setupConflictedFeature(t, env)
@@ -1508,6 +1530,7 @@ func TestLandRefusesRunningRebase(t *testing.T) {
 }
 
 func TestArchiveFeature(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 
@@ -1551,6 +1574,7 @@ func TestArchiveFeature(t *testing.T) {
 }
 
 func TestFeatureTasksListing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 

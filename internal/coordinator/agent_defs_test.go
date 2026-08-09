@@ -11,6 +11,7 @@ import (
 )
 
 func TestProjectAgentDefsInheritGlobalsAndOverrideByName(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	globalStore, err := flowdb.OpenGlobal(ctx, filepath.Join(t.TempDir(), "global.db"))
 	if err != nil {
@@ -99,6 +100,7 @@ func TestProjectAgentDefsInheritGlobalsAndOverrideByName(t *testing.T) {
 }
 
 func TestSeedDefaultsStampsConfiguredDefaultAgent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	globalStore, err := flowdb.OpenGlobal(ctx, filepath.Join(t.TempDir(), "global.db"))
 	if err != nil {
@@ -148,6 +150,7 @@ func TestSeedDefaultsStampsConfiguredDefaultAgent(t *testing.T) {
 }
 
 func TestSeedDefaultsUsesMatchingGlobalAgentDefinition(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	globalStore, err := flowdb.OpenGlobal(ctx, filepath.Join(t.TempDir(), "global.db"))
 	if err != nil {
@@ -214,6 +217,7 @@ func TestSeedDefaultsUsesMatchingGlobalAgentDefinition(t *testing.T) {
 }
 
 func TestFlowResolvesProjectOverrideForGlobalAgentReference(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	globalStore, err := flowdb.OpenGlobal(ctx, filepath.Join(t.TempDir(), "global.db"))
 	if err != nil {

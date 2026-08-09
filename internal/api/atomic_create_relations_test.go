@@ -10,6 +10,7 @@ import (
 )
 
 func TestCreateAPIsConvertAtomicCrossKindRelations(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	makeExchangeHooksInert(t, fixture.Project.ExchangePath)
@@ -65,6 +66,7 @@ func TestCreateAPIsConvertAtomicCrossKindRelations(t *testing.T) {
 }
 
 func TestCreateAPIMalformedWorkItemRelationRollsBack(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	items, err := fixture.Bundle.WorkItems.List(ctx)
@@ -87,6 +89,7 @@ func TestCreateAPIMalformedWorkItemRelationRollsBack(t *testing.T) {
 }
 
 func TestBoundTaskCredentialsConstrainGenericCreateRelations(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		scope coordinator.TokenScope
@@ -154,6 +157,7 @@ func TestBoundTaskCredentialsConstrainGenericCreateRelations(t *testing.T) {
 }
 
 func TestFeatureCreateMapsMissingRelatedWorkItemToNotFound(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	makeExchangeHooksInert(t, fixture.Project.ExchangePath)
 	seedAPIMain(t, fixture.Project.ExchangePath)

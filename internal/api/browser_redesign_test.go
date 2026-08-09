@@ -14,6 +14,7 @@ import (
 // and none of them can be checked from a string assertion: they are all about
 // what survives a repaint, and what happens where you clicked.
 func TestWebUIRedesignSurvivesRepaintsAndKeepsDisclosureLocal(t *testing.T) {
+	t.Parallel()
 	browserPath, ok := findBrowserExecutable()
 	if !ok {
 		t.Skip("no Chromium or Chrome executable found for browser smoke test")

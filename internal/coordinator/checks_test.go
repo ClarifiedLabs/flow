@@ -13,6 +13,7 @@ import (
 )
 
 func TestReportCheckMapsCIExitCodeToVerdict(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	_, tasks, checks := newCheckService(t)
 	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Check target"})
@@ -62,6 +63,7 @@ func TestReportCheckMapsCIExitCodeToVerdict(t *testing.T) {
 }
 
 func TestReviewerCheckRequiresExplicitResultAndKeepsErrorsInReview(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	_, tasks, checks := newCheckService(t)
 	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Reviewer execution failure"})
@@ -104,6 +106,7 @@ func TestReviewerCheckRequiresExplicitResultAndKeepsErrorsInReview(t *testing.T)
 }
 
 func TestResetAutomatedChecksForNewRevisionLeavesHumanChecksBlocked(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	_, tasks, checks := newCheckService(t)
 	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Reset target"})
@@ -215,6 +218,7 @@ func openReviewThread(t *testing.T, store *flowdb.Store, change Change) {
 }
 
 func TestReportReviewerSatisfiedWithOpenThreadsOverriddenToBlocked(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, tasks, checks := newCheckService(t)
 	task, change := seedReadyChange(t, store, tasks)
@@ -243,6 +247,7 @@ func TestReportReviewerSatisfiedWithOpenThreadsOverriddenToBlocked(t *testing.T)
 }
 
 func TestReportReviewerSatisfiedWithNoOpenThreadsStaysSatisfied(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, tasks, checks := newCheckService(t)
 	task, _ := seedReadyChange(t, store, tasks)
@@ -263,6 +268,7 @@ func TestReportReviewerSatisfiedWithNoOpenThreadsStaysSatisfied(t *testing.T) {
 }
 
 func TestReportCICheckWithOpenThreadsNotOverridden(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, tasks, checks := newCheckService(t)
 	task, change := seedReadyChange(t, store, tasks)
@@ -285,6 +291,7 @@ func TestReportCICheckWithOpenThreadsNotOverridden(t *testing.T) {
 }
 
 func TestReportCheckRejectsSourceJobForDifferentTask(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, tasks, checks := newCheckService(t)
 	target, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Check target"})
@@ -318,6 +325,7 @@ func TestReportCheckRejectsSourceJobForDifferentTask(t *testing.T) {
 }
 
 func TestWorkerCheckReportRejectsLeaseReleasedBeforeAtomicWrite(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, tasks, checks := newCheckService(t)
 	task, change := seedReadyChange(t, store, tasks)
@@ -369,6 +377,7 @@ VALUES (?, ?, 'w-check', 'ephemeral', ?, ?)`, leaseID, job.ID, formatTime(now), 
 }
 
 func TestAcceptancePendingGate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, tasks, checks := newCheckService(t)
 	checkConfig := NewCheckConfigServiceWithOptions(store.DB(), checks, nil, nil, Project{}, CheckConfigServiceOptions{})

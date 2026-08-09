@@ -12,6 +12,7 @@ import (
 )
 
 func TestAtomicCreateWorkItemRelationsAcrossKinds(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	epics := NewEpicService(env.fixture.store.DB(), testProjectID, nil)
@@ -66,6 +67,7 @@ func TestAtomicCreateWorkItemRelationsAcrossKinds(t *testing.T) {
 }
 
 func TestMalformedCreateWorkItemRelationRollsBackEverySubtype(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	epics := NewEpicService(env.fixture.store.DB(), testProjectID, nil)
@@ -109,6 +111,7 @@ func TestMalformedCreateWorkItemRelationRollsBackEverySubtype(t *testing.T) {
 }
 
 func TestCreateRejectsLegacyAndGenericParentDeclarationsAtomically(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	epics := NewEpicService(env.fixture.store.DB(), testProjectID, nil)
@@ -170,6 +173,7 @@ func TestCreateRejectsLegacyAndGenericParentDeclarationsAtomically(t *testing.T)
 }
 
 func TestTaskCreateRejectsFeatureIDAndGenericParentConflictAtomically(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	featureA, err := env.features.Create(ctx, CreateFeatureInput{Title: "feature parent A"})
@@ -206,6 +210,7 @@ func TestTaskCreateRejectsFeatureIDAndGenericParentConflictAtomically(t *testing
 }
 
 func TestFeatureCreateIntentReplaysStoredRelationsExactlyOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	anchor, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "durable relation anchor"})
@@ -280,6 +285,7 @@ SELECT COUNT(*) FROM work_item_relations WHERE source_item_id = ? OR target_item
 }
 
 func TestFeatureCreateIntentCleansExpectedOrphanAfterTargetDeletion(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	anchor, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "deleted target"})
@@ -328,6 +334,7 @@ WHEN NEW.title = 'deleted target feature' BEGIN SELECT RAISE(ABORT, 'forced fina
 }
 
 func TestFeatureCreateIntentPreservesUnexpectedOrphanTip(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	anchor, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "changed target"})
@@ -370,6 +377,7 @@ WHEN NEW.title = 'unexpected tip feature' BEGIN SELECT RAISE(ABORT, 'forced fina
 }
 
 func TestFeatureCreateConcurrentRetryDoesNotRegressCompletedIntent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	anchor, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "concurrent retry anchor"})
@@ -430,6 +438,7 @@ func TestFeatureCreateConcurrentRetryDoesNotRegressCompletedIntent(t *testing.T)
 }
 
 func TestFeatureCreateCleanupPreservesPreExistingSameTipRef(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	anchor, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "same-tip anchor"})
@@ -486,6 +495,7 @@ WHEN NEW.title = 'same-tip feature' BEGIN SELECT RAISE(ABORT, 'forced finalizati
 }
 
 func TestFeatureCreateGenericParentActorSurvivesIntentReplay(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
 	epics := NewEpicService(env.fixture.store.DB(), testProjectID, nil)

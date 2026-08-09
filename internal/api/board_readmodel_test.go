@@ -55,6 +55,7 @@ func fetchProjectBoard(t *testing.T, fixture testFixture) boardResponse {
 }
 
 func TestBoardCardCarriesDwellStepPositionAndWait(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "board read model")
 
@@ -90,6 +91,7 @@ func TestBoardCardCarriesDwellStepPositionAndWait(t *testing.T) {
 }
 
 func TestHoldEndpointStopsTheRunAndShowsOnTheBoard(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "board hold")
 
@@ -127,6 +129,7 @@ func TestHoldEndpointStopsTheRunAndShowsOnTheBoard(t *testing.T) {
 }
 
 func TestManualConvergenceHoldShowsAsBlockedOnTheBoardAndSidebar(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	makeExchangeHooksInert(t, fixture.Project.ExchangePath)
 	seedAPIMain(t, fixture.Project.ExchangePath)
@@ -249,6 +252,7 @@ UPDATE workflow_node_runs SET input_artifact_id = ? WHERE id = ?`,
 }
 
 func TestReleaseMergeRequiresMergedTerminal(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	planner, err := fixture.Registry.GlobalAgentDefs().GetByName(ctx, "task-planner")
@@ -291,6 +295,7 @@ func TestReleaseMergeRequiresMergedTerminal(t *testing.T) {
 }
 
 func TestReleaseSkipToMergeCannotResolveHeldHumanGate(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "board human skip to merge")
 
@@ -309,6 +314,7 @@ func TestReleaseSkipToMergeCannotResolveHeldHumanGate(t *testing.T) {
 }
 
 func TestWorkflowDetailResolvesNodeNamesAndEdgeCounts(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "workflow detail")
 
@@ -359,6 +365,7 @@ func TestWorkflowDetailResolvesNodeNamesAndEdgeCounts(t *testing.T) {
 }
 
 func TestFirstClassEpicReportsTypedChildrenAndBlockers(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	flow := newBoardFixtureFlow(t, fixture, "epic rollup")
@@ -406,6 +413,7 @@ func TestFirstClassEpicReportsTypedChildrenAndBlockers(t *testing.T) {
 }
 
 func TestWorkItemOverviewFiltersAndContextPreserveLegacyReads(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -474,6 +482,7 @@ func TestWorkItemOverviewFiltersAndContextPreserveLegacyReads(t *testing.T) {
 }
 
 func TestBoardContainersFollowCanonicalTopLevelHierarchyAndCountTasksOnce(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	makeExchangeHooksInert(t, fixture.Project.ExchangePath)
 	seedAPIMain(t, fixture.Project.ExchangePath)
@@ -549,6 +558,7 @@ func TestBoardContainersFollowCanonicalTopLevelHierarchyAndCountTasksOnce(t *tes
 }
 
 func TestBoardExposesAwaitingWorkerLaneState(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -630,6 +640,7 @@ INSERT INTO jobs (
 // read model: a scheduled task with a live blocks blocker carries the
 // blocker's id and title, and a task with no blocker carries none.
 func TestBoardCardNamesItsUnresolvedBlocker(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -676,6 +687,7 @@ func TestBoardCardNamesItsUnresolvedBlocker(t *testing.T) {
 // the blocking task reaches done it stops counting as a blocker, so the card no
 // longer names it.
 func TestBoardCardDropsResolvedBlocker(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -714,6 +726,7 @@ func TestBoardCardDropsResolvedBlocker(t *testing.T) {
 // updated, then a stable id tiebreak) and the rest are disclosed as a count
 // rather than dropped silently.
 func TestBlockerSummaryRanksByPriorityAndDisclosesOverflow(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	stale := now.Add(-time.Hour)
 
@@ -764,6 +777,7 @@ func TestBlockerSummaryRanksByPriorityAndDisclosesOverflow(t *testing.T) {
 // highest-priority titles in order, discloses the overflow count, and keeps the
 // resolved blocker out of both.
 func TestBoardCardOrdersBlockersAndDisclosesOverflow(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -950,6 +964,7 @@ func openCountingDB(t *testing.T) (*sql.DB, *queryRecorder) {
 // not regress to a per-task blocker query: building cards for any number of
 // tasks loads relations in a single batched query.
 func TestBoardCardsLoadRelationsWithConstantQueries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	build := func(taskCount int) int {
@@ -1008,6 +1023,7 @@ func TestBoardCardsLoadRelationsWithConstantQueries(t *testing.T) {
 // does not regress to a per-task latest-session query: building cards for any
 // number of tasks loads the latest sessions in a single batched query.
 func TestBoardCardsLoadLatestSessionsWithConstantQueries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	build := func(taskCount int) int {

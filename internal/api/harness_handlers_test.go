@@ -20,6 +20,7 @@ func harnessModel(harness, provider, id string) flowharness.Model {
 // catalog is intersected across the workers that offer the harness, and keyed
 // by harness name for attachment to the matching option.
 func TestLiveHarnessModelIntersectionAcrossWorkers(t *testing.T) {
+	t.Parallel()
 	harnessLabel := flowharness.AgentHarnessLabel(flowharness.Harness)
 
 	opus := harnessModel(flowharness.Harness, "anthropic", "claude-opus-4-8")
@@ -57,6 +58,7 @@ func TestLiveHarnessModelIntersectionAcrossWorkers(t *testing.T) {
 // TestLiveHarnessModelIntersectionIgnoresUnofferedHarness ensures a stray model
 // stamped for a harness the worker does not offer is dropped.
 func TestLiveHarnessModelIntersectionIgnoresUnofferedHarness(t *testing.T) {
+	t.Parallel()
 	workers := []worker.Worker{
 		{
 			ID:            "w-harness",

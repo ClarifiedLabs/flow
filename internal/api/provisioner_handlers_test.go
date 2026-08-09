@@ -17,6 +17,7 @@ import (
 )
 
 func TestProvisionerAssignmentsAuthorization(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	mintTestCredential(t, fixture.Registry, "orchestrator-token", coordinator.TokenScopeProvisioner, "test-provider")
 	mintTestCredential(t, fixture.Registry, "provisioner-worker-token", coordinator.TokenScopeWorker, "w-provisioner-auth")
@@ -38,6 +39,7 @@ func TestProvisionerAssignmentsAuthorization(t *testing.T) {
 }
 
 func TestProvisionerCapacitySlotIsIdleUntilVerifiedBoundAndRefreshed(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	job, err := fixture.Bundle.Queue.EnqueueJob(ctx, worker.EnqueueJobInput{
@@ -99,6 +101,7 @@ func TestProvisionerCapacitySlotIsIdleUntilVerifiedBoundAndRefreshed(t *testing.
 }
 
 func TestProvisionerCapacitySlotCapabilityLossBeforeClaimRequeuesJob(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	model := flowharness.Model{
@@ -160,6 +163,7 @@ func TestProvisionerCapacitySlotCapabilityLossBeforeClaimRequeuesJob(t *testing.
 }
 
 func TestProvisionerAssignmentListUsesTokenProviderBindingsWithoutQueryFilter(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	mintTestCredential(t, fixture.Registry, "orchestrator-token", coordinator.TokenScopeProvisioner, "retired-provider")
 	ctx := context.Background()
@@ -193,6 +197,7 @@ func TestProvisionerAssignmentListUsesTokenProviderBindingsWithoutQueryFilter(t 
 }
 
 func TestRegistryExpiresPendingAssignmentsForGenericClaims(t *testing.T) {
+	t.Parallel()
 	server, bundles := newMultiProjectServer(t, "alpha")
 	ctx := context.Background()
 	job, err := bundles[0].Queue.EnqueueJob(ctx, worker.EnqueueJobInput{Role: worker.RoleCI, CapacityBucket: worker.BucketEphemeral, Payload: map[string]any{"blocking": true}})
@@ -225,6 +230,7 @@ func TestRegistryExpiresPendingAssignmentsForGenericClaims(t *testing.T) {
 }
 
 func TestProvisionerReserveIsIdempotentAndEnforcesGlobalProfileConcurrency(t *testing.T) {
+	t.Parallel()
 	server, bundles := newMultiProjectServer(t, "alpha", "beta")
 	mintTestCredential(t, server.registry, "orchestrator-token", coordinator.TokenScopeProvisioner, "test-provider")
 	ctx := context.Background()
@@ -275,6 +281,7 @@ func TestProvisionerReserveIsIdempotentAndEnforcesGlobalProfileConcurrency(t *te
 }
 
 func TestAssignedWorkerRegistrationAndClaimAreExactAndExcludeGenericWorkers(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	mintTestCredential(t, fixture.Registry, "generic-worker-token", coordinator.TokenScopeWorker, "w-generic")
@@ -322,6 +329,7 @@ func TestAssignedWorkerRegistrationAndClaimAreExactAndExcludeGenericWorkers(t *t
 }
 
 func TestAssignedWorkerClaimNeverFallsBackWhenExactJobIsUnavailable(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	assignedJob, err := fixture.Bundle.Queue.EnqueueJob(ctx, worker.EnqueueJobInput{Role: worker.RoleCI, CapacityBucket: worker.BucketEphemeral, Priority: 100, Payload: map[string]any{"blocking": true}})
@@ -350,6 +358,7 @@ func TestAssignedWorkerClaimNeverFallsBackWhenExactJobIsUnavailable(t *testing.T
 }
 
 func TestProvisionerAbandonPreservesQueueAndCleanupRevokesAndRemovesWorker(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	job, err := fixture.Bundle.Queue.EnqueueJob(ctx, worker.EnqueueJobInput{Role: worker.RoleCI, CapacityBucket: worker.BucketEphemeral, Priority: 10, Payload: map[string]any{"blocking": true}})

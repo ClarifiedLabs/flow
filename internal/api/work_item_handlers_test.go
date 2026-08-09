@@ -10,6 +10,7 @@ import (
 )
 
 func TestBulkMoveWorkItemsAPIOrderAndAtomicValidation(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -67,6 +68,7 @@ func TestBulkMoveWorkItemsAPIOrderAndAtomicValidation(t *testing.T) {
 }
 
 func TestBulkMoveWorkItemsAPITaskBoundConsoleSingleton(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 

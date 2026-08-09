@@ -20,7 +20,7 @@ install: build
 	install -m 0755 bin/flow bin/flow-server bin/flow-worker bin/flow-orchestrator $(BINDIR)/
 
 test:
-	go test -p $(GO_TEST_P) ./...
+	go test -short -p $(GO_TEST_P) -count=1 -timeout 10m ./...
 
 # js-test runs the web UI's native-ESM Node tests (app.js is split into ES
 # modules served as-is to the browser; these tests import them directly).

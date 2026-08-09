@@ -179,6 +179,7 @@ func retryTestSnapshot(current FlowNodeSnapshot) FlowSnapshot {
 }
 
 func TestRetryExecutionRefreshesAuthorRuntimeFromProjectOverride(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newRetryRuntimeTestEnv(t)
 	globalAuthor, err := env.globals.Create(ctx, AgentDefInput{
@@ -244,6 +245,7 @@ func TestRetryExecutionRefreshesAuthorRuntimeFromProjectOverride(t *testing.T) {
 }
 
 func TestRetryExecutionRefreshesReviewAndVerificationAgentsAndOnlyErroredChecks(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		kind NodeKind
@@ -387,6 +389,7 @@ func TestRetryExecutionRefreshesReviewAndVerificationAgentsAndOnlyErroredChecks(
 }
 
 func TestRetryExecutionRuntimeRefreshFailureIsAtomic(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name         string
 		invalidAgent AgentDefSnapshot
@@ -453,6 +456,7 @@ func TestRetryExecutionRuntimeRefreshFailureIsAtomic(t *testing.T) {
 }
 
 func TestRetryExecutionWithoutRefreshKeepsFrozenRuntime(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newRetryRuntimeTestEnv(t)
 	author, err := env.globals.Create(ctx, AgentDefInput{Name: "ordinary-author", Harness: "harness", Model: "live-old", Prompt: "Live old."})

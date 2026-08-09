@@ -24,6 +24,7 @@ func newWorkflowModelServices(t *testing.T) (*FlowService, *TaskService, *Workfl
 }
 
 func TestForceDoneCleansTaskScopedConsoleWithoutWorkflowRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	_, tasks, runs := newWorkflowModelServices(t)
 	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Unscheduled task with console"})
@@ -84,6 +85,7 @@ INSERT INTO sessions (
 }
 
 func TestWorkflowModelHumanGateCanUseCustomOutcomeAndComplete(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 
@@ -163,6 +165,7 @@ func TestWorkflowModelHumanGateCanUseCustomOutcomeAndComplete(t *testing.T) {
 }
 
 func TestWorkflowModelSchedulingWaitsForTaskDependencies(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	flow, err := flows.Create(ctx, FlowInput{
@@ -202,6 +205,7 @@ func TestWorkflowModelSchedulingWaitsForTaskDependencies(t *testing.T) {
 }
 
 func TestWorkflowModelAgentInputWaitResumesSameNodeVisit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	agent, err := NewAgentDefService(flows.db).Create(ctx, AgentDefInput{

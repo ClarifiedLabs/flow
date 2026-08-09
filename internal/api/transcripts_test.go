@@ -37,6 +37,7 @@ func getAs(t *testing.T, server *Server, token string, path string) *httptest.Re
 }
 
 func TestSessionTranscriptUploadAndDownload(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Transcript session")
 	sessionID := started.Session.ID
@@ -70,6 +71,7 @@ func TestSessionTranscriptUploadAndDownload(t *testing.T) {
 }
 
 func TestSessionTranscriptDownloadRendersTerminalOutputAndPreservesRawStorage(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Rendered transcript")
 	sessionID := started.Session.ID
@@ -104,6 +106,7 @@ func TestSessionTranscriptDownloadRendersTerminalOutputAndPreservesRawStorage(t 
 }
 
 func TestSessionTranscriptUploadRejectsOtherSession(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	owner := startAuthorSessionForStatusTestWithWorker(t, fixture, "Owner session", "w-owner")
 	other := startAuthorSessionForStatusTestWithWorker(t, fixture, "Other session", "w-other")
@@ -116,6 +119,7 @@ func TestSessionTranscriptUploadRejectsOtherSession(t *testing.T) {
 }
 
 func TestSessionTranscriptDownloadRequiresOwner(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Owner-only download")
 	sessionID := started.Session.ID
@@ -133,6 +137,7 @@ func TestSessionTranscriptDownloadRequiresOwner(t *testing.T) {
 }
 
 func TestSessionTranscriptDownloadMissing(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "No transcript yet")
 
@@ -143,6 +148,7 @@ func TestSessionTranscriptDownloadMissing(t *testing.T) {
 }
 
 func TestJobTranscriptUploadRequiresLiveLease(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -177,6 +183,7 @@ func TestJobTranscriptUploadRequiresLiveLease(t *testing.T) {
 }
 
 func TestJobTranscriptUploadRejectsMissingLease(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	task, change := seedTaskWithChange(t, fixture, "Job transcript no-lease")
 	claimed := startLiveCheckJobForTask(t, fixture, "worker-token-rev2", "w-rev2", task.ID, change.ID, "", "reviewer-check", flowworker.RoleReviewer, flowworker.BucketEphemeral)
@@ -190,6 +197,7 @@ func TestJobTranscriptUploadRejectsMissingLease(t *testing.T) {
 }
 
 func TestJobTranscriptUploadRejectsReleasedLease(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	task, change := seedTaskWithChange(t, fixture, "Job transcript released-lease")
@@ -208,6 +216,7 @@ func TestJobTranscriptUploadRejectsReleasedLease(t *testing.T) {
 }
 
 func TestJobTranscriptDownloadServesTextPlain(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	task, change := seedTaskWithChange(t, fixture, "Job transcript content type")
 	claimed := startLiveCheckJobForTask(t, fixture, "worker-token-ct", "w-ct", task.ID, change.ID, "", "reviewer-check", flowworker.RoleReviewer, flowworker.BucketEphemeral)
@@ -228,6 +237,7 @@ func TestJobTranscriptDownloadServesTextPlain(t *testing.T) {
 }
 
 func TestJobTranscriptDownloadRequiresOwner(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	task, change := seedTaskWithChange(t, fixture, "Job transcript owner-only download")
 	claimed := startLiveCheckJobForTask(t, fixture, "worker-token-own", "w-own", task.ID, change.ID, "", "reviewer-check", flowworker.RoleReviewer, flowworker.BucketEphemeral)
@@ -246,6 +256,7 @@ func TestJobTranscriptDownloadRequiresOwner(t *testing.T) {
 }
 
 func TestSessionTranscriptUploadTruncatesToLast10MB(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Big transcript")
 	sessionID := started.Session.ID

@@ -15,6 +15,7 @@ import (
 // disposition to the convergence endpoint must return 200 (not 503), create a
 // clean-base feature planning workflow, and replay safely on a duplicate click.
 func TestConvergencePromoteDispositionSucceedsAndIsIdempotent(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	exchangePath := fixture.Project.ExchangePath
 	makeExchangeHooksInert(t, exchangePath)

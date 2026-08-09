@@ -11,6 +11,7 @@ import (
 // text. formatTime must render fixed-width fractions so string order equals
 // chronological order, and parseTime must round-trip the new layout.
 func TestFormatTimeLexicographicOrderIsChronological(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
 	ordered := []time.Time{
 		base,

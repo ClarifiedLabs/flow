@@ -12,6 +12,7 @@ import (
 )
 
 func TestCreateHistoryResumeDerivesImmutableLineageAndIsIdempotent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	env := newHistoryCaptureTestEnv(t)
 	project := Project{ID: "p-history", Name: "History", BaseBranch: "main"}

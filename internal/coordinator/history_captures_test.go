@@ -179,6 +179,7 @@ func transitionHistory(t *testing.T, service *HistoryCaptureService, capture His
 }
 
 func TestHistoryStorageCapacityCeilingsPreserveIdempotentRetries(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	env.service = NewHistoryCaptureServiceWithOptions(env.store.DB(), env.blobs, HistoryCaptureServiceOptions{
 		MaxRetainedCaptures:      1,
@@ -238,6 +239,7 @@ func TestHistoryStorageCapacityCeilingsPreserveIdempotentRetries(t *testing.T) {
 }
 
 func TestHistoryCaptureMigrationSchemaAndImmutableAttribution(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 
@@ -266,6 +268,7 @@ SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Sca
 }
 
 func TestHistoryCaptureConcurrentReservationIsIdempotentAndGrantIsHashOnly(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	input := baseHistoryReservation()
@@ -353,6 +356,7 @@ func TestHistoryCaptureConcurrentReservationIsIdempotentAndGrantIsHashOnly(t *te
 }
 
 func TestHistoryCaptureTransitionsVersionsAndExecutionVerdictAreIndependent(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	reserved := reserveHistoryCapture(t, env.service, baseHistoryReservation())
@@ -479,6 +483,7 @@ func (s failingPublishStore) Publish(context.Context, blob.Temporary, blob.Key) 
 }
 
 func TestHistoryArtifactPublishAuthenticatesBeforeBlobAccess(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	counting := &resumeCountingStore{Store: env.blobs}
@@ -498,6 +503,7 @@ func TestHistoryArtifactPublishAuthenticatesBeforeBlobAccess(t *testing.T) {
 }
 
 func TestHistoryArtifactImmutableIdempotencyAndPublicationRecovery(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	reserved := reserveHistoryCapture(t, env.service, baseHistoryReservation())
@@ -546,6 +552,7 @@ func TestHistoryArtifactImmutableIdempotencyAndPublicationRecovery(t *testing.T)
 }
 
 func TestHistoryPendingReconciliationRotatesFailuresForFairness(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	service := NewHistoryCaptureService(env.store.DB(), failingPublishStore{Store: env.blobs})
@@ -578,6 +585,7 @@ WHERE capture_id = ? AND reconcile_attempted_at IS NOT NULL`, reserved.Capture.I
 }
 
 func TestHistoryPendingReconciliationInterleavesDueRetriesAndNewArrivals(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	service := NewHistoryCaptureService(env.store.DB(), failingPublishStore{Store: env.blobs})
@@ -614,6 +622,7 @@ WHERE capture_id = ?`, reserved.Capture.ID); err != nil {
 }
 
 func TestHistoryPendingPublicationRemainsOutstandingForQuotas(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		maxUploads int
@@ -670,6 +679,7 @@ WHERE intent.temporary_upload_id = ?`, first.ID).Scan(&intentState, &publication
 }
 
 func TestHarnessArchiveMemberRegistrationEnforcesDeclaredAndConfiguredLimits(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	service := NewHistoryCaptureServiceWithOptions(env.store.DB(), env.blobs, HistoryCaptureServiceOptions{
@@ -762,6 +772,7 @@ SELECT COUNT(*) FROM harness_archive_member_sets WHERE capture_id = ?`, reserved
 }
 
 func TestHistoryTranscriptOrderingSealAndExactExpectedCompletion(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	reserved := reserveHistoryCapture(t, env.service, baseHistoryReservation())
@@ -859,6 +870,7 @@ func TestHistoryTranscriptOrderingSealAndExactExpectedCompletion(t *testing.T) {
 }
 
 func TestHistoryTranscriptBlobReadsDoNotHoldProjectWriteReservation(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	reserved := reserveHistoryCapture(t, env.service, baseHistoryReservation())
@@ -921,6 +933,7 @@ func TestHistoryTranscriptBlobReadsDoNotHoldProjectWriteReservation(t *testing.T
 }
 
 func TestHistoryCheckpointHintsCoalesceAndCheckpointArtifactsNeverCompleteFinalSet(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	input := baseHistoryReservation()
@@ -1020,6 +1033,7 @@ func TestHistoryCheckpointHintsCoalesceAndCheckpointArtifactsNeverCompleteFinalS
 }
 
 func TestHistoryUploadGrantRevocationIsDurableAuditedAndIdempotent(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	input := baseHistoryReservation()
@@ -1069,6 +1083,7 @@ func TestHistoryUploadGrantRevocationIsDurableAuditedAndIdempotent(t *testing.T)
 }
 
 func TestHistoryCaptureEventsAreAppendOnlyAndLossWaiverAreAudited(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	input := baseHistoryReservation()
@@ -1128,6 +1143,7 @@ func TestHistoryCaptureEventsAreAppendOnlyAndLossWaiverAreAudited(t *testing.T) 
 }
 
 func TestHistorySQLiteGuardsRejectLifecycleAndTerminalMetadataCorruption(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	input := baseHistoryReservation()
@@ -1189,6 +1205,7 @@ WHERE id = ?`, artifact.ID); err == nil {
 }
 
 func TestHistoryPublicationAbandonsOlderDuplicateResponseLossUpload(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	input := baseHistoryReservation()
@@ -1224,6 +1241,7 @@ func TestHistoryPublicationAbandonsOlderDuplicateResponseLossUpload(t *testing.T
 }
 
 func TestHistoryUploadIntentLifecycleLossWaiverAndCeilings(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	input := baseHistoryReservation()
@@ -1327,6 +1345,7 @@ func TestHistoryUploadIntentLifecycleLossWaiverAndCeilings(t *testing.T) {
 }
 
 func TestHistoryTranscriptStrictGzipRawDigestAndServerSeal(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 	input := baseHistoryReservation()
@@ -1427,6 +1446,7 @@ SELECT raw_sha256 FROM history_transcript_segments WHERE capture_id = ?`, reserv
 }
 
 func TestHistoryCompletionRequiresNativeRootWorkspaceManifestVerdictAndNoActiveIntent(t *testing.T) {
+	t.Parallel()
 	env := newHistoryCaptureTestEnv(t)
 	ctx := context.Background()
 

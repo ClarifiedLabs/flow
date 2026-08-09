@@ -10,6 +10,7 @@ import (
 )
 
 func TestThreadLifecycleClaimCertifyAndReopen(t *testing.T) {
+	t.Parallel()
 	_, threads, change := newThreadServiceFixture(t)
 	ctx := context.Background()
 
@@ -80,6 +81,7 @@ func TestThreadLifecycleClaimCertifyAndReopen(t *testing.T) {
 }
 
 func TestNotWarrantedClaimRequiresRationale(t *testing.T) {
+	t.Parallel()
 	_, threads, change := newThreadServiceFixture(t)
 	ctx := context.Background()
 	thread, err := threads.CreateThread(ctx, CreateThreadInput{
@@ -116,6 +118,7 @@ func TestNotWarrantedClaimRequiresRationale(t *testing.T) {
 }
 
 func TestReviewContextIncludesAllThreadStates(t *testing.T) {
+	t.Parallel()
 	_, threads, change := newThreadServiceFixture(t)
 	ctx := context.Background()
 	open, err := threads.CreateThread(ctx, CreateThreadInput{ChangeID: change.ID, AnchorCommitSHA: "a", FilePath: "a.go", Line: 1, Body: "open"})
@@ -160,6 +163,7 @@ func TestReviewContextIncludesAllThreadStates(t *testing.T) {
 }
 
 func TestCreateThreadIsIdempotent(t *testing.T) {
+	t.Parallel()
 	store, threads, change := newThreadServiceFixture(t)
 	ctx := context.Background()
 	input := CreateThreadInput{
@@ -214,6 +218,7 @@ func TestCreateThreadIsIdempotent(t *testing.T) {
 // inspected head, an anchor equal to it is preserved, and a non-empty anchor
 // naming a different commit refuses the whole submission with nothing filed.
 func TestSubmitReviewClampsCommentAnchorsToInspectedHead(t *testing.T) {
+	t.Parallel()
 	store, threads, change := newThreadServiceFixture(t)
 	ctx := context.Background()
 	const headSHA = "1111111111111111111111111111111111111111"
@@ -262,6 +267,7 @@ func TestSubmitReviewClampsCommentAnchorsToInspectedHead(t *testing.T) {
 }
 
 func TestCertifyTwiceIsBenignNoOp(t *testing.T) {
+	t.Parallel()
 	// The worker applies verifier decisions from the verdict file and tolerates a
 	// thread_not_found on re-apply. The coordinator surfaces that as sql.ErrNoRows
 	// once a thread is already in the target state, so a retried certify is a no-op.
@@ -283,6 +289,7 @@ func TestCertifyTwiceIsBenignNoOp(t *testing.T) {
 }
 
 func TestCertifyRequiresClaimedThread(t *testing.T) {
+	t.Parallel()
 	_, threads, change := newThreadServiceFixture(t)
 	ctx := context.Background()
 	thread, err := threads.CreateThread(ctx, CreateThreadInput{ChangeID: change.ID, AnchorCommitSHA: "a", FilePath: "a.go", Line: 1, Body: "open"})

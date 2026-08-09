@@ -10,6 +10,7 @@ import (
 )
 
 func TestIdempotencyReserveCompleteAndConflict(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, err := flowdb.Open(ctx, filepath.Join(t.TempDir(), "flow.db"))
 	if err != nil {
@@ -80,6 +81,7 @@ func TestIdempotencyReserveCompleteAndConflict(t *testing.T) {
 }
 
 func TestIdempotencyCancelAllowsRetryAfterFailedMutation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, err := flowdb.Open(ctx, filepath.Join(t.TempDir(), "flow.db"))
 	if err != nil {
@@ -107,6 +109,7 @@ func TestIdempotencyCancelAllowsRetryAfterFailedMutation(t *testing.T) {
 }
 
 func TestIdempotencyReserveReclaimsStalePendingAfterTTL(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, err := flowdb.Open(ctx, filepath.Join(t.TempDir(), "flow.db"))
 	if err != nil {
@@ -153,6 +156,7 @@ func TestIdempotencyReserveReclaimsStalePendingAfterTTL(t *testing.T) {
 }
 
 func TestIdempotencyReserveDoesNotReclaimPendingBeforeTTL(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, err := flowdb.Open(ctx, filepath.Join(t.TempDir(), "flow.db"))
 	if err != nil {
@@ -196,6 +200,7 @@ func TestIdempotencyReserveDoesNotReclaimPendingBeforeTTL(t *testing.T) {
 }
 
 func TestIdempotencyReserveReplaysCompletedRecordDespiteAge(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, err := flowdb.Open(ctx, filepath.Join(t.TempDir(), "flow.db"))
 	if err != nil {

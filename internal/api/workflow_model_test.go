@@ -9,6 +9,7 @@ import (
 )
 
 func TestWorkflowModelV2HumanGateLifecycle(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	flow, err := fixture.Bundle.Flows.Create(ctx, coordinator.FlowInput{

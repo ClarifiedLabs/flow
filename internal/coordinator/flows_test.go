@@ -35,6 +35,7 @@ func newFlowTestServices(t *testing.T) (*FlowService, *AgentDefService) {
 }
 
 func TestFlowCreateRejectsConflictingTaskSetMaterializerPolicies(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, defs := newFlowTestServices(t)
 	if err := flows.SeedDefaults(ctx); err != nil {
@@ -96,6 +97,7 @@ func TestFlowCreateRejectsConflictingTaskSetMaterializerPolicies(t *testing.T) {
 }
 
 func TestFlowDeleteRejectsActiveSnapshotReference(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, _ := newFlowTestServices(t)
 	if err := flows.SeedDefaults(ctx); err != nil {
@@ -127,6 +129,7 @@ func TestFlowDeleteRejectsActiveSnapshotReference(t *testing.T) {
 }
 
 func TestSeedDefaults(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, defs := newFlowTestServices(t)
 
@@ -230,6 +233,7 @@ func TestSeedDefaults(t *testing.T) {
 }
 
 func TestTaskSetWorkflowContractAdvertisesCodingAndPlanning(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, _ := newFlowTestServices(t)
 	if err := flows.SeedDefaults(ctx); err != nil {
@@ -270,6 +274,7 @@ func TestTaskSetWorkflowContractAdvertisesCodingAndPlanning(t *testing.T) {
 }
 
 func TestParallelReviewGraphUsesCanonicalBlockingAndFreezesSnapshot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, defs := newFlowTestServices(t)
 
@@ -375,6 +380,7 @@ func TestParallelReviewGraphUsesCanonicalBlockingAndFreezesSnapshot(t *testing.T
 }
 
 func TestReviewAgentUsesBlockingOnlyAndRejectsRequired(t *testing.T) {
+	t.Parallel()
 	// blocking is the only accepted spelling; an omitted blocking defaults to
 	// blocking, and false is advisory.
 	cfg, err := decodeNodeConfig(`{"change_review":{"agents":[{"agent_def_id":"ad-code"},{"agent_def_id":"ad-security","blocking":false}]}}`)
@@ -451,6 +457,7 @@ func TestReviewAgentUsesBlockingOnlyAndRejectsRequired(t *testing.T) {
 }
 
 func TestDecodeFlowSnapshotRejectsLegacyFieldsUnknownNestedFieldsAndInvalidGraph(t *testing.T) {
+	t.Parallel()
 	valid := `{"flow_id":"fl-current","flow_name":"current graph","start_node":"done","transition_budget":1,"nodes":[{"key":"done","name":"Done","kind":"terminal","config":{"terminal":{"resolution":"completed"}}}],"edges":[]}`
 	if _, err := decodeFlowSnapshot([]byte(valid)); err != nil {
 		t.Fatalf("decode valid current snapshot: %v", err)
@@ -487,6 +494,7 @@ func TestDecodeFlowSnapshotRejectsLegacyFieldsUnknownNestedFieldsAndInvalidGraph
 }
 
 func TestReviewAggregationBlocksApprovalWhenAnySourceIsBlocking(t *testing.T) {
+	t.Parallel()
 	agents := []SnapshotReviewAgent{
 		{Blocking: false, Agent: AgentDefSnapshot{Name: "advisory"}},
 		{Blocking: true, Agent: AgentDefSnapshot{Name: "blocker"}},
@@ -503,6 +511,7 @@ func TestReviewAggregationBlocksApprovalWhenAnySourceIsBlocking(t *testing.T) {
 }
 
 func TestAgentDefCRUD(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	_, defs := newFlowTestServices(t)
 

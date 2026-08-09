@@ -62,6 +62,7 @@ func apiRefTip(t *testing.T, exchangePath, branch string) string {
 }
 
 func TestFeatureAPIEndpoints(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	exchangePath := fixture.Project.ExchangePath
 	makeExchangeHooksInert(t, exchangePath)
@@ -212,6 +213,7 @@ func TestFeatureAPIEndpoints(t *testing.T) {
 }
 
 func TestSessionCreatedTaskInheritsFeature(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	exchangePath := fixture.Project.ExchangePath
 	makeExchangeHooksInert(t, exchangePath)
@@ -274,6 +276,7 @@ func TestSessionCreatedTaskInheritsFeature(t *testing.T) {
 // rejects the rebase with 403 and no rows (the raced 403 path). Unbound
 // project consoles keep project-wide rebase access.
 func TestTaskBoundConsoleRebaseScope(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	exchangePath := fixture.Project.ExchangePath
 	makeExchangeHooksInert(t, exchangePath)

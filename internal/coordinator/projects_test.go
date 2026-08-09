@@ -23,6 +23,7 @@ func newProjectService(t *testing.T) *ProjectService {
 }
 
 func TestProjectIDFromNameNormalizesHumanName(t *testing.T) {
+	t.Parallel()
 	tests := map[string]string{
 		"Flow App":        "p-flow-app",
 		"  API___Server ": "p-api-server",
@@ -47,6 +48,7 @@ func TestProjectIDFromNameNormalizesHumanName(t *testing.T) {
 }
 
 func TestProjectIDFromTaskID(t *testing.T) {
+	t.Parallel()
 	for taskID, wantProject := range map[string]string{
 		"t-flow-app-0001":      "p-flow-app",
 		"t-release-2026-10423": "p-release-2026",
@@ -64,6 +66,7 @@ func TestProjectIDFromTaskID(t *testing.T) {
 }
 
 func TestProjectServiceInsertAndLookups(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service := newProjectService(t)
 
@@ -126,6 +129,7 @@ func TestProjectServiceInsertAndLookups(t *testing.T) {
 }
 
 func TestProjectServiceInsertRejectsDuplicateName(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service := newProjectService(t)
 
@@ -150,6 +154,7 @@ func TestProjectServiceInsertRejectsDuplicateName(t *testing.T) {
 }
 
 func TestProjectServiceInsertRejectsDuplicateRepoPath(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service := newProjectService(t)
 
@@ -169,6 +174,7 @@ func TestProjectServiceInsertRejectsDuplicateRepoPath(t *testing.T) {
 }
 
 func TestProjectServiceListOrdersByName(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service := newProjectService(t)
 

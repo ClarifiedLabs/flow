@@ -33,6 +33,7 @@ func reviewGateRequest(t *testing.T, fixture testFixture, taskID string, request
 }
 
 func TestSubmitReviewApprovalAdvancesHumanGate(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "change review approval")
 
@@ -85,6 +86,7 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 }
 
 func TestSubmitReviewRequiresExactPersistedReviewWait(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "change review exact wait")
 
@@ -174,6 +176,7 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 }
 
 func TestSubmitReviewCommentLeavesHumanGateWaiting(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "change review comment")
 
@@ -246,6 +249,7 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 // workflow and park it waiting at the gate, moving the review forward even
 // though a comment must not. The run must stay scheduled with no node created.
 func TestSubmitReviewCommentDoesNotStartScheduledRun(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "change review comment scheduled")
 
@@ -309,6 +313,7 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 }
 
 func TestSubmitReviewEmptyHeadRejected(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "change review empty head")
 
@@ -379,6 +384,7 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 }
 
 func TestSubmitReviewStaleHeadConflicts(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "change review stale head")
 
@@ -454,6 +460,7 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 // finds no open gate, which used to let the late verdict commit its threads
 // and check beside the decision it contradicts.
 func TestSubmitReviewLateForDecidedGatePersistsNothing(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "change review gate conflict")
 
@@ -560,6 +567,7 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 // handler filed threads first and only then answered the gate, so a rejected
 // verdict left orphaned threads beside a decision that was never recorded.
 func TestSubmitReviewGateConflictPersistsNothing(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "change review gate conflict")
 
@@ -651,6 +659,7 @@ UPDATE workflow_node_runs SET state = ?, outcome = ?, completed_at = ? WHERE id 
 // ahead and let the contradictory verdict commit beside the decision it
 // contradicts.
 func TestSubmitReviewLateAfterFinalGatePassedPersistsNothing(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	flow := newFinalGateFixtureFlow(t, fixture, "change review passed final gate")
@@ -765,6 +774,7 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 // thread to an arbitrary or older commit. The web client never sends a
 // per-comment anchor, so this is API-surface hardening.
 func TestSubmitReviewMismatchedCommentAnchorRejected(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "change review mismatched anchor")
 
@@ -828,6 +838,7 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 }
 
 func TestSubmitReviewHeadUpdateCannotInterleave(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "change review head race")
 
@@ -954,6 +965,7 @@ func doRawJSONRequestAs(t *testing.T, server *Server, token string, method strin
 // with the 409 head_moved conflict that a genuine mismatch gets, and must
 // create nothing either way.
 func TestSubmitReviewMissingHeadSHABadRequest(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "change review missing head")
 
@@ -1047,6 +1059,7 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 // dropping its threads and check even though the relevant gate had not been
 // reached yet.
 func TestSubmitReviewMultiGatePreservesWaitingGateVerdict(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	flow := newMultiGateFixtureFlow(t, fixture, "multi-gate change review")
@@ -1213,6 +1226,7 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 // refused the revisited-gate verdict with 409, dropping its threads and check
 // even though the relevant visit was still open.
 func TestSubmitReviewRevisitAfterChangesRequestedPreservesVerdict(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	flow := newRevisitFixtureFlow(t, fixture, "change review revisit")
@@ -1376,6 +1390,7 @@ VALUES (?, ?, ?, 'main', ?, ?, ?, ?)`, changeID, created.Task.ID, "task/change-r
 // for field, and a later report that overwrites the row does not change what
 // the response already carries.
 func TestSubmitReviewResponseCarriesTransactionCheck(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	flow := newBoardFixtureFlow(t, fixture, "change review check fidelity")
 

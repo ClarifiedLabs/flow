@@ -16,6 +16,7 @@ import (
 // resolve outside the terminal route and fall through to API authentication,
 // returning 401 and leaving the terminal blank.
 func TestTerminalLoginRedirectUsesTrailingSlash(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Terminal trailing slash task")
 	if _, err := fixture.Sessions.RegisterTerminal(context.Background(), started.Session.ID, "http://127.0.0.1:7777"); err != nil {

@@ -9,6 +9,7 @@ import (
 )
 
 func TestEnsureMergeIntentReplacesIntentForPriorRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	repoPath := createReconcileGitRepo(t)
 	exchangePath := filepath.Join(t.TempDir(), "exchange.git")

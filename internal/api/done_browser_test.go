@@ -14,6 +14,7 @@ import (
 // the density toggle switches to compact rows, and the nav badge shows the
 // closed count.
 func TestWebUIDoneViewSurfacesClosedWork(t *testing.T) {
+	t.Parallel()
 	browserPath, ok := findBrowserExecutable()
 	if !ok {
 		t.Skip("no Chromium or Chrome executable found for browser smoke test")

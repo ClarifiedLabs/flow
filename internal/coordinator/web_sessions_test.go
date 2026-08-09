@@ -11,6 +11,7 @@ import (
 )
 
 func TestWebSessionBootstrapIsSingleUseAndAuthenticates(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, err := flowdb.OpenGlobal(ctx, filepath.Join(t.TempDir(), "global.db"))
 	if err != nil {
@@ -59,6 +60,7 @@ func TestWebSessionBootstrapIsSingleUseAndAuthenticates(t *testing.T) {
 }
 
 func TestWebSessionBootstrapAndSessionExpire(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, err := flowdb.OpenGlobal(ctx, filepath.Join(t.TempDir(), "global.db"))
 	if err != nil {

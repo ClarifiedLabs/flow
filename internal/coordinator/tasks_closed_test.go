@@ -36,6 +36,7 @@ UPDATE tasks SET lifecycle_state = ?, done_resolution = ?, done_at = ?, updated_
 }
 
 func TestListClosedTasksReturnsClosedNewestFirstAndExcludesOpen(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, clock := newClosedTaskFixture(t)
 	base := *clock
@@ -61,6 +62,7 @@ func TestListClosedTasksReturnsClosedNewestFirstAndExcludesOpen(t *testing.T) {
 }
 
 func TestListClosedTasksKeysetPagination(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, clock := newClosedTaskFixture(t)
 	base := *clock
@@ -96,6 +98,7 @@ func TestListClosedTasksKeysetPagination(t *testing.T) {
 }
 
 func TestListClosedTasksTieBreaksByIDWithoutSkipOrDuplicate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, clock := newClosedTaskFixture(t)
 	at := clock.Add(time.Hour)
@@ -128,6 +131,7 @@ func TestListClosedTasksTieBreaksByIDWithoutSkipOrDuplicate(t *testing.T) {
 }
 
 func TestListClosedTasksFiltersByOutcome(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, clock := newClosedTaskFixture(t)
 	base := *clock
@@ -165,6 +169,7 @@ func TestListClosedTasksFiltersByOutcome(t *testing.T) {
 }
 
 func TestListClosedTasksWithinWindow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, clock := newClosedTaskFixture(t)
 	base := *clock
@@ -183,6 +188,7 @@ func TestListClosedTasksWithinWindow(t *testing.T) {
 }
 
 func TestCountClosedTasksCountsOnlyClosed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, clock := newClosedTaskFixture(t)
 	base := *clock
@@ -201,6 +207,7 @@ func TestCountClosedTasksCountsOnlyClosed(t *testing.T) {
 }
 
 func TestCountClosedTasksByWindowCumulativeBucketsAtBoundaries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, clock := newClosedTaskFixture(t)
 	base := *clock
@@ -259,6 +266,7 @@ func TestCountClosedTasksByWindowCumulativeBucketsAtBoundaries(t *testing.T) {
 }
 
 func TestCountClosedTasksByWindowUsesOneClockSnapshot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, clock := newClosedTaskFixture(t)
 	base := *clock
@@ -301,6 +309,7 @@ func TestCountClosedTasksByWindowUsesOneClockSnapshot(t *testing.T) {
 }
 
 func TestCountClosedTasksByWindowExcludesOpenAndNullDoneAt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, clock := newClosedTaskFixture(t)
 	base := *clock
@@ -323,6 +332,7 @@ func TestCountClosedTasksByWindowExcludesOpenAndNullDoneAt(t *testing.T) {
 }
 
 func TestCountClosedTasksByWindowValidatesWindowsAndOutcomes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, _ := newClosedTaskFixture(t)
 

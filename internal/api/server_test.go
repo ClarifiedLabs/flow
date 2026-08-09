@@ -31,6 +31,7 @@ import (
 )
 
 func TestServerRequiresOwnerToken(t *testing.T) {
+	t.Parallel()
 	server := newTestServer(t)
 
 	response := httptest.NewRecorder()
@@ -50,6 +51,7 @@ func TestServerRequiresOwnerToken(t *testing.T) {
 }
 
 func TestServerReportsProtocolMismatch(t *testing.T) {
+	t.Parallel()
 	server := newTestServer(t)
 
 	response := httptest.NewRecorder()
@@ -70,6 +72,7 @@ func TestServerReportsProtocolMismatch(t *testing.T) {
 }
 
 func TestHarnessOptionsUseLiveWorkerHarnessLabels(t *testing.T) {
+	t.Parallel()
 	server := newTestServer(t)
 
 	if _, err := server.registry.Directory().RegisterWorker(context.Background(), flowworker.RegisterWorkerInput{
@@ -97,6 +100,7 @@ func TestHarnessOptionsUseLiveWorkerHarnessLabels(t *testing.T) {
 }
 
 func TestHarnessOptionsIncludeModelsAvailableOnEveryLiveHarnessWorker(t *testing.T) {
+	t.Parallel()
 	server := newTestServer(t)
 	ctx := context.Background()
 	minBudget := 1024
@@ -177,6 +181,7 @@ func TestHarnessOptionsIncludeModelsAvailableOnEveryLiveHarnessWorker(t *testing
 }
 
 func TestHarnessOptionsExcludeExpiredWorkers(t *testing.T) {
+	t.Parallel()
 	server := newTestServer(t)
 
 	ctx := context.Background()
@@ -236,6 +241,7 @@ func TestHarnessOptionsExcludeExpiredWorkers(t *testing.T) {
 }
 
 func TestHarnessOptionsIncludeDefaultArgs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dataDir := t.TempDir()
 	global, err := flowdb.OpenGlobal(ctx, filepath.Join(dataDir, "global.db"))
@@ -286,6 +292,7 @@ func TestHarnessOptionsIncludeDefaultArgs(t *testing.T) {
 }
 
 func TestWorkflowCheckRoleInstructionsUsesDedicatedReviewAggregator(t *testing.T) {
+	t.Parallel()
 	node := coordinator.FlowNodeSnapshot{Config: coordinator.FlowNodeSnapshotConfig{
 		ChangeReview: &coordinator.ChangeReviewNodeSnapshotConfig{
 			Agents: []coordinator.SnapshotReviewAgent{{Agent: coordinator.AgentDefSnapshot{
@@ -303,6 +310,7 @@ func TestWorkflowCheckRoleInstructionsUsesDedicatedReviewAggregator(t *testing.T
 }
 
 func TestRegistrySeedsGlobalDefsWithConfiguredDefaultAgent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dataDir := t.TempDir()
 	global, err := flowdb.OpenGlobal(ctx, filepath.Join(dataDir, "global.db"))
@@ -336,6 +344,7 @@ func TestRegistrySeedsGlobalDefsWithConfiguredDefaultAgent(t *testing.T) {
 }
 
 func TestNewRegistryRejectsInvalidDefaultAgent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	global, err := flowdb.OpenGlobal(ctx, filepath.Join(t.TempDir(), "global.db"))
 	if err != nil {
@@ -349,6 +358,7 @@ func TestNewRegistryRejectsInvalidDefaultAgent(t *testing.T) {
 }
 
 func TestSessionHarnessForJobRequiresStampedPayload(t *testing.T) {
+	t.Parallel()
 	changeID := "ch-test-0001"
 	legacy := flowworker.Job{ID: "j-legacy", Role: flowworker.RoleAuthor, ChangeID: &changeID, Payload: map[string]any{}}
 	if _, err := sessionHarnessForJob(legacy); err == nil {
@@ -373,6 +383,7 @@ func TestSessionHarnessForJobRequiresStampedPayload(t *testing.T) {
 }
 
 func TestDefaultAgentDefsAreGlobalAndInheritedByProjects(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 
 	var globalList agentDefsResponse
@@ -406,6 +417,7 @@ func TestDefaultAgentDefsAreGlobalAndInheritedByProjects(t *testing.T) {
 }
 
 func TestCreateProjectRestoresMutatedGlobalDefaultAgentDefs(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		mutate func(*testing.T, *Server, coordinator.AgentDef)
@@ -483,6 +495,7 @@ func TestCreateProjectRestoresMutatedGlobalDefaultAgentDefs(t *testing.T) {
 }
 
 func TestGlobalAgentDefMutationsWaitForProjectFlowSeeding(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name       string
 		method     string
@@ -613,6 +626,7 @@ func TestGlobalAgentDefMutationsWaitForProjectFlowSeeding(t *testing.T) {
 }
 
 func TestProjectFlowMutationWaitsForGlobalAgentDefDelete(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newTestFixture(t)
 	custom, err := fixture.Registry.GlobalAgentDefs().Create(ctx, coordinator.AgentDefInput{
@@ -698,6 +712,7 @@ func TestProjectFlowMutationWaitsForGlobalAgentDefDelete(t *testing.T) {
 }
 
 func TestGlobalAgentDefsAreInheritedAndProjectOverridesWin(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -776,6 +791,7 @@ func findAgentDefByName(defs []coordinator.AgentDef, name string) *coordinator.A
 }
 
 func TestTaskAttachmentUploadDetailAndDownload(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	task, err := fixture.Tasks.CreateTask(context.Background(), coordinator.CreateTaskInput{Title: "Attachment task"})
 	if err != nil {
@@ -819,6 +835,7 @@ func TestTaskAttachmentUploadDetailAndDownload(t *testing.T) {
 }
 
 func TestTaskAttachmentUnsafeContentTypesAreDownloadOnly(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	task, err := fixture.Tasks.CreateTask(context.Background(), coordinator.CreateTaskInput{Title: "Unsafe attachment task"})
 	if err != nil {
@@ -904,6 +921,7 @@ func uploadTaskAttachmentForTest(t *testing.T, fixture testFixture, uploadPath s
 }
 
 func TestIdempotentCreateDoesNotDuplicateTask(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 
 	first := taskResponse{}
@@ -933,6 +951,7 @@ func TestIdempotentCreateDoesNotDuplicateTask(t *testing.T) {
 }
 
 func TestListTasksFiltersByTextSearch(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 
 	var match taskResponse
@@ -966,6 +985,7 @@ func TestListTasksFiltersByTextSearch(t *testing.T) {
 }
 
 func TestConcurrentIdempotentCreateDoesNotDuplicateTask(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 
 	const requests = 24
@@ -1021,6 +1041,7 @@ func TestConcurrentIdempotentCreateDoesNotDuplicateTask(t *testing.T) {
 }
 
 func TestCredentialStoreInvalidCredentialDoesNotFallBackToConfiguredToken(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	if _, err := fixture.GlobalDB.ExecContext(context.Background(), `
 UPDATE tokens
@@ -1058,6 +1079,7 @@ WHERE token_hash = ?`, time.Now().UTC().Format(time.RFC3339Nano), coordinator.Ha
 }
 
 func TestWebUIBootstrapLoginAndCookieAuth(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodPost, "/v2/ui/bootstrap", map[string]string{}, http.StatusForbidden, nil)
@@ -1187,6 +1209,7 @@ func loginWebUI(t *testing.T, fixture testFixture) (*http.Cookie, *http.Cookie) 
 }
 
 func TestWebUIRoutesAndAssets(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 
 	for _, path := range []string{"/ui/", "/ui/board", "/ui/merge", "/ui/projects/" + fixture.Project.ID + "/tasks/t-api-0001", "/ui/changes/ch-0001", "/ui/sessions/s-0001/terminal", "/ui/workers", "/ui/jobs"} {
@@ -1247,6 +1270,7 @@ func TestWebUIRoutesAndAssets(t *testing.T) {
 }
 
 func TestWebUITerminalAttachCreatesOwnerBrowserURL(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Web terminal task")
 	if _, err := fixture.Sessions.RegisterTerminal(context.Background(), started.Session.ID, "http://127.0.0.1:7777"); err != nil {
@@ -1302,6 +1326,7 @@ func TestWebUITerminalAttachCreatesOwnerBrowserURL(t *testing.T) {
 }
 
 func TestBoardIncludesUITaskCardReadModels(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Card read model task")
 	if _, err := fixture.Sessions.UpdateSessionState(context.Background(), started.Session.ID, coordinator.SessionWaiting); err != nil {
@@ -1422,6 +1447,7 @@ INSERT INTO handoff_snapshots (
 }
 
 func TestBoardLastAgentActivityAtSelectsMostRecentlyUpdatedSession(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -1512,6 +1538,7 @@ func TestBoardLastAgentActivityAtSelectsMostRecentlyUpdatedSession(t *testing.T)
 }
 
 func TestBoardCurrentStepUsesFrozenWorkflowSnapshot(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -1587,6 +1614,7 @@ func TestBoardCurrentStepUsesFrozenWorkflowSnapshot(t *testing.T) {
 }
 
 func TestBoardCurrentStepToleratesMissingAndUnresolvedRunData(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -1640,6 +1668,7 @@ func TestBoardCurrentStepToleratesMissingAndUnresolvedRunData(t *testing.T) {
 }
 
 func TestBoardSupportsActiveBaseWorkspaceSessionWithoutChange(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Plan task set"})
@@ -1695,6 +1724,7 @@ func TestBoardSupportsActiveBaseWorkspaceSessionWithoutChange(t *testing.T) {
 }
 
 func TestBoardHidesUITaskCardsFromSessionTokens(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -1733,6 +1763,7 @@ func TestBoardHidesUITaskCardsFromSessionTokens(t *testing.T) {
 }
 
 func TestBoardUITaskCardsShowRelationBlockers(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -1772,6 +1803,7 @@ func TestBoardUITaskCardsShowRelationBlockers(t *testing.T) {
 }
 
 func TestBoardUITaskCardsIncludeTagsAndRelationSummary(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	parent, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Parent"})
@@ -1815,6 +1847,7 @@ func TestBoardUITaskCardsIncludeTagsAndRelationSummary(t *testing.T) {
 }
 
 func TestTaskDetailReadModelIsOwnerOnly(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	started := startAuthorSessionForStatusTest(t, fixture, "Task detail metadata")
@@ -1878,6 +1911,7 @@ func TestTaskDetailReadModelIsOwnerOnly(t *testing.T) {
 }
 
 func TestSessionTokenCanReadDifferentTaskOnlyWithinProject(t *testing.T) {
+	t.Parallel()
 	server, bundles := newMultiProjectServer(t, "alpha", "beta")
 	ctx := context.Background()
 	projectA := bundles[0]
@@ -1923,6 +1957,7 @@ func TestSessionTokenCanReadDifferentTaskOnlyWithinProject(t *testing.T) {
 }
 
 func TestSessionTokenCanReadDifferentTaskWorkflowAndRelations(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -1956,6 +1991,7 @@ func TestSessionTokenCanReadDifferentTaskWorkflowAndRelations(t *testing.T) {
 }
 
 func TestPromptContextAdvertisesNestedPlanningWorkflow(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	planning, err := fixture.Bundle.Flows.GetByName(ctx, "planning")
@@ -2010,6 +2046,7 @@ func TestPromptContextAdvertisesNestedPlanningWorkflow(t *testing.T) {
 }
 
 func TestArtifactSubmissionRejectsDisallowedChildWorkflowOverride(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	planning, err := fixture.Bundle.Flows.GetByName(ctx, "planning")
@@ -2058,6 +2095,7 @@ WHERE flow_id = ? AND kind = 'materialize_task_set'`, planning.ID); err != nil {
 }
 
 func TestWorkerTaskReadsRequireLiveProjectLease(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -2186,6 +2224,7 @@ func TestWorkerTaskReadsRequireLiveProjectLease(t *testing.T) {
 }
 
 func TestWorkerTaskReadsRequireLeaseInRequestedProject(t *testing.T) {
+	t.Parallel()
 	server, bundles := newMultiProjectServer(t, "alpha", "beta")
 	ctx := context.Background()
 	alpha, beta := bundles[0], bundles[1]
@@ -2256,6 +2295,7 @@ VALUES (?, ?, ?, ?, ?, ?)`,
 }
 
 func TestHookTokenCanPostGitEvents(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
@@ -2293,6 +2333,7 @@ func TestHookTokenCanPostGitEvents(t *testing.T) {
 }
 
 func TestDrainGitEventSpoolRecoversMissedPostReceive(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	exchangePath := t.TempDir()
 	repointFixtureExchange(t, fixture, exchangePath)
@@ -2370,6 +2411,7 @@ func TestGitEventsDeduplicateDirectPostAndSpoolDrain(t *testing.T) {
 }
 
 func TestWorkerHTTPLifecycleAndJobDiagnostics(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Worker API task"})
@@ -2511,6 +2553,7 @@ func TestWorkerHTTPLifecycleAndJobDiagnostics(t *testing.T) {
 }
 
 func TestConsoleAPILifecycleAndScope(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 
 	var startedConsole consoleResponse
@@ -2617,6 +2660,7 @@ func TestConsoleAPILifecycleAndScope(t *testing.T) {
 }
 
 func TestGetTaskRelationsAPI(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -2651,6 +2695,7 @@ func TestGetTaskRelationsAPI(t *testing.T) {
 }
 
 func TestCreateTaskWithRelationsAPI(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -2706,6 +2751,7 @@ func TestCreateTaskWithRelationsAPI(t *testing.T) {
 }
 
 func TestCreateTaskWithRelationsSessionShorthandAPI(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -2758,6 +2804,7 @@ func TestCreateTaskWithRelationsSessionShorthandAPI(t *testing.T) {
 }
 
 func TestCreateTaskWithRelationsTaskBoundConsoleAPI(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -2863,6 +2910,7 @@ func TestCreateTaskWithRelationsTaskBoundConsoleAPI(t *testing.T) {
 }
 
 func TestTaskBoundConsoleRelationsEndpointScope(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -2931,6 +2979,7 @@ func TestTaskBoundConsoleRelationsEndpointScope(t *testing.T) {
 }
 
 func TestCreateTaskWithRelationsUnboundConsoleAPI(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -2975,6 +3024,7 @@ func TestCreateTaskWithRelationsUnboundConsoleAPI(t *testing.T) {
 // request then recovers with exactly one linked child rather than a duplicate.
 // Malformed uses of the flag are rejected up front.
 func TestCreateTaskWithParentOfRelationAtomicAPI(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -3079,6 +3129,7 @@ func TestCreateTaskWithParentOfRelationAtomicAPI(t *testing.T) {
 }
 
 func TestTaskConsoleAPILifecycleAndScope(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Task recovery console"})
@@ -3157,6 +3208,7 @@ func TestTaskConsoleAPILifecycleAndScope(t *testing.T) {
 }
 
 func TestConsoleAPIStartsShellHarness(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 
 	var startedConsole consoleResponse
@@ -3200,6 +3252,7 @@ func TestConsoleAPIStartsShellHarness(t *testing.T) {
 }
 
 func TestConsoleTokenIsProjectConfined(t *testing.T) {
+	t.Parallel()
 	server, bundles := newMultiProjectServer(t, "alpha", "beta")
 	projectA := bundles[0].Project
 	projectB := bundles[1].Project
@@ -3229,6 +3282,7 @@ func TestConsoleTokenIsProjectConfined(t *testing.T) {
 }
 
 func TestDiagnosticsDistinguishExpiredUnreleasedLeases(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Expired lease diagnostics"})
@@ -3282,6 +3336,7 @@ WHERE id = ?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), clai
 // ordered globally by updated_at descending across projects (rather than
 // concatenating per-project lists in registry order).
 func TestJobsListAggregateOrdersByUpdatedAndStampsProject(t *testing.T) {
+	t.Parallel()
 	server, bundles := newMultiProjectServer(t, "alpha", "beta")
 	projectA, projectB := bundles[0].Project, bundles[1].Project
 	ctx := context.Background()
@@ -3369,6 +3424,7 @@ func startRunningAuthorSession(t *testing.T, fixture testFixture, taskID string)
 }
 
 func TestSessionSignalRejectsInvalidSignal(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Invalid signal task"})
@@ -3383,6 +3439,7 @@ func TestSessionSignalRejectsInvalidSignal(t *testing.T) {
 }
 
 func TestAttentionReplyRejectsForeignStatusLogID(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Attention reply task"})
@@ -3430,6 +3487,7 @@ func TestAttentionReplyRejectsForeignStatusLogID(t *testing.T) {
 // orphaned status row had been written. Validation must now reject it with 400
 // before any write.
 func TestAttentionReplyRejectsNonExistentStatusLogID(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Attention reply task"})
@@ -3463,6 +3521,7 @@ func TestAttentionReplyRejectsNonExistentStatusLogID(t *testing.T) {
 // valid status_log_id belonging to the task is accepted and threaded onto the
 // queued session message.
 func TestAttentionReplyLinksOwnTaskStatusLogID(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Attention reply task"})
@@ -3495,6 +3554,7 @@ func TestAttentionReplyLinksOwnTaskStatusLogID(t *testing.T) {
 }
 
 func TestSessionStatusIsVisibleInTaskDetail(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Status task")
 
@@ -3517,6 +3577,7 @@ func TestSessionStatusIsVisibleInTaskDetail(t *testing.T) {
 }
 
 func TestSessionStatusAcceptsKind(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Status kind task")
 
@@ -3537,6 +3598,7 @@ func TestSessionStatusAcceptsKind(t *testing.T) {
 }
 
 func TestSessionStatusRejectsBadKind(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Bad kind task")
 
@@ -3550,6 +3612,7 @@ func TestSessionStatusRejectsBadKind(t *testing.T) {
 // liveness: writing a status entry is agent activity and must stamp
 // last_agent_activity_at, which is nil before the first signal.
 func TestSessionStatusTouchesAgentActivity(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	started := startAuthorSessionForStatusTest(t, fixture, "Liveness status task")
@@ -3577,6 +3640,7 @@ func TestSessionStatusTouchesAgentActivity(t *testing.T) {
 }
 
 func TestSessionAttachRequiresOwnerToken(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Attach task")
 	if _, err := fixture.Sessions.RegisterTerminal(context.Background(), started.Session.ID, "/tmp/flow-session.sock"); err != nil {
@@ -3601,6 +3665,7 @@ func TestSessionAttachRequiresOwnerToken(t *testing.T) {
 }
 
 func TestJobAttachAllowsLiveReviewerJobs(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Reviewer attach task")
 	reviewer := startLiveCheckJobForTask(t, fixture, "reviewer-token", "w-review-attach", started.Session.TaskID, started.Change.ID, "head-1", "reviewer", flowworker.RoleReviewer, flowworker.BucketPersistentAgent)
@@ -3626,6 +3691,7 @@ func TestJobAttachAllowsLiveReviewerJobs(t *testing.T) {
 }
 
 func TestProjectGitWriteGateDrainsAdmittedWriters(t *testing.T) {
+	t.Parallel()
 	server := &Server{}
 	project := &projectServer{Server: server, project: coordinator.Project{ID: "p-git-gate"}}
 	gate := server.gitWriteGate(project.project.ID)
@@ -3671,6 +3737,7 @@ func TestProjectGitWriteGateDrainsAdmittedWriters(t *testing.T) {
 }
 
 func TestWorkerReportedConsoleExitWaitsForAdmittedGitWriter(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	fixture.Server.forBundle(fixture.Bundle) // installs the session projection fence
@@ -3739,6 +3806,7 @@ func TestWorkerReportedConsoleExitWaitsForAdmittedGitWriter(t *testing.T) {
 }
 
 func TestSessionAttachRejectsInactiveOrNonLiveSessions(t *testing.T) {
+	t.Parallel()
 	t.Run("finished", func(t *testing.T) {
 		fixture := newTestFixture(t)
 		started := startAuthorSessionForStatusTest(t, fixture, "Finished attach task")
@@ -3774,6 +3842,7 @@ WHERE id = ?`, time.Now().UTC().Format(time.RFC3339Nano), started.Session.LeaseI
 }
 
 func TestReviewThreadAPILifecycle(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Thread API task")
 
@@ -3838,6 +3907,7 @@ func TestReviewThreadAPILifecycle(t *testing.T) {
 }
 
 func TestReviewThreadAPIRestrictsSessionAndWorkerAccess(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Thread auth task")
 	other := startAuthorSessionForStatusTestWithWorker(t, fixture, "Other thread auth task", "w-other-author")
@@ -3875,6 +3945,7 @@ func TestReviewThreadAPIRestrictsSessionAndWorkerAccess(t *testing.T) {
 }
 
 func TestWorkerCheckReportRejectsSourceJobFromStaleHead(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	started := startAuthorSessionForStatusTest(t, fixture, "Stale check job task")
@@ -3923,6 +3994,7 @@ func TestWorkerCheckReportRejectsSourceJobFromStaleHead(t *testing.T) {
 }
 
 func TestWorkerCheckReportRejectsHeadAdvancedAfterScopeValidation(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	started := startAuthorSessionForStatusTest(t, fixture, "Interleaved stale check job task")
@@ -4001,6 +4073,7 @@ func TestWorkerCheckReportRejectsHeadAdvancedAfterScopeValidation(t *testing.T) 
 }
 
 func TestWorkerCheckReportRejectsSourceJobMissingCheckMetadata(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	started := startAuthorSessionForStatusTest(t, fixture, "Missing check metadata task")
@@ -4046,6 +4119,7 @@ func TestWorkerCheckReportRejectsSourceJobMissingCheckMetadata(t *testing.T) {
 }
 
 func TestWorkflowAuthorChangeUsesTaskAlignedID(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	started := startAuthorSessionForStatusTest(t, fixture, "Friendly workflow change ID")
 	want := "ch-" + strings.TrimPrefix(started.Session.TaskID, "t-")
@@ -4055,6 +4129,7 @@ func TestWorkflowAuthorChangeUsesTaskAlignedID(t *testing.T) {
 }
 
 func TestWorkerReviewerJobCanReportReviewerCheck(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	started := startAuthorSessionForStatusTest(t, fixture, "Reviewer report task")
@@ -4079,6 +4154,7 @@ func TestWorkerReviewerJobCanReportReviewerCheck(t *testing.T) {
 }
 
 func TestAdvisoryReviewerReportIsVisibleButCannotCreateBlockingThread(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	started := startAuthorSessionForStatusTest(t, fixture, "Advisory reviewer task")
@@ -4153,6 +4229,7 @@ UPDATE jobs SET payload_json = json_set(payload_json, '$.blocking', json('false'
 }
 
 func TestReviewAggregationLeaseCreatesOrIdentifiesFollowUpTasks(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	started := startAuthorSessionForStatusTest(t, fixture, "Review follow-up source")
@@ -4632,6 +4709,7 @@ func apiGitOutput(t *testing.T, dir string, args ...string) string {
 }
 
 func TestWorkerEndpointsRequireWorkerScopeAndLeaseOwnership(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
@@ -4688,6 +4766,7 @@ func TestWorkerEndpointsRequireWorkerScopeAndLeaseOwnership(t *testing.T) {
 }
 
 func TestJobEnqueueIdempotencyReplaysCreatedJob(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Idempotent job task"})
@@ -4720,6 +4799,7 @@ func TestJobEnqueueIdempotencyReplaysCreatedJob(t *testing.T) {
 }
 
 func TestWorkerCheckReportingRejectsExpiredLease(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Expired check lease task"})
@@ -4780,6 +4860,7 @@ WHERE id = ?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), clai
 }
 
 func TestWorkerCheckReportingRejectsNonCISourceJob(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Non-CI check lease task"})
@@ -4823,6 +4904,7 @@ func TestWorkerCheckReportingRejectsNonCISourceJob(t *testing.T) {
 }
 
 func TestWorkerClaimCanWaitForJob(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	job, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
@@ -4850,6 +4932,7 @@ func TestWorkerClaimCanWaitForJob(t *testing.T) {
 }
 
 func TestWorkerClaimSweepsExpiredLeases(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	expiredJob, err := fixture.Workers.EnqueueJob(ctx, flowworker.EnqueueJobInput{
@@ -5315,6 +5398,7 @@ func newMultiProjectServer(t *testing.T, projectNames ...string) (*Server, []*Pr
 }
 
 func TestListProjectsEndpoint(t *testing.T) {
+	t.Parallel()
 	server, bundles := newMultiProjectServer(t, "alpha", "beta")
 
 	recorder := httptest.NewRecorder()
@@ -5349,6 +5433,7 @@ func TestListProjectsEndpoint(t *testing.T) {
 }
 
 func TestCreateProjectUsesNormalizedIDAndRejectsKeyCollision(t *testing.T) {
+	t.Parallel()
 	registry, _, _, _ := newTestRegistryInDir(t, t.TempDir())
 	ctx := context.Background()
 
@@ -5374,6 +5459,7 @@ func TestCreateProjectUsesNormalizedIDAndRejectsKeyCollision(t *testing.T) {
 }
 
 func TestAggregateBoardMergesProjects(t *testing.T) {
+	t.Parallel()
 	server, bundles := newMultiProjectServer(t, "alpha", "beta")
 	ctx := context.Background()
 
@@ -5413,6 +5499,7 @@ func TestAggregateBoardMergesProjects(t *testing.T) {
 }
 
 func TestProjectScopedTaskRouteIsolation(t *testing.T) {
+	t.Parallel()
 	server, bundles := newMultiProjectServer(t, "alpha", "beta")
 	projectA, projectB := bundles[0], bundles[1]
 
@@ -5436,6 +5523,7 @@ func TestProjectScopedTaskRouteIsolation(t *testing.T) {
 }
 
 func TestUnscopedTaskRouteResolvesEmbeddedProjectWithMultipleProjects(t *testing.T) {
+	t.Parallel()
 	server, bundles := newMultiProjectServer(t, "alpha", "beta")
 
 	created, err := bundles[0].Tasks.CreateTask(context.Background(), coordinator.CreateTaskInput{Title: "Globally addressable"})
@@ -5451,6 +5539,7 @@ func TestUnscopedTaskRouteResolvesEmbeddedProjectWithMultipleProjects(t *testing
 }
 
 func TestSessionProcessExitRejectsConsoleSession(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 
 	var startedConsole consoleResponse
@@ -5502,6 +5591,7 @@ func TestSessionProcessExitRejectsConsoleSession(t *testing.T) {
 }
 
 func TestCanceledConsoleProcessExitRequiresSessionWorker(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 
@@ -5561,6 +5651,7 @@ func TestCanceledConsoleProcessExitRequiresSessionWorker(t *testing.T) {
 }
 
 func TestWorkflowRetryAPIRefreshesCurrentAuthorRuntime(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	started := startAuthorSessionForStatusTest(t, fixture, "Refresh blocked author runtime")
@@ -5609,6 +5700,7 @@ func TestWorkflowRetryAPIRefreshesCurrentAuthorRuntime(t *testing.T) {
 }
 
 func TestWorkflowAuthorProcessExitPausesUntilHumanRetry(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	started := startAuthorSessionForStatusTest(t, fixture, "Bounded workflow author crashes")
@@ -5670,6 +5762,7 @@ func TestWorkflowAuthorProcessExitPausesUntilHumanRetry(t *testing.T) {
 }
 
 func TestWorkflowAuthorCompletionRetiresPriorAutoMergeConflictCheck(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	started := startAuthorSessionForStatusTest(t, fixture, "Resolve prior merge conflict")
@@ -5739,6 +5832,7 @@ func TestWorkflowAuthorCompletionRetiresPriorAutoMergeConflictCheck(t *testing.T
 }
 
 func TestWorkflowFailedStepCanBeSkippedByOwner(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	started := startAuthorSessionForStatusTest(t, fixture, "Skippable workflow review failure")

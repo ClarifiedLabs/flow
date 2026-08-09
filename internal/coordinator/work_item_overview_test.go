@@ -8,6 +8,7 @@ import (
 )
 
 func TestWorkItemOverviewRollsUpMixedNesting(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, tasks := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
 	items := NewWorkItemService(store.DB(), "p-test")
@@ -54,6 +55,7 @@ func TestWorkItemOverviewRollsUpMixedNesting(t *testing.T) {
 }
 
 func TestAddDescendantTaskLifecycleRollup(t *testing.T) {
+	t.Parallel()
 	var got WorkItemDescendantTasks
 	for _, item := range []WorkItemSummary{
 		{State: WorkItemState{}},
@@ -75,6 +77,7 @@ func TestAddDescendantTaskLifecycleRollup(t *testing.T) {
 }
 
 func TestWorkItemContextOrdersAncestorsAndReportsBlockerProvenance(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, tasks := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
 	items := NewWorkItemService(store.DB(), "p-test")

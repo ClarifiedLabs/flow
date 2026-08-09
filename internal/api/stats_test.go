@@ -41,6 +41,7 @@ func finishCompletedTask(t *testing.T, bundle *ProjectBundle, title string, reso
 // error code is preserved, so raw SQLite/driver detail never crosses the trust
 // boundary.
 func TestCompletionStatsInternalErrorReturnsSanitizedMessage(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	// Closing the project database makes every store query fail with a raw
 	// driver error ("sql: database is closed").
@@ -88,6 +89,7 @@ func completionBucketCount(t *testing.T, resp completionStatsResponse, label str
 }
 
 func TestCompletionStatsReturnsEightBucketsInOrderAndCountsOnlySuccessfulOutcomes(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	now := time.Now().UTC()
 
@@ -123,6 +125,7 @@ func TestCompletionStatsReturnsEightBucketsInOrderAndCountsOnlySuccessfulOutcome
 }
 
 func TestCompletionStatsSumsAcrossProjectsAndNarrowsByProjectFilter(t *testing.T) {
+	t.Parallel()
 	server, bundles := newMultiProjectServer(t, "alpha", "beta")
 	alpha, beta := bundles[0], bundles[1]
 	now := time.Now().UTC()
@@ -161,6 +164,7 @@ func TestCompletionStatsSumsAcrossProjectsAndNarrowsByProjectFilter(t *testing.T
 }
 
 func TestCompletionStatsSessionTokenCannotReadOtherProject(t *testing.T) {
+	t.Parallel()
 	server, bundles := newMultiProjectServer(t, "alpha", "beta")
 	alpha, beta := bundles[0], bundles[1]
 	now := time.Now().UTC()
@@ -204,6 +208,7 @@ func TestCompletionStatsSessionTokenCannotReadOtherProject(t *testing.T) {
 }
 
 func TestCompletionStatsUpdatesWhenTaskTransitionsToDoneAndIsReadScoped(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 

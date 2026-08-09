@@ -6,6 +6,7 @@ import (
 )
 
 func TestWorkflowReviewAuthorCyclesWaitAtConfiguredLimit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, runs := newWorkflowModelServices(t)
 	agents := NewAgentDefService(flows.db)
@@ -167,6 +168,7 @@ func TestWorkflowReviewAuthorCyclesWaitAtConfiguredLimit(t *testing.T) {
 }
 
 func TestAutomatedReviewAuthorCycleClassification(t *testing.T) {
+	t.Parallel()
 	changeAuthor := FlowNodeSnapshot{
 		Kind:   NodeAgent,
 		Config: FlowNodeSnapshotConfig{Agent: &AgentNodeSnapshotConfig{Workspace: WorkspaceChange}},
@@ -199,6 +201,7 @@ func TestAutomatedReviewAuthorCycleClassification(t *testing.T) {
 }
 
 func TestWorkflowReviewCycleBudgetUsesConfiguredLimit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	flows, tasks, _ := newWorkflowModelServices(t)
 	flow, err := flows.Create(ctx, FlowInput{

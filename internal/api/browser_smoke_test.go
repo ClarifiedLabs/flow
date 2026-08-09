@@ -22,6 +22,7 @@ const (
 )
 
 func TestWebUIConsoleAutoReleaseRefreshesOpenPage(t *testing.T) {
+	t.Parallel()
 	browserPath, ok := findBrowserExecutable()
 	if !ok {
 		t.Skip("no Chromium or Chrome executable found for browser smoke test")
@@ -75,6 +76,7 @@ func TestWebUIConsoleAutoReleaseRefreshesOpenPage(t *testing.T) {
 // bar, the panel opens from the trigger, and clicking a destination navigates
 // there, marks it aria-current, and closes the panel.
 func TestWebUITopBarNavDropdown(t *testing.T) {
+	t.Parallel()
 	browserPath, ok := findBrowserExecutable()
 	if !ok {
 		t.Skip("no Chromium or Chrome executable found for browser smoke test")

@@ -17,6 +17,7 @@ import (
 )
 
 func TestHistoryOwnerAPIListsPaginatesFiltersAndDoesNotLeakInternals(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	for _, jobID := range []string{"history-job-a", "history-job-b", "history-job-c"} {
 		reserveAPIHistoryCapture(t, fixture, jobID)
@@ -64,6 +65,7 @@ func TestHistoryOwnerAPIListsPaginatesFiltersAndDoesNotLeakInternals(t *testing.
 }
 
 func TestHistoryOwnerAPIEventsWaiveAndRevoke(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	reserved := reserveAPIHistoryCapture(t, fixture, "history-owner-actions")
 	basePath := "/v2/projects/" + fixture.Project.ID + "/history/captures/" + reserved.Capture.ID
@@ -101,6 +103,7 @@ func TestHistoryOwnerAPIEventsWaiveAndRevoke(t *testing.T) {
 }
 
 func TestHistoryOwnerAPIDetailAndArtifactRangeStreaming(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	reserved := reserveAPIHistoryCapture(t, fixture, "history-content")
 	content := []byte("0123456789")
@@ -152,6 +155,7 @@ func TestHistoryOwnerAPIDetailAndArtifactRangeStreaming(t *testing.T) {
 }
 
 func TestHistoryManifestEndpointStreamsCoordinatorPublishedBytes(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	reserved := reserveAPIHistoryCapture(t, fixture, "history-manifest")
 	manifest := []byte(`{"format":"flow-history-manifest","schema_version":1}`)
@@ -170,6 +174,7 @@ func TestHistoryManifestEndpointStreamsCoordinatorPublishedBytes(t *testing.T) {
 }
 
 func TestHistoryResumeAPIIsIdempotentAndArtifactsRequireSelectedActiveLease(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	source, harnessArtifact, unselectedArtifact := seedAPIHistoryResumeSource(t, fixture)
@@ -230,6 +235,7 @@ func TestHistoryResumeAPIIsIdempotentAndArtifactsRequireSelectedActiveLease(t *t
 }
 
 func TestWorkerHistoryAPIReservesFromLeaseAndPublishesWithCapability(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	ctx := context.Background()
 	if _, err := fixture.Workers.RegisterWorker(ctx, flowworker.RegisterWorkerInput{
@@ -323,6 +329,7 @@ func TestWorkerHistoryAPIReservesFromLeaseAndPublishesWithCapability(t *testing.
 }
 
 func TestWorkerHistoryAPIPublishesCompleteNonHarnessCaptureIdempotently(t *testing.T) {
+	t.Parallel()
 	fixture := newTestFixture(t)
 	reserved := reserveAPIHistoryCapture(t, fixture, "history-complete-api")
 	basePath := "/v2/history/captures/" + reserved.Capture.ID

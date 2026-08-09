@@ -15,6 +15,7 @@ import (
 )
 
 func TestDefaultAgentChecksUseSelectedHarnessAndArgs(t *testing.T) {
+	t.Parallel()
 	suite, err := withDefaultAgentChecks(CheckSuite{}, flowharness.AgentSelection{Harness: flowharness.Harness}, []string{
 		"--model", "anthropic:claude-sonnet-4-6",
 	})
@@ -44,6 +45,7 @@ func TestDefaultAgentChecksUseSelectedHarnessAndArgs(t *testing.T) {
 }
 
 func TestDefaultAgentChecksUseConfiguredDefaultModel(t *testing.T) {
+	t.Parallel()
 	suite, err := withDefaultAgentChecks(CheckSuite{}, flowharness.AgentSelection{
 		Harness:         flowharness.Harness,
 		Model:           "anthropic:claude-sonnet-4-6",
@@ -199,6 +201,7 @@ VALUES (?, ?, ?, 'main', 'head-1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z
 }
 
 func TestValidateReviewDiscoveryAgentsReservesAggregationCheckName(t *testing.T) {
+	t.Parallel()
 	agents := []SnapshotReviewAgent{{Agent: AgentDefSnapshot{Name: ReviewAggregationCheckName}}}
 	if err := validateReviewDiscoveryAgents(agents); err == nil || !strings.Contains(err.Error(), "reserved") {
 		t.Fatalf("validate review discovery agents error = %v, want reserved-name rejection", err)
@@ -209,6 +212,7 @@ func TestValidateReviewDiscoveryAgentsReservesAggregationCheckName(t *testing.T)
 }
 
 func TestScheduleWorkflowNodeChecksConcurrentlyFansOutAndAggregatesExactlyOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, err := flowdb.Open(ctx, filepath.Join(t.TempDir(), "flow.db"))
 	if err != nil {

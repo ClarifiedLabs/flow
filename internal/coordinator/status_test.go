@@ -26,6 +26,7 @@ func newStatusTestService(t *testing.T) (*StatusService, string) {
 }
 
 func TestWriteStatusWithKind(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, taskID := newStatusTestService(t)
 
@@ -39,6 +40,7 @@ func TestWriteStatusWithKind(t *testing.T) {
 }
 
 func TestWriteStatusDefaultsKindNote(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, taskID := newStatusTestService(t)
 
@@ -52,6 +54,7 @@ func TestWriteStatusDefaultsKindNote(t *testing.T) {
 }
 
 func TestWriteStatusRejectsBadKind(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, taskID := newStatusTestService(t)
 
@@ -61,6 +64,7 @@ func TestWriteStatusRejectsBadKind(t *testing.T) {
 }
 
 func TestWriteStatusAcceptsAllKinds(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, taskID := newStatusTestService(t)
 
@@ -76,6 +80,7 @@ func TestWriteStatusAcceptsAllKinds(t *testing.T) {
 }
 
 func TestListRecentByKind(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	service, taskID := newStatusTestService(t)
 

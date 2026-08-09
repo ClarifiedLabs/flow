@@ -41,6 +41,7 @@ func newHistoryRegistry(t *testing.T, supplied blob.Store) (*Registry, string) {
 }
 
 func TestRegistryHistoryStoreDefaultsAndExternalOwnership(t *testing.T) {
+	t.Parallel()
 	defaultRegistry, dataDir := newHistoryRegistry(t, nil)
 	if defaultRegistry.HistoryBlobStore() == nil || !defaultRegistry.OwnsHistoryBlobStore() {
 		t.Fatalf("default history store = %T owned=%t", defaultRegistry.HistoryBlobStore(), defaultRegistry.OwnsHistoryBlobStore())
@@ -83,6 +84,7 @@ func TestRegistryHistoryStoreDefaultsAndExternalOwnership(t *testing.T) {
 }
 
 func TestRegistryWiresProjectIsolatedHistoryServicesAndMetadata(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	local, err := blob.NewLocal(filepath.Join(t.TempDir(), "blobs"), blob.LocalOptions{})
 	if err != nil {

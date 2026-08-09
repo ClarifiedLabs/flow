@@ -10,6 +10,7 @@ import (
 )
 
 func TestTaskFindingsRegistryAggregatesThreadsAcrossChanges(t *testing.T) {
+	t.Parallel()
 	_, threads, tasks, task := newFindingsRegistryFixture(t)
 	ctx := context.Background()
 
@@ -213,6 +214,7 @@ func TestTaskFindingsRegistryAggregatesThreadsAcrossChanges(t *testing.T) {
 }
 
 func TestTaskFindingsRegistryEmptyForTaskWithoutFindings(t *testing.T) {
+	t.Parallel()
 	_, threads, _, task := newFindingsRegistryFixture(t)
 	ctx := context.Background()
 
@@ -229,6 +231,7 @@ func TestTaskFindingsRegistryEmptyForTaskWithoutFindings(t *testing.T) {
 }
 
 func TestTaskFindingsRegistryUnknownTaskIsNoRows(t *testing.T) {
+	t.Parallel()
 	_, threads, _, _ := newFindingsRegistryFixture(t)
 	ctx := context.Background()
 
