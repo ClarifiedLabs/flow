@@ -506,7 +506,7 @@ func TestStageIncludesOtherDurableArtifactsInWriterBound(t *testing.T) {
 }
 
 func TestStageTranscriptEnforcesRunningBoundDuringGrowth(t *testing.T) {
-	const initialSize = 512 << 10
+	const initialSize = 64 << 10
 	root := t.TempDir()
 	source := filepath.Join(root, "transcript.txt")
 	if err := os.WriteFile(source, bytes.Repeat([]byte("a"), initialSize), 0600); err != nil {
@@ -521,26 +521,51 @@ func TestStageTranscriptEnforcesRunningBoundDuringGrowth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	appended := make(chan error, 1)
+	// Grow the source continuously once staging starts so the running bound is
+	// exceeded regardless of when the scheduler runs this goroutine. Capped so
+	// a staging bug cannot fill the disk.
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	appendErr := make(chan error, 1)
 	go func() {
+		defer close(done)
 		firstSegment := filepath.Join(entryDir, "transcript-000000000000.bin")
 		for {
 			if _, err := os.Stat(firstSegment); err == nil {
-				file, openErr := os.OpenFile(source, os.O_APPEND|os.O_WRONLY, 0600)
-				if openErr == nil {
-					_, openErr = file.Write(bytes.Repeat([]byte("b"), 4096))
-					if closeErr := file.Close(); openErr == nil {
-						openErr = closeErr
-					}
+				break
+			}
+			select {
+			case <-stop:
+				return
+			default:
+			}
+		}
+		for growth := 0; growth < 4<<20; growth += 4096 {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			file, openErr := os.OpenFile(source, os.O_APPEND|os.O_WRONLY, 0600)
+			if openErr == nil {
+				_, openErr = file.Write(bytes.Repeat([]byte("b"), 4096))
+				if closeErr := file.Close(); openErr == nil {
+					openErr = closeErr
 				}
-				appended <- openErr
+			}
+			if openErr != nil {
+				appendErr <- openErr
 				return
 			}
 		}
 	}()
 	_, _, err = outbox.stageTranscript(context.Background(), entryDir, source, nil, initialSize)
-	if appendErr := <-appended; appendErr != nil {
-		t.Fatal(appendErr)
+	close(stop)
+	<-done
+	select {
+	case openErr := <-appendErr:
+		t.Fatal(openErr)
+	default:
 	}
 	if !errors.Is(err, ErrLimitExceeded) {
 		t.Fatalf("stageTranscript() error = %v, want running byte limit", err)

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/cgi"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2176,15 +2178,12 @@ func workerConfigWithTmux(t *testing.T, workDir string, coordinatorURL string) c
 
 func createExchangeRemote(t *testing.T) string {
 	t.Helper()
-	worktree, remote := createSeedGitRemote(t)
-	gitRun(t, worktree, "push", remote, "main:main")
-	return serveExchangeRemote(t, remote)
+	return serveExchangeRemote(t, cloneSeedExchangeRemote(t))
 }
 
 func createExchangeRemoteWithoutFlowSkills(t *testing.T) string {
 	t.Helper()
-	_, remote := createSeedGitRemote(t)
-	return serveExchangeRemote(t, remote)
+	return serveExchangeRemote(t, cloneSeedExchangeRemote(t))
 }
 
 func serveExchangeRemote(t *testing.T, remote string) string {
@@ -2228,12 +2227,44 @@ func tmuxRun(t *testing.T, cfg config.WorkerConfig, args ...string) {
 	}
 }
 
-func createSeedGitRemote(t *testing.T) (string, string) {
+// seedExchangeTemplate is a per-binary seeded bare exchange (one README
+// commit on main, http.receivepack enabled) cloned per test with file copies
+// instead of ~10 git subprocesses. A bare repo carries no path-dependent
+// state, and no hooks are installed on it.
+var seedExchangeTemplate struct {
+	once sync.Once
+	path string
+	err  error
+}
+
+func cloneSeedExchangeRemote(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
-	worktree := filepath.Join(root, "worktree")
-	remote := filepath.Join(root, "exchange.git")
-	gitRun(t, root, "init", worktree)
+	seedExchangeTemplate.once.Do(func() {
+		root, err := os.MkdirTemp("", "flow-exchange-template-")
+		if err != nil {
+			seedExchangeTemplate.err = err
+			return
+		}
+		worktree := filepath.Join(root, "worktree")
+		remote := filepath.Join(root, "exchange.git")
+		buildSeedGitRemote(t, worktree, remote)
+		seedExchangeTemplate.path = remote
+	})
+	if seedExchangeTemplate.err != nil {
+		t.Fatalf("build seed exchange template: %v", seedExchangeTemplate.err)
+	}
+	remote := filepath.Join(t.TempDir(), "exchange.git")
+	if err := copyTree(seedExchangeTemplate.path, remote); err != nil {
+		t.Fatalf("clone seed exchange: %v", err)
+	}
+	return remote
+}
+
+// buildSeedGitRemote seeds a bare exchange from a fresh worktree. It is used
+// once per binary by the template; callers must not keep the worktree.
+func buildSeedGitRemote(t *testing.T, worktree, remote string) {
+	t.Helper()
+	gitRun(t, filepath.Dir(worktree), "init", worktree)
 	gitRun(t, worktree, "config", "user.email", "flow@example.com")
 	gitRun(t, worktree, "config", "user.name", "Flow Test")
 	if err := os.WriteFile(filepath.Join(worktree, "README.md"), []byte("seed\n"), 0o644); err != nil {
@@ -2242,10 +2273,54 @@ func createSeedGitRemote(t *testing.T) (string, string) {
 	gitRun(t, worktree, "add", "README.md")
 	gitRun(t, worktree, "commit", "-m", "seed")
 	gitRun(t, worktree, "branch", "-M", "main")
-	gitRun(t, root, "init", "--bare", remote)
-	gitRun(t, root, "--git-dir", remote, "config", "http.receivepack", "true")
+	gitRun(t, filepath.Dir(remote), "init", "--bare", remote)
+	gitRun(t, filepath.Dir(remote), "--git-dir", remote, "config", "http.receivepack", "true")
 	gitRun(t, worktree, "push", remote, "main:main")
+}
+
+func createSeedGitRemote(t *testing.T) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	worktree := filepath.Join(root, "worktree")
+	remote := filepath.Join(root, "exchange.git")
+	buildSeedGitRemote(t, worktree, remote)
 	return worktree, remote
+}
+
+// copyTree recursively copies a directory tree, preserving file modes.
+func copyTree(source, target string) error {
+	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		destination := filepath.Join(target, relative)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case entry.IsDir():
+			return os.MkdirAll(destination, info.Mode().Perm())
+		case entry.Type()&os.ModeSymlink != 0:
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, destination)
+		case entry.Type().IsRegular():
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(destination, contents, info.Mode().Perm())
+		default:
+			return nil
+		}
+	})
 }
 
 func writeScript(t *testing.T, contents string) string {

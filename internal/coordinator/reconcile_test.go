@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -302,36 +304,37 @@ type projectFixture struct {
 
 const testProjectID = "p-test"
 
-// newProjectFixture creates a repo + seeded exchange and opens the per-project
-// database, mirroring the production onboarding flow (CreateServerProject +
-// SeedExchangeFromWorktree). The per-project DB lives at the server project's
-// DatabasePath; projects/tokens/workers live in the global DB and are opened
-// separately by tests that need them.
+// newProjectFixture clones the per-binary seeded project template with file
+// copies and opens the per-project database. Building the repo + exchange
+// from scratch costs ~20 git subprocesses per test, which dominated fixture
+// setup time; the template itself mirrors the production onboarding flow
+// (CreateServerProject + SeedExchangeFromWorktree) exactly once per binary.
+// The per-project DB lives at the server project's DatabasePath;
+// projects/tokens/workers live in the global DB and are opened separately by
+// tests that need them.
 func newProjectFixture(t *testing.T) projectFixture {
 	t.Helper()
 	ctx := context.Background()
 
-	repoPath := createReconcileGitRepo(t)
-	dataDir := filepath.Join(t.TempDir(), "flow-data")
-	server, err := flowgit.CreateServerProject(ctx, flowgit.ServerProjectOptions{
-		DataDir:     dataDir,
-		ProjectID:   testProjectID,
-		BaseBranch:  "main",
-		HookCommand: inertReconcileHookCommand(),
+	seededProjectTemplate.once.Do(func() {
+		seededProjectTemplate.repoPath, seededProjectTemplate.projectDir, seededProjectTemplate.err = buildSeededProjectTemplate()
 	})
-	if err != nil {
-		t.Fatalf("create server project: %v", err)
-	}
-	if _, err := flowgit.SeedExchangeFromWorktree(ctx, flowgit.SeedOptions{
-		RepoPath:     repoPath,
-		BaseBranch:   "main",
-		ExchangeName: flowgit.DefaultExchangeName,
-		ExchangeURL:  server.ExchangePath,
-	}); err != nil {
-		t.Fatalf("seed exchange: %v", err)
+	if seededProjectTemplate.err != nil {
+		t.Fatalf("build seeded project template: %v", seededProjectTemplate.err)
 	}
 
-	store, err := flowdb.Open(ctx, server.DatabasePath)
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "flow-data")
+	repoPath := filepath.Join(root, "repo")
+	projectDir := flowgit.ProjectDir(dataDir, testProjectID)
+	copyDirTree(t, seededProjectTemplate.repoPath, repoPath)
+	copyDirTree(t, seededProjectTemplate.projectDir, projectDir)
+	// The seeded worktree remote points at the template exchange; retarget it
+	// at this test's copy so pushes stay fixture-local.
+	exchangePath := filepath.Join(projectDir, "exchange.git")
+	retargetFixtureRemote(t, repoPath, filepath.Join(seededProjectTemplate.projectDir, "exchange.git"), exchangePath)
+
+	store, err := flowdb.Open(ctx, flowgit.ProjectDatabasePath(dataDir, testProjectID))
 	if err != nil {
 		t.Fatalf("open project db: %v", err)
 	}
@@ -348,8 +351,109 @@ func newProjectFixture(t *testing.T) projectFixture {
 			RepoPath:     repoPath,
 			BaseBranch:   "main",
 			ExchangeName: flowgit.DefaultExchangeName,
-			ExchangePath: server.ExchangePath,
+			ExchangePath: exchangePath,
 		},
+	}
+}
+
+// seededProjectTemplate holds the per-binary fixture project newProjectFixture
+// clones. The inert hook command ignores its --repo argument, so the copied
+// hook scripts are valid for every clone even though they embed the template
+// path.
+var seededProjectTemplate struct {
+	once       sync.Once
+	repoPath   string
+	projectDir string
+	err        error
+}
+
+func buildSeededProjectTemplate() (repoPath, projectDir string, err error) {
+	ctx := context.Background()
+	root, err := os.MkdirTemp("", "flow-project-template-")
+	if err != nil {
+		return "", "", err
+	}
+	repoPath = filepath.Join(root, "repo")
+	if err := initReconcileGitRepo(repoPath); err != nil {
+		return "", "", err
+	}
+	dataDir := filepath.Join(root, "flow-data")
+	server, err := flowgit.CreateServerProject(ctx, flowgit.ServerProjectOptions{
+		DataDir:     dataDir,
+		ProjectID:   testProjectID,
+		BaseBranch:  "main",
+		HookCommand: inertReconcileHookCommand(),
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("create server project: %w", err)
+	}
+	if _, err := flowgit.SeedExchangeFromWorktree(ctx, flowgit.SeedOptions{
+		RepoPath:     repoPath,
+		BaseBranch:   "main",
+		ExchangeName: flowgit.DefaultExchangeName,
+		ExchangeURL:  server.ExchangePath,
+	}); err != nil {
+		return "", "", fmt.Errorf("seed exchange: %w", err)
+	}
+	return repoPath, flowgit.ProjectDir(dataDir, testProjectID), nil
+}
+
+// copyDirTree recursively copies a fixture tree, preserving file modes. The
+// trees are small (a handful of git objects), so copying beats rebuilding
+// them with git subprocesses for every test.
+func copyDirTree(t *testing.T, source, target string) {
+	t.Helper()
+	if err := filepath.WalkDir(source, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		destination := filepath.Join(target, relative)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case entry.IsDir():
+			return os.MkdirAll(destination, info.Mode().Perm())
+		case entry.Type()&os.ModeSymlink != 0:
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, destination)
+		case entry.Type().IsRegular():
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(destination, contents, info.Mode().Perm())
+		default:
+			return nil
+		}
+	}); err != nil {
+		t.Fatalf("copy fixture tree %s: %v", source, err)
+	}
+}
+
+// retargetFixtureRemote rewrites the worktree remote URL that still points at
+// the template exchange after the tree copy.
+func retargetFixtureRemote(t *testing.T, repoPath, oldURL, newURL string) {
+	t.Helper()
+	configPath := filepath.Join(repoPath, ".git", "config")
+	contents, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read fixture git config: %v", err)
+	}
+	if !strings.Contains(string(contents), oldURL) {
+		t.Fatalf("fixture git config does not reference template exchange %q", oldURL)
+	}
+	updated := strings.ReplaceAll(string(contents), oldURL, newURL)
+	if err := os.WriteFile(configPath, []byte(updated), 0o644); err != nil {
+		t.Fatalf("retarget fixture git remote: %v", err)
 	}
 }
 
@@ -357,23 +461,35 @@ func createReconcileGitRepo(t *testing.T) string {
 	t.Helper()
 
 	repoPath := filepath.Join(t.TempDir(), "repo")
-	if err := runReconcileGit("", nil, "-c", "init.defaultBranch=main", "init", repoPath); err != nil {
-		t.Fatalf("git init: %v", err)
-	}
-	if err := runReconcileGit(repoPath, nil, "config", "user.name", "Flow Test"); err != nil {
-		t.Fatalf("config user.name: %v", err)
-	}
-	if err := runReconcileGit(repoPath, nil, "config", "user.email", "flow-test@example.com"); err != nil {
-		t.Fatalf("config user.email: %v", err)
-	}
-	writeReconcileFile(t, repoPath, "README.md", "initial\n")
-	if err := runReconcileGit(repoPath, nil, "add", "README.md"); err != nil {
-		t.Fatalf("git add README: %v", err)
-	}
-	if err := runReconcileGit(repoPath, nil, "commit", "-m", "initial commit"); err != nil {
-		t.Fatalf("git initial commit: %v", err)
+	if err := initReconcileGitRepo(repoPath); err != nil {
+		t.Fatalf("create git repo: %v", err)
 	}
 	return repoPath
+}
+
+func initReconcileGitRepo(repoPath string) error {
+	if _, err := reconcileGitOutput("", nil, "-c", "init.defaultBranch=main", "init", repoPath); err != nil {
+		return fmt.Errorf("git init: %w", err)
+	}
+	if _, err := reconcileGitOutput(repoPath, nil, "config", "user.name", "Flow Test"); err != nil {
+		return fmt.Errorf("config user.name: %w", err)
+	}
+	if _, err := reconcileGitOutput(repoPath, nil, "config", "user.email", "flow-test@example.com"); err != nil {
+		return fmt.Errorf("config user.email: %w", err)
+	}
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(repoPath, "README.md"), []byte("initial\n"), 0o644); err != nil {
+		return fmt.Errorf("write README.md: %w", err)
+	}
+	if _, err := reconcileGitOutput(repoPath, nil, "add", "README.md"); err != nil {
+		return fmt.Errorf("git add README: %w", err)
+	}
+	if _, err := reconcileGitOutput(repoPath, nil, "commit", "-m", "initial commit"); err != nil {
+		return fmt.Errorf("git initial commit: %w", err)
+	}
+	return nil
 }
 
 func writeReconcileFile(t *testing.T, repoPath string, relativePath string, contents string) {

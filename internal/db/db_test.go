@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -582,6 +583,64 @@ func TestOpenMigrationIsIdempotent(t *testing.T) {
 		t.Fatalf("read migrations: %v", err)
 	}
 	assertAppliedMigrations(t, migrations, "0001_init", "0002_full_fidelity_history", "0003_history_resume_durability")
+}
+
+// TestMigratedTemplateClonesAreIndependent pins the hermetic-test fast path:
+// new databases stamped from the per-binary migrated template must be fully
+// migrated, writable, and isolated from one another (file copies, not shared
+// state).
+func TestMigratedTemplateClonesAreIndependent(t *testing.T) {
+	ctx := context.Background()
+	templatePath, err := createMigratedTemplate(migrationFS, "migrations/*.sql", "7")
+	if err != nil {
+		t.Fatalf("build migrated template: %v", err)
+	}
+
+	firstPath := filepath.Join(t.TempDir(), "first.db")
+	cloneMigratedTemplate(firstPath, migrationFS, "migrations/*.sql", "7")
+	first, err := Open(ctx, firstPath)
+	if err != nil {
+		t.Fatalf("open first clone: %v", err)
+	}
+	defer first.Close()
+	migrations, err := first.AppliedMigrations(ctx)
+	if err != nil {
+		t.Fatalf("read first clone migrations: %v", err)
+	}
+	assertAppliedMigrations(t, migrations, "0001_init", "0002_full_fidelity_history", "0003_history_resume_durability")
+	assertStorageFormat(t, first, "7")
+	if _, err := first.DB().ExecContext(ctx, `INSERT INTO schema_migrations (version) VALUES ('9999_clone_probe')`); err != nil {
+		t.Fatalf("write first clone: %v", err)
+	}
+
+	secondPath := filepath.Join(t.TempDir(), "second.db")
+	cloneMigratedTemplate(secondPath, migrationFS, "migrations/*.sql", "7")
+	second, err := Open(ctx, secondPath)
+	if err != nil {
+		t.Fatalf("open second clone: %v", err)
+	}
+	defer second.Close()
+	var count int
+	if err := second.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = '9999_clone_probe'`).Scan(&count); err != nil {
+		t.Fatalf("read second clone: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("second clone observed %d rows written only to the first clone", count)
+	}
+
+	// Cloning never mutates the template itself.
+	infoBefore, err := os.Stat(templatePath)
+	if err != nil {
+		t.Fatalf("stat template: %v", err)
+	}
+	cloneMigratedTemplate(filepath.Join(t.TempDir(), "third.db"), migrationFS, "migrations/*.sql", "7")
+	infoAfter, err := os.Stat(templatePath)
+	if err != nil {
+		t.Fatalf("restat template: %v", err)
+	}
+	if !os.SameFile(infoBefore, infoAfter) || infoAfter.ModTime() != infoBefore.ModTime() {
+		t.Fatalf("template file changed across clones: before=%v after=%v", infoBefore.ModTime(), infoAfter.ModTime())
+	}
 }
 
 func assertAppliedMigrations(t *testing.T, got []string, want ...string) {

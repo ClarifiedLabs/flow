@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -55,8 +56,13 @@ func openWith(ctx context.Context, driverName, path string, migrations embed.FS,
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return nil, fmt.Errorf("create database directory: %w", err)
 		}
+		cloneMigratedTemplate(path, migrations, glob, expectedStorageFormat)
 	}
 
+	return openDirect(ctx, driverName, path, migrations, glob, expectedStorageFormat)
+}
+
+func openDirect(ctx context.Context, driverName, path string, migrations embed.FS, glob string, expectedStorageFormat string) (*Store, error) {
 	conn, err := sql.Open(driverName, path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
@@ -86,6 +92,84 @@ func openWith(ctx context.Context, driverName, path string, migrations embed.FS,
 	}
 
 	return store, nil
+}
+
+// Hermetic test binaries (see internal/testenv) open a brand-new database for
+// nearly every test, and re-executing every migration statement through cgo
+// dominated suite CPU. Test processes therefore stamp a new database by
+// copying a fully migrated template file; the subsequent Migrate call finds
+// every version already applied and is a cheap no-op. The isolation marker is
+// only ever set by internal/testenv, so production binaries always take the
+// migration path. Templates are per-process and rooted in the isolated TMPDIR
+// that testenv reclaims.
+var migratedTemplates sync.Map // migrations glob -> *migratedTemplate
+
+type migratedTemplate struct {
+	once sync.Once
+	path string
+	err  error
+}
+
+func cloneMigratedTemplate(path string, migrations embed.FS, glob string, expectedStorageFormat string) {
+	if os.Getenv("FLOW_TESTENV_ISOLATED") != "1" {
+		return
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		return // existing databases open (and migrate) in place
+	}
+	cached, _ := migratedTemplates.LoadOrStore(glob, &migratedTemplate{})
+	template := cached.(*migratedTemplate)
+	template.once.Do(func() {
+		template.path, template.err = createMigratedTemplate(migrations, glob, expectedStorageFormat)
+	})
+	if template.err != nil {
+		return // fall back to applying migrations normally
+	}
+	contents, err := os.ReadFile(template.path)
+	if err != nil {
+		return
+	}
+	// Publish the copy atomically so a concurrent open never observes a
+	// partially written database.
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".template-copy-")
+	if err != nil {
+		return
+	}
+	temporaryPath := temporary.Name()
+	if _, err := temporary.Write(contents); err == nil {
+		err = temporary.Close()
+	} else {
+		_ = temporary.Close()
+	}
+	if err == nil {
+		err = os.Rename(temporaryPath, path)
+	}
+	if err != nil {
+		_ = os.Remove(temporaryPath)
+	}
+}
+
+func createMigratedTemplate(migrations embed.FS, glob string, expectedStorageFormat string) (string, error) {
+	dir, err := os.MkdirTemp("", "flow-db-template-")
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "template.db")
+	store, err := openDirect(context.Background(), "sqlite3", path, migrations, glob, expectedStorageFormat)
+	if err != nil {
+		return "", err
+	}
+	if _, err := store.db.ExecContext(context.Background(), "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		_ = store.Close()
+		return "", fmt.Errorf("checkpoint migrated template: %w", err)
+	}
+	if err := store.Close(); err != nil {
+		return "", err
+	}
+	if _, err := os.Lstat(path + "-wal"); !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("migrated template WAL was not fully checkpointed")
+	}
+	return path, nil
 }
 
 // validateExistingStorageFormat rejects an incompatible database before

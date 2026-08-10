@@ -4,7 +4,10 @@
 
 COMMAND_PACKAGES := ./cmd/flow ./cmd/flow-server ./cmd/flow-worker ./cmd/flow-orchestrator
 BINDIR ?= $(HOME)/bin
-GO_TEST_P ?= 4
+# Package-level test parallelism. The suite is dominated by tests that wait
+# on subprocesses (git/tmux) rather than burn CPU, so oversubscribing package
+# binaries relative to core count is a win on typical machines.
+GO_TEST_P ?= 8
 
 build:
 	mkdir -p bin
