@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -206,15 +207,47 @@ func TestBridgeWebSocketCloseKillsProcessGroup(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		err := syscall.Kill(childPID, 0)
-		if errors.Is(err, syscall.ESRCH) {
+		terminated, err := processTerminated(childPID)
+		if err != nil {
+			t.Fatalf("inspect child process %d: %v", childPID, err)
+		}
+		if terminated {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("child process %d remains after process-group termination (kill error %v)", childPID, err)
+			t.Fatalf("child process %d remains after process-group termination", childPID)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// processTerminated treats a Linux zombie as terminated. syscall.Kill with
+// signal 0 still succeeds for an unreaped zombie, which can persist when these
+// tests run under a PID 1 that does not reap orphaned grandchildren.
+func processTerminated(pid int) (bool, error) {
+	err := syscall.Kill(pid, 0)
+	if errors.Is(err, syscall.ESRCH) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if runtime.GOOS != "linux" {
+		return false, nil
+	}
+
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	closingParen := bytes.LastIndexByte(stat, ')')
+	if closingParen < 0 || closingParen+2 >= len(stat) {
+		return false, fmt.Errorf("malformed process stat %q", stat)
+	}
+	return stat[closingParen+2] == 'Z', nil
 }
 
 func websocketPair(t *testing.T) (*websocket.Conn, *websocket.Conn) {
