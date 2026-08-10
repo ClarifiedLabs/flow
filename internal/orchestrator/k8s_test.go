@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ClarifiedLabs/flow/internal/config"
 )
 
 func TestKubernetesProviderExactJobSecretIdentityAndDelete(t *testing.T) {
@@ -97,7 +99,11 @@ func TestKubernetesProviderExactJobSecretIdentityAndDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	profile := testProfile()
-	profile.ProviderOptions["harness_model_proxy_secret_name"] = "flow-harness-model-proxy"
+	profile.ProviderOptions = map[string]string{
+		"namespace": "workers", "image": "registry.example/flow-worker:v1", "work_dir": "/workspace",
+		"image_pull_policy": "Always", "harness_model_proxy_secret_name": "flow-harness-model-proxy",
+		"worker_args": `["--no-metrics"]`,
+	}
 	request := LaunchRequest{
 		Identity: identity, Assignment: assignment, Profile: profile,
 		CoordinatorURL: "https://coordinator.example", WorkerToken: "private-direct-token",
@@ -173,8 +179,9 @@ func TestKubernetesProviderExactJobSecretIdentityAndDelete(t *testing.T) {
 		t.Fatalf("worker env = %#v, want %#v", container.Env, wantEnv)
 	}
 	if container.Image != "registry.example/flow-worker:v1" || container.ImagePullPolicy != "Always" ||
-		len(container.VolumeMounts) != 2 || container.VolumeMounts[1].MountPath != "/workspace" ||
-		len(pod.Volumes) != 2 || pod.Volumes[0].Secret.SecretName != secretName || *pod.Volumes[0].Secret.DefaultMode != 0o400 || pod.Volumes[1].EmptyDir == nil {
+		len(container.VolumeMounts) != 2 || container.VolumeMounts[1].Name != "worker-work" || container.VolumeMounts[1].MountPath != "/workspace" ||
+		container.Resources != nil || pod.NodeSelector != nil || len(pod.Volumes) != 2 || pod.Volumes[0].Secret.SecretName != secretName ||
+		*pod.Volumes[0].Secret.DefaultMode != 0o400 || pod.Volumes[1].Name != "worker-work" || pod.Volumes[1].EmptyDir == nil || pod.Volumes[1].EmptyDir.SizeLimit != "" {
 		t.Fatalf("container/volume = %+v %+v", container, pod.Volumes)
 	}
 	if got := job.Metadata.Annotations["flow.clarifiedlabs.com/assignment-id"]; got != assignment.Assignment.ID {
@@ -215,19 +222,138 @@ func TestKubernetesProviderExactJobSecretIdentityAndDelete(t *testing.T) {
 	}
 }
 
+func TestKubernetesProviderGeneratesConfiguredWorkloadSpec(t *testing.T) {
+	assignment := testAssignment("pending")
+	var jobPayload, secretPayload []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs") {
+			jobPayload = body
+		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/secrets") {
+			secretPayload = body
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(server.Close)
+	provider, err := NewKubernetesProvider(KubernetesProviderOptions{
+		BaseURL: server.URL, HTTPClient: server.Client(), Namespace: "workers", Image: "worker:v1", WorkDir: "/home/flow/work",
+		WorkVolume:   &config.OrchestratorWorkVolumeConfig{Type: "generic_ephemeral", MountPath: "/home/flow", Size: "20Gi", StorageClassName: "fast", AccessModes: []string{"ReadWriteOnce"}},
+		Resources:    &config.OrchestratorResourceRequirements{Requests: map[string]string{"cpu": "500m", "memory": "1Gi"}, Limits: map[string]string{"memory": "2Gi", "ephemeral-storage": "5Gi"}},
+		NodeSelector: map[string]string{"kubernetes.io/os": "linux"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Launch(context.Background(), LaunchRequest{
+		Identity: IdentityOf(assignment), Assignment: assignment, Profile: testProfile(), CoordinatorURL: "https://coordinator.example", WorkerToken: "direct-token",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var secret kubernetesSecret
+	if err := json.Unmarshal(secretPayload, &secret); err != nil {
+		t.Fatal(err)
+	}
+	if workerYAML := string(secret.Data["worker.yaml"]); !strings.Contains(workerYAML, "work_dir: /home/flow/work") {
+		t.Fatalf("nested work_dir missing from worker config:\n%s", workerYAML)
+	}
+	var job kubernetesJob
+	if err := json.Unmarshal(jobPayload, &job); err != nil {
+		t.Fatal(err)
+	}
+	pod, labels := job.Spec.Template.Spec, job.Spec.Template.Metadata.Labels
+	container, volume := pod.Containers[0], pod.Volumes[1]
+	if container.VolumeMounts[1].Name != genericWorkVolumeName || container.VolumeMounts[1].MountPath != "/home/flow" || volume.Name != genericWorkVolumeName || volume.EmptyDir != nil || volume.Ephemeral == nil {
+		t.Fatalf("generic ephemeral work volume = %+v, mounts=%+v", volume, container.VolumeMounts)
+	}
+	claim := volume.Ephemeral.VolumeClaimTemplate
+	if !reflect.DeepEqual(claim.Metadata.Labels, labels) || claim.Spec.StorageClassName != "fast" ||
+		!reflect.DeepEqual(claim.Spec.AccessModes, []string{"ReadWriteOnce"}) || claim.Spec.Resources.Requests["storage"] != "20Gi" {
+		t.Fatalf("claim template = %+v, pod labels=%v", claim, labels)
+	}
+	if !reflect.DeepEqual(container.Resources.Requests, map[string]string{"cpu": "500m", "memory": "1Gi"}) ||
+		!reflect.DeepEqual(container.Resources.Limits, map[string]string{"memory": "2Gi", "ephemeral-storage": "5Gi"}) ||
+		!reflect.DeepEqual(pod.NodeSelector, map[string]string{"kubernetes.io/os": "linux"}) {
+		t.Fatalf("resources/node selector = %+v / %+v", container.Resources, pod.NodeSelector)
+	}
+	for _, credential := range []string{"direct-token", "model-proxy-secret-value", "https://private-model-proxy.example"} {
+		if strings.Contains(string(jobPayload), credential) {
+			t.Fatalf("credential %q leaked into Job", credential)
+		}
+	}
+}
+
+func TestKubernetesProviderEmptyDirSizeLimit(t *testing.T) {
+	var jobPayload []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs") {
+			jobPayload = body
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(server.Close)
+	provider, err := NewKubernetesProvider(KubernetesProviderOptions{
+		BaseURL: server.URL, HTTPClient: server.Client(), Namespace: "flow", Image: "worker:v1", WorkDir: "/work",
+		WorkVolume: &config.OrchestratorWorkVolumeConfig{Type: "empty_dir", SizeLimit: "8Gi"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := testAssignment("pending")
+	if err := provider.Launch(context.Background(), LaunchRequest{
+		Identity: IdentityOf(assignment), Assignment: assignment, Profile: testProfile(), CoordinatorURL: "https://coordinator.example", WorkerToken: "direct-token",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var job kubernetesJob
+	if err := json.Unmarshal(jobPayload, &job); err != nil {
+		t.Fatal(err)
+	}
+	volume := job.Spec.Template.Spec.Volumes[1]
+	if volume.Name != genericWorkVolumeName || volume.EmptyDir == nil || volume.EmptyDir.SizeLimit != "8Gi" || volume.Ephemeral != nil {
+		t.Fatalf("emptyDir work volume = %+v", volume)
+	}
+}
+
+func TestKubernetesGenericEphemeralPVCNameInvariant(t *testing.T) {
+	identity := AssignmentIdentity{
+		AssignmentID: strings.Repeat("assignment-with-a-very-long-name-", 20),
+		WorkerID:     strings.Repeat("worker", 50), ProviderID: strings.Repeat("provider", 50),
+		ProfileName: strings.Repeat("profile-with-a-very-long-name-", 20), ProviderRequestID: strings.Repeat("request", 50),
+	}
+	jobName, _ := KubernetesResourceNames(identity)
+	podNameLength := len(jobName) + jobPodGeneratedSuffixLength
+	claimNameLength := podNameLength + 1 + len(genericWorkVolumeName)
+	if claimNameLength > 63 {
+		t.Fatalf("generic ephemeral PVC name can exceed DNS label: job=%q pod=%d claim=%d", jobName, podNameLength, claimNameLength)
+	}
+	labels, _ := kubernetesIdentityMetadata(identity)
+	for key, value := range labels {
+		if len(value) == 0 || len(value) > 63 || value[0] == '-' || value[len(value)-1] == '-' {
+			t.Fatalf("identity label %s=%q is not DNS-label-safe", key, value)
+		}
+	}
+}
+
 func TestHarnessModelProxyEnvironmentRequiresConfiguredSecret(t *testing.T) {
 	if got := harnessModelProxyEnvironment(""); got != nil {
 		t.Fatalf("empty model proxy Secret env = %#v, want nil", got)
 	}
 }
 
-func TestKubernetesProviderDeleteTimesOutWhenJobStaysTerminating(t *testing.T) {
+func TestKubernetesProviderDeleteTimesOutWhenPodOrPVCFinalizerKeepsJobTerminating(t *testing.T) {
 	identity := IdentityOf(testAssignment("closed"))
 	jobName, _ := KubernetesResourceNames(identity)
 	jobPath := "/apis/batch/v1/namespaces/workers/jobs/" + jobName
 	labels, annotations := kubernetesIdentityMetadata(identity)
-	var deletes int
+	var deletes, secretRequests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/secrets/") {
+			secretRequests++
+			http.NotFound(w, r)
+			return
+		}
 		if r.URL.Path != jobPath {
 			http.NotFound(w, r)
 			return
@@ -258,6 +384,9 @@ func TestKubernetesProviderDeleteTimesOutWhenJobStaysTerminating(t *testing.T) {
 	}
 	if deletes != 1 {
 		t.Fatalf("Job delete calls = %d, want 1", deletes)
+	}
+	if secretRequests != 0 {
+		t.Fatalf("assignment Secret cleanup ran before foreground Job deletion completed: %d requests", secretRequests)
 	}
 }
 
@@ -362,6 +491,52 @@ func TestKubernetesProviderLeavesSecretForFencedCleanupAfterPermanentlyRejectedJ
 	}
 	if deleted != "" {
 		t.Fatalf("Secret was deleted before its credential could be fenced: %q", deleted)
+	}
+}
+
+func TestKubernetesProviderPersistedStructuredOptionErrorOrder(t *testing.T) {
+	provider := &KubernetesProvider{namespace: "flow", image: "worker:v1", workDir: "/work"}
+	profile := testProfile()
+	profile.ProviderOptions["namespace"] = "flow"
+	profile.ProviderOptions["image"] = "worker:v1"
+	profile.ProviderOptions["work_dir"] = "/work"
+	profile.ProviderOptions["work_volume"] = `{bad`
+	profile.ProviderOptions["resources"] = `{also-bad`
+	var first string
+	for i := 0; i < 20; i++ {
+		_, err := provider.settings(profile)
+		if err == nil {
+			t.Fatal("settings accepted malformed persisted options")
+		}
+		if !strings.Contains(err.Error(), "work_volume") {
+			t.Fatalf("first error = %v, want work_volume", err)
+		}
+		if first == "" {
+			first = err.Error()
+		} else if err.Error() != first {
+			t.Fatalf("nondeterministic errors: %q != %q", err, first)
+		}
+	}
+}
+
+func TestKubernetesProviderPersistedOmissionOverridesCurrentOptionalSettings(t *testing.T) {
+	provider := &KubernetesProvider{
+		namespace: "current", image: "worker:current", workDir: "/current",
+		workVolume:   &config.OrchestratorWorkVolumeConfig{Type: "generic_ephemeral", MountPath: "/current", Size: "5Gi", AccessModes: []string{"ReadWriteOnce"}},
+		resources:    &config.OrchestratorResourceRequirements{Requests: map[string]string{"cpu": "1"}},
+		nodeSelector: map[string]string{"kubernetes.io/os": "linux"},
+	}
+	legacy := testProfile()
+	legacy.ProviderOptions = map[string]string{
+		"namespace": "legacy", "image": "worker:legacy", "work_dir": "/legacy",
+	}
+	settings, err := provider.settings(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.namespace != "legacy" || settings.image != "worker:legacy" || settings.workDir != "/legacy" ||
+		settings.workVolume != nil || settings.resources != nil || settings.nodeSelector != nil {
+		t.Fatalf("legacy settings inherited current optional values: %+v", settings)
 	}
 }
 

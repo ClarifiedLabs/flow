@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"reflect"
 	"strings"
 	"syscall"
 
@@ -171,6 +172,18 @@ func buildProfilesAndProviders(cfg config.ResolvedOrchestrator) ([]orchestrator.
 				"image_pull_policy":               options.ImagePullPolicy,
 				"harness_model_proxy_secret_name": options.HarnessModelProxySecretName,
 			}
+			for key, value := range map[string]any{
+				"work_volume": options.WorkVolume, "resources": options.Resources, "node_selector": options.NodeSelector,
+			} {
+				if reflect.ValueOf(value).IsNil() {
+					continue
+				}
+				encoded, err := encodeProviderOption(value)
+				if err != nil {
+					return nil, nil, fmt.Errorf("profile %s: encode %s: %w", configured.Name, key, err)
+				}
+				profile.ProviderOptions[key] = encoded
+			}
 		case "darwin":
 			if configured.Darwin == nil {
 				return nil, nil, fmt.Errorf("profile %s: darwin configuration is missing", configured.Name)
@@ -195,18 +208,16 @@ func buildProfilesAndProviders(cfg config.ResolvedOrchestrator) ([]orchestrator.
 
 func providerFromProfile(profile orchestrator.Profile) (orchestrator.Provider, error) {
 	var workerArgs []string
-	if raw := strings.TrimSpace(profile.ProviderOptions["worker_args"]); raw != "" {
-		if err := json.Unmarshal([]byte(raw), &workerArgs); err != nil {
-			return nil, fmt.Errorf("decode persisted worker args: %w", err)
-		}
+	if err := decodeProviderOption(profile.ProviderOptions, "worker_args", &workerArgs); err != nil {
+		return nil, err
 	}
 	switch profile.ProviderType {
 	case "kubernetes":
-		return orchestrator.NewInClusterKubernetesProvider(orchestrator.KubernetesProviderOptions{
-			Namespace: profile.ProviderOptions["namespace"], Image: profile.ProviderOptions["image"],
-			ServiceAccount: profile.ProviderOptions["service_account"], WorkDir: profile.ProviderOptions["work_dir"],
-			WorkerArgs: workerArgs, ImagePullPolicy: profile.ProviderOptions["image_pull_policy"],
-		})
+		options, err := kubernetesProviderOptionsFromProfile(profile, workerArgs)
+		if err != nil {
+			return nil, err
+		}
+		return orchestrator.NewInClusterKubernetesProvider(options)
 	case "darwin":
 		return orchestrator.NewDarwinProcessProvider(orchestrator.DarwinProcessProviderOptions{
 			StateDir: profile.ProviderOptions["state_dir"], Executable: profile.ProviderOptions["executable"],
@@ -217,9 +228,81 @@ func providerFromProfile(profile orchestrator.Profile) (orchestrator.Provider, e
 	}
 }
 
+func kubernetesProviderOptionsFromProfile(profile orchestrator.Profile, workerArgs []string) (orchestrator.KubernetesProviderOptions, error) {
+	for _, key := range []string{"namespace", "image", "work_dir"} {
+		if strings.TrimSpace(profile.ProviderOptions[key]) == "" {
+			return orchestrator.KubernetesProviderOptions{}, fmt.Errorf("invalid persisted kubernetes option %s: value is required", key)
+		}
+	}
+	persisted := config.OrchestratorKubernetesConfig{
+		Namespace: profile.ProviderOptions["namespace"], Image: profile.ProviderOptions["image"],
+		ServiceAccount: profile.ProviderOptions["service_account"], WorkDir: profile.ProviderOptions["work_dir"],
+		WorkerArgs: workerArgs, ImagePullPolicy: profile.ProviderOptions["image_pull_policy"],
+		HarnessModelProxySecretName: profile.ProviderOptions["harness_model_proxy_secret_name"],
+	}
+	if err := decodeStructuredProviderOption(profile.ProviderOptions, "work_volume", &persisted.WorkVolume); err != nil {
+		return orchestrator.KubernetesProviderOptions{}, err
+	}
+	if err := decodeStructuredProviderOption(profile.ProviderOptions, "resources", &persisted.Resources); err != nil {
+		return orchestrator.KubernetesProviderOptions{}, err
+	}
+	if err := decodeStructuredProviderOption(profile.ProviderOptions, "node_selector", &persisted.NodeSelector); err != nil {
+		return orchestrator.KubernetesProviderOptions{}, err
+	}
+	resolved, err := config.ResolveOrchestratorKubernetesConfig(persisted)
+	if err != nil {
+		return orchestrator.KubernetesProviderOptions{}, fmt.Errorf("validate persisted kubernetes options: %w", err)
+	}
+	return orchestrator.KubernetesProviderOptions{
+		Namespace: resolved.Namespace, Image: resolved.Image, ServiceAccount: resolved.ServiceAccount,
+		WorkDir: resolved.WorkDir, WorkerArgs: resolved.WorkerArgs, ImagePullPolicy: resolved.ImagePullPolicy,
+		HarnessModelProxySecretName: resolved.HarnessModelProxySecretName,
+		WorkVolume:                  resolved.WorkVolume, Resources: resolved.Resources, NodeSelector: resolved.NodeSelector,
+	}, nil
+}
+
 func encodeStringSlice(values []string) string {
 	data, _ := json.Marshal(values)
 	return string(data)
+}
+
+func encodeProviderOption(value any) (string, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func decodeProviderOption(options map[string]string, key string, target any) error {
+	raw, exists := options[key]
+	if !exists {
+		return nil
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fmt.Errorf("decode persisted %s: value is empty", key)
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("decode persisted %s: %w", key, err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("decode persisted %s: trailing JSON data", key)
+	}
+	return nil
+}
+
+func decodeStructuredProviderOption(options map[string]string, key string, target any) error {
+	raw, exists := options[key]
+	if !exists {
+		return nil
+	}
+	if strings.TrimSpace(raw) == "null" {
+		return fmt.Errorf("decode persisted %s: value is null", key)
+	}
+	return decodeProviderOption(options, key, target)
 }
 
 func printUsage(w io.Writer) {

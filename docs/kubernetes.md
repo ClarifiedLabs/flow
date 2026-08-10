@@ -161,6 +161,22 @@ profiles:
       service_account: flow-worker
       work_dir: /var/lib/flow-worker
       image_pull_policy: IfNotPresent
+      work_volume:
+        type: generic_ephemeral
+        mount_path: /var/lib/flow-worker
+        size: 20Gi
+        access_modes: [ReadWriteOnce]
+        # Omit to use the cluster default; otherwise use a class supplied by
+        # your cluster rather than a cloud-provider-specific example name.
+        # storage_class_name: your-cluster-storage-class
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+        limits:
+          memory: 4Gi
+      node_selector:
+        kubernetes.io/os: linux
 
 metrics:
   listen: :8422
@@ -192,7 +208,32 @@ cleanup safe to retry. Keep the generated Secret private: it contains the direct
 worker bearer token.
 
 Profiles are independent provider configurations and may use different images,
-service accounts, pull policies, and Harness model-proxy Secrets. Configured
+service accounts, pull policies, work volumes, resource requests/limits, node
+selectors, and Harness model-proxy Secrets. Omitting `work_volume`, `resources`,
+and `node_selector` preserves the prior Job shape: an unbounded `emptyDir` is
+mounted at `work_dir`, and no container resources or node selector are emitted.
+Resource names are limited to `cpu`, `memory`, and `ephemeral-storage`; when a
+resource has both a request and a limit, the request must not exceed the limit.
+Quantities use Kubernetes parsing; decimal exponent magnitude is capped at 1000
+to bound configuration-validation cost.
+An explicit `work_volume.type: empty_dir` accepts an optional `size_limit`;
+Kubernetes uses it as `emptyDir.sizeLimit`, not as reserved capacity, and local
+ephemeral storage pressure can still cause eviction. `generic_ephemeral` requires
+`size`, defaults `access_modes` to `[ReadWriteOnce]`, and creates a PVC template
+owned by the worker Pod. `mount_path` defaults to `work_dir`; when set above it,
+`work_dir` must remain nested beneath it. Both paths must be absolute and clean,
+must not be `/`, and must not overlap the read-only worker configuration at
+`/var/run/flow`. Supported writable access modes are `ReadWriteOnce`,
+`ReadWriteMany`, and `ReadWriteOncePod`; the selected CSI driver and StorageClass
+must actually support the requested mode. `ReadWriteOncePod` must be the only
+mode when selected.
+
+For generic ephemeral storage, omit `storage_class_name` only when the cluster's
+default StorageClass has the desired provisioning, topology, expansion, and
+reclaim behavior. Otherwise set it to any dynamically provisioning StorageClass
+installed and governed by your cluster operator; Flow deliberately does not
+assume provider-specific class names. Admission policy, quotas, LimitRanges, scheduler capacity, and CSI
+provisioning can still reject or delay a Job even after local validation. Configured
 `agent.harness.*` labels are treated as requirements, not facts: the worker
 removes them from static labels, probes Harness, and reports its live model
 catalog. An explicit job model must appear by qualified ID in that catalog.
@@ -287,15 +328,34 @@ keeps the replayable history outbox outside `work_dir/jobs` (by default at
 until the coordinator acknowledges final publication. The outbox alone cannot
 reconstruct a workspace or Harness source directory that has disappeared.
 
-The current Kubernetes provider profile sets `work_dir: /var/lib/flow-worker`,
-but generated one-shot Jobs do not mount a PVC or another durable volume and the
-profile schema has no volume-mount option. Their writable Pod filesystem therefore
-does **not** preserve pending history across Pod deletion/replacement. S3 protects
-only bytes already uploaded to the coordinator. Do not claim cross-Pod full-fidelity
-history durability from the reference manifests until provider-managed durable
-worker storage is implemented; avoid deleting a worker Pod with a pending capture
-and treat such loss as evidence loss requiring recovery or an explicit owner
-waiver.
+The Kubernetes provider mounts `work_volume.mount_path` from either `empty_dir`
+or a generic ephemeral PVC and writes the possibly nested `work_dir` into
+`worker.yaml`. Mounting `/home/flow` with `work_dir: /home/flow/work` also places
+project work, history outbox data, hermetic task homes and their Android/tool
+caches, and the shipped worker image's rootless Docker data at
+`/home/flow/.local/share/docker` on the same large volume.
+
+Both volume modes follow the **Pod** lifecycle: they survive container restarts
+in that Pod, but Kubernetes deletes their contents or generated PVC when the Pod
+is deleted. A generic ephemeral PVC may offer different capacity, performance,
+and topology than node-local `emptyDir`; it is not assignment storage durable
+across Pod replacement. `emptyDir.sizeLimit` is also not a reservation and may
+compete with other node ephemeral storage.
+
+Consequently neither mode preserves pending history across Pod deletion or a
+replacement Job. S3 protects only bytes already uploaded to the coordinator.
+Avoid deleting a worker Pod with a pending capture and treat such loss as
+evidence loss requiring recovery or an explicit owner waiver. A future durable
+assignment-volume design would need independent PVC ownership, fencing,
+reattachment, retention, and cleanup semantics; generic ephemeral volumes do not
+provide those guarantees.
+
+Flow deletes worker Jobs with foreground propagation, so the Job controller first
+removes the Pod and Kubernetes' generic ephemeral volume controller then removes
+the Pod-owned PVC. Flow needs no PVC RBAC for this process. A CSI, Pod, PV, or PVC
+finalizer that remains stuck can delay Job deletion and storage reclamation even
+though Flow has initiated cleanup; Flow only removes the assignment Secret after
+foreground Job deletion completes.
 
 See [Full-fidelity execution history](history.md) for capture boundaries, outbox
 sizing, recovery, authorization, and waiver consequences.

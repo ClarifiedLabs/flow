@@ -18,42 +18,55 @@ import (
 	"reflect"
 	"strings"
 	"time"
+
+	"github.com/ClarifiedLabs/flow/internal/config"
 )
 
 const (
 	serviceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	serviceAccountCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 	workerConfigMountPath   = "/var/run/flow/worker.yaml"
+	genericWorkVolumeName   = "work"
+	// The Job controller appends '-' and five generated characters to a Pod name.
+	jobPodGeneratedSuffixLength = 6
 )
 
 // KubernetesProviderOptions configures a stdlib-only Kubernetes REST provider.
 type KubernetesProviderOptions struct {
-	BaseURL         string
-	Token           string
-	TokenFile       string
-	HTTPClient      *http.Client
-	Namespace       string
-	Image           string
-	ServiceAccount  string
-	WorkDir         string
-	WorkerArgs      []string
-	ImagePullPolicy string
-	DeletionTimeout time.Duration
+	BaseURL                     string
+	Token                       string
+	TokenFile                   string
+	HTTPClient                  *http.Client
+	Namespace                   string
+	Image                       string
+	ServiceAccount              string
+	WorkDir                     string
+	WorkerArgs                  []string
+	ImagePullPolicy             string
+	HarnessModelProxySecretName string
+	WorkVolume                  *config.OrchestratorWorkVolumeConfig
+	Resources                   *config.OrchestratorResourceRequirements
+	NodeSelector                map[string]string
+	DeletionTimeout             time.Duration
 }
 
 // KubernetesProvider creates one Secret and one batch/v1 Job per one-shot slot.
 type KubernetesProvider struct {
-	baseURL         string
-	token           string
-	tokenFile       string
-	client          *http.Client
-	namespace       string
-	image           string
-	serviceAccount  string
-	workDir         string
-	workerArgs      []string
-	imagePullPolicy string
-	deletionTimeout time.Duration
+	baseURL                     string
+	token                       string
+	tokenFile                   string
+	client                      *http.Client
+	namespace                   string
+	image                       string
+	serviceAccount              string
+	workDir                     string
+	workerArgs                  []string
+	imagePullPolicy             string
+	harnessModelProxySecretName string
+	workVolume                  *config.OrchestratorWorkVolumeConfig
+	resources                   *config.OrchestratorResourceRequirements
+	nodeSelector                map[string]string
+	deletionTimeout             time.Duration
 }
 
 // NewKubernetesProvider constructs a provider for an explicit API endpoint.
@@ -77,7 +90,9 @@ func NewKubernetesProvider(options KubernetesProviderOptions) (*KubernetesProvid
 		namespace: options.Namespace, image: strings.TrimSpace(options.Image),
 		serviceAccount: strings.TrimSpace(options.ServiceAccount), workDir: strings.TrimSpace(options.WorkDir),
 		workerArgs: append([]string(nil), options.WorkerArgs...), imagePullPolicy: strings.TrimSpace(options.ImagePullPolicy),
-		deletionTimeout: options.DeletionTimeout,
+		harnessModelProxySecretName: strings.TrimSpace(options.HarnessModelProxySecretName),
+		workVolume:                  cloneKubernetesWorkVolume(options.WorkVolume), resources: cloneKubernetesResources(options.Resources),
+		nodeSelector: cloneKubernetesStringMap(options.NodeSelector), deletionTimeout: options.DeletionTimeout,
 	}, nil
 }
 
@@ -182,20 +197,39 @@ func (k *KubernetesProvider) Launch(ctx context.Context, request LaunchRequest) 
 	job.Spec.Template.Spec.ServiceAccountName = settings.serviceAccount
 	job.Spec.Template.Spec.AutomountServiceAccountToken = &automountToken
 	job.Spec.Template.Spec.EnableServiceLinks = &enableServiceLinks
+	job.Spec.Template.Spec.NodeSelector = cloneKubernetesStringMap(settings.nodeSelector)
 	job.Spec.Template.Spec.SecurityContext = kubernetesPodSecurityContext{
 		RunAsNonRoot: &runAsNonRoot, RunAsUser: &runAsUser, RunAsGroup: &runAsGroup, FSGroup: &fsGroup, SeccompProfile: kubernetesSeccompProfile{Type: "RuntimeDefault"},
 	}
+	workVolumeName := "worker-work" // Preserve the exact legacy manifest when work_volume is omitted.
+	workVolume := kubernetesVolume{Name: workVolumeName, EmptyDir: &kubernetesEmptyDirVolume{}}
+	if settings.workVolume != nil {
+		workVolumeName = genericWorkVolumeName // Keeps <Job pod name>-<volume name> within the 63-character DNS label invariant.
+		workVolume = kubernetesVolume{Name: workVolumeName}
+		switch settings.workVolume.Type {
+		case "empty_dir":
+			workVolume.EmptyDir = &kubernetesEmptyDirVolume{SizeLimit: settings.workVolume.SizeLimit}
+		case "generic_ephemeral":
+			workVolume.Ephemeral = &kubernetesEphemeralVolume{VolumeClaimTemplate: kubernetesPersistentVolumeClaimTemplate{
+				Metadata: kubernetesMetadata{Labels: cloneKubernetesStringMap(labels)},
+				Spec: kubernetesPersistentVolumeClaimSpec{
+					AccessModes: append([]string(nil), settings.workVolume.AccessModes...), StorageClassName: settings.workVolume.StorageClassName,
+					Resources: kubernetesResourceRequirements{Requests: map[string]string{"storage": settings.workVolume.Size}},
+				},
+			}}
+		}
+	}
 	job.Spec.Template.Spec.Containers = []kubernetesContainer{{
 		Name: "worker", Image: settings.image, ImagePullPolicy: settings.imagePullPolicy, Command: command,
-		Env: harnessModelProxyEnvironment(settings.harnessModelProxySecretName),
+		Env: harnessModelProxyEnvironment(settings.harnessModelProxySecretName), Resources: kubernetesResources(settings.resources),
 		VolumeMounts: []kubernetesVolumeMount{
 			{Name: "worker-config", MountPath: "/var/run/flow", ReadOnly: true},
-			{Name: "worker-work", MountPath: settings.workDir},
+			{Name: workVolumeName, MountPath: kubernetesWorkVolumeMountPath(settings.workVolume, settings.workDir)},
 		},
 	}}
 	job.Spec.Template.Spec.Volumes = []kubernetesVolume{
 		{Name: "worker-config", Secret: &kubernetesSecretVolume{SecretName: secretName, DefaultMode: &mode}},
-		{Name: "worker-work", EmptyDir: &kubernetesEmptyDirVolume{}},
+		workVolume,
 	}
 	if err := k.createOrVerifyOwnedJob(ctx, settings.namespace, job, request.Identity); err != nil {
 		// Leave the owned Secret as an inspectable incomplete resource. The
@@ -289,34 +323,99 @@ type kubernetesSettings struct {
 	namespace, image, serviceAccount, workDir, imagePullPolicy string
 	harnessModelProxySecretName                                string
 	workerArgs                                                 []string
+	workVolume                                                 *config.OrchestratorWorkVolumeConfig
+	resources                                                  *config.OrchestratorResourceRequirements
+	nodeSelector                                               map[string]string
 }
 
 func (k *KubernetesProvider) settings(profile Profile) (kubernetesSettings, error) {
-	settings := kubernetesSettings{
-		namespace: option(profile, "namespace", k.namespace), image: option(profile, "image", k.image),
-		serviceAccount: option(profile, "service_account", k.serviceAccount), workDir: option(profile, "work_dir", k.workDir),
-		imagePullPolicy:             option(profile, "image_pull_policy", k.imagePullPolicy),
-		harnessModelProxySecretName: strings.TrimSpace(profile.ProviderOptions["harness_model_proxy_secret_name"]),
-		workerArgs:                  append([]string(nil), k.workerArgs...),
+	persisted := config.OrchestratorKubernetesConfig{
+		Namespace: k.namespace, Image: k.image, ServiceAccount: k.serviceAccount, WorkDir: k.workDir,
+		ImagePullPolicy: k.imagePullPolicy, HarnessModelProxySecretName: k.harnessModelProxySecretName,
+		WorkerArgs: append([]string(nil), k.workerArgs...), WorkVolume: cloneKubernetesWorkVolume(k.workVolume),
+		Resources: cloneKubernetesResources(k.resources), NodeSelector: cloneKubernetesStringMap(k.nodeSelector),
 	}
-	if raw := strings.TrimSpace(profile.ProviderOptions["worker_args"]); raw != "" {
-		if err := json.Unmarshal([]byte(raw), &settings.workerArgs); err != nil {
-			return settings, fmt.Errorf("provider option worker_args must be a JSON string array: %w", err)
+	if hasKubernetesProviderDescriptor(profile.ProviderOptions) {
+		for _, key := range []string{"namespace", "image", "work_dir"} {
+			if strings.TrimSpace(profile.ProviderOptions[key]) == "" {
+				return kubernetesSettings{}, fmt.Errorf("invalid persisted Kubernetes provider option %s: value is required", key)
+			}
+		}
+		persisted = config.OrchestratorKubernetesConfig{
+			Namespace: profile.ProviderOptions["namespace"], Image: profile.ProviderOptions["image"],
+			ServiceAccount: profile.ProviderOptions["service_account"], WorkDir: profile.ProviderOptions["work_dir"],
+			ImagePullPolicy:             profile.ProviderOptions["image_pull_policy"],
+			HarnessModelProxySecretName: profile.ProviderOptions["harness_model_proxy_secret_name"],
 		}
 	}
-	if settings.namespace == "" || settings.image == "" || settings.workDir == "" {
-		return settings, errors.New("Kubernetes namespace, image, and worker work dir are required")
+	if err := decodeKubernetesProviderOption(profile.ProviderOptions, "worker_args", &persisted.WorkerArgs, false); err != nil {
+		return kubernetesSettings{}, err
 	}
-	if settings.imagePullPolicy == "" {
-		settings.imagePullPolicy = "IfNotPresent"
+	if err := decodeKubernetesProviderOption(profile.ProviderOptions, "work_volume", &persisted.WorkVolume, true); err != nil {
+		return kubernetesSettings{}, err
 	}
-	if settings.serviceAccount == "" {
-		settings.serviceAccount = "default"
+	if err := decodeKubernetesProviderOption(profile.ProviderOptions, "resources", &persisted.Resources, true); err != nil {
+		return kubernetesSettings{}, err
 	}
-	if err := validateWorkerArgs(settings.workerArgs); err != nil {
-		return settings, err
+	if err := decodeKubernetesProviderOption(profile.ProviderOptions, "node_selector", &persisted.NodeSelector, true); err != nil {
+		return kubernetesSettings{}, err
 	}
-	return settings, nil
+	resolved, err := config.ResolveOrchestratorKubernetesConfig(persisted)
+	if err != nil {
+		return kubernetesSettings{}, fmt.Errorf("invalid Kubernetes provider options: %w", err)
+	}
+	if err := validateWorkerArgs(resolved.WorkerArgs); err != nil {
+		return kubernetesSettings{}, err
+	}
+	serviceAccount := resolved.ServiceAccount
+	if serviceAccount == "" {
+		serviceAccount = "default"
+	}
+	return kubernetesSettings{
+		namespace: resolved.Namespace, image: resolved.Image, serviceAccount: serviceAccount,
+		workDir: resolved.WorkDir, imagePullPolicy: resolved.ImagePullPolicy,
+		harnessModelProxySecretName: resolved.HarnessModelProxySecretName, workerArgs: resolved.WorkerArgs,
+		workVolume: resolved.WorkVolume, resources: resolved.Resources, nodeSelector: resolved.NodeSelector,
+	}, nil
+}
+
+func hasKubernetesProviderDescriptor(options map[string]string) bool {
+	for _, key := range []string{
+		"namespace", "image", "service_account", "work_dir", "image_pull_policy", "harness_model_proxy_secret_name",
+		"worker_args", "work_volume", "resources", "node_selector",
+	} {
+		if _, ok := options[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func kubernetesWorkVolumeMountPath(volume *config.OrchestratorWorkVolumeConfig, workDir string) string {
+	if volume == nil {
+		return workDir
+	}
+	return volume.MountPath
+}
+
+func decodeKubernetesProviderOption(options map[string]string, key string, target any, rejectNull bool) error {
+	raw, exists := options[key]
+	if !exists {
+		return nil
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" || rejectNull && raw == "null" {
+		return fmt.Errorf("provider option %s is empty or null", key)
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("provider option %s is invalid JSON: %w", key, err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("provider option %s has trailing JSON data", key)
+	}
+	return nil
 }
 
 func harnessModelProxyEnvironment(secretName string) []kubernetesEnvVar {
@@ -341,6 +440,44 @@ func option(profile Profile, key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func cloneKubernetesStringMap(value map[string]string) map[string]string {
+	if value == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(value))
+	for key, item := range value {
+		cloned[key] = item
+	}
+	return cloned
+}
+
+func cloneKubernetesWorkVolume(value *config.OrchestratorWorkVolumeConfig) *config.OrchestratorWorkVolumeConfig {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	cloned.AccessModes = append([]string(nil), value.AccessModes...)
+	return &cloned
+}
+
+func cloneKubernetesResources(value *config.OrchestratorResourceRequirements) *config.OrchestratorResourceRequirements {
+	if value == nil {
+		return nil
+	}
+	return &config.OrchestratorResourceRequirements{
+		Requests: cloneKubernetesStringMap(value.Requests), Limits: cloneKubernetesStringMap(value.Limits),
+	}
+}
+
+func kubernetesResources(value *config.OrchestratorResourceRequirements) *kubernetesResourceRequirements {
+	if value == nil {
+		return nil
+	}
+	return &kubernetesResourceRequirements{
+		Requests: cloneKubernetesStringMap(value.Requests), Limits: cloneKubernetesStringMap(value.Limits),
+	}
 }
 
 func (k *KubernetesProvider) createOrReplaceOwnedSecret(ctx context.Context, namespace string, secret kubernetesSecret, identity AssignmentIdentity) error {
@@ -539,11 +676,15 @@ func identityHash(identity AssignmentIdentity) string {
 }
 
 func kubernetesIdentityMetadata(identity AssignmentIdentity) (map[string]string, map[string]string) {
+	profileLabel := dnsSlug(identity.ProfileName)
+	if len(profileLabel) > 63 {
+		profileLabel = strings.TrimRight(profileLabel[:54], "-") + "-" + identityHash(identity)[:8]
+	}
 	labels := map[string]string{
 		"app.kubernetes.io/name":              "flow-worker",
 		"app.kubernetes.io/managed-by":        "flow-orchestrator",
 		"flow.clarifiedlabs.com/assignment":   identityHash(identity)[:24],
-		"flow.clarifiedlabs.com/profile-name": dnsSlug(identity.ProfileName),
+		"flow.clarifiedlabs.com/profile-name": profileLabel,
 	}
 	annotations := map[string]string{
 		"flow.clarifiedlabs.com/assignment-id":       identity.AssignmentID,
@@ -588,17 +729,19 @@ type kubernetesJob struct {
 				RestartPolicy                string                       `json:"restartPolicy"`
 				Containers                   []kubernetesContainer        `json:"containers"`
 				Volumes                      []kubernetesVolume           `json:"volumes"`
+				NodeSelector                 map[string]string            `json:"nodeSelector,omitempty"`
 			} `json:"spec"`
 		} `json:"template"`
 	} `json:"spec"`
 }
 type kubernetesContainer struct {
-	Name            string                  `json:"name"`
-	Image           string                  `json:"image"`
-	ImagePullPolicy string                  `json:"imagePullPolicy,omitempty"`
-	Command         []string                `json:"command"`
-	Env             []kubernetesEnvVar      `json:"env,omitempty"`
-	VolumeMounts    []kubernetesVolumeMount `json:"volumeMounts"`
+	Name            string                          `json:"name"`
+	Image           string                          `json:"image"`
+	ImagePullPolicy string                          `json:"imagePullPolicy,omitempty"`
+	Command         []string                        `json:"command"`
+	Env             []kubernetesEnvVar              `json:"env,omitempty"`
+	Resources       *kubernetesResourceRequirements `json:"resources,omitempty"`
+	VolumeMounts    []kubernetesVolumeMount         `json:"volumeMounts"`
 }
 type kubernetesEnvVar struct {
 	Name      string                 `json:"name"`
@@ -627,11 +770,30 @@ type kubernetesVolumeMount struct {
 	ReadOnly  bool   `json:"readOnly"`
 }
 type kubernetesVolume struct {
-	Name     string                    `json:"name"`
-	Secret   *kubernetesSecretVolume   `json:"secret,omitempty"`
-	EmptyDir *kubernetesEmptyDirVolume `json:"emptyDir,omitempty"`
+	Name      string                     `json:"name"`
+	Secret    *kubernetesSecretVolume    `json:"secret,omitempty"`
+	EmptyDir  *kubernetesEmptyDirVolume  `json:"emptyDir,omitempty"`
+	Ephemeral *kubernetesEphemeralVolume `json:"ephemeral,omitempty"`
 }
-type kubernetesEmptyDirVolume struct{}
+type kubernetesEmptyDirVolume struct {
+	SizeLimit string `json:"sizeLimit,omitempty"`
+}
+type kubernetesEphemeralVolume struct {
+	VolumeClaimTemplate kubernetesPersistentVolumeClaimTemplate `json:"volumeClaimTemplate"`
+}
+type kubernetesPersistentVolumeClaimTemplate struct {
+	Metadata kubernetesMetadata                  `json:"metadata"`
+	Spec     kubernetesPersistentVolumeClaimSpec `json:"spec"`
+}
+type kubernetesPersistentVolumeClaimSpec struct {
+	AccessModes      []string                       `json:"accessModes"`
+	StorageClassName string                         `json:"storageClassName,omitempty"`
+	Resources        kubernetesResourceRequirements `json:"resources"`
+}
+type kubernetesResourceRequirements struct {
+	Requests map[string]string `json:"requests,omitempty"`
+	Limits   map[string]string `json:"limits,omitempty"`
+}
 type kubernetesSecretVolume struct {
 	SecretName  string `json:"secretName"`
 	DefaultMode *int32 `json:"defaultMode,omitempty"`

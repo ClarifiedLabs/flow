@@ -22,6 +22,27 @@ profiles:
       image: ghcr.io/clarifiedlabs/flow-worker:latest
       image_pull_policy: Always
       work_dir: /flow/work
+      # empty_dir is Pod-scoped scratch space. size_limit is not a reservation,
+      # and node ephemeral-storage pressure can still evict the Pod.
+      work_volume:
+        type: empty_dir
+        mount_path: /flow
+        size_limit: 20Gi
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+        limits:
+          memory: 4Gi
+      node_selector:
+        kubernetes.io/os: linux
+      # For dynamically provisioned Pod-scoped storage instead, use:
+      # work_volume:
+      #   type: generic_ephemeral
+      #   mount_path: /flow
+      #   size: 50Gi
+      #   access_modes: [ReadWriteOnce]
+      #   storage_class_name: your-cluster-storage-class # omit for cluster default
       # Provision this Secret out of band; it supplies worker proxy credentials.
       harness_model_proxy_secret_name: flow-harness-model-proxy
 

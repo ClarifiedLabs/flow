@@ -4,13 +4,17 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
 	"github.com/ClarifiedLabs/flow/internal/metrics"
 	"github.com/ClarifiedLabs/flow/internal/scheduler"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // DefaultTelemetryListen is the shared default listen address for the
@@ -62,13 +66,33 @@ type OrchestratorProfileConfig struct {
 
 // OrchestratorKubernetesConfig configures Kubernetes Job workers for a profile.
 type OrchestratorKubernetesConfig struct {
-	Namespace                   string   `json:"namespace" yaml:"namespace"`
-	Image                       string   `json:"image" yaml:"image"`
-	ServiceAccount              string   `json:"service_account" yaml:"service_account"`
-	WorkDir                     string   `json:"work_dir" yaml:"work_dir"`
-	WorkerArgs                  []string `json:"worker_args" yaml:"worker_args"`
-	ImagePullPolicy             string   `json:"image_pull_policy" yaml:"image_pull_policy"`
-	HarnessModelProxySecretName string   `json:"harness_model_proxy_secret_name" yaml:"harness_model_proxy_secret_name"`
+	Namespace                   string                            `json:"namespace" yaml:"namespace"`
+	Image                       string                            `json:"image" yaml:"image"`
+	ServiceAccount              string                            `json:"service_account" yaml:"service_account"`
+	WorkDir                     string                            `json:"work_dir" yaml:"work_dir"`
+	WorkerArgs                  []string                          `json:"worker_args" yaml:"worker_args"`
+	ImagePullPolicy             string                            `json:"image_pull_policy" yaml:"image_pull_policy"`
+	HarnessModelProxySecretName string                            `json:"harness_model_proxy_secret_name" yaml:"harness_model_proxy_secret_name"`
+	WorkVolume                  *OrchestratorWorkVolumeConfig     `json:"work_volume,omitempty" yaml:"work_volume,omitempty"`
+	Resources                   *OrchestratorResourceRequirements `json:"resources,omitempty" yaml:"resources,omitempty"`
+	NodeSelector                map[string]string                 `json:"node_selector,omitempty" yaml:"node_selector,omitempty"`
+}
+
+// OrchestratorWorkVolumeConfig describes provider-neutral scratch storage.
+// EmptyDir uses SizeLimit; GenericEphemeral uses Size as its PVC storage request.
+type OrchestratorWorkVolumeConfig struct {
+	Type             string   `json:"type" yaml:"type"`
+	MountPath        string   `json:"mount_path,omitempty" yaml:"mount_path,omitempty"`
+	SizeLimit        string   `json:"size_limit,omitempty" yaml:"size_limit,omitempty"`
+	Size             string   `json:"size,omitempty" yaml:"size,omitempty"`
+	StorageClassName string   `json:"storage_class_name,omitempty" yaml:"storage_class_name,omitempty"`
+	AccessModes      []string `json:"access_modes,omitempty" yaml:"access_modes,omitempty"`
+}
+
+// OrchestratorResourceRequirements is a provider-neutral resource-list pair.
+type OrchestratorResourceRequirements struct {
+	Requests map[string]string `json:"requests,omitempty" yaml:"requests,omitempty"`
+	Limits   map[string]string `json:"limits,omitempty" yaml:"limits,omitempty"`
 }
 
 // OrchestratorDarwinConfig configures local Darwin process workers for a profile.
@@ -117,6 +141,9 @@ type ResolvedOrchestratorKubernetesConfig struct {
 	WorkerArgs                  []string
 	ImagePullPolicy             string
 	HarnessModelProxySecretName string
+	WorkVolume                  *OrchestratorWorkVolumeConfig
+	Resources                   *OrchestratorResourceRequirements
+	NodeSelector                map[string]string
 }
 
 // ResolvedOrchestratorDarwinConfig is a default-applied Darwin profile.
@@ -233,6 +260,8 @@ func (c OrchestratorConfig) Resolve() (ResolvedOrchestrator, error) {
 				ServiceAccount: profile.Kubernetes.ServiceAccount, WorkDir: profile.Kubernetes.WorkDir,
 				WorkerArgs: append([]string(nil), profile.Kubernetes.WorkerArgs...), ImagePullPolicy: profile.Kubernetes.ImagePullPolicy,
 				HarnessModelProxySecretName: profile.Kubernetes.HarnessModelProxySecretName,
+				WorkVolume:                  cloneWorkVolume(profile.Kubernetes.WorkVolume), Resources: cloneResourceRequirements(profile.Kubernetes.Resources),
+				NodeSelector: cloneStringMap(profile.Kubernetes.NodeSelector),
 			}
 		}
 		if profile.Darwin != nil {
@@ -437,6 +466,23 @@ func normalizeProfileBuckets(values []string) ([]string, error) {
 	return buckets, nil
 }
 
+// ResolveOrchestratorKubernetesConfig validates and default-applies a
+// Kubernetes provider block. It is also used to reject corrupted persisted
+// provider options before reconstructing a provider.
+func ResolveOrchestratorKubernetesConfig(cfg OrchestratorKubernetesConfig) (ResolvedOrchestratorKubernetesConfig, error) {
+	normalized, err := normalizeKubernetesConfig(cfg)
+	if err != nil {
+		return ResolvedOrchestratorKubernetesConfig{}, err
+	}
+	return ResolvedOrchestratorKubernetesConfig{
+		Namespace: normalized.Namespace, Image: normalized.Image, ServiceAccount: normalized.ServiceAccount,
+		WorkDir: normalized.WorkDir, WorkerArgs: append([]string(nil), normalized.WorkerArgs...),
+		ImagePullPolicy: normalized.ImagePullPolicy, HarnessModelProxySecretName: normalized.HarnessModelProxySecretName,
+		WorkVolume: cloneWorkVolume(normalized.WorkVolume), Resources: cloneResourceRequirements(normalized.Resources),
+		NodeSelector: cloneStringMap(normalized.NodeSelector),
+	}, nil
+}
+
 func normalizeKubernetesConfig(cfg OrchestratorKubernetesConfig) (OrchestratorKubernetesConfig, error) {
 	cfg.Namespace = strings.TrimSpace(cfg.Namespace)
 	if cfg.Namespace == "" {
@@ -450,8 +496,9 @@ func normalizeKubernetesConfig(cfg OrchestratorKubernetesConfig) (OrchestratorKu
 	cfg.WorkDir = strings.TrimSpace(cfg.WorkDir)
 	if cfg.WorkDir == "" {
 		cfg.WorkDir = defaultKubernetesWorkDir
-	} else {
-		cfg.WorkDir = cleanRequiredPath(cfg.WorkDir)
+	}
+	if err := validateKubernetesWorkPath("work_dir", cfg.WorkDir); err != nil {
+		return OrchestratorKubernetesConfig{}, err
 	}
 	cfg.WorkerArgs = normalizeWorkerArgs(cfg.WorkerArgs)
 	cfg.HarnessModelProxySecretName = strings.TrimSpace(cfg.HarnessModelProxySecretName)
@@ -471,10 +518,254 @@ func normalizeKubernetesConfig(cfg OrchestratorKubernetesConfig) (OrchestratorKu
 	default:
 		return OrchestratorKubernetesConfig{}, fmt.Errorf("invalid image_pull_policy %q", cfg.ImagePullPolicy)
 	}
+	var err error
+	cfg.WorkVolume, err = normalizeWorkVolume(cfg.WorkVolume, cfg.WorkDir)
+	if err != nil {
+		return OrchestratorKubernetesConfig{}, fmt.Errorf("work_volume: %w", err)
+	}
+	cfg.Resources, err = normalizeResourceRequirements(cfg.Resources)
+	if err != nil {
+		return OrchestratorKubernetesConfig{}, fmt.Errorf("resources: %w", err)
+	}
+	cfg.NodeSelector, err = normalizeKubernetesLabels(cfg.NodeSelector)
+	if err != nil {
+		return OrchestratorKubernetesConfig{}, fmt.Errorf("node_selector: %w", err)
+	}
 	return cfg, nil
 }
 
+func normalizeWorkVolume(cfg *OrchestratorWorkVolumeConfig, workDir string) (*OrchestratorWorkVolumeConfig, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	result := *cfg
+	result.Type = strings.ToLower(strings.TrimSpace(result.Type))
+	result.MountPath = strings.TrimSpace(result.MountPath)
+	result.SizeLimit = strings.TrimSpace(result.SizeLimit)
+	result.Size = strings.TrimSpace(result.Size)
+	result.StorageClassName = strings.TrimSpace(result.StorageClassName)
+	if result.MountPath == "" {
+		result.MountPath = workDir
+	}
+	if err := validateKubernetesWorkPath("mount_path", result.MountPath); err != nil {
+		return nil, err
+	}
+	if workDir != result.MountPath && !strings.HasPrefix(workDir, result.MountPath+"/") {
+		return nil, fmt.Errorf("work_dir %q must be within mount_path %q", workDir, result.MountPath)
+	}
+	switch result.Type {
+	case "empty_dir":
+		if result.Size != "" || result.StorageClassName != "" || len(result.AccessModes) != 0 {
+			return nil, errors.New("empty_dir cannot set size, storage_class_name, or access_modes")
+		}
+		if result.SizeLimit != "" && !validKubernetesQuantity(result.SizeLimit, true) {
+			return nil, fmt.Errorf("size_limit %q is not a positive Kubernetes resource quantity", result.SizeLimit)
+		}
+	case "generic_ephemeral":
+		if result.SizeLimit != "" {
+			return nil, errors.New("generic_ephemeral cannot set size_limit")
+		}
+		if result.Size == "" {
+			return nil, errors.New("generic_ephemeral size is required")
+		}
+		if !validKubernetesQuantity(result.Size, true) {
+			return nil, fmt.Errorf("size %q is not a positive Kubernetes resource quantity", result.Size)
+		}
+		if result.StorageClassName != "" && !validKubernetesDNS1123Subdomain(result.StorageClassName) {
+			return nil, errors.New("storage_class_name must be a DNS-1123 subdomain")
+		}
+		modes, err := normalizeAccessModes(result.AccessModes)
+		if err != nil {
+			return nil, err
+		}
+		result.AccessModes = modes
+	default:
+		return nil, fmt.Errorf("invalid type %q (want empty_dir or generic_ephemeral)", result.Type)
+	}
+	return &result, nil
+}
+
+func validateKubernetesWorkPath(field, value string) error {
+	if !path.IsAbs(value) || path.Clean(value) != value {
+		return fmt.Errorf("%s must be an absolute, clean container path", field)
+	}
+	if value == "/" {
+		return fmt.Errorf("%s must not be /", field)
+	}
+	const workerConfigDir = "/var/run/flow"
+	if value == workerConfigDir || strings.HasPrefix(value, workerConfigDir+"/") || strings.HasPrefix(workerConfigDir, value+"/") {
+		return fmt.Errorf("%s must not overlap %s", field, workerConfigDir)
+	}
+	return nil
+}
+
+func normalizeAccessModes(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return []string{"ReadWriteOnce"}, nil
+	}
+	canonical := map[string]string{
+		"readwriteonce": "ReadWriteOnce", "readwritemany": "ReadWriteMany",
+		"readwriteoncepod": "ReadWriteOncePod",
+	}
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		mode, ok := canonical[strings.ToLower(strings.TrimSpace(raw))]
+		if !ok {
+			return nil, fmt.Errorf("invalid access mode %q", raw)
+		}
+		if _, ok := seen[mode]; ok {
+			return nil, fmt.Errorf("duplicate access mode %s", mode)
+		}
+		seen[mode] = struct{}{}
+		result = append(result, mode)
+	}
+	if _, ok := seen["ReadWriteOncePod"]; ok && len(result) != 1 {
+		return nil, errors.New("ReadWriteOncePod must be the only access mode")
+	}
+	return result, nil
+}
+
+func normalizeResourceRequirements(cfg *OrchestratorResourceRequirements) (*OrchestratorResourceRequirements, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	result := &OrchestratorResourceRequirements{}
+	var err error
+	if result.Requests, err = normalizeResourceList(cfg.Requests); err != nil {
+		return nil, fmt.Errorf("requests: %w", err)
+	}
+	if result.Limits, err = normalizeResourceList(cfg.Limits); err != nil {
+		return nil, fmt.Errorf("limits: %w", err)
+	}
+	for _, name := range []string{"cpu", "memory", "ephemeral-storage"} {
+		request, hasRequest := result.Requests[name]
+		limit, hasLimit := result.Limits[name]
+		if !hasRequest || !hasLimit {
+			continue
+		}
+		requestQuantity, _ := parseKubernetesQuantity(request)
+		limitQuantity, _ := parseKubernetesQuantity(limit)
+		if requestQuantity.Cmp(*limitQuantity) > 0 {
+			return nil, fmt.Errorf("requests.%s quantity %q must not exceed limits.%s quantity %q", name, request, name, limit)
+		}
+	}
+	return result, nil
+}
+
+func normalizeResourceList(values map[string]string) (map[string]string, error) {
+	if values == nil {
+		return nil, nil
+	}
+	result := make(map[string]string, len(values))
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, rawKey := range keys {
+		key, value := strings.TrimSpace(rawKey), strings.TrimSpace(values[rawKey])
+		if !supportedKubernetesResourceName(key) {
+			return nil, fmt.Errorf("unsupported resource name %q (supported: cpu, memory, ephemeral-storage)", rawKey)
+		}
+		if !validKubernetesQuantity(value, false) {
+			return nil, fmt.Errorf("%s quantity %q is not a non-negative Kubernetes resource quantity", key, value)
+		}
+		if _, exists := result[key]; exists {
+			return nil, fmt.Errorf("duplicate resource name %q", key)
+		}
+		result[key] = value
+	}
+	return result, nil
+}
+
+func supportedKubernetesResourceName(value string) bool {
+	switch value {
+	case "cpu", "memory", "ephemeral-storage":
+		return true
+	default:
+		return false
+	}
+}
+
+func validKubernetesQuantity(value string, positive bool) bool {
+	quantity, ok := parseKubernetesQuantity(value)
+	return ok && quantity.Sign() >= 0 && (!positive || quantity.Sign() > 0)
+}
+
+func parseKubernetesQuantity(value string) (*resource.Quantity, bool) {
+	if i := strings.IndexAny(value, "eE"); i >= 0 {
+		exponent := value[i+1:]
+		exponent = strings.TrimPrefix(strings.TrimPrefix(exponent, "+"), "-")
+		if exponent != "" && strings.IndexFunc(exponent, func(r rune) bool { return r < '0' || r > '9' }) == -1 {
+			parsed, err := strconv.Atoi(value[i+1:])
+			if err != nil || parsed < -1000 || parsed > 1000 {
+				return nil, false
+			}
+		}
+	}
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil {
+		return nil, false
+	}
+	return &quantity, true
+}
+
+func normalizeKubernetesLabels(values map[string]string) (map[string]string, error) {
+	if values == nil {
+		return nil, nil
+	}
+	result := make(map[string]string, len(values))
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, rawKey := range keys {
+		key, value := strings.TrimSpace(rawKey), strings.TrimSpace(values[rawKey])
+		if !validKubernetesQualifiedName(key) {
+			return nil, fmt.Errorf("invalid Kubernetes label key %q", rawKey)
+		}
+		if !validKubernetesLabelValue(value) {
+			return nil, fmt.Errorf("invalid Kubernetes label value %q for %s", value, key)
+		}
+		if _, exists := result[key]; exists {
+			return nil, fmt.Errorf("duplicate Kubernetes label key %q", key)
+		}
+		result[key] = value
+	}
+	return result, nil
+}
+
+func validKubernetesQualifiedName(value string) bool {
+	parts := strings.Split(value, "/")
+	if len(parts) > 2 || len(parts) == 2 && !validKubernetesDNS1123Subdomain(parts[0]) {
+		return false
+	}
+	return validKubernetesLabelValue(parts[len(parts)-1]) && parts[len(parts)-1] != ""
+}
+
+func validKubernetesLabelValue(value string) bool {
+	if len(value) > 63 {
+		return false
+	}
+	if value == "" {
+		return true
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || i > 0 && i < len(value)-1 && (c == '-' || c == '_' || c == '.')) {
+			return false
+		}
+	}
+	return true
+}
+
 func validKubernetesSecretName(value string) bool {
+	return validKubernetesDNS1123Subdomain(value)
+}
+
+func validKubernetesDNS1123Subdomain(value string) bool {
 	if len(value) == 0 || len(value) > 253 {
 		return false
 	}
@@ -548,9 +839,28 @@ func mustParseDuration(value string) time.Duration {
 }
 
 func cloneStringMap(value map[string]string) map[string]string {
+	if value == nil {
+		return nil
+	}
 	cloned := make(map[string]string, len(value))
 	for key, item := range value {
 		cloned[key] = item
 	}
 	return cloned
+}
+
+func cloneWorkVolume(value *OrchestratorWorkVolumeConfig) *OrchestratorWorkVolumeConfig {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	cloned.AccessModes = append([]string(nil), value.AccessModes...)
+	return &cloned
+}
+
+func cloneResourceRequirements(value *OrchestratorResourceRequirements) *OrchestratorResourceRequirements {
+	if value == nil {
+		return nil
+	}
+	return &OrchestratorResourceRequirements{Requests: cloneStringMap(value.Requests), Limits: cloneStringMap(value.Limits)}
 }

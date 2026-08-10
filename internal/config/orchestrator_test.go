@@ -60,6 +60,15 @@ profiles:
       worker_args: [" --no-metrics ", "--metrics-listen=:9000"]
       image_pull_policy: always
       harness_model_proxy_secret_name: " flow-harness-model-proxy "
+      work_volume:
+        type: generic_ephemeral
+        mount_path: /workspace
+        size: 20Gi
+      resources:
+        requests: {cpu: 500m, memory: 1Gi}
+        limits: {ephemeral-storage: 5Gi}
+      node_selector:
+        kubernetes.io/os: linux
 metrics:
   enabled: false
   listen: ":8422"
@@ -95,6 +104,12 @@ metrics:
 	if !reflect.DeepEqual(profile.Kubernetes.WorkerArgs, []string{"--no-metrics", "--metrics-listen=:9000"}) {
 		t.Fatalf("worker args = %#v", profile.Kubernetes.WorkerArgs)
 	}
+	if profile.Kubernetes.WorkVolume == nil || profile.Kubernetes.WorkVolume.MountPath != "/workspace" || profile.Kubernetes.WorkVolume.Size != "20Gi" ||
+		!reflect.DeepEqual(profile.Kubernetes.WorkVolume.AccessModes, []string{"ReadWriteOnce"}) ||
+		profile.Kubernetes.Resources.Requests["cpu"] != "500m" || profile.Kubernetes.Resources.Limits["ephemeral-storage"] != "5Gi" ||
+		profile.Kubernetes.NodeSelector["kubernetes.io/os"] != "linux" {
+		t.Fatalf("Kubernetes workload settings = %+v", profile.Kubernetes)
+	}
 	if cfg.Metrics.Enabled == nil || *cfg.Metrics.Enabled || cfg.Metrics.Listen != ":8422" {
 		t.Fatalf("metrics = %+v", cfg.Metrics)
 	}
@@ -123,7 +138,14 @@ func TestLoadOrchestratorJSONPreservesCompleteProfileArray(t *testing.T) {
       "provider": "kubernetes",
       "provider_id": "cluster-a",
       "max_concurrency": 2,
-      "kubernetes": {"image": "flow-worker:v1", "worker_args": ["--no-metrics"]}
+      "kubernetes": {
+        "image": "flow-worker:v1",
+        "worker_args": ["--no-metrics"],
+        "work_dir": "/home/flow/work",
+        "work_volume": {"type": "empty_dir", "mount_path": "/home/flow", "size_limit": "10Gi"},
+        "resources": {"requests": {"ephemeral-storage": "1Gi"}},
+        "node_selector": {"kubernetes.io/os": "linux"}
+      }
     },
     {
       "name": "local",
@@ -150,6 +172,11 @@ func TestLoadOrchestratorJSONPreservesCompleteProfileArray(t *testing.T) {
 	}
 	if cfg.Profiles[0].Kubernetes == nil || cfg.Profiles[0].Darwin != nil || cfg.Profiles[1].Darwin == nil || cfg.Profiles[1].Kubernetes != nil {
 		t.Fatalf("profile provider blocks were overlaid: %+v", cfg.Profiles)
+	}
+	linux := cfg.Profiles[0].Kubernetes
+	if linux.WorkVolume == nil || linux.WorkVolume.Type != "empty_dir" || linux.WorkVolume.MountPath != "/home/flow" || linux.WorkVolume.SizeLimit != "10Gi" ||
+		linux.Resources.Requests["ephemeral-storage"] != "1Gi" || linux.NodeSelector["kubernetes.io/os"] != "linux" {
+		t.Fatalf("JSON Kubernetes workload settings = %+v", linux)
 	}
 	resolved, err := cfg.Resolve()
 	if err != nil {
@@ -269,6 +296,77 @@ func TestOrchestratorValidation(t *testing.T) {
 		{"kubernetes config required", func(c *OrchestratorConfig) { c.Profiles[0].Kubernetes = nil }, "requires kubernetes configuration"},
 		{"kubernetes mismatch", func(c *OrchestratorConfig) { c.Profiles[0].Darwin = &OrchestratorDarwinConfig{} }, "cannot use darwin"},
 		{"kubernetes image required", func(c *OrchestratorConfig) { c.Profiles[0].Kubernetes.Image = "" }, "image is required"},
+		{"work dir absolute", func(c *OrchestratorConfig) { c.Profiles[0].Kubernetes.WorkDir = "relative/work" }, "absolute, clean"},
+		{"work dir clean", func(c *OrchestratorConfig) { c.Profiles[0].Kubernetes.WorkDir = "/work/../other" }, "absolute, clean"},
+		{"work dir root", func(c *OrchestratorConfig) { c.Profiles[0].Kubernetes.WorkDir = "/" }, "must not be /"},
+		{"work dir config overlap", func(c *OrchestratorConfig) { c.Profiles[0].Kubernetes.WorkDir = "/var/run" }, "must not overlap"},
+		{"work volume type", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.WorkVolume = &OrchestratorWorkVolumeConfig{Type: "pvc"}
+		}, "invalid type"},
+		{"generic volume size required", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.WorkVolume = &OrchestratorWorkVolumeConfig{Type: "generic_ephemeral"}
+		}, "size is required"},
+		{"empty dir fields", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.WorkVolume = &OrchestratorWorkVolumeConfig{Type: "empty_dir", AccessModes: []string{"ReadWriteOnce"}}
+		}, "cannot set"},
+		{"empty dir size field", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.WorkVolume = &OrchestratorWorkVolumeConfig{Type: "empty_dir", Size: "1Gi"}
+		}, "cannot set size"},
+		{"empty dir quantity", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.WorkVolume = &OrchestratorWorkVolumeConfig{Type: "empty_dir", SizeLimit: "-1Gi"}
+		}, "size_limit"},
+		{"generic size limit", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.WorkVolume = &OrchestratorWorkVolumeConfig{Type: "generic_ephemeral", Size: "1Gi", SizeLimit: "2Gi"}
+		}, "cannot set size_limit"},
+		{"mount path absolute", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.WorkVolume = &OrchestratorWorkVolumeConfig{Type: "empty_dir", MountPath: "work"}
+		}, "absolute, clean"},
+		{"mount path clean", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.WorkVolume = &OrchestratorWorkVolumeConfig{Type: "empty_dir", MountPath: "/home/flow/../work"}
+		}, "absolute, clean"},
+		{"mount path root", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.WorkVolume = &OrchestratorWorkVolumeConfig{Type: "empty_dir", MountPath: "/"}
+		}, "must not be /"},
+		{"mount path config overlap", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.WorkVolume = &OrchestratorWorkVolumeConfig{Type: "empty_dir", MountPath: "/var/run"}
+		}, "must not overlap"},
+		{"work dir outside mount", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.WorkVolume = &OrchestratorWorkVolumeConfig{Type: "empty_dir", MountPath: "/home/flow"}
+			c.Profiles[0].Kubernetes.WorkDir = "/work"
+		}, "must be within"},
+		{"volume access mode", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.WorkVolume = &OrchestratorWorkVolumeConfig{Type: "generic_ephemeral", Size: "1Gi", AccessModes: []string{"ReadSometimes"}}
+		}, "access mode"},
+		{"read-only work volume", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.WorkVolume = &OrchestratorWorkVolumeConfig{Type: "generic_ephemeral", Size: "1Gi", AccessModes: []string{"ReadOnlyMany"}}
+		}, "access mode"},
+		{"ReadWriteOncePod combined", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.WorkVolume = &OrchestratorWorkVolumeConfig{Type: "generic_ephemeral", Size: "1Gi", AccessModes: []string{"ReadWriteOncePod", "ReadWriteOnce"}}
+		}, "only access mode"},
+		{"storage class", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.WorkVolume = &OrchestratorWorkVolumeConfig{Type: "generic_ephemeral", Size: "1Gi", StorageClassName: "NOT_VALID"}
+		}, "storage_class_name"},
+		{"resource quantity", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.Resources = &OrchestratorResourceRequirements{Requests: map[string]string{"cpu": "lots"}}
+		}, "quantity"},
+		{"resource empty quantity", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.Resources = &OrchestratorResourceRequirements{Requests: map[string]string{"memory": ""}}
+		}, "quantity"},
+		{"resource name", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.Resources = &OrchestratorResourceRequirements{Limits: map[string]string{"example.com/gpu": "1"}}
+		}, "unsupported resource name"},
+		{"cpu request exceeds limit", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.Resources = &OrchestratorResourceRequirements{Requests: map[string]string{"cpu": "1001m"}, Limits: map[string]string{"cpu": "1"}}
+		}, "must not exceed"},
+		{"memory request exceeds limit", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.Resources = &OrchestratorResourceRequirements{Requests: map[string]string{"memory": "2Gi"}, Limits: map[string]string{"memory": "1024Mi"}}
+		}, "must not exceed"},
+		{"node selector key", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.NodeSelector = map[string]string{"bad prefix!/node": "linux"}
+		}, "label key"},
+		{"node selector value", func(c *OrchestratorConfig) {
+			c.Profiles[0].Kubernetes.NodeSelector = map[string]string{"kubernetes.io/os": "bad value"}
+		}, "label value"},
 		{"pull policy invalid", func(c *OrchestratorConfig) { c.Profiles[0].Kubernetes.ImagePullPolicy = "Sometimes" }, "invalid image_pull_policy"},
 		{"model proxy Secret name invalid", func(c *OrchestratorConfig) { c.Profiles[0].Kubernetes.HarnessModelProxySecretName = "not valid" }, "harness_model_proxy_secret_name"},
 		{"kubernetes os conflict", func(c *OrchestratorConfig) { c.Profiles[0].Labels = map[string]string{"os": "macos"} }, "conflicts with kubernetes"},
@@ -293,6 +391,76 @@ func TestOrchestratorValidation(t *testing.T) {
 				t.Fatalf("Resolve() error = %v, want substring %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestKubernetesQuantityValidation(t *testing.T) {
+	for _, value := range []string{"0", "-0", "-0.0", "+1", ".5", "500m", "1Ki", "5e-1", "1E3", "1e100", "1n", "1E"} {
+		if !validKubernetesQuantity(value, false) {
+			t.Errorf("validKubernetesQuantity(%q, false) = false", value)
+		}
+	}
+	for _, value := range []string{"", "-1", "1e", "1MiB", "1MM", "NaN", "1e1001", "1e2147483648"} {
+		if validKubernetesQuantity(value, false) {
+			t.Errorf("validKubernetesQuantity(%q, false) = true", value)
+		}
+	}
+	for _, value := range []string{"0", "-0", "0.0", "0m"} {
+		if validKubernetesQuantity(value, true) {
+			t.Errorf("validKubernetesQuantity(%q, true) = true", value)
+		}
+	}
+}
+
+func TestOrchestratorKubernetesResourceQuantityComparison(t *testing.T) {
+	cfg := validOrchestratorConfig()
+	cfg.Profiles[0].Kubernetes.Resources = &OrchestratorResourceRequirements{
+		Requests: map[string]string{"cpu": "5e-1", "memory": "1024Mi"},
+		Limits:   map[string]string{"cpu": "500m", "memory": "1Gi"},
+	}
+	if _, err := cfg.Resolve(); err != nil {
+		t.Fatalf("Resolve() rejected equivalent quantities: %v", err)
+	}
+}
+
+func TestOrchestratorKubernetesWorkloadResolutionAndOmission(t *testing.T) {
+	omitted, err := validOrchestratorConfig().Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := omitted.Profiles[0].Kubernetes; got.WorkVolume != nil || got.Resources != nil || got.NodeSelector != nil {
+		t.Fatalf("omitted workload options changed: %+v", got)
+	}
+
+	cfg := validOrchestratorConfig()
+	cfg.Profiles[0].Kubernetes.WorkDir = "/home/flow/work"
+	cfg.Profiles[0].Kubernetes.WorkVolume = &OrchestratorWorkVolumeConfig{
+		Type: " GENERIC_EPHEMERAL ", MountPath: " /home/flow ", Size: " 20Gi ", AccessModes: []string{" readwriteoncepod "},
+	}
+	cfg.Profiles[0].Kubernetes.Resources = &OrchestratorResourceRequirements{
+		Requests: map[string]string{"cpu": " 500m ", "memory": "1Gi"}, Limits: map[string]string{"ephemeral-storage": "5Gi"},
+	}
+	cfg.Profiles[0].Kubernetes.NodeSelector = map[string]string{" kubernetes.io/os ": " linux ", "node.example.com/Class": "Build_1"}
+	resolved, err := cfg.Resolve()
+	if err != nil {
+		t.Fatalf("Resolve workload options: %v", err)
+	}
+	got := resolved.Profiles[0].Kubernetes
+	if got.WorkVolume.Type != "generic_ephemeral" || got.WorkVolume.MountPath != "/home/flow" || got.WorkVolume.Size != "20Gi" || !reflect.DeepEqual(got.WorkVolume.AccessModes, []string{"ReadWriteOncePod"}) {
+		t.Fatalf("work volume = %+v", got.WorkVolume)
+	}
+	if got.Resources.Requests["cpu"] != "500m" || got.Resources.Limits["ephemeral-storage"] != "5Gi" {
+		t.Fatalf("resources = %+v", got.Resources)
+	}
+	if !reflect.DeepEqual(got.NodeSelector, map[string]string{"kubernetes.io/os": "linux", "node.example.com/Class": "Build_1"}) {
+		t.Fatalf("node selector = %+v", got.NodeSelector)
+	}
+	cfg.Profiles[0].Kubernetes.WorkVolume.MountPath = "/mutated"
+	cfg.Profiles[0].Kubernetes.WorkVolume.AccessModes[0] = "ReadOnlyMany"
+	cfg.Profiles[0].Kubernetes.Resources.Requests["cpu"] = "9"
+	cfg.Profiles[0].Kubernetes.NodeSelector["kubernetes.io/os"] = "mutated"
+	if got.WorkVolume.MountPath != "/home/flow" || got.WorkVolume.AccessModes[0] != "ReadWriteOncePod" || got.Resources.Requests["cpu"] != "500m" || got.NodeSelector["kubernetes.io/os"] != "linux" {
+		t.Fatalf("resolved Kubernetes settings alias input: %+v", got)
 	}
 }
 
