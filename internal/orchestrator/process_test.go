@@ -164,6 +164,22 @@ func waitForFile(t *testing.T, path string) {
 	t.Fatalf("timed out waiting for %s", path)
 }
 
+// waitForPID waits for path to contain a parseable pid. A shell redirection
+// creates the file before the writer flushes the pid into it, so observing an
+// existing-but-empty file is not enough.
+func waitForPID(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if pid, err := readPID(path); err == nil {
+			return pid
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for pid in %s", path)
+	return 0
+}
+
 func TestDarwinProcessProviderRetriesStaleLaunchMarker(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("Darwin process provider test")
@@ -253,12 +269,12 @@ exit 0
 	}
 	dir := provider.DarwinProcessStateDir(identity)
 	childPath := filepath.Join(dir, "child.pid")
-	waitForFile(t, childPath)
-	childPID, err := readPID(childPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+	childPID := waitForPID(t, childPath)
+	t.Cleanup(func() {
+		if childPID > 1 {
+			_ = syscall.Kill(childPID, syscall.SIGKILL)
+		}
+	})
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if status, ok := readProcessStatus(filepath.Join(dir, "status.json")); ok && (status.State == ProviderSucceeded || status.State == ProviderFailed) {
