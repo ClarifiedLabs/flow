@@ -56,7 +56,9 @@ stringData:
           agent.harness.harness: "true"
         kubernetes:
           namespace: flow
-          # Release-configurable image used by generated worker Jobs.
+          # Release-configurable image used by generated worker Jobs. The
+          # published image is the minimal base and already ships Harness, so
+          # it satisfies the agent.harness.harness capability above.
           image: ghcr.io/clarifiedlabs/flow-worker:latest
           service_account: flow-worker
           work_dir: /var/lib/flow-worker

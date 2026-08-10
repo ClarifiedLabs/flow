@@ -75,149 +75,39 @@ LABEL org.opencontainers.image.source="https://github.com/ClarifiedLabs/flow" \
 
 CMD ["flow-orchestrator"]
 
-FROM flow-server AS flow-worker
+FROM debian:trixie-slim AS flow-worker
 
+ARG FLOW_UID=1000
+ARG FLOW_GID=1000
 ARG VERSION
 ARG COMMIT
 ARG DATE
 
 LABEL org.opencontainers.image.source="https://github.com/ClarifiedLabs/flow" \
       org.opencontainers.image.title="Flow Worker" \
-      org.opencontainers.image.description="Flow worker supervisor and agent runtime" \
+      org.opencontainers.image.description="Flow worker supervisor and agent runtime with the Harness agent CLI (minimal base image; extend it with your own toolchain)" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${COMMIT}" \
       org.opencontainers.image.created="${DATE}" \
       org.opencontainers.image.licenses="MIT"
 
-USER root
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ENV HOME=/home/flow \
+    FLOW_UID=${FLOW_UID} \
+    FLOW_GID=${FLOW_GID}
 
 ARG TARGETARCH
-ARG TEMURIN_JDK_VERSION=25
-ARG NVM_VERSION=0.40.5
-ARG NODE_VERSION=24.17.0
-ARG RUST_VERSION=1.96.0
 ARG HARNESS_VERSION=v0.5.6
 ARG HARNESS_DEB_SHA256_AMD64=1b3ab9e4a38b6f71d20d4ec3a7deeeb94adfa648869b3e16c9c84864a8f91aab
 ARG HARNESS_DEB_SHA256_ARM64=e385f330184e49f2b1367e44e35d72dbd0e76027351727781560e206c0ed621b
 
-ENV NVM_DIR=/usr/local/share/nvm \
-    NODE_VERSION=${NODE_VERSION} \
-    RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    JAVA_HOME=/usr/local/share/temurin-jdk \
-    BASH_ENV=/etc/profile.d/nvm.sh \
-    XDG_RUNTIME_DIR=/run/user/${FLOW_UID} \
-    DOCKER_HOST=unix:///run/user/${FLOW_UID}/docker.sock
-ENV PATH=/usr/local/go/bin:${NVM_DIR}/versions/node/v${NODE_VERSION}/bin:${CARGO_HOME}/bin:${PATH}
-
-COPY --from=build /usr/local/go /usr/local/go
-
 RUN set -eux \
     && apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl gpg \
-    && install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
-    && chmod a+r /etc/apt/keyrings/docker.asc \
-    && curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public -o /tmp/adoptium.asc \
-    && gpg --batch --dearmor -o /etc/apt/keyrings/adoptium.gpg /tmp/adoptium.asc \
-    && chmod a+r /etc/apt/keyrings/adoptium.gpg \
-    && . /etc/os-release \
-    && printf 'Types: deb\nURIs: https://download.docker.com/linux/debian\nSuites: %s\nComponents: stable\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/docker.asc\n' "$VERSION_CODENAME" "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/docker.sources \
-    && printf 'deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb %s main\n' "$VERSION_CODENAME" > /etc/apt/sources.list.d/adoptium.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-        age \
-        autoconf \
-        automake \
-        bash \
-        bat \
-        bind9-dnsutils \
-        bison \
-        build-essential \
-        clang \
-        cmake \
-        containerd.io \
-        dbus-user-session \
-        docker-buildx-plugin \
-        docker-ce \
-        docker-ce-cli \
-        docker-ce-rootless-extras \
-        docker-compose-plugin \
-        fd-find \
-        file \
-        flex \
-        fuse-overlayfs \
-        fzf \
-        gdb \
-        gh \
-        gnupg \
-        hyperfine \
-        iproute2 \
-        iptables \
-        iputils-ping \
-        jq \
-        less \
-        libcurl4-openssl-dev \
-        libffi-dev \
-        libsqlite3-dev \
-        libssl-dev \
-        libtool \
-        lld \
-        llvm \
-        lsof \
-        netcat-openbsd \
-        ninja-build \
-        openssh-client \
-        pipx \
-        pkg-config \
-        procps \
-        psmisc \
-        python3 \
-        python3-dev \
-        python3-pip \
-        python3-venv \
-        python3-yaml \
-        ripgrep \
-        rsync \
-        shellcheck \
-        shfmt \
-        slirp4netns \
-        sqlite3 \
-        strace \
-        temurin-${TEMURIN_JDK_VERSION}-jdk \
-        tini \
-        tmux \
-        tree \
-        uidmap \
-        unzip \
-        vim-tiny \
-        wget \
-        xz-utils \
-        yq \
-        zip \
-        zlib1g-dev \
-        zsh \
-    && ln -sfn /usr/bin/batcat /usr/local/bin/bat \
-    && ln -sfn /usr/bin/fdfind /usr/local/bin/fd \
-    && if ! command -v docker-compose >/dev/null 2>&1 && [ -x /usr/libexec/docker/cli-plugins/docker-compose ]; then \
-        ln -sfn /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose; \
-    fi \
-    && jdk_home="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")" \
-    && ln -sfn "$jdk_home" "$JAVA_HOME" \
-    && mkdir -p "$XDG_RUNTIME_DIR" /flow/work /home/flow/.local/share/flow /home/flow/.local/share/docker \
-    && chmod 0700 "$XDG_RUNTIME_DIR" \
-    && if ! grep -q '^flow:' /etc/subuid; then echo 'flow:100000:65536' >> /etc/subuid; fi \
-    && if ! grep -q '^flow:' /etc/subgid; then echo 'flow:100000:65536' >> /etc/subgid; fi \
+    && apt-get install -y --no-install-recommends ca-certificates curl git tmux \
+    && groupadd --gid "$FLOW_GID" flow \
+    && useradd --uid "$FLOW_UID" --gid "$FLOW_GID" --home-dir /home/flow --create-home --shell /bin/bash flow \
     && case "$TARGETARCH" in \
-        amd64) \
-            harness_deb_arch="amd64"; \
-            harness_deb_sha256="$HARNESS_DEB_SHA256_AMD64" \
-            ;; \
-        arm64) \
-            harness_deb_arch="arm64"; \
-            harness_deb_sha256="$HARNESS_DEB_SHA256_ARM64" \
-            ;; \
+        amd64) harness_deb_arch="amd64"; harness_deb_sha256="$HARNESS_DEB_SHA256_AMD64" ;; \
+        arm64) harness_deb_arch="arm64"; harness_deb_sha256="$HARNESS_DEB_SHA256_ARM64" ;; \
         *) echo "unsupported TARGETARCH for worker image: $TARGETARCH" >&2; exit 1 ;; \
     esac \
     && harness_package_version="${HARNESS_VERSION#v}" \
@@ -226,55 +116,12 @@ RUN set -eux \
     && printf '%s  %s\n' "$harness_deb_sha256" "$harness_deb" | sha256sum -c - \
     && apt-get install -y --no-install-recommends "$harness_deb" \
     && rm -f "$harness_deb" \
-    && rm -f /tmp/adoptium.asc \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p "$NVM_DIR" \
-    && curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/v${NVM_VERSION}/install.sh" -o /tmp/install-nvm.sh \
-    && PROFILE=/dev/null bash /tmp/install-nvm.sh \
-    && . "$NVM_DIR/nvm.sh" \
-    && nvm install "$NODE_VERSION" \
-    && nvm alias default "$NODE_VERSION" \
-    && nvm use default \
-    && corepack enable \
-    && printf 'export NVM_DIR="%s"\n[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"\n' "$NVM_DIR" > /etc/profile.d/nvm.sh \
-    && chmod 0644 /etc/profile.d/nvm.sh \
-    && rm -f /tmp/install-nvm.sh \
-    && curl -fsSL https://sh.rustup.rs -o /tmp/rustup-init.sh \
-    && sh /tmp/rustup-init.sh -y --no-modify-path --profile default --default-toolchain "$RUST_VERSION" \
-    && rustup component add clippy rustfmt rust-src \
-    && rm -f /tmp/rustup-init.sh \
-    && chown -R flow:flow \
-        "$NVM_DIR" \
-        "$RUSTUP_HOME" \
-        "$CARGO_HOME" \
-        /flow \
-        /home/flow \
-        "$XDG_RUNTIME_DIR" \
-    && go version \
-    && bash -lc 'nvm --version && node --version && npm --version' \
-    && rustc --version \
-    && cargo --version \
-    && java -version \
-    && clang --version \
-    && docker --version \
-    && docker compose version \
-    && age --version \
-    && gpg --version \
-    && ssh -V \
     && harness --version
 
-COPY --chmod=0644 docker/flow-worker-profile.sh /etc/profile.d/flow-dev-tools.sh
-COPY --chmod=0755 docker/flow-worker-entrypoint.sh /usr/local/bin/flow-worker-entrypoint
-
-ENV BASH_ENV=/etc/profile.d/flow-dev-tools.sh
-
-RUN printf '\n[ -r /etc/profile.d/flow-dev-tools.sh ] && . /etc/profile.d/flow-dev-tools.sh\n' >> /home/flow/.bashrc \
-    && chown flow:flow /home/flow/.bashrc
-
-VOLUME ["/flow/work", "/home/flow/.local/share/docker"]
+COPY --from=build /out/flow-worker /usr/local/bin/flow-worker
 EXPOSE 8422
 USER flow
-ENTRYPOINT ["tini", "-g", "--", "flow-worker-entrypoint"]
 # Workers are assignment-created one-shot processes. Orchestrator providers
 # override this command with the generated assignment config; standalone runs
 # mount an assignment-scoped config at /etc/flow/worker.yaml.

@@ -28,9 +28,11 @@ manifest or generated Flow configuration. This is profile-wide: every
 capacity-slot Job for the configured profile receives the two
 variables, and the proxy must enforce its local-network security model.
 
-The script creates or reuses the `flow` Kind cluster, loads locally built
-`flow-server`, `flow-worker`, and `flow-orchestrator` images, and deploys the
-server and orchestrator. It writes generated configuration, private tokens, and
+The script creates or reuses the `flow` Kind cluster, builds the minimal
+`flow-worker` base image plus a `flow-worker-dev` toolchain image on top of it
+(`docker/Dockerfile.worker-dev`), loads the locally built `flow-server`,
+`flow-worker-dev`, and `flow-orchestrator` images, and deploys the server and
+orchestrator (the dev image is what generated worker Jobs run). It writes generated configuration, private tokens, and
 persistent data under the gitignored `.flow-kind/` directory. The Flow API is
 mapped only to `http://127.0.0.1:8421`; unauthenticated telemetry remains
 cluster-internal.
@@ -228,7 +230,8 @@ an override: a repository's `.harness/config.json` still wins per key, and
 `harness_args`/flags and `HARNESS_*` environment variables win over the file.
 Because it is per-job global config, runtime `harness config set` writes stay
 job-scoped. The file must be a JSON object matching the Harness version baked
-into the worker image (the `HARNESS_VERSION` build arg in the Dockerfile); flow
+into the worker image (the `HARNESS_VERSION` build arg in the root Dockerfile;
+the published `flow-worker` base image ships Harness); flow
 validates only that it parses as a JSON object. It may contain credentials, so
 it travels only in the private per-worker Secret and each job's hermetic HOME
 and is never logged. Only newly launched worker Jobs pick up changes. Omitting
@@ -353,7 +356,7 @@ The Kubernetes provider mounts `work_volume.mount_path` from either `empty_dir`
 or a generic ephemeral PVC and writes the possibly nested `work_dir` into
 `worker.yaml`. Mounting `/home/flow` with `work_dir: /home/flow/work` also places
 project work, history outbox data, hermetic task homes and their Android/tool
-caches, and the shipped worker image's rootless Docker data at
+caches, and the dev worker image's rootless Docker data at
 `/home/flow/.local/share/docker` on the same large volume.
 
 Both volume modes follow the **Pod** lifecycle: they survive container restarts
@@ -450,4 +453,28 @@ SSE-KMS, also grant the selected key's encrypt/decrypt/data-key permissions.
 docker build --target flow-server -t ghcr.io/clarifiedlabs/flow-server .
 docker build --target flow-worker -t ghcr.io/clarifiedlabs/flow-worker .
 docker build --target flow-orchestrator -t ghcr.io/clarifiedlabs/flow-orchestrator .
+```
+
+The published `flow-worker` image is a minimal base: the `flow-worker` binary,
+the Harness agent CLI, and runtime essentials (`git`, `tmux`,
+`ca-certificates`, `curl`). It has no entrypoint; Kubernetes Jobs override the
+command, and standalone runs can `docker run` the binary directly. Extend it
+with your own toolchain packages:
+
+```dockerfile
+FROM ghcr.io/clarifiedlabs/flow-worker:latest
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends <your-packages> \
+    && rm -rf /var/lib/apt/lists/*
+USER flow
+```
+
+The full development toolchain image (Docker CE rootless, Go/Node/Rust/JDK,
+tini entrypoint) used by the local kind workflow is built separately and is
+not published:
+
+```sh
+docker build -f docker/Dockerfile.worker-dev \
+  --build-arg FLOW_WORKER_BASE_IMAGE=flow-worker:local \
+  -t flow-worker-dev:local .
 ```

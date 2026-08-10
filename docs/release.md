@@ -36,7 +36,9 @@ token.
 The release workflow publishes these GitHub Container Registry images:
 
 - `ghcr.io/clarifiedlabs/flow-server`
-- `ghcr.io/clarifiedlabs/flow-worker`
+- `ghcr.io/clarifiedlabs/flow-worker` (minimal base image: `flow-worker` binary
+  plus the Harness agent CLI and runtime essentials; extend it with your own
+  toolchain)
 
 Each release image gets `vX.Y.Z`, `X.Y.Z`, and `latest` tags. The `vX.Y.Z` and
 `X.Y.Z` tags identify the release, while `latest` tracks the newest published

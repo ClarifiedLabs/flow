@@ -332,11 +332,7 @@ jobs:
           COMMAND: ${{ matrix.command }}
           IMAGE: ${{ matrix.image }}:dry-run-${{ matrix.goarch }}
         run: |
-          args=()
-          if [[ "$COMMAND" == "flow-worker" ]]; then
-            args=(-e FLOW_WORKER_DOCKERD=false)
-          fi
-          output="$(docker run --rm "${args[@]}" "$IMAGE" "$COMMAND" --version)"
+          output="$(docker run --rm "$IMAGE" "$COMMAND" --version)"
           echo "$output"
           case "$output" in
             "$COMMAND ${RELEASE_VERSION}"*) ;;

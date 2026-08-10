@@ -128,7 +128,8 @@ resolve_images() {
     ''|*[!A-Za-z0-9_.-]*) fatal "FLOW_KIND_IMAGE_TAG must contain only letters, digits, '.', '_', or '-'" ;;
   esac
   SERVER_IMAGE="flow-server:${IMAGE_TAG}"
-  WORKER_IMAGE="flow-worker:${IMAGE_TAG}"
+  WORKER_BASE_IMAGE="flow-worker:${IMAGE_TAG}"
+  WORKER_IMAGE="flow-worker-dev:${IMAGE_TAG}"
   ORCHESTRATOR_IMAGE="flow-orchestrator:${IMAGE_TAG}"
 }
 
@@ -180,18 +181,23 @@ build_and_load_images() {
   for target in flow-server flow-worker flow-orchestrator; do
     case "${target}" in
       flow-server) image="${SERVER_IMAGE}" ;;
-      flow-worker) image="${WORKER_IMAGE}" ;;
+      flow-worker) image="${WORKER_BASE_IMAGE}" ;;
       flow-orchestrator) image="${ORCHESTRATOR_IMAGE}" ;;
     esac
     log "building ${image} (target ${target})"
     "${RUNTIME_BIN}" build --target "${target}" --tag "${image}" "${REPO_ROOT}"
   done
+  log "building ${WORKER_IMAGE} (docker/Dockerfile.worker-dev on ${WORKER_BASE_IMAGE})"
+  "${RUNTIME_BIN}" build -f "${REPO_ROOT}/docker/Dockerfile.worker-dev" \
+    --build-arg "FLOW_WORKER_BASE_IMAGE=${WORKER_BASE_IMAGE}" \
+    --tag "${WORKER_IMAGE}" "${REPO_ROOT}"
   log "loading local images into '${CLUSTER_NAME}'"
   kind load docker-image --name "${CLUSTER_NAME}" "${SERVER_IMAGE}" "${WORKER_IMAGE}" "${ORCHESTRATOR_IMAGE}"
   cat >"${STATE_DIR}/images.env" <<EOF
 FLOW_KIND_IMAGE_TAG=${IMAGE_TAG}
 FLOW_KIND_SERVER_IMAGE=${SERVER_IMAGE}
 FLOW_KIND_WORKER_IMAGE=${WORKER_IMAGE}
+FLOW_KIND_WORKER_BASE_IMAGE=${WORKER_BASE_IMAGE}
 FLOW_KIND_ORCHESTRATOR_IMAGE=${ORCHESTRATOR_IMAGE}
 EOF
   chmod 600 "${STATE_DIR}/images.env"
