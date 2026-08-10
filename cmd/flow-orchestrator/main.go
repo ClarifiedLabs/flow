@@ -171,6 +171,16 @@ func buildProfilesAndProviders(cfg config.ResolvedOrchestrator) ([]orchestrator.
 				"work_dir": options.WorkDir, "worker_args": encodeStringSlice(options.WorkerArgs),
 				"image_pull_policy":               options.ImagePullPolicy,
 				"harness_model_proxy_secret_name": options.HarnessModelProxySecretName,
+				"harness_config_file":             options.HarnessConfigFile,
+			}
+			if options.HarnessConfigFile != "" {
+				// Fail fast: the file may carry credentials, so only its path
+				// appears in errors, never its content. Flow does not import the
+				// Harness schema; it must match the Harness version baked into
+				// the worker image.
+				if err := validateHarnessConfigFile(options.HarnessConfigFile); err != nil {
+					return nil, nil, fmt.Errorf("profile %s: harness_config_file %s: %w", configured.Name, options.HarnessConfigFile, err)
+				}
 			}
 			for key, value := range map[string]any{
 				"work_volume": options.WorkVolume, "resources": options.Resources, "node_selector": options.NodeSelector,
@@ -239,6 +249,7 @@ func kubernetesProviderOptionsFromProfile(profile orchestrator.Profile, workerAr
 		ServiceAccount: profile.ProviderOptions["service_account"], WorkDir: profile.ProviderOptions["work_dir"],
 		WorkerArgs: workerArgs, ImagePullPolicy: profile.ProviderOptions["image_pull_policy"],
 		HarnessModelProxySecretName: profile.ProviderOptions["harness_model_proxy_secret_name"],
+		HarnessConfigFile:           profile.ProviderOptions["harness_config_file"],
 	}
 	if err := decodeStructuredProviderOption(profile.ProviderOptions, "work_volume", &persisted.WorkVolume); err != nil {
 		return orchestrator.KubernetesProviderOptions{}, err
@@ -257,8 +268,27 @@ func kubernetesProviderOptionsFromProfile(profile orchestrator.Profile, workerAr
 		Namespace: resolved.Namespace, Image: resolved.Image, ServiceAccount: resolved.ServiceAccount,
 		WorkDir: resolved.WorkDir, WorkerArgs: resolved.WorkerArgs, ImagePullPolicy: resolved.ImagePullPolicy,
 		HarnessModelProxySecretName: resolved.HarnessModelProxySecretName,
+		HarnessConfigFile:           resolved.HarnessConfigFile,
 		WorkVolume:                  resolved.WorkVolume, Resources: resolved.Resources, NodeSelector: resolved.NodeSelector,
 	}, nil
+}
+
+// validateHarnessConfigFile checks that an orchestrator-supplied Harness
+// config exists and is a JSON object. It performs JSON-syntax-only validation;
+// flow does not import the Harness schema.
+func validateHarnessConfigFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var value map[string]any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("invalid JSON object: %w", err)
+	}
+	if value == nil {
+		return errors.New("must contain a JSON object")
+	}
+	return nil
 }
 
 func encodeStringSlice(values []string) string {

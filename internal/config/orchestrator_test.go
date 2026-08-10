@@ -60,6 +60,7 @@ profiles:
       worker_args: [" --no-metrics ", "--metrics-listen=:9000"]
       image_pull_policy: always
       harness_model_proxy_secret_name: " flow-harness-model-proxy "
+      harness_config_file: " /etc/flow/harness/config.json "
       work_volume:
         type: generic_ephemeral
         mount_path: /workspace
@@ -101,6 +102,9 @@ metrics:
 	if profile.Kubernetes == nil || profile.Kubernetes.Namespace != "workers" || profile.Kubernetes.Image != "registry.example/flow-worker:v2" || profile.Kubernetes.ImagePullPolicy != "Always" || profile.Kubernetes.HarnessModelProxySecretName != "flow-harness-model-proxy" {
 		t.Fatalf("Kubernetes = %+v", profile.Kubernetes)
 	}
+	if profile.Kubernetes.HarnessConfigFile != "/etc/flow/harness/config.json" {
+		t.Fatalf("Kubernetes.HarnessConfigFile = %q, want trimmed path", profile.Kubernetes.HarnessConfigFile)
+	}
 	if !reflect.DeepEqual(profile.Kubernetes.WorkerArgs, []string{"--no-metrics", "--metrics-listen=:9000"}) {
 		t.Fatalf("worker args = %#v", profile.Kubernetes.WorkerArgs)
 	}
@@ -127,6 +131,9 @@ metrics:
 	}
 	if got.Kubernetes == nil || got.Darwin != nil || got.Kubernetes.ServiceAccount != "worker-sa" || got.Kubernetes.WorkDir != "/workspace/worker" || got.Kubernetes.HarnessModelProxySecretName != "flow-harness-model-proxy" {
 		t.Fatalf("resolved providers = kubernetes=%+v darwin=%+v", got.Kubernetes, got.Darwin)
+	}
+	if got.Kubernetes.HarnessConfigFile != "/etc/flow/harness/config.json" {
+		t.Fatalf("resolved HarnessConfigFile = %q, want /etc/flow/harness/config.json", got.Kubernetes.HarnessConfigFile)
 	}
 }
 
@@ -369,6 +376,8 @@ func TestOrchestratorValidation(t *testing.T) {
 		}, "label value"},
 		{"pull policy invalid", func(c *OrchestratorConfig) { c.Profiles[0].Kubernetes.ImagePullPolicy = "Sometimes" }, "invalid image_pull_policy"},
 		{"model proxy Secret name invalid", func(c *OrchestratorConfig) { c.Profiles[0].Kubernetes.HarnessModelProxySecretName = "not valid" }, "harness_model_proxy_secret_name"},
+		{"harness config file relative", func(c *OrchestratorConfig) { c.Profiles[0].Kubernetes.HarnessConfigFile = "harness/config.json" }, "harness_config_file must be an absolute, clean path"},
+		{"harness config file unclean", func(c *OrchestratorConfig) { c.Profiles[0].Kubernetes.HarnessConfigFile = "/etc/flow/../config.json" }, "harness_config_file must be an absolute, clean path"},
 		{"kubernetes os conflict", func(c *OrchestratorConfig) { c.Profiles[0].Labels = map[string]string{"os": "macos"} }, "conflicts with kubernetes"},
 		{"darwin config required", func(c *OrchestratorConfig) { c.Profiles[0].Provider = "darwin"; c.Profiles[0].Kubernetes = nil }, "requires darwin configuration"},
 		{"darwin mismatch", func(c *OrchestratorConfig) {

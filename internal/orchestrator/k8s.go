@@ -26,7 +26,11 @@ const (
 	serviceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	serviceAccountCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 	workerConfigMountPath   = "/var/run/flow/worker.yaml"
-	genericWorkVolumeName   = "work"
+	harnessConfigMountPath  = "/var/run/flow/harness.json"
+	// maxHarnessConfigBytes bounds the orchestrator-supplied Harness config so
+	// the per-worker Secret stays well under the Kubernetes 1 MiB object limit.
+	maxHarnessConfigBytes = 1 << 20
+	genericWorkVolumeName = "work"
 	// The Job controller appends '-' and five generated characters to a Pod name.
 	jobPodGeneratedSuffixLength = 6
 )
@@ -44,6 +48,7 @@ type KubernetesProviderOptions struct {
 	WorkerArgs                  []string
 	ImagePullPolicy             string
 	HarnessModelProxySecretName string
+	HarnessConfigFile           string
 	WorkVolume                  *config.OrchestratorWorkVolumeConfig
 	Resources                   *config.OrchestratorResourceRequirements
 	NodeSelector                map[string]string
@@ -63,6 +68,7 @@ type KubernetesProvider struct {
 	workerArgs                  []string
 	imagePullPolicy             string
 	harnessModelProxySecretName string
+	harnessConfigFile           string
 	workVolume                  *config.OrchestratorWorkVolumeConfig
 	resources                   *config.OrchestratorResourceRequirements
 	nodeSelector                map[string]string
@@ -91,6 +97,7 @@ func NewKubernetesProvider(options KubernetesProviderOptions) (*KubernetesProvid
 		serviceAccount: strings.TrimSpace(options.ServiceAccount), workDir: strings.TrimSpace(options.WorkDir),
 		workerArgs: append([]string(nil), options.WorkerArgs...), imagePullPolicy: strings.TrimSpace(options.ImagePullPolicy),
 		harnessModelProxySecretName: strings.TrimSpace(options.HarnessModelProxySecretName),
+		harnessConfigFile:           strings.TrimSpace(options.HarnessConfigFile),
 		workVolume:                  cloneKubernetesWorkVolume(options.WorkVolume), resources: cloneKubernetesResources(options.Resources),
 		nodeSelector: cloneKubernetesStringMap(options.NodeSelector), deletionTimeout: options.DeletionTimeout,
 	}, nil
@@ -163,16 +170,29 @@ func (k *KubernetesProvider) Launch(ctx context.Context, request LaunchRequest) 
 	if strings.TrimSpace(request.WorkerToken) == "" {
 		return Permanent(errors.New("worker token is required"))
 	}
-	config, err := generatedWorkerYAML(request, settings.workDir)
+	config, err := generatedWorkerYAML(request, settings.workDir, settings.harnessWorkerConfigPath())
 	if err != nil {
 		return Permanent(fmt.Errorf("generate worker config: %w", err))
+	}
+	secretData := map[string][]byte{"worker.yaml": config}
+	if settings.harnessConfigFile != "" {
+		// The Harness config may contain credentials: it travels only inside
+		// the existing private per-worker Secret and is never logged.
+		harnessConfig, err := os.ReadFile(settings.harnessConfigFile)
+		if err != nil {
+			return Permanent(fmt.Errorf("read harness config file: %w", err))
+		}
+		if len(harnessConfig) > maxHarnessConfigBytes {
+			return Permanent(fmt.Errorf("read harness config file: exceeds %d bytes", maxHarnessConfigBytes))
+		}
+		secretData["harness.json"] = harnessConfig
 	}
 	jobName, secretName := KubernetesResourceNames(request.Identity)
 	labels, annotations := kubernetesIdentityMetadata(request.Identity)
 	secret := kubernetesSecret{
 		APIVersion: "v1", Kind: "Secret",
 		Metadata: kubernetesMetadata{Name: secretName, Namespace: settings.namespace, Labels: labels, Annotations: annotations},
-		Type:     "Opaque", Data: map[string][]byte{"worker.yaml": config},
+		Type:     "Opaque", Data: secretData,
 	}
 	if err := k.createOrReplaceOwnedSecret(ctx, settings.namespace, secret, request.Identity); err != nil {
 		return fmt.Errorf("create worker Secret %s: %w", secretName, err)
@@ -321,18 +341,28 @@ func (k *KubernetesProvider) Delete(ctx context.Context, identity AssignmentIden
 
 type kubernetesSettings struct {
 	namespace, image, serviceAccount, workDir, imagePullPolicy string
-	harnessModelProxySecretName                                string
+	harnessModelProxySecretName, harnessConfigFile             string
 	workerArgs                                                 []string
 	workVolume                                                 *config.OrchestratorWorkVolumeConfig
 	resources                                                  *config.OrchestratorResourceRequirements
 	nodeSelector                                               map[string]string
 }
 
+// harnessWorkerConfigPath is the path of the Secret-mounted Harness config the
+// worker installs as each job's global config; empty when unconfigured.
+func (s kubernetesSettings) harnessWorkerConfigPath() string {
+	if s.harnessConfigFile == "" {
+		return ""
+	}
+	return harnessConfigMountPath
+}
+
 func (k *KubernetesProvider) settings(profile Profile) (kubernetesSettings, error) {
 	persisted := config.OrchestratorKubernetesConfig{
 		Namespace: k.namespace, Image: k.image, ServiceAccount: k.serviceAccount, WorkDir: k.workDir,
 		ImagePullPolicy: k.imagePullPolicy, HarnessModelProxySecretName: k.harnessModelProxySecretName,
-		WorkerArgs: append([]string(nil), k.workerArgs...), WorkVolume: cloneKubernetesWorkVolume(k.workVolume),
+		HarnessConfigFile: k.harnessConfigFile,
+		WorkerArgs:        append([]string(nil), k.workerArgs...), WorkVolume: cloneKubernetesWorkVolume(k.workVolume),
 		Resources: cloneKubernetesResources(k.resources), NodeSelector: cloneKubernetesStringMap(k.nodeSelector),
 	}
 	if hasKubernetesProviderDescriptor(profile.ProviderOptions) {
@@ -346,6 +376,7 @@ func (k *KubernetesProvider) settings(profile Profile) (kubernetesSettings, erro
 			ServiceAccount: profile.ProviderOptions["service_account"], WorkDir: profile.ProviderOptions["work_dir"],
 			ImagePullPolicy:             profile.ProviderOptions["image_pull_policy"],
 			HarnessModelProxySecretName: profile.ProviderOptions["harness_model_proxy_secret_name"],
+			HarnessConfigFile:           profile.ProviderOptions["harness_config_file"],
 		}
 	}
 	if err := decodeKubernetesProviderOption(profile.ProviderOptions, "worker_args", &persisted.WorkerArgs, false); err != nil {
@@ -374,7 +405,8 @@ func (k *KubernetesProvider) settings(profile Profile) (kubernetesSettings, erro
 	return kubernetesSettings{
 		namespace: resolved.Namespace, image: resolved.Image, serviceAccount: serviceAccount,
 		workDir: resolved.WorkDir, imagePullPolicy: resolved.ImagePullPolicy,
-		harnessModelProxySecretName: resolved.HarnessModelProxySecretName, workerArgs: resolved.WorkerArgs,
+		harnessModelProxySecretName: resolved.HarnessModelProxySecretName, harnessConfigFile: resolved.HarnessConfigFile,
+		workerArgs: resolved.WorkerArgs,
 		workVolume: resolved.WorkVolume, resources: resolved.Resources, nodeSelector: resolved.NodeSelector,
 	}, nil
 }
@@ -382,7 +414,7 @@ func (k *KubernetesProvider) settings(profile Profile) (kubernetesSettings, erro
 func hasKubernetesProviderDescriptor(options map[string]string) bool {
 	for _, key := range []string{
 		"namespace", "image", "service_account", "work_dir", "image_pull_policy", "harness_model_proxy_secret_name",
-		"worker_args", "work_volume", "resources", "node_selector",
+		"harness_config_file", "worker_args", "work_volume", "resources", "node_selector",
 	} {
 		if _, ok := options[key]; ok {
 			return true

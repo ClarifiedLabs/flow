@@ -16,7 +16,7 @@ func TestGeneratedWorkerConfigUsesCanonicalAcceptanceAndLoads(t *testing.T) {
 		CoordinatorURL: "https://coordinator.example",
 		WorkerToken:    "direct-worker-token",
 	}
-	data, err := generatedWorkerYAML(request, "/work")
+	data, err := generatedWorkerYAML(request, "/work", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,5 +34,40 @@ func TestGeneratedWorkerConfigUsesCanonicalAcceptanceAndLoads(t *testing.T) {
 	}
 	if _, err := config.LoadWorker(path); err != nil {
 		t.Fatalf("LoadWorker(generated config): %v\n%s", err, data)
+	}
+}
+
+func TestGeneratedWorkerConfigHarnessConfigFile(t *testing.T) {
+	request := LaunchRequest{
+		Assignment:     testAssignment(worker.AssignmentPending),
+		CoordinatorURL: "https://coordinator.example",
+		WorkerToken:    "direct-worker-token",
+	}
+	data, err := generatedWorkerYAML(request, "/work", "/var/run/flow/harness.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "harness_config_file: /var/run/flow/harness.json") {
+		t.Fatalf("generated worker config missing harness_config_file:\n%s", data)
+	}
+	// The generated config must still load as a worker config.
+	path := filepath.Join(t.TempDir(), "worker.yaml")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.LoadWorker(path)
+	if err != nil {
+		t.Fatalf("LoadWorker(generated config): %v\n%s", err, data)
+	}
+	if loaded.HarnessConfigFile != "/var/run/flow/harness.json" {
+		t.Fatalf("loaded HarnessConfigFile = %q", loaded.HarnessConfigFile)
+	}
+
+	data, err = generatedWorkerYAML(request, "/work", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "harness_config_file") {
+		t.Fatalf("unconfigured generated worker config mentions harness_config_file:\n%s", data)
 	}
 }

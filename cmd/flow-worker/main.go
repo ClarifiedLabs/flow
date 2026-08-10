@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -181,6 +182,12 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
 	}
+	if cfg.HarnessConfigFile != "" {
+		if err := validateWorkerHarnessConfigFile(cfg.HarnessConfigFile); err != nil {
+			fmt.Fprintf(stderr, "worker harness_config_file %s: %v\n", cfg.HarnessConfigFile, err)
+			return 1
+		}
+	}
 	cleanupPolicy, err := cfg.Cleanup.Resolve()
 	if err != nil {
 		fmt.Fprintf(stderr, "resolve worker cleanup policy: %v\n", err)
@@ -330,6 +337,24 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// validateWorkerHarnessConfigFile fails fast when the configured Harness
+// global-config source is unreadable or not a JSON object. Each job's
+// environment prep re-reads the file so edits between jobs are picked up.
+func validateWorkerHarnessConfigFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var value map[string]any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("invalid JSON object: %w", err)
+	}
+	if value == nil {
+		return errors.New("must contain a JSON object")
+	}
+	return nil
 }
 
 // workerJobMetrics are the per-worker job counters. The package-level atomic

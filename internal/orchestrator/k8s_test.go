@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -280,6 +281,106 @@ func TestKubernetesProviderGeneratesConfiguredWorkloadSpec(t *testing.T) {
 		if strings.Contains(string(jobPayload), credential) {
 			t.Fatalf("credential %q leaked into Job", credential)
 		}
+	}
+}
+
+func TestKubernetesProviderLaunchHarnessConfigFile(t *testing.T) {
+	assignment := testAssignment("pending")
+	var secretPayload []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/secrets") {
+			secretPayload = body
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(server.Close)
+
+	harnessJSON := []byte(`{"default_agent":{"model":"test-model"}}`)
+	harnessPath := filepath.Join(t.TempDir(), "harness.json")
+	if err := os.WriteFile(harnessPath, harnessJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launch := func(t *testing.T, options KubernetesProviderOptions, profile Profile) kubernetesSecret {
+		t.Helper()
+		secretPayload = nil
+		provider, err := NewKubernetesProvider(options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := provider.Launch(context.Background(), LaunchRequest{
+			Identity: IdentityOf(assignment), Assignment: assignment, Profile: profile,
+			CoordinatorURL: "https://coordinator.example", WorkerToken: "direct-token",
+		}); err != nil {
+			t.Fatalf("Launch() error = %v", err)
+		}
+		var secret kubernetesSecret
+		if err := json.Unmarshal(secretPayload, &secret); err != nil {
+			t.Fatal(err)
+		}
+		return secret
+	}
+	base := KubernetesProviderOptions{
+		BaseURL: server.URL, HTTPClient: server.Client(), Namespace: "workers", Image: "worker:v1", WorkDir: "/work",
+	}
+
+	// Provider-constructor configuration is embedded in the slot Secret and the
+	// generated worker.yaml.
+	configured := base
+	configured.HarnessConfigFile = harnessPath
+	secret := launch(t, configured, testProfile())
+	if got := secret.Data["harness.json"]; !reflect.DeepEqual(got, harnessJSON) {
+		t.Fatalf("Secret harness.json = %q, want %q", got, harnessJSON)
+	}
+	workerYAML := string(secret.Data["worker.yaml"])
+	if !strings.Contains(workerYAML, "harness_config_file: /var/run/flow/harness.json") {
+		t.Fatalf("worker config missing harness_config_file mount path:\n%s", workerYAML)
+	}
+	if strings.Contains(workerYAML, string(harnessJSON)) {
+		t.Fatal("Harness config content leaked into worker.yaml")
+	}
+
+	// Persisted provider options decode into the same launch behavior.
+	profile := testProfile()
+	profile.ProviderOptions = map[string]string{
+		"namespace": "workers", "image": "worker:v1", "work_dir": "/work", "harness_config_file": harnessPath,
+	}
+	secret = launch(t, base, profile)
+	if got := secret.Data["harness.json"]; !reflect.DeepEqual(got, harnessJSON) {
+		t.Fatalf("persisted Secret harness.json = %q, want %q", got, harnessJSON)
+	}
+	if !strings.Contains(string(secret.Data["worker.yaml"]), "harness_config_file: /var/run/flow/harness.json") {
+		t.Fatalf("persisted worker config missing harness_config_file:\n%s", secret.Data["worker.yaml"])
+	}
+
+	// Unconfigured launches keep the exact prior Secret and worker.yaml shape.
+	secret = launch(t, base, testProfile())
+	if _, ok := secret.Data["harness.json"]; ok {
+		t.Fatalf("unconfigured Secret contains harness.json: %v", secret.Data)
+	}
+	if strings.Contains(string(secret.Data["worker.yaml"]), "harness_config_file") {
+		t.Fatalf("unconfigured worker config mentions harness_config_file:\n%s", secret.Data["worker.yaml"])
+	}
+}
+
+func TestKubernetesProviderLaunchUnreadableHarnessConfigFileIsPermanent(t *testing.T) {
+	assignment := testAssignment("pending")
+	provider, err := NewKubernetesProvider(KubernetesProviderOptions{
+		BaseURL: "http://127.0.0.1:1", Namespace: "workers", Image: "worker:v1", WorkDir: "/work",
+		HarnessConfigFile: filepath.Join(t.TempDir(), "missing.json"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = provider.Launch(context.Background(), LaunchRequest{
+		Identity: IdentityOf(assignment), Assignment: assignment, Profile: testProfile(),
+		CoordinatorURL: "https://coordinator.example", WorkerToken: "direct-token",
+	})
+	if err == nil || !IsPermanent(err) {
+		t.Fatalf("Launch() error = %v, want Permanent", err)
+	}
+	if !strings.Contains(err.Error(), "read harness config file") {
+		t.Fatalf("Launch() error = %v, want harness config context", err)
 	}
 }
 

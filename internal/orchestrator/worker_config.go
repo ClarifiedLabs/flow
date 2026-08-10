@@ -18,9 +18,13 @@ type generatedWorkerConfig struct {
 	WorkDir        string            `yaml:"work_dir"`
 	Labels         map[string]string `yaml:"labels,omitempty"`
 	Taints         []scheduler.Taint `yaml:"taints,omitempty"`
+	// HarnessConfigFile is the worker-visible path of a Harness JSON config the
+	// worker installs as each job's global Harness config. Empty preserves the
+	// exact prior config shape.
+	HarnessConfigFile string `yaml:"harness_config_file,omitempty"`
 }
 
-func generatedWorkerYAML(request LaunchRequest, workDir string) ([]byte, error) {
+func generatedWorkerYAML(request LaunchRequest, workDir string, harnessConfigFile string) ([]byte, error) {
 	workerID := request.Assignment.Assignment.WorkerID
 	labels := request.Assignment.Assignment.ProfileLabels
 	taints := request.Assignment.Assignment.ProfileTaints
@@ -35,7 +39,7 @@ func generatedWorkerYAML(request LaunchRequest, workDir string) ([]byte, error) 
 	config := generatedWorkerConfig{
 		WorkerID: workerID, CoordinatorURL: request.CoordinatorURL,
 		Token: request.WorkerToken, WorkDir: workDir,
-		Labels: labels, Taints: taints,
+		Labels: labels, Taints: taints, HarnessConfigFile: strings.TrimSpace(harnessConfigFile),
 	}
 	return yaml.Marshal(config)
 }

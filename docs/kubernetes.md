@@ -205,13 +205,34 @@ The Job uses `restartPolicy: Never` and `backoffLimit: 0`; retries are owned by
 the durable orchestrator reconciliation, not by kubelet/container restarts. Job
 and Secret names are deterministic from slot identity, making launch and
 cleanup safe to retry. Keep the generated Secret private: it contains the direct
-worker bearer token.
+worker bearer token. When the profile sets `kubernetes.harness_config_file`, the
+orchestrator also embeds that file as a `harness.json` key in the same Secret
+and records `harness_config_file: /var/run/flow/harness.json` in `worker.yaml`;
+the Secret's mode 0400 plus fsGroup 1000 keeps it private while readable by the
+worker and its job shells.
 
 Profiles are independent provider configurations and may use different images,
 service accounts, pull policies, work volumes, resource requests/limits, node
 selectors, and Harness model-proxy Secrets. Omitting `work_volume`, `resources`,
 and `node_selector` preserves the prior Job shape: an unbounded `emptyDir` is
 mounted at `work_dir`, and no container resources or node selector are emitted.
+
+`kubernetes.harness_config_file` names an absolute path inside the orchestrator
+pod (mount it via ConfigMap or Secret, like `flow-orchestrator.yaml` itself).
+At each worker launch the orchestrator reads it — failing the launch
+permanently, without logging its content, if it is missing, unreadable, or over
+1 MiB — embeds it in the slot Secret, and the worker copies it into every job's
+hermetic `HOME` as the Harness **global** config
+(`$HOME/.config/harness/config.json`, mode 0600). It is a defaults layer, not
+an override: a repository's `.harness/config.json` still wins per key, and
+`harness_args`/flags and `HARNESS_*` environment variables win over the file.
+Because it is per-job global config, runtime `harness config set` writes stay
+job-scoped. The file must be a JSON object matching the Harness version baked
+into the worker image (the `HARNESS_VERSION` build arg in the Dockerfile); flow
+validates only that it parses as a JSON object. It may contain credentials, so
+it travels only in the private per-worker Secret and each job's hermetic HOME
+and is never logged. Only newly launched worker Jobs pick up changes. Omitting
+the key preserves the exact prior Job/Secret/`worker.yaml` shape.
 Resource names are limited to `cpu`, `memory`, and `ephemeral-storage`; when a
 resource has both a request and a limit, the request must not exceed the limit.
 Quantities use Kubernetes parsing; decimal exponent magnitude is capped at 1000

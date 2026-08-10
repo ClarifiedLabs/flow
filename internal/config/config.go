@@ -209,16 +209,21 @@ type ClientConfig struct {
 }
 
 type WorkerConfig struct {
-	WorkerID       string              `json:"worker_id" yaml:"worker_id"`
-	CoordinatorURL string              `json:"coordinator_url" yaml:"coordinator_url"`
-	Token          string              `json:"token" yaml:"token"`
-	WorkDir        string              `json:"work_dir" yaml:"work_dir"`
-	Labels         map[string]string   `json:"labels" yaml:"labels"`
-	Taints         []scheduler.Taint   `json:"taints" yaml:"taints"`
-	Cleanup        WorkerCleanup       `json:"cleanup" yaml:"cleanup"`
-	Git            WorkerGitConfig     `json:"git" yaml:"git"`
-	Metrics        metrics.Config      `json:"metrics" yaml:"metrics"`
-	History        WorkerHistoryConfig `json:"history" yaml:"history"`
+	WorkerID       string            `json:"worker_id" yaml:"worker_id"`
+	CoordinatorURL string            `json:"coordinator_url" yaml:"coordinator_url"`
+	Token          string            `json:"token" yaml:"token"`
+	WorkDir        string            `json:"work_dir" yaml:"work_dir"`
+	Labels         map[string]string `json:"labels" yaml:"labels"`
+	Taints         []scheduler.Taint `json:"taints" yaml:"taints"`
+	Cleanup        WorkerCleanup     `json:"cleanup" yaml:"cleanup"`
+	Git            WorkerGitConfig   `json:"git" yaml:"git"`
+	// HarnessConfigFile points at a Harness JSON config the worker installs as
+	// the global config ($HOME/.config/harness/config.json) of every job it
+	// runs. It supplies deployment-wide defaults only: a repo's
+	// .harness/config.json still wins per key and flags win over everything.
+	HarnessConfigFile string              `json:"harness_config_file,omitempty" yaml:"harness_config_file,omitempty"`
+	Metrics           metrics.Config      `json:"metrics" yaml:"metrics"`
+	History           WorkerHistoryConfig `json:"history" yaml:"history"`
 
 	// TmuxSocketPath is the per-job tmux socket path derived at runtime for a
 	// specific job. It is never user-configurable and never persisted.
@@ -738,6 +743,9 @@ func LoadWorker(path string) (WorkerConfig, error) {
 	if fileCfg.Taints != nil {
 		cfg.Taints = fileCfg.Taints
 	}
+	if fileCfg.HarnessConfigFile != "" {
+		cfg.HarnessConfigFile = fileCfg.HarnessConfigFile
+	}
 	cfg.Cleanup = fileCfg.Cleanup
 	if fileCfg.Git.Principal != "" {
 		cfg.Git.Principal = fileCfg.Git.Principal
@@ -916,6 +924,13 @@ func normalizeWorker(cfg WorkerConfig) (WorkerConfig, error) {
 	}
 	if _, err := cfg.History.Resolve(cfg.WorkDir); err != nil {
 		return WorkerConfig{}, err
+	}
+
+	cfg.HarnessConfigFile = strings.TrimSpace(cfg.HarnessConfigFile)
+	if cfg.HarnessConfigFile != "" {
+		if !filepath.IsAbs(cfg.HarnessConfigFile) || filepath.Clean(cfg.HarnessConfigFile) != cfg.HarnessConfigFile {
+			return WorkerConfig{}, errors.New("worker harness_config_file must be an absolute, clean path")
+		}
 	}
 
 	cfg.WorkDir = cleanRequiredPath(cfg.WorkDir)

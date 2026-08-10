@@ -199,7 +199,7 @@ func (p *DarwinProcessProvider) Launch(ctx context.Context, request LaunchReques
 	if err := os.MkdirAll(workDir, 0o700); err != nil {
 		return fmt.Errorf("create worker work dir: %w", err)
 	}
-	config, err := generatedWorkerYAML(request, workDir)
+	config, err := generatedWorkerYAML(request, workDir, "")
 	if err != nil {
 		return Permanent(fmt.Errorf("generate worker config: %w", err))
 	}

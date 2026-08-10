@@ -78,6 +78,14 @@ stringData:
             kubernetes.io/os: linux
           # Provision this Secret out of band; Kind creates it from local env vars.
           harness_model_proxy_secret_name: flow-harness-model-proxy
+          # Optional: an absolute path inside this pod to a Harness JSON config
+          # installed as every job's global Harness config
+          # ($HOME/.config/harness/config.json). It supplies deployment-wide
+          # defaults only: a repo's .harness/config.json still wins per key and
+          # harness_args/flags and HARNESS_* env win over it. The file must be a
+          # JSON object matching the Harness version in the worker image and is
+          # delivered to workers through the private per-slot Secret.
+          # harness_config_file: /etc/flow/harness/config.json
 
       # Profiles are independent and may use a leaner image and different
       # credentials for jobs that do not require Harness.
@@ -206,6 +214,10 @@ spec:
               mountPath: /etc/flow/flow-orchestrator.yaml
               subPath: flow-orchestrator.yaml
               readOnly: true
+            # Optional global Harness config for kubernetes.harness_config_file.
+            # - name: harness-config
+            #   mountPath: /etc/flow/harness
+            #   readOnly: true
       volumes:
         - name: config
           secret:
@@ -216,3 +228,11 @@ spec:
             items:
               - key: flow-orchestrator.yaml
                 path: flow-orchestrator.yaml
+        # Optional global Harness config mounted for harness_config_file:
+        # - name: harness-config
+        #   configMap:
+        #     name: flow-harness-config
+        #     defaultMode: 0440
+        #     items:
+        #       - key: config.json
+        #         path: config.json

@@ -66,16 +66,20 @@ type OrchestratorProfileConfig struct {
 
 // OrchestratorKubernetesConfig configures Kubernetes Job workers for a profile.
 type OrchestratorKubernetesConfig struct {
-	Namespace                   string                            `json:"namespace" yaml:"namespace"`
-	Image                       string                            `json:"image" yaml:"image"`
-	ServiceAccount              string                            `json:"service_account" yaml:"service_account"`
-	WorkDir                     string                            `json:"work_dir" yaml:"work_dir"`
-	WorkerArgs                  []string                          `json:"worker_args" yaml:"worker_args"`
-	ImagePullPolicy             string                            `json:"image_pull_policy" yaml:"image_pull_policy"`
-	HarnessModelProxySecretName string                            `json:"harness_model_proxy_secret_name" yaml:"harness_model_proxy_secret_name"`
-	WorkVolume                  *OrchestratorWorkVolumeConfig     `json:"work_volume,omitempty" yaml:"work_volume,omitempty"`
-	Resources                   *OrchestratorResourceRequirements `json:"resources,omitempty" yaml:"resources,omitempty"`
-	NodeSelector                map[string]string                 `json:"node_selector,omitempty" yaml:"node_selector,omitempty"`
+	Namespace                   string   `json:"namespace" yaml:"namespace"`
+	Image                       string   `json:"image" yaml:"image"`
+	ServiceAccount              string   `json:"service_account" yaml:"service_account"`
+	WorkDir                     string   `json:"work_dir" yaml:"work_dir"`
+	WorkerArgs                  []string `json:"worker_args" yaml:"worker_args"`
+	ImagePullPolicy             string   `json:"image_pull_policy" yaml:"image_pull_policy"`
+	HarnessModelProxySecretName string   `json:"harness_model_proxy_secret_name" yaml:"harness_model_proxy_secret_name"`
+	// HarnessConfigFile is an absolute path in the orchestrator pod to a
+	// Harness JSON config delivered to each worker as every job's global
+	// config; repo .harness/config.json and flags still override it.
+	HarnessConfigFile string                            `json:"harness_config_file" yaml:"harness_config_file"`
+	WorkVolume        *OrchestratorWorkVolumeConfig     `json:"work_volume,omitempty" yaml:"work_volume,omitempty"`
+	Resources         *OrchestratorResourceRequirements `json:"resources,omitempty" yaml:"resources,omitempty"`
+	NodeSelector      map[string]string                 `json:"node_selector,omitempty" yaml:"node_selector,omitempty"`
 }
 
 // OrchestratorWorkVolumeConfig describes provider-neutral scratch storage.
@@ -141,6 +145,7 @@ type ResolvedOrchestratorKubernetesConfig struct {
 	WorkerArgs                  []string
 	ImagePullPolicy             string
 	HarnessModelProxySecretName string
+	HarnessConfigFile           string
 	WorkVolume                  *OrchestratorWorkVolumeConfig
 	Resources                   *OrchestratorResourceRequirements
 	NodeSelector                map[string]string
@@ -260,6 +265,7 @@ func (c OrchestratorConfig) Resolve() (ResolvedOrchestrator, error) {
 				ServiceAccount: profile.Kubernetes.ServiceAccount, WorkDir: profile.Kubernetes.WorkDir,
 				WorkerArgs: append([]string(nil), profile.Kubernetes.WorkerArgs...), ImagePullPolicy: profile.Kubernetes.ImagePullPolicy,
 				HarnessModelProxySecretName: profile.Kubernetes.HarnessModelProxySecretName,
+				HarnessConfigFile:           profile.Kubernetes.HarnessConfigFile,
 				WorkVolume:                  cloneWorkVolume(profile.Kubernetes.WorkVolume), Resources: cloneResourceRequirements(profile.Kubernetes.Resources),
 				NodeSelector: cloneStringMap(profile.Kubernetes.NodeSelector),
 			}
@@ -478,7 +484,8 @@ func ResolveOrchestratorKubernetesConfig(cfg OrchestratorKubernetesConfig) (Reso
 		Namespace: normalized.Namespace, Image: normalized.Image, ServiceAccount: normalized.ServiceAccount,
 		WorkDir: normalized.WorkDir, WorkerArgs: append([]string(nil), normalized.WorkerArgs...),
 		ImagePullPolicy: normalized.ImagePullPolicy, HarnessModelProxySecretName: normalized.HarnessModelProxySecretName,
-		WorkVolume: cloneWorkVolume(normalized.WorkVolume), Resources: cloneResourceRequirements(normalized.Resources),
+		HarnessConfigFile: normalized.HarnessConfigFile,
+		WorkVolume:        cloneWorkVolume(normalized.WorkVolume), Resources: cloneResourceRequirements(normalized.Resources),
 		NodeSelector: cloneStringMap(normalized.NodeSelector),
 	}, nil
 }
@@ -504,6 +511,10 @@ func normalizeKubernetesConfig(cfg OrchestratorKubernetesConfig) (OrchestratorKu
 	cfg.HarnessModelProxySecretName = strings.TrimSpace(cfg.HarnessModelProxySecretName)
 	if cfg.HarnessModelProxySecretName != "" && !validKubernetesSecretName(cfg.HarnessModelProxySecretName) {
 		return OrchestratorKubernetesConfig{}, errors.New("harness_model_proxy_secret_name must be a DNS-1123 subdomain")
+	}
+	cfg.HarnessConfigFile = strings.TrimSpace(cfg.HarnessConfigFile)
+	if cfg.HarnessConfigFile != "" && (!path.IsAbs(cfg.HarnessConfigFile) || path.Clean(cfg.HarnessConfigFile) != cfg.HarnessConfigFile) {
+		return OrchestratorKubernetesConfig{}, errors.New("harness_config_file must be an absolute, clean path in the orchestrator pod")
 	}
 	policy := strings.ToLower(strings.TrimSpace(cfg.ImagePullPolicy))
 	switch policy {

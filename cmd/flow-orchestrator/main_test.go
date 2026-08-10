@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -42,9 +44,10 @@ func TestProviderOptionsSerializeDeterministicallyAndReconstruct(t *testing.T) {
 	profile := orchestrator.Profile{ProviderType: "kubernetes", ProviderOptions: map[string]string{
 		"namespace": "flow", "image": "worker:v1", "service_account": "flow-worker", "work_dir": "/home/flow/work",
 		"image_pull_policy": "IfNotPresent", "harness_model_proxy_secret_name": "flow-harness-model-proxy",
-		"work_volume":   encoded,
-		"resources":     `{"requests":{"cpu":"500m","memory":"1Gi"},"limits":{"ephemeral-storage":"5Gi"}}`,
-		"node_selector": `{"kubernetes.io/os":"linux"}`,
+		"harness_config_file": "/etc/flow/harness/config.json",
+		"work_volume":         encoded,
+		"resources":           `{"requests":{"cpu":"500m","memory":"1Gi"},"limits":{"ephemeral-storage":"5Gi"}}`,
+		"node_selector":       `{"kubernetes.io/os":"linux"}`,
 	}}
 	got, err := kubernetesProviderOptionsFromProfile(profile, []string{"--no-metrics"})
 	if err != nil {
@@ -54,6 +57,9 @@ func TestProviderOptionsSerializeDeterministicallyAndReconstruct(t *testing.T) {
 		got.Resources.Requests["cpu"] != "500m" || got.Resources.Limits["ephemeral-storage"] != "5Gi" ||
 		got.NodeSelector["kubernetes.io/os"] != "linux" || got.HarnessModelProxySecretName != "flow-harness-model-proxy" {
 		t.Fatalf("reconstructed options = %+v", got)
+	}
+	if got.HarnessConfigFile != "/etc/flow/harness/config.json" {
+		t.Fatalf("reconstructed HarnessConfigFile = %q", got.HarnessConfigFile)
 	}
 }
 
@@ -89,6 +95,49 @@ func TestPersistedProviderOptionsFailClosed(t *testing.T) {
 	}}
 	if _, err := kubernetesProviderOptionsFromProfile(profile, nil); err == nil || !strings.Contains(err.Error(), "validate persisted kubernetes options") {
 		t.Fatalf("semantically invalid persisted option error = %v", err)
+	}
+}
+
+func TestValidateHarnessConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	valid := filepath.Join(dir, "harness.json")
+	if err := os.WriteFile(valid, []byte(`{"default_agent":{"model":"test-model"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateHarnessConfigFile(valid); err != nil {
+		t.Fatalf("validateHarnessConfigFile(valid) = %v", err)
+	}
+	if err := validateHarnessConfigFile(filepath.Join(dir, "missing.json")); err == nil {
+		t.Fatal("validateHarnessConfigFile accepted a missing file")
+	}
+	for name, content := range map[string]string{
+		"broken.json":    `{"default_agent":`,
+		"nonobject.json": `[1,2]`,
+		"null.json":      `null`,
+	} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateHarnessConfigFile(path); err == nil {
+			t.Fatalf("validateHarnessConfigFile(%s) accepted %q", name, content)
+		}
+	}
+}
+
+func TestBuildProfilesValidatesHarnessConfigFileAtStartup(t *testing.T) {
+	resolved := config.ResolvedOrchestrator{
+		Profiles: []config.ResolvedOrchestratorProfile{{
+			Name: "linux", Provider: "kubernetes",
+			Kubernetes: &config.ResolvedOrchestratorKubernetesConfig{
+				Namespace: "flow", Image: "worker:v1", WorkDir: "/work",
+				HarnessConfigFile: filepath.Join(t.TempDir(), "missing.json"),
+			},
+		}},
+	}
+	_, _, err := buildProfilesAndProviders(resolved)
+	if err == nil || !strings.Contains(err.Error(), "profile linux") || !strings.Contains(err.Error(), "harness_config_file") {
+		t.Fatalf("buildProfilesAndProviders() error = %v, want profile-scoped harness_config_file failure", err)
 	}
 }
 

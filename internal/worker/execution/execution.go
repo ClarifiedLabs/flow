@@ -881,6 +881,9 @@ func runEntrypointInTmux(ctx context.Context, input tmuxInput) (int, error) {
 	if err := ensureHermeticJobEnvironment(input.Config.WorkDir, input.Job.ID); err != nil {
 		return -1, err
 	}
+	if err := installJobHarnessConfig(input.Config, input.Job.ID); err != nil {
+		return -1, err
+	}
 	entrypointEnv := workerEnv(input)
 	entrypointEnv["TMUX_TMPDIR"] = agentTmuxTmpDir
 	wrapper, err := writeWrapper(jobDirectory, input.Entrypoint, input.WorkerExitFile, entrypointEnv)
@@ -1347,6 +1350,31 @@ func ensureHermeticJobEnvironment(workDir string, jobID string) error {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return fmt.Errorf("create hermetic job environment directory %s: %w", path, err)
 		}
+	}
+	return nil
+}
+
+// installJobHarnessConfig copies the worker-configured Harness JSON config
+// into the job's hermetic HOME as Harness's global config
+// ($HOME/.config/harness/config.json). Harness merges flags > env > project
+// .harness/config.json > this global file > built-in defaults, so the file
+// supplies deployment-wide defaults only: a repo's project config still wins
+// per key. The source may carry credentials; it is copied, never logged.
+func installJobHarnessConfig(cfg config.WorkerConfig, jobID string) error {
+	source := strings.TrimSpace(cfg.HarnessConfigFile)
+	if source == "" {
+		return nil
+	}
+	data, err := os.ReadFile(source)
+	if err != nil {
+		return fmt.Errorf("read worker harness_config_file %s: %w", source, err)
+	}
+	target := filepath.Join(hermeticJobEnv(cfg.WorkDir, jobID)["HOME"], ".config", "harness", "config.json")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		return fmt.Errorf("create job Harness config directory: %w", err)
+	}
+	if err := os.WriteFile(target, data, 0o600); err != nil {
+		return fmt.Errorf("write job Harness config %s: %w", target, err)
 	}
 	return nil
 }

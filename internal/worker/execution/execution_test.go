@@ -1114,6 +1114,56 @@ func TestWorkerEnvUsesHermeticJobStateDefaults(t *testing.T) {
 	}
 }
 
+func TestInstallJobHarnessConfig(t *testing.T) {
+	workDir := t.TempDir()
+	harnessJSON := []byte(`{"default_agent":{"model":"test-model"}}`)
+	source := filepath.Join(t.TempDir(), "harness.json")
+	if err := os.WriteFile(source, harnessJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(hermeticJobEnv(workDir, "j-harness")["HOME"], ".config", "harness", "config.json")
+
+	// Unset: nothing is written.
+	cfg := workerConfig(workDir, "file:///tmp/exchange.git")
+	if err := ensureHermeticJobEnvironment(workDir, "j-harness"); err != nil {
+		t.Fatal(err)
+	}
+	if err := installJobHarnessConfig(cfg, "j-harness"); err != nil {
+		t.Fatalf("installJobHarnessConfig(unset) = %v", err)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("unconfigured job Harness config exists at %s: %v", target, err)
+	}
+
+	// Set: the file lands as the hermetic HOME's global Harness config, mode 0600.
+	cfg.HarnessConfigFile = source
+	if err := installJobHarnessConfig(cfg, "j-harness"); err != nil {
+		t.Fatalf("installJobHarnessConfig() = %v", err)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read installed job Harness config: %v", err)
+	}
+	if !bytes.Equal(data, harnessJSON) {
+		t.Fatalf("installed job Harness config = %q, want %q", data, harnessJSON)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("installed job Harness config mode = %o, want 600", info.Mode().Perm())
+	}
+
+	// Unreadable source fails loudly and names the configured path.
+	missing := filepath.Join(t.TempDir(), "missing.json")
+	cfg.HarnessConfigFile = missing
+	err = installJobHarnessConfig(cfg, "j-harness")
+	if err == nil || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("installJobHarnessConfig(missing source) = %v, want error naming %s", err, missing)
+	}
+}
+
 func TestWorkerEnvForwardsHarnessModelProxyConfiguration(t *testing.T) {
 	t.Setenv("HARNESS_MODEL_PROXY_URL", "https://model-proxy.example.test")
 	t.Setenv("HARNESS_MODEL_PROXY_API_KEY", "model-proxy-key")

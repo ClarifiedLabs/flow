@@ -574,6 +574,42 @@ labels:
 	}
 }
 
+func TestLoadWorkerHarnessConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "worker.yaml")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write worker config: %v", err)
+		}
+	}
+
+	write("coordinator_url: http://127.0.0.1:8421\nwork_dir: " + filepath.Join(dir, "work") + "\nharness_config_file:  /etc/flow/harness/config.json  \n")
+	cfg, err := LoadWorker(path)
+	if err != nil {
+		t.Fatalf("load worker config: %v", err)
+	}
+	if cfg.HarnessConfigFile != "/etc/flow/harness/config.json" {
+		t.Fatalf("HarnessConfigFile = %q, want trimmed absolute path", cfg.HarnessConfigFile)
+	}
+
+	write("coordinator_url: http://127.0.0.1:8421\nwork_dir: " + filepath.Join(dir, "work") + "\n")
+	cfg, err = LoadWorker(path)
+	if err != nil {
+		t.Fatalf("load worker config: %v", err)
+	}
+	if cfg.HarnessConfigFile != "" {
+		t.Fatalf("HarnessConfigFile = %q, want empty", cfg.HarnessConfigFile)
+	}
+
+	for _, value := range []string{"relative/harness.json", "/etc/flow/../harness.json", "etc/harness.json"} {
+		write("coordinator_url: http://127.0.0.1:8421\nwork_dir: " + filepath.Join(dir, "work") + "\nharness_config_file: " + value + "\n")
+		if _, err := LoadWorker(path); err == nil || !strings.Contains(err.Error(), "harness_config_file must be an absolute, clean path") {
+			t.Fatalf("LoadWorker(harness_config_file %q) error = %v, want absolute/clean rejection", value, err)
+		}
+	}
+}
+
 func TestWorkerCleanupDefaultsAndValidation(t *testing.T) {
 	resolved, err := (WorkerCleanup{}).Resolve()
 	if err != nil {
