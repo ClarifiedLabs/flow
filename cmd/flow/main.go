@@ -547,6 +547,16 @@ func runTaskWithGlobalOptions(args []string, options globalOptions, stdout, stde
 	}
 }
 
+// generateIdempotencyKey returns a random request replay key with a
+// human-readable prefix identifying the operation that created it.
+func generateIdempotencyKey(prefix string) (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate idempotency key: %w", err)
+	}
+	return prefix + hex.EncodeToString(random[:]), nil
+}
+
 func runTaskGuide(args []string, stdout, stderr io.Writer) int {
 	args = ownerCommandTrailingFlags(args, 2)
 	flags := flag.NewFlagSet("task guide", flag.ContinueOnError)
@@ -564,12 +574,12 @@ func runTaskGuide(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if strings.TrimSpace(idempotencyKey) == "" {
-		var random [16]byte
-		if _, err := rand.Read(random[:]); err != nil {
-			fmt.Fprintf(stderr, "generate idempotency key: %v\n", err)
+		generated, err := generateIdempotencyKey("guide-")
+		if err != nil {
+			fmt.Fprintf(stderr, "%v\n", err)
 			return 1
 		}
-		idempotencyKey = "guide-" + hex.EncodeToString(random[:])
+		idempotencyKey = generated
 	}
 	client, err := newAPIClient(apiFlags)
 	if err != nil {
@@ -608,12 +618,12 @@ func runTaskDecideReview(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if strings.TrimSpace(idempotencyKey) == "" {
-		var random [16]byte
-		if _, err := rand.Read(random[:]); err != nil {
-			fmt.Fprintf(stderr, "generate idempotency key: %v\n", err)
+		generated, err := generateIdempotencyKey("review-decision-")
+		if err != nil {
+			fmt.Fprintf(stderr, "%v\n", err)
 			return 1
 		}
-		idempotencyKey = "review-decision-" + hex.EncodeToString(random[:])
+		idempotencyKey = generated
 	}
 	client, err := newAPIClient(apiFlags)
 	if err != nil {
@@ -666,9 +676,11 @@ func runTaskCreate(args []string, stdout, stderr io.Writer) int {
 	var flowRef string
 	var featureRef string
 	var parentItemID string
+	var idempotencyKey string
 	flags.StringVar(&flowRef, "flow", "", "workflow (id or name) used when the task is scheduled")
 	flags.StringVar(&featureRef, "feature", "", "feature (id or title) the task is assigned to")
 	flags.StringVar(&parentItemID, "parent", "", "organizational parent epic or feature id")
+	flags.StringVar(&idempotencyKey, "idempotency-key", "", "request replay key (generated when omitted)")
 	flags.Var(&attachmentFiles, "file", "file to attach to the initial task prompt (repeatable)")
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -680,8 +692,17 @@ func runTaskCreate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "create client: %v\n", err)
 		return 1
 	}
+	if strings.TrimSpace(idempotencyKey) == "" {
+		generated, err := generateIdempotencyKey("create-")
+		if err != nil {
+			fmt.Fprintf(stderr, "%v\n", err)
+			return 1
+		}
+		idempotencyKey = generated
+	}
 	input := flowclient.CreateTaskInput{
 		Title: title, Body: body, Priority: priority, ParentItemID: parentItemID,
+		IdempotencyKey: idempotencyKey,
 	}
 	if strings.TrimSpace(flowRef) != "" {
 		flowID, err := resolveFlowRef(client, flowRef)
@@ -699,11 +720,12 @@ func runTaskCreate(args []string, stdout, stderr io.Writer) int {
 		}
 		input.FeatureID = featureID
 	}
-	task, err := client.CreateTask(input)
+	task, reused, err := client.CreateTask(input)
 	if err != nil {
 		fmt.Fprintf(stderr, "create task: %v\n", err)
 		return 1
 	}
+	slog.Debug("task create response", "task", task.ID, "reused", reused)
 	printTaskLine(stdout, task)
 	for _, filePath := range attachmentFiles.Values {
 		attachment, err := uploadTaskAttachmentFile(client, task.ID, filePath, coordinator.TaskAttachmentStageInitial)

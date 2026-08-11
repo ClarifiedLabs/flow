@@ -89,13 +89,20 @@ func (c *Client) consolePath() string {
 	return "/v2/console"
 }
 
-func (c *Client) CreateTask(input CreateTaskInput) (coordinator.Task, error) {
+// CreateTask creates a task and reports whether the server replayed a stored
+// idempotent response (reused=true) instead of executing a fresh create.
+func (c *Client) CreateTask(input CreateTaskInput) (coordinator.Task, bool, error) {
 	var response taskResponse
-	if err := c.do(http.MethodPost, c.tasksPath(""), input, nil, &response); err != nil {
-		return coordinator.Task{}, err
+	headers := http.Header{}
+	if key := strings.TrimSpace(input.IdempotencyKey); key != "" {
+		headers.Set(contract.IdempotencyHeader, key)
 	}
-
-	return response.Task, nil
+	responseHeaders, err := c.doRequest(context.Background(), http.MethodPost, c.tasksPath(""), input, nil, headers, &response)
+	if err != nil {
+		return coordinator.Task{}, false, err
+	}
+	reused := strings.TrimSpace(responseHeaders.Get(contract.IdempotentReplayHeader)) != ""
+	return response.Task, reused, nil
 }
 
 func (c *Client) ListTasks(filter TaskFilter) ([]coordinator.Task, error) {
@@ -2087,11 +2094,18 @@ func (c *Client) doContext(ctx context.Context, method string, path string, body
 }
 
 func (c *Client) doContextWithHeaders(ctx context.Context, method string, path string, body any, query url.Values, headers http.Header, target any) error {
+	_, err := c.doRequest(ctx, method, path, body, query, headers, target)
+	return err
+}
+
+// doRequest performs the request and returns the response headers so callers
+// can observe server signals such as idempotent replay.
+func (c *Client) doRequest(ctx context.Context, method string, path string, body any, query url.Values, headers http.Header, target any) (http.Header, error) {
 	var requestBody io.Reader
 	if body != nil {
 		var encoded bytes.Buffer
 		if err := json.NewEncoder(&encoded).Encode(body); err != nil {
-			return err
+			return nil, err
 		}
 		requestBody = &encoded
 	}
@@ -2102,7 +2116,7 @@ func (c *Client) doContextWithHeaders(ctx context.Context, method string, path s
 	}
 	request, err := http.NewRequestWithContext(ctx, method, endpoint, requestBody)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	request.Header.Set(protocolHeader, contract.ProtocolVersion)
 	if body != nil {
@@ -2122,7 +2136,7 @@ func (c *Client) doContextWithHeaders(ctx context.Context, method string, path s
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		slog.Debug("flow api request failed", "method", method, "path", path, "duration", time.Since(started), "error", err)
-		return err
+		return nil, err
 	}
 	defer response.Body.Close()
 	slog.Debug("flow api response", "method", method, "path", path, "status", response.StatusCode, "duration", time.Since(started))
@@ -2131,24 +2145,24 @@ func (c *Client) doContextWithHeaders(ctx context.Context, method string, path s
 		var apiError errorResponse
 		if err := json.NewDecoder(response.Body).Decode(&apiError); err != nil {
 			slog.Debug("flow api error response decode failed", "method", method, "path", path, "status", response.StatusCode, "error", err)
-			return &HTTPStatusError{StatusCode: response.StatusCode}
+			return response.Header, &HTTPStatusError{StatusCode: response.StatusCode}
 		}
 		slog.Debug("flow api error response", "method", method, "path", path, "status", response.StatusCode, "code", apiError.Error.Code)
-		return &HTTPStatusError{
+		return response.Header, &HTTPStatusError{
 			StatusCode: response.StatusCode,
 			Code:       apiError.Error.Code,
 			Message:    apiError.Error.Message,
 		}
 	}
 	if target == nil {
-		return nil
+		return response.Header, nil
 	}
 	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
 		slog.Debug("flow api response decode failed", "method", method, "path", path, "status", response.StatusCode, "error", err)
-		return err
+		return response.Header, err
 	}
 
-	return nil
+	return response.Header, nil
 }
 
 type HTTPStatusError struct {
@@ -2198,6 +2212,10 @@ type CreateTaskInput struct {
 	FlowID       string `json:"flow_id,omitempty"`
 	FeatureID    string `json:"feature_id,omitempty"`
 	ParentItemID string `json:"parent_item_id,omitempty"`
+	// IdempotencyKey rides the Idempotency-Key header rather than the body so
+	// retries of the same create replay the stored response instead of
+	// creating a second task.
+	IdempotencyKey string `json:"-"`
 }
 
 type EditTaskInput struct {

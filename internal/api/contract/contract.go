@@ -14,7 +14,10 @@ const (
 	ProtocolVersion   = "8"
 	ProtocolHeader    = "Flow-Protocol-Version"
 	IdempotencyHeader = "Idempotency-Key"
-	AuthScheme        = "Bearer "
+	// IdempotentReplayHeader marks a response served from a stored idempotency
+	// record instead of a fresh execution, so clients can report reused=true.
+	IdempotentReplayHeader = "X-Flow-Idempotent-Replay"
+	AuthScheme             = "Bearer "
 )
 
 type Project struct {

@@ -663,7 +663,7 @@ func TestFetchPromptIncludesTaskDetailsFromAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	task, err := client.CreateTask(flowclient.CreateTaskInput{
+	task, _, err := client.CreateTask(flowclient.CreateTaskInput{
 		Title: "Prompt details task",
 		Body:  "Build the prompt with complete task context.\n\nThe agent must be able to start work without calling task show.",
 	})
@@ -716,7 +716,7 @@ func TestFetchPromptIncludesTaskSetWorkflowSelection(t *testing.T) {
 	if flowIDs["coding"] == "" || flowIDs["planning"] == "" {
 		t.Fatalf("flow catalog = %+v", catalog.Flows)
 	}
-	task, err := client.CreateTask(flowclient.CreateTaskInput{
+	task, _, err := client.CreateTask(flowclient.CreateTaskInput{
 		Title: "Plan mixed follow-on work", Body: "Produce implementation tasks and narrower planning tasks where needed.", FlowID: flowIDs["planning"],
 	})
 	if err != nil {
@@ -1016,6 +1016,85 @@ func TestTaskCommandsUseAPI(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "scheduled:\n  t-demo-0001\tscheduled\tCLI task") {
 		t.Fatalf("board output = %q", stdout.String())
+	}
+}
+
+func TestTaskCreateIdempotencyKeyReplay(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	serverURL := newFlowAPIServer(t)
+
+	create := func(title, key string) (int, string, string) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		args := []string{"task", "create", "--server", serverURL, "--token", "owner-token", "--title", title}
+		if key != "" {
+			args = append(args, "--idempotency-key", key)
+		}
+		return run(args, &stdout, &stderr), stdout.String(), stderr.String()
+	}
+
+	code, out, errOut := create("Idempotent CLI task", "cli-key-1")
+	if code != 0 {
+		t.Fatalf("first create exitCode = %d, stderr = %q", code, errOut)
+	}
+	if !strings.Contains(out, "t-demo-0001") {
+		t.Fatalf("first create output = %q", out)
+	}
+
+	// A retry with the same key and body replays the stored create.
+	code, out, errOut = create("Idempotent CLI task", "cli-key-1")
+	if code != 0 {
+		t.Fatalf("replayed create exitCode = %d, stderr = %q", code, errOut)
+	}
+	if !strings.Contains(out, "t-demo-0001") {
+		t.Fatalf("replayed create output = %q", out)
+	}
+
+	client, err := flowclient.New(config.ClientConfig{ServerURL: serverURL, Token: "owner-token"})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	tasks, err := client.ListTasks(flowclient.TaskFilter{})
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("task count = %d, want 1", len(tasks))
+	}
+
+	// The same key with a different body conflicts (whole-body fingerprint).
+	code, _, errOut = create("Different CLI task", "cli-key-1")
+	if code != 1 {
+		t.Fatalf("conflicting create exitCode = %d, want 1", code)
+	}
+	if !strings.Contains(errOut, "idempotency_key_conflict") {
+		t.Fatalf("conflicting create stderr = %q", errOut)
+	}
+}
+
+func TestTaskCreateGeneratesIdempotencyKey(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	var capturedKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v2/tasks" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		capturedKey = r.Header.Get("Idempotency-Key")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"task":{"ID":"t-demo-0001","Title":"Keyed"}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"task", "create", "--server", server.URL, "--token", "owner-token", "--title", "Keyed"}, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("task create exitCode = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if !strings.HasPrefix(capturedKey, "create-") || len(capturedKey) != len("create-")+32 {
+		t.Fatalf("idempotency key = %q, want create-<32 hex chars>", capturedKey)
 	}
 }
 

@@ -119,7 +119,7 @@ normalize to the same key are rejected so identifiers remain predictable.
 Tasks:
 
 ```sh
-flow task create --title TITLE [--flow FLOW] [--feature FEATURE]
+flow task create --title TITLE [--flow FLOW] [--feature FEATURE] [--idempotency-key KEY]
 flow task list
 flow task show TASK_ID
 flow task edit --title TITLE [--feature FEATURE] TASK_ID
@@ -134,6 +134,24 @@ flow task reset TASK_ID
 flow task done TASK_ID --resolution completed
 flow task reopen TASK_ID
 ```
+
+`task create` is idempotent: the CLI sends an `Idempotency-Key` header on
+every create, generating a fresh key per invocation unless `--idempotency-key`
+is supplied. A retried request with the same key and the same body replays the
+stored response (marked with an `X-Flow-Idempotent-Replay: 1` header) instead
+of creating a second task. The server's fingerprint is a hash of the whole
+request — method, path, and exact body — so the same key with any difference
+(even cosmetic whitespace in the body) is rejected with
+`idempotency_key_conflict` rather than silently reusing the task. Scripted
+callers that may retry the same command should pass an explicit
+`--idempotency-key` (for example, one derived from their own operation ID) so
+the retry replays rather than duplicates.
+
+Internal task creators use the same guarantee with deterministic natural keys:
+review follow-up task actions dedupe by source task + check + finding hash
+(replays return the recorded task, conflicting actions on the same finding are
+rejected), and planning task-set materialization replays per artifact, so
+aggregator retries cannot duplicate tasks.
 
 `task guide` records durable guidance on the active workflow run and delivers
 it to every live author, reviewer, and verifier session in that run. Rulings

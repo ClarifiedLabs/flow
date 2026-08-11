@@ -950,6 +950,33 @@ func TestIdempotentCreateDoesNotDuplicateTask(t *testing.T) {
 	}, http.StatusConflict, nil, idempotencyHeader, "create-1")
 }
 
+func TestIdempotentReplayMarksResponseHeader(t *testing.T) {
+	t.Parallel()
+	fixture := newTestFixture(t)
+
+	first := httptest.NewRecorder()
+	firstRequest := authorizedRequest(http.MethodPost, "/v2/tasks", createTaskRequest{Title: "Replay header task"})
+	firstRequest.Header.Set(idempotencyHeader, "replay-header-1")
+	fixture.Server.ServeHTTP(first, firstRequest)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first create status = %d, want %d; body: %s", first.Code, http.StatusCreated, first.Body.String())
+	}
+	if got := first.Header().Get(contract.IdempotentReplayHeader); got != "" {
+		t.Fatalf("first create %s header = %q, want empty", contract.IdempotentReplayHeader, got)
+	}
+
+	second := httptest.NewRecorder()
+	secondRequest := authorizedRequest(http.MethodPost, "/v2/tasks", createTaskRequest{Title: "Replay header task"})
+	secondRequest.Header.Set(idempotencyHeader, "replay-header-1")
+	fixture.Server.ServeHTTP(second, secondRequest)
+	if second.Code != http.StatusCreated {
+		t.Fatalf("replayed create status = %d, want %d; body: %s", second.Code, http.StatusCreated, second.Body.String())
+	}
+	if got := second.Header().Get(contract.IdempotentReplayHeader); got != "1" {
+		t.Fatalf("replayed create %s header = %q, want %q", contract.IdempotentReplayHeader, got, "1")
+	}
+}
+
 func TestListTasksFiltersByTextSearch(t *testing.T) {
 	t.Parallel()
 	fixture := newTestFixture(t)

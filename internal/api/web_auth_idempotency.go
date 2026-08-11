@@ -358,6 +358,7 @@ func (s *Server) serveIdempotent(w http.ResponseWriter, r *http.Request, princip
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(contract.IdempotentReplayHeader, "1")
 		w.WriteHeader(record.StatusCode)
 		_, _ = w.Write(record.ResponseBody)
 		return
