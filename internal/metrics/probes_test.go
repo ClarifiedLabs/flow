@@ -63,3 +63,29 @@ func TestMuxNilReadyFuncIsAlwaysReady(t *testing.T) {
 		t.Fatalf("GET /readyz status = %d, want %d", rec.Code, http.StatusOK)
 	}
 }
+
+// TestMuxServesNothingBeyondTelemetrySurface pins the unauthenticated port's
+// attack surface: only the three telemetry routes exist, and they are
+// read-only (GET-only).
+func TestMuxServesNothingBeyondTelemetrySurface(t *testing.T) {
+	mux := Mux(New(), func() bool { return true })
+
+	for _, tc := range []struct {
+		method string
+		path   string
+		want   int
+	}{
+		{http.MethodGet, "/", http.StatusNotFound},
+		{http.MethodGet, "/admin", http.StatusNotFound},
+		{http.MethodGet, "/v2/tasks", http.StatusNotFound},
+		{http.MethodPost, "/metrics", http.StatusMethodNotAllowed},
+		{http.MethodPost, "/readyz", http.StatusMethodNotAllowed},
+		{http.MethodDelete, "/livez", http.StatusMethodNotAllowed},
+	} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+		if rec.Code != tc.want {
+			t.Errorf("%s %s status = %d, want %d", tc.method, tc.path, rec.Code, tc.want)
+		}
+	}
+}

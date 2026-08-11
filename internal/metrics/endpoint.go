@@ -21,6 +21,10 @@ const (
 	DefaultShutdownTimeout = 5 * time.Second
 )
 
+// DefaultListen must stay loopback: the telemetry port is unauthenticated,
+// so binding it beyond the local host exposes process internals to the
+// network. Kubernetes manifests override it explicitly (see k8s/).
+
 // Config is the persisted configuration for a Prometheus metrics endpoint.
 // A nil Enabled value means metrics use their default-enabled behavior.
 type Config struct {

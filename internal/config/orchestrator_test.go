@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -400,6 +401,22 @@ func TestOrchestratorValidation(t *testing.T) {
 				t.Fatalf("Resolve() error = %v, want substring %q", err, test.want)
 			}
 		})
+	}
+}
+
+// TestDefaultTelemetryListenIsLoopback pins the unauthenticated telemetry
+// port to loopback by default; binding beyond the local host must always be
+// an explicit configuration choice (see docs/security-local.md).
+func TestDefaultTelemetryListenIsLoopback(t *testing.T) {
+	host, port, err := net.SplitHostPort(DefaultTelemetryListen)
+	if err != nil {
+		t.Fatalf("DefaultTelemetryListen %q: %v", DefaultTelemetryListen, err)
+	}
+	if host != "127.0.0.1" && host != "::1" && host != "localhost" {
+		t.Fatalf("DefaultTelemetryListen host = %q, want loopback", host)
+	}
+	if port == "" {
+		t.Fatalf("DefaultTelemetryListen %q has no port", DefaultTelemetryListen)
 	}
 }
 
