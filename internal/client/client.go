@@ -113,6 +113,9 @@ func (c *Client) ListTasks(filter TaskFilter) ([]coordinator.Task, error) {
 	for _, tag := range filter.TagSlugs {
 		query.Add("tag", tag)
 	}
+	if filter.Ready {
+		query.Set("ready", "1")
+	}
 
 	var response tasksResponse
 	if err := c.do(http.MethodGet, c.tasksPath(""), nil, query, &response); err != nil {
@@ -129,6 +132,22 @@ func (c *Client) GetTask(id string) (coordinator.Task, error) {
 	}
 
 	return response.Task, nil
+}
+
+// TaskView is a task together with the server-derived flags the CLI polls on.
+type TaskView struct {
+	Task    coordinator.Task
+	Blocked bool
+}
+
+// GetTaskView reads a task with its derived blocked flag.
+func (c *Client) GetTaskView(id string) (TaskView, error) {
+	var response taskResponse
+	if err := c.do(http.MethodGet, c.tasksPath("/"+url.PathEscape(id)), nil, nil, &response); err != nil {
+		return TaskView{}, err
+	}
+
+	return TaskView{Task: response.Task, Blocked: response.Blocked}, nil
 }
 
 // CreateFeature posts a new feature: a project-child task group with its own
@@ -2248,6 +2267,10 @@ type UploadTaskAttachmentInput struct {
 type TaskFilter struct {
 	LifecycleStates []string
 	TagSlugs        []string
+	// Ready restricts the list to unscheduled tasks with no unresolved
+	// effective blockers (the same rule the schedule-time dependency gate
+	// applies before starting workflow nodes).
+	Ready bool
 }
 
 type ReviewFollowUpFinding = contract.ReviewFollowUpFinding

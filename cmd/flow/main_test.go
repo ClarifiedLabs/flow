@@ -1098,6 +1098,99 @@ func TestTaskCreateGeneratesIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestReadyNextAndWaitCommands(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	serverURL := newFlowAPIServer(t)
+	client, err := flowclient.New(config.ClientConfig{ServerURL: serverURL, Token: "owner-token"})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	blocker, _, err := client.CreateTask(flowclient.CreateTaskInput{Title: "blocker"})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	blocked, _, err := client.CreateTask(flowclient.CreateTaskInput{Title: "blocked"})
+	if err != nil {
+		t.Fatalf("create blocked: %v", err)
+	}
+	free, _, err := client.CreateTask(flowclient.CreateTaskInput{Title: "free"})
+	if err != nil {
+		t.Fatalf("create free: %v", err)
+	}
+	if err := client.LinkTasks(blocker.ID, coordinator.RelationBlocks, blocked.ID); err != nil {
+		t.Fatalf("link blocker: %v", err)
+	}
+
+	runCmd := func(cmd []string, args ...string) (int, string, string) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		// API flags must precede positional args: flag parsing stops at the
+		// first positional.
+		full := append(append([]string{}, cmd...), "--server", serverURL, "--token", "owner-token")
+		code := run(append(full, args...), &stdout, &stderr)
+		return code, stdout.String(), stderr.String()
+	}
+
+	code, out, errOut := runCmd([]string{"ready"})
+	if code != 0 {
+		t.Fatalf("ready exitCode = %d, stderr = %q", code, errOut)
+	}
+	if !strings.Contains(out, blocker.ID) || !strings.Contains(out, free.ID) || strings.Contains(out, blocked.ID) {
+		t.Fatalf("ready output = %q, want blocker+free, not blocked", out)
+	}
+
+	code, out, errOut = runCmd([]string{"next"})
+	if code != 0 {
+		t.Fatalf("next exitCode = %d, stderr = %q", code, errOut)
+	}
+	if !strings.Contains(out, blocker.ID) || strings.Contains(out, blocked.ID) {
+		t.Fatalf("next output = %q, want the blocker first", out)
+	}
+
+	// An already-blocked task satisfies --until blocked on the first poll.
+	code, out, errOut = runCmd([]string{"wait"}, "--until", "blocked", "--timeout", "5s", "--poll-interval", "10ms", blocked.ID)
+	if code != 0 {
+		t.Fatalf("wait blocked exitCode = %d, stderr = %q", code, errOut)
+	}
+	if !strings.Contains(out, blocked.ID) {
+		t.Fatalf("wait blocked output = %q", out)
+	}
+
+	// An unsatisfied condition exits 3 on timeout.
+	code, _, errOut = runCmd([]string{"wait"}, "--until", "done", "--timeout", "60ms", "--poll-interval", "10ms", blocked.ID)
+	if code != 3 {
+		t.Fatalf("wait timeout exitCode = %d, want 3 (stderr = %q)", code, errOut)
+	}
+
+	// Durations require units.
+	code, _, _ = runCmd([]string{"wait"}, "--until", "done", "--timeout", "30", blocked.ID)
+	if code != 2 {
+		t.Fatalf("wait invalid timeout exitCode = %d, want 2", code)
+	}
+
+	// Finish the blocker: done satisfies --until done immediately, and the
+	// dependent becomes ready.
+	code, _, errOut = runCmd([]string{"task", "done"}, "--resolution", "completed", blocker.ID)
+	if code != 0 {
+		t.Fatalf("task done exitCode = %d, stderr = %q", code, errOut)
+	}
+	code, out, errOut = runCmd([]string{"wait"}, "--until", "done", "--timeout", "5s", "--poll-interval", "10ms", blocker.ID)
+	if code != 0 || !strings.Contains(out, blocker.ID) {
+		t.Fatalf("wait done exitCode = %d output = %q stderr = %q", code, out, errOut)
+	}
+	code, out, _ = runCmd([]string{"ready"})
+	if code != 0 || !strings.Contains(out, blocked.ID) || strings.Contains(out, blocker.ID) {
+		t.Fatalf("ready after done exitCode = %d output = %q", code, out)
+	}
+
+	// --any succeeds when at least one task matches.
+	code, _, errOut = runCmd([]string{"wait"}, "--until", "done", "--any", "--timeout", "5s", "--poll-interval", "10ms", blocked.ID, blocker.ID)
+	if code != 0 {
+		t.Fatalf("wait --any exitCode = %d, stderr = %q", code, errOut)
+	}
+}
+
 func TestTaskCreateUsesDiscoveredClientConfigOwnerToken(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Chdir(t.TempDir())

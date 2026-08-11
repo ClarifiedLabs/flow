@@ -564,6 +564,9 @@ type RebaseFeatureResponse struct {
 type TaskResponse struct {
 	Task      coordinator.Task             `json:"task"`
 	StatusLog []coordinator.StatusLogEntry `json:"status_log,omitempty"`
+	// Blocked is the derived needs-attention flag (unresolved effective
+	// blockers, open waits, or a system hold depending on lifecycle).
+	Blocked bool `json:"blocked"`
 }
 
 type TaskAttachmentResponse struct {

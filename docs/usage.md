@@ -159,6 +159,27 @@ remain active together until a later ruling explicitly names one with
 `--supersedes`; they do not use newest-wins semantics. The CLI generates a
 fresh idempotency key unless `--idempotency-key` is supplied.
 
+Agent-oriented task discovery and synchronization:
+
+```sh
+flow ready [--tag TAG]
+flow next [--tag TAG]
+flow wait TASK_ID... [--until done|blocked|scheduled|in_progress] [--any|--all] [--timeout 30s] [--poll-interval 2s]
+```
+
+`ready` lists tasks an agent could start right now: unscheduled with no
+unresolved blockers — the same rule the schedule-time dependency gate applies
+before starting workflow nodes (blockers are any work items linked by `blocks`
+to the task or an ancestor; a blocker resolves when it reaches its terminal
+state). Output orders by priority, then creation time, so `next` prints the
+single best task to pick up. `wait` polls task reads until the `--until`
+condition holds (default `done` on all tasks; `--any` flips to
+at-least-one). A task's `blocked` state is the board's needs-attention
+derivation: unresolved blockers when unscheduled, open human gates or a system
+convergence hold when in progress. Durations need Go units (`30s`, `5m`);
+`--until` matches current states, so a task that reset to unscheduled never
+satisfies `done`. Exit codes: 0 condition met, 1 error, 2 usage, 3 timeout.
+
 Final review aggregation may pause on a `review_scope_decision` when a valid
 blocking finding depends on an inferred, broad scope requirement. Use
 `task decide-review` to require the fix in this task, exclude it without

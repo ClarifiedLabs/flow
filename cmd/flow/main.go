@@ -118,6 +118,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runWorkItemWithGlobalOptions(args[1:], options, stdout, stderr)
 	case "board":
 		return runBoard(options.withConfig(args[1:]), stdout, stderr)
+	case "ready":
+		return runReadyTasks(options.withConfig(args[1:]), stdout, stderr)
+	case "next":
+		return runNextTask(options.withConfig(args[1:]), stdout, stderr)
+	case "wait":
+		return runWait(options.withConfig(args[1:]), stdout, stderr)
 	case "checks":
 		return runChecks(options.withConfig(args[1:]), stdout, stderr)
 	case "transitions":
@@ -1736,6 +1742,168 @@ func runBoard(args []string, stdout, stderr io.Writer) int {
 
 	printBoard(stdout, board)
 	return 0
+}
+
+func runReadyTasks(args []string, stdout, stderr io.Writer) int {
+	tasks, code := fetchReadyTasks(args, stderr)
+	if code != 0 {
+		return code
+	}
+	for _, task := range tasks {
+		printTaskLine(stdout, task)
+	}
+	return 0
+}
+
+func runNextTask(args []string, stdout, stderr io.Writer) int {
+	tasks, code := fetchReadyTasks(args, stderr)
+	if code != 0 {
+		return code
+	}
+	if len(tasks) == 0 {
+		fmt.Fprintln(stdout, "no ready tasks")
+		return 0
+	}
+	printTaskLine(stdout, tasks[0])
+	return 0
+}
+
+// fetchReadyTasks lists the tasks an agent could start right now: unscheduled
+// with no unresolved blockers, ordered by priority then creation time.
+func fetchReadyTasks(args []string, stderr io.Writer) ([]coordinator.Task, int) {
+	flags := flag.NewFlagSet("ready", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	var tag string
+	flags.StringVar(&tag, "tag", "", "comma-separated tag slugs")
+	if err := flags.Parse(args); err != nil {
+		return nil, 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "usage: flow ready|next [--tag TAG]")
+		return nil, 2
+	}
+
+	applySessionEnvironment(apiFlags, nil)
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return nil, 1
+	}
+	tasks, err := client.ListTasks(flowclient.TaskFilter{Ready: true, TagSlugs: parseCSV(tag)})
+	if err != nil {
+		fmt.Fprintf(stderr, "list ready tasks: %v\n", err)
+		return nil, 1
+	}
+	return tasks, 0
+}
+
+// runWait polls tasks until they reach the requested condition. Exit codes:
+// 0 condition met, 1 error, 2 usage, 3 timeout. Durations must carry units
+// (time.ParseDuration), and --until matches current states: a task that reset
+// to unscheduled never satisfies "done".
+func runWait(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("wait", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	var until string
+	var timeoutText string
+	var intervalText string
+	var anyMode bool
+	var allMode bool
+	flags.StringVar(&until, "until", "done", "condition to wait for: done|blocked|scheduled|in_progress")
+	flags.StringVar(&timeoutText, "timeout", "30s", "overall timeout (Go duration with units, e.g. 30s, 5m)")
+	flags.StringVar(&intervalText, "poll-interval", "2s", "poll interval (Go duration with units)")
+	flags.BoolVar(&anyMode, "any", false, "succeed when any task matches")
+	flags.BoolVar(&allMode, "all", false, "succeed when every task matches (default)")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() == 0 {
+		fmt.Fprintln(stderr, "usage: flow wait [flags] TASK_ID...")
+		return 2
+	}
+	if anyMode && allMode {
+		fmt.Fprintln(stderr, "--any and --all conflict")
+		return 2
+	}
+	switch until {
+	case "done", "blocked", "scheduled", "in_progress":
+	default:
+		fmt.Fprintf(stderr, "invalid --until %q: want done|blocked|scheduled|in_progress\n", until)
+		return 2
+	}
+	timeout, err := time.ParseDuration(timeoutText)
+	if err != nil || timeout <= 0 {
+		fmt.Fprintf(stderr, "invalid --timeout %q: use a Go duration with units (e.g. 30s, 5m)\n", timeoutText)
+		return 2
+	}
+	interval, err := time.ParseDuration(intervalText)
+	if err != nil || interval <= 0 {
+		fmt.Fprintf(stderr, "invalid --poll-interval %q: use a Go duration with units (e.g. 2s, 500ms)\n", intervalText)
+		return 2
+	}
+
+	applySessionEnvironment(apiFlags, nil)
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "create client: %v\n", err)
+		return 1
+	}
+	type waitTarget struct {
+		client *flowclient.Client
+		id     string
+	}
+	targets := make([]waitTarget, 0, flags.NArg())
+	for _, arg := range flags.Args() {
+		scoped, ref := scopeClientForRef(client, arg)
+		targets = append(targets, waitTarget{client: scoped, id: ref})
+	}
+
+	matches := func(view flowclient.TaskView) bool {
+		switch until {
+		case "blocked":
+			return view.Blocked
+		case "done":
+			return view.Task.State != nil && *view.Task.State == coordinator.LifecycleDone
+		case "scheduled":
+			return view.Task.State != nil && *view.Task.State == coordinator.LifecycleScheduled
+		case "in_progress":
+			return view.Task.State != nil && *view.Task.State == coordinator.LifecycleInProgress
+		}
+		return false
+	}
+
+	deadline := time.Now().Add(timeout)
+	for {
+		matched := make([]coordinator.Task, 0, len(targets))
+		for _, target := range targets {
+			view, err := target.client.GetTaskView(target.id)
+			if err != nil {
+				fmt.Fprintf(stderr, "get task %s: %v\n", target.id, err)
+				return 1
+			}
+			if matches(view) {
+				matched = append(matched, view.Task)
+			}
+		}
+		if (anyMode && len(matched) > 0) || (!anyMode && len(matched) == len(targets)) {
+			for _, task := range matched {
+				printTaskLine(stdout, task)
+			}
+			return 0
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			fmt.Fprintf(stderr, "wait: timed out after %s waiting for %s (%d/%d tasks matched)\n", timeout, until, len(matched), len(targets))
+			return 3
+		}
+		if interval < remaining {
+			time.Sleep(interval)
+		} else {
+			time.Sleep(remaining)
+		}
+	}
 }
 
 func runUI(args []string, stdout, stderr io.Writer) int {
@@ -3778,6 +3946,9 @@ func printUsage(out io.Writer) {
 	  flow epic create|list|show|edit|start|complete|reopen|archive
 	  flow work-item show|tree|link|unlink|relations
   flow board
+  flow ready [--tag TAG]
+  flow next [--tag TAG]
+  flow wait TASK_ID... [--until done|blocked|scheduled|in_progress] [--any|--all] [--timeout 30s] [--poll-interval 2s]
   flow checks TASK_ID
   flow transitions TASK_ID
   flow workers

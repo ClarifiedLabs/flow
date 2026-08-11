@@ -510,10 +510,20 @@ func (s *Server) handleListTasksAggregate(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid_filter", err.Error())
 		return
 	}
+	ready, err := readyFilterFromQuery(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_filter", err.Error())
+		return
+	}
 
 	response := aggregateTasksResponse{Tasks: []uiTaskWithProject{}}
 	for _, bundle := range bundles {
-		tasks, err := bundle.Tasks.ListTasks(r.Context(), filter)
+		var tasks []coordinator.Task
+		if ready {
+			tasks, err = bundle.Tasks.ReadyTasks(r.Context(), filter)
+		} else {
+			tasks, err = bundle.Tasks.ListTasks(r.Context(), filter)
+		}
 		if err != nil {
 			writeInternalError(w, r, "list_tasks_failed", err)
 			return

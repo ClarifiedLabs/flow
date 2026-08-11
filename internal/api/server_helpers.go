@@ -553,6 +553,10 @@ type taskResponse struct {
 	ProjectName string                       `json:"project_name,omitempty"`
 	StatusLog   []coordinator.StatusLogEntry `json:"status_log,omitempty"`
 	Detail      *uiTaskDetail                `json:"task_detail,omitempty"`
+	// Blocked is the derived needs-attention flag: unresolved effective
+	// blockers for unscheduled tasks, open waits or a system hold for
+	// in-progress ones.
+	Blocked bool `json:"blocked"`
 }
 
 // lifecycleTransitionResponse is the unified task lifecycle endpoint response.
@@ -914,6 +918,19 @@ func taskFilterFromQuery(r *http.Request) (coordinator.TaskFilter, error) {
 	filter.Search = r.URL.Query().Get("q")
 
 	return filter, nil
+}
+
+// readyFilterFromQuery reports whether the request asks for the ready read
+// model (unscheduled tasks with no unresolved effective blockers).
+func readyFilterFromQuery(r *http.Request) (bool, error) {
+	switch value := strings.TrimSpace(r.URL.Query().Get("ready")); value {
+	case "", "0", "false":
+		return false, nil
+	case "1", "true":
+		return true, nil
+	default:
+		return false, fmt.Errorf("invalid ready %q", value)
+	}
 }
 
 func decodeJSON(r *http.Request, target any) error {

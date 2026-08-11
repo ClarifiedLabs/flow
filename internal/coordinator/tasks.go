@@ -1362,20 +1362,8 @@ func (s *TaskService) BoardResult(ctx context.Context) (BoardResult, error) {
 			result.LaneStates[task.ID] = LaneStateScheduled
 		case LifecycleInProgress:
 			result.Board.InProgress = append(result.Board.InProgress, task)
-			var openWaits, held, heldBySystem int
-			if err := s.db.QueryRowContext(ctx, `
-SELECT
-	(SELECT COUNT(*) FROM workflow_waits w
-		JOIN workflow_runs r ON r.id = w.workflow_run_id
-		WHERE r.task_id = ? AND w.state = 'open'),
-	(SELECT COUNT(*) FROM workflow_runs r
-		WHERE r.task_id = ? AND r.held_at IS NOT NULL
-			AND r.state IN ('scheduled', 'running', 'waiting')),
-	(SELECT COUNT(*) FROM workflow_runs r
-		WHERE r.task_id = ? AND r.held_at IS NOT NULL
-			AND r.held_by = ?
-			AND r.state IN ('scheduled', 'running', 'waiting'))`,
-				task.ID, task.ID, task.ID, string(ActorSystem)).Scan(&openWaits, &held, &heldBySystem); err != nil {
+			openWaits, held, heldBySystem, err := s.openWaitAndHoldCounts(ctx, task.ID)
+			if err != nil {
 				return BoardResult{}, err
 			}
 			switch {

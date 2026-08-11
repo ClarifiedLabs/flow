@@ -977,6 +977,57 @@ func TestIdempotentReplayMarksResponseHeader(t *testing.T) {
 	}
 }
 
+func TestListTasksReadyFilterAndBlockedFlagAPI(t *testing.T) {
+	t.Parallel()
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	var blocker, blocked, free taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks", createTaskRequest{
+		Title: "blocker",
+	}, http.StatusCreated, &blocker)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks", createTaskRequest{
+		Title: "blocked",
+	}, http.StatusCreated, &blocked)
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks", createTaskRequest{
+		Title: "free",
+	}, http.StatusCreated, &free)
+	if err := fixture.Tasks.LinkTasks(ctx, blocker.Task.ID, blocked.Task.ID, coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
+		t.Fatalf("link blocker: %v", err)
+	}
+
+	wantReady := func(path string) {
+		t.Helper()
+		var ready aggregateTasksResponse
+		doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, path, nil, http.StatusOK, &ready)
+		got := map[string]bool{}
+		for _, task := range ready.Tasks {
+			got[task.ID] = true
+		}
+		if len(got) != 2 || !got[blocker.Task.ID] || !got[free.Task.ID] || got[blocked.Task.ID] {
+			t.Fatalf("%s ready tasks = %+v, want blocker+free only", path, ready.Tasks)
+		}
+	}
+	// Both the aggregate and the project-scoped routes serve the ready read
+	// model.
+	wantReady("/v2/tasks?ready=1")
+	wantReady("/v2/projects/" + fixture.Project.ID + "/tasks?ready=1")
+
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks?ready=maybe", nil, http.StatusBadRequest, nil)
+
+	// The derived blocked flag rides the task read.
+	var blockedView taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks/"+blocked.Task.ID, nil, http.StatusOK, &blockedView)
+	if !blockedView.Blocked {
+		t.Fatalf("blocked task blocked = false, want true")
+	}
+	var freeView taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/tasks/"+free.Task.ID, nil, http.StatusOK, &freeView)
+	if freeView.Blocked {
+		t.Fatalf("free task blocked = true, want false")
+	}
+}
+
 func TestListTasksFiltersByTextSearch(t *testing.T) {
 	t.Parallel()
 	fixture := newTestFixture(t)

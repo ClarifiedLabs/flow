@@ -62,8 +62,18 @@ func (s *projectServer) handleListTasks(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid_filter", err.Error())
 		return
 	}
+	ready, err := readyFilterFromQuery(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_filter", err.Error())
+		return
+	}
 
-	tasks, err := s.tasks.ListTasks(r.Context(), filter)
+	var tasks []coordinator.Task
+	if ready {
+		tasks, err = s.tasks.ReadyTasks(r.Context(), filter)
+	} else {
+		tasks, err = s.tasks.ListTasks(r.Context(), filter)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "list_tasks_failed", err.Error())
 		return
@@ -419,8 +429,13 @@ func (s *projectServer) handleGetTask(w http.ResponseWriter, r *http.Request, pr
 		writeError(w, http.StatusNotFound, "task_not_found", err.Error())
 		return
 	}
+	blocked, err := s.tasks.TaskBlocked(r.Context(), taskID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "task_blocked_failed", err.Error())
+		return
+	}
 
-	response := taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name}
+	response := taskResponse{Task: task, ProjectID: s.project.ID, ProjectName: s.project.Name, Blocked: blocked}
 	if s.status != nil {
 		statusLog, err := s.status.ListForTask(r.Context(), taskID, 20)
 		if err != nil {
