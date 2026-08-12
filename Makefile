@@ -27,20 +27,12 @@ test:
 
 # js-test runs the web UI's native-ESM Node tests (app.js is split into ES
 # modules served as-is to the browser; these tests import them directly).
+# `node --test <glob>` runs every `*.test.mjs` under assets/ recursively, each
+# in its own subprocess. Helper modules keep non-matching names
+# (test-dom.mjs, test-helpers.mjs) so they are never collected as tests —
+# and never inside a directory named `test`, which node matches wholesale.
 js-test:
-	node --test internal/web/assets/app.test.mjs
-	node --test internal/web/assets/board-model.test.mjs
-	node --test internal/web/assets/create-relations.test.mjs
-	node --test internal/web/assets/elements.test.mjs
-	node --test internal/web/assets/lifecycle.test.mjs
-	node --test internal/web/assets/storage.test.mjs
-	node --test internal/web/assets/task-relations.test.mjs
-	node --test internal/web/assets/tasks-view.test.mjs
-	node --test internal/web/assets/work-context.test.mjs
-	node --test internal/web/assets/work-item-model.test.mjs
-	node --test internal/web/assets/work-items.test.mjs
-	node --test internal/web/assets/work-nav.test.mjs
-	node internal/web/assets/harness_models.test.mjs
+	node --test "internal/web/assets/**/*.test.mjs"
 
 release:
 ifndef VERSION
