@@ -9,6 +9,21 @@ import (
 	"testing"
 )
 
+// expectedProjectMigrations is the migration list a fresh project database
+// should carry under the current build tags (FTS5 adds 0005_task_fts).
+func expectedProjectMigrations() []string {
+	base := []string{"0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log"}
+	for _, f := range filterOptionalMigrations([]string{"0005_task_fts"}) {
+		base = append(base, f)
+	}
+	return base
+}
+
+func expectedSchemaVersion() string {
+	m := expectedProjectMigrations()
+	return m[len(m)-1]
+}
+
 func TestOpenInitializesSQLite(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "flow.db"))
@@ -37,14 +52,14 @@ func TestOpenInitializesSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log")
+	assertAppliedMigrations(t, migrations, expectedProjectMigrations()...)
 
 	var schemaVersion string
 	if err := store.DB().QueryRowContext(ctx, "SELECT value FROM app_metadata WHERE key = 'schema_version'").Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version metadata: %v", err)
 	}
-	if schemaVersion != "0004_event_log" {
-		t.Fatalf("schema version = %q, want 0004_event_log", schemaVersion)
+	if schemaVersion != expectedSchemaVersion() {
+		t.Fatalf("schema version = %q, want %s", schemaVersion, expectedSchemaVersion())
 	}
 	assertStorageFormat(t, store, "7")
 
@@ -582,7 +597,7 @@ func TestOpenMigrationIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log")
+	assertAppliedMigrations(t, migrations, expectedProjectMigrations()...)
 }
 
 // TestMigratedTemplateClonesAreIndependent pins the hermetic-test fast path:
@@ -607,7 +622,7 @@ func TestMigratedTemplateClonesAreIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read first clone migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log")
+	assertAppliedMigrations(t, migrations, expectedProjectMigrations()...)
 	assertStorageFormat(t, first, "7")
 	if _, err := first.DB().ExecContext(ctx, `INSERT INTO schema_migrations (version) VALUES ('9999_clone_probe')`); err != nil {
 		t.Fatalf("write first clone: %v", err)

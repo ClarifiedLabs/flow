@@ -20,7 +20,7 @@ RUN go mod download
 COPY . .
 RUN mkdir -p /out \
     && ldflags="-s -w -X github.com/ClarifiedLabs/flow/internal/version.Version=${VERSION} -X github.com/ClarifiedLabs/flow/internal/version.Commit=${COMMIT} -X github.com/ClarifiedLabs/flow/internal/version.Date=${DATE}" \
-    && CGO_ENABLED=1 go build -trimpath -ldflags="$ldflags" -o /out/ ./cmd/flow ./cmd/flow-server ./cmd/flow-worker ./cmd/flow-orchestrator
+    && CGO_ENABLED=1 go build -tags sqlite_fts5 -trimpath -ldflags="$ldflags" -o /out/ ./cmd/flow ./cmd/flow-server ./cmd/flow-worker ./cmd/flow-orchestrator
 
 FROM debian:trixie-slim AS flow-server
 

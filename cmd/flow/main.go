@@ -161,6 +161,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runEvents(options.withConfig(args[1:]), stdout, stderr)
 	case "quickstart", "agent-instructions":
 		return runQuickstart(options.withConfig(args[1:]), stdout, stderr)
+	case "search":
+		return runSearch(options.withConfig(args[1:]), stdout, stderr)
 	case "checks":
 		return runChecks(options.withConfig(args[1:]), stdout, stderr)
 	case "transitions":
@@ -1804,6 +1806,39 @@ func runTaskRelations(args []string, stdout, stderr io.Writer) int {
 	}
 
 	printTaskRelations(stdout, taskRef, relations)
+	return 0
+}
+
+// runSearch implements `flow search`: full-text (or substring, when the
+// server lacks FTS5) task search. Human output reuses the task line format.
+func runSearch(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("search", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	var limit int
+	flags.IntVar(&limit, "limit", 0, "maximum hits (server default 50)")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	mode := apiFlags.outputMode()
+	if flags.NArg() != 1 {
+		return machineUsage(stdout, stderr, mode, "search", "usage: flow search QUERY [--limit N]")
+	}
+	applySessionEnvironment(apiFlags, nil)
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		return machineError(stdout, stderr, mode, "search", "create client", err)
+	}
+	tasks, err := client.SearchTasks(flags.Arg(0), limit)
+	if err != nil {
+		return machineError(stdout, stderr, mode, "search", "search tasks", err)
+	}
+	if mode.Machine() {
+		return cliout.WriteData(stdout, mode, "search", map[string]any{"tasks": tasks})
+	}
+	for _, task := range tasks {
+		printTaskLine(stdout, task)
+	}
 	return 0
 }
 
@@ -4154,6 +4189,7 @@ func printUsage(out io.Writer) {
   flow next [--tag TAG]
   flow wait TASK_ID... [--until done|blocked|scheduled|in_progress] [--any|--all] [--timeout 30s] [--poll-interval 2s]
   flow events [--since N] [--limit N] [--kind K] [--task ID] [--actor A] [--follow|--tail]
+  flow search QUERY [--limit N]
   flow quickstart
   flow checks TASK_ID
   flow transitions TASK_ID

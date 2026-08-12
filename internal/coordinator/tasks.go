@@ -612,6 +612,87 @@ JOIN tags t ON t.id = it.tag_id`
 	return scanTasks(rows)
 }
 
+// SearchTasks ranks tasks matching query by full-text relevance (title and
+// body, FTS5 bm25). The query is sanitized term-by-term into a prefix MATCH
+// so user input can never inject FTS syntax. When the FTS index cannot answer
+// (e.g. a phrase the tokenizer dropped to nothing), it falls back to the
+// case-insensitive LIKE substring match ListTasks uses, so search never
+// regresses below the pre-FTS behavior. limit <= 0 defaults to 50.
+func (s *TaskService) SearchTasks(ctx context.Context, query string, limit int) ([]Task, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return []Task{}, nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	match := fts5Query(query)
+	if match == "" || !fts5Available {
+		return s.searchTasksLike(ctx, query, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT"+taskSelectColumns+`
+FROM task_fts f
+JOIN tasks i ON i.rowid = f.rowid
+WHERE task_fts MATCH ?
+ORDER BY bm25(task_fts)
+LIMIT ?`, match, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search tasks: %w", err)
+	}
+	defer rows.Close()
+	tasks, err := scanTasks(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(tasks) == 0 {
+		// FTS found nothing: the substring may still appear (e.g. inside a token
+		// the prefix index does not start). Fall back to substring matching.
+		return s.searchTasksLike(ctx, query, limit)
+	}
+	return tasks, nil
+}
+
+func (s *TaskService) searchTasksLike(ctx context.Context, query string, limit int) ([]Task, error) {
+	pattern := "%" + strings.ToLower(query) + "%"
+	rows, err := s.db.QueryContext(ctx, "SELECT"+taskSelectColumns+`
+FROM tasks i
+WHERE LOWER(i.title) LIKE ? OR LOWER(i.body) LIKE ?
+ORDER BY i.updated_at DESC
+LIMIT ?`, pattern, pattern, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search tasks (like): %w", err)
+	}
+	defer rows.Close()
+	return scanTasks(rows)
+}
+
+// fts5Query builds a safe FTS5 MATCH expression from free text: each
+// whitespace-separated run of word characters becomes a quoted prefix term
+// ANDed with the others. Anything else (quotes, operators, punctuation runs)
+// is dropped, so user input can never change the query's shape.
+func fts5Query(query string) string {
+	terms := strings.Fields(query)
+	parts := make([]string, 0, len(terms))
+	for _, term := range terms {
+		word := strings.Map(func(r rune) rune {
+			if r == '_' || r == '-' || ('0' <= r && r <= '9') || ('a' <= r && r <= 'z') || ('A' <= r && r <= 'Z') || r > 127 {
+				return r
+			}
+			return -1
+		}, term)
+		if word == "" {
+			continue
+		}
+		parts = append(parts, `"`+word+`"*`)
+	}
+	return strings.Join(parts, " AND ")
+}
+
+
 // ClosedOutcome filters closed tasks by their terminal disposition. The empty
 // value means "any outcome". The predicates mirror derivePhaseFromTask: a
 // rejected triage wins over a merged change, which wins over abandonment.

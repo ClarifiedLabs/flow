@@ -978,6 +978,23 @@ func (c *Client) StreamEvents(ctx context.Context, since int64, onEvent func(coo
 	return nil
 }
 
+// SearchTasks returns ranked task hits for query (FTS when the server binary
+// has it, substring otherwise). limit <= 0 uses the server default.
+func (c *Client) SearchTasks(query string, limit int) ([]coordinator.Task, error) {
+	var response struct {
+		Tasks []coordinator.Task `json:"tasks"`
+	}
+	params := url.Values{}
+	params.Set("q", query)
+	if limit > 0 {
+		params.Set("limit", strconv.Itoa(limit))
+	}
+	if err := c.do(http.MethodGet, c.projectPath("/search"), nil, params, &response); err != nil {
+		return nil, err
+	}
+	return response.Tasks, nil
+}
+
 // Board returns one project's board; the client must be project-scoped (or
 // the deployment single-project, in which case the coordinator resolves it).
 func (c *Client) Board() (coordinator.BoardResult, error) {

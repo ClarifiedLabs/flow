@@ -18,7 +18,7 @@ ldflags+=" -X github.com/ClarifiedLabs/flow/internal/version.Date=${DATE}"
 build_one() {
 	local name="$1"
 	local pkg="$2"
-	CGO_ENABLED="${CGO_ENABLED:-1}" GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -ldflags "$ldflags" -o "${out_dir}/${name}" "$pkg"
+	CGO_ENABLED="${CGO_ENABLED:-1}" GOOS="$GOOS" GOARCH="$GOARCH" go build -tags sqlite_fts5 -trimpath -ldflags "$ldflags" -o "${out_dir}/${name}" "$pkg"
 }
 
 build_one flow ./cmd/flow

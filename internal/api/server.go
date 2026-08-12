@@ -430,6 +430,23 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 		return
 	}
 
+	if r.URL.Path == "/v2/search" {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
+			writeError(w, http.StatusForbidden, "forbidden", "search requires owner, session, or console token")
+			return
+		}
+		ps, err := s.implicitProjectServer(principal)
+		if err != nil {
+			writeProjectResolveError(w, err)
+			return
+		}
+		ps.handleSearchTasks(w, r)
+		return
+	}
+
 	if r.URL.Path == "/v2/events" || r.URL.Path == "/v2/events/stream" {
 		if !requireMethod(w, r, http.MethodGet) {
 			return

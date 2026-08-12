@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,6 +80,32 @@ func (s *projectServer) handleListTasks(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	writeJSON(w, http.StatusOK, tasksResponse{Tasks: tasks})
+}
+
+// handleSearchTasks serves GET /v2/projects/{project}/search?q=...&limit=N.
+// It returns FTS-ranked task hits when the binary is built with FTS5,
+// substring matches otherwise (TaskService.SearchTasks owns the fallback).
+func (s *projectServer) handleSearchTasks(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	if strings.TrimSpace(query) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_query", "q is required")
+		return
+	}
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid_query", "limit must be a positive integer")
+			return
+		}
+		limit = parsed
+	}
+	tasks, err := s.tasks.SearchTasks(r.Context(), query, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "search_failed", err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, tasksResponse{Tasks: tasks})
 }
 

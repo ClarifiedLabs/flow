@@ -31,13 +31,13 @@ type Store struct {
 
 // Open opens a per-project database and applies the per-project migration set.
 func Open(ctx context.Context, path string) (*Store, error) {
-	return openWith(ctx, "sqlite3", path, migrationFS, "migrations/*.sql", "7")
+	return openWith(ctx, projectDriverName, path, migrationFS, "migrations/*.sql", "7")
 }
 
 // OpenGlobal opens the coordinator-wide database (projects registry, workers,
 // tokens, web sessions) and applies the global migration set.
 func OpenGlobal(ctx context.Context, path string) (*Store, error) {
-	return openWith(ctx, "sqlite3", path, globalMigrationFS, "migrations_global/*.sql", "6")
+	return openWith(ctx, projectDriverName, path, globalMigrationFS, "migrations_global/*.sql", "6")
 }
 
 // OpenWithDriver opens a per-project database through a named driver and applies
@@ -155,7 +155,7 @@ func createMigratedTemplate(migrations embed.FS, glob string, expectedStorageFor
 		return "", err
 	}
 	path := filepath.Join(dir, "template.db")
-	store, err := openDirect(context.Background(), "sqlite3", path, migrations, glob, expectedStorageFormat)
+	store, err := openDirect(context.Background(), projectDriverName, path, migrations, glob, expectedStorageFormat)
 	if err != nil {
 		return "", err
 	}
@@ -258,6 +258,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		return fmt.Errorf("list migrations: %w", err)
 	}
 	sort.Strings(files)
+	files = filterOptionalMigrations(files)
 
 	// SQLite's documented table-rebuild procedure requires foreign-key
 	// enforcement to be disabled before the migration transaction begins. The

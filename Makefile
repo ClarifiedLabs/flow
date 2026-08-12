@@ -11,7 +11,7 @@ GO_TEST_P ?= 8
 
 build:
 	mkdir -p bin
-	go build -o ./bin $(COMMAND_PACKAGES)
+	go build -tags sqlite_fts5 -o ./bin $(COMMAND_PACKAGES)
 
 ci: test js-test
 
@@ -47,7 +47,7 @@ ifndef VERSION
 	$(error VERSION is required; use VERSION=patch|minor|major|x.y.z [AUTOPUSH=1])
 endif
 	scripts/release/check-clean.sh
-	go build ./...
+	go build -tags sqlite_fts5 ./...
 	go vet ./...
 	$(MAKE) test
 	VERSION="$(VERSION)" AUTOPUSH="$(AUTOPUSH)" scripts/release/tag.sh
