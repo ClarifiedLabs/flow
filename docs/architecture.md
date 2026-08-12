@@ -463,6 +463,11 @@ terminal state, and flow state are authoritative on the server.
 | CLI client plumbing | `internal/client` |
 | Configuration loading and defaults | `internal/config` |
 | Domain services | `internal/coordinator` |
+| Project event log (durable stream + SSE) | `internal/coordinator/event_log.go`, `internal/api/event_handlers.go` |
+| CLI machine output contract (`--json`/`--agent`) | `internal/cliout` |
+| Post-commit hooks | `internal/hooks` |
+| MCP read server | `internal/mcp` |
+| Backup and restore | `internal/backup` |
 | SQLite schema/migrations | `internal/db`, `internal/sqlitex` |
 | Worker directory, queues, assignments, claims, leases | `internal/worker` |
 | Assignment reconciliation and Kubernetes/Darwin providers | `internal/orchestrator` |
@@ -472,6 +477,23 @@ terminal state, and flow state are authoritative on the server.
 | Prompt and handoff rendering/validation | `internal/prompt`, `internal/handoff`, `skills/` |
 | tmux/terminal helpers | `internal/terminal` |
 | Embedded web UI | `internal/web` |
+
+## Deliberately out of scope
+
+Patterns evaluated against kata (`github.com/kenn-io/kata`) and intentionally
+not adopted; recording them here so they are not re-litigated:
+
+- **Hub/spoke federation.** Flow's `flow-server` is already the shared daemon
+  kata recommends over peer federation; there is no cross-server sync.
+- **ULID dual identity.** Flow's canonical keyed ids (`t-<key>-NNNN`) already
+  carry project and sequence; a second id scheme adds nothing.
+- **JSONL-cutover migrations.** Flow's in-place numbered SQL migrations are
+  sufficient; the export is not the migration vehicle.
+- **Semantic/embedding search.** `flow search` is lexical (FTS5 with a
+  substring fallback); embeddings stay opt-out.
+- **Terminal UI (TUI).** The CLI + embedded web UI cover the surfaces; no
+  interactive TUI.
+- **Task recurrences and beads import.** Not flow's model.
 
 ## Development and verification
 
