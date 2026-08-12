@@ -23,11 +23,11 @@ import { phaseKey } from "./board.js";
 import { activityGroupOf, cardModel, phaseSlug } from "./board-model.js";
 import { installTestDOM } from "./test-dom.mjs";
 
-// elements/tasks.js defines a custom-element class at module scope, which
+// elements/tasks-view.js defines a custom-element class at module scope, which
 // needs a global HTMLElement; a bare constructor is enough here (the chip
 // vocabulary is all these tests read).
 globalThis.HTMLElement ??= class {};
-const { TASKS_STATE_FILTERS } = await import("./elements/tasks.js");
+const { TASKS_STATE_FILTERS } = await import("./elements/tasks-view.js");
 
 installTestDOM();
 
