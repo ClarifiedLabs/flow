@@ -67,6 +67,7 @@ var cssModules = []struct{ Name, Scope string }{
 	{"features.module.css", "flow-features"},
 	{"feature.module.css", "flow-feature"},
 	{"work-items.module.css", "flow-work-items"},
+	{"project-picker.module.css", "flow-project-picker"},
 }
 
 var assetVersion = computeAssetVersionFrom(assetFS, generatedCSS)

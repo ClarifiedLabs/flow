@@ -11,7 +11,7 @@ export const featureActions = {
     const result = await apiPost(
       `${featuresAPIBase(dataset.project)}/${encodeURIComponent(dataset.featureRebase)}/rebase`, {},
     );
-    app.featuresByProject?.delete(dataset.project);
+    app.caches?.invalidate?.("features", dataset.project);
     await app.refresh();
     const kind = result?.result?.kind || "";
     if (kind === "rebase_task_created") {
@@ -26,7 +26,7 @@ export const featureActions = {
     await apiPost(
       `${featuresAPIBase(dataset.project)}/${encodeURIComponent(dataset.featureLand)}/land`, {},
     );
-    app.featuresByProject?.delete(dataset.project);
+    app.caches?.invalidate?.("features", dataset.project);
     await app.refresh();
     return "Feature landed";
   },
@@ -36,7 +36,7 @@ export const featureActions = {
     await apiPost(
       `${featuresAPIBase(dataset.project)}/${encodeURIComponent(dataset.featureArchive)}/archive`, {},
     );
-    app.featuresByProject?.delete(dataset.project);
+    app.caches?.invalidate?.("features", dataset.project);
     await app.refresh();
     return "Feature archived";
   },

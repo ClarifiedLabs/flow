@@ -528,7 +528,7 @@ export class FlowWorkItems extends FlowElement {
       this.movePending = false;
       this.invalidate();
       const app = this.app;
-      app?.workItemsByProject?.delete(this.stateProject);
+      app?.caches?.invalidate?.("workItems", this.stateProject);
       if (typeof app?.refresh === "function") await app.refresh();
     } catch (error) {
       this.movePending = false;

@@ -1,8 +1,7 @@
 // Node test for the harness model selection serialize/parse/strip logic in
-// app.js. There is no browser test harness in this repo, so the entry module is
-// loaded as native ESM: install the minimal DOM stubs its load-time side effects
-// touch (customElements.define / document listeners / HTMLElement), then import
-// the named exports. Run with: node internal/web/assets/harness_models.test.mjs
+// the models/harness-* modules. Loaded as native ESM: install the minimal DOM
+// stubs their import chain's load-time side effects touch, then import the
+// named exports. Run with: make js-test
 import assert from "node:assert";
 
 const jsonEq = (actual, expected, msg) => assert.strictEqual(JSON.stringify(actual), JSON.stringify(expected), msg);
@@ -13,12 +12,12 @@ globalThis.window = {};
 globalThis.history = {};
 globalThis.HTMLElement = class {};
 
+const { normalizeHarnessModelList } = await import("./models/harness-catalog.js");
 const {
-  normalizeHarnessModelList,
   parseHarnessSelectionArgs,
   stripHarnessSelectionArgs,
   serializeHarnessModelSelection,
-} = await import("./app.js");
+} = await import("./models/harness-form.js");
 
 assert.strictEqual(typeof normalizeHarnessModelList, "function", "normalizeHarnessModelList loaded");
 assert.strictEqual(typeof parseHarnessSelectionArgs, "function", "parseHarnessSelectionArgs loaded");

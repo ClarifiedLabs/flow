@@ -155,6 +155,31 @@ export function findInlineTerminal(element) {
   return null;
 }
 
+// A bare action control: dataset plus the disabled/attributes/classList
+// surface the busy registry marks and restores.
+export class ActionButton {
+  constructor(dataset = {}) {
+    this.dataset = dataset;
+    this.disabled = false;
+    this.attributes = new Map();
+    this.classes = new Set();
+    this.classList = {
+      add: (name) => this.classes.add(name),
+      remove: (name) => this.classes.delete(name),
+      contains: (name) => this.classes.has(name),
+    };
+  }
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+  getAttribute(name) {
+    return this.attributes.has(name) ? this.attributes.get(name) : null;
+  }
+  removeAttribute(name) {
+    this.attributes.delete(name);
+  }
+}
+
 let appLoadCount = 0;
 export function loadAppModule() {
   // Import a fresh entry-module instance per call (cache-busting query) so
@@ -197,7 +222,11 @@ export async function applyContext(context) {
   for (const [key, value] of Object.entries(context)) {
     if (!CORE_GLOBAL_KEYS.has(key)) globalThis[key] = value;
   }
-  Object.assign(context, await loadAppModule());
+  // The static surface import is cached across tests (same semantics as the
+  // submodules the old barrel re-exported); only the entry-module import is
+  // query-busted per test, so FlowApp rebinds to this test's HTMLElement while
+  // everything else stays shared.
+  Object.assign(context, await import("./test-surface.mjs"), await loadAppModule());
   return context;
 }
 

@@ -185,8 +185,8 @@ func TestProjectPickerUsesDefinedThemeTokens(t *testing.T) {
 		want      []string
 		undefined []string
 	}{
-		{"nav.module.css", ".project-picker-menu {", []string{"background: var(--panel);", "border: 1px solid var(--line);"}, []string{"--surface", "--border"}},
-		{"nav.module.css", ".project-picker-item:hover {", []string{"background: var(--panel-2);"}, []string{"--surface-raised"}},
+		{"project-picker.module.css", ".project-picker-menu {", []string{"background: var(--panel);", "border: 1px solid var(--line);"}, []string{"--surface", "--border"}},
+		{"project-picker.module.css", ".project-picker-item:hover {", []string{"background: var(--panel-2);"}, []string{"--surface-raised"}},
 		{"shared.module.css", ".card-project-badge {", []string{"border: 1px solid var(--line);"}, []string{"--border"}},
 	}
 	for _, check := range rules {

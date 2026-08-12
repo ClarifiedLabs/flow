@@ -24,7 +24,7 @@ export const relationActions = {
       target_item_id: dataset.target,
       kind: dataset.kind,
     });
-    if (dataset.kind === "parent_of") app.workItemsByProject?.delete(dataset.project);
+    if (dataset.kind === "parent_of") app.caches?.invalidate?.("workItems", dataset.project);
     await app.refresh();
     return "Relation removed";
   },

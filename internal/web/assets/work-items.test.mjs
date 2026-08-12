@@ -85,6 +85,9 @@ test("segmented progress always has a textual accessible equivalent", () => {
 function interactiveWorkItems(overrides = {}) {
   const app = document.createElement("flow-app");
   app.workItemsByProject = new Map([["p-alpha", data.items]]);
+  // The element evicts through the app's cache port; back it with the same
+  // Map the assertions read.
+  app.caches = { invalidate: (kind, id) => app.workItemsByProject.delete(id) };
   app.refreshCalls = 0;
   app.refresh = async () => { app.refreshCalls += 1; };
   root.appendChild(app);

@@ -1,0 +1,53 @@
+/* Project picker dropdown in the top bar. The element owns the details,
+   its summary and the checkbox menu. */
+:host {
+  display: inline-block;
+}
+
+:host([hidden]) {
+  display: none;
+}
+
+.project-picker {
+  position: relative;
+}
+
+.project-picker summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.project-picker summary::-webkit-details-marker {
+  display: none;
+}
+
+.project-picker-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  min-width: 220px;
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.project-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.project-picker-item:hover {
+  background: var(--panel-2);
+}
+

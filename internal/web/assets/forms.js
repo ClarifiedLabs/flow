@@ -57,7 +57,7 @@ export const FORMS = {
     if (relations instanceof Error) return relations.message;
     if (relations.length) payload.work_item_relations = relations;
     const data = await apiPost(taskAPIBase(formProject), payload);
-    app.workItemsByProject?.delete(formProject);
+    app.caches?.invalidate?.("workItems", formProject);
     const task = data.task || data.Task || {};
     const taskID = value(task, "id", "ID");
     if (!taskID) throw new Error("Created task ID unavailable");
@@ -85,8 +85,8 @@ export const FORMS = {
     const body = String(form.elements.body?.value || "");
     if (featureID) {
       await apiPatch(`${featuresAPIBase(projectID)}/${encodeURIComponent(featureID)}`, { title, body });
-      app.featuresByProject?.delete(projectID);
-      app.workItemsByProject?.delete(projectID);
+      app.caches?.invalidate?.("features", projectID);
+      app.caches?.invalidate?.("workItems", projectID);
       await app.refresh();
       return "Feature updated";
     }
@@ -100,8 +100,8 @@ export const FORMS = {
       ...(relations.length ? { work_item_relations: relations } : {}),
     };
     await apiPost(featuresAPIBase(projectID), payload);
-    app.featuresByProject?.delete(projectID);
-    app.workItemsByProject?.delete(projectID);
+    app.caches?.invalidate?.("features", projectID);
+    app.caches?.invalidate?.("workItems", projectID);
     await app.refresh();
     return "Feature created";
   },
@@ -122,7 +122,7 @@ export const FORMS = {
     };
     if (epicID) {
       await apiPatch(`${epicsAPIBase(projectID)}/${encodeURIComponent(epicID)}`, payload);
-      app.workItemsByProject?.delete(projectID);
+      app.caches?.invalidate?.("workItems", projectID);
       await app.refresh();
       return "Epic updated";
     }
@@ -132,7 +132,7 @@ export const FORMS = {
     if (relations instanceof Error) return relations.message;
     if (relations.length) payload.work_item_relations = relations;
     await apiPost(epicsAPIBase(projectID), payload);
-    app.workItemsByProject?.delete(projectID);
+    app.caches?.invalidate?.("workItems", projectID);
     await app.refresh();
     return "Epic created";
   },
@@ -178,7 +178,7 @@ export const FORMS = {
     await apiPatch(workItemAPIPath(projectID, itemID, "/parent"), {
       parent_item_id: String(form.elements.parent_item_id?.value || "").trim(),
     });
-    app.workItemsByProject?.delete(projectID);
+    app.caches?.invalidate?.("workItems", projectID);
     await app.refresh();
     return "Work item moved";
   },
@@ -194,7 +194,7 @@ export const FORMS = {
       target_item_id: targetID,
       kind,
     });
-    if (kind === "parent_of") app.workItemsByProject?.delete(projectID);
+    if (kind === "parent_of") app.caches?.invalidate?.("workItems", projectID);
     await app.refresh();
     return "Relation added";
   },

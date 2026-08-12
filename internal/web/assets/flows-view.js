@@ -35,8 +35,7 @@ export async function renderFlowsView(app, context) {
   const defaultFlowID = flowsData.default_flow_id || flowsData.DefaultFlowID || "";
   // Keep this project's flow cache warm so the task form renders its Flow
   // selector without an extra round trip.
-  if (!app.flowsByProject) app.flowsByProject = new Map();
-  app.flowsByProject.set(project.id, { flows, defaultFlowID });
+  app.caches?.seed?.("flows", project.id, { flows, defaultFlowID });
 
   const state = flowsViewState(app);
   const agentOptions = (app.harnesses && app.harnesses.agents) || DEFAULT_AGENT_HARNESSES;
