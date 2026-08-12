@@ -87,3 +87,4 @@ Non-capabilities (keep severity calibrated):
 | Bootstrap single-use, session expiry | `internal/coordinator/web_sessions_test.go` |
 | Git HTTP auth/scope/slot ordering | `internal/api/git_http_handlers_test.go` |
 | Terminal token + worker scope checks | `internal/api/session_terminal_handlers_test.go`, `worker_terminal_handlers_test.go` |
+| Event log reads require owner/session/console (hook and anonymous rejected) | `internal/api/event_handlers_test.go` `TestEventsEndpointScopeEnforcement` |

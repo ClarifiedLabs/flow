@@ -216,6 +216,7 @@ Agent-oriented task discovery and synchronization:
 flow ready [--tag TAG]
 flow next [--tag TAG]
 flow wait TASK_ID... [--until done|blocked|scheduled|in_progress] [--any|--all] [--timeout 30s] [--poll-interval 2s]
+flow events [--since N] [--limit N] [--follow]
 ```
 
 `ready` lists tasks an agent could start right now: unscheduled with no
@@ -230,6 +231,15 @@ derivation: unresolved blockers when unscheduled, open human gates or a system
 convergence hold when in progress. Durations need Go units (`30s`, `5m`);
 `--until` matches current states, so a task that reset to unscheduled never
 satisfies `done`. Exit codes: 0 condition met, 1 error, 2 usage, 3 timeout.
+
+`events` reads the project event log: one durable, totally ordered stream of
+agent-relevant state changes (task lifecycle and edits, epic/feature
+transitions, session status writes, deduplicated git pushes). Every event
+carries a monotonic `seq`; pass `--since` with the last seq you saw (or the
+`next_since` cursor from the previous machine-mode page) to resume without
+gaps or duplicates. `--follow` streams new events as server-sent events,
+printing one event JSON per line in machine modes. Use it instead of polling
+`board` when an agent needs to react to changes.
 
 Final review aggregation may pause on a `review_scope_decision` when a valid
 blocking finding depends on an inferred, broad scope requirement. Use
