@@ -185,6 +185,17 @@ LIMIT ?`
 	return events, nil
 }
 
+// LatestSeq returns the highest committed seq, or 0 when the log is empty.
+// Post-commit hook dispatch uses it to place its cursor at the tail on boot
+// so a restart never refires events that committed while it was down.
+func (s *EventLogService) LatestSeq(ctx context.Context) (int64, error) {
+	var seq int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) FROM event_log`).Scan(&seq); err != nil {
+		return 0, fmt.Errorf("read latest event seq: %w", err)
+	}
+	return seq, nil
+}
+
 // appendEventLog is the nil-safe, non-fatal appender for mutation paths that
 // do not hold the write transaction at the emission site (fire-and-forget
 // producers such as the git-event consumer). Transactional mutations should

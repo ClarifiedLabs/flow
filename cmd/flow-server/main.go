@@ -29,6 +29,7 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
+	"github.com/ClarifiedLabs/flow/internal/hooks"
 	flowlog "github.com/ClarifiedLabs/flow/internal/logging"
 	"github.com/ClarifiedLabs/flow/internal/metrics"
 	flowtoken "github.com/ClarifiedLabs/flow/internal/token"
@@ -147,6 +148,10 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	}
 	if err := config.ValidateCoordinatorCommitIdentity(cfg.Git); err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
+		return 1
+	}
+	if err := config.ValidateHooks(cfg.Hooks); err != nil {
+		fmt.Fprintf(stderr, "invalid hooks: %v\n", err)
 		return 1
 	}
 	ownerToken = strings.TrimSpace(ownerToken)
@@ -433,6 +438,33 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		runHistoryReconciliation(ctx, registry, historyStore, historyPolicy.Reconciliation, historyMetrics)
 	}()
 
+	// Post-commit hooks: tail every open project's event log and dispatch
+	// matching committed events to external executables. Fully asynchronous —
+	// the poller reads committed rows only, so hooks never block or fail the
+	// mutation that produced an event. Dispatch is at-most-once: a crash
+	// between commit and dispatch loses the run, and each boot starts at the
+	// current max seq so events committed while down never fire. The source
+	// list is re-read every poll cycle so projects created while serving join
+	// the tail without a restart.
+	hooksDone := make(chan struct{})
+	if len(cfg.Hooks) == 0 {
+		close(hooksDone)
+	} else {
+		dispatcher := hooks.New(cfg.Hooks, func() []hooks.ProjectSource {
+			bundles := registry.All()
+			sources := make([]hooks.ProjectSource, 0, len(bundles))
+			for _, bundle := range bundles {
+				sources = append(sources, hooks.ProjectSource{ProjectID: bundle.Project.ID, EventLog: bundle.EventLog})
+			}
+			return sources
+		}, telemetryRegistry)
+		go func() {
+			defer close(hooksDone)
+			dispatcher.Run(ctx)
+		}()
+		slog.Info("post-commit hooks enabled", "hooks", len(cfg.Hooks))
+	}
+
 	srv := &http.Server{Addr: cfg.ListenAddr, Handler: instrumentAPIHandler(server, counters)}
 	shutdownDone := make(chan struct{})
 	go func() {
@@ -452,6 +484,7 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	<-shutdownDone
 	<-tickerDone
 	<-historyReconcileDone
+	<-hooksDone
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		fmt.Fprintf(stderr, "serve: %v\n", serveErr)
 		return 1

@@ -31,6 +31,57 @@ type CoordinatorConfig struct {
 	Git                        CoordinatorGitConfig     `json:"git" yaml:"git"`
 	Metrics                    metrics.Config           `json:"metrics" yaml:"metrics"`
 	History                    CoordinatorHistoryConfig `json:"history" yaml:"history"`
+	Hooks                      []HookConfig             `json:"hooks" yaml:"hooks"`
+}
+
+// HookConfig is one post-commit hook: when an event-log entry whose kind
+// matches one of Events commits, Command runs asynchronously with the event
+// as JSON on stdin. Events are exact kinds ("task.done") or a single
+// trailing glob prefix ("task.*"). Command is an absolute executable path
+// plus arguments; it is exec'd directly, never through a shell. Dispatch is
+// at-most-once and never blocks the mutation that produced the event.
+type HookConfig struct {
+	Events  []string `json:"events" yaml:"events"`
+	Command []string `json:"command" yaml:"command"`
+}
+
+// ValidateHooks checks every configured post-commit hook: at least one event
+// pattern, only exact kinds or a single trailing ".*" glob, a non-empty
+// command whose first element is an absolute path to an existing executable.
+// flow-server calls this at startup and refuses to serve on error.
+func ValidateHooks(hooks []HookConfig) error {
+	for i, hook := range hooks {
+		if len(hook.Events) == 0 {
+			return fmt.Errorf("coordinator hooks[%d]: at least one event pattern is required", i)
+		}
+		for _, pattern := range hook.Events {
+			pattern = strings.TrimSpace(pattern)
+			if pattern == "" {
+				return fmt.Errorf("coordinator hooks[%d]: event patterns must not be empty", i)
+			}
+			if strings.Contains(pattern, "*") && !strings.HasSuffix(pattern, ".*") {
+				return fmt.Errorf("coordinator hooks[%d]: event pattern %q: only a single trailing \".*\" glob is supported", i, pattern)
+			}
+			if strings.TrimSuffix(pattern, ".*") == "" {
+				return fmt.Errorf("coordinator hooks[%d]: event pattern %q must name a kind or kind prefix", i, pattern)
+			}
+		}
+		if len(hook.Command) == 0 || strings.TrimSpace(hook.Command[0]) == "" {
+			return fmt.Errorf("coordinator hooks[%d]: command is required", i)
+		}
+		executable := hook.Command[0]
+		if !filepath.IsAbs(executable) {
+			return fmt.Errorf("coordinator hooks[%d]: command %q must be an absolute path", i, executable)
+		}
+		info, err := os.Stat(executable)
+		if err != nil {
+			return fmt.Errorf("coordinator hooks[%d]: command %q: %w", i, executable, err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("coordinator hooks[%d]: command %q is a directory", i, executable)
+		}
+	}
+	return nil
 }
 
 // DefaultAgentConfig configures the coordinator's fallback agent: the harness
@@ -440,6 +491,7 @@ func LoadCoordinator(path string) (CoordinatorConfig, error) {
 	cfg.DefaultAgent = fileCfg.DefaultAgent
 	cfg.Metrics = fileCfg.Metrics
 	cfg.History = fileCfg.History
+	cfg.Hooks = fileCfg.Hooks
 	if strings.TrimSpace(fileCfg.Git.CommitName) != "" {
 		cfg.Git.CommitName = strings.TrimSpace(fileCfg.Git.CommitName)
 	}

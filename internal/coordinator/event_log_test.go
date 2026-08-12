@@ -277,3 +277,31 @@ func TestEventLogAppendFailureDoesNotFailMutation(t *testing.T) {
 }
 
 func intPtr(v int) *int { return &v }
+
+func TestEventLogLatestSeq(t *testing.T) {
+	log, ctx := openEventLogTestDB(t)
+
+	latest, err := log.LatestSeq(ctx)
+	if err != nil {
+		t.Fatalf("latest on empty log: %v", err)
+	}
+	if latest != 0 {
+		t.Fatalf("latest on empty log = %d, want 0", latest)
+	}
+
+	first, err := log.Append(ctx, Event{Kind: EventTaskCreated, TaskID: "t-1"})
+	if err != nil {
+		t.Fatalf("append first: %v", err)
+	}
+	second, err := log.Append(ctx, Event{Kind: EventTaskDone, TaskID: "t-1"})
+	if err != nil {
+		t.Fatalf("append second: %v", err)
+	}
+	latest, err = log.LatestSeq(ctx)
+	if err != nil {
+		t.Fatalf("latest: %v", err)
+	}
+	if latest != second.Seq || latest <= first.Seq {
+		t.Fatalf("latest = %d, want %d (first %d)", latest, second.Seq, first.Seq)
+	}
+}

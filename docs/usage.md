@@ -594,6 +594,48 @@ All binary telemetry endpoints (`/readyz`, `/livez`, and `/metrics`) are
 unauthenticated. Keep them loopback-only by default or cluster-internal in
 Kubernetes; never expose them through a public Ingress or LoadBalancer.
 
+## Post-commit hooks
+
+`flow-server` can run an external executable after matching entries commit to
+a project's event log — for example, to post a Slack message when a task
+completes. Configure hooks in the coordinator config file:
+
+```json
+{
+  "hooks": [
+    {
+      "events": ["task.done"],
+      "command": ["/usr/local/bin/flow-on-task-done", "--channel", "#eng"]
+    }
+  ]
+}
+```
+
+`events` holds exact event kinds (`task.done`) or a single trailing glob
+prefix (`task.*` matches every `task.` kind). `command` is an absolute
+executable path plus arguments; the server validates at startup that every
+hook has at least one pattern and an existing absolute executable, and
+refuses to serve otherwise. The executable is run directly — never through a
+shell — with the event as a JSON envelope on stdin:
+`{"seq","kind","project_id","task_id","actor","occurred_at","payload"}`
+(the raw payload is byte-capped at 64 KiB and the whole document at
+256 KiB). The environment adds `FLOW_EVENT_KIND`, `FLOW_EVENT_SEQ`,
+`FLOW_PROJECT_ID`, and `FLOW_TASK_ID`. Each run has a 30s timeout, and hook
+stderr is captured to the server log at debug level.
+
+Failure modes to plan around:
+
+- Dispatch is **at-most-once and fully asynchronous**: hooks fire after the
+  event commits and never block or roll back the mutation that produced it.
+- A crash between commit and dispatch **loses** the hook run, and on restart
+  the dispatcher resumes from the latest event — events that committed while
+  the server was down never fire.
+- A full dispatch queue drops runs; `flow_hook_runs_dropped_total` and
+  `flow_hook_run_failures_total` on `/metrics` count drops and failures.
+- **Loops are possible**: a hook that writes back into flow (e.g. via the
+  CLI) emits new events that can re-trigger hooks. Keep hook chains
+  convergent.
+
 ## Notes
 
 - Flow is designed for local/private coordination. The exchange remote is
