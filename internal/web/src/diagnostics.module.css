@@ -1,0 +1,5 @@
+/* Diagnostics tables (workers/jobs) render inside <flow-diagnostics>. */
+:host {
+  display: block;
+  min-width: 0;
+}

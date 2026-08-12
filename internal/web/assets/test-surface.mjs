@@ -22,7 +22,6 @@ export * from "./board.js";
 export * from "./board-model.js";
 export * from "./task-model.js";
 export * from "./queue.js";
-export * from "./diagnostics-view.js";
 export * from "./diff.js";
 export * from "./timeline.js";
 export * from "./attention.js";

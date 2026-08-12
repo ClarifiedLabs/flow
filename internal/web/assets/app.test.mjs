@@ -3637,106 +3637,6 @@ test("worker and job state badges map states to status classes", async () => {
   );
 });
 
-test("jobs view shows project column, filters by project, and sorts by updated", async () => {
-  const context = await scriptContext({}, {
-    fetch(path) {
-      assert.equal(path, "/ui/api/v2/jobs");
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({
-          jobs: [
-            // Intentionally out of updated order across two projects to prove
-            // the view re-sorts globally rather than trusting server order.
-            { id: "j-old", state: "finished", role: "ci", updated_at: "2026-06-01T00:00:00Z" },
-            { id: "j-mid", state: "running", role: "author", updated_at: "2026-06-05T00:00:00Z" },
-            { id: "j-new", state: "failed", role: "reviewer", updated_at: "2026-06-09T00:00:00Z" },
-          ],
-          diagnostics: {
-            "j-old": { project_name: "beta" },
-            "j-mid": { project_name: "alpha" },
-            "j-new": { project_name: "beta" },
-          },
-        }),
-      });
-    },
-  });
-
-  const content = { innerHTML: "" };
-  const app = new context.FlowApp();
-  app.setTitle = () => {};
-  app.bindTaskActions = () => {};
-  app.isActiveLoad = () => true;
-  app.querySelector = () => content;
-  // Stub the per-view control listeners so change handlers do not blow up;
-  // the table body is rendered into content.innerHTML up front.
-  app.querySelector = (selector) => {
-    if (selector === ".content") return content;
-    return null;
-  };
-
-  await context.renderJobsView(app);
-
-  const html = content.innerHTML;
-  // Project column renders the per-job project name.
-  assert.match(html, /<th>Project<\/th>/);
-  assert.match(html, /alpha/);
-  assert.match(html, /beta/);
-  // Default sort is updated desc, so j-new (Jun 9) precedes j-mid (Jun 5)
-  // which precedes j-old (Jun 1).
-  const newIdx = html.indexOf("j-new");
-  const midIdx = html.indexOf("j-mid");
-  const oldIdx = html.indexOf("j-old");
-  assert.ok(newIdx > -1 && midIdx > -1 && oldIdx > -1, "all job rows rendered");
-  assert.ok(newIdx < midIdx, "j-new before j-mid");
-  assert.ok(midIdx < oldIdx, "j-mid before j-old");
-  // Filter and sort controls are present with the default selection.
-  assert.match(html, /data-jobs-filter/);
-  assert.match(html, /data-jobs-sort-field/);
-  assert.match(html, /data-jobs-sort-order/);
-  assert.match(html, /<option value="updated" selected>Updated<\/option>/);
-  assert.match(html, /<option value="desc" selected>Newest first<\/option>/);
-  // State colors render via row tint classes.
-  assert.match(html, /class="row-ok"/);
-  assert.match(html, /class="row-run"/);
-  assert.match(html, /class="row-danger"/);
-});
-
-test("jobs view filter selects only the chosen project", async () => {
-  const context = await scriptContext({}, {
-    fetch(path) {
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({
-          jobs: [
-            { id: "j-a", state: "running", role: "author", updated_at: "2026-06-05T00:00:00Z" },
-            { id: "j-b", state: "running", role: "author", updated_at: "2026-06-09T00:00:00Z" },
-          ],
-          diagnostics: {
-            "j-a": { project_name: "alpha" },
-            "j-b": { project_name: "beta" },
-          },
-        }),
-      });
-    },
-  });
-
-  const content = { innerHTML: "" };
-  const app = new context.FlowApp();
-  app.setTitle = () => {};
-  app.bindTaskActions = () => {};
-  app.isActiveLoad = () => true;
-  app.querySelector = (selector) => (selector === ".content" ? content : null);
-
-  // Pretend the user picked the "beta" project filter before this render.
-  app.jobsView = { filter: "beta", sort: { field: "updated", order: "desc" } };
-  await context.renderJobsView(app);
-
-  const html = content.innerHTML;
-  assert.match(html, /j-b/);
-  assert.doesNotMatch(html, /j-a/);
-  // The beta option is the selected one.
-  assert.match(html, /<option value="beta" selected>beta<\/option>/);
-});
 
 test("check verdict badges map verdicts to status classes with pending fallback", async () => {
   const context = await scriptContext();
@@ -4004,7 +3904,14 @@ test("load tracks in-flight invocations and never arms a settle burst itself", a
   const jobsResponse = deferred();
   const title = { textContent: "" };
   const status = { textContent: "" };
-  const content = { innerHTML: "", dataset: {} };
+  const content = {
+    innerHTML: "",
+    dataset: {},
+    firstElementChild: null,
+    appendChild(child) {
+      this.firstElementChild = child;
+    },
+  };
   const context = await scriptContext({
     setTimeout(callback, delay) {
       timers.push({ callback, delay });
@@ -4012,6 +3919,11 @@ test("load tracks in-flight invocations and never arms a settle burst itself", a
     },
     clearTimeout() {},
   }, {
+    document: {
+      cookie: "flow_ui_csrf=csrf-token",
+      addEventListener() {},
+      createElement: (tag) => new SmokeElement(tag),
+    },
     fetch(path) {
       if (path === "/ui/api/v2/projects") {
         return Promise.resolve({ ok: true, json: () => Promise.resolve({ projects: [] }) });
@@ -4052,7 +3964,14 @@ test("a navigation load cancels an armed settle-burst timeout through the real l
   const jobsResponse = deferred();
   const title = { textContent: "" };
   const status = { textContent: "" };
-  const content = { innerHTML: "", dataset: {} };
+  const content = {
+    innerHTML: "",
+    dataset: {},
+    firstElementChild: null,
+    appendChild(child) {
+      this.firstElementChild = child;
+    },
+  };
   const context = await scriptContext({
     setTimeout(callback, delay) {
       timers.push({ callback, delay });
@@ -4062,6 +3981,11 @@ test("a navigation load cancels an armed settle-burst timeout through the real l
       cleared.push(id);
     },
   }, {
+    document: {
+      cookie: "flow_ui_csrf=csrf-token",
+      addEventListener() {},
+      createElement: (tag) => new SmokeElement(tag),
+    },
     fetch(path) {
       if (path === "/ui/api/v2/projects") {
         return Promise.resolve({ ok: true, json: () => Promise.resolve({ projects: [] }) });
@@ -4554,7 +4478,16 @@ test("connected callback preserves monotonic load generation", async () => {
 
 test("pre-disconnect load stays stale after reconnect-style load", async () => {
   const timers = [];
-  const content = { innerHTML: "" };
+  // Mount-compatible content stub: the jobs route mounts <flow-diagnostics>,
+  // so the stub records the element mount() appends.
+  const content = {
+    innerHTML: "",
+    dataset: {},
+    firstElementChild: null,
+    appendChild(child) {
+      this.firstElementChild = child;
+    },
+  };
   const oldJobs = deferred();
   const newJobs = deferred();
   const responses = [oldJobs.promise, newJobs.promise];
@@ -4565,6 +4498,11 @@ test("pre-disconnect load stays stale after reconnect-style load", async () => {
     },
     clearTimeout() {},
   }, {
+    document: {
+      cookie: "flow_ui_csrf=csrf-token",
+      addEventListener() {},
+      createElement: (tag) => new SmokeElement(tag),
+    },
     fetch(path) {
       assert.equal(path, "/ui/api/v2/jobs");
       const response = responses.shift();
@@ -4590,7 +4528,7 @@ test("pre-disconnect load stays stale after reconnect-style load", async () => {
     json: () => Promise.resolve({ jobs: [{ id: "old-job", state: "running" }] }),
   });
   await oldLoad;
-  assert.equal(content.innerHTML, "");
+  assert.equal(content.firstElementChild, null, "the stale load mounted nothing");
   assert.equal(timers.length, 0);
 
   newJobs.resolve({
@@ -4598,7 +4536,8 @@ test("pre-disconnect load stays stale after reconnect-style load", async () => {
     json: () => Promise.resolve({ jobs: [] }),
   });
   await newLoad;
-  assert.match(content.innerHTML, /No jobs/);
+  assert.equal(content.firstElementChild.data.kind, "jobs");
+  assert.deepEqual(content.firstElementChild.data.jobs, [], "the fresh load mounted the empty payload");
   assert.equal(timers[0].delay, 30000);
 });
 

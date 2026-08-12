@@ -5,7 +5,7 @@
 // the app instance, the load context and the matched params.
 
 import { terminalSessionIDForPath } from "../storage.js";
-import { renderWorkersView, renderJobsView } from "../diagnostics-view.js";
+import { renderWorkersRoute, renderJobsRoute } from "../diagnostics-route.js";
 import { renderTerminalView } from "../terminal-view.js";
 import { renderDoneRoute } from "../done-route.js";
 import { renderTasksView } from "../tasks-view.js";
@@ -83,8 +83,8 @@ export const ROUTES = [
   { match: (p) => p === "/ui/tasks", render: (app, ctx) => renderTasksView(app, ctx) },
   { match: (p) => { const id = terminalSessionIDForPath(p); return id && { id }; }, render: (app, ctx, p) => renderTerminalView(app, p.id, ctx) },
   { match: (p) => p === "/ui/flows", render: (app, ctx) => renderFlowsView(app, ctx) },
-  { match: (p) => p === "/ui/workers", render: (app, ctx) => renderWorkersView(app, ctx) },
-  { match: (p) => p === "/ui/jobs", render: (app, ctx) => renderJobsView(app, ctx) },
+  { match: (p) => p === "/ui/workers", render: (app, ctx) => renderWorkersRoute(app, ctx) },
+  { match: (p) => p === "/ui/jobs", render: (app, ctx) => renderJobsRoute(app, ctx) },
   { match: (p) => p === "/ui/done", render: (app, ctx) => renderDoneRoute(app, ctx) },
   { match: () => true, render: (app, ctx) => renderBoardRoute(app, ctx) },
 ];
