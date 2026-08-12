@@ -135,6 +135,10 @@ domain codes such as `flow wait`'s `3` (timeout, reported as
 `error.code = "wait_timeout"`). Usage errors report `error.code =
 "usage_error"`. `--json` failures print a bare `{"error": {...}}` object.
 
+See `docs/reference/cli-output.md` for the full stability contract, the
+`agent_format`/`protocol` fields on `flow version`, and the idempotency
+`reused` semantics.
+
 Every command's `data` is a JSON object so fields can be added without
 breaking the contract. Currently covered: `task create|list|show|edit|done|
 reopen|relations`, `feature create|list|show`, `epic create|list|show|edit|

@@ -136,8 +136,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	switch args[0] {
 	case "--version", "version":
-		fmt.Fprintf(stdout, "flow %s\n", version.Current())
-		return 0
+		return runVersion(options.withConfig(nil), stdout, stderr)
 	case "init":
 		return runInit(options.withConfig(args[1:]), stdout, stderr)
 	case "doctor":
@@ -1798,6 +1797,31 @@ func runTaskRelations(args []string, stdout, stderr io.Writer) int {
 	}
 
 	printTaskRelations(stdout, taskRef, relations)
+	return 0
+}
+
+// runVersion implements `flow version`: the binary version plus the machine
+// contracts it speaks. Machine modes expose agent_format and protocol so an
+// agent can confirm compatibility before parsing further output.
+func runVersion(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("version", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	mode := apiFlags.outputMode()
+	info := version.Current()
+	if mode.Machine() {
+		return cliout.WriteData(stdout, mode, "version", map[string]any{
+			"version":      info.Version,
+			"commit":       info.Commit,
+			"date":         info.Date,
+			"agent_format": cliout.ContractVersion,
+			"protocol":     contract.ProtocolVersion,
+		})
+	}
+	fmt.Fprintf(stdout, "flow %s\n", info)
 	return 0
 }
 
