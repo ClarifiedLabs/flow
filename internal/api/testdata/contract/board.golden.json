@@ -1,0 +1,62 @@
+{
+  "board": {
+    "InProgress": null,
+    "Scheduled": null,
+    "Unscheduled": [
+      {
+        "Body": "",
+        "CreatedAt": "\u003cts\u003e",
+        "CreatedBy": "human",
+        "CreatedBySessionID": null,
+        "ID": "\u003copen-task-id\u003e",
+        "Priority": 0,
+        "SourceChangeID": null,
+        "SourceTaskID": null,
+        "Title": "Golden open task",
+        "UpdatedAt": "\u003cts\u003e",
+        "state": null
+      }
+    ]
+  },
+  "containers": [
+    {
+      "id": "standalone",
+      "kind": "standalone",
+      "task_count": 1,
+      "title": "Standalone"
+    }
+  ],
+  "lane_states": {
+    "\u003copen-task-id\u003e": "unscheduled"
+  },
+  "task_cards": {
+    "\u003copen-task-id\u003e": {
+      "blockers": {
+        "count": 0
+      },
+      "container": {
+        "id": "standalone",
+        "kind": "standalone",
+        "task_count": 1,
+        "title": "Standalone"
+      },
+      "relations": {
+        "blocked_by": 0,
+        "blocks": 0,
+        "children": 0,
+        "parents": 0,
+        "related": 0,
+        "total": 0
+      },
+      "required_checks": {
+        "blocked": 0,
+        "errored": 0,
+        "pending": 0,
+        "satisfied": 0,
+        "skipped": 0,
+        "total": 0
+      },
+      "task_id": "\u003copen-task-id\u003e"
+    }
+  }
+}

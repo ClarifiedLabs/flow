@@ -1,0 +1,41 @@
+{
+  "events": [
+    {
+      "actor": "human",
+      "id": "\u003cevent-id\u003e",
+      "kind": "task.created",
+      "occurred_at": "\u003cts\u003e",
+      "payload": {
+        "title": "Golden open task"
+      },
+      "seq": "\u003cseq\u003e",
+      "task_id": "\u003copen-task-id\u003e"
+    },
+    {
+      "actor": "human",
+      "id": "\u003cevent-id\u003e",
+      "kind": "task.created",
+      "occurred_at": "\u003cts\u003e",
+      "payload": {
+        "title": "Golden done task"
+      },
+      "seq": "\u003cseq\u003e",
+      "task_id": "\u003cdone-task-id\u003e"
+    },
+    {
+      "actor": "human",
+      "id": "\u003cevent-id\u003e",
+      "kind": "task.done",
+      "occurred_at": "\u003cts\u003e",
+      "payload": {
+        "evidence_count": 0,
+        "note": "golden completion",
+        "resolution": "completed"
+      },
+      "seq": "\u003cseq\u003e",
+      "task_id": "\u003cdone-task-id\u003e"
+    }
+  ],
+  "next_since": "\u003cseq\u003e",
+  "reset_required": false
+}
