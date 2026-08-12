@@ -5,6 +5,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+// elements/tasks.js defines a custom-element class at module scope, which
+// needs a global HTMLElement; a bare constructor is enough for the pure
+// functions these tests exercise.
+globalThis.HTMLElement = class {};
+
 const {
   TASKS_STATE_FILTERS,
   tasksQueryView,
@@ -20,7 +25,7 @@ const {
   taskBulkPathView,
   applyTasksBulkAction,
   toggleTasksState,
-} = await import("./tasks-view.js");
+} = await import("./elements/tasks.js");
 const { buildWorkItemIndex } = await import("./work-item-model.js");
 
 function fakeApp(overrides = {}) {

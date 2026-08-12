@@ -21,8 +21,13 @@ import {
 import { LANES, TASKS_STATES } from "./config.js";
 import { phaseKey } from "./board.js";
 import { activityGroupOf, cardModel, phaseSlug } from "./board-model.js";
-import { TASKS_STATE_FILTERS } from "./tasks-view.js";
 import { installTestDOM } from "./test-dom.mjs";
+
+// elements/tasks.js defines a custom-element class at module scope, which
+// needs a global HTMLElement; a bare constructor is enough here (the chip
+// vocabulary is all these tests read).
+globalThis.HTMLElement ??= class {};
+const { TASKS_STATE_FILTERS } = await import("./elements/tasks.js");
 
 installTestDOM();
 

@@ -531,11 +531,50 @@ test("toggling the theme inside the panel does not close the dropdown", async ()
   assert.equal(harness.navMenu.open, true);
 });
 
+// tasks-route harness pieces: a mount-compatible content stub and a
+// document.createElement factory that builds a real FlowTasks (no listeners —
+// the content stub never connects it, so bind() never runs).
+// tasksRouteImports dynamically imports the route/element modules: their
+// import chain defines custom-element classes, which needs a global
+// HTMLElement — only present after a scriptContext call has installed one.
+async function tasksRouteImports() {
+  const { renderTasksRoute } = await import("./tasks-route.js");
+  const { FlowTasks } = await import("./elements/tasks.js");
+  return { renderTasksRoute, FlowTasks };
+}
+
+function tasksRouteContent() {
+  return {
+    innerHTML: "",
+    dataset: {},
+    firstElementChild: null,
+    appendChild(child) {
+      this.firstElementChild = child;
+    },
+  };
+}
+
+function tasksRouteDocument(FlowTasks) {
+  return {
+    cookie: "flow_ui_csrf=csrf-token",
+    addEventListener() {},
+    createElement(tag) {
+      const element = new FlowTasks();
+      element.tagName = String(tag).toUpperCase();
+      // The element is never connected here, so there is no <flow-app> to
+      // delegate to: app-facing services resolve to empty.
+      element.closest = () => null;
+      return element;
+    },
+  };
+}
+
 test("tasks route ?state=done deep link pre-filters over the stored selection", async () => {
   const fetchCalls = [];
   const title = { textContent: "" };
   const status = { textContent: "" };
-  const content = { innerHTML: "" };
+  const content = tasksRouteContent();
+  const { renderTasksRoute, FlowTasks } = await tasksRouteImports();
   const context = await scriptContext({
     location: { pathname: "/ui/tasks", search: "?state=done" },
     localStorage: {
@@ -547,6 +586,7 @@ test("tasks route ?state=done deep link pre-filters over the stored selection", 
       removeItem() {},
     },
   }, {
+    document: tasksRouteDocument(FlowTasks),
     fetch(path) {
       fetchCalls.push(path);
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ tasks: [] }) });
@@ -562,10 +602,10 @@ test("tasks route ?state=done deep link pre-filters over the stored selection", 
   };
   app.querySelectorAll = () => [];
 
-  const ok = await context.renderTasksView(app);
+  const ok = await renderTasksRoute(app);
 
   assert.equal(ok, true);
-  assert.deepEqual([...app.tasksState], ["done"], "deep link wins over the stored scheduled filter");
+  assert.deepEqual([...content.firstElementChild.tasksState], ["done"], "deep link wins over the stored scheduled filter");
   assert.deepEqual(fetchCalls, ["/ui/api/v2/tasks?state=done"]);
 });
 
@@ -573,7 +613,8 @@ test("tasks route ignores an invalid ?state= deep link and keeps the stored filt
   const fetchCalls = [];
   const title = { textContent: "" };
   const status = { textContent: "" };
-  const content = { innerHTML: "" };
+  const content = tasksRouteContent();
+  const { renderTasksRoute, FlowTasks } = await tasksRouteImports();
   const context = await scriptContext({
     location: { pathname: "/ui/tasks", search: "?state=bogus&state=also-bogus" },
     localStorage: {
@@ -585,6 +626,7 @@ test("tasks route ignores an invalid ?state= deep link and keeps the stored filt
       removeItem() {},
     },
   }, {
+    document: tasksRouteDocument(FlowTasks),
     fetch(path) {
       fetchCalls.push(path);
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ tasks: [] }) });
@@ -600,15 +642,17 @@ test("tasks route ignores an invalid ?state= deep link and keeps the stored filt
   };
   app.querySelectorAll = () => [];
 
-  const ok = await context.renderTasksView(app);
+  const ok = await renderTasksRoute(app);
 
   assert.equal(ok, true);
-  assert.deepEqual([...app.tasksState], ["in_progress"], "unknown state values fall back to the stored filter");
+  assert.deepEqual([...content.firstElementChild.tasksState], ["in_progress"], "unknown state values fall back to the stored filter");
   assert.deepEqual(fetchCalls, ["/ui/api/v2/tasks?state=in_progress"]);
 });
 
 test("tasks ?state= deep link re-seeds after an in-app navigation from a prior visit", async () => {
   const fetchCalls = [];
+  const content = tasksRouteContent();
+  const { renderTasksRoute, FlowTasks } = await tasksRouteImports();
   const context = await scriptContext({
     location: { pathname: "/ui/tasks", search: "?state=done" },
     localStorage: {
@@ -620,6 +664,7 @@ test("tasks ?state= deep link re-seeds after an in-app navigation from a prior v
       removeItem() {},
     },
   }, {
+    document: tasksRouteDocument(FlowTasks),
     fetch(path) {
       fetchCalls.push(path);
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ tasks: [] }) });
@@ -630,7 +675,7 @@ test("tasks ?state= deep link re-seeds after an in-app navigation from a prior v
   app.querySelector = (selector) => {
     if (selector === "h1") return { textContent: "" };
     if (selector === ".status") return { textContent: "" };
-    if (selector === ".content") return { innerHTML: "" };
+    if (selector === ".content") return content;
     if (selector === ".statusbar") return null;
     return null;
   };
@@ -638,17 +683,19 @@ test("tasks ?state= deep link re-seeds after an in-app navigation from a prior v
 
   // First visit: the retained scheduled filter applies (no state params).
   context.window.location.search = "";
-  const first = await context.renderTasksView(app);
+  const first = await renderTasksRoute(app);
   assert.equal(first, true);
-  assert.deepEqual([...app.tasksState], ["scheduled"], "no deep link keeps the persisted filter");
+  const element = content.firstElementChild;
+  assert.deepEqual([...element.tasksState], ["scheduled"], "no deep link keeps the persisted filter");
 
   // The throughput-strip data-link navigation reuses the same FlowApp and
-  // reloads the route with ?state=done: the deep link must replace the
-  // retained filter instead of being ignored.
+  // reloads the route with ?state=done: mount() reuses the element and the
+  // deep link must replace the retained filter instead of being ignored.
   context.window.location.search = "?state=done";
-  const second = await context.renderTasksView(app);
+  const second = await renderTasksRoute(app);
   assert.equal(second, true);
-  assert.deepEqual([...app.tasksState], ["done"], "in-app navigation to the deep link re-seeds the filter");
+  assert.equal(content.firstElementChild, element, "the same-route reload reuses the element");
+  assert.deepEqual([...element.tasksState], ["done"], "in-app navigation to the deep link re-seeds the filter");
   assert.deepEqual(fetchCalls, ["/ui/api/v2/tasks?state=scheduled", "/ui/api/v2/tasks?state=done"]);
 });
 

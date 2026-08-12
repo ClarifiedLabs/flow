@@ -1,23 +1,29 @@
-// Tasks view: a flat or container-grouped, filterable list of tasks across every visible project.
-// Lifecycle-state chips combine (Unscheduled, Scheduled, In Progress and Done
-// can be selected together; "All" selects or clears all four at once), and an
-// in-view project filter (composing with the topbar project picker) and a
-// title/body search all narrow the aggregate /v2/tasks read; checkboxes select
-// rows for bulk actions (priority, flow, schedule, reset, retry) that fan out
-// client-side over the existing per-task endpoints — the /ui/api proxy wraps
-// each call in the same idempotency handling as the one-off buttons. The view
-// does not poll, so the selection and the search box are never clobbered
-// mid-edit; refresh is the topbar's manual button.
+// Tasks element: a flat or container-grouped, filterable list of tasks across
+// every visible project. Lifecycle-state chips combine (Unscheduled, Scheduled,
+// In Progress and Done can be selected together; "All" selects or clears all
+// four at once), and an in-view project filter (composing with the topbar
+// project picker) and a title/body search all narrow the aggregate /v2/tasks
+// read; checkboxes select rows for bulk actions (priority, flow, schedule,
+// reset, retry) that fan out client-side over the existing per-task endpoints
+// — the /ui/api proxy wraps each call in the same idempotency handling as the
+// one-off buttons. The view does not poll, so the selection and the search box
+// are never clobbered mid-edit; refresh is the topbar's manual button.
+//
+// The route (tasks-route.js) mounts the element, syncs its URL/storage-seeded
+// state, fetches the aggregate read, and hands the payload over. The pure
+// view functions keep taking the view shape — the element provides it, and so
+// do the plain stand-ins in tasks-view.test.mjs.
 
-import { failureMessage } from "./actions/dispatch.js";
-import { apiGet, apiPatch, apiPost, taskAPIBase, taskHref, workItemHref, workItemsAPIBase } from "./api.js";
-import { phaseKey, renderPhaseBadge } from "./board.js";
-import { escapeAttr, escapeHTML } from "./html.js";
-import { LIFECYCLE_DONE, LIFECYCLE_IN_PROGRESS, LIFECYCLE_SCHEDULED, LIFECYCLE_UNSCHEDULED, lifecycleStateOf } from "./lifecycle.js";
-import { value } from "./normalize.js";
-import { readTasksListView, readTasksProject, readTasksQuery, readTasksState, writeTasksListView, writeTasksProject, writeTasksQuery, writeTasksState, writeWorkProject } from "./storage.js";
-import { buildWorkItemIndex, classifyTaskContainer, TASK_CONTAINER_STANDALONE, workItemCompare, workItemKind } from "./work-item-model.js";
-import { activeWorkProject, renderWorkNav, workViewHref } from "./work-nav.js";
+import { failureMessage } from "../actions/dispatch.js";
+import { define, FlowElement } from "./base.js";
+import { apiPatch, apiPost, taskAPIBase, taskHref, workItemHref } from "../api.js";
+import { phaseKey, renderPhaseBadge } from "../board.js";
+import { escapeAttr, escapeHTML } from "../html.js";
+import { LIFECYCLE_DONE, LIFECYCLE_IN_PROGRESS, LIFECYCLE_SCHEDULED, LIFECYCLE_UNSCHEDULED, lifecycleStateOf } from "../lifecycle.js";
+import { value } from "../normalize.js";
+import { readTasksListView, readTasksProject, readTasksQuery, readTasksState, writeTasksListView, writeTasksProject, writeTasksQuery, writeTasksState, writeWorkProject } from "../storage.js";
+import { classifyTaskContainer, TASK_CONTAINER_STANDALONE, workItemCompare, workItemKind } from "../work-item-model.js";
+import { renderWorkNav, workViewHref } from "../work-nav.js";
 
 // TASKS_STATE_FILTERS are the lifecycle chips. The four state chips combine
 // (the server ORs repeatable state params); "all" is a shortcut that selects
@@ -111,71 +117,6 @@ function tasksStateFromLocation() {
   return states.size > 0 ? states : null;
 }
 
-export async function renderTasksView(app, context) {
-  // Seed the lifecycle filter from ?state= deep-link params whenever the URL
-  // changed since the last render (or the app is fresh). A navigation to
-  // /ui/tasks?state=done — including the in-app data-link navigation from the
-  // board's throughput strip, which reuses this FlowApp — must win over a
-  // filter retained from a previous visit; load() clears the retained filter
-  // on leaving /ui/tasks so every arrival re-seeds. A re-render under an
-  // unchanged URL (a chip click reloads through the same load()) keeps the
-  // in-view selection instead of clobbering it back to the deep link.
-  const search = window.location.search;
-  if (!app.tasksState || app.tasksStateSearch !== search) {
-    app.tasksState = tasksStateFromLocation() || readTasksState();
-    app.tasksStateSearch = search;
-  }
-  const params = new URLSearchParams(window.location.search);
-  const projectFromURL = String(params.get("project") || "").trim();
-  if (app.tasksProject === undefined) app.tasksProject = projectFromURL || readTasksProject();
-  else if (projectFromURL && app.tasksProjectSearch !== window.location.search) app.tasksProject = projectFromURL;
-  app.tasksProjectSearch = window.location.search;
-  if (app.tasksRootSearch !== window.location.search) {
-    app.tasksRoot = tasksRootFromSearch(window.location.search);
-    app.tasksRootSearch = window.location.search;
-  }
-  if (app.tasksLayout === undefined) app.tasksLayout = readTasksListView();
-  const workProject = activeWorkProject(app, app.tasksProject);
-  if (workProject) writeWorkProject(workProject);
-  if (app.tasksQuery === undefined) app.tasksQuery = readTasksQuery();
-  if (!app.tasksSelected) app.tasksSelected = new Set();
-
-  const projectIDs = tasksWorkProjectIDs(app);
-  const tasksRequest = app.tasksState.size > 0
-    ? apiGet("/v2/tasks" + tasksQueryView(app, app.tasksState, { q: app.tasksQuery }))
-    : Promise.resolve(null);
-  const [data, workPayloads] = await Promise.all([
-    tasksRequest,
-    Promise.all(projectIDs.map(async (projectID) => [projectID, await apiGet(workItemsAPIBase(projectID))])),
-  ]);
-  if (context && !app.isActiveLoad(context)) return false;
-  app.setTitle("Tasks");
-  app.tasksProjectBadge = (app.projects || []).length > 1;
-  app.tasksList = value(data, "tasks", "Tasks") || [];
-  app.tasksWorkIndexes = new Map(workPayloads.map(([projectID, payload]) => [projectID, buildWorkItemIndex(payload)]));
-  // A refresh or root change can drop tasks from the visible list; selection
-  // only ever names rows currently shown.
-  const visible = new Set(filteredTasksView(app).map((task) => String(value(task, "id", "ID"))));
-  app.tasksSelected = new Set([...app.tasksSelected].filter((id) => visible.has(id)));
-  // The bulk flow dropdown reads the per-project flow cache; warm it now so a
-  // selection renders its options synchronously. Flows are project-owned, so
-  // there is nothing to warm while the filter is on all projects.
-  if (String(app.tasksProject || "").trim()) await app.ensureFlows(app.tasksProject);
-  if (context && !app.isActiveLoad(context)) return false;
-  app.querySelector(".content").innerHTML = `
-    <div class="tasks-view">
-      ${renderWorkNav({ active: "tasks", projects: app.projects || [], projectID: workProject, search: window.location.search })}
-      ${renderTasksControlsView(app)}
-      <div class="tasks-bulk" hidden></div>
-      <div class="tasks-list"></div>
-    </div>
-  `;
-  renderTasksListView(app);
-  renderTasksBulkBarView(app);
-  bindTasksControlsView(app);
-  return true;
-}
-
 // tasksQueryView builds the aggregate /v2/tasks query: repeatable project from
 // the topbar selection, one state param per selected lifecycle chip (the
 // server ORs them), and any extras (q). The view short-circuits an empty state
@@ -232,7 +173,7 @@ export function renderTasksControlsView(app) {
         </div>
         <select class="tasks-project" data-tasks-project aria-label="Filter by project">${projectOptions}</select>
         <select class="tasks-root" data-tasks-root aria-label="Filter by top-level container">${rootOptions}${missingRoot}</select>
-        <input class="tasks-search" data-tasks-search type="search" placeholder="Search title and body" value="${escapeAttr(app.tasksQuery)}" aria-label="Search tasks">
+        <input class="tasks-search" data-tasks-search type="search" placeholder="Search title and body" value="${escapeAttr(app.searchDraft ?? app.tasksQuery)}" aria-label="Search tasks">
       </div>
     </div>
   `;
@@ -253,23 +194,26 @@ function renderTasksRootOptionView(app, group) {
 export function renderTasksListView(app) {
   const list = app.querySelector(".tasks-list");
   if (!list) return;
+  list.innerHTML = renderTasksListMarkup(app);
+}
+
+export function renderTasksListMarkup(app) {
   const tasks = filteredTasksView(app);
   if (!tasks.length) {
     // An empty state selection matches no tasks by design; call that out so it
     // is not mistaken for a filter that matched nothing.
     const noStates = !app.tasksState || app.tasksState.size === 0;
-    list.innerHTML = noStates
+    return noStates
       ? `<div class="empty">No states selected — pick All or a state chip to show tasks</div>`
       : app.tasksRoot && (app.tasksList || []).length
         ? `<div class="empty">No tasks in this container</div>`
         : `<div class="empty">No tasks</div>`;
-    return;
   }
   const selected = app.tasksSelected || new Set();
   const rows = app.tasksLayout === "container"
     ? taskContainerGroupsView(app, tasks).map((group) => renderTasksGroupView(app, group)).join("")
     : `<div class="tasks-flat-list" role="list">${tasks.map((task) => renderTaskRowView(app, task, { showContainer: true })).join("")}</div>`;
-  list.innerHTML = `
+  return `
     <label class="tasks-select-all"><input type="checkbox" data-tasks-select-all${tasks.every((task) => selected.has(String(value(task, "id", "ID")))) ? " checked" : ""}> Select all ${tasks.length} visible</label>
     ${rows}
   `;
@@ -330,11 +274,12 @@ export function renderTasksBulkBarView(app) {
   if (!container) return;
   const count = app.tasksSelected ? app.tasksSelected.size : 0;
   container.hidden = count === 0;
-  if (!count) {
-    container.innerHTML = "";
-    return;
-  }
-  container.innerHTML = `
+  container.innerHTML = count ? renderTasksBulkBarMarkup(app) : "";
+}
+
+export function renderTasksBulkBarMarkup(app) {
+  const count = app.tasksSelected ? app.tasksSelected.size : 0;
+  return `
     <div class="tasks-bulk-bar" role="group" aria-label="Bulk actions">
       <span class="tasks-bulk-count">${count} selected</span>
       <span class="tasks-bulk-field">
@@ -385,109 +330,6 @@ export function toggleTasksState(state, key) {
 export function pruneTasksSelectionView(app) {
   const visible = new Set(filteredTasksView(app).map((task) => String(value(task, "id", "ID"))));
   app.tasksSelected = new Set([...(app.tasksSelected || [])].filter((id) => visible.has(id)));
-}
-
-export function bindTasksControlsView(app) {
-  const view = app.querySelector(".tasks-view");
-  if (!view) return;
-  view.querySelectorAll("[data-tasks-state]").forEach((button) => {
-    button.addEventListener("click", () => {
-      app.tasksState = toggleTasksState(app.tasksState, button.dataset.tasksState);
-      writeTasksState(app.tasksState);
-      app.load();
-    });
-  });
-  view.querySelectorAll("[data-tasks-layout]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const layout = button.dataset.tasksLayout;
-      if (layout !== "flat" && layout !== "container") return;
-      app.tasksLayout = layout;
-      writeTasksListView(layout);
-      renderTasksListView(app);
-      view.querySelectorAll("[data-tasks-layout]").forEach((control) => {
-        const active = control.dataset.tasksLayout === layout;
-        control.classList.toggle?.("active", active);
-        control.setAttribute("aria-pressed", String(active));
-      });
-    });
-  });
-  const projectSelect = view.querySelector("[data-tasks-project]");
-  if (projectSelect) {
-    projectSelect.addEventListener("change", () => {
-      app.tasksProject = String(projectSelect.value || "").trim();
-      app.tasksRoot = "";
-      writeTasksProject(app.tasksProject);
-      if (app.tasksProject) writeWorkProject(app.tasksProject);
-      if (globalThis.history?.replaceState) {
-        const projectHref = workViewHref("tasks", app.tasksProject, window.location.search);
-        history.replaceState({}, "", tasksRootHref(projectHref.split("?")[1] || "", ""));
-      }
-      app.load();
-    });
-  }
-  const rootSelect = view.querySelector("[data-tasks-root]");
-  if (rootSelect) {
-    rootSelect.addEventListener("change", () => {
-      app.tasksRoot = String(rootSelect.value || "").trim();
-      if (globalThis.history?.replaceState) history.replaceState({}, "", tasksRootHref(window.location.search, app.tasksRoot));
-      app.tasksRootSearch = window.location.search;
-      pruneTasksSelectionView(app);
-      renderTasksListView(app);
-      renderTasksBulkBarView(app);
-    });
-  }
-  const search = view.querySelector("[data-tasks-search]");
-  if (search) {
-    const apply = () => {
-      const next = String(search.value || "").trim();
-      if (next === app.tasksQuery) return;
-      app.tasksQuery = next;
-      writeTasksQuery(app.tasksQuery);
-      app.load();
-    };
-    search.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") apply();
-    });
-    search.addEventListener("change", apply);
-  }
-  view.addEventListener("change", (event) => {
-    // The shared Work-project picker is handled by FlowApp after this event
-    // bubbles. Clear a root from the old project first so it cannot hide every
-    // task in the newly selected project.
-    if (event.target.closest("[data-work-project]")) {
-      app.tasksRoot = "";
-      if (globalThis.history?.replaceState) history.replaceState({}, "", tasksRootHref(window.location.search, ""));
-    }
-    const selectAll = event.target.closest("[data-tasks-select-all]");
-    if (selectAll) {
-      app.tasksSelected = selectAll.checked
-        ? new Set(filteredTasksView(app).map((task) => String(value(task, "id", "ID"))))
-        : new Set();
-      renderTasksListView(app);
-      renderTasksBulkBarView(app);
-      return;
-    }
-    const box = event.target.closest("[data-tasks-select]");
-    if (!box) return;
-    const id = String(box.dataset.tasksSelect || "");
-    if (!id) return;
-    if (box.checked) {
-      app.tasksSelected.add(id);
-    } else {
-      app.tasksSelected.delete(id);
-    }
-    renderTasksBulkBarView(app);
-  });
-  view.addEventListener("click", (event) => {
-    if (event.target.closest("[data-tasks-clear]")) {
-      app.tasksSelected = new Set();
-      renderTasksListView(app);
-      renderTasksBulkBarView(app);
-      return;
-    }
-    const applyButton = event.target.closest("[data-tasks-apply]");
-    if (applyButton) applyTasksBulkAction(app, applyButton.dataset.tasksApply, view);
-  });
 }
 
 // applyTasksBulkAction fans one bulk action out over the selected tasks via
@@ -560,3 +402,210 @@ export function taskBulkPathView(task, suffix = "") {
   const id = String(value(task, "id", "ID"));
   return `${taskAPIBase(projectID)}/${encodeURIComponent(id)}${suffix}`;
 }
+
+export class FlowTasks extends FlowElement {
+  // The view state the old view stashed on the app (app.tasksState et al.) is
+  // element state now: mount() reuses the element across same-route reloads so
+  // chip selections survive, and leaving the route discards the element — the
+  // next visit re-seeds from the URL and storage (syncLocation), which is what
+  // replacing app.js's leaving-/ui/tasks reset means in element terms.
+  tasksState = undefined;
+  tasksProject = undefined;
+  tasksRoot = undefined;
+  tasksLayout = undefined;
+  tasksQuery = undefined;
+  tasksSelected = undefined;
+  // The payload fields the last route payload set (see render).
+  tasksList = [];
+  tasksWorkIndexes = new Map();
+  tasksProjectBadge = false;
+  // The search text the user has typed but not yet applied: kept across
+  // repaints so a selection click cannot clobber an in-progress edit.
+  searchDraft = undefined;
+  stateSearch = undefined;
+  projectSearch = undefined;
+  rootSearch = undefined;
+  payload = null;
+
+  // The app services the pure view functions need, delegated to the enclosing
+  // <flow-app> so the functions keep one "view" argument shape.
+  get projects() {
+    return this.app?.projects || [];
+  }
+
+  selectedProjectIDs() {
+    return this.app?.selectedProjectIDs?.() || [];
+  }
+
+  get flowsByProject() {
+    return this.app?.flowsByProject;
+  }
+
+  setStatus(message) {
+    this.app?.setStatus?.(message);
+  }
+
+  async load(options) {
+    return this.app?.load?.(options);
+  }
+
+  // syncLocation seeds the view state from the URL and storage whenever the
+  // location's query changed since the last sync. The route calls it after
+  // every mount; connectedCallback calls it for standalone mounts.
+  syncLocation() {
+    const search = window.location.search || "";
+    if (this.tasksState === undefined || this.stateSearch !== search) {
+      this.tasksState = tasksStateFromLocation() || readTasksState();
+    }
+    const projectFromURL = String(new URLSearchParams(search).get("project") || "").trim();
+    if (this.tasksProject === undefined) this.tasksProject = projectFromURL || readTasksProject();
+    else if (projectFromURL && this.projectSearch !== search) this.tasksProject = projectFromURL;
+    if (this.rootSearch !== search) {
+      this.tasksRoot = tasksRootFromSearch(search);
+    }
+    this.stateSearch = this.projectSearch = this.rootSearch = search;
+    if (this.tasksLayout === undefined) this.tasksLayout = readTasksListView();
+    if (this.tasksQuery === undefined) this.tasksQuery = readTasksQuery();
+    if (!this.tasksSelected) this.tasksSelected = new Set();
+  }
+
+  connectedCallback() {
+    this.syncLocation();
+    super.connectedCallback();
+  }
+
+  // workProjectIDs is the aggregate read's project scope: the in-view project
+  // filter when set, else the topbar selection, else every registered project.
+  workProjectIDs() {
+    return tasksWorkProjectIDs(this);
+  }
+
+  // data: { tasks, workIndexes, projectBadge } — the route's aggregate read.
+  render() {
+    const data = this.data;
+    if (!data) return "";
+    if (data !== this.payload) {
+      this.payload = data;
+      this.tasksList = data.tasks || [];
+      this.tasksWorkIndexes = data.workIndexes || new Map();
+      this.tasksProjectBadge = Boolean(data.projectBadge);
+      // A refresh or root change can drop tasks from the visible list;
+      // selection only ever names rows currently shown.
+      pruneTasksSelectionView(this);
+    }
+    const workProject = String(this.tasksProject || "").trim();
+    return `
+      <div class="tasks-view">
+        ${renderWorkNav({ active: "tasks", projects: this.projects, projectID: workProject, search: window.location.search })}
+        ${renderTasksControlsView(this)}
+        <div class="tasks-bulk"${this.tasksSelected && this.tasksSelected.size ? "" : " hidden"}>${this.tasksSelected && this.tasksSelected.size ? renderTasksBulkBarMarkup(this) : ""}</div>
+        <div class="tasks-list">${renderTasksListMarkup(this)}</div>
+      </div>
+    `;
+  }
+
+  bind() {
+    this.addEventListener("click", (event) => {
+      const stateButton = event.target.closest?.("[data-tasks-state]");
+      if (stateButton) {
+        this.tasksState = toggleTasksState(this.tasksState, stateButton.dataset.tasksState);
+        writeTasksState(this.tasksState);
+        this.load();
+        return;
+      }
+      const layoutButton = event.target.closest?.("[data-tasks-layout]");
+      if (layoutButton) {
+        const layout = layoutButton.dataset.tasksLayout;
+        if (layout !== "flat" && layout !== "container") return;
+        this.tasksLayout = layout;
+        writeTasksListView(layout);
+        this.invalidate();
+        return;
+      }
+      if (event.target.closest?.("[data-tasks-clear]")) {
+        this.tasksSelected = new Set();
+        this.invalidate();
+        return;
+      }
+      const applyButton = event.target.closest?.("[data-tasks-apply]");
+      if (applyButton) applyTasksBulkAction(this, applyButton.dataset.tasksApply, this);
+    });
+
+    this.addEventListener("change", (event) => {
+      const projectSelect = event.target.closest?.("[data-tasks-project]");
+      if (projectSelect) {
+        this.tasksProject = String(projectSelect.value || "").trim();
+        this.tasksRoot = "";
+        writeTasksProject(this.tasksProject);
+        if (this.tasksProject) writeWorkProject(this.tasksProject);
+        if (globalThis.history?.replaceState) {
+          const projectHref = workViewHref("tasks", this.tasksProject, window.location.search);
+          history.replaceState({}, "", tasksRootHref(projectHref.split("?")[1] || "", ""));
+        }
+        this.load();
+        return;
+      }
+      const rootSelect = event.target.closest?.("[data-tasks-root]");
+      if (rootSelect) {
+        this.tasksRoot = String(rootSelect.value || "").trim();
+        if (globalThis.history?.replaceState) history.replaceState({}, "", tasksRootHref(window.location.search, this.tasksRoot));
+        this.rootSearch = window.location.search;
+        pruneTasksSelectionView(this);
+        this.invalidate();
+        return;
+      }
+      const search = event.target.closest?.("[data-tasks-search]");
+      if (search) {
+        this.applySearch(search.value);
+        return;
+      }
+      // The shared Work-project picker is handled by FlowApp after this event
+      // bubbles. Clear a root from the old project first so it cannot hide
+      // every task in the newly selected project.
+      if (event.target.closest?.("[data-work-project]")) {
+        this.tasksRoot = "";
+        if (globalThis.history?.replaceState) history.replaceState({}, "", tasksRootHref(window.location.search, ""));
+      }
+      const selectAll = event.target.closest?.("[data-tasks-select-all]");
+      if (selectAll) {
+        this.tasksSelected = selectAll.checked
+          ? new Set(filteredTasksView(this).map((task) => String(value(task, "id", "ID"))))
+          : new Set();
+        this.invalidate();
+        return;
+      }
+      const box = event.target.closest?.("[data-tasks-select]");
+      if (!box) return;
+      const id = String(box.dataset.tasksSelect || "");
+      if (!id) return;
+      if (box.checked) {
+        this.tasksSelected.add(id);
+      } else {
+        this.tasksSelected.delete(id);
+      }
+      this.invalidate();
+    });
+
+    // The search input reports its text on every keystroke so a repaint keeps
+    // the draft; Enter (and the change event above) applies it.
+    this.addEventListener("input", (event) => {
+      const search = event.target.closest?.("[data-tasks-search]");
+      if (search) this.searchDraft = String(search.value ?? "");
+    });
+    this.addEventListener("keydown", (event) => {
+      const search = event.target.closest?.("[data-tasks-search]");
+      if (search && event.key === "Enter") this.applySearch(search.value);
+    });
+  }
+
+  applySearch(raw) {
+    const next = String(raw || "").trim();
+    this.searchDraft = undefined;
+    if (next === this.tasksQuery) return;
+    this.tasksQuery = next;
+    writeTasksQuery(this.tasksQuery);
+    this.load();
+  }
+}
+
+define("flow-tasks", FlowTasks);

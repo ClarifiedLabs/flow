@@ -1,4 +1,8 @@
-/* Tasks view (.tasks-*). flow-app scoped until the view gets an element. */
+/* Tasks view: filterable task list with bulk actions. */
+:host {
+  display: block;
+  min-width: 0;
+}
 
 .tasks-view {
   display: grid;

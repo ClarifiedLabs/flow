@@ -8,7 +8,7 @@ import { terminalSessionIDForPath } from "../storage.js";
 import { renderWorkersRoute, renderJobsRoute } from "../diagnostics-route.js";
 import { renderTerminalView } from "../terminal-view.js";
 import { renderDoneRoute } from "../done-route.js";
-import { renderTasksView } from "../tasks-view.js";
+import { renderTasksRoute } from "../tasks-route.js";
 import { renderBoardRoute } from "../board-route.js";
 import { renderTaskRoute } from "../task-route.js";
 import { renderChangeRoute } from "../change-route.js";
@@ -80,7 +80,7 @@ export const ROUTES = [
   },
   { match: (p) => p.startsWith("/ui/changes/") && { id: p.split("/").pop() }, render: (app, ctx, p) => renderChangeRoute(app, p.id, ctx) },
   { match: (p) => p === "/ui/console", render: (app, ctx) => app.renderConsole(ctx) },
-  { match: (p) => p === "/ui/tasks", render: (app, ctx) => renderTasksView(app, ctx) },
+  { match: (p) => p === "/ui/tasks", render: (app, ctx) => renderTasksRoute(app, ctx) },
   { match: (p) => { const id = terminalSessionIDForPath(p); return id && { id }; }, render: (app, ctx, p) => renderTerminalView(app, p.id, ctx) },
   { match: (p) => p === "/ui/flows", render: (app, ctx) => renderFlowsView(app, ctx) },
   { match: (p) => p === "/ui/workers", render: (app, ctx) => renderWorkersRoute(app, ctx) },

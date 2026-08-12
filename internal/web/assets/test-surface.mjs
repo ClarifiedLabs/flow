@@ -28,7 +28,7 @@ export * from "./attention.js";
 export * from "./task.js";
 export * from "./poller.js";
 export * from "./flows-view.js";
-export * from "./tasks-view.js";
+export * from "./elements/tasks.js";
 export * from "./work-items-route.js";
 export * from "./work-item-model.js";
 export * from "./work-nav.js";
