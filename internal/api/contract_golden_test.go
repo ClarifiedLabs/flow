@@ -75,9 +75,12 @@ func TestContractGoldenResponses(t *testing.T) {
 		{"project", projectPath},
 		{"events", projectPath + "/events"},
 		{"tasks", projectPath + "/tasks"},
-		{"search", projectPath + "/search?q=Golden"},
 		{"completions", projectPath + "/completions"},
 		{"board", projectPath + "/board"},
+		// /search is deliberately not pinned: its result set/order differs by
+		// build tag (FTS5-ranked vs substring) and the done task's JSON shape
+		// differs between the two code paths. The dedicated TestSearchEndpoint*
+		// tests pin its contract in both build modes instead.
 	}
 
 	for _, tc := range cases {
