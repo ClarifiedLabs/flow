@@ -504,33 +504,33 @@ export class FlowTasks extends FlowElement {
     `;
   }
 
-  bind() {
-    this.addEventListener("click", (event) => {
-      const stateButton = event.target.closest?.("[data-tasks-state]");
-      if (stateButton) {
-        this.tasksState = toggleTasksState(this.tasksState, stateButton.dataset.tasksState);
-        writeTasksState(this.tasksState);
-        this.load();
-        return;
-      }
-      const layoutButton = event.target.closest?.("[data-tasks-layout]");
-      if (layoutButton) {
-        const layout = layoutButton.dataset.tasksLayout;
-        if (layout !== "flat" && layout !== "container") return;
-        this.tasksLayout = layout;
-        writeTasksListView(layout);
-        this.invalidate();
-        return;
-      }
-      if (event.target.closest?.("[data-tasks-clear]")) {
-        this.tasksSelected = new Set();
-        this.invalidate();
-        return;
-      }
-      const applyButton = event.target.closest?.("[data-tasks-apply]");
-      if (applyButton) applyTasksBulkAction(this, applyButton.dataset.tasksApply, this);
-    });
+  handleClick(event) {
+    const stateButton = event.target.closest?.("[data-tasks-state]");
+    if (stateButton) {
+      this.tasksState = toggleTasksState(this.tasksState, stateButton.dataset.tasksState);
+      writeTasksState(this.tasksState);
+      this.load();
+      return;
+    }
+    const layoutButton = event.target.closest?.("[data-tasks-layout]");
+    if (layoutButton) {
+      const layout = layoutButton.dataset.tasksLayout;
+      if (layout !== "flat" && layout !== "container") return;
+      this.tasksLayout = layout;
+      writeTasksListView(layout);
+      this.invalidate();
+      return;
+    }
+    if (event.target.closest?.("[data-tasks-clear]")) {
+      this.tasksSelected = new Set();
+      this.invalidate();
+      return;
+    }
+    const applyButton = event.target.closest?.("[data-tasks-apply]");
+    if (applyButton) applyTasksBulkAction(this, applyButton.dataset.tasksApply, this);
+  }
 
+  bind() {
     this.addEventListener("change", (event) => {
       const projectSelect = event.target.closest?.("[data-tasks-project]");
       if (projectSelect) {

@@ -17,7 +17,7 @@ import { renderEpicRoute } from "../epic-route.js";
 import { renderFeaturesRoute, renderFeatureRoute } from "../features-route.js";
 import { renderWorkItemsRoute } from "../work-items-route.js";
 import { renderNewTaskView } from "../task-view.js";
-import { renderFlowsView } from "../flows-view.js";
+import { renderFlowsRoute } from "../flows-route.js";
 
 export const ROUTES = [
   {
@@ -83,7 +83,7 @@ export const ROUTES = [
   { match: (p) => p === "/ui/console", render: (app, ctx) => renderConsoleRoute(app, ctx) },
   { match: (p) => p === "/ui/tasks", render: (app, ctx) => renderTasksRoute(app, ctx) },
   { match: (p) => { const id = terminalSessionIDForPath(p); return id && { id }; }, render: (app, ctx, p) => renderTerminalView(app, p.id, ctx) },
-  { match: (p) => p === "/ui/flows", render: (app, ctx) => renderFlowsView(app, ctx) },
+  { match: (p) => p === "/ui/flows", render: (app, ctx) => renderFlowsRoute(app, ctx) },
   { match: (p) => p === "/ui/workers", render: (app, ctx) => renderWorkersRoute(app, ctx) },
   { match: (p) => p === "/ui/jobs", render: (app, ctx) => renderJobsRoute(app, ctx) },
   { match: (p) => p === "/ui/done", render: (app, ctx) => renderDoneRoute(app, ctx) },

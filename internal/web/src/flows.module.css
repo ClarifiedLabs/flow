@@ -1,4 +1,8 @@
 /* Flows view: sections, tables, flow editor, agent definitions. */
+:host {
+  display: block;
+  min-width: 0;
+}
 
 .flows-detail {
   width: 100%;

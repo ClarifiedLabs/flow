@@ -146,30 +146,28 @@ export class FlowDone extends FlowElement {
     }
   }
 
-  bind() {
-    this.addEventListener("click", (event) => {
-      const outcomeButton = event.target.closest?.("[data-done-outcome]");
-      if (outcomeButton) {
-        if (this.outcome === outcomeButton.dataset.doneOutcome) return;
-        this.outcome = outcomeButton.dataset.doneOutcome;
-        writeDoneOutcome(this.outcome);
-        this.app?.load();
-        return;
-      }
-      const densityButton = event.target.closest?.("[data-done-density]");
-      if (densityButton) {
-        if (this.density === densityButton.dataset.doneDensity) return;
-        this.density = densityButton.dataset.doneDensity;
-        writeDoneDensity(this.density);
-        this.invalidate();
-        return;
-      }
-      const moreButton = event.target.closest?.("[data-done-more]");
-      if (moreButton) {
-        event.preventDefault();
-        this.loadMore();
-      }
-    });
+  handleClick(event) {
+    const outcomeButton = event.target.closest?.("[data-done-outcome]");
+    if (outcomeButton) {
+      if (this.outcome === outcomeButton.dataset.doneOutcome) return;
+      this.outcome = outcomeButton.dataset.doneOutcome;
+      writeDoneOutcome(this.outcome);
+      this.app?.load();
+      return;
+    }
+    const densityButton = event.target.closest?.("[data-done-density]");
+    if (densityButton) {
+      if (this.density === densityButton.dataset.doneDensity) return;
+      this.density = densityButton.dataset.doneDensity;
+      writeDoneDensity(this.density);
+      this.invalidate();
+      return;
+    }
+    const moreButton = event.target.closest?.("[data-done-more]");
+    if (moreButton) {
+      event.preventDefault();
+      this.loadMore();
+    }
   }
 
   // loadMore fetches the next (older) page for every project that still has a

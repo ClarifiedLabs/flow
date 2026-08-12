@@ -65,6 +65,11 @@ export class TestNode {
     return this.tagName.toLowerCase();
   }
 
+  // parentNode is parentElement for every node the app builds.
+  get parentNode() {
+    return this.parentElement;
+  }
+
   get className() {
     return this.getAttribute("class") || "";
   }
@@ -170,6 +175,22 @@ export class TestNode {
     this.children = [];
     this._innerHTML = String(html);
     for (const child of parseHTML(String(html))) this.appendChild(child);
+  }
+
+  // insertAdjacentHTML supports the two positions the flow editor's add-row
+  // controls use; the markup is parsed with the same subset parser as
+  // innerHTML.
+  insertAdjacentHTML(position, html) {
+    const nodes = parseHTML(String(html));
+    if (position === "beforeend") {
+      for (const node of nodes) this.appendChild(node);
+      return;
+    }
+    if (position === "afterbegin") {
+      for (const node of [...nodes].reverse()) this.insertBefore(node, this.firstElementChild);
+      return;
+    }
+    throw new Error(`insertAdjacentHTML("${position}") is not implemented in test-dom`);
   }
 
   get innerHTML() {
