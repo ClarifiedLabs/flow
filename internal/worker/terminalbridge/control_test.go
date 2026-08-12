@@ -16,6 +16,10 @@ import (
 	"github.com/coder/websocket"
 )
 
+// testIOTimeout bounds websocket/pty round trips in tests. It is generous so
+// full-suite CPU load cannot flake tests whose real latency is milliseconds.
+const testIOTimeout = 15 * time.Second
+
 type memoryJobRegistry struct {
 	mu   sync.Mutex
 	jobs map[string]bool
@@ -56,7 +60,7 @@ func TestControlClientUnknownJobReturnsTerminalError(t *testing.T) {
 	control := receiveConnection(t, controlConnections)
 
 	writeJSON(t, control, `{"type":"terminal-open","stream_id":"stream-1","job_id":"missing","cols":80,"rows":24}`)
-	readCtx, readCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	readCtx, readCancel := context.WithTimeout(context.Background(), testIOTimeout)
 	defer readCancel()
 	messageType, data, err := control.Read(readCtx)
 	if err != nil {
@@ -93,7 +97,7 @@ func TestControlClientRegisteredJobStreamsTerminal(t *testing.T) {
 		jobSocketPath,
 	))
 	stream := receiveConnection(t, streamConnections)
-	ioCtx, ioCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ioCtx, ioCancel := context.WithTimeout(context.Background(), testIOTimeout)
 	defer ioCancel()
 	if err := stream.Write(ioCtx, websocket.MessageBinary, []byte("control-echo\n")); err != nil {
 		t.Fatalf("write terminal stream: %v", err)
@@ -198,7 +202,7 @@ func installFakeTmux(t *testing.T) string {
 
 func readFileEventually(t *testing.T, path string) string {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(testIOTimeout)
 	for {
 		contents, err := os.ReadFile(path)
 		if err == nil {
@@ -220,7 +224,7 @@ func receiveConnection(t *testing.T, connections <-chan *websocket.Conn) *websoc
 	case conn := <-connections:
 		t.Cleanup(func() { _ = conn.CloseNow() })
 		return conn
-	case <-time.After(3 * time.Second):
+	case <-time.After(testIOTimeout):
 		t.Fatal("timed out waiting for WebSocket connection")
 		return nil
 	}
@@ -228,7 +232,7 @@ func receiveConnection(t *testing.T, connections <-chan *websocket.Conn) *websoc
 
 func currentControlConnection(t *testing.T, client *ControlClient) *websocket.Conn {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(testIOTimeout)
 	for {
 		client.connMu.Lock()
 		conn := client.conn
@@ -245,7 +249,7 @@ func currentControlConnection(t *testing.T, client *ControlClient) *websocket.Co
 
 func waitForReplacement(t *testing.T, client *ControlClient, previous *websocket.Conn) *websocket.Conn {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(testIOTimeout)
 	for {
 		client.connMu.Lock()
 		conn := client.conn
@@ -262,7 +266,7 @@ func waitForReplacement(t *testing.T, client *ControlClient, previous *websocket
 
 func writeJSON(t *testing.T, conn *websocket.Conn, message string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testIOTimeout)
 	defer cancel()
 	if err := conn.Write(ctx, websocket.MessageText, []byte(message)); err != nil {
 		t.Fatalf("write JSON: %v", err)
@@ -276,7 +280,7 @@ func waitControlClient(t *testing.T, runErr <-chan error) {
 		if err != nil && err != context.Canceled {
 			t.Fatalf("ControlClient.Run: %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(testIOTimeout):
 		t.Fatal(fmt.Sprintf("timed out waiting for control client"))
 	}
 }

@@ -30,7 +30,7 @@ func TestBridgeWebSocketPTYEchoRoundTrip(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- NewBridge(master, cmd, workerConn).Run(context.Background()) }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testIOTimeout)
 	defer cancel()
 	if err := peerConn.Write(ctx, websocket.MessageBinary, []byte("bridge-echo\n")); err != nil {
 		t.Fatalf("write WebSocket input: %v", err)
@@ -54,7 +54,7 @@ func TestBridgeResizeChangesTerminalSize(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- NewBridge(master, cmd, workerConn).Run(context.Background()) }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testIOTimeout)
 	defer cancel()
 	if err := peerConn.Write(ctx, websocket.MessageText, []byte(`{"type":"resize","cols":91,"rows":37}`)); err != nil {
 		t.Fatalf("write resize: %v", err)
@@ -156,7 +156,7 @@ func TestBridgeChildExitSendsExitAndCloses(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- NewBridge(master, cmd, workerConn).Run(context.Background()) }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testIOTimeout)
 	defer cancel()
 	messageType, data, err := peerConn.Read(ctx)
 	if err != nil {
@@ -182,7 +182,7 @@ func TestBridgeWebSocketCloseKillsProcessGroup(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- NewBridge(master, cmd, workerConn).Run(context.Background()) }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testIOTimeout)
 	defer cancel()
 	output := readWebSocketUntil(t, ctx, peerConn, websocket.MessageBinary, []byte("child:"))
 	match := regexp.MustCompile(`child:(\d+)`).FindSubmatch(output)
@@ -264,7 +264,7 @@ func websocketPair(t *testing.T) (*websocket.Conn, *websocket.Conn) {
 	}))
 	t.Cleanup(server.Close)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testIOTimeout)
 	defer cancel()
 	workerConn, _, err := websocket.Dial(ctx, "ws"+server.URL[len("http"):], nil)
 	if err != nil {
@@ -310,7 +310,7 @@ func waitBridge(t *testing.T, runErr <-chan error) {
 		if err != nil {
 			t.Fatalf("Bridge.Run: %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(testIOTimeout):
 		t.Fatal(fmt.Sprintf("timed out waiting for bridge"))
 	}
 }

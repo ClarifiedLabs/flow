@@ -122,7 +122,7 @@ func TestStartWithSizeIORoundTrip(t *testing.T) {
 
 func readPTYUntil(t *testing.T, master *os.File, wanted []byte) []byte {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(testIOTimeout)
 
 	var output bytes.Buffer
 	buffer := make([]byte, 512)

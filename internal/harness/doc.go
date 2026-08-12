@@ -34,7 +34,10 @@ const (
 	StateWaiting = "waiting"
 )
 
-const availabilityCheckTimeout = 5 * time.Second
+// availabilityCheckTimeout bounds each local usability probe. Generous on
+// purpose: a wedged executable only delays detection, while an overloaded
+// host (full test-suite runs) must not turn a healthy binary into a flake.
+const availabilityCheckTimeout = 15 * time.Second
 
 // HookEvent describes a single native-hook event the harness emits. Matcher is
 // the harness-native matcher string ("*" for all tools, or a notification-type
