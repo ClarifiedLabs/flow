@@ -47,6 +47,7 @@ type workflowSkipRequest struct {
 type workflowDoneRequest struct {
 	Resolution coordinator.DoneResolution `json:"resolution"`
 	Note       string                     `json:"note,omitempty"`
+	Evidence   []coordinator.Evidence     `json:"evidence,omitempty"`
 }
 
 type workflowCompleteRequest struct {
@@ -495,7 +496,7 @@ func (s *projectServer) handleForceDoneWorkflow(w http.ResponseWriter, r *http.R
 	}
 	unlockGitWrites := s.drainGitWrites()
 	defer unlockGitWrites()
-	task, err := s.workflowRuns.ForceDone(r.Context(), taskID, request.Resolution, request.Note, workflowActor(principal))
+	task, err := s.workflowRuns.ForceDoneDetailed(r.Context(), taskID, request.Resolution, request.Note, request.Evidence, workflowActor(principal))
 	if err != nil {
 		writeWorkflowError(w, err, "complete_workflow_failed")
 		return

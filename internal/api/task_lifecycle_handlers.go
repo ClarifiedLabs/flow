@@ -109,6 +109,33 @@ func (s *projectServer) handleSearchTasks(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, tasksResponse{Tasks: tasks})
 }
 
+// handleCompletions serves GET /v2/projects/{project}/completions?resolution=&limit=,
+// the completion-audit read: done tasks with resolution, message, and evidence.
+func (s *projectServer) handleCompletions(w http.ResponseWriter, r *http.Request) {
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid_query", "limit must be a positive integer")
+			return
+		}
+		limit = parsed
+	}
+	resolution := r.URL.Query().Get("resolution")
+	if resolution != "" {
+		if err := coordinator.ValidateDoneResolution(coordinator.DoneResolution(resolution)); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
+			return
+		}
+	}
+	tasks, err := s.tasks.ListCompletions(r.Context(), resolution, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "completions_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, tasksResponse{Tasks: tasks})
+}
+
 // isProjectTaskReadPath identifies the intentionally project-readable task
 // surface. Console, terminal, and other operational endpoints are omitted so
 // their task-binding and owner checks remain unchanged.

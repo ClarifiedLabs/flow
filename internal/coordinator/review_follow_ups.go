@@ -336,11 +336,7 @@ func reviewFollowUpDisposition(action string) string {
 }
 
 func taskInTx(ctx context.Context, tx *sql.Tx, id string) (Task, error) {
-	return scanTask(tx.QueryRowContext(ctx, `
-SELECT
-	id, title, body, priority, flow_id, feature_id, created_by, created_by_session_id,
-	source_task_id, source_change_id, created_at, updated_at, lifecycle_state,
-	done_resolution, done_at
-FROM tasks
-WHERE id = ?`, strings.TrimSpace(id)))
+	return scanTask(tx.QueryRowContext(ctx, "SELECT"+taskSelectColumns+`
+FROM tasks i
+WHERE i.id = ?`, strings.TrimSpace(id)))
 }

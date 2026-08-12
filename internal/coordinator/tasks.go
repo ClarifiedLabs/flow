@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -101,6 +102,8 @@ type Task struct {
 	FeatureID           *string         `json:"feature_id,omitempty"`
 	State               *LifecycleState `json:"state"`
 	DoneResolution      *DoneResolution `json:"done_resolution,omitempty"`
+	DoneMessage         string           `json:"done_message,omitempty"`
+	DoneEvidence        []Evidence      `json:"done_evidence,omitempty"`
 	DoneAt              *time.Time      `json:"done_at,omitempty"`
 	CreatedBy           Actor
 	CreatedBySessionID  *string
@@ -525,6 +528,8 @@ SELECT
 	updated_at,
 	lifecycle_state,
 	done_resolution,
+	done_message,
+	done_evidence_json,
 	done_at
 FROM tasks
 WHERE id = ?`, id)
@@ -554,6 +559,8 @@ const taskSelectColumns = `
 	i.updated_at,
 	i.lifecycle_state,
 	i.done_resolution,
+	COALESCE(i.done_message, ''),
+	COALESCE(i.done_evidence_json, ''),
 	i.done_at`
 
 func (s *TaskService) ListTasks(ctx context.Context, filter TaskFilter) ([]Task, error) {
@@ -692,6 +699,37 @@ func fts5Query(query string) string {
 	return strings.Join(parts, " AND ")
 }
 
+
+// ListCompletions returns done tasks with their resolution, message, and
+// evidence, newest first, for `flow audit completions`. resolution filters by
+// terminal disposition (empty = any); limit <= 0 defaults to 100.
+func (s *TaskService) ListCompletions(ctx context.Context, resolution string, limit int) ([]Task, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	query := "SELECT" + taskSelectColumns + `
+FROM tasks i
+WHERE i.lifecycle_state = ?`
+	args := []any{string(LifecycleDone)}
+	if strings.TrimSpace(resolution) != "" {
+		query += `
+	AND i.done_resolution = ?`
+		args = append(args, strings.TrimSpace(resolution))
+	}
+	query += `
+ORDER BY i.done_at DESC, i.id DESC
+LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list completions: %w", err)
+	}
+	defer rows.Close()
+	return scanTasks(rows)
+}
 
 // ClosedOutcome filters closed tasks by their terminal disposition. The empty
 // value means "any outcome". The predicates mirror derivePhaseFromTask: a
@@ -843,7 +881,7 @@ func (s *TaskService) CountClosedTasksByWindow(ctx context.Context, windows []ti
 	resolutions := make([]any, 0, len(outcomes))
 	seen := make(map[DoneResolution]bool, len(outcomes))
 	for _, outcome := range outcomes {
-		if err := validateDoneResolution(outcome); err != nil {
+		if err := ValidateDoneResolution(outcome); err != nil {
 			return nil, fmt.Errorf("count closed tasks by window: %w", err)
 		}
 		if seen[outcome] {
@@ -1698,6 +1736,8 @@ SELECT
 	blocker.updated_at,
 	blocker.lifecycle_state,
 	blocker.done_resolution,
+	COALESCE(blocker.done_message, ''),
+	COALESCE(blocker.done_evidence_json, ''),
 	blocker.done_at
 FROM work_item_relations r
 JOIN tasks blocker ON blocker.id = r.source_item_id
@@ -1984,6 +2024,8 @@ func scanTask(scanner taskScanner) (Task, error) {
 	var updatedAt string
 	var lifecycleState sql.NullString
 	var doneResolution sql.NullString
+	var doneMessage sql.NullString
+	var doneEvidenceJSON sql.NullString
 	var doneAt sql.NullString
 
 	if err := scanner.Scan(
@@ -2001,6 +2043,8 @@ func scanTask(scanner taskScanner) (Task, error) {
 		&updatedAt,
 		&lifecycleState,
 		&doneResolution,
+		&doneMessage,
+		&doneEvidenceJSON,
 		&doneAt,
 	); err != nil {
 		return Task{}, fmt.Errorf("scan task: %w", err)
@@ -2044,6 +2088,13 @@ func scanTask(scanner taskScanner) (Task, error) {
 	if doneResolution.Valid {
 		resolution := DoneResolution(doneResolution.String)
 		task.DoneResolution = &resolution
+	}
+	task.DoneMessage = doneMessage.String
+	if doneEvidenceJSON.Valid && doneEvidenceJSON.String != "" {
+		var evidence []Evidence
+		if err := json.Unmarshal([]byte(doneEvidenceJSON.String), &evidence); err == nil {
+			task.DoneEvidence = evidence
+		}
 	}
 	if doneAt.Valid {
 		parsedDoneAt, err := parseTime(doneAt.String)

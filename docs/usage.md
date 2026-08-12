@@ -245,6 +245,24 @@ gaps or duplicates. `--follow` streams new events as server-sent events,
 printing one event JSON per line in machine modes. Use it instead of polling
 `board` when an agent needs to react to changes.
 
+`search QUERY` finds tasks by title/body: ranked full-text matches when the
+server binary is built with FTS5, substring matches otherwise.
+
+Completion evidence and audit:
+
+```sh
+flow task done TASK_ID [--resolution R] [--message TEXT] [--evidence type:value]
+flow audit completions [--resolution R] [--limit N]
+```
+
+`task done` accepts an optional substantive `--message` and repeatable typed
+`--evidence` entries (`commit:SHA`, `test:cmd`, `pr:URL`, `review:ref`,
+`note:text`). `flow complete --evidence ...` attaches the same evidence to the
+handoff artifact and auto-records the pinned HEAD as commit evidence. Evidence
+is stored with the task's done stamp and shown by `flow task show`. `flow audit
+completions` lists done tasks with their resolution, actor, message, and
+evidence — the tool for finding lazy closes.
+
 Final review aggregation may pause on a `review_scope_decision` when a valid
 blocking finding depends on an inferred, broad scope requirement. Use
 `task decide-review` to require the fix in this task, exclude it without

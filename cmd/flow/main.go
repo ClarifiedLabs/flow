@@ -163,6 +163,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runQuickstart(options.withConfig(args[1:]), stdout, stderr)
 	case "search":
 		return runSearch(options.withConfig(args[1:]), stdout, stderr)
+	case "audit":
+		return runAuditWithGlobalOptions(args[1:], options, stdout, stderr)
 	case "checks":
 		return runChecks(options.withConfig(args[1:]), stdout, stderr)
 	case "transitions":
@@ -1565,8 +1567,11 @@ func runTaskDone(args []string, stdout, stderr io.Writer) int {
 	apiFlags := addAPIFlags(flags)
 	var resolution string
 	var note string
+	var evidenceFlags stringSliceFlag
 	flags.StringVar(&resolution, "resolution", string(coordinator.ResolutionCompleted), "completed|rejected|abandoned|cancelled|failed")
 	flags.StringVar(&note, "note", "", "completion note")
+	flags.StringVar(&note, "message", "", "substantive resolution message (alias for --note)")
+	flags.Var(&evidenceFlags, "evidence", "typed completion evidence as type:value (repeatable); types: commit|test|pr|review|note")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -1574,12 +1579,16 @@ func runTaskDone(args []string, stdout, stderr io.Writer) int {
 	if flags.NArg() != 1 {
 		return machineUsage(stdout, stderr, mode, "task done", "task id is required")
 	}
+	evidence, err := parseEvidenceFlags(evidenceFlags.Values)
+	if err != nil {
+		return machineUsage(stdout, stderr, mode, "task done", err.Error())
+	}
 	client, err := newAPIClient(apiFlags)
 	if err != nil {
 		return machineError(stdout, stderr, mode, "task done", "create client", err)
 	}
 	client, taskRef := scopeClientForRef(client, flags.Arg(0))
-	task, err := client.ForceDone(taskRef, coordinator.DoneResolution(resolution), note)
+	task, err := client.ForceDoneWithEvidence(taskRef, coordinator.DoneResolution(resolution), note, evidence)
 	if err != nil {
 		return machineError(stdout, stderr, mode, "task done", "complete task", err)
 	}
@@ -1588,6 +1597,87 @@ func runTaskDone(args []string, stdout, stderr io.Writer) int {
 	}
 	printTaskLine(stdout, task)
 	return 0
+}
+
+// parseEvidenceFlags parses repeatable "type:value" evidence flags.
+func parseEvidenceFlags(values []string) ([]coordinator.Evidence, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	evidence := make([]coordinator.Evidence, 0, len(values))
+	for _, raw := range values {
+		typeName, value, found := strings.Cut(raw, ":")
+		if !found || strings.TrimSpace(value) == "" {
+			return nil, fmt.Errorf("invalid --evidence %q: want type:value (e.g. commit:abc123)", raw)
+		}
+		evidence = append(evidence, coordinator.Evidence{Type: coordinator.EvidenceType(typeName), Value: value})
+	}
+	return evidence, nil
+}
+
+// runAuditWithGlobalOptions routes `flow audit <subcommand>`, threading the
+// global output flags down like runTaskWithGlobalOptions does.
+func runAuditWithGlobalOptions(args []string, options globalOptions, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		return machineUsage(stdout, stderr, cliout.ModeHuman, "audit", "usage: flow audit completions [--resolution R] [--limit N]")
+	}
+	switch args[0] {
+	case "completions":
+		return runAuditCompletions(options.withConfig(args[1:]), stdout, stderr)
+	default:
+		return machineUsage(stdout, stderr, cliout.ModeHuman, "audit", "usage: flow audit completions [--resolution R] [--limit N]")
+	}
+}
+
+func runAuditCompletions(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("audit completions", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	var resolution string
+	var limit int
+	flags.StringVar(&resolution, "resolution", "", "filter by resolution: completed|merged|rejected|abandoned|cancelled|failed")
+	flags.IntVar(&limit, "limit", 100, "maximum completions")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	mode := apiFlags.outputMode()
+	if flags.NArg() != 0 {
+		return machineUsage(stdout, stderr, mode, "audit completions", "usage: flow audit completions [--resolution R] [--limit N]")
+	}
+	applySessionEnvironment(apiFlags, nil)
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		return machineError(stdout, stderr, mode, "audit completions", "create client", err)
+	}
+	tasks, err := client.ListCompletions(resolution, limit)
+	if err != nil {
+		return machineError(stdout, stderr, mode, "audit completions", "list completions", err)
+	}
+	if mode.Machine() {
+		return cliout.WriteData(stdout, mode, "audit completions", map[string]any{"completions": tasks})
+	}
+	for _, task := range tasks {
+		printCompletionLine(stdout, task)
+	}
+	return 0
+}
+
+func printCompletionLine(out io.Writer, task coordinator.Task) {
+	resolution := ""
+	if task.DoneResolution != nil {
+		resolution = string(*task.DoneResolution)
+	}
+	doneAt := ""
+	if task.DoneAt != nil {
+		doneAt = task.DoneAt.Format("2006-01-02T15:04:05Z")
+	}
+	fmt.Fprintf(out, "%s\t%s\t%s\t%s\tevidence=%d\t%s\n", task.ID, resolution, task.CreatedBy, doneAt, len(task.DoneEvidence), task.Title)
+	if task.DoneMessage != "" {
+		fmt.Fprintf(out, "  message: %s\n", task.DoneMessage)
+	}
+	for _, ev := range task.DoneEvidence {
+		fmt.Fprintf(out, "  evidence: %s: %s\n", ev.Type, ev.Value)
+	}
 }
 
 func runTaskReopen(args []string, stdout, stderr io.Writer) int {
@@ -3784,6 +3874,8 @@ func runComplete(args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&summaryFile, "summary-file", "", "Markdown summary file")
 	flags.StringVar(&outputFile, "output-file", "", "JSON artifact payload file")
 	flags.StringVar(&clientKey, "client-key", "", "idempotency key (default node run id)")
+	var evidenceFlags stringSliceFlag
+	flags.Var(&evidenceFlags, "evidence", "typed completion evidence as type:value (repeatable); types: commit|test|pr|review|note")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -3821,6 +3913,11 @@ func runComplete(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
+	evidence, err := parseEvidenceFlags(evidenceFlags.Values)
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 2
+	}
 	if coordinator.ArtifactKind(kind) == coordinator.ArtifactChange {
 		changeID := strings.TrimSpace(os.Getenv("FLOW_CHANGE_ID"))
 		if changeID == "" {
@@ -3857,7 +3954,17 @@ func runComplete(args []string, stdout, stderr io.Writer) int {
 		}
 		changePayload["change_id"] = changeID
 		changePayload["head_sha"] = headSHA
+		// The pinned HEAD is itself completion evidence.
+		evidence = append([]coordinator.Evidence{{Type: coordinator.EvidenceCommit, Value: headSHA}}, evidence...)
 		payload, _ = json.Marshal(changePayload)
+	}
+	if len(evidence) > 0 {
+		payloadMap := map[string]any{}
+		if len(payload) > 0 {
+			_ = json.Unmarshal(payload, &payloadMap)
+		}
+		payloadMap["evidence"] = evidence
+		payload, _ = json.Marshal(payloadMap)
 	}
 	if clientKey == "" {
 		clientKey = nodeRunID
@@ -4178,7 +4285,7 @@ func printUsage(out io.Writer) {
   flow task reset|reopen|retry|workflow TASK_ID
   flow task respond TASK_ID --node-run NODE_RUN_ID --review-wait REVIEW_WAIT_ID --outcome OUTCOME [--feedback TEXT]
   flow task budget TASK_ID --additional N
-  flow task done TASK_ID [--resolution RESOLUTION]
+  flow task done TASK_ID [--resolution RESOLUTION] [--message TEXT] [--evidence type:value]
 	  flow feature create --title TITLE [--body BODY] [--parent ITEM_ID]
   flow feature list [--status open|landed|archived|all]
 	  flow feature show|edit|rebase|land|archive|start FEATURE_ID
@@ -4190,6 +4297,7 @@ func printUsage(out io.Writer) {
   flow wait TASK_ID... [--until done|blocked|scheduled|in_progress] [--any|--all] [--timeout 30s] [--poll-interval 2s]
   flow events [--since N] [--limit N] [--kind K] [--task ID] [--actor A] [--follow|--tail]
   flow search QUERY [--limit N]
+  flow audit completions [--resolution R] [--limit N]
   flow quickstart
   flow checks TASK_ID
   flow transitions TASK_ID
@@ -4207,7 +4315,7 @@ func printUsage(out io.Writer) {
   flow thread reply|claim|certify|reopen
   flow status MESSAGE
   flow ask QUESTION
-  flow complete [--summary-file PATH] [--output-file PATH]
+  flow complete [--summary-file PATH] [--output-file PATH] [--evidence type:value]
   flow submit --summary-file PATH [--output-file PATH]
   flow reconcile
   flow --version

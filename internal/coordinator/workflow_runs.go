@@ -2130,10 +2130,20 @@ func (s *WorkflowRunService) SetEventLog(log *EventLogService) {
 }
 
 func (s *WorkflowRunService) ForceDone(ctx context.Context, taskID string, resolution DoneResolution, note string, actor Actor) (Task, error) {
+	return s.ForceDoneDetailed(ctx, taskID, resolution, note, nil, actor)
+}
+
+// ForceDoneDetailed is ForceDone plus a substantive resolution message and
+// typed completion evidence, persisted with the done stamp.
+func (s *WorkflowRunService) ForceDoneDetailed(ctx context.Context, taskID string, resolution DoneResolution, note string, evidence []Evidence, actor Actor) (Task, error) {
 	if err := s.requireTaskWorkItem(ctx, taskID); err != nil {
 		return Task{}, err
 	}
-	if err := validateDoneResolution(resolution); err != nil {
+	if err := ValidateDoneResolution(resolution); err != nil {
+		return Task{}, err
+	}
+	evidence, err := validateEvidence(evidence)
+	if err != nil {
 		return Task{}, err
 	}
 	if resolution == ResolutionMerged {
@@ -2208,9 +2218,17 @@ UPDATE workflow_runs SET state = ?, completed_at = ?, completion_source = 'owner
 			return Task{}, err
 		}
 	}
+	evidenceJSON := ""
+	if len(evidence) > 0 {
+		encoded, err := json.Marshal(evidence)
+		if err != nil {
+			return Task{}, fmt.Errorf("encode evidence: %w", err)
+		}
+		evidenceJSON = string(encoded)
+	}
 	if _, err := tx.ExecContext(ctx, `
-UPDATE tasks SET lifecycle_state = ?, done_resolution = ?, done_at = ?, updated_at = ? WHERE id = ?`,
-		string(LifecycleDone), string(resolution), sqlitex.FormatTime(now), sqlitex.FormatTime(now), taskID); err != nil {
+UPDATE tasks SET lifecycle_state = ?, done_resolution = ?, done_message = ?, done_evidence_json = ?, done_at = ?, updated_at = ? WHERE id = ?`,
+		string(LifecycleDone), string(resolution), strings.TrimSpace(note), evidenceJSON, sqlitex.FormatTime(now), sqlitex.FormatTime(now), taskID); err != nil {
 		return Task{}, err
 	}
 	// Force-done rebase tasks never finalized: close the running rebase row so
@@ -2240,7 +2258,7 @@ WHERE task_id = ? AND state = 'running'`, rebaseState, sqlitex.FormatTime(now), 
 		Kind:    EventTaskDone,
 		Actor:   string(actor),
 		TaskID:  taskID,
-		Payload: eventPayload(map[string]any{"resolution": string(resolution), "note": strings.TrimSpace(note)}),
+		Payload: eventPayload(map[string]any{"resolution": string(resolution), "note": strings.TrimSpace(note), "evidence_count": len(evidence)}),
 	}); err != nil {
 		slog.Warn("event log append failed", "error", err)
 	}
@@ -2474,7 +2492,7 @@ func (s *WorkflowRunService) completeTerminalTx(ctx context.Context, tx workflow
 		return fmt.Errorf("terminal node %q has no terminal config", node.Key)
 	}
 	resolution := node.Config.Terminal.Resolution
-	if err := validateDoneResolution(resolution); err != nil {
+	if err := ValidateDoneResolution(resolution); err != nil {
 		return err
 	}
 	if resolution == ResolutionMerged {

@@ -5,18 +5,20 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
 
 // expectedProjectMigrations is the migration list a fresh project database
-// should carry under the current build tags (FTS5 adds 0005_task_fts).
+// should carry under the current build tags. 0006_completion_evidence applies
+// in both modes; the tag-gated 0005_task_fts sorts before it, so the tail is
+// 0005 with FTS5 and 0006 without.
 func expectedProjectMigrations() []string {
-	base := []string{"0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log"}
-	for _, f := range filterOptionalMigrations([]string{"0005_task_fts"}) {
-		base = append(base, f)
-	}
-	return base
+	migrations := []string{"0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log", "0006_completion_evidence"}
+	migrations = append(migrations, filterOptionalMigrations([]string{"0005_task_fts"})...)
+	sort.Strings(migrations)
+	return migrations
 }
 
 func expectedSchemaVersion() string {

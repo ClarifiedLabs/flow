@@ -20,7 +20,8 @@
 4. Finalize with three actions:
    - `git commit` your work with a conventional-commit message.
    - Create `.flow/session/` and write a concise Markdown summary of the change and verification results to `.flow/session/SUMMARY.md`.
-   - Run `flow complete --summary-file .flow/session/SUMMARY.md`. It pushes the run-specific branch, creates the typed change artifact, and advances the active workflow node.
+   - Run `flow complete --summary-file .flow/session/SUMMARY.md [--evidence type:value]`. It pushes the run-specific branch, creates the typed change artifact, and advances the active workflow node.
+   - Attach typed evidence for what proves the change works: `--evidence test:"go test ./... green"`, `--evidence pr:<url>`, `--evidence note:"<what you verified>"` (repeatable). The change's pinned HEAD is recorded automatically as commit evidence.
    - A useful summary looks like:
 
      ```

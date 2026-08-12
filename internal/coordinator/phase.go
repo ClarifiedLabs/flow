@@ -78,12 +78,12 @@ func IsValidLifecycleTarget(target string) bool {
 	if strings.Contains(normalized, ":") {
 		parts := strings.SplitN(normalized, ":", 2)
 		if strings.TrimSpace(parts[0]) == "done" && strings.TrimSpace(parts[1]) != "" {
-			return validateDoneResolution(DoneResolution(strings.TrimSpace(parts[1]))) == nil
+			return ValidateDoneResolution(DoneResolution(strings.TrimSpace(parts[1]))) == nil
 		}
 		return false
 	}
 	// Bare done resolutions are also valid.
-	if validateDoneResolution(DoneResolution(normalized)) == nil {
+	if ValidateDoneResolution(DoneResolution(normalized)) == nil {
 		return true
 	}
 	for _, candidate := range AllLifecycleTransitionTargets {
@@ -96,7 +96,7 @@ func IsValidLifecycleTarget(target string) bool {
 
 // IsValidDoneResolution reports whether resolution is a known DoneResolution.
 func IsValidDoneResolution(resolution DoneResolution) bool {
-	return validateDoneResolution(resolution) == nil
+	return ValidateDoneResolution(resolution) == nil
 }
 
 // PhaseForTask derives the lifecycle phase for an already-loaded task,

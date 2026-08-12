@@ -60,6 +60,51 @@ const (
 	ResolutionFailed    DoneResolution = "failed"
 )
 
+// EvidenceType classifies one completion-evidence entry.
+type EvidenceType string
+
+const (
+	EvidenceCommit  EvidenceType = "commit"
+	EvidenceTest    EvidenceType = "test"
+	EvidencePR      EvidenceType = "pr"
+	EvidenceReview  EvidenceType = "review"
+	EvidenceNote    EvidenceType = "note"
+)
+
+// Evidence is one typed artifact attesting a task's completion (a commit SHA,
+// a test run, a PR URL, a review reference, or a free-text note).
+type Evidence struct {
+	Type  EvidenceType `json:"type"`
+	Value string       `json:"value"`
+}
+
+// maxEvidenceEntries caps a task's evidence list.
+const maxEvidenceEntries = 20
+
+// validateEvidence enforces the type allowlist, non-empty values, and the
+// list cap. It returns the normalized list (types lowercased, values trimmed).
+func validateEvidence(evidence []Evidence) ([]Evidence, error) {
+	if len(evidence) > maxEvidenceEntries {
+		return nil, fmt.Errorf("evidence list is capped at %d entries", maxEvidenceEntries)
+	}
+	normalized := make([]Evidence, 0, len(evidence))
+	for _, entry := range evidence {
+		typeName := EvidenceType(strings.ToLower(strings.TrimSpace(string(entry.Type))))
+		switch typeName {
+		case EvidenceCommit, EvidenceTest, EvidencePR, EvidenceReview, EvidenceNote:
+		default:
+			return nil, fmt.Errorf("invalid evidence type %q: want commit|test|pr|review|note", entry.Type)
+		}
+		value := strings.TrimSpace(entry.Value)
+		if value == "" {
+			return nil, fmt.Errorf("evidence %q has an empty value", typeName)
+		}
+		normalized = append(normalized, Evidence{Type: typeName, Value: value})
+	}
+	return normalized, nil
+}
+
+
 type AgentNodeConfig struct {
 	AgentDefID string        `json:"agent_def_id"`
 	Workspace  WorkspaceMode `json:"workspace"`
@@ -706,7 +751,7 @@ func normalizeNodeConfig(key string, kind NodeKind, config FlowNodeConfig) ([]st
 		}
 	case NodeTerminal:
 		if config.Terminal != nil {
-			if err := validateDoneResolution(config.Terminal.Resolution); err != nil {
+			if err := ValidateDoneResolution(config.Terminal.Resolution); err != nil {
 				return nil, FlowNodeConfig{}, fmt.Errorf("terminal node %q: %w", key, err)
 			}
 			return nil, config, nil
@@ -891,7 +936,7 @@ func validateMergedTerminalPaths(start string, nodes map[string]FlowNodeInput, e
 	return nil
 }
 
-func validateDoneResolution(resolution DoneResolution) error {
+func ValidateDoneResolution(resolution DoneResolution) error {
 	switch resolution {
 	case ResolutionCompleted, ResolutionMerged, ResolutionRejected, ResolutionAbandoned, ResolutionCancelled, ResolutionFailed:
 		return nil

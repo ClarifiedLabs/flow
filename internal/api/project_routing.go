@@ -316,6 +316,14 @@ func (s *Server) handleProjectScopedPath(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		ps.handleBoard(w, r, principal)
+	case sub == "completions":
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		if !requireScope(w, principal, "completions read requires owner, session, or console token", coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
+			return
+		}
+		ps.handleCompletions(w, r)
 	case sub == "search":
 		if !requireMethod(w, r, http.MethodGet) {
 			return

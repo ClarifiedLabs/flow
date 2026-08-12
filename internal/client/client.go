@@ -714,12 +714,40 @@ func (c *Client) ResetWorkflow(id string) (coordinator.WorkflowRun, error) {
 }
 
 func (c *Client) ForceDone(id string, resolution coordinator.DoneResolution, note string) (coordinator.Task, error) {
+	return c.ForceDoneWithEvidence(id, resolution, note, nil)
+}
+
+// ForceDoneWithEvidence completes a task with a resolution, a substantive
+// message, and optional typed completion evidence.
+func (c *Client) ForceDoneWithEvidence(id string, resolution coordinator.DoneResolution, note string, evidence []coordinator.Evidence) (coordinator.Task, error) {
 	var response taskResponse
-	request := map[string]string{"resolution": string(resolution), "note": note}
+	request := map[string]any{"resolution": string(resolution), "note": note}
+	if len(evidence) > 0 {
+		request["evidence"] = evidence
+	}
 	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(id))+"/done", request, nil, &response); err != nil {
 		return coordinator.Task{}, err
 	}
 	return response.Task, nil
+}
+
+// ListCompletions returns done tasks with resolution/message/evidence, newest
+// first, for `flow audit completions`. resolution filters (empty = any).
+func (c *Client) ListCompletions(resolution string, limit int) ([]coordinator.Task, error) {
+	var response struct {
+		Tasks []coordinator.Task `json:"tasks"`
+	}
+	query := url.Values{}
+	if resolution != "" {
+		query.Set("resolution", resolution)
+	}
+	if limit > 0 {
+		query.Set("limit", strconv.Itoa(limit))
+	}
+	if err := c.do(http.MethodGet, c.projectPath("/completions"), nil, query, &response); err != nil {
+		return nil, err
+	}
+	return response.Tasks, nil
 }
 
 func (c *Client) ReopenTask(id string) (coordinator.Task, error) {
