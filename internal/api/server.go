@@ -116,6 +116,7 @@ type projectServer struct {
 	checkConfigs      *coordinator.CheckConfigService
 	merges            *coordinator.MergeService
 	gitEvents         *coordinator.GitEventService
+	eventLog          *coordinator.EventLogService
 	history           *coordinator.HistoryCaptureService
 	workers           *worker.Service
 }
@@ -153,6 +154,7 @@ func (s *Server) forBundle(bundle *ProjectBundle) *projectServer {
 		checkConfigs:      bundle.CheckConfigs,
 		merges:            bundle.Merges,
 		gitEvents:         bundle.GitEvents,
+		eventLog:          bundle.EventLog,
 		history:           bundle.HistoryCaptures,
 		workers:           bundle.Queue,
 	}
@@ -425,6 +427,27 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, principal coor
 			return
 		}
 		s.handleBoardAggregate(w, r, principal)
+		return
+	}
+
+	if r.URL.Path == "/v2/events" || r.URL.Path == "/v2/events/stream" {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		if !scopeAllowed(principal, coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
+			writeError(w, http.StatusForbidden, "forbidden", "event read requires owner, session, or console token")
+			return
+		}
+		ps, err := s.implicitProjectServer(principal)
+		if err != nil {
+			writeProjectResolveError(w, err)
+			return
+		}
+		if r.URL.Path == "/v2/events/stream" {
+			ps.handleEventStream(w, r)
+			return
+		}
+		ps.handleEvents(w, r)
 		return
 	}
 

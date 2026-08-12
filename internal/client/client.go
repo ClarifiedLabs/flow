@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -901,6 +902,70 @@ func (c *Client) CreateWebBootstrap() (WebBootstrapResult, error) {
 		LoginPath: response.LoginPath,
 		ExpiresAt: response.ExpiresAt,
 	}, nil
+}
+
+// ListEvents returns one page of the project event log with seq > since,
+// plus the cursor to pass for the following page.
+func (c *Client) ListEvents(since int64, limit int) ([]coordinator.Event, int64, error) {
+	var response struct {
+		Events    []coordinator.Event `json:"events"`
+		NextSince int64               `json:"next_since"`
+	}
+	query := url.Values{}
+	query.Set("since", strconv.FormatInt(since, 10))
+	if limit > 0 {
+		query.Set("limit", strconv.Itoa(limit))
+	}
+	if err := c.do(http.MethodGet, c.projectPath("/events"), nil, query, &response); err != nil {
+		return nil, 0, err
+	}
+	return response.Events, response.NextSince, nil
+}
+
+// StreamEvents tails the project event log over server-sent events, invoking
+// onEvent for each event with seq > since. It returns when ctx is canceled,
+// when onEvent fails, or when the server closes the stream.
+func (c *Client) StreamEvents(ctx context.Context, since int64, onEvent func(coordinator.Event) error) error {
+	endpoint := c.baseURL + c.projectPath("/events/stream") + "?since=" + strconv.FormatInt(since, 10)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set(protocolHeader, contract.ProtocolVersion)
+	request.Header.Set("Accept", "text/event-stream")
+	if c.token != "" {
+		request.Header.Set("Authorization", authScheme+c.token)
+	}
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if err := statusError(response); err != nil {
+		return err
+	}
+	scanner := bufio.NewScanner(response.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var event coordinator.Event
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
+			return fmt.Errorf("decode event stream frame: %w", err)
+		}
+		if err := onEvent(event); err != nil {
+			return err
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}
+	return nil
 }
 
 // Board returns one project's board; the client must be project-scoped (or

@@ -316,6 +316,18 @@ func (s *Server) handleProjectScopedPath(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		ps.handleBoard(w, r, principal)
+	case sub == "events" || sub == "events/stream":
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		if !requireScope(w, principal, "event read requires owner, session, or console token", coordinator.TokenScopeOwner, coordinator.TokenScopeSession, coordinator.TokenScopeConsole) {
+			return
+		}
+		if sub == "events/stream" {
+			ps.handleEventStream(w, r)
+			return
+		}
+		ps.handleEvents(w, r)
 	case sub == "git/events":
 		if !requireMethod(w, r, http.MethodPost) {
 			return

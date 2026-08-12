@@ -158,6 +158,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runNextTask(options.withConfig(args[1:]), stdout, stderr)
 	case "wait":
 		return runWait(options.withConfig(args[1:]), stdout, stderr)
+	case "events":
+		return runEvents(options.withConfig(args[1:]), stdout, stderr)
 	case "checks":
 		return runChecks(options.withConfig(args[1:]), stdout, stderr)
 	case "transitions":
@@ -1797,6 +1799,76 @@ func runTaskRelations(args []string, stdout, stderr io.Writer) int {
 
 	printTaskRelations(stdout, taskRef, relations)
 	return 0
+}
+
+// runEvents implements `flow events`: one page of the project event log, or
+// a live tail with --follow (server-sent events). Machine output is the page
+// plus a resumable next_since cursor; --follow emits one event JSON per line.
+func runEvents(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("events", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	var since int64
+	var limit int
+	var follow bool
+	flags.Int64Var(&since, "since", 0, "only events with seq greater than N")
+	flags.IntVar(&limit, "limit", 100, "maximum events per fetch")
+	flags.BoolVar(&follow, "follow", false, "stream new events as they happen")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	mode := apiFlags.outputMode()
+	if flags.NArg() != 0 {
+		return machineUsage(stdout, stderr, mode, "events", "usage: flow events [--since N] [--limit N] [--follow]")
+	}
+	applySessionEnvironment(apiFlags, nil)
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		return machineError(stdout, stderr, mode, "events", "create client", err)
+	}
+	if follow {
+		err := client.StreamEvents(context.Background(), since, func(event coordinator.Event) error {
+			if mode.Machine() {
+				encoded, err := json.Marshal(event)
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintln(stdout, string(encoded))
+				return err
+			}
+			printEventLines(stdout, []coordinator.Event{event})
+			return nil
+		})
+		if err != nil {
+			return machineError(stdout, stderr, mode, "events", "stream events", err)
+		}
+		return 0
+	}
+	events, next, err := client.ListEvents(since, limit)
+	if err != nil {
+		return machineError(stdout, stderr, mode, "events", "list events", err)
+	}
+	if mode.Machine() {
+		return cliout.WriteData(stdout, mode, "events", map[string]any{"events": events, "next_since": next})
+	}
+	printEventLines(stdout, events)
+	return 0
+}
+
+func printEventLines(stdout io.Writer, events []coordinator.Event) {
+	for _, event := range events {
+		payload := "{}"
+		if len(event.Payload) > 0 {
+			if encoded, err := json.Marshal(event.Payload); err == nil {
+				payload = string(encoded)
+			}
+		}
+		task := event.TaskID
+		if task == "" {
+			task = "-"
+		}
+		fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\n", event.Seq, event.Kind, task, payload)
+	}
 }
 
 func runBoard(args []string, stdout, stderr io.Writer) int {
@@ -4041,6 +4113,7 @@ func printUsage(out io.Writer) {
   flow ready [--tag TAG]
   flow next [--tag TAG]
   flow wait TASK_ID... [--until done|blocked|scheduled|in_progress] [--any|--all] [--timeout 30s] [--poll-interval 2s]
+  flow events [--since N] [--limit N] [--follow]
   flow checks TASK_ID
   flow transitions TASK_ID
   flow workers
