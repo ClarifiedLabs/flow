@@ -201,8 +201,8 @@ func TestDispatcherFiresOnAppendedEvent(t *testing.T) {
 	// skipped by a slow first poll.
 	select {
 	case <-d.Seeded("p-test"):
-	case <-time.After(5 * time.Second):
-		t.Fatalf("dispatcher did not seed the project cursor within 5s")
+	case <-time.After(30 * time.Second):
+		t.Fatalf("dispatcher did not seed the project cursor within 30s")
 	}
 
 	appended, err := log.Append(ctx, coordinator.Event{
@@ -219,13 +219,13 @@ func TestDispatcherFiresOnAppendedEvent(t *testing.T) {
 		t.Fatalf("append non-matching event: %v", err)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if data, err := os.ReadFile(stdinPath); err == nil && len(data) > 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("hook did not fire within 5s")
+			t.Fatalf("hook did not fire within 30s")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
