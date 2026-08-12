@@ -29,7 +29,7 @@ export * from "./task.js";
 export * from "./poller.js";
 export * from "./elements/flows-view.js";
 export * from "./elements/flow-editor-view.js";
-export * from "./elements/tasks.js";
+export * from "./elements/tasks-view.js";
 export * from "./work-items-route.js";
 export * from "./work-item-model.js";
 export * from "./work-nav.js";

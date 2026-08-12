@@ -438,14 +438,21 @@ that exact lease.
 `flow-server` serves the browser UI directly; there is no separate frontend
 server. The implementation lives under `internal/web`:
 
-- `internal/web/assets/*.js`: browser-native ES modules; routes, models and
-  shared helpers.
-- `internal/web/assets/elements/*.js`: the custom elements the UI is built from.
-  Each renders from its own `data` property and listens on itself once, so
-  polling updates a view in place instead of rebuilding it.
+- `internal/web/assets/app.js`: the entry module and composition root
+  (`FlowApp` wiring, shell, routing, polling); collaborators in
+  `internal/web/assets/app/` (`routes.js`, `settle.js`, `sidebar.js`,
+  `caches.js`).
+- `internal/web/assets/*-route.js`: thin routes that fetch and mount an element.
+- `internal/web/assets/elements/*.js`: the custom elements the UI is built from,
+  plus their view helpers. Each renders from its own `data` property and listens
+  on itself once, so polling updates a view in place instead of rebuilding it.
+- `internal/web/assets/models/`: pure projections (task run/review/relations,
+  lifecycle options, now card, harness catalog/selection).
+- `internal/web/assets/actions/`: the delegated action table (busy registry,
+  dispatcher, per-domain handlers).
 - `internal/web/assets/index.html`: embedded shell page.
-- `internal/web/src/*.module.css`: one stylesheet per component, plus the shared
-  token and base sheets.
+- `internal/web/src/*.module.css`: one stylesheet per component, plus the
+  flow-app chrome sheets split by domain.
 - `internal/web/webassetbuild`: small Go step that scopes each stylesheet to its
   own element and concatenates them, used by embedded asset serving and tests.
 

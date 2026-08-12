@@ -5,7 +5,7 @@
 
 import { apiGet, workItemsAPIBase } from "./api.js";
 import { mount } from "./elements/base.js";
-import { tasksQueryView } from "./elements/tasks.js";
+import { tasksQueryView } from "./elements/tasks-view.js";
 import { value } from "./normalize.js";
 import { writeWorkProject } from "./storage.js";
 import { buildWorkItemIndex } from "./work-item-model.js";

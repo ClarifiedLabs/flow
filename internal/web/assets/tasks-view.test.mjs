@@ -1,14 +1,9 @@
-// tasks-view.js unit tests. The view's logic lives in exported functions that
+// elements/tasks-view.js unit tests. The view's logic lives in exported functions that
 // take plain app/view stand-ins, so these run without the DOM shim: only a
 // cookie-less document and a fetch stub are needed for the bulk fan-out.
 
 import test from "node:test";
 import assert from "node:assert/strict";
-
-// elements/tasks.js defines a custom-element class at module scope, which
-// needs a global HTMLElement; a bare constructor is enough for the pure
-// functions these tests exercise.
-globalThis.HTMLElement = class {};
 
 const {
   TASKS_STATE_FILTERS,
@@ -25,7 +20,7 @@ const {
   taskBulkPathView,
   applyTasksBulkAction,
   toggleTasksState,
-} = await import("./elements/tasks.js");
+} = await import("./elements/tasks-view.js");
 const { buildWorkItemIndex } = await import("./work-item-model.js");
 
 function fakeApp(overrides = {}) {
