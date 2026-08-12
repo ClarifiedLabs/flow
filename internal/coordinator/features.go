@@ -164,6 +164,10 @@ type FeatureService struct {
 	project Project
 	now     func() time.Time
 
+	// eventLog receives post-commit feature lifecycle events; nil disables
+	// emission (wired through the project bundle).
+	eventLog *EventLogService
+
 	// Runs schedules the system rebase task a conflicted rebase creates. It is
 	// wired through the project bundle; a nil Runs leaves the task unscheduled
 	// (tests schedule it explicitly).
@@ -492,6 +496,11 @@ INSERT INTO features (
 	if err := tx.Commit(ctx); err != nil {
 		return Feature{}, err
 	}
+	appendEventLog(ctx, s.eventLog, Event{
+		Kind:    EventFeatureCreated,
+		Actor:   storedCreatedBy,
+		Payload: eventPayload(map[string]any{"feature_id": id, "title": input.Title}),
+	})
 	return s.Get(ctx, id)
 }
 
@@ -776,6 +785,11 @@ WHERE id = ? AND status = 'open'`,
 	if err := tx.Commit(ctx); err != nil {
 		return Feature{}, err
 	}
+	appendEventLog(ctx, s.eventLog, Event{
+		Kind:    EventFeatureLanded,
+		Actor:   string(actor),
+		Payload: eventPayload(map[string]any{"feature_id": feature.ID, "land_sha": landSHA, "target_branch": target.Branch}),
+	})
 	return s.Get(ctx, feature.ID)
 }
 
@@ -813,7 +827,16 @@ UPDATE features SET status = ?, updated_at = ? WHERE id = ? AND status != ?`,
 	if err := tx.Commit(ctx); err != nil {
 		return Feature{}, err
 	}
+	appendEventLog(ctx, s.eventLog, Event{
+		Kind:    EventFeatureArchived,
+		Payload: eventPayload(map[string]any{"feature_id": feature.ID, "title": feature.Title}),
+	})
 	return s.Get(ctx, feature.ID)
+}
+
+// SetEventLog wires the project event log; a nil log disables emission.
+func (s *FeatureService) SetEventLog(log *EventLogService) {
+	s.eventLog = log
 }
 
 // Tasks returns the feature's assigned tasks in creation order.

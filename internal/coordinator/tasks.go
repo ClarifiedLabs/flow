@@ -278,6 +278,12 @@ type TaskService struct {
 	db        *sql.DB
 	projectID string
 	now       func() time.Time
+	eventLog  *EventLogService
+}
+
+// SetEventLog wires the project event log; a nil log disables emission.
+func (s *TaskService) SetEventLog(log *EventLogService) {
+	s.eventLog = log
 }
 
 func NewTaskService(database *sql.DB, projectID string) *TaskService {
@@ -489,6 +495,12 @@ VALUES (?, ?, ?, ?)`,
 	if err := tx.Commit(ctx); err != nil {
 		return Task{}, fmt.Errorf("commit create task: %w", err)
 	}
+	appendEventLog(ctx, s.eventLog, Event{
+		Kind:    EventTaskCreated,
+		Actor:   string(taskInput.CreatedBy),
+		TaskID:  id,
+		Payload: eventPayload(map[string]any{"title": taskInput.Title}),
+	})
 
 	return s.GetTask(ctx, id)
 }
@@ -880,7 +892,16 @@ WHERE id = ?`,
 		return Task{}, fmt.Errorf("edit task: %w", err)
 	}
 
-	return s.GetTask(ctx, id)
+	edited, err := s.GetTask(ctx, id)
+	if err != nil {
+		return Task{}, err
+	}
+	appendEventLog(ctx, s.eventLog, Event{
+		Kind:    EventTaskEdited,
+		TaskID:  id,
+		Payload: eventPayload(map[string]any{"title": edited.Title}),
+	})
+	return edited, nil
 }
 
 func (s *TaskService) ScheduleTask(ctx context.Context, id string, state ScheduleState) (Task, error) {
@@ -1095,6 +1116,12 @@ func (s *TaskService) LinkTasks(ctx context.Context, sourceTaskID, targetTaskID 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit link tasks: %w", err)
 	}
+	appendEventLog(ctx, s.eventLog, Event{
+		Kind:    EventRelationLinked,
+		Actor:   string(actor),
+		TaskID:  targetTaskID,
+		Payload: eventPayload(map[string]any{"source": sourceTaskID, "target": targetTaskID, "relation": string(kind)}),
+	})
 
 	return nil
 }
@@ -1222,7 +1249,15 @@ WHERE source_item_id = ? AND target_item_id = ? AND kind = ?`,
 	if err := reconcileEpicAncestorsTx(ctx, tx, []string{sourceTaskID, targetTaskID}, s.now().UTC()); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit unlink tasks: %w", err)
+	}
+	appendEventLog(ctx, s.eventLog, Event{
+		Kind:    EventRelationUnlinked,
+		TaskID:  targetTaskID,
+		Payload: eventPayload(map[string]any{"source": sourceTaskID, "target": targetTaskID, "relation": string(kind)}),
+	})
+	return nil
 }
 
 func (s *TaskService) RelationsForTask(ctx context.Context, taskID string) ([]TaskRelation, error) {

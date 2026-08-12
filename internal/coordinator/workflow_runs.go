@@ -206,6 +206,10 @@ type WorkflowRunService struct {
 	reviewLocksMu sync.Mutex
 	reviewLocks   map[string]*reviewLockEntry
 
+	// eventLog receives post-commit lifecycle events (done/reopen/reset);
+	// nil disables emission (wired through the project bundle).
+	eventLog *EventLogService
+
 	// reviewLockGate is a test seam: when set, RespondReview invokes it just
 	// before taking the per-task review lock. Race tests use it to hold a
 	// stale response at the pre-lock point while a concurrent decision
@@ -2108,7 +2112,18 @@ UPDATE tasks SET lifecycle_state = NULL, done_resolution = NULL, done_at = NULL,
 	if err := tx.Commit(); err != nil {
 		return WorkflowRun{}, err
 	}
+	appendEventLog(ctx, s.eventLog, Event{
+		Kind:   EventTaskReset,
+		Actor:  string(actor),
+		TaskID: taskID,
+		RunID:  run.ID,
+	})
 	return s.Get(ctx, run.ID)
+}
+
+// SetEventLog wires the project event log; a nil log disables emission.
+func (s *WorkflowRunService) SetEventLog(log *EventLogService) {
+	s.eventLog = log
 }
 
 func (s *WorkflowRunService) ForceDone(ctx context.Context, taskID string, resolution DoneResolution, note string, actor Actor) (Task, error) {
@@ -2221,6 +2236,12 @@ WHERE task_id = ? AND state = 'running'`, rebaseState, sqlitex.FormatTime(now), 
 	if err := tx.Commit(); err != nil {
 		return Task{}, err
 	}
+	appendEventLog(ctx, s.eventLog, Event{
+		Kind:    EventTaskDone,
+		Actor:   string(actor),
+		TaskID:  taskID,
+		Payload: eventPayload(map[string]any{"resolution": string(resolution), "note": strings.TrimSpace(note)}),
+	})
 	return s.tasks.GetTask(ctx, taskID)
 }
 
@@ -2293,6 +2314,12 @@ WHERE id = ? AND lifecycle_state = ?`, sqlitex.FormatTime(now), taskID, string(L
 	if err := tx.Commit(); err != nil {
 		return Task{}, err
 	}
+	appendEventLog(ctx, s.eventLog, Event{
+		Kind:    EventTaskReopened,
+		Actor:   string(actor),
+		TaskID:  taskID,
+		Payload: eventPayload(map[string]any{"previous_resolution": previousResolution}),
+	})
 	return s.tasks.GetTask(ctx, taskID)
 }
 

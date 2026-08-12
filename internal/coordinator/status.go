@@ -51,8 +51,14 @@ type WriteStatusInput struct {
 }
 
 type StatusService struct {
-	db  *sql.DB
-	now func() time.Time
+	db       *sql.DB
+	now      func() time.Time
+	eventLog *EventLogService
+}
+
+// SetEventLog wires the project event log; a nil log disables emission.
+func (s *StatusService) SetEventLog(log *EventLogService) {
+	s.eventLog = log
 }
 
 func NewStatusService(database *sql.DB) *StatusService {
@@ -112,7 +118,19 @@ INSERT INTO status_log (
 		return StatusLogEntry{}, fmt.Errorf("read status id: %w", err)
 	}
 
-	return s.Get(ctx, id)
+	entry, err := s.Get(ctx, id)
+	if err != nil {
+		return StatusLogEntry{}, err
+	}
+	appendEventLog(ctx, s.eventLog, Event{
+		Kind:      EventSessionStatus,
+		Actor:     input.Actor,
+		TaskID:    input.TaskID,
+		SessionID: input.SessionID,
+		ChangeID:  input.ChangeID,
+		Payload:   eventPayload(map[string]any{"kind": input.Kind, "message": input.Message, "status_log_id": id}),
+	})
+	return entry, nil
 }
 
 func (s *StatusService) WriteSessionStatus(ctx context.Context, sessionID string, message string, actor string, kind string) (StatusLogEntry, error) {

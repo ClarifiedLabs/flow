@@ -69,6 +69,12 @@ type EpicService struct {
 	projectID string
 	items     *WorkItemService
 	now       func() time.Time
+	eventLog  *EventLogService
+}
+
+// SetEventLog wires the project event log; a nil log disables emission.
+func (s *EpicService) SetEventLog(log *EventLogService) {
+	s.eventLog = log
 }
 
 func NewEpicService(database *sql.DB, projectID string, items *WorkItemService) *EpicService {
@@ -293,6 +299,11 @@ UPDATE epics SET status = 'completed', completed_automatically = 0,
 	if err := tx.Commit(ctx); err != nil {
 		return Epic{}, err
 	}
+	appendEventLog(ctx, s.eventLog, Event{
+		Kind:    EventEpicCompleted,
+		Actor:   string(actor),
+		Payload: eventPayload(map[string]any{"epic_id": epic.ID, "title": epic.Title}),
+	})
 	return s.Get(ctx, epic.ID)
 }
 
@@ -334,6 +345,11 @@ UPDATE epics SET status = 'open', completed_automatically = 0,
 	if err := tx.Commit(ctx); err != nil {
 		return Epic{}, err
 	}
+	appendEventLog(ctx, s.eventLog, Event{
+		Kind:    EventEpicReopened,
+		Actor:   string(actor),
+		Payload: eventPayload(map[string]any{"epic_id": epic.ID, "title": epic.Title}),
+	})
 	return s.Get(ctx, epic.ID)
 }
 
@@ -372,6 +388,11 @@ UPDATE epics SET status = 'archived', completed_automatically = 0,
 	if err := tx.Commit(ctx); err != nil {
 		return Epic{}, err
 	}
+	appendEventLog(ctx, s.eventLog, Event{
+		Kind:    EventEpicArchived,
+		Actor:   string(actor),
+		Payload: eventPayload(map[string]any{"epic_id": epic.ID, "title": epic.Title}),
+	})
 	return s.Get(ctx, epic.ID)
 }
 

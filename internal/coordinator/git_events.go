@@ -38,8 +38,14 @@ type RecordGitEventResult struct {
 }
 
 type GitEventService struct {
-	db  *sql.DB
-	now func() time.Time
+	db       *sql.DB
+	now      func() time.Time
+	eventLog *EventLogService
+}
+
+// SetEventLog wires the project event log; a nil log disables emission.
+func (s *GitEventService) SetEventLog(log *EventLogService) {
+	s.eventLog = log
 }
 
 func NewGitEventService(database *sql.DB) *GitEventService {
@@ -87,6 +93,16 @@ INSERT OR IGNORE INTO git_events (
 	stored, err := s.GetByHash(ctx, eventHash)
 	if err != nil {
 		return RecordGitEventResult{}, err
+	}
+	if inserted {
+		appendEventLog(ctx, s.eventLog, Event{
+			Kind:  EventGitPush,
+			Actor: event.Actor,
+			Payload: eventPayload(map[string]any{
+				"ref": event.Ref, "old_sha": event.OldSHA, "new_sha": event.NewSHA,
+				"source": string(event.Source), "event_hash": eventHash,
+			}),
+		})
 	}
 
 	return RecordGitEventResult{Event: stored, Inserted: inserted}, nil

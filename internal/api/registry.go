@@ -45,6 +45,7 @@ type ProjectBundle struct {
 	CheckConfigs      *coordinator.CheckConfigService
 	Merges            *coordinator.MergeService
 	GitEvents         *coordinator.GitEventService
+	EventLog          *coordinator.EventLogService
 	Idempotency       *coordinator.IdempotencyService
 	GitEventConsumer  *coordinator.GitEventConsumer
 	Queue             *worker.Service
@@ -378,6 +379,17 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 	})
 	status := coordinator.NewStatusService(db)
 
+	// The unified event log is bundle-scoped: each service appends post-commit,
+	// best-effort (emission never fails its triggering mutation).
+	eventLog := coordinator.NewEventLogService(db)
+	tasks.SetEventLog(eventLog)
+	epics.SetEventLog(eventLog)
+	workflowRuns.SetEventLog(eventLog)
+	features.SetEventLog(eventLog)
+	status.SetEventLog(eventLog)
+	gitEvents := coordinator.NewGitEventService(db)
+	gitEvents.SetEventLog(eventLog)
+
 	bundle := &ProjectBundle{
 		Project:           project,
 		Store:             store,
@@ -400,7 +412,8 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 		Reconciler:        reconciler,
 		CheckConfigs:      checkConfigs,
 		Merges:            merges,
-		GitEvents:         coordinator.NewGitEventService(db),
+		GitEvents:         gitEvents,
+		EventLog:          eventLog,
 		Idempotency:       coordinator.NewIdempotencyService(db),
 		GitEventConsumer:  coordinator.NewGitEventConsumer(db, project),
 		Queue:             queue,

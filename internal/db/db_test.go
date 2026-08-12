@@ -37,14 +37,14 @@ func TestOpenInitializesSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_init", "0002_full_fidelity_history", "0003_history_resume_durability")
+	assertAppliedMigrations(t, migrations, "0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log")
 
 	var schemaVersion string
 	if err := store.DB().QueryRowContext(ctx, "SELECT value FROM app_metadata WHERE key = 'schema_version'").Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version metadata: %v", err)
 	}
-	if schemaVersion != "0003_history_resume_durability" {
-		t.Fatalf("schema version = %q, want 0003_history_resume_durability", schemaVersion)
+	if schemaVersion != "0004_event_log" {
+		t.Fatalf("schema version = %q, want 0004_event_log", schemaVersion)
 	}
 	assertStorageFormat(t, store, "7")
 
@@ -582,7 +582,7 @@ func TestOpenMigrationIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_init", "0002_full_fidelity_history", "0003_history_resume_durability")
+	assertAppliedMigrations(t, migrations, "0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log")
 }
 
 // TestMigratedTemplateClonesAreIndependent pins the hermetic-test fast path:
@@ -607,7 +607,7 @@ func TestMigratedTemplateClonesAreIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read first clone migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_init", "0002_full_fidelity_history", "0003_history_resume_durability")
+	assertAppliedMigrations(t, migrations, "0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log")
 	assertStorageFormat(t, first, "7")
 	if _, err := first.DB().ExecContext(ctx, `INSERT INTO schema_migrations (version) VALUES ('9999_clone_probe')`); err != nil {
 		t.Fatalf("write first clone: %v", err)
