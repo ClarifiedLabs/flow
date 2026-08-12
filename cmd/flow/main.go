@@ -34,10 +34,12 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/handoff"
 	"github.com/ClarifiedLabs/flow/internal/harness"
 	flowlog "github.com/ClarifiedLabs/flow/internal/logging"
+	flowmcp "github.com/ClarifiedLabs/flow/internal/mcp"
 	flowprompt "github.com/ClarifiedLabs/flow/internal/prompt"
 	"github.com/ClarifiedLabs/flow/internal/terminal"
 	"github.com/ClarifiedLabs/flow/internal/version"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func main() {
@@ -165,6 +167,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runSearch(options.withConfig(args[1:]), stdout, stderr)
 	case "audit":
 		return runAuditWithGlobalOptions(args[1:], options, stdout, stderr)
+	case "mcp":
+		return runMCPWithGlobalOptions(args[1:], options, stdout, stderr)
 	case "checks":
 		return runChecks(options.withConfig(args[1:]), stdout, stderr)
 	case "transitions":
@@ -1678,6 +1682,39 @@ func printCompletionLine(out io.Writer, task coordinator.Task) {
 	for _, ev := range task.DoneEvidence {
 		fmt.Fprintf(out, "  evidence: %s: %s\n", ev.Type, ev.Value)
 	}
+}
+
+// runMCPWithGlobalOptions routes `flow mcp <subcommand>`.
+func runMCPWithGlobalOptions(args []string, options globalOptions, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] != "serve" {
+		return machineUsage(stdout, stderr, cliout.ModeHuman, "mcp", "usage: flow mcp serve [--project P]")
+	}
+	return runMCPServe(options.withConfig(args[1:]), stdout, stderr)
+}
+
+// runMCPServe runs the MCP read server over stdio against the resolved
+// flow-server. Nothing but MCP protocol goes to stdout; logs go to stderr.
+func runMCPServe(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("mcp serve", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiFlags := addAPIFlags(flags)
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 {
+		return machineUsage(stdout, stderr, apiFlags.outputMode(), "mcp serve", "usage: flow mcp serve [--project P]")
+	}
+	applySessionEnvironment(apiFlags, nil)
+	client, err := newAPIClient(apiFlags)
+	if err != nil {
+		return machineError(stdout, stderr, apiFlags.outputMode(), "mcp serve", "create client", err)
+	}
+	server := flowmcp.NewServer(client)
+	if err := server.Run(context.Background(), &sdkmcp.StdioTransport{}); err != nil {
+		fmt.Fprintf(stderr, "mcp serve: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func runTaskReopen(args []string, stdout, stderr io.Writer) int {
@@ -4298,6 +4335,7 @@ func printUsage(out io.Writer) {
   flow events [--since N] [--limit N] [--kind K] [--task ID] [--actor A] [--follow|--tail]
   flow search QUERY [--limit N]
   flow audit completions [--resolution R] [--limit N]
+  flow mcp serve [--project P]
   flow quickstart
   flow checks TASK_ID
   flow transitions TASK_ID
