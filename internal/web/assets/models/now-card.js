@@ -97,6 +97,11 @@ export function tabBadges(model) {
   const badges = {};
   if (model.review?.gate || model.review?.question) badges.review = { text: "!", tone: "warn" };
   if (model.change) badges.change = { text: String(model.openThreads || ""), tone: model.openThreads ? "warn" : "" };
+  // The Threads tab badge counts the task-wide open threads across every
+  // change — distinct from the change badge above, which is the current
+  // change's subset. No count, no badge: an all-resolved record is quiet.
+  const taskOpenThreads = Number(model.taskOpenThreads || 0);
+  if (taskOpenThreads) badges.threads = { text: String(taskOpenThreads), tone: "warn" };
   if (model.checks.length) {
     const ok = model.checksSatisfied === model.checks.length;
     badges.checks = { text: `${model.checksSatisfied}/${model.checks.length}`, tone: ok ? "ok" : "danger" };

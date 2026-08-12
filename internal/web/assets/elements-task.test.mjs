@@ -471,6 +471,59 @@ test("the findings tab sits next to checks and tab badges count unresolved findi
   assert.equal(tabBadges(clean).findings, undefined);
 });
 
+// --- threads tab --------------------------------------------------------------
+
+test("the threads tab sits between the change and the checks", () => {
+  const strip = renderTabStrip("change", {});
+  assert.ok(strip.indexOf('data-tab="change"') < strip.indexOf('data-tab="threads"'));
+  assert.ok(strip.indexOf('data-tab="threads"') < strip.indexOf('data-tab="checks"'));
+  assert.match(strip, /data-tab="threads">\s*Threads/);
+});
+
+test("the task model projects the change-filtered threads and the task-wide record", () => {
+  const model = taskModel({
+    task: { id: "t-1", title: "T" },
+    task_detail: {},
+    threads: [{ id: "th-new", change_id: "ch-2", state: "open" }],
+    task_threads: [
+      { id: "th-old", change_id: "ch-1", state: "certified" },
+      { id: "th-open-old", change_id: "ch-1", state: "open" },
+      { id: "th-new", change_id: "ch-2", state: "open" },
+    ],
+  });
+  assert.deepEqual(model.threads.map((thread) => thread.id), ["th-new"], "the change-scoped subset passes through");
+  assert.equal(model.openThreads, 1, "openThreads stays change-scoped");
+  assert.deepEqual(model.taskThreads.map((thread) => thread.id), ["th-old", "th-open-old", "th-new"]);
+  assert.equal(model.taskOpenThreads, 2, "taskOpenThreads counts the task-wide list");
+
+  // Payloads without the task-wide field (older servers, bare test models)
+  // fall back to the change's threads, so the tab never sees less than the diff.
+  const legacy = taskModel({
+    task: { id: "t-1", title: "T" },
+    task_detail: {},
+    threads: [{ id: "th-1", state: "open" }],
+  });
+  assert.deepEqual(legacy.taskThreads.map((thread) => thread.id), ["th-1"]);
+  assert.equal(legacy.taskOpenThreads, 1);
+});
+
+test("the threads tab badge counts task-wide open threads, distinct from the change badge", () => {
+  const badges = tabBadges({
+    change: { id: "c-1" },
+    openThreads: 1,
+    taskOpenThreads: 3,
+    checks: [],
+    transitions: [],
+    statusLog: [],
+  });
+  assert.equal(badges.change.text, "1", "the change badge stays change-scoped");
+  assert.deepEqual(badges.threads, { text: "3", tone: "warn" });
+
+  // No open threads anywhere → no badge: an all-resolved record is quiet.
+  const quiet = tabBadges({ change: { id: "c-1" }, openThreads: 0, taskOpenThreads: 0, checks: [], transitions: [], statusLog: [] });
+  assert.equal(quiet.threads, undefined);
+});
+
 test("handing back names every edge the executor can take", () => {
   const html = renderHeldPanel({
     held: true,

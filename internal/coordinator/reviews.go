@@ -662,6 +662,25 @@ ORDER BY created_at, id`, changeID)
 	return s.scanThreadsWithComments(ctx, rows)
 }
 
+// ListThreadsForTask returns every review thread recorded for the task,
+// across all of its changes, each carrying its full comment timeline. This is
+// the task-scoped read behind GET /v2/tasks/{taskID}/threads; the agent-payload
+// projection with the same scope is ReviewContextForTask below.
+func (s *ThreadService) ListThreadsForTask(ctx context.Context, taskID string) ([]ReviewThread, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, errors.New("task id is required")
+	}
+	rows, err := s.db.QueryContext(ctx, reviewThreadSelectSQL+`
+WHERE task_id = ?
+ORDER BY created_at, id`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("list review threads: %w", err)
+	}
+
+	return s.scanThreadsWithComments(ctx, rows)
+}
+
 func (s *ThreadService) ReviewContextForTask(ctx context.Context, taskID string) (ReviewContext, error) {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {

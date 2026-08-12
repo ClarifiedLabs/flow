@@ -1,0 +1,180 @@
+:host {
+  display: block;
+}
+
+/* One group per change: the tab reads as the review rounds they were, with
+   superseded changes' certified history still visible under its own head. */
+.group {
+  margin-top: 16px;
+}
+
+.group:first-child {
+  margin-top: 0;
+}
+
+.group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 6px;
+  font-size: var(--text-label);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.group-head .change-id {
+  font-family: var(--font-mono);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.group-head .current {
+  padding: 1px 6px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  font-size: var(--text-nano);
+  letter-spacing: var(--track-badge);
+  color: var(--st-idle);
+  border-color: var(--st-idle);
+}
+
+.threads {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.thread {
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+}
+
+.thread:first-child {
+  border-top: 0;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.badge {
+  padding: 1px 6px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  font-size: var(--text-nano);
+  letter-spacing: var(--track-badge);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.badge[data-tone="ok"] {
+  color: var(--st-ok);
+  border-color: var(--st-ok);
+}
+
+.badge[data-tone="warn"] {
+  color: var(--st-warn);
+  border-color: var(--st-warn);
+}
+
+.badge[data-tone="idle"] {
+  color: var(--st-idle);
+  border-color: var(--st-idle);
+}
+
+.anchor {
+  font-size: var(--text-quiet);
+  color: var(--muted);
+  text-decoration: none;
+}
+
+a.anchor {
+  color: var(--accent);
+}
+
+/* The stale-anchor flag and the findings resolution line share the warn tone:
+   the reviewer was reading an older revision, so the thread is evidence, not
+   a current instruction. */
+.flag {
+  font-size: var(--text-quiet);
+  color: var(--st-warn);
+}
+
+.spacer {
+  flex: 1;
+}
+
+/* The anchored code line, set in mono so it reads as code, not commentary. */
+.context {
+  margin: 8px 0 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: var(--text-quiet);
+  color: var(--ink-2);
+  white-space: pre-wrap;
+}
+
+.resolution {
+  margin: 8px 0 0;
+  font-size: var(--text-quiet);
+  color: var(--muted);
+}
+
+.resolution[data-tone="ok"] {
+  color: var(--st-ok);
+}
+
+.resolution[data-tone="warn"] {
+  color: var(--st-warn);
+}
+
+.resolution[data-tone="idle"] {
+  color: var(--st-idle);
+}
+
+.timeline {
+  margin-top: 8px;
+}
+
+.comment {
+  padding: 8px 0 0;
+  border-top: 1px dashed var(--line);
+  margin-top: 8px;
+}
+
+.comment:first-child {
+  border-top: 0;
+  padding-top: 0;
+  margin-top: 0;
+}
+
+.comment-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--text-quiet);
+}
+
+.comment-head .actor {
+  color: var(--ink);
+}
+
+.comment-head .meta {
+  color: var(--muted);
+}
+
+/* Comment bodies are the one place on the tab where a human or an agent
+   actually wrote: block markdown in prose type. */
+.prose {
+  margin-top: 4px;
+  font-family: var(--font-prose);
+  font-size: var(--text-prose);
+  line-height: var(--leading-body);
+  color: var(--ink-2);
+}

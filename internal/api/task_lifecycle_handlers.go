@@ -149,7 +149,7 @@ func isProjectTaskReadPath(method string, parts []string) bool {
 	switch parts[1] {
 	case "checks", "attachments", "workflow":
 		return true
-	case "relations", "prompt-context", "transitions", "findings":
+	case "relations", "prompt-context", "transitions", "findings", "threads":
 		return len(parts) == 2
 	default:
 		return false
@@ -297,6 +297,17 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
+	if len(parts) == 2 && parts[1] == "threads" {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		if !s.requireProjectReadAccess(w, r, principal) {
+			return
+		}
+		s.handleTaskThreads(w, r, taskID)
+		return
+	}
+
 	if len(parts) != 2 || r.Method != http.MethodPost {
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 		return
@@ -352,6 +363,28 @@ func (s *projectServer) handleTaskFindings(w http.ResponseWriter, r *http.Reques
 		FollowUps: registry.FollowUps,
 		Summary:   registry.Summary,
 	})
+}
+
+// handleTaskThreads serves every review thread recorded for the task across
+// all of its changes, each carrying its full comment timeline: the task-scoped
+// read behind the web UI's Threads tab. Unknown tasks were already rejected by
+// task routing.
+func (s *projectServer) handleTaskThreads(w http.ResponseWriter, r *http.Request, taskID string) {
+	if s.threads == nil {
+		writeError(w, http.StatusInternalServerError, "threads_unavailable", "thread service is not configured")
+		return
+	}
+	threads, err := s.threads.ListThreadsForTask(r.Context(), taskID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "list_threads_failed", err.Error())
+		return
+	}
+	if threads == nil {
+		// A threadless task reads as an empty array, not null, so browser and
+		// CLI consumers can iterate the response without a guard.
+		threads = []coordinator.ReviewThread{}
+	}
+	writeJSON(w, http.StatusOK, threadsResponse{Threads: threads})
 }
 
 // promptContextResponse carries the per-phase prompt material fetch-prompt

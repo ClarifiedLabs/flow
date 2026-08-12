@@ -26,6 +26,7 @@ import "./review-panel.js";
 import "./run-list.js";
 import "./tab-strip.js";
 import "./task-rail.js";
+import "./thread-list.js";
 import "./lifecycle-control.js";
 import "./workflow-graph.js";
 import { changeHeadKey, changeModelKey, renderOwnerRulingsPanel, renderTaskTerminal, taskTerminalTarget } from "./task-detail-view.js";
@@ -264,6 +265,9 @@ export class FlowTaskDetail extends FlowElement {
         break;
       case "findings":
         mount(panel, "flow-findings-list", model);
+        break;
+      case "threads":
+        mount(panel, "flow-thread-list", model);
         break;
       case "activity":
         mount(panel, "flow-activity-feed", model);

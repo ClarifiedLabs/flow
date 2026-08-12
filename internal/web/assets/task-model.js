@@ -60,6 +60,11 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
   const stepIndex = nodes.findIndex((node) => value(node, "key", "Key") === currentNodeKey) + 1;
   const checks = value(detail, "checks", "Checks") || [];
   const threads = value(data, "threads", "Threads") || [];
+  // taskThreads is the task-wide thread list across every change; threads
+  // above is the current change's subset that the Change tab and the Now card
+  // read. Payloads that only carry threads (older servers, bare test models)
+  // fall back to it so the tab and its badge never see less than the change.
+  const taskThreads = value(data, "task_threads", "TaskThreads") || threads;
   const artifacts = value(workflowData || {}, "artifacts", "Artifacts") || [];
   const changes = value(detail, "changes", "Changes") || [];
   const currentArtifactID = String(value(run, "current_artifact_id", "CurrentArtifactID") || "");
@@ -149,6 +154,9 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
     findings: value(data, "findings", "Findings") || null,
     threads,
     openThreads: threads.filter((thread) => value(thread, "state", "State") === "open").length,
+    taskThreads,
+    taskOpenThreads: taskThreads.filter((thread) => value(thread, "state", "State") === "open").length,
+    changes,
     change: value(detail, "ready_change", "ReadyChange") || changes[0],
     activeSession: value(detail, "active_session", "ActiveSession"),
     terminalAvailable: Boolean(value(detail, "terminal_available", "TerminalAvailable")),

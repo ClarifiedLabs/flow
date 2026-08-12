@@ -301,6 +301,74 @@ func TestCertifyRequiresClaimedThread(t *testing.T) {
 	}
 }
 
+func TestListThreadsForTaskSpansChanges(t *testing.T) {
+	t.Parallel()
+	store, threads, change := newThreadServiceFixture(t)
+	ctx := context.Background()
+
+	// A second change on the same task (the next review round's branch).
+	insertChangeForTest(t, store.DB(), change.TaskID, "ch-review-target-2", "task/review-target-2", false)
+	// Another task with its own change and thread: must be excluded.
+	otherTask, err := NewTaskService(store.DB(), "p-test").CreateTask(ctx, CreateTaskInput{Title: "Other review target"})
+	if err != nil {
+		t.Fatalf("create other task: %v", err)
+	}
+	insertChangeForTest(t, store.DB(), otherTask.ID, "ch-other", "task/other", false)
+
+	first, err := threads.CreateThread(ctx, CreateThreadInput{ChangeID: change.ID, AnchorCommitSHA: "a", FilePath: "a.go", Line: 1, Body: "round one"})
+	if err != nil {
+		t.Fatalf("create first thread: %v", err)
+	}
+	if _, err := threads.AddComment(ctx, AddThreadCommentInput{ThreadID: first.ID, Body: "following up", Actor: "author"}); err != nil {
+		t.Fatalf("reply to first thread: %v", err)
+	}
+	second, err := threads.CreateThread(ctx, CreateThreadInput{ChangeID: "ch-review-target-2", AnchorCommitSHA: "b", FilePath: "b.go", Line: 2, Body: "round two"})
+	if err != nil {
+		t.Fatalf("create second thread: %v", err)
+	}
+	if _, err := threads.CreateThread(ctx, CreateThreadInput{ChangeID: "ch-other", AnchorCommitSHA: "c", FilePath: "c.go", Line: 3, Body: "other task"}); err != nil {
+		t.Fatalf("create other task thread: %v", err)
+	}
+
+	listed, err := threads.ListThreadsForTask(ctx, change.TaskID)
+	if err != nil {
+		t.Fatalf("list threads for task: %v", err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("listed %d threads, want the task's 2 across both changes: %+v", len(listed), listed)
+	}
+	if listed[0].ID != first.ID || listed[1].ID != second.ID {
+		t.Fatalf("listed order = [%s %s], want creation order [%s %s]", listed[0].ID, listed[1].ID, first.ID, second.ID)
+	}
+	if listed[0].ChangeID != change.ID || listed[1].ChangeID != "ch-review-target-2" {
+		t.Fatalf("listed change ids = [%s %s], want [%s ch-review-target-2]", listed[0].ChangeID, listed[1].ChangeID, change.ID)
+	}
+	if len(listed[0].Comments) != 2 || listed[0].Comments[1].Body != "following up" {
+		t.Fatalf("first thread comments = %+v, want opening body plus the reply", listed[0].Comments)
+	}
+	if len(listed[1].Comments) != 1 {
+		t.Fatalf("second thread comments = %+v, want the opening comment", listed[1].Comments)
+	}
+}
+
+func TestListThreadsForTaskEmptyAndInvalid(t *testing.T) {
+	t.Parallel()
+	_, threads, change := newThreadServiceFixture(t)
+	ctx := context.Background()
+
+	listed, err := threads.ListThreadsForTask(ctx, change.TaskID)
+	if err != nil {
+		t.Fatalf("list threads for a threadless task: %v", err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("listed %+v, want no threads", listed)
+	}
+
+	if _, err := threads.ListThreadsForTask(ctx, "  "); err == nil {
+		t.Fatal("empty task id succeeded")
+	}
+}
+
 func newThreadServiceFixture(t *testing.T) (*flowdb.Store, *ThreadService, Change) {
 	t.Helper()
 	ctx := context.Background()

@@ -20,13 +20,14 @@ export async function renderTaskRoute(app, id, context, projectID = "") {
   const change = value(detail, "ready_change", "ReadyChange") || (value(detail, "changes", "Changes") || [])[0];
   const changeID = value(change || {}, "id", "ID");
 
-  // The Now card needs to know whether an open review thread blocks the merge,
-  // which lives with the change rather than with the task. The findings tab
-  // reads the per-task findings registry, fetched alongside so the tab paints
-  // from the model instead of loading on open.
+  // One task-scoped threads fetch feeds two projections: the Change tab and
+  // Now card read the current change's subset, and the Threads tab reads the
+  // full cross-change record. The findings tab reads the per-task findings
+  // registry, fetched alongside so the tab paints from the model instead of
+  // loading on open.
   const [workflowData, threadData, findingsData, planning] = await Promise.all([
     apiGet(`${taskAPIBase(resolvedProject)}/${encodeURIComponent(id)}/workflow`).catch(() => null),
-    changeID ? apiGet(`/v2/changes/${encodeURIComponent(changeID)}/threads`).catch(() => null) : Promise.resolve(null),
+    apiGet(`${taskAPIBase(resolvedProject)}/${encodeURIComponent(id)}/threads`).catch(() => null),
     apiGet(`${taskAPIBase(resolvedProject)}/${encodeURIComponent(id)}/findings`).catch((error) => ({ error: failureMessage(error) })),
     loadWorkItemContext(app, resolvedProject, id),
   ]);
@@ -49,10 +50,16 @@ export async function renderTaskRoute(app, id, context, projectID = "") {
     value(hierarchy, "item", "Item"),
   ].filter(Boolean) : []);
 
+  // The Change tab's inline diff and the Now card keep seeing exactly the
+  // current change's threads, filtered client-side out of the task-wide list,
+  // so an old-change thread anchored on the same file cannot leak into the
+  // current diff. task_threads is the unfiltered record the Threads tab reads.
+  const taskThreads = value(threadData || {}, "threads", "Threads") || [];
   const model = taskModel(
     {
       ...data,
-      threads: value(threadData || {}, "threads", "Threads") || [],
+      threads: taskThreads.filter((thread) => String(value(thread, "change_id", "ChangeID") || "") === String(changeID || "")),
+      task_threads: taskThreads,
       findings: findingsData,
       work_item: planning.hierarchy,
       work_items: [...knownItems, ...extraItems],
