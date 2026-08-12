@@ -610,6 +610,8 @@ func TestLoadWorkerHarnessConfigFile(t *testing.T) {
 	}
 }
 
+func float64Ptr(v float64) *float64 { return &v }
+
 func TestWorkerCleanupDefaultsAndValidation(t *testing.T) {
 	resolved, err := (WorkerCleanup{}).Resolve()
 	if err != nil {
@@ -623,6 +625,15 @@ func TestWorkerCleanupDefaultsAndValidation(t *testing.T) {
 	}
 	if resolved.MinFreePercent != 10 || resolved.ResumeFreePercent != 15 {
 		t.Fatalf("default percentage thresholds = %+v", resolved)
+	}
+
+	zero := 0.0
+	disabled, err := (WorkerCleanup{MinFreePercent: &zero, ResumeFreePercent: &zero}).Resolve()
+	if err != nil {
+		t.Fatalf("Resolve explicit zero percentages: %v", err)
+	}
+	if disabled.MinFreePercent != 0 || disabled.ResumeFreePercent != 0 {
+		t.Fatalf("explicit zero percentages resolved to %+v, want the percentage check disabled", disabled)
 	}
 
 	for name, cleanup := range map[string]WorkerCleanup{
@@ -640,11 +651,11 @@ func TestWorkerCleanupDefaultsAndValidation(t *testing.T) {
 			ResumeFreeBytes: "1GiB",
 		},
 		"resume percent below minimum": {
-			MinFreePercent:    20,
-			ResumeFreePercent: 15,
+			MinFreePercent:    float64Ptr(20),
+			ResumeFreePercent: float64Ptr(15),
 		},
 		"non-finite percent": {
-			MinFreePercent: math.NaN(),
+			MinFreePercent: float64Ptr(math.NaN()),
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

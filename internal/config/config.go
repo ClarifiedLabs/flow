@@ -236,10 +236,10 @@ type WorkerConfig struct {
 type WorkerCleanup struct {
 	Interval          string  `json:"interval" yaml:"interval"`
 	OrphanGrace       string  `json:"orphan_grace" yaml:"orphan_grace"`
-	MinFreeBytes      string  `json:"min_free_bytes" yaml:"min_free_bytes"`
-	ResumeFreeBytes   string  `json:"resume_free_bytes" yaml:"resume_free_bytes"`
-	MinFreePercent    float64 `json:"min_free_percent" yaml:"min_free_percent"`
-	ResumeFreePercent float64 `json:"resume_free_percent" yaml:"resume_free_percent"`
+	MinFreeBytes      string   `json:"min_free_bytes" yaml:"min_free_bytes"`
+	ResumeFreeBytes   string   `json:"resume_free_bytes" yaml:"resume_free_bytes"`
+	MinFreePercent    *float64 `json:"min_free_percent" yaml:"min_free_percent"`
+	ResumeFreePercent *float64 `json:"resume_free_percent" yaml:"resume_free_percent"`
 }
 
 // ResolvedWorkerCleanup is the parsed, default-applied worker cleanup policy.
@@ -255,12 +255,14 @@ type ResolvedWorkerCleanup struct {
 const (
 	defaultWorkerCleanupInterval    = 5 * time.Minute
 	defaultWorkerCleanupOrphanGrace = time.Hour
-	defaultWorkerMinFreePercent     = 10
-	defaultWorkerResumeFreePercent  = 15
+	defaultWorkerMinFreePercent    float64 = 10
+	defaultWorkerResumeFreePercent float64 = 15
 )
 
 // Resolve parses worker cleanup settings. Empty byte thresholds disable the
-// absolute-byte check; percentage thresholds are always enabled by default.
+// absolute-byte check. Percentage thresholds default to 10/15 percent when
+// unset; an explicit 0 disables the percentage check entirely (tests and
+// constrained hosts use this to make admission independent of the disk).
 func (c WorkerCleanup) Resolve() (ResolvedWorkerCleanup, error) {
 	interval, err := resolveWorkerCleanupDuration(c.Interval, defaultWorkerCleanupInterval, "interval", false)
 	if err != nil {
@@ -282,13 +284,13 @@ func (c WorkerCleanup) Resolve() (ResolvedWorkerCleanup, error) {
 		return ResolvedWorkerCleanup{}, errors.New("worker cleanup.resume_free_bytes must be >= min_free_bytes")
 	}
 
-	minFreePercent := c.MinFreePercent
-	if minFreePercent == 0 {
-		minFreePercent = defaultWorkerMinFreePercent
+	minFreePercent := defaultWorkerMinFreePercent
+	if c.MinFreePercent != nil {
+		minFreePercent = *c.MinFreePercent
 	}
-	resumeFreePercent := c.ResumeFreePercent
-	if resumeFreePercent == 0 {
-		resumeFreePercent = defaultWorkerResumeFreePercent
+	resumeFreePercent := defaultWorkerResumeFreePercent
+	if c.ResumeFreePercent != nil {
+		resumeFreePercent = *c.ResumeFreePercent
 	}
 	if math.IsNaN(minFreePercent) || math.IsInf(minFreePercent, 0) || minFreePercent < 0 || minFreePercent > 100 {
 		return ResolvedWorkerCleanup{}, errors.New("worker cleanup.min_free_percent must be between 0 and 100")

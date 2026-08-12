@@ -1377,14 +1377,7 @@ func TestWorkerStartupReaperUsesWorkerToken(t *testing.T) {
 	httpServer := httptest.NewServer(server)
 	t.Cleanup(httpServer.Close)
 
-	configPath := filepath.Join(t.TempDir(), "worker.yaml")
-	if err := os.WriteFile(configPath, []byte(`worker_id: w-local
-coordinator_url: `+httpServer.URL+`
-token: worker-token
-work_dir: `+filepath.ToSlash(t.TempDir())+`
-`), 0o600); err != nil {
-		t.Fatalf("write worker config: %v", err)
-	}
+	configPath := writeWorkerConfig(t, t.TempDir(), workerConfigOptions{coordinatorURL: httpServer.URL})
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -1503,6 +1496,9 @@ func writeWorkerConfig(t *testing.T, dir string, opts workerConfigOptions) strin
 	b.WriteString("coordinator_url: " + opts.coordinatorURL + "\n")
 	b.WriteString("token: worker-token\n")
 	b.WriteString("work_dir: " + filepath.ToSlash(t.TempDir()) + "\n")
+	// Tests must not depend on the host's free disk: disable the
+	// disk-pressure admission gate explicitly.
+	b.WriteString("cleanup:\n  min_free_percent: 0\n  resume_free_percent: 0\n")
 	if opts.agentHarnessLabel {
 		b.WriteString("labels:\n  agent.harness.harness: \"true\"\n")
 	}
