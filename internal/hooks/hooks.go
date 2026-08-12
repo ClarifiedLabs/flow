@@ -15,12 +15,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/config"
@@ -258,6 +260,18 @@ func (d *Dispatcher) execute(ctx context.Context, job run) {
 
 func (d *Dispatcher) runCommand(ctx context.Context, job run) error {
 	cmd := exec.CommandContext(ctx, job.hook.Command[0], job.hook.Command[1:]...)
+	// A hook may spawn children that inherit the pipes exec uses for non-file
+	// stdin/stderr. Killing only the hook leaves those pipes open, causing Run
+	// to wait for the children after the timeout. Isolate each hook in a process
+	// group and cancel the whole group so no descendants outlive the timeout.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
 	cmd.Stdin = bytes.NewReader(buildEnvelope(job.projectID, job.event))
 	cmd.Env = append(os.Environ(),
 		"FLOW_EVENT_KIND="+job.event.Kind,
