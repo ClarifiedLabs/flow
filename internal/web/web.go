@@ -55,7 +55,7 @@ var cssModules = []struct{ Name, Scope string }{
 	{"work-items.module.css", "flow-work-items"},
 }
 
-var assetVersion = computeAssetVersion()
+var assetVersion = computeAssetVersionFrom(assetFS, generatedCSS)
 
 func IndexHTML() ([]byte, error) {
 	contents, err := assetFS.ReadFile("assets/index.html")
@@ -84,17 +84,35 @@ func Asset(name string) ([]byte, string, bool) {
 	return contents, contentType(name), true
 }
 
-func computeAssetVersion() string {
+// computeAssetVersionFrom hashes the generated stylesheet plus every served JS
+// module (not just app.js) so the cache-busting version reflects a change to
+// any module the entry imports. The walk is recursive — assets/elements/ and
+// any future subdirectory participate — except assets/vendor/, whose pinned
+// third-party files never change in place. Sorted for determinism.
+func computeAssetVersionFrom(fsys fs.FS, css func() ([]byte, error)) string {
 	hash := sha256.New()
-	if css, err := generatedCSS(); err == nil {
+	if css, err := css(); err == nil {
 		_, _ = hash.Write(css)
 	}
-	// Hash every served JS module (not just app.js) so the cache-busting version
-	// reflects a change to any module the entry imports. Sorted for determinism.
-	names, _ := fs.Glob(assetFS, "assets/*.js")
+	var names []string
+	_ = fs.WalkDir(fsys, "assets", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path == "assets/vendor" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".js") {
+			names = append(names, path)
+		}
+		return nil
+	})
 	sort.Strings(names)
 	for _, name := range names {
-		if js, err := assetFS.ReadFile(name); err == nil {
+		if js, err := fs.ReadFile(fsys, name); err == nil {
 			_, _ = hash.Write([]byte(name))
 			_, _ = hash.Write(js)
 		}

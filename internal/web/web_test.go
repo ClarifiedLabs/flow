@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 func readModule(t *testing.T, name string) string {
@@ -13,6 +14,41 @@ func readModule(t *testing.T, name string) string {
 		t.Fatalf("read css module %s: %v", name, err)
 	}
 	return string(source)
+}
+
+// The index's ?v= cache-buster must reflect modules in subdirectories —
+// assets/elements/ holds most of the UI — but ignore pinned vendor files.
+// Regression: computeAssetVersion used a non-recursive assets/*.js glob, so
+// edits under assets/elements/ never bumped the version.
+func TestComputeAssetVersionWalksSubdirectories(t *testing.T) {
+	css := func() ([]byte, error) { return []byte("css"), nil }
+	js := func(data string) *fstest.MapFile { return &fstest.MapFile{Data: []byte(data)} }
+
+	base := fstest.MapFS{
+		"assets/app.js":           js("app"),
+		"assets/elements/card.js": js("card-v1"),
+		"assets/vendor/lib.js":    js("vendor-v1"),
+	}
+
+	elementEdited := fstest.MapFS{
+		"assets/app.js":           js("app"),
+		"assets/elements/card.js": js("card-v2"),
+		"assets/vendor/lib.js":    js("vendor-v1"),
+	}
+
+	vendorEdited := fstest.MapFS{
+		"assets/app.js":           js("app"),
+		"assets/elements/card.js": js("card-v1"),
+		"assets/vendor/lib.js":    js("vendor-v2"),
+	}
+
+	baseVersion := computeAssetVersionFrom(base, css)
+	if got := computeAssetVersionFrom(elementEdited, css); got == baseVersion {
+		t.Fatal("version did not change when an assets/elements/ module changed")
+	}
+	if got := computeAssetVersionFrom(vendorEdited, css); got != baseVersion {
+		t.Fatal("version changed when only an assets/vendor/ module changed")
+	}
 }
 
 func TestGeneratedCSSServesEveryModule(t *testing.T) {
