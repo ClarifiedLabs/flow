@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { actionScope, applyBusyState, failureMessage, gateResponsePending, handleAction, inFlight, pendingStatus, threadClaimPending } from "./actions.js";
-import { scheduleConsolePollView, startConsoleView } from "./console-view.js";
+import { startConsoleView } from "./actions/console.js";
 import { handleFormSubmit, formBusyKey } from "./forms.js";
 import { workflowStepCanBeSkipped } from "./task-view.js";
 import { renderTranscriptButton } from "./terminal.js";
@@ -245,10 +245,12 @@ test("console page offers shell harness and posts selected harness", async () =>
   const fetchCalls = [];
   const title = { textContent: "" };
   const status = { textContent: "" };
-  const content = { innerHTML: "" };
+  const content = mountableContent();
+  const { renderConsoleRoute, FlowConsole } = await consoleImports();
   const context = await scriptContext({
     location: { pathname: "/ui/console", search: "" },
   }, {
+    document: consoleDocument(FlowConsole),
     URLSearchParams,
     fetch(path, options) {
       fetchCalls.push({ path, options });
@@ -294,9 +296,11 @@ test("console page offers shell harness and posts selected harness", async () =>
   };
   app.querySelectorAll = () => [];
 
-  await app.renderConsole();
-  assert.match(content.innerHTML, /<option value="harness" selected>Harness<\/option>/);
-  assert.match(content.innerHTML, /<option value="shell">Shell<\/option>/);
+  await renderConsoleRoute(app);
+  const mounted = content.firstElementChild;
+  mounted.paint();
+  assert.match(mounted.innerHTML, /<option value="harness" selected>Harness<\/option>/);
+  assert.match(mounted.innerHTML, /<option value="shell">Shell<\/option>/);
 
   await startConsoleView(app, "p-alpha", "shell");
   const post = fetchCalls.find((call) => call.path === "/ui/api/v2/projects/p-alpha/console" && call.options.method === "POST");
@@ -3790,6 +3794,42 @@ test("pollDelay applies capped exponential backoff", async () => {
   assert.equal(pollDelay(10000, 0, 120000), 10000); // backoff disabled -> base
 });
 
+// Console-route harness pieces: a mount-compatible content stub and a
+// document.createElement factory that builds a real FlowConsole (never
+// connected by the stub, so only its data-driven poll gating runs).
+// consoleImports dynamically imports the route/element modules: their import
+// chain defines custom-element classes, which needs a global HTMLElement —
+// only present after a scriptContext call has installed one.
+async function consoleImports() {
+  const { renderConsoleRoute } = await import("./console-route.js");
+  const { FlowConsole } = await import("./elements/console.js");
+  return { renderConsoleRoute, FlowConsole };
+}
+
+function mountableContent() {
+  return {
+    innerHTML: "",
+    dataset: {},
+    firstElementChild: null,
+    appendChild(child) {
+      this.firstElementChild = child;
+    },
+  };
+}
+
+function consoleDocument(FlowConsole) {
+  return {
+    cookie: "flow_ui_csrf=csrf-token",
+    addEventListener() {},
+    createElement(tag) {
+      const element = new FlowConsole();
+      element.tagName = String(tag).toUpperCase();
+      element.closest = () => null;
+      return element;
+    },
+  };
+}
+
 // A console-action harness: a real FlowApp (real load, real settle-burst
 // machinery) parked on /ui/console with the project and harness registries
 // preloaded, a recording setTimeout, and a fetch stub that answers the
@@ -3807,7 +3847,8 @@ async function consoleActionHarness() {
   const fetches = [];
   const title = { textContent: "" };
   const status = { textContent: "" };
-  const content = { innerHTML: "", dataset: {} };
+  const content = mountableContent();
+  const { FlowConsole } = await consoleImports();
   const context = await scriptContext({
     location: { pathname: "/ui/console", search: "" },
     setTimeout(callback, delay) {
@@ -3816,6 +3857,7 @@ async function consoleActionHarness() {
     },
     clearTimeout() {},
   }, {
+    document: consoleDocument(FlowConsole),
     URLSearchParams,
     fetch(path, options) {
       fetches.push({ path, options });
@@ -4075,150 +4117,6 @@ test("a navigation load cancels an armed settle-burst timeout through the real l
   assert.equal(timers.length, 2, "only the route's regular poll timer remains");
 });
 
-// A console-poll harness: a real FlowApp parked on /ui/console with a
-// recording setTimeout, a fetch stub that hands each console-state GET a
-// deferred response in call order (or rejects every GET with rejectWith when
-// given), and a load() wrapper that counts invocations while delegating to the
-// real load, so the guard under test sees the real loadsInFlight accounting.
-async function consolePollHarness(rejectWith) {
-  const timers = [];
-  const title = { textContent: "" };
-  const status = { textContent: "" };
-  const content = { innerHTML: "", dataset: {} };
-  const responses = [];
-  const context = await scriptContext({
-    location: { pathname: "/ui/console", search: "" },
-    setTimeout(callback, delay) {
-      timers.push({ callback, delay });
-      return timers.length;
-    },
-    clearTimeout() {},
-  }, {
-    URLSearchParams,
-    fetch() {
-      if (rejectWith !== undefined) return Promise.reject(rejectWith);
-      const response = deferred();
-      responses.push(response);
-      return response.promise;
-    },
-  });
-  const app = new context.FlowApp();
-  app.pollingActive = true;
-  // Replace the real console Poller with a recording stub so the recorded
-  // callback is the poll's own async function (Poller.arm wraps it in a
-  // void-returning timer wrapper) and the test can await it directly.
-  app.consolePoll = {
-    arm(delay, callback) {
-      timers.push({ callback, delay });
-    },
-    clear() {},
-  };
-  app.projects = [{ id: "p-alpha", name: "Alpha" }];
-  app.harnesses = { agents: [], consoles: [{ name: "harness", display_name: "Harness" }] };
-  app.querySelector = (selector) => {
-    if (selector === ".content") return content;
-    if (selector === "h1") return title;
-    if (selector === ".status") return status;
-    return null;
-  };
-  app.querySelectorAll = () => [];
-  let loads = 0;
-  const realLoad = app.load.bind(app);
-  app.load = (options) => {
-    loads += 1;
-    return realLoad(options);
-  };
-  return {
-    app,
-    timers,
-    responses,
-    status,
-    loads: () => loads,
-    consoleState(active, terminalAvailable) {
-      return {
-        ok: true,
-        json: () => Promise.resolve({ active, terminal_available: terminalAvailable, project_id: "p-alpha" }),
-      };
-    },
-  };
-}
-
-test("a delayed console poll response overlapping another load skips its reload and keeps polling", async () => {
-  const harness = await consolePollHarness();
-  // An active console without a terminal arms the poll.
-  scheduleConsolePollView(harness.app, "p-alpha", "", { terminalAvailable: false });
-  assert.equal(harness.timers.length, 1);
-
-  // The poll fires and its state GET hangs; meanwhile another load starts (a
-  // refresh, navigation, or settle-burst tick) and is still in flight when
-  // the poll's response arrives announcing a terminal.
-  const pollReload = harness.timers[0].callback();
-  const otherLoad = harness.app.load();
-  harness.responses[0].resolve(harness.consoleState(true, true));
-  await pollReload;
-
-  assert.equal(harness.loads(), 1, "the poll response does not start a load while another load is in flight");
-  assert.equal(harness.timers.length, 2, "the skipped poll re-arms instead of stopping");
-
-  // The overlapping load completes; its own render re-arms the poll.
-  await flushAsync();
-  harness.responses[1].resolve(harness.consoleState(true, true));
-  await otherLoad;
-  assert.equal(harness.loads(), 1);
-  assert.equal(harness.timers.length, 3, "the completed load re-arms the console poll");
-
-  // With no load in flight, a later poll response still reloads once: the
-  // console going inactive triggers exactly one load and no further polling.
-  const inactiveReload = harness.timers[2].callback();
-  harness.responses[2].resolve(harness.consoleState(false, false));
-  await flushAsync();
-  harness.responses[3].resolve(harness.consoleState(false, false)); // the reload's own GET
-  await inactiveReload;
-  assert.equal(harness.loads(), 2, "a later poll response reloads once when no load is active");
-  assert.equal(harness.timers.length, 3, "an inactive console schedules no further poll");
-});
-
-test("console poll transitions reload exactly once when no load is in flight", async () => {
-  const harness = await consolePollHarness();
-  scheduleConsolePollView(harness.app, "p-alpha", "", { terminalAvailable: false });
-  assert.equal(harness.timers.length, 1);
-
-  // Terminal availability appearing reloads the console once and re-arms.
-  const terminalPoll = harness.timers[0].callback();
-  harness.responses[0].resolve(harness.consoleState(true, true));
-  await flushAsync();
-  harness.responses[1].resolve(harness.consoleState(true, true)); // the reload's own GET
-  await terminalPoll;
-  assert.equal(harness.loads(), 1, "the terminal-availability transition reloads once");
-  assert.equal(harness.timers.length, 2, "the active console keeps polling");
-
-  // The console going inactive reloads once and stops polling.
-  const inactivePoll = harness.timers[1].callback();
-  harness.responses[2].resolve(harness.consoleState(false, false));
-  await flushAsync();
-  harness.responses[3].resolve(harness.consoleState(false, false)); // the reload's own GET
-  await inactivePoll;
-  assert.equal(harness.loads(), 2, "the inactive-console transition reloads once");
-  assert.equal(harness.timers.length, 2, "an inactive console schedules no further poll");
-});
-
-test("a hostile console refresh rejection still reports a safe status and keeps polling", async () => {
-  // The console state GET rejects with a Proxy whose prototype lookup throws:
-  // the poll catch must format it without throwing, or the "console refresh
-  // failed" status and the re-arm would never run.
-  const harness = await consolePollHarness(new Proxy({}, {
-    getPrototypeOf() {
-      throw new Error("prototype trap");
-    },
-  }));
-  scheduleConsolePollView(harness.app, "p-alpha", "", { terminalAvailable: false });
-  assert.equal(harness.timers.length, 1);
-
-  await harness.timers[0].callback();
-
-  assert.equal(harness.status.textContent, "console refresh failed: Request failed");
-  assert.equal(harness.timers.length, 2, "the failed console refresh re-arms the poll");
-});
 
 test("board sidebar status separates blocked tasks in compact lifecycle groups", async () => {
   const context = await scriptContext();

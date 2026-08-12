@@ -1,8 +1,22 @@
 // Console handlers: per-task console start/release plus the Console
-// view's own controls, whose request and reload live in console-view.js.
+// view's own controls, whose request and reload live in the helpers below.
 
-import { apiDelete, apiPost, taskConsoleAPIPath } from "../api.js";
-import { releaseConsoleView, startConsoleView } from "../console-view.js";
+import { apiDelete, apiPost, consoleAPIPath, taskConsoleAPIPath } from "../api.js";
+
+// startConsoleView/releaseConsoleView are the Console view's own controls'
+// request-and-reload pair. Their target is the console pair (project, task)
+// — the task empty for a project console — and Start posts the harness picked
+// in the view's select. The pending state and the status line are the
+// dispatcher's, as for every action.
+export async function startConsoleView(app, projectID, harness, taskID = "") {
+  await apiPost(taskID ? taskConsoleAPIPath(projectID, taskID) : consoleAPIPath(projectID), { harness });
+  await app.load();
+}
+
+export async function releaseConsoleView(app, projectID, taskID = "") {
+  await apiDelete(taskID ? taskConsoleAPIPath(projectID, taskID) : consoleAPIPath(projectID));
+  await app.load();
+}
 
 export const consoleActions = {
   async startTaskConsole(app, element, dataset) {

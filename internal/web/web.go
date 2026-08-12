@@ -68,6 +68,7 @@ var cssModules = []struct{ Name, Scope string }{
 	{"feature.module.css", "flow-feature"},
 	{"work-items.module.css", "flow-work-items"},
 	{"diagnostics.module.css", "flow-diagnostics"},
+	{"console.module.css", "flow-console"},
 	{"project-picker.module.css", "flow-project-picker"},
 }
 

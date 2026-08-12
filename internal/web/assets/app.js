@@ -15,7 +15,6 @@ import { isWorkPath, workViewHref } from "./work-nav.js";
 import { normalizeHarnessOptions } from "./models/harness-catalog.js";
 import { openTerminalWindow, closeTerminalDialog, hideInlineTerminal, closeTerminalModalLayers } from "./terminal.js";
 import { pollDelay, Poller } from "./poller.js";
-import { stopConsolePollView, renderConsoleView } from "./console-view.js";
 import { createTaskView } from "./board-route.js";
 import { applyBusyState, failureMessage, handleAction, pendingStatus } from "./actions.js";
 import { handleFormSubmit } from "./forms.js";
@@ -97,7 +96,6 @@ export class FlowApp extends HTMLElement {
     this.settle.supersede();
     this.clearPolling();
     this.sidebar.stop();
-    stopConsolePollView(this);
   }
 
   renderShell() {
@@ -373,7 +371,6 @@ export class FlowApp extends HTMLElement {
 
   async load(options = {}) {
     this.clearPolling();
-    stopConsolePollView(this);
     // Navigation and every other load that is not the active settle burst's
     // own reload supersedes the burst (see app/settle.js).
     this.settle.cancelUnless(options.burst);
@@ -489,10 +486,6 @@ export class FlowApp extends HTMLElement {
 
   renderTaskForm(task, options) {
     return renderTaskFormView(this, task, options);
-  }
-
-  renderConsole(context) {
-    return renderConsoleView(this, context);
   }
 
   openInlineTerminal(button, kind, id) {

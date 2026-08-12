@@ -1,0 +1,5 @@
+/* Console page terminal detail. */
+:host {
+  display: block;
+  min-width: 0;
+}
