@@ -78,12 +78,88 @@ func TestEventsEndpointListsAppendedEvents(t *testing.T) {
 	}
 }
 
+func TestEventsEndpointFiltersAndResetField(t *testing.T) {
+	t.Parallel()
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+
+	first, err := fixture.Tasks.CreateTaskWithDetails(ctx, coordinator.CreateTaskWithDetailsInput{
+		Task: coordinator.CreateTaskInput{Title: "Alpha", CreatedBy: coordinator.ActorHuman},
+	})
+	if err != nil {
+		t.Fatalf("create alpha: %v", err)
+	}
+	if _, err := fixture.Tasks.CreateTaskWithDetails(ctx, coordinator.CreateTaskWithDetailsInput{
+		Task: coordinator.CreateTaskInput{Title: "Beta", CreatedBy: coordinator.ActorHuman},
+	}); err != nil {
+		t.Fatalf("create beta: %v", err)
+	}
+
+	path := "/v2/projects/" + fixture.Project.ID + "/events"
+
+	// reset_required is present and false in the poll response.
+	base := httptest.NewRecorder()
+	fixture.Server.ServeHTTP(base, authorizedRequest(http.MethodGet, path, nil))
+	var baseBody struct {
+		ResetRequired *bool `json:"reset_required"`
+	}
+	if err := json.NewDecoder(base.Body).Decode(&baseBody); err != nil {
+		t.Fatalf("decode base response: %v", err)
+	}
+	if baseBody.ResetRequired == nil || *baseBody.ResetRequired {
+		t.Fatalf("reset_required = %v, want present and false", baseBody.ResetRequired)
+	}
+
+	// kind filter returns only matching kinds.
+	byKind := httptest.NewRecorder()
+	fixture.Server.ServeHTTP(byKind, authorizedRequest(http.MethodGet, path+"?kind="+coordinator.EventTaskCreated, nil))
+	var kindBody eventsResponse
+	if err := json.NewDecoder(byKind.Body).Decode(&kindBody); err != nil {
+		t.Fatalf("decode kind filter: %v", err)
+	}
+	if len(kindBody.Events) != 2 {
+		t.Fatalf("kind filter returned %d events, want 2 task.created", len(kindBody.Events))
+	}
+	for _, event := range kindBody.Events {
+		if event.Kind != coordinator.EventTaskCreated {
+			t.Fatalf("kind filter leaked %s", event.Kind)
+		}
+	}
+
+	// task filter narrows to one task.
+	byTask := httptest.NewRecorder()
+	fixture.Server.ServeHTTP(byTask, authorizedRequest(http.MethodGet, path+"?task="+first.ID, nil))
+	var taskBody eventsResponse
+	if err := json.NewDecoder(byTask.Body).Decode(&taskBody); err != nil {
+		t.Fatalf("decode task filter: %v", err)
+	}
+	if len(taskBody.Events) == 0 {
+		t.Fatalf("task filter returned no events for %s", first.ID)
+	}
+	for _, event := range taskBody.Events {
+		if event.TaskID != first.ID {
+			t.Fatalf("task filter leaked task %s", event.TaskID)
+		}
+	}
+
+	// a kind that has no events returns an empty page that echoes the cursor.
+	none := httptest.NewRecorder()
+	fixture.Server.ServeHTTP(none, authorizedRequest(http.MethodGet, path+"?kind="+coordinator.EventGitPush, nil))
+	var noneBody eventsResponse
+	if err := json.NewDecoder(none.Body).Decode(&noneBody); err != nil {
+		t.Fatalf("decode empty filter: %v", err)
+	}
+	if len(noneBody.Events) != 0 || noneBody.NextSince != 0 {
+		t.Fatalf("unmatched kind = %+v, want empty page with cursor 0", noneBody)
+	}
+}
+
 func TestEventsEndpointValidatesQuery(t *testing.T) {
 	t.Parallel()
 	fixture := newTestFixture(t)
 	path := "/v2/projects/" + fixture.Project.ID + "/events"
 
-	for _, query := range []string{"?since=nope", "?since=-1", "?limit=0", "?limit=-3", "?limit=lots"} {
+	for _, query := range []string{"?since=nope", "?since=-1", "?limit=0", "?limit=-3", "?limit=lots", "?kind=", "?task=", "?actor="} {
 		response := httptest.NewRecorder()
 		fixture.Server.ServeHTTP(response, authorizedRequest(http.MethodGet, path+query, nil))
 		if response.Code != http.StatusBadRequest {

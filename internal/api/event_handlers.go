@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
@@ -12,10 +13,13 @@ import (
 
 // eventsResponse is the poll shape for the project event log. next_since is
 // the cursor for the following page: the last returned seq, or the caller's
-// own cursor when the page is empty.
+// own cursor when the page is empty. reset_required reserves kata's
+// purge-cursor semantics: flow never deletes events today, so it is always
+// false; a consumer that sees true must resync from seq 0.
 type eventsResponse struct {
-	Events    []coordinator.Event `json:"events"`
-	NextSince int64               `json:"next_since"`
+	Events        []coordinator.Event `json:"events"`
+	NextSince     int64               `json:"next_since"`
+	ResetRequired bool                `json:"reset_required"`
 }
 
 // eventStreamPollInterval bounds how often the SSE handler re-queries the
@@ -42,15 +46,40 @@ func parseEventSinceLimit(r *http.Request) (int64, int, error) {
 	return since, limit, nil
 }
 
+// parseEventFilter reads the optional kind/task/actor filters. Blank means no
+// filter; a set-but-empty value is rejected so a typoed `?kind=` is loud.
+func parseEventFilter(r *http.Request) (coordinator.EventFilter, error) {
+	var filter coordinator.EventFilter
+	query := r.URL.Query()
+	for _, param := range []struct {
+		name string
+		dst  *string
+	}{{"kind", &filter.Kind}, {"task", &filter.TaskID}, {"actor", &filter.Actor}} {
+		values, present := query[param.name]
+		if present && len(values) == 1 && strings.TrimSpace(values[0]) == "" {
+			return filter, fmt.Errorf("invalid %s: filter must be non-empty when present", param.name)
+		}
+		if present && len(values) > 0 {
+			*param.dst = values[0]
+		}
+	}
+	return filter, nil
+}
+
 // handleEvents serves one page of the project event log:
-// GET /v2/projects/{project}/events?since=N&limit=N.
+// GET /v2/projects/{project}/events?since=N&limit=N&kind=K&task=T&actor=A.
 func (ps *projectServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	since, limit, err := parseEventSinceLimit(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
 		return
 	}
-	events, err := ps.eventLog.List(r.Context(), since, limit)
+	filter, err := parseEventFilter(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
+		return
+	}
+	events, err := ps.eventLog.ListFiltered(r.Context(), since, limit, filter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "event_log_unavailable", err.Error())
 		return
@@ -59,7 +88,7 @@ func (ps *projectServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if len(events) > 0 {
 		next = events[len(events)-1].Seq
 	}
-	writeJSON(w, http.StatusOK, eventsResponse{Events: events, NextSince: next})
+	writeJSON(w, http.StatusOK, eventsResponse{Events: events, NextSince: next, ResetRequired: false})
 }
 
 // handleEventStream streams the project event log as server-sent events:

@@ -53,6 +53,48 @@ func TestEventLogAppendAssignsCursorAndDefaults(t *testing.T) {
 	}
 }
 
+func TestEventLogAppendTxIsAtomicWithTheTransaction(t *testing.T) {
+	log, ctx := openEventLogTestDB(t)
+	db := log.db
+
+	// An event appended in a transaction that rolls back leaves no row.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := log.AppendTx(ctx, tx, Event{Kind: EventTaskCreated, TaskID: "t-rolled-back"}); err != nil {
+		t.Fatalf("append in tx: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if events, err := log.List(ctx, 0, 0); err != nil || len(events) != 0 {
+		t.Fatalf("after rollback events = %+v, %v; want none", events, err)
+	}
+
+	// An event appended in a committed transaction persists.
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin 2: %v", err)
+	}
+	if _, err := log.AppendTx(ctx, tx, Event{Kind: EventTaskDone, TaskID: "t-committed"}); err != nil {
+		t.Fatalf("append in tx 2: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	events, err := log.List(ctx, 0, 0)
+	if err != nil || len(events) != 1 || events[0].TaskID != "t-committed" {
+		t.Fatalf("after commit events = %+v, %v; want the committed event", events, err)
+	}
+
+	// A nil service is a no-op (emission disabled) and must not panic.
+	var disabled *EventLogService
+	if _, err := disabled.AppendTx(ctx, nil, Event{Kind: EventTaskCreated}); err != nil {
+		t.Fatalf("nil AppendTx: %v", err)
+	}
+}
+
 func TestEventLogListPagesWithSinceAndLimit(t *testing.T) {
 	log, ctx := openEventLogTestDB(t)
 

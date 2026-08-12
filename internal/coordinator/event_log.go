@@ -111,21 +111,52 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 // EventLogMaxLimit bounds one page; ListEvents clamps larger requests.
 const EventLogMaxLimit = 500
 
+// EventFilter narrows a List query. Empty fields match everything.
+type EventFilter struct {
+	Kind   string
+	TaskID string
+	Actor  string
+}
+
 // List returns events with seq > since in seq order, at most limit (default
 // 100, clamped to EventLogMaxLimit).
 func (s *EventLogService) List(ctx context.Context, since int64, limit int) ([]Event, error) {
+	return s.ListFiltered(ctx, since, limit, EventFilter{})
+}
+
+// ListFiltered is List with kind/task/actor filters applied in SQL.
+func (s *EventLogService) ListFiltered(ctx context.Context, since int64, limit int, filter EventFilter) ([]Event, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	if limit > EventLogMaxLimit {
 		limit = EventLogMaxLimit
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	query := `
 SELECT seq, id, occurred_at, kind, actor, task_id, session_id, run_id, change_id, payload
 FROM event_log
-WHERE seq > ?
+WHERE seq > ?`
+	args := []any{since}
+	if filter.Kind != "" {
+		query += `
+AND kind = ?`
+		args = append(args, filter.Kind)
+	}
+	if filter.TaskID != "" {
+		query += `
+AND task_id = ?`
+		args = append(args, filter.TaskID)
+	}
+	if filter.Actor != "" {
+		query += `
+AND actor = ?`
+		args = append(args, filter.Actor)
+	}
+	query += `
 ORDER BY seq
-LIMIT ?`, since, limit)
+LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list events: %w", err)
 	}
@@ -154,8 +185,11 @@ LIMIT ?`, since, limit)
 	return events, nil
 }
 
-// appendEventLog is the nil-safe, non-fatal appender services use after a
-// mutation commits. Event emission must never fail the mutation that
+// appendEventLog is the nil-safe, non-fatal appender for mutation paths that
+// do not hold the write transaction at the emission site (fire-and-forget
+// producers such as the git-event consumer). Transactional mutations should
+// prefer stageEvent so the append lands before the next mutation can commit,
+// preserving event order. Emission must never fail the mutation that
 // triggered it, so failures are logged and swallowed.
 func appendEventLog(ctx context.Context, log *EventLogService, event Event) {
 	if log == nil {
@@ -183,3 +217,47 @@ func newEventID() string {
 	}
 	return "evt_" + hex.EncodeToString(random[:])
 }
+
+// eventLogExecer is the transactional SQL surface AppendTx writes through;
+// *sql.Tx and sqlitex.Tx both satisfy it.
+type eventLogExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+// AppendTx inserts the event inside the caller's transaction: the append
+// commits atomically with the mutation that produced it. Invariants (kind,
+// defaults, payload validity) match Append. The returned event carries its id
+// and occurred_at; seq is assigned on commit, so callers that need it must
+// re-list. A nil service is a no-op (emission disabled).
+func (s *EventLogService) AppendTx(ctx context.Context, tx eventLogExecer, event Event) (Event, error) {
+	if s == nil {
+		return Event{}, nil
+	}
+	event.Kind = strings.TrimSpace(event.Kind)
+	if event.Kind == "" {
+		return Event{}, errors.New("event kind is required")
+	}
+	if event.OccurredAt.IsZero() {
+		event.OccurredAt = s.now().UTC()
+	}
+	if event.ID == "" {
+		event.ID = newEventID()
+	}
+	payload := event.Payload
+	if len(payload) == 0 {
+		payload = json.RawMessage(`{}`)
+	}
+	if !json.Valid(payload) {
+		return Event{}, fmt.Errorf("event payload is not valid JSON")
+	}
+	event.Payload = payload
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO event_log (id, occurred_at, kind, actor, task_id, session_id, run_id, change_id, payload)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.ID, formatTime(event.OccurredAt.UTC()), event.Kind, event.Actor, event.TaskID, event.SessionID, event.RunID, event.ChangeID, string(payload)); err != nil {
+		return Event{}, fmt.Errorf("insert event: %w", err)
+	}
+	return event, nil
+}
+
+

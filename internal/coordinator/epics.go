@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -296,14 +297,16 @@ UPDATE epics SET status = 'completed', completed_automatically = 0,
 	if err := reconcileEpicAncestorsTx(ctx, tx, []string{epic.ID}, now); err != nil {
 		return Epic{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Epic{}, err
-	}
-	appendEventLog(ctx, s.eventLog, Event{
+	if _, err := s.eventLog.AppendTx(ctx, tx, Event{
 		Kind:    EventEpicCompleted,
 		Actor:   string(actor),
 		Payload: eventPayload(map[string]any{"epic_id": epic.ID, "title": epic.Title}),
-	})
+	}); err != nil {
+		slog.Warn("event log append failed", "error", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Epic{}, err
+	}
 	return s.Get(ctx, epic.ID)
 }
 
@@ -342,14 +345,16 @@ UPDATE epics SET status = 'open', completed_automatically = 0,
 	if err := reconcileEpicAncestorsTx(ctx, tx, []string{epic.ID}, now); err != nil {
 		return Epic{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Epic{}, err
-	}
-	appendEventLog(ctx, s.eventLog, Event{
+	if _, err := s.eventLog.AppendTx(ctx, tx, Event{
 		Kind:    EventEpicReopened,
 		Actor:   string(actor),
 		Payload: eventPayload(map[string]any{"epic_id": epic.ID, "title": epic.Title}),
-	})
+	}); err != nil {
+		slog.Warn("event log append failed", "error", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Epic{}, err
+	}
 	return s.Get(ctx, epic.ID)
 }
 
@@ -385,14 +390,16 @@ UPDATE epics SET status = 'archived', completed_automatically = 0,
 	if err := reconcileEpicAncestorsTx(ctx, tx, []string{epic.ID}, now); err != nil {
 		return Epic{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Epic{}, err
-	}
-	appendEventLog(ctx, s.eventLog, Event{
+	if _, err := s.eventLog.AppendTx(ctx, tx, Event{
 		Kind:    EventEpicArchived,
 		Actor:   string(actor),
 		Payload: eventPayload(map[string]any{"epic_id": epic.ID, "title": epic.Title}),
-	})
+	}); err != nil {
+		slog.Warn("event log append failed", "error", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Epic{}, err
+	}
 	return s.Get(ctx, epic.ID)
 }
 

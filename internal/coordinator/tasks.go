@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -492,15 +493,17 @@ VALUES (?, ?, ?, ?)`,
 		return Task{}, err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return Task{}, fmt.Errorf("commit create task: %w", err)
-	}
-	appendEventLog(ctx, s.eventLog, Event{
+	if _, err := s.eventLog.AppendTx(ctx, tx, Event{
 		Kind:    EventTaskCreated,
 		Actor:   string(taskInput.CreatedBy),
 		TaskID:  id,
 		Payload: eventPayload(map[string]any{"title": taskInput.Title}),
-	})
+	}); err != nil {
+		slog.Warn("event log append failed", "error", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Task{}, fmt.Errorf("commit create task: %w", err)
+	}
 
 	return s.GetTask(ctx, id)
 }
@@ -873,7 +876,12 @@ func (s *TaskService) EditTask(ctx context.Context, id string, input EditTaskInp
 		}
 	}
 
-	if _, err := s.db.ExecContext(ctx, `
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return Task{}, fmt.Errorf("begin edit task transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
 UPDATE tasks
 SET
 	title = ?,
@@ -892,15 +900,22 @@ WHERE id = ?`,
 		return Task{}, fmt.Errorf("edit task: %w", err)
 	}
 
+	// emit the edit event inside the write transaction
+	if _, err := s.eventLog.AppendTx(ctx, tx, Event{
+		Kind:    EventTaskEdited,
+		TaskID:  id,
+		Payload: eventPayload(map[string]any{"title": current.Title}),
+	}); err != nil {
+		slog.Warn("event log append failed", "error", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Task{}, fmt.Errorf("commit edit task: %w", err)
+	}
+
 	edited, err := s.GetTask(ctx, id)
 	if err != nil {
 		return Task{}, err
 	}
-	appendEventLog(ctx, s.eventLog, Event{
-		Kind:    EventTaskEdited,
-		TaskID:  id,
-		Payload: eventPayload(map[string]any{"title": edited.Title}),
-	})
 	return edited, nil
 }
 
@@ -1113,15 +1128,17 @@ func (s *TaskService) LinkTasks(ctx context.Context, sourceTaskID, targetTaskID 
 		return err
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit link tasks: %w", err)
-	}
-	appendEventLog(ctx, s.eventLog, Event{
+	if _, err := s.eventLog.AppendTx(ctx, tx, Event{
 		Kind:    EventRelationLinked,
 		Actor:   string(actor),
 		TaskID:  targetTaskID,
 		Payload: eventPayload(map[string]any{"source": sourceTaskID, "target": targetTaskID, "relation": string(kind)}),
-	})
+	}); err != nil {
+		slog.Warn("event log append failed", "error", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit link tasks: %w", err)
+	}
 
 	return nil
 }
@@ -1249,14 +1266,16 @@ WHERE source_item_id = ? AND target_item_id = ? AND kind = ?`,
 	if err := reconcileEpicAncestorsTx(ctx, tx, []string{sourceTaskID, targetTaskID}, s.now().UTC()); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit unlink tasks: %w", err)
-	}
-	appendEventLog(ctx, s.eventLog, Event{
+	if _, err := s.eventLog.AppendTx(ctx, tx, Event{
 		Kind:    EventRelationUnlinked,
 		TaskID:  targetTaskID,
 		Payload: eventPayload(map[string]any{"source": sourceTaskID, "target": targetTaskID, "relation": string(kind)}),
-	})
+	}); err != nil {
+		slog.Warn("event log append failed", "error", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit unlink tasks: %w", err)
+	}
 	return nil
 }
 

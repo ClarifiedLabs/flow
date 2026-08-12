@@ -1811,22 +1811,31 @@ func runEvents(args []string, stdout, stderr io.Writer) int {
 	var since int64
 	var limit int
 	var follow bool
+	var tail bool
+	var kindFilter string
+	var taskFilter string
+	var actorFilter string
 	flags.Int64Var(&since, "since", 0, "only events with seq greater than N")
 	flags.IntVar(&limit, "limit", 100, "maximum events per fetch")
 	flags.BoolVar(&follow, "follow", false, "stream new events as they happen")
+	flags.BoolVar(&tail, "tail", false, "alias for --follow")
+	flags.StringVar(&kindFilter, "kind", "", "only events of this kind (e.g. task.created)")
+	flags.StringVar(&taskFilter, "task", "", "only events for this task id")
+	flags.StringVar(&actorFilter, "actor", "", "only events by this actor")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	mode := apiFlags.outputMode()
 	if flags.NArg() != 0 {
-		return machineUsage(stdout, stderr, mode, "events", "usage: flow events [--since N] [--limit N] [--follow]")
+		return machineUsage(stdout, stderr, mode, "events", "usage: flow events [--since N] [--limit N] [--kind K] [--task ID] [--actor A] [--follow]")
 	}
+	filter := coordinator.EventFilter{Kind: kindFilter, TaskID: taskFilter, Actor: actorFilter}
 	applySessionEnvironment(apiFlags, nil)
 	client, err := newAPIClient(apiFlags)
 	if err != nil {
 		return machineError(stdout, stderr, mode, "events", "create client", err)
 	}
-	if follow {
+	if follow || tail {
 		err := client.StreamEvents(context.Background(), since, func(event coordinator.Event) error {
 			if mode.Machine() {
 				encoded, err := json.Marshal(event)
@@ -1844,7 +1853,7 @@ func runEvents(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	events, next, err := client.ListEvents(since, limit)
+	events, next, err := client.ListEvents(since, limit, filter)
 	if err != nil {
 		return machineError(stdout, stderr, mode, "events", "list events", err)
 	}
@@ -4113,7 +4122,7 @@ func printUsage(out io.Writer) {
   flow ready [--tag TAG]
   flow next [--tag TAG]
   flow wait TASK_ID... [--until done|blocked|scheduled|in_progress] [--any|--all] [--timeout 30s] [--poll-interval 2s]
-  flow events [--since N] [--limit N] [--follow]
+  flow events [--since N] [--limit N] [--kind K] [--task ID] [--actor A] [--follow|--tail]
   flow checks TASK_ID
   flow transitions TASK_ID
   flow workers

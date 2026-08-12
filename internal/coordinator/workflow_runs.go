@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -2109,15 +2110,17 @@ UPDATE tasks SET lifecycle_state = NULL, done_resolution = NULL, done_at = NULL,
 	}); err != nil {
 		return WorkflowRun{}, err
 	}
-	if err := tx.Commit(); err != nil {
-		return WorkflowRun{}, err
-	}
-	appendEventLog(ctx, s.eventLog, Event{
+	if _, err := s.eventLog.AppendTx(ctx, tx, Event{
 		Kind:   EventTaskReset,
 		Actor:  string(actor),
 		TaskID: taskID,
 		RunID:  run.ID,
-	})
+	}); err != nil {
+		slog.Warn("event log append failed", "error", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return WorkflowRun{}, err
+	}
 	return s.Get(ctx, run.ID)
 }
 
@@ -2233,15 +2236,17 @@ WHERE task_id = ? AND state = 'running'`, rebaseState, sqlitex.FormatTime(now), 
 	if err := reconcileEpicAncestorsTx(ctx, tx, []string{taskID}, now); err != nil {
 		return Task{}, err
 	}
-	if err := tx.Commit(); err != nil {
-		return Task{}, err
-	}
-	appendEventLog(ctx, s.eventLog, Event{
+	if _, err := s.eventLog.AppendTx(ctx, tx, Event{
 		Kind:    EventTaskDone,
 		Actor:   string(actor),
 		TaskID:  taskID,
 		Payload: eventPayload(map[string]any{"resolution": string(resolution), "note": strings.TrimSpace(note)}),
-	})
+	}); err != nil {
+		slog.Warn("event log append failed", "error", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Task{}, err
+	}
 	return s.tasks.GetTask(ctx, taskID)
 }
 
@@ -2311,15 +2316,17 @@ WHERE id = ? AND lifecycle_state = ?`, sqlitex.FormatTime(now), taskID, string(L
 	if err := reconcileEpicAncestorsTx(ctx, tx, []string{taskID}, now); err != nil {
 		return Task{}, err
 	}
-	if err := tx.Commit(); err != nil {
-		return Task{}, err
-	}
-	appendEventLog(ctx, s.eventLog, Event{
+	if _, err := s.eventLog.AppendTx(ctx, tx, Event{
 		Kind:    EventTaskReopened,
 		Actor:   string(actor),
 		TaskID:  taskID,
 		Payload: eventPayload(map[string]any{"previous_resolution": previousResolution}),
-	})
+	}); err != nil {
+		slog.Warn("event log append failed", "error", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Task{}, err
+	}
 	return s.tasks.GetTask(ctx, taskID)
 }
 

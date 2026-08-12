@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -493,14 +494,16 @@ INSERT INTO features (
 	if updated != 1 {
 		return Feature{}, errors.New("feature creation intent changed while finalizing")
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Feature{}, err
-	}
-	appendEventLog(ctx, s.eventLog, Event{
+	if _, err := s.eventLog.AppendTx(ctx, tx, Event{
 		Kind:    EventFeatureCreated,
 		Actor:   storedCreatedBy,
 		Payload: eventPayload(map[string]any{"feature_id": id, "title": input.Title}),
-	})
+	}); err != nil {
+		slog.Warn("event log append failed", "error", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Feature{}, err
+	}
 	return s.Get(ctx, id)
 }
 
@@ -782,14 +785,16 @@ WHERE id = ? AND status = 'open'`,
 	if err := reconcileEpicAncestorsTx(ctx, tx, []string{feature.ID}, nowTime); err != nil {
 		return Feature{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Feature{}, err
-	}
-	appendEventLog(ctx, s.eventLog, Event{
+	if _, err := s.eventLog.AppendTx(ctx, tx, Event{
 		Kind:    EventFeatureLanded,
 		Actor:   string(actor),
 		Payload: eventPayload(map[string]any{"feature_id": feature.ID, "land_sha": landSHA, "target_branch": target.Branch}),
-	})
+	}); err != nil {
+		slog.Warn("event log append failed", "error", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Feature{}, err
+	}
 	return s.Get(ctx, feature.ID)
 }
 
@@ -824,13 +829,15 @@ UPDATE features SET status = ?, updated_at = ? WHERE id = ? AND status != ?`,
 	if err := reconcileEpicAncestorsTx(ctx, tx, []string{feature.ID}, now); err != nil {
 		return Feature{}, err
 	}
+	if _, err := s.eventLog.AppendTx(ctx, tx, Event{
+		Kind:    EventFeatureArchived,
+		Payload: eventPayload(map[string]any{"feature_id": feature.ID, "title": feature.Title}),
+	}); err != nil {
+		slog.Warn("event log append failed", "error", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Feature{}, err
 	}
-	appendEventLog(ctx, s.eventLog, Event{
-		Kind:    EventFeatureArchived,
-		Payload: eventPayload(map[string]any{"feature_id": feature.ID, "title": feature.Title}),
-	})
 	return s.Get(ctx, feature.ID)
 }
 

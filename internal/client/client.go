@@ -905,8 +905,9 @@ func (c *Client) CreateWebBootstrap() (WebBootstrapResult, error) {
 }
 
 // ListEvents returns one page of the project event log with seq > since,
-// plus the cursor to pass for the following page.
-func (c *Client) ListEvents(since int64, limit int) ([]coordinator.Event, int64, error) {
+// plus the cursor to pass for the following page. Empty filter fields match
+// every event.
+func (c *Client) ListEvents(since int64, limit int, filter coordinator.EventFilter) ([]coordinator.Event, int64, error) {
 	var response struct {
 		Events    []coordinator.Event `json:"events"`
 		NextSince int64               `json:"next_since"`
@@ -915,6 +916,15 @@ func (c *Client) ListEvents(since int64, limit int) ([]coordinator.Event, int64,
 	query.Set("since", strconv.FormatInt(since, 10))
 	if limit > 0 {
 		query.Set("limit", strconv.Itoa(limit))
+	}
+	if filter.Kind != "" {
+		query.Set("kind", filter.Kind)
+	}
+	if filter.TaskID != "" {
+		query.Set("task", filter.TaskID)
+	}
+	if filter.Actor != "" {
+		query.Set("actor", filter.Actor)
 	}
 	if err := c.do(http.MethodGet, c.projectPath("/events"), nil, query, &response); err != nil {
 		return nil, 0, err
