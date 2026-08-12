@@ -1,4 +1,7 @@
-/* Done view (.done-*). flow-app scoped until the view gets an element. */
+/* Done view: paginated closed-task history. */
+:host {
+  display: block;
+}
 
 .done-view {
   display: grid;
