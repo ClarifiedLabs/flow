@@ -26,6 +26,7 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/api/contract"
 	"github.com/ClarifiedLabs/flow/internal/checkverdict"
 	flowclient "github.com/ClarifiedLabs/flow/internal/client"
+	"github.com/ClarifiedLabs/flow/internal/cliout"
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	"github.com/ClarifiedLabs/flow/internal/db"
@@ -46,6 +47,8 @@ func main() {
 type globalOptions struct {
 	configPath string
 	configSet  bool
+	jsonOut    bool
+	agentOut   bool
 }
 
 func parseGlobalOptions(args []string) (globalOptions, []string, error) {
@@ -64,6 +67,17 @@ func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 			options.configPath = strings.TrimPrefix(arg, "--config=")
 			options.configSet = true
 			args = args[1:]
+		case arg == "--json" || arg == "--agent":
+			if err := setOutputFlag(&options, arg, "true"); err != nil {
+				return globalOptions{}, nil, err
+			}
+			args = args[1:]
+		case strings.HasPrefix(arg, "--json=") || strings.HasPrefix(arg, "--agent="):
+			name, value, _ := strings.Cut(arg, "=")
+			if err := setOutputFlag(&options, name, value); err != nil {
+				return globalOptions{}, nil, err
+			}
+			args = args[1:]
 		default:
 			return options, args, nil
 		}
@@ -71,13 +85,33 @@ func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 	return options, args, nil
 }
 
+func setOutputFlag(options *globalOptions, name string, value string) error {
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fmt.Errorf("%s requires a boolean value: %w", name, err)
+	}
+	if name == "--json" {
+		options.jsonOut = parsed
+	} else {
+		options.agentOut = parsed
+	}
+	return nil
+}
+
 func (options globalOptions) withConfig(args []string) []string {
-	if !options.configSet {
+	var prefix []string
+	if options.configSet {
+		prefix = append(prefix, "--config", options.configPath)
+	}
+	if options.agentOut {
+		prefix = append(prefix, "--agent")
+	} else if options.jsonOut {
+		prefix = append(prefix, "--json")
+	}
+	if len(prefix) == 0 {
 		return args
 	}
-	configuredArgs := make([]string, 0, len(args)+2)
-	configuredArgs = append(configuredArgs, "--config", options.configPath)
-	return append(configuredArgs, args...)
+	return append(prefix, args...)
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -691,18 +725,17 @@ func runTaskCreate(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	mode := apiFlags.outputMode()
 
 	applySessionEnvironment(apiFlags, nil)
 	client, err := newAPIClient(apiFlags)
 	if err != nil {
-		fmt.Fprintf(stderr, "create client: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, mode, "task create", "create client", err)
 	}
 	if strings.TrimSpace(idempotencyKey) == "" {
 		generated, err := generateIdempotencyKey("create-")
 		if err != nil {
-			fmt.Fprintf(stderr, "%v\n", err)
-			return 1
+			return machineError(stdout, stderr, mode, "task create", "generate idempotency key", err)
 		}
 		idempotencyKey = generated
 	}
@@ -713,33 +746,42 @@ func runTaskCreate(args []string, stdout, stderr io.Writer) int {
 	if strings.TrimSpace(flowRef) != "" {
 		flowID, err := resolveFlowRef(client, flowRef)
 		if err != nil {
-			fmt.Fprintf(stderr, "resolve flow: %v\n", err)
-			return 1
+			return machineError(stdout, stderr, mode, "task create", "resolve flow", err)
 		}
 		input.FlowID = flowID
 	}
 	if strings.TrimSpace(featureRef) != "" {
 		featureID, err := resolveFeatureRef(client, featureRef)
 		if err != nil {
-			fmt.Fprintf(stderr, "resolve feature: %v\n", err)
-			return 1
+			return machineError(stdout, stderr, mode, "task create", "resolve feature", err)
 		}
 		input.FeatureID = featureID
 	}
 	task, reused, err := client.CreateTask(input)
 	if err != nil {
-		fmt.Fprintf(stderr, "create task: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, mode, "task create", "create task", err)
 	}
 	slog.Debug("task create response", "task", task.ID, "reused", reused)
-	printTaskLine(stdout, task)
+	attachments := make([]coordinator.TaskAttachment, 0, len(attachmentFiles.Values))
+	if !mode.Machine() {
+		printTaskLine(stdout, task)
+	}
 	for _, filePath := range attachmentFiles.Values {
 		attachment, err := uploadTaskAttachmentFile(client, task.ID, filePath, coordinator.TaskAttachmentStageInitial)
 		if err != nil {
-			fmt.Fprintf(stderr, "attach file to %s: %v\n", task.ID, err)
-			return 1
+			return machineError(stdout, stderr, mode, "task create", "attach file to "+task.ID, err)
 		}
-		printTaskAttachmentLine(stdout, attachment)
+		attachments = append(attachments, attachment)
+		if !mode.Machine() {
+			printTaskAttachmentLine(stdout, attachment)
+		}
+	}
+	if mode.Machine() {
+		return cliout.WriteData(stdout, mode, "task create", map[string]any{
+			"task":        task,
+			"reused":      reused,
+			"attachments": attachments,
+		})
 	}
 
 	return 0
@@ -812,8 +854,13 @@ func runTaskList(args []string, stdout, stderr io.Writer) int {
 		TagSlugs:        parseCSV(tag),
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "list tasks: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, apiFlags.outputMode(), "task list", "list tasks", err)
+	}
+	if apiFlags.outputMode().Machine() {
+		if tasks == nil {
+			tasks = []coordinator.Task{}
+		}
+		return cliout.WriteData(stdout, apiFlags.outputMode(), "task list", map[string]any{"tasks": tasks})
 	}
 
 	for _, task := range tasks {
@@ -829,22 +876,23 @@ func runTaskShow(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	mode := apiFlags.outputMode()
 	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "task id is required")
-		return 2
+		return machineUsage(stdout, stderr, mode, "task show", "task id is required")
 	}
 
 	applySessionEnvironment(apiFlags, nil)
 	client, err := newAPIClient(apiFlags)
 	if err != nil {
-		fmt.Fprintf(stderr, "create client: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, mode, "task show", "create client", err)
 	}
 	client, taskRef := scopeClientForRef(client, flags.Arg(0))
 	task, err := client.GetTask(taskRef)
 	if err != nil {
-		fmt.Fprintf(stderr, "show task: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, mode, "task show", "show task", err)
+	}
+	if mode.Machine() {
+		return cliout.WriteData(stdout, mode, "task show", map[string]any{"task": task})
 	}
 
 	printTaskDetail(stdout, task)
@@ -918,15 +966,14 @@ func runTaskEdit(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	mode := apiFlags.outputMode()
 	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "task id is required")
-		return 2
+		return machineUsage(stdout, stderr, mode, "task edit", "task id is required")
 	}
 	applySessionEnvironment(apiFlags, nil)
 	client, err := newAPIClient(apiFlags)
 	if err != nil {
-		fmt.Fprintf(stderr, "create client: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, mode, "task edit", "create client", err)
 	}
 
 	input := flowclient.EditTaskInput{}
@@ -976,8 +1023,10 @@ func runTaskEdit(args []string, stdout, stderr io.Writer) int {
 	client, taskRef := scopeClientForRef(client, flags.Arg(0))
 	task, err := client.EditTask(taskRef, input)
 	if err != nil {
-		fmt.Fprintf(stderr, "edit task: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, mode, "task edit", "edit task", err)
+	}
+	if mode.Machine() {
+		return cliout.WriteData(stdout, mode, "task edit", map[string]any{"task": task})
 	}
 
 	printTaskLine(stdout, task)
@@ -1032,21 +1081,22 @@ func runFeatureCreate(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	mode := apiFlags.outputMode()
 	if strings.TrimSpace(title) == "" {
-		fmt.Fprintln(stderr, "--title is required")
-		return 2
+		return machineUsage(stdout, stderr, mode, "feature create", "--title is required")
 	}
 
 	applySessionEnvironment(apiFlags, nil)
 	client, err := newAPIClient(apiFlags)
 	if err != nil {
-		fmt.Fprintf(stderr, "create client: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, mode, "feature create", "create client", err)
 	}
 	feature, err := client.CreateFeature(flowclient.CreateFeatureInput{Title: title, Body: body, ParentItemID: parentItemID})
 	if err != nil {
-		fmt.Fprintf(stderr, "create feature: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, mode, "feature create", "create feature", err)
+	}
+	if mode.Machine() {
+		return cliout.WriteData(stdout, mode, "feature create", map[string]any{"feature": feature.Feature})
 	}
 	printFeatureLine(stdout, feature.Feature)
 	return 0
@@ -1071,8 +1121,13 @@ func runFeatureList(args []string, stdout, stderr io.Writer) int {
 	}
 	features, err := client.ListFeatures(status)
 	if err != nil {
-		fmt.Fprintf(stderr, "list features: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, apiFlags.outputMode(), "feature list", "list features", err)
+	}
+	if apiFlags.outputMode().Machine() {
+		if features == nil {
+			features = []contract.FeatureResponse{}
+		}
+		return cliout.WriteData(stdout, apiFlags.outputMode(), "feature list", map[string]any{"features": features})
 	}
 
 	for _, feature := range features {
@@ -1088,8 +1143,10 @@ func runFeatureShow(args []string, stdout, stderr io.Writer) int {
 	}
 	feature, err := parsed.client.GetFeature(featureRef)
 	if err != nil {
-		fmt.Fprintf(stderr, "show feature: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, parsed.mode, "feature show", "show feature", err)
+	}
+	if parsed.mode.Machine() {
+		return cliout.WriteData(stdout, parsed.mode, "feature show", feature)
 	}
 	printFeatureDetail(stdout, feature)
 	return 0
@@ -1242,22 +1299,23 @@ func runEpicCreate(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	mode := apiFlags.outputMode()
 	if strings.TrimSpace(title) == "" {
-		fmt.Fprintln(stderr, "--title is required")
-		return 2
+		return machineUsage(stdout, stderr, mode, "epic create", "--title is required")
 	}
 	applySessionEnvironment(apiFlags, nil)
 	client, err := newAPIClient(apiFlags)
 	if err != nil {
-		fmt.Fprintf(stderr, "create client: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, mode, "epic create", "create client", err)
 	}
 	response, err := client.CreateEpic(contract.CreateEpicRequest{
 		Title: title, Body: body, Priority: priority, CompletionPolicy: policy, ParentItemID: parent,
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "create epic: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, mode, "epic create", "create epic", err)
+	}
+	if mode.Machine() {
+		return cliout.WriteData(stdout, mode, "epic create", map[string]any{"epic": response.Epic})
 	}
 	printEpicLine(stdout, response.Epic)
 	return 0
@@ -1280,8 +1338,13 @@ func runEpicList(args []string, stdout, stderr io.Writer) int {
 	}
 	epics, err := client.ListEpics(status)
 	if err != nil {
-		fmt.Fprintf(stderr, "list epics: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, apiFlags.outputMode(), "epic list", "list epics", err)
+	}
+	if apiFlags.outputMode().Machine() {
+		if epics == nil {
+			epics = []contract.EpicResponse{}
+		}
+		return cliout.WriteData(stdout, apiFlags.outputMode(), "epic list", map[string]any{"epics": epics})
 	}
 	for _, epic := range epics {
 		printEpicLine(stdout, epic.Epic)
@@ -1296,8 +1359,10 @@ func runEpicShow(args []string, stdout, stderr io.Writer) int {
 	}
 	response, err := parsed.client.GetEpic(id)
 	if err != nil {
-		fmt.Fprintf(stderr, "show epic: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, parsed.mode, "epic show", "show epic", err)
+	}
+	if parsed.mode.Machine() {
+		return cliout.WriteData(stdout, parsed.mode, "epic show", response)
 	}
 	printEpicDetail(stdout, response)
 	return 0
@@ -1316,15 +1381,14 @@ func runEpicEdit(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	mode := apiFlags.outputMode()
 	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: flow epic edit [flags] EPIC_ID")
-		return 2
+		return machineUsage(stdout, stderr, mode, "epic edit", "usage: flow epic edit [flags] EPIC_ID")
 	}
 	applySessionEnvironment(apiFlags, nil)
 	client, err := newAPIClient(apiFlags)
 	if err != nil {
-		fmt.Fprintf(stderr, "create client: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, mode, "epic edit", "create client", err)
 	}
 	client, id := scopeClientForRef(client, flags.Arg(0))
 	input := contract.EditEpicRequest{}
@@ -1342,8 +1406,10 @@ func runEpicEdit(args []string, stdout, stderr io.Writer) int {
 	}
 	response, err := client.UpdateEpic(id, input)
 	if err != nil {
-		fmt.Fprintf(stderr, "edit epic: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, mode, "epic edit", "edit epic", err)
+	}
+	if mode.Machine() {
+		return cliout.WriteData(stdout, mode, "epic edit", map[string]any{"epic": response.Epic})
 	}
 	printEpicLine(stdout, response.Epic)
 	return 0
@@ -1357,8 +1423,10 @@ func runEpicAction(action string, args []string, stdout, stderr io.Writer) int {
 	if action == "start" {
 		result, err := parsed.client.StartEpic(id)
 		if err != nil {
-			fmt.Fprintf(stderr, "start epic: %v\n", err)
-			return 1
+			return machineError(stdout, stderr, parsed.mode, "epic start", "start epic", err)
+		}
+		if parsed.mode.Machine() {
+			return cliout.WriteData(stdout, parsed.mode, "epic start", result)
 		}
 		printContainerStart(stdout, result)
 		return 0
@@ -1374,8 +1442,10 @@ func runEpicAction(action string, args []string, stdout, stderr io.Writer) int {
 		response, err = parsed.client.ArchiveEpic(id)
 	}
 	if err != nil {
-		fmt.Fprintf(stderr, "%s epic: %v\n", action, err)
-		return 1
+		return machineError(stdout, stderr, parsed.mode, "epic "+action, action+" epic", err)
+	}
+	if parsed.mode.Machine() {
+		return cliout.WriteData(stdout, parsed.mode, "epic "+action, map[string]any{"epic": response.Epic})
 	}
 	printEpicLine(stdout, response.Epic)
 	return 0
@@ -1490,20 +1560,21 @@ func runTaskDone(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	mode := apiFlags.outputMode()
 	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "task id is required")
-		return 2
+		return machineUsage(stdout, stderr, mode, "task done", "task id is required")
 	}
 	client, err := newAPIClient(apiFlags)
 	if err != nil {
-		fmt.Fprintf(stderr, "create client: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, mode, "task done", "create client", err)
 	}
 	client, taskRef := scopeClientForRef(client, flags.Arg(0))
 	task, err := client.ForceDone(taskRef, coordinator.DoneResolution(resolution), note)
 	if err != nil {
-		fmt.Fprintf(stderr, "complete task: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, mode, "task done", "complete task", err)
+	}
+	if mode.Machine() {
+		return cliout.WriteData(stdout, mode, "task done", map[string]any{"task": task})
 	}
 	printTaskLine(stdout, task)
 	return 0
@@ -1516,8 +1587,10 @@ func runTaskReopen(args []string, stdout, stderr io.Writer) int {
 	}
 	task, err := parsed.client.ReopenTask(taskRef)
 	if err != nil {
-		fmt.Fprintf(stderr, "reopen task: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, parsed.mode, "task reopen", "reopen task", err)
+	}
+	if parsed.mode.Machine() {
+		return cliout.WriteData(stdout, parsed.mode, "task reopen", map[string]any{"task": task})
 	}
 	printTaskLine(stdout, task)
 	return 0
@@ -1713,8 +1786,13 @@ func runTaskRelations(args []string, stdout, stderr io.Writer) int {
 	client, taskRef := scopeClientForRef(client, flags.Arg(0))
 	relations, err := client.GetTaskRelations(taskRef)
 	if err != nil {
-		fmt.Fprintf(stderr, "list relations: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, apiFlags.outputMode(), "task relations", "list relations", err)
+	}
+	if apiFlags.outputMode().Machine() {
+		if relations == nil {
+			relations = []coordinator.TaskRelation{}
+		}
+		return cliout.WriteData(stdout, apiFlags.outputMode(), "task relations", map[string]any{"relations": relations})
 	}
 
 	printTaskRelations(stdout, taskRef, relations)
@@ -1736,8 +1814,10 @@ func runBoard(args []string, stdout, stderr io.Writer) int {
 	}
 	board, err := client.Board()
 	if err != nil {
-		fmt.Fprintf(stderr, "load board: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, apiFlags.outputMode(), "board", "load board", err)
+	}
+	if apiFlags.outputMode().Machine() {
+		return cliout.WriteData(stdout, apiFlags.outputMode(), "board", map[string]any{"board": board})
 	}
 
 	printBoard(stdout, board)
@@ -1745,9 +1825,15 @@ func runBoard(args []string, stdout, stderr io.Writer) int {
 }
 
 func runReadyTasks(args []string, stdout, stderr io.Writer) int {
-	tasks, code := fetchReadyTasks(args, stderr)
+	tasks, mode, code := fetchReadyTasks(args, stdout, stderr, "ready")
 	if code != 0 {
 		return code
+	}
+	if mode.Machine() {
+		if tasks == nil {
+			tasks = []coordinator.Task{}
+		}
+		return cliout.WriteData(stdout, mode, "ready", map[string]any{"tasks": tasks})
 	}
 	for _, task := range tasks {
 		printTaskLine(stdout, task)
@@ -1756,9 +1842,16 @@ func runReadyTasks(args []string, stdout, stderr io.Writer) int {
 }
 
 func runNextTask(args []string, stdout, stderr io.Writer) int {
-	tasks, code := fetchReadyTasks(args, stderr)
+	tasks, mode, code := fetchReadyTasks(args, stdout, stderr, "next")
 	if code != 0 {
 		return code
+	}
+	if mode.Machine() {
+		var next *coordinator.Task
+		if len(tasks) > 0 {
+			next = &tasks[0]
+		}
+		return cliout.WriteData(stdout, mode, "next", map[string]any{"task": next})
 	}
 	if len(tasks) == 0 {
 		fmt.Fprintln(stdout, "no ready tasks")
@@ -1770,32 +1863,30 @@ func runNextTask(args []string, stdout, stderr io.Writer) int {
 
 // fetchReadyTasks lists the tasks an agent could start right now: unscheduled
 // with no unresolved blockers, ordered by priority then creation time.
-func fetchReadyTasks(args []string, stderr io.Writer) ([]coordinator.Task, int) {
+func fetchReadyTasks(args []string, stdout, stderr io.Writer, command string) ([]coordinator.Task, cliout.Mode, int) {
 	flags := flag.NewFlagSet("ready", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
 	var tag string
 	flags.StringVar(&tag, "tag", "", "comma-separated tag slugs")
 	if err := flags.Parse(args); err != nil {
-		return nil, 2
+		return nil, cliout.ModeHuman, 2
 	}
+	mode := apiFlags.outputMode()
 	if flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: flow ready|next [--tag TAG]")
-		return nil, 2
+		return nil, mode, machineUsage(stdout, stderr, mode, command, "usage: flow ready|next [--tag TAG]")
 	}
 
 	applySessionEnvironment(apiFlags, nil)
 	client, err := newAPIClient(apiFlags)
 	if err != nil {
-		fmt.Fprintf(stderr, "create client: %v\n", err)
-		return nil, 1
+		return nil, mode, machineError(stdout, stderr, mode, command, "create client", err)
 	}
 	tasks, err := client.ListTasks(flowclient.TaskFilter{Ready: true, TagSlugs: parseCSV(tag)})
 	if err != nil {
-		fmt.Fprintf(stderr, "list ready tasks: %v\n", err)
-		return nil, 1
+		return nil, mode, machineError(stdout, stderr, mode, command, "list ready tasks", err)
 	}
-	return tasks, 0
+	return tasks, mode, 0
 }
 
 // runWait polls tasks until they reach the requested condition. Exit codes:
@@ -1819,36 +1910,31 @@ func runWait(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	mode := apiFlags.outputMode()
 	if flags.NArg() == 0 {
-		fmt.Fprintln(stderr, "usage: flow wait [flags] TASK_ID...")
-		return 2
+		return machineUsage(stdout, stderr, mode, "wait", "usage: flow wait [flags] TASK_ID...")
 	}
 	if anyMode && allMode {
-		fmt.Fprintln(stderr, "--any and --all conflict")
-		return 2
+		return machineUsage(stdout, stderr, mode, "wait", "--any and --all conflict")
 	}
 	switch until {
 	case "done", "blocked", "scheduled", "in_progress":
 	default:
-		fmt.Fprintf(stderr, "invalid --until %q: want done|blocked|scheduled|in_progress\n", until)
-		return 2
+		return machineUsage(stdout, stderr, mode, "wait", fmt.Sprintf("invalid --until %q: want done|blocked|scheduled|in_progress", until))
 	}
 	timeout, err := time.ParseDuration(timeoutText)
 	if err != nil || timeout <= 0 {
-		fmt.Fprintf(stderr, "invalid --timeout %q: use a Go duration with units (e.g. 30s, 5m)\n", timeoutText)
-		return 2
+		return machineUsage(stdout, stderr, mode, "wait", fmt.Sprintf("invalid --timeout %q: use a Go duration with units (e.g. 30s, 5m)", timeoutText))
 	}
 	interval, err := time.ParseDuration(intervalText)
 	if err != nil || interval <= 0 {
-		fmt.Fprintf(stderr, "invalid --poll-interval %q: use a Go duration with units (e.g. 2s, 500ms)\n", intervalText)
-		return 2
+		return machineUsage(stdout, stderr, mode, "wait", fmt.Sprintf("invalid --poll-interval %q: use a Go duration with units (e.g. 2s, 500ms)", intervalText))
 	}
 
 	applySessionEnvironment(apiFlags, nil)
 	client, err := newAPIClient(apiFlags)
 	if err != nil {
-		fmt.Fprintf(stderr, "create client: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, mode, "wait", "create client", err)
 	}
 	type waitTarget struct {
 		client *flowclient.Client
@@ -1880,14 +1966,16 @@ func runWait(args []string, stdout, stderr io.Writer) int {
 		for _, target := range targets {
 			view, err := target.client.GetTaskView(target.id)
 			if err != nil {
-				fmt.Fprintf(stderr, "get task %s: %v\n", target.id, err)
-				return 1
+				return machineError(stdout, stderr, mode, "wait", "get task "+target.id, err)
 			}
 			if matches(view) {
 				matched = append(matched, view.Task)
 			}
 		}
 		if (anyMode && len(matched) > 0) || (!anyMode && len(matched) == len(targets)) {
+			if mode.Machine() {
+				return cliout.WriteData(stdout, mode, "wait", map[string]any{"tasks": matched, "until": until})
+			}
 			for _, task := range matched {
 				printTaskLine(stdout, task)
 			}
@@ -1895,7 +1983,11 @@ func runWait(args []string, stdout, stderr io.Writer) int {
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			fmt.Fprintf(stderr, "wait: timed out after %s waiting for %s (%d/%d tasks matched)\n", timeout, until, len(matched), len(targets))
+			message := fmt.Sprintf("timed out after %s waiting for %s (%d/%d tasks matched)", timeout, until, len(matched), len(targets))
+			if mode.Machine() {
+				return cliout.WriteFailure(stdout, mode, "wait", "wait_timeout", message, 3)
+			}
+			fmt.Fprintf(stderr, "wait: %s\n", message)
 			return 3
 		}
 		if interval < remaining {
@@ -3314,27 +3406,27 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	mode := apiFlags.outputMode()
 	message := strings.TrimSpace(strings.Join(flags.Args(), " "))
 	if message == "" {
-		fmt.Fprintln(stderr, "status message is required")
-		return 2
+		return machineUsage(stdout, stderr, mode, "status", "status message is required")
 	}
 
 	applySessionEnvironment(apiFlags, &sessionID)
 	if sessionID == "" {
-		fmt.Fprintln(stderr, "session id is required")
-		return 2
+		return machineUsage(stdout, stderr, mode, "status", "session id is required")
 	}
 
 	client, err := newAPIClient(apiFlags)
 	if err != nil {
-		fmt.Fprintf(stderr, "create client: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, mode, "status", "create client", err)
 	}
 	status, err := client.WriteSessionStatus(sessionID, message, kind)
 	if err != nil {
-		fmt.Fprintf(stderr, "write status: %v\n", err)
-		return 1
+		return machineError(stdout, stderr, mode, "status", "write status", err)
+	}
+	if mode.Machine() {
+		return cliout.WriteData(stdout, mode, "status", map[string]any{"status": status})
 	}
 
 	fmt.Fprintf(stdout, "%d\t%s\t%s\n", status.ID, status.TaskID, status.Message)
@@ -3973,11 +4065,15 @@ func printUsage(out io.Writer) {
 Global flags:
   --log-level LEVEL   structured log level: debug, info, warn, error, or off (overrides LOG_LEVEL)
   --config PATH       client config path for owner commands (also accepted on those commands for compatibility)
+  --json              print command results as bare JSON on stdout (machine contract v1)
+  --agent             print versioned JSON envelopes with structured errors (implies --json)
 
 API override flags on owner commands:
   --server URL        coordinator server URL
   --token TOKEN       bearer token
   --project PROJECT   project id or name
+  --json              bare JSON result on stdout
+  --agent             versioned JSON envelope on stdout (implies --json)
 `)
 }
 
@@ -4093,11 +4189,40 @@ type apiFlagValues struct {
 	serverURL  string
 	token      string
 	project    string
+	jsonOut    bool
+	agentOut   bool
+}
+
+// outputMode resolves the machine-readable output contract requested via
+// --json/--agent (global or command-local placement both land here).
+func (values *apiFlagValues) outputMode() cliout.Mode {
+	return cliout.FromFlags(values.jsonOut, values.agentOut)
+}
+
+// machineError renders err through the machine contract when active,
+// otherwise prints "context: err" to stderr. Returns the exit code (1).
+func machineError(stdout, stderr io.Writer, mode cliout.Mode, command, context string, err error) int {
+	if mode.Machine() {
+		return cliout.WriteError(stdout, mode, command, err)
+	}
+	fmt.Fprintf(stderr, "%s: %v\n", context, err)
+	return 1
+}
+
+// machineUsage renders a usage error through the machine contract when
+// active, otherwise prints the message to stderr. Returns the exit code (2).
+func machineUsage(stdout, stderr io.Writer, mode cliout.Mode, command, message string) int {
+	if mode.Machine() {
+		return cliout.WriteUsageError(stdout, mode, command, message)
+	}
+	fmt.Fprintln(stderr, message)
+	return 2
 }
 
 type parsedAPICommand struct {
 	flags  *flag.FlagSet
 	client *flowclient.Client
+	mode   cliout.Mode
 }
 
 type stringSliceFlag struct {
@@ -4126,6 +4251,8 @@ func addAPIFlags(flags *flag.FlagSet) *apiFlagValues {
 	flags.StringVar(&values.serverURL, "server", "", "coordinator server URL")
 	flags.StringVar(&values.token, "token", "", "owner bearer token")
 	flags.StringVar(&values.project, "project", "", "project id or name (default: auto-detect from the current repo)")
+	flags.BoolVar(&values.jsonOut, "json", false, "print the result as bare JSON on stdout")
+	flags.BoolVar(&values.agentOut, "agent", false, "print a versioned JSON envelope (contract v1) on stdout; implies --json")
 	return values
 }
 
@@ -4151,7 +4278,7 @@ func parseAPICommand(args []string, stderr io.Writer, name string, positionalCou
 		return parsedAPICommand{}, 1
 	}
 
-	return parsedAPICommand{flags: flags, client: client}, 0
+	return parsedAPICommand{flags: flags, client: client, mode: apiFlags.outputMode()}, 0
 }
 
 func parseScopedTaskAPICommand(args []string, stderr io.Writer, name string, positionalCount int, positionalError string) (parsedAPICommand, string, int) {

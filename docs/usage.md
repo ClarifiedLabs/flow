@@ -99,6 +99,57 @@ starts a new Unscheduled run, including after a merge.
 
 Inspect the active run and its node history with `flow task workflow TASK_ID`.
 
+## Machine-readable output (--json / --agent)
+
+Every API-backed command accepts `--json` and `--agent`, either globally
+(`flow --agent task list`) or on the command (`flow task list --agent`).
+Both modes write machine output to **stdout**; human diagnostics stay on
+stderr. The schema is contract **v1** (`internal/cliout`); breaking changes
+bump the version.
+
+- `--json` prints the command's result as one bare JSON object.
+- `--agent` wraps it in a versioned envelope and structures errors:
+
+```json
+{
+  "contract_version": 1,
+  "command": "task create",
+  "ok": true,
+  "data": { "task": { "id": "t-demo-0001" }, "reused": false, "attachments": [] }
+}
+```
+
+On failure the envelope carries the server's error code and a message:
+
+```json
+{
+  "contract_version": 1,
+  "command": "task show",
+  "ok": false,
+  "error": { "code": "task_not_found", "message": "task t-demo-9999 not found" }
+}
+```
+
+Exit codes are stable: `0` success, `1` command error, `2` usage error, plus
+domain codes such as `flow wait`'s `3` (timeout, reported as
+`error.code = "wait_timeout"`). Usage errors report `error.code =
+"usage_error"`. `--json` failures print a bare `{"error": {...}}` object.
+
+Every command's `data` is a JSON object so fields can be added without
+breaking the contract. Currently covered: `task create|list|show|edit|done|
+reopen|relations`, `feature create|list|show`, `epic create|list|show|edit|
+start|complete|reopen|archive`, `board`, `ready`, `next`, `wait`, and
+`status`. Show commands return the API v2 response object as `data`; other
+commands key their payload (`{"task": ...}`, `{"tasks": [...]}`,
+`{"board": ...}`, ...). Agents should treat unknown keys as forward
+compatible.
+
+```sh
+flow --agent task create --title "Wire retries"   # {"task": ..., "reused": false}
+flow --agent next                                 # {"task": {...}} or {"task": null}
+flow --agent wait t-demo-0001 --until done        # exit 0/3, envelope either way
+```
+
 ## Common CLI Commands
 
 Once `flow-server serve` has written `$XDG_CONFIG_HOME/flow/config.yaml`, owner
