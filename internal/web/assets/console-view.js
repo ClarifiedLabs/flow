@@ -3,7 +3,7 @@
 
 import { apiDelete, apiGet, apiPost, consoleAPIPath, consoleState, taskConsoleAPIPath } from "./api.js";
 import { CONSOLE_REFRESH_MS, DEFAULT_CONSOLE_HARNESSES } from "./config.js";
-import { renderHarnessOptions } from "./harness-models.js";
+import { renderHarnessOptions } from "./models/harness-form.js";
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
 import { terminalSelectionHint } from "./terminal.js";

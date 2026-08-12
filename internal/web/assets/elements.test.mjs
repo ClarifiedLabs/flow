@@ -50,7 +50,8 @@ const { handleFormSubmit } = await import("./forms.js");
 const { diffUnavailable } = await import("./elements/change.js");
 const { renderChangeRoute } = await import("./change-route.js");
 const { renderInlineThread } = await import("./elements/inline-thread.js");
-const { renderOwnerRulingsPanel } = await import("./elements/task-detail.js");
+const { renderOwnerRulingsPanel } = await import("./elements/task-detail-view.js");
+await import("./elements/task-detail.js");
 
 const HOUR = 3600_000;
 

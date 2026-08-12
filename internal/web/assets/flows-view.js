@@ -4,7 +4,8 @@
 
 import { agentDefsAPIBase, apiDelete, apiGet, apiPatch, apiPost, flowsAPIBase, globalAgentDefsAPIBase } from "./api.js";
 import { DEFAULT_AGENT_HARNESSES } from "./config.js";
-import { HARNESS_REASONING_UNAVAILABLE, findHarnessModel, harnessModels, harnessReasoningLevelValues, renderHarnessModelOptions, renderHarnessOptions } from "./harness-models.js";
+import { HARNESS_REASONING_UNAVAILABLE, findHarnessModel, harnessModels, harnessReasoningLevelValues } from "./models/harness-catalog.js";
+import { renderHarnessModelOptions, renderHarnessOptions } from "./models/harness-form.js";
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
 import { renderWorkflowGraph } from "./workflow-graph.js";

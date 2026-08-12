@@ -9,7 +9,7 @@ import { apiGet, apiPost, taskConsoleAPIPath, taskAPIBase, taskHref, flowsAPIBas
 import { readSelectedProjects, writeSelectedProjects, writeWorkProject, terminalSessionIDForPath, pollConfigForPath, readThemePreference, writeThemePreference, applyThemePreference } from "./storage.js";
 import { renderNavLink, renderNavTrigger, THEME_ICONS, THEME_OPTIONS } from "./nav.js";
 import { isWorkPath, workViewHref } from "./work-nav.js";
-import { normalizeHarnessOptions } from "./harness-models.js";
+import { normalizeHarnessOptions } from "./models/harness-catalog.js";
 import { openTerminalWindow, closeTerminalDialog, hideInlineTerminal, closeTerminalModalLayers } from "./terminal.js";
 import { pollDelay, Poller } from "./poller.js";
 import { renderWorkersView, renderJobsView } from "./diagnostics-view.js";
@@ -36,7 +36,8 @@ export * from "./config.js";
 export * from "./api.js";
 export * from "./storage.js";
 export * from "./nav.js";
-export * from "./harness-models.js";
+export * from "./models/harness-catalog.js";
+export * from "./models/harness-form.js";
 export * from "./terminal.js";
 export * from "./board.js";
 export * from "./board-model.js";

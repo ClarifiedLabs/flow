@@ -195,9 +195,9 @@ func lifecycleJSConsts(t *testing.T) map[string]string {
 }
 
 func TestLifecycleControlTargetsCoverTransitions(t *testing.T) {
-	taskModelSource, err := os.ReadFile(filepath.Join("assets", "task-model.js"))
+	taskModelSource, err := os.ReadFile(filepath.Join("assets", "models", "lifecycle-options.js"))
 	if err != nil {
-		t.Fatalf("read assets/task-model.js: %v", err)
+		t.Fatalf("read assets/models/lifecycle-options.js: %v", err)
 	}
 	// Extract LIFECYCLE_TARGET_OPTIONS values: { value: "..." } entries.
 	targetRE := regexp.MustCompile(`value:\s*"([^"]+)"`)
@@ -205,7 +205,7 @@ func TestLifecycleControlTargetsCoverTransitions(t *testing.T) {
 	sectionRE := regexp.MustCompile(`(?s)LIFECYCLE_TARGET_OPTIONS\s*=\s*\[([^\]]*)\]`)
 	section := sectionRE.FindStringSubmatch(string(taskModelSource))
 	if section == nil {
-		t.Fatalf("no LIFECYCLE_TARGET_OPTIONS found in assets/task-model.js")
+		t.Fatalf("no LIFECYCLE_TARGET_OPTIONS found in assets/models/lifecycle-options.js")
 	}
 	for _, m := range targetRE.FindAllStringSubmatch(section[1], -1) {
 		rawTargets[m[1]] = true

@@ -11,11 +11,12 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 )
 
-// The task-relations verdict (blockerVerdict in assets/task-model.js) keeps
+// The task-relations verdict (blockerVerdict in assets/models/relations.js) keeps
 // its own copy of the server's lifecycle vocabulary: LIFECYCLE_UNFINISHED
 // lists every state that confirms a blocker ("" is the wire encoding of a
 // valid unscheduled task — the relation payload's SourceState is a non-pointer
-// LifecycleState), and LIFECYCLE_DONE is the one state that clears a blocker.
+// LifecycleState), and LIFECYCLE_DONE — defined in the shared lifecycle
+// vocabulary, assets/lifecycle.js — is the one state that clears a blocker.
 // The server side of the vocabulary is enumerated in coordinator.AllLifecycleStates
 // (kept exhaustive by TestAllLifecycleStatesExhaustive in internal/coordinator,
 // which parses every LifecycleState constant in the coordinator package with
@@ -568,7 +569,7 @@ func jsExportedSetMembers(source, anchor string) ([]string, error) {
 		}
 	}
 	if start < 0 {
-		return nil, fmt.Errorf("assets/task-model.js is missing `export const %s = new Set([...])`; the verdict vocabulary has no anchor to check", anchor)
+		return nil, fmt.Errorf("the relations anchor source is missing `export const %s = new Set([...])`; the verdict vocabulary has no anchor to check", anchor)
 	}
 	// The Set argument must be exactly a plain array whose elements are all
 	// string literals: after the opening bracket or a comma the only legal
@@ -692,26 +693,35 @@ func jsExportedString(source, anchor string) (string, error) {
 		}
 		return next.text, nil
 	}
-	return "", fmt.Errorf("assets/task-model.js is missing `export const %s = \"...\"`; the done marker has no anchor to check", anchor)
+	return "", fmt.Errorf("the lifecycle anchor source is missing `export const %s = \"...\"`; the done marker has no anchor to check", anchor)
 }
 
-func readTaskModelJS(t *testing.T) string {
+func readRelationsJS(t *testing.T) string {
 	t.Helper()
-	source, err := os.ReadFile("assets/task-model.js")
+	source, err := os.ReadFile("assets/models/relations.js")
 	if err != nil {
-		t.Fatalf("read assets/task-model.js: %v", err)
+		t.Fatalf("read assets/models/relations.js: %v", err)
+	}
+	return string(source)
+}
+
+// The done marker's canonical home is the shared lifecycle vocabulary, so its
+// literal is anchored there rather than duplicated into the relations module.
+func readLifecycleJS(t *testing.T) string {
+	t.Helper()
+	source, err := os.ReadFile("assets/lifecycle.js")
+	if err != nil {
+		t.Fatalf("read assets/lifecycle.js: %v", err)
 	}
 	return string(source)
 }
 
 func TestTaskRelationsLifecycleParity(t *testing.T) {
-	source := readTaskModelJS(t)
-
-	unfinished, err := jsExportedSetMembers(source, "LIFECYCLE_UNFINISHED")
+	unfinished, err := jsExportedSetMembers(readRelationsJS(t), "LIFECYCLE_UNFINISHED")
 	if err != nil {
 		t.Fatal(err)
 	}
-	done, err := jsExportedString(source, "LIFECYCLE_DONE")
+	done, err := jsExportedString(readLifecycleJS(t), "LIFECYCLE_DONE")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -972,7 +982,7 @@ func TestJSTemplateInterpolationRegex(t *testing.T) {
 }
 
 func TestJSTemplateNestedInterpolationDoesNotDesync(t *testing.T) {
-	// task-model.js renders a repeat visit with a template literal nested inside
+	// models/task-run.js renders a repeat visit with a template literal nested inside
 	// a ${...} interpolation — `... ${visit > 1 ? ` · ×${visit - 1}` : ""}`. A
 	// tokenizer that advances to the next backtick without tracking
 	// interpolations stops at the nested template's opening backtick and lexes
