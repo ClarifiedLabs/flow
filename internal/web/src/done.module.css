@@ -1,0 +1,72 @@
+/* Done view (.done-*). flow-app scoped until the view gets an element. */
+
+.done-view {
+  display: grid;
+  gap: 14px;
+}
+
+.done-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.done-filters,
+.done-density {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.done-list {
+  display: grid;
+  gap: 8px;
+}
+
+.done-list[data-density="extended"] {
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  align-items: start;
+}
+
+.done-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--ph, var(--line-2));
+  border-radius: var(--radius);
+  padding: 8px 11px;
+}
+
+.done-row-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ink);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+  transition: color 120ms ease;
+}
+
+.done-row-title:hover {
+  color: var(--accent);
+}
+
+.done-row-meta {
+  color: var(--ink-2);
+  font-size: 0.75rem;
+}
+
+.done-row-meta a {
+  color: inherit;
+}
+
+.done-more {
+  display: flex;
+  justify-content: center;
+}

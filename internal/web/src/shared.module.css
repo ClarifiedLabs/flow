@@ -1,0 +1,575 @@
+/* Cross-component primitives: buttons, badges, cards, pills, tables,
+   feed rows, the shared step rail. Scoped by the manifest to flow-app. */
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.board {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+.cards {
+  display: grid;
+  gap: 8px;
+}
+
+.chip {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 4px 11px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+
+.chip:hover {
+  border-color: var(--line-2);
+  color: var(--ink);
+}
+
+.chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--ph, var(--line-2));
+  border-radius: var(--radius);
+  padding: 10px 11px;
+  min-width: 0;
+  transition: border-color 120ms ease;
+}
+
+.card:hover {
+  border-color: var(--line-2);
+  border-left-color: var(--ph, var(--line-2));
+}
+
+[data-phase="triage"] {
+  --ph: var(--ph-triage);
+  --ph-bg: var(--ph-triage-bg);
+}
+
+[data-phase="backlog"] {
+  --ph: var(--ph-backlog);
+  --ph-bg: var(--ph-backlog-bg);
+}
+
+[data-phase="up_next"] {
+  --ph: var(--ph-upnext);
+  --ph-bg: var(--ph-upnext-bg);
+}
+
+[data-phase="authoring"] {
+  --ph: var(--ph-authoring);
+  --ph-bg: var(--ph-authoring-bg);
+}
+
+[data-phase="planning"] {
+  --ph: var(--ph-planning);
+  --ph-bg: var(--ph-planning-bg);
+}
+
+[data-phase="critique"] {
+  --ph: var(--ph-critique);
+  --ph-bg: var(--ph-critique-bg);
+}
+
+[data-phase="approved"] {
+  --ph: var(--ph-approved);
+  --ph-bg: var(--ph-approved-bg);
+}
+
+[data-phase="merged"] {
+  --ph: var(--ph-merged);
+  --ph-bg: var(--ph-merged-bg);
+}
+
+[data-phase="dead"] {
+  --ph: var(--ph-dead);
+  --ph-bg: var(--ph-dead-bg);
+}
+
+[data-phase="blocked"] {
+  --ph: var(--st-blocked);
+  --ph-bg: var(--st-blocked-bg);
+}
+
+/* A task waiting on a person and a task that failed are different problems,
+   so they get different tones rather than sharing "blocked". */
+[data-phase="await"] {
+  --ph: var(--ph-await);
+  --ph-bg: var(--ph-await-bg);
+}
+
+[data-phase="danger"] {
+  --ph: var(--st-danger);
+  --ph-bg: var(--st-danger-bg);
+}
+
+.card-title {
+  color: var(--ink);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 0.8125rem;
+  display: block;
+  overflow-wrap: anywhere;
+  transition: color 120ms ease;
+}
+
+.card-title:hover {
+  color: var(--accent);
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.6875rem;
+  margin-top: 8px;
+}
+
+.card-current-step {
+  color: var(--ink-2);
+  font-size: 0.75rem;
+  line-height: 1.35;
+  margin-top: 4px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card[data-phase="authoring"] .card-current-step {
+  width: fit-content;
+  border-radius: var(--radius);
+  padding: 2px 7px;
+  color: var(--ph);
+  background: var(--ph-bg);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: var(--radius);
+  padding: 2px 7px;
+  font-size: 0.6875rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ph, var(--st-idle));
+  background: var(--ph-bg, var(--st-idle-bg));
+  white-space: nowrap;
+}
+
+.badge.ok {
+  --ph: var(--st-ok);
+  --ph-bg: var(--st-ok-bg);
+}
+
+.badge.warn {
+  --ph: var(--st-warn);
+  --ph-bg: var(--st-warn-bg);
+}
+
+.badge.danger {
+  --ph: var(--st-danger);
+  --ph-bg: var(--st-danger-bg);
+}
+
+.badge.blocked {
+  --ph: var(--st-blocked);
+  --ph-bg: var(--st-blocked-bg);
+}
+
+.badge.idle {
+  --ph: var(--st-idle);
+  --ph-bg: var(--st-idle-bg);
+}
+
+.badge.action {
+  --ph: var(--accent);
+  --ph-bg: var(--accent-soft);
+}
+
+.badge.run {
+  --ph: var(--ph-authoring);
+  --ph-bg: var(--ph-authoring-bg);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  flex: none;
+}
+
+tr.row-ok {
+  background: var(--st-ok-bg, transparent);
+}
+
+tr.row-danger {
+  background: var(--st-danger-bg, transparent);
+}
+
+tr.row-run {
+  background: var(--ph-authoring-bg, transparent);
+}
+
+tr.row-warn {
+  background: var(--st-warn-bg, transparent);
+}
+
+tr.row-idle {
+  background: var(--st-idle-bg, transparent);
+}
+
+.meta-quiet {
+  display: block;
+  color: var(--muted);
+  font-size: 0.71875rem;
+  line-height: 1.6;
+  margin-top: 7px;
+  overflow-wrap: anywhere;
+}
+
+.meta-quiet a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.meta-quiet a:hover {
+  text-decoration: underline;
+}
+
+.diff-add {
+  color: var(--st-ok);
+}
+
+.diff-del {
+  color: var(--st-danger);
+}
+
+.pill {
+  color: var(--muted);
+  font-size: 0.71875rem;
+  white-space: nowrap;
+}
+
+.pill-link {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.pill.warn {
+  color: var(--st-warn);
+}
+
+.card-status {
+  color: var(--ink-2);
+  font-family: var(--font-prose);
+  font-size: 0.78125rem;
+  line-height: 1.4;
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.card-status .badge {
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.empty {
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 12px;
+  background: var(--empty-bg);
+  text-align: center;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+}
+
+.empty::before {
+  content: "· ";
+}
+
+.empty::after {
+  content: " ·";
+}
+
+.actions {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.table-actions {
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-radius: var(--radius);
+  font-size: var(--text-ui);
+  font-weight: 600;
+  letter-spacing: var(--track-button);
+  padding: 6px 10px;
+  cursor: pointer;
+  min-height: 30px;
+  /* A button that navigates is still a button: an <a class="button"> must not
+     inherit the link underline. */
+  text-decoration: none;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.button:hover {
+  filter: brightness(1.08);
+}
+
+.button.secondary {
+  border-color: var(--line-2);
+  color: var(--ink-2);
+  background: var(--panel-2);
+}
+
+.button.secondary:hover {
+  color: var(--ink);
+  border-color: var(--muted);
+  filter: none;
+}
+
+.button.danger {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: var(--danger-ink);
+}
+
+/* A mutating control that is mid-flight: dimmed, unclickable, and flagged to
+   assistive tech. handleAction sets disabled + aria-busy + .is-busy
+   synchronously on click, so the pending state is visible before the request
+   even goes out. */
+.button:disabled,
+.button[aria-busy="true"],
+.button.is-busy {
+  opacity: 0.55;
+  cursor: progress;
+  pointer-events: none;
+  filter: none;
+}
+
+.icon-button {
+  width: 32px;
+  padding: 0;
+}
+
+.button-icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.feed-item .workflow-step-error {
+  color: var(--st-danger);
+}
+
+.button-link {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.session-state {
+  text-transform: capitalize;
+}
+
+.summary-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.summary-strip span,
+.muted {
+  color: var(--muted);
+  font-size: 0.71875rem;
+}
+
+.summary-strip span {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  padding: 3px 8px;
+}
+
+.feed {
+  display: grid;
+  gap: 8px;
+}
+
+.feed-item {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 9px 10px;
+  background: var(--panel);
+}
+
+.feed-item strong {
+  font-weight: 600;
+}
+
+.feed-item a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.feed-item a:hover {
+  text-decoration: underline;
+}
+
+.feed-item > span {
+  color: var(--muted);
+  font-size: 0.71875rem;
+  margin-left: 8px;
+}
+
+.feed-item p {
+  margin: 6px 0 0;
+  font-family: var(--font-prose);
+  font-size: 0.78125rem;
+  color: var(--ink-2);
+}
+
+.table-wrap {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 680px;
+  font-variant-numeric: tabular-nums;
+}
+
+.table-wrap.compact table {
+  min-width: 420px;
+}
+
+th,
+td {
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  padding: 9px 12px;
+  vertical-align: top;
+  font-size: 0.78125rem;
+}
+
+tbody tr:nth-child(even) td {
+  background: var(--panel-2);
+}
+
+tbody tr.inline-terminal-row td,
+tbody tr:nth-child(even).inline-terminal-row td {
+  background: var(--rail);
+}
+
+th {
+  color: var(--muted);
+  font-size: 0.65625rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  background: var(--rail);
+}
+
+.card-project-badge {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.625rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+
+/* Step rail. Shared because the card, the dense table row and the standalone
+   <flow-step-rail> all inline the same markup; scoping it to one of them would
+   leave it unstyled in the others. */
+.rail {
+  display: flex;
+  gap: 2px;
+  flex: none;
+}
+
+.rail i {
+  display: block;
+  width: 16px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line);
+}
+
+.rail i[data-seg="done"] {
+  background: var(--ink-2);
+}
+
+.rail i[data-seg="current"] {
+  background: var(--ph, var(--accent));
+}
+
+.rail-label {
+  font-size: var(--text-meta);
+  color: var(--ph, var(--muted));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.rail-label.is-idle {
+  color: var(--muted);
+}

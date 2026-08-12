@@ -23,7 +23,21 @@ var assetFS embed.FS
 // then shared chrome, then components.
 var cssModules = []struct{ Name, Scope string }{
 	{"tokens.module.css", ""},
-	{"base.module.css", "flow-app"},
+	// flow-app chrome and view sheets, split from the old base catch-all by
+	// domain. Order preserves the old file's relative rule order.
+	{"chrome.module.css", "flow-app"},
+	{"nav.module.css", "flow-app"},
+	{"shared.module.css", "flow-app"},
+	{"done.module.css", "flow-app"},
+	{"tasks.module.css", "flow-app"},
+	{"detail.module.css", "flow-app"},
+	{"timeline.module.css", "flow-app"},
+	{"terminal.module.css", "flow-app"},
+	{"forms.module.css", "flow-app"},
+	{"charts.module.css", "flow-app"},
+	{"flows.module.css", "flow-app"},
+	{"markdown.module.css", "flow-app"},
+	{"diff-tables.module.css", "flow-app"},
 	{"board.module.css", "flow-board"},
 	{"board-sort.module.css", "flow-board-sort"},
 	{"attention-strip.module.css", "flow-attention-strip"},

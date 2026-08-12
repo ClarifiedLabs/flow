@@ -1,0 +1,278 @@
+/* Flows view: sections, tables, flow editor, agent definitions. */
+
+.flows-detail {
+  width: 100%;
+  max-width: none;
+}
+
+.project-choice-list {
+  display: grid;
+  gap: 8px;
+  max-width: 560px;
+}
+
+.project-choice {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.project-choice:hover {
+  border-color: var(--accent);
+  background: var(--panel-2);
+}
+
+.project-switcher {
+  position: relative;
+  display: inline-block;
+  margin-bottom: 6px;
+}
+
+.project-switcher summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  list-style: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.2;
+}
+
+.project-switcher summary::-webkit-details-marker {
+  display: none;
+}
+
+.project-switcher summary::after {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+}
+
+.project-switcher-menu {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  z-index: 30;
+  min-width: 220px;
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+}
+
+.project-switcher-item {
+  display: block;
+  padding: 6px 8px;
+  border-radius: 4px;
+  color: var(--ink);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.project-switcher-item:hover,
+.project-switcher-item[aria-current="page"] {
+  background: var(--panel-2);
+}
+
+.flows-section {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.flows-section + .flows-section {
+  margin-top: 18px;
+}
+
+.flows-section .table-wrap {
+  min-width: 0;
+}
+
+.flows-section .table-actions {
+  gap: 6px;
+  margin-top: 0;
+}
+
+.flows-table .flow-name-column,
+.flows-table .flow-nodes-column,
+.flows-table .flow-actions-column {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.flows-table .flow-graph-column {
+  width: 100%;
+}
+
+.flows-section td .workflow-chart {
+  min-width: 420px;
+  max-height: 340px;
+  margin-top: 0;
+}
+
+.flow-graph-summary {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.6875rem;
+  overflow-wrap: anywhere;
+}
+
+.flow-editor .workflow-chart {
+  min-height: 110px;
+}
+
+.agent-def-table {
+  min-width: 800px;
+}
+
+.agent-def-table .agent-def-actions-column {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.agent-def-table input,
+.agent-def-table select,
+.agent-def-table textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--ink);
+  padding: 8px 9px;
+  font-size: 0.8125rem;
+}
+
+.agent-def-table input:focus,
+.agent-def-table select:focus,
+.agent-def-table textarea:focus {
+  border-color: var(--accent);
+}
+
+.agent-def-name-editor {
+  display: grid;
+  gap: 6px;
+}
+
+.agent-def-name-editor .badge {
+  width: fit-content;
+}
+
+.agent-def-edit-row td,
+tbody tr:nth-child(even).agent-def-edit-row td,
+.agent-def-prompt-row td,
+tbody tr:nth-child(even).agent-def-prompt-row td {
+  background: var(--panel-2);
+}
+
+.agent-def-prompt-field {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.65625rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.agent-def-prompt-field textarea {
+  min-height: 112px;
+  font-family: var(--font-prose);
+  font-weight: 400;
+  letter-spacing: normal;
+  resize: vertical;
+  text-transform: none;
+}
+
+.agent-def-add-row td {
+  height: 48px;
+  vertical-align: middle;
+}
+
+.flow-editor {
+  grid-template-columns: minmax(220px, 1fr) minmax(260px, 1.2fr);
+  align-items: start;
+}
+
+.flow-editor textarea[name="flow_description"] {
+  min-height: 64px;
+}
+
+.flow-rows-head {
+  color: var(--muted);
+  font-size: 0.65625rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  margin: 4px 0 -4px;
+  text-transform: uppercase;
+}
+
+.flow-row-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.flow-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(180px, 1.25fr) minmax(96px, 120px) auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.flow-row[data-review-row] {
+  grid-template-columns: minmax(128px, 160px) minmax(180px, 1fr) minmax(110px, auto) auto;
+}
+
+.flow-row .check {
+  align-self: center;
+  margin: 0;
+}
+
+.flow-row-controls {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.flow-row-controls .button {
+  flex: none;
+}
+
+.flow-row-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+@media (max-width: 760px) {
+  .flow-editor {
+    grid-template-columns: 1fr;
+  }
+
+  .flow-row,
+  .flow-row[data-review-row] {
+    grid-template-columns: 1fr;
+  }
+
+  .flow-row-controls {
+    justify-content: flex-start;
+  }
+}

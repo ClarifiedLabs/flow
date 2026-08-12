@@ -1,0 +1,385 @@
+/* Task/flow forms, relations picker, attachments, console controls. */
+
+.task-state-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin: 0;
+}
+
+.task-state-form label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 0.65625rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.task-state-form select {
+  min-width: 118px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--ink);
+  padding: 6px 8px;
+  font-size: 0.75rem;
+  letter-spacing: normal;
+  text-transform: none;
+  font-weight: 400;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.summary-grid div,
+.check-row {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 9px 10px;
+  min-width: 0;
+}
+
+.summary-grid span,
+.check-row span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.65625rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.summary-grid strong,
+.check-row strong {
+  display: block;
+  margin-top: 4px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.check-list {
+  display: grid;
+  gap: 8px;
+}
+
+.check-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+}
+
+.check-state {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.check-action {
+  white-space: nowrap;
+}
+
+.check-row p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--ink-2);
+  font-family: var(--font-prose);
+  font-size: 0.78125rem;
+  overflow-wrap: anywhere;
+}
+
+.task-form {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(96px, 120px) minmax(160px, 200px);
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.task-form label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.65625rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.task-form input,
+.task-form select,
+.task-form textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--ink);
+  padding: 8px 9px;
+  font-size: 0.8125rem;
+  letter-spacing: normal;
+  text-transform: none;
+  font-weight: 400;
+  transition: border-color 120ms ease;
+}
+
+.task-form textarea {
+  font-family: var(--font-prose);
+}
+
+.task-form input:focus,
+.task-form select:focus,
+.task-form textarea:focus {
+  border-color: var(--accent);
+}
+
+.task-form .wide,
+.form-actions {
+  grid-column: 1 / -1;
+}
+
+.task-form .harness-model-fields {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(180px, 240px);
+  gap: 12px;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.task-form .harness-model-fields[hidden] {
+  display: none;
+}
+
+.task-form .harness-model-fields [data-harness-model-controls],
+.task-form .harness-reasoning {
+  display: contents;
+}
+
+.task-form .harness-reasoning label[hidden] {
+  display: none;
+}
+
+.task-form .check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 0.78125rem;
+}
+
+.task-form .check input {
+  width: auto;
+  accent-color: var(--accent);
+}
+
+/* Relations picker (create mode only): generic work-item links declared in
+   the original create request. */
+.relation-picker {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.relation-picker-label {
+  color: var(--muted);
+  font-size: 0.65625rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.relation-rows {
+  display: grid;
+  gap: 8px;
+}
+
+.relation-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 180px) minmax(200px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .relation-row {
+    animation: rise 180ms ease both;
+  }
+}
+
+@media (max-width: 720px) {
+  .relation-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .relation-row select,
+  .relation-row input {
+    grid-column: 1 / -1;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .relation-remove {
+    grid-column: 2;
+    justify-self: end;
+  }
+}
+
+.relation-remove {
+  width: 32px;
+  padding: 6px 0;
+  line-height: 1;
+  text-align: center;
+  color: var(--muted);
+}
+
+.relation-remove:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+  filter: none;
+}
+
+.relation-picker-actions {
+  display: flex;
+}
+
+.relation-picker-actions .button {
+  padding: 5px 12px;
+  font-size: 0.75rem;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Stack the create-form's queue checkbox directly above the submit button,
+   both right-aligned, so the checkbox is not missed before hitting Create. */
+.task-form-actions {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.console-actions {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.console-actions label {
+  align-items: center;
+  color: var(--muted);
+  display: inline-flex;
+  gap: 8px;
+}
+
+.console-actions select {
+  background: rgba(8, 11, 20, 0.72);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink);
+  padding: 8px 10px;
+}
+
+.attachment-upload {
+  display: grid;
+  grid-template-columns: minmax(140px, 180px) 1fr;
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.attachment-upload label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.65625rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.attachment-upload input,
+.attachment-upload select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--ink);
+  padding: 8px 9px;
+  font-size: 0.8125rem;
+  letter-spacing: normal;
+  text-transform: none;
+  font-weight: 400;
+}
+
+.attachment-upload .wide,
+.attachment-upload .form-actions {
+  grid-column: 1 / -1;
+}
+
+.attachment-list {
+  display: grid;
+  gap: 8px;
+}
+
+.attachment-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.attachment-item p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.attachment-preview-link {
+  display: block;
+  margin-top: 10px;
+}
+
+.attachment-preview {
+  display: block;
+  max-width: min(100%, 720px);
+  max-height: 420px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  object-fit: contain;
+  background: var(--rail);
+}
+
+@media (max-width: 760px) {
+  .task-form,
+  .attachment-upload,
+  .attachment-main {
+    grid-template-columns: 1fr;
+  }
+
+  .task-form .harness-model-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .summary-grid,
+  .check-row {
+    grid-template-columns: 1fr;
+  }
+
+  .check-state {
+    justify-content: flex-start;
+  }
+}

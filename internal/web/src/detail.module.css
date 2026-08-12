@@ -1,0 +1,271 @@
+/* Task/change detail page chrome rendered outside a dedicated element. */
+
+.detail {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  max-width: 900px;
+}
+
+.task-detail,
+.change-detail {
+  width: 100%;
+  max-width: none;
+}
+
+.task-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.human-attention-panel {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  margin: 14px 0 16px;
+  padding: 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+.human-attention-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.human-attention-head h3 {
+  margin: 0;
+}
+
+.human-attention-body {
+  min-width: 0;
+  max-height: 52vh;
+  overflow: auto;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  line-height: 1.45;
+}
+
+.human-attention-reply {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.human-attention-reply textarea {
+  min-width: 0;
+  width: 100%;
+  resize: vertical;
+}
+
+.task-detail-column {
+  min-width: 0;
+}
+
+.task-detail-workflow,
+.task-detail-lifecycle {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.task-detail-column > :first-child {
+  margin-top: 0;
+}
+
+.task-detail-lifecycle > :first-child {
+  margin-top: 0;
+}
+
+.task-detail-column .task-form {
+  grid-template-columns: 1fr;
+}
+
+.task-detail-column > .task-form:first-child {
+  margin-top: 0;
+}
+
+/* Sticky task detail head: keeps the title/actions and current workflow step
+   visible while scrolling the (potentially long) timeline below. */
+.task-detail-head {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--bg, var(--panel));
+  padding-bottom: 14px;
+  margin-bottom: 0;
+}
+
+.task-detail-head > :first-child {
+  min-width: 0;
+}
+
+.task-current-step {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  min-width: 0;
+  margin-top: 5px;
+}
+
+.task-current-step-label {
+  color: var(--muted);
+  font-size: 0.65625rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.task-current-step strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.task-current-step-meta {
+  color: var(--muted);
+  font-size: 0.71875rem;
+}
+
+.workflow-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.workflow-detail-head h3,
+.workflow-detail-head p {
+  margin: 0;
+}
+
+.workflow-detail-head > p {
+  text-align: right;
+}
+
+.workflow-step {
+  min-width: 0;
+}
+
+.workflow-step.is-current {
+  border-left: 2px solid var(--accent);
+  background: var(--panel-2);
+}
+
+.workflow-step-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.workflow-step-head > div {
+  min-width: 0;
+}
+
+.workflow-step-key {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  overflow-wrap: anywhere;
+}
+
+.workflow-steps-empty {
+  margin-top: 0;
+}
+
+/* Collapsible read-only detail summary. The edit form is hidden until the Edit
+   button reveals it, which keeps the editor column short. */
+.task-read-only-detail {
+  display: grid;
+  gap: 10px;
+}
+
+.task-read-only-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.task-read-only-head h3 {
+  margin: 0;
+}
+
+.task-read-only-body {
+  display: grid;
+  gap: 8px;
+}
+
+.task-read-only-agent {
+  margin: 0;
+  font-size: 0.78125rem;
+  color: var(--ink-2);
+  word-break: break-word;
+}
+
+.task-read-only-field {
+  margin: 0;
+  font-size: 0.8125rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.task-read-only-field br + * {
+  margin-top: 2px;
+}
+
+.detail h3 {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 18px 0 8px;
+}
+
+.detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.detail h2 {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  margin: 0 0 10px;
+}
+
+.detail pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-prose);
+  font-size: 0.78125rem;
+  background: var(--pre);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px;
+}
+
+@media (max-width: 760px) {
+  .detail-head {
+    display: grid;
+  }
+}

@@ -1,0 +1,187 @@
+/* Markdown-rendered prose (.md) and its inline-mode variants. */
+
+/* Markdown-rendered prose. Applied as a `.md` wrapper to user/agent text that
+   may contain headings, lists, code, tables, links and images. Inline-mode
+   output used in tight contexts has no wrapper and is styled by the inline
+   rules at the end of this block. */
+.md {
+  font-family: var(--font-prose);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+  white-space: normal;
+  min-width: 0;
+}
+
+.md > :first-child {
+  margin-top: 0;
+}
+
+.md > :last-child {
+  margin-bottom: 0;
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+  margin: 12px 0 6px;
+  color: var(--ink);
+  font-family: var(--font-prose);
+  line-height: 1.3;
+}
+
+.md h1 {
+  font-size: 1.0625rem;
+}
+
+.md h2 {
+  font-size: 0.9375rem;
+}
+
+.md h3 {
+  font-size: 0.875rem;
+}
+
+.md h4,
+.md h5,
+.md h6 {
+  font-size: 0.8125rem;
+}
+
+.md p {
+  margin: 6px 0;
+}
+
+.md ul,
+.md ol {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+
+.md li {
+  margin: 2px 0;
+}
+
+.md li > ul,
+.md li > ol {
+  margin: 2px 0;
+}
+
+.md a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.md a:hover {
+  text-decoration: underline;
+}
+
+.md strong {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.md em {
+  font-style: italic;
+}
+
+.md del {
+  opacity: 0.7;
+}
+
+.md code {
+  font-family: var(--font-mono);
+  font-size: 0.78125rem;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1px 4px;
+}
+
+.md pre {
+  background: var(--pre);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  margin: 8px 0;
+  overflow: auto;
+  white-space: pre;
+}
+
+.md pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 0.75rem;
+}
+
+.md blockquote {
+  margin: 8px 0;
+  padding: 2px 0 2px 10px;
+  border-left: 2px solid var(--line-2);
+  color: var(--muted);
+}
+
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 12px 0;
+}
+
+.md table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 0.78125rem;
+}
+
+.md th,
+.md td {
+  border: 1px solid var(--line);
+  padding: 4px 8px;
+  text-align: left;
+}
+
+.md th {
+  background: var(--panel-2);
+  color: var(--ink);
+}
+
+.md img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius);
+}
+
+/* Plan/question body switches from a monospace <pre> to rendered prose while
+   keeping its scroll cap (set on the base .human-attention-body rule). */
+.human-attention-body.md {
+  font-family: var(--font-prose);
+  white-space: normal;
+}
+
+/* Inline-mode markdown lives in tight single-line contexts with no `.md`
+   wrapper; style only the inline code/link bits to match the block rules. */
+.card-status code,
+.timeline-row-body .muted code {
+  font-family: var(--font-mono);
+  font-size: 0.71875rem;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0 3px;
+}
+
+.card-status a,
+.timeline-row-body .muted a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.card-status a:hover,
+.timeline-row-body .muted a:hover {
+  text-decoration: underline;
+}

@@ -1,0 +1,153 @@
+/* Unified and split diff tables plus the diff mode bar. */
+
+.thread-context,
+.diff-unified {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  background: var(--pre);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 8px;
+  margin: 8px 0 0;
+  color: var(--ink-2);
+}
+
+.diff-unified {
+  overflow-x: visible;
+  overflow-wrap: anywhere;
+  padding: 0;
+  white-space: pre-wrap;
+  width: min(100%, calc(var(--diff-unified-width, 100ch) + 16px));
+}
+
+.diff-unified-line {
+  display: block;
+  padding: 1px 8px;
+}
+
+.diff-unified .diff-hunk-header,
+.diff-unified .diff-meta {
+  color: var(--muted);
+}
+
+.diff-unified .diff-add {
+  color: var(--st-ok);
+  background: color-mix(in srgb, var(--st-ok) 8%, transparent);
+}
+
+.diff-unified .diff-del {
+  color: var(--st-danger);
+  background: color-mix(in srgb, var(--st-danger) 8%, transparent);
+}
+
+.diff-mode-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.diff-mode-bar .button {
+  font-size: 0.75rem;
+}
+
+.diff-mode-bar .button[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.diff-split-wrap {
+  overflow-x: auto;
+  margin: 8px 0 0;
+}
+
+table.diff-split {
+  width: min(100%, calc(var(--diff-split-width, 160ch) + 32px));
+  min-width: 0;
+  max-width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  background: var(--pre);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  table-layout: fixed;
+}
+
+table.diff-split th,
+table.diff-split td {
+  width: 50%;
+  border-bottom: 1px solid var(--line);
+  padding: 2px 8px;
+  vertical-align: top;
+  font-size: 0.75rem;
+  letter-spacing: normal;
+  text-transform: none;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--ink-2);
+}
+
+table.diff-split th {
+  color: var(--muted);
+  font-size: 0.65625rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  background: var(--rail);
+}
+
+table.diff-split .diff-col-old {
+  border-right: 1px solid var(--line);
+}
+
+table.diff-split .diff-line-num {
+  display: inline-block;
+  min-width: 3ch;
+  margin-right: 8px;
+  color: var(--muted);
+  text-align: right;
+  user-select: none;
+}
+
+table.diff-split .diff-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+table.diff-split .diff-text.diff-add {
+  color: var(--st-ok);
+}
+
+table.diff-split .diff-text.diff-del {
+  color: var(--st-danger);
+}
+
+table.diff-split .diff-row-delete .diff-col-old,
+table.diff-split .diff-row-pair .diff-col-old {
+  background: color-mix(in srgb, var(--st-danger) 8%, transparent);
+}
+
+table.diff-split .diff-row-add .diff-col-new,
+table.diff-split .diff-row-pair .diff-col-new {
+  background: color-mix(in srgb, var(--st-ok) 8%, transparent);
+}
+
+table.diff-split .diff-row-delete .diff-col-new.empty,
+table.diff-split .diff-row-add .diff-col-old.empty {
+  background: color-mix(in srgb, var(--muted) 5%, transparent);
+}
+
+table.diff-split .diff-hunk-header td {
+  color: var(--muted);
+  background: var(--rail);
+  font-weight: 600;
+}
+
+table.diff-split .diff-row-meta .diff-text {
+  color: var(--muted);
+}

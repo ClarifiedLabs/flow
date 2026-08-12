@@ -1,0 +1,182 @@
+/* App chrome: shell, brand, top bar, content column, status bar.
+   Shared flow-app chrome, scoped by the manifest to flow-app. */
+
+.shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.brand {
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: var(--ink);
+  text-decoration: none;
+  flex: 0 0 auto;
+}
+
+.brand-cursor {
+  color: var(--accent);
+}
+
+.main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 22px 0;
+}
+
+/* Sticky top bar: brand, nav dropdown, page title and view actions. The bar
+   is opaque so scrolled content never shows through, and its ~57px height is
+   what flow-task-rail's sticky offset tucks beneath. */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 0 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.topbar h1 {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1.1875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  margin: 0;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  padding-bottom: 64px;
+}
+
+.statusbar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 28px;
+  margin: 0 -22px;
+  padding: 5px 22px;
+  border-top: 1px solid var(--line);
+  background: var(--rail);
+  font-size: 0.6875rem;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.sb-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  text-transform: uppercase;
+  color: var(--st-idle);
+  white-space: nowrap;
+}
+
+.sb-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--st-idle);
+}
+
+.statusbar[data-state="live"] .sb-live {
+  color: var(--st-ok);
+}
+
+.statusbar[data-state="live"] .sb-dot {
+  background: var(--st-ok);
+}
+
+.statusbar[data-state="error"] .sb-live {
+  color: var(--st-danger);
+}
+
+.statusbar[data-state="error"] .sb-dot {
+  background: var(--st-danger);
+}
+
+.statusbar .status {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-prose);
+  letter-spacing: normal;
+  color: var(--ink-2);
+}
+
+.statusbar[data-state="error"] .status {
+  color: var(--st-danger);
+}
+
+.sb-meta {
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .content[data-refresh="nav"] > * {
+    animation: rise 220ms ease both;
+  }
+
+  .content[data-refresh="nav"] .card {
+    animation: rise 240ms ease both;
+    animation-delay: calc(var(--i, 0) * 24ms);
+  }
+}
+
+@media (max-width: 760px) {
+  /* The bar wraps: brand + trigger + title on the first row, actions on the
+     second; the dropdown panel spans the full bar width. */
+  .topbar {
+    flex-wrap: wrap;
+    min-height: 0;
+    padding: 8px 12px;
+  }
+
+  .topbar-actions {
+    flex-basis: 100%;
+    justify-content: flex-start;
+  }
+
+  .statusbar {
+    position: static;
+  }
+}

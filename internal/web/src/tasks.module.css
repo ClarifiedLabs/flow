@@ -1,0 +1,215 @@
+/* Tasks view (.tasks-*). flow-app scoped until the view gets an element. */
+
+.tasks-view {
+  display: grid;
+  gap: 14px;
+  max-width: 1120px;
+}
+
+.tasks-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.tasks-filters,
+.tasks-tools,
+.tasks-layout {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.tasks-layout {
+  padding-right: 4px;
+  border-right: 1px solid var(--line);
+}
+
+.tasks-project,
+.tasks-root,
+.tasks-search,
+.tasks-bulk-bar select,
+.tasks-bulk-bar input {
+  font: inherit;
+  font-size: 0.75rem;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.tasks-search {
+  min-width: 220px;
+}
+
+.tasks-bulk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 8px 11px;
+}
+
+.tasks-bulk-count {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.tasks-bulk-field {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.tasks-bulk-field input[type="number"] {
+  width: 5.5rem;
+}
+
+.tasks-list,
+.tasks-flat-list {
+  display: grid;
+  gap: 8px;
+}
+
+.tasks-group {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+.tasks-group-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px 8px;
+  min-width: 0;
+}
+
+.tasks-group-header > a,
+.tasks-group-header > span:not(.tasks-group-kind):not(.tasks-group-id):not(.tasks-group-count) {
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 650;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.tasks-group-header > a:hover {
+  color: var(--accent);
+}
+
+.tasks-group-kind,
+.tasks-group-id,
+.tasks-group-count {
+  color: var(--muted);
+  font-size: 0.6875rem;
+}
+
+.tasks-group-kind {
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tasks-group-count {
+  margin-left: auto;
+}
+
+.tasks-group-list {
+  display: grid;
+  gap: 6px;
+}
+
+.tasks-select-all {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 0.75rem;
+  color: var(--ink-2);
+}
+
+/* Rows borrow .done-row's compact shape; [data-phase] supplies the tint. */
+.tasks-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--ph, var(--line-2));
+  border-radius: var(--radius);
+  padding: 8px 11px;
+}
+
+.tasks-row-breadcrumb {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  max-width: min(32%, 18rem);
+  color: var(--muted);
+  font-size: 0.6875rem;
+  white-space: nowrap;
+}
+
+.tasks-row-breadcrumb a {
+  color: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-decoration: none;
+}
+
+.tasks-row-breadcrumb a:hover {
+  color: var(--accent);
+}
+
+.tasks-row-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ink);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+  transition: color 120ms ease;
+}
+
+.tasks-row-title:hover {
+  color: var(--accent);
+}
+
+.tasks-row-meta {
+  color: var(--ink-2);
+  font-size: 0.75rem;
+}
+
+@media (max-width: 720px) {
+  .tasks-tools,
+  .tasks-project,
+  .tasks-root,
+  .tasks-search {
+    width: 100%;
+  }
+
+  .tasks-layout {
+    width: auto;
+    border-right: 0;
+  }
+
+  .tasks-row-breadcrumb {
+    max-width: calc(100% - 2rem);
+  }
+}

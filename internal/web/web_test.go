@@ -128,7 +128,7 @@ func TestBoardTableScrollsRatherThanWraps(t *testing.T) {
 // content: the bar must be sticky with an opaque background and a bottom
 // border, and the shell must be a single column (no permanent nav column).
 func TestTopbarSticksToTop(t *testing.T) {
-	css := readModule(t, "base.module.css")
+	css := readModule(t, "chrome.module.css")
 	for _, want := range []string{
 		".topbar {",
 		"position: sticky;",
@@ -141,7 +141,7 @@ func TestTopbarSticksToTop(t *testing.T) {
 		}
 	}
 	if strings.Contains(css, ".sidebar {") {
-		t.Fatal("base css still styles the removed sidebar")
+		t.Fatal("chrome css still styles the removed sidebar")
 	}
 }
 
@@ -150,15 +150,15 @@ func TestTopbarSticksToTop(t *testing.T) {
 // active in light mode while the nav foregrounds switched to the light
 // palette. The panel must use the same defined chrome tokens as the top bar.
 func TestNavPanelUsesDefinedThemeTokens(t *testing.T) {
-	css := readModule(t, "base.module.css")
+	css := readModule(t, "nav.module.css")
 	start := strings.Index(css, ".nav-panel {")
 	if start < 0 {
-		t.Fatal("base css is missing the .nav-panel rule")
+		t.Fatal("nav css is missing the .nav-panel rule")
 	}
 	rule := css[start:]
 	end := strings.Index(rule, "\n}")
 	if end < 0 {
-		t.Fatal("base css .nav-panel rule is not closed")
+		t.Fatal("nav css .nav-panel rule is not closed")
 	}
 	rule = rule[:end]
 	for _, want := range []string{"background: var(--panel);", "border: 1px solid var(--line);"} {
@@ -179,25 +179,26 @@ func TestNavPanelUsesDefinedThemeTokens(t *testing.T) {
 // light mode while the picker foregrounds switched to the light palette. The
 // panel, item hover, and card badge must use defined chrome tokens.
 func TestProjectPickerUsesDefinedThemeTokens(t *testing.T) {
-	css := readModule(t, "base.module.css")
 	rules := []struct {
+		module    string
 		selector  string
 		want      []string
 		undefined []string
 	}{
-		{".project-picker-menu {", []string{"background: var(--panel);", "border: 1px solid var(--line);"}, []string{"--surface", "--border"}},
-		{".project-picker-item:hover {", []string{"background: var(--panel-2);"}, []string{"--surface-raised"}},
-		{".card-project-badge {", []string{"border: 1px solid var(--line);"}, []string{"--border"}},
+		{"nav.module.css", ".project-picker-menu {", []string{"background: var(--panel);", "border: 1px solid var(--line);"}, []string{"--surface", "--border"}},
+		{"nav.module.css", ".project-picker-item:hover {", []string{"background: var(--panel-2);"}, []string{"--surface-raised"}},
+		{"shared.module.css", ".card-project-badge {", []string{"border: 1px solid var(--line);"}, []string{"--border"}},
 	}
 	for _, check := range rules {
+		css := readModule(t, check.module)
 		start := strings.Index(css, check.selector)
 		if start < 0 {
-			t.Fatalf("base css is missing the %s rule", check.selector)
+			t.Fatalf("%s is missing the %s rule", check.module, check.selector)
 		}
 		rule := css[start:]
 		end := strings.Index(rule, "\n}")
 		if end < 0 {
-			t.Fatalf("base css %s rule is not closed", check.selector)
+			t.Fatalf("%s %s rule is not closed", check.module, check.selector)
 		}
 		rule = rule[:end]
 		for _, want := range check.want {

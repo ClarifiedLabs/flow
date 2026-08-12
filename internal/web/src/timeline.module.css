@@ -1,0 +1,100 @@
+/* Unified lifecycle timeline (.timeline-*). */
+
+/* Unified timeline (full-width lifecycle section) that merges sessions,
+   transitions and status entries by time. */
+.lifecycle-timeline {
+  margin-top: 8px;
+}
+
+.timeline-feed {
+  gap: 6px;
+}
+
+.timeline-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.timeline-glyph {
+  width: 9px;
+  height: 9px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: none;
+}
+
+.timeline-glyph-session {
+  background: var(--accent);
+}
+
+.timeline-glyph-status {
+  background: var(--warn, #d0902a);
+}
+
+.timeline-glyph-transition {
+  background: var(--muted);
+}
+
+.timeline-row-body {
+  min-width: 0;
+}
+
+.timeline-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.timeline-row-head strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.timeline-row-head time {
+  color: var(--muted);
+  font-size: 0.71875rem;
+  margin-left: auto;
+}
+
+.timeline-row-body p {
+  margin: 4px 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.timeline-row-body .arrow {
+  color: var(--muted);
+}
+
+.timeline-actor {
+  margin-left: 4px;
+  font-weight: 600;
+}
+
+.timeline-row-actions {
+  margin-top: 4px;
+  justify-content: flex-start;
+}
+
+.timeline-show-more {
+  margin-top: 4px;
+}
+
+.timeline-run-rows {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+  padding-left: 4px;
+  border-left: 1px solid var(--line);
+}
+
+.timeline-run-rows .timeline-row {
+  padding-left: 0;
+}

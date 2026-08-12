@@ -1,0 +1,359 @@
+/* Primary navigation, work-list local nav, theme switcher, project picker.
+   Shared flow-app chrome, scoped by the manifest to flow-app. */
+
+.nav {
+  display: grid;
+  gap: 2px;
+}
+
+.nav a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: lowercase;
+  padding: 7px 10px;
+  border-radius: var(--radius);
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.nav a:hover {
+  color: var(--ink-2);
+}
+
+.nav a[aria-current="page"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.nav-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nav-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 18px;
+  min-height: 18px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--ink-2);
+  font-size: 0.6875rem;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.nav-status-board,
+.nav-status-jobs {
+  gap: 4px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.nav-board-status,
+.nav-job-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  min-height: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  line-height: 1;
+}
+
+.nav-board-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.nav-board-group .nav-board-status {
+  border-radius: 0;
+}
+
+.nav-board-status[data-board-lane="unscheduled"] {
+  background: var(--ph-backlog-bg);
+  color: var(--ph-backlog);
+}
+
+.nav-board-status[data-board-lane="scheduled"] {
+  background: var(--ph-upnext-bg);
+  color: var(--ph-upnext);
+}
+
+.nav-board-status[data-board-lane="in_progress"] {
+  background: var(--ph-authoring-bg);
+  color: var(--ph-authoring);
+}
+
+.nav-board-status[data-board-lane="blocked"] {
+  background: var(--st-blocked-bg);
+  color: var(--st-blocked);
+}
+
+.nav-job-status[data-job-status="active"] {
+  background: var(--st-ok-bg);
+  color: var(--st-ok);
+}
+
+.nav-job-status[data-job-status="queued"] {
+  background: var(--st-warn-bg);
+  color: var(--st-warn);
+}
+
+/* The nav dropdown reuses the project-picker pattern: a details/summary whose
+   panel floats below the trigger. */
+.nav-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.nav-menu summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.nav-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.nav-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.nav-trigger-label {
+  text-transform: lowercase;
+}
+
+.nav-trigger-status {
+  display: inline-flex;
+  align-items: center;
+}
+
+.nav-trigger-status:empty {
+  display: none;
+}
+
+.nav-panel {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  min-width: 240px;
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.nav-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 8px 4px 2px;
+  border-top: 1px solid var(--line);
+}
+
+.nav-footer-label {
+  color: var(--muted);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: lowercase;
+}
+
+/* Shared local navigation for the three Work list routes. It lives under
+   flow-app so the same markup can be rendered by plain Tasks and by the
+   feature/work-item custom elements. */
+.work-header {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 14px 16px 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.work-heading,
+.work-subnav,
+.work-breadcrumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.work-heading {
+  justify-content: space-between;
+}
+
+.work-heading h2 {
+  margin: 2px 0 0;
+  color: var(--ink);
+  font-size: var(--text-title);
+}
+
+.work-eyebrow,
+.work-project span {
+  display: block;
+  color: var(--muted);
+  font-size: var(--text-meta);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.work-project {
+  display: grid;
+  gap: 4px;
+  min-width: 180px;
+}
+
+.work-subnav {
+  gap: 2px;
+  margin: 0 -16px;
+  padding: 0 16px;
+  border-top: 1px solid var(--line);
+}
+
+.work-subnav a {
+  padding: 9px 12px 8px;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font-size: var(--text-quiet);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.work-subnav a:hover {
+  color: var(--ink);
+}
+
+.work-subnav a[aria-current="page"] {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+}
+
+.work-breadcrumbs {
+  padding-bottom: 10px;
+  color: var(--muted);
+  font-size: var(--text-meta);
+}
+
+.work-breadcrumbs a {
+  color: var(--ink-2);
+}
+
+.theme-switcher {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.theme-switcher button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.theme-switcher button[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.project-picker {
+  position: relative;
+}
+
+.project-picker summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.project-picker summary::-webkit-details-marker {
+  display: none;
+}
+
+.project-picker-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  min-width: 220px;
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.project-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.project-picker-item:hover {
+  background: var(--panel-2);
+}
+
+@media (max-width: 760px) {
+  .nav-menu {
+    position: static;
+  }
+
+  .nav-panel {
+    left: 0;
+    right: 0;
+    top: 100%;
+    min-width: 0;
+  }
+
+  .nav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
