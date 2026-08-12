@@ -138,13 +138,16 @@ func (d *Dispatcher) markSeeded(projectID string) {
 // synchronous; callers run it in a goroutine tied to server shutdown.
 func (d *Dispatcher) Run(ctx context.Context) {
 	queue := make(chan run, d.QueueSize)
+	// Cancellation stops polling, but queued and in-flight hooks drain during
+	// shutdown. Each run remains bounded independently by RunTimeout.
+	workerCtx := context.WithoutCancel(ctx)
 	var wg sync.WaitGroup
 	for i := 0; i < d.Workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for job := range queue {
-				d.execute(ctx, job)
+				d.execute(workerCtx, job)
 			}
 		}()
 	}

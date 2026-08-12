@@ -112,6 +112,20 @@ func writeStub(t *testing.T, body string) string {
 	return path
 }
 
+func waitForNonEmptyFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("file %s was not written within 30s", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestHookRunTimeoutKillsAndCountsFailure(t *testing.T) {
 	registry := metrics.New()
 	d := New(nil, nil, registry)
@@ -219,16 +233,11 @@ func TestDispatcherFiresOnAppendedEvent(t *testing.T) {
 		t.Fatalf("append non-matching event: %v", err)
 	}
 
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		if data, err := os.ReadFile(stdinPath); err == nil && len(data) > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("hook did not fire within 30s")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForNonEmptyFile(t, stdinPath)
+	// Stop polling while the hook may still be writing envPath. Run must drain
+	// the in-flight hook before returning, so both outputs are complete below.
+	cancel()
+	<-done
 
 	data, err := os.ReadFile(stdinPath)
 	if err != nil {
@@ -254,8 +263,80 @@ func TestDispatcherFiresOnAppendedEvent(t *testing.T) {
 		t.Fatalf("env = %q, want %q", envData, wantEnv)
 	}
 
+	if got := counterValue(t, registry, "flow_hook_run_failures_total"); got != 0 {
+		t.Fatalf("failures = %v, want 0", got)
+	}
+}
+
+func TestDispatcherDrainsInFlightHookOnShutdown(t *testing.T) {
+	ctx := context.Background()
+	store, err := flowdb.Open(ctx, filepath.Join(t.TempDir(), "flow.db"))
+	if err != nil {
+		t.Fatalf("open project db: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	log := coordinator.NewEventLogService(store.DB())
+
+	dir := t.TempDir()
+	startedPath := filepath.Join(dir, "started")
+	releasePath := filepath.Join(dir, "release")
+	completedPath := filepath.Join(dir, "completed")
+	stub := writeStub(t, "cat >/dev/null\nprintf started > \"$1\"\nwhile [ ! -e \"$2\" ]; do sleep 0.01; done\nprintf completed > \"$3\"\n")
+
+	registry := metrics.New()
+	d := New([]config.HookConfig{{
+		Events:  []string{"task.done"},
+		Command: []string{stub, startedPath, releasePath, completedPath},
+	}}, func() []ProjectSource {
+		return []ProjectSource{{ProjectID: "p-test", EventLog: log}}
+	}, registry)
+	d.PollInterval = 10 * time.Millisecond
+
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.Run(runCtx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = os.WriteFile(releasePath, []byte("release"), 0o600)
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Errorf("dispatcher did not stop during cleanup")
+		}
+	})
+
+	select {
+	case <-d.Seeded("p-test"):
+	case <-time.After(30 * time.Second):
+		t.Fatalf("dispatcher did not seed the project cursor within 30s")
+	}
+	if _, err := log.Append(ctx, coordinator.Event{Kind: coordinator.EventTaskDone, TaskID: "t-1"}); err != nil {
+		t.Fatalf("append matching event: %v", err)
+	}
+	waitForNonEmptyFile(t, startedPath)
+
+	// The hook is blocked until releasePath appears. Canceling Run must stop
+	// polling without killing this in-flight command.
 	cancel()
-	<-done
+	if err := os.WriteFile(releasePath, []byte("release"), 0o600); err != nil {
+		t.Fatalf("release hook: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("dispatcher did not drain the in-flight hook within 30s")
+	}
+
+	completed, err := os.ReadFile(completedPath)
+	if err != nil {
+		t.Fatalf("read hook completion: %v", err)
+	}
+	if string(completed) != "completed" {
+		t.Fatalf("hook completion = %q, want completed", completed)
+	}
 	if got := counterValue(t, registry, "flow_hook_run_failures_total"); got != 0 {
 		t.Fatalf("failures = %v, want 0", got)
 	}
