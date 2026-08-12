@@ -180,6 +180,42 @@ export class ActionButton {
   }
 }
 
+// Console-route harness pieces: a mount-compatible content stub and a
+// document.createElement factory that builds a real FlowConsole (never
+// connected by the stub, so only its data-driven poll gating runs).
+// consoleImports dynamically imports the route/element modules: their import
+// chain defines custom-element classes, which needs a global HTMLElement —
+// only present after a scriptContext call has installed one.
+export async function consoleImports() {
+  const { renderConsoleRoute } = await import("./console-route.js");
+  const { FlowConsole } = await import("./elements/console.js");
+  return { renderConsoleRoute, FlowConsole };
+}
+
+export function mountableContent() {
+  return {
+    innerHTML: "",
+    dataset: {},
+    firstElementChild: null,
+    appendChild(child) {
+      this.firstElementChild = child;
+    },
+  };
+}
+
+export function consoleDocument(FlowConsole) {
+  return {
+    cookie: "flow_ui_csrf=csrf-token",
+    addEventListener() {},
+    createElement(tag) {
+      const element = new FlowConsole();
+      element.tagName = String(tag).toUpperCase();
+      element.closest = () => null;
+      return element;
+    },
+  };
+}
+
 let appLoadCount = 0;
 export function loadAppModule() {
   // Import a fresh entry-module instance per call (cache-busting query) so
@@ -279,3 +315,138 @@ export function deferred() {
 export function flushAsync() {
   return new Promise((resolve) => setImmediate(resolve));
 }
+
+// statusApp is a bare app stand-in with a recording status line.
+export function statusApp() {
+  const statuses = [];
+  return {
+    statuses,
+    setStatus(message) {
+      statuses.push(message);
+    },
+    refresh() {},
+  };
+}
+
+// browserSmokeHarness drives a real FlowApp through its routes with smoke DOM
+// stubs and per-path canned responses; route elements mount into a
+// mount-compatible content stub and paint (isConnected) so
+// content.firstElementChild holds the page markup after a load.
+export async function browserSmokeHarness(path, responses) {
+  const [pathname, search = ""] = String(path).split("?", 2);
+  const title = new SmokeElement();
+  const status = new SmokeElement();
+  const content = new SmokeElement();
+  // Mount-compatible: routes mount their route element into content now, and
+  // the mounted element paints (isConnected) so content.firstElementChild
+  // holds the page markup after a load.
+  content.firstElementChild = null;
+  content.appendChild = (child) => {
+    content.firstElementChild = child;
+  };
+  const { FlowFlows } = await import("./elements/flows.js");
+  const createElement = (tag) => {
+    if (String(tag).toLowerCase() === "flow-flows") {
+      const element = new FlowFlows();
+      element.tagName = String(tag).toUpperCase();
+      element.isConnected = true;
+      element.closest = () => null;
+      return element;
+    }
+    const element = new SmokeElement();
+    element.tagName = String(tag).toUpperCase();
+    return element;
+  };
+  const refresh = new SmokeElement();
+  const nav = new SmokeNav();
+  const statusbar = new SmokeElement();
+  const sbLabel = new SmokeElement();
+  const sbMeta = new SmokeElement();
+  statusbar.querySelector = (selector) => (selector === ".sb-label" ? sbLabel : null);
+  const diffContainers = new Map();
+  const fetchCalls = [];
+
+  class SmokeHTMLElement extends SmokeElement {
+    querySelector(selector) {
+      if (selector === "h1") return title;
+      if (selector === ".status") return status;
+      if (selector === ".content") return content;
+      if (selector === ".nav") return nav;
+      if (selector === ".statusbar") return statusbar;
+      if (selector === ".sb-meta") return sbMeta;
+      if (selector === '[data-action="refresh"]') return refresh;
+      if (selector.startsWith("[data-change-diff=")) {
+        const id = selector.match(/"([^"]+)"/)?.[1] || selector;
+        if (!diffContainers.has(id)) diffContainers.set(id, new SmokeElement());
+        return diffContainers.get(id);
+      }
+      return new SmokeElement();
+    }
+
+    querySelectorAll(selector) {
+      if (selector === ".nav a") return nav.links;
+      return [];
+    }
+  }
+
+  const context = await scriptContext({
+    location: { pathname, search: search ? `?${search}` : "" },
+    setTimeout() {
+      return 1;
+    },
+    clearTimeout() {},
+  }, {
+    document: {
+      cookie: "flow_ui_csrf=csrf-token",
+      addEventListener() {},
+      createElement,
+    },
+    HTMLElement: SmokeHTMLElement,
+    fetch(requestPath) {
+      fetchCalls.push(requestPath);
+      if (requestPath === "/ui/api/v2/projects" && !(requestPath in responses)) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ projects: [] }),
+        });
+      }
+      if (requestPath === "/ui/api/v2/harnesses" && !(requestPath in responses)) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ agents: [], consoles: [] }),
+        });
+      }
+      if (!(requestPath in responses)) {
+        return Promise.resolve({
+          ok: false,
+          json: () => Promise.resolve({ error: { message: `missing smoke response for ${requestPath}` } }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(responses[requestPath]),
+      });
+    },
+  });
+  const app = new context.FlowApp();
+  app.pollingActive = true;
+  app.renderShell();
+
+  return {
+    app,
+    title,
+    status,
+    content,
+    statusbar,
+    sbLabel,
+    sbMeta,
+    fetchCalls,
+    activeNavHref() {
+      return nav.links.find((link) => link.attributes.get("aria-current") === "page")?.href || "";
+    },
+    diffContainer(id) {
+      return diffContainers.get(id) || new SmokeElement();
+    },
+  };
+}
+

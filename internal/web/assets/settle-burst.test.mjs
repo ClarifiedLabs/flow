@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { actionScope, handleAction, inFlight } from "./actions.js";
-import { ActionButton, deferred, scriptContext } from "./test-helpers.mjs";
+import { ActionButton, consoleDocument, consoleImports, deferred, mountableContent, scriptContext } from "./test-helpers.mjs";
 
 // A settle-burst harness: a real FlowApp with a recording setTimeout and a
 // stub load() that counts invocations and mimics the real load's contract —
@@ -332,3 +332,162 @@ test("a burst tick that finds a load in flight skips its reload instead of overl
   assert.equal(harness.loads(), 2, "the next tick reloads once no load is in flight");
   assert.equal(harness.timers.length, 2, "the burst is bounded");
 });
+
+// A console-action harness: a real FlowApp (real load, real settle-burst
+// machinery) parked on /ui/console with the project and harness registries
+// preloaded, a recording setTimeout, and a fetch stub that answers the
+// start/release mutations and serves every console state reload as an
+// inactive console. /ui/console has no regular poll (pollConfigForPath) and
+// an inactive console schedules no console poll, so every timer recorded
+// after the action belongs to the settle burst. The Console view's
+// startConsole/releaseConsole handlers reload with app.load() instead of
+// refresh(), so these tests pin the provenance stamping of handler-owned
+// loads: a successful Console Start or Release must arm the burst exactly
+// like a refresh()-based action, while the GET reload a burst tick performs
+// (fromPoll, untokened) must not re-arm it.
+async function consoleActionHarness() {
+  const timers = [];
+  const fetches = [];
+  const title = { textContent: "" };
+  const status = { textContent: "" };
+  const content = mountableContent();
+  const { FlowConsole } = await consoleImports();
+  const context = await scriptContext({
+    location: { pathname: "/ui/console", search: "" },
+    setTimeout(callback, delay) {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    clearTimeout() {},
+  }, {
+    document: consoleDocument(FlowConsole),
+    URLSearchParams,
+    fetch(path, options) {
+      fetches.push({ path, options });
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ active: false, project_id: "p-alpha" }),
+      });
+    },
+  });
+  const app = new context.FlowApp();
+  app.pollingActive = true;
+  app.projects = [{ id: "p-alpha", name: "Alpha" }];
+  app.harnesses = { agents: [], consoles: [{ name: "harness", display_name: "Harness" }] };
+  app.querySelector = (selector) => {
+    if (selector === ".content") return content;
+    if (selector === "h1") return title;
+    if (selector === ".status") return status;
+    if (selector === "[data-console-harness]") return { value: "harness" };
+    return null;
+  };
+  app.querySelectorAll = () => [];
+  return {
+    app,
+    context,
+    status,
+    timers,
+    fetches,
+    // consoleGets counts the console state reloads (the GETs), ignoring the
+    // start/release mutations themselves.
+    consoleGets: () => fetches.filter((call) => call.options.method === "GET").length,
+    async fire(index) {
+      timers[index].callback();
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+  };
+}
+
+test("a successful console start performs its reload and arms the settle burst", async () => {
+  const harness = await consoleActionHarness();
+  // The Console view's project-level Start button: data-start-console is
+  // empty (no task), the console target lives in data-project/data-task.
+  const button = new ActionButton({ startConsole: "", project: "p-alpha", task: "" });
+
+  await handleAction(harness.app, { target: button, preventDefault() {} });
+
+  const [firstDelay, secondDelay] = harness.context.SETTLE_BURST_DELAYS_MS;
+  const post = harness.fetches.find((call) => call.options.method === "POST");
+  assert.equal(post.path, "/ui/api/v2/projects/p-alpha/console");
+  assert.deepEqual(JSON.parse(post.options.body), { harness: "harness" });
+  assert.equal(harness.status.textContent, "Console starting");
+  assert.equal(harness.consoleGets(), 1, "the start performs its immediate reload");
+  assert.equal(harness.timers.length, 1, "the first burst tick is pending");
+  assert.equal(harness.timers[0].delay, firstDelay);
+
+  await harness.fire(0);
+  assert.equal(harness.consoleGets(), 2, "the first burst tick reloads the console view");
+  assert.equal(harness.timers.length, 2, "the second burst tick is pending");
+  assert.equal(harness.timers[1].delay, secondDelay - firstDelay);
+
+  await harness.fire(1);
+  assert.equal(harness.consoleGets(), 3, "the second burst tick reloads the console view");
+  assert.equal(harness.timers.length, 2, "the burst is bounded");
+});
+
+test("a successful console release performs its reload and arms the settle burst", async () => {
+  const harness = await consoleActionHarness();
+  const button = new ActionButton({ releaseConsole: "t-0001", project: "p-alpha", task: "t-0001" });
+
+  await handleAction(harness.app, { target: button, preventDefault() {} });
+
+  const [firstDelay] = harness.context.SETTLE_BURST_DELAYS_MS;
+  const mutation = harness.fetches.find((call) => call.options.method === "DELETE");
+  assert.equal(mutation.path, "/ui/api/v2/projects/p-alpha/tasks/t-0001/console");
+  assert.equal(harness.status.textContent, "Console released");
+  assert.equal(harness.consoleGets(), 1, "the release performs its immediate reload");
+  assert.equal(harness.timers.length, 1, "the first burst tick is pending");
+  assert.equal(harness.timers[0].delay, firstDelay);
+
+  await harness.fire(0);
+  assert.equal(harness.consoleGets(), 2, "the first burst tick reloads the console view");
+  assert.equal(harness.timers.length, 2, "the second burst tick is pending");
+
+  await harness.fire(1);
+  assert.equal(harness.consoleGets(), 3, "the second burst tick reloads the console view");
+  assert.equal(harness.timers.length, 2, "the burst is bounded");
+});
+
+test("an older burst tick awaiting its real reload cannot displace a newer burst's timer", async () => {
+  const harness = await consoleActionHarness();
+  const startButton = new ActionButton({ startConsole: "", project: "p-alpha", task: "" });
+
+  await handleAction(harness.app, { target: startButton, preventDefault() {} });
+  assert.equal(harness.timers.length, 1, "the first burst arms its first tick");
+
+  // Hold the first burst's tick in flight so a second action schedules its
+  // burst while the older tick is still awaiting its reload — the race that
+  // used to let the older continuation overwrite settlePoll's timer handle
+  // and orphan the newer burst's timeout. The wrapper only delays handing
+  // the completed load's context back, so the tick's reload itself runs
+  // through the real FlowApp.load() and its supersede/clear block, and the
+  // second action's load goes through the same real path.
+  const gate = deferred();
+  const baseLoad = harness.app.load.bind(harness.app);
+  let hold = true;
+  harness.app.load = async (options) => {
+    const loadContext = await baseLoad(options);
+    if (hold) {
+      hold = false;
+      await gate.promise;
+    }
+    return loadContext;
+  };
+
+  harness.fire(0);
+  await handleAction(harness.app, { target: startButton, preventDefault() {} });
+  assert.equal(harness.timers.length, 2, "the newer burst arms its first tick");
+  assert.equal(harness.app.settle.poll.timer, 2, "the newer burst owns the settle timer");
+
+  gate.resolve();
+  // Flush past the microtask queue so the superseded continuation has run.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.app.settle.poll.timer, 2, "the superseded continuation leaves the newer burst's timer owned");
+  assert.equal(harness.timers.length, 2, "the superseded continuation re-arms nothing");
+  assert.equal(harness.consoleGets(), 3, "the superseded continuation reloads nothing");
+
+  await harness.fire(1);
+  assert.equal(harness.consoleGets(), 4, "the newer burst's tick reloads the console view");
+  assert.equal(harness.timers.length, 3, "the newer burst continues to its next tick");
+});
+
