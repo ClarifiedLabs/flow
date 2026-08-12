@@ -24,6 +24,7 @@ import (
 
 	"github.com/ClarifiedLabs/flow/internal/api"
 	"github.com/ClarifiedLabs/flow/internal/api/contract"
+	"github.com/ClarifiedLabs/flow/internal/backup"
 	"github.com/ClarifiedLabs/flow/internal/blob"
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
@@ -68,6 +69,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runServe(args[1:], stdout, stderr)
 	case "config":
 		return runConfig(args[1:], stdout, stderr)
+	case "backup":
+		return runBackup(args[1:], stdout, stderr)
+	case "restore":
+		return runRestore(args[1:], stdout, stderr)
 	case "git-hook":
 		return runGitHook(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
@@ -770,6 +775,149 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// runBackup backs up one project (--project) or every project plus the
+// coordinator global database (--all) into a fresh output directory. It is
+// safe against a live server: the SQLite snapshots use the online backup
+// path (VACUUM INTO). The output is staged in DIR.tmp and renamed into place.
+func runBackup(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("backup", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	var configPath string
+	var dataDir string
+	var projectID string
+	var all bool
+	var output string
+	flags.StringVar(&configPath, "config", "", "coordinator config JSON path")
+	flags.StringVar(&dataDir, "data-dir", "", "Flow data directory")
+	flags.StringVar(&projectID, "project", "", "project ID to back up")
+	flags.BoolVar(&all, "all", false, "back up every project plus the global database")
+	flags.StringVar(&output, "output", "", "backup output directory (must not exist or be empty)")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if strings.TrimSpace(output) == "" {
+		fmt.Fprintln(stderr, "--output is required")
+		return 2
+	}
+	projectID = strings.TrimSpace(projectID)
+	if (projectID == "") == !all {
+		fmt.Fprintln(stderr, "exactly one of --project or --all is required")
+		return 2
+	}
+
+	cfg, err := config.LoadCoordinator(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "load coordinator config: %v\n", err)
+		return 1
+	}
+	cfg, err = config.ApplyCoordinatorEnvOverrides(cfg, os.Getenv)
+	if err != nil {
+		fmt.Fprintf(stderr, "apply coordinator env overrides: %v\n", err)
+		return 1
+	}
+	if dataDir != "" {
+		cfg.DataDir = dataDir
+	}
+
+	ctx := context.Background()
+	if all {
+		result, err := backup.BackupAll(ctx, cfg.DataDir, output)
+		if err != nil {
+			fmt.Fprintf(stderr, "backup: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "backup complete: %d project(s) -> %s\n", len(result.Projects), result.Dir)
+		for _, project := range result.Projects {
+			fmt.Fprintf(stdout, "  project %s (%s): %s\n", project.Manifest.ProjectID, project.Manifest.ProjectName, strings.Join(project.Artifacts, ", "))
+		}
+		if result.GlobalDatabase {
+			fmt.Fprintln(stdout, "  global database: global.db")
+		}
+		return 0
+	}
+
+	result, err := backup.BackupProject(ctx, cfg.DataDir, projectID, output)
+	if err != nil {
+		fmt.Fprintf(stderr, "backup: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "backup complete: project %s (%s) -> %s\n", result.Manifest.ProjectID, result.Manifest.ProjectName, result.Dir)
+	for _, artifact := range result.Artifacts {
+		fmt.Fprintf(stdout, "  %s\n", artifact)
+	}
+	return 0
+}
+
+// runRestore restores a backup created by runBackup into a (fresh) data
+// directory. Restore is offline: flow-server must be stopped so nothing
+// writes to the data dir while files are replaced.
+func runRestore(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("restore", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	var configPath string
+	var dataDir string
+	var input string
+	var force bool
+	flags.StringVar(&configPath, "config", "", "coordinator config JSON path")
+	flags.StringVar(&dataDir, "data-dir", "", "Flow data directory")
+	flags.StringVar(&input, "input", "", "backup directory to restore from")
+	flags.BoolVar(&force, "force", false, "replace existing data dir contents")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if strings.TrimSpace(input) == "" {
+		fmt.Fprintln(stderr, "--input is required")
+		return 2
+	}
+
+	cfg, err := config.LoadCoordinator(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "load coordinator config: %v\n", err)
+		return 1
+	}
+	cfg, err = config.ApplyCoordinatorEnvOverrides(cfg, os.Getenv)
+	if err != nil {
+		fmt.Fprintf(stderr, "apply coordinator env overrides: %v\n", err)
+		return 1
+	}
+	if dataDir != "" {
+		cfg.DataDir = dataDir
+	}
+
+	fmt.Fprintln(stderr, "note: restore is offline; stop flow-server before restoring and start it only after the restore completes")
+
+	manifest, err := backup.LoadManifest(input)
+	if err != nil {
+		fmt.Fprintf(stderr, "restore: %v\n", err)
+		return 1
+	}
+	ctx := context.Background()
+	if manifest.Kind == backup.KindFull {
+		result, err := backup.RestoreAll(ctx, input, cfg.DataDir, force)
+		if err != nil {
+			fmt.Fprintf(stderr, "restore: %v\n", err)
+			return 1
+		}
+		for _, project := range result.Projects {
+			fmt.Fprintf(stdout, "restored project %s -> %s (%s)\n", project.ProjectID, project.Dir, strings.Join(project.Restored, ", "))
+		}
+		if result.GlobalDatabase != "" {
+			fmt.Fprintf(stdout, "restored global database -> %s\n", result.GlobalDatabase)
+		}
+		return 0
+	}
+
+	result, err := backup.RestoreProject(ctx, input, cfg.DataDir, "", force)
+	if err != nil {
+		fmt.Fprintf(stderr, "restore: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "restored project %s -> %s (%s)\n", result.ProjectID, result.Dir, strings.Join(result.Restored, ", "))
+	return 0
+}
+
 func runGitHook(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "missing git hook name")
@@ -844,6 +992,8 @@ func printUsage(out io.Writer) {
   flow-server [--log-level LEVEL] COMMAND
   flow-server serve [--data-dir PATH] [--addr HOST:PORT] [--owner-token TOKEN | --owner-token-file PATH] [--hook-token TOKEN | --hook-token-file PATH] [--orchestrator-token TOKEN | --orchestrator-token-file PATH] [--orchestrator-provider-ids IDS] [--client-config PATH | --no-write-client-config]
   flow-server config [--config PATH]
+  flow-server backup [--config PATH] [--data-dir PATH] (--project ID | --all) --output DIR
+  flow-server restore [--config PATH] [--data-dir PATH] --input DIR [--force]
   flow-server git-hook pre-receive --repo PATH --base BRANCH
   flow-server git-hook post-receive --repo PATH --base BRANCH
   flow-server --version

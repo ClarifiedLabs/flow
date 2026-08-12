@@ -636,6 +636,31 @@ Failure modes to plan around:
   CLI) emits new events that can re-trigger hooks. Keep hook chains
   convergent.
 
+## Backup and restore
+
+```sh
+flow-server backup [--config PATH] [--data-dir PATH] (--project ID | --all) --output DIR
+flow-server restore [--config PATH] [--data-dir PATH] --input DIR [--force]
+```
+
+`backup` snapshots a project: an online (`VACUUM INTO`) copy of `flow.db`, a
+`git bundle` of the exchange repo, a tar of `attachments/`, and a
+`manifest.json` (project id, timestamps, flow version, schema version). The
+whole backup is written to `DIR.tmp` then renamed into place. `--all` backs up
+every project plus the global database. Backup can run against a live server —
+the SQLite snapshot is consistent — but the exchange refs and attachments may
+have advanced past the database snapshot (crash-consistent, not a point-in-time
+cut across all three).
+
+`restore` is offline: stop the server first. It verifies the manifest schema
+version (a backup from a newer flow fails with an actionable error), restores
+`flow.db`, extracts the exchange bundle, and untars attachments. It refuses to
+overwrite a non-empty project directory without `--force`.
+
+Take a backup before upgrades. Test restores by booting a server on the
+restored data dir. Portable cross-server project moves (JSONL with ID
+remapping) are deliberately deferred.
+
 ## Notes
 
 - Flow is designed for local/private coordination. The exchange remote is
