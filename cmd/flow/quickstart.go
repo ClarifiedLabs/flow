@@ -98,14 +98,9 @@ func agentsBlock() string {
 		agentsBlockEnd + "\n"
 }
 
-// foreignManagedMarkers are other tools' managed-block markers. If one is
-// present we must not merge into the file (kata/beads own their block), so
-// flow writes a sidecar proposal instead.
-var foreignManagedMarkers = []string{"<!-- kata:begin -->", "<!-- beads:begin -->", "<!-- beads:end -->"}
-
 // writeAgentsBlock installs or refreshes the flow managed block in path.
-// Returns the outcome: "created", "refreshed", "appended", "proposed"
-// (foreign block → sidecar), or "skipped" (symlink refused).
+// Returns the outcome: "created", "refreshed", "appended", or "skipped"
+// (symlink refused).
 func writeAgentsBlock(path string) (string, error) {
 	info, err := os.Lstat(path)
 	if err == nil && info.Mode()&os.ModeSymlink != 0 {
@@ -122,19 +117,6 @@ func writeAgentsBlock(path string) (string, error) {
 		existing = string(raw)
 	} else if !os.IsNotExist(err) {
 		return "", err
-	}
-
-	// Foreign managed block: do not touch the file, propose a sidecar.
-	if !strings.Contains(existing, agentsBlockBegin) {
-		for _, marker := range foreignManagedMarkers {
-			if strings.Contains(existing, marker) {
-				sidecar := path + ".flow-proposed"
-				if err := os.WriteFile(sidecar, []byte(block), 0o644); err != nil {
-					return "", err
-				}
-				return "proposed", nil
-			}
-		}
 	}
 
 	switch {

@@ -16,7 +16,7 @@ import (
 	flowgit "github.com/ClarifiedLabs/flow/internal/git"
 )
 
-// The fold invariants, kata drift-guard style: the derived state the services
+// Drift guard for the fold invariants: the derived state the services
 // maintain incrementally must always equal a fresh fold over the raw event-ish
 // rows (work item relations + subtype tables). Ops below run in randomized
 // order across fixed seeds; every assertion recomputes from scratch in Go so
@@ -466,8 +466,8 @@ func TestWorkItemFoldInvariantsUnderRandomOps(t *testing.T) {
 	}
 }
 
-// TestSpoolDrainReplayIsIdempotent proves kata's ingest discipline on the
-// post-receive spool: duplicated and reordered lines dedup to the same
+// TestSpoolDrainReplayIsIdempotent proves the post-receive spool's ingest
+// discipline: duplicated and reordered lines dedup to the same
 // git_events rows (event_hash content addressing), re-draining is a no-op,
 // and the derived change projection converges to the same branch tip.
 func TestSpoolDrainReplayIsIdempotent(t *testing.T) {

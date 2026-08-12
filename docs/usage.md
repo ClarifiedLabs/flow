@@ -464,8 +464,7 @@ cursor discipline, and the mutations agents must not run unprompted. Under
 repo's `AGENTS.md` (created if absent, or appended below existing content) and
 into `CLAUDE.md` when one already exists. Rerunning refreshes only the block;
 handwritten content outside the markers is untouched. Symlinked instruction
-files are refused, and when the file carries another tool's managed block
-(kata/beads markers) flow writes `AGENTS.md.flow-proposed` instead of merging.
+files are refused.
 
 ## Multi-Agent Nodes and Check Configuration
 

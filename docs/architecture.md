@@ -487,11 +487,11 @@ terminal state, and flow state are authoritative on the server.
 
 ## Deliberately out of scope
 
-Patterns evaluated against kata (`github.com/kenn-io/kata`) and intentionally
-not adopted; recording them here so they are not re-litigated:
+Patterns evaluated and intentionally not adopted; recording them here so
+they are not re-litigated:
 
-- **Hub/spoke federation.** Flow's `flow-server` is already the shared daemon
-  kata recommends over peer federation; there is no cross-server sync.
+- **Hub/spoke federation.** Flow's `flow-server` is already the shared
+  daemon; there is no peer federation or cross-server sync.
 - **ULID dual identity.** Flow's canonical keyed ids (`t-<key>-NNNN`) already
   carry project and sequence; a second id scheme adds nothing.
 - **JSONL-cutover migrations.** Flow's in-place numbered SQL migrations are
@@ -500,7 +500,7 @@ not adopted; recording them here so they are not re-litigated:
   substring fallback); embeddings stay opt-out.
 - **Terminal UI (TUI).** The CLI + embedded web UI cover the surfaces; no
   interactive TUI.
-- **Task recurrences and beads import.** Not flow's model.
+- **Task recurrences.** Not flow's model.
 
 ## Development and verification
 

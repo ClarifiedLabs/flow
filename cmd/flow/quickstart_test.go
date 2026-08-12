@@ -123,33 +123,6 @@ func TestWriteAgentsBlockAppendsToExistingFile(t *testing.T) {
 	}
 }
 
-func TestWriteAgentsBlockForeignBlockWritesSidecar(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "AGENTS.md")
-	foreign := "# Project\n\n<!-- kata:begin -->\nkata owns this block\n<!-- kata:end -->\n"
-	if err := os.WriteFile(path, []byte(foreign), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	outcome, err := writeAgentsBlock(path)
-	if err != nil {
-		t.Fatalf("writeAgentsBlock: %v", err)
-	}
-	if outcome != "proposed" {
-		t.Fatalf("outcome = %q, want proposed", outcome)
-	}
-	content, _ := os.ReadFile(path)
-	if string(content) != foreign {
-		t.Fatalf("foreign file modified:\n%s", content)
-	}
-	sidecar, err := os.ReadFile(path + ".flow-proposed")
-	if err != nil {
-		t.Fatalf("read sidecar: %v", err)
-	}
-	if !strings.Contains(string(sidecar), agentsBlockBegin) {
-		t.Fatalf("sidecar missing flow block:\n%s", sidecar)
-	}
-}
-
 func TestWriteAgentsBlockRefusesSymlink(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "real.md")

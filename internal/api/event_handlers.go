@@ -13,8 +13,8 @@ import (
 
 // eventsResponse is the poll shape for the project event log. next_since is
 // the cursor for the following page: the last returned seq, or the caller's
-// own cursor when the page is empty. reset_required reserves kata's
-// purge-cursor semantics: flow never deletes events today, so it is always
+// own cursor when the page is empty. reset_required reserves purge-cursor
+// semantics: flow never deletes events today, so it is always
 // false; a consumer that sees true must resync from seq 0.
 type eventsResponse struct {
 	Events        []coordinator.Event `json:"events"`
