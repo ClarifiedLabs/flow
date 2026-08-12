@@ -3,7 +3,7 @@
 // open review thread blocks the merge, and not otherwise — a card that is
 // always there stops being read.
 
-import { threadClaimPending } from "../actions.js";
+import { threadClaimPending } from "../actions/registry.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { renderMarkdown } from "../markdown.js";
 import { define, FlowElement } from "./base.js";

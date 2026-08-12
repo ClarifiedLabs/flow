@@ -5,7 +5,7 @@ import { apiGetText, apiPost } from "./api.js";
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
 import { closeInlineTerminal, inlineTerminalMount, registerInlineTerminalDisclosure, renderTerminalPopOutButton, renderTerminalSurface, resetInlineTerminalDisclosure, terminalMount, terminalSelectionHint } from "./terminal.js";
-import { failureMessage } from "./actions.js";
+import { failureMessage } from "./actions/dispatch.js";
 
 export async function renderTerminalView(app, sessionID, context) {
   app.setTitle("Terminal");

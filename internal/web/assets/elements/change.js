@@ -3,7 +3,8 @@
 // inline notes, so neither survives only as long as the next poll.
 
 import { apiPost } from "../api.js";
-import { ACTION_SETTLE, acquireBusy, failureMessage, inFlight, inFlightEntries, markBusy, releaseBusy, settleStatus } from "../actions.js";
+import { acquireBusy, inFlight, inFlightEntries, markBusy, releaseBusy } from "../actions/registry.js";
+import { ACTION_SETTLE, failureMessage, settleStatus } from "../actions/dispatch.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { value } from "../normalize.js";
 import { readDiffMode, writeDiffMode } from "../storage.js";

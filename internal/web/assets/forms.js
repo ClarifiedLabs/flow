@@ -9,14 +9,12 @@ import { uploadTaskAttachment } from "./task.js";
 import { collectCreateWorkItemRelations } from "./create-relations.js";
 import {
   acquireBusy,
-  actionScope,
-  failureMessage,
   formBusyControl,
   formBusyKey,
   markBusy,
   releaseBusy,
-  settleStatus,
-} from "./actions.js";
+} from "./actions/registry.js";
+import { actionScope, failureMessage, settleStatus } from "./actions/dispatch.js";
 
 // formBusyKey lives in actions.js next to the in-flight registry (forms.js
 // already imports actions.js, so the dependency stays one-way); it is

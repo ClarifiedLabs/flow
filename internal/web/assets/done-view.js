@@ -10,7 +10,7 @@ import { formatDate } from "./format.js";
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
 import { readDoneDensity, readDoneOutcome, writeDoneDensity, writeDoneOutcome } from "./storage.js";
-import { failureMessage } from "./actions.js";
+import { failureMessage } from "./actions/dispatch.js";
 
 export async function renderDoneView(app, context) {
   if (!app.doneOutcome) app.doneOutcome = readDoneOutcome();

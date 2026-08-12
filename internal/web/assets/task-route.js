@@ -2,7 +2,7 @@
 // into one model, hand to <flow-task-detail>.
 
 import { apiGet, taskAPIBase, workItemContextAPIPath } from "./api.js";
-import { failureMessage } from "./actions.js";
+import { failureMessage } from "./actions/dispatch.js";
 import { mount } from "./elements/base.js";
 import { taskModel } from "./task-model.js";
 import { value } from "./normalize.js";

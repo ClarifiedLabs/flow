@@ -10,7 +10,8 @@
 // [data-gate-panel], so this element never wires its own listeners for them.
 
 import { apiPost } from "../api.js";
-import { failureMessage, gateResponsePending } from "../actions.js";
+import { gateResponsePending } from "../actions/registry.js";
+import { failureMessage } from "../actions/dispatch.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { renderMarkdown } from "../markdown.js";
 import { value } from "../normalize.js";

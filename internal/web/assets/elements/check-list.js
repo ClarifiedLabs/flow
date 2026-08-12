@@ -10,7 +10,7 @@ import { apiGetText } from "../api.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { renderMarkdown } from "../markdown.js";
 import { value } from "../normalize.js";
-import { failureMessage } from "../actions.js";
+import { failureMessage } from "../actions/dispatch.js";
 import { define, FlowElement } from "./base.js";
 
 export function renderCheckList(model) {

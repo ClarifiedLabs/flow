@@ -3,7 +3,7 @@
 // orphaned rows remain visible without risking recursive loops.
 
 import { FlowElement, define } from "./base.js";
-import { failureMessage } from "../actions.js";
+import { failureMessage } from "../actions/dispatch.js";
 import { apiPatch, workItemHref, workItemParentsAPIPath } from "../api.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { value } from "../normalize.js";

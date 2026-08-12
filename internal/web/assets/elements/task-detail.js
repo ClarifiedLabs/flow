@@ -7,7 +7,7 @@
 // tab that remembers where you were.
 
 import { apiGet, apiPost } from "../api.js";
-import { failureMessage } from "../actions.js";
+import { failureMessage } from "../actions/dispatch.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { renderMarkdown } from "../markdown.js";
 import { value } from "../normalize.js";

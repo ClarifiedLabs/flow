@@ -19,7 +19,7 @@
 // DOM, which is the only way to test it without pulling in a third-party
 // browser environment.
 
-import { applyBusyState } from "../actions.js";
+import { applyBusyState } from "../actions/registry.js";
 
 export class FlowElement extends HTMLElement {
   #data = null;

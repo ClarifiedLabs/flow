@@ -9,7 +9,7 @@
 // does not poll, so the selection and the search box are never clobbered
 // mid-edit; refresh is the topbar's manual button.
 
-import { failureMessage } from "./actions.js";
+import { failureMessage } from "./actions/dispatch.js";
 import { apiGet, apiPatch, apiPost, taskAPIBase, taskHref, workItemHref, workItemsAPIBase } from "./api.js";
 import { phaseKey, renderPhaseBadge } from "./board.js";
 import { escapeAttr, escapeHTML } from "./html.js";

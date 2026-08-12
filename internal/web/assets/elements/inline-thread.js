@@ -3,7 +3,7 @@
 // reader hold a file and a line number in their head while they scroll.
 
 import { formatRelative } from "../format.js";
-import { threadClaimPending } from "../actions.js";
+import { threadClaimPending } from "../actions/registry.js";
 import { escapeAttr, escapeHTML } from "../html.js";
 import { renderMarkdown } from "../markdown.js";
 import { value } from "../normalize.js";

@@ -8,7 +8,7 @@ import { HARNESS_REASONING_UNAVAILABLE, findHarnessModel, harnessModels, harness
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
 import { renderWorkflowGraph } from "./workflow-graph.js";
-import { failureMessage } from "./actions.js";
+import { failureMessage } from "./actions/dispatch.js";
 
 export async function renderFlowsView(app, context) {
   app.setTitle("Flows");
