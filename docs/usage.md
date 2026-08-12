@@ -238,7 +238,9 @@ satisfies `done`. Exit codes: 0 condition met, 1 error, 2 usage, 3 timeout.
 
 `events` reads the project event log: one durable, totally ordered stream of
 agent-relevant state changes (task lifecycle and edits, epic/feature
-transitions, session status writes, deduplicated git pushes). Every event
+transitions — including reconciler-driven automatic epic completion/reopen,
+marked `"automatic": true` with actor `system` — session status writes,
+deduplicated git pushes). Every event
 carries a monotonic `seq`; pass `--since` with the last seq you saw (or the
 `next_since` cursor from the previous machine-mode page) to resume without
 gaps or duplicates. `--follow` streams new events as server-sent events,

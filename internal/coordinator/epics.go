@@ -556,12 +556,29 @@ UPDATE epics SET status = 'completed', completed_automatically = 1,
 	completed_at = ?, updated_at = ? WHERE id = ?`, formatTime(now), formatTime(now), epicID); err != nil {
 					return err
 				}
+				// Reconciler-driven transitions are emitted here (in the same tx)
+				// because no single service owns this mutation. Non-fatal: a failed
+				// insert must not roll back the state transition.
+				if err := insertEventLogTx(ctx, q, now, Event{
+					Kind:    EventEpicCompleted,
+					Actor:   string(ActorSystem),
+					Payload: eventPayload(map[string]any{"epic_id": epicID, "automatic": true}),
+				}); err != nil {
+					slog.Warn("event log append failed", "kind", EventEpicCompleted, "error", err)
+				}
 				changed = true
 			case status == string(EpicCompleted) && automatic != 0 && !shouldComplete:
 				if _, err := q.ExecContext(ctx, `
 UPDATE epics SET status = 'open', completed_automatically = 0,
 	completed_at = NULL, updated_at = ? WHERE id = ?`, formatTime(now), epicID); err != nil {
 					return err
+				}
+				if err := insertEventLogTx(ctx, q, now, Event{
+					Kind:    EventEpicReopened,
+					Actor:   string(ActorSystem),
+					Payload: eventPayload(map[string]any{"epic_id": epicID, "automatic": true}),
+				}); err != nil {
+					slog.Warn("event log append failed", "kind", EventEpicReopened, "error", err)
 				}
 				changed = true
 			}

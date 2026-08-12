@@ -814,6 +814,7 @@ func (c *Client) ApplyReviewFollowUp(sourceTaskID string, input ApplyReviewFollo
 	return ApplyReviewFollowUpResult{
 		Task:        response.Task,
 		Disposition: response.Disposition,
+		Reused:      response.Disposition == "existing",
 	}, nil
 }
 
@@ -2402,6 +2403,9 @@ type ApplyReviewFollowUpInput = contract.ApplyReviewFollowUpRequest
 type ApplyReviewFollowUpResult struct {
 	Task        coordinator.Task
 	Disposition string
+	// Reused reports that the follow-up action replayed an existing task
+	// (disposition "existing") instead of creating a new one.
+	Reused bool
 }
 
 type ProvisionerAssignment = contract.ProvisionerAssignment

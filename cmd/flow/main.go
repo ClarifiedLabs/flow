@@ -4949,6 +4949,12 @@ func printTaskAttachmentLine(out io.Writer, attachment coordinator.TaskAttachmen
 
 func printTaskDetail(out io.Writer, task coordinator.Task) {
 	printTaskLine(out, task)
+	if task.DoneMessage != "" {
+		fmt.Fprintf(out, "resolution message: %s\n", task.DoneMessage)
+	}
+	for _, evidence := range task.DoneEvidence {
+		fmt.Fprintf(out, "evidence: %s: %s\n", evidence.Type, evidence.Value)
+	}
 	if task.Body != "" {
 		fmt.Fprintf(out, "\n%s\n", task.Body)
 	}

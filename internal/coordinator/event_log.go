@@ -229,6 +229,32 @@ func newEventID() string {
 	return "evt_" + hex.EncodeToString(random[:])
 }
 
+// insertEventLogTx writes an event inside a caller-held transaction through
+// the shared relation querier, for sites (the epic reconciler) that mutate
+// derived state without an EventLogService in hand. Like AppendTx: kind is
+// required, payload defaults to {}, occurred_at comes from the caller's
+// mutation timestamp so the event shares the mutation's clock.
+func insertEventLogTx(ctx context.Context, q workItemRelationQuerier, now time.Time, event Event) error {
+	if event.Kind == "" {
+		return errors.New("event kind is required")
+	}
+	if event.ID == "" {
+		event.ID = newEventID()
+	}
+	payload := event.Payload
+	if len(payload) == 0 {
+		payload = json.RawMessage(`{}`)
+	}
+	if !json.Valid(payload) {
+		return fmt.Errorf("event payload is not valid JSON")
+	}
+	_, err := q.ExecContext(ctx, `
+INSERT INTO event_log (id, occurred_at, kind, actor, task_id, session_id, run_id, change_id, payload)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.ID, formatTime(now.UTC()), event.Kind, event.Actor, event.TaskID, event.SessionID, event.RunID, event.ChangeID, string(payload))
+	return err
+}
+
 // eventLogExecer is the transactional SQL surface AppendTx writes through;
 // *sql.Tx and sqlitex.Tx both satisfy it.
 type eventLogExecer interface {
