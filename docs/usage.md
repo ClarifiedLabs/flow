@@ -432,6 +432,21 @@ flow thread certify THREAD_ID
 flow thread reopen THREAD_ID
 ```
 
+## Onboarding agents
+
+`flow quickstart` prints flow's agent operating contract — the
+prompt → work → `flow complete` loop, gate responses, machine output, event-log
+cursor discipline, and the mutations agents must not run unprompted. Under
+`--agent` it emits a compact form suitable for stuffing into a system prompt.
+
+`flow init --with-agents` writes a marker-delimited block
+(`<!-- flow:begin -->` / `<!-- flow:end -->`) with the compact contract into the
+repo's `AGENTS.md` (created if absent, or appended below existing content) and
+into `CLAUDE.md` when one already exists. Rerunning refreshes only the block;
+handwritten content outside the markers is untouched. Symlinked instruction
+files are refused, and when the file carries another tool's managed block
+(kata/beads markers) flow writes `AGENTS.md.flow-proposed` instead of merging.
+
 ## Multi-Agent Nodes and Check Configuration
 
 Repo-versioned CI configuration lives in `.flow/checks/*.yaml`. CI jobs use the

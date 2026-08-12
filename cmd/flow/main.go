@@ -159,6 +159,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runWait(options.withConfig(args[1:]), stdout, stderr)
 	case "events":
 		return runEvents(options.withConfig(args[1:]), stdout, stderr)
+	case "quickstart", "agent-instructions":
+		return runQuickstart(options.withConfig(args[1:]), stdout, stderr)
 	case "checks":
 		return runChecks(options.withConfig(args[1:]), stdout, stderr)
 	case "transitions":
@@ -290,11 +292,13 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	var name string
 	var baseBranch string
 	var exchangeName string
+	var withAgents bool
 	apiFlags := addAPIFlags(flags)
 	flags.StringVar(&repoPath, "repo", ".", "git worktree to register as a Flow project")
 	flags.StringVar(&name, "name", "", "project name (default: repo directory name)")
 	flags.StringVar(&baseBranch, "base", "", "base branch to seed and protect (default: current branch)")
 	flags.StringVar(&exchangeName, "exchange-name", "", "git remote name for the Flow exchange (default flow)")
+	flags.BoolVar(&withAgents, "with-agents", false, "write the flow agent block into AGENTS.md/CLAUDE.md")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -388,6 +392,9 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stdout, "  flow task create --title \"...\"   # project auto-detected from this repo")
 	fmt.Fprintln(stdout, "  flow board")
+	if withAgents {
+		installAgentsBlocks(repoRoot, stdout)
+	}
 	return 0
 }
 
@@ -4123,7 +4130,7 @@ func runReconcile(args []string, stdout, stderr io.Writer) int {
 func printUsage(out io.Writer) {
 	fmt.Fprint(out, `Usage:
   flow [--log-level LEVEL] [--config PATH] COMMAND
-  flow init [--repo PATH] [--name NAME] [--base BRANCH]
+  flow init [--repo PATH] [--name NAME] [--base BRANCH] [--with-agents]
   flow doctor [--db PATH] [--config PATH]
   flow doctor work-items [--project PROJECT] [API flags]
 	  flow task create --title TITLE [--flow FLOW] [--feature FEATURE] [--parent ITEM_ID] [--file PATH]
@@ -4147,6 +4154,7 @@ func printUsage(out io.Writer) {
   flow next [--tag TAG]
   flow wait TASK_ID... [--until done|blocked|scheduled|in_progress] [--any|--all] [--timeout 30s] [--poll-interval 2s]
   flow events [--since N] [--limit N] [--kind K] [--task ID] [--actor A] [--follow|--tail]
+  flow quickstart
   flow checks TASK_ID
   flow transitions TASK_ID
   flow workers
