@@ -301,11 +301,13 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	var baseBranch string
 	var exchangeName string
 	var withAgents bool
+	var repair bool
 	apiFlags := addAPIFlags(flags)
-	flags.StringVar(&repoPath, "repo", ".", "git worktree to register as a Flow project")
+	flags.StringVar(&repoPath, "repo", ".", "git worktree to register or attach")
 	flags.StringVar(&name, "name", "", "project name (default: repo directory name)")
 	flags.StringVar(&baseBranch, "base", "", "base branch to seed and protect (default: current branch)")
 	flags.StringVar(&exchangeName, "exchange-name", "", "git remote name for the Flow exchange (default flow)")
+	flags.BoolVar(&repair, "repair", false, "repair an existing project attachment; do not create a project")
 	flags.BoolVar(&withAgents, "with-agents", false, "write the flow agent block into AGENTS.md/CLAUDE.md")
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -327,45 +329,123 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "connect to flow-server: %v\n", err)
 		return 1
 	}
+	// Initialization persists its token as the long-lived Git and owner CLI
+	// credential. Prove it has owner scope through a read-only owner-only route
+	// before changing any repository or credential-helper state.
+	if _, err := client.ListGlobalAgentDefs(); err != nil {
+		fmt.Fprintf(stderr, "validate owner credential: %v\n", err)
+		return 1
+	}
 
-	if strings.TrimSpace(baseBranch) == "" {
-		baseBranch, err = currentBranch(repoRoot)
+	localProjectRef, err := readRepoProjectRef(repoRoot)
+	if err != nil {
+		fmt.Fprintf(stderr, "read repository Flow project: %v\n", err)
+		return 1
+	}
+	explicitProjectRef := strings.TrimSpace(apiFlags.project)
+	projectRef := explicitProjectRef
+	if projectRef == "" {
+		projectRef = localProjectRef
+	}
+	attachExisting := projectRef != "" || repair
+	implicitRerun := explicitProjectRef == "" && localProjectRef != "" && !repair
+	if attachExisting && !implicitRerun && (strings.TrimSpace(name) != "" || strings.TrimSpace(baseBranch) != "" || strings.TrimSpace(exchangeName) != "") {
+		fmt.Fprintln(stderr, "--name, --base, and --exchange-name cannot be used when attaching or repairing an existing project")
+		return 2
+	}
+	if repair && projectRef == "" {
+		existing, lookupErr := client.LookupProjectByRepoPath(repoRoot)
+		if lookupErr != nil {
+			fmt.Fprintf(stderr, "find existing project for repository: %v\n", lookupErr)
+			return 1
+		}
+		if existing == nil {
+			fmt.Fprintln(stderr, "no Flow project is associated with this repository; pass --project ID_OR_NAME to attach one")
+			return 1
+		}
+		projectRef = existing.ID
+	}
+
+	var project flowclient.Project
+	created := false
+	if attachExisting {
+		project, err = client.GetProject(projectRef)
 		if err != nil {
-			fmt.Fprintf(stderr, "detect base branch: %v\n", err)
+			fmt.Fprintf(stderr, "resolve existing project: %v\n", err)
+			return 1
+		}
+		if implicitRerun {
+			if requested := strings.TrimSpace(name); requested != "" && requested != project.Name {
+				fmt.Fprintf(stderr, "--name %q does not match attached project name %q\n", requested, project.Name)
+				return 2
+			}
+			if requested := strings.TrimSpace(baseBranch); requested != "" && requested != project.BaseBranch {
+				fmt.Fprintf(stderr, "--base %q does not match attached project base branch %q\n", requested, project.BaseBranch)
+				return 2
+			}
+			if requested := strings.TrimSpace(exchangeName); requested != "" && requested != project.ExchangeName {
+				fmt.Fprintf(stderr, "--exchange-name %q does not match attached project remote name %q\n", requested, project.ExchangeName)
+				return 2
+			}
+		}
+	} else {
+		if strings.TrimSpace(baseBranch) == "" {
+			baseBranch, err = currentBranch(repoRoot)
+			if err != nil {
+				fmt.Fprintf(stderr, "detect base branch: %v\n", err)
+				return 1
+			}
+		}
+		project, created, err = client.CreateProject(flowclient.CreateProjectInput{
+			Name:         strings.TrimSpace(name),
+			RepoPath:     repoRoot,
+			BaseBranch:   strings.TrimSpace(baseBranch),
+			ExchangeName: strings.TrimSpace(exchangeName),
+		})
+		if err != nil {
+			fmt.Fprintf(stderr, "register project: %v\n", err)
 			return 1
 		}
 	}
 
-	project, created, err := client.CreateProject(flowclient.CreateProjectInput{
-		Name:         strings.TrimSpace(name),
-		RepoPath:     repoRoot,
-		BaseBranch:   strings.TrimSpace(baseBranch),
-		ExchangeName: strings.TrimSpace(exchangeName),
-	})
-	if err != nil {
-		fmt.Fprintf(stderr, "register project: %v\n", err)
-		return 1
-	}
 	exchangeURL, err := flowgit.ExchangeHTTPURL(clientCfg.ServerURL, project.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "resolve exchange remote: %v\n", err)
 		return 1
 	}
-
-	seed, err := flowgit.SeedExchangeFromWorktree(context.Background(), flowgit.SeedOptions{
-		RepoPath:     repoRoot,
-		BaseBranch:   project.BaseBranch,
-		ExchangeName: project.ExchangeName,
-		ExchangeURL:  exchangeURL,
-		Token:        clientCfg.Token,
-	})
-	if err != nil {
-		fmt.Fprintf(stderr, "seed exchange remote: %v\n", err)
+	if attachExisting {
+		_, err = flowgit.AttachExchangeWorktree(context.Background(), flowgit.AttachOptions{
+			RepoPath:      repoRoot,
+			ExchangeName:  project.ExchangeName,
+			ExchangeURL:   exchangeURL,
+			Token:         clientCfg.Token,
+			ReplaceRemote: repair,
+		})
+		if err != nil {
+			fmt.Fprintf(stderr, "attach exchange remote: %v\n", err)
+			return 1
+		}
+	} else {
+		seed, seedErr := flowgit.SeedExchangeFromWorktree(context.Background(), flowgit.SeedOptions{
+			RepoPath:     repoRoot,
+			BaseBranch:   project.BaseBranch,
+			ExchangeName: project.ExchangeName,
+			ExchangeURL:  exchangeURL,
+			Token:        clientCfg.Token,
+		})
+		if seedErr != nil {
+			fmt.Fprintf(stderr, "seed exchange remote: %v\n", seedErr)
+			return 1
+		}
+		if seed.Warning != "" {
+			fmt.Fprintf(stderr, "warning: %s\n", seed.Warning)
+		}
+	}
+	if err := writeRepoProjectRef(repoRoot, project.ID); err != nil {
+		fmt.Fprintf(stderr, "record repository Flow project: %v\n", err)
 		return 1
 	}
-	if seed.Warning != "" {
-		fmt.Fprintf(stderr, "warning: %s\n", seed.Warning)
-	}
+
 	credentialStored, credentialCommand, err := approveGitCredential(repoRoot, exchangeURL, clientCfg.Token)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: git credential storage skipped: %v\n", err)
@@ -383,7 +463,11 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	if created {
+	if attachExisting && repair {
+		fmt.Fprintln(stdout, "flow project attachment repaired")
+	} else if attachExisting {
+		fmt.Fprintln(stdout, "flow project attached")
+	} else if created {
 		fmt.Fprintln(stdout, "flow project created")
 	} else {
 		fmt.Fprintln(stdout, "flow project already registered")
@@ -447,6 +531,31 @@ func gitConfig(repoRoot string, key string, value string) error {
 	cmd.Dir = repoRoot
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git config %s: %s: %w", key, strings.TrimSpace(string(output)), err)
+	}
+	return nil
+}
+
+const repoProjectConfigKey = "flow.project"
+
+func readRepoProjectRef(repoRoot string) (string, error) {
+	cmd := exec.Command("git", "config", "--local", "--get", repoProjectConfigKey)
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return "", nil
+		}
+		return "", fmt.Errorf("git config --get %s: %s: %w", repoProjectConfigKey, strings.TrimSpace(string(output)), err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func writeRepoProjectRef(repoRoot string, projectID string) error {
+	cmd := exec.Command("git", "config", "--local", repoProjectConfigKey, strings.TrimSpace(projectID))
+	cmd.Dir = repoRoot
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git config %s: %s: %w", repoProjectConfigKey, strings.TrimSpace(string(output)), err)
 	}
 	return nil
 }
@@ -4310,6 +4419,8 @@ func printUsage(out io.Writer) {
 	fmt.Fprint(out, `Usage:
   flow [--log-level LEVEL] [--config PATH] COMMAND
   flow init [--repo PATH] [--name NAME] [--base BRANCH] [--with-agents]
+  flow init --repair [--repo PATH] [--project PROJECT]
+  flow init --project PROJECT [--repo PATH]
   flow doctor [--db PATH] [--config PATH]
   flow doctor work-items [--project PROJECT] [API flags]
 	  flow task create --title TITLE [--flow FLOW] [--feature FEATURE] [--parent ITEM_ID] [--file PATH]
@@ -4679,9 +4790,10 @@ func applyClientEnvironment(values *apiFlagValues) {
 // resolveProjectRef picks the project context for a command: an explicit
 // --project wins, then the worker-injected FLOW_PROJECT_ID (worker checkouts
 // are clones whose paths are not registered, so the environment must beat the
-// cwd lookup), then the project registered for the current repo root. An
-// empty result leaves routes unscoped: the coordinator resolves session
-// tokens to their bound project and single-project deployments implicitly.
+// cwd lookup), then the repository's local flow.project setting, and finally
+// the project registered for the current repo root. An empty result leaves routes
+// unscoped: the coordinator resolves session tokens to their bound project and
+// single-project deployments implicitly.
 func resolveProjectRef(values *apiFlagValues, client *flowclient.Client) string {
 	if values.project != "" {
 		return values.project
@@ -4692,6 +4804,9 @@ func resolveProjectRef(values *apiFlagValues, client *flowclient.Client) string 
 	root, err := resolveInitRepoRoot(".")
 	if err != nil {
 		return ""
+	}
+	if ref, configErr := readRepoProjectRef(root); configErr == nil && ref != "" {
+		return ref
 	}
 	project, err := client.LookupProjectByRepoPath(root)
 	if err != nil || project == nil {

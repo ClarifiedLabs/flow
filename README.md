@@ -69,6 +69,10 @@ cd /path/to/your/repo
 flow init
 ```
 
+If the Flow remote or saved Git credential is lost, run `flow init --repair`.
+To attach another clone to the same project without creating or seeding a new
+one, run `flow init --project PROJECT_ID_OR_NAME`.
+
 Open the web UI:
 
 ```sh

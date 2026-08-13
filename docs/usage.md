@@ -165,6 +165,12 @@ them from inside a registered repository or target project-owned collection
 operations explicitly with `--project NAME|ID`. A full task ID is globally
 resolvable, so `flow task show t-flow-app-0001` works from any directory.
 
+Initialization records the project ID in the repository-local `flow.project` Git
+setting. Use `flow init --repair` to restore a missing or stale Flow remote and
+its path-scoped Git credential without creating a project. Use
+`flow init --project NAME|ID` in a fresh clone to attach it to an existing
+project without seeding or pushing refs.
+
 Project IDs are derived from the project display name. Flow lowercases ASCII
 letters, replaces punctuation and whitespace runs with hyphens, and keeps the
 display name unchanged. For example, `flow init --name "Flow App"` creates

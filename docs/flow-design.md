@@ -218,8 +218,10 @@ compiled into the `flow` binary for prompt generation.
 6. Seeds the exchange remote by pushing only the configured base branch.
 7. Installs exchange-remote hooks.
 8. Records owner, hook, and coordinator git credentials.
-9. Leaves all existing remotes, including `origin`, untouched.
-10. Writes a client config so later CLI commands need no `--server`/`--token`.
+9. Records the non-secret project ID in the repository-local `flow.project` Git
+   setting for CLI auto-detection.
+10. Leaves all existing remotes, including `origin`, untouched.
+11. Writes a client config so later CLI commands need no `--server`/`--token`.
 
 Workers are one-shot capacity slots, not a reusable pool. A
 `flow-orchestrator` provider launches a slot with a direct credential; the slot
@@ -243,7 +245,15 @@ flow init --repo . --base main
 flow init --repo . --base main --exchange-name flow-local
 flow init --repo . --base main --name my-project
 flow init --repo . --base main --server http://127.0.0.1:8421 --token "$OWNER_TOKEN"
+flow init --repair                         # repair this checkout only
+flow init --project p-my-project           # attach a clone without pushing
+flow init --repair --project p-my-project  # explicitly replace a stale Flow URL
 ```
+
+Repair and attachment resolve existing coordinator projects. They verify the
+exchange and restore local configuration and credentials without creating a
+project or seeding refs. A plain attachment refuses to replace a conflicting
+same-name remote; repair mode makes replacement explicit.
 
 Existing remotes such as `origin` remain available for manual user pushes.
 Flow does not configure or run downstream mirror pushes in the MVP.

@@ -107,7 +107,8 @@ flow init
 ```
 
 `flow init` registers the project through the running coordinator, adds the
-`flow` exchange remote, pushes the base-branch seed, and refreshes
+`flow` exchange remote, pushes the base-branch seed, records the project ID in
+the repository's local Git config, and refreshes
 `$XDG_CONFIG_HOME/flow/config.yaml` so later commands usually need no
 `--server` or `--token` flags. Re-running it is idempotent.
 
@@ -176,6 +177,8 @@ rewrite your project, or replace `origin`. Through the server it:
 - Installs exchange-remote hooks.
 - Stores HTTP exchange credentials through Git's credential helper when the
   exchange URL is HTTP(S) and an owner token is available.
+- Records the non-secret project ID as `flow.project` in the repository's local
+  Git config for command auto-detection.
 - Refreshes the client config at `$XDG_CONFIG_HOME/flow/config.yaml` with the
   server URL, data dir, and owner credential.
 
@@ -183,6 +186,48 @@ The base branch defaults to the worktree's current branch; override it with
 `--base`. The owner token used for registration is resolved from `--token`, then
 session/worker/owner token environment variables, then client config, then
 `<data-dir>/owner.token`.
+
+## Repair or Attach a Checkout
+
+Repair an initialized checkout after its exchange remote or credential-helper
+entry is lost or stale:
+
+```sh
+cd /path/to/repo
+flow init --repair
+```
+
+Repair mode never creates or seeds a project. It resolves the project from the
+local `flow.project` Git setting, falling back to the legacy coordinator-side
+repository path, verifies the exchange, restores its remote URL, and re-approves
+the path-scoped HTTP credential. A normal `flow init` rerun also refreshes the credential for a checkout that
+already has the local project setting, but only explicit `--repair` may replace
+conflicting fetch or push URLs.
+
+A fresh clone does not inherit repository-local Git config. Attach it to an
+existing Flow project by ID or display name:
+
+```sh
+cd /path/to/clone
+flow init --project p-my-project
+# Display names work too: flow init --project "My Project"
+```
+
+Attachment verifies and adds the exchange remote, stores its credential, and
+records `flow.project`; it does not create a project, seed refs, or push. It also
+does not replace an unrelated remote with the same name. If this is a known
+stale Flow attachment, make replacement explicit:
+
+```sh
+flow init --repair --project p-my-project
+```
+
+Multiple independent clones can attach to the same project because
+auto-detection uses repository-local Git config rather than changing the
+project's original registration path. Linked worktrees share this
+repository-local association and therefore target the same Flow project;
+independent clones have separate local Git config and can be attached
+independently.
 
 ## Owner Token
 

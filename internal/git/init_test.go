@@ -65,6 +65,86 @@ func TestCreateServerProjectRejectsInvalidBaseBranch(t *testing.T) {
 	}
 }
 
+func TestAttachExchangeWorktreeConfiguresRemoteWithoutLocalCommits(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	project := createServerProjectForTest(t)
+
+	for _, tc := range []struct {
+		name               string
+		existingURL        string
+		existingExchange   bool
+		hasExplicitPushURL bool
+		explicitPushURL    string
+		replaceRemote      bool
+		wantError          bool
+	}{
+		{name: "new attachment"},
+		{name: "refuse conflicting remote", existingURL: "https://example.com/other.git", wantError: true},
+		{name: "repair stale fetch and push URLs", existingURL: "https://example.com/stale.git", hasExplicitPushURL: true, explicitPushURL: "https://example.com/wrong-push.git", replaceRemote: true},
+		{name: "repair stale push URL", existingExchange: true, hasExplicitPushURL: true, explicitPushURL: "https://example.com/wrong-push.git", replaceRemote: true},
+		{name: "repair empty push URL", existingExchange: true, hasExplicitPushURL: true, replaceRemote: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			repoPath := filepath.Join(t.TempDir(), "repo")
+			if err := gitRun(ctx, "", nil, "-c", "init.defaultBranch=main", "init", repoPath); err != nil {
+				t.Fatalf("git init: %v", err)
+			}
+			existingURL := tc.existingURL
+			if tc.existingExchange {
+				existingURL = project.ExchangePath
+			}
+			if existingURL != "" {
+				if err := gitRun(ctx, repoPath, nil, "remote", "add", DefaultExchangeName, existingURL); err != nil {
+					t.Fatalf("add stale remote: %v", err)
+				}
+			}
+			if tc.hasExplicitPushURL {
+				if err := gitRun(ctx, repoPath, nil, "config", "--add", "remote."+DefaultExchangeName+".pushurl", tc.explicitPushURL); err != nil {
+					t.Fatalf("add explicit push URL: %v", err)
+				}
+			}
+
+			result, err := AttachExchangeWorktree(ctx, AttachOptions{
+				RepoPath:      repoPath,
+				ExchangeURL:   project.ExchangePath,
+				ReplaceRemote: tc.replaceRemote,
+			})
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("conflicting remote was replaced without repair permission")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("attach exchange worktree: %v", err)
+			}
+			resolvedRepoPath, err := filepath.EvalSymlinks(repoPath)
+			if err != nil {
+				t.Fatalf("resolve repo path: %v", err)
+			}
+			if result.RepoRoot != resolvedRepoPath {
+				t.Fatalf("RepoRoot = %q, want %q", result.RepoRoot, resolvedRepoPath)
+			}
+			remoteURL, err := gitOutput(ctx, repoPath, nil, "remote", "get-url", DefaultExchangeName)
+			if err != nil {
+				t.Fatalf("read exchange remote: %v", err)
+			}
+			if remoteURL != project.ExchangePath {
+				t.Fatalf("exchange remote = %q, want %q", remoteURL, project.ExchangePath)
+			}
+			pushURL, err := gitOutput(ctx, repoPath, nil, "remote", "get-url", "--push", DefaultExchangeName)
+			if err != nil {
+				t.Fatalf("read exchange push URL: %v", err)
+			}
+			if pushURL != project.ExchangePath {
+				t.Fatalf("exchange push URL = %q, want %q", pushURL, project.ExchangePath)
+			}
+		})
+	}
+}
+
 func TestSeedExchangeFromWorktreeSeedsBaseAndPreservesOrigin(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

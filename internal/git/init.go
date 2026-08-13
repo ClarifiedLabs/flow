@@ -35,6 +35,51 @@ type SeedResult struct {
 	Warning    string
 }
 
+type AttachOptions struct {
+	RepoPath      string
+	ExchangeName  string
+	ExchangeURL   string
+	Token         string
+	ReplaceRemote bool
+}
+
+type AttachResult struct {
+	RepoRoot string
+}
+
+// AttachExchangeWorktree verifies an existing project's exchange and adds its
+// remote to a local worktree. It does not inspect or push local refs, so it is
+// safe for fresh clones and repositories without commits.
+func AttachExchangeWorktree(ctx context.Context, opts AttachOptions) (AttachResult, error) {
+	if strings.TrimSpace(opts.ExchangeURL) == "" {
+		return AttachResult{}, errors.New("exchange url is required")
+	}
+	if strings.TrimSpace(opts.ExchangeName) == "" {
+		opts.ExchangeName = DefaultExchangeName
+	}
+	if strings.TrimSpace(opts.RepoPath) == "" {
+		opts.RepoPath = "."
+	}
+
+	repoRoot, err := gitOutput(ctx, opts.RepoPath, nil, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return AttachResult{}, fmt.Errorf("verify git worktree: %w", err)
+	}
+	repoRoot, err = filepath.Abs(repoRoot)
+	if err != nil {
+		return AttachResult{}, fmt.Errorf("resolve git worktree: %w", err)
+	}
+
+	if _, err := gitOutput(ctx, repoRoot, gitHTTPAuthEnv(opts.Token), "ls-remote", opts.ExchangeURL); err != nil {
+		return AttachResult{}, fmt.Errorf("verify exchange remote: %w", err)
+	}
+	if err := ensureRemote(ctx, repoRoot, opts.ExchangeName, opts.ExchangeURL, opts.ReplaceRemote); err != nil {
+		return AttachResult{}, err
+	}
+
+	return AttachResult{RepoRoot: repoRoot}, nil
+}
+
 // SeedExchangeFromWorktree verifies the worktree, adds the exchange remote,
 // and pushes the base branch into the exchange when it is not there yet. It
 // only talks to the exchange over its URL, so the coordinator may live on a
@@ -198,25 +243,75 @@ func ensureBareExchange(ctx context.Context, exchangePath string) error {
 }
 
 func ensureRemote(ctx context.Context, repoPath string, name string, remoteURL string, replace bool) error {
+	pushURLs, err := explicitRemotePushURLs(ctx, repoPath, name)
+	if err != nil {
+		return err
+	}
 	currentURL, err := gitOutput(ctx, repoPath, nil, "remote", "get-url", name)
 	if err != nil {
+		if len(pushURLs) > 0 && !replace {
+			return fmt.Errorf("git remote %q has conflicting push URL configuration; remove it or rerun with --repair", name)
+		}
 		if err := gitRun(ctx, repoPath, nil, "remote", "add", name, remoteURL); err != nil {
 			return fmt.Errorf("add %s remote: %w", name, err)
 		}
+		if len(pushURLs) > 0 {
+			if err := gitRun(ctx, repoPath, nil, "config", "--unset-all", "remote."+name+".pushurl"); err != nil {
+				return fmt.Errorf("clear %s remote push URLs: %w", name, err)
+			}
+		}
 		return nil
 	}
-
-	if currentURL == remoteURL {
+	urlsMatch := currentURL == remoteURL
+	for _, pushURL := range pushURLs {
+		if pushURL != remoteURL {
+			urlsMatch = false
+			break
+		}
+	}
+	if urlsMatch && (!replace || len(pushURLs) == 0) {
 		return nil
 	}
 	if !replace {
-		return fmt.Errorf("git remote %q already exists with URL %q; pass --exchange-url to replace it or --exchange-name to use another remote name", name, currentURL)
+		if currentURL != remoteURL {
+			return fmt.Errorf("git remote %q already exists with URL %q; remove or rename it, or rerun with --repair", name, currentURL)
+		}
+		return fmt.Errorf("git remote %q has conflicting push URL configuration; remove it or rerun with --repair", name)
 	}
-	if err := gitRun(ctx, repoPath, nil, "remote", "set-url", name, remoteURL); err != nil {
-		return fmt.Errorf("replace %s remote URL: %w", name, err)
+	if currentURL != remoteURL {
+		if err := gitRun(ctx, repoPath, nil, "remote", "set-url", name, remoteURL); err != nil {
+			return fmt.Errorf("replace %s remote URL: %w", name, err)
+		}
+	}
+	// An explicit remote.<name>.pushurl overrides the fetch URL for pushes. Clear
+	// all such overrides during repair so `git push <name>` cannot keep targeting
+	// a stale or unrelated repository.
+	if len(pushURLs) > 0 {
+		if err := gitRun(ctx, repoPath, nil, "config", "--unset-all", "remote."+name+".pushurl"); err != nil {
+			return fmt.Errorf("clear %s remote push URLs: %w", name, err)
+		}
 	}
 
 	return nil
+}
+
+func explicitRemotePushURLs(ctx context.Context, repoPath string, name string) ([]string, error) {
+	result, err := runGit(ctx, repoPath, "", nil, "config", "--get-all", "remote."+name+".pushurl")
+	if err != nil {
+		if result.exitCode == 1 {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read %s remote push URLs: %w", name, err)
+	}
+
+	// A successful command means at least one value exists. Preserve empty
+	// values: an explicit empty pushurl still overrides normal push resolution
+	// and must be rejected or cleared just like a stale non-empty URL.
+	lines := strings.Split(strings.TrimSuffix(result.stdout, "\n"), "\n")
+	for index := range lines {
+		lines[index] = strings.TrimSpace(lines[index])
+	}
+	return lines, nil
 }
 
 type ServerProjectOptions struct {

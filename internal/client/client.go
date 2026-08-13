@@ -1,8 +1,8 @@
 package client
 
 import (
-	"bytes"
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1125,6 +1125,21 @@ func (c *Client) ListProjects() ([]Project, error) {
 	}
 
 	return response.Projects, nil
+}
+
+// GetProject resolves an existing project by ID or display name.
+func (c *Client) GetProject(ref string) (Project, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return Project{}, errors.New("project id or name is required")
+	}
+
+	var response projectResponse
+	if err := c.do(http.MethodGet, "/v2/projects/"+url.PathEscape(ref), nil, nil, &response); err != nil {
+		return Project{}, err
+	}
+
+	return response.Project, nil
 }
 
 func (c *Client) ListHarnesses() (HarnessesResponse, error) {

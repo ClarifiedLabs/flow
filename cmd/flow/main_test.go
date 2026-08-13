@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/ClarifiedLabs/flow/internal/config"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	"github.com/ClarifiedLabs/flow/internal/db"
+	flowgit "github.com/ClarifiedLabs/flow/internal/git"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
@@ -1952,6 +1954,268 @@ func TestInitRegistersProjectWithDiscoveredClientConfig(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(repoPath, ".flow", "skills")); !os.IsNotExist(err) {
 		t.Fatalf("init wrote repository skills; stat err = %v", err)
 	}
+}
+
+func TestInitAttachesRepositoryToExistingProject(t *testing.T) {
+	requireFlowTestTool(t, "git")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fixture := newFlowTestFixture(t)
+	if _, err := fixture.Registry.CreateProject(context.Background(), coordinator.Project{Name: "other", BaseBranch: "main"}); err != nil {
+		t.Fatalf("create second project: %v", err)
+	}
+	httpServer := httptest.NewServer(fixture.Server)
+	t.Cleanup(httpServer.Close)
+	writeInitTestClientConfig(t, httpServer.URL)
+
+	repoPath := t.TempDir()
+	runFlowTestGit(t, "", "-c", "init.defaultBranch=main", "init", repoPath)
+	capturePath := configureCapturingCredentialHelper(t, repoPath)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"init", "--repo", repoPath, "--project", fixture.Project.Name}, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("attach init exitCode = %d, stdout = %q stderr = %q", exitCode, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "flow project attached") || !strings.Contains(stdout.String(), "project_id: "+fixture.Project.ID) {
+		t.Fatalf("attach init output = %q", stdout.String())
+	}
+	if got := gitHTTPTestConfig(t, repoPath, repoProjectConfigKey); got != fixture.Project.ID {
+		t.Fatalf("%s = %q, want %q", repoProjectConfigKey, got, fixture.Project.ID)
+	}
+	wantExchangeURL, err := flowgit.ExchangeHTTPURL(httpServer.URL, fixture.Project.ID)
+	if err != nil {
+		t.Fatalf("exchange URL: %v", err)
+	}
+	if got := gitTestOutput(t, repoPath, "remote", "get-url", fixture.Project.ExchangeName); got != wantExchangeURL {
+		t.Fatalf("exchange remote = %q, want %q", got, wantExchangeURL)
+	}
+	assertCapturedFlowCredential(t, capturePath, wantExchangeURL)
+
+	// With multiple projects, this succeeds only if command auto-detection reads
+	// the local flow.project attachment rather than falling back to an unscoped API.
+	t.Chdir(repoPath)
+	stdout.Reset()
+	stderr.Reset()
+	if exitCode := run([]string{"board"}, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("board from attached repo exitCode = %d, stderr = %q", exitCode, stderr.String())
+	}
+}
+
+func TestInitRepairRestoresLegacyRepositoryAttachment(t *testing.T) {
+	requireFlowTestTool(t, "git")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fixture := newFlowTestFixture(t)
+
+	repoPath := t.TempDir()
+	runFlowTestGit(t, "", "-c", "init.defaultBranch=main", "init", repoPath)
+	repoRoot, err := resolveInitRepoRoot(repoPath)
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	project, err := fixture.Registry.CreateProject(context.Background(), coordinator.Project{
+		Name: "repair", RepoPath: repoRoot, BaseBranch: "main",
+	})
+	if err != nil {
+		t.Fatalf("create repair project: %v", err)
+	}
+	runFlowTestGit(t, repoPath, "remote", "add", project.ExchangeName, "https://example.com/stale.git")
+	runFlowTestGit(t, repoPath, "remote", "set-url", "--add", "--push", project.ExchangeName, "https://example.com/wrong-push.git")
+	capturePath := configureCapturingCredentialHelper(t, repoPath)
+
+	httpServer := httptest.NewServer(fixture.Server)
+	t.Cleanup(httpServer.Close)
+	writeInitTestClientConfig(t, httpServer.URL)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"init", "--repair", "--repo", repoPath}, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("repair init exitCode = %d, stdout = %q stderr = %q", exitCode, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "flow project attachment repaired") || !strings.Contains(stdout.String(), "project_id: "+project.ID) {
+		t.Fatalf("repair init output = %q", stdout.String())
+	}
+	if got := gitHTTPTestConfig(t, repoPath, repoProjectConfigKey); got != project.ID {
+		t.Fatalf("%s = %q, want %q", repoProjectConfigKey, got, project.ID)
+	}
+	wantExchangeURL, err := flowgit.ExchangeHTTPURL(httpServer.URL, project.ID)
+	if err != nil {
+		t.Fatalf("exchange URL: %v", err)
+	}
+	if got := gitTestOutput(t, repoPath, "remote", "get-url", project.ExchangeName); got != wantExchangeURL {
+		t.Fatalf("repaired exchange remote = %q, want %q", got, wantExchangeURL)
+	}
+	if got := gitTestOutput(t, repoPath, "remote", "get-url", "--push", project.ExchangeName); got != wantExchangeURL {
+		t.Fatalf("repaired exchange push URL = %q, want %q", got, wantExchangeURL)
+	}
+	assertCapturedFlowCredential(t, capturePath, wantExchangeURL)
+	if projects, err := fixture.Registry.Projects().List(context.Background()); err != nil {
+		t.Fatalf("list projects: %v", err)
+	} else if len(projects) != 2 {
+		t.Fatalf("projects after repair = %d, want 2 (repair must not create one)", len(projects))
+	}
+}
+
+func TestInitImplicitRerunAcceptsMatchingCreationFlags(t *testing.T) {
+	requireFlowTestTool(t, "git")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fixture := newFlowTestFixture(t)
+	httpServer := httptest.NewServer(fixture.Server)
+	t.Cleanup(httpServer.Close)
+	writeInitTestClientConfig(t, httpServer.URL)
+
+	repoPath := t.TempDir()
+	runFlowTestGit(t, "", "-c", "init.defaultBranch=main", "init", repoPath)
+	if err := writeRepoProjectRef(repoPath, fixture.Project.ID); err != nil {
+		t.Fatalf("write repo project: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{
+		"init", "--repo", repoPath,
+		"--name", fixture.Project.Name,
+		"--base", fixture.Project.BaseBranch,
+		"--exchange-name", fixture.Project.ExchangeName,
+	}, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("implicit rerun exitCode = %d, stdout = %q stderr = %q", exitCode, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "flow project attached") {
+		t.Fatalf("implicit rerun output = %q", stdout.String())
+	}
+}
+
+func TestInitPlainRerunRefusesConflictingRemote(t *testing.T) {
+	requireFlowTestTool(t, "git")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fixture := newFlowTestFixture(t)
+	httpServer := httptest.NewServer(fixture.Server)
+	t.Cleanup(httpServer.Close)
+	writeInitTestClientConfig(t, httpServer.URL)
+
+	repoPath := t.TempDir()
+	runFlowTestGit(t, "", "-c", "init.defaultBranch=main", "init", repoPath)
+	if err := writeRepoProjectRef(repoPath, fixture.Project.ID); err != nil {
+		t.Fatalf("write repo project: %v", err)
+	}
+	const unrelatedURL = "https://example.com/unrelated.git"
+	runFlowTestGit(t, repoPath, "remote", "add", fixture.Project.ExchangeName, unrelatedURL)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"init", "--repo", repoPath}, &stdout, &stderr)
+	if exitCode != 1 {
+		t.Fatalf("plain rerun exitCode = %d, want 1; stdout = %q stderr = %q", exitCode, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "rerun with --repair") {
+		t.Fatalf("plain rerun error is not actionable: %q", stderr.String())
+	}
+	if got := gitTestOutput(t, repoPath, "remote", "get-url", fixture.Project.ExchangeName); got != unrelatedURL {
+		t.Fatalf("plain rerun replaced remote with %q, want unchanged %q", got, unrelatedURL)
+	}
+}
+
+func TestInitAttachRejectsSessionCredentialBeforeMutation(t *testing.T) {
+	requireFlowTestTool(t, "git")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fixture := newFlowTestFixture(t)
+	projectID := fixture.Project.ID
+	if err := fixture.Credentials.EnsureToken(context.Background(), coordinator.CredentialInput{
+		Token: "session-token", Scope: coordinator.TokenScopeSession, Subject: "s-init", ProjectID: &projectID,
+	}); err != nil {
+		t.Fatalf("store session token: %v", err)
+	}
+	httpServer := httptest.NewServer(fixture.Server)
+	t.Cleanup(httpServer.Close)
+	writeInitTestClientConfig(t, httpServer.URL)
+	t.Setenv("FLOW_SESSION_TOKEN", "session-token")
+
+	repoPath := t.TempDir()
+	runFlowTestGit(t, "", "-c", "init.defaultBranch=main", "init", repoPath)
+	capturePath := configureCapturingCredentialHelper(t, repoPath)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"init", "--repo", repoPath, "--project", fixture.Project.ID}, &stdout, &stderr)
+	if exitCode != 1 {
+		t.Fatalf("session attach exitCode = %d, want 1; stdout = %q stderr = %q", exitCode, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "validate owner credential") {
+		t.Fatalf("session attach error = %q, want owner validation failure", stderr.String())
+	}
+	if ref, err := readRepoProjectRef(repoPath); err != nil {
+		t.Fatalf("read repo project: %v", err)
+	} else if ref != "" {
+		t.Fatalf("session attach wrote %s = %q", repoProjectConfigKey, ref)
+	}
+	if output, err := exec.Command("git", "-C", repoPath, "remote", "get-url", fixture.Project.ExchangeName).CombinedOutput(); err == nil {
+		t.Fatalf("session attach added exchange remote %q", strings.TrimSpace(string(output)))
+	}
+	if _, err := os.Stat(capturePath); !os.IsNotExist(err) {
+		t.Fatalf("session attach wrote credential helper state; stat err = %v", err)
+	}
+}
+
+func writeInitTestClientConfig(t *testing.T, serverURL string) {
+	t.Helper()
+	dataDir := t.TempDir()
+	if err := os.WriteFile(config.OwnerTokenPath(dataDir), []byte("owner-token\n"), 0o600); err != nil {
+		t.Fatalf("write owner token: %v", err)
+	}
+	configPath, err := config.DefaultClientConfigPath()
+	if err != nil {
+		t.Fatalf("default client config path: %v", err)
+	}
+	if err := config.WriteClientConfig(configPath, config.ClientConfig{ServerURL: serverURL, DataDir: dataDir}); err != nil {
+		t.Fatalf("write client config: %v", err)
+	}
+}
+
+func configureCapturingCredentialHelper(t *testing.T, repoPath string) string {
+	t.Helper()
+	capturePath := filepath.Join(t.TempDir(), "credential.txt")
+	helperPath := filepath.Join(t.TempDir(), "credential-helper.sh")
+	script := "#!/bin/sh\ncat > '" + strings.ReplaceAll(capturePath, "'", "'\"'\"'") + "'\n"
+	if err := os.WriteFile(helperPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write credential helper: %v", err)
+	}
+	runFlowTestGit(t, repoPath, "config", "credential.helper", helperPath)
+	return capturePath
+}
+
+func assertCapturedFlowCredential(t *testing.T, capturePath string, exchangeURL string) {
+	t.Helper()
+	parsed, err := url.Parse(exchangeURL)
+	if err != nil {
+		t.Fatalf("parse exchange URL: %v", err)
+	}
+	contents, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("read captured credential: %v", err)
+	}
+	for _, want := range []string{
+		"protocol=" + parsed.Scheme,
+		"host=" + parsed.Host,
+		"path=" + strings.TrimPrefix(parsed.Path, "/"),
+		"username=flow",
+		"password=owner-token",
+	} {
+		if !strings.Contains(string(contents), want) {
+			t.Fatalf("captured credential missing %q:\n%s", want, string(contents))
+		}
+	}
+}
+
+func gitTestOutput(t *testing.T, repoPath string, args ...string) string {
+	t.Helper()
+	commandArgs := append([]string{"-C", repoPath}, args...)
+	output, err := exec.Command("git", commandArgs...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %s: %v", strings.Join(args, " "), strings.TrimSpace(string(output)), err)
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func neutralizeFlowExchangeHooks(t *testing.T, exchangePath string) {
