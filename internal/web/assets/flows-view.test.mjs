@@ -500,6 +500,32 @@ test("flows route refreshes a stale project registry before choosing a project",
   ]);
 });
 
+test("flows route refreshes a harness catalog cached before workers became ready", async () => {
+  const harness = await browserSmokeHarness("/ui/flows", {
+    "/ui/api/v2/projects": { projects: [{ id: "p-alpha", name: "alpha" }] },
+    "/ui/api/v2/harnesses": {
+      agents: [{
+        name: "harness",
+        display_name: "Harness",
+        models: [{ target_id: "openai:gpt-5", display_name: "GPT-5", provider_label: "OpenAI", model_label: "gpt-5", reasoning: true }],
+      }],
+      consoles: [],
+    },
+    "/ui/api/v2/global/agent-defs": { agent_defs: [] },
+    "/ui/api/v2/projects/p-alpha/agent-defs": { agent_defs: [] },
+    "/ui/api/v2/projects/p-alpha/flows": { flows: [], default_flow_id: "" },
+  });
+  harness.app.harnesses = {
+    agents: [{ name: "harness", display_name: "Harness", models: [] }],
+    consoles: [],
+  };
+
+  await harness.app.load();
+
+  assert.equal(harness.app.harnesses.agents[0].models[0].qualified_id, "openai:gpt-5");
+  assert.equal(harness.fetchCalls.filter((path) => path === "/ui/api/v2/harnesses").length, 1);
+});
+
 test("flows view renders the active project name as a project switcher", async () => {
   const harness = await browserSmokeHarness("/ui/flows?project=p-beta", {
     "/ui/api/v2/projects": { projects: [{ id: "p-alpha", name: "alpha" }, { id: "p-beta", name: "beta" }] },

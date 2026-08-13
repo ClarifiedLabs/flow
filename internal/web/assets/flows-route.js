@@ -13,7 +13,10 @@ import "./elements/flows.js";
 export async function renderFlowsRoute(app, context) {
   app.setTitle("Flows");
   await app.ensureProjects();
-  await app.ensureHarnesses();
+  // Worker capabilities are dynamic. Re-fetch them on navigation/manual refresh
+  // so a catalog cached during worker startup does not persist for the lifetime
+  // of the page.
+  await app.ensureHarnesses({ refresh: true });
   if (context && !app.isActiveLoad(context)) return false;
   const params = new URLSearchParams(window.location.search);
   const project = resolveFlowsProjectView(app, params.get("project") || "");
