@@ -6,6 +6,9 @@ import { agentDefsAPIBase, apiGet, flowsAPIBase, globalAgentDefsAPIBase } from "
 import { DEFAULT_AGENT_HARNESSES } from "./config.js";
 import { mount } from "./elements/base.js";
 import { resolveFlowsProjectView } from "./elements/flows-view.js";
+// Side-effect import: registers <flow-flows>. Without it mount() creates an
+// unresolved element and the view paints nothing.
+import "./elements/flows.js";
 
 export async function renderFlowsRoute(app, context) {
   app.setTitle("Flows");

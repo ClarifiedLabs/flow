@@ -10,6 +10,9 @@ import { value } from "./normalize.js";
 import { writeWorkProject } from "./storage.js";
 import { buildWorkItemIndex } from "./work-item-model.js";
 import { activeWorkProject } from "./work-nav.js";
+// Side-effect import: registers <flow-tasks>. Without it mount() creates an
+// unresolved element and the view paints nothing.
+import "./elements/tasks.js";
 
 export async function renderTasksRoute(app, context) {
   // Mount first: the element seeds its filter state from the URL and storage
