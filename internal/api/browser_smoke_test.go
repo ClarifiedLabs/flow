@@ -196,7 +196,8 @@ func pushBrowserSmokeBranch(t *testing.T, exchangePath string, branch string) st
 }
 
 func TestBrowserTestContextCancelRemovesUserDataDir(t *testing.T) {
-	t.Parallel()
+	// Keep this test serial so its extra Chromium process does not compete with
+	// the browser UI tests, which intentionally run in parallel.
 	browserPath, ok := findBrowserExecutable()
 	if !ok {
 		t.Skip("no Chromium or Chrome executable found for browser smoke test")
