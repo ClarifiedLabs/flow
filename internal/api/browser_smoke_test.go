@@ -12,6 +12,7 @@ import (
 
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
+	"github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/chromedp"
 )
 
@@ -194,6 +195,46 @@ func pushBrowserSmokeBranch(t *testing.T, exchangePath string, branch string) st
 	return headSHA
 }
 
+func TestBrowserTestContextCancelRemovesUserDataDir(t *testing.T) {
+	t.Parallel()
+	browserPath, ok := findBrowserExecutable()
+	if !ok {
+		t.Skip("no Chromium or Chrome executable found for browser smoke test")
+	}
+
+	browserCtx, cancel := newBrowserTestContext(t, browserPath)
+	var commandLine []string
+	if err := chromedp.Run(browserCtx, chromedp.ActionFunc(func(ctx context.Context) error {
+		var err error
+		commandLine, err = browser.GetBrowserCommandLine().Do(ctx)
+		return err
+	})); err != nil {
+		cancel()
+		t.Fatalf("read browser command line: %v", err)
+	}
+
+	var userDataDir string
+	for _, arg := range commandLine {
+		if dir, found := strings.CutPrefix(arg, "--user-data-dir="); found {
+			userDataDir = dir
+			break
+		}
+	}
+	if userDataDir == "" {
+		cancel()
+		t.Fatalf("browser command line has no user-data-dir: %q", commandLine)
+	}
+	if _, err := os.Stat(userDataDir); err != nil {
+		cancel()
+		t.Fatalf("stat active browser user-data-dir: %v", err)
+	}
+
+	cancel()
+	if _, err := os.Stat(userDataDir); !os.IsNotExist(err) {
+		t.Fatalf("browser user-data-dir still exists after cancellation: %v", err)
+	}
+}
+
 func newBrowserTestContext(t *testing.T, browserPath string) (context.Context, context.CancelFunc) {
 	t.Helper()
 
@@ -203,7 +244,6 @@ func newBrowserTestContext(t *testing.T, browserPath string) (context.Context, c
 		chromedp.Headless,
 		chromedp.NoSandbox,
 		chromedp.DisableGPU,
-		chromedp.UserDataDir(t.TempDir()),
 		chromedp.WindowSize(1280, 900),
 		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.WSURLReadTimeout(browserStartupTimeout),
