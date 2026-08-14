@@ -286,11 +286,13 @@ jobs:
           - image: flow-worker
             target: flow-worker
             command: flow-worker
+            additional_command: flow
             os_label: ubuntu-24.04
             goarch: amd64
           - image: flow-worker
             target: flow-worker
             command: flow-worker
+            additional_command: flow
             os_label: ubuntu-24.04-arm
             goarch: arm64
           - image: flow-orchestrator
@@ -327,20 +329,29 @@ jobs:
             COMMIT=${{ github.sha }}
             DATE=${{ steps.release-date.outputs.date }}
 
-      - name: Verify image version
+      - name: Verify image commands
         env:
           COMMAND: ${{ matrix.command }}
+          ADDITIONAL_COMMAND: ${{ matrix.additional_command }}
           IMAGE: ${{ matrix.image }}:dry-run-${{ matrix.goarch }}
         run: |
-          output="$(docker run --rm "$IMAGE" "$COMMAND" --version)"
-          echo "$output"
-          case "$output" in
-            "$COMMAND ${RELEASE_VERSION}"*) ;;
-            *)
-              echo "unexpected version output: ${output}" >&2
-              exit 1
-              ;;
-          esac
+          verify_version() {
+            local command="$1"
+            local output
+            output="$(docker run --rm "$IMAGE" "$command" --version)"
+            echo "$output"
+            case "$output" in
+              "$command ${RELEASE_VERSION}"*) ;;
+              *)
+                echo "unexpected version output for ${command}: ${output}" >&2
+                exit 1
+                ;;
+            esac
+          }
+          verify_version "$COMMAND"
+          if [[ -n "$ADDITIONAL_COMMAND" ]]; then
+            verify_version "$ADDITIONAL_COMMAND"
+          fi
 
   docker-images:
     name: docker image ${{ matrix.image }} ${{ matrix.goarch }}

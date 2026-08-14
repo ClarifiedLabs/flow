@@ -456,10 +456,10 @@ docker build --target flow-orchestrator -t ghcr.io/clarifiedlabs/flow-orchestrat
 ```
 
 The published `flow-worker` image is a minimal base: the `flow-worker` binary,
-the Harness agent CLI, and runtime essentials (`git`, `tmux`,
-`ca-certificates`, `curl`). It has no entrypoint; Kubernetes Jobs override the
-command, and standalone runs can `docker run` the binary directly. Extend it
-with your own toolchain packages:
+the `flow` task CLI, the Harness agent CLI, and runtime essentials (`git`,
+`tmux`, `ca-certificates`, `curl`). It has no entrypoint; Kubernetes Jobs
+override the command, and standalone runs can `docker run` the binary directly.
+Extend it with your own toolchain packages:
 
 ```dockerfile
 FROM ghcr.io/clarifiedlabs/flow-worker:latest

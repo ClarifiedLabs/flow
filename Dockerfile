@@ -85,7 +85,7 @@ ARG DATE
 
 LABEL org.opencontainers.image.source="https://github.com/ClarifiedLabs/flow" \
       org.opencontainers.image.title="Flow Worker" \
-      org.opencontainers.image.description="Flow worker supervisor and agent runtime with the Harness agent CLI (minimal base image; extend it with your own toolchain)" \
+      org.opencontainers.image.description="Flow worker supervisor and agent runtime with the Flow and Harness CLIs (minimal base image; extend it with your own toolchain)" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${COMMIT}" \
       org.opencontainers.image.created="${DATE}" \
@@ -119,7 +119,7 @@ RUN set -eux \
     && rm -rf /var/lib/apt/lists/* \
     && harness --version
 
-COPY --from=build /out/flow-worker /usr/local/bin/flow-worker
+COPY --from=build /out/flow /out/flow-worker /usr/local/bin/
 EXPOSE 8422
 USER flow
 # Workers are assignment-created one-shot processes. Orchestrator providers
