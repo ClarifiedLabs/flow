@@ -20,7 +20,12 @@ API protocol version is separate and is shown by command status output and the
 
 ## Artifacts
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`. The workflow builds:
+Every push to `main` runs `.github/workflows/test.yml`. Pushing a `v*` tag runs
+`.github/workflows/release.yml`, which waits for the successful test workflow
+run for the tagged commit instead of running the same tests again. Push a
+release commit to `main` before tagging it so that same-commit test run exists.
+
+The release workflow builds:
 
 - macOS arm64 on `macos-26`
 - Linux amd64
@@ -55,8 +60,11 @@ role formulae.
 ## CI Dry Runs
 
 Push a branch named `release-ci` or under `release-ci/`, or run the `release`
-workflow manually, to exercise the release workflow without publishing. Dry-run
-builds use version `v0.0.0` and the pushed commit archive as the Homebrew source.
+workflow manually, to exercise the release workflow without publishing. Pushes
+to those branches run the test workflow, and the release dry run waits for its
+same-commit result. A manual run must target a commit that already has a
+push-triggered test run from `main` or a `release-ci` branch. Dry-run builds use
+version `v0.0.0` and the pushed commit archive as the Homebrew source.
 They build and upload the normal workflow artifacts, generate checksums, build
 and smoke-test both Docker images, build Homebrew bottles from a local tap, and
 dry-run the Homebrew formula merge.
