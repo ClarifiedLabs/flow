@@ -151,6 +151,7 @@ export function renderTaskFormView(app, task, options = {}) {
   const selectedFlowID = value(task, "flow_id", "FlowID");
   const flowOptions = flowSelectOptionsView(app, defaultProject, selectedFlowID);
   const selectedParentID = String(value(task, "parent_item_id", "ParentItemID") || "");
+  const requiresHumanReview = Boolean(value(task, "requires_human_review", "RequiresHumanReview"));
   return `
     <form class="task-form" data-task-form="${escapeAttr(taskID)}" data-task-form-mode="${escapeAttr(mode)}"${projectID ? ` data-project="${escapeAttr(projectID)}"` : (mode === "create" && projects.length === 1 ? ` data-project="${escapeAttr(value(projects[0], "id", "ID"))}"` : "")}>
       ${projectField}
@@ -185,6 +186,10 @@ export function renderTaskFormView(app, task, options = {}) {
       </label>` : ""}
       ${mode === "create" ? relationsPickerView((app.workItemsByProject && app.workItemsByProject.get(defaultProject)) || []) : ""}
       <div class="form-actions task-form-actions">
+        <label class="check">
+          <input name="requires_human_review" type="checkbox"${requiresHumanReview ? " checked" : ""}>
+          <span>Require human review</span>
+        </label>
         ${mode === "create" ? `
         <label class="check">
           <input name="queue_task" type="checkbox" checked>

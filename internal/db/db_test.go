@@ -14,7 +14,7 @@ import (
 // should carry under the current build tags. The tag-gated 0005_task_fts is
 // included only when FTS5 support is compiled in.
 func expectedProjectMigrations() []string {
-	migrations := []string{"0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log", "0006_completion_evidence", "0007_session_human_wait_latches"}
+	migrations := []string{"0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log", "0006_completion_evidence", "0007_session_human_wait_latches", "0008_optional_human_review"}
 	migrations = append(migrations, filterOptionalMigrations([]string{"0005_task_fts"})...)
 	sort.Strings(migrations)
 	return migrations
@@ -63,6 +63,18 @@ func TestOpenInitializesSQLite(t *testing.T) {
 		t.Fatalf("schema version = %q, want %s", schemaVersion, expectedSchemaVersion())
 	}
 	assertStorageFormat(t, store, "7")
+
+	var humanReviewNotNull int
+	var humanReviewDefault string
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT "notnull", dflt_value
+FROM pragma_table_info('tasks')
+WHERE name = 'requires_human_review'`).Scan(&humanReviewNotNull, &humanReviewDefault); err != nil {
+		t.Fatalf("inspect task human-review setting: %v", err)
+	}
+	if humanReviewNotNull != 1 || humanReviewDefault != "FALSE" {
+		t.Fatalf("requires_human_review notnull/default = %d/%q, want 1/FALSE", humanReviewNotNull, humanReviewDefault)
+	}
 
 	var relationPayloadNotNull int
 	var relationPayloadDefault string
@@ -574,6 +586,146 @@ INSERT INTO history_artifacts (
 )`, strings.Repeat("2", 64), strings.Repeat("d", 65)); err == nil || !strings.Contains(err.Error(), "inventory is frozen") {
 		t.Fatalf("post-upgrade inventory mutation error = %v", err)
 	}
+}
+
+func TestOptionalHumanReviewMigrationPreservesTasksAndUpgradesBuiltinFlow(t *testing.T) {
+	ctx := context.Background()
+	path := seedPreOptionalHumanReviewDB(t,
+		`{"human_gate":{"instructions":"Review the change and choose whether it can proceed.","outcomes":["approved","changes_requested","rejected"]}}`,
+		"2026-08-01T00:00:00Z")
+
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("upgrade optional human review schema: %v", err)
+	}
+	defer store.Close()
+
+	var preserved bool
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT requires_human_review FROM tasks WHERE id = 't-existing-0001'`).Scan(&preserved); err != nil {
+		t.Fatalf("read migrated task setting: %v", err)
+	}
+	if !preserved {
+		t.Fatal("existing task requires_human_review = false, want preserved true")
+	}
+	var taskOptIn bool
+	var skipOutcome string
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT json_extract(config_json, '$.human_gate.task_opt_in'),
+       json_extract(config_json, '$.human_gate.skip_outcome')
+FROM flow_nodes WHERE id = 'fn-review'`).Scan(&taskOptIn, &skipOutcome); err != nil {
+		t.Fatalf("read migrated coding gate: %v", err)
+	}
+	if !taskOptIn || skipOutcome != "approved" {
+		t.Fatalf("migrated coding gate = task_opt_in %t, skip_outcome %q", taskOptIn, skipOutcome)
+	}
+	migrations, err := store.AppliedMigrations(ctx)
+	if err != nil {
+		t.Fatalf("read upgraded migrations: %v", err)
+	}
+	assertAppliedMigrations(t, migrations, expectedProjectMigrations()...)
+	var schemaVersion string
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT value FROM app_metadata WHERE key = 'schema_version'`).Scan(&schemaVersion); err != nil {
+		t.Fatalf("read upgraded schema version: %v", err)
+	}
+	if schemaVersion != "0008_optional_human_review" {
+		t.Fatalf("upgraded schema version = %q, want 0008_optional_human_review", schemaVersion)
+	}
+}
+
+func TestOptionalHumanReviewMigrationLeavesCustomizedBuiltinGateMandatory(t *testing.T) {
+	ctx := context.Background()
+	path := seedPreOptionalHumanReviewDB(t,
+		`{"human_gate":{"instructions":"Release compliance approval is mandatory.","outcomes":["approved","changes_requested","rejected"]}}`,
+		"2026-08-02T00:00:00Z")
+
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("upgrade customized coding flow: %v", err)
+	}
+	defer store.Close()
+
+	var taskControlledFields int
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM flow_nodes
+WHERE id = 'fn-review'
+  AND (json_type(config_json, '$.human_gate.task_opt_in') IS NOT NULL
+       OR json_type(config_json, '$.human_gate.skip_outcome') IS NOT NULL)`).Scan(&taskControlledFields); err != nil {
+		t.Fatalf("inspect customized coding gate: %v", err)
+	}
+	if taskControlledFields != 0 {
+		t.Fatal("customized mandatory coding gate was converted to task-controlled")
+	}
+}
+
+func seedPreOptionalHumanReviewDB(t *testing.T, gateConfig, flowUpdatedAt string) string {
+	t.Helper()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "flow.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+
+	baseMigrations := expectedProjectMigrations()
+	baseMigrations = baseMigrations[:len(baseMigrations)-1]
+	for _, version := range baseMigrations {
+		content, readErr := migrationFS.ReadFile("migrations/" + version + ".sql")
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if _, execErr := raw.ExecContext(ctx, string(content)); execErr != nil {
+			t.Fatalf("apply %s: %v", version, execErr)
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `
+CREATE TABLE schema_migrations (
+    version TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+)`); err != nil {
+		t.Fatalf("create migration ledger: %v", err)
+	}
+	for _, version := range baseMigrations {
+		if _, err := raw.ExecContext(ctx, `INSERT INTO schema_migrations (version) VALUES (?)`, version); err != nil {
+			t.Fatalf("record %s: %v", version, err)
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `
+INSERT INTO work_items (id, kind, created_at)
+VALUES ('t-existing-0001', 'task', '2026-08-01T00:00:00Z');
+INSERT INTO tasks (id, title, created_by, created_at, updated_at)
+VALUES ('t-existing-0001', 'Existing task', 'human', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
+INSERT INTO flows (
+    id, name, description, start_node_key, transition_budget, builtin, created_at, updated_at
+) VALUES (
+    'fl-coding', 'coding', 'Implement, check, review, verify, and merge a change.',
+    'implement', 50, TRUE, '2026-08-01T00:00:00Z', ?
+)`, flowUpdatedAt); err != nil {
+		t.Fatalf("seed pre-optional-review task and flow: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `
+INSERT INTO flow_nodes (id, flow_id, node_key, name, kind, position, config_json)
+VALUES
+    ('fn-implement', 'fl-coding', 'implement', 'Implement', 'agent', 0, '{"agent":{}}'),
+    ('fn-verify', 'fl-coding', 'verify', 'Verify requirements', 'verify_change', 3, '{"verify_change":{}}'),
+    ('fn-review', 'fl-coding', 'human-review', 'Human change review', 'human_gate', 4, ?),
+    ('fn-merge', 'fl-coding', 'merge', 'Merge change', 'merge_change', 5, '{"merge_change":{}}'),
+    ('fn-rejected', 'fl-coding', 'rejected', 'Rejected', 'terminal', 7, '{"terminal":{"resolution":"rejected"}}')`, gateConfig); err != nil {
+		t.Fatalf("seed pre-optional-review nodes: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `
+INSERT INTO flow_edges (flow_id, from_node_key, outcome, to_node_key)
+VALUES
+    ('fl-coding', 'verify', 'passed', 'human-review'),
+    ('fl-coding', 'human-review', 'approved', 'merge'),
+    ('fl-coding', 'human-review', 'changes_requested', 'implement'),
+    ('fl-coding', 'human-review', 'rejected', 'rejected')`); err != nil {
+		t.Fatalf("seed pre-optional-review edges: %v", err)
+	}
+	return path
 }
 
 func TestOpenMigrationIsIdempotent(t *testing.T) {

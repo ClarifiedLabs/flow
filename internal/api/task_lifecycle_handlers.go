@@ -757,10 +757,11 @@ func (s *projectServer) handleEditTask(w http.ResponseWriter, r *http.Request, t
 	}
 
 	input := coordinator.EditTaskInput{
-		Title:    request.Title,
-		Body:     request.Body,
-		Priority: request.Priority,
-		FlowID:   request.FlowID,
+		Title:               request.Title,
+		Body:                request.Body,
+		Priority:            request.Priority,
+		RequiresHumanReview: request.RequiresHumanReview,
+		FlowID:              request.FlowID,
 	}
 	if request.FeatureID != nil {
 		// Tri-state: absent leaves the assignment alone, an empty string clears

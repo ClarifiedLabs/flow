@@ -2772,6 +2772,34 @@ func TestGetTaskRelationsAPI(t *testing.T) {
 	doJSONRequestAs(t, fixture.Server, "worker-token", http.MethodGet, "/v2/tasks/"+target.ID+"/relations", nil, http.StatusForbidden, nil)
 }
 
+func TestTaskHumanReviewSettingAPI(t *testing.T) {
+	t.Parallel()
+	fixture := newTestFixture(t)
+
+	var defaultTask taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{Title: "Default review policy"}, http.StatusCreated, &defaultTask)
+	if defaultTask.Task.RequiresHumanReview {
+		t.Fatal("default task requires human review, want false")
+	}
+
+	required := true
+	var optedIn taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks",
+		createTaskRequest{Title: "Reviewed task", RequiresHumanReview: &required}, http.StatusCreated, &optedIn)
+	if !optedIn.Task.RequiresHumanReview {
+		t.Fatal("opted-in task does not require human review")
+	}
+
+	required = false
+	var edited taskResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPatch, "/v2/tasks/"+optedIn.Task.ID,
+		editTaskRequest{RequiresHumanReview: &required}, http.StatusOK, &edited)
+	if edited.Task.RequiresHumanReview {
+		t.Fatal("edited task still requires human review")
+	}
+}
+
 func TestCreateTaskWithRelationsAPI(t *testing.T) {
 	t.Parallel()
 	fixture := newTestFixture(t)

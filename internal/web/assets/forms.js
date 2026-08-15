@@ -40,6 +40,9 @@ export const FORMS = {
       priority,
       flow_id: form.elements.flow_id ? form.elements.flow_id.value : "",
     };
+    if (form.elements.requires_human_review) {
+      payload.requires_human_review = Boolean(form.elements.requires_human_review.checked);
+    }
     if (!payload.title) return "Task title is required";
     if (mode !== "create") {
       await apiPatch(`${taskAPIBase(form.dataset.project)}/${encodeURIComponent(form.dataset.taskForm)}`, payload);

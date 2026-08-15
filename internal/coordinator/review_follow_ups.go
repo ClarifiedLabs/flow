@@ -335,7 +335,7 @@ func reviewFollowUpDisposition(action string) string {
 	return "existing"
 }
 
-func taskInTx(ctx context.Context, tx *sql.Tx, id string) (Task, error) {
+func taskInTx(ctx context.Context, tx workItemRelationQuerier, id string) (Task, error) {
 	return scanTask(tx.QueryRowContext(ctx, "SELECT"+taskSelectColumns+`
 FROM tasks i
 WHERE i.id = ?`, strings.TrimSpace(id)))

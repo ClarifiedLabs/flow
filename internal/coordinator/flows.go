@@ -694,7 +694,7 @@ func codingFlowInput(defIDs map[string]string) FlowInput {
 			{Key: "checks", Name: "Automated checks", Kind: NodeAutomatedChecks, Config: FlowNodeConfig{AutomatedChecks: &AutomatedChecksNodeConfig{}}},
 			{Key: "review", Name: "Code and security review", Kind: NodeChangeReview, Config: FlowNodeConfig{ChangeReview: &ChangeReviewNodeConfig{Agents: []ReviewAgentConfig{{AgentDefID: defIDs["code-reviewer"]}, {AgentDefID: defIDs["security-reviewer"]}}, AggregatorAgentDefID: defIDs["review-aggregator"]}}},
 			{Key: "verify", Name: "Verify requirements", Kind: NodeVerifyChange, Config: FlowNodeConfig{VerifyChange: &VerifyChangeNodeConfig{Agents: []ReviewAgentConfig{{AgentDefID: defIDs["verifier"]}}}}},
-			{Key: "human-review", Name: "Human change review", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Instructions: "Review the change and choose whether it can proceed.", Outcomes: []string{"approved", "changes_requested", "rejected"}}}},
+			{Key: "human-review", Name: "Human change review", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Instructions: "Review the change and choose whether it can proceed.", Outcomes: []string{"approved", "changes_requested", "rejected"}, TaskOptIn: true, SkipOutcome: "approved"}}},
 			{Key: "merge", Name: "Merge change", Kind: NodeMergeChange, Config: FlowNodeConfig{MergeChange: &MergeChangeNodeConfig{}}},
 			{Key: "done", Name: "Merged", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionMerged}}},
 			{Key: "rejected", Name: "Rejected", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionRejected}}},

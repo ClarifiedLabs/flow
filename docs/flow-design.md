@@ -1529,7 +1529,9 @@ Flow has three independent human gates:
   changes. This generalizes the old plan-approval gate — the seeded `planned`
   flow is exactly a human-gated `plan` phase before `implement`.
 - `requires_human_review`: creates a required human reviewer check in the
-  critique phase.
+  critique phase and retains the task-controlled human-review phase in the
+  built-in coding flow. When disabled, that flow bypasses the phase through its
+  approved edge; unrelated human gates remain mandatory.
 - `auto_merge=false`: requires a final human merge action after review state is
   approved.
 

@@ -142,6 +142,13 @@ func (s *WorkItemService) Move(ctx context.Context, itemID, newParentID string, 
 		return err
 	}
 	defer tx.Rollback()
+	if err := s.moveTx(ctx, tx, itemID, newParentID, actor); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *WorkItemService) moveTx(ctx context.Context, tx workItemRelationQuerier, itemID, newParentID string, actor Actor) error {
 	kind, err := workItemKindTx(ctx, tx, itemID)
 	if err != nil {
 		return err
@@ -181,10 +188,7 @@ DELETE FROM work_item_relations WHERE target_item_id = ? AND kind = 'parent_of'`
 	if err := s.syncSubtreeFeatureCachesTx(ctx, tx, itemID, s.now().UTC()); err != nil {
 		return err
 	}
-	if err := reconcileEpicAncestorsTx(ctx, tx, []string{itemID, oldParentID, newParentID}, s.now().UTC()); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return reconcileEpicAncestorsTx(ctx, tx, []string{itemID, oldParentID, newParentID}, s.now().UTC())
 }
 
 // syncSubtreeFeatureCachesTx validates an immutable feature integration target

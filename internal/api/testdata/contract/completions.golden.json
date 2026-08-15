@@ -14,6 +14,7 @@
       "done_at": "\u003cts\u003e",
       "done_message": "golden completion",
       "done_resolution": "completed",
+      "requires_human_review": false,
       "state": "done"
     }
   ]

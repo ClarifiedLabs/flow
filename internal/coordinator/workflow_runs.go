@@ -311,6 +311,10 @@ func (s *WorkflowRunService) ScheduleAs(ctx context.Context, taskID string, acto
 	if err != nil {
 		return WorkflowRun{}, err
 	}
+	snapshot, err = snapshotForTaskHumanReview(snapshot, task.RequiresHumanReview)
+	if err != nil {
+		return WorkflowRun{}, err
+	}
 	if len(snapshot.Nodes) == 0 || strings.TrimSpace(snapshot.StartNode) == "" {
 		return WorkflowRun{}, errors.New("selected flow is not a graph workflow")
 	}
@@ -318,18 +322,15 @@ func (s *WorkflowRunService) ScheduleAs(ctx context.Context, taskID string, acto
 	if err != nil {
 		return WorkflowRun{}, fmt.Errorf("encode flow snapshot: %w", err)
 	}
+	now := s.now().UTC()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return WorkflowRun{}, err
 	}
 	defer tx.Rollback()
-	var existingState sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT lifecycle_state FROM tasks WHERE id = ?`, taskID).Scan(&existingState); err != nil {
+	if err := claimTaskForScheduling(ctx, tx, task, now); err != nil {
 		return WorkflowRun{}, err
-	}
-	if existingState.Valid {
-		return WorkflowRun{}, fmt.Errorf("%w: task is already %s", ErrWorkflowConflict, existingState.String)
 	}
 	var sequence int
 	if err := tx.QueryRowContext(ctx, `
@@ -340,7 +341,6 @@ SELECT COALESCE(MAX(run_sequence), 0) + 1 FROM workflow_runs WHERE task_id = ?`,
 	if err != nil {
 		return WorkflowRun{}, err
 	}
-	now := s.now().UTC()
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO workflow_runs (
 	id, task_id, run_sequence, flow_id, flow_snapshot_json, state,
@@ -349,11 +349,6 @@ INSERT INTO workflow_runs (
 		sqlitex.NullableNonEmptyString(snapshot.FlowID), string(snapshotJSON), string(WorkflowRunScheduled),
 		snapshot.StartNode, snapshot.TransitionBudget, s.reviewAuthorCycleLimit, sqlitex.FormatTime(now)); err != nil {
 		return WorkflowRun{}, fmt.Errorf("insert workflow run: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-UPDATE tasks SET lifecycle_state = ?, done_resolution = NULL, done_at = NULL, updated_at = ?
-WHERE id = ?`, string(LifecycleScheduled), sqlitex.FormatTime(now), taskID); err != nil {
-		return WorkflowRun{}, fmt.Errorf("mark task scheduled: %w", err)
 	}
 	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
 		TaskID: taskID, WorkflowRunID: id, ToTaskState: string(LifecycleScheduled),
@@ -365,6 +360,40 @@ WHERE id = ?`, string(LifecycleScheduled), sqlitex.FormatTime(now), taskID); err
 		return WorkflowRun{}, err
 	}
 	return s.Get(ctx, id)
+}
+
+// claimTaskForScheduling atomically freezes the editable task settings used to
+// build the workflow snapshot. A concurrent edit cannot leave a task claiming
+// human review while its newly persisted run contains a bypassed review gate.
+func claimTaskForScheduling(ctx context.Context, tx *sql.Tx, task Task, now time.Time) error {
+	result, err := tx.ExecContext(ctx, `
+UPDATE tasks
+SET lifecycle_state = ?, done_resolution = NULL, done_at = NULL, updated_at = ?
+WHERE id = ?
+  AND lifecycle_state IS NULL
+  AND requires_human_review = ?
+  AND COALESCE(flow_id, '') = ?`,
+		string(LifecycleScheduled), sqlitex.FormatTime(now), task.ID,
+		task.RequiresHumanReview, task.FlowID)
+	if err != nil {
+		return fmt.Errorf("claim task for scheduling: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count scheduled task claim: %w", err)
+	}
+	if updated == 1 {
+		return nil
+	}
+
+	var state sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT lifecycle_state FROM tasks WHERE id = ?`, task.ID).Scan(&state); err != nil {
+		return err
+	}
+	if state.Valid {
+		return fmt.Errorf("%w: task is already %s", ErrWorkflowConflict, state.String)
+	}
+	return fmt.Errorf("%w: task workflow settings changed while scheduling", ErrWorkflowConflict)
 }
 
 func (s *WorkflowRunService) Get(ctx context.Context, runID string) (WorkflowRun, error) {

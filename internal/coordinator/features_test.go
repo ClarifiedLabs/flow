@@ -263,13 +263,21 @@ func TestTaskFeatureAssignmentAndEditGuard(t *testing.T) {
 		t.Fatalf("create with unknown feature error = %v, want ErrFeatureNotFound", err)
 	}
 
-	// Edit to another open feature works while the task is untouched.
-	reloaded, err := env.tasks.EditTask(ctx, task.ID, EditTaskInput{FeatureID: stringPtrPtr(&other.ID)})
+	// Edit to another open feature works while the task is untouched, and a
+	// review-policy edit in the same request survives the relationship reload.
+	required := true
+	reloaded, err := env.tasks.EditTask(ctx, task.ID, EditTaskInput{
+		FeatureID:           stringPtrPtr(&other.ID),
+		RequiresHumanReview: &required,
+	})
 	if err != nil {
-		t.Fatalf("edit feature: %v", err)
+		t.Fatalf("edit feature and review policy: %v", err)
 	}
 	if reloaded.FeatureID == nil || *reloaded.FeatureID != other.ID {
 		t.Fatalf("edited feature = %v, want %s", reloaded.FeatureID, other.ID)
+	}
+	if !reloaded.RequiresHumanReview {
+		t.Fatal("combined feature edit discarded requires_human_review")
 	}
 	// A no-op assignment always succeeds.
 	if _, err := env.tasks.EditTask(ctx, task.ID, EditTaskInput{FeatureID: stringPtrPtr(&other.ID)}); err != nil {
@@ -291,6 +299,22 @@ func TestTaskFeatureAssignmentAndEditGuard(t *testing.T) {
 	}
 	if _, err := env.tasks.EditTask(ctx, task.ID, EditTaskInput{FeatureID: stringPtrPtr(&feature.ID)}); err != nil {
 		t.Fatalf("scheduled task feature edit: %v", err)
+	}
+	// A scheduled task's frozen review policy cannot change, and rejection must
+	// roll back the feature move in the same transaction.
+	required = false
+	if _, err := env.tasks.EditTask(ctx, task.ID, EditTaskInput{
+		FeatureID:           stringPtrPtr(&other.ID),
+		RequiresHumanReview: &required,
+	}); !errors.Is(err, ErrWorkflowConflict) {
+		t.Fatalf("scheduled combined edit error = %v, want ErrWorkflowConflict", err)
+	}
+	unchanged, err := env.tasks.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("reload rejected combined edit: %v", err)
+	}
+	if unchanged.FeatureID == nil || *unchanged.FeatureID != feature.ID || !unchanged.RequiresHumanReview {
+		t.Fatalf("task after rejected combined edit = feature %v review %t, want %s/true", unchanged.FeatureID, unchanged.RequiresHumanReview, feature.ID)
 	}
 
 	// In-progress tasks may not move.
@@ -1295,7 +1319,7 @@ func TestExecutorFinalizeRebaseNode(t *testing.T) {
 		FlowID: "fl-feature-rebase", FlowName: FeatureRebaseFlowName, StartNode: "rebase", TransitionBudget: 50,
 		Nodes: []FlowNodeSnapshot{
 			{Key: "rebase", Name: "Rebase", Kind: NodeAgent, Config: FlowNodeSnapshotConfig{Agent: &AgentNodeSnapshotConfig{
-				Agent: AgentDefSnapshot{ID: "ad-feature-rebase", Name: "rebase agent", Harness: "harness", Prompt: "Rebase the feature."},
+				Agent:     AgentDefSnapshot{ID: "ad-feature-rebase", Name: "rebase agent", Harness: "harness", Prompt: "Rebase the feature."},
 				Workspace: WorkspaceChange, Artifact: ArtifactChange,
 			}}},
 			{Key: "finalize", Name: "Finalize", Kind: NodeFinalizeRebase, Config: FlowNodeSnapshotConfig{FinalizeRebase: &FinalizeRebaseNodeConfig{}}},

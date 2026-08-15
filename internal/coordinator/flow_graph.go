@@ -164,6 +164,10 @@ type ChangeReviewNodeConfig struct {
 type HumanGateNodeConfig struct {
 	Instructions string   `json:"instructions,omitempty"`
 	Outcomes     []string `json:"outcomes"`
+	// TaskOptIn makes this gate conditional on the task's requires_human_review
+	// setting. SkipOutcome is the edge followed when the setting is disabled.
+	TaskOptIn   bool   `json:"task_opt_in,omitempty"`
+	SkipOutcome string `json:"skip_outcome,omitempty"`
 }
 
 type VerifyChangeNodeConfig struct {
@@ -351,6 +355,91 @@ func (s FlowSnapshot) Target(from, outcome string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// snapshotForTaskHumanReview freezes the task-level human-review choice into a
+// run. Ordinary human gates remain mandatory; only gates explicitly marked
+// task_opt_in are bypassed when requires_human_review is false. Bypassing follows
+// each gate's configured skip outcome and removes branches that become
+// unreachable, leaving a complete graph that can still be validated normally.
+func snapshotForTaskHumanReview(snapshot FlowSnapshot, required bool) (FlowSnapshot, error) {
+	if required {
+		return snapshot, nil
+	}
+
+	bypass := make(map[string]string)
+	for _, node := range snapshot.Nodes {
+		if node.Kind != NodeHumanGate || node.Config.HumanGate == nil || !node.Config.HumanGate.TaskOptIn {
+			continue
+		}
+		target, ok := snapshot.Target(node.Key, node.Config.HumanGate.SkipOutcome)
+		if !ok {
+			return FlowSnapshot{}, fmt.Errorf("task-opt-in human gate %q has no edge for skip outcome %q", node.Key, node.Config.HumanGate.SkipOutcome)
+		}
+		bypass[node.Key] = target
+	}
+	if len(bypass) == 0 {
+		return snapshot, nil
+	}
+
+	resolveTarget := func(key string) (string, error) {
+		seen := map[string]bool{}
+		for bypass[key] != "" {
+			if seen[key] {
+				return "", fmt.Errorf("task-opt-in human gate skip outcomes form a cycle at %q", key)
+			}
+			seen[key] = true
+			key = bypass[key]
+		}
+		return key, nil
+	}
+
+	start, err := resolveTarget(snapshot.StartNode)
+	if err != nil {
+		return FlowSnapshot{}, err
+	}
+	projected := snapshot
+	projected.StartNode = start
+	projected.Edges = nil
+	for _, edge := range snapshot.Edges {
+		if bypass[edge.From] != "" {
+			continue
+		}
+		target, err := resolveTarget(edge.To)
+		if err != nil {
+			return FlowSnapshot{}, err
+		}
+		edge.To = target
+		projected.Edges = append(projected.Edges, edge)
+	}
+
+	reachable := map[string]bool{projected.StartNode: true}
+	for changed := true; changed; {
+		changed = false
+		for _, edge := range projected.Edges {
+			if reachable[edge.From] && !reachable[edge.To] {
+				reachable[edge.To] = true
+				changed = true
+			}
+		}
+	}
+	projected.Nodes = nil
+	for _, node := range snapshot.Nodes {
+		if bypass[node.Key] == "" && reachable[node.Key] {
+			projected.Nodes = append(projected.Nodes, node)
+		}
+	}
+	edges := projected.Edges[:0]
+	for _, edge := range projected.Edges {
+		if reachable[edge.From] && reachable[edge.To] {
+			edges = append(edges, edge)
+		}
+	}
+	projected.Edges = edges
+	if err := validateFlowSnapshot(projected); err != nil {
+		return FlowSnapshot{}, fmt.Errorf("project task human-review choice: %w", err)
+	}
+	return projected, nil
 }
 
 // decodeFlowSnapshot accepts one current graph snapshot only. Workflow runs are
@@ -699,6 +788,7 @@ func normalizeNodeConfig(key string, kind NodeKind, config FlowNodeConfig) ([]st
 	case NodeHumanGate:
 		if config.HumanGate != nil {
 			config.HumanGate.Instructions = strings.TrimSpace(config.HumanGate.Instructions)
+			config.HumanGate.SkipOutcome = strings.TrimSpace(config.HumanGate.SkipOutcome)
 			seen := map[string]bool{}
 			var outcomes []string
 			for _, raw := range config.HumanGate.Outcomes {
@@ -714,6 +804,13 @@ func normalizeNodeConfig(key string, kind NodeKind, config FlowNodeConfig) ([]st
 			}
 			if len(outcomes) == 0 {
 				return nil, FlowNodeConfig{}, fmt.Errorf("human gate %q requires at least one outcome", key)
+			}
+			if config.HumanGate.TaskOptIn {
+				if !seen[config.HumanGate.SkipOutcome] {
+					return nil, FlowNodeConfig{}, fmt.Errorf("task-opt-in human gate %q requires skip_outcome to name one of its outcomes", key)
+				}
+			} else if config.HumanGate.SkipOutcome != "" {
+				return nil, FlowNodeConfig{}, fmt.Errorf("human gate %q cannot set skip_outcome unless task_opt_in is true", key)
 			}
 			config.HumanGate.Outcomes = outcomes
 			return outcomes, config, nil

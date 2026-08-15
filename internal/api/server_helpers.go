@@ -49,18 +49,19 @@ func createTaskInputForPrincipal(request createTaskRequest, principal coordinato
 
 	input := coordinator.CreateTaskWithDetailsInput{
 		Task: coordinator.CreateTaskInput{
-			Title:              request.Title,
-			Body:               request.Body,
-			Priority:           request.Priority,
-			ScheduleState:      scheduleState,
-			TriageState:        triageState,
-			FlowID:             request.FlowID,
-			ParentItemID:       request.ParentItemID,
-			FeatureID:          request.FeatureID,
-			CreatedBy:          actor,
-			CreatedBySessionID: createdBySessionID,
-			SourceTaskID:       sourceTaskID,
-			SourceChangeID:     request.SourceChangeID,
+			Title:               request.Title,
+			Body:                request.Body,
+			Priority:            request.Priority,
+			ScheduleState:       scheduleState,
+			RequiresHumanReview: request.RequiresHumanReview,
+			TriageState:         triageState,
+			FlowID:              request.FlowID,
+			ParentItemID:        request.ParentItemID,
+			FeatureID:           request.FeatureID,
+			CreatedBy:           actor,
+			CreatedBySessionID:  createdBySessionID,
+			SourceTaskID:        sourceTaskID,
+			SourceChangeID:      request.SourceChangeID,
 		},
 		Tags:              tagInputs(request.Tags, actor),
 		Relations:         relationInputs(request.Relations, actor),
@@ -448,20 +449,21 @@ func sessionHarnessForJob(job worker.Job) (string, error) {
 }
 
 type createTaskRequest struct {
-	Title              string                                   `json:"title"`
-	Body               string                                   `json:"body"`
-	Priority           int                                      `json:"priority"`
-	FlowID             string                                   `json:"flow_id"`
-	ParentItemID       string                                   `json:"parent_item_id"`
-	FeatureID          *string                                  `json:"feature_id"`
-	ScheduleState      string                                   `json:"-"`
-	TriageState        string                                   `json:"-"`
-	CreatedBySessionID *string                                  `json:"created_by_session_id"`
-	SourceTaskID       *string                                  `json:"source_task_id"`
-	SourceChangeID     *string                                  `json:"source_change_id"`
-	Tags               []tagRequest                             `json:"tags"`
-	Relations          []relationRequest                        `json:"relations"`
-	WorkItemRelations  []contract.CreateWorkItemRelationRequest `json:"work_item_relations,omitempty"`
+	Title               string                                   `json:"title"`
+	Body                string                                   `json:"body"`
+	Priority            int                                      `json:"priority"`
+	RequiresHumanReview *bool                                    `json:"requires_human_review"`
+	FlowID              string                                   `json:"flow_id"`
+	ParentItemID        string                                   `json:"parent_item_id"`
+	FeatureID           *string                                  `json:"feature_id"`
+	ScheduleState       string                                   `json:"-"`
+	TriageState         string                                   `json:"-"`
+	CreatedBySessionID  *string                                  `json:"created_by_session_id"`
+	SourceTaskID        *string                                  `json:"source_task_id"`
+	SourceChangeID      *string                                  `json:"source_change_id"`
+	Tags                []tagRequest                             `json:"tags"`
+	Relations           []relationRequest                        `json:"relations"`
+	WorkItemRelations   []contract.CreateWorkItemRelationRequest `json:"work_item_relations,omitempty"`
 }
 
 type tagRequest struct {
@@ -474,11 +476,12 @@ type tagRequest struct {
 type relationRequest = contract.TaskRelationRequest
 
 type editTaskRequest struct {
-	Title     *string `json:"title"`
-	Body      *string `json:"body"`
-	Priority  *int    `json:"priority"`
-	FlowID    *string `json:"flow_id"`
-	FeatureID *string `json:"feature_id"`
+	Title               *string `json:"title"`
+	Body                *string `json:"body"`
+	Priority            *int    `json:"priority"`
+	RequiresHumanReview *bool   `json:"requires_human_review"`
+	FlowID              *string `json:"flow_id"`
+	FeatureID           *string `json:"feature_id"`
 }
 
 type scheduleTaskRequest = contract.ScheduleTaskRequest
@@ -563,9 +566,9 @@ type taskResponse struct {
 // It mirrors taskResponse so app.refresh() still works, and optionally carries
 // the active run produced or mutated by the transition.
 type lifecycleTransitionResponseAlias struct {
-	Task        coordinator.Task       `json:"task"`
-	ProjectID   string                 `json:"project_id,omitempty"`
-	ProjectName string                 `json:"project_name,omitempty"`
+	Task        coordinator.Task         `json:"task"`
+	ProjectID   string                   `json:"project_id,omitempty"`
+	ProjectName string                   `json:"project_name,omitempty"`
 	Run         *coordinator.WorkflowRun `json:"run,omitempty"`
 }
 

@@ -96,13 +96,13 @@ type Task struct {
 	Priority            int
 	ScheduleState       ScheduleState   `json:"-"`
 	TriageState         TriageState     `json:"-"`
-	RequiresHumanReview bool            `json:"-"`
+	RequiresHumanReview bool            `json:"requires_human_review"`
 	AutoMerge           bool            `json:"-"`
 	FlowID              string          `json:"flow_id,omitempty"`
 	FeatureID           *string         `json:"feature_id,omitempty"`
 	State               *LifecycleState `json:"state"`
 	DoneResolution      *DoneResolution `json:"done_resolution,omitempty"`
-	DoneMessage         string           `json:"done_message,omitempty"`
+	DoneMessage         string          `json:"done_message,omitempty"`
 	DoneEvidence        []Evidence      `json:"done_evidence,omitempty"`
 	DoneAt              *time.Time      `json:"done_at,omitempty"`
 	CreatedBy           Actor
@@ -283,6 +283,10 @@ type TaskService struct {
 	projectID string
 	now       func() time.Time
 	eventLog  *EventLogService
+
+	// editTaskAfterReadTestHook runs after EditTask's optimistic validation read
+	// and before its write transaction. Tests use it to force stale-read races.
+	editTaskAfterReadTestHook func()
 }
 
 // SetEventLog wires the project event log; a nil log disables emission.
@@ -412,6 +416,7 @@ INSERT INTO tasks (
 	title,
 	body,
 	priority,
+	requires_human_review,
 	flow_id,
 	feature_id,
 	created_by,
@@ -420,11 +425,12 @@ INSERT INTO tasks (
 	source_change_id,
 	created_at,
 	updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id,
 		taskInput.Title,
 		taskInput.Body,
 		taskInput.Priority,
+		*taskInput.RequiresHumanReview,
 		sqlitex.NullableNonEmptyString(taskInput.FlowID),
 		nullableStringValue(taskInput.FeatureID),
 		string(taskInput.CreatedBy),
@@ -518,6 +524,7 @@ SELECT
 	title,
 	body,
 	priority,
+	requires_human_review,
 	flow_id,
 	feature_id,
 	created_by,
@@ -549,6 +556,7 @@ const taskSelectColumns = `
 	i.title,
 	i.body,
 	i.priority,
+	i.requires_human_review,
 	i.flow_id,
 	i.feature_id,
 	i.created_by,
@@ -698,7 +706,6 @@ func fts5Query(query string) string {
 	}
 	return strings.Join(parts, " AND ")
 }
-
 
 // ListCompletions returns done tasks with their resolution, message, and
 // evidence, newest first, for `flow audit completions`. resolution filters by
@@ -956,43 +963,24 @@ func (s *TaskService) EditTask(ctx context.Context, id string, input EditTaskInp
 		return Task{}, err
 	}
 
-	if input.Title != nil {
-		title := strings.TrimSpace(*input.Title)
-		if title == "" {
-			return Task{}, errors.New("task title is required")
-		}
-		current.Title = title
+	if input.Title != nil && strings.TrimSpace(*input.Title) == "" {
+		return Task{}, errors.New("task title is required")
 	}
-	if input.Body != nil {
-		current.Body = *input.Body
+	if input.Priority != nil && *input.Priority < 0 {
+		return Task{}, errors.New("task priority must be non-negative")
 	}
-	if input.Priority != nil {
-		if *input.Priority < 0 {
-			return Task{}, errors.New("task priority must be non-negative")
-		}
-		current.Priority = *input.Priority
-	}
-	if input.FlowID != nil {
-		current.FlowID = strings.TrimSpace(*input.FlowID)
-	}
+	parentID := ""
 	if input.FeatureID != nil {
 		featureID, err := s.guardFeatureChange(ctx, current, *input.FeatureID)
 		if err != nil {
 			return Task{}, err
 		}
-		parentID := ""
 		if featureID != nil {
 			parentID = *featureID
 		}
-		items := NewWorkItemService(s.db, s.projectID)
-		items.now = s.now
-		if err := items.Move(ctx, current.ID, parentID, ActorHuman); err != nil {
-			return Task{}, err
-		}
-		current, err = s.GetTask(ctx, id)
-		if err != nil {
-			return Task{}, err
-		}
+	}
+	if hook := s.editTaskAfterReadTestHook; hook != nil {
+		hook()
 	}
 
 	tx, err := sqlitex.BeginImmediate(ctx, s.db)
@@ -1000,18 +988,57 @@ func (s *TaskService) EditTask(ctx context.Context, id string, input EditTaskInp
 		return Task{}, fmt.Errorf("begin edit task transaction: %w", err)
 	}
 	defer tx.Rollback()
+	locked, err := taskInTx(ctx, tx, id)
+	if err != nil {
+		return Task{}, err
+	}
+	if input.RequiresHumanReview != nil && locked.State != nil && locked.RequiresHumanReview != *input.RequiresHumanReview {
+		return Task{}, fmt.Errorf("%w: human review policy is frozen after scheduling", ErrWorkflowConflict)
+	}
+
+	// Base every edit on the row protected by this write transaction. The
+	// optimistic read above may be stale after a concurrent edit or schedule.
+	current = locked
+	if input.FeatureID != nil {
+		items := NewWorkItemService(s.db, s.projectID)
+		items.now = s.now
+		if err := items.moveTx(ctx, tx, current.ID, parentID, ActorHuman); err != nil {
+			return Task{}, err
+		}
+		current, err = taskInTx(ctx, tx, id)
+		if err != nil {
+			return Task{}, err
+		}
+	}
+	if input.Title != nil {
+		current.Title = strings.TrimSpace(*input.Title)
+	}
+	if input.Body != nil {
+		current.Body = *input.Body
+	}
+	if input.Priority != nil {
+		current.Priority = *input.Priority
+	}
+	if input.RequiresHumanReview != nil {
+		current.RequiresHumanReview = *input.RequiresHumanReview
+	}
+	if input.FlowID != nil {
+		current.FlowID = strings.TrimSpace(*input.FlowID)
+	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE tasks
 SET
 	title = ?,
 	body = ?,
 	priority = ?,
+	requires_human_review = ?,
 	flow_id = ?,
 	updated_at = ?
 WHERE id = ?`,
 		current.Title,
 		current.Body,
 		current.Priority,
+		current.RequiresHumanReview,
 		sqlitex.NullableNonEmptyString(current.FlowID),
 		formatTime(s.now().UTC()),
 		id,
@@ -1726,6 +1753,7 @@ SELECT
 	blocker.title,
 	blocker.body,
 	blocker.priority,
+	blocker.requires_human_review,
 	blocker.flow_id,
 	blocker.feature_id,
 	blocker.created_by,
@@ -1850,7 +1878,7 @@ func normalizeCreateTaskInput(input CreateTaskInput) (CreateTaskInput, error) {
 	}
 
 	if input.RequiresHumanReview == nil {
-		defaultRequiresHumanReview := true
+		defaultRequiresHumanReview := false
 		input.RequiresHumanReview = &defaultRequiresHumanReview
 	}
 	if input.AutoMerge == nil {
@@ -2033,6 +2061,7 @@ func scanTask(scanner taskScanner) (Task, error) {
 		&task.Title,
 		&task.Body,
 		&task.Priority,
+		&task.RequiresHumanReview,
 		&flowID,
 		&featureID,
 		&createdBy,
@@ -2064,7 +2093,6 @@ func scanTask(scanner taskScanner) (Task, error) {
 	// persisted or exposed by the version-2 model.
 	task.ScheduleState = ScheduleBacklog
 	task.TriageState = TriageAccepted
-	task.RequiresHumanReview = true
 	if flowID.Valid {
 		task.FlowID = flowID.String
 	}

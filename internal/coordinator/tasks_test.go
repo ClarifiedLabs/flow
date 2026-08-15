@@ -39,6 +39,9 @@ func TestCreateTaskAllocatesIDAndPersistsAcrossRestart(t *testing.T) {
 	if task.CreatedBy != ActorHuman {
 		t.Fatalf("CreatedBy = %q, want human", task.CreatedBy)
 	}
+	if task.RequiresHumanReview {
+		t.Fatal("RequiresHumanReview = true, want disabled by default")
+	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
 	}
@@ -61,6 +64,34 @@ func TestCreateTaskAllocatesIDAndPersistsAcrossRestart(t *testing.T) {
 	}
 	if reopenedTask.Body != "Persist tasks in SQLite." {
 		t.Fatalf("reopened Body = %q", reopenedTask.Body)
+	}
+	if reopenedTask.RequiresHumanReview {
+		t.Fatal("reopened RequiresHumanReview = true, want persisted false")
+	}
+}
+
+func TestTaskHumanReviewSettingPersistsAndCanBeEdited(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, service := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
+	t.Cleanup(func() { _ = store.Close() })
+
+	required := true
+	task, err := service.CreateTask(ctx, CreateTaskInput{Title: "Human-reviewed task", RequiresHumanReview: &required})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if !task.RequiresHumanReview {
+		t.Fatal("RequiresHumanReview = false, want explicit opt-in")
+	}
+
+	required = false
+	task, err = service.EditTask(ctx, task.ID, EditTaskInput{RequiresHumanReview: &required})
+	if err != nil {
+		t.Fatalf("disable human review: %v", err)
+	}
+	if task.RequiresHumanReview {
+		t.Fatal("RequiresHumanReview = true after edit, want false")
 	}
 }
 

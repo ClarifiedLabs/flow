@@ -164,6 +164,167 @@ func TestWorkflowModelHumanGateCanUseCustomOutcomeAndComplete(t *testing.T) {
 	}
 }
 
+func TestClaimTaskForSchedulingRejectsStaleHumanReviewChoice(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	_, tasks, runs := newWorkflowModelServices(t)
+	stale, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Review setting changes during scheduling"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	required := true
+	if _, err := tasks.EditTask(ctx, stale.ID, EditTaskInput{RequiresHumanReview: &required}); err != nil {
+		t.Fatalf("edit task review setting: %v", err)
+	}
+
+	tx, err := runs.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin scheduling transaction: %v", err)
+	}
+	defer tx.Rollback()
+	if err := claimTaskForScheduling(ctx, tx, stale, time.Now().UTC()); !errors.Is(err, ErrWorkflowConflict) {
+		t.Fatalf("claim with stale review setting error = %v, want workflow conflict", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback stale claim: %v", err)
+	}
+
+	current, err := tasks.GetTask(ctx, stale.ID)
+	if err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	if !current.RequiresHumanReview || current.State != nil {
+		t.Fatalf("task after stale claim = requires review %t state %v, want true and unscheduled", current.RequiresHumanReview, current.State)
+	}
+}
+
+func TestEditTaskOmittingReviewPolicyPreservesConcurrentScheduledOptIn(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	flows, tasks, runs := newWorkflowModelServices(t)
+	flow, err := flows.Create(ctx, FlowInput{
+		Name:      "stale edit review race",
+		StartNode: "review",
+		Nodes: []FlowNodeInput{
+			{Key: "review", Name: "Human review", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{
+				Outcomes: []string{"approved"}, TaskOptIn: true, SkipOutcome: "approved",
+			}}},
+			{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+		},
+		Edges: []FlowEdgeInput{{From: "review", Outcome: "approved", To: "done"}},
+	})
+	if err != nil {
+		t.Fatalf("create optional review flow: %v", err)
+	}
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Original title", FlowID: flow.ID})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	readComplete := make(chan struct{})
+	continueEdit := make(chan struct{})
+	tasks.editTaskAfterReadTestHook = func() {
+		// Disable the one-shot hook before allowing the concurrent operations to
+		// proceed through their own EditTask calls.
+		tasks.editTaskAfterReadTestHook = nil
+		close(readComplete)
+		<-continueEdit
+	}
+	type editResult struct {
+		task Task
+		err  error
+	}
+	result := make(chan editResult, 1)
+	updatedTitle := "Updated title"
+	go func() {
+		edited, editErr := tasks.EditTask(ctx, task.ID, EditTaskInput{Title: &updatedTitle})
+		result <- editResult{task: edited, err: editErr}
+	}()
+	<-readComplete
+
+	required := true
+	_, optInErr := tasks.EditTask(ctx, task.ID, EditTaskInput{RequiresHumanReview: &required})
+	var run WorkflowRun
+	var scheduleErr error
+	if optInErr == nil {
+		run, scheduleErr = runs.Schedule(ctx, task.ID)
+	}
+	close(continueEdit)
+	staleEdit := <-result
+
+	if optInErr != nil {
+		t.Fatalf("opt in while stale edit is paused: %v", optInErr)
+	}
+	if scheduleErr != nil {
+		t.Fatalf("schedule opted-in task: %v", scheduleErr)
+	}
+	if staleEdit.err != nil {
+		t.Fatalf("complete stale title edit: %v", staleEdit.err)
+	}
+	if staleEdit.task.Title != updatedTitle || !staleEdit.task.RequiresHumanReview || staleEdit.task.State == nil || *staleEdit.task.State != LifecycleScheduled {
+		t.Fatalf("task after stale edit = title %q review %t state %v, want updated/true/scheduled", staleEdit.task.Title, staleEdit.task.RequiresHumanReview, staleEdit.task.State)
+	}
+	if node, ok := run.Snapshot.Node("review"); !ok || node.Kind != NodeHumanGate {
+		t.Fatalf("scheduled snapshot review node = %+v, found=%t", node, ok)
+	}
+}
+
+func TestWorkflowScheduleIncludesTaskOptInHumanReviewOnlyWhenRequired(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	flows, tasks, runs := newWorkflowModelServices(t)
+	flow, err := flows.Create(ctx, FlowInput{
+		Name:      "optional human review",
+		StartNode: "review",
+		Nodes: []FlowNodeInput{
+			{Key: "review", Name: "Human review", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{
+				Outcomes: []string{"approved", "rejected"}, TaskOptIn: true, SkipOutcome: "approved",
+			}}},
+			{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+			{Key: "rejected", Name: "Rejected", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionRejected}}},
+		},
+		Edges: []FlowEdgeInput{
+			{From: "review", Outcome: "approved", To: "done"},
+			{From: "review", Outcome: "rejected", To: "rejected"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create optional-review flow: %v", err)
+	}
+
+	withoutReview, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Ship automatically", FlowID: flow.ID})
+	if err != nil {
+		t.Fatalf("create default task: %v", err)
+	}
+	withoutRun, err := runs.Schedule(ctx, withoutReview.ID)
+	if err != nil {
+		t.Fatalf("schedule default task: %v", err)
+	}
+	if withoutRun.Snapshot.StartNode != "done" || len(withoutRun.Snapshot.Nodes) != 1 {
+		t.Fatalf("default snapshot = start %q nodes %+v, want optional gate and rejected branch removed", withoutRun.Snapshot.StartNode, withoutRun.Snapshot.Nodes)
+	}
+
+	required := true
+	withReview, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Wait for a person", FlowID: flow.ID, RequiresHumanReview: &required})
+	if err != nil {
+		t.Fatalf("create opted-in task: %v", err)
+	}
+	withRun, err := runs.Schedule(ctx, withReview.ID)
+	if err != nil {
+		t.Fatalf("schedule opted-in task: %v", err)
+	}
+	if withRun.Snapshot.StartNode != "review" || len(withRun.Snapshot.Nodes) != 3 {
+		t.Fatalf("opted-in snapshot = start %q nodes %+v, want human gate preserved", withRun.Snapshot.StartNode, withRun.Snapshot.Nodes)
+	}
+	nodeRun, created, err := runs.EnsureCurrentNode(ctx, withRun.ID)
+	if err != nil {
+		t.Fatalf("enter opted-in human gate: %v", err)
+	}
+	if !created || nodeRun.State != WorkflowNodeWaiting {
+		t.Fatalf("opted-in gate node = %+v created=%t, want waiting", nodeRun, created)
+	}
+}
+
 func TestWorkflowModelSchedulingWaitsForTaskDependencies(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

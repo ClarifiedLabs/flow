@@ -183,6 +183,9 @@ func TestSeedDefaults(t *testing.T) {
 	if coding.Nodes[0].Kind != NodeAgent || coding.Nodes[len(coding.Nodes)-1].Kind != NodeTerminal {
 		t.Errorf("coding nodes = %+v", coding.Nodes)
 	}
+	if gate := coding.Nodes[4].Config.HumanGate; gate == nil || !gate.TaskOptIn || gate.SkipOutcome != "approved" {
+		t.Errorf("coding human-review gate = %+v, want task opt-in with approved bypass", gate)
+	}
 	codeReviewer, hasCodeReviewer := defsByName["code-reviewer"]
 	securityReviewer, hasSecurityReviewer := defsByName["security-reviewer"]
 	reviewAggregator, hasReviewAggregator := defsByName["review-aggregator"]

@@ -2361,12 +2361,13 @@ func durationSeconds(duration time.Duration) int {
 }
 
 type CreateTaskInput struct {
-	Title        string `json:"title"`
-	Body         string `json:"body"`
-	Priority     int    `json:"priority"`
-	FlowID       string `json:"flow_id,omitempty"`
-	FeatureID    string `json:"feature_id,omitempty"`
-	ParentItemID string `json:"parent_item_id,omitempty"`
+	Title               string `json:"title"`
+	Body                string `json:"body"`
+	Priority            int    `json:"priority"`
+	RequiresHumanReview bool   `json:"requires_human_review"`
+	FlowID              string `json:"flow_id,omitempty"`
+	FeatureID           string `json:"feature_id,omitempty"`
+	ParentItemID        string `json:"parent_item_id,omitempty"`
 	// IdempotencyKey rides the Idempotency-Key header rather than the body so
 	// retries of the same create replay the stored response instead of
 	// creating a second task.
@@ -2374,11 +2375,12 @@ type CreateTaskInput struct {
 }
 
 type EditTaskInput struct {
-	Title     *string `json:"title,omitempty"`
-	Body      *string `json:"body,omitempty"`
-	Priority  *int    `json:"priority,omitempty"`
-	FlowID    *string `json:"flow_id,omitempty"`
-	FeatureID *string `json:"feature_id,omitempty"`
+	Title               *string `json:"title,omitempty"`
+	Body                *string `json:"body,omitempty"`
+	Priority            *int    `json:"priority,omitempty"`
+	RequiresHumanReview *bool   `json:"requires_human_review,omitempty"`
+	FlowID              *string `json:"flow_id,omitempty"`
+	FeatureID           *string `json:"feature_id,omitempty"`
 }
 
 type CreateFeatureInput struct {

@@ -606,9 +606,8 @@ test("new task route renders project-scoped blank form with the selected project
   assert.match(content.innerHTML, /<option value="t-alpha-0001" label="task · First task"><\/option>/);
   assert.match(content.innerHTML, /<option value="e-alpha-0001" label="epic · First epic"><\/option>/);
   assert.match(content.innerHTML, /<option value="f-alpha-0001" label="feature · First feature"><\/option>/);
-  // The 'Queue after creation' checkbox label directly precedes the Create
-  // button inside the .task-form-actions footer (DOM order, not mere presence).
-  assert.match(content.innerHTML, /<div class="form-actions task-form-actions">\s*<label class="check">\s*<input name="queue_task" type="checkbox" checked>\s*<span>Queue after creation<\/span>\s*<\/label>\s*<button class="button" type="submit">Create<\/button>/);
+  // Human review is opt-in and appears beside the existing queue control.
+  assert.match(content.innerHTML, /<div class="form-actions task-form-actions">\s*<label class="check">\s*<input name="requires_human_review" type="checkbox">\s*<span>Require human review<\/span>\s*<\/label>\s*<label class="check">\s*<input name="queue_task" type="checkbox" checked>\s*<span>Queue after creation<\/span>\s*<\/label>\s*<button class="button" type="submit">Create<\/button>/);
   assert.equal(status.textContent, "");
 });
 
@@ -705,6 +704,7 @@ test("new task form submission posts to the selected project collection", async 
       flow_id: { value: "fl-coding" },
       title: { value: "First task" },
       body: { value: "Task details" },
+      requires_human_review: { checked: true },
       attachments: { files: [] },
       queue_task: { checked: false },
     },
@@ -736,6 +736,7 @@ test("new task form submission posts to the selected project collection", async 
     body: "Task details",
     priority: 2,
     flow_id: "fl-coding",
+    requires_human_review: true,
   });
   assert.equal(pushedPath, "/ui/tasks/t-alpha-0001");
   assert.equal(loads, 1);
@@ -746,6 +747,7 @@ test("task form renders the relation picker only in create mode", async () => {
   app.projects = [{ id: "p-alpha", name: "alpha" }];
 
   const createHTML = app.renderTaskForm({ title: "", priority: 0 }, { mode: "create", submitLabel: "Create" });
+  assert.match(createHTML, /<input name="requires_human_review" type="checkbox">/);
   assert.match(createHTML, /data-relation-picker/);
   assert.match(createHTML, /data-relation-rows/);
   assert.match(createHTML, /data-relation-add/);
@@ -757,13 +759,14 @@ test("task form renders the relation picker only in create mode", async () => {
   // is also available and duplicate declarations are rejected on submit.
   assert.match(createHTML, /data-relation-kind[^>]*>[\s\S]*?<option value="related_to" selected>/);
 
-  const editHTML = app.renderTaskForm({ title: "T" }, { taskID: "t-alpha-0001", projectID: "p-alpha" });
+  const editHTML = app.renderTaskForm({ title: "T", requires_human_review: true }, { taskID: "t-alpha-0001", projectID: "p-alpha" });
+  assert.match(editHTML, /<input name="requires_human_review" type="checkbox" checked>/);
   assert.doesNotMatch(editHTML, /data-relation-picker/);
   assert.doesNotMatch(editHTML, /data-relation-add/);
   assert.doesNotMatch(editHTML, /data-relation-row/);
-  // Edit mode has no queue checkbox: a single Save button sits in the footer.
+  // Edit mode retains the review policy but has no queue checkbox.
   assert.doesNotMatch(editHTML, /queue_task/);
-  assert.match(editHTML, /<div class="form-actions task-form-actions">\s*<button class="button" type="submit">Save<\/button>/);
+  assert.match(editHTML, /<div class="form-actions task-form-actions">\s*<label class="check">\s*<input name="requires_human_review" type="checkbox" checked>\s*<span>Require human review<\/span>\s*<\/label>\s*<button class="button" type="submit">Save<\/button>/);
 });
 
 function relationRow(kind, target) {
