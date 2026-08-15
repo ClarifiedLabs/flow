@@ -808,12 +808,39 @@ func (s *projectServer) applySessionSignal(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *projectServer) applySessionStateSignal(w http.ResponseWriter, r *http.Request, sessionID string, principal coordinator.Principal, state coordinator.SessionRuntimeState, source string, failureCode string) {
+	// Native waiting is authoritative, but the command that reports it is itself
+	// followed by terminal output (usage and the next prompt). Change state and
+	// arm/clear its redraw guard atomically.
+	if source == coordinator.SessionEventSourceNativeHook {
+		updated, err := s.sessions.UpdateNativeHookSessionState(r.Context(), sessionID, state)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, failureCode, err.Error())
+			return
+		}
+		s.touchAgentActivity(r.Context(), sessionID)
+		writeJSON(w, http.StatusOK, sessionResponse{Session: updated})
+		return
+	}
+
 	// The watchdog re-reports the same state every poll cycle; without this
 	// fast path the engine would log a session_state_changed transition per
 	// poll. A no-op same-state report returns the session unchanged.
 	session, err := s.sessions.GetSession(r.Context(), sessionID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, failureCode, err.Error())
+		return
+	}
+	if source == coordinator.SessionEventSourceWatchdog && state == coordinator.SessionWorking && session.RuntimeState == coordinator.SessionWaiting {
+		updated, _, err := s.sessions.UpdateWatchdogWorking(r.Context(), sessionID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, failureCode, err.Error())
+			return
+		}
+		// The conditional write keeps waiting during prompt/status redraw, but
+		// transitions after the short guard expires. Either result is final for
+		// this report; do not follow it with an unconditional state update.
+		s.touchAgentActivity(r.Context(), sessionID)
+		writeJSON(w, http.StatusOK, sessionResponse{Session: updated})
 		return
 	}
 	if session.RuntimeState == state {
@@ -1010,14 +1037,10 @@ func (s *projectServer) awaitHumanForSessionStatus(r *http.Request, sessionID st
 		return err
 	}
 	switch session.RuntimeState {
-	case coordinator.SessionWaiting:
-		return s.sessions.ProtectHumanWaitFromWatchdog(r.Context(), sessionID, kind)
-	case coordinator.SessionStarting, coordinator.SessionWorking:
+	case coordinator.SessionStarting, coordinator.SessionWorking, coordinator.SessionWaiting:
+		_, err = s.sessions.UpdateHumanWaitSessionState(r.Context(), sessionID, kind)
+		return err
 	default:
 		return nil
 	}
-	if _, err := s.sessions.UpdateSessionState(r.Context(), sessionID, coordinator.SessionWaiting); err != nil {
-		return err
-	}
-	return s.sessions.ProtectHumanWaitFromWatchdog(r.Context(), sessionID, kind)
 }

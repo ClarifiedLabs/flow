@@ -56,7 +56,11 @@ missing or internally ambiguous. These decisions resolve the blockers:
 5. Harness is the only supported agent CLI.
    The watchdog is still implemented in the
    MVP because harness hook support can vary and because missed waiting signals
-   would leak hot worker slots.
+   would leak hot worker slots. Native hook state is authoritative: after a
+   native waiting report, the coordinator briefly ignores watchdog working
+   reports caused by harness rendering usage and its next prompt. Once that
+   redraw guard expires, a later watchdog working report may transition the
+   session, preserving recovery when a native prompt-submit hook is missed.
 
 6. Author completion is explicit.
    An author session becomes reviewable only when the session invokes

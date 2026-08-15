@@ -28,6 +28,10 @@ const defaultAuthorBase = "main"
 // attempts, so the threshold of 2 permits exactly one automatic restart.
 const maxAutomaticCrashAttempts = 2
 
+// humanWaitWatchdogProtectionDuration absorbs prompt/status redraw output after
+// an authoritative wait without permanently disabling watchdog recovery.
+const humanWaitWatchdogProtectionDuration = 3 * time.Second
+
 // crashRestartLimitMessageFormat is the fmt.Sprintf template for the crash-loop
 // blocker status message, and crashRestartLimitMessageLike is the matching SQL
 // LIKE pattern. They are kept byte-identical (the LIKE wildcard replaces the
@@ -1995,8 +1999,183 @@ WHERE id = ?`,
 	return nil
 }
 
-// ProtectHumanWaitFromWatchdog records that the next watchdog-inferred working
-// report may still be output from the status command that parked the session.
+// UpdateNativeHookSessionState changes an active session's state and mutates its
+// watchdog guard in the same transaction. Waiting creates/refreshes the guard;
+// working clears it.
+func (s *SessionService) UpdateNativeHookSessionState(ctx context.Context, sessionID string, state SessionRuntimeState) (Session, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return Session{}, errors.New("session id is required")
+	}
+	if state != SessionWorking && state != SessionWaiting {
+		return Session{}, errors.New("native hook session state must be working or waiting")
+	}
+	if _, err := s.reconcileSessionForStateUpdate(ctx, sessionID); err != nil {
+		return Session{}, err
+	}
+	now := formatTime(s.now().UTC())
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Session{}, fmt.Errorf("begin native hook session state transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, `
+UPDATE sessions
+SET runtime_state = ?, updated_at = ?
+WHERE id = ? AND runtime_state IN (?, ?, ?)`,
+		string(state), now, sessionID,
+		string(SessionStarting), string(SessionWorking), string(SessionWaiting),
+	)
+	if err != nil {
+		return Session{}, fmt.Errorf("update native hook session state: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return Session{}, fmt.Errorf("read native hook session update rows affected: %w", err)
+	}
+	if rows == 0 {
+		return Session{}, sql.ErrNoRows
+	}
+
+	if state == SessionWaiting {
+		_, err = tx.ExecContext(ctx, `
+INSERT INTO session_human_wait_latches (session_id, kind, created_at)
+VALUES (?, ?, ?)
+ON CONFLICT(session_id) DO UPDATE SET
+	kind = excluded.kind,
+	created_at = excluded.created_at`, sessionID, SessionEventSourceNativeHook, now)
+	} else {
+		_, err = tx.ExecContext(ctx, `DELETE FROM session_human_wait_latches WHERE session_id = ?`, sessionID)
+	}
+	if err != nil {
+		return Session{}, fmt.Errorf("update native hook watchdog protection: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Session{}, fmt.Errorf("commit native hook session state transaction: %w", err)
+	}
+	return s.GetSession(ctx, sessionID)
+}
+
+// UpdateHumanWaitSessionState atomically parks an active session and creates the
+// watchdog redraw guard associated with a plan/question status.
+func (s *SessionService) UpdateHumanWaitSessionState(ctx context.Context, sessionID string, kind string) (Session, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return Session{}, errors.New("session id is required")
+	}
+	kind = strings.TrimSpace(kind)
+	if kind != StatusKindPlan && kind != StatusKindQuestion {
+		return Session{}, fmt.Errorf("human wait protection kind must be %s or %s", StatusKindPlan, StatusKindQuestion)
+	}
+	if _, err := s.reconcileSessionForStateUpdate(ctx, sessionID); err != nil {
+		return Session{}, err
+	}
+	now := formatTime(s.now().UTC())
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Session{}, fmt.Errorf("begin human wait session state transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, `
+UPDATE sessions
+SET runtime_state = ?, updated_at = ?
+WHERE id = ? AND runtime_state IN (?, ?, ?)`,
+		string(SessionWaiting), now, sessionID,
+		string(SessionStarting), string(SessionWorking), string(SessionWaiting),
+	)
+	if err != nil {
+		return Session{}, fmt.Errorf("update human wait session state: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return Session{}, fmt.Errorf("read human wait session update rows affected: %w", err)
+	}
+	if rows == 0 {
+		return Session{}, sql.ErrNoRows
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO session_human_wait_latches (session_id, kind, created_at)
+VALUES (?, ?, ?)
+ON CONFLICT(session_id) DO UPDATE SET
+	kind = excluded.kind,
+	created_at = excluded.created_at`, sessionID, kind, now); err != nil {
+		return Session{}, fmt.Errorf("update human wait watchdog protection: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Session{}, fmt.Errorf("commit human wait session state transaction: %w", err)
+	}
+	return s.GetSession(ctx, sessionID)
+}
+
+// UpdateWatchdogWorking conditionally marks a waiting session working only if
+// no unexpired authoritative-wait guard exists at write time. The SQL predicate
+// closes the check/update race with newer native and status waits.
+func (s *SessionService) UpdateWatchdogWorking(ctx context.Context, sessionID string) (Session, bool, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return Session{}, false, errors.New("session id is required")
+	}
+	if _, err := s.reconcileSessionForStateUpdate(ctx, sessionID); err != nil {
+		return Session{}, false, err
+	}
+	now := s.now().UTC()
+	result, err := s.db.ExecContext(ctx, `
+UPDATE sessions
+SET runtime_state = ?, updated_at = ?
+WHERE id = ?
+	AND runtime_state IN (?, ?, ?)
+	AND NOT EXISTS (
+		SELECT 1
+		FROM session_human_wait_latches
+		WHERE session_id = sessions.id AND created_at > ?
+	)`,
+		string(SessionWorking), formatTime(now), sessionID,
+		string(SessionStarting), string(SessionWorking), string(SessionWaiting),
+		formatTime(now.Add(-humanWaitWatchdogProtectionDuration)),
+	)
+	if err != nil {
+		return Session{}, false, fmt.Errorf("update watchdog session state: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return Session{}, false, fmt.Errorf("read watchdog session update rows affected: %w", err)
+	}
+	session, err := s.GetSession(ctx, sessionID)
+	if err != nil {
+		return Session{}, false, err
+	}
+	if rows == 0 {
+		if session.RuntimeState == SessionWaiting {
+			return session, true, nil
+		}
+		if session.RuntimeState != SessionWorking {
+			return Session{}, false, sql.ErrNoRows
+		}
+	}
+	return session, false, nil
+}
+
+func (s *SessionService) reconcileSessionForStateUpdate(ctx context.Context, sessionID string) (Session, error) {
+	session, err := s.GetSession(ctx, sessionID)
+	if err != nil {
+		return Session{}, err
+	}
+	if session.Role == flowworker.RoleConsole {
+		_, err = s.ReconcileCrashedConsoleSessions(ctx)
+	} else {
+		_, err = s.ReconcileCrashedAuthorSessions(ctx)
+	}
+	if err != nil {
+		return Session{}, err
+	}
+	return s.GetSession(ctx, sessionID)
+}
+
+// ProtectHumanWaitFromWatchdog records a short guard during which
+// watchdog-inferred working may still be output from the command that parked the
+// session.
 func (s *SessionService) ProtectHumanWaitFromWatchdog(ctx context.Context, sessionID string, kind string) error {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
@@ -2004,9 +2183,9 @@ func (s *SessionService) ProtectHumanWaitFromWatchdog(ctx context.Context, sessi
 	}
 	kind = strings.TrimSpace(kind)
 	switch kind {
-	case StatusKindPlan, StatusKindQuestion:
+	case StatusKindPlan, StatusKindQuestion, SessionEventSourceNativeHook:
 	default:
-		return fmt.Errorf("human wait protection kind must be %s or %s", StatusKindPlan, StatusKindQuestion)
+		return fmt.Errorf("human wait protection kind must be %s, %s, or %s", StatusKindPlan, StatusKindQuestion, SessionEventSourceNativeHook)
 	}
 	now := formatTime(s.now().UTC())
 	if _, err := s.db.ExecContext(ctx, `
@@ -2025,8 +2204,8 @@ ON CONFLICT(session_id) DO UPDATE SET
 	return nil
 }
 
-// ConsumeHumanWaitWatchdogProtection consumes the one-shot watchdog guard for a
-// session. It returns true when a pending guard was present.
+// ConsumeHumanWaitWatchdogProtection clears the watchdog guard for a session.
+// It returns true when a pending guard was present.
 func (s *SessionService) ConsumeHumanWaitWatchdogProtection(ctx context.Context, sessionID string) (bool, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {

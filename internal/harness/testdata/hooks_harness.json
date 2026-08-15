@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "flow hook harness ingest",
-            "timeout_seconds": 5
+            "timeout_seconds": 10
           }
         ]
       }
@@ -19,7 +19,7 @@
           {
             "type": "command",
             "command": "flow hook harness ingest",
-            "timeout_seconds": 5
+            "timeout_seconds": 10
           }
         ]
       }
@@ -31,7 +31,7 @@
           {
             "type": "command",
             "command": "flow hook harness ingest",
-            "timeout_seconds": 5
+            "timeout_seconds": 10
           }
         ]
       }
@@ -43,7 +43,7 @@
           {
             "type": "command",
             "command": "flow hook harness ingest",
-            "timeout_seconds": 5
+            "timeout_seconds": 10
           }
         ]
       }
@@ -54,7 +54,7 @@
           {
             "type": "command",
             "command": "flow hook harness ingest",
-            "timeout_seconds": 5
+            "timeout_seconds": 10
           }
         ]
       }
@@ -65,7 +65,7 @@
           {
             "type": "command",
             "command": "flow hook harness ingest",
-            "timeout_seconds": 5
+            "timeout_seconds": 10
           }
         ]
       }
@@ -76,7 +76,7 @@
           {
             "type": "command",
             "command": "flow hook harness ingest",
-            "timeout_seconds": 5
+            "timeout_seconds": 10
           }
         ]
       }

@@ -65,7 +65,7 @@ type Definition struct {
 	// wired, as the data source of truth for the hook-config renderer. HookEnvVar
 	// is the env var that points the harness at the generated config.
 	// HookTimeoutSeconds is the per-hook command timeout written into the config
-	// (0 omits the field; harness uses 5).
+	// (0 omits the field and uses the harness default).
 	HookEvents         []HookEvent
 	HookEnvVar         string
 	HookTimeoutSeconds int
@@ -172,8 +172,10 @@ var definitions = map[string]Definition{
 			{Name: "PostCompact", Matcher: "*"},
 			{Name: "Stop"},
 		},
-		HookEnvVar:         "FLOW_HARNESS_HOOKS",
-		HookTimeoutSeconds: 5,
+		HookEnvVar: "FLOW_HARNESS_HOOKS",
+		// Leave process-startup margin beyond flow's bounded five-second API
+		// request so harness observes the report's result.
+		HookTimeoutSeconds: 10,
 	},
 }
 

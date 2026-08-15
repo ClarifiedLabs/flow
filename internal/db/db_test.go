@@ -11,11 +11,10 @@ import (
 )
 
 // expectedProjectMigrations is the migration list a fresh project database
-// should carry under the current build tags. 0006_completion_evidence applies
-// in both modes; the tag-gated 0005_task_fts sorts before it, so the tail is
-// 0005 with FTS5 and 0006 without.
+// should carry under the current build tags. The tag-gated 0005_task_fts is
+// included only when FTS5 support is compiled in.
 func expectedProjectMigrations() []string {
-	migrations := []string{"0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log", "0006_completion_evidence"}
+	migrations := []string{"0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log", "0006_completion_evidence", "0007_session_human_wait_latches"}
 	migrations = append(migrations, filterOptionalMigrations([]string{"0005_task_fts"})...)
 	sort.Strings(migrations)
 	return migrations

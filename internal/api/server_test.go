@@ -3501,6 +3501,89 @@ func startRunningAuthorSession(t *testing.T, fixture testFixture, taskID string)
 	return running
 }
 
+func TestNativeWaitingSurvivesWatchdogRedrawGrace(t *testing.T) {
+	t.Parallel()
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Native wait watchdog race"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	running := startRunningAuthorSession(t, fixture, task.ID)
+	path := "/v2/sessions/" + running.Session.ID + "/signal"
+
+	var nativeWait sessionResponse
+	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, path, sessionSignalRequest{
+		Signal: string(coordinator.SessionSignalWaiting),
+		Source: coordinator.SessionEventSourceNativeHook,
+	}, http.StatusOK, &nativeWait)
+	if nativeWait.Session.RuntimeState != coordinator.SessionWaiting {
+		t.Fatalf("native wait state = %q, want waiting", nativeWait.Session.RuntimeState)
+	}
+
+	var redraw sessionResponse
+	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, path, sessionSignalRequest{
+		Signal: string(coordinator.SessionSignalWorking),
+		Source: coordinator.SessionEventSourceWatchdog,
+	}, http.StatusOK, &redraw)
+	if redraw.Session.RuntimeState != coordinator.SessionWaiting {
+		t.Fatalf("state after first watchdog output = %q, want waiting", redraw.Session.RuntimeState)
+	}
+
+	var duplicate sessionResponse
+	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, path, sessionSignalRequest{
+		Signal: string(coordinator.SessionSignalWorking),
+		Source: coordinator.SessionEventSourceWatchdog,
+	}, http.StatusOK, &duplicate)
+	if duplicate.Session.RuntimeState != coordinator.SessionWaiting {
+		t.Fatalf("state after duplicate watchdog output = %q, want waiting", duplicate.Session.RuntimeState)
+	}
+
+	if _, err := fixture.DB.ExecContext(ctx, `
+UPDATE session_human_wait_latches SET created_at = ? WHERE session_id = ?`,
+		time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339Nano), running.Session.ID); err != nil {
+		t.Fatalf("expire watchdog protection: %v", err)
+	}
+	var resumed sessionResponse
+	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, path, sessionSignalRequest{
+		Signal: string(coordinator.SessionSignalWorking),
+		Source: coordinator.SessionEventSourceWatchdog,
+	}, http.StatusOK, &resumed)
+	if resumed.Session.RuntimeState != coordinator.SessionWorking {
+		t.Fatalf("state after watchdog grace = %q, want working", resumed.Session.RuntimeState)
+	}
+}
+
+func TestFailedNativeWaitDoesNotLeaveWatchdogProtection(t *testing.T) {
+	t.Parallel()
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Rejected native wait"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	running := startRunningAuthorSession(t, fixture, task.ID)
+	if _, err := fixture.DB.ExecContext(ctx, `
+UPDATE sessions SET runtime_state = ?, finished_at = ? WHERE id = ?`,
+		string(coordinator.SessionFinished), time.Now().UTC().Format(time.RFC3339Nano), running.Session.ID); err != nil {
+		t.Fatalf("finish session: %v", err)
+	}
+
+	doJSONRequestAs(t, fixture.Server, running.SessionToken, http.MethodPost, "/v2/sessions/"+running.Session.ID+"/signal", sessionSignalRequest{
+		Signal: string(coordinator.SessionSignalWaiting),
+		Source: coordinator.SessionEventSourceNativeHook,
+	}, http.StatusBadRequest, nil)
+
+	var latches int
+	if err := fixture.DB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM session_human_wait_latches WHERE session_id = ?`, running.Session.ID).Scan(&latches); err != nil {
+		t.Fatalf("count watchdog protection: %v", err)
+	}
+	if latches != 0 {
+		t.Fatalf("watchdog protection rows = %d, want 0", latches)
+	}
+}
+
 func TestSessionSignalRejectsInvalidSignal(t *testing.T) {
 	t.Parallel()
 	fixture := newTestFixture(t)
