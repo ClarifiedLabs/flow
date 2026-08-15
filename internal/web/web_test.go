@@ -124,6 +124,25 @@ func TestBoardTableScrollsRatherThanWraps(t *testing.T) {
 	}
 }
 
+// The lifecycle target has long option labels. Its intrinsic width must be
+// allowed to shrink, or the native select pushes past the 300px task rail.
+func TestTaskRailLifecycleTargetFitsRail(t *testing.T) {
+	rail := readModule(t, "task-rail.module.css")
+	for _, want := range []string{
+		".control-row .select {",
+		"flex: 1 1 160px;",
+		"min-width: 0;",
+		"max-width: 100%;",
+		".control-row [data-lifecycle-target] {",
+		"width: 100%;",
+		"box-sizing: border-box;",
+	} {
+		if !strings.Contains(rail, want) {
+			t.Fatalf("task rail lifecycle selector CSS missing %q", want)
+		}
+	}
+}
+
 // TestTopbarSticksToTop keeps the navigation bar pinned above scrolling
 // content: the bar must be sticky with an opaque background and a bottom
 // border, and the shell must be a single column (no permanent nav column).

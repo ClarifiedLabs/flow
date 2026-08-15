@@ -73,6 +73,21 @@
   gap: 6px;
 }
 
+.control-row .select {
+  display: grid;
+  flex: 1 1 160px;
+  gap: 3px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.control-row [data-lifecycle-target] {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
 .facts {
   display: grid;
   grid-template-columns: 1fr 1fr;
