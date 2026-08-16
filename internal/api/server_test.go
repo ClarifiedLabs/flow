@@ -2798,6 +2798,24 @@ func TestTaskHumanReviewSettingAPI(t *testing.T) {
 	if edited.Task.RequiresHumanReview {
 		t.Fatal("edited task still requires human review")
 	}
+
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, "/v2/tasks/"+optedIn.Task.ID+"/schedule",
+		nil, http.StatusOK, nil)
+	required = true
+	var conflict errorResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPatch, "/v2/tasks/"+optedIn.Task.ID,
+		editTaskRequest{RequiresHumanReview: &required}, http.StatusConflict, &conflict)
+	if conflict.Error.Code != "workflow_conflict" {
+		t.Fatalf("scheduled review-policy edit error code = %q, want workflow_conflict", conflict.Error.Code)
+	}
+
+	invalidPriority := -1
+	var invalid errorResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPatch, "/v2/tasks/"+optedIn.Task.ID,
+		editTaskRequest{Priority: &invalidPriority}, http.StatusBadRequest, &invalid)
+	if invalid.Error.Code != "invalid_task" {
+		t.Fatalf("invalid task edit error code = %q, want invalid_task", invalid.Error.Code)
+	}
 }
 
 func TestCreateTaskWithRelationsAPI(t *testing.T) {

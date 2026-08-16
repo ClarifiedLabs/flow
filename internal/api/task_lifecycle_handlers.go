@@ -52,6 +52,8 @@ func writeTaskFeatureError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "feature_not_found", err.Error())
 	case errors.Is(err, coordinator.ErrFeatureClosed):
 		writeError(w, http.StatusConflict, "feature_closed", err.Error())
+	case errors.Is(err, coordinator.ErrWorkflowConflict):
+		writeError(w, http.StatusConflict, "workflow_conflict", err.Error())
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_task", err.Error())
 	}
