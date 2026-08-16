@@ -112,6 +112,8 @@ export function taskModel(data, workflowData, { now = Date.now() } = {}) {
     projectID: value(data, "project_id", "ProjectID") || "",
     projectName: value(data, "project_name", "ProjectName") || "",
     priority: Number(value(task, "priority", "Priority") || 0),
+    flowID: value(task, "flow_id", "FlowID") || "",
+    requiresHumanReview: Boolean(value(task, "requires_human_review", "RequiresHumanReview")),
     lifecycleState: value(task, "state", "State") || "unscheduled",
     createdBy: value(task, "created_by", "CreatedBy"),
 

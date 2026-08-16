@@ -239,6 +239,80 @@ test("the Now card renders for an open wait and stays away otherwise", () => {
   assert.equal(card.body, "Ship it?");
 });
 
+async function saveTaskHumanReviewTransition(persisted, checked, taskID) {
+  const requests = [];
+  let refreshes = 0;
+  globalThis.fetch = (path, options) => {
+    requests.push({ path: String(path), options });
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+  };
+  const model = taskModel({
+    task: {
+      id: taskID,
+      title: "Review policy task",
+      body: "Policy details",
+      priority: 2,
+      flow_id: "fl-coding",
+      requires_human_review: persisted,
+    },
+    project_id: "p-1",
+    task_detail: {},
+  });
+  const detail = mountElement(globalThis.document.body, "flow-task-detail", model);
+  await flush();
+
+  const edit = detail.querySelector("[data-task-edit]");
+  assert.ok(edit, "task detail exposes its edit action");
+  edit.click();
+  await flush();
+
+  const form = detail.querySelector("[data-task-form]");
+  assert.ok(form, "the edit action renders the existing task form");
+  assert.equal(form.dataset.taskFormMode, "edit");
+  const reviewPolicy = form.elements.requires_human_review;
+  assert.equal(reviewPolicy.hasAttribute("checked"), persisted, "the checkbox reflects the persisted policy");
+
+  // The test DOM parses value attributes but intentionally does not emulate
+  // HTMLInputElement's reflected value/checked properties, so fill the controls
+  // the same way a browser user would before submitting.
+  form.elements.title.value = "Review policy task";
+  form.elements.body.value = "Policy details";
+  form.elements.priority.value = "2";
+  form.elements.flow_id.value = "fl-coding";
+  reviewPolicy.checked = checked;
+
+  const app = {
+    setStatus() {},
+    async refresh() {
+      refreshes += 1;
+    },
+  };
+  assert.equal(await handleFormSubmit(app, { target: form, preventDefault() {} }), true);
+  await flush();
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, `/ui/api/v2/projects/p-1/tasks/${taskID}`);
+  assert.equal(requests[0].options.method, "PATCH");
+  assert.deepEqual(JSON.parse(requests[0].options.body), {
+    title: "Review policy task",
+    body: "Policy details",
+    priority: 2,
+    flow_id: "fl-coding",
+    requires_human_review: checked,
+  });
+  assert.equal(refreshes, 1, "saving refreshes task detail");
+  assert.equal(detail.querySelector("[data-task-editor]"), null, "saving returns to task detail");
+  detail.remove();
+}
+
+test("task detail edits human review policy from checked to unchecked", async () => {
+  await saveTaskHumanReviewTransition(true, false, "t-review-off");
+});
+
+test("task detail edits human review policy from unchecked to checked", async () => {
+  await saveTaskHumanReviewTransition(false, true, "t-review-on");
+});
+
 test("the Now card surfaces a review thread that blocks the merge", () => {
   const card = nowCardModel({
     wait: null,

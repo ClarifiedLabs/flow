@@ -46,6 +46,7 @@ export const FORMS = {
     if (!payload.title) return "Task title is required";
     if (mode !== "create") {
       await apiPatch(`${taskAPIBase(form.dataset.project)}/${encodeURIComponent(form.dataset.taskForm)}`, payload);
+      form.closest?.("flow-task-detail")?.finishEditing?.();
       await app.refresh();
       return "Task updated";
     }

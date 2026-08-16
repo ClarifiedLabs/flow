@@ -15,6 +15,7 @@ import { nowCardModel, tabBadges } from "../task-model.js";
 import { readDiagramMode, writeDiagramMode } from "../storage.js";
 import { renderTerminalPopOutButton, terminalSelectionHint } from "../terminal.js";
 import { TASK_TAB_KEYS } from "../config.js";
+import { renderTaskFormView } from "../task-view.js";
 import { define, FlowElement, mount } from "./base.js";
 import "./activity-feed.js";
 import { diffUnavailable } from "./change.js";
@@ -48,6 +49,7 @@ export class FlowTaskDetail extends FlowElement {
   panelKey = "";
   panelMarkup = "";
   deepLinked = false;
+  editing = false;
   renderedModel = null;
   renderedChangeKey = "";
   changeGeneration = 0;
@@ -163,10 +165,11 @@ export class FlowTaskDetail extends FlowElement {
     return `
       <flow-task-rail></flow-task-rail>
       <div class="surface">
+        ${this.editing ? this.taskEditorMarkup(model) : `
         <flow-held-panel></flow-held-panel>
         <flow-now-card></flow-now-card>
         <flow-tab-strip></flow-tab-strip>
-        <div class="panel" role="tabpanel"></div>
+        <div class="panel" role="tabpanel"></div>`}
       </div>
     `;
   }
@@ -194,6 +197,7 @@ export class FlowTaskDetail extends FlowElement {
     const rail = this.querySelector("flow-task-rail");
     if (!rail) return;
     rail.data = model;
+    if (this.editing) return;
     this.querySelector("flow-held-panel").data = model;
     this.querySelector("flow-now-card").data = { card: nowCardModel(model), model };
     const strip = this.querySelector("flow-tab-strip");
@@ -207,6 +211,19 @@ export class FlowTaskDetail extends FlowElement {
   }
 
   handleClick(event) {
+    const editTask = event.target.closest?.("[data-task-edit]");
+    if (editTask) {
+      event.preventDefault();
+      this.editing = true;
+      this.invalidate();
+      return;
+    }
+    const cancelTaskEdit = event.target.closest?.("[data-task-edit-cancel]");
+    if (cancelTaskEdit) {
+      event.preventDefault();
+      this.finishEditing();
+      return;
+    }
     const retryChange = event.target.closest?.("[data-change-retry]");
     if (retryChange) {
       event.preventDefault();
@@ -234,6 +251,32 @@ export class FlowTaskDetail extends FlowElement {
       writeDiagramMode(this.diagram);
       this.paintPanel();
     }
+  }
+
+  finishEditing() {
+    if (!this.editing) return;
+    this.editing = false;
+    this.invalidate();
+  }
+
+  taskEditorMarkup(model) {
+    const task = {
+      title: model.title,
+      body: model.body,
+      priority: model.priority,
+      flow_id: model.flowID,
+      requires_human_review: model.requiresHumanReview,
+    };
+    return `
+      <section class="section" data-task-editor>
+        <div class="section-head">
+          <h3>Edit task</h3>
+          <span class="spacer"></span>
+          <button class="button secondary" type="button" data-task-edit-cancel>Cancel</button>
+        </div>
+        ${renderTaskFormView(this.app || {}, task, { taskID: model.id, projectID: model.projectID })}
+      </section>
+    `;
   }
 
   paintPanel() {

@@ -46,6 +46,16 @@ test("task form flow select preselects the task's saved flow when editing", asyn
   assert.doesNotMatch(html, /\(default\)/);
 });
 
+test("task edit preserves its saved flow when flow options are unavailable", async () => {
+  const context = await scriptContext();
+  const app = new context.FlowApp();
+
+  const html = app.renderTaskForm({ title: "T", flow_id: "fl-unavailable" }, { taskID: "t-alpha-0001", projectID: "p-alpha" });
+
+  assert.match(html, /<option value="fl-unavailable" selected>fl-unavailable<\/option>/);
+  assert.doesNotMatch(html, /<option value="" selected>Project default<\/option>/);
+});
+
 test("wait reason phase_approval maps to a human label", async () => {
   const context = await scriptContext();
   assert.equal(context.waitReasonLabel("phase_approval"), "waiting for phase approval");

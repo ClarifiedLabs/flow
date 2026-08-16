@@ -23,6 +23,9 @@ export function renderTaskRail(model) {
       <span class="task-id">${escapeHTML(model.id)}</span>
       <h2>${escapeHTML(model.title)}</h2>
       <p class="quiet">${escapeHTML(railQuietMeta(model))}</p>
+      <div class="control-row">
+        <button class="button secondary" type="button" data-task-edit>Edit task</button>
+      </div>
     </div>
     ${renderCurrentStep(model)}
     <flow-run-spine></flow-run-spine>

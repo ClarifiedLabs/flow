@@ -1,4 +1,4 @@
-// The new-task page: the create form and its flow selector.
+// Task create/edit forms and the new-task page that hosts create mode.
 
 import { escapeAttr, escapeHTML } from "./html.js";
 import { value } from "./normalize.js";
@@ -65,7 +65,10 @@ export function flowSelectOptionsView(app, projectID, selectedFlowID) {
   const flows = cache.flows || [];
   const defaultFlowID = cache.defaultFlowID || "";
   if (!flows.length) {
-    return `<option value="" selected>Project default</option>`;
+    const selected = String(selectedFlowID || "").trim();
+    return selected
+      ? `<option value="${escapeAttr(selected)}" selected>${escapeHTML(selected)}</option>`
+      : `<option value="" selected>Project default</option>`;
   }
   const selected = String(selectedFlowID || "").trim() || defaultFlowID;
   return flows.map((flow) => {

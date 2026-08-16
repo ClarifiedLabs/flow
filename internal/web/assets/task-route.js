@@ -30,6 +30,9 @@ export async function renderTaskRoute(app, id, context, projectID = "") {
     apiGet(`${taskAPIBase(resolvedProject)}/${encodeURIComponent(id)}/threads`).catch(() => null),
     apiGet(`${taskAPIBase(resolvedProject)}/${encodeURIComponent(id)}/findings`).catch((error) => ({ error: failureMessage(error) })),
     loadWorkItemContext(app, resolvedProject, id),
+    typeof app.ensureFlows === "function"
+      ? Promise.resolve().then(() => app.ensureFlows(resolvedProject)).catch(() => null)
+      : null,
   ]);
   if (context && !app.isActiveLoad(context)) return false;
 
