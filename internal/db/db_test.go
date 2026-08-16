@@ -632,6 +632,30 @@ FROM flow_nodes WHERE id = 'fn-review'`).Scan(&taskOptIn, &skipOutcome); err != 
 	if schemaVersion != "0008_optional_human_review" {
 		t.Fatalf("upgraded schema version = %q, want 0008_optional_human_review", schemaVersion)
 	}
+
+	// Reopening the upgraded current-base database must skip 0008. Reapplying it
+	// would fail on the requires_human_review column added above.
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen upgraded optional human review schema: %v", err)
+	}
+	defer reopened.Close()
+	var optionalReviewMigrations int
+	if err := reopened.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM schema_migrations
+WHERE version = '0008_optional_human_review'`).Scan(&optionalReviewMigrations); err != nil {
+		t.Fatalf("count optional human review migrations: %v", err)
+	}
+	if optionalReviewMigrations != 1 {
+		t.Fatalf("optional human review migration count = %d, want 1", optionalReviewMigrations)
+	}
+	if err := reopened.DB().QueryRowContext(ctx,
+		`SELECT value FROM app_metadata WHERE key = 'schema_version'`).Scan(&schemaVersion); err != nil {
+		t.Fatalf("read schema version after reopen: %v", err)
+	}
+	if schemaVersion != "0008_optional_human_review" {
+		t.Fatalf("schema version after reopen = %q, want 0008_optional_human_review", schemaVersion)
+	}
 }
 
 func TestOptionalHumanReviewMigrationLeavesCustomizedBuiltinGateMandatory(t *testing.T) {
