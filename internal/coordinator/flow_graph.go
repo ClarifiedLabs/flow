@@ -716,6 +716,9 @@ func normalizeGraphInput(input FlowInput) (FlowInput, error) {
 			}
 		}
 	}
+	if err := validateTaskOptInHumanGateSkipPaths(nodes, edgesByNode); err != nil {
+		return FlowInput{}, err
+	}
 	if err := validateGraphReachability(input.StartNode, nodes, edgesByNode); err != nil {
 		return FlowInput{}, err
 	}
@@ -884,6 +887,51 @@ func reviewAgentBlocking(agent ReviewAgentConfig) bool {
 		return *agent.Blocking
 	}
 	return true
+}
+
+func validateTaskOptInHumanGateSkipPaths(nodes map[string]FlowNodeInput, edges map[string]map[string]string) error {
+	const (
+		unvisited = iota
+		visiting
+		visited
+	)
+	state := make(map[string]int, len(nodes))
+	var visit func(string) error
+	visit = func(key string) error {
+		node, ok := nodes[key]
+		if !ok || node.Kind != NodeHumanGate || node.Config.HumanGate == nil || !node.Config.HumanGate.TaskOptIn {
+			return nil
+		}
+		switch state[key] {
+		case visiting:
+			return fmt.Errorf("task-opt-in human gate skip outcomes form a cycle at %q", key)
+		case visited:
+			return nil
+		}
+		state[key] = visiting
+		target := edges[key][node.Config.HumanGate.SkipOutcome]
+		if err := visit(target); err != nil {
+			return err
+		}
+		state[key] = visited
+		return nil
+	}
+
+	keys := make([]string, 0, len(nodes))
+	for key, node := range nodes {
+		if node.Kind == NodeHumanGate && node.Config.HumanGate != nil && node.Config.HumanGate.TaskOptIn {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if state[key] == unvisited {
+			if err := visit(key); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func validateGraphReachability(start string, nodes map[string]FlowNodeInput, edges map[string]map[string]string) error {

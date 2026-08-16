@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -266,6 +267,104 @@ func TestEditTaskOmittingReviewPolicyPreservesConcurrentScheduledOptIn(t *testin
 	}
 	if node, ok := run.Snapshot.Node("review"); !ok || node.Kind != NodeHumanGate {
 		t.Fatalf("scheduled snapshot review node = %+v, found=%t", node, ok)
+	}
+}
+
+func TestFlowCreateAndUpdateRejectTaskOptInHumanGateSkipCycles(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	flows, _, _ := newWorkflowModelServices(t)
+
+	invalidFlows := []struct {
+		name  string
+		input func(string) FlowInput
+	}{
+		{
+			name: "self cycle",
+			input: func(name string) FlowInput {
+				return FlowInput{
+					Name: name, StartNode: "review",
+					Nodes: []FlowNodeInput{
+						{Key: "review", Name: "Review", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Outcomes: []string{"skip", "finish"}, TaskOptIn: true, SkipOutcome: "skip"}}},
+						{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+					},
+					Edges: []FlowEdgeInput{
+						{From: "review", Outcome: "skip", To: "review"},
+						{From: "review", Outcome: "finish", To: "done"},
+					},
+				}
+			},
+		},
+		{
+			name: "multiple gate cycle",
+			input: func(name string) FlowInput {
+				return FlowInput{
+					Name: name, StartNode: "review-a",
+					Nodes: []FlowNodeInput{
+						{Key: "review-a", Name: "Review A", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Outcomes: []string{"skip", "finish"}, TaskOptIn: true, SkipOutcome: "skip"}}},
+						{Key: "review-b", Name: "Review B", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Outcomes: []string{"skip", "finish"}, TaskOptIn: true, SkipOutcome: "skip"}}},
+						{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+					},
+					Edges: []FlowEdgeInput{
+						{From: "review-a", Outcome: "skip", To: "review-b"},
+						{From: "review-a", Outcome: "finish", To: "done"},
+						{From: "review-b", Outcome: "skip", To: "review-a"},
+						{From: "review-b", Outcome: "finish", To: "done"},
+					},
+				}
+			},
+		},
+	}
+
+	for _, tc := range invalidFlows {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := flows.Create(ctx, tc.input("create "+tc.name)); err == nil || !strings.Contains(err.Error(), "skip outcomes form a cycle") {
+				t.Fatalf("Create error = %v, want task-opt-in skip cycle rejection", err)
+			}
+
+			existing, err := flows.Create(ctx, FlowInput{
+				Name: "update " + tc.name, StartNode: "done",
+				Nodes: []FlowNodeInput{{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}}},
+			})
+			if err != nil {
+				t.Fatalf("create update target: %v", err)
+			}
+			if _, err := flows.Update(ctx, existing.ID, tc.input(existing.Name)); err == nil || !strings.Contains(err.Error(), "skip outcomes form a cycle") {
+				t.Fatalf("Update error = %v, want task-opt-in skip cycle rejection", err)
+			}
+		})
+	}
+}
+
+func TestWorkflowScheduleAcceptsAcyclicTaskOptInHumanGateChain(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	flows, tasks, runs := newWorkflowModelServices(t)
+	flow, err := flows.Create(ctx, FlowInput{
+		Name: "optional human review chain", StartNode: "review-a",
+		Nodes: []FlowNodeInput{
+			{Key: "review-a", Name: "Review A", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Outcomes: []string{"approved"}, TaskOptIn: true, SkipOutcome: "approved"}}},
+			{Key: "review-b", Name: "Review B", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Outcomes: []string{"approved"}, TaskOptIn: true, SkipOutcome: "approved"}}},
+			{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+		},
+		Edges: []FlowEdgeInput{
+			{From: "review-a", Outcome: "approved", To: "review-b"},
+			{From: "review-b", Outcome: "approved", To: "done"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create acyclic optional-review flow: %v", err)
+	}
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Ship through optional reviews", FlowID: flow.ID})
+	if err != nil {
+		t.Fatalf("create default opt-out task: %v", err)
+	}
+	run, err := runs.Schedule(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("schedule default opt-out task: %v", err)
+	}
+	if run.Snapshot.StartNode != "done" || len(run.Snapshot.Nodes) != 1 || run.Snapshot.Nodes[0].Key != "done" {
+		t.Fatalf("projected snapshot = start %q nodes %+v, want both optional gates bypassed", run.Snapshot.StartNode, run.Snapshot.Nodes)
 	}
 }
 
