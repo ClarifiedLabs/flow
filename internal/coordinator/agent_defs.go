@@ -20,6 +20,8 @@ var (
 	ErrAgentDefInUse     = errors.New("agent definition is referenced by a flow")
 )
 
+const agentDefsRevisionMetadataKey = "agent_defs_revision"
+
 // AgentDef is a reusable agent configuration: which harness to launch, the
 // model/reasoning-effort selection, and the role-instruction prompt. Project
 // catalogs include coordinator-global definitions unless a project definition
@@ -184,20 +186,37 @@ func (s *AgentDefService) create(ctx context.Context, input AgentDefInput, built
 		return AgentDef{}, err
 	}
 
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return AgentDef{}, err
+	}
+	defer tx.Rollback()
 	now := s.now().UTC()
-	_, err = s.db.ExecContext(ctx, `
+	if err := insertAgentDefWith(ctx, tx, id, input, builtin, now); err != nil {
+		return AgentDef{}, err
+	}
+	if err := bumpAgentDefCatalogRevision(ctx, tx, now); err != nil {
+		return AgentDef{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentDef{}, err
+	}
+	return s.Get(ctx, id)
+}
+
+func insertAgentDefWith(ctx context.Context, tx *sqlitex.Tx, id string, input AgentDefInput, builtin bool, now time.Time) error {
+	_, err := tx.ExecContext(ctx, `
 INSERT INTO agent_defs (id, name, harness, model, reasoning_effort, prompt, builtin, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, input.Name, input.Harness, input.Model, input.ReasoningEffort, input.Prompt,
 		boolToInt(builtin), sqlitex.FormatTime(now), sqlitex.FormatTime(now))
 	if err != nil {
 		if isUniqueViolation(err, "agent_defs.name") {
-			return AgentDef{}, ErrAgentDefNameTaken
+			return ErrAgentDefNameTaken
 		}
-		return AgentDef{}, fmt.Errorf("insert agent def: %w", err)
+		return fmt.Errorf("insert agent def: %w", err)
 	}
-
-	return s.Get(ctx, id)
+	return nil
 }
 
 func (s *AgentDefService) Update(ctx context.Context, id string, input AgentDefInput) (AgentDef, error) {
@@ -207,18 +226,25 @@ func (s *AgentDefService) Update(ctx context.Context, id string, input AgentDefI
 		return AgentDef{}, err
 	}
 
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return AgentDef{}, err
+	}
+	defer tx.Rollback()
+	now := s.now().UTC()
+	result, err := tx.ExecContext(ctx, `
 UPDATE agent_defs
 SET name = ?, harness = ?, model = ?, reasoning_effort = ?, prompt = ?, updated_at = ?
 WHERE id = ?`,
 		input.Name, input.Harness, input.Model, input.ReasoningEffort, input.Prompt,
-		sqlitex.FormatTime(s.now().UTC()), id)
+		sqlitex.FormatTime(now), id)
 	if err != nil {
 		if isUniqueViolation(err, "agent_defs.name") {
 			return AgentDef{}, ErrAgentDefNameTaken
 		}
 		return AgentDef{}, fmt.Errorf("update agent def: %w", err)
 	}
+	updatedID := id
 	affected, err := result.RowsAffected()
 	if err != nil {
 		return AgentDef{}, err
@@ -237,10 +263,21 @@ WHERE id = ?`,
 		if input.Name != inherited.Name {
 			return AgentDef{}, errors.New("an inherited agent definition override must keep the inherited name")
 		}
-		return s.Create(ctx, input)
+		updatedID, err = randomPrefixedID("ad")
+		if err != nil {
+			return AgentDef{}, err
+		}
+		if err := insertAgentDefWith(ctx, tx, updatedID, input, false, now); err != nil {
+			return AgentDef{}, err
+		}
 	}
-
-	return s.getLocal(ctx, "id = ?", id)
+	if err := bumpAgentDefCatalogRevision(ctx, tx, now); err != nil {
+		return AgentDef{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentDef{}, err
+	}
+	return s.getLocal(ctx, "id = ?", updatedID)
 }
 
 func (s *AgentDefService) Delete(ctx context.Context, id string) error {
@@ -257,7 +294,12 @@ func (s *AgentDefService) Delete(ctx context.Context, id string) error {
 			return ErrAgentDefInUse
 		}
 	}
-	result, err := s.db.ExecContext(ctx, `DELETE FROM agent_defs WHERE id = ?`, id)
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `DELETE FROM agent_defs WHERE id = ?`, id)
 	if err != nil {
 		if isForeignKeyViolation(err) {
 			return ErrAgentDefInUse
@@ -271,7 +313,10 @@ func (s *AgentDefService) Delete(ctx context.Context, id string) error {
 	if affected == 0 {
 		return ErrAgentDefNotFound
 	}
-	return nil
+	if err := bumpAgentDefCatalogRevision(ctx, tx, s.now().UTC()); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // IsReferenced reports whether this project's flows directly reference an
@@ -376,6 +421,40 @@ type agentDefQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
+type agentDefExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func agentDefCatalogRevision(ctx context.Context, queryer agentDefQueryer) (int64, error) {
+	var revision int64
+	if err := queryer.QueryRowContext(ctx,
+		`SELECT CAST(value AS INTEGER) FROM app_metadata WHERE key = ?`, agentDefsRevisionMetadataKey).Scan(&revision); err != nil {
+		return 0, fmt.Errorf("read agent definition catalog revision: %w", err)
+	}
+	if revision < 1 {
+		return 0, errors.New("agent definition catalog revision must be positive")
+	}
+	return revision, nil
+}
+
+func bumpAgentDefCatalogRevision(ctx context.Context, execer agentDefExecer, now time.Time) error {
+	result, err := execer.ExecContext(ctx, `
+UPDATE app_metadata
+SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT), updated_at = ?
+WHERE key = ?`, sqlitex.FormatTime(now), agentDefsRevisionMetadataKey)
+	if err != nil {
+		return fmt.Errorf("advance agent definition catalog revision: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated != 1 {
+		return errors.New("agent definition catalog revision metadata is missing")
+	}
+	return nil
+}
+
 func (s *AgentDefService) resolveWith(ctx context.Context, local agentDefQueryer, id string) (AgentDef, error) {
 	def, err := getAgentDefFrom(ctx, local, "id = ?", id)
 	if err == nil || !errors.Is(err, ErrAgentDefNotFound) || s.inherited == nil {
@@ -394,6 +473,89 @@ func (s *AgentDefService) resolveWith(ctx context.Context, local agentDefQueryer
 	}
 	inherited.Inherited = true
 	return inherited, nil
+}
+
+type agentDefSnapshotResolver struct {
+	local             agentDefQueryer
+	inheritedTx       *sql.Tx
+	localRevision     int64
+	inheritedRevision int64
+}
+
+// snapshotResolver pins each effective catalog to one database snapshot. The
+// project catalog shares the flow read transaction; the inherited catalog gets
+// one read transaction for all nodes rather than one independent read per node.
+func (s *AgentDefService) snapshotResolver(ctx context.Context, local agentDefQueryer) (*agentDefSnapshotResolver, error) {
+	localRevision, err := agentDefCatalogRevision(ctx, local)
+	if err != nil {
+		return nil, err
+	}
+	resolver := &agentDefSnapshotResolver{local: local, localRevision: localRevision}
+	if s.inherited == nil {
+		return resolver, nil
+	}
+	resolver.inheritedTx, err = s.inherited.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	resolver.inheritedRevision, err = agentDefCatalogRevision(ctx, resolver.inheritedTx)
+	if err != nil {
+		_ = resolver.inheritedTx.Rollback()
+		return nil, err
+	}
+	return resolver, nil
+}
+
+func (r *agentDefSnapshotResolver) Resolve(ctx context.Context, id string) (AgentDef, error) {
+	def, err := getAgentDefFrom(ctx, r.local, "id = ?", strings.TrimSpace(id))
+	if err == nil || !errors.Is(err, ErrAgentDefNotFound) || r.inheritedTx == nil {
+		return def, err
+	}
+	inherited, err := getAgentDefFrom(ctx, r.inheritedTx, "id = ?", strings.TrimSpace(id))
+	if err != nil {
+		return AgentDef{}, err
+	}
+	override, overrideErr := getAgentDefFrom(ctx, r.local, "name = ?", inherited.Name)
+	if overrideErr == nil {
+		return override, nil
+	}
+	if !errors.Is(overrideErr, ErrAgentDefNotFound) {
+		return AgentDef{}, overrideErr
+	}
+	inherited.Inherited = true
+	return inherited, nil
+}
+
+func (r *agentDefSnapshotResolver) Close() {
+	if r.inheritedTx != nil {
+		_ = r.inheritedTx.Rollback()
+	}
+}
+
+// lockInheritedCatalogRevision takes the inherited catalog's writer lock and
+// validates the resolved revision. Holding it through the project commit makes
+// the cross-database currentness check atomic with run persistence.
+func (s *AgentDefService) lockInheritedCatalogRevision(ctx context.Context, expected int64) (*sqlitex.Tx, bool, error) {
+	if s.inherited == nil {
+		return nil, expected == 0, nil
+	}
+	if expected < 1 {
+		return nil, false, nil
+	}
+	tx, err := sqlitex.BeginImmediate(ctx, s.inherited.db)
+	if err != nil {
+		return nil, false, err
+	}
+	current, err := agentDefCatalogRevision(ctx, tx)
+	if err != nil {
+		tx.Rollback()
+		return nil, false, err
+	}
+	if current != expected {
+		tx.Rollback()
+		return nil, false, nil
+	}
+	return tx, true, nil
 }
 
 func (s *AgentDefService) getLocal(ctx context.Context, where string, arg any) (AgentDef, error) {

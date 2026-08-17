@@ -19,6 +19,8 @@ var (
 	ErrWorkflowRunNotFound = errors.New("workflow run not found")
 	ErrNoActiveWorkflowRun = errors.New("task has no active workflow run")
 	ErrWorkflowConflict    = errors.New("workflow state conflict")
+
+	errSnapshotRevisionChanged = errors.New("flow snapshot dependencies changed while scheduling")
 )
 
 type WorkflowRunState string
@@ -241,6 +243,16 @@ type WorkflowRunService struct {
 	// through the project bundle and stays nil in tests that construct the
 	// service directly; scheduling then skips the rebase-block link.
 	Features *FeatureService
+
+	// scheduleSnapshotResolvedTestHook is a test seam invoked after snapshot
+	// resolution and before the scheduling transaction. Concurrency tests use it
+	// to update the selected flow in the former stale-snapshot window.
+	scheduleSnapshotResolvedTestHook func(FlowSnapshot)
+
+	// scheduleBeforeProjectLockTestHook is invoked immediately before scheduling
+	// takes the project writer lock. Lock-order tests hold that lock and verify the
+	// inherited catalog remains writable until scheduling acquires project first.
+	scheduleBeforeProjectLockTestHook func()
 }
 
 func NewWorkflowRunService(db *sql.DB, flows *FlowService, tasks *TaskService) *WorkflowRunService {
@@ -307,74 +319,130 @@ func (s *WorkflowRunService) ScheduleAs(ctx context.Context, taskID string, acto
 			return WorkflowRun{}, fmt.Errorf("gate task on running feature rebase: %w", err)
 		}
 	}
-	snapshot, err := s.flows.ResolveSnapshot(ctx, task.FlowID)
-	if err != nil {
-		return WorkflowRun{}, err
+	for {
+		snapshot, err := s.flows.ResolveSnapshot(ctx, task.FlowID)
+		if err != nil {
+			return WorkflowRun{}, err
+		}
+		snapshot, err = snapshotForTaskHumanReview(snapshot, task.RequiresHumanReview)
+		if err != nil {
+			return WorkflowRun{}, err
+		}
+		if len(snapshot.Nodes) == 0 || strings.TrimSpace(snapshot.StartNode) == "" {
+			return WorkflowRun{}, errors.New("selected flow is not a graph workflow")
+		}
+		if s.scheduleSnapshotResolvedTestHook != nil {
+			s.scheduleSnapshotResolvedTestHook(snapshot)
+		}
+
+		id, err := s.persistScheduledRun(ctx, task, snapshot, actor)
+		if errors.Is(err, errSnapshotRevisionChanged) {
+			continue
+		}
+		if err != nil {
+			return WorkflowRun{}, err
+		}
+		return s.Get(ctx, id)
 	}
-	snapshot, err = snapshotForTaskHumanReview(snapshot, task.RequiresHumanReview)
-	if err != nil {
-		return WorkflowRun{}, err
-	}
-	if len(snapshot.Nodes) == 0 || strings.TrimSpace(snapshot.StartNode) == "" {
-		return WorkflowRun{}, errors.New("selected flow is not a graph workflow")
-	}
+}
+
+func (s *WorkflowRunService) persistScheduledRun(ctx context.Context, task Task, snapshot FlowSnapshot, actor Actor) (string, error) {
 	snapshotJSON, err := json.Marshal(snapshot)
 	if err != nil {
-		return WorkflowRun{}, fmt.Errorf("encode flow snapshot: %w", err)
+		return "", fmt.Errorf("encode flow snapshot: %w", err)
 	}
 	now := s.now().UTC()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	// Project mutations that resolve inherited definitions already lock project
+	// before global. Scheduling follows the same order to avoid a cross-database
+	// connection-pool deadlock while holding both revisions stable.
+	if s.scheduleBeforeProjectLockTestHook != nil {
+		s.scheduleBeforeProjectLockTestHook()
+	}
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
 	if err != nil {
-		return WorkflowRun{}, err
+		return "", err
 	}
 	defer tx.Rollback()
-	if err := claimTaskForScheduling(ctx, tx, task, now); err != nil {
-		return WorkflowRun{}, err
+	inheritedCatalogLock, current, err := s.flows.lockInheritedAgentDefsRevision(ctx, snapshot.InheritedAgentDefsRevision)
+	if err != nil {
+		return "", fmt.Errorf("lock inherited agent definitions for scheduling: %w", err)
+	}
+	if !current {
+		return "", errSnapshotRevisionChanged
+	}
+	if inheritedCatalogLock != nil {
+		defer inheritedCatalogLock.Rollback()
+	}
+	if err := claimTaskForScheduling(ctx, tx, task, snapshot, now); err != nil {
+		return "", err
 	}
 	var sequence int
 	if err := tx.QueryRowContext(ctx, `
-SELECT COALESCE(MAX(run_sequence), 0) + 1 FROM workflow_runs WHERE task_id = ?`, taskID).Scan(&sequence); err != nil {
-		return WorkflowRun{}, err
+SELECT COALESCE(MAX(run_sequence), 0) + 1 FROM workflow_runs WHERE task_id = ?`, task.ID).Scan(&sequence); err != nil {
+		return "", err
 	}
 	id, err := randomPrefixedID("wr")
 	if err != nil {
-		return WorkflowRun{}, err
+		return "", err
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO workflow_runs (
 	id, task_id, run_sequence, flow_id, flow_snapshot_json, state,
 	current_node_key, transition_budget, review_cycle_budget, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, taskID, sequence,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, task.ID, sequence,
 		sqlitex.NullableNonEmptyString(snapshot.FlowID), string(snapshotJSON), string(WorkflowRunScheduled),
 		snapshot.StartNode, snapshot.TransitionBudget, s.reviewAuthorCycleLimit, sqlitex.FormatTime(now)); err != nil {
-		return WorkflowRun{}, fmt.Errorf("insert workflow run: %w", err)
+		return "", fmt.Errorf("insert workflow run: %w", err)
 	}
 	if err := insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
-		TaskID: taskID, WorkflowRunID: id, ToTaskState: string(LifecycleScheduled),
+		TaskID: task.ID, WorkflowRunID: id, ToTaskState: string(LifecycleScheduled),
 		ToNodeKey: snapshot.StartNode, EventKind: "task_scheduled", Actor: string(actor), CreatedAt: now,
 	}); err != nil {
-		return WorkflowRun{}, err
+		return "", err
 	}
-	if err := tx.Commit(); err != nil {
-		return WorkflowRun{}, err
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
 	}
-	return s.Get(ctx, id)
+	return id, nil
 }
 
-// claimTaskForScheduling atomically freezes the editable task settings used to
-// build the workflow snapshot. A concurrent edit cannot leave a task claiming
-// human review while its newly persisted run contains a bypassed review gate.
-func claimTaskForScheduling(ctx context.Context, tx *sql.Tx, task Task, now time.Time) error {
+// claimTaskForScheduling atomically freezes the editable task settings and the
+// project-owned revisions used to build the workflow snapshot. Once this write
+// succeeds, the transaction's writer lock prevents the selected flow or local
+// agent catalog from changing before the run is persisted. The inherited catalog
+// lock is held by persistScheduledRun across this transaction.
+type workflowSchedulingTx interface {
+	agentDefQueryer
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func claimTaskForScheduling(ctx context.Context, tx workflowSchedulingTx, task Task, snapshot FlowSnapshot, now time.Time) error {
+	if snapshot.FlowRevision < 1 || snapshot.AgentDefsRevision < 1 {
+		return errors.New("resolved flow snapshot has incomplete revisions")
+	}
+	if task.FlowID != "" && task.FlowID != snapshot.FlowID {
+		return fmt.Errorf("%w: task workflow settings changed while scheduling", ErrWorkflowConflict)
+	}
 	result, err := tx.ExecContext(ctx, `
 UPDATE tasks
 SET lifecycle_state = ?, done_resolution = NULL, done_at = NULL, updated_at = ?
 WHERE id = ?
   AND lifecycle_state IS NULL
   AND requires_human_review = ?
-  AND COALESCE(flow_id, '') = ?`,
+  AND COALESCE(flow_id, '') = ?
+  AND EXISTS (SELECT 1 FROM flows WHERE id = ? AND revision = ?)
+  AND EXISTS (
+	SELECT 1 FROM app_metadata
+	WHERE key = ? AND CAST(value AS INTEGER) = ?
+  )
+  AND (? <> '' OR EXISTS (
+	SELECT 1 FROM app_metadata WHERE key = ? AND value = ?
+  ))`,
 		string(LifecycleScheduled), sqlitex.FormatTime(now), task.ID,
-		task.RequiresHumanReview, task.FlowID)
+		task.RequiresHumanReview, task.FlowID, snapshot.FlowID, snapshot.FlowRevision,
+		agentDefsRevisionMetadataKey, snapshot.AgentDefsRevision,
+		task.FlowID, defaultFlowMetadataKey, snapshot.FlowID)
 	if err != nil {
 		return fmt.Errorf("claim task for scheduling: %w", err)
 	}
@@ -387,13 +455,47 @@ WHERE id = ?
 	}
 
 	var state sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT lifecycle_state FROM tasks WHERE id = ?`, task.ID).Scan(&state); err != nil {
+	var requiresHumanReview bool
+	var flowID string
+	if err := tx.QueryRowContext(ctx, `
+SELECT lifecycle_state, requires_human_review, COALESCE(flow_id, '')
+FROM tasks WHERE id = ?`, task.ID).Scan(&state, &requiresHumanReview, &flowID); err != nil {
 		return err
 	}
 	if state.Valid {
 		return fmt.Errorf("%w: task is already %s", ErrWorkflowConflict, state.String)
 	}
-	return fmt.Errorf("%w: task workflow settings changed while scheduling", ErrWorkflowConflict)
+	if requiresHumanReview != task.RequiresHumanReview || flowID != task.FlowID {
+		return fmt.Errorf("%w: task workflow settings changed while scheduling", ErrWorkflowConflict)
+	}
+
+	var revision int64
+	if err := tx.QueryRowContext(ctx, `SELECT revision FROM flows WHERE id = ?`, snapshot.FlowID).Scan(&revision); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errSnapshotRevisionChanged
+		}
+		return err
+	}
+	if revision != snapshot.FlowRevision {
+		return errSnapshotRevisionChanged
+	}
+	localAgentDefsRevision, err := agentDefCatalogRevision(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if localAgentDefsRevision != snapshot.AgentDefsRevision {
+		return errSnapshotRevisionChanged
+	}
+	if task.FlowID == "" {
+		defaultID, err := defaultFlowIDWith(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if defaultID != snapshot.FlowID {
+			return errSnapshotRevisionChanged
+		}
+	}
+	return fmt.Errorf("%w: task could not be claimed for scheduling", ErrWorkflowConflict)
 }
 
 func (s *WorkflowRunService) Get(ctx context.Context, runID string) (WorkflowRun, error) {

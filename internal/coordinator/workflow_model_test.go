@@ -2,13 +2,16 @@ package coordinator
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
+	"github.com/ClarifiedLabs/flow/internal/sqlitex"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
@@ -183,7 +186,7 @@ func TestClaimTaskForSchedulingRejectsStaleHumanReviewChoice(t *testing.T) {
 		t.Fatalf("begin scheduling transaction: %v", err)
 	}
 	defer tx.Rollback()
-	if err := claimTaskForScheduling(ctx, tx, stale, time.Now().UTC()); !errors.Is(err, ErrWorkflowConflict) {
+	if err := claimTaskForScheduling(ctx, tx, stale, FlowSnapshot{FlowID: "fl-stale", FlowRevision: 1, AgentDefsRevision: 1}, time.Now().UTC()); !errors.Is(err, ErrWorkflowConflict) {
 		t.Fatalf("claim with stale review setting error = %v, want workflow conflict", err)
 	}
 	if err := tx.Rollback(); err != nil {
@@ -196,6 +199,352 @@ func TestClaimTaskForSchedulingRejectsStaleHumanReviewChoice(t *testing.T) {
 	}
 	if !current.RequiresHumanReview || current.State != nil {
 		t.Fatalf("task after stale claim = requires review %t state %v, want true and unscheduled", current.RequiresHumanReview, current.State)
+	}
+}
+
+func TestWorkflowScheduleRetriesWhenFlowRevisionChanges(t *testing.T) {
+	flowInput := func(name string, withMandatoryGate bool) FlowInput {
+		input := FlowInput{
+			Name:      name,
+			StartNode: "done",
+			Nodes: []FlowNodeInput{
+				{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+			},
+		}
+		if withMandatoryGate {
+			input.StartNode = "approval"
+			input.Nodes = append([]FlowNodeInput{
+				{Key: "approval", Name: "Mandatory approval", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Outcomes: []string{"approved"}}}},
+			}, input.Nodes...)
+			input.Edges = []FlowEdgeInput{{From: "approval", Outcome: "approved", To: "done"}}
+		}
+		return input
+	}
+
+	for _, tc := range []struct {
+		name           string
+		initialHasGate bool
+		updatedHasGate bool
+	}{
+		{name: "adds mandatory gate", initialHasGate: false, updatedHasGate: true},
+		{name: "removes mandatory gate", initialHasGate: true, updatedHasGate: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			flows, tasks, runs := newWorkflowModelServices(t)
+			flow, err := flows.Create(ctx, flowInput("revision race", tc.initialHasGate))
+			if err != nil {
+				t.Fatalf("create flow: %v", err)
+			}
+			task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Schedule current flow", FlowID: flow.ID})
+			if err != nil {
+				t.Fatalf("create task: %v", err)
+			}
+
+			resolved := make(chan FlowSnapshot, 1)
+			resumeScheduling := make(chan struct{})
+			var resolutionCount atomic.Int32
+			runs.scheduleSnapshotResolvedTestHook = func(snapshot FlowSnapshot) {
+				if resolutionCount.Add(1) == 1 {
+					resolved <- snapshot
+					<-resumeScheduling
+				}
+			}
+			type scheduleResult struct {
+				run WorkflowRun
+				err error
+			}
+			scheduled := make(chan scheduleResult, 1)
+			go func() {
+				run, scheduleErr := runs.Schedule(ctx, task.ID)
+				scheduled <- scheduleResult{run: run, err: scheduleErr}
+			}()
+
+			var stale FlowSnapshot
+			select {
+			case stale = <-resolved:
+			case result := <-scheduled:
+				t.Fatalf("scheduling finished before revision update: run=%+v err=%v", result.run, result.err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for initial snapshot resolution")
+			}
+			updated, updateErr := flows.Update(ctx, flow.ID, flowInput(flow.Name, tc.updatedHasGate))
+			close(resumeScheduling)
+			if updateErr != nil {
+				t.Fatalf("update flow during scheduling: %v", updateErr)
+			}
+
+			var result scheduleResult
+			select {
+			case result = <-scheduled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for scheduling retry")
+			}
+			if result.err != nil {
+				t.Fatalf("schedule after flow update: %v", result.err)
+			}
+			if stale.FlowRevision != flow.Revision {
+				t.Fatalf("initial snapshot revision = %d, want %d", stale.FlowRevision, flow.Revision)
+			}
+			if updated.Revision <= stale.FlowRevision {
+				t.Fatalf("updated revision = %d, want greater than stale revision %d", updated.Revision, stale.FlowRevision)
+			}
+			if resolutionCount.Load() < 2 {
+				t.Fatalf("snapshot resolutions = %d, want retry after revision changed", resolutionCount.Load())
+			}
+			if result.run.Snapshot.FlowRevision != updated.Revision {
+				t.Fatalf("committed snapshot revision = %d, want current revision %d", result.run.Snapshot.FlowRevision, updated.Revision)
+			}
+			_, committedHasGate := result.run.Snapshot.Node("approval")
+			if committedHasGate != tc.updatedHasGate {
+				t.Fatalf("committed snapshot has mandatory gate = %t, want %t", committedHasGate, tc.updatedHasGate)
+			}
+			var runCount int
+			if err := runs.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM workflow_runs WHERE task_id = ?`, task.ID).Scan(&runCount); err != nil {
+				t.Fatalf("count committed runs: %v", err)
+			}
+			if runCount != 1 {
+				t.Fatalf("committed runs = %d, want exactly one current snapshot", runCount)
+			}
+		})
+	}
+}
+
+func TestWorkflowScheduleRetriesWhenAgentDefinitionChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		catalog  string
+		override bool
+	}{
+		{name: "local definition update", catalog: "local"},
+		{name: "project override creation", catalog: "inherited", override: true},
+		{name: "inherited definition update", catalog: "inherited"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			root := t.TempDir()
+			projectPath := filepath.Join(root, "project.db")
+			projectStore, err := flowdb.Open(ctx, projectPath)
+			if err != nil {
+				t.Fatalf("open project database: %v", err)
+			}
+			t.Cleanup(func() { _ = projectStore.Close() })
+
+			var globals *AgentDefService
+			var projectDefs *AgentDefService
+			var agent AgentDef
+			if tc.catalog == "inherited" {
+				globalStore, openErr := flowdb.OpenGlobal(ctx, filepath.Join(root, "global.db"))
+				if openErr != nil {
+					t.Fatalf("open global database: %v", openErr)
+				}
+				t.Cleanup(func() { _ = globalStore.Close() })
+				globals = NewGlobalAgentDefService(globalStore.DB())
+				agent, err = globals.Create(ctx, AgentDefInput{Name: "schedule-author", Harness: "harness", Model: "old-model", Prompt: "old prompt"})
+				projectDefs = NewInheritedAgentDefService(projectStore.DB(), globals)
+			} else {
+				projectDefs = NewAgentDefService(projectStore.DB())
+				agent, err = projectDefs.Create(ctx, AgentDefInput{Name: "schedule-author", Harness: "harness", Model: "old-model", Prompt: "old prompt"})
+			}
+			if err != nil {
+				t.Fatalf("create agent definition: %v", err)
+			}
+
+			flows := NewFlowServiceWithAgentDefs(projectStore.DB(), projectDefs)
+			tasks := NewTaskService(projectStore.DB(), "p-test")
+			runs := NewWorkflowRunService(projectStore.DB(), flows, tasks)
+			flow, err := flows.Create(ctx, FlowInput{
+				Name: "agent revision race", StartNode: "implement",
+				Nodes: []FlowNodeInput{
+					{Key: "implement", Name: "Implement", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: agent.ID, Workspace: WorkspaceChange, Artifact: ArtifactChange}}},
+					{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+				},
+				Edges: []FlowEdgeInput{{From: "implement", Outcome: "completed", To: "done"}},
+			})
+			if err != nil {
+				t.Fatalf("create flow: %v", err)
+			}
+			task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Schedule current agent", FlowID: flow.ID})
+			if err != nil {
+				t.Fatalf("create task: %v", err)
+			}
+
+			resolved := make(chan FlowSnapshot, 1)
+			resumeScheduling := make(chan struct{})
+			var resolutionCount atomic.Int32
+			runs.scheduleSnapshotResolvedTestHook = func(snapshot FlowSnapshot) {
+				if resolutionCount.Add(1) == 1 {
+					resolved <- snapshot
+					<-resumeScheduling
+				}
+			}
+			type scheduleResult struct {
+				run WorkflowRun
+				err error
+			}
+			scheduled := make(chan scheduleResult, 1)
+			go func() {
+				run, scheduleErr := runs.Schedule(ctx, task.ID)
+				scheduled <- scheduleResult{run: run, err: scheduleErr}
+			}()
+
+			var stale FlowSnapshot
+			select {
+			case stale = <-resolved:
+			case result := <-scheduled:
+				t.Fatalf("scheduling finished before agent update: run=%+v err=%v", result.run, result.err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for initial snapshot resolution")
+			}
+
+			updatedInput := AgentDefInput{Name: agent.Name, Harness: "harness", Model: "new-model", Prompt: "new prompt"}
+			if tc.catalog == "local" || tc.override {
+				_, err = projectDefs.Update(ctx, agent.ID, updatedInput)
+			} else {
+				_, err = globals.Update(ctx, agent.ID, updatedInput)
+			}
+			close(resumeScheduling)
+			if err != nil {
+				t.Fatalf("update agent definition during scheduling: %v", err)
+			}
+
+			var result scheduleResult
+			select {
+			case result = <-scheduled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for scheduling retry")
+			}
+			if result.err != nil {
+				t.Fatalf("schedule after agent update: %v", result.err)
+			}
+			if resolutionCount.Load() < 2 {
+				t.Fatalf("snapshot resolutions = %d, want retry after agent definition changed", resolutionCount.Load())
+			}
+			if result.run.Snapshot.AgentDefsRevision < stale.AgentDefsRevision || result.run.Snapshot.InheritedAgentDefsRevision < stale.InheritedAgentDefsRevision {
+				t.Fatalf("committed catalog revisions = local %d inherited %d, stale = local %d inherited %d",
+					result.run.Snapshot.AgentDefsRevision, result.run.Snapshot.InheritedAgentDefsRevision,
+					stale.AgentDefsRevision, stale.InheritedAgentDefsRevision)
+			}
+			if result.run.Snapshot.AgentDefsRevision == stale.AgentDefsRevision && result.run.Snapshot.InheritedAgentDefsRevision == stale.InheritedAgentDefsRevision {
+				t.Fatal("committed snapshot retained both stale agent catalog revisions")
+			}
+			node, ok := result.run.Snapshot.Node("implement")
+			if !ok || node.Config.Agent == nil {
+				t.Fatalf("committed implement node = %+v, ok=%t", node, ok)
+			}
+			if node.Config.Agent.Agent.Model != "new-model" || node.Config.Agent.Agent.Prompt != "new prompt" {
+				t.Fatalf("committed agent = %+v, want updated model and prompt", node.Config.Agent.Agent)
+			}
+			var runCount int
+			if err := runs.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM workflow_runs WHERE task_id = ?`, task.ID).Scan(&runCount); err != nil {
+				t.Fatalf("count committed runs: %v", err)
+			}
+			if runCount != 1 {
+				t.Fatalf("committed runs = %d, want exactly one current snapshot", runCount)
+			}
+		})
+	}
+}
+
+func TestWorkflowScheduleLocksProjectBeforeInheritedCatalog(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	globalStore, err := flowdb.OpenGlobal(ctx, filepath.Join(root, "global.db"))
+	if err != nil {
+		t.Fatalf("open global database: %v", err)
+	}
+	t.Cleanup(func() { _ = globalStore.Close() })
+	projectPath := filepath.Join(root, "project.db")
+	projectStore, err := flowdb.Open(ctx, projectPath)
+	if err != nil {
+		t.Fatalf("open project database: %v", err)
+	}
+	t.Cleanup(func() { _ = projectStore.Close() })
+
+	globals := NewGlobalAgentDefService(globalStore.DB())
+	agent, err := globals.Create(ctx, AgentDefInput{Name: "lock-order-author", Harness: "harness", Prompt: "old prompt"})
+	if err != nil {
+		t.Fatalf("create global agent definition: %v", err)
+	}
+	projectDefs := NewInheritedAgentDefService(projectStore.DB(), globals)
+	flows := NewFlowServiceWithAgentDefs(projectStore.DB(), projectDefs)
+	flow, err := flows.Create(ctx, FlowInput{
+		Name: "lock order flow", StartNode: "implement",
+		Nodes: []FlowNodeInput{
+			{Key: "implement", Name: "Implement", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: agent.ID, Workspace: WorkspaceChange, Artifact: ArtifactChange}}},
+			{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+		},
+		Edges: []FlowEdgeInput{{From: "implement", Outcome: "completed", To: "done"}},
+	})
+	if err != nil {
+		t.Fatalf("create flow: %v", err)
+	}
+	tasks := NewTaskService(projectStore.DB(), "p-test")
+	runs := NewWorkflowRunService(projectStore.DB(), flows, tasks)
+	task, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Schedule without lock inversion", FlowID: flow.ID})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	lockDB, err := sql.Open("sqlite3", projectPath)
+	if err != nil {
+		t.Fatalf("open independent project lock connection: %v", err)
+	}
+	t.Cleanup(func() { _ = lockDB.Close() })
+	projectLock, err := sqlitex.BeginImmediate(ctx, lockDB)
+	if err != nil {
+		t.Fatalf("hold project writer lock: %v", err)
+	}
+	defer projectLock.Rollback()
+	beforeProjectLock := make(chan struct{})
+	runs.scheduleBeforeProjectLockTestHook = func() {
+		runs.scheduleBeforeProjectLockTestHook = nil
+		close(beforeProjectLock)
+	}
+	type scheduleResult struct {
+		run WorkflowRun
+		err error
+	}
+	scheduled := make(chan scheduleResult, 1)
+	go func() {
+		run, scheduleErr := runs.Schedule(ctx, task.ID)
+		scheduled <- scheduleResult{run: run, err: scheduleErr}
+	}()
+	select {
+	case <-beforeProjectLock:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for scheduling to attempt the project lock")
+	}
+
+	globalUpdated := make(chan error, 1)
+	go func() {
+		_, updateErr := globals.Update(ctx, agent.ID, AgentDefInput{Name: agent.Name, Harness: "harness", Prompt: "new prompt"})
+		globalUpdated <- updateErr
+	}()
+	select {
+	case updateErr := <-globalUpdated:
+		if updateErr != nil {
+			t.Fatalf("update inherited definition while scheduling waits for project: %v", updateErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("inherited catalog was locked before scheduling acquired the project lock")
+	}
+	projectLock.Rollback()
+
+	select {
+	case result := <-scheduled:
+		if result.err != nil {
+			t.Fatalf("schedule after inherited update: %v", result.err)
+		}
+		node, ok := result.run.Snapshot.Node("implement")
+		if !ok || node.Config.Agent == nil || node.Config.Agent.Agent.Prompt != "new prompt" {
+			t.Fatalf("committed agent after retry = %+v, ok=%t; want new prompt", node.Config.Agent, ok)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("scheduling did not finish after releasing the project lock")
 	}
 }
 

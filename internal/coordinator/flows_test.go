@@ -34,6 +34,49 @@ func newFlowTestServices(t *testing.T) (*FlowService, *AgentDefService) {
 	return NewFlowServiceWithAgentDefs(projectStore.DB(), defs), defs
 }
 
+func TestFlowUpdateIncrementsPersistedRevision(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	flows, _ := newFlowTestServices(t)
+	input := FlowInput{
+		Name:      "revisioned flow",
+		StartNode: "done",
+		Nodes: []FlowNodeInput{
+			{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+		},
+	}
+	created, err := flows.Create(ctx, input)
+	if err != nil {
+		t.Fatalf("create flow: %v", err)
+	}
+	if created.Revision != 1 {
+		t.Fatalf("created revision = %d, want 1", created.Revision)
+	}
+	initialSnapshot, err := flows.ResolveSnapshot(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("resolve initial snapshot: %v", err)
+	}
+	if initialSnapshot.FlowRevision != created.Revision {
+		t.Fatalf("initial snapshot revision = %d, want %d", initialSnapshot.FlowRevision, created.Revision)
+	}
+
+	input.Description = "updated definition"
+	updated, err := flows.Update(ctx, created.ID, input)
+	if err != nil {
+		t.Fatalf("update flow: %v", err)
+	}
+	if updated.Revision != created.Revision+1 {
+		t.Fatalf("updated revision = %d, want %d", updated.Revision, created.Revision+1)
+	}
+	reloaded, err := flows.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("reload flow: %v", err)
+	}
+	if reloaded.Revision != updated.Revision {
+		t.Fatalf("persisted revision = %d, want %d", reloaded.Revision, updated.Revision)
+	}
+}
+
 func TestFlowCreateRejectsConflictingTaskSetMaterializerPolicies(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

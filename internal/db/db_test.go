@@ -14,7 +14,7 @@ import (
 // should carry under the current build tags. The tag-gated 0005_task_fts is
 // included only when FTS5 support is compiled in.
 func expectedProjectMigrations() []string {
-	migrations := []string{"0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log", "0006_completion_evidence", "0007_session_human_wait_latches", "0008_optional_human_review"}
+	migrations := []string{"0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log", "0006_completion_evidence", "0007_session_human_wait_latches", "0008_optional_human_review", "0009_flow_revisions", "0010_agent_def_revisions"}
 	migrations = append(migrations, filterOptionalMigrations([]string{"0005_task_fts"})...)
 	sort.Strings(migrations)
 	return migrations
@@ -74,6 +74,25 @@ WHERE name = 'requires_human_review'`).Scan(&humanReviewNotNull, &humanReviewDef
 	}
 	if humanReviewNotNull != 1 || humanReviewDefault != "FALSE" {
 		t.Fatalf("requires_human_review notnull/default = %d/%q, want 1/FALSE", humanReviewNotNull, humanReviewDefault)
+	}
+
+	var flowRevisionNotNull int
+	var flowRevisionDefault string
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT "notnull", dflt_value
+FROM pragma_table_info('flows')
+WHERE name = 'revision'`).Scan(&flowRevisionNotNull, &flowRevisionDefault); err != nil {
+		t.Fatalf("inspect flow revision: %v", err)
+	}
+	if flowRevisionNotNull != 1 || flowRevisionDefault != "1" {
+		t.Fatalf("flows.revision notnull/default = %d/%q, want 1/1", flowRevisionNotNull, flowRevisionDefault)
+	}
+	var agentDefsRevision int64
+	if err := store.DB().QueryRowContext(ctx, `SELECT CAST(value AS INTEGER) FROM app_metadata WHERE key = 'agent_defs_revision'`).Scan(&agentDefsRevision); err != nil {
+		t.Fatalf("read project agent definition revision: %v", err)
+	}
+	if agentDefsRevision != 1 {
+		t.Fatalf("project agent definition revision = %d, want 1", agentDefsRevision)
 	}
 
 	var relationPayloadNotNull int
@@ -192,15 +211,22 @@ func TestOpenGlobalInitializesGlobalSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_global_init")
+	assertAppliedMigrations(t, migrations, "0001_global_init", "0002_agent_def_revisions")
 	var schemaVersion string
 	if err := store.DB().QueryRowContext(ctx, "SELECT value FROM app_metadata WHERE key = 'schema_version'").Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version metadata: %v", err)
 	}
-	if schemaVersion != "0001_global_init" {
-		t.Fatalf("schema version = %q, want 0001_global_init", schemaVersion)
+	if schemaVersion != "0002_agent_def_revisions" {
+		t.Fatalf("schema version = %q, want 0002_agent_def_revisions", schemaVersion)
 	}
 	assertStorageFormat(t, store, "6")
+	var agentDefsRevision int64
+	if err := store.DB().QueryRowContext(ctx, `SELECT CAST(value AS INTEGER) FROM app_metadata WHERE key = 'agent_defs_revision'`).Scan(&agentDefsRevision); err != nil {
+		t.Fatalf("read global agent definition revision: %v", err)
+	}
+	if agentDefsRevision != 1 {
+		t.Fatalf("global agent definition revision = %d, want 1", agentDefsRevision)
+	}
 	assertColumnAbsent(t, store, "projects", "exchange_url")
 
 	assertTables(t, store, []string{"app_metadata", "projects", "workers", "capacity_slots", "tokens", "web_sessions", "web_bootstrap_tokens", "idempotency_records", "agent_defs"}, []string{"tasks", "jobs", "leases", "sessions", "changes"})
@@ -284,7 +310,7 @@ func TestOpenGlobalMigrationIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertAppliedMigrations(t, migrations, "0001_global_init")
+	assertAppliedMigrations(t, migrations, "0001_global_init", "0002_agent_def_revisions")
 }
 
 func TestGlobalTokensCarryProjectBinding(t *testing.T) {
@@ -629,8 +655,8 @@ FROM flow_nodes WHERE id = 'fn-review'`).Scan(&taskOptIn, &skipOutcome); err != 
 		`SELECT value FROM app_metadata WHERE key = 'schema_version'`).Scan(&schemaVersion); err != nil {
 		t.Fatalf("read upgraded schema version: %v", err)
 	}
-	if schemaVersion != "0008_optional_human_review" {
-		t.Fatalf("upgraded schema version = %q, want 0008_optional_human_review", schemaVersion)
+	if schemaVersion != expectedSchemaVersion() {
+		t.Fatalf("upgraded schema version = %q, want %s", schemaVersion, expectedSchemaVersion())
 	}
 
 	// Reopening the upgraded current-base database must skip 0008. Reapplying it
@@ -653,8 +679,8 @@ WHERE version = '0008_optional_human_review'`).Scan(&optionalReviewMigrations); 
 		`SELECT value FROM app_metadata WHERE key = 'schema_version'`).Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version after reopen: %v", err)
 	}
-	if schemaVersion != "0008_optional_human_review" {
-		t.Fatalf("schema version after reopen = %q, want 0008_optional_human_review", schemaVersion)
+	if schemaVersion != expectedSchemaVersion() {
+		t.Fatalf("schema version after reopen = %q, want %s", schemaVersion, expectedSchemaVersion())
 	}
 }
 
@@ -694,8 +720,13 @@ func seedPreOptionalHumanReviewDB(t *testing.T, gateConfig, flowUpdatedAt string
 	}
 	defer raw.Close()
 
-	baseMigrations := expectedProjectMigrations()
-	baseMigrations = baseMigrations[:len(baseMigrations)-1]
+	baseMigrations := []string{}
+	for _, version := range expectedProjectMigrations() {
+		if version == "0008_optional_human_review" {
+			break
+		}
+		baseMigrations = append(baseMigrations, version)
+	}
 	for _, version := range baseMigrations {
 		content, readErr := migrationFS.ReadFile("migrations/" + version + ".sql")
 		if readErr != nil {

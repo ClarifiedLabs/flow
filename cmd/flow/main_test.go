@@ -610,7 +610,7 @@ func TestDoctorInitializesDatabase(t *testing.T) {
 
 	output := stdout.String()
 	// flow doctor opens the coordinator-wide (global) database, whose schema
-	// is applied by the single global migration.
+	// is applied by the global migration set.
 	for _, want := range []string{"flow doctor", "sqlite: ok", "0001_global_init"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("doctor output missing %q:\n%s", want, output)
@@ -627,7 +627,7 @@ func TestDoctorInitializesDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	assertMigrationsEqual(t, migrations, "0001_global_init")
+	assertMigrationsEqual(t, migrations, "0001_global_init", "0002_agent_def_revisions")
 }
 
 func TestFetchPromptUsesWorkerRoleEnvironment(t *testing.T) {

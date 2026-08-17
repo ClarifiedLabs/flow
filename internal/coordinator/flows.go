@@ -34,6 +34,7 @@ const (
 // FlowSnapshot when they are scheduled.
 type Flow struct {
 	ID               string     `json:"id"`
+	Revision         int64      `json:"revision"`
 	Name             string     `json:"name"`
 	Description      string     `json:"description,omitempty"`
 	StartNode        string     `json:"start_node,omitempty"`
@@ -84,12 +85,15 @@ type FlowReviewAgentSnapshot struct {
 // FlowSnapshot is the fully resolved graph a workflow run executes. Agent
 // definitions are frozen into node configs when the task is scheduled.
 type FlowSnapshot struct {
-	FlowID           string             `json:"flow_id"`
-	FlowName         string             `json:"flow_name"`
-	StartNode        string             `json:"start_node,omitempty"`
-	TransitionBudget int                `json:"transition_budget,omitempty"`
-	Nodes            []FlowNodeSnapshot `json:"nodes,omitempty"`
-	Edges            []FlowEdge         `json:"edges,omitempty"`
+	FlowID                     string             `json:"flow_id"`
+	FlowRevision               int64              `json:"flow_revision,omitempty"`
+	AgentDefsRevision          int64              `json:"agent_defs_revision,omitempty"`
+	InheritedAgentDefsRevision int64              `json:"inherited_agent_defs_revision,omitempty"`
+	FlowName                   string             `json:"flow_name"`
+	StartNode                  string             `json:"start_node,omitempty"`
+	TransitionBudget           int                `json:"transition_budget,omitempty"`
+	Nodes                      []FlowNodeSnapshot `json:"nodes,omitempty"`
+	Edges                      []FlowEdge         `json:"edges,omitempty"`
 }
 
 // FlowService manages the per-project flow catalog and the project default.
@@ -181,7 +185,9 @@ func (s *FlowService) Update(ctx context.Context, id string, input FlowInput) (F
 		budget = DefaultFlowTransitionBudget
 	}
 	result, err := tx.ExecContext(ctx, `
-UPDATE flows SET name = ?, description = ?, start_node_key = ?, transition_budget = ?, updated_at = ?
+UPDATE flows
+SET name = ?, description = ?, start_node_key = ?, transition_budget = ?,
+	revision = revision + 1, updated_at = ?
 WHERE id = ?`, input.Name, input.Description, input.StartNode, budget,
 		sqlitex.FormatTime(s.now().UTC()), id)
 	if err != nil {
@@ -369,8 +375,17 @@ func (s *FlowService) List(ctx context.Context) ([]Flow, error) {
 }
 
 func (s *FlowService) list(ctx context.Context, where string, args ...any) ([]Flow, error) {
-	rows, err := s.db.QueryContext(ctx, `
-SELECT f.id, f.name, f.description, f.start_node_key, f.transition_budget, f.builtin, f.created_at, f.updated_at
+	return s.listWith(ctx, s.db, where, args...)
+}
+
+type flowQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (s *FlowService) listWith(ctx context.Context, queryer flowQueryer, where string, args ...any) ([]Flow, error) {
+	rows, err := queryer.QueryContext(ctx, `
+SELECT f.id, f.revision, f.name, f.description, f.start_node_key, f.transition_budget, f.builtin, f.created_at, f.updated_at
 FROM flows f WHERE `+where+` ORDER BY f.name`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list flows: %w", err)
@@ -383,7 +398,7 @@ FROM flows f WHERE `+where+` ORDER BY f.name`, args...)
 		var flow Flow
 		var builtin int
 		var createdAt, updatedAt string
-		if err := rows.Scan(&flow.ID, &flow.Name, &flow.Description, &flow.StartNode, &flow.TransitionBudget, &builtin, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&flow.ID, &flow.Revision, &flow.Name, &flow.Description, &flow.StartNode, &flow.TransitionBudget, &builtin, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		flow.Builtin = builtin != 0
@@ -405,7 +420,7 @@ FROM flows f WHERE `+where+` ORDER BY f.name`, args...)
 		return flows, nil
 	}
 
-	nodeRows, err := s.db.QueryContext(ctx, `
+	nodeRows, err := queryer.QueryContext(ctx, `
 SELECT n.id, n.flow_id, n.node_key, n.name, n.kind, n.position, n.config_json
 FROM flow_nodes n JOIN flows f ON f.id = n.flow_id
 WHERE `+where+` ORDER BY n.flow_id, n.position`, args...)
@@ -432,7 +447,7 @@ WHERE `+where+` ORDER BY n.flow_id, n.position`, args...)
 		return nil, err
 	}
 
-	edgeRows, err := s.db.QueryContext(ctx, `
+	edgeRows, err := queryer.QueryContext(ctx, `
 SELECT e.flow_id, e.from_node_key, e.outcome, e.to_node_key
 FROM flow_edges e JOIN flows f ON f.id = e.flow_id
 WHERE `+where+` ORDER BY e.flow_id, e.from_node_key, e.outcome`, args...)
@@ -454,7 +469,7 @@ WHERE `+where+` ORDER BY e.flow_id, e.from_node_key, e.outcome`, args...)
 		return nil, err
 	}
 
-	defaultID, err := s.DefaultFlowID(ctx)
+	defaultID, err := defaultFlowIDWith(ctx, queryer)
 	if err != nil {
 		return nil, err
 	}
@@ -467,8 +482,12 @@ WHERE `+where+` ORDER BY e.flow_id, e.from_node_key, e.outcome`, args...)
 
 // DefaultFlowID returns the project's default flow id, or "" when unset.
 func (s *FlowService) DefaultFlowID(ctx context.Context) (string, error) {
+	return defaultFlowIDWith(ctx, s.db)
+}
+
+func defaultFlowIDWith(ctx context.Context, queryer agentDefQueryer) (string, error) {
 	var id string
-	err := s.db.QueryRowContext(ctx,
+	err := queryer.QueryRowContext(ctx,
 		`SELECT value FROM app_metadata WHERE key = ?`, defaultFlowMetadataKey).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
@@ -504,9 +523,15 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.upd
 // ResolveSnapshot freezes the flow (default flow when flowID is empty) into a
 // FlowSnapshot: graph nodes and review agents joined with full agent-def copies.
 func (s *FlowService) ResolveSnapshot(ctx context.Context, flowID string) (FlowSnapshot, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return FlowSnapshot{}, err
+	}
+	defer tx.Rollback()
+
 	flowID = strings.TrimSpace(flowID)
 	if flowID == "" {
-		defaultID, err := s.DefaultFlowID(ctx)
+		defaultID, err := defaultFlowIDWith(ctx, tx)
 		if err != nil {
 			return FlowSnapshot{}, err
 		}
@@ -516,16 +541,25 @@ func (s *FlowService) ResolveSnapshot(ctx context.Context, flowID string) (FlowS
 		flowID = defaultID
 	}
 
-	flow, err := s.Get(ctx, flowID)
+	flows, err := s.listWith(ctx, tx, "f.id = ?", flowID)
 	if err != nil {
 		return FlowSnapshot{}, err
 	}
+	if len(flows) == 0 {
+		return FlowSnapshot{}, ErrFlowNotFound
+	}
+	flow := flows[0]
 	if len(flow.Nodes) == 0 {
 		return FlowSnapshot{}, fmt.Errorf("flow %q has no executable definition", flow.Name)
 	}
 
+	agentResolver, err := s.agentDefs.snapshotResolver(ctx, tx)
+	if err != nil {
+		return FlowSnapshot{}, err
+	}
+	defer agentResolver.Close()
 	snapshotAgent := func(agentDefID string) (AgentDefSnapshot, error) {
-		def, err := s.agentDefs.Resolve(ctx, agentDefID)
+		def, err := agentResolver.Resolve(ctx, agentDefID)
 		if err != nil {
 			return AgentDefSnapshot{}, fmt.Errorf("flow %q: %w", flow.Name, err)
 		}
@@ -540,7 +574,9 @@ func (s *FlowService) ResolveSnapshot(ctx context.Context, flowID string) (FlowS
 	}
 
 	snapshot := FlowSnapshot{
-		FlowID: flow.ID, FlowName: flow.Name, StartNode: flow.StartNode,
+		FlowID: flow.ID, FlowRevision: flow.Revision,
+		AgentDefsRevision: agentResolver.localRevision, InheritedAgentDefsRevision: agentResolver.inheritedRevision,
+		FlowName: flow.Name, StartNode: flow.StartNode,
 		TransitionBudget: flow.TransitionBudget, Edges: append([]FlowEdge(nil), flow.Edges...),
 	}
 	for _, node := range flow.Nodes {
@@ -597,7 +633,14 @@ func (s *FlowService) ResolveSnapshot(ctx context.Context, flowID string) (FlowS
 		}
 		snapshot.Nodes = append(snapshot.Nodes, snapshotNode)
 	}
+	if err := tx.Commit(); err != nil {
+		return FlowSnapshot{}, err
+	}
 	return snapshot, nil
+}
+
+func (s *FlowService) lockInheritedAgentDefsRevision(ctx context.Context, revision int64) (*sqlitex.Tx, bool, error) {
+	return s.agentDefs.lockInheritedCatalogRevision(ctx, revision)
 }
 
 // Names of the built-in flows every project is seeded with. Seeding matches
