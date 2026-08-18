@@ -91,12 +91,15 @@
      containing `decision_request` must not contain any `task_action`.
 
      `task_action` is optional and reserved for the final parallel-review
-     aggregation job. It declares work for the worker/coordinator to apply; do not
-     create or mutate a task directly. Add it only to a unique, actionable non-blocking issue that
+     aggregation job. It proposes work for a separate human-reviewed organizer
+     plan; it does not create or mutate a task during verdict application. Add it
+     only to a unique, actionable non-blocking issue that
      is safe to defer from the current change. Reuse an open task only for a
      high-confidence same-root-issue match from the supplied task candidates;
      otherwise create a task. Omit it for blocking findings, review-thread
-     duplicates, speculative observations, and informational notes.
+     duplicates, speculative observations, and informational notes. The worker
+     submits all proposals from the final report as one exact durable batch.
+     Verifier and discovery jobs cannot submit proposals.
      Use `"blocked"` only when at least one comment is `critical`/`high`,
      introduced by this change, and not a duplicate, or when the change cannot
      be reviewed reliably. Otherwise use `"satisfied"`; keep non-blocking

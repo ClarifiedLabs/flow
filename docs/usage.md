@@ -208,11 +208,14 @@ callers that may retry the same command should pass an explicit
 `--idempotency-key` (for example, one derived from their own operation ID) so
 the retry replays rather than duplicates.
 
-Internal task creators use the same guarantee with deterministic natural keys:
-review follow-up task actions dedupe by source task + check + finding hash
-(replays return the recorded task, conflicting actions on the same finding are
-rejected), and planning task-set materialization replays per artifact, so
-aggregator retries cannot duplicate tasks.
+Internal task creators use durable operation identities. Final review aggregation
+submits its exact sealed report as one batch keyed by the authenticated source job;
+an exact retry returns the same batch receipt and a different report digest for
+that job is rejected. Its `task_action` entries remain proposals until a separate,
+human-approved organizer task-set is materialized. Task-set materialization
+replays per artifact, so neither worker retries nor organizer retries duplicate
+work. The legacy singular follow-up endpoint remains readable for rolling
+compatibility but current workers do not call it.
 
 `task guide` records durable guidance on the active workflow run and delivers
 it to every live author, reviewer, and verifier session in that run. Rulings
@@ -277,6 +280,18 @@ blocking finding depends on an inferred, broad scope requirement. Use
 follow-up work, or retain it only as non-blocking follow-up. If the change head
 moves while the decision is open, Flow invalidates the decision and restarts
 the complete discovery round against the new head.
+
+Accepted non-blocking proposals never delay that review or merge. After approval,
+Flow asynchronously creates a system-owned organizer task. Its dedicated planning
+agent consolidates same-root findings, reuses only high-confidence open tasks,
+and proposes only real prerequisite `blocks` edges. A human approves the plan
+before materialization. Organizer rejection or failure leaves the source delivered
+and marks the follow-up set `attention` for retry. The source task's **Findings**
+tab shows aggregation check/job/head provenance, every batch and proposal, the
+active revision and plan artifact, each final disposition/target/grouping/blocker,
+and errors. Pre-batch actions appear separately as **Legacy follow-ups** because
+they do not contain the newer report and job provenance. Verifier jobs can certify
+or reopen review threads but cannot create follow-up proposals.
 
 Features (project-child task groups with their own exchange branch):
 

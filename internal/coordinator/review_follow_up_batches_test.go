@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/checkverdict"
+	flowmetrics "github.com/ClarifiedLabs/flow/internal/metrics"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
 )
 
@@ -46,6 +47,8 @@ func TestApplyReviewFollowUpBatchAcceptsAtomicallyWithoutCreatingTasksAndReplays
 	f := newScopeDecisionFixture(t)
 	report := followUpBatchReport(f.change.HeadSHA, 2)
 	service := NewTaskService(f.runs.db, "p-test")
+	metricRegistry := flowmetrics.New()
+	service.SetWorkflowMetrics(flowmetrics.RegisterWorkflow(metricRegistry))
 
 	var tasksBefore int
 	if err := f.runs.db.QueryRow(`SELECT COUNT(*) FROM tasks`).Scan(&tasksBefore); err != nil {
@@ -91,6 +94,18 @@ func TestApplyReviewFollowUpBatchAcceptsAtomicallyWithoutCreatingTasksAndReplays
 	_, err = service.ApplyReviewFollowUpBatch(context.Background(), batchInput(f, changed))
 	if err == nil || !strings.Contains(err.Error(), "different report digest") {
 		t.Fatalf("digest conflict error = %v", err)
+	}
+	var rendered strings.Builder
+	metricRegistry.Render(&rendered)
+	for _, want := range []string{
+		`flow_review_follow_up_batches_total{outcome="accepted"} 1`,
+		`flow_review_follow_up_batches_total{outcome="rejected"} 1`,
+		`flow_review_follow_up_batches_total{outcome="replayed"} 1`,
+		`flow_review_follow_up_proposals_accepted_total 2`,
+	} {
+		if !strings.Contains(rendered.String(), want) {
+			t.Errorf("batch metrics missing %q:\n%s", want, rendered.String())
+		}
 	}
 }
 

@@ -213,6 +213,46 @@ func TestTaskFindingsRegistryAggregatesThreadsAcrossChanges(t *testing.T) {
 	}
 }
 
+func TestTaskFindingsRegistryLegacyRelatedToUsesCanonicalEndpoints(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, err := flowdb.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	tasks := NewTaskService(store.DB(), "p-test")
+
+	// Allocate the reused target first so its ID sorts before the source ID.
+	// related_to storage canonicalizes those endpoints, which reverses the
+	// semantic source/target orientation assumed by the old findings join.
+	target, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Earlier target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := tasks.CreateTask(ctx, CreateTaskInput{Title: "Later source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertChangeForTest(t, store.DB(), source.ID, "ch-canonical-follow-up", "task/canonical-follow-up", false)
+	if _, err := tasks.ApplyReviewFollowUp(ctx, ApplyReviewFollowUpInput{
+		SourceTaskID: source.ID, SourceChangeID: "ch-canonical-follow-up", CheckName: "review-aggregator",
+		Finding:    ReviewFollowUpFinding{SHA: "head", File: "legacy.go", Line: 9, Body: "legacy follow-up", Severity: "low", Requirement: "compatibility"},
+		TaskAction: ReviewFollowUpTaskAction{Action: ReviewFollowUpUseExistingTask, TaskID: target.ID},
+	}); err != nil {
+		t.Fatalf("apply legacy follow-up: %v", err)
+	}
+
+	registry, err := NewThreadService(store.DB()).TaskFindingsRegistry(ctx, source.ID)
+	if err != nil {
+		t.Fatalf("load findings registry: %v", err)
+	}
+	if len(registry.FollowUps) != 1 || registry.FollowUps[0].TargetTaskID != target.ID ||
+		registry.FollowUps[0].RelatedAt == nil || !registry.FollowUps[0].Legacy {
+		t.Fatalf("canonical legacy follow-up = %+v, want target %s with relation and legacy marker", registry.FollowUps, target.ID)
+	}
+}
+
 func TestTaskFindingsRegistryEmptyForTaskWithoutFindings(t *testing.T) {
 	t.Parallel()
 	_, threads, _, task := newFindingsRegistryFixture(t)

@@ -2,7 +2,9 @@
 
 You are running the dedicated review follow-up planning workflow. Organize the durable, non-blocking proposal occurrences supplied in the task context into a human-reviewable implementation graph. Analyze the source task, repository, prior organizer decisions, and candidate work without implementing changes or creating commits.
 
-## Required accounting
+## Workflow
+
+### Required accounting
 
 Write a schema-version-1 task-set manifest with a `review_follow_up` section naming the supplied set ID and revision. Map every active proposal ID exactly once. Never invent or omit proposal IDs.
 

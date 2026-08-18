@@ -314,8 +314,8 @@ receives those persisted source check results under **Candidate Reports**, uses
 the node's dedicated frozen aggregator runtime and prompt, and deduplicates them.
 The final aggregator is distinct from both discovery and a standalone reviewer:
 it emits the one aggregate verdict, then the worker/coordinator alone creates
-eligible threads, applies declared follow-up task actions, and chooses
-`changes_requested`. Whether that final decision may block is still derived from
+eligible blocking threads, durably captures non-blocking follow-up proposals,
+and chooses `changes_requested`. Whether that final decision may block is still derived from
 the discovery agents' blocking policy. A standalone reviewer likewise emits one
 verdict for the worker to apply, without directly mutating project state.
 `verify_change` continues to evaluate its children directly; verifiers declare
@@ -327,9 +327,27 @@ regressions, and security defects remain ordinary blockers. A final aggregator
 that finds a blocking inferred scope requirement with cross-cutting, legacy-
 migration, or unknown remediation emits one structured decision request for one
 coherent cluster. The worker opens a durable `review_scope_decision` wait before
-filing comments, creating follow-up tasks, or reporting the aggregation check.
+filing comments, accepting follow-up proposals, or reporting the aggregation check.
 An owner choice becomes a durable ruling and reruns aggregation only; a changed
 head invalidates the wait and reruns full discovery.
+
+Non-blocking aggregation `task_action` entries are suggestions, not immediate
+mutations. The worker sends the exact sealed aggregate report once; one immutable
+batch is authenticated against its live lease/job/check/head, and proposal
+occurrences accumulate in a set keyed by source task, change, and workflow run.
+When source review exits `approved`, a reconciler schedules the dedicated
+`review-follow-up-organizer` planning flow outside the source workflow's critical
+path. The organizer maps every active proposal exactly once into a human-reviewed
+task-set plan: create, reuse, merge, cover from the source, or discard a duplicate.
+Only an approved plan materializes tasks, containment, and real prerequisite
+`blocks` edges. Organizer rejection or failure moves the set to `attention`; it
+never reverses source approval or merge. Review blocking and task dependency
+blocking are therefore separate systems.
+
+The Findings tab and `GET /v2/tasks/{id}/findings` expose exact batches, proposals,
+plan state, dispositions, target grouping/blockers, and retryable errors. Older
+singular `review_follow_up_actions` remain visible as explicitly legacy records;
+the read model does not invent finding bodies or source-job provenance for them.
 
 Owner rulings are versioned `workflow_owner_ruling_recorded` transitions.
 Active rulings are projected from the complete run history, apply together, and
@@ -370,12 +388,12 @@ retry; advisory errors remain visible and non-blocking. Retrying a check node
 preserves same-revision results and enqueues only its errored checks.
 
 The coordinator seeds global task-planner, author, code-reviewer,
-security-reviewer, review-aggregator, and verifier definitions. Fresh projects
-inherit those rows and seed only two project-owned flows: the default coding
-graph (implementation, checks, review, human gate, verification, and merge
-loops) and the planning graph
-(task-set authoring, human review, transactional materialization, and
-completion). No default agent-definition rows are stored in project databases.
+security-reviewer, review-aggregator, review-follow-up-organizer, and verifier
+definitions. Fresh projects inherit those rows and seed the default coding graph
+(implementation, checks, review, human gate, verification, and merge loops), the
+general planning graph (task-set authoring, human review, transactional
+materialization, and completion), and the dedicated review follow-up organizer
+planning graph. No default agent-definition rows are stored in project databases.
 Flows store global definition IDs; snapshot resolution applies a same-name
 project override before freezing the run.
 
@@ -405,9 +423,10 @@ Flow uses bearer tokens for API clients and short-lived cookies for the web UI:
   reviewer and verifier checks, the project is the read boundary: task records,
   lifecycle transition/status history, and review threads/comments are available
   as read-only context, including records outside the current task when useful.
-  This does not grant direct mutation authority. Agents declare comments, follow-up task actions,
-  thread decisions, and outcomes only in the verdict file; the lease-bound
-  worker/coordinator validates and applies allowed writes. Task-bound author or
+  This does not grant direct mutation authority. Agents declare comments,
+  follow-up proposals, thread decisions, and outcomes only in the verdict file;
+  the lease-bound worker/coordinator validates allowed writes. Only final
+  aggregation can propose follow-up work; verifier jobs cannot. Task-bound author or
   console capabilities remain separately constrained by their role.
 - **Hook token**: exchange hook/coordinator integration.
 - **Web session cookie + CSRF cookie/header**: browser UI authentication after a

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -414,7 +415,7 @@ type MaterializeTaskSetResult struct {
 	TaskIDs    map[string]string `json:"task_ids,omitempty"`
 }
 
-func (s *WorkflowArtifactService) MaterializeTaskSet(ctx context.Context, artifactID string, config MaterializeTaskSetNodeConfig) (MaterializeTaskSetResult, bool, error) {
+func (s *WorkflowArtifactService) MaterializeTaskSet(ctx context.Context, artifactID string, config MaterializeTaskSetNodeConfig) (result MaterializeTaskSetResult, replayed bool, err error) {
 	artifactID = strings.TrimSpace(artifactID)
 	if artifactID == "" {
 		return MaterializeTaskSetResult{}, false, errors.New("artifact id is required")
@@ -438,12 +439,25 @@ func (s *WorkflowArtifactService) MaterializeTaskSet(ctx context.Context, artifa
 	if err != nil {
 		return MaterializeTaskSetResult{}, false, err
 	}
+	reviewFollowUpMaterialization := manifest.ReviewFollowUp != nil
+	defer func() {
+		if !reviewFollowUpMaterialization || s.tasks == nil || s.tasks.metrics == nil {
+			return
+		}
+		outcome := "completed"
+		if err != nil {
+			outcome = "failed"
+		} else if replayed {
+			outcome = "replayed"
+		}
+		s.tasks.metrics.ReviewFollowUpMaterializations.Inc(map[string]string{"outcome": outcome})
+	}()
 	config = normalizedTaskSetMaterializerConfig(config)
 	if err := validateTaskSetWorkflowSelectionTx(ctx, tx, manifest, config); err != nil {
 		return MaterializeTaskSetResult{}, false, err
 	}
-	result := newMaterializeTaskSetResult()
-	replayed := false
+	result = newMaterializeTaskSetResult()
+	replayed = false
 	var materializationState, resultJSON string
 	err = tx.QueryRowContext(ctx, `
 SELECT state, result_json FROM workflow_materializations WHERE artifact_id = ?`, artifactID).Scan(&materializationState, &resultJSON)
@@ -547,11 +561,11 @@ INSERT INTO epics (
 				return MaterializeTaskSetResult{}, replayed, err
 			}
 			if sourceFeatureID.Valid {
-				if err := s.items.linkTx(ctx, tx, sourceFeatureID.String, id, RelationParentOf, ActorSystem); err != nil {
+				if err := s.linkMaterializedWorkItemTx(ctx, tx, sourceFeatureID.String, id, RelationParentOf); err != nil {
 					return MaterializeTaskSetResult{}, replayed, err
 				}
 			}
-			if err := s.items.linkTx(ctx, tx, sourceTaskID, id, RelationRelatedTo, ActorSystem); err != nil {
+			if err := s.linkMaterializedWorkItemTx(ctx, tx, sourceTaskID, id, RelationRelatedTo); err != nil {
 				return MaterializeTaskSetResult{}, replayed, err
 			}
 			result.RootEpicID = id
@@ -639,7 +653,7 @@ WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks')`, sourceID,
 			return MaterializeTaskSetResult{}, replayed, err
 		}
 		if exists == 0 {
-			if err := s.items.linkTx(ctx, tx, sourceID, targetID, RelationBlocks, ActorSystem); err != nil {
+			if err := s.linkMaterializedWorkItemTx(ctx, tx, sourceID, targetID, RelationBlocks); err != nil {
 				return MaterializeTaskSetResult{}, replayed, err
 			}
 		}
@@ -657,6 +671,9 @@ WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks')`, sourceID,
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return MaterializeTaskSetResult{}, replayed, err
+	}
+	if reviewPlan != nil {
+		s.recordReviewFollowUpPlanMetrics(manifest)
 	}
 	return result, replayed, nil
 }
@@ -883,6 +900,12 @@ INSERT INTO tasks (
 			sqlitex.NullableNonEmptyString(sourceChangeID), nowText, nowText); err != nil {
 			return "", fmt.Errorf("create generated task %q: %w", item.Key, err)
 		}
+		if _, eventErr := s.tasks.eventLog.AppendTx(ctx, tx, Event{
+			Kind: EventTaskCreated, Actor: string(createdBy), TaskID: id,
+			Payload: eventPayload(map[string]any{"title": item.Title}), OccurredAt: now,
+		}); eventErr != nil {
+			slog.Warn("event log append failed", "error", eventErr)
+		}
 		for _, slug := range item.TagSlugs {
 			tagID, err := upsertTagInTx(ctx, tx, CreateTagInput{Slug: slug, Name: slug, CreatedBy: ActorSystem}, nowText)
 			if err != nil {
@@ -913,7 +936,7 @@ INSERT INTO epics (
 	default:
 		return "", fmt.Errorf("%s item requires external materialization", item.Kind)
 	}
-	if err := s.items.linkTx(ctx, tx, parentID, id, RelationParentOf, ActorSystem); err != nil {
+	if err := s.linkMaterializedWorkItemTx(ctx, tx, parentID, id, RelationParentOf); err != nil {
 		return "", err
 	}
 	if err := reconcileEpicAncestorsTx(ctx, tx, []string{id}, now); err != nil {
@@ -930,6 +953,50 @@ INSERT INTO epics (
 		return "", err
 	}
 	return id, nil
+}
+
+func (s *WorkflowArtifactService) linkMaterializedWorkItemTx(ctx context.Context, tx workItemRelationQuerier, sourceID, targetID string, kind RelationKind) error {
+	if err := s.items.linkTx(ctx, tx, sourceID, targetID, kind, ActorSystem); err != nil {
+		return err
+	}
+	if _, err := s.tasks.eventLog.AppendTx(ctx, tx, Event{
+		Kind: EventRelationLinked, Actor: string(ActorSystem), TaskID: relationEventTaskIDTx(ctx, tx, sourceID, targetID),
+		Payload: eventPayload(map[string]any{"source": sourceID, "target": targetID, "relation": string(kind)}),
+	}); err != nil {
+		slog.Warn("event log append failed", "error", err)
+	}
+	return nil
+}
+
+func (s *WorkflowArtifactService) recordReviewFollowUpPlanMetrics(manifest TaskSetManifest) {
+	if s.tasks == nil || s.tasks.metrics == nil || manifest.ReviewFollowUp == nil {
+		return
+	}
+	outcomeLabels := map[ReviewFollowUpDisposition]string{
+		ReviewFollowUpDispositionCreateTask:        "created",
+		ReviewFollowUpDispositionUseExistingTask:   "reused",
+		ReviewFollowUpDispositionMergeWithProposal: "merged",
+		ReviewFollowUpDispositionCoveredBySource:   "covered",
+		ReviewFollowUpDispositionDiscardDuplicate:  "discarded",
+	}
+	for _, assignment := range manifest.ReviewFollowUp.Assignments {
+		s.tasks.metrics.ReviewFollowUpPlanOutcomes.Inc(map[string]string{"outcome": outcomeLabels[assignment.Disposition]})
+	}
+	items := make(map[string]TaskSetItem, len(manifest.Items))
+	for _, item := range manifest.Items {
+		items[item.Key] = item
+	}
+	blockedGeneratedTasks := map[string]bool{}
+	for _, dependency := range manifest.Dependencies {
+		item := items[dependency.Blocked]
+		if item.Kind == WorkItemTask && item.ExistingTaskID == "" {
+			blockedGeneratedTasks[item.Key] = true
+		}
+	}
+	if len(blockedGeneratedTasks) > 0 {
+		s.tasks.metrics.ReviewFollowUpBlockedTasks.Add(float64(len(blockedGeneratedTasks)), nil)
+	}
+	s.tasks.metrics.ReviewFollowUpOrganizerRuns.Inc(map[string]string{"outcome": "completed"})
 }
 
 func mapValues(values map[string]string) []string {

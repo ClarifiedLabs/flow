@@ -334,8 +334,8 @@ func TestRegistrySeedsGlobalDefsWithConfiguredDefaultAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list global agent defs: %v", err)
 	}
-	if len(defs) != 8 {
-		t.Fatalf("global default agent definitions = %d, want 8", len(defs))
+	if len(defs) != 9 {
+		t.Fatalf("global default agent definitions = %d, want 9", len(defs))
 	}
 	for _, def := range defs {
 		if def.Harness != flowharness.Harness || def.Model != "sonnet" || def.ReasoningEffort != "high" {
@@ -390,8 +390,8 @@ func TestDefaultAgentDefsAreGlobalAndInheritedByProjects(t *testing.T) {
 
 	var globalList agentDefsResponse
 	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet, "/v2/global/agent-defs", nil, http.StatusOK, &globalList)
-	if len(globalList.AgentDefs) != 8 {
-		t.Fatalf("global default agent definitions = %d, want 8", len(globalList.AgentDefs))
+	if len(globalList.AgentDefs) != 9 {
+		t.Fatalf("global default agent definitions = %d, want 9", len(globalList.AgentDefs))
 	}
 
 	var projectList agentDefsResponse
@@ -4517,6 +4517,15 @@ WHERE id = ?`, run.ID, run.CurrentNodeRunID, aggregation.Job.ID); err != nil {
 	}
 	if storedReport != reportJSON {
 		t.Fatalf("stored report differs from exact request string\ngot:  %q\nwant: %q", storedReport, reportJSON)
+	}
+	var findings contract.TaskFindingsResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodGet,
+		"/v2/tasks/"+started.Session.TaskID+"/findings", nil, http.StatusOK, &findings)
+	if len(findings.FollowUpSets) != 1 || findings.FollowUpSets[0].ID != receipt.SetID ||
+		len(findings.FollowUpSets[0].Batches) != 1 || findings.FollowUpSets[0].Batches[0].ID != receipt.BatchID ||
+		len(findings.FollowUpSets[0].Batches[0].Proposals) != 1 ||
+		findings.FollowUpSets[0].Batches[0].Proposals[0].Body != "The legacy path needs separate cleanup." {
+		t.Fatalf("findings follow-up sets = %+v", findings.FollowUpSets)
 	}
 
 	var apiError contract.ErrorResponse

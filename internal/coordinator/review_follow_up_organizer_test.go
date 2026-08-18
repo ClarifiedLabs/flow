@@ -155,4 +155,52 @@ func TestReviewFollowUpOrganizerFailureDoesNotChangeSourceTask(t *testing.T) {
 	if !sourceState.Valid || sourceState.String != string(LifecycleInProgress) {
 		t.Fatalf("source task state = %+v, want unchanged in_progress", sourceState)
 	}
+
+	// Repair the transient setup dependency. Attention sets without an active
+	// organizer task are retried on the next reconciliation tick.
+	seedOrganizerFlowForTest(t, f.runs.flows)
+	if err := executor.ReconcileReviewFollowUpOrganizers(ctx); err != nil {
+		t.Fatalf("retry organizer reconciliation: %v", err)
+	}
+	var organizerTaskID, lastError string
+	if err := f.runs.db.QueryRow(`SELECT state, COALESCE(organizer_task_id,''), last_error FROM review_follow_up_sets WHERE id = ?`, accepted.SetID).
+		Scan(&setState, &organizerTaskID, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if setState != "organizing" || organizerTaskID == "" || lastError != "" {
+		t.Fatalf("retried set = state %q task %q error %q", setState, organizerTaskID, lastError)
+	}
+}
+
+func TestReviewFollowUpOrganizerPropagatesStalePlanWriteFailure(t *testing.T) {
+	ctx := context.Background()
+	f := newScopeDecisionFixture(t)
+	seedOrganizerFlowForTest(t, f.runs.flows)
+	tasks := NewTaskService(f.runs.db, "p-test")
+	accepted, err := tasks.ApplyReviewFollowUpBatch(ctx, batchInput(f, followUpBatchReport(f.change.HeadSHA, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.runs.db.Exec(`
+CREATE TRIGGER fail_stale_review_follow_up_plan
+BEFORE UPDATE OF state ON review_follow_up_plan_revisions
+WHEN NEW.state = 'stale'
+BEGIN SELECT RAISE(ABORT, 'forced stale plan failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	executor := NewWorkflowExecutor(WorkflowExecutorOptions{Database: f.runs.db, Runs: f.runs, Tasks: tasks})
+	err = executor.reconcileReviewFollowUpOrganizer(ctx, reviewFollowUpOrganizerSet{
+		ID: accepted.SetID, SourceTaskID: f.task.ID, SourceChangeID: f.change.ID,
+		WorkflowRunID: f.run.ID, Revision: accepted.SetRevision,
+	})
+	if err == nil || !strings.Contains(err.Error(), "forced stale plan failure") {
+		t.Fatalf("stale plan write error = %v", err)
+	}
+	var stalePlans int
+	if err := f.runs.db.QueryRow(`SELECT COUNT(*) FROM review_follow_up_plan_revisions WHERE set_id = ? AND state = 'stale'`, accepted.SetID).Scan(&stalePlans); err != nil {
+		t.Fatal(err)
+	}
+	if stalePlans != 0 {
+		t.Fatalf("stale plans after failed state write = %d, want 0", stalePlans)
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	flowmetrics "github.com/ClarifiedLabs/flow/internal/metrics"
 	"github.com/ClarifiedLabs/flow/internal/sqlitex"
 )
 
@@ -283,6 +284,7 @@ type TaskService struct {
 	projectID string
 	now       func() time.Time
 	eventLog  *EventLogService
+	metrics   *flowmetrics.Workflow
 
 	// editTaskAfterReadTestHook runs after EditTask's optimistic validation read
 	// and before its write transaction. Tests use it to force stale-read races.
@@ -292,6 +294,12 @@ type TaskService struct {
 // SetEventLog wires the project event log; a nil log disables emission.
 func (s *TaskService) SetEventLog(log *EventLogService) {
 	s.eventLog = log
+}
+
+// SetWorkflowMetrics wires low-cardinality workflow counters. A nil metric set
+// disables emission, as in coordinator unit tests that construct services alone.
+func (s *TaskService) SetWorkflowMetrics(metrics *flowmetrics.Workflow) {
+	s.metrics = metrics
 }
 
 func NewTaskService(database *sql.DB, projectID string) *TaskService {

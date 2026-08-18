@@ -155,6 +155,38 @@ func TestHandlerMethodAndPath(t *testing.T) {
 	}
 }
 
+func TestWorkflowRegistersLowCardinalityReviewFollowUpMetrics(t *testing.T) {
+	registry := New()
+	workflow := RegisterWorkflow(registry)
+	workflow.ReviewFollowUpBatches.Inc(map[string]string{"outcome": "accepted"})
+	workflow.ReviewFollowUpProposals.Add(2, nil)
+	workflow.ReviewFollowUpPlanOutcomes.Inc(map[string]string{"outcome": "merged"})
+	workflow.ReviewFollowUpOrganizerRuns.Inc(map[string]string{"outcome": "completed"})
+	workflow.ReviewFollowUpMaterializations.Inc(map[string]string{"outcome": "replayed"})
+	workflow.ReviewFollowUpBlockedTasks.Add(1, nil)
+
+	var rendered strings.Builder
+	registry.Render(&rendered)
+	out := rendered.String()
+	for _, want := range []string{
+		`flow_review_follow_up_batches_total{outcome="accepted"} 1`,
+		`flow_review_follow_up_proposals_accepted_total 2`,
+		`flow_review_follow_up_plan_outcomes_total{outcome="merged"} 1`,
+		`flow_review_follow_up_organizer_runs_total{outcome="completed"} 1`,
+		`flow_review_follow_up_materializations_total{outcome="replayed"} 1`,
+		`flow_review_follow_up_dependency_blocked_tasks_total 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("metrics output missing %q:\n%s", want, out)
+		}
+	}
+	for _, forbidden := range []string{"task_id=", "batch_id=", "job_id=", "run_id=", "proposal_id="} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("metrics output contains high-cardinality label %q:\n%s", forbidden, out)
+		}
+	}
+}
+
 func TestCounterConcurrentAdd(t *testing.T) {
 	r := New()
 	c := r.Counter("c", "h")

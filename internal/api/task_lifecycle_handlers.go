@@ -375,10 +375,11 @@ func (s *projectServer) handleTaskFindings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, contract.TaskFindingsResponse{
-		TaskID:    registry.TaskID,
-		Findings:  registry.Findings,
-		FollowUps: registry.FollowUps,
-		Summary:   registry.Summary,
+		TaskID:       registry.TaskID,
+		Findings:     registry.Findings,
+		FollowUps:    registry.FollowUps,
+		FollowUpSets: registry.FollowUpSets,
+		Summary:      registry.Summary,
 	})
 }
 

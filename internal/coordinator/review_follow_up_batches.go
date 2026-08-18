@@ -54,7 +54,21 @@ type ApplyReviewFollowUpBatchResult struct {
 // aggregation report in the same BEGIN IMMEDIATE transaction. Provenance comes
 // exclusively from the lease-bound job; callers provide only the reviewed task,
 // exact sealed report bytes, and their digest.
-func (s *TaskService) ApplyReviewFollowUpBatch(ctx context.Context, input ApplyReviewFollowUpBatchInput) (ApplyReviewFollowUpBatchResult, error) {
+func (s *TaskService) ApplyReviewFollowUpBatch(ctx context.Context, input ApplyReviewFollowUpBatchInput) (result ApplyReviewFollowUpBatchResult, err error) {
+	defer func() {
+		if s.metrics == nil {
+			return
+		}
+		switch {
+		case err != nil:
+			s.metrics.ReviewFollowUpBatches.Inc(map[string]string{"outcome": "rejected"})
+		case result.Accepted && result.Replayed:
+			s.metrics.ReviewFollowUpBatches.Inc(map[string]string{"outcome": "replayed"})
+		case result.Accepted:
+			s.metrics.ReviewFollowUpBatches.Inc(map[string]string{"outcome": "accepted"})
+			s.metrics.ReviewFollowUpProposals.Add(float64(result.ProposalCount), nil)
+		}
+	}()
 	input.SourceTaskID = strings.TrimSpace(input.SourceTaskID)
 	input.LeaseID = strings.TrimSpace(input.LeaseID)
 	input.WorkerID = strings.TrimSpace(input.WorkerID)

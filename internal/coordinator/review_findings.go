@@ -38,6 +38,9 @@ type TaskReviewFinding struct {
 // use_existing_task), the target task, the originating check, and the finding
 // hash recorded when the action was applied.
 type TaskReviewFollowUp struct {
+	// Legacy marks rows written by the pre-batch singular endpoint. Those rows do
+	// not carry full finding text, source-job provenance, or organizer state.
+	Legacy bool   `json:"legacy"`
 	Action string `json:"action"`
 	// CheckName is the check whose review reported the finding.
 	CheckName string `json:"check_name"`
@@ -52,6 +55,93 @@ type TaskReviewFollowUp struct {
 	// recorded; it is absent if the relation has since been unlinked.
 	RelatedAt *time.Time `json:"related_at,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
+}
+
+// TaskReviewFollowUpDisposition is the human-reviewed terminal mapping for one
+// durable proposal occurrence. Target metadata is read live so the findings
+// ledger remains useful after the materialized task moves in the work graph.
+type TaskReviewFollowUpDisposition struct {
+	PlanRevisionID    string    `json:"plan_revision_id"`
+	SetRevision       int       `json:"set_revision"`
+	Disposition       string    `json:"disposition"`
+	ItemKey           string    `json:"item_key,omitempty"`
+	TargetTaskID      string    `json:"target_task_id,omitempty"`
+	TargetTaskTitle   string    `json:"target_task_title,omitempty"`
+	TargetFeatureID   string    `json:"target_feature_id,omitempty"`
+	TargetParentID    string    `json:"target_parent_id,omitempty"`
+	TargetBlockerIDs  []string  `json:"target_blocker_ids,omitempty"`
+	CanonicalProposal string    `json:"canonical_proposal_id,omitempty"`
+	Rationale         string    `json:"rationale"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+
+// TaskReviewFollowUpProposal preserves the exact accepted aggregation finding
+// and its suggestion. Disposition is absent while organizer review is pending.
+type TaskReviewFollowUpProposal struct {
+	ID                 string                         `json:"id"`
+	CommentIndex       int                            `json:"comment_index"`
+	FindingHash        string                         `json:"finding_hash"`
+	SHA                string                         `json:"sha"`
+	FilePath           string                         `json:"file_path"`
+	Line               int                            `json:"line"`
+	Body               string                         `json:"body"`
+	Severity           string                         `json:"severity"`
+	IntroducedByChange bool                           `json:"introduced_by_change"`
+	Requirement        string                         `json:"requirement"`
+	RequirementSource  string                         `json:"requirement_source"`
+	FindingBasis       string                         `json:"finding_basis"`
+	RemediationScope   string                         `json:"remediation_scope"`
+	ScopeRationale     string                         `json:"scope_rationale"`
+	FollowUp           string                         `json:"follow_up,omitempty"`
+	SuggestedAction    string                         `json:"suggested_action"`
+	SuggestedTitle     string                         `json:"suggested_title,omitempty"`
+	SuggestedBody      string                         `json:"suggested_body,omitempty"`
+	SuggestedTaskID    string                         `json:"suggested_task_id,omitempty"`
+	State              string                         `json:"state"`
+	Disposition        *TaskReviewFollowUpDisposition `json:"disposition,omitempty"`
+	CreatedAt          time.Time                      `json:"created_at"`
+}
+
+// TaskReviewFollowUpBatch is one immutable accepted aggregation delivery.
+type TaskReviewFollowUpBatch struct {
+	ID              string                       `json:"id"`
+	CheckName       string                       `json:"check_name"`
+	SourceJobID     string                       `json:"source_job_id"`
+	ReviewedHeadSHA string                       `json:"reviewed_head_sha"`
+	ReportSHA256    string                       `json:"report_sha256"`
+	State           string                       `json:"state"`
+	Proposals       []TaskReviewFollowUpProposal `json:"proposals"`
+	CreatedAt       time.Time                    `json:"created_at"`
+}
+
+// TaskReviewFollowUpPlan is the organizer plan bound to the set's active
+// revision. Historical dispositions retain their own plan revision IDs.
+type TaskReviewFollowUpPlan struct {
+	ID                     string `json:"id"`
+	SetRevision            int    `json:"set_revision"`
+	OrganizerWorkflowRunID string `json:"organizer_workflow_run_id,omitempty"`
+	ArtifactID             string `json:"artifact_id,omitempty"`
+	ArtifactSHA256         string `json:"artifact_sha256,omitempty"`
+	State                  string `json:"state"`
+	MaterializationError   string `json:"materialization_error,omitempty"`
+}
+
+// TaskReviewFollowUpSet groups all accepted review visits for one source
+// task/change/workflow lineage and carries the active organizer state.
+type TaskReviewFollowUpSet struct {
+	ID                   string                    `json:"id"`
+	SourceChangeID       string                    `json:"source_change_id"`
+	WorkflowRunID        string                    `json:"workflow_run_id"`
+	Revision             int                       `json:"revision"`
+	State                ReviewFollowUpSetState    `json:"state"`
+	OrganizerTaskID      string                    `json:"organizer_task_id,omitempty"`
+	OrganizerTaskTitle   string                    `json:"organizer_task_title,omitempty"`
+	ActivePlanArtifactID string                    `json:"active_plan_artifact_id,omitempty"`
+	LastError            string                    `json:"last_error,omitempty"`
+	Plan                 *TaskReviewFollowUpPlan   `json:"plan,omitempty"`
+	Batches              []TaskReviewFollowUpBatch `json:"batches"`
+	CreatedAt            time.Time                 `json:"created_at"`
+	UpdatedAt            time.Time                 `json:"updated_at"`
 }
 
 // TaskFindingsSummary counts the task's findings by resolution bucket. The
@@ -72,10 +162,11 @@ type TaskFindingsSummary struct {
 // findings: every review thread across all of the task's changes, every
 // deferred follow-up action, and bucket counts over both.
 type TaskFindingsRegistry struct {
-	TaskID    string
-	Findings  []TaskReviewFinding
-	FollowUps []TaskReviewFollowUp
-	Summary   TaskFindingsSummary
+	TaskID       string
+	Findings     []TaskReviewFinding
+	FollowUps    []TaskReviewFollowUp
+	FollowUpSets []TaskReviewFollowUpSet
+	Summary      TaskFindingsSummary
 }
 
 // TaskFindingsRegistry aggregates the review findings registry for one task:
@@ -98,9 +189,10 @@ func (s *ThreadService) TaskFindingsRegistry(ctx context.Context, taskID string)
 	}
 
 	registry := TaskFindingsRegistry{
-		TaskID:    taskID,
-		Findings:  []TaskReviewFinding{},
-		FollowUps: []TaskReviewFollowUp{},
+		TaskID:       taskID,
+		Findings:     []TaskReviewFinding{},
+		FollowUps:    []TaskReviewFollowUp{},
+		FollowUpSets: []TaskReviewFollowUpSet{},
 	}
 
 	rows, err := s.db.QueryContext(ctx, taskReviewFindingSelectSQL+`
@@ -143,14 +235,19 @@ ORDER BY f.created_at, f.finding_hash`, string(RelationRelatedTo), taskID)
 		return TaskFindingsRegistry{}, fmt.Errorf("close review follow-up rows: %w", err)
 	}
 
-	registry.Summary = summarizeTaskFindings(registry.Findings, registry.FollowUps)
+	registry.FollowUpSets, err = s.taskReviewFollowUpSets(ctx, taskID)
+	if err != nil {
+		return TaskFindingsRegistry{}, err
+	}
+
+	registry.Summary = summarizeTaskFindings(registry.Findings, registry.FollowUps, registry.FollowUpSets)
 	return registry, nil
 }
 
 // summarizeTaskFindings buckets every finding exactly once. Certified threads
 // are their own bucket; claimed threads split by claim kind; open and reopened
 // threads are unresolved; deferred-to-task counts the follow-up actions.
-func summarizeTaskFindings(findings []TaskReviewFinding, followUps []TaskReviewFollowUp) TaskFindingsSummary {
+func summarizeTaskFindings(findings []TaskReviewFinding, followUps []TaskReviewFollowUp, followUpSets []TaskReviewFollowUpSet) TaskFindingsSummary {
 	var summary TaskFindingsSummary
 	for _, finding := range findings {
 		switch finding.State {
@@ -175,6 +272,15 @@ func summarizeTaskFindings(findings []TaskReviewFinding, followUps []TaskReviewF
 		}
 	}
 	summary.DeferredToTask = len(followUps)
+	for _, set := range followUpSets {
+		for _, batch := range set.Batches {
+			for _, proposal := range batch.Proposals {
+				if proposal.Disposition != nil && proposal.Disposition.Disposition != string(ReviewFollowUpDispositionCoveredBySource) {
+					summary.DeferredToTask++
+				}
+			}
+		}
+	}
 	return summary
 }
 
@@ -307,12 +413,13 @@ SELECT
 FROM review_follow_up_actions f
 JOIN tasks t ON t.id = f.task_id
 LEFT JOIN work_item_relations r
-	ON r.source_item_id = f.source_task_id
-	AND r.target_item_id = f.task_id
-	AND r.kind = ?`
+	ON r.kind = ?
+	AND ((r.source_item_id = f.source_task_id AND r.target_item_id = f.task_id)
+		OR (r.source_item_id = f.task_id AND r.target_item_id = f.source_task_id))`
 
 func scanTaskReviewFollowUp(scanner taskScanner) (TaskReviewFollowUp, error) {
 	var followUp TaskReviewFollowUp
+	followUp.Legacy = true
 	var createdAt string
 	var relatedAt sql.NullString
 	if err := scanner.Scan(
@@ -339,4 +446,216 @@ func scanTaskReviewFollowUp(scanner taskScanner) (TaskReviewFollowUp, error) {
 		followUp.RelatedAt = &parsed
 	}
 	return followUp, nil
+}
+
+func (s *ThreadService) taskReviewFollowUpSets(ctx context.Context, taskID string) ([]TaskReviewFollowUpSet, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT s.id, s.source_change_id, s.workflow_run_id, s.revision, s.state,
+       COALESCE(s.organizer_task_id,''), COALESCE(ot.title,''),
+       COALESCE(s.active_plan_artifact_id,''), s.last_error,
+       COALESCE(pr.id,''), COALESCE(pr.set_revision,0),
+       COALESCE(pr.organizer_workflow_run_id,''), COALESCE(pr.plan_artifact_id,''),
+       COALESCE(pr.plan_sha256,''), COALESCE(pr.state,''), COALESCE(pr.materialization_error,''),
+       s.created_at, s.updated_at
+FROM review_follow_up_sets s
+LEFT JOIN tasks ot ON ot.id = s.organizer_task_id
+LEFT JOIN review_follow_up_plan_revisions pr ON pr.set_id = s.id AND pr.set_revision = s.revision
+WHERE s.source_task_id = ?
+ORDER BY s.created_at, s.id`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("list review follow-up sets: %w", err)
+	}
+	sets := []TaskReviewFollowUpSet{}
+	setIndexes := map[string]int{}
+	for rows.Next() {
+		var set TaskReviewFollowUpSet
+		var state, createdAt, updatedAt string
+		var plan TaskReviewFollowUpPlan
+		if err := rows.Scan(
+			&set.ID, &set.SourceChangeID, &set.WorkflowRunID, &set.Revision, &state,
+			&set.OrganizerTaskID, &set.OrganizerTaskTitle, &set.ActivePlanArtifactID, &set.LastError,
+			&plan.ID, &plan.SetRevision, &plan.OrganizerWorkflowRunID, &plan.ArtifactID,
+			&plan.ArtifactSHA256, &plan.State, &plan.MaterializationError, &createdAt, &updatedAt,
+		); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan review follow-up set: %w", err)
+		}
+		set.State = ReviewFollowUpSetState(state)
+		set.CreatedAt, err = parseTime(createdAt)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		set.UpdatedAt, err = parseTime(updatedAt)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if plan.ID != "" {
+			set.Plan = &plan
+		}
+		set.Batches = []TaskReviewFollowUpBatch{}
+		setIndexes[set.ID] = len(sets)
+		sets = append(sets, set)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterate review follow-up sets: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close review follow-up set rows: %w", err)
+	}
+	if len(sets) == 0 {
+		return sets, nil
+	}
+
+	batchRows, err := s.db.QueryContext(ctx, `
+SELECT b.id, b.set_id, b.check_name, b.source_job_id, b.reviewed_head_sha,
+       b.report_sha256, b.state, b.created_at
+FROM review_follow_up_batches b
+WHERE b.source_task_id = ?
+ORDER BY b.created_at, b.id`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("list review follow-up batches: %w", err)
+	}
+	batchLocations := map[string][2]int{}
+	for batchRows.Next() {
+		var batch TaskReviewFollowUpBatch
+		var setID, createdAt string
+		if err := batchRows.Scan(&batch.ID, &setID, &batch.CheckName, &batch.SourceJobID,
+			&batch.ReviewedHeadSHA, &batch.ReportSHA256, &batch.State, &createdAt); err != nil {
+			batchRows.Close()
+			return nil, fmt.Errorf("scan review follow-up batch: %w", err)
+		}
+		batch.CreatedAt, err = parseTime(createdAt)
+		if err != nil {
+			batchRows.Close()
+			return nil, err
+		}
+		batch.Proposals = []TaskReviewFollowUpProposal{}
+		setIndex, ok := setIndexes[setID]
+		if !ok {
+			batchRows.Close()
+			return nil, fmt.Errorf("review follow-up batch %s references unprojected set %s", batch.ID, setID)
+		}
+		batchIndex := len(sets[setIndex].Batches)
+		sets[setIndex].Batches = append(sets[setIndex].Batches, batch)
+		batchLocations[batch.ID] = [2]int{setIndex, batchIndex}
+	}
+	if err := batchRows.Err(); err != nil {
+		batchRows.Close()
+		return nil, fmt.Errorf("iterate review follow-up batches: %w", err)
+	}
+	if err := batchRows.Close(); err != nil {
+		return nil, fmt.Errorf("close review follow-up batch rows: %w", err)
+	}
+
+	proposalRows, err := s.db.QueryContext(ctx, `
+SELECT p.id, p.batch_id, p.comment_index, p.finding_hash, p.sha, p.file_path, p.line,
+       p.body, p.severity, p.introduced_by_change, p.requirement, p.requirement_source,
+       p.finding_basis, p.remediation_scope, p.scope_rationale, p.follow_up,
+       p.suggested_action, p.suggested_title, p.suggested_body, p.suggested_task_id,
+       p.state, p.created_at,
+       COALESCE(d.plan_revision_id,''), COALESCE(pr.set_revision,0), COALESCE(d.disposition,''),
+       COALESCE(d.item_key,''), COALESCE(d.target_task_id,''), COALESCE(tt.title,''),
+       COALESCE(tt.feature_id,''),
+       COALESCE((SELECT r.source_item_id FROM work_item_relations r WHERE r.kind = 'parent_of' AND r.target_item_id = d.target_task_id LIMIT 1), ''),
+       COALESCE(d.canonical_proposal_id,''), COALESCE(d.rationale,''), COALESCE(d.created_at,'')
+FROM review_follow_up_proposals p
+JOIN review_follow_up_batches b ON b.id = p.batch_id
+LEFT JOIN review_follow_up_dispositions d ON d.proposal_id = p.id
+LEFT JOIN review_follow_up_plan_revisions pr ON pr.id = d.plan_revision_id
+LEFT JOIN tasks tt ON tt.id = d.target_task_id
+WHERE b.source_task_id = ?
+ORDER BY b.created_at, b.id, p.comment_index`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("list review follow-up proposals: %w", err)
+	}
+	for proposalRows.Next() {
+		var proposal TaskReviewFollowUpProposal
+		var batchID, createdAt string
+		var disposition TaskReviewFollowUpDisposition
+		var dispositionCreatedAt string
+		if err := proposalRows.Scan(
+			&proposal.ID, &batchID, &proposal.CommentIndex, &proposal.FindingHash, &proposal.SHA,
+			&proposal.FilePath, &proposal.Line, &proposal.Body, &proposal.Severity,
+			&proposal.IntroducedByChange, &proposal.Requirement, &proposal.RequirementSource,
+			&proposal.FindingBasis, &proposal.RemediationScope, &proposal.ScopeRationale,
+			&proposal.FollowUp, &proposal.SuggestedAction, &proposal.SuggestedTitle,
+			&proposal.SuggestedBody, &proposal.SuggestedTaskID, &proposal.State, &createdAt,
+			&disposition.PlanRevisionID, &disposition.SetRevision, &disposition.Disposition,
+			&disposition.ItemKey, &disposition.TargetTaskID, &disposition.TargetTaskTitle,
+			&disposition.TargetFeatureID, &disposition.TargetParentID,
+			&disposition.CanonicalProposal, &disposition.Rationale, &dispositionCreatedAt,
+		); err != nil {
+			proposalRows.Close()
+			return nil, fmt.Errorf("scan review follow-up proposal: %w", err)
+		}
+		proposal.CreatedAt, err = parseTime(createdAt)
+		if err != nil {
+			proposalRows.Close()
+			return nil, err
+		}
+		if disposition.PlanRevisionID != "" {
+			disposition.CreatedAt, err = parseTime(dispositionCreatedAt)
+			if err != nil {
+				proposalRows.Close()
+				return nil, err
+			}
+			proposal.Disposition = &disposition
+		}
+		location, ok := batchLocations[batchID]
+		if !ok {
+			proposalRows.Close()
+			return nil, fmt.Errorf("review follow-up proposal %s references unprojected batch %s", proposal.ID, batchID)
+		}
+		batch := &sets[location[0]].Batches[location[1]]
+		batch.Proposals = append(batch.Proposals, proposal)
+	}
+	if err := proposalRows.Err(); err != nil {
+		proposalRows.Close()
+		return nil, fmt.Errorf("iterate review follow-up proposals: %w", err)
+	}
+	if err := proposalRows.Close(); err != nil {
+		return nil, fmt.Errorf("close review follow-up proposal rows: %w", err)
+	}
+
+	blockerRows, err := s.db.QueryContext(ctx, `
+SELECT DISTINCT d.target_task_id, r.source_item_id
+FROM review_follow_up_dispositions d
+JOIN review_follow_up_proposals p ON p.id = d.proposal_id
+JOIN review_follow_up_batches b ON b.id = p.batch_id
+JOIN work_item_relations r ON r.target_item_id = d.target_task_id AND r.kind = 'blocks'
+WHERE b.source_task_id = ?
+ORDER BY d.target_task_id, r.source_item_id`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("list review follow-up target blockers: %w", err)
+	}
+	blockersByTarget := map[string][]string{}
+	for blockerRows.Next() {
+		var targetID, blockerID string
+		if err := blockerRows.Scan(&targetID, &blockerID); err != nil {
+			blockerRows.Close()
+			return nil, fmt.Errorf("scan review follow-up target blocker: %w", err)
+		}
+		blockersByTarget[targetID] = append(blockersByTarget[targetID], blockerID)
+	}
+	if err := blockerRows.Err(); err != nil {
+		blockerRows.Close()
+		return nil, fmt.Errorf("iterate review follow-up target blockers: %w", err)
+	}
+	if err := blockerRows.Close(); err != nil {
+		return nil, fmt.Errorf("close review follow-up target blocker rows: %w", err)
+	}
+	for setIndex := range sets {
+		for batchIndex := range sets[setIndex].Batches {
+			for proposalIndex := range sets[setIndex].Batches[batchIndex].Proposals {
+				disposition := sets[setIndex].Batches[batchIndex].Proposals[proposalIndex].Disposition
+				if disposition != nil {
+					disposition.TargetBlockerIDs = append([]string(nil), blockersByTarget[disposition.TargetTaskID]...)
+				}
+			}
+		}
+	}
+	return sets, nil
 }

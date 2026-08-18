@@ -384,6 +384,7 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 	// best-effort (emission never fails its triggering mutation).
 	eventLog := coordinator.NewEventLogService(db)
 	tasks.SetEventLog(eventLog)
+	tasks.SetWorkflowMetrics(r.workflowMetrics)
 	epics.SetEventLog(eventLog)
 	workflowRuns.SetEventLog(eventLog)
 	features.SetEventLog(eventLog)

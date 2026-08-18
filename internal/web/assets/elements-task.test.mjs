@@ -420,8 +420,8 @@ test("satisfied check rows still show the duration next to block details", () =>
 // --- findings registry ------------------------------------------------------
 
 function findingsRegistry(overrides = {}) {
-  const { findings = [], follow_ups = [], summary = {} } = overrides;
-  return { findings, follow_ups, summary };
+  const { findings = [], follow_ups = [], follow_up_sets = [], summary = {} } = overrides;
+  return { findings, follow_ups, follow_up_sets, summary };
 }
 
 test("the findings view renders one row per finding with resolution labels and summary counts", () => {
@@ -481,11 +481,58 @@ test("deferred follow-up findings render links to their target tasks", () => {
   assert.match(html, /Handle lint fallout/);
   assert.match(html, /t-0099/);
   // The follow-ups section only appears when something was deferred.
-  assert.match(html, /<h4>Follow-ups<\/h4>/);
+  assert.match(html, /<h4>Legacy follow-ups<\/h4>/);
   const noDeferrals = renderFindings({
     findings: findingsRegistry({ findings: [{ id: "th-1", state: "open", finding: "x" }], summary: { unresolved: 1 } }),
   });
   assert.doesNotMatch(noDeferrals, /Follow-ups/);
+});
+
+test("organized review follow-up sets render provenance, plans, dispositions, targets, and errors", () => {
+  const html = renderFindings({
+    projectID: "p-1",
+    findings: findingsRegistry({
+      follow_up_sets: [{
+        id: "rfus-1", source_change_id: "ch-1", revision: 3, state: "attention",
+        organizer_task_id: "t-organizer", organizer_task_title: "Organize follow-ups",
+        active_plan_artifact_id: "wa-plan", last_error: "materialization needs retry",
+        plan: { id: "rfpr-3", state: "failed" },
+        batches: [{
+          id: "rfub-1", check_name: "review.aggregate.node.1", source_job_id: "j-review",
+          reviewed_head_sha: "1234567890abcdef", proposals: [{
+            id: "rfp-1", file_path: "src/a.go", line: 14, severity: "medium", body: "**durable** concern",
+            suggested_action: "create_task", suggested_title: "Proposed fix", suggested_body: "Implement **carefully**.",
+            disposition: {
+              disposition: "use_existing_task", target_task_id: "t-42", target_task_title: "Existing fix",
+              target_feature_id: "f-1", target_parent_id: "e-1", target_blocker_ids: ["t-10"],
+              rationale: "Same root issue",
+            },
+          }, {
+            id: "rfp-2", file_path: "src/b.go", line: 2, severity: "low", body: "pending concern",
+            suggested_action: "use_existing_task", suggested_task_id: "t-84", suggested_title: "Prior fix",
+          }],
+        }],
+      }],
+    }),
+  });
+  assert.match(html, /data-follow-up-set="rfus-1" data-state="attention"/);
+  assert.match(html, /revision 3 · plan failed/);
+  assert.match(html, /href="\/ui\/tasks\/t-organizer" data-link/);
+  assert.match(html, /wa-plan/);
+  assert.match(html, /materialization needs retry/);
+  assert.match(html, /review\.aggregate\.node\.1 · job j-review · head 1234567890ab/);
+  assert.match(html, /href="\/ui\/changes\/ch-1" data-link>src\/a\.go:14/);
+  assert.match(html, /<strong>durable<\/strong> concern/);
+  assert.match(html, /data-suggested-action="create_task"/);
+  assert.match(html, /Suggested new task<\/strong> · Proposed fix/);
+  assert.match(html, /Implement <strong>carefully<\/strong>\./);
+  assert.match(html, /data-suggested-action="use_existing_task"/);
+  assert.match(html, /href="\/ui\/tasks\/t-84" data-link>Prior fix<\/a>/);
+  assert.match(html, /data-disposition="use_existing_task"/);
+  assert.match(html, /reused existing task/);
+  assert.match(html, /href="\/ui\/tasks\/t-42" data-link/);
+  assert.match(html, /feature f-1 · parent e-1 · blocked by t-10/);
+  assert.match(html, /Awaiting organizer disposition/);
 });
 
 test("an empty findings registry renders the empty state, not an error", () => {

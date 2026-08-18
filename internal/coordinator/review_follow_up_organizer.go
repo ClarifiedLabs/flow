@@ -107,6 +107,15 @@ WHERE s.state = 'open' AND EXISTS (
 )`, nowText); err != nil {
 		return err
 	}
+	// Setup errors are retryable and have no active organizer task. Keep the
+	// durable attention/error state between ticks, then reopen it here so a
+	// repaired flow, database, or scheduler can resume the reserved revision.
+	if _, err := e.db.ExecContext(ctx, `
+UPDATE review_follow_up_sets
+SET state = 'organizer_pending', last_error = '', updated_at = ?
+WHERE state = 'attention' AND organizer_task_id IS NULL`, nowText); err != nil {
+		return err
+	}
 	rows, err := e.db.QueryContext(ctx, `
 SELECT id, source_task_id, source_change_id, workflow_run_id, revision
 FROM review_follow_up_sets
@@ -191,7 +200,11 @@ WHERE id = ? AND organizer_task_id IS NULL`, organizerTaskID, formatTime(e.tasks
 		return err
 	}
 	if currentRevision != set.Revision || currentState != string(ReviewFollowUpSetOrganizerPending) {
-		_, _ = e.db.ExecContext(ctx, `UPDATE review_follow_up_plan_revisions SET state = 'stale', updated_at = ? WHERE id = ?`, formatTime(e.tasks.now().UTC()), planID)
+		result, staleErr := e.db.ExecContext(ctx, `UPDATE review_follow_up_plan_revisions SET state = 'stale', updated_at = ? WHERE id = ? AND state <> 'stale'`, formatTime(e.tasks.now().UTC()), planID)
+		if staleErr != nil {
+			return staleErr
+		}
+		e.recordReviewFollowUpOrganizerOutcome(result, "stale")
 		return nil
 	}
 
@@ -223,8 +236,15 @@ WHERE id = ? AND revision = ? AND state = 'organizer_pending'`, organizerTaskID,
 		return err
 	}
 	if updated == 0 {
-		_, _ = tx.ExecContext(ctx, `UPDATE review_follow_up_plan_revisions SET state = 'stale', updated_at = ? WHERE id = ?`, nowText, planID)
-		return tx.Commit(ctx)
+		result, staleErr := tx.ExecContext(ctx, `UPDATE review_follow_up_plan_revisions SET state = 'stale', updated_at = ? WHERE id = ? AND state <> 'stale'`, nowText, planID)
+		if staleErr != nil {
+			return staleErr
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		e.recordReviewFollowUpOrganizerOutcome(result, "stale")
+		return nil
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE review_follow_up_plan_revisions
@@ -331,8 +351,7 @@ WHERE pr.set_id = ? ORDER BY pr.set_revision, d.proposal_id`, set.ID)
 SELECT t.id, t.title, COALESCE(t.lifecycle_state,'unscheduled'), t.created_by,
        COALESCE(t.feature_id,''),
        COALESCE((SELECT r.source_item_id FROM work_item_relations r WHERE r.kind = 'parent_of' AND r.target_item_id = t.id LIMIT 1), ''),
-       COALESCE((SELECT c.branch FROM changes c WHERE c.task_id = t.id ORDER BY c.created_at DESC LIMIT 1), ''),
-       COALESCE((SELECT group_concat(r.source_item_id, ',') FROM work_item_relations r WHERE r.kind = 'blocks' AND r.target_item_id = t.id), '')
+       COALESCE((SELECT c.branch FROM changes c WHERE c.task_id = t.id ORDER BY c.created_at DESC LIMIT 1), '')
 FROM tasks t
 WHERE t.id <> ? AND t.lifecycle_state IS NOT 'done'
 ORDER BY t.updated_at DESC, t.id LIMIT 100`, set.SourceTaskID)
@@ -342,7 +361,7 @@ ORDER BY t.updated_at DESC, t.id LIMIT 100`, set.SourceTaskID)
 	for rows.Next() {
 		var candidate reviewFollowUpCandidateTask
 		if err := rows.Scan(&candidate.ID, &candidate.Title, &candidate.State, &candidate.CreatedBy,
-			&candidate.FeatureID, &candidate.ParentID, &candidate.Branch, &candidate.Blockers); err != nil {
+			&candidate.FeatureID, &candidate.ParentID, &candidate.Branch); err != nil {
 			rows.Close()
 			return "", err
 		}
@@ -350,6 +369,35 @@ ORDER BY t.updated_at DESC, t.id LIMIT 100`, set.SourceTaskID)
 	}
 	if err := rows.Close(); err != nil {
 		return "", err
+	}
+	candidateIndexes := make(map[string]int, len(organizerContext.CandidateTasks))
+	for index, candidate := range organizerContext.CandidateTasks {
+		candidateIndexes[candidate.ID] = index
+	}
+	rows, err = e.db.QueryContext(ctx, `
+SELECT target_item_id, source_item_id
+FROM work_item_relations
+WHERE kind = 'blocks'
+ORDER BY target_item_id, source_item_id`)
+	if err != nil {
+		return "", err
+	}
+	candidateBlockers := map[string][]string{}
+	for rows.Next() {
+		var targetID, blockerID string
+		if err := rows.Scan(&targetID, &blockerID); err != nil {
+			rows.Close()
+			return "", err
+		}
+		if _, found := candidateIndexes[targetID]; found {
+			candidateBlockers[targetID] = append(candidateBlockers[targetID], blockerID)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return "", err
+	}
+	for targetID, blockers := range candidateBlockers {
+		organizerContext.CandidateTasks[candidateIndexes[targetID]].Blockers = strings.Join(blockers, ",")
 	}
 	transitions, err := workflowTransitionsForProjection(ctx, e.db, set.WorkflowRunID)
 	if err == nil {
@@ -366,18 +414,29 @@ func (e *WorkflowExecutor) markReviewFollowUpOrganizerAttention(ctx context.Cont
 	message = truncateUTF8Bytes(strings.TrimSpace(message), 4096, "…")
 	cause := errors.New(message)
 	nowText := formatTime(e.tasks.now().UTC())
-	_, err := e.db.ExecContext(ctx, `
+	result, err := e.db.ExecContext(ctx, `
 UPDATE review_follow_up_sets
 SET state = 'attention', last_error = ?, updated_at = ?
-WHERE id = ? AND revision = ?`, message, nowText, setID, revision)
+WHERE id = ? AND revision = ? AND (state <> 'attention' OR last_error <> ?)`, message, nowText, setID, revision, message)
 	if err != nil {
 		return errors.Join(cause, err)
 	}
+	e.recordReviewFollowUpOrganizerOutcome(result, "failed")
 	_, err = e.db.ExecContext(ctx, `
 UPDATE review_follow_up_plan_revisions
 SET state = 'failed', materialization_error = ?, updated_at = ?
 WHERE set_id = ? AND set_revision = ?`, message, nowText, setID, revision)
 	return errors.Join(cause, err)
+}
+
+func (e *WorkflowExecutor) recordReviewFollowUpOrganizerOutcome(result sql.Result, outcome string) {
+	if result == nil || e.runs == nil || e.runs.metrics == nil {
+		return
+	}
+	updated, err := result.RowsAffected()
+	if err == nil && updated > 0 {
+		e.runs.metrics.ReviewFollowUpOrganizerRuns.Inc(map[string]string{"outcome": outcome})
+	}
 }
 
 func (s *TaskService) markReviewFollowUpOrganizerTaskState(ctx context.Context, organizerTaskID string, state ReviewFollowUpSetState, message string) error {
@@ -389,13 +448,24 @@ func (s *TaskService) markReviewFollowUpOrganizerTaskState(ctx context.Context, 
 	case ReviewFollowUpSetAttention:
 		planState = "failed"
 	}
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 UPDATE review_follow_up_sets
 SET state = ?, last_error = ?, updated_at = ?
-WHERE organizer_task_id = ? AND state NOT IN ('materialized', 'closed')`,
-		string(state), message, formatTime(s.now().UTC()), strings.TrimSpace(organizerTaskID))
+WHERE organizer_task_id = ? AND state NOT IN ('materialized', 'closed')
+  AND (state <> ? OR last_error <> ?)`,
+		string(state), message, formatTime(s.now().UTC()), strings.TrimSpace(organizerTaskID), string(state), message)
 	if err != nil {
 		return err
+	}
+	if s.metrics != nil && state == ReviewFollowUpSetAttention {
+		updated, rowsErr := result.RowsAffected()
+		if rowsErr == nil && updated > 0 {
+			outcome := "failed"
+			if message == "organizer plan was rejected" {
+				outcome = "rejected"
+			}
+			s.metrics.ReviewFollowUpOrganizerRuns.Inc(map[string]string{"outcome": outcome})
+		}
 	}
 	_, err = s.db.ExecContext(ctx, `
 UPDATE review_follow_up_plan_revisions

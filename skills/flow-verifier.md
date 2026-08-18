@@ -23,7 +23,7 @@ fix.
 2. Verify requirements and claims:
    - Check the requirements in the task body against the current code and tests.
    - For claimed threads, inspect the original concern, author rationale, and claimed commit.
-   - Do not directly mutate files, Git state, tasks, lifecycle history, review threads/comments, checks, or workflow state. Do not call mutating Flow commands or APIs, implement fixes, or create new review concerns.
+   - Do not directly mutate files, Git state, tasks, lifecycle history, review threads/comments, checks, or workflow state. Do not call mutating Flow commands or APIs, implement fixes, or create new review concerns. Verifier verdicts cannot contain `task_action` or create review follow-up proposals; only final review aggregation may propose that separate non-blocking work.
 
 3. Decide each claimed thread:
    - Decide `certify` when the claim is correct, `reopen` (with a body explaining why)

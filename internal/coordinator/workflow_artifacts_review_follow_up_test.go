@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
+	flowmetrics "github.com/ClarifiedLabs/flow/internal/metrics"
 )
 
 func TestDecodeTaskSetManifestReviewFollowUpValidation(t *testing.T) {
@@ -60,12 +61,16 @@ type organizerArtifactFixture struct {
 	setID, planID               string
 	proposalIDs                 []string
 	config                      MaterializeTaskSetNodeConfig
+	metrics                     *flowmetrics.Registry
 }
 
 func newOrganizerArtifactFixture(t *testing.T) organizerArtifactFixture {
 	t.Helper()
 	ctx := context.Background()
 	store, tasks := newTaskService(t, filepath.Join(t.TempDir(), "flow.db"))
+	tasks.SetEventLog(NewEventLogService(store.DB()))
+	metricRegistry := flowmetrics.New()
+	tasks.SetWorkflowMetrics(flowmetrics.RegisterWorkflow(metricRegistry))
 	globalStore, err := flowdb.OpenGlobal(ctx, filepath.Join(t.TempDir(), "global.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -169,7 +174,7 @@ VALUES (?, ?, 1, ?, ?, 'organizing', ?, ?)`, planID, setID, organizer.ID, runID,
 	}
 	return organizerArtifactFixture{ctx: ctx, store: store, tasks: tasks, artifacts: NewWorkflowArtifactService(store.DB(), tasks),
 		source: source, organizer: organizer, existing: existing, runID: runID, nodeRunID: nodeRunID,
-		setID: setID, planID: planID, proposalIDs: proposalIDs, config: config}
+		setID: setID, planID: planID, proposalIDs: proposalIDs, config: config, metrics: metricRegistry}
 }
 
 func (f organizerArtifactFixture) createArtifact(t *testing.T) WorkflowArtifact {
@@ -179,7 +184,7 @@ func (f organizerArtifactFixture) createArtifact(t *testing.T) WorkflowArtifact 
 			{Key: "created", Kind: WorkItemTask, Title: "Consolidated fix", Body: "Implement the consolidated review follow-up."},
 			{Key: "existing", Kind: WorkItemTask, ExistingTaskID: f.existing.ID},
 		},
-		Dependencies: []TaskSetDependency{{Blocker: "created", Blocked: "existing"}},
+		Dependencies: []TaskSetDependency{{Blocker: "existing", Blocked: "created"}},
 		ReviewFollowUp: &TaskSetReviewFollowUp{SetID: f.setID, SetRevision: 1, Assignments: []TaskSetReviewFollowUpAssignment{
 			{ProposalID: f.proposalIDs[0], Disposition: ReviewFollowUpDispositionCreateTask, ItemKey: "created", Rationale: "one consolidated task"},
 			{ProposalID: f.proposalIDs[1], Disposition: ReviewFollowUpDispositionUseExistingTask, TargetTaskID: f.existing.ID, Rationale: "already tracked"},
@@ -223,11 +228,21 @@ func TestReviewFollowUpTaskSetMaterializesExistingReferencesDispositionsAndRepla
 	if err := f.store.DB().QueryRow(`SELECT COUNT(*) FROM review_follow_up_proposals WHERE state = 'dispositioned'`).Scan(&dispositioned); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.store.DB().QueryRow(`SELECT COUNT(*) FROM work_item_relations WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, created.ID, f.existing.ID).Scan(&blocks); err != nil {
+	if err := f.store.DB().QueryRow(`SELECT COUNT(*) FROM work_item_relations WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, f.existing.ID, created.ID).Scan(&blocks); err != nil {
 		t.Fatal(err)
 	}
 	if dispositions != 2 || dispositioned != 2 || blocks != 1 {
 		t.Fatalf("dispositions/proposals/blocks = %d/%d/%d", dispositions, dispositioned, blocks)
+	}
+	var taskCreatedEvents, relationEvents int
+	if err := f.store.DB().QueryRow(`SELECT COUNT(*) FROM event_log WHERE kind = ? AND task_id = ?`, EventTaskCreated, created.ID).Scan(&taskCreatedEvents); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.DB().QueryRow(`SELECT COUNT(*) FROM event_log WHERE kind = ?`, EventRelationLinked).Scan(&relationEvents); err != nil {
+		t.Fatal(err)
+	}
+	if taskCreatedEvents != 1 || relationEvents != 3 {
+		t.Fatalf("materialization task.created/relation.linked events = %d/%d, want 1/3", taskCreatedEvents, relationEvents)
 	}
 	var planState, setState string
 	if err := f.store.DB().QueryRow(`SELECT state FROM review_follow_up_plan_revisions WHERE id = ?`, f.planID).Scan(&planState); err != nil {
@@ -238,6 +253,24 @@ func TestReviewFollowUpTaskSetMaterializesExistingReferencesDispositionsAndRepla
 	}
 	if planState != "materialized" || setState != "materialized" {
 		t.Fatalf("plan/set states = %s/%s", planState, setState)
+	}
+	registry, err := NewThreadService(f.store.DB()).TaskFindingsRegistry(f.ctx, f.source.ID)
+	if err != nil {
+		t.Fatalf("load source findings registry: %v", err)
+	}
+	if len(registry.FollowUpSets) != 1 || registry.FollowUpSets[0].ID != f.setID ||
+		registry.FollowUpSets[0].Plan == nil || registry.FollowUpSets[0].Plan.ArtifactID != artifact.ID ||
+		len(registry.FollowUpSets[0].Batches) != 1 || len(registry.FollowUpSets[0].Batches[0].Proposals) != 2 {
+		t.Fatalf("organized follow-up registry = %+v", registry.FollowUpSets)
+	}
+	proposals := registry.FollowUpSets[0].Batches[0].Proposals
+	if proposals[0].Disposition == nil || proposals[0].Disposition.TargetTaskID != created.ID ||
+		len(proposals[0].Disposition.TargetBlockerIDs) != 1 || proposals[0].Disposition.TargetBlockerIDs[0] != f.existing.ID ||
+		proposals[1].Disposition == nil || proposals[1].Disposition.TargetTaskID != f.existing.ID {
+		t.Fatalf("organized proposal dispositions = %+v", proposals)
+	}
+	if registry.Summary.DeferredToTask != 2 {
+		t.Fatalf("organized deferred summary = %d, want 2", registry.Summary.DeferredToTask)
 	}
 	second, replayed, err := f.artifacts.MaterializeTaskSet(f.ctx, artifact.ID, f.config)
 	if err != nil || !replayed || second.TaskIDs["created"] != created.ID {
@@ -252,6 +285,20 @@ func TestReviewFollowUpTaskSetMaterializesExistingReferencesDispositionsAndRepla
 	}
 	if tasks != 4 || dispositions != 2 || blocks != 1 || relations != 3 {
 		t.Fatalf("post-replay tasks/dispositions/blocks/relations = %d/%d/%d/%d", tasks, dispositions, blocks, relations)
+	}
+	var metrics strings.Builder
+	f.metrics.Render(&metrics)
+	for _, want := range []string{
+		`flow_review_follow_up_materializations_total{outcome="completed"} 1`,
+		`flow_review_follow_up_materializations_total{outcome="replayed"} 1`,
+		`flow_review_follow_up_plan_outcomes_total{outcome="created"} 1`,
+		`flow_review_follow_up_plan_outcomes_total{outcome="reused"} 1`,
+		`flow_review_follow_up_organizer_runs_total{outcome="completed"} 1`,
+		`flow_review_follow_up_dependency_blocked_tasks_total 1`,
+	} {
+		if !strings.Contains(metrics.String(), want) {
+			t.Errorf("materialization metrics missing %q:\n%s", want, metrics.String())
+		}
 	}
 }
 

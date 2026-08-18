@@ -734,10 +734,11 @@ type ThreadsResponse struct {
 // thread across the task's changes, every deferred follow-up action, and
 // resolution-bucket counts over both.
 type TaskFindingsResponse struct {
-	TaskID    string                           `json:"task_id"`
-	Findings  []coordinator.TaskReviewFinding  `json:"findings"`
-	FollowUps []coordinator.TaskReviewFollowUp `json:"follow_ups"`
-	Summary   coordinator.TaskFindingsSummary  `json:"summary"`
+	TaskID       string                              `json:"task_id"`
+	Findings     []coordinator.TaskReviewFinding     `json:"findings"`
+	FollowUps    []coordinator.TaskReviewFollowUp    `json:"follow_ups"`
+	FollowUpSets []coordinator.TaskReviewFollowUpSet `json:"follow_up_sets"`
+	Summary      coordinator.TaskFindingsSummary     `json:"summary"`
 }
 
 type StatusResponse struct {

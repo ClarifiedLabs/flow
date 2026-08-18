@@ -255,6 +255,19 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	return err
 }
 
+func relationEventTaskIDTx(ctx context.Context, q workItemRelationQuerier, sourceID, targetID string) string {
+	var taskID string
+	err := q.QueryRowContext(ctx, `
+SELECT id FROM work_items
+WHERE kind = 'task' AND id IN (?, ?)
+ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END
+LIMIT 1`, sourceID, targetID, targetID).Scan(&taskID)
+	if err != nil {
+		return ""
+	}
+	return taskID
+}
+
 // eventLogExecer is the transactional SQL surface AppendTx writes through;
 // *sql.Tx and sqlitex.Tx both satisfy it.
 type eventLogExecer interface {
@@ -296,5 +309,3 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	}
 	return event, nil
 }
-
-

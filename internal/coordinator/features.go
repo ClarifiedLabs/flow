@@ -489,6 +489,35 @@ INSERT INTO features (
 	if err != nil {
 		return Feature{}, err
 	}
+	if _, err := s.eventLog.AppendTx(ctx, tx, Event{
+		Kind:    EventFeatureCreated,
+		Actor:   storedCreatedBy,
+		Payload: eventPayload(map[string]any{"feature_id": id, "title": input.Title}),
+	}); err != nil {
+		slog.Warn("event log append failed", "error", err)
+	}
+	emitRelationEvent := func(sourceID, targetID string, kind RelationKind, actor Actor) {
+		if _, eventErr := s.eventLog.AppendTx(ctx, tx, Event{
+			Kind: EventRelationLinked, Actor: string(actor), TaskID: relationEventTaskIDTx(ctx, tx, sourceID, targetID),
+			Payload: eventPayload(map[string]any{"source": sourceID, "target": targetID, "relation": string(kind)}),
+		}); eventErr != nil {
+			slog.Warn("event log append failed", "error", eventErr)
+		}
+	}
+	if parentPlan.ParentItemID != "" {
+		parentActor := Actor(storedCreatedBy)
+		if parentPlan.parentFromRelation {
+			parentActor = parentPlan.parentCreatedBy
+		}
+		emitRelationEvent(parentPlan.ParentItemID, id, RelationParentOf, parentActor)
+	}
+	for _, relation := range parentPlan.Relations {
+		if relation.Kind == RelationParentOf && relation.TargetIsNewItem {
+			continue
+		}
+		sourceID, targetID := resolveCreateRelation(id, relation)
+		emitRelationEvent(sourceID, targetID, relation.Kind, relation.CreatedBy)
+	}
 	if err := reconcileEpicAncestorsTx(ctx, tx, touched, s.now().UTC()); err != nil {
 		return Feature{}, err
 	}
@@ -501,13 +530,6 @@ INSERT INTO features (
 	}
 	if updated != 1 {
 		return Feature{}, errors.New("feature creation intent changed while finalizing")
-	}
-	if _, err := s.eventLog.AppendTx(ctx, tx, Event{
-		Kind:    EventFeatureCreated,
-		Actor:   storedCreatedBy,
-		Payload: eventPayload(map[string]any{"feature_id": id, "title": input.Title}),
-	}); err != nil {
-		slog.Warn("event log append failed", "error", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Feature{}, err

@@ -338,6 +338,22 @@ cardinality:
 | `flow_review_scope_decision_reruns_total{kind}` | aggregation-only or full-discovery reruns |
 | `flow_review_scope_decision_rejections_total{reason}` | repeated-key or attempt-limit rejections |
 
+Review follow-up batching and organizer metrics are also bounded enums or
+unlabelled totals; they never attach task, set, batch, proposal, job, or run IDs:
+
+| Metric | Meaning |
+| --- | --- |
+| `flow_review_follow_up_batches_total{outcome}` | batch ingestion outcomes: `accepted`, `replayed`, or `rejected` |
+| `flow_review_follow_up_proposals_accepted_total` | proposal occurrences durably accepted |
+| `flow_review_follow_up_plan_outcomes_total{outcome}` | materialized proposal mappings: `created`, `reused`, `merged`, `discarded`, or `covered` |
+| `flow_review_follow_up_organizer_runs_total{outcome}` | organizer outcomes: `completed`, `rejected`, `failed`, or `stale` |
+| `flow_review_follow_up_materializations_total{outcome}` | task-set attempts: `completed`, `replayed`, or `failed` |
+| `flow_review_follow_up_dependency_blocked_tasks_total` | newly generated tasks with declared dependency blockers |
+
+Alert on sustained `rejected`, `failed`, `stale`, or set `attention` behavior and
+inspect the source task's Findings tab for the retryable durable error. These
+failures do not mean the reviewed source change was blocked.
+
 ## History durability for capacity workers
 
 `flow-server` stores its SQLite databases and the default local history blob

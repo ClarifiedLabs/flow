@@ -633,9 +633,10 @@ closes, the final aggregator receives those persisted results as **Candidate
 Reports** and writes one aggregate verdict. The aggregator is distinct from a
 standalone reviewer, which reviews directly without Candidate Reports, but
 neither mutates project state itself: only the worker/coordinator applies eligible
-thread comments, declared follow-up task actions, thread decisions, and workflow
-outcomes. `verify_change` uses the same verdict-only write boundary for verifier
-thread decisions.
+thread comments, captures declared follow-up proposals, applies thread decisions,
+and records workflow outcomes. `verify_change` uses the same verdict-only write
+boundary for verifier thread decisions; verifier jobs cannot submit follow-up
+proposals.
 
 Reviewer comments carry four required scope fields: `requirement_source`
 (`explicit|inferred`), `finding_basis` (`explicit_requirement`,
@@ -651,6 +652,24 @@ head movement invalidates the wait and queues full discovery on a refreshed
 change artifact. Three accepted decision rounds are allowed per change-review
 node run; repeated active decision keys and a fourth round become ordinary
 errored-check recovery waits.
+
+A final aggregation report's non-blocking `task_action` occurrences are ingested
+as one all-or-nothing immutable batch, authenticated from the worker lease rather
+than caller-supplied provenance. Batches from repeated visits accumulate in one
+revisioned follow-up set for the source task/change/run. Approval only marks that
+set pending: a lifecycle reconciler creates a separate system-owned organizer
+task and schedules the dedicated organizer planning graph, so organizer errors
+cannot veto source delivery. Its task-set artifact requires human review and must
+account for each active proposal with create/reuse/merge/covered/duplicate
+semantics before trusted materialization records dispositions and target tasks.
+
+Organizer dependencies are ordinary `blocks` relations and affect task readiness;
+they are not review blockers. Plans cannot target the reviewed source with a
+blocker, cannot depend on late blockers to stop already-running work, and may only
+reuse open project-local tasks. Exact artifact replay returns the original
+materialization result. Normal `task.created` and `relation.linked` events are
+emitted for generated work, and the task findings projection retains both the
+new batch ledger and provenance-limited legacy singular rows.
 
 Durable owner rulings are an orthogonal run input rather than mutable task text.
 All active rulings apply together, and only an explicit `supersedes_id` removes

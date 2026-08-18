@@ -66,6 +66,60 @@ func TestAtomicCreateWorkItemRelationsAcrossKinds(t *testing.T) {
 	}
 }
 
+func TestFeatureCreateEmitsRelationLinkedForAtomicContainment(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newFeatureTestEnv(t)
+	env.features.SetEventLog(NewEventLogService(env.fixture.store.DB()))
+	epics := NewEpicService(env.fixture.store.DB(), testProjectID, nil)
+	parent, err := epics.Create(ctx, CreateEpicInput{Title: "feature event parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	featureInput := CreateFeatureInput{
+		Title: "feature with audited parent", CreatedBy: ActorHuman, OperationKey: "feature-event-replay",
+		WorkItemRelations: []CreateWorkItemRelationInput{{
+			SourceItemID: parent.ID, TargetIsNewItem: true, Kind: RelationParentOf, CreatedBy: ActorSystem,
+		}},
+	}
+	feature, err := env.features.Create(ctx, featureInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events, featureSequence, relationSequence int
+	var relationActor, storedActor string
+	if err := env.fixture.store.DB().QueryRowContext(ctx, `
+SELECT actor, seq FROM event_log
+WHERE kind = ? AND task_id = ''
+  AND json_extract(payload, '$.source') = ?
+  AND json_extract(payload, '$.target') = ?
+  AND json_extract(payload, '$.relation') = ?`,
+		EventRelationLinked, parent.ID, feature.ID, string(RelationParentOf)).Scan(&relationActor, &relationSequence); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.fixture.store.DB().QueryRowContext(ctx, `SELECT seq FROM event_log WHERE kind = ? AND json_extract(payload, '$.feature_id') = ?`, EventFeatureCreated, feature.ID).Scan(&featureSequence); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.fixture.store.DB().QueryRowContext(ctx, `SELECT created_by FROM work_item_relations WHERE source_item_id = ? AND target_item_id = ? AND kind = ?`, parent.ID, feature.ID, RelationParentOf).Scan(&storedActor); err != nil {
+		t.Fatal(err)
+	}
+	if relationActor != string(ActorSystem) || relationActor != storedActor {
+		t.Fatalf("feature relation event/stored actors = %q/%q, want system", relationActor, storedActor)
+	}
+	if featureSequence >= relationSequence {
+		t.Fatalf("feature.created seq %d must precede relation.linked seq %d", featureSequence, relationSequence)
+	}
+	if replayed, err := env.features.Create(ctx, featureInput); err != nil || replayed.ID != feature.ID {
+		t.Fatalf("replay feature create = %+v, %v", replayed, err)
+	}
+	if err := env.fixture.store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM event_log WHERE kind = ? AND json_extract(payload, '$.target') = ?`, EventRelationLinked, feature.ID).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 {
+		t.Fatalf("replayed feature containment events = %d, want 1", events)
+	}
+}
+
 func TestMalformedCreateWorkItemRelationRollsBackEverySubtype(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
