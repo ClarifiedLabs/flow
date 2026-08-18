@@ -647,9 +647,10 @@ func (s *FlowService) lockInheritedAgentDefsRevision(ctx context.Context, revisi
 // on these names so a project that already has a flow with the same name —
 // seeded earlier or user-created — is left untouched.
 const (
-	CodingFlowName        = "coding"
-	PlanningFlowName      = "planning"
-	FeatureRebaseFlowName = "feature-rebase"
+	CodingFlowName                  = "coding"
+	PlanningFlowName                = "planning"
+	ReviewFollowUpOrganizerFlowName = "review-follow-up-organizer"
+	FeatureRebaseFlowName           = "feature-rebase"
 )
 
 // SeedDefaults populates a project with the built-in coding, planning, and
@@ -693,6 +694,16 @@ func (s *FlowService) SeedDefaults(ctx context.Context) error {
 	if planningID == "" {
 		if _, err := s.create(ctx, planningFlowInput(defIDs, codingID), true); err != nil {
 			return fmt.Errorf("seed planning flow: %w", err)
+		}
+	}
+
+	organizerID, err := s.flowIDByName(ctx, ReviewFollowUpOrganizerFlowName)
+	if err != nil {
+		return err
+	}
+	if organizerID == "" {
+		if _, err := s.create(ctx, reviewFollowUpOrganizerFlowInput(defIDs, codingID), true); err != nil {
+			return fmt.Errorf("seed review follow-up organizer flow: %w", err)
 		}
 	}
 
@@ -778,6 +789,29 @@ func planningFlowInput(defIDs map[string]string, codingID string) FlowInput {
 			{From: "review-plan", Outcome: "changes_requested", To: "write-plan"},
 			{From: "review-plan", Outcome: "rejected", To: "rejected"},
 			{From: "create-tasks", Outcome: "completed", To: "done"},
+		},
+	}
+}
+
+func reviewFollowUpOrganizerFlowInput(defIDs map[string]string, codingID string) FlowInput {
+	return FlowInput{
+		Name:             ReviewFollowUpOrganizerFlowName,
+		Description:      "Organize durable non-blocking review proposals into one human-approved task graph.",
+		StartNode:        "organize",
+		TransitionBudget: DefaultFlowTransitionBudget,
+		Nodes: []FlowNodeInput{
+			{Key: "organize", Name: "Organize review follow-ups", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: defIDs["review-follow-up-organizer"], Workspace: WorkspaceBase, Artifact: ArtifactTaskSet}}},
+			{Key: "review-plan", Name: "Review organizer plan", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Instructions: "Review every proposal disposition, merge/reuse rationale, grouping, and blocking dependency.", Outcomes: []string{"approved", "changes_requested", "rejected"}}}},
+			{Key: "materialize", Name: "Materialize follow-ups", Kind: NodeMaterializeTaskSet, Config: FlowNodeConfig{MaterializeTaskSet: &MaterializeTaskSetNodeConfig{DefaultChildFlowID: codingID, AllowChildFlowOverride: true, MaxItems: 25}}},
+			{Key: "done", Name: "Organized", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+			{Key: "rejected", Name: "Rejected", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionRejected}}},
+		},
+		Edges: []FlowEdgeInput{
+			{From: "organize", Outcome: "completed", To: "review-plan"},
+			{From: "review-plan", Outcome: "approved", To: "materialize"},
+			{From: "review-plan", Outcome: "changes_requested", To: "organize"},
+			{From: "review-plan", Outcome: "rejected", To: "rejected"},
+			{From: "materialize", Outcome: "completed", To: "done"},
 		},
 	}
 }

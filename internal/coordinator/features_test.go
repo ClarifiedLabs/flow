@@ -1193,7 +1193,7 @@ func TestSeedDefaultsSeedsPerName(t *testing.T) {
 	for _, flow := range flows {
 		byName[flow.Name] = flow
 	}
-	for _, name := range []string{CodingFlowName, PlanningFlowName, FeatureRebaseFlowName} {
+	for _, name := range []string{CodingFlowName, PlanningFlowName, ReviewFollowUpOrganizerFlowName, FeatureRebaseFlowName} {
 		if _, ok := byName[name]; !ok {
 			t.Fatalf("seeded flows missing %q: %v", name, flows)
 		}
@@ -1233,8 +1233,8 @@ func TestSeedDefaultsSeedsPerName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list flows after reseed: %v", err)
 	}
-	if len(flows) != 3 {
-		t.Fatalf("flows after reseed = %d, want 3", len(flows))
+	if len(flows) != 4 {
+		t.Fatalf("flows after reseed = %d, want 4", len(flows))
 	}
 
 	// A missing built-in is restored without touching the others.
@@ -1290,8 +1290,8 @@ func TestSeedDefaultsPreservesUserFlowsAndFreshDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list flows: %v", err)
 	}
-	if len(all) != 4 {
-		t.Fatalf("flows = %d, want user + 3 built-ins", len(all))
+	if len(all) != 5 {
+		t.Fatalf("flows = %d, want user + 4 built-ins", len(all))
 	}
 	if defaultID, err := flows.DefaultFlowID(ctx); err != nil || defaultID != "" {
 		t.Fatalf("default flow = %q, %v, want unset on non-fresh seed", defaultID, err)

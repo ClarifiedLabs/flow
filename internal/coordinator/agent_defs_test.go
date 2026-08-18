@@ -117,8 +117,8 @@ func TestSeedDefaultsStampsConfiguredDefaultAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list global defaults: %v", err)
 	}
-	if len(defs) != 8 {
-		t.Fatalf("global defaults = %d, want 8", len(defs))
+	if len(defs) != 9 {
+		t.Fatalf("global defaults = %d, want 9", len(defs))
 	}
 	for _, def := range defs {
 		if def.Harness != flowharness.Harness || def.Model != "anthropic:claude-sonnet-4-6" || def.ReasoningEffort != "high" {
@@ -178,8 +178,8 @@ func TestSeedDefaultsUsesMatchingGlobalAgentDefinition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list global defaults: %v", err)
 	}
-	if len(globalDefs) != 8 {
-		t.Fatalf("global defaults = %d, want 8", len(globalDefs))
+	if len(globalDefs) != 9 {
+		t.Fatalf("global defaults = %d, want 9", len(globalDefs))
 	}
 	preservedAuthor, err := globals.GetByName(ctx, "author")
 	if err != nil || preservedAuthor.ID != globalAuthor.ID || preservedAuthor.Builtin || preservedAuthor.Prompt != "shared author" {

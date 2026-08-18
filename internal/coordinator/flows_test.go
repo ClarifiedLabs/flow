@@ -184,8 +184,8 @@ func TestSeedDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List agent defs: %v", err)
 	}
-	if len(allDefs) != 8 {
-		t.Fatalf("inherited default agent defs = %d, want 8", len(allDefs))
+	if len(allDefs) != 9 {
+		t.Fatalf("inherited default agent defs = %d, want 9", len(allDefs))
 	}
 	defsByName := make(map[string]AgentDef, len(allDefs))
 	for _, def := range allDefs {
@@ -209,8 +209,8 @@ func TestSeedDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List flows: %v", err)
 	}
-	if len(allFlows) != 3 {
-		t.Fatalf("seeded flows = %d, want 3", len(allFlows))
+	if len(allFlows) != 4 {
+		t.Fatalf("seeded flows = %d, want 4", len(allFlows))
 	}
 
 	coding, err := flows.GetByName(ctx, "coding")
@@ -264,6 +264,19 @@ func TestSeedDefaults(t *testing.T) {
 	if planning.Nodes[1].Kind != NodeHumanGate || planning.Nodes[2].Kind != NodeMaterializeTaskSet {
 		t.Errorf("planning nodes = %+v", planning.Nodes)
 	}
+	organizer, err := flows.GetByName(ctx, ReviewFollowUpOrganizerFlowName)
+	if err != nil {
+		t.Fatalf("GetByName organizer: %v", err)
+	}
+	if organizer.StartNode != "organize" || len(organizer.Nodes) != 5 ||
+		organizer.Nodes[1].Kind != NodeHumanGate || organizer.Nodes[2].Kind != NodeMaterializeTaskSet {
+		t.Fatalf("organizer graph = start %q, nodes %+v", organizer.StartNode, organizer.Nodes)
+	}
+	organizerDef := defsByName["review-follow-up-organizer"]
+	if organizer.Nodes[0].Config.Agent == nil || organizer.Nodes[0].Config.Agent.AgentDefID != organizerDef.ID ||
+		!strings.Contains(organizerDef.Prompt, "Required accounting") {
+		t.Fatalf("organizer agent/definition = %+v / %+v", organizer.Nodes[0].Config.Agent, organizerDef)
+	}
 
 	// Idempotent: a second seed pass changes nothing.
 	if err := flows.SeedDefaults(ctx); err != nil {
@@ -273,8 +286,8 @@ func TestSeedDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List flows after reseed: %v", err)
 	}
-	if len(allFlows) != 3 {
-		t.Fatalf("flows after reseed = %d, want 3", len(allFlows))
+	if len(allFlows) != 4 {
+		t.Fatalf("flows after reseed = %d, want 4", len(allFlows))
 	}
 }
 

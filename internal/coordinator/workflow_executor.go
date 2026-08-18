@@ -120,6 +120,9 @@ func NewWorkflowExecutor(opts WorkflowExecutorOptions) *WorkflowExecutor {
 // human wait, a dependency wait, or Done. Repeated calls are idempotent.
 func (e *WorkflowExecutor) Tick(ctx context.Context) error {
 	var errs error
+	if err := e.ReconcileReviewFollowUpOrganizers(ctx); err != nil {
+		errs = errors.Join(errs, fmt.Errorf("reconcile review follow-up organizers: %w", err))
+	}
 	restarted, err := e.runs.ReconcileReviewScopeDecisionHeads(ctx)
 	if err != nil {
 		errs = errors.Join(errs, fmt.Errorf("reconcile review scope decision heads: %w", err))
@@ -193,7 +196,16 @@ func (e *WorkflowExecutor) Advance(ctx context.Context, runID string) error {
 				fmt.Errorf("snapshot node %q not found", nodeRun.NodeKey),
 			)
 		}
-		if node.Kind == NodeHumanGate || node.Kind == NodeTerminal {
+		if node.Kind == NodeHumanGate {
+			// This is a no-op for ordinary tasks. Organizer state is advisory to
+			// source delivery and must not make a human gate fail.
+			_ = e.tasks.markReviewFollowUpOrganizerTaskState(ctx, run.TaskID, ReviewFollowUpSetAwaitingReview, "")
+			return nil
+		}
+		if node.Kind == NodeTerminal {
+			if node.Config.Terminal != nil && node.Config.Terminal.Resolution == ResolutionRejected {
+				_ = e.tasks.markReviewFollowUpOrganizerTaskState(ctx, run.TaskID, ReviewFollowUpSetAttention, "organizer plan was rejected")
+			}
 			return nil
 		}
 		handler := e.handlers[node.Kind]
@@ -274,6 +286,7 @@ func (e *WorkflowExecutor) pauseExecutionError(
 		}
 		return errors.Join(executionErr, fmt.Errorf("park workflow after execution failure: %w", err))
 	}
+	_ = e.tasks.markReviewFollowUpOrganizerTaskState(ctx, run.TaskID, ReviewFollowUpSetAttention, failure.Message)
 	return nil
 }
 
@@ -544,6 +557,11 @@ func (e *WorkflowExecutor) handleChangeReview(ctx context.Context, run WorkflowR
 		Outcome:   outcome,
 		Actor:     ActorSystem,
 	})
+	if err == nil && outcome == "approved" {
+		// The review transition is already durable. Organizer marking is healed by
+		// the lifecycle reconciler and can never veto the source workflow.
+		_ = e.tasks.MarkReviewFollowUpOrganizerPending(ctx, run.TaskID, change.ID, run.ID)
+	}
 	return err == nil, err
 }
 

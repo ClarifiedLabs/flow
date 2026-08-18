@@ -107,6 +107,7 @@ func defaultAgentDefSeeds() []defaultAgentDefSeed {
 		{name: "code-reviewer", skill: flowskills.ReviewerSkill},
 		{name: "security-reviewer", skill: flowskills.ReviewerSkill, focus: "Security focus: prioritize trust boundaries, authorization, input validation, secret handling, injection risks, and exploitable failure modes."},
 		{name: "review-aggregator", skill: flowskills.ReviewerSkill, focus: "Aggregation focus: validate the supplied parallel review reports, deduplicate findings by root cause, and produce the final review decision without starting a new open-ended review pass."},
+		{name: "review-follow-up-organizer", skill: flowskills.ReviewFollowUpOrganizerSkill},
 		{name: "verifier", skill: flowskills.VerifierSkill},
 		{name: "rebase-author", skill: flowskills.RebaseAuthorSkill},
 		{name: "rebase-verifier", skill: flowskills.RebaseVerifierSkill},

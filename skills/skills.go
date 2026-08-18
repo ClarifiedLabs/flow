@@ -7,18 +7,19 @@ import (
 )
 
 const (
-	PlannerSkill        = "flow-planner"
-	TaskPlannerSkill    = "flow-task-planner"
-	AuthorSkill         = "flow-author"
-	ReviewerSkill       = "flow-reviewer"
-	VerifierSkill       = "flow-verifier"
-	RebaseAuthorSkill   = "flow-rebase-author"
-	RebaseVerifierSkill = "flow-rebase-verifier"
+	PlannerSkill                 = "flow-planner"
+	TaskPlannerSkill             = "flow-task-planner"
+	AuthorSkill                  = "flow-author"
+	ReviewerSkill                = "flow-reviewer"
+	VerifierSkill                = "flow-verifier"
+	RebaseAuthorSkill            = "flow-rebase-author"
+	RebaseVerifierSkill          = "flow-rebase-verifier"
+	ReviewFollowUpOrganizerSkill = "flow-review-follow-up-organizer"
 )
 
-var Names = []string{PlannerSkill, TaskPlannerSkill, AuthorSkill, ReviewerSkill, VerifierSkill, RebaseAuthorSkill, RebaseVerifierSkill}
+var Names = []string{PlannerSkill, TaskPlannerSkill, AuthorSkill, ReviewerSkill, VerifierSkill, RebaseAuthorSkill, RebaseVerifierSkill, ReviewFollowUpOrganizerSkill}
 
-//go:embed flow-planner.md flow-task-planner.md flow-author.md flow-reviewer.md flow-verifier.md flow-rebase-author.md flow-rebase-verifier.md
+//go:embed flow-planner.md flow-task-planner.md flow-author.md flow-reviewer.md flow-verifier.md flow-rebase-author.md flow-rebase-verifier.md flow-review-follow-up-organizer.md
 var bundled embed.FS
 
 func Instructions(name string) (string, error) {
