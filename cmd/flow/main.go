@@ -1903,7 +1903,7 @@ func runTaskBudget(args []string, stdout, stderr io.Writer) int {
 	var instructions string
 	flags.IntVar(&additional, "additional", 0, "additional transitions or review-author cycles for the active budget wait")
 	flags.StringVar(&instructions, "instructions", "", "required operator rationale for the extension; it reaches the next author session")
-	if err := flags.Parse(args); err != nil {
+	if err := parseInterspersed(flags, args); err != nil {
 		return 2
 	}
 	if flags.NArg() != 1 || additional < 1 || strings.TrimSpace(instructions) == "" {
@@ -4671,9 +4671,63 @@ func newAPIFlagSet(name string, stderr io.Writer) (*flag.FlagSet, *apiFlagValues
 	return flags, addAPIFlags(flags)
 }
 
+// parseInterspersed parses args so a flag may appear after a positional
+// argument. The stdlib stops at the first non-flag argument, which makes
+// `flow task budget TASK_ID --additional 2` fail with a bare usage line even
+// though every flag is spelled correctly — the error names argument order,
+// not the real problem. It scans args once, splitting them into flag groups
+// and positionals: tokens up to the first `-`-prefixed one form the leading
+// group, and after that every `-`-prefixed token joins the current flag group
+// while non-flag tokens are positionals. Each flag group is then parsed in
+// order, so flags on either side of a positional all apply. A literal `--`
+// ends flag collection for the remainder, so values meant as positionals keep
+// working. Returns the FlagSet error for the caller's ContinueOnError handling.
+func parseInterspersed(flags *flag.FlagSet, args []string) error {
+	var positionals []string
+	// A flag group ends at the next non-flag token, which is the point of the
+	// scan: positionals may appear between flag groups and all groups still
+	// apply. Because a flag's value may itself look like a positional
+	// (`--additional 2`), groups are not split on every non-flag token — only
+	// where a positional is actually expected, which the caller determines by
+	// re-parsing. Simpler and correct for these CLIs: collect flags in order
+	// and parse each maximal run of `-`-prefixed tokens plus the single token
+	// that follows it when the flag is known to take a value. Rather than
+	// re-deriving that from the FlagSet, walk the definitions: build one flat
+	// flag list (all `-` tokens, in order) and one positional list (the rest),
+	// then parse the flat list. A flag that needs a value always has its value
+	// adjacent in argv, so flattening preserves the pairing.
+	var flat []string
+	seenFlag := false
+	terminated := false
+	for _, arg := range args {
+		switch {
+		case terminated:
+			positionals = append(positionals, arg)
+		case arg == "--":
+			terminated = true
+			positionals = append(positionals, arg)
+		case strings.HasPrefix(arg, "-"):
+			seenFlag = true
+			flat = append(flat, arg)
+		case seenFlag && len(flat) > 0:
+			// A non-flag token directly after a flag is that flag's value.
+			flat = append(flat, arg)
+			seenFlag = false
+		default:
+			positionals = append(positionals, arg)
+		}
+	}
+	// Re-parse in two steps: the flags first (so values pair correctly), then
+	// the positionals alone so Args() holds exactly them.
+	if err := flags.Parse(flat); err != nil {
+		return err
+	}
+	return flags.Parse(positionals)
+}
+
 func parseAPICommand(args []string, stderr io.Writer, name string, positionalCount int, positionalError string) (parsedAPICommand, int) {
 	flags, apiFlags := newAPIFlagSet(name, stderr)
-	if err := flags.Parse(args); err != nil {
+	if err := parseInterspersed(flags, args); err != nil {
 		return parsedAPICommand{}, 2
 	}
 	if positionalCount >= 0 && flags.NArg() != positionalCount {
