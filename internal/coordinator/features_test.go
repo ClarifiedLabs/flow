@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -477,6 +478,104 @@ func TestRebaseOnMainCleanThenUpToDate(t *testing.T) {
 	}
 	if again.Kind != RebaseAlreadyUpToDate {
 		t.Fatalf("second rebase kind = %q, want %q", again.Kind, RebaseAlreadyUpToDate)
+	}
+}
+
+func TestBlockOnRebaseAdoptsExistingRelationAsSystemGate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newFeatureTestEnv(t)
+	feature, err := env.features.Create(ctx, CreateFeatureInput{Title: "adopted blocker"})
+	if err != nil {
+		t.Fatalf("create feature: %v", err)
+	}
+	target, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "blocked task", FeatureID: &feature.ID})
+	if err != nil {
+		t.Fatalf("create blocked task: %v", err)
+	}
+	rebase := seedRunningRebaseRow(t, env, feature, env.branchTip(t, feature.Branch), 0)
+
+	// A first writer can create the same edge before the rebase sweep. Once the
+	// rebase adopts that edge as its dependency gate, its provenance must become
+	// system-owned so neither coordinator unlink surface can remove it.
+	if err := env.tasks.LinkTasks(ctx, rebase.TaskID, target.ID, RelationBlocks, ActorHuman); err != nil {
+		t.Fatalf("create pre-existing human blocker: %v", err)
+	}
+	if err := env.tasks.BlockOnRebase(ctx, rebase.TaskID, []string{target.ID}); err != nil {
+		t.Fatalf("adopt blocker for rebase: %v", err)
+	}
+	var createdBy string
+	if err := env.fixture.store.DB().QueryRowContext(ctx, `
+SELECT created_by FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`,
+		rebase.TaskID, target.ID).Scan(&createdBy); err != nil {
+		t.Fatalf("read adopted blocker provenance: %v", err)
+	}
+	if createdBy != string(ActorSystem) {
+		t.Fatalf("adopted blocker created_by = %q, want %q", createdBy, ActorSystem)
+	}
+	if err := env.tasks.UnlinkTasks(ctx, rebase.TaskID, target.ID, RelationBlocks); !errors.Is(err, ErrActiveRebaseBlocker) {
+		t.Fatalf("task unlink error = %v, want ErrActiveRebaseBlocker", err)
+	}
+	items := NewWorkItemService(env.fixture.store.DB(), testProjectID)
+	if err := items.Unlink(ctx, rebase.TaskID, target.ID, RelationBlocks); !errors.Is(err, ErrActiveRebaseBlocker) {
+		t.Fatalf("work-item unlink error = %v, want ErrActiveRebaseBlocker", err)
+	}
+}
+
+func TestBlockOnRebaseSerializesAdoptionAgainstConcurrentUnlink(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newFeatureTestEnv(t)
+	feature, err := env.features.Create(ctx, CreateFeatureInput{Title: "raced blocker adoption"})
+	if err != nil {
+		t.Fatalf("create feature: %v", err)
+	}
+	target, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "raced blocked task", FeatureID: &feature.ID})
+	if err != nil {
+		t.Fatalf("create blocked task: %v", err)
+	}
+	rebase := seedRunningRebaseRow(t, env, feature, env.branchTip(t, feature.Branch), 0)
+	if err := env.tasks.LinkTasks(ctx, rebase.TaskID, target.ID, RelationBlocks, ActorHuman); err != nil {
+		t.Fatalf("create pre-existing human blocker: %v", err)
+	}
+
+	// Use a second database handle to force an untrusted unlink attempt after
+	// BlockOnRebase's graph read and before its provenance-adoption UPSERT. The
+	// adoption transaction must already own the SQLite writer reservation, so
+	// the unlink loses this serialization race instead of deleting the edge and
+	// leaving the adoption with a stale WAL snapshot.
+	raceDB, err := sql.Open("sqlite3", env.fixture.store.Path())
+	if err != nil {
+		t.Fatalf("open racing database handle: %v", err)
+	}
+	raceDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = raceDB.Close() })
+	if _, err := raceDB.ExecContext(ctx, "PRAGMA busy_timeout = 0"); err != nil {
+		t.Fatalf("disable racing handle busy timeout: %v", err)
+	}
+	racer := NewTaskService(raceDB, testProjectID)
+	var unlinkErr error
+	env.tasks.blockOnRebaseAfterGraphReadTestHook = func() {
+		env.tasks.blockOnRebaseAfterGraphReadTestHook = nil
+		unlinkErr = racer.UnlinkTasks(ctx, rebase.TaskID, target.ID, RelationBlocks)
+	}
+
+	if err := env.tasks.BlockOnRebase(ctx, rebase.TaskID, []string{target.ID}); err != nil {
+		t.Fatalf("adopt blocker while unlink races: %v", err)
+	}
+	if unlinkErr == nil {
+		t.Fatal("racing unlink succeeded between graph read and blocker adoption")
+	}
+	var createdBy string
+	if err := env.fixture.store.DB().QueryRowContext(ctx, `
+SELECT created_by FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`,
+		rebase.TaskID, target.ID).Scan(&createdBy); err != nil {
+		t.Fatalf("read raced blocker provenance: %v", err)
+	}
+	if createdBy != string(ActorSystem) {
+		t.Fatalf("raced blocker created_by = %q, want %q", createdBy, ActorSystem)
 	}
 }
 

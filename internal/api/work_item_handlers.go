@@ -662,6 +662,8 @@ func writeWorkItemError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "work_item_not_found", err.Error())
 	case errors.Is(err, coordinator.ErrWorkItemNotSchedulable):
 		writeError(w, http.StatusConflict, "work_item_not_schedulable", err.Error())
+	case errors.Is(err, coordinator.ErrActiveRebaseBlocker):
+		writeError(w, http.StatusConflict, "active_rebase_blocker", err.Error())
 	case errors.Is(err, coordinator.ErrWorkItemHasParent), errors.Is(err, coordinator.ErrWorkItemCycle),
 		errors.Is(err, coordinator.ErrWorkItemMoveConflict), errors.Is(err, coordinator.ErrWorkItemParentClosed),
 		errors.Is(err, coordinator.ErrWorkItemBlocked),

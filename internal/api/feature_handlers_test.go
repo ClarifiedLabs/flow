@@ -472,6 +472,86 @@ func TestTaskBoundConsoleRebaseScope(t *testing.T) {
 		t.Fatalf("running rebase restriction = %q, want bound task %q", restrictedTo, boundTask.ID)
 	}
 
+	// Schedule the bound task while the rebase remains active. Its task-scoped
+	// console credential can name the system blocker through either relation API,
+	// but neither DELETE may remove the dependency gate.
+	var scheduled workflowRunResponse
+	doJSONRequestAs(t, fixture.Server, "task-bound-console-token", http.MethodPost,
+		"/v2/tasks/"+boundTask.ID+"/schedule", nil, http.StatusOK, &scheduled)
+	if scheduled.Run.State != coordinator.WorkflowRunScheduled || scheduled.Run.CurrentNodeRunID != "" {
+		t.Fatalf("blocked task run = %+v, want scheduled with no current node", scheduled.Run)
+	}
+	legacyDelete := relationRequest{
+		SourceTaskID: conflicted.Result.RebaseTaskID,
+		TargetTaskID: boundTask.ID,
+		Kind:         string(coordinator.RelationBlocks),
+	}
+	var legacyDeleteError contract.ErrorResponse
+	doJSONRequestAs(t, fixture.Server, "task-bound-console-token", http.MethodDelete,
+		"/v2/tasks/"+boundTask.ID+"/relations", legacyDelete, http.StatusConflict, &legacyDeleteError)
+	if legacyDeleteError.Error.Code != "active_rebase_blocker" {
+		t.Fatalf("legacy delete error = %+v, want active_rebase_blocker", legacyDeleteError.Error)
+	}
+	genericDelete := contract.WorkItemRelationRequest{
+		SourceItemID: conflicted.Result.RebaseTaskID,
+		TargetItemID: boundTask.ID,
+		Kind:         string(coordinator.RelationBlocks),
+	}
+	var genericDeleteError contract.ErrorResponse
+	doJSONRequestAs(t, fixture.Server, "task-bound-console-token", http.MethodDelete,
+		"/v2/projects/"+fixture.Project.ID+"/work-items/"+boundTask.ID+"/relations",
+		genericDelete, http.StatusConflict, &genericDeleteError)
+	if genericDeleteError.Error.Code != "active_rebase_blocker" {
+		t.Fatalf("generic delete error = %+v, want active_rebase_blocker", genericDeleteError.Error)
+	}
+	var activeBlockers int
+	if err := fixture.DB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`,
+		conflicted.Result.RebaseTaskID, boundTask.ID).Scan(&activeBlockers); err != nil {
+		t.Fatalf("count active rebase blocker rows: %v", err)
+	}
+	if activeBlockers != 1 {
+		t.Fatalf("active rebase blocker rows after rejected deletes = %d, want 1", activeBlockers)
+	}
+	if err := fixture.Bundle.WorkflowExecutor.Advance(ctx, scheduled.Run.ID); err != nil {
+		t.Fatalf("advance blocked task workflow: %v", err)
+	}
+	var nodeRuns int
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM workflow_node_runs WHERE workflow_run_id = ?`, scheduled.Run.ID).Scan(&nodeRuns); err != nil {
+		t.Fatalf("count blocked task node runs: %v", err)
+	}
+	if nodeRuns != 0 {
+		t.Fatalf("blocked task created %d workflow node runs while rebase active, want 0", nodeRuns)
+	}
+
+	// Once the rebase is no longer running, both APIs retain their authorized
+	// cleanup behavior for the same system-owned relation provenance.
+	if _, err := fixture.DB.ExecContext(ctx,
+		`UPDATE feature_rebases SET state = 'cancelled', completed_at = ? WHERE task_id = ?`,
+		"2026-01-01T00:00:00Z", conflicted.Result.RebaseTaskID); err != nil {
+		t.Fatalf("close running rebase: %v", err)
+	}
+	doJSONRequestAs(t, fixture.Server, "task-bound-console-token", http.MethodDelete,
+		"/v2/projects/"+fixture.Project.ID+"/work-items/"+boundTask.ID+"/relations",
+		genericDelete, http.StatusNoContent, nil)
+	if err := fixture.Tasks.BlockOnRebase(ctx, conflicted.Result.RebaseTaskID, []string{boundTask.ID}); err != nil {
+		t.Fatalf("restore closed-rebase system blocker: %v", err)
+	}
+	doJSONRequestAs(t, fixture.Server, "task-bound-console-token", http.MethodDelete,
+		"/v2/tasks/"+boundTask.ID+"/relations", legacyDelete, http.StatusNoContent, nil)
+	if err := fixture.Bundle.WorkflowExecutor.Advance(ctx, scheduled.Run.ID); err != nil {
+		t.Fatalf("advance unblocked task workflow: %v", err)
+	}
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM workflow_node_runs WHERE workflow_run_id = ?`, scheduled.Run.ID).Scan(&nodeRuns); err != nil {
+		t.Fatalf("count unblocked task node runs: %v", err)
+	}
+	if nodeRuns == 0 {
+		t.Fatal("unblocked task created no workflow node after the rebase closed")
+	}
+
 	// The feature now holds another open task created before the request: the
 	// rebase is rejected with 403 and creates no rebase or relation rows.
 	if _, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "extra task", FeatureID: &feature.ID}); err != nil {

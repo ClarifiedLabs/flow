@@ -289,6 +289,9 @@ type TaskService struct {
 	// editTaskAfterReadTestHook runs after EditTask's optimistic validation read
 	// and before its write transaction. Tests use it to force stale-read races.
 	editTaskAfterReadTestHook func()
+	// blockOnRebaseAfterGraphReadTestHook runs inside BlockOnRebase's write
+	// transaction after its dependency-graph read and before blocker adoption.
+	blockOnRebaseAfterGraphReadTestHook func()
 }
 
 // SetEventLog wires the project event log; a nil log disables emission.
@@ -1224,11 +1227,11 @@ WHERE task_id = ? AND tag_id = ?`, taskID, tagID); err != nil {
 }
 
 // BlockOnRebase inserts (rebaseTask blocks task) relations for every id,
-// tolerating duplicates and skipping the rebase task itself. A running
-// feature rebase holds the feature's other tasks at the workflow dependency
-// gate through these ordinary blocks relations; done blockers resolve by
-// definition, so release needs no cleanup. A relation that would cycle is
-// skipped rather than failing the caller's schedule path.
+// adopting duplicate edges as system-owned and skipping the rebase task itself.
+// A running feature rebase holds the feature's other tasks at the workflow
+// dependency gate through these ordinary blocks relations; done blockers
+// resolve by definition, so release needs no cleanup. A relation that would
+// cycle is skipped rather than failing the caller's schedule path.
 func (s *TaskService) BlockOnRebase(ctx context.Context, rebaseTaskID string, taskIDs []string) error {
 	rebaseTaskID = strings.TrimSpace(rebaseTaskID)
 	if rebaseTaskID == "" {
@@ -1240,27 +1243,31 @@ func (s *TaskService) BlockOnRebase(ctx context.Context, rebaseTaskID string, ta
 		if taskID == "" || taskID == rebaseTaskID {
 			continue
 		}
-		tx, err := s.db.BeginTx(ctx, nil)
+		tx, err := sqlitex.BeginImmediate(ctx, s.db)
 		if err != nil {
-			return err
+			return fmt.Errorf("begin rebase block transaction: %w", err)
 		}
 		cycle, err := workItemDependencyPathExists(ctx, tx, taskID, rebaseTaskID)
 		if err != nil {
 			tx.Rollback()
 			return err
 		}
+		if s.blockOnRebaseAfterGraphReadTestHook != nil {
+			s.blockOnRebaseAfterGraphReadTestHook()
+		}
 		if cycle {
 			tx.Rollback()
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT OR IGNORE INTO work_item_relations (source_item_id, target_item_id, kind, created_by, created_at)
-VALUES (?, ?, ?, ?, ?)`,
+INSERT INTO work_item_relations (source_item_id, target_item_id, kind, created_by, created_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(source_item_id, target_item_id, kind) DO UPDATE SET created_by = excluded.created_by`,
 			rebaseTaskID, taskID, string(RelationBlocks), string(ActorSystem), nowText); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("block task on rebase: %w", err)
 		}
-		if err := tx.Commit(); err != nil {
+		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit rebase block: %w", err)
 		}
 	}
@@ -1403,11 +1410,14 @@ func (s *TaskService) UnlinkTasks(ctx context.Context, sourceTaskID, targetTaskI
 		sourceTaskID, targetTaskID = targetTaskID, sourceTaskID
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
 	if err != nil {
 		return fmt.Errorf("begin unlink task transaction: %w", err)
 	}
 	defer tx.Rollback()
+	if err := preserveActiveRebaseBlockerTx(ctx, tx, sourceTaskID, targetTaskID, kind); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `
 DELETE FROM work_item_relations
 WHERE source_item_id = ? AND target_item_id = ? AND kind = ?`,
@@ -1427,7 +1437,7 @@ WHERE source_item_id = ? AND target_item_id = ? AND kind = ?`,
 	}); err != nil {
 		slog.Warn("event log append failed", "error", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit unlink tasks: %w", err)
 	}
 	return nil

@@ -18,6 +18,7 @@ var (
 	ErrWorkItemHasParent      = errors.New("work item already has a parent")
 	ErrWorkItemCycle          = errors.New("work item relation would create a dependency cycle")
 	ErrWorkItemParentClosed   = errors.New("work item parent is closed")
+	ErrActiveRebaseBlocker    = errors.New("active feature rebase blocker cannot be removed")
 )
 
 // WorkItemRelation is the typed, cross-kind relation returned by the canonical
@@ -497,6 +498,35 @@ SELECT EXISTS(SELECT 1 FROM reachable WHERE id = ?)`, startID, goalID).Scan(&fou
 	return found != 0, err
 }
 
+// preserveActiveRebaseBlockerTx prevents user-facing relation APIs from
+// removing the system-owned dependency gate for a rebase that is still
+// running. Callers hold the project writer lock across this check and the
+// delete, so rebase finalization and relation removal have one serialization
+// order: cleanup is allowed only after the running row has closed.
+func preserveActiveRebaseBlockerTx(ctx context.Context, q workItemRelationQuerier, sourceID, targetID string, kind RelationKind) error {
+	if kind != RelationBlocks {
+		return nil
+	}
+	var protected int
+	if err := q.QueryRowContext(ctx, `
+SELECT EXISTS (
+	SELECT 1
+	FROM work_item_relations r
+	JOIN feature_rebases fr ON fr.task_id = r.source_item_id
+	WHERE r.source_item_id = ?
+		AND r.target_item_id = ?
+		AND r.kind = 'blocks'
+		AND r.created_by = ?
+		AND fr.state = 'running'
+)`, sourceID, targetID, string(ActorSystem)).Scan(&protected); err != nil {
+		return fmt.Errorf("check active feature rebase blocker: %w", err)
+	}
+	if protected != 0 {
+		return ErrActiveRebaseBlocker
+	}
+	return nil
+}
+
 func (s *WorkItemService) Unlink(ctx context.Context, sourceID, targetID string, kind RelationKind) error {
 	if err := validateRelationKind(kind); err != nil {
 		return err
@@ -523,6 +553,9 @@ func (s *WorkItemService) Unlink(ctx context.Context, sourceID, targetID string,
 		return err
 	}
 	if err := requireWorkItemRelationMutableTx(ctx, tx, targetID, targetKind); err != nil {
+		return err
+	}
+	if err := preserveActiveRebaseBlockerTx(ctx, tx, sourceID, targetID, kind); err != nil {
 		return err
 	}
 	result, err := tx.ExecContext(ctx, `

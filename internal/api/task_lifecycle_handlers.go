@@ -850,6 +850,10 @@ func (s *projectServer) handleTaskRelations(w http.ResponseWriter, r *http.Reque
 		w.WriteHeader(http.StatusNoContent)
 	case http.MethodDelete:
 		if err := s.tasks.UnlinkTasks(r.Context(), sourceTaskID, targetTaskID, kind); err != nil {
+			if errors.Is(err, coordinator.ErrActiveRebaseBlocker) {
+				writeError(w, http.StatusConflict, "active_rebase_blocker", err.Error())
+				return
+			}
 			writeError(w, http.StatusBadRequest, "unlink_tasks_failed", err.Error())
 			return
 		}
