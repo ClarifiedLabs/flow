@@ -88,11 +88,13 @@ func (s *WorkflowArtifactService) Create(ctx context.Context, input CreateWorkfl
 	if err != nil {
 		return WorkflowArtifact{}, false, err
 	}
+	var taskSetManifest *TaskSetManifest
 	if input.Kind == ArtifactTaskSet {
 		manifest, err := DecodeTaskSetManifest(canonicalPayload)
 		if err != nil {
 			return WorkflowArtifact{}, false, err
 		}
+		taskSetManifest = &manifest
 		canonicalPayload, err = json.Marshal(manifest)
 		if err != nil {
 			return WorkflowArtifact{}, false, fmt.Errorf("encode normalized task-set manifest: %w", err)
@@ -153,13 +155,16 @@ FROM workflow_node_runs nr WHERE nr.id = ?`, input.NodeRunID).Scan(&runID, &node
 			return WorkflowArtifact{}, false, err
 		}
 		if found {
-			manifest, err := DecodeTaskSetManifest(canonicalPayload)
-			if err != nil {
+			if err := validateTaskSetWorkflowSelectionTx(ctx, tx, *taskSetManifest, config); err != nil {
 				return WorkflowArtifact{}, false, err
 			}
-			if err := validateTaskSetWorkflowSelectionTx(ctx, tx, manifest, config); err != nil {
-				return WorkflowArtifact{}, false, err
-			}
+		}
+	}
+	var reviewPlan *reviewFollowUpPlanContext
+	if taskSetManifest != nil && taskSetManifest.ReviewFollowUp != nil {
+		reviewPlan, err = s.validateReviewFollowUpPlanTx(ctx, tx, *taskSetManifest, runID, "")
+		if err != nil {
+			return WorkflowArtifact{}, false, err
 		}
 	}
 	if input.Kind == ArtifactChange {
@@ -204,6 +209,21 @@ INSERT INTO workflow_artifacts (
 		input.SummaryMarkdown, nullableRawJSON(canonicalPayload), digest,
 		sqlitex.NullableNonEmptyString(input.BaseRevision), input.ClientKey, sqlitex.FormatTime(now)); err != nil {
 		return WorkflowArtifact{}, false, err
+	}
+	if reviewPlan != nil {
+		nowText := sqlitex.FormatTime(now)
+		if _, err := tx.ExecContext(ctx, `
+UPDATE review_follow_up_plan_revisions
+SET plan_artifact_id = ?, plan_sha256 = ?, state = 'awaiting_review', updated_at = ?
+WHERE id = ? AND plan_artifact_id IS NULL`, id, digest, nowText, reviewPlan.PlanRevisionID); err != nil {
+			return WorkflowArtifact{}, false, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE review_follow_up_sets
+SET active_plan_artifact_id = ?, state = 'awaiting_review', updated_at = ?
+WHERE id = ? AND revision = ?`, id, nowText, reviewPlan.SetID, reviewPlan.SetRevision); err != nil {
+			return WorkflowArtifact{}, false, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return WorkflowArtifact{}, false, err
@@ -336,22 +356,51 @@ func scanWorkflowArtifactMaybe(scanner taskScanner) (WorkflowArtifact, bool, err
 	return artifact, true, nil
 }
 
+const reviewFollowUpRationaleMaxBytes = 4096
+
+type ReviewFollowUpDisposition string
+
+const (
+	ReviewFollowUpDispositionCreateTask        ReviewFollowUpDisposition = "create_task"
+	ReviewFollowUpDispositionUseExistingTask   ReviewFollowUpDisposition = "use_existing_task"
+	ReviewFollowUpDispositionMergeWithProposal ReviewFollowUpDisposition = "merge_with_proposal"
+	ReviewFollowUpDispositionCoveredBySource   ReviewFollowUpDisposition = "covered_by_source"
+	ReviewFollowUpDispositionDiscardDuplicate  ReviewFollowUpDisposition = "discard_duplicate"
+)
+
 type TaskSetManifest struct {
-	SchemaVersion int                 `json:"schema_version"`
-	Items         []TaskSetItem       `json:"items"`
-	Dependencies  []TaskSetDependency `json:"dependencies,omitempty"`
+	SchemaVersion  int                    `json:"schema_version"`
+	Items          []TaskSetItem          `json:"items"`
+	Dependencies   []TaskSetDependency    `json:"dependencies,omitempty"`
+	ReviewFollowUp *TaskSetReviewFollowUp `json:"review_follow_up,omitempty"`
 }
 
 type TaskSetItem struct {
 	Key              string               `json:"key"`
 	Kind             WorkItemKind         `json:"kind"`
+	ExistingTaskID   string               `json:"existing_task_id,omitempty"`
 	ParentKey        string               `json:"parent_key,omitempty"`
-	Title            string               `json:"title"`
-	Body             string               `json:"body"`
+	Title            string               `json:"title,omitempty"`
+	Body             string               `json:"body,omitempty"`
 	Priority         int                  `json:"priority,omitempty"`
 	TagSlugs         []string             `json:"tag_slugs,omitempty"`
 	FlowID           string               `json:"flow_id,omitempty"`
 	CompletionPolicy EpicCompletionPolicy `json:"completion_policy,omitempty"`
+}
+
+type TaskSetReviewFollowUp struct {
+	SetID       string                            `json:"set_id"`
+	SetRevision int                               `json:"set_revision"`
+	Assignments []TaskSetReviewFollowUpAssignment `json:"assignments"`
+}
+
+type TaskSetReviewFollowUpAssignment struct {
+	ProposalID          string                    `json:"proposal_id"`
+	Disposition         ReviewFollowUpDisposition `json:"disposition"`
+	ItemKey             string                    `json:"item_key,omitempty"`
+	TargetTaskID        string                    `json:"target_task_id,omitempty"`
+	CanonicalProposalID string                    `json:"canonical_proposal_id,omitempty"`
+	Rationale           string                    `json:"rationale"`
 }
 
 type TaskSetDependency struct {
@@ -393,14 +442,6 @@ func (s *WorkflowArtifactService) MaterializeTaskSet(ctx context.Context, artifa
 	if err := validateTaskSetWorkflowSelectionTx(ctx, tx, manifest, config); err != nil {
 		return MaterializeTaskSetResult{}, false, err
 	}
-	var sourceTaskID, sourceTitle string
-	var sourceFeatureID sql.NullString
-	if err := tx.QueryRowContext(ctx, `
-SELECT t.id, t.title, t.feature_id
-FROM workflow_runs wr JOIN tasks t ON t.id = wr.task_id
-WHERE wr.id = ?`, artifact.WorkflowRunID).Scan(&sourceTaskID, &sourceTitle, &sourceFeatureID); err != nil {
-		return MaterializeTaskSetResult{}, false, err
-	}
 	result := newMaterializeTaskSetResult()
 	replayed := false
 	var materializationState, resultJSON string
@@ -417,6 +458,41 @@ SELECT state, result_json FROM workflow_materializations WHERE artifact_id = ?`,
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return MaterializeTaskSetResult{}, false, err
+	}
+
+	reviewPlan, err := s.validateReviewFollowUpPlanTx(ctx, tx, manifest, artifact.WorkflowRunID, artifact.ID)
+	if err != nil {
+		return MaterializeTaskSetResult{}, replayed, err
+	}
+	var sourceTaskID, sourceChangeID string
+	if reviewPlan != nil {
+		sourceTaskID = reviewPlan.SourceTaskID
+		sourceChangeID = reviewPlan.SourceChangeID
+	} else if err := tx.QueryRowContext(ctx, `SELECT task_id FROM workflow_runs WHERE id = ?`, artifact.WorkflowRunID).Scan(&sourceTaskID); err != nil {
+		return MaterializeTaskSetResult{}, replayed, err
+	}
+	var sourceTitle string
+	var sourceFeatureID sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT title, feature_id FROM tasks WHERE id = ?`, sourceTaskID).Scan(&sourceTitle, &sourceFeatureID); err != nil {
+		return MaterializeTaskSetResult{}, replayed, err
+	}
+	for _, item := range manifest.Items {
+		if item.Kind == WorkItemFeature && item.ExistingTaskID == "" && s.Features == nil {
+			return MaterializeTaskSetResult{}, replayed, errors.New("feature service is required to materialize feature items")
+		}
+		if item.ExistingTaskID == "" {
+			continue
+		}
+		if existing := result.ItemIDs[item.Key]; existing != "" && existing != item.ExistingTaskID {
+			return MaterializeTaskSetResult{}, replayed, fmt.Errorf("materialized item %q changed id from %s to %s", item.Key, existing, item.ExistingTaskID)
+		}
+		result.ItemIDs[item.Key] = item.ExistingTaskID
+		result.TaskIDs[item.Key] = item.ExistingTaskID
+	}
+	if replayed {
+		if err := storeMaterializationResultTx(ctx, tx, artifactID, result, "prepared", ""); err != nil {
+			return MaterializeTaskSetResult{}, replayed, err
+		}
 	} else {
 		nowText := sqlitex.FormatTime(s.now().UTC())
 		resultJSON, _ := json.Marshal(result)
@@ -425,6 +501,18 @@ INSERT INTO workflow_materializations (
 	artifact_id, workflow_run_id, state, result_json, created_at, updated_at
 ) VALUES (?, ?, 'prepared', ?, ?, ?)`, artifact.ID, artifact.WorkflowRunID, string(resultJSON), nowText, nowText); err != nil {
 			return MaterializeTaskSetResult{}, false, err
+		}
+	}
+	if reviewPlan != nil {
+		nowText := sqlitex.FormatTime(s.now().UTC())
+		if _, err := tx.ExecContext(ctx, `
+UPDATE review_follow_up_plan_revisions SET state = 'materializing', updated_at = ? WHERE id = ?`, nowText, reviewPlan.PlanRevisionID); err != nil {
+			return MaterializeTaskSetResult{}, replayed, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE review_follow_up_sets SET state = 'materializing', updated_at = ?
+WHERE id = ? AND revision = ?`, nowText, reviewPlan.SetID, reviewPlan.SetRevision); err != nil {
+			return MaterializeTaskSetResult{}, replayed, err
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -511,7 +599,7 @@ INSERT INTO epics (
 					return MaterializeTaskSetResult{}, replayed, err
 				}
 			} else {
-				id, err = s.materializeDatabaseItem(ctx, artifact, config, item, parentID, sourceTaskID, artifactID, &result)
+				id, err = s.materializeDatabaseItem(ctx, artifact, config, item, parentID, sourceTaskID, sourceChangeID, artifactID, &result)
 				if err != nil {
 					_ = s.storeMaterializationError(ctx, artifactID, err)
 					return MaterializeTaskSetResult{}, replayed, err
@@ -537,6 +625,11 @@ INSERT INTO epics (
 	if err := loadMaterializationResultTx(ctx, tx, artifactID, &result); err != nil {
 		return MaterializeTaskSetResult{}, replayed, err
 	}
+	if reviewPlan != nil {
+		if _, err := s.validateReviewFollowUpPlanTx(ctx, tx, manifest, artifact.WorkflowRunID, artifact.ID); err != nil {
+			return MaterializeTaskSetResult{}, replayed, err
+		}
+	}
 	for _, dependency := range manifest.Dependencies {
 		sourceID, targetID := result.ItemIDs[dependency.Blocker], result.ItemIDs[dependency.Blocked]
 		var exists int
@@ -554,6 +647,11 @@ WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks')`, sourceID,
 	if err := reconcileEpicAncestorsTx(ctx, tx, append([]string{result.RootEpicID}, mapValues(result.ItemIDs)...), s.now().UTC()); err != nil {
 		return MaterializeTaskSetResult{}, replayed, err
 	}
+	if reviewPlan != nil {
+		if err := s.persistReviewFollowUpDispositionsTx(ctx, tx, manifest, *reviewPlan, artifact, result); err != nil {
+			return MaterializeTaskSetResult{}, replayed, err
+		}
+	}
 	if err := storeMaterializationResultTx(ctx, tx, artifactID, result, "completed", ""); err != nil {
 		return MaterializeTaskSetResult{}, replayed, err
 	}
@@ -561,6 +659,99 @@ WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks')`, sourceID,
 		return MaterializeTaskSetResult{}, replayed, err
 	}
 	return result, replayed, nil
+}
+
+func (s *WorkflowArtifactService) persistReviewFollowUpDispositionsTx(
+	ctx context.Context,
+	tx workItemRelationQuerier,
+	manifest TaskSetManifest,
+	plan reviewFollowUpPlanContext,
+	artifact WorkflowArtifact,
+	result MaterializeTaskSetResult,
+) error {
+	review := manifest.ReviewFollowUp
+	assignments := make(map[string]TaskSetReviewFollowUpAssignment, len(review.Assignments))
+	for _, assignment := range review.Assignments {
+		assignments[assignment.ProposalID] = assignment
+	}
+	resolveTarget := func(assignment TaskSetReviewFollowUpAssignment) string {
+		switch assignment.Disposition {
+		case ReviewFollowUpDispositionCreateTask:
+			return result.ItemIDs[assignment.ItemKey]
+		case ReviewFollowUpDispositionUseExistingTask:
+			return assignment.TargetTaskID
+		case ReviewFollowUpDispositionCoveredBySource:
+			return plan.SourceTaskID
+		case ReviewFollowUpDispositionMergeWithProposal, ReviewFollowUpDispositionDiscardDuplicate:
+			canonical := assignments[assignment.CanonicalProposalID]
+			if canonical.Disposition == ReviewFollowUpDispositionCreateTask {
+				return result.ItemIDs[canonical.ItemKey]
+			}
+			return canonical.TargetTaskID
+		default:
+			return ""
+		}
+	}
+	nowText := sqlitex.FormatTime(s.now().UTC())
+	for _, assignment := range review.Assignments {
+		targetTaskID := resolveTarget(assignment)
+		if targetTaskID == "" {
+			return fmt.Errorf("proposal %q has no resolved disposition target", assignment.ProposalID)
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO review_follow_up_dispositions (
+	proposal_id, plan_revision_id, disposition, item_key, target_task_id,
+	canonical_proposal_id, rationale, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, assignment.ProposalID, plan.PlanRevisionID,
+			string(assignment.Disposition), sqlitex.NullableNonEmptyString(assignment.ItemKey), targetTaskID,
+			sqlitex.NullableNonEmptyString(assignment.CanonicalProposalID), assignment.Rationale, nowText, nowText); err != nil {
+			return fmt.Errorf("persist proposal %q disposition: %w", assignment.ProposalID, err)
+		}
+		updated, err := tx.ExecContext(ctx, `
+UPDATE review_follow_up_proposals SET state = 'dispositioned', updated_at = ?
+WHERE id = ? AND state = 'active'`, nowText, assignment.ProposalID)
+		if err != nil {
+			return err
+		}
+		count, err := updated.RowsAffected()
+		if err != nil || count != 1 {
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("proposal %q is no longer active", assignment.ProposalID)
+		}
+	}
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	updated, err := tx.ExecContext(ctx, `
+UPDATE review_follow_up_plan_revisions
+SET state = 'materialized', materialization_result_json = ?, materialization_error = '', updated_at = ?
+WHERE id = ? AND plan_artifact_id = ?`, string(resultJSON), nowText, plan.PlanRevisionID, artifact.ID)
+	if err != nil {
+		return err
+	}
+	if count, err := updated.RowsAffected(); err != nil || count != 1 {
+		if err != nil {
+			return err
+		}
+		return errors.New("review_follow_up plan revision changed during materialization")
+	}
+	updated, err = tx.ExecContext(ctx, `
+UPDATE review_follow_up_sets
+SET state = 'materialized', active_plan_artifact_id = ?, last_error = '', updated_at = ?
+WHERE id = ? AND revision = ?`, artifact.ID, nowText, plan.SetID, plan.SetRevision)
+	if err != nil {
+		return err
+	}
+	if count, err := updated.RowsAffected(); err != nil || count != 1 {
+		if err != nil {
+			return err
+		}
+		return errors.New("review_follow_up set revision changed during materialization")
+	}
+	return nil
 }
 
 func newMaterializeTaskSetResult() MaterializeTaskSetResult {
@@ -642,6 +833,7 @@ func (s *WorkflowArtifactService) materializeDatabaseItem(
 	item TaskSetItem,
 	parentID string,
 	sourceTaskID string,
+	sourceChangeID string,
 	artifactID string,
 	result *MaterializeTaskSetResult,
 ) (string, error) {
@@ -685,9 +877,10 @@ func (s *WorkflowArtifactService) materializeDatabaseItem(
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO tasks (
 	id, title, body, priority, flow_id, feature_id, created_by, created_by_session_id,
-	source_task_id, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.Title, item.Body, item.Priority,
-			flowID, sqlitex.NullableNonEmptyString(featureID), string(createdBy), sessionID, sourceTaskID, nowText, nowText); err != nil {
+	source_task_id, source_change_id, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.Title, item.Body, item.Priority,
+			flowID, sqlitex.NullableNonEmptyString(featureID), string(createdBy), sessionID, sourceTaskID,
+			sqlitex.NullableNonEmptyString(sourceChangeID), nowText, nowText); err != nil {
 			return "", fmt.Errorf("create generated task %q: %w", item.Key, err)
 		}
 		for _, slug := range item.TagSlugs {
@@ -769,17 +962,17 @@ func DecodeTaskSetManifest(raw []byte) (TaskSetManifest, error) {
 	if len(manifest.Dependencies) > 200 {
 		return TaskSetManifest{}, errors.New("task-set may contain at most 200 dependencies")
 	}
+
 	seen := map[string]bool{}
 	kinds := make(map[string]WorkItemKind, len(manifest.Items))
+	items := make(map[string]TaskSetItem, len(manifest.Items))
 	for i := range manifest.Items {
 		item := &manifest.Items[i]
 		item.Key = strings.TrimSpace(item.Key)
+		item.ExistingTaskID = strings.TrimSpace(item.ExistingTaskID)
 		item.ParentKey = strings.TrimSpace(item.ParentKey)
 		item.Title = strings.TrimSpace(item.Title)
 		item.FlowID = strings.TrimSpace(item.FlowID)
-		if item.Kind != WorkItemTask && item.Kind != WorkItemEpic && item.Kind != WorkItemFeature {
-			return TaskSetManifest{}, fmt.Errorf("item %q has invalid kind %q", item.Key, item.Kind)
-		}
 		if !flowNodeKeyPattern.MatchString(item.Key) {
 			return TaskSetManifest{}, fmt.Errorf("item %d key %q is invalid", i+1, item.Key)
 		}
@@ -787,6 +980,26 @@ func DecodeTaskSetManifest(raw []byte) (TaskSetManifest, error) {
 			return TaskSetManifest{}, fmt.Errorf("duplicate item key %q", item.Key)
 		}
 		seen[item.Key] = true
+
+		if item.ExistingTaskID != "" {
+			if item.Kind == "" {
+				item.Kind = WorkItemTask
+			}
+			if item.Kind != WorkItemTask {
+				return TaskSetManifest{}, fmt.Errorf("existing item %q must have task kind", item.Key)
+			}
+			if item.ParentKey != "" || item.Title != "" || strings.TrimSpace(item.Body) != "" || item.Priority != 0 ||
+				len(item.TagSlugs) != 0 || item.FlowID != "" || item.CompletionPolicy != "" {
+				return TaskSetManifest{}, fmt.Errorf("existing task item %q may only specify key, kind, and existing_task_id", item.Key)
+			}
+			kinds[item.Key] = item.Kind
+			items[item.Key] = *item
+			continue
+		}
+
+		if item.Kind != WorkItemTask && item.Kind != WorkItemEpic && item.Kind != WorkItemFeature {
+			return TaskSetManifest{}, fmt.Errorf("item %q has invalid kind %q", item.Key, item.Kind)
+		}
 		kinds[item.Key] = item.Kind
 		if item.Title == "" || strings.TrimSpace(item.Body) == "" {
 			return TaskSetManifest{}, fmt.Errorf("item %q requires title and body", item.Key)
@@ -821,7 +1034,9 @@ func DecodeTaskSetManifest(raw []byte) (TaskSetManifest, error) {
 			}
 			seenTags[item.TagSlugs[j]] = true
 		}
+		items[item.Key] = *item
 	}
+
 	dependencyEdges := map[string][]string{}
 	for _, item := range manifest.Items {
 		if item.ParentKey == "" {
@@ -854,6 +1069,12 @@ func DecodeTaskSetManifest(raw []byte) (TaskSetManifest, error) {
 		seenDependencies[edgeKey] = true
 		dependencyEdges[dependency.Blocker] = append(dependencyEdges[dependency.Blocker], dependency.Blocked)
 	}
+	if manifest.ReviewFollowUp != nil {
+		if err := normalizeTaskSetReviewFollowUp(manifest.ReviewFollowUp, items); err != nil {
+			return TaskSetManifest{}, err
+		}
+	}
+
 	visiting := map[string]bool{}
 	visited := map[string]bool{}
 	var visit func(string) bool
@@ -880,4 +1101,223 @@ func DecodeTaskSetManifest(raw []byte) (TaskSetManifest, error) {
 		}
 	}
 	return manifest, nil
+}
+
+func normalizeTaskSetReviewFollowUp(review *TaskSetReviewFollowUp, items map[string]TaskSetItem) error {
+	review.SetID = strings.TrimSpace(review.SetID)
+	if review.SetID == "" || review.SetRevision <= 0 {
+		return errors.New("review_follow_up requires set_id and a positive set_revision")
+	}
+	if len(review.Assignments) == 0 {
+		return errors.New("review_follow_up requires at least one assignment")
+	}
+	assignments := make(map[string]TaskSetReviewFollowUpAssignment, len(review.Assignments))
+	usedItemKeys := map[string]bool{}
+	for i := range review.Assignments {
+		assignment := &review.Assignments[i]
+		assignment.ProposalID = strings.TrimSpace(assignment.ProposalID)
+		assignment.ItemKey = strings.TrimSpace(assignment.ItemKey)
+		assignment.TargetTaskID = strings.TrimSpace(assignment.TargetTaskID)
+		assignment.CanonicalProposalID = strings.TrimSpace(assignment.CanonicalProposalID)
+		assignment.Rationale = strings.TrimSpace(assignment.Rationale)
+		if assignment.ProposalID == "" {
+			return fmt.Errorf("review_follow_up assignment %d requires proposal_id", i+1)
+		}
+		if _, duplicate := assignments[assignment.ProposalID]; duplicate {
+			return fmt.Errorf("duplicate review_follow_up assignment for proposal %q", assignment.ProposalID)
+		}
+		if assignment.Rationale == "" {
+			return fmt.Errorf("proposal %q assignment requires rationale", assignment.ProposalID)
+		}
+		if len(assignment.Rationale) > reviewFollowUpRationaleMaxBytes {
+			return fmt.Errorf("proposal %q rationale exceeds %d bytes", assignment.ProposalID, reviewFollowUpRationaleMaxBytes)
+		}
+		switch assignment.Disposition {
+		case ReviewFollowUpDispositionCreateTask:
+			item, ok := items[assignment.ItemKey]
+			if !ok {
+				return fmt.Errorf("proposal %q references unknown item_key %q", assignment.ProposalID, assignment.ItemKey)
+			}
+			if assignment.ItemKey == "" || item.Kind != WorkItemTask || item.ExistingTaskID != "" ||
+				assignment.TargetTaskID != "" || assignment.CanonicalProposalID != "" {
+				return fmt.Errorf("proposal %q has invalid create_task assignment shape", assignment.ProposalID)
+			}
+			if usedItemKeys[assignment.ItemKey] {
+				return fmt.Errorf("multiple create_task assignments reference item_key %q", assignment.ItemKey)
+			}
+			usedItemKeys[assignment.ItemKey] = true
+		case ReviewFollowUpDispositionUseExistingTask:
+			if assignment.TargetTaskID == "" || assignment.ItemKey != "" || assignment.CanonicalProposalID != "" {
+				return fmt.Errorf("proposal %q has invalid use_existing_task assignment shape", assignment.ProposalID)
+			}
+		case ReviewFollowUpDispositionMergeWithProposal, ReviewFollowUpDispositionDiscardDuplicate:
+			if assignment.CanonicalProposalID == "" || assignment.CanonicalProposalID == assignment.ProposalID ||
+				assignment.ItemKey != "" || assignment.TargetTaskID != "" {
+				return fmt.Errorf("proposal %q has invalid %s assignment shape", assignment.ProposalID, assignment.Disposition)
+			}
+		case ReviewFollowUpDispositionCoveredBySource:
+			if assignment.ItemKey != "" || assignment.TargetTaskID != "" || assignment.CanonicalProposalID != "" {
+				return fmt.Errorf("proposal %q has invalid covered_by_source assignment shape", assignment.ProposalID)
+			}
+		default:
+			return fmt.Errorf("proposal %q has invalid disposition %q", assignment.ProposalID, assignment.Disposition)
+		}
+		assignments[assignment.ProposalID] = *assignment
+	}
+	for _, assignment := range review.Assignments {
+		if assignment.CanonicalProposalID == "" {
+			continue
+		}
+		canonical, ok := assignments[assignment.CanonicalProposalID]
+		if !ok || (canonical.Disposition != ReviewFollowUpDispositionCreateTask && canonical.Disposition != ReviewFollowUpDispositionUseExistingTask) {
+			return fmt.Errorf("proposal %q has invalid canonical_proposal_id %q", assignment.ProposalID, assignment.CanonicalProposalID)
+		}
+	}
+	return nil
+}
+
+type reviewFollowUpPlanContext struct {
+	PlanRevisionID string
+	SetID          string
+	SetRevision    int
+	SourceTaskID   string
+	SourceChangeID string
+}
+
+func (s *WorkflowArtifactService) validateReviewFollowUpPlanTx(
+	ctx context.Context,
+	q workItemRelationQuerier,
+	manifest TaskSetManifest,
+	workflowRunID string,
+	artifactID string,
+) (*reviewFollowUpPlanContext, error) {
+	review := manifest.ReviewFollowUp
+	if review == nil {
+		return nil, nil
+	}
+	var plan reviewFollowUpPlanContext
+	var currentRevision int
+	var organizerTaskID, organizerWorkflowRunID, planArtifactID, runTaskID string
+	if err := q.QueryRowContext(ctx, `
+SELECT pr.id, pr.set_id, pr.set_revision, s.revision, s.source_task_id, s.source_change_id,
+       COALESCE(pr.organizer_task_id, ''), COALESCE(pr.organizer_workflow_run_id, ''),
+       COALESCE(pr.plan_artifact_id, ''), COALESCE(wr.task_id, '')
+FROM review_follow_up_plan_revisions pr
+JOIN review_follow_up_sets s ON s.id = pr.set_id
+LEFT JOIN workflow_runs wr ON wr.id = pr.organizer_workflow_run_id
+WHERE pr.set_id = ? AND pr.set_revision = ?`, review.SetID, review.SetRevision).Scan(
+		&plan.PlanRevisionID, &plan.SetID, &plan.SetRevision, &currentRevision,
+		&plan.SourceTaskID, &plan.SourceChangeID, &organizerTaskID, &organizerWorkflowRunID,
+		&planArtifactID, &runTaskID,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, errors.New("review_follow_up plan revision is not bound")
+		}
+		return nil, err
+	}
+	if currentRevision != review.SetRevision {
+		return nil, fmt.Errorf("review_follow_up set revision is stale: current revision is %d", currentRevision)
+	}
+	if organizerTaskID == "" || organizerWorkflowRunID != workflowRunID || runTaskID != organizerTaskID {
+		return nil, errors.New("workflow is not the organizer task/workflow bound to review_follow_up plan revision")
+	}
+	if artifactID == "" {
+		if planArtifactID != "" {
+			return nil, errors.New("review_follow_up plan revision already has an artifact")
+		}
+	} else if planArtifactID != artifactID {
+		return nil, errors.New("task-set artifact is not bound to review_follow_up plan revision")
+	}
+
+	active := map[string]bool{}
+	rows, err := q.QueryContext(ctx, `
+SELECT p.id
+FROM review_follow_up_proposals p
+JOIN review_follow_up_batches b ON b.id = p.batch_id
+WHERE b.set_id = ? AND p.state = 'active'`, review.SetID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var proposalID string
+		if err := rows.Scan(&proposalID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		active[proposalID] = true
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	assigned := make(map[string]bool, len(review.Assignments))
+	for _, assignment := range review.Assignments {
+		if !active[assignment.ProposalID] {
+			return nil, fmt.Errorf("review_follow_up assignment references unknown active proposal %q", assignment.ProposalID)
+		}
+		assigned[assignment.ProposalID] = true
+	}
+	for proposalID := range active {
+		if !assigned[proposalID] {
+			return nil, fmt.Errorf("active proposal %q is missing an assignment", proposalID)
+		}
+	}
+
+	resolved := make(map[string]string, len(manifest.Items))
+	for _, item := range manifest.Items {
+		if item.ExistingTaskID == "" {
+			continue
+		}
+		if err := s.requireOpenProjectTaskTx(ctx, q, item.ExistingTaskID); err != nil {
+			return nil, fmt.Errorf("existing item %q: %w", item.Key, err)
+		}
+		resolved[item.Key] = item.ExistingTaskID
+	}
+	for _, assignment := range review.Assignments {
+		if assignment.Disposition == ReviewFollowUpDispositionUseExistingTask {
+			if err := s.requireOpenProjectTaskTx(ctx, q, assignment.TargetTaskID); err != nil {
+				return nil, fmt.Errorf("proposal %q target: %w", assignment.ProposalID, err)
+			}
+			if assignment.TargetTaskID == plan.SourceTaskID {
+				return nil, fmt.Errorf("proposal %q cannot use the reviewed source task", assignment.ProposalID)
+			}
+		}
+	}
+	for _, dependency := range manifest.Dependencies {
+		blockerID, blockerKnown := resolved[dependency.Blocker]
+		blockedID, blockedKnown := resolved[dependency.Blocked]
+		if blockedKnown && blockedID == plan.SourceTaskID {
+			return nil, errors.New("dependency target cannot resolve to the reviewed source task")
+		}
+		if blockerKnown && blockedKnown {
+			if blockerID == blockedID {
+				return nil, fmt.Errorf("dependency %q -> %q resolves to a self dependency", dependency.Blocker, dependency.Blocked)
+			}
+			cycle, err := workItemDependencyPathExists(ctx, q, blockedID, blockerID)
+			if err != nil {
+				return nil, err
+			}
+			if cycle {
+				return nil, fmt.Errorf("dependency %q -> %q would create a cycle", dependency.Blocker, dependency.Blocked)
+			}
+		}
+	}
+	return &plan, nil
+}
+
+func (s *WorkflowArtifactService) requireOpenProjectTaskTx(ctx context.Context, q workItemRelationQuerier, taskID string) error {
+	projectID, ok := ProjectIDFromTaskID(taskID)
+	if !ok || s.tasks == nil || s.tasks.projectID == "" || projectID != s.tasks.projectID {
+		return fmt.Errorf("task %q is not project-local", taskID)
+	}
+	var state sql.NullString
+	if err := q.QueryRowContext(ctx, `SELECT lifecycle_state FROM tasks WHERE id = ?`, taskID).Scan(&state); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("task %q does not exist", taskID)
+		}
+		return err
+	}
+	if state.Valid && state.String == string(LifecycleDone) {
+		return fmt.Errorf("task %q must be open", taskID)
+	}
+	return nil
 }
