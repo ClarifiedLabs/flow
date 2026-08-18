@@ -15,11 +15,12 @@ import (
 // featureTestEnv bundles a real-git project fixture with the coordinator
 // services feature work flows through, wired the way the registry wires them.
 type featureTestEnv struct {
-	fixture  projectFixture
-	tasks    *TaskService
-	flows    *FlowService
-	runs     *WorkflowRunService
-	features *FeatureService
+	fixture   projectFixture
+	tasks     *TaskService
+	flows     *FlowService
+	runs      *WorkflowRunService
+	features  *FeatureService
+	gitEvents *GitEventService
 }
 
 func newFeatureTestEnv(t *testing.T) *featureTestEnv {
@@ -47,8 +48,9 @@ func newFeatureTestEnv(t *testing.T) *featureTestEnv {
 	features := NewFeatureService(fixture.store.DB(), tasks, fixture.project)
 	features.Runs = runs
 	runs.Features = features
+	features.GitEvents = NewGitEventService(fixture.store.DB())
 
-	return &featureTestEnv{fixture: fixture, tasks: tasks, flows: flows, runs: runs, features: features}
+	return &featureTestEnv{fixture: fixture, tasks: tasks, flows: flows, runs: runs, features: features, gitEvents: features.GitEvents}
 }
 
 func (env *featureTestEnv) exchangePath() string {

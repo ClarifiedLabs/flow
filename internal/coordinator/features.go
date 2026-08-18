@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -173,6 +174,13 @@ type FeatureService struct {
 	// wired through the project bundle; a nil Runs leaves the task unscheduled
 	// (tests schedule it explicitly).
 	Runs *WorkflowRunService
+
+	// GitEvents drains the exchange's post-receive spool on recovery paths so
+	// finalization decisions are made against the complete set of observed ref
+	// updates. A nil GitEvents skips the drain and therefore cannot confirm a
+	// publication; recovery then fails closed (running/stale/failed, never
+	// finalized).
+	GitEvents *GitEventService
 
 	// RebaseOnMainTestHook, when set, runs at the named phase inside
 	// RebaseOnMain so tests can inject a feature-task creation by another
@@ -1098,16 +1106,46 @@ func (s *FeatureService) RebaseOnMain(ctx context.Context, feature Feature, rest
 	if running, found, err := s.RunningRebase(ctx, feature.ID); err != nil {
 		return RebaseStartResult{}, err
 	} else if found {
-		// Crash between the clean path's push and its stamp: the ref already
-		// moved, so heal the row to finalized instead of refusing forever.
-		tip, ok, tipErr := flowgit.BranchTip(ctx, exchangePath, feature.Branch)
-		if tipErr == nil && ok && tip != running.OldTipSHA {
-			if err := s.stampRebaseDone(ctx, running.ID, RebaseFinalized, tip); err != nil {
+		// Crash recovery must reconcile the row against durable evidence — a
+		// recorded publication intent plus the post-receive event that proves
+		// flow's own push landed. A ref that merely moved is not proof: a merge
+		// push by another actor must never heal a rebase row to finalized.
+		outcome, err := s.resolveRebasePublication(ctx, feature, running)
+		if err != nil {
+			return RebaseStartResult{}, err
+		}
+		switch outcome {
+		case RebasePublicationFinalized:
+			return RebaseStartResult{Kind: RebaseRebased, Feature: feature, NewTipSHA: running.NewTipSHA}, nil
+		case RebasePublicationStale, RebasePublicationFailed:
+			// The row is closed (stale/failed) and, for stale, a redo row is open
+			// against the current tip. A failed rebase is retryable from here; a
+			// stale one still holds the gate through its redo row.
+			if _, stillRunning, err := s.RunningRebase(ctx, feature.ID); err != nil {
+				return RebaseStartResult{}, err
+			} else if stillRunning {
+				return RebaseStartResult{}, ErrFeatureRebaseRunning
+			}
+			// Fall through and retry the rebase against the current ref state.
+			reloaded, err := s.Get(ctx, feature.ID)
+			if err != nil {
 				return RebaseStartResult{}, err
 			}
-			return RebaseStartResult{Kind: RebaseRebased, Feature: feature, NewTipSHA: tip}, nil
+			return s.rebaseOnMainInner(ctx, reloaded, restrictBlockedTo)
 		}
 		return RebaseStartResult{}, ErrFeatureRebaseRunning
+	}
+
+	return s.rebaseOnMainInner(ctx, feature, restrictBlockedTo)
+}
+
+func (s *FeatureService) rebaseOnMainInner(ctx context.Context, feature Feature, restrictBlockedTo []string) (RebaseStartResult, error) {
+	exchangePath := strings.TrimSpace(s.project.ExchangePath)
+	if exchangePath == "" {
+		return RebaseStartResult{}, errors.New("project exchange remote is required for feature branches")
+	}
+	if err := s.requireNoOpenIntegrationDescendants(ctx, feature.ID); err != nil {
+		return RebaseStartResult{}, err
 	}
 
 	// Preflight runs before the write reservation: resolving the base and
@@ -1171,18 +1209,68 @@ func (s *FeatureService) RebaseOnMain(ctx context.Context, feature Feature, rest
 		s.RebaseOnMainTestHook(RebaseOnMainAfterReservation)
 	}
 
-	result, err := flowgit.RebaseOnto(ctx, flowgit.RebaseOntoInput{
+	// Rebase without publishing: the rebased head is computed in a throwaway
+	// clone whose objects live only there, so publication must push from that
+	// clone. The clone is removed on every exit path below.
+	rebased, err := flowgit.RebaseBranchCloned(ctx, flowgit.RebaseOntoInput{
 		ExchangePath:    exchangePath,
 		Branch:          feature.Branch,
 		Onto:            base,
 		ExpectedOldSHA:  featureTip,
 		ExpectedOntoSHA: baseTip,
 	})
+	if rebased.Worktree != "" {
+		defer os.RemoveAll(rebased.Worktree)
+	}
 	if err == nil {
-		if err := s.stampRebaseDone(ctx, rebaseID, RebaseFinalized, result.HeadSHA); err != nil {
+		// Durable intent first, then the compare-and-swap push, then
+		// finalization backed by the event the push produced. A crash at any
+		// point leaves an unambiguous record for the resolver.
+		if _, err := s.recordPublicationIntent(ctx, rebaseID, featureTip, rebased.HeadSHA); err != nil {
 			return RebaseStartResult{}, err
 		}
-		return RebaseStartResult{Kind: RebaseRebased, Feature: feature, NewTipSHA: result.HeadSHA}, nil
+		if err := flowgit.PushBranchCompareAndSwap(ctx, rebased.Worktree, "refs/heads/"+feature.Branch, featureTip); err != nil {
+			// The lease was lost or the push failed. Reconcile with evidence:
+			// either a concurrent push already landed (stale) or ours did
+			// (finalized); anything else is an operational failure.
+			reloaded, reloadErr := s.Get(ctx, feature.ID)
+			if reloadErr != nil {
+				return RebaseStartResult{}, reloadErr
+			}
+			running, runningErr := s.runningRebaseByID(ctx, rebaseID)
+			if runningErr != nil {
+				return RebaseStartResult{}, runningErr
+			}
+			outcome, resolveErr := s.resolveRebasePublication(ctx, reloaded, running)
+			if resolveErr != nil {
+				return RebaseStartResult{}, fmt.Errorf("rebase feature branch: %w (recovery: %v)", err, resolveErr)
+			}
+			switch outcome {
+			case RebasePublicationFinalized:
+				return RebaseStartResult{Kind: RebaseRebased, Feature: feature, NewTipSHA: rebased.HeadSHA}, nil
+			case RebasePublicationStale:
+				return RebaseStartResult{Kind: RebaseRebased, Feature: feature, NewTipSHA: rebased.HeadSHA}, nil
+			}
+			return RebaseStartResult{}, fmt.Errorf("rebase feature branch: %w", err)
+		}
+		// The push succeeded: record the proof this process produced, then
+		// finalize with that evidence. (The hook spool also carries the event;
+		// the hash dedup keeps them one row.)
+		if err := s.recordPublicationEvent(ctx, feature, featureTip, rebased.HeadSHA); err != nil {
+			return RebaseStartResult{}, err
+		}
+		running, err := s.runningRebaseByID(ctx, rebaseID)
+		if err != nil {
+			return RebaseStartResult{}, err
+		}
+		outcome, err := s.resolveRebasePublication(ctx, feature, running)
+		if err != nil {
+			return RebaseStartResult{}, err
+		}
+		if outcome != RebasePublicationFinalized {
+			return RebaseStartResult{}, fmt.Errorf("rebase push succeeded but publication was not confirmed (outcome %s)", outcome)
+		}
+		return RebaseStartResult{Kind: RebaseRebased, Feature: feature, NewTipSHA: rebased.HeadSHA}, nil
 	}
 	var conflict *flowgit.RebaseConflictError
 	if !errors.As(err, &conflict) {
@@ -1236,6 +1324,284 @@ UPDATE feature_rebases SET task_id = ? WHERE id = ?`, task.ID, rebaseID); err !=
 	return RebaseStartResult{Kind: RebaseTaskCreated, Feature: feature, RebaseTaskID: task.ID}, nil
 }
 
+// RebasePublicationOutcome is what a recovery path decided about a running
+// rebase row, and what it did to it.
+type RebasePublicationOutcome string
+
+const (
+	// RebasePublicationFinalized means durable evidence (a git_events row
+	// matching this rebase's recorded publication intent) proved flow's own
+	// push published the tip; the row is now finalized.
+	RebasePublicationFinalized RebasePublicationOutcome = "finalized"
+	// RebasePublicationStale means the feature ref moved without a matching
+	// intent+event pair: another actor won the compare-and-swap, so the row is
+	// marked stale and a redo row opened against the current tip.
+	RebasePublicationStale RebasePublicationOutcome = "stale"
+	// RebasePublicationFailed means an intent was recorded but the push never
+	// landed (no event, ref unchanged); the row is failed and the rebase may be
+	// retried.
+	RebasePublicationFailed RebasePublicationOutcome = "failed"
+	// RebasePublicationRunning means nothing decisive is observable: no intent,
+	// ref unchanged — the rebase is still in flight.
+	RebasePublicationRunning RebasePublicationOutcome = "running"
+)
+
+// ErrRebaseFinalizationRequiresEvidence is the choke-point invariant: no code
+// path may set feature_rebases.state to 'finalized' without the event hash of
+// the git event that proves flow's own push published the tip.
+var ErrRebaseFinalizationRequiresEvidence = errors.New("rebase finalization requires a confirmed publication event")
+
+// recordPublicationIntent durably records, before any push, the exact ref
+// update flow is about to perform for rebaseID: old_tip_sha -> new_tip_sha. The
+// row commits in its own BEGIN IMMEDIATE transaction before the push starts, so
+// a crash anywhere between the intent and the finalized stamp leaves an
+// unambiguous record to reconcile against the exchange's post-receive spool.
+func (s *FeatureService) recordPublicationIntent(ctx context.Context, rebaseID, oldTipSHA, newTipSHA string) (string, error) {
+	rebaseID = strings.TrimSpace(rebaseID)
+	oldTipSHA = strings.TrimSpace(oldTipSHA)
+	newTipSHA = strings.TrimSpace(newTipSHA)
+	if rebaseID == "" || oldTipSHA == "" || newTipSHA == "" {
+		return "", errors.New("publication intent requires rebase id and tip shas")
+	}
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	// Idempotent: a retry of the same (rebase, new tip) collapses onto the
+	// existing intent rather than failing the rebase.
+	var id string
+	err = tx.QueryRowContext(ctx, `
+SELECT id FROM rebase_publications
+WHERE rebase_id = ? AND new_tip_sha = ?
+LIMIT 1`, rebaseID, newTipSHA).Scan(&id)
+	if err == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return "", err
+		}
+		return id, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("lookup publication intent: %w", err)
+	}
+	id, err = randomPrefixedID("rbp")
+	if err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO rebase_publications (
+	id, rebase_id, old_tip_sha, new_tip_sha, recorded_at
+) VALUES (?, ?, ?, ?, ?)`,
+		id, rebaseID, oldTipSHA, newTipSHA, formatTime(s.now().UTC())); err != nil {
+		return "", fmt.Errorf("record publication intent: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit publication intent: %w", err)
+	}
+	return id, nil
+}
+
+// confirmPublicationEvent looks for the durable git event proving the intent
+// was published: ref = the feature ref, old_sha = the intent's old tip,
+// new_sha = the intent's new tip, observed no earlier than the rebase row.
+// The caller must have drained the spool first; this only reads.
+func (s *FeatureService) confirmPublicationEvent(ctx context.Context, feature Feature, rebase FeatureRebase, intent rebasePublication) (string, bool, error) {
+	if intent.NewTipSHA == "" {
+		return "", false, nil
+	}
+	var eventHash string
+	err := s.db.QueryRowContext(ctx, `
+SELECT event_hash
+FROM git_events
+WHERE ref = ?
+	AND old_sha = ?
+	AND new_sha = ?
+	AND observed_at >= ?
+ORDER BY observed_at DESC, id DESC
+LIMIT 1`,
+		"refs/heads/"+feature.Branch,
+		intent.OldTipSHA,
+		intent.NewTipSHA,
+		formatTime(rebase.CreatedAt),
+	).Scan(&eventHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("look up publication event: %w", err)
+	}
+	return eventHash, true, nil
+}
+
+type rebasePublication struct {
+	ID         string
+	RebaseID   string
+	OldTipSHA  string
+	NewTipSHA  string
+	RecordedAt time.Time
+}
+
+// latestPublicationIntent returns the newest recorded publication intent for
+// the rebase row, if any.
+func (s *FeatureService) latestPublicationIntent(ctx context.Context, rebaseID string) (rebasePublication, bool, error) {
+	var intent rebasePublication
+	var recordedAt string
+	err := s.db.QueryRowContext(ctx, `
+SELECT id, rebase_id, old_tip_sha, new_tip_sha, recorded_at
+FROM rebase_publications
+WHERE rebase_id = ?
+ORDER BY recorded_at DESC, id DESC
+LIMIT 1`, strings.TrimSpace(rebaseID)).Scan(
+		&intent.ID, &intent.RebaseID, &intent.OldTipSHA, &intent.NewTipSHA, &recordedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return rebasePublication{}, false, nil
+	}
+	if err != nil {
+		return rebasePublication{}, false, fmt.Errorf("load publication intent: %w", err)
+	}
+	parsed, err := parseTime(recordedAt)
+	if err != nil {
+		return rebasePublication{}, false, err
+	}
+	intent.RecordedAt = parsed
+	return intent, true, nil
+}
+
+// finalizeRebaseWithEvidence is the only path that may write
+// state='finalized'. eventHash must be non-empty and must identify the git
+// event recorded for this rebase's publication intent; the event hash is
+// stamped onto the intent row so the proof is durable and auditable.
+func (s *FeatureService) finalizeRebaseWithEvidence(ctx context.Context, rebaseID, newTipSHA, eventHash string) error {
+	rebaseID = strings.TrimSpace(rebaseID)
+	newTipSHA = strings.TrimSpace(newTipSHA)
+	eventHash = strings.TrimSpace(eventHash)
+	if rebaseID == "" || newTipSHA == "" || eventHash == "" {
+		return fmt.Errorf("%w: rebase %s new tip %q event %q", ErrRebaseFinalizationRequiresEvidence, rebaseID, newTipSHA, eventHash)
+	}
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := formatTime(s.now().UTC())
+	result, err := tx.ExecContext(ctx, `
+UPDATE feature_rebases
+SET state = 'finalized', new_tip_sha = ?, completed_at = ?
+WHERE id = ? AND state = 'running'`, newTipSHA, now, rebaseID)
+	if err != nil {
+		return fmt.Errorf("finalize rebase with evidence: %w", err)
+	}
+	if rows, err := result.RowsAffected(); err != nil {
+		return err
+	} else if rows == 0 {
+		// Already closed by a concurrent recovery; nothing to do.
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE rebase_publications
+SET confirmed_event_hash = ?
+WHERE rebase_id = ? AND new_tip_sha = ? AND confirmed_event_hash IS NULL`,
+		eventHash, rebaseID, newTipSHA); err != nil {
+		return fmt.Errorf("confirm publication intent: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// recordPublicationEvent records the git event for a compare-and-swap push
+// this process just completed successfully. Git's --force-with-lease verifies
+// the expected old value server-side before updating, so a successful return
+// is durable proof from the actor that performed the work — the same proof the
+// exchange's post-receive hook spools asynchronously. Recording it here makes
+// the happy path deterministic; the spool drain in resolveRebasePublication
+// covers pushes whose stamp crashed before this could run. The event hash
+// dedup (old, new, ref, actor) collapses the two sources onto one row.
+func (s *FeatureService) recordPublicationEvent(ctx context.Context, feature Feature, oldTipSHA, newTipSHA string) error {
+	if s.GitEvents == nil {
+		return errors.New("git event service is required to confirm rebase publication")
+	}
+	_, err := s.GitEvents.Record(ctx, GitEvent{
+		OldSHA: strings.TrimSpace(oldTipSHA),
+		NewSHA: strings.TrimSpace(newTipSHA),
+		Ref:    "refs/heads/" + feature.Branch,
+		Actor:  "coordinator",
+	}, GitEventSourceAPI)
+	if err != nil {
+		return fmt.Errorf("record publication event: %w", err)
+	}
+	return nil
+}
+
+// resolveRebasePublication reconciles a running rebase row against durable
+// evidence instead of observing the ref's current position. It drains the
+// exchange spool first, so event absence is meaningful, then decides:
+//
+//  1. intent + matching event -> finalized with that event hash as evidence
+//  2. intent, no event, ref unchanged -> failed (the push never landed)
+//  3. ref moved without a matching intent+event -> stale (someone else won
+//     the CAS; never finalized)
+//  4. no intent, ref unchanged -> still running (in flight)
+func (s *FeatureService) resolveRebasePublication(ctx context.Context, feature Feature, rebase FeatureRebase) (RebasePublicationOutcome, error) {
+	exchangePath := strings.TrimSpace(s.project.ExchangePath)
+	if exchangePath == "" {
+		return RebasePublicationRunning, errors.New("project exchange remote is required for feature branches")
+	}
+	// A synchronous, idempotent drain makes "no event" a real answer.
+	if s.GitEvents != nil {
+		if _, err := s.GitEvents.DrainSpooled(ctx, exchangePath); err != nil {
+			return RebasePublicationRunning, fmt.Errorf("drain exchange hook spool: %w", err)
+		}
+	}
+
+	intent, hasIntent, err := s.latestPublicationIntent(ctx, rebase.ID)
+	if err != nil {
+		return RebasePublicationRunning, err
+	}
+	if hasIntent {
+		if eventHash, confirmed, err := s.confirmPublicationEvent(ctx, feature, rebase, intent); err != nil {
+			return RebasePublicationRunning, err
+		} else if confirmed {
+			if err := s.finalizeRebaseWithEvidence(ctx, rebase.ID, intent.NewTipSHA, eventHash); err != nil {
+				return RebasePublicationRunning, err
+			}
+			return RebasePublicationFinalized, nil
+		}
+	}
+
+	tip, ok, err := flowgit.BranchTip(ctx, exchangePath, feature.Branch)
+	if err != nil {
+		return RebasePublicationRunning, fmt.Errorf("resolve feature branch tip: %w", err)
+	}
+	if !ok {
+		return RebasePublicationRunning, fmt.Errorf("feature branch %q not found in exchange remote", feature.Branch)
+	}
+
+	// The ref moved but no matching intent+event explains it: another actor won
+	// the compare-and-swap. Honest outcome is stale, never finalized.
+	if tip != rebase.OldTipSHA {
+		if hasIntent && tip == intent.NewTipSHA {
+			// The ref sits on our intended tip but the event that would prove we
+			// pushed it is missing (spool loss or a disabled hook). Fail closed:
+			// leave the row running rather than finalize from observation.
+			return RebasePublicationRunning, nil
+		}
+		if err := s.markRebaseStale(ctx, rebase, tip); err != nil {
+			return RebasePublicationRunning, err
+		}
+		return RebasePublicationStale, nil
+	}
+
+	// Ref unchanged. An intent whose push never landed releases the gate so the
+	// rebase can be retried; otherwise the rebase is still in flight.
+	if hasIntent {
+		if err := s.stampRebaseDone(ctx, rebase.ID, RebaseFailed, ""); err != nil {
+			return RebasePublicationRunning, err
+		}
+		return RebasePublicationFailed, nil
+	}
+	return RebasePublicationRunning, nil
+}
+
 func requireNoEffectiveBlockersTx(ctx context.Context, q workItemRelationQuerier, itemID string) error {
 	count, err := effectiveUnresolvedBlockerCountTx(ctx, q, itemID)
 	if err != nil {
@@ -1258,6 +1624,31 @@ func (s *FeatureService) flowIDByName(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("look up %s flow: %w", FeatureRebaseFlowName, err)
 	}
 	return id, nil
+}
+
+// runningRebaseByID loads one rebase row regardless of state, for
+// post-publication reconciliation of a row this process created.
+func (s *FeatureService) runningRebaseByID(ctx context.Context, rebaseID string) (FeatureRebase, error) {
+	rebase, err := scanFeatureRebase(s.db.QueryRowContext(ctx, `
+SELECT
+	id,
+	feature_id,
+	COALESCE(task_id, ''),
+	old_tip_sha,
+	target_base,
+	target_base_sha,
+	target_feature_id,
+	new_tip_sha,
+	state,
+	created_at,
+	completed_at,
+	restrict_blocked_to
+FROM feature_rebases
+WHERE id = ?`, strings.TrimSpace(rebaseID)))
+	if err != nil {
+		return FeatureRebase{}, fmt.Errorf("load rebase: %w", err)
+	}
+	return rebase, nil
 }
 
 // FinalizeRebase publishes the rebased head recorded on the rebase task's
@@ -1301,13 +1692,27 @@ func (s *FeatureService) FinalizeRebase(ctx context.Context, featureID, taskID s
 		return "", fmt.Errorf("feature branch %q not found in exchange remote", feature.Branch)
 	}
 	if tip == head {
-		// Heal: the push landed but the stamp crashed (merge-intent-style
-		// replay). The ref already points at the new head, so finalizing is a
-		// no-op beyond the row.
-		if err := s.stampRebaseDone(ctx, rebase.ID, RebaseFinalized, head); err != nil {
+		// The ref already points at the change head. Observation alone is not
+		// proof that this process published it: route through the evidence
+		// resolver, which finalizes only when a recorded intent plus its
+		// post-receive event explain the position.
+		outcome, err := s.resolveRebasePublication(ctx, feature, rebase)
+		if err != nil {
 			return "", err
 		}
-		return "finalized", nil
+		switch outcome {
+		case RebasePublicationFinalized:
+			return "finalized", nil
+		case RebasePublicationFailed:
+			return "failed", nil
+		case RebasePublicationStale:
+			return "stale", nil
+		default:
+			// The push may have landed with an undrained/lost event. Fail closed:
+			// the finalize node retries and an operator investigates, but the row
+			// is never finalized from observation.
+			return "", fmt.Errorf("feature ref already at rebased head %s without publication evidence", head)
+		}
 	}
 	if tip != rebase.OldTipSHA {
 		if err := s.markRebaseStale(ctx, rebase, tip); err != nil {
@@ -1317,27 +1722,42 @@ func (s *FeatureService) FinalizeRebase(ctx context.Context, featureID, taskID s
 	}
 
 	ref := "refs/heads/" + feature.Branch
+	// Intent precedes the push so a crash between the two is decidable.
+	if _, err := s.recordPublicationIntent(ctx, rebase.ID, rebase.OldTipSHA, head); err != nil {
+		return "", err
+	}
 	if err := flowgit.PushRefCompareAndSwap(ctx, exchangePath, ref, head, rebase.OldTipSHA); err != nil {
-		// A lost lease means a concurrent update (a task merged mid-rebase).
-		// Re-probe and take the stale path when the tip really moved.
-		current, ok, probeErr := flowgit.BranchTip(ctx, exchangePath, feature.Branch)
-		if probeErr == nil && ok && current != rebase.OldTipSHA && current != head {
-			if staleErr := s.markRebaseStale(ctx, rebase, current); staleErr != nil {
-				return "", staleErr
-			}
-			return "stale", nil
+		// A lost lease means a concurrent update (a task merged mid-rebase), or
+		// the push itself landed while reporting failure. Reconcile with
+		// evidence rather than probing the ref: stale only when another actor's
+		// movement is observable, finalized only when our event proves it.
+		outcome, resolveErr := s.resolveRebasePublication(ctx, feature, rebase)
+		if resolveErr != nil {
+			return "", fmt.Errorf("push rebased head to feature branch: %w (recovery: %v)", err, resolveErr)
 		}
-		if probeErr == nil && ok && current == head {
-			if stampErr := s.stampRebaseDone(ctx, rebase.ID, RebaseFinalized, head); stampErr != nil {
-				return "", stampErr
-			}
+		switch outcome {
+		case RebasePublicationFinalized:
 			return "finalized", nil
+		case RebasePublicationStale:
+			return "stale", nil
+		case RebasePublicationFailed:
+			return "", fmt.Errorf("push rebased head to feature branch: %w", err)
 		}
 		return "", fmt.Errorf("push rebased head to feature branch: %w", err)
 	}
 
-	if err := s.stampRebaseDone(ctx, rebase.ID, RebaseFinalized, head); err != nil {
+	// The push succeeded: record the proof this process produced, then
+	// finalize with that evidence. (The hook spool also carries the event; the
+	// hash dedup keeps them one row.)
+	if err := s.recordPublicationEvent(ctx, feature, rebase.OldTipSHA, head); err != nil {
 		return "", err
+	}
+	outcome, err := s.resolveRebasePublication(ctx, feature, rebase)
+	if err != nil {
+		return "", err
+	}
+	if outcome != RebasePublicationFinalized {
+		return "", fmt.Errorf("rebase publication was not confirmed after push (outcome %s)", outcome)
 	}
 	return "finalized", nil
 }
@@ -1617,8 +2037,13 @@ INSERT INTO feature_rebases (
 }
 
 // stampRebaseDone closes a rebase row. newTipSHA is recorded for finalized
-// rows and left empty otherwise.
+// rows and left empty otherwise. Finalization is deliberately not reachable
+// through this helper: a finalized row requires the event-hash evidence that
+// only finalizeRebaseWithEvidence can supply.
 func (s *FeatureService) stampRebaseDone(ctx context.Context, rebaseID string, state RebaseState, newTipSHA string) error {
+	if state == RebaseFinalized {
+		return fmt.Errorf("%w: stampRebaseDone cannot finalize", ErrRebaseFinalizationRequiresEvidence)
+	}
 	now := formatTime(s.now().UTC())
 	if _, err := s.db.ExecContext(ctx, `
 UPDATE feature_rebases

@@ -1303,7 +1303,7 @@ test("a submission in the queued-paint window binds to the head still rendered, 
   const posted = JSON.parse(calls[0].options.body);
   assert.equal(posted.head_sha, "abc123def456", "the submission names the head rendered on screen, not the model's newer head");
   assert.equal(posted.body, "feedback written against h1");
-  assert.deepEqual(posted.comments, [{ file_path: "a.go", line: 1, body: "note against h1" }]);
+  assert.deepEqual(posted.comments, [{ file_path: "a.go", line: 1, body: "note against h1", disposition: "introduced_by_change" }]);
 
   resolveRequest();
   await pending;
@@ -1638,7 +1638,7 @@ test("a delayed successful submission for the old head does not clear the new he
   posted.push(JSON.parse(reviewCalls[reviewCalls.length - 1].options.body));
   assert.equal(posted[1].head_sha, "def456789abc", "the h2 submission names the displayed head");
   assert.equal(posted[1].body, "", "the h2 submission carries no h1 review text");
-  assert.deepEqual(posted[1].comments, [{ file_path: "a.go", line: 1, body: "note against h2" }], "the h2 submission carries the h2 draft");
+  assert.deepEqual(posted[1].comments, [{ file_path: "a.go", line: 1, body: "note against h2", disposition: "introduced_by_change" }], "the h2 submission carries the h2 draft");
 
   resolveSecond();
   await second;

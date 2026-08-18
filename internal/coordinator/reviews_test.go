@@ -391,5 +391,5 @@ func newThreadServiceFixture(t *testing.T) (*flowdb.Store, *ThreadService, Chang
 		t.Fatalf("get review change: %v", err)
 	}
 
-	return store, NewThreadService(store.DB()), change
+	return store, NewThreadServiceForProject(store.DB(), "p-test"), change
 }

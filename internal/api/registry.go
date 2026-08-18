@@ -331,7 +331,7 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 		return nil, fmt.Errorf("seed default flows for project %s: %w", project.ID, err)
 	}
 	checks := coordinator.NewCheckService(db)
-	threads := coordinator.NewThreadService(db)
+	threads := coordinator.NewThreadServiceForProject(db, project.ID)
 	queue := worker.NewService(db)
 	// checkConfigs and reconciler are constructed before sessions so the session
 	// service can route a crashed author with a saved handoff to a completion-
@@ -364,6 +364,7 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 	// the services it composes are wired back onto it after construction.
 	threads.Checks = checks
 	threads.Runs = workflowRuns
+	workflowRuns.Threads = threads
 	features := coordinator.NewFeatureService(db, tasks, project)
 	features.Runs = workflowRuns
 	workflowRuns.Features = features
@@ -388,6 +389,9 @@ func (r *Registry) openProjectLocked(ctx context.Context, project coordinator.Pr
 	features.SetEventLog(eventLog)
 	status.SetEventLog(eventLog)
 	gitEvents := coordinator.NewGitEventService(db)
+	// Rebase finalization needs the drained post-receive record to confirm its
+	// own publication; the event service is the drain owner.
+	features.GitEvents = gitEvents
 	gitEvents.SetEventLog(eventLog)
 
 	bundle := &ProjectBundle{

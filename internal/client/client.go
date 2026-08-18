@@ -662,11 +662,14 @@ func (c *Client) RespondWorkflow(taskID, nodeRunID, reviewWaitID, outcome, feedb
 	return response, nil
 }
 
-func (c *Client) ExtendWorkflowBudget(taskID string, additional int) (coordinator.WorkflowRun, error) {
+func (c *Client) ExtendWorkflowBudget(taskID string, additional int, instructions string) (coordinator.WorkflowRun, error) {
 	var response struct {
 		Run coordinator.WorkflowRun `json:"run"`
 	}
-	request := map[string]int{"additional": additional}
+	request := struct {
+		Additional   int    `json:"additional"`
+		Instructions string `json:"instructions"`
+	}{Additional: additional, Instructions: strings.TrimSpace(instructions)}
 	if err := c.do(http.MethodPost, c.tasksPath("/"+url.PathEscape(taskID))+"/workflow/budget", request, nil, &response); err != nil {
 		return coordinator.WorkflowRun{}, err
 	}

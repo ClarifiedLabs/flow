@@ -816,6 +816,27 @@ test("a drafted line keeps its note and says so", () => {
   assert.match(html, /cap the wait/);
 });
 
+test("a drafted line offers an explicit scope ruling that defaults to blocking", () => {
+  const drafts = new Map([["a.go:12", { path: "a.go", line: 12, body: "cap the wait", disposition: "introduced_by_change" }]]);
+  const html = renderDiffFile(
+    { path: "a.go", hunks: [{ header: "@@", lines: [{ kind: "context", new_line: 12, text: "x" }] }] },
+    { drafts },
+  );
+  assert.match(html, /checked data-draft-disposition="introduced_by_change"|data-draft-disposition="introduced_by_change" checked/);
+  assert.match(html, /data-draft-disposition="preexisting"/);
+  assert.match(html, /Introduced by this change/);
+  assert.match(html, /Pre-existing/);
+
+  // A pre-existing ruling survives a repaint instead of resetting to blocking.
+  const carried = new Map([["a.go:12", { path: "a.go", line: 12, body: "predates this", disposition: "preexisting" }]]);
+  const reRendered = renderDiffFile(
+    { path: "a.go", hunks: [{ header: "@@", lines: [{ kind: "context", new_line: 12, text: "x" }] }] },
+    { drafts: carried },
+  );
+  assert.match(reRendered, /checked data-draft-disposition="preexisting"|data-draft-disposition="preexisting" checked/);
+  assert.doesNotMatch(reRendered, /checked data-draft-disposition="introduced_by_change"|data-draft-disposition="introduced_by_change" checked/);
+});
+
 test("the review bar states how many notes ride along with the verdict", () => {
   assert.match(renderReviewBar(3), /3 pending inline notes will be posted with this/);
   assert.match(renderReviewBar(1), /1 pending inline note will be posted/);

@@ -153,7 +153,7 @@ func TestWorkflowReviewAuthorCyclesWaitAtConfiguredLimit(t *testing.T) {
 		t.Fatalf("replayed blocked completion = %+v", replayed)
 	}
 
-	extended, err := runs.ExtendBudget(ctx, task.ID, 2, ActorHuman)
+	extended, err := runs.ExtendBudget(ctx, task.ID, 2, "Narrow the fix to the reported race and stop.", ActorHuman)
 	if err != nil {
 		t.Fatalf("extend review cycle budget: %v", err)
 	}

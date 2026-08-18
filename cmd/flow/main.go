@@ -1900,12 +1900,14 @@ func runTaskBudget(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	apiFlags := addAPIFlags(flags)
 	var additional int
+	var instructions string
 	flags.IntVar(&additional, "additional", 0, "additional transitions or review-author cycles for the active budget wait")
+	flags.StringVar(&instructions, "instructions", "", "required operator rationale for the extension; it reaches the next author session")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
-	if flags.NArg() != 1 || additional < 1 {
-		fmt.Fprintln(stderr, "usage: flow task budget [flags] TASK_ID --additional N")
+	if flags.NArg() != 1 || additional < 1 || strings.TrimSpace(instructions) == "" {
+		fmt.Fprintln(stderr, "usage: flow task budget [flags] TASK_ID --additional N --instructions TEXT")
 		return 2
 	}
 	client, err := newAPIClient(apiFlags)
@@ -1914,7 +1916,7 @@ func runTaskBudget(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	client, taskRef := scopeClientForRef(client, flags.Arg(0))
-	run, err := client.ExtendWorkflowBudget(taskRef, additional)
+	run, err := client.ExtendWorkflowBudget(taskRef, additional, instructions)
 	if err != nil {
 		fmt.Fprintf(stderr, "extend workflow budget: %v\n", err)
 		return 1
@@ -4432,7 +4434,7 @@ func printUsage(out io.Writer) {
   flow task schedule TASK_ID
   flow task reset|reopen|retry|workflow TASK_ID
   flow task respond TASK_ID --node-run NODE_RUN_ID --review-wait REVIEW_WAIT_ID --outcome OUTCOME [--feedback TEXT]
-  flow task budget TASK_ID --additional N
+  flow task budget TASK_ID --additional N --instructions TEXT
   flow task done TASK_ID [--resolution RESOLUTION] [--message TEXT] [--evidence type:value]
 	  flow feature create --title TITLE [--body BODY] [--parent ITEM_ID]
   flow feature list [--status open|landed|archived|all]

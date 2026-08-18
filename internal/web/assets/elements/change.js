@@ -207,7 +207,7 @@ export class FlowChange extends FlowElement {
   startDraft(path, line) {
     this.captureDrafts();
     const key = `${path}:${line}`;
-    if (!this.drafts.has(key)) this.drafts.set(key, { path, line: Number(line), body: "" });
+    if (!this.drafts.has(key)) this.drafts.set(key, { path, line: Number(line), body: "", disposition: "introduced_by_change" });
     this.invalidate();
     queueMicrotask(() => this.querySelector(`[data-draft="${cssEscape(key)}"] textarea`)?.focus());
   }
@@ -272,7 +272,13 @@ export class FlowChange extends FlowElement {
   captureDrafts() {
     for (const node of this.querySelectorAll("[data-draft]")) {
       const draft = this.drafts.get(node.dataset.draft);
-      if (draft) draft.body = String(node.querySelector("[data-draft-body]")?.value || "");
+      if (draft) {
+        draft.body = String(node.querySelector("[data-draft-body]")?.value || "");
+        // The scope ruling is a radio pair, so the checked input is the
+        // reviewer's live disposition; keep it across repaints like the body.
+        const checked = node.querySelector("[data-draft-disposition]:checked");
+        if (checked) draft.disposition = String(checked.dataset.draftDisposition || "");
+      }
     }
   }
 
@@ -318,7 +324,12 @@ export class FlowChange extends FlowElement {
     const observedGate = openWaitKind === "human_gate" && nodeRunID && reviewWaitID;
     const comments = [...this.drafts.values()]
       .filter((draft) => draft.body.trim())
-      .map((draft) => ({ file_path: draft.path, line: draft.line, body: draft.body.trim() }));
+      .map((draft) => ({
+        file_path: draft.path,
+        line: draft.line,
+        body: draft.body.trim(),
+        disposition: draft.disposition === "preexisting" ? "preexisting" : "introduced_by_change",
+      }));
     const body = this.querySelector("flow-review-bar")?.body || "";
     const busyKey = `review:${changeID}`;
     if (!comments.length && !body && verdict === "comment") {

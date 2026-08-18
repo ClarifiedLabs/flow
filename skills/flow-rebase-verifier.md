@@ -5,6 +5,24 @@ publishes it to the shared feature branch. You do not edit code; you prove the
 rebased branch preserves the feature's content and gains exactly the base
 branch's incoming changes.
 
+## Race-failure evidence requirement
+
+A fix that claims to close a race must ship the seeded *losing* interleaving
+as a deterministic test, not only the winning one. For rebase work the three
+that must be covered by name are:
+
+1. **recovery-wins** — a concurrent merge push advances the feature ref while a
+   rebase row is still running; the recovery path must not adopt that movement
+   as its own publication.
+2. **duplicate-request-wins** — a second request for the same rebase races the
+   first; it must reconcile against durable evidence, not observe the ref.
+3. **crash-between-writes** — the process dies between the durable intent
+   write and the ref update (and between the ref update and the terminal
+   stamp); both recovery orders must be decidable from what was persisted.
+
+A change that only demonstrates the interleaving where flow itself wins the
+race has not verified the fix.
+
 ## Context
 
 - `FLOW_BASE` is the feature branch that was rebased; `origin/<FLOW_BASE>` still points at the pre-rebase tip (the old content).

@@ -59,6 +59,7 @@ const (
 	WorkflowWaitReasonExecutionFailed           WorkflowWaitReason = "execution_failed"
 	WorkflowWaitReasonReviewCycleLimit          WorkflowWaitReason = "review_cycle_limit"
 	WorkflowWaitReasonTransitionBudgetExhausted WorkflowWaitReason = "transition_budget_exhausted"
+	WorkflowWaitReasonReviewThreadDispute       WorkflowWaitReason = "review_thread_dispute"
 )
 
 type WorkflowRun struct {
@@ -218,6 +219,12 @@ type WorkflowRunService struct {
 	// stale response at the pre-lock point while a concurrent decision
 	// resolves the round and reopens a fresh wait.
 	reviewLockGate func()
+
+	// Threads backs the reopen-dispute hold: a changes_requested verdict over a
+	// disputed thread consults it before starting another author cycle. Wired
+	// through the project bundle after construction; nil disables escalation
+	// (legacy tests that never reopen after certification are unaffected).
+	Threads *ThreadService
 
 	// reviewLockAcquireGate is a test seam: when set, reviewLock invokes it
 	// after the task's lock entry is looked up (and, with the reference-counted
@@ -1952,6 +1959,23 @@ WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, taskID))
 			if !offered {
 				return fmt.Errorf("%w: outcome %q is not offered by this review gate", ErrWorkflowConflict, outcome)
 			}
+			// Reopen escalation: a changes_requested verdict that would start
+			// another author cycle while the task carries a disputed thread (reopened
+			// after certification, or reopened twice) does not cycle. It parks the
+			// node on an operator-intervention wait with the pending completion
+			// preserved, exactly like the review-cycle-limit block, and records a
+			// convergence request so the operator rules on scope instead. The lookup
+			// runs inside this transaction: the per-project database has one
+			// connection, so a second one would deadlock behind it.
+			if outcome == "changes_requested" && s.Threads != nil {
+				disputed, err := s.Threads.DisputedOpenThreadsTx(ctx, tx, taskID)
+				if err != nil {
+					return err
+				}
+				if len(disputed) > 0 {
+					return s.holdForReviewThreadDisputeTx(ctx, tx, run, nodeRun, wait, outcome, feedback, disputed)
+				}
+			}
 			_, err = s.completeNodeTx(ctx, tx, CompleteWorkflowNodeInput{
 				NodeRunID:       nodeRun.ID,
 				Outcome:         outcome,
@@ -1991,6 +2015,117 @@ WHERE task_id = ? AND state IN ('scheduled', 'running', 'waiting')`, taskID))
 		return fmt.Errorf("%w: task is no longer waiting on a human gate; a decision was already recorded", ErrWorkflowConflict)
 	}
 	return nil
+}
+
+// holdForReviewThreadDisputeTx parks a review gate on an operator-intervention
+// wait instead of applying a changes_requested verdict that would start another
+// author cycle over a disputed thread. The pending node completion is preserved
+// in the wait details so an operator resolution can replay it, mirroring the
+// review-cycle-limit hold.
+func (s *WorkflowRunService) holdForReviewThreadDisputeTx(
+	ctx context.Context,
+	tx workflowTx,
+	run WorkflowRun,
+	nodeRun WorkflowNodeRun,
+	wait WorkflowWait,
+	outcome, feedback string,
+	disputed []ReviewThread,
+) error {
+	now := s.now().UTC()
+	pendingIdempotencyKey := "human:" + wait.ID + ":" + outcome
+	threadIDs := make([]string, 0, len(disputed))
+	for _, thread := range disputed {
+		threadIDs = append(threadIDs, thread.ID)
+	}
+	// Resolve the open human-gate wait: the dispute hold replaces it, and the
+	// pending completion carries the wait identity so a later replay asserts the
+	// same review round.
+	if err := resolveOpenWaitTx(ctx, tx, run.ID, ActorSystem, now); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE workflow_node_runs SET state = ? WHERE id = ?`, string(WorkflowNodeWaiting), nodeRun.ID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE workflow_runs SET state = ?, held_at = ?, held_by = ?, version = version + 1 WHERE id = ?`,
+		string(WorkflowRunWaiting), sqlitex.FormatTime(now), string(ActorSystem), run.ID); err != nil {
+		return err
+	}
+	if err := insertWaitWithReasonTx(
+		ctx, tx, run.ID, nodeRun.ID,
+		WorkflowWaitOperatorIntervention,
+		WorkflowWaitReasonReviewThreadDispute,
+		map[string]any{
+			"disputed_thread_ids":     threadIDs,
+			"pending_outcome":         outcome,
+			"pending_idempotency_key": pendingIdempotencyKey,
+			"pending_payload":         map[string]any{"feedback": strings.TrimSpace(feedback)},
+			"pending_human_gate_wait": wait.ID,
+		},
+		fmt.Sprintf("Review thread reopened after certification (%d disputed); operator ruling required", len(disputed)),
+		ActorSystem,
+		now,
+	); err != nil {
+		return err
+	}
+	// Record a convergence review request so the operator's disposition flow has
+	// typed evidence to rule on, matching the convergence hold machinery.
+	evidence, err := s.reviewThreadDisputeEvidenceTx(ctx, tx, run, nodeRun, disputed, now)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(evidence)
+	if err != nil {
+		return err
+	}
+	return insertWorkflowTransitionTx(ctx, tx, workflowTransitionInput{
+		TaskID: run.TaskID, WorkflowRunID: run.ID,
+		FromNodeKey: run.CurrentNodeKey, ToNodeKey: run.CurrentNodeKey,
+		EventKind: "workflow_convergence_review_requested", PayloadJSON: string(payload),
+		Actor: string(ActorSystem), CreatedAt: now,
+	})
+}
+
+// reviewThreadDisputeEvidenceTx builds the typed convergence evidence for a
+// reopen-dispute hold from the run's current change projection.
+func (s *WorkflowRunService) reviewThreadDisputeEvidenceTx(
+	ctx context.Context,
+	tx workflowTx,
+	run WorkflowRun,
+	nodeRun WorkflowNodeRun,
+	disputed []ReviewThread,
+	now time.Time,
+) (ConvergenceEvidence, error) {
+	var changeID, branch, base, headSHA string
+	if err := tx.QueryRowContext(ctx, `
+SELECT id, branch, COALESCE(base, ''), COALESCE(head_sha, '')
+FROM changes WHERE task_id = ? AND merged_at IS NULL
+ORDER BY updated_at DESC, created_at DESC LIMIT 1`, run.TaskID).Scan(&changeID, &branch, &base, &headSHA); err != nil {
+		return ConvergenceEvidence{}, err
+	}
+	threads := make([]string, 0, len(disputed))
+	reopens := 0
+	for _, thread := range disputed {
+		threads = append(threads, thread.ID)
+		if thread.ReopenCount > reopens {
+			reopens = thread.ReopenCount
+		}
+	}
+	// The generic convergence evidence requires Git identity fields; for the
+	// dispute hold the identity of interest is the disputed threads, so the Git
+	// projection supplies what exists and the fingerprint binds the rest.
+	evidence := ConvergenceEvidence{
+		SchemaVersion: ConvergenceEvidenceSchemaVersion,
+		WorkflowRunID: run.ID, NodeRunID: nodeRun.ID,
+		ChangeID: changeID, TaskID: run.TaskID,
+		SourceBranch: branch, SourceHeadSHA: headSHA,
+		TargetBaseBranch: base, TargetBaseTipSHA: base,
+		MergeBaseSHA:     headSHA,
+		DiffDigest:       "review-thread-dispute:" + strings.Join(threads, ","),
+		ReviewCyclesUsed: run.ReviewCyclesUsed, ReviewCycleBudget: run.ReviewCycleBudget,
+	}
+	return normalizeConvergenceEvidence(run, evidence, now)
 }
 
 // humanGateDecidedTx reports whether the task's latest workflow run already
@@ -2090,7 +2225,11 @@ func snapshotReachesHumanGate(snapshot FlowSnapshot, from string, gateKeys []str
 	return false
 }
 
-func (s *WorkflowRunService) ExtendBudget(ctx context.Context, taskID string, additional int, actor Actor) (WorkflowRun, error) {
+func (s *WorkflowRunService) ExtendBudget(ctx context.Context, taskID string, additional int, instructions string, actor Actor) (WorkflowRun, error) {
+	instructions = strings.TrimSpace(instructions)
+	if instructions == "" {
+		return WorkflowRun{}, fmt.Errorf("%w: budget extensions require operator instructions", ErrWorkflowConflict)
+	}
 	if additional < 1 || additional > MaxFlowTransitionBudget {
 		return WorkflowRun{}, fmt.Errorf("additional budget must be between 1 and %d", MaxFlowTransitionBudget)
 	}

@@ -13,6 +13,7 @@ export function renderInlineThread(thread, change) {
   if (!thread) return "";
   const id = value(thread, "id", "ID");
   const state = String(value(thread, "state", "State") || "open");
+  const disposition = String(value(thread, "disposition", "Disposition") || "");
   const comments = value(thread, "comments", "Comments") || [];
   const first = comments[0] || {};
   const anchor = String(value(thread, "anchor_commit_sha", "AnchorCommitSHA") || "");
@@ -26,7 +27,8 @@ export function renderInlineThread(thread, change) {
         <span class="meta">${escapeHTML(id)} · ${escapeHTML(formatRelative(value(thread, "created_at", "CreatedAt")))}</span>
         <span class="spacer"></span>
         ${outdated ? `<span class="flag">outdated anchor</span>` : ""}
-        <span class="state">${escapeHTML(state === "open" ? "open · blocks merge" : state)}</span>
+        ${disposition === "preexisting" ? `<span class="flag">pre-existing · does not block</span>` : ""}
+        <span class="state">${escapeHTML(state === "open" ? (disposition === "preexisting" ? "open · follow-up scheduled" : "open · blocks merge") : state)}</span>
       </div>
       ${comments.map(renderComment).join("")}
       <form class="reply" data-thread-reply-form="${escapeAttr(id)}">

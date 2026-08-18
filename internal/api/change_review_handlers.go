@@ -3,6 +3,7 @@ package api
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -13,6 +14,22 @@ import (
 // reports against. The web UI's Approve button has always targeted it; the
 // review bar batches inline notes into the same report.
 const humanReviewCheckName = "human-review"
+
+// decodeReviewDisposition validates a request-level disposition string. An
+// omitted or empty value is the historical default and blocks like
+// introduced_by_change.
+func decodeReviewDisposition(raw string) (coordinator.ReviewDisposition, error) {
+	switch strings.TrimSpace(raw) {
+	case "":
+		return coordinator.DispositionDefault, nil
+	case string(coordinator.DispositionIntroducedByChange):
+		return coordinator.DispositionIntroducedByChange, nil
+	case string(coordinator.DispositionPreexisting):
+		return coordinator.DispositionPreexisting, nil
+	default:
+		return coordinator.DispositionDefault, fmt.Errorf("disposition must be introduced_by_change or preexisting, not %q", raw)
+	}
+}
 
 // reviewVerdictRequest is one submitted review: any inline notes the reviewer
 // drafted while reading the diff, plus the overall verdict they are posting
@@ -40,6 +57,10 @@ type reviewInlineComment struct {
 	AnchorCommitSHA string `json:"anchor_commit_sha,omitempty"`
 	Context         string `json:"context,omitempty"`
 	Body            string `json:"body"`
+	// Disposition is the reviewer's scope ruling for this thread:
+	// "introduced_by_change" (the default, blocks) or "preexisting"
+	// (does not block; a linked follow-up task is created).
+	Disposition string `json:"disposition,omitempty"`
 }
 
 type reviewVerdictResponse struct {
@@ -93,12 +114,19 @@ func (s *projectServer) handleSubmitReview(w http.ResponseWriter, r *http.Reques
 
 	comments := make([]coordinator.SubmitReviewComment, 0, len(request.Comments))
 	for _, comment := range request.Comments {
+		disposition, err := decodeReviewDisposition(comment.Disposition)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_disposition", err.Error())
+			return
+		}
 		comments = append(comments, coordinator.SubmitReviewComment{
 			FilePath: comment.FilePath,
 			Line:     comment.Line,
 			Anchor:   comment.AnchorCommitSHA,
 			Context:  comment.Context,
 			Body:     comment.Body,
+			// Disposition is the reviewer's scope ruling for this thread.
+			Disposition: disposition,
 		})
 	}
 	result, err := s.threads.SubmitReview(ctx, coordinator.SubmitReviewInput{

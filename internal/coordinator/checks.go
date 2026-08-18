@@ -227,13 +227,16 @@ func (s *CheckService) crossCheckReviewThreads(ctx context.Context, input *Repor
 // countOpenReviewThreads counts unresolved review threads on the task's latest
 // ready, unmerged change. open and reopened threads are unresolved (claimed and
 // certified threads represent author/verifier progress); a change with none is
-// clear of outstanding critique.
+// clear of outstanding critique. A preexisting disposition does not gate: the
+// reviewer has ruled the concern predates the change, so it is scheduled as a
+// follow-up task instead of blocking this change.
 func (s *CheckService) countOpenReviewThreads(ctx context.Context, taskID string) (int, error) {
 	var count int
 	if err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM review_threads
 WHERE state IN (?, ?)
+	AND COALESCE(disposition, '') != ?
 	AND change_id = (
 		SELECT id
 		FROM changes
@@ -245,6 +248,7 @@ WHERE state IN (?, ?)
 	)`,
 		string(ThreadOpen),
 		string(ThreadReopened),
+		string(DispositionPreexisting),
 		taskID,
 	).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count open review threads: %w", err)

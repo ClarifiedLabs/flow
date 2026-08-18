@@ -22,6 +22,20 @@ const (
 	ThreadReopened  ReviewThreadState = "reopened"
 )
 
+// ReviewDisposition records the reviewer's scope ruling on a thread: whether
+// the concern was introduced by the change under review (blocks) or is
+// pre-existing work that the change neither introduced nor made reachable
+// (does not block, and is scheduled as a linked follow-up task). The empty
+// string is the historical default and behaves like introduced_by_change for
+// gating purposes.
+type ReviewDisposition string
+
+const (
+	DispositionDefault            ReviewDisposition = ""
+	DispositionIntroducedByChange ReviewDisposition = "introduced_by_change"
+	DispositionPreexisting        ReviewDisposition = "preexisting"
+)
+
 type ReviewClaimKind string
 
 const (
@@ -48,9 +62,14 @@ type ReviewThread struct {
 	CertifiedAt     *time.Time        `json:"certified_at,omitempty"`
 	ReopenedBy      *string           `json:"reopened_by,omitempty"`
 	ReopenedAt      *time.Time        `json:"reopened_at,omitempty"`
-	Comments        []ReviewComment   `json:"comments,omitempty"`
-	CreatedAt       time.Time         `json:"created_at"`
-	UpdatedAt       time.Time         `json:"updated_at"`
+	// ReopenCount is how many times the thread has been reopened after a
+	// claim or certification.
+	ReopenCount int `json:"reopen_count"`
+	// Disposition is the reviewer's scope ruling for this thread.
+	Disposition ReviewDisposition `json:"disposition,omitempty"`
+	Comments    []ReviewComment   `json:"comments,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
+	UpdatedAt   time.Time         `json:"updated_at"`
 }
 
 type ReviewComment struct {
@@ -69,6 +88,7 @@ type CreateThreadInput struct {
 	Context         string
 	Body            string
 	Actor           string
+	Disposition     ReviewDisposition
 }
 
 type AddThreadCommentInput struct {
@@ -97,8 +117,15 @@ type ReviewContext struct {
 }
 
 type ThreadService struct {
-	db  *sql.DB
-	now func() time.Time
+	db        *sql.DB
+	projectID string
+	now       func() time.Time
+
+	// Tasks creates the follow-up task a preexisting-disposition thread
+	// schedules. Wired through the project bundle; nil leaves preexisting
+	// threads ungated but without a follow-up (tests that never use the
+	// disposition are unaffected).
+	Tasks *TaskService
 
 	// Checks and Runs back the atomic review submission (SubmitReview), which
 	// files threads, records the verdict check, and completes the verdict's
@@ -123,6 +150,16 @@ func NewThreadService(database *sql.DB) *ThreadService {
 	}
 }
 
+// NewThreadServiceForProject constructs the thread service with the project
+// identity a preexisting-disposition follow-up task id is allocated under.
+func NewThreadServiceForProject(database *sql.DB, projectID string) *ThreadService {
+	return &ThreadService{
+		db:        database,
+		projectID: strings.TrimSpace(projectID),
+		now:       sqlitex.UTCNow,
+	}
+}
+
 func (s *ThreadService) CreateThread(ctx context.Context, input CreateThreadInput) (ReviewThread, error) {
 	now := s.now().UTC()
 	tx, err := sqlitex.BeginImmediate(ctx, s.db)
@@ -131,7 +168,7 @@ func (s *ThreadService) CreateThread(ctx context.Context, input CreateThreadInpu
 	}
 	defer tx.Rollback()
 
-	thread, err := createThreadTx(ctx, tx, input, now)
+	thread, err := createThreadTx(ctx, tx, s.projectID, input, now)
 	if err != nil {
 		return ReviewThread{}, err
 	}
@@ -148,13 +185,16 @@ func (s *ThreadService) CreateThread(ctx context.Context, input CreateThreadInpu
 // duplicate thread. CreateThread wraps it in its own transaction; the atomic
 // review submission runs it inside the transaction that also validates the
 // change head and records the verdict.
-func createThreadTx(ctx context.Context, tx reviewThreadTxer, input CreateThreadInput, now time.Time) (ReviewThread, error) {
+func createThreadTx(ctx context.Context, tx reviewThreadTxer, projectID string, input CreateThreadInput, now time.Time) (ReviewThread, error) {
 	input.ChangeID = strings.TrimSpace(input.ChangeID)
 	input.AnchorCommitSHA = strings.TrimSpace(input.AnchorCommitSHA)
 	input.FilePath = strings.TrimSpace(input.FilePath)
 	input.Context = strings.TrimSpace(input.Context)
 	input.Body = strings.TrimSpace(input.Body)
 	input.Actor = normalizeReviewActor(input.Actor)
+	if err := validateReviewDisposition(input.Disposition); err != nil {
+		return ReviewThread{}, err
+	}
 	if input.ChangeID == "" {
 		return ReviewThread{}, errors.New("change id is required")
 	}
@@ -228,9 +268,11 @@ INSERT INTO review_threads (
 	context,
 	created_by,
 	body_hash,
+	reopen_count,
+	disposition,
 	created_at,
 	updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		threadID,
 		taskID,
 		input.ChangeID,
@@ -241,6 +283,8 @@ INSERT INTO review_threads (
 		input.Context,
 		input.Actor,
 		bodyHash,
+		0,
+		string(input.Disposition),
 		formatTime(now),
 		formatTime(now),
 	); err != nil {
@@ -249,8 +293,78 @@ INSERT INTO review_threads (
 	if _, err := insertReviewComment(ctx, tx, threadID, input.Actor, input.Body, now); err != nil {
 		return ReviewThread{}, err
 	}
+	if input.Disposition == DispositionPreexisting {
+		if err := schedulePreexistingFollowUpTx(ctx, tx, threadID, taskID, projectID, input, now); err != nil {
+			return ReviewThread{}, err
+		}
+	}
 
 	return scanReviewThread(tx.QueryRowContext(ctx, reviewThreadSelectSQL+` WHERE id = ?`, threadID))
+}
+
+// schedulePreexistingFollowUpTx creates exactly one follow-up task for a
+// preexisting-disposition thread, inside the same transaction that files the
+// thread, and links it related_to the source task. The provenance header names
+// the source task, change, anchor, and thread so the follow-up is auditable
+// without the review context. Idempotency rides the thread's own dedup key:
+// the same concern re-filed collapses to the existing thread above, so this
+// runs only on first insert.
+func schedulePreexistingFollowUpTx(ctx context.Context, tx reviewThreadTxer, threadID, taskID string, projectID string, input CreateThreadInput, now time.Time) error {
+	var featureID sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT feature_id FROM tasks WHERE id = ?`, taskID).Scan(&featureID); err != nil {
+		return fmt.Errorf("load follow-up source task: %w", err)
+	}
+	var nextNumber int64
+	if err := tx.QueryRowContext(ctx, `
+UPDATE id_allocators
+SET next_number = next_number + 1
+WHERE name = 'task'
+RETURNING next_number - 1`).Scan(&nextNumber); err != nil {
+		return fmt.Errorf("allocate follow-up task id: %w", err)
+	}
+	id, err := formatTaskID(projectID, nextNumber)
+	if err != nil {
+		return err
+	}
+	nowText := formatTime(now)
+	title := fmt.Sprintf("Follow up: preexisting concern at %s:%d", input.FilePath, input.Line)
+	if len(title) > 200 {
+		title = title[:200]
+	}
+	body := fmt.Sprintf(
+		"Filed from review thread %s during change %s on task %s.\n\n"+
+			"The reviewer ruled this concern preexisting: the change under review neither introduced nor made it reachable, "+
+			"so it does not gate that change and is scheduled here instead.\n\n"+
+			"Anchor: %s:%d (commit %s)\nContext: %s\n\n---\n\n%s",
+		threadID, input.ChangeID, taskID,
+		input.FilePath, input.Line, input.AnchorCommitSHA, input.Context, input.Body,
+	)
+	if _, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO work_items (id, kind, created_at) VALUES (?, 'task', ?)`, id, nowText); err != nil {
+		return fmt.Errorf("insert follow-up work item: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO tasks (
+	id, title, body, priority, feature_id, created_by, source_task_id, source_change_id,
+	created_at, updated_at
+) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+		id, title, body, featureID, string(ActorHuman), taskID, input.ChangeID, nowText, nowText); err != nil {
+		return fmt.Errorf("insert follow-up task: %w", err)
+	}
+	// related_to is undirected in this schema's convention: order the endpoints
+	// so a re-link cannot create a duplicate pair.
+	relatedSourceID, relatedTargetID := taskID, id
+	if relatedTargetID < relatedSourceID {
+		relatedSourceID, relatedTargetID = relatedTargetID, relatedSourceID
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO work_item_relations (
+	source_item_id, target_item_id, kind, created_by, created_at
+) VALUES (?, ?, ?, ?, ?)`,
+		relatedSourceID, relatedTargetID, string(RelationRelatedTo), string(ActorHuman), nowText); err != nil {
+		return fmt.Errorf("relate follow-up task: %w", err)
+	}
+	return nil
 }
 
 // SubmitReviewInput is one human review submission: the change whose diff the
@@ -281,6 +395,8 @@ type SubmitReviewComment struct {
 	Anchor   string
 	Context  string
 	Body     string
+	// Disposition is the reviewer's scope ruling for this comment's thread.
+	Disposition ReviewDisposition
 }
 
 type SubmitReviewResult struct {
@@ -369,7 +485,7 @@ WHERE id = ?`, input.ChangeID).Scan(&taskID, &currentHead); err != nil {
 			// guarantees is still the change's current head.
 			anchor = input.HeadSHA
 		}
-		thread, err := createThreadTx(ctx, tx, CreateThreadInput{
+		thread, err := createThreadTx(ctx, tx, s.projectID, CreateThreadInput{
 			ChangeID:        input.ChangeID,
 			AnchorCommitSHA: anchor,
 			FilePath:        comment.FilePath,
@@ -377,6 +493,7 @@ WHERE id = ?`, input.ChangeID).Scan(&taskID, &currentHead); err != nil {
 			Context:         comment.Context,
 			Body:            comment.Body,
 			Actor:           input.Actor,
+			Disposition:     comment.Disposition,
 		}, now)
 		if err != nil {
 			return SubmitReviewResult{}, fmt.Errorf("create review thread: %w", err)
@@ -441,6 +558,78 @@ WHERE id = ?`, input.ChangeID).Scan(&taskID, &currentHead); err != nil {
 func hashThreadBody(body string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(body)))
 	return hex.EncodeToString(sum[:])
+}
+
+// threadDisputed reports whether a thread's reopen history demands an operator
+// ruling instead of another author cycle: either it was reopened after being
+// certified (the verifier approved a fix that did not hold) or it has been
+// reopened twice or more (the fix/verify loop is not converging).
+func threadDisputed(thread ReviewThread) bool {
+	return thread.ReopenCount >= 2 || thread.State == ThreadReopened && threadReopenedFromCertified(thread)
+}
+
+// threadReopenedFromCertified reports whether the thread's most recent reopen
+// left a certification behind. Certified-then-reopened is recorded by the
+// reopen transaction's clear of certified_by; the durable signal is a
+// reopen that happened while a certification existed, so the reopen count
+// plus a non-nil certified marker with a reopen after it is enough. The
+// ReopenThread call path records the previous state in the thread payload
+// for callers that need it; here the certified-at timestamp preceding the
+// reopen-at timestamp is the persisted evidence.
+func threadReopenedFromCertified(thread ReviewThread) bool {
+	return thread.CertifiedAt != nil && thread.ReopenedAt != nil && !thread.CertifiedAt.After(*thread.ReopenedAt)
+}
+
+// DisputedOpenThreads lists the task's open/reopened threads that demand an
+// operator ruling. It is the shared predicate behind the review-gate hold and
+// the author-job suppression.
+func (s *ThreadService) DisputedOpenThreads(ctx context.Context, taskID string) ([]ReviewThread, error) {
+	rows, err := s.db.QueryContext(ctx, disputedReviewThreadSelect, strings.TrimSpace(taskID), string(ThreadOpen), string(ThreadReopened))
+	if err != nil {
+		return nil, fmt.Errorf("list disputed review threads: %w", err)
+	}
+	defer rows.Close()
+	return scanDisputedThreads(rows)
+}
+
+// DisputedOpenThreadsTx is DisputedOpenThreads for a caller that already holds
+// the transaction the verdict is being applied in: the per-project database
+// allows a single connection, so a second one would deadlock behind the
+// caller's write transaction.
+func (s *ThreadService) DisputedOpenThreadsTx(ctx context.Context, tx reviewThreadTxRows, taskID string) ([]ReviewThread, error) {
+	rows, err := tx.QueryContext(ctx, disputedReviewThreadSelect, strings.TrimSpace(taskID), string(ThreadOpen), string(ThreadReopened))
+	if err != nil {
+		return nil, fmt.Errorf("list disputed review threads: %w", err)
+	}
+	defer rows.Close()
+	return scanDisputedThreads(rows)
+}
+
+// disputedReviewThreadSelect loads the task's open/reopened threads with the
+// fields the dispute predicate needs. A thread is disputed when it was
+// reopened at or after a certification (the verifier approved a fix that did
+// not hold) or has been reopened twice or more.
+const disputedReviewThreadSelect = reviewThreadSelectSQL + `
+WHERE task_id = ?
+	AND state IN (?, ?)
+	AND (reopen_count >= 2 OR (certified_at IS NOT NULL AND reopened_at IS NOT NULL AND reopened_at >= certified_at))`
+
+func scanDisputedThreads(rows *sql.Rows) ([]ReviewThread, error) {
+	var threads []ReviewThread
+	for rows.Next() {
+		thread, err := scanReviewThread(rows)
+		if err != nil {
+			return nil, err
+		}
+		threads = append(threads, thread)
+	}
+	return threads, rows.Err()
+}
+
+// reviewThreadTxRows is the query surface the in-transaction dispute lookup
+// needs. workflowTx satisfies it.
+type reviewThreadTxRows interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
 func (s *ThreadService) ChangeTaskID(ctx context.Context, changeID string) (string, error) {
@@ -578,6 +767,15 @@ func (s *ThreadService) verifyThread(ctx context.Context, input VerifyThreadInpu
 	}
 	defer tx.Rollback()
 
+	// The reopen path needs the state it is leaving so escalation predicates can
+	// distinguish a reopened-after-certification from a reopened-after-claim.
+	var previousState string
+	if state == ThreadReopened {
+		if err := tx.QueryRowContext(ctx, `SELECT state FROM review_threads WHERE id = ?`, input.ThreadID).Scan(&previousState); err != nil {
+			return ReviewThread{}, err
+		}
+	}
+
 	var query string
 	var args []any
 	switch state {
@@ -597,6 +795,7 @@ WHERE id = ?
 		query = `
 UPDATE review_threads
 SET state = ?,
+	reopen_count = reopen_count + 1,
 	reopened_by = ?,
 	reopened_at = ?,
 	updated_at = ?
@@ -811,6 +1010,8 @@ SELECT
 	certified_at,
 	reopened_by,
 	reopened_at,
+	reopen_count,
+	disposition,
 	created_at,
 	updated_at
 FROM review_threads`
@@ -826,6 +1027,8 @@ func scanReviewThread(scanner taskScanner) (ReviewThread, error) {
 	var certifiedAt sql.NullString
 	var reopenedBy sql.NullString
 	var reopenedAt sql.NullString
+	var reopenCount int
+	var disposition string
 	var createdAt string
 	var updatedAt string
 	if err := scanner.Scan(
@@ -846,6 +1049,8 @@ func scanReviewThread(scanner taskScanner) (ReviewThread, error) {
 		&certifiedAt,
 		&reopenedBy,
 		&reopenedAt,
+		&reopenCount,
+		&disposition,
 		&createdAt,
 		&updatedAt,
 	); err != nil {
@@ -862,6 +1067,8 @@ func scanReviewThread(scanner taskScanner) (ReviewThread, error) {
 	thread.State = ReviewThreadState(state)
 	thread.CreatedAt = parsedCreatedAt
 	thread.UpdatedAt = parsedUpdatedAt
+	thread.ReopenCount = reopenCount
+	thread.Disposition = ReviewDisposition(disposition)
 	if claimKind.Valid {
 		value := ReviewClaimKind(claimKind.String)
 		thread.ClaimKind = &value
@@ -924,6 +1131,15 @@ func validateClaimKind(kind ReviewClaimKind) error {
 		return nil
 	default:
 		return fmt.Errorf("invalid claim kind: %s", kind)
+	}
+}
+
+func validateReviewDisposition(disposition ReviewDisposition) error {
+	switch disposition {
+	case DispositionDefault, DispositionIntroducedByChange, DispositionPreexisting:
+		return nil
+	default:
+		return fmt.Errorf("invalid review disposition: %s", disposition)
 	}
 }
 

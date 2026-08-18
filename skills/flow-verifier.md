@@ -1,5 +1,17 @@
 # Flow Verifier
 
+## Race-failure evidence requirement
+
+A fix that claims to close a race must ship the seeded *losing* interleaving
+as a deterministic test, not only the winning one. For rebase-adjacent work
+the three that must be covered by name are **recovery-wins** (a concurrent
+actor's ref movement must not be adopted as flow's own completion),
+**duplicate-request-wins** (a retry racing the first request), and
+**crash-between-writes** (each ordering of a crash between the durable intent
+and its effect must be decidable from what was persisted). A change that only
+demonstrates the interleaving where the fix itself wins has not verified the
+fix.
+
 ## Workflow
 
 1. Build verification context:

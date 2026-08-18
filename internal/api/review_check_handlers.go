@@ -295,6 +295,11 @@ func (s *projectServer) handleCreateThread(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
+	disposition, err := decodeReviewDisposition(request.Disposition)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_disposition", err.Error())
+		return
+	}
 	taskID, err := s.threads.ChangeTaskID(r.Context(), changeID)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "change_not_found", "change not found")
@@ -316,6 +321,7 @@ func (s *projectServer) handleCreateThread(w http.ResponseWriter, r *http.Reques
 		Context:         request.Context,
 		Body:            request.Body,
 		Actor:           principal.Actor(),
+		Disposition:     disposition,
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "change_not_found", "change not found")

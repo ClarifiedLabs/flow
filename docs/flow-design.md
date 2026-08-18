@@ -939,6 +939,20 @@ engine's at-least-once delivery and version-conflict retries cannot
 double-advance a pipeline. The work-phase dwell deadline re-arms per phase and
 declines to escalate while a gate deliberately waits on a human.
 
+Two invariants govern every recovery path in the coordinator:
+
+- **Terminal transitions need durable evidence from the actor that performed
+  the work, never observation of side effects.** A `feature_rebases` row
+  reaches `finalized` only when the exact ref update flow intended — recorded
+  as a publication intent before the push — is confirmed by the git event that
+  the push produced. Observing that a ref has moved is not proof that flow
+  moved it: a merge push by another actor must resolve the row to `stale`,
+  never to `finalized`.
+- **Scope rule for review concerns.** A defect the change introduces or makes
+  reachable blocks in-change; a genuinely untouched pre-existing window may be
+  scheduled as a follow-up task, filed with a `preexisting` disposition that
+  does not gate the change under review.
+
 `engine.Step` is the single entry point. For one event it:
 
 1. resolves the target task and loads a snapshot,

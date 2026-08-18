@@ -72,9 +72,20 @@ function renderLine(line, { path, byLine, drafts }) {
 }
 
 function renderDraft(key, draft) {
+  const preexisting = draft.disposition === "preexisting";
   return `
     <div class="draft" data-draft="${escapeAttr(key)}">
       <textarea data-draft-body rows="2" placeholder="Leave a note on this line…">${escapeHTML(draft.body || "")}</textarea>
+      <div class="draft-scope" role="radiogroup" aria-label="Scope of this concern">
+        <label class="scope-option">
+          <input type="radio" name="draft-scope-${escapeAttr(key)}" value="introduced_by_change"${preexisting ? "" : " checked"} data-draft-disposition="introduced_by_change" />
+          <span>Introduced by this change</span>
+        </label>
+        <label class="scope-option">
+          <input type="radio" name="draft-scope-${escapeAttr(key)}" value="preexisting"${preexisting ? " checked" : ""} data-draft-disposition="preexisting" />
+          <span>Pre-existing (schedule a follow-up)</span>
+        </label>
+      </div>
       <div class="draft-actions">
         <button class="button secondary" data-draft-cancel="${escapeAttr(key)}">Discard</button>
         <span class="draft-hint">posts with your review</span>

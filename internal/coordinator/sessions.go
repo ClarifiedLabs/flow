@@ -513,6 +513,16 @@ func (s *SessionService) ensureAuthorJob(ctx context.Context, input EnsureAuthor
 		return EnsureAuthorJobResult{}, err
 	}
 	if reviewFix {
+		// Reopen escalation, belt and braces: even if a gate somehow applied a
+		// changes_requested verdict, a disputed thread must not start another
+		// author cycle.
+		disputed, err := s.taskHasDisputedReviewThread(ctx, task.ID)
+		if err != nil {
+			return EnsureAuthorJobResult{}, err
+		}
+		if disputed {
+			return EnsureAuthorJobResult{}, fmt.Errorf("%w: task has a review thread reopened after certification", ErrAuthorJobSuppressed)
+		}
 		budget, err := s.reviewCycles.Consume(ctx, task.ID, "system")
 		if errors.Is(err, ErrReviewCycleLimitReached) {
 			return EnsureAuthorJobResult{}, fmt.Errorf("%w: %w (%d/%d review-author cycles used)", ErrAuthorJobSuppressed, ErrReviewCycleLimitReached, budget.UsedCycles, budget.GrantedCycles)
@@ -599,6 +609,18 @@ func (s *SessionService) shouldConsumeReviewCycle(ctx context.Context, taskID st
 		return false, nil
 	}
 	return taskHasUnmergedChange(ctx, s.db, taskID)
+}
+
+// taskHasDisputedReviewThread reports whether the task carries a thread whose
+// reopen history demands an operator ruling. Author jobs are suppressed for
+// such tasks so no enqueue path can cycle a disputed thread back to the
+// author; the operator resolves the convergence hold instead.
+func (s *SessionService) taskHasDisputedReviewThread(ctx context.Context, taskID string) (bool, error) {
+	disputed, err := NewThreadServiceForProject(s.db, s.project.ID).DisputedOpenThreads(ctx, taskID)
+	if err != nil {
+		return false, err
+	}
+	return len(disputed) > 0, nil
 }
 
 func (s *SessionService) ReviewCycleBudget(ctx context.Context, taskID string) (ReviewCycleBudget, error) {
@@ -1159,6 +1181,15 @@ func (s *SessionService) enqueueCrashedAuthorSession(ctx context.Context, sessio
 		return false, err
 	}
 	if reviewFix {
+		// Reopen escalation, belt and braces for the crashed-session relaunch
+		// path: a disputed thread must not restart an author session either.
+		disputed, err := s.taskHasDisputedReviewThread(ctx, task.ID)
+		if err != nil {
+			return false, err
+		}
+		if disputed {
+			return false, nil
+		}
 		budget, err := s.reviewCycles.Consume(ctx, task.ID, "system")
 		if errors.Is(err, ErrReviewCycleLimitReached) {
 			return false, nil

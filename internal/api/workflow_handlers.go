@@ -34,6 +34,10 @@ type workflowRespondRequest struct {
 
 type workflowBudgetRequest struct {
 	Additional int `json:"additional"`
+	// Instructions is the operator's rationale for the extension. Required:
+	// extending an automation budget without a stated reason silently re-arms
+	// the loop the budget was meant to stop.
+	Instructions string `json:"instructions"`
 }
 
 type workflowRetryRequest struct {
@@ -128,9 +132,9 @@ type lifecycleTransitionRequest struct {
 }
 
 type lifecycleTransitionResponse struct {
-	Task        coordinator.Task       `json:"task"`
-	ProjectID   string                 `json:"project_id,omitempty"`
-	ProjectName string                 `json:"project_name,omitempty"`
+	Task        coordinator.Task         `json:"task"`
+	ProjectID   string                   `json:"project_id,omitempty"`
+	ProjectName string                   `json:"project_name,omitempty"`
 	Run         *coordinator.WorkflowRun `json:"run,omitempty"`
 }
 
@@ -941,10 +945,32 @@ func (s *projectServer) handleWorkflowPath(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 			return
 		}
-		run, err := s.workflowRuns.ExtendBudget(r.Context(), taskID, request.Additional, coordinator.ActorHuman)
+		if strings.TrimSpace(request.Instructions) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request", "instructions are required to extend an automation budget")
+			return
+		}
+		run, err := s.workflowRuns.ExtendBudget(r.Context(), taskID, request.Additional, request.Instructions, coordinator.ActorHuman)
 		if err != nil {
 			writeWorkflowError(w, err, "extend_workflow_budget_failed")
 			return
+		}
+		// A review-cycle extension also records the instructions on the cycle
+		// budget so the next author payload carries them; nothing else consumes
+		// the rationale yet, but it is persisted with the decision either way.
+		if s.sessions != nil {
+			if wait, ok, waitErr := s.workflowRuns.OpenWait(r.Context(), taskID); waitErr == nil && ok &&
+				wait.Kind == coordinator.WorkflowWaitOperatorIntervention &&
+				wait.Reason == coordinator.WorkflowWaitReasonReviewCycleLimit {
+				if _, err := s.sessions.ApproveReviewCycles(r.Context(), coordinator.ApproveReviewCyclesInput{
+					TaskID:       taskID,
+					Cycles:       0,
+					Instructions: request.Instructions,
+					Actor:        principal.Actor(),
+				}); err != nil {
+					writeError(w, http.StatusInternalServerError, "approve_review_cycles_failed", err.Error())
+					return
+				}
+			}
 		}
 		if s.workflowExecutor != nil {
 			if err := s.workflowExecutor.Advance(r.Context(), run.ID); err != nil {

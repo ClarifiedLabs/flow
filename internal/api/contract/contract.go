@@ -489,6 +489,10 @@ type CreateThreadRequest struct {
 	Context         string `json:"context"`
 	Body            string `json:"body"`
 	LeaseID         string `json:"lease_id"`
+	// Disposition is the reviewer's scope ruling for this thread:
+	// "introduced_by_change" (the default, blocks) or "preexisting"
+	// (does not block; a linked follow-up task is created).
+	Disposition string `json:"disposition,omitempty"`
 }
 
 type PutHandoffRequest struct {

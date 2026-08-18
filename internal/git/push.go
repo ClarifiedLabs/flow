@@ -54,6 +54,27 @@ func PushRef(ctx context.Context, exchangePath, src, ref string) error {
 	return nil
 }
 
+// PushBranchCompareAndSwap force-updates ref on the exchange remote only when
+// it still points at expectedSHA, pushing the worktree's current HEAD (the
+// rebased objects live only in the worktree, so the push must originate there).
+// It runs as the coordinator principal, mirroring PushRefCompareAndSwap.
+func PushBranchCompareAndSwap(ctx context.Context, worktree, ref, expectedSHA string) error {
+	worktree = strings.TrimSpace(worktree)
+	ref = strings.TrimSpace(ref)
+	expectedSHA = strings.TrimSpace(expectedSHA)
+	if worktree == "" {
+		return errors.New("worktree is required")
+	}
+	if ref == "" || expectedSHA == "" {
+		return errors.New("ref and expected sha are required")
+	}
+	if err := gitRun(ctx, worktree, []string{"FLOW_GIT_PRINCIPAL=" + coordinatorActor},
+		"push", "--force-with-lease="+ref+":"+expectedSHA, "origin", "HEAD:"+ref); err != nil {
+		return fmt.Errorf("compare-and-swap push HEAD to %s: %w", ref, err)
+	}
+	return nil
+}
+
 // PushRefCompareAndSwap force-updates ref on the exchange remote only when it
 // still points at expectedSHA. This is the guard for the coordinator's
 // rewrites of shared feature refs (rebase finalize): a concurrent update to
