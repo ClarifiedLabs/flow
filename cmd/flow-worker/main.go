@@ -567,11 +567,7 @@ func runWorkerOnce(ctx context.Context, client *flowclient.Client, cfg config.Wo
 	}
 	if !captureInterrupted {
 		checkCtx, checkCancel := context.WithTimeout(jobCtx, historyShutdownBudget)
-		checkErr = retryTransientOperationContext(checkCtx, "report check", stdout, func() error {
-			var err error
-			reportedCheckVerdict, err = reportCheckIfNeeded(checkCtx, client, *claim.Job, *claim.Lease, result, stdout)
-			return err
-		})
+		reportedCheckVerdict, checkErr = reportCheckIfNeeded(checkCtx, client, *claim.Job, *claim.Lease, result, stdout)
 		checkCancel()
 		staleCheckResult = isStaleSourceJobHeadReport(checkErr)
 		if staleCheckResult {
@@ -1153,11 +1149,11 @@ func reportCheckIfNeeded(ctx context.Context, client *flowclient.Client, job flo
 	// thread that independently blocks approval. Aggregation jobs may still apply
 	// non-blocking follow-up tasks. The worker lease is live here, so every
 	// coordinator mutation can be bound to the exact source job.
-	var followUpResults map[int]reviewFollowUpResult
+	var followUpBatchReceipt *flowclient.ApplyReviewFollowUpBatchResult
 	var followUpFailures []string
 	if haveVerdict && !decisionRequestRejected {
 		var err error
-		followUpResults, followUpFailures, err = applyVerdictActions(
+		followUpBatchReceipt, followUpFailures, err = applyVerdictActions(
 			ctx,
 			client,
 			kind,
@@ -1176,14 +1172,15 @@ func reportCheckIfNeeded(ctx context.Context, client *flowclient.Client, job flo
 	}
 	if haveVerdict && verdict != coordinator.CheckErrored {
 		if !blocking || reviewDiscovery {
-			details = advisoryVerdictDetails(details, verdictReport, followUpResults)
+			details = advisoryVerdictDetails(details, verdictReport)
 		} else if kind == coordinator.CheckKindReviewer {
-			details = classifiedReviewDetails(details, verdictReport, followUpResults)
+			details = classifiedReviewDetails(details, verdictReport)
 		}
 	}
 	details = appendFollowUpActionFailures(details, followUpFailures)
+	details = appendReviewFollowUpBatchReceipt(details, followUpBatchReceipt)
 
-	check, err := client.ReportCheckContext(ctx, *job.TaskID, checkName, flowclient.ReportCheckInput{
+	checkInput := flowclient.ReportCheckInput{
 		Kind:        kind,
 		Required:    &blocking,
 		Verdict:     verdict,
@@ -1191,6 +1188,12 @@ func reportCheckIfNeeded(ctx context.Context, client *flowclient.Client, job flo
 		Details:     details,
 		SourceJobID: &sourceJobID,
 		LeaseID:     &leaseID,
+	}
+	var check flowclient.CheckResult
+	err = retryTransientOperationContext(ctx, "report check", stdout, func() error {
+		var reportErr error
+		check, reportErr = client.ReportCheckContext(ctx, *job.TaskID, checkName, checkInput)
+		return reportErr
 	})
 	if err != nil {
 		return "", fmt.Errorf("report check: %w", err)
@@ -1205,18 +1208,11 @@ func reportCheckIfNeeded(ctx context.Context, client *flowclient.Client, job flo
 	return check.Check.Verdict, nil
 }
 
-// applyVerdictActions deterministically files a reviewer job's blocking
-// concerns, applies final-aggregation follow-up tasks, and carries out verifier
-// decisions. Load-bearing failures — filing blocking concerns as threads and
-// applying verifier decisions — make the check errored so declared blocking
-// work is never silently lost. Follow-up task actions are non-blocking
-// bookkeeping: their failures are returned separately so the caller can record
-// them in the check details without erroring the check or halting the
-// workflow. Every operation is idempotent or state-guarded, making retry safe.
-type reviewFollowUpResult struct {
-	TaskID      string
-	Disposition string
-}
+// applyVerdictActions deterministically persists a final aggregation's complete
+// follow-up proposal batch before filing a reviewer job's blocking concerns, and
+// carries out verifier decisions. Every coordinator mutation is idempotent or
+// state-guarded, making an exact retry safe. Batch persistence, blocking-thread,
+// and verifier-decision failures are load-bearing and make the check errored.
 
 func applyVerdictActions(
 	ctx context.Context,
@@ -1229,58 +1225,55 @@ func applyVerdictActions(
 	result workerexec.RunResult,
 	report workerexec.VerdictReport,
 	stdout io.Writer,
-) (map[int]reviewFollowUpResult, []string, error) {
+) (*flowclient.ApplyReviewFollowUpBatchResult, []string, error) {
 	leaseID := lease.ID
 	var actionErr error
 	var followUpFailures []string
-	followUpResults := map[int]reviewFollowUpResult{}
+	var followUpBatchReceipt *flowclient.ApplyReviewFollowUpBatchResult
 	switch kind {
 	case coordinator.CheckKindReviewer:
-		for index, comment := range report.Comments {
-			if comment.TaskAction == nil {
-				continue
+		taskActionCount := reviewTaskActionCount(report)
+		if reviewAggregation && taskActionCount > 0 {
+			if len(result.VerdictBytes) == 0 || strings.TrimSpace(result.VerdictSHA256) == "" {
+				return nil, nil, errors.New("persist review follow-up batch: exact sealed verdict bytes and digest are unavailable")
 			}
-			if !reviewAggregation {
-				failure := fmt.Sprintf("%s:%d: task_action ignored: only a review aggregation job may apply task_action", comment.File, comment.Line)
-				fmt.Fprintf(stdout, "check: apply review follow-up %s\n", failure)
-				followUpFailures = append(followUpFailures, failure)
-				continue
+			input := flowclient.ApplyReviewFollowUpBatchInput{
+				LeaseID:      leaseID,
+				ReportJSON:   string(result.VerdictBytes),
+				ReportSHA256: result.VerdictSHA256,
 			}
-			introduced := comment.IntroducedByChange != nil && *comment.IntroducedByChange
-			var applied flowclient.ApplyReviewFollowUpResult
-			err := retryTransientOperationContext(ctx, "apply review follow-up", stdout, func() error {
+			var applied flowclient.ApplyReviewFollowUpBatchResult
+			err := retryTransientOperationContext(ctx, "apply review follow-up batch", stdout, func() error {
 				var err error
-				applied, err = client.ApplyReviewFollowUp(sourceTaskID, flowclient.ApplyReviewFollowUpInput{
-					LeaseID: leaseID,
-					Finding: flowclient.ReviewFollowUpFinding{
-						SHA:                comment.SHA,
-						File:               comment.File,
-						Line:               comment.Line,
-						Body:               comment.Body,
-						Severity:           comment.Severity,
-						IntroducedByChange: introduced,
-						Requirement:        comment.Requirement,
-						DuplicateOf:        comment.DuplicateOf,
-					},
-					TaskAction: flowclient.ReviewFollowUpTaskAction{
-						Action: comment.TaskAction.Action,
-						Title:  comment.TaskAction.Title,
-						Body:   comment.TaskAction.Body,
-						TaskID: comment.TaskAction.TaskID,
-					},
-				})
+				applied, err = client.ApplyReviewFollowUpBatch(ctx, sourceTaskID, input)
 				return err
 			})
 			if err != nil {
-				fmt.Fprintf(stdout, "check: apply review follow-up %s:%d failed: %v\n", comment.File, comment.Line, err)
-				followUpFailures = append(followUpFailures, fmt.Sprintf("%s:%d (%s): %v", comment.File, comment.Line, comment.TaskAction.Action, err))
-				continue
+				fmt.Fprintf(stdout, "check: persist review follow-up batch failed: %v\n", err)
+				return nil, nil, fmt.Errorf("persist review follow-up batch: %w", err)
 			}
-			followUpResults[index] = reviewFollowUpResult{
-				TaskID:      applied.Task.ID,
-				Disposition: applied.Disposition,
+			if !applied.Accepted {
+				return nil, nil, errors.New("persist review follow-up batch: coordinator did not accept the proposal batch")
 			}
-			fmt.Fprintf(stdout, "check: review follow-up %s task %s\n", applied.Disposition, applied.Task.ID)
+			followUpBatchReceipt = &applied
+			fmt.Fprintf(
+				stdout,
+				"check: review follow-up batch accepted batch=%s set=%s revision=%d proposals=%d replayed=%t\n",
+				applied.BatchID,
+				applied.SetID,
+				applied.SetRevision,
+				applied.ProposalCount,
+				applied.Replayed,
+			)
+		} else if !reviewAggregation {
+			for _, comment := range report.Comments {
+				if comment.TaskAction == nil {
+					continue
+				}
+				failure := fmt.Sprintf("%s:%d: task_action ignored: only a review aggregation job may apply task_action", comment.File, comment.Line)
+				fmt.Fprintf(stdout, "check: apply review follow-up %s\n", failure)
+				followUpFailures = append(followUpFailures, failure)
+			}
 		}
 
 		if blocking {
@@ -1347,7 +1340,17 @@ func applyVerdictActions(
 			fmt.Fprintf(stdout, "check: retained %d advisory finding(s) in check details; no review threads changed\n", findings)
 		}
 	}
-	return followUpResults, followUpFailures, actionErr
+	return followUpBatchReceipt, followUpFailures, actionErr
+}
+
+func reviewTaskActionCount(report workerexec.VerdictReport) int {
+	count := 0
+	for _, comment := range report.Comments {
+		if comment.TaskAction != nil {
+			count++
+		}
+	}
+	return count
 }
 
 // appendFollowUpActionFailures records non-blocking follow-up task action
@@ -1386,15 +1389,15 @@ func reviewAggregationJob(job flowworker.Job) bool {
 	return aggregation
 }
 
-func advisoryVerdictDetails(details string, report workerexec.VerdictReport, taskResults map[int]reviewFollowUpResult) string {
+func advisoryVerdictDetails(details string, report workerexec.VerdictReport) string {
 	var lines []string
 	if trimmed := strings.TrimSpace(details); trimmed != "" {
 		lines = append(lines, "Advisory (non-blocking): "+trimmed)
 	} else {
 		lines = append(lines, "Advisory (non-blocking) finding")
 	}
-	for index, comment := range report.Comments {
-		lines = append(lines, formatReviewFinding(comment, taskResults[index]))
+	for _, comment := range report.Comments {
+		lines = append(lines, formatReviewFinding(comment))
 	}
 	for _, decision := range report.Threads {
 		finding := fmt.Sprintf("- thread %s: recommends %s", decision.ID, decision.Decision)
@@ -1416,12 +1419,12 @@ func blockingReviewFindings(report workerexec.VerdictReport) int {
 	return count
 }
 
-func classifiedReviewDetails(details string, report workerexec.VerdictReport, taskResults map[int]reviewFollowUpResult) string {
+func classifiedReviewDetails(details string, report workerexec.VerdictReport) string {
 	lines := []string{strings.TrimSpace(details)}
 	var followUps []string
-	for index, comment := range report.Comments {
+	for _, comment := range report.Comments {
 		if !comment.BlocksApproval() {
-			followUps = append(followUps, formatReviewFinding(comment, taskResults[index]))
+			followUps = append(followUps, formatReviewFinding(comment))
 		}
 	}
 	if len(followUps) == 0 {
@@ -1432,7 +1435,7 @@ func classifiedReviewDetails(details string, report workerexec.VerdictReport, ta
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
-func formatReviewFinding(comment workerexec.ReviewCommentReport, taskResult reviewFollowUpResult) string {
+func formatReviewFinding(comment workerexec.ReviewCommentReport) string {
 	classification := comment.Severity
 	if comment.IntroducedByChange != nil && !*comment.IntroducedByChange {
 		classification += ", pre-existing"
@@ -1451,15 +1454,21 @@ func formatReviewFinding(comment workerexec.ReviewCommentReport, taskResult revi
 	if comment.FollowUp != "" {
 		finding += " Follow-up: " + strings.TrimSpace(comment.FollowUp)
 	}
-	if taskResult.TaskID != "" {
-		finding += fmt.Sprintf(
-			" Follow-up task: [%s](/ui/tasks/%s) (%s).",
-			taskResult.TaskID,
-			taskResult.TaskID,
-			taskResult.Disposition,
-		)
-	}
 	return finding
+}
+
+func appendReviewFollowUpBatchReceipt(details string, receipt *flowclient.ApplyReviewFollowUpBatchResult) string {
+	if receipt == nil || !receipt.Accepted {
+		return details
+	}
+	return strings.TrimSpace(fmt.Sprintf(
+		"%s\n\nDurable follow-up batch accepted: batch `%s`; set `%s`; revision %d; proposals %d.",
+		strings.TrimSpace(details),
+		receipt.BatchID,
+		receipt.SetID,
+		receipt.SetRevision,
+		receipt.ProposalCount,
+	))
 }
 
 // transcriptTailBytes is the maximum number of bytes the worker uploads from

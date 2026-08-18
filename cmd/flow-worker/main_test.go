@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -134,7 +135,7 @@ func TestAdvisoryVerdictFindingsStayInCheckDetailsWithoutThreadActions(t *testin
 			ID: "th-1", Decision: "reopen", Body: "Recheck this path.",
 		}},
 	}
-	details := advisoryVerdictDetails(report.Reason, report, nil)
+	details := advisoryVerdictDetails(report.Reason, report)
 	for _, want := range []string{"Advisory (non-blocking)", "auth.go:42", "constant-time comparison", "thread th-1", "recommends reopen"} {
 		if !strings.Contains(details, want) {
 			t.Fatalf("advisory details %q missing %q", details, want)
@@ -204,7 +205,7 @@ func TestBlockingReviewerOnlyCountsTaskCausedUniqueHighSeverityFindings(t *testi
 	if got := blockingReviewFindings(report); got != 1 {
 		t.Fatalf("blockingReviewFindings = %d, want 1", got)
 	}
-	details := classifiedReviewDetails("review complete", report, nil)
+	details := classifiedReviewDetails("review complete", report)
 	for _, want := range []string{"pre-existing", "medium", "duplicate of th-1", "security hardening task"} {
 		if !strings.Contains(details, want) {
 			t.Fatalf("classified details %q missing %q", details, want)
@@ -360,38 +361,90 @@ func TestReviewerHarnessFailureReportsErroredInsteadOfBlocked(t *testing.T) {
 	}
 }
 
-func TestAdvisoryReviewAggregationAppliesTaskActionBeforeReportingVerdict(t *testing.T) {
-	var followUpCalls int
+func TestReviewAggregationSubmitsOneDurableBatchBeforeReportingVerdict(t *testing.T) {
+	const verdictJSON = `{
+		"verdict":"satisfied",
+		"reason":"two deferred issues",
+		"comments":[{
+			"sha":"head-1",
+			"file":"internal/cache.go",
+			"line":42,
+			"body":"The legacy cache has no size bound.",
+			"severity":"high",
+			"introduced_by_change":false,
+			"requirement":"cache memory remains bounded",
+			"requirement_source":"explicit",
+			"finding_basis":"explicit_requirement",
+			"remediation_scope":"local",
+			"scope_rationale":"The cache implementation owns its bound.",
+			"task_action":{
+				"action":"create_task",
+				"title":"Bound the legacy cache",
+				"body":"Add a configurable cache bound and tests covering eviction."
+			}
+		},{
+			"sha":"head-1",
+			"file":"internal/board.ts",
+			"line":7,
+			"body":"Cancelled mutations leave a stale pending status.",
+			"severity":"medium",
+			"introduced_by_change":true,
+			"requirement":"pending status clears on cancel",
+			"requirement_source":"explicit",
+			"finding_basis":"demonstrated_regression",
+			"remediation_scope":"local",
+			"scope_rationale":"The mutation cleanup is local to the board client.",
+			"task_action":{
+				"action":"use_existing_task",
+				"task_id":"t-review-0001"
+			}
+		}]
+	}`
+	verdictBytes := []byte(verdictJSON)
+	verdictDigest := sha256.Sum256(verdictBytes)
+	sealedReport, err := checkverdict.Validate(verdictBytes, checkverdict.ModeReviewAggregation)
+	if err != nil {
+		t.Fatalf("validate verdict: %v", err)
+	}
+
+	var batchCalls, singularCalls, checkCalls int
 	var reported struct {
 		Verdict string `json:"verdict"`
 		Details string `json:"details"`
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v2/tasks/t-review/review-follow-ups":
-			followUpCalls++
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/tasks/t-review/review-follow-up-batches":
+			batchCalls++
 			var request struct {
-				LeaseID string `json:"lease_id"`
-				Finding struct {
-					File string `json:"file"`
-				} `json:"finding"`
-				TaskAction struct {
-					Action string `json:"action"`
-					Title  string `json:"title"`
-				} `json:"task_action"`
+				LeaseID      string `json:"lease_id"`
+				ReportJSON   string `json:"report_json"`
+				ReportSHA256 string `json:"report_sha256"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-				t.Errorf("decode follow-up: %v", err)
+				t.Errorf("decode follow-up batch: %v", err)
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			if request.LeaseID != "l-review" || request.Finding.File != "internal/cache.go" ||
-				request.TaskAction.Action != "create_task" || request.TaskAction.Title != "Bound the legacy cache" {
-				t.Errorf("review follow-up request = %+v", request)
+			if request.LeaseID != "l-review" || request.ReportJSON != verdictJSON || request.ReportSHA256 != fmt.Sprintf("%x", verdictDigest) {
+				t.Errorf("review follow-up batch request = %+v", request)
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"task":{"ID":"t-review-0002","Title":"Bound the legacy cache","Body":"Add a bound."},"disposition":"created"}`)
+			_, _ = io.WriteString(w, `{"accepted":true,"batch_id":"rfub-accepted","set_id":"rfus-review","set_revision":3,"set_state":"open","proposal_count":2,"replayed":false}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/tasks/t-review/review-follow-ups":
+			singularCalls++
+			http.Error(w, "singular endpoint must not be called", http.StatusInternalServerError)
 		case r.Method == http.MethodPost && r.URL.Path == "/v2/tasks/t-review/checks/review-aggregation.node.nr-1":
+			checkCalls++
+			if batchCalls != 1 {
+				t.Errorf("check reported before durable batch: batch calls = %d", batchCalls)
+			}
+			if checkCalls == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, `{"error":{"code":"temporarily_unavailable","message":"check response lost"}}`)
+				return
+			}
 			if err := json.NewDecoder(r.Body).Decode(&reported); err != nil {
 				t.Errorf("decode report: %v", err)
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -410,32 +463,11 @@ func TestAdvisoryReviewAggregationAppliesTaskActionBeforeReportingVerdict(t *tes
 		t.Fatalf("new client: %v", err)
 	}
 	verdictPath := filepath.Join(t.TempDir(), workerexec.VerdictFileName)
-	if err := os.WriteFile(verdictPath, []byte(`{
-		"verdict":"satisfied",
-		"reason":"one deferred issue",
-		"comments":[{
-			"sha":"head-1",
-			"file":"internal/cache.go",
-			"line":42,
-			"body":"The legacy cache has no size bound.",
-			"severity":"high",
-			"introduced_by_change":false,
-			"requirement":"cache memory remains bounded",
-			"task_action":{
-				"action":"create_task",
-				"title":"Bound the legacy cache",
-				"body":"Add a configurable cache bound and tests covering eviction."
-			}
-		}]
-	}`), 0o600); err != nil {
+	if err := os.WriteFile(verdictPath, verdictBytes, 0o600); err != nil {
 		t.Fatalf("write verdict: %v", err)
 	}
-	sealedReport, ok, err := workerexec.ReadVerdictFile(verdictPath)
-	if err != nil || !ok {
-		t.Fatalf("read sealed verdict: ok=%v err=%v", ok, err)
-	}
-	// The live worker captures this report while validating the completion
-	// seal. Changing the file afterward must not affect applied actions.
+	// The batch must use the immutable captured bytes even if the verdict file is
+	// changed after completion.
 	if err := os.WriteFile(verdictPath, []byte(`{"verdict":"blocked","reason":"mutated after seal"}`), 0o600); err != nil {
 		t.Fatalf("mutate verdict after capture: %v", err)
 	}
@@ -457,69 +489,104 @@ func TestAdvisoryReviewAggregationAppliesTaskActionBeforeReportingVerdict(t *tes
 		},
 		VerdictFilePath: verdictPath,
 		VerdictReport:   &sealedReport,
+		VerdictBytes:    verdictBytes,
+		VerdictSHA256:   fmt.Sprintf("%x", verdictDigest),
 	}
 	var stdout bytes.Buffer
 	verdict, err := reportCheckIfNeeded(context.Background(), client, job, flowworker.Lease{ID: "l-review"}, result, &stdout)
 	if err != nil || verdict != coordinator.CheckSatisfied {
 		t.Fatalf("reportCheckIfNeeded verdict=%s err=%v stdout=%q", verdict, err, stdout.String())
 	}
-	if followUpCalls != 1 {
-		t.Fatalf("follow-up calls = %d, want 1", followUpCalls)
+	if batchCalls != 1 || singularCalls != 0 || checkCalls != 2 {
+		t.Fatalf("calls: plural=%d singular=%d check=%d, want 1/0/2", batchCalls, singularCalls, checkCalls)
 	}
-	for _, want := range []string{"Advisory (non-blocking)", "[t-review-0002](/ui/tasks/t-review-0002)", "(created)"} {
+	for _, want := range []string{
+		"Advisory (non-blocking)",
+		"Durable follow-up batch accepted",
+		"batch `rfub-accepted`",
+		"set `rfus-review`",
+		"revision 3",
+		"proposals 2",
+	} {
 		if !strings.Contains(reported.Details, want) {
 			t.Fatalf("reported details %q missing %q", reported.Details, want)
 		}
 	}
+	if strings.Contains(reported.Details, "/ui/tasks/") {
+		t.Fatalf("reported details contain a nonexistent task link: %q", reported.Details)
+	}
 }
 
-// Regression: a review aggregation verdict whose follow-up task_action is
-// rejected by the coordinator (here: use_existing_task naming a task that is
-// already done) must not error the check or block the workflow. The rejected
-// action is recorded in the check details while the verdict and the sibling
-// follow-ups still apply.
-func TestReviewAggregationFollowUpRejectionDegradesToCheckDetails(t *testing.T) {
-	var followUpCalls int
+// Regression: proposal persistence is load-bearing, and blocking threads must
+// not be filed until the complete batch has been durably accepted.
+func TestReviewAggregationBatchFailureReportsErroredBeforeBlockingThreads(t *testing.T) {
+	const verdictJSON = `{
+		"verdict":"blocked",
+		"reason":"one proposal and one blocker",
+		"comments":[{
+			"sha":"head-1",
+			"file":"internal/cache.go",
+			"line":42,
+			"body":"The legacy cache has no size bound.",
+			"severity":"medium",
+			"introduced_by_change":true,
+			"requirement":"cache memory remains bounded",
+			"requirement_source":"explicit",
+			"finding_basis":"explicit_requirement",
+			"remediation_scope":"local",
+			"scope_rationale":"The cache implementation owns its bound.",
+			"task_action":{
+				"action":"create_task",
+				"title":"Bound the legacy cache",
+				"body":"Add a configurable cache bound."
+			}
+		},{
+			"sha":"head-1",
+			"file":"internal/auth.go",
+			"line":17,
+			"body":"Authorization is bypassed.",
+			"severity":"high",
+			"introduced_by_change":true,
+			"requirement":"requests are authorized",
+			"requirement_source":"explicit",
+			"finding_basis":"security_defect",
+			"remediation_scope":"local",
+			"scope_rationale":"The changed handler owns authorization."
+		}]
+	}`
+	verdictBytes := []byte(verdictJSON)
+	verdictDigest := sha256.Sum256(verdictBytes)
+	report, err := checkverdict.Validate(verdictBytes, checkverdict.ModeReviewAggregation)
+	if err != nil {
+		t.Fatalf("validate verdict: %v", err)
+	}
+
+	var batchCalls, singularCalls, threadCalls, checkCalls int
 	var reported struct {
 		Verdict string `json:"verdict"`
 		Details string `json:"details"`
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/tasks/t-review/review-follow-up-batches":
+			batchCalls++
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"code":"review_follow_up_batch_failed","message":"durable proposal store unavailable"}}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/v2/tasks/t-review/review-follow-ups":
-			followUpCalls++
-			var request struct {
-				Finding struct {
-					File string `json:"file"`
-				} `json:"finding"`
-				TaskAction struct {
-					Action string `json:"action"`
-					TaskID string `json:"task_id"`
-				} `json:"task_action"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-				t.Errorf("decode follow-up: %v", err)
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			if request.TaskAction.Action == "use_existing_task" {
-				if request.TaskAction.TaskID != "t-review-0001" {
-					t.Errorf("use_existing_task target = %q", request.TaskAction.TaskID)
-				}
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = io.WriteString(w, `{"error":{"code":"review_follow_up_failed","message":"review follow-up task must be open"}}`)
-				return
-			}
-			_, _ = io.WriteString(w, `{"task":{"ID":"t-review-0002","Title":"Bound the legacy cache","Body":"Add a bound."},"disposition":"created"}`)
+			singularCalls++
+			http.Error(w, "singular endpoint must not be called", http.StatusInternalServerError)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/threads"):
+			threadCalls++
+			http.Error(w, "thread filed before batch persistence", http.StatusInternalServerError)
 		case r.Method == http.MethodPost && r.URL.Path == "/v2/tasks/t-review/checks/review-aggregation.node.nr-1":
+			checkCalls++
 			if err := json.NewDecoder(r.Body).Decode(&reported); err != nil {
 				t.Errorf("decode report: %v", err)
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"check":{"task_id":"t-review","name":"review-aggregation.node.nr-1","kind":"reviewer","required":true,"verdict":"satisfied"},"review_state":"approved"}`)
+			_, _ = io.WriteString(w, `{"check":{"task_id":"t-review","name":"review-aggregation.node.nr-1","kind":"reviewer","required":true,"verdict":"errored"},"review_state":"in_review"}`)
 		default:
 			t.Errorf("request = %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -529,22 +596,6 @@ func TestReviewAggregationFollowUpRejectionDegradesToCheckDetails(t *testing.T) 
 	client, err := flowclient.New(config.ClientConfig{ServerURL: server.URL, Token: "worker-token"})
 	if err != nil {
 		t.Fatalf("new client: %v", err)
-	}
-	report := workerexec.VerdictReport{
-		Verdict: "satisfied",
-		Reason:  "two deferred issues",
-		Comments: []workerexec.ReviewCommentReport{
-			{
-				SHA: "head-1", File: "internal/cache.go", Line: 42, Body: "The legacy cache has no size bound.",
-				Severity: "medium", IntroducedByChange: boolPtr(true), Requirement: "cache memory remains bounded",
-				TaskAction: &workerexec.ReviewTaskActionReport{Action: "create_task", Title: "Bound the legacy cache", Body: "Add a configurable cache bound."},
-			},
-			{
-				SHA: "head-1", File: "internal/board.ts", Line: 7, Body: "Cancelled mutations leave a stale pending status.",
-				Severity: "medium", IntroducedByChange: boolPtr(true), Requirement: "pending status clears on cancel",
-				TaskAction: &workerexec.ReviewTaskActionReport{Action: "use_existing_task", TaskID: "t-review-0001"},
-			},
-		},
 	}
 	taskID := "t-review"
 	job := flowworker.Job{
@@ -563,54 +614,77 @@ func TestReviewAggregationFollowUpRejectionDegradesToCheckDetails(t *testing.T) 
 			CompletionProtocol: checkverdict.CompletionProtocol,
 		},
 		VerdictReport: &report,
+		VerdictBytes:  verdictBytes,
+		VerdictSHA256: fmt.Sprintf("%x", verdictDigest),
 	}
 	var stdout bytes.Buffer
 	verdict, err := reportCheckIfNeeded(context.Background(), client, job, flowworker.Lease{ID: "l-review"}, result, &stdout)
-	if err != nil || verdict != coordinator.CheckSatisfied {
+	if err == nil || verdict != coordinator.CheckErrored {
 		t.Fatalf("reportCheckIfNeeded verdict=%s err=%v stdout=%q", verdict, err, stdout.String())
 	}
-	if followUpCalls != 2 {
-		t.Fatalf("follow-up calls = %d, want 2", followUpCalls)
+	if batchCalls != 1 || singularCalls != 0 || threadCalls != 0 || checkCalls != 1 {
+		t.Fatalf("calls: batch=%d singular=%d thread=%d check=%d, want 1/0/0/1", batchCalls, singularCalls, threadCalls, checkCalls)
 	}
-	if reported.Verdict != string(coordinator.CheckSatisfied) {
-		t.Fatalf("reported verdict = %q, want satisfied", reported.Verdict)
+	if reported.Verdict != string(coordinator.CheckErrored) {
+		t.Fatalf("reported verdict = %q, want errored", reported.Verdict)
 	}
-	for _, want := range []string{
-		"[t-review-0002](/ui/tasks/t-review-0002)",
-		"stale pending status",
-		"Follow-up task actions failed (non-blocking):",
-		"internal/board.ts:7 (use_existing_task)",
-		"review_follow_up_failed: review follow-up task must be open",
-	} {
+	for _, want := range []string{"structured verdict actions failed", "persist review follow-up batch", "durable proposal store unavailable"} {
 		if !strings.Contains(reported.Details, want) {
 			t.Fatalf("reported details %q missing %q", reported.Details, want)
 		}
 	}
+	if strings.Contains(reported.Details, "non-blocking") {
+		t.Fatalf("batch persistence failure degraded to warning: %q", reported.Details)
+	}
 }
 
-// A non-aggregation reviewer has no business emitting task_action, but dropping
-// that action must not error the check: the finding itself is already retained
-// in the details, and the ignored action is recorded alongside it.
-func TestNonAggregationReviewerTaskActionDegradesToDetails(t *testing.T) {
-	report := workerexec.VerdictReport{Comments: []workerexec.ReviewCommentReport{{
+func TestReviewFollowUpBatchSkippedWithoutAggregationActions(t *testing.T) {
+	actionReport := workerexec.VerdictReport{Comments: []workerexec.ReviewCommentReport{{
 		SHA: "abc123", File: "auth.go", Line: 42, Body: "Pre-existing issue.",
 		Severity: "medium", IntroducedByChange: boolPtr(false), Requirement: "authorize requests",
-		TaskAction: &workerexec.ReviewTaskActionReport{Action: "create_task", Title: "Follow up on auth hardening"},
+		TaskAction: &workerexec.ReviewTaskActionReport{Action: "create_task", Title: "Follow up on auth hardening", Body: "Harden authorization."},
 	}}}
-	var stdout bytes.Buffer
-	results, failures, err := applyVerdictActions(context.Background(), nil, coordinator.CheckKindReviewer, false, false, "", flowworker.Lease{}, workerexec.RunResult{}, report, &stdout)
-	if err != nil {
-		t.Fatalf("applyVerdictActions error = %v, want nil", err)
+	withoutAction := actionReport
+	withoutAction.Comments = append([]workerexec.ReviewCommentReport(nil), actionReport.Comments...)
+	withoutAction.Comments[0].TaskAction = nil
+
+	tests := []struct {
+		name              string
+		kind              coordinator.CheckKind
+		reviewAggregation bool
+		report            workerexec.VerdictReport
+		wantFailures      int
+	}{
+		{name: "aggregation without task_action", kind: coordinator.CheckKindReviewer, reviewAggregation: true, report: withoutAction},
+		{name: "non-aggregation reviewer", kind: coordinator.CheckKindReviewer, report: actionReport, wantFailures: 1},
+		{name: "verifier", kind: coordinator.CheckKindVerifier, reviewAggregation: true, report: actionReport},
 	}
-	if len(results) != 0 {
-		t.Fatalf("follow-up results = %v, want none", results)
-	}
-	if len(failures) != 1 || !strings.Contains(failures[0], "auth.go:42") || !strings.Contains(failures[0], "only a review aggregation job may apply task_action") {
-		t.Fatalf("follow-up failures = %v", failures)
-	}
-	details := appendFollowUpActionFailures("review complete", failures)
-	if !strings.Contains(details, "Follow-up task actions failed (non-blocking):") || !strings.Contains(details, "auth.go:42") {
-		t.Fatalf("details = %q", details)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				http.Error(w, "unexpected proposal request", http.StatusInternalServerError)
+			}))
+			t.Cleanup(server.Close)
+			client, err := flowclient.New(config.ClientConfig{ServerURL: server.URL, Token: "worker-token"})
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+			receipt, failures, err := applyVerdictActions(
+				context.Background(), client, tt.kind, false, tt.reviewAggregation, "t-review",
+				flowworker.Lease{ID: "l-review"}, workerexec.RunResult{}, tt.report, io.Discard,
+			)
+			if err != nil {
+				t.Fatalf("applyVerdictActions error = %v, want nil", err)
+			}
+			if receipt != nil || calls != 0 {
+				t.Fatalf("receipt=%+v calls=%d, want no proposals", receipt, calls)
+			}
+			if len(failures) != tt.wantFailures {
+				t.Fatalf("follow-up failures = %v, want %d", failures, tt.wantFailures)
+			}
+		})
 	}
 }
 
