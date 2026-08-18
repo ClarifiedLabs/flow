@@ -110,6 +110,11 @@ type FlowService struct {
 	db        *sql.DB
 	agentDefs *AgentDefService
 	now       func() time.Time
+
+	// ListRowsReadTestHook runs after listWith reads the flow rows and before it
+	// reads their graph and default metadata. Tests use it to force a concurrent
+	// update at that boundary. Test-only; nil in production.
+	ListRowsReadTestHook func()
 }
 
 func NewFlowService(database *sql.DB) *FlowService {
@@ -358,7 +363,7 @@ SELECT
 }
 
 func (s *FlowService) Get(ctx context.Context, id string) (Flow, error) {
-	flows, err := s.list(ctx, "f.id = ?", id)
+	flows, _, err := s.list(ctx, "f.id = ?", id)
 	if err != nil {
 		return Flow{}, err
 	}
@@ -369,7 +374,7 @@ func (s *FlowService) Get(ctx context.Context, id string) (Flow, error) {
 }
 
 func (s *FlowService) GetByName(ctx context.Context, name string) (Flow, error) {
-	flows, err := s.list(ctx, "f.name = ?", strings.TrimSpace(name))
+	flows, _, err := s.list(ctx, "f.name = ?", strings.TrimSpace(name))
 	if err != nil {
 		return Flow{}, err
 	}
@@ -380,11 +385,35 @@ func (s *FlowService) GetByName(ctx context.Context, name string) (Flow, error) 
 }
 
 func (s *FlowService) List(ctx context.Context) ([]Flow, error) {
+	flows, _, err := s.list(ctx, "1 = 1")
+	return flows, err
+}
+
+// ListWithDefaultFlowID returns the ordered flow catalog and its default id
+// from the same read transaction used to populate each flow's Default marker.
+func (s *FlowService) ListWithDefaultFlowID(ctx context.Context) ([]Flow, string, error) {
 	return s.list(ctx, "1 = 1")
 }
 
-func (s *FlowService) list(ctx context.Context, where string, args ...any) ([]Flow, error) {
-	return s.listWith(ctx, s.db, where, args...)
+func (s *FlowService) list(ctx context.Context, where string, args ...any) ([]Flow, string, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, "", err
+	}
+	defer tx.Rollback()
+
+	flows, err := s.listWith(ctx, tx, where, args...)
+	if err != nil {
+		return nil, "", err
+	}
+	defaultID, err := defaultFlowIDWith(ctx, tx)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, "", err
+	}
+	return flows, defaultID, nil
 }
 
 type flowQueryer interface {
@@ -427,6 +456,9 @@ FROM flows f WHERE `+where+` ORDER BY f.name`, args...)
 	}
 	if len(flows) == 0 {
 		return flows, nil
+	}
+	if s.ListRowsReadTestHook != nil {
+		s.ListRowsReadTestHook()
 	}
 
 	nodeRows, err := queryer.QueryContext(ctx, `

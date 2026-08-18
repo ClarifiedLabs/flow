@@ -134,12 +134,7 @@ func (s *projectServer) handleFlowsPath(w http.ResponseWriter, r *http.Request, 
 	if rest == "" {
 		switch r.Method {
 		case http.MethodGet:
-			flows, err := s.flows.List(r.Context())
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "list_flows_failed", err.Error())
-				return
-			}
-			defaultID, err := s.flows.DefaultFlowID(r.Context())
+			flows, defaultID, err := s.flows.ListWithDefaultFlowID(r.Context())
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "list_flows_failed", err.Error())
 				return

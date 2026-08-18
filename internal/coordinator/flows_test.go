@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 )
@@ -32,6 +34,181 @@ func newFlowTestServices(t *testing.T) (*FlowService, *AgentDefService) {
 	t.Cleanup(func() { _ = projectStore.Close() })
 	defs := NewInheritedAgentDefService(projectStore.DB(), globals)
 	return NewFlowServiceWithAgentDefs(projectStore.DB(), defs), defs
+}
+
+func TestPublicFlowReadsAreRevisionCoherent(t *testing.T) {
+	readers := []struct {
+		name string
+		read func(context.Context, *FlowService, Flow) (Flow, error)
+	}{
+		{
+			name: "Get",
+			read: func(ctx context.Context, flows *FlowService, target Flow) (Flow, error) {
+				return flows.Get(ctx, target.ID)
+			},
+		},
+		{
+			name: "GetByName",
+			read: func(ctx context.Context, flows *FlowService, target Flow) (Flow, error) {
+				return flows.GetByName(ctx, target.Name)
+			},
+		},
+		{
+			name: "List",
+			read: func(ctx context.Context, flows *FlowService, target Flow) (Flow, error) {
+				listed, err := flows.List(ctx)
+				if err != nil {
+					return Flow{}, err
+				}
+				if len(listed) != 2 {
+					return Flow{}, fmt.Errorf("listed flows = %d, want 2", len(listed))
+				}
+				if listed[0].Name != "a-fallback" || listed[1].Name != target.Name {
+					return Flow{}, fmt.Errorf("flow order = %q, %q, want a-fallback, %s", listed[0].Name, listed[1].Name, target.Name)
+				}
+				return listed[1], nil
+			},
+		},
+	}
+
+	for _, tc := range readers {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "project.db")
+			readStore, err := flowdb.Open(ctx, path)
+			if err != nil {
+				t.Fatalf("open read database: %v", err)
+			}
+			t.Cleanup(func() { _ = readStore.Close() })
+			writeStore, err := flowdb.Open(ctx, path)
+			if err != nil {
+				t.Fatalf("open write database: %v", err)
+			}
+			t.Cleanup(func() { _ = writeStore.Close() })
+
+			reader := NewFlowService(readStore.DB())
+			writer := NewFlowService(writeStore.DB())
+			initialInput := FlowInput{
+				Name:      "z-coherent read",
+				StartNode: "old-gate",
+				Nodes: []FlowNodeInput{
+					{Key: "old-gate", Name: "Old gate", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Instructions: "Old graph", Outcomes: []string{"approved"}}}},
+					{Key: "old-done", Name: "Old done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+				},
+				Edges: []FlowEdgeInput{{From: "old-gate", Outcome: "approved", To: "old-done"}},
+			}
+			created, err := reader.Create(ctx, initialInput)
+			if err != nil {
+				t.Fatalf("create flow: %v", err)
+			}
+			fallback, err := reader.Create(ctx, FlowInput{
+				Name:      "a-fallback",
+				StartNode: "done",
+				Nodes: []FlowNodeInput{
+					{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("create fallback flow: %v", err)
+			}
+			if err := reader.SetDefaultFlow(ctx, created.ID); err != nil {
+				t.Fatalf("set default flow: %v", err)
+			}
+
+			rowsRead := make(chan struct{})
+			resumeRead := make(chan struct{})
+			reader.ListRowsReadTestHook = func() {
+				close(rowsRead)
+				<-resumeRead
+			}
+			type readResult struct {
+				flow Flow
+				err  error
+			}
+			readDone := make(chan readResult, 1)
+			go func() {
+				flow, readErr := tc.read(ctx, reader, created)
+				readDone <- readResult{flow: flow, err: readErr}
+			}()
+
+			select {
+			case <-rowsRead:
+			case result := <-readDone:
+				t.Fatalf("read finished before concurrent update: flow=%+v err=%v", result.flow, result.err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for flow row read")
+			}
+
+			updatedInput := FlowInput{
+				Name:      created.Name,
+				StartNode: "new-gate",
+				Nodes: []FlowNodeInput{
+					{Key: "new-gate", Name: "New gate", Kind: NodeHumanGate, Config: FlowNodeConfig{HumanGate: &HumanGateNodeConfig{Instructions: "New graph", Outcomes: []string{"completed"}}}},
+					{Key: "new-done", Name: "New done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+				},
+				Edges: []FlowEdgeInput{{From: "new-gate", Outcome: "completed", To: "new-done"}},
+			}
+			updated, updateErr := writer.Update(ctx, created.ID, updatedInput)
+			var defaultErr error
+			if updateErr == nil {
+				defaultErr = writer.SetDefaultFlow(ctx, fallback.ID)
+			}
+			close(resumeRead)
+			if updateErr != nil {
+				t.Fatalf("update flow between row and graph reads: %v", updateErr)
+			}
+			if defaultErr != nil {
+				t.Fatalf("move default between row and metadata reads: %v", defaultErr)
+			}
+			if updated.Revision != created.Revision+1 {
+				t.Fatalf("updated revision = %d, want %d", updated.Revision, created.Revision+1)
+			}
+
+			var result readResult
+			select {
+			case result = <-readDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for coherent flow read")
+			}
+			if result.err != nil {
+				t.Fatalf("read flow: %v", result.err)
+			}
+			flow := result.flow
+			if flow.Revision != created.Revision {
+				t.Fatalf("returned revision = %d, want pinned revision %d", flow.Revision, created.Revision)
+			}
+			if flow.StartNode != "old-gate" || len(flow.Nodes) != 2 || flow.Nodes[0].Key != "old-gate" || flow.Nodes[1].Key != "old-done" {
+				t.Fatalf("revision %d returned nodes from another revision: start=%q nodes=%+v", flow.Revision, flow.StartNode, flow.Nodes)
+			}
+			if len(flow.Edges) != 1 || flow.Edges[0] != (FlowEdge{From: "old-gate", Outcome: "approved", To: "old-done"}) {
+				t.Fatalf("revision %d returned edges from another revision: %+v", flow.Revision, flow.Edges)
+			}
+			if !flow.Default {
+				t.Fatal("coherent read lost the default-flow marker")
+			}
+		})
+	}
+}
+
+func TestPublicFlowReadNotFoundBehavior(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	flows, _ := newFlowTestServices(t)
+
+	listed, err := flows.List(ctx)
+	if err != nil {
+		t.Fatalf("list empty flow catalog: %v", err)
+	}
+	if listed == nil || len(listed) != 0 {
+		t.Fatalf("empty flow list = %#v, want non-nil empty slice", listed)
+	}
+	if _, err := flows.Get(ctx, "fl-missing"); !errors.Is(err, ErrFlowNotFound) {
+		t.Fatalf("Get missing flow error = %v, want ErrFlowNotFound", err)
+	}
+	if _, err := flows.GetByName(ctx, "  missing  "); !errors.Is(err, ErrFlowNotFound) {
+		t.Fatalf("GetByName missing flow error = %v, want ErrFlowNotFound", err)
+	}
 }
 
 func TestFlowUpdateIncrementsPersistedRevision(t *testing.T) {
