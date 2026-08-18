@@ -313,6 +313,56 @@ test("task detail edits human review policy from unchecked to checked", async ()
   await saveTaskHumanReviewTransition(false, true, "t-review-on");
 });
 
+test("task detail preserves an unsaved draft when Edit task is clicked again", async () => {
+  const model = taskModel({
+    task: { id: "t-edit-draft", title: "Persisted title", body: "Persisted body", priority: 1 },
+    project_id: "p-1",
+    task_detail: {},
+  });
+  const detail = mountElement(globalThis.document.body, "flow-task-detail", model);
+  await flush();
+
+  detail.querySelector("[data-task-edit]").click();
+  await flush();
+  const form = detail.querySelector("[data-task-form]");
+  form.elements.title.value = "Unsaved title";
+
+  detail.querySelector("[data-task-edit]").click();
+  await flush();
+
+  assert.equal(detail.querySelector("[data-task-form]"), form, "the repeated action must not reconstruct the form");
+  assert.equal(form.elements.title.value, "Unsaved title");
+  detail.remove();
+});
+
+test("task detail exits edit mode when its task identity changes", async () => {
+  const first = taskModel({
+    task: { id: "t-edit-first", title: "First task", body: "First body", priority: 1 },
+    project_id: "p-1",
+    task_detail: {},
+  });
+  const second = taskModel({
+    task: { id: "t-edit-second", title: "Second task", body: "Second body", priority: 2 },
+    project_id: "p-1",
+    task_detail: {},
+  });
+  const detail = mountElement(globalThis.document.body, "flow-task-detail", first);
+  await flush();
+
+  detail.querySelector("[data-task-edit]").click();
+  await flush();
+  assert.ok(detail.querySelector("[data-task-editor]"));
+
+  detail.data = second;
+  await flush();
+
+  assert.equal(detail.querySelector("[data-task-editor]"), null);
+  assert.ok(detail.querySelector("flow-tab-strip"), "the new task renders its detail view");
+  assert.equal(detail.querySelector("flow-task-rail").data.id, "t-edit-second");
+  assert.equal(detail.editingTaskID, "", "the previous task's editor state is discarded");
+  detail.remove();
+});
+
 test("the Now card surfaces a review thread that blocks the merge", () => {
   const card = nowCardModel({
     wait: null,

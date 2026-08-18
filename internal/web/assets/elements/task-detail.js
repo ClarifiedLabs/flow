@@ -49,7 +49,7 @@ export class FlowTaskDetail extends FlowElement {
   panelKey = "";
   panelMarkup = "";
   deepLinked = false;
-  editing = false;
+  editingTaskID = "";
   renderedModel = null;
   renderedChangeKey = "";
   changeGeneration = 0;
@@ -107,7 +107,11 @@ export class FlowTaskDetail extends FlowElement {
   terminalPromise = null;
 
   render(model) {
-    if (!model) return `<div class="empty">Loading task</div>`;
+    if (!model) {
+      this.editingTaskID = "";
+      return `<div class="empty">Loading task</div>`;
+    }
+    if (this.editingTaskID && this.editingTaskID !== model.id) this.editingTaskID = "";
     const changeKey = changeModelKey(model);
     if (changeKey === this.renderedChangeKey) {
       // A fresh model for the same task/change/head is a poll or a refresh.
@@ -165,7 +169,7 @@ export class FlowTaskDetail extends FlowElement {
     return `
       <flow-task-rail></flow-task-rail>
       <div class="surface">
-        ${this.editing ? this.taskEditorMarkup(model) : `
+        ${this.editingTaskID === model.id ? this.taskEditorMarkup(model) : `
         <flow-held-panel></flow-held-panel>
         <flow-now-card></flow-now-card>
         <flow-tab-strip></flow-tab-strip>
@@ -197,7 +201,7 @@ export class FlowTaskDetail extends FlowElement {
     const rail = this.querySelector("flow-task-rail");
     if (!rail) return;
     rail.data = model;
-    if (this.editing) return;
+    if (this.editingTaskID === model.id) return;
     this.querySelector("flow-held-panel").data = model;
     this.querySelector("flow-now-card").data = { card: nowCardModel(model), model };
     const strip = this.querySelector("flow-tab-strip");
@@ -214,7 +218,9 @@ export class FlowTaskDetail extends FlowElement {
     const editTask = event.target.closest?.("[data-task-edit]");
     if (editTask) {
       event.preventDefault();
-      this.editing = true;
+      const taskID = this.data?.id || "";
+      if (!taskID || this.editingTaskID === taskID) return;
+      this.editingTaskID = taskID;
       this.invalidate();
       return;
     }
@@ -254,8 +260,8 @@ export class FlowTaskDetail extends FlowElement {
   }
 
   finishEditing() {
-    if (!this.editing) return;
-    this.editing = false;
+    if (!this.editingTaskID) return;
+    this.editingTaskID = "";
     this.invalidate();
   }
 
