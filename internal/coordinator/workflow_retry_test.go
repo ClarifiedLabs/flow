@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 )
@@ -16,6 +18,7 @@ import (
 type retryRuntimeTestEnv struct {
 	store       *flowdb.Store
 	globalStore *flowdb.Store
+	globalPath  string
 	globals     *AgentDefService
 	defs        *AgentDefService
 	tasks       *TaskService
@@ -26,7 +29,8 @@ type retryRuntimeTestEnv struct {
 func newRetryRuntimeTestEnv(t *testing.T) *retryRuntimeTestEnv {
 	t.Helper()
 	ctx := context.Background()
-	globalStore, err := flowdb.OpenGlobal(ctx, filepath.Join(t.TempDir(), "global.db"))
+	globalPath := filepath.Join(t.TempDir(), "global.db")
+	globalStore, err := flowdb.OpenGlobal(ctx, globalPath)
 	if err != nil {
 		t.Fatalf("open global database: %v", err)
 	}
@@ -42,7 +46,7 @@ func newRetryRuntimeTestEnv(t *testing.T) *retryRuntimeTestEnv {
 	tasks := NewTaskService(store.DB(), "p-test")
 	flows := NewFlowServiceWithAgentDefs(store.DB(), defs)
 	return &retryRuntimeTestEnv{
-		store: store, globalStore: globalStore, globals: globals, defs: defs,
+		store: store, globalStore: globalStore, globalPath: globalPath, globals: globals, defs: defs,
 		tasks: tasks, runs: NewWorkflowRunService(store.DB(), flows, tasks),
 		checks: NewCheckService(store.DB()),
 	}
@@ -53,6 +57,20 @@ type waitingRetryWorkflow struct {
 	run       WorkflowRun
 	runID     string
 	nodeRunID string
+}
+
+func (e *retryRuntimeTestEnv) currentAgentRuntimeRevision(t *testing.T) AgentRuntimeRevision {
+	t.Helper()
+	ctx := context.Background()
+	local, err := agentDefCatalogRevision(ctx, e.store.DB())
+	if err != nil {
+		t.Fatalf("read project agent catalog revision: %v", err)
+	}
+	inherited, err := agentDefCatalogRevision(ctx, e.globalStore.DB())
+	if err != nil {
+		t.Fatalf("read inherited agent catalog revision: %v", err)
+	}
+	return AgentRuntimeRevision{AgentDefsRevision: local, InheritedAgentDefsRevision: inherited}
 }
 
 func (e *retryRuntimeTestEnv) pauseWorkflowForRetry(t *testing.T, snapshot FlowSnapshot, currentNodeKey string) waitingRetryWorkflow {
@@ -162,7 +180,8 @@ func retryTestSnapshot(current FlowNodeSnapshot) FlowSnapshot {
 		panic("retry test snapshot has unsupported current node kind " + string(current.Kind))
 	}
 	return FlowSnapshot{
-		FlowID: "fl-runtime-refresh", FlowName: "Frozen workflow", StartNode: "completed-progress", TransitionBudget: 17,
+		FlowID: "fl-runtime-refresh", FlowRevision: 3, AgentDefsRevision: 7, InheritedAgentDefsRevision: 11,
+		FlowName: "Frozen workflow", StartNode: "completed-progress", TransitionBudget: 17,
 		Nodes: []FlowNodeSnapshot{
 			{
 				Key: "completed-progress", Name: "Completed progress", Kind: NodeAgent,
@@ -207,9 +226,11 @@ func TestRetryExecutionRefreshesAuthorRuntimeFromProjectOverride(t *testing.T) {
 	}
 
 	expectedSnapshot := snapshot
+	expectedRevision := env.currentAgentRuntimeRevision(t)
 	expectedSnapshot.Nodes[1].Config.Agent.Agent.Harness = projectOverride.Harness
 	expectedSnapshot.Nodes[1].Config.Agent.Agent.Model = projectOverride.Model
 	expectedSnapshot.Nodes[1].Config.Agent.Agent.ReasoningEffort = projectOverride.ReasoningEffort
+	expectedSnapshot.Nodes[1].Config.Agent.Agent.RuntimeRevision = &expectedRevision
 	retried, err := env.runs.RetryExecution(ctx, waiting.task.ID, ActorHuman, true)
 	if err != nil {
 		t.Fatalf("retry with runtime refresh: %v", err)
@@ -238,9 +259,76 @@ func TestRetryExecutionRefreshesAuthorRuntimeFromProjectOverride(t *testing.T) {
 		New: WorkflowAgentRuntimeSettings{
 			Harness: projectOverride.Harness, Model: projectOverride.Model, ReasoningEffort: projectOverride.ReasoningEffort,
 		},
+		RuntimeRevision: &expectedRevision,
 	}
 	if !reflect.DeepEqual(payload.RefreshedAgents[0], wantRefresh) {
 		t.Fatalf("runtime refresh transition = %+v, want %+v", payload.RefreshedAgents[0], wantRefresh)
+	}
+}
+
+func TestRetryExecutionAuditRetainsRuntimeRevisionAcrossRefreshes(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newRetryRuntimeTestEnv(t)
+	author, err := env.globals.Create(ctx, AgentDefInput{
+		Name: "revisioned-author", Harness: "harness", Model: "first-live", ReasoningEffort: "medium", Prompt: "Live prompt.",
+	})
+	if err != nil {
+		t.Fatalf("create author: %v", err)
+	}
+	snapshot := retryTestSnapshot(FlowNodeSnapshot{
+		Key: "author", Name: "Author", Kind: NodeAgent,
+		Config: FlowNodeSnapshotConfig{Agent: &AgentNodeSnapshotConfig{
+			Agent: AgentDefSnapshot{
+				ID: author.ID, Name: "Frozen author", Harness: "harness", Model: "frozen-model", ReasoningEffort: "low", Prompt: "Frozen prompt.",
+			},
+			Workspace: WorkspaceChange, Artifact: ArtifactChange,
+		}},
+	})
+	waiting := env.pauseWorkflowForRetry(t, snapshot, "author")
+	firstRevision := env.currentAgentRuntimeRevision(t)
+	if _, err := env.runs.RetryExecution(ctx, waiting.task.ID, ActorHuman, true); err != nil {
+		t.Fatalf("first runtime refresh: %v", err)
+	}
+
+	if _, err := env.globals.Update(ctx, author.ID, AgentDefInput{
+		Name: author.Name, Harness: "harness", Model: "second-live", ReasoningEffort: "high", Prompt: "Changed live prompt.",
+	}); err != nil {
+		t.Fatalf("update author before second refresh: %v", err)
+	}
+	secondRevision := env.currentAgentRuntimeRevision(t)
+	if secondRevision.InheritedAgentDefsRevision <= firstRevision.InheritedAgentDefsRevision {
+		t.Fatalf("second inherited revision = %d, want newer than first %d",
+			secondRevision.InheritedAgentDefsRevision, firstRevision.InheritedAgentDefsRevision)
+	}
+	if err := env.runs.PauseForExecutionError(ctx, waiting.runID, waiting.nodeRunID, WorkflowExecutionFailure{
+		Operation: "launch agent", NodeKind: NodeAgent, Message: "agent process failed again",
+	}); err != nil {
+		t.Fatalf("pause workflow for second refresh: %v", err)
+	}
+	retried, err := env.runs.RetryExecution(ctx, waiting.task.ID, ActorHuman, true)
+	if err != nil {
+		t.Fatalf("second runtime refresh: %v", err)
+	}
+
+	payloads := retryTransitionPayloads(t, env.runs, waiting.runID)
+	if len(payloads) != 2 {
+		t.Fatalf("retry audit payload count = %d, want 2", len(payloads))
+	}
+	wantRevisions := []AgentRuntimeRevision{firstRevision, secondRevision}
+	wantModels := []string{"first-live", "second-live"}
+	for i, payload := range payloads {
+		if len(payload.RefreshedAgents) != 1 {
+			t.Fatalf("retry audit payload %d refreshes = %+v, want one", i, payload.RefreshedAgents)
+		}
+		refresh := payload.RefreshedAgents[0]
+		if !reflect.DeepEqual(refresh.RuntimeRevision, &wantRevisions[i]) || refresh.New.Model != wantModels[i] {
+			t.Fatalf("retry audit payload %d = %+v, want model %q revision %+v", i, refresh, wantModels[i], wantRevisions[i])
+		}
+	}
+	refreshed := retried.Snapshot.Nodes[1].Config.Agent.Agent
+	if refreshed.RuntimeRevision == nil || !reflect.DeepEqual(*refreshed.RuntimeRevision, secondRevision) || refreshed.Model != "second-live" {
+		t.Fatalf("latest persisted runtime = %+v, want second model and revision %+v", refreshed, secondRevision)
 	}
 }
 
@@ -335,17 +423,21 @@ func TestRetryExecutionRefreshesReviewAndVerificationAgentsAndOnlyErroredChecks(
 			} else {
 				expectedAgents = expectedSnapshot.Nodes[1].Config.VerifyChange.Agents
 			}
+			expectedRevision := env.currentAgentRuntimeRevision(t)
 			expectedAgents[0].Agent.Harness = firstLive.Harness
 			expectedAgents[0].Agent.Model = firstLive.Model
 			expectedAgents[0].Agent.ReasoningEffort = firstLive.ReasoningEffort
+			expectedAgents[0].Agent.RuntimeRevision = &expectedRevision
 			expectedAgents[1].Agent.Harness = secondLive.Harness
 			expectedAgents[1].Agent.Model = secondLive.Model
 			expectedAgents[1].Agent.ReasoningEffort = secondLive.ReasoningEffort
+			expectedAgents[1].Agent.RuntimeRevision = &expectedRevision
 			if tc.kind == NodeChangeReview {
 				expectedAggregator := &expectedSnapshot.Nodes[1].Config.ChangeReview.Aggregator
 				expectedAggregator.Harness = aggregatorLive.Harness
 				expectedAggregator.Model = aggregatorLive.Model
 				expectedAggregator.ReasoningEffort = aggregatorLive.ReasoningEffort
+				expectedAggregator.RuntimeRevision = &expectedRevision
 			}
 
 			retried, err := env.runs.RetryExecution(ctx, waiting.task.ID, ActorHuman, true)
@@ -385,6 +477,139 @@ func TestRetryExecutionRefreshesReviewAndVerificationAgentsAndOnlyErroredChecks(
 				t.Fatalf("retry transition payload = %+v, want one reset and %d refreshed agents", payload, wantRefreshed)
 			}
 		})
+	}
+}
+
+func TestRetryExecutionRefreshUsesCoherentInheritedCatalogSnapshot(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newRetryRuntimeTestEnv(t)
+	first, err := env.globals.Create(ctx, AgentDefInput{
+		Name: "coherent-first", Harness: "harness", Model: "first-before", ReasoningEffort: "medium", Prompt: "Live first prompt.",
+	})
+	if err != nil {
+		t.Fatalf("create first agent: %v", err)
+	}
+	second, err := env.globals.Create(ctx, AgentDefInput{
+		Name: "coherent-second", Harness: "harness", Model: "second-before", ReasoningEffort: "medium", Prompt: "Live second prompt.",
+	})
+	if err != nil {
+		t.Fatalf("create second agent: %v", err)
+	}
+	frozenAgents := []SnapshotReviewAgent{
+		{Blocking: true, Agent: AgentDefSnapshot{ID: first.ID, Name: "Frozen first", Harness: "harness", Model: "first-frozen", ReasoningEffort: "low", Prompt: "Frozen first prompt."}},
+		{Blocking: true, Agent: AgentDefSnapshot{ID: second.ID, Name: "Frozen second", Harness: "harness", Model: "second-frozen", ReasoningEffort: "low", Prompt: "Frozen second prompt."}},
+	}
+	snapshot := retryTestSnapshot(FlowNodeSnapshot{
+		Key: "verify", Name: "Verify", Kind: NodeVerifyChange,
+		Config: FlowNodeSnapshotConfig{VerifyChange: &VerifyChangeNodeSnapshotConfig{Agents: frozenAgents}},
+	})
+	waiting := env.pauseWorkflowForRetry(t, snapshot, "verify")
+	pinnedRevision := env.currentAgentRuntimeRevision(t)
+	concurrentDB, err := sql.Open("sqlite3", env.globalPath)
+	if err != nil {
+		t.Fatalf("open independent inherited catalog connection: %v", err)
+	}
+	concurrentDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = concurrentDB.Close() })
+	if _, err := concurrentDB.ExecContext(ctx, "PRAGMA busy_timeout = 5000"); err != nil {
+		t.Fatalf("configure independent inherited catalog connection: %v", err)
+	}
+	concurrentGlobals := NewGlobalAgentDefService(concurrentDB)
+
+	firstResolved := make(chan struct{})
+	resumeRefresh := make(chan struct{}, 1)
+	defer func() {
+		select {
+		case resumeRefresh <- struct{}{}:
+		default:
+		}
+	}()
+	env.runs.refreshAgentRuntimeResolvedTestHook = func(index int) {
+		if index == 0 {
+			close(firstResolved)
+			<-resumeRefresh
+		}
+	}
+	type retryResult struct {
+		run WorkflowRun
+		err error
+	}
+	retried := make(chan retryResult, 1)
+	go func() {
+		run, retryErr := env.runs.RetryExecution(ctx, waiting.task.ID, ActorHuman, true)
+		retried <- retryResult{run: run, err: retryErr}
+	}()
+	select {
+	case <-firstResolved:
+	case result := <-retried:
+		t.Fatalf("retry finished before inherited update: run=%+v err=%v", result.run, result.err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first agent resolution")
+	}
+
+	updated := make(chan error, 1)
+	go func() {
+		_, updateErr := concurrentGlobals.Update(ctx, second.ID, AgentDefInput{
+			Name: second.Name, Harness: "harness", Model: "second-after", ReasoningEffort: "high", Prompt: "Changed live second prompt.",
+		})
+		updated <- updateErr
+	}()
+	select {
+	case updateErr := <-updated:
+		if updateErr != nil {
+			t.Fatalf("commit inherited agent update between resolutions: %v", updateErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out committing inherited update between agent resolutions")
+	}
+	resumeRefresh <- struct{}{}
+
+	var result retryResult
+	select {
+	case result = <-retried:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for retry after inherited update")
+	}
+	if result.err != nil {
+		t.Fatalf("retry after inherited update: %v", result.err)
+	}
+	if result.run.Snapshot.AgentDefsRevision != snapshot.AgentDefsRevision ||
+		result.run.Snapshot.InheritedAgentDefsRevision != snapshot.InheritedAgentDefsRevision {
+		t.Fatalf("original snapshot revisions changed = local %d inherited %d, want local %d inherited %d",
+			result.run.Snapshot.AgentDefsRevision, result.run.Snapshot.InheritedAgentDefsRevision,
+			snapshot.AgentDefsRevision, snapshot.InheritedAgentDefsRevision)
+	}
+	verify, ok := result.run.Snapshot.Node("verify")
+	if !ok || verify.Config.VerifyChange == nil || len(verify.Config.VerifyChange.Agents) != 2 {
+		t.Fatalf("persisted verification node = %+v, ok=%t", verify, ok)
+	}
+	gotAgents := verify.Config.VerifyChange.Agents
+	if gotAgents[0].Agent.Model != "first-before" || gotAgents[1].Agent.Model != "second-before" {
+		t.Fatalf("persisted runtime models = %q/%q, want coherent pre-update models first-before/second-before",
+			gotAgents[0].Agent.Model, gotAgents[1].Agent.Model)
+	}
+	for i, wantFrozen := range frozenAgents {
+		if !reflect.DeepEqual(gotAgents[i].Agent.RuntimeRevision, &pinnedRevision) {
+			t.Fatalf("agent %d runtime revision = %+v, want pinned %+v", i, gotAgents[i].Agent.RuntimeRevision, pinnedRevision)
+		}
+		if gotAgents[i].Agent.ID != wantFrozen.Agent.ID || gotAgents[i].Agent.Name != wantFrozen.Agent.Name || gotAgents[i].Agent.Prompt != wantFrozen.Agent.Prompt {
+			t.Fatalf("agent %d non-runtime fields changed = %+v, want id/name/prompt from %+v", i, gotAgents[i].Agent, wantFrozen.Agent)
+		}
+	}
+	currentRevision := env.currentAgentRuntimeRevision(t)
+	if currentRevision.InheritedAgentDefsRevision <= pinnedRevision.InheritedAgentDefsRevision {
+		t.Fatalf("inherited revision after update = %d, want newer than pinned %d",
+			currentRevision.InheritedAgentDefsRevision, pinnedRevision.InheritedAgentDefsRevision)
+	}
+	payload := retryTransitionPayload(t, env.runs, waiting.runID)
+	if len(payload.RefreshedAgents) != 2 || payload.RefreshedAgents[0].New.Model != "first-before" || payload.RefreshedAgents[1].New.Model != "second-before" {
+		t.Fatalf("retry audit payload = %+v, want two coherent pre-update refreshes", payload)
+	}
+	for i, refresh := range payload.RefreshedAgents {
+		if !reflect.DeepEqual(refresh.RuntimeRevision, &pinnedRevision) {
+			t.Fatalf("audit refresh %d revision = %+v, want pinned %+v", i, refresh.RuntimeRevision, pinnedRevision)
+		}
 	}
 }
 
@@ -498,11 +723,21 @@ type decodedRetryTransitionPayload struct {
 
 func retryTransitionPayload(t *testing.T, runs *WorkflowRunService, runID string) decodedRetryTransitionPayload {
 	t.Helper()
+	payloads := retryTransitionPayloads(t, runs, runID)
+	if len(payloads) == 0 {
+		t.Fatal("node_retry_requested transition not found")
+	}
+	return payloads[len(payloads)-1]
+}
+
+func retryTransitionPayloads(t *testing.T, runs *WorkflowRunService, runID string) []decodedRetryTransitionPayload {
+	t.Helper()
 	detail, err := runs.Detail(context.Background(), runID)
 	if err != nil {
 		t.Fatalf("load workflow detail: %v", err)
 	}
-	for i := len(detail.Transitions) - 1; i >= 0; i-- {
+	var payloads []decodedRetryTransitionPayload
+	for i := range detail.Transitions {
 		if detail.Transitions[i].EventKind != "node_retry_requested" {
 			continue
 		}
@@ -510,8 +745,7 @@ func retryTransitionPayload(t *testing.T, runs *WorkflowRunService, runID string
 		if err := json.Unmarshal(detail.Transitions[i].Payload, &payload); err != nil {
 			t.Fatalf("decode retry transition payload: %v", err)
 		}
-		return payload
+		payloads = append(payloads, payload)
 	}
-	t.Fatal("node_retry_requested transition not found")
-	return decodedRetryTransitionPayload{}
+	return payloads
 }

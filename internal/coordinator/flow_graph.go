@@ -550,6 +550,11 @@ func frozenAgentID(agent AgentDefSnapshot) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid frozen agent %q: %w", agent.ID, err)
 	}
+	if agent.RuntimeRevision != nil {
+		if agent.RuntimeRevision.AgentDefsRevision < 1 || agent.RuntimeRevision.InheritedAgentDefsRevision < 0 {
+			return "", fmt.Errorf("frozen agent %q has invalid runtime revision provenance", agent.ID)
+		}
+	}
 	canonical := AgentDefSnapshot{
 		ID:              agent.ID,
 		Name:            normalized.Name,
@@ -557,6 +562,7 @@ func frozenAgentID(agent AgentDefSnapshot) (string, error) {
 		Model:           normalized.Model,
 		ReasoningEffort: normalized.ReasoningEffort,
 		Prompt:          normalized.Prompt,
+		RuntimeRevision: agent.RuntimeRevision,
 	}
 	if agent != canonical {
 		return "", fmt.Errorf("frozen agent %q must use canonical values", agent.ID)

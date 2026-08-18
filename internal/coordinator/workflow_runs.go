@@ -163,9 +163,10 @@ type WorkflowAgentRuntimeSettings struct {
 }
 
 type WorkflowAgentRuntimeRefresh struct {
-	AgentID string                       `json:"agent_id"`
-	Old     WorkflowAgentRuntimeSettings `json:"old"`
-	New     WorkflowAgentRuntimeSettings `json:"new"`
+	AgentID         string                       `json:"agent_id"`
+	Old             WorkflowAgentRuntimeSettings `json:"old"`
+	New             WorkflowAgentRuntimeSettings `json:"new"`
+	RuntimeRevision *AgentRuntimeRevision        `json:"runtime_revision,omitempty"`
 }
 
 type WorkflowTransition struct {
@@ -260,6 +261,11 @@ type WorkflowRunService struct {
 	// takes the project writer lock. Lock-order tests hold that lock and verify the
 	// inherited catalog remains writable until scheduling acquires project first.
 	scheduleBeforeProjectLockTestHook func()
+
+	// refreshAgentRuntimeResolvedTestHook is invoked after each agent resolves
+	// from the retry refresh's pinned catalogs. Concurrency tests update the
+	// inherited catalog between agents to prove one refresh stays coherent.
+	refreshAgentRuntimeResolvedTestHook func(int)
 }
 
 func NewWorkflowRunService(db *sql.DB, flows *FlowService, tasks *TaskService) *WorkflowRunService {
@@ -1124,15 +1130,28 @@ func (s *WorkflowRunService) refreshNodeAgentRuntime(
 		}
 	}
 
+	resolver, err := s.flows.agentDefs.snapshotResolver(ctx, tx)
+	if err != nil {
+		return nil, fmt.Errorf("pin agent definitions for runtime refresh: %w", err)
+	}
+	defer resolver.Close()
+	provenance := AgentRuntimeRevision{
+		AgentDefsRevision:          resolver.localRevision,
+		InheritedAgentDefsRevision: resolver.inheritedRevision,
+	}
+
 	refreshed := make([]WorkflowAgentRuntimeRefresh, 0, len(agents))
-	for _, agent := range agents {
+	for i, agent := range agents {
 		agentID := strings.TrimSpace(agent.ID)
 		if agentID == "" {
 			return nil, fmt.Errorf("snapshot agent %q in node %q has no id", agent.Name, nodeKey)
 		}
-		definition, err := s.flows.agentDefs.resolveWith(ctx, tx, agentID)
+		definition, err := resolver.Resolve(ctx, agentID)
 		if err != nil {
 			return nil, fmt.Errorf("resolve snapshot agent %q in node %q: %w", agentID, nodeKey, err)
+		}
+		if s.refreshAgentRuntimeResolvedTestHook != nil {
+			s.refreshAgentRuntimeResolvedTestHook(i)
 		}
 		oldRuntime := workflowAgentRuntimeSettings(*agent)
 		newRuntime := WorkflowAgentRuntimeSettings{
@@ -1143,10 +1162,18 @@ func (s *WorkflowRunService) refreshNodeAgentRuntime(
 		agent.Harness = newRuntime.Harness
 		agent.Model = newRuntime.Model
 		agent.ReasoningEffort = newRuntime.ReasoningEffort
+		agent.RuntimeRevision = &AgentRuntimeRevision{
+			AgentDefsRevision:          provenance.AgentDefsRevision,
+			InheritedAgentDefsRevision: provenance.InheritedAgentDefsRevision,
+		}
 		refreshed = append(refreshed, WorkflowAgentRuntimeRefresh{
 			AgentID: agentID,
 			Old:     oldRuntime,
 			New:     newRuntime,
+			RuntimeRevision: &AgentRuntimeRevision{
+				AgentDefsRevision:          provenance.AgentDefsRevision,
+				InheritedAgentDefsRevision: provenance.InheritedAgentDefsRevision,
+			},
 		})
 	}
 	return refreshed, nil

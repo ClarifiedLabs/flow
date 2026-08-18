@@ -56,16 +56,25 @@ type FlowInput struct {
 	Edges            []FlowEdgeInput `json:"edges,omitempty"`
 }
 
+// AgentRuntimeRevision identifies the coherent local and inherited catalog
+// views used by an explicit retry-time runtime refresh. The flow snapshot's
+// top-level revisions continue to identify the original, fully frozen graph.
+type AgentRuntimeRevision struct {
+	AgentDefsRevision          int64 `json:"agent_defs_revision"`
+	InheritedAgentDefsRevision int64 `json:"inherited_agent_defs_revision,omitempty"`
+}
+
 // AgentDefSnapshot is the frozen copy of an agent definition carried in a
 // FlowSnapshot: everything a job needs to launch the agent, immune to later
 // edits of the live agent_defs row.
 type AgentDefSnapshot struct {
-	ID              string `json:"id,omitempty"`
-	Name            string `json:"name"`
-	Harness         string `json:"harness"`
-	Model           string `json:"model,omitempty"`
-	ReasoningEffort string `json:"reasoning_effort,omitempty"`
-	Prompt          string `json:"prompt,omitempty"`
+	ID              string                `json:"id,omitempty"`
+	Name            string                `json:"name"`
+	Harness         string                `json:"harness"`
+	Model           string                `json:"model,omitempty"`
+	ReasoningEffort string                `json:"reasoning_effort,omitempty"`
+	Prompt          string                `json:"prompt,omitempty"`
+	RuntimeRevision *AgentRuntimeRevision `json:"runtime_revision,omitempty"`
 }
 
 // ModelSelectionArgs renders the snapshot's model/effort choice as harness
