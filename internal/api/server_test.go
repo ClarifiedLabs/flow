@@ -3,7 +3,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -4432,6 +4434,120 @@ UPDATE jobs SET payload_json = json_set(payload_json, '$.blocking', json('false'
 		doJSONRequestAs(t, fixture.Server, "advisory-verifier-token", http.MethodPost, "/v2/threads/"+created.Thread.ID+"/"+action, threadCommentRequest{
 			Body: "Advisory jobs cannot " + action + ".", LeaseID: advisoryVerifier.Lease.ID,
 		}, http.StatusForbidden, nil)
+	}
+}
+
+func TestReviewFollowUpBatchAPIReceiptAndErrorMapping(t *testing.T) {
+	t.Parallel()
+	fixture := newTestFixture(t)
+	ctx := context.Background()
+	started := startAuthorSessionForStatusTest(t, fixture, "Review follow-up batch source")
+	if _, err := fixture.Sessions.UpdateChangeHead(ctx, started.Change.ID, "head-batch"); err != nil {
+		t.Fatalf("update change head: %v", err)
+	}
+	run, active, err := fixture.Bundle.WorkflowRuns.ActiveForTask(ctx, started.Session.TaskID)
+	if err != nil || !active || run.CurrentNodeRunID == "" {
+		t.Fatalf("active workflow run = %+v, active=%t, err=%v", run, active, err)
+	}
+	checkName := coordinator.ReviewAggregationCheckName + ".node." + run.CurrentNodeRunID
+	aggregation := startLiveCheckJobForTask(
+		t, fixture, "batch-token", "w-batch", started.Session.TaskID, started.Change.ID,
+		"head-batch", checkName, flowworker.RoleReviewer, flowworker.BucketPersistentAgent,
+	)
+	if _, err := fixture.Store.DB().ExecContext(ctx, `
+UPDATE jobs
+SET workflow_run_id = ?, node_run_id = ?,
+    payload_json = json_set(payload_json, '$.review_aggregation', json('true'))
+WHERE id = ?`, run.ID, run.CurrentNodeRunID, aggregation.Job.ID); err != nil {
+		t.Fatalf("bind aggregation job to workflow: %v", err)
+	}
+	required := true
+	if _, err := fixture.Checks.ReportCheck(ctx, coordinator.ReportCheckInput{
+		TaskID: started.Session.TaskID, Name: checkName, Kind: coordinator.CheckKindReviewer,
+		Required: &required, Verdict: coordinator.CheckPending, Details: coordinator.ReviewAggregationDetailsPrefix,
+	}); err != nil {
+		t.Fatalf("create aggregation check: %v", err)
+	}
+	if _, err := fixture.Store.DB().ExecContext(ctx,
+		`UPDATE checks SET source_job_id = ? WHERE task_id = ? AND name = ?`,
+		aggregation.Job.ID, started.Session.TaskID, checkName,
+	); err != nil {
+		t.Fatalf("bind aggregation check to job: %v", err)
+	}
+
+	const reportJSON = `{
+  "verdict": "satisfied",
+  "reason": "defer an independent issue",
+  "comments": [{
+    "sha": "head-batch",
+    "file": "legacy.go",
+    "line": 17,
+    "body": "The legacy path needs separate cleanup.",
+    "severity": "medium",
+    "introduced_by_change": false,
+    "requirement": "legacy behavior remains bounded",
+    "requirement_source": "explicit",
+    "finding_basis": "explicit_requirement",
+    "remediation_scope": "local",
+    "scope_rationale": "The issue predates and is independent of this change.",
+    "follow_up": "organize after approval",
+    "task_action": {
+      "action": "create_task",
+      "title": "Deferred API follow-up",
+      "body": "Clean up the bounded legacy path."
+    }
+  }]
+}`
+	digest := sha256.Sum256([]byte(reportJSON))
+	request := contract.ApplyReviewFollowUpBatchRequest{
+		LeaseID: aggregation.Lease.ID, ReportJSON: reportJSON, ReportSHA256: hex.EncodeToString(digest[:]),
+	}
+	path := "/v2/tasks/" + started.Session.TaskID + "/review-follow-up-batches"
+	var receipt contract.ApplyReviewFollowUpBatchResponse
+	doJSONRequestAs(t, fixture.Server, "batch-token", http.MethodPost, path, request, http.StatusOK, &receipt)
+	if !receipt.Accepted || receipt.Replayed || receipt.BatchID == "" || receipt.SetID == "" ||
+		receipt.SetRevision != 1 || receipt.SetState != coordinator.ReviewFollowUpSetOpen || receipt.ProposalCount != 1 {
+		t.Fatalf("batch receipt = %+v", receipt)
+	}
+	var storedReport string
+	if err := fixture.Store.DB().QueryRowContext(ctx,
+		`SELECT report_json FROM review_follow_up_batches WHERE id = ?`, receipt.BatchID,
+	).Scan(&storedReport); err != nil {
+		t.Fatalf("load stored report: %v", err)
+	}
+	if storedReport != reportJSON {
+		t.Fatalf("stored report differs from exact request string\ngot:  %q\nwant: %q", storedReport, reportJSON)
+	}
+
+	var apiError contract.ErrorResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost, path, request, http.StatusForbidden, &apiError)
+	if apiError.Error.Code != "forbidden" {
+		t.Fatalf("owner auth error = %+v", apiError)
+	}
+	if err := fixture.Credentials.EnsureToken(ctx, coordinator.CredentialInput{
+		Token: "other-batch-token", Scope: coordinator.TokenScopeWorker, Subject: "w-other-batch",
+	}); err != nil {
+		t.Fatalf("store other worker token: %v", err)
+	}
+	doJSONRequestAs(t, fixture.Server, "other-batch-token", http.MethodPost, path, request, http.StatusForbidden, &apiError)
+	if apiError.Error.Code != "forbidden" {
+		t.Fatalf("lease ownership error = %+v", apiError)
+	}
+
+	invalid := request
+	invalid.ReportSHA256 = strings.Repeat("0", sha256.Size*2)
+	doJSONRequestAs(t, fixture.Server, "batch-token", http.MethodPost, path, invalid, http.StatusBadRequest, &apiError)
+	if apiError.Error.Code != "review_follow_up_batch_invalid" {
+		t.Fatalf("validation error = %+v", apiError)
+	}
+
+	conflicting := request
+	conflicting.ReportJSON = strings.Replace(reportJSON, "Deferred API follow-up", "Different API follow-up", 1)
+	conflictingDigest := sha256.Sum256([]byte(conflicting.ReportJSON))
+	conflicting.ReportSHA256 = hex.EncodeToString(conflictingDigest[:])
+	doJSONRequestAs(t, fixture.Server, "batch-token", http.MethodPost, path, conflicting, http.StatusConflict, &apiError)
+	if apiError.Error.Code != "review_follow_up_batch_conflict" {
+		t.Fatalf("conflict error = %+v", apiError)
 	}
 }
 

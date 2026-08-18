@@ -803,6 +803,7 @@ func (c *Client) GetTaskRelations(id string) ([]coordinator.TaskRelation, error)
 	return response.Relations, nil
 }
 
+// ApplyReviewFollowUp calls the legacy singular follow-up endpoint.
 func (c *Client) ApplyReviewFollowUp(sourceTaskID string, input ApplyReviewFollowUpInput) (ApplyReviewFollowUpResult, error) {
 	var response contract.ApplyReviewFollowUpResponse
 	if err := c.do(
@@ -819,6 +820,21 @@ func (c *Client) ApplyReviewFollowUp(sourceTaskID string, input ApplyReviewFollo
 		Disposition: response.Disposition,
 		Reused:      response.Disposition == "existing",
 	}, nil
+}
+
+func (c *Client) ApplyReviewFollowUpBatch(ctx context.Context, taskID string, input ApplyReviewFollowUpBatchInput) (ApplyReviewFollowUpBatchResult, error) {
+	var response contract.ApplyReviewFollowUpBatchResponse
+	if err := c.doContext(
+		ctx,
+		http.MethodPost,
+		c.tasksPath("/"+url.PathEscape(taskID))+"/review-follow-up-batches",
+		contract.ApplyReviewFollowUpBatchRequest(input),
+		nil,
+		&response,
+	); err != nil {
+		return ApplyReviewFollowUpBatchResult{}, err
+	}
+	return response, nil
 }
 
 func (c *Client) MergeTask(id string) (coordinator.MergeResult, error) {
@@ -2427,6 +2443,10 @@ type ApplyReviewFollowUpResult struct {
 	// (disposition "existing") instead of creating a new one.
 	Reused bool
 }
+
+type ApplyReviewFollowUpBatchInput = contract.ApplyReviewFollowUpBatchRequest
+
+type ApplyReviewFollowUpBatchResult = contract.ApplyReviewFollowUpBatchResponse
 
 type ProvisionerAssignment = contract.ProvisionerAssignment
 

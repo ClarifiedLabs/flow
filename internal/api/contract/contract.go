@@ -224,6 +224,7 @@ type ReviewFollowUpTaskAction struct {
 	TaskID string `json:"task_id,omitempty"`
 }
 
+// ApplyReviewFollowUpRequest is the legacy singular follow-up contract.
 type ApplyReviewFollowUpRequest struct {
 	LeaseID    string                   `json:"lease_id"`
 	Finding    ReviewFollowUpFinding    `json:"finding"`
@@ -234,6 +235,16 @@ type ApplyReviewFollowUpResponse struct {
 	Task        coordinator.Task `json:"task"`
 	Disposition string           `json:"disposition"`
 }
+
+type ApplyReviewFollowUpBatchRequest struct {
+	LeaseID      string `json:"lease_id"`
+	ReportJSON   string `json:"report_json"`
+	ReportSHA256 string `json:"report_sha256"`
+}
+
+// ApplyReviewFollowUpBatchResponse is the durable acceptance receipt returned
+// for a complete review aggregation report.
+type ApplyReviewFollowUpBatchResponse = coordinator.ApplyReviewFollowUpBatchResult
 
 type RegisterWorkerRequest struct {
 	ID                  string              `json:"id"`

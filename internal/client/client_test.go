@@ -88,6 +88,52 @@ func TestHistoryClientListsAndPublishesWithTypedContracts(t *testing.T) {
 	}
 }
 
+func TestApplyReviewFollowUpBatch(t *testing.T) {
+	t.Parallel()
+	const reportJSON = "{\n  \"verdict\": \"satisfied\",\n  \"reason\": \"exact report bytes\"\n}"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v2/tasks/t-review%2Fsource/review-follow-up-batches", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("auth header = %q", got)
+		}
+		var request contract.ApplyReviewFollowUpBatchRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if request.LeaseID != "l-review" || request.ReportJSON != reportJSON || request.ReportSHA256 != "digest" {
+			t.Fatalf("request = %+v", request)
+		}
+		writeJSON(t, w, http.StatusOK, contract.ApplyReviewFollowUpBatchResponse{
+			Accepted: true, BatchID: "rfub-client", SetID: "rfus-client", SetRevision: 2,
+			SetState: coordinator.ReviewFollowUpSetOpen, ProposalCount: 3,
+		})
+	})
+	client := newClientForTest(t, mux)
+
+	receipt, err := client.ApplyReviewFollowUpBatch(context.Background(), "t-review/source", ApplyReviewFollowUpBatchInput{
+		LeaseID: "l-review", ReportJSON: reportJSON, ReportSHA256: "digest",
+	})
+	if err != nil {
+		t.Fatalf("apply batch: %v", err)
+	}
+	if !receipt.Accepted || receipt.BatchID != "rfub-client" || receipt.SetID != "rfus-client" ||
+		receipt.SetRevision != 2 || receipt.SetState != coordinator.ReviewFollowUpSetOpen || receipt.ProposalCount != 3 {
+		t.Fatalf("receipt = %+v", receipt)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = client.ApplyReviewFollowUpBatch(canceled, "t-review/source", ApplyReviewFollowUpBatchInput{
+		LeaseID: "l-review", ReportJSON: reportJSON, ReportSHA256: "digest",
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled request error = %v, want context.Canceled", err)
+	}
+}
+
 func TestListTaskAttachments(t *testing.T) {
 	t.Parallel()
 	want := []coordinator.TaskAttachment{

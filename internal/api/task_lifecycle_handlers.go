@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ClarifiedLabs/flow/internal/api/contract"
+	"github.com/ClarifiedLabs/flow/internal/checkverdict"
 	"github.com/ClarifiedLabs/flow/internal/coordinator"
 	"github.com/ClarifiedLabs/flow/internal/sqlitex"
 	flowworker "github.com/ClarifiedLabs/flow/internal/worker"
@@ -255,6 +258,18 @@ func (s *projectServer) handleTaskPath(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
+	if len(parts) == 2 && parts[1] == "review-follow-up-batches" {
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		if !requireScope(w, principal, "review follow-up batch requires a worker token", coordinator.TokenScopeWorker) {
+			return
+		}
+		s.handleApplyReviewFollowUpBatch(w, r, principal, taskID)
+		return
+	}
+
+	// Legacy singular endpoint retained for older workers.
 	if len(parts) == 2 && parts[1] == "review-follow-ups" {
 		if !requireMethod(w, r, http.MethodPost) {
 			return
@@ -839,6 +854,54 @@ func (s *projectServer) handleTaskRelations(w http.ResponseWriter, r *http.Reque
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+func (s *projectServer) handleApplyReviewFollowUpBatch(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
+	var request contract.ApplyReviewFollowUpBatchRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	if err := validateApplyReviewFollowUpBatchRequest(request); err != nil {
+		writeError(w, http.StatusBadRequest, "review_follow_up_batch_invalid", err.Error())
+		return
+	}
+	result, err := s.tasks.ApplyReviewFollowUpBatch(r.Context(), coordinator.ApplyReviewFollowUpBatchInput{
+		SourceTaskID: taskID,
+		LeaseID:      request.LeaseID,
+		WorkerID:     principal.Subject,
+		ReportJSON:   []byte(request.ReportJSON),
+		ReportSHA256: request.ReportSHA256,
+	})
+	switch {
+	case errors.Is(err, coordinator.ErrReviewFollowUpBatchForbidden):
+		writeError(w, http.StatusForbidden, "forbidden", err.Error())
+	case errors.Is(err, coordinator.ErrReviewFollowUpBatchConflict):
+		writeError(w, http.StatusConflict, "review_follow_up_batch_conflict", err.Error())
+	case err != nil:
+		writeInternalError(w, r, "apply_review_follow_up_batch_failed", err)
+	default:
+		writeJSON(w, http.StatusOK, contract.ApplyReviewFollowUpBatchResponse(result))
+	}
+}
+
+func validateApplyReviewFollowUpBatchRequest(request contract.ApplyReviewFollowUpBatchRequest) error {
+	if request.ReportJSON == "" {
+		return errors.New("review follow-up report_json is required")
+	}
+	actualDigest := sha256.Sum256([]byte(request.ReportJSON))
+	reportSHA256 := strings.TrimSpace(request.ReportSHA256)
+	if len(reportSHA256) != sha256.Size*2 || reportSHA256 != hex.EncodeToString(actualDigest[:]) {
+		return errors.New("review follow-up report_sha256 does not match report_json")
+	}
+	validated, err := checkverdict.Validate([]byte(request.ReportJSON), checkverdict.ModeReviewAggregation)
+	if err != nil {
+		return fmt.Errorf("validate review aggregation report: %w", err)
+	}
+	if validated.DecisionRequest != nil {
+		return errors.New("review aggregation decision_request report cannot create a follow-up batch")
+	}
+	return nil
 }
 
 func (s *projectServer) handleApplyReviewFollowUp(w http.ResponseWriter, r *http.Request, principal coordinator.Principal, taskID string) {
