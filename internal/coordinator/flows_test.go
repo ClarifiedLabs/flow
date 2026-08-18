@@ -572,7 +572,7 @@ func TestReviewAggregationBlocksApprovalWhenAnySourceIsBlocking(t *testing.T) {
 func TestAgentDefCRUD(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	_, defs := newFlowTestServices(t)
+	flows, defs := newFlowTestServices(t)
 
 	created, err := defs.Create(ctx, AgentDefInput{
 		Name:            "opus-reviewer",
@@ -626,8 +626,28 @@ func TestAgentDefCRUD(t *testing.T) {
 		t.Fatalf("GetByName = %+v, %v", byName, err)
 	}
 
+	referencingFlow, err := flows.Create(ctx, FlowInput{
+		Name: "agent-def-delete-reference", StartNode: "review",
+		Nodes: []FlowNodeInput{
+			{Key: "review", Name: "Review", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: created.ID, Workspace: WorkspaceChange, Artifact: ArtifactChange}}},
+			{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+		},
+		Edges: []FlowEdgeInput{{From: "review", Outcome: "completed", To: "done"}},
+	})
+	if err != nil {
+		t.Fatalf("create referencing flow: %v", err)
+	}
+	if err := defs.Delete(ctx, created.ID); !errors.Is(err, ErrAgentDefInUse) {
+		t.Fatalf("Delete referenced definition = %v, want ErrAgentDefInUse", err)
+	}
+	if err := flows.Delete(ctx, referencingFlow.ID); err != nil {
+		t.Fatalf("delete referencing flow: %v", err)
+	}
 	if err := defs.Delete(ctx, created.ID); err != nil {
 		t.Fatalf("Delete: %v", err)
+	}
+	if err := defs.Delete(ctx, created.ID); !errors.Is(err, ErrAgentDefNotFound) {
+		t.Fatalf("second Delete = %v, want ErrAgentDefNotFound", err)
 	}
 	if _, err := defs.Get(ctx, created.ID); !errors.Is(err, ErrAgentDefNotFound) {
 		t.Fatalf("Get after delete = %v, want ErrAgentDefNotFound", err)

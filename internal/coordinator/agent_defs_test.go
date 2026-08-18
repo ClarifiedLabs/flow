@@ -2,12 +2,21 @@ package coordinator
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"fmt"
+	"io"
 	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	flowdb "github.com/ClarifiedLabs/flow/internal/db"
 	flowharness "github.com/ClarifiedLabs/flow/internal/harness"
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 func TestProjectAgentDefsInheritGlobalsAndOverrideByName(t *testing.T) {
@@ -262,5 +271,185 @@ func TestFlowResolvesProjectOverrideForGlobalAgentReference(t *testing.T) {
 	}
 	if node.Config.Agent.Agent.Harness != "harness" || node.Config.Agent.Agent.Model != "anthropic:claude-sonnet-4-6" || node.Config.Agent.Agent.Prompt != "project" {
 		t.Fatalf("snapshot agent = %+v, want project override", node.Config.Agent.Agent)
+	}
+}
+
+type agentDefDeleteRaceGate struct {
+	scanArmed   atomic.Bool
+	scanEntered chan struct{}
+	scanRelease chan struct{}
+	releaseOnce sync.Once
+}
+
+func newAgentDefDeleteRaceGate() *agentDefDeleteRaceGate {
+	return &agentDefDeleteRaceGate{
+		scanEntered: make(chan struct{}),
+		scanRelease: make(chan struct{}),
+	}
+}
+
+func (g *agentDefDeleteRaceGate) releaseScan() {
+	g.releaseOnce.Do(func() { close(g.scanRelease) })
+}
+
+type agentDefDeleteRaceDriver struct {
+	driver.Driver
+	gate *agentDefDeleteRaceGate
+}
+
+func (d agentDefDeleteRaceDriver) Open(name string) (driver.Conn, error) {
+	conn, err := d.Driver.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return agentDefDeleteRaceConn{Conn: conn, gate: d.gate}, nil
+}
+
+type agentDefDeleteRaceConn struct {
+	driver.Conn
+	gate *agentDefDeleteRaceGate
+}
+
+func (c agentDefDeleteRaceConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	queryer, ok := c.Conn.(driver.QueryerContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+	rows, err := queryer.QueryContext(ctx, query, args)
+	if err != nil || !strings.Contains(query, "SELECT config_json FROM flow_nodes") {
+		return rows, err
+	}
+	return agentDefDeleteRaceRows{Rows: rows, gate: c.gate}, nil
+}
+
+type agentDefDeleteRaceRows struct {
+	driver.Rows
+	gate *agentDefDeleteRaceGate
+}
+
+func (r agentDefDeleteRaceRows) Next(dest []driver.Value) error {
+	err := r.Rows.Next(dest)
+	if errors.Is(err, io.EOF) && r.gate.scanArmed.CompareAndSwap(true, false) {
+		close(r.gate.scanEntered)
+		<-r.gate.scanRelease
+	}
+	return err
+}
+
+var agentDefDeleteRaceDriverSequence atomic.Int64
+
+func registerAgentDefDeleteRaceDriver(gate *agentDefDeleteRaceGate) string {
+	name := fmt.Sprintf("sqlite3-agent-def-delete-race-%d", agentDefDeleteRaceDriverSequence.Add(1))
+	sql.Register(name, agentDefDeleteRaceDriver{Driver: &sqlite3.SQLiteDriver{}, gate: gate})
+	return name
+}
+
+func TestProjectAgentDefDeleteSerializesConcurrentFlowReferenceWrites(t *testing.T) {
+	for _, operation := range []string{"create", "update"} {
+		t.Run(operation, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			gate := newAgentDefDeleteRaceGate()
+			defer gate.releaseScan()
+			path := filepath.Join(t.TempDir(), "project.db")
+
+			deleteStore, err := flowdb.OpenWithDriver(ctx, registerAgentDefDeleteRaceDriver(gate), path)
+			if err != nil {
+				t.Fatalf("open deleting database handle: %v", err)
+			}
+			t.Cleanup(func() { _ = deleteStore.Close() })
+			writeStore, err := flowdb.Open(ctx, path)
+			if err != nil {
+				t.Fatalf("open flow-writing database handle: %v", err)
+			}
+			t.Cleanup(func() { _ = writeStore.Close() })
+
+			defs := NewAgentDefService(deleteStore.DB())
+			agent, err := defs.Create(ctx, AgentDefInput{Name: "concurrent-agent", Harness: "harness"})
+			if err != nil {
+				t.Fatalf("create agent definition: %v", err)
+			}
+			flows := NewFlowServiceWithAgentDefs(writeStore.DB(), NewAgentDefService(writeStore.DB()))
+			flowName := "concurrent-" + operation
+			var existing Flow
+			if operation == "update" {
+				existing, err = flows.Create(ctx, FlowInput{
+					Name: flowName, StartNode: "done",
+					Nodes: []FlowNodeInput{{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}}},
+				})
+				if err != nil {
+					t.Fatalf("create flow to update: %v", err)
+				}
+			}
+
+			writeFlow := func() error {
+				input := agentDefDeleteRaceFlowInput(flowName, agent.ID)
+				if operation == "update" {
+					_, err := flows.Update(ctx, existing.ID, input)
+					return err
+				}
+				_, err := flows.Create(ctx, input)
+				return err
+			}
+			if _, err := writeStore.DB().ExecContext(ctx, "PRAGMA busy_timeout = 0"); err != nil {
+				t.Fatalf("disable writer busy timeout: %v", err)
+			}
+
+			gate.scanArmed.Store(true)
+			deleteDone := make(chan error, 1)
+			go func() { deleteDone <- defs.Delete(ctx, agent.ID) }()
+			waitForAgentDefDeleteRaceSignal(t, ctx, gate.scanEntered, "deletion reference scan")
+
+			writeErr := writeFlow()
+			var sqliteErr sqlite3.Error
+			if !errors.As(writeErr, &sqliteErr) || sqliteErr.Code != sqlite3.ErrBusy {
+				t.Fatalf("concurrent flow %s error = %v, want SQLite busy while deletion holds the writer lock", operation, writeErr)
+			}
+
+			gate.releaseScan()
+			if err := waitForAgentDefDeleteRaceResult(t, ctx, deleteDone, "delete agent definition"); err != nil {
+				t.Fatalf("delete agent definition: %v", err)
+			}
+			writeErr = writeFlow()
+			if writeErr == nil || !strings.Contains(writeErr.Error(), "references unknown agent definition") {
+				t.Fatalf("flow %s after deletion error = %v, want unknown agent definition", operation, writeErr)
+			}
+			if referenced, err := NewAgentDefService(writeStore.DB()).IsReferenced(ctx, agent.ID); err != nil {
+				t.Fatalf("inspect references after race: %v", err)
+			} else if referenced {
+				t.Fatal("concurrent flow write orphaned the deleted agent definition")
+			}
+		})
+	}
+}
+
+func agentDefDeleteRaceFlowInput(name, agentDefID string) FlowInput {
+	return FlowInput{
+		Name: name, StartNode: "work",
+		Nodes: []FlowNodeInput{
+			{Key: "work", Name: "Work", Kind: NodeAgent, Config: FlowNodeConfig{Agent: &AgentNodeConfig{AgentDefID: agentDefID, Workspace: WorkspaceChange, Artifact: ArtifactChange}}},
+			{Key: "done", Name: "Done", Kind: NodeTerminal, Config: FlowNodeConfig{Terminal: &TerminalNodeConfig{Resolution: ResolutionCompleted}}},
+		},
+		Edges: []FlowEdgeInput{{From: "work", Outcome: "completed", To: "done"}},
+	}
+}
+
+func waitForAgentDefDeleteRaceSignal(t *testing.T, ctx context.Context, signal <-chan struct{}, operation string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-ctx.Done():
+		t.Fatalf("wait for %s: %v", operation, ctx.Err())
+	}
+}
+
+func waitForAgentDefDeleteRaceResult(t *testing.T, ctx context.Context, result <-chan error, operation string) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		t.Fatalf("wait for %s: %v", operation, ctx.Err())
+		return nil
 	}
 }

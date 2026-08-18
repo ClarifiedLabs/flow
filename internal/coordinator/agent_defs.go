@@ -283,11 +283,16 @@ WHERE id = ?`,
 
 func (s *AgentDefService) Delete(ctx context.Context, id string) error {
 	id = strings.TrimSpace(id)
-	if _, err := s.getLocal(ctx, "id = ?", id); err != nil {
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := getAgentDefFrom(ctx, tx, "id = ?", id); err != nil {
 		return err
 	}
 	if s.projectOwned {
-		inUse, err := s.IsReferenced(ctx, id)
+		inUse, err := isAgentDefReferencedWith(ctx, tx, id)
 		if err != nil {
 			return err
 		}
@@ -295,11 +300,6 @@ func (s *AgentDefService) Delete(ctx context.Context, id string) error {
 			return ErrAgentDefInUse
 		}
 	}
-	tx, err := sqlitex.BeginImmediate(ctx, s.db)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `DELETE FROM agent_defs WHERE id = ?`, id)
 	if err != nil {
 		if isForeignKeyViolation(err) {
@@ -327,7 +327,15 @@ func (s *AgentDefService) IsReferenced(ctx context.Context, id string) (bool, er
 	if !s.projectOwned {
 		return false, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT config_json FROM flow_nodes`)
+	return isAgentDefReferencedWith(ctx, s.db, id)
+}
+
+type agentDefReferenceQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func isAgentDefReferencedWith(ctx context.Context, queryer agentDefReferenceQueryer, id string) (bool, error) {
+	rows, err := queryer.QueryContext(ctx, `SELECT config_json FROM flow_nodes`)
 	if err != nil {
 		return false, fmt.Errorf("inspect workflow agent references: %w", err)
 	}
