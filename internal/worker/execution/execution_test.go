@@ -1717,8 +1717,8 @@ func TestRunJobFlowAgentCheckRejectsProcessExitWithoutSeal(t *testing.T) {
 	if result.FinalState != JobFailed || result.Err == nil || !strings.Contains(result.Err.Error(), "exited before running flow complete") {
 		t.Fatalf("RunJob() result = %+v", result)
 	}
-	if result.VerdictReport != nil {
-		t.Fatalf("RunJob() captured unsealed verdict = %+v", result.VerdictReport)
+	if result.VerdictReport != nil || result.VerdictBytes != nil || result.VerdictSHA256 != "" {
+		t.Fatalf("RunJob() captured unsealed verdict: report=%+v bytes=%q digest=%q", result.VerdictReport, result.VerdictBytes, result.VerdictSHA256)
 	}
 }
 
@@ -1732,11 +1732,13 @@ func TestRunJobFlowAgentCheckFinishesFromSealWithoutEntrypointExit(t *testing.T)
 	if err := os.MkdirAll(filepath.Dir(verdictPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(verdictPath, []byte(`{"verdict":"satisfied","reason":"sealed result"}`), 0o600); err != nil {
+	verdictBytes := []byte("{\n  \"verdict\": \"satisfied\",\n  \"reason\": \"sealed result\"\n}\n")
+	if err := os.WriteFile(verdictPath, verdictBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	sealContext := checkverdict.Context{JobID: jobID, CheckName: "review", Mode: checkverdict.ModeReview}
-	if _, err := checkverdict.SealVerdict(verdictPath, completionFilePath(workDir, jobID), sealContext); err != nil {
+	sealedVerdict, err := checkverdict.SealVerdict(verdictPath, completionFilePath(workDir, jobID), sealContext)
+	if err != nil {
 		t.Fatal(err)
 	}
 	input := RunInput{
@@ -1766,6 +1768,16 @@ func TestRunJobFlowAgentCheckFinishesFromSealWithoutEntrypointExit(t *testing.T)
 	}
 	if result.VerdictReport == nil || result.VerdictReport.Verdict != "satisfied" || result.VerdictReport.Reason != "sealed result" {
 		t.Fatalf("RunJob() captured report = %+v", result.VerdictReport)
+	}
+
+	if err := os.WriteFile(verdictPath, []byte(`{"verdict":"blocked","reason":"edited after capture"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(result.VerdictBytes, verdictBytes) {
+		t.Fatalf("RunJob() captured bytes = %q after verdict edit, want exact sealed bytes %q", result.VerdictBytes, verdictBytes)
+	}
+	if result.VerdictSHA256 != sealedVerdict.Digest {
+		t.Fatalf("RunJob() captured digest = %q after verdict edit, want %q", result.VerdictSHA256, sealedVerdict.Digest)
 	}
 }
 

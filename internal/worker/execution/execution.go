@@ -197,6 +197,11 @@ type RunResult struct {
 	// completion seal. Flow-owned interactive checks use this captured report
 	// instead of reopening the verdict file after the harness is stopped.
 	VerdictReport *VerdictReport
+	// VerdictBytes and VerdictSHA256 are an immutable snapshot of the exact
+	// verdict contents authenticated by the completion seal. VerdictBytes is
+	// detached from the validator's buffer before capture.
+	VerdictBytes  []byte
+	VerdictSHA256 string
 	// TranscriptPath is the local file the worker piped tmux pane output to.
 	// Empty when transcript capture could not be started. The caller uploads
 	// its tail to the coordinator after the job completes.
@@ -377,6 +382,8 @@ func RunJob(ctx context.Context, input RunInput) RunResult {
 		Payload:            payload,
 		VerdictFilePath:    verdictFilePath(input.Config.WorkDir, input.Job.ID),
 		VerdictReport:      completionCapture.report,
+		VerdictBytes:       append([]byte(nil), completionCapture.bytes...),
+		VerdictSHA256:      completionCapture.digest,
 		TranscriptPath:     transcriptFile,
 		HistoryPreparation: historyPreparation,
 		Err:                err,
@@ -863,6 +870,8 @@ type tmuxInput struct {
 
 type checkCompletionCapture struct {
 	report *VerdictReport
+	bytes  []byte
+	digest string
 }
 
 func runEntrypointInTmux(ctx context.Context, input tmuxInput) (int, error) {
@@ -1635,6 +1644,8 @@ func (w *checkCompletionWatcher) poll() (bool, error) {
 	if w.capture != nil {
 		report := validated.Report
 		w.capture.report = &report
+		w.capture.bytes = append([]byte(nil), validated.Bytes...)
+		w.capture.digest = validated.Digest
 	}
 	return true, nil
 }
