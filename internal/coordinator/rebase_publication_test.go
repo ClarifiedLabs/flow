@@ -186,16 +186,28 @@ func TestRebaseRecoverySpooledEventFinalizes(t *testing.T) {
 	}
 	defer os.RemoveAll(rebased.Worktree)
 	rebase := seedRunningRebaseRow(t, env, feature, oldTip, 0)
+	if _, err := env.fixture.store.DB().ExecContext(ctx, `
+UPDATE feature_rebases SET task_id = NULL WHERE id = ?`, rebase.ID); err != nil {
+		t.Fatalf("make running rebase task-less: %v", err)
+	}
+	rebase, found, err := env.features.RunningRebase(ctx, feature.ID)
+	if err != nil || !found || rebase.TaskID != "" {
+		t.Fatalf("load task-less running rebase: %+v, %v, %v", rebase, found, err)
+	}
 	seedPublicationIntent(t, env, rebase, rebased.HeadSHA)
 	if err := flowgit.PushBranchCompareAndSwap(ctx, rebased.Worktree, "refs/heads/"+feature.Branch, oldTip); err != nil {
 		t.Fatalf("push rebased head: %v", err)
 	}
 	appendSpooledEvent(t, env.exchangePath(), "refs/heads/"+feature.Branch, oldTip, rebased.HeadSHA, "coordinator")
 
-	// The retry must drain the spool and finalize with the event as evidence.
-	_, err = env.features.RebaseOnMain(ctx, feature)
+	// The retry must drain the spool, finalize with the event as evidence, and
+	// report the published intent tip rather than the running row's empty tip.
+	result, err := env.features.RebaseOnMain(ctx, feature)
 	if err != nil {
 		t.Fatalf("retry rebase: %v", err)
+	}
+	if result.Kind != RebaseRebased || result.NewTipSHA != rebased.HeadSHA {
+		t.Fatalf("retry result = %+v, want rebased tip %s", result, rebased.HeadSHA)
 	}
 	rebases, err := env.features.ListRebases(ctx, feature.ID)
 	if err != nil {

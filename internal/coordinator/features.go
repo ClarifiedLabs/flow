@@ -1138,7 +1138,11 @@ func (s *FeatureService) RebaseOnMain(ctx context.Context, feature Feature, rest
 		}
 		switch outcome {
 		case RebasePublicationFinalized:
-			return RebaseStartResult{Kind: RebaseRebased, Feature: feature, NewTipSHA: running.NewTipSHA}, nil
+			finalized, err := s.runningRebaseByID(ctx, running.ID)
+			if err != nil {
+				return RebaseStartResult{}, err
+			}
+			return RebaseStartResult{Kind: RebaseRebased, Feature: feature, NewTipSHA: finalized.NewTipSHA}, nil
 		case RebasePublicationStale, RebasePublicationFailed:
 			// The row is closed (stale/failed) and, for stale, a redo row is open
 			// against the current tip. A failed rebase is retryable from here; a
