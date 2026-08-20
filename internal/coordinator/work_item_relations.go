@@ -499,10 +499,12 @@ SELECT EXISTS(SELECT 1 FROM reachable WHERE id = ?)`, startID, goalID).Scan(&fou
 }
 
 // preserveActiveRebaseBlockerTx prevents user-facing relation APIs from
-// removing the system-owned dependency gate for a rebase that is still
-// running. Callers hold the project writer lock across this check and the
-// delete, so rebase finalization and relation removal have one serialization
-// order: cleanup is allowed only after the running row has closed.
+// removing an exact dependency gate for a rebase that is still running. The
+// edge's provenance is deliberately ignored: legacy binaries could leave a
+// human-owned edge serving as the active gate. Callers hold the project writer
+// lock across this check and the delete, so rebase finalization and relation
+// removal have one serialization order: cleanup is allowed only after the
+// running row has closed.
 func preserveActiveRebaseBlockerTx(ctx context.Context, q workItemRelationQuerier, sourceID, targetID string, kind RelationKind) error {
 	if kind != RelationBlocks {
 		return nil
@@ -516,9 +518,8 @@ SELECT EXISTS (
 	WHERE r.source_item_id = ?
 		AND r.target_item_id = ?
 		AND r.kind = 'blocks'
-		AND r.created_by = ?
 		AND fr.state = 'running'
-)`, sourceID, targetID, string(ActorSystem)).Scan(&protected); err != nil {
+)`, sourceID, targetID).Scan(&protected); err != nil {
 		return fmt.Errorf("check active feature rebase blocker: %w", err)
 	}
 	if protected != 0 {

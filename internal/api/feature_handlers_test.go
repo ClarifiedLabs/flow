@@ -61,6 +61,149 @@ func apiRefTip(t *testing.T, exchangePath, branch string) string {
 	return apiGitOutput(t, "", "--git-dir", exchangePath, "rev-parse", "refs/heads/"+branch)
 }
 
+func TestLegacyActiveRebaseBlockerSurvivesRelationDeletionAttempts(t *testing.T) {
+	t.Parallel()
+	fixture := newTestFixture(t)
+	exchangePath := fixture.Project.ExchangePath
+	makeExchangeHooksInert(t, exchangePath)
+	mainSHA := seedAPIMain(t, exchangePath)
+	ctx := context.Background()
+
+	feature, err := fixture.Bundle.Features.Create(ctx, coordinator.CreateFeatureInput{Title: "legacy rebase blocker"})
+	if err != nil {
+		t.Fatalf("create feature: %v", err)
+	}
+	target, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "scheduled target", FeatureID: &feature.ID})
+	if err != nil {
+		t.Fatalf("create target task: %v", err)
+	}
+	rebaseTask, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{
+		Title: "legacy rebase task", FeatureID: &feature.ID, CreatedBy: coordinator.ActorSystem,
+	})
+	if err != nil {
+		t.Fatalf("create rebase task: %v", err)
+	}
+
+	// An older binary persisted a running rebase whose exact blocker retained
+	// the provenance of a human relation that predated BlockOnRebase's adoption
+	// path.
+	if err := fixture.Tasks.LinkTasks(ctx, rebaseTask.ID, target.ID, coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
+		t.Fatalf("seed legacy human blocker: %v", err)
+	}
+	if _, err := fixture.DB.ExecContext(ctx, `
+INSERT INTO feature_rebases (
+	id, feature_id, task_id, old_tip_sha, target_base, target_base_sha,
+	new_tip_sha, state, created_at, restrict_blocked_to
+) VALUES ('rb-legacy-upgrade', ?, ?, ?, 'main', ?, '', 'running', '2026-01-01T00:00:00Z', '')`,
+		feature.ID, rebaseTask.ID, mainSHA, mainSHA); err != nil {
+		t.Fatalf("seed running legacy rebase: %v", err)
+	}
+
+	// Schedule while the dependency gate exists so no initial node is created.
+	// The current scheduler adopts the edge as system-owned, so restore the stale
+	// legacy provenance afterward to model opening the persisted database after
+	// upgrade, when the adoption path does not necessarily rerun.
+	var scheduled workflowRunResponse
+	doJSONRequest(t, fixture.Server, http.MethodPost, "/v2/tasks/"+target.ID+"/schedule", nil, http.StatusOK, &scheduled)
+	if scheduled.Run.State != coordinator.WorkflowRunScheduled || scheduled.Run.CurrentNodeRunID != "" {
+		t.Fatalf("scheduled target run = %+v, want scheduled with no current node", scheduled.Run)
+	}
+	if _, err := fixture.DB.ExecContext(ctx, `
+UPDATE work_item_relations SET created_by = 'human'
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, rebaseTask.ID, target.ID); err != nil {
+		t.Fatalf("restore stale blocker provenance: %v", err)
+	}
+	var createdBy string
+	if err := fixture.DB.QueryRowContext(ctx, `
+SELECT created_by FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`,
+		rebaseTask.ID, target.ID).Scan(&createdBy); err != nil {
+		t.Fatalf("read legacy blocker provenance: %v", err)
+	}
+	if createdBy != string(coordinator.ActorHuman) {
+		t.Fatalf("legacy blocker created_by = %q, want %q", createdBy, coordinator.ActorHuman)
+	}
+
+	assertNoInitialNode := func(after string) {
+		t.Helper()
+		if err := fixture.Bundle.WorkflowExecutor.Advance(ctx, scheduled.Run.ID); err != nil {
+			t.Fatalf("advance target workflow after %s: %v", after, err)
+		}
+		var nodeRuns int
+		if err := fixture.DB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM workflow_node_runs WHERE workflow_run_id = ?`, scheduled.Run.ID).Scan(&nodeRuns); err != nil {
+			t.Fatalf("count target node runs after %s: %v", after, err)
+		}
+		if nodeRuns != 0 {
+			t.Fatalf("target created %d workflow node runs after %s, want 0", nodeRuns, after)
+		}
+	}
+	legacyDelete := relationRequest{
+		SourceTaskID: rebaseTask.ID,
+		TargetTaskID: target.ID,
+		Kind:         string(coordinator.RelationBlocks),
+	}
+	var legacyError contract.ErrorResponse
+	doJSONRequest(t, fixture.Server, http.MethodDelete, "/v2/tasks/"+target.ID+"/relations",
+		legacyDelete, http.StatusConflict, &legacyError)
+	if legacyError.Error.Code != "active_rebase_blocker" {
+		t.Fatalf("legacy delete error = %+v, want active_rebase_blocker", legacyError.Error)
+	}
+	assertNoInitialNode("task relation delete")
+
+	genericDelete := contract.WorkItemRelationRequest{
+		SourceItemID: rebaseTask.ID,
+		TargetItemID: target.ID,
+		Kind:         string(coordinator.RelationBlocks),
+	}
+	var genericError contract.ErrorResponse
+	doJSONRequest(t, fixture.Server, http.MethodDelete,
+		"/v2/projects/"+fixture.Project.ID+"/work-items/"+target.ID+"/relations",
+		genericDelete, http.StatusConflict, &genericError)
+	if genericError.Error.Code != "active_rebase_blocker" {
+		t.Fatalf("generic delete error = %+v, want active_rebase_blocker", genericError.Error)
+	}
+	assertNoInitialNode("work-item relation delete")
+
+	var blockers int
+	if err := fixture.DB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`,
+		rebaseTask.ID, target.ID).Scan(&blockers); err != nil {
+		t.Fatalf("count protected legacy blockers: %v", err)
+	}
+	if blockers != 1 {
+		t.Fatalf("protected legacy blocker count = %d, want 1", blockers)
+	}
+
+	// Once the rebase closes, the same stale-provenance edge is ordinary user
+	// data again and both relation APIs retain their cleanup behavior.
+	if _, err := fixture.DB.ExecContext(ctx, `
+UPDATE feature_rebases SET state = 'cancelled', completed_at = '2026-01-01T00:01:00Z'
+WHERE id = 'rb-legacy-upgrade'`); err != nil {
+		t.Fatalf("close legacy rebase: %v", err)
+	}
+	doJSONRequest(t, fixture.Server, http.MethodDelete,
+		"/v2/projects/"+fixture.Project.ID+"/work-items/"+target.ID+"/relations",
+		genericDelete, http.StatusNoContent, nil)
+	if err := fixture.Tasks.LinkTasks(ctx, rebaseTask.ID, target.ID, coordinator.RelationBlocks, coordinator.ActorHuman); err != nil {
+		t.Fatalf("restore closed-rebase human blocker: %v", err)
+	}
+	doJSONRequest(t, fixture.Server, http.MethodDelete, "/v2/tasks/"+target.ID+"/relations",
+		legacyDelete, http.StatusNoContent, nil)
+	if err := fixture.Bundle.WorkflowExecutor.Advance(ctx, scheduled.Run.ID); err != nil {
+		t.Fatalf("advance target workflow after cleanup: %v", err)
+	}
+	var nodeRuns int
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM workflow_node_runs WHERE workflow_run_id = ?`, scheduled.Run.ID).Scan(&nodeRuns); err != nil {
+		t.Fatalf("count target node runs after cleanup: %v", err)
+	}
+	if nodeRuns == 0 {
+		t.Fatal("target created no initial workflow node after the rebase closed and blocker was removed")
+	}
+}
+
 func TestFeatureAPIEndpoints(t *testing.T) {
 	t.Parallel()
 	fixture := newTestFixture(t)
