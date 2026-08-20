@@ -3762,6 +3762,139 @@ func TestAttentionReplyLinksOwnTaskStatusLogID(t *testing.T) {
 	}
 }
 
+// TestAttentionReplyQueuesReviewFixAfterCurrentBaseUpgrade is the regression
+// for current-main databases missing review_cycle_budgets. An owner reply with
+// no active session must consume a cycle and queue a review-fix author job after
+// the database upgrades from 0012.
+func TestAttentionReplyQueuesReviewFixAfterCurrentBaseUpgrade(t *testing.T) {
+	ctx := context.Background()
+	current := newTestFixture(t)
+	dataDir := current.DataDir
+	projectID := current.Project.ID
+	if err := current.Registry.Close(); err != nil {
+		t.Fatalf("close current-base registry: %v", err)
+	}
+
+	projectDB := flowgit.ProjectDatabasePath(dataDir, projectID)
+	raw, err := sql.Open("sqlite3", projectDB)
+	if err != nil {
+		t.Fatalf("open current-base database: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `
+DROP TABLE review_cycle_budgets;
+DELETE FROM schema_migrations WHERE version = '0013_review_cycle_budgets';
+UPDATE app_metadata
+SET value = '0012_review_follow_up_batches'
+WHERE key = 'schema_version';`); err != nil {
+		_ = raw.Close()
+		t.Fatalf("restore current-base schema: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close current-base database: %v", err)
+	}
+
+	fixture := reopenTestFixture(t, dataDir)
+	var migrationCount int
+	var schemaVersion string
+	if err := fixture.DB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM schema_migrations
+WHERE version = '0013_review_cycle_budgets'`).Scan(&migrationCount); err != nil {
+		t.Fatalf("count review cycle budget migrations: %v", err)
+	}
+	if migrationCount != 1 {
+		t.Fatalf("review cycle budget migration count = %d, want 1", migrationCount)
+	}
+	if err := fixture.DB.QueryRowContext(ctx,
+		`SELECT value FROM app_metadata WHERE key = 'schema_version'`).Scan(&schemaVersion); err != nil {
+		t.Fatalf("read upgraded schema version: %v", err)
+	}
+	if schemaVersion != "0013_review_cycle_budgets" {
+		t.Fatalf("upgraded schema version = %q, want 0013_review_cycle_budgets", schemaVersion)
+	}
+
+	// A second open must observe the ledger entry rather than reapplying CREATE
+	// TABLE, while preserving the latest schema metadata.
+	reopened, err := flowdb.Open(ctx, projectDB)
+	if err != nil {
+		t.Fatalf("reopen upgraded database: %v", err)
+	}
+	if err := reopened.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM schema_migrations
+WHERE version = '0013_review_cycle_budgets'`).Scan(&migrationCount); err != nil {
+		_ = reopened.Close()
+		t.Fatalf("count review cycle budget migrations after reopen: %v", err)
+	}
+	if err := reopened.DB().QueryRowContext(ctx,
+		`SELECT value FROM app_metadata WHERE key = 'schema_version'`).Scan(&schemaVersion); err != nil {
+		_ = reopened.Close()
+		t.Fatalf("read schema version after reopen: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("close reopened database: %v", err)
+	}
+	if migrationCount != 1 || schemaVersion != "0013_review_cycle_budgets" {
+		t.Fatalf("reopened migration state = count %d, schema %q", migrationCount, schemaVersion)
+	}
+
+	task, err := fixture.Tasks.CreateTask(ctx, coordinator.CreateTaskInput{Title: "Reply queues review fix"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := fixture.DB.ExecContext(ctx,
+		`UPDATE tasks SET lifecycle_state = 'scheduled' WHERE id = ?`, task.ID); err != nil {
+		t.Fatalf("schedule task: %v", err)
+	}
+	initial, err := fixture.Sessions.EnsureAuthorJob(ctx, coordinator.EnsureAuthorJobInput{TaskID: task.ID})
+	if err != nil {
+		t.Fatalf("queue initial author job: %v", err)
+	}
+	canceled, err := fixture.Bundle.Queue.CancelLiveJobsForTask(ctx, task.ID, flowworker.RoleAuthor)
+	if err != nil {
+		t.Fatalf("cancel initial author job: %v", err)
+	}
+	if len(canceled) != 1 || canceled[0] != initial.Job.ID {
+		t.Fatalf("canceled author jobs = %v, want [%s]", canceled, initial.Job.ID)
+	}
+	if _, err := fixture.DB.ExecContext(ctx, `
+UPDATE changes
+SET head_sha = 'reviewed-head', ready_at = updated_at
+WHERE id = ?`, initial.Change.ID); err != nil {
+		t.Fatalf("mark change ready for review: %v", err)
+	}
+	required := true
+	if _, err := fixture.Checks.ReportCheck(ctx, coordinator.ReportCheckInput{
+		TaskID: task.ID, Name: "review", Kind: coordinator.CheckKindCI,
+		Required: &required, Verdict: coordinator.CheckBlocked, Reporter: "reviewer",
+	}); err != nil {
+		t.Fatalf("record changes-requested check: %v", err)
+	}
+
+	var reply sessionMessageResponse
+	doJSONRequestAs(t, fixture.Server, "owner-token", http.MethodPost,
+		"/v2/tasks/"+task.ID+"/attention/reply",
+		attentionReplyRequest{Message: "Limit the fix to the migration."}, http.StatusOK, &reply)
+	if reply.Queued {
+		t.Fatal("reply queued to session = true, want a new author job with no active session")
+	}
+	job, ok, err := fixture.Bundle.Queue.LiveAuthorJobForTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("load queued author job: %v", err)
+	}
+	if !ok {
+		t.Fatal("owner reply did not queue an author job")
+	}
+	if got := payloadString(job.Payload, "human_attention_instructions"); got != "Limit the fix to the migration." {
+		t.Fatalf("human attention instructions = %q", got)
+	}
+	budget, err := fixture.Sessions.ReviewCycleBudget(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("read consumed review cycle budget: %v", err)
+	}
+	if budget.UsedCycles != 1 || budget.GrantedCycles != coordinator.DefaultReviewAuthorCycleLimit {
+		t.Fatalf("consumed review cycle budget = %+v", budget)
+	}
+}
+
 func TestSessionStatusIsVisibleInTaskDetail(t *testing.T) {
 	t.Parallel()
 	fixture := newTestFixture(t)

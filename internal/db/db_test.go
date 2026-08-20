@@ -14,7 +14,7 @@ import (
 // should carry under the current build tags. The tag-gated 0005_task_fts is
 // included only when FTS5 support is compiled in.
 func expectedProjectMigrations() []string {
-	migrations := []string{"0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log", "0006_completion_evidence", "0007_session_human_wait_latches", "0008_optional_human_review", "0009_flow_revisions", "0010_agent_def_revisions", "0011_review_loop_hardening", "0012_review_follow_up_batches"}
+	migrations := []string{"0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log", "0006_completion_evidence", "0007_session_human_wait_latches", "0008_optional_human_review", "0009_flow_revisions", "0010_agent_def_revisions", "0011_review_loop_hardening", "0012_review_follow_up_batches", "0013_review_cycle_budgets"}
 	migrations = append(migrations, filterOptionalMigrations([]string{"0005_task_fts"})...)
 	sort.Strings(migrations)
 	return migrations
