@@ -34,6 +34,7 @@ var cssModules = []struct{ Name, Scope string }{
 	{"timeline.module.css", "flow-app"},
 	{"terminal.module.css", "flow-app"},
 	{"forms.module.css", "flow-app"},
+	{"budget-modal.module.css", "flow-app"},
 	{"charts.module.css", "flow-app"},
 	{"flows.module.css", "flow-flows"},
 	{"markdown.module.css", "flow-app"},

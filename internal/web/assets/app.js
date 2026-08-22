@@ -14,6 +14,7 @@ import { renderNavLink, renderNavTrigger, THEME_ICONS, THEME_OPTIONS } from "./n
 import { isWorkPath, workViewHref } from "./work-nav.js";
 import { normalizeHarnessOptions } from "./models/harness-catalog.js";
 import { openTerminalWindow, closeTerminalDialog, hideInlineTerminal, closeTerminalModalLayers } from "./terminal.js";
+import { closeBudgetModal } from "./budget-modal.js";
 import { pollDelay, Poller } from "./poller.js";
 import { createTaskView } from "./board-route.js";
 import { applyBusyState, failureMessage, handleAction, pendingStatus } from "./actions.js";
@@ -376,7 +377,10 @@ export class FlowApp extends HTMLElement {
     this.settle.cancelUnless(options.burst);
     this.updateActiveNav();
     const path = window.location.pathname;
-    if (!options.fromPoll) closeTerminalModalLayers(this);
+    if (!options.fromPoll) {
+      closeTerminalModalLayers(this);
+      closeBudgetModal(this);
+    }
     const content = this.querySelector(".content");
     if (content && content.dataset) {
       content.dataset.refresh = options.fromPoll ? "poll" : "nav";
@@ -530,6 +534,18 @@ if (typeof globalThis !== "undefined") {
 }
 
 document.addEventListener("click", (event) => {
+  // The budget modal's own controls: Cancel dismisses without a request, Done
+  // closes the disposition view after a successful grant. Closing the layer
+  // the control lives in beats re-querying the document for it.
+  const budgetDismiss = event.target?.closest?.("[data-budget-cancel], [data-budget-done]");
+  if (budgetDismiss) {
+    event.preventDefault();
+    const layer = budgetDismiss.closest?.("[data-budget-modal-layer]");
+    layer?.close?.();
+    layer?.remove?.();
+    return;
+  }
+
   const popOut = event.target?.closest?.("[data-terminal-popout]");
   if (popOut) {
     event.preventDefault();
@@ -560,8 +576,18 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  const modal = document.querySelector?.("[data-terminal-modal-layer]");
-  if (!modal) return;
-  event.preventDefault();
-  modal.remove();
+  const terminalModal = document.querySelector?.("[data-terminal-modal-layer]");
+  if (terminalModal) {
+    event.preventDefault();
+    terminalModal.remove();
+    return;
+  }
+  // A native <dialog> absorbs Escape into its cancel event, which the layer
+  // already handles; this is the fallback for the open-attribute path.
+  const budgetModal = document.querySelector?.("[data-budget-modal-layer]");
+  if (budgetModal && budgetModal.dataset?.budgetPending !== "true") {
+    event.preventDefault();
+    budgetModal.close?.();
+    budgetModal.remove();
+  }
 });

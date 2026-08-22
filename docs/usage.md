@@ -190,7 +190,7 @@ flow task guide TASK_ID "OWNER RULING" [--supersedes RULING_ID]
 flow task decide-review TASK_ID WAIT_ID fix_in_task|out_of_scope|defer_follow_up [--guidance TEXT]
 flow task respond TASK_ID --node-run NODE_RUN_ID --outcome OUTCOME --feedback "..."
 flow task retry [--refresh-agent-runtime] TASK_ID
-flow task budget TASK_ID --additional N
+flow task budget TASK_ID --additional N --instructions TEXT
 flow task reset TASK_ID
 flow task done TASK_ID --resolution completed
 flow task reopen TASK_ID

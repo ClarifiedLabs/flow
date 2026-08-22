@@ -1,0 +1,122 @@
+/* The automation-budget modal: a <dialog> layer mounted under .main so polls,
+   which rewrite .content only, never destroy a half-filled form. */
+
+.budget-modal {
+  width: min(520px, calc(100vw - 32px));
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0;
+  color: var(--ink);
+  background: var(--panel);
+}
+
+.budget-modal::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+
+.budget-modal-panel {
+  display: grid;
+  gap: 10px;
+  padding: 18px;
+}
+
+.budget-modal h2 {
+  margin: 0;
+  font-size: var(--text-body);
+  font-weight: var(--weight-node);
+  letter-spacing: var(--track-tight);
+}
+
+.budget-modal h2 code {
+  color: var(--ink-2);
+}
+
+.budget-modal-context {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: var(--text-quiet);
+}
+
+.budget-modal-form {
+  display: grid;
+  gap: 10px;
+}
+
+.budget-modal label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: var(--text-label);
+  font-weight: 600;
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+}
+
+.budget-modal input,
+.budget-modal textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--ink);
+  padding: 6px 8px;
+  font-size: var(--text-ui);
+  font-family: var(--font-prose);
+  letter-spacing: normal;
+  text-transform: none;
+  font-weight: 400;
+}
+
+.budget-modal textarea {
+  min-height: 76px;
+  resize: vertical;
+}
+
+.budget-modal-hint {
+  color: var(--muted);
+  font-size: var(--text-micro);
+  font-weight: 400;
+  letter-spacing: var(--track-tight);
+  text-transform: none;
+}
+
+.budget-modal-error {
+  padding: 10px;
+  border: 1px solid var(--st-danger);
+  border-radius: var(--radius);
+  color: var(--st-danger);
+  background: var(--st-danger-bg);
+  font-size: var(--text-quiet);
+}
+
+.budget-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.budget-modal-totals {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.budget-modal-totals div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 6px;
+}
+
+.budget-modal-totals dt {
+  color: var(--muted);
+  font-size: var(--text-label);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+}
+
+.budget-modal-totals dd {
+  margin: 0;
+  font-size: var(--text-quiet);
+}

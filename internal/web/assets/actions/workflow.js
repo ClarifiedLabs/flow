@@ -2,6 +2,14 @@
 // responses, budgets, retries, holds, and take-over/release.
 
 import { apiPost, taskConsoleAPIPath } from "../api.js";
+import {
+  budgetDefaults,
+  budgetKindName,
+  budgetModalResult,
+  budgetValidationError,
+  openBudgetModal,
+  renderBudgetModalInto,
+} from "../budget-modal.js";
 import { CANCELLED, failureMessage, workflowPath } from "./dispatch.js";
 
 export const workflowActions = {
@@ -91,15 +99,92 @@ export const workflowActions = {
     return result?.queued ? "Comment sent to the agent" : "Comment recorded";
   },
 
+  // workflowBudget opens the modal that collects the extension. The POST is
+  // rejected server-side without operator instructions — they are both the
+  // recorded rationale and the payload the next author session reads — so a
+  // bare window.prompt could never complete this operation from the GUI.
+  // Opening is not a mutation: the handler returns CANCELLED so the dispatcher
+  // clears the pending label without a request having gone out.
   async workflowBudget(app, element, dataset) {
-    const reviewCycles = dataset.workflowBudgetKind === "review-cycles";
-    const additional = Number(
-      window.prompt(reviewCycles ? "Additional review-author cycles" : "Additional workflow transitions", reviewCycles ? "2" : "50"),
-    );
-    if (!Number.isInteger(additional) || additional < 1) return CANCELLED;
-    await apiPost(workflowPath(dataset, dataset.workflowBudget, "/workflow/budget"), { additional });
+    const taskID = String(dataset.workflowBudget || "").trim();
+    if (!taskID) return CANCELLED;
+    // The modal mounts at app level (.main), which polls never rewrite: the
+    // originating card repaints its own innerHTML, so a form inside it would
+    // be destroyed mid-edit. The control lives inside <flow-app>, so that is
+    // the root; the document covers any detached-control edge case.
+    const root = element?.closest?.("flow-app") || globalThis.document;
+    openBudgetModal(root, budgetDefaults({
+      taskID,
+      projectID: dataset.project,
+      kind: dataset.workflowBudgetKind,
+      used: dataset.workflowBudgetUsed,
+      total: dataset.workflowBudgetTotal,
+    }));
+    return CANCELLED;
+  },
+
+  // budgetGrant submits the open modal. Validation is local (integer 1..500,
+  // non-blank instructions) so the server's contract can never surface as a
+  // cryptic 400; a rejection renders inline, keeps the typed input, and
+  // propagates so the status bar agrees with the modal. On success the run's
+  // authoritative totals come off the POST response, so no extra GET is
+  // needed — the refresh that follows tears the layer down and this handler
+  // re-renders the disposition view right after it settles.
+  async budgetGrant(app, element, dataset) {
+    const layer = element?.closest?.("[data-budget-modal-layer]");
+    if (!layer) return "The budget prompt is no longer open";
+    // The host outlives the layer: app.refresh() re-runs the route, whose load
+    // tears the modal down, so the disposition view is re-rendered into the
+    // still-live host from the POST response the server already sent.
+    const host = layer.parentElement;
+    const taskID = String(dataset.budgetGrant || "").trim();
+    const projectID = String(dataset.project || "").trim();
+    const kind = budgetKindName(layer.dataset.budgetKind);
+    const additionalRaw = layer.querySelector("[data-budget-additional]")?.value;
+    const instructionsRaw = layer.querySelector("[data-budget-instructions]")?.value;
+    const additional = Number(additionalRaw);
+    const instructions = String(instructionsRaw || "").trim();
+    const invalid = budgetValidationError(additionalRaw, instructions);
+    if (invalid) {
+      renderBudgetModalInto(host, {
+        taskID,
+        projectID,
+        kind,
+        additional: additionalRaw,
+        instructions: instructionsRaw,
+        error: invalid,
+      });
+      return invalid;
+    }
+    // Flag the layer as pending for the dialog's own cancel (Escape) handler:
+    // a dismissal mid-flight would drop the disposition this request is about
+    // to render. The re-renders below clear it.
+    layer.dataset.budgetPending = "true";
+    let result;
+    try {
+      result = await apiPost(workflowPath(dataset, taskID, "/workflow/budget"), { additional, instructions });
+    } catch (error) {
+      // Keep exactly what the operator typed so a fixable rejection — a
+      // ceiling breach, a concurrent grant's 409 — is one edit from a retry.
+      const message = failureMessage(error);
+      renderBudgetModalInto(host, {
+        taskID,
+        projectID,
+        kind,
+        additional,
+        instructions,
+        error: message,
+      });
+      throw new Error(message);
+    }
     await app.refresh();
-    return reviewCycles ? `Granted ${additional} review cycles` : `Extended budget by ${additional}`;
+    renderBudgetModalInto(host, {
+      taskID,
+      projectID,
+      kind,
+      result: budgetModalResult(result?.run, additional, kind),
+    });
+    return kind === "review-cycles" ? `Granted ${additional} review cycles` : `Extended budget by ${additional}`;
   },
 
   async workflowRetry(app, element, dataset) {

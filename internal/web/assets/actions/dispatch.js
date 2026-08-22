@@ -100,6 +100,7 @@ const PENDING_LABELS = {
   workflowRespond: "Sending feedback",
   gateComment: "Sending comment",
   workflowBudget: "Extending budget",
+  budgetGrant: "Granting cycles",
   workflowRetry: "Retrying",
   workflowSkip: "Skipping step",
   workflowHold: "Holding",
