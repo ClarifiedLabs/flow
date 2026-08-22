@@ -289,9 +289,6 @@ type TaskService struct {
 	// editTaskAfterReadTestHook runs after EditTask's optimistic validation read
 	// and before its write transaction. Tests use it to force stale-read races.
 	editTaskAfterReadTestHook func()
-	// blockOnRebaseAfterGraphReadTestHook runs inside BlockOnRebase's write
-	// transaction after its dependency-graph read and before blocker adoption.
-	blockOnRebaseAfterGraphReadTestHook func()
 }
 
 // SetEventLog wires the project event log; a nil log disables emission.
@@ -1227,12 +1224,64 @@ WHERE task_id = ? AND tag_id = ?`, taskID, tagID); err != nil {
 }
 
 // BlockOnRebase inserts (rebaseTask blocks task) relations for every id,
-// adopting duplicate edges as system-owned and skipping the rebase task itself.
-// A running feature rebase holds the feature's other tasks at the workflow
-// dependency gate through these ordinary blocks relations; done blockers
-// resolve by definition, so release needs no cleanup. A relation that would
-// cycle is skipped rather than failing the caller's schedule path.
+// tolerating duplicates and skipping the rebase task itself. Newly created
+// edges receive durable rebase-gate provenance in the same transaction. The
+// initial sweep skips cycles; schedule-time reconciliation rejects them because
+// scheduling must not proceed without its required blocker.
 func (s *TaskService) BlockOnRebase(ctx context.Context, rebaseTaskID string, taskIDs []string) error {
+	return s.blockOnRebaseForFeature(ctx, rebaseTaskID, "", taskIDs)
+}
+
+// blockOnRebaseForFeature rechecks each snapshotted target's feature under the
+// same writer lock as relation insertion. A task moved and scheduled after the
+// initial snapshot therefore cannot receive a stale blocker afterward.
+func (s *TaskService) blockOnRebaseForFeature(ctx context.Context, rebaseTaskID, expectedFeatureID string, taskIDs []string) error {
+	rebaseTaskID = strings.TrimSpace(rebaseTaskID)
+	expectedFeatureID = strings.TrimSpace(expectedFeatureID)
+	if rebaseTaskID == "" {
+		return errors.New("rebase task id is required")
+	}
+	for _, taskID := range taskIDs {
+		taskID = strings.TrimSpace(taskID)
+		if taskID == "" || taskID == rebaseTaskID {
+			continue
+		}
+		tx, err := sqlitex.BeginImmediate(ctx, s.db)
+		if err != nil {
+			return fmt.Errorf("begin rebase block transaction: %w", err)
+		}
+		if expectedFeatureID != "" {
+			var currentFeatureID string
+			err := tx.QueryRowContext(ctx, `SELECT COALESCE(feature_id, '') FROM tasks WHERE id = ?`, taskID).Scan(&currentFeatureID)
+			if errors.Is(err, sql.ErrNoRows) || err == nil && currentFeatureID != expectedFeatureID {
+				tx.Rollback()
+				continue
+			}
+			if err != nil {
+				tx.Rollback()
+				return fmt.Errorf("recheck rebase blocker target feature: %w", err)
+			}
+		}
+		if err := s.blockOnRebaseTx(ctx, tx, rebaseTaskID, []string{taskID}); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit rebase block: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *TaskService) blockOnRebaseTx(ctx context.Context, tx workItemRelationQuerier, rebaseTaskID string, taskIDs []string) error {
+	return s.blockOnRebaseTxWithCyclePolicy(ctx, tx, rebaseTaskID, taskIDs, false)
+}
+
+func (s *TaskService) blockOnRebaseStrictTx(ctx context.Context, tx workItemRelationQuerier, rebaseTaskID string, taskIDs []string) error {
+	return s.blockOnRebaseTxWithCyclePolicy(ctx, tx, rebaseTaskID, taskIDs, true)
+}
+
+func (s *TaskService) blockOnRebaseTxWithCyclePolicy(ctx context.Context, tx workItemRelationQuerier, rebaseTaskID string, taskIDs []string, rejectCycles bool) error {
 	rebaseTaskID = strings.TrimSpace(rebaseTaskID)
 	if rebaseTaskID == "" {
 		return errors.New("rebase task id is required")
@@ -1243,35 +1292,34 @@ func (s *TaskService) BlockOnRebase(ctx context.Context, rebaseTaskID string, ta
 		if taskID == "" || taskID == rebaseTaskID {
 			continue
 		}
-		tx, err := sqlitex.BeginImmediate(ctx, s.db)
-		if err != nil {
-			return fmt.Errorf("begin rebase block transaction: %w", err)
-		}
 		cycle, err := workItemDependencyPathExists(ctx, tx, taskID, rebaseTaskID)
 		if err != nil {
-			tx.Rollback()
 			return err
 		}
-		if s.blockOnRebaseAfterGraphReadTestHook != nil {
-			s.blockOnRebaseAfterGraphReadTestHook()
-		}
 		if cycle {
-			tx.Rollback()
+			if rejectCycles {
+				return fmt.Errorf("%w: required rebase blocker %s blocks %s would create a dependency cycle", ErrWorkflowConflict, rebaseTaskID, taskID)
+			}
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO work_item_relations (source_item_id, target_item_id, kind, created_by, created_at)
-VALUES (?, ?, ?, ?, ?)
-ON CONFLICT(source_item_id, target_item_id, kind) DO UPDATE SET created_by = excluded.created_by`,
-			rebaseTaskID, taskID, string(RelationBlocks), string(ActorSystem), nowText); err != nil {
-			tx.Rollback()
+		result, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO work_item_relations (source_item_id, target_item_id, kind, created_by, created_at)
+VALUES (?, ?, ?, ?, ?)`, rebaseTaskID, taskID, string(RelationBlocks), string(ActorSystem), nowText)
+		if err != nil {
 			return fmt.Errorf("block task on rebase: %w", err)
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("commit rebase block: %w", err)
+		inserted, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("count inserted rebase blockers: %w", err)
+		}
+		if inserted == 1 {
+			if _, err := tx.ExecContext(ctx, `
+INSERT INTO rebase_block_relations (source_item_id, target_item_id, relation_kind, created_at)
+VALUES (?, ?, 'blocks', ?)`, rebaseTaskID, taskID, nowText); err != nil {
+				return fmt.Errorf("record rebase blocker provenance: %w", err)
+			}
 		}
 	}
-
 	return nil
 }
 

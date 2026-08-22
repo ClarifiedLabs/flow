@@ -14,7 +14,7 @@ import (
 // should carry under the current build tags. The tag-gated 0005_task_fts is
 // included only when FTS5 support is compiled in.
 func expectedProjectMigrations() []string {
-	migrations := []string{"0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log", "0006_completion_evidence", "0007_session_human_wait_latches", "0008_optional_human_review", "0009_flow_revisions", "0010_agent_def_revisions", "0011_review_loop_hardening", "0012_review_follow_up_batches", "0013_review_cycle_budgets"}
+	migrations := []string{"0001_init", "0002_full_fidelity_history", "0003_history_resume_durability", "0004_event_log", "0006_completion_evidence", "0007_session_human_wait_latches", "0008_optional_human_review", "0009_flow_revisions", "0010_agent_def_revisions", "0011_review_loop_hardening", "0012_review_follow_up_batches", "0013_review_cycle_budgets", "0014_rebase_block_provenance"}
 	migrations = append(migrations, filterOptionalMigrations([]string{"0005_task_fts"})...)
 	sort.Strings(migrations)
 	return migrations
@@ -93,6 +93,15 @@ WHERE name = 'revision'`).Scan(&flowRevisionNotNull, &flowRevisionDefault); err 
 	}
 	if agentDefsRevision != 1 {
 		t.Fatalf("project agent definition revision = %d, want 1", agentDefsRevision)
+	}
+
+	var provenanceTable int
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'rebase_block_relations'`).Scan(&provenanceTable); err != nil {
+		t.Fatalf("inspect rebase blocker provenance table: %v", err)
+	}
+	if provenanceTable != 1 {
+		t.Fatalf("rebase blocker provenance table count = %d, want 1", provenanceTable)
 	}
 
 	var relationPayloadNotNull int
@@ -781,6 +790,111 @@ VALUES
 		t.Fatalf("seed pre-optional-review edges: %v", err)
 	}
 	return path
+}
+
+func TestRebaseProvenanceMigrationUpgradesCurrentBaseExactlyOnce(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "flow.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var applied []string
+	for _, version := range expectedProjectMigrations() {
+		if version == "0014_rebase_block_provenance" {
+			continue
+		}
+		content, err := migrationFS.ReadFile("migrations/" + version + ".sql")
+		if err != nil {
+			t.Fatalf("read %s: %v", version, err)
+		}
+		if _, err := raw.ExecContext(ctx, string(content)); err != nil {
+			t.Fatalf("apply %s: %v", version, err)
+		}
+		applied = append(applied, version)
+	}
+	if _, err := raw.ExecContext(ctx, `
+CREATE TABLE schema_migrations (
+	version TEXT PRIMARY KEY,
+	applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+)`); err != nil {
+		t.Fatalf("create migration ledger: %v", err)
+	}
+	for _, version := range applied {
+		if _, err := raw.ExecContext(ctx, `INSERT INTO schema_migrations (version) VALUES (?)`, version); err != nil {
+			t.Fatalf("record %s: %v", version, err)
+		}
+	}
+	var baseSchemaVersion string
+	if err := raw.QueryRowContext(ctx, `SELECT value FROM app_metadata WHERE key = 'schema_version'`).Scan(&baseSchemaVersion); err != nil {
+		t.Fatalf("read current-base schema version: %v", err)
+	}
+	if baseSchemaVersion != "0013_review_cycle_budgets" {
+		t.Fatalf("current-base schema version = %q, want %q", baseSchemaVersion, "0013_review_cycle_budgets")
+	}
+	if _, err := raw.ExecContext(ctx, `
+INSERT INTO work_items (id, kind, created_at) VALUES
+	('t-legacy-source', 'task', '2026-08-01T00:00:00Z'),
+	('t-legacy-target', 'task', '2026-08-01T00:00:01Z');
+INSERT INTO tasks (id, title, created_by, created_at, updated_at) VALUES
+	('t-legacy-source', 'Legacy source', 'system', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z'),
+	('t-legacy-target', 'Legacy target', 'human', '2026-08-01T00:00:01Z', '2026-08-01T00:00:01Z');
+INSERT INTO work_item_relations (source_item_id, target_item_id, kind, created_by, created_at)
+VALUES ('t-legacy-source', 't-legacy-target', 'blocks', 'system', '2026-08-01T00:00:02Z')`); err != nil {
+		t.Fatalf("seed unknown legacy blocker: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close current-base database: %v", err)
+	}
+
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("upgrade current-base database: %v", err)
+	}
+	var migrationCount, provenanceCount int
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM schema_migrations WHERE version = '0014_rebase_block_provenance'`).Scan(&migrationCount); err != nil {
+		t.Fatalf("count provenance migration: %v", err)
+	}
+	if migrationCount != 1 {
+		t.Fatalf("provenance migration count = %d, want 1", migrationCount)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM rebase_block_relations`).Scan(&provenanceCount); err != nil {
+		t.Fatalf("count migrated provenance rows: %v", err)
+	}
+	if provenanceCount != 0 {
+		t.Fatalf("legacy blocker provenance rows = %d, want unknown/0", provenanceCount)
+	}
+	var schemaVersion string
+	if err := store.DB().QueryRowContext(ctx, `SELECT value FROM app_metadata WHERE key = 'schema_version'`).Scan(&schemaVersion); err != nil {
+		t.Fatalf("read upgraded schema version: %v", err)
+	}
+	if schemaVersion != expectedSchemaVersion() {
+		t.Fatalf("upgraded schema version = %q, want %q", schemaVersion, expectedSchemaVersion())
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close upgraded database: %v", err)
+	}
+
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen upgraded database: %v", err)
+	}
+	defer reopened.Close()
+	if err := reopened.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM schema_migrations WHERE version = '0014_rebase_block_provenance'`).Scan(&migrationCount); err != nil {
+		t.Fatalf("count provenance migration after reopen: %v", err)
+	}
+	if migrationCount != 1 {
+		t.Fatalf("provenance migration count after reopen = %d, want 1", migrationCount)
+	}
+	if err := reopened.DB().QueryRowContext(ctx, `SELECT value FROM app_metadata WHERE key = 'schema_version'`).Scan(&schemaVersion); err != nil {
+		t.Fatalf("read schema version after reopen: %v", err)
+	}
+	if schemaVersion != expectedSchemaVersion() {
+		t.Fatalf("schema version after reopen = %q, want %q", schemaVersion, expectedSchemaVersion())
+	}
 }
 
 func TestOpenMigrationIsIdempotent(t *testing.T) {

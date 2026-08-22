@@ -157,6 +157,11 @@ const (
 	// A feature task created here commits before the conflicted path's
 	// non-done-task snapshot, so it enters the initial relation sweep.
 	RebaseOnMainAfterReservation
+
+	// RebaseOnMainAfterTaskSnapshot runs after the conflicted path snapshots
+	// the feature's non-done tasks and before it publishes blocker relations.
+	// Tests use it to prove each insertion rechecks current membership.
+	RebaseOnMainAfterTaskSnapshot
 )
 
 type FeatureService struct {
@@ -1337,7 +1342,10 @@ UPDATE feature_rebases SET task_id = ? WHERE id = ?`, task.ID, rebaseID); err !=
 	if err != nil {
 		return RebaseStartResult{}, err
 	}
-	if err := s.tasks.BlockOnRebase(ctx, task.ID, restrictBlockedTasks(blocked, restrictBlockedTo)); err != nil {
+	if s.RebaseOnMainTestHook != nil {
+		s.RebaseOnMainTestHook(RebaseOnMainAfterTaskSnapshot)
+	}
+	if err := s.tasks.blockOnRebaseForFeature(ctx, task.ID, feature.ID, restrictBlockedTasks(blocked, restrictBlockedTo)); err != nil {
 		return RebaseStartResult{}, fmt.Errorf("block feature tasks on rebase: %w", err)
 	}
 
@@ -1831,37 +1839,75 @@ INSERT INTO feature_rebases (
 	return nil
 }
 
-// EnsureRebaseBlock links a running rebase's task as a blocker of taskID when
-// taskID belongs to the rebased feature. WorkflowRunService calls it before
-// scheduling a task so tasks created or reopened mid-rebase are held at the
-// dependency gate like the rest of the feature. A restriction persisted on the
-// running row (a task-bound console's confinement) applies here too: when the
-// row names allowed blocker targets, taskID is linked only if it is one of
-// them, so a sibling of the bound task is never linked by the schedule path.
+// EnsureRebaseBlock reconciles taskID's blockers from running rebase tasks,
+// linking the current feature's gate and removing obsolete proven gates.
+// WorkflowRunService uses its transactional form while scheduling so tasks
+// created, reopened, or moved mid-rebase are gated for one atomic feature
+// assignment. A task-bound rebase's persisted restriction applies here too.
 func (s *FeatureService) EnsureRebaseBlock(ctx context.Context, taskID string) error {
 	taskID = strings.TrimSpace(taskID)
-	var rebaseTaskID, restriction string
-	err := s.db.QueryRowContext(ctx, `
-SELECT fr.task_id, fr.restrict_blocked_to
-FROM feature_rebases fr
-JOIN tasks t ON t.feature_id = fr.feature_id
-WHERE t.id = ? AND fr.state = 'running' AND fr.task_id IS NOT NULL AND fr.task_id != ?`,
-		taskID, taskID).Scan(&rebaseTaskID, &restriction)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
+	tx, err := sqlitex.BeginImmediate(ctx, s.db)
 	if err != nil {
-		return fmt.Errorf("load running rebase for task: %w", err)
+		return err
 	}
-	if !restrictionAllows(restriction, taskID) {
-		// The running rebase is confined: a task-bound console started it and
-		// may link only its bound task. This task is out of scope and must not
-		// receive a rebase_task blocks relation whose endpoints exclude the
-		// bound task.
-		return nil
+	defer tx.Rollback()
+	var featureID string
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(feature_id, '') FROM tasks WHERE id = ?`, taskID).Scan(&featureID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if err := s.ensureRebaseBlockTx(ctx, tx, taskID, featureID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// ensureRebaseBlockTx reconciles taskID against the supplied feature
+// assignment. Callers read featureID under the same writer transaction used to
+// claim or mutate the task, so a concurrent move cannot invalidate the gate.
+func (s *FeatureService) ensureRebaseBlockTx(ctx context.Context, tx workItemRelationQuerier, taskID, featureID string) error {
+	var rebaseTaskID string
+	if featureID != "" {
+		var restriction string
+		err := tx.QueryRowContext(ctx, `
+SELECT COALESCE(task_id, ''), restrict_blocked_to
+FROM feature_rebases
+WHERE feature_id = ? AND state = 'running'`, featureID).Scan(&rebaseTaskID, &restriction)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("load running rebase for task: %w", err)
+		}
+		if err == nil && !restrictionAllows(restriction, taskID) {
+			rebaseTaskID = ""
+		} else if err == nil && rebaseTaskID == "" {
+			// A running reservation has not yet proved whether the rebase is clean
+			// or attached its conflict task. Scheduling must fail closed until it
+			// can reconcile the required blocker identity.
+			return fmt.Errorf("%w: running feature rebase has not attached its blocker task", ErrWorkflowConflict)
+		} else if err == nil && rebaseTaskID == taskID {
+			rebaseTaskID = ""
+		}
 	}
 
-	return s.tasks.BlockOnRebase(ctx, rebaseTaskID, []string{taskID})
+	// Delete only edges explicitly recorded as rebase gates. Unknown legacy
+	// rows and ordinary system-authored dependencies fail safe and survive.
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM work_item_relations
+WHERE target_item_id = ? AND kind = 'blocks'
+  AND source_item_id != ?
+  AND EXISTS (
+    SELECT 1 FROM rebase_block_relations
+    WHERE rebase_block_relations.source_item_id = work_item_relations.source_item_id
+      AND rebase_block_relations.target_item_id = work_item_relations.target_item_id
+      AND rebase_block_relations.relation_kind = work_item_relations.kind
+  )`, taskID, rebaseTaskID); err != nil {
+		return fmt.Errorf("remove stale rebase blocks for task: %w", err)
+	}
+	if rebaseTaskID == "" {
+		return nil
+	}
+	return s.tasks.blockOnRebaseStrictTx(ctx, tx, rebaseTaskID, []string{taskID})
 }
 
 // restrictBlockedTasks filters ids down to the allowed membership set,

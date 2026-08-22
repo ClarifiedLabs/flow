@@ -2,7 +2,6 @@ package coordinator
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -481,7 +480,7 @@ func TestRebaseOnMainCleanThenUpToDate(t *testing.T) {
 	}
 }
 
-func TestBlockOnRebaseAdoptsExistingRelationAsSystemGate(t *testing.T) {
+func TestBlockOnRebaseLeavesExistingRelationProvenanceUnknown(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	env := newFeatureTestEnv(t)
@@ -495,87 +494,44 @@ func TestBlockOnRebaseAdoptsExistingRelationAsSystemGate(t *testing.T) {
 	}
 	rebase := seedRunningRebaseRow(t, env, feature, env.branchTip(t, feature.Branch), 0)
 
-	// A first writer can create the same edge before the rebase sweep. Once the
-	// rebase adopts that edge as its dependency gate, its provenance must become
-	// system-owned so neither coordinator unlink surface can remove it.
+	// A first writer can create the same edge before the rebase sweep. Because
+	// the gate did not create that edge, its actor and provenance remain ordinary.
 	if err := env.tasks.LinkTasks(ctx, rebase.TaskID, target.ID, RelationBlocks, ActorHuman); err != nil {
 		t.Fatalf("create pre-existing human blocker: %v", err)
 	}
 	if err := env.tasks.BlockOnRebase(ctx, rebase.TaskID, []string{target.ID}); err != nil {
-		t.Fatalf("adopt blocker for rebase: %v", err)
+		t.Fatalf("reconcile existing blocker for rebase: %v", err)
 	}
 	var createdBy string
 	if err := env.fixture.store.DB().QueryRowContext(ctx, `
 SELECT created_by FROM work_item_relations
 WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`,
 		rebase.TaskID, target.ID).Scan(&createdBy); err != nil {
-		t.Fatalf("read adopted blocker provenance: %v", err)
+		t.Fatalf("read existing blocker actor: %v", err)
 	}
-	if createdBy != string(ActorSystem) {
-		t.Fatalf("adopted blocker created_by = %q, want %q", createdBy, ActorSystem)
+	if createdBy != string(ActorHuman) {
+		t.Fatalf("existing blocker created_by = %q, want %q", createdBy, ActorHuman)
 	}
-	if err := env.tasks.UnlinkTasks(ctx, rebase.TaskID, target.ID, RelationBlocks); !errors.Is(err, ErrActiveRebaseBlocker) {
-		t.Fatalf("task unlink error = %v, want ErrActiveRebaseBlocker", err)
+	var provenance int
+	if err := env.fixture.store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM rebase_block_relations
+WHERE source_item_id = ? AND target_item_id = ?`, rebase.TaskID, target.ID).Scan(&provenance); err != nil {
+		t.Fatalf("read existing blocker provenance: %v", err)
+	}
+	if provenance != 0 {
+		t.Fatalf("existing blocker provenance = %d, want unknown/0", provenance)
 	}
 	items := NewWorkItemService(env.fixture.store.DB(), testProjectID)
 	if err := items.Unlink(ctx, rebase.TaskID, target.ID, RelationBlocks); !errors.Is(err, ErrActiveRebaseBlocker) {
-		t.Fatalf("work-item unlink error = %v, want ErrActiveRebaseBlocker", err)
+		t.Fatalf("unlink active unknown-provenance blocker error = %v, want ErrActiveRebaseBlocker", err)
 	}
-}
-
-func TestBlockOnRebaseSerializesAdoptionAgainstConcurrentUnlink(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	env := newFeatureTestEnv(t)
-	feature, err := env.features.Create(ctx, CreateFeatureInput{Title: "raced blocker adoption"})
-	if err != nil {
-		t.Fatalf("create feature: %v", err)
+	if _, err := env.fixture.store.DB().ExecContext(ctx, `
+UPDATE feature_rebases SET state = 'cancelled', completed_at = '2026-08-22T00:00:00Z' WHERE id = ?`,
+		rebase.ID); err != nil {
+		t.Fatalf("close running rebase: %v", err)
 	}
-	target, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "raced blocked task", FeatureID: &feature.ID})
-	if err != nil {
-		t.Fatalf("create blocked task: %v", err)
-	}
-	rebase := seedRunningRebaseRow(t, env, feature, env.branchTip(t, feature.Branch), 0)
-	if err := env.tasks.LinkTasks(ctx, rebase.TaskID, target.ID, RelationBlocks, ActorHuman); err != nil {
-		t.Fatalf("create pre-existing human blocker: %v", err)
-	}
-
-	// Use a second database handle to force an untrusted unlink attempt after
-	// BlockOnRebase's graph read and before its provenance-adoption UPSERT. The
-	// adoption transaction must already own the SQLite writer reservation, so
-	// the unlink loses this serialization race instead of deleting the edge and
-	// leaving the adoption with a stale WAL snapshot.
-	raceDB, err := sql.Open("sqlite3", env.fixture.store.Path())
-	if err != nil {
-		t.Fatalf("open racing database handle: %v", err)
-	}
-	raceDB.SetMaxOpenConns(1)
-	t.Cleanup(func() { _ = raceDB.Close() })
-	if _, err := raceDB.ExecContext(ctx, "PRAGMA busy_timeout = 0"); err != nil {
-		t.Fatalf("disable racing handle busy timeout: %v", err)
-	}
-	racer := NewTaskService(raceDB, testProjectID)
-	var unlinkErr error
-	env.tasks.blockOnRebaseAfterGraphReadTestHook = func() {
-		env.tasks.blockOnRebaseAfterGraphReadTestHook = nil
-		unlinkErr = racer.UnlinkTasks(ctx, rebase.TaskID, target.ID, RelationBlocks)
-	}
-
-	if err := env.tasks.BlockOnRebase(ctx, rebase.TaskID, []string{target.ID}); err != nil {
-		t.Fatalf("adopt blocker while unlink races: %v", err)
-	}
-	if unlinkErr == nil {
-		t.Fatal("racing unlink succeeded between graph read and blocker adoption")
-	}
-	var createdBy string
-	if err := env.fixture.store.DB().QueryRowContext(ctx, `
-SELECT created_by FROM work_item_relations
-WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`,
-		rebase.TaskID, target.ID).Scan(&createdBy); err != nil {
-		t.Fatalf("read raced blocker provenance: %v", err)
-	}
-	if createdBy != string(ActorSystem) {
-		t.Fatalf("raced blocker created_by = %q, want %q", createdBy, ActorSystem)
+	if err := items.Unlink(ctx, rebase.TaskID, target.ID, RelationBlocks); err != nil {
+		t.Fatalf("unlink ordinary blocker after rebase closes: %v", err)
 	}
 }
 
@@ -1000,6 +956,172 @@ WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, rebaseTask
 	if got := countBlockedBy(result.RebaseTaskID, boundTask.ID); got != 1 {
 		t.Fatalf("rebase task blocks bound task %d times, want exactly 1", got)
 	}
+}
+
+// TestRebaseInitialSweepRechecksFeatureMembership controls the stale snapshot
+// ordering: the sweep snapshots a task in feature A, the task moves and
+// schedules in B, and only then does the sweep attempt blocker publication.
+func TestRebaseInitialSweepRechecksFeatureMembership(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newFeatureTestEnv(t)
+	feature := setupConflictedFeature(t, env)
+	task, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "move after rebase snapshot", FeatureID: &feature.ID})
+	if err != nil {
+		t.Fatalf("create feature task: %v", err)
+	}
+	destination, err := env.features.Create(ctx, CreateFeatureInput{Title: "snapshot move destination"})
+	if err != nil {
+		t.Fatalf("create destination feature: %v", err)
+	}
+	items := NewWorkItemService(env.fixture.store.DB(), env.fixture.project.ID)
+
+	snapshotted := make(chan struct{})
+	releaseSweep := make(chan struct{})
+	env.features.RebaseOnMainTestHook = func(phase RebaseOnMainTestPhase) {
+		if phase == RebaseOnMainAfterTaskSnapshot {
+			close(snapshotted)
+			<-releaseSweep
+		}
+	}
+	t.Cleanup(func() { env.features.RebaseOnMainTestHook = nil })
+	type outcome struct {
+		result RebaseStartResult
+		err    error
+	}
+	finished := make(chan outcome, 1)
+	go func() {
+		result, rebaseErr := env.features.RebaseOnMain(ctx, feature)
+		finished <- outcome{result: result, err: rebaseErr}
+	}()
+
+	<-snapshotted
+	if err := items.Move(ctx, task.ID, destination.ID, ActorHuman); err != nil {
+		close(releaseSweep)
+		t.Fatalf("move task after rebase snapshot: %v", err)
+	}
+	if _, err := env.runs.ScheduleAs(ctx, task.ID, ActorHuman); err != nil {
+		close(releaseSweep)
+		t.Fatalf("schedule task after move: %v", err)
+	}
+	close(releaseSweep)
+	rebased := <-finished
+	if rebased.err != nil || rebased.result.Kind != RebaseTaskCreated {
+		t.Fatalf("start conflicted rebase = %+v, %v", rebased.result, rebased.err)
+	}
+	var blockers int
+	if err := env.fixture.store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`,
+		rebased.result.RebaseTaskID, task.ID).Scan(&blockers); err != nil {
+		t.Fatalf("count stale rebase blockers: %v", err)
+	}
+	if blockers != 0 {
+		t.Fatalf("rebase blockers after snapshot, move, schedule, and sweep = %d, want 0", blockers)
+	}
+}
+
+func TestScheduleRebaseGateUsesAtomicFeatureAssignment(t *testing.T) {
+	t.Parallel()
+
+	t.Run("move into rebasing feature adds blocker", func(t *testing.T) {
+		ctx := context.Background()
+		env := newFeatureTestEnv(t)
+		feature, err := env.features.Create(ctx, CreateFeatureInput{Title: "atomic move in"})
+		if err != nil {
+			t.Fatalf("create feature: %v", err)
+		}
+		rebase := seedRunningRebaseRow(t, env, feature, env.branchTip(t, feature.Branch), 0)
+		task, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "move into running rebase"})
+		if err != nil {
+			t.Fatalf("create task: %v", err)
+		}
+		items := NewWorkItemService(env.fixture.store.DB(), env.fixture.project.ID)
+		env.runs.scheduleSnapshotResolvedTestHook = func(FlowSnapshot) {
+			env.runs.scheduleSnapshotResolvedTestHook = nil
+			if moveErr := items.Move(ctx, task.ID, feature.ID, ActorHuman); moveErr != nil {
+				t.Fatalf("move task into rebasing feature: %v", moveErr)
+			}
+		}
+		if _, err := env.runs.ScheduleAs(ctx, task.ID, ActorHuman); err != nil {
+			t.Fatalf("schedule moved task: %v", err)
+		}
+		var blockers, provenance int
+		if err := env.fixture.store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, rebase.TaskID, task.ID).Scan(&blockers); err != nil {
+			t.Fatalf("count rebase blockers: %v", err)
+		}
+		if err := env.fixture.store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM rebase_block_relations
+WHERE source_item_id = ? AND target_item_id = ?`, rebase.TaskID, task.ID).Scan(&provenance); err != nil {
+			t.Fatalf("count rebase blocker provenance: %v", err)
+		}
+		if blockers != 1 || provenance != 1 {
+			t.Fatalf("blockers/provenance after move in = %d/%d, want 1/1", blockers, provenance)
+		}
+	})
+
+	t.Run("move out removes only proven rebase gate", func(t *testing.T) {
+		ctx := context.Background()
+		env := newFeatureTestEnv(t)
+		feature, err := env.features.Create(ctx, CreateFeatureInput{Title: "atomic move out"})
+		if err != nil {
+			t.Fatalf("create feature: %v", err)
+		}
+		destination, err := env.features.Create(ctx, CreateFeatureInput{Title: "atomic destination"})
+		if err != nil {
+			t.Fatalf("create destination: %v", err)
+		}
+		rebase := seedRunningRebaseRow(t, env, feature, env.branchTip(t, feature.Branch), 0)
+		task, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "move out of running rebase", FeatureID: &feature.ID})
+		if err != nil {
+			t.Fatalf("create feature task: %v", err)
+		}
+		if err := env.tasks.BlockOnRebase(ctx, rebase.TaskID, []string{task.ID}); err != nil {
+			t.Fatalf("create rebase gate: %v", err)
+		}
+		items := NewWorkItemService(env.fixture.store.DB(), env.fixture.project.ID)
+		env.runs.scheduleSnapshotResolvedTestHook = func(FlowSnapshot) {
+			env.runs.scheduleSnapshotResolvedTestHook = nil
+			if moveErr := items.Move(ctx, task.ID, destination.ID, ActorHuman); moveErr != nil {
+				t.Fatalf("move task out of rebasing feature: %v", moveErr)
+			}
+		}
+		if _, err := env.runs.ScheduleAs(ctx, task.ID, ActorHuman); err != nil {
+			t.Fatalf("schedule moved task: %v", err)
+		}
+		var blockers int
+		if err := env.fixture.store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, rebase.TaskID, task.ID).Scan(&blockers); err != nil {
+			t.Fatalf("count stale rebase blockers: %v", err)
+		}
+		if blockers != 0 {
+			t.Fatalf("rebase blockers after move out = %d, want 0", blockers)
+		}
+
+		// The same historical rebase task can also be the source of an ordinary
+		// system dependency. Without explicit provenance that edge must survive.
+		ordinary, err := env.tasks.CreateTask(ctx, CreateTaskInput{Title: "ordinary historical dependency"})
+		if err != nil {
+			t.Fatalf("create ordinary target: %v", err)
+		}
+		if err := env.tasks.LinkTasks(ctx, rebase.TaskID, ordinary.ID, RelationBlocks, ActorSystem); err != nil {
+			t.Fatalf("link ordinary system blocker: %v", err)
+		}
+		if _, err := env.runs.ScheduleAs(ctx, ordinary.ID, ActorHuman); err != nil {
+			t.Fatalf("schedule ordinarily blocked task: %v", err)
+		}
+		if err := env.fixture.store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*) FROM work_item_relations
+WHERE source_item_id = ? AND target_item_id = ? AND kind = 'blocks'`, rebase.TaskID, ordinary.ID).Scan(&blockers); err != nil {
+			t.Fatalf("count ordinary system blockers: %v", err)
+		}
+		if blockers != 1 {
+			t.Fatalf("ordinary system blockers after reconciliation = %d, want 1", blockers)
+		}
+	})
 }
 
 // TestRestrictionAllows locks the persisted-restriction predicate: an empty

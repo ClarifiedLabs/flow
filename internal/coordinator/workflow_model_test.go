@@ -186,7 +186,7 @@ func TestClaimTaskForSchedulingRejectsStaleHumanReviewChoice(t *testing.T) {
 		t.Fatalf("begin scheduling transaction: %v", err)
 	}
 	defer tx.Rollback()
-	if err := claimTaskForScheduling(ctx, tx, stale, FlowSnapshot{FlowID: "fl-stale", FlowRevision: 1, AgentDefsRevision: 1}, time.Now().UTC()); !errors.Is(err, ErrWorkflowConflict) {
+	if err := claimTaskForScheduling(ctx, tx, stale, FlowSnapshot{FlowID: "fl-stale", FlowRevision: 1, AgentDefsRevision: 1}, "", time.Now().UTC()); !errors.Is(err, ErrWorkflowConflict) {
 		t.Fatalf("claim with stale review setting error = %v, want workflow conflict", err)
 	}
 	if err := tx.Rollback(); err != nil {

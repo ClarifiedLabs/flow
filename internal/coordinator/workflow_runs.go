@@ -322,16 +322,6 @@ func (s *WorkflowRunService) ScheduleAs(ctx context.Context, taskID string, acto
 	if task.State != nil {
 		return WorkflowRun{}, fmt.Errorf("%w: task is already %s", ErrWorkflowConflict, *task.State)
 	}
-	// Gate before creating the run: a task whose feature is mid-rebase gets a
-	// rebase_task blocks link first, so the dependency gate in
-	// EnsureCurrentNode can never observe the new run ungated. The
-	// rebase-start sweep covers the inverse race (rebase starts after this
-	// schedule), and the rebase task itself is never self-blocked.
-	if s.Features != nil {
-		if err := s.Features.EnsureRebaseBlock(ctx, taskID); err != nil {
-			return WorkflowRun{}, fmt.Errorf("gate task on running feature rebase: %w", err)
-		}
-	}
 	for {
 		snapshot, err := s.flows.ResolveSnapshot(ctx, task.FlowID)
 		if err != nil {
@@ -377,6 +367,10 @@ func (s *WorkflowRunService) persistScheduledRun(ctx context.Context, task Task,
 		return "", err
 	}
 	defer tx.Rollback()
+	var featureID string
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(feature_id, '') FROM tasks WHERE id = ?`, task.ID).Scan(&featureID); err != nil {
+		return "", err
+	}
 	inheritedCatalogLock, current, err := s.flows.lockInheritedAgentDefsRevision(ctx, snapshot.InheritedAgentDefsRevision)
 	if err != nil {
 		return "", fmt.Errorf("lock inherited agent definitions for scheduling: %w", err)
@@ -387,7 +381,14 @@ func (s *WorkflowRunService) persistScheduledRun(ctx context.Context, task Task,
 	if inheritedCatalogLock != nil {
 		defer inheritedCatalogLock.Rollback()
 	}
-	if err := claimTaskForScheduling(ctx, tx, task, snapshot, now); err != nil {
+	// Reconcile the rebase gate under the same project writer lock used to
+	// claim the task, so both operations use one indivisible feature assignment.
+	if s.Features != nil {
+		if err := s.Features.ensureRebaseBlockTx(ctx, tx, task.ID, featureID); err != nil {
+			return "", fmt.Errorf("gate task on running feature rebase: %w", err)
+		}
+	}
+	if err := claimTaskForScheduling(ctx, tx, task, snapshot, featureID, now); err != nil {
 		return "", err
 	}
 	var sequence int
@@ -420,17 +421,17 @@ INSERT INTO workflow_runs (
 	return id, nil
 }
 
-// claimTaskForScheduling atomically freezes the editable task settings and the
-// project-owned revisions used to build the workflow snapshot. Once this write
-// succeeds, the transaction's writer lock prevents the selected flow or local
-// agent catalog from changing before the run is persisted. The inherited catalog
-// lock is held by persistScheduledRun across this transaction.
+// claimTaskForScheduling atomically freezes the editable task settings, feature
+// assignment, and project-owned revisions used to build the workflow snapshot.
+// Once this write succeeds, the transaction's writer lock prevents any of them
+// from changing before the run is persisted. The inherited catalog lock is held
+// by persistScheduledRun across this transaction.
 type workflowSchedulingTx interface {
 	agentDefQueryer
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
-func claimTaskForScheduling(ctx context.Context, tx workflowSchedulingTx, task Task, snapshot FlowSnapshot, now time.Time) error {
+func claimTaskForScheduling(ctx context.Context, tx workflowSchedulingTx, task Task, snapshot FlowSnapshot, featureID string, now time.Time) error {
 	if snapshot.FlowRevision < 1 || snapshot.AgentDefsRevision < 1 {
 		return errors.New("resolved flow snapshot has incomplete revisions")
 	}
@@ -444,6 +445,7 @@ WHERE id = ?
   AND lifecycle_state IS NULL
   AND requires_human_review = ?
   AND COALESCE(flow_id, '') = ?
+  AND COALESCE(feature_id, '') = ?
   AND EXISTS (SELECT 1 FROM flows WHERE id = ? AND revision = ?)
   AND EXISTS (
 	SELECT 1 FROM app_metadata
@@ -453,7 +455,7 @@ WHERE id = ?
 	SELECT 1 FROM app_metadata WHERE key = ? AND value = ?
   ))`,
 		string(LifecycleScheduled), sqlitex.FormatTime(now), task.ID,
-		task.RequiresHumanReview, task.FlowID, snapshot.FlowID, snapshot.FlowRevision,
+		task.RequiresHumanReview, task.FlowID, featureID, snapshot.FlowID, snapshot.FlowRevision,
 		agentDefsRevisionMetadataKey, snapshot.AgentDefsRevision,
 		task.FlowID, defaultFlowMetadataKey, snapshot.FlowID)
 	if err != nil {
@@ -469,17 +471,17 @@ WHERE id = ?
 
 	var state sql.NullString
 	var requiresHumanReview bool
-	var flowID string
+	var flowID, currentFeatureID string
 	if err := tx.QueryRowContext(ctx, `
-SELECT lifecycle_state, requires_human_review, COALESCE(flow_id, '')
-FROM tasks WHERE id = ?`, task.ID).Scan(&state, &requiresHumanReview, &flowID); err != nil {
+SELECT lifecycle_state, requires_human_review, COALESCE(flow_id, ''), COALESCE(feature_id, '')
+FROM tasks WHERE id = ?`, task.ID).Scan(&state, &requiresHumanReview, &flowID, &currentFeatureID); err != nil {
 		return err
 	}
 	if state.Valid {
 		return fmt.Errorf("%w: task is already %s", ErrWorkflowConflict, state.String)
 	}
-	if requiresHumanReview != task.RequiresHumanReview || flowID != task.FlowID {
-		return fmt.Errorf("%w: task workflow settings changed while scheduling", ErrWorkflowConflict)
+	if requiresHumanReview != task.RequiresHumanReview || flowID != task.FlowID || currentFeatureID != featureID {
+		return fmt.Errorf("%w: task workflow settings or feature assignment changed while scheduling", ErrWorkflowConflict)
 	}
 
 	var revision int64
